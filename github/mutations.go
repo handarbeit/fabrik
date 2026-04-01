@@ -95,6 +95,10 @@ query($projectId: ID!) {
 		return nil, err
 	}
 
+	if result.Data.Node.Field.ID == "" {
+		return nil, fmt.Errorf("project %q has no Status field", projectID)
+	}
+
 	sf := &StatusField{
 		FieldID: result.Data.Node.Field.ID,
 		Options: make(map[string]string),
