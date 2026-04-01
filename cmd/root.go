@@ -20,6 +20,7 @@ type Config struct {
 	Token       string
 	StagesDir     string
 	Yolo          bool
+	AutoUpgrade   bool
 	PollSeconds   int
 	MaxConcurrent int
 }
@@ -34,6 +35,7 @@ func Execute() error {
 	flag.StringVar(&cfg.Token, "token", "", "GitHub token (or set GITHUB_TOKEN env var)")
 	flag.StringVar(&cfg.StagesDir, "stages", "./stages", "Directory containing stage YAML configs")
 	flag.BoolVar(&cfg.Yolo, "yolo", false, "Auto-advance issues through stages without waiting for human input")
+	flag.BoolVar(&cfg.AutoUpgrade, "auto-upgrade", false, "When idle, check for new commits on origin/main and self-upgrade (for fabrik developing itself)")
 	flag.IntVar(&cfg.PollSeconds, "poll", 30, "Polling interval in seconds")
 
 	flag.Parse()
@@ -128,6 +130,7 @@ func Execute() error {
 	fmt.Printf("  user:    %s\n", cfg.User)
 	fmt.Printf("  stages:  %d loaded\n", len(stageCfgs))
 	fmt.Printf("  yolo:    %v\n", cfg.Yolo)
+	fmt.Printf("  auto-upgrade: %v\n", cfg.AutoUpgrade)
 	fmt.Printf("  poll:    %ds\n", cfg.PollSeconds)
 	fmt.Printf("  workers: %d\n", cfg.MaxConcurrent)
 
@@ -138,6 +141,7 @@ func Execute() error {
 		User:          cfg.User,
 		Token:         cfg.Token,
 		Yolo:          cfg.Yolo,
+		AutoUpgrade:   cfg.AutoUpgrade,
 		PollSeconds:   cfg.PollSeconds,
 		MaxConcurrent: cfg.MaxConcurrent,
 		Stages:        stageCfgs,
