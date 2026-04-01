@@ -7,11 +7,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
 )
+
+var stageCompleteRE = regexp.MustCompile(`(?m)^FABRIK_STAGE_COMPLETE\r?$`)
 
 // SessionDir returns the directory where Claude sessions are cached for an issue.
 func SessionDir(issueNumber int) string {
@@ -110,7 +113,7 @@ func runClaude(ctx context.Context, args []string, workDir string, issueNumber i
 	// Determine completion based on the stage's completion criteria.
 	// For the label used inside runClaude we don't have the stage, so we use
 	// a simple marker check; callers that have the stage use checkCompletion.
-	completed := strings.Contains(result, "FABRIK_STAGE_COMPLETE")
+	completed := stageCompleteRE.MatchString(result)
 
 	return result, completed, nil
 }
@@ -119,7 +122,7 @@ func runClaude(ctx context.Context, args []string, workDir string, issueNumber i
 // according to the stage's completion criteria.
 func checkCompletion(stage *stages.Stage, output string) bool {
 	if stage.Completion.Type == "claude" {
-		return strings.Contains(output, "FABRIK_STAGE_COMPLETE")
+		return stageCompleteRE.MatchString(output)
 	}
 	return false
 }
