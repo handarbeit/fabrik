@@ -126,8 +126,8 @@ allowed_tools:            # Optional: restrict available tools
   - Grep
   - Glob
 completion:
-  type: claude            # "claude", "tasklist", "label", or "approval"
-  value: ""               # Type-specific (label name, approval keyword)
+  type: claude            # "claude" (default and only supported type)
+  value: ""               # Reserved for future completion types
 auto_advance: false       # Override global yolo setting for this stage
 ```
 

@@ -38,7 +38,7 @@ model: sonnet           # Claude model (optional)
 max_turns: 10           # Turn limit (optional)
 allowed_tools: []       # Tool restrictions (optional)
 completion:             # How to detect stage completion
-  type: claude          # claude | tasklist | label | approval
+  type: claude          # "claude" (default and only supported type)
 auto_advance: false     # Override yolo mode per-stage (optional)
 ```
 
