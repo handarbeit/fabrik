@@ -88,7 +88,6 @@ func gitToplevel() (string, error) {
 }
 
 func (e *Engine) Run() error {
-	// Set up graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -102,59 +101,52 @@ func (e *Engine) Run() error {
 	fmt.Println("\nFabrik is running. Press Ctrl+C to stop.")
 	fmt.Println()
 
-	// Main poll loop
+	// Handle signals in a dedicated goroutine so cancel() fires immediately
+	// even while poll() is blocking on wg.Wait(). This ensures CommandContext
+	// kills in-flight Claude child processes without waiting for the current
+	// poll cycle to finish naturally.
+	go func() {
+		select {
+		case sig := <-sigCh:
+			fmt.Printf("\nReceived %v — shutting down gracefully (Ctrl-C again to force-quit)...\n", sig)
+			cancel()
+		case <-ctx.Done():
+			return
+		}
+		// Listen for a second signal during drain and force-exit.
+		select {
+		case <-sigCh:
+			fmt.Println("\nForce-quitting...")
+			os.Exit(1)
+		case <-ctx.Done():
+		}
+	}()
+
 	ticker := time.NewTicker(time.Duration(e.cfg.PollSeconds) * time.Second)
 	defer ticker.Stop()
 
 	// Run immediately on start, then on tick
-	if err := e.poll(ctx); err != nil {
+	if err := e.poll(ctx); err != nil && ctx.Err() == nil {
 		fmt.Printf("  [warn] poll error: %v\n", err)
 	}
 
 	for {
 		select {
-		case sig := <-sigCh:
-			fmt.Printf("\nReceived %v — shutting down gracefully...\n", sig)
-			cancel()
-
-			// Wait for in-flight workers with a 10-second timeout.
-			// A second signal during drain triggers immediate exit.
-			done := make(chan struct{})
-			go func() {
-				e.waitForDrain()
-				close(done)
-			}()
-
-			select {
-			case <-done:
-				// Workers drained cleanly.
-			case <-time.After(10 * time.Second):
-				fmt.Println("[warn] drain timeout exceeded — proceeding to cleanup")
-			case <-sigCh:
-				fmt.Println("\nForce-quitting...")
-				e.cleanupLockedIssues()
-				os.Exit(1)
-			}
-
+		case <-ctx.Done():
+			// Signal goroutine called cancel(); poll() returned because
+			// CommandContext killed the child processes.
 			e.cleanupLockedIssues()
 			return nil
 		case <-ticker.C:
+			if ctx.Err() != nil {
+				e.cleanupLockedIssues()
+				return nil
+			}
 			if err := e.poll(ctx); err != nil {
 				fmt.Printf("  [warn] poll error: %v\n", err)
 			}
 		}
 	}
-}
-
-// waitForDrain is a no-op placeholder — actual drain tracking is done by the
-// WaitGroup inside poll(). We expose this so Run() can wait on it via a goroutine.
-// Because poll() returns only after wg.Wait(), and Run() blocks on poll(), any
-// in-flight poll is already being drained when we reach the signal handler.
-// This function exists to give us a hook point for the goroutine + timeout pattern.
-func (e *Engine) waitForDrain() {
-	// poll() already drains via wg.Wait() before returning; there is nothing
-	// extra to wait for here — the in-flight poll will finish because CommandContext
-	// kills the child claude processes once ctx is cancelled.
 }
 
 // cleanupLockedIssues removes fabrik:locked labels for any issues that were locked
@@ -208,11 +200,6 @@ func (e *Engine) poll(ctx context.Context) error {
 
 	var dispatched int
 	for _, item := range board.Items {
-		// Don't start new work if the context has been cancelled.
-		if ctx.Err() != nil {
-			break
-		}
-
 		item := item
 		// Quick pre-check: skip items that won't need processing.
 		// This avoids acquiring a semaphore slot for no-ops.
@@ -223,14 +210,12 @@ func (e *Engine) poll(ctx context.Context) error {
 		if _, ok := e.inFlight.Load(item.Number); ok {
 			continue
 		}
-		// Non-blocking semaphore acquire: if all slots are occupied by workers from
-		// a previous cycle, skip this item rather than blocking poll() — the ticker
-		// must remain free to fire on schedule regardless of in-flight workers.
+		// Acquire semaphore slot, but abort if the context is cancelled so we
+		// don't block indefinitely when all slots are taken at shutdown time.
 		select {
 		case e.sem <- struct{}{}:
-		default:
-			logf(item.Number, "skip", "at capacity, will retry next poll\n")
-			continue
+		case <-ctx.Done():
+			goto doneDispatching
 		}
 		e.inFlight.Store(item.Number, struct{}{})
 		e.wg.Add(1)
@@ -244,6 +229,7 @@ func (e *Engine) poll(ctx context.Context) error {
 			}
 		}()
 	}
+doneDispatching:
 
 	if dispatched == 0 {
 		// Check whether any workers from a previous poll cycle are still running.
