@@ -146,3 +146,12 @@ func TestGraphqlRequest_ConnectionRefused(t *testing.T) {
 		t.Fatal("expected error for connection refused")
 	}
 }
+
+func TestGraphqlRequest_InvalidURL(t *testing.T) {
+	c := NewClientWithBaseURL("token", "://bad-base")
+	var result struct{}
+	err := c.graphqlRequest("{ test }", nil, &result)
+	if err == nil {
+		t.Fatal("expected error for invalid base URL")
+	}
+}

@@ -82,3 +82,11 @@ func TestRestPost_ConnectionError(t *testing.T) {
 		t.Fatal("expected error for connection refused")
 	}
 }
+
+func TestRestPost_InvalidURL(t *testing.T) {
+	c := NewClientWithBaseURL("token", "http://example.com")
+	err := c.restPost("://invalid-url", map[string]string{"key": "val"})
+	if err == nil {
+		t.Fatal("expected error for invalid URL")
+	}
+}
