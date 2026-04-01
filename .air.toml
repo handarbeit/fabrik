@@ -1,0 +1,19 @@
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  bin = "./tmp/fabrik"
+  cmd = "go build -o ./tmp/fabrik ."
+  args_bin = ["--owner", "jmatthewpryor", "--repo", "fabrik", "--project", "1", "--user", "arbeithand", "--stages", "./stages/mystages"]
+  delay = 1000
+  exclude_dir = ["tmp", ".fabrik", "stages", ".git"]
+  exclude_regex = ["_test\\.go"]
+  include_ext = ["go", "yaml", "yml"]
+  kill_delay = "2s"
+  send_interrupt = true
+
+[log]
+  time = false
+
+[misc]
+  clean_on_exit = true

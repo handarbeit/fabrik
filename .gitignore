@@ -3,3 +3,4 @@
 fabrik
 *.exe
 .DS_Store
+tmp/
