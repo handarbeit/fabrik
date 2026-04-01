@@ -1,6 +1,7 @@
 .history/*
 .claude/
 .fabrik/
+.env
 stages/mystages/
 fabrik
 *.exe
