@@ -23,7 +23,9 @@ func LoadDotenv() error {
 	return godotenv.Load(".env")
 }
 
-// isInGitignore checks whether the given filename appears as an entry in .gitignore.
+// isInGitignore checks whether the given filename is covered by an entry in .gitignore.
+// It accepts any non-comment, non-negation line that contains filename as a substring
+// (e.g. ".env", "**/.env", ".env*" all match ".env").
 func isInGitignore(filename string) bool {
 	f, err := os.Open(".gitignore")
 	if err != nil {
@@ -34,7 +36,10 @@ func isInGitignore(filename string) bool {
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if line == filename {
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "!") {
+			continue
+		}
+		if strings.Contains(line, filename) {
 			return true
 		}
 	}

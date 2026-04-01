@@ -56,11 +56,34 @@ func Execute() error {
 	}
 	if cfg.ProjectNum == 0 {
 		if v := os.Getenv("FABRIK_PROJECT_NUMBER"); v != "" {
-			fmt.Sscanf(v, "%d", &cfg.ProjectNum)
+			n, err := strconv.Atoi(v)
+			if err != nil || n <= 0 {
+				return fmt.Errorf("FABRIK_PROJECT_NUMBER=%q is invalid (must be a positive integer)", v)
+			}
+			cfg.ProjectNum = n
 		}
 	}
 	if cfg.User == "" {
 		cfg.User = os.Getenv("FABRIK_USER")
+	}
+	if cfg.StagesDir == "./stages" {
+		if v := os.Getenv("FABRIK_STAGES"); v != "" {
+			cfg.StagesDir = v
+		}
+	}
+	if !cfg.Yolo {
+		if v := os.Getenv("FABRIK_YOLO"); v != "" {
+			cfg.Yolo = v == "true" || v == "1" || v == "yes"
+		}
+	}
+	if cfg.PollSeconds == 30 {
+		if v := os.Getenv("FABRIK_POLL"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				cfg.PollSeconds = n
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_POLL=%q is invalid (must be a positive integer); using default %d\n", v, cfg.PollSeconds)
+			}
+		}
 	}
 
 	// Max concurrent from env, default 5
