@@ -128,9 +128,17 @@ func (e *Engine) poll() error {
 			logf(item.Number, "skip", "already in-flight, will retry next poll\n")
 			continue
 		}
+		// Non-blocking semaphore acquire: if all slots are occupied by workers from
+		// a previous cycle, skip this item rather than blocking poll() — the ticker
+		// must remain free to fire on schedule regardless of in-flight workers.
+		select {
+		case e.sem <- struct{}{}:
+		default:
+			logf(item.Number, "skip", "at capacity, will retry next poll\n")
+			continue
+		}
 		e.inFlight.Store(item.Number, struct{}{})
 		e.wg.Add(1)
-		e.sem <- struct{}{}
 		dispatched++
 		go func() {
 			defer e.wg.Done()
