@@ -209,10 +209,8 @@ func (e *Engine) poll(ctx context.Context) error {
 	var dispatched int
 	for _, item := range board.Items {
 		// Don't start new work if the context has been cancelled.
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			break
-		default:
 		}
 
 		item := item
@@ -473,14 +471,21 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	logf(item.Number, "process", "%q — stage: %s\n", item.Title, stage.Name)
 
 	// Acquire lock and register in lockedIssues so shutdown can clean up.
+	lockAdded := false
 	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, lockLabel); err != nil {
 		logf(item.Number, "warn", "could not add lock label: %v\n", err)
 	} else {
+		lockAdded = true
 		e.mu.Lock()
 		e.lockedIssues[item.Number] = true
 		e.mu.Unlock()
 	}
 	defer func() {
+		if lockAdded {
+			if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, item.Number, lockLabel); err != nil {
+				logf(item.Number, "warn", "could not remove lock label: %v\n", err)
+			}
+		}
 		e.mu.Lock()
 		delete(e.lockedIssues, item.Number)
 		e.mu.Unlock()
@@ -501,6 +506,10 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	resume := attempted // resume session if we've processed this before
 	output, completed, err := e.claude.Invoke(ctx, stage, item, nil, resume, workDir, modelOverride)
 	if err != nil {
+		if ctx.Err() != nil {
+			logf(item.Number, "skip", "cancelled during claude invocation\n")
+			return nil
+		}
 		logf(item.Number, "warn", "claude invocation issue: %v\n", err)
 	}
 
@@ -573,8 +582,12 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	}
 	output, _, err := InvokeClaudeForComments(ctx, stage, item, comments, workDir, modelOverride)
 	if err != nil {
-		logf(item.Number, "warn", "claude comment review issue: %v\n", err)
 		e.removeEditingLabel(item.Number)
+		if ctx.Err() != nil {
+			logf(item.Number, "skip", "cancelled during claude comment review\n")
+			return nil
+		}
+		logf(item.Number, "warn", "claude comment review issue: %v\n", err)
 		return err
 	}
 
