@@ -213,7 +213,7 @@ See [adrs/](adrs/) for documented decisions and their rationale.
 
 ## Requirements
 
-- Go 1.21+
+- Go 1.26.1+
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
 - GitHub personal access token with `repo` and `project` scopes
 - A GitHub Project (v2) with board columns matching your stage names
