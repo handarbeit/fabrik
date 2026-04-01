@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -27,7 +28,7 @@ func sessionFile(issueNumber int, stageName string) string {
 // workDir is the directory Claude should run in (typically a git worktree).
 // modelOverride, if non-empty, replaces the stage's configured model.
 // It returns Claude's output and whether Claude indicated completion.
-func InvokeClaude(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
+func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
 	sessDir := SessionDir(issue.Number)
 	if err := os.MkdirAll(sessDir, 0755); err != nil {
 		return "", false, fmt.Errorf("creating session dir: %w", err)
@@ -37,13 +38,13 @@ func InvokeClaude(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Co
 	args := buildClaudeArgs(stage, issue.Number, resume, modelOverride)
 	args = append(args, prompt)
 
-	return runClaude(args, workDir, issue.Number, stage.Name)
+	return runClaude(ctx, args, workDir, issue.Number, stage.Name)
 }
 
 // InvokeClaudeForComments runs Claude Code with a comment-review prompt.
 // It uses the stage's CommentPrompt if defined, otherwise a default.
 // modelOverride, if non-empty, replaces the stage's configured model.
-func InvokeClaudeForComments(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, modelOverride string) (string, bool, error) {
+func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, modelOverride string) (string, bool, error) {
 	sessDir := SessionDir(issue.Number)
 	if err := os.MkdirAll(sessDir, 0755); err != nil {
 		return "", false, fmt.Errorf("creating session dir: %w", err)
@@ -53,7 +54,7 @@ func InvokeClaudeForComments(stage *stages.Stage, issue gh.ProjectItem, comments
 	args := buildClaudeArgs(stage, issue.Number, true, modelOverride) // resume existing session
 	args = append(args, prompt)
 
-	return runClaude(args, workDir, issue.Number, stage.Name+"-comment-review")
+	return runClaude(ctx, args, workDir, issue.Number, stage.Name+"-comment-review")
 }
 
 func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOverride string) []string {
@@ -87,10 +88,10 @@ func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOve
 	return args
 }
 
-func runClaude(args []string, workDir string, issueNumber int, label string) (string, bool, error) {
+func runClaude(ctx context.Context, args []string, workDir string, issueNumber int, label string) (string, bool, error) {
 	logf(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
 
-	cmd := exec.Command("claude", args...)
+	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = workDir
 	cmd.Stderr = os.Stderr
 
