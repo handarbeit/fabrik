@@ -118,9 +118,9 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
 								Typename string `json:"__typename"`
 								ID       string `json:"id"`
 								Number   int    `json:"number"`
-								Title  string `json:"title"`
-								Body   string `json:"body"`
-								URL    string `json:"url"`
+								Title string `json:"title"`
+								Body  string `json:"body"`
+								URL   string `json:"url"`
 								Author *struct {
 									Login string `json:"login"`
 								} `json:"author"`
@@ -169,7 +169,7 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
 	}
 
 	for _, node := range proj.Items.Nodes {
-		// Skip items without content (e.g. draft issues)
+		// Skip items whose content was not returned (empty content ID, e.g. draft issues)
 		if node.Content.ID == "" {
 			continue
 		}
