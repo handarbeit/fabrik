@@ -9,17 +9,30 @@ import (
 	"time"
 )
 
-const graphqlEndpoint = "https://api.github.com/graphql"
+const defaultBaseURL = "https://api.github.com"
 
 // Client is a GitHub GraphQL API client.
 type Client struct {
 	token      string
+	baseURL    string
 	httpClient *http.Client
 }
 
 func NewClient(token string) *Client {
 	return &Client{
-		token: token,
+		token:   token,
+		baseURL: defaultBaseURL,
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second,
+		},
+	}
+}
+
+// NewClientWithBaseURL creates a client with a custom base URL (for testing).
+func NewClientWithBaseURL(token, baseURL string) *Client {
+	return &Client{
+		token:   token,
+		baseURL: baseURL,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -37,7 +50,7 @@ func (c *Client) graphqlRequest(query string, variables map[string]interface{}, 
 		return fmt.Errorf("marshaling request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", graphqlEndpoint, bytes.NewReader(jsonBody))
+	req, err := http.NewRequest("POST", c.baseURL+"/graphql", bytes.NewReader(jsonBody))
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
 	}

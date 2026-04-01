@@ -13,7 +13,7 @@ func (c *Client) AddLabelToIssue(owner, repo string, issueNumber int, labelName 
 	}
 
 	// Use REST API for simplicity — add label to issue
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%d/labels", owner, repo, issueNumber)
+	url := fmt.Sprintf("%s/repos/%s/%s/issues/%d/labels", c.baseURL, owner, repo, issueNumber)
 	body := map[string]interface{}{
 		"labels": []string{labelName},
 	}
@@ -22,7 +22,7 @@ func (c *Client) AddLabelToIssue(owner, repo string, issueNumber int, labelName 
 
 // AddComment posts a comment on an issue.
 func (c *Client) AddComment(owner, repo string, issueNumber int, body string) error {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%d/comments", owner, repo, issueNumber)
+	url := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments", c.baseURL, owner, repo, issueNumber)
 	payload := map[string]interface{}{
 		"body": body,
 	}
@@ -225,7 +225,7 @@ func (c *Client) FindPRForIssue(owner, repo string, issueNumber int) (int, error
 }
 
 func (c *Client) ensureLabel(owner, repo, name string) error {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/labels", owner, repo)
+	url := fmt.Sprintf("%s/repos/%s/%s/labels", c.baseURL, owner, repo)
 	body := map[string]interface{}{
 		"name":  name,
 		"color": "6f42c1",
