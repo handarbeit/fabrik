@@ -11,6 +11,10 @@ prompt: |
   4. Write tests for any new functionality.
   5. Ensure the code compiles and tests pass.
   6. Push your commits to the remote branch.
+  7. Create a draft PR using: gh pr create --draft --title "..." --body "Closes #N"
+     The body MUST include "Closes #N" (where N is the issue number) so that
+     the PR is linked to the issue. This linking is how Fabrik discovers PR
+     comments.
 
   Work methodically through the task checklist. When all tasks are complete
   and tests pass, signal completion.
