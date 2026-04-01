@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -585,12 +586,21 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}
 	}
 
-	// Record attempt time (used for cooldown if stage didn't complete)
-	func() {
-		e.mu.Lock()
-		defer e.mu.Unlock()
-		e.processedSet[itemKey] = time.Now()
-	}()
+	// Record attempt time only if Claude actually ran (nil error or ExitError).
+	// A start failure (binary not found, etc.) should not apply the cooldown
+	// so the item is retried on the next poll.
+	claudeRan := err == nil
+	if err != nil {
+		var exitErr *exec.ExitError
+		claudeRan = errors.As(err, &exitErr)
+	}
+	if claudeRan {
+		func() {
+			e.mu.Lock()
+			defer e.mu.Unlock()
+			e.processedSet[itemKey] = time.Now()
+		}()
+	}
 
 	if completed {
 		// Post-stage: create draft PR and/or mark ready now that commits exist
