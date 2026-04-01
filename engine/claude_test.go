@@ -123,6 +123,12 @@ func TestCheckCompletion_Claude(t *testing.T) {
 	if checkCompletion(stage, "`FABRIK_STAGE_COMPLETE`") {
 		t.Error("expected no completion when marker is inside backticks")
 	}
+	if !checkCompletion(stage, "Some output\r\nFABRIK_STAGE_COMPLETE\r\n") {
+		t.Error("expected completion when marker is on its own CRLF line")
+	}
+	if !checkCompletion(stage, "FABRIK_STAGE_COMPLETE\nmore output after") {
+		t.Error("expected completion when marker appears on its own line but not as final line")
+	}
 }
 
 func TestCheckCompletion_OtherTypes(t *testing.T) {

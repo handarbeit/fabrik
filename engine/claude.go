@@ -14,7 +14,7 @@ import (
 	"github.com/handarbeit/fabrik/stages"
 )
 
-var stageCompleteRE = regexp.MustCompile(`(?m)^FABRIK_STAGE_COMPLETE$`)
+var stageCompleteRE = regexp.MustCompile(`(?m)^FABRIK_STAGE_COMPLETE\r?$`)
 
 // SessionDir returns the directory where Claude sessions are cached for an issue.
 func SessionDir(issueNumber int) string {
