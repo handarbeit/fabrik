@@ -1,5 +1,6 @@
 .history/*
 .fabrik/
+stages/mystages/
 fabrik
 *.exe
 .DS_Store
