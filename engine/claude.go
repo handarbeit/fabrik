@@ -23,8 +23,15 @@ func SessionDir(issueNumber int) string {
 }
 
 // sessionFile returns the path to the session ID file for a given issue+stage.
+// stageName is sanitized to prevent path traversal: filepath.Base strips directory
+// components, and an additional check rejects names that are empty, ".", or the
+// path separator (e.g. filepath.Base("/") == "/"), falling back to "default".
 func sessionFile(issueNumber int, stageName string) string {
-	return filepath.Join(SessionDir(issueNumber), stageName+".session")
+	base := filepath.Base(stageName)
+	if base == "" || base == "." || base == "/" || base == string(filepath.Separator) {
+		base = "default"
+	}
+	return filepath.Join(SessionDir(issueNumber), base+".session")
 }
 
 // InvokeClaude runs Claude Code with the given stage configuration and issue context.
