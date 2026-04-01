@@ -35,7 +35,7 @@ type Engine struct {
 	processedSet map[string]time.Time // track what we've processed: "issue#-commentID" -> timestamp
 	lockedIssues map[int]bool         // issues that have had fabrik:locked added and not yet released
 	idleCount    int                  // consecutive idle polls; triggers self-upgrade at threshold
-	sem          chan struct{}         // semaphore bounding concurrent workers across poll cycles
+	sem          chan struct{}        // semaphore bounding concurrent workers across poll cycles
 	wg           sync.WaitGroup       // tracks in-flight workers for graceful shutdown
 	inFlight     sync.Map             // key: issue number (int), value: struct{}
 }
