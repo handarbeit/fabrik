@@ -110,8 +110,8 @@ type StatusField struct {
 }
 
 // AddCommentReaction adds a reaction to a comment. Content can be "+1", "-1", "eyes", etc.
-func (c *Client) AddCommentReaction(owner, repo, commentID, content string) error {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/comments/%s/reactions", owner, repo, commentID)
+func (c *Client) AddCommentReaction(owner, repo string, commentDatabaseID int, content string) error {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/comments/%d/reactions", owner, repo, commentDatabaseID)
 	payload := map[string]interface{}{
 		"content": content,
 	}

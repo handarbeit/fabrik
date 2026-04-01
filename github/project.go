@@ -43,6 +43,7 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
               comments(first: 50) {
                 nodes {
                   id
+                  databaseId
                   author {
                     login
                   }
@@ -96,8 +97,9 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
 								} `json:"assignees"`
 								Comments struct {
 									Nodes []struct {
-										ID     string `json:"id"`
-										Author *struct {
+										ID         string `json:"id"`
+										DatabaseID int    `json:"databaseId"`
+										Author     *struct {
 											Login string `json:"login"`
 										} `json:"author"`
 										Body      string `json:"body"`
@@ -154,8 +156,9 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
 
 		for _, cm := range node.Content.Comments.Nodes {
 			comment := Comment{
-				ID:   cm.ID,
-				Body: cm.Body,
+				ID:         cm.ID,
+				DatabaseID: cm.DatabaseID,
+				Body:       cm.Body,
 			}
 			if cm.Author != nil {
 				comment.Author = cm.Author.Login

@@ -25,8 +25,9 @@ type ProjectItem struct {
 
 // Comment represents a comment on an issue.
 type Comment struct {
-	ID        string
-	Author    string
-	Body      string
-	CreatedAt time.Time
+	ID         string
+	DatabaseID int // Numeric ID needed for REST API (reactions, etc.)
+	Author     string
+	Body       string
+	CreatedAt  time.Time
 }
