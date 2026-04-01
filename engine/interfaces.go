@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"context"
+
 	gh "github.com/verveguy/fabrik/github"
 	"github.com/verveguy/fabrik/stages"
 )
@@ -22,12 +24,12 @@ type GitHubClient interface {
 
 // ClaudeInvoker defines the interface for invoking Claude Code.
 type ClaudeInvoker interface {
-	Invoke(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (output string, completed bool, err error)
+	Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (output string, completed bool, err error)
 }
 
 // RealClaudeInvoker wraps the existing InvokeClaude function.
 type RealClaudeInvoker struct{}
 
-func (r *RealClaudeInvoker) Invoke(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
-	return InvokeClaude(stage, issue, newComments, resume, workDir, modelOverride)
+func (r *RealClaudeInvoker) Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
+	return InvokeClaude(ctx, stage, issue, newComments, resume, workDir, modelOverride)
 }

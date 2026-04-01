@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"context"
+
 	gh "github.com/verveguy/fabrik/github"
 	"github.com/verveguy/fabrik/stages"
 )
@@ -111,7 +113,7 @@ type claudeInvokeCall struct {
 	modelOverride string
 }
 
-func (m *mockClaudeInvoker) Invoke(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
+func (m *mockClaudeInvoker) Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
 	m.calls = append(m.calls, claudeInvokeCall{stage.Name, issue.Number, resume, workDir, modelOverride})
 	if m.invokeFn != nil {
 		return m.invokeFn(stage, issue, newComments, resume, workDir, modelOverride)
