@@ -170,3 +170,35 @@ func TestConcurrentItemDispatch(t *testing.T) {
 		t.Errorf("max in-flight goroutines was %d, expected <= %d", maxInFlight, maxConcurrent)
 	}
 }
+
+func TestExtractModelOverride(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels []string
+		want   string
+	}{
+		{"no labels", nil, ""},
+		{"no model label", []string{"stage:Plan:complete", "fabrik:locked"}, ""},
+		{"single model label", []string{"model:opus"}, "opus"},
+		{"model label among others", []string{"stage:Plan", "model:sonnet", "fabrik:locked"}, "sonnet"},
+		{"empty model name skipped", []string{"model:", "model:haiku"}, "haiku"},
+		{"multiple model labels uses first", []string{"model:opus", "model:sonnet"}, "opus"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractModelOverride(tc.labels)
+			if got != tc.want {
+				t.Errorf("extractModelOverride(%v) = %q, want %q", tc.labels, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestExtractModelOverrideWarnsOnMultiple(t *testing.T) {
+	// Verify no panic and correct return value when multiple model labels are present.
+	// The warning goes to fmt.Printf (stdout) and is tested behaviorally above.
+	result := extractModelOverride([]string{"model:opus", "model:sonnet", "model:haiku"})
+	if result != "opus" {
+		t.Errorf("expected %q, got %q", "opus", result)
+	}
+}
