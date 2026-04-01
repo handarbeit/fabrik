@@ -79,6 +79,25 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string) (s
 	return wtDir, nil
 }
 
+// PushBranch pushes the issue's worktree branch to origin.
+// Uses -u to set upstream tracking on the first push.
+// Serialized with mu because git push -u writes upstream tracking to .git/config,
+// which is not safe to update concurrently across workers.
+// Errors are non-fatal (e.g., no commits yet) — the caller decides how to handle them.
+func (wm *WorktreeManager) PushBranch(issueNumber int) error {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	wtDir := wm.worktreeDir(issueNumber)
+	branch := wm.branchName(issueNumber)
+	cmd := exec.Command("git", "push", "-u", "origin", branch)
+	cmd.Dir = wtDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("pushing branch %s: %s: %w", branch, strings.TrimSpace(string(out)), err)
+	}
+	fmt.Printf("  [worktree] pushed %s to origin\n", branch)
+	return nil
+}
+
 // CleanupWorktree removes the worktree and optionally the branch for an issue.
 func (wm *WorktreeManager) CleanupWorktree(issueNumber int, deleteBranch bool) error {
 	wtDir := wm.worktreeDir(issueNumber)
