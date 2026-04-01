@@ -218,6 +218,11 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 		return fmt.Errorf("setting up worktree: %w", err)
 	}
 
+	// Pre-stage: create a draft PR if requested and none exists yet
+	if stage.CreateDraftPR {
+		e.ensureDraftPR(item, baseBranch)
+	}
+
 	// Invoke Claude Code in the issue's worktree
 	modelOverride := extractModelOverride(item.Labels)
 	if modelOverride != "" {
@@ -248,6 +253,10 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 	}()
 
 	if completed {
+		// Post-stage: push branch and mark PR ready if requested
+		if stage.MarkPRReadyOnComplete {
+			e.markPRReady(item)
+		}
 		e.handleStageComplete(board, item, stage)
 	} else {
 		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
@@ -336,6 +345,59 @@ func (e *Engine) markCommentsProcessed(item gh.ProjectItem, comments []gh.Commen
 		key := fmt.Sprintf("%d-comment-%s", item.Number, c.ID)
 		e.processedSet[key] = time.Now()
 	}
+}
+
+// ensureDraftPR pushes the issue branch and creates a draft PR if one doesn't exist yet.
+// Idempotent: skips creation if FindPRForIssue finds an existing PR.
+func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) {
+	// Push the branch so GitHub can create a PR against it
+	if err := e.worktrees.PushBranch(item.Number); err != nil {
+		fmt.Printf("  [warn] could not push branch for issue #%d: %v\n", item.Number, err)
+		return
+	}
+
+	// Check if a PR already exists
+	prNumber, err := e.client.FindPRForIssue(e.cfg.Owner, e.cfg.Repo, item.Number)
+	if err != nil {
+		fmt.Printf("  [warn] could not check for existing PR for issue #%d: %v\n", item.Number, err)
+		return
+	}
+	if prNumber > 0 {
+		fmt.Printf("  [pr] draft PR #%d already exists for issue #%d, skipping creation\n", prNumber, item.Number)
+		return
+	}
+
+	head := fmt.Sprintf("fabrik/issue-%d", item.Number)
+	prNum, err := e.client.CreateDraftPR(e.cfg.Owner, e.cfg.Repo, item.Title, head, baseBranch, item.Number)
+	if err != nil {
+		fmt.Printf("  [warn] could not create draft PR for issue #%d: %v\n", item.Number, err)
+		return
+	}
+	fmt.Printf("  [pr] created draft PR #%d for issue #%d\n", prNum, item.Number)
+}
+
+// markPRReady pushes the issue branch and transitions its PR from draft to ready-for-review.
+func (e *Engine) markPRReady(item gh.ProjectItem) {
+	if err := e.worktrees.PushBranch(item.Number); err != nil {
+		fmt.Printf("  [warn] could not push branch for issue #%d: %v\n", item.Number, err)
+		// Don't return — still try to mark ready if push is a no-op (already up to date)
+	}
+
+	prNumber, err := e.client.FindPRForIssue(e.cfg.Owner, e.cfg.Repo, item.Number)
+	if err != nil {
+		fmt.Printf("  [warn] could not find PR for issue #%d: %v\n", item.Number, err)
+		return
+	}
+	if prNumber == 0 {
+		fmt.Printf("  [warn] no open PR found for issue #%d, cannot mark ready\n", item.Number)
+		return
+	}
+
+	if err := e.client.MarkPRReady(e.cfg.Owner, e.cfg.Repo, prNumber); err != nil {
+		fmt.Printf("  [warn] could not mark PR #%d ready: %v\n", prNumber, err)
+		return
+	}
+	fmt.Printf("  [pr] marked PR #%d ready-for-review for issue #%d\n", prNumber, item.Number)
 }
 
 // postOutputToPR posts detailed output on the linked PR and a brief summary on the issue.
