@@ -322,7 +322,7 @@ func (e *Engine) removeEditingLabel(issueNumber int) {
 
 func (e *Engine) removeLockLabel(issueNumber int, label string) {
 	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, issueNumber, label); err != nil &&
-		!strings.Contains(err.Error(), "404") {
+		!errors.Is(err, gh.ErrNotFound) {
 		logf(issueNumber, "warn", "could not remove lock label: %v\n", err)
 	}
 }
@@ -330,7 +330,7 @@ func (e *Engine) removeLockLabel(issueNumber int, label string) {
 func (e *Engine) removeInProgressLabel(issueNumber int, stageName string) {
 	label := fmt.Sprintf("stage:%s:in_progress", stageName)
 	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, issueNumber, label); err != nil &&
-		!strings.Contains(err.Error(), "404") {
+		!errors.Is(err, gh.ErrNotFound) {
 		logf(issueNumber, "warn", "could not remove in_progress label: %v\n", err)
 	}
 }
