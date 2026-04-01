@@ -219,7 +219,7 @@ New comments have been posted on this pull request. These may include:
 
 Your job is to:
 1. Read and understand the new comments in context of the current PR description and code changes.
-2. Make any requested code changes and push them to the PR branch.
+2. Make any requested code changes in the checked-out worktree/issue branch, following the existing fabrik workflow.
 3. Update the PR description as needed to reflect the current state of the changes.
 4. Respond to review feedback by addressing the concerns raised.
 5. If comments from automated review bots suggest improvements, evaluate and apply them where appropriate.
