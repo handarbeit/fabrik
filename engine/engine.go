@@ -162,10 +162,15 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 
 	// Determine if we need to run the stage
 	itemKey := fmt.Sprintf("%d-%s", item.Number, stage.Name)
-	_, alreadyProcessed := e.processedSet[itemKey]
-
-	if alreadyProcessed {
-		return nil
+	if lastAttempt, attempted := e.processedSet[itemKey]; attempted {
+		// If stage completed, the completion label above would have caught it.
+		// If we're here, the stage was attempted but didn't complete.
+		// Apply a cooldown to avoid hot-looping.
+		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
+		if time.Since(lastAttempt) < cooldown {
+			return nil
+		}
+		fmt.Printf("  [retry] cooldown expired for issue #%d stage %q, retrying\n", item.Number, stage.Name)
 	}
 
 	*worked = true
@@ -189,18 +194,26 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 		fmt.Printf("  [warn] claude invocation issue: %v\n", err)
 	}
 
-	// Post Claude's output as a comment
+	// Post Claude's output
 	if output != "" {
-		comment := formatOutputComment(stage.Name, output)
-		if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
-			fmt.Printf("  [warn] could not post comment: %v\n", err)
+		if stage.PostToPR {
+			e.postOutputToPR(item, stage.Name, output)
+		} else {
+			comment := formatOutputComment(stage.Name, output)
+			if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
+				fmt.Printf("  [warn] could not post comment: %v\n", err)
+			}
 		}
 	}
 
+	// Record attempt time (used for cooldown if stage didn't complete)
 	e.processedSet[itemKey] = time.Now()
 
 	if completed {
 		e.handleStageComplete(board, item, stage)
+	} else {
+		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
+		fmt.Printf("  [wait] stage %q did not complete for issue #%d — will retry after %v\n", stage.Name, item.Number, cooldown)
 	}
 
 	return nil
@@ -278,6 +291,37 @@ func (e *Engine) markCommentsProcessed(item gh.ProjectItem, comments []gh.Commen
 	for _, c := range comments {
 		key := fmt.Sprintf("%d-comment-%s", item.Number, c.ID)
 		e.processedSet[key] = time.Now()
+	}
+}
+
+// postOutputToPR posts detailed output on the linked PR and a brief summary on the issue.
+func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output string) {
+	prNumber, err := e.client.FindPRForIssue(e.cfg.Owner, e.cfg.Repo, item.Number)
+	if err != nil {
+		fmt.Printf("  [warn] could not find PR for issue #%d: %v\n", item.Number, err)
+	}
+
+	if prNumber > 0 {
+		// Post detailed output on the PR
+		comment := formatOutputComment(stageName, output)
+		if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, prNumber, comment); err != nil {
+			fmt.Printf("  [warn] could not post to PR #%d: %v\n", prNumber, err)
+		} else {
+			fmt.Printf("  [post] detailed %s output posted to PR #%d\n", stageName, prNumber)
+		}
+
+		// Post brief summary on the issue
+		summary := formatPRSummaryComment(stageName, prNumber, output)
+		if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, summary); err != nil {
+			fmt.Printf("  [warn] could not post summary to issue #%d: %v\n", item.Number, err)
+		}
+	} else {
+		// No PR found — fall back to posting on the issue
+		fmt.Printf("  [warn] no open PR found for issue #%d, posting on issue instead\n", item.Number)
+		comment := formatOutputComment(stageName, output)
+		if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
+			fmt.Printf("  [warn] could not post comment: %v\n", err)
+		}
 	}
 }
 
@@ -361,6 +405,17 @@ func formatOutputComment(stageName, output string) string {
 		output = output[:maxLen] + "\n\n... (truncated)"
 	}
 	return fmt.Sprintf("🏭 **Fabrik — stage: %s**\n\n%s", stageName, output)
+}
+
+func formatPRSummaryComment(stageName string, prNumber int, output string) string {
+	// Extract first paragraph or up to ~300 chars as a brief summary
+	summary := output
+	if idx := strings.Index(summary, "\n\n"); idx > 0 && idx < 500 {
+		summary = summary[:idx]
+	} else if len(summary) > 300 {
+		summary = summary[:300] + "..."
+	}
+	return fmt.Sprintf("🏭 **Fabrik — stage: %s**\n\nDetailed review posted on PR #%d.\n\n%s", stageName, prNumber, summary)
 }
 
 func mapKeys(m map[string]string) []string {
