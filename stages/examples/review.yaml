@@ -5,7 +5,7 @@ prompt: |
   1. Check for correctness, edge cases, and potential bugs.
   2. Check for security issues (injection, XSS, etc.).
   3. Verify test coverage is adequate.
-  4. Suggest improvements if any.
+  4. Check code style and consistency with the rest of the codebase.
   5. Post your review findings as a comment.
 
   If the implementation looks good, signal completion.
