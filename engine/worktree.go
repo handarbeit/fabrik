@@ -173,12 +173,10 @@ func (wm *WorktreeManager) updateWorktreeFromMain(wtDir, baseBranch string, issu
 	cmd.Dir = wtDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		outStr := strings.TrimSpace(string(out))
-		// If merge conflicts, abort and let Claude handle it during the stage
 		if strings.Contains(outStr, "CONFLICT") || strings.Contains(outStr, "Automatic merge failed") {
-			logf(issueNumber, "worktree", "merge conflicts detected, aborting merge — Claude will resolve during stage\n")
-			abort := exec.Command("git", "merge", "--abort")
-			abort.Dir = wtDir
-			_ = abort.Run()
+			// Leave conflict markers in place — Claude will see them via git status
+			// and resolve them as part of the stage prompt instructions
+			logf(issueNumber, "worktree", "merge conflicts with origin/%s — Claude will resolve\n", baseBranch)
 		} else {
 			logf(issueNumber, "worktree", "warn: could not merge origin/%s: %s\n", baseBranch, outStr)
 		}

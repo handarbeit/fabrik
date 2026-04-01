@@ -130,6 +130,18 @@ func (c *Client) UpdateIssueBody(owner, repo string, issueNumber int, body strin
 	return c.restPatch(url, payload)
 }
 
+// GetIssueBody fetches the body of an issue (or PR, since PRs are issues on the REST API).
+func (c *Client) GetIssueBody(owner, repo string, issueNumber int) (string, error) {
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%d", owner, repo, issueNumber)
+	var result struct {
+		Body string `json:"body"`
+	}
+	if err := c.restGetJSON(apiURL, &result); err != nil {
+		return "", err
+	}
+	return result.Body, nil
+}
+
 // RemoveLabelFromIssue removes a label from an issue.
 func (c *Client) RemoveLabelFromIssue(owner, repo string, issueNumber int, labelName string) error {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%d/labels/%s", owner, repo, issueNumber, url.PathEscape(labelName))
