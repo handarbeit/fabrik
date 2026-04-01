@@ -38,7 +38,11 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	args := buildClaudeArgs(stage, issue.Number, resume, modelOverride)
 	args = append(args, prompt)
 
-	return runClaude(ctx, args, workDir, issue.Number, stage.Name)
+	output, _, err := runClaude(ctx, args, workDir, issue.Number, stage.Name)
+	if err != nil {
+		return output, false, err
+	}
+	return output, checkCompletion(stage, output), nil
 }
 
 // InvokeClaudeForComments runs Claude Code with a comment-review prompt.
@@ -107,21 +111,20 @@ func runClaude(ctx context.Context, args []string, workDir string, issueNumber i
 	baseName := strings.TrimSuffix(label, "-comment-review")
 	saveSessionID(sessionFile(issueNumber, baseName), result)
 
-	// Determine completion based on the stage's completion criteria.
-	// For the label used inside runClaude we don't have the stage, so we use
-	// a simple marker check; callers that have the stage use checkCompletion.
 	completed := strings.Contains(result, "FABRIK_STAGE_COMPLETE")
 
 	return result, completed, nil
 }
 
-// checkCompletion returns true if Claude's output indicates the stage is complete
-// according to the stage's completion criteria.
+// checkCompletion returns true if Claude's output indicates the stage is complete.
+// The only supported type is "claude" (also the default when type is unset).
 func checkCompletion(stage *stages.Stage, output string) bool {
-	if stage.Completion.Type == "claude" {
+	switch stage.Completion.Type {
+	case "", "claude":
 		return strings.Contains(output, "FABRIK_STAGE_COMPLETE")
+	default:
+		return false
 	}
-	return false
 }
 
 func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment) string {
