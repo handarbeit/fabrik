@@ -17,7 +17,7 @@ type ProjectItem struct {
 	Body      string
 	Status    string // The column/status on the board
 	URL       string
-	IsPR      bool   // True if this item is a Pull Request (vs an Issue)
+	IsPR      bool // True if this item is a Pull Request (vs an Issue)
 	Labels    []string
 	Assignees []string
 	Comments  []Comment
