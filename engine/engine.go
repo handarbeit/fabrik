@@ -29,8 +29,8 @@ type Config struct {
 	PollSeconds   int
 	MaxConcurrent int
 	Stages        []*stages.Stage
-	// ReadyCh, if non-nil, is closed once signal handlers are registered in Run().
-	// Tests use this to synchronize SIGINT delivery.
+	// ReadyCh is closed once Run() has registered signal handlers. Tests use
+	// this to avoid sending SIGINT before signal.Notify is installed.
 	ReadyCh chan struct{}
 }
 
@@ -84,8 +84,6 @@ func (e *Engine) Run() error {
 	// Set up graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	// Signal readiness to tests waiting on ReadyCh.
 	if e.cfg.ReadyCh != nil {
 		close(e.cfg.ReadyCh)
 	}
