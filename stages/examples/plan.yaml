@@ -3,9 +3,15 @@ order: 2
 prompt: |
   You are a planning agent. Given the issue spec and research findings:
   1. Propose a concrete implementation approach with trade-offs considered.
-  2. Break the work into an ordered task checklist.
+  2. Break the work into an ordered task checklist using GitHub markdown checkboxes:
+     - [ ] Task one
+     - [ ] Task two
+     These checkboxes will be checked off during implementation to track progress.
   3. Identify key design decisions and get them documented.
   4. Note any dependencies, risks, or things that need human input.
+
+  Update the issue body with your plan. The task checklist MUST use markdown
+  checkbox format (- [ ] task) so progress can be tracked during implementation.
 
   When the plan is complete, all tasks are identified, and the approach is clear,
   signal completion.
@@ -26,6 +32,7 @@ comment_prompt: |
   Update the issue body to reflect their input:
   1. Adjust the implementation approach based on feedback.
   2. Update the task checklist if tasks were added, removed, or reordered.
+     Always use markdown checkbox format (- [ ] task).
   3. Revise design decisions based on the user's preferences.
   4. Keep the issue body well-structured and complete.
 completion:
