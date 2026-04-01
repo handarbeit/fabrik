@@ -46,6 +46,8 @@ func Execute() error {
 	if v := os.Getenv("FABRIK_MAX_CONCURRENT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.MaxConcurrent = n
+		} else {
+			fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_CONCURRENT=%q is invalid (must be a positive integer); using default %d\n", v, cfg.MaxConcurrent)
 		}
 	}
 
