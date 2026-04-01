@@ -133,6 +133,23 @@ func TestItemNeedsWork_SkipsPaused(t *testing.T) {
 	}
 }
 
+func TestItemNeedsWork_SkipsPausedWithNewComments(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+
+	item := gh.ProjectItem{
+		Number: 1,
+		Status: "Research",
+		Labels: []string{"fabrik:paused"},
+		Comments: []gh.Comment{
+			{ID: "C1", Author: "otheruser", Body: "Please do something"},
+		},
+	}
+
+	if eng.itemNeedsWork(item) {
+		t.Error("itemNeedsWork should return false for paused item even when new comments are present")
+	}
+}
+
 func TestProcessItem_AllowsOwnLock(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
