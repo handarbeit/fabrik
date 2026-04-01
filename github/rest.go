@@ -14,6 +14,11 @@ import (
 // from other failures without fragile string matching.
 var ErrNotFound = errors.New("not found")
 
+// ErrUnprocessableEntity is returned by REST methods when the server responds
+// with 422. Callers may use errors.Is(err, github.ErrUnprocessableEntity) to
+// detect "already exists" or validation failures without fragile string matching.
+var ErrUnprocessableEntity = errors.New("unprocessable entity")
+
 func (c *Client) restRequest(method, url string, body interface{}) error {
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
@@ -36,6 +41,9 @@ func (c *Client) restRequest(method, url string, body interface{}) error {
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode == 422 {
+			return fmt.Errorf("GitHub API returned 422: %s: %w", string(respBody), ErrUnprocessableEntity)
+		}
 		return fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
 	}
 

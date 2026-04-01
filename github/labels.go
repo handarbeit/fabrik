@@ -1,9 +1,9 @@
 package github
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
-	"strings"
 )
 
 // AddLabelToIssue adds a label to an issue. Creates the label if it doesn't exist.
@@ -34,7 +34,7 @@ func (c *Client) ensureLabel(owner, repo, name string) error {
 		"color": "6f42c1",
 	}
 	// Ignore 422 (label already exists); propagate all other errors.
-	if err := c.restPost(apiURL, body); err != nil && !strings.Contains(err.Error(), "422") {
+	if err := c.restPost(apiURL, body); err != nil && !errors.Is(err, ErrUnprocessableEntity) {
 		return err
 	}
 	return nil
