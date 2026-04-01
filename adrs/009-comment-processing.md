@@ -22,19 +22,22 @@ reactions and direct issue body updates.
 2. Fabrik adds :eyes: reaction to each new comment (signals "received").
 3. `fabrik:editing` label applied (locks the issue).
 4. Claude invoked with a comment-review prompt specific to the current stage.
-5. Claude outputs the complete updated issue body between
+5. Claude performs any actions requested in the comments (e.g., linking PRs, running commands).
+6. If the issue body needs updating, Claude outputs the complete updated body between
    `FABRIK_ISSUE_UPDATE_BEGIN` / `FABRIK_ISSUE_UPDATE_END` markers.
-6. Fabrik parses the markers and updates the issue body on GitHub.
-7. `fabrik:editing` label removed.
-8. :+1: reaction added to each comment (signals "processed").
+7. Fabrik parses the markers and updates the issue body on GitHub (or posts output as a comment if no markers).
+8. `fabrik:editing` label removed.
+9. :rocket: reaction added to each comment (signals "processed").
 
 ## Rationale
 
 - **Issue body as living document**: The issue body evolves as the workflow
   progresses. Comments add information; the body reflects the current state.
 - **Visual feedback**: Reactions give the user immediate confirmation that
-  their comment was seen (:eyes:) and processed (:+1:) without cluttering
-  the comment thread.
+  their comment was seen (:eyes:) and processed (:rocket:) without cluttering
+  the comment thread. The :rocket: reaction also serves as durable state —
+  on restart, Fabrik skips comments that already have a :rocket: reaction,
+  avoiding reprocessing.
 - **Stage-specific handling**: Each stage can define a `comment_prompt` that
   knows how to incorporate feedback relevant to that stage (e.g., research
   answers vs. plan adjustments).

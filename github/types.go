@@ -30,4 +30,21 @@ type Comment struct {
 	Author     string
 	Body       string
 	CreatedAt  time.Time
+	Reactions  []ReactionGroup
+}
+
+// ReactionGroup represents a reaction type and its count on a comment.
+type ReactionGroup struct {
+	Content string // e.g. "THUMBS_UP", "EYES", etc.
+	Count   int
+}
+
+// HasReaction returns true if the comment has at least one reaction of the given type.
+func (c Comment) HasReaction(content string) bool {
+	for _, r := range c.Reactions {
+		if r.Content == content && r.Count > 0 {
+			return true
+		}
+	}
+	return false
 }
