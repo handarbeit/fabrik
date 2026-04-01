@@ -6,12 +6,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // WorktreeManager handles git worktrees for issue isolation.
 type WorktreeManager struct {
-	baseDir string // directory containing the main repo
-	rootDir string // where worktrees are stored (e.g., .fabrik/worktrees)
+	mu      sync.Mutex // serializes worktree/branch creation (git config isn't concurrent-safe)
+	baseDir string     // directory containing the main repo
+	rootDir string     // where worktrees are stored (e.g., .fabrik/worktrees)
 }
 
 func NewWorktreeManager(repoDir string) *WorktreeManager {
@@ -21,9 +23,17 @@ func NewWorktreeManager(repoDir string) *WorktreeManager {
 	}
 }
 
+// BaseDir returns the main repository directory.
+func (wm *WorktreeManager) BaseDir() string {
+	return wm.baseDir
+}
+
 // EnsureWorktree creates or returns the path to a worktree for the given issue.
 // Each issue gets its own branch (fabrik/issue-N) and worktree directory.
 func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string) (string, error) {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+
 	wtDir := wm.worktreeDir(issueNumber)
 	branch := wm.branchName(issueNumber)
 
@@ -34,13 +44,13 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string) (s
 		if out, cmdErr := cmd.CombinedOutput(); cmdErr == nil {
 			if strings.TrimSpace(string(out)) == branch {
 				// Worktree exists and is on the right branch — update from origin
-				wm.updateWorktreeFromMain(wtDir, baseBranch)
+				wm.updateWorktreeFromMain(wtDir, baseBranch, issueNumber)
 				return wtDir, nil
 			}
 		}
 		// Directory exists but git can't identify it — still usable, don't destroy it
 		// The directory might have uncommitted work from a killed Claude session
-		fmt.Printf("  [worktree] directory exists for issue #%d but branch check failed, using as-is\n", issueNumber)
+		logf(issueNumber, "worktree", "directory exists but branch check failed, using as-is\n")
 		return wtDir, nil
 	}
 
@@ -70,8 +80,27 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string) (s
 		return "", fmt.Errorf("creating worktree: %s: %w", string(out), err)
 	}
 
-	fmt.Printf("  [worktree] created %s for issue #%d\n", wtDir, issueNumber)
+	logf(issueNumber, "worktree", "created %s\n", wtDir)
 	return wtDir, nil
+}
+
+// PushBranch pushes the issue's worktree branch to origin.
+// Uses -u to set upstream tracking on the first push.
+// Serialized with mu because git push -u writes upstream tracking to .git/config,
+// which is not safe to update concurrently across workers.
+// Errors are non-fatal (e.g., no commits yet) — the caller decides how to handle them.
+func (wm *WorktreeManager) PushBranch(issueNumber int) error {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	wtDir := wm.worktreeDir(issueNumber)
+	branch := wm.branchName(issueNumber)
+	cmd := exec.Command("git", "push", "-u", "origin", branch)
+	cmd.Dir = wtDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("pushing branch %s: %s: %w", branch, strings.TrimSpace(string(out)), err)
+	}
+	fmt.Printf("  [worktree] pushed %s to origin\n", branch)
+	return nil
 }
 
 // CleanupWorktree removes the worktree and optionally the branch for an issue.
@@ -94,7 +123,7 @@ func (wm *WorktreeManager) CleanupWorktree(issueNumber int, deleteBranch bool) e
 		}
 	}
 
-	fmt.Printf("  [worktree] cleaned up for issue #%d\n", issueNumber)
+	logf(issueNumber, "worktree", "cleaned up\n")
 	return nil
 }
 
@@ -122,12 +151,12 @@ func (wm *WorktreeManager) branchExists(branch string) bool {
 // updateWorktreeFromMain fetches latest origin and merges main into the worktree branch.
 // This ensures stages always start from an up-to-date base.
 // Errors are non-fatal — the worktree is still usable, just potentially behind.
-func (wm *WorktreeManager) updateWorktreeFromMain(wtDir, baseBranch string) {
+func (wm *WorktreeManager) updateWorktreeFromMain(wtDir, baseBranch string, issueNumber int) {
 	// Check for uncommitted changes — skip update if dirty
 	statusCmd := exec.Command("git", "status", "--porcelain")
 	statusCmd.Dir = wtDir
 	if out, err := statusCmd.Output(); err == nil && len(strings.TrimSpace(string(out))) > 0 {
-		fmt.Printf("  [worktree] has uncommitted changes, skipping update from main\n")
+		logf(issueNumber, "worktree", "has uncommitted changes, skipping update from main\n")
 		return
 	}
 
@@ -135,7 +164,7 @@ func (wm *WorktreeManager) updateWorktreeFromMain(wtDir, baseBranch string) {
 	cmd := exec.Command("git", "fetch", "origin", baseBranch)
 	cmd.Dir = wtDir
 	if out, err := cmd.CombinedOutput(); err != nil {
-		fmt.Printf("  [worktree] warn: could not fetch origin: %s\n", strings.TrimSpace(string(out)))
+		logf(issueNumber, "worktree", "warn: could not fetch origin: %s\n", strings.TrimSpace(string(out)))
 		return
 	}
 
@@ -144,19 +173,17 @@ func (wm *WorktreeManager) updateWorktreeFromMain(wtDir, baseBranch string) {
 	cmd.Dir = wtDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		outStr := strings.TrimSpace(string(out))
-		// If merge conflicts, abort and let Claude handle it during the stage
 		if strings.Contains(outStr, "CONFLICT") || strings.Contains(outStr, "Automatic merge failed") {
-			fmt.Printf("  [worktree] merge conflicts detected, aborting merge — Claude will resolve during stage\n")
-			abort := exec.Command("git", "merge", "--abort")
-			abort.Dir = wtDir
-			_ = abort.Run()
+			// Leave conflict markers in place — Claude will see them via git status
+			// and resolve them as part of the stage prompt instructions
+			logf(issueNumber, "worktree", "merge conflicts with origin/%s — Claude will resolve\n", baseBranch)
 		} else {
-			fmt.Printf("  [worktree] warn: could not merge origin/%s: %s\n", baseBranch, outStr)
+			logf(issueNumber, "worktree", "warn: could not merge origin/%s: %s\n", baseBranch, outStr)
 		}
 		return
 	}
 
-	fmt.Printf("  [worktree] updated from origin/%s\n", baseBranch)
+	logf(issueNumber, "worktree", "updated from origin/%s\n", baseBranch)
 }
 
 // Prune removes stale worktree registrations from git.

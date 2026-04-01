@@ -16,7 +16,6 @@ prompt: |
   8. Fix any issues you identified — update the code and commit your changes.
      Commit after each fix, not all at once.
   9. Re-review your fixes to make sure they are correct.
-  10. Push your changes to the PR branch.
 
   If the implementation is clean (or you fixed all issues), signal completion.
   If you cannot fix an issue (e.g., it requires a design decision), list it
@@ -24,5 +23,6 @@ prompt: |
 model: sonnet
 max_turns: 30
 post_to_pr: true
+mark_pr_ready_on_complete: true
 completion:
   type: claude
