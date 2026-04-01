@@ -23,6 +23,11 @@ func NewWorktreeManager(repoDir string) *WorktreeManager {
 	}
 }
 
+// BaseDir returns the main repository directory.
+func (wm *WorktreeManager) BaseDir() string {
+	return wm.baseDir
+}
+
 // EnsureWorktree creates or returns the path to a worktree for the given issue.
 // Each issue gets its own branch (fabrik/issue-N) and worktree directory.
 func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string) (string, error) {
