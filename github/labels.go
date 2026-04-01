@@ -22,7 +22,7 @@ func (c *Client) AddLabelToIssue(owner, repo string, issueNumber int, labelName 
 
 // RemoveLabelFromIssue removes a label from an issue.
 func (c *Client) RemoveLabelFromIssue(owner, repo string, issueNumber int, labelName string) error {
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%d/labels/%s", owner, repo, issueNumber, url.PathEscape(labelName))
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/issues/%d/labels/%s", c.baseURL, owner, repo, issueNumber, url.PathEscape(labelName))
 	return c.restDelete(apiURL)
 }
 
