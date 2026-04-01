@@ -87,6 +87,10 @@ func (m *mockGitHubClient) UpdateProjectItemStatus(projectID, itemID, statusFiel
 	return nil
 }
 
+func (m *mockGitHubClient) GetIssueBody(owner, repo string, issueNumber int) (string, error) {
+	return "", nil
+}
+
 func (m *mockGitHubClient) FindPRForIssue(owner, repo string, issueNumber int) (int, error) {
 	return 0, nil
 }
@@ -97,10 +101,6 @@ func (m *mockGitHubClient) CreateDraftPR(owner, repo, title, head, base string, 
 
 func (m *mockGitHubClient) MarkPRReady(owner, repo string, prNumber int) error {
 	return nil
-}
-
-func (m *mockGitHubClient) GetIssueBody(owner, repo string, issueNumber int) (string, error) {
-	return "", nil
 }
 
 // mockClaudeInvoker implements ClaudeInvoker for testing.
