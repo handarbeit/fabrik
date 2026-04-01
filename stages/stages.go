@@ -36,6 +36,10 @@ type Stage struct {
 	// CompletionCriteria defines when this stage is "done".
 	Completion CompletionCriteria `yaml:"completion"`
 
+	// PostToPR routes stage output to the linked PR instead of the issue.
+	// A brief summary is still posted on the issue.
+	PostToPR bool `yaml:"post_to_pr,omitempty"`
+
 	// AutoAdvance overrides the global yolo setting for this specific stage.
 	// nil means use the global setting.
 	AutoAdvance *bool `yaml:"auto_advance,omitempty"`
