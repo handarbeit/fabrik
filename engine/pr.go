@@ -68,9 +68,7 @@ func (e *Engine) ensurePRLinksIssue(prNumber, issueNumber int) {
 // markPRReady pushes the issue branch and transitions its PR from draft to ready-for-review.
 // If no PR exists yet (e.g., ensureDraftPR failed earlier because there were no commits),
 // it attempts to create one before marking it ready.
-// markPRReady marks the PR as ready for review.
-// knownPR is the PR number from ensureDraftPR (avoids search API race).
-// If knownPR is 0, falls back to searching.
+// knownPR is the PR number from ensureDraftPR (avoids search API race); 0 falls back to search.
 func (e *Engine) markPRReady(item gh.ProjectItem, knownPR int) {
 	if err := e.worktrees.PushBranch(item.Number); err != nil {
 		logf(item.Number, "warn", "could not push branch: %v\n", err)
