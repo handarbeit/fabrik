@@ -33,7 +33,8 @@ type Config struct {
 
 type Engine struct {
 	cfg          Config
-	client       *gh.Client
+	client       GitHubClient
+	claude       ClaudeInvoker
 	statusField  *gh.StatusField
 	worktrees    *WorktreeManager
 	mu           sync.Mutex
@@ -50,9 +51,21 @@ func New(cfg Config) (*Engine, error) {
 	return &Engine{
 		cfg:          cfg,
 		client:       gh.NewClient(cfg.Token),
+		claude:       &RealClaudeInvoker{},
 		worktrees:    NewWorktreeManager(repoDir),
 		processedSet: make(map[string]time.Time),
 	}, nil
+}
+
+// NewWithDeps creates an Engine with explicit dependencies (for testing).
+func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktrees *WorktreeManager) *Engine {
+	return &Engine{
+		cfg:          cfg,
+		client:       client,
+		claude:       claude,
+		worktrees:    worktrees,
+		processedSet: make(map[string]time.Time),
+	}
 }
 
 func gitToplevel() (string, error) {
@@ -316,7 +329,8 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 	if modelOverride != "" {
 		logf(item.Number, "model", "using model override %q\n", modelOverride)
 	}
-	output, completed, err := InvokeClaude(stage, item, false, workDir, modelOverride)
+	resume := attempted // resume session if we've processed this before
+	output, completed, err := e.claude.Invoke(stage, item, nil, resume, workDir, modelOverride)
 	if err != nil {
 		logf(item.Number, "warn", "claude invocation issue: %v\n", err)
 	}
