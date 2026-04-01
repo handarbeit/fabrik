@@ -542,7 +542,8 @@ func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) {
 		return
 	}
 	if prNumber > 0 {
-		fmt.Printf("  [pr] draft PR #%d already exists for issue #%d, skipping creation\n", prNumber, item.Number)
+		logf(item.Number, "pr", "PR #%d already exists, ensuring issue link\n", prNumber)
+		e.ensurePRLinksIssue(prNumber, item.Number)
 		return
 	}
 
@@ -559,6 +560,32 @@ func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) {
 		return
 	}
 	fmt.Printf("  [pr] created draft PR #%d for issue #%d\n", prNum, item.Number)
+}
+
+// ensurePRLinksIssue checks that a PR body contains "Closes #N" and adds it if missing.
+// This ensures closedByPullRequestsReferences links the PR to the issue, which is how
+// Fabrik discovers PR comments.
+func (e *Engine) ensurePRLinksIssue(prNumber, issueNumber int) {
+	closingKeyword := fmt.Sprintf("Closes #%d", issueNumber)
+
+	// Fetch current PR body (PRs are issues on the REST API)
+	body, err := e.client.GetIssueBody(e.cfg.Owner, e.cfg.Repo, prNumber)
+	if err != nil {
+		logf(issueNumber, "warn", "could not fetch PR #%d body: %v\n", prNumber, err)
+		return
+	}
+
+	if strings.Contains(body, closingKeyword) {
+		return // already linked
+	}
+
+	// Append closing keyword
+	updatedBody := body + "\n\n" + closingKeyword
+	if err := e.client.UpdateIssueBody(e.cfg.Owner, e.cfg.Repo, prNumber, updatedBody); err != nil {
+		logf(issueNumber, "warn", "could not update PR #%d body: %v\n", prNumber, err)
+		return
+	}
+	logf(issueNumber, "pr", "added '%s' to PR #%d body\n", closingKeyword, prNumber)
 }
 
 // markPRReady pushes the issue branch and transitions its PR from draft to ready-for-review.
