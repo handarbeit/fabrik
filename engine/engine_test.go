@@ -151,8 +151,7 @@ func TestConcurrentItemDispatch(t *testing.T) {
 			}
 			mu.Unlock()
 
-			var worked int32
-			if err := e.processItem(board, item, &worked); err != nil {
+			if err := e.processItem(board, item); err != nil {
 				t.Errorf("processItem error for issue #%d: %v", item.Number, err)
 			}
 
