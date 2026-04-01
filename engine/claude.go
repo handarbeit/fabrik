@@ -25,6 +25,7 @@ func sessionFile(issueNumber int, stageName string) string {
 
 // InvokeClaude runs Claude Code with the given stage configuration and issue context.
 // workDir is the directory Claude should run in (typically a git worktree).
+// modelOverride, if non-empty, replaces the stage's configured model.
 // It returns Claude's output and whether Claude indicated completion.
 func InvokeClaude(stage *stages.Stage, issue gh.ProjectItem, resume bool, workDir string, modelOverride string) (string, bool, error) {
 	sessDir := SessionDir(issue.Number)
@@ -41,6 +42,7 @@ func InvokeClaude(stage *stages.Stage, issue gh.ProjectItem, resume bool, workDi
 
 // InvokeClaudeForComments runs Claude Code with a comment-review prompt.
 // It uses the stage's CommentPrompt if defined, otherwise a default.
+// modelOverride, if non-empty, replaces the stage's configured model.
 func InvokeClaudeForComments(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, modelOverride string) (string, bool, error) {
 	sessDir := SessionDir(issue.Number)
 	if err := os.MkdirAll(sessDir, 0755); err != nil {
