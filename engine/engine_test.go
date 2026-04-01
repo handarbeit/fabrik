@@ -493,6 +493,17 @@ func TestProcessItem_FullHappyPath(t *testing.T) {
 		t.Errorf("lock label = %q", client.addLabelCalls[0].labelName)
 	}
 
+	// Should have removed the lock label after processing completes
+	foundLockRemoval := false
+	for _, call := range client.removeLabelCalls {
+		if call.labelName == "fabrik:locked:testuser" {
+			foundLockRemoval = true
+		}
+	}
+	if !foundLockRemoval {
+		t.Error("expected lock label to be removed after processItem completes")
+	}
+
 	// Should have invoked Claude
 	if len(claude.calls) != 1 {
 		t.Fatalf("expected 1 claude call, got %d", len(claude.calls))
@@ -566,6 +577,17 @@ func TestProcessItem_CompletionWithAutoAdvance(t *testing.T) {
 	}
 	if !foundComplete {
 		t.Error("expected completion label to be added")
+	}
+
+	// Should have removed the lock label after processing completes
+	foundLockRemoval := false
+	for _, call := range client.removeLabelCalls {
+		if call.labelName == "fabrik:locked:testuser" {
+			foundLockRemoval = true
+		}
+	}
+	if !foundLockRemoval {
+		t.Error("expected lock label to be removed after processItem completes")
 	}
 
 	// Should have advanced to next stage
