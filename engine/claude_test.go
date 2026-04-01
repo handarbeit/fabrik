@@ -159,6 +159,12 @@ More output`
 	if string(data) != "sess_abc123" {
 		t.Errorf("session ID = %q, want sess_abc123", string(data))
 	}
+
+	if info, err := os.Stat(path); err != nil {
+		t.Fatalf("stat session file: %v", err)
+	} else if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("session file mode = %04o, want 0600", perm)
+	}
 }
 
 func TestSaveSessionID_NoSessionID(t *testing.T) {
@@ -332,8 +338,8 @@ echo "NO RESUME"
 
 	// Write a session file to enable resume
 	sessDir := SessionDir(99)
-	os.MkdirAll(sessDir, 0755)
-	os.WriteFile(sessionFile(99, "Plan"), []byte("sess_existing"), 0644)
+	os.MkdirAll(sessDir, 0700)
+	os.WriteFile(sessionFile(99, "Plan"), []byte("sess_existing"), 0600)
 	defer os.RemoveAll(sessDir)
 
 	output, _, err := InvokeClaude(context.Background(), stage, issue, nil, true, workDir, "")
@@ -342,6 +348,12 @@ echo "NO RESUME"
 	}
 	if !strings.Contains(output, "RESUMED") {
 		t.Errorf("expected resume, got: %q", output)
+	}
+
+	if info, err := os.Stat(sessDir); err != nil {
+		t.Fatalf("stat session dir: %v", err)
+	} else if perm := info.Mode().Perm(); perm != 0700 {
+		t.Errorf("session dir mode = %04o, want 0700", perm)
 	}
 }
 

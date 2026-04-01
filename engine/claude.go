@@ -40,8 +40,11 @@ func sessionFile(issueNumber int, stageName string) string {
 // It returns Claude's output and whether Claude indicated completion.
 func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
 	sessDir := SessionDir(issue.Number)
-	if err := os.MkdirAll(sessDir, 0755); err != nil {
+	if err := os.MkdirAll(sessDir, 0700); err != nil {
 		return "", false, fmt.Errorf("creating session dir: %w", err)
+	}
+	if err := os.Chmod(sessDir, 0700); err != nil {
+		return "", false, fmt.Errorf("setting session dir permissions: %w", err)
 	}
 
 	prompt := buildPrompt(stage, issue, newComments)
@@ -56,8 +59,11 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 // modelOverride, if non-empty, replaces the stage's configured model.
 func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, modelOverride string) (string, bool, error) {
 	sessDir := SessionDir(issue.Number)
-	if err := os.MkdirAll(sessDir, 0755); err != nil {
+	if err := os.MkdirAll(sessDir, 0700); err != nil {
 		return "", false, fmt.Errorf("creating session dir: %w", err)
+	}
+	if err := os.Chmod(sessDir, 0700); err != nil {
+		return "", false, fmt.Errorf("setting session dir permissions: %w", err)
 	}
 
 	prompt := buildCommentReviewPrompt(stage, issue, comments)
@@ -304,7 +310,13 @@ func saveSessionID(path string, output string) {
 				SessionID string `json:"session_id"`
 			}
 			if err := json.Unmarshal([]byte(line), &meta); err == nil && meta.SessionID != "" {
-				_ = os.WriteFile(path, []byte(meta.SessionID), 0644)
+				if err := os.WriteFile(path, []byte(meta.SessionID), 0600); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: failed to save session id to %s: %v\n", path, err)
+					return
+				}
+				if err := os.Chmod(path, 0600); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: failed to set permissions on session file %s: %v\n", path, err)
+				}
 				return
 			}
 		}
