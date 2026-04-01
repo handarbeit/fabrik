@@ -204,7 +204,7 @@ func defaultCommentPrompt(stageName string) string {
 	return fmt.Sprintf(`You are a comment review agent for the "%s" stage.
 The user has posted new comments on this issue. Your job is to:
 1. Read and understand the new comments in context of the current issue body.
-2. If comments request actions (e.g., linking a PR, running a command, making code changes), perform those actions using available tools.
+2. If comments request actions (e.g., linking a pull request, running a command, making code changes), perform those actions using available tools.
 3. If comments provide information, corrections, or answers to questions, incorporate them into the issue body.
 4. Preserve all existing content that is still valid.
 5. Maintain the structure and formatting of the issue body.`, stageName)
