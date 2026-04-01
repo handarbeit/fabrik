@@ -26,14 +26,14 @@ func sessionFile(issueNumber int, stageName string) string {
 // InvokeClaude runs Claude Code with the given stage configuration and issue context.
 // workDir is the directory Claude should run in (typically a git worktree).
 // It returns Claude's output and whether Claude indicated completion.
-func InvokeClaude(stage *stages.Stage, issue gh.ProjectItem, resume bool, workDir string) (string, bool, error) {
+func InvokeClaude(stage *stages.Stage, issue gh.ProjectItem, resume bool, workDir string, modelOverride string) (string, bool, error) {
 	sessDir := SessionDir(issue.Number)
 	if err := os.MkdirAll(sessDir, 0755); err != nil {
 		return "", false, fmt.Errorf("creating session dir: %w", err)
 	}
 
 	prompt := buildPrompt(stage, issue)
-	args := buildClaudeArgs(stage, issue.Number, resume)
+	args := buildClaudeArgs(stage, issue.Number, resume, modelOverride)
 	args = append(args, prompt)
 
 	return runClaude(args, workDir, issue.Number, stage.Name)
@@ -41,20 +41,20 @@ func InvokeClaude(stage *stages.Stage, issue gh.ProjectItem, resume bool, workDi
 
 // InvokeClaudeForComments runs Claude Code with a comment-review prompt.
 // It uses the stage's CommentPrompt if defined, otherwise a default.
-func InvokeClaudeForComments(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string) (string, bool, error) {
+func InvokeClaudeForComments(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, modelOverride string) (string, bool, error) {
 	sessDir := SessionDir(issue.Number)
 	if err := os.MkdirAll(sessDir, 0755); err != nil {
 		return "", false, fmt.Errorf("creating session dir: %w", err)
 	}
 
 	prompt := buildCommentReviewPrompt(stage, issue, comments)
-	args := buildClaudeArgs(stage, issue.Number, true) // resume existing session
+	args := buildClaudeArgs(stage, issue.Number, true, modelOverride) // resume existing session
 	args = append(args, prompt)
 
 	return runClaude(args, workDir, issue.Number, stage.Name+"-comment-review")
 }
 
-func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool) []string {
+func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOverride string) []string {
 	args := []string{
 		"--print",
 		"--verbose",
@@ -67,7 +67,10 @@ func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool) []string
 		}
 	}
 
-	if stage.Model != "" {
+	// Model override from labels takes precedence over stage config
+	if modelOverride != "" {
+		args = append(args, "--model", modelOverride)
+	} else if stage.Model != "" {
 		args = append(args, "--model", stage.Model)
 	}
 
