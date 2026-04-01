@@ -103,10 +103,9 @@ func TestMaxConcurrentDefault(t *testing.T) {
 	}
 }
 
-// TestConcurrentItemDispatch verifies that the semaphore-bounded goroutine pool
-// used in poll() dispatches all items without races and respects MaxConcurrent.
-// This mirrors the exact dispatch pattern in poll() so that regressions in the
-// goroutine fan-out code are caught by go test -race.
+// TestConcurrentItemDispatch verifies that the non-blocking semaphore dispatch
+// used in poll() respects MaxConcurrent and processes all items across multiple
+// simulated poll cycles without data races.
 func TestConcurrentItemDispatch(t *testing.T) {
 	const numItems = 15
 	const maxConcurrent = 3
@@ -118,6 +117,7 @@ func TestConcurrentItemDispatch(t *testing.T) {
 			Stages:        nil, // no matching stage → processItem returns nil immediately
 		},
 		processedSet: make(map[string]time.Time),
+		sem:          make(chan struct{}, maxConcurrent),
 	}
 
 	board := &gh.ProjectBoard{}
@@ -126,7 +126,6 @@ func TestConcurrentItemDispatch(t *testing.T) {
 		items[i] = gh.ProjectItem{Number: i + 1, Status: "NoSuchStage"}
 	}
 
-	// Replicate the exact dispatch pattern from poll().
 	var (
 		mu          sync.Mutex
 		processed   int
@@ -134,40 +133,117 @@ func TestConcurrentItemDispatch(t *testing.T) {
 		inFlight    int
 	)
 
-	sem := make(chan struct{}, e.cfg.MaxConcurrent)
-	var wg sync.WaitGroup
-	for _, item := range items {
-		item := item
-		sem <- struct{}{}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			defer func() { <-sem }()
+	// Replicate the non-blocking dispatch pattern from poll(). Items that don't
+	// get a semaphore slot are retried in subsequent cycles, mirroring real behaviour.
+	remaining := make([]gh.ProjectItem, len(items))
+	copy(remaining, items)
+	var dispatchWg sync.WaitGroup
 
-			mu.Lock()
-			inFlight++
-			if inFlight > maxInFlight {
-				maxInFlight = inFlight
+	for len(remaining) > 0 {
+		var nextRound []gh.ProjectItem
+		for _, item := range remaining {
+			item := item
+			select {
+			case e.sem <- struct{}{}:
+			default:
+				nextRound = append(nextRound, item)
+				continue
 			}
-			mu.Unlock()
+			dispatchWg.Add(1)
+			go func() {
+				defer dispatchWg.Done()
+				defer func() { <-e.sem }()
 
-			if err := e.processItem(board, item); err != nil {
-				t.Errorf("processItem error for issue #%d: %v", item.Number, err)
-			}
+				mu.Lock()
+				inFlight++
+				if inFlight > maxInFlight {
+					maxInFlight = inFlight
+				}
+				mu.Unlock()
 
-			mu.Lock()
-			inFlight--
-			processed++
-			mu.Unlock()
-		}()
+				if err := e.processItem(board, item); err != nil {
+					t.Errorf("processItem error for issue #%d: %v", item.Number, err)
+				}
+
+				mu.Lock()
+				inFlight--
+				processed++
+				mu.Unlock()
+			}()
+		}
+		remaining = nextRound
+		if len(remaining) > 0 {
+			// Yield so in-flight goroutines can make progress and free semaphore slots.
+			dispatchWg.Wait()
+		}
 	}
-	wg.Wait()
+	dispatchWg.Wait()
 
 	if processed != numItems {
 		t.Errorf("expected %d items processed, got %d", numItems, processed)
 	}
 	if maxInFlight > maxConcurrent {
 		t.Errorf("max in-flight goroutines was %d, expected <= %d", maxInFlight, maxConcurrent)
+	}
+}
+
+// TestPollNonBlockingAtCapacity verifies that the dispatch loop in poll() skips
+// items via non-blocking semaphore acquire when all slots are taken, so poll()
+// itself never blocks and the ticker can fire on schedule.
+func TestPollNonBlockingAtCapacity(t *testing.T) {
+	const maxConcurrent = 2
+
+	e := &Engine{
+		cfg: Config{
+			User:          "testuser",
+			MaxConcurrent: maxConcurrent,
+			Stages:        nil,
+		},
+		processedSet: make(map[string]time.Time),
+		sem:          make(chan struct{}, maxConcurrent),
+	}
+
+	// Fill the semaphore to simulate two in-flight workers from a previous cycle.
+	e.sem <- struct{}{}
+	e.sem <- struct{}{}
+
+	items := []gh.ProjectItem{
+		{Number: 1, Status: "NoSuchStage"},
+		{Number: 2, Status: "NoSuchStage"},
+	}
+
+	// Replicate the non-blocking dispatch from poll().
+	dispatched := 0
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for _, item := range items {
+			item := item
+			select {
+			case e.sem <- struct{}{}:
+				e.inFlight.Store(item.Number, struct{}{})
+				e.wg.Add(1)
+				dispatched++
+				go func() {
+					defer e.wg.Done()
+					defer func() { <-e.sem }()
+					defer e.inFlight.Delete(item.Number)
+				}()
+			default:
+				// skipped — at capacity
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+		// dispatch loop returned without blocking — correct
+	case <-time.After(time.Second):
+		t.Fatal("dispatch loop blocked when semaphore was full")
+	}
+
+	if dispatched != 0 {
+		t.Errorf("expected 0 dispatched (semaphore full), got %d", dispatched)
 	}
 }
 
