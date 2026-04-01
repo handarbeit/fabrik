@@ -436,7 +436,7 @@ query($id: ID!, $cursor: String) {
 
 		var result struct {
 			Data struct {
-				Node struct {
+				Node *struct {
 					Comments struct {
 						Nodes    []commentNodeData `json:"nodes"`
 						PageInfo struct {
@@ -450,6 +450,9 @@ query($id: ID!, $cursor: String) {
 
 		if err := c.graphqlRequest(query, vars, &result); err != nil {
 			return nil, fmt.Errorf("fetching comments for node %s: %w", nodeID, err)
+		}
+		if result.Data.Node == nil {
+			return nil, fmt.Errorf("fetching comments for node %s: node not found or unsupported type", nodeID)
 		}
 
 		page := result.Data.Node.Comments
@@ -506,7 +509,7 @@ query($id: ID!, $cursor: String) {
 
 		var result struct {
 			Data struct {
-				Node struct {
+				Node *struct {
 					Labels struct {
 						Nodes []struct {
 							Name string `json:"name"`
@@ -522,6 +525,9 @@ query($id: ID!, $cursor: String) {
 
 		if err := c.graphqlRequest(query, vars, &result); err != nil {
 			return nil, fmt.Errorf("fetching labels for node %s: %w", nodeID, err)
+		}
+		if result.Data.Node == nil {
+			return nil, fmt.Errorf("fetching labels for node %s: node not found or unsupported type", nodeID)
 		}
 
 		page := result.Data.Node.Labels
