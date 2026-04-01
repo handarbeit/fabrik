@@ -200,7 +200,7 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem) error 
 }
 
 // processComments handles new user comments on an issue.
-// Flow: 👀 reactions → editing label → invoke Claude → update issue body → 👍 reactions → remove editing label
+// Flow: 👀 reactions → editing label → invoke Claude → update issue body → remove editing label → 👍 reactions
 func (e *Engine) processComments(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, comments []gh.Comment) error {
 	fmt.Printf("\n[comments] processing %d new comment(s) on issue #%d — stage: %s\n",
 		len(comments), item.Number, stage.Name)
@@ -214,7 +214,7 @@ func (e *Engine) processComments(board *gh.ProjectBoard, item gh.ProjectItem, st
 
 	// Step 2: Add editing label
 	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, "fabrik:editing"); err != nil {
-		fmt.Printf("  [warn] could not add editing label: %v\n", err)
+		return fmt.Errorf("adding editing label: %w", err)
 	}
 
 	// Step 3: Ensure worktree
@@ -259,8 +259,19 @@ func (e *Engine) processComments(board *gh.ProjectBoard, item gh.ProjectItem, st
 		}
 	}
 
+	// Mark comments as processed only after everything succeeded
+	e.markCommentsProcessed(item, comments)
+
 	fmt.Printf("  [done] comment processing complete for issue #%d\n", item.Number)
 	return nil
+}
+
+// markCommentsProcessed records comments as processed so they won't be retried.
+func (e *Engine) markCommentsProcessed(item gh.ProjectItem, comments []gh.Comment) {
+	for _, c := range comments {
+		key := fmt.Sprintf("%d-comment-%s", item.Number, c.ID)
+		e.processedSet[key] = time.Now()
+	}
 }
 
 func (e *Engine) removeEditingLabel(issueNumber int) {
@@ -308,8 +319,6 @@ func (e *Engine) findNewComments(item gh.ProjectItem) []gh.Comment {
 			continue
 		}
 		newComments = append(newComments, c)
-		// Mark as processed now — so we don't re-process on next poll
-		e.processedSet[key] = time.Now()
 	}
 	return newComments
 }
