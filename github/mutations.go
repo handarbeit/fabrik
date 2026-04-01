@@ -1,6 +1,9 @@
 package github
 
-import "fmt"
+import (
+	"fmt"
+	"net/url"
+)
 
 // AddLabelToIssue adds a label to an issue. Creates the label if it doesn't exist.
 func (c *Client) AddLabelToIssue(owner, repo string, issueNumber int, labelName string) error {
@@ -129,7 +132,7 @@ func (c *Client) UpdateIssueBody(owner, repo string, issueNumber int, body strin
 
 // RemoveLabelFromIssue removes a label from an issue.
 func (c *Client) RemoveLabelFromIssue(owner, repo string, issueNumber int, labelName string) error {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%d/labels/%s", owner, repo, issueNumber, labelName)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%d/labels/%s", owner, repo, issueNumber, url.PathEscape(labelName))
 	return c.restDelete(url)
 }
 
