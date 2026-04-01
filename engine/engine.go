@@ -342,6 +342,37 @@ func gitRevParse(dir, ref string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// captureGitMeta captures the current branch name, short commit SHA, and a
+// human-readable UTC timestamp from the given worktree directory.
+// Returns "unknown" values gracefully if git commands fail (e.g. empty workDir).
+func captureGitMeta(workDir string) (branch, commit, timestamp string) {
+	timestamp = time.Now().UTC().Format("2006-01-02 15:04 UTC")
+
+	if workDir == "" {
+		return "unknown", "unknown", timestamp
+	}
+
+	sha, err := gitRevParse(workDir, "HEAD")
+	if err != nil || sha == "" {
+		commit = "unknown"
+	} else if len(sha) >= 8 {
+		commit = sha[:8]
+	} else {
+		commit = sha
+	}
+
+	branchCmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	branchCmd.Dir = workDir
+	out, err := branchCmd.Output()
+	if err != nil {
+		branch = "unknown"
+	} else {
+		branch = strings.TrimSpace(string(out))
+	}
+
+	return branch, commit, timestamp
+}
+
 // itemNeedsWork does cheap pre-checks to determine if an item might need processing.
 // This runs in the poll loop BEFORE acquiring a semaphore slot, so it must be fast
 // and not make any API calls.
@@ -539,12 +570,15 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		logf(item.Number, "warn", "claude invocation issue: %v\n", err)
 	}
 
+	// Capture git metadata for the comment header
+	branch, commit, timestamp := captureGitMeta(workDir)
+
 	// Post Claude's output
 	if output != "" {
 		if stage.PostToPR {
-			e.postOutputToPR(item, stage.Name, output)
+			e.postOutputToPR(item, stage.Name, output, branch, commit, timestamp)
 		} else {
-			comment := formatOutputComment(stage.Name, output)
+			comment := formatOutputComment(stage.Name, output, branch, commit, timestamp)
 			if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
 				logf(item.Number, "warn", "could not post comment: %v\n", err)
 			}
@@ -617,6 +651,9 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		return err
 	}
 
+	// Capture git metadata for the comment header
+	branch, commit, timestamp := captureGitMeta(workDir)
+
 	// Step 5: Parse the updated issue body from Claude's output and apply it
 	if updatedBody := extractUpdatedBody(output); updatedBody != "" {
 		logf(item.Number, "edit", "updating issue body\n")
@@ -626,7 +663,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	} else {
 		// No body update — post output as a comment instead
 		if output != "" {
-			comment := formatOutputComment(stage.Name+" (comment review)", output)
+			comment := formatOutputComment(stage.Name+" (comment review)", output, branch, commit, timestamp)
 			if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
 				logf(item.Number, "warn", "could not post comment: %v\n", err)
 			}
@@ -752,7 +789,7 @@ func (e *Engine) markPRReady(item gh.ProjectItem) {
 }
 
 // postOutputToPR posts detailed output on the linked PR and a brief summary on the issue.
-func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output string) {
+func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output, branch, commit, timestamp string) {
 	prNumber, err := e.client.FindPRForIssue(e.cfg.Owner, e.cfg.Repo, item.Number)
 	if err != nil {
 		logf(item.Number, "warn", "could not find PR: %v\n", err)
@@ -760,7 +797,7 @@ func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output string) {
 
 	if prNumber > 0 {
 		// Post detailed output on the PR
-		comment := formatOutputComment(stageName, output)
+		comment := formatOutputComment(stageName, output, branch, commit, timestamp)
 		if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, prNumber, comment); err != nil {
 			logf(item.Number, "warn", "could not post to PR #%d: %v\n", prNumber, err)
 		} else {
@@ -768,14 +805,14 @@ func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output string) {
 		}
 
 		// Post brief summary on the issue
-		summary := formatPRSummaryComment(stageName, prNumber, output)
+		summary := formatPRSummaryComment(stageName, prNumber, output, branch, commit, timestamp)
 		if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, summary); err != nil {
 			logf(item.Number, "warn", "could not post summary: %v\n", err)
 		}
 	} else {
 		// No PR found — fall back to posting on the issue
 		logf(item.Number, "warn", "no open PR found, posting on issue instead\n")
-		comment := formatOutputComment(stageName, output)
+		comment := formatOutputComment(stageName, output, branch, commit, timestamp)
 		if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
 			logf(item.Number, "warn", "could not post comment: %v\n", err)
 		}
@@ -873,20 +910,22 @@ func (e *Engine) advanceToNextStage(board *gh.ProjectBoard, item gh.ProjectItem,
 	return e.client.UpdateProjectItemStatus(board.ProjectID, item.ItemID, e.statusField.FieldID, optionID)
 }
 
-func formatOutputComment(stageName, output string) string {
+func formatOutputComment(stageName, output, branch, commit, timestamp string) string {
 	const maxLen = 60000
 	if len(output) > maxLen {
 		output = output[:maxLen] + "\n\n... (truncated)"
 	}
-	return fmt.Sprintf("🏭 **Fabrik — stage: %s**\n\n%s", stageName, output)
+	meta := fmt.Sprintf("*branch: %s | commit: %s | %s*", branch, commit, timestamp)
+	return fmt.Sprintf("🏭 **Fabrik — stage: %s**\n%s\n\n%s", stageName, meta, output)
 }
 
-func formatPRSummaryComment(stageName string, prNumber int, output string) string {
+func formatPRSummaryComment(stageName string, prNumber int, output, branch, commit, timestamp string) string {
 	summary := extractSummary(output)
 	if summary == "" {
 		summary = "(no summary provided)"
 	}
-	return fmt.Sprintf("🏭 **Fabrik — stage: %s**\n\nDetailed output posted on PR #%d.\n\n%s", stageName, prNumber, summary)
+	meta := fmt.Sprintf("*branch: %s | commit: %s | %s*", branch, commit, timestamp)
+	return fmt.Sprintf("🏭 **Fabrik — stage: %s**\n%s\n\nDetailed output posted on PR #%d.\n\n%s", stageName, meta, prNumber, summary)
 }
 
 // extractModelOverride scans item labels for the first "model:<name>" label and returns <name>.
