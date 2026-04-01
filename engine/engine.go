@@ -96,6 +96,7 @@ func (e *Engine) poll() error {
 	}
 
 	// Fetch status field metadata (for mutations) on first poll
+	e.mu.Lock()
 	if e.statusField == nil && board.ProjectID != "" {
 		sf, err := e.client.FetchStatusField(board.ProjectID)
 		if err != nil {
@@ -104,6 +105,7 @@ func (e *Engine) poll() error {
 			e.statusField = sf
 		}
 	}
+	e.mu.Unlock()
 
 	fmt.Printf("[poll] found %d items on board\n", len(board.Items))
 
@@ -169,9 +171,12 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem) error 
 
 	// Determine if we need to run the stage
 	itemKey := fmt.Sprintf("%d-%s", item.Number, stage.Name)
-	e.mu.Lock()
-	_, alreadyProcessed := e.processedSet[itemKey]
-	e.mu.Unlock()
+	var alreadyProcessed bool
+	func() {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		_, alreadyProcessed = e.processedSet[itemKey]
+	}()
 
 	if alreadyProcessed {
 		return nil
@@ -205,9 +210,11 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem) error 
 		}
 	}
 
-	e.mu.Lock()
-	e.processedSet[itemKey] = time.Now()
-	e.mu.Unlock()
+	func() {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		e.processedSet[itemKey] = time.Now()
+	}()
 
 	if completed {
 		e.handleStageComplete(board, item, stage)
