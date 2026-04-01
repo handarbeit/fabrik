@@ -59,7 +59,7 @@ exactly (case-sensitive). The default pipeline uses:
   --stages ./stages/mystages
 ```
 
-Fabrik polls the project board every 30 seconds. Move an issue to `Research` on the
+Fabrik polls the project board by default every 30 seconds (configurable with `--poll`). Move an issue to `Research` on the
 board to start processing it.
 
 ### Development Mode (self-upgrade)
@@ -165,11 +165,11 @@ auto_advance: false       # Optional. Override global --yolo setting for this sp
 | Type | Behavior |
 |------|----------|
 | `claude` | Claude signals completion by outputting the exact line `FABRIK_STAGE_COMPLETE` |
-| `tasklist` | Stage is complete when all GitHub task list items in the issue body are checked |
-| `label` | Stage is complete when the specified label is applied to the issue |
-| `approval` | Stage is complete when a comment containing the specified keyword is posted |
+| `tasklist` | _(planned, not yet implemented)_ Stage is complete when all GitHub task list items in the issue body are checked |
+| `label` | _(planned, not yet implemented)_ Stage is complete when the specified label is applied to the issue |
+| `approval` | _(planned, not yet implemented)_ Stage is complete when a comment containing the specified keyword is posted |
 
-The `claude` type is the default and most common. Stages that do not complete apply a
+Only the `claude` completion type is currently implemented. The `tasklist`, `label`, and `approval` types are defined in the schema but not yet evaluated by the engine — stages using these types will not advance automatically. Use `claude` for all stages until these types are implemented. Stages that do not complete apply a
 cooldown before retrying (see [Cooldown on Incomplete Stages](#cooldown-on-incomplete-stages)).
 
 #### Model Override via Stage Config
@@ -374,8 +374,9 @@ cp -r stages/examples stages/mystages
 ./fabrik --stages ./stages/mystages ...
 ```
 
-You can add, remove, or reorder stages. The only requirement is that `name` matches
-a board column and `order` values are unique and correctly ordered.
+You can add, remove, or reorder stages. Stages must include the required fields
+described in the YAML reference (for example, `name`, `order`, and `prompt`). In addition,
+`name` should match a board column and `order` values should be unique and define the stage sequence.
 
 ---
 
