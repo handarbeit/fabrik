@@ -136,6 +136,35 @@ func (c *Client) RemoveLabelFromIssue(owner, repo string, issueNumber int, label
 	return c.restDelete(url)
 }
 
+// CreateDraftPR creates a draft pull request for the given issue branch.
+// Returns the PR number. Callers should first call FindPRForIssue to avoid duplicates.
+func (c *Client) CreateDraftPR(owner, repo, title, head, base string, issueNumber int) (int, error) {
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls", owner, repo)
+	body := map[string]interface{}{
+		"title": title,
+		"head":  head,
+		"base":  base,
+		"body":  fmt.Sprintf("Closes #%d", issueNumber),
+		"draft": true,
+	}
+	var result struct {
+		Number int `json:"number"`
+	}
+	if err := c.restPostWithResponse(apiURL, body, &result); err != nil {
+		return 0, fmt.Errorf("creating draft PR: %w", err)
+	}
+	return result.Number, nil
+}
+
+// MarkPRReady transitions a draft PR to ready-for-review.
+func (c *Client) MarkPRReady(owner, repo string, prNumber int) error {
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d", owner, repo, prNumber)
+	body := map[string]interface{}{
+		"draft": false,
+	}
+	return c.restPatch(apiURL, body)
+}
+
 // FindPRForIssue finds the open PR associated with an issue by looking for
 // a PR whose head branch matches the fabrik/issue-N convention.
 // Returns the PR number, or 0 if no matching PR is found.
