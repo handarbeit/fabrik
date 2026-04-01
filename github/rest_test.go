@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestRestPost_Success(t *testing.T) {
@@ -75,6 +76,7 @@ func TestRestPost_SuccessNon200(t *testing.T) {
 
 func TestRestPost_ConnectionError(t *testing.T) {
 	c := NewClientWithBaseURL("token", "http://127.0.0.1:1")
+	c.httpClient.Timeout = 2 * time.Second // avoid 30s hang on connection refused
 	err := c.restPost("http://127.0.0.1:1/test", map[string]string{})
 	if err == nil {
 		t.Fatal("expected error for connection refused")
