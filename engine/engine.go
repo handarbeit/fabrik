@@ -18,21 +18,25 @@ import (
 const idleUpgradeThreshold = 2
 
 type Config struct {
-	Owner       string
-	Repo        string
-	ProjectNum  int
-	User        string
-	Token       string
+	Owner         string
+	Repo          string
+	ProjectNum    int
+	User          string
+	Token         string
 	Yolo          bool
 	AutoUpgrade   bool
 	PollSeconds   int
 	MaxConcurrent int
-	Stages      []*stages.Stage
+	Stages        []*stages.Stage
+	// ReadyCh is closed once Run() has registered signal handlers. Tests use
+	// this to avoid sending SIGINT before signal.Notify is installed.
+	ReadyCh chan struct{}
 }
 
 type Engine struct {
 	cfg          Config
-	client       *gh.Client
+	client       GitHubClient
+	claude       ClaudeInvoker
 	statusField  *gh.StatusField
 	worktrees    *WorktreeManager
 	mu           sync.Mutex
@@ -52,10 +56,22 @@ func New(cfg Config) (*Engine, error) {
 	return &Engine{
 		cfg:          cfg,
 		client:       gh.NewClient(cfg.Token),
+		claude:       &RealClaudeInvoker{},
 		worktrees:    NewWorktreeManager(repoDir),
 		processedSet: make(map[string]time.Time),
 		sem:          make(chan struct{}, cfg.MaxConcurrent),
 	}, nil
+}
+
+// NewWithDeps creates an Engine with explicit dependencies (for testing).
+func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktrees *WorktreeManager) *Engine {
+	return &Engine{
+		cfg:          cfg,
+		client:       client,
+		claude:       claude,
+		worktrees:    worktrees,
+		processedSet: make(map[string]time.Time),
+	}
 }
 
 func gitToplevel() (string, error) {
@@ -71,6 +87,9 @@ func (e *Engine) Run() error {
 	// Set up graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	if e.cfg.ReadyCh != nil {
+		close(e.cfg.ReadyCh)
+	}
 
 	fmt.Println("\nFabrik is running. Press Ctrl+C to stop.")
 	fmt.Println()
@@ -337,17 +356,13 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem) error 
 		return fmt.Errorf("setting up worktree: %w", err)
 	}
 
-	// Pre-stage: create a draft PR if requested and none exists yet
-	if stage.CreateDraftPR {
-		e.ensureDraftPR(item, baseBranch)
-	}
-
 	// Invoke Claude Code in the issue's worktree
 	modelOverride := extractModelOverride(item.Number, item.Labels)
 	if modelOverride != "" {
 		logf(item.Number, "model", "using model override %q\n", modelOverride)
 	}
-	output, completed, err := InvokeClaude(stage, item, false, workDir, modelOverride)
+	resume := attempted // resume session if we've processed this before
+	output, completed, err := e.claude.Invoke(stage, item, nil, resume, workDir, modelOverride)
 	if err != nil {
 		logf(item.Number, "warn", "claude invocation issue: %v\n", err)
 	}
@@ -372,7 +387,10 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem) error 
 	}()
 
 	if completed {
-		// Post-stage: push branch and mark PR ready if requested
+		// Post-stage: create draft PR and/or mark ready now that commits exist
+		if stage.CreateDraftPR {
+			e.ensureDraftPR(item, baseBranch)
+		}
 		if stage.MarkPRReadyOnComplete {
 			e.markPRReady(item)
 		}
