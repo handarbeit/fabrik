@@ -1,1 +1,4 @@
 .history/*
+fabrik
+*.exe
+.DS_Store
