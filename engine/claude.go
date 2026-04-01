@@ -160,12 +160,13 @@ func buildCommentReviewPrompt(stage *stages.Stage, issue gh.ProjectItem, comment
 	}
 
 	b.WriteString("---\n\n")
-	b.WriteString("IMPORTANT: You must output the complete updated issue body between these exact markers:\n\n")
+	b.WriteString("First, perform any actions requested in the comments using available tools.\n")
+	b.WriteString("Then, if the issue body needs updating, output the complete updated issue body between these exact markers:\n\n")
 	b.WriteString("FABRIK_ISSUE_UPDATE_BEGIN\n")
 	b.WriteString("(the full updated issue body goes here)\n")
 	b.WriteString("FABRIK_ISSUE_UPDATE_END\n\n")
 	b.WriteString("Include the ENTIRE issue body in your update, not just the changed parts.\n")
-	b.WriteString("Incorporate the information from the comments into the appropriate sections.\n")
+	b.WriteString("If no issue body changes are needed, you may omit the markers.\n")
 
 	return b.String()
 }
@@ -174,11 +175,10 @@ func defaultCommentPrompt(stageName string) string {
 	return fmt.Sprintf(`You are a comment review agent for the "%s" stage.
 The user has posted new comments on this issue. Your job is to:
 1. Read and understand the new comments in context of the current issue body.
-2. Incorporate the information from the comments into the issue body.
-3. If comments answer questions, update the issue body to reflect the answers and remove the questions.
-4. If comments provide corrections or clarifications, update the relevant sections.
-5. Preserve all existing content that is still valid.
-6. Maintain the structure and formatting of the issue body.`, stageName)
+2. If comments request actions (e.g., linking a PR, running a command, making code changes), perform those actions using available tools.
+3. If comments provide information, corrections, or answers to questions, incorporate them into the issue body.
+4. Preserve all existing content that is still valid.
+5. Maintain the structure and formatting of the issue body.`, stageName)
 }
 
 // extractUpdatedBody parses the updated issue body from Claude's output.
