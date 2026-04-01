@@ -21,7 +21,45 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
             }
           }
           content {
+            __typename
             ... on Issue {
+              id
+              number
+              title
+              body
+              url
+              author {
+                login
+              }
+              labels(first: 20) {
+                nodes {
+                  name
+                }
+              }
+              assignees(first: 10) {
+                nodes {
+                  login
+                }
+              }
+              comments(first: 50) {
+                nodes {
+                  id
+                  databaseId
+                  author {
+                    login
+                  }
+                  body
+                  createdAt
+                  reactionGroups {
+                    content
+                    reactors {
+                      totalCount
+                    }
+                  }
+                }
+              }
+            }
+            ... on PullRequest {
               id
               number
               title
@@ -78,17 +116,18 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
 					ID    string `json:"id"`
 					Items struct {
 						Nodes []struct {
-							ID                 string `json:"id"`
-							FieldValueByName   *struct {
+							ID               string `json:"id"`
+							FieldValueByName *struct {
 								Name string `json:"name"`
 							} `json:"fieldValueByName"`
 							Content struct {
-								ID     string `json:"id"`
-								Number int    `json:"number"`
-								Title  string `json:"title"`
-								Body   string `json:"body"`
-								URL    string `json:"url"`
-								Author *struct {
+								Typename string `json:"__typename"`
+								ID       string `json:"id"`
+								Number   int    `json:"number"`
+								Title    string `json:"title"`
+								Body     string `json:"body"`
+								URL      string `json:"url"`
+								Author   *struct {
 									Login string `json:"login"`
 								} `json:"author"`
 								Labels struct {
@@ -136,7 +175,7 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
 	}
 
 	for _, node := range proj.Items.Nodes {
-		// Skip non-issue items (draft issues, PRs)
+		// Skip items whose content was not returned (empty content ID, e.g. draft issues)
 		if node.Content.ID == "" {
 			continue
 		}
@@ -148,6 +187,7 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
 			Title:  node.Content.Title,
 			Body:   node.Content.Body,
 			URL:    node.Content.URL,
+			IsPR:   node.Content.Typename == "PullRequest",
 		}
 
 		if node.FieldValueByName != nil {

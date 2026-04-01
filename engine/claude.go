@@ -149,21 +149,30 @@ func buildPrompt(stage *stages.Stage, issue gh.ProjectItem) string {
 	return b.String()
 }
 
-func buildCommentReviewPrompt(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment) string {
+func buildCommentReviewPrompt(stage *stages.Stage, item gh.ProjectItem, comments []gh.Comment) string {
 	var b strings.Builder
 
 	// Use stage-specific comment prompt if available, otherwise default
 	if stage.CommentPrompt != "" {
 		b.WriteString(stage.CommentPrompt)
+	} else if item.IsPR {
+		b.WriteString(defaultPRCommentPrompt())
 	} else {
 		b.WriteString(defaultCommentPrompt(stage.Name))
 	}
 
 	b.WriteString("\n\n---\n\n")
-	b.WriteString(fmt.Sprintf("# Issue #%d: %s\n\n", issue.Number, issue.Title))
-	b.WriteString(fmt.Sprintf("URL: %s\n\n", issue.URL))
-	b.WriteString("## Current Issue Body\n\n")
-	b.WriteString(issue.Body)
+
+	if item.IsPR {
+		b.WriteString(fmt.Sprintf("# PR #%d: %s\n\n", item.Number, item.Title))
+		b.WriteString(fmt.Sprintf("URL: %s\n\n", item.URL))
+		b.WriteString("## Current PR Description\n\n")
+	} else {
+		b.WriteString(fmt.Sprintf("# Issue #%d: %s\n\n", item.Number, item.Title))
+		b.WriteString(fmt.Sprintf("URL: %s\n\n", item.URL))
+		b.WriteString("## Current Issue Body\n\n")
+	}
+	b.WriteString(item.Body)
 	b.WriteString("\n\n")
 
 	b.WriteString("## New Comments to Process\n\n")
@@ -173,12 +182,25 @@ func buildCommentReviewPrompt(stage *stages.Stage, issue gh.ProjectItem, comment
 
 	b.WriteString("---\n\n")
 	b.WriteString("First, perform any actions requested in the comments using available tools.\n")
-	b.WriteString("Then, if the issue body needs updating, output the complete updated issue body between these exact markers:\n\n")
+	if item.IsPR {
+		b.WriteString("Then, if the PR description needs updating, output the complete updated PR description between these exact markers:\n\n")
+	} else {
+		b.WriteString("Then, if the issue body needs updating, output the complete updated issue body between these exact markers:\n\n")
+	}
 	b.WriteString("FABRIK_ISSUE_UPDATE_BEGIN\n")
-	b.WriteString("(the full updated issue body goes here)\n")
+	if item.IsPR {
+		b.WriteString("(the full updated PR description goes here)\n")
+	} else {
+		b.WriteString("(the full updated issue body goes here)\n")
+	}
 	b.WriteString("FABRIK_ISSUE_UPDATE_END\n\n")
-	b.WriteString("Include the ENTIRE issue body in your update, not just the changed parts.\n")
-	b.WriteString("If no issue body changes are needed, you may omit the markers.\n")
+	if item.IsPR {
+		b.WriteString("Include the ENTIRE PR description in your update, not just the changed parts.\n")
+		b.WriteString("If no PR description changes are needed, you may omit the markers.\n")
+	} else {
+		b.WriteString("Include the ENTIRE issue body in your update, not just the changed parts.\n")
+		b.WriteString("If no issue body changes are needed, you may omit the markers.\n")
+	}
 
 	return b.String()
 }
@@ -187,10 +209,27 @@ func defaultCommentPrompt(stageName string) string {
 	return fmt.Sprintf(`You are a comment review agent for the "%s" stage.
 The user has posted new comments on this issue. Your job is to:
 1. Read and understand the new comments in context of the current issue body.
-2. If comments request actions (e.g., linking a PR, running a command, making code changes), perform those actions using available tools.
+2. If comments request actions (e.g., linking a pull request, running a command, making code changes), perform those actions using available tools.
 3. If comments provide information, corrections, or answers to questions, incorporate them into the issue body.
 4. Preserve all existing content that is still valid.
 5. Maintain the structure and formatting of the issue body.`, stageName)
+}
+
+func defaultPRCommentPrompt() string {
+	return `You are a PR comment review agent.
+New comments have been posted on this pull request. These may include:
+- Review feedback from humans or automated bots (e.g., GitHub Copilot, Gemini code review)
+- Requests for code changes or clarifications
+- Suggestions for improving the PR description
+
+Your job is to:
+1. Read and understand the new comments in context of the current PR description and code changes.
+2. Make any requested code changes in the checked-out worktree/issue branch, following the existing fabrik workflow.
+3. Update the PR description as needed to reflect the current state of the changes.
+4. Respond to review feedback by addressing the concerns raised.
+5. If comments from automated review bots suggest improvements, evaluate and apply them where appropriate.
+6. Preserve all existing PR description content that is still valid.
+7. Maintain the structure and formatting of the PR description.`
 }
 
 // extractBetweenMarkers extracts content between a BEGIN/END marker pair.
@@ -216,7 +255,7 @@ func extractBetweenMarkers(output, beginMarker, endMarker string) string {
 	return strings.TrimSpace(body)
 }
 
-// extractUpdatedBody parses the updated issue body from Claude's output.
+// extractUpdatedBody parses the updated issue/PR body from Claude's output.
 func extractUpdatedBody(output string) string {
 	return extractBetweenMarkers(output, "FABRIK_ISSUE_UPDATE_BEGIN", "FABRIK_ISSUE_UPDATE_END")
 }

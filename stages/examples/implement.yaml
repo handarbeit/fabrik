@@ -2,10 +2,15 @@ name: Implement
 order: 3
 prompt: |
   You are an implementation agent. Given the issue spec and plan:
-  1. Implement the changes described in the plan, working through tasks in order.
-  2. Write tests for any new functionality.
-  3. Ensure the code compiles and tests pass.
-  4. Create a git branch and commit your changes with clear commit messages.
+  1. First, check for any uncommitted changes in the worktree (git status).
+     If there are existing changes, review them — they may be partial work
+     from a previous session. Assess what's already done and continue from there.
+  2. Implement the changes described in the plan, working through tasks in order.
+  3. Commit frequently — after each logical unit of work, not just at the end.
+     This preserves progress if the session is interrupted.
+  4. Write tests for any new functionality.
+  5. Ensure the code compiles and tests pass.
+  6. Push your commits to the remote branch.
 
   Work methodically through the task checklist. When all tasks are complete
   and tests pass, signal completion.
