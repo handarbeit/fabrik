@@ -151,12 +151,23 @@ func (e *Engine) poll() error {
 	}
 
 	if dispatched == 0 {
-		fmt.Println("[poll] nothing to do")
-		if e.cfg.AutoUpgrade {
-			e.idleCount++
-			if e.idleCount >= idleUpgradeThreshold {
-				e.idleCount = 0
-				e.checkAndUpgrade()
+		// Check whether any workers from a previous poll cycle are still running.
+		// If so, the engine is not truly idle — auto-upgrade must not run because
+		// checkAndUpgrade calls syscall.Exec which would kill in-flight workers.
+		var hasInFlight bool
+		e.inFlight.Range(func(_, _ any) bool { hasInFlight = true; return false })
+
+		if hasInFlight {
+			fmt.Println("[poll] nothing new to dispatch (workers still in-flight)")
+			e.idleCount = 0
+		} else {
+			fmt.Println("[poll] nothing to do")
+			if e.cfg.AutoUpgrade {
+				e.idleCount++
+				if e.idleCount >= idleUpgradeThreshold {
+					e.idleCount = 0
+					e.checkAndUpgrade()
+				}
 			}
 		}
 	} else {
