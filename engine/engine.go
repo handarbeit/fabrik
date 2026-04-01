@@ -27,13 +27,17 @@ type Engine struct {
 	cfg          Config
 	client       *gh.Client
 	statusField  *gh.StatusField
+	worktrees    *WorktreeManager
 	processedSet map[string]time.Time // track what we've processed: "issue#-commentID" -> timestamp
 }
 
 func New(cfg Config) *Engine {
+	// Use current working directory as the repo root
+	repoDir, _ := os.Getwd()
 	return &Engine{
 		cfg:          cfg,
 		client:       gh.NewClient(cfg.Token),
+		worktrees:    NewWorktreeManager(repoDir),
 		processedSet: make(map[string]time.Time),
 	}
 }
@@ -140,9 +144,16 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem) error 
 		fmt.Printf("  [warn] could not add lock label: %v\n", err)
 	}
 
-	// Invoke Claude Code
+	// Ensure worktree exists for this issue
+	baseBranch := e.worktrees.DefaultBaseBranch()
+	workDir, err := e.worktrees.EnsureWorktree(item.Number, baseBranch)
+	if err != nil {
+		return fmt.Errorf("setting up worktree: %w", err)
+	}
+
+	// Invoke Claude Code in the issue's worktree
 	resume := alreadyProcessed // resume session if we've processed this before
-	output, completed, err := InvokeClaude(stage, item, newComments, resume)
+	output, completed, err := InvokeClaude(stage, item, newComments, resume, workDir)
 	if err != nil {
 		fmt.Printf("  [warn] claude invocation issue: %v\n", err)
 	}
