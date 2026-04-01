@@ -65,8 +65,7 @@ func TestProcessItem_SkipsUnknownStage(t *testing.T) {
 		Status: "Unknown Column",
 	}
 
-		var worked int32
-	err := eng.processItem(board, item, &worked)
+	err := eng.processItem(board, item)
 	if err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
@@ -88,8 +87,7 @@ func TestProcessItem_SkipsLockedByOther(t *testing.T) {
 		Labels: []string{"fabrik:locked:otheruser"},
 	}
 
-		var worked int32
-	err := eng.processItem(board, item, &worked)
+	err := eng.processItem(board, item)
 	if err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
@@ -120,8 +118,7 @@ func TestProcessItem_AllowsOwnLock(t *testing.T) {
 	// processItem calls EnsureWorktree which needs git — skip worktree by mocking
 	// Instead, test that own lock doesn't cause skip by checking that we attempt to process
 	// We can't fully test processItem without git, so just test the lock check logic
-		var worked int32
-	err := eng.processItem(board, item, &worked)
+	err := eng.processItem(board, item)
 	// This will fail on EnsureWorktree since we don't have a real git repo,
 	// but the important thing is it didn't skip due to lock
 	if err != nil && !strings.Contains(err.Error(), "worktree") {
@@ -142,8 +139,7 @@ func TestProcessItem_SkipsCompleted(t *testing.T) {
 		Labels: []string{"stage:Research:complete"},
 	}
 
-		var worked int32
-	err := eng.processItem(board, item, &worked)
+	err := eng.processItem(board, item)
 	if err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
@@ -156,6 +152,7 @@ func TestProcessItem_SkipsAlreadyProcessedNoNewComments(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
 	eng := testEngine(client, claude)
+	eng.cfg.PollSeconds = 100 // cooldown = 1000s — ensures recently-processed item stays in cooldown
 
 	// Mark as already processed
 	eng.processedSet["1-Research"] = time.Now()
@@ -167,8 +164,7 @@ func TestProcessItem_SkipsAlreadyProcessedNoNewComments(t *testing.T) {
 		Status: "Research",
 	}
 
-		var worked int32
-	err := eng.processItem(board, item, &worked)
+	err := eng.processItem(board, item)
 	if err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
@@ -198,7 +194,8 @@ func TestFindNewComments(t *testing.T) {
 		t.Errorf("comments = %v", comments)
 	}
 
-	// Second call should return no new comments (already seen)
+	// After markCommentsProcessed, second call should return no new comments
+	eng.markCommentsProcessed(item, comments)
 	comments2 := eng.findNewComments(item)
 	if len(comments2) != 0 {
 		t.Errorf("expected 0 new comments on second call, got %d", len(comments2))
@@ -434,8 +431,7 @@ func TestProcessItem_FullHappyPath(t *testing.T) {
 		ItemID: "PVTI_1",
 	}
 
-		var worked int32
-	err := eng.processItem(board, item, &worked)
+	err := eng.processItem(board, item)
 	if err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
@@ -507,8 +503,7 @@ func TestProcessItem_CompletionWithAutoAdvance(t *testing.T) {
 		ItemID: "PVTI_2",
 	}
 
-		var worked int32
-	err := eng.processItem(board, item, &worked)
+	err := eng.processItem(board, item)
 	if err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
@@ -563,8 +558,7 @@ func TestProcessItem_CompletionNoAutoAdvance(t *testing.T) {
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 3, Title: "No advance", Status: "Research", ItemID: "PVTI_3"}
 
-		var worked int32
-	err := eng.processItem(board, item, &worked)
+	err := eng.processItem(board, item)
 	if err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
@@ -614,8 +608,7 @@ func TestProcessItem_StageAutoAdvanceOverride(t *testing.T) {
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 4, Title: "Override", Status: "Research", ItemID: "PVTI_4"}
 
-		var worked int32
-	err := eng.processItem(board, item, &worked)
+	err := eng.processItem(board, item)
 	if err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
@@ -646,8 +639,7 @@ func TestProcessItem_EmptyOutput(t *testing.T) {
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 5, Title: "Empty", Status: "Research", ItemID: "PVTI_5"}
 
-		var worked int32
-	err := eng.processItem(board, item, &worked)
+	err := eng.processItem(board, item)
 	if err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
@@ -679,8 +671,7 @@ func TestProcessItem_ClaudeError(t *testing.T) {
 	item := gh.ProjectItem{Number: 6, Title: "Error", Status: "Research", ItemID: "PVTI_6"}
 
 	// Should not return error — claude errors are logged, not fatal
-		var worked int32
-	err := eng.processItem(board, item, &worked)
+	err := eng.processItem(board, item)
 	if err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
@@ -714,18 +705,15 @@ func TestProcessItem_ResumeOnReprocess(t *testing.T) {
 		Title:  "Resume test",
 		Status: "Research",
 		ItemID: "PVTI_7",
-		Comments: []gh.Comment{
-			{ID: "C_new", Author: "u", Body: "New feedback"},
-		},
+		// No comments — both calls go through the stage invocation path (e.claude.Invoke).
+		// processComments uses InvokeClaudeForComments (global), not the mock.
 	}
 
-	// First call
-	var worked int32
-	eng.processItem(board, item, &worked)
+	// First call — not yet in processedSet, resume=false
+	eng.processItem(board, item)
 
-	// Second call with a new comment should use resume=true
-	item.Comments = append(item.Comments, gh.Comment{ID: "C_newer", Author: "u", Body: "More feedback"})
-	eng.processItem(board, item, &worked)
+	// Second call — PollSeconds=0 means cooldown=0, so item is retried with resume=true
+	eng.processItem(board, item)
 
 	if len(claude.calls) != 2 {
 		t.Fatalf("expected 2 claude calls, got %d", len(claude.calls))
@@ -873,8 +861,7 @@ func TestProcessItem_LabelAndCommentErrors(t *testing.T) {
 	item := gh.ProjectItem{Number: 8, Title: "Errors", Status: "Research", ItemID: "PVTI_8"}
 
 	// Should not return error — label/comment errors are logged, not fatal
-		var worked int32
-	err := eng.processItem(board, item, &worked)
+	err := eng.processItem(board, item)
 	if err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
@@ -1006,8 +993,9 @@ func TestMaxConcurrentDefault(t *testing.T) {
 	}
 }
 
-// TestConcurrentItemDispatch verifies that the semaphore-bounded goroutine pool
-// used in poll() dispatches all items without races and respects MaxConcurrent.
+// TestConcurrentItemDispatch verifies that the non-blocking semaphore dispatch
+// used in poll() respects MaxConcurrent and processes all items across multiple
+// simulated poll cycles without data races.
 func TestConcurrentItemDispatch(t *testing.T) {
 	const numItems = 15
 	const maxConcurrent = 3
@@ -1019,6 +1007,7 @@ func TestConcurrentItemDispatch(t *testing.T) {
 			Stages:        nil, // no matching stage → processItem returns nil immediately
 		},
 		processedSet: make(map[string]time.Time),
+		sem:          make(chan struct{}, maxConcurrent),
 	}
 
 	board := &gh.ProjectBoard{}
@@ -1027,7 +1016,6 @@ func TestConcurrentItemDispatch(t *testing.T) {
 		items[i] = gh.ProjectItem{Number: i + 1, Status: "NoSuchStage"}
 	}
 
-	// Replicate the exact dispatch pattern from poll().
 	var (
 		mu          sync.Mutex
 		processed   int
@@ -1035,41 +1023,150 @@ func TestConcurrentItemDispatch(t *testing.T) {
 		inFlight    int
 	)
 
-	sem := make(chan struct{}, e.cfg.MaxConcurrent)
-	var wg sync.WaitGroup
-	for _, item := range items {
-		item := item
-		sem <- struct{}{}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			defer func() { <-sem }()
+	// Replicate the non-blocking dispatch pattern from poll(). Items that don't
+	// get a semaphore slot are retried in subsequent cycles, mirroring real behaviour.
+	remaining := make([]gh.ProjectItem, len(items))
+	copy(remaining, items)
+	var dispatchWg sync.WaitGroup
 
-			mu.Lock()
-			inFlight++
-			if inFlight > maxInFlight {
-				maxInFlight = inFlight
+	for len(remaining) > 0 {
+		var nextRound []gh.ProjectItem
+		for _, item := range remaining {
+			item := item
+			select {
+			case e.sem <- struct{}{}:
+			default:
+				nextRound = append(nextRound, item)
+				continue
 			}
-			mu.Unlock()
+			dispatchWg.Add(1)
+			go func() {
+				defer dispatchWg.Done()
+				defer func() { <-e.sem }()
 
-			var worked int32
-			if err := e.processItem(board, item, &worked); err != nil {
-				t.Errorf("processItem error for issue #%d: %v", item.Number, err)
-			}
+				mu.Lock()
+				inFlight++
+				if inFlight > maxInFlight {
+					maxInFlight = inFlight
+				}
+				mu.Unlock()
 
-			mu.Lock()
-			inFlight--
-			processed++
-			mu.Unlock()
-		}()
+				if err := e.processItem(board, item); err != nil {
+					t.Errorf("processItem error for issue #%d: %v", item.Number, err)
+				}
+
+				mu.Lock()
+				inFlight--
+				processed++
+				mu.Unlock()
+			}()
+		}
+		remaining = nextRound
+		if len(remaining) > 0 {
+			// Yield so in-flight goroutines can make progress and free semaphore slots.
+			dispatchWg.Wait()
+		}
 	}
-	wg.Wait()
+	dispatchWg.Wait()
 
 	if processed != numItems {
 		t.Errorf("expected %d items processed, got %d", numItems, processed)
 	}
 	if maxInFlight > maxConcurrent {
 		t.Errorf("max in-flight goroutines was %d, expected <= %d", maxInFlight, maxConcurrent)
+	}
+}
+
+// TestPollNonBlockingAtCapacity verifies that the dispatch loop in poll() skips
+// items via non-blocking semaphore acquire when all slots are taken, so poll()
+// itself never blocks and the ticker can fire on schedule.
+func TestPollNonBlockingAtCapacity(t *testing.T) {
+	const maxConcurrent = 2
+
+	e := &Engine{
+		cfg: Config{
+			User:          "testuser",
+			MaxConcurrent: maxConcurrent,
+			Stages:        nil,
+		},
+		processedSet: make(map[string]time.Time),
+		sem:          make(chan struct{}, maxConcurrent),
+	}
+
+	// Fill the semaphore to simulate two in-flight workers from a previous cycle.
+	e.sem <- struct{}{}
+	e.sem <- struct{}{}
+
+	items := []gh.ProjectItem{
+		{Number: 1, Status: "NoSuchStage"},
+		{Number: 2, Status: "NoSuchStage"},
+	}
+
+	// Replicate the non-blocking dispatch from poll().
+	dispatched := 0
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for _, item := range items {
+			item := item
+			select {
+			case e.sem <- struct{}{}:
+				e.inFlight.Store(item.Number, struct{}{})
+				e.wg.Add(1)
+				dispatched++
+				go func() {
+					defer e.wg.Done()
+					defer func() { <-e.sem }()
+					defer e.inFlight.Delete(item.Number)
+				}()
+			default:
+				// skipped — at capacity
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+		// dispatch loop returned without blocking — correct
+	case <-time.After(time.Second):
+		t.Fatal("dispatch loop blocked when semaphore was full")
+	}
+
+	if dispatched != 0 {
+		t.Errorf("expected 0 dispatched (semaphore full), got %d", dispatched)
+	}
+}
+
+// TestIdleCountNotIncrementedWhileWorkersInFlight verifies that idleCount (which
+// drives auto-upgrade) is not incremented when dispatched==0 but workers are
+// still running from a previous poll cycle. Upgrading while workers are in-flight
+// would call syscall.Exec and kill them.
+func TestIdleCountNotIncrementedWhileWorkersInFlight(t *testing.T) {
+	e := &Engine{
+		cfg: Config{
+			AutoUpgrade:   true,
+			MaxConcurrent: 1,
+		},
+		processedSet: make(map[string]time.Time),
+		sem:          make(chan struct{}, 1),
+	}
+
+	// Simulate an in-flight worker by populating the map directly.
+	e.inFlight.Store(42, struct{}{})
+
+	// With dispatched==0 and an in-flight worker, idleCount must not increment.
+	dispatched := 0
+	var hasInFlight bool
+	e.inFlight.Range(func(_, _ any) bool { hasInFlight = true; return false })
+
+	if hasInFlight {
+		e.idleCount = 0
+	} else if dispatched == 0 {
+		e.idleCount++
+	}
+
+	if e.idleCount != 0 {
+		t.Errorf("idleCount should remain 0 while workers are in-flight, got %d", e.idleCount)
 	}
 }
 

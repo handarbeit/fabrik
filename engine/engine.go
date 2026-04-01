@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -43,6 +42,9 @@ type Engine struct {
 	mu           sync.Mutex
 	processedSet map[string]time.Time // track what we've processed: "issue#-commentID" -> timestamp
 	idleCount    int                  // consecutive idle polls; triggers self-upgrade at threshold
+	sem          chan struct{}         // semaphore bounding concurrent workers across poll cycles
+	wg           sync.WaitGroup       // tracks in-flight workers for graceful shutdown
+	inFlight     sync.Map             // key: issue number (int), value: struct{}
 }
 
 func New(cfg Config) (*Engine, error) {
@@ -57,6 +59,7 @@ func New(cfg Config) (*Engine, error) {
 		claude:       &RealClaudeInvoker{},
 		worktrees:    NewWorktreeManager(repoDir),
 		processedSet: make(map[string]time.Time),
+		sem:          make(chan struct{}, cfg.MaxConcurrent),
 	}, nil
 }
 
@@ -103,7 +106,8 @@ func (e *Engine) Run() error {
 	for {
 		select {
 		case <-sigCh:
-			fmt.Println("\nShutting down...")
+			fmt.Println("\nShutting down — waiting for in-flight workers to finish...")
+			e.wg.Wait()
 			return nil
 		case <-ticker.C:
 			if err := e.poll(); err != nil {
@@ -135,34 +139,54 @@ func (e *Engine) poll() error {
 
 	fmt.Printf("[poll] found %d items on board\n", len(board.Items))
 
-	var worked int32
-	maxConcurrent := e.cfg.MaxConcurrent
-	if maxConcurrent <= 0 {
-		maxConcurrent = 1
-	}
-	sem := make(chan struct{}, maxConcurrent)
-	var wg sync.WaitGroup
+	var dispatched int
 	for _, item := range board.Items {
 		item := item
-		sem <- struct{}{}
-		wg.Add(1)
+		// Skip issues already being processed by a previous poll cycle's worker
+		if _, ok := e.inFlight.Load(item.Number); ok {
+			logf(item.Number, "skip", "already in-flight, will retry next poll\n")
+			continue
+		}
+		// Non-blocking semaphore acquire: if all slots are occupied by workers from
+		// a previous cycle, skip this item rather than blocking poll() — the ticker
+		// must remain free to fire on schedule regardless of in-flight workers.
+		select {
+		case e.sem <- struct{}{}:
+		default:
+			logf(item.Number, "skip", "at capacity, will retry next poll\n")
+			continue
+		}
+		e.inFlight.Store(item.Number, struct{}{})
+		e.wg.Add(1)
+		dispatched++
 		go func() {
-			defer wg.Done()
-			defer func() { <-sem }()
-			if err := e.processItem(board, item, &worked); err != nil {
+			defer e.wg.Done()
+			defer func() { <-e.sem }()
+			defer e.inFlight.Delete(item.Number)
+			if err := e.processItem(board, item); err != nil {
 				logf(item.Number, "error", "%v\n", err)
 			}
 		}()
 	}
-	wg.Wait()
 
-	if worked == 0 {
-		fmt.Println("[poll] nothing to do")
-		if e.cfg.AutoUpgrade {
-			e.idleCount++
-			if e.idleCount >= idleUpgradeThreshold {
-				e.idleCount = 0
-				e.checkAndUpgrade()
+	if dispatched == 0 {
+		// Check whether any workers from a previous poll cycle are still running.
+		// If so, the engine is not truly idle — auto-upgrade must not run because
+		// checkAndUpgrade calls syscall.Exec which would kill in-flight workers.
+		var hasInFlight bool
+		e.inFlight.Range(func(_, _ any) bool { hasInFlight = true; return false })
+
+		if hasInFlight {
+			fmt.Println("[poll] nothing new to dispatch (workers still in-flight)")
+			e.idleCount = 0
+		} else {
+			fmt.Println("[poll] nothing to do")
+			if e.cfg.AutoUpgrade {
+				e.idleCount++
+				if e.idleCount >= idleUpgradeThreshold {
+					e.idleCount = 0
+					e.checkAndUpgrade()
+				}
 			}
 		}
 	} else {
@@ -251,7 +275,7 @@ func gitRevParse(dir, ref string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked *int32) error {
+func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem) error {
 	// Find the stage config for this item's current status
 	stage := stages.FindStage(e.cfg.Stages, item.Status)
 	if stage == nil {
@@ -281,7 +305,6 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 
 	// If there are new comments, process them (even if stage is complete)
 	if len(newComments) > 0 {
-		atomic.AddInt32(worked, 1)
 		return e.processComments(board, item, stage, newComments)
 	}
 
@@ -319,7 +342,6 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 		logf(item.Number, "retry", "cooldown expired for stage %q, retrying\n", stage.Name)
 	}
 
-	atomic.AddInt32(worked, 1)
 	logf(item.Number, "process", "%q — stage: %s\n", item.Title, stage.Name)
 
 	// Acquire lock
