@@ -87,6 +87,12 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
                   }
                   body
                   createdAt
+                  reactionGroups {
+                    content
+                    reactors {
+                      totalCount
+                    }
+                  }
                 }
               }
             }
@@ -110,18 +116,18 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
 					ID    string `json:"id"`
 					Items struct {
 						Nodes []struct {
-							ID                 string `json:"id"`
-							FieldValueByName   *struct {
+							ID               string `json:"id"`
+							FieldValueByName *struct {
 								Name string `json:"name"`
 							} `json:"fieldValueByName"`
 							Content struct {
 								Typename string `json:"__typename"`
 								ID       string `json:"id"`
 								Number   int    `json:"number"`
-								Title string `json:"title"`
-								Body  string `json:"body"`
-								URL   string `json:"url"`
-								Author *struct {
+								Title    string `json:"title"`
+								Body     string `json:"body"`
+								URL      string `json:"url"`
+								Author   *struct {
 									Login string `json:"login"`
 								} `json:"author"`
 								Labels struct {
