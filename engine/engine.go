@@ -162,6 +162,11 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem) error 
 		return e.processComments(board, item, stage, newComments)
 	}
 
+	// PRs only support comment processing — skip stage invocation
+	if item.IsPR {
+		return nil
+	}
+
 	// Check for stage completion label — already done
 	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
 	for _, label := range item.Labels {
