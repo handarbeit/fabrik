@@ -8,7 +8,7 @@ import (
 // CreateDraftPR creates a draft pull request for the given issue branch.
 // Returns the PR number. Callers should first call FindPRForIssue to avoid duplicates.
 func (c *Client) CreateDraftPR(owner, repo, title, head, base string, issueNumber int) (int, error) {
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls", owner, repo)
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls", c.baseURL, owner, repo)
 	body := map[string]interface{}{
 		"title": title,
 		"head":  head,
@@ -80,7 +80,7 @@ mutation($prId: ID!) {
 // Returns the PR number, or 0 if no matching PR is found.
 func (c *Client) FindPRForIssue(owner, repo string, issueNumber int) (int, error) {
 	query := fmt.Sprintf("repo:%s/%s is:pr is:open head:fabrik/issue-%d", owner, repo, issueNumber)
-	searchURL := fmt.Sprintf("https://api.github.com/search/issues?q=%s", url.QueryEscape(query))
+	searchURL := fmt.Sprintf("%s/search/issues?q=%s", c.baseURL, url.QueryEscape(query))
 
 	resp, err := c.restGet(searchURL)
 	if err != nil {
