@@ -311,11 +311,6 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 		return fmt.Errorf("setting up worktree: %w", err)
 	}
 
-	// Pre-stage: create a draft PR if requested and none exists yet
-	if stage.CreateDraftPR {
-		e.ensureDraftPR(item, baseBranch)
-	}
-
 	// Invoke Claude Code in the issue's worktree
 	modelOverride := extractModelOverride(item.Number, item.Labels)
 	if modelOverride != "" {
@@ -346,7 +341,10 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 	}()
 
 	if completed {
-		// Post-stage: push branch and mark PR ready if requested
+		// Post-stage: create draft PR and/or mark ready now that commits exist
+		if stage.CreateDraftPR {
+			e.ensureDraftPR(item, baseBranch)
+		}
 		if stage.MarkPRReadyOnComplete {
 			e.markPRReady(item)
 		}
