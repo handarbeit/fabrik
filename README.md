@@ -65,10 +65,11 @@ When a user comments on an issue in an active stage:
 1. Fabrik reacts with :eyes: to each new comment (marks as "in review")
 2. Adds `fabrik:editing` label to lock the issue
 3. Invokes Claude with a stage-specific comment review prompt
-4. Parses the updated issue body from Claude's output
-5. Updates the issue body on GitHub
-6. Removes `fabrik:editing` label
-7. Reacts with :+1: to each processed comment
+4. Claude performs any requested actions (e.g., linking PRs, running commands)
+5. If the issue body needs updating, parses the updated body from Claude's output
+6. Updates the issue body on GitHub (or posts output as a comment)
+7. Removes `fabrik:editing` label
+8. Reacts with :rocket: to each processed comment (also used to skip already-processed comments on restart)
 
 This allows iterative refinement — comment to answer questions, provide feedback,
 or steer the work, and Fabrik incorporates your input into the issue.
