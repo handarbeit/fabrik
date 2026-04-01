@@ -172,6 +172,7 @@ Fabrik uses labels to track state:
 |-------|---------|
 | `fabrik:locked:<user>` | Issue is being processed by this user's Fabrik instance |
 | `fabrik:editing` | Issue body is being updated (prevents concurrent processing) |
+| `fabrik:paused` | Issue is skipped entirely — no stage processing or comment processing occurs |
 | `stage:<name>:complete` | Stage has been completed |
 
 ## Multi-User

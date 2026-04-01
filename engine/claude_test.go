@@ -180,6 +180,12 @@ More output`
 	if string(data) != "sess_abc123" {
 		t.Errorf("session ID = %q, want sess_abc123", string(data))
 	}
+
+	if info, err := os.Stat(path); err != nil {
+		t.Fatalf("stat session file: %v", err)
+	} else if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("session file mode = %04o, want 0600", perm)
+	}
 }
 
 func TestSaveSessionID_NoSessionID(t *testing.T) {
@@ -243,6 +249,7 @@ func TestRealClaudeInvoker_Invoke(t *testing.T) {
 	binDir := t.TempDir()
 	fakeClaude := filepath.Join(binDir, "claude")
 	script := `#!/bin/sh
+cat >/dev/null
 echo "real invoker output"
 `
 	os.WriteFile(fakeClaude, []byte(script), 0755)
@@ -274,6 +281,7 @@ func TestInvokeClaude_FakeBinary(t *testing.T) {
 	binDir := t.TempDir()
 	fakeClaude := filepath.Join(binDir, "claude")
 	script := `#!/bin/sh
+cat >/dev/null
 echo "Claude output for test"
 echo '{"session_id":"sess_test123"}'
 echo "FABRIK_STAGE_COMPLETE"
@@ -329,6 +337,7 @@ func TestInvokeClaude_WithResume(t *testing.T) {
 	fakeClaude := filepath.Join(binDir, "claude")
 	// Script that checks for --resume flag
 	script := `#!/bin/sh
+cat >/dev/null
 for arg in "$@"; do
 	if [ "$arg" = "--resume" ]; then
 		echo "RESUMED"
@@ -353,8 +362,8 @@ echo "NO RESUME"
 
 	// Write a session file to enable resume
 	sessDir := SessionDir(99)
-	os.MkdirAll(sessDir, 0755)
-	os.WriteFile(sessionFile(99, "Plan"), []byte("sess_existing"), 0644)
+	os.MkdirAll(sessDir, 0700)
+	os.WriteFile(sessionFile(99, "Plan"), []byte("sess_existing"), 0600)
 	defer os.RemoveAll(sessDir)
 
 	output, _, err := InvokeClaude(context.Background(), stage, issue, nil, true, workDir, "")
@@ -364,12 +373,19 @@ echo "NO RESUME"
 	if !strings.Contains(output, "RESUMED") {
 		t.Errorf("expected resume, got: %q", output)
 	}
+
+	if info, err := os.Stat(sessDir); err != nil {
+		t.Fatalf("stat session dir: %v", err)
+	} else if perm := info.Mode().Perm(); perm != 0700 {
+		t.Errorf("session dir mode = %04o, want 0700", perm)
+	}
 }
 
 func TestInvokeClaude_WithModelAndTools(t *testing.T) {
 	binDir := t.TempDir()
 	fakeClaude := filepath.Join(binDir, "claude")
 	script := `#!/bin/sh
+cat >/dev/null
 echo "args: $@"
 `
 	os.WriteFile(fakeClaude, []byte(script), 0755)
@@ -413,6 +429,7 @@ func TestInvokeClaude_WithModelOverride(t *testing.T) {
 	binDir := t.TempDir()
 	fakeClaude := filepath.Join(binDir, "claude")
 	script := `#!/bin/sh
+cat >/dev/null
 echo "args: $@"
 `
 	os.WriteFile(fakeClaude, []byte(script), 0755)
@@ -445,6 +462,7 @@ func TestInvokeClaude_BinaryError(t *testing.T) {
 	binDir := t.TempDir()
 	fakeClaude := filepath.Join(binDir, "claude")
 	script := `#!/bin/sh
+cat >/dev/null
 echo "partial output"
 exit 1
 `
@@ -476,8 +494,8 @@ func TestInvokeClaude_WithComments(t *testing.T) {
 	binDir := t.TempDir()
 	fakeClaude := filepath.Join(binDir, "claude")
 	script := `#!/bin/sh
-# Just echo last argument (the prompt) to verify comments are included
-echo "$@" | grep -o "New Comments" && echo "HAS_COMMENTS" || echo "NO_COMMENTS"
+# Read prompt from stdin to verify comments are included
+cat | grep -o "New Comments" && echo "HAS_COMMENTS" || echo "NO_COMMENTS"
 `
 	os.WriteFile(fakeClaude, []byte(script), 0755)
 
