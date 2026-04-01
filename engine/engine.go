@@ -315,6 +315,25 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 		return fmt.Errorf("setting up worktree: %w", err)
 	}
 
+	// If this is a restricted (read-only) stage, stash any unexpected dirty state
+	// before invocation so the stage sees a clean worktree.
+	if len(stage.AllowedTools) > 0 {
+		statusCmd := exec.Command("git", "status", "--porcelain")
+		statusCmd.Dir = workDir
+		if out, err := statusCmd.Output(); err == nil && len(strings.TrimSpace(string(out))) > 0 {
+			logf(item.Number, "warn", "worktree dirty before read-only stage %q — stashing changes\n", stage.Name)
+			msg := fmt.Sprintf("fabrik: auto-stash before stage %q for issue #%d", stage.Name, item.Number)
+			stashCmd := exec.Command("git", "stash", "push", "-m", msg)
+			stashCmd.Dir = workDir
+			if stashOut, stashErr := stashCmd.CombinedOutput(); stashErr != nil {
+				logf(item.Number, "warn", "could not stash: %s\n", strings.TrimSpace(string(stashOut)))
+			} else {
+				logf(item.Number, "info", "stashed: %s\n", strings.TrimSpace(string(stashOut)))
+			}
+		}
+	}
+
+
 	// Invoke Claude Code in the issue's worktree
 	modelOverride := extractModelOverride(item.Number, item.Labels)
 	if modelOverride != "" {
