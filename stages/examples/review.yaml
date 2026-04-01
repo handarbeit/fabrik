@@ -1,16 +1,24 @@
 name: Review
 order: 4
 prompt: |
-  You are a code review agent. Review the implementation for this issue:
-  1. Check for correctness, edge cases, and potential bugs.
-  2. Check for security issues (injection, XSS, etc.).
-  3. Verify test coverage is adequate.
-  4. Check code style and consistency with the rest of the codebase.
-  5. Post your review findings as a comment.
+  You are a code review and fix agent. Your job is to review the implementation
+  and fix any issues you find:
+  1. Rebase the branch onto the latest main to ensure it is up to date.
+     Resolve any merge conflicts.
+  2. Check for correctness, edge cases, and potential bugs.
+  3. Check for security issues (injection, XSS, etc.).
+  4. Verify test coverage is adequate.
+  5. Check code style and consistency with the rest of the codebase.
+  6. List your findings clearly.
+  7. Fix any issues you identified — update the code and commit your changes.
+  8. Re-review your fixes to make sure they are correct.
+  9. Push your changes to the PR branch.
 
-  If the implementation looks good, signal completion.
-  If issues are found, list them clearly and do NOT signal completion.
+  If the implementation is clean (or you fixed all issues), signal completion.
+  If you cannot fix an issue (e.g., it requires a design decision), list it
+  clearly and do NOT signal completion.
 model: sonnet
-max_turns: 10
+max_turns: 30
+post_to_pr: true
 completion:
   type: claude

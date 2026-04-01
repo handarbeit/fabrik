@@ -25,8 +25,8 @@ Fabrik is a local CLI tool (written in Go) that orchestrates Claude Code through
 
 1. Fabrik polls the GitHub Project board (via GraphQL API — single query to pull the whole board).
 2. For each issue in an active stage:
-   - **New comments**: Process user comments first — react with :eyes:, invoke Claude with the comment review prompt, update the issue body, react with :+1:.
-   - **Stage processing**: If the stage hasn't been run yet, invoke Claude with the stage prompt in the issue's isolated worktree.
+   - **New comments**: Process user comments first — react with :eyes:, invoke Claude with the comment review prompt (Claude can perform actions and/or update the issue body), react with :rocket:.
+   - **Stage processing**: If the stage hasn't been run yet, invoke Claude with the stage prompt in the issue's isolated worktree. The prompt includes all prior comments (previous stage outputs and user feedback) as context.
    - Loop until the stage's **completion criteria** are met.
    - On completion, label the issue `stage:<name>:complete`.
 3. **Advancement:**
@@ -39,10 +39,11 @@ When a user comments on an issue:
 1. :eyes: reaction added (marks as "in review")
 2. `fabrik:editing` label applied (locks issue during update)
 3. Claude invoked with stage-specific comment review prompt
-4. Updated issue body extracted from Claude output (between `FABRIK_ISSUE_UPDATE_BEGIN`/`END` markers)
-5. Issue body updated on GitHub
-6. `fabrik:editing` label removed
-7. :+1: reaction added (marks as "processed")
+4. Claude performs any requested actions using available tools
+5. If issue body needs updating, updated body extracted from Claude output (between `FABRIK_ISSUE_UPDATE_BEGIN`/`END` markers)
+6. Issue body updated on GitHub (or output posted as comment if no markers)
+7. `fabrik:editing` label removed
+8. :rocket: reaction added (marks as "processed"; also used to skip already-processed comments on restart)
 
 ### Git Worktrees
 

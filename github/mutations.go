@@ -136,6 +136,24 @@ func (c *Client) RemoveLabelFromIssue(owner, repo string, issueNumber int, label
 	return c.restDelete(url)
 }
 
+// FindPRForIssue finds the open PR associated with an issue by looking for
+// a PR whose head branch matches the fabrik/issue-N convention.
+// Returns the PR number, or 0 if no matching PR is found.
+func (c *Client) FindPRForIssue(owner, repo string, issueNumber int) (int, error) {
+	query := fmt.Sprintf("repo:%s/%s is:pr is:open head:fabrik/issue-%d", owner, repo, issueNumber)
+	searchURL := fmt.Sprintf("https://api.github.com/search/issues?q=%s", url.QueryEscape(query))
+
+	resp, err := c.restGet(searchURL)
+	if err != nil {
+		return 0, fmt.Errorf("searching for PR: %w", err)
+	}
+
+	if len(resp.Items) == 0 {
+		return 0, nil
+	}
+	return resp.Items[0].Number, nil
+}
+
 func (c *Client) ensureLabel(owner, repo, name string) error {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/labels", owner, repo)
 	body := map[string]interface{}{
