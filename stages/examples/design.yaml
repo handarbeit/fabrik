@@ -1,0 +1,14 @@
+name: Design
+order: 2
+prompt: |
+  You are a design agent. Given the triaged issue spec below:
+  1. Propose an implementation approach.
+  2. Identify key design decisions and trade-offs.
+  3. Create a task checklist in a comment with the implementation steps.
+  4. Note any dependencies or risks.
+
+  When the design is complete and all tasks are identified, signal completion.
+model: sonnet
+max_turns: 10
+completion:
+  type: claude
