@@ -24,7 +24,7 @@ type ProjectItem struct {
 	Author    string
 }
 
-// Comment represents a comment on an issue.
+// Comment represents a comment on an issue or linked PR.
 type Comment struct {
 	ID         string
 	DatabaseID int // Numeric ID needed for REST API (reactions, etc.)
@@ -32,6 +32,7 @@ type Comment struct {
 	Body       string
 	CreatedAt  time.Time
 	Reactions  []ReactionGroup
+	FromPR     int // Non-zero if this comment is from a linked PR
 }
 
 // ReactionGroup represents a reaction type and its count on a comment.
