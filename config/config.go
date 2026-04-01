@@ -24,8 +24,9 @@ func LoadDotenv() error {
 }
 
 // isInGitignore checks whether the given filename is covered by an entry in .gitignore.
-// It accepts any non-comment, non-negation line that contains filename as a substring
-// (e.g. ".env", "**/.env", ".env*" all match ".env").
+// It accepts lines where filename appears at the end of the pattern or is followed only
+// by a glob wildcard (*) or path separator (/), so that ".envrc" or ".env.example" in
+// .gitignore do NOT falsely match ".env".
 func isInGitignore(filename string) bool {
 	f, err := os.Open(".gitignore")
 	if err != nil {
@@ -39,9 +40,17 @@ func isInGitignore(filename string) bool {
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "!") {
 			continue
 		}
-		if strings.Contains(line, filename) {
-			return true
+		idx := strings.Index(line, filename)
+		if idx < 0 {
+			continue
 		}
+		// Reject if the match is embedded inside a longer filename component,
+		// e.g. ".envrc" or ".env.example" must not match ".env".
+		rest := line[idx+len(filename):]
+		if rest != "" && rest[0] != '/' && rest[0] != '*' {
+			continue
+		}
+		return true
 	}
 	return false
 }
