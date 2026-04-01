@@ -27,9 +27,18 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string) (s
 	wtDir := wm.worktreeDir(issueNumber)
 	branch := wm.branchName(issueNumber)
 
-	// If worktree already exists, just return the path
+	// If worktree directory exists, validate it's a proper worktree on the right branch
 	if _, err := os.Stat(wtDir); err == nil {
-		return wtDir, nil
+		cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+		cmd.Dir = wtDir
+		if out, cmdErr := cmd.CombinedOutput(); cmdErr == nil {
+			if strings.TrimSpace(string(out)) == branch {
+				return wtDir, nil
+			}
+		}
+		// Directory exists but isn't a valid worktree for expected branch — remove and recreate
+		fmt.Printf("  [worktree] stale directory for issue #%d, recreating\n", issueNumber)
+		_ = os.RemoveAll(wtDir)
 	}
 
 	// Ensure root directory exists
@@ -37,12 +46,17 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string) (s
 		return "", fmt.Errorf("creating worktree root: %w", err)
 	}
 
-	// Create the branch if it doesn't exist
+	// Create the branch if it doesn't exist, forking from origin/<base>
 	if !wm.branchExists(branch) {
-		cmd := exec.Command("git", "branch", branch, baseBranch)
+		// Prefer origin/<base> to handle cases where the local branch doesn't exist
+		baseRef := "origin/" + baseBranch
+		if !wm.branchExists(baseRef) {
+			baseRef = baseBranch
+		}
+		cmd := exec.Command("git", "branch", branch, baseRef)
 		cmd.Dir = wm.baseDir
 		if out, err := cmd.CombinedOutput(); err != nil {
-			return "", fmt.Errorf("creating branch %s: %s: %w", branch, string(out), err)
+			return "", fmt.Errorf("creating branch %s from %s: %s: %w", branch, baseRef, string(out), err)
 		}
 	}
 
@@ -62,7 +76,7 @@ func (wm *WorktreeManager) CleanupWorktree(issueNumber int, deleteBranch bool) e
 	wtDir := wm.worktreeDir(issueNumber)
 
 	// Remove the worktree
-	cmd := exec.Command("git", "worktree", "remove", wtDir, "--force")
+	cmd := exec.Command("git", "worktree", "remove", "--force", wtDir)
 	cmd.Dir = wm.baseDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("removing worktree: %s: %w", string(out), err)
@@ -104,15 +118,21 @@ func (wm *WorktreeManager) branchExists(branch string) bool {
 
 // DefaultBaseBranch returns the default branch of the repo (main or master).
 func (wm *WorktreeManager) DefaultBaseBranch() string {
+	// Try origin HEAD symref first
 	cmd := exec.Command("git", "symbolic-ref", "refs/remotes/origin/HEAD")
 	cmd.Dir = wm.baseDir
 	out, err := cmd.Output()
 	if err == nil {
 		ref := strings.TrimSpace(string(out))
-		// refs/remotes/origin/main -> main
 		parts := strings.Split(ref, "/")
 		if len(parts) > 0 {
 			return parts[len(parts)-1]
+		}
+	}
+	// Fallback: check which of main/master exists
+	for _, candidate := range []string{"main", "master"} {
+		if wm.branchExists(candidate) || wm.branchExists("origin/"+candidate) {
+			return candidate
 		}
 	}
 	return "main"
