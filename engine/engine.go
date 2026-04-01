@@ -206,7 +206,11 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem) error 
 	}
 
 	// Invoke Claude Code in the issue's worktree
-	output, completed, err := InvokeClaude(stage, item, false, workDir)
+	modelOverride := extractModelOverride(item.Labels)
+	if modelOverride != "" {
+		fmt.Printf("  [model] using model override %q for issue #%d\n", modelOverride, item.Number)
+	}
+	output, completed, err := InvokeClaude(stage, item, false, workDir, modelOverride)
 	if err != nil {
 		fmt.Printf("  [warn] claude invocation issue: %v\n", err)
 	}
@@ -267,7 +271,11 @@ func (e *Engine) processComments(board *gh.ProjectBoard, item gh.ProjectItem, st
 	}
 
 	// Step 4: Invoke Claude with the comment review prompt
-	output, _, err := InvokeClaudeForComments(stage, item, comments, workDir)
+	modelOverride := extractModelOverride(item.Labels)
+	if modelOverride != "" {
+		fmt.Printf("  [model] using model override %q for issue #%d\n", modelOverride, item.Number)
+	}
+	output, _, err := InvokeClaudeForComments(stage, item, comments, workDir, modelOverride)
 	if err != nil {
 		fmt.Printf("  [warn] claude comment review issue: %v\n", err)
 		e.removeEditingLabel(item.Number)
@@ -438,6 +446,28 @@ func formatPRSummaryComment(stageName string, prNumber int, output string) strin
 		summary = "(no summary provided)"
 	}
 	return fmt.Sprintf("🏭 **Fabrik — stage: %s**\n\nDetailed output posted on PR #%d.\n\n%s", stageName, prNumber, summary)
+}
+
+// extractModelOverride scans item labels for the first "model:<name>" label and returns <name>.
+// If multiple model labels exist, it uses the first and logs a warning.
+// Returns "" if no model label is found.
+func extractModelOverride(labels []string) string {
+	const prefix = "model:"
+	var found string
+	for _, label := range labels {
+		if strings.HasPrefix(label, prefix) {
+			name := strings.TrimPrefix(label, prefix)
+			if name == "" {
+				continue
+			}
+			if found == "" {
+				found = name
+			} else {
+				fmt.Printf("  [warn] multiple model: labels found, using %q (ignoring %q)\n", found, name)
+			}
+		}
+	}
+	return found
 }
 
 func mapKeys(m map[string]string) []string {
