@@ -157,12 +157,53 @@ func (c *Client) CreateDraftPR(owner, repo, title, head, base string, issueNumbe
 }
 
 // MarkPRReady transitions a draft PR to ready-for-review.
+// Uses the GraphQL markPullRequestReadyForReview mutation, which is the supported
+// path — REST PATCH does not reliably support draft→ready transitions.
 func (c *Client) MarkPRReady(owner, repo string, prNumber int) error {
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d", owner, repo, prNumber)
-	body := map[string]interface{}{
-		"draft": false,
+	// Fetch the PR node ID (required for the GraphQL mutation)
+	fetchQuery := `
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      id
+    }
+  }
+}`
+	fetchVars := map[string]interface{}{
+		"owner":  owner,
+		"repo":   repo,
+		"number": prNumber,
 	}
-	return c.restPatch(apiURL, body)
+	var fetchResult struct {
+		Data struct {
+			Repository struct {
+				PullRequest struct {
+					ID string `json:"id"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+	if err := c.graphqlRequest(fetchQuery, fetchVars, &fetchResult); err != nil {
+		return fmt.Errorf("fetching PR node ID: %w", err)
+	}
+	nodeID := fetchResult.Data.Repository.PullRequest.ID
+	if nodeID == "" {
+		return fmt.Errorf("PR #%d not found in repository %s/%s", prNumber, owner, repo)
+	}
+
+	mutation := `
+mutation($prId: ID!) {
+  markPullRequestReadyForReview(input: { pullRequestId: $prId }) {
+    pullRequest {
+      id
+    }
+  }
+}`
+	mutVars := map[string]interface{}{
+		"prId": nodeID,
+	}
+	var mutResult struct{}
+	return c.graphqlRequest(mutation, mutVars, &mutResult)
 }
 
 // FindPRForIssue finds the open PR associated with an issue by looking for
