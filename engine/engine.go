@@ -349,6 +349,13 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem) error 
 		logf(item.Number, "warn", "could not add lock label: %v\n", err)
 	}
 
+	// Add in_progress label for this stage and ensure it's removed on all exit paths
+	inProgressLabel := fmt.Sprintf("stage:%s:in_progress", stage.Name)
+	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, inProgressLabel); err != nil {
+		logf(item.Number, "warn", "could not add in_progress label: %v\n", err)
+	}
+	defer e.removeInProgressLabel(item.Number, stage.Name)
+
 	// Ensure worktree exists for this issue
 	baseBranch := e.worktrees.DefaultBaseBranch()
 	workDir, err := e.worktrees.EnsureWorktree(item.Number, baseBranch)
@@ -582,6 +589,13 @@ func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output string) {
 func (e *Engine) removeEditingLabel(issueNumber int) {
 	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, issueNumber, "fabrik:editing"); err != nil {
 		logf(issueNumber, "warn", "could not remove editing label: %v\n", err)
+	}
+}
+
+func (e *Engine) removeInProgressLabel(issueNumber int, stageName string) {
+	label := fmt.Sprintf("stage:%s:in_progress", stageName)
+	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, issueNumber, label); err != nil {
+		logf(issueNumber, "warn", "could not remove in_progress label: %v\n", err)
 	}
 }
 
