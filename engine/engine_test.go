@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"syscall"
@@ -493,6 +494,17 @@ func TestProcessItem_FullHappyPath(t *testing.T) {
 		t.Errorf("lock label = %q", client.addLabelCalls[0].labelName)
 	}
 
+	// Should have removed the lock label after processing completes
+	foundLockRemoval := false
+	for _, call := range client.removeLabelCalls {
+		if call.labelName == "fabrik:locked:testuser" {
+			foundLockRemoval = true
+		}
+	}
+	if !foundLockRemoval {
+		t.Error("expected lock label to be removed after processItem completes")
+	}
+
 	// Should have invoked Claude
 	if len(claude.calls) != 1 {
 		t.Fatalf("expected 1 claude call, got %d", len(claude.calls))
@@ -566,6 +578,17 @@ func TestProcessItem_CompletionWithAutoAdvance(t *testing.T) {
 	}
 	if !foundComplete {
 		t.Error("expected completion label to be added")
+	}
+
+	// Should have removed the lock label after processing completes
+	foundLockRemoval := false
+	for _, call := range client.removeLabelCalls {
+		if call.labelName == "fabrik:locked:testuser" {
+			foundLockRemoval = true
+		}
+	}
+	if !foundLockRemoval {
+		t.Error("expected lock label to be removed after processItem completes")
 	}
 
 	// Should have advanced to next stage
@@ -707,7 +730,10 @@ func TestProcessItem_ClaudeError(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
 		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
-			return "partial output", false, fmt.Errorf("claude crashed")
+			// Simulate a start failure: binary not found (*exec.Error)
+			cmd := exec.Command("this-binary-does-not-exist-fabrik-test")
+			_, startErr := cmd.Output()
+			return "partial output", false, startErr
 		},
 	}
 
@@ -728,6 +754,53 @@ func TestProcessItem_ClaudeError(t *testing.T) {
 	// Should still post partial output
 	if len(client.addCommentCalls) != 1 {
 		t.Fatalf("expected 1 comment with partial output, got %d", len(client.addCommentCalls))
+	}
+
+	// A start-failure (*exec.Error / binary not found) — processedSet must NOT be updated
+	itemKey := fmt.Sprintf("%d-%s", 6, "Research")
+	eng.mu.Lock()
+	_, recorded := eng.processedSet[itemKey]
+	eng.mu.Unlock()
+	if recorded {
+		t.Error("processedSet should NOT be updated on a start-failure error")
+	}
+}
+
+func TestProcessItem_ClaudeExitError(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
+			// Simulate Claude running and exiting non-zero (wrapped *exec.ExitError)
+			cmd := exec.Command("git", "definitely-invalid-arg")
+			runErr := cmd.Run()
+			return "some output", false, fmt.Errorf("claude exited with error: %w", runErr)
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{Owner: "o", Repo: "r", User: "u", Token: "t", Stages: testStages()},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 7, Title: "ExitError", Status: "Research", ItemID: "PVTI_7"}
+
+	err := eng.processItem(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	// An *exec.ExitError means Claude ran — processedSet MUST be updated (cooldown applies)
+	itemKey := fmt.Sprintf("%d-%s", 7, "Research")
+	eng.mu.Lock()
+	_, recorded := eng.processedSet[itemKey]
+	eng.mu.Unlock()
+	if !recorded {
+		t.Error("processedSet should be updated when Claude ran and exited non-zero")
 	}
 }
 

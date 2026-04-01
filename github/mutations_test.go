@@ -177,6 +177,29 @@ func TestFetchStatusField_Error(t *testing.T) {
 	}
 }
 
+func TestFetchStatusField_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"data": map[string]interface{}{
+				"node": map[string]interface{}{
+					"field": nil,
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	_, err := c.FetchStatusField("PVT_456")
+	if err == nil {
+		t.Fatal("expected error when Status field is absent")
+	}
+	if !strings.Contains(err.Error(), "no Status field") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
 func TestAddLabelToIssue_AddFails(t *testing.T) {
 	callNum := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

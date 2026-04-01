@@ -12,16 +12,24 @@ type mockGitHubClient struct {
 	fetchProjectBoardFn       func(owner, repo string, projectNum int) (*gh.ProjectBoard, error)
 	fetchStatusFieldFn        func(projectID string) (*gh.StatusField, error)
 	addLabelToIssueFn         func(owner, repo string, issueNumber int, labelName string) error
+	removeLabelFromIssueFn    func(owner, repo string, issueNumber int, labelName string) error
 	addCommentFn              func(owner, repo string, issueNumber int, body string) error
 	updateProjectItemStatusFn func(projectID, itemID, statusFieldID, statusOptionID string) error
 
 	// Track calls
 	addLabelCalls     []addLabelCall
+	removeLabelCalls  []removeLabelCall
 	addCommentCalls   []addCommentCall
 	updateStatusCalls []updateStatusCall
 }
 
 type addLabelCall struct {
+	owner, repo string
+	issueNumber int
+	labelName   string
+}
+
+type removeLabelCall struct {
 	owner, repo string
 	issueNumber int
 	labelName   string
@@ -60,6 +68,10 @@ func (m *mockGitHubClient) AddLabelToIssue(owner, repo string, issueNumber int, 
 }
 
 func (m *mockGitHubClient) RemoveLabelFromIssue(owner, repo string, issueNumber int, labelName string) error {
+	m.removeLabelCalls = append(m.removeLabelCalls, removeLabelCall{owner, repo, issueNumber, labelName})
+	if m.removeLabelFromIssueFn != nil {
+		return m.removeLabelFromIssueFn(owner, repo, issueNumber, labelName)
+	}
 	return nil
 }
 
