@@ -391,9 +391,20 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem) error 
 
 	logf(item.Number, "process", "%q — stage: %s\n", item.Title, stage.Name)
 
-	// Acquire lock
+	// Acquire lock and ensure it's released on all exit paths
 	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, lockLabel); err != nil {
 		logf(item.Number, "warn", "could not add lock label: %v\n", err)
+	} else {
+		defer e.removeLockLabel(item.Number, lockLabel)
+	}
+
+	// Add in_progress label for this stage and ensure it's removed on all exit paths.
+	// Only defer cleanup when the add succeeded to avoid a spurious warning on removal.
+	inProgressLabel := fmt.Sprintf("stage:%s:in_progress", stage.Name)
+	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, inProgressLabel); err != nil {
+		logf(item.Number, "warn", "could not add in_progress label: %v\n", err)
+	} else {
+		defer e.removeInProgressLabel(item.Number, stage.Name)
 	}
 
 	// Ensure worktree exists for this issue
@@ -656,6 +667,21 @@ func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output string) {
 func (e *Engine) removeEditingLabel(issueNumber int) {
 	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, issueNumber, "fabrik:editing"); err != nil {
 		logf(issueNumber, "warn", "could not remove editing label: %v\n", err)
+	}
+}
+
+func (e *Engine) removeLockLabel(issueNumber int, label string) {
+	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, issueNumber, label); err != nil &&
+		!strings.Contains(err.Error(), "404") {
+		logf(issueNumber, "warn", "could not remove lock label: %v\n", err)
+	}
+}
+
+func (e *Engine) removeInProgressLabel(issueNumber int, stageName string) {
+	label := fmt.Sprintf("stage:%s:in_progress", stageName)
+	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, issueNumber, label); err != nil &&
+		!strings.Contains(err.Error(), "404") {
+		logf(issueNumber, "warn", "could not remove in_progress label: %v\n", err)
 	}
 }
 
