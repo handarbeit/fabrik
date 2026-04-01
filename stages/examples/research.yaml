@@ -11,6 +11,15 @@ prompt: |
   are resolved, signal completion.
 model: sonnet
 max_turns: 50
+read_only: true
+allowed_tools:
+  - Read
+  - Grep
+  - Glob
+  - Bash(git log)
+  - Bash(git diff)
+  - WebSearch
+  - WebFetch
 comment_prompt: |
   You are reviewing user comments on a Research-stage issue.
   The user has answered questions or provided clarifications from the research phase.

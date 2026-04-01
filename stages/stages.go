@@ -26,6 +26,10 @@ type Stage struct {
 	// AllowedTools restricts which tools Claude Code can use. Empty = all.
 	AllowedTools []string `yaml:"allowed_tools,omitempty"`
 
+	// ReadOnly marks this stage as read-only. When true, the engine will stash
+	// any dirty worktree state before invoking Claude and restore it afterward.
+	ReadOnly bool `yaml:"read_only,omitempty"`
+
 	// MaxTurns limits how many turns Claude Code can take per invocation.
 	MaxTurns int `yaml:"max_turns,omitempty"`
 
