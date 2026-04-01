@@ -708,7 +708,10 @@ func TestProcessItem_ClaudeError(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
 		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
-			return "partial output", false, fmt.Errorf("claude crashed")
+			// Simulate a start failure: binary not found (*exec.Error)
+			cmd := exec.Command("this-binary-does-not-exist-fabrik-test")
+			_, startErr := cmd.Output()
+			return "partial output", false, startErr
 		},
 	}
 
@@ -731,7 +734,7 @@ func TestProcessItem_ClaudeError(t *testing.T) {
 		t.Fatalf("expected 1 comment with partial output, got %d", len(client.addCommentCalls))
 	}
 
-	// A plain fmt.Errorf is treated as "failed to start" — processedSet must NOT be updated
+	// A start-failure (*exec.Error / binary not found) — processedSet must NOT be updated
 	itemKey := fmt.Sprintf("%d-%s", 6, "Research")
 	eng.mu.Lock()
 	_, recorded := eng.processedSet[itemKey]
@@ -750,7 +753,7 @@ func TestProcessItem_ClaudeExitError(t *testing.T) {
 	claude := &mockClaudeInvoker{
 		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
 			// Simulate Claude running and exiting non-zero (wrapped *exec.ExitError)
-			cmd := exec.Command("sh", "-c", "exit 1")
+			cmd := exec.Command("git", "definitely-invalid-arg")
 			runErr := cmd.Run()
 			return "some output", false, fmt.Errorf("claude exited with error: %w", runErr)
 		},

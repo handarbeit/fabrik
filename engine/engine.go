@@ -586,13 +586,24 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}
 	}
 
-	// Record attempt time only if Claude actually ran (nil error or ExitError).
-	// A start failure (binary not found, etc.) should not apply the cooldown
-	// so the item is retried on the next poll.
+	// Record attempt time only if Claude actually ran.
+	// Known start failures (binary not found, command not found, etc.) should
+	// not apply the cooldown so the item is retried on the next poll.
 	claudeRan := err == nil
 	if err != nil {
-		var exitErr *exec.ExitError
-		claudeRan = errors.As(err, &exitErr)
+		// Default to "Claude ran" for errors, and only treat specific
+		// start-failure types as "did not run".
+		claudeRan = true
+
+		var startErr *exec.Error
+		if errors.As(err, &startErr) {
+			claudeRan = false
+		} else {
+			var pathErr *os.PathError
+			if errors.As(err, &pathErr) || errors.Is(err, exec.ErrNotFound) {
+				claudeRan = false
+			}
+		}
 	}
 	if claudeRan {
 		func() {
