@@ -492,6 +492,27 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		return fmt.Errorf("setting up worktree: %w", err)
 	}
 
+	// If this is a read-only stage, stash any unexpected dirty state (including
+	// untracked files) before invocation so the stage sees a clean worktree, and
+	// restore it afterward.
+	stashed := false
+	if stage.ReadOnly {
+		statusCmd := exec.Command("git", "status", "--porcelain")
+		statusCmd.Dir = workDir
+		if out, err := statusCmd.Output(); err == nil && len(strings.TrimSpace(string(out))) > 0 {
+			logf(item.Number, "warn", "worktree dirty before read-only stage %q — stashing changes\n", stage.Name)
+			msg := fmt.Sprintf("fabrik: auto-stash before stage %q for issue #%d", stage.Name, item.Number)
+			stashCmd := exec.Command("git", "stash", "push", "-u", "-m", msg)
+			stashCmd.Dir = workDir
+			if stashOut, stashErr := stashCmd.CombinedOutput(); stashErr != nil {
+				logf(item.Number, "warn", "could not stash: %s\n", strings.TrimSpace(string(stashOut)))
+			} else {
+				logf(item.Number, "info", "stashed: %s\n", strings.TrimSpace(string(stashOut)))
+				stashed = true
+			}
+		}
+	}
+
 	// Invoke Claude Code in the issue's worktree
 	modelOverride := extractModelOverride(item.Number, item.Labels)
 	if modelOverride != "" {
@@ -499,6 +520,17 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	}
 	resume := attempted // resume session if we've processed this before
 	output, completed, err := e.claude.Invoke(ctx, stage, item, nil, resume, workDir, modelOverride)
+
+	// Restore any stashed changes now that the read-only stage has finished.
+	if stashed {
+		popCmd := exec.Command("git", "stash", "pop")
+		popCmd.Dir = workDir
+		if popOut, popErr := popCmd.CombinedOutput(); popErr != nil {
+			logf(item.Number, "warn", "could not pop stash: %s\n", strings.TrimSpace(string(popOut)))
+		} else {
+			logf(item.Number, "info", "stash restored after read-only stage\n")
+		}
+	}
 	if err != nil {
 		if ctx.Err() != nil {
 			logf(item.Number, "skip", "cancelled during claude invocation\n")
