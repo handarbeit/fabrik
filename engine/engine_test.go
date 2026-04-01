@@ -96,6 +96,42 @@ func TestProcessItem_SkipsLockedByOther(t *testing.T) {
 	}
 }
 
+func TestProcessItem_SkipsPaused(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := testEngine(client, claude)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 1,
+		Title:  "Test",
+		Status: "Research",
+		Labels: []string{"fabrik:paused"},
+	}
+
+	err := eng.processItem(board, item)
+	if err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if len(claude.calls) != 0 {
+		t.Error("should not invoke claude for paused item")
+	}
+}
+
+func TestItemNeedsWork_SkipsPaused(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+
+	item := gh.ProjectItem{
+		Number: 1,
+		Status: "Research",
+		Labels: []string{"fabrik:paused"},
+	}
+
+	if eng.itemNeedsWork(item) {
+		t.Error("itemNeedsWork should return false for paused item")
+	}
+}
+
 func TestProcessItem_AllowsOwnLock(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
