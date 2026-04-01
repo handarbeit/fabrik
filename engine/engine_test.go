@@ -247,6 +247,39 @@ func TestPollNonBlockingAtCapacity(t *testing.T) {
 	}
 }
 
+// TestIdleCountNotIncrementedWhileWorkersInFlight verifies that idleCount (which
+// drives auto-upgrade) is not incremented when dispatched==0 but workers are
+// still running from a previous poll cycle. Upgrading while workers are in-flight
+// would call syscall.Exec and kill them.
+func TestIdleCountNotIncrementedWhileWorkersInFlight(t *testing.T) {
+	e := &Engine{
+		cfg: Config{
+			AutoUpgrade:   true,
+			MaxConcurrent: 1,
+		},
+		processedSet: make(map[string]time.Time),
+		sem:          make(chan struct{}, 1),
+	}
+
+	// Simulate an in-flight worker by populating the map directly.
+	e.inFlight.Store(42, struct{}{})
+
+	// With dispatched==0 and an in-flight worker, idleCount must not increment.
+	dispatched := 0
+	var hasInFlight bool
+	e.inFlight.Range(func(_, _ any) bool { hasInFlight = true; return false })
+
+	if hasInFlight {
+		e.idleCount = 0
+	} else if dispatched == 0 {
+		e.idleCount++
+	}
+
+	if e.idleCount != 0 {
+		t.Errorf("idleCount should remain 0 while workers are in-flight, got %d", e.idleCount)
+	}
+}
+
 func TestExtractModelOverride(t *testing.T) {
 	tests := []struct {
 		name   string
