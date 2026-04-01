@@ -36,9 +36,8 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 
 	prompt := buildPrompt(stage, issue, newComments)
 	args := buildClaudeArgs(stage, issue.Number, resume, modelOverride)
-	args = append(args, prompt)
 
-	return runClaude(ctx, args, workDir, issue.Number, stage.Name)
+	return runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name)
 }
 
 // InvokeClaudeForComments runs Claude Code with a comment-review prompt.
@@ -52,9 +51,8 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 
 	prompt := buildCommentReviewPrompt(stage, issue, comments)
 	args := buildClaudeArgs(stage, issue.Number, true, modelOverride) // resume existing session
-	args = append(args, prompt)
 
-	return runClaude(ctx, args, workDir, issue.Number, stage.Name+"-comment-review")
+	return runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review")
 }
 
 func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOverride string) []string {
@@ -88,11 +86,12 @@ func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOve
 	return args
 }
 
-func runClaude(ctx context.Context, args []string, workDir string, issueNumber int, label string) (string, bool, error) {
+func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string) (string, bool, error) {
 	logf(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
 
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = workDir
+	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Stderr = os.Stderr
 
 	output, err := cmd.Output()

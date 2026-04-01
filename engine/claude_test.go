@@ -440,8 +440,8 @@ func TestInvokeClaude_WithComments(t *testing.T) {
 	binDir := t.TempDir()
 	fakeClaude := filepath.Join(binDir, "claude")
 	script := `#!/bin/sh
-# Just echo last argument (the prompt) to verify comments are included
-echo "$@" | grep -o "New Comments" && echo "HAS_COMMENTS" || echo "NO_COMMENTS"
+# Read prompt from stdin to verify comments are included
+cat | grep -o "New Comments" && echo "HAS_COMMENTS" || echo "NO_COMMENTS"
 `
 	os.WriteFile(fakeClaude, []byte(script), 0755)
 
