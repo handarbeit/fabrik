@@ -116,16 +116,6 @@ func TestCheckCompletion_Claude(t *testing.T) {
 	}
 }
 
-func TestCheckCompletion_OtherTypes(t *testing.T) {
-	for _, typ := range []string{"tasklist", "label", "approval", "unknown"} {
-		stage := &stages.Stage{
-			Completion: stages.CompletionCriteria{Type: typ},
-		}
-		if checkCompletion(stage, "FABRIK_STAGE_COMPLETE") {
-			t.Errorf("type %q should not check for marker", typ)
-		}
-	}
-}
 
 func TestSaveSessionID_ValidJSON(t *testing.T) {
 	dir := t.TempDir()

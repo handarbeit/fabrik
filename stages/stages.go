@@ -61,14 +61,11 @@ type Stage struct {
 
 // CompletionCriteria defines how to determine if a stage is complete.
 type CompletionCriteria struct {
-	// Type is the kind of completion check: "tasklist", "label", "approval", or "claude".
-	// - "tasklist": all checkbox items in the issue body are checked
-	// - "label": a specific label is present on the issue
-	// - "approval": a comment containing an approval keyword exists
-	// - "claude": Claude Code decides when it's done (default)
+	// Type is the kind of completion check. Currently only "claude" is supported.
+	// - "claude": Claude Code signals completion by outputting FABRIK_STAGE_COMPLETE (default)
 	Type string `yaml:"type"`
 
-	// Value is type-specific: label name for "label", keyword for "approval".
+	// Value is reserved for future completion types.
 	Value string `yaml:"value,omitempty"`
 }
 
