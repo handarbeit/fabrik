@@ -266,6 +266,9 @@ query($owner: String!, $repo: String!, $projectNum: Int!, $cursor: String) {
 		if !proj.Items.PageInfo.HasNextPage {
 			break
 		}
+		if proj.Items.PageInfo.EndCursor == "" {
+			return nil, fmt.Errorf("fetching project board: hasNextPage=true but endCursor is empty")
+		}
 		cursor = proj.Items.PageInfo.EndCursor
 	}
 
@@ -454,6 +457,9 @@ query($id: ID!, $cursor: String) {
 		if !page.PageInfo.HasNextPage {
 			break
 		}
+		if page.PageInfo.EndCursor == "" {
+			return nil, fmt.Errorf("fetching comments for node %s: hasNextPage=true but endCursor is empty", nodeID)
+		}
 		cursor = page.PageInfo.EndCursor
 	}
 	return allNodes, nil
@@ -524,6 +530,9 @@ query($id: ID!, $cursor: String) {
 		}
 		if !page.PageInfo.HasNextPage {
 			break
+		}
+		if page.PageInfo.EndCursor == "" {
+			return nil, fmt.Errorf("fetching labels for node %s: hasNextPage=true but endCursor is empty", nodeID)
 		}
 		cursor = page.PageInfo.EndCursor
 	}
