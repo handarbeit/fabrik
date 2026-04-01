@@ -259,10 +259,10 @@ func (e *Engine) processComments(board *gh.ProjectBoard, item gh.ProjectItem, st
 	// Step 6: Remove editing label
 	e.removeEditingLabel(item.Number)
 
-	// Step 7: React with 👍 to all processed comments
+	// Step 7: React with 🚀 to all processed comments
 	for _, c := range comments {
-		if err := e.client.AddCommentReaction(e.cfg.Owner, e.cfg.Repo, c.DatabaseID, "+1"); err != nil {
-			fmt.Printf("  [warn] could not add 👍 to comment %s: %v\n", c.ID, err)
+		if err := e.client.AddCommentReaction(e.cfg.Owner, e.cfg.Repo, c.DatabaseID, "rocket"); err != nil {
+			fmt.Printf("  [warn] could not add 🚀 to comment %s: %v\n", c.ID, err)
 		}
 	}
 
@@ -323,6 +323,10 @@ func (e *Engine) findNewComments(item gh.ProjectItem) []gh.Comment {
 		}
 		// Skip comments that look like Fabrik output
 		if strings.HasPrefix(c.Body, "🏭 **Fabrik") {
+			continue
+		}
+		// Skip comments already processed (marked with 🚀 reaction)
+		if c.HasReaction("ROCKET") {
 			continue
 		}
 		newComments = append(newComments, c)
