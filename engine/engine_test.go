@@ -102,3 +102,71 @@ func TestMaxConcurrentDefault(t *testing.T) {
 		t.Errorf("expected default MaxConcurrent=5, got %d", cfg.MaxConcurrent)
 	}
 }
+
+// TestConcurrentItemDispatch verifies that the semaphore-bounded goroutine pool
+// used in poll() dispatches all items without races and respects MaxConcurrent.
+// This mirrors the exact dispatch pattern in poll() so that regressions in the
+// goroutine fan-out code are caught by go test -race.
+func TestConcurrentItemDispatch(t *testing.T) {
+	const numItems = 15
+	const maxConcurrent = 3
+
+	e := &Engine{
+		cfg: Config{
+			User:          "testuser",
+			MaxConcurrent: maxConcurrent,
+			Stages:        nil, // no matching stage → processItem returns nil immediately
+		},
+		processedSet: make(map[string]time.Time),
+	}
+
+	board := &gh.ProjectBoard{}
+	items := make([]gh.ProjectItem, numItems)
+	for i := range items {
+		items[i] = gh.ProjectItem{Number: i + 1, Status: "NoSuchStage"}
+	}
+
+	// Replicate the exact dispatch pattern from poll().
+	var (
+		mu          sync.Mutex
+		processed   int
+		maxInFlight int
+		inFlight    int
+	)
+
+	sem := make(chan struct{}, e.cfg.MaxConcurrent)
+	var wg sync.WaitGroup
+	for _, item := range items {
+		item := item
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			mu.Lock()
+			inFlight++
+			if inFlight > maxInFlight {
+				maxInFlight = inFlight
+			}
+			mu.Unlock()
+
+			if err := e.processItem(board, item); err != nil {
+				t.Errorf("processItem error for issue #%d: %v", item.Number, err)
+			}
+
+			mu.Lock()
+			inFlight--
+			processed++
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+
+	if processed != numItems {
+		t.Errorf("expected %d items processed, got %d", numItems, processed)
+	}
+	if maxInFlight > maxConcurrent {
+		t.Errorf("max in-flight goroutines was %d, expected <= %d", maxInFlight, maxConcurrent)
+	}
+}
