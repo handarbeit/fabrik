@@ -1,5 +1,8 @@
 .history/*
+.claude/
 .fabrik/
+stages/mystages/
 fabrik
 *.exe
 .DS_Store
+tmp/
