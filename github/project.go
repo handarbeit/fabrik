@@ -5,14 +5,89 @@ import (
 	"time"
 )
 
-// FetchProjectBoard pulls the entire project board in a single GraphQL query.
+// commentNodeData holds the raw data for a comment returned from the API.
+type commentNodeData struct {
+	ID         string `json:"id"`
+	DatabaseID int    `json:"databaseId"`
+	Author     *struct {
+		Login string `json:"login"`
+	} `json:"author"`
+	Body           string `json:"body"`
+	CreatedAt      string `json:"createdAt"`
+	ReactionGroups []struct {
+		Content  string `json:"content"`
+		Reactors struct {
+			TotalCount int `json:"totalCount"`
+		} `json:"reactors"`
+	} `json:"reactionGroups"`
+}
+
+// itemNode mirrors one element of items.nodes in the FetchProjectBoard query.
+type itemNode struct {
+	ID               string `json:"id"`
+	FieldValueByName *struct {
+		Name string `json:"name"`
+	} `json:"fieldValueByName"`
+	Content struct {
+		Typename string `json:"__typename"`
+		ID       string `json:"id"`
+		Number   int    `json:"number"`
+		Title    string `json:"title"`
+		Body     string `json:"body"`
+		URL      string `json:"url"`
+		Author   *struct {
+			Login string `json:"login"`
+		} `json:"author"`
+		Labels struct {
+			Nodes []struct {
+				Name string `json:"name"`
+			} `json:"nodes"`
+			PageInfo struct {
+				HasNextPage bool   `json:"hasNextPage"`
+				EndCursor   string `json:"endCursor"`
+			} `json:"pageInfo"`
+		} `json:"labels"`
+		Assignees struct {
+			Nodes []struct {
+				Login string `json:"login"`
+			} `json:"nodes"`
+		} `json:"assignees"`
+		Comments struct {
+			Nodes    []commentNodeData `json:"nodes"`
+			PageInfo struct {
+				HasNextPage bool   `json:"hasNextPage"`
+				EndCursor   string `json:"endCursor"`
+			} `json:"pageInfo"`
+		} `json:"comments"`
+		LinkedPRs *struct {
+			Nodes []struct {
+				ID       string `json:"id"`
+				Number   int    `json:"number"`
+				Comments struct {
+					Nodes    []commentNodeData `json:"nodes"`
+					PageInfo struct {
+						HasNextPage bool   `json:"hasNextPage"`
+						EndCursor   string `json:"endCursor"`
+					} `json:"pageInfo"`
+				} `json:"comments"`
+			} `json:"nodes"`
+		} `json:"closedByPullRequestsReferences"`
+	} `json:"content"`
+}
+
+// FetchProjectBoard pulls the entire project board, paginating over items,
+// comments, and labels as needed.
 func (c *Client) FetchProjectBoard(owner, repo string, projectNum int) (*ProjectBoard, error) {
 	query := `
-query($owner: String!, $repo: String!, $projectNum: Int!) {
+query($owner: String!, $repo: String!, $projectNum: Int!, $cursor: String) {
   repository(owner: $owner, name: $repo) {
     projectV2(number: $projectNum) {
       id
-      items(first: 100) {
+      items(first: 100, after: $cursor) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
         nodes {
           id
           fieldValueByName(name: "Status") {
@@ -31,9 +106,13 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
               author {
                 login
               }
-              labels(first: 20) {
+              labels(first: 100) {
                 nodes {
                   name
+                }
+                pageInfo {
+                  hasNextPage
+                  endCursor
                 }
               }
               assignees(first: 10) {
@@ -41,7 +120,7 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
                   login
                 }
               }
-              comments(first: 50) {
+              comments(first: 100) {
                 nodes {
                   id
                   databaseId
@@ -57,11 +136,16 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
                     }
                   }
                 }
+                pageInfo {
+                  hasNextPage
+                  endCursor
+                }
               }
               closedByPullRequestsReferences(first: 10) {
                 nodes {
+                  id
                   number
-                  comments(first: 50) {
+                  comments(first: 100) {
                     nodes {
                       id
                       databaseId
@@ -77,6 +161,10 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
                         }
                       }
                     }
+                    pageInfo {
+                      hasNextPage
+                      endCursor
+                    }
                   }
                 }
               }
@@ -90,9 +178,13 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
               author {
                 login
               }
-              labels(first: 20) {
+              labels(first: 100) {
                 nodes {
                   name
+                }
+                pageInfo {
+                  hasNextPage
+                  endCursor
                 }
               }
               assignees(first: 10) {
@@ -100,7 +192,7 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
                   login
                 }
               }
-              comments(first: 50) {
+              comments(first: 100) {
                 nodes {
                   id
                   databaseId
@@ -116,6 +208,10 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
                     }
                   }
                 }
+                pageInfo {
+                  hasNextPage
+                  endCursor
+                }
               }
             }
           }
@@ -125,100 +221,57 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
   }
 }`
 
-	vars := map[string]interface{}{
-		"owner":      owner,
-		"repo":       repo,
-		"projectNum": projectNum,
+	var projectID string
+	var allNodes []itemNode
+
+	// Paginate over items.
+	cursor := ""
+	for {
+		vars := map[string]interface{}{
+			"owner":      owner,
+			"repo":       repo,
+			"projectNum": projectNum,
+		}
+		if cursor != "" {
+			vars["cursor"] = cursor
+		}
+
+		var result struct {
+			Data struct {
+				Repository struct {
+					ProjectV2 struct {
+						ID    string `json:"id"`
+						Items struct {
+							PageInfo struct {
+								HasNextPage bool   `json:"hasNextPage"`
+								EndCursor   string `json:"endCursor"`
+							} `json:"pageInfo"`
+							Nodes []itemNode `json:"nodes"`
+						} `json:"items"`
+					} `json:"projectV2"`
+				} `json:"repository"`
+			} `json:"data"`
+		}
+
+		if err := c.graphqlRequest(query, vars, &result); err != nil {
+			return nil, fmt.Errorf("fetching project board: %w", err)
+		}
+
+		proj := result.Data.Repository.ProjectV2
+		if projectID == "" {
+			projectID = proj.ID
+		}
+		allNodes = append(allNodes, proj.Items.Nodes...)
+
+		if !proj.Items.PageInfo.HasNextPage {
+			break
+		}
+		cursor = proj.Items.PageInfo.EndCursor
 	}
 
-	var result struct {
-		Data struct {
-			Repository struct {
-				ProjectV2 struct {
-					ID    string `json:"id"`
-					Items struct {
-						Nodes []struct {
-							ID               string `json:"id"`
-							FieldValueByName *struct {
-								Name string `json:"name"`
-							} `json:"fieldValueByName"`
-							Content struct {
-								Typename string `json:"__typename"`
-								ID       string `json:"id"`
-								Number   int    `json:"number"`
-								Title    string `json:"title"`
-								Body     string `json:"body"`
-								URL      string `json:"url"`
-								Author   *struct {
-									Login string `json:"login"`
-								} `json:"author"`
-								Labels struct {
-									Nodes []struct {
-										Name string `json:"name"`
-									} `json:"nodes"`
-								} `json:"labels"`
-								Assignees struct {
-									Nodes []struct {
-										Login string `json:"login"`
-									} `json:"nodes"`
-								} `json:"assignees"`
-								Comments struct {
-									Nodes []struct {
-										ID         string `json:"id"`
-										DatabaseID int    `json:"databaseId"`
-										Author     *struct {
-											Login string `json:"login"`
-										} `json:"author"`
-										Body           string `json:"body"`
-										CreatedAt      string `json:"createdAt"`
-										ReactionGroups []struct {
-											Content  string `json:"content"`
-											Reactors struct {
-												TotalCount int `json:"totalCount"`
-											} `json:"reactors"`
-										} `json:"reactionGroups"`
-									} `json:"nodes"`
-								} `json:"comments"`
-								LinkedPRs *struct {
-									Nodes []struct {
-										Number   int `json:"number"`
-										Comments struct {
-											Nodes []struct {
-												ID         string `json:"id"`
-												DatabaseID int    `json:"databaseId"`
-												Author     *struct {
-													Login string `json:"login"`
-												} `json:"author"`
-												Body           string `json:"body"`
-												CreatedAt      string `json:"createdAt"`
-												ReactionGroups []struct {
-													Content  string `json:"content"`
-													Reactors struct {
-														TotalCount int `json:"totalCount"`
-													} `json:"reactors"`
-												} `json:"reactionGroups"`
-											} `json:"nodes"`
-										} `json:"comments"`
-									} `json:"nodes"`
-								} `json:"closedByPullRequestsReferences"`
-							} `json:"content"`
-						} `json:"nodes"`
-					} `json:"items"`
-				} `json:"projectV2"`
-			} `json:"repository"`
-		} `json:"data"`
-	}
+	board := &ProjectBoard{ProjectID: projectID}
 
-	if err := c.graphqlRequest(query, vars, &result); err != nil {
-		return nil, fmt.Errorf("fetching project board: %w", err)
-	}
-
-	proj := result.Data.Repository.ProjectV2
-	board := &ProjectBoard{
-		ProjectID: proj.ID,
-	}
-
-	for _, node := range proj.Items.Nodes {
+	for _, node := range allNodes {
 		// Skip items whose content was not returned (empty content ID, e.g. draft issues)
 		if node.Content.ID == "" {
 			continue
@@ -245,56 +298,43 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
 		for _, l := range node.Content.Labels.Nodes {
 			item.Labels = append(item.Labels, l.Name)
 		}
+		if node.Content.Labels.PageInfo.HasNextPage {
+			extra, err := c.fetchNodeLabels(node.Content.ID, node.Content.Labels.PageInfo.EndCursor)
+			if err != nil {
+				return nil, err
+			}
+			item.Labels = append(item.Labels, extra...)
+		}
 
 		for _, a := range node.Content.Assignees.Nodes {
 			item.Assignees = append(item.Assignees, a.Login)
 		}
 
-		for _, cm := range node.Content.Comments.Nodes {
-			comment := Comment{
-				ID:         cm.ID,
-				DatabaseID: cm.DatabaseID,
-				Body:       cm.Body,
+		commentNodes := node.Content.Comments.Nodes
+		if node.Content.Comments.PageInfo.HasNextPage {
+			extra, err := c.fetchNodeComments(node.Content.ID, node.Content.Comments.PageInfo.EndCursor)
+			if err != nil {
+				return nil, err
 			}
-			if cm.Author != nil {
-				comment.Author = cm.Author.Login
-			}
-			// Parse time, ignore error (zero value is fine)
-			if t, err := parseTime(cm.CreatedAt); err == nil {
-				comment.CreatedAt = t
-			}
-			for _, rg := range cm.ReactionGroups {
-				comment.Reactions = append(comment.Reactions, ReactionGroup{
-					Content: rg.Content,
-					Count:   rg.Reactors.TotalCount,
-				})
-			}
-			item.Comments = append(item.Comments, comment)
+			commentNodes = append(commentNodes, extra...)
+		}
+		for _, cm := range commentNodes {
+			item.Comments = append(item.Comments, toComment(cm, 0))
 		}
 
 		// Merge comments from linked PRs (via closedByPullRequestsReferences)
 		if node.Content.LinkedPRs != nil {
 			for _, pr := range node.Content.LinkedPRs.Nodes {
-				for _, cm := range pr.Comments.Nodes {
-					comment := Comment{
-						ID:         cm.ID,
-						DatabaseID: cm.DatabaseID,
-						Body:       cm.Body,
-						FromPR:     pr.Number,
+				prCommentNodes := pr.Comments.Nodes
+				if pr.Comments.PageInfo.HasNextPage {
+					extra, err := c.fetchNodeComments(pr.ID, pr.Comments.PageInfo.EndCursor)
+					if err != nil {
+						return nil, err
 					}
-					if cm.Author != nil {
-						comment.Author = cm.Author.Login
-					}
-					if t, err := parseTime(cm.CreatedAt); err == nil {
-						comment.CreatedAt = t
-					}
-					for _, rg := range cm.ReactionGroups {
-						comment.Reactions = append(comment.Reactions, ReactionGroup{
-							Content: rg.Content,
-							Count:   rg.Reactors.TotalCount,
-						})
-					}
-					item.Comments = append(item.Comments, comment)
+					prCommentNodes = append(prCommentNodes, extra...)
+				}
+				for _, cm := range prCommentNodes {
+					item.Comments = append(item.Comments, toComment(cm, pr.Number))
 				}
 			}
 		}
@@ -303,6 +343,191 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
 	}
 
 	return board, nil
+}
+
+// toComment converts raw commentNodeData into a domain Comment.
+func toComment(cm commentNodeData, fromPR int) Comment {
+	c := Comment{
+		ID:         cm.ID,
+		DatabaseID: cm.DatabaseID,
+		Body:       cm.Body,
+		FromPR:     fromPR,
+	}
+	if cm.Author != nil {
+		c.Author = cm.Author.Login
+	}
+	if t, err := parseTime(cm.CreatedAt); err == nil {
+		c.CreatedAt = t
+	}
+	for _, rg := range cm.ReactionGroups {
+		c.Reactions = append(c.Reactions, ReactionGroup{
+			Content: rg.Content,
+			Count:   rg.Reactors.TotalCount,
+		})
+	}
+	return c
+}
+
+// fetchNodeComments fetches all remaining comments for an issue or PR node,
+// starting from the given cursor.
+func (c *Client) fetchNodeComments(nodeID, startCursor string) ([]commentNodeData, error) {
+	query := `
+query($id: ID!, $cursor: String) {
+  node(id: $id) {
+    ... on Issue {
+      comments(first: 100, after: $cursor) {
+        nodes {
+          id
+          databaseId
+          author {
+            login
+          }
+          body
+          createdAt
+          reactionGroups {
+            content
+            reactors {
+              totalCount
+            }
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+    ... on PullRequest {
+      comments(first: 100, after: $cursor) {
+        nodes {
+          id
+          databaseId
+          author {
+            login
+          }
+          body
+          createdAt
+          reactionGroups {
+            content
+            reactors {
+              totalCount
+            }
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  }
+}`
+
+	var allNodes []commentNodeData
+	cursor := startCursor
+	for {
+		vars := map[string]interface{}{
+			"id":     nodeID,
+			"cursor": cursor,
+		}
+
+		var result struct {
+			Data struct {
+				Node struct {
+					Comments struct {
+						Nodes    []commentNodeData `json:"nodes"`
+						PageInfo struct {
+							HasNextPage bool   `json:"hasNextPage"`
+							EndCursor   string `json:"endCursor"`
+						} `json:"pageInfo"`
+					} `json:"comments"`
+				} `json:"node"`
+			} `json:"data"`
+		}
+
+		if err := c.graphqlRequest(query, vars, &result); err != nil {
+			return nil, fmt.Errorf("fetching comments for node %s: %w", nodeID, err)
+		}
+
+		page := result.Data.Node.Comments
+		allNodes = append(allNodes, page.Nodes...)
+		if !page.PageInfo.HasNextPage {
+			break
+		}
+		cursor = page.PageInfo.EndCursor
+	}
+	return allNodes, nil
+}
+
+// fetchNodeLabels fetches all remaining labels for an issue or PR node,
+// starting from the given cursor.
+func (c *Client) fetchNodeLabels(nodeID, startCursor string) ([]string, error) {
+	query := `
+query($id: ID!, $cursor: String) {
+  node(id: $id) {
+    ... on Issue {
+      labels(first: 100, after: $cursor) {
+        nodes {
+          name
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+    ... on PullRequest {
+      labels(first: 100, after: $cursor) {
+        nodes {
+          name
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  }
+}`
+
+	var allLabels []string
+	cursor := startCursor
+	for {
+		vars := map[string]interface{}{
+			"id":     nodeID,
+			"cursor": cursor,
+		}
+
+		var result struct {
+			Data struct {
+				Node struct {
+					Labels struct {
+						Nodes []struct {
+							Name string `json:"name"`
+						} `json:"nodes"`
+						PageInfo struct {
+							HasNextPage bool   `json:"hasNextPage"`
+							EndCursor   string `json:"endCursor"`
+						} `json:"pageInfo"`
+					} `json:"labels"`
+				} `json:"node"`
+			} `json:"data"`
+		}
+
+		if err := c.graphqlRequest(query, vars, &result); err != nil {
+			return nil, fmt.Errorf("fetching labels for node %s: %w", nodeID, err)
+		}
+
+		page := result.Data.Node.Labels
+		for _, n := range page.Nodes {
+			allLabels = append(allLabels, n.Name)
+		}
+		if !page.PageInfo.HasNextPage {
+			break
+		}
+		cursor = page.PageInfo.EndCursor
+	}
+	return allLabels, nil
 }
 
 func parseTime(s string) (time.Time, error) {
