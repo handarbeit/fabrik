@@ -41,8 +41,8 @@ type Stage struct {
 	PostToPR bool `yaml:"post_to_pr,omitempty"`
 
 	// CreateDraftPR causes the engine to push the branch and create a draft PR
-	// (linked to the issue) before invoking Claude. Idempotent — skipped if a PR
-	// already exists for the issue branch.
+	// (linked to the issue) before invoking Claude. Idempotent with respect to
+	// open PRs — skipped if an open PR already exists for the issue branch.
 	CreateDraftPR bool `yaml:"create_draft_pr,omitempty"`
 
 	// MarkPRReadyOnComplete causes the engine to push the branch and mark the PR
