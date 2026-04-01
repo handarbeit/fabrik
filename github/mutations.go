@@ -1,6 +1,9 @@
 package github
 
-import "fmt"
+import (
+	"fmt"
+	"net/url"
+)
 
 // AddLabelToIssue adds a label to an issue. Creates the label if it doesn't exist.
 func (c *Client) AddLabelToIssue(owner, repo string, issueNumber int, labelName string) error {
@@ -107,6 +110,30 @@ query($projectId: ID!) {
 type StatusField struct {
 	FieldID string
 	Options map[string]string // status name -> option ID
+}
+
+// AddCommentReaction adds a reaction to a comment. Content can be "+1", "-1", "eyes", etc.
+func (c *Client) AddCommentReaction(owner, repo string, commentDatabaseID int, content string) error {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/comments/%d/reactions", owner, repo, commentDatabaseID)
+	payload := map[string]interface{}{
+		"content": content,
+	}
+	return c.restPost(url, payload)
+}
+
+// UpdateIssueBody updates the body of an issue.
+func (c *Client) UpdateIssueBody(owner, repo string, issueNumber int, body string) error {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%d", owner, repo, issueNumber)
+	payload := map[string]interface{}{
+		"body": body,
+	}
+	return c.restPatch(url, payload)
+}
+
+// RemoveLabelFromIssue removes a label from an issue.
+func (c *Client) RemoveLabelFromIssue(owner, repo string, issueNumber int, labelName string) error {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%d/labels/%s", owner, repo, issueNumber, url.PathEscape(labelName))
+	return c.restDelete(url)
 }
 
 func (c *Client) ensureLabel(owner, repo, name string) error {
