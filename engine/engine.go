@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +16,8 @@ import (
 	"github.com/verveguy/fabrik/stages"
 )
 
+const idleUpgradeThreshold = 2
+
 type Config struct {
 	Owner       string
 	Repo        string
@@ -22,6 +25,7 @@ type Config struct {
 	User        string
 	Token       string
 	Yolo          bool
+	AutoUpgrade   bool
 	PollSeconds   int
 	MaxConcurrent int
 	Stages      []*stages.Stage
@@ -34,6 +38,7 @@ type Engine struct {
 	worktrees    *WorktreeManager
 	mu           sync.Mutex
 	processedSet map[string]time.Time // track what we've processed: "issue#-commentID" -> timestamp
+	idleCount    int                  // consecutive idle polls; triggers self-upgrade at threshold
 }
 
 func New(cfg Config) (*Engine, error) {
@@ -130,9 +135,97 @@ func (e *Engine) poll() error {
 
 	if worked == 0 {
 		fmt.Println("[poll] nothing to do")
+		if e.cfg.AutoUpgrade {
+			e.idleCount++
+			if e.idleCount >= idleUpgradeThreshold {
+				e.idleCount = 0
+				e.checkAndUpgrade()
+			}
+		}
+	} else {
+		e.idleCount = 0
 	}
 
 	return nil
+}
+
+// checkAndUpgrade checks origin/main for new commits and, if found, performs a
+// fast-forward pull, rebuilds the binary, and re-execs the process in place.
+func (e *Engine) checkAndUpgrade() {
+	baseBranch := e.worktrees.DefaultBaseBranch()
+	dir := e.worktrees.BaseDir()
+
+	fmt.Printf("[upgrade] checking origin/%s for new commits\n", baseBranch)
+
+	// Fetch from origin
+	fetchCmd := exec.Command("git", "fetch", "origin", baseBranch)
+	fetchCmd.Dir = dir
+	if out, err := fetchCmd.CombinedOutput(); err != nil {
+		fmt.Printf("[upgrade] git fetch failed: %v\n%s\n", err, out)
+		return
+	}
+
+	// Compare HEAD to origin/baseBranch
+	localRef, err := gitRevParse(dir, "HEAD")
+	if err != nil {
+		fmt.Printf("[upgrade] could not resolve HEAD: %v\n", err)
+		return
+	}
+	remoteRef, err := gitRevParse(dir, "origin/"+baseBranch)
+	if err != nil {
+		fmt.Printf("[upgrade] could not resolve origin/%s: %v\n", baseBranch, err)
+		return
+	}
+	if localRef == remoteRef {
+		fmt.Printf("[upgrade] already up-to-date\n")
+		return
+	}
+
+	fmt.Printf("[upgrade] new commits detected — pulling origin/%s\n", baseBranch)
+
+	pullCmd := exec.Command("git", "pull", "--ff-only", "origin", baseBranch)
+	pullCmd.Dir = dir
+	if out, err := pullCmd.CombinedOutput(); err != nil {
+		fmt.Printf("[upgrade] git pull --ff-only failed (local changes?): %v\n%s\n", err, out)
+		return
+	}
+
+	// Determine current executable path
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Printf("[upgrade] could not determine executable path: %v\n", err)
+		return
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		fmt.Printf("[upgrade] could not resolve symlinks for executable: %v\n", err)
+		return
+	}
+
+	fmt.Printf("[upgrade] rebuilding binary: %s\n", exe)
+
+	buildCmd := exec.Command("go", "build", "-o", exe, ".")
+	buildCmd.Dir = dir
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		fmt.Printf("[upgrade] build failed: %v\n%s\n", err, out)
+		return
+	}
+
+	fmt.Printf("[upgrade] re-executing new binary\n")
+
+	if err := syscall.Exec(exe, os.Args, os.Environ()); err != nil {
+		fmt.Printf("[upgrade] exec failed: %v\n", err)
+	}
+}
+
+func gitRevParse(dir, ref string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", ref)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked *int32) error {
