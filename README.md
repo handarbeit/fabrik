@@ -12,19 +12,19 @@ are user input, and the board columns define the workflow.
 # Build
 go build -o fabrik .
 
-# Set up your GitHub token
-export GITHUB_TOKEN=ghp_...
+# Create your .env file from the example
+cp .env.example .env
+# Edit .env with your GitHub token and repo details
+# Make sure .env is in your .gitignore (Fabrik enforces this)
 
 # Copy and customize stage configs
 cp -r stages/examples stages/mystages
 
-# Run
-./fabrik \
-  --owner your-org \
-  --repo your-repo \
-  --project 1 \
-  --user your-github-username \
-  --stages ./stages/mystages
+# Run (all config comes from .env — no flags needed)
+./fabrik
+
+# Or override specific values with flags
+./fabrik --stages ./stages/mystages --yolo
 ```
 
 ### Development
@@ -109,6 +109,25 @@ completion:
   value: ""               # Type-specific (label name, approval keyword)
 auto_advance: false       # Override global yolo setting for this stage
 ```
+
+## Configuration
+
+Fabrik loads configuration from a `.env` file in the current working directory.
+See [`.env.example`](.env.example) for all supported keys.
+
+| Key | Description |
+|-----|-------------|
+| `FABRIK_TOKEN` | GitHub token (preferred) |
+| `GITHUB_TOKEN` | GitHub token (backward-compatible fallback) |
+| `FABRIK_OWNER` | GitHub repo owner |
+| `FABRIK_REPO` | GitHub repo name |
+| `FABRIK_PROJECT_NUMBER` | GitHub project number |
+| `FABRIK_USER` | Your GitHub username |
+
+**Safety:** If a `.env` file exists but is not listed in `.gitignore`, Fabrik will
+refuse to start with a fatal error to prevent accidental token leaks.
+
+Command-line flags take precedence over `.env` values.
 
 ## Flags
 
