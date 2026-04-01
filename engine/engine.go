@@ -117,7 +117,11 @@ func (e *Engine) poll() error {
 	fmt.Printf("[poll] found %d items on board\n", len(board.Items))
 
 	var worked int32
-	sem := make(chan struct{}, e.cfg.MaxConcurrent)
+	maxConcurrent := e.cfg.MaxConcurrent
+	if maxConcurrent <= 0 {
+		maxConcurrent = 1
+	}
+	sem := make(chan struct{}, maxConcurrent)
 	var wg sync.WaitGroup
 	for _, item := range board.Items {
 		item := item
