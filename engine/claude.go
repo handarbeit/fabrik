@@ -131,6 +131,13 @@ func buildPrompt(stage *stages.Stage, issue gh.ProjectItem) string {
 	}
 
 	b.WriteString("---\n\n")
+	if stage.PostToPR {
+		b.WriteString("Your detailed output will be posted on the PR. Provide a brief summary (2-4 sentences)\n")
+		b.WriteString("for the issue between these markers:\n\n")
+		b.WriteString("FABRIK_SUMMARY_BEGIN\n")
+		b.WriteString("(brief summary of findings and actions taken)\n")
+		b.WriteString("FABRIK_SUMMARY_END\n\n")
+	}
 	b.WriteString("When you have completed all work for this stage, end your response with the exact line:\n")
 	b.WriteString("FABRIK_STAGE_COMPLETE\n")
 
@@ -181,12 +188,9 @@ The user has posted new comments on this issue. Your job is to:
 5. Maintain the structure and formatting of the issue body.`, stageName)
 }
 
-// extractUpdatedBody parses the updated issue body from Claude's output.
-// Looks for content between FABRIK_ISSUE_UPDATE_BEGIN and FABRIK_ISSUE_UPDATE_END markers.
-func extractUpdatedBody(output string) string {
-	const beginMarker = "FABRIK_ISSUE_UPDATE_BEGIN"
-	const endMarker = "FABRIK_ISSUE_UPDATE_END"
-
+// extractBetweenMarkers extracts content between a BEGIN/END marker pair.
+// Returns empty string if markers are not found.
+func extractBetweenMarkers(output, beginMarker, endMarker string) string {
 	beginIdx := strings.Index(output, beginMarker)
 	if beginIdx == -1 {
 		return ""
@@ -205,6 +209,16 @@ func extractUpdatedBody(output string) string {
 
 	body := output[bodyStart : bodyStart+endIdx]
 	return strings.TrimSpace(body)
+}
+
+// extractUpdatedBody parses the updated issue body from Claude's output.
+func extractUpdatedBody(output string) string {
+	return extractBetweenMarkers(output, "FABRIK_ISSUE_UPDATE_BEGIN", "FABRIK_ISSUE_UPDATE_END")
+}
+
+// extractSummary parses a brief summary from Claude's output.
+func extractSummary(output string) string {
+	return extractBetweenMarkers(output, "FABRIK_SUMMARY_BEGIN", "FABRIK_SUMMARY_END")
 }
 
 // saveSessionID attempts to extract a session ID from Claude's output.

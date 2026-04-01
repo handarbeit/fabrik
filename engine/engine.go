@@ -408,14 +408,11 @@ func formatOutputComment(stageName, output string) string {
 }
 
 func formatPRSummaryComment(stageName string, prNumber int, output string) string {
-	// Extract first paragraph or up to ~300 chars as a brief summary
-	summary := output
-	if idx := strings.Index(summary, "\n\n"); idx > 0 && idx < 500 {
-		summary = summary[:idx]
-	} else if len(summary) > 300 {
-		summary = summary[:300] + "..."
+	summary := extractSummary(output)
+	if summary == "" {
+		summary = "(no summary provided)"
 	}
-	return fmt.Sprintf("🏭 **Fabrik — stage: %s**\n\nDetailed review posted on PR #%d.\n\n%s", stageName, prNumber, summary)
+	return fmt.Sprintf("🏭 **Fabrik — stage: %s**\n\nDetailed output posted on PR #%d.\n\n%s", stageName, prNumber, summary)
 }
 
 func mapKeys(m map[string]string) []string {
