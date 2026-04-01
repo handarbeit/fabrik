@@ -218,6 +218,11 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 		return fmt.Errorf("setting up worktree: %w", err)
 	}
 
+	// Pre-stage: create a draft PR if requested and none exists yet
+	if stage.CreateDraftPR {
+		e.ensureDraftPR(item, baseBranch)
+	}
+
 	// Invoke Claude Code in the issue's worktree
 	modelOverride := extractModelOverride(item.Number, item.Labels)
 	if modelOverride != "" {
@@ -248,6 +253,10 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 	}()
 
 	if completed {
+		// Post-stage: push branch and mark PR ready if requested
+		if stage.MarkPRReadyOnComplete {
+			e.markPRReady(item)
+		}
 		e.handleStageComplete(board, item, stage)
 	} else {
 		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
@@ -336,6 +345,70 @@ func (e *Engine) markCommentsProcessed(item gh.ProjectItem, comments []gh.Commen
 		key := fmt.Sprintf("%d-comment-%s", item.Number, c.ID)
 		e.processedSet[key] = time.Now()
 	}
+}
+
+// ensureDraftPR pushes the issue branch and creates a draft PR if one doesn't exist yet.
+// Idempotent: checks for an existing PR first; only pushes and creates if none found.
+func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) {
+	// Check for an existing PR first — avoids pushing on retries and handles
+	// the case where a push fails but a PR already exists from a prior run.
+	prNumber, err := e.client.FindPRForIssue(e.cfg.Owner, e.cfg.Repo, item.Number)
+	if err != nil {
+		fmt.Printf("  [warn] could not check for existing PR for issue #%d: %v\n", item.Number, err)
+		return
+	}
+	if prNumber > 0 {
+		fmt.Printf("  [pr] draft PR #%d already exists for issue #%d, skipping creation\n", prNumber, item.Number)
+		return
+	}
+
+	// No PR exists — push the branch so GitHub can create a PR against it
+	if err := e.worktrees.PushBranch(item.Number); err != nil {
+		fmt.Printf("  [warn] could not push branch for issue #%d: %v\n", item.Number, err)
+		return
+	}
+
+	head := fmt.Sprintf("fabrik/issue-%d", item.Number)
+	prNum, err := e.client.CreateDraftPR(e.cfg.Owner, e.cfg.Repo, item.Title, head, baseBranch, item.Number)
+	if err != nil {
+		fmt.Printf("  [warn] could not create draft PR for issue #%d: %v\n", item.Number, err)
+		return
+	}
+	fmt.Printf("  [pr] created draft PR #%d for issue #%d\n", prNum, item.Number)
+}
+
+// markPRReady pushes the issue branch and transitions its PR from draft to ready-for-review.
+// If no PR exists yet (e.g., ensureDraftPR failed earlier because there were no commits),
+// it attempts to create one before marking it ready.
+func (e *Engine) markPRReady(item gh.ProjectItem) {
+	if err := e.worktrees.PushBranch(item.Number); err != nil {
+		fmt.Printf("  [warn] could not push branch for issue #%d: %v\n", item.Number, err)
+		// Don't return — still try to mark ready if push is a no-op (already up to date)
+	}
+
+	prNumber, err := e.client.FindPRForIssue(e.cfg.Owner, e.cfg.Repo, item.Number)
+	if err != nil {
+		fmt.Printf("  [warn] could not find PR for issue #%d: %v\n", item.Number, err)
+		return
+	}
+	if prNumber == 0 {
+		// No PR yet — ensureDraftPR may have failed earlier (e.g., branch had no commits).
+		// Now that commits exist and the branch is pushed, try to create the PR.
+		baseBranch := e.worktrees.DefaultBaseBranch()
+		head := fmt.Sprintf("fabrik/issue-%d", item.Number)
+		prNumber, err = e.client.CreateDraftPR(e.cfg.Owner, e.cfg.Repo, item.Title, head, baseBranch, item.Number)
+		if err != nil {
+			fmt.Printf("  [warn] could not create PR for issue #%d: %v\n", item.Number, err)
+			return
+		}
+		fmt.Printf("  [pr] created PR #%d for issue #%d\n", prNumber, item.Number)
+	}
+
+	if err := e.client.MarkPRReady(e.cfg.Owner, e.cfg.Repo, prNumber); err != nil {
+		fmt.Printf("  [warn] could not mark PR #%d ready: %v\n", prNumber, err)
+		return
+	}
+	fmt.Printf("  [pr] marked PR #%d ready-for-review for issue #%d\n", prNumber, item.Number)
 }
 
 // postOutputToPR posts detailed output on the linked PR and a brief summary on the issue.
