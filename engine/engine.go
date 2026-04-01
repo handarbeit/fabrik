@@ -628,6 +628,11 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}()
 	}
 
+	// Commit any uncommitted changes so partial work isn't lost (e.g., max_turns reached)
+	if claudeRan && !completed {
+		commitWIP(workDir, item.Number, stage.Name)
+	}
+
 	// Always push the branch after a stage runs — preserves work even on failure/max_turns
 	if claudeRan {
 		if pushErr := e.worktrees.PushBranch(item.Number); pushErr != nil {
@@ -952,6 +957,37 @@ func (e *Engine) advanceToNextStage(board *gh.ProjectBoard, item gh.ProjectItem,
 
 	logf(item.Number, "advance", "moving to stage %q\n", next.Name)
 	return e.client.UpdateProjectItemStatus(board.ProjectID, item.ItemID, e.statusField.FieldID, optionID)
+}
+
+// commitWIP commits any uncommitted changes in the worktree as a WIP commit.
+// This preserves partial work when Claude hits max_turns or errors out.
+func commitWIP(workDir string, issueNumber int, stageName string) {
+	// Check for uncommitted changes
+	statusCmd := exec.Command("git", "status", "--porcelain")
+	statusCmd.Dir = workDir
+	out, err := statusCmd.Output()
+	if err != nil || len(strings.TrimSpace(string(out))) == 0 {
+		return // clean worktree, nothing to commit
+	}
+
+	// Stage all changes
+	addCmd := exec.Command("git", "add", "-A")
+	addCmd.Dir = workDir
+	if _, err := addCmd.CombinedOutput(); err != nil {
+		logf(issueNumber, "warn", "could not stage WIP changes: %v\n", err)
+		return
+	}
+
+	// Commit
+	msg := fmt.Sprintf("WIP: %s stage incomplete (partial progress)", stageName)
+	commitCmd := exec.Command("git", "commit", "-m", msg)
+	commitCmd.Dir = workDir
+	if _, err := commitCmd.CombinedOutput(); err != nil {
+		logf(issueNumber, "warn", "could not commit WIP: %v\n", err)
+		return
+	}
+
+	logf(issueNumber, "info", "committed WIP changes for incomplete %s stage\n", stageName)
 }
 
 func formatOutputComment(stageName, output, branch, commit, timestamp string) string {
