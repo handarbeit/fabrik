@@ -26,13 +26,13 @@ func sessionFile(issueNumber int, stageName string) string {
 // InvokeClaude runs Claude Code with the given stage configuration and issue context.
 // workDir is the directory Claude should run in (typically a git worktree).
 // It returns Claude's output and whether Claude indicated completion.
-func InvokeClaude(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string) (string, bool, error) {
+func InvokeClaude(stage *stages.Stage, issue gh.ProjectItem, resume bool, workDir string) (string, bool, error) {
 	sessDir := SessionDir(issue.Number)
 	if err := os.MkdirAll(sessDir, 0755); err != nil {
 		return "", false, fmt.Errorf("creating session dir: %w", err)
 	}
 
-	prompt := buildPrompt(stage, issue, newComments)
+	prompt := buildPrompt(stage, issue)
 	args := buildClaudeArgs(stage, issue.Number, resume)
 	args = append(args, prompt)
 
@@ -106,7 +106,7 @@ func runClaude(args []string, workDir string, issueNumber int, label string) (st
 	return result, completed, nil
 }
 
-func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment) string {
+func buildPrompt(stage *stages.Stage, issue gh.ProjectItem) string {
 	var b strings.Builder
 
 	b.WriteString(stage.Prompt)
@@ -123,14 +123,21 @@ func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Com
 		b.WriteString("\n\n")
 	}
 
-	if len(newComments) > 0 {
-		b.WriteString("## New Comments (user feedback)\n\n")
-		for _, c := range newComments {
+	if len(issue.Comments) > 0 {
+		b.WriteString("## Prior Discussion\n\n")
+		for _, c := range issue.Comments {
 			b.WriteString(fmt.Sprintf("**@%s** (%s):\n%s\n\n", c.Author, c.CreatedAt.Format("2006-01-02 15:04"), c.Body))
 		}
 	}
 
 	b.WriteString("---\n\n")
+	if stage.PostToPR {
+		b.WriteString("Your detailed output will be posted on the PR. Provide a brief summary (2-4 sentences)\n")
+		b.WriteString("for the issue between these markers:\n\n")
+		b.WriteString("FABRIK_SUMMARY_BEGIN\n")
+		b.WriteString("(brief summary of findings and actions taken)\n")
+		b.WriteString("FABRIK_SUMMARY_END\n\n")
+	}
 	b.WriteString("When you have completed all work for this stage, end your response with the exact line:\n")
 	b.WriteString("FABRIK_STAGE_COMPLETE\n")
 
@@ -160,12 +167,13 @@ func buildCommentReviewPrompt(stage *stages.Stage, issue gh.ProjectItem, comment
 	}
 
 	b.WriteString("---\n\n")
-	b.WriteString("IMPORTANT: You must output the complete updated issue body between these exact markers:\n\n")
+	b.WriteString("First, perform any actions requested in the comments using available tools.\n")
+	b.WriteString("Then, if the issue body needs updating, output the complete updated issue body between these exact markers:\n\n")
 	b.WriteString("FABRIK_ISSUE_UPDATE_BEGIN\n")
 	b.WriteString("(the full updated issue body goes here)\n")
 	b.WriteString("FABRIK_ISSUE_UPDATE_END\n\n")
 	b.WriteString("Include the ENTIRE issue body in your update, not just the changed parts.\n")
-	b.WriteString("Incorporate the information from the comments into the appropriate sections.\n")
+	b.WriteString("If no issue body changes are needed, you may omit the markers.\n")
 
 	return b.String()
 }
@@ -174,19 +182,15 @@ func defaultCommentPrompt(stageName string) string {
 	return fmt.Sprintf(`You are a comment review agent for the "%s" stage.
 The user has posted new comments on this issue. Your job is to:
 1. Read and understand the new comments in context of the current issue body.
-2. Incorporate the information from the comments into the issue body.
-3. If comments answer questions, update the issue body to reflect the answers and remove the questions.
-4. If comments provide corrections or clarifications, update the relevant sections.
-5. Preserve all existing content that is still valid.
-6. Maintain the structure and formatting of the issue body.`, stageName)
+2. If comments request actions (e.g., linking a PR, running a command, making code changes), perform those actions using available tools.
+3. If comments provide information, corrections, or answers to questions, incorporate them into the issue body.
+4. Preserve all existing content that is still valid.
+5. Maintain the structure and formatting of the issue body.`, stageName)
 }
 
-// extractUpdatedBody parses the updated issue body from Claude's output.
-// Looks for content between FABRIK_ISSUE_UPDATE_BEGIN and FABRIK_ISSUE_UPDATE_END markers.
-func extractUpdatedBody(output string) string {
-	const beginMarker = "FABRIK_ISSUE_UPDATE_BEGIN"
-	const endMarker = "FABRIK_ISSUE_UPDATE_END"
-
+// extractBetweenMarkers extracts content between a BEGIN/END marker pair.
+// Returns empty string if markers are not found.
+func extractBetweenMarkers(output, beginMarker, endMarker string) string {
 	beginIdx := strings.Index(output, beginMarker)
 	if beginIdx == -1 {
 		return ""
@@ -205,6 +209,16 @@ func extractUpdatedBody(output string) string {
 
 	body := output[bodyStart : bodyStart+endIdx]
 	return strings.TrimSpace(body)
+}
+
+// extractUpdatedBody parses the updated issue body from Claude's output.
+func extractUpdatedBody(output string) string {
+	return extractBetweenMarkers(output, "FABRIK_ISSUE_UPDATE_BEGIN", "FABRIK_ISSUE_UPDATE_END")
+}
+
+// extractSummary parses a brief summary from Claude's output.
+func extractSummary(output string) string {
+	return extractBetweenMarkers(output, "FABRIK_SUMMARY_BEGIN", "FABRIK_SUMMARY_END")
 }
 
 // saveSessionID attempts to extract a session ID from Claude's output.
