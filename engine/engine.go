@@ -289,6 +289,13 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		return false
 	}
 
+	// Paused items never need work
+	for _, label := range item.Labels {
+		if label == "fabrik:paused" {
+			return false
+		}
+	}
+
 	// Check for new comments (always worth processing)
 	if len(e.findNewComments(item)) > 0 {
 		return true
@@ -350,7 +357,7 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem) error 
 	// Skip if paused
 	for _, label := range item.Labels {
 		if label == "fabrik:paused" {
-			fmt.Printf("  [skip] issue #%d is paused\n", item.Number)
+			logf(item.Number, "skip", "is paused\n")
 			return nil
 		}
 	}

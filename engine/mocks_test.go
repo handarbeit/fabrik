@@ -85,6 +85,10 @@ func (m *mockGitHubClient) UpdateProjectItemStatus(projectID, itemID, statusFiel
 	return nil
 }
 
+func (m *mockGitHubClient) GetIssueBody(owner, repo string, issueNumber int) (string, error) {
+	return "", nil
+}
+
 func (m *mockGitHubClient) FindPRForIssue(owner, repo string, issueNumber int) (int, error) {
 	return 0, nil
 }
