@@ -1144,9 +1144,9 @@ func TestFindNewCommentsFiltering(t *testing.T) {
 	item := gh.ProjectItem{
 		Number: 42,
 		Comments: []gh.Comment{
-			{ID: "c1", Author: "alice", Body: "please fix"},         // new — should be returned
-			{ID: "c2", Author: "alice", Body: "already seen"},       // already processed
-			{ID: "c3", Author: "bob", Body: "not my user"},          // wrong author
+			{ID: "c1", Author: "alice", Body: "please fix"},        // new — should be returned
+			{ID: "c2", Author: "alice", Body: "already seen"},      // already processed
+			{ID: "c3", Author: "bob", Body: "not my user"},         // wrong author
 			{ID: "c4", Author: "alice", Body: "🏭 **Fabrik output"}, // fabrik output
 		},
 	}

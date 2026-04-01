@@ -135,11 +135,11 @@ func TestFetchProjectBoard_SkipsNonIssues(t *testing.T) {
 								map[string]interface{}{
 									"id": "PVTI_real",
 									"content": map[string]interface{}{
-										"id":     "I_real",
-										"number": 1,
-										"title":  "Real issue",
-										"body":   "",
-										"url":    "https://example.com",
+										"id":        "I_real",
+										"number":    1,
+										"title":     "Real issue",
+										"body":      "",
+										"url":       "https://example.com",
 										"labels":    map[string]interface{}{"nodes": []interface{}{}},
 										"assignees": map[string]interface{}{"nodes": []interface{}{}},
 										"comments":  map[string]interface{}{"nodes": []interface{}{}},
@@ -220,12 +220,12 @@ func TestFetchProjectBoard_NilAuthor(t *testing.T) {
 								map[string]interface{}{
 									"id": "PVTI_001",
 									"content": map[string]interface{}{
-										"id":     "I_1",
-										"number": 1,
-										"title":  "Ghost author",
-										"body":   "",
-										"url":    "https://example.com",
-										"author": nil,
+										"id":        "I_1",
+										"number":    1,
+										"title":     "Ghost author",
+										"body":      "",
+										"url":       "https://example.com",
+										"author":    nil,
 										"labels":    map[string]interface{}{"nodes": []interface{}{}},
 										"assignees": map[string]interface{}{"nodes": []interface{}{}},
 										"comments": map[string]interface{}{
@@ -530,11 +530,11 @@ func TestFetchProjectBoard_LabelOverflow(t *testing.T) {
 									map[string]interface{}{
 										"id": "PVTI_1",
 										"content": map[string]interface{}{
-											"id":        "I_1",
-											"number":    1,
-											"title":     "Issue with many labels",
-											"body":      "",
-											"url":       "https://example.com",
+											"id":     "I_1",
+											"number": 1,
+											"title":  "Issue with many labels",
+											"body":   "",
+											"url":    "https://example.com",
 											"labels": map[string]interface{}{
 												"nodes":    []interface{}{map[string]interface{}{"name": "bug"}},
 												"pageInfo": map[string]interface{}{"hasNextPage": true, "endCursor": "l_overflow"},
