@@ -342,6 +342,37 @@ func gitRevParse(dir, ref string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// captureGitMeta captures the current branch name, short commit SHA, and a
+// human-readable UTC timestamp from the given worktree directory.
+// Returns "unknown" values gracefully if git commands fail (e.g. empty workDir).
+func captureGitMeta(workDir string) (branch, commit, timestamp string) {
+	timestamp = time.Now().UTC().Format("2006-01-02 15:04 UTC")
+
+	if workDir == "" {
+		return "unknown", "unknown", timestamp
+	}
+
+	sha, err := gitRevParse(workDir, "HEAD")
+	if err != nil || sha == "" {
+		commit = "unknown"
+	} else if len(sha) >= 8 {
+		commit = sha[:8]
+	} else {
+		commit = sha
+	}
+
+	branchCmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	branchCmd.Dir = workDir
+	out, err := branchCmd.Output()
+	if err != nil {
+		branch = "unknown"
+	} else {
+		branch = strings.TrimSpace(string(out))
+	}
+
+	return branch, commit, timestamp
+}
+
 // itemNeedsWork does cheap pre-checks to determine if an item might need processing.
 // This runs in the poll loop BEFORE acquiring a semaphore slot, so it must be fast
 // and not make any API calls.
@@ -507,6 +538,27 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		return fmt.Errorf("setting up worktree: %w", err)
 	}
 
+	// If this is a read-only stage, stash any unexpected dirty state (including
+	// untracked files) before invocation so the stage sees a clean worktree, and
+	// restore it afterward.
+	stashed := false
+	if stage.ReadOnly {
+		statusCmd := exec.Command("git", "status", "--porcelain")
+		statusCmd.Dir = workDir
+		if out, err := statusCmd.Output(); err == nil && len(strings.TrimSpace(string(out))) > 0 {
+			logf(item.Number, "warn", "worktree dirty before read-only stage %q — stashing changes\n", stage.Name)
+			msg := fmt.Sprintf("fabrik: auto-stash before stage %q for issue #%d", stage.Name, item.Number)
+			stashCmd := exec.Command("git", "stash", "push", "-u", "-m", msg)
+			stashCmd.Dir = workDir
+			if stashOut, stashErr := stashCmd.CombinedOutput(); stashErr != nil {
+				logf(item.Number, "warn", "could not stash: %s\n", strings.TrimSpace(string(stashOut)))
+			} else {
+				logf(item.Number, "info", "stashed: %s\n", strings.TrimSpace(string(stashOut)))
+				stashed = true
+			}
+		}
+	}
+
 	// Invoke Claude Code in the issue's worktree
 	modelOverride := extractModelOverride(item.Number, item.Labels)
 	if modelOverride != "" {
@@ -514,6 +566,17 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	}
 	resume := attempted // resume session if we've processed this before
 	output, completed, err := e.claude.Invoke(ctx, stage, item, nil, resume, workDir, modelOverride)
+
+	// Restore any stashed changes now that the read-only stage has finished.
+	if stashed {
+		popCmd := exec.Command("git", "stash", "pop")
+		popCmd.Dir = workDir
+		if popOut, popErr := popCmd.CombinedOutput(); popErr != nil {
+			logf(item.Number, "warn", "could not pop stash: %s\n", strings.TrimSpace(string(popOut)))
+		} else {
+			logf(item.Number, "info", "stash restored after read-only stage\n")
+		}
+	}
 	if err != nil {
 		if ctx.Err() != nil {
 			logf(item.Number, "skip", "cancelled during claude invocation\n")
@@ -522,12 +585,15 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		logf(item.Number, "warn", "claude invocation issue: %v\n", err)
 	}
 
+	// Capture git metadata for the comment header
+	branch, commit, timestamp := captureGitMeta(workDir)
+
 	// Post Claude's output
 	if output != "" {
 		if stage.PostToPR {
-			e.postOutputToPR(item, stage.Name, output)
+			e.postOutputToPR(item, stage.Name, output, branch, commit, timestamp)
 		} else {
-			comment := formatOutputComment(stage.Name, output)
+			comment := formatOutputComment(stage.Name, output, branch, commit, timestamp)
 			if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
 				logf(item.Number, "warn", "could not post comment: %v\n", err)
 			}
@@ -543,11 +609,12 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 
 	if completed {
 		// Post-stage: create draft PR and/or mark ready now that commits exist
+		var prNumber int
 		if stage.CreateDraftPR {
-			e.ensureDraftPR(item, baseBranch)
+			prNumber = e.ensureDraftPR(item, baseBranch)
 		}
 		if stage.MarkPRReadyOnComplete {
-			e.markPRReady(item)
+			e.markPRReady(item, prNumber)
 		}
 		e.handleStageComplete(board, item, stage)
 	} else {
@@ -600,6 +667,9 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		return err
 	}
 
+	// Capture git metadata for the comment header
+	branch, commit, timestamp := captureGitMeta(workDir)
+
 	// Step 5: Parse the updated issue body from Claude's output and apply it
 	if updatedBody := extractUpdatedBody(output); updatedBody != "" {
 		logf(item.Number, "edit", "updating issue body\n")
@@ -609,7 +679,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	} else {
 		// No body update — post output as a comment instead
 		if output != "" {
-			comment := formatOutputComment(stage.Name+" (comment review)", output)
+			comment := formatOutputComment(stage.Name+" (comment review)", output, branch, commit, timestamp)
 			if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
 				logf(item.Number, "warn", "could not post comment: %v\n", err)
 			}
@@ -645,33 +715,34 @@ func (e *Engine) markCommentsProcessed(item gh.ProjectItem, comments []gh.Commen
 
 // ensureDraftPR pushes the issue branch and creates a draft PR if one doesn't exist yet.
 // Idempotent: checks for an existing PR first; only pushes and creates if none found.
-func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) {
+func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) int {
 	// Check for an existing PR first — avoids pushing on retries and handles
 	// the case where a push fails but a PR already exists from a prior run.
 	prNumber, err := e.client.FindPRForIssue(e.cfg.Owner, e.cfg.Repo, item.Number)
 	if err != nil {
-		fmt.Printf("  [warn] could not check for existing PR for issue #%d: %v\n", item.Number, err)
-		return
+		logf(item.Number, "warn", "could not check for existing PR: %v\n", err)
+		return 0
 	}
 	if prNumber > 0 {
 		logf(item.Number, "pr", "PR #%d already exists, ensuring issue link\n", prNumber)
 		e.ensurePRLinksIssue(prNumber, item.Number)
-		return
+		return prNumber
 	}
 
 	// No PR exists — push the branch so GitHub can create a PR against it
 	if err := e.worktrees.PushBranch(item.Number); err != nil {
-		fmt.Printf("  [warn] could not push branch for issue #%d: %v\n", item.Number, err)
-		return
+		logf(item.Number, "warn", "could not push branch: %v\n", err)
+		return 0
 	}
 
 	head := fmt.Sprintf("fabrik/issue-%d", item.Number)
 	prNum, err := e.client.CreateDraftPR(e.cfg.Owner, e.cfg.Repo, item.Title, head, baseBranch, item.Number)
 	if err != nil {
-		fmt.Printf("  [warn] could not create draft PR for issue #%d: %v\n", item.Number, err)
-		return
+		logf(item.Number, "warn", "could not create draft PR: %v\n", err)
+		return 0
 	}
-	fmt.Printf("  [pr] created draft PR #%d for issue #%d\n", prNum, item.Number)
+	logf(item.Number, "pr", "created draft PR #%d\n", prNum)
+	return prNum
 }
 
 // ensurePRLinksIssue checks that a PR body contains "Closes #N" and adds it if missing.
@@ -703,39 +774,38 @@ func (e *Engine) ensurePRLinksIssue(prNumber, issueNumber int) {
 // markPRReady pushes the issue branch and transitions its PR from draft to ready-for-review.
 // If no PR exists yet (e.g., ensureDraftPR failed earlier because there were no commits),
 // it attempts to create one before marking it ready.
-func (e *Engine) markPRReady(item gh.ProjectItem) {
+// markPRReady marks the PR as ready for review.
+// knownPR is the PR number from ensureDraftPR (avoids search API race).
+// If knownPR is 0, falls back to searching.
+func (e *Engine) markPRReady(item gh.ProjectItem, knownPR int) {
 	if err := e.worktrees.PushBranch(item.Number); err != nil {
-		fmt.Printf("  [warn] could not push branch for issue #%d: %v\n", item.Number, err)
+		logf(item.Number, "warn", "could not push branch: %v\n", err)
 		// Don't return — still try to mark ready if push is a no-op (already up to date)
 	}
 
-	prNumber, err := e.client.FindPRForIssue(e.cfg.Owner, e.cfg.Repo, item.Number)
-	if err != nil {
-		fmt.Printf("  [warn] could not find PR for issue #%d: %v\n", item.Number, err)
-		return
-	}
+	prNumber := knownPR
 	if prNumber == 0 {
-		// No PR yet — ensureDraftPR may have failed earlier (e.g., branch had no commits).
-		// Now that commits exist and the branch is pushed, try to create the PR.
-		baseBranch := e.worktrees.DefaultBaseBranch()
-		head := fmt.Sprintf("fabrik/issue-%d", item.Number)
-		prNumber, err = e.client.CreateDraftPR(e.cfg.Owner, e.cfg.Repo, item.Title, head, baseBranch, item.Number)
+		var err error
+		prNumber, err = e.client.FindPRForIssue(e.cfg.Owner, e.cfg.Repo, item.Number)
 		if err != nil {
-			fmt.Printf("  [warn] could not create PR for issue #%d: %v\n", item.Number, err)
+			logf(item.Number, "warn", "could not find PR: %v\n", err)
 			return
 		}
-		fmt.Printf("  [pr] created PR #%d for issue #%d\n", prNumber, item.Number)
+	}
+	if prNumber == 0 {
+		logf(item.Number, "warn", "no PR found to mark ready\n")
+		return
 	}
 
 	if err := e.client.MarkPRReady(e.cfg.Owner, e.cfg.Repo, prNumber); err != nil {
-		fmt.Printf("  [warn] could not mark PR #%d ready: %v\n", prNumber, err)
+		logf(item.Number, "warn", "could not mark PR #%d ready: %v\n", prNumber, err)
 		return
 	}
-	fmt.Printf("  [pr] marked PR #%d ready-for-review for issue #%d\n", prNumber, item.Number)
+	logf(item.Number, "pr", "marked PR #%d ready-for-review\n", prNumber)
 }
 
 // postOutputToPR posts detailed output on the linked PR and a brief summary on the issue.
-func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output string) {
+func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output, branch, commit, timestamp string) {
 	prNumber, err := e.client.FindPRForIssue(e.cfg.Owner, e.cfg.Repo, item.Number)
 	if err != nil {
 		logf(item.Number, "warn", "could not find PR: %v\n", err)
@@ -743,7 +813,7 @@ func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output string) {
 
 	if prNumber > 0 {
 		// Post detailed output on the PR
-		comment := formatOutputComment(stageName, output)
+		comment := formatOutputComment(stageName, output, branch, commit, timestamp)
 		if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, prNumber, comment); err != nil {
 			logf(item.Number, "warn", "could not post to PR #%d: %v\n", prNumber, err)
 		} else {
@@ -751,14 +821,14 @@ func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output string) {
 		}
 
 		// Post brief summary on the issue
-		summary := formatPRSummaryComment(stageName, prNumber, output)
+		summary := formatPRSummaryComment(stageName, prNumber, output, branch, commit, timestamp)
 		if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, summary); err != nil {
 			logf(item.Number, "warn", "could not post summary: %v\n", err)
 		}
 	} else {
 		// No PR found — fall back to posting on the issue
 		logf(item.Number, "warn", "no open PR found, posting on issue instead\n")
-		comment := formatOutputComment(stageName, output)
+		comment := formatOutputComment(stageName, output, branch, commit, timestamp)
 		if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
 			logf(item.Number, "warn", "could not post comment: %v\n", err)
 		}
@@ -856,20 +926,22 @@ func (e *Engine) advanceToNextStage(board *gh.ProjectBoard, item gh.ProjectItem,
 	return e.client.UpdateProjectItemStatus(board.ProjectID, item.ItemID, e.statusField.FieldID, optionID)
 }
 
-func formatOutputComment(stageName, output string) string {
+func formatOutputComment(stageName, output, branch, commit, timestamp string) string {
 	const maxLen = 60000
 	if len(output) > maxLen {
 		output = output[:maxLen] + "\n\n... (truncated)"
 	}
-	return fmt.Sprintf("🏭 **Fabrik — stage: %s**\n\n%s", stageName, output)
+	meta := fmt.Sprintf("*branch: %s | commit: %s | %s*", branch, commit, timestamp)
+	return fmt.Sprintf("🏭 **Fabrik — stage: %s**\n%s\n\n%s", stageName, meta, output)
 }
 
-func formatPRSummaryComment(stageName string, prNumber int, output string) string {
+func formatPRSummaryComment(stageName string, prNumber int, output, branch, commit, timestamp string) string {
 	summary := extractSummary(output)
 	if summary == "" {
 		summary = "(no summary provided)"
 	}
-	return fmt.Sprintf("🏭 **Fabrik — stage: %s**\n\nDetailed output posted on PR #%d.\n\n%s", stageName, prNumber, summary)
+	meta := fmt.Sprintf("*branch: %s | commit: %s | %s*", branch, commit, timestamp)
+	return fmt.Sprintf("🏭 **Fabrik — stage: %s**\n%s\n\nDetailed output posted on PR #%d.\n\n%s", stageName, meta, prNumber, summary)
 }
 
 // extractModelOverride scans item labels for the first "model:<name>" label and returns <name>.

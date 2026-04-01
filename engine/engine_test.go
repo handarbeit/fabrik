@@ -323,23 +323,71 @@ func TestAdvanceToNextStage_MissingOption(t *testing.T) {
 }
 
 func TestFormatOutputComment(t *testing.T) {
-	comment := formatOutputComment("Research", "Hello world")
+	comment := formatOutputComment("Research", "Hello world", "main", "abc12345", "2026-04-01 14:30 UTC")
 	if !strings.Contains(comment, "🏭 **Fabrik — stage: Research**") {
 		t.Errorf("comment = %q", comment)
 	}
 	if !strings.Contains(comment, "Hello world") {
 		t.Error("comment missing output")
 	}
+	if !strings.Contains(comment, "*branch: main | commit: abc12345 | 2026-04-01 14:30 UTC*") {
+		t.Errorf("comment missing metadata line: %q", comment)
+	}
 }
 
 func TestFormatOutputComment_Truncation(t *testing.T) {
 	longOutput := strings.Repeat("x", 70000)
-	comment := formatOutputComment("Test", longOutput)
+	comment := formatOutputComment("Test", longOutput, "main", "abc12345", "2026-04-01 14:30 UTC")
 	if len(comment) > 61000 {
 		t.Errorf("comment should be truncated, len = %d", len(comment))
 	}
 	if !strings.Contains(comment, "... (truncated)") {
 		t.Error("truncated comment missing truncation notice")
+	}
+}
+
+func TestFormatPRSummaryComment(t *testing.T) {
+	output := "FABRIK_SUMMARY_BEGIN\nDid some work.\nFABRIK_SUMMARY_END\n"
+	comment := formatPRSummaryComment("Plan", 42, output, "fabrik/issue-5", "deadbeef", "2026-04-01 14:30 UTC")
+	if !strings.Contains(comment, "🏭 **Fabrik — stage: Plan**") {
+		t.Errorf("missing header: %q", comment)
+	}
+	if !strings.Contains(comment, "*branch: fabrik/issue-5 | commit: deadbeef | 2026-04-01 14:30 UTC*") {
+		t.Errorf("missing metadata line: %q", comment)
+	}
+	if !strings.Contains(comment, "PR #42") {
+		t.Errorf("missing PR reference: %q", comment)
+	}
+}
+
+func TestCaptureGitMeta_EmptyWorkDir(t *testing.T) {
+	branch, commit, timestamp := captureGitMeta("")
+	if branch != "unknown" {
+		t.Errorf("expected branch=unknown, got %q", branch)
+	}
+	if commit != "unknown" {
+		t.Errorf("expected commit=unknown, got %q", commit)
+	}
+	if timestamp == "" {
+		t.Error("expected non-empty timestamp")
+	}
+}
+
+func TestCaptureGitMeta_ValidDir(t *testing.T) {
+	// Use the current repo root — it definitely has commits and a branch
+	repoRoot, err := gitToplevel()
+	if err != nil {
+		t.Skip("not in a git repo")
+	}
+	branch, commit, timestamp := captureGitMeta(repoRoot)
+	if branch == "unknown" {
+		t.Errorf("expected real branch, got %q", branch)
+	}
+	if commit == "unknown" || len(commit) != 8 {
+		t.Errorf("expected 8-char commit SHA, got %q", commit)
+	}
+	if timestamp == "" {
+		t.Error("expected non-empty timestamp")
 	}
 }
 
