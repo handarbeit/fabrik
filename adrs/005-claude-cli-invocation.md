@@ -30,10 +30,16 @@ Shell out to `claude` CLI via `os/exec` with `--print` (non-interactive) mode.
 ## How It Works
 
 ```
-fabrik -> claude --print --verbose --model sonnet --max-turns 10 "<prompt>"
+fabrik -> claude --print --verbose --model sonnet --max-turns 10
+          (prompt delivered via stdin)
        <- stdout (Claude's response)
        <- session metadata (for resumption)
 ```
+
+The prompt (stage instructions + issue body + comments) is passed to the
+`claude` process via stdin rather than as a positional CLI argument. This
+avoids OS `ARG_MAX` limits for large issues with long comment histories and
+prevents prompt content from appearing in process listings.
 
 Claude runs in the issue's worktree directory (`cmd.Dir = workDir`), so it
 operates on the correct branch and file state.
