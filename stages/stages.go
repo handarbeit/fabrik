@@ -40,6 +40,16 @@ type Stage struct {
 	// A brief summary is still posted on the issue.
 	PostToPR bool `yaml:"post_to_pr,omitempty"`
 
+	// CreateDraftPR causes the engine to push the branch and create a draft PR
+	// (linked to the issue) before invoking Claude. Idempotent with respect to
+	// open PRs — skipped if an open PR already exists for the issue branch.
+	CreateDraftPR bool `yaml:"create_draft_pr,omitempty"`
+
+	// MarkPRReadyOnComplete causes the engine to push the branch and mark the PR
+	// as ready-for-review after the stage signals completion. This transitions
+	// the draft PR and triggers external review bots.
+	MarkPRReadyOnComplete bool `yaml:"mark_pr_ready_on_complete,omitempty"`
+
 	// AutoAdvance overrides the global yolo setting for this specific stage.
 	// nil means use the global setting.
 	AutoAdvance *bool `yaml:"auto_advance,omitempty"`
