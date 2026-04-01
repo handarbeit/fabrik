@@ -63,7 +63,8 @@ func (e *Engine) Run() error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	fmt.Println("\nFabrik is running. Press Ctrl+C to stop.\n")
+	fmt.Println("\nFabrik is running. Press Ctrl+C to stop.")
+	fmt.Println()
 
 	// Main poll loop
 	ticker := time.NewTicker(time.Duration(e.cfg.PollSeconds) * time.Second)
