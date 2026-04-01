@@ -122,7 +122,7 @@ func (e *Engine) poll() error {
 			defer wg.Done()
 			defer func() { <-sem }()
 			if err := e.processItem(board, item, &worked); err != nil {
-				fmt.Printf("  [error] issue #%d: %v\n", item.Number, err)
+				logf(item.Number, "error", "%v\n", err)
 			}
 		}()
 	}
