@@ -9,6 +9,7 @@ prompt: |
 
   Work methodically through the task checklist. When all tasks are complete
   and tests pass, signal completion.
+model: sonnet
 max_turns: 50
 completion:
   type: claude

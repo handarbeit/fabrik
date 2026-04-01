@@ -49,6 +49,12 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
                   }
                   body
                   createdAt
+                  reactionGroups {
+                    content
+                    reactors {
+                      totalCount
+                    }
+                  }
                 }
               }
             }
@@ -102,8 +108,14 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
 										Author     *struct {
 											Login string `json:"login"`
 										} `json:"author"`
-										Body      string `json:"body"`
-										CreatedAt string `json:"createdAt"`
+										Body           string `json:"body"`
+										CreatedAt      string `json:"createdAt"`
+										ReactionGroups []struct {
+											Content  string `json:"content"`
+											Reactors struct {
+												TotalCount int `json:"totalCount"`
+											} `json:"reactors"`
+										} `json:"reactionGroups"`
 									} `json:"nodes"`
 								} `json:"comments"`
 							} `json:"content"`
@@ -166,6 +178,12 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
 			// Parse time, ignore error (zero value is fine)
 			if t, err := parseTime(cm.CreatedAt); err == nil {
 				comment.CreatedAt = t
+			}
+			for _, rg := range cm.ReactionGroups {
+				comment.Reactions = append(comment.Reactions, ReactionGroup{
+					Content: rg.Content,
+					Count:   rg.Reactors.TotalCount,
+				})
 			}
 			item.Comments = append(item.Comments, comment)
 		}
