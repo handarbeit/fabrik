@@ -267,8 +267,10 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}()
 	}
 
-	// Commit any uncommitted changes so partial work isn't lost (e.g., max_turns reached)
-	if claudeRan && !completed {
+	// Commit any uncommitted changes so partial work isn't lost (e.g., max_turns reached).
+	// Skip for read-only stages: those don't produce commits, and any dirty state was
+	// restored by stash pop above — committing it would misattribute the stash contents.
+	if claudeRan && !completed && !stage.ReadOnly {
 		commitWIP(workDir, item.Number, stage.Name)
 	}
 
