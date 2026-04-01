@@ -147,7 +147,7 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 	otherLockPrefix := "fabrik:locked:"
 	for _, label := range item.Labels {
 		if strings.HasPrefix(label, otherLockPrefix) && label != lockLabel {
-			fmt.Printf("  [skip] issue #%d locked by another user\n", item.Number)
+			logf(item.Number, "skip", "locked by another user\n")
 			return nil
 		}
 	}
@@ -155,7 +155,7 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 	// Skip if currently being edited
 	for _, label := range item.Labels {
 		if label == "fabrik:editing" {
-			fmt.Printf("  [skip] issue #%d is being edited\n", item.Number)
+			logf(item.Number, "skip", "is being edited\n")
 			return nil
 		}
 	}
@@ -200,15 +200,15 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 		if time.Since(lastAttempt) < cooldown {
 			return nil
 		}
-		fmt.Printf("  [retry] cooldown expired for issue #%d stage %q, retrying\n", item.Number, stage.Name)
+		logf(item.Number, "retry", "cooldown expired for stage %q, retrying\n", stage.Name)
 	}
 
 	atomic.AddInt32(worked, 1)
-	fmt.Printf("\n[process] issue #%d %q — stage: %s\n", item.Number, item.Title, stage.Name)
+	logf(item.Number, "process", "%q — stage: %s\n", item.Title, stage.Name)
 
 	// Acquire lock
 	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, lockLabel); err != nil {
-		fmt.Printf("  [warn] could not add lock label: %v\n", err)
+		logf(item.Number, "warn", "could not add lock label: %v\n", err)
 	}
 
 	// Ensure worktree exists for this issue
@@ -219,13 +219,13 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 	}
 
 	// Invoke Claude Code in the issue's worktree
-	modelOverride := extractModelOverride(item.Labels)
+	modelOverride := extractModelOverride(item.Number, item.Labels)
 	if modelOverride != "" {
-		fmt.Printf("  [model] using model override %q for issue #%d\n", modelOverride, item.Number)
+		logf(item.Number, "model", "using model override %q\n", modelOverride)
 	}
 	output, completed, err := InvokeClaude(stage, item, false, workDir, modelOverride)
 	if err != nil {
-		fmt.Printf("  [warn] claude invocation issue: %v\n", err)
+		logf(item.Number, "warn", "claude invocation issue: %v\n", err)
 	}
 
 	// Post Claude's output
@@ -235,7 +235,7 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 		} else {
 			comment := formatOutputComment(stage.Name, output)
 			if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
-				fmt.Printf("  [warn] could not post comment: %v\n", err)
+				logf(item.Number, "warn", "could not post comment: %v\n", err)
 			}
 		}
 	}
@@ -251,7 +251,7 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 		e.handleStageComplete(board, item, stage)
 	} else {
 		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
-		fmt.Printf("  [wait] stage %q did not complete for issue #%d — will retry after %v\n", stage.Name, item.Number, cooldown)
+		logf(item.Number, "wait", "stage %q did not complete — will retry after %v\n", stage.Name, cooldown)
 	}
 
 	return nil
@@ -260,13 +260,13 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 // processComments handles new user comments on an issue.
 // Flow: 👀 reactions → editing label → invoke Claude → perform actions / update issue body → remove editing label → 🚀 reactions
 func (e *Engine) processComments(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, comments []gh.Comment) error {
-	fmt.Printf("\n[comments] processing %d new comment(s) on issue #%d — stage: %s\n",
-		len(comments), item.Number, stage.Name)
+	logf(item.Number, "comments", "processing %d new comment(s) — stage: %s\n",
+		len(comments), stage.Name)
 
 	// Step 1: React with 👀 to all new comments
 	for _, c := range comments {
 		if err := e.client.AddCommentReaction(e.cfg.Owner, e.cfg.Repo, c.DatabaseID, "eyes"); err != nil {
-			fmt.Printf("  [warn] could not add 👀 to comment %s: %v\n", c.ID, err)
+			logf(item.Number, "warn", "could not add 👀 to comment %s: %v\n", c.ID, err)
 		}
 	}
 
@@ -284,29 +284,29 @@ func (e *Engine) processComments(board *gh.ProjectBoard, item gh.ProjectItem, st
 	}
 
 	// Step 4: Invoke Claude with the comment review prompt
-	modelOverride := extractModelOverride(item.Labels)
+	modelOverride := extractModelOverride(item.Number, item.Labels)
 	if modelOverride != "" {
-		fmt.Printf("  [model] using model override %q for issue #%d\n", modelOverride, item.Number)
+		logf(item.Number, "model", "using model override %q\n", modelOverride)
 	}
 	output, _, err := InvokeClaudeForComments(stage, item, comments, workDir, modelOverride)
 	if err != nil {
-		fmt.Printf("  [warn] claude comment review issue: %v\n", err)
+		logf(item.Number, "warn", "claude comment review issue: %v\n", err)
 		e.removeEditingLabel(item.Number)
 		return err
 	}
 
 	// Step 5: Parse the updated issue body from Claude's output and apply it
 	if updatedBody := extractUpdatedBody(output); updatedBody != "" {
-		fmt.Printf("  [edit] updating issue #%d body\n", item.Number)
+		logf(item.Number, "edit", "updating issue body\n")
 		if err := e.client.UpdateIssueBody(e.cfg.Owner, e.cfg.Repo, item.Number, updatedBody); err != nil {
-			fmt.Printf("  [warn] could not update issue body: %v\n", err)
+			logf(item.Number, "warn", "could not update issue body: %v\n", err)
 		}
 	} else {
 		// No body update — post output as a comment instead
 		if output != "" {
 			comment := formatOutputComment(stage.Name+" (comment review)", output)
 			if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
-				fmt.Printf("  [warn] could not post comment: %v\n", err)
+				logf(item.Number, "warn", "could not post comment: %v\n", err)
 			}
 		}
 	}
@@ -317,14 +317,14 @@ func (e *Engine) processComments(board *gh.ProjectBoard, item gh.ProjectItem, st
 	// Step 7: React with 🚀 to all processed comments
 	for _, c := range comments {
 		if err := e.client.AddCommentReaction(e.cfg.Owner, e.cfg.Repo, c.DatabaseID, "rocket"); err != nil {
-			fmt.Printf("  [warn] could not add 🚀 to comment %s: %v\n", c.ID, err)
+			logf(item.Number, "warn", "could not add 🚀 to comment %s: %v\n", c.ID, err)
 		}
 	}
 
 	// Mark comments as processed only after everything succeeded
 	e.markCommentsProcessed(item, comments)
 
-	fmt.Printf("  [done] comment processing complete for issue #%d\n", item.Number)
+	logf(item.Number, "done", "comment processing complete\n")
 	return nil
 }
 
@@ -342,45 +342,45 @@ func (e *Engine) markCommentsProcessed(item gh.ProjectItem, comments []gh.Commen
 func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output string) {
 	prNumber, err := e.client.FindPRForIssue(e.cfg.Owner, e.cfg.Repo, item.Number)
 	if err != nil {
-		fmt.Printf("  [warn] could not find PR for issue #%d: %v\n", item.Number, err)
+		logf(item.Number, "warn", "could not find PR: %v\n", err)
 	}
 
 	if prNumber > 0 {
 		// Post detailed output on the PR
 		comment := formatOutputComment(stageName, output)
 		if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, prNumber, comment); err != nil {
-			fmt.Printf("  [warn] could not post to PR #%d: %v\n", prNumber, err)
+			logf(item.Number, "warn", "could not post to PR #%d: %v\n", prNumber, err)
 		} else {
-			fmt.Printf("  [post] detailed %s output posted to PR #%d\n", stageName, prNumber)
+			logf(item.Number, "post", "detailed %s output posted to PR #%d\n", stageName, prNumber)
 		}
 
 		// Post brief summary on the issue
 		summary := formatPRSummaryComment(stageName, prNumber, output)
 		if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, summary); err != nil {
-			fmt.Printf("  [warn] could not post summary to issue #%d: %v\n", item.Number, err)
+			logf(item.Number, "warn", "could not post summary: %v\n", err)
 		}
 	} else {
 		// No PR found — fall back to posting on the issue
-		fmt.Printf("  [warn] no open PR found for issue #%d, posting on issue instead\n", item.Number)
+		logf(item.Number, "warn", "no open PR found, posting on issue instead\n")
 		comment := formatOutputComment(stageName, output)
 		if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
-			fmt.Printf("  [warn] could not post comment: %v\n", err)
+			logf(item.Number, "warn", "could not post comment: %v\n", err)
 		}
 	}
 }
 
 func (e *Engine) removeEditingLabel(issueNumber int) {
 	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, issueNumber, "fabrik:editing"); err != nil {
-		fmt.Printf("  [warn] could not remove editing label: %v\n", err)
+		logf(issueNumber, "warn", "could not remove editing label: %v\n", err)
 	}
 }
 
 func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
-	fmt.Printf("  [done] stage %q complete for issue #%d\n", stage.Name, item.Number)
+	logf(item.Number, "done", "stage %q complete\n", stage.Name)
 
 	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
 	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, completeLabel); err != nil {
-		fmt.Printf("  [warn] could not add completion label: %v\n", err)
+		logf(item.Number, "warn", "could not add completion label: %v\n", err)
 	}
 
 	shouldAdvance := e.cfg.Yolo
@@ -390,10 +390,10 @@ func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem
 
 	if shouldAdvance {
 		if err := e.advanceToNextStage(board, item, stage); err != nil {
-			fmt.Printf("  [warn] could not advance: %v\n", err)
+			logf(item.Number, "warn", "could not advance: %v\n", err)
 		}
 	} else {
-		fmt.Printf("  [wait] waiting for human to advance issue #%d\n", item.Number)
+		logf(item.Number, "wait", "waiting for human to advance\n")
 	}
 }
 
@@ -427,7 +427,7 @@ func (e *Engine) findNewComments(item gh.ProjectItem) []gh.Comment {
 func (e *Engine) advanceToNextStage(board *gh.ProjectBoard, item gh.ProjectItem, currentStage *stages.Stage) error {
 	next := stages.NextStage(e.cfg.Stages, currentStage.Name)
 	if next == nil {
-		fmt.Printf("  [info] issue #%d has completed all stages\n", item.Number)
+		logf(item.Number, "info", "completed all stages\n")
 		return nil
 	}
 
@@ -441,7 +441,7 @@ func (e *Engine) advanceToNextStage(board *gh.ProjectBoard, item gh.ProjectItem,
 			next.Name, mapKeys(e.statusField.Options))
 	}
 
-	fmt.Printf("  [advance] moving issue #%d to stage %q\n", item.Number, next.Name)
+	logf(item.Number, "advance", "moving to stage %q\n", next.Name)
 	return e.client.UpdateProjectItemStatus(board.ProjectID, item.ItemID, e.statusField.FieldID, optionID)
 }
 
@@ -464,7 +464,7 @@ func formatPRSummaryComment(stageName string, prNumber int, output string) strin
 // extractModelOverride scans item labels for the first "model:<name>" label and returns <name>.
 // If multiple model labels exist, it uses the first and logs a warning.
 // Returns "" if no model label is found.
-func extractModelOverride(labels []string) string {
+func extractModelOverride(issueNumber int, labels []string) string {
 	const prefix = "model:"
 	var found string
 	for _, label := range labels {
@@ -476,11 +476,16 @@ func extractModelOverride(labels []string) string {
 			if found == "" {
 				found = name
 			} else {
-				fmt.Printf("  [warn] multiple model: labels found, using %q (ignoring %q)\n", found, name)
+				logf(issueNumber, "warn", "multiple model: labels found, using %q (ignoring %q)\n", found, name)
 			}
 		}
 	}
 	return found
+}
+
+func logf(issueNumber int, tag, format string, args ...any) {
+	prefix := fmt.Sprintf("[#%d %s] ", issueNumber, tag)
+	fmt.Printf(prefix+format, args...)
 }
 
 func mapKeys(m map[string]string) []string {
