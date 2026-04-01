@@ -334,20 +334,23 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 		return fmt.Errorf("setting up worktree: %w", err)
 	}
 
-	// If this is a restricted (read-only) stage, stash any unexpected dirty state
-	// before invocation so the stage sees a clean worktree.
-	if len(stage.AllowedTools) > 0 {
+	// If this is a read-only stage, stash any unexpected dirty state (including
+	// untracked files) before invocation so the stage sees a clean worktree, and
+	// restore it afterward.
+	stashed := false
+	if stage.ReadOnly {
 		statusCmd := exec.Command("git", "status", "--porcelain")
 		statusCmd.Dir = workDir
 		if out, err := statusCmd.Output(); err == nil && len(strings.TrimSpace(string(out))) > 0 {
 			logf(item.Number, "warn", "worktree dirty before read-only stage %q — stashing changes\n", stage.Name)
 			msg := fmt.Sprintf("fabrik: auto-stash before stage %q for issue #%d", stage.Name, item.Number)
-			stashCmd := exec.Command("git", "stash", "push", "-m", msg)
+			stashCmd := exec.Command("git", "stash", "push", "-u", "-m", msg)
 			stashCmd.Dir = workDir
 			if stashOut, stashErr := stashCmd.CombinedOutput(); stashErr != nil {
 				logf(item.Number, "warn", "could not stash: %s\n", strings.TrimSpace(string(stashOut)))
 			} else {
 				logf(item.Number, "info", "stashed: %s\n", strings.TrimSpace(string(stashOut)))
+				stashed = true
 			}
 		}
 	}
@@ -359,6 +362,17 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 	}
 	resume := attempted // resume session if we've processed this before
 	output, completed, err := e.claude.Invoke(stage, item, nil, resume, workDir, modelOverride)
+
+	// Restore any stashed changes now that the read-only stage has finished.
+	if stashed {
+		popCmd := exec.Command("git", "stash", "pop")
+		popCmd.Dir = workDir
+		if popOut, popErr := popCmd.CombinedOutput(); popErr != nil {
+			logf(item.Number, "warn", "could not pop stash: %s\n", strings.TrimSpace(string(popOut)))
+		} else {
+			logf(item.Number, "info", "stash restored after read-only stage\n")
+		}
+	}
 	if err != nil {
 		logf(item.Number, "warn", "claude invocation issue: %v\n", err)
 	}
