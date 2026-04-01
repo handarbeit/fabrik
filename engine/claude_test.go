@@ -109,10 +109,25 @@ func TestCheckCompletion_Claude(t *testing.T) {
 	}
 
 	if !checkCompletion(stage, "Some output\nFABRIK_STAGE_COMPLETE\n") {
-		t.Error("expected completion when marker present")
+		t.Error("expected completion when marker present on its own line")
+	}
+	if !checkCompletion(stage, "output\nFABRIK_STAGE_COMPLETE") {
+		t.Error("expected completion when marker is last line with no trailing newline")
 	}
 	if checkCompletion(stage, "Some output without marker") {
 		t.Error("expected no completion without marker")
+	}
+	if checkCompletion(stage, "Please output FABRIK_STAGE_COMPLETE when done") {
+		t.Error("expected no completion when marker is embedded in a sentence")
+	}
+	if checkCompletion(stage, "`FABRIK_STAGE_COMPLETE`") {
+		t.Error("expected no completion when marker is inside backticks")
+	}
+	if !checkCompletion(stage, "Some output\r\nFABRIK_STAGE_COMPLETE\r\n") {
+		t.Error("expected completion when marker is on its own CRLF line")
+	}
+	if !checkCompletion(stage, "FABRIK_STAGE_COMPLETE\nmore output after") {
+		t.Error("expected completion when marker appears on its own line but not as final line")
 	}
 }
 
