@@ -62,14 +62,18 @@ exactly (case-sensitive). The default pipeline uses:
 Fabrik polls the project board every 30 seconds. Move an issue to `Research` on the
 board to start processing it.
 
-### Development Mode (auto-reload)
+### Development Mode (self-upgrade)
+
+The `--auto-upgrade` flag enables Fabrik to upgrade itself when idle. After 2
+consecutive idle polls, Fabrik checks `origin/main` for new commits. If found, it
+runs `git pull --ff-only`, rebuilds the binary with `go build`, and re-execs itself.
+This is intended for the self-evolving workflow where Fabrik develops Fabrik.
 
 ```bash
-go install github.com/air-verse/air@latest
-air
+./fabrik --auto-upgrade --owner your-org --repo your-repo --project 1 --user you
 ```
 
-Configure your flags in `.air.toml` under `args_bin`.
+Upgrade lifecycle events are logged; failures are non-fatal and logged as warnings.
 
 ---
 
@@ -86,14 +90,46 @@ Configure your flags in `.air.toml` under `args_bin`.
 | `--token` | GitHub API token | `$GITHUB_TOKEN` |
 | `--stages` | Directory containing stage YAML configs | `./stages` |
 | `--yolo` | Auto-advance issues through stages without human approval | `false` |
+| `--auto-upgrade` | When idle for 2 polls, check origin/main for new commits and self-upgrade | `false` |
 | `--poll` | Poll interval in seconds | `30` |
+
+### `.env` File Support
+
+Fabrik loads configuration from a `.env` file in the working directory if present.
+All flags can be set via `.env` — flags take precedence over `.env` values.
+
+```
+FABRIK_TOKEN=ghp_...         # Preferred token env var
+GITHUB_TOKEN=ghp_...         # Fallback token env var (backward-compatible)
+FABRIK_OWNER=your-org
+FABRIK_REPO=your-repo
+FABRIK_PROJECT_NUMBER=1
+FABRIK_USER=your-username
+FABRIK_STAGES=./stages/mystages
+FABRIK_YOLO=true
+FABRIK_POLL=30
+FABRIK_MAX_CONCURRENT=5
+```
+
+**Safety:** If a `.env` file exists but is not listed in `.gitignore`, Fabrik will
+refuse to start with a fatal error to prevent accidental token leaks.
 
 ### Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `GITHUB_TOKEN` | GitHub personal access token | required (or use `--token`) |
+| `FABRIK_TOKEN` | GitHub personal access token (preferred) | required (or use `--token`) |
+| `GITHUB_TOKEN` | GitHub personal access token (fallback) | required (or use `FABRIK_TOKEN`) |
+| `FABRIK_OWNER` | GitHub repo owner | — |
+| `FABRIK_REPO` | GitHub repo name | — |
+| `FABRIK_PROJECT_NUMBER` | GitHub Project (v2) number | — |
+| `FABRIK_USER` | Your GitHub username | — |
+| `FABRIK_STAGES` | Stage configs directory | `./stages` |
+| `FABRIK_YOLO` | Auto-advance (`true`/`1`/`yes`) | `false` |
+| `FABRIK_POLL` | Poll interval in seconds | `30` |
 | `FABRIK_MAX_CONCURRENT` | Maximum number of issues processed simultaneously | `5` |
+
+Token precedence: `--token` flag > `FABRIK_TOKEN` > `GITHUB_TOKEN`
 
 `FABRIK_MAX_CONCURRENT` controls how many Claude Code sessions can run in parallel.
 Increase it if you have many issues in active stages; lower it to reduce API costs or
