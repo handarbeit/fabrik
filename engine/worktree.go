@@ -94,7 +94,7 @@ func (wm *WorktreeManager) PushBranch(issueNumber int) error {
 	defer wm.mu.Unlock()
 	wtDir := wm.worktreeDir(issueNumber)
 	branch := wm.branchName(issueNumber)
-	cmd := exec.Command("git", "push", "-u", "origin", branch)
+	cmd := exec.Command("git", "push", "--force-with-lease", "-u", "origin", branch)
 	cmd.Dir = wtDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("pushing branch %s: %s: %w", branch, strings.TrimSpace(string(out)), err)
