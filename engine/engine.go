@@ -104,16 +104,21 @@ func (e *Engine) poll() error {
 
 	fmt.Printf("[poll] found %d items on board\n", len(board.Items))
 
+	worked := false
 	for _, item := range board.Items {
-		if err := e.processItem(board, item); err != nil {
+		if err := e.processItem(board, item, &worked); err != nil {
 			fmt.Printf("  [error] issue #%d: %v\n", item.Number, err)
 		}
+	}
+
+	if !worked {
+		fmt.Println("[poll] nothing to do")
 	}
 
 	return nil
 }
 
-func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem) error {
+func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked *bool) error {
 	// Find the stage config for this item's current status
 	stage := stages.FindStage(e.cfg.Stages, item.Status)
 	if stage == nil {
@@ -143,6 +148,7 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem) error 
 
 	// If there are new comments, process them (even if stage is complete)
 	if len(newComments) > 0 {
+		*worked = true
 		return e.processComments(board, item, stage, newComments)
 	}
 
@@ -162,6 +168,7 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem) error 
 		return nil
 	}
 
+	*worked = true
 	fmt.Printf("\n[process] issue #%d %q — stage: %s\n", item.Number, item.Title, stage.Name)
 
 	// Acquire lock
