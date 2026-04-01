@@ -207,7 +207,7 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 }
 
 // processComments handles new user comments on an issue.
-// Flow: 👀 reactions → editing label → invoke Claude → update issue body → remove editing label → 👍 reactions
+// Flow: 👀 reactions → editing label → invoke Claude → perform actions / update issue body → remove editing label → 🚀 reactions
 func (e *Engine) processComments(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, comments []gh.Comment) error {
 	fmt.Printf("\n[comments] processing %d new comment(s) on issue #%d — stage: %s\n",
 		len(comments), item.Number, stage.Name)
