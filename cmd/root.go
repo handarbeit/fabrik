@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
+	"github.com/verveguy/fabrik/config"
 	"github.com/verveguy/fabrik/engine"
 	"github.com/verveguy/fabrik/stages"
 )
@@ -36,9 +38,54 @@ func Execute() error {
 
 	flag.Parse()
 
-	// Token from env if not provided
+	// Load .env file if present (fatal if .env exists but not in .gitignore)
+	if err := config.LoadDotenv(); err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+
+	// Token: flag > FABRIK_TOKEN > GITHUB_TOKEN
 	if cfg.Token == "" {
-		cfg.Token = os.Getenv("GITHUB_TOKEN")
+		cfg.Token = config.Token()
+	}
+
+	// Allow env vars (from .env or shell) to fill in missing flags
+	if cfg.Owner == "" {
+		cfg.Owner = os.Getenv("FABRIK_OWNER")
+	}
+	if cfg.Repo == "" {
+		cfg.Repo = os.Getenv("FABRIK_REPO")
+	}
+	if cfg.ProjectNum == 0 {
+		if v := os.Getenv("FABRIK_PROJECT_NUMBER"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n <= 0 {
+				return fmt.Errorf("FABRIK_PROJECT_NUMBER=%q is invalid (must be a positive integer)", v)
+			}
+			cfg.ProjectNum = n
+		}
+	}
+	if cfg.User == "" {
+		cfg.User = os.Getenv("FABRIK_USER")
+	}
+	if cfg.StagesDir == "./stages" {
+		if v := os.Getenv("FABRIK_STAGES"); v != "" {
+			cfg.StagesDir = v
+		}
+	}
+	if !cfg.Yolo {
+		if v := os.Getenv("FABRIK_YOLO"); v != "" {
+			lv := strings.ToLower(v)
+			cfg.Yolo = lv == "true" || lv == "1" || lv == "yes"
+		}
+	}
+	if cfg.PollSeconds == 30 {
+		if v := os.Getenv("FABRIK_POLL"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				cfg.PollSeconds = n
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_POLL=%q is invalid (must be a positive integer); using default %d\n", v, cfg.PollSeconds)
+			}
+		}
 	}
 
 	// Max concurrent from env, default 5
@@ -54,15 +101,15 @@ func Execute() error {
 	if cfg.Owner == "" || cfg.Repo == "" || cfg.ProjectNum == 0 {
 		fmt.Fprintf(os.Stderr, "Usage: fabrik --owner OWNER --repo REPO --project NUM [options]\n\n")
 		flag.PrintDefaults()
-		return fmt.Errorf("missing required flags: --owner, --repo, --project")
+		return fmt.Errorf("missing required config: owner, repo, project (use flags or .env file)")
 	}
 
 	if cfg.Token == "" {
-		return fmt.Errorf("GitHub token required: use --token or set GITHUB_TOKEN env var")
+		return fmt.Errorf("GitHub token required: use --token, FABRIK_TOKEN, or GITHUB_TOKEN")
 	}
 
 	if cfg.User == "" {
-		return fmt.Errorf("--user is required (your GitHub username)")
+		return fmt.Errorf("user is required: use --user flag or FABRIK_USER in .env")
 	}
 
 	// Load stage configurations
