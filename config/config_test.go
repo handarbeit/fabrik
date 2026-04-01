@@ -46,6 +46,16 @@ func TestIsInGitignore_Commented(t *testing.T) {
 	}
 }
 
+func TestIsInGitignore_SimilarName(t *testing.T) {
+	dir := t.TempDir()
+	// .envrc and .env.example should NOT match ".env"
+	os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".envrc\n.env.example\n"), 0644)
+	chdir(t, dir)
+	if isInGitignore(".env") {
+		t.Error(".envrc / .env.example entries must not falsely match .env")
+	}
+}
+
 func TestIsInGitignore_Absent(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("*.log\nnode_modules/\n"), 0644)

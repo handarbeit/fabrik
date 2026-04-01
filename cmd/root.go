@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/verveguy/fabrik/config"
 	"github.com/verveguy/fabrik/engine"
@@ -73,7 +74,8 @@ func Execute() error {
 	}
 	if !cfg.Yolo {
 		if v := os.Getenv("FABRIK_YOLO"); v != "" {
-			cfg.Yolo = v == "true" || v == "1" || v == "yes"
+			lv := strings.ToLower(v)
+			cfg.Yolo = lv == "true" || lv == "1" || lv == "yes"
 		}
 	}
 	if cfg.PollSeconds == 30 {
