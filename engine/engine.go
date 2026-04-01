@@ -483,13 +483,13 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		e.mu.Lock()
 		e.lockedIssues[item.Number] = true
 		e.mu.Unlock()
-		defer e.removeLockLabel(item.Number, lockLabel)
+		defer func() {
+			e.removeLockLabel(item.Number, lockLabel)
+			e.mu.Lock()
+			delete(e.lockedIssues, item.Number)
+			e.mu.Unlock()
+		}()
 	}
-	defer func() {
-		e.mu.Lock()
-		delete(e.lockedIssues, item.Number)
-		e.mu.Unlock()
-	}()
 
 	// Add in_progress label for this stage and ensure it's removed on all exit paths.
 	// Only defer cleanup when the add succeeded to avoid a spurious warning on removal.
