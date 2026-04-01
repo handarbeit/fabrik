@@ -162,7 +162,6 @@ func TestCheckCompletion_UnsupportedTypes(t *testing.T) {
 	}
 }
 
-
 func TestSaveSessionID_ValidJSON(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.session")

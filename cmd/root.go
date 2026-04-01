@@ -18,11 +18,11 @@ import (
 var testReadyCh chan struct{}
 
 type Config struct {
-	Owner       string
-	Repo        string
-	ProjectNum  int
-	User        string
-	Token       string
+	Owner         string
+	Repo          string
+	ProjectNum    int
+	User          string
+	Token         string
 	StagesDir     string
 	Yolo          bool
 	AutoUpgrade   bool
