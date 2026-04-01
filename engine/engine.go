@@ -613,6 +613,13 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}()
 	}
 
+	// Always push the branch after a stage runs — preserves work even on failure/max_turns
+	if claudeRan {
+		if pushErr := e.worktrees.PushBranch(item.Number); pushErr != nil {
+			logf(item.Number, "warn", "could not push branch: %v\n", pushErr)
+		}
+	}
+
 	if completed {
 		// Post-stage: create draft PR and/or mark ready now that commits exist
 		var prNumber int
