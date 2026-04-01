@@ -23,5 +23,6 @@ prompt: |
 model: sonnet
 max_turns: 30
 post_to_pr: true
+mark_pr_ready_on_complete: true
 completion:
   type: claude
