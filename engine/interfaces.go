@@ -16,6 +16,8 @@ type GitHubClient interface {
 	UpdateIssueBody(owner, repo string, issueNumber int, body string) error
 	UpdateProjectItemStatus(projectID, itemID, statusFieldID, statusOptionID string) error
 	FindPRForIssue(owner, repo string, issueNumber int) (int, error)
+	CreateDraftPR(owner, repo, title, head, base string, issueNumber int) (int, error)
+	MarkPRReady(owner, repo string, prNumber int) error
 }
 
 // ClaudeInvoker defines the interface for invoking Claude Code.

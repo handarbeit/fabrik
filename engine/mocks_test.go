@@ -89,6 +89,14 @@ func (m *mockGitHubClient) FindPRForIssue(owner, repo string, issueNumber int) (
 	return 0, nil
 }
 
+func (m *mockGitHubClient) CreateDraftPR(owner, repo, title, head, base string, issueNumber int) (int, error) {
+	return 0, nil
+}
+
+func (m *mockGitHubClient) MarkPRReady(owner, repo string, prNumber int) error {
+	return nil
+}
+
 // mockClaudeInvoker implements ClaudeInvoker for testing.
 type mockClaudeInvoker struct {
 	invokeFn func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error)

@@ -174,7 +174,7 @@ func TestBranchExists(t *testing.T) {
 	}
 }
 
-func TestEnsureWorktree_StaleDirectoryRecreated(t *testing.T) {
+func TestEnsureWorktree_StaleDirectoryPreserved(t *testing.T) {
 	skipIfNoGit(t)
 	repoDir := initBareRepo(t)
 	wm := NewWorktreeManager(repoDir)
@@ -187,7 +187,7 @@ func TestEnsureWorktree_StaleDirectoryRecreated(t *testing.T) {
 	// Write a dummy file so it's not empty
 	os.WriteFile(filepath.Join(wtDir, "dummy"), []byte("stale"), 0644)
 
-	// EnsureWorktree should remove stale dir and recreate
+	// EnsureWorktree should preserve the stale dir (may contain partial work)
 	resultDir, err := wm.EnsureWorktree(50, "main")
 	if err != nil {
 		t.Fatalf("EnsureWorktree with stale dir: %v", err)
@@ -196,15 +196,9 @@ func TestEnsureWorktree_StaleDirectoryRecreated(t *testing.T) {
 		t.Errorf("dir = %q, want %q", resultDir, wtDir)
 	}
 
-	// Verify it's a proper worktree
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	cmd.Dir = resultDir
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("checking branch: %v", err)
-	}
-	if strings.TrimSpace(string(out)) != "fabrik/issue-50" {
-		t.Errorf("branch = %q", strings.TrimSpace(string(out)))
+	// Verify the dummy file still exists (not destroyed)
+	if _, err := os.Stat(filepath.Join(resultDir, "dummy")); err != nil {
+		t.Error("stale directory contents should be preserved")
 	}
 }
 
