@@ -1,5 +1,9 @@
 .history/*
-.claude/
+.claude/*
+!.claude/settings.json
+!.claude/rules/
+!.claude/skills/
+!.claude/agents/
 .fabrik/
 .env
 stages/mystages/
