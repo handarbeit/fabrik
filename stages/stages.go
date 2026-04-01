@@ -29,6 +29,10 @@ type Stage struct {
 	// MaxTurns limits how many turns Claude Code can take per invocation.
 	MaxTurns int `yaml:"max_turns,omitempty"`
 
+	// CommentPrompt is the prompt used when processing user comments during this stage.
+	// If empty, a default comment-processing prompt is used.
+	CommentPrompt string `yaml:"comment_prompt,omitempty"`
+
 	// CompletionCriteria defines when this stage is "done".
 	Completion CompletionCriteria `yaml:"completion"`
 

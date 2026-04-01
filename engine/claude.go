@@ -32,17 +32,35 @@ func InvokeClaude(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Co
 		return "", false, fmt.Errorf("creating session dir: %w", err)
 	}
 
-	// Build the prompt
 	prompt := buildPrompt(stage, issue, newComments)
+	args := buildClaudeArgs(stage, issue.Number, resume)
+	args = append(args, prompt)
 
-	// Build claude command args
-	args := []string{
-		"--print",    // non-interactive, print output
-		"--verbose",  // include metadata
+	return runClaude(args, workDir, issue.Number, stage.Name)
+}
+
+// InvokeClaudeForComments runs Claude Code with a comment-review prompt.
+// It uses the stage's CommentPrompt if defined, otherwise a default.
+func InvokeClaudeForComments(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string) (string, bool, error) {
+	sessDir := SessionDir(issue.Number)
+	if err := os.MkdirAll(sessDir, 0755); err != nil {
+		return "", false, fmt.Errorf("creating session dir: %w", err)
 	}
 
-	// Resume session if we have one
-	sessFile := sessionFile(issue.Number, stage.Name)
+	prompt := buildCommentReviewPrompt(stage, issue, comments)
+	args := buildClaudeArgs(stage, issue.Number, true) // resume existing session
+	args = append(args, prompt)
+
+	return runClaude(args, workDir, issue.Number, stage.Name+"-comment-review")
+}
+
+func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool) []string {
+	args := []string{
+		"--print",
+		"--verbose",
+	}
+
+	sessFile := sessionFile(issueNumber, stage.Name)
 	if resume {
 		if sessionID, err := os.ReadFile(sessFile); err == nil && len(sessionID) > 0 {
 			args = append(args, "--resume", strings.TrimSpace(string(sessionID)))
@@ -61,10 +79,11 @@ func InvokeClaude(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Co
 		args = append(args, "--allowedTools", tool)
 	}
 
-	// Add the prompt as the final argument
-	args = append(args, prompt)
+	return args
+}
 
-	fmt.Printf("  [claude] invoking for issue #%d stage %q in %s\n", issue.Number, stage.Name, workDir)
+func runClaude(args []string, workDir string, issueNumber int, label string) (string, bool, error) {
+	fmt.Printf("  [claude] invoking for issue #%d (%s) in %s\n", issueNumber, label, workDir)
 
 	cmd := exec.Command("claude", args...)
 	cmd.Dir = workDir
@@ -77,11 +96,12 @@ func InvokeClaude(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Co
 
 	result := string(output)
 
-	// Try to extract and save session ID from output for future resumption
-	saveSessionID(sessFile, result)
+	// Try to save session ID for future resumption
+	// Use the base stage name (strip "-comment-review" suffix) for session continuity
+	baseName := strings.TrimSuffix(label, "-comment-review")
+	saveSessionID(sessionFile(issueNumber, baseName), result)
 
-	// Check if Claude indicated completion
-	completed := checkCompletion(stage, result)
+	completed := strings.Contains(result, "FABRIK_STAGE_COMPLETE")
 
 	return result, completed, nil
 }
@@ -117,20 +137,78 @@ func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Com
 	return b.String()
 }
 
-func checkCompletion(stage *stages.Stage, output string) bool {
-	switch stage.Completion.Type {
-	case "claude":
-		return strings.Contains(output, "FABRIK_STAGE_COMPLETE")
-	default:
-		// For other types, completion is checked externally
-		return false
+func buildCommentReviewPrompt(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment) string {
+	var b strings.Builder
+
+	// Use stage-specific comment prompt if available, otherwise default
+	if stage.CommentPrompt != "" {
+		b.WriteString(stage.CommentPrompt)
+	} else {
+		b.WriteString(defaultCommentPrompt(stage.Name))
 	}
+
+	b.WriteString("\n\n---\n\n")
+	b.WriteString(fmt.Sprintf("# Issue #%d: %s\n\n", issue.Number, issue.Title))
+	b.WriteString(fmt.Sprintf("URL: %s\n\n", issue.URL))
+	b.WriteString("## Current Issue Body\n\n")
+	b.WriteString(issue.Body)
+	b.WriteString("\n\n")
+
+	b.WriteString("## New Comments to Process\n\n")
+	for _, c := range comments {
+		b.WriteString(fmt.Sprintf("**@%s** (%s):\n%s\n\n", c.Author, c.CreatedAt.Format("2006-01-02 15:04"), c.Body))
+	}
+
+	b.WriteString("---\n\n")
+	b.WriteString("IMPORTANT: You must output the complete updated issue body between these exact markers:\n\n")
+	b.WriteString("FABRIK_ISSUE_UPDATE_BEGIN\n")
+	b.WriteString("(the full updated issue body goes here)\n")
+	b.WriteString("FABRIK_ISSUE_UPDATE_END\n\n")
+	b.WriteString("Include the ENTIRE issue body in your update, not just the changed parts.\n")
+	b.WriteString("Incorporate the information from the comments into the appropriate sections.\n")
+
+	return b.String()
+}
+
+func defaultCommentPrompt(stageName string) string {
+	return fmt.Sprintf(`You are a comment review agent for the "%s" stage.
+The user has posted new comments on this issue. Your job is to:
+1. Read and understand the new comments in context of the current issue body.
+2. Incorporate the information from the comments into the issue body.
+3. If comments answer questions, update the issue body to reflect the answers and remove the questions.
+4. If comments provide corrections or clarifications, update the relevant sections.
+5. Preserve all existing content that is still valid.
+6. Maintain the structure and formatting of the issue body.`, stageName)
+}
+
+// extractUpdatedBody parses the updated issue body from Claude's output.
+// Looks for content between FABRIK_ISSUE_UPDATE_BEGIN and FABRIK_ISSUE_UPDATE_END markers.
+func extractUpdatedBody(output string) string {
+	const beginMarker = "FABRIK_ISSUE_UPDATE_BEGIN"
+	const endMarker = "FABRIK_ISSUE_UPDATE_END"
+
+	beginIdx := strings.Index(output, beginMarker)
+	if beginIdx == -1 {
+		return ""
+	}
+
+	// Move past the marker and any trailing newline
+	bodyStart := beginIdx + len(beginMarker)
+	if bodyStart < len(output) && output[bodyStart] == '\n' {
+		bodyStart++
+	}
+
+	endIdx := strings.Index(output[bodyStart:], endMarker)
+	if endIdx == -1 {
+		return ""
+	}
+
+	body := output[bodyStart : bodyStart+endIdx]
+	return strings.TrimSpace(body)
 }
 
 // saveSessionID attempts to extract a session ID from Claude's output.
-// Claude Code --print with --verbose includes a JSON metadata line.
 func saveSessionID(path string, output string) {
-	// Look for session metadata in output
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "{") && strings.Contains(line, "session_id") {
