@@ -2,6 +2,7 @@ package github
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -292,5 +293,215 @@ func TestParseTime(t *testing.T) {
 	_, err = parseTime("")
 	if err == nil {
 		t.Error("expected error for empty time string")
+	}
+}
+
+// readVars parses the GraphQL request body and returns the variables map.
+func readVars(r *http.Request) map[string]interface{} {
+	body, _ := io.ReadAll(r.Body)
+	var req struct {
+		Variables map[string]interface{} `json:"variables"`
+	}
+	json.Unmarshal(body, &req)
+	return req.Variables
+}
+
+func makeItem(id, itemID, title string) map[string]interface{} {
+	return map[string]interface{}{
+		"id": itemID,
+		"content": map[string]interface{}{
+			"id":        id,
+			"number":    1,
+			"title":     title,
+			"body":      "",
+			"url":       "https://example.com",
+			"labels":    map[string]interface{}{"nodes": []interface{}{}, "pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""}},
+			"assignees": map[string]interface{}{"nodes": []interface{}{}},
+			"comments":  map[string]interface{}{"nodes": []interface{}{}, "pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""}},
+		},
+	}
+}
+
+func TestFetchProjectBoard_ItemsPagination(t *testing.T) {
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		vars := readVars(r)
+		callCount++
+
+		cursor, _ := vars["cursor"].(string)
+		if cursor == "" {
+			// Page 1: two items, hasNextPage=true
+			resp := map[string]interface{}{
+				"data": map[string]interface{}{
+					"repository": map[string]interface{}{
+						"projectV2": map[string]interface{}{
+							"id": "PVT_123",
+							"items": map[string]interface{}{
+								"pageInfo": map[string]interface{}{
+									"hasNextPage": true,
+									"endCursor":   "cursor_page2",
+								},
+								"nodes": []interface{}{
+									makeItem("I_1", "PVTI_1", "Item One"),
+									makeItem("I_2", "PVTI_2", "Item Two"),
+								},
+							},
+						},
+					},
+				},
+			}
+			json.NewEncoder(w).Encode(resp)
+		} else if cursor == "cursor_page2" {
+			// Page 2: one item, hasNextPage=false
+			resp := map[string]interface{}{
+				"data": map[string]interface{}{
+					"repository": map[string]interface{}{
+						"projectV2": map[string]interface{}{
+							"id": "PVT_123",
+							"items": map[string]interface{}{
+								"pageInfo": map[string]interface{}{
+									"hasNextPage": false,
+									"endCursor":   "",
+								},
+								"nodes": []interface{}{
+									makeItem("I_3", "PVTI_3", "Item Three"),
+								},
+							},
+						},
+					},
+				},
+			}
+			json.NewEncoder(w).Encode(resp)
+		} else {
+			t.Errorf("unexpected cursor: %q", cursor)
+			w.WriteHeader(400)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	board, err := c.FetchProjectBoard("owner", "repo", 1)
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
+	}
+
+	if callCount != 2 {
+		t.Errorf("expected 2 API calls, got %d", callCount)
+	}
+	if len(board.Items) != 3 {
+		t.Fatalf("expected 3 items across 2 pages, got %d", len(board.Items))
+	}
+	if board.Items[0].Title != "Item One" || board.Items[1].Title != "Item Two" || board.Items[2].Title != "Item Three" {
+		t.Errorf("unexpected items: %v", board.Items)
+	}
+}
+
+func TestFetchProjectBoard_CommentOverflow(t *testing.T) {
+	// Handler tracks which requests have been made.
+	// Request 1: main items query (no cursor) — item with comments hasNextPage=true
+	// Request 2: node comments query (startCursor="c_overflow") — returns extra comment
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		vars := readVars(r)
+		callCount++
+
+		// Distinguish main query (has "owner") from node query (has "id").
+		if _, isMain := vars["owner"]; isMain {
+			resp := map[string]interface{}{
+				"data": map[string]interface{}{
+					"repository": map[string]interface{}{
+						"projectV2": map[string]interface{}{
+							"id": "PVT_123",
+							"items": map[string]interface{}{
+								"pageInfo": map[string]interface{}{
+									"hasNextPage": false,
+									"endCursor":   "",
+								},
+								"nodes": []interface{}{
+									map[string]interface{}{
+										"id": "PVTI_1",
+										"content": map[string]interface{}{
+											"id":        "I_1",
+											"number":    1,
+											"title":     "Issue with many comments",
+											"body":      "",
+											"url":       "https://example.com",
+											"labels":    map[string]interface{}{"nodes": []interface{}{}, "pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""}},
+											"assignees": map[string]interface{}{"nodes": []interface{}{}},
+											"comments": map[string]interface{}{
+												"nodes": []interface{}{
+													map[string]interface{}{
+														"id":        "C_1",
+														"author":    map[string]interface{}{"login": "alice"},
+														"body":      "First comment",
+														"createdAt": "2024-01-15T10:00:00Z",
+													},
+												},
+												"pageInfo": map[string]interface{}{
+													"hasNextPage": true,
+													"endCursor":   "c_overflow",
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			json.NewEncoder(w).Encode(resp)
+		} else {
+			// Node comments overflow query
+			nodeID, _ := vars["id"].(string)
+			if nodeID != "I_1" {
+				t.Errorf("unexpected node ID: %q", nodeID)
+			}
+			resp := map[string]interface{}{
+				"data": map[string]interface{}{
+					"node": map[string]interface{}{
+						"comments": map[string]interface{}{
+							"nodes": []interface{}{
+								map[string]interface{}{
+									"id":        "C_2",
+									"author":    map[string]interface{}{"login": "bob"},
+									"body":      "Overflow comment",
+									"createdAt": "2024-01-16T10:00:00Z",
+								},
+							},
+							"pageInfo": map[string]interface{}{
+								"hasNextPage": false,
+								"endCursor":   "",
+							},
+						},
+					},
+				},
+			}
+			json.NewEncoder(w).Encode(resp)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	board, err := c.FetchProjectBoard("owner", "repo", 1)
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
+	}
+
+	if callCount != 2 {
+		t.Errorf("expected 2 API calls (main + overflow), got %d", callCount)
+	}
+	if len(board.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(board.Items))
+	}
+	item := board.Items[0]
+	if len(item.Comments) != 2 {
+		t.Fatalf("expected 2 comments (1 main + 1 overflow), got %d", len(item.Comments))
+	}
+	if item.Comments[0].Body != "First comment" {
+		t.Errorf("comment[0].Body = %q", item.Comments[0].Body)
+	}
+	if item.Comments[1].Body != "Overflow comment" {
+		t.Errorf("comment[1].Body = %q", item.Comments[1].Body)
 	}
 }
