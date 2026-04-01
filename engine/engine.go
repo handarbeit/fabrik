@@ -378,6 +378,8 @@ func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) {
 }
 
 // markPRReady pushes the issue branch and transitions its PR from draft to ready-for-review.
+// If no PR exists yet (e.g., ensureDraftPR failed earlier because there were no commits),
+// it attempts to create one before marking it ready.
 func (e *Engine) markPRReady(item gh.ProjectItem) {
 	if err := e.worktrees.PushBranch(item.Number); err != nil {
 		fmt.Printf("  [warn] could not push branch for issue #%d: %v\n", item.Number, err)
@@ -390,8 +392,16 @@ func (e *Engine) markPRReady(item gh.ProjectItem) {
 		return
 	}
 	if prNumber == 0 {
-		fmt.Printf("  [warn] no open PR found for issue #%d, cannot mark ready\n", item.Number)
-		return
+		// No PR yet — ensureDraftPR may have failed earlier (e.g., branch had no commits).
+		// Now that commits exist and the branch is pushed, try to create the PR.
+		baseBranch := e.worktrees.DefaultBaseBranch()
+		head := fmt.Sprintf("fabrik/issue-%d", item.Number)
+		prNumber, err = e.client.CreateDraftPR(e.cfg.Owner, e.cfg.Repo, item.Title, head, baseBranch, item.Number)
+		if err != nil {
+			fmt.Printf("  [warn] could not create PR for issue #%d: %v\n", item.Number, err)
+			return
+		}
+		fmt.Printf("  [pr] created PR #%d for issue #%d\n", prNumber, item.Number)
 	}
 
 	if err := e.client.MarkPRReady(e.cfg.Owner, e.cfg.Repo, prNumber); err != nil {

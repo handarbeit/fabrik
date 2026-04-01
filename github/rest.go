@@ -99,7 +99,10 @@ func (c *Client) restPostWithResponse(url string, body interface{}, target inter
 		return fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	return json.NewDecoder(resp.Body).Decode(target)
+	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
+		return fmt.Errorf("decoding response: %w", err)
+	}
+	return nil
 }
 
 func (c *Client) restPatch(url string, body interface{}) error {
