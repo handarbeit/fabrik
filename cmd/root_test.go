@@ -143,14 +143,18 @@ prompt: "Do research"
 		"--yolo",
 	}
 
-	// Run in a goroutine since engine.Run() will block.
-	// Send SIGINT after a short delay to make it exit.
+	// Use testReadyCh so we only send SIGINT after engine.Run has registered
+	// its signal handlers, avoiding a race that can terminate the test process.
+	readyCh := make(chan struct{})
+	testReadyCh = readyCh
+	defer func() { testReadyCh = nil }()
+
 	done := make(chan error, 1)
 	go func() {
 		done <- Execute()
 	}()
 
-	time.Sleep(200 * time.Millisecond)
+	<-readyCh
 	p, _ := os.FindProcess(os.Getpid())
 	p.Signal(syscall.SIGINT)
 

@@ -19,16 +19,19 @@ import (
 const idleUpgradeThreshold = 2
 
 type Config struct {
-	Owner       string
-	Repo        string
-	ProjectNum  int
-	User        string
-	Token       string
+	Owner         string
+	Repo          string
+	ProjectNum    int
+	User          string
+	Token         string
 	Yolo          bool
 	AutoUpgrade   bool
 	PollSeconds   int
 	MaxConcurrent int
-	Stages      []*stages.Stage
+	Stages        []*stages.Stage
+	// ReadyCh, if non-nil, is closed once signal handlers are registered in Run().
+	// Tests use this to synchronize SIGINT delivery.
+	ReadyCh chan struct{}
 }
 
 type Engine struct {
@@ -81,6 +84,11 @@ func (e *Engine) Run() error {
 	// Set up graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	// Signal readiness to tests waiting on ReadyCh.
+	if e.cfg.ReadyCh != nil {
+		close(e.cfg.ReadyCh)
+	}
 
 	fmt.Println("\nFabrik is running. Press Ctrl+C to stop.")
 	fmt.Println()
