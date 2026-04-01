@@ -7,11 +7,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
 )
+
+var stageCompleteRE = regexp.MustCompile(`(?m)^FABRIK_STAGE_COMPLETE\r?$`)
 
 // SessionDir returns the directory where Claude sessions are cached for an issue.
 func SessionDir(issueNumber int) string {
@@ -20,8 +23,15 @@ func SessionDir(issueNumber int) string {
 }
 
 // sessionFile returns the path to the session ID file for a given issue+stage.
+// stageName is sanitized to prevent path traversal: filepath.Base strips directory
+// components, and an additional check rejects names that are empty, ".", or the
+// path separator (e.g. filepath.Base("/") == "/"), falling back to "default".
 func sessionFile(issueNumber int, stageName string) string {
-	return filepath.Join(SessionDir(issueNumber), stageName+".session")
+	base := filepath.Base(stageName)
+	if base == "" || base == "." || base == "/" || base == string(filepath.Separator) {
+		base = "default"
+	}
+	return filepath.Join(SessionDir(issueNumber), base+".session")
 }
 
 // InvokeClaude runs Claude Code with the given stage configuration and issue context.
@@ -111,7 +121,8 @@ func runClaude(ctx context.Context, args []string, workDir string, issueNumber i
 	baseName := strings.TrimSuffix(label, "-comment-review")
 	saveSessionID(sessionFile(issueNumber, baseName), result)
 
-	completed := strings.Contains(result, "FABRIK_STAGE_COMPLETE")
+	// Simple marker check — callers with the stage use checkCompletion for robustness.
+	completed := stageCompleteRE.MatchString(result)
 
 	return result, completed, nil
 }
@@ -121,12 +132,7 @@ func runClaude(ctx context.Context, args []string, workDir string, issueNumber i
 func checkCompletion(stage *stages.Stage, output string) bool {
 	switch stage.Completion.Type {
 	case "", "claude":
-		for _, line := range strings.Split(output, "\n") {
-			if strings.TrimSpace(line) == "FABRIK_STAGE_COMPLETE" {
-				return true
-			}
-		}
-		return false
+		return stageCompleteRE.MatchString(output)
 	default:
 		return false
 	}
