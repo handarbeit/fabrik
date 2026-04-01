@@ -29,15 +29,13 @@ cp -r stages/examples stages/mystages
 
 ### Development
 
-```bash
-# Install air for auto-reload
-go install github.com/air-verse/air@latest
+Use `--auto-upgrade` to have Fabrik self-upgrade from `origin/main` when idle:
 
-# Run with auto-rebuild on file changes
-air
+```bash
+./fabrik --auto-upgrade ...
 ```
 
-Configure your flags in `.air.toml` under `args_bin`.
+After 2 idle polls, Fabrik checks for new commits, rebuilds (`go build`), and re-execs.
 
 ## How It Works
 
@@ -163,6 +161,7 @@ Command-line flags take precedence over `.env` values.
 | `--token` | GitHub token | `$GITHUB_TOKEN` |
 | `--stages` | Stage configs directory | `./stages` |
 | `--yolo` | Auto-advance through stages | `false` |
+| `--auto-upgrade` | Self-upgrade from origin/main when idle | `false` |
 | `--poll` | Poll interval in seconds | `30` |
 
 ## Labels
