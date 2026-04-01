@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -19,8 +20,9 @@ type Config struct {
 	ProjectNum  int
 	User        string
 	Token       string
-	Yolo        bool
-	PollSeconds int
+	Yolo          bool
+	PollSeconds   int
+	MaxConcurrent int
 	Stages      []*stages.Stage
 }
 
@@ -29,6 +31,7 @@ type Engine struct {
 	client       *gh.Client
 	statusField  *gh.StatusField
 	worktrees    *WorktreeManager
+	mu           sync.Mutex
 	processedSet map[string]time.Time // track what we've processed: "issue#-commentID" -> timestamp
 }
 
@@ -60,7 +63,8 @@ func (e *Engine) Run() error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	fmt.Println("\nFabrik is running. Press Ctrl+C to stop.\n")
+	fmt.Println("\nFabrik is running. Press Ctrl+C to stop.")
+	fmt.Println()
 
 	// Main poll loop
 	ticker := time.NewTicker(time.Duration(e.cfg.PollSeconds) * time.Second)
@@ -93,6 +97,7 @@ func (e *Engine) poll() error {
 	}
 
 	// Fetch status field metadata (for mutations) on first poll
+	e.mu.Lock()
 	if e.statusField == nil && board.ProjectID != "" {
 		sf, err := e.client.FetchStatusField(board.ProjectID)
 		if err != nil {
@@ -101,24 +106,30 @@ func (e *Engine) poll() error {
 			e.statusField = sf
 		}
 	}
+	e.mu.Unlock()
 
 	fmt.Printf("[poll] found %d items on board\n", len(board.Items))
 
-	worked := false
+	sem := make(chan struct{}, e.cfg.MaxConcurrent)
+	var wg sync.WaitGroup
 	for _, item := range board.Items {
-		if err := e.processItem(board, item, &worked); err != nil {
-			fmt.Printf("  [error] issue #%d: %v\n", item.Number, err)
-		}
+		item := item
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if err := e.processItem(board, item); err != nil {
+				fmt.Printf("  [error] issue #%d: %v\n", item.Number, err)
+			}
+		}()
 	}
-
-	if !worked {
-		fmt.Println("[poll] nothing to do")
-	}
+	wg.Wait()
 
 	return nil
 }
 
-func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked *bool) error {
+func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem) error {
 	// Find the stage config for this item's current status
 	stage := stages.FindStage(e.cfg.Stages, item.Status)
 	if stage == nil {
@@ -148,7 +159,6 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 
 	// If there are new comments, process them (even if stage is complete)
 	if len(newComments) > 0 {
-		*worked = true
 		return e.processComments(board, item, stage, newComments)
 	}
 
@@ -162,7 +172,15 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 
 	// Determine if we need to run the stage
 	itemKey := fmt.Sprintf("%d-%s", item.Number, stage.Name)
-	if lastAttempt, attempted := e.processedSet[itemKey]; attempted {
+	var lastAttempt time.Time
+	var attempted bool
+	func() {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		lastAttempt, attempted = e.processedSet[itemKey]
+	}()
+
+	if attempted {
 		// If stage completed, the completion label above would have caught it.
 		// If we're here, the stage was attempted but didn't complete.
 		// Apply a cooldown to avoid hot-looping.
@@ -173,7 +191,6 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 		fmt.Printf("  [retry] cooldown expired for issue #%d stage %q, retrying\n", item.Number, stage.Name)
 	}
 
-	*worked = true
 	fmt.Printf("\n[process] issue #%d %q — stage: %s\n", item.Number, item.Title, stage.Name)
 
 	// Acquire lock
@@ -207,7 +224,11 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 	}
 
 	// Record attempt time (used for cooldown if stage didn't complete)
-	e.processedSet[itemKey] = time.Now()
+	func() {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		e.processedSet[itemKey] = time.Now()
+	}()
 
 	if completed {
 		e.handleStageComplete(board, item, stage)
@@ -288,6 +309,8 @@ func (e *Engine) processComments(board *gh.ProjectBoard, item gh.ProjectItem, st
 
 // markCommentsProcessed records comments as processed so they won't be retried.
 func (e *Engine) markCommentsProcessed(item gh.ProjectItem, comments []gh.Comment) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	for _, c := range comments {
 		key := fmt.Sprintf("%d-comment-%s", item.Number, c.ID)
 		e.processedSet[key] = time.Now()
@@ -355,6 +378,8 @@ func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem
 
 func (e *Engine) findNewComments(item gh.ProjectItem) []gh.Comment {
 	var newComments []gh.Comment
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	for _, c := range item.Comments {
 		// Only process comments from the configured user
 		if c.Author != e.cfg.User {
