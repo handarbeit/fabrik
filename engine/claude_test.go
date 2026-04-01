@@ -116,6 +116,37 @@ func TestCheckCompletion_Claude(t *testing.T) {
 	}
 }
 
+func TestCheckCompletion_DefaultEmpty(t *testing.T) {
+	// Empty type behaves like "claude"
+	stage := &stages.Stage{
+		Completion: stages.CompletionCriteria{Type: ""},
+	}
+	if !checkCompletion(stage, "prefix\nFABRIK_STAGE_COMPLETE\nsuffix") {
+		t.Error("expected completion for empty type when marker present")
+	}
+}
+
+func TestCheckCompletion_ExactLineOnly(t *testing.T) {
+	// Marker embedded in a sentence must not trigger completion
+	stage := &stages.Stage{
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+	if checkCompletion(stage, "You said FABRIK_STAGE_COMPLETE in a sentence") {
+		t.Error("marker inside a sentence should not complete (exact-line required)")
+	}
+}
+
+func TestCheckCompletion_UnsupportedTypes(t *testing.T) {
+	for _, typ := range []string{"tasklist", "label", "approval", "unknown"} {
+		stage := &stages.Stage{
+			Completion: stages.CompletionCriteria{Type: typ},
+		}
+		if checkCompletion(stage, "FABRIK_STAGE_COMPLETE") {
+			t.Errorf("type %q should not complete", typ)
+		}
+	}
+}
+
 
 func TestSaveSessionID_ValidJSON(t *testing.T) {
 	dir := t.TempDir()

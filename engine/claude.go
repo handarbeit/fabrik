@@ -121,7 +121,12 @@ func runClaude(ctx context.Context, args []string, workDir string, issueNumber i
 func checkCompletion(stage *stages.Stage, output string) bool {
 	switch stage.Completion.Type {
 	case "", "claude":
-		return strings.Contains(output, "FABRIK_STAGE_COMPLETE")
+		for _, line := range strings.Split(output, "\n") {
+			if strings.TrimSpace(line) == "FABRIK_STAGE_COMPLETE" {
+				return true
+			}
+		}
+		return false
 	default:
 		return false
 	}

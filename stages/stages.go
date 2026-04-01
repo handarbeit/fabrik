@@ -122,6 +122,8 @@ func loadOne(path string) (*Stage, error) {
 
 	if s.Completion.Type == "" {
 		s.Completion.Type = "claude"
+	} else if s.Completion.Type != "claude" {
+		return nil, fmt.Errorf("stage %q: unsupported completion type %q (only \"claude\" is supported)", s.Name, s.Completion.Type)
 	}
 
 	return &s, nil
