@@ -808,13 +808,17 @@ func TestRun_ShutdownOnSignal(t *testing.T) {
 	eng := testEngine(client, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 300 // long poll so we don't hit a second tick
 
+	// Use ReadyCh so we only send SIGINT after signal.Notify is registered.
+	readyCh := make(chan struct{})
+	eng.cfg.ReadyCh = readyCh
+
 	done := make(chan error, 1)
 	go func() {
 		done <- eng.Run()
 	}()
 
-	// Give Run a moment to start, then send SIGINT
-	time.Sleep(100 * time.Millisecond)
+	// Wait for Run to register signal handlers before sending SIGINT.
+	<-readyCh
 	p, _ := os.FindProcess(os.Getpid())
 	p.Signal(syscall.SIGINT)
 

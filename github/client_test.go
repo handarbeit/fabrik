@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestGraphqlRequest_Success(t *testing.T) {
@@ -138,6 +139,7 @@ func TestGraphqlRequest_WithVariables(t *testing.T) {
 
 func TestGraphqlRequest_ConnectionRefused(t *testing.T) {
 	c := NewClientWithBaseURL("token", "http://127.0.0.1:1")
+	c.httpClient.Timeout = 2 * time.Second // avoid 30s hang on connection refused
 	var result struct{}
 	err := c.graphqlRequest("{ test }", nil, &result)
 	if err == nil {
