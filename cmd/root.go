@@ -12,6 +12,11 @@ import (
 	"github.com/verveguy/fabrik/stages"
 )
 
+// testReadyCh is set by tests to receive a signal once engine.Run has
+// registered its signal handlers. This prevents SIGINT from arriving before
+// signal.Notify is installed, which would terminate the process.
+var testReadyCh chan struct{}
+
 type Config struct {
 	Owner       string
 	Repo        string
@@ -145,6 +150,7 @@ func Execute() error {
 		PollSeconds:   cfg.PollSeconds,
 		MaxConcurrent: cfg.MaxConcurrent,
 		Stages:        stageCfgs,
+		ReadyCh:       testReadyCh,
 	})
 	if err != nil {
 		return err
