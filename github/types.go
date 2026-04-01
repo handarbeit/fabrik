@@ -8,7 +8,7 @@ type ProjectBoard struct {
 	Items     []ProjectItem
 }
 
-// ProjectItem represents an issue card on the project board.
+// ProjectItem represents an issue or pull request card on the project board.
 type ProjectItem struct {
 	ID        string
 	ItemID    string // The project item ID (needed for mutations)
@@ -17,6 +17,7 @@ type ProjectItem struct {
 	Body      string
 	Status    string // The column/status on the board
 	URL       string
+	IsPR      bool   // True if this item is a Pull Request (vs an Issue)
 	Labels    []string
 	Assignees []string
 	Comments  []Comment
