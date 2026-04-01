@@ -27,7 +27,7 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string) (s
 	wtDir := wm.worktreeDir(issueNumber)
 	branch := wm.branchName(issueNumber)
 
-	// If worktree directory exists, validate it's a proper worktree on the right branch
+	// If worktree directory exists, try to use it as-is
 	if _, err := os.Stat(wtDir); err == nil {
 		cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
 		cmd.Dir = wtDir
@@ -38,15 +38,11 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string) (s
 				return wtDir, nil
 			}
 		}
-		// Directory exists but isn't a valid worktree for expected branch — remove and recreate
-		fmt.Printf("  [worktree] stale directory for issue #%d, recreating\n", issueNumber)
-		_ = os.RemoveAll(wtDir)
+		// Directory exists but git can't identify it — still usable, don't destroy it
+		// The directory might have uncommitted work from a killed Claude session
+		fmt.Printf("  [worktree] directory exists for issue #%d but branch check failed, using as-is\n", issueNumber)
+		return wtDir, nil
 	}
-
-	// Prune stale worktree registrations (directory gone but still registered in git)
-	prune := exec.Command("git", "worktree", "prune")
-	prune.Dir = wm.baseDir
-	_ = prune.Run()
 
 	// Ensure root directory exists
 	if err := os.MkdirAll(wm.rootDir, 0755); err != nil {
@@ -161,6 +157,14 @@ func (wm *WorktreeManager) updateWorktreeFromMain(wtDir, baseBranch string) {
 	}
 
 	fmt.Printf("  [worktree] updated from origin/%s\n", baseBranch)
+}
+
+// Prune removes stale worktree registrations from git.
+// Should be called once per poll cycle, before workers spawn — never during concurrent work.
+func (wm *WorktreeManager) Prune() {
+	cmd := exec.Command("git", "worktree", "prune")
+	cmd.Dir = wm.baseDir
+	_ = cmd.Run()
 }
 
 // DefaultBaseBranch returns the default branch of the repo (main or master).
