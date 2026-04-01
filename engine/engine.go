@@ -160,6 +160,14 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem, worked
 		}
 	}
 
+	// Skip if paused
+	for _, label := range item.Labels {
+		if label == "fabrik:paused" {
+			fmt.Printf("  [skip] issue #%d is paused\n", item.Number)
+			return nil
+		}
+	}
+
 	// Check for new comments from our user
 	newComments := e.findNewComments(item)
 
