@@ -80,7 +80,9 @@ func TestLoadAll_EmptyDir(t *testing.T) {
 }
 
 func TestLoadAll_NonExistentDir(t *testing.T) {
-	_, err := LoadAll("/nonexistent/path/stages")
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "nonexistent-subdir")
+	_, err := LoadAll(missing)
 	if err == nil {
 		t.Fatal("expected error for nonexistent dir")
 	}
@@ -219,11 +221,12 @@ func TestFindStage(t *testing.T) {
 
 func TestLoadAll_ReadError(t *testing.T) {
 	dir := t.TempDir()
-	// Create an unreadable file
+	// Create a directory named bad.yaml so os.ReadFile fails deterministically
+	// (works on all platforms, unlike chmod 0000 which fails as root or on Windows)
 	path := filepath.Join(dir, "bad.yaml")
-	os.WriteFile(path, []byte("name: x\nprompt: p"), 0644)
-	os.Chmod(path, 0000)
-	defer os.Chmod(path, 0644) // cleanup
+	if err := os.Mkdir(path, 0755); err != nil {
+		t.Fatalf("failed to create directory %q: %v", path, err)
+	}
 
 	_, err := LoadAll(dir)
 	if err == nil {
