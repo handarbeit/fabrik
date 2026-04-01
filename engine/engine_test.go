@@ -110,7 +110,7 @@ func TestProcessItem_SkipsPaused(t *testing.T) {
 		Labels: []string{"fabrik:paused"},
 	}
 
-	err := eng.processItem(board, item)
+	err := eng.processItem(context.Background(), board, item)
 	if err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
