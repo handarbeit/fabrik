@@ -68,6 +68,10 @@ func New(cfg Config) (*Engine, error) {
 
 // NewWithDeps creates an Engine with explicit dependencies (for testing).
 func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktrees *WorktreeManager) *Engine {
+	maxConcurrent := cfg.MaxConcurrent
+	if maxConcurrent <= 0 {
+		maxConcurrent = 1
+	}
 	return &Engine{
 		cfg:          cfg,
 		client:       client,
@@ -75,6 +79,7 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		worktrees:    worktrees,
 		processedSet: make(map[string]time.Time),
 		lockedIssues: make(map[int]bool),
+		sem:          make(chan struct{}, maxConcurrent),
 	}
 }
 
