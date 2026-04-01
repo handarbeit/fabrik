@@ -24,8 +24,9 @@ func sessionFile(issueNumber int, stageName string) string {
 }
 
 // InvokeClaude runs Claude Code with the given stage configuration and issue context.
+// workDir is the directory Claude should run in (typically a git worktree).
 // It returns Claude's output and whether Claude indicated completion.
-func InvokeClaude(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool) (string, bool, error) {
+func InvokeClaude(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string) (string, bool, error) {
 	sessDir := SessionDir(issue.Number)
 	if err := os.MkdirAll(sessDir, 0755); err != nil {
 		return "", false, fmt.Errorf("creating session dir: %w", err)
@@ -63,9 +64,10 @@ func InvokeClaude(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Co
 	// Add the prompt as the final argument
 	args = append(args, prompt)
 
-	fmt.Printf("  [claude] invoking for issue #%d stage %q\n", issue.Number, stage.Name)
+	fmt.Printf("  [claude] invoking for issue #%d stage %q in %s\n", issue.Number, stage.Name, workDir)
 
 	cmd := exec.Command("claude", args...)
+	cmd.Dir = workDir
 	cmd.Stderr = os.Stderr
 
 	output, err := cmd.Output()

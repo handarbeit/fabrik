@@ -71,7 +71,7 @@ func Execute() error {
 	fmt.Printf("  yolo:    %v\n", cfg.Yolo)
 	fmt.Printf("  poll:    %ds\n", cfg.PollSeconds)
 
-	eng := engine.New(engine.Config{
+	eng, err := engine.New(engine.Config{
 		Owner:       cfg.Owner,
 		Repo:        cfg.Repo,
 		ProjectNum:  cfg.ProjectNum,
@@ -81,6 +81,9 @@ func Execute() error {
 		PollSeconds: cfg.PollSeconds,
 		Stages:      stageCfgs,
 	})
+	if err != nil {
+		return err
+	}
 
 	return eng.Run()
 }
