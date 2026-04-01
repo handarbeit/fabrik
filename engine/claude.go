@@ -20,8 +20,9 @@ func SessionDir(issueNumber int) string {
 }
 
 // sessionFile returns the path to the session ID file for a given issue+stage.
+// stageName is sanitized via filepath.Base to prevent path traversal.
 func sessionFile(issueNumber int, stageName string) string {
-	return filepath.Join(SessionDir(issueNumber), stageName+".session")
+	return filepath.Join(SessionDir(issueNumber), filepath.Base(stageName)+".session")
 }
 
 // InvokeClaude runs Claude Code with the given stage configuration and issue context.
