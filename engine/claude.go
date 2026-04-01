@@ -86,7 +86,7 @@ func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOve
 }
 
 func runClaude(args []string, workDir string, issueNumber int, label string) (string, bool, error) {
-	fmt.Printf("  [claude] invoking for issue #%d (%s) in %s\n", issueNumber, label, workDir)
+	logf(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
 
 	cmd := exec.Command("claude", args...)
 	cmd.Dir = workDir
