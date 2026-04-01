@@ -40,15 +40,17 @@ func sessionFile(issueNumber int, stageName string) string {
 // It returns Claude's output and whether Claude indicated completion.
 func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
 	sessDir := SessionDir(issue.Number)
-	if err := os.MkdirAll(sessDir, 0755); err != nil {
+	if err := os.MkdirAll(sessDir, 0700); err != nil {
 		return "", false, fmt.Errorf("creating session dir: %w", err)
+	}
+	if err := os.Chmod(sessDir, 0700); err != nil {
+		return "", false, fmt.Errorf("setting session dir permissions: %w", err)
 	}
 
 	prompt := buildPrompt(stage, issue, newComments)
 	args := buildClaudeArgs(stage, issue.Number, resume, modelOverride)
-	args = append(args, prompt)
 
-	output, _, err := runClaude(ctx, args, workDir, issue.Number, stage.Name)
+	output, _, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name)
 	if err != nil {
 		return output, false, err
 	}
@@ -60,15 +62,17 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 // modelOverride, if non-empty, replaces the stage's configured model.
 func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, modelOverride string) (string, bool, error) {
 	sessDir := SessionDir(issue.Number)
-	if err := os.MkdirAll(sessDir, 0755); err != nil {
+	if err := os.MkdirAll(sessDir, 0700); err != nil {
 		return "", false, fmt.Errorf("creating session dir: %w", err)
+	}
+	if err := os.Chmod(sessDir, 0700); err != nil {
+		return "", false, fmt.Errorf("setting session dir permissions: %w", err)
 	}
 
 	prompt := buildCommentReviewPrompt(stage, issue, comments)
 	args := buildClaudeArgs(stage, issue.Number, true, modelOverride) // resume existing session
-	args = append(args, prompt)
 
-	return runClaude(ctx, args, workDir, issue.Number, stage.Name+"-comment-review")
+	return runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review")
 }
 
 func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOverride string) []string {
@@ -102,11 +106,12 @@ func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOve
 	return args
 }
 
-func runClaude(ctx context.Context, args []string, workDir string, issueNumber int, label string) (string, bool, error) {
+func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string) (string, bool, error) {
 	logf(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
 
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = workDir
+	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Stderr = os.Stderr
 
 	output, err := cmd.Output()
@@ -308,7 +313,13 @@ func saveSessionID(path string, output string) {
 				SessionID string `json:"session_id"`
 			}
 			if err := json.Unmarshal([]byte(line), &meta); err == nil && meta.SessionID != "" {
-				_ = os.WriteFile(path, []byte(meta.SessionID), 0644)
+				if err := os.WriteFile(path, []byte(meta.SessionID), 0600); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: failed to save session id to %s: %v\n", path, err)
+					return
+				}
+				if err := os.Chmod(path, 0600); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: failed to set permissions on session file %s: %v\n", path, err)
+				}
 				return
 			}
 		}
