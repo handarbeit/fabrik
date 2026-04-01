@@ -13,7 +13,7 @@ func (c *Client) AddComment(owner, repo string, issueNumber int, body string) er
 
 // AddCommentReaction adds a reaction to a comment. Content can be "+1", "-1", "eyes", etc.
 func (c *Client) AddCommentReaction(owner, repo string, commentDatabaseID int, content string) error {
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/comments/%d/reactions", owner, repo, commentDatabaseID)
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/issues/comments/%d/reactions", c.baseURL, owner, repo, commentDatabaseID)
 	payload := map[string]interface{}{
 		"content": content,
 	}
@@ -22,7 +22,7 @@ func (c *Client) AddCommentReaction(owner, repo string, commentDatabaseID int, c
 
 // UpdateIssueBody updates the body of an issue.
 func (c *Client) UpdateIssueBody(owner, repo string, issueNumber int, body string) error {
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%d", owner, repo, issueNumber)
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/issues/%d", c.baseURL, owner, repo, issueNumber)
 	payload := map[string]interface{}{
 		"body": body,
 	}
@@ -31,7 +31,7 @@ func (c *Client) UpdateIssueBody(owner, repo string, issueNumber int, body strin
 
 // GetIssueBody fetches the body of an issue (or PR, since PRs are issues on the REST API).
 func (c *Client) GetIssueBody(owner, repo string, issueNumber int) (string, error) {
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%d", owner, repo, issueNumber)
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/issues/%d", c.baseURL, owner, repo, issueNumber)
 	var result struct {
 		Body string `json:"body"`
 	}
