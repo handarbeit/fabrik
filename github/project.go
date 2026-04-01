@@ -58,6 +58,28 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
                   }
                 }
               }
+              closedByPullRequestsReferences(first: 10) {
+                nodes {
+                  number
+                  comments(first: 50) {
+                    nodes {
+                      id
+                      databaseId
+                      author {
+                        login
+                      }
+                      body
+                      createdAt
+                      reactionGroups {
+                        content
+                        reactors {
+                          totalCount
+                        }
+                      }
+                    }
+                  }
+                }
+              }
             }
             ... on PullRequest {
               id
@@ -157,6 +179,28 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
 										} `json:"reactionGroups"`
 									} `json:"nodes"`
 								} `json:"comments"`
+								LinkedPRs *struct {
+									Nodes []struct {
+										Number   int `json:"number"`
+										Comments struct {
+											Nodes []struct {
+												ID         string `json:"id"`
+												DatabaseID int    `json:"databaseId"`
+												Author     *struct {
+													Login string `json:"login"`
+												} `json:"author"`
+												Body           string `json:"body"`
+												CreatedAt      string `json:"createdAt"`
+												ReactionGroups []struct {
+													Content  string `json:"content"`
+													Reactors struct {
+														TotalCount int `json:"totalCount"`
+													} `json:"reactors"`
+												} `json:"reactionGroups"`
+											} `json:"nodes"`
+										} `json:"comments"`
+									} `json:"nodes"`
+								} `json:"closedByPullRequestsReferences"`
 							} `json:"content"`
 						} `json:"nodes"`
 					} `json:"items"`
@@ -226,6 +270,33 @@ query($owner: String!, $repo: String!, $projectNum: Int!) {
 				})
 			}
 			item.Comments = append(item.Comments, comment)
+		}
+
+		// Merge comments from linked PRs (via closedByPullRequestsReferences)
+		if node.Content.LinkedPRs != nil {
+			for _, pr := range node.Content.LinkedPRs.Nodes {
+				for _, cm := range pr.Comments.Nodes {
+					comment := Comment{
+						ID:         cm.ID,
+						DatabaseID: cm.DatabaseID,
+						Body:       cm.Body,
+						FromPR:     pr.Number,
+					}
+					if cm.Author != nil {
+						comment.Author = cm.Author.Login
+					}
+					if t, err := parseTime(cm.CreatedAt); err == nil {
+						comment.CreatedAt = t
+					}
+					for _, rg := range cm.ReactionGroups {
+						comment.Reactions = append(comment.Reactions, ReactionGroup{
+							Content: rg.Content,
+							Count:   rg.Reactors.TotalCount,
+						})
+					}
+					item.Comments = append(item.Comments, comment)
+				}
+			}
 		}
 
 		board.Items = append(board.Items, item)

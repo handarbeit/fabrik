@@ -13,7 +13,7 @@ func (c *Client) AddLabelToIssue(owner, repo string, issueNumber int, labelName 
 	}
 
 	// Use REST API for simplicity — add label to issue
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%d/labels", owner, repo, issueNumber)
+	url := fmt.Sprintf("%s/repos/%s/%s/issues/%d/labels", c.baseURL, owner, repo, issueNumber)
 	body := map[string]interface{}{
 		"labels": []string{labelName},
 	}
@@ -22,7 +22,7 @@ func (c *Client) AddLabelToIssue(owner, repo string, issueNumber int, labelName 
 
 // AddComment posts a comment on an issue.
 func (c *Client) AddComment(owner, repo string, issueNumber int, body string) error {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%d/comments", owner, repo, issueNumber)
+	url := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments", c.baseURL, owner, repo, issueNumber)
 	payload := map[string]interface{}{
 		"body": body,
 	}
@@ -136,6 +136,76 @@ func (c *Client) RemoveLabelFromIssue(owner, repo string, issueNumber int, label
 	return c.restDelete(url)
 }
 
+// CreateDraftPR creates a draft pull request for the given issue branch.
+// Returns the PR number. Callers should first call FindPRForIssue to avoid duplicates.
+func (c *Client) CreateDraftPR(owner, repo, title, head, base string, issueNumber int) (int, error) {
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls", owner, repo)
+	body := map[string]interface{}{
+		"title": title,
+		"head":  head,
+		"base":  base,
+		"body":  fmt.Sprintf("Closes #%d", issueNumber),
+		"draft": true,
+	}
+	var result struct {
+		Number int `json:"number"`
+	}
+	if err := c.restPostWithResponse(apiURL, body, &result); err != nil {
+		return 0, fmt.Errorf("creating draft PR: %w", err)
+	}
+	return result.Number, nil
+}
+
+// MarkPRReady transitions a draft PR to ready-for-review.
+// Uses the GraphQL markPullRequestReadyForReview mutation, which is the supported
+// path — REST PATCH does not reliably support draft→ready transitions.
+func (c *Client) MarkPRReady(owner, repo string, prNumber int) error {
+	// Fetch the PR node ID (required for the GraphQL mutation)
+	fetchQuery := `
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      id
+    }
+  }
+}`
+	fetchVars := map[string]interface{}{
+		"owner":  owner,
+		"repo":   repo,
+		"number": prNumber,
+	}
+	var fetchResult struct {
+		Data struct {
+			Repository struct {
+				PullRequest struct {
+					ID string `json:"id"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+	if err := c.graphqlRequest(fetchQuery, fetchVars, &fetchResult); err != nil {
+		return fmt.Errorf("fetching PR node ID: %w", err)
+	}
+	nodeID := fetchResult.Data.Repository.PullRequest.ID
+	if nodeID == "" {
+		return fmt.Errorf("PR #%d not found in repository %s/%s", prNumber, owner, repo)
+	}
+
+	mutation := `
+mutation($prId: ID!) {
+  markPullRequestReadyForReview(input: { pullRequestId: $prId }) {
+    pullRequest {
+      id
+    }
+  }
+}`
+	mutVars := map[string]interface{}{
+		"prId": nodeID,
+	}
+	var mutResult struct{}
+	return c.graphqlRequest(mutation, mutVars, &mutResult)
+}
+
 // FindPRForIssue finds the open PR associated with an issue by looking for
 // a PR whose head branch matches the fabrik/issue-N convention.
 // Returns the PR number, or 0 if no matching PR is found.
@@ -155,7 +225,7 @@ func (c *Client) FindPRForIssue(owner, repo string, issueNumber int) (int, error
 }
 
 func (c *Client) ensureLabel(owner, repo, name string) error {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/labels", owner, repo)
+	url := fmt.Sprintf("%s/repos/%s/%s/labels", c.baseURL, owner, repo)
 	body := map[string]interface{}{
 		"name":  name,
 		"color": "6f42c1",

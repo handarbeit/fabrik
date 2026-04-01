@@ -25,14 +25,15 @@ func sessionFile(issueNumber int, stageName string) string {
 
 // InvokeClaude runs Claude Code with the given stage configuration and issue context.
 // workDir is the directory Claude should run in (typically a git worktree).
+// modelOverride, if non-empty, replaces the stage's configured model.
 // It returns Claude's output and whether Claude indicated completion.
-func InvokeClaude(stage *stages.Stage, issue gh.ProjectItem, resume bool, workDir string, modelOverride string) (string, bool, error) {
+func InvokeClaude(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
 	sessDir := SessionDir(issue.Number)
 	if err := os.MkdirAll(sessDir, 0755); err != nil {
 		return "", false, fmt.Errorf("creating session dir: %w", err)
 	}
 
-	prompt := buildPrompt(stage, issue)
+	prompt := buildPrompt(stage, issue, newComments)
 	args := buildClaudeArgs(stage, issue.Number, resume, modelOverride)
 	args = append(args, prompt)
 
@@ -41,6 +42,7 @@ func InvokeClaude(stage *stages.Stage, issue gh.ProjectItem, resume bool, workDi
 
 // InvokeClaudeForComments runs Claude Code with a comment-review prompt.
 // It uses the stage's CommentPrompt if defined, otherwise a default.
+// modelOverride, if non-empty, replaces the stage's configured model.
 func InvokeClaudeForComments(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, modelOverride string) (string, bool, error) {
 	sessDir := SessionDir(issue.Number)
 	if err := os.MkdirAll(sessDir, 0755); err != nil {
@@ -86,7 +88,7 @@ func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOve
 }
 
 func runClaude(args []string, workDir string, issueNumber int, label string) (string, bool, error) {
-	fmt.Printf("  [claude] invoking for issue #%d (%s) in %s\n", issueNumber, label, workDir)
+	logf(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
 
 	cmd := exec.Command("claude", args...)
 	cmd.Dir = workDir
@@ -104,12 +106,24 @@ func runClaude(args []string, workDir string, issueNumber int, label string) (st
 	baseName := strings.TrimSuffix(label, "-comment-review")
 	saveSessionID(sessionFile(issueNumber, baseName), result)
 
+	// Determine completion based on the stage's completion criteria.
+	// For the label used inside runClaude we don't have the stage, so we use
+	// a simple marker check; callers that have the stage use checkCompletion.
 	completed := strings.Contains(result, "FABRIK_STAGE_COMPLETE")
 
 	return result, completed, nil
 }
 
-func buildPrompt(stage *stages.Stage, issue gh.ProjectItem) string {
+// checkCompletion returns true if Claude's output indicates the stage is complete
+// according to the stage's completion criteria.
+func checkCompletion(stage *stages.Stage, output string) bool {
+	if stage.Completion.Type == "claude" {
+		return strings.Contains(output, "FABRIK_STAGE_COMPLETE")
+	}
+	return false
+}
+
+func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment) string {
 	var b strings.Builder
 
 	b.WriteString(stage.Prompt)
@@ -129,6 +143,13 @@ func buildPrompt(stage *stages.Stage, issue gh.ProjectItem) string {
 	if len(issue.Comments) > 0 {
 		b.WriteString("## Prior Discussion\n\n")
 		for _, c := range issue.Comments {
+			b.WriteString(fmt.Sprintf("**@%s** (%s):\n%s\n\n", c.Author, c.CreatedAt.Format("2006-01-02 15:04"), c.Body))
+		}
+	}
+
+	if len(newComments) > 0 {
+		b.WriteString("## New Comments\n\n")
+		for _, c := range newComments {
 			b.WriteString(fmt.Sprintf("**@%s** (%s):\n%s\n\n", c.Author, c.CreatedAt.Format("2006-01-02 15:04"), c.Body))
 		}
 	}
