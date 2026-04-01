@@ -171,7 +171,7 @@ allowed_tools:
   - Write
 max_turns: 50
 completion:
-  type: label
+  type: claude
   value: "done"
 auto_advance: true
 `)
@@ -193,11 +193,27 @@ auto_advance: true
 	if s.MaxTurns != 50 {
 		t.Errorf("MaxTurns = %d", s.MaxTurns)
 	}
-	if s.Completion.Type != "label" || s.Completion.Value != "done" {
+	if s.Completion.Type != "claude" || s.Completion.Value != "done" {
 		t.Errorf("Completion = %+v", s.Completion)
 	}
 	if s.AutoAdvance == nil || !*s.AutoAdvance {
 		t.Errorf("AutoAdvance = %v", s.AutoAdvance)
+	}
+}
+
+func TestLoadAll_UnsupportedCompletionType(t *testing.T) {
+	for _, typ := range []string{"tasklist", "label", "approval", "unknown"} {
+		dir := t.TempDir()
+		writeStageFile(t, dir, "stage.yaml", `
+name: Test
+prompt: "do stuff"
+completion:
+  type: `+typ+`
+`)
+		_, err := LoadAll(dir)
+		if err == nil {
+			t.Errorf("type %q: expected error for unsupported completion type, got nil", typ)
+		}
 	}
 }
 
