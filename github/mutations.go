@@ -80,7 +80,7 @@ query($projectId: ID!) {
 	var result struct {
 		Data struct {
 			Node struct {
-				Field struct {
+				Field *struct {
 					ID      string `json:"id"`
 					Options []struct {
 						ID   string `json:"id"`
@@ -95,7 +95,7 @@ query($projectId: ID!) {
 		return nil, err
 	}
 
-	if result.Data.Node.Field.ID == "" {
+	if result.Data.Node.Field == nil || result.Data.Node.Field.ID == "" {
 		return nil, fmt.Errorf("project %q has no Status field", projectID)
 	}
 
