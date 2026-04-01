@@ -142,9 +142,13 @@ func (e *Engine) poll() error {
 	var dispatched int
 	for _, item := range board.Items {
 		item := item
+		// Quick pre-check: skip items that won't need processing.
+		// This avoids acquiring a semaphore slot for no-ops.
+		if !e.itemNeedsWork(item) {
+			continue
+		}
 		// Skip issues already being processed by a previous poll cycle's worker
 		if _, ok := e.inFlight.Load(item.Number); ok {
-			logf(item.Number, "skip", "already in-flight, will retry next poll\n")
 			continue
 		}
 		// Non-blocking semaphore acquire: if all slots are occupied by workers from
@@ -273,6 +277,49 @@ func gitRevParse(dir, ref string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// itemNeedsWork does cheap pre-checks to determine if an item might need processing.
+// This runs in the poll loop BEFORE acquiring a semaphore slot, so it must be fast
+// and not make any API calls.
+func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
+	// No matching stage = nothing to do
+	stage := stages.FindStage(e.cfg.Stages, item.Status)
+	if stage == nil {
+		return false
+	}
+
+	// Check for new comments (always worth processing)
+	if len(e.findNewComments(item)) > 0 {
+		return true
+	}
+
+	// PRs only support comment processing
+	if item.IsPR {
+		return false
+	}
+
+	// Already completed this stage
+	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
+	for _, label := range item.Labels {
+		if label == completeLabel {
+			return false
+		}
+	}
+
+	// Check cooldown
+	itemKey := fmt.Sprintf("%d-%s", item.Number, stage.Name)
+	e.mu.Lock()
+	lastAttempt, attempted := e.processedSet[itemKey]
+	e.mu.Unlock()
+	if attempted {
+		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
+		if time.Since(lastAttempt) < cooldown {
+			return false
+		}
+	}
+
+	return true
 }
 
 func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem) error {
