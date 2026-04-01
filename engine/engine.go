@@ -177,7 +177,7 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem) error 
 	}
 
 	// Invoke Claude Code in the issue's worktree
-	output, completed, err := InvokeClaude(stage, item, nil, false, workDir)
+	output, completed, err := InvokeClaude(stage, item, false, workDir)
 	if err != nil {
 		fmt.Printf("  [warn] claude invocation issue: %v\n", err)
 	}
