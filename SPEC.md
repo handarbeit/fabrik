@@ -59,6 +59,7 @@ When a user comments on an issue:
 - Labels on issues serve as lightweight locks:
   - `fabrik:locked:<user>` — processing lock per user
   - `fabrik:editing` — body update lock
+  - `fabrik:paused` — issue is skipped entirely; no stage processing or comment processing occurs
 - The "who made the change" rule is the primary guard.
 
 ### Architecture
