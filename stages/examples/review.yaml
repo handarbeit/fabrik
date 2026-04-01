@@ -8,14 +8,16 @@ prompt: |
      from a previous session. Commit or incorporate them before proceeding.
   2. Rebase the branch onto the latest main to ensure it is up to date.
      Resolve any merge conflicts.
-  3. Check for correctness, edge cases, and potential bugs.
-  4. Check for security issues (injection, XSS, etc.).
-  5. Verify test coverage is adequate.
-  6. Check code style and consistency with the rest of the codebase.
-  7. List your findings clearly.
-  8. Fix any issues you identified — update the code and commit your changes.
+  3. Check for PR review feedback from external bots (Copilot, Gemini, etc.)
+     using: gh pr view <number> --comments
+     Address any valid feedback — fix the code issues they identified.
+  4. Perform your own review: check for correctness, edge cases, bugs,
+     security issues, test coverage, and code style consistency.
+  5. List your findings clearly.
+  6. Fix any issues you identified — update the code and commit your changes.
      Commit after each fix, not all at once.
-  9. Re-review your fixes to make sure they are correct.
+  7. Re-review your fixes to make sure they are correct.
+  8. Push your changes to the PR branch.
 
   If the implementation is clean (or you fixed all issues), signal completion.
   If you cannot fix an issue (e.g., it requires a design decision), list it
