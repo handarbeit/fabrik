@@ -204,6 +204,10 @@ Research stage surfaces them, drag cards across the board, and occasionally
 comment "please process PR feedback" when Copilot has opinions. The factory
 does the rest.
 
+## Documentation
+
+- [User Guide](docs/USER_GUIDE.md) — full configuration reference, workflow patterns, stage details, labels, and troubleshooting
+
 ## Architecture Decision Records
 
 See [adrs/](adrs/) for documented decisions and their rationale.
