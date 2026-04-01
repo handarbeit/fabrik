@@ -187,7 +187,7 @@ func TestExtractModelOverride(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := extractModelOverride(tc.labels)
+			got := extractModelOverride(0, tc.labels)
 			if got != tc.want {
 				t.Errorf("extractModelOverride(%v) = %q, want %q", tc.labels, got, tc.want)
 			}
@@ -198,7 +198,7 @@ func TestExtractModelOverride(t *testing.T) {
 func TestExtractModelOverrideWarnsOnMultiple(t *testing.T) {
 	// Verify no panic and correct return value when multiple model labels are present.
 	// The warning goes to fmt.Printf (stdout) and is tested behaviorally above.
-	result := extractModelOverride([]string{"model:opus", "model:sonnet", "model:haiku"})
+	result := extractModelOverride(0, []string{"model:opus", "model:sonnet", "model:haiku"})
 	if result != "opus" {
 		t.Errorf("expected %q, got %q", "opus", result)
 	}
