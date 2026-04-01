@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -19,8 +20,9 @@ type Config struct {
 	ProjectNum  int
 	User        string
 	Token       string
-	Yolo        bool
-	PollSeconds int
+	Yolo          bool
+	PollSeconds   int
+	MaxConcurrent int
 	Stages      []*stages.Stage
 }
 
@@ -29,6 +31,7 @@ type Engine struct {
 	client       *gh.Client
 	statusField  *gh.StatusField
 	worktrees    *WorktreeManager
+	mu           sync.Mutex
 	processedSet map[string]time.Time // track what we've processed: "issue#-commentID" -> timestamp
 }
 
@@ -104,11 +107,21 @@ func (e *Engine) poll() error {
 
 	fmt.Printf("[poll] found %d items on board\n", len(board.Items))
 
+	sem := make(chan struct{}, e.cfg.MaxConcurrent)
+	var wg sync.WaitGroup
 	for _, item := range board.Items {
-		if err := e.processItem(board, item); err != nil {
-			fmt.Printf("  [error] issue #%d: %v\n", item.Number, err)
-		}
+		item := item
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if err := e.processItem(board, item); err != nil {
+				fmt.Printf("  [error] issue #%d: %v\n", item.Number, err)
+			}
+		}()
 	}
+	wg.Wait()
 
 	return nil
 }
@@ -156,7 +169,9 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem) error 
 
 	// Determine if we need to run the stage
 	itemKey := fmt.Sprintf("%d-%s", item.Number, stage.Name)
+	e.mu.Lock()
 	_, alreadyProcessed := e.processedSet[itemKey]
+	e.mu.Unlock()
 
 	if alreadyProcessed {
 		return nil
@@ -190,7 +205,9 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem) error 
 		}
 	}
 
+	e.mu.Lock()
 	e.processedSet[itemKey] = time.Now()
+	e.mu.Unlock()
 
 	if completed {
 		e.handleStageComplete(board, item, stage)
@@ -268,6 +285,8 @@ func (e *Engine) processComments(board *gh.ProjectBoard, item gh.ProjectItem, st
 
 // markCommentsProcessed records comments as processed so they won't be retried.
 func (e *Engine) markCommentsProcessed(item gh.ProjectItem, comments []gh.Comment) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	for _, c := range comments {
 		key := fmt.Sprintf("%d-comment-%s", item.Number, c.ID)
 		e.processedSet[key] = time.Now()
@@ -304,6 +323,8 @@ func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem
 
 func (e *Engine) findNewComments(item gh.ProjectItem) []gh.Comment {
 	var newComments []gh.Comment
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	for _, c := range item.Comments {
 		// Only process comments from the configured user
 		if c.Author != e.cfg.User {
