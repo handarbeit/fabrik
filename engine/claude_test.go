@@ -317,8 +317,8 @@ echo "NO RESUME"
 
 	// Write a session file to enable resume
 	sessDir := SessionDir(99)
-	os.MkdirAll(sessDir, 0755)
-	os.WriteFile(sessionFile(99, "Plan"), []byte("sess_existing"), 0644)
+	os.MkdirAll(sessDir, 0700)
+	os.WriteFile(sessionFile(99, "Plan"), []byte("sess_existing"), 0600)
 	defer os.RemoveAll(sessDir)
 
 	output, _, err := InvokeClaude(context.Background(), stage, issue, nil, true, workDir, "")
