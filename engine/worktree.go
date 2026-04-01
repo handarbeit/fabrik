@@ -6,12 +6,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // WorktreeManager handles git worktrees for issue isolation.
 type WorktreeManager struct {
-	baseDir string // directory containing the main repo
-	rootDir string // where worktrees are stored (e.g., .fabrik/worktrees)
+	mu      sync.Mutex // serializes worktree/branch creation (git config isn't concurrent-safe)
+	baseDir string     // directory containing the main repo
+	rootDir string     // where worktrees are stored (e.g., .fabrik/worktrees)
 }
 
 func NewWorktreeManager(repoDir string) *WorktreeManager {
@@ -24,6 +26,9 @@ func NewWorktreeManager(repoDir string) *WorktreeManager {
 // EnsureWorktree creates or returns the path to a worktree for the given issue.
 // Each issue gets its own branch (fabrik/issue-N) and worktree directory.
 func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string) (string, error) {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+
 	wtDir := wm.worktreeDir(issueNumber)
 	branch := wm.branchName(issueNumber)
 
