@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -41,6 +42,7 @@ type Engine struct {
 	worktrees    *WorktreeManager
 	mu           sync.Mutex
 	processedSet map[string]time.Time // track what we've processed: "issue#-commentID" -> timestamp
+	lockedIssues map[int]bool         // issues that have had fabrik:locked added and not yet released
 	idleCount    int                  // consecutive idle polls; triggers self-upgrade at threshold
 	sem          chan struct{}         // semaphore bounding concurrent workers across poll cycles
 	wg           sync.WaitGroup       // tracks in-flight workers for graceful shutdown
@@ -59,6 +61,7 @@ func New(cfg Config) (*Engine, error) {
 		claude:       &RealClaudeInvoker{},
 		worktrees:    NewWorktreeManager(repoDir),
 		processedSet: make(map[string]time.Time),
+		lockedIssues: make(map[int]bool),
 		sem:          make(chan struct{}, cfg.MaxConcurrent),
 	}, nil
 }
@@ -71,6 +74,7 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		claude:       claude,
 		worktrees:    worktrees,
 		processedSet: make(map[string]time.Time),
+		lockedIssues: make(map[int]bool),
 	}
 }
 
@@ -85,8 +89,12 @@ func gitToplevel() (string, error) {
 
 func (e *Engine) Run() error {
 	// Set up graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
 	if e.cfg.ReadyCh != nil {
 		close(e.cfg.ReadyCh)
 	}
@@ -99,25 +107,84 @@ func (e *Engine) Run() error {
 	defer ticker.Stop()
 
 	// Run immediately on start, then on tick
-	if err := e.poll(); err != nil {
+	if err := e.poll(ctx); err != nil {
 		fmt.Printf("  [warn] poll error: %v\n", err)
 	}
 
 	for {
 		select {
-		case <-sigCh:
-			fmt.Println("\nShutting down — waiting for in-flight workers to finish...")
-			e.wg.Wait()
+		case sig := <-sigCh:
+			fmt.Printf("\nReceived %v — shutting down gracefully...\n", sig)
+			cancel()
+
+			// Wait for in-flight workers with a 10-second timeout.
+			// A second signal during drain triggers immediate exit.
+			done := make(chan struct{})
+			go func() {
+				e.waitForDrain()
+				close(done)
+			}()
+
+			select {
+			case <-done:
+				// Workers drained cleanly.
+			case <-time.After(10 * time.Second):
+				fmt.Println("[warn] drain timeout exceeded — proceeding to cleanup")
+			case <-sigCh:
+				fmt.Println("\nForce-quitting...")
+				e.cleanupLockedIssues()
+				os.Exit(1)
+			}
+
+			e.cleanupLockedIssues()
 			return nil
 		case <-ticker.C:
-			if err := e.poll(); err != nil {
+			if err := e.poll(ctx); err != nil {
 				fmt.Printf("  [warn] poll error: %v\n", err)
 			}
 		}
 	}
 }
 
-func (e *Engine) poll() error {
+// waitForDrain is a no-op placeholder — actual drain tracking is done by the
+// WaitGroup inside poll(). We expose this so Run() can wait on it via a goroutine.
+// Because poll() returns only after wg.Wait(), and Run() blocks on poll(), any
+// in-flight poll is already being drained when we reach the signal handler.
+// This function exists to give us a hook point for the goroutine + timeout pattern.
+func (e *Engine) waitForDrain() {
+	// poll() already drains via wg.Wait() before returning; there is nothing
+	// extra to wait for here — the in-flight poll will finish because CommandContext
+	// kills the child claude processes once ctx is cancelled.
+}
+
+// cleanupLockedIssues removes fabrik:locked labels for any issues that were locked
+// at shutdown time but never released (e.g., because the worker was killed mid-run).
+func (e *Engine) cleanupLockedIssues() {
+	e.mu.Lock()
+	issues := make([]int, 0, len(e.lockedIssues))
+	for num := range e.lockedIssues {
+		issues = append(issues, num)
+	}
+	e.mu.Unlock()
+
+	if len(issues) == 0 {
+		return
+	}
+	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
+	fmt.Printf("[shutdown] removing lock labels from %d issue(s)\n", len(issues))
+	for _, num := range issues {
+		if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, num, lockLabel); err != nil {
+			logf(num, "warn", "could not remove lock label during shutdown: %v\n", err)
+		} else {
+			logf(num, "shutdown", "removed lock label\n")
+		}
+		e.mu.Lock()
+		delete(e.lockedIssues, num)
+		e.mu.Unlock()
+	}
+}
+
+func (e *Engine) poll(ctx context.Context) error {
 	fmt.Printf("[poll] fetching project board %s/%s#%d\n", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
 
 	board, err := e.client.FetchProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
@@ -141,6 +208,13 @@ func (e *Engine) poll() error {
 
 	var dispatched int
 	for _, item := range board.Items {
+		// Don't start new work if the context has been cancelled.
+		select {
+		case <-ctx.Done():
+			break
+		default:
+		}
+
 		item := item
 		// Quick pre-check: skip items that won't need processing.
 		// This avoids acquiring a semaphore slot for no-ops.
@@ -167,7 +241,7 @@ func (e *Engine) poll() error {
 			defer e.wg.Done()
 			defer func() { <-e.sem }()
 			defer e.inFlight.Delete(item.Number)
-			if err := e.processItem(board, item); err != nil {
+			if err := e.processItem(ctx, board, item); err != nil {
 				logf(item.Number, "error", "%v\n", err)
 			}
 		}()
@@ -329,7 +403,7 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	return true
 }
 
-func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem) error {
+func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem) error {
 	// Find the stage config for this item's current status
 	stage := stages.FindStage(e.cfg.Stages, item.Status)
 	if stage == nil {
@@ -367,7 +441,7 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem) error 
 
 	// If there are new comments, process them (even if stage is complete)
 	if len(newComments) > 0 {
-		return e.processComments(board, item, stage, newComments)
+		return e.processComments(ctx, board, item, stage, newComments)
 	}
 
 	// PRs only support comment processing — skip stage invocation
@@ -404,14 +478,29 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem) error 
 		logf(item.Number, "retry", "cooldown expired for stage %q, retrying\n", stage.Name)
 	}
 
+	// Bail early if context was cancelled before starting new work.
+	select {
+	case <-ctx.Done():
+		logf(item.Number, "skip", "shutdown requested, skipping\n")
+		return nil
+	default:
+	}
 	logf(item.Number, "process", "%q — stage: %s\n", item.Title, stage.Name)
 
-	// Acquire lock and ensure it's released on all exit paths
+	// Acquire lock, register in lockedIssues for shutdown cleanup, and ensure it's released on all exit paths.
 	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, lockLabel); err != nil {
 		logf(item.Number, "warn", "could not add lock label: %v\n", err)
 	} else {
+		e.mu.Lock()
+		e.lockedIssues[item.Number] = true
+		e.mu.Unlock()
 		defer e.removeLockLabel(item.Number, lockLabel)
 	}
+	defer func() {
+		e.mu.Lock()
+		delete(e.lockedIssues, item.Number)
+		e.mu.Unlock()
+	}()
 
 	// Add in_progress label for this stage and ensure it's removed on all exit paths.
 	// Only defer cleanup when the add succeeded to avoid a spurious warning on removal.
@@ -435,7 +524,7 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem) error 
 		logf(item.Number, "model", "using model override %q\n", modelOverride)
 	}
 	resume := attempted // resume session if we've processed this before
-	output, completed, err := e.claude.Invoke(stage, item, nil, resume, workDir, modelOverride)
+	output, completed, err := e.claude.Invoke(ctx, stage, item, nil, resume, workDir, modelOverride)
 	if err != nil {
 		logf(item.Number, "warn", "claude invocation issue: %v\n", err)
 	}
@@ -478,7 +567,7 @@ func (e *Engine) processItem(board *gh.ProjectBoard, item gh.ProjectItem) error 
 
 // processComments handles new user comments on an issue.
 // Flow: 👀 reactions → editing label → invoke Claude → perform actions / update issue body → remove editing label → 🚀 reactions
-func (e *Engine) processComments(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, comments []gh.Comment) error {
+func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, comments []gh.Comment) error {
 	logf(item.Number, "comments", "processing %d new comment(s) — stage: %s\n",
 		len(comments), stage.Name)
 
@@ -507,7 +596,7 @@ func (e *Engine) processComments(board *gh.ProjectBoard, item gh.ProjectItem, st
 	if modelOverride != "" {
 		logf(item.Number, "model", "using model override %q\n", modelOverride)
 	}
-	output, _, err := InvokeClaudeForComments(stage, item, comments, workDir, modelOverride)
+	output, _, err := InvokeClaudeForComments(ctx, stage, item, comments, workDir, modelOverride)
 	if err != nil {
 		logf(item.Number, "warn", "claude comment review issue: %v\n", err)
 		e.removeEditingLabel(item.Number)

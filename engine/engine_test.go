@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -65,7 +66,7 @@ func TestProcessItem_SkipsUnknownStage(t *testing.T) {
 		Status: "Unknown Column",
 	}
 
-	err := eng.processItem(board, item)
+	err := eng.processItem(context.Background(), board, item)
 	if err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
@@ -87,7 +88,7 @@ func TestProcessItem_SkipsLockedByOther(t *testing.T) {
 		Labels: []string{"fabrik:locked:otheruser"},
 	}
 
-	err := eng.processItem(board, item)
+	err := eng.processItem(context.Background(), board, item)
 	if err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
@@ -154,7 +155,7 @@ func TestProcessItem_AllowsOwnLock(t *testing.T) {
 	// processItem calls EnsureWorktree which needs git — skip worktree by mocking
 	// Instead, test that own lock doesn't cause skip by checking that we attempt to process
 	// We can't fully test processItem without git, so just test the lock check logic
-	err := eng.processItem(board, item)
+	err := eng.processItem(context.Background(), board, item)
 	// This will fail on EnsureWorktree since we don't have a real git repo,
 	// but the important thing is it didn't skip due to lock
 	if err != nil && !strings.Contains(err.Error(), "worktree") {
@@ -175,7 +176,7 @@ func TestProcessItem_SkipsCompleted(t *testing.T) {
 		Labels: []string{"stage:Research:complete"},
 	}
 
-	err := eng.processItem(board, item)
+	err := eng.processItem(context.Background(), board, item)
 	if err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
@@ -200,7 +201,7 @@ func TestProcessItem_SkipsAlreadyProcessedNoNewComments(t *testing.T) {
 		Status: "Research",
 	}
 
-	err := eng.processItem(board, item)
+	err := eng.processItem(context.Background(), board, item)
 	if err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
@@ -383,7 +384,7 @@ func TestPoll_FetchesBoardAndProcessesItems(t *testing.T) {
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
 
-	err := eng.poll()
+	err := eng.poll(context.Background())
 	if err != nil {
 		t.Fatalf("poll: %v", err)
 	}
@@ -401,7 +402,7 @@ func TestPoll_Error(t *testing.T) {
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
 
-	err := eng.poll()
+	err := eng.poll(context.Background())
 	if err == nil {
 		t.Fatal("expected error from poll")
 	}
@@ -467,7 +468,7 @@ func TestProcessItem_FullHappyPath(t *testing.T) {
 		ItemID: "PVTI_1",
 	}
 
-	err := eng.processItem(board, item)
+	err := eng.processItem(context.Background(), board, item)
 	if err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
@@ -539,7 +540,7 @@ func TestProcessItem_CompletionWithAutoAdvance(t *testing.T) {
 		ItemID: "PVTI_2",
 	}
 
-	err := eng.processItem(board, item)
+	err := eng.processItem(context.Background(), board, item)
 	if err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
@@ -594,7 +595,7 @@ func TestProcessItem_CompletionNoAutoAdvance(t *testing.T) {
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 3, Title: "No advance", Status: "Research", ItemID: "PVTI_3"}
 
-	err := eng.processItem(board, item)
+	err := eng.processItem(context.Background(), board, item)
 	if err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
@@ -644,7 +645,7 @@ func TestProcessItem_StageAutoAdvanceOverride(t *testing.T) {
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 4, Title: "Override", Status: "Research", ItemID: "PVTI_4"}
 
-	err := eng.processItem(board, item)
+	err := eng.processItem(context.Background(), board, item)
 	if err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
@@ -675,7 +676,7 @@ func TestProcessItem_EmptyOutput(t *testing.T) {
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 5, Title: "Empty", Status: "Research", ItemID: "PVTI_5"}
 
-	err := eng.processItem(board, item)
+	err := eng.processItem(context.Background(), board, item)
 	if err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
@@ -707,7 +708,7 @@ func TestProcessItem_ClaudeError(t *testing.T) {
 	item := gh.ProjectItem{Number: 6, Title: "Error", Status: "Research", ItemID: "PVTI_6"}
 
 	// Should not return error — claude errors are logged, not fatal
-	err := eng.processItem(board, item)
+	err := eng.processItem(context.Background(), board, item)
 	if err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
@@ -746,10 +747,10 @@ func TestProcessItem_ResumeOnReprocess(t *testing.T) {
 	}
 
 	// First call — not yet in processedSet, resume=false
-	eng.processItem(board, item)
+	eng.processItem(context.Background(), board, item)
 
 	// Second call — PollSeconds=0 means cooldown=0, so item is retried with resume=true
-	eng.processItem(board, item)
+	eng.processItem(context.Background(), board, item)
 
 	if len(claude.calls) != 2 {
 		t.Fatalf("expected 2 claude calls, got %d", len(claude.calls))
@@ -774,7 +775,7 @@ func TestPoll_StatusFieldFetchError(t *testing.T) {
 	eng := testEngine(client, &mockClaudeInvoker{})
 
 	// Should not error — status field failure is a warning
-	err := eng.poll()
+	err := eng.poll(context.Background())
 	if err != nil {
 		t.Fatalf("poll: %v", err)
 	}
@@ -796,7 +797,7 @@ func TestPoll_StatusFieldAlreadySet(t *testing.T) {
 	eng := testEngine(client, &mockClaudeInvoker{})
 	eng.statusField = &gh.StatusField{FieldID: "already-set"}
 
-	eng.poll()
+	eng.poll(context.Background())
 }
 
 func TestPoll_EmptyProjectID(t *testing.T) {
@@ -811,7 +812,7 @@ func TestPoll_EmptyProjectID(t *testing.T) {
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
 
-	eng.poll()
+	eng.poll(context.Background())
 }
 
 func TestNew(t *testing.T) {
@@ -897,7 +898,7 @@ func TestProcessItem_LabelAndCommentErrors(t *testing.T) {
 	item := gh.ProjectItem{Number: 8, Title: "Errors", Status: "Research", ItemID: "PVTI_8"}
 
 	// Should not return error — label/comment errors are logged, not fatal
-	err := eng.processItem(board, item)
+	err := eng.processItem(context.Background(), board, item)
 	if err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
@@ -929,7 +930,7 @@ func TestPoll_ProcessItemError(t *testing.T) {
 	)
 
 	// poll should not return error even when processItem fails
-	err := eng.poll()
+	err := eng.poll(context.Background())
 	if err != nil {
 		t.Fatalf("poll should not error from processItem failures: %v", err)
 	}
@@ -1043,6 +1044,7 @@ func TestConcurrentItemDispatch(t *testing.T) {
 			Stages:        nil, // no matching stage → processItem returns nil immediately
 		},
 		processedSet: make(map[string]time.Time),
+		lockedIssues: make(map[int]bool),
 		sem:          make(chan struct{}, maxConcurrent),
 	}
 
@@ -1087,7 +1089,7 @@ func TestConcurrentItemDispatch(t *testing.T) {
 				}
 				mu.Unlock()
 
-				if err := e.processItem(board, item); err != nil {
+				if err := e.processItem(context.Background(), board, item); err != nil {
 					t.Errorf("processItem error for issue #%d: %v", item.Number, err)
 				}
 

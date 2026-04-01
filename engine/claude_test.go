@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -222,7 +223,7 @@ echo "real invoker output"
 	}
 	issue := gh.ProjectItem{Number: 80, Title: "T"}
 
-	output, _, err := invoker.Invoke(stage, issue, nil, false, t.TempDir(), "")
+	output, _, err := invoker.Invoke(context.Background(), stage, issue, nil, false, t.TempDir(), "")
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
@@ -263,7 +264,7 @@ echo "FABRIK_STAGE_COMPLETE"
 		URL:    "https://example.com",
 	}
 
-	output, completed, err := InvokeClaude(stage, issue, nil, false, workDir, "")
+	output, completed, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -320,7 +321,7 @@ echo "NO RESUME"
 	os.WriteFile(sessionFile(99, "Plan"), []byte("sess_existing"), 0644)
 	defer os.RemoveAll(sessDir)
 
-	output, _, err := InvokeClaude(stage, issue, nil, true, workDir, "")
+	output, _, err := InvokeClaude(context.Background(), stage, issue, nil, true, workDir, "")
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -352,7 +353,7 @@ echo "args: $@"
 	}
 	issue := gh.ProjectItem{Number: 50, Title: "T"}
 
-	output, _, err := InvokeClaude(stage, issue, nil, false, workDir, "")
+	output, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -393,7 +394,7 @@ echo "args: $@"
 	}
 	issue := gh.ProjectItem{Number: 51, Title: "T"}
 
-	output, _, err := InvokeClaude(stage, issue, nil, false, workDir, "opus")
+	output, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "opus")
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -425,7 +426,7 @@ exit 1
 	}
 	issue := gh.ProjectItem{Number: 60, Title: "T"}
 
-	output, _, err := InvokeClaude(stage, issue, nil, false, workDir, "")
+	output, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
 	if err == nil {
 		t.Fatal("expected error for failing binary")
 	}
@@ -459,7 +460,7 @@ echo "$@" | grep -o "New Comments" && echo "HAS_COMMENTS" || echo "NO_COMMENTS"
 		{Author: "user", Body: "Fix this", CreatedAt: time.Now()},
 	}
 
-	output, _, err := InvokeClaude(stage, issue, comments, false, workDir, "")
+	output, _, err := InvokeClaude(context.Background(), stage, issue, comments, false, workDir, "")
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
