@@ -11,6 +11,7 @@ prompt: |
   are resolved, signal completion.
 model: sonnet
 max_turns: 50
+read_only: true
 allowed_tools:
   - Read
   - Grep
