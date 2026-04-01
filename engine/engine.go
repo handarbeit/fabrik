@@ -348,15 +348,10 @@ func (e *Engine) markCommentsProcessed(item gh.ProjectItem, comments []gh.Commen
 }
 
 // ensureDraftPR pushes the issue branch and creates a draft PR if one doesn't exist yet.
-// Idempotent: skips creation if FindPRForIssue finds an existing PR.
+// Idempotent: checks for an existing PR first; only pushes and creates if none found.
 func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) {
-	// Push the branch so GitHub can create a PR against it
-	if err := e.worktrees.PushBranch(item.Number); err != nil {
-		fmt.Printf("  [warn] could not push branch for issue #%d: %v\n", item.Number, err)
-		return
-	}
-
-	// Check if a PR already exists
+	// Check for an existing PR first — avoids pushing on retries and handles
+	// the case where a push fails but a PR already exists from a prior run.
 	prNumber, err := e.client.FindPRForIssue(e.cfg.Owner, e.cfg.Repo, item.Number)
 	if err != nil {
 		fmt.Printf("  [warn] could not check for existing PR for issue #%d: %v\n", item.Number, err)
@@ -364,6 +359,12 @@ func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) {
 	}
 	if prNumber > 0 {
 		fmt.Printf("  [pr] draft PR #%d already exists for issue #%d, skipping creation\n", prNumber, item.Number)
+		return
+	}
+
+	// No PR exists — push the branch so GitHub can create a PR against it
+	if err := e.worktrees.PushBranch(item.Number); err != nil {
+		fmt.Printf("  [warn] could not push branch for issue #%d: %v\n", item.Number, err)
 		return
 	}
 
