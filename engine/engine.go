@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -31,15 +32,27 @@ type Engine struct {
 	processedSet map[string]time.Time // track what we've processed: "issue#-commentID" -> timestamp
 }
 
-func New(cfg Config) *Engine {
-	// Use current working directory as the repo root
-	repoDir, _ := os.Getwd()
+func New(cfg Config) (*Engine, error) {
+	// Resolve git repo root (works even if launched from a subdirectory)
+	repoDir, err := gitToplevel()
+	if err != nil {
+		return nil, fmt.Errorf("resolving git repo root: %w", err)
+	}
 	return &Engine{
 		cfg:          cfg,
 		client:       gh.NewClient(cfg.Token),
 		worktrees:    NewWorktreeManager(repoDir),
 		processedSet: make(map[string]time.Time),
+	}, nil
+}
+
+func gitToplevel() (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("not inside a git repository: %w", err)
 	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 func (e *Engine) Run() error {
