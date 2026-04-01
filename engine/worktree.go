@@ -33,6 +33,8 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string) (s
 		cmd.Dir = wtDir
 		if out, cmdErr := cmd.CombinedOutput(); cmdErr == nil {
 			if strings.TrimSpace(string(out)) == branch {
+				// Worktree exists and is on the right branch — update from origin
+				wm.updateWorktreeFromMain(wtDir, baseBranch)
 				return wtDir, nil
 			}
 		}
@@ -40,6 +42,11 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string) (s
 		fmt.Printf("  [worktree] stale directory for issue #%d, recreating\n", issueNumber)
 		_ = os.RemoveAll(wtDir)
 	}
+
+	// Prune stale worktree registrations (directory gone but still registered in git)
+	prune := exec.Command("git", "worktree", "prune")
+	prune.Dir = wm.baseDir
+	_ = prune.Run()
 
 	// Ensure root directory exists
 	if err := os.MkdirAll(wm.rootDir, 0755); err != nil {
@@ -60,8 +67,8 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string) (s
 		}
 	}
 
-	// Create the worktree
-	cmd := exec.Command("git", "worktree", "add", wtDir, branch)
+	// Create the worktree (use -f to handle edge cases with stale registrations)
+	cmd := exec.Command("git", "worktree", "add", "-f", wtDir, branch)
 	cmd.Dir = wm.baseDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("creating worktree: %s: %w", string(out), err)
@@ -114,6 +121,46 @@ func (wm *WorktreeManager) branchExists(branch string) bool {
 	out, err := cmd.CombinedOutput()
 	_ = out
 	return err == nil
+}
+
+// updateWorktreeFromMain fetches latest origin and merges main into the worktree branch.
+// This ensures stages always start from an up-to-date base.
+// Errors are non-fatal — the worktree is still usable, just potentially behind.
+func (wm *WorktreeManager) updateWorktreeFromMain(wtDir, baseBranch string) {
+	// Check for uncommitted changes — skip update if dirty
+	statusCmd := exec.Command("git", "status", "--porcelain")
+	statusCmd.Dir = wtDir
+	if out, err := statusCmd.Output(); err == nil && len(strings.TrimSpace(string(out))) > 0 {
+		fmt.Printf("  [worktree] has uncommitted changes, skipping update from main\n")
+		return
+	}
+
+	// Fetch latest from origin
+	cmd := exec.Command("git", "fetch", "origin", baseBranch)
+	cmd.Dir = wtDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		fmt.Printf("  [worktree] warn: could not fetch origin: %s\n", strings.TrimSpace(string(out)))
+		return
+	}
+
+	// Merge origin/main into the current branch (no-edit to avoid interactive prompts)
+	cmd = exec.Command("git", "merge", "origin/"+baseBranch, "--no-edit")
+	cmd.Dir = wtDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		outStr := strings.TrimSpace(string(out))
+		// If merge conflicts, abort and let Claude handle it during the stage
+		if strings.Contains(outStr, "CONFLICT") || strings.Contains(outStr, "Automatic merge failed") {
+			fmt.Printf("  [worktree] merge conflicts detected, aborting merge — Claude will resolve during stage\n")
+			abort := exec.Command("git", "merge", "--abort")
+			abort.Dir = wtDir
+			_ = abort.Run()
+		} else {
+			fmt.Printf("  [worktree] warn: could not merge origin/%s: %s\n", baseBranch, outStr)
+		}
+		return
+	}
+
+	fmt.Printf("  [worktree] updated from origin/%s\n", baseBranch)
 }
 
 // DefaultBaseBranch returns the default branch of the repo (main or master).

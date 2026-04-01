@@ -65,13 +65,35 @@ When a user comments on an issue in an active stage:
 1. Fabrik reacts with :eyes: to each new comment (marks as "in review")
 2. Adds `fabrik:editing` label to lock the issue
 3. Invokes Claude with a stage-specific comment review prompt
-4. Parses the updated issue body from Claude's output
-5. Updates the issue body on GitHub
-6. Removes `fabrik:editing` label
-7. Reacts with :+1: to each processed comment
+4. Claude performs any requested actions (e.g., linking PRs, running commands)
+5. If the issue body needs updating, parses the updated body from Claude's output
+6. Updates the issue body on GitHub (or posts output as a comment)
+7. Removes `fabrik:editing` label
+8. Reacts with :rocket: to each processed comment (also used to skip already-processed comments on restart)
 
 This allows iterative refinement — comment to answer questions, provide feedback,
 or steer the work, and Fabrik incorporates your input into the issue.
+
+### Review and Fix
+
+Stages with `post_to_pr: true` (like the default Review stage) post detailed
+output on the linked PR and a brief summary on the issue. The Review stage
+also rebases onto latest main and resolves merge conflicts before reviewing,
+keeping the PR branch clean.
+
+If a stage doesn't complete (e.g., unfixable issues found), it retries after
+a cooldown period rather than being permanently skipped.
+
+### Steering with Comments
+
+Fabrik responds to natural language. Comment on an issue to steer the work:
+
+- *"Please link the PR to this issue"* — Claude performs the action
+- *"Please process PR feedback on PR #18"* — Claude reads the PR reviews and fixes the code
+- *"Let's use approach B instead"* — Claude updates the plan accordingly
+
+Each stage sees the full conversation history — previous stage outputs, user
+comments, and all — so context carries forward through the pipeline.
 
 ## Default Pipeline
 
@@ -83,7 +105,7 @@ The example stages implement a full SDLC pipeline:
 | **Research** | Explore codebase, identify scope, surface questions |
 | **Plan** | Design approach, break into tasks, document decisions |
 | **Implement** | Write code, tests, commit to issue branch |
-| **Review** | Check correctness, security, coverage |
+| **Review** | Rebase, review, fix, and push to PR |
 | **Validate** | Run tests, verify requirements met |
 | **Done** | Terminal state (no processing) |
 
@@ -100,6 +122,7 @@ comment_prompt: |         # Prompt for processing user comments (optional)
   You are reviewing user comments...
 model: sonnet             # Optional: claude model to use
 max_turns: 10             # Optional: limit Claude's turns
+post_to_pr: true          # Optional: post output on linked PR instead of issue
 allowed_tools:            # Optional: restrict available tools
   - Read
   - Grep
@@ -166,6 +189,20 @@ branch `fabrik/issue-N`. This means:
 - Multiple issues can be worked on simultaneously without conflicts
 - Each issue's changes are on their own branch, ready for PR
 - Worktrees persist across polls for Claude session continuity
+
+## The Self-Evolving Factory
+
+Fabrik is used to develop Fabrik. Issues filed against this repo go through
+the same Research → Plan → Implement → Review → Validate pipeline that Fabrik
+orchestrates. When we filed an issue to add PR comment processing, Fabrik
+researched its own codebase, planned the GraphQL changes, and will eventually
+implement the feature that lets it read PR comments — gaining a capability it
+needs by building it for itself. Ouroboros-as-a-service.
+
+The human's role is product manager: file issues, answer questions when the
+Research stage surfaces them, drag cards across the board, and occasionally
+comment "please process PR feedback" when Copilot has opinions. The factory
+does the rest.
 
 ## Architecture Decision Records
 

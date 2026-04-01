@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/verveguy/fabrik/config"
 	"github.com/verveguy/fabrik/engine"
@@ -16,9 +17,10 @@ type Config struct {
 	ProjectNum  int
 	User        string
 	Token       string
-	StagesDir   string
-	Yolo        bool
-	PollSeconds int
+	StagesDir     string
+	Yolo          bool
+	PollSeconds   int
+	MaxConcurrent int
 }
 
 func Execute() error {
@@ -61,6 +63,16 @@ func Execute() error {
 		cfg.User = os.Getenv("FABRIK_USER")
 	}
 
+	// Max concurrent from env, default 5
+	cfg.MaxConcurrent = 5
+	if v := os.Getenv("FABRIK_MAX_CONCURRENT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.MaxConcurrent = n
+		} else {
+			fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_CONCURRENT=%q is invalid (must be a positive integer); using default %d\n", v, cfg.MaxConcurrent)
+		}
+	}
+
 	if cfg.Owner == "" || cfg.Repo == "" || cfg.ProjectNum == 0 {
 		fmt.Fprintf(os.Stderr, "Usage: fabrik --owner OWNER --repo REPO --project NUM [options]\n\n")
 		flag.PrintDefaults()
@@ -92,16 +104,18 @@ func Execute() error {
 	fmt.Printf("  stages:  %d loaded\n", len(stageCfgs))
 	fmt.Printf("  yolo:    %v\n", cfg.Yolo)
 	fmt.Printf("  poll:    %ds\n", cfg.PollSeconds)
+	fmt.Printf("  workers: %d\n", cfg.MaxConcurrent)
 
 	eng, err := engine.New(engine.Config{
-		Owner:       cfg.Owner,
-		Repo:        cfg.Repo,
-		ProjectNum:  cfg.ProjectNum,
-		User:        cfg.User,
-		Token:       cfg.Token,
-		Yolo:        cfg.Yolo,
-		PollSeconds: cfg.PollSeconds,
-		Stages:      stageCfgs,
+		Owner:         cfg.Owner,
+		Repo:          cfg.Repo,
+		ProjectNum:    cfg.ProjectNum,
+		User:          cfg.User,
+		Token:         cfg.Token,
+		Yolo:          cfg.Yolo,
+		PollSeconds:   cfg.PollSeconds,
+		MaxConcurrent: cfg.MaxConcurrent,
+		Stages:        stageCfgs,
 	})
 	if err != nil {
 		return err
