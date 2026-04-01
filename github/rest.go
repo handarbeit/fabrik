@@ -3,10 +3,16 @@ package github
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 )
+
+// ErrNotFound is returned by REST methods when the server responds with 404.
+// Callers may use errors.Is(err, github.ErrNotFound) to distinguish "not found"
+// from other failures without fragile string matching.
+var ErrNotFound = errors.New("not found")
 
 func (c *Client) restRequest(method, url string, body interface{}) error {
 	jsonBody, err := json.Marshal(body)
@@ -147,6 +153,9 @@ func (c *Client) restDelete(url string) error {
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode == 404 {
+			return fmt.Errorf("GitHub API returned 404: %s: %w", string(respBody), ErrNotFound)
+		}
 		return fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
