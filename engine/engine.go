@@ -207,7 +207,7 @@ func (e *Engine) processComments(board *gh.ProjectBoard, item gh.ProjectItem, st
 
 	// Step 1: React with 👀 to all new comments
 	for _, c := range comments {
-		if err := e.client.AddCommentReaction(e.cfg.Owner, e.cfg.Repo, c.ID, "eyes"); err != nil {
+		if err := e.client.AddCommentReaction(e.cfg.Owner, e.cfg.Repo, c.DatabaseID, "eyes"); err != nil {
 			fmt.Printf("  [warn] could not add 👀 to comment %s: %v\n", c.ID, err)
 		}
 	}
@@ -254,7 +254,7 @@ func (e *Engine) processComments(board *gh.ProjectBoard, item gh.ProjectItem, st
 
 	// Step 7: React with 👍 to all processed comments
 	for _, c := range comments {
-		if err := e.client.AddCommentReaction(e.cfg.Owner, e.cfg.Repo, c.ID, "+1"); err != nil {
+		if err := e.client.AddCommentReaction(e.cfg.Owner, e.cfg.Repo, c.DatabaseID, "+1"); err != nil {
 			fmt.Printf("  [warn] could not add 👍 to comment %s: %v\n", c.ID, err)
 		}
 	}
