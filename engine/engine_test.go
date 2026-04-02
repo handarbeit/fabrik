@@ -1378,4 +1378,261 @@ func TestExtractModelOverrideWarnsOnMultiple(t *testing.T) {
 	}
 }
 
+func TestProcessItem_EscalatesAtMaxRetries(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
+			return "partial output", false, nil // never completes
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 2,
+			Stages:     testStages(),
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 10, Title: "Escalate test", Status: "Research", ItemID: "PVTI_10"}
+
+	// PollSeconds=0 makes cooldown=0, so both calls reach Claude without waiting.
+	// First attempt — retry count becomes 1, no escalation yet
+	eng.processItem(context.Background(), board, item)
+	foundPaused := false
+	for _, call := range client.addLabelCalls {
+		if call.labelName == "fabrik:paused" {
+			foundPaused = true
+		}
+	}
+	if foundPaused {
+		t.Error("should not escalate after first failure")
+	}
+
+	// Second attempt — retry count becomes 2, should escalate
+	eng.processItem(context.Background(), board, item)
+
+	foundPaused = false
+	foundFailed := false
+	for _, call := range client.addLabelCalls {
+		if call.labelName == "fabrik:paused" {
+			foundPaused = true
+		}
+		if call.labelName == "stage:Research:failed" {
+			foundFailed = true
+		}
+	}
+	if !foundPaused {
+		t.Error("expected fabrik:paused label after max retries")
+	}
+	if !foundFailed {
+		t.Error("expected stage:Research:failed label after max retries")
+	}
+
+	// Should have posted an escalation comment
+	foundEscalationComment := false
+	for _, call := range client.addCommentCalls {
+		if strings.Contains(call.body, "paused") && strings.Contains(call.body, "Research") {
+			foundEscalationComment = true
+		}
+	}
+	if !foundEscalationComment {
+		t.Error("expected escalation comment to be posted")
+	}
+
+	// pausedDueToRetries should be set
+	itemKey := fmt.Sprintf("%d-%s", 10, "Research")
+	eng.mu.Lock()
+	paused := eng.pausedDueToRetries[itemKey]
+	eng.mu.Unlock()
+	if !paused {
+		t.Error("expected pausedDueToRetries to be set")
+	}
+}
+
+func TestProcessItem_ResetsOnUnpause(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
+			return "output", false, nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 3, // high enough so one retry after unpause doesn't re-escalate
+			Stages:     testStages(),
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	// Simulate a previous escalation: engine had paused this issue after 3 failures
+	itemKey := fmt.Sprintf("%d-%s", 11, "Research")
+	eng.mu.Lock()
+	eng.retryCount[itemKey] = 3
+	eng.pausedDueToRetries[itemKey] = true
+	eng.mu.Unlock()
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	// Item does NOT have fabrik:paused — user has removed it to signal investigation done
+	item := gh.ProjectItem{
+		Number: 11,
+		Title:  "Unpause test",
+		Status: "Research",
+		ItemID: "PVTI_11",
+		Labels: []string{}, // no fabrik:paused
+	}
+
+	eng.processItem(context.Background(), board, item)
+
+	// stage:Research:failed should have been removed by clearFailedStage
+	foundRemoval := false
+	for _, call := range client.removeLabelCalls {
+		if call.labelName == "stage:Research:failed" {
+			foundRemoval = true
+		}
+	}
+	if !foundRemoval {
+		t.Error("expected stage:Research:failed label to be removed on unpause")
+	}
+
+	// pausedDueToRetries should be cleared (cleared by clearFailedStage, not re-set since we don't hit limit yet)
+	eng.mu.Lock()
+	stillPaused := eng.pausedDueToRetries[itemKey]
+	eng.mu.Unlock()
+	if stillPaused {
+		t.Error("expected pausedDueToRetries to be cleared after unpause")
+	}
+}
+
+func TestProcessItem_UnlimitedWhenMaxRetriesZero(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
+			return "output", false, nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 0, // unlimited
+			Stages:     testStages(),
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 12, Title: "Unlimited retries", Status: "Research", ItemID: "PVTI_12"}
+
+	// Run many times — should never escalate
+	for i := 0; i < 10; i++ {
+		eng.processItem(context.Background(), board, item)
+	}
+
+	for _, call := range client.addLabelCalls {
+		if call.labelName == "fabrik:paused" {
+			t.Error("should not add fabrik:paused when MaxRetries=0")
+		}
+		if strings.HasSuffix(call.labelName, ":failed") {
+			t.Errorf("should not add failed label when MaxRetries=0, got %q", call.labelName)
+		}
+	}
+
+	// retryCount should remain 0 (not incremented when MaxRetries=0)
+	itemKey := fmt.Sprintf("%d-%s", 12, "Research")
+	eng.mu.Lock()
+	count := eng.retryCount[itemKey]
+	eng.mu.Unlock()
+	if count != 0 {
+		t.Errorf("expected retryCount=0 when MaxRetries=0, got %d", count)
+	}
+}
+
+func TestProcessItem_ClearsRetryCountOnCompletion(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
+			return "output", true, nil // stage completes successfully
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 3,
+			Stages:     testStages(),
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	// Pre-seed retry state as if previous failures occurred
+	itemKey := fmt.Sprintf("%d-%s", 13, "Research")
+	eng.mu.Lock()
+	eng.retryCount[itemKey] = 2
+	eng.pausedDueToRetries[itemKey] = false
+	eng.mu.Unlock()
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 13, Title: "Completion test", Status: "Research", ItemID: "PVTI_13"}
+
+	eng.processItem(context.Background(), board, item)
+
+	// Both maps should be cleared after successful completion
+	eng.mu.Lock()
+	count := eng.retryCount[itemKey]
+	paused := eng.pausedDueToRetries[itemKey]
+	eng.mu.Unlock()
+
+	if count != 0 {
+		t.Errorf("expected retryCount to be cleared on completion, got %d", count)
+	}
+	if paused {
+		t.Error("expected pausedDueToRetries to be cleared on completion")
+	}
+}
+
 // skipIfNoGit and initBareRepo are defined in worktree_test.go
