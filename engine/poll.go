@@ -221,11 +221,16 @@ doneDispatching:
 		// Check whether any workers from a previous poll cycle are still running.
 		// If so, the engine is not truly idle — auto-upgrade must not run because
 		// checkAndUpgrade calls syscall.Exec which would kill in-flight workers.
-		var hasInFlight bool
-		e.inFlight.Range(func(_, _ any) bool { hasInFlight = true; return false })
+		var inFlightNums []int
+		e.inFlight.Range(func(key, _ any) bool {
+			if num, ok := key.(int); ok {
+				inFlightNums = append(inFlightNums, num)
+			}
+			return true
+		})
 
-		if hasInFlight {
-			fmt.Println("[poll] nothing new to dispatch (workers still in-flight)")
+		if len(inFlightNums) > 0 {
+			fmt.Printf("[poll] nothing new to dispatch (workers still in-flight: %v)\n", inFlightNums)
 			e.idleCount = 0
 		} else {
 			fmt.Println("[poll] nothing to do")
