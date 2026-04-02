@@ -11,9 +11,9 @@ import (
 
 // WorktreeManager handles git worktrees for issue isolation.
 type WorktreeManager struct {
-	mu      sync.Mutex                     // serializes worktree/branch creation (git config isn't concurrent-safe)
-	baseDir string                         // directory containing the main repo
-	rootDir string                         // where worktrees are stored (e.g., .fabrik/worktrees)
+	mu      sync.Mutex                        // serializes worktree/branch creation (git config isn't concurrent-safe)
+	baseDir string                            // directory containing the main repo
+	rootDir string                            // where worktrees are stored (e.g., .fabrik/worktrees)
 	logfFn  func(int, string, string, ...any) // optional; set by Engine after construction
 }
 

@@ -155,8 +155,8 @@ func TestItemNeedsWork_SkipsPausedWithNewComments(t *testing.T) {
 func TestProcessItem_AllowsOwnLock(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
-			return "output", ClaudeStats{}, false, nil
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+			return "output", false, TokenUsage{}, nil
 		},
 	}
 	eng := testEngine(client, claude)
@@ -521,8 +521,8 @@ func TestProcessItem_FullHappyPath(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
-			return "Claude output here\nFABRIK_STAGE_COMPLETE\n", ClaudeStats{}, true, nil
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+			return "Claude output here\nFABRIK_STAGE_COMPLETE\n", true, TokenUsage{}, nil
 		},
 	}
 
@@ -591,6 +591,52 @@ func TestProcessItem_FullHappyPath(t *testing.T) {
 	}
 }
 
+func TestProcessItem_AccumulatesTokenUsage(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	want := TokenUsage{InputTokens: 100, OutputTokens: 50, CacheCreationTokens: 10, CacheReadTokens: 5, CostUSD: 0.0042}
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+			return "FABRIK_STAGE_COMPLETE", true, want, nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{Owner: "o", Repo: "r", User: "u", Token: "t", Stages: testStages()},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 200, Title: "Token Test", Status: "Research", ItemID: "PVTI_200"}
+
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	eng.mu.Lock()
+	got := eng.totalTokens
+	eng.mu.Unlock()
+
+	if got.InputTokens != want.InputTokens {
+		t.Errorf("totalTokens.InputTokens = %d, want %d", got.InputTokens, want.InputTokens)
+	}
+	if got.OutputTokens != want.OutputTokens {
+		t.Errorf("totalTokens.OutputTokens = %d, want %d", got.OutputTokens, want.OutputTokens)
+	}
+	if got.CacheCreationTokens != want.CacheCreationTokens {
+		t.Errorf("totalTokens.CacheCreationTokens = %d, want %d", got.CacheCreationTokens, want.CacheCreationTokens)
+	}
+	if got.CacheReadTokens != want.CacheReadTokens {
+		t.Errorf("totalTokens.CacheReadTokens = %d, want %d", got.CacheReadTokens, want.CacheReadTokens)
+	}
+	if diff := got.CostUSD - want.CostUSD; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("totalTokens.CostUSD = %f, want ~%f", got.CostUSD, want.CostUSD)
+	}
+}
+
 func TestProcessItem_CompletionWithAutoAdvance(t *testing.T) {
 	skipIfNoGit(t)
 	repoDir := initBareRepo(t)
@@ -598,8 +644,8 @@ func TestProcessItem_CompletionWithAutoAdvance(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
-			return "Done\nFABRIK_STAGE_COMPLETE", ClaudeStats{}, true, nil
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+			return "Done\nFABRIK_STAGE_COMPLETE", true, TokenUsage{}, nil
 		},
 	}
 
@@ -676,8 +722,8 @@ func TestProcessItem_CompletionNoAutoAdvance(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
-			return "Done", ClaudeStats{}, true, nil
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+			return "Done", true, TokenUsage{}, nil
 		},
 	}
 
@@ -717,8 +763,8 @@ func TestProcessItem_StageAutoAdvanceOverride(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
-			return "Done", ClaudeStats{}, true, nil
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+			return "Done", true, TokenUsage{}, nil
 		},
 	}
 
@@ -767,8 +813,8 @@ func TestProcessItem_EmptyOutput(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
-			return "", ClaudeStats{}, false, nil
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+			return "", false, TokenUsage{}, nil
 		},
 	}
 
@@ -798,11 +844,11 @@ func TestProcessItem_ClaudeError(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
 			// Simulate a start failure: binary not found (*exec.Error)
 			cmd := exec.Command("this-binary-does-not-exist-fabrik-test")
 			_, startErr := cmd.Output()
-			return "partial output", ClaudeStats{}, false, startErr
+			return "partial output", false, TokenUsage{}, startErr
 		},
 	}
 
@@ -842,11 +888,11 @@ func TestProcessItem_ClaudeExitError(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
 			// Simulate Claude running and exiting non-zero (wrapped *exec.ExitError)
 			cmd := exec.Command("git", "definitely-invalid-arg")
 			runErr := cmd.Run()
-			return "some output", ClaudeStats{}, false, fmt.Errorf("claude exited with error: %w", runErr)
+			return "some output", false, TokenUsage{}, fmt.Errorf("claude exited with error: %w", runErr)
 		},
 	}
 
@@ -880,8 +926,8 @@ func TestProcessItem_ResumeOnReprocess(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
-			return "output", ClaudeStats{}, false, nil
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+			return "output", false, TokenUsage{}, nil
 		},
 	}
 
@@ -1076,8 +1122,8 @@ func TestProcessItem_LabelAndCommentErrors(t *testing.T) {
 		},
 	}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
-			return "output", ClaudeStats{}, true, nil
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+			return "output", true, TokenUsage{}, nil
 		},
 	}
 
@@ -1111,8 +1157,8 @@ func TestPoll_ProcessItemError(t *testing.T) {
 		},
 	}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
-			return "", ClaudeStats{}, false, nil
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+			return "", false, TokenUsage{}, nil
 		},
 	}
 
@@ -1441,8 +1487,8 @@ func TestProcessItem_EscalatesAtMaxRetries(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
-			return "partial output", ClaudeStats{}, false, nil // never completes
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+			return "partial output", false, TokenUsage{}, nil // never completes
 		},
 	}
 
@@ -1529,8 +1575,8 @@ func TestProcessItem_ResetsOnUnpause(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
-			return "output", ClaudeStats{}, false, nil
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+			return "output", false, TokenUsage{}, nil
 		},
 	}
 
@@ -1597,8 +1643,8 @@ func TestProcessItem_UnlimitedWhenMaxRetriesZero(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
-			return "output", ClaudeStats{}, false, nil
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+			return "output", false, TokenUsage{}, nil
 		},
 	}
 
@@ -1653,8 +1699,8 @@ func TestProcessItem_ClearsRetryCountOnCompletion(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
-			return "output", ClaudeStats{}, true, nil // stage completes successfully
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+			return "output", true, TokenUsage{}, nil // stage completes successfully
 		},
 	}
 

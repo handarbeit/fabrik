@@ -364,16 +364,21 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		e.logf(item.Number, "model", "using model override %q\n", modelOverride)
 	}
 	resume := attempted // resume session if we've processed this before
-	output, stats, completed, err := e.claude.Invoke(ctx, stage, item, nil, resume, workDir, modelOverride)
-	if stats.TurnsUsed > 0 || stats.InputTokens > 0 || stats.OutputTokens > 0 {
-		if stats.MaxTurns > 0 {
+	output, completed, usage, err := e.claude.Invoke(ctx, stage, item, nil, resume, workDir, modelOverride)
+	if usage.TurnsUsed > 0 || usage.InputTokens > 0 || usage.OutputTokens > 0 {
+		if usage.MaxTurns > 0 {
 			e.logf(item.Number, "stats", "used %d/%d turns, %dk input / %dk output tokens\n",
-				stats.TurnsUsed, stats.MaxTurns, stats.InputTokens/1000, stats.OutputTokens/1000)
+				usage.TurnsUsed, usage.MaxTurns, usage.InputTokens/1000, usage.OutputTokens/1000)
 		} else {
 			e.logf(item.Number, "stats", "used %d turns, %dk input / %dk output tokens\n",
-				stats.TurnsUsed, stats.InputTokens/1000, stats.OutputTokens/1000)
+				usage.TurnsUsed, usage.InputTokens/1000, usage.OutputTokens/1000)
 		}
 	}
+	func() {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		e.totalTokens = e.totalTokens.add(usage)
+	}()
 
 	// Restore any stashed changes now that the read-only stage has finished.
 	if stashed {
@@ -398,7 +403,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 
 	// Post Claude's output
 	if output != "" {
-		footer := formatStatsFooter(stats, completed)
+		footer := formatStatsFooter(usage, completed)
 		if stage.PostToPR {
 			e.postOutputToPR(item, stage.Name, output, footer, branch, commit, timestamp)
 		} else {

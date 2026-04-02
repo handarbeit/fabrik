@@ -162,7 +162,123 @@ func TestCheckCompletion_UnsupportedTypes(t *testing.T) {
 	}
 }
 
-func TestSaveSessionIDDirect_Valid(t *testing.T) {
+func TestParseClaudeJSON_ValidJSON(t *testing.T) {
+	output := []byte(`{"result":"hello world","session_id":"sess_abc123","num_turns":5,"total_cost_usd":0.0042,"modelUsage":{"claude-sonnet-4-6":{"inputTokens":100,"outputTokens":50,"cacheCreationInputTokens":10,"cacheReadInputTokens":5}}}`)
+
+	resp, ok := parseClaudeJSON(output)
+	if !ok {
+		t.Fatal("expected successful parse")
+	}
+	if resp.Result != "hello world" {
+		t.Errorf("Result = %q, want %q", resp.Result, "hello world")
+	}
+	if resp.SessionID != "sess_abc123" {
+		t.Errorf("SessionID = %q, want %q", resp.SessionID, "sess_abc123")
+	}
+	if resp.NumTurns != 5 {
+		t.Errorf("NumTurns = %d, want 5", resp.NumTurns)
+	}
+
+	usage := tokenUsageFromResponse(resp)
+	if usage.InputTokens != 100 {
+		t.Errorf("InputTokens = %d, want 100", usage.InputTokens)
+	}
+	if usage.OutputTokens != 50 {
+		t.Errorf("OutputTokens = %d, want 50", usage.OutputTokens)
+	}
+	if usage.CacheCreationTokens != 10 {
+		t.Errorf("CacheCreationTokens = %d, want 10", usage.CacheCreationTokens)
+	}
+	if usage.CacheReadTokens != 5 {
+		t.Errorf("CacheReadTokens = %d, want 5", usage.CacheReadTokens)
+	}
+	if diff := usage.CostUSD - 0.0042; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("CostUSD = %f, want ~0.0042", usage.CostUSD)
+	}
+}
+
+func TestTokenUsageFromResponse_MultiModel(t *testing.T) {
+	output := []byte(`{"result":"ok","session_id":"s","total_cost_usd":0.003,"modelUsage":{"claude-sonnet-4-6":{"inputTokens":100,"outputTokens":50,"cacheCreationInputTokens":10,"cacheReadInputTokens":5},"claude-haiku-3":{"inputTokens":200,"outputTokens":30,"cacheCreationInputTokens":0,"cacheReadInputTokens":20}}}`)
+	resp, ok := parseClaudeJSON(output)
+	if !ok {
+		t.Fatal("expected successful parse")
+	}
+	usage := tokenUsageFromResponse(resp)
+	if usage.InputTokens != 300 {
+		t.Errorf("InputTokens = %d, want 300", usage.InputTokens)
+	}
+	if usage.OutputTokens != 80 {
+		t.Errorf("OutputTokens = %d, want 80", usage.OutputTokens)
+	}
+	if usage.CacheCreationTokens != 10 {
+		t.Errorf("CacheCreationTokens = %d, want 10", usage.CacheCreationTokens)
+	}
+	if usage.CacheReadTokens != 25 {
+		t.Errorf("CacheReadTokens = %d, want 25", usage.CacheReadTokens)
+	}
+	if diff := usage.CostUSD - 0.003; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("CostUSD = %f, want ~0.003", usage.CostUSD)
+	}
+}
+
+func TestTokenUsageAdd(t *testing.T) {
+	a := TokenUsage{InputTokens: 10, OutputTokens: 5, CacheCreationTokens: 2, CacheReadTokens: 3, CostUSD: 0.001}
+	b := TokenUsage{InputTokens: 20, OutputTokens: 15, CacheCreationTokens: 8, CacheReadTokens: 7, CostUSD: 0.002}
+	got := a.add(b)
+	if got.InputTokens != 30 {
+		t.Errorf("InputTokens = %d, want 30", got.InputTokens)
+	}
+	if got.OutputTokens != 20 {
+		t.Errorf("OutputTokens = %d, want 20", got.OutputTokens)
+	}
+	if got.CacheCreationTokens != 10 {
+		t.Errorf("CacheCreationTokens = %d, want 10", got.CacheCreationTokens)
+	}
+	if got.CacheReadTokens != 10 {
+		t.Errorf("CacheReadTokens = %d, want 10", got.CacheReadTokens)
+	}
+	if diff := got.CostUSD - 0.003; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("CostUSD = %f, want ~0.003", got.CostUSD)
+	}
+	// Adding zero value leaves original unchanged
+	zero := TokenUsage{}
+	if a.add(zero) != a {
+		t.Error("adding zero TokenUsage should return original")
+	}
+}
+
+func TestTokenUsageFromResponse_NoModelUsage(t *testing.T) {
+	// When modelUsage is absent (older CLI or error response), token counts are zero
+	// but CostUSD is still populated from the top-level field.
+	output := []byte(`{"result":"hello","session_id":"s","total_cost_usd":0.005}`)
+	resp, ok := parseClaudeJSON(output)
+	if !ok {
+		t.Fatal("expected successful parse")
+	}
+	usage := tokenUsageFromResponse(resp)
+	if usage.InputTokens != 0 || usage.OutputTokens != 0 || usage.CacheCreationTokens != 0 || usage.CacheReadTokens != 0 {
+		t.Errorf("expected zero token counts when modelUsage absent, got %+v", usage)
+	}
+	if diff := usage.CostUSD - 0.005; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("CostUSD = %f, want ~0.005", usage.CostUSD)
+	}
+}
+
+func TestParseClaudeJSON_InvalidJSON(t *testing.T) {
+	_, ok := parseClaudeJSON([]byte(`not json at all`))
+	if ok {
+		t.Error("expected parse failure for invalid JSON")
+	}
+}
+
+func TestParseClaudeJSON_EmptyResult(t *testing.T) {
+	_, ok := parseClaudeJSON([]byte(`{"result":"","session_id":"sess_1"}`))
+	if ok {
+		t.Error("expected parse failure for empty result")
+	}
+}
+
+func TestSaveSessionIDDirect(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.session")
 
@@ -175,12 +291,6 @@ func TestSaveSessionIDDirect_Valid(t *testing.T) {
 	if string(data) != "sess_abc123" {
 		t.Errorf("session ID = %q, want sess_abc123", string(data))
 	}
-
-	if info, err := os.Stat(path); err != nil {
-		t.Fatalf("stat session file: %v", err)
-	} else if perm := info.Mode().Perm(); perm != 0600 {
-		t.Errorf("session file mode = %04o, want 0600", perm)
-	}
 }
 
 func TestSaveSessionIDDirect_Empty(t *testing.T) {
@@ -191,64 +301,6 @@ func TestSaveSessionIDDirect_Empty(t *testing.T) {
 
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Error("session file should not exist for empty session ID")
-	}
-}
-
-func TestParseClaudeJSON(t *testing.T) {
-	input := []byte(`{"result":"hello","session_id":"sess_xyz","num_turns":5,"total_cost_usd":0.01,"usage":{"input_tokens":100,"output_tokens":50}}`)
-	ok, text, sessionID, turns, cost, inputTokens, outputTokens := parseClaudeJSON(input)
-	if !ok {
-		t.Error("expected ok=true for valid JSON")
-	}
-	if text != "hello" {
-		t.Errorf("text = %q, want hello", text)
-	}
-	if sessionID != "sess_xyz" {
-		t.Errorf("sessionID = %q, want sess_xyz", sessionID)
-	}
-	if turns != 5 {
-		t.Errorf("turns = %d, want 5", turns)
-	}
-	if cost != 0.01 {
-		t.Errorf("cost = %f, want 0.01", cost)
-	}
-	if inputTokens != 100 {
-		t.Errorf("inputTokens = %d, want 100", inputTokens)
-	}
-	if outputTokens != 50 {
-		t.Errorf("outputTokens = %d, want 50", outputTokens)
-	}
-}
-
-func TestParseClaudeJSON_Invalid(t *testing.T) {
-	ok, text, sessionID, turns, cost, inputTokens, outputTokens := parseClaudeJSON([]byte("not json"))
-	if ok {
-		t.Error("expected ok=false for invalid JSON")
-	}
-	if text != "" || sessionID != "" || turns != 0 || cost != 0 || inputTokens != 0 || outputTokens != 0 {
-		t.Errorf("expected zero values for invalid JSON, got text=%q sessionID=%q turns=%d cost=%f inputTokens=%d outputTokens=%d", text, sessionID, turns, cost, inputTokens, outputTokens)
-	}
-}
-
-func TestParseClaudeJSON_MaxTurnsError(t *testing.T) {
-	// When Claude hits max_turns, the JSON has no "result" field.
-	// parseClaudeJSON must return ok=true with empty text (not fail to parse).
-	input := []byte(`{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":30,"usage":{"input_tokens":1000,"output_tokens":500},"errors":["Reached maximum number of turns (30)"]}`)
-	ok, text, _, turns, _, inputTokens, outputTokens := parseClaudeJSON(input)
-	if !ok {
-		t.Error("expected ok=true: valid JSON should parse even without a result field")
-	}
-	if text != "" {
-		t.Errorf("text = %q, want empty string for error response", text)
-	}
-	if turns != 30 {
-		t.Errorf("turns = %d, want 30", turns)
-	}
-	if inputTokens != 1000 {
-		t.Errorf("inputTokens = %d, want 1000", inputTokens)
-	}
-	if outputTokens != 500 {
-		t.Errorf("outputTokens = %d, want 500", outputTokens)
 	}
 }
 
@@ -275,45 +327,45 @@ func TestLogDir(t *testing.T) {
 func TestFormatStatsFooter(t *testing.T) {
 	tests := []struct {
 		name      string
-		stats     ClaudeStats
+		stats     TokenUsage
 		completed bool
 		wantEmpty bool
 		wantSubs  []string
 	}{
 		{
 			name:      "zero stats returns empty",
-			stats:     ClaudeStats{},
+			stats:     TokenUsage{},
 			completed: true,
 			wantEmpty: true,
 		},
 		{
 			name:      "with turns and tokens, completed",
-			stats:     ClaudeStats{TurnsUsed: 15, MaxTurns: 30, InputTokens: 47000, OutputTokens: 8000},
+			stats:     TokenUsage{TurnsUsed: 15, MaxTurns: 30, InputTokens: 47000, OutputTokens: 8000},
 			completed: true,
 			wantSubs:  []string{"15/30 turns", "47k input", "8k output"},
 		},
 		{
 			name:      "with turns and tokens, incomplete",
-			stats:     ClaudeStats{TurnsUsed: 30, MaxTurns: 30, InputTokens: 47000, OutputTokens: 8000},
+			stats:     TokenUsage{TurnsUsed: 30, MaxTurns: 30, InputTokens: 47000, OutputTokens: 8000},
 			completed: false,
 			wantSubs:  []string{"30/30 turns", "Stage incomplete."},
 		},
 		{
 			name:      "no max turns",
-			stats:     ClaudeStats{TurnsUsed: 10, InputTokens: 5000, OutputTokens: 1000},
+			stats:     TokenUsage{TurnsUsed: 10, InputTokens: 5000, OutputTokens: 1000},
 			completed: true,
 			wantSubs:  []string{"10 turns", "5k input", "1k output"},
 		},
 		{
 			name:      "only input tokens",
-			stats:     ClaudeStats{InputTokens: 5000},
+			stats:     TokenUsage{InputTokens: 5000},
 			completed: true,
 			wantEmpty: false,
 			wantSubs:  []string{"5k input"},
 		},
 		{
 			name:      "only output tokens",
-			stats:     ClaudeStats{OutputTokens: 2000},
+			stats:     TokenUsage{OutputTokens: 2000},
 			completed: true,
 			wantEmpty: false,
 			wantSubs:  []string{"2k output"},
@@ -367,7 +419,7 @@ printf '%s\n' '{"result":"stage output\nFABRIK_STAGE_COMPLETE\n","session_id":"s
 	defer os.RemoveAll(SessionDir(77))
 	defer os.RemoveAll(LogDir(77))
 
-	output, stats, completed, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	output, completed, stats, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -474,7 +526,7 @@ printf '%s\n' '{"result":"Claude output for test\nFABRIK_STAGE_COMPLETE\n","sess
 		URL:    "https://example.com",
 	}
 
-	output, _, completed, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	output, completed, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}

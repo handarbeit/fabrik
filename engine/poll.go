@@ -17,6 +17,45 @@ import (
 
 const idleUpgradeThreshold = 2
 
+// isTTY reports whether stdout is connected to a terminal.
+var isTTY = func() bool {
+	fi, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}()
+
+// lastStatusLen tracks the length of the last overwritten status line so we
+// can clear any leftover characters when the next line is shorter.
+var lastStatusLen int
+
+// pollStatus prints a transient status line that overwrites itself on a TTY.
+// On non-TTY output it prints a normal line.
+func pollStatus(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	if isTTY {
+		// Pad with spaces to clear any leftover characters from the previous line.
+		pad := ""
+		if len(msg) < lastStatusLen {
+			pad = strings.Repeat(" ", lastStatusLen-len(msg))
+		}
+		fmt.Printf("\r%s%s", msg, pad)
+		lastStatusLen = len(msg)
+	} else {
+		fmt.Println(msg)
+	}
+}
+
+// pollStatusClear ends the current transient status line (if on a TTY) so that
+// subsequent output starts on a fresh line.
+func pollStatusClear() {
+	if isTTY && lastStatusLen > 0 {
+		fmt.Println()
+		lastStatusLen = 0
+	}
+}
+
 func gitToplevel() (string, error) {
 	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
 	out, err := cmd.Output()
@@ -128,6 +167,7 @@ func (e *Engine) poll(ctx context.Context) error {
 
 	board, err := e.client.FetchProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
 	if err != nil {
+		pollStatusClear()
 		return err
 	}
 
@@ -220,7 +260,7 @@ func (e *Engine) poll(ctx context.Context) error {
 			stageName = s.Name
 		}
 		startTime := time.Now()
-		e.inFlight.Store(item.Number, struct{}{})
+		e.inFlight.Store(item.Number, item.IsPR)
 		e.wg.Add(1)
 		dispatched++
 		go func() {
@@ -247,15 +287,38 @@ func (e *Engine) poll(ctx context.Context) error {
 	}
 doneDispatching:
 
+	// Report cumulative token consumption only when new cost has accrued since
+	// the last print, to avoid repeated log noise on idle polls.
+	e.mu.Lock()
+	tokens := e.totalTokens
+	newCost := tokens.CostUSD > e.lastReportedCost
+	if newCost {
+		e.lastReportedCost = tokens.CostUSD
+	}
+	e.mu.Unlock()
+	if newCost {
+		fmt.Printf("[stats] cost: $%.4f | in: %d | out: %d | cache_read: %d | cache_write: %d\n",
+			tokens.CostUSD, tokens.InputTokens, tokens.OutputTokens, tokens.CacheReadTokens, tokens.CacheCreationTokens)
+	}
+
 	if dispatched == 0 {
 		// Check whether any workers from a previous poll cycle are still running.
 		// If so, the engine is not truly idle — auto-upgrade must not run because
 		// checkAndUpgrade calls syscall.Exec which would kill in-flight workers.
-		var hasInFlight bool
-		e.inFlight.Range(func(_, _ any) bool { hasInFlight = true; return false })
+		var inFlightLabels []string
+		e.inFlight.Range(func(key, val any) bool {
+			if num, ok := key.(int); ok {
+				if isPR, _ := val.(bool); isPR {
+					inFlightLabels = append(inFlightLabels, fmt.Sprintf("PR#%d", num))
+				} else {
+					inFlightLabels = append(inFlightLabels, fmt.Sprintf("#%d", num))
+				}
+			}
+			return true
+		})
 
-		if hasInFlight {
-			e.logf(0, "poll", "nothing new to dispatch (workers still in-flight)\n")
+		if len(inFlightLabels) > 0 {
+			e.logf(0, "poll", "nothing new to dispatch (in-flight: %v)\n", inFlightLabels)
 			e.idleCount = 0
 		} else {
 			e.logf(0, "poll", "nothing to do\n")
@@ -268,6 +331,8 @@ doneDispatching:
 			}
 		}
 	} else {
+		// Workers dispatched — clear status line so worker logs appear cleanly.
+		pollStatusClear()
 		e.idleCount = 0
 	}
 
