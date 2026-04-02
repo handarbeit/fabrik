@@ -153,6 +153,20 @@ func (e *Engine) poll(ctx context.Context) error {
 			graphqlStats.Remaining, graphqlStats.Limit, resetStr)
 	}
 
+	// Update the updatedAt cache for all items. This is done before dispatch
+	// so that itemNeedsWork can compare against the previous poll's timestamps.
+	// We defer the actual cache update to after the dispatch loop so that
+	// itemNeedsWork sees the OLD timestamps during this poll.
+	defer func() {
+		e.mu.Lock()
+		for _, item := range board.Items {
+			if !item.UpdatedAt.IsZero() {
+				e.lastUpdatedAt[item.Number] = item.UpdatedAt
+			}
+		}
+		e.mu.Unlock()
+	}()
+
 	var dispatched int
 	for _, item := range board.Items {
 		item := item
