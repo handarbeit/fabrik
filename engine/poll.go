@@ -77,10 +77,15 @@ func (e *Engine) Run() error {
 			// Signal goroutine called cancel(); poll() returned because
 			// CommandContext killed the child processes.
 			e.cleanupLockedIssues()
+			// Wait for all worker goroutines to finish before returning so
+			// that emitStructural goroutines never send on a closed channel
+			// (cmd/root.go closes events immediately after Run() returns).
+			e.wg.Wait()
 			return nil
 		case <-ticker.C:
 			if ctx.Err() != nil {
 				e.cleanupLockedIssues()
+				e.wg.Wait()
 				return nil
 			}
 			if err := e.poll(ctx); err != nil {
