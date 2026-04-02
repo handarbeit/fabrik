@@ -240,7 +240,7 @@ doneDispatching:
 		e.idleCount = 0
 	}
 
-	e.emit(tui.PollCompletedEvent{ItemCount: len(board.Items), Dispatched: dispatched})
+	e.emitStructural(tui.PollCompletedEvent{ItemCount: len(board.Items), Dispatched: dispatched})
 	return nil
 }
 
