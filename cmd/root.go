@@ -28,6 +28,7 @@ type Config struct {
 	AutoUpgrade   bool
 	PollSeconds   int
 	MaxConcurrent int
+	MaxRetries    int
 }
 
 func Execute() error {
@@ -42,6 +43,7 @@ func Execute() error {
 	flag.BoolVar(&cfg.Yolo, "yolo", false, "Auto-advance issues through stages without waiting for human input")
 	flag.BoolVar(&cfg.AutoUpgrade, "auto-upgrade", false, "When idle, check for new commits on origin/main and self-upgrade (for fabrik developing itself)")
 	flag.IntVar(&cfg.PollSeconds, "poll", 30, "Polling interval in seconds")
+	flag.IntVar(&cfg.MaxRetries, "max-retries", 3, "Max failed stage attempts before pausing the issue (0 = unlimited)")
 
 	flag.Parse()
 
@@ -105,6 +107,17 @@ func Execute() error {
 		}
 	}
 
+	// Max retries from env (only if still at default)
+	if cfg.MaxRetries == 3 {
+		if v := os.Getenv("FABRIK_MAX_RETRIES"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				cfg.MaxRetries = n
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_RETRIES=%q is invalid (must be a non-negative integer); using default %d\n", v, cfg.MaxRetries)
+			}
+		}
+	}
+
 	if cfg.Owner == "" || cfg.Repo == "" || cfg.ProjectNum == 0 {
 		fmt.Fprintf(os.Stderr, "Usage: fabrik --owner OWNER --repo REPO --project NUM [options]\n\n")
 		flag.PrintDefaults()
@@ -138,6 +151,11 @@ func Execute() error {
 	fmt.Printf("  auto-upgrade: %v\n", cfg.AutoUpgrade)
 	fmt.Printf("  poll:    %ds\n", cfg.PollSeconds)
 	fmt.Printf("  workers: %d\n", cfg.MaxConcurrent)
+	if cfg.MaxRetries == 0 {
+		fmt.Printf("  max-retries: unlimited\n")
+	} else {
+		fmt.Printf("  max-retries: %d\n", cfg.MaxRetries)
+	}
 
 	eng, err := engine.New(engine.Config{
 		Owner:         cfg.Owner,
@@ -149,6 +167,7 @@ func Execute() error {
 		AutoUpgrade:   cfg.AutoUpgrade,
 		PollSeconds:   cfg.PollSeconds,
 		MaxConcurrent: cfg.MaxConcurrent,
+		MaxRetries:    cfg.MaxRetries,
 		Stages:        stageCfgs,
 		ReadyCh:       testReadyCh,
 	})
