@@ -4,9 +4,8 @@
 !.claude/rules/
 !.claude/skills/
 !.claude/agents/
-.fabrik/
+.fabrik/worktrees/
 .env
-stages/mystages/
 fabrik
 *.exe
 .DS_Store
