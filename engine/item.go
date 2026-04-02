@@ -13,10 +13,11 @@ import (
 	"github.com/handarbeit/fabrik/stages"
 )
 
-// itemNeedsWork does cheap pre-checks to determine if an item might need processing.
-// This runs in the poll loop BEFORE acquiring a semaphore slot, so it must be fast
-// and not make any API calls.
-func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
+// itemMayNeedWork does cheap pre-checks using only shallow board data (no comments).
+// Items that pass this filter will have their details fetched via FetchItemDetails
+// before the full itemNeedsWork check. This avoids expensive deep fetches for items
+// that can be ruled out by status, labels, or updatedAt alone.
+func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 	// No matching stage = nothing to do
 	stage := stages.FindStage(e.cfg.Stages, item.Status)
 	if stage == nil {
@@ -46,7 +47,58 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 
 	// Cleanup stages bypass comment processing and cooldown checks.
 	if stage.CleanupWorktree {
-		// Respect the paused label — user may be preserving the worktree intentionally.
+		for _, label := range item.Labels {
+			if label == "fabrik:paused" {
+				return false
+			}
+		}
+		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
+		for _, label := range item.Labels {
+			if label == completeLabel {
+				return false
+			}
+		}
+		return true
+	}
+
+	// Paused items and items locked by another user are not our work
+	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
+	otherLockPrefix := "fabrik:locked:"
+	for _, label := range item.Labels {
+		if label == "fabrik:paused" {
+			return false
+		}
+		if strings.HasPrefix(label, otherLockPrefix) && label != lockLabel {
+			return false
+		}
+	}
+
+	// PRs need comments to decide — if updatedAt changed, deep fetch to check
+	if item.IsPR {
+		return true
+	}
+
+	// Already completed this stage
+	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
+	for _, label := range item.Labels {
+		if label == completeLabel {
+			return false
+		}
+	}
+
+	return true
+}
+
+// itemNeedsWork does full checks including comment inspection.
+// This runs AFTER FetchItemDetails has populated the item's Comments.
+func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
+	stage := stages.FindStage(e.cfg.Stages, item.Status)
+	if stage == nil {
+		return false
+	}
+
+	// Cleanup stages bypass comment processing and cooldown checks.
+	if stage.CleanupWorktree {
 		for _, label := range item.Labels {
 			if label == "fabrik:paused" {
 				return false
