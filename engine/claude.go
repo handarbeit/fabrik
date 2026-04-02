@@ -1,14 +1,17 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
@@ -23,6 +26,8 @@ type TokenUsage struct {
 	CacheCreationTokens int
 	CacheReadTokens     int
 	CostUSD             float64
+	TurnsUsed           int
+	MaxTurns            int
 }
 
 // add returns a new TokenUsage that is the sum of t and other.
@@ -40,6 +45,12 @@ func (t TokenUsage) add(other TokenUsage) TokenUsage {
 func SessionDir(issueNumber int) string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".fabrik", "sessions", fmt.Sprintf("issue-%d", issueNumber))
+}
+
+// LogDir returns the directory where Claude session logs are stored for an issue.
+func LogDir(issueNumber int) string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".fabrik", "logs", fmt.Sprintf("issue-%d", issueNumber))
 }
 
 // sessionFile returns the path to the session ID file for a given issue+stage.
@@ -71,6 +82,7 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	args := buildClaudeArgs(stage, issue.Number, resume, modelOverride)
 
 	output, _, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name)
+	usage.MaxTurns = stage.MaxTurns
 	if err != nil {
 		return output, false, usage, err
 	}
@@ -92,13 +104,15 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 	prompt := buildCommentReviewPrompt(stage, issue, comments)
 	args := buildClaudeArgs(stage, issue.Number, true, modelOverride) // resume existing session
 
-	return runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review")
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review")
+	usage.MaxTurns = stage.MaxTurns
+	return output, completed, usage, err
 }
 
 func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOverride string) []string {
 	args := []string{
-		"--print",
 		"--output-format", "json",
+		"--verbose",
 	}
 
 	sessFile := sessionFile(issueNumber, stage.Name)
@@ -142,45 +156,70 @@ type claudeResponse struct {
 		CacheCreationTokens int `json:"cacheCreationInputTokens"`
 		CacheReadTokens     int `json:"cacheReadInputTokens"`
 	} `json:"modelUsage"`
+	// Usage is the per-request token count, used as fallback when ModelUsage is absent.
+	Usage struct {
+		InputTokens  int `json:"input_tokens"`
+		OutputTokens int `json:"output_tokens"`
+	} `json:"usage"`
 }
 
 func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string) (string, bool, TokenUsage, error) {
 	logf(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
 
+	// Set up stderr tee to a timestamped log file.
+	var stderrWriter io.Writer = os.Stderr
+	logDir := LogDir(issueNumber)
+	if err := os.MkdirAll(logDir, 0700); err != nil {
+		logf(issueNumber, "warn", "could not create log dir: %v\n", err)
+	} else if err := os.Chmod(logDir, 0700); err != nil {
+		logf(issueNumber, "warn", "could not set log dir permissions: %v\n", err)
+	} else {
+		safeLabel := strings.NewReplacer("/", "-", "\\", "-", ":", "-", " ", "-").Replace(label)
+		now := time.Now().UTC()
+		logPath := filepath.Join(logDir, fmt.Sprintf("%s-%s-%d.log", safeLabel, now.Format("20060102-150405"), now.UnixNano()))
+		if logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); err != nil {
+			logf(issueNumber, "warn", "could not create log file %s: %v\n", logPath, err)
+		} else {
+			defer logFile.Close()
+			stderrWriter = io.MultiWriter(os.Stderr, logFile)
+		}
+	}
+
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = workDir
 	cmd.Stdin = strings.NewReader(prompt)
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = stderrWriter
 
-	output, err := cmd.Output()
-	if err != nil {
-		// Try to parse JSON even on error (max_turns produces exit code 1 but valid JSON)
-		if resp, ok := parseClaudeJSON(output); ok {
-			usage := tokenUsageFromResponse(resp)
-			logf(issueNumber, "claude", "used %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
-			baseName := strings.TrimSuffix(label, "-comment-review")
-			saveSessionIDDirect(sessionFile(issueNumber, baseName), resp.SessionID)
-			return resp.Result, false, usage, fmt.Errorf("claude exited with error: %w", err)
-		}
-		return string(output), false, TokenUsage{}, fmt.Errorf("claude exited with error: %w", err)
-	}
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
 
-	resp, ok := parseClaudeJSON(output)
-	text := resp.Result
-	usage := tokenUsageFromResponse(resp)
-	if !ok {
-		text = string(output)
-	} else {
-		logf(issueNumber, "claude", "completed in %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
-	}
+	runErr := cmd.Run()
+	rawOutput := stdout.Bytes()
 
-	// Save session ID for future resumption
 	baseName := strings.TrimSuffix(label, "-comment-review")
-	saveSessionIDDirect(sessionFile(issueNumber, baseName), resp.SessionID)
 
-	// Simple marker check — callers with the stage use checkCompletion for robustness.
+	resp, ok := parseClaudeJSON(bytes.TrimSpace(rawOutput))
+	var text string
+	var usage TokenUsage
+	if ok {
+		text = resp.Result
+		usage = tokenUsageFromResponse(resp)
+		if runErr != nil {
+			logf(issueNumber, "claude", "used %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
+		} else {
+			logf(issueNumber, "claude", "completed in %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
+		}
+		saveSessionIDDirect(sessionFile(issueNumber, baseName), resp.SessionID)
+	} else {
+		logf(issueNumber, "warn", "JSON parse failed; falling back to raw output\n")
+		text = string(rawOutput)
+	}
+
+	if runErr != nil {
+		return text, false, usage, fmt.Errorf("claude exited with error: %w", runErr)
+	}
+
 	completed := stageCompleteRE.MatchString(text)
-
 	return text, completed, usage, nil
 }
 
@@ -323,6 +362,24 @@ Your job is to:
 7. Maintain the structure and formatting of the PR description.`
 }
 
+// formatStatsFooter returns a one-line stats summary suitable for appending to a comment.
+// Returns empty string when no stats are available (e.g. JSON parse fallback).
+func formatStatsFooter(usage TokenUsage, completed bool) string {
+	if usage.TurnsUsed == 0 && usage.InputTokens == 0 && usage.OutputTokens == 0 {
+		return ""
+	}
+	var completion string
+	if !completed {
+		completion = " Stage incomplete."
+	}
+	if usage.MaxTurns > 0 {
+		return fmt.Sprintf("\n\n---\nUsed %d/%d turns, %dk input / %dk output tokens.%s",
+			usage.TurnsUsed, usage.MaxTurns, usage.InputTokens/1000, usage.OutputTokens/1000, completion)
+	}
+	return fmt.Sprintf("\n\n---\nUsed %d turns, %dk input / %dk output tokens.%s",
+		usage.TurnsUsed, usage.InputTokens/1000, usage.OutputTokens/1000, completion)
+}
+
 // extractBetweenMarkers extracts content between a BEGIN/END marker pair.
 // Returns empty string if markers are not found.
 func extractBetweenMarkers(output, beginMarker, endMarker string) string {
@@ -368,13 +425,19 @@ func parseClaudeJSON(output []byte) (claudeResponse, bool) {
 // tokenUsageFromResponse converts a claudeResponse to TokenUsage.
 // Token counts are summed across all models in ModelUsage for accuracy;
 // CostUSD comes from the top-level total_cost_usd field.
+// Falls back to the per-request Usage field when ModelUsage is absent.
 func tokenUsageFromResponse(resp claudeResponse) TokenUsage {
-	usage := TokenUsage{CostUSD: resp.CostUSD}
+	usage := TokenUsage{CostUSD: resp.CostUSD, TurnsUsed: resp.NumTurns}
 	for _, m := range resp.ModelUsage {
 		usage.InputTokens += m.InputTokens
 		usage.OutputTokens += m.OutputTokens
 		usage.CacheCreationTokens += m.CacheCreationTokens
 		usage.CacheReadTokens += m.CacheReadTokens
+	}
+	// Fall back to the per-request Usage field when ModelUsage is absent.
+	if len(resp.ModelUsage) == 0 {
+		usage.InputTokens = resp.Usage.InputTokens
+		usage.OutputTokens = resp.Usage.OutputTokens
 	}
 	return usage
 }

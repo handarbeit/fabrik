@@ -73,18 +73,9 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 		}
 	}
 
-	// PRs need comments to decide — if updatedAt changed, deep fetch to check
-	if item.IsPR {
-		return true
-	}
-
-	// Already completed this stage
-	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
-	for _, label := range item.Labels {
-		if label == completeLabel {
-			return false
-		}
-	}
+	// Don't check the completion label here — completed items may still have
+	// new comments that need processing. The completion check lives in
+	// itemNeedsWork where it runs after comments have been loaded.
 
 	return true
 }
@@ -404,10 +395,11 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 
 	// Post Claude's output
 	if output != "" {
+		footer := formatStatsFooter(usage, completed)
 		if stage.PostToPR {
-			e.postOutputToPR(item, stage.Name, output, branch, commit, timestamp)
+			e.postOutputToPR(item, stage.Name, output, footer, branch, commit, timestamp)
 		} else {
-			comment := formatOutputComment(stage.Name, output, branch, commit, timestamp)
+			comment := formatOutputComment(stage.Name, output, footer, branch, commit, timestamp)
 			if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
 				logf(item.Number, "warn", "could not post comment: %v\n", err)
 			}

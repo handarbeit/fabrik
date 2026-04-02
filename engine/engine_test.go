@@ -342,7 +342,7 @@ func TestAdvanceToNextStage_MissingOption(t *testing.T) {
 }
 
 func TestFormatOutputComment(t *testing.T) {
-	comment := formatOutputComment("Research", "Hello world", "main", "abc12345", "2026-04-01 14:30 UTC")
+	comment := formatOutputComment("Research", "Hello world", "", "main", "abc12345", "2026-04-01 14:30 UTC")
 	if !strings.Contains(comment, "🏭 **Fabrik — stage: Research**") {
 		t.Errorf("comment = %q", comment)
 	}
@@ -356,12 +356,25 @@ func TestFormatOutputComment(t *testing.T) {
 
 func TestFormatOutputComment_Truncation(t *testing.T) {
 	longOutput := strings.Repeat("x", 70000)
-	comment := formatOutputComment("Test", longOutput, "main", "abc12345", "2026-04-01 14:30 UTC")
+	comment := formatOutputComment("Test", longOutput, "", "main", "abc12345", "2026-04-01 14:30 UTC")
 	if len(comment) > 61000 {
 		t.Errorf("comment should be truncated, len = %d", len(comment))
 	}
 	if !strings.Contains(comment, "... (truncated)") {
 		t.Error("truncated comment missing truncation notice")
+	}
+}
+
+func TestFormatOutputComment_FooterSurvivesTruncation(t *testing.T) {
+	// Output exceeds the limit; footer must appear after the truncation notice, not be cut off.
+	longOutput := strings.Repeat("x", 65000)
+	footer := "\n\n---\nUsed 30/30 turns, 47k input / 8k output tokens. Stage incomplete."
+	comment := formatOutputComment("Test", longOutput, footer, "main", "abc12345", "2026-04-01 14:30 UTC")
+	if !strings.Contains(comment, "... (truncated)") {
+		t.Error("expected truncation notice")
+	}
+	if !strings.Contains(comment, "30/30 turns") {
+		t.Error("stats footer must appear after truncation, not be cut off")
 	}
 }
 
