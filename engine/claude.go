@@ -358,7 +358,7 @@ func saveSessionIDDirect(path, sessionID string) {
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to create session dir %s: %v\n", filepath.Dir(path), err)
+		fmt.Fprintf(os.Stderr, "warning: failed to create session dir for %s: %v\n", path, err)
 		return
 	}
 	if err := os.WriteFile(path, []byte(sessionID), 0600); err != nil {
