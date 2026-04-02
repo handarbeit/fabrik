@@ -1408,6 +1408,7 @@ func TestProcessItem_EscalatesAtMaxRetries(t *testing.T) {
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 10, Title: "Escalate test", Status: "Research", ItemID: "PVTI_10"}
 
+	// PollSeconds=0 makes cooldown=0, so both calls reach Claude without waiting.
 	// First attempt — retry count becomes 1, no escalation yet
 	eng.processItem(context.Background(), board, item)
 	foundPaused := false
@@ -1578,6 +1579,59 @@ func TestProcessItem_UnlimitedWhenMaxRetriesZero(t *testing.T) {
 	eng.mu.Unlock()
 	if count != 0 {
 		t.Errorf("expected retryCount=0 when MaxRetries=0, got %d", count)
+	}
+}
+
+func TestProcessItem_ClearsRetryCountOnCompletion(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
+			return "output", true, nil // stage completes successfully
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 3,
+			Stages:     testStages(),
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	// Pre-seed retry state as if previous failures occurred
+	itemKey := fmt.Sprintf("%d-%s", 13, "Research")
+	eng.mu.Lock()
+	eng.retryCount[itemKey] = 2
+	eng.pausedDueToRetries[itemKey] = false
+	eng.mu.Unlock()
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 13, Title: "Completion test", Status: "Research", ItemID: "PVTI_13"}
+
+	eng.processItem(context.Background(), board, item)
+
+	// Both maps should be cleared after successful completion
+	eng.mu.Lock()
+	count := eng.retryCount[itemKey]
+	paused := eng.pausedDueToRetries[itemKey]
+	eng.mu.Unlock()
+
+	if count != 0 {
+		t.Errorf("expected retryCount to be cleared on completion, got %d", count)
+	}
+	if paused {
+		t.Error("expected pausedDueToRetries to be cleared on completion")
 	}
 }
 
