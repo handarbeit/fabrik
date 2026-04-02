@@ -32,8 +32,8 @@ func TestFmtDuration(t *testing.T) {
 
 func TestHeaderHeight(t *testing.T) {
 	h := headerHeight()
-	if h != 3 {
-		t.Errorf("headerHeight() = %d, want 3", h)
+	if h != 4 {
+		t.Errorf("headerHeight() = %d, want 4", h)
 	}
 }
 

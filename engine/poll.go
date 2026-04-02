@@ -26,13 +26,21 @@ var isTTY = func() bool {
 	return fi.Mode()&os.ModeCharDevice != 0
 }()
 
+// tuiMode is set to true when the TUI owns stdout (alt-screen). When true,
+// pollStatus/pollStatusClear are no-ops since all output goes through the
+// event channel.
+var tuiMode bool
+
 // lastStatusLen tracks the length of the last overwritten status line so we
 // can clear any leftover characters when the next line is shorter.
 var lastStatusLen int
 
 // pollStatus prints a transient status line that overwrites itself on a TTY.
-// On non-TTY output it prints a normal line.
+// On non-TTY output it prints a normal line. No-op in TUI mode.
 func pollStatus(format string, args ...any) {
+	if tuiMode {
+		return
+	}
 	msg := fmt.Sprintf(format, args...)
 	if isTTY {
 		// Pad with spaces to clear any leftover characters from the previous line.
@@ -48,8 +56,11 @@ func pollStatus(format string, args ...any) {
 }
 
 // pollStatusClear ends the current transient status line (if on a TTY) so that
-// subsequent output starts on a fresh line.
+// subsequent output starts on a fresh line. No-op in TUI mode.
 func pollStatusClear() {
+	if tuiMode {
+		return
+	}
 	if isTTY && lastStatusLen > 0 {
 		fmt.Println()
 		lastStatusLen = 0
@@ -297,8 +308,7 @@ doneDispatching:
 	}
 	e.mu.Unlock()
 	if newCost {
-		pollStatusClear()
-		fmt.Printf("[stats] cost: $%.4f | in: %d | out: %d | cache_read: %d | cache_write: %d\n",
+		e.logf(0, "stats", "cost: $%.4f | in: %d | out: %d | cache_read: %d | cache_write: %d\n",
 			tokens.CostUSD, tokens.InputTokens, tokens.OutputTokens, tokens.CacheReadTokens, tokens.CacheCreationTokens)
 	}
 
@@ -347,6 +357,7 @@ func (e *Engine) checkAndUpgrade() {
 	baseBranch := e.worktrees.DefaultBaseBranch()
 	dir := e.worktrees.BaseDir()
 
+	e.logf(0, "upgrade", "checking origin/%s ...\n", baseBranch)
 	pollStatus("[upgrade] checking origin/%s ...", baseBranch)
 
 	// Fetch from origin

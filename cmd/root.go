@@ -30,6 +30,7 @@ type Config struct {
 	StagesDir     string
 	Yolo          bool
 	AutoUpgrade   bool
+	TUI           bool
 	PollSeconds   int
 	MaxConcurrent int
 	MaxRetries    int
@@ -51,6 +52,7 @@ func Execute() error {
 	flag.StringVar(&cfg.StagesDir, "stages", "./.fabrik/stages", "Directory containing stage YAML configs")
 	flag.BoolVar(&cfg.Yolo, "yolo", false, "Auto-advance issues through stages without waiting for human input")
 	flag.BoolVar(&cfg.AutoUpgrade, "auto-upgrade", false, "When idle, check for new commits on origin/main and self-upgrade (for fabrik developing itself)")
+	flag.BoolVar(&cfg.TUI, "tui", false, "Enable the interactive TUI dashboard (default: plain-text log output)")
 	flag.IntVar(&cfg.PollSeconds, "poll", 30, "Polling interval in seconds")
 	flag.IntVar(&cfg.MaxRetries, "max-retries", 3, "Max failed stage attempts before pausing the issue (0 = unlimited)")
 
@@ -151,15 +153,14 @@ func Execute() error {
 		return fmt.Errorf("no stage configurations found in %s", cfg.StagesDir)
 	}
 
-	// Both stdin and stdout must be a TTY before enabling the TUI. If stdin is
-	// piped (e.g. `echo q | fabrik`), bubbletea would immediately receive the
-	// piped input and quit, making TUI mode unusable.
-	isTTY := (isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())) &&
+	// TUI requires --tui flag AND a real terminal on both stdin and stdout.
+	useTUI := cfg.TUI &&
+		(isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())) &&
 		(isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd()))
 
 	// In plain-text mode, print the startup banner to stdout. In TUI mode the
 	// bubbletea alt-screen replaces stdout immediately, so skip the banner.
-	if !isTTY {
+	if !useTUI {
 		fmt.Printf("Fabrik starting\n")
 		fmt.Printf("  repo:    %s/%s\n", cfg.Owner, cfg.Repo)
 		fmt.Printf("  project: #%d\n", cfg.ProjectNum)
@@ -194,9 +195,9 @@ func Execute() error {
 		return err
 	}
 
-	// When stdout is a TTY, run the bubbletea TUI. Otherwise fall through to
-	// plain-text mode where the engine prints directly to stdout.
-	if isTTY {
+	// When --tui is enabled (and we have a real terminal), run the bubbletea
+	// TUI. Otherwise fall through to plain-text mode.
+	if useTUI {
 		return runTUI(eng, cfg.PollSeconds)
 	}
 	return eng.Run()
