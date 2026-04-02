@@ -139,7 +139,7 @@ func (e *Engine) poll(ctx context.Context) error {
 	if restStats.Limit > 0 {
 		resetStr := "unknown"
 		if !restStats.Reset.IsZero() {
-			resetStr = restStats.Reset.UTC().Format("15:04 UTC")
+			resetStr = restStats.Reset.Local().Format("15:04")
 		}
 		fmt.Printf("[poll] rate limit REST: %d/%d remaining, resets at %s\n",
 			restStats.Remaining, restStats.Limit, resetStr)
@@ -147,7 +147,7 @@ func (e *Engine) poll(ctx context.Context) error {
 	if graphqlStats.Limit > 0 {
 		resetStr := "unknown"
 		if !graphqlStats.Reset.IsZero() {
-			resetStr = graphqlStats.Reset.UTC().Format("15:04 UTC")
+			resetStr = graphqlStats.Reset.Local().Format("15:04")
 		}
 		fmt.Printf("[poll] rate limit GraphQL: %d/%d remaining, resets at %s\n",
 			graphqlStats.Remaining, graphqlStats.Limit, resetStr)
