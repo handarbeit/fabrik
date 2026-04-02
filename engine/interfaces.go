@@ -10,6 +10,7 @@ import (
 // GitHubClient defines the GitHub operations needed by the engine.
 type GitHubClient interface {
 	FetchProjectBoard(owner, repo string, projectNum int) (*gh.ProjectBoard, error)
+	FetchItemDetails(item *gh.ProjectItem) error
 	FetchStatusField(projectID string) (*gh.StatusField, error)
 	AddLabelToIssue(owner, repo string, issueNumber int, labelName string) error
 	RemoveLabelFromIssue(owner, repo string, issueNumber int, labelName string) error
@@ -26,12 +27,12 @@ type GitHubClient interface {
 
 // ClaudeInvoker defines the interface for invoking Claude Code.
 type ClaudeInvoker interface {
-	Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (output string, completed bool, err error)
+	Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (output string, stats ClaudeStats, completed bool, err error)
 }
 
 // RealClaudeInvoker wraps the existing InvokeClaude function.
 type RealClaudeInvoker struct{}
 
-func (r *RealClaudeInvoker) Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
+func (r *RealClaudeInvoker) Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
 	return InvokeClaude(ctx, stage, issue, newComments, resume, workDir, modelOverride)
 }
