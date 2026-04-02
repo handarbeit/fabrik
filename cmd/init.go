@@ -21,6 +21,9 @@ func runInit(args []string) error {
 	if err := fset.Parse(args); err != nil {
 		return err
 	}
+	if fset.NArg() != 0 {
+		return fmt.Errorf("init: unexpected positional arguments: %v", fset.Args())
+	}
 
 	destDir := ".fabrik/stages"
 	if err := os.MkdirAll(destDir, 0755); err != nil {
