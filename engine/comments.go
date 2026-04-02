@@ -68,7 +68,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	if modelOverride != "" {
 		e.logf(item.Number, "model", "using model override %q\n", modelOverride)
 	}
-	output, _, usage, err := InvokeClaudeForComments(ctx, stage, item, comments, workDir, modelOverride)
+	output, _, usage, err := InvokeClaudeForComments(ctx, stage, item, comments, workDir, modelOverride, e.cfg.NoTmux || stage.NoTmux)
 	func() {
 		e.mu.Lock()
 		defer e.mu.Unlock()
