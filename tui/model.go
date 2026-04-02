@@ -22,18 +22,18 @@ type HistoryEntry struct {
 
 // activeJob tracks an in-flight worker.
 type activeJob struct {
-	StageName  string
-	StartedAt  time.Time
-	LastTag    string
-	LastLine   string
+	StageName string
+	StartedAt time.Time
+	LastTag   string
+	LastLine  string
 }
 
 // Model is the bubbletea TUI model for Fabrik.
 type Model struct {
 	// poll timer
-	pollInterval  time.Duration
-	nextPollAt    time.Time
-	pollCount     int
+	pollInterval time.Duration
+	nextPollAt   time.Time
+	pollCount    int
 
 	// active jobs (keyed by issue number)
 	active map[int]*activeJob
