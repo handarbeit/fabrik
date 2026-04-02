@@ -576,6 +576,52 @@ func TestProcessItem_FullHappyPath(t *testing.T) {
 	}
 }
 
+func TestProcessItem_AccumulatesTokenUsage(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	want := TokenUsage{InputTokens: 100, OutputTokens: 50, CacheCreationTokens: 10, CacheReadTokens: 5, CostUSD: 0.0042}
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+			return "FABRIK_STAGE_COMPLETE", true, want, nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{Owner: "o", Repo: "r", User: "u", Token: "t", Stages: testStages()},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 200, Title: "Token Test", Status: "Research", ItemID: "PVTI_200"}
+
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	eng.mu.Lock()
+	got := eng.totalTokens
+	eng.mu.Unlock()
+
+	if got.InputTokens != want.InputTokens {
+		t.Errorf("totalTokens.InputTokens = %d, want %d", got.InputTokens, want.InputTokens)
+	}
+	if got.OutputTokens != want.OutputTokens {
+		t.Errorf("totalTokens.OutputTokens = %d, want %d", got.OutputTokens, want.OutputTokens)
+	}
+	if got.CacheCreationTokens != want.CacheCreationTokens {
+		t.Errorf("totalTokens.CacheCreationTokens = %d, want %d", got.CacheCreationTokens, want.CacheCreationTokens)
+	}
+	if got.CacheReadTokens != want.CacheReadTokens {
+		t.Errorf("totalTokens.CacheReadTokens = %d, want %d", got.CacheReadTokens, want.CacheReadTokens)
+	}
+	if diff := got.CostUSD - want.CostUSD; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("totalTokens.CostUSD = %f, want ~%f", got.CostUSD, want.CostUSD)
+	}
+}
+
 func TestProcessItem_CompletionWithAutoAdvance(t *testing.T) {
 	skipIfNoGit(t)
 	repoDir := initBareRepo(t)
