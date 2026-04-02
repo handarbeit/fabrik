@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -154,8 +155,8 @@ func TestItemNeedsWork_SkipsPausedWithNewComments(t *testing.T) {
 func TestProcessItem_AllowsOwnLock(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
-			return "output", false, nil
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
+			return "output", ClaudeStats{}, false, nil
 		},
 	}
 	eng := testEngine(client, claude)
@@ -341,7 +342,7 @@ func TestAdvanceToNextStage_MissingOption(t *testing.T) {
 }
 
 func TestFormatOutputComment(t *testing.T) {
-	comment := formatOutputComment("Research", "Hello world", "main", "abc12345", "2026-04-01 14:30 UTC")
+	comment := formatOutputComment("Research", "Hello world", "", "main", "abc12345", "2026-04-01 14:30 UTC")
 	if !strings.Contains(comment, "🏭 **Fabrik — stage: Research**") {
 		t.Errorf("comment = %q", comment)
 	}
@@ -355,12 +356,25 @@ func TestFormatOutputComment(t *testing.T) {
 
 func TestFormatOutputComment_Truncation(t *testing.T) {
 	longOutput := strings.Repeat("x", 70000)
-	comment := formatOutputComment("Test", longOutput, "main", "abc12345", "2026-04-01 14:30 UTC")
+	comment := formatOutputComment("Test", longOutput, "", "main", "abc12345", "2026-04-01 14:30 UTC")
 	if len(comment) > 61000 {
 		t.Errorf("comment should be truncated, len = %d", len(comment))
 	}
 	if !strings.Contains(comment, "... (truncated)") {
 		t.Error("truncated comment missing truncation notice")
+	}
+}
+
+func TestFormatOutputComment_FooterSurvivesTruncation(t *testing.T) {
+	// Output exceeds the limit; footer must appear after the truncation notice, not be cut off.
+	longOutput := strings.Repeat("x", 65000)
+	footer := "\n\n---\nUsed 30/30 turns, 47k input / 8k output tokens. Stage incomplete."
+	comment := formatOutputComment("Test", longOutput, footer, "main", "abc12345", "2026-04-01 14:30 UTC")
+	if !strings.Contains(comment, "... (truncated)") {
+		t.Error("expected truncation notice")
+	}
+	if !strings.Contains(comment, "30/30 turns") {
+		t.Error("stats footer must appear after truncation, not be cut off")
 	}
 }
 
@@ -507,8 +521,8 @@ func TestProcessItem_FullHappyPath(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
-			return "Claude output here\nFABRIK_STAGE_COMPLETE", true, nil
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
+			return "Claude output here\nFABRIK_STAGE_COMPLETE\n", ClaudeStats{}, true, nil
 		},
 	}
 
@@ -584,8 +598,8 @@ func TestProcessItem_CompletionWithAutoAdvance(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
-			return "Done\nFABRIK_STAGE_COMPLETE", true, nil
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
+			return "Done\nFABRIK_STAGE_COMPLETE", ClaudeStats{}, true, nil
 		},
 	}
 
@@ -662,8 +676,8 @@ func TestProcessItem_CompletionNoAutoAdvance(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
-			return "Done", true, nil
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
+			return "Done", ClaudeStats{}, true, nil
 		},
 	}
 
@@ -703,8 +717,8 @@ func TestProcessItem_StageAutoAdvanceOverride(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
-			return "Done", true, nil
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
+			return "Done", ClaudeStats{}, true, nil
 		},
 	}
 
@@ -753,8 +767,8 @@ func TestProcessItem_EmptyOutput(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
-			return "", false, nil
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
+			return "", ClaudeStats{}, false, nil
 		},
 	}
 
@@ -784,11 +798,11 @@ func TestProcessItem_ClaudeError(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
 			// Simulate a start failure: binary not found (*exec.Error)
 			cmd := exec.Command("this-binary-does-not-exist-fabrik-test")
 			_, startErr := cmd.Output()
-			return "partial output", false, startErr
+			return "partial output", ClaudeStats{}, false, startErr
 		},
 	}
 
@@ -828,11 +842,11 @@ func TestProcessItem_ClaudeExitError(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
 			// Simulate Claude running and exiting non-zero (wrapped *exec.ExitError)
 			cmd := exec.Command("git", "definitely-invalid-arg")
 			runErr := cmd.Run()
-			return "some output", false, fmt.Errorf("claude exited with error: %w", runErr)
+			return "some output", ClaudeStats{}, false, fmt.Errorf("claude exited with error: %w", runErr)
 		},
 	}
 
@@ -866,8 +880,8 @@ func TestProcessItem_ResumeOnReprocess(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
-			return "output", false, nil
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
+			return "output", ClaudeStats{}, false, nil
 		},
 	}
 
@@ -1062,8 +1076,8 @@ func TestProcessItem_LabelAndCommentErrors(t *testing.T) {
 		},
 	}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
-			return "output", true, nil
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
+			return "output", ClaudeStats{}, true, nil
 		},
 	}
 
@@ -1097,8 +1111,8 @@ func TestPoll_ProcessItemError(t *testing.T) {
 		},
 	}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
-			return "", false, nil
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
+			return "", ClaudeStats{}, false, nil
 		},
 	}
 
@@ -1427,8 +1441,8 @@ func TestProcessItem_EscalatesAtMaxRetries(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
-			return "partial output", false, nil // never completes
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
+			return "partial output", ClaudeStats{}, false, nil // never completes
 		},
 	}
 
@@ -1452,7 +1466,9 @@ func TestProcessItem_EscalatesAtMaxRetries(t *testing.T) {
 
 	// PollSeconds=0 makes cooldown=0, so both calls reach Claude without waiting.
 	// First attempt — retry count becomes 1, no escalation yet
-	eng.processItem(context.Background(), board, item)
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem (first call): %v", err)
+	}
 	foundPaused := false
 	for _, call := range client.addLabelCalls {
 		if call.labelName == "fabrik:paused" {
@@ -1464,7 +1480,9 @@ func TestProcessItem_EscalatesAtMaxRetries(t *testing.T) {
 	}
 
 	// Second attempt — retry count becomes 2, should escalate
-	eng.processItem(context.Background(), board, item)
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem (second call): %v", err)
+	}
 
 	foundPaused = false
 	foundFailed := false
@@ -1511,8 +1529,8 @@ func TestProcessItem_ResetsOnUnpause(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
-			return "output", false, nil
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
+			return "output", ClaudeStats{}, false, nil
 		},
 	}
 
@@ -1548,7 +1566,9 @@ func TestProcessItem_ResetsOnUnpause(t *testing.T) {
 		Labels: []string{}, // no fabrik:paused
 	}
 
-	eng.processItem(context.Background(), board, item)
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
 
 	// stage:Research:failed should have been removed by clearFailedStage
 	foundRemoval := false
@@ -1577,8 +1597,8 @@ func TestProcessItem_UnlimitedWhenMaxRetriesZero(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
-			return "output", false, nil
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
+			return "output", ClaudeStats{}, false, nil
 		},
 	}
 
@@ -1602,7 +1622,9 @@ func TestProcessItem_UnlimitedWhenMaxRetriesZero(t *testing.T) {
 
 	// Run many times — should never escalate
 	for i := 0; i < 10; i++ {
-		eng.processItem(context.Background(), board, item)
+		if err := eng.processItem(context.Background(), board, item); err != nil {
+			t.Fatalf("processItem (iteration %d): %v", i, err)
+		}
 	}
 
 	for _, call := range client.addLabelCalls {
@@ -1631,8 +1653,8 @@ func TestProcessItem_ClearsRetryCountOnCompletion(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
-			return "output", true, nil // stage completes successfully
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
+			return "output", ClaudeStats{}, true, nil // stage completes successfully
 		},
 	}
 
@@ -1661,7 +1683,9 @@ func TestProcessItem_ClearsRetryCountOnCompletion(t *testing.T) {
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 13, Title: "Completion test", Status: "Research", ItemID: "PVTI_13"}
 
-	eng.processItem(context.Background(), board, item)
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
 
 	// Both maps should be cleared after successful completion
 	eng.mu.Lock()
@@ -1678,3 +1702,302 @@ func TestProcessItem_ClearsRetryCountOnCompletion(t *testing.T) {
 }
 
 // skipIfNoGit and initBareRepo are defined in worktree_test.go
+
+func testStagesWithCleanup() []*stages.Stage {
+	ss := testStages()
+	return append(ss, &stages.Stage{
+		Name:            "Done",
+		Order:           99,
+		CleanupWorktree: true,
+	})
+}
+
+func TestItemNeedsWork_CleanupStage_NeedsWork(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.cfg.Stages = testStagesWithCleanup()
+
+	item := gh.ProjectItem{
+		Number: 1,
+		Status: "Done",
+		Labels: []string{}, // no completion label → needs work
+	}
+	if !eng.itemNeedsWork(item) {
+		t.Error("cleanup stage without completion label should need work")
+	}
+}
+
+func TestItemNeedsWork_CleanupStage_AlreadyComplete(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.cfg.Stages = testStagesWithCleanup()
+
+	item := gh.ProjectItem{
+		Number: 1,
+		Status: "Done",
+		Labels: []string{"stage:Done:complete"},
+	}
+	if eng.itemNeedsWork(item) {
+		t.Error("cleanup stage with completion label should not need work")
+	}
+}
+
+func TestProcessItem_CleanupStage_SkipsAlreadyComplete(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := testEngine(client, claude)
+	eng.cfg.Stages = testStagesWithCleanup()
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 1,
+		Title:  "Test",
+		Status: "Done",
+		Labels: []string{"stage:Done:complete"},
+	}
+
+	err := eng.processItem(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if len(client.addLabelCalls) != 0 {
+		t.Errorf("expected no label calls for already-complete cleanup stage, got %d", len(client.addLabelCalls))
+	}
+	if len(claude.calls) != 0 {
+		t.Error("should not invoke claude for cleanup stage")
+	}
+}
+
+func TestProcessItem_CleanupStage_CleanWorktree(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	// Create the worktree first
+	_, err := wm.EnsureWorktree(42, "main")
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	var addedLabel string
+	client := &mockGitHubClient{
+		addLabelToIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			addedLabel = labelName
+			return nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "testuser", Token: "token",
+			Stages: testStagesWithCleanup()},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 42, Title: "Test", Status: "Done", ItemID: "PVTI_42"}
+
+	err = eng.processItem(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	// Worktree directory should be gone
+	if _, err := os.Stat(wm.WorktreeDir(42)); !os.IsNotExist(err) {
+		t.Error("worktree directory should have been removed")
+	}
+
+	// Completion label should have been added
+	if addedLabel != "stage:Done:complete" {
+		t.Errorf("completion label = %q, want stage:Done:complete", addedLabel)
+	}
+
+	// Should be marked in processedSet
+	eng.mu.Lock()
+	_, ok := eng.processedSet["42-Done"]
+	eng.mu.Unlock()
+	if !ok {
+		t.Error("item should be marked in processedSet after cleanup")
+	}
+
+	// Claude should not have been invoked
+	if len(claude.calls) != 0 {
+		t.Error("claude should not be invoked for cleanup stage")
+	}
+}
+
+func TestProcessItem_CleanupStage_DirtyWorktree(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	// Create the worktree and leave a dirty file
+	wtDir, err := wm.EnsureWorktree(43, "main")
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wtDir, "dirty.txt"), []byte("uncommitted"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "testuser", Token: "token",
+			Stages: testStagesWithCleanup()},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 43, Title: "Test", Status: "Done", ItemID: "PVTI_43"}
+
+	err = eng.processItem(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	// Worktree directory should still exist (dirty → skip)
+	if _, err := os.Stat(wm.WorktreeDir(43)); os.IsNotExist(err) {
+		t.Error("worktree directory should NOT have been removed for dirty worktree")
+	}
+
+	// No completion label should have been added
+	if len(client.addLabelCalls) != 0 {
+		t.Errorf("expected no label calls for dirty worktree, got %d", len(client.addLabelCalls))
+	}
+}
+
+func TestProcessItem_CleanupStage_NonexistentWorktree(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+	// Don't create the worktree — simulate issue moved to Done before any stage ran
+
+	var addedLabel string
+	client := &mockGitHubClient{
+		addLabelToIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			addedLabel = labelName
+			return nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "testuser", Token: "token",
+			Stages: testStagesWithCleanup()},
+		client, &mockClaudeInvoker{}, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 99, Title: "No Worktree", Status: "Done", ItemID: "PVTI_99"}
+
+	// Should not return error — worktree missing is warn+continue
+	err := eng.processItem(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	// Completion label should still be added even though worktree didn't exist
+	if addedLabel != "stage:Done:complete" {
+		t.Errorf("completion label = %q, want stage:Done:complete", addedLabel)
+	}
+}
+
+func TestItemNeedsWork_CleanupStage_PausedItem(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.cfg.Stages = testStagesWithCleanup()
+
+	item := gh.ProjectItem{
+		Number: 1,
+		Status: "Done",
+		Labels: []string{"fabrik:paused"}, // paused → should not need work
+	}
+	if eng.itemNeedsWork(item) {
+		t.Error("paused cleanup stage item should not need work")
+	}
+}
+
+func TestProcessItem_CleanupStage_PRItem(t *testing.T) {
+	// PR items on the board don't have worktrees — cleanup should just apply the label.
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := testEngine(client, claude)
+	eng.cfg.Stages = testStagesWithCleanup()
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 55,
+		Title:  "Some PR",
+		Status: "Done",
+		IsPR:   true,
+		ItemID: "PVTI_55",
+	}
+
+	err := eng.processItem(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	// Completion label should be applied
+	if len(client.addLabelCalls) != 1 || client.addLabelCalls[0].labelName != "stage:Done:complete" {
+		t.Errorf("expected stage:Done:complete label, got %v", client.addLabelCalls)
+	}
+	if len(claude.calls) != 0 {
+		t.Error("should not invoke claude for cleanup stage PR item")
+	}
+}
+
+func TestProcessItem_CleanupStage_NewCommentsIgnored(t *testing.T) {
+	// New comments on a Done item should not divert to processComments — cleanup runs instead.
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	// Create the worktree
+	_, err := wm.EnsureWorktree(77, "main")
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	var addedLabel string
+	client := &mockGitHubClient{
+		addLabelToIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			addedLabel = labelName
+			return nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "testuser", Token: "token",
+			Stages: testStagesWithCleanup()},
+		client, claude, wm,
+	)
+
+	// Item has a new (un-rocketed) comment — cleanup should still proceed, not processComments.
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 77,
+		Title:  "Test",
+		Status: "Done",
+		ItemID: "PVTI_77",
+		Comments: []gh.Comment{
+			{ID: "C1", Author: "testuser", Body: "please do X"},
+			// No rocket reaction → findNewComments would normally return this
+		},
+	}
+
+	err = eng.processItem(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	// Worktree should be removed and completion label applied
+	if _, statErr := os.Stat(wm.WorktreeDir(77)); !os.IsNotExist(statErr) {
+		t.Error("worktree directory should have been removed despite new comment")
+	}
+	if addedLabel != "stage:Done:complete" {
+		t.Errorf("completion label = %q, want stage:Done:complete", addedLabel)
+	}
+	if len(claude.calls) != 0 {
+		t.Error("claude should not be invoked for cleanup stage")
+	}
+}

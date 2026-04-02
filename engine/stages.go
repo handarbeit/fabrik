@@ -10,6 +10,9 @@ import (
 func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
 	e.logf(item.Number, "done", "stage %q complete\n", stage.Name)
 
+	// Clean up any failure label from a prior incomplete run.
+	e.removeFailedLabel(item.Number, stage.Name)
+
 	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
 	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, completeLabel); err != nil {
 		e.logf(item.Number, "warn", "could not add completion label: %v\n", err)

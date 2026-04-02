@@ -23,18 +23,21 @@ type commentNodeData struct {
 }
 
 // itemNode mirrors one element of items.nodes in the FetchProjectBoard query.
+// This is the shallow version — comments and linked PRs are fetched separately
+// via FetchItemDetails to reduce GraphQL rate limit cost.
 type itemNode struct {
 	ID               string `json:"id"`
 	FieldValueByName *struct {
 		Name string `json:"name"`
 	} `json:"fieldValueByName"`
 	Content struct {
-		Typename string `json:"__typename"`
-		ID       string `json:"id"`
-		Number   int    `json:"number"`
-		Title    string `json:"title"`
-		Body     string `json:"body"`
-		URL      string `json:"url"`
+		Typename  string `json:"__typename"`
+		ID        string `json:"id"`
+		Number    int    `json:"number"`
+		Title     string `json:"title"`
+		Body      string `json:"body"`
+		URL       string `json:"url"`
+		UpdatedAt string `json:"updatedAt"`
 		Author   *struct {
 			Login string `json:"login"`
 		} `json:"author"`
@@ -52,31 +55,17 @@ type itemNode struct {
 				Login string `json:"login"`
 			} `json:"nodes"`
 		} `json:"assignees"`
-		Comments struct {
-			Nodes    []commentNodeData `json:"nodes"`
-			PageInfo struct {
-				HasNextPage bool   `json:"hasNextPage"`
-				EndCursor   string `json:"endCursor"`
-			} `json:"pageInfo"`
-		} `json:"comments"`
 		LinkedPRs *struct {
 			Nodes []struct {
-				ID       string `json:"id"`
-				Number   int    `json:"number"`
-				Comments struct {
-					Nodes    []commentNodeData `json:"nodes"`
-					PageInfo struct {
-						HasNextPage bool   `json:"hasNextPage"`
-						EndCursor   string `json:"endCursor"`
-					} `json:"pageInfo"`
-				} `json:"comments"`
+				UpdatedAt string `json:"updatedAt"`
 			} `json:"nodes"`
 		} `json:"closedByPullRequestsReferences"`
 	} `json:"content"`
 }
 
-// FetchProjectBoard pulls the entire project board, paginating over items,
-// comments, and labels as needed.
+// FetchProjectBoard pulls the project board with shallow item data (no comments
+// or linked PRs). Use FetchItemDetails to populate comments for specific items.
+// This two-phase approach dramatically reduces GraphQL rate limit cost.
 func (c *Client) FetchProjectBoard(owner, repo string, projectNum int) (*ProjectBoard, error) {
 	query := `
 query($owner: String!, $repo: String!, $projectNum: Int!, $cursor: String) {
@@ -103,6 +92,7 @@ query($owner: String!, $repo: String!, $projectNum: Int!, $cursor: String) {
               title
               body
               url
+              updatedAt
               author {
                 login
               }
@@ -120,52 +110,9 @@ query($owner: String!, $repo: String!, $projectNum: Int!, $cursor: String) {
                   login
                 }
               }
-              comments(first: 100) {
+              closedByPullRequestsReferences(first: 5) {
                 nodes {
-                  id
-                  databaseId
-                  author {
-                    login
-                  }
-                  body
-                  createdAt
-                  reactionGroups {
-                    content
-                    reactors {
-                      totalCount
-                    }
-                  }
-                }
-                pageInfo {
-                  hasNextPage
-                  endCursor
-                }
-              }
-              closedByPullRequestsReferences(first: 10) {
-                nodes {
-                  id
-                  number
-                  comments(first: 100) {
-                    nodes {
-                      id
-                      databaseId
-                      author {
-                        login
-                      }
-                      body
-                      createdAt
-                      reactionGroups {
-                        content
-                        reactors {
-                          totalCount
-                        }
-                      }
-                    }
-                    pageInfo {
-                      hasNextPage
-                      endCursor
-                    }
-                  }
+                  updatedAt
                 }
               }
             }
@@ -175,6 +122,7 @@ query($owner: String!, $repo: String!, $projectNum: Int!, $cursor: String) {
               title
               body
               url
+              updatedAt
               author {
                 login
               }
@@ -190,27 +138,6 @@ query($owner: String!, $repo: String!, $projectNum: Int!, $cursor: String) {
               assignees(first: 10) {
                 nodes {
                   login
-                }
-              }
-              comments(first: 100) {
-                nodes {
-                  id
-                  databaseId
-                  author {
-                    login
-                  }
-                  body
-                  createdAt
-                  reactionGroups {
-                    content
-                    reactors {
-                      totalCount
-                    }
-                  }
-                }
-                pageInfo {
-                  hasNextPage
-                  endCursor
                 }
               }
             }
@@ -290,6 +217,20 @@ query($owner: String!, $repo: String!, $projectNum: Int!, $cursor: String) {
 			IsPR:   node.Content.Typename == "PullRequest",
 		}
 
+		if t, err := parseTime(node.Content.UpdatedAt); err == nil {
+			item.UpdatedAt = t
+		}
+		// Use the latest updatedAt across the issue and its linked PRs so that
+		// comments on a linked PR are detected as changes even though the issue
+		// itself doesn't update.
+		if node.Content.LinkedPRs != nil {
+			for _, pr := range node.Content.LinkedPRs.Nodes {
+				if t, err := parseTime(pr.UpdatedAt); err == nil && t.After(item.UpdatedAt) {
+					item.UpdatedAt = t
+				}
+			}
+		}
+
 		if node.FieldValueByName != nil {
 			item.Status = node.FieldValueByName.Name
 		}
@@ -313,39 +254,145 @@ query($owner: String!, $repo: String!, $projectNum: Int!, $cursor: String) {
 			item.Assignees = append(item.Assignees, a.Login)
 		}
 
-		commentNodes := node.Content.Comments.Nodes
-		if node.Content.Comments.PageInfo.HasNextPage {
-			extra, err := c.fetchNodeComments(node.Content.ID, node.Content.Comments.PageInfo.EndCursor)
-			if err != nil {
-				return nil, err
-			}
-			commentNodes = append(commentNodes, extra...)
-		}
-		for _, cm := range commentNodes {
-			item.Comments = append(item.Comments, toComment(cm, 0))
-		}
-
-		// Merge comments from linked PRs (via closedByPullRequestsReferences)
-		if node.Content.LinkedPRs != nil {
-			for _, pr := range node.Content.LinkedPRs.Nodes {
-				prCommentNodes := pr.Comments.Nodes
-				if pr.Comments.PageInfo.HasNextPage {
-					extra, err := c.fetchNodeComments(pr.ID, pr.Comments.PageInfo.EndCursor)
-					if err != nil {
-						return nil, err
-					}
-					prCommentNodes = append(prCommentNodes, extra...)
-				}
-				for _, cm := range prCommentNodes {
-					item.Comments = append(item.Comments, toComment(cm, pr.Number))
-				}
-			}
-		}
-
 		board.Items = append(board.Items, item)
 	}
 
 	return board, nil
+}
+
+// FetchItemDetails populates the Comments field of a ProjectItem by fetching
+// issue/PR comments and linked PR comments via individual node queries.
+// This is the "deep" phase of the two-phase fetch approach.
+func (c *Client) FetchItemDetails(item *ProjectItem) error {
+	query := `
+query($id: ID!) {
+  node(id: $id) {
+    ... on Issue {
+      comments(first: 100) {
+        nodes {
+          id
+          databaseId
+          author { login }
+          body
+          createdAt
+          reactionGroups {
+            content
+            reactors { totalCount }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+      closedByPullRequestsReferences(first: 10) {
+        nodes {
+          id
+          number
+          comments(first: 100) {
+            nodes {
+              id
+              databaseId
+              author { login }
+              body
+              createdAt
+              reactionGroups {
+                content
+                reactors { totalCount }
+              }
+            }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+      }
+    }
+    ... on PullRequest {
+      comments(first: 100) {
+        nodes {
+          id
+          databaseId
+          author { login }
+          body
+          createdAt
+          reactionGroups {
+            content
+            reactors { totalCount }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}`
+
+	vars := map[string]interface{}{
+		"id": item.ID,
+	}
+
+	var result struct {
+		Data struct {
+			Node *struct {
+				Comments struct {
+					Nodes    []commentNodeData `json:"nodes"`
+					PageInfo struct {
+						HasNextPage bool   `json:"hasNextPage"`
+						EndCursor   string `json:"endCursor"`
+					} `json:"pageInfo"`
+				} `json:"comments"`
+				LinkedPRs *struct {
+					Nodes []struct {
+						ID       string `json:"id"`
+						Number   int    `json:"number"`
+						Comments struct {
+							Nodes    []commentNodeData `json:"nodes"`
+							PageInfo struct {
+								HasNextPage bool   `json:"hasNextPage"`
+								EndCursor   string `json:"endCursor"`
+							} `json:"pageInfo"`
+						} `json:"comments"`
+					} `json:"nodes"`
+				} `json:"closedByPullRequestsReferences"`
+			} `json:"node"`
+		} `json:"data"`
+	}
+
+	if err := c.graphqlRequest(query, vars, &result); err != nil {
+		return fmt.Errorf("fetching details for item #%d: %w", item.Number, err)
+	}
+	if result.Data.Node == nil {
+		return fmt.Errorf("fetching details for item #%d: node not found", item.Number)
+	}
+
+	node := result.Data.Node
+
+	// Process issue/PR comments
+	commentNodes := node.Comments.Nodes
+	if node.Comments.PageInfo.HasNextPage {
+		extra, err := c.fetchNodeComments(item.ID, node.Comments.PageInfo.EndCursor)
+		if err != nil {
+			return err
+		}
+		commentNodes = append(commentNodes, extra...)
+	}
+	for _, cm := range commentNodes {
+		item.Comments = append(item.Comments, toComment(cm, 0))
+	}
+
+	// Merge comments from linked PRs
+	if node.LinkedPRs != nil {
+		for _, pr := range node.LinkedPRs.Nodes {
+			prCommentNodes := pr.Comments.Nodes
+			if pr.Comments.PageInfo.HasNextPage {
+				extra, err := c.fetchNodeComments(pr.ID, pr.Comments.PageInfo.EndCursor)
+				if err != nil {
+					return err
+				}
+				prCommentNodes = append(prCommentNodes, extra...)
+			}
+			for _, cm := range prCommentNodes {
+				item.Comments = append(item.Comments, toComment(cm, pr.Number))
+			}
+		}
+	}
+
+	return nil
 }
 
 // toComment converts raw commentNodeData into a domain Comment.

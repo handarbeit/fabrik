@@ -152,7 +152,7 @@ func (e *Engine) poll(ctx context.Context) error {
 	if restStats.Limit > 0 {
 		resetStr := "unknown"
 		if !restStats.Reset.IsZero() {
-			resetStr = restStats.Reset.UTC().Format("15:04 UTC")
+			resetStr = restStats.Reset.Local().Format("15:04")
 		}
 		e.logf(0, "poll", "rate limit REST: %d/%d remaining, resets at %s\n",
 			restStats.Remaining, restStats.Limit, resetStr)
@@ -160,17 +160,48 @@ func (e *Engine) poll(ctx context.Context) error {
 	if graphqlStats.Limit > 0 {
 		resetStr := "unknown"
 		if !graphqlStats.Reset.IsZero() {
-			resetStr = graphqlStats.Reset.UTC().Format("15:04 UTC")
+			resetStr = graphqlStats.Reset.Local().Format("15:04")
 		}
 		e.logf(0, "poll", "rate limit GraphQL: %d/%d remaining, resets at %s\n",
 			graphqlStats.Remaining, graphqlStats.Limit, resetStr)
 	}
 
+	// Update the updatedAt cache for all items. This is done before dispatch
+	// so that itemNeedsWork can compare against the previous poll's timestamps.
+	// We defer the actual cache update to after the dispatch loop so that
+	// itemNeedsWork sees the OLD timestamps during this poll.
+	defer func() {
+		e.mu.Lock()
+		for _, item := range board.Items {
+			if !item.UpdatedAt.IsZero() {
+				e.lastUpdatedAt[item.Number] = item.UpdatedAt
+			}
+		}
+		e.mu.Unlock()
+	}()
+
+	// Deep-fetch details (comments, linked PRs) only for items that pass the
+	// shallow pre-filter. This avoids the expensive nested GraphQL cost for
+	// items that can be ruled out by status, labels, or updatedAt alone.
+	var deepFetched int
+	for i := range board.Items {
+		if !e.itemMayNeedWork(board.Items[i]) {
+			continue
+		}
+		logf(board.Items[i].Number, "poll", "deep-fetching details\n")
+		if err := e.client.FetchItemDetails(&board.Items[i]); err != nil {
+			logf(board.Items[i].Number, "warn", "could not fetch item details: %v\n", err)
+		}
+		deepFetched++
+	}
+	if deepFetched > 0 {
+		fmt.Printf("[poll] deep-fetched details for %d item(s)\n", deepFetched)
+	}
+
 	var dispatched int
 	for _, item := range board.Items {
 		item := item
-		// Quick pre-check: skip items that won't need processing.
-		// This avoids acquiring a semaphore slot for no-ops.
+		// Full check including comments (populated by deep fetch above).
 		if !e.itemNeedsWork(item) {
 			continue
 		}

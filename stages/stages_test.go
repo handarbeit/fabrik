@@ -250,6 +250,37 @@ func TestLoadAll_ReadError(t *testing.T) {
 	}
 }
 
+func TestLoadAll_CleanupWorktreeStage(t *testing.T) {
+	dir := t.TempDir()
+	writeStageFile(t, dir, "done.yaml", `
+name: Done
+order: 99
+cleanup_worktree: true
+`)
+
+	stages, err := LoadAll(dir)
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	if len(stages) != 1 {
+		t.Fatalf("expected 1 stage, got %d", len(stages))
+	}
+	s := stages[0]
+	if s.Name != "Done" {
+		t.Errorf("Name = %q, want Done", s.Name)
+	}
+	if !s.CleanupWorktree {
+		t.Error("CleanupWorktree should be true")
+	}
+	if s.Prompt != "" {
+		t.Errorf("Prompt should be empty, got %q", s.Prompt)
+	}
+	// Completion.Type should not be set (no validation for cleanup stages)
+	if s.Completion.Type != "" {
+		t.Errorf("Completion.Type = %q, want empty", s.Completion.Type)
+	}
+}
+
 func TestNextStage(t *testing.T) {
 	stages := []*Stage{
 		{Name: "A"},

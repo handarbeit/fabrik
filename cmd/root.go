@@ -36,6 +36,11 @@ type Config struct {
 }
 
 func Execute() error {
+	// Dispatch subcommands before flag parsing so they get their own flag sets.
+	if len(os.Args) > 1 && os.Args[1] == "init" {
+		return runInit(os.Args[2:])
+	}
+
 	cfg := &Config{}
 
 	flag.StringVar(&cfg.Owner, "owner", "", "GitHub repository owner")
@@ -43,7 +48,7 @@ func Execute() error {
 	flag.IntVar(&cfg.ProjectNum, "project", 0, "GitHub project number")
 	flag.StringVar(&cfg.User, "user", "", "GitHub username (only process changes by this user)")
 	flag.StringVar(&cfg.Token, "token", "", "GitHub token (or set GITHUB_TOKEN env var)")
-	flag.StringVar(&cfg.StagesDir, "stages", "./stages", "Directory containing stage YAML configs")
+	flag.StringVar(&cfg.StagesDir, "stages", "./.fabrik/stages", "Directory containing stage YAML configs")
 	flag.BoolVar(&cfg.Yolo, "yolo", false, "Auto-advance issues through stages without waiting for human input")
 	flag.BoolVar(&cfg.AutoUpgrade, "auto-upgrade", false, "When idle, check for new commits on origin/main and self-upgrade (for fabrik developing itself)")
 	flag.IntVar(&cfg.PollSeconds, "poll", 30, "Polling interval in seconds")
@@ -80,7 +85,7 @@ func Execute() error {
 	if cfg.User == "" {
 		cfg.User = os.Getenv("FABRIK_USER")
 	}
-	if cfg.StagesDir == "./stages" {
+	if cfg.StagesDir == "./.fabrik/stages" {
 		if v := os.Getenv("FABRIK_STAGES"); v != "" {
 			cfg.StagesDir = v
 		}
