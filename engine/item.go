@@ -99,15 +99,24 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}
 	}
 
-	// Unpause detection: if we paused this item due to max retries but the
-	// fabrik:paused label is now gone, the user has investigated — reset state.
+	// Unpause detection: if this stage has a stage:<name>:failed label but
+	// fabrik:paused is gone, the user has investigated — reset state. We check
+	// the label (not just the in-memory map) so cleanup works across restarts.
+	failedLabel := fmt.Sprintf("stage:%s:failed", stage.Name)
+	var hasFailedLabel bool
+	for _, label := range item.Labels {
+		if label == failedLabel {
+			hasFailedLabel = true
+			break
+		}
+	}
 	var wasPaused bool
 	func() {
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		wasPaused = e.pausedDueToRetries[itemKey]
 	}()
-	if wasPaused {
+	if wasPaused || hasFailedLabel {
 		e.clearFailedStage(item, stage)
 	}
 
