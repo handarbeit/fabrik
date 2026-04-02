@@ -133,7 +133,7 @@ func (m *mockGitHubClient) RateLimitStats() (gh.RateLimitStats, gh.RateLimitStat
 
 // mockClaudeInvoker implements ClaudeInvoker for testing.
 type mockClaudeInvoker struct {
-	invokeFn func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error)
+	invokeFn func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error)
 	calls    []claudeInvokeCall
 }
 
@@ -148,8 +148,7 @@ type claudeInvokeCall struct {
 func (m *mockClaudeInvoker) Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
 	m.calls = append(m.calls, claudeInvokeCall{stage.Name, issue.Number, resume, workDir, modelOverride})
 	if m.invokeFn != nil {
-		output, completed, err := m.invokeFn(stage, issue, newComments, resume, workDir, modelOverride)
-		return output, completed, TokenUsage{}, err
+		return m.invokeFn(stage, issue, newComments, resume, workDir, modelOverride)
 	}
 	return "mock output", false, TokenUsage{}, nil
 }
