@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -469,7 +470,7 @@ func TestRealClaudeInvoker_Invoke(t *testing.T) {
 	fakeClaude := filepath.Join(binDir, "claude")
 	script := `#!/bin/sh
 cat >/dev/null
-echo "real invoker output"
+printf '%s\n' '{"result":"real invoker output","session_id":"sess_ri","num_turns":1,"total_cost_usd":0.001}'
 `
 	os.WriteFile(fakeClaude, []byte(script), 0755)
 
@@ -553,18 +554,13 @@ printf '%s\n' '{"result":"Claude output for test\nFABRIK_STAGE_COMPLETE\n","sess
 
 func TestInvokeClaude_WithResume(t *testing.T) {
 	binDir := t.TempDir()
+	argsFile := filepath.Join(binDir, "args.txt")
 	fakeClaude := filepath.Join(binDir, "claude")
-	// Script that checks for --resume flag
-	script := `#!/bin/sh
+	script := fmt.Sprintf(`#!/bin/sh
 cat >/dev/null
-for arg in "$@"; do
-	if [ "$arg" = "--resume" ]; then
-		echo "RESUMED"
-		exit 0
-	fi
-done
-echo "NO RESUME"
-`
+echo "$@" > %s
+printf '%%s\n' '{"result":"resume output","session_id":"sess_resume","num_turns":1,"total_cost_usd":0.001}'
+`, argsFile)
 	os.WriteFile(fakeClaude, []byte(script), 0755)
 
 	origPath := os.Getenv("PATH")
@@ -586,12 +582,13 @@ echo "NO RESUME"
 	defer os.RemoveAll(sessDir)
 	defer os.RemoveAll(LogDir(99))
 
-	output, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, true, workDir, "")
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, true, workDir, "")
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
-	if !strings.Contains(output, "RESUMED") {
-		t.Errorf("expected resume, got: %q", output)
+	args, _ := os.ReadFile(argsFile)
+	if !strings.Contains(string(args), "--resume") {
+		t.Errorf("expected --resume in args, got: %q", string(args))
 	}
 
 	if info, err := os.Stat(sessDir); err != nil {
@@ -603,11 +600,13 @@ echo "NO RESUME"
 
 func TestInvokeClaude_WithModelAndTools(t *testing.T) {
 	binDir := t.TempDir()
+	argsFile := filepath.Join(binDir, "args.txt")
 	fakeClaude := filepath.Join(binDir, "claude")
-	script := `#!/bin/sh
+	script := fmt.Sprintf(`#!/bin/sh
 cat >/dev/null
-echo "args: $@"
-`
+echo "$@" > %s
+printf '%%s\n' '{"result":"ok","session_id":"sess_mt","num_turns":1,"total_cost_usd":0.001}'
+`, argsFile)
 	os.WriteFile(fakeClaude, []byte(script), 0755)
 
 	origPath := os.Getenv("PATH")
@@ -625,21 +624,22 @@ echo "args: $@"
 	}
 	issue := gh.ProjectItem{Number: 50, Title: "T"}
 
-	output, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
-	// Check args include model and tools
-	if !strings.Contains(output, "--model") {
+	args, _ := os.ReadFile(argsFile)
+	argsStr := string(args)
+	if !strings.Contains(argsStr, "--model") {
 		t.Error("expected --model in args")
 	}
-	if !strings.Contains(output, "opus") {
+	if !strings.Contains(argsStr, "opus") {
 		t.Error("expected opus in args")
 	}
-	if !strings.Contains(output, "--max-turns") {
+	if !strings.Contains(argsStr, "--max-turns") {
 		t.Error("expected --max-turns in args")
 	}
-	if !strings.Contains(output, "--allowedTools") {
+	if !strings.Contains(argsStr, "--allowedTools") {
 		t.Error("expected --allowedTools in args")
 	}
 	os.RemoveAll(SessionDir(50))
@@ -648,11 +648,13 @@ echo "args: $@"
 
 func TestInvokeClaude_WithModelOverride(t *testing.T) {
 	binDir := t.TempDir()
+	argsFile := filepath.Join(binDir, "args.txt")
 	fakeClaude := filepath.Join(binDir, "claude")
-	script := `#!/bin/sh
+	script := fmt.Sprintf(`#!/bin/sh
 cat >/dev/null
-echo "args: $@"
-`
+echo "$@" > %s
+printf '%%s\n' '{"result":"ok","session_id":"sess_mo","num_turns":1,"total_cost_usd":0.001}'
+`, argsFile)
 	os.WriteFile(fakeClaude, []byte(script), 0755)
 
 	origPath := os.Getenv("PATH")
@@ -668,12 +670,12 @@ echo "args: $@"
 	}
 	issue := gh.ProjectItem{Number: 51, Title: "T"}
 
-	output, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "opus")
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "opus")
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
-	// Override should take precedence
-	if !strings.Contains(output, "opus") {
+	args, _ := os.ReadFile(argsFile)
+	if !strings.Contains(string(args), "opus") {
 		t.Error("expected model override 'opus' in args")
 	}
 	os.RemoveAll(SessionDir(51))
@@ -683,9 +685,10 @@ echo "args: $@"
 func TestInvokeClaude_BinaryError(t *testing.T) {
 	binDir := t.TempDir()
 	fakeClaude := filepath.Join(binDir, "claude")
+	// Binary exits with error but still outputs valid JSON with partial result
 	script := `#!/bin/sh
 cat >/dev/null
-echo "partial output"
+printf '%s\n' '{"result":"partial output","session_id":"sess_err","num_turns":5,"total_cost_usd":0.01,"is_error":true}'
 exit 1
 `
 	os.WriteFile(fakeClaude, []byte(script), 0755)
@@ -715,11 +718,12 @@ exit 1
 
 func TestInvokeClaude_WithComments(t *testing.T) {
 	binDir := t.TempDir()
+	stdinFile := filepath.Join(binDir, "stdin.txt")
 	fakeClaude := filepath.Join(binDir, "claude")
-	script := `#!/bin/sh
-# Read prompt from stdin to verify comments are included
-cat | grep -o "New Comments" && echo "HAS_COMMENTS" || echo "NO_COMMENTS"
-`
+	script := fmt.Sprintf(`#!/bin/sh
+cat > %s
+printf '%%s\n' '{"result":"comment output","session_id":"sess_c","num_turns":1,"total_cost_usd":0.001}'
+`, stdinFile)
 	os.WriteFile(fakeClaude, []byte(script), 0755)
 
 	origPath := os.Getenv("PATH")
@@ -737,12 +741,13 @@ cat | grep -o "New Comments" && echo "HAS_COMMENTS" || echo "NO_COMMENTS"
 		{Author: "user", Body: "Fix this", CreatedAt: time.Now()},
 	}
 
-	output, _, _, err := InvokeClaude(context.Background(), stage, issue, comments, false, workDir, "")
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, comments, false, workDir, "")
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
-	if !strings.Contains(output, "HAS_COMMENTS") {
-		t.Errorf("expected comments in prompt, output: %q", output)
+	stdin, _ := os.ReadFile(stdinFile)
+	if !strings.Contains(string(stdin), "New Comments") {
+		t.Errorf("expected comments in prompt, stdin: %q", string(stdin))
 	}
 	os.RemoveAll(SessionDir(70))
 	os.RemoveAll(LogDir(70))
