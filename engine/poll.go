@@ -14,6 +14,45 @@ import (
 
 const idleUpgradeThreshold = 2
 
+// isTTY reports whether stdout is connected to a terminal.
+var isTTY = func() bool {
+	fi, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}()
+
+// lastStatusLen tracks the length of the last overwritten status line so we
+// can clear any leftover characters when the next line is shorter.
+var lastStatusLen int
+
+// pollStatus prints a transient status line that overwrites itself on a TTY.
+// On non-TTY output it prints a normal line.
+func pollStatus(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	if isTTY {
+		// Pad with spaces to clear any leftover characters from the previous line.
+		pad := ""
+		if len(msg) < lastStatusLen {
+			pad = strings.Repeat(" ", lastStatusLen-len(msg))
+		}
+		fmt.Printf("\r%s%s", msg, pad)
+		lastStatusLen = len(msg)
+	} else {
+		fmt.Println(msg)
+	}
+}
+
+// pollStatusClear ends the current transient status line (if on a TTY) so that
+// subsequent output starts on a fresh line.
+func pollStatusClear() {
+	if isTTY && lastStatusLen > 0 {
+		fmt.Println()
+		lastStatusLen = 0
+	}
+}
+
 func gitToplevel() (string, error) {
 	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
 	out, err := cmd.Output()
@@ -113,10 +152,11 @@ func (e *Engine) cleanupLockedIssues() {
 }
 
 func (e *Engine) poll(ctx context.Context) error {
-	fmt.Printf("[poll] fetching project board %s/%s#%d\n", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
+	pollStatus("[poll] fetching board %s/%s#%d ...", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
 
 	board, err := e.client.FetchProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
 	if err != nil {
+		pollStatusClear()
 		return err
 	}
 
@@ -125,6 +165,7 @@ func (e *Engine) poll(ctx context.Context) error {
 	if e.statusField == nil && board.ProjectID != "" {
 		sf, err := e.client.FetchStatusField(board.ProjectID)
 		if err != nil {
+			pollStatusClear()
 			fmt.Printf("  [warn] could not fetch status field: %v\n", err)
 		} else {
 			e.statusField = sf
@@ -132,25 +173,18 @@ func (e *Engine) poll(ctx context.Context) error {
 	}
 	e.mu.Unlock()
 
-	fmt.Printf("[poll] found %d items on board\n", len(board.Items))
-
-	// Report rate limit stats when we have seen at least one response.
+	// Build a compact status summary with item count and rate limits.
+	var rateParts []string
 	restStats, graphqlStats := e.client.RateLimitStats()
 	if restStats.Limit > 0 {
-		resetStr := "unknown"
-		if !restStats.Reset.IsZero() {
-			resetStr = restStats.Reset.Local().Format("15:04")
-		}
-		fmt.Printf("[poll] rate limit REST: %d/%d remaining, resets at %s\n",
-			restStats.Remaining, restStats.Limit, resetStr)
+		rateParts = append(rateParts, fmt.Sprintf("REST %d/%d", restStats.Remaining, restStats.Limit))
 	}
 	if graphqlStats.Limit > 0 {
-		resetStr := "unknown"
-		if !graphqlStats.Reset.IsZero() {
-			resetStr = graphqlStats.Reset.Local().Format("15:04")
-		}
-		fmt.Printf("[poll] rate limit GraphQL: %d/%d remaining, resets at %s\n",
-			graphqlStats.Remaining, graphqlStats.Limit, resetStr)
+		rateParts = append(rateParts, fmt.Sprintf("GQL %d/%d", graphqlStats.Remaining, graphqlStats.Limit))
+	}
+	status := fmt.Sprintf("[poll] %d items", len(board.Items))
+	if len(rateParts) > 0 {
+		status += " | " + strings.Join(rateParts, ", ")
 	}
 
 	// Update the updatedAt cache for all items. This is done before dispatch
@@ -175,14 +209,14 @@ func (e *Engine) poll(ctx context.Context) error {
 		if !e.itemMayNeedWork(board.Items[i]) {
 			continue
 		}
-		logf(board.Items[i].Number, "poll", "deep-fetching details\n")
 		if err := e.client.FetchItemDetails(&board.Items[i]); err != nil {
+			pollStatusClear()
 			logf(board.Items[i].Number, "warn", "could not fetch item details: %v\n", err)
 		}
 		deepFetched++
 	}
 	if deepFetched > 0 {
-		fmt.Printf("[poll] deep-fetched details for %d item(s)\n", deepFetched)
+		status += fmt.Sprintf(" | deep-fetched %d", deepFetched)
 	}
 
 	var dispatched int
@@ -248,10 +282,12 @@ doneDispatching:
 		})
 
 		if len(inFlightLabels) > 0 {
-			fmt.Printf("[poll] nothing new to dispatch (workers still in-flight: %v)\n", inFlightLabels)
+			status += fmt.Sprintf(" | in-flight: %v", inFlightLabels)
+			pollStatus("%s", status)
 			e.idleCount = 0
 		} else {
-			fmt.Println("[poll] nothing to do")
+			status += " | idle"
+			pollStatus("%s", status)
 			if e.cfg.AutoUpgrade {
 				e.idleCount++
 				if e.idleCount >= idleUpgradeThreshold {
@@ -261,6 +297,8 @@ doneDispatching:
 			}
 		}
 	} else {
+		// Workers dispatched — clear status line so worker logs appear cleanly.
+		pollStatusClear()
 		e.idleCount = 0
 	}
 
@@ -273,6 +311,7 @@ func (e *Engine) checkAndUpgrade() {
 	baseBranch := e.worktrees.DefaultBaseBranch()
 	dir := e.worktrees.BaseDir()
 
+	pollStatusClear()
 	fmt.Printf("[upgrade] checking origin/%s for new commits\n", baseBranch)
 
 	// Fetch from origin
