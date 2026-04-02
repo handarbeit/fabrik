@@ -23,6 +23,23 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		return false
 	}
 
+	// Cleanup stages bypass comment processing and cooldown checks.
+	if stage.CleanupWorktree {
+		// Respect the paused label — user may be preserving the worktree intentionally.
+		for _, label := range item.Labels {
+			if label == "fabrik:paused" {
+				return false
+			}
+		}
+		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
+		for _, label := range item.Labels {
+			if label == completeLabel {
+				return false
+			}
+		}
+		return true
+	}
+
 	// Paused items and items locked by another user are not our work
 	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
 	otherLockPrefix := "fabrik:locked:"
@@ -104,6 +121,43 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}
 	}
 
+	// Cleanup stage: remove the worktree (no lock, no Claude, no comment processing needed).
+	// Runs before new-comment check — cleanup stages are terminal and should not route
+	// comments to processComments. Also handles PR items (no worktree to remove, just label).
+	if stage.CleanupWorktree {
+		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
+		for _, label := range item.Labels {
+			if label == completeLabel {
+				return nil
+			}
+		}
+
+		// Issues have worktrees; PRs on the board do not — skip the removal for PRs.
+		if !item.IsPR {
+			wtDir := e.worktrees.WorktreeDir(item.Number)
+			statusCmd := exec.Command("git", "status", "--porcelain")
+			statusCmd.Dir = wtDir
+			if out, err := statusCmd.Output(); err == nil && len(strings.TrimSpace(string(out))) > 0 {
+				logf(item.Number, "warn", "worktree dirty — skipping cleanup to preserve uncommitted changes\n")
+				return nil
+			}
+
+			if err := e.worktrees.CleanupWorktree(item.Number, false); err != nil {
+				logf(item.Number, "warn", "could not clean up worktree: %v\n", err)
+			}
+		}
+
+		if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, completeLabel); err != nil {
+			logf(item.Number, "warn", "could not add completion label: %v\n", err)
+		}
+
+		e.mu.Lock()
+		e.processedSet[itemKey] = time.Now()
+		e.mu.Unlock()
+
+		return nil
+	}
+
 	// Unpause detection: if this stage has a stage:<name>:failed label but
 	// fabrik:paused is gone, the user has investigated — reset state. We check
 	// the label (not just the in-memory map) so cleanup works across restarts.
@@ -176,28 +230,40 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	}
 	logf(item.Number, "process", "%q — stage: %s\n", item.Title, stage.Name)
 
-	// Acquire lock, register in lockedIssues for shutdown cleanup, and ensure it's released on all exit paths.
+	// Acquire lock and in_progress label. These are released only when
+	// the stage completes or is permanently abandoned — NOT on every
+	// processItem return. This keeps the issue locked through cooldown
+	// retries so other instances don't pick it up.
+	lockAcquired := false
 	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, lockLabel); err != nil {
 		logf(item.Number, "warn", "could not add lock label: %v\n", err)
 	} else {
+		lockAcquired = true
 		e.mu.Lock()
 		e.lockedIssues[item.Number] = true
 		e.mu.Unlock()
-		defer func() {
+	}
+
+	inProgressLabel := fmt.Sprintf("stage:%s:in_progress", stage.Name)
+	inProgressAdded := false
+	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, inProgressLabel); err != nil {
+		logf(item.Number, "warn", "could not add in_progress label: %v\n", err)
+	} else {
+		inProgressAdded = true
+	}
+
+	// releaseLock is called when we're truly done with this issue+stage
+	// (completed, permanently failed, or paused). NOT called on cooldown retry.
+	releaseLock := func() {
+		if lockAcquired {
 			e.removeLockLabel(item.Number, lockLabel)
 			e.mu.Lock()
 			delete(e.lockedIssues, item.Number)
 			e.mu.Unlock()
-		}()
-	}
-
-	// Add in_progress label for this stage and ensure it's removed on all exit paths.
-	// Only defer cleanup when the add succeeded to avoid a spurious warning on removal.
-	inProgressLabel := fmt.Sprintf("stage:%s:in_progress", stage.Name)
-	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, inProgressLabel); err != nil {
-		logf(item.Number, "warn", "could not add in_progress label: %v\n", err)
-	} else {
-		defer e.removeInProgressLabel(item.Number, stage.Name)
+		}
+		if inProgressAdded {
+			e.removeInProgressLabel(item.Number, stage.Name)
+		}
 	}
 
 	// Ensure worktree exists for this issue
@@ -249,6 +315,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	if err != nil {
 		if ctx.Err() != nil {
 			logf(item.Number, "skip", "cancelled during claude invocation\n")
+			// Lock will be cleaned up by cleanupLockedIssues on shutdown
 			return nil
 		}
 		logf(item.Number, "warn", "claude invocation issue: %v\n", err)
@@ -311,6 +378,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	}
 
 	if completed {
+		releaseLock()
 		// Clear retry tracking for this stage — no longer needed after success.
 		func() {
 			e.mu.Lock()
@@ -340,6 +408,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			}()
 			if count >= e.cfg.MaxRetries {
 				e.escalateFailedStage(item, stage)
+				releaseLock() // permanently giving up — release the lock
 			}
 		}
 	}
