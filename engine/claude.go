@@ -116,7 +116,7 @@ type claudeResponse struct {
 }
 
 func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string) (string, bool, error) {
-	e.logf(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
+	fmt.Printf("[#%d claude] invoking (%s) in %s\n", issueNumber, label, workDir)
 
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = workDir
