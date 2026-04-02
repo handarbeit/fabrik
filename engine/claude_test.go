@@ -162,15 +162,11 @@ func TestCheckCompletion_UnsupportedTypes(t *testing.T) {
 	}
 }
 
-func TestSaveSessionID_ValidJSON(t *testing.T) {
+func TestSaveSessionIDDirect(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.session")
 
-	output := `Some output text
-{"session_id":"sess_abc123","other":"data"}
-More output`
-
-	saveSessionID(path, output)
+	saveSessionIDDirect(path, "sess_abc123")
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -187,38 +183,44 @@ More output`
 	}
 }
 
-func TestSaveSessionID_NoSessionID(t *testing.T) {
+func TestSaveSessionIDDirect_Empty(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.session")
 
-	saveSessionID(path, "just plain output\nno json here\n")
+	saveSessionIDDirect(path, "")
 
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Error("session file should not exist when no session ID found")
+		t.Error("session file should not exist for empty session ID")
 	}
 }
 
-func TestSaveSessionID_InvalidJSON(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "test.session")
-
-	output := `{not valid json but has session_id}`
-	saveSessionID(path, output)
-
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Error("session file should not exist for invalid JSON")
+func TestParseClaudeJSON(t *testing.T) {
+	input := []byte(`{"result":"hello","session_id":"sess_xyz","num_turns":5,"total_cost_usd":0.01,"usage":{"input_tokens":100,"output_tokens":50}}`)
+	text, sessionID, turns, cost, inputTokens, outputTokens := parseClaudeJSON(input)
+	if text != "hello" {
+		t.Errorf("text = %q, want hello", text)
+	}
+	if sessionID != "sess_xyz" {
+		t.Errorf("sessionID = %q, want sess_xyz", sessionID)
+	}
+	if turns != 5 {
+		t.Errorf("turns = %d, want 5", turns)
+	}
+	if cost != 0.01 {
+		t.Errorf("cost = %f, want 0.01", cost)
+	}
+	if inputTokens != 100 {
+		t.Errorf("inputTokens = %d, want 100", inputTokens)
+	}
+	if outputTokens != 50 {
+		t.Errorf("outputTokens = %d, want 50", outputTokens)
 	}
 }
 
-func TestSaveSessionID_EmptySessionID(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "test.session")
-
-	output := `{"session_id":""}`
-	saveSessionID(path, output)
-
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Error("session file should not exist for empty session_id")
+func TestParseClaudeJSON_Invalid(t *testing.T) {
+	text, sessionID, turns, cost, inputTokens, outputTokens := parseClaudeJSON([]byte("not json"))
+	if text != "" || sessionID != "" || turns != 0 || cost != 0 || inputTokens != 0 || outputTokens != 0 {
+		t.Errorf("expected zero values for invalid JSON, got text=%q sessionID=%q turns=%d cost=%f inputTokens=%d outputTokens=%d", text, sessionID, turns, cost, inputTokens, outputTokens)
 	}
 }
 
@@ -312,11 +314,11 @@ func TestInvokeClaude_JSONOutput(t *testing.T) {
 	binDir := t.TempDir()
 	fakeClaude := filepath.Join(binDir, "claude")
 	// Output a valid JSON envelope as --output-format json would.
-	// Use a Python heredoc-style approach to avoid shell escaping issues with
-	// embedded newlines in JSON string values.
+	// Use printf '%s' to emit the string without interpreting escape sequences in the value,
+	// keeping \n as JSON-encoded newlines (not literal newlines).
 	script := `#!/bin/sh
 cat >/dev/null
-python3 -c "import json,sys; sys.stdout.write(json.dumps({'result':'stage output\nFABRIK_STAGE_COMPLETE\n','session_id':'sess_json123','num_turns':12,'usage':{'input_tokens':5000,'output_tokens':1000}}))"
+printf '%s\n' '{"result":"stage output\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_json123","num_turns":12,"usage":{"input_tokens":5000,"output_tokens":1000}}'
 `
 	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
 		t.Fatal(err)
@@ -413,14 +415,12 @@ echo "real invoker output"
 }
 
 func TestInvokeClaude_FakeBinary(t *testing.T) {
-	// Create a fake claude binary that echoes its arguments
+	// Create a fake claude binary that outputs a valid JSON envelope
 	binDir := t.TempDir()
 	fakeClaude := filepath.Join(binDir, "claude")
 	script := `#!/bin/sh
 cat >/dev/null
-echo "Claude output for test"
-echo '{"session_id":"sess_test123"}'
-echo "FABRIK_STAGE_COMPLETE"
+printf '%s\n' '{"result":"Claude output for test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_test123","num_turns":3,"total_cost_usd":0.001}'
 `
 	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
 		t.Fatal(err)
@@ -455,7 +455,7 @@ echo "FABRIK_STAGE_COMPLETE"
 		t.Error("expected completed=true")
 	}
 
-	// Check session file was saved
+	// Check session file was saved from JSON
 	sessFile := sessionFile(42, "Research")
 	data, err := os.ReadFile(sessFile)
 	if err != nil {
