@@ -335,7 +335,7 @@ func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 		logf(item.Number, "warn", "could not add paused label: %v\n", err)
 	}
 
-	failedLabel := fmt.Sprintf("stage:%s:failed", strings.ToLower(stage.Name))
+	failedLabel := fmt.Sprintf("stage:%s:failed", stage.Name)
 	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, failedLabel); err != nil {
 		logf(item.Number, "warn", "could not add failed label: %v\n", err)
 	}
@@ -360,7 +360,7 @@ func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 	logf(item.Number, "unpause", "clearing failed stage %q after manual unpause\n", stage.Name)
 
-	failedLabel := fmt.Sprintf("stage:%s:failed", strings.ToLower(stage.Name))
+	failedLabel := fmt.Sprintf("stage:%s:failed", stage.Name)
 	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, item.Number, failedLabel); err != nil &&
 		!errors.Is(err, gh.ErrNotFound) {
 		logf(item.Number, "warn", "could not remove failed label: %v\n", err)
