@@ -46,7 +46,8 @@ func NewClientWithBaseURL(token, baseURL string) *Client {
 }
 
 // parseRateLimitHeaders extracts GitHub rate limit headers from an HTTP response.
-// Returns a zero-value RateLimitStats if the headers are absent or malformed.
+// Returns a RateLimitStats with numeric fields at zero and Reset at the zero time if
+// the headers are absent or malformed; UpdatedAt is always set to the current time.
 func parseRateLimitHeaders(h http.Header) RateLimitStats {
 	limit, _ := strconv.Atoi(h.Get("X-RateLimit-Limit"))
 	remaining, _ := strconv.Atoi(h.Get("X-RateLimit-Remaining"))
