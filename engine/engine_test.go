@@ -1385,8 +1385,8 @@ func TestProcessItem_EscalatesAtMaxRetries(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
-			return "partial output", false, nil // never completes
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
+			return "partial output", ClaudeStats{}, false, nil // never completes
 		},
 	}
 
@@ -1469,8 +1469,8 @@ func TestProcessItem_ResetsOnUnpause(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
-			return "output", false, nil
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
+			return "output", ClaudeStats{}, false, nil
 		},
 	}
 
@@ -1535,8 +1535,8 @@ func TestProcessItem_UnlimitedWhenMaxRetriesZero(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
-			return "output", false, nil
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
+			return "output", ClaudeStats{}, false, nil
 		},
 	}
 
@@ -1589,8 +1589,8 @@ func TestProcessItem_ClearsRetryCountOnCompletion(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
-			return "output", true, nil // stage completes successfully
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
+			return "output", ClaudeStats{}, true, nil // stage completes successfully
 		},
 	}
 
