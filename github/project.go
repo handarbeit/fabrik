@@ -29,12 +29,13 @@ type itemNode struct {
 		Name string `json:"name"`
 	} `json:"fieldValueByName"`
 	Content struct {
-		Typename string `json:"__typename"`
-		ID       string `json:"id"`
-		Number   int    `json:"number"`
-		Title    string `json:"title"`
-		Body     string `json:"body"`
-		URL      string `json:"url"`
+		Typename  string `json:"__typename"`
+		ID        string `json:"id"`
+		Number    int    `json:"number"`
+		Title     string `json:"title"`
+		Body      string `json:"body"`
+		URL       string `json:"url"`
+		UpdatedAt string `json:"updatedAt"`
 		Author   *struct {
 			Login string `json:"login"`
 		} `json:"author"`
@@ -103,6 +104,7 @@ query($owner: String!, $repo: String!, $projectNum: Int!, $cursor: String) {
               title
               body
               url
+              updatedAt
               author {
                 login
               }
@@ -175,6 +177,7 @@ query($owner: String!, $repo: String!, $projectNum: Int!, $cursor: String) {
               title
               body
               url
+              updatedAt
               author {
                 login
               }
@@ -288,6 +291,10 @@ query($owner: String!, $repo: String!, $projectNum: Int!, $cursor: String) {
 			Body:   node.Content.Body,
 			URL:    node.Content.URL,
 			IsPR:   node.Content.Typename == "PullRequest",
+		}
+
+		if t, err := parseTime(node.Content.UpdatedAt); err == nil {
+			item.UpdatedAt = t
 		}
 
 		if node.FieldValueByName != nil {
