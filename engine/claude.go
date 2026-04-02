@@ -211,9 +211,8 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 		}
 		saveSessionIDDirect(sessionFile(issueNumber, baseName), resp.SessionID)
 	} else {
-		// Fallback: treat raw stdout as plain text (no session ID available).
-		fmt.Fprintf(os.Stderr, "[#%d warn] JSON parse failed; falling back to raw output\n", issueNumber)
-		text = string(rawOutput)
+		fmt.Fprintf(os.Stderr, "[#%d warn] JSON parse failed (%d bytes); output not posted\n", issueNumber, len(rawOutput))
+		text = fmt.Sprintf("⚠️ Claude output could not be parsed (raw output was %d bytes). Check logs at `~/.fabrik/logs/issue-%d/` for details.", len(rawOutput), issueNumber)
 	}
 
 	if runErr != nil {
