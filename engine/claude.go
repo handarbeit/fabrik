@@ -1,18 +1,29 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
 )
+
+// ClaudeStats holds usage statistics from a Claude invocation.
+type ClaudeStats struct {
+	TurnsUsed    int
+	MaxTurns     int
+	InputTokens  int
+	OutputTokens int
+}
 
 var stageCompleteRE = regexp.MustCompile(`(?m)^FABRIK_STAGE_COMPLETE\r?$`)
 
@@ -20,6 +31,12 @@ var stageCompleteRE = regexp.MustCompile(`(?m)^FABRIK_STAGE_COMPLETE\r?$`)
 func SessionDir(issueNumber int) string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".fabrik", "sessions", fmt.Sprintf("issue-%d", issueNumber))
+}
+
+// LogDir returns the directory where Claude session logs are stored for an issue.
+func LogDir(issueNumber int) string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".fabrik", "logs", fmt.Sprintf("issue-%d", issueNumber))
 }
 
 // sessionFile returns the path to the session ID file for a given issue+stage.
@@ -37,36 +54,37 @@ func sessionFile(issueNumber int, stageName string) string {
 // InvokeClaude runs Claude Code with the given stage configuration and issue context.
 // workDir is the directory Claude should run in (typically a git worktree).
 // modelOverride, if non-empty, replaces the stage's configured model.
-// It returns Claude's output and whether Claude indicated completion.
-func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
+// It returns Claude's output, usage stats, and whether Claude indicated completion.
+func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
 	sessDir := SessionDir(issue.Number)
 	if err := os.MkdirAll(sessDir, 0700); err != nil {
-		return "", false, fmt.Errorf("creating session dir: %w", err)
+		return "", ClaudeStats{}, false, fmt.Errorf("creating session dir: %w", err)
 	}
 	if err := os.Chmod(sessDir, 0700); err != nil {
-		return "", false, fmt.Errorf("setting session dir permissions: %w", err)
+		return "", ClaudeStats{}, false, fmt.Errorf("setting session dir permissions: %w", err)
 	}
 
 	prompt := buildPrompt(stage, issue, newComments)
 	args := buildClaudeArgs(stage, issue.Number, resume, modelOverride)
 
-	output, _, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name)
+	output, stats, _, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name)
+	stats.MaxTurns = stage.MaxTurns
 	if err != nil {
-		return output, false, err
+		return output, stats, false, err
 	}
-	return output, checkCompletion(stage, output), nil
+	return output, stats, checkCompletion(stage, output), nil
 }
 
 // InvokeClaudeForComments runs Claude Code with a comment-review prompt.
 // It uses the stage's CommentPrompt if defined, otherwise a default.
 // modelOverride, if non-empty, replaces the stage's configured model.
-func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, modelOverride string) (string, bool, error) {
+func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
 	sessDir := SessionDir(issue.Number)
 	if err := os.MkdirAll(sessDir, 0700); err != nil {
-		return "", false, fmt.Errorf("creating session dir: %w", err)
+		return "", ClaudeStats{}, false, fmt.Errorf("creating session dir: %w", err)
 	}
 	if err := os.Chmod(sessDir, 0700); err != nil {
-		return "", false, fmt.Errorf("setting session dir permissions: %w", err)
+		return "", ClaudeStats{}, false, fmt.Errorf("setting session dir permissions: %w", err)
 	}
 
 	prompt := buildCommentReviewPrompt(stage, issue, comments)
@@ -77,7 +95,7 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 
 func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOverride string) []string {
 	args := []string{
-		"--print",
+		"--output-format", "json",
 		"--verbose",
 	}
 
@@ -106,30 +124,80 @@ func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOve
 	return args
 }
 
-func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string) (string, bool, error) {
+func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string) (string, ClaudeStats, bool, error) {
 	logf(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
+
+	// Set up stderr tee to a timestamped log file.
+	var stderrWriter io.Writer = os.Stderr
+	logDir := LogDir(issueNumber)
+	if err := os.MkdirAll(logDir, 0700); err != nil {
+		logf(issueNumber, "warn", "could not create log dir: %v\n", err)
+	} else if err := os.Chmod(logDir, 0700); err != nil {
+		logf(issueNumber, "warn", "could not set log dir permissions: %v\n", err)
+	} else {
+		safeLabel := strings.NewReplacer("/", "-", "\\", "-", ":", "-", " ", "-").Replace(label)
+		ts := time.Now().UTC().Format("20060102-150405")
+		logPath := filepath.Join(logDir, fmt.Sprintf("%s-%s.log", safeLabel, ts))
+		if logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); err != nil {
+			logf(issueNumber, "warn", "could not create log file %s: %v\n", logPath, err)
+		} else {
+			defer logFile.Close()
+			stderrWriter = io.MultiWriter(os.Stderr, logFile)
+		}
+	}
 
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = workDir
 	cmd.Stdin = strings.NewReader(prompt)
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = stderrWriter
 
-	output, err := cmd.Output()
-	if err != nil {
-		return string(output), false, fmt.Errorf("claude exited with error: %w", err)
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+
+	runErr := cmd.Run()
+	rawOutput := stdout.Bytes()
+
+	// Parse JSON envelope from --output-format json.
+	var envelope struct {
+		Result    string `json:"result"`
+		SessionID string `json:"session_id"`
+		NumTurns  int    `json:"num_turns"`
+		Usage     struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
 	}
 
-	result := string(output)
-
-	// Try to save session ID for future resumption
-	// Use the base stage name (strip "-comment-review" suffix) for session continuity
+	var stats ClaudeStats
+	var result string
 	baseName := strings.TrimSuffix(label, "-comment-review")
-	saveSessionID(sessionFile(issueNumber, baseName), result)
 
-	// Simple marker check — callers with the stage use checkCompletion for robustness.
+	if jsonErr := json.Unmarshal(bytes.TrimSpace(rawOutput), &envelope); jsonErr == nil {
+		result = envelope.Result
+		stats.TurnsUsed = envelope.NumTurns
+		stats.InputTokens = envelope.Usage.InputTokens
+		stats.OutputTokens = envelope.Usage.OutputTokens
+		if envelope.SessionID != "" {
+			sessPath := sessionFile(issueNumber, baseName)
+			if err := os.WriteFile(sessPath, []byte(envelope.SessionID), 0600); err != nil {
+				logf(issueNumber, "warn", "could not save session id: %v\n", err)
+			} else {
+				_ = os.Chmod(sessPath, 0600)
+			}
+		}
+	} else {
+		// Fallback: treat raw stdout as plain text and use legacy session ID scan.
+		logf(issueNumber, "warn", "JSON parse failed (%v); falling back to raw output\n", jsonErr)
+		result = string(rawOutput)
+		saveSessionID(sessionFile(issueNumber, baseName), result)
+	}
+
+	if runErr != nil {
+		return result, stats, false, fmt.Errorf("claude exited with error: %w", runErr)
+	}
+
 	completed := stageCompleteRE.MatchString(result)
-
-	return result, completed, nil
+	return result, stats, completed, nil
 }
 
 // checkCompletion returns true if Claude's output indicates the stage is complete.
@@ -269,6 +337,24 @@ Your job is to:
 5. If comments from automated review bots suggest improvements, evaluate and apply them where appropriate.
 6. Preserve all existing PR description content that is still valid.
 7. Maintain the structure and formatting of the PR description.`
+}
+
+// formatStatsFooter returns a one-line stats summary suitable for appending to a comment.
+// Returns empty string when no stats are available (e.g. JSON parse fallback).
+func formatStatsFooter(stats ClaudeStats, completed bool) string {
+	if stats.TurnsUsed == 0 && stats.InputTokens == 0 {
+		return ""
+	}
+	var completion string
+	if !completed {
+		completion = " Stage incomplete."
+	}
+	if stats.MaxTurns > 0 {
+		return fmt.Sprintf("\n\n---\nUsed %d/%d turns, %dk input / %dk output tokens.%s",
+			stats.TurnsUsed, stats.MaxTurns, stats.InputTokens/1000, stats.OutputTokens/1000, completion)
+	}
+	return fmt.Sprintf("\n\n---\nUsed %d turns, %dk input / %dk output tokens.%s",
+		stats.TurnsUsed, stats.InputTokens/1000, stats.OutputTokens/1000, completion)
 }
 
 // extractBetweenMarkers extracts content between a BEGIN/END marker pair.
