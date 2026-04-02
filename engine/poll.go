@@ -311,13 +311,13 @@ func (e *Engine) checkAndUpgrade() {
 	baseBranch := e.worktrees.DefaultBaseBranch()
 	dir := e.worktrees.BaseDir()
 
-	pollStatusClear()
-	fmt.Printf("[upgrade] checking origin/%s for new commits\n", baseBranch)
+	pollStatus("[upgrade] checking origin/%s ...", baseBranch)
 
 	// Fetch from origin
 	fetchCmd := exec.Command("git", "fetch", "origin", baseBranch)
 	fetchCmd.Dir = dir
 	if out, err := fetchCmd.CombinedOutput(); err != nil {
+		pollStatusClear()
 		fmt.Printf("[upgrade] git fetch failed: %v\n%s\n", err, out)
 		return
 	}
@@ -325,19 +325,23 @@ func (e *Engine) checkAndUpgrade() {
 	// Compare HEAD to origin/baseBranch
 	localRef, err := gitRevParse(dir, "HEAD")
 	if err != nil {
+		pollStatusClear()
 		fmt.Printf("[upgrade] could not resolve HEAD: %v\n", err)
 		return
 	}
 	remoteRef, err := gitRevParse(dir, "origin/"+baseBranch)
 	if err != nil {
+		pollStatusClear()
 		fmt.Printf("[upgrade] could not resolve origin/%s: %v\n", baseBranch, err)
 		return
 	}
 	if localRef == remoteRef {
-		fmt.Printf("[upgrade] already up-to-date\n")
+		// Nothing to do — leave status line for next poll to overwrite
 		return
 	}
 
+	// Real upgrade happening — print permanent output
+	pollStatusClear()
 	fmt.Printf("[upgrade] new commits detected — pulling origin/%s\n", baseBranch)
 
 	pullCmd := exec.Command("git", "pull", "--ff-only", "origin", baseBranch)
