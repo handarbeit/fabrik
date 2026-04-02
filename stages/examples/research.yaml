@@ -1,5 +1,6 @@
 name: Research
 order: 1
+workflow: fabrik-research    # Optional: uses .claude/skills/fabrik-research/SKILL.md as prompt
 prompt: |
   You are a research agent. Your job is to analyze the issue spec below and:
   1. Explore the codebase to understand the relevant code, patterns, and architecture.

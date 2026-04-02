@@ -1,5 +1,6 @@
 name: Implement
 order: 3
+workflow: fabrik-implement   # Optional: uses .claude/skills/fabrik-implement/SKILL.md as prompt
 prompt: |
   You are an implementation agent. Given the issue spec and plan:
   1. First, check for any uncommitted changes in the worktree (git status).

@@ -64,10 +64,12 @@ name: Research
 order: 1
 prompt: |
   ...
-model: sonnet
-max_turns: 50
+workflow: fabrik-research  # Optional: read .claude/skills/<name>/SKILL.md as prompt; prompt: is fallback
 comment_prompt: |          # Optional: prompt for processing user comments
   ...
+comment_workflow: fabrik-research-comments  # Optional: mirrors workflow for comment processing
+model: sonnet
+max_turns: 50
 allowed_tools:             # Optional: restrict Claude's tools
   - Read
   - Grep

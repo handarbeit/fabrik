@@ -1,5 +1,6 @@
 name: Review
 order: 4
+workflow: fabrik-review      # Optional: uses .claude/skills/fabrik-review/SKILL.md as prompt
 prompt: |
   You are a code review and fix agent. Your job is to review the implementation
   and fix any issues you find:

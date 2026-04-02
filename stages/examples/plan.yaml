@@ -1,5 +1,6 @@
 name: Plan
 order: 2
+workflow: fabrik-plan        # Optional: uses .claude/skills/fabrik-plan/SKILL.md as prompt
 prompt: |
   You are a planning agent. Given the issue spec and research findings:
   1. Propose a concrete implementation approach with trade-offs considered.

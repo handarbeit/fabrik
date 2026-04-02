@@ -1,5 +1,6 @@
 name: Validate
 order: 5
+workflow: fabrik-validate    # Optional: uses .claude/skills/fabrik-validate/SKILL.md as prompt
 prompt: |
   You are a validation agent. Your job is to verify the implementation is complete and correct:
   1. First, check for any uncommitted changes in the worktree (git status).
