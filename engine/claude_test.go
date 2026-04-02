@@ -472,7 +472,9 @@ func TestRealClaudeInvoker_Invoke(t *testing.T) {
 cat >/dev/null
 printf '%s\n' '{"result":"real invoker output","session_id":"sess_ri","num_turns":1,"total_cost_usd":0.001}'
 `
-	os.WriteFile(fakeClaude, []byte(script), 0755)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	origPath := os.Getenv("PATH")
 	os.Setenv("PATH", binDir+":"+origPath)
@@ -561,7 +563,9 @@ cat >/dev/null
 echo "$@" > %s
 printf '%%s\n' '{"result":"resume output","session_id":"sess_resume","num_turns":1,"total_cost_usd":0.001}'
 `, argsFile)
-	os.WriteFile(fakeClaude, []byte(script), 0755)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	origPath := os.Getenv("PATH")
 	os.Setenv("PATH", binDir+":"+origPath)
@@ -607,7 +611,9 @@ cat >/dev/null
 echo "$@" > %s
 printf '%%s\n' '{"result":"ok","session_id":"sess_mt","num_turns":1,"total_cost_usd":0.001}'
 `, argsFile)
-	os.WriteFile(fakeClaude, []byte(script), 0755)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	origPath := os.Getenv("PATH")
 	os.Setenv("PATH", binDir+":"+origPath)
@@ -655,7 +661,9 @@ cat >/dev/null
 echo "$@" > %s
 printf '%%s\n' '{"result":"ok","session_id":"sess_mo","num_turns":1,"total_cost_usd":0.001}'
 `, argsFile)
-	os.WriteFile(fakeClaude, []byte(script), 0755)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	origPath := os.Getenv("PATH")
 	os.Setenv("PATH", binDir+":"+origPath)
@@ -691,7 +699,9 @@ cat >/dev/null
 printf '%s\n' '{"result":"partial output","session_id":"sess_err","num_turns":5,"total_cost_usd":0.01,"is_error":true}'
 exit 1
 `
-	os.WriteFile(fakeClaude, []byte(script), 0755)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	origPath := os.Getenv("PATH")
 	os.Setenv("PATH", binDir+":"+origPath)
@@ -724,7 +734,9 @@ func TestInvokeClaude_WithComments(t *testing.T) {
 cat > %s
 printf '%%s\n' '{"result":"comment output","session_id":"sess_c","num_turns":1,"total_cost_usd":0.001}'
 `, stdinFile)
-	os.WriteFile(fakeClaude, []byte(script), 0755)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	origPath := os.Getenv("PATH")
 	os.Setenv("PATH", binDir+":"+origPath)
