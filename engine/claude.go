@@ -18,11 +18,11 @@ var stageCompleteRE = regexp.MustCompile(`(?m)^FABRIK_STAGE_COMPLETE\r?$`)
 
 // TokenUsage holds token consumption data from a single Claude invocation.
 type TokenUsage struct {
-	InputTokens          int
-	OutputTokens         int
-	CacheCreationTokens  int
-	CacheReadTokens      int
-	CostUSD              float64
+	InputTokens         int
+	OutputTokens        int
+	CacheCreationTokens int
+	CacheReadTokens     int
+	CostUSD             float64
 }
 
 // add returns a new TokenUsage that is the sum of t and other.

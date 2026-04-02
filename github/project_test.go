@@ -43,18 +43,6 @@ func TestFetchProjectBoard_Success(t *testing.T) {
 												map[string]interface{}{"login": "bob"},
 											},
 										},
-										"comments": map[string]interface{}{
-											"nodes": []interface{}{
-												map[string]interface{}{
-													"id": "C_1",
-													"author": map[string]interface{}{
-														"login": "alice",
-													},
-													"body":      "Started work",
-													"createdAt": "2024-01-15T10:00:00Z",
-												},
-											},
-										},
 									},
 								},
 							},
@@ -108,11 +96,9 @@ func TestFetchProjectBoard_Success(t *testing.T) {
 	if len(item.Assignees) != 1 || item.Assignees[0] != "bob" {
 		t.Errorf("Assignees = %v", item.Assignees)
 	}
-	if len(item.Comments) != 1 || item.Comments[0].Author != "alice" {
-		t.Errorf("Comments = %v", item.Comments)
-	}
-	if item.Comments[0].Body != "Started work" {
-		t.Errorf("Comment body = %q", item.Comments[0].Body)
+	// Shallow query does not populate comments.
+	if len(item.Comments) != 0 {
+		t.Errorf("expected no comments from shallow fetch, got %d", len(item.Comments))
 	}
 }
 
@@ -142,7 +128,6 @@ func TestFetchProjectBoard_SkipsNonIssues(t *testing.T) {
 										"url":       "https://example.com",
 										"labels":    map[string]interface{}{"nodes": []interface{}{}},
 										"assignees": map[string]interface{}{"nodes": []interface{}{}},
-										"comments":  map[string]interface{}{"nodes": []interface{}{}},
 									},
 								},
 							},
@@ -185,7 +170,6 @@ func TestFetchProjectBoard_NoStatus(t *testing.T) {
 										"url":       "https://example.com",
 										"labels":    map[string]interface{}{"nodes": []interface{}{}},
 										"assignees": map[string]interface{}{"nodes": []interface{}{}},
-										"comments":  map[string]interface{}{"nodes": []interface{}{}},
 									},
 								},
 							},
@@ -228,16 +212,6 @@ func TestFetchProjectBoard_NilAuthor(t *testing.T) {
 										"author":    nil,
 										"labels":    map[string]interface{}{"nodes": []interface{}{}},
 										"assignees": map[string]interface{}{"nodes": []interface{}{}},
-										"comments": map[string]interface{}{
-											"nodes": []interface{}{
-												map[string]interface{}{
-													"id":        "C_1",
-													"author":    nil,
-													"body":      "ghost comment",
-													"createdAt": "",
-												},
-											},
-										},
 									},
 								},
 							},
@@ -257,9 +231,6 @@ func TestFetchProjectBoard_NilAuthor(t *testing.T) {
 	}
 	if board.Items[0].Author != "" {
 		t.Errorf("Author = %q, want empty", board.Items[0].Author)
-	}
-	if board.Items[0].Comments[0].Author != "" {
-		t.Errorf("Comment Author = %q, want empty", board.Items[0].Comments[0].Author)
 	}
 }
 
@@ -323,7 +294,6 @@ func makeItem(id, itemID, title string) map[string]interface{} {
 			"url":       "https://example.com",
 			"labels":    map[string]interface{}{"nodes": []interface{}{}, "pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""}},
 			"assignees": map[string]interface{}{"nodes": []interface{}{}},
-			"comments":  map[string]interface{}{"nodes": []interface{}{}, "pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""}},
 		},
 	}
 }
@@ -402,55 +372,78 @@ func TestFetchProjectBoard_ItemsPagination(t *testing.T) {
 	}
 }
 
-func TestFetchProjectBoard_CommentOverflow(t *testing.T) {
-	// Handler tracks which requests have been made.
-	// Request 1: main items query (no cursor) — item with comments hasNextPage=true
-	// Request 2: node comments query (startCursor="c_overflow") — returns extra comment
+func TestFetchItemDetails_Comments(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"data": map[string]interface{}{
+				"node": map[string]interface{}{
+					"comments": map[string]interface{}{
+						"nodes": []interface{}{
+							map[string]interface{}{
+								"id":        "C_1",
+								"author":    map[string]interface{}{"login": "alice"},
+								"body":      "First comment",
+								"createdAt": "2024-01-15T10:00:00Z",
+							},
+							map[string]interface{}{
+								"id":        "C_2",
+								"author":    map[string]interface{}{"login": "bob"},
+								"body":      "Second comment",
+								"createdAt": "2024-01-16T10:00:00Z",
+							},
+						},
+						"pageInfo": map[string]interface{}{
+							"hasNextPage": false,
+							"endCursor":   "",
+						},
+					},
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	item := &ProjectItem{ID: "I_1", Number: 1}
+	if err := c.FetchItemDetails(item); err != nil {
+		t.Fatalf("FetchItemDetails: %v", err)
+	}
+
+	if len(item.Comments) != 2 {
+		t.Fatalf("expected 2 comments, got %d", len(item.Comments))
+	}
+	if item.Comments[0].Body != "First comment" || item.Comments[0].Author != "alice" {
+		t.Errorf("comment[0] = %+v", item.Comments[0])
+	}
+	if item.Comments[1].Body != "Second comment" || item.Comments[1].Author != "bob" {
+		t.Errorf("comment[1] = %+v", item.Comments[1])
+	}
+}
+
+func TestFetchItemDetails_CommentOverflow(t *testing.T) {
 	callCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		vars := readVars(r)
 		callCount++
 
-		// Distinguish main query (has "owner") from node query (has "id").
-		if _, isMain := vars["owner"]; isMain {
+		if _, hasCursor := vars["cursor"]; !hasCursor || vars["cursor"] == nil {
+			// First call: FetchItemDetails main query
 			resp := map[string]interface{}{
 				"data": map[string]interface{}{
-					"repository": map[string]interface{}{
-						"projectV2": map[string]interface{}{
-							"id": "PVT_123",
-							"items": map[string]interface{}{
-								"pageInfo": map[string]interface{}{
-									"hasNextPage": false,
-									"endCursor":   "",
+					"node": map[string]interface{}{
+						"comments": map[string]interface{}{
+							"nodes": []interface{}{
+								map[string]interface{}{
+									"id":        "C_1",
+									"author":    map[string]interface{}{"login": "alice"},
+									"body":      "First comment",
+									"createdAt": "2024-01-15T10:00:00Z",
 								},
-								"nodes": []interface{}{
-									map[string]interface{}{
-										"id": "PVTI_1",
-										"content": map[string]interface{}{
-											"id":        "I_1",
-											"number":    1,
-											"title":     "Issue with many comments",
-											"body":      "",
-											"url":       "https://example.com",
-											"labels":    map[string]interface{}{"nodes": []interface{}{}, "pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""}},
-											"assignees": map[string]interface{}{"nodes": []interface{}{}},
-											"comments": map[string]interface{}{
-												"nodes": []interface{}{
-													map[string]interface{}{
-														"id":        "C_1",
-														"author":    map[string]interface{}{"login": "alice"},
-														"body":      "First comment",
-														"createdAt": "2024-01-15T10:00:00Z",
-													},
-												},
-												"pageInfo": map[string]interface{}{
-													"hasNextPage": true,
-													"endCursor":   "c_overflow",
-												},
-											},
-										},
-									},
-								},
+							},
+							"pageInfo": map[string]interface{}{
+								"hasNextPage": true,
+								"endCursor":   "c_overflow",
 							},
 						},
 					},
@@ -458,11 +451,7 @@ func TestFetchProjectBoard_CommentOverflow(t *testing.T) {
 			}
 			json.NewEncoder(w).Encode(resp)
 		} else {
-			// Node comments overflow query
-			nodeID, _ := vars["id"].(string)
-			if nodeID != "I_1" {
-				t.Errorf("unexpected node ID: %q", nodeID)
-			}
+			// Overflow query
 			resp := map[string]interface{}{
 				"data": map[string]interface{}{
 					"node": map[string]interface{}{
@@ -489,18 +478,14 @@ func TestFetchProjectBoard_CommentOverflow(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("token", srv.URL)
-	board, err := c.FetchProjectBoard("owner", "repo", 1)
-	if err != nil {
-		t.Fatalf("FetchProjectBoard: %v", err)
+	item := &ProjectItem{ID: "I_1", Number: 1}
+	if err := c.FetchItemDetails(item); err != nil {
+		t.Fatalf("FetchItemDetails: %v", err)
 	}
 
 	if callCount != 2 {
 		t.Errorf("expected 2 API calls (main + overflow), got %d", callCount)
 	}
-	if len(board.Items) != 1 {
-		t.Fatalf("expected 1 item, got %d", len(board.Items))
-	}
-	item := board.Items[0]
 	if len(item.Comments) != 2 {
 		t.Fatalf("expected 2 comments (1 main + 1 overflow), got %d", len(item.Comments))
 	}
@@ -540,7 +525,6 @@ func TestFetchProjectBoard_LabelOverflow(t *testing.T) {
 												"pageInfo": map[string]interface{}{"hasNextPage": true, "endCursor": "l_overflow"},
 											},
 											"assignees": map[string]interface{}{"nodes": []interface{}{}},
-											"comments":  map[string]interface{}{"nodes": []interface{}{}, "pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""}},
 										},
 									},
 								},
@@ -592,52 +576,36 @@ func TestFetchProjectBoard_LabelOverflow(t *testing.T) {
 	}
 }
 
-func TestFetchProjectBoard_LinkedPRCommentOverflow(t *testing.T) {
+func TestFetchItemDetails_LinkedPRCommentOverflow(t *testing.T) {
 	callCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		vars := readVars(r)
 		callCount++
 
-		if _, isMain := vars["owner"]; isMain {
+		if _, hasCursor := vars["cursor"]; !hasCursor || vars["cursor"] == nil {
+			// First call: FetchItemDetails main query
 			resp := map[string]interface{}{
 				"data": map[string]interface{}{
-					"repository": map[string]interface{}{
-						"projectV2": map[string]interface{}{
-							"id": "PVT_123",
-							"items": map[string]interface{}{
-								"pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""},
-								"nodes": []interface{}{
-									map[string]interface{}{
-										"id": "PVTI_1",
-										"content": map[string]interface{}{
-											"id":        "I_1",
-											"number":    1,
-											"title":     "Issue with linked PR",
-											"body":      "",
-											"url":       "https://example.com",
-											"labels":    map[string]interface{}{"nodes": []interface{}{}, "pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""}},
-											"assignees": map[string]interface{}{"nodes": []interface{}{}},
-											"comments":  map[string]interface{}{"nodes": []interface{}{}, "pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""}},
-											"closedByPullRequestsReferences": map[string]interface{}{
-												"nodes": []interface{}{
-													map[string]interface{}{
-														"id":     "PR_5",
-														"number": 5,
-														"comments": map[string]interface{}{
-															"nodes": []interface{}{
-																map[string]interface{}{
-																	"id":        "PC_1",
-																	"author":    map[string]interface{}{"login": "alice"},
-																	"body":      "PR comment 1",
-																	"createdAt": "2024-01-15T10:00:00Z",
-																},
-															},
-															"pageInfo": map[string]interface{}{"hasNextPage": true, "endCursor": "pc_overflow"},
-														},
-													},
-												},
+					"node": map[string]interface{}{
+						"comments": map[string]interface{}{
+							"nodes":    []interface{}{},
+							"pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""},
+						},
+						"closedByPullRequestsReferences": map[string]interface{}{
+							"nodes": []interface{}{
+								map[string]interface{}{
+									"id":     "PR_5",
+									"number": 5,
+									"comments": map[string]interface{}{
+										"nodes": []interface{}{
+											map[string]interface{}{
+												"id":        "PC_1",
+												"author":    map[string]interface{}{"login": "alice"},
+												"body":      "PR comment 1",
+												"createdAt": "2024-01-15T10:00:00Z",
 											},
 										},
+										"pageInfo": map[string]interface{}{"hasNextPage": true, "endCursor": "pc_overflow"},
 									},
 								},
 							},
@@ -647,7 +615,7 @@ func TestFetchProjectBoard_LinkedPRCommentOverflow(t *testing.T) {
 			}
 			json.NewEncoder(w).Encode(resp)
 		} else {
-			// Node comments overflow query (for the linked PR)
+			// PR comment overflow query
 			nodeID, _ := vars["id"].(string)
 			if nodeID != "PR_5" {
 				t.Errorf("unexpected node ID: %q", nodeID)
@@ -675,18 +643,14 @@ func TestFetchProjectBoard_LinkedPRCommentOverflow(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("token", srv.URL)
-	board, err := c.FetchProjectBoard("owner", "repo", 1)
-	if err != nil {
-		t.Fatalf("FetchProjectBoard: %v", err)
+	item := &ProjectItem{ID: "I_1", Number: 1}
+	if err := c.FetchItemDetails(item); err != nil {
+		t.Fatalf("FetchItemDetails: %v", err)
 	}
 
 	if callCount != 2 {
 		t.Errorf("expected 2 API calls (main + PR overflow), got %d", callCount)
 	}
-	if len(board.Items) != 1 {
-		t.Fatalf("expected 1 item, got %d", len(board.Items))
-	}
-	item := board.Items[0]
 	if len(item.Comments) != 2 {
 		t.Fatalf("expected 2 PR comments (1 main + 1 overflow), got %d", len(item.Comments))
 	}
@@ -695,5 +659,41 @@ func TestFetchProjectBoard_LinkedPRCommentOverflow(t *testing.T) {
 	}
 	if item.Comments[1].Body != "PR overflow comment" || item.Comments[1].FromPR != 5 {
 		t.Errorf("comment[1] = %+v", item.Comments[1])
+	}
+}
+
+func TestFetchItemDetails_NilAuthor(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"data": map[string]interface{}{
+				"node": map[string]interface{}{
+					"comments": map[string]interface{}{
+						"nodes": []interface{}{
+							map[string]interface{}{
+								"id":        "C_1",
+								"author":    nil,
+								"body":      "ghost comment",
+								"createdAt": "",
+							},
+						},
+						"pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""},
+					},
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	item := &ProjectItem{ID: "I_1", Number: 1}
+	if err := c.FetchItemDetails(item); err != nil {
+		t.Fatalf("FetchItemDetails: %v", err)
+	}
+	if len(item.Comments) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(item.Comments))
+	}
+	if item.Comments[0].Author != "" {
+		t.Errorf("Comment Author = %q, want empty", item.Comments[0].Author)
 	}
 }

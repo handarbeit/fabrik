@@ -197,6 +197,30 @@ func TestParseClaudeJSON_ValidJSON(t *testing.T) {
 	}
 }
 
+func TestTokenUsageFromResponse_MultiModel(t *testing.T) {
+	output := []byte(`{"result":"ok","session_id":"s","total_cost_usd":0.003,"modelUsage":{"claude-sonnet-4-6":{"inputTokens":100,"outputTokens":50,"cacheCreationInputTokens":10,"cacheReadInputTokens":5},"claude-haiku-3":{"inputTokens":200,"outputTokens":30,"cacheCreationInputTokens":0,"cacheReadInputTokens":20}}}`)
+	resp, ok := parseClaudeJSON(output)
+	if !ok {
+		t.Fatal("expected successful parse")
+	}
+	usage := tokenUsageFromResponse(resp)
+	if usage.InputTokens != 300 {
+		t.Errorf("InputTokens = %d, want 300", usage.InputTokens)
+	}
+	if usage.OutputTokens != 80 {
+		t.Errorf("OutputTokens = %d, want 80", usage.OutputTokens)
+	}
+	if usage.CacheCreationTokens != 10 {
+		t.Errorf("CacheCreationTokens = %d, want 10", usage.CacheCreationTokens)
+	}
+	if usage.CacheReadTokens != 25 {
+		t.Errorf("CacheReadTokens = %d, want 25", usage.CacheReadTokens)
+	}
+	if diff := usage.CostUSD - 0.003; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("CostUSD = %f, want ~0.003", usage.CostUSD)
+	}
+}
+
 func TestParseClaudeJSON_InvalidJSON(t *testing.T) {
 	_, ok := parseClaudeJSON([]byte(`not json at all`))
 	if ok {
@@ -417,7 +441,7 @@ echo "args: $@"
 	}
 	issue := gh.ProjectItem{Number: 50, Title: "T"}
 
-	output, _, _, err := InvokeClaude(context.Background(), stage, issue, nil,false, workDir, "")
+	output, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -459,7 +483,7 @@ echo "args: $@"
 	}
 	issue := gh.ProjectItem{Number: 51, Title: "T"}
 
-	output, _, _, err := InvokeClaude(context.Background(), stage, issue, nil,false, workDir, "opus")
+	output, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "opus")
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -492,7 +516,7 @@ exit 1
 	}
 	issue := gh.ProjectItem{Number: 60, Title: "T"}
 
-	output, _, _, err := InvokeClaude(context.Background(), stage, issue, nil,false, workDir, "")
+	output, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
 	if err == nil {
 		t.Fatal("expected error for failing binary")
 	}
