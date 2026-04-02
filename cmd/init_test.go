@@ -160,6 +160,12 @@ func TestRunInit_ForceOverwrites(t *testing.T) {
 	}
 }
 
+func TestRunInit_RejectsPositionalArgs(t *testing.T) {
+	if err := runInit([]string{"unexpected"}); err == nil {
+		t.Fatal("expected error for unexpected positional argument, got nil")
+	}
+}
+
 func TestRunInit_IdempotentDestDir(t *testing.T) {
 	dir := t.TempDir()
 	orig, err := os.Getwd()
