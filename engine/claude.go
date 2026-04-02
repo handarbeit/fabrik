@@ -342,7 +342,7 @@ Your job is to:
 // formatStatsFooter returns a one-line stats summary suitable for appending to a comment.
 // Returns empty string when no stats are available (e.g. JSON parse fallback).
 func formatStatsFooter(stats ClaudeStats, completed bool) string {
-	if stats.TurnsUsed == 0 && stats.InputTokens == 0 {
+	if stats.TurnsUsed == 0 && stats.InputTokens == 0 && stats.OutputTokens == 0 {
 		return ""
 	}
 	var completion string
