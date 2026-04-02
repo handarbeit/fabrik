@@ -14,6 +14,15 @@ import (
 // from other failures without fragile string matching.
 var ErrNotFound = errors.New("not found")
 
+// updateRestStats parses rate limit headers from a response and stores them when present.
+func (c *Client) updateRestStats(h http.Header) {
+	if stats := parseRateLimitHeaders(h); stats.Limit > 0 {
+		c.mu.Lock()
+		c.restStats = stats
+		c.mu.Unlock()
+	}
+}
+
 // ErrUnprocessableEntity is returned by REST methods when the server responds
 // with 422. Callers may use errors.Is(err, github.ErrUnprocessableEntity) to
 // detect "already exists" or validation failures without fragile string matching.
@@ -39,11 +48,7 @@ func (c *Client) restRequest(method, url string, body interface{}) error {
 	}
 	defer resp.Body.Close()
 
-	if stats := parseRateLimitHeaders(resp.Header); stats.Limit > 0 {
-		c.mu.Lock()
-		c.restStats = stats
-		c.mu.Unlock()
-	}
+	c.updateRestStats(resp.Header)
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -70,11 +75,7 @@ func (c *Client) restGetJSON(url string, result interface{}) error {
 	}
 	defer resp.Body.Close()
 
-	if stats := parseRateLimitHeaders(resp.Header); stats.Limit > 0 {
-		c.mu.Lock()
-		c.restStats = stats
-		c.mu.Unlock()
-	}
+	c.updateRestStats(resp.Header)
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -105,11 +106,7 @@ func (c *Client) restGet(url string) (*SearchResult, error) {
 	}
 	defer resp.Body.Close()
 
-	if stats := parseRateLimitHeaders(resp.Header); stats.Limit > 0 {
-		c.mu.Lock()
-		c.restStats = stats
-		c.mu.Unlock()
-	}
+	c.updateRestStats(resp.Header)
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -148,11 +145,7 @@ func (c *Client) restPostWithResponse(url string, body interface{}, target inter
 	}
 	defer resp.Body.Close()
 
-	if stats := parseRateLimitHeaders(resp.Header); stats.Limit > 0 {
-		c.mu.Lock()
-		c.restStats = stats
-		c.mu.Unlock()
-	}
+	c.updateRestStats(resp.Header)
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -183,11 +176,7 @@ func (c *Client) restDelete(url string) error {
 	}
 	defer resp.Body.Close()
 
-	if stats := parseRateLimitHeaders(resp.Header); stats.Limit > 0 {
-		c.mu.Lock()
-		c.restStats = stats
-		c.mu.Unlock()
-	}
+	c.updateRestStats(resp.Header)
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
