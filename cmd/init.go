@@ -1,10 +1,12 @@
 package cmd
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 
 	"github.com/verveguy/fabrik/stages"
@@ -38,13 +40,15 @@ func runInit(args []string) error {
 		}
 		destPath := filepath.Join(destDir, entry.Name())
 		if !*force {
-			if _, err := os.Stat(destPath); err == nil {
+			if _, statErr := os.Stat(destPath); statErr == nil {
 				skipped++
 				fmt.Printf("  skip   %s (already exists; use --force to overwrite)\n", destPath)
 				continue
+			} else if !errors.Is(statErr, fs.ErrNotExist) {
+				return fmt.Errorf("checking %s: %w", destPath, statErr)
 			}
 		}
-		data, err := stages.DefaultStages.ReadFile(filepath.Join("examples", entry.Name()))
+		data, err := stages.DefaultStages.ReadFile(path.Join("examples", entry.Name()))
 		if err != nil {
 			return fmt.Errorf("reading embedded %s: %w", entry.Name(), err)
 		}
