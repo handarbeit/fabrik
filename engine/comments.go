@@ -91,7 +91,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	} else {
 		// No body update — post output as a comment instead
 		if output != "" {
-			comment := formatOutputComment(stage.Name+" (comment review)", output, branch, commit, timestamp)
+			comment := formatOutputComment(stage.Name+" (comment review)", output, "", branch, commit, timestamp)
 			if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
 				logf(item.Number, "warn", "could not post comment: %v\n", err)
 			}

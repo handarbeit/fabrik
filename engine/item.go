@@ -262,11 +262,11 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 
 	// Post Claude's output
 	if output != "" {
-		displayOutput := output + formatStatsFooter(stats, completed)
+		footer := formatStatsFooter(stats, completed)
 		if stage.PostToPR {
-			e.postOutputToPR(item, stage.Name, displayOutput, branch, commit, timestamp)
+			e.postOutputToPR(item, stage.Name, output, footer, branch, commit, timestamp)
 		} else {
-			comment := formatOutputComment(stage.Name, displayOutput, branch, commit, timestamp)
+			comment := formatOutputComment(stage.Name, output, footer, branch, commit, timestamp)
 			if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
 				logf(item.Number, "warn", "could not post comment: %v\n", err)
 			}
