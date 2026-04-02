@@ -17,14 +17,14 @@ cp .env.example .env
 # Edit .env with your GitHub token and repo details
 # Make sure .env is in your .gitignore (Fabrik enforces this)
 
-# Copy and customize stage configs
-cp -r stages/examples stages/mystages
+# Initialize stage configs in .fabrik/stages/
+./fabrik init
 
 # Run (all config comes from .env — no flags needed)
 ./fabrik
 
 # Or override specific values with flags
-./fabrik --stages ./stages/mystages --yolo
+./fabrik --stages ./.fabrik/stages --yolo
 ```
 
 ### Development
@@ -159,7 +159,7 @@ Command-line flags take precedence over `.env` values.
 | `--project` | GitHub project number | required |
 | `--user` | Your GitHub username | required |
 | `--token` | GitHub token | `$GITHUB_TOKEN` |
-| `--stages` | Stage configs directory | `./stages` |
+| `--stages` | Stage configs directory | `./.fabrik/stages` |
 | `--yolo` | Auto-advance through stages | `false` |
 | `--auto-upgrade` | Self-upgrade from origin/main when idle | `false` |
 | `--poll` | Poll interval in seconds | `30` |
@@ -204,9 +204,24 @@ Research stage surfaces them, drag cards across the board, and occasionally
 comment "please process PR feedback" when Copilot has opinions. The factory
 does the rest.
 
+## Migration from `./stages`
+
+If you used Fabrik before `v0.2`, your stage configs were in `./stages` (the old default)
+or `./stages/mystages/` if you used that convention.
+
+```bash
+mkdir -p .fabrik/stages
+# If you used the default ./stages path:
+cp ./stages/*.yaml .fabrik/stages/
+# If you used ./stages/mystages/:
+cp ./stages/mystages/*.yaml .fabrik/stages/
+# Or keep the old path by setting FABRIK_STAGES in your .env:
+# FABRIK_STAGES=./stages
+```
+
 ## Documentation
 
-- [User Guide](docs/USER_GUIDE.md) — full configuration reference, workflow patterns, stage details, labels, and troubleshooting
+- [User Guide](docs/USER_GUIDE.md) — full configuration reference for the pre-v0.2 `./stages` workflow (see "Quick Start" and "Migration from `./stages`" above for the current `./.fabrik/stages` default), workflow patterns, stage details, labels, and troubleshooting
 
 ## Architecture Decision Records
 

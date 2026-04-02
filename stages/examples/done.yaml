@@ -1,0 +1,3 @@
+name: Done
+order: 99
+cleanup_worktree: true

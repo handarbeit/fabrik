@@ -162,7 +162,7 @@ func TestCheckCompletion_UnsupportedTypes(t *testing.T) {
 	}
 }
 
-func TestSaveSessionID_WritesSessionID(t *testing.T) {
+func TestSaveSessionIDDirect_Valid(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.session")
 
@@ -183,7 +183,7 @@ func TestSaveSessionID_WritesSessionID(t *testing.T) {
 	}
 }
 
-func TestSaveSessionID_EmptySessionID(t *testing.T) {
+func TestSaveSessionIDDirect_Empty(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.session")
 

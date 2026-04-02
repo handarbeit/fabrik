@@ -57,6 +57,11 @@ type Stage struct {
 	// AutoAdvance overrides the global yolo setting for this specific stage.
 	// nil means use the global setting.
 	AutoAdvance *bool `yaml:"auto_advance,omitempty"`
+
+	// CleanupWorktree causes the engine to remove the issue's worktree directory
+	// instead of invoking Claude. No prompt, lock, or in_progress label is needed.
+	// Use this for terminal stages like "Done" to reclaim disk space.
+	CleanupWorktree bool `yaml:"cleanup_worktree,omitempty"`
 }
 
 // CompletionCriteria defines how to determine if a stage is complete.
@@ -116,14 +121,16 @@ func loadOne(path string) (*Stage, error) {
 		return nil, fmt.Errorf("stage must have a 'name' field")
 	}
 
-	if s.Prompt == "" {
-		return nil, fmt.Errorf("stage %q must have a 'prompt' field", s.Name)
-	}
+	if !s.CleanupWorktree {
+		if s.Prompt == "" {
+			return nil, fmt.Errorf("stage %q must have a 'prompt' field", s.Name)
+		}
 
-	if s.Completion.Type == "" {
-		s.Completion.Type = "claude"
-	} else if s.Completion.Type != "claude" {
-		return nil, fmt.Errorf("stage %q: unsupported completion type %q (only \"claude\" is supported)", s.Name, s.Completion.Type)
+		if s.Completion.Type == "" {
+			s.Completion.Type = "claude"
+		} else if s.Completion.Type != "claude" {
+			return nil, fmt.Errorf("stage %q: unsupported completion type %q (only \"claude\" is supported)", s.Name, s.Completion.Type)
+		}
 	}
 
 	return &s, nil
