@@ -34,6 +34,7 @@ type Config struct {
 	PollSeconds   int
 	MaxConcurrent int
 	MaxRetries    int
+	NoTmux        bool
 }
 
 func Execute() error {
@@ -53,6 +54,7 @@ func Execute() error {
 	flag.BoolVar(&cfg.Yolo, "yolo", false, "Auto-advance issues through stages without waiting for human input")
 	flag.BoolVar(&cfg.AutoUpgrade, "auto-upgrade", false, "When idle, check for new commits on origin/main and self-upgrade (for fabrik developing itself)")
 	flag.BoolVar(&cfg.TUI, "tui", false, "Enable the interactive TUI dashboard (default: plain-text log output)")
+	flag.BoolVar(&cfg.NoTmux, "no-tmux", false, "Disable tmux session wrapping; run Claude directly (useful for CI/headless environments)")
 	flag.IntVar(&cfg.PollSeconds, "poll", 30, "Polling interval in seconds")
 	flag.IntVar(&cfg.MaxRetries, "max-retries", 3, "Max failed stage attempts before pausing the issue (0 = unlimited)")
 
@@ -96,6 +98,12 @@ func Execute() error {
 		if v := os.Getenv("FABRIK_YOLO"); v != "" {
 			lv := strings.ToLower(v)
 			cfg.Yolo = lv == "true" || lv == "1" || lv == "yes"
+		}
+	}
+	if !cfg.NoTmux {
+		if v := os.Getenv("FABRIK_NO_TMUX"); v != "" {
+			lv := strings.ToLower(v)
+			cfg.NoTmux = lv == "true" || lv == "1" || lv == "yes"
 		}
 	}
 	if cfg.PollSeconds == 30 {
@@ -167,6 +175,7 @@ func Execute() error {
 		fmt.Printf("  user:    %s\n", cfg.User)
 		fmt.Printf("  stages:  %d loaded\n", len(stageCfgs))
 		fmt.Printf("  yolo:    %v\n", cfg.Yolo)
+		fmt.Printf("  no-tmux: %v\n", cfg.NoTmux)
 		fmt.Printf("  auto-upgrade: %v\n", cfg.AutoUpgrade)
 		fmt.Printf("  poll:    %ds\n", cfg.PollSeconds)
 		fmt.Printf("  workers: %d\n", cfg.MaxConcurrent)
@@ -188,6 +197,7 @@ func Execute() error {
 		PollSeconds:   cfg.PollSeconds,
 		MaxConcurrent: cfg.MaxConcurrent,
 		MaxRetries:    cfg.MaxRetries,
+		NoTmux:        cfg.NoTmux,
 		Stages:        stageCfgs,
 		ReadyCh:       testReadyCh,
 	})
