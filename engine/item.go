@@ -23,8 +23,14 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		return false
 	}
 
-	// Cleanup stages bypass comment processing and all other checks
+	// Cleanup stages bypass comment processing and cooldown checks.
 	if stage.CleanupWorktree {
+		// Respect the paused label — user may be preserving the worktree intentionally.
+		for _, label := range item.Labels {
+			if label == "fabrik:paused" {
+				return false
+			}
+		}
 		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
 		for _, label := range item.Labels {
 			if label == completeLabel {
@@ -115,6 +121,43 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}
 	}
 
+	// Cleanup stage: remove the worktree (no lock, no Claude, no comment processing needed).
+	// Runs before new-comment check — cleanup stages are terminal and should not route
+	// comments to processComments. Also handles PR items (no worktree to remove, just label).
+	if stage.CleanupWorktree {
+		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
+		for _, label := range item.Labels {
+			if label == completeLabel {
+				return nil
+			}
+		}
+
+		// Issues have worktrees; PRs on the board do not — skip the removal for PRs.
+		if !item.IsPR {
+			wtDir := e.worktrees.WorktreeDir(item.Number)
+			statusCmd := exec.Command("git", "status", "--porcelain")
+			statusCmd.Dir = wtDir
+			if out, err := statusCmd.Output(); err == nil && len(strings.TrimSpace(string(out))) > 0 {
+				logf(item.Number, "warn", "worktree dirty — skipping cleanup to preserve uncommitted changes\n")
+				return nil
+			}
+
+			if err := e.worktrees.CleanupWorktree(item.Number, false); err != nil {
+				logf(item.Number, "warn", "could not clean up worktree: %v\n", err)
+			}
+		}
+
+		if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, completeLabel); err != nil {
+			logf(item.Number, "warn", "could not add completion label: %v\n", err)
+		}
+
+		e.mu.Lock()
+		e.processedSet[itemKey] = time.Now()
+		e.mu.Unlock()
+
+		return nil
+	}
+
 	// Unpause detection: if this stage has a stage:<name>:failed label but
 	// fabrik:paused is gone, the user has investigated — reset state. We check
 	// the label (not just the in-memory map) so cleanup works across restarts.
@@ -155,32 +198,6 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		if label == completeLabel {
 			return nil
 		}
-	}
-
-	// Cleanup stage: remove the worktree (no lock, no Claude invocation needed)
-	if stage.CleanupWorktree {
-		wtDir := e.worktrees.WorktreeDir(item.Number)
-		statusCmd := exec.Command("git", "status", "--porcelain")
-		statusCmd.Dir = wtDir
-		if out, err := statusCmd.Output(); err == nil && len(strings.TrimSpace(string(out))) > 0 {
-			logf(item.Number, "warn", "worktree dirty — skipping cleanup to preserve uncommitted changes\n")
-			return nil
-		}
-
-		if err := e.worktrees.CleanupWorktree(item.Number, false); err != nil {
-			logf(item.Number, "warn", "could not clean up worktree: %v\n", err)
-		}
-
-		if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, completeLabel); err != nil {
-			logf(item.Number, "warn", "could not add completion label: %v\n", err)
-		}
-
-		itemKey := fmt.Sprintf("%d-%s", item.Number, stage.Name)
-		e.mu.Lock()
-		e.processedSet[itemKey] = time.Now()
-		e.mu.Unlock()
-
-		return nil
 	}
 
 	// Determine if we need to run the stage
