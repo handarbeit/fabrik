@@ -350,15 +350,15 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 // fabrik:paused and stage:<name>:failed labels, posts an explanatory comment, and
 // records the escalation so clearFailedStage can detect when the user unpauses.
 func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
-	logf(item.Number, "escalate", "stage %q failed %d time(s) — pausing issue\n", stage.Name, e.cfg.MaxRetries)
+	e.logf(item.Number, "escalate", "stage %q failed %d time(s) — pausing issue\n", stage.Name, e.cfg.MaxRetries)
 
 	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, "fabrik:paused"); err != nil {
-		logf(item.Number, "warn", "could not add paused label: %v\n", err)
+		e.logf(item.Number, "warn", "could not add paused label: %v\n", err)
 	}
 
 	failedLabel := fmt.Sprintf("stage:%s:failed", stage.Name)
 	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, failedLabel); err != nil {
-		logf(item.Number, "warn", "could not add failed label: %v\n", err)
+		e.logf(item.Number, "warn", "could not add failed label: %v\n", err)
 	}
 
 	comment := fmt.Sprintf(
@@ -366,7 +366,7 @@ func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 		stage.Name, e.cfg.MaxRetries,
 	)
 	if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
-		logf(item.Number, "warn", "could not post escalation comment: %v\n", err)
+		e.logf(item.Number, "warn", "could not post escalation comment: %v\n", err)
 	}
 
 	itemKey := fmt.Sprintf("%d-%s", item.Number, stage.Name)
@@ -379,12 +379,12 @@ func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 // that was paused by the engine due to max retries. It removes the stage:<name>:failed
 // label and resets the retry count so the stage can be attempted again.
 func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
-	logf(item.Number, "unpause", "clearing failed stage %q after manual unpause\n", stage.Name)
+	e.logf(item.Number, "unpause", "clearing failed stage %q after manual unpause\n", stage.Name)
 
 	failedLabel := fmt.Sprintf("stage:%s:failed", stage.Name)
 	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, item.Number, failedLabel); err != nil &&
 		!errors.Is(err, gh.ErrNotFound) {
-		logf(item.Number, "warn", "could not remove failed label: %v\n", err)
+		e.logf(item.Number, "warn", "could not remove failed label: %v\n", err)
 	}
 
 	itemKey := fmt.Sprintf("%d-%s", item.Number, stage.Name)
