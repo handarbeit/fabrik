@@ -196,7 +196,10 @@ func TestSaveSessionIDDirect_Empty(t *testing.T) {
 
 func TestParseClaudeJSON(t *testing.T) {
 	input := []byte(`{"result":"hello","session_id":"sess_xyz","num_turns":5,"total_cost_usd":0.01,"usage":{"input_tokens":100,"output_tokens":50}}`)
-	text, sessionID, turns, cost, inputTokens, outputTokens := parseClaudeJSON(input)
+	ok, text, sessionID, turns, cost, inputTokens, outputTokens := parseClaudeJSON(input)
+	if !ok {
+		t.Error("expected ok=true for valid JSON")
+	}
 	if text != "hello" {
 		t.Errorf("text = %q, want hello", text)
 	}
@@ -218,9 +221,34 @@ func TestParseClaudeJSON(t *testing.T) {
 }
 
 func TestParseClaudeJSON_Invalid(t *testing.T) {
-	text, sessionID, turns, cost, inputTokens, outputTokens := parseClaudeJSON([]byte("not json"))
+	ok, text, sessionID, turns, cost, inputTokens, outputTokens := parseClaudeJSON([]byte("not json"))
+	if ok {
+		t.Error("expected ok=false for invalid JSON")
+	}
 	if text != "" || sessionID != "" || turns != 0 || cost != 0 || inputTokens != 0 || outputTokens != 0 {
 		t.Errorf("expected zero values for invalid JSON, got text=%q sessionID=%q turns=%d cost=%f inputTokens=%d outputTokens=%d", text, sessionID, turns, cost, inputTokens, outputTokens)
+	}
+}
+
+func TestParseClaudeJSON_MaxTurnsError(t *testing.T) {
+	// When Claude hits max_turns, the JSON has no "result" field.
+	// parseClaudeJSON must return ok=true with empty text (not fail to parse).
+	input := []byte(`{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":30,"usage":{"input_tokens":1000,"output_tokens":500},"errors":["Reached maximum number of turns (30)"]}`)
+	ok, text, _, turns, _, inputTokens, outputTokens := parseClaudeJSON(input)
+	if !ok {
+		t.Error("expected ok=true: valid JSON should parse even without a result field")
+	}
+	if text != "" {
+		t.Errorf("text = %q, want empty string for error response", text)
+	}
+	if turns != 30 {
+		t.Errorf("turns = %d, want 30", turns)
+	}
+	if inputTokens != 1000 {
+		t.Errorf("inputTokens = %d, want 1000", inputTokens)
+	}
+	if outputTokens != 500 {
+		t.Errorf("outputTokens = %d, want 500", outputTokens)
 	}
 }
 
