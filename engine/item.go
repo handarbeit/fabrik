@@ -70,6 +70,9 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		return nil
 	}
 
+	// Hoist itemKey early so unpause detection can use it before stage processing.
+	itemKey := fmt.Sprintf("%d-%s", item.Number, stage.Name)
+
 	// Check if this issue is locked by another driver instance
 	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
 	otherLockPrefix := "fabrik:locked:"
@@ -96,6 +99,18 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}
 	}
 
+	// Unpause detection: if we paused this item due to max retries but the
+	// fabrik:paused label is now gone, the user has investigated — reset state.
+	var wasPaused bool
+	func() {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		wasPaused = e.pausedDueToRetries[itemKey]
+	}()
+	if wasPaused {
+		e.clearFailedStage(item, stage)
+	}
+
 	// Check for new comments from our user
 	newComments := e.findNewComments(item)
 
@@ -118,7 +133,6 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	}
 
 	// Determine if we need to run the stage
-	itemKey := fmt.Sprintf("%d-%s", item.Number, stage.Name)
 	var lastAttempt time.Time
 	var attempted bool
 	func() {
@@ -294,9 +308,69 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	} else {
 		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
 		logf(item.Number, "wait", "stage %q did not complete — will retry after %v\n", stage.Name, cooldown)
+		if claudeRan && e.cfg.MaxRetries > 0 {
+			var count int
+			func() {
+				e.mu.Lock()
+				defer e.mu.Unlock()
+				e.retryCount[itemKey]++
+				count = e.retryCount[itemKey]
+			}()
+			if count >= e.cfg.MaxRetries {
+				e.escalateFailedStage(item, stage)
+			}
+		}
 	}
 
 	return nil
+}
+
+// escalateFailedStage is called when a stage has failed MaxRetries times. It adds
+// fabrik:paused and stage:<name>:failed labels, posts an explanatory comment, and
+// records the escalation so clearFailedStage can detect when the user unpauses.
+func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
+	logf(item.Number, "escalate", "stage %q failed %d time(s) — pausing issue\n", stage.Name, e.cfg.MaxRetries)
+
+	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, "fabrik:paused"); err != nil {
+		logf(item.Number, "warn", "could not add paused label: %v\n", err)
+	}
+
+	failedLabel := fmt.Sprintf("stage:%s:failed", strings.ToLower(stage.Name))
+	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, failedLabel); err != nil {
+		logf(item.Number, "warn", "could not add failed label: %v\n", err)
+	}
+
+	comment := fmt.Sprintf(
+		"🏭 **Fabrik — stage failed**\n\nStage **%s** failed to complete after %d attempt(s). The issue has been paused (`fabrik:paused`).\n\nTo retry: investigate the failure, make any needed fixes, then remove the `fabrik:paused` label.",
+		stage.Name, e.cfg.MaxRetries,
+	)
+	if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
+		logf(item.Number, "warn", "could not post escalation comment: %v\n", err)
+	}
+
+	itemKey := fmt.Sprintf("%d-%s", item.Number, stage.Name)
+	e.mu.Lock()
+	e.pausedDueToRetries[itemKey] = true
+	e.mu.Unlock()
+}
+
+// clearFailedStage is called when the user removes fabrik:paused from an issue
+// that was paused by the engine due to max retries. It removes the stage:<name>:failed
+// label and resets the retry count so the stage can be attempted again.
+func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
+	logf(item.Number, "unpause", "clearing failed stage %q after manual unpause\n", stage.Name)
+
+	failedLabel := fmt.Sprintf("stage:%s:failed", strings.ToLower(stage.Name))
+	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, item.Number, failedLabel); err != nil &&
+		!errors.Is(err, gh.ErrNotFound) {
+		logf(item.Number, "warn", "could not remove failed label: %v\n", err)
+	}
+
+	itemKey := fmt.Sprintf("%d-%s", item.Number, stage.Name)
+	e.mu.Lock()
+	delete(e.retryCount, itemKey)
+	delete(e.pausedDueToRetries, itemKey)
+	e.mu.Unlock()
 }
 
 // extractModelOverride scans item labels for the first "model:<name>" label and returns <name>.
