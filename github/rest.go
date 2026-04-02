@@ -39,6 +39,12 @@ func (c *Client) restRequest(method, url string, body interface{}) error {
 	}
 	defer resp.Body.Close()
 
+	if stats := parseRateLimitHeaders(resp.Header); stats.Limit > 0 {
+		c.mu.Lock()
+		c.restStats = stats
+		c.mu.Unlock()
+	}
+
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode == 422 {
@@ -63,6 +69,12 @@ func (c *Client) restGetJSON(url string, result interface{}) error {
 		return fmt.Errorf("executing request: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if stats := parseRateLimitHeaders(resp.Header); stats.Limit > 0 {
+		c.mu.Lock()
+		c.restStats = stats
+		c.mu.Unlock()
+	}
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -92,6 +104,12 @@ func (c *Client) restGet(url string) (*SearchResult, error) {
 		return nil, fmt.Errorf("executing request: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if stats := parseRateLimitHeaders(resp.Header); stats.Limit > 0 {
+		c.mu.Lock()
+		c.restStats = stats
+		c.mu.Unlock()
+	}
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -130,6 +148,12 @@ func (c *Client) restPostWithResponse(url string, body interface{}, target inter
 	}
 	defer resp.Body.Close()
 
+	if stats := parseRateLimitHeaders(resp.Header); stats.Limit > 0 {
+		c.mu.Lock()
+		c.restStats = stats
+		c.mu.Unlock()
+	}
+
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
@@ -158,6 +182,12 @@ func (c *Client) restDelete(url string) error {
 		return fmt.Errorf("executing request: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if stats := parseRateLimitHeaders(resp.Header); stats.Limit > 0 {
+		c.mu.Lock()
+		c.restStats = stats
+		c.mu.Unlock()
+	}
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
