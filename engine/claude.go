@@ -17,15 +17,29 @@ import (
 	"github.com/handarbeit/fabrik/stages"
 )
 
-// ClaudeStats holds usage statistics from a Claude invocation.
-type ClaudeStats struct {
-	TurnsUsed    int
-	MaxTurns     int
-	InputTokens  int
-	OutputTokens int
+var stageCompleteRE = regexp.MustCompile(`(?m)^FABRIK_STAGE_COMPLETE\r?$`)
+
+// TokenUsage holds token consumption data from a single Claude invocation.
+type TokenUsage struct {
+	InputTokens         int
+	OutputTokens        int
+	CacheCreationTokens int
+	CacheReadTokens     int
+	CostUSD             float64
+	TurnsUsed           int
+	MaxTurns            int
 }
 
-var stageCompleteRE = regexp.MustCompile(`(?m)^FABRIK_STAGE_COMPLETE\r?$`)
+// add returns a new TokenUsage that is the sum of t and other.
+func (t TokenUsage) add(other TokenUsage) TokenUsage {
+	return TokenUsage{
+		InputTokens:         t.InputTokens + other.InputTokens,
+		OutputTokens:        t.OutputTokens + other.OutputTokens,
+		CacheCreationTokens: t.CacheCreationTokens + other.CacheCreationTokens,
+		CacheReadTokens:     t.CacheReadTokens + other.CacheReadTokens,
+		CostUSD:             t.CostUSD + other.CostUSD,
+	}
+}
 
 // SessionDir returns the directory where Claude sessions are cached for an issue.
 func SessionDir(issueNumber int) string {
@@ -54,45 +68,45 @@ func sessionFile(issueNumber int, stageName string) string {
 // InvokeClaude runs Claude Code with the given stage configuration and issue context.
 // workDir is the directory Claude should run in (typically a git worktree).
 // modelOverride, if non-empty, replaces the stage's configured model.
-// It returns Claude's output, usage stats, and whether Claude indicated completion.
-func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
+// It returns Claude's output, whether Claude indicated completion, and token usage.
+func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
 	sessDir := SessionDir(issue.Number)
 	if err := os.MkdirAll(sessDir, 0700); err != nil {
-		return "", ClaudeStats{}, false, fmt.Errorf("creating session dir: %w", err)
+		return "", false, TokenUsage{}, fmt.Errorf("creating session dir: %w", err)
 	}
 	if err := os.Chmod(sessDir, 0700); err != nil {
-		return "", ClaudeStats{}, false, fmt.Errorf("setting session dir permissions: %w", err)
+		return "", false, TokenUsage{}, fmt.Errorf("setting session dir permissions: %w", err)
 	}
 
 	prompt := buildPrompt(stage, issue, newComments)
 	args := buildClaudeArgs(stage, issue.Number, resume, modelOverride)
 
-	output, stats, _, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name)
-	stats.MaxTurns = stage.MaxTurns
+	output, _, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name)
+	usage.MaxTurns = stage.MaxTurns
 	if err != nil {
-		return output, stats, false, err
+		return output, false, usage, err
 	}
-	return output, stats, checkCompletion(stage, output), nil
+	return output, checkCompletion(stage, output), usage, nil
 }
 
 // InvokeClaudeForComments runs Claude Code with a comment-review prompt.
 // It uses the stage's CommentPrompt if defined, otherwise a default.
 // modelOverride, if non-empty, replaces the stage's configured model.
-func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
+func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
 	sessDir := SessionDir(issue.Number)
 	if err := os.MkdirAll(sessDir, 0700); err != nil {
-		return "", ClaudeStats{}, false, fmt.Errorf("creating session dir: %w", err)
+		return "", false, TokenUsage{}, fmt.Errorf("creating session dir: %w", err)
 	}
 	if err := os.Chmod(sessDir, 0700); err != nil {
-		return "", ClaudeStats{}, false, fmt.Errorf("setting session dir permissions: %w", err)
+		return "", false, TokenUsage{}, fmt.Errorf("setting session dir permissions: %w", err)
 	}
 
 	prompt := buildCommentReviewPrompt(stage, issue, comments)
 	args := buildClaudeArgs(stage, issue.Number, true, modelOverride) // resume existing session
 
-	output, stats, completed, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review")
-	stats.MaxTurns = stage.MaxTurns
-	return output, stats, completed, err
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review")
+	usage.MaxTurns = stage.MaxTurns
+	return output, completed, usage, err
 }
 
 func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOverride string) []string {
@@ -133,13 +147,23 @@ type claudeResponse struct {
 	NumTurns  int     `json:"num_turns"`
 	CostUSD   float64 `json:"total_cost_usd"`
 	IsError   bool    `json:"is_error"`
-	Usage     struct {
+	// ModelUsage contains per-model accumulated token counts for the full session.
+	// These are more accurate than the top-level "usage" field, which reflects only
+	// the last API call rather than the entire multi-turn session.
+	ModelUsage map[string]struct {
+		InputTokens         int `json:"inputTokens"`
+		OutputTokens        int `json:"outputTokens"`
+		CacheCreationTokens int `json:"cacheCreationInputTokens"`
+		CacheReadTokens     int `json:"cacheReadInputTokens"`
+	} `json:"modelUsage"`
+	// Usage is the per-request token count, used as fallback when ModelUsage is absent.
+	Usage struct {
 		InputTokens  int `json:"input_tokens"`
 		OutputTokens int `json:"output_tokens"`
 	} `json:"usage"`
 }
 
-func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string) (string, ClaudeStats, bool, error) {
+func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string) (string, bool, TokenUsage, error) {
 	logf(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
 
 	// Set up stderr tee to a timestamped log file.
@@ -172,31 +196,31 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	runErr := cmd.Run()
 	rawOutput := stdout.Bytes()
 
-	var stats ClaudeStats
-	var result string
 	baseName := strings.TrimSuffix(label, "-comment-review")
 
-	ok, text, sessionID, turns, _, inputTokens, outputTokens := parseClaudeJSON(bytes.TrimSpace(rawOutput))
+	resp, ok := parseClaudeJSON(bytes.TrimSpace(rawOutput))
+	var text string
+	var usage TokenUsage
 	if ok {
-		// JSON parsed successfully — use the result field (may be empty for error responses
-		// like max_turns, which have no "result" field; that's correct, not raw JSON).
-		result = text
-		stats.TurnsUsed = turns
-		stats.InputTokens = inputTokens
-		stats.OutputTokens = outputTokens
-		saveSessionIDDirect(sessionFile(issueNumber, baseName), sessionID)
+		text = resp.Result
+		usage = tokenUsageFromResponse(resp)
+		if runErr != nil {
+			logf(issueNumber, "claude", "used %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
+		} else {
+			logf(issueNumber, "claude", "completed in %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
+		}
+		saveSessionIDDirect(sessionFile(issueNumber, baseName), resp.SessionID)
 	} else {
-		// Fallback: treat raw stdout as plain text (no session ID available).
 		logf(issueNumber, "warn", "JSON parse failed; falling back to raw output\n")
-		result = string(rawOutput)
+		text = string(rawOutput)
 	}
 
 	if runErr != nil {
-		return result, stats, false, fmt.Errorf("claude exited with error: %w", runErr)
+		return text, false, usage, fmt.Errorf("claude exited with error: %w", runErr)
 	}
 
-	completed := stageCompleteRE.MatchString(result)
-	return result, stats, completed, nil
+	completed := stageCompleteRE.MatchString(text)
+	return text, completed, usage, nil
 }
 
 // checkCompletion returns true if Claude's output indicates the stage is complete.
@@ -340,20 +364,20 @@ Your job is to:
 
 // formatStatsFooter returns a one-line stats summary suitable for appending to a comment.
 // Returns empty string when no stats are available (e.g. JSON parse fallback).
-func formatStatsFooter(stats ClaudeStats, completed bool) string {
-	if stats.TurnsUsed == 0 && stats.InputTokens == 0 && stats.OutputTokens == 0 {
+func formatStatsFooter(usage TokenUsage, completed bool) string {
+	if usage.TurnsUsed == 0 && usage.InputTokens == 0 && usage.OutputTokens == 0 {
 		return ""
 	}
 	var completion string
 	if !completed {
 		completion = " Stage incomplete."
 	}
-	if stats.MaxTurns > 0 {
+	if usage.MaxTurns > 0 {
 		return fmt.Sprintf("\n\n---\nUsed %d/%d turns, %dk input / %dk output tokens.%s",
-			stats.TurnsUsed, stats.MaxTurns, stats.InputTokens/1000, stats.OutputTokens/1000, completion)
+			usage.TurnsUsed, usage.MaxTurns, usage.InputTokens/1000, usage.OutputTokens/1000, completion)
 	}
 	return fmt.Sprintf("\n\n---\nUsed %d turns, %dk input / %dk output tokens.%s",
-		stats.TurnsUsed, stats.InputTokens/1000, stats.OutputTokens/1000, completion)
+		usage.TurnsUsed, usage.InputTokens/1000, usage.OutputTokens/1000, completion)
 }
 
 // extractBetweenMarkers extracts content between a BEGIN/END marker pair.
@@ -390,31 +414,32 @@ func extractSummary(output string) string {
 }
 
 // parseClaudeJSON parses the JSON output from claude --output-format json.
-// Returns ok=true if the JSON was successfully parsed (regardless of whether
-// the result field is populated — error responses like max_turns have no result).
-// Returns empty strings/zero values if parsing fails.
-func parseClaudeJSON(output []byte) (ok bool, text, sessionID string, turns int, cost float64, inputTokens, outputTokens int) {
+func parseClaudeJSON(output []byte) (claudeResponse, bool) {
 	var resp claudeResponse
 	if err := json.Unmarshal(output, &resp); err != nil {
-		return false, "", "", 0, 0, 0, 0
+		return claudeResponse{}, false
 	}
-	return true, resp.Result, resp.SessionID, resp.NumTurns, resp.CostUSD, resp.Usage.InputTokens, resp.Usage.OutputTokens
+	return resp, resp.Result != ""
 }
 
-// saveSessionID scans output lines for a JSON object containing session_id and
-// saves it to path. Used when the session ID must be extracted from raw output.
-func saveSessionID(path, output string) {
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.Contains(line, "session_id") {
-			continue
-		}
-		var resp claudeResponse
-		if err := json.Unmarshal([]byte(line), &resp); err == nil && resp.SessionID != "" {
-			saveSessionIDDirect(path, resp.SessionID)
-			return
-		}
+// tokenUsageFromResponse converts a claudeResponse to TokenUsage.
+// Token counts are summed across all models in ModelUsage for accuracy;
+// CostUSD comes from the top-level total_cost_usd field.
+// Falls back to the per-request Usage field when ModelUsage is absent.
+func tokenUsageFromResponse(resp claudeResponse) TokenUsage {
+	usage := TokenUsage{CostUSD: resp.CostUSD, TurnsUsed: resp.NumTurns}
+	for _, m := range resp.ModelUsage {
+		usage.InputTokens += m.InputTokens
+		usage.OutputTokens += m.OutputTokens
+		usage.CacheCreationTokens += m.CacheCreationTokens
+		usage.CacheReadTokens += m.CacheReadTokens
 	}
+	// Fall back to the per-request Usage field when ModelUsage is absent.
+	if len(resp.ModelUsage) == 0 {
+		usage.InputTokens = resp.Usage.InputTokens
+		usage.OutputTokens = resp.Usage.OutputTokens
+	}
+	return usage
 }
 
 // saveSessionIDDirect saves a known session ID to disk for future resumption.
