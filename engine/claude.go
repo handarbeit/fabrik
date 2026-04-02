@@ -127,7 +127,7 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	if err != nil {
 		// Try to parse JSON even on error (max_turns produces exit code 1 but valid JSON)
 		if text, sessionID, turns, cost := parseClaudeJSON(output); text != "" {
-			fmt.Printf("[#%d claude] used %d turns, $%.4f\n", issueNumber, turns, cost)
+			fmt.Fprintf(os.Stderr, "[#%d claude] used %d turns, $%.4f\n", issueNumber, turns, cost)
 			baseName := strings.TrimSuffix(label, "-comment-review")
 			saveSessionIDDirect(sessionFile(issueNumber, baseName), sessionID)
 			return text, false, fmt.Errorf("claude exited with error: %w", err)
@@ -141,7 +141,7 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 		text = string(output)
 	}
 
-	fmt.Printf("[#%d claude] completed in %d turns, $%.4f\n", issueNumber, turns, cost)
+	fmt.Fprintf(os.Stderr, "[#%d claude] completed in %d turns, $%.4f\n", issueNumber, turns, cost)
 
 	// Save session ID for future resumption
 	baseName := strings.TrimSuffix(label, "-comment-review")
