@@ -164,21 +164,21 @@ type claudeResponse struct {
 }
 
 func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string) (string, bool, TokenUsage, error) {
-	logf(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
+	fmt.Fprintf(os.Stderr, "[#%d claude] invoking (%s) in %s\n", issueNumber, label, workDir)
 
 	// Set up stderr tee to a timestamped log file.
 	var stderrWriter io.Writer = os.Stderr
 	logDir := LogDir(issueNumber)
 	if err := os.MkdirAll(logDir, 0700); err != nil {
-		logf(issueNumber, "warn", "could not create log dir: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[#%d warn] could not create log dir: %v\n", issueNumber, err)
 	} else if err := os.Chmod(logDir, 0700); err != nil {
-		logf(issueNumber, "warn", "could not set log dir permissions: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[#%d warn] could not set log dir permissions: %v\n", issueNumber, err)
 	} else {
 		safeLabel := strings.NewReplacer("/", "-", "\\", "-", ":", "-", " ", "-").Replace(label)
 		now := time.Now().UTC()
 		logPath := filepath.Join(logDir, fmt.Sprintf("%s-%s-%d.log", safeLabel, now.Format("20060102-150405"), now.UnixNano()))
 		if logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); err != nil {
-			logf(issueNumber, "warn", "could not create log file %s: %v\n", logPath, err)
+			fmt.Fprintf(os.Stderr, "[#%d warn] could not create log file %s: %v\n", issueNumber, logPath, err)
 		} else {
 			defer logFile.Close()
 			stderrWriter = io.MultiWriter(os.Stderr, logFile)
@@ -205,13 +205,14 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 		text = resp.Result
 		usage = tokenUsageFromResponse(resp)
 		if runErr != nil {
-			logf(issueNumber, "claude", "used %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
+			fmt.Fprintf(os.Stderr, "[#%d claude] used %d turns, $%.4f\n", issueNumber, resp.NumTurns, resp.CostUSD)
 		} else {
-			logf(issueNumber, "claude", "completed in %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
+			fmt.Fprintf(os.Stderr, "[#%d claude] completed in %d turns, $%.4f\n", issueNumber, resp.NumTurns, resp.CostUSD)
 		}
 		saveSessionIDDirect(sessionFile(issueNumber, baseName), resp.SessionID)
 	} else {
-		logf(issueNumber, "warn", "JSON parse failed; falling back to raw output\n")
+		// Fallback: treat raw stdout as plain text (no session ID available).
+		fmt.Fprintf(os.Stderr, "[#%d warn] JSON parse failed; falling back to raw output\n", issueNumber)
 		text = string(rawOutput)
 	}
 

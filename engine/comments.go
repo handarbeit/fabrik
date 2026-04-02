@@ -40,13 +40,13 @@ func (e *Engine) findNewComments(item gh.ProjectItem) []gh.Comment {
 // processComments handles new user comments on an issue.
 // Flow: 👀 reactions → editing label → invoke Claude → perform actions / update issue body → remove editing label → 🚀 reactions
 func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, comments []gh.Comment) error {
-	logf(item.Number, "comments", "processing %d new comment(s) — stage: %s\n",
+	e.logf(item.Number, "comments", "processing %d new comment(s) — stage: %s\n",
 		len(comments), stage.Name)
 
 	// Step 1: React with 👀 to all new comments
 	for _, c := range comments {
 		if err := e.client.AddCommentReaction(e.cfg.Owner, e.cfg.Repo, c.DatabaseID, "eyes"); err != nil {
-			logf(item.Number, "warn", "could not add 👀 to comment %s: %v\n", c.ID, err)
+			e.logf(item.Number, "warn", "could not add 👀 to comment %s: %v\n", c.ID, err)
 		}
 	}
 
@@ -64,9 +64,9 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	}
 
 	// Step 4: Invoke Claude with the comment review prompt
-	modelOverride := extractModelOverride(item.Number, item.Labels)
+	modelOverride := e.extractModelOverride(item.Number, item.Labels)
 	if modelOverride != "" {
-		logf(item.Number, "model", "using model override %q\n", modelOverride)
+		e.logf(item.Number, "model", "using model override %q\n", modelOverride)
 	}
 	output, _, usage, err := InvokeClaudeForComments(ctx, stage, item, comments, workDir, modelOverride)
 	func() {
@@ -77,10 +77,10 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	if err != nil {
 		e.removeEditingLabel(item.Number)
 		if ctx.Err() != nil {
-			logf(item.Number, "skip", "cancelled during claude comment review\n")
+			e.logf(item.Number, "skip", "cancelled during claude comment review\n")
 			return nil
 		}
-		logf(item.Number, "warn", "claude comment review issue: %v\n", err)
+		e.logf(item.Number, "warn", "claude comment review issue: %v\n", err)
 		return err
 	}
 
@@ -89,16 +89,16 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 
 	// Step 5: Parse the updated issue body from Claude's output and apply it
 	if updatedBody := extractUpdatedBody(output); updatedBody != "" {
-		logf(item.Number, "edit", "updating issue body\n")
+		e.logf(item.Number, "edit", "updating issue body\n")
 		if err := e.client.UpdateIssueBody(e.cfg.Owner, e.cfg.Repo, item.Number, updatedBody); err != nil {
-			logf(item.Number, "warn", "could not update issue body: %v\n", err)
+			e.logf(item.Number, "warn", "could not update issue body: %v\n", err)
 		}
 	} else {
 		// No body update — post output as a comment instead
 		if output != "" {
 			comment := formatOutputComment(stage.Name+" (comment review)", output, "", branch, commit, timestamp)
 			if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
-				logf(item.Number, "warn", "could not post comment: %v\n", err)
+				e.logf(item.Number, "warn", "could not post comment: %v\n", err)
 			}
 		}
 	}
@@ -109,14 +109,14 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// Step 7: React with 🚀 to all processed comments
 	for _, c := range comments {
 		if err := e.client.AddCommentReaction(e.cfg.Owner, e.cfg.Repo, c.DatabaseID, "rocket"); err != nil {
-			logf(item.Number, "warn", "could not add 🚀 to comment %s: %v\n", c.ID, err)
+			e.logf(item.Number, "warn", "could not add 🚀 to comment %s: %v\n", c.ID, err)
 		}
 	}
 
 	// Mark comments as processed only after everything succeeded
 	e.markCommentsProcessed(item, comments)
 
-	logf(item.Number, "done", "comment processing complete\n")
+	e.logf(item.Number, "done", "comment processing complete\n")
 	return nil
 }
 
