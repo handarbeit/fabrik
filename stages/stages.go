@@ -33,6 +33,16 @@ type Stage struct {
 	// MaxTurns limits how many turns Claude Code can take per invocation.
 	MaxTurns int `yaml:"max_turns,omitempty"`
 
+	// Workflow is the name of a .claude/skills/<name>/SKILL.md to use as the stage prompt.
+	// When set, fabrik reads the skill file from the worktree and uses it instead of Prompt.
+	// Prompt remains the fallback if the skill file is not found.
+	Workflow string `yaml:"workflow,omitempty"`
+
+	// CommentWorkflow mirrors Workflow for the comment-processing path.
+	// When set, fabrik reads .claude/skills/<name>/SKILL.md as the comment prompt.
+	// CommentPrompt remains the fallback if the skill file is not found.
+	CommentWorkflow string `yaml:"comment_workflow,omitempty"`
+
 	// CommentPrompt is the prompt used when processing user comments during this stage.
 	// If empty, a default comment-processing prompt is used.
 	CommentPrompt string `yaml:"comment_prompt,omitempty"`
@@ -116,8 +126,8 @@ func loadOne(path string) (*Stage, error) {
 		return nil, fmt.Errorf("stage must have a 'name' field")
 	}
 
-	if s.Prompt == "" {
-		return nil, fmt.Errorf("stage %q must have a 'prompt' field", s.Name)
+	if s.Prompt == "" && s.Workflow == "" {
+		return nil, fmt.Errorf("stage %q must have a 'prompt' or 'workflow' field", s.Name)
 	}
 
 	if s.Completion.Type == "" {

@@ -24,7 +24,7 @@ func TestBuildPrompt_Basic(t *testing.T) {
 		Body:   "It is broken",
 	}
 
-	prompt := buildPrompt(stage, issue, nil)
+	prompt := buildPrompt(stage, issue, nil, "")
 
 	if !strings.Contains(prompt, "You are a research agent.") {
 		t.Error("prompt missing stage prompt")
@@ -51,7 +51,7 @@ func TestBuildPrompt_WithLabels(t *testing.T) {
 		Labels: []string{"bug", "priority"},
 	}
 
-	prompt := buildPrompt(stage, issue, nil)
+	prompt := buildPrompt(stage, issue, nil, "")
 	if !strings.Contains(prompt, "## Labels") {
 		t.Error("prompt missing labels section")
 	}
@@ -71,7 +71,7 @@ func TestBuildPrompt_WithComments(t *testing.T) {
 		},
 	}
 
-	prompt := buildPrompt(stage, issue, comments)
+	prompt := buildPrompt(stage, issue, comments, "")
 	if !strings.Contains(prompt, "## New Comments") {
 		t.Error("prompt missing comments section")
 	}
@@ -87,7 +87,7 @@ func TestBuildPrompt_NoLabelsSection(t *testing.T) {
 	stage := &stages.Stage{Name: "Test", Prompt: "prompt"}
 	issue := gh.ProjectItem{Number: 1, Title: "T"}
 
-	prompt := buildPrompt(stage, issue, nil)
+	prompt := buildPrompt(stage, issue, nil, "")
 	if strings.Contains(prompt, "## Labels") {
 		t.Error("prompt should not have labels section when no labels")
 	}
@@ -97,7 +97,7 @@ func TestBuildPrompt_NoCommentsSection(t *testing.T) {
 	stage := &stages.Stage{Name: "Test", Prompt: "prompt"}
 	issue := gh.ProjectItem{Number: 1, Title: "T"}
 
-	prompt := buildPrompt(stage, issue, nil)
+	prompt := buildPrompt(stage, issue, nil, "")
 	if strings.Contains(prompt, "## New Comments") {
 		t.Error("prompt should not have comments section when no comments")
 	}
@@ -307,7 +307,7 @@ echo "FABRIK_STAGE_COMPLETE"
 		URL:    "https://example.com",
 	}
 
-	output, completed, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	output, completed, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "", "")
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -365,7 +365,7 @@ echo "NO RESUME"
 	os.WriteFile(sessionFile(99, "Plan"), []byte("sess_existing"), 0600)
 	defer os.RemoveAll(sessDir)
 
-	output, _, err := InvokeClaude(context.Background(), stage, issue, nil, true, workDir, "")
+	output, _, err := InvokeClaude(context.Background(), stage, issue, nil, true, workDir, "", "")
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -404,7 +404,7 @@ echo "args: $@"
 	}
 	issue := gh.ProjectItem{Number: 50, Title: "T"}
 
-	output, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	output, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "", "")
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -446,7 +446,7 @@ echo "args: $@"
 	}
 	issue := gh.ProjectItem{Number: 51, Title: "T"}
 
-	output, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "opus")
+	output, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "opus", "")
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -479,7 +479,7 @@ exit 1
 	}
 	issue := gh.ProjectItem{Number: 60, Title: "T"}
 
-	output, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	output, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "", "")
 	if err == nil {
 		t.Fatal("expected error for failing binary")
 	}
@@ -513,7 +513,7 @@ cat | grep -o "New Comments" && echo "HAS_COMMENTS" || echo "NO_COMMENTS"
 		{Author: "user", Body: "Fix this", CreatedAt: time.Now()},
 	}
 
-	output, _, err := InvokeClaude(context.Background(), stage, issue, comments, false, workDir, "")
+	output, _, err := InvokeClaude(context.Background(), stage, issue, comments, false, workDir, "", "")
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -535,7 +535,7 @@ func TestBuildCommentReviewPrompt_Issue(t *testing.T) {
 		{Author: "alice", Body: "looks good", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
 	}
 
-	prompt := buildCommentReviewPrompt(stage, item, comments)
+	prompt := buildCommentReviewPrompt(stage, item, comments, "")
 
 	if !strings.Contains(prompt, "# Issue #42: Test Issue") {
 		t.Error("expected issue header in prompt")
@@ -564,7 +564,7 @@ func TestBuildCommentReviewPrompt_PR(t *testing.T) {
 		{Author: "bot", Body: "suggestion: use const", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
 	}
 
-	prompt := buildCommentReviewPrompt(stage, item, comments)
+	prompt := buildCommentReviewPrompt(stage, item, comments, "")
 
 	if !strings.Contains(prompt, "# PR #7: Fix bug") {
 		t.Error("expected PR header in prompt")
@@ -591,7 +591,7 @@ func TestBuildCommentReviewPrompt_CustomCommentPrompt(t *testing.T) {
 		{Author: "user", Body: "hello", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
 	}
 
-	prompt := buildCommentReviewPrompt(stage, item, comments)
+	prompt := buildCommentReviewPrompt(stage, item, comments, "")
 
 	if !strings.Contains(prompt, "Custom prompt text") {
 		t.Error("expected custom comment prompt to be used")

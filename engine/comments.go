@@ -68,7 +68,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	if modelOverride != "" {
 		logf(item.Number, "model", "using model override %q\n", modelOverride)
 	}
-	output, _, err := InvokeClaudeForComments(ctx, stage, item, comments, workDir, modelOverride)
+	output, _, err := InvokeClaudeForComments(ctx, stage, item, comments, workDir, modelOverride, e.worktrees.BaseDir())
 	if err != nil {
 		e.removeEditingLabel(item.Number)
 		if ctx.Err() != nil {

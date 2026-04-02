@@ -49,7 +49,7 @@ func New(cfg Config) (*Engine, error) {
 	return &Engine{
 		cfg:          cfg,
 		client:       gh.NewClient(cfg.Token),
-		claude:       &RealClaudeInvoker{},
+		claude:       &RealClaudeInvoker{MainRepoDir: repoDir},
 		worktrees:    NewWorktreeManager(repoDir),
 		processedSet: make(map[string]time.Time),
 		lockedIssues: make(map[int]bool),

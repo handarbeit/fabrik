@@ -29,8 +29,11 @@ type ClaudeInvoker interface {
 }
 
 // RealClaudeInvoker wraps the existing InvokeClaude function.
-type RealClaudeInvoker struct{}
+type RealClaudeInvoker struct {
+	// MainRepoDir is the root of the main repository, used for .claude/ artifact injection.
+	MainRepoDir string
+}
 
 func (r *RealClaudeInvoker) Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
-	return InvokeClaude(ctx, stage, issue, newComments, resume, workDir, modelOverride)
+	return InvokeClaude(ctx, stage, issue, newComments, resume, workDir, modelOverride, r.MainRepoDir)
 }

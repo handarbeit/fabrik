@@ -36,9 +36,10 @@ func sessionFile(issueNumber int, stageName string) string {
 
 // InvokeClaude runs Claude Code with the given stage configuration and issue context.
 // workDir is the directory Claude should run in (typically a git worktree).
+// mainRepoDir is the root of the main repository (for .claude/ artifact injection).
 // modelOverride, if non-empty, replaces the stage's configured model.
 // It returns Claude's output and whether Claude indicated completion.
-func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
+func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string, mainRepoDir string) (string, bool, error) {
 	sessDir := SessionDir(issue.Number)
 	if err := os.MkdirAll(sessDir, 0700); err != nil {
 		return "", false, fmt.Errorf("creating session dir: %w", err)
@@ -47,7 +48,17 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 		return "", false, fmt.Errorf("setting session dir permissions: %w", err)
 	}
 
-	prompt := buildPrompt(stage, issue, newComments)
+	if mainRepoDir != "" {
+		if err := injectClaudeArtifacts(workDir, mainRepoDir, stage); err != nil {
+			logf(issue.Number, "warn", "could not inject .claude artifacts: %v\n", err)
+		}
+	}
+
+	if err := writeContextFile(workDir, issue, newComments); err != nil {
+		logf(issue.Number, "warn", "could not write context file: %v\n", err)
+	}
+
+	prompt := buildPrompt(stage, issue, newComments, workDir)
 	args := buildClaudeArgs(stage, issue.Number, resume, modelOverride)
 
 	output, _, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name)
@@ -59,8 +70,9 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 
 // InvokeClaudeForComments runs Claude Code with a comment-review prompt.
 // It uses the stage's CommentPrompt if defined, otherwise a default.
+// mainRepoDir is the root of the main repository (for .claude/ artifact injection).
 // modelOverride, if non-empty, replaces the stage's configured model.
-func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, modelOverride string) (string, bool, error) {
+func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, modelOverride string, mainRepoDir string) (string, bool, error) {
 	sessDir := SessionDir(issue.Number)
 	if err := os.MkdirAll(sessDir, 0700); err != nil {
 		return "", false, fmt.Errorf("creating session dir: %w", err)
@@ -69,7 +81,17 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 		return "", false, fmt.Errorf("setting session dir permissions: %w", err)
 	}
 
-	prompt := buildCommentReviewPrompt(stage, issue, comments)
+	if mainRepoDir != "" {
+		if err := injectClaudeArtifacts(workDir, mainRepoDir, stage); err != nil {
+			logf(issue.Number, "warn", "could not inject .claude artifacts: %v\n", err)
+		}
+	}
+
+	if err := writeContextFile(workDir, issue, comments); err != nil {
+		logf(issue.Number, "warn", "could not write context file: %v\n", err)
+	}
+
+	prompt := buildCommentReviewPrompt(stage, issue, comments, workDir)
 	args := buildClaudeArgs(stage, issue.Number, true, modelOverride) // resume existing session
 
 	return runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review")
@@ -143,10 +165,86 @@ func checkCompletion(stage *stages.Stage, output string) bool {
 	}
 }
 
-func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment) string {
+// writeContextFile writes issue context to .fabrik/context.md in the worktree.
+// Skills and prompts can reference this file instead of relying on prompt interpolation.
+func writeContextFile(workDir string, issue gh.ProjectItem, comments []gh.Comment) error {
+	fabrikDir := filepath.Join(workDir, ".fabrik")
+	if err := os.MkdirAll(fabrikDir, 0755); err != nil {
+		return fmt.Errorf("creating .fabrik dir: %w", err)
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("# Issue #%d: %s\n\n", issue.Number, issue.Title))
+	b.WriteString(fmt.Sprintf("URL: %s\n\n", issue.URL))
+
+	if len(issue.Labels) > 0 {
+		b.WriteString("## Labels\n\n")
+		b.WriteString(strings.Join(issue.Labels, ", "))
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString("## Body\n\n")
+	b.WriteString(issue.Body)
+	b.WriteString("\n\n")
+
+	if len(comments) > 0 {
+		b.WriteString("## Comments\n\n")
+		for _, c := range comments {
+			b.WriteString(fmt.Sprintf("**@%s** (%s):\n%s\n\n", c.Author, c.CreatedAt.Format("2006-01-02 15:04"), c.Body))
+		}
+	}
+
+	path := filepath.Join(fabrikDir, "context.md")
+	if err := os.WriteFile(path, []byte(b.String()), 0644); err != nil {
+		return fmt.Errorf("writing context file: %w", err)
+	}
+	return nil
+}
+
+// resolveWorkflowPrompt returns the prompt for a stage.
+// If stage.Workflow is set, reads .claude/skills/<workflow>/SKILL.md from workDir.
+// Falls back to stage.Prompt if the skill file cannot be read.
+func resolveWorkflowPrompt(stage *stages.Stage, workDir string) (string, error) {
+	if stage.Workflow == "" {
+		return stage.Prompt, nil
+	}
+	skillPath := filepath.Join(workDir, ".claude", "skills", stage.Workflow, "SKILL.md")
+	data, err := os.ReadFile(skillPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return stage.Prompt, fmt.Errorf("skill %q not found at %s, falling back to stage prompt", stage.Workflow, skillPath)
+		}
+		return stage.Prompt, fmt.Errorf("reading skill %q: %w", stage.Workflow, err)
+	}
+	return string(data), nil
+}
+
+// resolveCommentWorkflowPrompt returns the comment prompt for a stage.
+// Mirrors resolveWorkflowPrompt but uses stage.CommentWorkflow.
+func resolveCommentWorkflowPrompt(stage *stages.Stage, workDir string) (string, error) {
+	if stage.CommentWorkflow == "" {
+		return stage.CommentPrompt, nil
+	}
+	skillPath := filepath.Join(workDir, ".claude", "skills", stage.CommentWorkflow, "SKILL.md")
+	data, err := os.ReadFile(skillPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return stage.CommentPrompt, fmt.Errorf("comment skill %q not found at %s, falling back to comment prompt", stage.CommentWorkflow, skillPath)
+		}
+		return stage.CommentPrompt, fmt.Errorf("reading comment skill %q: %w", stage.CommentWorkflow, err)
+	}
+	return string(data), nil
+}
+
+func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, workDir string) string {
 	var b strings.Builder
 
-	b.WriteString(stage.Prompt)
+	stagePrompt, err := resolveWorkflowPrompt(stage, workDir)
+	if err != nil {
+		// Log warning but continue with fallback (stage.Prompt was already returned)
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+	}
+	b.WriteString(stagePrompt)
 	b.WriteString("\n\n---\n\n")
 	b.WriteString(fmt.Sprintf("# Issue #%d: %s\n\n", issue.Number, issue.Title))
 	b.WriteString(fmt.Sprintf("URL: %s\n\n", issue.URL))
@@ -188,12 +286,15 @@ func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Com
 	return b.String()
 }
 
-func buildCommentReviewPrompt(stage *stages.Stage, item gh.ProjectItem, comments []gh.Comment) string {
+func buildCommentReviewPrompt(stage *stages.Stage, item gh.ProjectItem, comments []gh.Comment, workDir string) string {
 	var b strings.Builder
 
-	// Use stage-specific comment prompt if available, otherwise default
-	if stage.CommentPrompt != "" {
-		b.WriteString(stage.CommentPrompt)
+	// Use stage-specific comment workflow/prompt if available, otherwise default
+	if commentPrompt, err := resolveCommentWorkflowPrompt(stage, workDir); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+		b.WriteString(commentPrompt)
+	} else if commentPrompt != "" {
+		b.WriteString(commentPrompt)
 	} else if item.IsPR {
 		b.WriteString(defaultPRCommentPrompt())
 	} else {

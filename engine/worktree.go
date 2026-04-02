@@ -80,8 +80,60 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string) (s
 		return "", fmt.Errorf("creating worktree: %s: %w", string(out), err)
 	}
 
+	// Ensure injected artifacts are not committed on the issue branch
+	if err := ensureWorktreeGitignore(wtDir); err != nil {
+		logf(issueNumber, "warn", "could not update worktree .gitignore: %v\n", err)
+	}
+
 	logf(issueNumber, "worktree", "created %s\n", wtDir)
 	return wtDir, nil
+}
+
+// ensureWorktreeGitignore adds .fabrik/ and .claude/ to the worktree's .gitignore
+// so injected artifacts are never committed on the issue branch.
+// Appends only entries that are not already present.
+func ensureWorktreeGitignore(wtDir string) error {
+	gitignorePath := filepath.Join(wtDir, ".gitignore")
+
+	// Read existing content (empty string if file doesn't exist)
+	existing := ""
+	if data, err := os.ReadFile(gitignorePath); err == nil {
+		existing = string(data)
+	}
+
+	required := []string{".fabrik/", ".claude/"}
+	var toAdd []string
+	for _, entry := range required {
+		found := false
+		for _, line := range strings.Split(existing, "\n") {
+			if strings.TrimSpace(line) == entry {
+				found = true
+				break
+			}
+		}
+		if !found {
+			toAdd = append(toAdd, entry)
+		}
+	}
+
+	if len(toAdd) == 0 {
+		return nil // nothing to add
+	}
+
+	var content strings.Builder
+	content.WriteString(existing)
+	if len(existing) > 0 && !strings.HasSuffix(existing, "\n") {
+		content.WriteString("\n")
+	}
+	for _, entry := range toAdd {
+		content.WriteString(entry)
+		content.WriteString("\n")
+	}
+
+	if err := os.WriteFile(gitignorePath, []byte(content.String()), 0644); err != nil {
+		return fmt.Errorf("writing .gitignore: %w", err)
+	}
+	return nil
 }
 
 // PushBranch pushes the issue's worktree branch to origin.
