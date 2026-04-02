@@ -1,9 +1,12 @@
 package cmd
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/handarbeit/fabrik/stages"
 )
 
 func TestRunInit_WritesFiles(t *testing.T) {
@@ -25,19 +28,43 @@ func TestRunInit_WritesFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadDir: %v", err)
 	}
-	if len(entries) == 0 {
-		t.Fatal("expected files in .fabrik/stages, got none")
+
+	// Count embedded source files to verify all were written.
+	embedded, err := fs.ReadDir(stages.DefaultStages, "examples")
+	if err != nil {
+		t.Fatalf("reading embedded stages: %v", err)
 	}
+	embeddedFiles := 0
+	for _, e := range embedded {
+		if !e.IsDir() {
+			embeddedFiles++
+		}
+	}
+	writtenFiles := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			writtenFiles++
+		}
+	}
+	if writtenFiles != embeddedFiles {
+		t.Fatalf("expected %d file(s) written, got %d", embeddedFiles, writtenFiles)
+	}
+
+	// Verify each written file matches the embedded source exactly.
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(dir, ".fabrik", "stages", e.Name()))
+		written, err := os.ReadFile(filepath.Join(dir, ".fabrik", "stages", e.Name()))
 		if err != nil {
 			t.Fatalf("reading written file %s: %v", e.Name(), err)
 		}
-		if len(data) == 0 {
-			t.Errorf("file %s is empty", e.Name())
+		source, err := stages.DefaultStages.ReadFile("examples/" + e.Name())
+		if err != nil {
+			t.Fatalf("reading embedded source %s: %v", e.Name(), err)
+		}
+		if string(written) != string(source) {
+			t.Errorf("file %s: content mismatch", e.Name())
 		}
 	}
 }
@@ -60,7 +87,10 @@ func TestRunInit_SkipsExistingFiles(t *testing.T) {
 
 	// Overwrite one file with sentinel content.
 	stagesDir := filepath.Join(dir, ".fabrik", "stages")
-	entries, _ := os.ReadDir(stagesDir)
+	entries, err := os.ReadDir(stagesDir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
 	if len(entries) == 0 {
 		t.Fatal("no files written by first init")
 	}
@@ -101,7 +131,10 @@ func TestRunInit_ForceOverwrites(t *testing.T) {
 	}
 
 	stagesDir := filepath.Join(dir, ".fabrik", "stages")
-	entries, _ := os.ReadDir(stagesDir)
+	entries, err := os.ReadDir(stagesDir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
 	if len(entries) == 0 {
 		t.Fatal("no files written by first init")
 	}
