@@ -90,3 +90,45 @@ func TestRestPost_InvalidURL(t *testing.T) {
 		t.Fatal("expected error for invalid URL")
 	}
 }
+
+func TestRestPost_CapturesRateLimitHeaders(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Limit", "5000")
+		w.Header().Set("X-RateLimit-Remaining", "4800")
+		w.Header().Set("X-RateLimit-Used", "200")
+		w.Header().Set("X-RateLimit-Reset", "1700000000")
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	if err := c.restPost(srv.URL+"/test", map[string]string{}); err != nil {
+		t.Fatalf("restPost: %v", err)
+	}
+
+	rest, _ := c.RateLimitStats()
+	if rest.Limit != 5000 {
+		t.Errorf("rest.Limit = %d, want 5000", rest.Limit)
+	}
+	if rest.Remaining != 4800 {
+		t.Errorf("rest.Remaining = %d, want 4800", rest.Remaining)
+	}
+}
+
+func TestRestPost_NoRateLimitHeaders(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// No X-RateLimit-* headers
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	if err := c.restPost(srv.URL+"/test", map[string]string{}); err != nil {
+		t.Fatalf("restPost: %v", err)
+	}
+
+	rest, _ := c.RateLimitStats()
+	if rest.Limit != 0 {
+		t.Errorf("rest.Limit = %d, want 0 when headers absent", rest.Limit)
+	}
+}
