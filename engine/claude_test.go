@@ -163,7 +163,7 @@ func TestCheckCompletion_UnsupportedTypes(t *testing.T) {
 }
 
 func TestParseClaudeJSON_ValidJSON(t *testing.T) {
-	output := []byte(`{"result":"hello world","session_id":"sess_abc123","num_turns":5,"total_cost_usd":0.0042,"usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":10,"cache_read_input_tokens":5}}`)
+	output := []byte(`{"result":"hello world","session_id":"sess_abc123","num_turns":5,"total_cost_usd":0.0042,"modelUsage":{"claude-sonnet-4-6":{"inputTokens":100,"outputTokens":50,"cacheCreationInputTokens":10,"cacheReadInputTokens":5}}}`)
 
 	resp, ok := parseClaudeJSON(output)
 	if !ok {
