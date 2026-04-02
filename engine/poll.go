@@ -167,11 +167,27 @@ func (e *Engine) poll(ctx context.Context) error {
 		e.mu.Unlock()
 	}()
 
+	// Deep-fetch details (comments, linked PRs) only for items that pass the
+	// shallow pre-filter. This avoids the expensive nested GraphQL cost for
+	// items that can be ruled out by status, labels, or updatedAt alone.
+	var deepFetched int
+	for i := range board.Items {
+		if !e.itemMayNeedWork(board.Items[i]) {
+			continue
+		}
+		if err := e.client.FetchItemDetails(&board.Items[i]); err != nil {
+			logf(board.Items[i].Number, "warn", "could not fetch item details: %v\n", err)
+		}
+		deepFetched++
+	}
+	if deepFetched > 0 {
+		fmt.Printf("[poll] deep-fetched details for %d item(s)\n", deepFetched)
+	}
+
 	var dispatched int
 	for _, item := range board.Items {
 		item := item
-		// Quick pre-check: skip items that won't need processing.
-		// This avoids acquiring a semaphore slot for no-ops.
+		// Full check including comments (populated by deep fetch above).
 		if !e.itemNeedsWork(item) {
 			continue
 		}
