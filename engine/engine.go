@@ -19,6 +19,7 @@ type Config struct {
 	AutoUpgrade   bool
 	PollSeconds   int
 	MaxConcurrent int
+	MaxRetries    int
 	Stages        []*stages.Stage
 	// ReadyCh is closed once Run() has registered signal handlers. Tests use
 	// this to avoid sending SIGINT before signal.Notify is installed.
@@ -26,19 +27,21 @@ type Config struct {
 }
 
 type Engine struct {
-	cfg          Config
-	client       GitHubClient
-	claude       ClaudeInvoker
-	statusField  *gh.StatusField
-	worktrees    *WorktreeManager
-	mu           sync.Mutex
-	processedSet map[string]time.Time // track what we've processed: "issue#-commentID" -> timestamp
-	lockedIssues map[int]bool         // issues that have had fabrik:locked added and not yet released
-	totalTokens  TokenUsage           // accumulated token usage since process start
-	idleCount    int                  // consecutive idle polls; triggers self-upgrade at threshold
-	sem          chan struct{}        // semaphore bounding concurrent workers across poll cycles
-	wg           sync.WaitGroup       // tracks in-flight workers for graceful shutdown
-	inFlight     sync.Map             // key: issue number (int), value: struct{}
+	cfg                Config
+	client             GitHubClient
+	claude             ClaudeInvoker
+	statusField        *gh.StatusField
+	worktrees          *WorktreeManager
+	mu                 sync.Mutex
+	processedSet       map[string]time.Time // track what we've processed: "issue#-commentID" -> timestamp
+	lockedIssues       map[int]bool         // issues that have had fabrik:locked added and not yet released
+	totalTokens        TokenUsage           // accumulated token usage since process start
+	retryCount         map[string]int       // key: "<issueNum>-<stageName>", value: failed attempt count
+	pausedDueToRetries map[string]bool      // key: "<issueNum>-<stageName>", true if engine paused this issue
+	idleCount          int                  // consecutive idle polls; triggers self-upgrade at threshold
+	sem                chan struct{}         // semaphore bounding concurrent workers across poll cycles
+	wg                 sync.WaitGroup       // tracks in-flight workers for graceful shutdown
+	inFlight           sync.Map             // key: issue number (int), value: struct{}
 }
 
 func New(cfg Config) (*Engine, error) {
@@ -48,13 +51,15 @@ func New(cfg Config) (*Engine, error) {
 		return nil, fmt.Errorf("resolving git repo root: %w", err)
 	}
 	return &Engine{
-		cfg:          cfg,
-		client:       gh.NewClient(cfg.Token),
-		claude:       &RealClaudeInvoker{},
-		worktrees:    NewWorktreeManager(repoDir),
-		processedSet: make(map[string]time.Time),
-		lockedIssues: make(map[int]bool),
-		sem:          make(chan struct{}, cfg.MaxConcurrent),
+		cfg:                cfg,
+		client:             gh.NewClient(cfg.Token),
+		claude:             &RealClaudeInvoker{},
+		worktrees:          NewWorktreeManager(repoDir),
+		processedSet:       make(map[string]time.Time),
+		lockedIssues:       make(map[int]bool),
+		retryCount:         make(map[string]int),
+		pausedDueToRetries: make(map[string]bool),
+		sem:                make(chan struct{}, cfg.MaxConcurrent),
 	}, nil
 }
 
@@ -65,13 +70,15 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		maxConcurrent = 1
 	}
 	return &Engine{
-		cfg:          cfg,
-		client:       client,
-		claude:       claude,
-		worktrees:    worktrees,
-		processedSet: make(map[string]time.Time),
-		lockedIssues: make(map[int]bool),
-		sem:          make(chan struct{}, maxConcurrent),
+		cfg:                cfg,
+		client:             client,
+		claude:             claude,
+		worktrees:          worktrees,
+		processedSet:       make(map[string]time.Time),
+		lockedIssues:       make(map[int]bool),
+		retryCount:         make(map[string]int),
+		pausedDueToRetries: make(map[string]bool),
+		sem:                make(chan struct{}, maxConcurrent),
 	}
 }
 
