@@ -207,14 +207,14 @@ type claudeResponse struct {
 }
 
 func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, noTmux bool) (string, bool, TokenUsage, error) {
-	logf(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
+	fmt.Fprintf(os.Stderr, "[#%d claude] invoking (%s) in %s\n", issueNumber, label, workDir)
 
 	if !noTmux && tmuxAvailable() {
 		sessionName := sanitizeTmuxName(issueNumber, label)
 		return runClaudeInTmux(ctx, args, prompt, workDir, issueNumber, label, sessionName)
 	}
 	if !noTmux {
-		logf(issueNumber, "warn", "tmux not found on PATH; running Claude directly\n")
+		fmt.Fprintf(os.Stderr, "[#%d warn] tmux not found on PATH; running Claude directly\n", issueNumber)
 	}
 
 	// Set up stderr tee to a timestamped log file.
@@ -280,7 +280,7 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 // post-run parsing. Stderr stays in the tmux pane. The exit code is written to a
 // third temp file so errors are propagated correctly.
 func runClaudeInTmux(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, sessionName string) (string, bool, TokenUsage, error) {
-	logf(issueNumber, "claude", "starting tmux session %q (attach: tmux attach -t %s)\n", sessionName, sessionName)
+	fmt.Fprintf(os.Stderr, "[#%d claude] starting tmux session %q (attach: tmux attach -t %s)\n", issueNumber, sessionName, sessionName)
 
 	// Write prompt to temp file (tmux can't receive stdin from the Go process).
 	promptFile, err := os.CreateTemp("", "fabrik-prompt-*")
@@ -404,13 +404,13 @@ sessionDone:
 		result = resp.Result
 		usage = tokenUsageFromResponse(resp)
 		if runErr != nil {
-			logf(issueNumber, "claude", "used %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
+			fmt.Fprintf(os.Stderr, "[#%d claude] used %d turns, $%.4f\n", issueNumber, resp.NumTurns, resp.CostUSD)
 		} else {
-			logf(issueNumber, "claude", "completed in %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
+			fmt.Fprintf(os.Stderr, "[#%d claude] completed in %d turns, $%.4f\n", issueNumber, resp.NumTurns, resp.CostUSD)
 		}
 		saveSessionIDDirect(sessionFile(issueNumber, baseName), resp.SessionID)
 	} else {
-		logf(issueNumber, "warn", "JSON parse failed; falling back to raw output\n")
+		fmt.Fprintf(os.Stderr, "[#%d warn] JSON parse failed; falling back to raw output\n", issueNumber)
 		result = string(rawOutput)
 	}
 
