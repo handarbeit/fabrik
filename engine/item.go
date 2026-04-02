@@ -218,6 +218,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			return nil
 		}
 		logf(item.Number, "retry", "cooldown expired for stage %q, retrying\n", stage.Name)
+		e.removeFailedLabel(item.Number, stage.Name)
 	}
 
 	// Bail early if context was cancelled before starting new work.
@@ -425,10 +426,7 @@ func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 		logf(item.Number, "warn", "could not add paused label: %v\n", err)
 	}
 
-	failedLabel := fmt.Sprintf("stage:%s:failed", stage.Name)
-	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, failedLabel); err != nil {
-		logf(item.Number, "warn", "could not add failed label: %v\n", err)
-	}
+	e.addFailedLabel(item.Number, stage.Name)
 
 	comment := fmt.Sprintf(
 		"🏭 **Fabrik — stage failed**\n\nStage **%s** failed to complete after %d attempt(s). The issue has been paused (`fabrik:paused`).\n\nTo retry: investigate the failure, make any needed fixes, then remove the `fabrik:paused` label.",
@@ -504,6 +502,21 @@ func (e *Engine) removeInProgressLabel(issueNumber int, stageName string) {
 	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, issueNumber, label); err != nil &&
 		!errors.Is(err, gh.ErrNotFound) {
 		logf(issueNumber, "warn", "could not remove in_progress label: %v\n", err)
+	}
+}
+
+func (e *Engine) addFailedLabel(issueNumber int, stageName string) {
+	label := fmt.Sprintf("stage:%s:failed", stageName)
+	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, issueNumber, label); err != nil {
+		logf(issueNumber, "warn", "could not add failed label: %v\n", err)
+	}
+}
+
+func (e *Engine) removeFailedLabel(issueNumber int, stageName string) {
+	label := fmt.Sprintf("stage:%s:failed", stageName)
+	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, issueNumber, label); err != nil &&
+		!errors.Is(err, gh.ErrNotFound) {
+		logf(issueNumber, "warn", "could not remove failed label: %v\n", err)
 	}
 }
 
