@@ -136,8 +136,8 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 		logf(issueNumber, "warn", "could not set log dir permissions: %v\n", err)
 	} else {
 		safeLabel := strings.NewReplacer("/", "-", "\\", "-", ":", "-", " ", "-").Replace(label)
-		ts := time.Now().UTC().Format("20060102-150405")
-		logPath := filepath.Join(logDir, fmt.Sprintf("%s-%s.log", safeLabel, ts))
+		now := time.Now().UTC()
+		logPath := filepath.Join(logDir, fmt.Sprintf("%s-%s-%d.log", safeLabel, now.Format("20060102-150405"), now.UnixNano()))
 		if logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); err != nil {
 			logf(issueNumber, "warn", "could not create log file %s: %v\n", logPath, err)
 		} else {
