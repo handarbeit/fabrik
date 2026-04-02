@@ -138,6 +138,7 @@ func (e *Engine) cleanupLockedIssues() {
 		return
 	}
 	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
+	pollStatusClear()
 	fmt.Printf("[shutdown] removing lock labels from %d issue(s)\n", len(issues))
 	for _, num := range issues {
 		if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, num, lockLabel); err != nil {
@@ -261,6 +262,7 @@ doneDispatching:
 	}
 	e.mu.Unlock()
 	if newCost {
+		pollStatusClear()
 		fmt.Printf("[stats] cost: $%.4f | in: %d | out: %d | cache_read: %d | cache_write: %d\n",
 			tokens.CostUSD, tokens.InputTokens, tokens.OutputTokens, tokens.CacheReadTokens, tokens.CacheCreationTokens)
 	}
