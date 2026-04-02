@@ -1449,7 +1449,9 @@ func TestProcessItem_EscalatesAtMaxRetries(t *testing.T) {
 
 	// PollSeconds=0 makes cooldown=0, so both calls reach Claude without waiting.
 	// First attempt — retry count becomes 1, no escalation yet
-	eng.processItem(context.Background(), board, item)
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem (first call): %v", err)
+	}
 	foundPaused := false
 	for _, call := range client.addLabelCalls {
 		if call.labelName == "fabrik:paused" {
@@ -1461,7 +1463,9 @@ func TestProcessItem_EscalatesAtMaxRetries(t *testing.T) {
 	}
 
 	// Second attempt — retry count becomes 2, should escalate
-	eng.processItem(context.Background(), board, item)
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem (second call): %v", err)
+	}
 
 	foundPaused = false
 	foundFailed := false
@@ -1545,7 +1549,9 @@ func TestProcessItem_ResetsOnUnpause(t *testing.T) {
 		Labels: []string{}, // no fabrik:paused
 	}
 
-	eng.processItem(context.Background(), board, item)
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
 
 	// stage:Research:failed should have been removed by clearFailedStage
 	foundRemoval := false
@@ -1599,7 +1605,9 @@ func TestProcessItem_UnlimitedWhenMaxRetriesZero(t *testing.T) {
 
 	// Run many times — should never escalate
 	for i := 0; i < 10; i++ {
-		eng.processItem(context.Background(), board, item)
+		if err := eng.processItem(context.Background(), board, item); err != nil {
+			t.Fatalf("processItem (iteration %d): %v", i, err)
+		}
 	}
 
 	for _, call := range client.addLabelCalls {
@@ -1658,7 +1666,9 @@ func TestProcessItem_ClearsRetryCountOnCompletion(t *testing.T) {
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 13, Title: "Completion test", Status: "Research", ItemID: "PVTI_13"}
 
-	eng.processItem(context.Background(), board, item)
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
 
 	// Both maps should be cleared after successful completion
 	eng.mu.Lock()
