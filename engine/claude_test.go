@@ -337,6 +337,7 @@ printf '%s\n' '{"result":"stage output\nFABRIK_STAGE_COMPLETE\n","session_id":"s
 	}
 	issue := gh.ProjectItem{Number: 77, Title: "Test JSON"}
 	defer os.RemoveAll(SessionDir(77))
+	defer os.RemoveAll(LogDir(77))
 
 	output, stats, completed, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
 	if err != nil {
@@ -412,6 +413,7 @@ echo "real invoker output"
 		t.Errorf("output = %q", output)
 	}
 	os.RemoveAll(SessionDir(80))
+	os.RemoveAll(LogDir(80))
 }
 
 func TestInvokeClaude_FakeBinary(t *testing.T) {
@@ -466,6 +468,7 @@ printf '%s\n' '{"result":"Claude output for test\nFABRIK_STAGE_COMPLETE\n","sess
 	}
 	// Cleanup
 	os.RemoveAll(SessionDir(42))
+	os.RemoveAll(LogDir(42))
 }
 
 func TestInvokeClaude_WithResume(t *testing.T) {
@@ -501,6 +504,7 @@ echo "NO RESUME"
 	os.MkdirAll(sessDir, 0700)
 	os.WriteFile(sessionFile(99, "Plan"), []byte("sess_existing"), 0600)
 	defer os.RemoveAll(sessDir)
+	defer os.RemoveAll(LogDir(99))
 
 	output, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, true, workDir, "")
 	if err != nil {
@@ -559,6 +563,7 @@ echo "args: $@"
 		t.Error("expected --allowedTools in args")
 	}
 	os.RemoveAll(SessionDir(50))
+	os.RemoveAll(LogDir(50))
 }
 
 func TestInvokeClaude_WithModelOverride(t *testing.T) {
@@ -592,6 +597,7 @@ echo "args: $@"
 		t.Error("expected model override 'opus' in args")
 	}
 	os.RemoveAll(SessionDir(51))
+	os.RemoveAll(LogDir(51))
 }
 
 func TestInvokeClaude_BinaryError(t *testing.T) {
@@ -624,6 +630,7 @@ exit 1
 		t.Errorf("expected partial output, got: %q", output)
 	}
 	os.RemoveAll(SessionDir(60))
+	os.RemoveAll(LogDir(60))
 }
 
 func TestInvokeClaude_WithComments(t *testing.T) {
@@ -658,6 +665,7 @@ cat | grep -o "New Comments" && echo "HAS_COMMENTS" || echo "NO_COMMENTS"
 		t.Errorf("expected comments in prompt, output: %q", output)
 	}
 	os.RemoveAll(SessionDir(70))
+	os.RemoveAll(LogDir(70))
 }
 
 func TestBuildCommentReviewPrompt_Issue(t *testing.T) {
