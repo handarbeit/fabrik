@@ -508,7 +508,7 @@ func TestProcessItem_FullHappyPath(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
 		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
-			return "Claude output here", false, nil
+			return "Claude output here\nFABRIK_STAGE_COMPLETE\n", true, nil
 		},
 	}
 
