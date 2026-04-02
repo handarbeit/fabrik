@@ -146,6 +146,7 @@ func Execute() error {
 		return fmt.Errorf("no stage configurations found in %s", cfg.StagesDir)
 	}
 
+<<<<<<< HEAD
 	fmt.Printf("Fabrik starting\n")
 	fmt.Printf("  repo:    %s/%s\n", cfg.Owner, cfg.Repo)
 	fmt.Printf("  project: #%d\n", cfg.ProjectNum)
@@ -159,6 +160,22 @@ func Execute() error {
 		fmt.Printf("  max-retries: unlimited\n")
 	} else {
 		fmt.Printf("  max-retries: %d\n", cfg.MaxRetries)
+=======
+	isTTY := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
+
+	// In plain-text mode, print the startup banner to stdout. In TUI mode the
+	// bubbletea alt-screen replaces stdout immediately, so skip the banner.
+	if !isTTY {
+		fmt.Printf("Fabrik starting\n")
+		fmt.Printf("  repo:    %s/%s\n", cfg.Owner, cfg.Repo)
+		fmt.Printf("  project: #%d\n", cfg.ProjectNum)
+		fmt.Printf("  user:    %s\n", cfg.User)
+		fmt.Printf("  stages:  %d loaded\n", len(stageCfgs))
+		fmt.Printf("  yolo:    %v\n", cfg.Yolo)
+		fmt.Printf("  auto-upgrade: %v\n", cfg.AutoUpgrade)
+		fmt.Printf("  poll:    %ds\n", cfg.PollSeconds)
+		fmt.Printf("  workers: %d\n", cfg.MaxConcurrent)
+>>>>>>> 02be843 (fix(tui): suppress startup banner in TUI mode)
 	}
 
 	eng, err := engine.New(engine.Config{
@@ -181,7 +198,7 @@ func Execute() error {
 
 	// When stdout is a TTY, run the bubbletea TUI. Otherwise fall through to
 	// plain-text mode where the engine prints directly to stdout.
-	if isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd()) {
+	if isTTY {
 		return runTUI(eng, cfg.PollSeconds)
 	}
 	return eng.Run()
