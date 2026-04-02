@@ -163,11 +163,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // updateHistoryViewport rebuilds the viewport content from the history slice.
+// Uses a pointer receiver so it can be called on the addressable local copy
+// in Update(); the mutations are included in the returned model value.
 func (m *Model) updateHistoryViewport() {
-	innerWidth := m.width - 6 // account for border + padding
-	if innerWidth < 20 {
-		innerWidth = 20
-	}
+	innerWidth := max(m.width-6, 20) // account for border + padding
 
 	var lines []string
 	// Show newest entries at the top.
@@ -188,10 +187,7 @@ func (m *Model) updateHistoryViewport() {
 	m.historyVP.SetContent(strings.Join(lines, "\n"))
 
 	// Update viewport height within the overall layout.
-	historyHeight := m.height - headerHeight() - activeHeight(len(m.active)) - 4
-	if historyHeight < 3 {
-		historyHeight = 3
-	}
+	historyHeight := max(m.height-headerHeight()-activeHeight(len(m.active))-4, 3)
 	m.historyVP.Width = innerWidth
 	m.historyVP.Height = historyHeight
 	// Scroll to top (newest) on update.
@@ -229,10 +225,7 @@ func (m Model) viewHeader() string {
 
 	title := titleStyle.Render("fabrik")
 	timerStr := dimStyle.Render(timer)
-	gap := m.width - lipgloss.Width(title) - lipgloss.Width(timerStr) - 6
-	if gap < 1 {
-		gap = 1
-	}
+	gap := max(m.width-lipgloss.Width(title)-lipgloss.Width(timerStr)-6, 1)
 	content := title + strings.Repeat(" ", gap) + timerStr
 	return borderStyle.Width(m.width - 4).Render(content)
 }
@@ -259,10 +252,7 @@ func (m Model) viewActive() string {
 		msg := ""
 		if job.LastLine != "" {
 			// Truncate long lines to avoid wrapping
-			maxMsg := m.width - 35
-			if maxMsg < 0 {
-				maxMsg = 0
-			}
+			maxMsg := max(m.width-35, 0)
 			msg = job.LastLine
 			if runes := []rune(msg); len(runes) > maxMsg {
 				msg = string(runes[:maxMsg]) + "…"
@@ -290,11 +280,7 @@ func headerHeight() int {
 
 // activeHeight returns the approximate line height of the active pane.
 func activeHeight(n int) int {
-	lines := n + 1 // title + one line per job
-	if lines < 2 {
-		lines = 2
-	}
-	return lines + 2 // +2 for border
+	return max(n+1, 2) + 2 // title + one line per job (min 2) + border
 }
 
 // fmtDuration formats a duration as MM:SS.
