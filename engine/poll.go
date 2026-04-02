@@ -297,6 +297,7 @@ doneDispatching:
 	}
 	e.mu.Unlock()
 	if newCost {
+		pollStatusClear()
 		fmt.Printf("[stats] cost: $%.4f | in: %d | out: %d | cache_read: %d | cache_write: %d\n",
 			tokens.CostUSD, tokens.InputTokens, tokens.OutputTokens, tokens.CacheReadTokens, tokens.CacheCreationTokens)
 	}
@@ -346,7 +347,7 @@ func (e *Engine) checkAndUpgrade() {
 	baseBranch := e.worktrees.DefaultBaseBranch()
 	dir := e.worktrees.BaseDir()
 
-	e.logf(0, "upgrade", "checking origin/%s for new commits\n", baseBranch)
+	pollStatus("[upgrade] checking origin/%s ...", baseBranch)
 
 	// Fetch from origin
 	fetchCmd := exec.Command("git", "fetch", "origin", baseBranch)
@@ -368,7 +369,7 @@ func (e *Engine) checkAndUpgrade() {
 		return
 	}
 	if localRef == remoteRef {
-		e.logf(0, "upgrade", "already up-to-date\n")
+		// Nothing to do — leave status line for next poll to overwrite
 		return
 	}
 

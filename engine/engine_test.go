@@ -1818,7 +1818,7 @@ func TestProcessItem_CleanupStage_CleanWorktree(t *testing.T) {
 	wm := NewWorktreeManager(repoDir)
 
 	// Create the worktree first
-	_, err := wm.EnsureWorktree(42, "main")
+	_, err := wm.EnsureWorktree(42, "main", false)
 	if err != nil {
 		t.Fatalf("EnsureWorktree: %v", err)
 	}
@@ -1876,7 +1876,7 @@ func TestProcessItem_CleanupStage_DirtyWorktree(t *testing.T) {
 	wm := NewWorktreeManager(repoDir)
 
 	// Create the worktree and leave a dirty file
-	wtDir, err := wm.EnsureWorktree(43, "main")
+	wtDir, err := wm.EnsureWorktree(43, "main", false)
 	if err != nil {
 		t.Fatalf("EnsureWorktree: %v", err)
 	}
@@ -1998,7 +1998,7 @@ func TestProcessItem_CleanupStage_NewCommentsIgnored(t *testing.T) {
 	wm := NewWorktreeManager(repoDir)
 
 	// Create the worktree
-	_, err := wm.EnsureWorktree(77, "main")
+	_, err := wm.EnsureWorktree(77, "main", false)
 	if err != nil {
 		t.Fatalf("EnsureWorktree: %v", err)
 	}

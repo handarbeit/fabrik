@@ -415,12 +415,39 @@ func extractSummary(output string) string {
 }
 
 // parseClaudeJSON parses the JSON output from claude --output-format json.
+// Handles two formats:
+//   - Single result object: {"result": "...", "session_id": "...", ...}
+//   - Conversation array: [{"type":"system",...}, ..., {"type":"result","result":"..."}]
 func parseClaudeJSON(output []byte) (claudeResponse, bool) {
+	// Try single-object format first (older Claude Code versions).
 	var resp claudeResponse
-	if err := json.Unmarshal(output, &resp); err != nil {
+	if err := json.Unmarshal(output, &resp); err == nil && resp.Result != "" {
+		return resp, true
+	}
+
+	// Try array format (newer Claude Code versions output the full conversation).
+	// The result is in the last element with type "result".
+	var messages []json.RawMessage
+	if err := json.Unmarshal(output, &messages); err != nil {
 		return claudeResponse{}, false
 	}
-	return resp, resp.Result != ""
+
+	// Walk backwards to find the result message.
+	for i := len(messages) - 1; i >= 0; i-- {
+		var envelope struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(messages[i], &envelope); err != nil {
+			continue
+		}
+		if envelope.Type == "result" {
+			if err := json.Unmarshal(messages[i], &resp); err == nil && resp.Result != "" {
+				return resp, true
+			}
+		}
+	}
+
+	return claudeResponse{}, false
 }
 
 // tokenUsageFromResponse converts a claudeResponse to TokenUsage.

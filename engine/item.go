@@ -330,9 +330,12 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}
 	}
 
-	// Ensure worktree exists for this issue
+	// Ensure worktree exists for this issue.
+	// On retries (resume=true), skip rebasing onto main — the worktree already
+	// has context from the previous attempt and pulling in unrelated changes
+	// mid-session confuses Claude.
 	baseBranch := e.worktrees.DefaultBaseBranch()
-	workDir, err := e.worktrees.EnsureWorktree(item.Number, baseBranch)
+	workDir, err := e.worktrees.EnsureWorktree(item.Number, baseBranch, attempted)
 	if err != nil {
 		return fmt.Errorf("setting up worktree: %w", err)
 	}
