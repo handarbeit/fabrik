@@ -15,6 +15,7 @@ type mockGitHubClient struct {
 	removeLabelFromIssueFn    func(owner, repo string, issueNumber int, labelName string) error
 	addCommentFn              func(owner, repo string, issueNumber int, body string) error
 	updateProjectItemStatusFn func(projectID, itemID, statusFieldID, statusOptionID string) error
+	rateLimitStatsFn          func() (gh.RateLimitStats, gh.RateLimitStats)
 
 	// Track calls
 	addLabelCalls     []addLabelCall
@@ -116,6 +117,9 @@ func (m *mockGitHubClient) MarkPRReady(owner, repo string, prNumber int) error {
 }
 
 func (m *mockGitHubClient) RateLimitStats() (gh.RateLimitStats, gh.RateLimitStats) {
+	if m.rateLimitStatsFn != nil {
+		return m.rateLimitStatsFn()
+	}
 	return gh.RateLimitStats{}, gh.RateLimitStats{}
 }
 
