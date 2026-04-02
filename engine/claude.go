@@ -126,6 +126,19 @@ func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOve
 	return args
 }
 
+// claudeResponse represents the JSON output from claude --output-format json.
+type claudeResponse struct {
+	Result    string  `json:"result"`
+	SessionID string  `json:"session_id"`
+	NumTurns  int     `json:"num_turns"`
+	CostUSD   float64 `json:"total_cost_usd"`
+	IsError   bool    `json:"is_error"`
+	Usage     struct {
+		InputTokens  int `json:"input_tokens"`
+		OutputTokens int `json:"output_tokens"`
+	} `json:"usage"`
+}
+
 func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string) (string, ClaudeStats, bool, error) {
 	logf(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
 
@@ -159,37 +172,21 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	runErr := cmd.Run()
 	rawOutput := stdout.Bytes()
 
-	// Parse JSON envelope from --output-format json.
-	var envelope struct {
-		Result    string `json:"result"`
-		SessionID string `json:"session_id"`
-		NumTurns  int    `json:"num_turns"`
-		Usage     struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
-		} `json:"usage"`
-	}
-
 	var stats ClaudeStats
 	var result string
 	baseName := strings.TrimSuffix(label, "-comment-review")
 
-	if jsonErr := json.Unmarshal(bytes.TrimSpace(rawOutput), &envelope); jsonErr == nil {
-		result = envelope.Result
-		stats.TurnsUsed = envelope.NumTurns
-		stats.InputTokens = envelope.Usage.InputTokens
-		stats.OutputTokens = envelope.Usage.OutputTokens
-		if envelope.SessionID != "" {
-			sessPath := sessionFile(issueNumber, baseName)
-			if err := os.WriteFile(sessPath, []byte(envelope.SessionID), 0600); err != nil {
-				logf(issueNumber, "warn", "could not save session id: %v\n", err)
-			}
-		}
+	text, sessionID, turns, _, inputTokens, outputTokens := parseClaudeJSON(bytes.TrimSpace(rawOutput))
+	if text != "" {
+		result = text
+		stats.TurnsUsed = turns
+		stats.InputTokens = inputTokens
+		stats.OutputTokens = outputTokens
+		saveSessionIDDirect(sessionFile(issueNumber, baseName), sessionID)
 	} else {
-		// Fallback: treat raw stdout as plain text and use legacy session ID scan.
-		logf(issueNumber, "warn", "JSON parse failed (%v); falling back to raw output\n", jsonErr)
+		// Fallback: treat raw stdout as plain text (no session ID available).
+		logf(issueNumber, "warn", "JSON parse failed; falling back to raw output\n")
 		result = string(rawOutput)
-		saveSessionID(sessionFile(issueNumber, baseName), result)
 	}
 
 	if runErr != nil {
@@ -390,24 +387,23 @@ func extractSummary(output string) string {
 	return extractBetweenMarkers(output, "FABRIK_SUMMARY_BEGIN", "FABRIK_SUMMARY_END")
 }
 
-// saveSessionID attempts to extract a session ID from Claude's output.
-func saveSessionID(path string, output string) {
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "{") && strings.Contains(line, "session_id") {
-			var meta struct {
-				SessionID string `json:"session_id"`
-			}
-			if err := json.Unmarshal([]byte(line), &meta); err == nil && meta.SessionID != "" {
-				if err := os.WriteFile(path, []byte(meta.SessionID), 0600); err != nil {
-					fmt.Fprintf(os.Stderr, "warning: failed to save session id to %s: %v\n", path, err)
-					return
-				}
-				if err := os.Chmod(path, 0600); err != nil {
-					fmt.Fprintf(os.Stderr, "warning: failed to set permissions on session file %s: %v\n", path, err)
-				}
-				return
-			}
-		}
+// parseClaudeJSON parses the JSON output from claude --output-format json.
+// Returns the text result, session ID, turn count, cost, input tokens, and output tokens.
+// Returns empty strings/zero values if parsing fails.
+func parseClaudeJSON(output []byte) (text, sessionID string, turns int, cost float64, inputTokens, outputTokens int) {
+	var resp claudeResponse
+	if err := json.Unmarshal(output, &resp); err != nil {
+		return "", "", 0, 0, 0, 0
+	}
+	return resp.Result, resp.SessionID, resp.NumTurns, resp.CostUSD, resp.Usage.InputTokens, resp.Usage.OutputTokens
+}
+
+// saveSessionIDDirect saves a known session ID to disk for future resumption.
+func saveSessionIDDirect(path, sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	if err := os.WriteFile(path, []byte(sessionID), 0600); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to save session id to %s: %v\n", path, err)
 	}
 }
