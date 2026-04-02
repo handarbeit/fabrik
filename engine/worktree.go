@@ -30,7 +30,9 @@ func (wm *WorktreeManager) BaseDir() string {
 
 // EnsureWorktree creates or returns the path to a worktree for the given issue.
 // Each issue gets its own branch (fabrik/issue-N) and worktree directory.
-func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string) (string, error) {
+// When skipUpdate is true (e.g. on retry attempts), the worktree is returned as-is
+// without rebasing onto main. This avoids introducing unrelated changes mid-session.
+func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string, skipUpdate bool) (string, error) {
 	wm.mu.Lock()
 	defer wm.mu.Unlock()
 
@@ -43,8 +45,9 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string) (s
 		cmd.Dir = wtDir
 		if out, cmdErr := cmd.CombinedOutput(); cmdErr == nil {
 			if strings.TrimSpace(string(out)) == branch {
-				// Worktree exists and is on the right branch — update from origin
-				wm.updateWorktreeFromMain(wtDir, baseBranch, issueNumber)
+				if !skipUpdate {
+					wm.updateWorktreeFromMain(wtDir, baseBranch, issueNumber)
+				}
 				return wtDir, nil
 			}
 		}
@@ -152,8 +155,9 @@ func (wm *WorktreeManager) branchExists(branch string) bool {
 	return err == nil
 }
 
-// updateWorktreeFromMain fetches latest origin and merges main into the worktree branch.
-// This ensures stages always start from an up-to-date base.
+// updateWorktreeFromMain fetches latest origin and rebases the worktree branch
+// onto origin/main. This ensures stages start from an up-to-date base without
+// creating noise merge commits that confuse Claude on retries.
 // Errors are non-fatal — the worktree is still usable, just potentially behind.
 func (wm *WorktreeManager) updateWorktreeFromMain(wtDir, baseBranch string, issueNumber int) {
 	// Check for uncommitted changes — skip update if dirty
@@ -172,22 +176,30 @@ func (wm *WorktreeManager) updateWorktreeFromMain(wtDir, baseBranch string, issu
 		return
 	}
 
-	// Merge origin/main into the current branch (no-edit to avoid interactive prompts)
-	cmd = exec.Command("git", "merge", "origin/"+baseBranch, "--no-edit")
+	// Rebase onto origin/main to keep a linear history and avoid merge commits
+	// that introduce unrelated changes into the worktree.
+	cmd = exec.Command("git", "rebase", "origin/"+baseBranch)
 	cmd.Dir = wtDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		outStr := strings.TrimSpace(string(out))
-		if strings.Contains(outStr, "CONFLICT") || strings.Contains(outStr, "Automatic merge failed") {
-			// Leave conflict markers in place — Claude will see them via git status
-			// and resolve them as part of the stage prompt instructions
-			logf(issueNumber, "worktree", "merge conflicts with origin/%s — Claude will resolve\n", baseBranch)
+		if strings.Contains(outStr, "CONFLICT") || strings.Contains(outStr, "could not apply") {
+			// Abort the rebase and leave the branch as-is — Claude will work
+			// from the current state and can be rebased in a later stage.
+			abortCmd := exec.Command("git", "rebase", "--abort")
+			abortCmd.Dir = wtDir
+			_ = abortCmd.Run()
+			logf(issueNumber, "worktree", "rebase conflicts with origin/%s — staying on current base\n", baseBranch)
 		} else {
-			logf(issueNumber, "worktree", "warn: could not merge origin/%s: %s\n", baseBranch, outStr)
+			// Unknown error — abort to leave worktree in a clean state
+			abortCmd := exec.Command("git", "rebase", "--abort")
+			abortCmd.Dir = wtDir
+			_ = abortCmd.Run()
+			logf(issueNumber, "worktree", "warn: could not rebase onto origin/%s: %s\n", baseBranch, outStr)
 		}
 		return
 	}
 
-	logf(issueNumber, "worktree", "updated from origin/%s\n", baseBranch)
+	logf(issueNumber, "worktree", "rebased onto origin/%s\n", baseBranch)
 }
 
 // Prune removes stale worktree registrations from git.
