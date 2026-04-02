@@ -6,10 +6,14 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mattn/go-isatty"
 	"github.com/handarbeit/fabrik/config"
 	"github.com/handarbeit/fabrik/engine"
 	"github.com/handarbeit/fabrik/stages"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 // testReadyCh is set by tests to receive a signal once engine.Run has
@@ -147,19 +151,29 @@ func Execute() error {
 		return fmt.Errorf("no stage configurations found in %s", cfg.StagesDir)
 	}
 
-	fmt.Printf("Fabrik starting\n")
-	fmt.Printf("  repo:    %s/%s\n", cfg.Owner, cfg.Repo)
-	fmt.Printf("  project: #%d\n", cfg.ProjectNum)
-	fmt.Printf("  user:    %s\n", cfg.User)
-	fmt.Printf("  stages:  %d loaded\n", len(stageCfgs))
-	fmt.Printf("  yolo:    %v\n", cfg.Yolo)
-	fmt.Printf("  auto-upgrade: %v\n", cfg.AutoUpgrade)
-	fmt.Printf("  poll:    %ds\n", cfg.PollSeconds)
-	fmt.Printf("  workers: %d\n", cfg.MaxConcurrent)
-	if cfg.MaxRetries == 0 {
-		fmt.Printf("  max-retries: unlimited\n")
-	} else {
-		fmt.Printf("  max-retries: %d\n", cfg.MaxRetries)
+	// Both stdin and stdout must be a TTY before enabling the TUI. If stdin is
+	// piped (e.g. `echo q | fabrik`), bubbletea would immediately receive the
+	// piped input and quit, making TUI mode unusable.
+	isTTY := (isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())) &&
+		(isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd()))
+
+	// In plain-text mode, print the startup banner to stdout. In TUI mode the
+	// bubbletea alt-screen replaces stdout immediately, so skip the banner.
+	if !isTTY {
+		fmt.Printf("Fabrik starting\n")
+		fmt.Printf("  repo:    %s/%s\n", cfg.Owner, cfg.Repo)
+		fmt.Printf("  project: #%d\n", cfg.ProjectNum)
+		fmt.Printf("  user:    %s\n", cfg.User)
+		fmt.Printf("  stages:  %d loaded\n", len(stageCfgs))
+		fmt.Printf("  yolo:    %v\n", cfg.Yolo)
+		fmt.Printf("  auto-upgrade: %v\n", cfg.AutoUpgrade)
+		fmt.Printf("  poll:    %ds\n", cfg.PollSeconds)
+		fmt.Printf("  workers: %d\n", cfg.MaxConcurrent)
+		if cfg.MaxRetries == 0 {
+			fmt.Printf("  max-retries: unlimited\n")
+		} else {
+			fmt.Printf("  max-retries: %d\n", cfg.MaxRetries)
+		}
 	}
 
 	eng, err := engine.New(engine.Config{
@@ -180,5 +194,56 @@ func Execute() error {
 		return err
 	}
 
+	// When stdout is a TTY, run the bubbletea TUI. Otherwise fall through to
+	// plain-text mode where the engine prints directly to stdout.
+	if isTTY {
+		return runTUI(eng, cfg.PollSeconds)
+	}
 	return eng.Run()
+}
+
+// runTUI wires the event channel, starts the bubbletea program, and runs the
+// engine. The engine handles SIGINT itself; bubbletea uses WithoutSignalHandler
+// so it doesn't interfere. When the engine exits, the TUI is quit.
+func runTUI(eng *engine.Engine, pollSeconds int) error {
+	events := make(chan tui.Event, 256)
+	eng.SetEvents(events)
+
+	tuiModel := tui.New(pollSeconds)
+	p := tea.NewProgram(tuiModel, tea.WithAltScreen(), tea.WithoutSignalHandler())
+
+	// Forward events from the engine's channel into bubbletea.
+	go func() {
+		for ev := range events {
+			p.Send(ev)
+		}
+	}()
+
+	// Run the engine in a goroutine; quit the TUI when it returns.
+	errCh := make(chan error, 1)
+	go func() {
+		err := eng.Run()
+		// Close the events channel so the forwarding goroutine exits.
+		close(events)
+		errCh <- err
+		p.Quit()
+	}()
+
+	if _, err := p.Run(); err != nil {
+		// TUI failed — signal the engine to stop so its goroutine and the
+		// forwarding goroutine both exit cleanly.
+		_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		<-errCh
+		return err
+	}
+	// TUI exited (user pressed q or ctrl+c). If the engine is still running
+	// (q doesn't send SIGINT), signal it to stop gracefully.
+	select {
+	case engineErr := <-errCh:
+		return engineErr
+	default:
+		// Engine still running; send SIGTERM so its signal handler fires.
+		_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		return <-errCh
+	}
 }

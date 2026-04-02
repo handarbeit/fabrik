@@ -38,7 +38,7 @@ type itemNode struct {
 		Body      string `json:"body"`
 		URL       string `json:"url"`
 		UpdatedAt string `json:"updatedAt"`
-		Author   *struct {
+		Author    *struct {
 			Login string `json:"login"`
 		} `json:"author"`
 		Labels struct {

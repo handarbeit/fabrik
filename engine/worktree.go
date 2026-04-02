@@ -11,9 +11,19 @@ import (
 
 // WorktreeManager handles git worktrees for issue isolation.
 type WorktreeManager struct {
-	mu      sync.Mutex // serializes worktree/branch creation (git config isn't concurrent-safe)
-	baseDir string     // directory containing the main repo
-	rootDir string     // where worktrees are stored (e.g., .fabrik/worktrees)
+	mu      sync.Mutex                        // serializes worktree/branch creation (git config isn't concurrent-safe)
+	baseDir string                            // directory containing the main repo
+	rootDir string                            // where worktrees are stored (e.g., .fabrik/worktrees)
+	logfFn  func(int, string, string, ...any) // optional; set by Engine after construction
+}
+
+// logf calls logfFn if set, otherwise prints directly.
+func (wm *WorktreeManager) logf(issueNumber int, tag, format string, args ...any) {
+	if wm.logfFn != nil {
+		wm.logfFn(issueNumber, tag, format, args...)
+		return
+	}
+	fmt.Printf("[#%d %s] "+format, append([]any{issueNumber, tag}, args...)...)
 }
 
 func NewWorktreeManager(repoDir string) *WorktreeManager {
@@ -53,7 +63,7 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string, sk
 		}
 		// Directory exists but git can't identify it — still usable, don't destroy it
 		// The directory might have uncommitted work from a killed Claude session
-		logf(issueNumber, "worktree", "directory exists but branch check failed, using as-is\n")
+		wm.logf(issueNumber, "worktree", "directory exists but branch check failed, using as-is\n")
 		return wtDir, nil
 	}
 
@@ -83,7 +93,7 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string, sk
 		return "", fmt.Errorf("creating worktree: %s: %w", string(out), err)
 	}
 
-	logf(issueNumber, "worktree", "created %s\n", wtDir)
+	wm.logf(issueNumber, "worktree", "created %s\n", wtDir)
 	return wtDir, nil
 }
 
@@ -102,8 +112,7 @@ func (wm *WorktreeManager) PushBranch(issueNumber int) error {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("pushing branch %s: %s: %w", branch, strings.TrimSpace(string(out)), err)
 	}
-	pollStatusClear()
-	fmt.Printf("  [worktree] pushed %s to origin\n", branch)
+	wm.logf(issueNumber, "worktree", "pushed %s to origin\n", branch)
 	return nil
 }
 
@@ -131,7 +140,7 @@ func (wm *WorktreeManager) CleanupWorktree(issueNumber int, deleteBranch bool) e
 		}
 	}
 
-	logf(issueNumber, "worktree", "cleaned up\n")
+	wm.logf(issueNumber, "worktree", "cleaned up\n")
 	return nil
 }
 
@@ -165,7 +174,7 @@ func (wm *WorktreeManager) updateWorktreeFromMain(wtDir, baseBranch string, issu
 	statusCmd := exec.Command("git", "status", "--porcelain")
 	statusCmd.Dir = wtDir
 	if out, err := statusCmd.Output(); err == nil && len(strings.TrimSpace(string(out))) > 0 {
-		logf(issueNumber, "worktree", "has uncommitted changes, skipping update from main\n")
+		wm.logf(issueNumber, "worktree", "has uncommitted changes, skipping update from main\n")
 		return
 	}
 
@@ -173,7 +182,7 @@ func (wm *WorktreeManager) updateWorktreeFromMain(wtDir, baseBranch string, issu
 	cmd := exec.Command("git", "fetch", "origin", baseBranch)
 	cmd.Dir = wtDir
 	if out, err := cmd.CombinedOutput(); err != nil {
-		logf(issueNumber, "worktree", "warn: could not fetch origin: %s\n", strings.TrimSpace(string(out)))
+		wm.logf(issueNumber, "worktree", "warn: could not fetch origin: %s\n", strings.TrimSpace(string(out)))
 		return
 	}
 
@@ -189,18 +198,18 @@ func (wm *WorktreeManager) updateWorktreeFromMain(wtDir, baseBranch string, issu
 			abortCmd := exec.Command("git", "rebase", "--abort")
 			abortCmd.Dir = wtDir
 			_ = abortCmd.Run()
-			logf(issueNumber, "worktree", "rebase conflicts with origin/%s — staying on current base\n", baseBranch)
+			wm.logf(issueNumber, "worktree", "rebase conflicts with origin/%s — staying on current base\n", baseBranch)
 		} else {
 			// Unknown error — abort to leave worktree in a clean state
 			abortCmd := exec.Command("git", "rebase", "--abort")
 			abortCmd.Dir = wtDir
 			_ = abortCmd.Run()
-			logf(issueNumber, "worktree", "warn: could not rebase onto origin/%s: %s\n", baseBranch, outStr)
+			wm.logf(issueNumber, "worktree", "warn: could not rebase onto origin/%s: %s\n", baseBranch, outStr)
 		}
 		return
 	}
 
-	logf(issueNumber, "worktree", "rebased onto origin/%s\n", baseBranch)
+	wm.logf(issueNumber, "worktree", "rebased onto origin/%s\n", baseBranch)
 }
 
 // Prune removes stale worktree registrations from git.
