@@ -221,7 +221,7 @@ cp ./stages/mystages/*.yaml .fabrik/stages/
 
 ## Documentation
 
-- [User Guide](docs/USER_GUIDE.md) — full configuration reference, workflow patterns, stage details, labels, and troubleshooting
+- [User Guide](docs/USER_GUIDE.md) — full configuration reference for the pre-v0.2 `./stages` workflow (see "Quick Start" and "Migration from `./stages`" above for the current `./.fabrik/stages` default), workflow patterns, stage details, labels, and troubleshooting
 
 ## Architecture Decision Records
 
