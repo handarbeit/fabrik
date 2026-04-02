@@ -27,20 +27,20 @@ type Config struct {
 }
 
 type Engine struct {
-	cfg               Config
-	client            GitHubClient
-	claude            ClaudeInvoker
-	statusField       *gh.StatusField
-	worktrees         *WorktreeManager
-	mu                sync.Mutex
-	processedSet      map[string]time.Time // track what we've processed: "issue#-commentID" -> timestamp
-	lockedIssues      map[int]bool         // issues that have had fabrik:locked added and not yet released
-	retryCount        map[string]int       // key: "<issueNum>-<stageName>", value: failed attempt count
-	pausedDueToRetries map[string]bool     // key: "<issueNum>-<stageName>", true if engine paused this issue
-	idleCount         int                  // consecutive idle polls; triggers self-upgrade at threshold
-	sem               chan struct{}         // semaphore bounding concurrent workers across poll cycles
-	wg                sync.WaitGroup       // tracks in-flight workers for graceful shutdown
-	inFlight          sync.Map             // key: issue number (int), value: struct{}
+	cfg                Config
+	client             GitHubClient
+	claude             ClaudeInvoker
+	statusField        *gh.StatusField
+	worktrees          *WorktreeManager
+	mu                 sync.Mutex
+	processedSet       map[string]time.Time // track what we've processed: "issue#-commentID" -> timestamp
+	lockedIssues       map[int]bool         // issues that have had fabrik:locked added and not yet released
+	retryCount         map[string]int       // key: "<issueNum>-<stageName>", value: failed attempt count
+	pausedDueToRetries map[string]bool      // key: "<issueNum>-<stageName>", true if engine paused this issue
+	idleCount          int                  // consecutive idle polls; triggers self-upgrade at threshold
+	sem                chan struct{}        // semaphore bounding concurrent workers across poll cycles
+	wg                 sync.WaitGroup       // tracks in-flight workers for graceful shutdown
+	inFlight           sync.Map             // key: issue number (int), value: struct{}
 }
 
 func New(cfg Config) (*Engine, error) {
