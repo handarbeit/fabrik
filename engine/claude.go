@@ -336,6 +336,22 @@ func parseClaudeJSON(output []byte) (text, sessionID string, turns int, cost flo
 	return resp.Result, resp.SessionID, resp.NumTurns, resp.CostUSD
 }
 
+// saveSessionID scans output lines for a JSON object containing session_id and
+// saves it to path. Used when the session ID must be extracted from raw output.
+func saveSessionID(path, output string) {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.Contains(line, "session_id") {
+			continue
+		}
+		var resp claudeResponse
+		if err := json.Unmarshal([]byte(line), &resp); err == nil && resp.SessionID != "" {
+			saveSessionIDDirect(path, resp.SessionID)
+			return
+		}
+	}
+}
+
 // saveSessionIDDirect saves a known session ID to disk for future resumption.
 func saveSessionIDDirect(path, sessionID string) {
 	if sessionID == "" {
