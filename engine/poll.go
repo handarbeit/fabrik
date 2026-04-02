@@ -10,6 +10,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/verveguy/fabrik/stages"
+	"github.com/verveguy/fabrik/tui"
 )
 
 const idleUpgradeThreshold = 2
@@ -73,8 +76,10 @@ func (e *Engine) Run() error {
 		close(e.cfg.ReadyCh)
 	}
 
-	fmt.Println("\nFabrik is running. Press Ctrl+C to stop.")
-	fmt.Println()
+	if e.events == nil {
+		fmt.Println("\nFabrik is running. Press Ctrl+C to stop.")
+		fmt.Println()
+	}
 
 	// Handle signals in a dedicated goroutine so cancel() fires immediately
 	// even while poll() is blocking on wg.Wait(). This ensures CommandContext
@@ -83,7 +88,7 @@ func (e *Engine) Run() error {
 	go func() {
 		select {
 		case sig := <-sigCh:
-			fmt.Printf("\nReceived %v — shutting down gracefully (Ctrl-C again to force-quit)...\n", sig)
+			fmt.Fprintf(os.Stderr, "\nReceived %v — shutting down gracefully (Ctrl-C again to force-quit)...\n", sig)
 			cancel()
 		case <-ctx.Done():
 			return
@@ -91,7 +96,7 @@ func (e *Engine) Run() error {
 		// Listen for a second signal during drain and force-exit.
 		select {
 		case <-sigCh:
-			fmt.Println("\nForce-quitting...")
+			fmt.Fprintln(os.Stderr, "\nForce-quitting...")
 			os.Exit(1)
 		case <-ctx.Done():
 		}
@@ -102,7 +107,7 @@ func (e *Engine) Run() error {
 
 	// Run immediately on start, then on tick
 	if err := e.poll(ctx); err != nil && ctx.Err() == nil {
-		fmt.Printf("  [warn] poll error: %v\n", err)
+		e.logf(0, "warn", "poll error: %v\n", err)
 	}
 
 	for {
@@ -111,14 +116,19 @@ func (e *Engine) Run() error {
 			// Signal goroutine called cancel(); poll() returned because
 			// CommandContext killed the child processes.
 			e.cleanupLockedIssues()
+			// Wait for all worker goroutines before returning.
+			// emitStructural now sends synchronously, so events are in the buffer
+			// before wg.Done() fires — no separate structuralWg needed.
+			e.wg.Wait()
 			return nil
 		case <-ticker.C:
 			if ctx.Err() != nil {
 				e.cleanupLockedIssues()
+				e.wg.Wait()
 				return nil
 			}
 			if err := e.poll(ctx); err != nil {
-				fmt.Printf("  [warn] poll error: %v\n", err)
+				e.logf(0, "warn", "poll error: %v\n", err)
 			}
 		}
 	}
@@ -138,13 +148,12 @@ func (e *Engine) cleanupLockedIssues() {
 		return
 	}
 	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
-	pollStatusClear()
-	fmt.Printf("[shutdown] removing lock labels from %d issue(s)\n", len(issues))
+	e.logf(0, "shutdown", "removing lock labels from %d issue(s)\n", len(issues))
 	for _, num := range issues {
 		if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, num, lockLabel); err != nil {
-			logf(num, "warn", "could not remove lock label during shutdown: %v\n", err)
+			e.logf(num, "warn", "could not remove lock label during shutdown: %v\n", err)
 		} else {
-			logf(num, "shutdown", "removed lock label\n")
+			e.logf(num, "shutdown", "removed lock label\n")
 		}
 		e.mu.Lock()
 		delete(e.lockedIssues, num)
@@ -153,7 +162,8 @@ func (e *Engine) cleanupLockedIssues() {
 }
 
 func (e *Engine) poll(ctx context.Context) error {
-	pollStatus("[poll] fetching board %s/%s#%d ...", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
+	e.emitStructural(tui.PollStartedEvent{Owner: e.cfg.Owner, Repo: e.cfg.Repo, Project: e.cfg.ProjectNum})
+	e.logf(0, "poll", "fetching project board %s/%s#%d\n", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
 
 	board, err := e.client.FetchProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
 	if err != nil {
@@ -166,26 +176,32 @@ func (e *Engine) poll(ctx context.Context) error {
 	if e.statusField == nil && board.ProjectID != "" {
 		sf, err := e.client.FetchStatusField(board.ProjectID)
 		if err != nil {
-			pollStatusClear()
-			fmt.Printf("  [warn] could not fetch status field: %v\n", err)
+			e.logf(0, "warn", "could not fetch status field: %v\n", err)
 		} else {
 			e.statusField = sf
 		}
 	}
 	e.mu.Unlock()
 
-	// Build a compact status summary with item count and rate limits.
-	var rateParts []string
+	e.logf(0, "poll", "found %d items on board\n", len(board.Items))
+
+	// Report rate limit stats when we have seen at least one response.
 	restStats, graphqlStats := e.client.RateLimitStats()
 	if restStats.Limit > 0 {
-		rateParts = append(rateParts, fmt.Sprintf("REST %d/%d", restStats.Remaining, restStats.Limit))
+		resetStr := "unknown"
+		if !restStats.Reset.IsZero() {
+			resetStr = restStats.Reset.Local().Format("15:04")
+		}
+		e.logf(0, "poll", "rate limit REST: %d/%d remaining, resets at %s\n",
+			restStats.Remaining, restStats.Limit, resetStr)
 	}
 	if graphqlStats.Limit > 0 {
-		rateParts = append(rateParts, fmt.Sprintf("GQL %d/%d", graphqlStats.Remaining, graphqlStats.Limit))
-	}
-	status := fmt.Sprintf("[poll] %d items", len(board.Items))
-	if len(rateParts) > 0 {
-		status += " | " + strings.Join(rateParts, ", ")
+		resetStr := "unknown"
+		if !graphqlStats.Reset.IsZero() {
+			resetStr = graphqlStats.Reset.Local().Format("15:04")
+		}
+		e.logf(0, "poll", "rate limit GraphQL: %d/%d remaining, resets at %s\n",
+			graphqlStats.Remaining, graphqlStats.Limit, resetStr)
 	}
 
 	// Update the updatedAt cache for all items. This is done before dispatch
@@ -210,14 +226,14 @@ func (e *Engine) poll(ctx context.Context) error {
 		if !e.itemMayNeedWork(board.Items[i]) {
 			continue
 		}
+		e.logf(board.Items[i].Number, "poll", "deep-fetching details\n")
 		if err := e.client.FetchItemDetails(&board.Items[i]); err != nil {
-			pollStatusClear()
-			logf(board.Items[i].Number, "warn", "could not fetch item details: %v\n", err)
+			e.logf(board.Items[i].Number, "warn", "could not fetch item details: %v\n", err)
 		}
 		deepFetched++
 	}
 	if deepFetched > 0 {
-		status += fmt.Sprintf(" | deep-fetched %d", deepFetched)
+		e.logf(0, "poll", "deep-fetched details for %d item(s)\n", deepFetched)
 	}
 
 	var dispatched int
@@ -238,6 +254,12 @@ func (e *Engine) poll(ctx context.Context) error {
 		case <-ctx.Done():
 			goto doneDispatching
 		}
+		// Capture stage name and start time for job tracking.
+		var stageName string
+		if s := stages.FindStage(e.cfg.Stages, item.Status); s != nil {
+			stageName = s.Name
+		}
+		startTime := time.Now()
 		e.inFlight.Store(item.Number, item.IsPR)
 		e.wg.Add(1)
 		dispatched++
@@ -245,8 +267,21 @@ func (e *Engine) poll(ctx context.Context) error {
 			defer e.wg.Done()
 			defer func() { <-e.sem }()
 			defer e.inFlight.Delete(item.Number)
-			if err := e.processItem(ctx, board, item); err != nil {
-				logf(item.Number, "error", "%v\n", err)
+			e.emitStructural(tui.JobStartedEvent{
+				IssueNumber: item.Number,
+				StageName:   stageName,
+				StartedAt:   startTime,
+			})
+			err := e.processItem(ctx, board, item)
+			e.emitStructural(tui.JobCompletedEvent{
+				IssueNumber: item.Number,
+				StageName:   stageName,
+				Success:     err == nil,
+				Duration:    time.Since(startTime),
+				CompletedAt: time.Now(),
+			})
+			if err != nil {
+				e.logf(item.Number, "error", "%v\n", err)
 			}
 		}()
 	}
@@ -284,12 +319,10 @@ doneDispatching:
 		})
 
 		if len(inFlightLabels) > 0 {
-			status += fmt.Sprintf(" | in-flight: %v", inFlightLabels)
-			pollStatus("%s", status)
+			e.logf(0, "poll", "nothing new to dispatch (in-flight: %v)\n", inFlightLabels)
 			e.idleCount = 0
 		} else {
-			status += " | idle"
-			pollStatus("%s", status)
+			e.logf(0, "poll", "nothing to do\n")
 			if e.cfg.AutoUpgrade {
 				e.idleCount++
 				if e.idleCount >= idleUpgradeThreshold {
@@ -304,6 +337,7 @@ doneDispatching:
 		e.idleCount = 0
 	}
 
+	e.emitStructural(tui.PollCompletedEvent{ItemCount: len(board.Items), Dispatched: dispatched})
 	return nil
 }
 
@@ -319,22 +353,19 @@ func (e *Engine) checkAndUpgrade() {
 	fetchCmd := exec.Command("git", "fetch", "origin", baseBranch)
 	fetchCmd.Dir = dir
 	if out, err := fetchCmd.CombinedOutput(); err != nil {
-		pollStatusClear()
-		fmt.Printf("[upgrade] git fetch failed: %v\n%s\n", err, out)
+		e.logf(0, "upgrade", "git fetch failed: %v\n%s\n", err, out)
 		return
 	}
 
 	// Compare HEAD to origin/baseBranch
 	localRef, err := gitRevParse(dir, "HEAD")
 	if err != nil {
-		pollStatusClear()
-		fmt.Printf("[upgrade] could not resolve HEAD: %v\n", err)
+		e.logf(0, "upgrade", "could not resolve HEAD: %v\n", err)
 		return
 	}
 	remoteRef, err := gitRevParse(dir, "origin/"+baseBranch)
 	if err != nil {
-		pollStatusClear()
-		fmt.Printf("[upgrade] could not resolve origin/%s: %v\n", baseBranch, err)
+		e.logf(0, "upgrade", "could not resolve origin/%s: %v\n", baseBranch, err)
 		return
 	}
 	if localRef == remoteRef {
@@ -342,42 +373,40 @@ func (e *Engine) checkAndUpgrade() {
 		return
 	}
 
-	// Real upgrade happening — print permanent output
-	pollStatusClear()
-	fmt.Printf("[upgrade] new commits detected — pulling origin/%s\n", baseBranch)
+	e.logf(0, "upgrade", "new commits detected — pulling origin/%s\n", baseBranch)
 
 	pullCmd := exec.Command("git", "pull", "--ff-only", "origin", baseBranch)
 	pullCmd.Dir = dir
 	if out, err := pullCmd.CombinedOutput(); err != nil {
-		fmt.Printf("[upgrade] git pull --ff-only failed (local changes?): %v\n%s\n", err, out)
+		e.logf(0, "upgrade", "git pull --ff-only failed (local changes?): %v\n%s\n", err, out)
 		return
 	}
 
 	// Determine current executable path
 	exe, err := os.Executable()
 	if err != nil {
-		fmt.Printf("[upgrade] could not determine executable path: %v\n", err)
+		e.logf(0, "upgrade", "could not determine executable path: %v\n", err)
 		return
 	}
 	exe, err = filepath.EvalSymlinks(exe)
 	if err != nil {
-		fmt.Printf("[upgrade] could not resolve symlinks for executable: %v\n", err)
+		e.logf(0, "upgrade", "could not resolve symlinks for executable: %v\n", err)
 		return
 	}
 
-	fmt.Printf("[upgrade] rebuilding binary: %s\n", exe)
+	e.logf(0, "upgrade", "rebuilding binary: %s\n", exe)
 
 	buildCmd := exec.Command("go", "build", "-o", exe, ".")
 	buildCmd.Dir = dir
 	if out, err := buildCmd.CombinedOutput(); err != nil {
-		fmt.Printf("[upgrade] build failed: %v\n%s\n", err, out)
+		e.logf(0, "upgrade", "build failed: %v\n%s\n", err, out)
 		return
 	}
 
-	fmt.Printf("[upgrade] re-executing new binary\n")
+	e.logf(0, "upgrade", "re-executing new binary\n")
 
 	if err := syscall.Exec(exe, os.Args, os.Environ()); err != nil {
-		fmt.Printf("[upgrade] exec failed: %v\n", err)
+		e.logf(0, "upgrade", "exec failed: %v\n", err)
 	}
 }
 

@@ -561,7 +561,9 @@ func TestProcessItem_FullHappyPath(t *testing.T) {
 		t.Errorf("lock label = %q", client.addLabelCalls[0].labelName)
 	}
 
-	// Should have removed the lock label after processing completes
+	// Lock label is released when stage completes (completed=true → releaseLock() called).
+	// When not completed, the lock persists through cooldown so other instances don't
+	// pick up the issue — see "Keep lock and in_progress labels through cooldown retries".
 	foundLockRemoval := false
 	for _, call := range client.removeLabelCalls {
 		if call.labelName == "fabrik:locked:testuser" {
@@ -569,7 +571,7 @@ func TestProcessItem_FullHappyPath(t *testing.T) {
 		}
 	}
 	if !foundLockRemoval {
-		t.Error("expected lock label to be removed after processItem completes")
+		t.Error("expected lock label to be removed after stage completes")
 	}
 
 	// Should have invoked Claude
@@ -1445,6 +1447,7 @@ func TestIdleCountNotIncrementedWhileWorkersInFlight(t *testing.T) {
 }
 
 func TestExtractModelOverride(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
 	tests := []struct {
 		name   string
 		labels []string
@@ -1459,7 +1462,7 @@ func TestExtractModelOverride(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := extractModelOverride(0, tc.labels)
+			got := eng.extractModelOverride(0, tc.labels)
 			if got != tc.want {
 				t.Errorf("extractModelOverride(%v) = %q, want %q", tc.labels, got, tc.want)
 			}
@@ -1469,8 +1472,9 @@ func TestExtractModelOverride(t *testing.T) {
 
 func TestExtractModelOverrideWarnsOnMultiple(t *testing.T) {
 	// Verify no panic and correct return value when multiple model labels are present.
-	// The warning goes to fmt.Printf (stdout) and is tested behaviorally above.
-	result := extractModelOverride(0, []string{"model:opus", "model:sonnet", "model:haiku"})
+	// The warning goes to eng.logf (stdout in test mode) and is tested behaviorally above.
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	result := eng.extractModelOverride(0, []string{"model:opus", "model:sonnet", "model:haiku"})
 	if result != "opus" {
 		t.Errorf("expected %q, got %q", "opus", result)
 	}
