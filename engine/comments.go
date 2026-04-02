@@ -57,7 +57,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 
 	// Step 3: Ensure worktree
 	baseBranch := e.worktrees.DefaultBaseBranch()
-	workDir, err := e.worktrees.EnsureWorktree(item.Number, baseBranch)
+	workDir, err := e.worktrees.EnsureWorktree(item.Number, baseBranch, false)
 	if err != nil {
 		e.removeEditingLabel(item.Number)
 		return fmt.Errorf("setting up worktree: %w", err)
