@@ -973,3 +973,69 @@ func TestShellQuote(t *testing.T) {
 		}
 	}
 }
+
+func TestSaveDebugLog(t *testing.T) {
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { os.Chdir(orig) })
+
+	const want = "hello debug output"
+	saveDebugLog(42, "Research", want)
+
+	debugDir := filepath.Join(dir, ".fabrik", "debug")
+	entries, err := os.ReadDir(debugDir)
+	if err != nil {
+		t.Fatalf("reading debug dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 debug file, got %d", len(entries))
+	}
+	name := entries[0].Name()
+	if !strings.HasPrefix(name, "issue-42_") || !strings.HasSuffix(name, "_Research.log") {
+		t.Errorf("unexpected filename %q", name)
+	}
+	data, err := os.ReadFile(filepath.Join(debugDir, name))
+	if err != nil {
+		t.Fatalf("reading debug file: %v", err)
+	}
+	if string(data) != want {
+		t.Errorf("debug file content = %q, want %q", string(data), want)
+	}
+	info, err := entries[0].Info()
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("file permissions = %o, want 0600", info.Mode().Perm())
+	}
+}
+
+func TestSaveDebugLog_UniqueNames(t *testing.T) {
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { os.Chdir(orig) })
+
+	saveDebugLog(1, "Implement", "output-a")
+	saveDebugLog(1, "Implement", "output-b")
+
+	debugDir := filepath.Join(dir, ".fabrik", "debug")
+	entries, err := os.ReadDir(debugDir)
+	if err != nil {
+		t.Fatalf("reading debug dir: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Errorf("expected 2 distinct debug files, got %d (timestamp collision?)", len(entries))
+	}
+}
