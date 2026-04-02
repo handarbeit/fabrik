@@ -25,12 +25,12 @@ type GitHubClient interface {
 
 // ClaudeInvoker defines the interface for invoking Claude Code.
 type ClaudeInvoker interface {
-	Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (output string, completed bool, err error)
+	Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (output string, completed bool, usage TokenUsage, err error)
 }
 
 // RealClaudeInvoker wraps the existing InvokeClaude function.
 type RealClaudeInvoker struct{}
 
-func (r *RealClaudeInvoker) Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
+func (r *RealClaudeInvoker) Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
 	return InvokeClaude(ctx, stage, issue, newComments, resume, workDir, modelOverride)
 }
