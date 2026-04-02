@@ -175,6 +175,7 @@ func (e *Engine) poll(ctx context.Context) error {
 		if !e.itemMayNeedWork(board.Items[i]) {
 			continue
 		}
+		logf(board.Items[i].Number, "poll", "deep-fetching details\n")
 		if err := e.client.FetchItemDetails(&board.Items[i]); err != nil {
 			logf(board.Items[i].Number, "warn", "could not fetch item details: %v\n", err)
 		}
