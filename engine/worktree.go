@@ -102,6 +102,7 @@ func (wm *WorktreeManager) PushBranch(issueNumber int) error {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("pushing branch %s: %s: %w", branch, strings.TrimSpace(string(out)), err)
 	}
+	pollStatusClear()
 	fmt.Printf("  [worktree] pushed %s to origin\n", branch)
 	return nil
 }

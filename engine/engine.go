@@ -87,6 +87,7 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 }
 
 func logf(issueNumber int, tag, format string, args ...any) {
+	pollStatusClear()
 	prefix := fmt.Sprintf("[#%d %s] ", issueNumber, tag)
 	fmt.Printf(prefix+format, args...)
 }
