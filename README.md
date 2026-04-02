@@ -206,12 +206,17 @@ does the rest.
 
 ## Migration from `./stages`
 
-If you used Fabrik before `v0.2`, your stage configs were in `./stages/mystages/`.
+If you used Fabrik before `v0.2`, your stage configs were in `./stages` (the old default)
+or `./stages/mystages/` if you used that convention.
 
 ```bash
 mkdir -p .fabrik/stages
+# If you used the default ./stages path:
+cp ./stages/*.yaml .fabrik/stages/
+# If you used ./stages/mystages/:
 cp ./stages/mystages/*.yaml .fabrik/stages/
-# Or set FABRIK_STAGES=./stages/mystages in your .env to keep the old path
+# Or keep the old path by setting FABRIK_STAGES in your .env:
+# FABRIK_STAGES=./stages
 ```
 
 ## Documentation
