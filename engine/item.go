@@ -13,14 +13,104 @@ import (
 	"github.com/verveguy/fabrik/stages"
 )
 
-// itemNeedsWork does cheap pre-checks to determine if an item might need processing.
-// This runs in the poll loop BEFORE acquiring a semaphore slot, so it must be fast
-// and not make any API calls.
-func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
+// itemMayNeedWork does cheap pre-checks using only shallow board data (no comments).
+// Items that pass this filter will have their details fetched via FetchItemDetails
+// before the full itemNeedsWork check. This avoids expensive deep fetches for items
+// that can be ruled out by status, labels, or updatedAt alone.
+func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 	// No matching stage = nothing to do
 	stage := stages.FindStage(e.cfg.Stages, item.Status)
 	if stage == nil {
 		return false
+	}
+
+	// Skip items that haven't changed since last poll — unless in cooldown retry.
+	if !item.UpdatedAt.IsZero() {
+		e.mu.Lock()
+		lastSeen, seen := e.lastUpdatedAt[item.Number]
+		e.mu.Unlock()
+		if seen && !item.UpdatedAt.After(lastSeen) {
+			// Item unchanged — but still allow cooldown retries
+			itemKey := fmt.Sprintf("%d-%s", item.Number, stage.Name)
+			e.mu.Lock()
+			lastAttempt, attempted := e.processedSet[itemKey]
+			e.mu.Unlock()
+			if attempted {
+				cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
+				if time.Since(lastAttempt) >= cooldown {
+					return true // cooldown expired, retry
+				}
+			}
+			return false
+		}
+	}
+
+	// Cleanup stages bypass comment processing and cooldown checks.
+	if stage.CleanupWorktree {
+		for _, label := range item.Labels {
+			if label == "fabrik:paused" {
+				return false
+			}
+		}
+		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
+		for _, label := range item.Labels {
+			if label == completeLabel {
+				return false
+			}
+		}
+		return true
+	}
+
+	// Paused items and items locked by another user are not our work
+	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
+	otherLockPrefix := "fabrik:locked:"
+	for _, label := range item.Labels {
+		if label == "fabrik:paused" {
+			return false
+		}
+		if strings.HasPrefix(label, otherLockPrefix) && label != lockLabel {
+			return false
+		}
+	}
+
+	// PRs need comments to decide — if updatedAt changed, deep fetch to check
+	if item.IsPR {
+		return true
+	}
+
+	// Already completed this stage
+	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
+	for _, label := range item.Labels {
+		if label == completeLabel {
+			return false
+		}
+	}
+
+	return true
+}
+
+// itemNeedsWork does full checks including comment inspection.
+// This runs AFTER FetchItemDetails has populated the item's Comments.
+func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
+	stage := stages.FindStage(e.cfg.Stages, item.Status)
+	if stage == nil {
+		return false
+	}
+
+	// Cleanup stages bypass comment processing and cooldown checks.
+	if stage.CleanupWorktree {
+		for _, label := range item.Labels {
+			if label == "fabrik:paused" {
+				return false
+			}
+		}
+		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
+		for _, label := range item.Labels {
+			if label == completeLabel {
+				return false
+			}
+		}
+		return true
 	}
 
 	// Paused items and items locked by another user are not our work
@@ -104,6 +194,43 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}
 	}
 
+	// Cleanup stage: remove the worktree (no lock, no Claude, no comment processing needed).
+	// Runs before new-comment check — cleanup stages are terminal and should not route
+	// comments to processComments. Also handles PR items (no worktree to remove, just label).
+	if stage.CleanupWorktree {
+		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
+		for _, label := range item.Labels {
+			if label == completeLabel {
+				return nil
+			}
+		}
+
+		// Issues have worktrees; PRs on the board do not — skip the removal for PRs.
+		if !item.IsPR {
+			wtDir := e.worktrees.WorktreeDir(item.Number)
+			statusCmd := exec.Command("git", "status", "--porcelain")
+			statusCmd.Dir = wtDir
+			if out, err := statusCmd.Output(); err == nil && len(strings.TrimSpace(string(out))) > 0 {
+				logf(item.Number, "warn", "worktree dirty — skipping cleanup to preserve uncommitted changes\n")
+				return nil
+			}
+
+			if err := e.worktrees.CleanupWorktree(item.Number, false); err != nil {
+				logf(item.Number, "warn", "could not clean up worktree: %v\n", err)
+			}
+		}
+
+		if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, completeLabel); err != nil {
+			logf(item.Number, "warn", "could not add completion label: %v\n", err)
+		}
+
+		e.mu.Lock()
+		e.processedSet[itemKey] = time.Now()
+		e.mu.Unlock()
+
+		return nil
+	}
+
 	// Unpause detection: if this stage has a stage:<name>:failed label but
 	// fabrik:paused is gone, the user has investigated — reset state. We check
 	// the label (not just the in-memory map) so cleanup works across restarts.
@@ -164,6 +291,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			return nil
 		}
 		logf(item.Number, "retry", "cooldown expired for stage %q, retrying\n", stage.Name)
+		e.removeFailedLabel(item.Number, stage.Name)
 	}
 
 	// Bail early if context was cancelled before starting new work.
@@ -376,10 +504,7 @@ func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 		logf(item.Number, "warn", "could not add paused label: %v\n", err)
 	}
 
-	failedLabel := fmt.Sprintf("stage:%s:failed", stage.Name)
-	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, failedLabel); err != nil {
-		logf(item.Number, "warn", "could not add failed label: %v\n", err)
-	}
+	e.addFailedLabel(item.Number, stage.Name)
 
 	comment := fmt.Sprintf(
 		"🏭 **Fabrik — stage failed**\n\nStage **%s** failed to complete after %d attempt(s). The issue has been paused (`fabrik:paused`).\n\nTo retry: investigate the failure, make any needed fixes, then remove the `fabrik:paused` label.",
@@ -455,6 +580,21 @@ func (e *Engine) removeInProgressLabel(issueNumber int, stageName string) {
 	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, issueNumber, label); err != nil &&
 		!errors.Is(err, gh.ErrNotFound) {
 		logf(issueNumber, "warn", "could not remove in_progress label: %v\n", err)
+	}
+}
+
+func (e *Engine) addFailedLabel(issueNumber int, stageName string) {
+	label := fmt.Sprintf("stage:%s:failed", stageName)
+	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, issueNumber, label); err != nil {
+		logf(issueNumber, "warn", "could not add failed label: %v\n", err)
+	}
+}
+
+func (e *Engine) removeFailedLabel(issueNumber int, stageName string) {
+	label := fmt.Sprintf("stage:%s:failed", stageName)
+	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, issueNumber, label); err != nil &&
+		!errors.Is(err, gh.ErrNotFound) {
+		logf(issueNumber, "warn", "could not remove failed label: %v\n", err)
 	}
 }
 

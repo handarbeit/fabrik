@@ -10,6 +10,7 @@ import (
 // GitHubClient defines the GitHub operations needed by the engine.
 type GitHubClient interface {
 	FetchProjectBoard(owner, repo string, projectNum int) (*gh.ProjectBoard, error)
+	FetchItemDetails(item *gh.ProjectItem) error
 	FetchStatusField(projectID string) (*gh.StatusField, error)
 	AddLabelToIssue(owner, repo string, issueNumber int, labelName string) error
 	RemoveLabelFromIssue(owner, repo string, issueNumber int, labelName string) error
