@@ -162,7 +162,7 @@ func TestCheckCompletion_UnsupportedTypes(t *testing.T) {
 	}
 }
 
-func TestSaveSessionIDDirect(t *testing.T) {
+func TestSaveSessionID_WritesSessionID(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.session")
 
@@ -183,7 +183,7 @@ func TestSaveSessionIDDirect(t *testing.T) {
 	}
 }
 
-func TestSaveSessionIDDirect_Empty(t *testing.T) {
+func TestSaveSessionID_EmptySessionID(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.session")
 
@@ -450,7 +450,7 @@ func TestInvokeClaude_FakeBinary(t *testing.T) {
 	fakeClaude := filepath.Join(binDir, "claude")
 	script := `#!/bin/sh
 cat >/dev/null
-printf '%s\n' '{"result":"Claude output for test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_test123","num_turns":3,"total_cost_usd":0.001}'
+printf '%s\n' '{"result":"Claude output for test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_test123","num_turns":3,"total_cost_usd":0.001,"is_error":false}'
 `
 	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
 		t.Fatal(err)
