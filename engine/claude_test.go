@@ -314,6 +314,144 @@ func TestSessionDir(t *testing.T) {
 	}
 }
 
+func TestLogDir(t *testing.T) {
+	dir := LogDir(42)
+	if !strings.Contains(dir, "issue-42") {
+		t.Errorf("LogDir(42) = %q, expected to contain issue-42", dir)
+	}
+	if !strings.Contains(dir, ".fabrik/logs") {
+		t.Errorf("LogDir(42) = %q, expected to contain .fabrik/logs", dir)
+	}
+}
+
+func TestFormatStatsFooter(t *testing.T) {
+	tests := []struct {
+		name      string
+		stats     TokenUsage
+		completed bool
+		wantEmpty bool
+		wantSubs  []string
+	}{
+		{
+			name:      "zero stats returns empty",
+			stats:     TokenUsage{},
+			completed: true,
+			wantEmpty: true,
+		},
+		{
+			name:      "with turns and tokens, completed",
+			stats:     TokenUsage{TurnsUsed: 15, MaxTurns: 30, InputTokens: 47000, OutputTokens: 8000},
+			completed: true,
+			wantSubs:  []string{"15/30 turns", "47k input", "8k output"},
+		},
+		{
+			name:      "with turns and tokens, incomplete",
+			stats:     TokenUsage{TurnsUsed: 30, MaxTurns: 30, InputTokens: 47000, OutputTokens: 8000},
+			completed: false,
+			wantSubs:  []string{"30/30 turns", "Stage incomplete."},
+		},
+		{
+			name:      "no max turns",
+			stats:     TokenUsage{TurnsUsed: 10, InputTokens: 5000, OutputTokens: 1000},
+			completed: true,
+			wantSubs:  []string{"10 turns", "5k input", "1k output"},
+		},
+		{
+			name:      "only input tokens",
+			stats:     TokenUsage{InputTokens: 5000},
+			completed: true,
+			wantEmpty: false,
+			wantSubs:  []string{"5k input"},
+		},
+		{
+			name:      "only output tokens",
+			stats:     TokenUsage{OutputTokens: 2000},
+			completed: true,
+			wantEmpty: false,
+			wantSubs:  []string{"2k output"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatStatsFooter(tt.stats, tt.completed)
+			if tt.wantEmpty {
+				if got != "" {
+					t.Errorf("expected empty footer, got %q", got)
+				}
+				return
+			}
+			for _, sub := range tt.wantSubs {
+				if !strings.Contains(got, sub) {
+					t.Errorf("footer %q missing %q", got, sub)
+				}
+			}
+		})
+	}
+}
+
+func TestInvokeClaude_JSONOutput(t *testing.T) {
+	binDir := t.TempDir()
+	fakeClaude := filepath.Join(binDir, "claude")
+	// Output a valid JSON envelope as --output-format json would.
+	// Use printf '%s' to emit the string without interpreting escape sequences in the value,
+	// keeping \n as JSON-encoded newlines (not literal newlines).
+	script := `#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"result":"stage output\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_json123","num_turns":12,"usage":{"input_tokens":5000,"output_tokens":1000}}'
+`
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	os.Setenv("PATH", binDir+":"+origPath)
+	defer os.Setenv("PATH", origPath)
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "Research",
+		Prompt:     "Do research",
+		MaxTurns:   30,
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 77, Title: "Test JSON"}
+	defer os.RemoveAll(SessionDir(77))
+	defer os.RemoveAll(LogDir(77))
+
+	output, completed, stats, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+	if !strings.Contains(output, "stage output") {
+		t.Errorf("output = %q, expected to contain 'stage output'", output)
+	}
+	if !completed {
+		t.Error("expected completed=true")
+	}
+	if stats.TurnsUsed != 12 {
+		t.Errorf("TurnsUsed = %d, want 12", stats.TurnsUsed)
+	}
+	if stats.MaxTurns != 30 {
+		t.Errorf("MaxTurns = %d, want 30", stats.MaxTurns)
+	}
+	if stats.InputTokens != 5000 {
+		t.Errorf("InputTokens = %d, want 5000", stats.InputTokens)
+	}
+	if stats.OutputTokens != 1000 {
+		t.Errorf("OutputTokens = %d, want 1000", stats.OutputTokens)
+	}
+
+	// Check session file was saved from JSON
+	data, err := os.ReadFile(sessionFile(77, "Research"))
+	if err != nil {
+		t.Fatalf("reading session file: %v", err)
+	}
+	if string(data) != "sess_json123" {
+		t.Errorf("session = %q, want sess_json123", string(data))
+	}
+}
+
 func TestSessionFile(t *testing.T) {
 	path := sessionFile(42, "Research")
 	if !strings.HasSuffix(path, "Research.session") {
@@ -355,15 +493,16 @@ echo "real invoker output"
 		t.Errorf("output = %q", output)
 	}
 	os.RemoveAll(SessionDir(80))
+	os.RemoveAll(LogDir(80))
 }
 
 func TestInvokeClaude_FakeBinary(t *testing.T) {
-	// Create a fake claude binary that echoes its arguments
+	// Create a fake claude binary that outputs a valid JSON envelope
 	binDir := t.TempDir()
 	fakeClaude := filepath.Join(binDir, "claude")
 	script := `#!/bin/sh
 cat >/dev/null
-printf '%s\n' '{"result":"Claude output for test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_test123","num_turns":1,"total_cost_usd":0.001,"is_error":false}'
+printf '%s\n' '{"result":"Claude output for test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_test123","num_turns":3,"total_cost_usd":0.001,"is_error":false}'
 `
 	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
 		t.Fatal(err)
@@ -398,7 +537,7 @@ printf '%s\n' '{"result":"Claude output for test\nFABRIK_STAGE_COMPLETE\n","sess
 		t.Error("expected completed=true")
 	}
 
-	// Check session file was saved
+	// Check session file was saved from JSON
 	sessFile := sessionFile(42, "Research")
 	data, err := os.ReadFile(sessFile)
 	if err != nil {
@@ -409,6 +548,7 @@ printf '%s\n' '{"result":"Claude output for test\nFABRIK_STAGE_COMPLETE\n","sess
 	}
 	// Cleanup
 	os.RemoveAll(SessionDir(42))
+	os.RemoveAll(LogDir(42))
 }
 
 func TestInvokeClaude_WithResume(t *testing.T) {
@@ -444,6 +584,7 @@ echo "NO RESUME"
 	os.MkdirAll(sessDir, 0700)
 	os.WriteFile(sessionFile(99, "Plan"), []byte("sess_existing"), 0600)
 	defer os.RemoveAll(sessDir)
+	defer os.RemoveAll(LogDir(99))
 
 	output, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, true, workDir, "")
 	if err != nil {
@@ -502,6 +643,7 @@ echo "args: $@"
 		t.Error("expected --allowedTools in args")
 	}
 	os.RemoveAll(SessionDir(50))
+	os.RemoveAll(LogDir(50))
 }
 
 func TestInvokeClaude_WithModelOverride(t *testing.T) {
@@ -535,6 +677,7 @@ echo "args: $@"
 		t.Error("expected model override 'opus' in args")
 	}
 	os.RemoveAll(SessionDir(51))
+	os.RemoveAll(LogDir(51))
 }
 
 func TestInvokeClaude_BinaryError(t *testing.T) {
@@ -567,6 +710,7 @@ exit 1
 		t.Errorf("expected partial output, got: %q", output)
 	}
 	os.RemoveAll(SessionDir(60))
+	os.RemoveAll(LogDir(60))
 }
 
 func TestInvokeClaude_WithComments(t *testing.T) {
@@ -601,6 +745,7 @@ cat | grep -o "New Comments" && echo "HAS_COMMENTS" || echo "NO_COMMENTS"
 		t.Errorf("expected comments in prompt, output: %q", output)
 	}
 	os.RemoveAll(SessionDir(70))
+	os.RemoveAll(LogDir(70))
 }
 
 func TestBuildCommentReviewPrompt_Issue(t *testing.T) {

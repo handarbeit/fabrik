@@ -55,6 +55,11 @@ type itemNode struct {
 				Login string `json:"login"`
 			} `json:"nodes"`
 		} `json:"assignees"`
+		LinkedPRs *struct {
+			Nodes []struct {
+				UpdatedAt string `json:"updatedAt"`
+			} `json:"nodes"`
+		} `json:"closedByPullRequestsReferences"`
 	} `json:"content"`
 }
 
@@ -103,6 +108,11 @@ query($owner: String!, $repo: String!, $projectNum: Int!, $cursor: String) {
               assignees(first: 10) {
                 nodes {
                   login
+                }
+              }
+              closedByPullRequestsReferences(first: 5) {
+                nodes {
+                  updatedAt
                 }
               }
             }
@@ -209,6 +219,16 @@ query($owner: String!, $repo: String!, $projectNum: Int!, $cursor: String) {
 
 		if t, err := parseTime(node.Content.UpdatedAt); err == nil {
 			item.UpdatedAt = t
+		}
+		// Use the latest updatedAt across the issue and its linked PRs so that
+		// comments on a linked PR are detected as changes even though the issue
+		// itself doesn't update.
+		if node.Content.LinkedPRs != nil {
+			for _, pr := range node.Content.LinkedPRs.Nodes {
+				if t, err := parseTime(pr.UpdatedAt); err == nil && t.After(item.UpdatedAt) {
+					item.UpdatedAt = t
+				}
+			}
 		}
 
 		if node.FieldValueByName != nil {
