@@ -232,6 +232,136 @@ func TestSessionDir(t *testing.T) {
 	}
 }
 
+func TestLogDir(t *testing.T) {
+	dir := LogDir(42)
+	if !strings.Contains(dir, "issue-42") {
+		t.Errorf("LogDir(42) = %q, expected to contain issue-42", dir)
+	}
+	if !strings.Contains(dir, ".fabrik/logs") {
+		t.Errorf("LogDir(42) = %q, expected to contain .fabrik/logs", dir)
+	}
+}
+
+func TestFormatStatsFooter(t *testing.T) {
+	tests := []struct {
+		name      string
+		stats     ClaudeStats
+		completed bool
+		wantEmpty bool
+		wantSubs  []string
+	}{
+		{
+			name:      "zero stats returns empty",
+			stats:     ClaudeStats{},
+			completed: true,
+			wantEmpty: true,
+		},
+		{
+			name:      "with turns and tokens, completed",
+			stats:     ClaudeStats{TurnsUsed: 15, MaxTurns: 30, InputTokens: 47000, OutputTokens: 8000},
+			completed: true,
+			wantSubs:  []string{"15/30 turns", "47k input", "8k output"},
+		},
+		{
+			name:      "with turns and tokens, incomplete",
+			stats:     ClaudeStats{TurnsUsed: 30, MaxTurns: 30, InputTokens: 47000, OutputTokens: 8000},
+			completed: false,
+			wantSubs:  []string{"30/30 turns", "Stage incomplete."},
+		},
+		{
+			name:      "no max turns",
+			stats:     ClaudeStats{TurnsUsed: 10, InputTokens: 5000, OutputTokens: 1000},
+			completed: true,
+			wantSubs:  []string{"10 turns", "5k input", "1k output"},
+		},
+		{
+			name:      "only input tokens",
+			stats:     ClaudeStats{InputTokens: 5000},
+			completed: true,
+			wantEmpty: false,
+			wantSubs:  []string{"5k input"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatStatsFooter(tt.stats, tt.completed)
+			if tt.wantEmpty {
+				if got != "" {
+					t.Errorf("expected empty footer, got %q", got)
+				}
+				return
+			}
+			for _, sub := range tt.wantSubs {
+				if !strings.Contains(got, sub) {
+					t.Errorf("footer %q missing %q", got, sub)
+				}
+			}
+		})
+	}
+}
+
+func TestInvokeClaude_JSONOutput(t *testing.T) {
+	binDir := t.TempDir()
+	fakeClaude := filepath.Join(binDir, "claude")
+	// Output a valid JSON envelope as --output-format json would.
+	// Use a Python heredoc-style approach to avoid shell escaping issues with
+	// embedded newlines in JSON string values.
+	script := `#!/bin/sh
+cat >/dev/null
+python3 -c "import json,sys; sys.stdout.write(json.dumps({'result':'stage output\nFABRIK_STAGE_COMPLETE\n','session_id':'sess_json123','num_turns':12,'usage':{'input_tokens':5000,'output_tokens':1000}}))"
+`
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	os.Setenv("PATH", binDir+":"+origPath)
+	defer os.Setenv("PATH", origPath)
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "Research",
+		Prompt:     "Do research",
+		MaxTurns:   30,
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 77, Title: "Test JSON"}
+	defer os.RemoveAll(SessionDir(77))
+
+	output, stats, completed, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+	if !strings.Contains(output, "stage output") {
+		t.Errorf("output = %q, expected to contain 'stage output'", output)
+	}
+	if !completed {
+		t.Error("expected completed=true")
+	}
+	if stats.TurnsUsed != 12 {
+		t.Errorf("TurnsUsed = %d, want 12", stats.TurnsUsed)
+	}
+	if stats.MaxTurns != 30 {
+		t.Errorf("MaxTurns = %d, want 30", stats.MaxTurns)
+	}
+	if stats.InputTokens != 5000 {
+		t.Errorf("InputTokens = %d, want 5000", stats.InputTokens)
+	}
+	if stats.OutputTokens != 1000 {
+		t.Errorf("OutputTokens = %d, want 1000", stats.OutputTokens)
+	}
+
+	// Check session file was saved from JSON
+	data, err := os.ReadFile(sessionFile(77, "Research"))
+	if err != nil {
+		t.Fatalf("reading session file: %v", err)
+	}
+	if string(data) != "sess_json123" {
+		t.Errorf("session = %q, want sess_json123", string(data))
+	}
+}
+
 func TestSessionFile(t *testing.T) {
 	path := sessionFile(42, "Research")
 	if !strings.HasSuffix(path, "Research.session") {
