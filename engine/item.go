@@ -228,7 +228,16 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		logf(item.Number, "model", "using model override %q\n", modelOverride)
 	}
 	resume := attempted // resume session if we've processed this before
-	output, completed, err := e.claude.Invoke(ctx, stage, item, nil, resume, workDir, modelOverride)
+	output, stats, completed, err := e.claude.Invoke(ctx, stage, item, nil, resume, workDir, modelOverride)
+	if stats.TurnsUsed > 0 || stats.InputTokens > 0 {
+		if stats.MaxTurns > 0 {
+			logf(item.Number, "stats", "used %d/%d turns, %dk input / %dk output tokens\n",
+				stats.TurnsUsed, stats.MaxTurns, stats.InputTokens/1000, stats.OutputTokens/1000)
+		} else {
+			logf(item.Number, "stats", "used %d turns, %dk input / %dk output tokens\n",
+				stats.TurnsUsed, stats.InputTokens/1000, stats.OutputTokens/1000)
+		}
+	}
 
 	// Restore any stashed changes now that the read-only stage has finished.
 	if stashed {
@@ -253,10 +262,11 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 
 	// Post Claude's output
 	if output != "" {
+		displayOutput := output + formatStatsFooter(stats, completed)
 		if stage.PostToPR {
-			e.postOutputToPR(item, stage.Name, output, branch, commit, timestamp)
+			e.postOutputToPR(item, stage.Name, displayOutput, branch, commit, timestamp)
 		} else {
-			comment := formatOutputComment(stage.Name, output, branch, commit, timestamp)
+			comment := formatOutputComment(stage.Name, displayOutput, branch, commit, timestamp)
 			if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
 				logf(item.Number, "warn", "could not post comment: %v\n", err)
 			}
