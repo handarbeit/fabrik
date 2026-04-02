@@ -162,7 +162,7 @@ func TestCheckCompletion_UnsupportedTypes(t *testing.T) {
 	}
 }
 
-func TestSaveSessionID_WritesSessionID(t *testing.T) {
+func TestSaveSessionIDDirect_Valid(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.session")
 
@@ -183,7 +183,7 @@ func TestSaveSessionID_WritesSessionID(t *testing.T) {
 	}
 }
 
-func TestSaveSessionID_EmptySessionID(t *testing.T) {
+func TestSaveSessionIDDirect_Empty(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.session")
 
@@ -194,7 +194,7 @@ func TestSaveSessionID_EmptySessionID(t *testing.T) {
 	}
 }
 
-func TestParseClaudeJSON_ValidResponse(t *testing.T) {
+func TestParseClaudeJSON_Valid(t *testing.T) {
 	output := []byte(`{"result":"Claude output\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_abc123","num_turns":5,"total_cost_usd":0.012,"is_error":false}`)
 	text, sessionID, turns, cost := parseClaudeJSON(output)
 	if text != "Claude output\nFABRIK_STAGE_COMPLETE\n" {
@@ -211,10 +211,10 @@ func TestParseClaudeJSON_ValidResponse(t *testing.T) {
 	}
 }
 
-func TestParseClaudeJSON_InvalidJSON(t *testing.T) {
-	text, sessionID, turns, cost := parseClaudeJSON([]byte(`not valid json`))
+func TestParseClaudeJSON_Invalid(t *testing.T) {
+	text, sessionID, turns, cost := parseClaudeJSON([]byte("not json"))
 	if text != "" || sessionID != "" || turns != 0 || cost != 0 {
-		t.Errorf("expected all zero values for invalid JSON, got text=%q sessionID=%q turns=%d cost=%v", text, sessionID, turns, cost)
+		t.Error("expected all zero values for invalid JSON")
 	}
 }
 
