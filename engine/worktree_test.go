@@ -58,7 +58,7 @@ func TestEnsureWorktree_CreatesAndReturns(t *testing.T) {
 	repoDir := initBareRepo(t)
 	wm := NewWorktreeManager(repoDir)
 
-	wtDir, err := wm.EnsureWorktree(99, "main")
+	wtDir, err := wm.EnsureWorktree(99, "main", false)
 	if err != nil {
 		t.Fatalf("EnsureWorktree: %v", err)
 	}
@@ -86,12 +86,12 @@ func TestEnsureWorktree_Idempotent(t *testing.T) {
 	repoDir := initBareRepo(t)
 	wm := NewWorktreeManager(repoDir)
 
-	dir1, err := wm.EnsureWorktree(1, "main")
+	dir1, err := wm.EnsureWorktree(1, "main", false)
 	if err != nil {
 		t.Fatalf("first EnsureWorktree: %v", err)
 	}
 
-	dir2, err := wm.EnsureWorktree(1, "main")
+	dir2, err := wm.EnsureWorktree(1, "main", false)
 	if err != nil {
 		t.Fatalf("second EnsureWorktree: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestCleanupWorktree(t *testing.T) {
 	repoDir := initBareRepo(t)
 	wm := NewWorktreeManager(repoDir)
 
-	wtDir, err := wm.EnsureWorktree(5, "main")
+	wtDir, err := wm.EnsureWorktree(5, "main", false)
 	if err != nil {
 		t.Fatalf("EnsureWorktree: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestCleanupWorktree_KeepBranch(t *testing.T) {
 	repoDir := initBareRepo(t)
 	wm := NewWorktreeManager(repoDir)
 
-	_, err := wm.EnsureWorktree(7, "main")
+	_, err := wm.EnsureWorktree(7, "main", false)
 	if err != nil {
 		t.Fatalf("EnsureWorktree: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestEnsureWorktree_StaleDirectoryPreserved(t *testing.T) {
 	os.WriteFile(filepath.Join(wtDir, "dummy"), []byte("stale"), 0644)
 
 	// EnsureWorktree should preserve the stale dir (may contain partial work)
-	resultDir, err := wm.EnsureWorktree(50, "main")
+	resultDir, err := wm.EnsureWorktree(50, "main", false)
 	if err != nil {
 		t.Fatalf("EnsureWorktree with stale dir: %v", err)
 	}
@@ -332,7 +332,7 @@ func TestEnsureWorktree_ExistingBranch(t *testing.T) {
 	}
 
 	// EnsureWorktree should use existing branch
-	wtDir, err := wm.EnsureWorktree(20, "main")
+	wtDir, err := wm.EnsureWorktree(20, "main", false)
 	if err != nil {
 		t.Fatalf("EnsureWorktree: %v", err)
 	}

@@ -138,6 +138,8 @@ func (e *Engine) logf(issueNumber int, tag, format string, args ...any) {
 		}
 		return
 	}
+	// Plain-text mode: clear any transient status line before printing.
+	pollStatusClear()
 	if issueNumber == 0 {
 		fmt.Printf("[%s] %s", tag, msg)
 	} else {
