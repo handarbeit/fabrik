@@ -176,8 +176,10 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	var result string
 	baseName := strings.TrimSuffix(label, "-comment-review")
 
-	text, sessionID, turns, _, inputTokens, outputTokens := parseClaudeJSON(bytes.TrimSpace(rawOutput))
-	if text != "" {
+	ok, text, sessionID, turns, _, inputTokens, outputTokens := parseClaudeJSON(bytes.TrimSpace(rawOutput))
+	if ok {
+		// JSON parsed successfully — use the result field (may be empty for error responses
+		// like max_turns, which have no "result" field; that's correct, not raw JSON).
 		result = text
 		stats.TurnsUsed = turns
 		stats.InputTokens = inputTokens
@@ -388,14 +390,15 @@ func extractSummary(output string) string {
 }
 
 // parseClaudeJSON parses the JSON output from claude --output-format json.
-// Returns the text result, session ID, turn count, cost, input tokens, and output tokens.
+// Returns ok=true if the JSON was successfully parsed (regardless of whether
+// the result field is populated — error responses like max_turns have no result).
 // Returns empty strings/zero values if parsing fails.
-func parseClaudeJSON(output []byte) (text, sessionID string, turns int, cost float64, inputTokens, outputTokens int) {
+func parseClaudeJSON(output []byte) (ok bool, text, sessionID string, turns int, cost float64, inputTokens, outputTokens int) {
 	var resp claudeResponse
 	if err := json.Unmarshal(output, &resp); err != nil {
-		return "", "", 0, 0, 0, 0
+		return false, "", "", 0, 0, 0, 0
 	}
-	return resp.Result, resp.SessionID, resp.NumTurns, resp.CostUSD, resp.Usage.InputTokens, resp.Usage.OutputTokens
+	return true, resp.Result, resp.SessionID, resp.NumTurns, resp.CostUSD, resp.Usage.InputTokens, resp.Usage.OutputTokens
 }
 
 // saveSessionIDDirect saves a known session ID to disk for future resumption.
