@@ -281,6 +281,13 @@ func TestFormatStatsFooter(t *testing.T) {
 			wantEmpty: false,
 			wantSubs:  []string{"5k input"},
 		},
+		{
+			name:      "only output tokens",
+			stats:     ClaudeStats{OutputTokens: 2000},
+			completed: true,
+			wantEmpty: false,
+			wantSubs:  []string{"2k output"},
+		},
 	}
 
 	for _, tt := range tests {
