@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mattn/go-isatty"
@@ -206,7 +207,10 @@ func runTUI(eng *engine.Engine, pollSeconds int) error {
 	// Run the engine in a goroutine; quit the TUI when it returns.
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- eng.Run()
+		err := eng.Run()
+		// Close the events channel so the forwarding goroutine exits.
+		close(events)
+		errCh <- err
 		p.Quit()
 	}()
 
@@ -215,5 +219,14 @@ func runTUI(eng *engine.Engine, pollSeconds int) error {
 		<-errCh
 		return err
 	}
-	return <-errCh
+	// TUI exited (user pressed q or ctrl+c). If the engine is still running
+	// (q doesn't send SIGINT), signal it to stop gracefully.
+	select {
+	case engineErr := <-errCh:
+		return engineErr
+	default:
+		// Engine still running; send SIGTERM so its signal handler fires.
+		_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		return <-errCh
+	}
 }
