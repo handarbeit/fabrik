@@ -162,30 +162,24 @@ func TestCheckCompletion_UnsupportedTypes(t *testing.T) {
 	}
 }
 
-func TestExtractMetadata_ValidJSON(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "test.session")
+func TestParseClaudeJSON_ValidJSON(t *testing.T) {
+	output := []byte(`{"result":"hello world","session_id":"sess_abc123","num_turns":5,"total_cost_usd":0.0042,"usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":10,"cache_read_input_tokens":5}}`)
 
-	output := `Some output text
-{"session_id":"sess_abc123","total_cost_usd":0.0042,"usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":10,"cache_read_input_tokens":5}}
-More output`
-
-	usage := extractMetadata(path, output)
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading session file: %v", err)
+	resp, ok := parseClaudeJSON(output)
+	if !ok {
+		t.Fatal("expected successful parse")
 	}
-	if string(data) != "sess_abc123" {
-		t.Errorf("session ID = %q, want sess_abc123", string(data))
+	if resp.Result != "hello world" {
+		t.Errorf("Result = %q, want %q", resp.Result, "hello world")
 	}
-
-	if info, err := os.Stat(path); err != nil {
-		t.Fatalf("stat session file: %v", err)
-	} else if perm := info.Mode().Perm(); perm != 0600 {
-		t.Errorf("session file mode = %04o, want 0600", perm)
+	if resp.SessionID != "sess_abc123" {
+		t.Errorf("SessionID = %q, want %q", resp.SessionID, "sess_abc123")
+	}
+	if resp.NumTurns != 5 {
+		t.Errorf("NumTurns = %d, want 5", resp.NumTurns)
 	}
 
+	usage := tokenUsageFromResponse(resp)
 	if usage.InputTokens != 100 {
 		t.Errorf("InputTokens = %d, want 100", usage.InputTokens)
 	}
@@ -203,46 +197,43 @@ More output`
 	}
 }
 
-func TestExtractMetadata_NoSessionID(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "test.session")
-
-	usage := extractMetadata(path, "just plain output\nno json here\n")
-
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Error("session file should not exist when no session ID found")
-	}
-	if usage.CostUSD != 0 || usage.InputTokens != 0 {
-		t.Error("expected zero TokenUsage for output with no metadata")
+func TestParseClaudeJSON_InvalidJSON(t *testing.T) {
+	_, ok := parseClaudeJSON([]byte(`not json at all`))
+	if ok {
+		t.Error("expected parse failure for invalid JSON")
 	}
 }
 
-func TestExtractMetadata_InvalidJSON(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "test.session")
-
-	usage := extractMetadata(path, `{not valid json but has session_id}`)
-
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Error("session file should not exist for invalid JSON")
-	}
-	if usage.CostUSD != 0 {
-		t.Error("expected zero CostUSD for invalid JSON")
+func TestParseClaudeJSON_EmptyResult(t *testing.T) {
+	_, ok := parseClaudeJSON([]byte(`{"result":"","session_id":"sess_1"}`))
+	if ok {
+		t.Error("expected parse failure for empty result")
 	}
 }
 
-func TestExtractMetadata_EmptySessionID(t *testing.T) {
+func TestSaveSessionIDDirect(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.session")
 
-	usage := extractMetadata(path, `{"session_id":"","total_cost_usd":0.01,"usage":{"input_tokens":5}}`)
+	saveSessionIDDirect(path, "sess_abc123")
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading session file: %v", err)
+	}
+	if string(data) != "sess_abc123" {
+		t.Errorf("session ID = %q, want sess_abc123", string(data))
+	}
+}
+
+func TestSaveSessionIDDirect_Empty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.session")
+
+	saveSessionIDDirect(path, "")
 
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Error("session file should not exist for empty session_id")
-	}
-	// Token data should still be returned even without session ID
-	if usage.InputTokens != 5 {
-		t.Errorf("InputTokens = %d, want 5", usage.InputTokens)
+		t.Error("session file should not exist for empty session ID")
 	}
 }
 
