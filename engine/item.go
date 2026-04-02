@@ -296,6 +296,13 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	}
 
 	if completed {
+		// Clear retry tracking for this stage — no longer needed after success.
+		func() {
+			e.mu.Lock()
+			defer e.mu.Unlock()
+			delete(e.retryCount, itemKey)
+			delete(e.pausedDueToRetries, itemKey)
+		}()
 		// Post-stage: create draft PR and/or mark ready now that commits exist
 		var prNumber int
 		if stage.CreateDraftPR {
