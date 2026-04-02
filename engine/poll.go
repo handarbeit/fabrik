@@ -203,7 +203,7 @@ func (e *Engine) poll(ctx context.Context) error {
 		case <-ctx.Done():
 			goto doneDispatching
 		}
-		e.inFlight.Store(item.Number, struct{}{})
+		e.inFlight.Store(item.Number, item.IsPR)
 		e.wg.Add(1)
 		dispatched++
 		go func() {
@@ -221,16 +221,20 @@ doneDispatching:
 		// Check whether any workers from a previous poll cycle are still running.
 		// If so, the engine is not truly idle — auto-upgrade must not run because
 		// checkAndUpgrade calls syscall.Exec which would kill in-flight workers.
-		var inFlightNums []int
-		e.inFlight.Range(func(key, _ any) bool {
+		var inFlightLabels []string
+		e.inFlight.Range(func(key, val any) bool {
 			if num, ok := key.(int); ok {
-				inFlightNums = append(inFlightNums, num)
+				if isPR, _ := val.(bool); isPR {
+					inFlightLabels = append(inFlightLabels, fmt.Sprintf("PR#%d", num))
+				} else {
+					inFlightLabels = append(inFlightLabels, fmt.Sprintf("#%d", num))
+				}
 			}
 			return true
 		})
 
-		if len(inFlightNums) > 0 {
-			fmt.Printf("[poll] nothing new to dispatch (workers still in-flight: %v)\n", inFlightNums)
+		if len(inFlightLabels) > 0 {
+			fmt.Printf("[poll] nothing new to dispatch (workers still in-flight: %v)\n", inFlightLabels)
 			e.idleCount = 0
 		} else {
 			fmt.Println("[poll] nothing to do")
