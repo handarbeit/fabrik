@@ -181,8 +181,6 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 			sessPath := sessionFile(issueNumber, baseName)
 			if err := os.WriteFile(sessPath, []byte(envelope.SessionID), 0600); err != nil {
 				logf(issueNumber, "warn", "could not save session id: %v\n", err)
-			} else {
-				_ = os.Chmod(sessPath, 0600)
 			}
 		}
 	} else {

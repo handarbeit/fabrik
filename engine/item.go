@@ -229,7 +229,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	}
 	resume := attempted // resume session if we've processed this before
 	output, stats, completed, err := e.claude.Invoke(ctx, stage, item, nil, resume, workDir, modelOverride)
-	if stats.TurnsUsed > 0 || stats.InputTokens > 0 {
+	if stats.TurnsUsed > 0 || stats.InputTokens > 0 || stats.OutputTokens > 0 {
 		if stats.MaxTurns > 0 {
 			logf(item.Number, "stats", "used %d/%d turns, %dk input / %dk output tokens\n",
 				stats.TurnsUsed, stats.MaxTurns, stats.InputTokens/1000, stats.OutputTokens/1000)
