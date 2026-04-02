@@ -96,8 +96,11 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 }
 
 // SetEvents configures the event channel. Must be called before Run().
+// When set, direct stdout writes (pollStatus/pollStatusClear) are suppressed
+// because the TUI owns the terminal.
 func (e *Engine) SetEvents(ch chan tui.Event) {
 	e.events = ch
+	tuiMode = ch != nil
 	if e.worktrees != nil {
 		e.worktrees.logfFn = e.logf
 	}
