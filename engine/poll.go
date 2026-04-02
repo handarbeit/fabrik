@@ -10,6 +10,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/handarbeit/fabrik/stages"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 const idleUpgradeThreshold = 2
@@ -34,8 +37,10 @@ func (e *Engine) Run() error {
 		close(e.cfg.ReadyCh)
 	}
 
-	fmt.Println("\nFabrik is running. Press Ctrl+C to stop.")
-	fmt.Println()
+	if e.events == nil {
+		fmt.Println("\nFabrik is running. Press Ctrl+C to stop.")
+		fmt.Println()
+	}
 
 	// Handle signals in a dedicated goroutine so cancel() fires immediately
 	// even while poll() is blocking on wg.Wait(). This ensures CommandContext
@@ -63,7 +68,7 @@ func (e *Engine) Run() error {
 
 	// Run immediately on start, then on tick
 	if err := e.poll(ctx); err != nil && ctx.Err() == nil {
-		fmt.Printf("  [warn] poll error: %v\n", err)
+		e.logf(0, "warn", "poll error: %v\n", err)
 	}
 
 	for {
@@ -79,7 +84,7 @@ func (e *Engine) Run() error {
 				return nil
 			}
 			if err := e.poll(ctx); err != nil {
-				fmt.Printf("  [warn] poll error: %v\n", err)
+				e.logf(0, "warn", "poll error: %v\n", err)
 			}
 		}
 	}
@@ -99,7 +104,7 @@ func (e *Engine) cleanupLockedIssues() {
 		return
 	}
 	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
-	fmt.Printf("[shutdown] removing lock labels from %d issue(s)\n", len(issues))
+	e.logf(0, "shutdown", "removing lock labels from %d issue(s)\n", len(issues))
 	for _, num := range issues {
 		if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, num, lockLabel); err != nil {
 			e.logf(num, "warn", "could not remove lock label during shutdown: %v\n", err)
@@ -113,7 +118,8 @@ func (e *Engine) cleanupLockedIssues() {
 }
 
 func (e *Engine) poll(ctx context.Context) error {
-	fmt.Printf("[poll] fetching project board %s/%s#%d\n", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
+	e.emit(tui.PollStartedEvent{Owner: e.cfg.Owner, Repo: e.cfg.Repo, Project: e.cfg.ProjectNum})
+	e.logf(0, "poll", "fetching project board %s/%s#%d\n", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
 
 	board, err := e.client.FetchProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
 	if err != nil {
@@ -125,14 +131,14 @@ func (e *Engine) poll(ctx context.Context) error {
 	if e.statusField == nil && board.ProjectID != "" {
 		sf, err := e.client.FetchStatusField(board.ProjectID)
 		if err != nil {
-			fmt.Printf("  [warn] could not fetch status field: %v\n", err)
+			e.logf(0, "warn", "could not fetch status field: %v\n", err)
 		} else {
 			e.statusField = sf
 		}
 	}
 	e.mu.Unlock()
 
-	fmt.Printf("[poll] found %d items on board\n", len(board.Items))
+	e.logf(0, "poll", "found %d items on board\n", len(board.Items))
 
 	// Report rate limit stats when we have seen at least one response.
 	restStats, graphqlStats := e.client.RateLimitStats()
@@ -172,6 +178,12 @@ func (e *Engine) poll(ctx context.Context) error {
 		case <-ctx.Done():
 			goto doneDispatching
 		}
+		// Capture stage name and start time for job tracking.
+		var stageName string
+		if s := stages.FindStage(e.cfg.Stages, item.Status); s != nil {
+			stageName = s.Name
+		}
+		startTime := time.Now()
 		e.inFlight.Store(item.Number, struct{}{})
 		e.wg.Add(1)
 		dispatched++
@@ -179,7 +191,20 @@ func (e *Engine) poll(ctx context.Context) error {
 			defer e.wg.Done()
 			defer func() { <-e.sem }()
 			defer e.inFlight.Delete(item.Number)
-			if err := e.processItem(ctx, board, item); err != nil {
+			e.emit(tui.JobStartedEvent{
+				IssueNumber: item.Number,
+				StageName:   stageName,
+				StartedAt:   startTime,
+			})
+			err := e.processItem(ctx, board, item)
+			e.emit(tui.JobCompletedEvent{
+				IssueNumber: item.Number,
+				StageName:   stageName,
+				Success:     err == nil,
+				Duration:    time.Since(startTime),
+				CompletedAt: time.Now(),
+			})
+			if err != nil {
 				e.logf(item.Number, "error", "%v\n", err)
 			}
 		}()
@@ -194,10 +219,10 @@ doneDispatching:
 		e.inFlight.Range(func(_, _ any) bool { hasInFlight = true; return false })
 
 		if hasInFlight {
-			fmt.Println("[poll] nothing new to dispatch (workers still in-flight)")
+			e.logf(0, "poll", "nothing new to dispatch (workers still in-flight)\n")
 			e.idleCount = 0
 		} else {
-			fmt.Println("[poll] nothing to do")
+			e.logf(0, "poll", "nothing to do\n")
 			if e.cfg.AutoUpgrade {
 				e.idleCount++
 				if e.idleCount >= idleUpgradeThreshold {
@@ -210,6 +235,7 @@ doneDispatching:
 		e.idleCount = 0
 	}
 
+	e.emit(tui.PollCompletedEvent{ItemCount: len(board.Items), Dispatched: dispatched})
 	return nil
 }
 
@@ -219,66 +245,66 @@ func (e *Engine) checkAndUpgrade() {
 	baseBranch := e.worktrees.DefaultBaseBranch()
 	dir := e.worktrees.BaseDir()
 
-	fmt.Printf("[upgrade] checking origin/%s for new commits\n", baseBranch)
+	e.logf(0, "upgrade", "checking origin/%s for new commits\n", baseBranch)
 
 	// Fetch from origin
 	fetchCmd := exec.Command("git", "fetch", "origin", baseBranch)
 	fetchCmd.Dir = dir
 	if out, err := fetchCmd.CombinedOutput(); err != nil {
-		fmt.Printf("[upgrade] git fetch failed: %v\n%s\n", err, out)
+		e.logf(0, "upgrade", "git fetch failed: %v\n%s\n", err, out)
 		return
 	}
 
 	// Compare HEAD to origin/baseBranch
 	localRef, err := gitRevParse(dir, "HEAD")
 	if err != nil {
-		fmt.Printf("[upgrade] could not resolve HEAD: %v\n", err)
+		e.logf(0, "upgrade", "could not resolve HEAD: %v\n", err)
 		return
 	}
 	remoteRef, err := gitRevParse(dir, "origin/"+baseBranch)
 	if err != nil {
-		fmt.Printf("[upgrade] could not resolve origin/%s: %v\n", baseBranch, err)
+		e.logf(0, "upgrade", "could not resolve origin/%s: %v\n", baseBranch, err)
 		return
 	}
 	if localRef == remoteRef {
-		fmt.Printf("[upgrade] already up-to-date\n")
+		e.logf(0, "upgrade", "already up-to-date\n")
 		return
 	}
 
-	fmt.Printf("[upgrade] new commits detected — pulling origin/%s\n", baseBranch)
+	e.logf(0, "upgrade", "new commits detected — pulling origin/%s\n", baseBranch)
 
 	pullCmd := exec.Command("git", "pull", "--ff-only", "origin", baseBranch)
 	pullCmd.Dir = dir
 	if out, err := pullCmd.CombinedOutput(); err != nil {
-		fmt.Printf("[upgrade] git pull --ff-only failed (local changes?): %v\n%s\n", err, out)
+		e.logf(0, "upgrade", "git pull --ff-only failed (local changes?): %v\n%s\n", err, out)
 		return
 	}
 
 	// Determine current executable path
 	exe, err := os.Executable()
 	if err != nil {
-		fmt.Printf("[upgrade] could not determine executable path: %v\n", err)
+		e.logf(0, "upgrade", "could not determine executable path: %v\n", err)
 		return
 	}
 	exe, err = filepath.EvalSymlinks(exe)
 	if err != nil {
-		fmt.Printf("[upgrade] could not resolve symlinks for executable: %v\n", err)
+		e.logf(0, "upgrade", "could not resolve symlinks for executable: %v\n", err)
 		return
 	}
 
-	fmt.Printf("[upgrade] rebuilding binary: %s\n", exe)
+	e.logf(0, "upgrade", "rebuilding binary: %s\n", exe)
 
 	buildCmd := exec.Command("go", "build", "-o", exe, ".")
 	buildCmd.Dir = dir
 	if out, err := buildCmd.CombinedOutput(); err != nil {
-		fmt.Printf("[upgrade] build failed: %v\n%s\n", err, out)
+		e.logf(0, "upgrade", "build failed: %v\n%s\n", err, out)
 		return
 	}
 
-	fmt.Printf("[upgrade] re-executing new binary\n")
+	e.logf(0, "upgrade", "re-executing new binary\n")
 
 	if err := syscall.Exec(exe, os.Args, os.Environ()); err != nil {
-		fmt.Printf("[upgrade] exec failed: %v\n", err)
+		e.logf(0, "upgrade", "exec failed: %v\n", err)
 	}
 }
 
