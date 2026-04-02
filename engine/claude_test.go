@@ -192,8 +192,8 @@ func TestParseClaudeJSON_ValidJSON(t *testing.T) {
 	if usage.CacheReadTokens != 5 {
 		t.Errorf("CacheReadTokens = %d, want 5", usage.CacheReadTokens)
 	}
-	if usage.CostUSD != 0.0042 {
-		t.Errorf("CostUSD = %f, want 0.0042", usage.CostUSD)
+	if diff := usage.CostUSD - 0.0042; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("CostUSD = %f, want ~0.0042", usage.CostUSD)
 	}
 }
 
@@ -378,7 +378,7 @@ echo "NO RESUME"
 	os.WriteFile(sessionFile(99, "Plan"), []byte("sess_existing"), 0600)
 	defer os.RemoveAll(sessDir)
 
-	output, _, _, err := InvokeClaude(context.Background(), stage, issue, nil,true, workDir, "")
+	output, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, true, workDir, "")
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
