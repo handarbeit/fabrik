@@ -49,7 +49,7 @@ func (e *Engine) Run() error {
 	go func() {
 		select {
 		case sig := <-sigCh:
-			fmt.Printf("\nReceived %v — shutting down gracefully (Ctrl-C again to force-quit)...\n", sig)
+			fmt.Fprintf(os.Stderr, "\nReceived %v — shutting down gracefully (Ctrl-C again to force-quit)...\n", sig)
 			cancel()
 		case <-ctx.Done():
 			return
@@ -57,7 +57,7 @@ func (e *Engine) Run() error {
 		// Listen for a second signal during drain and force-exit.
 		select {
 		case <-sigCh:
-			fmt.Println("\nForce-quitting...")
+			fmt.Fprintln(os.Stderr, "\nForce-quitting...")
 			os.Exit(1)
 		case <-ctx.Done():
 		}
