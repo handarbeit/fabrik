@@ -104,7 +104,11 @@ func (wm *WorktreeManager) PushBranch(issueNumber int) error {
 }
 
 // CleanupWorktree removes the worktree and optionally the branch for an issue.
+// Serialized with mu because git worktree remove writes to .git/worktrees/ metadata
+// and .git/config, which are not safe to update concurrently with EnsureWorktree or PushBranch.
 func (wm *WorktreeManager) CleanupWorktree(issueNumber int, deleteBranch bool) error {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
 	wtDir := wm.worktreeDir(issueNumber)
 
 	// Remove the worktree
