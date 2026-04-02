@@ -7,9 +7,12 @@ import (
 	"strconv"
 	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mattn/go-isatty"
 	"github.com/verveguy/fabrik/config"
 	"github.com/verveguy/fabrik/engine"
 	"github.com/verveguy/fabrik/stages"
+	"github.com/verveguy/fabrik/tui"
 )
 
 // testReadyCh is set by tests to receive a signal once engine.Run has
@@ -175,5 +178,42 @@ func Execute() error {
 		return err
 	}
 
+	// When stdout is a TTY, run the bubbletea TUI. Otherwise fall through to
+	// plain-text mode where the engine prints directly to stdout.
+	if isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd()) {
+		return runTUI(eng, cfg.PollSeconds)
+	}
 	return eng.Run()
+}
+
+// runTUI wires the event channel, starts the bubbletea program, and runs the
+// engine. The engine handles SIGINT itself; bubbletea uses WithoutSignalHandler
+// so it doesn't interfere. When the engine exits, the TUI is quit.
+func runTUI(eng *engine.Engine, pollSeconds int) error {
+	events := make(chan tui.Event, 256)
+	eng.SetEvents(events)
+
+	tuiModel := tui.New(pollSeconds)
+	p := tea.NewProgram(tuiModel, tea.WithAltScreen(), tea.WithoutSignalHandler())
+
+	// Forward events from the engine's channel into bubbletea.
+	go func() {
+		for ev := range events {
+			p.Send(ev)
+		}
+	}()
+
+	// Run the engine in a goroutine; quit the TUI when it returns.
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- eng.Run()
+		p.Quit()
+	}()
+
+	if _, err := p.Run(); err != nil {
+		// Drain engine error if TUI exited first.
+		<-errCh
+		return err
+	}
+	return <-errCh
 }
