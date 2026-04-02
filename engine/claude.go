@@ -133,12 +133,15 @@ type claudeResponse struct {
 	NumTurns  int     `json:"num_turns"`
 	CostUSD   float64 `json:"total_cost_usd"`
 	IsError   bool    `json:"is_error"`
-	Usage     struct {
-		InputTokens         int `json:"input_tokens"`
-		OutputTokens        int `json:"output_tokens"`
-		CacheCreationTokens int `json:"cache_creation_input_tokens"`
-		CacheReadTokens     int `json:"cache_read_input_tokens"`
-	} `json:"usage"`
+	// ModelUsage contains per-model accumulated token counts for the full session.
+	// These are more accurate than the top-level "usage" field, which reflects only
+	// the last API call rather than the entire multi-turn session.
+	ModelUsage map[string]struct {
+		InputTokens         int `json:"inputTokens"`
+		OutputTokens        int `json:"outputTokens"`
+		CacheCreationTokens int `json:"cacheCreationInputTokens"`
+		CacheReadTokens     int `json:"cacheReadInputTokens"`
+	} `json:"modelUsage"`
 }
 
 func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string) (string, bool, TokenUsage, error) {
@@ -363,14 +366,17 @@ func parseClaudeJSON(output []byte) (claudeResponse, bool) {
 }
 
 // tokenUsageFromResponse converts a claudeResponse to TokenUsage.
+// Token counts are summed across all models in ModelUsage for accuracy;
+// CostUSD comes from the top-level total_cost_usd field.
 func tokenUsageFromResponse(resp claudeResponse) TokenUsage {
-	return TokenUsage{
-		InputTokens:         resp.Usage.InputTokens,
-		OutputTokens:        resp.Usage.OutputTokens,
-		CacheCreationTokens: resp.Usage.CacheCreationTokens,
-		CacheReadTokens:     resp.Usage.CacheReadTokens,
-		CostUSD:             resp.CostUSD,
+	usage := TokenUsage{CostUSD: resp.CostUSD}
+	for _, m := range resp.ModelUsage {
+		usage.InputTokens += m.InputTokens
+		usage.OutputTokens += m.OutputTokens
+		usage.CacheCreationTokens += m.CacheCreationTokens
+		usage.CacheReadTokens += m.CacheReadTokens
 	}
+	return usage
 }
 
 // saveSessionIDDirect saves a known session ID to disk for future resumption.
