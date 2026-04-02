@@ -23,6 +23,27 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		return false
 	}
 
+	// Skip items that haven't changed since last poll — unless in cooldown retry.
+	if !item.UpdatedAt.IsZero() {
+		e.mu.Lock()
+		lastSeen, seen := e.lastUpdatedAt[item.Number]
+		e.mu.Unlock()
+		if seen && !item.UpdatedAt.After(lastSeen) {
+			// Item unchanged — but still allow cooldown retries
+			itemKey := fmt.Sprintf("%d-%s", item.Number, stage.Name)
+			e.mu.Lock()
+			lastAttempt, attempted := e.processedSet[itemKey]
+			e.mu.Unlock()
+			if attempted {
+				cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
+				if time.Since(lastAttempt) >= cooldown {
+					return true // cooldown expired, retry
+				}
+			}
+			return false
+		}
+	}
+
 	// Cleanup stages bypass comment processing and cooldown checks.
 	if stage.CleanupWorktree {
 		// Respect the paused label — user may be preserving the worktree intentionally.
