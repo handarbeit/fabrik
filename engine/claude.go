@@ -98,7 +98,7 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOverride string) []string {
 	args := []string{
 		"--print",
-		"--verbose",
+		"--output-format", "json",
 	}
 
 	sessFile := sessionFile(issueNumber, stage.Name)
@@ -126,6 +126,21 @@ func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOve
 	return args
 }
 
+// claudeResponse represents the JSON output from claude --output-format json.
+type claudeResponse struct {
+	Result    string  `json:"result"`
+	SessionID string  `json:"session_id"`
+	NumTurns  int     `json:"num_turns"`
+	CostUSD   float64 `json:"total_cost_usd"`
+	IsError   bool    `json:"is_error"`
+	Usage     struct {
+		InputTokens         int `json:"input_tokens"`
+		OutputTokens        int `json:"output_tokens"`
+		CacheCreationTokens int `json:"cache_creation_input_tokens"`
+		CacheReadTokens     int `json:"cache_read_input_tokens"`
+	} `json:"usage"`
+}
+
 func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string) (string, bool, TokenUsage, error) {
 	logf(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
 
@@ -136,20 +151,34 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 
 	output, err := cmd.Output()
 	if err != nil {
+		// Try to parse JSON even on error (max_turns produces exit code 1 but valid JSON)
+		if resp, ok := parseClaudeJSON(output); ok {
+			usage := tokenUsageFromResponse(resp)
+			logf(issueNumber, "claude", "used %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
+			baseName := strings.TrimSuffix(label, "-comment-review")
+			saveSessionIDDirect(sessionFile(issueNumber, baseName), resp.SessionID)
+			return resp.Result, false, usage, fmt.Errorf("claude exited with error: %w", err)
+		}
 		return string(output), false, TokenUsage{}, fmt.Errorf("claude exited with error: %w", err)
 	}
 
-	result := string(output)
+	resp, ok := parseClaudeJSON(output)
+	text := resp.Result
+	if !ok {
+		text = string(output)
+	}
 
-	// Try to save session ID and extract token usage from metadata line
-	// Use the base stage name (strip "-comment-review" suffix) for session continuity
+	usage := tokenUsageFromResponse(resp)
+	logf(issueNumber, "claude", "completed in %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
+
+	// Save session ID for future resumption
 	baseName := strings.TrimSuffix(label, "-comment-review")
-	usage := extractMetadata(sessionFile(issueNumber, baseName), result)
+	saveSessionIDDirect(sessionFile(issueNumber, baseName), resp.SessionID)
 
 	// Simple marker check — callers with the stage use checkCompletion for robustness.
-	completed := stageCompleteRE.MatchString(result)
+	completed := stageCompleteRE.MatchString(text)
 
-	return result, completed, usage, nil
+	return text, completed, usage, nil
 }
 
 // checkCompletion returns true if Claude's output indicates the stage is complete.
@@ -324,42 +353,32 @@ func extractSummary(output string) string {
 	return extractBetweenMarkers(output, "FABRIK_SUMMARY_BEGIN", "FABRIK_SUMMARY_END")
 }
 
-// extractMetadata extracts the session ID and token usage from Claude's output.
-// It saves the session ID to path for future resumption, and returns token usage.
-// Missing fields produce zero values (graceful degradation if output format changes).
-func extractMetadata(path string, output string) TokenUsage {
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "{") || !strings.Contains(line, "session_id") {
-			continue
-		}
-		var meta struct {
-			SessionID string `json:"session_id"`
-			CostUSD   float64 `json:"total_cost_usd"`
-			Usage     struct {
-				InputTokens         int `json:"input_tokens"`
-				OutputTokens        int `json:"output_tokens"`
-				CacheCreationTokens int `json:"cache_creation_input_tokens"`
-				CacheReadTokens     int `json:"cache_read_input_tokens"`
-			} `json:"usage"`
-		}
-		if err := json.Unmarshal([]byte(line), &meta); err != nil {
-			continue
-		}
-		if meta.SessionID != "" {
-			if err := os.WriteFile(path, []byte(meta.SessionID), 0600); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: failed to save session id to %s: %v\n", path, err)
-			} else if err := os.Chmod(path, 0600); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: failed to set permissions on session file %s: %v\n", path, err)
-			}
-		}
-		return TokenUsage{
-			InputTokens:         meta.Usage.InputTokens,
-			OutputTokens:        meta.Usage.OutputTokens,
-			CacheCreationTokens: meta.Usage.CacheCreationTokens,
-			CacheReadTokens:     meta.Usage.CacheReadTokens,
-			CostUSD:             meta.CostUSD,
-		}
+// parseClaudeJSON parses the JSON output from claude --output-format json.
+func parseClaudeJSON(output []byte) (claudeResponse, bool) {
+	var resp claudeResponse
+	if err := json.Unmarshal(output, &resp); err != nil {
+		return claudeResponse{}, false
 	}
-	return TokenUsage{}
+	return resp, resp.Result != ""
+}
+
+// tokenUsageFromResponse converts a claudeResponse to TokenUsage.
+func tokenUsageFromResponse(resp claudeResponse) TokenUsage {
+	return TokenUsage{
+		InputTokens:         resp.Usage.InputTokens,
+		OutputTokens:        resp.Usage.OutputTokens,
+		CacheCreationTokens: resp.Usage.CacheCreationTokens,
+		CacheReadTokens:     resp.Usage.CacheReadTokens,
+		CostUSD:             resp.CostUSD,
+	}
+}
+
+// saveSessionIDDirect saves a known session ID to disk for future resumption.
+func saveSessionIDDirect(path, sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	if err := os.WriteFile(path, []byte(sessionID), 0600); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to save session id to %s: %v\n", path, err)
+	}
 }
