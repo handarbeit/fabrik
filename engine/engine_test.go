@@ -508,7 +508,7 @@ func TestProcessItem_FullHappyPath(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
 		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
-			return "Claude output here", false, nil
+			return "Claude output here\nFABRIK_STAGE_COMPLETE", true, nil
 		},
 	}
 
@@ -951,6 +951,44 @@ func TestPoll_EmptyProjectID(t *testing.T) {
 	eng := testEngine(client, &mockClaudeInvoker{})
 
 	eng.poll(context.Background())
+}
+
+func TestPoll_RateLimitLogging(t *testing.T) {
+	resetTime := time.Now().Add(time.Hour)
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{ProjectID: "PVT_1"}, nil
+		},
+		rateLimitStatsFn: func() (gh.RateLimitStats, gh.RateLimitStats) {
+			rest := gh.RateLimitStats{Limit: 5000, Remaining: 4800, Used: 200, Reset: resetTime}
+			gql := gh.RateLimitStats{Limit: 5000, Remaining: 4950, Used: 50, Reset: resetTime}
+			return rest, gql
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+
+	// poll() must succeed and not panic when rate limit stats are non-zero.
+	if err := eng.poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+}
+
+func TestPoll_RateLimitLogging_ZeroReset(t *testing.T) {
+	// Verify poll() handles a zero Reset (header absent) gracefully — no panic, no "00:00 UTC".
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{ProjectID: "PVT_1"}, nil
+		},
+		rateLimitStatsFn: func() (gh.RateLimitStats, gh.RateLimitStats) {
+			rest := gh.RateLimitStats{Limit: 60, Remaining: 0} // Reset is zero
+			return rest, gh.RateLimitStats{}
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+
+	if err := eng.poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
 }
 
 func TestNew(t *testing.T) {

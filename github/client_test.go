@@ -155,3 +155,124 @@ func TestGraphqlRequest_InvalidURL(t *testing.T) {
 		t.Fatal("expected error for invalid base URL")
 	}
 }
+
+func TestParseRateLimitHeaders_AllPresent(t *testing.T) {
+	h := http.Header{}
+	h.Set("X-RateLimit-Limit", "5000")
+	h.Set("X-RateLimit-Remaining", "4998")
+	h.Set("X-RateLimit-Used", "2")
+	h.Set("X-RateLimit-Reset", "1700000000")
+
+	stats := parseRateLimitHeaders(h)
+
+	if stats.Limit != 5000 {
+		t.Errorf("Limit = %d, want 5000", stats.Limit)
+	}
+	if stats.Remaining != 4998 {
+		t.Errorf("Remaining = %d, want 4998", stats.Remaining)
+	}
+	if stats.Used != 2 {
+		t.Errorf("Used = %d, want 2", stats.Used)
+	}
+	if stats.Reset.IsZero() {
+		t.Error("Reset should be set")
+	}
+	if stats.Reset.Unix() != 1700000000 {
+		t.Errorf("Reset.Unix() = %d, want 1700000000", stats.Reset.Unix())
+	}
+	if stats.UpdatedAt.IsZero() {
+		t.Error("UpdatedAt should be set")
+	}
+}
+
+func TestParseRateLimitHeaders_ResetAbsent(t *testing.T) {
+	h := http.Header{}
+	h.Set("X-RateLimit-Limit", "60")
+	h.Set("X-RateLimit-Remaining", "0")
+	// X-RateLimit-Reset intentionally omitted
+
+	stats := parseRateLimitHeaders(h)
+
+	if stats.Limit != 60 {
+		t.Errorf("Limit = %d, want 60", stats.Limit)
+	}
+	if !stats.Reset.IsZero() {
+		t.Errorf("Reset should be zero when header is absent, got %v", stats.Reset)
+	}
+}
+
+func TestParseRateLimitHeaders_NoHeaders(t *testing.T) {
+	stats := parseRateLimitHeaders(http.Header{})
+
+	if stats.Limit != 0 {
+		t.Errorf("Limit = %d, want 0 for empty headers", stats.Limit)
+	}
+}
+
+func TestParseRateLimitHeaders_ZeroLimit(t *testing.T) {
+	h := http.Header{}
+	h.Set("X-RateLimit-Limit", "0")
+	h.Set("X-RateLimit-Remaining", "0")
+
+	stats := parseRateLimitHeaders(h)
+
+	if stats.Limit != 0 {
+		t.Errorf("Limit = %d, want 0", stats.Limit)
+	}
+}
+
+func TestRateLimitStats_StoresOnRequest(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Limit", "5000")
+		w.Header().Set("X-RateLimit-Remaining", "4950")
+		w.Header().Set("X-RateLimit-Used", "50")
+		w.Header().Set("X-RateLimit-Reset", "1700000000")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"data":{}}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	var result struct{}
+	if err := c.graphqlRequest("{ test }", nil, &result); err != nil {
+		t.Fatalf("graphqlRequest: %v", err)
+	}
+
+	_, graphql := c.RateLimitStats()
+	if graphql.Limit != 5000 {
+		t.Errorf("graphql.Limit = %d, want 5000", graphql.Limit)
+	}
+	if graphql.Remaining != 4950 {
+		t.Errorf("graphql.Remaining = %d, want 4950", graphql.Remaining)
+	}
+}
+
+func TestRateLimitStats_Concurrent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Limit", "5000")
+		w.Header().Set("X-RateLimit-Remaining", "4999")
+		w.Header().Set("X-RateLimit-Reset", "1700000000")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"data":{}}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+
+	done := make(chan struct{})
+	for i := 0; i < 5; i++ {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			var result struct{}
+			c.graphqlRequest("{ test }", nil, &result) //nolint:errcheck
+		}()
+	}
+	for i := 0; i < 5; i++ {
+		<-done
+	}
+	// Verify stats were written without data races (race detector catches any issues).
+	_, graphql := c.RateLimitStats()
+	if graphql.Limit != 5000 {
+		t.Errorf("graphql.Limit = %d, want 5000", graphql.Limit)
+	}
+}

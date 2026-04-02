@@ -296,9 +296,7 @@ func TestInvokeClaude_FakeBinary(t *testing.T) {
 	fakeClaude := filepath.Join(binDir, "claude")
 	script := `#!/bin/sh
 cat >/dev/null
-echo "Claude output for test"
-echo '{"session_id":"sess_test123"}'
-echo "FABRIK_STAGE_COMPLETE"
+printf '%s\n' '{"result":"Claude output for test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_test123","num_turns":1,"total_cost_usd":0.001,"is_error":false}'
 `
 	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
 		t.Fatal(err)
