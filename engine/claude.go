@@ -322,10 +322,18 @@ func runClaudeInTmux(ctx context.Context, args []string, prompt string, workDir 
 	scriptPath := scriptFile.Name()
 	defer os.Remove(scriptPath)
 
+	// Resolve the claude binary path so the script works even when claude is
+	// not available as a plain name inside the tmux shell (e.g. in PATH-restricted
+	// or function-based environments).
+	claudeBin := "claude"
+	if resolved, err := exec.LookPath("claude"); err == nil {
+		claudeBin = resolved
+	}
+
 	var sb strings.Builder
 	sb.WriteString("#!/bin/sh\n")
 	sb.WriteString("cd " + shellQuote(workDir) + "\n")
-	sb.WriteString("claude")
+	sb.WriteString(shellQuote(claudeBin))
 	for _, arg := range args {
 		sb.WriteString(" " + shellQuote(arg))
 	}
@@ -343,7 +351,8 @@ func runClaudeInTmux(ctx context.Context, args []string, prompt string, workDir 
 	}
 
 	// Kill any pre-existing session with this name (leftover from a previous interrupted run).
-	exec.Command("tmux", "kill-session", "-t", sessionName).Run() //nolint:errcheck
+	// Use "=<name>" for exact-match to avoid accidentally killing a differently-named session.
+	exec.Command("tmux", "kill-session", "-t", "="+sessionName).Run() //nolint:errcheck
 
 	// Start detached tmux session running the script.
 	if err := exec.Command("tmux", "new-session", "-d", "-s", sessionName, scriptPath).Run(); err != nil {
@@ -351,15 +360,19 @@ func runClaudeInTmux(ctx context.Context, args []string, prompt string, workDir 
 	}
 
 	// Poll until the session exits, respecting context cancellation.
+	// Use "=<name>" to force exact-match in tmux has-session (avoids prefix
+	// collisions, e.g. fabrik-7 matching fabrik-74).
+	exactTarget := "=" + sessionName
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			exec.Command("tmux", "kill-session", "-t", sessionName).Run() //nolint:errcheck
+			exec.Command("tmux", "kill-session", "-t", exactTarget).Run() //nolint:errcheck
 			return "", false, TokenUsage{}, ctx.Err()
 		case <-ticker.C:
-			if err := exec.Command("tmux", "has-session", "-t", sessionName).Run(); err != nil {
+			// Use CommandContext so the poll call itself respects cancellation.
+			if err := exec.CommandContext(ctx, "tmux", "has-session", "-t", exactTarget).Run(); err != nil {
 				// Session is gone — Claude finished.
 				goto sessionDone
 			}
@@ -373,13 +386,14 @@ sessionDone:
 		return "", false, TokenUsage{}, fmt.Errorf("reading tmux output: %w", err)
 	}
 
-	// Determine exit code.
+	// Determine exit code. An empty or missing exit file means Claude was killed
+	// before the script could write the exit code — treat that as an error.
 	var runErr error
-	if exitBytes, err := os.ReadFile(exitPath); err == nil {
-		code := strings.TrimSpace(string(exitBytes))
-		if code != "" && code != "0" {
-			runErr = fmt.Errorf("exit status %s", code)
-		}
+	exitBytes, exitReadErr := os.ReadFile(exitPath)
+	if exitReadErr != nil || strings.TrimSpace(string(exitBytes)) == "" {
+		runErr = fmt.Errorf("claude exited abnormally (no exit code written)")
+	} else if code := strings.TrimSpace(string(exitBytes)); code != "0" {
+		runErr = fmt.Errorf("exit status %s", code)
 	}
 
 	baseName := strings.TrimSuffix(label, "-comment-review")
