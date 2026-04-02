@@ -221,6 +221,49 @@ func TestTokenUsageFromResponse_MultiModel(t *testing.T) {
 	}
 }
 
+func TestTokenUsageAdd(t *testing.T) {
+	a := TokenUsage{InputTokens: 10, OutputTokens: 5, CacheCreationTokens: 2, CacheReadTokens: 3, CostUSD: 0.001}
+	b := TokenUsage{InputTokens: 20, OutputTokens: 15, CacheCreationTokens: 8, CacheReadTokens: 7, CostUSD: 0.002}
+	got := a.add(b)
+	if got.InputTokens != 30 {
+		t.Errorf("InputTokens = %d, want 30", got.InputTokens)
+	}
+	if got.OutputTokens != 20 {
+		t.Errorf("OutputTokens = %d, want 20", got.OutputTokens)
+	}
+	if got.CacheCreationTokens != 10 {
+		t.Errorf("CacheCreationTokens = %d, want 10", got.CacheCreationTokens)
+	}
+	if got.CacheReadTokens != 10 {
+		t.Errorf("CacheReadTokens = %d, want 10", got.CacheReadTokens)
+	}
+	if diff := got.CostUSD - 0.003; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("CostUSD = %f, want ~0.003", got.CostUSD)
+	}
+	// Adding zero value leaves original unchanged
+	zero := TokenUsage{}
+	if a.add(zero) != a {
+		t.Error("adding zero TokenUsage should return original")
+	}
+}
+
+func TestTokenUsageFromResponse_NoModelUsage(t *testing.T) {
+	// When modelUsage is absent (older CLI or error response), token counts are zero
+	// but CostUSD is still populated from the top-level field.
+	output := []byte(`{"result":"hello","session_id":"s","total_cost_usd":0.005}`)
+	resp, ok := parseClaudeJSON(output)
+	if !ok {
+		t.Fatal("expected successful parse")
+	}
+	usage := tokenUsageFromResponse(resp)
+	if usage.InputTokens != 0 || usage.OutputTokens != 0 || usage.CacheCreationTokens != 0 || usage.CacheReadTokens != 0 {
+		t.Errorf("expected zero token counts when modelUsage absent, got %+v", usage)
+	}
+	if diff := usage.CostUSD - 0.005; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("CostUSD = %f, want ~0.005", usage.CostUSD)
+	}
+}
+
 func TestParseClaudeJSON_InvalidJSON(t *testing.T) {
 	_, ok := parseClaudeJSON([]byte(`not json at all`))
 	if ok {
