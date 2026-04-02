@@ -137,12 +137,20 @@ func (e *Engine) poll(ctx context.Context) error {
 	// Report rate limit stats when we have seen at least one response.
 	restStats, graphqlStats := e.client.RateLimitStats()
 	if restStats.Limit > 0 {
+		resetStr := "unknown"
+		if !restStats.Reset.IsZero() {
+			resetStr = restStats.Reset.UTC().Format("15:04 UTC")
+		}
 		fmt.Printf("[poll] rate limit REST: %d/%d remaining, resets at %s\n",
-			restStats.Remaining, restStats.Limit, restStats.Reset.UTC().Format("15:04 UTC"))
+			restStats.Remaining, restStats.Limit, resetStr)
 	}
 	if graphqlStats.Limit > 0 {
+		resetStr := "unknown"
+		if !graphqlStats.Reset.IsZero() {
+			resetStr = graphqlStats.Reset.UTC().Format("15:04 UTC")
+		}
 		fmt.Printf("[poll] rate limit GraphQL: %d/%d remaining, resets at %s\n",
-			graphqlStats.Remaining, graphqlStats.Limit, graphqlStats.Reset.UTC().Format("15:04 UTC"))
+			graphqlStats.Remaining, graphqlStats.Limit, resetStr)
 	}
 
 	var dispatched int
