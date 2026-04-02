@@ -1429,7 +1429,7 @@ func TestProcessItem_EscalatesAtMaxRetries(t *testing.T) {
 		if call.labelName == "fabrik:paused" {
 			foundPaused = true
 		}
-		if call.labelName == "stage:research:failed" {
+		if call.labelName == "stage:Research:failed" {
 			foundFailed = true
 		}
 	}
@@ -1437,7 +1437,7 @@ func TestProcessItem_EscalatesAtMaxRetries(t *testing.T) {
 		t.Error("expected fabrik:paused label after max retries")
 	}
 	if !foundFailed {
-		t.Error("expected stage:research:failed label after max retries")
+		t.Error("expected stage:Research:failed label after max retries")
 	}
 
 	// Should have posted an escalation comment
@@ -1507,15 +1507,15 @@ func TestProcessItem_ResetsOnUnpause(t *testing.T) {
 
 	eng.processItem(context.Background(), board, item)
 
-	// stage:research:failed should have been removed by clearFailedStage
+	// stage:Research:failed should have been removed by clearFailedStage
 	foundRemoval := false
 	for _, call := range client.removeLabelCalls {
-		if call.labelName == "stage:research:failed" {
+		if call.labelName == "stage:Research:failed" {
 			foundRemoval = true
 		}
 	}
 	if !foundRemoval {
-		t.Error("expected stage:research:failed label to be removed on unpause")
+		t.Error("expected stage:Research:failed label to be removed on unpause")
 	}
 
 	// pausedDueToRetries should be cleared (cleared by clearFailedStage, not re-set since we don't hit limit yet)
