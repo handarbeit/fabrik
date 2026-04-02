@@ -167,6 +167,15 @@ func (e *Engine) poll(ctx context.Context) error {
 	}
 doneDispatching:
 
+	// Report cumulative token consumption when non-zero.
+	e.mu.Lock()
+	tokens := e.totalTokens
+	e.mu.Unlock()
+	if tokens.CostUSD > 0 {
+		fmt.Printf("[stats] cost: $%.4f | in: %d | out: %d | cache_read: %d | cache_write: %d\n",
+			tokens.CostUSD, tokens.InputTokens, tokens.OutputTokens, tokens.CacheReadTokens, tokens.CacheCreationTokens)
+	}
+
 	if dispatched == 0 {
 		// Check whether any workers from a previous poll cycle are still running.
 		// If so, the engine is not truly idle — auto-upgrade must not run because
