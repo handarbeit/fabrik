@@ -16,9 +16,9 @@ import (
 // It extracts the embedded default stage YAML files into .fabrik/stages/.
 // Existing files are skipped unless --force is passed.
 func runInit(args []string) error {
-	fs_ := flag.NewFlagSet("init", flag.ContinueOnError)
-	force := fs_.Bool("force", false, "Overwrite existing stage files")
-	if err := fs_.Parse(args); err != nil {
+	fset := flag.NewFlagSet("init", flag.ContinueOnError)
+	force := fset.Bool("force", false, "Overwrite existing stage files")
+	if err := fset.Parse(args); err != nil {
 		return err
 	}
 
