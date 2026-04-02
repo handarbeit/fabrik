@@ -83,7 +83,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	otherLockPrefix := "fabrik:locked:"
 	for _, label := range item.Labels {
 		if strings.HasPrefix(label, otherLockPrefix) && label != lockLabel {
-			logf(item.Number, "skip", "locked by another user\n")
+			e.logf(item.Number, "skip", "locked by another user\n")
 			return nil
 		}
 	}
@@ -91,7 +91,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// Skip if currently being edited
 	for _, label := range item.Labels {
 		if label == "fabrik:editing" {
-			logf(item.Number, "skip", "is being edited\n")
+			e.logf(item.Number, "skip", "is being edited\n")
 			return nil
 		}
 	}
@@ -99,7 +99,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// Skip if paused
 	for _, label := range item.Labels {
 		if label == "fabrik:paused" {
-			logf(item.Number, "skip", "is paused\n")
+			e.logf(item.Number, "skip", "is paused\n")
 			return nil
 		}
 	}
@@ -163,21 +163,21 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		if time.Since(lastAttempt) < cooldown {
 			return nil
 		}
-		logf(item.Number, "retry", "cooldown expired for stage %q, retrying\n", stage.Name)
+		e.logf(item.Number, "retry", "cooldown expired for stage %q, retrying\n", stage.Name)
 	}
 
 	// Bail early if context was cancelled before starting new work.
 	select {
 	case <-ctx.Done():
-		logf(item.Number, "skip", "shutdown requested, skipping\n")
+		e.logf(item.Number, "skip", "shutdown requested, skipping\n")
 		return nil
 	default:
 	}
-	logf(item.Number, "process", "%q — stage: %s\n", item.Title, stage.Name)
+	e.logf(item.Number, "process", "%q — stage: %s\n", item.Title, stage.Name)
 
 	// Acquire lock, register in lockedIssues for shutdown cleanup, and ensure it's released on all exit paths.
 	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, lockLabel); err != nil {
-		logf(item.Number, "warn", "could not add lock label: %v\n", err)
+		e.logf(item.Number, "warn", "could not add lock label: %v\n", err)
 	} else {
 		e.mu.Lock()
 		e.lockedIssues[item.Number] = true
@@ -194,7 +194,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// Only defer cleanup when the add succeeded to avoid a spurious warning on removal.
 	inProgressLabel := fmt.Sprintf("stage:%s:in_progress", stage.Name)
 	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, inProgressLabel); err != nil {
-		logf(item.Number, "warn", "could not add in_progress label: %v\n", err)
+		e.logf(item.Number, "warn", "could not add in_progress label: %v\n", err)
 	} else {
 		defer e.removeInProgressLabel(item.Number, stage.Name)
 	}
@@ -214,23 +214,23 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		statusCmd := exec.Command("git", "status", "--porcelain")
 		statusCmd.Dir = workDir
 		if out, err := statusCmd.Output(); err == nil && len(strings.TrimSpace(string(out))) > 0 {
-			logf(item.Number, "warn", "worktree dirty before read-only stage %q — stashing changes\n", stage.Name)
+			e.logf(item.Number, "warn", "worktree dirty before read-only stage %q — stashing changes\n", stage.Name)
 			msg := fmt.Sprintf("fabrik: auto-stash before stage %q for issue #%d", stage.Name, item.Number)
 			stashCmd := exec.Command("git", "stash", "push", "-u", "-m", msg)
 			stashCmd.Dir = workDir
 			if stashOut, stashErr := stashCmd.CombinedOutput(); stashErr != nil {
-				logf(item.Number, "warn", "could not stash: %s\n", strings.TrimSpace(string(stashOut)))
+				e.logf(item.Number, "warn", "could not stash: %s\n", strings.TrimSpace(string(stashOut)))
 			} else {
-				logf(item.Number, "info", "stashed: %s\n", strings.TrimSpace(string(stashOut)))
+				e.logf(item.Number, "info", "stashed: %s\n", strings.TrimSpace(string(stashOut)))
 				stashed = true
 			}
 		}
 	}
 
 	// Invoke Claude Code in the issue's worktree
-	modelOverride := extractModelOverride(item.Number, item.Labels)
+	modelOverride := e.extractModelOverride(item.Number, item.Labels)
 	if modelOverride != "" {
-		logf(item.Number, "model", "using model override %q\n", modelOverride)
+		e.logf(item.Number, "model", "using model override %q\n", modelOverride)
 	}
 	resume := attempted // resume session if we've processed this before
 	output, completed, err := e.claude.Invoke(ctx, stage, item, nil, resume, workDir, modelOverride)
@@ -240,17 +240,17 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		popCmd := exec.Command("git", "stash", "pop")
 		popCmd.Dir = workDir
 		if popOut, popErr := popCmd.CombinedOutput(); popErr != nil {
-			logf(item.Number, "warn", "could not pop stash: %s\n", strings.TrimSpace(string(popOut)))
+			e.logf(item.Number, "warn", "could not pop stash: %s\n", strings.TrimSpace(string(popOut)))
 		} else {
-			logf(item.Number, "info", "stash restored after read-only stage\n")
+			e.logf(item.Number, "info", "stash restored after read-only stage\n")
 		}
 	}
 	if err != nil {
 		if ctx.Err() != nil {
-			logf(item.Number, "skip", "cancelled during claude invocation\n")
+			e.logf(item.Number, "skip", "cancelled during claude invocation\n")
 			return nil
 		}
-		logf(item.Number, "warn", "claude invocation issue: %v\n", err)
+		e.logf(item.Number, "warn", "claude invocation issue: %v\n", err)
 	}
 
 	// Capture git metadata for the comment header
@@ -263,7 +263,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		} else {
 			comment := formatOutputComment(stage.Name, output, branch, commit, timestamp)
 			if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
-				logf(item.Number, "warn", "could not post comment: %v\n", err)
+				e.logf(item.Number, "warn", "could not post comment: %v\n", err)
 			}
 		}
 	}
@@ -299,13 +299,13 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// Skip for read-only stages: those don't produce commits, and any dirty state was
 	// restored by stash pop above — committing it would misattribute the stash contents.
 	if claudeRan && !completed && !stage.ReadOnly {
-		commitWIP(workDir, item.Number, stage.Name)
+		e.commitWIP(workDir, item.Number, stage.Name)
 	}
 
 	// Always push the branch after a stage runs — preserves work even on failure/max_turns
 	if claudeRan {
 		if pushErr := e.worktrees.PushBranch(item.Number); pushErr != nil {
-			logf(item.Number, "warn", "could not push branch: %v\n", pushErr)
+			e.logf(item.Number, "warn", "could not push branch: %v\n", pushErr)
 		}
 	}
 
@@ -328,7 +328,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		e.handleStageComplete(board, item, stage)
 	} else {
 		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
-		logf(item.Number, "wait", "stage %q did not complete — will retry after %v\n", stage.Name, cooldown)
+		e.logf(item.Number, "wait", "stage %q did not complete — will retry after %v\n", stage.Name, cooldown)
 		if claudeRan && e.cfg.MaxRetries > 0 {
 			var count int
 			func() {
@@ -398,7 +398,7 @@ func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 // extractModelOverride scans item labels for the first "model:<name>" label and returns <name>.
 // If multiple model labels exist, it uses the first and logs a warning.
 // Returns "" if no model label is found.
-func extractModelOverride(issueNumber int, labels []string) string {
+func (e *Engine) extractModelOverride(issueNumber int, labels []string) string {
 	const prefix = "model:"
 	var found string
 	for _, label := range labels {
@@ -410,7 +410,7 @@ func extractModelOverride(issueNumber int, labels []string) string {
 			if found == "" {
 				found = name
 			} else {
-				logf(issueNumber, "warn", "multiple model: labels found, using %q (ignoring %q)\n", found, name)
+				e.logf(issueNumber, "warn", "multiple model: labels found, using %q (ignoring %q)\n", found, name)
 			}
 		}
 	}
@@ -419,14 +419,14 @@ func extractModelOverride(issueNumber int, labels []string) string {
 
 func (e *Engine) removeEditingLabel(issueNumber int) {
 	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, issueNumber, "fabrik:editing"); err != nil {
-		logf(issueNumber, "warn", "could not remove editing label: %v\n", err)
+		e.logf(issueNumber, "warn", "could not remove editing label: %v\n", err)
 	}
 }
 
 func (e *Engine) removeLockLabel(issueNumber int, label string) {
 	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, issueNumber, label); err != nil &&
 		!errors.Is(err, gh.ErrNotFound) {
-		logf(issueNumber, "warn", "could not remove lock label: %v\n", err)
+		e.logf(issueNumber, "warn", "could not remove lock label: %v\n", err)
 	}
 }
 
@@ -434,13 +434,13 @@ func (e *Engine) removeInProgressLabel(issueNumber int, stageName string) {
 	label := fmt.Sprintf("stage:%s:in_progress", stageName)
 	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, issueNumber, label); err != nil &&
 		!errors.Is(err, gh.ErrNotFound) {
-		logf(issueNumber, "warn", "could not remove in_progress label: %v\n", err)
+		e.logf(issueNumber, "warn", "could not remove in_progress label: %v\n", err)
 	}
 }
 
 // commitWIP commits any uncommitted changes in the worktree as a WIP commit.
 // This preserves partial work when Claude hits max_turns or errors out.
-func commitWIP(workDir string, issueNumber int, stageName string) {
+func (e *Engine) commitWIP(workDir string, issueNumber int, stageName string) {
 	// Check for uncommitted changes
 	statusCmd := exec.Command("git", "status", "--porcelain")
 	statusCmd.Dir = workDir
@@ -453,7 +453,7 @@ func commitWIP(workDir string, issueNumber int, stageName string) {
 	addCmd := exec.Command("git", "add", "-A")
 	addCmd.Dir = workDir
 	if _, err := addCmd.CombinedOutput(); err != nil {
-		logf(issueNumber, "warn", "could not stage WIP changes: %v\n", err)
+		e.logf(issueNumber, "warn", "could not stage WIP changes: %v\n", err)
 		return
 	}
 
@@ -462,9 +462,9 @@ func commitWIP(workDir string, issueNumber int, stageName string) {
 	commitCmd := exec.Command("git", "commit", "-m", msg)
 	commitCmd.Dir = workDir
 	if _, err := commitCmd.CombinedOutput(); err != nil {
-		logf(issueNumber, "warn", "could not commit WIP: %v\n", err)
+		e.logf(issueNumber, "warn", "could not commit WIP: %v\n", err)
 		return
 	}
 
-	logf(issueNumber, "info", "committed WIP changes for incomplete %s stage\n", stageName)
+	e.logf(issueNumber, "info", "committed WIP changes for incomplete %s stage\n", stageName)
 }

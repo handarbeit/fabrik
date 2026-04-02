@@ -102,9 +102,9 @@ func (e *Engine) cleanupLockedIssues() {
 	fmt.Printf("[shutdown] removing lock labels from %d issue(s)\n", len(issues))
 	for _, num := range issues {
 		if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, num, lockLabel); err != nil {
-			logf(num, "warn", "could not remove lock label during shutdown: %v\n", err)
+			e.logf(num, "warn", "could not remove lock label during shutdown: %v\n", err)
 		} else {
-			logf(num, "shutdown", "removed lock label\n")
+			e.logf(num, "shutdown", "removed lock label\n")
 		}
 		e.mu.Lock()
 		delete(e.lockedIssues, num)
@@ -180,7 +180,7 @@ func (e *Engine) poll(ctx context.Context) error {
 			defer func() { <-e.sem }()
 			defer e.inFlight.Delete(item.Number)
 			if err := e.processItem(ctx, board, item); err != nil {
-				logf(item.Number, "error", "%v\n", err)
+				e.logf(item.Number, "error", "%v\n", err)
 			}
 		}()
 	}

@@ -8,11 +8,11 @@ import (
 )
 
 func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
-	logf(item.Number, "done", "stage %q complete\n", stage.Name)
+	e.logf(item.Number, "done", "stage %q complete\n", stage.Name)
 
 	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
 	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, completeLabel); err != nil {
-		logf(item.Number, "warn", "could not add completion label: %v\n", err)
+		e.logf(item.Number, "warn", "could not add completion label: %v\n", err)
 	}
 
 	shouldAdvance := e.cfg.Yolo
@@ -22,17 +22,17 @@ func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem
 
 	if shouldAdvance {
 		if err := e.advanceToNextStage(board, item, stage); err != nil {
-			logf(item.Number, "warn", "could not advance: %v\n", err)
+			e.logf(item.Number, "warn", "could not advance: %v\n", err)
 		}
 	} else {
-		logf(item.Number, "wait", "waiting for human to advance\n")
+		e.logf(item.Number, "wait", "waiting for human to advance\n")
 	}
 }
 
 func (e *Engine) advanceToNextStage(board *gh.ProjectBoard, item gh.ProjectItem, currentStage *stages.Stage) error {
 	next := stages.NextStage(e.cfg.Stages, currentStage.Name)
 	if next == nil {
-		logf(item.Number, "info", "completed all stages\n")
+		e.logf(item.Number, "info", "completed all stages\n")
 		return nil
 	}
 
@@ -46,6 +46,6 @@ func (e *Engine) advanceToNextStage(board *gh.ProjectBoard, item gh.ProjectItem,
 			next.Name, mapKeys(e.statusField.Options))
 	}
 
-	logf(item.Number, "advance", "moving to stage %q\n", next.Name)
+	e.logf(item.Number, "advance", "moving to stage %q\n", next.Name)
 	return e.client.UpdateProjectItemStatus(board.ProjectID, item.ItemID, e.statusField.FieldID, optionID)
 }
