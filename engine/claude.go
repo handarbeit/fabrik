@@ -118,7 +118,7 @@ func saveDebugLog(issueNumber int, label string, output string) {
 	if safe == "" || safe == "." || safe == string(filepath.Separator) {
 		safe = "stage"
 	}
-	name := fmt.Sprintf("issue-%d_%d_%s.log", issueNumber, time.Now().Unix(), safe)
+	name := fmt.Sprintf("issue-%d_%d_%s.log", issueNumber, time.Now().UnixNano(), safe)
 	path := filepath.Join(debugDir, name)
 	if err := os.WriteFile(path, []byte(output), 0600); err != nil {
 		fmt.Fprintf(os.Stderr, "[warn] saveDebugLog: writing %s: %v\n", path, err)
