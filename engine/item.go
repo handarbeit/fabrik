@@ -205,7 +205,12 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		logf(item.Number, "model", "using model override %q\n", modelOverride)
 	}
 	resume := attempted // resume session if we've processed this before
-	output, completed, err := e.claude.Invoke(ctx, stage, item, nil, resume, workDir, modelOverride)
+	output, completed, usage, err := e.claude.Invoke(ctx, stage, item, nil, resume, workDir, modelOverride)
+	func() {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		e.totalTokens = e.totalTokens.add(usage)
+	}()
 
 	// Restore any stashed changes now that the read-only stage has finished.
 	if stashed {

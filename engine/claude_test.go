@@ -162,15 +162,15 @@ func TestCheckCompletion_UnsupportedTypes(t *testing.T) {
 	}
 }
 
-func TestSaveSessionID_ValidJSON(t *testing.T) {
+func TestExtractMetadata_ValidJSON(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.session")
 
 	output := `Some output text
-{"session_id":"sess_abc123","other":"data"}
+{"session_id":"sess_abc123","total_cost_usd":0.0042,"usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":10,"cache_read_input_tokens":5}}
 More output`
 
-	saveSessionID(path, output)
+	usage := extractMetadata(path, output)
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -185,40 +185,64 @@ More output`
 	} else if perm := info.Mode().Perm(); perm != 0600 {
 		t.Errorf("session file mode = %04o, want 0600", perm)
 	}
+
+	if usage.InputTokens != 100 {
+		t.Errorf("InputTokens = %d, want 100", usage.InputTokens)
+	}
+	if usage.OutputTokens != 50 {
+		t.Errorf("OutputTokens = %d, want 50", usage.OutputTokens)
+	}
+	if usage.CacheCreationTokens != 10 {
+		t.Errorf("CacheCreationTokens = %d, want 10", usage.CacheCreationTokens)
+	}
+	if usage.CacheReadTokens != 5 {
+		t.Errorf("CacheReadTokens = %d, want 5", usage.CacheReadTokens)
+	}
+	if usage.CostUSD != 0.0042 {
+		t.Errorf("CostUSD = %f, want 0.0042", usage.CostUSD)
+	}
 }
 
-func TestSaveSessionID_NoSessionID(t *testing.T) {
+func TestExtractMetadata_NoSessionID(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.session")
 
-	saveSessionID(path, "just plain output\nno json here\n")
+	usage := extractMetadata(path, "just plain output\nno json here\n")
 
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Error("session file should not exist when no session ID found")
 	}
+	if usage.CostUSD != 0 || usage.InputTokens != 0 {
+		t.Error("expected zero TokenUsage for output with no metadata")
+	}
 }
 
-func TestSaveSessionID_InvalidJSON(t *testing.T) {
+func TestExtractMetadata_InvalidJSON(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.session")
 
-	output := `{not valid json but has session_id}`
-	saveSessionID(path, output)
+	usage := extractMetadata(path, `{not valid json but has session_id}`)
 
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Error("session file should not exist for invalid JSON")
 	}
+	if usage.CostUSD != 0 {
+		t.Error("expected zero CostUSD for invalid JSON")
+	}
 }
 
-func TestSaveSessionID_EmptySessionID(t *testing.T) {
+func TestExtractMetadata_EmptySessionID(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.session")
 
-	output := `{"session_id":""}`
-	saveSessionID(path, output)
+	usage := extractMetadata(path, `{"session_id":"","total_cost_usd":0.01,"usage":{"input_tokens":5}}`)
 
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Error("session file should not exist for empty session_id")
+	}
+	// Token data should still be returned even without session ID
+	if usage.InputTokens != 5 {
+		t.Errorf("InputTokens = %d, want 5", usage.InputTokens)
 	}
 }
 
@@ -265,7 +289,7 @@ echo "real invoker output"
 	}
 	issue := gh.ProjectItem{Number: 80, Title: "T"}
 
-	output, _, err := invoker.Invoke(context.Background(), stage, issue, nil, false, t.TempDir(), "")
+	output, _, _, err := invoker.Invoke(context.Background(), stage, issue, nil, false, t.TempDir(), "")
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
@@ -307,7 +331,7 @@ echo "FABRIK_STAGE_COMPLETE"
 		URL:    "https://example.com",
 	}
 
-	output, completed, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	output, completed, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -365,7 +389,7 @@ echo "NO RESUME"
 	os.WriteFile(sessionFile(99, "Plan"), []byte("sess_existing"), 0600)
 	defer os.RemoveAll(sessDir)
 
-	output, _, err := InvokeClaude(context.Background(), stage, issue, nil, true, workDir, "")
+	output, _, _, err := InvokeClaude(context.Background(), stage, issue, nil,true, workDir, "")
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -404,7 +428,7 @@ echo "args: $@"
 	}
 	issue := gh.ProjectItem{Number: 50, Title: "T"}
 
-	output, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	output, _, _, err := InvokeClaude(context.Background(), stage, issue, nil,false, workDir, "")
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -446,7 +470,7 @@ echo "args: $@"
 	}
 	issue := gh.ProjectItem{Number: 51, Title: "T"}
 
-	output, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "opus")
+	output, _, _, err := InvokeClaude(context.Background(), stage, issue, nil,false, workDir, "opus")
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -479,7 +503,7 @@ exit 1
 	}
 	issue := gh.ProjectItem{Number: 60, Title: "T"}
 
-	output, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	output, _, _, err := InvokeClaude(context.Background(), stage, issue, nil,false, workDir, "")
 	if err == nil {
 		t.Fatal("expected error for failing binary")
 	}
@@ -513,7 +537,7 @@ cat | grep -o "New Comments" && echo "HAS_COMMENTS" || echo "NO_COMMENTS"
 		{Author: "user", Body: "Fix this", CreatedAt: time.Now()},
 	}
 
-	output, _, err := InvokeClaude(context.Background(), stage, issue, comments, false, workDir, "")
+	output, _, _, err := InvokeClaude(context.Background(), stage, issue, comments, false, workDir, "")
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}

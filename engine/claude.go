@@ -16,6 +16,26 @@ import (
 
 var stageCompleteRE = regexp.MustCompile(`(?m)^FABRIK_STAGE_COMPLETE\r?$`)
 
+// TokenUsage holds token consumption data from a single Claude invocation.
+type TokenUsage struct {
+	InputTokens          int
+	OutputTokens         int
+	CacheCreationTokens  int
+	CacheReadTokens      int
+	CostUSD              float64
+}
+
+// add returns a new TokenUsage that is the sum of t and other.
+func (t TokenUsage) add(other TokenUsage) TokenUsage {
+	return TokenUsage{
+		InputTokens:         t.InputTokens + other.InputTokens,
+		OutputTokens:        t.OutputTokens + other.OutputTokens,
+		CacheCreationTokens: t.CacheCreationTokens + other.CacheCreationTokens,
+		CacheReadTokens:     t.CacheReadTokens + other.CacheReadTokens,
+		CostUSD:             t.CostUSD + other.CostUSD,
+	}
+}
+
 // SessionDir returns the directory where Claude sessions are cached for an issue.
 func SessionDir(issueNumber int) string {
 	home, _ := os.UserHomeDir()
@@ -37,36 +57,36 @@ func sessionFile(issueNumber int, stageName string) string {
 // InvokeClaude runs Claude Code with the given stage configuration and issue context.
 // workDir is the directory Claude should run in (typically a git worktree).
 // modelOverride, if non-empty, replaces the stage's configured model.
-// It returns Claude's output and whether Claude indicated completion.
-func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
+// It returns Claude's output, whether Claude indicated completion, and token usage.
+func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
 	sessDir := SessionDir(issue.Number)
 	if err := os.MkdirAll(sessDir, 0700); err != nil {
-		return "", false, fmt.Errorf("creating session dir: %w", err)
+		return "", false, TokenUsage{}, fmt.Errorf("creating session dir: %w", err)
 	}
 	if err := os.Chmod(sessDir, 0700); err != nil {
-		return "", false, fmt.Errorf("setting session dir permissions: %w", err)
+		return "", false, TokenUsage{}, fmt.Errorf("setting session dir permissions: %w", err)
 	}
 
 	prompt := buildPrompt(stage, issue, newComments)
 	args := buildClaudeArgs(stage, issue.Number, resume, modelOverride)
 
-	output, _, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name)
+	output, _, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name)
 	if err != nil {
-		return output, false, err
+		return output, false, usage, err
 	}
-	return output, checkCompletion(stage, output), nil
+	return output, checkCompletion(stage, output), usage, nil
 }
 
 // InvokeClaudeForComments runs Claude Code with a comment-review prompt.
 // It uses the stage's CommentPrompt if defined, otherwise a default.
 // modelOverride, if non-empty, replaces the stage's configured model.
-func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, modelOverride string) (string, bool, error) {
+func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
 	sessDir := SessionDir(issue.Number)
 	if err := os.MkdirAll(sessDir, 0700); err != nil {
-		return "", false, fmt.Errorf("creating session dir: %w", err)
+		return "", false, TokenUsage{}, fmt.Errorf("creating session dir: %w", err)
 	}
 	if err := os.Chmod(sessDir, 0700); err != nil {
-		return "", false, fmt.Errorf("setting session dir permissions: %w", err)
+		return "", false, TokenUsage{}, fmt.Errorf("setting session dir permissions: %w", err)
 	}
 
 	prompt := buildCommentReviewPrompt(stage, issue, comments)
@@ -106,7 +126,7 @@ func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOve
 	return args
 }
 
-func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string) (string, bool, error) {
+func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string) (string, bool, TokenUsage, error) {
 	logf(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
 
 	cmd := exec.CommandContext(ctx, "claude", args...)
@@ -116,20 +136,20 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 
 	output, err := cmd.Output()
 	if err != nil {
-		return string(output), false, fmt.Errorf("claude exited with error: %w", err)
+		return string(output), false, TokenUsage{}, fmt.Errorf("claude exited with error: %w", err)
 	}
 
 	result := string(output)
 
-	// Try to save session ID for future resumption
+	// Try to save session ID and extract token usage from metadata line
 	// Use the base stage name (strip "-comment-review" suffix) for session continuity
 	baseName := strings.TrimSuffix(label, "-comment-review")
-	saveSessionID(sessionFile(issueNumber, baseName), result)
+	usage := extractMetadata(sessionFile(issueNumber, baseName), result)
 
 	// Simple marker check — callers with the stage use checkCompletion for robustness.
 	completed := stageCompleteRE.MatchString(result)
 
-	return result, completed, nil
+	return result, completed, usage, nil
 }
 
 // checkCompletion returns true if Claude's output indicates the stage is complete.
@@ -304,24 +324,42 @@ func extractSummary(output string) string {
 	return extractBetweenMarkers(output, "FABRIK_SUMMARY_BEGIN", "FABRIK_SUMMARY_END")
 }
 
-// saveSessionID attempts to extract a session ID from Claude's output.
-func saveSessionID(path string, output string) {
+// extractMetadata extracts the session ID and token usage from Claude's output.
+// It saves the session ID to path for future resumption, and returns token usage.
+// Missing fields produce zero values (graceful degradation if output format changes).
+func extractMetadata(path string, output string) TokenUsage {
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "{") && strings.Contains(line, "session_id") {
-			var meta struct {
-				SessionID string `json:"session_id"`
-			}
-			if err := json.Unmarshal([]byte(line), &meta); err == nil && meta.SessionID != "" {
-				if err := os.WriteFile(path, []byte(meta.SessionID), 0600); err != nil {
-					fmt.Fprintf(os.Stderr, "warning: failed to save session id to %s: %v\n", path, err)
-					return
-				}
-				if err := os.Chmod(path, 0600); err != nil {
-					fmt.Fprintf(os.Stderr, "warning: failed to set permissions on session file %s: %v\n", path, err)
-				}
-				return
+		if !strings.HasPrefix(line, "{") || !strings.Contains(line, "session_id") {
+			continue
+		}
+		var meta struct {
+			SessionID string `json:"session_id"`
+			CostUSD   float64 `json:"total_cost_usd"`
+			Usage     struct {
+				InputTokens         int `json:"input_tokens"`
+				OutputTokens        int `json:"output_tokens"`
+				CacheCreationTokens int `json:"cache_creation_input_tokens"`
+				CacheReadTokens     int `json:"cache_read_input_tokens"`
+			} `json:"usage"`
+		}
+		if err := json.Unmarshal([]byte(line), &meta); err != nil {
+			continue
+		}
+		if meta.SessionID != "" {
+			if err := os.WriteFile(path, []byte(meta.SessionID), 0600); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to save session id to %s: %v\n", path, err)
+			} else if err := os.Chmod(path, 0600); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to set permissions on session file %s: %v\n", path, err)
 			}
 		}
+		return TokenUsage{
+			InputTokens:         meta.Usage.InputTokens,
+			OutputTokens:        meta.Usage.OutputTokens,
+			CacheCreationTokens: meta.Usage.CacheCreationTokens,
+			CacheReadTokens:     meta.Usage.CacheReadTokens,
+			CostUSD:             meta.CostUSD,
+		}
 	}
+	return TokenUsage{}
 }

@@ -129,10 +129,11 @@ type claudeInvokeCall struct {
 	modelOverride string
 }
 
-func (m *mockClaudeInvoker) Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
+func (m *mockClaudeInvoker) Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
 	m.calls = append(m.calls, claudeInvokeCall{stage.Name, issue.Number, resume, workDir, modelOverride})
 	if m.invokeFn != nil {
-		return m.invokeFn(stage, issue, newComments, resume, workDir, modelOverride)
+		output, completed, err := m.invokeFn(stage, issue, newComments, resume, workDir, modelOverride)
+		return output, completed, TokenUsage{}, err
 	}
-	return "mock output", false, nil
+	return "mock output", false, TokenUsage{}, nil
 }
