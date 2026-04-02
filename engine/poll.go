@@ -134,6 +134,17 @@ func (e *Engine) poll(ctx context.Context) error {
 
 	fmt.Printf("[poll] found %d items on board\n", len(board.Items))
 
+	// Report rate limit stats when we have seen at least one response.
+	restStats, graphqlStats := e.client.RateLimitStats()
+	if restStats.Limit > 0 {
+		fmt.Printf("[poll] rate limit REST: %d/%d remaining, resets at %s\n",
+			restStats.Remaining, restStats.Limit, restStats.Reset.UTC().Format("15:04 UTC"))
+	}
+	if graphqlStats.Limit > 0 {
+		fmt.Printf("[poll] rate limit GraphQL: %d/%d remaining, resets at %s\n",
+			graphqlStats.Remaining, graphqlStats.Limit, graphqlStats.Reset.UTC().Format("15:04 UTC"))
+	}
+
 	var dispatched int
 	for _, item := range board.Items {
 		item := item
