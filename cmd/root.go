@@ -221,7 +221,9 @@ func runTUI(eng *engine.Engine, pollSeconds int) error {
 	}()
 
 	if _, err := p.Run(); err != nil {
-		// Drain engine error if TUI exited first.
+		// TUI failed — signal the engine to stop so its goroutine and the
+		// forwarding goroutine both exit cleanly.
+		_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 		<-errCh
 		return err
 	}
