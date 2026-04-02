@@ -54,6 +54,9 @@ type Model struct {
 
 	// now (updated on each TickEvent)
 	now time.Time
+
+	// statusLine shows the latest poll-level log message in the header
+	statusLine string
 }
 
 var (
@@ -150,10 +153,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case LogEvent:
-		// Update the last-seen tag/line for the active job, if any
-		if job, ok := m.active[ev.IssueNumber]; ok {
+		if ev.IssueNumber == 0 {
+			// Poll-level message — show in header status line
+			m.statusLine = fmt.Sprintf("[%s] %s", ev.Tag, strings.TrimRight(ev.Message, "\n"))
+		} else if job, ok := m.active[ev.IssueNumber]; ok {
 			job.LastTag = ev.Tag
-			// Trim trailing newline for display
 			job.LastLine = strings.TrimRight(ev.Message, "\n")
 		}
 		return m, nil
@@ -226,7 +230,19 @@ func (m Model) viewHeader() string {
 	title := titleStyle.Render("fabrik")
 	timerStr := dimStyle.Render(timer)
 	gap := max(m.width-lipgloss.Width(title)-lipgloss.Width(timerStr)-6, 1)
-	content := title + strings.Repeat(" ", gap) + timerStr
+	topLine := title + strings.Repeat(" ", gap) + timerStr
+
+	if m.statusLine == "" {
+		return borderStyle.Width(m.width - 4).Render(topLine)
+	}
+
+	// Truncate status line to fit within the border
+	maxStatus := max(m.width-8, 10)
+	status := m.statusLine
+	if runes := []rune(status); len(runes) > maxStatus {
+		status = string(runes[:maxStatus]) + "…"
+	}
+	content := topLine + "\n" + dimStyle.Render(status)
 	return borderStyle.Width(m.width - 4).Render(content)
 }
 
@@ -275,7 +291,7 @@ func (m Model) viewHistory() string {
 
 // headerHeight returns the approximate line height of the header pane.
 func headerHeight() int {
-	return 3 // border top + 1 content line + border bottom
+	return 4 // border top + title line + status line + border bottom
 }
 
 // activeHeight returns the approximate line height of the active pane.
