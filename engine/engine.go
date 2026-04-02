@@ -41,6 +41,7 @@ type Engine struct {
 	idleCount          int                  // consecutive idle polls; triggers self-upgrade at threshold
 	sem                chan struct{}         // semaphore bounding concurrent workers across poll cycles
 	wg                 sync.WaitGroup       // tracks in-flight workers for graceful shutdown
+	structuralWg       sync.WaitGroup       // tracks emitStructural goroutines to prevent send-on-closed-channel
 	inFlight           sync.Map             // key: issue number (int), value: struct{}
 	events             chan tui.Event        // nil in tests / plain-text mode; TUI goroutine consumes
 }
@@ -113,11 +114,17 @@ func (e *Engine) emit(ev tui.Event) {
 // emitStructural sends a structural event (JobStarted, JobCompleted, PollStarted,
 // PollCompleted) via a goroutine so it is never dropped even if the channel is
 // temporarily full. Use only for low-frequency events that must not be lost.
+// The goroutine is tracked by structuralWg so Run() can wait for all sends to
+// complete before returning (preventing send-on-closed-channel panics).
 func (e *Engine) emitStructural(ev tui.Event) {
 	if e.events == nil {
 		return
 	}
-	go func() { e.events <- ev }()
+	e.structuralWg.Add(1)
+	go func() {
+		defer e.structuralWg.Done()
+		e.events <- ev
+	}()
 }
 
 // logf emits a LogEvent to the channel (if configured) or prints directly.

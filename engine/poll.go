@@ -77,15 +77,17 @@ func (e *Engine) Run() error {
 			// Signal goroutine called cancel(); poll() returned because
 			// CommandContext killed the child processes.
 			e.cleanupLockedIssues()
-			// Wait for all worker goroutines to finish before returning so
-			// that emitStructural goroutines never send on a closed channel
-			// (cmd/root.go closes events immediately after Run() returns).
+			// Wait for all worker goroutines, then all structural-event goroutines,
+			// before returning. cmd/root.go closes the events channel immediately
+			// after Run() returns, so both waits are required to prevent panics.
 			e.wg.Wait()
+			e.structuralWg.Wait()
 			return nil
 		case <-ticker.C:
 			if ctx.Err() != nil {
 				e.cleanupLockedIssues()
 				e.wg.Wait()
+				e.structuralWg.Wait()
 				return nil
 			}
 			if err := e.poll(ctx); err != nil {
@@ -152,7 +154,7 @@ func (e *Engine) poll(ctx context.Context) error {
 		if !restStats.Reset.IsZero() {
 			resetStr = restStats.Reset.UTC().Format("15:04 UTC")
 		}
-		fmt.Printf("[poll] rate limit REST: %d/%d remaining, resets at %s\n",
+		e.logf(0, "poll", "rate limit REST: %d/%d remaining, resets at %s\n",
 			restStats.Remaining, restStats.Limit, resetStr)
 	}
 	if graphqlStats.Limit > 0 {
@@ -160,7 +162,7 @@ func (e *Engine) poll(ctx context.Context) error {
 		if !graphqlStats.Reset.IsZero() {
 			resetStr = graphqlStats.Reset.UTC().Format("15:04 UTC")
 		}
-		fmt.Printf("[poll] rate limit GraphQL: %d/%d remaining, resets at %s\n",
+		e.logf(0, "poll", "rate limit GraphQL: %d/%d remaining, resets at %s\n",
 			graphqlStats.Remaining, graphqlStats.Limit, resetStr)
 	}
 

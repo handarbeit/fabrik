@@ -508,7 +508,7 @@ func TestProcessItem_FullHappyPath(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
 		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
-			return "Claude output here", false, nil
+			return "Claude output here\nFABRIK_STAGE_COMPLETE", true, nil
 		},
 	}
 
@@ -547,7 +547,9 @@ func TestProcessItem_FullHappyPath(t *testing.T) {
 		t.Errorf("lock label = %q", client.addLabelCalls[0].labelName)
 	}
 
-	// Should have removed the lock label after processing completes
+	// Lock label is released when stage completes (completed=true → releaseLock() called).
+	// When not completed, the lock persists through cooldown so other instances don't
+	// pick up the issue — see "Keep lock and in_progress labels through cooldown retries".
 	foundLockRemoval := false
 	for _, call := range client.removeLabelCalls {
 		if call.labelName == "fabrik:locked:testuser" {
@@ -555,7 +557,7 @@ func TestProcessItem_FullHappyPath(t *testing.T) {
 		}
 	}
 	if !foundLockRemoval {
-		t.Error("expected lock label to be removed after processItem completes")
+		t.Error("expected lock label to be removed after stage completes")
 	}
 
 	// Should have invoked Claude
