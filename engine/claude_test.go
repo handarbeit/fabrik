@@ -162,7 +162,7 @@ func TestCheckCompletion_UnsupportedTypes(t *testing.T) {
 	}
 }
 
-func TestSaveSessionID_WritesSessionID(t *testing.T) {
+func TestSaveSessionIDDirect_ValidID(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.session")
 
@@ -183,14 +183,14 @@ func TestSaveSessionID_WritesSessionID(t *testing.T) {
 	}
 }
 
-func TestSaveSessionID_EmptySessionID(t *testing.T) {
+func TestSaveSessionIDDirect_EmptyID(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.session")
 
 	saveSessionIDDirect(path, "")
 
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Error("session file should not exist for empty session_id")
+		t.Error("session file should not exist for empty session ID")
 	}
 }
 
