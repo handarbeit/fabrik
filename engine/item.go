@@ -23,9 +23,14 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		return false
 	}
 
-	// Paused items never need work
+	// Paused items and items locked by another user are not our work
+	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
+	otherLockPrefix := "fabrik:locked:"
 	for _, label := range item.Labels {
 		if label == "fabrik:paused" {
+			return false
+		}
+		if strings.HasPrefix(label, otherLockPrefix) && label != lockLabel {
 			return false
 		}
 	}
