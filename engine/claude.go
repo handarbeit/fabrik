@@ -90,7 +90,9 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 	prompt := buildCommentReviewPrompt(stage, issue, comments)
 	args := buildClaudeArgs(stage, issue.Number, true, modelOverride) // resume existing session
 
-	return runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review")
+	output, stats, completed, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review")
+	stats.MaxTurns = stage.MaxTurns
+	return output, stats, completed, err
 }
 
 func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOverride string) []string {
