@@ -102,6 +102,8 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 func (e *Engine) SetEvents(ch chan tui.Event) {
 	e.events = ch
 	tuiMode = ch != nil
+	claudeLogf = e.logf
+	claudeTUI = ch != nil
 	if e.worktrees != nil {
 		e.worktrees.logfFn = e.logf
 	}

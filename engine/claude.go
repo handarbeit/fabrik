@@ -60,6 +60,23 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// claudeLogf is the logging function used by runClaude. Set by the Engine
+// during construction to route output through the event channel in TUI mode.
+// Falls back to stderr when nil (e.g. in tests).
+var claudeLogf func(issueNumber int, tag, format string, args ...any)
+
+// claudeTUI indicates whether the TUI is active. When true, Claude's child
+// process stderr is sent only to the log file (not the terminal).
+var claudeTUI bool
+
+func claudeLog(issueNumber int, tag, format string, args ...any) {
+	if claudeLogf != nil {
+		claudeLogf(issueNumber, tag, format, args...)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[#%d %s] "+format, append([]any{issueNumber, tag}, args...)...)
+}
+
 // TokenUsage holds token consumption data from a single Claude invocation.
 type TokenUsage struct {
 	InputTokens         int
@@ -207,7 +224,7 @@ type claudeResponse struct {
 }
 
 func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, noTmux bool) (string, bool, TokenUsage, error) {
-	fmt.Fprintf(os.Stderr, "[#%d claude] invoking (%s) in %s\n", issueNumber, label, workDir)
+	claudeLog(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
 
 	if !noTmux && tmuxAvailable() {
 		sessionName := sanitizeTmuxName(issueNumber, label)
@@ -215,29 +232,36 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 		if err == nil || ctx.Err() != nil {
 			return output, completed, usage, err
 		}
-		// tmux is on PATH but failed to start a session (e.g. no TERM, daemon environment).
-		// Fall back to direct execution so the invocation is not permanently broken.
-		fmt.Fprintf(os.Stderr, "[#%d warn] tmux session failed (%v); falling back to direct execution\n", issueNumber, err)
+		claudeLog(issueNumber, "warn", "tmux session failed (%v); falling back to direct execution\n", err)
 	} else if !noTmux {
-		fmt.Fprintf(os.Stderr, "[#%d warn] tmux not found on PATH; running Claude directly\n", issueNumber)
+		claudeLog(issueNumber, "warn", "tmux not found on PATH; running Claude directly\n")
 	}
 
-	// Set up stderr tee to a timestamped log file.
-	var stderrWriter io.Writer = os.Stderr
+	// Set up stderr: in TUI mode, only to log file; in plain mode, tee to os.Stderr + log file.
+	var stderrWriter io.Writer
+	if claudeTUI {
+		stderrWriter = io.Discard
+	} else {
+		stderrWriter = os.Stderr
+	}
 	logDir := LogDir(issueNumber)
 	if err := os.MkdirAll(logDir, 0700); err != nil {
-		fmt.Fprintf(os.Stderr, "[#%d warn] could not create log dir: %v\n", issueNumber, err)
+		claudeLog(issueNumber, "warn", "could not create log dir: %v\n", err)
 	} else if err := os.Chmod(logDir, 0700); err != nil {
-		fmt.Fprintf(os.Stderr, "[#%d warn] could not set log dir permissions: %v\n", issueNumber, err)
+		claudeLog(issueNumber, "warn", "could not set log dir permissions: %v\n", err)
 	} else {
 		safeLabel := strings.NewReplacer("/", "-", "\\", "-", ":", "-", " ", "-").Replace(label)
 		now := time.Now().UTC()
 		logPath := filepath.Join(logDir, fmt.Sprintf("%s-%s-%d.log", safeLabel, now.Format("20060102-150405"), now.UnixNano()))
 		if logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); err != nil {
-			fmt.Fprintf(os.Stderr, "[#%d warn] could not create log file %s: %v\n", issueNumber, logPath, err)
+			claudeLog(issueNumber, "warn", "could not create log file %s: %v\n", logPath, err)
 		} else {
 			defer logFile.Close()
-			stderrWriter = io.MultiWriter(os.Stderr, logFile)
+			if claudeTUI {
+				stderrWriter = logFile
+			} else {
+				stderrWriter = io.MultiWriter(os.Stderr, logFile)
+			}
 		}
 	}
 
@@ -261,13 +285,13 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 		text = resp.Result
 		usage = tokenUsageFromResponse(resp)
 		if runErr != nil {
-			fmt.Fprintf(os.Stderr, "[#%d claude] used %d turns, $%.4f\n", issueNumber, resp.NumTurns, resp.CostUSD)
+			claudeLog(issueNumber, "claude", "used %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
 		} else {
-			fmt.Fprintf(os.Stderr, "[#%d claude] completed in %d turns, $%.4f\n", issueNumber, resp.NumTurns, resp.CostUSD)
+			claudeLog(issueNumber, "claude", "completed in %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
 		}
 		saveSessionIDDirect(sessionFile(issueNumber, baseName), resp.SessionID)
 	} else {
-		fmt.Fprintf(os.Stderr, "[#%d warn] JSON parse failed (%d bytes); output not posted\n", issueNumber, len(rawOutput))
+		claudeLog(issueNumber, "warn", "JSON parse failed (%d bytes); output not posted\n", len(rawOutput))
 		text = fmt.Sprintf("⚠️ Claude output could not be parsed (raw output was %d bytes). Check logs at `~/.fabrik/logs/issue-%d/` for details.", len(rawOutput), issueNumber)
 	}
 
@@ -285,7 +309,7 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 // post-run parsing. Stderr stays in the tmux pane. The exit code is written to a
 // third temp file so errors are propagated correctly.
 func runClaudeInTmux(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, sessionName string) (string, bool, TokenUsage, error) {
-	fmt.Fprintf(os.Stderr, "[#%d claude] starting tmux session %q (attach: tmux attach -t %s)\n", issueNumber, sessionName, sessionName)
+	claudeLog(issueNumber, "claude", "starting tmux session %q (attach: tmux attach -t %s)\n", sessionName, sessionName)
 
 	// Write prompt to temp file (tmux can't receive stdin from the Go process).
 	promptFile, err := os.CreateTemp("", "fabrik-prompt-*")
@@ -409,14 +433,14 @@ sessionDone:
 		result = resp.Result
 		usage = tokenUsageFromResponse(resp)
 		if runErr != nil {
-			fmt.Fprintf(os.Stderr, "[#%d claude] used %d turns, $%.4f\n", issueNumber, resp.NumTurns, resp.CostUSD)
+			claudeLog(issueNumber, "claude", "used %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
 		} else {
-			fmt.Fprintf(os.Stderr, "[#%d claude] completed in %d turns, $%.4f\n", issueNumber, resp.NumTurns, resp.CostUSD)
+			claudeLog(issueNumber, "claude", "completed in %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
 		}
 		saveSessionIDDirect(sessionFile(issueNumber, baseName), resp.SessionID)
 	} else {
-		fmt.Fprintf(os.Stderr, "[#%d warn] JSON parse failed; falling back to raw output\n", issueNumber)
-		result = string(rawOutput)
+		claudeLog(issueNumber, "warn", "JSON parse failed (%d bytes); output not posted\n", len(rawOutput))
+		result = fmt.Sprintf("⚠️ Claude output could not be parsed (raw output was %d bytes). Check logs at `~/.fabrik/logs/issue-%d/` for details.", len(rawOutput), issueNumber)
 	}
 
 	if runErr != nil {
@@ -652,10 +676,10 @@ func saveSessionIDDirect(path, sessionID string) {
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to create session dir for %s: %v\n", path, err)
+		claudeLog(0, "warn", "failed to create session dir for %s: %v\n", path, err)
 		return
 	}
 	if err := os.WriteFile(path, []byte(sessionID), 0600); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to save session id to %s: %v\n", path, err)
+		claudeLog(0, "warn", "failed to save session id to %s: %v\n", path, err)
 	}
 }
