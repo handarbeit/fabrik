@@ -57,6 +57,11 @@ type Stage struct {
 	// AutoAdvance overrides the global yolo setting for this specific stage.
 	// nil means use the global setting.
 	AutoAdvance *bool `yaml:"auto_advance,omitempty"`
+
+	// Commands maps slash command names (without the leading /) to their expanded
+	// prompt text. Stage-level commands override the built-in defaults.
+	// Example: commands: {resolve: "Address PR feedback..."}
+	Commands map[string]string `yaml:"commands,omitempty"`
 }
 
 // CompletionCriteria defines how to determine if a stage is complete.

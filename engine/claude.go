@@ -16,6 +16,43 @@ import (
 
 var stageCompleteRE = regexp.MustCompile(`(?m)^FABRIK_STAGE_COMPLETE\r?$`)
 
+// commandRE matches a slash command at the start of a line, e.g. /resolve
+// Requires the command to start at column 0 to avoid matching file paths like /usr/bin/foo.
+var commandRE = regexp.MustCompile(`(?m)^/([a-zA-Z][a-zA-Z0-9_-]*)`)
+
+// builtinCommands are the default slash commands recognized by Fabrik.
+// Stage YAML can override individual entries via the commands: field.
+var builtinCommands = map[string]string{
+	"resolve": "Address PR feedback that is worthy and when done, post a response on each feedback comment as well as a summary comment with all decisions and fixes on this PR",
+}
+
+// expandCommands replaces slash commands in body with their expanded prompt text.
+// stageCommands (from stage YAML) override built-in defaults.
+// Commands must appear at the start of a line. Any text following the command
+// token on the same line is preserved and appended after the expansion.
+// Unknown commands are left unchanged (a warning is logged to stderr).
+func expandCommands(body string, stageCommands map[string]string) string {
+	// Merge built-ins with stage overrides (stage wins).
+	commands := make(map[string]string, len(builtinCommands)+len(stageCommands))
+	for k, v := range builtinCommands {
+		commands[k] = v
+	}
+	for k, v := range stageCommands {
+		commands[k] = v
+	}
+
+	return commandRE.ReplaceAllStringFunc(body, func(match string) string {
+		// match is the full /command token; extract just the name.
+		name := match[1:] // strip leading /
+		expansion, ok := commands[name]
+		if !ok {
+			fmt.Fprintf(os.Stderr, "warning: unknown fabrik command /%s — passing through verbatim\n", name)
+			return match
+		}
+		return expansion
+	})
+}
+
 // SessionDir returns the directory where Claude sessions are cached for an issue.
 func SessionDir(issueNumber int) string {
 	home, _ := os.UserHomeDir()
@@ -216,7 +253,8 @@ func buildCommentReviewPrompt(stage *stages.Stage, item gh.ProjectItem, comments
 
 	b.WriteString("## New Comments to Process\n\n")
 	for _, c := range comments {
-		b.WriteString(fmt.Sprintf("**@%s** (%s):\n%s\n\n", c.Author, c.CreatedAt.Format("2006-01-02 15:04"), c.Body))
+		expandedBody := expandCommands(c.Body, stage.Commands)
+		b.WriteString(fmt.Sprintf("**@%s** (%s):\n%s\n\n", c.Author, c.CreatedAt.Format("2006-01-02 15:04"), expandedBody))
 	}
 
 	b.WriteString("---\n\n")

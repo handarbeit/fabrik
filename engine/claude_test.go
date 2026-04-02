@@ -615,6 +615,117 @@ func TestDefaultPRCommentPrompt(t *testing.T) {
 	}
 }
 
+func TestExpandCommands_KnownCommand(t *testing.T) {
+	body := "/resolve"
+	result := expandCommands(body, nil)
+	if result == body {
+		t.Error("expected /resolve to be expanded")
+	}
+	if !strings.Contains(result, "PR feedback") {
+		t.Errorf("expansion missing expected text, got: %q", result)
+	}
+}
+
+func TestExpandCommands_UnknownCommand(t *testing.T) {
+	body := "/nonexistent"
+	result := expandCommands(body, nil)
+	// Unknown command passes through verbatim
+	if result != body {
+		t.Errorf("unknown command should pass through verbatim, got: %q", result)
+	}
+}
+
+func TestExpandCommands_MixedContent(t *testing.T) {
+	body := "/resolve please also fix the typo in README"
+	result := expandCommands(body, nil)
+	// Command expands and trailing text is preserved
+	if strings.Contains(result, "/resolve") {
+		t.Error("expected /resolve to be replaced")
+	}
+	if !strings.Contains(result, "please also fix the typo in README") {
+		t.Errorf("trailing text should be preserved, got: %q", result)
+	}
+	if !strings.Contains(result, "PR feedback") {
+		t.Errorf("expansion missing expected text, got: %q", result)
+	}
+}
+
+func TestExpandCommands_StageOverride(t *testing.T) {
+	stageCommands := map[string]string{
+		"resolve": "Custom resolve expansion for this stage",
+	}
+	body := "/resolve"
+	result := expandCommands(body, stageCommands)
+	if result != "Custom resolve expansion for this stage" {
+		t.Errorf("stage override should win, got: %q", result)
+	}
+}
+
+func TestExpandCommands_StageCustomCommand(t *testing.T) {
+	stageCommands := map[string]string{
+		"ship": "Create a production deployment",
+	}
+	body := "/ship"
+	result := expandCommands(body, stageCommands)
+	if result != "Create a production deployment" {
+		t.Errorf("stage-defined command should expand, got: %q", result)
+	}
+}
+
+func TestExpandCommands_MidLineSlash(t *testing.T) {
+	// Slashes not at line start should not trigger expansion
+	body := "See /usr/bin/foo for details"
+	result := expandCommands(body, nil)
+	if result != body {
+		t.Errorf("mid-line slash should not trigger expansion, got: %q", result)
+	}
+}
+
+func TestExpandCommands_MultiLine(t *testing.T) {
+	body := "Some context\n/resolve\nMore text"
+	result := expandCommands(body, nil)
+	if strings.Contains(result, "/resolve") {
+		t.Error("expected /resolve to be replaced")
+	}
+	if !strings.Contains(result, "PR feedback") {
+		t.Errorf("expansion missing expected text, got: %q", result)
+	}
+	if !strings.Contains(result, "Some context") {
+		t.Error("surrounding text should be preserved")
+	}
+}
+
+func TestExpandCommands_NoCommands(t *testing.T) {
+	body := "Just a regular comment with no commands."
+	result := expandCommands(body, nil)
+	if result != body {
+		t.Errorf("body without commands should be unchanged, got: %q", result)
+	}
+}
+
+func TestBuildCommentReviewPrompt_ExpandsCommands(t *testing.T) {
+	stage := &stages.Stage{Name: "Review"}
+	item := gh.ProjectItem{
+		Number: 10,
+		Title:  "Fix bug",
+		URL:    "https://github.com/org/repo/pull/10",
+		Body:   "PR body",
+		IsPR:   true,
+	}
+	comments := []gh.Comment{
+		{Author: "user", Body: "/resolve", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
+	}
+
+	prompt := buildCommentReviewPrompt(stage, item, comments)
+
+	if strings.Contains(prompt, "/resolve") {
+		t.Error("expected /resolve to be expanded in prompt")
+	}
+	if !strings.Contains(prompt, "PR feedback") {
+		t.Errorf("expected expansion text in prompt, got snippet: %q", prompt[len(prompt)-200:])
+	}
+}
+
 func TestExtractUpdatedBody(t *testing.T) {
 	tests := []struct {
 		name   string

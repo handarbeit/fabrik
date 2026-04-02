@@ -27,3 +27,10 @@ mark_pr_ready_on_complete: true
 post_to_pr: true
 completion:
   type: claude
+# commands defines slash command expansions for use in issue/PR comments.
+# Built-in commands (like /resolve) are always available; add entries here
+# to override them or define stage-specific commands.
+# commands:
+#   resolve: "Address PR feedback that is worthy and when done, post a response
+#     on each feedback comment as well as a summary comment with all decisions
+#     and fixes on this PR"

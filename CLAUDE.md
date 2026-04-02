@@ -75,7 +75,20 @@ post_to_pr: true           # Post output to linked PR instead of issue
 create_draft_pr: true      # Create draft PR before stage runs
 mark_pr_ready_on_complete: true  # Mark PR ready when stage completes
 auto_advance: false        # Override global yolo setting
+commands:                  # Slash command expansions for issue/PR comments
+  resolve: "Address PR feedback that is worthy and when done, post a response
+    on each feedback comment as well as a summary comment with all decisions
+    and fixes on this PR"
 ```
+
+### Slash Commands in Comments
+
+Users can post `/commands` in issue or PR comments to trigger well-defined actions. Commands are expanded to their full prompt text before being passed to Claude. They must appear at the **start of a line** (to avoid colliding with file paths like `/usr/bin/foo`).
+
+**Built-in commands:**
+- `/resolve` — Expands to: "Address PR feedback that is worthy and when done, post a response on each feedback comment as well as a summary comment with all decisions and fixes on this PR"
+
+**Custom commands** can be defined per-stage in the `commands:` YAML field. Stage commands override built-ins. Unknown commands are passed through verbatim with a warning log.
 
 ## Important Conventions
 
