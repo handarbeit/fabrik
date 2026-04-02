@@ -118,7 +118,7 @@ func (e *Engine) cleanupLockedIssues() {
 }
 
 func (e *Engine) poll(ctx context.Context) error {
-	e.emit(tui.PollStartedEvent{Owner: e.cfg.Owner, Repo: e.cfg.Repo, Project: e.cfg.ProjectNum})
+	e.emitStructural(tui.PollStartedEvent{Owner: e.cfg.Owner, Repo: e.cfg.Repo, Project: e.cfg.ProjectNum})
 	e.logf(0, "poll", "fetching project board %s/%s#%d\n", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
 
 	board, err := e.client.FetchProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
@@ -191,13 +191,13 @@ func (e *Engine) poll(ctx context.Context) error {
 			defer e.wg.Done()
 			defer func() { <-e.sem }()
 			defer e.inFlight.Delete(item.Number)
-			e.emit(tui.JobStartedEvent{
+			e.emitStructural(tui.JobStartedEvent{
 				IssueNumber: item.Number,
 				StageName:   stageName,
 				StartedAt:   startTime,
 			})
 			err := e.processItem(ctx, board, item)
-			e.emit(tui.JobCompletedEvent{
+			e.emitStructural(tui.JobCompletedEvent{
 				IssueNumber: item.Number,
 				StageName:   stageName,
 				Success:     err == nil,
