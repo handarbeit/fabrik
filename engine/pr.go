@@ -97,7 +97,7 @@ func (e *Engine) markPRReady(item gh.ProjectItem, knownPR int) {
 }
 
 // postOutputToPR posts detailed output on the linked PR and a brief summary on the issue.
-func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output, branch, commit, timestamp string) {
+func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output, footer, branch, commit, timestamp string) {
 	prNumber, err := e.client.FindPRForIssue(e.cfg.Owner, e.cfg.Repo, item.Number)
 	if err != nil {
 		logf(item.Number, "warn", "could not find PR: %v\n", err)
@@ -105,7 +105,7 @@ func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output, branch, 
 
 	if prNumber > 0 {
 		// Post detailed output on the PR
-		comment := formatOutputComment(stageName, output, branch, commit, timestamp)
+		comment := formatOutputComment(stageName, output, footer, branch, commit, timestamp)
 		if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, prNumber, comment); err != nil {
 			logf(item.Number, "warn", "could not post to PR #%d: %v\n", prNumber, err)
 		} else {
@@ -120,20 +120,22 @@ func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output, branch, 
 	} else {
 		// No PR found — fall back to posting on the issue
 		logf(item.Number, "warn", "no open PR found, posting on issue instead\n")
-		comment := formatOutputComment(stageName, output, branch, commit, timestamp)
+		comment := formatOutputComment(stageName, output, footer, branch, commit, timestamp)
 		if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
 			logf(item.Number, "warn", "could not post comment: %v\n", err)
 		}
 	}
 }
 
-func formatOutputComment(stageName, output, branch, commit, timestamp string) string {
+// formatOutputComment formats Claude's output as a GitHub comment.
+// footer is appended after any truncation so it is never cut off.
+func formatOutputComment(stageName, output, footer, branch, commit, timestamp string) string {
 	const maxLen = 60000
 	if len(output) > maxLen {
 		output = output[:maxLen] + "\n\n... (truncated)"
 	}
 	meta := fmt.Sprintf("*branch: %s | commit: %s | %s*", branch, commit, timestamp)
-	return fmt.Sprintf("🏭 **Fabrik — stage: %s**\n%s\n\n%s", stageName, meta, output)
+	return fmt.Sprintf("🏭 **Fabrik — stage: %s**\n%s\n\n%s%s", stageName, meta, output, footer)
 }
 
 func formatPRSummaryComment(stageName string, prNumber int, output, branch, commit, timestamp string) string {
