@@ -264,8 +264,8 @@ func (m Model) viewActive() string {
 				maxMsg = 0
 			}
 			msg = job.LastLine
-			if len(msg) > maxMsg {
-				msg = msg[:maxMsg] + "…"
+			if runes := []rune(msg); len(runes) > maxMsg {
+				msg = string(runes[:maxMsg]) + "…"
 			}
 		}
 		line := fmt.Sprintf("#%-5d %-12s %s %s  %s %s",
