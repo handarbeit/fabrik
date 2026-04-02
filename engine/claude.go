@@ -211,9 +211,14 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 
 	if !noTmux && tmuxAvailable() {
 		sessionName := sanitizeTmuxName(issueNumber, label)
-		return runClaudeInTmux(ctx, args, prompt, workDir, issueNumber, label, sessionName)
-	}
-	if !noTmux {
+		output, completed, usage, err := runClaudeInTmux(ctx, args, prompt, workDir, issueNumber, label, sessionName)
+		if err == nil || ctx.Err() != nil {
+			return output, completed, usage, err
+		}
+		// tmux is on PATH but failed to start a session (e.g. no TERM, daemon environment).
+		// Fall back to direct execution so the invocation is not permanently broken.
+		fmt.Fprintf(os.Stderr, "[#%d warn] tmux session failed (%v); falling back to direct execution\n", issueNumber, err)
+	} else if !noTmux {
 		fmt.Fprintf(os.Stderr, "[#%d warn] tmux not found on PATH; running Claude directly\n", issueNumber)
 	}
 
@@ -332,7 +337,7 @@ func runClaudeInTmux(ctx context.Context, args []string, prompt string, workDir 
 
 	var sb strings.Builder
 	sb.WriteString("#!/bin/sh\n")
-	sb.WriteString("cd " + shellQuote(workDir) + "\n")
+	sb.WriteString("cd " + shellQuote(workDir) + " || exit 1\n")
 	sb.WriteString(shellQuote(claudeBin))
 	for _, arg := range args {
 		sb.WriteString(" " + shellQuote(arg))
