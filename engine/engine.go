@@ -36,6 +36,7 @@ type Engine struct {
 	processedSet       map[string]time.Time // track what we've processed: "issue#-commentID" -> timestamp
 	lockedIssues       map[int]bool         // issues that have had fabrik:locked added and not yet released
 	totalTokens        TokenUsage           // accumulated token usage since process start
+	lastReportedCost   float64              // cost at last [stats] report; skip repeat prints when unchanged
 	retryCount         map[string]int       // key: "<issueNum>-<stageName>", value: failed attempt count
 	pausedDueToRetries map[string]bool      // key: "<issueNum>-<stageName>", true if engine paused this issue
 	idleCount          int                  // consecutive idle polls; triggers self-upgrade at threshold
