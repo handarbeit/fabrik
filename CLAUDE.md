@@ -25,8 +25,10 @@ go vet ./...             # Lint
 - `github/rest.go` — HTTP helpers
 - `github/types.go` — Shared data types (ProjectItem, Comment, ReactionGroup)
 - `stages/stages.go` — YAML stage config loading
-- `stages/examples/` — Default stage configs (committed)
-- `stages/mystages/` — User-customized stages (gitignored)
+- `stages/examples/` — Default stage YAML sources, embedded in binary via `//go:embed`
+- `stages/embed.go` — Exposes embedded default stages as `stages.DefaultStages`
+- `cmd/init.go` — `fabrik init` subcommand; extracts embedded YAMLs to `.fabrik/stages/`
+- `.fabrik/stages/` — Live stage configs for this project (tracked in git)
 
 ## Key Patterns
 
