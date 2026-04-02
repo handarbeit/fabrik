@@ -5,6 +5,7 @@
 !.claude/skills/
 !.claude/agents/
 .fabrik/worktrees/
+.fabrik/debug/
 .env
 fabrik
 *.exe
