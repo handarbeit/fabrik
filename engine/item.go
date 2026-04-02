@@ -357,10 +357,7 @@ func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 		logf(item.Number, "warn", "could not add paused label: %v\n", err)
 	}
 
-	failedLabel := fmt.Sprintf("stage:%s:failed", stage.Name)
-	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, failedLabel); err != nil {
-		logf(item.Number, "warn", "could not add failed label: %v\n", err)
-	}
+	e.addFailedLabel(item.Number, stage.Name)
 
 	comment := fmt.Sprintf(
 		"🏭 **Fabrik — stage failed**\n\nStage **%s** failed to complete after %d attempt(s). The issue has been paused (`fabrik:paused`).\n\nTo retry: investigate the failure, make any needed fixes, then remove the `fabrik:paused` label.",
