@@ -10,6 +10,7 @@ import (
 // mockGitHubClient implements GitHubClient for testing.
 type mockGitHubClient struct {
 	fetchProjectBoardFn       func(owner, repo string, projectNum int) (*gh.ProjectBoard, error)
+	fetchItemDetailsFn        func(item *gh.ProjectItem) error
 	fetchStatusFieldFn        func(projectID string) (*gh.StatusField, error)
 	addLabelToIssueFn         func(owner, repo string, issueNumber int, labelName string) error
 	removeLabelFromIssueFn    func(owner, repo string, issueNumber int, labelName string) error
@@ -51,6 +52,13 @@ func (m *mockGitHubClient) FetchProjectBoard(owner, repo string, projectNum int)
 		return m.fetchProjectBoardFn(owner, repo, projectNum)
 	}
 	return &gh.ProjectBoard{}, nil
+}
+
+func (m *mockGitHubClient) FetchItemDetails(item *gh.ProjectItem) error {
+	if m.fetchItemDetailsFn != nil {
+		return m.fetchItemDetailsFn(item)
+	}
+	return nil
 }
 
 func (m *mockGitHubClient) FetchStatusField(projectID string) (*gh.StatusField, error) {
@@ -125,7 +133,7 @@ func (m *mockGitHubClient) RateLimitStats() (gh.RateLimitStats, gh.RateLimitStat
 
 // mockClaudeInvoker implements ClaudeInvoker for testing.
 type mockClaudeInvoker struct {
-	invokeFn func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error)
+	invokeFn func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error)
 	calls    []claudeInvokeCall
 }
 
@@ -137,10 +145,10 @@ type claudeInvokeCall struct {
 	modelOverride string
 }
 
-func (m *mockClaudeInvoker) Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, error) {
+func (m *mockClaudeInvoker) Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, ClaudeStats, bool, error) {
 	m.calls = append(m.calls, claudeInvokeCall{stage.Name, issue.Number, resume, workDir, modelOverride})
 	if m.invokeFn != nil {
 		return m.invokeFn(stage, issue, newComments, resume, workDir, modelOverride)
 	}
-	return "mock output", false, nil
+	return "mock output", ClaudeStats{}, false, nil
 }
