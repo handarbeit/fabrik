@@ -108,11 +108,11 @@ func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOve
 
 // claudeResponse represents the JSON output from claude --output-format json.
 type claudeResponse struct {
-	Result    string `json:"result"`
-	SessionID string `json:"session_id"`
-	NumTurns  int    `json:"num_turns"`
+	Result    string  `json:"result"`
+	SessionID string  `json:"session_id"`
+	NumTurns  int     `json:"num_turns"`
 	CostUSD   float64 `json:"total_cost_usd"`
-	IsError   bool   `json:"is_error"`
+	IsError   bool    `json:"is_error"`
 }
 
 func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string) (string, bool, error) {

@@ -2,6 +2,15 @@ package github
 
 import "time"
 
+// RateLimitStats holds the latest GitHub API rate limit values parsed from response headers.
+type RateLimitStats struct {
+	Limit     int
+	Remaining int
+	Used      int
+	Reset     time.Time
+	UpdatedAt time.Time
+}
+
 // ProjectBoard represents the full state of a GitHub Project (v2) board.
 type ProjectBoard struct {
 	ProjectID string
