@@ -77,17 +77,15 @@ func (e *Engine) Run() error {
 			// Signal goroutine called cancel(); poll() returned because
 			// CommandContext killed the child processes.
 			e.cleanupLockedIssues()
-			// Wait for all worker goroutines, then all structural-event goroutines,
-			// before returning. cmd/root.go closes the events channel immediately
-			// after Run() returns, so both waits are required to prevent panics.
+			// Wait for all worker goroutines before returning.
+			// emitStructural now sends synchronously, so events are in the buffer
+			// before wg.Done() fires — no separate structuralWg needed.
 			e.wg.Wait()
-			e.structuralWg.Wait()
 			return nil
 		case <-ticker.C:
 			if ctx.Err() != nil {
 				e.cleanupLockedIssues()
 				e.wg.Wait()
-				e.structuralWg.Wait()
 				return nil
 			}
 			if err := e.poll(ctx); err != nil {
@@ -188,14 +186,14 @@ func (e *Engine) poll(ctx context.Context) error {
 		if !e.itemMayNeedWork(board.Items[i]) {
 			continue
 		}
-		logf(board.Items[i].Number, "poll", "deep-fetching details\n")
+		e.logf(board.Items[i].Number, "poll", "deep-fetching details\n")
 		if err := e.client.FetchItemDetails(&board.Items[i]); err != nil {
-			logf(board.Items[i].Number, "warn", "could not fetch item details: %v\n", err)
+			e.logf(board.Items[i].Number, "warn", "could not fetch item details: %v\n", err)
 		}
 		deepFetched++
 	}
 	if deepFetched > 0 {
-		fmt.Printf("[poll] deep-fetched details for %d item(s)\n", deepFetched)
+		e.logf(0, "poll", "deep-fetched details for %d item(s)\n", deepFetched)
 	}
 
 	var dispatched int

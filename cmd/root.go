@@ -151,7 +151,11 @@ func Execute() error {
 		return fmt.Errorf("no stage configurations found in %s", cfg.StagesDir)
 	}
 
-	isTTY := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
+	// Both stdin and stdout must be a TTY before enabling the TUI. If stdin is
+	// piped (e.g. `echo q | fabrik`), bubbletea would immediately receive the
+	// piped input and quit, making TUI mode unusable.
+	isTTY := (isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())) &&
+		(isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd()))
 
 	// In plain-text mode, print the startup banner to stdout. In TUI mode the
 	// bubbletea alt-screen replaces stdout immediately, so skip the banner.
