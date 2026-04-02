@@ -1873,3 +1873,104 @@ func TestProcessItem_CleanupStage_NonexistentWorktree(t *testing.T) {
 		t.Errorf("completion label = %q, want stage:Done:complete", addedLabel)
 	}
 }
+
+func TestItemNeedsWork_CleanupStage_PausedItem(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.cfg.Stages = testStagesWithCleanup()
+
+	item := gh.ProjectItem{
+		Number: 1,
+		Status: "Done",
+		Labels: []string{"fabrik:paused"}, // paused → should not need work
+	}
+	if eng.itemNeedsWork(item) {
+		t.Error("paused cleanup stage item should not need work")
+	}
+}
+
+func TestProcessItem_CleanupStage_PRItem(t *testing.T) {
+	// PR items on the board don't have worktrees — cleanup should just apply the label.
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := testEngine(client, claude)
+	eng.cfg.Stages = testStagesWithCleanup()
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 55,
+		Title:  "Some PR",
+		Status: "Done",
+		IsPR:   true,
+		ItemID: "PVTI_55",
+	}
+
+	err := eng.processItem(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	// Completion label should be applied
+	if len(client.addLabelCalls) != 1 || client.addLabelCalls[0].labelName != "stage:Done:complete" {
+		t.Errorf("expected stage:Done:complete label, got %v", client.addLabelCalls)
+	}
+	if len(claude.calls) != 0 {
+		t.Error("should not invoke claude for cleanup stage PR item")
+	}
+}
+
+func TestProcessItem_CleanupStage_NewCommentsIgnored(t *testing.T) {
+	// New comments on a Done item should not divert to processComments — cleanup runs instead.
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	// Create the worktree
+	_, err := wm.EnsureWorktree(77, "main")
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	var addedLabel string
+	client := &mockGitHubClient{
+		addLabelToIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			addedLabel = labelName
+			return nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "testuser", Token: "token",
+			Stages: testStagesWithCleanup()},
+		client, claude, wm,
+	)
+
+	// Item has a new (un-rocketed) comment — cleanup should still proceed, not processComments.
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 77,
+		Title:  "Test",
+		Status: "Done",
+		ItemID: "PVTI_77",
+		Comments: []gh.Comment{
+			{ID: "C1", Author: "testuser", Body: "please do X"},
+			// No rocket reaction → findNewComments would normally return this
+		},
+	}
+
+	err = eng.processItem(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	// Worktree should be removed and completion label applied
+	if _, statErr := os.Stat(wm.WorktreeDir(77)); !os.IsNotExist(statErr) {
+		t.Error("worktree directory should have been removed despite new comment")
+	}
+	if addedLabel != "stage:Done:complete" {
+		t.Errorf("completion label = %q, want stage:Done:complete", addedLabel)
+	}
+	if len(claude.calls) != 0 {
+		t.Error("claude should not be invoked for cleanup stage")
+	}
+}
