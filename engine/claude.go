@@ -167,12 +167,12 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 
 	resp, ok := parseClaudeJSON(output)
 	text := resp.Result
+	usage := tokenUsageFromResponse(resp)
 	if !ok {
 		text = string(output)
+	} else {
+		logf(issueNumber, "claude", "completed in %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
 	}
-
-	usage := tokenUsageFromResponse(resp)
-	logf(issueNumber, "claude", "completed in %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
 
 	// Save session ID for future resumption
 	baseName := strings.TrimSuffix(label, "-comment-review")
