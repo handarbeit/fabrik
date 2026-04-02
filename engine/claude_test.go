@@ -420,7 +420,7 @@ printf '%s\n' '{"result":"stage output\nFABRIK_STAGE_COMPLETE\n","session_id":"s
 	defer os.RemoveAll(SessionDir(77))
 	defer os.RemoveAll(LogDir(77))
 
-	output, completed, stats, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	output, completed, stats, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "", true)
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -527,7 +527,7 @@ printf '%s\n' '{"result":"Claude output for test\nFABRIK_STAGE_COMPLETE\n","sess
 		URL:    "https://example.com",
 	}
 
-	output, completed, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	output, completed, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "", true)
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -582,7 +582,7 @@ printf '%%s\n' '{"result":"resume output","session_id":"sess_resume","num_turns"
 	defer os.RemoveAll(sessDir)
 	defer os.RemoveAll(LogDir(99))
 
-	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, true, workDir, "")
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, true, workDir, "", true)
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -624,7 +624,7 @@ printf '%%s\n' '{"result":"ok","session_id":"sess_mt","num_turns":1,"total_cost_
 	}
 	issue := gh.ProjectItem{Number: 50, Title: "T"}
 
-	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "", true)
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -670,7 +670,7 @@ printf '%%s\n' '{"result":"ok","session_id":"sess_mo","num_turns":1,"total_cost_
 	}
 	issue := gh.ProjectItem{Number: 51, Title: "T"}
 
-	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "opus")
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "opus", true)
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -705,7 +705,7 @@ exit 1
 	}
 	issue := gh.ProjectItem{Number: 60, Title: "T"}
 
-	output, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	output, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "", true)
 	if err == nil {
 		t.Fatal("expected error for failing binary")
 	}
@@ -741,7 +741,7 @@ printf '%%s\n' '{"result":"comment output","session_id":"sess_c","num_turns":1,"
 		{Author: "user", Body: "Fix this", CreatedAt: time.Now()},
 	}
 
-	_, _, _, err := InvokeClaude(context.Background(), stage, issue, comments, false, workDir, "")
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, comments, false, workDir, "", true)
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -875,5 +875,89 @@ func TestExtractUpdatedBody(t *testing.T) {
 				t.Errorf("extractUpdatedBody() = %q, want %q", got, tt.expect)
 			}
 		})
+	}
+}
+
+func TestSanitizeTmuxName(t *testing.T) {
+	tests := []struct {
+		issueNumber int
+		stageName   string
+		want        string
+	}{
+		{74, "implement", "fabrik-74-implement"},
+		{74, "Implement", "fabrik-74-implement"},
+		{1, "comment-review", "fabrik-1-comment-review"},
+		{42, "My Stage Name", "fabrik-42-my-stage-name"},
+		{5, "stage:with:colons", "fabrik-5-stage-with-colons"},
+		{5, "stage/slash", "fabrik-5-stage-slash"},
+		{10, "  spaces  ", "fabrik-10-spaces"},
+		{10, "a--b", "fabrik-10-a-b"},
+		{10, "---", "fabrik-10-stage"},
+		{10, "", "fabrik-10-stage"},
+	}
+
+	for _, tt := range tests {
+		got := sanitizeTmuxName(tt.issueNumber, tt.stageName)
+		if got != tt.want {
+			t.Errorf("sanitizeTmuxName(%d, %q) = %q, want %q", tt.issueNumber, tt.stageName, got, tt.want)
+		}
+	}
+}
+
+func TestTmuxFallback(t *testing.T) {
+	// Verify that noTmux=true bypasses tmux and runs Claude directly.
+	// This tests the fallback path regardless of whether tmux is installed.
+	binDir := t.TempDir()
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := `#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"result":"fallback output\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_fallback","num_turns":1}'
+`
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	os.Setenv("PATH", binDir+":"+origPath)
+	defer os.Setenv("PATH", origPath)
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "Test",
+		Prompt:     "test prompt",
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 74, Title: "tmux fallback test"}
+	defer os.RemoveAll(SessionDir(74))
+	defer os.RemoveAll(LogDir(74))
+
+	output, completed, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "", true)
+	if err != nil {
+		t.Fatalf("InvokeClaude with noTmux=true: %v", err)
+	}
+	if !strings.Contains(output, "fallback output") {
+		t.Errorf("output = %q, expected 'fallback output'", output)
+	}
+	if !completed {
+		t.Error("expected completed=true")
+	}
+}
+
+func TestShellQuote(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"hello", "'hello'"},
+		{"hello world", "'hello world'"},
+		{"it's", `'it'\''s'`},
+		{"--resume", "'--resume'"},
+		{"", "''"},
+	}
+	for _, tt := range tests {
+		got := shellQuote(tt.input)
+		if got != tt.want {
+			t.Errorf("shellQuote(%q) = %q, want %q", tt.input, got, tt.want)
+		}
 	}
 }
