@@ -123,6 +123,32 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	return nil
 }
 
+// markCommentsSeenByStage adds a rocket reaction to any user comments that were
+// present when a stage ran. These comments were included in the prompt as context
+// and should not be treated as "new" on subsequent polls — particularly to avoid
+// false-triggering the awaiting-input unblock logic.
+func (e *Engine) markCommentsSeenByStage(item gh.ProjectItem) {
+	for _, c := range item.Comments {
+		if c.Author != e.cfg.User {
+			continue
+		}
+		if strings.HasPrefix(c.Body, "🏭 **Fabrik") {
+			continue
+		}
+		if c.HasReaction("ROCKET") {
+			continue
+		}
+		// This comment was seen by the stage — mark it so it won't trigger unblock
+		if err := e.client.AddCommentReaction(e.cfg.Owner, e.cfg.Repo, c.DatabaseID, "rocket"); err != nil {
+			e.logf(item.Number, "warn", "could not add rocket to seen comment %s: %v\n", c.ID, err)
+		}
+		e.mu.Lock()
+		key := fmt.Sprintf("%d-comment-%s", item.Number, c.ID)
+		e.processedSet[key] = time.Now()
+		e.mu.Unlock()
+	}
+}
+
 // markCommentsProcessed records comments as processed so they won't be retried.
 func (e *Engine) markCommentsProcessed(item gh.ProjectItem, comments []gh.Comment) {
 	e.mu.Lock()
