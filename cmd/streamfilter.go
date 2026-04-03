@@ -23,11 +23,12 @@ func RunStreamFilter() {
 			Subtype string `json:"subtype"`
 			Message *struct {
 				Content []struct {
-					Type    string `json:"type"`
-					Text    string `json:"text"`
-					Name    string `json:"name"`
-					Input   json.RawMessage `json:"input"`
-					Content json.RawMessage `json:"content"`
+					Type     string          `json:"type"`
+					Text     string          `json:"text"`
+					Thinking string          `json:"thinking"`
+					Name     string          `json:"name"`
+					Input    json.RawMessage `json:"input"`
+					Content  json.RawMessage `json:"content"`
 				} `json:"content"`
 			} `json:"message"`
 			Result   string  `json:"result"`
@@ -45,9 +46,21 @@ func RunStreamFilter() {
 			}
 			for _, block := range msg.Message.Content {
 				switch block.Type {
+				case "thinking":
+					thinking := block.Thinking
+					if thinking == "" {
+						thinking = block.Text
+					}
+					if thinking != "" {
+						// Truncate very long thinking
+						if len(thinking) > 500 {
+							thinking = thinking[:500] + "..."
+						}
+						fmt.Printf("\n💭 %s\n", thinking)
+					}
 				case "text":
 					if block.Text != "" {
-						fmt.Print(block.Text)
+						fmt.Printf("\n📝 %s\n", block.Text)
 					}
 				case "tool_use":
 					fmt.Printf("\n--- tool: %s ---\n", block.Name)
