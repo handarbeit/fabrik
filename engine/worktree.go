@@ -58,6 +58,7 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string, sk
 				if !skipUpdate {
 					wm.updateWorktreeFromMain(wtDir, baseBranch, issueNumber)
 				}
+				wm.writeGitExclude(wtDir, issueNumber)
 				return wtDir, nil
 			}
 		}
@@ -94,6 +95,7 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string, sk
 	}
 
 	wm.logf(issueNumber, "worktree", "created %s\n", wtDir)
+	wm.writeGitExclude(wtDir, issueNumber)
 	return wtDir, nil
 }
 
@@ -210,6 +212,47 @@ func (wm *WorktreeManager) updateWorktreeFromMain(wtDir, baseBranch string, issu
 	}
 
 	wm.logf(issueNumber, "worktree", "rebased onto origin/%s\n", baseBranch)
+}
+
+// writeGitExclude writes `.fabrik/` to the per-worktree git exclude file so
+// context files never get accidentally staged or committed. This is idempotent —
+// safe to call on every EnsureWorktree invocation.
+//
+// In a linked worktree, `.git` is a file pointing to the per-worktree git dir
+// (e.g. <main>/.git/worktrees/issue-N/). `git rev-parse --git-dir` returns
+// that absolute path, so we append `info/exclude` to it.
+func (wm *WorktreeManager) writeGitExclude(wtDir string, issueNumber int) {
+	cmd := exec.Command("git", "rev-parse", "--git-dir")
+	cmd.Dir = wtDir
+	out, err := cmd.Output()
+	if err != nil {
+		wm.logf(issueNumber, "warn", "could not determine git-dir for exclude setup: %v\n", err)
+		return
+	}
+	gitDir := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(wtDir, gitDir)
+	}
+	infoDir := filepath.Join(gitDir, "info")
+	if err := os.MkdirAll(infoDir, 0755); err != nil {
+		wm.logf(issueNumber, "warn", "could not create git info dir: %v\n", err)
+		return
+	}
+	excludePath := filepath.Join(infoDir, "exclude")
+	const entry = ".fabrik/\n"
+	existing, _ := os.ReadFile(excludePath)
+	if strings.Contains(string(existing), ".fabrik/") {
+		return // already present
+	}
+	f, err := os.OpenFile(excludePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		wm.logf(issueNumber, "warn", "could not open git exclude file: %v\n", err)
+		return
+	}
+	defer f.Close()
+	if _, err := f.WriteString(entry); err != nil {
+		wm.logf(issueNumber, "warn", "could not write git exclude entry: %v\n", err)
+	}
 }
 
 // Prune removes stale worktree registrations from git.
