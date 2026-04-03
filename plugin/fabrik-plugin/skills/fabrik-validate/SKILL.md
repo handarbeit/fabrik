@@ -12,6 +12,17 @@ Confirm with high confidence that the PR is ready to merge. If it's not, clearly
 
 ## Before You Start
 
+### Read context files
+
+The engine has written context files to `.fabrik/` in your working directory:
+- `.fabrik/issue.md` — the issue body (the original spec); use this to verify requirements
+- `.fabrik/stage-Plan.md` — the task checklist; verify all tasks were completed
+- `.fabrik/stage-Implement.md` — the implementation summary, if present
+- `.fabrik/stage-Review.md` — the review findings, if present
+- `.fabrik/pr-description.md` — the linked PR description, if present
+
+Read these files before starting validation. The spec in `.fabrik/issue.md` is your ground truth for requirements verification.
+
 1. `git status` — commit any uncommitted changes
 2. Rebase onto latest main:
    ```bash

@@ -350,6 +350,13 @@ func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Com
 	}
 
 	b.WriteString("---\n\n")
+	b.WriteString("Context files are available in `.fabrik/` in your working directory:\n")
+	b.WriteString("- `.fabrik/issue.md` — the issue body (spec)\n")
+	b.WriteString("- `.fabrik/stage-{Name}.md` — output from prior stages (e.g. `.fabrik/stage-Research.md`)\n")
+	if stage.PostToPR {
+		b.WriteString("- `.fabrik/pr-description.md` — the linked PR description\n")
+	}
+	b.WriteString("\n")
 	if stage.PostToPR {
 		b.WriteString("Your detailed output will be posted on the PR. Provide a brief summary (2-4 sentences)\n")
 		b.WriteString("for the issue between these markers:\n\n")
@@ -405,6 +412,10 @@ func buildCommentReviewPrompt(stage *stages.Stage, item gh.ProjectItem, comments
 	}
 
 	b.WriteString("---\n\n")
+	b.WriteString("Context files are available in `.fabrik/` in your working directory:\n")
+	b.WriteString("- `.fabrik/issue.md` — the issue body (spec)\n")
+	b.WriteString("- `.fabrik/stage-{Name}.md` — the current stage output (e.g. `.fabrik/stage-Specify.md`) and prior stage outputs\n")
+	b.WriteString("\n")
 	b.WriteString("First, perform any actions requested in the comments using available tools.\n")
 	if item.IsPR {
 		b.WriteString("Then, if the PR description needs updating, output the complete updated PR description between these exact markers:\n\n")
