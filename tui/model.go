@@ -14,14 +14,19 @@ import (
 // HistoryEntry records a completed job for the history pane.
 type HistoryEntry struct {
 	IssueNumber int
+	Title       string
 	StageName   string
 	Success     bool
 	Duration    time.Duration
 	CompletedAt time.Time
+	TurnsUsed   int
+	MaxTurns    int
+	CostUSD     float64
 }
 
 // activeJob tracks an in-flight worker.
 type activeJob struct {
+	Title     string
 	StageName string
 	StartedAt time.Time
 	LastTag   string
@@ -134,6 +139,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case JobStartedEvent:
 		m.active[ev.IssueNumber] = &activeJob{
+			Title:     ev.Title,
 			StageName: ev.StageName,
 			StartedAt: ev.StartedAt,
 		}
@@ -143,10 +149,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		delete(m.active, ev.IssueNumber)
 		entry := HistoryEntry{
 			IssueNumber: ev.IssueNumber,
+			Title:       ev.Title,
 			StageName:   ev.StageName,
 			Success:     ev.Success,
 			Duration:    ev.Duration,
 			CompletedAt: ev.CompletedAt,
+			TurnsUsed:   ev.TurnsUsed,
+			MaxTurns:    ev.MaxTurns,
+			CostUSD:     ev.CostUSD,
 		}
 		m.history = append(m.history, entry)
 		m.updateHistoryViewport()
@@ -184,8 +194,30 @@ func (m *Model) updateHistoryViewport() {
 		}
 		ts := dimStyle.Render(h.CompletedAt.Format("2006-01-02 15:04"))
 		dur := fmtDuration(h.Duration)
-		line := fmt.Sprintf("#%-5d %-12s %s %s  %s%s",
-			h.IssueNumber, h.StageName, status, dur, ts, result)
+		stats := ""
+		if h.TurnsUsed > 0 || h.CostUSD > 0 {
+			parts := []string{}
+			if h.MaxTurns > 0 {
+				parts = append(parts, fmt.Sprintf("%d/%d turns", h.TurnsUsed, h.MaxTurns))
+			} else if h.TurnsUsed > 0 {
+				parts = append(parts, fmt.Sprintf("%d turns", h.TurnsUsed))
+			}
+			if h.CostUSD > 0 {
+				parts = append(parts, fmt.Sprintf("$%.2f", h.CostUSD))
+			}
+			stats = dimStyle.Render("  " + strings.Join(parts, " "))
+		}
+		titleStr := ""
+		if h.Title != "" {
+			maxTitle := max(innerWidth-60, 10)
+			t := h.Title
+			if runes := []rune(t); len(runes) > maxTitle {
+				t = string(runes[:maxTitle]) + "…"
+			}
+			titleStr = "  " + dimStyle.Render(t)
+		}
+		line := fmt.Sprintf("#%-5d %-12s %s %s  %s%s%s%s",
+			h.IssueNumber, h.StageName, status, dur, ts, stats, result, titleStr)
 		lines = append(lines, line)
 	}
 	m.historyVP.SetContent(strings.Join(lines, "\n"))
@@ -274,8 +306,17 @@ func (m Model) viewActive() string {
 				msg = string(runes[:maxMsg]) + "…"
 			}
 		}
-		line := fmt.Sprintf("#%-5d %-12s %s %s  %s %s",
-			num, job.StageName, spinner, elapsed, tag, msg)
+		titleStr := ""
+		if job.Title != "" {
+			maxTitle := max(m.width-50, 10)
+			t := job.Title
+			if runes := []rune(t); len(runes) > maxTitle {
+				t = string(runes[:maxTitle]) + "…"
+			}
+			titleStr = dimStyle.Render(t) + " "
+		}
+		line := fmt.Sprintf("#%-5d %-12s %s %s  %s%s %s",
+			num, job.StageName, spinner, elapsed, titleStr, tag, msg)
 		lines = append(lines, line)
 	}
 
