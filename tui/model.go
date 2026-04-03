@@ -388,21 +388,34 @@ func (m Model) viewHeader() string {
 
 	title := titleStyle.Render("fabrik")
 	timerStr := dimStyle.Render(timer)
-	gap := max(m.width-lipgloss.Width(title)-lipgloss.Width(timerStr)-6, 1)
-	topLine := title + strings.Repeat(" ", gap) + timerStr
 
-	if m.statusLine == "" {
-		return borderStyle.Width(m.width - 4).Render(topLine)
+	status := ""
+	if m.statusLine != "" {
+		status = "  " + dimStyle.Render(m.statusLine)
 	}
 
-	// Truncate status line to fit within the border
-	maxStatus := max(m.width-8, 10)
-	status := m.statusLine
-	if runes := []rune(status); len(runes) > maxStatus {
-		status = string(runes[:maxStatus]) + "…"
+	// title + status on left, timer on right, single line
+	left := title + status
+	leftWidth := lipgloss.Width(left)
+	timerWidth := lipgloss.Width(timerStr)
+	available := m.width - 6 // border + padding
+	if leftWidth+timerWidth+1 > available {
+		// Truncate status to fit
+		maxStatus := max(available-lipgloss.Width(title)-timerWidth-3, 0)
+		if maxStatus > 0 && m.statusLine != "" {
+			s := m.statusLine
+			if runes := []rune(s); len(runes) > maxStatus {
+				s = string(runes[:maxStatus]) + "…"
+			}
+			status = "  " + dimStyle.Render(s)
+		} else {
+			status = ""
+		}
+		left = title + status
+		leftWidth = lipgloss.Width(left)
 	}
-	content := topLine + "\n" + dimStyle.Render(status)
-	return borderStyle.Width(m.width - 4).Render(content)
+	gap := max(m.width-leftWidth-timerWidth-2, 1)
+	return " " + left + strings.Repeat(" ", gap) + timerStr
 }
 
 func (m Model) viewActive() string {
@@ -475,7 +488,7 @@ func (m Model) viewHistory() string {
 
 // headerHeight returns the approximate line height of the header pane.
 func headerHeight() int {
-	return 4 // border top + title line + status line + border bottom
+	return 1
 }
 
 // activeHeight returns the approximate line height of the active pane.
