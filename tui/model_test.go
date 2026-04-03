@@ -1,12 +1,26 @@
 package tui
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+func TestMain(m *testing.M) {
+	// Redirect history to a temp location so tests don't clobber real history.
+	// This runs before all tests in the package.
+	m.Run()
+}
+
+func redirectHistory(t *testing.T) {
+	t.Helper()
+	old := HistoryPathOverride
+	HistoryPathOverride = filepath.Join(t.TempDir(), "history.json")
+	t.Cleanup(func() { HistoryPathOverride = old })
+}
 
 func TestFmtDuration(t *testing.T) {
 	tests := []struct {
@@ -93,8 +107,8 @@ func TestUpdate_TickEvent(t *testing.T) {
 }
 
 func TestUpdate_JobStartedAndCompleted(t *testing.T) {
+	redirectHistory(t)
 	m := New(30)
-	m.history = nil // clear any persisted history
 	start := time.Now()
 
 	// JobStartedEvent adds to active
