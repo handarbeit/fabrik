@@ -515,13 +515,14 @@ func tmuxSessionName(issueNumber int, stageName string) string {
 // openLogViewerCmd returns a tea.Cmd that opens a terminal showing the most
 // recent log file in the given directory using less.
 func openLogViewerCmd(logDir string) tea.Cmd {
-	// Find the most recent file by name (filenames contain timestamps).
+	if _, err := os.Stat(logDir); err != nil {
+		// Directory doesn't exist — no logs available (e.g., tmux session)
+		return nil
+	}
 	entries, err := os.ReadDir(logDir)
 	if err != nil || len(entries) == 0 {
-		// Fall back to opening the directory listing
-		return openTerminalCmd("ls", "-lt", logDir)
+		return nil
 	}
-	// Sort by name descending (timestamp in name = lexicographic order).
 	latest := entries[len(entries)-1].Name()
 	return openTerminalCmd("sh", "-c", fmt.Sprintf("cd %s && less +F %s", logDir, latest))
 }
