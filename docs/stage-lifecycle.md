@@ -1,6 +1,6 @@
 # Fabrik Stage Lifecycle
 
-This document describes what the Fabrik engine does before, during, and after each stage invocation. It is intended as a reference for writing and refining stage prompts — understanding what Claude inherits and what the engine expects helps craft better instructions.
+This document describes what the Fabrik engine does before, during, and after each stage invocation. It is intended as a reference for writing and refining stage skills — understanding what Claude inherits and what the engine expects helps craft better instructions.
 
 ---
 
@@ -10,9 +10,11 @@ This document describes what the Fabrik engine does before, during, and after ea
 
 Before any work begins, two filters run:
 
-1. **Shallow pre-filter** (`itemMayNeedWork`): Uses board data only (no comments). Skips items that have no matching stage, haven't changed since last poll (unless cooldown retry), are paused, or are locked by another user.
+1. **Shallow pre-filter** (`itemMayNeedWork`): Uses board data only (no comments). Skips items that have no matching stage, haven't changed since last poll (unless cooldown retry), are paused, or are locked by another user. Does NOT filter on stage completion labels — completed items may still have new comments.
 
-2. **Deep filter** (`itemNeedsWork`): After fetching comments for items that pass the shallow check. New comments trigger processing even on completed stages. PRs only support comment processing (no stage invocation).
+2. **Deep filter** (`itemNeedsWork`): After fetching comments via `FetchItemDetails` for items that pass the shallow check. New comments trigger processing even on completed stages. PRs only support comment processing (no stage invocation).
+
+The two-phase approach minimizes GitHub GraphQL rate limit cost — only items that might need work get the expensive detail fetch (~2 points each vs ~1,200 for fetching everything).
 
 ### Lock & Label Acquisition
 
@@ -34,7 +36,7 @@ Each issue gets an isolated git worktree:
 - **Branch**: `fabrik/issue-<N>`
 - **First run**: Branch created from `origin/main`, then rebased onto latest `origin/main`
 - **Retry** (`attempted=true`): Worktree returned as-is — no rebase, no fetch. This preserves Claude's context and avoids pulling in unrelated changes mid-session.
-- **Rebase conflicts**: Silently aborted — Claude works from current base, a later stage can rebase.
+- **Rebase conflicts**: Silently aborted (rebase --abort) — Claude works from current base, a later stage can rebase.
 
 ### Read-Only Stage Stashing
 
@@ -60,31 +62,43 @@ If the stage is marked `read_only: true`:
 
 ### Prompt Construction
 
-The prompt sent to Claude is built from these sections in order:
+When a stage has a `skill:` field set (recommended), the prompt is a minimal directive:
 
 ```
-1. Stage prompt (from YAML config)
-2. ---
-3. # Issue #N: <title>
-   URL: <url>
-4. ## Spec / Issue Body
-   <full issue body>
-5. ## Labels
-   <comma-separated labels>
-6. ## Prior Discussion
-   <all comments — author, timestamp, body>
-7. ## New Comments
-   <only unprocessed comments>
-8. ---
-9. [If post_to_pr]: Instructions for FABRIK_SUMMARY markers
-10. Completion instruction: "end your response with FABRIK_STAGE_COMPLETE"
+You are operating as the Fabrik <StageName> agent for issue #<N>.
+Follow the instructions in the <skill-name> skill exactly.
+
+---
+# Issue #N: <title>
+URL: <url>
+
+## Spec / Issue Body
+<full issue body>
+
+## Labels
+<comma-separated labels>
+
+## Prior Discussion
+<all comments — author, timestamp, body>
+
+## New Comments
+<only unprocessed comments>
+
+---
+[If post_to_pr]: Instructions for FABRIK_SUMMARY markers
+Completion instruction: "end your response with FABRIK_STAGE_COMPLETE"
 ```
 
-**Key implication for prompts**: Claude receives the full issue body, all prior comments, and any new comments. The stage prompt should focus on *what to do*, not *what context is available*.
+When a stage uses an inline `prompt:` field (legacy), the prompt text replaces the skill directive at the top.
+
+The skill itself is auto-loaded by Claude Code via the `--plugin-dir` mechanism. It contains the detailed methodology, quality checklists, scope boundaries, and common pitfalls for the stage.
+
+**Key implication for skills**: Claude receives the full issue body, all prior comments, and any new comments in the prompt. The skill should focus on *methodology and quality standards*, not on describing what context is available.
 
 ### Claude Arguments
 
 ```
+--plugin-dir <absolute-path-to-.fabrik/plugin>
 --output-format json          (direct execution)
 --output-format stream-json   (tmux execution — enables real-time pane visibility)
 --verbose
@@ -94,17 +108,19 @@ The prompt sent to Claude is built from these sections in order:
 --allowedTools <tool> ...     (if restricted)
 ```
 
+The `--plugin-dir` is auto-detected from `.fabrik/plugin/` in the repo root (created by `fabrik init`) and resolved to an absolute path since Claude runs in the worktree.
+
 ### Execution Mode
 
 **With tmux** (default when available):
 - Session name: `fabrik-<N>-<stageName>` (sanitized)
 - User can observe: `tmux attach -t fabrik-<N>-<stageName>`
-- Stream-json piped through `fabrik _stream-filter` for human-readable display
+- Uses `stream-json` format, piped through `fabrik _stream-filter` for human-readable display (thinking, text, tool calls)
 - Falls back to direct execution if tmux fails
 
 **Direct execution** (when `--no-tmux` or tmux unavailable):
-- JSON output captured in memory
-- Stderr goes to log file (TUI mode) or stderr + log file (plain mode)
+- Uses `json` format, output captured in memory
+- Stderr goes to log file only (TUI mode) or stderr + log file (plain mode)
 
 ### Logging
 
@@ -120,9 +136,16 @@ The prompt sent to Claude is built from these sections in order:
 Three JSON formats are supported (tried in order):
 1. Single result object: `{"result": "...", "session_id": "..."}`
 2. JSON array: `[{"type":"system",...}, ..., {"type":"result","result":"..."}]`
-3. NDJSON (stream-json): One JSON object per line
+3. NDJSON (stream-json): One JSON object per line, last `type: "result"` used
 
-If parsing fails: A short error message is posted instead of the raw output. Full output is in the log files.
+If parsing fails: A short error message is posted instead of the raw output. Full output is in the log files. Raw JSON is never posted as a comment.
+
+### Issue Body Update
+
+Before posting output, the engine checks for `FABRIK_ISSUE_UPDATE_BEGIN`/`END` markers:
+- If found: Extracts the content and updates the issue body via the GitHub API
+- The markers and their content are stripped from the output before posting as a comment
+- This allows stages like Specify, Research, and Plan to refine the issue body
 
 ### Git Metadata Capture
 
@@ -145,7 +168,7 @@ These appear in the comment header for traceability.
 
 **Format**: `🏭 **Fabrik — stage: <name>** *branch: X | commit: Y | timestamp*`
 
-**Footer**: Stats appended — turns used, input/output tokens, completion status.
+**Footer**: Stats appended — turns used (with max), input/output tokens, completion status.
 
 **Truncation**: Output capped at ~60K characters (GitHub comment limit).
 
@@ -204,7 +227,7 @@ A comment is "new" if it:
 
 ### Flow
 
-1. **👀 (eyes) reaction** added to all new comments
+1. **Eyes reaction** added to all new comments
 2. **`fabrik:editing` label** added to issue
 3. **Worktree prepared** (fresh rebase, not a retry)
 4. **Claude invoked** with comment-review prompt:
@@ -215,7 +238,7 @@ A comment is "new" if it:
    - If found: Update issue/PR body with extracted content
    - If not found: Post Claude's output as a comment
 6. **`fabrik:editing` label** removed
-7. **🚀 (rocket) reaction** added to processed comments
+7. **Rocket reaction** added to processed comments
 8. **Comments marked processed** in memory
 
 ### Comment Prompt Construction
@@ -241,9 +264,23 @@ A comment is "new" if it:
 | Session | Fresh or resume on retry | Always resume |
 | Worktree update | Skip on retry | Always rebase |
 | Completion marker | `FABRIK_STAGE_COMPLETE` required | Not required |
-| Body update | Not expected | Via `FABRIK_ISSUE_UPDATE` markers |
-| Reaction flow | Labels only | 👀 → editing → 🚀 |
+| Issue body update | Via `FABRIK_ISSUE_UPDATE` markers (extracted and applied) | Via `FABRIK_ISSUE_UPDATE` markers (extracted and applied) |
+| Reaction flow | Labels only | Eyes -> editing -> Rocket |
 | Lock | `fabrik:locked:<user>` | `fabrik:editing` |
+
+### Known Limitation
+
+Comments processed via the Rocket reaction flow are not visible to subsequent stage retries. The stage prompt only includes `newComments` (unprocessed ones) — previously-processed comments are filtered out. This means a stage retry after comment processing may not see the user's answers. This will be addressed by context files (#99).
+
+---
+
+## Phase 5: Cleanup Stages
+
+Cleanup stages (`cleanup_worktree: true`) are terminal stages like Done:
+- No Claude invocation, no lock, no in_progress label
+- Remove the worktree directory (unconditionally — dirty state is discarded since the issue has completed all active stages)
+- Add `stage:<name>:complete` label
+- Respect `fabrik:paused` — skip if paused
 
 ---
 
@@ -251,9 +288,9 @@ A comment is "new" if it:
 
 | Marker | Direction | Purpose |
 |--------|-----------|---------|
-| `FABRIK_STAGE_COMPLETE` | Claude → Engine | Signals stage finished successfully (must be on its own line) |
-| `FABRIK_SUMMARY_BEGIN` / `END` | Claude → Engine | Brief summary for issue when `post_to_pr: true` |
-| `FABRIK_ISSUE_UPDATE_BEGIN` / `END` | Claude → Engine | Updated issue/PR body from comment processing |
+| `FABRIK_STAGE_COMPLETE` | Claude -> Engine | Signals stage finished successfully (must be on its own line) |
+| `FABRIK_SUMMARY_BEGIN` / `END` | Claude -> Engine | Brief summary for issue when `post_to_pr: true` |
+| `FABRIK_ISSUE_UPDATE_BEGIN` / `END` | Claude -> Engine | Updated issue body (works in both stage runs and comment processing) |
 
 ## Labels Reference
 
@@ -271,8 +308,9 @@ A comment is "new" if it:
 
 ```yaml
 name: Research              # Required: matches board column name
-order: 1                    # Required: processing priority (lower = earlier)
-prompt: |                   # Required: system prompt for Claude
+order: 2                    # Required: processing priority (lower = earlier)
+skill: fabrik-research      # Plugin skill name (recommended, alternative to prompt)
+prompt: |                   # Inline prompt (legacy, used when skill not set)
   ...
 model: sonnet               # Optional: Claude model
 max_turns: 50               # Optional: turn limit per invocation
@@ -291,3 +329,5 @@ cleanup_worktree: false     # Terminal stage — remove worktree instead of runn
 completion:
   type: claude              # Only supported type
 ```
+
+Either `skill` or `prompt` is required (unless `cleanup_worktree` is true). When `skill` is set, the engine sends a directive prompt and the skill is loaded via the `--plugin-dir` mechanism.
