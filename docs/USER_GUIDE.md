@@ -4,6 +4,7 @@ Fabrik is an automated Claude Code SDLC driver powered by GitHub Issues and Proj
 This guide covers everything you need to set up, configure, and use Fabrik effectively.
 
 For a quick overview see the [README](../README.md).
+For details on the internal stage lifecycle, see [Stage Lifecycle](stage-lifecycle.md).
 
 ---
 
@@ -14,7 +15,9 @@ For a quick overview see the [README](../README.md).
 3. [Workflow Patterns](#3-workflow-patterns)
 4. [Stage Reference](#4-stage-reference)
 5. [Labels Reference](#5-labels-reference)
-6. [Troubleshooting](#6-troubleshooting)
+6. [TUI Dashboard](#6-tui-dashboard)
+7. [Observability](#7-observability)
+8. [Troubleshooting](#8-troubleshooting)
 
 ---
 
@@ -26,6 +29,7 @@ For a quick overview see the [README](../README.md).
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
 - GitHub personal access token with `repo` and `project` scopes
 - A GitHub Project (v2) with board columns matching your stage names
+- tmux (optional, for observing Claude sessions in real-time)
 
 ### Initial Setup
 
@@ -36,8 +40,9 @@ go build -o fabrik .
 # Set your GitHub token
 export GITHUB_TOKEN=ghp_...
 
-# Copy the example stages and customize
-cp -r stages/examples stages/mystages
+# Initialize default stage configs
+./fabrik init
+# This creates .fabrik/stages/ with default YAML files
 ```
 
 ### Create a Project Board
@@ -46,7 +51,7 @@ Create a GitHub Project (v2) for your repository. Add board columns that corresp
 your stage names — the column name must match the `name` field in each stage YAML file
 exactly (case-sensitive). The default pipeline uses:
 
-`Backlog` → `Research` → `Plan` → `Implement` → `Review` → `Validate` → `Done`
+`Backlog` -> `Research` -> `Plan` -> `Implement` -> `Review` -> `Validate` -> `Done`
 
 ### First Run
 
@@ -55,12 +60,11 @@ exactly (case-sensitive). The default pipeline uses:
   --owner your-org \
   --repo your-repo \
   --project 1 \
-  --user your-github-username \
-  --stages ./stages/mystages
+  --user your-github-username
 ```
 
-Fabrik polls the project board by default every 30 seconds (configurable with `--poll`). Move an issue to `Research` on the
-board to start processing it.
+Fabrik polls the project board every 30 seconds by default (configurable with `--poll`).
+Move an issue to `Research` on the board to start processing it.
 
 ### Development Mode (self-upgrade)
 
@@ -73,8 +77,6 @@ This is intended for the self-evolving workflow where Fabrik develops Fabrik.
 ./fabrik --auto-upgrade --owner your-org --repo your-repo --project 1 --user you
 ```
 
-Upgrade lifecycle events are logged; failures are non-fatal and logged as warnings.
-
 ---
 
 ## 2. Configuration Reference
@@ -86,12 +88,16 @@ Upgrade lifecycle events are logged; failures are non-fatal and logged as warnin
 | `--owner` | GitHub repo owner (org or user) | required |
 | `--repo` | GitHub repo name | required |
 | `--project` | GitHub Project (v2) number | required |
-| `--user` | Your GitHub username — only processes board changes made by this user | required |
+| `--user` | Your GitHub username — only processes comments by this user | required |
 | `--token` | GitHub API token | `$GITHUB_TOKEN` |
-| `--stages` | Directory containing stage YAML configs | `./stages` |
+| `--stages` | Directory containing stage YAML configs | `./.fabrik/stages` |
 | `--yolo` | Auto-advance issues through stages without human approval | `false` |
-| `--auto-upgrade` | When idle for 2 polls, check origin/main for new commits and self-upgrade | `false` |
+| `--auto-upgrade` | When idle, self-upgrade from origin/main | `false` |
+| `--tui` | Enable the interactive TUI dashboard | `false` |
+| `--no-tmux` | Disable tmux session wrapping; run Claude directly | `false` |
 | `--poll` | Poll interval in seconds | `30` |
+| `--max-retries` | Max failed stage attempts before pausing the issue (0 = unlimited) | `3` |
+| `--debug-output` | Save Claude stage output to `.fabrik/debug/` | `false` |
 
 ### `.env` File Support
 
@@ -100,15 +106,18 @@ All flags can be set via `.env` — flags take precedence over `.env` values.
 
 ```
 FABRIK_TOKEN=ghp_...         # Preferred token env var
-GITHUB_TOKEN=ghp_...         # Fallback token env var (backward-compatible)
+GITHUB_TOKEN=ghp_...         # Fallback token env var
 FABRIK_OWNER=your-org
 FABRIK_REPO=your-repo
 FABRIK_PROJECT_NUMBER=1
 FABRIK_USER=your-username
-FABRIK_STAGES=./stages/mystages
+FABRIK_STAGES=./.fabrik/stages
 FABRIK_YOLO=true
 FABRIK_POLL=30
 FABRIK_MAX_CONCURRENT=5
+FABRIK_MAX_RETRIES=3
+FABRIK_NO_TMUX=false
+FABRIK_DEBUG_OUTPUT=false
 ```
 
 **Safety:** If a `.env` file exists but is not listed in `.gitignore`, Fabrik will
@@ -118,22 +127,21 @@ refuse to start with a fatal error to prevent accidental token leaks.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `FABRIK_TOKEN` | GitHub personal access token (preferred) | required (or use `--token`) |
-| `GITHUB_TOKEN` | GitHub personal access token (fallback) | required (or use `FABRIK_TOKEN`) |
-| `FABRIK_OWNER` | GitHub repo owner | — |
-| `FABRIK_REPO` | GitHub repo name | — |
-| `FABRIK_PROJECT_NUMBER` | GitHub Project (v2) number | — |
-| `FABRIK_USER` | Your GitHub username | — |
-| `FABRIK_STAGES` | Stage configs directory | `./stages` |
+| `FABRIK_TOKEN` | GitHub personal access token (preferred) | required |
+| `GITHUB_TOKEN` | GitHub personal access token (fallback) | required |
+| `FABRIK_OWNER` | GitHub repo owner | -- |
+| `FABRIK_REPO` | GitHub repo name | -- |
+| `FABRIK_PROJECT_NUMBER` | GitHub Project (v2) number | -- |
+| `FABRIK_USER` | Your GitHub username | -- |
+| `FABRIK_STAGES` | Stage configs directory | `./.fabrik/stages` |
 | `FABRIK_YOLO` | Auto-advance (`true`/`1`/`yes`) | `false` |
 | `FABRIK_POLL` | Poll interval in seconds | `30` |
-| `FABRIK_MAX_CONCURRENT` | Maximum number of issues processed simultaneously | `5` |
+| `FABRIK_MAX_CONCURRENT` | Max parallel Claude sessions | `5` |
+| `FABRIK_MAX_RETRIES` | Max retries before pausing (0 = unlimited) | `3` |
+| `FABRIK_NO_TMUX` | Disable tmux wrapping | `false` |
+| `FABRIK_DEBUG_OUTPUT` | Save raw Claude output for debugging | `false` |
 
 Token precedence: `--token` flag > `FABRIK_TOKEN` > `GITHUB_TOKEN`
-
-`FABRIK_MAX_CONCURRENT` controls how many Claude Code sessions can run in parallel.
-Increase it if you have many issues in active stages; lower it to reduce API costs or
-system load. Invalid values fall back to the default of `5`.
 
 ### Stage YAML Reference
 
@@ -142,76 +150,27 @@ Each stage is a YAML file in your stages directory. The filename is arbitrary; t
 
 ```yaml
 name: Research            # Required. Must match a Project board column exactly.
-order: 1                  # Required. Lower values are processed earlier in the pipeline.
-prompt: |                 # Required. System prompt given to Claude Code for stage work.
+order: 1                  # Required. Lower values processed earlier in the pipeline.
+prompt: |                 # Required. System prompt for Claude Code.
   You are a research agent...
-comment_prompt: |         # Optional. Prompt used when processing user comments on this stage.
-  You are reviewing user comments...
-model: sonnet             # Optional. Claude model to use: "opus", "sonnet", etc.
-max_turns: 10             # Optional. Maximum conversation turns Claude Code may take.
-post_to_pr: true          # Optional. Post detailed output on the linked PR; brief summary on issue.
-allowed_tools:            # Optional. Restrict which Claude Code tools are available.
+comment_prompt: |         # Optional. Prompt for processing user comments.
+  You are reviewing comments...
+model: sonnet             # Optional. Claude model: "opus", "sonnet", etc.
+max_turns: 10             # Optional. Max conversation turns per invocation.
+read_only: false          # Optional. Stash/restore worktree (for analysis stages).
+post_to_pr: true          # Optional. Post output on linked PR; summary on issue.
+create_draft_pr: true     # Optional. Create draft PR on completion.
+mark_pr_ready_on_complete: true  # Optional. Mark PR ready when stage completes.
+auto_advance: false       # Optional. Override global --yolo for this stage.
+no_tmux: false            # Optional. Skip tmux wrapping for this stage.
+cleanup_worktree: false   # Optional. Terminal stage — remove worktree, no Claude.
+allowed_tools:            # Optional. Restrict Claude's available tools.
   - Read
   - Grep
   - Glob
 completion:
-  type: claude            # "claude" (default and only supported type)
-  value: ""               # Reserved for future completion types
-auto_advance: false       # Optional. Override global --yolo setting for this specific stage.
+  type: claude            # Only supported type (default).
 ```
-
-#### Completion Types
-
-| Type | Behavior |
-|------|----------|
-| `claude` | Claude signals completion by outputting the exact line `FABRIK_STAGE_COMPLETE` (default) |
-
-Stages that do not complete apply a cooldown before retrying (see [Cooldown on Incomplete Stages](#cooldown-on-incomplete-stages)).
-
-#### Model Override via Stage Config
-
-Set `model: opus` or `model: sonnet` in a stage YAML to use a specific model for that
-stage. This is useful for balancing cost vs. capability — e.g., using `sonnet` for
-lightweight Research and `opus` for complex Implement work.
-
-#### `allowed_tools`
-
-Restrict the Claude Code tools available during a stage. An empty list (the default)
-allows all tools. Example — read-only Research stage:
-
-```yaml
-allowed_tools:
-  - Read
-  - Grep
-  - Glob
-```
-
-Available tools include the full Claude Code tool set: `Read`, `Write`, `Edit`, `Bash`,
-`Grep`, `Glob`, `LSP`, and others.
-
-#### `post_to_pr`
-
-When `true`, the stage's detailed Claude output is posted as a comment on the linked PR,
-and a brief summary is posted on the issue. Requires a PR to be linked to the issue.
-If no linked PR is found, output falls back to the issue.
-
-This is used by the default Review stage to keep detailed code-review feedback on the
-PR where it belongs, while keeping the issue comment thread clean.
-
-When using `post_to_pr: true`, include instructions in your prompt for Claude to emit
-a `FABRIK_SUMMARY_BEGIN` / `FABRIK_SUMMARY_END` block with a 2–4 sentence summary of
-what was done. Fabrik extracts this summary and posts it on the issue.
-
-#### `auto_advance`
-
-Override the global `--yolo` flag for a specific stage:
-
-```yaml
-auto_advance: true   # Always auto-advance from this stage, even without --yolo
-auto_advance: false  # Always wait for human approval from this stage, even with --yolo
-```
-
-Omitting `auto_advance` inherits the global `--yolo` setting.
 
 ---
 
@@ -234,30 +193,29 @@ issue body and all prior comments, so context carries forward.
 
 **Effective comment patterns:**
 
-- *"Please link the PR to this issue"* — Claude creates the PR link
-- *"Please process PR feedback on PR #18"* — Claude reads PR reviews and addresses them
-- *"Let's use approach B instead"* — Claude updates the plan and continues
-- *"The answer to your question about X is Y"* — Claude incorporates your answer
-- *"Please push and link the PR"* — Claude pushes the branch and creates a draft PR
+- *"Please link the PR to this issue"* -- Claude creates the PR link
+- *"Please process PR feedback on PR #18"* -- Claude reads PR reviews and addresses them
+- *"Let's use approach B instead"* -- Claude updates the plan and continues
+- *"The answer to your question about X is Y"* -- Claude incorporates your answer
+- *"Please push and link the PR"* -- Claude pushes the branch and creates a draft PR
 
 When you post a comment:
-1. Fabrik reacts with 👀 to acknowledge the comment.
+1. Fabrik reacts with eyes to acknowledge the comment.
 2. Claude is invoked with the stage's `comment_prompt` (or a default prompt).
 3. Claude performs any requested actions.
 4. If the issue body should be updated, Claude outputs the new body between
    `FABRIK_ISSUE_UPDATE_BEGIN` and `FABRIK_ISSUE_UPDATE_END` markers.
 5. Fabrik updates the issue body (or posts a comment if no markers are found).
-6. Fabrik reacts with 🚀 to mark the comment as processed.
+6. Fabrik reacts with rocket to mark the comment as processed.
 
-The 🚀 reaction is durable — on restart, Fabrik skips comments that already have it,
-preventing duplicate processing.
+The rocket reaction is durable -- on restart, Fabrik skips comments that already have it.
 
-### Reaction Flow Summary
+### Reaction Flow
 
 | Reaction | Meaning |
 |----------|---------|
-| 👀 | Comment received and queued for processing |
-| 🚀 | Comment has been fully processed |
+| Eyes | Comment received and queued for processing |
+| Rocket | Comment has been fully processed |
 
 ### When to Intervene
 
@@ -267,40 +225,28 @@ You do not need to babysit the pipeline. The intended human role is:
 - **Answer questions** when Research surfaces a checklist of unknowns.
 - **Move cards** (or use `--yolo` to automate this).
 - **Comment** to steer when the plan goes sideways or you want to redirect.
-- **Review PRs** before merging — Fabrik gets them review-ready, not merge-ready.
+- **Review PRs** before merging -- Fabrik gets them review-ready, not merge-ready.
 
 ### Draft PR Workflow
 
-The Implement stage is intended to push commits and create a **draft PR** linked to
-the issue. This gives you a place to review incrementally. The Review stage then
-rebases, reviews, fixes, and pushes — turning the draft into a review-ready PR.
+The Implement stage creates a **draft PR** linked to the issue. This gives you a place
+to review incrementally. The Review stage then rebases, reviews, fixes, and pushes --
+turning the draft into a review-ready PR.
 
-If Claude does not automatically create the PR, comment:
-*"Please push and link the PR"*
+### Retry and Escalation
 
-### Review and Fix Workflow
+When a stage doesn't complete (Claude doesn't output `FABRIK_STAGE_COMPLETE`):
 
-The default Review stage (`post_to_pr: true`) does the following:
-1. Checks for uncommitted changes from previous sessions and commits/incorporates them.
-2. Rebases the branch onto latest main and resolves merge conflicts.
-3. Reviews the code for correctness, security issues, test coverage, and style.
-4. Fixes any issues found, committing after each fix.
-5. Pushes to the PR branch.
-6. Posts detailed findings on the PR and a brief summary on the issue.
+1. **Cooldown**: Fabrik waits `poll_interval x 10` seconds (default 5 minutes) before retrying.
+2. **Resume**: On retry, Claude resumes the existing conversation session with full context.
+3. **WIP commit**: Partial work is committed and pushed to preserve progress.
+4. **Max retries**: After `--max-retries` failures (default 3):
+   - `fabrik:paused` and `stage:<name>:failed` labels are added
+   - An explanatory comment is posted on the issue
+   - The issue stops being processed until a human investigates
 
-If the Review stage finds an issue it cannot fix autonomously (e.g., a design decision),
-it lists the blocker clearly and does **not** signal completion. The stage will retry
-after a cooldown, or you can comment to provide guidance.
-
-### Cooldown on Incomplete Stages
-
-If a stage doesn't signal completion (no `FABRIK_STAGE_COMPLETE` output), Fabrik
-applies a cooldown before retrying. The cooldown is `poll_interval × 10` seconds
-(default: 30s × 10 = 5 minutes).
-
-After the cooldown expires, Fabrik retries the stage automatically. This prevents
-hot-looping on stages awaiting external input (like a human answering a question or
-a CI check completing).
+To resume after escalation: remove the `fabrik:paused` label. Fabrik will clear the
+failed label, reset the retry count, and try again immediately.
 
 ---
 
@@ -310,69 +256,29 @@ a CI check completing).
 
 | Stage | Order | Purpose |
 |-------|-------|---------|
-| **Backlog** | — | Parking lot. No stage config needed; issues here are not processed. |
+| **Backlog** | -- | Parking lot. No stage config needed. |
 | **Research** | 1 | Explore codebase, surface questions, summarize findings. |
 | **Plan** | 2 | Design approach, break into tasks, document decisions. |
 | **Implement** | 3 | Write code and tests, commit frequently, push to branch. |
 | **Review** | 4 | Rebase, review, fix issues, push. Posts output on PR. |
-| **Validate** | 5 | Run tests, verify requirements met, confirm PR is ready. |
-| **Done** | — | Terminal state. No stage config needed; issues here are not processed. |
-
-### Research Stage
-
-- **Model:** `sonnet`
-- **Max turns:** 10
-- **Completion:** `claude` (outputs `FABRIK_STAGE_COMPLETE`)
-- **Comment prompt:** Incorporates user answers into the issue body, removes resolved questions.
-
-Claude explores the codebase, lists relevant files, surfaces ambiguities as a checklist,
-and summarizes findings in the issue body. When all questions are answered (by user
-comments), Claude signals completion.
-
-### Plan Stage
-
-Claude reads the research output and designs a solution. Output is written into the
-issue body as a structured plan with a task checklist that later stages can follow.
-
-### Implement Stage
-
-- **Model:** `sonnet`
-- **Max turns:** 50
-- **Completion:** `claude`
-
-Claude checks for prior uncommitted work (from interrupted sessions), implements the
-plan task-by-task, commits after each logical unit, writes tests, and pushes commits
-to the `fabrik/issue-N` branch.
-
-### Review Stage
-
-- **Model:** `sonnet`
-- **Max turns:** 30
-- **`post_to_pr: true`**
-- **Completion:** `claude`
-
-Claude rebases, reviews, fixes, and pushes. Detailed findings go on the PR; a brief
-summary goes on the issue. If issues are unfixable, Claude blocks completion and
-describes the blocker.
-
-### Validate Stage
-
-Claude runs the test suite, checks that requirements in the issue body are met, and
-confirms the PR is ready for human merge review.
+| **Validate** | 5 | Run tests, verify requirements, confirm PR is ready. |
+| **Done** | -- | Terminal state. Cleanup stage removes worktree. |
 
 ### Customizing Stages
 
-Copy the example stages and modify them:
-
 ```bash
-cp -r stages/examples stages/mystages
-# Edit stages/mystages/*.yaml
-./fabrik --stages ./stages/mystages ...
+# Initialize with defaults
+./fabrik init
+
+# Edit stage configs
+vim .fabrik/stages/research.yaml
+
+# Or point to a custom directory
+./fabrik --stages ./my-custom-stages ...
 ```
 
-You can add, remove, or reorder stages. Stages must include the required fields
-described in the YAML reference (for example, `name`, `order`, and `prompt`). In addition,
-`name` should match a board column and `order` values should be unique and define the stage sequence.
+You can add, remove, or reorder stages. Stages must have `name`, `order`, and `prompt`
+fields. The `name` must match a board column and `order` values define the sequence.
 
 ---
 
@@ -380,51 +286,141 @@ described in the YAML reference (for example, `name`, `order`, and `prompt`). In
 
 ### Fabrik-Managed Labels
 
-Fabrik creates and manages these labels automatically:
-
 | Label | Purpose |
 |-------|---------|
-| `fabrik:locked:<user>` | Issue is being actively processed by this user's Fabrik instance. Other instances skip the issue. |
-| `fabrik:editing` | Issue body is being updated. Prevents concurrent edits. |
-| `stage:<name>:complete` | The named stage has been completed. Prevents re-running after restart. |
+| `fabrik:locked:<user>` | Issue being processed by this user's instance |
+| `fabrik:editing` | Issue body being updated (comment processing) |
+| `fabrik:paused` | Processing paused (max retries exceeded or manual) |
+| `stage:<name>:in_progress` | Stage actively running |
+| `stage:<name>:complete` | Stage completed successfully |
+| `stage:<name>:failed` | Stage hit max retries |
 
-### Model Override Labels
-
-Add a `model:<name>` label to an issue to override the model for that specific issue,
-regardless of what the stage YAML specifies:
+### User-Set Labels
 
 | Label | Effect |
 |-------|--------|
-| `model:opus` | Use Claude Opus for all stage invocations on this issue |
-| `model:sonnet` | Use Claude Sonnet for all stage invocations on this issue |
+| `model:opus` | Override Claude model to Opus for this issue |
+| `model:sonnet` | Override Claude model to Sonnet for this issue |
+| `fabrik:paused` | Manually pause processing (add to pause, remove to resume) |
 
-The label override takes precedence over the stage YAML `model` field. If multiple
-`model:*` labels are present, the first one is used and the others are ignored with
-a warning in the logs.
-
-Use model labels when an issue is unusually complex and needs extra capability, or when
-a particular issue can be handled with a lighter model to reduce cost.
-
-### Label Precedence
-
-```
-model:<name> label on issue  >  model field in stage YAML  >  no model specified
-```
+Model label precedence: `model:<name>` label > stage YAML `model` field > default.
 
 ---
 
-## 6. Troubleshooting
+## 6. TUI Dashboard
+
+Enable the interactive terminal dashboard with `--tui`:
+
+```bash
+./fabrik --tui --owner your-org --repo your-repo --project 1 --user you
+```
+
+### Layout
+
+The TUI shows three panes:
+- **Header**: Poll timer countdown, latest status message
+- **In Progress**: Active Claude sessions with issue title, stage, elapsed time, and last status
+- **History**: Completed jobs with title, stage, duration, turns, cost, and timestamp
+
+### Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `Tab` | Switch focus between In Progress and History panes |
+| `Up/Down` or `j/k` | Navigate items within the focused pane |
+| `a` | Attach to tmux session for selected in-progress job |
+| `l` | Open latest log file for selected history job |
+| `C` (shift-c) | Clear history |
+| `q` | Quit |
+
+### History Persistence
+
+Job history is saved to `~/.fabrik/history.json` and restored on restart.
+
+---
+
+## 7. Observability
+
+### Tmux Sessions
+
+By default, each Claude invocation runs inside a named tmux session. You can observe
+Claude working in real-time:
+
+```bash
+# List active sessions
+tmux list-sessions | grep fabrik
+
+# Attach to a session
+tmux attach -t fabrik-42-implement
+```
+
+The tmux pane shows a human-readable stream of Claude's activity:
+- Thinking blocks (with reasoning)
+- Text responses
+- Tool calls with compact argument summaries
+- Completion summary with turns and cost
+
+Detach with `Ctrl-b d` without interrupting Claude's work.
+
+To disable tmux wrapping: `--no-tmux` flag, `FABRIK_NO_TMUX=true`, or `no_tmux: true`
+in the stage YAML.
+
+### Log Files
+
+Session logs are saved to `~/.fabrik/logs/issue-<N>/`:
+```bash
+ls -lt ~/.fabrik/logs/issue-42/
+# Research-20260402-150405-1775174307809137000.log
+# Implement-20260402-160000-1775174400000000000.log
+```
+
+### Debug Output
+
+Enable `--debug-output` to save Claude's raw output to `.fabrik/debug/` in the
+working directory. Useful for diagnosing prompt issues or unexpected behavior.
+
+### Rate Limit Monitoring
+
+Fabrik reports GitHub API rate limit stats in each poll cycle:
+- REST API: requests remaining / limit
+- GraphQL API: points remaining / limit
+
+The GraphQL query uses a two-phase fetch (shallow board scan + targeted detail fetch)
+to minimize rate limit consumption. Typical cost is ~5-30 points per poll depending on
+active items, well within the 5,000 points/hour limit.
+
+---
+
+## 8. Troubleshooting
+
+### Issue Not Being Picked Up
+
+- Confirm the board column name exactly matches a stage YAML `name` (case-sensitive).
+- Confirm the issue is on the project board.
+- Check for `fabrik:locked:<other-user>` label (another instance has it).
+- Check for stuck `fabrik:editing` label (remove manually if stale).
+- Check the poll log -- the issue may be filtered by `updatedAt` caching. Restart Fabrik
+  to force a fresh scan.
+
+### Stage Keeps Retrying
+
+A stage that never outputs `FABRIK_STAGE_COMPLETE` retries after each cooldown. Causes:
+
+- **Claude found an unfixable issue** -- comment to provide guidance.
+- **Missing context** -- add detail to the issue body.
+- **Bug in the stage prompt** -- check that the prompt instructs Claude to output
+  `FABRIK_STAGE_COMPLETE` when done.
+
+After `--max-retries` failures, the issue is paused with `fabrik:paused`. Remove the
+label to resume.
 
 ### Stale Worktrees
 
-Worktrees are created at `.fabrik/worktrees/issue-N/` on branch `fabrik/issue-N`.
-Fabrik keeps them up to date with main automatically: on each poll, if the worktree
-has no uncommitted changes, Fabrik fetches and merges the latest main.
+Worktrees are at `.fabrik/worktrees/issue-N/` on branch `fabrik/issue-N`. On each stage
+invocation, Fabrik rebases onto latest main (unless it's a retry). If the rebase
+conflicts, it's silently aborted and Claude works from the current base.
 
-If a worktree has uncommitted changes, the auto-update is skipped and Claude will
-handle any necessary rebasing during the stage (as the Review stage does explicitly).
-
-To manually clean up a worktree:
+To manually clean up:
 ```bash
 git worktree remove --force .fabrik/worktrees/issue-N
 git branch -D fabrik/issue-N
@@ -432,78 +428,34 @@ git branch -D fabrik/issue-N
 
 ### Killed or Interrupted Sessions
 
-Claude Code sessions are stored at `~/.fabrik/sessions/issue-N/stage-name.session`.
-If a session is interrupted mid-stage, Fabrik resumes from the session file on the
-next poll. The Implement stage's instruction to commit frequently minimizes lost work.
+Claude sessions are stored at `~/.fabrik/sessions/issue-N/<stage>.session`. On retry,
+Fabrik resumes from the session file. The Implement stage commits frequently to minimize
+lost work.
 
-If a session is in a bad state and you want a clean restart:
-1. Remove the session file: `rm ~/.fabrik/sessions/issue-N/stage-name.session`
-2. Remove the `stage:<name>:complete` label from the issue (if incorrectly applied)
-3. Fabrik will start a fresh session on the next poll
+To force a fresh session:
+1. Remove: `rm ~/.fabrik/sessions/issue-N/<stage>.session`
+2. Remove `stage:<name>:complete` label if incorrectly applied
+3. Fabrik starts a fresh session on next poll
 
 ### Comment Reprocessed After Restart
 
-The 🚀 reaction on a comment is the durable "processed" marker. If you restart Fabrik
-and a comment gets processed again, it means the 🚀 reaction was not applied before
-shutdown (e.g., Fabrik was killed mid-flight).
-
-This is expected behavior for the in-flight comment. Subsequent polls will not
-reprocess it once 🚀 is applied.
-
-### Stage Keeps Retrying
-
-A stage that never outputs `FABRIK_STAGE_COMPLETE` will retry indefinitely after each
-cooldown period. Common causes:
-
-- **Claude found an unfixable issue** — comment on the issue to provide guidance or
-  make a decision. Claude will incorporate your input and may then be able to complete.
-- **Missing context in the issue body** — the issue spec may be incomplete. Add detail
-  or answer Claude's questions via comments.
-- **Bug in the stage prompt** — the prompt may not instruct Claude to signal completion.
-  Check your stage YAML `prompt` field ends with instructions to output `FABRIK_STAGE_COMPLETE`.
-
-### Issue Not Being Picked Up
-
-- Confirm the board column name exactly matches the `name` field in a stage YAML (case-sensitive).
-- Confirm the issue is on the board (issues not added to the project are not visible to Fabrik).
-- Check that no `fabrik:locked:<other-user>` label is present (another instance has it locked).
-- Check that no `fabrik:editing` label is stuck on the issue (remove it manually if stale).
-
-### Multi-User Conflicts
-
-Multiple users can run Fabrik against the same project board. Each instance only
-processes changes made by its own `--user`. If you see an issue being processed by
-another user's instance, the `fabrik:locked:<user>` label will be present — your
-instance will skip it until the lock is released.
+The rocket reaction is the durable "processed" marker. If a comment gets reprocessed
+after restart, it means the rocket was not applied before shutdown (killed mid-flight).
+This is expected for in-flight comments.
 
 ### Post-to-PR Output Missing
 
-If a stage with `post_to_pr: true` is not posting to the PR:
-- Confirm the issue has a linked PR. Fabrik searches for a PR with the issue number
-  in its title or body, or linked via the GitHub "Development" section.
-- If no PR is found, output falls back to the issue comment thread.
+For stages with `post_to_pr: true`:
+- Confirm the issue has a linked PR (via "Development" section or `Closes #N` in PR body)
+- If no PR is found, output falls back to the issue
 
-### FABRIK_SUMMARY Not Appearing
+### Raw JSON in Comments
 
-For `post_to_pr: true` stages, Claude needs to emit the summary markers in its output:
+If you see raw JSON dumped in issue/PR comments, Claude Code's output format has
+changed. Update Fabrik to the latest version -- `parseClaudeJSON` handles multiple
+output formats (single JSON, JSON array, and stream-json NDJSON).
 
-```
-FABRIK_SUMMARY_BEGIN
-Brief summary of what was done (2–4 sentences).
-FABRIK_SUMMARY_END
-```
+### Multi-User Conflicts
 
-If your stage prompt does not instruct Claude to produce this block, no summary will
-appear on the issue. Add explicit instructions to your prompt:
-
-```yaml
-prompt: |
-  ...your existing prompt...
-
-  After completing your work, output a brief summary (2-4 sentences) wrapped in:
-  FABRIK_SUMMARY_BEGIN
-  <your summary here>
-  FABRIK_SUMMARY_END
-
-  Then signal completion with FABRIK_STAGE_COMPLETE
-```
+Multiple users can run Fabrik against the same board. Each instance only processes
+comments by its `--user`. The `fabrik:locked:<user>` label prevents conflicts.
