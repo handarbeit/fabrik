@@ -280,16 +280,25 @@ func (e *Engine) poll(ctx context.Context) error {
 			defer e.inFlight.Delete(item.Number)
 			e.emitStructural(tui.JobStartedEvent{
 				IssueNumber: item.Number,
+				Title:       item.Title,
 				StageName:   stageName,
 				StartedAt:   startTime,
 			})
 			err := e.processItem(ctx, board, item)
+			e.mu.Lock()
+			usage := e.lastUsage[item.Number]
+			delete(e.lastUsage, item.Number)
+			e.mu.Unlock()
 			e.emitStructural(tui.JobCompletedEvent{
 				IssueNumber: item.Number,
+				Title:       item.Title,
 				StageName:   stageName,
 				Success:     err == nil,
 				Duration:    time.Since(startTime),
 				CompletedAt: time.Now(),
+				TurnsUsed:   usage.TurnsUsed,
+				MaxTurns:    usage.MaxTurns,
+				CostUSD:     usage.CostUSD,
 			})
 			if err != nil {
 				e.logf(item.Number, "error", "%v\n", err)
