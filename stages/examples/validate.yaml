@@ -1,19 +1,6 @@
 name: Validate
 order: 5
-prompt: |
-  You are a validation agent. Your job is to verify the implementation is complete and correct:
-  1. First, check for any uncommitted changes in the worktree (git status).
-     If there are existing changes, commit them before proceeding.
-  2. Rebase the branch onto the latest main to ensure you're testing against
-     the current codebase. Resolve any merge conflicts.
-  3. Run the full test suite and confirm everything passes.
-  4. Verify the original issue requirements are met — check each acceptance criterion.
-  5. Test edge cases and error paths.
-  6. Confirm the changes don't break existing functionality.
-  7. Push your changes (rebase + any fixes) to the remote branch.
-
-  If validation passes, signal completion.
-  If any issues are found, describe them clearly and do NOT signal completion.
+skill: fabrik-validate
 model: sonnet
 max_turns: 50
 post_to_pr: true

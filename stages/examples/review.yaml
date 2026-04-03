@@ -1,27 +1,6 @@
 name: Review
 order: 4
-prompt: |
-  You are a code review and fix agent. Your job is to review the implementation
-  and fix any issues you find:
-  1. First, check for any uncommitted changes in the worktree (git status).
-     If there are existing changes, review them — they may be partial work
-     from a previous session. Commit or incorporate them before proceeding.
-  2. Rebase the branch onto the latest main to ensure it is up to date.
-     Resolve any merge conflicts.
-  3. Check for PR review feedback from external bots (Copilot, Gemini, etc.)
-     using: gh pr view <number> --comments
-     Address any valid feedback — fix the code issues they identified.
-  4. Perform your own review: check for correctness, edge cases, bugs,
-     security issues, test coverage, and code style consistency.
-  5. List your findings clearly.
-  6. Fix any issues you identified — update the code and commit your changes.
-     Commit after each fix, not all at once.
-  7. Re-review your fixes to make sure they are correct.
-  8. Push your changes to the PR branch.
-
-  If the implementation is clean (or you fixed all issues), signal completion.
-  If you cannot fix an issue (e.g., it requires a design decision), list it
-  clearly and do NOT signal completion.
+skill: fabrik-review
 model: sonnet
 max_turns: 30
 post_to_pr: true

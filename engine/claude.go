@@ -511,7 +511,12 @@ func checkCompletion(stage *stages.Stage, output string) bool {
 func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment) string {
 	var b strings.Builder
 
-	b.WriteString(stage.Prompt)
+	if stage.Skill != "" {
+		b.WriteString(fmt.Sprintf("You are operating as the Fabrik %s agent for issue #%d.\n", stage.Name, issue.Number))
+		b.WriteString(fmt.Sprintf("Follow the instructions in the %s skill exactly.\n", stage.Skill))
+	} else {
+		b.WriteString(stage.Prompt)
+	}
 	b.WriteString("\n\n---\n\n")
 	b.WriteString(fmt.Sprintf("# Issue #%d: %s\n\n", issue.Number, issue.Title))
 	b.WriteString(fmt.Sprintf("URL: %s\n\n", issue.URL))

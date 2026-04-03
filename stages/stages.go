@@ -18,7 +18,14 @@ type Stage struct {
 	Order int `yaml:"order"`
 
 	// Prompt is the system prompt sent to Claude Code for this stage.
-	Prompt string `yaml:"prompt"`
+	// Optional when Skill is set — the skill provides the instructions.
+	Prompt string `yaml:"prompt,omitempty"`
+
+	// Skill names a Fabrik plugin skill (e.g., "fabrik-research") that Claude
+	// should follow for this stage. When set, the engine sends a directive
+	// prompt instead of the Prompt field. The skill must be installed in the
+	// user's Claude Code plugin configuration.
+	Skill string `yaml:"skill,omitempty"`
 
 	// Model to use (e.g., "opus", "sonnet"). Optional.
 	Model string `yaml:"model,omitempty"`
@@ -126,8 +133,8 @@ func loadOne(path string) (*Stage, error) {
 	}
 
 	if !s.CleanupWorktree {
-		if s.Prompt == "" {
-			return nil, fmt.Errorf("stage %q must have a 'prompt' field", s.Name)
+		if s.Prompt == "" && s.Skill == "" {
+			return nil, fmt.Errorf("stage %q must have a 'prompt' or 'skill' field", s.Name)
 		}
 
 		if s.Completion.Type == "" {
