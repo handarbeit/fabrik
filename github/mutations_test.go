@@ -241,3 +241,39 @@ func TestEnsureLabel(t *testing.T) {
 		t.Fatalf("ensureLabel: %v", err)
 	}
 }
+
+func TestUpdateComment_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			t.Errorf("method = %s, want PATCH", r.Method)
+		}
+		if !strings.HasSuffix(r.URL.Path, "/repos/owner/repo/issues/comments/99") {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		var body map[string]interface{}
+		json.NewDecoder(r.Body).Decode(&body)
+		if body["body"] != "updated body" {
+			t.Errorf("body = %v", body["body"])
+		}
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	if err := c.UpdateComment("owner", "repo", 99, "updated body"); err != nil {
+		t.Fatalf("UpdateComment: %v", err)
+	}
+}
+
+func TestUpdateComment_Error(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404)
+		w.Write([]byte(`{"message":"not found"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	if err := c.UpdateComment("owner", "repo", 99, "body"); err == nil {
+		t.Fatal("expected error for 404 response")
+	}
+}

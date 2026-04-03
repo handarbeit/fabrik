@@ -15,14 +15,17 @@ type mockGitHubClient struct {
 	addLabelToIssueFn         func(owner, repo string, issueNumber int, labelName string) error
 	removeLabelFromIssueFn    func(owner, repo string, issueNumber int, labelName string) error
 	addCommentFn              func(owner, repo string, issueNumber int, body string) error
+	updateCommentFn           func(owner, repo string, commentDatabaseID int, body string) error
+	updateIssueBodyFn         func(owner, repo string, issueNumber int, body string) error
 	updateProjectItemStatusFn func(projectID, itemID, statusFieldID, statusOptionID string) error
 	rateLimitStatsFn          func() (gh.RateLimitStats, gh.RateLimitStats)
 
 	// Track calls
-	addLabelCalls     []addLabelCall
-	removeLabelCalls  []removeLabelCall
-	addCommentCalls   []addCommentCall
-	updateStatusCalls []updateStatusCall
+	addLabelCalls      []addLabelCall
+	removeLabelCalls   []removeLabelCall
+	addCommentCalls    []addCommentCall
+	updateCommentCalls []updateCommentCall
+	updateStatusCalls  []updateStatusCall
 }
 
 type addLabelCall struct {
@@ -40,6 +43,12 @@ type removeLabelCall struct {
 type addCommentCall struct {
 	owner, repo string
 	issueNumber int
+	body        string
+}
+
+type updateCommentCall struct {
+	owner, repo string
+	commentID   int
 	body        string
 }
 
@@ -96,7 +105,18 @@ func (m *mockGitHubClient) AddCommentReaction(owner, repo string, commentDatabas
 	return nil
 }
 
+func (m *mockGitHubClient) UpdateComment(owner, repo string, commentDatabaseID int, body string) error {
+	if m.updateCommentFn != nil {
+		return m.updateCommentFn(owner, repo, commentDatabaseID, body)
+	}
+	m.updateCommentCalls = append(m.updateCommentCalls, updateCommentCall{owner, repo, commentDatabaseID, body})
+	return nil
+}
+
 func (m *mockGitHubClient) UpdateIssueBody(owner, repo string, issueNumber int, body string) error {
+	if m.updateIssueBodyFn != nil {
+		return m.updateIssueBodyFn(owner, repo, issueNumber, body)
+	}
 	return nil
 }
 
@@ -151,4 +171,11 @@ func (m *mockClaudeInvoker) Invoke(ctx context.Context, stage *stages.Stage, iss
 		return m.invokeFn(stage, issue, newComments, resume, workDir, modelOverride)
 	}
 	return "mock output", false, TokenUsage{}, nil
+}
+
+func (m *mockClaudeInvoker) InvokeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+	if m.invokeFn != nil {
+		return m.invokeFn(stage, issue, comments, false, workDir, modelOverride)
+	}
+	return "mock comment output", false, TokenUsage{}, nil
 }
