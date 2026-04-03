@@ -103,6 +103,7 @@ func New(pollSeconds int) Model {
 	return Model{
 		pollInterval:  time.Duration(pollSeconds) * time.Second,
 		active:        make(map[int]*activeJob),
+		history:       LoadHistory(),
 		historyVP:     vp,
 		spinnerFrames: []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"},
 		now:           time.Now(),
@@ -128,6 +129,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch ev.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
+
+		case "C":
+			m.history = nil
+			m.histIdx = 0
+			SaveHistory(m.history)
+			m.updateHistoryViewport()
+			return m, nil
 
 		case "tab":
 			if m.focusPane == paneActive {
@@ -238,6 +246,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			CostUSD:     ev.CostUSD,
 		}
 		m.history = append(m.history, entry)
+		SaveHistory(m.history)
 		m.updateHistoryViewport()
 		return m, nil
 
@@ -421,7 +430,7 @@ func (m Model) viewHistory() string {
 	title := dimStyle.Render(fmt.Sprintf("%s History (%d)", focusIndicator, len(m.history)))
 	hint := ""
 	if m.focusPane == paneHistory && len(m.history) > 0 {
-		hint = dimStyle.Render("  [l]ogs  [tab] in-progress")
+		hint = dimStyle.Render("  [l]ogs  [C]lear  [tab] in-progress")
 	}
 	content := title + hint + "\n" + m.historyVP.View()
 	return borderStyle.Width(m.width - 4).Render(content)
