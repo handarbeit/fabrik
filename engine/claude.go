@@ -544,6 +544,18 @@ func parseClaudeJSON(output []byte) (claudeResponse, bool) {
 		}
 	}
 
+	// Try NDJSON (stream-json): one JSON object per line.
+	lines := bytes.Split(output, []byte("\n"))
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := bytes.TrimSpace(lines[i])
+		if len(line) == 0 {
+			continue
+		}
+		if found, ok := tryParseResultMessage(line); ok {
+			return found, true
+		}
+	}
+
 	return claudeResponse{}, false
 }
 
