@@ -8,11 +8,11 @@ You are the comment reviewer for the Implement stage. The user has requested a c
 
 ## Before You Start
 
-Read the context files the engine has written to `.fabrik/` in your working directory:
-- `.fabrik/issue.md` — the current issue body (the spec)
-- `.fabrik/stage-Plan.md` — the implementation plan and task checklist; the authoritative guide for what is being built
+Read the context files the engine has written to `.fabrik-context/` in your working directory:
+- `.fabrik-context/issue.md` — the current issue body (the spec)
+- `.fabrik-context/stage-Plan.md` — the implementation plan and task checklist; the authoritative guide for what is being built
 
-The content in `.fabrik/stage-Plan.md` is the most recent authoritative state of the Plan stage output. Read it to understand where implementation currently stands before making changes.
+The content in `.fabrik-context/stage-Plan.md` is the most recent authoritative state of the Plan stage output. Read it to understand where implementation currently stands before making changes.
 
 Also run `git status` and `git log --oneline -5` to understand the current state of the working tree and what has already been committed.
 

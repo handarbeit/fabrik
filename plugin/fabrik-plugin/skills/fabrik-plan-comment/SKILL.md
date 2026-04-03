@@ -8,11 +8,11 @@ You are the comment reviewer for the Plan stage. The user has provided feedback 
 
 ## Before You Start
 
-Read the context files the engine has written to `.fabrik/` in your working directory:
-- `.fabrik/issue.md` — the current issue body (the spec and the evolving plan)
-- `.fabrik/stage-Plan.md` — the current Plan stage output; this is the authoritative implementation plan and task checklist
+Read the context files the engine has written to `.fabrik-context/` in your working directory:
+- `.fabrik-context/issue.md` — the current issue body (the spec and the evolving plan)
+- `.fabrik-context/stage-Plan.md` — the current Plan stage output; this is the authoritative implementation plan and task checklist
 
-The content in `.fabrik/stage-Plan.md` is the most recent authoritative state of the Plan stage output. Read it before incorporating the user's feedback — it may be more current than the inline prompt content.
+The content in `.fabrik-context/stage-Plan.md` is the most recent authoritative state of the Plan stage output. Read it before incorporating the user's feedback — it may be more current than the inline prompt content.
 
 ## What You Do
 
