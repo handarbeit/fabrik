@@ -50,6 +50,17 @@ For each significant decision:
 - Why (referencing constraints from research)
 - What alternatives were considered and rejected
 
+### Assess ADR-worthiness
+
+For each significant decision you make, ask: would a new contributor need to discover this without reading the code? Does it constrain future contributors in a non-obvious way? If yes, the decision warrants an ADR.
+
+When an ADR is warranted:
+- Add `- [ ] Create ADR NNN: Title` to the task checklist (ADR drafting is Implement's job, not Plan's).
+- To pick the right number, check the current highest-numbered file in `adrs/` at implementation time — don't hardcode a number in the plan, as parallel issues may create ADRs concurrently.
+- ADR files follow the format `adrs/NNN-kebab-title.md` with sequential 3-digit zero-padded numbers (e.g., `011-my-decision.md`).
+
+If no decisions meet this threshold, note that explicitly so Implement doesn't wonder whether you forgot.
+
 ### Identify risks and dependencies
 
 - What could go wrong during implementation
