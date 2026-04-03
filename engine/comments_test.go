@@ -219,11 +219,11 @@ printf '%s\n' '{"result":"Updated research findings with more detail about X.","
 	repoDir := initBareRepo(t)
 	eng := NewWithDeps(
 		Config{
-			Owner:   "owner",
-			Repo:    "repo",
-			User:    "testuser",
-			Stages:  allStages,
-			NoTmux:  true,
+			Owner:  "owner",
+			Repo:   "repo",
+			User:   "testuser",
+			Stages: allStages,
+			NoTmux: true,
 		},
 		client,
 		&mockClaudeInvoker{},
