@@ -8,11 +8,11 @@ You are the comment reviewer for the Review stage. The user has responded to one
 
 ## Before You Start
 
-Read the context files the engine has written to `.fabrik/` in your working directory:
-- `.fabrik/issue.md` — the current issue body (the spec)
-- `.fabrik/stage-Review.md` — the current Review stage output; this is the authoritative list of review findings
+Read the context files the engine has written to `.fabrik-context/` in your working directory:
+- `.fabrik-context/issue.md` — the current issue body (the spec)
+- `.fabrik-context/stage-Review.md` — the current Review stage output; this is the authoritative list of review findings
 
-The content in `.fabrik/stage-Review.md` is the most recent authoritative state of the Review stage output. Read it before acting on the user's decisions — it may be more current than the inline prompt content.
+The content in `.fabrik-context/stage-Review.md` is the most recent authoritative state of the Review stage output. Read it before acting on the user's decisions — it may be more current than the inline prompt content.
 
 Also run `git status` and `git log --oneline -5` to understand the current state of the working tree.
 

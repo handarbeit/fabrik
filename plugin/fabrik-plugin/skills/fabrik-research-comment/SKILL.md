@@ -8,11 +8,11 @@ You are the comment reviewer for the Research stage. The user has responded to o
 
 ## Before You Start
 
-Read the context files the engine has written to `.fabrik/` in your working directory:
-- `.fabrik/issue.md` — the current issue body (the spec)
-- `.fabrik/stage-Research.md` — the current Research stage output; this is the living document of research findings
+Read the context files the engine has written to `.fabrik-context/` in your working directory:
+- `.fabrik-context/issue.md` — the current issue body (the spec)
+- `.fabrik-context/stage-Research.md` — the current Research stage output; this is the living document of research findings
 
-The content in `.fabrik/stage-Research.md` is the most recent authoritative state of the Research stage output. Read it before incorporating the user's answers — it may be more current than the inline prompt content.
+The content in `.fabrik-context/stage-Research.md` is the most recent authoritative state of the Research stage output. Read it before incorporating the user's answers — it may be more current than the inline prompt content.
 
 ## What You Do
 
