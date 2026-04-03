@@ -19,6 +19,7 @@ type HistoryEntry struct {
 	IssueNumber int
 	Title       string
 	StageName   string
+	IsComment   bool
 	Success     bool
 	Duration    time.Duration
 	CompletedAt time.Time
@@ -31,6 +32,7 @@ type HistoryEntry struct {
 type activeJob struct {
 	Title     string
 	StageName string
+	IsComment bool
 	StartedAt time.Time
 	LastTag   string
 	LastLine  string
@@ -259,6 +261,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.active[ev.IssueNumber] = &activeJob{
 			Title:     ev.Title,
 			StageName: ev.StageName,
+			IsComment: ev.IsComment,
 			StartedAt: ev.StartedAt,
 		}
 		return m, nil
@@ -269,6 +272,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			IssueNumber: ev.IssueNumber,
 			Title:       ev.Title,
 			StageName:   ev.StageName,
+			IsComment:   ev.IsComment,
 			Success:     ev.Success,
 			Duration:    ev.Duration,
 			CompletedAt: ev.CompletedAt,
@@ -335,8 +339,12 @@ func (m *Model) updateHistoryViewport() {
 			}
 			titleStr = "  " + dimStyle.Render(t)
 		}
+		stageDisplay := h.StageName
+		if h.IsComment {
+			stageDisplay += " (💬)"
+		}
 		line := fmt.Sprintf("#%-5d %-12s %s %s  %s%s%s%s",
-			h.IssueNumber, h.StageName, status, dur, ts, stats, result, titleStr)
+			h.IssueNumber, stageDisplay, status, dur, ts, stats, result, titleStr)
 		displayIdx := len(m.history) - 1 - i // 0-based index matching histIdx
 		if m.focusPane == paneHistory && displayIdx == m.histIdx {
 			line = selectedStyle.Render(line)
@@ -450,8 +458,12 @@ func (m Model) viewActive() string {
 			}
 			titleStr = dimStyle.Render(t) + " "
 		}
+		stageDisplay := job.StageName
+		if job.IsComment {
+			stageDisplay += " (💬)"
+		}
 		line := fmt.Sprintf("#%-5d %-12s %s %s  %s%s %s",
-			num, job.StageName, spinner, elapsed, titleStr, tag, msg)
+			num, stageDisplay, spinner, elapsed, titleStr, tag, msg)
 		// Truncate to terminal width to prevent wrapping
 		maxWidth := max(m.width-6, 20) // account for border + padding
 		if runes := []rune(line); len(runes) > maxWidth {
