@@ -15,14 +15,16 @@ type mockGitHubClient struct {
 	addLabelToIssueFn         func(owner, repo string, issueNumber int, labelName string) error
 	removeLabelFromIssueFn    func(owner, repo string, issueNumber int, labelName string) error
 	addCommentFn              func(owner, repo string, issueNumber int, body string) error
+	updateCommentFn           func(owner, repo string, commentDatabaseID int, body string) error
 	updateProjectItemStatusFn func(projectID, itemID, statusFieldID, statusOptionID string) error
 	rateLimitStatsFn          func() (gh.RateLimitStats, gh.RateLimitStats)
 
 	// Track calls
-	addLabelCalls     []addLabelCall
-	removeLabelCalls  []removeLabelCall
-	addCommentCalls   []addCommentCall
-	updateStatusCalls []updateStatusCall
+	addLabelCalls      []addLabelCall
+	removeLabelCalls   []removeLabelCall
+	addCommentCalls    []addCommentCall
+	updateCommentCalls []updateCommentCall
+	updateStatusCalls  []updateStatusCall
 }
 
 type addLabelCall struct {
@@ -40,6 +42,12 @@ type removeLabelCall struct {
 type addCommentCall struct {
 	owner, repo string
 	issueNumber int
+	body        string
+}
+
+type updateCommentCall struct {
+	owner, repo string
+	commentID   int
 	body        string
 }
 
@@ -93,6 +101,14 @@ func (m *mockGitHubClient) AddComment(owner, repo string, issueNumber int, body 
 }
 
 func (m *mockGitHubClient) AddCommentReaction(owner, repo string, commentDatabaseID int, content string) error {
+	return nil
+}
+
+func (m *mockGitHubClient) UpdateComment(owner, repo string, commentDatabaseID int, body string) error {
+	if m.updateCommentFn != nil {
+		return m.updateCommentFn(owner, repo, commentDatabaseID, body)
+	}
+	m.updateCommentCalls = append(m.updateCommentCalls, updateCommentCall{owner, repo, commentDatabaseID, body})
 	return nil
 }
 
