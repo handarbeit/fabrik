@@ -75,9 +75,10 @@ type Model struct {
 	statusLine string
 
 	// selection state
-	focusPane pane
-	activeIdx int // index into sorted active issue numbers
-	histIdx   int // index into history (0 = newest)
+	focusPane    pane
+	activeIdx    int  // index into sorted active issue numbers
+	histIdx      int  // index into history (0 = newest)
+	confirmClear bool // true when waiting for Y/N on clear-all
 }
 
 var (
@@ -128,14 +129,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch ev.String() {
 		case "ctrl+c", "q":
+			if m.confirmClear {
+				m.confirmClear = false
+				return m, nil
+			}
 			return m, tea.Quit
 
-		case "C":
-			m.history = nil
-			m.histIdx = 0
-			SaveHistory(m.history)
-			m.updateHistoryViewport()
+		case "c":
+			// Delete selected history entry
+			if m.focusPane == paneHistory && len(m.history) > 0 {
+				realIdx := len(m.history) - 1 - m.histIdx
+				if realIdx >= 0 && realIdx < len(m.history) {
+					m.history = append(m.history[:realIdx], m.history[realIdx+1:]...)
+					SaveHistory(m.history)
+					if m.histIdx >= len(m.history) && m.histIdx > 0 {
+						m.histIdx--
+					}
+					m.updateHistoryViewport()
+				}
+			}
 			return m, nil
+
+		case "C":
+			if m.focusPane == paneHistory && len(m.history) > 0 {
+				if m.confirmClear {
+					// Confirmed — clear all
+					m.history = nil
+					m.histIdx = 0
+					m.confirmClear = false
+					SaveHistory(m.history)
+					m.updateHistoryViewport()
+				} else {
+					// Ask for confirmation
+					m.confirmClear = true
+				}
+			}
+			return m, nil
+
+		case "n", "N", "escape":
+			if m.confirmClear {
+				m.confirmClear = false
+				return m, nil
+			}
 
 		case "tab":
 			if m.focusPane == paneActive {
@@ -429,8 +464,10 @@ func (m Model) viewHistory() string {
 	}
 	title := dimStyle.Render(fmt.Sprintf("%s History (%d)", focusIndicator, len(m.history)))
 	hint := ""
-	if m.focusPane == paneHistory && len(m.history) > 0 {
-		hint = dimStyle.Render("  [l]ogs  [C]lear  [tab] in-progress")
+	if m.confirmClear {
+		hint = failStyle.Render("  Clear all history? [C]onfirm / [n]o")
+	} else if m.focusPane == paneHistory && len(m.history) > 0 {
+		hint = dimStyle.Render("  [l]ogs  [c]lear entry  [C]lear all  [tab] in-progress")
 	}
 	content := title + hint + "\n" + m.historyVP.View()
 	return borderStyle.Width(m.width - 4).Render(content)
