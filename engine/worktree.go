@@ -240,9 +240,9 @@ func (wm *WorktreeManager) writeGitExclude(wtDir string, issueNumber int) {
 		return
 	}
 	excludePath := filepath.Join(infoDir, "exclude")
-	const entry = ".fabrik/\n"
+	const entry = ".fabrik-context/\n"
 	existing, _ := os.ReadFile(excludePath)
-	if strings.Contains(string(existing), ".fabrik/") {
+	if strings.Contains(string(existing), ".fabrik-context/") {
 		return // already present
 	}
 	f, err := os.OpenFile(excludePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
