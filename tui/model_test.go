@@ -94,6 +94,7 @@ func TestUpdate_TickEvent(t *testing.T) {
 
 func TestUpdate_JobStartedAndCompleted(t *testing.T) {
 	m := New(30)
+	m.history = nil // clear any persisted history
 	start := time.Now()
 
 	// JobStartedEvent adds to active
