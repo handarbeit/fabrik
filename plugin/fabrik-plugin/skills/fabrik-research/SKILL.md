@@ -21,6 +21,7 @@ Map out everything relevant to the specified feature:
 - **Dependencies** (internal and external) that are affected
 - **Test coverage** of the affected areas
 - **Patterns and conventions** used in similar parts of the codebase
+- **Existing ADRs** in the `adrs/` directory — read these at the start of research. Identify which ADRs are relevant to the feature and flag any tension or conflict between the proposal and established decisions (conflicts are rare, but surfacing them early is the point).
 
 Be thorough. Read the actual code, don't guess from file names. Follow call chains to understand how components connect.
 
@@ -53,6 +54,9 @@ Update the issue body with your research findings. Add a Research section (don't
 
 ### Architecture Notes
 How the relevant components connect and interact.
+
+#### Relevant ADRs
+- **ADR NNN** (`NNN-title.md`): Why it's relevant. Any conflict with this feature.
 
 ### Constraints
 Technical limitations and requirements discovered.
