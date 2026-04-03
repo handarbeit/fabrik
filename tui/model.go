@@ -341,7 +341,7 @@ func (m *Model) updateHistoryViewport() {
 		}
 		stageDisplay := h.StageName
 		if h.IsComment {
-			stageDisplay += " (💬)"
+			stageDisplay += " 💬"
 		}
 		line := fmt.Sprintf("#%-5d %-12s %s %s  %s%s%s%s",
 			h.IssueNumber, stageDisplay, status, dur, ts, stats, result, titleStr)
@@ -460,7 +460,7 @@ func (m Model) viewActive() string {
 		}
 		stageDisplay := job.StageName
 		if job.IsComment {
-			stageDisplay += " (💬)"
+			stageDisplay += " 💬"
 		}
 		line := fmt.Sprintf("#%-5d %-12s %s %s  %s%s %s",
 			num, stageDisplay, spinner, elapsed, titleStr, tag, msg)
