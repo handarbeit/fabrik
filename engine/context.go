@@ -64,7 +64,14 @@ func (e *Engine) writeContextFiles(item gh.ProjectItem, currentStage *stages.Sta
 		if comment == nil {
 			continue
 		}
-		filename := fmt.Sprintf("stage-%s.md", stage.Name)
+		// Sanitize stage name: reject names with path separators to prevent
+		// context files from being written outside .fabrik/.
+		safeName := stage.Name
+		if strings.ContainsAny(safeName, "/\\") {
+			e.logf(item.Number, "warn", "stage name %q contains path separator, skipping context file\n", safeName)
+			continue
+		}
+		filename := fmt.Sprintf("stage-%s.md", safeName)
 		if err := os.WriteFile(filepath.Join(fabrikDir, filename), []byte(comment.Body), 0644); err != nil {
 			e.logf(item.Number, "warn", "could not write .fabrik/%s: %v\n", filename, err)
 		}
