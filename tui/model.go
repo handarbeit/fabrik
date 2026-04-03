@@ -2,6 +2,9 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -33,6 +36,14 @@ type activeJob struct {
 	LastLine  string
 }
 
+// pane identifies which TUI section has focus.
+type pane int
+
+const (
+	paneActive  pane = iota
+	paneHistory
+)
+
 // Model is the bubbletea TUI model for Fabrik.
 type Model struct {
 	// poll timer
@@ -62,6 +73,11 @@ type Model struct {
 
 	// statusLine shows the latest poll-level log message in the header
 	statusLine string
+
+	// selection state
+	focusPane pane
+	activeIdx int // index into sorted active issue numbers
+	histIdx   int // index into history (0 = newest)
 }
 
 var (
@@ -73,10 +89,11 @@ var (
 			Border(lipgloss.RoundedBorder()).
 			Padding(0, 1)
 
-	successStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
-	failStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	dimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
-	activeStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	successStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	failStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	activeStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	selectedStyle = lipgloss.NewStyle().Background(lipgloss.Color("238"))
 )
 
 // New creates an initial TUI model.
@@ -111,8 +128,71 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch ev.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
+
+		case "tab":
+			if m.focusPane == paneActive {
+				m.focusPane = paneHistory
+			} else {
+				m.focusPane = paneActive
+			}
+			m.updateHistoryViewport()
+			return m, nil
+
+		case "up", "k":
+			if m.focusPane == paneActive {
+				if m.activeIdx > 0 {
+					m.activeIdx--
+				}
+			} else {
+				if m.histIdx > 0 {
+					m.histIdx--
+					m.updateHistoryViewport()
+				}
+			}
+			return m, nil
+
+		case "down", "j":
+			if m.focusPane == paneActive {
+				nums := m.sortedActiveNums()
+				if m.activeIdx < len(nums)-1 {
+					m.activeIdx++
+				}
+			} else {
+				if m.histIdx < len(m.history)-1 {
+					m.histIdx++
+					m.updateHistoryViewport()
+				}
+			}
+			return m, nil
+
+		case "enter", "a":
+			// Attach to tmux session for selected in-progress job
+			if m.focusPane == paneActive {
+				nums := m.sortedActiveNums()
+				if m.activeIdx < len(nums) {
+					num := nums[m.activeIdx]
+					if job, ok := m.active[num]; ok {
+						session := tmuxSessionName(num, job.StageName)
+						return m, openTerminalCmd("tmux", "attach", "-t", session)
+					}
+				}
+			}
+			return m, nil
+
+		case "l":
+			// Open log directory for selected history job
+			if m.focusPane == paneHistory && len(m.history) > 0 {
+				// History is displayed newest-first, so index 0 = last element
+				realIdx := len(m.history) - 1 - m.histIdx
+				if realIdx >= 0 && realIdx < len(m.history) {
+					h := m.history[realIdx]
+					logDir := fmt.Sprintf("%s/.fabrik/logs/issue-%d", homeDir(), h.IssueNumber)
+					return m, openTerminalCmd("ls", "-lt", logDir)
+				}
+			}
+			return m, nil
 		}
-		// Forward key events to the history viewport for scrolling
+		// Forward other key events to the history viewport for scrolling
 		var cmd tea.Cmd
 		m.historyVP, cmd = m.historyVP.Update(msg)
 		return m, cmd
@@ -218,6 +298,10 @@ func (m *Model) updateHistoryViewport() {
 		}
 		line := fmt.Sprintf("#%-5d %-12s %s %s  %s%s%s%s",
 			h.IssueNumber, h.StageName, status, dur, ts, stats, result, titleStr)
+		displayIdx := len(m.history) - 1 - i // 0-based index matching histIdx
+		if m.focusPane == paneHistory && displayIdx == m.histIdx {
+			line = selectedStyle.Render(line)
+		}
 		lines = append(lines, line)
 	}
 	m.historyVP.SetContent(strings.Join(lines, "\n"))
@@ -279,18 +363,17 @@ func (m Model) viewHeader() string {
 }
 
 func (m Model) viewActive() string {
-	title := activeStyle.Render(fmt.Sprintf("In Progress (%d)", len(m.active)))
+	focusIndicator := " "
+	if m.focusPane == paneActive {
+		focusIndicator = "▸"
+	}
+	title := activeStyle.Render(fmt.Sprintf("%s In Progress (%d)", focusIndicator, len(m.active)))
 
 	var lines []string
-	// Sort by issue number for stable display.
-	nums := make([]int, 0, len(m.active))
-	for n := range m.active {
-		nums = append(nums, n)
-	}
-	sort.Ints(nums)
+	nums := m.sortedActiveNums()
 
 	spinner := m.spinnerFrames[m.spinnerIdx]
-	for _, num := range nums {
+	for idx, num := range nums {
 		job := m.active[num]
 		elapsed := fmtDuration(m.now.Sub(job.StartedAt))
 		tag := ""
@@ -317,16 +400,31 @@ func (m Model) viewActive() string {
 		}
 		line := fmt.Sprintf("#%-5d %-12s %s %s  %s%s %s",
 			num, job.StageName, spinner, elapsed, titleStr, tag, msg)
+		if m.focusPane == paneActive && idx == m.activeIdx {
+			line = selectedStyle.Render(line)
+		}
 		lines = append(lines, line)
 	}
 
-	content := title + "\n" + strings.Join(lines, "\n")
+	hint := ""
+	if m.focusPane == paneActive && len(m.active) > 0 {
+		hint = dimStyle.Render("  [a]ttach tmux  [tab] history")
+	}
+	content := title + hint + "\n" + strings.Join(lines, "\n")
 	return borderStyle.Width(m.width - 4).Render(content)
 }
 
 func (m Model) viewHistory() string {
-	title := dimStyle.Render(fmt.Sprintf("History (%d)", len(m.history)))
-	content := title + "\n" + m.historyVP.View()
+	focusIndicator := " "
+	if m.focusPane == paneHistory {
+		focusIndicator = "▸"
+	}
+	title := dimStyle.Render(fmt.Sprintf("%s History (%d)", focusIndicator, len(m.history)))
+	hint := ""
+	if m.focusPane == paneHistory && len(m.history) > 0 {
+		hint = dimStyle.Render("  [l]ogs  [tab] in-progress")
+	}
+	content := title + hint + "\n" + m.historyVP.View()
 	return borderStyle.Width(m.width - 4).Render(content)
 }
 
@@ -340,6 +438,35 @@ func activeHeight(n int) int {
 	return max(n+1, 2) + 2 // title + one line per job (min 2) + border
 }
 
+// sortedActiveNums returns issue numbers from the active map in sorted order.
+func (m Model) sortedActiveNums() []int {
+	nums := make([]int, 0, len(m.active))
+	for n := range m.active {
+		nums = append(nums, n)
+	}
+	sort.Ints(nums)
+	return nums
+}
+
+// tmuxSessionName builds the tmux session name for an active job.
+func tmuxSessionName(issueNumber int, stageName string) string {
+	safe := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' {
+			return r
+		}
+		return '-'
+	}, stageName)
+	safe = strings.ToLower(safe)
+	for strings.Contains(safe, "--") {
+		safe = strings.ReplaceAll(safe, "--", "-")
+	}
+	safe = strings.Trim(safe, "-")
+	if safe == "" {
+		safe = "stage"
+	}
+	return fmt.Sprintf("fabrik-%d-%s", issueNumber, safe)
+}
+
 // fmtDuration formats a duration as MM:SS.
 func fmtDuration(d time.Duration) string {
 	if d < 0 {
@@ -349,4 +476,48 @@ func fmtDuration(d time.Duration) string {
 	m := int(d.Minutes())
 	s := int(d.Seconds()) % 60
 	return fmt.Sprintf("%d:%02d", m, s)
+}
+
+// homeDir returns the user's home directory.
+func homeDir() string {
+	h, _ := os.UserHomeDir()
+	return h
+}
+
+// openTerminalCmd returns a tea.Cmd that opens a new terminal window running
+// the given command. On macOS it uses osascript to open Terminal.app; on Linux
+// it tries common terminal emulators.
+func openTerminalCmd(name string, args ...string) tea.Cmd {
+	return func() tea.Msg {
+		cmdStr := name
+		for _, a := range args {
+			cmdStr += " " + a
+		}
+
+		var cmd *exec.Cmd
+		if runtime.GOOS == "darwin" {
+			script := fmt.Sprintf(`tell application "Terminal"
+activate
+do script "%s"
+end tell`, strings.ReplaceAll(cmdStr, `"`, `\"`))
+			cmd = exec.Command("osascript", "-e", script)
+		} else {
+			// Try common Linux terminals
+			for _, term := range []string{"gnome-terminal", "xterm", "konsole"} {
+				if _, err := exec.LookPath(term); err == nil {
+					if term == "gnome-terminal" {
+						cmd = exec.Command(term, "--", "sh", "-c", cmdStr)
+					} else {
+						cmd = exec.Command(term, "-e", cmdStr)
+					}
+					break
+				}
+			}
+			if cmd == nil {
+				return nil // no terminal found
+			}
+		}
+		_ = cmd.Start()
+		return nil
+	}
 }
