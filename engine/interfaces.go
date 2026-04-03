@@ -16,6 +16,7 @@ type GitHubClient interface {
 	RemoveLabelFromIssue(owner, repo string, issueNumber int, labelName string) error
 	AddComment(owner, repo string, issueNumber int, body string) error
 	AddCommentReaction(owner, repo string, commentDatabaseID int, content string) error
+	UpdateComment(owner, repo string, commentDatabaseID int, body string) error
 	UpdateIssueBody(owner, repo string, issueNumber int, body string) error
 	UpdateProjectItemStatus(projectID, itemID, statusFieldID, statusOptionID string) error
 	GetIssueBody(owner, repo string, issueNumber int) (string, error)
