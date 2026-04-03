@@ -172,6 +172,7 @@ func TestCollectStageComments(t *testing.T) {
 
 func TestProcessComments_UpdatesStageComment(t *testing.T) {
 	skipIfNoGit(t)
+	userCommentID := 444
 	existingCommentID := 555
 	researchCommentBody := "🏭 **Fabrik — stage: Research**\n*branch: main | commit: abc | 2026-01-01*\n\nOriginal research."
 
@@ -196,7 +197,7 @@ printf '%s\n' '{"result":"Updated research findings with more detail about X.","
 		Comments: []gh.Comment{
 			{
 				ID:         "comment-1",
-				DatabaseID: existingCommentID,
+				DatabaseID: userCommentID,
 				Author:     "testuser",
 				Body:       "Please add more detail about X",
 				CreatedAt:  time.Now(),
