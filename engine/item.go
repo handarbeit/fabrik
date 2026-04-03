@@ -405,6 +405,18 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// Capture git metadata for the comment header
 	branch, commit, timestamp := captureGitMeta(workDir)
 
+	// Check for issue body update markers in stage output
+	if output != "" {
+		if updatedBody := extractUpdatedBody(output); updatedBody != "" {
+			e.logf(item.Number, "edit", "updating issue body from stage output\n")
+			if err := e.client.UpdateIssueBody(e.cfg.Owner, e.cfg.Repo, item.Number, updatedBody); err != nil {
+				e.logf(item.Number, "warn", "could not update issue body: %v\n", err)
+			}
+			// Strip the markers from the output before posting as a comment
+			output = stripMarkers(output, "FABRIK_ISSUE_UPDATE_BEGIN", "FABRIK_ISSUE_UPDATE_END")
+		}
+	}
+
 	// Post Claude's output
 	if output != "" {
 		footer := formatStatsFooter(usage, completed)

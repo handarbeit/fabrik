@@ -695,6 +695,24 @@ func extractUpdatedBody(output string) string {
 	return extractBetweenMarkers(output, "FABRIK_ISSUE_UPDATE_BEGIN", "FABRIK_ISSUE_UPDATE_END")
 }
 
+// stripMarkers removes the begin/end marker block (inclusive) from the output.
+func stripMarkers(output, beginMarker, endMarker string) string {
+	beginIdx := strings.Index(output, beginMarker)
+	if beginIdx == -1 {
+		return output
+	}
+	endIdx := strings.Index(output[beginIdx:], endMarker)
+	if endIdx == -1 {
+		return output
+	}
+	endIdx += beginIdx + len(endMarker)
+	// Also strip a trailing newline after the end marker
+	if endIdx < len(output) && output[endIdx] == '\n' {
+		endIdx++
+	}
+	return output[:beginIdx] + output[endIdx:]
+}
+
 // extractSummary parses a brief summary from Claude's output.
 func extractSummary(output string) string {
 	return extractBetweenMarkers(output, "FABRIK_SUMMARY_BEGIN", "FABRIK_SUMMARY_END")
