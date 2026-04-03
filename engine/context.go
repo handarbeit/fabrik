@@ -42,9 +42,11 @@ func findStageComment(comments []gh.Comment, stageName string) *gh.Comment {
 //
 // Errors are non-fatal — Claude can still run without the files; log and continue.
 func (e *Engine) writeContextFiles(item gh.ProjectItem, currentStage *stages.Stage, workDir string, isCommentProcessing bool) {
-	fabrikDir := filepath.Join(workDir, ".fabrik")
+	// Use .fabrik-context/ instead of .fabrik/ to avoid colliding with
+	// the tracked .fabrik/ directory (which contains stages/ and plugin/).
+	fabrikDir := filepath.Join(workDir, ".fabrik-context")
 	if err := os.MkdirAll(fabrikDir, 0755); err != nil {
-		e.logf(item.Number, "warn", "could not create .fabrik dir: %v\n", err)
+		e.logf(item.Number, "warn", "could not create .fabrik-context dir: %v\n", err)
 		return
 	}
 

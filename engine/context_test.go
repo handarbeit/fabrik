@@ -100,7 +100,7 @@ func TestWriteContextFiles_IssueAlwaysWritten(t *testing.T) {
 
 	eng.writeContextFiles(item, stage, workDir, false)
 
-	data, err := os.ReadFile(filepath.Join(workDir, ".fabrik", "issue.md"))
+	data, err := os.ReadFile(filepath.Join(workDir, ".fabrik-context", "issue.md"))
 	if err != nil {
 		t.Fatalf("issue.md not written: %v", err)
 	}
@@ -134,12 +134,12 @@ func TestWriteContextFiles_PriorStagesOnly(t *testing.T) {
 	eng.writeContextFiles(item, stage, workDir, false)
 
 	// Research should be written (Order 1 < 2)
-	if _, err := os.ReadFile(filepath.Join(workDir, ".fabrik", "stage-Research.md")); err != nil {
+	if _, err := os.ReadFile(filepath.Join(workDir, ".fabrik-context", "stage-Research.md")); err != nil {
 		t.Errorf("stage-Research.md should be written for prior stage: %v", err)
 	}
 
 	// Plan should NOT be written (Order 2 == current, not strictly less)
-	if _, err := os.ReadFile(filepath.Join(workDir, ".fabrik", "stage-Plan.md")); err == nil {
+	if _, err := os.ReadFile(filepath.Join(workDir, ".fabrik-context", "stage-Plan.md")); err == nil {
 		t.Error("stage-Plan.md should not be written (current stage, not prior)")
 	}
 }
@@ -168,7 +168,7 @@ func TestWriteContextFiles_CommentProcessingIncludesCurrent(t *testing.T) {
 	eng.writeContextFiles(item, stage, workDir, true)
 
 	for _, name := range []string{"stage-Research.md", "stage-Plan.md"} {
-		if _, err := os.ReadFile(filepath.Join(workDir, ".fabrik", name)); err != nil {
+		if _, err := os.ReadFile(filepath.Join(workDir, ".fabrik-context", name)); err != nil {
 			t.Errorf("%s should be written for comment processing: %v", name, err)
 		}
 	}
@@ -194,11 +194,11 @@ func TestWriteContextFiles_SkipsStagesWithNoComment(t *testing.T) {
 	eng.writeContextFiles(item, stage, workDir, false)
 
 	// No stage-Research.md since there's no matching comment.
-	if _, err := os.ReadFile(filepath.Join(workDir, ".fabrik", "stage-Research.md")); err == nil {
+	if _, err := os.ReadFile(filepath.Join(workDir, ".fabrik-context", "stage-Research.md")); err == nil {
 		t.Error("stage-Research.md should not exist when there is no matching comment")
 	}
 	// But issue.md should still exist.
-	if _, err := os.ReadFile(filepath.Join(workDir, ".fabrik", "issue.md")); err != nil {
+	if _, err := os.ReadFile(filepath.Join(workDir, ".fabrik-context", "issue.md")); err != nil {
 		t.Errorf("issue.md should always be written: %v", err)
 	}
 }
