@@ -180,14 +180,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "l":
-			// Open log directory for selected history job
+			// Open latest log file for selected history job
 			if m.focusPane == paneHistory && len(m.history) > 0 {
-				// History is displayed newest-first, so index 0 = last element
 				realIdx := len(m.history) - 1 - m.histIdx
 				if realIdx >= 0 && realIdx < len(m.history) {
 					h := m.history[realIdx]
 					logDir := fmt.Sprintf("%s/.fabrik/logs/issue-%d", homeDir(), h.IssueNumber)
-					return m, openTerminalCmd("ls", "-lt", logDir)
+					return m, openLogViewerCmd(logDir)
 				}
 			}
 			return m, nil
@@ -465,6 +464,21 @@ func tmuxSessionName(issueNumber int, stageName string) string {
 		safe = "stage"
 	}
 	return fmt.Sprintf("fabrik-%d-%s", issueNumber, safe)
+}
+
+// openLogViewerCmd returns a tea.Cmd that opens a terminal showing the most
+// recent log file in the given directory using less.
+func openLogViewerCmd(logDir string) tea.Cmd {
+	// Find the most recent file by name (filenames contain timestamps).
+	entries, err := os.ReadDir(logDir)
+	if err != nil || len(entries) == 0 {
+		// Fall back to opening the directory listing
+		return openTerminalCmd("ls", "-lt", logDir)
+	}
+	// Sort by name descending (timestamp in name = lexicographic order).
+	latest := entries[len(entries)-1].Name()
+	logPath := logDir + "/" + latest
+	return openTerminalCmd("less", "+F", logPath)
 }
 
 // fmtDuration formats a duration as MM:SS.
