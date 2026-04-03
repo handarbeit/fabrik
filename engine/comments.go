@@ -63,6 +63,9 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		return fmt.Errorf("setting up worktree: %w", err)
 	}
 
+	// Write context files (all stages including current) before Claude runs.
+	e.writeContextFiles(item, stage, workDir, true)
+
 	// Step 4: Invoke Claude with the comment review prompt
 	modelOverride := e.extractModelOverride(item.Number, item.Labels)
 	if modelOverride != "" {
@@ -90,26 +93,44 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// Capture git metadata for the comment header
 	branch, commit, timestamp := captureGitMeta(workDir)
 
-	// Step 5: Parse the updated issue body from Claude's output and apply it
+	// Step 5: Strip FABRIK_ISSUE_UPDATE block from output, then update issue body if present.
 	if updatedBody := extractUpdatedBody(output); updatedBody != "" {
 		e.logf(item.Number, "edit", "updating issue body\n")
 		if err := e.client.UpdateIssueBody(e.cfg.Owner, e.cfg.Repo, item.Number, updatedBody); err != nil {
 			e.logf(item.Number, "warn", "could not update issue body: %v\n", err)
 		}
-	} else {
-		// No body update — post output as a comment instead
-		if output != "" {
+		output = stripMarkers(output, "FABRIK_ISSUE_UPDATE_BEGIN", "FABRIK_ISSUE_UPDATE_END")
+	}
+
+	// Step 6: Rewrite or create the stage comment (unless post_to_pr).
+	// For post_to_pr stages the stage output lives on the PR; comment processing
+	// output on such stages is posted as a new comment on the issue as before.
+	if output != "" {
+		if stage.PostToPR {
 			comment := formatOutputComment(stage.Name+" (comment review)", output, "", branch, commit, timestamp)
 			if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
 				e.logf(item.Number, "warn", "could not post comment: %v\n", err)
 			}
+		} else {
+			existing := findStageComment(item.Comments, stage.Name)
+			stageComment := formatOutputComment(stage.Name, output, "", branch, commit, timestamp)
+			if existing != nil {
+				e.logf(item.Number, "edit", "rewriting stage comment for %s\n", stage.Name)
+				if err := e.client.UpdateComment(e.cfg.Owner, e.cfg.Repo, existing.DatabaseID, stageComment); err != nil {
+					e.logf(item.Number, "warn", "could not update stage comment: %v\n", err)
+				}
+			} else {
+				if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, stageComment); err != nil {
+					e.logf(item.Number, "warn", "could not post stage comment: %v\n", err)
+				}
+			}
 		}
 	}
 
-	// Step 6: Remove editing label
+	// Step 7: Remove editing label
 	e.removeEditingLabel(item.Number)
 
-	// Step 7: React with 🚀 to all processed comments
+	// Step 8: React with 🚀 to all processed comments
 	for _, c := range comments {
 		if err := e.client.AddCommentReaction(e.cfg.Owner, e.cfg.Repo, c.DatabaseID, "rocket"); err != nil {
 			e.logf(item.Number, "warn", "could not add 🚀 to comment %s: %v\n", c.ID, err)
