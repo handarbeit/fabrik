@@ -44,6 +44,11 @@ type Stage struct {
 	// If empty, a default comment-processing prompt is used.
 	CommentPrompt string `yaml:"comment_prompt,omitempty"`
 
+	// CommentSkill names a Fabrik plugin skill to use when processing user comments
+	// during this stage. When set, the engine sends a directive prompt instead of
+	// CommentPrompt. Takes precedence over CommentPrompt if both are set.
+	CommentSkill string `yaml:"comment_skill,omitempty"`
+
 	// CompletionCriteria defines when this stage is "done".
 	Completion CompletionCriteria `yaml:"completion"`
 
