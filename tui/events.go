@@ -38,6 +38,7 @@ type JobStartedEvent struct {
 	IssueNumber int
 	Title       string
 	StageName   string
+	IsComment   bool // true when processing a user comment, not a stage run
 	StartedAt   time.Time
 }
 
@@ -48,6 +49,7 @@ type JobCompletedEvent struct {
 	IssueNumber int
 	Title       string
 	StageName   string
+	IsComment   bool // true when processing a user comment, not a stage run
 	Success     bool
 	Duration    time.Duration
 	CompletedAt time.Time

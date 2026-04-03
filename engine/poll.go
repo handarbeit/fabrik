@@ -270,6 +270,7 @@ func (e *Engine) poll(ctx context.Context) error {
 		if s := stages.FindStage(e.cfg.Stages, item.Status); s != nil {
 			stageName = s.Name
 		}
+		isComment := len(e.findNewComments(item)) > 0
 		startTime := time.Now()
 		e.inFlight.Store(item.Number, item.IsPR)
 		e.wg.Add(1)
@@ -282,6 +283,7 @@ func (e *Engine) poll(ctx context.Context) error {
 				IssueNumber: item.Number,
 				Title:       item.Title,
 				StageName:   stageName,
+				IsComment:   isComment,
 				StartedAt:   startTime,
 			})
 			err := e.processItem(ctx, board, item)
@@ -293,6 +295,7 @@ func (e *Engine) poll(ctx context.Context) error {
 				IssueNumber: item.Number,
 				Title:       item.Title,
 				StageName:   stageName,
+				IsComment:   isComment,
 				Success:     err == nil,
 				Duration:    time.Since(startTime),
 				CompletedAt: time.Now(),
