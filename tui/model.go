@@ -520,10 +520,10 @@ func (m Model) sortedActiveNums() []int {
 }
 
 // openLogViewerCmd returns a tea.Cmd that opens a terminal showing the most
-// recent log file in the given directory using less.
+// recent log file in the given directory, piped through the stream filter
+// for human-readable output.
 func openLogViewerCmd(logDir string) tea.Cmd {
 	if _, err := os.Stat(logDir); err != nil {
-		// Directory doesn't exist — no logs yet for this job
 		return nil
 	}
 	entries, err := os.ReadDir(logDir)
@@ -531,6 +531,19 @@ func openLogViewerCmd(logDir string) tea.Cmd {
 		return nil
 	}
 	latest := entries[len(entries)-1].Name()
+
+	// Resolve fabrik binary for the stream filter
+	fabrikBin, err := os.Executable()
+	if err != nil {
+		fabrikBin = "fabrik"
+	}
+
+	// For JSON files, pipe through the stream filter; for other files, use less
+	if strings.HasSuffix(latest, ".json") {
+		return openTerminalCmd("sh", "-c", fmt.Sprintf(
+			"cd %s && cat %s | %s _stream-filter | less -R",
+			logDir, latest, fabrikBin))
+	}
 	return openTerminalCmd("sh", "-c", fmt.Sprintf("cd %s && less +F %s", logDir, latest))
 }
 
