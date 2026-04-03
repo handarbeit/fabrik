@@ -398,7 +398,7 @@ func (m Model) viewHeader() string {
 	left := title + status
 	leftWidth := lipgloss.Width(left)
 	timerWidth := lipgloss.Width(timerStr)
-	available := m.width - 6 // border + padding
+	available := m.width - 1 // leading space
 	if leftWidth+timerWidth+1 > available {
 		// Truncate status to fit
 		maxStatus := max(available-lipgloss.Width(title)-timerWidth-3, 0)
