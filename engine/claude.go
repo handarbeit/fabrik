@@ -371,10 +371,11 @@ func runClaudeInTmux(ctx context.Context, args []string, prompt string, workDir 
 		tmuxArgs = append(tmuxArgs, arg)
 	}
 
-	// Resolve the fabrik binary for the stream filter.
-	fabrikBin := os.Args[0]
-	if resolved, err := exec.LookPath(fabrikBin); err == nil {
-		fabrikBin = resolved
+	// Resolve the fabrik binary for the stream filter (must be absolute since
+	// tmux runs the script from a different working directory).
+	fabrikBin, err := os.Executable()
+	if err != nil {
+		fabrikBin = os.Args[0]
 	}
 
 	var sb strings.Builder
