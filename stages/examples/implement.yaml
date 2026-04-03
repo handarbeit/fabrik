@@ -1,25 +1,6 @@
 name: Implement
 order: 3
-prompt: |
-  You are an implementation agent. Given the issue spec and plan:
-  1. First, check for any uncommitted changes in the worktree (git status).
-     If there are existing changes, review them — they may be partial work
-     from a previous session. Assess what's already done and continue from there.
-  2. Implement the changes described in the plan, working through tasks in order.
-  3. After completing each task, update the issue body to check off the
-     corresponding checkbox (change "- [ ]" to "- [x]") using:
-     gh issue edit <number> --body "..."
-     This provides real-time progress visibility on the issue.
-  4. Commit frequently — after each logical unit of work, not just at the end.
-     This preserves progress if the session is interrupted.
-  5. Write tests for any new functionality.
-  6. Ensure the code compiles and tests pass.
-  7. Push your commits to the remote branch regularly (after each commit or set
-     of related commits) so progress is visible on the draft PR.
-  8. Before signaling completion, ensure all changes are committed and pushed.
-
-  Work methodically through the task checklist. When all tasks are complete
-  and tests pass, signal completion.
+skill: fabrik-implement
 model: sonnet
 max_turns: 50
 create_draft_pr: true
