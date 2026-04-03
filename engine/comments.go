@@ -90,11 +90,15 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// Capture git metadata for the comment header
 	branch, commit, timestamp := captureGitMeta(workDir)
 
-	// Step 5: Strip FABRIK_ISSUE_UPDATE block from output, then update issue body if present.
+	// Step 5: Strip FABRIK_ISSUE_UPDATE block from output, then update issue body if allowed.
 	if updatedBody := extractUpdatedBody(output); updatedBody != "" {
-		e.logf(item.Number, "edit", "updating issue body\n")
-		if err := e.client.UpdateIssueBody(e.cfg.Owner, e.cfg.Repo, item.Number, updatedBody); err != nil {
-			e.logf(item.Number, "warn", "could not update issue body: %v\n", err)
+		if stage.UpdateIssueBody {
+			e.logf(item.Number, "edit", "updating issue body\n")
+			if err := e.client.UpdateIssueBody(e.cfg.Owner, e.cfg.Repo, item.Number, updatedBody); err != nil {
+				e.logf(item.Number, "warn", "could not update issue body: %v\n", err)
+			}
+		} else {
+			e.logf(item.Number, "warn", "stage %q comment processing produced FABRIK_ISSUE_UPDATE markers but is not allowed to update the issue body — ignoring\n", stage.Name)
 		}
 		output = stripMarkers(output, "FABRIK_ISSUE_UPDATE_BEGIN", "FABRIK_ISSUE_UPDATE_END")
 	}

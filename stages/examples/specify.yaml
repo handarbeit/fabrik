@@ -3,6 +3,7 @@ order: 0
 skill: fabrik-specify
 comment_skill: fabrik-specify-comment
 auto_advance: false
+update_issue_body: true
 model: sonnet
 max_turns: 20
 read_only: true
