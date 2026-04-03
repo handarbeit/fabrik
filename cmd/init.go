@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -15,11 +14,12 @@ import (
 )
 
 // runInit implements the `fabrik init` subcommand.
-// It extracts the embedded default stage YAML files into .fabrik/stages/.
+// It extracts the embedded default stage YAML files into .fabrik/stages/
+// and the Fabrik plugin into .fabrik/plugin/ in the current directory.
 // Existing files are skipped unless --force is passed.
 func runInit(args []string) error {
 	fset := flag.NewFlagSet("init", flag.ContinueOnError)
-	force := fset.Bool("force", false, "Overwrite existing stage files")
+	force := fset.Bool("force", false, "Overwrite existing files")
 	if err := fset.Parse(args); err != nil {
 		return err
 	}
@@ -27,9 +27,10 @@ func runInit(args []string) error {
 		return fmt.Errorf("init: unexpected positional arguments: %v", fset.Args())
 	}
 
-	destDir := ".fabrik/stages"
-	if err := os.MkdirAll(destDir, 0755); err != nil {
-		return fmt.Errorf("creating %s: %w", destDir, err)
+	// Extract stage configs
+	stagesDir := ".fabrik/stages"
+	if err := os.MkdirAll(stagesDir, 0755); err != nil {
+		return fmt.Errorf("creating %s: %w", stagesDir, err)
 	}
 
 	entries, err := fs.ReadDir(stages.DefaultStages, "examples")
@@ -43,7 +44,7 @@ func runInit(args []string) error {
 		if entry.IsDir() {
 			continue
 		}
-		destPath := filepath.Join(destDir, entry.Name())
+		destPath := filepath.Join(stagesDir, entry.Name())
 		if !*force {
 			if _, statErr := os.Stat(destPath); statErr == nil {
 				skipped++
@@ -64,32 +65,16 @@ func runInit(args []string) error {
 		fmt.Printf("  write  %s\n", destPath)
 	}
 
-	fmt.Printf("fabrik init: wrote %d stage file(s), skipped %d file(s)\n", wrote, skipped)
-	fmt.Printf("Stage configs are in %s — edit them to customize your pipeline.\n", destDir)
+	fmt.Printf("fabrik init: wrote %d stage file(s), skipped %d\n", wrote, skipped)
 
-	// Install the Fabrik plugin to ~/.claude/plugins/fabrik/
-	if err := installPlugin(*force); err != nil {
-		return fmt.Errorf("installing plugin: %w", err)
-	}
-
-	return nil
-}
-
-// installPlugin copies the embedded Fabrik plugin to ~/.claude/plugins/fabrik/.
-func installPlugin(force bool) error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("finding home directory: %w", err)
-	}
-	pluginDir := filepath.Join(home, ".claude", "plugins", "fabrik")
-
-	wrote := 0
-	skipped := 0
-	err = fs.WalkDir(fabrikplugin.FabrikPlugin, "fabrik-plugin", func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+	// Extract plugin
+	pluginDir := ".fabrik/plugin"
+	pluginWrote := 0
+	pluginSkipped := 0
+	err = fs.WalkDir(fabrikplugin.FabrikPlugin, "fabrik-plugin", func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
-		// Convert embedded path (fabrik-plugin/...) to dest path (~/.claude/plugins/fabrik/...)
 		rel, _ := filepath.Rel("fabrik-plugin", p)
 		destPath := filepath.Join(pluginDir, rel)
 
@@ -97,9 +82,9 @@ func installPlugin(force bool) error {
 			return os.MkdirAll(destPath, 0755)
 		}
 
-		if !force {
+		if !*force {
 			if _, statErr := os.Stat(destPath); statErr == nil {
-				skipped++
+				pluginSkipped++
 				return nil
 			}
 		}
@@ -114,26 +99,15 @@ func installPlugin(force bool) error {
 		if writeErr := os.WriteFile(destPath, data, 0644); writeErr != nil {
 			return fmt.Errorf("writing %s: %w", destPath, writeErr)
 		}
-		wrote++
+		pluginWrote++
 		fmt.Printf("  write  %s\n", destPath)
 		return nil
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("extracting plugin: %w", err)
 	}
 
-	fmt.Printf("fabrik init: installed plugin to %s (%d file(s), %d skipped)\n", pluginDir, wrote, skipped)
-
-	// Check if the plugin is enabled in user settings
-	settingsPath := filepath.Join(home, ".claude", "settings.json")
-	if data, readErr := os.ReadFile(settingsPath); readErr == nil {
-		// Simple check — don't parse JSON, just look for the plugin name
-		if !bytes.Contains(data, []byte(`"fabrik"`)) {
-			fmt.Printf("\nTo enable the plugin, add to %s:\n", settingsPath)
-			fmt.Printf("  \"enabledPlugins\": { \"fabrik\": true }\n")
-			fmt.Printf("Or run: claude /plugins\n")
-		}
-	}
-
+	fmt.Printf("fabrik init: wrote %d plugin file(s), skipped %d\n", pluginWrote, pluginSkipped)
+	fmt.Println("\nFabrik is ready. Stage configs and plugin skills are in .fabrik/")
 	return nil
 }
