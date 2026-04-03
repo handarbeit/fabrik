@@ -303,3 +303,31 @@ func TestNextStage(t *testing.T) {
 		t.Errorf("NextStage(X) = %v, want nil", s)
 	}
 }
+
+func TestLoadAll_CommentSkillField(t *testing.T) {
+	dir := t.TempDir()
+	writeStageFile(t, dir, "specify.yaml", `
+name: Specify
+order: 0
+skill: fabrik-specify
+comment_skill: fabrik-specify-comment
+auto_advance: false
+model: sonnet
+max_turns: 20
+`)
+
+	stages, err := LoadAll(dir)
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	if len(stages) != 1 {
+		t.Fatalf("expected 1 stage, got %d", len(stages))
+	}
+	s := stages[0]
+	if s.CommentSkill != "fabrik-specify-comment" {
+		t.Errorf("CommentSkill = %q, want %q", s.CommentSkill, "fabrik-specify-comment")
+	}
+	if s.AutoAdvance == nil || *s.AutoAdvance != false {
+		t.Errorf("AutoAdvance = %v, want explicit false", s.AutoAdvance)
+	}
+}
