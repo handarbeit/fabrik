@@ -65,6 +65,7 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string, sk
 		// Directory exists but git can't identify it — still usable, don't destroy it
 		// The directory might have uncommitted work from a killed Claude session
 		wm.logf(issueNumber, "worktree", "directory exists but branch check failed, using as-is\n")
+		wm.writeGitExclude(wtDir, issueNumber)
 		return wtDir, nil
 	}
 
