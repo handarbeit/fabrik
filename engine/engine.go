@@ -23,7 +23,6 @@ type Config struct {
 	PollSeconds   int
 	MaxConcurrent int
 	MaxRetries    int
-	NoTmux        bool
 	DebugOutput   bool
 	PluginDir     string
 	Stages        []*stages.Stage
@@ -80,7 +79,7 @@ func New(cfg Config) (*Engine, error) {
 	eng := &Engine{
 		cfg:                cfg,
 		client:             gh.NewClient(cfg.Token),
-		claude:             &RealClaudeInvoker{NoTmux: cfg.NoTmux, DebugOutput: cfg.DebugOutput},
+		claude:             &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},
 		worktrees:          wm,
 		processedSet:       make(map[string]time.Time),
 		lockedIssues:       make(map[int]bool),

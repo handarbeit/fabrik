@@ -99,8 +99,7 @@ The skill itself is auto-loaded by Claude Code via the `--plugin-dir` mechanism.
 
 ```
 --plugin-dir <absolute-path-to-.fabrik/plugin>
---output-format json          (direct execution)
---output-format stream-json   (tmux execution — enables real-time pane visibility)
+--output-format json
 --verbose
 --resume <sessionID>          (if retry)
 --model <override>            (if label or stage config)
@@ -112,14 +111,8 @@ The `--plugin-dir` is auto-detected from `.fabrik/plugin/` in the repo root (cre
 
 ### Execution Mode
 
-**With tmux** (default when available):
-- Session name: `fabrik-<N>-<stageName>` (sanitized)
-- User can observe: `tmux attach -t fabrik-<N>-<stageName>`
-- Uses `stream-json` format, piped through `fabrik _stream-filter` for human-readable display (thinking, text, tool calls)
-- Falls back to direct execution if tmux fails
-
-**Direct execution** (when `--no-tmux` or tmux unavailable):
-- Uses `json` format, output captured in memory
+Claude runs directly via `exec.CommandContext` with stdin piped and stdout captured:
+- Uses `--output-format json`, output captured in memory
 - Stderr goes to log file only (TUI mode) or stderr + log file (plain mode)
 
 ### Logging
@@ -133,10 +126,9 @@ The `--plugin-dir` is auto-detected from `.fabrik/plugin/` in the repo root (cre
 
 ### Output Parsing
 
-Three JSON formats are supported (tried in order):
+Two JSON formats are supported (tried in order):
 1. Single result object: `{"result": "...", "session_id": "..."}`
 2. JSON array: `[{"type":"system",...}, ..., {"type":"result","result":"..."}]`
-3. NDJSON (stream-json): One JSON object per line, last `type: "result"` used
 
 If parsing fails: A short error message is posted instead of the raw output. Full output is in the log files. Raw JSON is never posted as a comment.
 
@@ -324,7 +316,6 @@ post_to_pr: false           # Route output to linked PR
 create_draft_pr: false      # Create draft PR on completion
 mark_pr_ready_on_complete: false  # Mark PR ready on completion
 auto_advance: null          # Override global yolo (true/false/null)
-no_tmux: false              # Skip tmux for this stage
 cleanup_worktree: false     # Terminal stage — remove worktree instead of running Claude
 completion:
   type: claude              # Only supported type

@@ -30,7 +30,7 @@ For details on the internal stage lifecycle, see [Stage Lifecycle](stage-lifecyc
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
 - GitHub personal access token with `repo` and `project` scopes
 - A GitHub Project (v2) with board columns matching your stage names
-- tmux (optional, for observing Claude sessions in real-time)
+
 
 ### Initial Setup
 
@@ -95,7 +95,6 @@ This is intended for the self-evolving workflow where Fabrik develops Fabrik.
 | `--yolo` | Auto-advance issues through stages without human approval | `false` |
 | `--auto-upgrade` | When idle, self-upgrade from origin/main | `false` |
 | `--tui` | Enable the interactive TUI dashboard | `false` |
-| `--no-tmux` | Disable tmux session wrapping; run Claude directly | `false` |
 | `--plugin-dir` | Path to Fabrik plugin directory (overrides `.fabrik/plugin/`) | auto-detected |
 | `--poll` | Poll interval in seconds | `30` |
 | `--max-retries` | Max failed stage attempts before pausing the issue (0 = unlimited) | `3` |
@@ -118,7 +117,6 @@ FABRIK_YOLO=true
 FABRIK_POLL=30
 FABRIK_MAX_CONCURRENT=5
 FABRIK_MAX_RETRIES=3
-FABRIK_NO_TMUX=false
 FABRIK_PLUGIN_DIR=           # Override plugin location (for development)
 FABRIK_DEBUG_OUTPUT=false
 ```
@@ -141,7 +139,6 @@ refuse to start with a fatal error to prevent accidental token leaks.
 | `FABRIK_POLL` | Poll interval in seconds | `30` |
 | `FABRIK_MAX_CONCURRENT` | Max parallel Claude sessions | `5` |
 | `FABRIK_MAX_RETRIES` | Max retries before pausing (0 = unlimited) | `3` |
-| `FABRIK_NO_TMUX` | Disable tmux wrapping | `false` |
 | `FABRIK_PLUGIN_DIR` | Override plugin directory | `.fabrik/plugin/` |
 | `FABRIK_DEBUG_OUTPUT` | Save raw Claude output for debugging | `false` |
 
@@ -165,7 +162,6 @@ post_to_pr: true          # Optional. Post output on linked PR; summary on issue
 create_draft_pr: true     # Optional. Create draft PR on completion.
 mark_pr_ready_on_complete: true  # Optional. Mark PR ready when stage completes.
 auto_advance: false       # Optional. Override global --yolo for this stage.
-no_tmux: false            # Optional. Skip tmux wrapping for this stage.
 cleanup_worktree: false   # Optional. Terminal stage -- remove worktree, no Claude.
 allowed_tools:            # Optional. Restrict Claude's available tools.
   - Read
@@ -403,7 +399,6 @@ Claude sessions, and a scrollable History pane with completed jobs.
 |-----|--------|
 | `Tab` | Switch focus between In Progress and History panes |
 | `Up/Down` or `j/k` | Navigate items within the focused pane |
-| `a` | Attach to tmux session for selected in-progress job |
 | `l` | Open latest log file for selected history job |
 | `c` | Delete selected history entry |
 | `C` | Clear all history (with confirmation) |
@@ -424,39 +419,15 @@ Job history is saved to `~/.fabrik/history.json` and restored on restart.
 
 ## 8. Observability
 
-### Tmux Sessions
-
-By default, each Claude invocation runs inside a named tmux session. You can observe
-Claude working in real-time:
-
-```bash
-# List active sessions
-tmux list-sessions | grep fabrik
-
-# Attach to a session
-tmux attach -t fabrik-42-implement
-```
-
-The tmux pane shows a human-readable stream of Claude's activity:
-- Thinking blocks (with reasoning)
-- Text responses
-- Tool calls with compact argument summaries
-- Completion summary with turns and cost
-
-Detach with `Ctrl-b d` without interrupting Claude's work.
-
-To disable tmux wrapping: `--no-tmux` flag, `FABRIK_NO_TMUX=true`, or `no_tmux: true`
-in the stage YAML.
-
 ### Log Files
 
 Session logs are saved to `~/.fabrik/logs/issue-<N>/`:
 ```bash
 ls -lt ~/.fabrik/logs/issue-42/
-```
 
-Note: Log files are created for direct execution mode. Tmux sessions capture output
-in the pane instead.
+# Tail the latest log in real-time
+tail -f ~/.fabrik/logs/issue-42/$(ls -t ~/.fabrik/logs/issue-42/ | head -1)
+```
 
 ### Debug Output
 
