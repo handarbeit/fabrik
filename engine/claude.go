@@ -410,6 +410,10 @@ func buildCommentReviewPrompt(stage *stages.Stage, item gh.ProjectItem, comments
 	}
 
 	b.WriteString("---\n\n")
+	b.WriteString("Context files are available in `.fabrik/` in your working directory:\n")
+	b.WriteString("- `.fabrik/issue.md` — the issue body (spec)\n")
+	b.WriteString("- `.fabrik/stage-{Name}.md` — the current stage output (e.g. `.fabrik/stage-Specify.md`) and prior stage outputs\n")
+	b.WriteString("\n")
 	b.WriteString("First, perform any actions requested in the comments using available tools.\n")
 	if item.IsPR {
 		b.WriteString("Then, if the PR description needs updating, output the complete updated PR description between these exact markers:\n\n")
