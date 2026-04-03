@@ -405,7 +405,9 @@ func runClaudeInTmux(ctx context.Context, args []string, prompt string, workDir 
 	}
 
 	var sb strings.Builder
-	sb.WriteString("#!/bin/sh\n")
+	// Use bash explicitly: PIPESTATUS is a bash-only feature and is required to
+	// capture Claude's exit code from the middle of a pipeline.
+	sb.WriteString("#!/usr/bin/env bash\n")
 	sb.WriteString("cd " + shellQuote(workDir) + " || exit 1\n")
 	sb.WriteString(shellQuote(claudeBin))
 	for _, arg := range tmuxArgs {
@@ -414,7 +416,7 @@ func runClaudeInTmux(ctx context.Context, args []string, prompt string, workDir 
 	sb.WriteString(" < " + shellQuote(promptPath))
 	sb.WriteString(" | tee " + shellQuote(outputPath))
 	sb.WriteString(" | " + shellQuote(fabrikBin) + " _stream-filter\n")
-	sb.WriteString("echo ${PIPESTATUS[0]:-$?} > " + shellQuote(exitPath) + "\n")
+	sb.WriteString("echo ${PIPESTATUS[0]} > " + shellQuote(exitPath) + "\n")
 
 	if _, err := scriptFile.WriteString(sb.String()); err != nil {
 		scriptFile.Close()
@@ -526,7 +528,15 @@ func writeContextFiles(workDir string, issueBody string, stageComments map[strin
 	}
 
 	for stageName, body := range stageComments {
-		name := fmt.Sprintf("stage-%s.md", stageName)
+		// Sanitize stage name: filepath.Base strips directory components, and we
+		// additionally replace any remaining path separators so a malformed stage
+		// name like "../../../etc/passwd" cannot escape the .fabrik/ directory.
+		safeName := filepath.Base(stageName)
+		safeName = strings.NewReplacer("/", "-", "\\", "-", string(filepath.Separator), "-").Replace(safeName)
+		if safeName == "" || safeName == "." {
+			safeName = "unknown"
+		}
+		name := fmt.Sprintf("stage-%s.md", safeName)
 		if err := os.WriteFile(filepath.Join(fabrikDir, name), []byte(body), 0644); err != nil {
 			return fmt.Errorf("writing %s: %w", name, err)
 		}
@@ -606,7 +616,7 @@ func buildCommentReviewPrompt(stage *stages.Stage, item gh.ProjectItem, comments
 
 	b.WriteString("Context documents are available in `.fabrik/` in the working directory:\n")
 	b.WriteString("- `.fabrik/issue.md` — the issue description\n")
-	b.WriteString(fmt.Sprintf("- `.fabrik/stage-%s.md` — the current stage comment (the document your response will replace)\n", stage.Name))
+	b.WriteString(fmt.Sprintf("- `.fabrik/stage-%s.md` — the current stage comment (if present; your response will replace or create it)\n", stage.Name))
 	b.WriteString("- `.fabrik/stage-{Name}.md` — output from prior stages (e.g. `.fabrik/stage-Research.md`)\n")
 	b.WriteString("- `.fabrik/pr-description.md` — PR description (for PR-linked workflows)\n\n")
 
@@ -626,7 +636,7 @@ func buildCommentReviewPrompt(stage *stages.Stage, item gh.ProjectItem, comments
 	b.WriteString("---\n\n")
 	b.WriteString("Instructions:\n")
 	b.WriteString("1. First, perform any actions requested in the comments using available tools.\n")
-	b.WriteString(fmt.Sprintf("2. Read the current stage comment from `.fabrik/stage-%s.md`.\n", stage.Name))
+	b.WriteString(fmt.Sprintf("2. If `.fabrik/stage-%s.md` exists, read it as the current stage comment to build upon.\n", stage.Name))
 	b.WriteString("3. Your response should be the complete updated content for the stage comment, incorporating:\n")
 	b.WriteString("   - All relevant findings, decisions, or work from the current stage comment\n")
 	b.WriteString("   - Updates, corrections, and new information from the user's comments\n")
