@@ -414,7 +414,7 @@ func (m Model) viewHeader() string {
 		left = title + status
 		leftWidth = lipgloss.Width(left)
 	}
-	gap := max(m.width-leftWidth-timerWidth-3, 1)
+	gap := max(m.width-leftWidth-timerWidth-4, 1)
 	return " " + left + strings.Repeat(" ", gap) + timerStr
 }
 
