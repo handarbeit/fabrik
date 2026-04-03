@@ -1,0 +1,14 @@
+name: Specify
+order: 0
+skill: fabrik-specify
+model: sonnet
+max_turns: 20
+read_only: true
+allowed_tools:
+  - Read
+  - Grep
+  - Glob
+  - WebSearch
+  - WebFetch
+completion:
+  type: claude
