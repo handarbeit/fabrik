@@ -12,20 +12,27 @@ are user input, and the board columns define the workflow.
 # Build
 go build -o fabrik .
 
-# Create your .env file from the example
-cp .env.example .env
-# Edit .env with your GitHub token and repo details
-# Make sure .env is in your .gitignore (Fabrik enforces this)
-
-# Initialize stage configs in .fabrik/stages/
+# Initialize stage configs, plugin, and project config template
 ./fabrik init
+# Creates .fabrik/stages/, .fabrik/plugin/, and .fabrik/config.yaml
+# If your terminal is interactive, it will prompt for owner/repo/project/user
 
-# Run (all config comes from .env — no flags needed)
+# Edit .fabrik/config.yaml with your project settings (commit this file)
+# Add your GitHub token to a gitignored .env:
+echo 'FABRIK_TOKEN=ghp_...' >> .env
+echo '.env' >> .gitignore
+
+# Run (settings come from .fabrik/config.yaml)
 ./fabrik
 
 # Or override specific values with flags
 ./fabrik --stages ./.fabrik/stages --yolo
 ```
+
+**Configuration summary:**
+- `.fabrik/config.yaml` — non-secret project settings (commit to git)
+- `.env` — secrets only (`FABRIK_TOKEN` / `GITHUB_TOKEN`; must be gitignored)
+- Precedence: `CLI flag > env var > .env > config.yaml > defaults`
 
 ### Development
 
