@@ -12,6 +12,17 @@ Produce a clean, well-tested PR that a human reviewer can approve with confidenc
 
 ## Before You Start
 
+### Read context files
+
+The engine has written context files to `.fabrik/` in your working directory:
+- `.fabrik/issue.md` — the issue body (spec and task checklist)
+- `.fabrik/stage-Research.md` — the research findings, if present
+- `.fabrik/stage-Plan.md` — the implementation plan and task checklist
+- `.fabrik/stage-Implement.md` — the Implement stage output, if present
+- `.fabrik/pr-description.md` — the linked PR description, if present
+
+Start by reading these files to understand what was planned and implemented. Use the task checklist in `.fabrik/stage-Plan.md` to verify all tasks were completed.
+
 ### Check worktree state
 
 1. `git status` — commit or incorporate any uncommitted changes from prior sessions
