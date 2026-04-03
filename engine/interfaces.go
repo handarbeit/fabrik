@@ -32,14 +32,11 @@ type ClaudeInvoker interface {
 
 // RealClaudeInvoker wraps the existing InvokeClaude function.
 type RealClaudeInvoker struct {
-	// NoTmux disables tmux session wrapping globally (from --no-tmux flag or FABRIK_NO_TMUX).
-	// The effective value is r.NoTmux || stage.NoTmux.
-	NoTmux      bool
 	DebugOutput bool
 }
 
 func (r *RealClaudeInvoker) Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
-	output, completed, usage, err := InvokeClaude(ctx, stage, issue, newComments, resume, workDir, modelOverride, r.NoTmux || stage.NoTmux)
+	output, completed, usage, err := InvokeClaude(ctx, stage, issue, newComments, resume, workDir, modelOverride)
 	if r.DebugOutput {
 		saveDebugLog(issue.Number, stage.Name, output)
 	}
