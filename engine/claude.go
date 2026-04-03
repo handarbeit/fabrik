@@ -359,16 +359,35 @@ func runClaudeInTmux(ctx context.Context, args []string, prompt string, workDir 
 		claudeBin = resolved
 	}
 
+	// In tmux mode, use stream-json so the pane shows real-time activity.
+	// stdout is tee'd: raw stream-json goes to the capture file for parsing,
+	// and a human-readable view is piped through `fabrik _stream-filter` for
+	// the tmux pane.
+	tmuxArgs := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg == "json" && len(tmuxArgs) > 0 && tmuxArgs[len(tmuxArgs)-1] == "--output-format" {
+			arg = "stream-json"
+		}
+		tmuxArgs = append(tmuxArgs, arg)
+	}
+
+	// Resolve the fabrik binary for the stream filter.
+	fabrikBin := os.Args[0]
+	if resolved, err := exec.LookPath(fabrikBin); err == nil {
+		fabrikBin = resolved
+	}
+
 	var sb strings.Builder
 	sb.WriteString("#!/bin/sh\n")
 	sb.WriteString("cd " + shellQuote(workDir) + " || exit 1\n")
 	sb.WriteString(shellQuote(claudeBin))
-	for _, arg := range args {
+	for _, arg := range tmuxArgs {
 		sb.WriteString(" " + shellQuote(arg))
 	}
 	sb.WriteString(" < " + shellQuote(promptPath))
-	sb.WriteString(" > " + shellQuote(outputPath) + "\n")
-	sb.WriteString("echo $? > " + shellQuote(exitPath) + "\n")
+	sb.WriteString(" | tee " + shellQuote(outputPath))
+	sb.WriteString(" | " + shellQuote(fabrikBin) + " _stream-filter\n")
+	sb.WriteString("echo ${PIPESTATUS[0]:-$?} > " + shellQuote(exitPath) + "\n")
 
 	if _, err := scriptFile.WriteString(sb.String()); err != nil {
 		scriptFile.Close()
@@ -641,38 +660,57 @@ func extractSummary(output string) string {
 	return extractBetweenMarkers(output, "FABRIK_SUMMARY_BEGIN", "FABRIK_SUMMARY_END")
 }
 
-// parseClaudeJSON parses the JSON output from claude --output-format json.
-// Handles two formats:
+// parseClaudeJSON parses the JSON output from claude --output-format json
+// or --output-format stream-json.
+// Handles three formats:
 //   - Single result object: {"result": "...", "session_id": "...", ...}
 //   - Conversation array: [{"type":"system",...}, ..., {"type":"result","result":"..."}]
+//   - NDJSON (stream-json): one JSON object per line, last "result" line has the response
 func parseClaudeJSON(output []byte) (claudeResponse, bool) {
-	// Try single-object format first (older Claude Code versions).
+	// Try single-object format first.
 	var resp claudeResponse
 	if err := json.Unmarshal(output, &resp); err == nil && resp.Result != "" {
 		return resp, true
 	}
 
-	// Try array format (newer Claude Code versions output the full conversation).
+	// Try JSON array format.
 	var messages []json.RawMessage
-	if err := json.Unmarshal(output, &messages); err != nil {
-		return claudeResponse{}, false
-	}
-
-	// Walk backwards to find the result message.
-	for i := len(messages) - 1; i >= 0; i-- {
-		var envelope struct {
-			Type string `json:"type"`
-		}
-		if err := json.Unmarshal(messages[i], &envelope); err != nil {
-			continue
-		}
-		if envelope.Type == "result" {
-			if err := json.Unmarshal(messages[i], &resp); err == nil && resp.Result != "" {
-				return resp, true
+	if err := json.Unmarshal(output, &messages); err == nil && len(messages) > 0 {
+		for i := len(messages) - 1; i >= 0; i-- {
+			if found, ok := tryParseResultMessage(messages[i]); ok {
+				return found, true
 			}
 		}
 	}
 
+	// Try NDJSON (stream-json): one JSON object per line.
+	lines := bytes.Split(output, []byte("\n"))
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := bytes.TrimSpace(lines[i])
+		if len(line) == 0 {
+			continue
+		}
+		if found, ok := tryParseResultMessage(line); ok {
+			return found, true
+		}
+	}
+
+	return claudeResponse{}, false
+}
+
+// tryParseResultMessage checks if raw JSON is a "result" type message and
+// returns the parsed claudeResponse if so.
+func tryParseResultMessage(raw []byte) (claudeResponse, bool) {
+	var envelope struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil || envelope.Type != "result" {
+		return claudeResponse{}, false
+	}
+	var resp claudeResponse
+	if err := json.Unmarshal(raw, &resp); err == nil && resp.Result != "" {
+		return resp, true
+	}
 	return claudeResponse{}, false
 }
 
