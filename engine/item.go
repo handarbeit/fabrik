@@ -510,6 +510,13 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}
 	}
 
+	// Mark any pre-existing user comments as "seen" by adding a rocket reaction.
+	// These comments were included in the prompt as context — they should not
+	// trigger the awaiting-input unblock logic on subsequent polls.
+	if claudeRan {
+		e.markCommentsSeenByStage(item)
+	}
+
 	// Only honor the blocked-on-input marker if Claude ran without error.
 	// If there was an error, treat the run as a retry/failure rather than
 	// silently pausing the issue.
