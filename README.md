@@ -100,6 +100,7 @@ The example stages implement a full SDLC pipeline:
 | Stage | Purpose |
 |-------|---------|
 | **Backlog** | Parking lot (no processing) |
+| **Specify** | Refine rough issues into clear, unambiguous specs (Q&A with user) |
 | **Research** | Explore codebase, identify scope, surface questions |
 | **Plan** | Design approach, break into tasks, document decisions |
 | **Implement** | Write code, tests, commit to issue branch |
@@ -118,6 +119,7 @@ prompt: |                 # Prompt for Claude Code during stage processing
   You are a research agent...
 comment_prompt: |         # Prompt for processing user comments (optional)
   You are reviewing user comments...
+comment_skill: fabrik-research-comment  # Skill for comment review (overrides comment_prompt)
 model: sonnet             # Optional: claude model to use
 max_turns: 10             # Optional: limit Claude's turns
 post_to_pr: true          # Optional: post output on linked PR instead of issue

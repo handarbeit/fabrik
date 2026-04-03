@@ -578,8 +578,15 @@ func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Com
 func buildCommentReviewPrompt(stage *stages.Stage, item gh.ProjectItem, comments []gh.Comment) string {
 	var b strings.Builder
 
-	// Use stage-specific comment prompt if available, otherwise default
-	if stage.CommentPrompt != "" {
+	// Use stage-specific comment skill directive if available, then CommentPrompt, then default
+	if stage.CommentSkill != "" {
+		itemType := "issue"
+		if item.IsPR {
+			itemType = "PR"
+		}
+		b.WriteString(fmt.Sprintf("You are operating as the Fabrik %s comment reviewer for %s #%d.\n", stage.Name, itemType, item.Number))
+		b.WriteString(fmt.Sprintf("Follow the instructions in the %s skill exactly.", stage.CommentSkill))
+	} else if stage.CommentPrompt != "" {
 		b.WriteString(stage.CommentPrompt)
 	} else if item.IsPR {
 		b.WriteString(defaultPRCommentPrompt())
