@@ -103,12 +103,7 @@ Technical risks identified during research.
 
 **Blocking on input**: If there are open questions that require human input before research can continue (e.g., ambiguous requirements, missing context only the user can provide), output `FABRIK_BLOCKED_ON_INPUT` on its own line instead of `FABRIK_STAGE_COMPLETE`. The engine will pause with both `fabrik:paused` and `fabrik:awaiting-input` labels and auto-resume when the user comments. Do not remove these labels manually. These two markers are mutually exclusive — never output both.
 
-**Updating the issue body**: Wrap the complete updated issue body in:
-```
-FABRIK_ISSUE_UPDATE_BEGIN
-<entire issue body — spec + research findings>
-FABRIK_ISSUE_UPDATE_END
-```
+**Do NOT update the issue body.** The issue body is the spec, owned by Specify. Your research findings are posted as a stage comment by the engine automatically. Do not use `FABRIK_ISSUE_UPDATE` markers — they would overwrite the spec.
 
 **On retry**: You'll resume your existing session. Check what you've already found and continue from there rather than starting over.
 
