@@ -106,6 +106,141 @@ func TestLoadDotenv_Success(t *testing.T) {
 	}
 }
 
+func TestLoadProjectConfig_MissingFile(t *testing.T) {
+	dir := t.TempDir()
+	chdir(t, dir)
+	pc, err := LoadProjectConfig()
+	if err != nil {
+		t.Fatalf("expected nil error for missing file, got: %v", err)
+	}
+	if pc.Owner != "" || pc.Repo != "" || pc.ProjectNum != nil {
+		t.Error("expected zero-value struct for missing config file")
+	}
+}
+
+func TestLoadProjectConfig_ValidYAML(t *testing.T) {
+	dir := t.TempDir()
+	chdir(t, dir)
+	if err := os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	yaml := `
+owner: myorg
+repo: myrepo
+project: 42
+user: alice
+stages: ./.fabrik/stages
+poll: 60
+max_concurrent: 3
+max_retries: 5
+yolo: true
+auto_upgrade: true
+tui: true
+terminal: iTerm.app
+debug_output: true
+`
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte(yaml), 0644)
+
+	pc, err := LoadProjectConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pc.Owner != "myorg" {
+		t.Errorf("owner: want myorg, got %q", pc.Owner)
+	}
+	if pc.Repo != "myrepo" {
+		t.Errorf("repo: want myrepo, got %q", pc.Repo)
+	}
+	if pc.ProjectNum == nil || *pc.ProjectNum != 42 {
+		t.Errorf("project: want 42, got %v", pc.ProjectNum)
+	}
+	if pc.User != "alice" {
+		t.Errorf("user: want alice, got %q", pc.User)
+	}
+	if pc.Poll == nil || *pc.Poll != 60 {
+		t.Errorf("poll: want 60, got %v", pc.Poll)
+	}
+	if pc.MaxConcurrent == nil || *pc.MaxConcurrent != 3 {
+		t.Errorf("max_concurrent: want 3, got %v", pc.MaxConcurrent)
+	}
+	if pc.MaxRetries == nil || *pc.MaxRetries != 5 {
+		t.Errorf("max_retries: want 5, got %v", pc.MaxRetries)
+	}
+	if !pc.Yolo {
+		t.Error("yolo: want true")
+	}
+	if !pc.AutoUpgrade {
+		t.Error("auto_upgrade: want true")
+	}
+	if !pc.TUI {
+		t.Error("tui: want true")
+	}
+	if pc.Terminal != "iTerm.app" {
+		t.Errorf("terminal: want iTerm.app, got %q", pc.Terminal)
+	}
+	if !pc.DebugOutput {
+		t.Error("debug_output: want true")
+	}
+}
+
+func TestLoadProjectConfig_UnknownKeysIgnored(t *testing.T) {
+	dir := t.TempDir()
+	chdir(t, dir)
+	if err := os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	yaml := "owner: org\nunknown_key: value\n"
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte(yaml), 0644)
+
+	pc, err := LoadProjectConfig()
+	if err != nil {
+		t.Fatalf("unknown keys should be ignored, got error: %v", err)
+	}
+	if pc.Owner != "org" {
+		t.Errorf("owner: want org, got %q", pc.Owner)
+	}
+}
+
+func TestLoadProjectConfig_PointerFieldsAbsent(t *testing.T) {
+	dir := t.TempDir()
+	chdir(t, dir)
+	if err := os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("owner: org\n"), 0644)
+
+	pc, err := LoadProjectConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pc.ProjectNum != nil {
+		t.Error("project: want nil when absent")
+	}
+	if pc.Poll != nil {
+		t.Error("poll: want nil when absent")
+	}
+	if pc.MaxConcurrent != nil {
+		t.Error("max_concurrent: want nil when absent")
+	}
+	if pc.MaxRetries != nil {
+		t.Error("max_retries: want nil when absent")
+	}
+}
+
+func TestLoadProjectConfig_InvalidYAML(t *testing.T) {
+	dir := t.TempDir()
+	chdir(t, dir)
+	if err := os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte(":\n  - invalid: [yaml\n"), 0644)
+
+	_, err := LoadProjectConfig()
+	if err == nil {
+		t.Error("expected error for invalid YAML")
+	}
+}
+
 func TestToken_FabrikTokenPreferred(t *testing.T) {
 	t.Setenv("FABRIK_TOKEN", "fabrik-tok")
 	t.Setenv("GITHUB_TOKEN", "github-tok")
