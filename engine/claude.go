@@ -262,6 +262,17 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	runErr := cmd.Run()
 	rawOutput := stdout.Bytes()
 
+	// Save the raw output to a log file for debugging. stderr may be empty
+	// with --output-format json in newer Claude Code versions, so the stdout
+	// capture is the only record of what Claude produced.
+	if len(rawOutput) > 0 {
+		safeLabel2 := strings.NewReplacer("/", "-", "\\", "-", ":", "-", " ", "-").Replace(label)
+		outputLogPath := filepath.Join(LogDir(issueNumber), fmt.Sprintf("%s-output-%s.json", safeLabel2, time.Now().UTC().Format("20060102-150405")))
+		if err := os.WriteFile(outputLogPath, rawOutput, 0600); err != nil {
+			claudeLog(issueNumber, "warn", "could not save output log: %v\n", err)
+		}
+	}
+
 	baseName := strings.TrimSuffix(label, "-comment-review")
 
 	resp, ok := parseClaudeJSON(bytes.TrimSpace(rawOutput))
