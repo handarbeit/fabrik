@@ -456,6 +456,11 @@ func (m Model) viewActive() string {
 		}
 		line := fmt.Sprintf("#%-5d %-12s %s %s  %s%s %s",
 			num, job.StageName, spinner, elapsed, titleStr, tag, msg)
+		// Truncate to terminal width to prevent wrapping
+		maxWidth := max(m.width-6, 20) // account for border + padding
+		if runes := []rune(line); len(runes) > maxWidth {
+			line = string(runes[:maxWidth-1]) + "…"
+		}
 		if m.focusPane == paneActive && idx == m.activeIdx {
 			line = selectedStyle.Render(line)
 		}
