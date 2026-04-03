@@ -343,7 +343,12 @@ func (m *Model) updateHistoryViewport() {
 		if h.IsComment {
 			stageDisplay += " 💬"
 		}
-		line := fmt.Sprintf("#%-5d %-12s %s %s  %s%s%s%s",
+		// Pad stage column manually — emoji width differs from byte count
+		stagePad := 12 - lipgloss.Width(stageDisplay)
+		if stagePad > 0 {
+			stageDisplay += strings.Repeat(" ", stagePad)
+		}
+		line := fmt.Sprintf("#%-5d %s %s %s  %s%s%s%s",
 			h.IssueNumber, stageDisplay, status, dur, ts, stats, result, titleStr)
 		displayIdx := len(m.history) - 1 - i // 0-based index matching histIdx
 		if m.focusPane == paneHistory && displayIdx == m.histIdx {
@@ -462,7 +467,11 @@ func (m Model) viewActive() string {
 		if job.IsComment {
 			stageDisplay += " 💬"
 		}
-		line := fmt.Sprintf("#%-5d %-12s %s %s  %s%s %s",
+		stagePad := 12 - lipgloss.Width(stageDisplay)
+		if stagePad > 0 {
+			stageDisplay += strings.Repeat(" ", stagePad)
+		}
+		line := fmt.Sprintf("#%-5d %s %s %s  %s%s %s",
 			num, stageDisplay, spinner, elapsed, titleStr, tag, msg)
 		// Truncate to terminal width to prevent wrapping
 		maxWidth := max(m.width-6, 20) // account for border + padding
