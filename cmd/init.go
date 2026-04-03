@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"errors"
 	"flag"
 	"fmt"
@@ -8,10 +9,113 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 
+	"github.com/mattn/go-isatty"
 	fabrikplugin "github.com/verveguy/fabrik/plugin"
 	"github.com/verveguy/fabrik/stages"
 )
+
+// configYAMLTemplate is the all-commented-out template written by fabrik init.
+// Required fields use placeholder comments; optional fields show their defaults.
+const configYAMLTemplate = `# .fabrik/config.yaml — project-level configuration for Fabrik
+# Commit this file to git so project settings travel with the repo.
+# Keep secrets (FABRIK_TOKEN, GITHUB_TOKEN) in .env (gitignored).
+#
+# Precedence: CLI flag > shell env var > .env > .fabrik/config.yaml > built-in default
+
+# Required: GitHub repository owner (org or username)
+# owner: your-org
+
+# Required: GitHub repository name
+# repo: your-repo
+
+# Required: GitHub project number (the number in the project URL)
+# project: 1
+
+# Required: Your GitHub username (Fabrik only processes issues assigned to you)
+# user: your-github-username
+
+# Optional settings (defaults shown):
+# stages: ./.fabrik/stages
+# poll: 30
+# max_concurrent: 5
+# max_retries: 3
+# yolo: false
+# auto_upgrade: false
+# tui: false
+# terminal: ""
+# debug_output: false
+`
+
+// writeConfigTemplate writes the .fabrik/config.yaml template.
+// If stdin is a TTY and the file does not already exist, it prompts for
+// required values and writes them as uncommented entries.
+func writeConfigTemplate(force bool) error {
+	configPath := ".fabrik/config.yaml"
+
+	if !force {
+		if _, err := os.Stat(configPath); err == nil {
+			fmt.Printf("  skip   %s (already exists; use --force to overwrite)\n", configPath)
+			return nil
+		}
+	}
+
+	content := configYAMLTemplate
+
+	// Interactive mode: prompt for required values when stdin is a TTY.
+	if isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd()) {
+		owner, repo, project, user := promptRequiredValues()
+		if owner != "" || repo != "" || project != "" || user != "" {
+			content = buildConfigWithValues(owner, repo, project, user)
+		}
+	}
+
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		return fmt.Errorf("writing %s: %w", configPath, err)
+	}
+	fmt.Printf("  write  %s\n", configPath)
+	return nil
+}
+
+// promptRequiredValues reads owner/repo/project/user from stdin interactively.
+// Returns empty strings for any field the user skips (just hits enter).
+func promptRequiredValues() (owner, repo, project, user string) {
+	reader := bufio.NewReader(os.Stdin)
+	prompt := func(label string) string {
+		fmt.Printf("  %s: ", label)
+		line, _ := reader.ReadString('\n')
+		return strings.TrimSpace(line)
+	}
+	fmt.Println("\nFabrik interactive setup — press Enter to skip a field and fill it in later.")
+	owner = prompt("GitHub owner (org or username)")
+	repo = prompt("GitHub repository name")
+	project = prompt("GitHub project number")
+	user = prompt("Your GitHub username")
+	return
+}
+
+// buildConfigWithValues returns a config.yaml where the supplied required values
+// are written as uncommented entries; optional settings remain commented out.
+func buildConfigWithValues(owner, repo, project, user string) string {
+	lines := strings.Split(configYAMLTemplate, "\n")
+	var out []string
+	for _, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "# owner:") && owner != "":
+			out = append(out, "owner: "+owner)
+		case strings.HasPrefix(line, "# repo:") && repo != "":
+			out = append(out, "repo: "+repo)
+		case strings.HasPrefix(line, "# project:") && project != "":
+			out = append(out, "project: "+project)
+		case strings.HasPrefix(line, "# user:") && user != "":
+			out = append(out, "user: "+user)
+		default:
+			out = append(out, line)
+		}
+	}
+	return strings.Join(out, "\n")
+}
 
 // runInit implements the `fabrik init` subcommand.
 // It extracts the embedded default stage YAML files into .fabrik/stages/
@@ -108,6 +212,13 @@ func runInit(args []string) error {
 	}
 
 	fmt.Printf("fabrik init: wrote %d plugin file(s), skipped %d\n", pluginWrote, pluginSkipped)
+
+	// Generate .fabrik/config.yaml template
+	if err := writeConfigTemplate(*force); err != nil {
+		return err
+	}
+
 	fmt.Println("\nFabrik is ready. Stage configs and plugin skills are in .fabrik/")
+	fmt.Println("Edit .fabrik/config.yaml with your project settings, then run fabrik.")
 	return nil
 }
