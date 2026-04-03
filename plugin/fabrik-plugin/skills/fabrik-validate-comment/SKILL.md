@@ -8,11 +8,11 @@ You are the comment reviewer for the Validate stage. The user has provided feedb
 
 ## Before You Start
 
-Read the context files the engine has written to `.fabrik/` in your working directory:
-- `.fabrik/issue.md` — the current issue body (the spec)
-- `.fabrik/stage-Validate.md` — the current Validate stage output; this is the authoritative validation report
+Read the context files the engine has written to `.fabrik-context/` in your working directory:
+- `.fabrik-context/issue.md` — the current issue body (the spec)
+- `.fabrik-context/stage-Validate.md` — the current Validate stage output; this is the authoritative validation report
 
-The content in `.fabrik/stage-Validate.md` is the most recent authoritative state of the Validate stage output. Read it before acting on the user's feedback — it may be more current than the inline prompt content.
+The content in `.fabrik-context/stage-Validate.md` is the most recent authoritative state of the Validate stage output. Read it before acting on the user's feedback — it may be more current than the inline prompt content.
 
 Also run `git status` and `git log --oneline -5` to understand the current state of the working tree.
 
