@@ -16,6 +16,7 @@ type mockGitHubClient struct {
 	removeLabelFromIssueFn    func(owner, repo string, issueNumber int, labelName string) error
 	addCommentFn              func(owner, repo string, issueNumber int, body string) error
 	updateCommentFn           func(owner, repo string, commentDatabaseID int, body string) error
+	updateIssueBodyFn         func(owner, repo string, issueNumber int, body string) error
 	updateProjectItemStatusFn func(projectID, itemID, statusFieldID, statusOptionID string) error
 	rateLimitStatsFn          func() (gh.RateLimitStats, gh.RateLimitStats)
 
@@ -113,6 +114,9 @@ func (m *mockGitHubClient) UpdateComment(owner, repo string, commentDatabaseID i
 }
 
 func (m *mockGitHubClient) UpdateIssueBody(owner, repo string, issueNumber int, body string) error {
+	if m.updateIssueBodyFn != nil {
+		return m.updateIssueBodyFn(owner, repo, issueNumber, body)
+	}
 	return nil
 }
 
@@ -167,4 +171,11 @@ func (m *mockClaudeInvoker) Invoke(ctx context.Context, stage *stages.Stage, iss
 		return m.invokeFn(stage, issue, newComments, resume, workDir, modelOverride)
 	}
 	return "mock output", false, TokenUsage{}, nil
+}
+
+func (m *mockClaudeInvoker) InvokeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+	if m.invokeFn != nil {
+		return m.invokeFn(stage, issue, comments, false, workDir, modelOverride)
+	}
+	return "mock comment output", false, TokenUsage{}, nil
 }
