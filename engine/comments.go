@@ -37,8 +37,50 @@ func (e *Engine) findNewComments(item gh.ProjectItem) []gh.Comment {
 	return newComments
 }
 
+// findStageComment finds the most recent comment for a given stage in the
+// provided comments slice. Matches on the stage comment header prefix so it
+// works for both issue comments and PR comments (FromPR > 0).
+func findStageComment(comments []gh.Comment, stageName string) *gh.Comment {
+	header := fmt.Sprintf("🏭 **Fabrik — stage: %s**", stageName)
+	var found *gh.Comment
+	for i := range comments {
+		if strings.HasPrefix(comments[i].Body, header) {
+			c := comments[i]
+			found = &c
+		}
+	}
+	return found
+}
+
+// collectStageComments gathers stage comment bodies for context files.
+// When includeCurrent is false, only stages prior to currentStage are included.
+// When includeCurrent is true, the current stage is also included.
+func (e *Engine) collectStageComments(item gh.ProjectItem, currentStage *stages.Stage, includeCurrent bool) map[string]string {
+	result := make(map[string]string)
+	for _, s := range e.cfg.Stages {
+		if s.CleanupWorktree {
+			continue
+		}
+		var include bool
+		if includeCurrent {
+			include = s.Order <= currentStage.Order
+		} else {
+			include = s.Order < currentStage.Order
+		}
+		if !include {
+			continue
+		}
+		if c := findStageComment(item.Comments, s.Name); c != nil {
+			result[s.Name] = c.Body
+		}
+	}
+	return result
+}
+
 // processComments handles new user comments on an issue.
-// Flow: 👀 reactions → editing label → invoke Claude → perform actions / update issue body → remove editing label → 🚀 reactions
+// Flow: 👀 reactions → editing label → write context files → invoke Claude →
+// rewrite stage comment (UpdateComment or fallback AddComment) → post acknowledgement
+// → remove editing label → 🚀 reactions
 func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, comments []gh.Comment) error {
 	e.logf(item.Number, "comments", "processing %d new comment(s) — stage: %s\n",
 		len(comments), stage.Name)
@@ -63,7 +105,19 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		return fmt.Errorf("setting up worktree: %w", err)
 	}
 
-	// Step 4: Invoke Claude with the comment review prompt
+	// Step 4: Write context files (prior stages + current stage)
+	stageComments := e.collectStageComments(item, stage, true)
+	prBody := ""
+	if stage.PostToPR {
+		if prNum, prErr := e.client.FindPRForIssue(e.cfg.Owner, e.cfg.Repo, item.Number); prErr == nil && prNum > 0 {
+			prBody, _ = e.client.GetIssueBody(e.cfg.Owner, e.cfg.Repo, prNum)
+		}
+	}
+	if err := writeContextFiles(workDir, item.Body, stageComments, prBody); err != nil {
+		e.logf(item.Number, "warn", "could not write context files: %v\n", err)
+	}
+
+	// Step 5: Invoke Claude with the comment review prompt
 	modelOverride := e.extractModelOverride(item.Number, item.Labels)
 	if modelOverride != "" {
 		e.logf(item.Number, "model", "using model override %q\n", modelOverride)
@@ -90,26 +144,41 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// Capture git metadata for the comment header
 	branch, commit, timestamp := captureGitMeta(workDir)
 
-	// Step 5: Parse the updated issue body from Claude's output and apply it
-	if updatedBody := extractUpdatedBody(output); updatedBody != "" {
-		e.logf(item.Number, "edit", "updating issue body\n")
-		if err := e.client.UpdateIssueBody(e.cfg.Owner, e.cfg.Repo, item.Number, updatedBody); err != nil {
-			e.logf(item.Number, "warn", "could not update issue body: %v\n", err)
-		}
-	} else {
-		// No body update — post output as a comment instead
-		if output != "" {
-			comment := formatOutputComment(stage.Name+" (comment review)", output, "", branch, commit, timestamp)
-			if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
-				e.logf(item.Number, "warn", "could not post comment: %v\n", err)
+	// Step 6: Rewrite the stage comment with Claude's output
+	if output != "" {
+		footer := formatStatsFooter(usage, false)
+		newCommentBody := formatOutputComment(stage.Name, output, footer, branch, commit, timestamp)
+		existingComment := findStageComment(item.Comments, stage.Name)
+		if existingComment != nil {
+			e.logf(item.Number, "edit", "updating stage comment for %q\n", stage.Name)
+			if err := e.client.UpdateComment(e.cfg.Owner, e.cfg.Repo, existingComment.DatabaseID, newCommentBody); err != nil {
+				e.logf(item.Number, "warn", "could not update stage comment: %v\n", err)
+			}
+		} else {
+			// No existing stage comment — create one
+			targetNumber := item.Number
+			if stage.PostToPR {
+				if prNum, prErr := e.client.FindPRForIssue(e.cfg.Owner, e.cfg.Repo, item.Number); prErr == nil && prNum > 0 {
+					targetNumber = prNum
+				}
+			}
+			e.logf(item.Number, "edit", "no existing stage comment for %q, creating new\n", stage.Name)
+			if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, targetNumber, newCommentBody); err != nil {
+				e.logf(item.Number, "warn", "could not post stage comment: %v\n", err)
 			}
 		}
 	}
 
-	// Step 6: Remove editing label
+	// Step 7: Post acknowledgement comment on the issue
+	ackComment := fmt.Sprintf("🏭 **Fabrik**\n\nComment processed during **%s** stage. The stage comment has been updated.", stage.Name)
+	if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, ackComment); err != nil {
+		e.logf(item.Number, "warn", "could not post acknowledgement: %v\n", err)
+	}
+
+	// Step 8: Remove editing label
 	e.removeEditingLabel(item.Number)
 
-	// Step 7: React with 🚀 to all processed comments
+	// Step 9: React with 🚀 to all processed comments
 	for _, c := range comments {
 		if err := e.client.AddCommentReaction(e.cfg.Owner, e.cfg.Repo, c.DatabaseID, "rocket"); err != nil {
 			e.logf(item.Number, "warn", "could not add 🚀 to comment %s: %v\n", c.ID, err)

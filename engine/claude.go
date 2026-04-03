@@ -508,6 +508,39 @@ func checkCompletion(stage *stages.Stage, output string) bool {
 	}
 }
 
+// writeContextFiles writes stage context documents to the .fabrik/ directory
+// in the worktree for Claude to read as named reference files. The directory
+// is excluded from git via .git/info/exclude (set up by EnsureWorktree).
+//
+// issueBody is written to .fabrik/issue.md.
+// stageComments maps stage name to comment body; each is written to .fabrik/stage-{Name}.md.
+// prBody, if non-empty, is written to .fabrik/pr-description.md.
+func writeContextFiles(workDir string, issueBody string, stageComments map[string]string, prBody string) error {
+	fabrikDir := filepath.Join(workDir, ".fabrik")
+	if err := os.MkdirAll(fabrikDir, 0755); err != nil {
+		return fmt.Errorf("creating .fabrik dir: %w", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(fabrikDir, "issue.md"), []byte(issueBody), 0644); err != nil {
+		return fmt.Errorf("writing issue.md: %w", err)
+	}
+
+	for stageName, body := range stageComments {
+		name := fmt.Sprintf("stage-%s.md", stageName)
+		if err := os.WriteFile(filepath.Join(fabrikDir, name), []byte(body), 0644); err != nil {
+			return fmt.Errorf("writing %s: %w", name, err)
+		}
+	}
+
+	if prBody != "" {
+		if err := os.WriteFile(filepath.Join(fabrikDir, "pr-description.md"), []byte(prBody), 0644); err != nil {
+			return fmt.Errorf("writing pr-description.md: %w", err)
+		}
+	}
+
+	return nil
+}
+
 func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment) string {
 	var b strings.Builder
 
@@ -540,6 +573,10 @@ func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Com
 	}
 
 	b.WriteString("---\n\n")
+	b.WriteString("Context documents from prior stages are available in `.fabrik/` in the working directory:\n")
+	b.WriteString("- `.fabrik/issue.md` — the issue description\n")
+	b.WriteString("- `.fabrik/stage-{Name}.md` — output from each completed prior stage (e.g. `.fabrik/stage-Research.md`)\n")
+	b.WriteString("- `.fabrik/pr-description.md` — PR description (for PR-linked workflows)\n\n")
 	if stage.PostToPR {
 		b.WriteString("Your detailed output will be posted on the PR. Provide a brief summary (2-4 sentences)\n")
 		b.WriteString("for the issue between these markers:\n\n")
@@ -567,17 +604,19 @@ func buildCommentReviewPrompt(stage *stages.Stage, item gh.ProjectItem, comments
 
 	b.WriteString("\n\n---\n\n")
 
+	b.WriteString("Context documents are available in `.fabrik/` in the working directory:\n")
+	b.WriteString("- `.fabrik/issue.md` — the issue description\n")
+	b.WriteString(fmt.Sprintf("- `.fabrik/stage-%s.md` — the current stage comment (the document your response will replace)\n", stage.Name))
+	b.WriteString("- `.fabrik/stage-{Name}.md` — output from prior stages (e.g. `.fabrik/stage-Research.md`)\n")
+	b.WriteString("- `.fabrik/pr-description.md` — PR description (for PR-linked workflows)\n\n")
+
 	if item.IsPR {
 		b.WriteString(fmt.Sprintf("# PR #%d: %s\n\n", item.Number, item.Title))
 		b.WriteString(fmt.Sprintf("URL: %s\n\n", item.URL))
-		b.WriteString("## Current PR Description\n\n")
 	} else {
 		b.WriteString(fmt.Sprintf("# Issue #%d: %s\n\n", item.Number, item.Title))
 		b.WriteString(fmt.Sprintf("URL: %s\n\n", item.URL))
-		b.WriteString("## Current Issue Body\n\n")
 	}
-	b.WriteString(item.Body)
-	b.WriteString("\n\n")
 
 	b.WriteString("## New Comments to Process\n\n")
 	for _, c := range comments {
@@ -585,38 +624,27 @@ func buildCommentReviewPrompt(stage *stages.Stage, item gh.ProjectItem, comments
 	}
 
 	b.WriteString("---\n\n")
-	b.WriteString("First, perform any actions requested in the comments using available tools.\n")
-	if item.IsPR {
-		b.WriteString("Then, if the PR description needs updating, output the complete updated PR description between these exact markers:\n\n")
-	} else {
-		b.WriteString("Then, if the issue body needs updating, output the complete updated issue body between these exact markers:\n\n")
-	}
-	b.WriteString("FABRIK_ISSUE_UPDATE_BEGIN\n")
-	if item.IsPR {
-		b.WriteString("(the full updated PR description goes here)\n")
-	} else {
-		b.WriteString("(the full updated issue body goes here)\n")
-	}
-	b.WriteString("FABRIK_ISSUE_UPDATE_END\n\n")
-	if item.IsPR {
-		b.WriteString("Include the ENTIRE PR description in your update, not just the changed parts.\n")
-		b.WriteString("If no PR description changes are needed, you may omit the markers.\n")
-	} else {
-		b.WriteString("Include the ENTIRE issue body in your update, not just the changed parts.\n")
-		b.WriteString("If no issue body changes are needed, you may omit the markers.\n")
-	}
+	b.WriteString("Instructions:\n")
+	b.WriteString("1. First, perform any actions requested in the comments using available tools.\n")
+	b.WriteString(fmt.Sprintf("2. Read the current stage comment from `.fabrik/stage-%s.md`.\n", stage.Name))
+	b.WriteString("3. Your response should be the complete updated content for the stage comment, incorporating:\n")
+	b.WriteString("   - All relevant findings, decisions, or work from the current stage comment\n")
+	b.WriteString("   - Updates, corrections, and new information from the user's comments\n")
+	b.WriteString("4. Do not include the stage comment header in your response — it will be added automatically.\n")
+	b.WriteString("5. Preserve all valid existing content; only change what the comments request.\n")
 
 	return b.String()
 }
 
 func defaultCommentPrompt(stageName string) string {
-	return fmt.Sprintf(`You are a comment review agent for the "%s" stage.
-The user has posted new comments on this issue. Your job is to:
-1. Read and understand the new comments in context of the current issue body.
-2. If comments request actions (e.g., linking a pull request, running a command, making code changes), perform those actions using available tools.
-3. If comments provide information, corrections, or answers to questions, incorporate them into the issue body.
-4. Preserve all existing content that is still valid.
-5. Maintain the structure and formatting of the issue body.`, stageName)
+	return fmt.Sprintf("You are a comment review agent for the %q stage.\n"+
+		"The user has posted new comments on this issue. Your job is to:\n"+
+		"1. Read and understand the new comments in context of the current stage comment (.fabrik/stage-%s.md) and prior stage context.\n"+
+		"2. If comments request actions (e.g., running a command, making code changes, updating research), perform those actions using available tools.\n"+
+		"3. Produce a complete updated stage comment that incorporates the user's feedback, corrections, and new information.\n"+
+		"4. Preserve all existing content from the current stage comment that is still valid.\n"+
+		"5. Maintain the structure and formatting of the stage comment.",
+		stageName, stageName)
 }
 
 func defaultPRCommentPrompt() string {
@@ -624,16 +652,15 @@ func defaultPRCommentPrompt() string {
 New comments have been posted on this pull request. These may include:
 - Review feedback from humans or automated bots (e.g., GitHub Copilot, Gemini code review)
 - Requests for code changes or clarifications
-- Suggestions for improving the PR description
+- Suggestions for improving the implementation
 
 Your job is to:
-1. Read and understand the new comments in context of the current PR description and code changes.
+1. Read and understand the new comments in context of the current stage comment and code changes.
 2. Make any requested code changes in the checked-out worktree/issue branch, following the existing fabrik workflow.
-3. Update the PR description as needed to reflect the current state of the changes.
-4. Respond to review feedback by addressing the concerns raised.
-5. If comments from automated review bots suggest improvements, evaluate and apply them where appropriate.
-6. Preserve all existing PR description content that is still valid.
-7. Maintain the structure and formatting of the PR description.`
+3. Respond to review feedback by addressing the concerns raised.
+4. If comments from automated review bots suggest improvements, evaluate and apply them where appropriate.
+5. Produce a complete updated stage comment that reflects the current state of the work.
+6. Preserve all existing stage comment content that is still valid.`
 }
 
 // formatStatsFooter returns a one-line stats summary suitable for appending to a comment.
@@ -675,11 +702,6 @@ func extractBetweenMarkers(output, beginMarker, endMarker string) string {
 
 	body := output[bodyStart : bodyStart+endIdx]
 	return strings.TrimSpace(body)
-}
-
-// extractUpdatedBody parses the updated issue/PR body from Claude's output.
-func extractUpdatedBody(output string) string {
-	return extractBetweenMarkers(output, "FABRIK_ISSUE_UPDATE_BEGIN", "FABRIK_ISSUE_UPDATE_END")
 }
 
 // extractSummary parses a brief summary from Claude's output.

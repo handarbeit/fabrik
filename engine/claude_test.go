@@ -782,14 +782,14 @@ func TestBuildCommentReviewPrompt_Issue(t *testing.T) {
 	if !strings.Contains(prompt, "# Issue #42: Test Issue") {
 		t.Error("expected issue header in prompt")
 	}
-	if !strings.Contains(prompt, "## Current Issue Body") {
-		t.Error("expected 'Current Issue Body' section")
+	if !strings.Contains(prompt, ".fabrik/") {
+		t.Error("expected mention of .fabrik/ context files")
 	}
-	if !strings.Contains(prompt, "updated issue body") {
-		t.Error("expected issue-specific marker instructions")
+	if !strings.Contains(prompt, "stage-Research.md") {
+		t.Error("expected mention of stage comment file")
 	}
-	if strings.Contains(prompt, "PR") {
-		t.Error("should not contain PR terminology for issues")
+	if strings.Contains(prompt, "FABRIK_ISSUE_UPDATE_BEGIN") {
+		t.Error("should not contain old FABRIK_ISSUE_UPDATE markers")
 	}
 }
 
@@ -811,14 +811,14 @@ func TestBuildCommentReviewPrompt_PR(t *testing.T) {
 	if !strings.Contains(prompt, "# PR #7: Fix bug") {
 		t.Error("expected PR header in prompt")
 	}
-	if !strings.Contains(prompt, "## Current PR Description") {
-		t.Error("expected 'Current PR Description' section")
+	if !strings.Contains(prompt, ".fabrik/") {
+		t.Error("expected mention of .fabrik/ context files")
 	}
-	if !strings.Contains(prompt, "updated PR description") {
-		t.Error("expected PR-specific marker instructions")
+	if !strings.Contains(prompt, "stage-Review.md") {
+		t.Error("expected mention of stage comment file")
 	}
-	if !strings.Contains(prompt, "FABRIK_ISSUE_UPDATE_BEGIN") {
-		t.Error("expected consistent FABRIK_ISSUE_UPDATE markers for PRs")
+	if strings.Contains(prompt, "FABRIK_ISSUE_UPDATE_BEGIN") {
+		t.Error("should not contain old FABRIK_ISSUE_UPDATE markers")
 	}
 }
 
@@ -854,39 +854,6 @@ func TestDefaultPRCommentPrompt(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "review feedback") {
 		t.Error("expected mention of review feedback")
-	}
-}
-
-func TestExtractUpdatedBody(t *testing.T) {
-	tests := []struct {
-		name   string
-		input  string
-		expect string
-	}{
-		{
-			name:   "normal extraction",
-			input:  "Some preamble\nFABRIK_ISSUE_UPDATE_BEGIN\nUpdated body here\nFABRIK_ISSUE_UPDATE_END\nSome epilogue",
-			expect: "Updated body here",
-		},
-		{
-			name:   "no markers",
-			input:  "Just some output without markers",
-			expect: "",
-		},
-		{
-			name:   "only begin marker",
-			input:  "FABRIK_ISSUE_UPDATE_BEGIN\nBody without end",
-			expect: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := extractUpdatedBody(tt.input)
-			if got != tt.expect {
-				t.Errorf("extractUpdatedBody() = %q, want %q", got, tt.expect)
-			}
-		})
 	}
 }
 
@@ -952,6 +919,90 @@ printf '%s\n' '{"result":"fallback output\nFABRIK_STAGE_COMPLETE\n","session_id"
 	}
 	if !completed {
 		t.Error("expected completed=true")
+	}
+}
+
+func TestWriteContextFiles(t *testing.T) {
+	workDir := t.TempDir()
+
+	stageComments := map[string]string{
+		"Research": "## Research findings\nHere is what I found.",
+		"Plan":     "## Plan\n1. Do this\n2. Do that",
+	}
+	err := writeContextFiles(workDir, "Issue body here", stageComments, "PR description here")
+	if err != nil {
+		t.Fatalf("writeContextFiles: %v", err)
+	}
+
+	// Verify issue.md
+	issueContent, err := os.ReadFile(filepath.Join(workDir, ".fabrik", "issue.md"))
+	if err != nil {
+		t.Fatalf("reading issue.md: %v", err)
+	}
+	if string(issueContent) != "Issue body here" {
+		t.Errorf("issue.md = %q, want %q", string(issueContent), "Issue body here")
+	}
+
+	// Verify stage files
+	for stageName, body := range stageComments {
+		path := filepath.Join(workDir, ".fabrik", "stage-"+stageName+".md")
+		content, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading stage-%s.md: %v", stageName, err)
+		}
+		if string(content) != body {
+			t.Errorf("stage-%s.md = %q, want %q", stageName, string(content), body)
+		}
+	}
+
+	// Verify pr-description.md
+	prContent, err := os.ReadFile(filepath.Join(workDir, ".fabrik", "pr-description.md"))
+	if err != nil {
+		t.Fatalf("reading pr-description.md: %v", err)
+	}
+	if string(prContent) != "PR description here" {
+		t.Errorf("pr-description.md = %q, want %q", string(prContent), "PR description here")
+	}
+}
+
+func TestWriteContextFiles_NoPRBody(t *testing.T) {
+	workDir := t.TempDir()
+
+	err := writeContextFiles(workDir, "body", nil, "")
+	if err != nil {
+		t.Fatalf("writeContextFiles: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(workDir, ".fabrik", "pr-description.md")); !os.IsNotExist(err) {
+		t.Error("pr-description.md should not be written when prBody is empty")
+	}
+}
+
+func TestBuildPrompt_ContextFilesNote(t *testing.T) {
+	stage := &stages.Stage{Name: "Implement", Prompt: "implement prompt"}
+	issue := gh.ProjectItem{Number: 1, Title: "Test"}
+	prompt := buildPrompt(stage, issue, nil)
+	if !strings.Contains(prompt, ".fabrik/") {
+		t.Error("expected prompt to mention .fabrik/ context files")
+	}
+	if !strings.Contains(prompt, "issue.md") {
+		t.Error("expected prompt to mention issue.md")
+	}
+}
+
+func TestBuildCommentReviewPrompt_NoUpdateMarkers(t *testing.T) {
+	stage := &stages.Stage{Name: "Research", Prompt: "research prompt"}
+	item := gh.ProjectItem{Number: 1, Title: "Test"}
+	comments := []gh.Comment{{Author: "user", Body: "hello"}}
+	prompt := buildCommentReviewPrompt(stage, item, comments)
+	if strings.Contains(prompt, "FABRIK_ISSUE_UPDATE_BEGIN") {
+		t.Error("comment review prompt should not contain FABRIK_ISSUE_UPDATE_BEGIN")
+	}
+	if strings.Contains(prompt, "FABRIK_ISSUE_UPDATE_END") {
+		t.Error("comment review prompt should not contain FABRIK_ISSUE_UPDATE_END")
+	}
+	if !strings.Contains(prompt, ".fabrik/") {
+		t.Error("expected prompt to mention .fabrik/ context files")
 	}
 }
 

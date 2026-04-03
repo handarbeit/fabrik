@@ -361,6 +361,18 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}
 	}
 
+	// Write context files for prior stages into .fabrik/ so Claude can reference them.
+	stageComments := e.collectStageComments(item, stage, false)
+	prBody := ""
+	if stage.PostToPR {
+		if prNum, prErr := e.client.FindPRForIssue(e.cfg.Owner, e.cfg.Repo, item.Number); prErr == nil && prNum > 0 {
+			prBody, _ = e.client.GetIssueBody(e.cfg.Owner, e.cfg.Repo, prNum)
+		}
+	}
+	if err := writeContextFiles(workDir, item.Body, stageComments, prBody); err != nil {
+		e.logf(item.Number, "warn", "could not write context files: %v\n", err)
+	}
+
 	// Invoke Claude Code in the issue's worktree
 	modelOverride := e.extractModelOverride(item.Number, item.Labels)
 	if modelOverride != "" {

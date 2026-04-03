@@ -58,6 +58,7 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string, sk
 				if !skipUpdate {
 					wm.updateWorktreeFromMain(wtDir, baseBranch, issueNumber)
 				}
+				wm.ensureGitExclude(wtDir, ".fabrik/", issueNumber)
 				return wtDir, nil
 			}
 		}
@@ -94,6 +95,7 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string, sk
 	}
 
 	wm.logf(issueNumber, "worktree", "created %s\n", wtDir)
+	wm.ensureGitExclude(wtDir, ".fabrik/", issueNumber)
 	return wtDir, nil
 }
 
@@ -163,6 +165,53 @@ func (wm *WorktreeManager) branchExists(branch string) bool {
 	out, err := cmd.CombinedOutput()
 	_ = out
 	return err == nil
+}
+
+// ensureGitExclude adds pattern to the per-worktree .git/info/exclude file so it
+// never appears in git status. Creates the info/ directory if needed. Non-fatal:
+// errors are logged but do not prevent the worktree from being used.
+func (wm *WorktreeManager) ensureGitExclude(wtDir, pattern string, issueNumber int) {
+	// Find the per-worktree gitdir (for worktrees this is .git/worktrees/<name>/)
+	cmd := exec.Command("git", "rev-parse", "--git-dir")
+	cmd.Dir = wtDir
+	out, err := cmd.Output()
+	if err != nil {
+		wm.logf(issueNumber, "warn", "could not find gitdir for exclude setup: %v\n", err)
+		return
+	}
+	gitDir := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(wtDir, gitDir)
+	}
+
+	infoDir := filepath.Join(gitDir, "info")
+	if err := os.MkdirAll(infoDir, 0755); err != nil {
+		wm.logf(issueNumber, "warn", "could not create gitdir info dir: %v\n", err)
+		return
+	}
+
+	excludeFile := filepath.Join(infoDir, "exclude")
+	existing, err := os.ReadFile(excludeFile)
+	if err != nil && !os.IsNotExist(err) {
+		wm.logf(issueNumber, "warn", "could not read exclude file: %v\n", err)
+		return
+	}
+
+	for _, line := range strings.Split(string(existing), "\n") {
+		if strings.TrimSpace(line) == pattern {
+			return // already present
+		}
+	}
+
+	f, err := os.OpenFile(excludeFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		wm.logf(issueNumber, "warn", "could not open exclude file: %v\n", err)
+		return
+	}
+	defer f.Close()
+	if _, err := fmt.Fprintf(f, "%s\n", pattern); err != nil {
+		wm.logf(issueNumber, "warn", "could not write to exclude file: %v\n", err)
+	}
 }
 
 // updateWorktreeFromMain fetches latest origin and rebases the worktree branch

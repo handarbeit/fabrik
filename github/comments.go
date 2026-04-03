@@ -29,6 +29,15 @@ func (c *Client) UpdateIssueBody(owner, repo string, issueNumber int, body strin
 	return c.restPatch(apiURL, payload)
 }
 
+// UpdateComment replaces the body of an existing issue comment.
+func (c *Client) UpdateComment(owner, repo string, commentDatabaseID int, body string) error {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/issues/comments/%d", c.baseURL, owner, repo, commentDatabaseID)
+	payload := map[string]interface{}{
+		"body": body,
+	}
+	return c.restPatch(apiURL, payload)
+}
+
 // GetIssueBody fetches the body of an issue (or PR, since PRs are issues on the REST API).
 func (c *Client) GetIssueBody(owner, repo string, issueNumber int) (string, error) {
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/issues/%d", c.baseURL, owner, repo, issueNumber)
