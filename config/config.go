@@ -7,7 +7,52 @@ import (
 	"strings"
 
 	"github.com/joho/godotenv"
+	"gopkg.in/yaml.v3"
 )
+
+// ProjectConfig holds the non-secret, project-level settings read from
+// .fabrik/config.yaml. All fields are optional; absent fields stay zero/nil.
+type ProjectConfig struct {
+	Owner         string `yaml:"owner"`
+	Repo          string `yaml:"repo"`
+	ProjectNum    *int   `yaml:"project"`
+	User          string `yaml:"user"`
+	StagesDir     string `yaml:"stages"`
+	Poll          *int   `yaml:"poll"`
+	MaxConcurrent *int   `yaml:"max_concurrent"`
+	MaxRetries    *int   `yaml:"max_retries"`
+	Yolo          bool   `yaml:"yolo"`
+	AutoUpgrade   bool   `yaml:"auto_upgrade"`
+	TUI           bool   `yaml:"tui"`
+	Terminal      string `yaml:"terminal"`
+	DebugOutput   bool   `yaml:"debug_output"`
+}
+
+// LoadProjectConfig reads .fabrik/config.yaml from CWD.
+// If the file does not exist, a zero-value struct is returned with no error.
+func LoadProjectConfig() (ProjectConfig, error) {
+	data, err := os.ReadFile(".fabrik/config.yaml")
+	if os.IsNotExist(err) {
+		return ProjectConfig{}, nil
+	}
+	if err != nil {
+		return ProjectConfig{}, fmt.Errorf("reading .fabrik/config.yaml: %w", err)
+	}
+	var pc ProjectConfig
+	if err := yaml.Unmarshal(data, &pc); err != nil {
+		return ProjectConfig{}, fmt.Errorf("parsing .fabrik/config.yaml: %w", err)
+	}
+	return pc, nil
+}
+
+// WarnIfConfigIgnored prints a warning to stderr if .fabrik/config.yaml is
+// listed in .gitignore. The config file should be committed to git so it
+// travels with the repo; ignoring it defeats that purpose.
+func WarnIfConfigIgnored() {
+	if isInGitignore(".fabrik/config.yaml") {
+		fmt.Fprintln(os.Stderr, "[warn] .fabrik/config.yaml is listed in .gitignore — this file should be committed to git so project config travels with the repo")
+	}
+}
 
 // LoadDotenv loads .env from CWD if it exists, and verifies it is listed in .gitignore.
 // Returns nil if no .env file is present.
