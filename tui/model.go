@@ -208,23 +208,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
-		case "enter", "a":
-			// Attach to tmux session for selected in-progress job
+		case "enter", "l":
+			// Open latest log file for selected job (active or history pane)
 			if m.focusPane == paneActive {
 				nums := m.sortedActiveNums()
 				if m.activeIdx < len(nums) {
 					num := nums[m.activeIdx]
-					if job, ok := m.active[num]; ok {
-						session := tmuxSessionName(num, job.StageName)
-						return m, openTerminalCmd("tmux", "attach", "-t", session)
+					if _, ok := m.active[num]; ok {
+						logDir := fmt.Sprintf("%s/.fabrik/logs/issue-%d", homeDir(), num)
+						return m, openLogViewerCmd(logDir)
 					}
 				}
-			}
-			return m, nil
-
-		case "l":
-			// Open latest log file for selected history job
-			if m.focusPane == paneHistory && len(m.history) > 0 {
+			} else if m.focusPane == paneHistory && len(m.history) > 0 {
 				realIdx := len(m.history) - 1 - m.histIdx
 				if realIdx >= 0 && realIdx < len(m.history) {
 					h := m.history[realIdx]
@@ -233,6 +228,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			return m, nil
+
 		}
 		// Forward other key events to the history viewport for scrolling
 		var cmd tea.Cmd
@@ -469,7 +465,7 @@ func (m Model) viewActive() string {
 
 	hint := ""
 	if m.focusPane == paneActive && len(m.active) > 0 {
-		hint = dimStyle.Render("  [a]ttach tmux  [tab] history")
+		hint = dimStyle.Render("  [enter/l]ogs  [tab] history")
 	}
 	content := title + hint + "\n" + strings.Join(lines, "\n")
 	return borderStyle.Width(m.width - 4).Render(content)
@@ -511,30 +507,11 @@ func (m Model) sortedActiveNums() []int {
 	return nums
 }
 
-// tmuxSessionName builds the tmux session name for an active job.
-func tmuxSessionName(issueNumber int, stageName string) string {
-	safe := strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' {
-			return r
-		}
-		return '-'
-	}, stageName)
-	safe = strings.ToLower(safe)
-	for strings.Contains(safe, "--") {
-		safe = strings.ReplaceAll(safe, "--", "-")
-	}
-	safe = strings.Trim(safe, "-")
-	if safe == "" {
-		safe = "stage"
-	}
-	return fmt.Sprintf("fabrik-%d-%s", issueNumber, safe)
-}
-
 // openLogViewerCmd returns a tea.Cmd that opens a terminal showing the most
 // recent log file in the given directory using less.
 func openLogViewerCmd(logDir string) tea.Cmd {
 	if _, err := os.Stat(logDir); err != nil {
-		// Directory doesn't exist — no logs available (e.g., tmux session)
+		// Directory doesn't exist — no logs yet for this job
 		return nil
 	}
 	entries, err := os.ReadDir(logDir)
