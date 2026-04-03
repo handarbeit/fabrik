@@ -35,6 +35,7 @@ type Config struct {
 	MaxConcurrent int
 	MaxRetries    int
 	NoTmux        bool
+	DebugOutput   bool
 }
 
 func Execute() error {
@@ -61,6 +62,7 @@ func Execute() error {
 	flag.BoolVar(&cfg.NoTmux, "no-tmux", false, "Disable tmux session wrapping; run Claude directly (useful for CI/headless environments)")
 	flag.IntVar(&cfg.PollSeconds, "poll", 30, "Polling interval in seconds")
 	flag.IntVar(&cfg.MaxRetries, "max-retries", 3, "Max failed stage attempts before pausing the issue (0 = unlimited)")
+	flag.BoolVar(&cfg.DebugOutput, "debug-output", false, "Save Claude stage output to .fabrik/debug/ for debugging")
 
 	flag.Parse()
 
@@ -141,6 +143,13 @@ func Execute() error {
 		}
 	}
 
+	if !cfg.DebugOutput {
+		if v := os.Getenv("FABRIK_DEBUG_OUTPUT"); v != "" {
+			lv := strings.ToLower(v)
+			cfg.DebugOutput = lv == "true" || lv == "1" || lv == "yes"
+		}
+	}
+
 	if cfg.Owner == "" || cfg.Repo == "" || cfg.ProjectNum == 0 {
 		fmt.Fprintf(os.Stderr, "Usage: fabrik --owner OWNER --repo REPO --project NUM [options]\n\n")
 		flag.PrintDefaults()
@@ -189,6 +198,7 @@ func Execute() error {
 			fmt.Printf("  max-retries: %d\n", cfg.MaxRetries)
 		}
 	}
+	fmt.Printf("  debug-output: %v\n", cfg.DebugOutput)
 
 	eng, err := engine.New(engine.Config{
 		Owner:         cfg.Owner,
@@ -202,6 +212,7 @@ func Execute() error {
 		MaxConcurrent: cfg.MaxConcurrent,
 		MaxRetries:    cfg.MaxRetries,
 		NoTmux:        cfg.NoTmux,
+		DebugOutput:   cfg.DebugOutput,
 		Stages:        stageCfgs,
 		ReadyCh:       testReadyCh,
 	})
