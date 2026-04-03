@@ -1,0 +1,11 @@
+{
+  "name": "fabrik",
+  "version": "0.1.0",
+  "description": "SDLC stage workflow skills for the Fabrik pipeline orchestrator. Provides expertise for each pipeline stage: Specify, Research, Plan, Implement, Review, and Validate.",
+  "author": {
+    "name": "Tenacious Ventures",
+    "url": "https://github.com/tenaciousvc/fabrik"
+  },
+  "homepage": "https://github.com/tenaciousvc/fabrik",
+  "repository": "https://github.com/tenaciousvc/fabrik"
+}
