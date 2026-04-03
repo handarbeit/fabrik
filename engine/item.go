@@ -510,7 +510,10 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}
 	}
 
-	blockedOnInput := CheckBlockedOnInput(output)
+	// Only honor the blocked-on-input marker if Claude ran without error.
+	// If there was an error, treat the run as a retry/failure rather than
+	// silently pausing the issue.
+	blockedOnInput := err == nil && CheckBlockedOnInput(output)
 
 	if completed {
 		releaseLock()
