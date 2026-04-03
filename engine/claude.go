@@ -99,6 +99,32 @@ func (t TokenUsage) add(other TokenUsage) TokenUsage {
 	}
 }
 
+// saveDebugLog writes Claude's output for a stage invocation to
+// .fabrik/debug/issue-{N}_{epoch}_{label}.log in the current working directory.
+// Errors are non-fatal — a warning is printed to stderr.
+func saveDebugLog(issueNumber int, label string, output string) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[warn] saveDebugLog: getting cwd: %v\n", err)
+		return
+	}
+	debugDir := filepath.Join(cwd, ".fabrik", "debug")
+	if err := os.MkdirAll(debugDir, 0700); err != nil {
+		fmt.Fprintf(os.Stderr, "[warn] saveDebugLog: creating debug dir: %v\n", err)
+		return
+	}
+	// Sanitize label for use in filename.
+	safe := filepath.Base(label)
+	if safe == "" || safe == "." || safe == string(filepath.Separator) {
+		safe = "stage"
+	}
+	name := fmt.Sprintf("issue-%d_%d_%s.log", issueNumber, time.Now().UnixNano(), safe)
+	path := filepath.Join(debugDir, name)
+	if err := os.WriteFile(path, []byte(output), 0600); err != nil {
+		fmt.Fprintf(os.Stderr, "[warn] saveDebugLog: writing %s: %v\n", path, err)
+	}
+}
+
 // SessionDir returns the directory where Claude sessions are cached for an issue.
 func SessionDir(issueNumber int) string {
 	home, _ := os.UserHomeDir()
