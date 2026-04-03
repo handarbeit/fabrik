@@ -45,8 +45,7 @@ func findStageComment(comments []gh.Comment, stageName string) *gh.Comment {
 	var found *gh.Comment
 	for i := range comments {
 		if strings.HasPrefix(comments[i].Body, header) {
-			c := comments[i]
-			found = &c
+			found = &comments[i]
 		}
 	}
 	return found
@@ -169,10 +168,14 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		}
 	}
 
-	// Step 7: Post acknowledgement comment on the issue
-	ackComment := fmt.Sprintf("🏭 **Fabrik**\n\nComment processed during **%s** stage. The stage comment has been updated.", stage.Name)
-	if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, ackComment); err != nil {
-		e.logf(item.Number, "warn", "could not post acknowledgement: %v\n", err)
+	// Step 7: Post acknowledgement comment on the issue only when Claude produced
+	// output. When output is empty (e.g. Claude returned nothing useful) we skip
+	// the ack to avoid misleading the user into thinking the stage comment changed.
+	if output != "" {
+		ackComment := fmt.Sprintf("🏭 **Fabrik**\n\nComment processed during **%s** stage. The stage comment has been updated.", stage.Name)
+		if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, ackComment); err != nil {
+			e.logf(item.Number, "warn", "could not post acknowledgement: %v\n", err)
+		}
 	}
 
 	// Step 8: Remove editing label
