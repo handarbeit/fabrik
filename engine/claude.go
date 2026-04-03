@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -24,46 +23,6 @@ var blockedOnInputRE = regexp.MustCompile(`(?m)^FABRIK_BLOCKED_ON_INPUT\r?$`)
 // CheckBlockedOnInput reports whether output contains the FABRIK_BLOCKED_ON_INPUT marker.
 func CheckBlockedOnInput(output string) bool {
 	return blockedOnInputRE.MatchString(output)
-}
-
-var (
-	tmuxOnce      sync.Once
-	tmuxAvailBool bool
-)
-
-// tmuxAvailable reports whether tmux is on PATH. Result is cached after first call.
-func tmuxAvailable() bool {
-	tmuxOnce.Do(func() {
-		_, err := exec.LookPath("tmux")
-		tmuxAvailBool = err == nil
-	})
-	return tmuxAvailBool
-}
-
-// sanitizeTmuxName returns a tmux-safe session name of the form fabrik-N-stage.
-// Non-alphanumeric characters (except hyphens) are replaced with hyphens;
-// consecutive and leading/trailing hyphens are collapsed.
-func sanitizeTmuxName(issueNumber int, stageName string) string {
-	safe := strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' {
-			return r
-		}
-		return '-'
-	}, stageName)
-	safe = strings.ToLower(safe)
-	for strings.Contains(safe, "--") {
-		safe = strings.ReplaceAll(safe, "--", "-")
-	}
-	safe = strings.Trim(safe, "-")
-	if safe == "" {
-		safe = "stage"
-	}
-	return fmt.Sprintf("fabrik-%d-%s", issueNumber, safe)
-}
-
-// shellQuote returns s enclosed in single quotes, safe for POSIX shell.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // claudeLogf is the logging function used by runClaude. Set by the Engine
@@ -162,9 +121,8 @@ func sessionFile(issueNumber int, stageName string) string {
 // InvokeClaude runs Claude Code with the given stage configuration and issue context.
 // workDir is the directory Claude should run in (typically a git worktree).
 // modelOverride, if non-empty, replaces the stage's configured model.
-// noTmux skips tmux wrapping and runs Claude directly (e.g. for CI environments).
 // It returns Claude's output, whether Claude indicated completion, and token usage.
-func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string, noTmux bool) (string, bool, TokenUsage, error) {
+func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
 	sessDir := SessionDir(issue.Number)
 	if err := os.MkdirAll(sessDir, 0700); err != nil {
 		return "", false, TokenUsage{}, fmt.Errorf("creating session dir: %w", err)
@@ -176,7 +134,7 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	prompt := buildPrompt(stage, issue, newComments)
 	args := buildClaudeArgs(stage, issue.Number, resume, modelOverride)
 
-	output, _, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, noTmux)
+	output, _, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name)
 	usage.MaxTurns = stage.MaxTurns
 	if err != nil {
 		return output, false, usage, err
@@ -187,8 +145,7 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 // InvokeClaudeForComments runs Claude Code with a comment-review prompt.
 // It uses the stage's CommentPrompt if defined, otherwise a default.
 // modelOverride, if non-empty, replaces the stage's configured model.
-// noTmux skips tmux wrapping and runs Claude directly.
-func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, modelOverride string, noTmux bool) (string, bool, TokenUsage, error) {
+func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
 	sessDir := SessionDir(issue.Number)
 	if err := os.MkdirAll(sessDir, 0700); err != nil {
 		return "", false, TokenUsage{}, fmt.Errorf("creating session dir: %w", err)
@@ -200,7 +157,7 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 	prompt := buildCommentReviewPrompt(stage, issue, comments)
 	args := buildClaudeArgs(stage, issue.Number, true, modelOverride) // resume existing session
 
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", noTmux)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review")
 	usage.MaxTurns = stage.MaxTurns
 	return output, completed, usage, err
 }
@@ -263,19 +220,8 @@ type claudeResponse struct {
 	} `json:"usage"`
 }
 
-func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, noTmux bool) (string, bool, TokenUsage, error) {
+func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string) (string, bool, TokenUsage, error) {
 	claudeLog(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
-
-	if !noTmux && tmuxAvailable() {
-		sessionName := sanitizeTmuxName(issueNumber, label)
-		output, completed, usage, err := runClaudeInTmux(ctx, args, prompt, workDir, issueNumber, label, sessionName)
-		if err == nil || ctx.Err() != nil {
-			return output, completed, usage, err
-		}
-		claudeLog(issueNumber, "warn", "tmux session failed (%v); falling back to direct execution\n", err)
-	} else if !noTmux {
-		claudeLog(issueNumber, "warn", "tmux not found on PATH; running Claude directly\n")
-	}
 
 	// Set up stderr: in TUI mode, only to log file; in plain mode, tee to os.Stderr + log file.
 	var stderrWriter io.Writer
@@ -341,174 +287,6 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 
 	completed := stageCompleteRE.MatchString(text)
 	return text, completed, usage, nil
-}
-
-// runClaudeInTmux runs Claude inside a named detached tmux session so the user
-// can observe it with `tmux attach -t <sessionName>`. The prompt is written to a
-// temp file (stdin redirect) and stdout is captured to another temp file for
-// post-run parsing. Stderr stays in the tmux pane. The exit code is written to a
-// third temp file so errors are propagated correctly.
-func runClaudeInTmux(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, sessionName string) (string, bool, TokenUsage, error) {
-	claudeLog(issueNumber, "claude", "starting tmux session %q (attach: tmux attach -t %s)\n", sessionName, sessionName)
-
-	// Write prompt to temp file (tmux can't receive stdin from the Go process).
-	promptFile, err := os.CreateTemp("", "fabrik-prompt-*")
-	if err != nil {
-		return "", false, TokenUsage{}, fmt.Errorf("creating prompt temp file: %w", err)
-	}
-	promptPath := promptFile.Name()
-	defer os.Remove(promptPath)
-	if _, err := promptFile.WriteString(prompt); err != nil {
-		promptFile.Close()
-		return "", false, TokenUsage{}, fmt.Errorf("writing prompt: %w", err)
-	}
-	promptFile.Close()
-
-	// Create output temp file.
-	outputFile, err := os.CreateTemp("", "fabrik-output-*")
-	if err != nil {
-		return "", false, TokenUsage{}, fmt.Errorf("creating output temp file: %w", err)
-	}
-	outputPath := outputFile.Name()
-	outputFile.Close()
-	defer os.Remove(outputPath)
-
-	// Create exit-code temp file.
-	exitFile, err := os.CreateTemp("", "fabrik-exit-*")
-	if err != nil {
-		return "", false, TokenUsage{}, fmt.Errorf("creating exit temp file: %w", err)
-	}
-	exitPath := exitFile.Name()
-	exitFile.Close()
-	defer os.Remove(exitPath)
-
-	// Write a shell script so we can pass args without shell-quoting headaches
-	// and capture Claude's exit code.
-	scriptFile, err := os.CreateTemp("", "fabrik-tmux-*.sh")
-	if err != nil {
-		return "", false, TokenUsage{}, fmt.Errorf("creating tmux script: %w", err)
-	}
-	scriptPath := scriptFile.Name()
-	defer os.Remove(scriptPath)
-
-	// Resolve the claude binary path so the script works even when claude is
-	// not available as a plain name inside the tmux shell (e.g. in PATH-restricted
-	// or function-based environments).
-	claudeBin := "claude"
-	if resolved, err := exec.LookPath("claude"); err == nil {
-		claudeBin = resolved
-	}
-
-	// In tmux mode, use stream-json so the pane shows real-time activity.
-	// stdout is tee'd: raw stream-json goes to the capture file for parsing,
-	// and a human-readable view is piped through `fabrik _stream-filter` for
-	// the tmux pane.
-	tmuxArgs := make([]string, 0, len(args))
-	for _, arg := range args {
-		if arg == "json" && len(tmuxArgs) > 0 && tmuxArgs[len(tmuxArgs)-1] == "--output-format" {
-			arg = "stream-json"
-		}
-		tmuxArgs = append(tmuxArgs, arg)
-	}
-
-	// Resolve the fabrik binary for the stream filter (must be absolute since
-	// tmux runs the script from a different working directory).
-	fabrikBin, err := os.Executable()
-	if err != nil {
-		fabrikBin = os.Args[0]
-	}
-
-	var sb strings.Builder
-	sb.WriteString("#!/bin/sh\n")
-	sb.WriteString("cd " + shellQuote(workDir) + " || exit 1\n")
-	sb.WriteString(shellQuote(claudeBin))
-	for _, arg := range tmuxArgs {
-		sb.WriteString(" " + shellQuote(arg))
-	}
-	sb.WriteString(" < " + shellQuote(promptPath))
-	sb.WriteString(" | tee " + shellQuote(outputPath))
-	sb.WriteString(" | " + shellQuote(fabrikBin) + " _stream-filter\n")
-	sb.WriteString("echo ${PIPESTATUS[0]:-$?} > " + shellQuote(exitPath) + "\n")
-
-	if _, err := scriptFile.WriteString(sb.String()); err != nil {
-		scriptFile.Close()
-		return "", false, TokenUsage{}, fmt.Errorf("writing tmux script: %w", err)
-	}
-	scriptFile.Close()
-	if err := os.Chmod(scriptPath, 0700); err != nil {
-		return "", false, TokenUsage{}, fmt.Errorf("chmod tmux script: %w", err)
-	}
-
-	// Kill any pre-existing session with this name (leftover from a previous interrupted run).
-	// Use "=<name>" for exact-match to avoid accidentally killing a differently-named session.
-	exec.Command("tmux", "kill-session", "-t", "="+sessionName).Run() //nolint:errcheck
-
-	// Start detached tmux session running the script.
-	if err := exec.Command("tmux", "new-session", "-d", "-s", sessionName, scriptPath).Run(); err != nil {
-		return "", false, TokenUsage{}, fmt.Errorf("starting tmux session %q: %w", sessionName, err)
-	}
-
-	// Poll until the session exits, respecting context cancellation.
-	// Use "=<name>" to force exact-match in tmux has-session (avoids prefix
-	// collisions, e.g. fabrik-7 matching fabrik-74).
-	exactTarget := "=" + sessionName
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			exec.Command("tmux", "kill-session", "-t", exactTarget).Run() //nolint:errcheck
-			return "", false, TokenUsage{}, ctx.Err()
-		case <-ticker.C:
-			// Use CommandContext so the poll call itself respects cancellation.
-			if err := exec.CommandContext(ctx, "tmux", "has-session", "-t", exactTarget).Run(); err != nil {
-				// Session is gone — Claude finished.
-				goto sessionDone
-			}
-		}
-	}
-
-sessionDone:
-	// Read Claude's output.
-	rawOutput, err := os.ReadFile(outputPath)
-	if err != nil {
-		return "", false, TokenUsage{}, fmt.Errorf("reading tmux output: %w", err)
-	}
-
-	// Determine exit code. An empty or missing exit file means Claude was killed
-	// before the script could write the exit code — treat that as an error.
-	var runErr error
-	exitBytes, exitReadErr := os.ReadFile(exitPath)
-	if exitReadErr != nil || strings.TrimSpace(string(exitBytes)) == "" {
-		runErr = fmt.Errorf("claude exited abnormally (no exit code written)")
-	} else if code := strings.TrimSpace(string(exitBytes)); code != "0" {
-		runErr = fmt.Errorf("exit status %s", code)
-	}
-
-	baseName := strings.TrimSuffix(label, "-comment-review")
-	resp, ok := parseClaudeJSON(bytes.TrimSpace(rawOutput))
-	var result string
-	var usage TokenUsage
-	if ok {
-		result = resp.Result
-		usage = tokenUsageFromResponse(resp)
-		if runErr != nil {
-			claudeLog(issueNumber, "claude", "used %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
-		} else {
-			claudeLog(issueNumber, "claude", "completed in %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
-		}
-		saveSessionIDDirect(sessionFile(issueNumber, baseName), resp.SessionID)
-	} else {
-		claudeLog(issueNumber, "warn", "JSON parse failed (%d bytes); output not posted\n", len(rawOutput))
-		result = fmt.Sprintf("⚠️ Claude output could not be parsed (raw output was %d bytes). Check logs at `~/.fabrik/logs/issue-%d/` for details.", len(rawOutput), issueNumber)
-	}
-
-	if runErr != nil {
-		return result, false, usage, fmt.Errorf("claude exited with error: %w", runErr)
-	}
-
-	completed := stageCompleteRE.MatchString(result)
-	return result, completed, usage, nil
 }
 
 // checkCompletion returns true if Claude's output indicates the stage is complete.
@@ -734,12 +512,10 @@ func extractSummary(output string) string {
 	return extractBetweenMarkers(output, "FABRIK_SUMMARY_BEGIN", "FABRIK_SUMMARY_END")
 }
 
-// parseClaudeJSON parses the JSON output from claude --output-format json
-// or --output-format stream-json.
-// Handles three formats:
+// parseClaudeJSON parses the JSON output from claude --output-format json.
+// Handles two formats:
 //   - Single result object: {"result": "...", "session_id": "...", ...}
 //   - Conversation array: [{"type":"system",...}, ..., {"type":"result","result":"..."}]
-//   - NDJSON (stream-json): one JSON object per line, last "result" line has the response
 func parseClaudeJSON(output []byte) (claudeResponse, bool) {
 	// Try single-object format first.
 	var resp claudeResponse
@@ -754,18 +530,6 @@ func parseClaudeJSON(output []byte) (claudeResponse, bool) {
 			if found, ok := tryParseResultMessage(messages[i]); ok {
 				return found, true
 			}
-		}
-	}
-
-	// Try NDJSON (stream-json): one JSON object per line.
-	lines := bytes.Split(output, []byte("\n"))
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := bytes.TrimSpace(lines[i])
-		if len(line) == 0 {
-			continue
-		}
-		if found, ok := tryParseResultMessage(line); ok {
-			return found, true
 		}
 	}
 
