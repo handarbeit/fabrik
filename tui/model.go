@@ -477,8 +477,7 @@ func openLogViewerCmd(logDir string) tea.Cmd {
 	}
 	// Sort by name descending (timestamp in name = lexicographic order).
 	latest := entries[len(entries)-1].Name()
-	logPath := logDir + "/" + latest
-	return openTerminalCmd("less", "+F", logPath)
+	return openTerminalCmd("sh", "-c", fmt.Sprintf("cd %s && less +F %s", logDir, latest))
 }
 
 // fmtDuration formats a duration as MM:SS.
