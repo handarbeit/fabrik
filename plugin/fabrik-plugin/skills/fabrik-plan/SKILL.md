@@ -107,6 +107,8 @@ Plans typically complete in a single pass. If the spec and research are solid, t
 
 **Completing the stage**: Output `FABRIK_STAGE_COMPLETE` on its own line when the plan is complete and actionable.
 
+**Blocking on input**: If there are unresolved questions that must be answered before a concrete plan can be produced, output `FABRIK_BLOCKED_ON_INPUT` on its own line instead of `FABRIK_STAGE_COMPLETE`. The engine will pause with `fabrik:awaiting-input` and auto-resume when the user comments. These two markers are mutually exclusive — never output both.
+
 **Updating the issue body**: Wrap the complete updated issue body in:
 ```
 FABRIK_ISSUE_UPDATE_BEGIN
