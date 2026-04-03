@@ -19,6 +19,12 @@ import (
 )
 
 var stageCompleteRE = regexp.MustCompile(`(?m)^FABRIK_STAGE_COMPLETE\r?$`)
+var blockedOnInputRE = regexp.MustCompile(`(?m)^FABRIK_BLOCKED_ON_INPUT\r?$`)
+
+// CheckBlockedOnInput reports whether output contains the FABRIK_BLOCKED_ON_INPUT marker.
+func CheckBlockedOnInput(output string) bool {
+	return blockedOnInputRE.MatchString(output)
+}
 
 var (
 	tmuxOnce      sync.Once
@@ -561,7 +567,10 @@ func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Com
 		b.WriteString("FABRIK_SUMMARY_END\n\n")
 	}
 	b.WriteString("When you have completed all work for this stage, end your response with the exact line:\n")
-	b.WriteString("FABRIK_STAGE_COMPLETE\n")
+	b.WriteString("FABRIK_STAGE_COMPLETE\n\n")
+	b.WriteString("If you have unresolved questions that must be answered before the stage can proceed, output instead:\n")
+	b.WriteString("FABRIK_BLOCKED_ON_INPUT\n")
+	b.WriteString("These two markers are mutually exclusive — output exactly one or neither.\n")
 
 	return b.String()
 }

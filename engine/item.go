@@ -13,6 +13,22 @@ import (
 	"github.com/handarbeit/fabrik/stages"
 )
 
+// isAwaitingInput returns true iff the item has both fabrik:paused and
+// fabrik:awaiting-input labels, indicating it was paused waiting for user input
+// (as opposed to a failure-escalation pause).
+func isAwaitingInput(item gh.ProjectItem) bool {
+	var hasPaused, hasAwaitingInput bool
+	for _, label := range item.Labels {
+		if label == "fabrik:paused" {
+			hasPaused = true
+		}
+		if label == "fabrik:awaiting-input" {
+			hasAwaitingInput = true
+		}
+	}
+	return hasPaused && hasAwaitingInput
+}
+
 // itemMayNeedWork does cheap pre-checks using only shallow board data (no comments).
 // Items that pass this filter will have their details fetched via FetchItemDetails
 // before the full itemNeedsWork check. This avoids expensive deep fetches for items
@@ -61,11 +77,15 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 		return true
 	}
 
+	// Awaiting-input items (paused + awaiting-input) should be polled so we can
+	// detect when the user responds with a comment — they bypass the paused guard.
+	awaitingInput := isAwaitingInput(item)
+
 	// Paused items and items locked by another user are not our work
 	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
 	otherLockPrefix := "fabrik:locked:"
 	for _, label := range item.Labels {
-		if label == "fabrik:paused" {
+		if label == "fabrik:paused" && !awaitingInput {
 			return false
 		}
 		if strings.HasPrefix(label, otherLockPrefix) && label != lockLabel {
@@ -102,6 +122,13 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 			}
 		}
 		return true
+	}
+
+	// Awaiting-input items (paused + awaiting-input) should be checked for new
+	// comments — that's the resume trigger. They must not proceed further.
+	awaitingInput := isAwaitingInput(item)
+	if awaitingInput {
+		return len(e.findNewComments(item)) > 0
 	}
 
 	// Paused items and items locked by another user are not our work
@@ -177,7 +204,19 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}
 	}
 
-	// Skip if paused
+	// Awaiting-input: paused because Claude needs user input. If the user has
+	// responded with a new comment, unblock and route to comment processing.
+	if isAwaitingInput(item) {
+		newComments := e.findNewComments(item)
+		if len(newComments) > 0 {
+			e.unblockAwaitingInput(item, stage, itemKey)
+			return e.processComments(ctx, board, item, stage, newComments)
+		}
+		e.logf(item.Number, "skip", "awaiting user input\n")
+		return nil
+	}
+
+	// Skip if paused (failure-escalation pause — not awaiting-input)
 	for _, label := range item.Labels {
 		if label == "fabrik:paused" {
 			e.logf(item.Number, "skip", "is paused\n")
@@ -471,6 +510,11 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}
 	}
 
+	// Only honor the blocked-on-input marker if Claude ran without error.
+	// If there was an error, treat the run as a retry/failure rather than
+	// silently pausing the issue.
+	blockedOnInput := err == nil && CheckBlockedOnInput(output)
+
 	if completed {
 		releaseLock()
 		// Clear retry tracking for this stage — no longer needed after success.
@@ -489,6 +533,9 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			e.markPRReady(item, prNumber)
 		}
 		e.handleStageComplete(board, item, stage)
+	} else if blockedOnInput {
+		releaseLock()
+		e.blockOnInput(item, stage)
 	} else {
 		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
 		e.logf(item.Number, "wait", "stage %q did not complete — will retry after %v\n", stage.Name, cooldown)
@@ -553,6 +600,41 @@ func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 	delete(e.retryCount, itemKey)
 	delete(e.pausedDueToRetries, itemKey)
 	delete(e.processedSet, itemKey) // clear cooldown so the stage retries immediately
+	e.mu.Unlock()
+}
+
+// blockOnInput is called when Claude outputs FABRIK_BLOCKED_ON_INPUT. It pauses
+// the issue with fabrik:paused + fabrik:awaiting-input labels so the engine
+// knows to auto-unblock when the user responds with a comment.
+// It does NOT add a stage:<name>:failed label and does NOT touch retryCount.
+func (e *Engine) blockOnInput(item gh.ProjectItem, stage *stages.Stage) {
+	e.logf(item.Number, "block", "stage %q needs user input — pausing with awaiting-input\n", stage.Name)
+
+	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, "fabrik:paused"); err != nil {
+		e.logf(item.Number, "warn", "could not add paused label: %v\n", err)
+	}
+	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, "fabrik:awaiting-input"); err != nil {
+		e.logf(item.Number, "warn", "could not add awaiting-input label: %v\n", err)
+	}
+}
+
+// unblockAwaitingInput is called when a user comment arrives on an issue that
+// was paused via blockOnInput. It removes both labels and clears the
+// processedSet entry so the stage re-runs promptly after comment processing.
+func (e *Engine) unblockAwaitingInput(item gh.ProjectItem, stage *stages.Stage, itemKey string) {
+	e.logf(item.Number, "unblock", "user comment received — removing awaiting-input pause\n")
+
+	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, item.Number, "fabrik:paused"); err != nil &&
+		!errors.Is(err, gh.ErrNotFound) {
+		e.logf(item.Number, "warn", "could not remove paused label: %v\n", err)
+	}
+	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, item.Number, "fabrik:awaiting-input"); err != nil &&
+		!errors.Is(err, gh.ErrNotFound) {
+		e.logf(item.Number, "warn", "could not remove awaiting-input label: %v\n", err)
+	}
+
+	e.mu.Lock()
+	delete(e.processedSet, itemKey)
 	e.mu.Unlock()
 }
 
