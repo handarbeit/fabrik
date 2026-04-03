@@ -23,6 +23,7 @@ type Config struct {
 	MaxRetries    int
 	NoTmux        bool
 	DebugOutput   bool
+	PluginDir     string
 	Stages        []*stages.Stage
 	// ReadyCh is closed once Run() has registered signal handlers. Tests use
 	// this to avoid sending SIGINT before signal.Notify is installed.
@@ -57,6 +58,7 @@ func New(cfg Config) (*Engine, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolving git repo root: %w", err)
 	}
+	claudePluginDir = cfg.PluginDir
 	wm := NewWorktreeManager(repoDir)
 	eng := &Engine{
 		cfg:                cfg,
