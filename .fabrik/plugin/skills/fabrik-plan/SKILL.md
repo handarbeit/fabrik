@@ -129,12 +129,7 @@ Plans typically complete in a single pass. If the spec and research are solid, t
 
 **Blocking on input**: If there are unresolved questions that must be answered before a concrete plan can be produced, output `FABRIK_BLOCKED_ON_INPUT` on its own line instead of `FABRIK_STAGE_COMPLETE`. The engine will pause with both `fabrik:paused` and `fabrik:awaiting-input` labels and auto-resume when the user comments. Do not remove these labels manually. These two markers are mutually exclusive — never output both.
 
-**Updating the issue body**: Wrap the complete updated issue body in:
-```
-FABRIK_ISSUE_UPDATE_BEGIN
-<entire issue body — spec + research + plan>
-FABRIK_ISSUE_UPDATE_END
-```
+**Do NOT update the issue body.** The issue body is the spec, owned by Specify. Your plan is posted as a stage comment by the engine automatically. Do not use `FABRIK_ISSUE_UPDATE` markers — they would overwrite the spec.
 
 **Comment processing**: If the user comments with feedback, adjust the plan accordingly. Update task list, revise decisions, re-order work as needed. Always use checkbox format (`- [ ] task`) for the task list.
 
