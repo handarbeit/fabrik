@@ -29,6 +29,7 @@ type GitHubClient interface {
 // ClaudeInvoker defines the interface for invoking Claude Code.
 type ClaudeInvoker interface {
 	Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (output string, completed bool, usage TokenUsage, err error)
+	InvokeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, modelOverride string) (output string, completed bool, usage TokenUsage, err error)
 }
 
 // RealClaudeInvoker wraps the existing InvokeClaude function.
@@ -40,6 +41,14 @@ func (r *RealClaudeInvoker) Invoke(ctx context.Context, stage *stages.Stage, iss
 	output, completed, usage, err := InvokeClaude(ctx, stage, issue, newComments, resume, workDir, modelOverride)
 	if r.DebugOutput {
 		saveDebugLog(issue.Number, stage.Name, output)
+	}
+	return output, completed, usage, err
+}
+
+func (r *RealClaudeInvoker) InvokeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+	output, completed, usage, err := InvokeClaudeForComments(ctx, stage, issue, comments, workDir, modelOverride)
+	if r.DebugOutput {
+		saveDebugLog(issue.Number, stage.Name+"-comment-review", output)
 	}
 	return output, completed, usage, err
 }
