@@ -69,6 +69,10 @@ var claudeLogf func(issueNumber int, tag, format string, args ...any)
 // process stderr is sent only to the log file (not the terminal).
 var claudeTUI bool
 
+// claudePluginDir is the path to the Fabrik plugin directory. Set by the Engine
+// during construction. When non-empty, --plugin-dir is added to Claude args.
+var claudePluginDir string
+
 func claudeLog(issueNumber int, tag, format string, args ...any) {
 	if claudeLogf != nil {
 		claudeLogf(issueNumber, tag, format, args...)
@@ -199,6 +203,10 @@ func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOve
 	args := []string{
 		"--output-format", "json",
 		"--verbose",
+	}
+
+	if claudePluginDir != "" {
+		args = append(args, "--plugin-dir", claudePluginDir)
 	}
 
 	sessFile := sessionFile(issueNumber, stage.Name)

@@ -36,6 +36,7 @@ type Config struct {
 	MaxRetries    int
 	NoTmux        bool
 	DebugOutput   bool
+	PluginDir     string
 }
 
 func Execute() error {
@@ -63,6 +64,7 @@ func Execute() error {
 	flag.IntVar(&cfg.PollSeconds, "poll", 30, "Polling interval in seconds")
 	flag.IntVar(&cfg.MaxRetries, "max-retries", 3, "Max failed stage attempts before pausing the issue (0 = unlimited)")
 	flag.BoolVar(&cfg.DebugOutput, "debug-output", false, "Save Claude stage output to .fabrik/debug/ for debugging")
+	flag.StringVar(&cfg.PluginDir, "plugin-dir", "", "Path to Fabrik plugin directory (for development; overrides installed plugin)")
 
 	flag.Parse()
 
@@ -150,6 +152,12 @@ func Execute() error {
 		}
 	}
 
+	if cfg.PluginDir == "" {
+		if v := os.Getenv("FABRIK_PLUGIN_DIR"); v != "" {
+			cfg.PluginDir = v
+		}
+	}
+
 	if cfg.Owner == "" || cfg.Repo == "" || cfg.ProjectNum == 0 {
 		fmt.Fprintf(os.Stderr, "Usage: fabrik --owner OWNER --repo REPO --project NUM [options]\n\n")
 		flag.PrintDefaults()
@@ -213,6 +221,7 @@ func Execute() error {
 		MaxRetries:    cfg.MaxRetries,
 		NoTmux:        cfg.NoTmux,
 		DebugOutput:   cfg.DebugOutput,
+		PluginDir:     cfg.PluginDir,
 		Stages:        stageCfgs,
 		ReadyCh:       testReadyCh,
 	})
