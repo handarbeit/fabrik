@@ -92,7 +92,7 @@ Anything that could complicate or block this work.
 
 **Completing the stage**: Output `FABRIK_STAGE_COMPLETE` on its own line when the spec is clear and all questions are resolved.
 
-**Blocking on input**: If you have open questions that must be answered before you can produce a complete spec, output `FABRIK_BLOCKED_ON_INPUT` on its own line instead of `FABRIK_STAGE_COMPLETE`. The engine will pause the issue with a `fabrik:awaiting-input` label and automatically resume when the user responds with a comment. These two markers are mutually exclusive — never output both.
+**Blocking on input**: If you have open questions that must be answered before you can produce a complete spec, output `FABRIK_BLOCKED_ON_INPUT` on its own line instead of `FABRIK_STAGE_COMPLETE`. The engine will pause the issue with both `fabrik:paused` and `fabrik:awaiting-input` labels and automatically resume when the user responds with a comment. Do not remove these labels manually. These two markers are mutually exclusive — never output both.
 
 **Updating the issue body**: Wrap the complete updated issue body in:
 ```
