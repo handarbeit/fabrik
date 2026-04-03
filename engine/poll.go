@@ -237,9 +237,9 @@ func (e *Engine) poll(ctx context.Context) error {
 		if !e.itemMayNeedWork(board.Items[i]) {
 			continue
 		}
-		e.logf(board.Items[i].Number, "poll", "deep-fetching details\n")
+		e.logf(0, "poll", "deep-fetching details for #%d\n", board.Items[i].Number)
 		if err := e.client.FetchItemDetails(&board.Items[i]); err != nil {
-			e.logf(board.Items[i].Number, "warn", "could not fetch item details: %v\n", err)
+			e.logf(0, "warn", "could not fetch details for #%d: %v\n", board.Items[i].Number, err)
 		}
 		deepFetched++
 	}
