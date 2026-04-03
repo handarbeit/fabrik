@@ -43,6 +43,10 @@ func Execute() error {
 	if len(os.Args) > 1 && os.Args[1] == "init" {
 		return runInit(os.Args[2:])
 	}
+	if len(os.Args) > 1 && os.Args[1] == "_debug-server" {
+		RunDebugServer()
+		return nil
+	}
 	cfg := &Config{}
 
 	flag.StringVar(&cfg.Owner, "owner", "", "GitHub repository owner")
