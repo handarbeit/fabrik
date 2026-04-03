@@ -126,10 +126,9 @@ Claude runs directly via `exec.CommandContext` with stdin piped and stdout captu
 
 ### Output Parsing
 
-Three JSON formats are supported (tried in order):
+Two JSON formats are supported (tried in order):
 1. Single result object: `{"result": "...", "session_id": "..."}`
 2. JSON array: `[{"type":"system",...}, ..., {"type":"result","result":"..."}]`
-3. NDJSON (stream-json): One JSON object per line, last `type: "result"` used
 
 If parsing fails: A short error message is posted instead of the raw output. Full output is in the log files. Raw JSON is never posted as a comment.
 
