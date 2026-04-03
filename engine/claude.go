@@ -507,6 +507,17 @@ func stripMarkers(output, beginMarker, endMarker string) string {
 	return output[:beginIdx] + output[endIdx:]
 }
 
+// stripLine removes all lines that exactly match the given text from the output.
+func stripLine(output, line string) string {
+	var result []string
+	for _, l := range strings.Split(output, "\n") {
+		if strings.TrimSpace(l) != line {
+			result = append(result, l)
+		}
+	}
+	return strings.Join(result, "\n")
+}
+
 // extractSummary parses a brief summary from Claude's output.
 func extractSummary(output string) string {
 	return extractBetweenMarkers(output, "FABRIK_SUMMARY_BEGIN", "FABRIK_SUMMARY_END")

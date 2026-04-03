@@ -456,13 +456,26 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}
 	}
 
+	// Strip all Fabrik markers from output before posting as a comment.
+	// This must happen after extractUpdatedBody (above) but the raw output is
+	// still needed for CheckBlockedOnInput (below), so we strip into a separate
+	// variable for posting.
+	postOutput := output
+	if postOutput != "" {
+		postOutput = stripLine(postOutput, "FABRIK_STAGE_COMPLETE")
+		postOutput = stripLine(postOutput, "FABRIK_BLOCKED_ON_INPUT")
+		postOutput = stripLine(postOutput, "FABRIK_SUMMARY_BEGIN")
+		postOutput = stripLine(postOutput, "FABRIK_SUMMARY_END")
+		postOutput = strings.TrimSpace(postOutput)
+	}
+
 	// Post Claude's output
-	if output != "" {
+	if postOutput != "" {
 		footer := formatStatsFooter(usage, completed)
 		if stage.PostToPR {
-			e.postOutputToPR(item, stage.Name, output, footer, branch, commit, timestamp)
+			e.postOutputToPR(item, stage.Name, postOutput, footer, branch, commit, timestamp)
 		} else {
-			comment := formatOutputComment(stage.Name, output, footer, branch, commit, timestamp)
+			comment := formatOutputComment(stage.Name, postOutput, footer, branch, commit, timestamp)
 			if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
 				e.logf(item.Number, "warn", "could not post comment: %v\n", err)
 			}
