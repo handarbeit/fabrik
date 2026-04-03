@@ -36,6 +36,7 @@ type Config struct {
 	MaxRetries    int
 	DebugOutput   bool
 	PluginDir     string
+	Terminal      string
 }
 
 func Execute() error {
@@ -63,6 +64,7 @@ func Execute() error {
 	flag.BoolVar(&cfg.AutoUpgrade, "auto-upgrade", false, "When idle, check for new commits on origin/main and self-upgrade (for fabrik developing itself)")
 	flag.BoolVar(&cfg.TUI, "tui", false, "Enable the interactive TUI dashboard (default: plain-text log output)")
 	flag.IntVar(&cfg.PollSeconds, "poll", 30, "Polling interval in seconds")
+	flag.IntVar(&cfg.MaxConcurrent, "max-concurrent", 5, "Maximum number of concurrent issue workers")
 	flag.IntVar(&cfg.MaxRetries, "max-retries", 3, "Max failed stage attempts before pausing the issue (0 = unlimited)")
 	flag.BoolVar(&cfg.DebugOutput, "debug-output", false, "Save Claude stage output to .fabrik/debug/ for debugging")
 	flag.StringVar(&cfg.PluginDir, "plugin-dir", "", "Path to Fabrik plugin directory (for development; overrides installed plugin)")
@@ -74,17 +76,35 @@ func Execute() error {
 		return fmt.Errorf("config: %w", err)
 	}
 
+	// Load .fabrik/config.yaml (optional; zero value if absent)
+	pc, err := config.LoadProjectConfig()
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+
+	// Warn (non-fatal) if config.yaml is gitignored
+	config.WarnIfConfigIgnored()
+
 	// Token: flag > FABRIK_TOKEN > GITHUB_TOKEN
 	if cfg.Token == "" {
 		cfg.Token = config.Token()
 	}
 
-	// Allow env vars (from .env or shell) to fill in missing flags
+	// Allow env vars (from .env or shell) to fill in missing flags,
+	// falling back to config.yaml values when still at default.
 	if cfg.Owner == "" {
-		cfg.Owner = os.Getenv("FABRIK_OWNER")
+		if v := os.Getenv("FABRIK_OWNER"); v != "" {
+			cfg.Owner = v
+		} else if pc.Owner != "" {
+			cfg.Owner = pc.Owner
+		}
 	}
 	if cfg.Repo == "" {
-		cfg.Repo = os.Getenv("FABRIK_REPO")
+		if v := os.Getenv("FABRIK_REPO"); v != "" {
+			cfg.Repo = v
+		} else if pc.Repo != "" {
+			cfg.Repo = pc.Repo
+		}
 	}
 	if cfg.ProjectNum == 0 {
 		if v := os.Getenv("FABRIK_PROJECT_NUMBER"); v != "" {
@@ -93,20 +113,30 @@ func Execute() error {
 				return fmt.Errorf("FABRIK_PROJECT_NUMBER=%q is invalid (must be a positive integer)", v)
 			}
 			cfg.ProjectNum = n
+		} else if pc.ProjectNum != nil {
+			cfg.ProjectNum = *pc.ProjectNum
 		}
 	}
 	if cfg.User == "" {
-		cfg.User = os.Getenv("FABRIK_USER")
+		if v := os.Getenv("FABRIK_USER"); v != "" {
+			cfg.User = v
+		} else if pc.User != "" {
+			cfg.User = pc.User
+		}
 	}
 	if cfg.StagesDir == "./.fabrik/stages" {
 		if v := os.Getenv("FABRIK_STAGES"); v != "" {
 			cfg.StagesDir = v
+		} else if pc.StagesDir != "" {
+			cfg.StagesDir = pc.StagesDir
 		}
 	}
 	if !cfg.Yolo {
 		if v := os.Getenv("FABRIK_YOLO"); v != "" {
 			lv := strings.ToLower(v)
 			cfg.Yolo = lv == "true" || lv == "1" || lv == "yes"
+		} else if pc.Yolo {
+			cfg.Yolo = true
 		}
 	}
 	if cfg.PollSeconds == 30 {
@@ -116,20 +146,21 @@ func Execute() error {
 			} else {
 				fmt.Fprintf(os.Stderr, "[warn] FABRIK_POLL=%q is invalid (must be a positive integer); using default %d\n", v, cfg.PollSeconds)
 			}
+		} else if pc.Poll != nil {
+			cfg.PollSeconds = *pc.Poll
 		}
 	}
-
-	// Max concurrent from env, default 5
-	cfg.MaxConcurrent = 5
-	if v := os.Getenv("FABRIK_MAX_CONCURRENT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.MaxConcurrent = n
-		} else {
-			fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_CONCURRENT=%q is invalid (must be a positive integer); using default %d\n", v, cfg.MaxConcurrent)
+	if cfg.MaxConcurrent == 5 {
+		if v := os.Getenv("FABRIK_MAX_CONCURRENT"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				cfg.MaxConcurrent = n
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_CONCURRENT=%q is invalid (must be a positive integer); using default %d\n", v, cfg.MaxConcurrent)
+			}
+		} else if pc.MaxConcurrent != nil {
+			cfg.MaxConcurrent = *pc.MaxConcurrent
 		}
 	}
-
-	// Max retries from env (only if still at default)
 	if cfg.MaxRetries == 3 {
 		if v := os.Getenv("FABRIK_MAX_RETRIES"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
@@ -137,16 +168,41 @@ func Execute() error {
 			} else {
 				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_RETRIES=%q is invalid (must be a non-negative integer); using default %d\n", v, cfg.MaxRetries)
 			}
+		} else if pc.MaxRetries != nil {
+			cfg.MaxRetries = *pc.MaxRetries
 		}
 	}
-
+	if !cfg.AutoUpgrade {
+		if v := os.Getenv("FABRIK_AUTO_UPGRADE"); v != "" {
+			lv := strings.ToLower(v)
+			cfg.AutoUpgrade = lv == "true" || lv == "1" || lv == "yes"
+		} else if pc.AutoUpgrade {
+			cfg.AutoUpgrade = true
+		}
+	}
+	if !cfg.TUI {
+		if v := os.Getenv("FABRIK_TUI"); v != "" {
+			lv := strings.ToLower(v)
+			cfg.TUI = lv == "true" || lv == "1" || lv == "yes"
+		} else if pc.TUI {
+			cfg.TUI = true
+		}
+	}
 	if !cfg.DebugOutput {
 		if v := os.Getenv("FABRIK_DEBUG_OUTPUT"); v != "" {
 			lv := strings.ToLower(v)
 			cfg.DebugOutput = lv == "true" || lv == "1" || lv == "yes"
+		} else if pc.DebugOutput {
+			cfg.DebugOutput = true
 		}
 	}
-
+	if cfg.Terminal == "" {
+		if v := os.Getenv("FABRIK_TERMINAL"); v != "" {
+			cfg.Terminal = v
+		} else if pc.Terminal != "" {
+			cfg.Terminal = pc.Terminal
+		}
+	}
 	if cfg.PluginDir == "" {
 		if v := os.Getenv("FABRIK_PLUGIN_DIR"); v != "" {
 			cfg.PluginDir = v

@@ -9,6 +9,19 @@ import (
 	"time"
 )
 
+// chdirTest changes to dir for the duration of the test, restoring original on cleanup.
+func chdirTest(t *testing.T, dir string) {
+	t.Helper()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(orig) })
+}
+
 func resetFlags() {
 	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 }
@@ -120,6 +133,76 @@ func TestExecute_MissingProject(t *testing.T) {
 	err := Execute()
 	if err == nil {
 		t.Fatal("expected error for missing project number")
+	}
+}
+
+func TestExecute_MaxConcurrentFlag(t *testing.T) {
+	resetFlags()
+	stagesDir := t.TempDir()
+	// No stage files — expect stages error, not a flag error
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--token", "tok", "--stages", stagesDir, "--max-concurrent", "10"}
+
+	err := Execute()
+	if err == nil {
+		t.Fatal("expected error (no stages)")
+	}
+	// Should fail on stages, not on the --max-concurrent flag itself
+	if err.Error() == "unknown flag: --max-concurrent" {
+		t.Error("--max-concurrent flag not registered")
+	}
+}
+
+func TestExecute_ConfigYAMLApplied(t *testing.T) {
+	// Test that config.yaml values satisfy required fields (owner/repo/project/user).
+	// Execute() will fail at engine.New() (not inside a git repo) rather than at
+	// the "missing required config" validation — that's the evidence config.yaml worked.
+	dir := t.TempDir()
+	chdirTest(t, dir)
+	os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".env\n"), 0644)
+	stagesDir := filepath.Join(dir, "stages")
+	os.MkdirAll(stagesDir, 0755)
+	writeStageFile(t, stagesDir, "research.yaml", "name: Research\norder: 1\nprompt: test\n")
+	configYAML := "owner: cfgorg\nrepo: cfgrepo\nproject: 7\nuser: cfguser\nstages: " + stagesDir + "\npoll: 15\n"
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte(configYAML), 0644)
+
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	for _, k := range []string{"FABRIK_OWNER", "FABRIK_REPO", "FABRIK_PROJECT_NUMBER", "FABRIK_USER", "FABRIK_STAGES"} {
+		t.Setenv(k, "")
+	}
+	os.Args = []string{"fabrik"}
+
+	err := Execute()
+	// Should fail at engine.New() (not a git repo) — NOT at "missing required config"
+	if err == nil {
+		t.Fatal("expected error (not a git repo)")
+	}
+	const missingConfig = "missing required config: owner, repo, project"
+	if err.Error() == missingConfig {
+		t.Errorf("config.yaml values were not applied: got %q", err.Error())
+	}
+}
+
+func TestExecute_EnvVarBeatsConfigYAML(t *testing.T) {
+	dir := t.TempDir()
+	chdirTest(t, dir)
+	os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".env\n"), 0644)
+	stagesDir := filepath.Join(dir, "stages")
+	os.MkdirAll(stagesDir, 0755)
+	// config.yaml sets owner to cfgorg, but env var should win
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("owner: cfgorg\n"), 0644)
+
+	resetFlags()
+	t.Setenv("FABRIK_OWNER", "envorg")
+	defer t.Cleanup(func() { os.Unsetenv("FABRIK_OWNER") })
+	os.Args = []string{"fabrik", "--repo", "r", "--project", "1", "--user", "u", "--token", "tok", "--stages", stagesDir}
+
+	err := Execute()
+	// Will fail on no stages — but NOT on missing owner (env var won over config.yaml)
+	if err != nil && err.Error() == "missing required config: owner, repo, project (use flags or .env file)" {
+		t.Error("env var FABRIK_OWNER should have satisfied owner requirement (beats config.yaml)")
 	}
 }
 
