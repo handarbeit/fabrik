@@ -12,9 +12,9 @@ Produce a thorough technical analysis that a planner could use to design an impl
 
 ## Before You Start
 
-Read the context files the engine has written to `.fabrik/` in your working directory:
-- `.fabrik/issue.md` — the issue body (the spec); start here to understand the feature
-- `.fabrik/stage-Specify.md` — the Specify stage output, if present
+Read the context files the engine has written to `.fabrik-context/` in your working directory:
+- `.fabrik-context/issue.md` — the issue body (the spec); start here to understand the feature
+- `.fabrik-context/stage-Specify.md` — the Specify stage output, if present
 
 These files are always fresher than what appears in the inline prompt. Read them before exploring the codebase.
 

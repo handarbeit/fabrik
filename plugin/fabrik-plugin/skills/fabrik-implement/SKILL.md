@@ -14,12 +14,12 @@ Produce a clean, tested, committed implementation that follows the plan and is r
 
 ### Read context files
 
-The engine has written context files to `.fabrik/` in your working directory:
-- `.fabrik/issue.md` — the issue body (the spec); understand what you're building
-- `.fabrik/stage-Plan.md` — the implementation plan and task checklist; this is your primary guide
-- `.fabrik/stage-Research.md` — the research findings, if present
+The engine has written context files to `.fabrik-context/` in your working directory:
+- `.fabrik-context/issue.md` — the issue body (the spec); understand what you're building
+- `.fabrik-context/stage-Plan.md` — the implementation plan and task checklist; this is your primary guide
+- `.fabrik-context/stage-Research.md` — the research findings, if present
 
-Read these files before looking at the code. The task checklist in `.fabrik/stage-Plan.md` is the authoritative source of truth — not the issue body.
+Read these files before looking at the code. The task checklist in `.fabrik-context/stage-Plan.md` is the authoritative source of truth — not the issue body.
 
 ### Check for existing work
 
@@ -28,11 +28,11 @@ Always start with `git status`. There may be:
 - **Prior commits** on the branch — check `git log` to see what's already been done
 - **Checked-off tasks** in the Plan stage comment — don't redo completed work
 
-If resuming, pick up where the previous session left off. Read the commit history and the task checklist in `.fabrik/stage-Plan.md` to understand what's done.
+If resuming, pick up where the previous session left off. Read the commit history and the task checklist in `.fabrik-context/stage-Plan.md` to understand what's done.
 
 ### Understand the plan
 
-Read `.fabrik/stage-Plan.md` thoroughly. The plan contains:
+Read `.fabrik-context/stage-Plan.md` thoroughly. The plan contains:
 - The implementation approach and key decisions (follow them, don't redesign)
 - The task checklist (work through it in order)
 - File changes (the plan tells you what to modify)
