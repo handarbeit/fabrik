@@ -966,7 +966,7 @@ printf '%s\n' '{"result":"fallback output\nFABRIK_STAGE_COMPLETE\n","session_id"
 		Prompt:     "test prompt",
 		Completion: stages.CompletionCriteria{Type: "claude"},
 	}
-	issue := gh.ProjectItem{Number: 74, Title: "tmux fallback test"}
+	issue := gh.ProjectItem{Number: 74, Title: "direct invocation test"}
 	defer os.RemoveAll(SessionDir(74))
 	defer os.RemoveAll(LogDir(74))
 
