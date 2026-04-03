@@ -100,6 +100,7 @@ The example stages implement a full SDLC pipeline:
 | Stage | Purpose |
 |-------|---------|
 | **Backlog** | Parking lot (no processing) |
+| **Specify** | Refine rough issues into clear, unambiguous specs (Q&A with user) |
 | **Research** | Explore codebase, identify scope, surface questions |
 | **Plan** | Design approach, break into tasks, document decisions |
 | **Implement** | Write code, tests, commit to issue branch |
