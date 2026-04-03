@@ -381,6 +381,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		e.totalTokens = e.totalTokens.add(usage)
+		e.lastUsage[item.Number] = usage
 	}()
 
 	// Restore any stashed changes now that the read-only stage has finished.
