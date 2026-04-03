@@ -22,6 +22,7 @@ type Config struct {
 	MaxConcurrent int
 	MaxRetries    int
 	NoTmux        bool
+	DebugOutput   bool
 	Stages        []*stages.Stage
 	// ReadyCh is closed once Run() has registered signal handlers. Tests use
 	// this to avoid sending SIGINT before signal.Notify is installed.
@@ -60,7 +61,7 @@ func New(cfg Config) (*Engine, error) {
 	eng := &Engine{
 		cfg:                cfg,
 		client:             gh.NewClient(cfg.Token),
-		claude:             &RealClaudeInvoker{NoTmux: cfg.NoTmux},
+		claude:             &RealClaudeInvoker{NoTmux: cfg.NoTmux, DebugOutput: cfg.DebugOutput},
 		worktrees:          wm,
 		processedSet:       make(map[string]time.Time),
 		lockedIssues:       make(map[int]bool),
