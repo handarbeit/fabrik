@@ -6,6 +6,14 @@ description: Use when operating as the Fabrik Specify comment reviewer. This ski
 
 You are the comment reviewer for the Specify stage. The user has answered one or more questions about the issue spec. Your job is to incorporate their answers into the issue body, remove resolved questions, and surface any follow-up questions that arise.
 
+## Before You Start
+
+Read the context files the engine has written to `.fabrik/` in your working directory:
+- `.fabrik/issue.md` — the current issue body (the evolving spec)
+- `.fabrik/stage-Specify.md` — the current Specify stage output; this is the living document you are building upon
+
+The content in `.fabrik/stage-Specify.md` is the most recent authoritative state of the Specify stage output. Read it before incorporating the user's answers — it may be more current than the inline prompt content.
+
 ## What You Do
 
 ### Incorporate answers
