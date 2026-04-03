@@ -237,9 +237,9 @@ func (e *Engine) poll(ctx context.Context) error {
 		if !e.itemMayNeedWork(board.Items[i]) {
 			continue
 		}
-		e.logf(board.Items[i].Number, "poll", "deep-fetching details\n")
+		e.logf(0, "poll", "deep-fetching details for #%d\n", board.Items[i].Number)
 		if err := e.client.FetchItemDetails(&board.Items[i]); err != nil {
-			e.logf(board.Items[i].Number, "warn", "could not fetch item details: %v\n", err)
+			e.logf(0, "warn", "could not fetch details for #%d: %v\n", board.Items[i].Number, err)
 		}
 		deepFetched++
 	}
@@ -280,16 +280,25 @@ func (e *Engine) poll(ctx context.Context) error {
 			defer e.inFlight.Delete(item.Number)
 			e.emitStructural(tui.JobStartedEvent{
 				IssueNumber: item.Number,
+				Title:       item.Title,
 				StageName:   stageName,
 				StartedAt:   startTime,
 			})
 			err := e.processItem(ctx, board, item)
+			e.mu.Lock()
+			usage := e.lastUsage[item.Number]
+			delete(e.lastUsage, item.Number)
+			e.mu.Unlock()
 			e.emitStructural(tui.JobCompletedEvent{
 				IssueNumber: item.Number,
+				Title:       item.Title,
 				StageName:   stageName,
 				Success:     err == nil,
 				Duration:    time.Since(startTime),
 				CompletedAt: time.Now(),
+				TurnsUsed:   usage.TurnsUsed,
+				MaxTurns:    usage.MaxTurns,
+				CostUSD:     usage.CostUSD,
 			})
 			if err != nil {
 				e.logf(item.Number, "error", "%v\n", err)

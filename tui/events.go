@@ -36,6 +36,7 @@ func (PollCompletedEvent) tuiEvent() {}
 // JobStartedEvent is emitted when a worker goroutine begins processing an item.
 type JobStartedEvent struct {
 	IssueNumber int
+	Title       string
 	StageName   string
 	StartedAt   time.Time
 }
@@ -45,10 +46,14 @@ func (JobStartedEvent) tuiEvent() {}
 // JobCompletedEvent is emitted when a worker goroutine finishes.
 type JobCompletedEvent struct {
 	IssueNumber int
+	Title       string
 	StageName   string
 	Success     bool
 	Duration    time.Duration
 	CompletedAt time.Time
+	TurnsUsed   int
+	MaxTurns    int
+	CostUSD     float64
 }
 
 func (JobCompletedEvent) tuiEvent() {}
