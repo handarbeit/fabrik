@@ -42,6 +42,7 @@ type Engine struct {
 	lastReportedCost   float64              // cost at last [stats] report; skip repeat prints when unchanged
 	retryCount         map[string]int       // key: "<issueNum>-<stageName>", value: failed attempt count
 	pausedDueToRetries map[string]bool      // key: "<issueNum>-<stageName>", true if engine paused this issue
+	lastUsage          map[int]TokenUsage   // per-issue token usage from last processItem (for TUI)
 	lastUpdatedAt      map[int]time.Time    // tracks last-seen updatedAt per issue number
 	idleCount          int                  // consecutive idle polls; triggers self-upgrade at threshold
 	sem                chan struct{}        // semaphore bounding concurrent workers across poll cycles
@@ -64,6 +65,7 @@ func New(cfg Config) (*Engine, error) {
 		worktrees:          wm,
 		processedSet:       make(map[string]time.Time),
 		lockedIssues:       make(map[int]bool),
+		lastUsage:          make(map[int]TokenUsage),
 		lastUpdatedAt:      make(map[int]time.Time),
 		retryCount:         make(map[string]int),
 		pausedDueToRetries: make(map[string]bool),
@@ -86,6 +88,7 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		worktrees:          worktrees,
 		processedSet:       make(map[string]time.Time),
 		lockedIssues:       make(map[int]bool),
+		lastUsage:          make(map[int]TokenUsage),
 		lastUpdatedAt:      make(map[int]time.Time),
 		retryCount:         make(map[string]int),
 		pausedDueToRetries: make(map[string]bool),
