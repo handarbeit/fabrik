@@ -89,6 +89,8 @@ Technical risks identified during research.
 
 **Completing the stage**: Output `FABRIK_STAGE_COMPLETE` on its own line when research is thorough and all technical questions are resolved.
 
+**Blocking on input**: If there are open questions that require human input before research can continue (e.g., ambiguous requirements, missing context only the user can provide), output `FABRIK_BLOCKED_ON_INPUT` on its own line instead of `FABRIK_STAGE_COMPLETE`. The engine will pause with `fabrik:awaiting-input` and auto-resume when the user comments. These two markers are mutually exclusive — never output both.
+
 **Updating the issue body**: Wrap the complete updated issue body in:
 ```
 FABRIK_ISSUE_UPDATE_BEGIN
