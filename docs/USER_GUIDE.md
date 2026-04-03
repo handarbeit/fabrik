@@ -242,11 +242,10 @@ issue body and all prior comments, so context carries forward.
 
 When you post a comment:
 1. Fabrik reacts with 👀 to acknowledge the comment.
-2. Claude is invoked with the stage's `comment_prompt` (or a default prompt).
+2. Claude is invoked with the stage's `comment_prompt` (or a default prompt), with full context from prior stage comments available as files in `.fabrik/`.
 3. Claude performs any requested actions.
-4. If the issue body should be updated, Claude outputs the new body between
-   `FABRIK_ISSUE_UPDATE_BEGIN` and `FABRIK_ISSUE_UPDATE_END` markers.
-5. Fabrik updates the issue body (or posts a comment if no markers are found).
+4. Fabrik rewrites the stage's existing comment with the updated output (or creates a new one if none exists).
+5. Fabrik posts a brief acknowledgement comment confirming the update.
 6. Fabrik reacts with 🚀 to mark the comment as processed.
 
 The 🚀 reaction is durable — on restart, Fabrik skips comments that already have it,

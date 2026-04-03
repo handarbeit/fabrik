@@ -38,10 +38,10 @@ Fabrik is a local CLI tool (written in Go) that orchestrates Claude Code through
 When a user comments on an issue:
 1. :eyes: reaction added (marks as "in review")
 2. `fabrik:editing` label applied (locks issue during update)
-3. Claude invoked with stage-specific comment review prompt
+3. Claude invoked with stage-specific comment review prompt; prior stage comments and issue body injected as context files in `.fabrik/`
 4. Claude performs any requested actions using available tools
-5. If issue body needs updating, updated body extracted from Claude output (between `FABRIK_ISSUE_UPDATE_BEGIN`/`END` markers)
-6. Issue body updated on GitHub (or output posted as comment if no markers)
+5. The stage's existing comment is rewritten with Claude's output (falls back to new comment if none exists)
+6. A brief acknowledgement comment is posted to confirm the update
 7. `fabrik:editing` label removed
 8. :rocket: reaction added (marks as "processed"; also used to skip already-processed comments on restart)
 
