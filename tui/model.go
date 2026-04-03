@@ -538,13 +538,14 @@ func openLogViewerCmd(logDir string) tea.Cmd {
 		fabrikBin = "fabrik"
 	}
 
-	// For JSON files, pipe through the stream filter; for other files, use less
+	// For JSON files, pipe through the stream filter; for other files, use less.
+	// Pass as a single string — openTerminalCmd sends it to Terminal.app's do script.
 	if strings.HasSuffix(latest, ".json") {
-		return openTerminalCmd("sh", "-c", fmt.Sprintf(
+		return openTerminalCmd(fmt.Sprintf(
 			"cd %s && cat %s | %s _stream-filter | less -R",
 			logDir, latest, fabrikBin))
 	}
-	return openTerminalCmd("sh", "-c", fmt.Sprintf("cd %s && less +F %s", logDir, latest))
+	return openTerminalCmd(fmt.Sprintf("cd %s && less +F %s", logDir, latest))
 }
 
 // fmtDuration formats a duration as MM:SS.
