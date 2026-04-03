@@ -873,6 +873,30 @@ func TestBuildCommentReviewPrompt_CommentSkill(t *testing.T) {
 	}
 }
 
+func TestBuildCommentReviewPrompt_CommentSkillPR(t *testing.T) {
+	stage := &stages.Stage{
+		Name:         "Review",
+		CommentSkill: "fabrik-review-comment",
+	}
+	item := gh.ProjectItem{
+		Number: 55,
+		Title:  "Some PR",
+		IsPR:   true,
+	}
+	comments := []gh.Comment{
+		{Author: "user", Body: "looks good", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
+	}
+
+	prompt := buildCommentReviewPrompt(stage, item, comments)
+
+	if !strings.Contains(prompt, "PR #55") {
+		t.Errorf("expected 'PR #55' in prompt, got: %s", prompt)
+	}
+	if strings.Contains(prompt, "issue #55") {
+		t.Error("should not say 'issue' when item is a PR")
+	}
+}
+
 func TestDefaultPRCommentPrompt(t *testing.T) {
 	prompt := defaultPRCommentPrompt()
 
