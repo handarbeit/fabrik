@@ -6,8 +6,14 @@ import (
 	"path/filepath"
 )
 
+// HistoryPathOverride can be set by tests to redirect history I/O to a temp file.
+var HistoryPathOverride string
+
 // historyPath returns the path to the persistent history file.
 func historyPath() string {
+	if HistoryPathOverride != "" {
+		return HistoryPathOverride
+	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".fabrik", "history.json")
 }
