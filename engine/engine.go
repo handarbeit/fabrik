@@ -2,6 +2,8 @@ package engine
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -58,7 +60,22 @@ func New(cfg Config) (*Engine, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolving git repo root: %w", err)
 	}
-	claudePluginDir = cfg.PluginDir
+	// Default to .fabrik/plugin in the repo root (created by fabrik init).
+	// --plugin-dir flag overrides this for development.
+	// Path must be absolute since Claude runs in the worktree, not the repo root.
+	pluginDir := cfg.PluginDir
+	if pluginDir == "" {
+		defaultPluginDir := filepath.Join(repoDir, ".fabrik", "plugin")
+		if fi, err := os.Stat(defaultPluginDir); err == nil && fi.IsDir() {
+			pluginDir = defaultPluginDir
+		}
+	}
+	if pluginDir != "" {
+		if abs, err := filepath.Abs(pluginDir); err == nil {
+			pluginDir = abs
+		}
+		claudePluginDir = pluginDir
+	}
 	wm := NewWorktreeManager(repoDir)
 	eng := &Engine{
 		cfg:                cfg,
