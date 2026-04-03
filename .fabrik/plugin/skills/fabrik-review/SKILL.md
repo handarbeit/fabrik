@@ -12,6 +12,17 @@ Produce a clean, well-tested PR that a human reviewer can approve with confidenc
 
 ## Before You Start
 
+### Read context files
+
+The engine has written context files to `.fabrik/` in your working directory:
+- `.fabrik/issue.md` — the issue body (spec and task checklist)
+- `.fabrik/stage-Research.md` — the research findings, if present
+- `.fabrik/stage-Plan.md` — the implementation plan and task checklist
+- `.fabrik/stage-Implement.md` — the Implement stage output, if present
+- `.fabrik/pr-description.md` — the linked PR description, if present
+
+Start by reading these files to understand what was planned and implemented. Use the task checklist in `.fabrik/stage-Plan.md` to verify all tasks were completed.
+
 ### Check worktree state
 
 1. `git status` — commit or incorporate any uncommitted changes from prior sessions
@@ -24,7 +35,22 @@ Ensure the branch is up to date:
 git fetch origin main
 git rebase origin/main
 ```
-Resolve any merge conflicts. If conflicts are complex, resolve them carefully and commit the resolution with a clear message.
+
+### Merge conflict resolution — CRITICAL
+
+When resolving merge conflicts during rebase, you MUST be conservative:
+
+1. **Never silently drop code from main.** If main has code that your branch doesn't, it was added by another PR and must be kept. Your branch's changes should be layered on top of main's current state, not replace it.
+
+2. **When in doubt, keep both sides.** If you can't tell whether code from main or your branch is correct, keep both and verify the result compiles and tests pass. It's better to have a redundant function than to silently delete one that other code depends on.
+
+3. **After resolving each conflict, run `go build ./...`** to verify the resolution didn't break anything. Don't batch all conflict resolutions and hope for the best.
+
+4. **Check for new files on main.** Rebase conflicts in existing files are visible, but new files added to main (new source files, new test files, new subcommands) won't show as conflicts — they just appear. Never delete files that came from main.
+
+5. **After the full rebase, run `go test ./...`** before proceeding with review. If tests fail, the conflict resolution was wrong — investigate and fix before continuing.
+
+Common mistake: a feature branch that doesn't have a function added on main will "resolve" the conflict by keeping its version (without the function). This silently deletes working code. Always check `git diff origin/main..HEAD` after rebase to verify you haven't lost anything from main.
 
 ### Check for external review feedback
 

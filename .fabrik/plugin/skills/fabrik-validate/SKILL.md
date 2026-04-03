@@ -12,6 +12,17 @@ Confirm with high confidence that the PR is ready to merge. If it's not, clearly
 
 ## Before You Start
 
+### Read context files
+
+The engine has written context files to `.fabrik/` in your working directory:
+- `.fabrik/issue.md` — the issue body (the original spec); use this to verify requirements
+- `.fabrik/stage-Plan.md` — the task checklist; verify all tasks were completed
+- `.fabrik/stage-Implement.md` — the implementation summary, if present
+- `.fabrik/stage-Review.md` — the review findings, if present
+- `.fabrik/pr-description.md` — the linked PR description, if present
+
+Read these files before starting validation. The spec in `.fabrik/issue.md` is your ground truth for requirements verification.
+
 1. `git status` — commit any uncommitted changes
 2. Rebase onto latest main:
    ```bash
@@ -19,6 +30,15 @@ Confirm with high confidence that the PR is ready to merge. If it's not, clearly
    git rebase origin/main
    ```
 3. Resolve any merge conflicts (main may have moved since Review)
+
+### Merge conflict resolution — CRITICAL
+
+If the rebase produces conflicts, resolve them conservatively:
+
+- **Never drop code from main.** Code on main was merged from other PRs and must be preserved. Your branch adds to main, it doesn't replace it.
+- **After resolving conflicts, run `go build ./...` and `go test ./...` immediately.** If either fails, the resolution was wrong — fix it before proceeding with validation.
+- **Check for missing files.** Run `git diff origin/main..HEAD --name-only` and verify no files from main were accidentally deleted. New files added to main (source, tests, subcommands) should all be present.
+- **If unsure about a conflict, abort the rebase** (`git rebase --abort`) and do NOT signal completion. Describe the conflict and let the human resolve it.
 
 ## What You Validate
 

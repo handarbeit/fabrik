@@ -12,18 +12,27 @@ Produce a clean, tested, committed implementation that follows the plan and is r
 
 ## Before You Start
 
+### Read context files
+
+The engine has written context files to `.fabrik/` in your working directory:
+- `.fabrik/issue.md` — the issue body (the spec); understand what you're building
+- `.fabrik/stage-Plan.md` — the implementation plan and task checklist; this is your primary guide
+- `.fabrik/stage-Research.md` — the research findings, if present
+
+Read these files before looking at the code. The task checklist in `.fabrik/stage-Plan.md` is the authoritative source of truth — not the issue body.
+
 ### Check for existing work
 
 Always start with `git status`. There may be:
 - **Uncommitted changes** from a previous interrupted session — review them, decide if they're useful, commit or discard
 - **Prior commits** on the branch — check `git log` to see what's already been done
-- **Checked-off tasks** in the issue body — don't redo completed work
+- **Checked-off tasks** in the Plan stage comment — don't redo completed work
 
-If resuming, pick up where the previous session left off. Read the commit history and task checklist to understand what's done.
+If resuming, pick up where the previous session left off. Read the commit history and the task checklist in `.fabrik/stage-Plan.md` to understand what's done.
 
 ### Understand the plan
 
-Read the issue body thoroughly. The plan section contains:
+Read `.fabrik/stage-Plan.md` thoroughly. The plan contains:
 - The implementation approach and key decisions (follow them, don't redesign)
 - The task checklist (work through it in order)
 - File changes (the plan tells you what to modify)
@@ -40,7 +49,7 @@ Work through tasks in the order listed. For each task:
 3. Write or update tests
 4. Commit with a clear message describing what was done
 5. Push to remote
-6. Check off the task in the issue body using `gh issue edit`
+6. Check off the task in the Plan stage comment (see below)
 
 ### Commit frequently
 
@@ -65,11 +74,36 @@ Push after each commit or small group of related commits. The remote branch is t
 
 ### Update task progress
 
-After completing each task, update the issue body to check it off:
+After completing each task, check it off in the **Plan stage comment** — not the issue body. The issue body is the spec (owned by Specify); task tracking lives in the Plan stage comment.
+
+First, find the Plan stage comment's database ID:
 ```bash
-gh issue edit <number> --body "..."
+gh issue view <number> --json comments \
+  --jq '.comments[] | select(.body | startswith("🏭 **Fabrik — stage: Plan**")) | .databaseId' \
+  | tail -1
 ```
-Change `- [ ] Task` to `- [x] Task`. This provides real-time visibility.
+
+Then update the comment body with the task checked off:
+```bash
+# Get current body and update the checkbox
+COMMENT_ID=<id from above>
+CURRENT_BODY=$(gh api /repos/{owner}/{repo}/issues/comments/$COMMENT_ID --jq '.body')
+# Edit CURRENT_BODY: change "- [ ] Task N" to "- [x] Task N"
+gh api -X PATCH /repos/{owner}/{repo}/issues/comments/$COMMENT_ID \
+  -f body="$UPDATED_BODY"
+```
+
+If no Plan stage comment exists (Plan was never run or comment was deleted), skip task tracking gracefully — don't fail.
+
+### Write a reviewer-oriented PR description
+
+When creating the draft PR, write a PR description for a human reviewer — not a copy of the plan. The description should cover:
+1. **What the PR does** — a concise summary of the feature or fix
+2. **Key changes** — the most significant code changes (files, interfaces, behaviors)
+3. **How to test** — steps a reviewer can take to verify the change works
+4. **Closing reference**: `Closes #N`
+
+This is not a task checklist. It is not the plan. It is a summary for someone reviewing the diff who may not have read the issue.
 
 ### Write tests
 

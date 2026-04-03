@@ -31,6 +31,15 @@ Read these files before starting validation. The spec in `.fabrik/issue.md` is y
    ```
 3. Resolve any merge conflicts (main may have moved since Review)
 
+### Merge conflict resolution — CRITICAL
+
+If the rebase produces conflicts, resolve them conservatively:
+
+- **Never drop code from main.** Code on main was merged from other PRs and must be preserved. Your branch adds to main, it doesn't replace it.
+- **After resolving conflicts, run `go build ./...` and `go test ./...` immediately.** If either fails, the resolution was wrong — fix it before proceeding with validation.
+- **Check for missing files.** Run `git diff origin/main..HEAD --name-only` and verify no files from main were accidentally deleted. New files added to main (source, tests, subcommands) should all be present.
+- **If unsure about a conflict, abort the rebase** (`git rebase --abort`) and do NOT signal completion. Describe the conflict and let the human resolve it.
+
 ## What You Validate
 
 ### Requirements verification
