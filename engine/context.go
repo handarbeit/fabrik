@@ -210,24 +210,37 @@ func (e *Engine) writeCodebaseChanges(item gh.ProjectItem, currentStage *stages.
 	b.WriteString("| Status | File |\n")
 	b.WriteString("|--------|------|\n")
 
-	shown := 0
+	// Parse valid file entries first, so truncation count is accurate.
+	type fileEntry struct {
+		status string
+		file   string
+	}
+	var entries []fileEntry
 	for _, line := range diffLines {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 2)
+		parts := strings.Split(line, "\t")
 		if len(parts) < 2 {
 			continue
 		}
 		status := changeType(parts[0])
-		file := parts[1]
-		if shown >= maxFiles {
-			remaining := len(diffLines) - shown
-			b.WriteString(fmt.Sprintf("\n(and %d more files)\n", remaining))
+		// Renames/copies have 3 fields: R100\told\tnew — show as "old → new".
+		var file string
+		if len(parts) >= 3 {
+			file = parts[1] + " → " + parts[2]
+		} else {
+			file = parts[1]
+		}
+		entries = append(entries, fileEntry{status, file})
+	}
+
+	for i, entry := range entries {
+		if i >= maxFiles {
+			b.WriteString(fmt.Sprintf("\n(and %d more files)\n", len(entries)-maxFiles))
 			break
 		}
-		b.WriteString(fmt.Sprintf("| %s | `%s` |\n", status, file))
-		shown++
+		b.WriteString(fmt.Sprintf("| %s | `%s` |\n", entry.status, entry.file))
 	}
 
 	outPath := filepath.Join(fabrikDir, "codebase-changes.md")
