@@ -88,7 +88,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	}
 
 	// Capture git metadata for the comment header
-	branch, commit, timestamp := captureGitMeta(workDir)
+	branch, commit, mainSHA, timestamp := captureGitMeta(workDir, baseBranch)
 
 	// Step 5: Check for stage completion marker before stripping.
 	completed := checkCompletion(stage, output)
@@ -118,13 +118,13 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// output on such stages is posted as a new comment on the issue as before.
 	if output != "" {
 		if stage.PostToPR {
-			comment := formatOutputComment(stage.Name+" (comment review)", output, "", branch, commit, timestamp)
+			comment := formatOutputComment(stage.Name+" (comment review)", output, "", branch, commit, mainSHA, timestamp)
 			if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
 				e.logf(item.Number, "warn", "could not post comment: %v\n", err)
 			}
 		} else {
 			existing := findStageComment(item.Comments, stage.Name)
-			stageComment := formatOutputComment(stage.Name, output, "", branch, commit, timestamp)
+			stageComment := formatOutputComment(stage.Name, output, "", branch, commit, mainSHA, timestamp)
 			if existing != nil {
 				e.logf(item.Number, "edit", "rewriting stage comment for %s\n", stage.Name)
 				if err := e.client.UpdateComment(e.cfg.Owner, e.cfg.Repo, existing.DatabaseID, stageComment); err != nil {

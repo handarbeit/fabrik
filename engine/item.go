@@ -446,7 +446,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	}
 
 	// Capture git metadata for the comment header
-	branch, commit, timestamp := captureGitMeta(workDir)
+	branch, commit, mainSHA, timestamp := captureGitMeta(workDir, baseBranch)
 
 	// Check for issue body update markers in stage output.
 	// Only stages with UpdateIssueBody=true (e.g., Specify) are allowed to
@@ -483,9 +483,9 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	if postOutput != "" {
 		footer := formatStatsFooter(usage, completed)
 		if stage.PostToPR {
-			e.postOutputToPR(item, stage.Name, postOutput, footer, branch, commit, timestamp)
+			e.postOutputToPR(item, stage.Name, postOutput, footer, branch, commit, mainSHA, timestamp)
 		} else {
-			comment := formatOutputComment(stage.Name, postOutput, footer, branch, commit, timestamp)
+			comment := formatOutputComment(stage.Name, postOutput, footer, branch, commit, mainSHA, timestamp)
 			if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
 				e.logf(item.Number, "warn", "could not post comment: %v\n", err)
 			}
