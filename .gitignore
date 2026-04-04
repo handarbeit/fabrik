@@ -6,6 +6,9 @@
 !.claude/agents/
 .fabrik/worktrees/
 .fabrik/debug/
+.fabrik/issue.md
+.fabrik/stage-*.md
+.fabrik-context/
 .env
 fabrik
 *.exe
