@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -25,6 +26,31 @@ func findStageComment(comments []gh.Comment, stageName string) *gh.Comment {
 		}
 	}
 	return found
+}
+
+// parseMainSHA extracts the main: SHA from a stage comment's metadata line.
+// The metadata line is the second line of the comment, formatted as:
+//
+//	*branch: {branch} | commit: {commit} | main: {sha} | {timestamp}*
+//
+// Returns empty string if the comment has no metadata line or no main: field
+// (e.g., comments written before this feature was added).
+func parseMainSHA(commentBody string) string {
+	lines := strings.SplitN(commentBody, "\n", 3)
+	if len(lines) < 2 {
+		return ""
+	}
+	metaLine := lines[1]
+	for _, segment := range strings.Split(metaLine, "|") {
+		segment = strings.TrimSpace(segment)
+		if strings.HasPrefix(segment, "main:") {
+			sha := strings.TrimSpace(strings.TrimPrefix(segment, "main:"))
+			// Strip trailing '*' from the last field edge case
+			sha = strings.TrimSuffix(sha, "*")
+			return sha
+		}
+	}
+	return ""
 }
 
 // writeContextFiles writes context files to .fabrik/ in the worktree so Claude
@@ -79,6 +105,11 @@ func (e *Engine) writeContextFiles(item gh.ProjectItem, currentStage *stages.Sta
 		}
 	}
 
+	// Generate codebase-changes.md for stage transitions (not comment processing).
+	if !isCommentProcessing {
+		e.writeCodebaseChanges(item, currentStage, workDir, fabrikDir)
+	}
+
 	// Write PR description for post_to_pr stage invocations.
 	if !isCommentProcessing && currentStage.PostToPR {
 		prNumber, err := e.client.FindPRForIssue(e.cfg.Owner, e.cfg.Repo, item.Number)
@@ -93,5 +124,126 @@ func (e *Engine) writeContextFiles(item gh.ProjectItem, currentStage *stages.Sta
 		if err := os.WriteFile(filepath.Join(fabrikDir, "pr-description.md"), []byte(prBody), 0644); err != nil {
 			e.logf(item.Number, "warn", "could not write .fabrik/pr-description.md: %v\n", err)
 		}
+	}
+}
+
+// writeCodebaseChanges generates .fabrik-context/codebase-changes.md showing
+// what changed on origin/main since the most recent prior stage that recorded
+// a main: SHA. Skips gracefully when no prior SHA exists or SHAs match.
+func (e *Engine) writeCodebaseChanges(item gh.ProjectItem, currentStage *stages.Stage, workDir, fabrikDir string) {
+	const maxFiles = 100
+
+	// Find the most recent completed prior stage's main SHA.
+	var priorSHA, priorStageName string
+	for i := len(e.cfg.Stages) - 1; i >= 0; i-- {
+		s := e.cfg.Stages[i]
+		if s.Order >= currentStage.Order {
+			continue
+		}
+		comment := findStageComment(item.Comments, s.Name)
+		if comment == nil {
+			continue
+		}
+		sha := parseMainSHA(comment.Body)
+		if sha != "" {
+			priorSHA = sha
+			priorStageName = s.Name
+			break
+		}
+	}
+
+	if priorSHA == "" {
+		return // no prior SHA — first stage or pre-feature comments
+	}
+
+	// Resolve current origin/{baseBranch} HEAD.
+	baseBranch := e.worktrees.DefaultBaseBranch()
+	currentSHA, err := gitRevParse(workDir, "origin/"+baseBranch)
+	if err != nil {
+		e.logf(item.Number, "warn", "could not resolve origin/%s for codebase changes: %v\n", baseBranch, err)
+		return
+	}
+	// Use short SHA for display.
+	currentShort := currentSHA
+	if len(currentShort) > 8 {
+		currentShort = currentShort[:8]
+	}
+
+	if strings.HasPrefix(currentSHA, priorSHA) || strings.HasPrefix(priorSHA, currentSHA) {
+		return // SHAs match, no changes
+	}
+
+	// Count commits.
+	countCmd := exec.Command("git", "rev-list", "--count", priorSHA+"..."+currentSHA)
+	countCmd.Dir = workDir
+	countOut, err := countCmd.Output()
+	if err != nil {
+		e.logf(item.Number, "warn", "could not count commits for codebase changes: %v\n", err)
+		return
+	}
+	commitCount := strings.TrimSpace(string(countOut))
+
+	// Get file-level changes.
+	diffCmd := exec.Command("git", "diff", "--name-status", priorSHA+"..."+currentSHA)
+	diffCmd.Dir = workDir
+	diffOut, err := diffCmd.Output()
+	if err != nil {
+		e.logf(item.Number, "warn", "could not generate diff for codebase changes: %v\n", err)
+		return
+	}
+
+	diffLines := strings.Split(strings.TrimSpace(string(diffOut)), "\n")
+	if len(diffLines) == 1 && diffLines[0] == "" {
+		return // no file changes
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("# Codebase Changes Since %s\n\n", priorStageName))
+	b.WriteString(fmt.Sprintf("Changes on `origin/%s` since the %s stage (%s → %s): **%s commit(s)**\n\n",
+		baseBranch, priorStageName, priorSHA, currentShort, commitCount))
+	b.WriteString("| Status | File |\n")
+	b.WriteString("|--------|------|\n")
+
+	shown := 0
+	for _, line := range diffLines {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) < 2 {
+			continue
+		}
+		status := changeType(parts[0])
+		file := parts[1]
+		if shown >= maxFiles {
+			remaining := len(diffLines) - shown
+			b.WriteString(fmt.Sprintf("\n(and %d more files)\n", remaining))
+			break
+		}
+		b.WriteString(fmt.Sprintf("| %s | `%s` |\n", status, file))
+		shown++
+	}
+
+	outPath := filepath.Join(fabrikDir, "codebase-changes.md")
+	if err := os.WriteFile(outPath, []byte(b.String()), 0644); err != nil {
+		e.logf(item.Number, "warn", "could not write codebase-changes.md: %v\n", err)
+	}
+}
+
+// changeType converts git diff --name-status codes to human-readable labels.
+func changeType(code string) string {
+	switch {
+	case strings.HasPrefix(code, "R"):
+		return "Renamed"
+	case strings.HasPrefix(code, "C"):
+		return "Copied"
+	case code == "M":
+		return "Modified"
+	case code == "A":
+		return "New"
+	case code == "D":
+		return "Deleted"
+	default:
+		return code
 	}
 }
