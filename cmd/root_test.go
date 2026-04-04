@@ -178,7 +178,7 @@ func TestExecute_ConfigYAMLApplied(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error (not a git repo)")
 	}
-	const missingConfig = "missing required config: owner, repo, project"
+	const missingConfig = "missing required config: owner, repo, project (use flags or .env file)"
 	if err.Error() == missingConfig {
 		t.Errorf("config.yaml values were not applied: got %q", err.Error())
 	}

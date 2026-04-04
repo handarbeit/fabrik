@@ -114,6 +114,9 @@ func Execute() error {
 			}
 			cfg.ProjectNum = n
 		} else if pc.ProjectNum != nil {
+			if *pc.ProjectNum <= 0 {
+				return fmt.Errorf("config.yaml project=%d is invalid (must be a positive integer)", *pc.ProjectNum)
+			}
 			cfg.ProjectNum = *pc.ProjectNum
 		}
 	}
@@ -147,7 +150,11 @@ func Execute() error {
 				fmt.Fprintf(os.Stderr, "[warn] FABRIK_POLL=%q is invalid (must be a positive integer); using default %d\n", v, cfg.PollSeconds)
 			}
 		} else if pc.Poll != nil {
-			cfg.PollSeconds = *pc.Poll
+			if *pc.Poll <= 0 {
+				fmt.Fprintf(os.Stderr, "[warn] config.yaml poll=%d is invalid (must be a positive integer); using default %d\n", *pc.Poll, cfg.PollSeconds)
+			} else {
+				cfg.PollSeconds = *pc.Poll
+			}
 		}
 	}
 	if cfg.MaxConcurrent == 5 {
@@ -158,7 +165,11 @@ func Execute() error {
 				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_CONCURRENT=%q is invalid (must be a positive integer); using default %d\n", v, cfg.MaxConcurrent)
 			}
 		} else if pc.MaxConcurrent != nil {
-			cfg.MaxConcurrent = *pc.MaxConcurrent
+			if *pc.MaxConcurrent <= 0 {
+				fmt.Fprintf(os.Stderr, "[warn] config.yaml max_concurrent=%d is invalid (must be a positive integer); using default %d\n", *pc.MaxConcurrent, cfg.MaxConcurrent)
+			} else {
+				cfg.MaxConcurrent = *pc.MaxConcurrent
+			}
 		}
 	}
 	if cfg.MaxRetries == 3 {
@@ -169,7 +180,11 @@ func Execute() error {
 				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_RETRIES=%q is invalid (must be a non-negative integer); using default %d\n", v, cfg.MaxRetries)
 			}
 		} else if pc.MaxRetries != nil {
-			cfg.MaxRetries = *pc.MaxRetries
+			if *pc.MaxRetries < 0 {
+				fmt.Fprintf(os.Stderr, "[warn] config.yaml max_retries=%d is invalid (must be a non-negative integer); using default %d\n", *pc.MaxRetries, cfg.MaxRetries)
+			} else {
+				cfg.MaxRetries = *pc.MaxRetries
+			}
 		}
 	}
 	if !cfg.AutoUpgrade {
