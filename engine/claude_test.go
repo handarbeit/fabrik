@@ -272,10 +272,22 @@ func TestParseClaudeJSON_InvalidJSON(t *testing.T) {
 	}
 }
 
-func TestParseClaudeJSON_EmptyResult(t *testing.T) {
-	_, ok := parseClaudeJSON([]byte(`{"result":"","session_id":"sess_1"}`))
+func TestParseClaudeJSON_EmptyResultWithSessionID(t *testing.T) {
+	// Empty result but valid session ID (e.g., max_turns hit) should still parse.
+	resp, ok := parseClaudeJSON([]byte(`{"result":"","session_id":"sess_1"}`))
+	if !ok {
+		t.Error("expected parse success for empty result with session_id")
+	}
+	if resp.SessionID != "sess_1" {
+		t.Errorf("SessionID = %q, want sess_1", resp.SessionID)
+	}
+}
+
+func TestParseClaudeJSON_EmptyResultNoSessionID(t *testing.T) {
+	// Truly empty/invalid — no result, no session ID.
+	_, ok := parseClaudeJSON([]byte(`{"result":"","session_id":""}`))
 	if ok {
-		t.Error("expected parse failure for empty result")
+		t.Error("expected parse failure for empty result with no session_id")
 	}
 }
 
