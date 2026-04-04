@@ -59,20 +59,20 @@ The addition of `.fabrik/config.yaml` as a new config source with defined preced
 
 ### Task Checklist
 
-- [ ] Task 1: Add `ProjectConfig` struct (with pointer integer fields) and `LoadProjectConfig()` to `config/config.go`; import `gopkg.in/yaml.v3`
-- [ ] Task 2: Add `WarnIfConfigIgnored()` to `config/config.go` (calls `isInGitignore(".fabrik/config.yaml")`, prints to stderr, non-fatal)
-- [ ] Task 3: Add tests for `LoadProjectConfig()` in `config/config_test.go` (missing file returns zero-value struct; valid YAML parses correctly; integer and bool fields; unknown keys ignored)
-- [ ] Task 4: Add `--max-concurrent` CLI flag in `cmd/root.go` via `flag.IntVar`; remove the hardcoded `cfg.MaxConcurrent = 5` line and its env-var block (replaced in task 6)
-- [ ] Task 5: Add `Terminal string` to `cmd.Config` struct in `cmd/root.go`
-- [ ] Task 6: Wire `LoadProjectConfig()` into `Execute()` after `LoadDotenv()`; add config.yaml fallback to every per-setting env-var check block (including new `FABRIK_AUTO_UPGRADE`, `FABRIK_TUI`, `FABRIK_TERMINAL` env var checks); call `WarnIfConfigIgnored()`
-- [ ] Task 7: Add tests for config.yaml integration in `cmd/root_test.go` (config.yaml values apply when env/flag absent; env var beats config.yaml; `--max-concurrent` flag works)
-- [ ] Task 8: Add config.yaml template constant and `writeConfigTemplate()` helper to `cmd/init.go`; call it from `runInit()` (skip if file exists and `--force` not set)
-- [ ] Task 9: Add interactive prompting to `cmd/init.go` — when stdin is a TTY and config.yaml doesn't exist, prompt for owner/repo/project/user and write their values into the generated file (non-commented); gate on `isatty.IsTerminal`
-- [ ] Task 10: Add tests for config.yaml generation in `cmd/init_test.go` (non-TTY: template written with all settings commented; file not overwritten without `--force`; `--force` overwrites)
-- [ ] Task 11: Update `.env.example` to keep only `FABRIK_TOKEN` / `GITHUB_TOKEN`; add a comment pointing to `.fabrik/config.yaml` for other settings
-- [ ] Task 12: Create ADR NNN: `.fabrik/config.yaml` as project-level config source (document precedence order and at-default heuristic limitation)
-- [ ] Task 13: Update `docs/USER_GUIDE.md` — Getting Started section (setup flow) and Configuration Reference (settings table, config.yaml format, `.env` trimmed example)
-- [ ] Task 14: Update `README.md` Quick Start to introduce `config.yaml` as primary non-secret config; update setup instructions
+- [x] Task 1: Add `ProjectConfig` struct (with pointer integer fields) and `LoadProjectConfig()` to `config/config.go`; import `gopkg.in/yaml.v3`
+- [x] Task 2: Add `WarnIfConfigIgnored()` to `config/config.go` (calls `isInGitignore(".fabrik/config.yaml")`, prints to stderr, non-fatal)
+- [x] Task 3: Add tests for `LoadProjectConfig()` in `config/config_test.go` (missing file returns zero-value struct; valid YAML parses correctly; integer and bool fields; unknown keys ignored)
+- [x] Task 4: Add `--max-concurrent` CLI flag in `cmd/root.go` via `flag.IntVar`; remove the hardcoded `cfg.MaxConcurrent = 5` line and its env-var block (replaced in task 6)
+- [x] Task 5: Add `Terminal string` to `cmd.Config` struct in `cmd/root.go`
+- [x] Task 6: Wire `LoadProjectConfig()` into `Execute()` after `LoadDotenv()`; add config.yaml fallback to every per-setting env-var check block (including new `FABRIK_AUTO_UPGRADE`, `FABRIK_TUI`, `FABRIK_TERMINAL` env var checks); call `WarnIfConfigIgnored()`
+- [x] Task 7: Add tests for config.yaml integration in `cmd/root_test.go` (config.yaml values apply when env/flag absent; env var beats config.yaml; `--max-concurrent` flag works)
+- [x] Task 8: Add config.yaml template constant and `writeConfigTemplate()` helper to `cmd/init.go`; call it from `runInit()` (skip if file exists and `--force` not set)
+- [x] Task 9: Add interactive prompting to `cmd/init.go` — when stdin is a TTY and config.yaml doesn't exist, prompt for owner/repo/project/user and write their values into the generated file (non-commented); gate on `isatty.IsTerminal`
+- [x] Task 10: Add tests for config.yaml generation in `cmd/init_test.go` (non-TTY: template written with all settings commented; file not overwritten without `--force`; `--force` overwrites)
+- [x] Task 11: Update `.env.example` to keep only `FABRIK_TOKEN` / `GITHUB_TOKEN`; add a comment pointing to `.fabrik/config.yaml` for other settings
+- [x] Task 12: Create ADR NNN: `.fabrik/config.yaml` as project-level config source (document precedence order and at-default heuristic limitation)
+- [x] Task 13: Update `docs/USER_GUIDE.md` — Getting Started section (setup flow) and Configuration Reference (settings table, config.yaml format, `.env` trimmed example)
+- [x] Task 14: Update `README.md` Quick Start to introduce `config.yaml` as primary non-secret config; update setup instructions
 
 ---
 
