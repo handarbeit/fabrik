@@ -192,7 +192,7 @@ FABRIK_USER=my-personal-username
 | `FABRIK_AUTO_UPGRADE` | `auto_upgrade` | Self-upgrade when idle (`true`/`1`/`yes`) | `false` |
 | `FABRIK_TUI` | `tui` | Enable TUI dashboard (`true`/`1`/`yes`) | `false` |
 | `FABRIK_TERMINAL` | `terminal` | Terminal app for TUI (passthrough for issue #108) | `""` |
-| `FABRIK_PLUGIN_DIR` | *(flag only)* | Override plugin directory | `.fabrik/plugin/` |
+| `FABRIK_PLUGIN_DIR` | *(no config.yaml key)* | Override plugin directory | `.fabrik/plugin/` |
 | `FABRIK_DEBUG_OUTPUT` | `debug_output` | Save raw Claude output for debugging | `false` |
 
 Token precedence: `--token` flag > `FABRIK_TOKEN` > `GITHUB_TOKEN`
