@@ -183,7 +183,7 @@ Fabrik uses labels to track state:
 | `fabrik:locked:<user>` | Issue is being processed by this user's Fabrik instance |
 | `fabrik:editing` | Issue body is being updated (prevents concurrent processing) |
 | `fabrik:paused` | Issue is skipped entirely — no stage processing or comment processing occurs |
-| `fabrik:awaiting-input` | Stage is paused waiting for user input; auto-clears when new comment received |
+| `fabrik:awaiting-input` | Stage is paused waiting for user input; auto-clears when a new comment from the configured user (`--user`) is received |
 | `stage:<name>:complete` | Stage has been completed |
 
 ## Multi-User
