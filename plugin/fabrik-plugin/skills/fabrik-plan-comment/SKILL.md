@@ -41,12 +41,16 @@ Do **not** use `FABRIK_ISSUE_UPDATE` markers — plan content lives in the stage
 
 ## Completion
 
-Do NOT output `FABRIK_STAGE_COMPLETE`. Comment processing in Plan returns control to the engine without advancing the pipeline. The Plan stage continues until the user or the agent explicitly signals completion through the main Plan workflow.
+When all feedback has been incorporated, open questions resolved, and the plan is concrete and complete enough for implementation to begin, signal completion:
+- Output `FABRIK_STAGE_COMPLETE` on its own line
+
+Do not signal completion if the plan still has ambiguities, unresolved questions, or tasks that are too vague to implement.
+
+If the user's comment adjusts the plan but the plan still needs further refinement or the user is clearly not done providing feedback, do not signal completion.
 
 ## What You Do NOT Do
 
 - **Do not commit code changes** — Plan is a read-only stage; no code is modified
-- **Do not signal stage completion** — never output `FABRIK_STAGE_COMPLETE`
 - **Do not use FABRIK_ISSUE_UPDATE markers** — plan output goes to the stage comment, not the issue body
 - **Do not start implementing** — stay at the planning level
 - **Do not add tasks beyond what the user requested** — no scope creep
