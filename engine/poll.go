@@ -452,14 +452,16 @@ func gitRevParse(dir, ref string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// captureGitMeta captures the current branch name, short commit SHA, and a
-// human-readable UTC timestamp from the given worktree directory.
-// Returns "unknown" values gracefully if git commands fail (e.g. empty workDir).
-func captureGitMeta(workDir string) (branch, commit, timestamp string) {
+// captureGitMeta captures the current branch name, short commit SHA,
+// origin/{baseBranch} SHA, and a human-readable UTC timestamp from the given
+// worktree directory. Returns "unknown" values gracefully if git commands fail.
+// mainSHA is empty (not "unknown") when it cannot be resolved — callers treat
+// empty as "no data" rather than an error sentinel.
+func captureGitMeta(workDir, baseBranch string) (branch, commit, mainSHA, timestamp string) {
 	timestamp = time.Now().UTC().Format("2006-01-02 15:04 UTC")
 
 	if workDir == "" {
-		return "unknown", "unknown", timestamp
+		return "unknown", "unknown", "", timestamp
 	}
 
 	sha, err := gitRevParse(workDir, "HEAD")
@@ -480,5 +482,16 @@ func captureGitMeta(workDir string) (branch, commit, timestamp string) {
 		branch = strings.TrimSpace(string(out))
 	}
 
-	return branch, commit, timestamp
+	// Capture origin/{baseBranch} SHA for staleness tracking.
+	if baseBranch != "" {
+		if mSHA, err := gitRevParse(workDir, "origin/"+baseBranch); err == nil {
+			if len(mSHA) >= 8 {
+				mainSHA = mSHA[:8]
+			} else {
+				mainSHA = mSHA
+			}
+		}
+	}
+
+	return branch, commit, mainSHA, timestamp
 }
