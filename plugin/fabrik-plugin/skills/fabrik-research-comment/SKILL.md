@@ -39,12 +39,16 @@ Do **not** use `FABRIK_ISSUE_UPDATE` markers — research findings live in the s
 
 ## Completion
 
-Do NOT output `FABRIK_STAGE_COMPLETE`. Comment processing in Research returns control to the engine without advancing the pipeline. The Research stage continues until the user or the agent explicitly signals completion through the main Research workflow.
+When all open questions are resolved and the research findings are complete and sufficient for the Plan stage to proceed, signal completion:
+- Output `FABRIK_STAGE_COMPLETE` on its own line
+
+Do not signal completion if open questions remain, or if the research still has gaps that would impede the Plan stage.
+
+If the user's comment only partially answers questions and new questions arise, do not signal completion — let the research continue.
 
 ## What You Do NOT Do
 
 - **Do not commit code changes** — Research is a read-only stage; no code is modified
-- **Do not signal stage completion** — never output `FABRIK_STAGE_COMPLETE`
 - **Do not use FABRIK_ISSUE_UPDATE markers** — research output goes to the stage comment, not the issue body
 - **Do not make implementation decisions** — stay at the findings/questions level
 - **Do not add requirements or scope** unless the user's comment explicitly introduces them
