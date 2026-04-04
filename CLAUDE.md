@@ -16,13 +16,22 @@ go vet ./...             # Lint
 ## Architecture
 
 - `cmd/root.go` — CLI entry point, flag parsing, .env loading
-- `engine/engine.go` — Main poll loop, concurrent worker dispatch, stage/comment processing
+- `engine/engine.go` — Engine struct, Config, construction, Run() entry point
+- `engine/poll.go` — Main poll loop, idle-upgrade, concurrent worker dispatch
+- `engine/item.go` — Per-issue processing: stage runs, comment processing, blocking/pausing
+- `engine/pr.go` — Output posting: issue comments, PR comments, summary extraction
+- `engine/comments.go` — Comment detection and filtering logic
+- `engine/context.go` — Context files (.fabrik-context/) and stage comment lookup
 - `engine/claude.go` — Claude Code invocation, prompt building, marker extraction
 - `engine/worktree.go` — Git worktree lifecycle (create, update, push, cleanup)
 - `engine/interfaces.go` — GitHubClient and ClaudeInvoker interfaces (for testing)
 - `github/project.go` — GraphQL board fetching (single query for all items + comments + linked PRs)
-- `github/mutations.go` — REST mutations (labels, comments, reactions, PRs, status updates)
-- `github/rest.go` — HTTP helpers
+- `github/client.go` — HTTP client construction and shared request helpers
+- `github/labels.go` — Label mutations (add, remove, ensure)
+- `github/comments.go` — Comment mutations (add, update, reactions)
+- `github/prs.go` — PR mutations (create draft, mark ready)
+- `github/status.go` — Project board status updates
+- `github/rest.go` — Low-level HTTP helpers
 - `github/types.go` — Shared data types (ProjectItem, Comment, ReactionGroup)
 - `stages/stages.go` — YAML stage config loading
 - `stages/examples/` — Default stage YAML sources, embedded in binary via `//go:embed`
@@ -74,6 +83,7 @@ comment_prompt: |          # Optional: prompt for processing user comments
 allowed_tools:             # Optional: restrict Claude's tools
   - Read
   - Grep
+update_issue_body: false   # Allow FABRIK_ISSUE_UPDATE markers to modify issue body (Specify only)
 post_to_pr: true           # Post output to linked PR instead of issue
 create_draft_pr: true      # Create draft PR before stage runs
 mark_pr_ready_on_complete: true  # Mark PR ready when stage completes
