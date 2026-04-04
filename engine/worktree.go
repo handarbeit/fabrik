@@ -173,8 +173,10 @@ func (wm *WorktreeManager) branchExists(branch string) bool {
 // creating noise merge commits that confuse Claude on retries.
 // Errors are non-fatal — the worktree is still usable, just potentially behind.
 func (wm *WorktreeManager) updateWorktreeFromMain(wtDir, baseBranch string, issueNumber int) {
-	// Check for uncommitted changes — skip update if dirty
-	statusCmd := exec.Command("git", "status", "--porcelain")
+	// Check for uncommitted changes — skip update if dirty.
+	// Use -uno to ignore untracked files (context files, leftover artifacts)
+	// which would otherwise block the rebase permanently.
+	statusCmd := exec.Command("git", "status", "--porcelain", "-uno")
 	statusCmd.Dir = wtDir
 	if out, err := statusCmd.Output(); err == nil && len(strings.TrimSpace(string(out))) > 0 {
 		wm.logf(issueNumber, "worktree", "has uncommitted changes, skipping update from main\n")
