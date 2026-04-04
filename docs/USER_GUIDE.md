@@ -222,7 +222,7 @@ model: sonnet             # Optional. Claude model: "opus", "sonnet", etc.
 max_turns: 50             # Optional. Max conversation turns per invocation.
 read_only: true           # Optional. Stash/restore worktree (for analysis stages).
 update_issue_body: false  # Optional. Allow FABRIK_ISSUE_UPDATE markers to modify the issue body.
-                          #   Only Specify sets this to true; other stages ignore the markers.
+                          #   By convention only Specify should set this to true.
 post_to_pr: true          # Optional. Post output on linked PR; summary on issue.
 create_draft_pr: true     # Optional. Create draft PR on completion.
 mark_pr_ready_on_complete: true  # Optional. Mark PR ready when stage completes.
@@ -339,16 +339,16 @@ it just needs a question answered.
 When a stage outputs `FABRIK_BLOCKED_ON_INPUT`:
 1. `fabrik:paused` and `fabrik:awaiting-input` labels are added to the issue
 2. The retry counter is **not** incremented — this does not count as a failure
-3. The issue waits silently until you comment
+3. The issue waits silently until the configured Fabrik user (`--user` / `FABRIK_USER`) posts a new comment
 
-When you post a new comment:
+When the configured user posts a new comment:
 1. Fabrik detects the comment and automatically removes both labels
 2. Comment processing is triggered immediately (no manual card move needed)
 3. The comment processing run can output `FABRIK_STAGE_COMPLETE` to finish the stage
    directly, without needing an additional stage invocation
 
 This is the intended mechanism for Q&A in stages like Specify — Claude asks a question,
-you answer it in a comment, and the stage resumes automatically.
+the configured user answers it in a comment, and the stage resumes automatically.
 
 ---
 
@@ -449,7 +449,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:locked:<user>` | Issue being processed by this user's instance |
 | `fabrik:editing` | Issue body being updated (comment processing) |
 | `fabrik:paused` | Processing paused (max retries exceeded or manual) |
-| `fabrik:awaiting-input` | Stage paused waiting for user input; auto-clears on new comment |
+| `fabrik:awaiting-input` | Stage paused waiting for user input; auto-clears on a new comment from the configured user |
 | `stage:<name>:in_progress` | Stage actively running |
 | `stage:<name>:complete` | Stage completed successfully |
 | `stage:<name>:failed` | Stage hit max retries |
