@@ -26,7 +26,7 @@ For details on the internal stage lifecycle, see [Stage Lifecycle](stage-lifecyc
 
 ### Prerequisites
 
-- Go 1.21+
+- Go 1.26.1+
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
 - GitHub personal access token with `repo` and `project` scopes
 - A GitHub Project (v2) with board columns matching your stage names
@@ -213,11 +213,16 @@ Each stage is a YAML file in your stages directory. The filename is arbitrary; t
 name: Research            # Required. Must match a Project board column exactly.
 order: 2                  # Required. Lower values processed earlier in the pipeline.
 skill: fabrik-research    # Plugin skill to use (alternative to inline prompt).
+comment_skill: fabrik-research-comment  # Plugin skill for comment review (overrides comment_prompt).
 prompt: |                 # Inline prompt (used when skill is not set).
   You are a research agent...
+comment_prompt: |         # Inline comment-review prompt (used when comment_skill is not set).
+  You are reviewing user comments...
 model: sonnet             # Optional. Claude model: "opus", "sonnet", etc.
 max_turns: 50             # Optional. Max conversation turns per invocation.
 read_only: true           # Optional. Stash/restore worktree (for analysis stages).
+update_issue_body: false  # Optional. Allow FABRIK_ISSUE_UPDATE markers to modify the issue body.
+                          #   By convention only Specify should set this to true.
 post_to_pr: true          # Optional. Post output on linked PR; summary on issue.
 create_draft_pr: true     # Optional. Create draft PR on completion.
 mark_pr_ready_on_complete: true  # Optional. Mark PR ready when stage completes.
@@ -325,6 +330,26 @@ When a stage doesn't complete (Claude doesn't output `FABRIK_STAGE_COMPLETE`):
 To resume after escalation: remove the `fabrik:paused` label. Fabrik will clear the
 failed label, reset the retry count, and try again immediately.
 
+### Stages Waiting for Input
+
+A stage can signal that it needs user input before it can proceed by outputting
+`FABRIK_BLOCKED_ON_INPUT`. This is different from a failure — the stage is not broken,
+it just needs a question answered.
+
+When a stage outputs `FABRIK_BLOCKED_ON_INPUT`:
+1. `fabrik:paused` and `fabrik:awaiting-input` labels are added to the issue
+2. The retry counter is **not** incremented — this does not count as a failure
+3. The issue waits silently until the configured Fabrik user (`--user` / `FABRIK_USER`) posts a new comment
+
+When the configured user posts a new comment:
+1. Fabrik detects the comment and automatically removes both labels
+2. Comment processing is triggered immediately (no manual card move needed)
+3. The comment processing run can output `FABRIK_STAGE_COMPLETE` to finish the stage
+   directly, without needing an additional stage invocation
+
+This is the intended mechanism for Q&A in stages like Specify — Claude asks a question,
+the configured user answers it in a comment, and the stage resumes automatically.
+
 ---
 
 ## 4. Stage Reference
@@ -424,6 +449,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:locked:<user>` | Issue being processed by this user's instance |
 | `fabrik:editing` | Issue body being updated (comment processing) |
 | `fabrik:paused` | Processing paused (max retries exceeded or manual) |
+| `fabrik:awaiting-input` | Stage paused waiting for user input; auto-clears on a new comment from the configured user |
 | `stage:<name>:in_progress` | Stage actively running |
 | `stage:<name>:complete` | Stage completed successfully |
 | `stage:<name>:failed` | Stage hit max retries |
