@@ -353,6 +353,7 @@ func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Com
 	b.WriteString("Context files are available in `.fabrik-context/` in your working directory:\n")
 	b.WriteString("- `.fabrik-context/issue.md` — the issue body (spec)\n")
 	b.WriteString("- `.fabrik-context/stage-{Name}.md` — output from prior stages (e.g. `.fabrik-context/stage-Research.md`)\n")
+	b.WriteString("- `.fabrik-context/codebase-changes.md` — files changed on main since the last stage (if any)\n")
 	if stage.PostToPR {
 		b.WriteString("- `.fabrik-context/pr-description.md` — the linked PR description\n")
 	}
