@@ -49,6 +49,12 @@ go build -o fabrik .
 If your terminal is interactive, `fabrik init` will prompt you for the required settings
 (owner, repo, project number, username) and write them into `config.yaml` for you.
 
+To refresh plugin skills without touching stages or config (e.g., after upgrading Fabrik):
+
+```bash
+./fabrik upgrade
+```
+
 Edit `.fabrik/config.yaml` with your project settings and commit it to git. Add your
 GitHub token to a gitignored `.env` file:
 
@@ -91,7 +97,8 @@ Move an issue to `Specify` on the board to start processing it.
 
 The `--auto-upgrade` flag enables Fabrik to upgrade itself when idle. After 2
 consecutive idle polls, Fabrik checks `origin/main` for new commits. If found, it
-runs `git pull --ff-only`, rebuilds the binary with `go build`, and re-execs itself.
+runs `git pull --ff-only`, rebuilds the binary, runs `fabrik upgrade` to refresh
+plugin skills, and re-execs itself.
 This is intended for the self-evolving workflow where Fabrik develops Fabrik.
 
 ```bash
