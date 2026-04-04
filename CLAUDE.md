@@ -83,7 +83,7 @@ comment_prompt: |          # Optional: prompt for processing user comments
 allowed_tools:             # Optional: restrict Claude's tools
   - Read
   - Grep
-update_issue_body: false   # Allow FABRIK_ISSUE_UPDATE markers to modify issue body (Specify only)
+update_issue_body: false   # Allow FABRIK_ISSUE_UPDATE markers to modify issue body (by convention, Specify only)
 post_to_pr: true           # Post output to linked PR instead of issue
 create_draft_pr: true      # Create draft PR before stage runs
 mark_pr_ready_on_complete: true  # Mark PR ready when stage completes
