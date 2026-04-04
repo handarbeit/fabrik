@@ -197,10 +197,16 @@ func (e *Engine) writeCodebaseChanges(item gh.ProjectItem, currentStage *stages.
 		return // no file changes
 	}
 
+	// Abbreviate SHAs for display in the markdown file.
+	priorShort := priorSHA
+	if len(priorShort) > 8 {
+		priorShort = priorShort[:8]
+	}
+
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("# Codebase Changes Since %s\n\n", priorStageName))
 	b.WriteString(fmt.Sprintf("Changes on `origin/%s` since the %s stage (%s → %s): **%s commit(s)**\n\n",
-		baseBranch, priorStageName, priorSHA, currentShort, commitCount))
+		baseBranch, priorStageName, priorShort, currentShort, commitCount))
 	b.WriteString("| Status | File |\n")
 	b.WriteString("|--------|------|\n")
 
