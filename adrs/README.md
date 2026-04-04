@@ -19,3 +19,7 @@ contributors and future maintainers.
 | [007](007-label-based-locking.md) | Label-based locking for multi-user safety | Accepted |
 | [008](008-human-in-the-loop.md) | Human-in-the-loop by default | Accepted |
 | [009](009-comment-processing.md) | Comment processing with reaction flow | Accepted |
+| [010](010-file-granularity.md) | File Granularity and Module Structure | Accepted |
+| [011](011-context-files.md) | Context Files as Claude Context Delivery Mechanism | Accepted |
+| [012](012-stage-comment-living-document.md) | Stage Comment as Living Document | Accepted |
+| [013](013-project-config-yaml.md) | `.fabrik/config.yaml` as Project-Level Config Source | Accepted |
