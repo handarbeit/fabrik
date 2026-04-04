@@ -483,13 +483,11 @@ func captureGitMeta(workDir, baseBranch string) (branch, commit, mainSHA, timest
 	}
 
 	// Capture origin/{baseBranch} SHA for staleness tracking.
+	// Store full SHA — it is used as a git revision in writeCodebaseChanges;
+	// abbreviated SHAs can become ambiguous in larger repos.
 	if baseBranch != "" {
 		if mSHA, err := gitRevParse(workDir, "origin/"+baseBranch); err == nil {
-			if len(mSHA) >= 8 {
-				mainSHA = mSHA[:8]
-			} else {
-				mainSHA = mSHA
-			}
+			mainSHA = mSHA
 		}
 	}
 

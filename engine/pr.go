@@ -150,7 +150,9 @@ func formatPRSummaryComment(stageName string, prNumber int, output, branch, comm
 }
 
 // formatMetaLine builds the italicized metadata line for comment headers.
-// When mainSHA is non-empty, includes a main: field.
+// When mainSHA is non-empty, includes a main: field. The full SHA is stored
+// (not abbreviated) because it is later used as a git revision in
+// writeCodebaseChanges — abbreviated SHAs can become ambiguous over time.
 func formatMetaLine(branch, commit, mainSHA, timestamp string) string {
 	if mainSHA != "" {
 		return fmt.Sprintf("*branch: %s | commit: %s | main: %s | %s*", branch, commit, mainSHA, timestamp)
