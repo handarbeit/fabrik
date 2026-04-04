@@ -79,7 +79,6 @@ type Stage struct {
 	// instead of invoking Claude. No prompt, lock, or in_progress label is needed.
 	// Use this for terminal stages like "Done" to reclaim disk space.
 	CleanupWorktree bool `yaml:"cleanup_worktree,omitempty"`
-
 }
 
 // CompletionCriteria defines how to determine if a stage is complete.
