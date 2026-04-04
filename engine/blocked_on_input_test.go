@@ -257,13 +257,13 @@ func TestProcessItem_BlockedOnInput_AddsLabels(t *testing.T) {
 
 	eng := NewWithDeps(
 		Config{
-			Owner:         "owner",
-			Repo:          "repo",
-			ProjectNum:    1,
-			User:          "testuser",
-			Token:         "token",
-			MaxRetries:    3,
-			Stages:        testStages(),
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 3,
+			Stages:     testStages(),
 		},
 		client,
 		claude,
