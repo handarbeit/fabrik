@@ -845,8 +845,8 @@ func TestBuildCommentReviewPrompt_CustomCommentPrompt(t *testing.T) {
 
 func TestBuildCommentReviewPrompt_CommentSkill(t *testing.T) {
 	stage := &stages.Stage{
-		Name:         "Specify",
-		CommentSkill: "fabrik-specify-comment",
+		Name:          "Specify",
+		CommentSkill:  "fabrik-specify-comment",
 		CommentPrompt: "should not appear",
 	}
 	item := gh.ProjectItem{
