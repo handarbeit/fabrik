@@ -1,0 +1,28 @@
+# .fabrik/config.yaml — project-level configuration for Fabrik
+# Commit this file to git so project settings travel with the repo.
+# Keep secrets (FABRIK_TOKEN, GITHUB_TOKEN) in .env (gitignored).
+#
+# Precedence: CLI flag > shell env var > .env > .fabrik/config.yaml > built-in default
+
+# Required: GitHub repository owner (org or username)
+owner: handarbeit
+
+# Required: GitHub repository name
+repo: fabrik
+
+# Required: GitHub project number (the number in the project URL)
+project: 1
+
+# Required: Your GitHub username (Fabrik only processes issues assigned to you)
+user: arbeithand
+
+# Optional settings (defaults shown):
+# stages: ./.fabrik/stages
+poll: 15
+max_concurrent: 5
+# max_retries: 3
+# yolo: false
+auto_upgrade: true
+tui: true
+terminal: ghostty
+# debug_output: false
