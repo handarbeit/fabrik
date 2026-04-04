@@ -44,6 +44,9 @@ func Execute() error {
 	if len(os.Args) > 1 && os.Args[1] == "init" {
 		return runInit(os.Args[2:])
 	}
+	if len(os.Args) > 1 && os.Args[1] == "upgrade" {
+		return runUpgrade(os.Args[2:])
+	}
 	if len(os.Args) > 1 && os.Args[1] == "_stream-filter" {
 		RunStreamFilter()
 		return nil

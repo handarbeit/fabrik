@@ -426,13 +426,13 @@ func (e *Engine) checkAndUpgrade() {
 		return
 	}
 
-	// Refresh stage configs and plugin skills from the new binary.
-	e.logf(0, "upgrade", "refreshing .fabrik/ configs and plugin\n")
-	initCmd := exec.Command(exe, "init", "--force")
-	initCmd.Dir = dir
-	if out, err := initCmd.CombinedOutput(); err != nil {
-		e.logf(0, "upgrade", "fabrik init --force failed: %v\n%s\n", err, out)
-		// Non-fatal — continue with re-exec, old configs still work
+	// Refresh plugin skills from the new binary.
+	e.logf(0, "upgrade", "refreshing plugin skills\n")
+	upgradeCmd := exec.Command(exe, "upgrade")
+	upgradeCmd.Dir = dir
+	if out, err := upgradeCmd.CombinedOutput(); err != nil {
+		e.logf(0, "upgrade", "fabrik upgrade failed: %v\n%s\n", err, out)
+		// Non-fatal — continue with re-exec, old skills still work
 	}
 
 	e.logf(0, "upgrade", "re-executing new binary\n")
