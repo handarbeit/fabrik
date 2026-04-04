@@ -39,6 +39,10 @@ Read `.fabrik-context/stage-Plan.md` thoroughly. The plan contains:
 
 If the plan is unclear or seems wrong based on what you find in the code, note the discrepancy but follow the plan. Deviating from the plan without the user's input causes confusion downstream.
 
+### Check for codebase changes
+
+If `.fabrik-context/codebase-changes.md` exists, read it. This file lists files that changed on `origin/main` since the Plan stage completed. Before starting each task, check if any files mentioned in the Plan were modified on main. If so, verify the Plan's assumptions against the current code and adapt the task as needed — interfaces may have changed, files may have been renamed or removed.
+
 ## How You Work
 
 ### Follow the task checklist
