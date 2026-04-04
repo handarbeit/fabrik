@@ -128,6 +128,7 @@ comment_prompt: |         # Prompt for processing user comments (optional)
   You are reviewing user comments...
 comment_skill: fabrik-research-comment  # Skill for comment review (overrides comment_prompt)
 model: sonnet             # Optional: claude model to use
+update_issue_body: false  # Allow FABRIK_ISSUE_UPDATE markers to modify issue body (Specify only)
 max_turns: 10             # Optional: limit Claude's turns
 post_to_pr: true          # Optional: post output on linked PR instead of issue
 allowed_tools:            # Optional: restrict available tools
@@ -182,6 +183,7 @@ Fabrik uses labels to track state:
 | `fabrik:locked:<user>` | Issue is being processed by this user's Fabrik instance |
 | `fabrik:editing` | Issue body is being updated (prevents concurrent processing) |
 | `fabrik:paused` | Issue is skipped entirely — no stage processing or comment processing occurs |
+| `fabrik:awaiting-input` | Stage is paused waiting for user input; auto-clears when new comment received |
 | `stage:<name>:complete` | Stage has been completed |
 
 ## Multi-User
