@@ -90,7 +90,10 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// Capture git metadata for the comment header
 	branch, commit, timestamp := captureGitMeta(workDir)
 
-	// Step 5: Strip FABRIK_ISSUE_UPDATE block from output, then update issue body if allowed.
+	// Step 5: Check for stage completion marker before stripping.
+	completed := checkCompletion(stage, output)
+
+	// Step 6: Strip FABRIK_ISSUE_UPDATE block from output, then update issue body if allowed.
 	if updatedBody := extractUpdatedBody(output); updatedBody != "" {
 		if stage.UpdateIssueBody {
 			e.logf(item.Number, "edit", "updating issue body\n")
@@ -103,7 +106,14 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		output = stripMarkers(output, "FABRIK_ISSUE_UPDATE_BEGIN", "FABRIK_ISSUE_UPDATE_END")
 	}
 
-	// Step 6: Rewrite or create the stage comment (unless post_to_pr).
+	// Step 7: Strip all Fabrik markers from output before posting.
+	output = stripLine(output, "FABRIK_STAGE_COMPLETE")
+	output = stripLine(output, "FABRIK_BLOCKED_ON_INPUT")
+	output = stripLine(output, "FABRIK_SUMMARY_BEGIN")
+	output = stripLine(output, "FABRIK_SUMMARY_END")
+	output = strings.TrimSpace(output)
+
+	// Step 8: Rewrite or create the stage comment (unless post_to_pr).
 	// For post_to_pr stages the stage output lives on the PR; comment processing
 	// output on such stages is posted as a new comment on the issue as before.
 	if output != "" {
@@ -128,10 +138,10 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		}
 	}
 
-	// Step 7: Remove editing label
+	// Step 9: Remove editing label
 	e.removeEditingLabel(item.Number)
 
-	// Step 8: React with 🚀 to all processed comments
+	// Step 10: React with 🚀 to all processed comments
 	for _, c := range comments {
 		if err := e.client.AddCommentReaction(e.cfg.Owner, e.cfg.Repo, c.DatabaseID, "rocket"); err != nil {
 			e.logf(item.Number, "warn", "could not add 🚀 to comment %s: %v\n", c.ID, err)
@@ -141,7 +151,29 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// Mark comments as processed only after everything succeeded
 	e.markCommentsProcessed(item, comments)
 
-	e.logf(item.Number, "done", "comment processing complete\n")
+	// Step 11: If comment processing resolved the stage, handle completion.
+	// This avoids an unnecessary extra stage invocation after unblocking.
+	if completed {
+		e.logf(item.Number, "done", "comment processing completed stage %q\n", stage.Name)
+		itemKey := fmt.Sprintf("%d-%s", item.Number, stage.Name)
+		func() {
+			e.mu.Lock()
+			defer e.mu.Unlock()
+			delete(e.retryCount, itemKey)
+			delete(e.pausedDueToRetries, itemKey)
+		}()
+		if stage.CreateDraftPR {
+			baseBranch := e.worktrees.DefaultBaseBranch()
+			e.ensureDraftPR(item, baseBranch)
+		}
+		if stage.MarkPRReadyOnComplete {
+			e.markPRReady(item, 0)
+		}
+		e.handleStageComplete(board, item, stage)
+	} else {
+		e.logf(item.Number, "done", "comment processing complete\n")
+	}
+
 	return nil
 }
 
