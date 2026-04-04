@@ -42,7 +42,7 @@ type activeJob struct {
 type pane int
 
 const (
-	paneActive  pane = iota
+	paneActive pane = iota
 	paneHistory
 )
 
