@@ -553,8 +553,10 @@ func extractSummary(output string) string {
 //   - Conversation array: [{"type":"system",...}, ..., {"type":"result","result":"..."}]
 func parseClaudeJSON(output []byte) (claudeResponse, bool) {
 	// Try single-object format first.
+	// Accept if result is non-empty OR if session_id is present (max_turns hit
+	// produces a valid result message with empty result text).
 	var resp claudeResponse
-	if err := json.Unmarshal(output, &resp); err == nil && resp.Result != "" {
+	if err := json.Unmarshal(output, &resp); err == nil && (resp.Result != "" || resp.SessionID != "") {
 		return resp, true
 	}
 
@@ -593,7 +595,7 @@ func tryParseResultMessage(raw []byte) (claudeResponse, bool) {
 		return claudeResponse{}, false
 	}
 	var resp claudeResponse
-	if err := json.Unmarshal(raw, &resp); err == nil && resp.Result != "" {
+	if err := json.Unmarshal(raw, &resp); err == nil && (resp.Result != "" || resp.SessionID != "") {
 		return resp, true
 	}
 	return claudeResponse{}, false
