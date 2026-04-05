@@ -473,9 +473,11 @@ func TestProcessItem_EmptyOutput(t *testing.T) {
 		t.Fatalf("processItem: %v", err)
 	}
 
-	// Should NOT post comment when output is empty
-	if len(client.addCommentCalls) != 0 {
-		t.Error("should not post comment for empty output")
+	// Should post exactly one warning comment when output is empty but Claude ran without error
+	if len(client.addCommentCalls) != 1 {
+		t.Errorf("expected 1 warning comment for empty output, got %d", len(client.addCommentCalls))
+	} else if !strings.Contains(client.addCommentCalls[0].body, "empty stage output") {
+		t.Errorf("expected empty-output warning, got: %s", client.addCommentCalls[0].body)
 	}
 }
 
@@ -1155,5 +1157,103 @@ func TestProcessItem_CleanupStage_NewCommentsIgnored(t *testing.T) {
 	}
 	if len(claude.calls) != 0 {
 		t.Error("claude should not be invoked for cleanup stage")
+	}
+}
+
+func TestProcessItem_CleanupStage_EngineFilesOnlyNotDirty(t *testing.T) {
+	// Engine-managed files (.fabrik-context/) must not block cleanup.
+	// The engine writes context files to .fabrik-context/, which is added to
+	// .git/info/exclude by EnsureWorktree. This test verifies cleanup proceeds
+	// even when untracked files are present in the worktree.
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+
+	wm := NewWorktreeManager(repoDir)
+	wtDir, err := wm.EnsureWorktree(88, "main", false)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	// Write an untracked file to simulate incomplete work in the worktree.
+	// (The .fabrik-context/ dir itself is git-excluded by EnsureWorktree, so
+	// engine context files never surface in git status — this is belt-and-suspenders.)
+	if err := os.WriteFile(filepath.Join(wtDir, "wip.txt"), []byte("work in progress"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// Verify the test precondition: untracked file appears in git status
+	statusCmd := exec.Command("git", "status", "--porcelain")
+	statusCmd.Dir = wtDir
+	statusOut, _ := statusCmd.Output()
+	if !strings.Contains(string(statusOut), "wip.txt") {
+		t.Fatalf("precondition failed: wip.txt not visible in git status, got: %s", statusOut)
+	}
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "testuser", Token: "token",
+			Stages: testStagesWithCleanup()},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 88, Title: "Test", Status: "Done", ItemID: "PVTI_88"}
+
+	err = eng.processItem(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	// Cleanup should always proceed regardless of untracked files in the worktree —
+	// the dirty check only warns, it never blocks cleanup.
+	if _, statErr := os.Stat(wm.WorktreeDir(88)); !os.IsNotExist(statErr) {
+		t.Error("worktree should have been removed even when untracked files are present")
+	}
+	if len(client.addLabelCalls) == 0 || client.addLabelCalls[0].labelName != "stage:Done:complete" {
+		t.Errorf("expected stage:Done:complete label, got %v", client.addLabelCalls)
+	}
+}
+
+func TestProcessItem_EmptyOutputWarningComment(t *testing.T) {
+	// When Claude runs without error but produces no output, a warning comment
+	// naming the stage must be posted to the issue.
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+			return "", false, TokenUsage{}, nil // no output, no error
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{Owner: "o", Repo: "r", User: "u", Token: "t", Stages: testStages()},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 7, Title: "Test", Status: "Research", ItemID: "PVTI_7"}
+
+	err := eng.processItem(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	// A warning comment must be posted and must mention the stage name
+	var warningComments []string
+	for _, c := range client.addCommentCalls {
+		if strings.Contains(c.body, "empty stage output") {
+			warningComments = append(warningComments, c.body)
+		}
+	}
+	if len(warningComments) == 0 {
+		t.Errorf("expected an empty-output warning comment, got comments: %v", client.addCommentCalls)
+	}
+	if len(warningComments) > 0 && !strings.Contains(warningComments[0], "Research") {
+		t.Errorf("warning comment should mention stage name %q, got: %s", "Research", warningComments[0])
 	}
 }
