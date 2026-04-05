@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -237,5 +238,61 @@ func TestFetchCheckRuns_Empty(t *testing.T) {
 	}
 	if len(runs) != 0 {
 		t.Errorf("expected 0 runs, got %d", len(runs))
+	}
+}
+
+func TestFetchLinkedPR_Found(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		// Verify head filter includes the owner and branch
+		if !strings.Contains(r.URL.RawQuery, "head=") {
+			t.Errorf("expected head= query param, got %s", r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]interface{}{
+			{
+				"number": 42,
+				"title":  "Linked PR",
+				"state":  "open",
+				"merged": false,
+				"draft":  false,
+				"head":   map[string]string{"sha": "deadbeef"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	pr, err := c.FetchLinkedPR("owner", "repo", 10)
+	if err != nil {
+		t.Fatalf("FetchLinkedPR: %v", err)
+	}
+	if pr == nil {
+		t.Fatal("expected PR, got nil")
+	}
+	if pr.Number != 42 {
+		t.Errorf("Number = %d, want 42", pr.Number)
+	}
+	if pr.HeadSHA != "deadbeef" {
+		t.Errorf("HeadSHA = %q, want 'deadbeef'", pr.HeadSHA)
+	}
+}
+
+func TestFetchLinkedPR_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]interface{}{}) // empty array
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	pr, err := c.FetchLinkedPR("owner", "repo", 99)
+	if err != nil {
+		t.Fatalf("FetchLinkedPR: %v", err)
+	}
+	if pr != nil {
+		t.Errorf("expected nil PR for empty response, got %+v", pr)
 	}
 }
