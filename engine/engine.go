@@ -120,8 +120,9 @@ func New(cfg Config) (*Engine, error) {
 	if !jobControlMode && cfg.Repo != "" {
 		// Single-repo git-repo mode: register the configured repo's WM upfront.
 		nameWithOwner := cfg.Owner + "/" + cfg.Repo
-		rName := cfg.Repo
-		wm := NewWorktreeManagerForRepo(repoDir, worktreeRoot, rName)
+		// Use "owner-repo" as the directory segment to avoid cross-owner collisions.
+		dirName := cfg.Owner + "-" + cfg.Repo
+		wm := NewWorktreeManagerForRepo(repoDir, worktreeRoot, dirName)
 		eng.worktreeManagers[nameWithOwner] = wm
 		wm.logfFn = eng.logf
 	}
@@ -212,8 +213,10 @@ func (e *Engine) registerWorktrees(nameWithOwner, baseDir, worktreeRoot string) 
 	if wm, ok := e.worktreeManagers[nameWithOwner]; ok {
 		return wm
 	}
-	_, rname := parseOwnerRepo(nameWithOwner)
-	wm := NewWorktreeManagerForRepo(baseDir, worktreeRoot, rname)
+	owner, rname := parseOwnerRepo(nameWithOwner)
+	// Use "owner-repo" as directory segment to avoid cross-owner collisions.
+	dirName := owner + "-" + rname
+	wm := NewWorktreeManagerForRepo(baseDir, worktreeRoot, dirName)
 	wm.logfFn = e.logf
 	e.worktreeManagers[nameWithOwner] = wm
 	return wm
