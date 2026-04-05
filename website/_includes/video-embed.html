@@ -1,0 +1,17 @@
+{% if include.youtube_id %}
+<div class="video-wrapper">
+  <iframe
+    src="https://www.youtube.com/embed/{{ include.youtube_id }}"
+    title="{{ include.title | default: 'Demo video' }}"
+    loading="lazy"
+    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+    allowfullscreen>
+  </iframe>
+</div>
+{% else %}
+<div class="video-placeholder">
+  <span class="placeholder-icon">▶</span>
+  <span class="placeholder-title">{{ include.title | default: 'Demo Video' }}</span>
+  <span class="placeholder-desc">{{ include.desc | default: 'Video coming soon.' }}</span>
+</div>
+{% endif %}
