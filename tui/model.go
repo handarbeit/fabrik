@@ -50,8 +50,17 @@ const (
 	paneHistory
 )
 
+// ProjectInfo holds display metadata about the monitored project shown in the footer.
+type ProjectInfo struct {
+	CWD     string // display-ready CWD (home-relative or absolute)
+	Repo    string // "owner/repo"
+	Version string // optional version or module name; empty if unknown
+}
+
 // Model is the bubbletea TUI model for Fabrik.
 type Model struct {
+	// project info for the footer
+	projectInfo ProjectInfo
 	// poll timer
 	pollInterval time.Duration
 	nextPollAt   time.Time
@@ -113,11 +122,13 @@ var (
 
 // New creates an initial TUI model.
 // pollSeconds is the configured polling interval.
+// info provides project metadata displayed in the footer.
 // terminal is the resolved terminal emulator identifier; empty string uses the platform default.
 // pluginDir is the Fabrik plugin directory passed to claude --plugin-dir (may be empty).
-func New(pollSeconds int, terminal string, pluginDir string) Model {
+func New(pollSeconds int, info ProjectInfo, terminal string, pluginDir string) Model {
 	vp := viewport.New(80, 10)
 	return Model{
+		projectInfo:   info,
 		pollInterval:  time.Duration(pollSeconds) * time.Second,
 		active:        make(map[int]*activeJob),
 		history:       LoadHistory(),
@@ -406,7 +417,7 @@ func (m *Model) updateHistoryViewport() {
 	m.historyVP.SetContent(strings.Join(lines, "\n"))
 
 	// Update viewport height within the overall layout.
-	historyHeight := max(m.height-headerHeight()-activeHeight(len(m.active))-4, 3)
+	historyHeight := max(m.height-headerHeight()-activeHeight(len(m.active))-footerHeight()-4, 3)
 	m.historyVP.Width = innerWidth
 	m.historyVP.Height = historyHeight
 	// Scroll to top (newest) on update.
@@ -429,6 +440,9 @@ func (m Model) View() string {
 
 	// ── History pane ──
 	sections = append(sections, m.viewHistory())
+
+	// ── Footer ──
+	sections = append(sections, m.viewFooter())
 
 	return strings.Join(sections, "\n")
 }
@@ -562,8 +576,45 @@ func (m Model) viewHistory() string {
 	return borderStyle.Width(m.width - 4).Render(content)
 }
 
+func (m Model) viewFooter() string {
+	// Assemble: CWD · owner/repo [· version]
+	parts := []string{}
+	if m.projectInfo.CWD != "" {
+		parts = append(parts, m.projectInfo.CWD)
+	}
+	if m.projectInfo.Repo != "" {
+		parts = append(parts, m.projectInfo.Repo)
+	}
+	if m.projectInfo.Version != "" {
+		parts = append(parts, m.projectInfo.Version)
+	}
+	footer := dimStyle.Render(strings.Join(parts, " · "))
+
+	// Truncate to terminal width so the footer never wraps.
+	maxWidth := m.width - 1
+	if maxWidth < 1 {
+		maxWidth = 1
+	}
+	if lipgloss.Width(footer) > maxWidth {
+		// Re-render with truncated plain text.
+		plain := strings.Join(parts, " · ")
+		runes := []rune(plain)
+		// Binary search is overkill; shrink until it fits.
+		for len(runes) > 0 && lipgloss.Width(dimStyle.Render(string(runes)+"…")) > maxWidth {
+			runes = runes[:len(runes)-1]
+		}
+		footer = dimStyle.Render(string(runes) + "…")
+	}
+	return footer
+}
+
 // headerHeight returns the approximate line height of the header pane.
 func headerHeight() int {
+	return 1
+}
+
+// footerHeight returns the height of the footer pane (one persistent line).
+func footerHeight() int {
 	return 1
 }
 
