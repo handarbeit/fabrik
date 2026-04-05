@@ -35,6 +35,36 @@ Create a git worktree for each issue at `.fabrik/worktrees/issue-N/` on branch
 - Stale worktree directories are detected and recreated.
 - `.fabrik/` is gitignored.
 
+### Multi-repo path structure (added in issue #134)
+
+In multi-repo mode (omitting `--repo`), Fabrik manages multiple repos from a
+single job-control directory. Worktree paths are namespaced by repo name to
+prevent collisions when multiple repos have issues with the same number:
+
+```
+.fabrik/worktrees/<repo-name>/issue-N/
+```
+
+For example, issues in `liminis` and `liminis-framework` use:
+```
+.fabrik/worktrees/liminis/issue-42/
+.fabrik/worktrees/liminis-framework/issue-42/
+```
+
+One `WorktreeManager` instance is created per repo (see ADR 014). Each WM has
+its own mutex, so concurrent workers in different repos never contend on
+worktree creation; same-repo workers serialize as before.
+
+**Auto-migration**: At startup, Fabrik scans `.fabrik/worktrees/` for old-style
+`issue-N/` entries and migrates them to the per-repo structure using
+`git worktree move` (requires git ≥ 2.17). Worktrees whose remote URL cannot
+be parsed are left in place with a warning.
+
+**Bare clones**: In job-control mode (non-git directory), each repo is
+bare-cloned to `.fabrik/repos/<owner>-<repo>.git` on first access, then a
+`WorktreeManager` is registered for it. See `ensureRepoReady` in
+`engine/engine.go`.
+
 ## Validation
 
 When reusing an existing worktree directory, we verify it's a valid git
