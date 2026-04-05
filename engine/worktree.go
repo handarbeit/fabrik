@@ -11,10 +11,11 @@ import (
 
 // WorktreeManager handles git worktrees for issue isolation.
 type WorktreeManager struct {
-	mu      sync.Mutex                        // serializes worktree/branch creation (git config isn't concurrent-safe)
-	baseDir string                            // directory containing the main repo
-	rootDir string                            // where worktrees are stored (e.g., .fabrik/worktrees)
-	logfFn  func(int, string, string, ...any) // optional; set by Engine after construction
+	mu       sync.Mutex                        // serializes worktree/branch creation (git config isn't concurrent-safe)
+	baseDir  string                            // directory containing the main repo
+	rootDir  string                            // where worktrees are stored (e.g., .fabrik/worktrees)
+	repoName string                            // repo name used to namespace worktree paths (e.g., "liminis"); empty = legacy flat layout
+	logfFn   func(int, string, string, ...any) // optional; set by Engine after construction
 }
 
 // logf calls logfFn if set, otherwise prints directly.
@@ -34,6 +35,17 @@ func NewWorktreeManagerWithRoot(repoDir, worktreeRoot string) *WorktreeManager {
 	return &WorktreeManager{
 		baseDir: repoDir,
 		rootDir: worktreeRoot,
+	}
+}
+
+// NewWorktreeManagerForRepo creates a WorktreeManager that namespaces all worktree
+// paths under worktreeRoot/<repoName>/. Use this when managing multiple repos from
+// a single Fabrik job-control directory.
+func NewWorktreeManagerForRepo(baseDir, worktreeRoot, rName string) *WorktreeManager {
+	return &WorktreeManager{
+		baseDir:  baseDir,
+		rootDir:  worktreeRoot,
+		repoName: rName,
 	}
 }
 
@@ -183,6 +195,9 @@ func (wm *WorktreeManager) WorktreeDir(issueNumber int) string {
 }
 
 func (wm *WorktreeManager) worktreeDir(issueNumber int) string {
+	if wm.repoName != "" {
+		return filepath.Join(wm.rootDir, wm.repoName, fmt.Sprintf("issue-%d", issueNumber))
+	}
 	return filepath.Join(wm.rootDir, fmt.Sprintf("issue-%d", issueNumber))
 }
 

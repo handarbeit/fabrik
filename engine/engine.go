@@ -36,23 +36,23 @@ type Engine struct {
 	client             GitHubClient
 	claude             ClaudeInvoker
 	statusField        *gh.StatusField
-	worktrees          *WorktreeManager
+	worktreeManagers   map[string]*WorktreeManager // key: "owner/repo"; one WM per discovered repo
 	mu                 sync.Mutex
-	processedSet       map[string]time.Time // track what we've processed: "issue#-commentID" -> timestamp
-	lockedIssues       map[int]bool         // issues that have had fabrik:locked added and not yet released
+	processedSet       map[string]time.Time // key: "owner/repo#N-stageName" or "owner/repo#N-comment-ID"
+	lockedIssues       map[string]bool      // key: "owner/repo#N"; issues with fabrik:locked added but not yet released
 	totalTokens        TokenUsage           // accumulated token usage since process start
 	lastReportedCost   float64              // cost at last [stats] report; skip repeat prints when unchanged
-	retryCount         map[string]int       // key: "<issueNum>-<stageName>", value: failed attempt count
-	pausedDueToRetries map[string]bool      // key: "<issueNum>-<stageName>", true if engine paused this issue
-	lastUsage          map[int]TokenUsage   // per-issue token usage from last processItem (for TUI)
-	lastCompleted      map[int]bool         // per-issue stage completion from last processItem (for TUI)
-	lastBlocked        map[int]bool         // per-issue blocked-on-input from last processItem (for TUI)
-	lastUpdatedAt      map[int]time.Time    // tracks last-seen updatedAt per issue number
+	retryCount         map[string]int       // key: "owner/repo#N-stageName", value: failed attempt count
+	pausedDueToRetries map[string]bool      // key: "owner/repo#N-stageName", true if engine paused this issue
+	lastUsage          map[string]TokenUsage   // key: issueKey; per-issue token usage from last processItem (for TUI)
+	lastCompleted      map[string]bool         // key: issueKey; per-issue stage completion from last processItem (for TUI)
+	lastBlocked        map[string]bool         // key: issueKey; per-issue blocked-on-input from last processItem (for TUI)
+	lastUpdatedAt      map[string]time.Time    // key: issueKey; tracks last-seen updatedAt per issue
 	idleCount          int                  // consecutive idle polls; triggers self-upgrade at threshold
-	sem                chan struct{}        // semaphore bounding concurrent workers across poll cycles
+	sem                chan struct{}         // semaphore bounding concurrent workers across poll cycles
 	wg                 sync.WaitGroup       // tracks in-flight workers for graceful shutdown
-	inFlight           sync.Map             // key: issue number (int), value: struct{}
-	events             chan tui.Event       // nil in tests / plain-text mode; TUI goroutine consumes
+	inFlight           sync.Map             // key: issueKey string, value: bool (isPR)
+	events             chan tui.Event        // nil in tests / plain-text mode; TUI goroutine consumes
 }
 
 func New(cfg Config) (*Engine, error) {
@@ -96,51 +96,118 @@ func New(cfg Config) (*Engine, error) {
 		claudePluginDir = pluginDir
 	}
 	worktreeRoot := filepath.Join(fabrikDir, ".fabrik", "worktrees")
-	wm := NewWorktreeManagerWithRoot(repoDir, worktreeRoot)
 	eng := &Engine{
 		cfg:                cfg,
 		client:             gh.NewClient(cfg.Token),
 		claude:             &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},
-		worktrees:          wm,
+		worktreeManagers:   make(map[string]*WorktreeManager),
 		processedSet:       make(map[string]time.Time),
-		lockedIssues:       make(map[int]bool),
-		lastUsage:          make(map[int]TokenUsage),
-		lastCompleted:      make(map[int]bool),
-		lastBlocked:        make(map[int]bool),
-		lastUpdatedAt:      make(map[int]time.Time),
+		lockedIssues:       make(map[string]bool),
+		lastUsage:          make(map[string]TokenUsage),
+		lastCompleted:      make(map[string]bool),
+		lastBlocked:        make(map[string]bool),
+		lastUpdatedAt:      make(map[string]time.Time),
 		retryCount:         make(map[string]int),
 		pausedDueToRetries: make(map[string]bool),
 		sem:                make(chan struct{}, cfg.MaxConcurrent),
 	}
-	wm.logfFn = eng.logf
+
+	if cfg.Repo != "" {
+		// Single-repo mode: register the configured repo's WM upfront.
+		nameWithOwner := cfg.Owner + "/" + cfg.Repo
+		rName := cfg.Repo
+		wm := NewWorktreeManagerForRepo(repoDir, worktreeRoot, rName)
+		eng.worktreeManagers[nameWithOwner] = wm
+		wm.logfFn = eng.logf
+	}
+	// In multi-repo mode (cfg.Repo == ""), WMs are registered lazily in ensureRepoReady.
 	return eng, nil
 }
 
 // NewWithDeps creates an Engine with explicit dependencies (for testing).
+// worktrees is a convenience parameter: if non-nil, it is registered as the WM
+// for cfg.Owner+"/"+cfg.Repo (or "_test/_test" when cfg is empty).
 func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktrees *WorktreeManager) *Engine {
 	maxConcurrent := cfg.MaxConcurrent
 	if maxConcurrent <= 0 {
 		maxConcurrent = 1
 	}
+	wms := make(map[string]*WorktreeManager)
 	eng := &Engine{
 		cfg:                cfg,
 		client:             client,
 		claude:             claude,
-		worktrees:          worktrees,
+		worktreeManagers:   wms,
 		processedSet:       make(map[string]time.Time),
-		lockedIssues:       make(map[int]bool),
-		lastUsage:          make(map[int]TokenUsage),
-		lastCompleted:      make(map[int]bool),
-		lastBlocked:        make(map[int]bool),
-		lastUpdatedAt:      make(map[int]time.Time),
+		lockedIssues:       make(map[string]bool),
+		lastUsage:          make(map[string]TokenUsage),
+		lastCompleted:      make(map[string]bool),
+		lastBlocked:        make(map[string]bool),
+		lastUpdatedAt:      make(map[string]time.Time),
 		retryCount:         make(map[string]int),
 		pausedDueToRetries: make(map[string]bool),
 		sem:                make(chan struct{}, maxConcurrent),
 	}
 	if worktrees != nil {
 		worktrees.logfFn = eng.logf
+		key := cfg.Owner + "/" + cfg.Repo
+		if key == "/" {
+			key = "_test/_test"
+		}
+		wms[key] = worktrees
 	}
 	return eng
+}
+
+// defaultRepo returns "owner/repo" from cfg, or "" if both are empty.
+func (e *Engine) defaultRepo() string {
+	if e.cfg.Owner == "" && e.cfg.Repo == "" {
+		return ""
+	}
+	return e.cfg.Owner + "/" + e.cfg.Repo
+}
+
+// worktreesFor returns the WorktreeManager for the given "owner/repo" key.
+// Panics if no WM is registered for that repo — callers must call ensureRepoReady first.
+func (e *Engine) worktreesFor(nameWithOwner string) *WorktreeManager {
+	if nameWithOwner == "" {
+		nameWithOwner = e.defaultRepo()
+	}
+	e.mu.Lock()
+	wm, ok := e.worktreeManagers[nameWithOwner]
+	e.mu.Unlock()
+	if !ok {
+		panic(fmt.Sprintf("engine: no WorktreeManager registered for repo %q — ensureRepoReady not called", nameWithOwner))
+	}
+	return wm
+}
+
+// primaryWorktrees returns the WorktreeManager for the configured primary repo, or nil.
+// Used by operations that don't have a per-issue repo (e.g. auto-upgrade).
+func (e *Engine) primaryWorktrees() *WorktreeManager {
+	key := e.defaultRepo()
+	if key == "" {
+		return nil
+	}
+	e.mu.Lock()
+	wm := e.worktreeManagers[key]
+	e.mu.Unlock()
+	return wm
+}
+
+// registerWorktrees adds a WorktreeManager for nameWithOwner to the map.
+// Idempotent: if a WM is already registered for this repo, returns the existing one.
+func (e *Engine) registerWorktrees(nameWithOwner, baseDir, worktreeRoot string) *WorktreeManager {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if wm, ok := e.worktreeManagers[nameWithOwner]; ok {
+		return wm
+	}
+	_, rname := parseOwnerRepo(nameWithOwner)
+	wm := NewWorktreeManagerForRepo(baseDir, worktreeRoot, rname)
+	wm.logfFn = e.logf
+	e.worktreeManagers[nameWithOwner] = wm
+	return wm
 }
 
 // SetEvents configures the event channel. Must be called before Run().
@@ -151,9 +218,12 @@ func (e *Engine) SetEvents(ch chan tui.Event) {
 	tuiMode = ch != nil
 	claudeLogf = e.logf
 	claudeTUI = ch != nil
-	if e.worktrees != nil {
-		e.worktrees.logfFn = e.logf
+	// Update logfFn for all registered WorktreeManagers.
+	e.mu.Lock()
+	for _, wm := range e.worktreeManagers {
+		wm.logfFn = e.logf
 	}
+	e.mu.Unlock()
 }
 
 // emit sends an event to the channel without blocking. Dropped if the channel is full.

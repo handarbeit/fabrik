@@ -149,25 +149,27 @@ func (e *Engine) Run() error {
 // at shutdown time but never released (e.g., because the worker was killed mid-run).
 func (e *Engine) cleanupLockedIssues() {
 	e.mu.Lock()
-	issues := make([]int, 0, len(e.lockedIssues))
-	for num := range e.lockedIssues {
-		issues = append(issues, num)
+	keys := make([]string, 0, len(e.lockedIssues))
+	for key := range e.lockedIssues {
+		keys = append(keys, key)
 	}
 	e.mu.Unlock()
 
-	if len(issues) == 0 {
+	if len(keys) == 0 {
 		return
 	}
 	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
-	e.logf(0, "shutdown", "removing lock labels from %d issue(s)\n", len(issues))
-	for _, num := range issues {
-		if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, num, lockLabel); err != nil {
+	e.logf(0, "shutdown", "removing lock labels from %d issue(s)\n", len(keys))
+	for _, key := range keys {
+		// Parse "owner/repo#N" back into components for the API call.
+		owner, repo, num := parseIssueKey(key, e.cfg.Owner, e.cfg.Repo)
+		if err := e.client.RemoveLabelFromIssue(owner, repo, num, lockLabel); err != nil {
 			e.logf(num, "warn", "could not remove lock label during shutdown: %v\n", err)
 		} else {
 			e.logf(num, "shutdown", "removed lock label\n")
 		}
 		e.mu.Lock()
-		delete(e.lockedIssues, num)
+		delete(e.lockedIssues, key)
 		e.mu.Unlock()
 	}
 }
@@ -223,7 +225,7 @@ func (e *Engine) poll(ctx context.Context) error {
 		e.mu.Lock()
 		for _, item := range board.Items {
 			if !item.UpdatedAt.IsZero() {
-				e.lastUpdatedAt[item.Number] = item.UpdatedAt
+				e.lastUpdatedAt[issueKey(item, e.defaultRepo())] = item.UpdatedAt
 			}
 		}
 		e.mu.Unlock()
