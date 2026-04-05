@@ -56,17 +56,35 @@ type Engine struct {
 }
 
 func New(cfg Config) (*Engine, error) {
-	// Resolve git repo root (works even if launched from a subdirectory)
+	// Resolve working directory. If we're in a git repo, use the repo root.
+	// If not (job-control directory for multi-repo projects), use cwd and
+	// clone the target repo as a bare repo for worktree operations.
+	// fabrikDir is the directory containing .fabrik/ (stages, plugin, config).
+	// repoDir is the git repo root used for worktree operations.
+	// In a git repo, they're the same. In a job-control directory, fabrikDir
+	// is cwd and repoDir is the bare clone at .fabrik/repo.git.
+	var fabrikDir string
 	repoDir, err := gitToplevel()
 	if err != nil {
-		return nil, fmt.Errorf("resolving git repo root: %w", err)
+		// Not in a git repo — job-control directory for multi-repo projects.
+		fabrikDir, err = os.Getwd()
+		if err != nil {
+			return nil, fmt.Errorf("resolving working directory: %w", err)
+		}
+		if cloneErr := ensureBareClone(fabrikDir, cfg.Owner, cfg.Repo); cloneErr != nil {
+			return nil, fmt.Errorf("cloning target repo: %w", cloneErr)
+		}
+		repoDir = filepath.Join(fabrikDir, ".fabrik", "repo.git")
+	} else {
+		fabrikDir = repoDir
 	}
-	// Default to .fabrik/plugin in the repo root (created by fabrik init).
+
+	// Default to .fabrik/plugin in the fabrik dir (created by fabrik init).
 	// --plugin-dir flag overrides this for development.
 	// Path must be absolute since Claude runs in the worktree, not the repo root.
 	pluginDir := cfg.PluginDir
 	if pluginDir == "" {
-		defaultPluginDir := filepath.Join(repoDir, ".fabrik", "plugin")
+		defaultPluginDir := filepath.Join(fabrikDir, ".fabrik", "plugin")
 		if fi, err := os.Stat(defaultPluginDir); err == nil && fi.IsDir() {
 			pluginDir = defaultPluginDir
 		}
@@ -77,7 +95,8 @@ func New(cfg Config) (*Engine, error) {
 		}
 		claudePluginDir = pluginDir
 	}
-	wm := NewWorktreeManager(repoDir)
+	worktreeRoot := filepath.Join(fabrikDir, ".fabrik", "worktrees")
+	wm := NewWorktreeManagerWithRoot(repoDir, worktreeRoot)
 	eng := &Engine{
 		cfg:                cfg,
 		client:             gh.NewClient(cfg.Token),
