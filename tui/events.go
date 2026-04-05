@@ -36,6 +36,7 @@ func (PollCompletedEvent) tuiEvent() {}
 // JobStartedEvent is emitted when a worker goroutine begins processing an item.
 type JobStartedEvent struct {
 	IssueNumber int
+	Repo        string // "owner/repo" — empty for single-repo projects
 	Title       string
 	StageName   string
 	IsComment   bool // true when processing a user comment, not a stage run
@@ -46,19 +47,20 @@ func (JobStartedEvent) tuiEvent() {}
 
 // JobCompletedEvent is emitted when a worker goroutine finishes.
 type JobCompletedEvent struct {
-	IssueNumber    int
-	Title          string
+	IssueNumber int
+	Repo        string // "owner/repo" — empty for single-repo projects
+	Title       string
 	StageName      string
 	StageModel     string // model configured for the stage (e.g. "sonnet")
 	IsComment      bool   // true when processing a user comment, not a stage run
 	Success        bool   // no error from processItem
 	Completed      bool   // stage actually completed (FABRIK_STAGE_COMPLETE detected)
 	BlockedOnInput bool   // stage needs user input (FABRIK_BLOCKED_ON_INPUT detected)
-	Duration       time.Duration
-	CompletedAt    time.Time
-	TurnsUsed      int
-	MaxTurns       int
-	CostUSD        float64
+	Duration    time.Duration
+	CompletedAt time.Time
+	TurnsUsed   int
+	MaxTurns    int
+	CostUSD     float64
 }
 
 func (JobCompletedEvent) tuiEvent() {}

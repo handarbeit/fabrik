@@ -137,8 +137,8 @@ func TestNew(t *testing.T) {
 	if eng.claude == nil {
 		t.Error("claude should not be nil")
 	}
-	if eng.worktrees == nil {
-		t.Error("worktrees should not be nil")
+	if len(eng.worktreeManagers) == 0 {
+		t.Error("worktreeManagers should not be empty")
 	}
 }
 
@@ -238,7 +238,7 @@ func TestFindNewCommentsFiltering(t *testing.T) {
 	}
 
 	// Pre-mark one comment as processed
-	e.processedSet["42-comment-c2"] = time.Now()
+	e.processedSet["#42-comment-c2"] = time.Now()
 
 	item := gh.ProjectItem{
 		Number: 42,
@@ -281,7 +281,7 @@ func TestConcurrentItemDispatch(t *testing.T) {
 			Stages:        nil, // no matching stage → processItem returns nil immediately
 		},
 		processedSet: make(map[string]time.Time),
-		lockedIssues: make(map[int]bool),
+		lockedIssues: make(map[string]bool),
 		sem:          make(chan struct{}, maxConcurrent),
 	}
 

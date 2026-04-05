@@ -154,8 +154,9 @@ func TestExecute_MaxConcurrentFlag(t *testing.T) {
 
 func TestExecute_ConfigYAMLApplied(t *testing.T) {
 	// Test that config.yaml values satisfy required fields (owner/repo/project/user).
-	// Execute() will fail at engine.New() (not inside a git repo) rather than at
-	// the "missing required config" validation — that's the evidence config.yaml worked.
+	// In multi-repo / job-control mode (no git repo in cwd), engine.New() now
+	// succeeds and starts polling. We send SIGINT to stop it and verify it did
+	// NOT fail with "missing required config" — that proves config.yaml was applied.
 	dir := t.TempDir()
 	chdirTest(t, dir)
 	os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".env\n"), 0644)
@@ -173,13 +174,29 @@ func TestExecute_ConfigYAMLApplied(t *testing.T) {
 	}
 	os.Args = []string{"fabrik"}
 
-	err := Execute()
-	// Should fail at engine.New() (not a git repo) — NOT at "missing required config"
-	if err == nil {
-		t.Fatal("expected error (not a git repo)")
+	// Use testReadyCh + SIGINT so Execute() returns after engine.Run() starts.
+	readyCh := make(chan struct{})
+	testReadyCh = readyCh
+	defer func() { testReadyCh = nil }()
+
+	done := make(chan error, 1)
+	go func() { done <- Execute() }()
+
+	<-readyCh
+	p, _ := os.FindProcess(os.Getpid())
+	p.Signal(syscall.SIGINT)
+
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Execute did not return after SIGINT")
 	}
-	const missingConfig = "missing required config: owner, repo, project (use flags or .env file)"
-	if err.Error() == missingConfig {
+
+	// The engine started — config.yaml values were applied. Verify the error is
+	// NOT "missing required config" (which would mean config.yaml was ignored).
+	const missingConfig = "missing required config: owner and project (use flags or .env file)"
+	if err != nil && err.Error() == missingConfig {
 		t.Errorf("config.yaml values were not applied: got %q", err.Error())
 	}
 }
@@ -201,7 +218,7 @@ func TestExecute_EnvVarBeatsConfigYAML(t *testing.T) {
 
 	err := Execute()
 	// Will fail on no stages — but NOT on missing owner (env var won over config.yaml)
-	if err != nil && err.Error() == "missing required config: owner, repo, project (use flags or .env file)" {
+	if err != nil && err.Error() == "missing required config: owner and project (use flags or .env file)" {
 		t.Error("env var FABRIK_OWNER should have satisfied owner requirement (beats config.yaml)")
 	}
 }
