@@ -161,6 +161,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 			defer e.mu.Unlock()
 			delete(e.retryCount, itemKey)
 			delete(e.pausedDueToRetries, itemKey)
+			e.lastCompleted[item.Number] = true
 		}()
 		if stage.CreateDraftPR {
 			baseBranch := e.worktrees.DefaultBaseBranch()
