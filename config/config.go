@@ -26,6 +26,7 @@ type ProjectConfig struct {
 	TUI           bool   `yaml:"tui"`
 	Terminal      string `yaml:"terminal"`
 	DebugOutput   bool   `yaml:"debug_output"`
+	Version       string `yaml:"version"`
 }
 
 // LoadProjectConfig reads .fabrik/config.yaml from CWD.

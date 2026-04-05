@@ -46,6 +46,7 @@ const configYAMLTemplate = `# .fabrik/config.yaml — project-level configuratio
 # tui: false
 # terminal: ""
 # debug_output: false
+# version: ""
 `
 
 // writeConfigTemplate writes the .fabrik/config.yaml template.
