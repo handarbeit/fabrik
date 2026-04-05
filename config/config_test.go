@@ -138,6 +138,7 @@ auto_upgrade: true
 tui: true
 terminal: iTerm.app
 debug_output: true
+version: "2.0.0"
 `
 	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte(yaml), 0644)
 
@@ -180,6 +181,9 @@ debug_output: true
 	}
 	if !pc.DebugOutput {
 		t.Error("debug_output: want true")
+	}
+	if pc.Version != "2.0.0" {
+		t.Errorf("version: want 2.0.0, got %q", pc.Version)
 	}
 }
 
