@@ -1,0 +1,31 @@
+title: Fabrik
+description: >-
+  Automated Claude Code SDLC driver powered by GitHub Issues and Projects.
+  Fabrik watches your GitHub Project board and drives Claude Code through
+  configurable pipeline stages — Research, Plan, Implement, Review, Validate.
+url: "https://handarbeit.github.io"
+baseurl: "/fabrik"
+github_username: handarbeit
+github_repo: fabrik
+
+# Plugins
+plugins:
+  - jekyll-feed
+  - jekyll-seo-tag
+
+# Build settings
+markdown: kramdown
+kramdown:
+  input: GFM
+  syntax_highlighter: rouge
+
+# Sass
+sass:
+  sass_dir: assets/css
+  style: compressed
+
+# Exclude from build
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - README.md
