@@ -440,6 +440,20 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// not captured in the stash. Errors are non-fatal.
 	e.writeContextFiles(item, stage, workDir, false)
 
+	// Capture progress baseline before Claude runs (for stages with progress detection).
+	var baseline progressBaseline
+	if stage.ProgressResetsRetries {
+		baseline.worktreeHead, _ = gitRevParse(workDir, "HEAD")
+		remoteBranch := "origin/" + e.worktrees.branchName(item.Number)
+		baseline.remoteHead, _ = gitRevParse(workDir, remoteBranch)
+		if prNum, err := e.client.FindPRForIssue(e.cfg.Owner, e.cfg.Repo, item.Number); err == nil && prNum > 0 {
+			baseline.prNumber = prNum
+			if body, err := e.client.GetIssueBody(e.cfg.Owner, e.cfg.Repo, prNum); err == nil {
+				baseline.checkedTasks = countCheckedTasks(body)
+			}
+		}
+	}
+
 	// Invoke Claude Code in the issue's worktree
 	modelOverride := e.extractModelOverride(item.Number, item.Labels)
 	if modelOverride != "" {
@@ -624,18 +638,79 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	} else {
 		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
 		e.logf(item.Number, "wait", "stage %q did not complete — will retry after %v\n", stage.Name, cooldown)
-		maxLoops := e.effectiveMaxLoops()
-		if claudeRan && maxLoops > 0 {
-			var count int
+
+		if claudeRan {
+			// Progress detection: compare baseline with current state.
+			// This runs AFTER commitWIP and PushBranch, so WIP commits count.
+			var progress progressResult
+			if stage.ProgressResetsRetries {
+				worktreeHeadAfter, _ := gitRevParse(workDir, "HEAD")
+				remoteBranch := "origin/" + e.worktrees.branchName(item.Number)
+				remoteHeadAfter, _ := gitRevParse(workDir, remoteBranch)
+				checkedTasksAfter := 0
+				if baseline.prNumber > 0 {
+					if body, err := e.client.GetIssueBody(e.cfg.Owner, e.cfg.Repo, baseline.prNumber); err == nil {
+						checkedTasksAfter = countCheckedTasks(body)
+					}
+				}
+				progress = detectProgress(baseline, worktreeHeadAfter, remoteHeadAfter, checkedTasksAfter)
+			}
+
+			maxLoops := e.effectiveMaxLoops()
+			maxTotal := effectiveMaxTotalRetries(stage.MaxTotalRetries, e.cfg.MaxTotalRetries)
+
+			// Always increment totalLoopCount
+			var totalCount int
 			func() {
 				e.mu.Lock()
 				defer e.mu.Unlock()
-				e.loopCount[stageKey]++
-				count = e.loopCount[stageKey]
+				e.totalLoopCount[stageKey]++
+				totalCount = e.totalLoopCount[stageKey]
 			}()
-			if count >= maxLoops {
-				e.escalateFailedStage(item, stage, maxLoops)
-				releaseLock() // permanently giving up — release the lock
+
+			// Check total ceiling first — progress doesn't override this
+			if maxTotal > 0 && totalCount >= maxTotal {
+				e.logf(item.Number, "escalate", "stage %q hit total retry ceiling (%d) — pausing\n", stage.Name, maxTotal)
+				comment := fmt.Sprintf(
+					"🏭 **Fabrik — stage failed**\n\nStage **%s** hit the total retry ceiling (%d attempts). The issue has been paused (`fabrik:paused`).\n\nTo retry: investigate, make any needed fixes, then remove the `fabrik:paused` label.",
+					stage.Name, maxTotal,
+				)
+				if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, "fabrik:paused"); err != nil {
+					e.logf(item.Number, "warn", "could not add paused label: %v\n", err)
+				}
+				e.addFailedLabel(item.Number, stage.Name)
+				if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
+					e.logf(item.Number, "warn", "could not post escalation comment: %v\n", err)
+				}
+				func() {
+					e.mu.Lock()
+					defer e.mu.Unlock()
+					e.pausedDueToRetries[stageKey] = true
+				}()
+				releaseLock()
+			} else if progress.hasProgress {
+				// Progress detected — reset no-progress counter
+				var prevCount int
+				func() {
+					e.mu.Lock()
+					defer e.mu.Unlock()
+					prevCount = e.loopCount[stageKey]
+					e.loopCount[stageKey] = 0
+				}()
+				e.logf(item.Number, "progress", "%s — loop counter reset (was %d, now 0)\n", progress.detail, prevCount)
+			} else if maxLoops > 0 {
+				// No progress — increment no-progress counter
+				var count int
+				func() {
+					e.mu.Lock()
+					defer e.mu.Unlock()
+					e.loopCount[stageKey]++
+					count = e.loopCount[stageKey]
+				}()
+				if count >= maxLoops {
+					e.escalateFailedStage(item, stage, maxLoops)
+					releaseLock() // permanently giving up — release the lock
+				}
 			}
 		}
 	}
