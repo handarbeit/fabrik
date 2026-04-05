@@ -85,7 +85,7 @@ Verify existing functionality isn't broken:
 - No TODO or FIXME comments that should have been resolved
 - No debug logging left in
 - No commented-out code
-- All plan tasks checked off in the issue body
+- All plan tasks checked off in `.fabrik-context/stage-Plan.md`
 
 ### Documentation accuracy
 
