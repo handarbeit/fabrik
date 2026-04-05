@@ -417,7 +417,7 @@ func (m *Model) updateHistoryViewport() {
 	m.historyVP.SetContent(strings.Join(lines, "\n"))
 
 	// Update viewport height within the overall layout.
-	historyHeight := max(m.height-headerHeight()-activeHeight(len(m.active))-footerHeight()-6, 3)
+	historyHeight := max(m.height-headerHeight()-activeHeight(len(m.active))-footerHeight()-3, 3)
 	m.historyVP.Width = innerWidth
 	m.historyVP.Height = historyHeight
 	// Scroll to top (newest) on update.
