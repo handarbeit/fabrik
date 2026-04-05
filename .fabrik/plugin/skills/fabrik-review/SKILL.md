@@ -21,7 +21,7 @@ The engine has written context files to `.fabrik-context/` in your working direc
 - `.fabrik-context/stage-Implement.md` — the Implement stage output, if present
 - `.fabrik-context/pr-description.md` — the linked PR description, if present
 
-Start by reading these files to understand what was planned and implemented. Use the task checklist in `.fabrik-context/stage-Plan.md` to verify all tasks were completed.
+Start by reading these files to understand what was planned and implemented. Use the task checklist in the PR body (or `.fabrik-context/stage-Plan.md` if no PR exists) to verify all tasks were completed. As you verify or complete tasks during review, update the checkboxes in the PR body to reflect current status.
 
 ### Check worktree state
 
@@ -96,15 +96,9 @@ git diff origin/main..HEAD
 - No dead code or commented-out code left behind
 
 **Completeness**:
-- All tasks in the plan checklist are done
+- All tasks in the plan checklist are done (check them off in the PR body as you verify)
 - No TODO comments that should have been resolved
-
-**Documentation**:
-- Were all documentation tasks from the plan checklist completed?
-- Do new or modified exported Go types, functions, or methods have godoc comments?
-- Do user-facing docs (README, CLAUDE.md, guides, SKILL.md files) reflect the changes?
-- Fix missing or outdated documentation the same way you fix any other issue: write it, commit it with `docs: description`, move on. Missing docs are not a reason to block — they're a reason to write.
-- Only block (do not signal completion) if a documentation issue is architectural — e.g., the docs describe a design that contradicts the actual implementation in a way that requires a human decision about which is correct.
+- Documentation updated if public API changed
 
 ### Fix what you find
 
