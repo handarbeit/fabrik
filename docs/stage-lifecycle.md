@@ -1,3 +1,8 @@
+---
+layout: default
+title: Stage Lifecycle
+---
+
 # Fabrik Stage Lifecycle
 
 This document describes what the Fabrik engine does before, during, and after each stage invocation, including comment processing. It is intended as a reference for writing and refining stage skills.
