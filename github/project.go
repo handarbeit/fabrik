@@ -37,8 +37,11 @@ type itemNode struct {
 		Title     string `json:"title"`
 		Body      string `json:"body"`
 		URL       string `json:"url"`
-		UpdatedAt string `json:"updatedAt"`
-		Author    *struct {
+		UpdatedAt  string `json:"updatedAt"`
+		Repository *struct {
+			NameWithOwner string `json:"nameWithOwner"`
+		} `json:"repository"`
+		Author *struct {
 			Login string `json:"login"`
 		} `json:"author"`
 		Labels struct {
@@ -96,6 +99,9 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
               body
               url
               updatedAt
+              repository {
+                nameWithOwner
+              }
               author {
                 login
               }
@@ -126,6 +132,9 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
               body
               url
               updatedAt
+              repository {
+                nameWithOwner
+              }
               author {
                 login
               }
@@ -217,6 +226,9 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 			Body:   node.Content.Body,
 			URL:    node.Content.URL,
 			IsPR:   node.Content.Typename == "PullRequest",
+		}
+		if node.Content.Repository != nil {
+			item.Repo = node.Content.Repository.NameWithOwner
 		}
 
 		if t, err := parseTime(node.Content.UpdatedAt); err == nil {
