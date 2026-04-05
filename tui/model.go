@@ -492,6 +492,23 @@ func (m Model) viewActive() string {
 		lines = append(lines, line)
 	}
 
+	// Cap visible lines to fit within activeHeight
+	maxLines := activeHeight(len(m.active)) - 3 // subtract title + border
+	if len(lines) > maxLines && maxLines > 0 {
+		// Show lines around the selected index
+		start := m.activeIdx - maxLines/2
+		if start < 0 {
+			start = 0
+		}
+		if start+maxLines > len(lines) {
+			start = max(len(lines)-maxLines, 0)
+		}
+		lines = lines[start : start+maxLines]
+		if start > 0 || start+maxLines < len(nums) {
+			lines = append(lines, dimStyle.Render(fmt.Sprintf("  … %d more", len(nums)-maxLines)))
+		}
+	}
+
 	hint := ""
 	if m.focusPane == paneActive && len(m.active) > 0 {
 		hint = dimStyle.Render("  [enter/l]ogs  [tab] history")
@@ -522,8 +539,9 @@ func headerHeight() int {
 }
 
 // activeHeight returns the approximate line height of the active pane.
+// Capped to avoid pushing history off screen on small terminals.
 func activeHeight(n int) int {
-	return max(n+1, 2) + 2 // title + one line per job (min 2) + border
+	return min(max(n+1, 2)+2, 10) // title + one line per job (min 2) + border, max 10
 }
 
 // sortedActiveNums returns issue numbers from the active map in sorted order.
