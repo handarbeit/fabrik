@@ -22,6 +22,7 @@ func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) int {
 	if prNumber > 0 {
 		e.logf(item.Number, "pr", "PR #%d already exists, ensuring issue link\n", prNumber)
 		e.ensurePRLinksIssue(item, prNumber)
+		e.ensurePRTaskList(item, prNumber)
 		return prNumber
 	}
 
@@ -39,7 +40,48 @@ func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) int {
 		return 0
 	}
 	e.logf(item.Number, "pr", "created draft PR #%d\n", prNum)
+
+	// Inject the Plan stage task list into the PR body (if available)
+	e.ensurePRTaskList(item, prNum)
+
 	return prNum
+}
+
+// ensurePRTaskList extracts the task list from the Plan stage comment (between
+// FABRIK_TASK_LIST_BEGIN/END markers) and adds it to the PR body. This makes the
+// PR body the canonical location for the task checklist. If the Plan stage comment
+// predates the markers or doesn't exist, this is a no-op.
+func (e *Engine) ensurePRTaskList(item gh.ProjectItem, prNumber int) {
+	// Find the Plan stage comment from the issue's comments
+	planComment := findStageComment(item.Comments, "Plan")
+	if planComment == nil {
+		return
+	}
+
+	taskList := extractBetweenMarkers(planComment.Body, "FABRIK_TASK_LIST_BEGIN", "FABRIK_TASK_LIST_END")
+	if taskList == "" {
+		return
+	}
+
+	// Fetch current PR body
+	body, err := e.client.GetIssueBody(e.cfg.Owner, e.cfg.Repo, prNumber)
+	if err != nil {
+		e.logf(item.Number, "warn", "could not fetch PR #%d body for task list: %v\n", prNumber, err)
+		return
+	}
+
+	// Check if task list is already present (idempotent)
+	if strings.Contains(body, "FABRIK_TASK_LIST_BEGIN") || strings.Contains(body, taskList) {
+		return
+	}
+
+	// Append task list to existing body, preserving Closes #N and any other content
+	updatedBody := body + "\n\n" + taskList
+	if err := e.client.UpdateIssueBody(e.cfg.Owner, e.cfg.Repo, prNumber, updatedBody); err != nil {
+		e.logf(item.Number, "warn", "could not update PR #%d body with task list: %v\n", prNumber, err)
+		return
+	}
+	e.logf(item.Number, "pr", "added Plan task list to PR #%d body\n", prNumber)
 }
 
 // ensurePRLinksIssue checks that a PR body contains "Closes #N" and adds it if missing.
