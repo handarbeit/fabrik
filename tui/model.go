@@ -539,6 +539,16 @@ func openLogViewerCmd(logDir string) tea.Cmd {
 	if err != nil || len(entries) == 0 {
 		return nil
 	}
+	// Sort by modification time (most recent last) — filenames sort
+	// alphabetically by stage name, not by time.
+	sort.Slice(entries, func(i, j int) bool {
+		fi, _ := entries[i].Info()
+		fj, _ := entries[j].Info()
+		if fi == nil || fj == nil {
+			return entries[i].Name() < entries[j].Name()
+		}
+		return fi.ModTime().Before(fj.ModTime())
+	})
 	latest := entries[len(entries)-1].Name()
 
 	// Resolve fabrik binary for the stream filter
