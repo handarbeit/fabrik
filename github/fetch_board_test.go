@@ -398,4 +398,3 @@ func TestFetchProjectBoard_LabelOverflow(t *testing.T) {
 		t.Errorf("unexpected labels: %v", item.Labels)
 	}
 }
-

@@ -8,9 +8,9 @@ import (
 
 func TestInferVersion(t *testing.T) {
 	tests := []struct {
-		name     string
-		files    map[string]string // filename → content
-		want     string
+		name  string
+		files map[string]string // filename → content
+		want  string
 	}{
 		{
 			name: "package.json version",
