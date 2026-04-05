@@ -206,6 +206,76 @@ func TestUpdate_QuitKey(t *testing.T) {
 	}
 }
 
+func TestUpdate_RKey_ActivePane_AliasesLogViewer(t *testing.T) {
+	m := New(30, "")
+	m.focusPane = paneActive
+	m.active[7] = &activeJob{StageName: "Research", StartedAt: time.Now()}
+
+	// r on an active pane item delegates to the log viewer (same as enter/l).
+	// openLogViewerCmd returns nil when the log dir is empty, so we just verify
+	// the key is handled (no panic) and the model is returned.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if _, ok := next.(Model); !ok {
+		t.Error("expected Model returned from Update with r key in active pane")
+	}
+}
+
+func TestUpdate_RKey_ActivePane_NoJobs_NoOp(t *testing.T) {
+	m := New(30, "")
+	m.focusPane = paneActive
+	// No active jobs: r is a no-op
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if cmd != nil {
+		t.Error("expected nil cmd from r key with empty active pane")
+	}
+}
+
+func TestUpdate_RKey_HistoryPane_WithEntry(t *testing.T) {
+	redirectHistory(t)
+	m := New(30, "")
+	m.focusPane = paneHistory
+	m.history = []HistoryEntry{
+		{IssueNumber: 42, StageName: "Research", StageModel: "sonnet", Success: true},
+	}
+
+	// r on a history entry calls openResumeCmd — non-nil cmd returned
+	// (openResumeCmd returns an error-message terminal cmd when worktree is missing)
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if cmd == nil {
+		t.Error("expected non-nil cmd from r key with history entry")
+	}
+}
+
+func TestUpdate_RKey_HistoryPane_NoEntries_NoOp(t *testing.T) {
+	m := New(30, "")
+	m.focusPane = paneHistory
+	m.history = nil
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if cmd != nil {
+		t.Error("expected nil cmd from r key with empty history pane")
+	}
+}
+
+func TestShellQuote(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"simple", "'simple'"},
+		{"path/with spaces/dir", "'path/with spaces/dir'"},
+		{"it's a test", "'it'\\''s a test'"},
+		{"", "''"},
+	}
+	for _, tt := range tests {
+		got := shellQuote(tt.input)
+		if got != tt.want {
+			t.Errorf("shellQuote(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
 func TestView_BeforeWindowSize(t *testing.T) {
 	m := New(30, "", "")
 	// Before width is set, View should return a loading placeholder without panicking
