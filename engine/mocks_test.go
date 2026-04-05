@@ -19,7 +19,9 @@ type mockGitHubClient struct {
 	updateCommentFn           func(owner, repo string, commentDatabaseID int, body string) error
 	updateIssueBodyFn         func(owner, repo string, issueNumber int, body string) error
 	updateProjectItemStatusFn func(projectID, itemID, statusFieldID, statusOptionID string) error
+	getIssueBodyFn            func(owner, repo string, issueNumber int) (string, error)
 	findPRForIssueFn          func(owner, repo string, issueNumber int) (int, error)
+	createDraftPRFn           func(owner, repo, title, head, base string, issueNumber int) (int, error)
 	mergePRFn                 func(owner, repo string, prNumber int) error
 	rateLimitStatsFn          func() (gh.RateLimitStats, gh.RateLimitStats)
 
@@ -145,6 +147,9 @@ func (m *mockGitHubClient) UpdateProjectItemStatus(projectID, itemID, statusFiel
 }
 
 func (m *mockGitHubClient) GetIssueBody(owner, repo string, issueNumber int) (string, error) {
+	if m.getIssueBodyFn != nil {
+		return m.getIssueBodyFn(owner, repo, issueNumber)
+	}
 	return "", nil
 }
 
@@ -164,6 +169,9 @@ func (m *mockGitHubClient) MergePR(owner, repo string, prNumber int) error {
 }
 
 func (m *mockGitHubClient) CreateDraftPR(owner, repo, title, head, base string, issueNumber int) (int, error) {
+	if m.createDraftPRFn != nil {
+		return m.createDraftPRFn(owner, repo, title, head, base, issueNumber)
+	}
 	return 0, nil
 }
 
