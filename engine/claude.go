@@ -175,7 +175,7 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 
 func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOverride string) []string {
 	args := []string{
-		"--output-format", "json",
+		"--output-format", "stream-json",
 		"--verbose",
 	}
 
@@ -234,31 +234,36 @@ type claudeResponse struct {
 func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string) (string, bool, TokenUsage, error) {
 	claudeLog(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
 
-	// Set up stderr: in TUI mode, only to log file; in plain mode, tee to os.Stderr + log file.
+	// Set up stderr: in TUI mode discard; in plain mode forward to os.Stderr.
+	// Stderr is diagnostic noise from Claude CLI itself (not the structured output).
 	var stderrWriter io.Writer
 	if claudeTUI {
 		stderrWriter = io.Discard
 	} else {
 		stderrWriter = os.Stderr
 	}
+
+	// Open the .log file before running Claude so stdout (NDJSON stream-json) is
+	// tee'd to disk in real time. This enables fabrik watch to follow the live output.
+	var stdoutWriter io.Writer
+	var stdout bytes.Buffer
+	stdoutWriter = &stdout
+
+	safeLabel := strings.NewReplacer("/", "-", "\\", "-", ":", "-", " ", "-").Replace(label)
 	logDir := LogDir(issueNumber)
 	if err := os.MkdirAll(logDir, 0700); err != nil {
 		claudeLog(issueNumber, "warn", "could not create log dir: %v\n", err)
 	} else if err := os.Chmod(logDir, 0700); err != nil {
 		claudeLog(issueNumber, "warn", "could not set log dir permissions: %v\n", err)
 	} else {
-		safeLabel := strings.NewReplacer("/", "-", "\\", "-", ":", "-", " ", "-").Replace(label)
 		now := time.Now().UTC()
 		logPath := filepath.Join(logDir, fmt.Sprintf("%s-%s-%d.log", safeLabel, now.Format("20060102-150405"), now.UnixNano()))
 		if logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); err != nil {
 			claudeLog(issueNumber, "warn", "could not create log file %s: %v\n", logPath, err)
 		} else {
 			defer logFile.Close()
-			if claudeTUI {
-				stderrWriter = logFile
-			} else {
-				stderrWriter = io.MultiWriter(os.Stderr, logFile)
-			}
+			// Tee stdout to both the in-memory buffer (for parsing) and the .log file (for live follow).
+			stdoutWriter = io.MultiWriter(&stdout, logFile)
 		}
 	}
 
@@ -266,21 +271,15 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	cmd.Dir = workDir
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Stderr = stderrWriter
-
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
+	cmd.Stdout = stdoutWriter
 
 	runErr := cmd.Run()
 	rawOutput := stdout.Bytes()
 
-	// Save the raw output to a log file for debugging. stderr may be empty
-	// with --output-format json in newer Claude Code versions, so the stdout
-	// capture is the only record of what Claude produced.
+	// Save the raw NDJSON output to an -output-*.json file for backward compatibility
+	// (e.g., the existing TUI log viewer and stream-filter tooling).
 	if len(rawOutput) > 0 {
-		outLogDir := LogDir(issueNumber)
-		os.MkdirAll(outLogDir, 0700)
-		safeLabel2 := strings.NewReplacer("/", "-", "\\", "-", ":", "-", " ", "-").Replace(label)
-		outputLogPath := filepath.Join(outLogDir, fmt.Sprintf("%s-output-%s.json", safeLabel2, time.Now().UTC().Format("20060102-150405")))
+		outputLogPath := filepath.Join(logDir, fmt.Sprintf("%s-output-%s.json", safeLabel, time.Now().UTC().Format("20060102-150405")))
 		if err := os.WriteFile(outputLogPath, rawOutput, 0600); err != nil {
 			claudeLog(issueNumber, "warn", "could not save output log: %v\n", err)
 		}
