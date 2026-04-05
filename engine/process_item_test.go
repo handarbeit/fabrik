@@ -1257,3 +1257,396 @@ func TestProcessItem_EmptyOutputWarningComment(t *testing.T) {
 		t.Errorf("warning comment should mention stage name %q, got: %s", "Research", warningComments[0])
 	}
 }
+
+// --- Progress-based retry reset tests ---
+
+func TestProcessItem_ProgressResetsLoopCount(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	commitCount := 0
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+			// Simulate progress: create a commit in the worktree
+			commitCount++
+			cmd := exec.Command("git", "commit", "--allow-empty", "-m", fmt.Sprintf("progress commit %d", commitCount))
+			cmd.Dir = workDir
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Logf("commit failed: %s %v", out, err)
+			}
+			return "partial output", false, TokenUsage{}, nil
+		},
+	}
+
+	progressStages := []*stages.Stage{
+		{
+			Name:                  "Implement",
+			Order:                 1,
+			Prompt:                "Implement it",
+			Completion:            stages.CompletionCriteria{Type: "claude"},
+			ProgressResetsRetries: true,
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 2,
+			Stages:     progressStages,
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 20, Title: "Progress test", Status: "Implement", ItemID: "PVTI_20"}
+
+	// Pre-set loopCount to simulate prior no-progress failures
+	itemKey := "20-Implement"
+	eng.mu.Lock()
+	eng.loopCount[itemKey] = 1
+	eng.mu.Unlock()
+
+	// Run: Claude will commit (progress detected), loopCount should reset to 0
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	eng.mu.Lock()
+	count := eng.loopCount[itemKey]
+	totalCount := eng.totalLoopCount[itemKey]
+	eng.mu.Unlock()
+
+	if count != 0 {
+		t.Errorf("loopCount should be reset to 0 on progress, got %d", count)
+	}
+	if totalCount != 1 {
+		t.Errorf("totalLoopCount should be 1 after one attempt, got %d", totalCount)
+	}
+
+	// Should NOT have been paused
+	for _, call := range client.addLabelCalls {
+		if call.labelName == "fabrik:paused" {
+			t.Error("should not pause issue when progress is detected")
+		}
+	}
+}
+
+func TestProcessItem_TotalLoopCeiling(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+			// Simulate progress so loopCount doesn't trigger escalation
+			cmd := exec.Command("git", "commit", "--allow-empty", "-m", "progress")
+			cmd.Dir = workDir
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Logf("commit failed: %s %v", out, err)
+			}
+			return "partial output", false, TokenUsage{}, nil
+		},
+	}
+
+	progressStages := []*stages.Stage{
+		{
+			Name:                  "Implement",
+			Order:                 1,
+			Prompt:                "Implement it",
+			Completion:            stages.CompletionCriteria{Type: "claude"},
+			ProgressResetsRetries: true,
+			MaxTotalRetries:       2,
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 5, // high enough that no-progress escalation doesn't trigger
+			Stages:     progressStages,
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 21, Title: "Ceiling test", Status: "Implement", ItemID: "PVTI_21"}
+	itemKey := "21-Implement"
+
+	// Pre-set totalLoopCount to one below the ceiling
+	eng.mu.Lock()
+	eng.totalLoopCount[itemKey] = 1
+	eng.mu.Unlock()
+
+	// This attempt should hit the total ceiling (1+1 = 2 >= MaxTotalRetries of 2)
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	// Should be paused due to total ceiling
+	foundPaused := false
+	foundFailed := false
+	for _, call := range client.addLabelCalls {
+		if call.labelName == "fabrik:paused" {
+			foundPaused = true
+		}
+		if call.labelName == "stage:Implement:failed" {
+			foundFailed = true
+		}
+	}
+	if !foundPaused {
+		t.Error("expected fabrik:paused after hitting total loop ceiling")
+	}
+	if !foundFailed {
+		t.Error("expected stage:Implement:failed after hitting total loop ceiling")
+	}
+
+	// Escalation comment should mention "total retry ceiling"
+	foundCeilingComment := false
+	for _, call := range client.addCommentCalls {
+		if strings.Contains(call.body, "total retry ceiling") {
+			foundCeilingComment = true
+		}
+	}
+	if !foundCeilingComment {
+		t.Error("expected escalation comment mentioning total retry ceiling")
+	}
+}
+
+func TestProcessItem_NoProgressIncrements(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+
+	firstRun := true
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+			if firstRun {
+				// First run: context files get written into the worktree.
+				// commitWIP will commit them — this counts as progress.
+				firstRun = false
+			}
+			// On both runs: no explicit commits from "Claude"
+			return "partial output", false, TokenUsage{}, nil
+		},
+	}
+
+	progressStages := []*stages.Stage{
+		{
+			Name:                  "Implement",
+			Order:                 1,
+			Prompt:                "Implement it",
+			Completion:            stages.CompletionCriteria{Type: "claude"},
+			ProgressResetsRetries: true,
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 3,
+			Stages:     progressStages,
+		},
+		client,
+		claude,
+		wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 22, Title: "No progress test", Status: "Implement", ItemID: "PVTI_22"}
+
+	// First run: creates worktree, writes context files, commitWIP commits them.
+	// This will detect progress (WIP commit changes HEAD), which is expected.
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem (first): %v", err)
+	}
+
+	itemKey := "22-Implement"
+	eng.mu.Lock()
+	count1 := eng.loopCount[itemKey]
+	eng.mu.Unlock()
+	if count1 != 0 {
+		t.Errorf("first run: loopCount should be 0 (progress from WIP commit), got %d", count1)
+	}
+
+	// Second run: worktree already has context files committed.
+	// No new commits from Claude → no progress → loopCount should increment.
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem (second): %v", err)
+	}
+
+	eng.mu.Lock()
+	count2 := eng.loopCount[itemKey]
+	totalCount := eng.totalLoopCount[itemKey]
+	eng.mu.Unlock()
+
+	if count2 != 1 {
+		t.Errorf("second run: loopCount should be 1 after no-progress attempt, got %d", count2)
+	}
+	if totalCount != 2 {
+		t.Errorf("totalLoopCount should be 2 after two attempts, got %d", totalCount)
+	}
+}
+
+func TestEnsurePRTaskList(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	var updatedBody string
+	client := &mockGitHubClient{
+		getIssueBodyFn: func(owner, repo string, issueNumber int) (string, error) {
+			return "Closes #30", nil
+		},
+		updateIssueBodyFn: func(owner, repo string, issueNumber int, body string) error {
+			updatedBody = body
+			return nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			Stages:     testStages(),
+		},
+		client,
+		&mockClaudeInvoker{},
+		wm,
+	)
+
+	item := gh.ProjectItem{
+		Number: 30,
+		Title:  "PR task list test",
+		Status: "Implement",
+		Comments: []gh.Comment{
+			{
+				Body: "🏭 **Fabrik — stage: Plan**\n*branch: test*\n\nSome plan.\n\nFABRIK_TASK_LIST_BEGIN\n- [ ] Task 1\n- [ ] Task 2\n- [ ] Task 3\nFABRIK_TASK_LIST_END\n\nMore text.",
+			},
+		},
+	}
+
+	eng.ensurePRTaskList(item, 100)
+
+	if updatedBody == "" {
+		t.Fatal("expected PR body to be updated with task list")
+	}
+	if !strings.Contains(updatedBody, "Closes #30") {
+		t.Error("updated body should preserve 'Closes #30'")
+	}
+	if !strings.Contains(updatedBody, "Task 1") {
+		t.Error("updated body should contain task list items")
+	}
+	if !strings.Contains(updatedBody, "Task 3") {
+		t.Error("updated body should contain all task list items")
+	}
+}
+
+func TestEnsurePRTaskList_NoPlanComment(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	var updateCalled bool
+	client := &mockGitHubClient{
+		updateIssueBodyFn: func(owner, repo string, issueNumber int, body string) error {
+			updateCalled = true
+			return nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			Stages:     testStages(),
+		},
+		client,
+		&mockClaudeInvoker{},
+		wm,
+	)
+
+	// No Plan stage comment
+	item := gh.ProjectItem{
+		Number:   31,
+		Title:    "No plan test",
+		Status:   "Implement",
+		Comments: []gh.Comment{},
+	}
+
+	eng.ensurePRTaskList(item, 100)
+
+	if updateCalled {
+		t.Error("should not update PR body when no Plan comment exists")
+	}
+}
+
+func TestEnsurePRTaskList_NoMarkers(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	var updateCalled bool
+	client := &mockGitHubClient{
+		updateIssueBodyFn: func(owner, repo string, issueNumber int, body string) error {
+			updateCalled = true
+			return nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			Stages:     testStages(),
+		},
+		client,
+		&mockClaudeInvoker{},
+		wm,
+	)
+
+	// Plan comment without markers (old format)
+	item := gh.ProjectItem{
+		Number: 32,
+		Title:  "Old format test",
+		Status: "Implement",
+		Comments: []gh.Comment{
+			{Body: "🏭 **Fabrik — stage: Plan**\n*branch: test*\n\nSome plan without markers."},
+		},
+	}
+
+	eng.ensurePRTaskList(item, 100)
+
+	if updateCalled {
+		t.Error("should not update PR body when Plan comment has no task list markers")
+	}
+}
