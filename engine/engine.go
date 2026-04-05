@@ -45,6 +45,8 @@ type Engine struct {
 	retryCount         map[string]int       // key: "<issueNum>-<stageName>", value: failed attempt count
 	pausedDueToRetries map[string]bool      // key: "<issueNum>-<stageName>", true if engine paused this issue
 	lastUsage          map[int]TokenUsage   // per-issue token usage from last processItem (for TUI)
+	lastCompleted      map[int]bool         // per-issue stage completion from last processItem (for TUI)
+	lastBlocked        map[int]bool         // per-issue blocked-on-input from last processItem (for TUI)
 	lastUpdatedAt      map[int]time.Time    // tracks last-seen updatedAt per issue number
 	idleCount          int                  // consecutive idle polls; triggers self-upgrade at threshold
 	sem                chan struct{}        // semaphore bounding concurrent workers across poll cycles
@@ -84,6 +86,8 @@ func New(cfg Config) (*Engine, error) {
 		processedSet:       make(map[string]time.Time),
 		lockedIssues:       make(map[int]bool),
 		lastUsage:          make(map[int]TokenUsage),
+		lastCompleted:      make(map[int]bool),
+		lastBlocked:        make(map[int]bool),
 		lastUpdatedAt:      make(map[int]time.Time),
 		retryCount:         make(map[string]int),
 		pausedDueToRetries: make(map[string]bool),
@@ -107,6 +111,8 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		processedSet:       make(map[string]time.Time),
 		lockedIssues:       make(map[int]bool),
 		lastUsage:          make(map[int]TokenUsage),
+		lastCompleted:      make(map[int]bool),
+		lastBlocked:        make(map[int]bool),
 		lastUpdatedAt:      make(map[int]time.Time),
 		retryCount:         make(map[string]int),
 		pausedDueToRetries: make(map[string]bool),

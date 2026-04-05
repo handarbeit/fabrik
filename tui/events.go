@@ -50,7 +50,9 @@ type JobCompletedEvent struct {
 	Title       string
 	StageName   string
 	IsComment   bool // true when processing a user comment, not a stage run
-	Success     bool
+	Success        bool // no error from processItem
+	Completed      bool // stage actually completed (FABRIK_STAGE_COMPLETE detected)
+	BlockedOnInput bool // stage needs user input (FABRIK_BLOCKED_ON_INPUT detected)
 	Duration    time.Duration
 	CompletedAt time.Time
 	TurnsUsed   int
