@@ -1563,6 +1563,59 @@ func TestEnsurePRTaskList(t *testing.T) {
 	if !strings.Contains(updatedBody, "Task 3") {
 		t.Error("updated body should contain all task list items")
 	}
+	if !strings.Contains(updatedBody, "FABRIK_TASK_LIST_BEGIN") {
+		t.Error("updated body should contain FABRIK_TASK_LIST_BEGIN marker")
+	}
+	if !strings.Contains(updatedBody, "FABRIK_TASK_LIST_END") {
+		t.Error("updated body should contain FABRIK_TASK_LIST_END marker")
+	}
+}
+
+func TestEnsurePRTaskList_Idempotent(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	updateCount := 0
+	client := &mockGitHubClient{
+		getIssueBodyFn: func(owner, repo string, issueNumber int) (string, error) {
+			// Simulate PR body that already has markers (with some tasks checked)
+			return "Closes #33\n\nFABRIK_TASK_LIST_BEGIN\n- [x] Task 1\n- [ ] Task 2\nFABRIK_TASK_LIST_END", nil
+		},
+		updateIssueBodyFn: func(owner, repo string, issueNumber int, body string) error {
+			updateCount++
+			return nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			Stages:     testStages(),
+		},
+		client,
+		&mockClaudeInvoker{},
+		wm,
+	)
+
+	item := gh.ProjectItem{
+		Number: 33,
+		Title:  "Idempotent test",
+		Status: "Implement",
+		Comments: []gh.Comment{
+			{Body: "🏭 **Fabrik — stage: Plan**\n*branch: test*\n\nFABRIK_TASK_LIST_BEGIN\n- [ ] Task 1\n- [ ] Task 2\nFABRIK_TASK_LIST_END"},
+		},
+	}
+
+	eng.ensurePRTaskList(item, 100)
+
+	if updateCount != 0 {
+		t.Error("should not update PR body when task list markers already present")
+	}
 }
 
 func TestEnsurePRTaskList_NoPlanComment(t *testing.T) {
