@@ -26,9 +26,9 @@ Read these files before looking at the code. The task checklist in `.fabrik-cont
 Always start with `git status`. There may be:
 - **Uncommitted changes** from a previous interrupted session — review them, decide if they're useful, commit or discard
 - **Prior commits** on the branch — check `git log` to see what's already been done
-- **Checked-off tasks** in the Plan stage comment — don't redo completed work
+- **Checked-off tasks** in the PR body — don't redo completed work
 
-If resuming, pick up where the previous session left off. Read the commit history and the task checklist in `.fabrik-context/stage-Plan.md` to understand what's done.
+If resuming, pick up where the previous session left off. Read the commit history and the task checklist in the PR body (or `.fabrik-context/stage-Plan.md` if no PR exists yet) to understand what's done.
 
 ### Understand the plan
 
@@ -49,9 +49,7 @@ Work through tasks in the order listed. For each task:
 3. Write or update tests
 4. Commit with a clear message describing what was done
 5. Push to remote
-6. Check off the task in the Plan stage comment (see below)
-
-**Documentation tasks are not optional.** If the plan includes documentation tasks (README updates, godoc, SKILL.md changes, CLAUDE.md edits, etc.), treat them exactly like code tasks: implement, commit, push. Do not defer documentation to the end or skip it assuming Review will catch it. If you discover documentation that should have been in the plan is missing, add it — the plan's doc inventory is a starting point, not a ceiling.
+6. Check off the task in the PR body (see below)
 
 ### Commit frequently
 
@@ -76,26 +74,21 @@ Push after each commit or small group of related commits. The remote branch is t
 
 ### Update task progress
 
-After completing each task, check it off in the **Plan stage comment** — not the issue body. The issue body is the spec (owned by Specify); task tracking lives in the Plan stage comment.
+After completing each task, check it off in the **PR body** — the PR description is the canonical task list. The engine copies the Plan task checklist into the PR body when the draft PR is created.
 
-First, find the Plan stage comment's database ID:
+To update a checkbox, find the linked PR number and update its body:
 ```bash
-gh issue view <number> --json comments \
-  --jq '.comments[] | select(.body | startswith("🏭 **Fabrik — stage: Plan**")) | .databaseId' \
-  | tail -1
-```
+# Find the PR number for this issue branch
+PR_NUM=$(gh pr list --head "fabrik/issue-<N>" --json number --jq '.[0].number')
 
-Then update the comment body with the task checked off:
-```bash
-# Get current body and update the checkbox
-COMMENT_ID=<id from above>
-CURRENT_BODY=$(gh api /repos/{owner}/{repo}/issues/comments/$COMMENT_ID --jq '.body')
+# Get current PR body and update the checkbox
+CURRENT_BODY=$(gh pr view $PR_NUM --json body --jq '.body')
 # Edit CURRENT_BODY: change "- [ ] Task N" to "- [x] Task N"
-gh api -X PATCH /repos/{owner}/{repo}/issues/comments/$COMMENT_ID \
+gh api -X PATCH /repos/{owner}/{repo}/pulls/$PR_NUM \
   -f body="$UPDATED_BODY"
 ```
 
-If no Plan stage comment exists (Plan was never run or comment was deleted), skip task tracking gracefully — don't fail.
+If no PR exists yet (e.g., first run before draft PR creation), skip task tracking gracefully — don't fail. The engine tracks checked task count in the PR body for progress detection.
 
 ### Write a reviewer-oriented PR description
 
