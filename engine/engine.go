@@ -23,12 +23,10 @@ type Config struct {
 	Yolo          bool
 	AutoUpgrade   bool
 	PollSeconds   int
-	MaxConcurrent   int
-	MaxRetries      int // deprecated: alias for MaxLoops
-	MaxLoops        int
-	MaxTotalRetries int
-	DebugOutput     bool
-	PluginDir       string
+	MaxConcurrent int
+	MaxRetries    int
+	DebugOutput   bool
+	PluginDir     string
 	Stages        []*stages.Stage
 	// ReadyCh is closed once Run() has registered signal handlers. Tests use
 	// this to avoid sending SIGINT before signal.Notify is installed.
@@ -48,8 +46,7 @@ type Engine struct {
 	lockedIssues       map[string]bool      // key: "owner/repo#N"; issues with fabrik:locked added but not yet released
 	totalTokens        TokenUsage           // accumulated token usage since process start
 	lastReportedCost   float64              // cost at last [stats] report; skip repeat prints when unchanged
-	loopCount          map[string]int       // key: "owner/repo#N-stageName", value: consecutive no-progress attempts
-	totalLoopCount     map[string]int       // key: "owner/repo#N-stageName", value: total attempts (progress or not)
+	retryCount         map[string]int       // key: "owner/repo#N-stageName", value: failed attempt count
 	pausedDueToRetries map[string]bool      // key: "owner/repo#N-stageName", true if engine paused this issue
 	lastUsage          map[string]TokenUsage   // key: issueKey; per-issue token usage from last processItem (for TUI)
 	lastCompleted      map[string]bool         // key: issueKey; per-issue stage completion from last processItem (for TUI)
@@ -115,8 +112,7 @@ func New(cfg Config) (*Engine, error) {
 		lastCompleted:      make(map[string]bool),
 		lastBlocked:        make(map[string]bool),
 		lastUpdatedAt:      make(map[string]time.Time),
-		loopCount:          make(map[string]int),
-		totalLoopCount:     make(map[string]int),
+		retryCount:         make(map[string]int),
 		pausedDueToRetries: make(map[string]bool),
 		sem:                make(chan struct{}, cfg.MaxConcurrent),
 	}
@@ -158,8 +154,7 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		lastCompleted:      make(map[string]bool),
 		lastBlocked:        make(map[string]bool),
 		lastUpdatedAt:      make(map[string]time.Time),
-		loopCount:          make(map[string]int),
-		totalLoopCount:     make(map[string]int),
+		retryCount:         make(map[string]int),
 		pausedDueToRetries: make(map[string]bool),
 		sem:                make(chan struct{}, maxConcurrent),
 	}
@@ -285,23 +280,6 @@ func (e *Engine) logf(issueNumber int, tag, format string, args ...any) {
 	} else {
 		fmt.Printf("[#%d %s] %s", issueNumber, tag, msg)
 	}
-}
-
-// effectiveMaxLoops returns the max no-progress loops limit for the engine.
-// Returns 0 for unlimited. The deprecated MaxRetries is migrated to MaxLoops
-// at startup in cmd/root.go, so this method only reads MaxLoops.
-func (e *Engine) effectiveMaxLoops() int {
-	return e.cfg.MaxLoops
-}
-
-// effectiveMaxTotalRetries returns the total retry ceiling for a stage.
-// Stage-level config takes precedence over the global engine config.
-// Returns 0 (unlimited) if neither is set.
-func effectiveMaxTotalRetries(stageCfg int, engineCfg int) int {
-	if stageCfg > 0 {
-		return stageCfg
-	}
-	return engineCfg
 }
 
 func mapKeys(m map[string]string) []string {

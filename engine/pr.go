@@ -22,7 +22,6 @@ func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) int {
 	if prNumber > 0 {
 		e.logf(item.Number, "pr", "PR #%d already exists, ensuring issue link\n", prNumber)
 		e.ensurePRLinksIssue(item, prNumber)
-		e.ensurePRTaskList(item, prNumber)
 		return prNumber
 	}
 
@@ -40,52 +39,7 @@ func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) int {
 		return 0
 	}
 	e.logf(item.Number, "pr", "created draft PR #%d\n", prNum)
-
-	// Inject the Plan stage task list into the PR body (if available)
-	e.ensurePRTaskList(item, prNum)
-
 	return prNum
-}
-
-// ensurePRTaskList extracts the task list from the Plan stage comment (between
-// FABRIK_TASK_LIST_BEGIN/END markers) and adds it to the PR body. This makes the
-// PR body the canonical location for the task checklist. If the Plan stage comment
-// predates the markers or doesn't exist, this is a no-op.
-func (e *Engine) ensurePRTaskList(item gh.ProjectItem, prNumber int) {
-	// Find the Plan stage comment from the issue's comments
-	planComment := findStageComment(item.Comments, "Plan")
-	if planComment == nil {
-		return
-	}
-
-	taskList := extractBetweenMarkers(planComment.Body, "FABRIK_TASK_LIST_BEGIN", "FABRIK_TASK_LIST_END")
-	if taskList == "" {
-		return
-	}
-
-	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-
-	// Fetch current PR body
-	body, err := e.client.GetIssueBody(owner, repo, prNumber)
-	if err != nil {
-		e.logf(item.Number, "warn", "could not fetch PR #%d body for task list: %v\n", prNumber, err)
-		return
-	}
-
-	// Check if task list is already present (idempotent) by looking for markers.
-	// We wrap the task list in markers in the PR body so we can detect it even
-	// after users check off tasks (which would change the content).
-	if strings.Contains(body, "FABRIK_TASK_LIST_BEGIN") {
-		return
-	}
-
-	// Append task list wrapped in markers to existing body, preserving Closes #N
-	updatedBody := body + "\n\nFABRIK_TASK_LIST_BEGIN\n" + taskList + "\nFABRIK_TASK_LIST_END"
-	if err := e.client.UpdateIssueBody(owner, repo, prNumber, updatedBody); err != nil {
-		e.logf(item.Number, "warn", "could not update PR #%d body with task list: %v\n", prNumber, err)
-		return
-	}
-	e.logf(item.Number, "pr", "added Plan task list to PR #%d body\n", prNumber)
 }
 
 // ensurePRLinksIssue checks that a PR body contains "Closes #N" and adds it if missing.

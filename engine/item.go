@@ -440,20 +440,6 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// not captured in the stash. Errors are non-fatal.
 	e.writeContextFiles(item, stage, workDir, false)
 
-	// Capture progress baseline before Claude runs (for stages with progress detection).
-	var baseline progressBaseline
-	if stage.ProgressResetsRetries {
-		baseline.worktreeHead, _ = gitRevParse(workDir, "HEAD")
-		remoteBranch := "origin/" + e.worktreesFor(item.Repo).branchName(item.Number)
-		baseline.remoteHead, _ = gitRevParse(workDir, remoteBranch)
-		if prNum, err := e.client.FindPRForIssue(owner, repo, item.Number); err == nil && prNum > 0 {
-			baseline.prNumber = prNum
-			if body, err := e.client.GetIssueBody(owner, repo, prNum); err == nil {
-				baseline.checkedTasks = countCheckedTasks(body)
-			}
-		}
-	}
-
 	// Invoke Claude Code in the issue's worktree
 	modelOverride := e.extractModelOverride(item.Number, item.Labels)
 	if modelOverride != "" {
@@ -615,12 +601,11 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 
 	if completed {
 		releaseLock()
-		// Clear loop tracking for this stage — no longer needed after success.
+		// Clear retry tracking for this stage — no longer needed after success.
 		func() {
 			e.mu.Lock()
 			defer e.mu.Unlock()
-			delete(e.loopCount, stageKey)
-			delete(e.totalLoopCount, stageKey)
+			delete(e.retryCount, stageKey)
 			delete(e.pausedDueToRetries, stageKey)
 		}()
 		// Post-stage: create draft PR and/or mark ready now that commits exist
@@ -638,79 +623,17 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	} else {
 		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
 		e.logf(item.Number, "wait", "stage %q did not complete — will retry after %v\n", stage.Name, cooldown)
-
-		if claudeRan {
-			// Progress detection: compare baseline with current state.
-			// This runs AFTER commitWIP and PushBranch, so WIP commits count.
-			var progress progressResult
-			if stage.ProgressResetsRetries {
-				worktreeHeadAfter, _ := gitRevParse(workDir, "HEAD")
-				remoteBranch := "origin/" + e.worktreesFor(item.Repo).branchName(item.Number)
-				remoteHeadAfter, _ := gitRevParse(workDir, remoteBranch)
-				checkedTasksAfter := 0
-				if baseline.prNumber > 0 {
-					if body, err := e.client.GetIssueBody(owner, repo, baseline.prNumber); err == nil {
-						checkedTasksAfter = countCheckedTasks(body)
-					}
-				}
-				progress = detectProgress(baseline, worktreeHeadAfter, remoteHeadAfter, checkedTasksAfter)
-			}
-
-			maxLoops := e.effectiveMaxLoops()
-			maxTotal := effectiveMaxTotalRetries(stage.MaxTotalRetries, e.cfg.MaxTotalRetries)
-
-			// Always increment totalLoopCount
-			var totalCount int
+		if claudeRan && e.cfg.MaxRetries > 0 {
+			var count int
 			func() {
 				e.mu.Lock()
 				defer e.mu.Unlock()
-				e.totalLoopCount[stageKey]++
-				totalCount = e.totalLoopCount[stageKey]
+				e.retryCount[stageKey]++
+				count = e.retryCount[stageKey]
 			}()
-
-			// Check total ceiling first — progress doesn't override this
-			if maxTotal > 0 && totalCount >= maxTotal {
-				e.logf(item.Number, "escalate", "stage %q hit total retry ceiling (%d) — pausing\n", stage.Name, maxTotal)
-				comment := fmt.Sprintf(
-					"🏭 **Fabrik — stage failed**\n\nStage **%s** hit the total retry ceiling (%d attempts). The issue has been paused (`fabrik:paused`).\n\nTo retry: investigate, make any needed fixes, then remove the `fabrik:paused` label.",
-					stage.Name, maxTotal,
-				)
-				if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
-					e.logf(item.Number, "warn", "could not add paused label: %v\n", err)
-				}
-				e.addFailedLabel(owner, repo, item.Number, stage.Name)
-				if err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
-					e.logf(item.Number, "warn", "could not post escalation comment: %v\n", err)
-				}
-				func() {
-					e.mu.Lock()
-					defer e.mu.Unlock()
-					e.pausedDueToRetries[stageKey] = true
-				}()
-				releaseLock()
-			} else if progress.hasProgress {
-				// Progress detected — reset no-progress counter
-				var prevCount int
-				func() {
-					e.mu.Lock()
-					defer e.mu.Unlock()
-					prevCount = e.loopCount[stageKey]
-					e.loopCount[stageKey] = 0
-				}()
-				e.logf(item.Number, "progress", "%s — loop counter reset (was %d, now 0)\n", progress.detail, prevCount)
-			} else if maxLoops > 0 {
-				// No progress — increment no-progress counter
-				var count int
-				func() {
-					e.mu.Lock()
-					defer e.mu.Unlock()
-					e.loopCount[stageKey]++
-					count = e.loopCount[stageKey]
-				}()
-				if count >= maxLoops {
-					e.escalateFailedStage(item, stage, maxLoops)
-					releaseLock() // permanently giving up — release the lock
-				}
+			if count >= e.cfg.MaxRetries {
+				e.escalateFailedStage(item, stage)
+				releaseLock() // permanently giving up — release the lock
 			}
 		}
 	}
@@ -721,8 +644,8 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 // escalateFailedStage is called when a stage has failed MaxRetries times. It adds
 // fabrik:paused and stage:<name>:failed labels, posts an explanatory comment, and
 // records the escalation so clearFailedStage can detect when the user unpauses.
-func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage, maxLoops int) {
-	e.logf(item.Number, "escalate", "stage %q failed %d no-progress loop(s) — pausing issue\n", stage.Name, maxLoops)
+func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
+	e.logf(item.Number, "escalate", "stage %q failed %d time(s) — pausing issue\n", stage.Name, e.cfg.MaxRetries)
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
@@ -733,8 +656,8 @@ func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage, m
 	e.addFailedLabel(owner, repo, item.Number, stage.Name)
 
 	comment := fmt.Sprintf(
-		"🏭 **Fabrik — stage failed**\n\nStage **%s** failed to complete after %d consecutive no-progress attempt(s). The issue has been paused (`fabrik:paused`).\n\nTo retry: investigate the failure, make any needed fixes, then remove the `fabrik:paused` label.",
-		stage.Name, maxLoops,
+		"🏭 **Fabrik — stage failed**\n\nStage **%s** failed to complete after %d attempt(s). The issue has been paused (`fabrik:paused`).\n\nTo retry: investigate the failure, make any needed fixes, then remove the `fabrik:paused` label.",
+		stage.Name, e.cfg.MaxRetries,
 	)
 	if err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
 		e.logf(item.Number, "warn", "could not post escalation comment: %v\n", err)
@@ -761,8 +684,7 @@ func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 
 	stageKey := issueKey(item, e.defaultRepo()) + "-" + stage.Name
 	e.mu.Lock()
-	delete(e.loopCount, stageKey)
-	delete(e.totalLoopCount, stageKey)
+	delete(e.retryCount, stageKey)
 	delete(e.pausedDueToRetries, stageKey)
 	delete(e.processedSet, stageKey) // clear cooldown so the stage retries immediately
 	e.mu.Unlock()
@@ -771,7 +693,7 @@ func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 // blockOnInput is called when Claude outputs FABRIK_BLOCKED_ON_INPUT. It pauses
 // the issue with fabrik:paused + fabrik:awaiting-input labels so the engine
 // knows to auto-unblock when the user responds with a comment.
-// It does NOT add a stage:<name>:failed label and does NOT touch loopCount.
+// It does NOT add a stage:<name>:failed label and does NOT touch retryCount.
 func (e *Engine) blockOnInput(item gh.ProjectItem, stage *stages.Stage) {
 	e.logf(item.Number, "block", "stage %q needs user input — pausing with awaiting-input\n", stage.Name)
 

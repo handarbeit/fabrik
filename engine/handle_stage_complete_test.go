@@ -214,7 +214,9 @@ func TestHandleStageComplete_YoloLabel_NonValidate_NoMergeAttempt(t *testing.T) 
 }
 
 func TestHandleStageComplete_AutoAdvanceFalse_OverridesAdvanceButMergeStillFires(t *testing.T) {
-	// auto_advance: false on Validate should suppress advancement but NOT suppress merge
+	// auto_advance: false on Validate should suppress advancement but NOT suppress merge.
+	// Global cfg.Yolo=true activates merge; item has no fabrik:yolo label so
+	// auto_advance:false is respected (item-level yolo would override it).
 	f := false
 	client := &mockGitHubClient{
 		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
@@ -223,20 +225,21 @@ func TestHandleStageComplete_AutoAdvanceFalse_OverridesAdvanceButMergeStillFires
 	}
 	stgs := testStagesWithValidate()
 	eng := testEngineWithStages(client, stgs)
+	eng.cfg.Yolo = true // global yolo triggers merge
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
-	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:yolo"}}
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"} // no fabrik:yolo label
 	validateStage := &stages.Stage{Name: "Validate", AutoAdvance: &f}
 
 	eng.handleStageComplete(board, item, validateStage)
 
-	// Merge should still fire
+	// Merge should still fire (global yolo active)
 	if len(client.mergePRCalls) != 1 {
 		t.Fatalf("expected MergePR to fire even with auto_advance:false, got %d", len(client.mergePRCalls))
 	}
-	// fabrik:yolo label overrides auto_advance:false — advancement should fire
-	if len(client.updateStatusCalls) != 1 {
-		t.Errorf("expected advance (yolo overrides auto_advance:false), got %d", len(client.updateStatusCalls))
+	// But advancement should be suppressed (auto_advance:false, no item-level yolo to override)
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("expected no advance when auto_advance:false, got %d", len(client.updateStatusCalls))
 	}
 }
 

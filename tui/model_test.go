@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -440,4 +441,393 @@ func TestNew_TerminalStored(t *testing.T) {
 			t.Errorf("New(30, ProjectInfo{}, %q, \"\"): got terminal=%q, want %q", id, m.terminal, id)
 		}
 	}
+}
+
+// TestInit verifies Init returns a non-nil cmd (the initial tick).
+func TestInit(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", "")
+	cmd := m.Init()
+	if cmd == nil {
+		t.Error("Init() should return a non-nil cmd")
+	}
+}
+
+// TestTuiEventMethods exercises the tuiEvent() no-op methods on each event type
+// to achieve coverage of these trivial interface satisfiers.
+func TestTuiEventMethods(t *testing.T) {
+	LogEvent{}.tuiEvent()
+	PollStartedEvent{}.tuiEvent()
+	PollCompletedEvent{}.tuiEvent()
+	JobStartedEvent{}.tuiEvent()
+	JobCompletedEvent{}.tuiEvent()
+	TickEvent{}.tuiEvent()
+}
+
+// TestLoadHistory_MalformedJSON verifies LoadHistory returns nil on bad JSON.
+func TestLoadHistory_MalformedJSON(t *testing.T) {
+	redirectHistory(t)
+	if err := os.WriteFile(HistoryPathOverride, []byte("not valid json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	entries := LoadHistory()
+	if entries != nil {
+		t.Error("expected nil from LoadHistory with malformed JSON")
+	}
+}
+
+// TestLoadHistory_RoundTrip verifies history entries survive a save/load cycle.
+func TestLoadHistory_RoundTrip(t *testing.T) {
+	redirectHistory(t)
+	entries := []HistoryEntry{
+		{IssueNumber: 1, StageName: "Research", Success: true},
+		{IssueNumber: 2, StageName: "Implement", Success: false, IsComment: true},
+	}
+	SaveHistory(entries)
+	loaded := LoadHistory()
+	if len(loaded) != 2 {
+		t.Fatalf("loaded %d entries, want 2", len(loaded))
+	}
+	if loaded[0].IssueNumber != 1 || loaded[1].IsComment != true {
+		t.Errorf("round-trip mismatch: %+v", loaded)
+	}
+}
+
+// TestUpdate_TabKey_SwitchesPanes verifies tab toggles focus between panes.
+func TestUpdate_TabKey_SwitchesPanes(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", "")
+	m.width = 80
+	m.height = 24
+	if m.focusPane != paneActive {
+		t.Fatal("expected initial pane to be active")
+	}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	nm := next.(Model)
+	if nm.focusPane != paneHistory {
+		t.Error("expected pane to switch to history after tab")
+	}
+	if cmd != nil {
+		t.Error("expected nil cmd from tab")
+	}
+	next2, _ := nm.Update(tea.KeyMsg{Type: tea.KeyTab})
+	nm2 := next2.(Model)
+	if nm2.focusPane != paneActive {
+		t.Error("expected pane to switch back to active after second tab")
+	}
+}
+
+// TestUpdate_JK_HistoryPane verifies j/k navigation in the history pane.
+func TestUpdate_JK_HistoryPane(t *testing.T) {
+	redirectHistory(t)
+	m := New(30, ProjectInfo{}, "", "")
+	m.width = 80
+	m.height = 24
+	m.focusPane = paneHistory
+	m.history = []HistoryEntry{
+		{IssueNumber: 1, StageName: "Research"},
+		{IssueNumber: 2, StageName: "Plan"},
+		{IssueNumber: 3, StageName: "Implement"},
+	}
+
+	// j increments histIdx
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	nm := next.(Model)
+	if nm.histIdx != 1 {
+		t.Errorf("histIdx = %d after j, want 1", nm.histIdx)
+	}
+	// k decrements histIdx
+	next2, _ := nm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	nm2 := next2.(Model)
+	if nm2.histIdx != 0 {
+		t.Errorf("histIdx = %d after k, want 0", nm2.histIdx)
+	}
+	// k at 0 is a no-op
+	next3, _ := nm2.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	nm3 := next3.(Model)
+	if nm3.histIdx != 0 {
+		t.Errorf("histIdx = %d after k at 0, want 0", nm3.histIdx)
+	}
+}
+
+// TestUpdate_JK_ActivePane verifies j/k navigation in the active pane.
+func TestUpdate_JK_ActivePane(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", "")
+	m.active[activeJobKey("", 1)] = &activeJob{StageName: "Research", StartedAt: time.Now()}
+	m.active[activeJobKey("", 2)] = &activeJob{StageName: "Plan", StartedAt: time.Now()}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	nm := next.(Model)
+	if nm.activeIdx != 1 {
+		t.Errorf("activeIdx = %d after j, want 1", nm.activeIdx)
+	}
+	next2, _ := nm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	nm2 := next2.(Model)
+	if nm2.activeIdx != 0 {
+		t.Errorf("activeIdx = %d after k, want 0", nm2.activeIdx)
+	}
+}
+
+// TestUpdate_CKey_DeletesHistoryEntry verifies c removes the selected entry.
+func TestUpdate_CKey_DeletesHistoryEntry(t *testing.T) {
+	redirectHistory(t)
+	m := New(30, ProjectInfo{}, "", "")
+	m.width = 80
+	m.height = 24
+	m.focusPane = paneHistory
+	m.history = []HistoryEntry{
+		{IssueNumber: 1, StageName: "Research"},
+		{IssueNumber: 2, StageName: "Plan"},
+	}
+	// histIdx=0 → realIdx = len-1-0 = 1 → deletes entry at index 1 (IssueNumber 2)
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	nm := next.(Model)
+	if len(nm.history) != 1 {
+		t.Errorf("history len = %d after c, want 1", len(nm.history))
+	}
+	if nm.history[0].IssueNumber != 1 {
+		t.Errorf("remaining entry IssueNumber = %d, want 1", nm.history[0].IssueNumber)
+	}
+}
+
+// TestUpdate_CKey_EmptyHistory_NoOp verifies c is a no-op with no history.
+func TestUpdate_CKey_EmptyHistory_NoOp(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", "")
+	m.focusPane = paneHistory
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	if cmd != nil {
+		t.Error("expected nil cmd from c with empty history")
+	}
+}
+
+// TestUpdate_CapitalC_ClearAll verifies two C presses clear all history.
+func TestUpdate_CapitalC_ClearAll(t *testing.T) {
+	redirectHistory(t)
+	m := New(30, ProjectInfo{}, "", "")
+	m.width = 80
+	m.height = 24
+	m.focusPane = paneHistory
+	m.history = []HistoryEntry{
+		{IssueNumber: 1, StageName: "Research"},
+		{IssueNumber: 2, StageName: "Plan"},
+	}
+	// First C sets confirmClear
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("C")})
+	nm := next.(Model)
+	if !nm.confirmClear {
+		t.Error("expected confirmClear=true after first C")
+	}
+	if len(nm.history) != 2 {
+		t.Error("history should not be cleared after first C")
+	}
+	// Second C confirms and clears
+	next2, _ := nm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("C")})
+	nm2 := next2.(Model)
+	if nm2.confirmClear {
+		t.Error("expected confirmClear=false after confirmed C")
+	}
+	if len(nm2.history) != 0 {
+		t.Errorf("history len = %d after confirmed clear, want 0", len(nm2.history))
+	}
+}
+
+// TestUpdate_QuitDuringConfirmClear_Cancels verifies q cancels confirmClear state.
+func TestUpdate_QuitDuringConfirmClear_Cancels(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", "")
+	m.confirmClear = true
+	m.focusPane = paneHistory
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	nm := next.(Model)
+	if nm.confirmClear {
+		t.Error("expected confirmClear=false after q during confirmation")
+	}
+	if cmd != nil {
+		t.Error("expected nil cmd (no quit) when q pressed during confirm")
+	}
+}
+
+// TestUpdate_NKey_CancelsConfirmClear verifies n cancels the clear confirmation.
+func TestUpdate_NKey_CancelsConfirmClear(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", "")
+	m.confirmClear = true
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	nm := next.(Model)
+	if nm.confirmClear {
+		t.Error("expected confirmClear=false after n")
+	}
+}
+
+// TestUpdate_EnterL_HistoryPane_NoLogDir verifies enter returns nil when log dir is missing.
+func TestUpdate_EnterL_HistoryPane_NoLogDir(t *testing.T) {
+	redirectHistory(t)
+	m := New(30, ProjectInfo{}, "", "")
+	m.width = 80
+	m.height = 24
+	m.focusPane = paneHistory
+	m.history = []HistoryEntry{
+		{IssueNumber: 99999, StageName: "Research"},
+	}
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Error("expected nil cmd from enter when log dir doesn't exist")
+	}
+}
+
+// TestUpdate_EnterL_ActivePane_NoLogDir verifies enter in active pane returns nil when log dir missing.
+func TestUpdate_EnterL_ActivePane_NoLogDir(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", "")
+	m.width = 80
+	m.height = 24
+	m.focusPane = paneActive
+	m.active[activeJobKey("", 99999)] = &activeJob{StageName: "Research", StartedAt: time.Now()}
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Error("expected nil cmd from enter when log dir doesn't exist")
+	}
+}
+
+// TestUpdate_LogEvent_IssueZero_StatusLine verifies poll-level log events update statusLine.
+func TestUpdate_LogEvent_IssueZero_StatusLine(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", "")
+	m.width = 80
+	m.height = 24
+	next, _ := m.Update(LogEvent{IssueNumber: 0, Tag: "poll", Message: "polling now\n"})
+	nm := next.(Model)
+	if nm.statusLine != "[poll] polling now" {
+		t.Errorf("statusLine = %q, want %q", nm.statusLine, "[poll] polling now")
+	}
+}
+
+// TestTuiReadSessionID_NotFound verifies empty string for a missing session file.
+func TestTuiReadSessionID_NotFound(t *testing.T) {
+	id := tuiReadSessionID(99999, "SomeStageThatDoesNotExist")
+	if id != "" {
+		t.Errorf("expected empty string for missing session, got %q", id)
+	}
+}
+
+// TestOpenLogViewerCmd_WithLogFile verifies a non-nil cmd is returned for a dir with log files.
+func TestOpenLogViewerCmd_WithLogFile(t *testing.T) {
+	logDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(logDir, "research.log"), []byte("log content"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	m := New(30, ProjectInfo{}, "", "")
+	cmd := m.openLogViewerCmd(logDir)
+	if cmd == nil {
+		t.Error("expected non-nil cmd for dir with log files")
+	}
+	// Do NOT execute cmd — it would launch a terminal.
+}
+
+// TestOpenLogViewerCmd_WithJSONFile verifies JSON log files use stream-filter pipe.
+func TestOpenLogViewerCmd_WithJSONFile(t *testing.T) {
+	logDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(logDir, "research.json"), []byte(`{"type":"log"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	m := New(30, ProjectInfo{}, "", "")
+	cmd := m.openLogViewerCmd(logDir)
+	if cmd == nil {
+		t.Error("expected non-nil cmd for .json log file")
+	}
+	// Do NOT execute cmd — it would launch a terminal.
+}
+
+// TestOpenLogViewerCmd_EmptyDir verifies nil cmd for an empty log directory.
+func TestOpenLogViewerCmd_EmptyDir(t *testing.T) {
+	logDir := t.TempDir()
+	m := New(30, ProjectInfo{}, "", "")
+	cmd := m.openLogViewerCmd(logDir)
+	if cmd != nil {
+		t.Error("expected nil cmd for empty log dir")
+	}
+}
+
+// TestViewHistory_ConfirmClear verifies the confirmation prompt is shown.
+func TestViewHistory_ConfirmClear(t *testing.T) {
+	redirectHistory(t)
+	m := New(30, ProjectInfo{}, "", "")
+	m.width = 80
+	m.height = 24
+	m.focusPane = paneHistory
+	m.history = []HistoryEntry{{IssueNumber: 1, StageName: "Research"}}
+	m.confirmClear = true
+	view := m.viewHistory()
+	if !strings.Contains(view, "Clear all history") {
+		t.Errorf("expected confirmation text in viewHistory, got: %q", view)
+	}
+}
+
+// TestViewActive_IsComment verifies the 💬 emoji appears for comment jobs.
+func TestViewActive_IsComment(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", "")
+	m.width = 80
+	m.height = 24
+	m.active[activeJobKey("", 5)] = &activeJob{StageName: "Implement", IsComment: true, StartedAt: time.Now()}
+	view := m.viewActive()
+	if !strings.Contains(view, "💬") {
+		t.Errorf("expected 💬 in viewActive for IsComment job, got: %q", view)
+	}
+}
+
+// TestViewHistory_IsComment verifies the 💬 emoji appears for comment history entries.
+func TestViewHistory_IsComment(t *testing.T) {
+	redirectHistory(t)
+	m := New(30, ProjectInfo{}, "", "")
+	m.width = 80
+	m.height = 24
+	m.history = []HistoryEntry{{IssueNumber: 5, StageName: "Implement", IsComment: true, Success: true}}
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = next.(Model)
+	view := m.viewHistory()
+	if !strings.Contains(view, "💬") {
+		t.Errorf("expected 💬 in viewHistory for IsComment entry, got: %q", view)
+	}
+}
+
+// TestViewHeader_WithStatusLine verifies statusLine content appears in the header.
+func TestViewHeader_WithStatusLine(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", "")
+	m.width = 80
+	m.statusLine = "some status"
+	header := m.viewHeader()
+	if !strings.Contains(header, "some status") {
+		t.Errorf("header missing statusLine, got: %q", header)
+	}
+}
+
+// TestViewHeader_StatusLineTruncation verifies narrow headers truncate statusLine without panic.
+func TestViewHeader_StatusLineTruncation(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", "")
+	m.width = 25
+	m.statusLine = "a very very very very very very long status message"
+	header := m.viewHeader()
+	w := lipgloss.Width(header)
+	if w > m.width+5 {
+		t.Errorf("header too wide: %d > %d", w, m.width)
+	}
+}
+
+// TestOpenResumeCmd_WorktreeExists verifies a non-nil cmd is returned when the worktree exists.
+func TestOpenResumeCmd_WorktreeExists(t *testing.T) {
+	tmpDir := t.TempDir()
+	issueNum := 42
+	worktreeDir := filepath.Join(tmpDir, ".fabrik", "worktrees", fmt.Sprintf("issue-%d", issueNum))
+	if err := os.MkdirAll(worktreeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(oldWd) //nolint:errcheck
+
+	m := New(30, ProjectInfo{}, "", "")
+	cmd := m.openResumeCmd(issueNum, "Research", "sonnet")
+	if cmd == nil {
+		t.Error("expected non-nil cmd when worktree exists")
+	}
+	// Do NOT execute cmd — it would launch a terminal.
 }

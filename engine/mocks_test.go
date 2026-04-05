@@ -2,13 +2,18 @@ package engine
 
 import (
 	"context"
+	"sync"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
 )
 
 // mockGitHubClient implements GitHubClient for testing.
+// mu protects all *Calls slices so the mock is safe for concurrent use by
+// goroutines spawned inside the engine's poll loop.
 type mockGitHubClient struct {
+	mu sync.Mutex
+
 	fetchProjectBoardFn       func(owner, repo string, projectNum int) (*gh.ProjectBoard, error)
 	fetchLabelsFn             func(owner, repo string, issueNumber int) ([]string, error)
 	fetchItemDetailsFn        func(item *gh.ProjectItem) error
@@ -19,19 +24,32 @@ type mockGitHubClient struct {
 	updateCommentFn           func(owner, repo string, commentDatabaseID int, body string) error
 	updateIssueBodyFn         func(owner, repo string, issueNumber int, body string) error
 	updateProjectItemStatusFn func(projectID, itemID, statusFieldID, statusOptionID string) error
-	getIssueBodyFn            func(owner, repo string, issueNumber int) (string, error)
 	findPRForIssueFn          func(owner, repo string, issueNumber int) (int, error)
-	createDraftPRFn           func(owner, repo, title, head, base string, issueNumber int) (int, error)
 	mergePRFn                 func(owner, repo string, prNumber int) error
 	rateLimitStatsFn          func() (gh.RateLimitStats, gh.RateLimitStats)
+	getIssueBodyFn            func(owner, repo string, issueNumber int) (string, error)
+	markPRReadyFn             func(owner, repo string, prNumber int) error
+	createDraftPRFn           func(owner, repo, title, head, base string, issueNumber int) (int, error)
 
-	// Track calls
+	// Track calls — access under mu when accessed from concurrent goroutines.
 	addLabelCalls      []addLabelCall
 	removeLabelCalls   []removeLabelCall
 	addCommentCalls    []addCommentCall
 	updateCommentCalls []updateCommentCall
 	updateStatusCalls  []updateStatusCall
 	mergePRCalls       []mergePRCall
+	markPRReadyCalls   []markPRReadyCall
+	createDraftPRCalls []createDraftPRCall
+}
+
+type markPRReadyCall struct {
+	owner, repo string
+	prNumber    int
+}
+
+type createDraftPRCall struct {
+	owner, repo, title, head, base string
+	issueNumber                    int
 }
 
 type mergePRCall struct {
@@ -96,25 +114,34 @@ func (m *mockGitHubClient) FetchStatusField(projectID string) (*gh.StatusField, 
 }
 
 func (m *mockGitHubClient) AddLabelToIssue(owner, repo string, issueNumber int, labelName string) error {
+	m.mu.Lock()
 	m.addLabelCalls = append(m.addLabelCalls, addLabelCall{owner, repo, issueNumber, labelName})
-	if m.addLabelToIssueFn != nil {
-		return m.addLabelToIssueFn(owner, repo, issueNumber, labelName)
+	fn := m.addLabelToIssueFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, issueNumber, labelName)
 	}
 	return nil
 }
 
 func (m *mockGitHubClient) RemoveLabelFromIssue(owner, repo string, issueNumber int, labelName string) error {
+	m.mu.Lock()
 	m.removeLabelCalls = append(m.removeLabelCalls, removeLabelCall{owner, repo, issueNumber, labelName})
-	if m.removeLabelFromIssueFn != nil {
-		return m.removeLabelFromIssueFn(owner, repo, issueNumber, labelName)
+	fn := m.removeLabelFromIssueFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, issueNumber, labelName)
 	}
 	return nil
 }
 
 func (m *mockGitHubClient) AddComment(owner, repo string, issueNumber int, body string) error {
+	m.mu.Lock()
 	m.addCommentCalls = append(m.addCommentCalls, addCommentCall{owner, repo, issueNumber, body})
-	if m.addCommentFn != nil {
-		return m.addCommentFn(owner, repo, issueNumber, body)
+	fn := m.addCommentFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, issueNumber, body)
 	}
 	return nil
 }
@@ -124,58 +151,89 @@ func (m *mockGitHubClient) AddCommentReaction(owner, repo string, commentDatabas
 }
 
 func (m *mockGitHubClient) UpdateComment(owner, repo string, commentDatabaseID int, body string) error {
-	if m.updateCommentFn != nil {
-		return m.updateCommentFn(owner, repo, commentDatabaseID, body)
+	m.mu.Lock()
+	fn := m.updateCommentFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, commentDatabaseID, body)
 	}
+	m.mu.Lock()
 	m.updateCommentCalls = append(m.updateCommentCalls, updateCommentCall{owner, repo, commentDatabaseID, body})
+	m.mu.Unlock()
 	return nil
 }
 
 func (m *mockGitHubClient) UpdateIssueBody(owner, repo string, issueNumber int, body string) error {
-	if m.updateIssueBodyFn != nil {
-		return m.updateIssueBodyFn(owner, repo, issueNumber, body)
+	m.mu.Lock()
+	fn := m.updateIssueBodyFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, issueNumber, body)
 	}
 	return nil
 }
 
 func (m *mockGitHubClient) UpdateProjectItemStatus(projectID, itemID, statusFieldID, statusOptionID string) error {
+	m.mu.Lock()
 	m.updateStatusCalls = append(m.updateStatusCalls, updateStatusCall{projectID, itemID, statusFieldID, statusOptionID})
-	if m.updateProjectItemStatusFn != nil {
-		return m.updateProjectItemStatusFn(projectID, itemID, statusFieldID, statusOptionID)
+	fn := m.updateProjectItemStatusFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(projectID, itemID, statusFieldID, statusOptionID)
 	}
 	return nil
 }
 
-func (m *mockGitHubClient) GetIssueBody(owner, repo string, issueNumber int) (string, error) {
-	if m.getIssueBodyFn != nil {
-		return m.getIssueBodyFn(owner, repo, issueNumber)
-	}
-	return "", nil
-}
-
 func (m *mockGitHubClient) FindPRForIssue(owner, repo string, issueNumber int) (int, error) {
-	if m.findPRForIssueFn != nil {
-		return m.findPRForIssueFn(owner, repo, issueNumber)
+	m.mu.Lock()
+	fn := m.findPRForIssueFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, issueNumber)
 	}
 	return 0, nil
 }
 
 func (m *mockGitHubClient) MergePR(owner, repo string, prNumber int) error {
+	m.mu.Lock()
 	m.mergePRCalls = append(m.mergePRCalls, mergePRCall{owner, repo, prNumber})
-	if m.mergePRFn != nil {
-		return m.mergePRFn(owner, repo, prNumber)
+	fn := m.mergePRFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, prNumber)
 	}
 	return nil
 }
 
+func (m *mockGitHubClient) GetIssueBody(owner, repo string, issueNumber int) (string, error) {
+	m.mu.Lock()
+	fn := m.getIssueBodyFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, issueNumber)
+	}
+	return "", nil
+}
+
 func (m *mockGitHubClient) CreateDraftPR(owner, repo, title, head, base string, issueNumber int) (int, error) {
-	if m.createDraftPRFn != nil {
-		return m.createDraftPRFn(owner, repo, title, head, base, issueNumber)
+	m.mu.Lock()
+	m.createDraftPRCalls = append(m.createDraftPRCalls, createDraftPRCall{owner, repo, title, head, base, issueNumber})
+	fn := m.createDraftPRFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, title, head, base, issueNumber)
 	}
 	return 0, nil
 }
 
 func (m *mockGitHubClient) MarkPRReady(owner, repo string, prNumber int) error {
+	m.mu.Lock()
+	m.markPRReadyCalls = append(m.markPRReadyCalls, markPRReadyCall{owner, repo, prNumber})
+	fn := m.markPRReadyFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, prNumber)
+	}
 	return nil
 }
 
@@ -187,7 +245,9 @@ func (m *mockGitHubClient) RateLimitStats() (gh.RateLimitStats, gh.RateLimitStat
 }
 
 // mockClaudeInvoker implements ClaudeInvoker for testing.
+// mu protects calls for concurrent-safe access.
 type mockClaudeInvoker struct {
+	mu       sync.Mutex
 	invokeFn func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error)
 	calls    []claudeInvokeCall
 }
@@ -201,9 +261,12 @@ type claudeInvokeCall struct {
 }
 
 func (m *mockClaudeInvoker) Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+	m.mu.Lock()
 	m.calls = append(m.calls, claudeInvokeCall{stage.Name, issue.Number, resume, workDir, modelOverride})
-	if m.invokeFn != nil {
-		return m.invokeFn(stage, issue, newComments, resume, workDir, modelOverride)
+	fn := m.invokeFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(stage, issue, newComments, resume, workDir, modelOverride)
 	}
 	return "mock output", false, TokenUsage{}, nil
 }
