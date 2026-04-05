@@ -232,8 +232,14 @@ func (e *Engine) poll(ctx context.Context) error {
 	// Deep-fetch details (comments, linked PRs) only for items that pass the
 	// shallow pre-filter. This avoids the expensive nested GraphQL cost for
 	// items that can be ruled out by status, labels, or updatedAt alone.
+	// Filter repo early to avoid wasting deep-fetch API points on other repos.
+	repoFilter := fmt.Sprintf("%s/%s", e.cfg.Owner, e.cfg.Repo)
+
 	var deepFetched int
 	for i := range board.Items {
+		if board.Items[i].Repo != "" && board.Items[i].Repo != repoFilter {
+			continue
+		}
 		if !e.itemMayNeedWork(board.Items[i]) {
 			continue
 		}
@@ -247,9 +253,16 @@ func (e *Engine) poll(ctx context.Context) error {
 		e.logf(0, "poll", "deep-fetched details for %d item(s)\n", deepFetched)
 	}
 
+	// Build the expected repo name for filtering (e.g., "verveguy/liminis").
+	expectedRepo := fmt.Sprintf("%s/%s", e.cfg.Owner, e.cfg.Repo)
+
 	var dispatched int
 	for _, item := range board.Items {
 		item := item
+		// Skip items from other repos on the same project board.
+		if item.Repo != "" && item.Repo != expectedRepo {
+			continue
+		}
 		// Full check including comments (populated by deep fetch above).
 		if !e.itemNeedsWork(item) {
 			continue
