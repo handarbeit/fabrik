@@ -175,20 +175,17 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 }
 
 // commentMaxTurns returns the effective max-turns limit for comment processing.
-// If CommentMaxTurns > 0, that value is used explicitly. Otherwise it falls back
-// to min(MaxTurns, 15) when MaxTurns > 0, or 15 when MaxTurns is unlimited (0).
-// This ensures comment sessions are always bounded independently of the main stage budget.
+// If CommentMaxTurns > 0, that value is used explicitly. Otherwise it uses
+// the stage's MaxTurns (same budget as a stage run). If both are 0 (unlimited),
+// defaults to 50 as a safety cap.
 func commentMaxTurns(stage *stages.Stage) int {
 	if stage.CommentMaxTurns > 0 {
 		return stage.CommentMaxTurns
 	}
 	if stage.MaxTurns > 0 {
-		if stage.MaxTurns < 15 {
-			return stage.MaxTurns
-		}
-		return 15
+		return stage.MaxTurns
 	}
-	return 15
+	return 50
 }
 
 func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOverride string, maxTurns int) []string {
