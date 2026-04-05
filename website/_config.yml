@@ -8,6 +8,11 @@ baseurl: "/fabrik"
 github_username: tenaciousvc
 github_repo: fabrik
 
+# Plugins
+plugins:
+  - jekyll-feed
+  - jekyll-seo-tag
+
 # Build settings
 markdown: kramdown
 kramdown:
