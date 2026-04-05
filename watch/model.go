@@ -262,7 +262,7 @@ func (m *WatchModel) fetchGitHub() {
 	m.github.title = issue.Title
 	m.github.state = issue.State
 	m.github.labels = issue.Labels
-	m.commentCnt = issue.Comments
+	m.github.commentCnt = issue.Comments
 
 	// Discover the linked PR by convention (branch fabrik/issue-N).
 	// Cache the PR number once found; re-fetch details on each poll.
@@ -336,7 +336,11 @@ func (m WatchModel) View() string {
 	}
 
 	// PR/CI row
-	b.WriteString(m.prStatusLine())
+	prLine := m.prStatusLine()
+	if m.github.commentCnt > 0 {
+		prLine += dimStyle.Render(fmt.Sprintf("  |  %d comments", m.github.commentCnt))
+	}
+	b.WriteString(prLine)
 	b.WriteString("\n\n")
 
 	// ── Live output viewport ──
