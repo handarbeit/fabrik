@@ -17,19 +17,20 @@ import (
 
 // HistoryEntry records a completed job for the history pane.
 type HistoryEntry struct {
-	IssueNumber    int
-	Title          string
-	StageName      string
-	StageModel     string // model configured for the stage; empty means use claude default
-	IsComment      bool
+	IssueNumber int
+	Repo        string // "owner/repo" — empty for single-repo projects
+	Title       string
+	StageName   string
+	StageModel  string // model configured for the stage; empty means use claude default
+	IsComment   bool
 	Success        bool
 	Completed      bool
 	BlockedOnInput bool
-	Duration       time.Duration
-	CompletedAt    time.Time
-	TurnsUsed      int
-	MaxTurns       int
-	CostUSD        float64
+	Duration    time.Duration
+	CompletedAt time.Time
+	TurnsUsed   int
+	MaxTurns    int
+	CostUSD     float64
 }
 
 // activeJob tracks an in-flight worker.
@@ -317,19 +318,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case JobCompletedEvent:
 		delete(m.active, ev.IssueNumber)
 		entry := HistoryEntry{
-			IssueNumber:    ev.IssueNumber,
-			Title:          ev.Title,
-			StageName:      ev.StageName,
-			StageModel:     ev.StageModel,
-			IsComment:      ev.IsComment,
+			IssueNumber: ev.IssueNumber,
+			Title:       ev.Title,
+			StageName:   ev.StageName,
+			StageModel:  ev.StageModel,
+			IsComment:   ev.IsComment,
 			Success:        ev.Success,
 			Completed:      ev.Completed,
 			BlockedOnInput: ev.BlockedOnInput,
-			Duration:       ev.Duration,
-			CompletedAt:    ev.CompletedAt,
-			TurnsUsed:      ev.TurnsUsed,
-			MaxTurns:       ev.MaxTurns,
-			CostUSD:        ev.CostUSD,
+			Duration:    ev.Duration,
+			CompletedAt: ev.CompletedAt,
+			TurnsUsed:   ev.TurnsUsed,
+			MaxTurns:    ev.MaxTurns,
+			CostUSD:     ev.CostUSD,
 		}
 		m.history = append(m.history, entry)
 		SaveHistory(m.history)
@@ -417,7 +418,7 @@ func (m *Model) updateHistoryViewport() {
 	m.historyVP.SetContent(strings.Join(lines, "\n"))
 
 	// Update viewport height within the overall layout.
-	historyHeight := max(m.height-headerHeight()-activeHeight(len(m.active))-footerHeight()-3, 3)
+	historyHeight := max(m.height-headerHeight()-activeHeight(len(m.active))-footerHeight()-4, 3)
 	m.historyVP.Width = innerWidth
 	m.historyVP.Height = historyHeight
 	// Scroll to top (newest) on update.
@@ -535,20 +536,21 @@ func (m Model) viewActive() string {
 		lines = append(lines, line)
 	}
 
-	// Cap visible lines to fit within activeHeight.
-	// Reserve 1 slot for the "… N more" indicator so total lines == maxLines.
+	// Cap visible lines to fit within activeHeight
 	maxLines := activeHeight(len(m.active)) - 3 // subtract title + border
 	if len(lines) > maxLines && maxLines > 0 {
-		display := maxLines - 1 // job slots; 1 slot reserved for "… N more"
-		start := m.activeIdx - display/2
+		// Show lines around the selected index
+		start := m.activeIdx - maxLines/2
 		if start < 0 {
 			start = 0
 		}
-		if start+display > len(lines) {
-			start = max(len(lines)-display, 0)
+		if start+maxLines > len(lines) {
+			start = max(len(lines)-maxLines, 0)
 		}
-		lines = lines[start : start+display]
-		lines = append(lines, dimStyle.Render(fmt.Sprintf("  … %d more", len(nums)-display)))
+		lines = lines[start : start+maxLines]
+		if start > 0 || start+maxLines < len(nums) {
+			lines = append(lines, dimStyle.Render(fmt.Sprintf("  … %d more", len(nums)-maxLines)))
+		}
 	}
 
 	hint := ""
@@ -667,7 +669,7 @@ func (m Model) openLogViewerCmd(logDir string) tea.Cmd {
 	// Shell-quote path components so directories or binaries with spaces work correctly.
 	if strings.HasSuffix(latest, ".json") {
 		return m.openTerminalCmd(fmt.Sprintf(
-			"cd %s && cat %s | %s stream-filter | less -R",
+			"cd %s && cat %s | %s _stream-filter | less -R",
 			shellQuote(logDir), shellQuote(latest), shellQuote(fabrikBin)))
 	}
 	return m.openTerminalCmd(fmt.Sprintf("cd %s && less +F %s", shellQuote(logDir), shellQuote(latest)))

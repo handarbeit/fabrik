@@ -320,6 +320,100 @@ func (wm *WorktreeManager) writeGitExclude(wtDir string, issueNumber int) {
 	}
 }
 
+// migrateWorktrees scans worktreeRoot for old-style issue-N/ directories and moves
+// each one to the per-repo layout <repoName>/issue-N/ using git worktree move.
+// This is called once at startup before any workers dispatch.
+// logfn is optional; pass nil to suppress output.
+func migrateWorktrees(worktreeRoot string, logfn func(string)) {
+	entries, err := os.ReadDir(worktreeRoot)
+	if err != nil {
+		return // no worktrees directory yet, nothing to migrate
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		// Old-style entries match issue-N pattern; new-style are just repo names.
+		if len(name) < 7 || name[:6] != "issue-" {
+			continue
+		}
+		oldPath := filepath.Join(worktreeRoot, name)
+
+		// Read the git remote to determine which repo this worktree belongs to.
+		cmd := exec.Command("git", "remote", "get-url", "origin")
+		cmd.Dir = oldPath
+		out, err := cmd.Output()
+		if err != nil {
+			if logfn != nil {
+				logfn(fmt.Sprintf("warn: cannot read remote for worktree %s — leaving in place\n", oldPath))
+			}
+			continue
+		}
+		remoteURL := strings.TrimSpace(string(out))
+		rName := repoNameFromURL(remoteURL)
+		if rName == "" {
+			if logfn != nil {
+				logfn(fmt.Sprintf("warn: cannot parse repo name from remote URL %q for %s — leaving in place\n", remoteURL, oldPath))
+			}
+			continue
+		}
+
+		// Compute new path: worktreeRoot/<repoName>/issue-N/
+		newDir := filepath.Join(worktreeRoot, rName)
+		newPath := filepath.Join(newDir, name)
+
+		if _, err := os.Stat(newPath); err == nil {
+			if logfn != nil {
+				logfn(fmt.Sprintf("warn: migration target %s already exists — skipping %s\n", newPath, oldPath))
+			}
+			continue
+		}
+
+		if err := os.MkdirAll(newDir, 0755); err != nil {
+			if logfn != nil {
+				logfn(fmt.Sprintf("warn: cannot create dir %s: %v\n", newDir, err))
+			}
+			continue
+		}
+
+		// git worktree move requires git ≥ 2.17. If it fails, log and leave in place.
+		// We run git worktree move from the worktree itself (it finds the main repo).
+		moveCmd := exec.Command("git", "worktree", "move", oldPath, newPath)
+		moveCmd.Dir = oldPath
+		if out, err := moveCmd.CombinedOutput(); err != nil {
+			if logfn != nil {
+				logfn(fmt.Sprintf("warn: git worktree move %s → %s failed: %s\n",
+					oldPath, newPath, strings.TrimSpace(string(out))))
+			}
+			continue
+		}
+		if logfn != nil {
+			logfn(fmt.Sprintf("migrated %s → %s\n", oldPath, newPath))
+		}
+	}
+}
+
+// repoNameFromURL parses a git remote URL and returns just the repository name.
+// Handles both HTTPS (https://github.com/owner/repo.git) and
+// SSH (git@github.com:owner/repo.git) formats.
+func repoNameFromURL(remoteURL string) string {
+	// Strip trailing .git
+	u := strings.TrimSuffix(remoteURL, ".git")
+	// Find the last '/' or ':'
+	lastSlash := strings.LastIndex(u, "/")
+	lastColon := strings.LastIndex(u, ":")
+	idx := lastSlash
+	if lastColon > idx {
+		idx = lastColon
+	}
+	if idx < 0 || idx+1 >= len(u) {
+		return ""
+	}
+	return u[idx+1:]
+}
+
 // Prune removes stale worktree registrations from git.
 // Should be called once per poll cycle, before workers spawn — never during concurrent work.
 func (wm *WorktreeManager) Prune() {
