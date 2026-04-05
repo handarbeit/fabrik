@@ -143,7 +143,7 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	}
 
 	prompt := buildPrompt(stage, issue, newComments)
-	args := buildClaudeArgs(stage, issue.Number, resume, modelOverride)
+	args := buildClaudeArgs(stage, issue.Number, resume, modelOverride, stage.MaxTurns)
 
 	output, _, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name)
 	usage.MaxTurns = stage.MaxTurns
@@ -166,14 +166,32 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 	}
 
 	prompt := buildCommentReviewPrompt(stage, issue, comments)
-	args := buildClaudeArgs(stage, issue.Number, true, modelOverride) // resume existing session
+	limit := commentMaxTurns(stage)
+	args := buildClaudeArgs(stage, issue.Number, true, modelOverride, limit) // resume existing session
 
 	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review")
-	usage.MaxTurns = stage.MaxTurns
+	usage.MaxTurns = limit
 	return output, completed, usage, err
 }
 
-func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOverride string) []string {
+// commentMaxTurns returns the effective max-turns limit for comment processing.
+// If CommentMaxTurns > 0, that value is used explicitly. Otherwise it falls back
+// to min(MaxTurns, 15) when MaxTurns > 0, or 15 when MaxTurns is unlimited (0).
+// This ensures comment sessions are always bounded independently of the main stage budget.
+func commentMaxTurns(stage *stages.Stage) int {
+	if stage.CommentMaxTurns > 0 {
+		return stage.CommentMaxTurns
+	}
+	if stage.MaxTurns > 0 {
+		if stage.MaxTurns < 15 {
+			return stage.MaxTurns
+		}
+		return 15
+	}
+	return 15
+}
+
+func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOverride string, maxTurns int) []string {
 	args := []string{
 		"--output-format", "json",
 		"--verbose",
@@ -197,8 +215,8 @@ func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOve
 		args = append(args, "--model", stage.Model)
 	}
 
-	if stage.MaxTurns > 0 {
-		args = append(args, "--max-turns", fmt.Sprintf("%d", stage.MaxTurns))
+	if maxTurns > 0 {
+		args = append(args, "--max-turns", fmt.Sprintf("%d", maxTurns))
 	}
 
 	for _, tool := range stage.AllowedTools {
