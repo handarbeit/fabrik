@@ -107,6 +107,21 @@ Technical risks identified during research.
 
 **On retry**: You'll resume your existing session. Check what you've already found and continue from there rather than starting over.
 
+## Complexity Assessment
+
+Before completing, assess whether this issue warrants using a more capable model for implementation. If the issue involves **three or more** of the following, include an open question recommending the `model:opus` label:
+
+- Changes spanning 5+ files across multiple packages
+- New interfaces, types, or architectural patterns
+- Concurrency changes (mutexes, goroutines, channels)
+- Complex merge/rebase scenarios with likely conflicts
+- Multiple interacting subsystems that must change in coordination
+
+If warranted, add this as a technical question:
+> "This issue is architecturally complex (brief reason). Consider adding the `model:opus` label to use a more capable model for Implement and Review stages."
+
+This is a recommendation, not a blocker — do not use `FABRIK_BLOCKED_ON_INPUT` for this. Include it alongside other open questions so the user can decide.
+
 ## Quality Checklist
 
 Before signaling completion, verify:
