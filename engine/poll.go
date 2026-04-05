@@ -348,6 +348,7 @@ func (e *Engine) poll(ctx context.Context) error {
 		isComment := len(e.findNewComments(item)) > 0
 		startTime := time.Now()
 		iKey := issueKey(item, e.defaultRepo())
+		itemRepo := itemOwnerRepoString(item, e.defaultRepo())
 		e.inFlight.Store(iKey, item.IsPR)
 		e.wg.Add(1)
 		dispatched++
@@ -357,7 +358,7 @@ func (e *Engine) poll(ctx context.Context) error {
 			defer e.inFlight.Delete(iKey)
 			e.emitStructural(tui.JobStartedEvent{
 				IssueNumber: item.Number,
-				Repo:        iKey,
+				Repo:        itemRepo,
 				Title:       item.Title,
 				StageName:   stageName,
 				IsComment:   isComment,
@@ -374,7 +375,7 @@ func (e *Engine) poll(ctx context.Context) error {
 			e.mu.Unlock()
 			e.emitStructural(tui.JobCompletedEvent{
 				IssueNumber:    item.Number,
-				Repo:           iKey,
+				Repo:           itemRepo,
 				Title:          item.Title,
 				StageName:      stageName,
 				StageModel:     stageModel,
