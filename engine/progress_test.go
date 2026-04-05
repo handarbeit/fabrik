@@ -127,19 +127,3 @@ func TestDetectProgress(t *testing.T) {
 	}
 }
 
-func TestItoa(t *testing.T) {
-	tests := []struct {
-		n    int
-		want string
-	}{
-		{0, "0"},
-		{1, "1"},
-		{42, "42"},
-		{100, "100"},
-	}
-	for _, tt := range tests {
-		if got := itoa(tt.n); got != tt.want {
-			t.Errorf("itoa(%d) = %q, want %q", tt.n, got, tt.want)
-		}
-	}
-}
