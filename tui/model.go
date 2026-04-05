@@ -442,7 +442,7 @@ func (m *Model) updateHistoryViewport() {
 	m.historyVP.SetContent(strings.Join(lines, "\n"))
 
 	// Update viewport height within the overall layout.
-	historyHeight := max(m.height-headerHeight()-activeHeight(len(m.active))-footerHeight()-4, 3)
+	historyHeight := max(m.height-headerHeight()-activeHeight(len(m.active))-footerHeight()-3, 3)
 	m.historyVP.Width = innerWidth
 	m.historyVP.Height = historyHeight
 	// Scroll to top (newest) on update.
@@ -571,6 +571,7 @@ func (m Model) viewActive() string {
 		if start+maxLines > len(lines) {
 			start = max(len(lines)-maxLines, 0)
 		}
+		if start > 0 || start+maxLines < len(keys) { maxLines-- }
 		lines = lines[start : start+maxLines]
 		if start > 0 || start+maxLines < len(keys) {
 			lines = append(lines, dimStyle.Render(fmt.Sprintf("  … %d more", len(keys)-maxLines)))
@@ -646,7 +647,9 @@ func footerHeight() int {
 // activeHeight returns the approximate line height of the active pane.
 // Capped to avoid pushing history off screen on small terminals.
 func activeHeight(n int) int {
-	return min(max(n+1, 2)+2, 10) // title + one line per job (min 2) + border, max 10
+	base := max(n+1, 2) + 2
+	if base > 10 { return 11 }
+	return base
 }
 
 // sortedActiveKeys returns job keys from the active map in sorted order.
