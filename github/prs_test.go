@@ -129,3 +129,113 @@ func TestMergePR_FalseMergeable(t *testing.T) {
 		t.Fatalf("expected ErrNotMergeable for mergeable=false, got: %v", err)
 	}
 }
+
+func TestFetchPRDetails_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if r.URL.Path != "/repos/owner/repo/pulls/7" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"number": 7,
+			"title":  "My PR",
+			"state":  "open",
+			"merged": false,
+			"draft":  true,
+			"head":   map[string]string{"sha": "abc123def"},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	pr, err := c.FetchPRDetails("owner", "repo", 7)
+	if err != nil {
+		t.Fatalf("FetchPRDetails: %v", err)
+	}
+	if pr.Number != 7 {
+		t.Errorf("Number = %d, want 7", pr.Number)
+	}
+	if pr.Title != "My PR" {
+		t.Errorf("Title = %q, want 'My PR'", pr.Title)
+	}
+	if pr.State != "open" {
+		t.Errorf("State = %q, want 'open'", pr.State)
+	}
+	if pr.Merged {
+		t.Error("Merged should be false")
+	}
+	if !pr.Draft {
+		t.Error("Draft should be true")
+	}
+	if pr.HeadSHA != "abc123def" {
+		t.Errorf("HeadSHA = %q, want 'abc123def'", pr.HeadSHA)
+	}
+}
+
+func TestFetchPRDetails_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404)
+		w.Write([]byte(`{"message":"Not Found"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	_, err := c.FetchPRDetails("owner", "repo", 999)
+	if err == nil {
+		t.Fatal("expected error for 404")
+	}
+}
+
+func TestFetchCheckRuns_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if r.URL.Path != "/repos/owner/repo/commits/deadbeef/check-runs" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"check_runs": []map[string]string{
+				{"name": "ci/test", "status": "completed", "conclusion": "success"},
+				{"name": "ci/lint", "status": "in_progress", "conclusion": ""},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	runs, err := c.FetchCheckRuns("owner", "repo", "deadbeef")
+	if err != nil {
+		t.Fatalf("FetchCheckRuns: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("len(runs) = %d, want 2", len(runs))
+	}
+	if runs[0].Name != "ci/test" || runs[0].Status != "completed" || runs[0].Conclusion != "success" {
+		t.Errorf("runs[0] = %+v", runs[0])
+	}
+	if runs[1].Name != "ci/lint" || runs[1].Status != "in_progress" || runs[1].Conclusion != "" {
+		t.Errorf("runs[1] = %+v", runs[1])
+	}
+}
+
+func TestFetchCheckRuns_Empty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"check_runs": []interface{}{}})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	runs, err := c.FetchCheckRuns("owner", "repo", "abc")
+	if err != nil {
+		t.Fatalf("FetchCheckRuns: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Errorf("expected 0 runs, got %d", len(runs))
+	}
+}
