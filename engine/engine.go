@@ -23,12 +23,12 @@ type Config struct {
 	Yolo          bool
 	AutoUpgrade   bool
 	PollSeconds   int
-	MaxConcurrent int
+	MaxConcurrent   int
 	MaxRetries      int // deprecated: alias for MaxLoops
 	MaxLoops        int
 	MaxTotalRetries int
 	DebugOutput     bool
-	PluginDir     string
+	PluginDir       string
 	Stages        []*stages.Stage
 	// ReadyCh is closed once Run() has registered signal handlers. Tests use
 	// this to avoid sending SIGINT before signal.Notify is installed.
