@@ -6,6 +6,69 @@ import (
 	"net/url"
 )
 
+// PRDetails holds the fields from a GitHub pull request needed by fabrik watch.
+type PRDetails struct {
+	Number  int
+	Title   string
+	State   string // "open", "closed"
+	Merged  bool
+	Draft   bool
+	HeadSHA string
+}
+
+// FetchPRDetails retrieves a single pull request via the REST API.
+func (c *Client) FetchPRDetails(owner, repo string, prNumber int) (*PRDetails, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", c.baseURL, owner, repo, prNumber)
+	var raw struct {
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		State  string `json:"state"`
+		Merged bool   `json:"merged"`
+		Draft  bool   `json:"draft"`
+		Head   struct {
+			SHA string `json:"sha"`
+		} `json:"head"`
+	}
+	if err := c.restGetJSON(apiURL, &raw); err != nil {
+		return nil, fmt.Errorf("fetching PR #%d: %w", prNumber, err)
+	}
+	return &PRDetails{
+		Number:  raw.Number,
+		Title:   raw.Title,
+		State:   raw.State,
+		Merged:  raw.Merged,
+		Draft:   raw.Draft,
+		HeadSHA: raw.Head.SHA,
+	}, nil
+}
+
+// CheckRun holds the result of a single CI check run.
+type CheckRun struct {
+	Name       string
+	Status     string // "queued", "in_progress", "completed"
+	Conclusion string // "success", "failure", "neutral", "cancelled", "skipped", "timed_out", "action_required", or ""
+}
+
+// FetchCheckRuns retrieves check runs for a given commit SHA via the REST API.
+func (c *Client) FetchCheckRuns(owner, repo, sha string) ([]CheckRun, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/commits/%s/check-runs", c.baseURL, owner, repo, sha)
+	var raw struct {
+		CheckRuns []struct {
+			Name       string `json:"name"`
+			Status     string `json:"status"`
+			Conclusion string `json:"conclusion"`
+		} `json:"check_runs"`
+	}
+	if err := c.restGetJSON(apiURL, &raw); err != nil {
+		return nil, fmt.Errorf("fetching check runs for %s: %w", sha, err)
+	}
+	out := make([]CheckRun, len(raw.CheckRuns))
+	for i, cr := range raw.CheckRuns {
+		out[i] = CheckRun{Name: cr.Name, Status: cr.Status, Conclusion: cr.Conclusion}
+	}
+	return out, nil
+}
+
 // ErrNotMergeable is returned by MergePR when the PR cannot be merged because
 // GitHub reports mergeable as false or null (not yet computed). Callers may
 // use errors.Is(err, github.ErrNotMergeable) to distinguish this from API failures.
