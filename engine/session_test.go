@@ -126,3 +126,61 @@ func TestSessionFile(t *testing.T) {
 	}
 }
 
+func TestReadSessionID_FileAbsent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	got := ReadSessionID(999, "Research")
+	if got != "" {
+		t.Errorf("expected empty string for absent file, got %q", got)
+	}
+}
+
+func TestReadSessionID_FileEmpty(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".fabrik", "sessions", "issue-1")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "Research.session"), []byte(""), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got := ReadSessionID(1, "Research")
+	if got != "" {
+		t.Errorf("expected empty string for empty file, got %q", got)
+	}
+}
+
+func TestReadSessionID_ValidID(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".fabrik", "sessions", "issue-42")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	wantID := "abc123def456"
+	if err := os.WriteFile(filepath.Join(dir, "Plan.session"), []byte(wantID), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got := ReadSessionID(42, "Plan")
+	if got != wantID {
+		t.Errorf("expected %q, got %q", wantID, got)
+	}
+}
+
+func TestReadSessionID_WhitespacePaddedID(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".fabrik", "sessions", "issue-7")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	wantID := "session-xyz"
+	if err := os.WriteFile(filepath.Join(dir, "Implement.session"), []byte("  "+wantID+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got := ReadSessionID(7, "Implement")
+	if got != wantID {
+		t.Errorf("expected %q after trimming, got %q", wantID, got)
+	}
+}
