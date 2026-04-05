@@ -1023,14 +1023,16 @@ func TestProcessItem_CleanupStage_DirtyWorktree(t *testing.T) {
 		t.Fatalf("processItem: %v", err)
 	}
 
-	// Worktree directory should still exist (dirty → skip)
-	if _, err := os.Stat(wm.WorktreeDir(43)); os.IsNotExist(err) {
-		t.Error("worktree directory should NOT have been removed for dirty worktree")
+	// Worktree directory should be removed even when dirty
+	if _, err := os.Stat(wm.WorktreeDir(43)); !os.IsNotExist(err) {
+		t.Error("worktree directory should have been removed even for dirty worktree")
 	}
 
-	// No completion label should have been added
-	if len(client.addLabelCalls) != 0 {
-		t.Errorf("expected no label calls for dirty worktree, got %d", len(client.addLabelCalls))
+	// Completion label should have been added
+	if len(client.addLabelCalls) != 1 {
+		t.Errorf("expected 1 label call, got %d", len(client.addLabelCalls))
+	} else if client.addLabelCalls[0].labelName != "stage:Done:complete" {
+		t.Errorf("expected label stage:Done:complete, got %s", client.addLabelCalls[0].labelName)
 	}
 }
 
