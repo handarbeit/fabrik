@@ -33,8 +33,10 @@ type Config struct {
 	TUI           bool
 	PollSeconds   int
 	MaxConcurrent int
-	MaxRetries    int
-	DebugOutput   bool
+	MaxRetries      int // deprecated: use MaxLoops
+	MaxLoops        int
+	MaxTotalRetries int
+	DebugOutput     bool
 	PluginDir     string
 	Terminal      string
 }
@@ -74,7 +76,9 @@ func Execute() error {
 	flag.BoolVar(&cfg.TUI, "tui", false, "Enable the interactive TUI dashboard (default: plain-text log output)")
 	flag.IntVar(&cfg.PollSeconds, "poll", 30, "Polling interval in seconds")
 	flag.IntVar(&cfg.MaxConcurrent, "max-concurrent", 5, "Maximum number of concurrent issue workers")
-	flag.IntVar(&cfg.MaxRetries, "max-retries", 3, "Max failed stage attempts before pausing the issue (0 = unlimited)")
+	flag.IntVar(&cfg.MaxLoops, "max-loops", 3, "Max consecutive no-progress stage attempts before pausing (0 = unlimited)")
+	flag.IntVar(&cfg.MaxRetries, "max-retries", 0, "Deprecated: use --max-loops instead")
+	flag.IntVar(&cfg.MaxTotalRetries, "max-total-retries", 0, "Max total stage attempts regardless of progress (0 = unlimited)")
 	flag.BoolVar(&cfg.DebugOutput, "debug-output", false, "Save Claude stage output to .fabrik/debug/ for debugging")
 	flag.StringVar(&cfg.PluginDir, "plugin-dir", "", "Path to Fabrik plugin directory (for development; overrides installed plugin)")
 	flag.StringVar(&cfg.Terminal, "terminal", "", "Terminal emulator to use for log viewer (terminal, iterm2, ghostty, kitty, alacritty, warp)")
@@ -182,19 +186,45 @@ func Execute() error {
 			}
 		}
 	}
-	if cfg.MaxRetries == 3 {
-		if v := os.Getenv("FABRIK_MAX_RETRIES"); v != "" {
+	if cfg.MaxLoops == 3 {
+		if v := os.Getenv("FABRIK_MAX_LOOPS"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-				cfg.MaxRetries = n
+				cfg.MaxLoops = n
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_RETRIES=%q is invalid (must be a non-negative integer); using default %d\n", v, cfg.MaxRetries)
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_LOOPS=%q is invalid (must be a non-negative integer); using default %d\n", v, cfg.MaxLoops)
+			}
+		} else if pc.MaxLoops != nil {
+			if *pc.MaxLoops < 0 {
+				fmt.Fprintf(os.Stderr, "[warn] config.yaml max_loops=%d is invalid (must be a non-negative integer); using default %d\n", *pc.MaxLoops, cfg.MaxLoops)
+			} else {
+				cfg.MaxLoops = *pc.MaxLoops
+			}
+		} else if v := os.Getenv("FABRIK_MAX_RETRIES"); v != "" {
+			fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_RETRIES is deprecated — use FABRIK_MAX_LOOPS instead\n")
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				cfg.MaxLoops = n
 			}
 		} else if pc.MaxRetries != nil {
-			if *pc.MaxRetries < 0 {
-				fmt.Fprintf(os.Stderr, "[warn] config.yaml max_retries=%d is invalid (must be a non-negative integer); using default %d\n", *pc.MaxRetries, cfg.MaxRetries)
-			} else {
-				cfg.MaxRetries = *pc.MaxRetries
+			fmt.Fprintf(os.Stderr, "[warn] config.yaml max_retries is deprecated — use max_loops instead\n")
+			if *pc.MaxRetries >= 0 {
+				cfg.MaxLoops = *pc.MaxRetries
 			}
+		}
+	}
+	// --max-retries flag used explicitly (non-zero and MaxLoops still at default)
+	if cfg.MaxRetries > 0 && cfg.MaxLoops == 3 {
+		fmt.Fprintf(os.Stderr, "[warn] --max-retries is deprecated — use --max-loops instead\n")
+		cfg.MaxLoops = cfg.MaxRetries
+	}
+	if cfg.MaxTotalRetries == 0 {
+		if v := os.Getenv("FABRIK_MAX_TOTAL_RETRIES"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				cfg.MaxTotalRetries = n
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_TOTAL_RETRIES=%q is invalid (must be a non-negative integer); using default 0\n", v)
+			}
+		} else if pc.MaxTotalRetries != nil && *pc.MaxTotalRetries >= 0 {
+			cfg.MaxTotalRetries = *pc.MaxTotalRetries
 		}
 	}
 	if !cfg.AutoUpgrade {
@@ -277,10 +307,13 @@ func Execute() error {
 		fmt.Printf("  auto-upgrade: %v\n", cfg.AutoUpgrade)
 		fmt.Printf("  poll:    %ds\n", cfg.PollSeconds)
 		fmt.Printf("  workers: %d\n", cfg.MaxConcurrent)
-		if cfg.MaxRetries == 0 {
-			fmt.Printf("  max-retries: unlimited\n")
+		if cfg.MaxLoops == 0 {
+			fmt.Printf("  max-loops: unlimited\n")
 		} else {
-			fmt.Printf("  max-retries: %d\n", cfg.MaxRetries)
+			fmt.Printf("  max-loops: %d\n", cfg.MaxLoops)
+		}
+		if cfg.MaxTotalRetries > 0 {
+			fmt.Printf("  max-total-retries: %d\n", cfg.MaxTotalRetries)
 		}
 	}
 	fmt.Printf("  debug-output: %v\n", cfg.DebugOutput)
