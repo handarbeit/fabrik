@@ -1,9 +1,15 @@
 package github
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 )
+
+// ErrNotMergeable is returned by MergePR when the PR cannot be merged because
+// GitHub reports mergeable as false or null (not yet computed). Callers may
+// use errors.Is(err, github.ErrNotMergeable) to distinguish this from API failures.
+var ErrNotMergeable = errors.New("PR is not mergeable")
 
 // CreateDraftPR creates a draft pull request for the given issue branch.
 // Returns the PR number. Callers should first call FindPRForIssue to avoid duplicates.
@@ -91,4 +97,43 @@ func (c *Client) FindPRForIssue(owner, repo string, issueNumber int) (int, error
 		return 0, nil
 	}
 	return resp.Items[0].Number, nil
+}
+
+// MergePR merges the pull request identified by prNumber. It first checks
+// GitHub's mergeable status: if null (not yet computed) or false, it returns
+// ErrNotMergeable. It attempts a rebase merge first; if the repository does
+// not allow rebase merges (405), it falls back to a regular merge commit.
+func (c *Client) MergePR(owner, repo string, prNumber int) error {
+	// Check mergeable status.
+	prURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", c.baseURL, owner, repo, prNumber)
+	var prData struct {
+		Mergeable *bool `json:"mergeable"`
+	}
+	if err := c.restGetJSON(prURL, &prData); err != nil {
+		return fmt.Errorf("fetching PR mergeable status: %w", err)
+	}
+	if prData.Mergeable == nil || !*prData.Mergeable {
+		return ErrNotMergeable
+	}
+
+	mergeURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/merge", c.baseURL, owner, repo, prNumber)
+	var mergeResult struct {
+		Merged  bool   `json:"merged"`
+		Message string `json:"message"`
+	}
+
+	// Attempt rebase merge first.
+	err := c.restPutWithResponse(mergeURL, map[string]interface{}{"merge_method": "rebase"}, &mergeResult)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, ErrMethodNotAllowed) {
+		return fmt.Errorf("merging PR: %w", err)
+	}
+
+	// Rebase not allowed — fall back to merge commit.
+	if err := c.restPutWithResponse(mergeURL, map[string]interface{}{"merge_method": "merge"}, &mergeResult); err != nil {
+		return fmt.Errorf("merging PR (merge commit fallback): %w", err)
+	}
+	return nil
 }
