@@ -353,16 +353,17 @@ func migrateWorktrees(worktreeRoot string, logfn func(string)) {
 			continue
 		}
 		remoteURL := strings.TrimSpace(string(out))
-		rName := repoNameFromURL(remoteURL)
-		if rName == "" {
+		// Use "owner-repo" as the directory segment (matches registerWorktrees).
+		dirName := ownerRepoDirFromURL(remoteURL)
+		if dirName == "" {
 			if logfn != nil {
-				logfn(fmt.Sprintf("warn: cannot parse repo name from remote URL %q for %s — leaving in place\n", remoteURL, oldPath))
+				logfn(fmt.Sprintf("warn: cannot parse repo from remote URL %q for %s — leaving in place\n", remoteURL, oldPath))
 			}
 			continue
 		}
 
-		// Compute new path: worktreeRoot/<repoName>/issue-N/
-		newDir := filepath.Join(worktreeRoot, rName)
+		// Compute new path: worktreeRoot/<owner-repo>/issue-N/
+		newDir := filepath.Join(worktreeRoot, dirName)
 		newPath := filepath.Join(newDir, name)
 
 		if _, err := os.Stat(newPath); err == nil {
@@ -413,6 +414,32 @@ func repoNameFromURL(remoteURL string) string {
 		return ""
 	}
 	return u[idx+1:]
+}
+
+// ownerRepoDirFromURL parses a git remote URL and returns "owner-repo" for use
+// as a worktree directory segment. This matches the format used by registerWorktrees
+// to prevent cross-owner collisions when two orgs have repos with the same name.
+// Returns "" if the URL cannot be parsed to an owner/repo pair.
+func ownerRepoDirFromURL(remoteURL string) string {
+	// Strip trailing .git
+	u := strings.TrimSuffix(remoteURL, ".git")
+	// Normalize SSH format git@github.com:owner/repo → owner/repo
+	if colonIdx := strings.LastIndex(u, ":"); colonIdx >= 0 {
+		if slashIdx := strings.Index(u, "/"); slashIdx < 0 || slashIdx > colonIdx {
+			u = u[colonIdx+1:]
+		}
+	}
+	// Now u should be something like "https://github.com/owner/repo" or "owner/repo"
+	parts := strings.Split(u, "/")
+	if len(parts) < 2 {
+		return ""
+	}
+	owner := parts[len(parts)-2]
+	repo := parts[len(parts)-1]
+	if owner == "" || repo == "" {
+		return ""
+	}
+	return owner + "-" + repo
 }
 
 // Prune removes stale worktree registrations from git.
