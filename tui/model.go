@@ -417,7 +417,7 @@ func (m *Model) updateHistoryViewport() {
 	m.historyVP.SetContent(strings.Join(lines, "\n"))
 
 	// Update viewport height within the overall layout.
-	historyHeight := max(m.height-headerHeight()-activeHeight(len(m.active))-footerHeight()-4, 3)
+	historyHeight := max(m.height-headerHeight()-activeHeight(len(m.active))-footerHeight()-6, 3)
 	m.historyVP.Width = innerWidth
 	m.historyVP.Height = historyHeight
 	// Scroll to top (newest) on update.
@@ -535,21 +535,20 @@ func (m Model) viewActive() string {
 		lines = append(lines, line)
 	}
 
-	// Cap visible lines to fit within activeHeight
+	// Cap visible lines to fit within activeHeight.
+	// Reserve 1 slot for the "… N more" indicator so total lines == maxLines.
 	maxLines := activeHeight(len(m.active)) - 3 // subtract title + border
 	if len(lines) > maxLines && maxLines > 0 {
-		// Show lines around the selected index
-		start := m.activeIdx - maxLines/2
+		display := maxLines - 1 // job slots; 1 slot reserved for "… N more"
+		start := m.activeIdx - display/2
 		if start < 0 {
 			start = 0
 		}
-		if start+maxLines > len(lines) {
-			start = max(len(lines)-maxLines, 0)
+		if start+display > len(lines) {
+			start = max(len(lines)-display, 0)
 		}
-		lines = lines[start : start+maxLines]
-		if start > 0 || start+maxLines < len(nums) {
-			lines = append(lines, dimStyle.Render(fmt.Sprintf("  … %d more", len(nums)-maxLines)))
-		}
+		lines = lines[start : start+display]
+		lines = append(lines, dimStyle.Render(fmt.Sprintf("  … %d more", len(nums)-display)))
 	}
 
 	hint := ""
