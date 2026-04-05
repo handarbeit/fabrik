@@ -51,8 +51,10 @@ func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem
 		e.logf(item.Number, "warn", "could not add completion label: %v\n", err)
 	}
 
+	// fabrik:yolo label overrides stage.AutoAdvance — if the user
+	// explicitly labelled the issue for yolo, respect that over YAML config.
 	shouldAdvance := yoloActive
-	if stage.AutoAdvance != nil {
+	if stage.AutoAdvance != nil && !hasYoloLabel(item) {
 		shouldAdvance = *stage.AutoAdvance
 	}
 
