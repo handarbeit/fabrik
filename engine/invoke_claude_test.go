@@ -418,6 +418,91 @@ printf '%s\n' '{"result":"fallback output\nFABRIK_STAGE_COMPLETE\n","session_id"
 	}
 }
 
+// TestRunClaude_StdoutTeeToLogFile verifies that runClaude tees Claude's stdout
+// (NDJSON stream-json) to the .log file in real time via io.MultiWriter.
+// The test uses a fake claude binary that outputs NDJSON stream-json format
+// and asserts that the .log file contains the same NDJSON content.
+func TestRunClaude_StdoutTeeToLogFile(t *testing.T) {
+	binDir := t.TempDir()
+	fakeClaude := filepath.Join(binDir, "claude")
+	// Emit two NDJSON lines: one assistant message and one result (stream-json format).
+	ndjson := `{"type":"assistant","message":{"content":[{"type":"text","text":"hello from stream-json"}]}}
+{"type":"result","subtype":"success","result":"stage text\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_tee","num_turns":2,"total_cost_usd":0.002}
+`
+	// Write the NDJSON to a temp file so the fake binary can cat it.
+	ndjsonFile := filepath.Join(binDir, "output.ndjson")
+	if err := os.WriteFile(ndjsonFile, []byte(ndjson), 0600); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\ncat >/dev/null\ncat " + ndjsonFile + "\n"
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	os.Setenv("PATH", binDir+":"+origPath)
+	defer os.Setenv("PATH", origPath)
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "Tee",
+		Prompt:     "tee test",
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 200, Title: "Tee test"}
+	defer os.RemoveAll(SessionDir(200))
+	defer os.RemoveAll(LogDir(200))
+
+	output, completed, stats, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+	if !strings.Contains(output, "stage text") {
+		t.Errorf("output = %q, expected 'stage text'", output)
+	}
+	if !completed {
+		t.Error("expected completed=true")
+	}
+	if stats.TurnsUsed != 2 {
+		t.Errorf("TurnsUsed = %d, want 2", stats.TurnsUsed)
+	}
+
+	// Verify the .log file was created and contains the NDJSON content.
+	logDir := LogDir(200)
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		t.Fatalf("reading log dir %s: %v", logDir, err)
+	}
+	var logFiles []os.DirEntry
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".log") {
+			logFiles = append(logFiles, e)
+		}
+	}
+	if len(logFiles) == 0 {
+		t.Fatal("no .log file found in LogDir")
+	}
+	logContent, err := os.ReadFile(filepath.Join(logDir, logFiles[0].Name()))
+	if err != nil {
+		t.Fatalf("reading log file: %v", err)
+	}
+	// The .log file should contain the raw NDJSON written by the fake claude.
+	if !strings.Contains(string(logContent), `"type":"assistant"`) {
+		t.Errorf(".log file content = %q, expected to contain NDJSON assistant message", string(logContent))
+	}
+	if !strings.Contains(string(logContent), `"type":"result"`) {
+		t.Errorf(".log file content = %q, expected to contain NDJSON result message", string(logContent))
+	}
+	// Verify the session was saved from the result message.
+	data, err := os.ReadFile(sessionFile(200, "Tee"))
+	if err != nil {
+		t.Fatalf("reading session file: %v", err)
+	}
+	if string(data) != "sess_tee" {
+		t.Errorf("session = %q, want sess_tee", string(data))
+	}
+}
+
 func TestSaveDebugLog(t *testing.T) {
 	dir := t.TempDir()
 	orig, err := os.Getwd()

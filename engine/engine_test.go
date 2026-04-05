@@ -520,4 +520,3 @@ func TestItemNeedsWork_CleanupStage_PausedItem(t *testing.T) {
 		t.Error("paused cleanup stage item should not need work")
 	}
 }
-

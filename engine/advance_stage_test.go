@@ -89,4 +89,3 @@ func TestAdvanceToNextStage_MissingOption(t *testing.T) {
 		t.Fatal("expected error for missing option")
 	}
 }
-

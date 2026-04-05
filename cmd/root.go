@@ -47,9 +47,12 @@ func Execute() error {
 	if len(os.Args) > 1 && os.Args[1] == "upgrade" {
 		return runUpgrade(os.Args[2:])
 	}
-	if len(os.Args) > 1 && os.Args[1] == "_stream-filter" {
+	if len(os.Args) > 1 && (os.Args[1] == "stream-filter" || os.Args[1] == "_stream-filter") {
 		RunStreamFilter()
 		return nil
+	}
+	if len(os.Args) > 1 && os.Args[1] == "watch" {
+		return runWatch(os.Args[2:])
 	}
 	if len(os.Args) > 1 && os.Args[1] == "resume" {
 		return runResume(os.Args[2:])

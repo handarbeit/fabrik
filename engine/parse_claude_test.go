@@ -225,4 +225,3 @@ func TestExtractUpdatedBody(t *testing.T) {
 		})
 	}
 }
-
