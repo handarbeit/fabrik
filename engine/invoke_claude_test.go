@@ -589,9 +589,9 @@ func TestCommentMaxTurns(t *testing.T) {
 			want:            1,
 		},
 		{
-			name:     "default when MaxTurns > 15: capped at 15",
+			name:     "default when MaxTurns > 15: uses MaxTurns",
 			maxTurns: 50,
-			want:     15,
+			want:     50,
 		},
 		{
 			name:     "default when MaxTurns == 15: returns 15",
@@ -604,9 +604,9 @@ func TestCommentMaxTurns(t *testing.T) {
 			want:     10,
 		},
 		{
-			name:     "default when MaxTurns == 0 (unlimited): returns 15",
+			name:     "default when MaxTurns == 0 (unlimited): returns 50",
 			maxTurns: 0,
-			want:     15,
+			want:     50,
 		},
 	}
 
@@ -700,7 +700,8 @@ printf '%%s\n' '{"result":"done","session_id":"sess_def","num_turns":2,"total_co
 
 	workDir := t.TempDir()
 
-	// Stage with MaxTurns=50, no CommentMaxTurns — default should be 15
+	// Stage with MaxTurns=50, no CommentMaxTurns — comment processing
+	// should use the same MaxTurns as the stage.
 	stage := &stages.Stage{
 		Name:       "Implement",
 		Prompt:     "implement",
@@ -720,19 +721,16 @@ printf '%%s\n' '{"result":"done","session_id":"sess_def","num_turns":2,"total_co
 	args, _ := os.ReadFile(argsFile)
 	argsStr := string(args)
 
-	if !strings.Contains(argsStr, "15") {
-		t.Errorf("expected default limit (15) in args: %q", argsStr)
-	}
-	if strings.Contains(argsStr, "50") {
-		t.Errorf("stage MaxTurns (50) should not appear in comment args: %q", argsStr)
+	if !strings.Contains(argsStr, "50") {
+		t.Errorf("expected stage MaxTurns (50) in comment args: %q", argsStr)
 	}
 
-	if usage.MaxTurns != 15 {
-		t.Errorf("usage.MaxTurns = %d, want 15", usage.MaxTurns)
+	if usage.MaxTurns != 50 {
+		t.Errorf("usage.MaxTurns = %d, want 50", usage.MaxTurns)
 	}
 }
 
-func TestInvokeClaudeForComments_UnlimitedStageDefaultsTo15(t *testing.T) {
+func TestInvokeClaudeForComments_UnlimitedStageDefaultsTo50(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	binDir := t.TempDir()
 	argsFile := filepath.Join(binDir, "args.txt")
@@ -750,7 +748,7 @@ printf '%%s\n' '{"result":"done","session_id":"sess_unl","num_turns":2,"total_co
 
 	workDir := t.TempDir()
 
-	// Stage with MaxTurns=0 (unlimited) — comment default should be 15
+	// Stage with MaxTurns=0 (unlimited) — comment default should be 50 (safety cap)
 	stage := &stages.Stage{
 		Name:       "Research",
 		Prompt:     "research",
@@ -773,11 +771,11 @@ printf '%%s\n' '{"result":"done","session_id":"sess_unl","num_turns":2,"total_co
 	if !strings.Contains(argsStr, "--max-turns") {
 		t.Errorf("expected --max-turns in args, got: %q", argsStr)
 	}
-	if !strings.Contains(argsStr, "15") {
-		t.Errorf("expected default limit (15) in args: %q", argsStr)
+	if !strings.Contains(argsStr, "50") {
+		t.Errorf("expected default limit (50) in args: %q", argsStr)
 	}
 
-	if usage.MaxTurns != 15 {
-		t.Errorf("usage.MaxTurns = %d, want 15", usage.MaxTurns)
+	if usage.MaxTurns != 50 {
+		t.Errorf("usage.MaxTurns = %d, want 50", usage.MaxTurns)
 	}
 }

@@ -3,7 +3,7 @@ order: 4
 skill: fabrik-review
 comment_skill: fabrik-review-comment
 model: sonnet
-max_turns: 30
+max_turns: 50
 post_to_pr: true
 mark_pr_ready_on_complete: true
 completion:

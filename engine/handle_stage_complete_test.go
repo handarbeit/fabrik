@@ -234,9 +234,9 @@ func TestHandleStageComplete_AutoAdvanceFalse_OverridesAdvanceButMergeStillFires
 	if len(client.mergePRCalls) != 1 {
 		t.Fatalf("expected MergePR to fire even with auto_advance:false, got %d", len(client.mergePRCalls))
 	}
-	// But advancement should be suppressed
-	if len(client.updateStatusCalls) != 0 {
-		t.Errorf("expected no advance when auto_advance:false, got %d", len(client.updateStatusCalls))
+	// fabrik:yolo label overrides auto_advance:false — advancement should fire
+	if len(client.updateStatusCalls) != 1 {
+		t.Errorf("expected advance (yolo overrides auto_advance:false), got %d", len(client.updateStatusCalls))
 	}
 }
 
