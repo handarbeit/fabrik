@@ -115,5 +115,8 @@ func inferFromTOML(path, section, key string) string {
 		}
 		return v
 	}
+	if err := scanner.Err(); err != nil {
+		return ""
+	}
 	return ""
 }
