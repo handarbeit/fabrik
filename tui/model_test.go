@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -393,6 +394,35 @@ func TestOpenTerminalCmd_KnownIDs(t *testing.T) {
 		if cmd == nil {
 			t.Errorf("terminal %q: expected non-nil tea.Cmd", id)
 		}
+	}
+}
+
+// TestLayoutHeightInvariant verifies that the total rendered height of View()
+// equals m.height for various numbers of active jobs. This ensures the header
+// and footer are never pushed off screen when In Progress fills up.
+func TestLayoutHeightInvariant(t *testing.T) {
+	redirectHistory(t)
+
+	const termWidth = 80
+	const termHeight = 24
+
+	for _, n := range []int{0, 1, 7, 8, 15} {
+		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
+			m := New(30, ProjectInfo{}, "", "")
+			// Add n active jobs.
+			now := time.Now()
+			for i := 0; i < n; i++ {
+				m.active[i+1] = &activeJob{StageName: "Research", StartedAt: now}
+			}
+			// Apply window size — this triggers updateHistoryViewport().
+			next, _ := m.Update(tea.WindowSizeMsg{Width: termWidth, Height: termHeight})
+			m = next.(Model)
+
+			got := lipgloss.Height(m.View())
+			if got != termHeight {
+				t.Errorf("n=%d: View() height = %d, want %d (header/footer pushed off screen)", n, got, termHeight)
+			}
+		})
 	}
 }
 
