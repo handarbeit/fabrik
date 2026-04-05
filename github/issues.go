@@ -4,20 +4,22 @@ import "fmt"
 
 // IssueData holds the fields from a GitHub issue needed by fabrik watch.
 type IssueData struct {
-	Number int
-	Title  string
-	State  string
-	Labels []string
+	Number   int
+	Title    string
+	State    string
+	Labels   []string
+	Comments int
 }
 
 // FetchIssue retrieves a single issue via the REST API.
 func (c *Client) FetchIssue(owner, repo string, issueNumber int) (*IssueData, error) {
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/issues/%d", c.baseURL, owner, repo, issueNumber)
 	var raw struct {
-		Number int    `json:"number"`
-		Title  string `json:"title"`
-		State  string `json:"state"`
-		Labels []struct {
+		Number   int    `json:"number"`
+		Title    string `json:"title"`
+		State    string `json:"state"`
+		Comments int    `json:"comments"`
+		Labels   []struct {
 			Name string `json:"name"`
 		} `json:"labels"`
 	}
@@ -25,9 +27,10 @@ func (c *Client) FetchIssue(owner, repo string, issueNumber int) (*IssueData, er
 		return nil, fmt.Errorf("fetching issue #%d: %w", issueNumber, err)
 	}
 	issue := &IssueData{
-		Number: raw.Number,
-		Title:  raw.Title,
-		State:  raw.State,
+		Number:   raw.Number,
+		Title:    raw.Title,
+		State:    raw.State,
+		Comments: raw.Comments,
 	}
 	for _, l := range raw.Labels {
 		issue.Labels = append(issue.Labels, l.Name)
