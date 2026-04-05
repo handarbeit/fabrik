@@ -116,11 +116,12 @@ func TestUpdate_JobStartedAndCompleted(t *testing.T) {
 	// JobStartedEvent adds to active
 	next, _ := m.Update(JobStartedEvent{IssueNumber: 42, StageName: "Implement", StartedAt: start})
 	nm := next.(Model)
-	if _, ok := nm.active[42]; !ok {
+	key42 := activeJobKey("", 42)
+	if _, ok := nm.active[key42]; !ok {
 		t.Fatal("expected issue 42 in active after JobStartedEvent")
 	}
-	if nm.active[42].StageName != "Implement" {
-		t.Errorf("StageName = %q", nm.active[42].StageName)
+	if nm.active[key42].StageName != "Implement" {
+		t.Errorf("StageName = %q", nm.active[key42].StageName)
 	}
 
 	// JobCompletedEvent removes from active and adds to history
@@ -134,7 +135,7 @@ func TestUpdate_JobStartedAndCompleted(t *testing.T) {
 	})
 	nm2 := next2.(Model)
 
-	if _, ok := nm2.active[42]; ok {
+	if _, ok := nm2.active[key42]; ok {
 		t.Error("expected issue 42 removed from active after JobCompletedEvent")
 	}
 	if len(nm2.history) != 1 {
@@ -151,12 +152,14 @@ func TestUpdate_JobStartedAndCompleted(t *testing.T) {
 
 func TestUpdate_LogEvent_UpdatesActiveJob(t *testing.T) {
 	m := New(30, ProjectInfo{}, "", "")
-	m.active[7] = &activeJob{StageName: "Research", StartedAt: time.Now()}
+	key7 := activeJobKey("", 7)
+	m.active[key7] = &activeJob{IssueNumber: 7, StageName: "Research", StartedAt: time.Now()}
+	m.activeNumToKey[7] = key7
 
 	next, _ := m.Update(LogEvent{IssueNumber: 7, Tag: "claude", Message: "running prompt\n"})
 	nm := next.(Model)
 
-	job, ok := nm.active[7]
+	job, ok := nm.active[key7]
 	if !ok {
 		t.Fatal("issue 7 missing from active")
 	}
@@ -173,7 +176,7 @@ func TestUpdate_LogEvent_UnknownIssue(t *testing.T) {
 	m := New(30, ProjectInfo{}, "", "")
 	next, _ := m.Update(LogEvent{IssueNumber: 999, Tag: "warn", Message: "something\n"})
 	nm := next.(Model)
-	if _, ok := nm.active[999]; ok {
+	if _, ok := nm.active[activeJobKey("", 999)]; ok {
 		t.Error("unknown issue should not be added to active via LogEvent")
 	}
 }
@@ -211,7 +214,9 @@ func TestUpdate_QuitKey(t *testing.T) {
 func TestUpdate_RKey_ActivePane_AliasesLogViewer(t *testing.T) {
 	m := New(30, ProjectInfo{}, "", "")
 	m.focusPane = paneActive
-	m.active[7] = &activeJob{StageName: "Research", StartedAt: time.Now()}
+	key7 := activeJobKey("", 7)
+	m.active[key7] = &activeJob{IssueNumber: 7, StageName: "Research", StartedAt: time.Now()}
+	m.activeNumToKey[7] = key7
 
 	// r on an active pane item delegates to the log viewer (same as enter/l).
 	// openLogViewerCmd returns nil when the log dir is empty, so we just verify
@@ -412,7 +417,7 @@ func TestLayoutHeightInvariant(t *testing.T) {
 			// Add n active jobs.
 			now := time.Now()
 			for i := 0; i < n; i++ {
-				m.active[i+1] = &activeJob{StageName: "Research", StartedAt: now}
+				m.active[fmt.Sprintf("issue-%d", i+1)] = &activeJob{StageName: "Research", StartedAt: now}
 			}
 			// Apply window size — this triggers updateHistoryViewport().
 			next, _ := m.Update(tea.WindowSizeMsg{Width: termWidth, Height: termHeight})

@@ -149,25 +149,27 @@ func (e *Engine) Run() error {
 // at shutdown time but never released (e.g., because the worker was killed mid-run).
 func (e *Engine) cleanupLockedIssues() {
 	e.mu.Lock()
-	issues := make([]int, 0, len(e.lockedIssues))
-	for num := range e.lockedIssues {
-		issues = append(issues, num)
+	keys := make([]string, 0, len(e.lockedIssues))
+	for key := range e.lockedIssues {
+		keys = append(keys, key)
 	}
 	e.mu.Unlock()
 
-	if len(issues) == 0 {
+	if len(keys) == 0 {
 		return
 	}
 	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
-	e.logf(0, "shutdown", "removing lock labels from %d issue(s)\n", len(issues))
-	for _, num := range issues {
-		if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, num, lockLabel); err != nil {
+	e.logf(0, "shutdown", "removing lock labels from %d issue(s)\n", len(keys))
+	for _, key := range keys {
+		// Parse "owner/repo#N" back into components for the API call.
+		owner, repo, num := parseIssueKey(key, e.cfg.Owner, e.cfg.Repo)
+		if err := e.client.RemoveLabelFromIssue(owner, repo, num, lockLabel); err != nil {
 			e.logf(num, "warn", "could not remove lock label during shutdown: %v\n", err)
 		} else {
 			e.logf(num, "shutdown", "removed lock label\n")
 		}
 		e.mu.Lock()
-		delete(e.lockedIssues, num)
+		delete(e.lockedIssues, key)
 		e.mu.Unlock()
 	}
 }
@@ -223,7 +225,7 @@ func (e *Engine) poll(ctx context.Context) error {
 		e.mu.Lock()
 		for _, item := range board.Items {
 			if !item.UpdatedAt.IsZero() {
-				e.lastUpdatedAt[item.Number] = item.UpdatedAt
+				e.lastUpdatedAt[issueKey(item, e.defaultRepo())] = item.UpdatedAt
 			}
 		}
 		e.mu.Unlock()
@@ -233,11 +235,30 @@ func (e *Engine) poll(ctx context.Context) error {
 	// shallow pre-filter. This avoids the expensive nested GraphQL cost for
 	// items that can be ruled out by status, labels, or updatedAt alone.
 	// Filter repo early to avoid wasting deep-fetch API points on other repos.
-	repoFilter := fmt.Sprintf("%s/%s", e.cfg.Owner, e.cfg.Repo)
+	// In multi-repo mode (cfg.Repo == ""), all repos on the board are processed.
+	repoFilter := ""
+	if e.cfg.Repo != "" {
+		repoFilter = fmt.Sprintf("%s/%s", e.cfg.Owner, e.cfg.Repo)
+	}
+
+	// Log newly discovered repos for visibility.
+	seenRepos := make(map[string]bool)
+	for _, it := range board.Items {
+		if it.Repo != "" {
+			seenRepos[it.Repo] = true
+		}
+	}
+	if len(seenRepos) > 0 {
+		repos := make([]string, 0, len(seenRepos))
+		for r := range seenRepos {
+			repos = append(repos, r)
+		}
+		e.logf(0, "poll", "repos on board: %v\n", repos)
+	}
 
 	var deepFetched int
 	for i := range board.Items {
-		if board.Items[i].Repo != "" && board.Items[i].Repo != repoFilter {
+		if repoFilter != "" && board.Items[i].Repo != "" && board.Items[i].Repo != repoFilter {
 			continue
 		}
 		if !e.itemMayNeedWork(board.Items[i]) {
@@ -253,20 +274,15 @@ func (e *Engine) poll(ctx context.Context) error {
 		e.logf(0, "poll", "deep-fetched details for %d item(s)\n", deepFetched)
 	}
 
-	// Build the expected repo name for filtering (e.g., "acme/widgets").
-	expectedRepo := fmt.Sprintf("%s/%s", e.cfg.Owner, e.cfg.Repo)
-
 	// Catch-up: auto-advance items that have fabrik:yolo + stage complete
-	// but are still sitting in the completed stage's column (e.g., yolo label
-	// was added after the stage finished).
+	// but are still sitting in the completed stage's column.
 	for _, item := range board.Items {
-		if item.Repo != "" && item.Repo != expectedRepo {
+		if repoFilter != "" && item.Repo != "" && item.Repo != repoFilter {
 			continue
 		}
 		if !e.cfg.Yolo && !hasYoloLabel(item) {
 			continue
 		}
-		// Skip paused or awaiting-input items
 		isPaused := false
 		for _, l := range item.Labels {
 			if l == "fabrik:paused" {
@@ -281,8 +297,6 @@ func (e *Engine) poll(ctx context.Context) error {
 		if stage == nil || stage.CleanupWorktree {
 			continue
 		}
-		// fabrik:yolo label overrides stage.AutoAdvance — if the user
-		// explicitly labelled the issue for yolo, respect that over YAML config.
 		isYolo := hasYoloLabel(item)
 		if !isYolo && stage.AutoAdvance != nil && !*stage.AutoAdvance {
 			continue
@@ -306,8 +320,8 @@ func (e *Engine) poll(ctx context.Context) error {
 	var dispatched int
 	for _, item := range board.Items {
 		item := item
-		// Skip items from other repos on the same project board.
-		if item.Repo != "" && item.Repo != expectedRepo {
+		// In single-repo mode, skip items from other repos on the same project board.
+		if repoFilter != "" && item.Repo != "" && item.Repo != repoFilter {
 			continue
 		}
 		// Full check including comments (populated by deep fetch above).
@@ -315,7 +329,7 @@ func (e *Engine) poll(ctx context.Context) error {
 			continue
 		}
 		// Skip issues already being processed by a previous poll cycle's worker
-		if _, ok := e.inFlight.Load(item.Number); ok {
+		if _, ok := e.inFlight.Load(issueKey(item, e.defaultRepo())); ok {
 			continue
 		}
 		// Acquire semaphore slot, but abort if the context is cancelled so we
@@ -333,15 +347,18 @@ func (e *Engine) poll(ctx context.Context) error {
 		}
 		isComment := len(e.findNewComments(item)) > 0
 		startTime := time.Now()
-		e.inFlight.Store(item.Number, item.IsPR)
+		iKey := issueKey(item, e.defaultRepo())
+		itemRepo := itemOwnerRepoString(item, e.defaultRepo())
+		e.inFlight.Store(iKey, item.IsPR)
 		e.wg.Add(1)
 		dispatched++
 		go func() {
 			defer e.wg.Done()
 			defer func() { <-e.sem }()
-			defer e.inFlight.Delete(item.Number)
+			defer e.inFlight.Delete(iKey)
 			e.emitStructural(tui.JobStartedEvent{
 				IssueNumber: item.Number,
+				Repo:        itemRepo,
 				Title:       item.Title,
 				StageName:   stageName,
 				IsComment:   isComment,
@@ -349,15 +366,16 @@ func (e *Engine) poll(ctx context.Context) error {
 			})
 			err := e.processItem(ctx, board, item)
 			e.mu.Lock()
-			usage := e.lastUsage[item.Number]
-			completed := e.lastCompleted[item.Number]
-			blocked := e.lastBlocked[item.Number]
-			delete(e.lastUsage, item.Number)
-			delete(e.lastCompleted, item.Number)
-			delete(e.lastBlocked, item.Number)
+			usage := e.lastUsage[iKey]
+			completed := e.lastCompleted[iKey]
+			blocked := e.lastBlocked[iKey]
+			delete(e.lastUsage, iKey)
+			delete(e.lastCompleted, iKey)
+			delete(e.lastBlocked, iKey)
 			e.mu.Unlock()
 			e.emitStructural(tui.JobCompletedEvent{
 				IssueNumber:    item.Number,
+				Repo:           itemRepo,
 				Title:          item.Title,
 				StageName:      stageName,
 				StageModel:     stageModel,
@@ -398,11 +416,11 @@ doneDispatching:
 		// checkAndUpgrade calls syscall.Exec which would kill in-flight workers.
 		var inFlightLabels []string
 		e.inFlight.Range(func(key, val any) bool {
-			if num, ok := key.(int); ok {
+			if k, ok := key.(string); ok {
 				if isPR, _ := val.(bool); isPR {
-					inFlightLabels = append(inFlightLabels, fmt.Sprintf("PR#%d", num))
+					inFlightLabels = append(inFlightLabels, "PR:"+k)
 				} else {
-					inFlightLabels = append(inFlightLabels, fmt.Sprintf("#%d", num))
+					inFlightLabels = append(inFlightLabels, k)
 				}
 			}
 			return true
@@ -434,8 +452,13 @@ doneDispatching:
 // checkAndUpgrade checks origin/main for new commits and, if found, performs a
 // fast-forward pull, rebuilds the binary, and re-execs the process in place.
 func (e *Engine) checkAndUpgrade() {
-	baseBranch := e.worktrees.DefaultBaseBranch()
-	dir := e.worktrees.BaseDir()
+	wm := e.primaryWorktrees()
+	if wm == nil {
+		e.logf(0, "upgrade", "no primary repo — skipping auto-upgrade in multi-repo mode\n")
+		return
+	}
+	baseBranch := wm.DefaultBaseBranch()
+	dir := wm.BaseDir()
 
 	e.logf(0, "upgrade", "checking origin/%s ...\n", baseBranch)
 	pollStatus("[upgrade] checking origin/%s ...", baseBranch)

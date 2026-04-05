@@ -87,8 +87,8 @@ func TestProcessItem_AllowsOwnLock(t *testing.T) {
 		},
 	}
 	eng := testEngine(client, claude)
-	// Need a real worktree manager for processItem — use mock that returns a temp dir
-	eng.worktrees = &WorktreeManager{baseDir: t.TempDir(), rootDir: t.TempDir()}
+	// Need a real worktree manager for processItem — register a mock WM for the test repo
+	eng.worktreeManagers["owner/repo"] = &WorktreeManager{baseDir: t.TempDir(), rootDir: t.TempDir()}
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
@@ -138,7 +138,7 @@ func TestProcessItem_SkipsAlreadyProcessedNoNewComments(t *testing.T) {
 	eng.cfg.PollSeconds = 100 // cooldown = 1000s — ensures recently-processed item stays in cooldown
 
 	// Mark as already processed
-	eng.processedSet["1-Research"] = time.Now()
+	eng.processedSet["owner/repo#1-Research"] = time.Now()
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
@@ -516,7 +516,7 @@ func TestProcessItem_ClaudeError(t *testing.T) {
 	}
 
 	// A start-failure (*exec.Error / binary not found) — processedSet must NOT be updated
-	itemKey := fmt.Sprintf("%d-%s", 6, "Research")
+	itemKey := fmt.Sprintf("o/r#%d-%s", 6, "Research")
 	eng.mu.Lock()
 	_, recorded := eng.processedSet[itemKey]
 	eng.mu.Unlock()
@@ -554,7 +554,7 @@ func TestProcessItem_ClaudeExitError(t *testing.T) {
 	}
 
 	// An *exec.ExitError means Claude ran — processedSet MUST be updated (cooldown applies)
-	itemKey := fmt.Sprintf("%d-%s", 7, "Research")
+	itemKey := fmt.Sprintf("o/r#%d-%s", 7, "Research")
 	eng.mu.Lock()
 	_, recorded := eng.processedSet[itemKey]
 	eng.mu.Unlock()
@@ -720,7 +720,7 @@ func TestProcessItem_EscalatesAtMaxRetries(t *testing.T) {
 	}
 
 	// pausedDueToRetries should be set
-	itemKey := fmt.Sprintf("%d-%s", 10, "Research")
+	itemKey := fmt.Sprintf("owner/repo#%d-%s", 10, "Research")
 	eng.mu.Lock()
 	paused := eng.pausedDueToRetries[itemKey]
 	eng.mu.Unlock()
@@ -757,7 +757,7 @@ func TestProcessItem_ResetsOnUnpause(t *testing.T) {
 	)
 
 	// Simulate a previous escalation: engine had paused this issue after 3 failures
-	itemKey := fmt.Sprintf("%d-%s", 11, "Research")
+	itemKey := fmt.Sprintf("owner/repo#%d-%s", 11, "Research")
 	eng.mu.Lock()
 	eng.retryCount[itemKey] = 3
 	eng.pausedDueToRetries[itemKey] = true
@@ -844,7 +844,7 @@ func TestProcessItem_UnlimitedWhenMaxRetriesZero(t *testing.T) {
 	}
 
 	// retryCount should remain 0 (not incremented when MaxRetries=0)
-	itemKey := fmt.Sprintf("%d-%s", 12, "Research")
+	itemKey := fmt.Sprintf("owner/repo#%d-%s", 12, "Research")
 	eng.mu.Lock()
 	count := eng.retryCount[itemKey]
 	eng.mu.Unlock()
@@ -881,7 +881,7 @@ func TestProcessItem_ClearsRetryCountOnCompletion(t *testing.T) {
 	)
 
 	// Pre-seed retry state as if previous failures occurred
-	itemKey := fmt.Sprintf("%d-%s", 13, "Research")
+	itemKey := fmt.Sprintf("owner/repo#%d-%s", 13, "Research")
 	eng.mu.Lock()
 	eng.retryCount[itemKey] = 2
 	eng.pausedDueToRetries[itemKey] = false
@@ -982,7 +982,7 @@ func TestProcessItem_CleanupStage_CleanWorktree(t *testing.T) {
 
 	// Should be marked in processedSet
 	eng.mu.Lock()
-	_, ok := eng.processedSet["42-Done"]
+	_, ok := eng.processedSet["owner/repo#42-Done"]
 	eng.mu.Unlock()
 	if !ok {
 		t.Error("item should be marked in processedSet after cleanup")

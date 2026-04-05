@@ -17,29 +17,41 @@ import (
 
 // HistoryEntry records a completed job for the history pane.
 type HistoryEntry struct {
-	IssueNumber    int
-	Title          string
-	StageName      string
-	StageModel     string // model configured for the stage; empty means use claude default
-	IsComment      bool
+	IssueNumber int
+	Repo        string // "owner/repo" — empty for single-repo projects
+	Title       string
+	StageName   string
+	StageModel  string // model configured for the stage; empty means use claude default
+	IsComment   bool
 	Success        bool
 	Completed      bool
 	BlockedOnInput bool
-	Duration       time.Duration
-	CompletedAt    time.Time
-	TurnsUsed      int
-	MaxTurns       int
-	CostUSD        float64
+	Duration    time.Duration
+	CompletedAt time.Time
+	TurnsUsed   int
+	MaxTurns    int
+	CostUSD     float64
 }
 
 // activeJob tracks an in-flight worker.
 type activeJob struct {
-	Title     string
-	StageName string
-	IsComment bool
-	StartedAt time.Time
-	LastTag   string
-	LastLine  string
+	IssueNumber int
+	Repo        string // "owner/repo" — empty for single-repo projects
+	Title       string
+	StageName   string
+	IsComment   bool
+	StartedAt   time.Time
+	LastTag     string
+	LastLine    string
+}
+
+// activeJobKey returns a unique string key for an active job.
+// Format: "owner/repo#N" when Repo is non-empty, "#N" otherwise.
+func activeJobKey(repo string, issueNumber int) string {
+	if repo != "" {
+		return fmt.Sprintf("%s#%d", repo, issueNumber)
+	}
+	return fmt.Sprintf("#%d", issueNumber)
 }
 
 // pane identifies which TUI section has focus.
@@ -66,8 +78,11 @@ type Model struct {
 	nextPollAt   time.Time
 	pollCount    int
 
-	// active jobs (keyed by issue number)
-	active map[int]*activeJob
+	// active jobs keyed by "owner/repo#N" (or "#N" for single-repo)
+	active map[string]*activeJob
+	// activeNumToKey maps issue number → current job key for LogEvent routing.
+	// When two repos have the same issue number, the last-started job wins.
+	activeNumToKey map[int]string
 
 	// completed job history (newest last)
 	history []HistoryEntry
@@ -128,10 +143,11 @@ var (
 func New(pollSeconds int, info ProjectInfo, terminal string, pluginDir string) Model {
 	vp := viewport.New(80, 10)
 	return Model{
-		projectInfo:   info,
-		pollInterval:  time.Duration(pollSeconds) * time.Second,
-		active:        make(map[int]*activeJob),
-		history:       LoadHistory(),
+		projectInfo:    info,
+		pollInterval:   time.Duration(pollSeconds) * time.Second,
+		active:         make(map[string]*activeJob),
+		activeNumToKey: make(map[int]string),
+		history:        LoadHistory(),
 		historyVP:     vp,
 		spinnerFrames: []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"},
 		now:           time.Now(),
@@ -225,8 +241,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "down", "j":
 			if m.focusPane == paneActive {
-				nums := m.sortedActiveNums()
-				if m.activeIdx < len(nums)-1 {
+				keys := m.sortedActiveKeys()
+				if m.activeIdx < len(keys)-1 {
 					m.activeIdx++
 				}
 			} else {
@@ -240,11 +256,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter", "l":
 			// Open latest log file for selected job (active or history pane)
 			if m.focusPane == paneActive {
-				nums := m.sortedActiveNums()
-				if m.activeIdx < len(nums) {
-					num := nums[m.activeIdx]
-					if _, ok := m.active[num]; ok {
-						logDir := fmt.Sprintf("%s/.fabrik/logs/issue-%d", homeDir(), num)
+				keys := m.sortedActiveKeys()
+				if m.activeIdx < len(keys) {
+					if job, ok := m.active[keys[m.activeIdx]]; ok {
+						logDir := logDirForJob(job)
 						return m, m.openLogViewerCmd(logDir)
 					}
 				}
@@ -252,7 +267,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				realIdx := len(m.history) - 1 - m.histIdx
 				if realIdx >= 0 && realIdx < len(m.history) {
 					h := m.history[realIdx]
-					logDir := fmt.Sprintf("%s/.fabrik/logs/issue-%d", homeDir(), h.IssueNumber)
+					logDir := logDirForHistory(h)
 					return m, m.openLogViewerCmd(logDir)
 				}
 			}
@@ -262,11 +277,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Active pane: open log viewer (active sessions must not be interrupted)
 			// History pane: open interactive resume session in the issue's worktree
 			if m.focusPane == paneActive {
-				nums := m.sortedActiveNums()
-				if m.activeIdx < len(nums) {
-					num := nums[m.activeIdx]
-					if _, ok := m.active[num]; ok {
-						logDir := fmt.Sprintf("%s/.fabrik/logs/issue-%d", homeDir(), num)
+				keys := m.sortedActiveKeys()
+				if m.activeIdx < len(keys) {
+					if job, ok := m.active[keys[m.activeIdx]]; ok {
+						logDir := logDirForJob(job)
 						return m, m.openLogViewerCmd(logDir)
 					}
 				}
@@ -306,30 +320,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case JobStartedEvent:
-		m.active[ev.IssueNumber] = &activeJob{
-			Title:     ev.Title,
-			StageName: ev.StageName,
-			IsComment: ev.IsComment,
-			StartedAt: ev.StartedAt,
+		key := activeJobKey(ev.Repo, ev.IssueNumber)
+		m.active[key] = &activeJob{
+			IssueNumber: ev.IssueNumber,
+			Repo:        ev.Repo,
+			Title:       ev.Title,
+			StageName:   ev.StageName,
+			IsComment:   ev.IsComment,
+			StartedAt:   ev.StartedAt,
 		}
+		m.activeNumToKey[ev.IssueNumber] = key
 		return m, nil
 
 	case JobCompletedEvent:
-		delete(m.active, ev.IssueNumber)
+		key := activeJobKey(ev.Repo, ev.IssueNumber)
+		delete(m.active, key)
+		if m.activeNumToKey[ev.IssueNumber] == key {
+			delete(m.activeNumToKey, ev.IssueNumber)
+		}
 		entry := HistoryEntry{
-			IssueNumber:    ev.IssueNumber,
-			Title:          ev.Title,
-			StageName:      ev.StageName,
-			StageModel:     ev.StageModel,
-			IsComment:      ev.IsComment,
+			IssueNumber: ev.IssueNumber,
+			Repo:        ev.Repo,
+			Title:       ev.Title,
+			StageName:   ev.StageName,
+			StageModel:  ev.StageModel,
+			IsComment:   ev.IsComment,
 			Success:        ev.Success,
 			Completed:      ev.Completed,
 			BlockedOnInput: ev.BlockedOnInput,
-			Duration:       ev.Duration,
-			CompletedAt:    ev.CompletedAt,
-			TurnsUsed:      ev.TurnsUsed,
-			MaxTurns:       ev.MaxTurns,
-			CostUSD:        ev.CostUSD,
+			Duration:    ev.Duration,
+			CompletedAt: ev.CompletedAt,
+			TurnsUsed:   ev.TurnsUsed,
+			MaxTurns:    ev.MaxTurns,
+			CostUSD:     ev.CostUSD,
 		}
 		m.history = append(m.history, entry)
 		SaveHistory(m.history)
@@ -340,9 +363,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if ev.IssueNumber == 0 {
 			// Poll-level message — show in header status line
 			m.statusLine = fmt.Sprintf("[%s] %s", ev.Tag, strings.TrimRight(ev.Message, "\n"))
-		} else if job, ok := m.active[ev.IssueNumber]; ok {
-			job.LastTag = ev.Tag
-			job.LastLine = strings.TrimRight(ev.Message, "\n")
+		} else if key, known := m.activeNumToKey[ev.IssueNumber]; known {
+			if job, ok := m.active[key]; ok {
+				job.LastTag = ev.Tag
+				job.LastLine = strings.TrimRight(ev.Message, "\n")
+			}
 		}
 		return m, nil
 	}
@@ -496,11 +521,11 @@ func (m Model) viewActive() string {
 	title := activeStyle.Render(fmt.Sprintf("%s In Progress (%d)", focusIndicator, len(m.active)))
 
 	var lines []string
-	nums := m.sortedActiveNums()
+	keys := m.sortedActiveKeys()
 
 	spinner := m.spinnerFrames[m.spinnerIdx]
-	for idx, num := range nums {
-		job := m.active[num]
+	for idx, key := range keys {
+		job := m.active[key]
 		elapsed := fmtDuration(m.now.Sub(job.StartedAt))
 		tag := ""
 		if job.LastTag != "" {
@@ -523,7 +548,7 @@ func (m Model) viewActive() string {
 			stageDisplay += strings.Repeat(" ", stagePad)
 		}
 		line := fmt.Sprintf("#%-5d %s %s %s  %s%s %s",
-			num, stageDisplay, spinner, elapsed, titleStr, tag, msg)
+			job.IssueNumber, stageDisplay, spinner, elapsed, titleStr, tag, msg)
 		// Truncate to terminal width to prevent wrapping
 		maxWidth := max(m.width-6, 20) // account for border + padding
 		if runes := []rune(line); len(runes) > maxWidth {
@@ -535,20 +560,22 @@ func (m Model) viewActive() string {
 		lines = append(lines, line)
 	}
 
-	// Cap visible lines to fit within activeHeight.
-	// Reserve 1 slot for the "… N more" indicator so total lines == maxLines.
+	// Cap visible lines to fit within activeHeight
 	maxLines := activeHeight(len(m.active)) - 3 // subtract title + border
 	if len(lines) > maxLines && maxLines > 0 {
-		display := maxLines - 1 // job slots; 1 slot reserved for "… N more"
-		start := m.activeIdx - display/2
+		// Show lines around the selected index
+		start := m.activeIdx - maxLines/2
 		if start < 0 {
 			start = 0
 		}
-		if start+display > len(lines) {
-			start = max(len(lines)-display, 0)
+		if start+maxLines > len(lines) {
+			start = max(len(lines)-maxLines, 0)
 		}
-		lines = lines[start : start+display]
-		lines = append(lines, dimStyle.Render(fmt.Sprintf("  … %d more", len(nums)-display)))
+		if start > 0 || start+maxLines < len(keys) { maxLines-- }
+		lines = lines[start : start+maxLines]
+		if start > 0 || start+maxLines < len(keys) {
+			lines = append(lines, dimStyle.Render(fmt.Sprintf("  … %d more", len(keys)-maxLines)))
+		}
 	}
 
 	hint := ""
@@ -620,17 +647,42 @@ func footerHeight() int {
 // activeHeight returns the approximate line height of the active pane.
 // Capped to avoid pushing history off screen on small terminals.
 func activeHeight(n int) int {
-	return min(max(n+1, 2)+2, 10) // title + one line per job (min 2) + border, max 10
+	base := max(n+1, 2) + 2
+	if base > 10 { return 11 }
+	return base
 }
 
-// sortedActiveNums returns issue numbers from the active map in sorted order.
-func (m Model) sortedActiveNums() []int {
-	nums := make([]int, 0, len(m.active))
-	for n := range m.active {
-		nums = append(nums, n)
+// sortedActiveKeys returns job keys from the active map in sorted order.
+// Keys have the form "owner/repo#N" or "#N" (single-repo).
+func (m Model) sortedActiveKeys() []string {
+	keys := make([]string, 0, len(m.active))
+	for k := range m.active {
+		keys = append(keys, k)
 	}
-	sort.Ints(nums)
-	return nums
+	sort.Strings(keys)
+	return keys
+}
+
+// logDirForJob returns the log directory for an active job.
+func logDirForJob(job *activeJob) string {
+	return logDirForIssue(job.Repo, job.IssueNumber)
+}
+
+// logDirForHistory returns the log directory for a history entry.
+func logDirForHistory(h HistoryEntry) string {
+	return logDirForIssue(h.Repo, h.IssueNumber)
+}
+
+// logDirForIssue returns ~/.fabrik/logs/<owner>-<repo>/issue-N/ in multi-repo
+// mode, or ~/.fabrik/logs/issue-N/ in single-repo mode (empty repo).
+func logDirForIssue(repo string, issueNumber int) string {
+	issuePart := fmt.Sprintf("issue-%d", issueNumber)
+	if repo == "" {
+		return fmt.Sprintf("%s/.fabrik/logs/%s", homeDir(), issuePart)
+	}
+	// Sanitize "owner/repo" → "owner-repo" for use as a directory name.
+	repoPart := strings.ReplaceAll(repo, "/", "-")
+	return fmt.Sprintf("%s/.fabrik/logs/%s/%s", homeDir(), repoPart, issuePart)
 }
 
 // openLogViewerCmd returns a tea.Cmd that opens a terminal showing the most
@@ -667,7 +719,7 @@ func (m Model) openLogViewerCmd(logDir string) tea.Cmd {
 	// Shell-quote path components so directories or binaries with spaces work correctly.
 	if strings.HasSuffix(latest, ".json") {
 		return m.openTerminalCmd(fmt.Sprintf(
-			"cd %s && cat %s | %s stream-filter | less -R",
+			"cd %s && cat %s | %s _stream-filter | less -R",
 			shellQuote(logDir), shellQuote(latest), shellQuote(fabrikBin)))
 	}
 	return m.openTerminalCmd(fmt.Sprintf("cd %s && less +F %s", shellQuote(logDir), shellQuote(latest)))

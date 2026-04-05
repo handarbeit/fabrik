@@ -21,8 +21,10 @@ func hasYoloLabel(item gh.ProjectItem) bool {
 func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
 	e.logf(item.Number, "done", "stage %q complete\n", stage.Name)
 
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+
 	// Clean up any failure label from a prior incomplete run.
-	e.removeFailedLabel(item.Number, stage.Name)
+	e.removeFailedLabel(owner, repo, item.Number, stage.Name)
 
 	// Re-fetch labels so we see changes made while the stage was running
 	// (e.g., fabrik:yolo added mid-run). The item snapshot from dispatch
@@ -47,7 +49,7 @@ func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem
 	}
 
 	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
-	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, completeLabel); err != nil {
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
 		e.logf(item.Number, "warn", "could not add completion label: %v\n", err)
 	}
 
@@ -71,7 +73,8 @@ func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem
 // Returns nil on success or when no PR exists (no-PR is logged and skipped).
 // Returns an error that has been handled (comment+pause posted) on ErrNotMergeable.
 func (e *Engine) attemptMergeOnValidate(item gh.ProjectItem) error {
-	prNumber, err := e.client.FindPRForIssue(e.cfg.Owner, e.cfg.Repo, item.Number)
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	prNumber, err := e.client.FindPRForIssue(owner, repo, item.Number)
 	if err != nil {
 		e.logf(item.Number, "warn", "could not find PR for merge: %v\n", err)
 		return nil
@@ -81,13 +84,13 @@ func (e *Engine) attemptMergeOnValidate(item gh.ProjectItem) error {
 		return nil
 	}
 
-	if err := e.client.MergePR(e.cfg.Owner, e.cfg.Repo, prNumber); err != nil {
+	if err := e.client.MergePR(owner, repo, prNumber); err != nil {
 		if errors.Is(err, gh.ErrNotMergeable) {
 			msg := fmt.Sprintf("Auto-merge skipped: PR #%d is not mergeable (GitHub reports a merge conflict or the mergeable status is not yet computed). Please resolve any conflicts and merge manually.", prNumber)
-			if cerr := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, msg); cerr != nil {
+			if cerr := e.client.AddComment(owner, repo, item.Number, msg); cerr != nil {
 				e.logf(item.Number, "warn", "could not post unmergeable comment: %v\n", cerr)
 			}
-			if lerr := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, "fabrik:paused"); lerr != nil {
+			if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); lerr != nil {
 				e.logf(item.Number, "warn", "could not add fabrik:paused label: %v\n", lerr)
 			}
 			return fmt.Errorf("PR #%d not mergeable", prNumber)

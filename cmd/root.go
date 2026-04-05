@@ -236,10 +236,10 @@ func Execute() error {
 		}
 	}
 
-	if cfg.Owner == "" || cfg.Repo == "" || cfg.ProjectNum == 0 {
-		fmt.Fprintf(os.Stderr, "Usage: fabrik --owner OWNER --repo REPO --project NUM [options]\n\n")
+	if cfg.Owner == "" || cfg.ProjectNum == 0 {
+		fmt.Fprintf(os.Stderr, "Usage: fabrik --owner OWNER --project NUM [--repo REPO] [options]\n\n")
 		flag.PrintDefaults()
-		return fmt.Errorf("missing required config: owner, repo, project (use flags or .env file)")
+		return fmt.Errorf("missing required config: owner and project (use flags or .env file)")
 	}
 
 	if cfg.Token == "" {

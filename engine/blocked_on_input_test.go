@@ -308,7 +308,7 @@ func TestProcessItem_BlockedOnInput_AddsLabels(t *testing.T) {
 	}
 
 	// retryCount should NOT be incremented
-	itemKey := "10-Research"
+	itemKey := "owner/repo#10-Research"
 	eng.mu.Lock()
 	count := eng.retryCount[itemKey]
 	eng.mu.Unlock()
@@ -353,7 +353,7 @@ func TestProcessItem_BlockedOnInput_ProcessedSetEntry(t *testing.T) {
 	}
 
 	// processedSet should have an entry (Claude ran)
-	itemKey := "11-Research"
+	itemKey := "owner/repo#11-Research"
 	eng.mu.Lock()
 	_, hasEntry := eng.processedSet[itemKey]
 	eng.mu.Unlock()
