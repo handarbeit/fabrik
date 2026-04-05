@@ -339,18 +339,18 @@ echo '.env' >> .gitignore
           <div class="link-desc">Source code, issues, and releases</div>
         </div>
       </a>
-      <a href="https://github.com/handarbeit/fabrik/blob/main/docs/USER_GUIDE.md" class="link-card" target="_blank" rel="noopener">
+      <a href="{{ '/USER_GUIDE' | relative_url }}" class="link-card">
         <span class="link-icon">📖</span>
         <div>
           <div class="link-title">User Guide</div>
           <div class="link-desc">Full configuration reference and workflow patterns</div>
         </div>
       </a>
-      <a href="https://github.com/handarbeit/fabrik/blob/main/README.md" class="link-card" target="_blank" rel="noopener">
+      <a href="{{ '/stage-lifecycle' | relative_url }}" class="link-card">
         <span class="link-icon">📄</span>
         <div>
-          <div class="link-title">README</div>
-          <div class="link-desc">Quick overview, flags, labels, and architecture</div>
+          <div class="link-title">Stage Lifecycle</div>
+          <div class="link-desc">Engine internals, markers, context files, and comment processing</div>
         </div>
       </a>
       <a href="https://github.com/handarbeit/fabrik/issues/new" class="link-card" target="_blank" rel="noopener">

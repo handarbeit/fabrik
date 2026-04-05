@@ -1,3 +1,8 @@
+---
+layout: default
+title: User Guide
+---
+
 # Fabrik User Guide
 
 Fabrik is an automated Claude Code SDLC driver powered by GitHub Issues and Projects.

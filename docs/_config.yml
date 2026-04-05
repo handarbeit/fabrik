@@ -24,12 +24,8 @@ sass:
   sass_dir: assets/css
   style: compressed
 
-# Exclude from build — developer docs coexist in this directory
-# but are not part of the Jekyll site
+# Exclude from build
 exclude:
   - Gemfile
   - Gemfile.lock
   - README.md
-  - USER_GUIDE.md
-  - stage-lifecycle.md
-  - specs/
