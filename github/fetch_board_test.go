@@ -309,8 +309,8 @@ func TestFetchProjectBoard_ItemsPagination(t *testing.T) {
 		t.Fatalf("FetchProjectBoard: %v", err)
 	}
 
-	if callCount != 2 {
-		t.Errorf("expected 2 API calls, got %d", callCount)
+	if callCount != 3 {
+		t.Errorf("expected 3 API calls (org fail + 2 pages), got %d", callCount)
 	}
 	if len(board.Items) != 3 {
 		t.Fatalf("expected 3 items across 2 pages, got %d", len(board.Items))
@@ -384,7 +384,7 @@ func TestFetchProjectBoard_LabelOverflow(t *testing.T) {
 		t.Fatalf("FetchProjectBoard: %v", err)
 	}
 
-	if callCount != 2 {
+	if callCount != 3 {
 		t.Errorf("expected 2 API calls (main + overflow), got %d", callCount)
 	}
 	if len(board.Items) != 1 {

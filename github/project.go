@@ -70,14 +70,22 @@ type itemNode struct {
 // or linked PRs). Use FetchItemDetails to populate comments for specific items.
 // This two-phase approach dramatically reduces GraphQL rate limit cost.
 func (c *Client) FetchProjectBoard(owner, repo string, projectNum int) (*ProjectBoard, error) {
-	// Query via user(login) rather than repository(owner,name) because
-	// GitHub Projects v2 are always at the user/org level. The repo-level
-	// query only works when the project is explicitly linked to that repo.
-	query := `
+	// Try organization first, then user. GitHub Projects v2 live at the
+	// user or org level. We can't know which without checking, so we try
+	// org first then fall back to user.
+	board, err := c.fetchProjectBoard(owner, repo, projectNum, "organization")
+	if err != nil {
+		board, err = c.fetchProjectBoard(owner, repo, projectNum, "user")
+	}
+	return board, err
+}
+
+func (c *Client) fetchProjectBoard(owner, repo string, projectNum int, ownerType string) (*ProjectBoard, error) {
+	query := fmt.Sprintf(`
 query($owner: String!, $projectNum: Int!, $cursor: String) {
-  user(login: $owner) {
+  %s(login: $owner) {
     projectV2(number: $projectNum) {
-      id
+      id`, ownerType) + `
       items(first: 100, after: $cursor) {
         pageInfo {
           hasNextPage
@@ -175,19 +183,17 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 		}
 
 		var result struct {
-			Data struct {
-				User struct {
-					ProjectV2 struct {
-						ID    string `json:"id"`
-						Items struct {
-							PageInfo struct {
-								HasNextPage bool   `json:"hasNextPage"`
-								EndCursor   string `json:"endCursor"`
-							} `json:"pageInfo"`
-							Nodes []itemNode `json:"nodes"`
-						} `json:"items"`
-					} `json:"projectV2"`
-				} `json:"user"`
+			Data map[string]struct {
+				ProjectV2 struct {
+					ID    string `json:"id"`
+					Items struct {
+						PageInfo struct {
+							HasNextPage bool   `json:"hasNextPage"`
+							EndCursor   string `json:"endCursor"`
+						} `json:"pageInfo"`
+						Nodes []itemNode `json:"nodes"`
+					} `json:"items"`
+				} `json:"projectV2"`
 			} `json:"data"`
 		}
 
@@ -195,7 +201,11 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 			return nil, fmt.Errorf("fetching project board: %w", err)
 		}
 
-		proj := result.Data.User.ProjectV2
+		ownerData, ok := result.Data[ownerType]
+		if !ok {
+			return nil, fmt.Errorf("fetching project board: no %s data in response", ownerType)
+		}
+		proj := ownerData.ProjectV2
 		if projectID == "" {
 			projectID = proj.ID
 		}
