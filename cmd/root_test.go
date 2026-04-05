@@ -195,7 +195,7 @@ func TestExecute_ConfigYAMLApplied(t *testing.T) {
 
 	// The engine started — config.yaml values were applied. Verify the error is
 	// NOT "missing required config" (which would mean config.yaml was ignored).
-	const missingConfig = "missing required config: owner, repo, project (use flags or .env file)"
+	const missingConfig = "missing required config: owner and project (use flags or .env file)"
 	if err != nil && err.Error() == missingConfig {
 		t.Errorf("config.yaml values were not applied: got %q", err.Error())
 	}
@@ -218,7 +218,7 @@ func TestExecute_EnvVarBeatsConfigYAML(t *testing.T) {
 
 	err := Execute()
 	// Will fail on no stages — but NOT on missing owner (env var won over config.yaml)
-	if err != nil && err.Error() == "missing required config: owner, repo, project (use flags or .env file)" {
+	if err != nil && err.Error() == "missing required config: owner and project (use flags or .env file)" {
 		t.Error("env var FABRIK_OWNER should have satisfied owner requirement (beats config.yaml)")
 	}
 }

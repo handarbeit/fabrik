@@ -417,7 +417,7 @@ func TestLayoutHeightInvariant(t *testing.T) {
 			// Add n active jobs.
 			now := time.Now()
 			for i := 0; i < n; i++ {
-				m.active[i+1] = &activeJob{StageName: "Research", StartedAt: now}
+				m.active[fmt.Sprintf("issue-%d", i+1)] = &activeJob{StageName: "Research", StartedAt: now}
 			}
 			// Apply window size — this triggers updateHistoryViewport().
 			next, _ := m.Update(tea.WindowSizeMsg{Width: termWidth, Height: termHeight})
