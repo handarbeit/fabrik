@@ -10,7 +10,7 @@ builds:
     env:
       - CGO_ENABLED=0
     ldflags:
-      - -s -w
+      - -s -w -X github.com/verveguy/fabrik/cmd.Version={{.Version}}
 
 archives:
   - id: fabrik
