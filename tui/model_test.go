@@ -70,7 +70,7 @@ func TestActiveHeight(t *testing.T) {
 }
 
 func TestNew(t *testing.T) {
-	m := New(30, "")
+	m := New(30, "", "")
 	if m.pollInterval != 30*time.Second {
 		t.Errorf("pollInterval = %v, want 30s", m.pollInterval)
 	}
@@ -86,7 +86,7 @@ func TestNew(t *testing.T) {
 }
 
 func TestUpdate_TickEvent(t *testing.T) {
-	m := New(30, "")
+	m := New(30, "", "")
 	m.width = 80
 	m.height = 24
 	initial := m.spinnerIdx
@@ -108,7 +108,7 @@ func TestUpdate_TickEvent(t *testing.T) {
 
 func TestUpdate_JobStartedAndCompleted(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, "")
+	m := New(30, "", "")
 	start := time.Now()
 
 	// JobStartedEvent adds to active
@@ -148,7 +148,7 @@ func TestUpdate_JobStartedAndCompleted(t *testing.T) {
 }
 
 func TestUpdate_LogEvent_UpdatesActiveJob(t *testing.T) {
-	m := New(30, "")
+	m := New(30, "", "")
 	m.active[7] = &activeJob{StageName: "Research", StartedAt: time.Now()}
 
 	next, _ := m.Update(LogEvent{IssueNumber: 7, Tag: "claude", Message: "running prompt\n"})
@@ -168,7 +168,7 @@ func TestUpdate_LogEvent_UpdatesActiveJob(t *testing.T) {
 
 func TestUpdate_LogEvent_UnknownIssue(t *testing.T) {
 	// LogEvent for an issue not in active map should not panic
-	m := New(30, "")
+	m := New(30, "", "")
 	next, _ := m.Update(LogEvent{IssueNumber: 999, Tag: "warn", Message: "something\n"})
 	nm := next.(Model)
 	if _, ok := nm.active[999]; ok {
@@ -177,7 +177,7 @@ func TestUpdate_LogEvent_UnknownIssue(t *testing.T) {
 }
 
 func TestUpdate_PollStartedAndCompleted(t *testing.T) {
-	m := New(30, "")
+	m := New(30, "", "")
 	before := time.Now()
 
 	next, _ := m.Update(PollStartedEvent{Owner: "o", Repo: "r", Project: 1})
@@ -194,7 +194,7 @@ func TestUpdate_PollStartedAndCompleted(t *testing.T) {
 }
 
 func TestUpdate_QuitKey(t *testing.T) {
-	m := New(30, "")
+	m := New(30, "", "")
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
 	if cmd == nil {
 		t.Error("expected quit cmd from 'q' key")
@@ -206,8 +206,78 @@ func TestUpdate_QuitKey(t *testing.T) {
 	}
 }
 
+func TestUpdate_RKey_ActivePane_AliasesLogViewer(t *testing.T) {
+	m := New(30, "", "")
+	m.focusPane = paneActive
+	m.active[7] = &activeJob{StageName: "Research", StartedAt: time.Now()}
+
+	// r on an active pane item delegates to the log viewer (same as enter/l).
+	// openLogViewerCmd returns nil when the log dir is empty, so we just verify
+	// the key is handled (no panic) and the model is returned.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if _, ok := next.(Model); !ok {
+		t.Error("expected Model returned from Update with r key in active pane")
+	}
+}
+
+func TestUpdate_RKey_ActivePane_NoJobs_NoOp(t *testing.T) {
+	m := New(30, "", "")
+	m.focusPane = paneActive
+	// No active jobs: r is a no-op
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if cmd != nil {
+		t.Error("expected nil cmd from r key with empty active pane")
+	}
+}
+
+func TestUpdate_RKey_HistoryPane_WithEntry(t *testing.T) {
+	redirectHistory(t)
+	m := New(30, "", "")
+	m.focusPane = paneHistory
+	m.history = []HistoryEntry{
+		{IssueNumber: 42, StageName: "Research", StageModel: "sonnet", Success: true},
+	}
+
+	// r on a history entry calls openResumeCmd — non-nil cmd returned
+	// (openResumeCmd returns an error-message terminal cmd when worktree is missing)
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if cmd == nil {
+		t.Error("expected non-nil cmd from r key with history entry")
+	}
+}
+
+func TestUpdate_RKey_HistoryPane_NoEntries_NoOp(t *testing.T) {
+	m := New(30, "", "")
+	m.focusPane = paneHistory
+	m.history = nil
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if cmd != nil {
+		t.Error("expected nil cmd from r key with empty history pane")
+	}
+}
+
+func TestShellQuote(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"simple", "'simple'"},
+		{"path/with spaces/dir", "'path/with spaces/dir'"},
+		{"it's a test", "'it'\\''s a test'"},
+		{"", "''"},
+	}
+	for _, tt := range tests {
+		got := shellQuote(tt.input)
+		if got != tt.want {
+			t.Errorf("shellQuote(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
 func TestView_BeforeWindowSize(t *testing.T) {
-	m := New(30, "")
+	m := New(30, "", "")
 	// Before width is set, View should return a loading placeholder without panicking
 	v := m.View()
 	if !strings.Contains(v, "Loading") {
@@ -216,7 +286,7 @@ func TestView_BeforeWindowSize(t *testing.T) {
 }
 
 func TestView_AfterWindowSize(t *testing.T) {
-	m := New(30, "")
+	m := New(30, "", "")
 	m.width = 80
 	m.height = 24
 	m.nextPollAt = time.Now().Add(30 * time.Second)
@@ -241,7 +311,7 @@ func TestView_AfterWindowSize(t *testing.T) {
 // The returned Cmd is intentionally not executed — doing so may launch GUI
 // processes (osascript, terminal emulators) during go test.
 func TestOpenTerminalCmd_UnknownID(t *testing.T) {
-	m := New(30, "totally_unknown_terminal")
+	m := New(30, "totally_unknown_terminal", "")
 	cmd := m.openTerminalCmd("echo hello")
 	if cmd == nil {
 		t.Error("expected non-nil tea.Cmd for unknown terminal ID")
@@ -251,7 +321,7 @@ func TestOpenTerminalCmd_UnknownID(t *testing.T) {
 // TestOpenTerminalCmd_KnownIDs verifies that known terminal IDs return non-nil Cmds.
 func TestOpenTerminalCmd_KnownIDs(t *testing.T) {
 	for _, id := range []string{"terminal", "iterm2", "ghostty", "kitty", "alacritty", "warp", ""} {
-		m := New(30, id)
+		m := New(30, id, "")
 		cmd := m.openTerminalCmd("echo hello")
 		if cmd == nil {
 			t.Errorf("terminal %q: expected non-nil tea.Cmd", id)
@@ -263,7 +333,7 @@ func TestOpenTerminalCmd_KnownIDs(t *testing.T) {
 // terminal field is stored on the model correctly.
 func TestNew_TerminalStored(t *testing.T) {
 	for _, id := range []string{"", "ghostty", "iterm2"} {
-		m := New(30, id)
+		m := New(30, id, "")
 		if m.terminal != id {
 			t.Errorf("New(30, %q): got terminal=%q, want %q", id, m.terminal, id)
 		}
