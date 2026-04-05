@@ -427,7 +427,7 @@ doneDispatching:
 		})
 
 		if len(inFlightLabels) > 0 {
-			e.logf(0, "poll", "nothing new to dispatch (in-flight: %v)\n", inFlightLabels)
+			e.logf(0, "poll", "workers active\n")
 			e.idleCount = 0
 		} else {
 			e.logf(0, "poll", "nothing to do\n")
