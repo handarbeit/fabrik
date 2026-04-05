@@ -444,7 +444,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	var baseline progressBaseline
 	if stage.ProgressResetsRetries {
 		baseline.worktreeHead, _ = gitRevParse(workDir, "HEAD")
-		remoteBranch := "origin/" + e.worktrees.branchName(item.Number)
+		remoteBranch := "origin/" + e.worktreesFor(item.Repo).branchName(item.Number)
 		baseline.remoteHead, _ = gitRevParse(workDir, remoteBranch)
 		if prNum, err := e.client.FindPRForIssue(e.cfg.Owner, e.cfg.Repo, item.Number); err == nil && prNum > 0 {
 			baseline.prNumber = prNum
@@ -645,7 +645,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			var progress progressResult
 			if stage.ProgressResetsRetries {
 				worktreeHeadAfter, _ := gitRevParse(workDir, "HEAD")
-				remoteBranch := "origin/" + e.worktrees.branchName(item.Number)
+				remoteBranch := "origin/" + e.worktreesFor(item.Repo).branchName(item.Number)
 				remoteHeadAfter, _ := gitRevParse(workDir, remoteBranch)
 				checkedTasksAfter := 0
 				if baseline.prNumber > 0 {
@@ -675,11 +675,11 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 					"🏭 **Fabrik — stage failed**\n\nStage **%s** hit the total retry ceiling (%d attempts). The issue has been paused (`fabrik:paused`).\n\nTo retry: investigate, make any needed fixes, then remove the `fabrik:paused` label.",
 					stage.Name, maxTotal,
 				)
-				if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, "fabrik:paused"); err != nil {
+				if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
 					e.logf(item.Number, "warn", "could not add paused label: %v\n", err)
 				}
-				e.addFailedLabel(item.Number, stage.Name)
-				if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
+				e.addFailedLabel(owner, repo, item.Number, stage.Name)
+				if err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
 					e.logf(item.Number, "warn", "could not post escalation comment: %v\n", err)
 				}
 				func() {
