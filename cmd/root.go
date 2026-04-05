@@ -63,6 +63,9 @@ func Execute() error {
 	}
 	cfg := &Config{}
 
+	var versionFlag bool
+	flag.BoolVar(&versionFlag, "version", false, "Print the fabrik version and exit")
+
 	flag.StringVar(&cfg.Owner, "owner", "", "GitHub repository owner")
 	flag.StringVar(&cfg.Repo, "repo", "", "GitHub repository name")
 	flag.IntVar(&cfg.ProjectNum, "project", 0, "GitHub project number")
@@ -80,6 +83,11 @@ func Execute() error {
 	flag.StringVar(&cfg.Terminal, "terminal", "", "Terminal emulator to use for log viewer (terminal, iterm2, ghostty, kitty, alacritty, warp)")
 
 	flag.Parse()
+
+	if versionFlag {
+		fmt.Println(Version)
+		os.Exit(0)
+	}
 
 	// Load .env file if present (fatal if .env exists but not in .gitignore)
 	if err := config.LoadDotenv(); err != nil {
@@ -268,7 +276,7 @@ func Execute() error {
 	// In plain-text mode, print the startup banner to stdout. In TUI mode the
 	// bubbletea alt-screen replaces stdout immediately, so skip the banner.
 	if !useTUI {
-		fmt.Printf("Fabrik starting\n")
+		fmt.Printf("Fabrik starting %s\n", Version)
 		fmt.Printf("  repo:    %s/%s\n", cfg.Owner, cfg.Repo)
 		fmt.Printf("  project: #%d\n", cfg.ProjectNum)
 		fmt.Printf("  user:    %s\n", cfg.User)
@@ -352,9 +360,10 @@ func buildProjectInfo(cfg *Config, pc config.ProjectConfig) tui.ProjectInfo {
 	}
 
 	return tui.ProjectInfo{
-		CWD:     cwdDisplay,
-		Repo:    cfg.Owner + "/" + cfg.Repo,
-		Version: version,
+		CWD:           cwdDisplay,
+		Repo:          cfg.Owner + "/" + cfg.Repo,
+		Version:       version,
+		FabrikVersion: Version,
 	}
 }
 
