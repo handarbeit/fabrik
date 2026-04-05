@@ -510,15 +510,49 @@ Job history is saved to `~/.fabrik/history.json` and restored on restart.
 
 ## 8. Observability
 
+### `fabrik watch` — Per-Issue TUI
+
+The recommended way to monitor a running issue is `fabrik watch`:
+
+```bash
+fabrik watch 42
+# or with explicit credentials:
+fabrik watch 42 --owner myorg --repo myrepo --token ghp_...
+```
+
+This opens a real-time terminal UI that shows:
+- Issue title, labels, and current stage
+- **Live Claude output** — streams from the `.log` file as Claude writes it (no polling)
+- **Stage history** — completed stages with duration and cost (requires `--tui` engine mode)
+- **PR status** — linked PR number, open/draft/merged state
+- **CI check results** — compact pass/fail/pending summary
+- **Comment count** — updates on each GitHub poll
+
+#### Keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` | Scroll live output |
+| `g` / `G` | Jump to top / bottom of output |
+| `i` | Open interactive Claude session in the issue's worktree (resumes current stage) |
+| `q` / `ctrl+c` | Quit |
+
+#### Credentials
+
+`fabrik watch` reads owner, repo, and poll interval from `.fabrik/config.yaml` (see §2). Without a GitHub token, it shows local log output and stage history but skips GitHub API calls (PR/CI/comments).
+
 ### Log Files
 
-Session logs are saved to `~/.fabrik/logs/issue-<N>/`:
+Session logs are saved to `~/.fabrik/logs/issue-<N>/` as NDJSON (one JSON event per line). Each stage produces a `.log` file written continuously during execution — `fabrik watch` follows this file live. To view a log manually:
+
 ```bash
 ls -lt ~/.fabrik/logs/issue-42/
 
-# Tail the latest log in real-time
-tail -f ~/.fabrik/logs/issue-42/$(ls -t ~/.fabrik/logs/issue-42/ | head -1)
+# Render a completed log as human-readable text
+cat ~/.fabrik/logs/issue-42/<stage>-output-<timestamp>.json | fabrik stream-filter | less -R
 ```
+
+`fabrik stream-filter` reads NDJSON or JSON array Claude output from stdin and renders thinking blocks, text responses, and tool calls as human-readable text.
 
 ### Debug Output
 
