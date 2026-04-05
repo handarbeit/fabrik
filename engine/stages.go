@@ -24,22 +24,24 @@ func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem
 	// Clean up any failure label from a prior incomplete run.
 	e.removeFailedLabel(item.Number, stage.Name)
 
-	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
-	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, completeLabel); err != nil {
-		e.logf(item.Number, "warn", "could not add completion label: %v\n", err)
-	}
-
 	// yoloActive gates both PR merge and is the base for stage advancement.
 	// stage.AutoAdvance overrides advancement only — not the merge decision.
 	yoloActive := e.cfg.Yolo || hasYoloLabel(item)
 
 	// Attempt PR merge after Validate when yolo is active.
+	// This runs BEFORE adding the completion label so that on merge failure the
+	// engine can retry Validate (itemNeedsWork skips stages with a complete label).
 	if yoloActive && stage.Name == "Validate" {
 		if err := e.attemptMergeOnValidate(item); err != nil {
-			// ErrNotMergeable: post comment and pause; no advance.
+			// Merge failed: post/pause already handled inside attemptMergeOnValidate.
 			e.logf(item.Number, "warn", "PR not merged: %v\n", err)
 			return
 		}
+	}
+
+	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
+	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, completeLabel); err != nil {
+		e.logf(item.Number, "warn", "could not add completion label: %v\n", err)
 	}
 
 	shouldAdvance := yoloActive
@@ -81,9 +83,11 @@ func (e *Engine) attemptMergeOnValidate(item gh.ProjectItem) error {
 			}
 			return fmt.Errorf("PR #%d not mergeable", prNumber)
 		}
-		// Non-mergeable API error: log and continue (advance normally).
+		// Other API errors (transient 5xx, permissions, etc.): log and return an
+		// error so the caller skips the completion label and stage advancement.
+		// The engine will retry Validate on the next cooldown cycle.
 		e.logf(item.Number, "warn", "auto-merge of PR #%d failed: %v\n", prNumber, err)
-		return nil
+		return fmt.Errorf("auto-merge failed: %w", err)
 	}
 
 	e.logf(item.Number, "info", "auto-merged PR #%d\n", prNumber)

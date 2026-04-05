@@ -240,8 +240,10 @@ func TestHandleStageComplete_AutoAdvanceFalse_OverridesAdvanceButMergeStillFires
 	}
 }
 
-func TestHandleStageComplete_MergeAPIError_LogsAndAdvances(t *testing.T) {
-	// Non-ErrNotMergeable error from MergePR: log and continue (advance)
+func TestHandleStageComplete_MergeAPIError_LogsAndDoesNotAdvance(t *testing.T) {
+	// Non-ErrNotMergeable error from MergePR: log the error and do NOT advance.
+	// This prevents silently moving to Done when the PR merge failed (e.g. transient
+	// 5xx, permissions). The engine will retry Validate on the next cooldown cycle.
 	client := &mockGitHubClient{
 		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
 			return 88, nil
@@ -259,14 +261,20 @@ func TestHandleStageComplete_MergeAPIError_LogsAndAdvances(t *testing.T) {
 
 	eng.handleStageComplete(board, item, validateStage)
 
-	// Should NOT post unmergeable comment or fabrik:paused
+	// Should NOT post unmergeable comment or fabrik:paused (not ErrNotMergeable)
 	for _, c := range client.addLabelCalls {
 		if c.labelName == "fabrik:paused" {
 			t.Error("should not add fabrik:paused for non-ErrNotMergeable error")
 		}
 	}
-	// Should still advance
-	if len(client.updateStatusCalls) != 1 {
-		t.Fatalf("expected advance on non-ErrNotMergeable error, got %d", len(client.updateStatusCalls))
+	// Should NOT advance — merge failed, no completion label was added, engine retries
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("expected no advance when merge API error, got %d status updates", len(client.updateStatusCalls))
+	}
+	// Should NOT add completion label — engine must be able to retry Validate
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Validate:complete" {
+			t.Error("should not add stage:Validate:complete when merge failed")
+		}
 	}
 }
