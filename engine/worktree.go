@@ -27,10 +27,40 @@ func (wm *WorktreeManager) logf(issueNumber int, tag, format string, args ...any
 }
 
 func NewWorktreeManager(repoDir string) *WorktreeManager {
+	return NewWorktreeManagerWithRoot(repoDir, filepath.Join(repoDir, ".fabrik", "worktrees"))
+}
+
+func NewWorktreeManagerWithRoot(repoDir, worktreeRoot string) *WorktreeManager {
 	return &WorktreeManager{
 		baseDir: repoDir,
-		rootDir: filepath.Join(repoDir, ".fabrik", "worktrees"),
+		rootDir: worktreeRoot,
 	}
+}
+
+// ensureBareClone creates a bare clone of the target repo at .fabrik/repo.git
+// if it doesn't already exist. Returns the path to the bare clone.
+// This is used when Fabrik runs from a non-git job-control directory.
+func ensureBareClone(baseDir, owner, repo string) error {
+	bareDir := filepath.Join(baseDir, ".fabrik", "repo.git")
+	if _, err := os.Stat(bareDir); err == nil {
+		// Already cloned — fetch latest
+		cmd := exec.Command("git", "fetch", "origin")
+		cmd.Dir = bareDir
+		cmd.CombinedOutput() // best-effort
+		return nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(bareDir), 0755); err != nil {
+		return fmt.Errorf("creating .fabrik dir: %w", err)
+	}
+
+	cloneURL := fmt.Sprintf("https://github.com/%s/%s.git", owner, repo)
+	cmd := exec.Command("git", "clone", "--bare", cloneURL, bareDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("cloning %s: %s: %w", cloneURL, strings.TrimSpace(string(out)), err)
+	}
+
+	return nil
 }
 
 // BaseDir returns the main repository directory.
