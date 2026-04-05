@@ -37,6 +37,8 @@ type Engine struct {
 	claude             ClaudeInvoker
 	statusField        *gh.StatusField
 	worktreeManagers   map[string]*WorktreeManager // key: "owner/repo"; one WM per discovered repo
+	jobControlMode     bool                        // true when running from a non-git directory (multi-repo)
+	jobControlDir      string                      // fabrikDir when jobControlMode is true
 	mu                 sync.Mutex
 	processedSet       map[string]time.Time // key: "owner/repo#N-stageName" or "owner/repo#N-comment-ID"
 	lockedIssues       map[string]bool      // key: "owner/repo#N"; issues with fabrik:locked added but not yet released
@@ -64,17 +66,16 @@ func New(cfg Config) (*Engine, error) {
 	// In a git repo, they're the same. In a job-control directory, fabrikDir
 	// is cwd and repoDir is the bare clone at .fabrik/repo.git.
 	var fabrikDir string
+	var jobControlMode bool
 	repoDir, err := gitToplevel()
 	if err != nil {
 		// Not in a git repo — job-control directory for multi-repo projects.
+		// Repos are cloned lazily by ensureRepoReady when the first issue for each repo arrives.
 		fabrikDir, err = os.Getwd()
 		if err != nil {
 			return nil, fmt.Errorf("resolving working directory: %w", err)
 		}
-		if cloneErr := ensureBareClone(fabrikDir, cfg.Owner, cfg.Repo); cloneErr != nil {
-			return nil, fmt.Errorf("cloning target repo: %w", cloneErr)
-		}
-		repoDir = filepath.Join(fabrikDir, ".fabrik", "repo.git")
+		jobControlMode = true
 	} else {
 		fabrikDir = repoDir
 	}
@@ -101,6 +102,8 @@ func New(cfg Config) (*Engine, error) {
 		client:             gh.NewClient(cfg.Token),
 		claude:             &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},
 		worktreeManagers:   make(map[string]*WorktreeManager),
+		jobControlMode:     jobControlMode,
+		jobControlDir:      fabrikDir,
 		processedSet:       make(map[string]time.Time),
 		lockedIssues:       make(map[string]bool),
 		lastUsage:          make(map[string]TokenUsage),
@@ -112,14 +115,18 @@ func New(cfg Config) (*Engine, error) {
 		sem:                make(chan struct{}, cfg.MaxConcurrent),
 	}
 
-	if cfg.Repo != "" {
-		// Single-repo mode: register the configured repo's WM upfront.
+	if !jobControlMode && cfg.Repo != "" {
+		// Single-repo git-repo mode: register the configured repo's WM upfront.
 		nameWithOwner := cfg.Owner + "/" + cfg.Repo
 		rName := cfg.Repo
 		wm := NewWorktreeManagerForRepo(repoDir, worktreeRoot, rName)
 		eng.worktreeManagers[nameWithOwner] = wm
 		wm.logfFn = eng.logf
 	}
+
+	// Migrate any old-style worktrees (issue-N/) to the new per-repo layout.
+	migrateWorktrees(worktreeRoot, func(msg string) { fmt.Printf("[startup] %s", msg) })
+
 	// In multi-repo mode (cfg.Repo == ""), WMs are registered lazily in ensureRepoReady.
 	return eng, nil
 }

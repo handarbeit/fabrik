@@ -309,7 +309,7 @@ func TestWriteCodebaseChanges_SHAsMatch(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
 	eng := testEngine(client, claude)
-	eng.worktrees = NewWorktreeManager(repoDir)
+	eng.worktreeManagers["owner/repo"] = NewWorktreeManager(repoDir)
 
 	// Get the current HEAD SHA (there's only one commit, so origin doesn't exist;
 	// we simulate by using the repo itself as origin).
@@ -384,7 +384,7 @@ func TestWriteCodebaseChanges_DiffWritten(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
 	eng := testEngine(client, claude)
-	eng.worktrees = NewWorktreeManager(repoDir)
+	eng.worktreeManagers["owner/repo"] = NewWorktreeManager(repoDir)
 
 	fabrikDir := filepath.Join(repoDir, ".fabrik-context")
 	os.MkdirAll(fabrikDir, 0755)
