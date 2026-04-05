@@ -246,7 +246,8 @@ type claudeResponse struct {
 	SessionID string  `json:"session_id"`
 	NumTurns  int     `json:"num_turns"`
 	CostUSD   float64 `json:"total_cost_usd"`
-	IsError   bool    `json:"is_error"`
+	IsError   bool     `json:"is_error"`
+	Errors    []string `json:"errors"`
 	// ModelUsage contains per-model accumulated token counts for the full session.
 	// These are more accurate than the top-level "usage" field, which reflects only
 	// the last API call rather than the entire multi-turn session.
@@ -318,11 +319,24 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	}
 
 	baseName := strings.TrimSuffix(label, "-comment-review")
+	sessFilePath := sessionFile(issueNumber, baseName)
 
 	resp, ok := parseClaudeJSON(bytes.TrimSpace(rawOutput))
 	var text string
 	var usage TokenUsage
 	if ok {
+		// Check for stale session ID error — delete the session file so the
+		// next retry starts fresh instead of looping on the same expired ID.
+		if resp.IsError && len(resp.Errors) > 0 {
+			for _, errMsg := range resp.Errors {
+				if strings.Contains(errMsg, "No conversation found with session ID") {
+					claudeLog(issueNumber, "warn", "session expired — deleting stale session file for retry\n")
+					os.Remove(sessFilePath)
+					break
+				}
+			}
+		}
+
 		text = resp.Result
 		usage = tokenUsageFromResponse(resp)
 		if runErr != nil {
@@ -330,7 +344,7 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 		} else {
 			claudeLog(issueNumber, "claude", "completed in %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
 		}
-		saveSessionIDDirect(sessionFile(issueNumber, baseName), resp.SessionID)
+		saveSessionIDDirect(sessFilePath, resp.SessionID)
 	} else {
 		claudeLog(issueNumber, "warn", "JSON parse failed (%d bytes); output not posted\n", len(rawOutput))
 		text = fmt.Sprintf("⚠️ Claude output could not be parsed (raw output was %d bytes). Check logs at `~/.fabrik/logs/issue-%d/` for details.", len(rawOutput), issueNumber)
