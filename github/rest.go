@@ -28,6 +28,11 @@ func (c *Client) updateRestStats(h http.Header) {
 // detect "already exists" or validation failures without fragile string matching.
 var ErrUnprocessableEntity = errors.New("unprocessable entity")
 
+// ErrMethodNotAllowed is returned by REST methods when the server responds
+// with 405. Callers may use errors.Is(err, github.ErrMethodNotAllowed) to
+// detect unsupported operations (e.g. rebase merge not allowed by repo policy).
+var ErrMethodNotAllowed = errors.New("method not allowed")
+
 func (c *Client) restRequest(method, url string, body interface{}) error {
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
@@ -52,7 +57,10 @@ func (c *Client) restRequest(method, url string, body interface{}) error {
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode == 422 {
+		switch resp.StatusCode {
+		case 405:
+			return fmt.Errorf("GitHub API returned 405: %s: %w", string(respBody), ErrMethodNotAllowed)
+		case 422:
 			return fmt.Errorf("GitHub API returned 422: %s: %w", string(respBody), ErrUnprocessableEntity)
 		}
 		return fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
@@ -160,6 +168,46 @@ func (c *Client) restPostWithResponse(url string, body interface{}, target inter
 
 func (c *Client) restPatch(url string, body interface{}) error {
 	return c.restRequest("PATCH", url, body)
+}
+
+// restPutWithResponse PUTs and decodes the response body into the provided target.
+func (c *Client) restPutWithResponse(url string, body interface{}, target interface{}) error {
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshaling request: %w", err)
+	}
+
+	req, err := http.NewRequest("PUT", url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("executing request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	c.updateRestStats(resp.Header)
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		switch resp.StatusCode {
+		case 405:
+			return fmt.Errorf("GitHub API returned 405: %s: %w", string(respBody), ErrMethodNotAllowed)
+		case 422:
+			return fmt.Errorf("GitHub API returned 422: %s: %w", string(respBody), ErrUnprocessableEntity)
+		}
+		return fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
+		return fmt.Errorf("decoding response: %w", err)
+	}
+	return nil
 }
 
 func (c *Client) restDelete(url string) error {
