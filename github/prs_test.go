@@ -3,6 +3,7 @@ package github
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -14,8 +15,8 @@ import (
 func fakePRServer(t *testing.T, prNumber int, getHandler, putHandler http.HandlerFunc) (*httptest.Server, *Client) {
 	t.Helper()
 	mux := http.NewServeMux()
-	prPath := "/repos/owner/repo/pulls/42"
-	mergePath := "/repos/owner/repo/pulls/42/merge"
+	prPath := fmt.Sprintf("/repos/owner/repo/pulls/%d", prNumber)
+	mergePath := fmt.Sprintf("/repos/owner/repo/pulls/%d/merge", prNumber)
 	if getHandler != nil {
 		mux.HandleFunc(prPath, func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != "GET" {
