@@ -75,6 +75,7 @@ Before each Claude invocation, the engine writes context documents to `.fabrik-c
 | `.fabrik-context/stage-Implement.md` | Implement stage comment output |
 | `.fabrik-context/stage-Review.md` | Review stage comment output |
 | `.fabrik-context/pr-description.md` | Linked PR description (for `post_to_pr` stages) |
+| `.fabrik-context/codebase-changes.md` | Files changed on `origin/<baseBranch>` since the prior stage ran (omitted on first stage or when no changes) |
 
 **Stage invocation**: Writes only stages *prior* to the current stage. Implement sees Specify, Research, Plan but not its own output.
 

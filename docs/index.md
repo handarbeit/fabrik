@@ -219,6 +219,15 @@ description: >-
           at a glance.
         </div>
       </div>
+      <div class="feature-card">
+        <span class="feature-icon">🗂️</span>
+        <div class="feature-title">Multi-Repo Support</div>
+        <div class="feature-desc">
+          Run Fabrik from outside any git repo to manage issues across multiple
+          repositories from a single GitHub Project board. Each repo is cloned
+          lazily; worktrees are created per repo and per issue automatically.
+        </div>
+      </div>
     </div>
 
     <div class="factory-callout">
@@ -260,7 +269,7 @@ description: >-
           <div class="step-num">1</div>
           <div class="step-content">
             <div class="step-title">Prerequisites</div>
-            <div class="step-desc">Install Go 1.21+, Claude Code CLI, and create a GitHub token with <code>repo</code> and <code>project</code> scopes.</div>
+            <div class="step-desc">Install Go 1.26.1+, Claude Code CLI, and create a GitHub token with <code>repo</code> and <code>project</code> scopes.</div>
           </div>
         </div>
         <div class="step">
