@@ -76,49 +76,66 @@ func followLatestLog(logDir string, send func(tea.Msg), done <-chan struct{}) {
 }
 
 // followFile reads from path, rendering each NDJSON line via streamfilter.
-// When it detects a newer .log file in logDir, it switches to that file.
+// It loops — switching to newer .log files as they appear — until done is closed.
+// Using a loop instead of recursion avoids goroutine stack growth across stage transitions.
 func followFile(path, logDir string, send func(tea.Msg), done <-chan struct{}) {
-	f, err := os.Open(path)
-	if err != nil {
-		// File disappeared; wait and retry with the next newest
-		time.Sleep(200 * time.Millisecond)
-		if next := newestLogFile(logDir); next != "" && next != path {
-			followFile(next, logDir, send, done)
-		}
-		return
-	}
-	defer f.Close()
-
-	reader := bufio.NewReader(f)
 	for {
-		select {
-		case <-done:
-			return
-		default:
-		}
-
-		line, err := reader.ReadBytes('\n')
-		if len(line) > 0 {
-			if rendered := streamfilter.RenderLine(line); rendered != "" {
-				send(LogLineMsg{Text: rendered})
-			}
-		}
+		f, err := os.Open(path)
 		if err != nil {
-			if err != io.EOF {
-				// Unexpected read error; stop following this file.
-				return
-			}
-			// EOF: check for a newer log file (stage transition).
-			if next := newestLogFile(logDir); next != "" && next != path {
-				followFile(next, logDir, send, done)
-				return
-			}
-			// Still at EOF of the current file; sleep and retry.
+			// File disappeared; wait briefly and try the next newest.
 			select {
 			case <-done:
 				return
-			case <-time.After(100 * time.Millisecond):
+			case <-time.After(200 * time.Millisecond):
 			}
+			if next := newestLogFile(logDir); next != "" && next != path {
+				path = next
+			}
+			continue
+		}
+
+		reader := bufio.NewReader(f)
+		switchFile := false
+	readLoop:
+		for {
+			select {
+			case <-done:
+				f.Close()
+				return
+			default:
+			}
+
+			line, err := reader.ReadBytes('\n')
+			if len(line) > 0 {
+				if rendered := streamfilter.RenderLine(line); rendered != "" {
+					send(LogLineMsg{Text: rendered})
+				}
+			}
+			if err != nil {
+				if err != io.EOF {
+					// Unexpected read error; stop following this file.
+					f.Close()
+					return
+				}
+				// EOF: check for a newer log file (stage transition).
+				if next := newestLogFile(logDir); next != "" && next != path {
+					path = next
+					switchFile = true
+					break readLoop
+				}
+				// Still at EOF; sleep and retry.
+				select {
+				case <-done:
+					f.Close()
+					return
+				case <-time.After(100 * time.Millisecond):
+				}
+			}
+		}
+
+		f.Close()
+		if !switchFile {
+			return
 		}
 	}
 }
