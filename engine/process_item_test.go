@@ -660,7 +660,7 @@ func TestProcessItem_EscalatesAtMaxRetries(t *testing.T) {
 			ProjectNum: 1,
 			User:       "testuser",
 			Token:      "token",
-			MaxRetries: 2,
+			MaxLoops: 2,
 			Stages:     testStages(),
 		},
 		client,
@@ -748,7 +748,7 @@ func TestProcessItem_ResetsOnUnpause(t *testing.T) {
 			ProjectNum: 1,
 			User:       "testuser",
 			Token:      "token",
-			MaxRetries: 3, // high enough so one retry after unpause doesn't re-escalate
+			MaxLoops: 3, // high enough so one retry after unpause doesn't re-escalate
 			Stages:     testStages(),
 		},
 		client,
@@ -816,7 +816,7 @@ func TestProcessItem_UnlimitedWhenMaxRetriesZero(t *testing.T) {
 			ProjectNum: 1,
 			User:       "testuser",
 			Token:      "token",
-			MaxRetries: 0, // unlimited
+			MaxLoops: 0, // unlimited
 			Stages:     testStages(),
 		},
 		client,
@@ -872,7 +872,7 @@ func TestProcessItem_ClearsRetryCountOnCompletion(t *testing.T) {
 			ProjectNum: 1,
 			User:       "testuser",
 			Token:      "token",
-			MaxRetries: 3,
+			MaxLoops: 3,
 			Stages:     testStages(),
 		},
 		client,
@@ -1297,7 +1297,7 @@ func TestProcessItem_ProgressResetsLoopCount(t *testing.T) {
 			ProjectNum: 1,
 			User:       "testuser",
 			Token:      "token",
-			MaxRetries: 2,
+			MaxLoops: 2,
 			Stages:     progressStages,
 		},
 		client,
@@ -1375,7 +1375,7 @@ func TestProcessItem_TotalLoopCeiling(t *testing.T) {
 			ProjectNum: 1,
 			User:       "testuser",
 			Token:      "token",
-			MaxRetries: 5, // high enough that no-progress escalation doesn't trigger
+			MaxLoops: 5, // high enough that no-progress escalation doesn't trigger
 			Stages:     progressStages,
 		},
 		client,
@@ -1464,7 +1464,7 @@ func TestProcessItem_NoProgressIncrements(t *testing.T) {
 			ProjectNum: 1,
 			User:       "testuser",
 			Token:      "token",
-			MaxRetries: 3,
+			MaxLoops: 3,
 			Stages:     progressStages,
 		},
 		client,

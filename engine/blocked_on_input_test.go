@@ -262,7 +262,7 @@ func TestProcessItem_BlockedOnInput_AddsLabels(t *testing.T) {
 			ProjectNum: 1,
 			User:       "testuser",
 			Token:      "token",
-			MaxRetries: 3,
+			MaxLoops: 3,
 			Stages:     testStages(),
 		},
 		client,

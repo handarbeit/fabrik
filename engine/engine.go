@@ -288,13 +288,10 @@ func (e *Engine) logf(issueNumber int, tag, format string, args ...any) {
 }
 
 // effectiveMaxLoops returns the max no-progress loops limit for the engine.
-// It uses MaxLoops if set (non-zero), otherwise falls back to MaxRetries
-// for backward compatibility.
+// Returns 0 for unlimited. The deprecated MaxRetries is migrated to MaxLoops
+// at startup in cmd/root.go, so this method only reads MaxLoops.
 func (e *Engine) effectiveMaxLoops() int {
-	if e.cfg.MaxLoops > 0 {
-		return e.cfg.MaxLoops
-	}
-	return e.cfg.MaxRetries
+	return e.cfg.MaxLoops
 }
 
 // effectiveMaxTotalRetries returns the total retry ceiling for a stage.
