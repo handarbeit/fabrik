@@ -289,19 +289,25 @@ func (e *Engine) poll(ctx context.Context) error {
 			err := e.processItem(ctx, board, item)
 			e.mu.Lock()
 			usage := e.lastUsage[item.Number]
+			completed := e.lastCompleted[item.Number]
+			blocked := e.lastBlocked[item.Number]
 			delete(e.lastUsage, item.Number)
+			delete(e.lastCompleted, item.Number)
+			delete(e.lastBlocked, item.Number)
 			e.mu.Unlock()
 			e.emitStructural(tui.JobCompletedEvent{
-				IssueNumber: item.Number,
-				Title:       item.Title,
-				StageName:   stageName,
-				IsComment:   isComment,
-				Success:     err == nil,
-				Duration:    time.Since(startTime),
-				CompletedAt: time.Now(),
-				TurnsUsed:   usage.TurnsUsed,
-				MaxTurns:    usage.MaxTurns,
-				CostUSD:     usage.CostUSD,
+				IssueNumber:    item.Number,
+				Title:          item.Title,
+				StageName:      stageName,
+				IsComment:      isComment,
+				Success:        err == nil,
+				Completed:      completed,
+				BlockedOnInput: blocked,
+				Duration:       time.Since(startTime),
+				CompletedAt:    time.Now(),
+				TurnsUsed:      usage.TurnsUsed,
+				MaxTurns:       usage.MaxTurns,
+				CostUSD:        usage.CostUSD,
 			})
 			if err != nil {
 				e.logf(item.Number, "error", "%v\n", err)

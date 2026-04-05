@@ -545,6 +545,14 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// silently pausing the issue.
 	blockedOnInput := err == nil && CheckBlockedOnInput(output)
 
+	// Store completion/blocked state for TUI event emission in poll.go.
+	func() {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		e.lastCompleted[item.Number] = completed
+		e.lastBlocked[item.Number] = blockedOnInput
+	}()
+
 	if completed {
 		releaseLock()
 		// Clear retry tracking for this stage — no longer needed after success.

@@ -20,7 +20,9 @@ type HistoryEntry struct {
 	Title       string
 	StageName   string
 	IsComment   bool
-	Success     bool
+	Success        bool
+	Completed      bool
+	BlockedOnInput bool
 	Duration    time.Duration
 	CompletedAt time.Time
 	TurnsUsed   int
@@ -273,7 +275,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Title:       ev.Title,
 			StageName:   ev.StageName,
 			IsComment:   ev.IsComment,
-			Success:     ev.Success,
+			Success:        ev.Success,
+			Completed:      ev.Completed,
+			BlockedOnInput: ev.BlockedOnInput,
 			Duration:    ev.Duration,
 			CompletedAt: ev.CompletedAt,
 			TurnsUsed:   ev.TurnsUsed,
@@ -309,11 +313,18 @@ func (m *Model) updateHistoryViewport() {
 	// Show newest entries at the top.
 	for i := len(m.history) - 1; i >= 0; i-- {
 		h := m.history[i]
-		status := successStyle.Render("✓")
-		result := ""
+		var status, result string
 		if !h.Success {
 			status = failStyle.Render("✗")
-			result = dimStyle.Render("  (failed)")
+			result = dimStyle.Render("  (error)")
+		} else if h.BlockedOnInput {
+			status = activeStyle.Render("?")
+			result = dimStyle.Render("  (input needed)")
+		} else if !h.Completed {
+			status = dimStyle.Render("↻")
+			result = dimStyle.Render("  (retry)")
+		} else {
+			status = successStyle.Render("✓")
 		}
 		ts := dimStyle.Render(h.CompletedAt.Format("2006-01-02 15:04"))
 		dur := fmtDuration(h.Duration)
