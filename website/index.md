@@ -1,6 +1,6 @@
 ---
 layout: default
-title: Fabrik — Automated Claude Code SDLC Orchestration
+title: Automated Claude Code SDLC Orchestration
 description: >-
   Fabrik watches your GitHub Project board and drives Claude Code through a
   configurable SDLC pipeline. File an issue, drag it across the board, let the
