@@ -23,10 +23,6 @@ The engine has written context files to `.fabrik-context/` in your working direc
 
 Start by reading these files to understand what was planned and implemented. Use the task checklist in `.fabrik-context/stage-Plan.md` to verify all tasks were completed.
 
-### Check for codebase changes
-
-If `.fabrik-context/codebase-changes.md` exists, read it. This file lists files that changed on `origin/main` since the Implement stage completed. If the implementation touched files that have since been modified on main, flag those areas for closer review — the implementation may have been against an outdated base, and merge conflicts or behavioral changes may need attention.
-
 ### Check worktree state
 
 1. `git status` — commit or incorporate any uncommitted changes from prior sessions
