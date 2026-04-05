@@ -601,11 +601,12 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 
 	if completed {
 		releaseLock()
-		// Clear retry tracking for this stage — no longer needed after success.
+		// Clear loop tracking for this stage — no longer needed after success.
 		func() {
 			e.mu.Lock()
 			defer e.mu.Unlock()
-			delete(e.retryCount, stageKey)
+			delete(e.loopCount, stageKey)
+			delete(e.totalLoopCount, stageKey)
 			delete(e.pausedDueToRetries, stageKey)
 		}()
 		// Post-stage: create draft PR and/or mark ready now that commits exist
@@ -623,16 +624,17 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	} else {
 		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
 		e.logf(item.Number, "wait", "stage %q did not complete — will retry after %v\n", stage.Name, cooldown)
-		if claudeRan && e.cfg.MaxRetries > 0 {
+		maxLoops := e.effectiveMaxLoops()
+		if claudeRan && maxLoops > 0 {
 			var count int
 			func() {
 				e.mu.Lock()
 				defer e.mu.Unlock()
-				e.retryCount[stageKey]++
-				count = e.retryCount[stageKey]
+				e.loopCount[stageKey]++
+				count = e.loopCount[stageKey]
 			}()
-			if count >= e.cfg.MaxRetries {
-				e.escalateFailedStage(item, stage)
+			if count >= maxLoops {
+				e.escalateFailedStage(item, stage, maxLoops)
 				releaseLock() // permanently giving up — release the lock
 			}
 		}
@@ -644,8 +646,8 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 // escalateFailedStage is called when a stage has failed MaxRetries times. It adds
 // fabrik:paused and stage:<name>:failed labels, posts an explanatory comment, and
 // records the escalation so clearFailedStage can detect when the user unpauses.
-func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
-	e.logf(item.Number, "escalate", "stage %q failed %d time(s) — pausing issue\n", stage.Name, e.cfg.MaxRetries)
+func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage, maxLoops int) {
+	e.logf(item.Number, "escalate", "stage %q failed %d no-progress loop(s) — pausing issue\n", stage.Name, maxLoops)
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
@@ -656,8 +658,8 @@ func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 	e.addFailedLabel(owner, repo, item.Number, stage.Name)
 
 	comment := fmt.Sprintf(
-		"🏭 **Fabrik — stage failed**\n\nStage **%s** failed to complete after %d attempt(s). The issue has been paused (`fabrik:paused`).\n\nTo retry: investigate the failure, make any needed fixes, then remove the `fabrik:paused` label.",
-		stage.Name, e.cfg.MaxRetries,
+		"🏭 **Fabrik — stage failed**\n\nStage **%s** failed to complete after %d consecutive no-progress attempt(s). The issue has been paused (`fabrik:paused`).\n\nTo retry: investigate the failure, make any needed fixes, then remove the `fabrik:paused` label.",
+		stage.Name, maxLoops,
 	)
 	if err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
 		e.logf(item.Number, "warn", "could not post escalation comment: %v\n", err)
@@ -684,7 +686,8 @@ func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 
 	stageKey := issueKey(item, e.defaultRepo()) + "-" + stage.Name
 	e.mu.Lock()
-	delete(e.retryCount, stageKey)
+	delete(e.loopCount, stageKey)
+	delete(e.totalLoopCount, stageKey)
 	delete(e.pausedDueToRetries, stageKey)
 	delete(e.processedSet, stageKey) // clear cooldown so the stage retries immediately
 	e.mu.Unlock()
@@ -693,7 +696,7 @@ func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 // blockOnInput is called when Claude outputs FABRIK_BLOCKED_ON_INPUT. It pauses
 // the issue with fabrik:paused + fabrik:awaiting-input labels so the engine
 // knows to auto-unblock when the user responds with a comment.
-// It does NOT add a stage:<name>:failed label and does NOT touch retryCount.
+// It does NOT add a stage:<name>:failed label and does NOT touch loopCount.
 func (e *Engine) blockOnInput(item gh.ProjectItem, stage *stages.Stage) {
 	e.logf(item.Number, "block", "stage %q needs user input — pausing with awaiting-input\n", stage.Name)
 
