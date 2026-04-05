@@ -174,6 +174,28 @@ Command-line flags take precedence over `.env` values.
 | `--auto-upgrade` | Self-upgrade from origin/main when idle | `false` |
 | `--poll` | Poll interval in seconds | `30` |
 
+## Subcommands
+
+| Command | Description |
+|---------|-------------|
+| `fabrik init` | Initialize `.fabrik/stages/`, `.fabrik/plugin/`, and `.fabrik/config.yaml` in the current repo |
+| `fabrik watch <issue-number>` | Open a real-time TUI for a single issue — live Claude output, stage history, PR/CI status |
+| `fabrik stream-filter` | Read NDJSON Claude output from stdin and render it as human-readable text |
+| `fabrik resume <issue-number>` | Resume an interrupted Claude session for an issue |
+| `fabrik upgrade` | Self-upgrade Fabrik binary from origin/main |
+
+### `fabrik watch`
+
+Monitor a single issue in real time without running the engine:
+
+```bash
+fabrik watch 42
+# or with explicit credentials if not in .fabrik/config.yaml:
+fabrik watch 42 --owner myorg --repo myrepo
+```
+
+The watch TUI displays: issue title and labels, live Claude output (streamed from the log file), stage history with duration and cost, linked PR status, CI check results, and comment count. Press `i` to open an interactive Claude session in the issue's worktree (resumes the current stage's session). Press `q` to exit.
+
 ## Labels
 
 Fabrik uses labels to track state:
