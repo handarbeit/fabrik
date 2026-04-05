@@ -32,12 +32,12 @@ type Config struct {
 	AutoUpgrade   bool
 	TUI           bool
 	PollSeconds   int
-	MaxConcurrent int
+	MaxConcurrent   int
 	MaxRetries      int // deprecated: use MaxLoops
 	MaxLoops        int
 	MaxTotalRetries int
 	DebugOutput     bool
-	PluginDir     string
+	PluginDir       string
 	Terminal      string
 }
 
@@ -326,13 +326,13 @@ func Execute() error {
 		Token:         cfg.Token,
 		Yolo:          cfg.Yolo,
 		AutoUpgrade:   cfg.AutoUpgrade,
-		PollSeconds:   cfg.PollSeconds,
+		PollSeconds:     cfg.PollSeconds,
 		MaxConcurrent:   cfg.MaxConcurrent,
 		MaxRetries:      cfg.MaxRetries,
 		MaxLoops:        cfg.MaxLoops,
 		MaxTotalRetries: cfg.MaxTotalRetries,
 		DebugOutput:     cfg.DebugOutput,
-		PluginDir:     cfg.PluginDir,
+		PluginDir:       cfg.PluginDir,
 		Stages:        stageCfgs,
 		ReadyCh:       testReadyCh,
 	})
