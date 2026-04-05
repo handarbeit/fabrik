@@ -98,6 +98,25 @@ Fabrik polls the project board every 30 seconds by default (configurable with `-
 or `poll:` in `config.yaml`).
 Move an issue to `Specify` on the board to start processing it.
 
+### Multi-Repo / Job-Control Mode
+
+Fabrik can manage issues from a **single GitHub Project board that spans multiple repositories**. To use this mode, run Fabrik from a directory that is *not* inside a git repository:
+
+```bash
+mkdir ~/fabrik-control && cd ~/fabrik-control
+./fabrik --owner myorg --project 5 --user me
+# No --repo needed — Fabrik processes all repos on the board
+```
+
+In job-control mode:
+- Each repository found on the board is cloned as a bare clone at `.fabrik/repo.git/<owner>/<repo>/`
+- Worktrees are created at `.fabrik/worktrees/<owner>/<repo>/issue-N/` on branch `fabrik/issue-N`
+- One worktree manager runs per discovered repository, all sharing the same poll loop
+
+To restrict processing to a single repo while still using job-control mode, pass `--repo owner/repo`.
+
+In **single-repo mode** (running from within a git repository), behavior is unchanged — the existing repo root is used and no bare cloning occurs.
+
 ### Development Mode (self-upgrade)
 
 The `--auto-upgrade` flag enables Fabrik to upgrade itself when idle. After 2
@@ -499,12 +518,20 @@ Claude sessions, and a scrollable History pane with completed jobs.
 
 **In Progress**: Issue number, stage name, elapsed time, issue title, latest status message.
 
-**History**: Issue number, stage name, success/fail, duration, timestamp, turns used,
-cost, and issue title.
+**History**: Issue number, stage name, success/fail icon, duration, timestamp, turns used,
+cost, and issue title. Status icons:
+
+| Icon | Meaning |
+|------|---------|
+| `✓` | Stage completed successfully |
+| `✗` | Stage failed (hit max retries) |
+| `?` | Stage blocked / awaiting user input |
+| `↻` | Stage retrying |
+| `💬` | Issue has unprocessed comments |
 
 ### History Persistence
 
-Job history is saved to `~/.fabrik/history.json` and restored on restart.
+Job history is saved to `.fabrik/history.json` (project-local, alongside `.fabrik/config.yaml`) and restored on restart.
 
 ---
 
