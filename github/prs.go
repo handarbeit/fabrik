@@ -69,6 +69,39 @@ func (c *Client) FetchCheckRuns(owner, repo, sha string) ([]CheckRun, error) {
 	return out, nil
 }
 
+// FetchLinkedPR finds the PR linked to an issue by searching for a PR with the
+// head branch fabrik/issue-N (Fabrik's naming convention). Returns nil, nil if
+// no PR is found.
+func (c *Client) FetchLinkedPR(owner, repo string, issueNumber int) (*PRDetails, error) {
+	branch := fmt.Sprintf("fabrik/issue-%d", issueNumber)
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls?head=%s:%s&state=all&per_page=1",
+		c.baseURL, owner, repo, url.PathEscape(owner), url.PathEscape(branch))
+	var raw []struct {
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		State  string `json:"state"`
+		Merged bool   `json:"merged"`
+		Draft  bool   `json:"draft"`
+		Head   struct {
+			SHA string `json:"sha"`
+		} `json:"head"`
+	}
+	if err := c.restGetJSON(apiURL, &raw); err != nil {
+		return nil, fmt.Errorf("fetching linked PR for issue #%d: %w", issueNumber, err)
+	}
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	return &PRDetails{
+		Number:  raw[0].Number,
+		Title:   raw[0].Title,
+		State:   raw[0].State,
+		Merged:  raw[0].Merged,
+		Draft:   raw[0].Draft,
+		HeadSHA: raw[0].Head.SHA,
+	}, nil
+}
+
 // ErrNotMergeable is returned by MergePR when the PR cannot be merged because
 // GitHub reports mergeable as false or null (not yet computed). Callers may
 // use errors.Is(err, github.ErrNotMergeable) to distinguish this from API failures.
