@@ -27,6 +27,15 @@ func runResume(args []string) error {
 	stagesDir := fset.String("stages", ".fabrik/stages", "Directory containing stage YAML configs")
 	pluginDir := fset.String("plugin-dir", "", "Path to Fabrik plugin directory")
 
+	// Support `fabrik resume <issue-number> [flags]`: extract the issue number
+	// from the front of args before flag parsing (flag.FlagSet stops at first
+	// non-flag argument, so we must pull the positional out first).
+	if len(args) == 0 || args[0] == "" {
+		return fmt.Errorf("resume: expected exactly one positional argument: <issue-number>\nUsage: fabrik resume <issue-number> [--stage <name>]")
+	}
+	issueArg := args[0]
+	args = args[1:]
+
 	if err := fset.Parse(args); err != nil {
 		return err
 	}
@@ -43,13 +52,9 @@ func runResume(args []string) error {
 		}
 	}
 
-	if fset.NArg() != 1 {
-		return fmt.Errorf("resume: expected exactly one positional argument: <issue-number>\nUsage: fabrik resume <issue-number> [--stage <name>]")
-	}
-
-	issueNumber, err := strconv.Atoi(fset.Arg(0))
+	issueNumber, err := strconv.Atoi(issueArg)
 	if err != nil || issueNumber <= 0 {
-		return fmt.Errorf("resume: issue number must be a positive integer, got %q", fset.Arg(0))
+		return fmt.Errorf("resume: issue number must be a positive integer, got %q", issueArg)
 	}
 
 	if *stageName == "" {
