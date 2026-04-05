@@ -17,7 +17,7 @@ import (
 // engine itself and should never be treated as user-generated dirty content.
 // These paths must not block cleanup or worktree updates.
 func isEngineManagedPath(path string) bool {
-	return strings.HasPrefix(path, ".fabrik-context/") || strings.HasPrefix(path, ".fabrik/issue.md")
+	return strings.HasPrefix(path, ".fabrik-context/")
 }
 
 // isAwaitingInput returns true iff the item has both fabrik:paused and
@@ -538,7 +538,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 
 	// Warn the user when Claude ran without error but produced no output at all.
 	// This makes silent stalls visible on the issue without waiting for MaxRetries.
-	if claudeRan && err == nil && output == "" {
+	if claudeRan && err == nil && strings.TrimSpace(output) == "" {
 		e.logf(item.Number, "warn", "stage %q ran without error but produced no output\n", stage.Name)
 		warnComment := fmt.Sprintf("🏭 **Fabrik — empty stage output**\n\nStage **%s** ran without error but produced no output.", stage.Name)
 		if commentErr := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, warnComment); commentErr != nil {

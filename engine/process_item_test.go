@@ -1161,31 +1161,12 @@ func TestProcessItem_CleanupStage_NewCommentsIgnored(t *testing.T) {
 }
 
 func TestProcessItem_CleanupStage_EngineFilesOnlyNotDirty(t *testing.T) {
-	// Engine-managed files (.fabrik/issue.md) must not block cleanup.
-	// Only user-generated uncommitted content should trigger the dirty warning.
+	// Engine-managed files (.fabrik-context/) must not block cleanup.
+	// The engine writes context files to .fabrik-context/, which is added to
+	// .git/info/exclude by EnsureWorktree. This test verifies cleanup proceeds
+	// even when untracked files are present in the worktree.
 	skipIfNoGit(t)
 	repoDir := initBareRepo(t)
-
-	// Commit a tracked file inside .fabrik/ so git knows the directory.
-	// This ensures that adding .fabrik/issue.md later shows as
-	// "?? .fabrik/issue.md" (not "?? .fabrik/") in git status --porcelain.
-	fabrikDir := filepath.Join(repoDir, ".fabrik")
-	if err := os.MkdirAll(fabrikDir, 0755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(fabrikDir, ".gitkeep"), nil, 0644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	for _, args := range [][]string{
-		{"git", "add", ".fabrik/.gitkeep"},
-		{"git", "commit", "-m", "add .fabrik dir"},
-	} {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = repoDir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("setup %v: %s: %v", args, out, err)
-		}
-	}
 
 	wm := NewWorktreeManager(repoDir)
 	wtDir, err := wm.EnsureWorktree(88, "main", false)
@@ -1193,17 +1174,19 @@ func TestProcessItem_CleanupStage_EngineFilesOnlyNotDirty(t *testing.T) {
 		t.Fatalf("EnsureWorktree: %v", err)
 	}
 
-	// Write .fabrik/issue.md as an untracked file (engine-managed, should be ignored).
-	if err := os.WriteFile(filepath.Join(wtDir, ".fabrik", "issue.md"), []byte("issue body"), 0644); err != nil {
+	// Write an untracked file to simulate incomplete work in the worktree.
+	// (The .fabrik-context/ dir itself is git-excluded by EnsureWorktree, so
+	// engine context files never surface in git status — this is belt-and-suspenders.)
+	if err := os.WriteFile(filepath.Join(wtDir, "wip.txt"), []byte("work in progress"), 0644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	// Verify the test precondition: .fabrik/issue.md appears in git status
+	// Verify the test precondition: untracked file appears in git status
 	statusCmd := exec.Command("git", "status", "--porcelain")
 	statusCmd.Dir = wtDir
 	statusOut, _ := statusCmd.Output()
-	if !strings.Contains(string(statusOut), ".fabrik/issue.md") {
-		t.Fatalf("precondition failed: .fabrik/issue.md not visible in git status, got: %s", statusOut)
+	if !strings.Contains(string(statusOut), "wip.txt") {
+		t.Fatalf("precondition failed: wip.txt not visible in git status, got: %s", statusOut)
 	}
 
 	client := &mockGitHubClient{}
@@ -1223,9 +1206,10 @@ func TestProcessItem_CleanupStage_EngineFilesOnlyNotDirty(t *testing.T) {
 		t.Fatalf("processItem: %v", err)
 	}
 
-	// Cleanup should proceed: worktree removed and completion label added
+	// Cleanup should always proceed regardless of untracked files in the worktree —
+	// the dirty check only warns, it never blocks cleanup.
 	if _, statErr := os.Stat(wm.WorktreeDir(88)); !os.IsNotExist(statErr) {
-		t.Error("worktree should have been removed when only engine-managed files are present")
+		t.Error("worktree should have been removed even when untracked files are present")
 	}
 	if len(client.addLabelCalls) == 0 || client.addLabelCalls[0].labelName != "stage:Done:complete" {
 		t.Errorf("expected stage:Done:complete label, got %v", client.addLabelCalls)
