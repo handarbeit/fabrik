@@ -664,7 +664,9 @@ end tell`, strings.ReplaceAll(cmdStr, `"`, `\"`))
 		if cmd == nil {
 			return nil
 		}
-		_ = cmd.Start()
+		if err := cmd.Start(); err != nil {
+			fmt.Fprintf(os.Stderr, "[warn] failed to launch terminal %q: %v\n", m.terminal, err)
+		}
 		return nil
 	}
 }
