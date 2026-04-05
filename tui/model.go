@@ -601,12 +601,16 @@ func (m Model) openTerminalCmd(cmdStr string) tea.Cmd {
 
 		switch m.terminal {
 		case "iterm2":
-			// iTerm2 v3+ AppleScript API; macOS only.
-			script := fmt.Sprintf(`tell application "iTerm"
+			// iTerm2 v3+ AppleScript API; macOS only. Fall back to Linux default on other platforms.
+			if runtime.GOOS == "darwin" {
+				script := fmt.Sprintf(`tell application "iTerm"
 	activate
 	create window with default profile command "%s"
 end tell`, strings.ReplaceAll(cmdStr, `"`, `\"`))
-			cmd = exec.Command("osascript", "-e", script)
+				cmd = exec.Command("osascript", "-e", script)
+			} else {
+				cmd = linuxFallbackTerminal(cmdStr)
+			}
 
 		case "ghostty":
 			if runtime.GOOS == "darwin" {
@@ -623,9 +627,13 @@ end tell`, strings.ReplaceAll(cmdStr, `"`, `\"`))
 			cmd = exec.Command("alacritty", "-e", "sh", "-c", cmdStr)
 
 		case "warp":
-			// Warp does not support passing a command via -e; open the app and warn.
-			fmt.Fprintf(os.Stderr, "[warn] Warp terminal does not support opening with a command; log viewer unavailable\n")
-			cmd = exec.Command("open", "-a", "Warp")
+			// Warp does not support passing a command via -e; macOS only.
+			if runtime.GOOS == "darwin" {
+				fmt.Fprintf(os.Stderr, "[warn] Warp terminal does not support opening with a command; log viewer unavailable\n")
+				cmd = exec.Command("open", "-a", "Warp")
+			} else {
+				cmd = linuxFallbackTerminal(cmdStr)
+			}
 
 		case "terminal", "":
 			// Terminal.app on macOS or platform default on Linux.
