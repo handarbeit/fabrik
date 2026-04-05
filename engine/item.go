@@ -446,9 +446,9 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		baseline.worktreeHead, _ = gitRevParse(workDir, "HEAD")
 		remoteBranch := "origin/" + e.worktreesFor(item.Repo).branchName(item.Number)
 		baseline.remoteHead, _ = gitRevParse(workDir, remoteBranch)
-		if prNum, err := e.client.FindPRForIssue(e.cfg.Owner, e.cfg.Repo, item.Number); err == nil && prNum > 0 {
+		if prNum, err := e.client.FindPRForIssue(owner, repo, item.Number); err == nil && prNum > 0 {
 			baseline.prNumber = prNum
-			if body, err := e.client.GetIssueBody(e.cfg.Owner, e.cfg.Repo, prNum); err == nil {
+			if body, err := e.client.GetIssueBody(owner, repo, prNum); err == nil {
 				baseline.checkedTasks = countCheckedTasks(body)
 			}
 		}
@@ -649,7 +649,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 				remoteHeadAfter, _ := gitRevParse(workDir, remoteBranch)
 				checkedTasksAfter := 0
 				if baseline.prNumber > 0 {
-					if body, err := e.client.GetIssueBody(e.cfg.Owner, e.cfg.Repo, baseline.prNumber); err == nil {
+					if body, err := e.client.GetIssueBody(owner, repo, baseline.prNumber); err == nil {
 						checkedTasksAfter = countCheckedTasks(body)
 					}
 				}
