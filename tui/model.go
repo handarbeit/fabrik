@@ -64,9 +64,10 @@ const (
 
 // ProjectInfo holds display metadata about the monitored project shown in the footer.
 type ProjectInfo struct {
-	CWD     string // display-ready CWD (home-relative or absolute)
-	Repo    string // "owner/repo"
-	Version string // optional version or module name; empty if unknown
+	CWD           string // display-ready CWD (home-relative or absolute)
+	Repo          string // "owner/repo"
+	Version       string // optional version or module name of the monitored project; empty if unknown
+	FabrikVersion string // fabrik binary version (e.g. "v1.2.3" or "dev(abc1234)")
 }
 
 // Model is the bubbletea TUI model for Fabrik.
@@ -482,6 +483,9 @@ func (m Model) viewHeader() string {
 	}
 
 	title := titleStyle.Render("fabrik")
+	if m.projectInfo.FabrikVersion != "" {
+		title = title + " " + dimStyle.Render(m.projectInfo.FabrikVersion)
+	}
 	timerStr := dimStyle.Render(timer)
 
 	status := ""
