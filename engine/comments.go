@@ -165,7 +165,8 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		func() {
 			e.mu.Lock()
 			defer e.mu.Unlock()
-			delete(e.retryCount, stageKey)
+			delete(e.loopCount, stageKey)
+			delete(e.totalLoopCount, stageKey)
 			delete(e.pausedDueToRetries, stageKey)
 			e.lastCompleted[iKey] = true
 		}()

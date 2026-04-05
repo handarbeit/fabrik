@@ -241,7 +241,7 @@ func TestProcessItem_AwaitingInput_NoComment_Skips(t *testing.T) {
 	}
 }
 
-// --- (f) processItem calls blockOnInput, does not increment retryCount ---
+// --- (f) processItem calls blockOnInput, does not increment loopCount ---
 
 func TestProcessItem_BlockedOnInput_AddsLabels(t *testing.T) {
 	skipIfNoGit(t)
@@ -307,13 +307,13 @@ func TestProcessItem_BlockedOnInput_AddsLabels(t *testing.T) {
 		}
 	}
 
-	// retryCount should NOT be incremented
+	// loopCount should NOT be incremented
 	itemKey := "owner/repo#10-Research"
 	eng.mu.Lock()
-	count := eng.retryCount[itemKey]
+	count := eng.loopCount[itemKey]
 	eng.mu.Unlock()
 	if count != 0 {
-		t.Errorf("retryCount should be 0 after blocked-on-input, got %d", count)
+		t.Errorf("loopCount should be 0 after blocked-on-input, got %d", count)
 	}
 
 	// Lock should be released (since blockOnInput calls releaseLock)

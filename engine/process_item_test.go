@@ -759,7 +759,7 @@ func TestProcessItem_ResetsOnUnpause(t *testing.T) {
 	// Simulate a previous escalation: engine had paused this issue after 3 failures
 	itemKey := fmt.Sprintf("owner/repo#%d-%s", 11, "Research")
 	eng.mu.Lock()
-	eng.retryCount[itemKey] = 3
+	eng.loopCount[itemKey] = 3
 	eng.pausedDueToRetries[itemKey] = true
 	eng.mu.Unlock()
 
@@ -843,13 +843,13 @@ func TestProcessItem_UnlimitedWhenMaxRetriesZero(t *testing.T) {
 		}
 	}
 
-	// retryCount should remain 0 (not incremented when MaxRetries=0)
+	// loopCount should remain 0 (not incremented when MaxRetries=0)
 	itemKey := fmt.Sprintf("owner/repo#%d-%s", 12, "Research")
 	eng.mu.Lock()
-	count := eng.retryCount[itemKey]
+	count := eng.loopCount[itemKey]
 	eng.mu.Unlock()
 	if count != 0 {
-		t.Errorf("expected retryCount=0 when MaxRetries=0, got %d", count)
+		t.Errorf("expected loopCount=0 when MaxRetries=0, got %d", count)
 	}
 }
 
@@ -883,7 +883,7 @@ func TestProcessItem_ClearsRetryCountOnCompletion(t *testing.T) {
 	// Pre-seed retry state as if previous failures occurred
 	itemKey := fmt.Sprintf("owner/repo#%d-%s", 13, "Research")
 	eng.mu.Lock()
-	eng.retryCount[itemKey] = 2
+	eng.loopCount[itemKey] = 2
 	eng.pausedDueToRetries[itemKey] = false
 	eng.mu.Unlock()
 
@@ -896,12 +896,12 @@ func TestProcessItem_ClearsRetryCountOnCompletion(t *testing.T) {
 
 	// Both maps should be cleared after successful completion
 	eng.mu.Lock()
-	count := eng.retryCount[itemKey]
+	count := eng.loopCount[itemKey]
 	paused := eng.pausedDueToRetries[itemKey]
 	eng.mu.Unlock()
 
 	if count != 0 {
-		t.Errorf("expected retryCount to be cleared on completion, got %d", count)
+		t.Errorf("expected loopCount to be cleared on completion, got %d", count)
 	}
 	if paused {
 		t.Error("expected pausedDueToRetries to be cleared on completion")
