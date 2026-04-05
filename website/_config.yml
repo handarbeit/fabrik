@@ -1,0 +1,26 @@
+title: Fabrik
+description: >-
+  Automated Claude Code SDLC driver powered by GitHub Issues and Projects.
+  Fabrik watches your GitHub Project board and drives Claude Code through
+  configurable pipeline stages — Research, Plan, Implement, Review, Validate.
+url: "https://tenaciousvc.github.io"
+baseurl: "/fabrik"
+github_username: tenaciousvc
+github_repo: fabrik
+
+# Build settings
+markdown: kramdown
+kramdown:
+  input: GFM
+  syntax_highlighter: rouge
+
+# Sass
+sass:
+  sass_dir: assets/css
+  style: compressed
+
+# Exclude from build
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - README.md
