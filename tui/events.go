@@ -48,11 +48,12 @@ func (JobStartedEvent) tuiEvent() {}
 type JobCompletedEvent struct {
 	IssueNumber int
 	Title       string
-	StageName   string
-	IsComment   bool // true when processing a user comment, not a stage run
-	Success        bool // no error from processItem
-	Completed      bool // stage actually completed (FABRIK_STAGE_COMPLETE detected)
-	BlockedOnInput bool // stage needs user input (FABRIK_BLOCKED_ON_INPUT detected)
+	StageName      string
+	StageModel     string // model configured for the stage (e.g. "sonnet")
+	IsComment      bool   // true when processing a user comment, not a stage run
+	Success        bool   // no error from processItem
+	Completed      bool   // stage actually completed (FABRIK_STAGE_COMPLETE detected)
+	BlockedOnInput bool   // stage needs user input (FABRIK_BLOCKED_ON_INPUT detected)
 	Duration    time.Duration
 	CompletedAt time.Time
 	TurnsUsed   int

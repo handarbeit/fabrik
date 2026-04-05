@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -19,6 +20,7 @@ type HistoryEntry struct {
 	IssueNumber int
 	Title       string
 	StageName   string
+	StageModel  string // model configured for the stage; empty means use claude default
 	IsComment   bool
 	Success        bool
 	Completed      bool
@@ -75,6 +77,9 @@ type Model struct {
 	// now (updated on each TickEvent)
 	now time.Time
 
+	// pluginDir is the Fabrik plugin directory, passed to claude --plugin-dir
+	pluginDir string
+
 	// statusLine shows the latest poll-level log message in the header
 	statusLine string
 
@@ -109,7 +114,8 @@ var (
 // New creates an initial TUI model.
 // pollSeconds is the configured polling interval.
 // terminal is the resolved terminal emulator identifier; empty string uses the platform default.
-func New(pollSeconds int, terminal string) Model {
+// pluginDir is the Fabrik plugin directory passed to claude --plugin-dir (may be empty).
+func New(pollSeconds int, terminal string, pluginDir string) Model {
 	vp := viewport.New(80, 10)
 	return Model{
 		pollInterval:  time.Duration(pollSeconds) * time.Second,
@@ -119,6 +125,7 @@ func New(pollSeconds int, terminal string) Model {
 		spinnerFrames: []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"},
 		now:           time.Now(),
 		terminal:      terminal,
+		pluginDir:     pluginDir,
 	}
 }
 
@@ -240,6 +247,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
+		case "r":
+			// Active pane: open log viewer (active sessions must not be interrupted)
+			// History pane: open interactive resume session in the issue's worktree
+			if m.focusPane == paneActive {
+				nums := m.sortedActiveNums()
+				if m.activeIdx < len(nums) {
+					num := nums[m.activeIdx]
+					if _, ok := m.active[num]; ok {
+						logDir := fmt.Sprintf("%s/.fabrik/logs/issue-%d", homeDir(), num)
+						return m, m.openLogViewerCmd(logDir)
+					}
+				}
+			} else if m.focusPane == paneHistory && len(m.history) > 0 {
+				realIdx := len(m.history) - 1 - m.histIdx
+				if realIdx >= 0 && realIdx < len(m.history) {
+					h := m.history[realIdx]
+					return m, m.openResumeCmd(h.IssueNumber, h.StageName, h.StageModel)
+				}
+			}
+			return m, nil
+
 		}
 		// Forward other key events to the history viewport for scrolling
 		var cmd tea.Cmd
@@ -281,6 +309,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			IssueNumber: ev.IssueNumber,
 			Title:       ev.Title,
 			StageName:   ev.StageName,
+			StageModel:  ev.StageModel,
 			IsComment:   ev.IsComment,
 			Success:        ev.Success,
 			Completed:      ev.Completed,
@@ -494,7 +523,7 @@ func (m Model) viewActive() string {
 
 	hint := ""
 	if m.focusPane == paneActive && len(m.active) > 0 {
-		hint = dimStyle.Render("  [enter/l]ogs  [tab] history")
+		hint = dimStyle.Render("  [r/enter/l]ogs  [tab] history")
 	}
 	content := title + hint + "\n" + strings.Join(lines, "\n")
 	return borderStyle.Width(m.width - 4).Render(content)
@@ -510,7 +539,7 @@ func (m Model) viewHistory() string {
 	if m.confirmClear {
 		hint = failStyle.Render("  Clear all history? [C]onfirm / [n]o")
 	} else if m.focusPane == paneHistory && len(m.history) > 0 {
-		hint = dimStyle.Render("  [l]ogs  [c]lear entry  [C]lear all  [tab] in-progress")
+		hint = dimStyle.Render("  [r]esume  [l]ogs  [c]lear entry  [C]lear all  [tab] in-progress")
 	}
 	content := title + hint + "\n" + m.historyVP.View()
 	return borderStyle.Width(m.width - 4).Render(content)
@@ -580,6 +609,55 @@ func (m Model) openLogViewerCmd(logDir string) tea.Cmd {
 // making it safe to embed in a shell command string.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// tuiReadSessionID reads the Claude session ID for a given issue and stage.
+// The path logic mirrors engine.ReadSessionID — keep in sync if either changes.
+func tuiReadSessionID(issueNumber int, stageName string) string {
+	home, _ := os.UserHomeDir()
+	base := filepath.Base(stageName)
+	if base == "" || base == "." || base == "/" || base == string(filepath.Separator) {
+		base = "default"
+	}
+	path := filepath.Join(home, ".fabrik", "sessions",
+		fmt.Sprintf("issue-%d", issueNumber), base+".session")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// openResumeCmd returns a tea.Cmd that opens a new terminal window running an
+// interactive Claude session in the issue's worktree. If a session file exists
+// for the given stage, --resume <id> is passed; otherwise a fresh session starts.
+// If the worktree directory does not exist, an error terminal window is opened.
+func (m Model) openResumeCmd(issueNumber int, stageName, stageModel string) tea.Cmd {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil
+	}
+	worktreeDir := filepath.Join(cwd, ".fabrik", "worktrees", fmt.Sprintf("issue-%d", issueNumber))
+	if _, err := os.Stat(worktreeDir); err != nil {
+		return m.openTerminalCmd(fmt.Sprintf("echo 'Worktree for issue #%d not found (%s). The issue has not been processed yet.' && read", issueNumber, worktreeDir))
+	}
+
+	args := []string{"claude"}
+	sessionID := tuiReadSessionID(issueNumber, stageName)
+	if sessionID != "" {
+		args = append(args, "--resume", sessionID)
+	}
+	if stageModel != "" {
+		args = append(args, "--model", stageModel)
+	}
+	if m.pluginDir != "" {
+		args = append(args, "--plugin-dir", m.pluginDir)
+	}
+
+	// Build: cd <worktreeDir> && claude [--resume <id>] [--model <m>] [--plugin-dir <d>]
+	quotedDir := strings.ReplaceAll(worktreeDir, `"`, `\"`)
+	cmdStr := fmt.Sprintf("cd \"%s\" && %s", quotedDir, strings.Join(args, " "))
+	return m.openTerminalCmd(cmdStr)
 }
 
 // fmtDuration formats a duration as MM:SS.
