@@ -173,6 +173,12 @@ Command-line flags take precedence over `.env` values.
 | `--yolo` | Auto-advance through stages | `false` |
 | `--auto-upgrade` | Self-upgrade from origin/main when idle | `false` |
 | `--poll` | Poll interval in seconds | `30` |
+| `--tui` | Enable the interactive TUI dashboard | `false` |
+| `--max-concurrent` | Maximum number of concurrent issue workers | `5` |
+| `--max-retries` | Max failed stage attempts before pausing the issue (0 = unlimited) | `3` |
+| `--debug-output` | Save Claude stage output to `.fabrik/debug/` for debugging | `false` |
+| `--plugin-dir` | Path to Fabrik plugin directory (overrides installed plugin) | `""` |
+| `--terminal` | Terminal emulator for log viewer (`terminal`, `iterm2`, `ghostty`, `kitty`, `alacritty`, `warp`) | `""` |
 
 ## Subcommands
 
@@ -182,7 +188,7 @@ Command-line flags take precedence over `.env` values.
 | `fabrik watch <issue-number>` | Open a real-time TUI for a single issue — live Claude output, stage history, PR/CI status |
 | `fabrik stream-filter` | Read NDJSON Claude output from stdin and render it as human-readable text |
 | `fabrik resume <issue-number>` | Resume an interrupted Claude session for an issue |
-| `fabrik upgrade` | Self-upgrade Fabrik binary from origin/main |
+| `fabrik upgrade` | Refresh plugin skills in `.fabrik/plugin/` from embedded defaults |
 
 ### `fabrik watch`
 
@@ -207,6 +213,8 @@ Fabrik uses labels to track state:
 | `fabrik:paused` | Issue is skipped entirely — no stage processing or comment processing occurs |
 | `fabrik:awaiting-input` | Stage is paused waiting for user input; auto-clears when a new comment from the configured user (`--user`) is received |
 | `stage:<name>:complete` | Stage has been completed |
+| `stage:<name>:in_progress` | Stage is actively running |
+| `stage:<name>:failed` | Stage hit max retries and was paused |
 
 ## Multi-User
 
@@ -222,6 +230,26 @@ branch `fabrik/issue-N`. This means:
 - Multiple issues can be worked on simultaneously without conflicts
 - Each issue's changes are on their own branch, ready for PR
 - Worktrees persist across polls for Claude session continuity
+
+## Multi-Repo / Job-Control Mode
+
+Fabrik can manage issues across **multiple repositories** from a single GitHub Project board. When you run Fabrik from a directory that is not a git repository, it enters **job-control mode**:
+
+1. `fabrikDir` is set to the current working directory (not a git root)
+2. Repos are discovered lazily from project board items
+3. Each repo is cloned as a bare clone at `.fabrik/repo.git/<owner>/<repo>/`
+4. Worktrees for each issue are created under `.fabrik/worktrees/<owner>/<repo>/issue-N/`
+5. One worktree manager per discovered repository handles its own lifecycle
+
+This means you can run Fabrik from a dedicated "control" directory (no git repo required) and have it work across an entire GitHub organization:
+
+```bash
+mkdir my-fabrik-control && cd my-fabrik-control
+./fabrik --owner myorg --project 5 --user me
+# Fabrik will clone repos as needed into .fabrik/repo.git/
+```
+
+In single-repo mode (running from within a git repository), behavior is unchanged — the repo root is used for the worktree directory as before.
 
 ## The Self-Evolving Factory
 
