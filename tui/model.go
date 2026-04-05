@@ -677,7 +677,7 @@ func linuxFallbackTerminal(cmdStr string) *exec.Cmd {
 			if term == "gnome-terminal" {
 				return exec.Command(term, "--", "sh", "-c", cmdStr)
 			}
-			return exec.Command(term, "-e", cmdStr)
+			return exec.Command(term, "-e", "sh", "-c", cmdStr)
 		}
 	}
 	return nil
