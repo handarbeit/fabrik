@@ -245,4 +245,3 @@ func TestDefaultPRCommentPrompt(t *testing.T) {
 		t.Error("expected mention of review feedback")
 	}
 }
-

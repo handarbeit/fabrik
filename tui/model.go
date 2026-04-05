@@ -17,19 +17,19 @@ import (
 
 // HistoryEntry records a completed job for the history pane.
 type HistoryEntry struct {
-	IssueNumber int
-	Title       string
-	StageName   string
-	StageModel  string // model configured for the stage; empty means use claude default
-	IsComment   bool
+	IssueNumber    int
+	Title          string
+	StageName      string
+	StageModel     string // model configured for the stage; empty means use claude default
+	IsComment      bool
 	Success        bool
 	Completed      bool
 	BlockedOnInput bool
-	Duration    time.Duration
-	CompletedAt time.Time
-	TurnsUsed   int
-	MaxTurns    int
-	CostUSD     float64
+	Duration       time.Duration
+	CompletedAt    time.Time
+	TurnsUsed      int
+	MaxTurns       int
+	CostUSD        float64
 }
 
 // activeJob tracks an in-flight worker.
@@ -317,19 +317,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case JobCompletedEvent:
 		delete(m.active, ev.IssueNumber)
 		entry := HistoryEntry{
-			IssueNumber: ev.IssueNumber,
-			Title:       ev.Title,
-			StageName:   ev.StageName,
-			StageModel:  ev.StageModel,
-			IsComment:   ev.IsComment,
+			IssueNumber:    ev.IssueNumber,
+			Title:          ev.Title,
+			StageName:      ev.StageName,
+			StageModel:     ev.StageModel,
+			IsComment:      ev.IsComment,
 			Success:        ev.Success,
 			Completed:      ev.Completed,
 			BlockedOnInput: ev.BlockedOnInput,
-			Duration:    ev.Duration,
-			CompletedAt: ev.CompletedAt,
-			TurnsUsed:   ev.TurnsUsed,
-			MaxTurns:    ev.MaxTurns,
-			CostUSD:     ev.CostUSD,
+			Duration:       ev.Duration,
+			CompletedAt:    ev.CompletedAt,
+			TurnsUsed:      ev.TurnsUsed,
+			MaxTurns:       ev.MaxTurns,
+			CostUSD:        ev.CostUSD,
 		}
 		m.history = append(m.history, entry)
 		SaveHistory(m.history)
@@ -668,7 +668,7 @@ func (m Model) openLogViewerCmd(logDir string) tea.Cmd {
 	// Shell-quote path components so directories or binaries with spaces work correctly.
 	if strings.HasSuffix(latest, ".json") {
 		return m.openTerminalCmd(fmt.Sprintf(
-			"cd %s && cat %s | %s _stream-filter | less -R",
+			"cd %s && cat %s | %s stream-filter | less -R",
 			shellQuote(logDir), shellQuote(latest), shellQuote(fabrikBin)))
 	}
 	return m.openTerminalCmd(fmt.Sprintf("cd %s && less +F %s", shellQuote(logDir), shellQuote(latest)))
