@@ -16,7 +16,7 @@ Confirm with high confidence that the PR is ready to merge. If it's not, clearly
 
 The engine has written context files to `.fabrik-context/` in your working directory:
 - `.fabrik-context/issue.md` — the issue body (the original spec); use this to verify requirements
-- `.fabrik-context/stage-Plan.md` — the task checklist; verify all tasks were completed
+- `.fabrik-context/stage-Plan.md` — the task checklist; verify all tasks were completed. The PR body is the canonical task list — update checkboxes there as you verify tasks.
 - `.fabrik-context/stage-Implement.md` — the implementation summary, if present
 - `.fabrik-context/stage-Review.md` — the review findings, if present
 - `.fabrik-context/pr-description.md` — the linked PR description, if present
@@ -85,7 +85,7 @@ Verify existing functionality isn't broken:
 - No TODO or FIXME comments that should have been resolved
 - No debug logging left in
 - No commented-out code
-- All plan tasks checked off in the issue body
+- All plan tasks checked off in the PR body
 
 ### Branch state
 
