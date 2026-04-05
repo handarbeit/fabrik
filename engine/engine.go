@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -283,4 +285,61 @@ func mapKeys(m map[string]string) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// ErrSkipItem is returned by ensureRepoReady when a repo cannot be cloned and
+// the item should be skipped for this poll cycle (but not surfaced as an error).
+var ErrSkipItem = errors.New("skip item")
+
+// ensureRepoReady guarantees that a WorktreeManager exists for the repo that
+// owns item. In single-repo git mode the WM is already registered at startup,
+// so this is a no-op. In job-control (multi-repo) mode it lazily bare-clones
+// the repo on first access. If the clone fails it posts a comment, adds
+// fabrik:paused and fabrik:awaiting-input labels, records a history entry, and
+// returns ErrSkipItem so the caller skips without treating it as a hard error.
+func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	if owner == "" || repo == "" {
+		return nil // cannot determine repo — let processItem handle it
+	}
+	nameWithOwner := owner + "/" + repo
+
+	e.mu.Lock()
+	_, registered := e.worktreeManagers[nameWithOwner]
+	e.mu.Unlock()
+	if registered {
+		return nil
+	}
+
+	// Job-control mode: clone the repo bare.
+	worktreeRoot := filepath.Join(e.jobControlDir, ".fabrik", "worktrees")
+	bareDir, err := ensureBareClone(e.jobControlDir, owner, repo)
+	if err != nil {
+		msg := fmt.Sprintf("🏭 **Fabrik — cannot clone repo**\n\nFailed to clone `%s/%s`:\n```\n%v\n```\nHuman intervention required. Fix the clone issue and remove `fabrik:paused` to retry.", owner, repo, err)
+		if commentErr := e.client.AddComment(owner, repo, item.Number, msg); commentErr != nil {
+			e.logf(item.Number, "warn", "could not post clone-failure comment: %v\n", commentErr)
+		}
+		if labelErr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); labelErr != nil {
+			e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", labelErr)
+		}
+		if labelErr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); labelErr != nil {
+			e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", labelErr)
+		}
+		// Append a history entry so the TUI records the failure.
+		hist := tui.LoadHistory()
+		hist = append(hist, tui.HistoryEntry{
+			IssueNumber: item.Number,
+			Repo:        nameWithOwner,
+			Title:       item.Title,
+			StageName:   "clone",
+			Success:     false,
+			CompletedAt: time.Now(),
+		})
+		tui.SaveHistory(hist)
+		e.logf(item.Number, "error", "cannot clone repo %s: %v — pausing issue\n", nameWithOwner, err)
+		return ErrSkipItem
+	}
+
+	e.registerWorktrees(nameWithOwner, bareDir, worktreeRoot)
+	return nil
 }

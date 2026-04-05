@@ -357,6 +357,7 @@ func (e *Engine) poll(ctx context.Context) error {
 			defer e.inFlight.Delete(iKey)
 			e.emitStructural(tui.JobStartedEvent{
 				IssueNumber: item.Number,
+				Repo:        iKey,
 				Title:       item.Title,
 				StageName:   stageName,
 				IsComment:   isComment,
@@ -373,6 +374,7 @@ func (e *Engine) poll(ctx context.Context) error {
 			e.mu.Unlock()
 			e.emitStructural(tui.JobCompletedEvent{
 				IssueNumber:    item.Number,
+				Repo:           iKey,
 				Title:          item.Title,
 				StageName:      stageName,
 				StageModel:     stageModel,

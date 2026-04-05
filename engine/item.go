@@ -192,6 +192,15 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		return nil
 	}
 
+	// Ensure the repo's WorktreeManager is registered (no-op in single-repo mode;
+	// triggers lazy bare-clone in job-control / multi-repo mode).
+	if err := e.ensureRepoReady(ctx, item); err != nil {
+		if errors.Is(err, ErrSkipItem) {
+			return nil
+		}
+		return err
+	}
+
 	// Derive per-issue owner/repo for all API calls.
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	// Unique key for this issue across all repos.

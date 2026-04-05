@@ -95,9 +95,26 @@ func saveDebugLog(issueNumber int, label string, output string) {
 }
 
 // SessionDir returns the directory where Claude sessions are cached for an issue.
+// The path is ~/.fabrik/sessions/issue-N/ for single-repo projects.
+// Use sessionDirForItem for multi-repo-aware paths.
 func SessionDir(issueNumber int) string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".fabrik", "sessions", fmt.Sprintf("issue-%d", issueNumber))
+}
+
+// sessionDirForItem returns the session directory for an issue, namespaced by
+// repo when item.Repo is set (multi-repo mode). The path is:
+//   - single-repo: ~/.fabrik/sessions/issue-N/
+//   - multi-repo:  ~/.fabrik/sessions/<owner>-<repo>/issue-N/
+func sessionDirForItem(issue gh.ProjectItem) string {
+	home, _ := os.UserHomeDir()
+	issuePart := fmt.Sprintf("issue-%d", issue.Number)
+	if issue.Repo == "" {
+		return filepath.Join(home, ".fabrik", "sessions", issuePart)
+	}
+	// Sanitize "owner/repo" → "owner-repo" for use as a directory name.
+	repoPart := strings.ReplaceAll(issue.Repo, "/", "-")
+	return filepath.Join(home, ".fabrik", "sessions", repoPart, issuePart)
 }
 
 // LogDir returns the directory where Claude session logs are stored for an issue.
@@ -134,7 +151,7 @@ func ReadSessionID(issueNumber int, stageName string) string {
 // modelOverride, if non-empty, replaces the stage's configured model.
 // It returns Claude's output, whether Claude indicated completion, and token usage.
 func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
-	sessDir := SessionDir(issue.Number)
+	sessDir := sessionDirForItem(issue)
 	if err := os.MkdirAll(sessDir, 0700); err != nil {
 		return "", false, TokenUsage{}, fmt.Errorf("creating session dir: %w", err)
 	}
@@ -157,7 +174,7 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 // It uses the stage's CommentPrompt if defined, otherwise a default.
 // modelOverride, if non-empty, replaces the stage's configured model.
 func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
-	sessDir := SessionDir(issue.Number)
+	sessDir := sessionDirForItem(issue)
 	if err := os.MkdirAll(sessDir, 0700); err != nil {
 		return "", false, TokenUsage{}, fmt.Errorf("creating session dir: %w", err)
 	}
