@@ -71,6 +71,7 @@ func Execute() error {
 	flag.IntVar(&cfg.MaxRetries, "max-retries", 3, "Max failed stage attempts before pausing the issue (0 = unlimited)")
 	flag.BoolVar(&cfg.DebugOutput, "debug-output", false, "Save Claude stage output to .fabrik/debug/ for debugging")
 	flag.StringVar(&cfg.PluginDir, "plugin-dir", "", "Path to Fabrik plugin directory (for development; overrides installed plugin)")
+	flag.StringVar(&cfg.Terminal, "terminal", "", "Terminal emulator to use for log viewer (terminal, iterm2, ghostty, kitty, alacritty, warp)")
 
 	flag.Parse()
 
@@ -219,6 +220,8 @@ func Execute() error {
 			cfg.Terminal = v
 		} else if pc.Terminal != "" {
 			cfg.Terminal = pc.Terminal
+		} else {
+			cfg.Terminal = detectTerminalFromEnv()
 		}
 	}
 	if cfg.PluginDir == "" {
@@ -299,19 +302,39 @@ func Execute() error {
 	// When --tui is enabled (and we have a real terminal), run the bubbletea
 	// TUI. Otherwise fall through to plain-text mode.
 	if useTUI {
-		return runTUI(eng, cfg.PollSeconds)
+		return runTUI(eng, cfg.PollSeconds, cfg.Terminal)
 	}
 	return eng.Run()
+}
+
+// detectTerminalFromEnv maps the TERM_PROGRAM environment variable to a Fabrik
+// terminal identifier. Returns "" if TERM_PROGRAM is not set or not recognized,
+// causing openTerminalCmd to fall back to the platform default.
+func detectTerminalFromEnv() string {
+	switch os.Getenv("TERM_PROGRAM") {
+	case "Apple_Terminal":
+		return "terminal"
+	case "iTerm.app":
+		return "iterm2"
+	case "ghostty":
+		return "ghostty"
+	case "WarpTerminal":
+		return "warp"
+	case "alacritty":
+		return "alacritty"
+	default:
+		return ""
+	}
 }
 
 // runTUI wires the event channel, starts the bubbletea program, and runs the
 // engine. The engine handles SIGINT itself; bubbletea uses WithoutSignalHandler
 // so it doesn't interfere. When the engine exits, the TUI is quit.
-func runTUI(eng *engine.Engine, pollSeconds int) error {
+func runTUI(eng *engine.Engine, pollSeconds int, terminal string) error {
 	events := make(chan tui.Event, 256)
 	eng.SetEvents(events)
 
-	tuiModel := tui.New(pollSeconds)
+	tuiModel := tui.New(pollSeconds, terminal)
 	p := tea.NewProgram(tuiModel, tea.WithAltScreen(), tea.WithoutSignalHandler())
 
 	// Forward events from the engine's channel into bubbletea.
