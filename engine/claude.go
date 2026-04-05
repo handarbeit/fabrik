@@ -118,6 +118,17 @@ func sessionFile(issueNumber int, stageName string) string {
 	return filepath.Join(SessionDir(issueNumber), base+".session")
 }
 
+// ReadSessionID reads the session ID for a given issue and stage name.
+// Returns the session ID string, or empty string if the file does not exist,
+// is unreadable, or is empty.
+func ReadSessionID(issueNumber int, stageName string) string {
+	data, err := os.ReadFile(sessionFile(issueNumber, stageName))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
 // InvokeClaude runs Claude Code with the given stage configuration and issue context.
 // workDir is the directory Claude should run in (typically a git worktree).
 // modelOverride, if non-empty, replaces the stage's configured model.
