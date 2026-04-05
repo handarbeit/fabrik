@@ -264,6 +264,9 @@ func (m WatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // main goroutine; the operations are fast REST calls and the poll interval is
 // long (30s default), so blocking is acceptable.
 func (m *WatchModel) fetchGitHub() {
+	// Always refresh history — it doesn't require a GitHub client.
+	m.history = issueHistory(m.issueNumber)
+
 	if m.opts.Client == nil || m.opts.Owner == "" || m.opts.Repo == "" {
 		return
 	}
@@ -277,29 +280,35 @@ func (m *WatchModel) fetchGitHub() {
 	m.github.state = issue.State
 	m.github.labels = issue.Labels
 
-	// Find linked PR from labels (fabrik convention: labels don't carry PR number;
-	// we'd need a separate query). For now we store labels and derive PR info
-	// separately if pr number is known from a prior fetch.
-	// Try to fetch PR details if we have a PR number.
-	if m.github.prNumber > 0 {
+	// Discover the linked PR by convention (branch fabrik/issue-N).
+	// Cache the PR number once found; re-fetch details on each poll.
+	if m.github.prNumber == 0 {
+		pr, err := m.opts.Client.FetchLinkedPR(m.opts.Owner, m.opts.Repo, m.issueNumber)
+		if err == nil && pr != nil {
+			m.github.prNumber = pr.Number
+			m.github.prState = pr.State
+			m.github.prMerged = pr.Merged
+			m.github.prDraft = pr.Draft
+			m.github.prHeadSHA = pr.HeadSHA
+		}
+	} else {
 		pr, err := m.opts.Client.FetchPRDetails(m.opts.Owner, m.opts.Repo, m.github.prNumber)
 		if err == nil {
 			m.github.prState = pr.State
 			m.github.prMerged = pr.Merged
 			m.github.prDraft = pr.Draft
 			m.github.prHeadSHA = pr.HeadSHA
+		}
+	}
 
-			if pr.HeadSHA != "" {
-				runs, err := m.opts.Client.FetchCheckRuns(m.opts.Owner, m.opts.Repo, pr.HeadSHA)
-				if err == nil {
-					m.github.checkRuns = runs
-				}
-			}
+	if m.github.prHeadSHA != "" {
+		runs, err := m.opts.Client.FetchCheckRuns(m.opts.Owner, m.opts.Repo, m.github.prHeadSHA)
+		if err == nil {
+			m.github.checkRuns = runs
 		}
 	}
 
 	m.lastPollAt = time.Now()
-	m.history = issueHistory(m.issueNumber)
 }
 
 // issueHistory loads history entries for a specific issue.
