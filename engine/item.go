@@ -256,6 +256,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 
 		e.mu.Lock()
 		e.processedSet[itemKey] = time.Now()
+		e.lastCompleted[item.Number] = true
 		e.mu.Unlock()
 
 		return nil
