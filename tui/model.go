@@ -458,21 +458,11 @@ func (m Model) viewActive() string {
 		}
 		msg := ""
 		if job.LastLine != "" {
-			// Truncate long lines to avoid wrapping
-			maxMsg := max(m.width-35, 0)
 			msg = job.LastLine
-			if runes := []rune(msg); len(runes) > maxMsg {
-				msg = string(runes[:maxMsg]) + "…"
-			}
 		}
 		titleStr := ""
 		if job.Title != "" {
-			maxTitle := max(m.width-50, 10)
-			t := job.Title
-			if runes := []rune(t); len(runes) > maxTitle {
-				t = string(runes[:maxTitle]) + "…"
-			}
-			titleStr = dimStyle.Render(t) + " "
+			titleStr = dimStyle.Render(job.Title) + " "
 		}
 		stageDisplay := job.StageName
 		if job.IsComment {
