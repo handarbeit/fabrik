@@ -19,12 +19,12 @@ type ProjectConfig struct {
 	User          string `yaml:"user"`
 	StagesDir     string `yaml:"stages"`
 	Poll          *int   `yaml:"poll"`
-	MaxConcurrent *int   `yaml:"max_concurrent"`
-	MaxRetries      *int `yaml:"max_retries"`       // deprecated: alias for MaxLoops
-	MaxLoops        *int `yaml:"max_loops"`
-	MaxTotalRetries *int `yaml:"max_total_retries"`
-	Yolo            bool `yaml:"yolo"`
-	AutoUpgrade   bool   `yaml:"auto_upgrade"`
+	MaxConcurrent   *int   `yaml:"max_concurrent"`
+	MaxRetries      *int   `yaml:"max_retries"` // deprecated: alias for MaxLoops
+	MaxLoops        *int   `yaml:"max_loops"`
+	MaxTotalRetries *int   `yaml:"max_total_retries"`
+	Yolo            bool   `yaml:"yolo"`
+	AutoUpgrade     bool   `yaml:"auto_upgrade"`
 	TUI           bool   `yaml:"tui"`
 	Terminal      string `yaml:"terminal"`
 	DebugOutput   bool   `yaml:"debug_output"`
