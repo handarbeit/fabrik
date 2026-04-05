@@ -10,12 +10,13 @@ import (
 var HistoryPathOverride string
 
 // historyPath returns the path to the persistent history file.
+// Uses .fabrik/history.json in the current working directory so each
+// project has its own history.
 func historyPath() string {
 	if HistoryPathOverride != "" {
 		return HistoryPathOverride
 	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".fabrik", "history.json")
+	return filepath.Join(".fabrik", "history.json")
 }
 
 // LoadHistory reads saved history entries from disk.
