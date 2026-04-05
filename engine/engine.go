@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,23 +38,25 @@ type Engine struct {
 	client             GitHubClient
 	claude             ClaudeInvoker
 	statusField        *gh.StatusField
-	worktrees          *WorktreeManager
+	worktreeManagers   map[string]*WorktreeManager // key: "owner/repo"; one WM per discovered repo
+	jobControlMode     bool                        // true when running from a non-git directory (multi-repo)
+	jobControlDir      string                      // fabrikDir when jobControlMode is true
 	mu                 sync.Mutex
-	processedSet       map[string]time.Time // track what we've processed: "issue#-commentID" -> timestamp
-	lockedIssues       map[int]bool         // issues that have had fabrik:locked added and not yet released
+	processedSet       map[string]time.Time // key: "owner/repo#N-stageName" or "owner/repo#N-comment-ID"
+	lockedIssues       map[string]bool      // key: "owner/repo#N"; issues with fabrik:locked added but not yet released
 	totalTokens        TokenUsage           // accumulated token usage since process start
 	lastReportedCost   float64              // cost at last [stats] report; skip repeat prints when unchanged
-	retryCount         map[string]int       // key: "<issueNum>-<stageName>", value: failed attempt count
-	pausedDueToRetries map[string]bool      // key: "<issueNum>-<stageName>", true if engine paused this issue
-	lastUsage          map[int]TokenUsage   // per-issue token usage from last processItem (for TUI)
-	lastCompleted      map[int]bool         // per-issue stage completion from last processItem (for TUI)
-	lastBlocked        map[int]bool         // per-issue blocked-on-input from last processItem (for TUI)
-	lastUpdatedAt      map[int]time.Time    // tracks last-seen updatedAt per issue number
+	retryCount         map[string]int       // key: "owner/repo#N-stageName", value: failed attempt count
+	pausedDueToRetries map[string]bool      // key: "owner/repo#N-stageName", true if engine paused this issue
+	lastUsage          map[string]TokenUsage   // key: issueKey; per-issue token usage from last processItem (for TUI)
+	lastCompleted      map[string]bool         // key: issueKey; per-issue stage completion from last processItem (for TUI)
+	lastBlocked        map[string]bool         // key: issueKey; per-issue blocked-on-input from last processItem (for TUI)
+	lastUpdatedAt      map[string]time.Time    // key: issueKey; tracks last-seen updatedAt per issue
 	idleCount          int                  // consecutive idle polls; triggers self-upgrade at threshold
-	sem                chan struct{}        // semaphore bounding concurrent workers across poll cycles
+	sem                chan struct{}         // semaphore bounding concurrent workers across poll cycles
 	wg                 sync.WaitGroup       // tracks in-flight workers for graceful shutdown
-	inFlight           sync.Map             // key: issue number (int), value: struct{}
-	events             chan tui.Event       // nil in tests / plain-text mode; TUI goroutine consumes
+	inFlight           sync.Map             // key: issueKey string, value: bool (isPR)
+	events             chan tui.Event        // nil in tests / plain-text mode; TUI goroutine consumes
 }
 
 func New(cfg Config) (*Engine, error) {
@@ -64,17 +68,16 @@ func New(cfg Config) (*Engine, error) {
 	// In a git repo, they're the same. In a job-control directory, fabrikDir
 	// is cwd and repoDir is the bare clone at .fabrik/repo.git.
 	var fabrikDir string
+	var jobControlMode bool
 	repoDir, err := gitToplevel()
 	if err != nil {
 		// Not in a git repo — job-control directory for multi-repo projects.
+		// Repos are cloned lazily by ensureRepoReady when the first issue for each repo arrives.
 		fabrikDir, err = os.Getwd()
 		if err != nil {
 			return nil, fmt.Errorf("resolving working directory: %w", err)
 		}
-		if cloneErr := ensureBareClone(fabrikDir, cfg.Owner, cfg.Repo); cloneErr != nil {
-			return nil, fmt.Errorf("cloning target repo: %w", cloneErr)
-		}
-		repoDir = filepath.Join(fabrikDir, ".fabrik", "repo.git")
+		jobControlMode = true
 	} else {
 		fabrikDir = repoDir
 	}
@@ -96,51 +99,127 @@ func New(cfg Config) (*Engine, error) {
 		claudePluginDir = pluginDir
 	}
 	worktreeRoot := filepath.Join(fabrikDir, ".fabrik", "worktrees")
-	wm := NewWorktreeManagerWithRoot(repoDir, worktreeRoot)
 	eng := &Engine{
 		cfg:                cfg,
 		client:             gh.NewClient(cfg.Token),
 		claude:             &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},
-		worktrees:          wm,
+		worktreeManagers:   make(map[string]*WorktreeManager),
+		jobControlMode:     jobControlMode,
+		jobControlDir:      fabrikDir,
 		processedSet:       make(map[string]time.Time),
-		lockedIssues:       make(map[int]bool),
-		lastUsage:          make(map[int]TokenUsage),
-		lastCompleted:      make(map[int]bool),
-		lastBlocked:        make(map[int]bool),
-		lastUpdatedAt:      make(map[int]time.Time),
+		lockedIssues:       make(map[string]bool),
+		lastUsage:          make(map[string]TokenUsage),
+		lastCompleted:      make(map[string]bool),
+		lastBlocked:        make(map[string]bool),
+		lastUpdatedAt:      make(map[string]time.Time),
 		retryCount:         make(map[string]int),
 		pausedDueToRetries: make(map[string]bool),
 		sem:                make(chan struct{}, cfg.MaxConcurrent),
 	}
-	wm.logfFn = eng.logf
+
+	if !jobControlMode && cfg.Repo != "" {
+		// Single-repo git-repo mode: register the configured repo's WM upfront.
+		nameWithOwner := cfg.Owner + "/" + cfg.Repo
+		// Use "owner-repo" as the directory segment to avoid cross-owner collisions.
+		dirName := cfg.Owner + "-" + cfg.Repo
+		wm := NewWorktreeManagerForRepo(repoDir, worktreeRoot, dirName)
+		eng.worktreeManagers[nameWithOwner] = wm
+		wm.logfFn = eng.logf
+	}
+
+	// Migrate any old-style worktrees (issue-N/) to the new per-repo layout.
+	migrateWorktrees(worktreeRoot, func(msg string) { fmt.Printf("[startup] %s", msg) })
+
+	// In multi-repo mode (cfg.Repo == ""), WMs are registered lazily in ensureRepoReady.
 	return eng, nil
 }
 
 // NewWithDeps creates an Engine with explicit dependencies (for testing).
+// worktrees is a convenience parameter: if non-nil, it is registered as the WM
+// for cfg.Owner+"/"+cfg.Repo (or "_test/_test" when cfg is empty).
 func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktrees *WorktreeManager) *Engine {
 	maxConcurrent := cfg.MaxConcurrent
 	if maxConcurrent <= 0 {
 		maxConcurrent = 1
 	}
+	wms := make(map[string]*WorktreeManager)
 	eng := &Engine{
 		cfg:                cfg,
 		client:             client,
 		claude:             claude,
-		worktrees:          worktrees,
+		worktreeManagers:   wms,
 		processedSet:       make(map[string]time.Time),
-		lockedIssues:       make(map[int]bool),
-		lastUsage:          make(map[int]TokenUsage),
-		lastCompleted:      make(map[int]bool),
-		lastBlocked:        make(map[int]bool),
-		lastUpdatedAt:      make(map[int]time.Time),
+		lockedIssues:       make(map[string]bool),
+		lastUsage:          make(map[string]TokenUsage),
+		lastCompleted:      make(map[string]bool),
+		lastBlocked:        make(map[string]bool),
+		lastUpdatedAt:      make(map[string]time.Time),
 		retryCount:         make(map[string]int),
 		pausedDueToRetries: make(map[string]bool),
 		sem:                make(chan struct{}, maxConcurrent),
 	}
 	if worktrees != nil {
 		worktrees.logfFn = eng.logf
+		key := cfg.Owner + "/" + cfg.Repo
+		if key == "/" {
+			key = "_test/_test"
+		}
+		wms[key] = worktrees
 	}
 	return eng
+}
+
+// defaultRepo returns "owner/repo" from cfg, or "" if both are empty.
+func (e *Engine) defaultRepo() string {
+	if e.cfg.Owner == "" && e.cfg.Repo == "" {
+		return ""
+	}
+	return e.cfg.Owner + "/" + e.cfg.Repo
+}
+
+// worktreesFor returns the WorktreeManager for the given "owner/repo" key.
+// Panics if no WM is registered for that repo — callers must call ensureRepoReady first.
+func (e *Engine) worktreesFor(nameWithOwner string) *WorktreeManager {
+	if nameWithOwner == "" {
+		nameWithOwner = e.defaultRepo()
+	}
+	e.mu.Lock()
+	wm, ok := e.worktreeManagers[nameWithOwner]
+	e.mu.Unlock()
+	if !ok {
+		panic(fmt.Sprintf("engine: no WorktreeManager registered for repo %q — ensureRepoReady not called", nameWithOwner))
+	}
+	return wm
+}
+
+// primaryWorktrees returns the WorktreeManager for the configured primary repo, or nil.
+// Used by operations that don't have a per-issue repo (e.g. auto-upgrade).
+func (e *Engine) primaryWorktrees() *WorktreeManager {
+	key := e.defaultRepo()
+	if key == "" {
+		return nil
+	}
+	e.mu.Lock()
+	wm := e.worktreeManagers[key]
+	e.mu.Unlock()
+	return wm
+}
+
+// registerWorktrees adds a WorktreeManager for nameWithOwner to the map.
+// Idempotent: if a WM is already registered for this repo, returns the existing one.
+func (e *Engine) registerWorktrees(nameWithOwner, baseDir, worktreeRoot string) *WorktreeManager {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if wm, ok := e.worktreeManagers[nameWithOwner]; ok {
+		return wm
+	}
+	owner, rname := parseOwnerRepo(nameWithOwner)
+	// Use "owner-repo" as directory segment to avoid cross-owner collisions.
+	dirName := owner + "-" + rname
+	wm := NewWorktreeManagerForRepo(baseDir, worktreeRoot, dirName)
+	wm.logfFn = e.logf
+	e.worktreeManagers[nameWithOwner] = wm
+	return wm
 }
 
 // SetEvents configures the event channel. Must be called before Run().
@@ -151,9 +230,12 @@ func (e *Engine) SetEvents(ch chan tui.Event) {
 	tuiMode = ch != nil
 	claudeLogf = e.logf
 	claudeTUI = ch != nil
-	if e.worktrees != nil {
-		e.worktrees.logfFn = e.logf
+	// Update logfFn for all registered WorktreeManagers.
+	e.mu.Lock()
+	for _, wm := range e.worktreeManagers {
+		wm.logfFn = e.logf
 	}
+	e.mu.Unlock()
 }
 
 // emit sends an event to the channel without blocking. Dropped if the channel is full.
@@ -206,4 +288,61 @@ func mapKeys(m map[string]string) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// ErrSkipItem is returned by ensureRepoReady when a repo cannot be cloned and
+// the item should be skipped for this poll cycle (but not surfaced as an error).
+var ErrSkipItem = errors.New("skip item")
+
+// ensureRepoReady guarantees that a WorktreeManager exists for the repo that
+// owns item. In single-repo git mode the WM is already registered at startup,
+// so this is a no-op. In job-control (multi-repo) mode it lazily bare-clones
+// the repo on first access. If the clone fails it posts a comment, adds
+// fabrik:paused and fabrik:awaiting-input labels, records a history entry, and
+// returns ErrSkipItem so the caller skips without treating it as a hard error.
+func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	if owner == "" || repo == "" {
+		return nil // cannot determine repo — let processItem handle it
+	}
+	nameWithOwner := owner + "/" + repo
+
+	e.mu.Lock()
+	_, registered := e.worktreeManagers[nameWithOwner]
+	e.mu.Unlock()
+	if registered {
+		return nil
+	}
+
+	// Job-control mode: clone the repo bare.
+	worktreeRoot := filepath.Join(e.jobControlDir, ".fabrik", "worktrees")
+	bareDir, err := ensureBareClone(e.jobControlDir, owner, repo)
+	if err != nil {
+		msg := fmt.Sprintf("🏭 **Fabrik — cannot clone repo**\n\nFailed to clone `%s/%s`:\n```\n%v\n```\nHuman intervention required. Fix the clone issue and remove `fabrik:paused` to retry.", owner, repo, err)
+		if commentErr := e.client.AddComment(owner, repo, item.Number, msg); commentErr != nil {
+			e.logf(item.Number, "warn", "could not post clone-failure comment: %v\n", commentErr)
+		}
+		if labelErr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); labelErr != nil {
+			e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", labelErr)
+		}
+		if labelErr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); labelErr != nil {
+			e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", labelErr)
+		}
+		// Append a history entry so the TUI records the failure.
+		hist := tui.LoadHistory()
+		hist = append(hist, tui.HistoryEntry{
+			IssueNumber: item.Number,
+			Repo:        nameWithOwner,
+			Title:       item.Title,
+			StageName:   "clone",
+			Success:     false,
+			CompletedAt: time.Now(),
+		})
+		tui.SaveHistory(hist)
+		e.logf(item.Number, "error", "cannot clone repo %s: %v — pausing issue\n", nameWithOwner, err)
+		return ErrSkipItem
+	}
+
+	e.registerWorktrees(nameWithOwner, bareDir, worktreeRoot)
+	return nil
 }

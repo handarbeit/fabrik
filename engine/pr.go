@@ -10,27 +10,30 @@ import (
 // ensureDraftPR pushes the issue branch and creates a draft PR if one doesn't exist yet.
 // Idempotent: checks for an existing PR first; only pushes and creates if none found.
 func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) int {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+
 	// Check for an existing PR first — avoids pushing on retries and handles
 	// the case where a push fails but a PR already exists from a prior run.
-	prNumber, err := e.client.FindPRForIssue(e.cfg.Owner, e.cfg.Repo, item.Number)
+	prNumber, err := e.client.FindPRForIssue(owner, repo, item.Number)
 	if err != nil {
 		e.logf(item.Number, "warn", "could not check for existing PR: %v\n", err)
 		return 0
 	}
 	if prNumber > 0 {
 		e.logf(item.Number, "pr", "PR #%d already exists, ensuring issue link\n", prNumber)
-		e.ensurePRLinksIssue(prNumber, item.Number)
+		e.ensurePRLinksIssue(item, prNumber)
 		return prNumber
 	}
 
 	// No PR exists — push the branch so GitHub can create a PR against it
-	if err := e.worktrees.PushBranch(item.Number); err != nil {
+	wm := e.worktreesFor(item.Repo)
+	if err := wm.PushBranch(item.Number); err != nil {
 		e.logf(item.Number, "warn", "could not push branch: %v\n", err)
 		return 0
 	}
 
 	head := fmt.Sprintf("fabrik/issue-%d", item.Number)
-	prNum, err := e.client.CreateDraftPR(e.cfg.Owner, e.cfg.Repo, item.Title, head, baseBranch, item.Number)
+	prNum, err := e.client.CreateDraftPR(owner, repo, item.Title, head, baseBranch, item.Number)
 	if err != nil {
 		e.logf(item.Number, "warn", "could not create draft PR: %v\n", err)
 		return 0
@@ -42,13 +45,14 @@ func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) int {
 // ensurePRLinksIssue checks that a PR body contains "Closes #N" and adds it if missing.
 // This ensures closedByPullRequestsReferences links the PR to the issue, which is how
 // Fabrik discovers PR comments.
-func (e *Engine) ensurePRLinksIssue(prNumber, issueNumber int) {
-	closingKeyword := fmt.Sprintf("Closes #%d", issueNumber)
+func (e *Engine) ensurePRLinksIssue(item gh.ProjectItem, prNumber int) {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	closingKeyword := fmt.Sprintf("Closes #%d", item.Number)
 
 	// Fetch current PR body (PRs are issues on the REST API)
-	body, err := e.client.GetIssueBody(e.cfg.Owner, e.cfg.Repo, prNumber)
+	body, err := e.client.GetIssueBody(owner, repo, prNumber)
 	if err != nil {
-		e.logf(issueNumber, "warn", "could not fetch PR #%d body: %v\n", prNumber, err)
+		e.logf(item.Number, "warn", "could not fetch PR #%d body: %v\n", prNumber, err)
 		return
 	}
 
@@ -58,11 +62,11 @@ func (e *Engine) ensurePRLinksIssue(prNumber, issueNumber int) {
 
 	// Append closing keyword
 	updatedBody := body + "\n\n" + closingKeyword
-	if err := e.client.UpdateIssueBody(e.cfg.Owner, e.cfg.Repo, prNumber, updatedBody); err != nil {
-		e.logf(issueNumber, "warn", "could not update PR #%d body: %v\n", prNumber, err)
+	if err := e.client.UpdateIssueBody(owner, repo, prNumber, updatedBody); err != nil {
+		e.logf(item.Number, "warn", "could not update PR #%d body: %v\n", prNumber, err)
 		return
 	}
-	e.logf(issueNumber, "pr", "added '%s' to PR #%d body\n", closingKeyword, prNumber)
+	e.logf(item.Number, "pr", "added '%s' to PR #%d body\n", closingKeyword, prNumber)
 }
 
 // markPRReady pushes the issue branch and transitions its PR from draft to ready-for-review.
@@ -70,7 +74,9 @@ func (e *Engine) ensurePRLinksIssue(prNumber, issueNumber int) {
 // it attempts to create one before marking it ready.
 // knownPR is the PR number from ensureDraftPR (avoids search API race); 0 falls back to search.
 func (e *Engine) markPRReady(item gh.ProjectItem, knownPR int) {
-	if err := e.worktrees.PushBranch(item.Number); err != nil {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	wm := e.worktreesFor(item.Repo)
+	if err := wm.PushBranch(item.Number); err != nil {
 		e.logf(item.Number, "warn", "could not push branch: %v\n", err)
 		// Don't return — still try to mark ready if push is a no-op (already up to date)
 	}
@@ -78,7 +84,7 @@ func (e *Engine) markPRReady(item gh.ProjectItem, knownPR int) {
 	prNumber := knownPR
 	if prNumber == 0 {
 		var err error
-		prNumber, err = e.client.FindPRForIssue(e.cfg.Owner, e.cfg.Repo, item.Number)
+		prNumber, err = e.client.FindPRForIssue(owner, repo, item.Number)
 		if err != nil {
 			e.logf(item.Number, "warn", "could not find PR: %v\n", err)
 			return
@@ -89,7 +95,7 @@ func (e *Engine) markPRReady(item gh.ProjectItem, knownPR int) {
 		return
 	}
 
-	if err := e.client.MarkPRReady(e.cfg.Owner, e.cfg.Repo, prNumber); err != nil {
+	if err := e.client.MarkPRReady(owner, repo, prNumber); err != nil {
 		e.logf(item.Number, "warn", "could not mark PR #%d ready: %v\n", prNumber, err)
 		return
 	}
@@ -98,7 +104,8 @@ func (e *Engine) markPRReady(item gh.ProjectItem, knownPR int) {
 
 // postOutputToPR posts detailed output on the linked PR and a brief summary on the issue.
 func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output, footer, branch, commit, mainSHA, timestamp string) {
-	prNumber, err := e.client.FindPRForIssue(e.cfg.Owner, e.cfg.Repo, item.Number)
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	prNumber, err := e.client.FindPRForIssue(owner, repo, item.Number)
 	if err != nil {
 		e.logf(item.Number, "warn", "could not find PR: %v\n", err)
 	}
@@ -106,7 +113,7 @@ func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output, footer, 
 	if prNumber > 0 {
 		// Post detailed output on the PR
 		comment := formatOutputComment(stageName, output, footer, branch, commit, mainSHA, timestamp)
-		if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, prNumber, comment); err != nil {
+		if err := e.client.AddComment(owner, repo, prNumber, comment); err != nil {
 			e.logf(item.Number, "warn", "could not post to PR #%d: %v\n", prNumber, err)
 		} else {
 			e.logf(item.Number, "post", "detailed %s output posted to PR #%d\n", stageName, prNumber)
@@ -114,14 +121,14 @@ func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output, footer, 
 
 		// Post brief summary on the issue
 		summary := formatPRSummaryComment(stageName, prNumber, output, branch, commit, mainSHA, timestamp)
-		if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, summary); err != nil {
+		if err := e.client.AddComment(owner, repo, item.Number, summary); err != nil {
 			e.logf(item.Number, "warn", "could not post summary: %v\n", err)
 		}
 	} else {
 		// No PR found — fall back to posting on the issue
 		e.logf(item.Number, "warn", "no open PR found, posting on issue instead\n")
 		comment := formatOutputComment(stageName, output, footer, branch, commit, mainSHA, timestamp)
-		if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
+		if err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
 			e.logf(item.Number, "warn", "could not post comment: %v\n", err)
 		}
 	}

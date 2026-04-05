@@ -14,13 +14,14 @@ func (e *Engine) findNewComments(item gh.ProjectItem) []gh.Comment {
 	var newComments []gh.Comment
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	iKey := issueKey(item, e.defaultRepo())
 	for _, c := range item.Comments {
 		// Only process comments from the configured user
 		if c.Author != e.cfg.User {
 			continue
 		}
 		// Skip comments we've already processed
-		key := fmt.Sprintf("%d-comment-%s", item.Number, c.ID)
+		key := iKey + "-comment-" + c.ID
 		if _, seen := e.processedSet[key]; seen {
 			continue
 		}
@@ -43,23 +44,27 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	e.logf(item.Number, "comments", "processing %d new comment(s) — stage: %s\n",
 		len(comments), stage.Name)
 
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	iKey := issueKey(item, e.defaultRepo())
+
 	// Step 1: React with 👀 to all new comments
 	for _, c := range comments {
-		if err := e.client.AddCommentReaction(e.cfg.Owner, e.cfg.Repo, c.DatabaseID, "eyes"); err != nil {
+		if err := e.client.AddCommentReaction(owner, repo, c.DatabaseID, "eyes"); err != nil {
 			e.logf(item.Number, "warn", "could not add 👀 to comment %s: %v\n", c.ID, err)
 		}
 	}
 
 	// Step 2: Add editing label
-	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, "fabrik:editing"); err != nil {
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:editing"); err != nil {
 		return fmt.Errorf("adding editing label: %w", err)
 	}
 
 	// Step 3: Ensure worktree
-	baseBranch := e.worktrees.DefaultBaseBranch()
-	workDir, err := e.worktrees.EnsureWorktree(item.Number, baseBranch, false)
+	wm := e.worktreesFor(item.Repo)
+	baseBranch := wm.DefaultBaseBranch()
+	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, false)
 	if err != nil {
-		e.removeEditingLabel(item.Number)
+		e.removeEditingLabel(owner, repo, item.Number)
 		return fmt.Errorf("setting up worktree: %w", err)
 	}
 
@@ -76,10 +81,10 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		e.totalTokens = e.totalTokens.add(usage)
-		e.lastUsage[item.Number] = usage
+		e.lastUsage[issueKey(item, e.defaultRepo())] = usage
 	}()
 	if err != nil {
-		e.removeEditingLabel(item.Number)
+		e.removeEditingLabel(owner, repo, item.Number)
 		if ctx.Err() != nil {
 			e.logf(item.Number, "skip", "cancelled during claude comment review\n")
 			return nil
@@ -98,7 +103,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	if updatedBody := extractUpdatedBody(output); updatedBody != "" {
 		if stage.UpdateIssueBody {
 			e.logf(item.Number, "edit", "updating issue body\n")
-			if err := e.client.UpdateIssueBody(e.cfg.Owner, e.cfg.Repo, item.Number, updatedBody); err != nil {
+			if err := e.client.UpdateIssueBody(owner, repo, item.Number, updatedBody); err != nil {
 				e.logf(item.Number, "warn", "could not update issue body: %v\n", err)
 			}
 		} else {
@@ -120,7 +125,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	if output != "" {
 		if stage.PostToPR {
 			comment := formatOutputComment(stage.Name+" (comment review)", output, "", branch, commit, mainSHA, timestamp)
-			if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
+			if err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
 				e.logf(item.Number, "warn", "could not post comment: %v\n", err)
 			}
 		} else {
@@ -128,11 +133,11 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 			stageComment := formatOutputComment(stage.Name, output, "", branch, commit, mainSHA, timestamp)
 			if existing != nil {
 				e.logf(item.Number, "edit", "rewriting stage comment for %s\n", stage.Name)
-				if err := e.client.UpdateComment(e.cfg.Owner, e.cfg.Repo, existing.DatabaseID, stageComment); err != nil {
+				if err := e.client.UpdateComment(owner, repo, existing.DatabaseID, stageComment); err != nil {
 					e.logf(item.Number, "warn", "could not update stage comment: %v\n", err)
 				}
 			} else {
-				if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, stageComment); err != nil {
+				if err := e.client.AddComment(owner, repo, item.Number, stageComment); err != nil {
 					e.logf(item.Number, "warn", "could not post stage comment: %v\n", err)
 				}
 			}
@@ -140,11 +145,11 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	}
 
 	// Step 9: Remove editing label
-	e.removeEditingLabel(item.Number)
+	e.removeEditingLabel(owner, repo, item.Number)
 
 	// Step 10: React with 🚀 to all processed comments
 	for _, c := range comments {
-		if err := e.client.AddCommentReaction(e.cfg.Owner, e.cfg.Repo, c.DatabaseID, "rocket"); err != nil {
+		if err := e.client.AddCommentReaction(owner, repo, c.DatabaseID, "rocket"); err != nil {
 			e.logf(item.Number, "warn", "could not add 🚀 to comment %s: %v\n", c.ID, err)
 		}
 	}
@@ -156,16 +161,15 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// This avoids an unnecessary extra stage invocation after unblocking.
 	if completed {
 		e.logf(item.Number, "done", "comment processing completed stage %q\n", stage.Name)
-		itemKey := fmt.Sprintf("%d-%s", item.Number, stage.Name)
+		stageKey := iKey + "-" + stage.Name
 		func() {
 			e.mu.Lock()
 			defer e.mu.Unlock()
-			delete(e.retryCount, itemKey)
-			delete(e.pausedDueToRetries, itemKey)
-			e.lastCompleted[item.Number] = true
+			delete(e.retryCount, stageKey)
+			delete(e.pausedDueToRetries, stageKey)
+			e.lastCompleted[iKey] = true
 		}()
 		if stage.CreateDraftPR {
-			baseBranch := e.worktrees.DefaultBaseBranch()
 			e.ensureDraftPR(item, baseBranch)
 		}
 		if stage.MarkPRReadyOnComplete {
@@ -184,6 +188,8 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 // and should not be treated as "new" on subsequent polls — particularly to avoid
 // false-triggering the awaiting-input unblock logic.
 func (e *Engine) markCommentsSeenByStage(item gh.ProjectItem) {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	iKey := issueKey(item, e.defaultRepo())
 	for _, c := range item.Comments {
 		if c.Author != e.cfg.User {
 			continue
@@ -195,11 +201,11 @@ func (e *Engine) markCommentsSeenByStage(item gh.ProjectItem) {
 			continue
 		}
 		// This comment was seen by the stage — mark it so it won't trigger unblock
-		if err := e.client.AddCommentReaction(e.cfg.Owner, e.cfg.Repo, c.DatabaseID, "rocket"); err != nil {
+		if err := e.client.AddCommentReaction(owner, repo, c.DatabaseID, "rocket"); err != nil {
 			e.logf(item.Number, "warn", "could not add rocket to seen comment %s: %v\n", c.ID, err)
 		}
 		e.mu.Lock()
-		key := fmt.Sprintf("%d-comment-%s", item.Number, c.ID)
+		key := iKey + "-comment-" + c.ID
 		e.processedSet[key] = time.Now()
 		e.mu.Unlock()
 	}
@@ -207,10 +213,11 @@ func (e *Engine) markCommentsSeenByStage(item gh.ProjectItem) {
 
 // markCommentsProcessed records comments as processed so they won't be retried.
 func (e *Engine) markCommentsProcessed(item gh.ProjectItem, comments []gh.Comment) {
+	iKey := issueKey(item, e.defaultRepo())
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, c := range comments {
-		key := fmt.Sprintf("%d-comment-%s", item.Number, c.ID)
+		key := iKey + "-comment-" + c.ID
 		e.processedSet[key] = time.Now()
 	}
 }

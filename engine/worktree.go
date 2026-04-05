@@ -11,10 +11,11 @@ import (
 
 // WorktreeManager handles git worktrees for issue isolation.
 type WorktreeManager struct {
-	mu      sync.Mutex                        // serializes worktree/branch creation (git config isn't concurrent-safe)
-	baseDir string                            // directory containing the main repo
-	rootDir string                            // where worktrees are stored (e.g., .fabrik/worktrees)
-	logfFn  func(int, string, string, ...any) // optional; set by Engine after construction
+	mu       sync.Mutex                        // serializes worktree/branch creation (git config isn't concurrent-safe)
+	baseDir  string                            // directory containing the main repo
+	rootDir  string                            // where worktrees are stored (e.g., .fabrik/worktrees)
+	repoName string                            // repo name used to namespace worktree paths (e.g., "liminis"); empty = legacy flat layout
+	logfFn   func(int, string, string, ...any) // optional; set by Engine after construction
 }
 
 // logf calls logfFn if set, otherwise prints directly.
@@ -37,30 +38,42 @@ func NewWorktreeManagerWithRoot(repoDir, worktreeRoot string) *WorktreeManager {
 	}
 }
 
-// ensureBareClone creates a bare clone of the target repo at .fabrik/repo.git
-// if it doesn't already exist. Returns the path to the bare clone.
+// NewWorktreeManagerForRepo creates a WorktreeManager that namespaces all worktree
+// paths under worktreeRoot/<repoName>/. Use this when managing multiple repos from
+// a single Fabrik job-control directory.
+func NewWorktreeManagerForRepo(baseDir, worktreeRoot, rName string) *WorktreeManager {
+	return &WorktreeManager{
+		baseDir:  baseDir,
+		rootDir:  worktreeRoot,
+		repoName: rName,
+	}
+}
+
+// ensureBareClone creates a bare clone of the target repo at
+// .fabrik/repos/<owner>-<repo>.git if it doesn't already exist.
+// Returns the path to the bare clone directory on success.
 // This is used when Fabrik runs from a non-git job-control directory.
-func ensureBareClone(baseDir, owner, repo string) error {
-	bareDir := filepath.Join(baseDir, ".fabrik", "repo.git")
+func ensureBareClone(baseDir, owner, repo string) (string, error) {
+	bareDir := filepath.Join(baseDir, ".fabrik", "repos", owner+"-"+repo+".git")
 	if _, err := os.Stat(bareDir); err == nil {
 		// Already cloned — fetch latest
 		cmd := exec.Command("git", "fetch", "origin")
 		cmd.Dir = bareDir
 		cmd.CombinedOutput() // best-effort
-		return nil
+		return bareDir, nil
 	}
 
 	if err := os.MkdirAll(filepath.Dir(bareDir), 0755); err != nil {
-		return fmt.Errorf("creating .fabrik dir: %w", err)
+		return "", fmt.Errorf("creating .fabrik/repos dir: %w", err)
 	}
 
 	cloneURL := fmt.Sprintf("https://github.com/%s/%s.git", owner, repo)
 	cmd := exec.Command("git", "clone", "--bare", cloneURL, bareDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("cloning %s: %s: %w", cloneURL, strings.TrimSpace(string(out)), err)
+		return "", fmt.Errorf("cloning %s: %s: %w", cloneURL, strings.TrimSpace(string(out)), err)
 	}
 
-	return nil
+	return bareDir, nil
 }
 
 // BaseDir returns the main repository directory.
@@ -183,6 +196,9 @@ func (wm *WorktreeManager) WorktreeDir(issueNumber int) string {
 }
 
 func (wm *WorktreeManager) worktreeDir(issueNumber int) string {
+	if wm.repoName != "" {
+		return filepath.Join(wm.rootDir, wm.repoName, fmt.Sprintf("issue-%d", issueNumber))
+	}
 	return filepath.Join(wm.rootDir, fmt.Sprintf("issue-%d", issueNumber))
 }
 
@@ -303,6 +319,127 @@ func (wm *WorktreeManager) writeGitExclude(wtDir string, issueNumber int) {
 	if _, err := f.WriteString(entry); err != nil {
 		wm.logf(issueNumber, "warn", "could not write git exclude entry: %v\n", err)
 	}
+}
+
+// migrateWorktrees scans worktreeRoot for old-style issue-N/ directories and moves
+// each one to the per-repo layout <repoName>/issue-N/ using git worktree move.
+// This is called once at startup before any workers dispatch.
+// logfn is optional; pass nil to suppress output.
+func migrateWorktrees(worktreeRoot string, logfn func(string)) {
+	entries, err := os.ReadDir(worktreeRoot)
+	if err != nil {
+		return // no worktrees directory yet, nothing to migrate
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		// Old-style entries match issue-N pattern; new-style are just repo names.
+		if len(name) < 7 || name[:6] != "issue-" {
+			continue
+		}
+		oldPath := filepath.Join(worktreeRoot, name)
+
+		// Read the git remote to determine which repo this worktree belongs to.
+		cmd := exec.Command("git", "remote", "get-url", "origin")
+		cmd.Dir = oldPath
+		out, err := cmd.Output()
+		if err != nil {
+			if logfn != nil {
+				logfn(fmt.Sprintf("warn: cannot read remote for worktree %s — leaving in place\n", oldPath))
+			}
+			continue
+		}
+		remoteURL := strings.TrimSpace(string(out))
+		// Use "owner-repo" as the directory segment (matches registerWorktrees).
+		dirName := ownerRepoDirFromURL(remoteURL)
+		if dirName == "" {
+			if logfn != nil {
+				logfn(fmt.Sprintf("warn: cannot parse repo from remote URL %q for %s — leaving in place\n", remoteURL, oldPath))
+			}
+			continue
+		}
+
+		// Compute new path: worktreeRoot/<owner-repo>/issue-N/
+		newDir := filepath.Join(worktreeRoot, dirName)
+		newPath := filepath.Join(newDir, name)
+
+		if _, err := os.Stat(newPath); err == nil {
+			if logfn != nil {
+				logfn(fmt.Sprintf("warn: migration target %s already exists — skipping %s\n", newPath, oldPath))
+			}
+			continue
+		}
+
+		if err := os.MkdirAll(newDir, 0755); err != nil {
+			if logfn != nil {
+				logfn(fmt.Sprintf("warn: cannot create dir %s: %v\n", newDir, err))
+			}
+			continue
+		}
+
+		// git worktree move requires git ≥ 2.17. If it fails, log and leave in place.
+		// We run git worktree move from the worktree itself (it finds the main repo).
+		moveCmd := exec.Command("git", "worktree", "move", oldPath, newPath)
+		moveCmd.Dir = oldPath
+		if out, err := moveCmd.CombinedOutput(); err != nil {
+			if logfn != nil {
+				logfn(fmt.Sprintf("warn: git worktree move %s → %s failed: %s\n",
+					oldPath, newPath, strings.TrimSpace(string(out))))
+			}
+			continue
+		}
+		if logfn != nil {
+			logfn(fmt.Sprintf("migrated %s → %s\n", oldPath, newPath))
+		}
+	}
+}
+
+// repoNameFromURL parses a git remote URL and returns just the repository name.
+// Handles both HTTPS (https://github.com/owner/repo.git) and
+// SSH (git@github.com:owner/repo.git) formats.
+func repoNameFromURL(remoteURL string) string {
+	// Strip trailing .git
+	u := strings.TrimSuffix(remoteURL, ".git")
+	// Find the last '/' or ':'
+	lastSlash := strings.LastIndex(u, "/")
+	lastColon := strings.LastIndex(u, ":")
+	idx := lastSlash
+	if lastColon > idx {
+		idx = lastColon
+	}
+	if idx < 0 || idx+1 >= len(u) {
+		return ""
+	}
+	return u[idx+1:]
+}
+
+// ownerRepoDirFromURL parses a git remote URL and returns "owner-repo" for use
+// as a worktree directory segment. This matches the format used by registerWorktrees
+// to prevent cross-owner collisions when two orgs have repos with the same name.
+// Returns "" if the URL cannot be parsed to an owner/repo pair.
+func ownerRepoDirFromURL(remoteURL string) string {
+	// Strip trailing .git
+	u := strings.TrimSuffix(remoteURL, ".git")
+	// Normalize SSH format git@github.com:owner/repo → owner/repo
+	if colonIdx := strings.LastIndex(u, ":"); colonIdx >= 0 {
+		if slashIdx := strings.Index(u, "/"); slashIdx < 0 || slashIdx > colonIdx {
+			u = u[colonIdx+1:]
+		}
+	}
+	// Now u should be something like "https://github.com/owner/repo" or "owner/repo"
+	parts := strings.Split(u, "/")
+	if len(parts) < 2 {
+		return ""
+	}
+	owner := parts[len(parts)-2]
+	repo := parts[len(parts)-1]
+	if owner == "" || repo == "" {
+		return ""
+	}
+	return owner + "-" + repo
 }
 
 // Prune removes stale worktree registrations from git.
