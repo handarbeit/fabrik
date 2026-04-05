@@ -142,31 +142,14 @@ func readSessionID(issueNumber int, stageName string) string {
 	return strings.TrimSpace(string(data))
 }
 
-// Init starts background goroutines and the GitHub poll ticker.
+// Init starts the GitHub poll ticker and the one-second UI refresh ticker.
+// The log follower goroutines are launched in Run() via p.Send, which is the
+// correct bubbletea pattern for goroutines that need to send messages back.
 func (m WatchModel) Init() tea.Cmd {
 	return tea.Batch(
-		startLogFollower(m.logDir, m.done),
 		pollGitHub(),
 		tickCmd(),
 	)
-}
-
-func startLogFollower(logDir string, done chan struct{}) tea.Cmd {
-	return func() tea.Msg {
-		// Channel to bridge goroutine sends into bubbletea messages.
-		// We return a cmd that starts the follower; bubbletea will call Init
-		// and we use a separate approach: launch the goroutine and return the
-		// first message when ready, but for simplicity we use a cmd that
-		// launches goroutines and sends via a channel. The standard bubbletea
-		// pattern for goroutines is to send via the program's Send method —
-		// but since we don't have *tea.Program here, we use the send func
-		// pattern in the model's Update loop by returning a cmd.
-		//
-		// Instead, we launch goroutines here that will not be able to send
-		// messages. The correct bubbletea pattern is to pass a *tea.Program.
-		// We store a send func in the model and call Run() which injects it.
-		return nil
-	}
 }
 
 // Run runs the bubbletea program with the WatchModel.
