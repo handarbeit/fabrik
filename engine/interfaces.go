@@ -23,6 +23,7 @@ type GitHubClient interface {
 	FindPRForIssue(owner, repo string, issueNumber int) (int, error)
 	CreateDraftPR(owner, repo, title, head, base string, issueNumber int) (int, error)
 	MarkPRReady(owner, repo string, prNumber int) error
+	MergePR(owner, repo string, prNumber int) error
 	RateLimitStats() (rest, graphql gh.RateLimitStats)
 }
 
