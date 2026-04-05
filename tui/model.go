@@ -78,6 +78,11 @@ type Model struct {
 	// statusLine shows the latest poll-level log message in the header
 	statusLine string
 
+	// terminal is the resolved terminal emulator identifier (e.g. "terminal",
+	// "iterm2", "ghostty", "kitty", "alacritty", "warp"). Empty string means
+	// use the platform default.
+	terminal string
+
 	// selection state
 	focusPane    pane
 	activeIdx    int  // index into sorted active issue numbers
@@ -103,7 +108,8 @@ var (
 
 // New creates an initial TUI model.
 // pollSeconds is the configured polling interval.
-func New(pollSeconds int) Model {
+// terminal is the resolved terminal emulator identifier; empty string uses the platform default.
+func New(pollSeconds int, terminal string) Model {
 	vp := viewport.New(80, 10)
 	return Model{
 		pollInterval:  time.Duration(pollSeconds) * time.Second,
@@ -112,6 +118,7 @@ func New(pollSeconds int) Model {
 		historyVP:     vp,
 		spinnerFrames: []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"},
 		now:           time.Now(),
+		terminal:      terminal,
 	}
 }
 
@@ -220,7 +227,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					num := nums[m.activeIdx]
 					if _, ok := m.active[num]; ok {
 						logDir := fmt.Sprintf("%s/.fabrik/logs/issue-%d", homeDir(), num)
-						return m, openLogViewerCmd(logDir)
+						return m, m.openLogViewerCmd(logDir)
 					}
 				}
 			} else if m.focusPane == paneHistory && len(m.history) > 0 {
@@ -228,7 +235,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if realIdx >= 0 && realIdx < len(m.history) {
 					h := m.history[realIdx]
 					logDir := fmt.Sprintf("%s/.fabrik/logs/issue-%d", homeDir(), h.IssueNumber)
-					return m, openLogViewerCmd(logDir)
+					return m, m.openLogViewerCmd(logDir)
 				}
 			}
 			return m, nil
@@ -532,7 +539,7 @@ func (m Model) sortedActiveNums() []int {
 // openLogViewerCmd returns a tea.Cmd that opens a terminal showing the most
 // recent log file in the given directory, piped through the stream filter
 // for human-readable output.
-func openLogViewerCmd(logDir string) tea.Cmd {
+func (m Model) openLogViewerCmd(logDir string) tea.Cmd {
 	if _, err := os.Stat(logDir); err != nil {
 		return nil
 	}
@@ -560,12 +567,19 @@ func openLogViewerCmd(logDir string) tea.Cmd {
 
 	// For JSON files, pipe through the stream filter; for other files, use less.
 	// Pass as a single string — openTerminalCmd sends it to Terminal.app's do script.
+	// Shell-quote path components so directories or binaries with spaces work correctly.
 	if strings.HasSuffix(latest, ".json") {
-		return openTerminalCmd(fmt.Sprintf(
+		return m.openTerminalCmd(fmt.Sprintf(
 			"cd %s && cat %s | %s _stream-filter | less -R",
-			logDir, latest, fabrikBin))
+			shellQuote(logDir), shellQuote(latest), shellQuote(fabrikBin)))
 	}
-	return openTerminalCmd(fmt.Sprintf("cd %s && less +F %s", logDir, latest))
+	return m.openTerminalCmd(fmt.Sprintf("cd %s && less +F %s", shellQuote(logDir), shellQuote(latest)))
+}
+
+// shellQuote wraps s in single quotes and escapes any embedded single quotes,
+// making it safe to embed in a shell command string.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // fmtDuration formats a duration as MM:SS.
@@ -586,39 +600,94 @@ func homeDir() string {
 }
 
 // openTerminalCmd returns a tea.Cmd that opens a new terminal window running
-// the given command. On macOS it uses osascript to open Terminal.app; on Linux
-// it tries common terminal emulators.
-func openTerminalCmd(name string, args ...string) tea.Cmd {
+// cmdStr as a shell command. It dispatches to the terminal specified by
+// m.terminal; an empty string or unknown ID falls back to the platform default.
+func (m Model) openTerminalCmd(cmdStr string) tea.Cmd {
 	return func() tea.Msg {
-		cmdStr := name
-		for _, a := range args {
-			cmdStr += " " + a
-		}
-
 		var cmd *exec.Cmd
-		if runtime.GOOS == "darwin" {
-			script := fmt.Sprintf(`tell application "Terminal"
+
+		switch m.terminal {
+		case "iterm2":
+			// iTerm2 v3+ AppleScript API; macOS only. Fall back to Linux default on other platforms.
+			if runtime.GOOS == "darwin" {
+				script := fmt.Sprintf(`tell application "iTerm"
+	activate
+	create window with default profile command "%s"
+end tell`, strings.ReplaceAll(cmdStr, `"`, `\"`))
+				cmd = exec.Command("osascript", "-e", script)
+			} else {
+				cmd = linuxFallbackTerminal(cmdStr)
+			}
+
+		case "ghostty":
+			if runtime.GOOS == "darwin" {
+				// Ghostty binary cannot launch the GUI directly on macOS; use open.
+				cmd = exec.Command("open", "-na", "Ghostty.app", "--args", "-e", "sh", "-c", cmdStr)
+			} else {
+				cmd = exec.Command("ghostty", "-e", "sh", "-c", cmdStr)
+			}
+
+		case "kitty":
+			cmd = exec.Command("kitty", "sh", "-c", cmdStr)
+
+		case "alacritty":
+			cmd = exec.Command("alacritty", "-e", "sh", "-c", cmdStr)
+
+		case "warp":
+			// Warp does not support passing a command via -e; macOS only.
+			if runtime.GOOS == "darwin" {
+				fmt.Fprintf(os.Stderr, "[warn] Warp terminal does not support opening with a command; log viewer unavailable\n")
+				cmd = exec.Command("open", "-a", "Warp")
+			} else {
+				cmd = linuxFallbackTerminal(cmdStr)
+			}
+
+		case "terminal", "":
+			// Terminal.app on macOS or platform default on Linux.
+			if runtime.GOOS == "darwin" {
+				script := fmt.Sprintf(`tell application "Terminal"
 activate
 do script "%s"
 end tell`, strings.ReplaceAll(cmdStr, `"`, `\"`))
-			cmd = exec.Command("osascript", "-e", script)
-		} else {
-			// Try common Linux terminals
-			for _, term := range []string{"gnome-terminal", "xterm", "konsole"} {
-				if _, err := exec.LookPath(term); err == nil {
-					if term == "gnome-terminal" {
-						cmd = exec.Command(term, "--", "sh", "-c", cmdStr)
-					} else {
-						cmd = exec.Command(term, "-e", cmdStr)
-					}
-					break
-				}
+				cmd = exec.Command("osascript", "-e", script)
+			} else {
+				cmd = linuxFallbackTerminal(cmdStr)
 			}
-			if cmd == nil {
-				return nil // no terminal found
+
+		default:
+			// Unknown terminal ID — warn and fall through to platform default.
+			fmt.Fprintf(os.Stderr, "[warn] unknown terminal %q; falling back to platform default\n", m.terminal)
+			if runtime.GOOS == "darwin" {
+				script := fmt.Sprintf(`tell application "Terminal"
+activate
+do script "%s"
+end tell`, strings.ReplaceAll(cmdStr, `"`, `\"`))
+				cmd = exec.Command("osascript", "-e", script)
+			} else {
+				cmd = linuxFallbackTerminal(cmdStr)
 			}
 		}
-		_ = cmd.Start()
+
+		if cmd == nil {
+			return nil
+		}
+		if err := cmd.Start(); err != nil {
+			fmt.Fprintf(os.Stderr, "[warn] failed to launch terminal %q: %v\n", m.terminal, err)
+		}
 		return nil
 	}
+}
+
+// linuxFallbackTerminal returns an *exec.Cmd for the first available terminal
+// emulator found in PATH (gnome-terminal, xterm, konsole). Returns nil if none found.
+func linuxFallbackTerminal(cmdStr string) *exec.Cmd {
+	for _, term := range []string{"gnome-terminal", "xterm", "konsole"} {
+		if _, err := exec.LookPath(term); err == nil {
+			if term == "gnome-terminal" {
+				return exec.Command(term, "--", "sh", "-c", cmdStr)
+			}
+			return exec.Command(term, "-e", "sh", "-c", cmdStr)
+		}
+	}
+	return nil
 }
