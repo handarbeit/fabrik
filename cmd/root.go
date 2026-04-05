@@ -333,9 +333,12 @@ func detectTerminalFromEnv() string {
 // buildProjectInfo assembles the TUI footer metadata from the active config.
 func buildProjectInfo(cfg *Config, pc config.ProjectConfig) tui.ProjectInfo {
 	// Format CWD as home-relative path when possible.
-	cwd, _ := os.Getwd()
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = ""
+	}
 	cwdDisplay := cwd
-	if home, err := os.UserHomeDir(); err == nil && home != "" && strings.HasPrefix(cwd, home) {
+	if home, herr := os.UserHomeDir(); herr == nil && home != "" && (cwd == home || strings.HasPrefix(cwd, home+string(os.PathSeparator))) {
 		cwdDisplay = "~" + cwd[len(home):]
 	}
 
