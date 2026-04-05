@@ -34,15 +34,19 @@ Make decisions. Don't present options — that was Research's job. If the resear
 
 ### Create the task checklist
 
-Break the work into an ordered checklist using GitHub markdown checkboxes:
+Break the work into an ordered checklist using GitHub markdown checkboxes, wrapped in `FABRIK_TASK_LIST_BEGIN` / `FABRIK_TASK_LIST_END` markers so the engine can extract it:
 
 ```
-## Task Checklist
+FABRIK_TASK_LIST_BEGIN
+### Task Checklist
 
 - [ ] Task 1: Brief description
 - [ ] Task 2: Brief description
 ...
+FABRIK_TASK_LIST_END
 ```
+
+The markers must be on their own lines. The engine copies the content between them into the PR description when the Implement stage creates a draft PR. This makes the PR body the canonical task list for tracking progress.
 
 Tasks should be:
 - **Ordered** — each task can be done after the ones above it
@@ -107,10 +111,12 @@ Description of the chosen approach and key design decisions.
 ### Key Decisions
 - **Decision**: Why this approach over alternatives.
 
+FABRIK_TASK_LIST_BEGIN
 ### Task Checklist
 - [ ] Task 1
 - [ ] Task 2
 ...
+FABRIK_TASK_LIST_END
 
 ### Risks
 - Risk description and mitigation.
