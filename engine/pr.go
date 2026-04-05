@@ -63,8 +63,10 @@ func (e *Engine) ensurePRTaskList(item gh.ProjectItem, prNumber int) {
 		return
 	}
 
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+
 	// Fetch current PR body
-	body, err := e.client.GetIssueBody(e.cfg.Owner, e.cfg.Repo, prNumber)
+	body, err := e.client.GetIssueBody(owner, repo, prNumber)
 	if err != nil {
 		e.logf(item.Number, "warn", "could not fetch PR #%d body for task list: %v\n", prNumber, err)
 		return
@@ -79,7 +81,7 @@ func (e *Engine) ensurePRTaskList(item gh.ProjectItem, prNumber int) {
 
 	// Append task list wrapped in markers to existing body, preserving Closes #N
 	updatedBody := body + "\n\nFABRIK_TASK_LIST_BEGIN\n" + taskList + "\nFABRIK_TASK_LIST_END"
-	if err := e.client.UpdateIssueBody(e.cfg.Owner, e.cfg.Repo, prNumber, updatedBody); err != nil {
+	if err := e.client.UpdateIssueBody(owner, repo, prNumber, updatedBody); err != nil {
 		e.logf(item.Number, "warn", "could not update PR #%d body with task list: %v\n", prNumber, err)
 		return
 	}
