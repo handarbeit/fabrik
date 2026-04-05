@@ -278,10 +278,11 @@ func (e *Engine) poll(ctx context.Context) error {
 		case <-ctx.Done():
 			goto doneDispatching
 		}
-		// Capture stage name and start time for job tracking.
-		var stageName string
+		// Capture stage name, model, and start time for job tracking.
+		var stageName, stageModel string
 		if s := stages.FindStage(e.cfg.Stages, item.Status); s != nil {
 			stageName = s.Name
+			stageModel = s.Model
 		}
 		isComment := len(e.findNewComments(item)) > 0
 		startTime := time.Now()
@@ -312,6 +313,7 @@ func (e *Engine) poll(ctx context.Context) error {
 				IssueNumber:    item.Number,
 				Title:          item.Title,
 				StageName:      stageName,
+				StageModel:     stageModel,
 				IsComment:      isComment,
 				Success:        err == nil,
 				Completed:      completed,
