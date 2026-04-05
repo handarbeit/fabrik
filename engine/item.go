@@ -49,14 +49,15 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 
 	// Skip items that haven't changed since last poll — unless in cooldown retry.
 	if !item.UpdatedAt.IsZero() {
+		iKey := issueKey(item, e.defaultRepo())
 		e.mu.Lock()
-		lastSeen, seen := e.lastUpdatedAt[item.Number]
+		lastSeen, seen := e.lastUpdatedAt[iKey]
 		e.mu.Unlock()
 		if seen && !item.UpdatedAt.After(lastSeen) {
 			// Item unchanged — but still allow cooldown retries
-			itemKey := fmt.Sprintf("%d-%s", item.Number, stage.Name)
+			stageKey := iKey + "-" + stage.Name
 			e.mu.Lock()
-			lastAttempt, attempted := e.processedSet[itemKey]
+			lastAttempt, attempted := e.processedSet[stageKey]
 			e.mu.Unlock()
 			if attempted {
 				cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
@@ -169,9 +170,10 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	}
 
 	// Check cooldown
-	itemKey := fmt.Sprintf("%d-%s", item.Number, stage.Name)
+	iKey := issueKey(item, e.defaultRepo())
+	stageKey := iKey + "-" + stage.Name
 	e.mu.Lock()
-	lastAttempt, attempted := e.processedSet[itemKey]
+	lastAttempt, attempted := e.processedSet[stageKey]
 	e.mu.Unlock()
 	if attempted {
 		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
@@ -190,8 +192,12 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		return nil
 	}
 
-	// Hoist itemKey early so unpause detection can use it before stage processing.
-	itemKey := fmt.Sprintf("%d-%s", item.Number, stage.Name)
+	// Derive per-issue owner/repo for all API calls.
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	// Unique key for this issue across all repos.
+	iKey := issueKey(item, e.defaultRepo())
+	// Unique key for this issue+stage combination.
+	stageKey := iKey + "-" + stage.Name
 
 	// Check if this issue is locked by another driver instance
 	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
@@ -216,7 +222,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	if isAwaitingInput(item) {
 		newComments := e.findNewComments(item)
 		if len(newComments) > 0 {
-			e.unblockAwaitingInput(item, stage, itemKey)
+			e.unblockAwaitingInput(item, stage, stageKey)
 			return e.processComments(ctx, board, item, stage, newComments)
 		}
 		e.logf(item.Number, "skip", "awaiting user input\n")
@@ -244,7 +250,8 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 
 		// Issues have worktrees; PRs on the board do not — skip the removal for PRs.
 		if !item.IsPR {
-			wtDir := e.worktrees.WorktreeDir(item.Number)
+			wm := e.worktreesFor(item.Repo)
+			wtDir := wm.WorktreeDir(item.Number)
 			statusCmd := exec.Command("git", "status", "--porcelain")
 			statusCmd.Dir = wtDir
 			if out, err := statusCmd.Output(); err == nil {
@@ -261,18 +268,18 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 				}
 			}
 
-			if err := e.worktrees.CleanupWorktree(item.Number, false); err != nil {
+			if err := wm.CleanupWorktree(item.Number, false); err != nil {
 				e.logf(item.Number, "warn", "could not clean up worktree: %v\n", err)
 			}
 		}
 
-		if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, completeLabel); err != nil {
+		if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
 			e.logf(item.Number, "warn", "could not add completion label: %v\n", err)
 		}
 
 		e.mu.Lock()
-		e.processedSet[itemKey] = time.Now()
-		e.lastCompleted[item.Number] = true
+		e.processedSet[stageKey] = time.Now()
+		e.lastCompleted[iKey] = true
 		e.mu.Unlock()
 
 		return nil
@@ -293,7 +300,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	func() {
 		e.mu.Lock()
 		defer e.mu.Unlock()
-		wasPaused = e.pausedDueToRetries[itemKey]
+		wasPaused = e.pausedDueToRetries[stageKey]
 	}()
 	if wasPaused || hasFailedLabel {
 		e.clearFailedStage(item, stage)
@@ -326,7 +333,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	func() {
 		e.mu.Lock()
 		defer e.mu.Unlock()
-		lastAttempt, attempted = e.processedSet[itemKey]
+		lastAttempt, attempted = e.processedSet[stageKey]
 	}()
 
 	if attempted {
@@ -338,7 +345,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			return nil
 		}
 		e.logf(item.Number, "retry", "cooldown expired for stage %q, retrying\n", stage.Name)
-		e.removeFailedLabel(item.Number, stage.Name)
+		e.removeFailedLabel(owner, repo, item.Number, stage.Name)
 	}
 
 	// Bail early if context was cancelled before starting new work.
@@ -355,18 +362,18 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// processItem return. This keeps the issue locked through cooldown
 	// retries so other instances don't pick it up.
 	lockAcquired := false
-	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, lockLabel); err != nil {
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, lockLabel); err != nil {
 		e.logf(item.Number, "warn", "could not add lock label: %v\n", err)
 	} else {
 		lockAcquired = true
 		e.mu.Lock()
-		e.lockedIssues[item.Number] = true
+		e.lockedIssues[iKey] = true
 		e.mu.Unlock()
 	}
 
 	inProgressLabel := fmt.Sprintf("stage:%s:in_progress", stage.Name)
 	inProgressAdded := false
-	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, inProgressLabel); err != nil {
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, inProgressLabel); err != nil {
 		e.logf(item.Number, "warn", "could not add in_progress label: %v\n", err)
 	} else {
 		inProgressAdded = true
@@ -376,22 +383,25 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// (completed, permanently failed, or paused). NOT called on cooldown retry.
 	releaseLock := func() {
 		if lockAcquired {
-			e.removeLockLabel(item.Number, lockLabel)
+			e.removeLockLabel(owner, repo, item.Number, lockLabel)
 			e.mu.Lock()
-			delete(e.lockedIssues, item.Number)
+			delete(e.lockedIssues, iKey)
 			e.mu.Unlock()
 		}
 		if inProgressAdded {
-			e.removeInProgressLabel(item.Number, stage.Name)
+			e.removeInProgressLabel(owner, repo, item.Number, stage.Name)
 		}
 	}
+
+	// Ensure the WorktreeManager for this item's repo is ready.
+	wm := e.worktreesFor(item.Repo)
 
 	// Ensure worktree exists for this issue.
 	// On retries (resume=true), skip rebasing onto main — the worktree already
 	// has context from the previous attempt and pulling in unrelated changes
 	// mid-session confuses Claude.
-	baseBranch := e.worktrees.DefaultBaseBranch()
-	workDir, err := e.worktrees.EnsureWorktree(item.Number, baseBranch, attempted)
+	baseBranch := wm.DefaultBaseBranch()
+	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, attempted)
 	if err != nil {
 		return fmt.Errorf("setting up worktree: %w", err)
 	}
@@ -441,7 +451,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		e.totalTokens = e.totalTokens.add(usage)
-		e.lastUsage[item.Number] = usage
+		e.lastUsage[iKey] = usage
 	}()
 
 	// Restore any stashed changes now that the read-only stage has finished.
@@ -472,7 +482,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		if updatedBody := extractUpdatedBody(output); updatedBody != "" {
 			if stage.UpdateIssueBody {
 				e.logf(item.Number, "edit", "updating issue body from stage output\n")
-				if err := e.client.UpdateIssueBody(e.cfg.Owner, e.cfg.Repo, item.Number, updatedBody); err != nil {
+				if err := e.client.UpdateIssueBody(owner, repo, item.Number, updatedBody); err != nil {
 					e.logf(item.Number, "warn", "could not update issue body: %v\n", err)
 				}
 			} else {
@@ -503,7 +513,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			e.postOutputToPR(item, stage.Name, postOutput, footer, branch, commit, mainSHA, timestamp)
 		} else {
 			comment := formatOutputComment(stage.Name, postOutput, footer, branch, commit, mainSHA, timestamp)
-			if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
+			if err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
 				e.logf(item.Number, "warn", "could not post comment: %v\n", err)
 			}
 		}
@@ -532,7 +542,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		func() {
 			e.mu.Lock()
 			defer e.mu.Unlock()
-			e.processedSet[itemKey] = time.Now()
+			e.processedSet[stageKey] = time.Now()
 		}()
 	}
 
@@ -555,7 +565,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 
 	// Always push the branch after a stage runs — preserves work even on failure/max_turns
 	if claudeRan {
-		if pushErr := e.worktrees.PushBranch(item.Number); pushErr != nil {
+		if pushErr := wm.PushBranch(item.Number); pushErr != nil {
 			e.logf(item.Number, "warn", "could not push branch: %v\n", pushErr)
 		}
 	}
@@ -576,8 +586,8 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	func() {
 		e.mu.Lock()
 		defer e.mu.Unlock()
-		e.lastCompleted[item.Number] = completed
-		e.lastBlocked[item.Number] = blockedOnInput
+		e.lastCompleted[iKey] = completed
+		e.lastBlocked[iKey] = blockedOnInput
 	}()
 
 	if completed {
@@ -586,8 +596,8 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		func() {
 			e.mu.Lock()
 			defer e.mu.Unlock()
-			delete(e.retryCount, itemKey)
-			delete(e.pausedDueToRetries, itemKey)
+			delete(e.retryCount, stageKey)
+			delete(e.pausedDueToRetries, stageKey)
 		}()
 		// Post-stage: create draft PR and/or mark ready now that commits exist
 		var prNumber int
@@ -609,8 +619,8 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			func() {
 				e.mu.Lock()
 				defer e.mu.Unlock()
-				e.retryCount[itemKey]++
-				count = e.retryCount[itemKey]
+				e.retryCount[stageKey]++
+				count = e.retryCount[stageKey]
 			}()
 			if count >= e.cfg.MaxRetries {
 				e.escalateFailedStage(item, stage)
@@ -628,23 +638,25 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 	e.logf(item.Number, "escalate", "stage %q failed %d time(s) — pausing issue\n", stage.Name, e.cfg.MaxRetries)
 
-	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, "fabrik:paused"); err != nil {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
 		e.logf(item.Number, "warn", "could not add paused label: %v\n", err)
 	}
 
-	e.addFailedLabel(item.Number, stage.Name)
+	e.addFailedLabel(owner, repo, item.Number, stage.Name)
 
 	comment := fmt.Sprintf(
 		"🏭 **Fabrik — stage failed**\n\nStage **%s** failed to complete after %d attempt(s). The issue has been paused (`fabrik:paused`).\n\nTo retry: investigate the failure, make any needed fixes, then remove the `fabrik:paused` label.",
 		stage.Name, e.cfg.MaxRetries,
 	)
-	if err := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, comment); err != nil {
+	if err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
 		e.logf(item.Number, "warn", "could not post escalation comment: %v\n", err)
 	}
 
-	itemKey := fmt.Sprintf("%d-%s", item.Number, stage.Name)
+	stageKey := issueKey(item, e.defaultRepo()) + "-" + stage.Name
 	e.mu.Lock()
-	e.pausedDueToRetries[itemKey] = true
+	e.pausedDueToRetries[stageKey] = true
 	e.mu.Unlock()
 }
 
@@ -654,17 +666,18 @@ func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 	e.logf(item.Number, "unpause", "clearing failed stage %q after manual unpause\n", stage.Name)
 
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	failedLabel := fmt.Sprintf("stage:%s:failed", stage.Name)
-	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, item.Number, failedLabel); err != nil &&
+	if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, failedLabel); err != nil &&
 		!errors.Is(err, gh.ErrNotFound) {
 		e.logf(item.Number, "warn", "could not remove failed label: %v\n", err)
 	}
 
-	itemKey := fmt.Sprintf("%d-%s", item.Number, stage.Name)
+	stageKey := issueKey(item, e.defaultRepo()) + "-" + stage.Name
 	e.mu.Lock()
-	delete(e.retryCount, itemKey)
-	delete(e.pausedDueToRetries, itemKey)
-	delete(e.processedSet, itemKey) // clear cooldown so the stage retries immediately
+	delete(e.retryCount, stageKey)
+	delete(e.pausedDueToRetries, stageKey)
+	delete(e.processedSet, stageKey) // clear cooldown so the stage retries immediately
 	e.mu.Unlock()
 }
 
@@ -675,10 +688,11 @@ func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 func (e *Engine) blockOnInput(item gh.ProjectItem, stage *stages.Stage) {
 	e.logf(item.Number, "block", "stage %q needs user input — pausing with awaiting-input\n", stage.Name)
 
-	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, "fabrik:paused"); err != nil {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
 		e.logf(item.Number, "warn", "could not add paused label: %v\n", err)
 	}
-	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, item.Number, "fabrik:awaiting-input"); err != nil {
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
 		e.logf(item.Number, "warn", "could not add awaiting-input label: %v\n", err)
 	}
 }
@@ -686,20 +700,21 @@ func (e *Engine) blockOnInput(item gh.ProjectItem, stage *stages.Stage) {
 // unblockAwaitingInput is called when a user comment arrives on an issue that
 // was paused via blockOnInput. It removes both labels and clears the
 // processedSet entry so the stage re-runs promptly after comment processing.
-func (e *Engine) unblockAwaitingInput(item gh.ProjectItem, stage *stages.Stage, itemKey string) {
+func (e *Engine) unblockAwaitingInput(item gh.ProjectItem, stage *stages.Stage, stageKey string) {
 	e.logf(item.Number, "unblock", "user comment received — removing awaiting-input pause\n")
 
-	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, item.Number, "fabrik:paused"); err != nil &&
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:paused"); err != nil &&
 		!errors.Is(err, gh.ErrNotFound) {
 		e.logf(item.Number, "warn", "could not remove paused label: %v\n", err)
 	}
-	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, item.Number, "fabrik:awaiting-input"); err != nil &&
+	if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil &&
 		!errors.Is(err, gh.ErrNotFound) {
 		e.logf(item.Number, "warn", "could not remove awaiting-input label: %v\n", err)
 	}
 
 	e.mu.Lock()
-	delete(e.processedSet, itemKey)
+	delete(e.processedSet, stageKey)
 	e.mu.Unlock()
 }
 
@@ -725,37 +740,37 @@ func (e *Engine) extractModelOverride(issueNumber int, labels []string) string {
 	return found
 }
 
-func (e *Engine) removeEditingLabel(issueNumber int) {
-	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, issueNumber, "fabrik:editing"); err != nil {
+func (e *Engine) removeEditingLabel(owner, repo string, issueNumber int) {
+	if err := e.client.RemoveLabelFromIssue(owner, repo, issueNumber, "fabrik:editing"); err != nil {
 		e.logf(issueNumber, "warn", "could not remove editing label: %v\n", err)
 	}
 }
 
-func (e *Engine) removeLockLabel(issueNumber int, label string) {
-	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, issueNumber, label); err != nil &&
+func (e *Engine) removeLockLabel(owner, repo string, issueNumber int, label string) {
+	if err := e.client.RemoveLabelFromIssue(owner, repo, issueNumber, label); err != nil &&
 		!errors.Is(err, gh.ErrNotFound) {
 		e.logf(issueNumber, "warn", "could not remove lock label: %v\n", err)
 	}
 }
 
-func (e *Engine) removeInProgressLabel(issueNumber int, stageName string) {
+func (e *Engine) removeInProgressLabel(owner, repo string, issueNumber int, stageName string) {
 	label := fmt.Sprintf("stage:%s:in_progress", stageName)
-	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, issueNumber, label); err != nil &&
+	if err := e.client.RemoveLabelFromIssue(owner, repo, issueNumber, label); err != nil &&
 		!errors.Is(err, gh.ErrNotFound) {
 		e.logf(issueNumber, "warn", "could not remove in_progress label: %v\n", err)
 	}
 }
 
-func (e *Engine) addFailedLabel(issueNumber int, stageName string) {
+func (e *Engine) addFailedLabel(owner, repo string, issueNumber int, stageName string) {
 	label := fmt.Sprintf("stage:%s:failed", stageName)
-	if err := e.client.AddLabelToIssue(e.cfg.Owner, e.cfg.Repo, issueNumber, label); err != nil {
+	if err := e.client.AddLabelToIssue(owner, repo, issueNumber, label); err != nil {
 		e.logf(issueNumber, "warn", "could not add failed label: %v\n", err)
 	}
 }
 
-func (e *Engine) removeFailedLabel(issueNumber int, stageName string) {
+func (e *Engine) removeFailedLabel(owner, repo string, issueNumber int, stageName string) {
 	label := fmt.Sprintf("stage:%s:failed", stageName)
-	if err := e.client.RemoveLabelFromIssue(e.cfg.Owner, e.cfg.Repo, issueNumber, label); err != nil &&
+	if err := e.client.RemoveLabelFromIssue(owner, repo, issueNumber, label); err != nil &&
 		!errors.Is(err, gh.ErrNotFound) {
 		e.logf(issueNumber, "warn", "could not remove failed label: %v\n", err)
 	}
