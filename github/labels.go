@@ -6,6 +6,22 @@ import (
 	"net/url"
 )
 
+// FetchLabels returns the current labels on an issue.
+func (c *Client) FetchLabels(owner, repo string, issueNumber int) ([]string, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/issues/%d/labels", c.baseURL, owner, repo, issueNumber)
+	var labels []struct {
+		Name string `json:"name"`
+	}
+	if err := c.restGetJSON(apiURL, &labels); err != nil {
+		return nil, err
+	}
+	names := make([]string, len(labels))
+	for i, l := range labels {
+		names[i] = l.Name
+	}
+	return names, nil
+}
+
 // AddLabelToIssue adds a label to an issue. Creates the label if it doesn't exist.
 func (c *Client) AddLabelToIssue(owner, repo string, issueNumber int, labelName string) error {
 	// First ensure the label exists

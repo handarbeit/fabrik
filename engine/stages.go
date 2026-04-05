@@ -24,6 +24,13 @@ func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem
 	// Clean up any failure label from a prior incomplete run.
 	e.removeFailedLabel(item.Number, stage.Name)
 
+	// Re-fetch labels so we see changes made while the stage was running
+	// (e.g., fabrik:yolo added mid-run). The item snapshot from dispatch
+	// time may be stale. On error, keep existing labels.
+	if freshLabels, err := e.client.FetchLabels(e.cfg.Owner, e.cfg.Repo, item.Number); err == nil && len(freshLabels) > 0 {
+		item.Labels = freshLabels
+	}
+
 	// yoloActive gates both PR merge and is the base for stage advancement.
 	// stage.AutoAdvance overrides advancement only — not the merge decision.
 	yoloActive := e.cfg.Yolo || hasYoloLabel(item)
