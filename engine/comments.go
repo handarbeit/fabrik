@@ -76,6 +76,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		e.totalTokens = e.totalTokens.add(usage)
+		e.lastUsage[item.Number] = usage
 	}()
 	if err != nil {
 		e.removeEditingLabel(item.Number)
