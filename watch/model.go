@@ -262,6 +262,7 @@ func (m *WatchModel) fetchGitHub() {
 	m.github.title = issue.Title
 	m.github.state = issue.State
 	m.github.labels = issue.Labels
+	m.commentCnt = issue.Comments
 
 	// Discover the linked PR by convention (branch fabrik/issue-N).
 	// Cache the PR number once found; re-fetch details on each poll.
