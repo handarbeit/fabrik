@@ -23,10 +23,6 @@ The engine has written context files to `.fabrik-context/` in your working direc
 
 Read these files before starting validation. The spec in `.fabrik-context/issue.md` is your ground truth for requirements verification.
 
-### Check for codebase changes
-
-If `.fabrik-context/codebase-changes.md` exists, read it. This file lists files that changed on `origin/main` since the Review stage completed. Note any significant changes — if many files were modified, the rebase may introduce conflicts or regressions that need extra attention during validation.
-
 1. `git status` — commit any uncommitted changes
 2. Rebase onto latest main:
    ```bash

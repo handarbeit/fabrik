@@ -19,10 +19,6 @@ Read the context files the engine has written to `.fabrik-context/` in your work
 
 These files are always fresher than the inline prompt. Read them before designing the approach.
 
-### Check for codebase changes
-
-If `.fabrik-context/codebase-changes.md` exists, read it. This file lists files that changed on `origin/main` since the Research stage completed. Cross-reference the changed files against Research findings — if Research referenced files that have since been modified, renamed, or deleted, verify those findings against the current code before planning. Note any deviations rather than silently proceeding with stale assumptions.
-
 ## What You Do
 
 ### Design the approach
