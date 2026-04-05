@@ -4,9 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{% if page.title %}{{ page.title }} — {{ site.title }}{% else %}{{ site.title }}{% endif %}</title>
-  <meta name="description" content="{% if page.description %}{{ page.description }}{% else %}{{ site.description }}{% endif %}">
-  <meta name="og:title" content="{% if page.title %}{{ page.title }}{% else %}{{ site.title }}{% endif %}">
-  <meta name="og:description" content="{% if page.description %}{{ page.description }}{% else %}{{ site.description }}{% endif %}">
+  {% seo %}
   <link rel="stylesheet" href="{{ '/assets/css/style.css' | relative_url }}">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -20,14 +18,14 @@
           <span class="logo-icon">🏭</span>
           <span class="logo-text">Fabrik</span>
         </a>
-        <div class="nav-links">
+        <div class="nav-links" id="site-nav-links">
           <a href="#how-it-works">How It Works</a>
           <a href="#features">Features</a>
           <a href="#quickstart">Quickstart</a>
           <a href="https://github.com/handarbeit/fabrik/blob/main/docs/USER_GUIDE.md" target="_blank" rel="noopener">Docs</a>
           <a href="https://github.com/handarbeit/fabrik" class="btn btn-sm" target="_blank" rel="noopener">GitHub</a>
         </div>
-        <button class="nav-toggle" aria-label="Toggle navigation" aria-expanded="false">
+        <button class="nav-toggle" aria-label="Toggle navigation" aria-expanded="false" aria-controls="site-nav-links">
           <span></span><span></span><span></span>
         </button>
       </nav>
