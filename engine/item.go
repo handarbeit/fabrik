@@ -241,8 +241,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			statusCmd := exec.Command("git", "status", "--porcelain")
 			statusCmd.Dir = wtDir
 			if out, err := statusCmd.Output(); err == nil && len(strings.TrimSpace(string(out))) > 0 {
-				e.logf(item.Number, "warn", "worktree dirty — skipping cleanup to preserve uncommitted changes\n")
-				return nil
+				e.logf(item.Number, "warn", "worktree dirty at cleanup — uncommitted changes will be discarded\n")
 			}
 
 			if err := e.worktrees.CleanupWorktree(item.Number, false); err != nil {
