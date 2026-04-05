@@ -51,6 +51,9 @@ func Execute() error {
 		RunStreamFilter()
 		return nil
 	}
+	if len(os.Args) > 1 && os.Args[1] == "watch" {
+		return runWatch(os.Args[2:])
+	}
 	if len(os.Args) > 1 && os.Args[1] == "resume" {
 		return runResume(os.Args[2:])
 	}
