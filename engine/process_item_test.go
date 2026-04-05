@@ -1309,7 +1309,7 @@ func TestProcessItem_ProgressResetsLoopCount(t *testing.T) {
 	item := gh.ProjectItem{Number: 20, Title: "Progress test", Status: "Implement", ItemID: "PVTI_20"}
 
 	// Pre-set loopCount to simulate prior no-progress failures
-	itemKey := "20-Implement"
+	itemKey := "owner/repo#20-Implement"
 	eng.mu.Lock()
 	eng.loopCount[itemKey] = 1
 	eng.mu.Unlock()
@@ -1385,7 +1385,7 @@ func TestProcessItem_TotalLoopCeiling(t *testing.T) {
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 21, Title: "Ceiling test", Status: "Implement", ItemID: "PVTI_21"}
-	itemKey := "21-Implement"
+	itemKey := "owner/repo#21-Implement"
 
 	// Pre-set totalLoopCount to one below the ceiling
 	eng.mu.Lock()
@@ -1481,7 +1481,7 @@ func TestProcessItem_NoProgressIncrements(t *testing.T) {
 		t.Fatalf("processItem (first): %v", err)
 	}
 
-	itemKey := "22-Implement"
+	itemKey := "owner/repo#22-Implement"
 	eng.mu.Lock()
 	count1 := eng.loopCount[itemKey]
 	eng.mu.Unlock()
