@@ -238,19 +238,14 @@ func TestView_AfterWindowSize(t *testing.T) {
 
 // TestOpenTerminalCmd_UnknownID verifies that an unknown terminal ID does not
 // panic and returns a non-nil tea.Cmd (the fallback path runs).
+// The returned Cmd is intentionally not executed — doing so may launch GUI
+// processes (osascript, terminal emulators) during go test.
 func TestOpenTerminalCmd_UnknownID(t *testing.T) {
 	m := New(30, "totally_unknown_terminal")
 	cmd := m.openTerminalCmd("echo hello")
 	if cmd == nil {
 		t.Error("expected non-nil tea.Cmd for unknown terminal ID")
 	}
-	// Calling the Cmd func must not panic (it may fail to start a process, which is fine in tests).
-	defer func() {
-		if r := recover(); r != nil {
-			t.Errorf("openTerminalCmd panicked: %v", r)
-		}
-	}()
-	_ = cmd()
 }
 
 // TestOpenTerminalCmd_KnownIDs verifies that known terminal IDs return non-nil Cmds.
