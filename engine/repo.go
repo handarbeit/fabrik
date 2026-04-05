@@ -36,6 +36,15 @@ func issueKey(item gh.ProjectItem, defaultRepo string) string {
 	return fmt.Sprintf("%s#%d", repo, item.Number)
 }
 
+// itemOwnerRepoString returns the "owner/repo" string for an item.
+// Uses item.Repo if non-empty; falls back to defaultRepo.
+func itemOwnerRepoString(item gh.ProjectItem, defaultRepo string) string {
+	if item.Repo != "" {
+		return item.Repo
+	}
+	return defaultRepo
+}
+
 // itemOwnerRepo returns the (owner, repo) pair for an item.
 // Uses item.Repo if non-empty; falls back to defaultRepo.
 func itemOwnerRepo(item gh.ProjectItem, defaultRepo string) (owner, repo string) {
