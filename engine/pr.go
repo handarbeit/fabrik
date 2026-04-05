@@ -70,13 +70,15 @@ func (e *Engine) ensurePRTaskList(item gh.ProjectItem, prNumber int) {
 		return
 	}
 
-	// Check if task list is already present (idempotent)
-	if strings.Contains(body, "FABRIK_TASK_LIST_BEGIN") || strings.Contains(body, taskList) {
+	// Check if task list is already present (idempotent) by looking for markers.
+	// We wrap the task list in markers in the PR body so we can detect it even
+	// after users check off tasks (which would change the content).
+	if strings.Contains(body, "FABRIK_TASK_LIST_BEGIN") {
 		return
 	}
 
-	// Append task list to existing body, preserving Closes #N and any other content
-	updatedBody := body + "\n\n" + taskList
+	// Append task list wrapped in markers to existing body, preserving Closes #N
+	updatedBody := body + "\n\nFABRIK_TASK_LIST_BEGIN\n" + taskList + "\nFABRIK_TASK_LIST_END"
 	if err := e.client.UpdateIssueBody(e.cfg.Owner, e.cfg.Repo, prNumber, updatedBody); err != nil {
 		e.logf(item.Number, "warn", "could not update PR #%d body with task list: %v\n", prNumber, err)
 		return
