@@ -207,7 +207,7 @@ func TestUpdate_QuitKey(t *testing.T) {
 }
 
 func TestUpdate_RKey_ActivePane_AliasesLogViewer(t *testing.T) {
-	m := New(30, "")
+	m := New(30, "", "")
 	m.focusPane = paneActive
 	m.active[7] = &activeJob{StageName: "Research", StartedAt: time.Now()}
 
@@ -221,7 +221,7 @@ func TestUpdate_RKey_ActivePane_AliasesLogViewer(t *testing.T) {
 }
 
 func TestUpdate_RKey_ActivePane_NoJobs_NoOp(t *testing.T) {
-	m := New(30, "")
+	m := New(30, "", "")
 	m.focusPane = paneActive
 	// No active jobs: r is a no-op
 
@@ -233,7 +233,7 @@ func TestUpdate_RKey_ActivePane_NoJobs_NoOp(t *testing.T) {
 
 func TestUpdate_RKey_HistoryPane_WithEntry(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, "")
+	m := New(30, "", "")
 	m.focusPane = paneHistory
 	m.history = []HistoryEntry{
 		{IssueNumber: 42, StageName: "Research", StageModel: "sonnet", Success: true},
@@ -248,7 +248,7 @@ func TestUpdate_RKey_HistoryPane_WithEntry(t *testing.T) {
 }
 
 func TestUpdate_RKey_HistoryPane_NoEntries_NoOp(t *testing.T) {
-	m := New(30, "")
+	m := New(30, "", "")
 	m.focusPane = paneHistory
 	m.history = nil
 
