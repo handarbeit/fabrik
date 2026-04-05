@@ -30,8 +30,5 @@ changelog:
       - "^Merge "
 
 release:
-  github:
-    owner: tenaciousvc
-    name: fabrik
   draft: false
   prerelease: auto
