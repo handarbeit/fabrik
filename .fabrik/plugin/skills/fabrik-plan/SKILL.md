@@ -52,6 +52,18 @@ Tasks should be:
 
 Include testing tasks alongside the code they test, not as a separate phase at the end.
 
+### Identify documentation work
+
+Before finalizing the task checklist, explicitly identify what documentation needs to be written or updated. Documentation is a deliverable alongside code — not an afterthought. Documentation types in scope for Fabrik:
+
+- **README / CLAUDE.md** — if user-facing behavior, configuration, or CLI commands change
+- **User guides** — if operational workflows change
+- **SKILL.md files** — if Fabrik skills are added or modified
+- **Inline godoc** — for any new or modified exported Go types, functions, or methods
+- **ADRs** — for architectural decisions (see ADR-worthiness section below)
+
+Every plan must either include documentation tasks in the checklist, or include an explicit statement: "No documentation changes needed because: [reason]." Silent omission is not acceptable — even a 3-line bug fix deserves a conscious decision.
+
 ### Document key decisions
 
 For each significant decision:
@@ -142,3 +154,4 @@ Before signaling completion, verify:
 - [ ] The plan is grounded in the research findings
 - [ ] An implementer could follow this plan without making design decisions
 - [ ] Testing is integrated into the task list, not deferred
+- [ ] Documentation work is identified: either tasks are included or absence is explicitly justified
