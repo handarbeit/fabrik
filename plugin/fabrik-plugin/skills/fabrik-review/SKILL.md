@@ -21,7 +21,7 @@ The engine has written context files to `.fabrik-context/` in your working direc
 - `.fabrik-context/stage-Implement.md` — the Implement stage output, if present
 - `.fabrik-context/pr-description.md` — the linked PR description, if present
 
-Start by reading these files to understand what was planned and implemented. Use the task checklist in the PR body (or `.fabrik-context/stage-Plan.md` if no PR exists) to verify all tasks were completed. As you verify or complete tasks during review, update the checkboxes in the PR body to reflect current status.
+Start by reading these files to understand what was planned and implemented. Use the task checklist in `.fabrik-context/stage-Plan.md` to verify all tasks were completed.
 
 ### Check worktree state
 
@@ -96,7 +96,7 @@ git diff origin/main..HEAD
 - No dead code or commented-out code left behind
 
 **Completeness**:
-- All tasks in the plan checklist are done (check them off in the PR body as you verify)
+- All tasks in the plan checklist are done
 - No TODO comments that should have been resolved
 - Documentation updated if public API changed
 
