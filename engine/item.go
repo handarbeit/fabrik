@@ -13,6 +13,13 @@ import (
 	"github.com/handarbeit/fabrik/stages"
 )
 
+// isEngineManagedPath returns true for paths that are written by the Fabrik
+// engine itself and should never be treated as user-generated dirty content.
+// These paths must not block cleanup or worktree updates.
+func isEngineManagedPath(path string) bool {
+	return strings.HasPrefix(path, ".fabrik-context/")
+}
+
 // isAwaitingInput returns true iff the item has both fabrik:paused and
 // fabrik:awaiting-input labels, indicating it was paused waiting for user input
 // (as opposed to a failure-escalation pause).
@@ -240,8 +247,18 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			wtDir := e.worktrees.WorktreeDir(item.Number)
 			statusCmd := exec.Command("git", "status", "--porcelain")
 			statusCmd.Dir = wtDir
-			if out, err := statusCmd.Output(); err == nil && len(strings.TrimSpace(string(out))) > 0 {
-				e.logf(item.Number, "warn", "worktree dirty at cleanup — uncommitted changes will be discarded\n")
+			if out, err := statusCmd.Output(); err == nil {
+				for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+					if line == "" {
+						continue
+					}
+					path := strings.TrimSpace(line[2:])
+					if isEngineManagedPath(path) {
+						continue
+					}
+					e.logf(item.Number, "warn", "worktree dirty at cleanup — uncommitted changes will be discarded\n")
+					break
+				}
 			}
 
 			if err := e.worktrees.CleanupWorktree(item.Number, false); err != nil {
@@ -517,6 +534,16 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			defer e.mu.Unlock()
 			e.processedSet[itemKey] = time.Now()
 		}()
+	}
+
+	// Warn the user when Claude ran without error but produced no output at all.
+	// This makes silent stalls visible on the issue without waiting for MaxRetries.
+	if claudeRan && err == nil && strings.TrimSpace(output) == "" {
+		e.logf(item.Number, "warn", "stage %q ran without error but produced no output\n", stage.Name)
+		warnComment := fmt.Sprintf("🏭 **Fabrik — empty stage output**\n\nStage **%s** ran without error but produced no output.", stage.Name)
+		if commentErr := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, warnComment); commentErr != nil {
+			e.logf(item.Number, "warn", "could not post empty-output warning: %v\n", commentErr)
+		}
 	}
 
 	// Commit any uncommitted changes so partial work isn't lost (e.g., max_turns reached).
