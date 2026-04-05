@@ -22,7 +22,8 @@ jobs:
       - name: Verify tag is on main
         run: |
           git fetch origin main
-          if ! git branch -r --contains "${{ github.ref_name }}" | grep -q "origin/main"; then
+          TAG_COMMIT="$(git rev-parse "${{ github.ref_name }}^{commit}")"
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then
             echo "Tag ${{ github.ref_name }} is not on origin/main — aborting release."
             exit 1
           fi
