@@ -39,6 +39,9 @@ func runResume(args []string) error {
 	if err := fset.Parse(args); err != nil {
 		return err
 	}
+	if fset.NArg() != 0 {
+		return fmt.Errorf("resume: unexpected positional argument(s): %v\nUsage: fabrik resume <issue-number> [--stage <name>]", fset.Args())
+	}
 
 	// Allow env vars to fill in missing flags
 	if *stagesDir == ".fabrik/stages" {
@@ -68,8 +71,11 @@ func runResume(args []string) error {
 	}
 	worktreeDir := filepath.Join(cwd, ".fabrik", "worktrees", fmt.Sprintf("issue-%d", issueNumber))
 	if _, err := os.Stat(worktreeDir); err != nil {
-		return fmt.Errorf("resume: worktree for issue #%d not found at %s\n"+
-			"The issue has not been processed yet, or the worktree was cleaned up.", issueNumber, worktreeDir)
+		if os.IsNotExist(err) {
+			return fmt.Errorf("resume: worktree for issue #%d not found at %s\n"+
+				"The issue has not been processed yet, or the worktree was cleaned up.", issueNumber, worktreeDir)
+		}
+		return fmt.Errorf("resume: stat %s: %w", worktreeDir, err)
 	}
 
 	// Load stage configs to get the model
