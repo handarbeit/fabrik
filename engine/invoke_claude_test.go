@@ -542,21 +542,20 @@ func TestCommentMaxTurns(t *testing.T) {
 }
 
 func TestInvokeClaudeForComments_UsesCommentMaxTurns(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	binDir := t.TempDir()
 	argsFile := filepath.Join(binDir, "args.txt")
 	fakeClaude := filepath.Join(binDir, "claude")
 	script := fmt.Sprintf(`#!/bin/sh
 cat >/dev/null
-echo "$@" > %s
+echo "$@" > %q
 printf '%%s\n' '{"result":"comment done","session_id":"sess_cmt","num_turns":3,"total_cost_usd":0.001}'
 `, argsFile)
 	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	workDir := t.TempDir()
 
@@ -596,27 +595,23 @@ printf '%%s\n' '{"result":"comment done","session_id":"sess_cmt","num_turns":3,"
 	if usage.MaxTurns != 7 {
 		t.Errorf("usage.MaxTurns = %d, want 7", usage.MaxTurns)
 	}
-
-	os.RemoveAll(SessionDir(200))
-	os.RemoveAll(LogDir(200))
 }
 
 func TestInvokeClaudeForComments_DefaultMaxTurns(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	binDir := t.TempDir()
 	argsFile := filepath.Join(binDir, "args.txt")
 	fakeClaude := filepath.Join(binDir, "claude")
 	script := fmt.Sprintf(`#!/bin/sh
 cat >/dev/null
-echo "$@" > %s
+echo "$@" > %q
 printf '%%s\n' '{"result":"done","session_id":"sess_def","num_turns":2,"total_cost_usd":0.001}'
 `, argsFile)
 	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	workDir := t.TempDir()
 
@@ -650,27 +645,23 @@ printf '%%s\n' '{"result":"done","session_id":"sess_def","num_turns":2,"total_co
 	if usage.MaxTurns != 15 {
 		t.Errorf("usage.MaxTurns = %d, want 15", usage.MaxTurns)
 	}
-
-	os.RemoveAll(SessionDir(201))
-	os.RemoveAll(LogDir(201))
 }
 
 func TestInvokeClaudeForComments_UnlimitedStageDefaultsTo15(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	binDir := t.TempDir()
 	argsFile := filepath.Join(binDir, "args.txt")
 	fakeClaude := filepath.Join(binDir, "claude")
 	script := fmt.Sprintf(`#!/bin/sh
 cat >/dev/null
-echo "$@" > %s
+echo "$@" > %q
 printf '%%s\n' '{"result":"done","session_id":"sess_unl","num_turns":2,"total_cost_usd":0.001}'
 `, argsFile)
 	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	workDir := t.TempDir()
 
@@ -704,7 +695,4 @@ printf '%%s\n' '{"result":"done","session_id":"sess_unl","num_turns":2,"total_co
 	if usage.MaxTurns != 15 {
 		t.Errorf("usage.MaxTurns = %d, want 15", usage.MaxTurns)
 	}
-
-	os.RemoveAll(SessionDir(202))
-	os.RemoveAll(LogDir(202))
 }
