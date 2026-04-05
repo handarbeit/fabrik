@@ -6,6 +6,8 @@
 !.claude/agents/
 .fabrik/worktrees/
 .fabrik/debug/
+.fabrik/history.json
+.fabrik/repo.git/
 .fabrik/issue.md
 .fabrik/stage-*.md
 .fabrik-context/
