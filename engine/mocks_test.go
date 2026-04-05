@@ -10,6 +10,7 @@ import (
 // mockGitHubClient implements GitHubClient for testing.
 type mockGitHubClient struct {
 	fetchProjectBoardFn       func(owner, repo string, projectNum int) (*gh.ProjectBoard, error)
+	fetchLabelsFn             func(owner, repo string, issueNumber int) ([]string, error)
 	fetchItemDetailsFn        func(item *gh.ProjectItem) error
 	fetchStatusFieldFn        func(projectID string) (*gh.StatusField, error)
 	addLabelToIssueFn         func(owner, repo string, issueNumber int, labelName string) error
@@ -62,6 +63,13 @@ type updateCommentCall struct {
 
 type updateStatusCall struct {
 	projectID, itemID, fieldID, optionID string
+}
+
+func (m *mockGitHubClient) FetchLabels(owner, repo string, issueNumber int) ([]string, error) {
+	if m.fetchLabelsFn != nil {
+		return m.fetchLabelsFn(owner, repo, issueNumber)
+	}
+	return nil, nil
 }
 
 func (m *mockGitHubClient) FetchProjectBoard(owner, repo string, projectNum int) (*gh.ProjectBoard, error) {

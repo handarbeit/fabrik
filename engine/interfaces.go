@@ -12,6 +12,7 @@ type GitHubClient interface {
 	FetchProjectBoard(owner, repo string, projectNum int) (*gh.ProjectBoard, error)
 	FetchItemDetails(item *gh.ProjectItem) error
 	FetchStatusField(projectID string) (*gh.StatusField, error)
+	FetchLabels(owner, repo string, issueNumber int) ([]string, error)
 	AddLabelToIssue(owner, repo string, issueNumber int, labelName string) error
 	RemoveLabelFromIssue(owner, repo string, issueNumber int, labelName string) error
 	AddComment(owner, repo string, issueNumber int, body string) error
