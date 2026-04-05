@@ -18,6 +18,8 @@ type mockGitHubClient struct {
 	updateCommentFn           func(owner, repo string, commentDatabaseID int, body string) error
 	updateIssueBodyFn         func(owner, repo string, issueNumber int, body string) error
 	updateProjectItemStatusFn func(projectID, itemID, statusFieldID, statusOptionID string) error
+	findPRForIssueFn          func(owner, repo string, issueNumber int) (int, error)
+	mergePRFn                 func(owner, repo string, prNumber int) error
 	rateLimitStatsFn          func() (gh.RateLimitStats, gh.RateLimitStats)
 
 	// Track calls
@@ -26,6 +28,12 @@ type mockGitHubClient struct {
 	addCommentCalls    []addCommentCall
 	updateCommentCalls []updateCommentCall
 	updateStatusCalls  []updateStatusCall
+	mergePRCalls       []mergePRCall
+}
+
+type mergePRCall struct {
+	owner, repo string
+	prNumber    int
 }
 
 type addLabelCall struct {
@@ -133,7 +141,18 @@ func (m *mockGitHubClient) GetIssueBody(owner, repo string, issueNumber int) (st
 }
 
 func (m *mockGitHubClient) FindPRForIssue(owner, repo string, issueNumber int) (int, error) {
+	if m.findPRForIssueFn != nil {
+		return m.findPRForIssueFn(owner, repo, issueNumber)
+	}
 	return 0, nil
+}
+
+func (m *mockGitHubClient) MergePR(owner, repo string, prNumber int) error {
+	m.mergePRCalls = append(m.mergePRCalls, mergePRCall{owner, repo, prNumber})
+	if m.mergePRFn != nil {
+		return m.mergePRFn(owner, repo, prNumber)
+	}
+	return nil
 }
 
 func (m *mockGitHubClient) CreateDraftPR(owner, repo, title, head, base string, issueNumber int) (int, error) {
