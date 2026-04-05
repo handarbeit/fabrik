@@ -319,6 +319,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		delete(m.active, ev.IssueNumber)
 		entry := HistoryEntry{
 			IssueNumber: ev.IssueNumber,
+			Repo:        ev.Repo,
 			Title:       ev.Title,
 			StageName:   ev.StageName,
 			StageModel:  ev.StageModel,
