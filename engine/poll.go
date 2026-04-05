@@ -281,8 +281,10 @@ func (e *Engine) poll(ctx context.Context) error {
 		if stage == nil || stage.CleanupWorktree {
 			continue
 		}
-		// Check if stage.AutoAdvance explicitly disables advancement
-		if stage.AutoAdvance != nil && !*stage.AutoAdvance {
+		// fabrik:yolo label overrides stage.AutoAdvance — if the user
+		// explicitly labelled the issue for yolo, respect that over YAML config.
+		isYolo := hasYoloLabel(item)
+		if !isYolo && stage.AutoAdvance != nil && !*stage.AutoAdvance {
 			continue
 		}
 		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
