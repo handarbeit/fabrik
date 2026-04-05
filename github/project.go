@@ -67,9 +67,12 @@ type itemNode struct {
 // or linked PRs). Use FetchItemDetails to populate comments for specific items.
 // This two-phase approach dramatically reduces GraphQL rate limit cost.
 func (c *Client) FetchProjectBoard(owner, repo string, projectNum int) (*ProjectBoard, error) {
+	// Query via user(login) rather than repository(owner,name) because
+	// GitHub Projects v2 are always at the user/org level. The repo-level
+	// query only works when the project is explicitly linked to that repo.
 	query := `
-query($owner: String!, $repo: String!, $projectNum: Int!, $cursor: String) {
-  repository(owner: $owner, name: $repo) {
+query($owner: String!, $projectNum: Int!, $cursor: String) {
+  user(login: $owner) {
     projectV2(number: $projectNum) {
       id
       items(first: 100, after: $cursor) {
@@ -156,7 +159,6 @@ query($owner: String!, $repo: String!, $projectNum: Int!, $cursor: String) {
 	for {
 		vars := map[string]interface{}{
 			"owner":      owner,
-			"repo":       repo,
 			"projectNum": projectNum,
 		}
 		if cursor != "" {
@@ -165,7 +167,7 @@ query($owner: String!, $repo: String!, $projectNum: Int!, $cursor: String) {
 
 		var result struct {
 			Data struct {
-				Repository struct {
+				User struct {
 					ProjectV2 struct {
 						ID    string `json:"id"`
 						Items struct {
@@ -176,7 +178,7 @@ query($owner: String!, $repo: String!, $projectNum: Int!, $cursor: String) {
 							Nodes []itemNode `json:"nodes"`
 						} `json:"items"`
 					} `json:"projectV2"`
-				} `json:"repository"`
+				} `json:"user"`
 			} `json:"data"`
 		}
 
@@ -184,7 +186,7 @@ query($owner: String!, $repo: String!, $projectNum: Int!, $cursor: String) {
 			return nil, fmt.Errorf("fetching project board: %w", err)
 		}
 
-		proj := result.Data.Repository.ProjectV2
+		proj := result.Data.User.ProjectV2
 		if projectID == "" {
 			projectID = proj.ID
 		}

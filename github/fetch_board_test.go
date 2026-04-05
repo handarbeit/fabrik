@@ -11,7 +11,7 @@ func TestFetchProjectBoard_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]interface{}{
 			"data": map[string]interface{}{
-				"repository": map[string]interface{}{
+				"user": map[string]interface{}{
 					"projectV2": map[string]interface{}{
 						"id": "PVT_123",
 						"items": map[string]interface{}{
@@ -104,7 +104,7 @@ func TestFetchProjectBoard_SkipsNonIssues(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]interface{}{
 			"data": map[string]interface{}{
-				"repository": map[string]interface{}{
+				"user": map[string]interface{}{
 					"projectV2": map[string]interface{}{
 						"id": "PVT_123",
 						"items": map[string]interface{}{
@@ -152,7 +152,7 @@ func TestFetchProjectBoard_NoStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]interface{}{
 			"data": map[string]interface{}{
-				"repository": map[string]interface{}{
+				"user": map[string]interface{}{
 					"projectV2": map[string]interface{}{
 						"id": "PVT_123",
 						"items": map[string]interface{}{
@@ -194,7 +194,7 @@ func TestFetchProjectBoard_NilAuthor(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]interface{}{
 			"data": map[string]interface{}{
-				"repository": map[string]interface{}{
+				"user": map[string]interface{}{
 					"projectV2": map[string]interface{}{
 						"id": "PVT_123",
 						"items": map[string]interface{}{
@@ -257,7 +257,7 @@ func TestFetchProjectBoard_ItemsPagination(t *testing.T) {
 			// Page 1: two items, hasNextPage=true
 			resp := map[string]interface{}{
 				"data": map[string]interface{}{
-					"repository": map[string]interface{}{
+					"user": map[string]interface{}{
 						"projectV2": map[string]interface{}{
 							"id": "PVT_123",
 							"items": map[string]interface{}{
@@ -279,7 +279,7 @@ func TestFetchProjectBoard_ItemsPagination(t *testing.T) {
 			// Page 2: one item, hasNextPage=false
 			resp := map[string]interface{}{
 				"data": map[string]interface{}{
-					"repository": map[string]interface{}{
+					"user": map[string]interface{}{
 						"projectV2": map[string]interface{}{
 							"id": "PVT_123",
 							"items": map[string]interface{}{
@@ -329,7 +329,7 @@ func TestFetchProjectBoard_LabelOverflow(t *testing.T) {
 		if _, isMain := vars["owner"]; isMain {
 			resp := map[string]interface{}{
 				"data": map[string]interface{}{
-					"repository": map[string]interface{}{
+					"user": map[string]interface{}{
 						"projectV2": map[string]interface{}{
 							"id": "PVT_123",
 							"items": map[string]interface{}{
