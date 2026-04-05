@@ -256,6 +256,51 @@ func (e *Engine) poll(ctx context.Context) error {
 	// Build the expected repo name for filtering (e.g., "acme/widgets").
 	expectedRepo := fmt.Sprintf("%s/%s", e.cfg.Owner, e.cfg.Repo)
 
+	// Catch-up: auto-advance items that have fabrik:yolo + stage complete
+	// but are still sitting in the completed stage's column (e.g., yolo label
+	// was added after the stage finished).
+	for _, item := range board.Items {
+		if item.Repo != "" && item.Repo != expectedRepo {
+			continue
+		}
+		if !e.cfg.Yolo && !hasYoloLabel(item) {
+			continue
+		}
+		// Skip paused or awaiting-input items
+		isPaused := false
+		for _, l := range item.Labels {
+			if l == "fabrik:paused" {
+				isPaused = true
+				break
+			}
+		}
+		if isPaused {
+			continue
+		}
+		stage := stages.FindStage(e.cfg.Stages, item.Status)
+		if stage == nil || stage.CleanupWorktree {
+			continue
+		}
+		// Check if stage.AutoAdvance explicitly disables advancement
+		if stage.AutoAdvance != nil && !*stage.AutoAdvance {
+			continue
+		}
+		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
+		hasComplete := false
+		for _, l := range item.Labels {
+			if l == completeLabel {
+				hasComplete = true
+				break
+			}
+		}
+		if hasComplete {
+			e.logf(item.Number, "advance", "yolo catch-up: stage %q already complete, advancing\n", stage.Name)
+			if err := e.advanceToNextStage(board, item, stage); err != nil {
+				e.logf(item.Number, "warn", "could not advance: %v\n", err)
+			}
+		}
+	}
+
 	var dispatched int
 	for _, item := range board.Items {
 		item := item
