@@ -112,11 +112,12 @@ func (e *Engine) writeContextFiles(item gh.ProjectItem, currentStage *stages.Sta
 
 	// Write PR description for post_to_pr stage invocations.
 	if !isCommentProcessing && currentStage.PostToPR {
-		prNumber, err := e.client.FindPRForIssue(e.cfg.Owner, e.cfg.Repo, item.Number)
+		owner, repo := itemOwnerRepo(item, e.defaultRepo())
+		prNumber, err := e.client.FindPRForIssue(owner, repo, item.Number)
 		if err != nil || prNumber == 0 {
 			return
 		}
-		prBody, err := e.client.GetIssueBody(e.cfg.Owner, e.cfg.Repo, prNumber)
+		prBody, err := e.client.GetIssueBody(owner, repo, prNumber)
 		if err != nil {
 			e.logf(item.Number, "warn", "could not fetch PR body for context file: %v\n", err)
 			return
@@ -157,7 +158,8 @@ func (e *Engine) writeCodebaseChanges(item gh.ProjectItem, currentStage *stages.
 	}
 
 	// Resolve current origin/{baseBranch} HEAD.
-	baseBranch := e.worktrees.DefaultBaseBranch()
+	wm := e.worktreesFor(item.Repo)
+	baseBranch := wm.DefaultBaseBranch()
 	currentSHA, err := gitRevParse(workDir, "origin/"+baseBranch)
 	if err != nil {
 		e.logf(item.Number, "warn", "could not resolve origin/%s for codebase changes: %v\n", baseBranch, err)
