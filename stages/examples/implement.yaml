@@ -7,6 +7,5 @@ max_turns: 50
 create_draft_pr: true
 mark_pr_ready_on_complete: true
 post_to_pr: true
-progress_resets_retries: true
 completion:
   type: claude

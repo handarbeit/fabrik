@@ -77,16 +77,6 @@ type Stage struct {
 	// set to true — other stages post output as stage comments.
 	UpdateIssueBody bool `yaml:"update_issue_body,omitempty"`
 
-	// ProgressResetsRetries enables progress-based retry tracking for this stage.
-	// When true, the engine checks for new commits or newly checked PR body tasks
-	// after an incomplete attempt. If progress is detected, the no-progress loop
-	// counter is reset to 0 instead of incrementing.
-	ProgressResetsRetries bool `yaml:"progress_resets_retries,omitempty"`
-
-	// MaxTotalRetries caps the total number of retries (regardless of progress)
-	// for this stage per issue. 0 means unlimited.
-	MaxTotalRetries int `yaml:"max_total_retries,omitempty"`
-
 	// AutoAdvance overrides the global yolo setting for this specific stage.
 	// nil means use the global setting.
 	AutoAdvance *bool `yaml:"auto_advance,omitempty"`
