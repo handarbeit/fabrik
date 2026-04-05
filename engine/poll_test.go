@@ -173,6 +173,7 @@ func TestPoll_ProcessItemError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("poll should not error from processItem failures: %v", err)
 	}
+	eng.wg.Wait()
 }
 
 // TestProcessedSetConcurrency verifies that concurrent access to processedSet
