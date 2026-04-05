@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"strconv"
 	"strings"
 )
 
@@ -67,7 +68,7 @@ func detectProgress(before progressBaseline, worktreeHeadAfter, remoteHeadAfter 
 			if result.newTasks == 1 {
 				parts = append(parts, "1 new task completed")
 			} else {
-				parts = append(parts, strings.Replace("N new tasks completed", "N", itoa(result.newTasks), 1))
+				parts = append(parts, strconv.Itoa(result.newTasks)+" new tasks completed")
 			}
 		}
 		result.detail = strings.Join(parts, ", ")
@@ -76,22 +77,3 @@ func detectProgress(before progressBaseline, worktreeHeadAfter, remoteHeadAfter 
 	return result
 }
 
-// itoa is a minimal int-to-string without importing strconv.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	s := ""
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	for n > 0 {
-		s = string(rune('0'+n%10)) + s
-		n /= 10
-	}
-	if neg {
-		s = "-" + s
-	}
-	return s
-}
