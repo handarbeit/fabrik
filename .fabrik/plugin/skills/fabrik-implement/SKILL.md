@@ -51,6 +51,8 @@ Work through tasks in the order listed. For each task:
 5. Push to remote
 6. Check off the task in the Plan stage comment (see below)
 
+**Documentation tasks are not optional.** If the plan includes documentation tasks (README updates, godoc, SKILL.md changes, CLAUDE.md edits, etc.), treat them exactly like code tasks: implement, commit, push. Do not defer documentation to the end or skip it assuming Review will catch it. If you discover documentation that should have been in the plan is missing, add it — the plan's doc inventory is a starting point, not a ceiling.
+
 ### Commit frequently
 
 Commit after each logical unit of work — typically after each task or sub-task. Do not accumulate a large diff and commit at the end. Frequent commits:
