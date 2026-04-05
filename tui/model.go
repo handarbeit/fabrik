@@ -567,12 +567,19 @@ func (m Model) openLogViewerCmd(logDir string) tea.Cmd {
 
 	// For JSON files, pipe through the stream filter; for other files, use less.
 	// Pass as a single string — openTerminalCmd sends it to Terminal.app's do script.
+	// Shell-quote path components so directories or binaries with spaces work correctly.
 	if strings.HasSuffix(latest, ".json") {
 		return m.openTerminalCmd(fmt.Sprintf(
 			"cd %s && cat %s | %s _stream-filter | less -R",
-			logDir, latest, fabrikBin))
+			shellQuote(logDir), shellQuote(latest), shellQuote(fabrikBin)))
 	}
-	return m.openTerminalCmd(fmt.Sprintf("cd %s && less +F %s", logDir, latest))
+	return m.openTerminalCmd(fmt.Sprintf("cd %s && less +F %s", shellQuote(logDir), shellQuote(latest)))
+}
+
+// shellQuote wraps s in single quotes and escapes any embedded single quotes,
+// making it safe to embed in a shell command string.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // fmtDuration formats a duration as MM:SS.
