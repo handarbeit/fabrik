@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -43,4 +44,25 @@ func itemOwnerRepo(item gh.ProjectItem, defaultRepo string) (owner, repo string)
 		r = defaultRepo
 	}
 	return parseOwnerRepo(r)
+}
+
+// parseIssueKey reverses issueKey: parses "owner/repo#N" into (owner, repo, issueNumber).
+// Falls back to (defaultOwner, defaultRepo, 0) on malformed input.
+func parseIssueKey(key, defaultOwner, defaultRepo string) (owner, repo string, issueNumber int) {
+	// Expected format: "owner/repo#N"
+	hashIdx := strings.LastIndex(key, "#")
+	if hashIdx < 0 {
+		return defaultOwner, defaultRepo, 0
+	}
+	repoWithOwner := key[:hashIdx]
+	numStr := key[hashIdx+1:]
+	n, err := strconv.Atoi(numStr)
+	if err != nil {
+		return defaultOwner, defaultRepo, 0
+	}
+	o, r := parseOwnerRepo(repoWithOwner)
+	if o == "" || r == "" {
+		return defaultOwner, defaultRepo, n
+	}
+	return o, r, n
 }
