@@ -40,6 +40,12 @@ type Stage struct {
 	// MaxTurns limits how many turns Claude Code can take per invocation.
 	MaxTurns int `yaml:"max_turns,omitempty"`
 
+	// CommentMaxTurns limits how many turns Claude Code can take when processing
+	// user comments. When 0 (unset), defaults to min(MaxTurns, 15) or 15 if
+	// MaxTurns is also 0. This keeps comment processing bounded independently
+	// of the main stage turn budget.
+	CommentMaxTurns int `yaml:"comment_max_turns,omitempty"`
+
 	// CommentPrompt is the prompt used when processing user comments during this stage.
 	// If empty, a default comment-processing prompt is used.
 	CommentPrompt string `yaml:"comment_prompt,omitempty"`

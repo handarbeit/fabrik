@@ -483,3 +483,228 @@ func TestSaveDebugLog_UniqueNames(t *testing.T) {
 		t.Errorf("expected 2 distinct debug files, got %d (timestamp collision?)", len(entries))
 	}
 }
+
+func TestCommentMaxTurns(t *testing.T) {
+	tests := []struct {
+		name            string
+		maxTurns        int
+		commentMaxTurns int
+		want            int
+	}{
+		{
+			name:            "explicit CommentMaxTurns used directly",
+			maxTurns:        50,
+			commentMaxTurns: 20,
+			want:            20,
+		},
+		{
+			name:            "explicit CommentMaxTurns=1 is respected",
+			maxTurns:        50,
+			commentMaxTurns: 1,
+			want:            1,
+		},
+		{
+			name:     "default when MaxTurns > 15: capped at 15",
+			maxTurns: 50,
+			want:     15,
+		},
+		{
+			name:     "default when MaxTurns == 15: returns 15",
+			maxTurns: 15,
+			want:     15,
+		},
+		{
+			name:     "default when MaxTurns < 15: uses MaxTurns",
+			maxTurns: 10,
+			want:     10,
+		},
+		{
+			name:     "default when MaxTurns == 0 (unlimited): returns 15",
+			maxTurns: 0,
+			want:     15,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			stage := &stages.Stage{
+				Name:            "Implement",
+				Prompt:          "implement",
+				MaxTurns:        tc.maxTurns,
+				CommentMaxTurns: tc.commentMaxTurns,
+			}
+			got := commentMaxTurns(stage)
+			if got != tc.want {
+				t.Errorf("commentMaxTurns() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestInvokeClaudeForComments_UsesCommentMaxTurns(t *testing.T) {
+	binDir := t.TempDir()
+	argsFile := filepath.Join(binDir, "args.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+echo "$@" > %s
+printf '%%s\n' '{"result":"comment done","session_id":"sess_cmt","num_turns":3,"total_cost_usd":0.001}'
+`, argsFile)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	os.Setenv("PATH", binDir+":"+origPath)
+	defer os.Setenv("PATH", origPath)
+
+	workDir := t.TempDir()
+
+	// Stage with MaxTurns=50 and explicit CommentMaxTurns=7
+	stage := &stages.Stage{
+		Name:            "Implement",
+		Prompt:          "implement",
+		MaxTurns:        50,
+		CommentMaxTurns: 7,
+		Completion:      stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 200, Title: "T"}
+	comments := []gh.Comment{
+		{Author: "user", Body: "Please fix the bug", CreatedAt: time.Now()},
+	}
+
+	_, _, usage, err := InvokeClaudeForComments(context.Background(), stage, issue, comments, workDir, "")
+	if err != nil {
+		t.Fatalf("InvokeClaudeForComments: %v", err)
+	}
+
+	args, _ := os.ReadFile(argsFile)
+	argsStr := string(args)
+
+	// --max-turns should use CommentMaxTurns (7), not MaxTurns (50)
+	if !strings.Contains(argsStr, "--max-turns") {
+		t.Errorf("expected --max-turns in args, got: %q", argsStr)
+	}
+	if strings.Contains(argsStr, "50") {
+		t.Errorf("stage MaxTurns (50) leaked into comment args: %q", argsStr)
+	}
+	if !strings.Contains(argsStr, "7") {
+		t.Errorf("expected comment limit (7) in args: %q", argsStr)
+	}
+
+	// usage.MaxTurns should reflect the comment limit, not stage.MaxTurns
+	if usage.MaxTurns != 7 {
+		t.Errorf("usage.MaxTurns = %d, want 7", usage.MaxTurns)
+	}
+
+	os.RemoveAll(SessionDir(200))
+	os.RemoveAll(LogDir(200))
+}
+
+func TestInvokeClaudeForComments_DefaultMaxTurns(t *testing.T) {
+	binDir := t.TempDir()
+	argsFile := filepath.Join(binDir, "args.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+echo "$@" > %s
+printf '%%s\n' '{"result":"done","session_id":"sess_def","num_turns":2,"total_cost_usd":0.001}'
+`, argsFile)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	os.Setenv("PATH", binDir+":"+origPath)
+	defer os.Setenv("PATH", origPath)
+
+	workDir := t.TempDir()
+
+	// Stage with MaxTurns=50, no CommentMaxTurns — default should be 15
+	stage := &stages.Stage{
+		Name:       "Implement",
+		Prompt:     "implement",
+		MaxTurns:   50,
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 201, Title: "T"}
+	comments := []gh.Comment{
+		{Author: "user", Body: "Update the README", CreatedAt: time.Now()},
+	}
+
+	_, _, usage, err := InvokeClaudeForComments(context.Background(), stage, issue, comments, workDir, "")
+	if err != nil {
+		t.Fatalf("InvokeClaudeForComments: %v", err)
+	}
+
+	args, _ := os.ReadFile(argsFile)
+	argsStr := string(args)
+
+	if !strings.Contains(argsStr, "15") {
+		t.Errorf("expected default limit (15) in args: %q", argsStr)
+	}
+	if strings.Contains(argsStr, "50") {
+		t.Errorf("stage MaxTurns (50) should not appear in comment args: %q", argsStr)
+	}
+
+	if usage.MaxTurns != 15 {
+		t.Errorf("usage.MaxTurns = %d, want 15", usage.MaxTurns)
+	}
+
+	os.RemoveAll(SessionDir(201))
+	os.RemoveAll(LogDir(201))
+}
+
+func TestInvokeClaudeForComments_UnlimitedStageDefaultsTo15(t *testing.T) {
+	binDir := t.TempDir()
+	argsFile := filepath.Join(binDir, "args.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+echo "$@" > %s
+printf '%%s\n' '{"result":"done","session_id":"sess_unl","num_turns":2,"total_cost_usd":0.001}'
+`, argsFile)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	os.Setenv("PATH", binDir+":"+origPath)
+	defer os.Setenv("PATH", origPath)
+
+	workDir := t.TempDir()
+
+	// Stage with MaxTurns=0 (unlimited) — comment default should be 15
+	stage := &stages.Stage{
+		Name:       "Research",
+		Prompt:     "research",
+		MaxTurns:   0,
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 202, Title: "T"}
+	comments := []gh.Comment{
+		{Author: "user", Body: "Add more analysis", CreatedAt: time.Now()},
+	}
+
+	_, _, usage, err := InvokeClaudeForComments(context.Background(), stage, issue, comments, workDir, "")
+	if err != nil {
+		t.Fatalf("InvokeClaudeForComments: %v", err)
+	}
+
+	args, _ := os.ReadFile(argsFile)
+	argsStr := string(args)
+
+	if !strings.Contains(argsStr, "--max-turns") {
+		t.Errorf("expected --max-turns in args, got: %q", argsStr)
+	}
+	if !strings.Contains(argsStr, "15") {
+		t.Errorf("expected default limit (15) in args: %q", argsStr)
+	}
+
+	if usage.MaxTurns != 15 {
+		t.Errorf("usage.MaxTurns = %d, want 15", usage.MaxTurns)
+	}
+
+	os.RemoveAll(SessionDir(202))
+	os.RemoveAll(LogDir(202))
+}
