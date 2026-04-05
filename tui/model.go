@@ -638,25 +638,29 @@ func (m Model) openResumeCmd(issueNumber int, stageName, stageModel string) tea.
 		return nil
 	}
 	worktreeDir := filepath.Join(cwd, ".fabrik", "worktrees", fmt.Sprintf("issue-%d", issueNumber))
-	if _, err := os.Stat(worktreeDir); err != nil {
-		return m.openTerminalCmd(fmt.Sprintf("echo 'Worktree for issue #%d not found (%s). The issue has not been processed yet.' && read", issueNumber, worktreeDir))
+	if _, statErr := os.Stat(worktreeDir); statErr != nil {
+		if os.IsNotExist(statErr) {
+			return m.openTerminalCmd(fmt.Sprintf("echo 'Worktree for issue #%d not found (%s). The issue has not been processed yet.' && read", issueNumber, worktreeDir))
+		}
+		return m.openTerminalCmd(fmt.Sprintf("echo 'Failed to access worktree for issue #%d (%s): %v' && read", issueNumber, worktreeDir, statErr))
 	}
 
-	args := []string{"claude"}
+	// Build the command with properly shell-quoted arguments to handle paths
+	// with spaces or shell metacharacters.
+	parts := []string{"claude"}
 	sessionID := tuiReadSessionID(issueNumber, stageName)
 	if sessionID != "" {
-		args = append(args, "--resume", sessionID)
+		parts = append(parts, "--resume", shellQuote(sessionID))
 	}
 	if stageModel != "" {
-		args = append(args, "--model", stageModel)
+		parts = append(parts, "--model", shellQuote(stageModel))
 	}
 	if m.pluginDir != "" {
-		args = append(args, "--plugin-dir", m.pluginDir)
+		parts = append(parts, "--plugin-dir", shellQuote(m.pluginDir))
 	}
 
 	// Build: cd <worktreeDir> && claude [--resume <id>] [--model <m>] [--plugin-dir <d>]
-	quotedDir := strings.ReplaceAll(worktreeDir, `"`, `\"`)
-	cmdStr := fmt.Sprintf("cd \"%s\" && %s", quotedDir, strings.Join(args, " "))
+	cmdStr := fmt.Sprintf("cd %s && %s", shellQuote(worktreeDir), strings.Join(parts, " "))
 	return m.openTerminalCmd(cmdStr)
 }
 
