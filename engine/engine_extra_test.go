@@ -89,14 +89,14 @@ func TestCleanupLockedIssues_Empty_NoOp(t *testing.T) {
 
 func TestParseIssueKey_Malformed(t *testing.T) {
 	cases := []struct {
-		key         string
-		wantOwner   string
-		wantRepo    string
-		wantIssueN  int
+		key        string
+		wantOwner  string
+		wantRepo   string
+		wantIssueN int
 	}{
-		{"nohash", "defOwner", "defRepo", 0},           // no # → fallback
+		{"nohash", "defOwner", "defRepo", 0},                // no # → fallback
 		{"owner/repo#notanumber", "defOwner", "defRepo", 0}, // bad number → fallback
-		{"#5", "defOwner", "defRepo", 5},               // empty owner/repo → partial fallback
+		{"#5", "defOwner", "defRepo", 5},                    // empty owner/repo → partial fallback
 	}
 	for _, tc := range cases {
 		o, r, n := parseIssueKey(tc.key, "defOwner", "defRepo")
