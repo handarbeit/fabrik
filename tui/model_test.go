@@ -432,6 +432,103 @@ func TestLayoutHeightInvariant(t *testing.T) {
 	}
 }
 
+// TestLayoutHeightInvariant_SmallTerminal verifies that View() height equals
+// the terminal height on terminals where the old history floor of 3 caused
+// overflow but the new floor of 1 fixes it.
+//
+// The invariant is satisfiable only when termHeight ≥ activeHeight(n)+5+1
+// (at least 1 history viewport line fits). Each case below satisfies that
+// condition with exactly 1 or 2 lines left for history — the exact range
+// where the old floor(3) forced overflow but floor(1) does not.
+func TestLayoutHeightInvariant_SmallTerminal(t *testing.T) {
+	redirectHistory(t)
+
+	const termWidth = 80
+
+	cases := []struct {
+		termHeight int
+		nActive    int
+	}{
+		// activeHeight(7)=10; termHeight=16: residual=1; old floor(3) → overflow, new floor(1) → exact
+		{16, 7},
+		// activeHeight(7)=10; termHeight=17: residual=2; old floor(3) → overflow, new floor(1) → exact
+		{17, 7},
+		// activeHeight(5)=8; termHeight=14: residual=1; old floor(3) → overflow, new floor(1) → exact
+		{14, 5},
+		// activeHeight(0)=4; termHeight=10: residual=1; old floor(3) → overflow, new floor(1) → exact
+		{10, 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("h=%d,n=%d", tc.termHeight, tc.nActive), func(t *testing.T) {
+			m := New(30, ProjectInfo{}, "", "")
+			now := time.Now()
+			for i := 0; i < tc.nActive; i++ {
+				m.active[fmt.Sprintf("issue-%d", i+1)] = &activeJob{StageName: "Research", StartedAt: now}
+			}
+			next, _ := m.Update(tea.WindowSizeMsg{Width: termWidth, Height: tc.termHeight})
+			m = next.(Model)
+
+			got := lipgloss.Height(m.View())
+			if got != tc.termHeight {
+				t.Errorf("h=%d,n=%d: View() height = %d, want %d (header/footer pushed off screen)",
+					tc.termHeight, tc.nActive, got, tc.termHeight)
+			}
+		})
+	}
+}
+
+// TestViewHeader_TimerAlwaysVisible verifies that when the status message is
+// long enough to trigger truncation, the timer string still appears in the output.
+func TestViewHeader_TimerAlwaysVisible(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", "")
+	m.width = 60
+	m.nextPollAt = time.Now().Add(90 * time.Second)
+
+	// Status long enough to overflow without truncation.
+	m.statusLine = "this is a very long status message that should be truncated by the header renderer"
+
+	header := m.viewHeader()
+
+	// The timer prefix must be visible.
+	if !strings.Contains(header, "poll in") {
+		t.Errorf("viewHeader() does not contain timer; got: %q", header)
+	}
+}
+
+// TestViewHeader_WidthNeverExceedsTerminal verifies that lipgloss.Width of
+// viewHeader() never exceeds m.width for various status line lengths.
+func TestViewHeader_WidthNeverExceedsTerminal(t *testing.T) {
+	cases := []struct {
+		name       string
+		width      int
+		statusLine string
+	}{
+		{"empty status", 80, ""},
+		{"short status", 80, "syncing"},
+		{"boundary status", 80, strings.Repeat("x", 60)},
+		{"very long status", 80, strings.Repeat("x", 200)},
+		{"narrow terminal empty", 30, ""},
+		{"narrow terminal long", 30, strings.Repeat("x", 100)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(30, ProjectInfo{}, "", "")
+			m.width = tc.width
+			m.nextPollAt = time.Now().Add(90 * time.Second)
+			m.statusLine = tc.statusLine
+
+			header := m.viewHeader()
+			w := lipgloss.Width(header)
+			if w > tc.width {
+				t.Errorf("viewHeader() width %d exceeds terminal width %d; status=%q",
+					w, tc.width, tc.statusLine)
+			}
+		})
+	}
+}
+
 // TestDetectTerminalFromEnv is in the cmd package; here we just verify the
 // terminal field is stored on the model correctly.
 func TestNew_TerminalStored(t *testing.T) {
