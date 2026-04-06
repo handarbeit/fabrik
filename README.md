@@ -191,7 +191,6 @@ to prevent accidental token leaks.
 | `--max-retries` | Max failed stage attempts before pausing the issue (0 = unlimited) | `3` |
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` for debugging | `false` |
 | `--plugin-dir` | Path to Fabrik plugin directory (overrides installed plugin) | `""` |
-| `--terminal` | Terminal emulator for log viewer (`terminal`, `iterm2`, `ghostty`, `kitty`, `alacritty`, `warp`) | `""` |
 
 ## Subcommands
 
