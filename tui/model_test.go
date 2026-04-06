@@ -1350,3 +1350,130 @@ func TestHandleMouse_ClickOutOfBounds_NoStateChange(t *testing.T) {
 		t.Error("click on header should not change focus pane from initial paneActive")
 	}
 }
+
+// TestLoadHistory_Dedup verifies that LoadHistory collapses duplicate entries
+// (same issue, repo, stage, IsComment) to the most recent by CompletedAt, while
+// preserving entries for different stages on the same issue.
+func TestLoadHistory_Dedup(t *testing.T) {
+	redirectHistory(t)
+
+	t1 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	t2 := t1.Add(time.Hour)
+	t3 := t2.Add(time.Hour)
+
+	entries := []HistoryEntry{
+		// Two duplicates for issue 42, Research — t2 is more recent than t1.
+		{IssueNumber: 42, Repo: "", StageName: "Research", IsComment: false, Success: false, CompletedAt: t1},
+		{IssueNumber: 42, Repo: "", StageName: "Research", IsComment: false, Success: true, CompletedAt: t2},
+		// Different stage on the same issue — must be preserved.
+		{IssueNumber: 42, Repo: "", StageName: "Plan", IsComment: false, Success: true, CompletedAt: t3},
+		// Comment run on the same stage — different IsComment, must be preserved.
+		{IssueNumber: 42, Repo: "", StageName: "Research", IsComment: true, Success: true, CompletedAt: t1},
+	}
+	SaveHistory(entries)
+
+	got := LoadHistory()
+
+	if len(got) != 3 {
+		t.Fatalf("LoadHistory returned %d entries, want 3 (dedup should collapse 2 Research entries to 1)", len(got))
+	}
+
+	// Find the Research (non-comment) entry — must be the most recent one (Success: true).
+	var researchEntry *HistoryEntry
+	for i := range got {
+		if got[i].StageName == "Research" && !got[i].IsComment {
+			researchEntry = &got[i]
+			break
+		}
+	}
+	if researchEntry == nil {
+		t.Fatal("Research (non-comment) entry not found in result")
+	}
+	if !researchEntry.Success {
+		t.Error("LoadHistory kept the older Research entry instead of the most recent one")
+	}
+	if !researchEntry.CompletedAt.Equal(t2) {
+		t.Errorf("Research entry CompletedAt = %v, want %v", researchEntry.CompletedAt, t2)
+	}
+
+	// Plan entry must be present.
+	var planFound bool
+	for _, h := range got {
+		if h.StageName == "Plan" {
+			planFound = true
+			break
+		}
+	}
+	if !planFound {
+		t.Error("Plan entry was removed by deduplication, but should be preserved (different stage)")
+	}
+
+	// Research IsComment=true entry must be present.
+	var commentFound bool
+	for _, h := range got {
+		if h.StageName == "Research" && h.IsComment {
+			commentFound = true
+			break
+		}
+	}
+	if !commentFound {
+		t.Error("Research IsComment=true entry was removed, but should be preserved (different dedup key)")
+	}
+}
+
+// TestJobCompletedEvent_Dedup verifies that receiving a JobCompletedEvent for
+// the same (issue, stage) replaces the existing history entry rather than
+// appending a duplicate.
+func TestJobCompletedEvent_Dedup(t *testing.T) {
+	redirectHistory(t)
+
+	m := New(30, ProjectInfo{}, "")
+	m.width = 80
+	m.height = 24
+
+	t1 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	t2 := t1.Add(time.Hour)
+
+	// First completion.
+	next, _ := m.Update(JobCompletedEvent{
+		IssueNumber: 10,
+		StageName:   "Research",
+		Success:     false,
+		CompletedAt: t1,
+	})
+	m = next.(Model)
+	if len(m.history) != 1 {
+		t.Fatalf("after first event: history len = %d, want 1", len(m.history))
+	}
+
+	// Second completion for the same (issue, stage) — should replace, not append.
+	next, _ = m.Update(JobCompletedEvent{
+		IssueNumber: 10,
+		StageName:   "Research",
+		Success:     true,
+		CompletedAt: t2,
+	})
+	m = next.(Model)
+
+	if len(m.history) != 1 {
+		t.Fatalf("after duplicate event: history len = %d, want 1 (duplicate should replace)", len(m.history))
+	}
+	if !m.history[0].Success {
+		t.Error("history entry should be the most recent (Success: true), but got the older one")
+	}
+	if !m.history[0].CompletedAt.Equal(t2) {
+		t.Errorf("history entry CompletedAt = %v, want %v", m.history[0].CompletedAt, t2)
+	}
+
+	// A different stage on the same issue must still be appended independently.
+	next, _ = m.Update(JobCompletedEvent{
+		IssueNumber: 10,
+		StageName:   "Plan",
+		Success:     true,
+		CompletedAt: t2,
+	})
+	m = next.(Model)
+	if len(m.history) != 2 {
+		t.Fatalf("after Plan event: history len = %d, want 2 (different stage, not a duplicate)", len(m.history))
+	}
+}
