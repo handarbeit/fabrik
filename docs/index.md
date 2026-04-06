@@ -16,8 +16,8 @@ description: >-
     <h1>Your SDLC,<br>on <span class="accent">autopilot</span></h1>
     <p class="hero-tagline">
       Fabrik watches your GitHub Project board and drives Claude Code through
-      a full software development pipeline — Research, Plan, Implement, Review,
-      Validate — automatically. File an issue. Drag a card. Ship.
+      a full software development pipeline — Specify, Research, Plan, Implement,
+      Review, Validate — automatically. File an issue. Drag a card. Ship.
     </p>
     <div class="hero-actions">
       <a href="https://github.com/tenaciousvc/fabrik" class="btn btn-primary" target="_blank" rel="noopener">
@@ -164,6 +164,8 @@ description: >-
           Comment on an issue mid-stage to redirect the work.
           Fabrik reacts with 👀, processes your comment, and continues.
           The full conversation history is always available to Claude.
+          When Claude needs input, it signals <code>FABRIK_BLOCKED_ON_INPUT</code> —
+          the issue pauses and automatically resumes the moment you reply.
         </div>
       </div>
       <div class="feature-card">
@@ -214,9 +216,11 @@ description: >-
         <span class="feature-icon">🖥️</span>
         <div class="feature-title">Terminal UI</div>
         <div class="feature-desc">
-          A bubbletea-powered TUI shows active jobs, stage progress, token
-          costs, and history — everything you need to supervise the factory
-          at a glance.
+          Run <code>fabrik --tui</code> for a bubbletea control panel: active jobs,
+          stage progress, token costs, and history across all issues. Run
+          <code>fabrik watch &lt;issue&gt;</code> to focus on a single issue — live log
+          streaming, CI check status, and PR state. Tab to switch panes,
+          <code>l</code> to view logs, <code>q</code> to quit.
         </div>
       </div>
       <div class="feature-card">
@@ -226,6 +230,17 @@ description: >-
           Run Fabrik from outside any git repo to manage issues across multiple
           repositories from a single GitHub Project board. Each repo is cloned
           lazily; worktrees are created per repo and per issue automatically.
+        </div>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">🧩</span>
+        <div class="feature-title">Plugin &amp; Skills</div>
+        <div class="feature-desc">
+          Customize Claude's methodology per stage with markdown skill files in
+          <code>.fabrik/plugin/skills/</code>. Reference a skill by name in your
+          stage YAML — Fabrik injects it into Claude's prompt. Default skills
+          ship with Fabrik; <code>fabrik init</code> installs them and
+          <code>fabrik upgrade</code> refreshes them.
         </div>
       </div>
     </div>
@@ -238,13 +253,13 @@ description: >-
         <div class="callout-body">
           Issues filed against this repository go through the same Specify → Research →
           Plan → Implement → Review → Validate pipeline that Fabrik orchestrates. When we
-          filed an issue to add PR comment processing, Fabrik researched its own
-          codebase, planned the GraphQL changes, and implemented the feature that
-          lets it read PR comments — gaining a capability it needed by building it
-          for itself. This page was written by Fabrik too.
+          filed an issue to add <code>fabrik watch</code>, Fabrik researched its own log
+          format, designed the per-issue monitoring command, and implemented the live log
+          streaming and CI check UI — building the observatory it now uses to watch itself
+          build features. This page was written by Fabrik too.
           <br><br>
           The human's role is product manager: file issues, answer clarifying
-          questions, drag cards, and occasionally comment "please process PR feedback."
+          questions, drag cards, and occasionally comment to redirect the work.
           The factory does the rest.
         </div>
       </div>
@@ -373,6 +388,13 @@ echo '.env' >> .gitignore
         <div>
           <div class="link-title">File an Issue</div>
           <div class="link-desc">Bug reports, feature requests, questions</div>
+        </div>
+      </a>
+      <a href="https://github.com/tenaciousvc/fabrik/releases" class="link-card" target="_blank" rel="noopener">
+        <span class="link-icon">📦</span>
+        <div>
+          <div class="link-title">GitHub Releases</div>
+          <div class="link-desc">Pre-built binaries and release notes</div>
         </div>
       </a>
     </div>
