@@ -234,5 +234,38 @@ func TestPoll_CleanupStageItemNotDeepFetched(t *testing.T) {
 	}
 }
 
+// TestItemNeedsWork_CleanupStage_NoWorktree verifies that itemNeedsWork returns
+// false for a cleanup-stage item when no worktree directory exists for the issue.
+// This guards against the "repeating Done cleanup loop" where items with no
+// worktree get repeatedly dispatched because the worktree guard was missing.
+func TestItemNeedsWork_CleanupStage_NoWorktree(t *testing.T) {
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 1,
+			Stages:        testStagesWithCleanup(),
+		},
+		&mockGitHubClient{},
+		&mockClaudeInvoker{},
+		// WorktreeManager points to a temp dir with no issue-42 subdirectory.
+		NewWorktreeManagerWithRoot(t.TempDir(), t.TempDir()),
+	)
+
+	item := gh.ProjectItem{
+		Number: 42,
+		Title:  "Old done item",
+		Status: "Done",
+		// No labels — no stage:Done:complete, no fabrik:paused
+	}
+
+	if eng.itemNeedsWork(item) {
+		t.Error("itemNeedsWork must return false for cleanup item with no worktree directory")
+	}
+}
+
 // TestProcessedSetConcurrency verifies that concurrent access to processedSet
 // via the mutex-protected methods does not cause data races.
