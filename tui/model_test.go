@@ -889,7 +889,7 @@ func TestUpdate_LogEvent_IssueZero_StatusLine(t *testing.T) {
 
 // TestTuiReadSessionID_NotFound verifies empty string for a missing session file.
 func TestTuiReadSessionID_NotFound(t *testing.T) {
-	id := tuiReadSessionID(99999, "SomeStageThatDoesNotExist")
+	id := tuiReadSessionID("", 99999, "SomeStageThatDoesNotExist")
 	if id != "" {
 		t.Errorf("expected empty string for missing session, got %q", id)
 	}
@@ -1016,7 +1016,7 @@ func TestOpenResumeCmd_WorktreeExists(t *testing.T) {
 	defer os.Chdir(oldWd) //nolint:errcheck
 
 	m := New(30, ProjectInfo{}, "", "")
-	cmd := m.openResumeCmd(issueNum, "Research", "sonnet")
+	cmd := m.openResumeCmd("", issueNum, "Research", "sonnet")
 	if cmd == nil {
 		t.Error("expected non-nil cmd when worktree exists")
 	}
