@@ -445,7 +445,11 @@ func (m *Model) updateHistoryViewport(scrollToTop bool) {
 	m.historyVP.SetContent(strings.Join(lines, "\n"))
 
 	// Update viewport height within the overall layout.
-	historyHeight := max(m.height-headerHeight()-activeHeight(len(m.active))-footerHeight()-3, 3)
+	// Minimum 1 (not 3) so the history pane can shrink on small terminals
+	// without pushing header/footer off screen. viewport.Model panics on
+	// non-positive Height, so the floor of 1 is both a correctness and
+	// safety requirement.
+	historyHeight := max(m.height-headerHeight()-activeHeight(len(m.active))-footerHeight()-3, 1)
 	m.historyVP.Width = innerWidth
 	m.historyVP.Height = historyHeight
 
@@ -511,14 +515,22 @@ func (m Model) viewHeader() string {
 	leftWidth := lipgloss.Width(left)
 	timerWidth := lipgloss.Width(timerStr)
 	available := m.width - 1 // leading space
-	if leftWidth+timerWidth+1 > available {
-		// Truncate status to fit
+	if leftWidth+timerWidth > available {
+		// Truncate status to fit. The rendered structure is:
+		//   " " + title + "  " + dimStyle(s+"…") + gap + timerStr
+		// where "  " (2 chars) is the prefix and "…" (1 char) is the suffix → 3 chars overhead.
 		maxStatus := max(available-lipgloss.Width(title)-timerWidth-3, 0)
 		if maxStatus > 0 && m.statusLine != "" {
 			s := m.statusLine
-			if runes := []rune(s); len(runes) > maxStatus {
-				s = string(runes[:maxStatus]) + "…"
+			// Shrink using display width (lipgloss.Width strips ANSI), matching viewFooter pattern.
+			for lipgloss.Width(s) > maxStatus {
+				runes := []rune(s)
+				if len(runes) == 0 {
+					break
+				}
+				s = string(runes[:len(runes)-1])
 			}
+			s += "…"
 			status = "  " + dimStyle.Render(s)
 		} else {
 			status = ""
@@ -526,7 +538,8 @@ func (m Model) viewHeader() string {
 		left = title + status
 		leftWidth = lipgloss.Width(left)
 	}
-	gap := max(m.width-leftWidth-timerWidth-4, 1)
+	// gap min=0: when header is exactly full-width after truncation no padding is needed.
+	gap := max(m.width-1-leftWidth-timerWidth, 0)
 	return " " + left + strings.Repeat(" ", gap) + timerStr
 }
 
