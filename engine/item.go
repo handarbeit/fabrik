@@ -148,6 +148,23 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 				return false
 			}
 		}
+		// If no worktree directory exists, there is nothing to clean up.
+		// Use a direct map lookup rather than worktreesFor() to avoid a panic —
+		// worktreesFor panics if no WorktreeManager is registered, which can happen
+		// in multi-repo mode before ensureRepoReady has run for this repo.
+		key := item.Repo
+		if key == "" {
+			key = e.defaultRepo()
+		}
+		e.mu.Lock()
+		wm, ok := e.worktreeManagers[key]
+		e.mu.Unlock()
+		if !ok {
+			return false
+		}
+		if _, err := os.Stat(wm.WorktreeDir(item.Number)); os.IsNotExist(err) {
+			return false
+		}
 		return true
 	}
 
