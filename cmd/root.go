@@ -86,7 +86,7 @@ func Execute() error {
 
 	if versionFlag {
 		fmt.Println(Version)
-		os.Exit(0)
+		return nil
 	}
 
 	// Load .env file if present (fatal if .env exists but not in .gitignore)
