@@ -6,9 +6,11 @@ import (
 	"flag"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/mattn/go-isatty"
@@ -37,6 +39,7 @@ const configYAMLTemplate = `# .fabrik/config.yaml — project-level configuratio
 # user: your-github-username
 
 # Optional settings (defaults shown):
+# owner_type: organization         # Owner type parsed from project URL: "user" or "organization".
 # stages: ./.fabrik/stages      # Path to stage YAML configs directory.
 # poll: 30                      # Polling interval in seconds. Lower = more responsive, higher = fewer API calls.
 # max_concurrent: 5             # Max parallel Claude sessions. Tune based on your API tier capacity.
@@ -50,10 +53,75 @@ const configYAMLTemplate = `# .fabrik/config.yaml — project-level configuratio
 # version: ""                   # Project version shown in TUI footer. Auto-inferred from package.json/go.mod if not set.
 `
 
+// parseProjectURL parses a GitHub Project URL and returns owner, project number
+// (as string), and ownerType ("user" or "organization").
+// Accepted forms:
+//
+//	https://github.com/users/<username>/projects/<N>
+//	https://github.com/users/<username>/projects/<N>/views/<V>
+//	https://github.com/orgs/<orgname>/projects/<N>
+//	https://github.com/orgs/<orgname>/projects/<N>/views/<V>
+//
+// A /views/<N> suffix is silently ignored.
+func parseProjectURL(rawURL string) (owner, project, ownerType string, err error) {
+	u, parseErr := url.Parse(rawURL)
+	if parseErr != nil {
+		return "", "", "", fmt.Errorf("invalid URL %q: %w", rawURL, parseErr)
+	}
+	if u.Host != "github.com" {
+		return "", "", "", fmt.Errorf("invalid project URL %q: host must be github.com", rawURL)
+	}
+
+	// Split path into clean segments, dropping empty strings.
+	segments := splitPathSegments(u.Path)
+
+	// Expected: [users|orgs, <name>, projects, <N>] optionally followed by [views, <V>]
+	if len(segments) < 4 {
+		return "", "", "", fmt.Errorf("invalid project URL %q: expected /users/<name>/projects/<N> or /orgs/<name>/projects/<N>", rawURL)
+	}
+
+	kindSeg := segments[0]
+	nameSeg := segments[1]
+	projectsLiteral := segments[2]
+	numSeg := segments[3]
+
+	if kindSeg != "users" && kindSeg != "orgs" {
+		return "", "", "", fmt.Errorf("invalid project URL %q: path must start with /users/ or /orgs/", rawURL)
+	}
+	if projectsLiteral != "projects" {
+		return "", "", "", fmt.Errorf("invalid project URL %q: expected /projects/<N> after owner name", rawURL)
+	}
+	// Validate that <N> is a positive integer.
+	n, convErr := strconv.Atoi(numSeg)
+	if convErr != nil || n <= 0 {
+		return "", "", "", fmt.Errorf("invalid project URL %q: project number %q must be a positive integer", rawURL, numSeg)
+	}
+
+	if kindSeg == "users" {
+		ownerType = "user"
+	} else {
+		ownerType = "organization"
+	}
+	return nameSeg, numSeg, ownerType, nil
+}
+
+// splitPathSegments splits a URL path into non-empty segments.
+func splitPathSegments(p string) []string {
+	var segs []string
+	for _, s := range strings.Split(p, "/") {
+		if s != "" {
+			segs = append(segs, s)
+		}
+	}
+	return segs
+}
+
 // writeConfigTemplate writes the .fabrik/config.yaml template.
-// If stdin is a TTY and the file does not already exist, it prompts for
-// required values and writes them as uncommented entries.
-func writeConfigTemplate(force bool) error {
+// owner, project, ownerType, user are pre-populated values (from a URL or flag).
+// If any are empty and stdin is a TTY, the user is prompted for missing values.
+// When owner is non-empty (URL provided), only user is prompted (if empty and TTY).
+// When owner is empty, the full interactive prompt runs for all four fields.
+func writeConfigTemplate(owner, project, ownerType, user string, force bool) error {
 	configPath := ".fabrik/config.yaml"
 
 	if !force {
@@ -65,11 +133,19 @@ func writeConfigTemplate(force bool) error {
 
 	content := configYAMLTemplate
 
-	// Interactive mode: prompt for required values when stdin is a TTY.
-	if isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd()) {
-		owner, repo, project, user := promptRequiredValues()
-		if owner != "" || repo != "" || project != "" || user != "" {
-			content = buildConfigWithValues(owner, repo, project, user)
+	isTTY := isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
+
+	if owner != "" {
+		// URL-provided flow: owner/project/ownerType are known; only prompt for user.
+		if user == "" && isTTY {
+			user = promptForUser()
+		}
+		content = buildConfigWithValues(owner, "", project, ownerType, user)
+	} else if isTTY {
+		// Full interactive flow: prompt for all four required fields.
+		o, repo, proj, u := promptRequiredValues()
+		if o != "" || repo != "" || proj != "" || u != "" {
+			content = buildConfigWithValues(o, repo, proj, "", u)
 		}
 	}
 
@@ -78,6 +154,15 @@ func writeConfigTemplate(force bool) error {
 	}
 	fmt.Printf("  config: %s\n", configPath)
 	return nil
+}
+
+// promptForUser prompts for a single GitHub username interactively.
+func promptForUser() string {
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Printf("\nFabrik interactive setup — press Enter to skip and fill in later.\n")
+	fmt.Printf("  Your GitHub username: ")
+	line, _ := reader.ReadString('\n')
+	return strings.TrimSpace(line)
 }
 
 // promptRequiredValues reads owner/repo/project/user from stdin interactively.
@@ -97,9 +182,10 @@ func promptRequiredValues() (owner, repo, project, user string) {
 	return
 }
 
-// buildConfigWithValues returns a config.yaml where the supplied required values
-// are written as uncommented entries; optional settings remain commented out.
-func buildConfigWithValues(owner, repo, project, user string) string {
+// buildConfigWithValues returns a config.yaml where the supplied values are
+// written as uncommented entries; unset values remain commented out.
+// ownerType is written into the optional section when non-empty.
+func buildConfigWithValues(owner, repo, project, ownerType, user string) string {
 	lines := strings.Split(configYAMLTemplate, "\n")
 	var out []string
 	for _, line := range lines {
@@ -112,6 +198,8 @@ func buildConfigWithValues(owner, repo, project, user string) string {
 			out = append(out, "project: "+project)
 		case strings.HasPrefix(line, "# user:") && user != "":
 			out = append(out, "user: "+user)
+		case strings.HasPrefix(line, "# owner_type:") && ownerType != "":
+			out = append(out, "owner_type: "+ownerType)
 		default:
 			out = append(out, line)
 		}
@@ -123,14 +211,33 @@ func buildConfigWithValues(owner, repo, project, user string) string {
 // It extracts the embedded default stage YAML files into .fabrik/stages/
 // and the Fabrik plugin into .fabrik/plugin/ in the current directory.
 // Existing files are skipped unless --force is passed.
+//
+// An optional positional argument may be a GitHub Project URL of the form:
+//
+//	https://github.com/users/<name>/projects/<N>
+//	https://github.com/orgs/<name>/projects/<N>
+//
+// When provided, owner, project, and owner_type are parsed from the URL.
+// The --user flag sets the GitHub username for fully non-interactive setup.
 func runInit(args []string) error {
 	fset := flag.NewFlagSet("init", flag.ContinueOnError)
 	force := fset.Bool("force", false, "Overwrite existing files")
+	userFlag := fset.String("user", "", "Your GitHub username")
 	if err := fset.Parse(args); err != nil {
 		return err
 	}
-	if fset.NArg() != 0 {
-		return fmt.Errorf("init: unexpected positional arguments: %v", fset.Args())
+	if fset.NArg() > 1 {
+		return fmt.Errorf("init: too many positional arguments (expected at most one project URL)")
+	}
+
+	// Parse URL if provided — must happen before any filesystem writes.
+	var owner, project, ownerType string
+	if fset.NArg() == 1 {
+		var err error
+		owner, project, ownerType, err = parseProjectURL(fset.Arg(0))
+		if err != nil {
+			return err
+		}
 	}
 
 	// Extract stage configs
@@ -221,7 +328,7 @@ func runInit(args []string) error {
 	}
 
 	// Generate .fabrik/config.yaml template
-	if err := writeConfigTemplate(*force); err != nil {
+	if err := writeConfigTemplate(owner, project, ownerType, *userFlag, *force); err != nil {
 		return err
 	}
 
