@@ -308,6 +308,13 @@ func Execute() error {
 		}
 	}
 
+	// Check whether on-disk plugin files match the embedded versions. This runs
+	// only in the main daemon path (all subcommands returned early above).
+	// If .fabrik/plugin/ does not exist (no fabrik init), the check is a no-op.
+	if err := checkPluginSkills(".fabrik/plugin"); err != nil {
+		fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skill check failed: %v\n", err)
+	}
+
 	eng, err := engine.New(engine.Config{
 		Owner:         cfg.Owner,
 		Repo:          cfg.Repo,
