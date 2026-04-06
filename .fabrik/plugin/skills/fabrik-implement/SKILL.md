@@ -66,27 +66,6 @@ Bad commit messages:
 
 **Documentation tasks are not optional.** If the plan includes documentation tasks (README updates, godoc, SKILL.md changes, CLAUDE.md edits, etc.), treat them exactly like code tasks: implement, commit, push. Do not defer documentation to the end or skip it assuming Review will catch it. If you discover documentation that should have been in the plan is missing, add it — the plan's doc inventory is a starting point, not a ceiling.
 
-### Commit frequently
-
-Commit after each logical unit of work — typically after each task or sub-task. Do not accumulate a large diff and commit at the end. Frequent commits:
-- Preserve progress if the session is interrupted
-- Make review easier
-- Enable bisecting if something breaks
-
-Good commit messages:
-- `Add FetchItemDetails method for deep-fetching item comments`
-- `Update poll loop to use two-phase fetch`
-- `Fix race condition in worktree mutex handling`
-
-Bad commit messages:
-- `WIP`
-- `Updates`
-- `Fix stuff`
-
-### Push regularly
-
-Push after each commit or small group of related commits. The remote branch is the durable record of progress. If your session is killed, pushed commits survive.
-
 ### Update task progress
 
 After completing each task, check it off in the **Plan stage comment** — not the issue body. The issue body is the spec (owned by Specify); task tracking lives in the Plan stage comment.
@@ -144,7 +123,8 @@ Before signaling completion:
 
 - **Do not redesign the approach** — the Plan stage made those decisions. If something seems wrong, note it but implement the plan.
 - **Do not skip tests** — if the plan didn't mention tests for a task, add them anyway
-- **Do not accumulate large uncommitted diffs** — commit and push frequently
+- **Do not move to the next task with uncommitted changes** — run `git status` before starting each task; commit and push if the tree is dirty. Accumulating uncommitted changes across tasks is a **workflow violation**.
+- **Never use vague commit messages** ("WIP", "Updates", "Fix stuff") — each message must describe the specific task or change completed
 - **Do not refactor unrelated code** — stay focused on the task list
 - **Do not add features not in the plan** — no scope creep
 - **Do not leave the branch in a broken state** — every push should compile and pass tests
@@ -168,7 +148,7 @@ Before signaling completion:
 ## Common Pitfalls
 
 - **Starting over instead of resuming**: Always check `git status` and `git log` first. Don't redo work.
-- **Giant commits**: Break work into small, logical commits. One task = one or a few commits.
+- **Giant commits**: Accumulating a large diff before committing is a **workflow violation** — not just a bad practice. Commit and push after each task. If `git status` is dirty when you're about to start a new task, stop and commit first.
 - **Forgetting to push**: Every commit should be pushed. Don't leave work only on local.
 - **Ignoring test failures**: Fix failing tests before moving to the next task. Don't accumulate failures.
 - **Diverging from the plan**: Follow the task list. If you discover the plan is wrong, note it and continue — don't silently redesign.
