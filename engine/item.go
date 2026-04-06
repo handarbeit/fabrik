@@ -823,6 +823,17 @@ func (e *Engine) commitWIP(workDir string, issueNumber int, stageName string) {
 		return
 	}
 
+	// Unstage any context files that were picked up by git add -A above.
+	// This covers the case where context files were previously committed
+	// (making them tracked) and then modified — the .gitignore inside
+	// .fabrik-context/ only protects untracked files.
+	resetCmd := exec.Command("git", "reset", "HEAD", "--", ".fabrik-context/")
+	resetCmd.Dir = workDir
+	if _, err := resetCmd.CombinedOutput(); err != nil {
+		e.logf(issueNumber, "warn", "could not unstage context files: %v\n", err)
+		return
+	}
+
 	// Commit
 	msg := fmt.Sprintf("WIP: %s stage incomplete (partial progress)", stageName)
 	commitCmd := exec.Command("git", "commit", "-m", msg)
