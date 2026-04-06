@@ -13,9 +13,11 @@ are user input, and the board columns define the workflow.
 go build -o fabrik .
 
 # Initialize stage configs, plugin, and project config template
+# Pass your GitHub Project URL to auto-populate owner, project, and owner_type:
+./fabrik init --user you https://github.com/orgs/your-org/projects/5
+# Or run without a URL for full interactive prompts (TTY) / blank template (non-TTY)
 ./fabrik init
 # Creates .fabrik/stages/, .fabrik/plugin/, and .fabrik/config.yaml
-# If your terminal is interactive, it will prompt for owner/repo/project/user
 
 # Edit .fabrik/config.yaml with your project settings (commit this file)
 # Add your GitHub token to a gitignored .env:
