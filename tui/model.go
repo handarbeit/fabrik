@@ -128,6 +128,11 @@ type Model struct {
 	histIdx      int  // index into history (0 = newest)
 	confirmClear bool // true when waiting for Y/N on clear-all
 	confirmQuit  bool // true when waiting for q/n on quit-with-active-jobs
+
+	// mouse double-click detection
+	lastClickAt time.Time
+	lastClickX  int
+	lastClickY  int
 }
 
 var (
@@ -441,9 +446,105 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+
+	case tea.MouseMsg:
+		return m.handleMouse(ev)
 	}
 
 	return m, nil
+}
+
+// handleMouse processes a tea.MouseMsg: forwards all mouse events to the history
+// viewport (which handles wheel scroll internally), then performs hit-testing for
+// left-click events to update selection state and detect double-clicks.
+func (m Model) handleMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
+	// Forward all mouse events to the history viewport so wheel-scroll works.
+	var cmd tea.Cmd
+	m.historyVP, cmd = m.historyVP.Update(ev)
+
+	if ev.Button != tea.MouseButtonLeft || ev.Action != tea.MouseActionPress {
+		return m, cmd
+	}
+
+	// Compute layout Y positions for hit-testing.
+	nActive := len(m.active)
+	activeH := activeHeight(nActive)
+
+	// histTopY: Y where the history pane border starts.
+	// Active pane occupies Y=1..activeH (inclusive). Detail panel may follow.
+	histTopY := 1 + activeH
+	if m.detailPanel {
+		if detail := m.viewDetail(); detail != "" {
+			histTopY += strings.Count(detail, "\n") + 1
+		}
+	}
+
+	clickY := ev.Y
+
+	// Detect double-click: same cell within 300ms.
+	isDoubleClick := time.Since(m.lastClickAt) < 300*time.Millisecond &&
+		ev.X == m.lastClickX && ev.Y == m.lastClickY
+	m.lastClickAt = time.Now()
+	m.lastClickX = ev.X
+	m.lastClickY = ev.Y
+
+	switch {
+	case clickY >= 1 && clickY <= activeH:
+		// Click anywhere in the active pane (borders, title, or content rows).
+		m.focusPane = paneActive
+
+		// Content rows start at Y=3 (border-top at Y=1, title at Y=2).
+		// Border-bottom is at Y=activeH; don't treat it as a row selection.
+		if clickY >= 3 && clickY < activeH {
+			keys := m.sortedActiveKeys()
+			nKeys := len(keys)
+			maxLines := activeH - 3
+			start := 0
+			if nKeys > maxLines && maxLines > 0 {
+				start = m.activeIdx - maxLines/2
+				if start < 0 {
+					start = 0
+				}
+				if start+maxLines > nKeys {
+					start = max(nKeys-maxLines, 0)
+				}
+			}
+			visibleRow := clickY - 3
+			actualIdx := start + visibleRow
+			if actualIdx >= 0 && actualIdx < nKeys {
+				m.activeIdx = actualIdx
+				if isDoubleClick {
+					if job, ok := m.active[keys[actualIdx]]; ok {
+						return m, openWatchInlineCmd(job.IssueNumber, job.Repo)
+					}
+				}
+			}
+		}
+
+	case clickY >= histTopY && clickY <= histTopY+1:
+		// Click on history pane border-top or title row → switch focus.
+		m.focusPane = paneHistory
+		m.updateHistoryViewport(false)
+
+	case clickY >= histTopY+2:
+		// Click on history viewport content.
+		visibleRow := clickY - (histTopY + 2)
+		newHistIdx := visibleRow + m.historyVP.YOffset
+		if newHistIdx >= 0 && newHistIdx < len(m.history) {
+			m.focusPane = paneHistory
+			m.histIdx = newHistIdx
+			m.updateHistoryViewport(false)
+			if isDoubleClick {
+				realIdx := len(m.history) - 1 - m.histIdx
+				if realIdx >= 0 && realIdx < len(m.history) {
+					h := m.history[realIdx]
+					return m, openWatchInlineCmd(h.IssueNumber, h.Repo)
+				}
+			}
+		}
+	}
+
+	return m, cmd
 }
 
 // updateHistoryViewport rebuilds the viewport content from the history slice.
