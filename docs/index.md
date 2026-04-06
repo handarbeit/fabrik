@@ -236,8 +236,8 @@ description: >-
         <div class="callout-label">The Self-Evolving Factory</div>
         <div class="callout-title">Fabrik is built with Fabrik</div>
         <div class="callout-body">
-          Issues filed against this repository go through the same Research → Plan →
-          Implement → Review → Validate pipeline that Fabrik orchestrates. When we
+          Issues filed against this repository go through the same Specify → Research →
+          Plan → Implement → Review → Validate pipeline that Fabrik orchestrates. When we
           filed an issue to add PR comment processing, Fabrik researched its own
           codebase, planned the GraphQL changes, and implemented the feature that
           lets it read PR comments — gaining a capability it needed by building it

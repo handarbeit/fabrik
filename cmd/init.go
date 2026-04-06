@@ -76,7 +76,7 @@ func writeConfigTemplate(force bool) error {
 	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
 		return fmt.Errorf("writing %s: %w", configPath, err)
 	}
-	fmt.Printf("  write  %s\n", configPath)
+	fmt.Printf("  config: %s\n", configPath)
 	return nil
 }
 
@@ -154,7 +154,6 @@ func runInit(args []string) error {
 		if !*force {
 			if _, statErr := os.Stat(destPath); statErr == nil {
 				skipped++
-				fmt.Printf("  skip   %s (already exists; use --force to overwrite)\n", destPath)
 				continue
 			} else if !errors.Is(statErr, fs.ErrNotExist) {
 				return fmt.Errorf("checking %s: %w", destPath, statErr)
@@ -168,10 +167,13 @@ func runInit(args []string) error {
 			return fmt.Errorf("writing %s: %w", destPath, err)
 		}
 		wrote++
-		fmt.Printf("  write  %s\n", destPath)
 	}
 
-	fmt.Printf("fabrik init: wrote %d stage file(s), skipped %d\n", wrote, skipped)
+	if skipped > 0 {
+		fmt.Printf("  stages: %d written, %d skipped (use --force to overwrite)\n", wrote, skipped)
+	} else {
+		fmt.Printf("  stages: %d written\n", wrote)
+	}
 
 	// Extract plugin
 	pluginDir := ".fabrik/plugin"
@@ -206,14 +208,17 @@ func runInit(args []string) error {
 			return fmt.Errorf("writing %s: %w", destPath, writeErr)
 		}
 		pluginWrote++
-		fmt.Printf("  write  %s\n", destPath)
 		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("extracting plugin: %w", err)
 	}
 
-	fmt.Printf("fabrik init: wrote %d plugin file(s), skipped %d\n", pluginWrote, pluginSkipped)
+	if pluginSkipped > 0 {
+		fmt.Printf("  plugin: %d written, %d skipped\n", pluginWrote, pluginSkipped)
+	} else {
+		fmt.Printf("  plugin: %d skill files written\n", pluginWrote)
+	}
 
 	// Generate .fabrik/config.yaml template
 	if err := writeConfigTemplate(*force); err != nil {
