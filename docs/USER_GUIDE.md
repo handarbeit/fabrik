@@ -156,15 +156,49 @@ project: 1
 user: your-github-username
 
 # Optional settings (defaults shown):
+
+# Path to stage YAML configs directory.
 # stages: ./.fabrik/stages
+
+# Polling interval in seconds. Lower values are more responsive; higher values
+# reduce GitHub API usage. Tradeoff: 10s is very responsive but consumes ~360 REST
+# requests/hour; 30s (default) is a good balance.
 # poll: 30
+
+# Maximum number of parallel Claude sessions. Tune based on your API tier capacity.
+# Each active session counts against your Anthropic API concurrency limit.
 # max_concurrent: 5
+
+# Maximum stage failures before pausing an issue. When exceeded, fabrik:paused and
+# stage:<name>:failed labels are applied. Set to 0 for unlimited retries.
 # max_retries: 3
+
+# Auto-advance issues through stages without human card moves on the board.
+# When true, completed issues advance to the next stage automatically.
+# Per-stage auto_advance: in stage YAML can override this setting per-stage.
 # yolo: false
+
+# Self-upgrade from origin/main when idle. After 2 consecutive idle polls, Fabrik
+# checks for new commits, rebuilds the binary, runs fabrik upgrade, and re-execs.
+# Intended for the self-evolving workflow where Fabrik develops itself.
 # auto_upgrade: false
+
+# Enable the interactive TUI dashboard. Requires a real (non-piped) terminal.
 # tui: false
+
+# Terminal app for the TUI log viewer. Valid values: terminal, iterm2, ghostty,
+# kitty, alacritty, warp. Auto-detected from TERM_PROGRAM env var if not set.
+# Note: kitty has no TERM_PROGRAM auto-detection -- set this explicitly for kitty.
 # terminal: ""
+
+# Save raw Claude output to .fabrik/debug/ for diagnosing unexpected behavior
+# or prompt issues. Files are named by issue number and stage.
 # debug_output: false
+
+# Project version shown in the TUI footer. Auto-inferred from package.json,
+# go.mod (returns module path, not semver), Cargo.toml, or pyproject.toml.
+# Set explicitly to override auto-inference (e.g., version: "1.2.0").
+# version: ""
 ```
 
 **Note:** `.fabrik/config.yaml` should NOT be listed in `.gitignore`. Fabrik warns
@@ -222,11 +256,47 @@ FABRIK_USER=my-personal-username
 | `FABRIK_MAX_RETRIES` | `max_retries` | Max retries before pausing (0 = unlimited) | `3` |
 | `FABRIK_AUTO_UPGRADE` | `auto_upgrade` | Self-upgrade when idle (`true`/`1`/`yes`) | `false` |
 | `FABRIK_TUI` | `tui` | Enable TUI dashboard (`true`/`1`/`yes`) | `false` |
-| `FABRIK_TERMINAL` | `terminal` | Terminal app for TUI (passthrough for issue #108) | `""` |
+| `FABRIK_TERMINAL` | `terminal` | Terminal app for TUI log viewer (`terminal`, `iterm2`, `ghostty`, `kitty`, `alacritty`, `warp`). Auto-detected from `TERM_PROGRAM` if not set. | `""` |
 | `FABRIK_PLUGIN_DIR` | *(no config.yaml key)* | Override plugin directory | `.fabrik/plugin/` |
 | `FABRIK_DEBUG_OUTPUT` | `debug_output` | Save raw Claude output for debugging | `false` |
 
 Token precedence: `--token` flag > `FABRIK_TOKEN` > `GITHUB_TOKEN`
+
+### Terminal Auto-Detection
+
+The `terminal:` setting (and its `--terminal` flag / `FABRIK_TERMINAL` env var) controls
+which terminal app the TUI opens for the log viewer. Valid values:
+
+| Value | Terminal |
+|-------|----------|
+| `terminal` | macOS Terminal.app (default on macOS) |
+| `iterm2` | iTerm2 (macOS only; uses AppleScript) |
+| `ghostty` | Ghostty (macOS: `open -na Ghostty.app`; Linux: `ghostty -e`) |
+| `kitty` | kitty (cross-platform: `kitty sh -c ...`) |
+| `alacritty` | Alacritty (cross-platform: `alacritty -e sh -c ...`) |
+| `warp` | Warp (macOS only; opens app without a command) |
+
+**Auto-detection from `TERM_PROGRAM`:**
+
+When `terminal:` is unset (or `""`), Fabrik reads the `TERM_PROGRAM` environment variable:
+
+| `TERM_PROGRAM` value | Detected terminal |
+|----------------------|-------------------|
+| `Apple_Terminal` | `terminal` |
+| `iTerm.app` | `iterm2` |
+| `ghostty` | `ghostty` |
+| `WarpTerminal` | `warp` |
+| `alacritty` | `alacritty` |
+| *(anything else)* | platform default |
+
+**kitty** has no `TERM_PROGRAM` entry — set `terminal: kitty` explicitly in `config.yaml`.
+
+**Platform notes:**
+- `warp` — macOS only; Warp cannot be launched with a specific command, so only the
+  app opens (the user navigates to the log manually).
+- `iterm2` — macOS only (uses AppleScript); Linux falls back to the platform default.
+- `ghostty` — macOS uses `open -na Ghostty.app --args ...`; Linux uses `ghostty -e`.
+- Linux fallback tries `gnome-terminal`, then `xterm`, then `konsole` in order.
 
 ### Stage YAML Reference
 
@@ -236,22 +306,39 @@ Each stage is a YAML file in your stages directory. The filename is arbitrary; t
 ```yaml
 name: Research            # Required. Must match a Project board column exactly.
 order: 2                  # Required. Lower values processed earlier in the pipeline.
-skill: fabrik-research    # Plugin skill to use (alternative to inline prompt).
+skill: fabrik-research    # Plugin skill to use (recommended; alternative to inline prompt).
+                          #   When set, Fabrik sends a minimal directive and Claude loads
+                          #   the skill methodology via the plugin system.
 comment_skill: fabrik-research-comment  # Plugin skill for comment review (overrides comment_prompt).
-prompt: |                 # Inline prompt (used when skill is not set).
+prompt: |                 # Inline prompt (used when skill is not set; legacy but still supported).
   You are a research agent...
 comment_prompt: |         # Inline comment-review prompt (used when comment_skill is not set).
   You are reviewing user comments...
 model: sonnet             # Optional. Claude model: "opus", "sonnet", etc.
-max_turns: 50             # Optional. Max conversation turns per invocation.
-read_only: true           # Optional. Stash/restore worktree (for analysis stages).
-update_issue_body: false  # Optional. Allow FABRIK_ISSUE_UPDATE markers to modify the issue body.
-                          #   By convention only Specify should set this to true.
-post_to_pr: true          # Optional. Post output on linked PR; summary on issue.
-create_draft_pr: true     # Optional. Create draft PR on completion.
-mark_pr_ready_on_complete: true  # Optional. Mark PR ready when stage completes.
-auto_advance: false       # Optional. Override global --yolo for this stage.
-cleanup_worktree: false   # Optional. Terminal stage -- remove worktree, no Claude.
+max_turns: 50             # Optional. Max conversation turns per main stage invocation.
+comment_max_turns: 15     # Optional. Max turns when processing user comments. Defaults to
+                          #   min(max_turns, 15) when max_turns is set, otherwise 15.
+                          #   Keeps comment processing bounded independently of stage budget.
+read_only: true           # Optional. Stashes the dirty worktree before Claude runs and
+                          #   restores it after. Use for analysis stages that should not
+                          #   modify files (e.g., Specify, Research).
+update_issue_body: false  # Optional. Allow FABRIK_ISSUE_UPDATE_BEGIN/END markers in Claude
+                          #   output to update the issue body. By convention only Specify
+                          #   sets this to true.
+post_to_pr: true          # Optional. Routes detailed Claude output to the linked PR; a
+                          #   brief summary is still posted on the issue. Falls back to
+                          #   posting on the issue if no linked PR is found.
+create_draft_pr: true     # Optional. Pushes the branch and creates a draft PR *before*
+                          #   Claude runs. Idempotent if a PR already exists.
+mark_pr_ready_on_complete: true  # Optional. Marks the draft PR as review-ready after the
+                                 #   stage completes. Triggers external review bots.
+auto_advance: false       # Optional. Per-stage override for the global yolo setting.
+                          #   true  = always auto-advance this stage (even if yolo: false)
+                          #   false = never auto-advance this stage (even if yolo: true)
+                          #   omit  = inherit the global yolo setting
+cleanup_worktree: false   # Optional. Removes the issue worktree instead of invoking Claude.
+                          #   Use for terminal stages (e.g., Done) where no further work
+                          #   is needed on the branch.
 allowed_tools:            # Optional. Restrict Claude's available tools.
   - Read
   - Grep
@@ -262,7 +349,20 @@ completion:
 
 Either `skill` or `prompt` is required (unless `cleanup_worktree` is true). When `skill`
 is set, Fabrik sends a directive prompt telling Claude to follow the named skill; the
-skill provides the detailed methodology via the plugin system.
+skill provides the detailed methodology via the plugin system. Prefer `skill` for complex
+stages — it supports rich methodology, quality checklists, and scope boundaries. Use
+`prompt` for simple single-purpose stages or quick overrides.
+
+**`auto_advance` and `yolo` interaction:**
+
+There are four cases:
+
+1. Global `yolo: true` in `config.yaml` → all stages auto-advance after completion.
+2. Per-stage `auto_advance: true` in stage YAML → this stage always auto-advances, regardless of whether global `yolo` is true or false.
+3. Per-stage `auto_advance: false` in stage YAML → this stage never auto-advances, even when global `yolo: true`. This is a meaningful override — explicitly setting `false` is different from omitting the field.
+4. Per-stage `auto_advance:` absent from stage YAML → the stage inherits the global `yolo` setting.
+
+Note: there is no `fabrik:yolo` label. Yolo behavior is controlled by `config.yaml` / the `--yolo` flag and per-stage `auto_advance:` only.
 
 ---
 
