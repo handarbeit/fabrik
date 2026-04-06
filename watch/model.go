@@ -347,6 +347,7 @@ func (m WatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case NewLogFileMsg:
 		// Stage transition: clear live buffer, rebuild tabs, move to live tab.
 		m.lines = nil
+		m.currentLogPath = ""
 		m.vp.SetContent("")
 		newTabs := buildStageTabs(m.logDir, m.stageOrder)
 		m.stageTabs = newTabs
