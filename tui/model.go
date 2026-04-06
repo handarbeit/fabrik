@@ -430,7 +430,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			MaxTurns:       ev.MaxTurns,
 			CostUSD:        ev.CostUSD,
 		}
-		m.history = append(m.history, entry)
+		// Remove any existing entry with the same dedup key so repeated dispatches
+		// of the same (issue, stage) replace rather than accumulate.
+		dupKey := historyDedupKey{
+			IssueNumber: entry.IssueNumber,
+			Repo:        entry.Repo,
+			StageName:   entry.StageName,
+			IsComment:   entry.IsComment,
+		}
+		filtered := m.history[:0]
+		for _, h := range m.history {
+			k := historyDedupKey{
+				IssueNumber: h.IssueNumber,
+				Repo:        h.Repo,
+				StageName:   h.StageName,
+				IsComment:   h.IsComment,
+			}
+			if k != dupKey {
+				filtered = append(filtered, h)
+			}
+		}
+		m.history = append(filtered, entry)
 		SaveHistory(m.history)
 		m.updateHistoryViewport(true)
 		return m, nil
