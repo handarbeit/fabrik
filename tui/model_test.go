@@ -73,7 +73,7 @@ func TestActiveHeight(t *testing.T) {
 }
 
 func TestNew(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	if m.pollInterval != 30*time.Second {
 		t.Errorf("pollInterval = %v, want 30s", m.pollInterval)
 	}
@@ -89,7 +89,7 @@ func TestNew(t *testing.T) {
 }
 
 func TestUpdate_TickEvent(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	m.width = 80
 	m.height = 24
 	initial := m.spinnerIdx
@@ -111,7 +111,7 @@ func TestUpdate_TickEvent(t *testing.T) {
 
 func TestUpdate_JobStartedAndCompleted(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	start := time.Now()
 
 	// JobStartedEvent adds to active
@@ -152,7 +152,7 @@ func TestUpdate_JobStartedAndCompleted(t *testing.T) {
 }
 
 func TestUpdate_LogEvent_UpdatesActiveJob(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	key7 := activeJobKey("", 7)
 	m.active[key7] = &activeJob{IssueNumber: 7, StageName: "Research", StartedAt: time.Now()}
 	m.activeNumToKey[7] = key7
@@ -174,7 +174,7 @@ func TestUpdate_LogEvent_UpdatesActiveJob(t *testing.T) {
 
 func TestUpdate_LogEvent_UnknownIssue(t *testing.T) {
 	// LogEvent for an issue not in active map should not panic
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	next, _ := m.Update(LogEvent{IssueNumber: 999, Tag: "warn", Message: "something\n"})
 	nm := next.(Model)
 	if _, ok := nm.active[activeJobKey("", 999)]; ok {
@@ -183,7 +183,7 @@ func TestUpdate_LogEvent_UnknownIssue(t *testing.T) {
 }
 
 func TestUpdate_PollStartedAndCompleted(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	before := time.Now()
 
 	next, _ := m.Update(PollStartedEvent{Owner: "o", Repo: "r", Project: 1})
@@ -200,7 +200,7 @@ func TestUpdate_PollStartedAndCompleted(t *testing.T) {
 }
 
 func TestUpdate_QuitKey(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
 	if cmd == nil {
 		t.Error("expected quit cmd from 'q' key")
@@ -212,24 +212,26 @@ func TestUpdate_QuitKey(t *testing.T) {
 	}
 }
 
-func TestUpdate_RKey_ActivePane_AliasesLogViewer(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", "")
+func TestUpdate_RKey_ActivePane_SetsStatusMsg(t *testing.T) {
+	m := New(30, ProjectInfo{}, "")
 	m.focusPane = paneActive
 	key7 := activeJobKey("", 7)
 	m.active[key7] = &activeJob{IssueNumber: 7, StageName: "Research", StartedAt: time.Now()}
 	m.activeNumToKey[7] = key7
 
-	// r on an active pane item delegates to the log viewer (same as enter/l).
-	// openLogViewerCmd returns nil when the log dir is empty, so we just verify
-	// the key is handled (no panic) and the model is returned.
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
-	if _, ok := next.(Model); !ok {
-		t.Error("expected Model returned from Update with r key in active pane")
+	// r on an active pane item sets statusMsg and returns no cmd.
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if cmd != nil {
+		t.Error("expected nil cmd from r key in active pane")
+	}
+	nm := next.(Model)
+	if nm.statusMsg == "" {
+		t.Error("expected statusMsg to be set after r key in active pane")
 	}
 }
 
 func TestUpdate_RKey_ActivePane_NoJobs_NoOp(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	m.focusPane = paneActive
 	// No active jobs: r is a no-op
 
@@ -239,24 +241,51 @@ func TestUpdate_RKey_ActivePane_NoJobs_NoOp(t *testing.T) {
 	}
 }
 
-func TestUpdate_RKey_HistoryPane_WithEntry(t *testing.T) {
+func TestUpdate_RKey_HistoryPane_WithEntry_MissingWorktree(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, ProjectInfo{}, "", "")
+	// Chdir to a temp dir so worktree path won't accidentally exist.
+	t.Chdir(t.TempDir())
+	m := New(30, ProjectInfo{}, "")
 	m.focusPane = paneHistory
 	m.history = []HistoryEntry{
 		{IssueNumber: 42, StageName: "Research", StageModel: "sonnet", Success: true},
 	}
 
-	// r on a history entry calls openResumeCmd — non-nil cmd returned
-	// (openResumeCmd returns an error-message terminal cmd when worktree is missing)
+	// r on a history entry when worktree is missing: nil cmd, statusMsg set.
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if cmd != nil {
+		t.Error("expected nil cmd when worktree is missing")
+	}
+	nm := next.(Model)
+	if nm.statusMsg == "" {
+		t.Error("expected statusMsg to be set when worktree is missing")
+	}
+}
+
+func TestUpdate_RKey_HistoryPane_WithWorktree(t *testing.T) {
+	redirectHistory(t)
+	// Create a temp project dir with the worktree directory.
+	dir := t.TempDir()
+	worktree := filepath.Join(dir, ".fabrik", "worktrees", "issue-42")
+	if err := os.MkdirAll(worktree, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	m := New(30, ProjectInfo{}, "")
+	m.focusPane = paneHistory
+	m.history = []HistoryEntry{
+		{IssueNumber: 42, StageName: "Research", StageModel: "sonnet", Success: true},
+	}
+
+	// r on a history entry with worktree present: returns non-nil tea.ExecProcess cmd.
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
 	if cmd == nil {
-		t.Error("expected non-nil cmd from r key with history entry")
+		t.Error("expected non-nil cmd (tea.ExecProcess) from r key with worktree present")
 	}
 }
 
 func TestUpdate_RKey_HistoryPane_NoEntries_NoOp(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	m.focusPane = paneHistory
 	m.history = nil
 
@@ -266,26 +295,9 @@ func TestUpdate_RKey_HistoryPane_NoEntries_NoOp(t *testing.T) {
 	}
 }
 
-func TestShellQuote(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"simple", "'simple'"},
-		{"path/with spaces/dir", "'path/with spaces/dir'"},
-		{"it's a test", "'it'\\''s a test'"},
-		{"", "''"},
-	}
-	for _, tt := range tests {
-		got := shellQuote(tt.input)
-		if got != tt.want {
-			t.Errorf("shellQuote(%q) = %q, want %q", tt.input, got, tt.want)
-		}
-	}
-}
 
 func TestView_BeforeWindowSize(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	// Before width is set, View should return a loading placeholder without panicking
 	v := m.View()
 	if !strings.Contains(v, "Loading") {
@@ -294,7 +306,7 @@ func TestView_BeforeWindowSize(t *testing.T) {
 }
 
 func TestView_AfterWindowSize(t *testing.T) {
-	m := New(30, ProjectInfo{Repo: "owner/repo", CWD: "~/myproject"}, "", "")
+	m := New(30, ProjectInfo{Repo: "owner/repo", CWD: "~/myproject"}, "")
 	m.width = 80
 	m.height = 24
 	m.nextPollAt = time.Now().Add(30 * time.Second)
@@ -322,7 +334,7 @@ func TestView_AfterWindowSize(t *testing.T) {
 
 func TestNew_StoresProjectInfo(t *testing.T) {
 	info := ProjectInfo{CWD: "~/foo", Repo: "org/bar", Version: "1.2.3"}
-	m := New(30, info, "", "")
+	m := New(30, info, "")
 	if m.projectInfo != info {
 		t.Errorf("projectInfo = %+v, want %+v", m.projectInfo, info)
 	}
@@ -335,7 +347,7 @@ func TestFooterHeight(t *testing.T) {
 }
 
 func TestViewFooter_Content(t *testing.T) {
-	m := New(30, ProjectInfo{CWD: "~/projects/myapp", Repo: "org/myapp", Version: "2.0.0"}, "", "")
+	m := New(30, ProjectInfo{CWD: "~/projects/myapp", Repo: "org/myapp", Version: "2.0.0"}, "")
 	m.width = 120
 	footer := m.viewFooter()
 
@@ -347,7 +359,7 @@ func TestViewFooter_Content(t *testing.T) {
 }
 
 func TestViewFooter_NoVersion(t *testing.T) {
-	m := New(30, ProjectInfo{CWD: "~/projects/myapp", Repo: "org/myapp"}, "", "")
+	m := New(30, ProjectInfo{CWD: "~/projects/myapp", Repo: "org/myapp"}, "")
 	m.width = 120
 	footer := m.viewFooter()
 
@@ -365,7 +377,7 @@ func TestViewFooter_Truncation(t *testing.T) {
 		CWD:     "~/very/long/path/to/a/deeply/nested/project/directory",
 		Repo:    "some-long-org/some-long-repo-name",
 		Version: "99.99.99",
-	}, "", "")
+	}, "")
 	m.width = 30
 	footer := m.viewFooter()
 
@@ -380,28 +392,6 @@ func TestViewFooter_Truncation(t *testing.T) {
 	}
 }
 
-// TestOpenTerminalCmd_UnknownID verifies that an unknown terminal ID does not
-// panic and returns a non-nil tea.Cmd (the fallback path runs).
-// The returned Cmd is intentionally not executed — doing so may launch GUI
-// processes (osascript, terminal emulators) during go test.
-func TestOpenTerminalCmd_UnknownID(t *testing.T) {
-	m := New(30, ProjectInfo{}, "totally_unknown_terminal", "")
-	cmd := m.openTerminalCmd("echo hello")
-	if cmd == nil {
-		t.Error("expected non-nil tea.Cmd for unknown terminal ID")
-	}
-}
-
-// TestOpenTerminalCmd_KnownIDs verifies that known terminal IDs return non-nil Cmds.
-func TestOpenTerminalCmd_KnownIDs(t *testing.T) {
-	for _, id := range []string{"terminal", "iterm2", "ghostty", "kitty", "alacritty", "warp", ""} {
-		m := New(30, ProjectInfo{}, id, "")
-		cmd := m.openTerminalCmd("echo hello")
-		if cmd == nil {
-			t.Errorf("terminal %q: expected non-nil tea.Cmd", id)
-		}
-	}
-}
 
 // TestLayoutHeightInvariant verifies that the total rendered height of View()
 // equals m.height for various numbers of active jobs. This ensures the header
@@ -414,7 +404,7 @@ func TestLayoutHeightInvariant(t *testing.T) {
 
 	for _, n := range []int{0, 1, 7, 8, 15} {
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
-			m := New(30, ProjectInfo{}, "", "")
+			m := New(30, ProjectInfo{}, "")
 			// Add n active jobs.
 			now := time.Now()
 			for i := 0; i < n; i++ {
@@ -461,7 +451,7 @@ func TestLayoutHeightInvariant_SmallTerminal(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(fmt.Sprintf("h=%d,n=%d", tc.termHeight, tc.nActive), func(t *testing.T) {
-			m := New(30, ProjectInfo{}, "", "")
+			m := New(30, ProjectInfo{}, "")
 			now := time.Now()
 			for i := 0; i < tc.nActive; i++ {
 				m.active[fmt.Sprintf("issue-%d", i+1)] = &activeJob{StageName: "Research", StartedAt: now}
@@ -481,7 +471,7 @@ func TestLayoutHeightInvariant_SmallTerminal(t *testing.T) {
 // TestViewHeader_TimerAlwaysVisible verifies that when the status message is
 // long enough to trigger truncation, the timer string still appears in the output.
 func TestViewHeader_TimerAlwaysVisible(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	m.width = 60
 	m.nextPollAt = time.Now().Add(90 * time.Second)
 
@@ -514,7 +504,7 @@ func TestViewHeader_WidthNeverExceedsTerminal(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m := New(30, ProjectInfo{}, "", "")
+			m := New(30, ProjectInfo{}, "")
 			m.width = tc.width
 			m.nextPollAt = time.Now().Add(90 * time.Second)
 			m.statusLine = tc.statusLine
@@ -529,20 +519,10 @@ func TestViewHeader_WidthNeverExceedsTerminal(t *testing.T) {
 	}
 }
 
-// TestDetectTerminalFromEnv is in the cmd package; here we just verify the
-// terminal field is stored on the model correctly.
-func TestNew_TerminalStored(t *testing.T) {
-	for _, id := range []string{"", "ghostty", "iterm2"} {
-		m := New(30, ProjectInfo{}, id, "")
-		if m.terminal != id {
-			t.Errorf("New(30, ProjectInfo{}, %q, \"\"): got terminal=%q, want %q", id, m.terminal, id)
-		}
-	}
-}
 
 // TestInit verifies Init returns a non-nil cmd (the initial tick).
 func TestInit(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	cmd := m.Init()
 	if cmd == nil {
 		t.Error("Init() should return a non-nil cmd")
@@ -591,7 +571,7 @@ func TestLoadHistory_RoundTrip(t *testing.T) {
 
 // TestUpdate_TabKey_SwitchesPanes verifies tab toggles focus between panes.
 func TestUpdate_TabKey_SwitchesPanes(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	m.width = 80
 	m.height = 24
 	if m.focusPane != paneActive {
@@ -615,7 +595,7 @@ func TestUpdate_TabKey_SwitchesPanes(t *testing.T) {
 // TestUpdate_JK_HistoryPane verifies j/k navigation in the history pane.
 func TestUpdate_JK_HistoryPane(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	m.width = 80
 	m.height = 24
 	m.focusPane = paneHistory
@@ -647,7 +627,7 @@ func TestUpdate_JK_HistoryPane(t *testing.T) {
 
 // TestUpdate_JK_ActivePane verifies j/k navigation in the active pane.
 func TestUpdate_JK_ActivePane(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	m.active[activeJobKey("", 1)] = &activeJob{StageName: "Research", StartedAt: time.Now()}
 	m.active[activeJobKey("", 2)] = &activeJob{StageName: "Plan", StartedAt: time.Now()}
 
@@ -666,7 +646,7 @@ func TestUpdate_JK_ActivePane(t *testing.T) {
 // TestUpdate_CKey_DeletesHistoryEntry verifies c removes the selected entry.
 func TestUpdate_CKey_DeletesHistoryEntry(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	m.width = 80
 	m.height = 24
 	m.focusPane = paneHistory
@@ -687,7 +667,7 @@ func TestUpdate_CKey_DeletesHistoryEntry(t *testing.T) {
 
 // TestUpdate_CKey_EmptyHistory_NoOp verifies c is a no-op with no history.
 func TestUpdate_CKey_EmptyHistory_NoOp(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	m.focusPane = paneHistory
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
 	if cmd != nil {
@@ -699,7 +679,7 @@ func TestUpdate_CKey_EmptyHistory_NoOp(t *testing.T) {
 // viewport area scrolls the YOffset down, and navigating back up scrolls it up.
 func TestUpdate_ScrollToVisible(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	m.width = 80
 	m.height = 24
 	m.focusPane = paneHistory
@@ -758,7 +738,7 @@ func TestUpdate_ScrollToVisible(t *testing.T) {
 // resets the viewport to the top regardless of the current selection position.
 func TestUpdate_JobCompletedScrollsToTop(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	m.width = 80
 	m.height = 24
 	m.focusPane = paneHistory
@@ -792,7 +772,7 @@ func TestUpdate_JobCompletedScrollsToTop(t *testing.T) {
 // TestUpdate_CapitalC_ClearAll verifies two C presses clear all history.
 func TestUpdate_CapitalC_ClearAll(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	m.width = 80
 	m.height = 24
 	m.focusPane = paneHistory
@@ -822,7 +802,7 @@ func TestUpdate_CapitalC_ClearAll(t *testing.T) {
 
 // TestUpdate_QuitDuringConfirmClear_Cancels verifies q cancels confirmClear state.
 func TestUpdate_QuitDuringConfirmClear_Cancels(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	m.confirmClear = true
 	m.focusPane = paneHistory
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
@@ -837,7 +817,7 @@ func TestUpdate_QuitDuringConfirmClear_Cancels(t *testing.T) {
 
 // TestUpdate_NKey_CancelsConfirmClear verifies n cancels the clear confirmation.
 func TestUpdate_NKey_CancelsConfirmClear(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	m.confirmClear = true
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
 	nm := next.(Model)
@@ -849,7 +829,7 @@ func TestUpdate_NKey_CancelsConfirmClear(t *testing.T) {
 // TestUpdate_EnterL_HistoryPane_NoLogDir verifies enter returns nil when log dir is missing.
 func TestUpdate_EnterL_HistoryPane_NoLogDir(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	m.width = 80
 	m.height = 24
 	m.focusPane = paneHistory
@@ -862,22 +842,35 @@ func TestUpdate_EnterL_HistoryPane_NoLogDir(t *testing.T) {
 	}
 }
 
-// TestUpdate_EnterL_ActivePane_NoLogDir verifies enter in active pane returns nil when log dir missing.
-func TestUpdate_EnterL_ActivePane_NoLogDir(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", "")
+// TestUpdate_EnterKey_ActivePane_TogglesDetailPanel verifies enter in active pane toggles the detail panel.
+func TestUpdate_EnterKey_ActivePane_TogglesDetailPanel(t *testing.T) {
+	m := New(30, ProjectInfo{}, "")
 	m.width = 80
 	m.height = 24
 	m.focusPane = paneActive
 	m.active[activeJobKey("", 99999)] = &activeJob{StageName: "Research", StartedAt: time.Now()}
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	// First enter: panel opens.
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm := next.(Model)
 	if cmd != nil {
-		t.Error("expected nil cmd from enter when log dir doesn't exist")
+		t.Error("enter key should return nil cmd (no subprocess)")
+	}
+	if !nm.detailPanel {
+		t.Error("expected detailPanel=true after first enter")
+	}
+
+	// Second enter: panel closes.
+	next2, _ := nm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm2 := next2.(Model)
+	if nm2.detailPanel {
+		t.Error("expected detailPanel=false after second enter")
 	}
 }
 
 // TestUpdate_LogEvent_IssueZero_StatusLine verifies poll-level log events update statusLine.
 func TestUpdate_LogEvent_IssueZero_StatusLine(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	m.width = 80
 	m.height = 24
 	next, _ := m.Update(LogEvent{IssueNumber: 0, Tag: "poll", Message: "polling now\n"})
@@ -895,48 +888,23 @@ func TestTuiReadSessionID_NotFound(t *testing.T) {
 	}
 }
 
-// TestOpenLogViewerCmd_WithLogFile verifies a non-nil cmd is returned for a dir with log files.
-func TestOpenLogViewerCmd_WithLogFile(t *testing.T) {
-	logDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(logDir, "research.log"), []byte("log content"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	m := New(30, ProjectInfo{}, "", "")
-	cmd := m.openLogViewerCmd(logDir)
-	if cmd == nil {
-		t.Error("expected non-nil cmd for dir with log files")
-	}
-	// Do NOT execute cmd — it would launch a terminal.
-}
+// TestUpdate_LKey_Returns_WatchCmd verifies the l key returns a non-nil tea.ExecProcess cmd.
+func TestUpdate_LKey_Returns_WatchCmd(t *testing.T) {
+	m := New(30, ProjectInfo{}, "")
+	m.focusPane = paneActive
+	m.active[activeJobKey("", 7)] = &activeJob{IssueNumber: 7, StageName: "Research", StartedAt: time.Now()}
+	m.activeNumToKey[7] = activeJobKey("", 7)
 
-// TestOpenLogViewerCmd_WithJSONFile verifies JSON log files use stream-filter pipe.
-func TestOpenLogViewerCmd_WithJSONFile(t *testing.T) {
-	logDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(logDir, "research.json"), []byte(`{"type":"log"}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	m := New(30, ProjectInfo{}, "", "")
-	cmd := m.openLogViewerCmd(logDir)
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
 	if cmd == nil {
-		t.Error("expected non-nil cmd for .json log file")
-	}
-	// Do NOT execute cmd — it would launch a terminal.
-}
-
-// TestOpenLogViewerCmd_EmptyDir verifies nil cmd for an empty log directory.
-func TestOpenLogViewerCmd_EmptyDir(t *testing.T) {
-	logDir := t.TempDir()
-	m := New(30, ProjectInfo{}, "", "")
-	cmd := m.openLogViewerCmd(logDir)
-	if cmd != nil {
-		t.Error("expected nil cmd for empty log dir")
+		t.Error("expected non-nil cmd (tea.ExecProcess) from l key with active job")
 	}
 }
 
 // TestViewHistory_ConfirmClear verifies the confirmation prompt is shown.
 func TestViewHistory_ConfirmClear(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	m.width = 80
 	m.height = 24
 	m.focusPane = paneHistory
@@ -950,7 +918,7 @@ func TestViewHistory_ConfirmClear(t *testing.T) {
 
 // TestViewActive_IsComment verifies the 💬 emoji appears for comment jobs.
 func TestViewActive_IsComment(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	m.width = 80
 	m.height = 24
 	m.active[activeJobKey("", 5)] = &activeJob{StageName: "Implement", IsComment: true, StartedAt: time.Now()}
@@ -963,7 +931,7 @@ func TestViewActive_IsComment(t *testing.T) {
 // TestViewHistory_IsComment verifies the 💬 emoji appears for comment history entries.
 func TestViewHistory_IsComment(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	m.width = 80
 	m.height = 24
 	m.history = []HistoryEntry{{IssueNumber: 5, StageName: "Implement", IsComment: true, Success: true}}
@@ -977,7 +945,7 @@ func TestViewHistory_IsComment(t *testing.T) {
 
 // TestViewHeader_WithStatusLine verifies statusLine content appears in the header.
 func TestViewHeader_WithStatusLine(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	m.width = 80
 	m.statusLine = "some status"
 	header := m.viewHeader()
@@ -988,7 +956,7 @@ func TestViewHeader_WithStatusLine(t *testing.T) {
 
 // TestViewHeader_StatusLineTruncation verifies narrow headers truncate statusLine without panic.
 func TestViewHeader_StatusLineTruncation(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", "")
+	m := New(30, ProjectInfo{}, "")
 	m.width = 25
 	m.statusLine = "a very very very very very very long status message"
 	header := m.viewHeader()
@@ -998,27 +966,25 @@ func TestViewHeader_StatusLineTruncation(t *testing.T) {
 	}
 }
 
-// TestOpenResumeCmd_WorktreeExists verifies a non-nil cmd is returned when the worktree exists.
-func TestOpenResumeCmd_WorktreeExists(t *testing.T) {
-	tmpDir := t.TempDir()
-	issueNum := 42
-	worktreeDir := filepath.Join(tmpDir, ".fabrik", "worktrees", fmt.Sprintf("issue-%d", issueNum))
-	if err := os.MkdirAll(worktreeDir, 0700); err != nil {
-		t.Fatal(err)
+// TestUpdate_RKey_HistoryPane_ActiveIssue_SetsStatusMsg verifies that r on a history entry
+// for an issue that is currently active shows a status message and returns no cmd.
+func TestUpdate_RKey_HistoryPane_ActiveIssue_SetsStatusMsg(t *testing.T) {
+	redirectHistory(t)
+	m := New(30, ProjectInfo{}, "")
+	m.focusPane = paneHistory
+	// Add issue 42 to both active map and history.
+	key42 := activeJobKey("", 42)
+	m.active[key42] = &activeJob{IssueNumber: 42, StageName: "Implement", StartedAt: time.Now()}
+	m.history = []HistoryEntry{
+		{IssueNumber: 42, StageName: "Research", Success: true},
 	}
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chdir(oldWd) //nolint:errcheck
 
-	m := New(30, ProjectInfo{}, "", "")
-	cmd := m.openResumeCmd("", issueNum, "Research", "sonnet")
-	if cmd == nil {
-		t.Error("expected non-nil cmd when worktree exists")
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if cmd != nil {
+		t.Error("expected nil cmd when issue is active")
 	}
-	// Do NOT execute cmd — it would launch a terminal.
+	nm := next.(Model)
+	if nm.statusMsg == "" {
+		t.Error("expected statusMsg to be set when issue is actively running")
+	}
 }
