@@ -266,42 +266,6 @@ FABRIK_USER=my-personal-username
 
 Token precedence: `--token` flag > `FABRIK_TOKEN` > `GITHUB_TOKEN`
 
-### Terminal Auto-Detection
-
-The `terminal:` setting (and its `--terminal` flag / `FABRIK_TERMINAL` env var) controls
-which terminal app the TUI opens for the log viewer. Valid values:
-
-| Value | Terminal |
-|-------|----------|
-| `terminal` | macOS Terminal.app (default on macOS) |
-| `iterm2` | iTerm2 (macOS only; uses AppleScript) |
-| `ghostty` | Ghostty (macOS: `open -na Ghostty.app`; Linux: `ghostty -e`) |
-| `kitty` | kitty (cross-platform: `kitty sh -c ...`) |
-| `alacritty` | Alacritty (cross-platform: `alacritty -e sh -c ...`) |
-| `warp` | Warp (macOS only; opens app without a command) |
-
-**Auto-detection from `TERM_PROGRAM`:**
-
-When `terminal:` is unset (or `""`), Fabrik reads the `TERM_PROGRAM` environment variable:
-
-| `TERM_PROGRAM` value | Detected terminal |
-|----------------------|-------------------|
-| `Apple_Terminal` | `terminal` |
-| `iTerm.app` | `iterm2` |
-| `ghostty` | `ghostty` |
-| `WarpTerminal` | `warp` |
-| `alacritty` | `alacritty` |
-| *(anything else)* | platform default |
-
-**kitty** has no `TERM_PROGRAM` entry — set `terminal: kitty` explicitly in `config.yaml`.
-
-**Platform notes:**
-- `warp` — macOS only; Warp cannot be launched with a specific command, so only the
-  app opens (the user navigates to the log manually).
-- `iterm2` — macOS only (uses AppleScript); Linux falls back to the platform default.
-- `ghostty` — macOS uses `open -na Ghostty.app --args ...`; Linux uses `ghostty -e`.
-- Linux fallback tries `gnome-terminal`, then `xterm`, then `konsole` in order.
-
 ### Stage YAML Reference
 
 Each stage is a YAML file in your stages directory. The filename is arbitrary; the
