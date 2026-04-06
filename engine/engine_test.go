@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"testing"
@@ -480,8 +481,26 @@ func TestExtractModelOverrideWarnsOnMultiple(t *testing.T) {
 }
 
 func TestItemNeedsWork_CleanupStage_NeedsWork(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
-	eng.cfg.Stages = testStagesWithCleanup()
+	rootDir := t.TempDir()
+	worktreeDir := filepath.Join(rootDir, "issue-1")
+	if err := os.MkdirAll(worktreeDir, 0o755); err != nil {
+		t.Fatalf("create worktree dir: %v", err)
+	}
+	wm := NewWorktreeManagerWithRoot(t.TempDir(), rootDir)
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithCleanup(),
+		},
+		&mockGitHubClient{},
+		&mockClaudeInvoker{},
+		wm,
+	)
 
 	item := gh.ProjectItem{
 		Number: 1,
