@@ -917,7 +917,6 @@ func tuiReadSessionID(repo string, issueNumber int, stageName string) string {
 	return strings.TrimSpace(string(data))
 }
 
-
 // fmtDuration formats a duration as MM:SS.
 func fmtDuration(d time.Duration) string {
 	if d < 0 {
