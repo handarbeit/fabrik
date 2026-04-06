@@ -681,16 +681,23 @@ func logDirForHistory(h HistoryEntry) string {
 	return logDirForIssue(h.Repo, h.IssueNumber)
 }
 
-// logDirForIssue returns ~/.fabrik/logs/<owner>-<repo>/issue-N/ in multi-repo
-// mode, or ~/.fabrik/logs/issue-N/ in single-repo mode (empty repo).
+// logDirForIssue returns the log directory for an issue. Tries the repo-namespaced
+// path first (~/.fabrik/logs/<owner>-<repo>/issue-N/), falls back to the legacy
+// flat path (~/.fabrik/logs/issue-N/) for backward compatibility.
 func logDirForIssue(repo string, issueNumber int) string {
+	home := homeDir()
 	issuePart := fmt.Sprintf("issue-%d", issueNumber)
-	if repo == "" {
-		return fmt.Sprintf("%s/.fabrik/logs/%s", homeDir(), issuePart)
+
+	if repo != "" {
+		repoPart := strings.ReplaceAll(repo, "/", "-")
+		namespaced := filepath.Join(home, ".fabrik", "logs", repoPart, issuePart)
+		if _, err := os.Stat(namespaced); err == nil {
+			return namespaced
+		}
 	}
-	// Sanitize "owner/repo" → "owner-repo" for use as a directory name.
-	repoPart := strings.ReplaceAll(repo, "/", "-")
-	return fmt.Sprintf("%s/.fabrik/logs/%s/%s", homeDir(), repoPart, issuePart)
+
+	// Fall back to legacy flat path (engine still writes here)
+	return filepath.Join(home, ".fabrik", "logs", issuePart)
 }
 
 // openLogViewerCmd returns a tea.Cmd that opens a terminal showing the most
