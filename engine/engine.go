@@ -204,9 +204,10 @@ func (e *Engine) worktreesFor(nameWithOwner string) *WorktreeManager {
 	return wm
 }
 
-// primaryWorktrees returns the WorktreeManager for the configured primary repo, or nil.
-// Used by operations that don't have a per-issue repo (e.g. auto-upgrade).
-func (e *Engine) primaryWorktrees() *WorktreeManager {
+// devCheckout returns the WorktreeManager for Fabrik's own source checkout, or nil.
+// Only available in dev mode (version starts with "dev") when running from Fabrik's own repo.
+// Used by the dev upgrade path (git pull + go build); the release upgrade path has no dependency on this.
+func (e *Engine) devCheckout() *WorktreeManager {
 	key := e.defaultRepo()
 	if key == "" {
 		return nil
