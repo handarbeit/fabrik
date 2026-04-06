@@ -3,6 +3,8 @@ package engine
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -174,6 +176,62 @@ func TestPoll_ProcessItemError(t *testing.T) {
 		t.Fatalf("poll should not error from processItem failures: %v", err)
 	}
 	eng.wg.Wait()
+}
+
+// TestPoll_CleanupStageItemNotDeepFetched verifies that items in cleanup stages
+// are never passed to FetchItemDetails even when itemMayNeedWork returns true
+// (i.e. a worktree directory exists for the item).
+func TestPoll_CleanupStageItemNotDeepFetched(t *testing.T) {
+	var fetchDetailsCalled bool
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{Number: 42, Title: "Old done item", Status: "Done"},
+				},
+			}, nil
+		},
+		fetchStatusFieldFn: func(projectID string) (*gh.StatusField, error) {
+			return &gh.StatusField{FieldID: "F1", Options: map[string]string{}}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			fetchDetailsCalled = true
+			return nil
+		},
+	}
+
+	// Create a real worktree directory so itemMayNeedWork's os.Stat check passes.
+	rootDir := t.TempDir()
+	worktreeDir := filepath.Join(rootDir, "issue-42")
+	if err := os.MkdirAll(worktreeDir, 0o755); err != nil {
+		t.Fatalf("create worktree dir: %v", err)
+	}
+	wm := NewWorktreeManagerWithRoot(t.TempDir(), rootDir)
+
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 1,
+			Stages:        testStagesWithCleanup(),
+		},
+		client,
+		&mockClaudeInvoker{},
+		wm,
+	)
+
+	if err := eng.poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	eng.wg.Wait()
+
+	if fetchDetailsCalled {
+		t.Error("FetchItemDetails must not be called for cleanup-stage items")
+	}
 }
 
 // TestProcessedSetConcurrency verifies that concurrent access to processedSet

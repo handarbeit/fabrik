@@ -1257,3 +1257,90 @@ func TestProcessItem_EmptyOutputWarningComment(t *testing.T) {
 		t.Errorf("warning comment should mention stage name %q, got: %s", "Research", warningComments[0])
 	}
 }
+
+// TestItemMayNeedWork_CleanupStage_NoWorktree verifies that itemMayNeedWork returns
+// false for a cleanup-stage item when no worktree directory exists on disk.
+func TestItemMayNeedWork_CleanupStage_NoWorktree(t *testing.T) {
+	// Engine with cleanup stages but WM points at a temp dir with no worktree inside.
+	rootDir := t.TempDir()
+	wm := NewWorktreeManagerWithRoot(t.TempDir(), rootDir)
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 1,
+			Stages:        testStagesWithCleanup(),
+		},
+		&mockGitHubClient{},
+		&mockClaudeInvoker{},
+		wm,
+	)
+
+	item := gh.ProjectItem{Number: 7, Title: "Old done item", Status: "Done"}
+	// No worktree dir for issue-7 — itemMayNeedWork must return false.
+	if eng.itemMayNeedWork(item) {
+		t.Error("itemMayNeedWork should return false when no worktree directory exists")
+	}
+}
+
+// TestItemMayNeedWork_CleanupStage_WithWorktree verifies that itemMayNeedWork returns
+// true for a cleanup-stage item when the worktree directory does exist on disk.
+func TestItemMayNeedWork_CleanupStage_WithWorktree(t *testing.T) {
+	rootDir := t.TempDir()
+	// Create the worktree directory for issue-7.
+	worktreeDir := filepath.Join(rootDir, "issue-7")
+	if err := os.MkdirAll(worktreeDir, 0o755); err != nil {
+		t.Fatalf("create worktree dir: %v", err)
+	}
+	wm := NewWorktreeManagerWithRoot(t.TempDir(), rootDir)
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 1,
+			Stages:        testStagesWithCleanup(),
+		},
+		&mockGitHubClient{},
+		&mockClaudeInvoker{},
+		wm,
+	)
+
+	item := gh.ProjectItem{Number: 7, Title: "Old done item", Status: "Done"}
+	// Worktree dir exists — itemMayNeedWork must return true.
+	if !eng.itemMayNeedWork(item) {
+		t.Error("itemMayNeedWork should return true when worktree directory exists")
+	}
+}
+
+// TestItemMayNeedWork_CleanupStage_NoWM verifies that itemMayNeedWork returns false
+// for a cleanup-stage item when no WorktreeManager is registered for the item's repo.
+// This prevents a panic (worktreesFor panics on unregistered repos) and correctly
+// indicates there is nothing to clean up.
+func TestItemMayNeedWork_CleanupStage_NoWM(t *testing.T) {
+	// NewWithDeps with nil WM leaves worktreeManagers empty.
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 1,
+			Stages:        testStagesWithCleanup(),
+		},
+		&mockGitHubClient{},
+		&mockClaudeInvoker{},
+		nil, // no WM registered
+	)
+
+	item := gh.ProjectItem{Number: 3, Title: "Old done item", Status: "Done"}
+	if eng.itemMayNeedWork(item) {
+		t.Error("itemMayNeedWork should return false when no WorktreeManager is registered")
+	}
+}
