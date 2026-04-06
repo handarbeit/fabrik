@@ -242,7 +242,7 @@ FABRIK_USER=my-personal-username
 | `--stages` | Directory containing stage YAML configs | `./.fabrik/stages` |
 | `--yolo` | Auto-advance issues through stages without human approval | `false` |
 | `--auto-upgrade` | When idle, self-upgrade from origin/main | `false` |
-| `--tui` | Enable the interactive TUI dashboard | `false` |
+| `--notui` | Disable the interactive TUI dashboard | TUI on by default |
 | `--plugin-dir` | Path to Fabrik plugin directory (overrides `.fabrik/plugin/`) | auto-detected |
 | `--poll` | Poll interval in seconds | `30` |
 | `--max-concurrent` | Maximum number of concurrent issue workers | `5` |
@@ -602,10 +602,10 @@ Model label precedence: `model:<name>` label > stage YAML `model` field > defaul
 
 ## 7. TUI Dashboard
 
-Enable the interactive terminal dashboard with `--tui`:
+The interactive terminal dashboard is enabled by default when running in a real terminal. To disable it, use `--notui`:
 
 ```bash
-./fabrik --tui --owner your-org --repo your-repo --project 1 --user you
+./fabrik --notui --owner your-org --repo your-repo --project 1 --user you
 ```
 
 ### Layout
@@ -660,7 +660,7 @@ fabrik watch 42 --owner myorg --repo myrepo --token ghp_...
 This opens a real-time terminal UI that shows:
 - Issue title, labels, and current stage
 - **Live Claude output** — streams from the `.log` file as Claude writes it (no polling)
-- **Stage history** — completed stages with duration and cost (requires `--tui` engine mode)
+- **Stage history** — completed stages with duration and cost
 - **PR status** — linked PR number, open/draft/merged state
 - **CI check results** — compact pass/fail/pending summary
 - **Comment count** — updates on each GitHub poll

@@ -173,7 +173,7 @@ version: "2.0.0"
 	if !pc.AutoUpgrade {
 		t.Error("auto_upgrade: want true")
 	}
-	if !pc.TUI {
+	if pc.TUI == nil || !*pc.TUI {
 		t.Error("tui: want true")
 	}
 	if pc.Terminal != "iTerm.app" {
@@ -228,6 +228,9 @@ func TestLoadProjectConfig_PointerFieldsAbsent(t *testing.T) {
 	}
 	if pc.MaxRetries != nil {
 		t.Error("max_retries: want nil when absent")
+	}
+	if pc.TUI != nil {
+		t.Error("tui: want nil when absent")
 	}
 }
 
