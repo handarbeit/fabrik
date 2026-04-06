@@ -125,3 +125,15 @@ func (c *Client) graphqlRequest(query string, variables map[string]interface{}, 
 
 	return json.Unmarshal(respBody, result)
 }
+
+// FetchLatestRelease calls GET /repos/{owner}/{repo}/releases/latest and returns
+// the tag name and asset list. Returns an error if the request fails or returns
+// a non-2xx status.
+func (c *Client) FetchLatestRelease(owner, repo string) (*LatestRelease, error) {
+	url := c.baseURL + "/repos/" + owner + "/" + repo + "/releases/latest"
+	var release LatestRelease
+	if err := c.restGetJSON(url, &release); err != nil {
+		return nil, fmt.Errorf("fetching latest release for %s/%s: %w", owner, repo, err)
+	}
+	return &release, nil
+}
