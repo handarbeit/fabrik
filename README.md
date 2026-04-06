@@ -8,6 +8,23 @@ are user input, and the board columns define the workflow.
 
 ## Quick Start
 
+**Option A: Install binary (requires `gh`)**
+
+```bash
+# Requires: gh auth login (with access to handarbeit/fabrik)
+cd ~/bin  # or any directory on your PATH
+gh release download --repo handarbeit/fabrik \
+  --pattern "fabrik_*_$(uname -s | tr A-Z a-z)_$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/').tar.gz" \
+  -O - | tar xz
+# Platform-specific alternatives:
+#   darwin/arm64:  --pattern "fabrik_*_darwin_arm64.tar.gz"
+#   darwin/amd64:  --pattern "fabrik_*_darwin_amd64.tar.gz"
+#   linux/amd64:   --pattern "fabrik_*_linux_amd64.tar.gz"
+#   linux/arm64:   --pattern "fabrik_*_linux_arm64.tar.gz"
+```
+
+**Option B: Build from source (requires Go)**
+
 ```bash
 # Build
 go build -o fabrik .
