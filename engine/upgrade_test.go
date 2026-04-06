@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,9 +39,9 @@ func TestSemverGreater(t *testing.T) {
 		{"1.0", "0.9.9", true},
 	}
 	for _, tc := range tests {
-		got := semverGreater(tc.a, tc.b)
+		got := SemverGreater(tc.a, tc.b)
 		if got != tc.want {
-			t.Errorf("semverGreater(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+			t.Errorf("SemverGreater(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
 		}
 	}
 }
@@ -173,7 +174,7 @@ func TestCheckReleaseUpgrade_DownloadAttempted(t *testing.T) {
 	}
 }
 
-// TestExtractBinaryFromTarball verifies that extractBinaryFromTarball correctly
+// TestExtractBinaryFromTarball verifies that ExtractBinaryFromTarball correctly
 // extracts the "fabrik" binary from a .tar.gz archive and returns an executable
 // temp file in the specified destination directory.
 func TestExtractBinaryFromTarball(t *testing.T) {
@@ -211,9 +212,9 @@ func TestExtractBinaryFromTarball(t *testing.T) {
 	}
 
 	destDir := t.TempDir()
-	outPath, err := extractBinaryFromTarball(tarballPath, destDir)
+	outPath, err := ExtractBinaryFromTarball(tarballPath, destDir)
 	if err != nil {
-		t.Fatalf("extractBinaryFromTarball returned error: %v", err)
+		t.Fatalf("ExtractBinaryFromTarball returned error: %v", err)
 	}
 
 	// Verify the output file is inside destDir.
@@ -240,7 +241,7 @@ func TestExtractBinaryFromTarball(t *testing.T) {
 	}
 }
 
-// TestExtractBinaryFromTarball_NotFound verifies that extractBinaryFromTarball
+// TestExtractBinaryFromTarball_NotFound verifies that ExtractBinaryFromTarball
 // returns an error when no entry named "fabrik" exists in the archive.
 func TestExtractBinaryFromTarball_NotFound(t *testing.T) {
 	tarball, err := os.CreateTemp(t.TempDir(), "test-*.tar.gz")
@@ -267,8 +268,100 @@ func TestExtractBinaryFromTarball_NotFound(t *testing.T) {
 	gw.Close()
 	tarball.Close()
 
-	_, err = extractBinaryFromTarball(tarballPath, t.TempDir())
+	_, err = ExtractBinaryFromTarball(tarballPath, t.TempDir())
 	if err == nil {
 		t.Error("expected error when fabrik binary not in tarball, got nil")
+	}
+}
+
+// TestPerformReleaseUpgrade_UpToDate verifies that when the running version
+// equals the latest release, PerformReleaseUpgrade returns without attempting
+// a download.
+func TestPerformReleaseUpgrade_UpToDate(t *testing.T) {
+	fetched := false
+	client := &mockGitHubClient{
+		fetchLatestReleaseFn: func(owner, repo string) (*gh.LatestRelease, error) {
+			fetched = true
+			return &gh.LatestRelease{TagName: "v1.2.3"}, nil
+		},
+	}
+	var logs []string
+	logf := func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+
+	PerformReleaseUpgrade(client, "v1.2.3", "", nil, logf)
+
+	if !fetched {
+		t.Error("expected FetchLatestRelease to be called")
+	}
+	if len(logs) != 0 {
+		t.Errorf("expected no log output for up-to-date version, got: %v", logs)
+	}
+}
+
+// TestPerformReleaseUpgrade_NoMatchingAsset verifies that when a newer release
+// exists but no asset matches the current GOOS/GOARCH, PerformReleaseUpgrade
+// logs a warning and returns without attempting a download.
+func TestPerformReleaseUpgrade_NoMatchingAsset(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLatestReleaseFn: func(owner, repo string) (*gh.LatestRelease, error) {
+			return &gh.LatestRelease{
+				TagName: "v9.9.9",
+				Assets: []gh.ReleaseAsset{
+					{Name: "fabrik_v9.9.9_plan9_arm.tar.gz", BrowserDownloadURL: "http://example.com/plan9.tar.gz"},
+				},
+			}, nil
+		},
+	}
+	var logs []string
+	logf := func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+
+	PerformReleaseUpgrade(client, "v0.0.1", "", nil, logf)
+
+	found := false
+	for _, l := range logs {
+		if strings.Contains(l, "no matching asset") || strings.Contains(l, "skipping") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected 'no matching asset' warning in logs, got: %v", logs)
+	}
+}
+
+// TestPerformReleaseUpgrade_DownloadAttempted verifies that when a newer
+// release exists and a platform-matching asset is found, the download server
+// is hit. The server returns 500 so the upgrade fails gracefully (no exec).
+func TestPerformReleaseUpgrade_DownloadAttempted(t *testing.T) {
+	downloaded := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		downloaded = true
+		http.Error(w, "test server error", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	matchingAsset := fmt.Sprintf("fabrik_v9.9.9_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	client := &mockGitHubClient{
+		fetchLatestReleaseFn: func(owner, repo string) (*gh.LatestRelease, error) {
+			return &gh.LatestRelease{
+				TagName: "v9.9.9",
+				Assets: []gh.ReleaseAsset{
+					{Name: matchingAsset, BrowserDownloadURL: srv.URL + "/asset.tar.gz"},
+				},
+			}, nil
+		},
+	}
+	var logs []string
+	logf := func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+
+	PerformReleaseUpgrade(client, "v0.0.1", "", nil, logf)
+
+	if !downloaded {
+		t.Error("download server was not hit even though a matching asset was provided")
 	}
 }

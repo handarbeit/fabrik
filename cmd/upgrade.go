@@ -5,14 +5,35 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/verveguy/fabrik/config"
+	"github.com/verveguy/fabrik/engine"
+	gh "github.com/verveguy/fabrik/github"
 	fabrikplugin "github.com/verveguy/fabrik/plugin"
 )
 
+// upgradeGitHubClient is the GitHub client used by runUpgrade. It can be
+// replaced in tests to avoid real network calls.
+var upgradeGitHubClient engine.GitHubClient
+
 // runUpgrade implements the `fabrik upgrade` subcommand.
-// It refreshes the plugin skills in .fabrik/plugin/ from the embedded defaults,
-// always overwriting existing files. Does not touch stages or config.yaml.
+// For release builds it first checks for a newer binary, downloads and
+// atomically replaces it if found, then re-execs so the new binary's embedded
+// skills are extracted. Dev builds skip the binary check and only refresh
+// plugin skills from the current binary's embedded defaults.
 func runUpgrade(args []string) error {
+	if !strings.HasPrefix(Version, "dev") {
+		token := config.Token()
+		client := upgradeGitHubClient
+		if client == nil {
+			client = gh.NewClient(token)
+		}
+		engine.PerformReleaseUpgrade(client, Version, token, nil, func(format string, args ...any) {
+			fmt.Printf(format, args...)
+		})
+	}
+
 	wrote, err := refreshPlugin()
 	if err != nil {
 		return err
