@@ -13,6 +13,105 @@ import (
 	"github.com/verveguy/fabrik/streamfilter"
 )
 
+// stageTab represents a single tab in the stage tab bar.
+type stageTab struct {
+	Label   string // stage name parsed from log filename
+	LogPath string // path to the newest log file for this label
+	IsLive  bool   // true if this is the globally newest log file
+}
+
+// stageNameFromFilename extracts the stage label from a log filename.
+// Format: <safeLabel>-<yyyyMMdd-HHmmss>-<nanos>.log
+// Returns everything before the first 8-digit all-numeric date segment.
+func stageNameFromFilename(name string) string {
+	base := strings.TrimSuffix(name, ".log")
+	parts := strings.Split(base, "-")
+	var label []string
+	for _, p := range parts {
+		if len(p) == 8 && isAllDigits(p) {
+			break
+		}
+		label = append(label, p)
+	}
+	return strings.Join(label, "-")
+}
+
+func isAllDigits(s string) bool {
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// buildStageTabs scans logDir, groups .log files by stage label, picks the
+// newest log per label, sorts groups chronologically by their newest file, and
+// marks the globally newest as IsLive. Returns an empty slice if logDir is
+// unreadable or empty.
+func buildStageTabs(logDir string) []stageTab {
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		return nil
+	}
+
+	// newestPerLabel maps label -> newest filename (lexicographic = chronological)
+	newestPerLabel := make(map[string]string)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".log") {
+			continue
+		}
+		label := stageNameFromFilename(e.Name())
+		if label == "" {
+			continue
+		}
+		if e.Name() > newestPerLabel[label] {
+			newestPerLabel[label] = e.Name()
+		}
+	}
+	if len(newestPerLabel) == 0 {
+		return nil
+	}
+
+	// Build tabs slice and sort by newest filename (chronological).
+	tabs := make([]stageTab, 0, len(newestPerLabel))
+	for label, filename := range newestPerLabel {
+		tabs = append(tabs, stageTab{
+			Label:   label,
+			LogPath: filepath.Join(logDir, filename),
+		})
+	}
+	sort.Slice(tabs, func(i, j int) bool {
+		return filepath.Base(tabs[i].LogPath) < filepath.Base(tabs[j].LogPath)
+	})
+
+	// Mark the globally newest tab as live.
+	if len(tabs) > 0 {
+		tabs[len(tabs)-1].IsLive = true
+	}
+	return tabs
+}
+
+// renderLogFile reads the log file at path, renders each NDJSON line via
+// streamfilter.RenderLine, and returns the joined result ready for viewport display.
+func renderLogFile(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	var b strings.Builder
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := append(scanner.Bytes(), '\n')
+		if rendered := streamfilter.RenderLine(line); rendered != "" {
+			b.WriteString(rendered)
+		}
+	}
+	return b.String()
+}
+
 // StartLogFollower launches two goroutines:
 //  1. A file-follow goroutine that reads the newest .log file in logDir in
 //     real time, calling send(LogLineMsg) for each rendered line.
