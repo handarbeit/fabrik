@@ -60,7 +60,7 @@ func TestRefreshPlugin_WritesFiles(t *testing.T) {
 // ── init buildConfigWithValues ────────────────────────────────────────────────
 
 func TestBuildConfigWithValues_AllFields(t *testing.T) {
-	result := buildConfigWithValues("myorg", "myrepo", "42", "myuser")
+	result := buildConfigWithValues("myorg", "myrepo", "42", "", "myuser")
 
 	if !strings.Contains(result, "owner: myorg") {
 		t.Errorf("owner not in output: %s", result)
@@ -77,7 +77,7 @@ func TestBuildConfigWithValues_AllFields(t *testing.T) {
 }
 
 func TestBuildConfigWithValues_EmptyFields_KeepsComments(t *testing.T) {
-	result := buildConfigWithValues("", "", "", "")
+	result := buildConfigWithValues("", "", "", "", "")
 
 	// Empty strings should leave commented lines untouched
 	if strings.Contains(result, "owner: ") && !strings.Contains(result, "# owner:") {
@@ -90,7 +90,7 @@ func TestBuildConfigWithValues_EmptyFields_KeepsComments(t *testing.T) {
 }
 
 func TestBuildConfigWithValues_PartialFields(t *testing.T) {
-	result := buildConfigWithValues("acme", "", "5", "")
+	result := buildConfigWithValues("acme", "", "5", "", "")
 
 	if !strings.Contains(result, "owner: acme") {
 		t.Errorf("owner not replaced: %s", result)
@@ -231,7 +231,7 @@ func TestWriteConfigTemplate_CreatesNewFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := writeConfigTemplate(false); err != nil {
+	if err := writeConfigTemplate("", "", "", "", false); err != nil {
 		t.Fatalf("writeConfigTemplate: %v", err)
 	}
 	content, err := os.ReadFile(".fabrik/config.yaml")
