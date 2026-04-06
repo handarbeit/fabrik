@@ -109,7 +109,6 @@ func TestExecute_EnvYolo(t *testing.T) {
 	executeAndStop(t)
 }
 
-
 func TestExecute_EnvMaxRetries_Valid(t *testing.T) {
 	dir, stagesDir := setupValidStages(t)
 	chdirTest(t, dir)
