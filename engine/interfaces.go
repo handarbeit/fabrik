@@ -9,7 +9,7 @@ import (
 
 // GitHubClient defines the GitHub operations needed by the engine.
 type GitHubClient interface {
-	FetchProjectBoard(owner, repo string, projectNum int) (*gh.ProjectBoard, error)
+	FetchProjectBoard(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error)
 	FetchItemDetails(item *gh.ProjectItem) error
 	FetchStatusField(projectID string) (*gh.StatusField, error)
 	FetchLabels(owner, repo string, issueNumber int) ([]string, error)

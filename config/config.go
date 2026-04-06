@@ -16,6 +16,7 @@ type ProjectConfig struct {
 	Owner         string `yaml:"owner"`
 	Repo          string `yaml:"repo"`
 	ProjectNum    *int   `yaml:"project"`
+	OwnerType     string `yaml:"owner_type"`
 	User          string `yaml:"user"`
 	StagesDir     string `yaml:"stages"`
 	Poll          *int   `yaml:"poll"`

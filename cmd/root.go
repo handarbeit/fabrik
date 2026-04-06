@@ -25,6 +25,7 @@ type Config struct {
 	Owner         string
 	Repo          string
 	ProjectNum    int
+	OwnerType     string
 	User          string
 	Token         string
 	StagesDir     string
@@ -144,6 +145,10 @@ func Execute() error {
 		} else if pc.User != "" {
 			cfg.User = pc.User
 		}
+	}
+	// OwnerType is derived at init time from the project URL; no env var or flag.
+	if cfg.OwnerType == "" && pc.OwnerType != "" {
+		cfg.OwnerType = pc.OwnerType
 	}
 	if cfg.StagesDir == "./.fabrik/stages" {
 		if v := os.Getenv("FABRIK_STAGES"); v != "" {
@@ -307,6 +312,7 @@ func Execute() error {
 		Owner:         cfg.Owner,
 		Repo:          cfg.Repo,
 		ProjectNum:    cfg.ProjectNum,
+		OwnerType:     cfg.OwnerType,
 		User:          cfg.User,
 		Token:         cfg.Token,
 		Version:       Version,

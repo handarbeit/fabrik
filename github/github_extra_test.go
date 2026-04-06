@@ -420,7 +420,7 @@ func TestFetchProjectBoard_OrgFailsFallsBackToUser(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("token", srv.URL)
-	board, err := c.FetchProjectBoard("userorg", "repo", 1)
+	board, err := c.FetchProjectBoard("userorg", "repo", 1, "")
 	if err != nil {
 		t.Fatalf("FetchProjectBoard: %v", err)
 	}
@@ -483,7 +483,7 @@ func TestFetchProjectBoard_RepoFieldParsed(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("token", srv.URL)
-	board, err := c.FetchProjectBoard("acme", "myrepo", 1)
+	board, err := c.FetchProjectBoard("acme", "myrepo", 1, "")
 	if err != nil {
 		t.Fatalf("FetchProjectBoard: %v", err)
 	}
