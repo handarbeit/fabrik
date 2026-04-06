@@ -17,20 +17,20 @@ import (
 
 // HistoryEntry records a completed job for the history pane.
 type HistoryEntry struct {
-	IssueNumber int
-	Repo        string // "owner/repo" — empty for single-repo projects
-	Title       string
-	StageName   string
-	StageModel  string // model configured for the stage; empty means use claude default
-	IsComment   bool
+	IssueNumber    int
+	Repo           string // "owner/repo" — empty for single-repo projects
+	Title          string
+	StageName      string
+	StageModel     string // model configured for the stage; empty means use claude default
+	IsComment      bool
 	Success        bool
 	Completed      bool
 	BlockedOnInput bool
-	Duration    time.Duration
-	CompletedAt time.Time
-	TurnsUsed   int
-	MaxTurns    int
-	CostUSD     float64
+	Duration       time.Duration
+	CompletedAt    time.Time
+	TurnsUsed      int
+	MaxTurns       int
+	CostUSD        float64
 }
 
 // activeJob tracks an in-flight worker.
@@ -149,11 +149,11 @@ func New(pollSeconds int, info ProjectInfo, terminal string, pluginDir string) M
 		active:         make(map[string]*activeJob),
 		activeNumToKey: make(map[int]string),
 		history:        LoadHistory(),
-		historyVP:     vp,
-		spinnerFrames: []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"},
-		now:           time.Now(),
-		terminal:      terminal,
-		pluginDir:     pluginDir,
+		historyVP:      vp,
+		spinnerFrames:  []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"},
+		now:            time.Now(),
+		terminal:       terminal,
+		pluginDir:      pluginDir,
 	}
 }
 
@@ -340,20 +340,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			delete(m.activeNumToKey, ev.IssueNumber)
 		}
 		entry := HistoryEntry{
-			IssueNumber: ev.IssueNumber,
-			Repo:        ev.Repo,
-			Title:       ev.Title,
-			StageName:   ev.StageName,
-			StageModel:  ev.StageModel,
-			IsComment:   ev.IsComment,
+			IssueNumber:    ev.IssueNumber,
+			Repo:           ev.Repo,
+			Title:          ev.Title,
+			StageName:      ev.StageName,
+			StageModel:     ev.StageModel,
+			IsComment:      ev.IsComment,
 			Success:        ev.Success,
 			Completed:      ev.Completed,
 			BlockedOnInput: ev.BlockedOnInput,
-			Duration:    ev.Duration,
-			CompletedAt: ev.CompletedAt,
-			TurnsUsed:   ev.TurnsUsed,
-			MaxTurns:    ev.MaxTurns,
-			CostUSD:     ev.CostUSD,
+			Duration:       ev.Duration,
+			CompletedAt:    ev.CompletedAt,
+			TurnsUsed:      ev.TurnsUsed,
+			MaxTurns:       ev.MaxTurns,
+			CostUSD:        ev.CostUSD,
 		}
 		m.history = append(m.history, entry)
 		SaveHistory(m.history)
@@ -575,7 +575,9 @@ func (m Model) viewActive() string {
 		if start+maxLines > len(lines) {
 			start = max(len(lines)-maxLines, 0)
 		}
-		if start > 0 || start+maxLines < len(keys) { maxLines-- }
+		if start > 0 || start+maxLines < len(keys) {
+			maxLines--
+		}
 		lines = lines[start : start+maxLines]
 		if start > 0 || start+maxLines < len(keys) {
 			lines = append(lines, dimStyle.Render(fmt.Sprintf("  … %d more", len(keys)-maxLines)))
@@ -652,7 +654,9 @@ func footerHeight() int {
 // Capped to avoid pushing history off screen on small terminals.
 func activeHeight(n int) int {
 	base := max(n+1, 2) + 2
-	if base > 10 { return 11 }
+	if base > 10 {
+		return 11
+	}
 	return base
 }
 
