@@ -289,7 +289,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				realIdx := len(m.history) - 1 - m.histIdx
 				if realIdx >= 0 && realIdx < len(m.history) {
 					h := m.history[realIdx]
-					return m, m.openResumeCmd(h.IssueNumber, h.StageName, h.StageModel)
+					return m, m.openResumeCmd(h.Repo, h.IssueNumber, h.StageName, h.StageModel)
 				}
 			}
 			return m, nil
@@ -707,22 +707,18 @@ func logDirForHistory(h HistoryEntry) string {
 	return logDirForIssue(h.Repo, h.IssueNumber)
 }
 
-// logDirForIssue returns the log directory for an issue. Tries the repo-namespaced
-// path first (~/.fabrik/logs/<owner>-<repo>/issue-N/), falls back to the legacy
-// flat path (~/.fabrik/logs/issue-N/) for backward compatibility.
+// logDirForIssue returns the log directory for an issue.
+// Uses the repo-namespaced path (~/.fabrik/logs/<owner>-<repo>/issue-N/) when
+// repo is non-empty, otherwise the flat path (~/.fabrik/logs/issue-N/).
 func logDirForIssue(repo string, issueNumber int) string {
 	home := homeDir()
 	issuePart := fmt.Sprintf("issue-%d", issueNumber)
 
 	if repo != "" {
 		repoPart := strings.ReplaceAll(repo, "/", "-")
-		namespaced := filepath.Join(home, ".fabrik", "logs", repoPart, issuePart)
-		if _, err := os.Stat(namespaced); err == nil {
-			return namespaced
-		}
+		return filepath.Join(home, ".fabrik", "logs", repoPart, issuePart)
 	}
 
-	// Fall back to legacy flat path (engine still writes here)
 	return filepath.Join(home, ".fabrik", "logs", issuePart)
 }
 
@@ -772,17 +768,23 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// tuiReadSessionID reads the Claude session ID for a given issue and stage.
+// tuiReadSessionID reads the Claude session ID for a given repo, issue and stage.
 // The path logic mirrors engine.ReadSessionID — keep in sync if either changes.
-func tuiReadSessionID(issueNumber int, stageName string) string {
+func tuiReadSessionID(repo string, issueNumber int, stageName string) string {
 	home, _ := os.UserHomeDir()
 	base := filepath.Base(stageName)
 	if base == "" || base == "." || base == "/" || base == string(filepath.Separator) {
 		base = "default"
 	}
-	path := filepath.Join(home, ".fabrik", "sessions",
-		fmt.Sprintf("issue-%d", issueNumber), base+".session")
-	data, err := os.ReadFile(path)
+	issuePart := fmt.Sprintf("issue-%d", issueNumber)
+	var sessDir string
+	if repo != "" {
+		repoPart := strings.ReplaceAll(repo, "/", "-")
+		sessDir = filepath.Join(home, ".fabrik", "sessions", repoPart, issuePart)
+	} else {
+		sessDir = filepath.Join(home, ".fabrik", "sessions", issuePart)
+	}
+	data, err := os.ReadFile(filepath.Join(sessDir, base+".session"))
 	if err != nil {
 		return ""
 	}
@@ -793,7 +795,7 @@ func tuiReadSessionID(issueNumber int, stageName string) string {
 // interactive Claude session in the issue's worktree. If a session file exists
 // for the given stage, --resume <id> is passed; otherwise a fresh session starts.
 // If the worktree directory does not exist, an error terminal window is opened.
-func (m Model) openResumeCmd(issueNumber int, stageName, stageModel string) tea.Cmd {
+func (m Model) openResumeCmd(repo string, issueNumber int, stageName, stageModel string) tea.Cmd {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return nil
@@ -809,7 +811,7 @@ func (m Model) openResumeCmd(issueNumber int, stageName, stageModel string) tea.
 	// Build the command with properly shell-quoted arguments to handle paths
 	// with spaces or shell metacharacters.
 	parts := []string{"claude"}
-	sessionID := tuiReadSessionID(issueNumber, stageName)
+	sessionID := tuiReadSessionID(repo, issueNumber, stageName)
 	if sessionID != "" {
 		parts = append(parts, "--resume", shellQuote(sessionID))
 	}

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -123,6 +124,20 @@ func LogDir(issueNumber int) string {
 	return filepath.Join(home, ".fabrik", "logs", fmt.Sprintf("issue-%d", issueNumber))
 }
 
+// logDirForItem returns the log directory for an issue, namespaced by repo when
+// item.Repo is set (multi-repo mode). The path is:
+//   - single-repo: ~/.fabrik/logs/issue-N/
+//   - multi-repo:  ~/.fabrik/logs/<owner>-<repo>/issue-N/
+func logDirForItem(issue gh.ProjectItem) string {
+	home, _ := os.UserHomeDir()
+	issuePart := fmt.Sprintf("issue-%d", issue.Number)
+	if issue.Repo == "" {
+		return filepath.Join(home, ".fabrik", "logs", issuePart)
+	}
+	repoPart := strings.ReplaceAll(issue.Repo, "/", "-")
+	return filepath.Join(home, ".fabrik", "logs", repoPart, issuePart)
+}
+
 // sessionFile returns the path to the session ID file for a given issue+stage.
 // stageName is sanitized to prevent path traversal: filepath.Base strips directory
 // components, and an additional check rejects names that are empty, ".", or the
@@ -135,11 +150,25 @@ func sessionFile(issueNumber int, stageName string) string {
 	return filepath.Join(SessionDir(issueNumber), base+".session")
 }
 
-// ReadSessionID reads the session ID for a given issue and stage name.
+// ReadSessionID reads the session ID for a given repo, issue, and stage name.
+// repo should be "owner/repo" for multi-repo projects, or "" for single-repo.
 // Returns the session ID string, or empty string if the file does not exist,
 // is unreadable, or is empty.
-func ReadSessionID(issueNumber int, stageName string) string {
-	data, err := os.ReadFile(sessionFile(issueNumber, stageName))
+func ReadSessionID(repo string, issueNumber int, stageName string) string {
+	base := filepath.Base(stageName)
+	if base == "" || base == "." || base == "/" || base == string(filepath.Separator) {
+		base = "default"
+	}
+	home, _ := os.UserHomeDir()
+	issuePart := fmt.Sprintf("issue-%d", issueNumber)
+	var sessDir string
+	if repo == "" {
+		sessDir = filepath.Join(home, ".fabrik", "sessions", issuePart)
+	} else {
+		repoPart := strings.ReplaceAll(repo, "/", "-")
+		sessDir = filepath.Join(home, ".fabrik", "sessions", repoPart, issuePart)
+	}
+	data, err := os.ReadFile(filepath.Join(sessDir, base+".session"))
 	if err != nil {
 		return ""
 	}
@@ -159,10 +188,13 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 		return "", false, TokenUsage{}, fmt.Errorf("setting session dir permissions: %w", err)
 	}
 
-	prompt := buildPrompt(stage, issue, newComments)
-	args := buildClaudeArgs(stage, issue.Number, resume, modelOverride, stage.MaxTurns)
+	sessFilePath := filepath.Join(sessDir, filepath.Base(stage.Name)+".session")
+	ld := logDirForItem(issue)
 
-	output, _, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name)
+	prompt := buildPrompt(stage, issue, newComments)
+	args := buildClaudeArgs(stage, sessFilePath, resume, modelOverride, stage.MaxTurns)
+
+	output, _, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, sessFilePath, ld)
 	usage.MaxTurns = stage.MaxTurns
 	if err != nil {
 		return output, false, usage, err
@@ -182,11 +214,14 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 		return "", false, TokenUsage{}, fmt.Errorf("setting session dir permissions: %w", err)
 	}
 
+	sessFilePath := filepath.Join(sessDir, filepath.Base(stage.Name)+".session")
+	ld := logDirForItem(issue)
+
 	prompt := buildCommentReviewPrompt(stage, issue, comments)
 	limit := commentMaxTurns(stage)
-	args := buildClaudeArgs(stage, issue.Number, true, modelOverride, limit) // resume existing session
+	args := buildClaudeArgs(stage, sessFilePath, true, modelOverride, limit) // resume existing session
 
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review")
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", sessFilePath, ld)
 	usage.MaxTurns = limit
 	return output, completed, usage, err
 }
@@ -205,7 +240,7 @@ func commentMaxTurns(stage *stages.Stage) int {
 	return 50
 }
 
-func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOverride string, maxTurns int) []string {
+func buildClaudeArgs(stage *stages.Stage, sessFilePath string, resume bool, modelOverride string, maxTurns int) []string {
 	args := []string{
 		"--output-format", "stream-json",
 		"--verbose",
@@ -215,9 +250,8 @@ func buildClaudeArgs(stage *stages.Stage, issueNumber int, resume bool, modelOve
 		args = append(args, "--plugin-dir", claudePluginDir)
 	}
 
-	sessFile := sessionFile(issueNumber, stage.Name)
 	if resume {
-		if sessionID, err := os.ReadFile(sessFile); err == nil && len(sessionID) > 0 {
+		if sessionID, err := os.ReadFile(sessFilePath); err == nil && len(sessionID) > 0 {
 			args = append(args, "--resume", strings.TrimSpace(string(sessionID)))
 		}
 	}
@@ -264,7 +298,7 @@ type claudeResponse struct {
 	} `json:"usage"`
 }
 
-func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string) (string, bool, TokenUsage, error) {
+func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, sessFilePath string, logDir string) (string, bool, TokenUsage, error) {
 	claudeLog(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
 
 	// Set up stderr: in TUI mode discard; in plain mode forward to os.Stderr.
@@ -283,7 +317,6 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	stdoutWriter = &stdout
 
 	safeLabel := strings.NewReplacer("/", "-", "\\", "-", ":", "-", " ", "-").Replace(label)
-	logDir := LogDir(issueNumber)
 	if err := os.MkdirAll(logDir, 0700); err != nil {
 		claudeLog(issueNumber, "warn", "could not create log dir: %v\n", err)
 	} else if err := os.Chmod(logDir, 0700); err != nil {
@@ -318,9 +351,6 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 		}
 	}
 
-	baseName := strings.TrimSuffix(label, "-comment-review")
-	sessFilePath := sessionFile(issueNumber, baseName)
-
 	resp, ok := parseClaudeJSON(bytes.TrimSpace(rawOutput))
 	var text string
 	var usage TokenUsage
@@ -347,7 +377,7 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 		saveSessionIDDirect(sessFilePath, resp.SessionID)
 	} else {
 		claudeLog(issueNumber, "warn", "JSON parse failed (%d bytes); output not posted\n", len(rawOutput))
-		text = fmt.Sprintf("⚠️ Claude output could not be parsed (raw output was %d bytes). Check logs at `~/.fabrik/logs/issue-%d/` for details.", len(rawOutput), issueNumber)
+		text = fmt.Sprintf("⚠️ Claude output could not be parsed (raw output was %d bytes). Check logs at `%s` for details.", len(rawOutput), logDir)
 	}
 
 	if runErr != nil {
@@ -676,6 +706,117 @@ func tokenUsageFromResponse(resp claudeResponse) TokenUsage {
 		usage.OutputTokens = resp.Usage.OutputTokens
 	}
 	return usage
+}
+
+// migrateSessions scans sessionRoot for old-style issue-N/ directories and moves
+// each one to the per-repo layout <dirName>/issue-N/ using os.Rename.
+// It reads the git remote from the corresponding worktree under worktreeRoot to
+// determine the target repo. Must be called after migrateWorktrees so that
+// namespaced worktree paths exist.
+// logfn is optional; pass nil to suppress output.
+func migrateSessions(sessionRoot, worktreeRoot string, logfn func(string)) {
+	entries, err := os.ReadDir(sessionRoot)
+	if err != nil {
+		return // no sessions directory yet
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		// Old-style entries match issue-N pattern.
+		if len(name) < 7 || name[:6] != "issue-" {
+			continue
+		}
+		// Parse the issue number from the dir name for the worktree scan.
+		issueNumStr := name[6:]
+		if _, err := strconv.Atoi(issueNumStr); err != nil {
+			continue // not a valid issue number
+		}
+		oldPath := filepath.Join(sessionRoot, name)
+
+		// Search two levels deep in worktreeRoot for a matching issue-N/ subdir.
+		// After migrateWorktrees, layout is: worktreeRoot/<owner-repo>/issue-N/
+		wtDir := findWorktreeForIssue(worktreeRoot, name)
+		if wtDir == "" {
+			if logfn != nil {
+				logfn(fmt.Sprintf("warn: no worktree found for session %s — leaving in place\n", oldPath))
+			}
+			continue
+		}
+
+		// Read the git remote to determine the repo.
+		cmd := exec.Command("git", "remote", "get-url", "origin")
+		cmd.Dir = wtDir
+		out, err := cmd.Output()
+		if err != nil {
+			if logfn != nil {
+				logfn(fmt.Sprintf("warn: cannot read remote for worktree %s — leaving session %s in place\n", wtDir, oldPath))
+			}
+			continue
+		}
+		remoteURL := strings.TrimSpace(string(out))
+		dirName := ownerRepoDirFromURL(remoteURL)
+		if dirName == "" {
+			if logfn != nil {
+				logfn(fmt.Sprintf("warn: cannot parse repo from remote URL %q for %s — leaving session %s in place\n", remoteURL, wtDir, oldPath))
+			}
+			continue
+		}
+
+		newDir := filepath.Join(sessionRoot, dirName)
+		newPath := filepath.Join(newDir, name)
+
+		if _, err := os.Stat(newPath); err == nil {
+			if logfn != nil {
+				logfn(fmt.Sprintf("warn: migration target %s already exists — skipping %s\n", newPath, oldPath))
+			}
+			continue
+		}
+
+		if err := os.MkdirAll(newDir, 0700); err != nil {
+			if logfn != nil {
+				logfn(fmt.Sprintf("warn: cannot create dir %s: %v\n", newDir, err))
+			}
+			continue
+		}
+
+		if err := os.Rename(oldPath, newPath); err != nil {
+			if logfn != nil {
+				logfn(fmt.Sprintf("warn: rename %s → %s failed: %v\n", oldPath, newPath, err))
+			}
+			continue
+		}
+		if logfn != nil {
+			logfn(fmt.Sprintf("migrated session %s → %s\n", oldPath, newPath))
+		}
+	}
+}
+
+// findWorktreeForIssue searches two levels deep in worktreeRoot for a directory
+// named issueDirName (e.g. "issue-42"). Returns the full path if found, or "".
+func findWorktreeForIssue(worktreeRoot, issueDirName string) string {
+	// Check direct child first (old-style, should not exist after migrateWorktrees).
+	direct := filepath.Join(worktreeRoot, issueDirName)
+	if fi, err := os.Stat(direct); err == nil && fi.IsDir() {
+		return direct
+	}
+	// Scan one level of subdirs (the per-repo namespaced dirs).
+	repoDirs, err := os.ReadDir(worktreeRoot)
+	if err != nil {
+		return ""
+	}
+	for _, repoDir := range repoDirs {
+		if !repoDir.IsDir() {
+			continue
+		}
+		candidate := filepath.Join(worktreeRoot, repoDir.Name(), issueDirName)
+		if fi, err := os.Stat(candidate); err == nil && fi.IsDir() {
+			return candidate
+		}
+	}
+	return ""
 }
 
 // saveSessionIDDirect saves a known session ID to disk for future resumption.
