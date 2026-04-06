@@ -295,7 +295,6 @@ func TestUpdate_RKey_HistoryPane_NoEntries_NoOp(t *testing.T) {
 	}
 }
 
-
 func TestView_BeforeWindowSize(t *testing.T) {
 	m := New(30, ProjectInfo{}, "")
 	// Before width is set, View should return a loading placeholder without panicking
@@ -391,7 +390,6 @@ func TestViewFooter_Truncation(t *testing.T) {
 		t.Errorf("expected truncation ellipsis in narrow footer; got: %q", footer)
 	}
 }
-
 
 // TestLayoutHeightInvariant verifies that the total rendered height of View()
 // equals m.height for various numbers of active jobs. This ensures the header
@@ -518,7 +516,6 @@ func TestViewHeader_WidthNeverExceedsTerminal(t *testing.T) {
 		})
 	}
 }
-
 
 // TestInit verifies Init returns a non-nil cmd (the initial tick).
 func TestInit(t *testing.T) {
