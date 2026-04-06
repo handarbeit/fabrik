@@ -667,11 +667,11 @@ func (m WatchModel) openClaudeInlineCmd() tea.Cmd {
 
 // Styles
 var (
-	headerStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
-	sectionStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
+	headerStyle        = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
+	sectionStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
 	activeSectionStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214"))
-	dimStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
-	successStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
-	failStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	activeStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	dimStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	successStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	failStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	activeStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 )
