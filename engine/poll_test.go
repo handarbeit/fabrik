@@ -12,7 +12,7 @@ import (
 
 func TestPoll_FetchesBoardAndProcessesItems(t *testing.T) {
 	client := &mockGitHubClient{
-		fetchProjectBoardFn: func(owner, repo string, projectNum int) (*gh.ProjectBoard, error) {
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{
 				ProjectID: "PVT_1",
 				Items: []gh.ProjectItem{
@@ -41,7 +41,7 @@ func TestPoll_FetchesBoardAndProcessesItems(t *testing.T) {
 
 func TestPoll_Error(t *testing.T) {
 	client := &mockGitHubClient{
-		fetchProjectBoardFn: func(owner, repo string, projectNum int) (*gh.ProjectBoard, error) {
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return nil, fmt.Errorf("network error")
 		},
 	}
@@ -55,7 +55,7 @@ func TestPoll_Error(t *testing.T) {
 
 func TestPoll_StatusFieldFetchError(t *testing.T) {
 	client := &mockGitHubClient{
-		fetchProjectBoardFn: func(owner, repo string, projectNum int) (*gh.ProjectBoard, error) {
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{ProjectID: "PVT_1", Items: nil}, nil
 		},
 		fetchStatusFieldFn: func(projectID string) (*gh.StatusField, error) {
@@ -76,7 +76,7 @@ func TestPoll_StatusFieldFetchError(t *testing.T) {
 
 func TestPoll_StatusFieldAlreadySet(t *testing.T) {
 	client := &mockGitHubClient{
-		fetchProjectBoardFn: func(owner, repo string, projectNum int) (*gh.ProjectBoard, error) {
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{ProjectID: "PVT_1"}, nil
 		},
 		fetchStatusFieldFn: func(projectID string) (*gh.StatusField, error) {
@@ -92,7 +92,7 @@ func TestPoll_StatusFieldAlreadySet(t *testing.T) {
 
 func TestPoll_EmptyProjectID(t *testing.T) {
 	client := &mockGitHubClient{
-		fetchProjectBoardFn: func(owner, repo string, projectNum int) (*gh.ProjectBoard, error) {
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{ProjectID: ""}, nil
 		},
 		fetchStatusFieldFn: func(projectID string) (*gh.StatusField, error) {
@@ -108,7 +108,7 @@ func TestPoll_EmptyProjectID(t *testing.T) {
 func TestPoll_RateLimitLogging(t *testing.T) {
 	resetTime := time.Now().Add(time.Hour)
 	client := &mockGitHubClient{
-		fetchProjectBoardFn: func(owner, repo string, projectNum int) (*gh.ProjectBoard, error) {
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{ProjectID: "PVT_1"}, nil
 		},
 		rateLimitStatsFn: func() (gh.RateLimitStats, gh.RateLimitStats) {
@@ -128,7 +128,7 @@ func TestPoll_RateLimitLogging(t *testing.T) {
 func TestPoll_RateLimitLogging_ZeroReset(t *testing.T) {
 	// Verify poll() handles a zero Reset (header absent) gracefully — no panic, no "00:00 UTC".
 	client := &mockGitHubClient{
-		fetchProjectBoardFn: func(owner, repo string, projectNum int) (*gh.ProjectBoard, error) {
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{ProjectID: "PVT_1"}, nil
 		},
 		rateLimitStatsFn: func() (gh.RateLimitStats, gh.RateLimitStats) {
@@ -145,7 +145,7 @@ func TestPoll_RateLimitLogging_ZeroReset(t *testing.T) {
 
 func TestPoll_ProcessItemError(t *testing.T) {
 	client := &mockGitHubClient{
-		fetchProjectBoardFn: func(owner, repo string, projectNum int) (*gh.ProjectBoard, error) {
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{
 				ProjectID: "PVT_1",
 				Items: []gh.ProjectItem{

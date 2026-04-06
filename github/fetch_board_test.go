@@ -54,7 +54,7 @@ func TestFetchProjectBoard_Success(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("token", srv.URL)
-	board, err := c.FetchProjectBoard("owner", "repo", 1)
+	board, err := c.FetchProjectBoard("owner", "repo", 1, "")
 	if err != nil {
 		t.Fatalf("FetchProjectBoard: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestFetchProjectBoard_SkipsNonIssues(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("token", srv.URL)
-	board, err := c.FetchProjectBoard("owner", "repo", 1)
+	board, err := c.FetchProjectBoard("owner", "repo", 1, "")
 	if err != nil {
 		t.Fatalf("FetchProjectBoard: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestFetchProjectBoard_NoStatus(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("token", srv.URL)
-	board, err := c.FetchProjectBoard("owner", "repo", 1)
+	board, err := c.FetchProjectBoard("owner", "repo", 1, "")
 	if err != nil {
 		t.Fatalf("FetchProjectBoard: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestFetchProjectBoard_NilAuthor(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("token", srv.URL)
-	board, err := c.FetchProjectBoard("owner", "repo", 1)
+	board, err := c.FetchProjectBoard("owner", "repo", 1, "")
 	if err != nil {
 		t.Fatalf("FetchProjectBoard: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestFetchProjectBoard_APIError(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("bad-token", srv.URL)
-	_, err := c.FetchProjectBoard("owner", "repo", 1)
+	_, err := c.FetchProjectBoard("owner", "repo", 1, "")
 	if err == nil {
 		t.Fatal("expected error for 401 response")
 	}
@@ -304,7 +304,7 @@ func TestFetchProjectBoard_ItemsPagination(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("token", srv.URL)
-	board, err := c.FetchProjectBoard("owner", "repo", 1)
+	board, err := c.FetchProjectBoard("owner", "repo", 1, "")
 	if err != nil {
 		t.Fatalf("FetchProjectBoard: %v", err)
 	}
@@ -379,7 +379,7 @@ func TestFetchProjectBoard_LabelOverflow(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("token", srv.URL)
-	board, err := c.FetchProjectBoard("owner", "repo", 1)
+	board, err := c.FetchProjectBoard("owner", "repo", 1, "")
 	if err != nil {
 		t.Fatalf("FetchProjectBoard: %v", err)
 	}

@@ -19,7 +19,7 @@ func TestPoll_MultiRepoFilter_SkipsOtherRepos(t *testing.T) {
 		deepFetchedNumbers []int
 	)
 	client := &mockGitHubClient{
-		fetchProjectBoardFn: func(owner, repo string, projectNum int) (*gh.ProjectBoard, error) {
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{
 				ProjectID: "PVT_1",
 				Items: []gh.ProjectItem{
@@ -66,7 +66,7 @@ func TestPoll_MultiRepoFilter_SkipsOtherRepos(t *testing.T) {
 func TestPoll_MultiRepoFilter_YoloCatchup_SkipsOtherRepos(t *testing.T) {
 	var advancedItems []string
 	client := &mockGitHubClient{
-		fetchProjectBoardFn: func(owner, repo string, projectNum int) (*gh.ProjectBoard, error) {
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{
 				ProjectID: "PVT_1",
 				Items: []gh.ProjectItem{

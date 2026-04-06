@@ -69,7 +69,14 @@ type itemNode struct {
 // FetchProjectBoard pulls the project board with shallow item data (no comments
 // or linked PRs). Use FetchItemDetails to populate comments for specific items.
 // This two-phase approach dramatically reduces GraphQL rate limit cost.
-func (c *Client) FetchProjectBoard(owner, repo string, projectNum int) (*ProjectBoard, error) {
+//
+// When ownerType is non-empty ("user" or "organization"), the board is fetched
+// directly using that type, skipping the try-org-then-user fallback. When
+// ownerType is empty, the original fallback behavior is preserved.
+func (c *Client) FetchProjectBoard(owner, repo string, projectNum int, ownerType string) (*ProjectBoard, error) {
+	if ownerType != "" {
+		return c.fetchProjectBoard(owner, repo, projectNum, ownerType)
+	}
 	// Try organization first, then user. GitHub Projects v2 live at the
 	// user or org level. We can't know which without checking, so we try
 	// org first then fall back to user.
