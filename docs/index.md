@@ -216,7 +216,7 @@ description: >-
         <span class="feature-icon">🖥️</span>
         <div class="feature-title">Terminal UI</div>
         <div class="feature-desc">
-          Run <code>fabrik --tui</code> for a bubbletea control panel: active jobs,
+          Fabrik launches a bubbletea control panel by default: active jobs,
           stage progress, token costs, and history across all issues. Run
           <code>fabrik watch &lt;issue&gt;</code> to focus on a single issue — live log
           streaming, CI check status, and PR state. Tab to switch panes,

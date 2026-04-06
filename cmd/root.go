@@ -75,7 +75,8 @@ func Execute() error {
 	flag.StringVar(&cfg.StagesDir, "stages", "./.fabrik/stages", "Directory containing stage YAML configs")
 	flag.BoolVar(&cfg.Yolo, "yolo", false, "Auto-advance issues through stages without waiting for human input")
 	flag.BoolVar(&cfg.AutoUpgrade, "auto-upgrade", false, "When idle, check for new commits on origin/main and self-upgrade (for fabrik developing itself)")
-	flag.BoolVar(&cfg.TUI, "tui", false, "Enable the interactive TUI dashboard (default: plain-text log output)")
+	var noTUI bool
+	flag.BoolVar(&noTUI, "notui", false, "Disable the interactive TUI dashboard (default: enabled when a real terminal is detected)")
 	flag.IntVar(&cfg.PollSeconds, "poll", 30, "Polling interval in seconds")
 	flag.IntVar(&cfg.MaxConcurrent, "max-concurrent", 5, "Maximum number of concurrent issue workers")
 	flag.IntVar(&cfg.MaxRetries, "max-retries", 3, "Max failed stage attempts before pausing the issue (0 = unlimited)")
@@ -218,13 +219,16 @@ func Execute() error {
 			cfg.AutoUpgrade = true
 		}
 	}
-	if !cfg.TUI {
-		if v := os.Getenv("FABRIK_TUI"); v != "" {
-			lv := strings.ToLower(v)
-			cfg.TUI = lv == "true" || lv == "1" || lv == "yes"
-		} else if pc.TUI {
-			cfg.TUI = true
+	cfg.TUI = true // default on
+	if noTUI {
+		cfg.TUI = false
+	} else if v := os.Getenv("FABRIK_TUI"); v != "" {
+		lv := strings.ToLower(v)
+		if lv == "false" || lv == "0" || lv == "no" {
+			cfg.TUI = false
 		}
+	} else if pc.TUI != nil && !*pc.TUI {
+		cfg.TUI = false
 	}
 	if !cfg.DebugOutput {
 		if v := os.Getenv("FABRIK_DEBUG_OUTPUT"); v != "" {
@@ -273,7 +277,7 @@ func Execute() error {
 		return fmt.Errorf("no stage configurations found in %s", cfg.StagesDir)
 	}
 
-	// TUI requires --tui flag AND a real terminal on both stdin and stdout.
+	// TUI is enabled by default when a real terminal is detected; use --notui to disable.
 	useTUI := cfg.TUI &&
 		(isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())) &&
 		(isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd()))
@@ -337,7 +341,7 @@ func Execute() error {
 		return err
 	}
 
-	// When --tui is enabled (and we have a real terminal), run the bubbletea
+	// When TUI is enabled (and we have a real terminal), run the bubbletea
 	// TUI. Otherwise fall through to plain-text mode.
 	if useTUI {
 		return runTUI(eng, cfg.PollSeconds, buildProjectInfo(cfg, pc), cfg.Terminal, cfg.PluginDir)
