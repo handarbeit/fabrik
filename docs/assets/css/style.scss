@@ -705,3 +705,120 @@ code {
   .btn { justify-content: center; }
   .pipeline { grid-template-columns: 1fr; }
 }
+
+// ============================================================
+// Documentation pages (.docs-content)
+// ============================================================
+.docs-content {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 48px 24px 80px;
+  font-size: 1rem;
+  line-height: 1.8;
+  color: $color-text;
+
+  h1 {
+    font-size: 2rem;
+    font-weight: 700;
+    margin-top: 0;
+    margin-bottom: 24px;
+    color: $color-text;
+    border-bottom: 1px solid $color-border;
+    padding-bottom: 12px;
+  }
+
+  h2 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin-top: 48px;
+    margin-bottom: 16px;
+    color: $color-text;
+  }
+
+  h3 {
+    font-size: 1.2rem;
+    font-weight: 600;
+    margin-top: 32px;
+    margin-bottom: 12px;
+    color: $color-text;
+  }
+
+  h4 {
+    font-size: 1rem;
+    font-weight: 600;
+    margin-top: 24px;
+    margin-bottom: 8px;
+    color: $color-text-muted;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  p {
+    margin-bottom: 16px;
+  }
+
+  ul, ol {
+    margin-bottom: 16px;
+    padding-left: 24px;
+
+    li {
+      margin-bottom: 6px;
+    }
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 24px;
+    font-size: 0.9rem;
+
+    th {
+      background: $color-surface-2;
+      color: $color-text;
+      font-weight: 600;
+      text-align: left;
+      padding: 10px 14px;
+      border: 1px solid $color-border;
+    }
+
+    td {
+      padding: 9px 14px;
+      border: 1px solid $color-border;
+    }
+
+    tbody tr:nth-child(even) td {
+      background: rgba($color-surface, 0.5);
+    }
+
+    tbody tr:nth-child(odd) td {
+      background: transparent;
+    }
+  }
+
+  blockquote {
+    border-left: 4px solid $color-accent;
+    margin: 24px 0;
+    padding: 12px 20px;
+    color: $color-text-muted;
+    background: rgba($color-surface, 0.5);
+    border-radius: 0 $radius $radius 0;
+
+    p:last-child { margin-bottom: 0; }
+  }
+
+  hr {
+    border: none;
+    border-top: 1px solid $color-border;
+    margin: 40px 0;
+  }
+
+  div.highlight {
+    margin-bottom: 20px;
+  }
+}
+
+@media (max-width: 480px) {
+  .docs-content {
+    padding: 32px 16px 60px;
+  }
+}
