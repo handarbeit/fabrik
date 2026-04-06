@@ -91,7 +91,7 @@ func promptRequiredValues() (owner, repo, project, user string) {
 	}
 	fmt.Println("\nFabrik interactive setup — press Enter to skip a field and fill it in later.")
 	owner = prompt("GitHub owner (org or username)")
-	repo = prompt("GitHub repository name")
+	repo = prompt("GitHub repository name (leave blank for multi-repo)")
 	project = prompt("GitHub project number")
 	user = prompt("Your GitHub username")
 	return
