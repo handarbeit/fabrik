@@ -1,8 +1,14 @@
 package engine
 
 import (
+	"archive/tar"
+	"compress/gzip"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -128,11 +134,11 @@ func TestCheckReleaseUpgrade_RateLimitExpiry(t *testing.T) {
 	}
 }
 
-// TestCheckReleaseUpgrade_NoMatchingAsset_HTTPServer tests the asset-matching
-// logic against a real HTTP server that would serve a tarball. Because we can't
-// actually re-exec in a test, we verify that the request is made to the right URL.
+// TestCheckReleaseUpgrade_DownloadAttempted verifies that when a newer release
+// exists and an asset matching the current platform is found, the download is
+// actually attempted. The HTTP server returns a 500 so the upgrade fails
+// gracefully (no exec occurs).
 func TestCheckReleaseUpgrade_DownloadAttempted(t *testing.T) {
-	// Stand up a minimal HTTP server to verify a download is attempted.
 	downloaded := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		downloaded = true
@@ -141,19 +147,16 @@ func TestCheckReleaseUpgrade_DownloadAttempted(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	// Construct an asset name that matches the running platform — the same
+	// format the production code uses: fabrik_VERSION_GOOS_GOARCH.tar.gz.
+	matchingAsset := fmt.Sprintf("fabrik_v9.9.9_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+
 	client := &mockGitHubClient{
 		fetchLatestReleaseFn: func(owner, repo string) (*gh.LatestRelease, error) {
-			// Return a release with an asset that matches the current platform.
-			// We use a wildcard name that won't match any real platform name,
-			// so we need to construct the expected name.
 			return &gh.LatestRelease{
 				TagName: "v9.9.9",
 				Assets: []gh.ReleaseAsset{
-					// We can't know GOOS/GOARCH at compile time in this file,
-					// but we can use the real values via the runtime package.
-					// Instead, return an asset whose name we'll never match —
-					// the test verifies the "no matching asset" path.
-					{Name: "fabrik_v9.9.9_plan9_arm.tar.gz", BrowserDownloadURL: srv.URL + "/asset.tar.gz"},
+					{Name: matchingAsset, BrowserDownloadURL: srv.URL + "/asset.tar.gz"},
 				},
 			}, nil
 		},
@@ -164,8 +167,108 @@ func TestCheckReleaseUpgrade_DownloadAttempted(t *testing.T) {
 
 	eng.checkReleaseUpgrade()
 
-	// The no-matching-asset path should NOT hit the download URL.
-	if downloaded {
-		t.Error("download server was hit even though no asset matched")
+	// A matching asset was found — the download server must have been hit.
+	if !downloaded {
+		t.Error("download server was not hit even though a matching asset was provided")
+	}
+}
+
+// TestExtractBinaryFromTarball verifies that extractBinaryFromTarball correctly
+// extracts the "fabrik" binary from a .tar.gz archive and returns an executable
+// temp file in the specified destination directory.
+func TestExtractBinaryFromTarball(t *testing.T) {
+	const binaryContent = "#!/bin/sh\necho hello\n"
+
+	// Build a minimal tar.gz containing a file named "fabrik".
+	tarball, err := os.CreateTemp(t.TempDir(), "test-*.tar.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tarballPath := tarball.Name()
+
+	gw := gzip.NewWriter(tarball)
+	tw := tar.NewWriter(gw)
+	hdr := &tar.Header{
+		Name:     "fabrik",
+		Typeflag: tar.TypeReg,
+		Size:     int64(len(binaryContent)),
+		Mode:     0755,
+	}
+	if err := tw.WriteHeader(hdr); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte(binaryContent)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := tarball.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	destDir := t.TempDir()
+	outPath, err := extractBinaryFromTarball(tarballPath, destDir)
+	if err != nil {
+		t.Fatalf("extractBinaryFromTarball returned error: %v", err)
+	}
+
+	// Verify the output file is inside destDir.
+	if filepath.Dir(outPath) != destDir {
+		t.Errorf("output path %q is not inside destDir %q", outPath, destDir)
+	}
+
+	// Verify the content matches.
+	got, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("reading output file: %v", err)
+	}
+	if string(got) != binaryContent {
+		t.Errorf("content = %q, want %q", got, binaryContent)
+	}
+
+	// Verify the file is executable.
+	info, err := os.Stat(outPath)
+	if err != nil {
+		t.Fatalf("stat output file: %v", err)
+	}
+	if info.Mode()&0111 == 0 {
+		t.Errorf("output file mode %o is not executable", info.Mode())
+	}
+}
+
+// TestExtractBinaryFromTarball_NotFound verifies that extractBinaryFromTarball
+// returns an error when no entry named "fabrik" exists in the archive.
+func TestExtractBinaryFromTarball_NotFound(t *testing.T) {
+	tarball, err := os.CreateTemp(t.TempDir(), "test-*.tar.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tarballPath := tarball.Name()
+
+	gw := gzip.NewWriter(tarball)
+	tw := tar.NewWriter(gw)
+	hdr := &tar.Header{
+		Name:     "other-binary",
+		Typeflag: tar.TypeReg,
+		Size:     4,
+		Mode:     0755,
+	}
+	if err := tw.WriteHeader(hdr); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte("data")); err != nil {
+		t.Fatal(err)
+	}
+	tw.Close()
+	gw.Close()
+	tarball.Close()
+
+	_, err = extractBinaryFromTarball(tarballPath, t.TempDir())
+	if err == nil {
+		t.Error("expected error when fabrik binary not in tarball, got nil")
 	}
 }
