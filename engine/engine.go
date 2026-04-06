@@ -133,6 +133,15 @@ func New(cfg Config) (*Engine, error) {
 	// Migrate any old-style worktrees (issue-N/) to the new per-repo layout.
 	migrateWorktrees(worktreeRoot, func(msg string) { fmt.Printf("[startup] %s", msg) })
 
+	// Migrate any old-style session files (issue-N/) to the new per-repo layout.
+	// Must run after migrateWorktrees so namespaced worktree paths exist for remote lookup.
+	home, _ := os.UserHomeDir()
+	migrateSessions(
+		filepath.Join(home, ".fabrik", "sessions"),
+		worktreeRoot,
+		func(msg string) { fmt.Printf("[startup] %s", msg) },
+	)
+
 	// In multi-repo mode (cfg.Repo == ""), WMs are registered lazily in ensureRepoReady.
 	return eng, nil
 }

@@ -73,7 +73,7 @@ type WatchModel struct {
 
 // NewModel creates a WatchModel for the given issue number.
 func NewModel(issueNumber int, opts GitHubOptions) WatchModel {
-	logDir := issueLogDir(issueNumber)
+	logDir := issueLogDir(opts.Owner, opts.Repo, issueNumber)
 	vp := viewport.New(80, 20)
 	vp.SetContent("")
 
@@ -120,16 +120,30 @@ func mergeTabSelection(newTabs []stageTab, oldTabs []stageTab, oldIdx int) int {
 	return liveTabIdx(newTabs)
 }
 
-// issueLogDir returns ~/.fabrik/logs/issue-N.
-func issueLogDir(issueNumber int) string {
+// issueLogDir returns the log directory for an issue, namespaced by repo when
+// owner and repo are non-empty (multi-repo mode).
+//   - single-repo: ~/.fabrik/logs/issue-N/
+//   - multi-repo:  ~/.fabrik/logs/<owner>-<repo>/issue-N/
+func issueLogDir(owner, repo string, issueNumber int) string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".fabrik", "logs", fmt.Sprintf("issue-%d", issueNumber))
+	issuePart := fmt.Sprintf("issue-%d", issueNumber)
+	if owner == "" || repo == "" {
+		return filepath.Join(home, ".fabrik", "logs", issuePart)
+	}
+	return filepath.Join(home, ".fabrik", "logs", owner+"-"+repo, issuePart)
 }
 
-// sessionDir returns ~/.fabrik/sessions/issue-N.
-func sessionDir(issueNumber int) string {
+// sessionDir returns the session directory for an issue, namespaced by repo when
+// owner and repo are non-empty (multi-repo mode).
+//   - single-repo: ~/.fabrik/sessions/issue-N/
+//   - multi-repo:  ~/.fabrik/sessions/<owner>-<repo>/issue-N/
+func sessionDir(owner, repo string, issueNumber int) string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".fabrik", "sessions", fmt.Sprintf("issue-%d", issueNumber))
+	issuePart := fmt.Sprintf("issue-%d", issueNumber)
+	if owner == "" || repo == "" {
+		return filepath.Join(home, ".fabrik", "sessions", issuePart)
+	}
+	return filepath.Join(home, ".fabrik", "sessions", owner+"-"+repo, issuePart)
 }
 
 // worktreeDir returns .fabrik/worktrees/issue-N relative to CWD.
@@ -149,11 +163,11 @@ func currentStageFromLog(logDir string) string {
 }
 
 // readSessionID returns the session ID for the current stage, or "" if not found.
-func readSessionID(issueNumber int, stageName string) string {
+func readSessionID(owner, repo string, issueNumber int, stageName string) string {
 	if stageName == "" {
 		return ""
 	}
-	path := filepath.Join(sessionDir(issueNumber), stageName+".session")
+	path := filepath.Join(sessionDir(owner, repo, issueNumber), stageName+".session")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
@@ -518,7 +532,7 @@ func (m WatchModel) statusBar() string {
 	keys := dimStyle.Render("q quit  ↑↓ scroll  ←→ tabs  G bottom  g top  i resume claude")
 
 	// Session ID for current stage.
-	sessionID := readSessionID(m.issueNumber, currentStageFromLog(m.logDir))
+	sessionID := readSessionID(m.opts.Owner, m.opts.Repo, m.issueNumber, currentStageFromLog(m.logDir))
 	if sessionID != "" {
 		keys += dimStyle.Render("  |  session: " + sessionID)
 	}
@@ -544,7 +558,7 @@ func (m WatchModel) statusBar() string {
 // When Claude exits, the TUI resumes and ClaudeFinishedMsg is sent.
 func (m WatchModel) openClaudeInlineCmd() tea.Cmd {
 	stageName := currentStageFromLog(m.logDir)
-	sessionID := readSessionID(m.issueNumber, stageName)
+	sessionID := readSessionID(m.opts.Owner, m.opts.Repo, m.issueNumber, stageName)
 	wt := worktreeDir(m.issueNumber)
 
 	var args []string
