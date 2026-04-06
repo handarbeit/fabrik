@@ -2,6 +2,10 @@ package engine
 
 import (
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,4 +121,100 @@ func TestBlockOnInput_LabelErrors_LogsWarning(t *testing.T) {
 	item := gh.ProjectItem{Number: 6}
 	// Should not panic when labels fail
 	eng.blockOnInput(item, stage)
+}
+
+// TestCommitWIP_ExcludesContextFiles verifies that commitWIP does not include
+// files under .fabrik-context/ in the WIP commit, even when they were previously
+// committed (making them tracked by git).
+func TestCommitWIP_ExcludesContextFiles(t *testing.T) {
+	skipIfNoGit(t)
+
+	// Set up a minimal git repo.
+	workDir := t.TempDir()
+	cmds := [][]string{
+		{"git", "init", "-b", "main"},
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "Test"},
+		{"git", "commit", "--allow-empty", "-m", "initial"},
+	}
+	for _, args := range cmds {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = workDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("setup %v: %s: %v", args, out, err)
+		}
+	}
+
+	// Create a regular file and a context file — both with changes.
+	regularFile := filepath.Join(workDir, "app.go")
+	if err := os.WriteFile(regularFile, []byte("package main\n"), 0644); err != nil {
+		t.Fatalf("write regular file: %v", err)
+	}
+
+	contextDir := filepath.Join(workDir, ".fabrik-context")
+	if err := os.MkdirAll(contextDir, 0755); err != nil {
+		t.Fatalf("mkdir context dir: %v", err)
+	}
+	contextFile := filepath.Join(contextDir, "issue.md")
+	if err := os.WriteFile(contextFile, []byte("# Issue\n"), 0644); err != nil {
+		t.Fatalf("write context file: %v", err)
+	}
+
+	// Commit both files so the context file is tracked.
+	for _, args := range [][]string{
+		{"git", "add", "-A"},
+		{"git", "commit", "-m", "seed both files"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = workDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("seed commit %v: %s: %v", args, out, err)
+		}
+	}
+
+	// Now modify both files so they appear as uncommitted changes.
+	if err := os.WriteFile(regularFile, []byte("package main\n\n// changed\n"), 0644); err != nil {
+		t.Fatalf("modify regular file: %v", err)
+	}
+	if err := os.WriteFile(contextFile, []byte("# Issue\n\nupdated context\n"), 0644); err != nil {
+		t.Fatalf("modify context file: %v", err)
+	}
+
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.commitWIP(workDir, 42, "Research")
+
+	// Verify the WIP commit was created.
+	logCmd := exec.Command("git", "log", "--oneline", "-1")
+	logCmd.Dir = workDir
+	logOut, err := logCmd.Output()
+	if err != nil {
+		t.Fatalf("git log: %v", err)
+	}
+	if !strings.Contains(string(logOut), "WIP") {
+		t.Errorf("expected WIP commit, got: %s", string(logOut))
+	}
+
+	// Verify the context file is NOT in the WIP commit.
+	showCmd := exec.Command("git", "show", "--name-only", "--format=", "HEAD")
+	showCmd.Dir = workDir
+	showOut, err := showCmd.Output()
+	if err != nil {
+		t.Fatalf("git show: %v", err)
+	}
+	filesInCommit := string(showOut)
+	if strings.Contains(filesInCommit, ".fabrik-context") {
+		t.Errorf(".fabrik-context files should not appear in WIP commit, got:\n%s", filesInCommit)
+	}
+	if !strings.Contains(filesInCommit, "app.go") {
+		t.Errorf("app.go should appear in WIP commit, got:\n%s", filesInCommit)
+	}
+
+	// Verify the context file change is preserved on disk (not lost).
+	data, err := os.ReadFile(contextFile)
+	if err != nil {
+		t.Fatalf("read context file after commitWIP: %v", err)
+	}
+	if !strings.Contains(string(data), "updated context") {
+		t.Errorf("context file content should be preserved on disk")
+	}
 }

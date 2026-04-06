@@ -76,6 +76,14 @@ func (e *Engine) writeContextFiles(item gh.ProjectItem, currentStage *stages.Sta
 		return
 	}
 
+	// Write a .gitignore that excludes everything in this directory.
+	// This prevents untracked context files from being staged by git add -A
+	// (whether run by Fabrik or by Claude). Must be written before any other
+	// files so it is in place even if a subsequent write fails early.
+	if err := os.WriteFile(filepath.Join(fabrikDir, ".gitignore"), []byte("*\n"), 0644); err != nil {
+		e.logf(item.Number, "warn", "could not write .fabrik-context/.gitignore: %v\n", err)
+	}
+
 	// Always write the issue body.
 	if err := os.WriteFile(filepath.Join(fabrikDir, "issue.md"), []byte(item.Body), 0644); err != nil {
 		e.logf(item.Number, "warn", "could not write .fabrik/issue.md: %v\n", err)
