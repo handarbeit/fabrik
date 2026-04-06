@@ -122,43 +122,54 @@ Each stage is a YAML file in your stages directory:
 ```yaml
 name: Research            # Must match a Project board column name
 order: 1                  # Processing order (lower = earlier)
-prompt: |                 # Prompt for Claude Code during stage processing
+skill: fabrik-research    # Plugin skill (recommended; alternative to inline prompt)
+prompt: |                 # Inline prompt (used when skill is not set)
   You are a research agent...
-comment_prompt: |         # Prompt for processing user comments (optional)
-  You are reviewing user comments...
 comment_skill: fabrik-research-comment  # Skill for comment review (overrides comment_prompt)
+comment_prompt: |         # Inline comment-review prompt (used when comment_skill is not set)
+  You are reviewing user comments...
 model: sonnet             # Optional: claude model to use
-update_issue_body: false  # Allow FABRIK_ISSUE_UPDATE markers to modify issue body (Specify only)
-max_turns: 10             # Optional: limit Claude's turns
+max_turns: 50             # Optional: max conversation turns per stage invocation
+comment_max_turns: 15     # Optional: max turns when processing user comments (default: min(max_turns,15))
+read_only: false          # Optional: stash/restore worktree; use for analysis stages (Specify, Research)
+update_issue_body: false  # Optional: allow FABRIK_ISSUE_UPDATE markers to modify issue body (Specify only)
 post_to_pr: true          # Optional: post output on linked PR instead of issue
+create_draft_pr: true     # Optional: push branch and create draft PR before Claude runs
+mark_pr_ready_on_complete: true  # Optional: mark PR ready after stage completes
+auto_advance: false       # Optional: override global yolo setting for this stage
+                          #   true = always auto-advance; false = never; omit = inherit yolo
+cleanup_worktree: false   # Optional: remove worktree instead of invoking Claude (terminal stages)
 allowed_tools:            # Optional: restrict available tools
   - Read
   - Grep
   - Glob
 completion:
   type: claude            # "claude" (default and only supported type)
-  value: ""               # Reserved for future completion types
-auto_advance: false       # Override global yolo setting for this stage
 ```
 
 ## Configuration
 
-Fabrik loads configuration from a `.env` file in the current working directory.
-See [`.env.example`](.env.example) for all supported keys.
+Fabrik resolves settings in this order (highest to lowest priority):
 
-| Key | Description |
-|-----|-------------|
-| `FABRIK_TOKEN` | GitHub token (preferred) |
-| `GITHUB_TOKEN` | GitHub token (backward-compatible fallback) |
-| `FABRIK_OWNER` | GitHub repo owner |
-| `FABRIK_REPO` | GitHub repo name |
-| `FABRIK_PROJECT_NUMBER` | GitHub project number |
-| `FABRIK_USER` | Your GitHub username |
+```
+CLI flag  >  shell env var  >  .env file  >  .fabrik/config.yaml  >  built-in default
+```
 
-**Safety:** If a `.env` file exists but is not listed in `.gitignore`, Fabrik will
-refuse to start with a fatal error to prevent accidental token leaks.
+Run `fabrik init` to generate `.fabrik/config.yaml` in your project. This file holds
+all non-secret project settings and should be committed to git. See the
+[Configuration Reference](docs/USER_GUIDE.md#2-configuration-reference) in the User
+Guide for a full field-by-field description with examples and defaults.
 
-Command-line flags take precedence over `.env` values.
+**Secrets** (GitHub tokens) belong in a gitignored `.env` file only:
+
+```
+# .env (gitignored — keep secrets here)
+FABRIK_TOKEN=ghp_...    # Preferred
+GITHUB_TOKEN=ghp_...    # Fallback
+```
+
+**Safety:** If `.env` exists but is not listed in `.gitignore`, Fabrik refuses to start
+to prevent accidental token leaks.
 
 ## Flags
 
