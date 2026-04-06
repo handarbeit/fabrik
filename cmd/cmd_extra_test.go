@@ -2,14 +2,79 @@ package cmd
 
 import (
 	"bytes"
+	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/verveguy/fabrik/config"
+	gh "github.com/verveguy/fabrik/github"
 )
+
+// ── upgrade mock ──────────────────────────────────────────────────────────────
+
+// testGitHubUpgradeClient is a minimal GitHubClient mock for upgrade tests.
+// It implements only FetchLatestRelease; all other methods return zero values.
+type testGitHubUpgradeClient struct {
+	fetchLatestReleaseFn func(owner, repo string) (*gh.LatestRelease, error)
+}
+
+func (m *testGitHubUpgradeClient) FetchLatestRelease(owner, repo string) (*gh.LatestRelease, error) {
+	if m.fetchLatestReleaseFn != nil {
+		return m.fetchLatestReleaseFn(owner, repo)
+	}
+	return nil, nil
+}
+func (m *testGitHubUpgradeClient) FetchProjectBoard(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+	return &gh.ProjectBoard{}, nil
+}
+func (m *testGitHubUpgradeClient) FetchItemDetails(item *gh.ProjectItem) error { return nil }
+func (m *testGitHubUpgradeClient) FetchStatusField(projectID string) (*gh.StatusField, error) {
+	return &gh.StatusField{Options: map[string]string{}}, nil
+}
+func (m *testGitHubUpgradeClient) FetchLabels(owner, repo string, issueNumber int) ([]string, error) {
+	return nil, nil
+}
+func (m *testGitHubUpgradeClient) AddLabelToIssue(owner, repo string, issueNumber int, labelName string) error {
+	return nil
+}
+func (m *testGitHubUpgradeClient) RemoveLabelFromIssue(owner, repo string, issueNumber int, labelName string) error {
+	return nil
+}
+func (m *testGitHubUpgradeClient) AddComment(owner, repo string, issueNumber int, body string) error {
+	return nil
+}
+func (m *testGitHubUpgradeClient) AddCommentReaction(owner, repo string, commentDatabaseID int, content string) error {
+	return nil
+}
+func (m *testGitHubUpgradeClient) UpdateComment(owner, repo string, commentDatabaseID int, body string) error {
+	return nil
+}
+func (m *testGitHubUpgradeClient) UpdateIssueBody(owner, repo string, issueNumber int, body string) error {
+	return nil
+}
+func (m *testGitHubUpgradeClient) UpdateProjectItemStatus(projectID, itemID, statusFieldID, statusOptionID string) error {
+	return nil
+}
+func (m *testGitHubUpgradeClient) GetIssueBody(owner, repo string, issueNumber int) (string, error) {
+	return "", nil
+}
+func (m *testGitHubUpgradeClient) FindPRForIssue(owner, repo string, issueNumber int) (int, error) {
+	return 0, nil
+}
+func (m *testGitHubUpgradeClient) CreateDraftPR(owner, repo, title, head, base string, issueNumber int) (int, error) {
+	return 0, nil
+}
+func (m *testGitHubUpgradeClient) MarkPRReady(owner, repo string, prNumber int) error { return nil }
+func (m *testGitHubUpgradeClient) MergePR(owner, repo string, prNumber int) error     { return nil }
+func (m *testGitHubUpgradeClient) RateLimitStats() (gh.RateLimitStats, gh.RateLimitStats) {
+	return gh.RateLimitStats{}, gh.RateLimitStats{}
+}
 
 // ── upgrade ───────────────────────────────────────────────────────────────────
 
@@ -41,6 +106,115 @@ func TestRunUpgrade_Idempotent(t *testing.T) {
 	}
 	if err := runUpgrade(nil); err != nil {
 		t.Fatalf("second runUpgrade: %v", err)
+	}
+}
+
+// TestRunUpgrade_DevBuildSkipsBinaryCheck verifies that a dev build never
+// calls FetchLatestRelease — no network activity should occur.
+func TestRunUpgrade_DevBuildSkipsBinaryCheck(t *testing.T) {
+	dir := t.TempDir()
+	chdirTest(t, dir)
+
+	called := false
+	upgradeGitHubClient = &testGitHubUpgradeClient{
+		fetchLatestReleaseFn: func(owner, repo string) (*gh.LatestRelease, error) {
+			called = true
+			return nil, nil
+		},
+	}
+	t.Cleanup(func() { upgradeGitHubClient = nil })
+
+	// Ensure Version looks like a dev build.
+	orig := Version
+	Version = "dev(test)"
+	t.Cleanup(func() { Version = orig })
+
+	if err := runUpgrade(nil); err != nil {
+		t.Fatalf("runUpgrade: %v", err)
+	}
+	if called {
+		t.Error("FetchLatestRelease should not be called for dev builds")
+	}
+}
+
+// TestRunUpgrade_NetworkFailureFallsThrough verifies that when the release API
+// returns an error, runUpgrade still falls through and refreshes plugin skills.
+func TestRunUpgrade_NetworkFailureFallsThrough(t *testing.T) {
+	dir := t.TempDir()
+	chdirTest(t, dir)
+
+	upgradeGitHubClient = &testGitHubUpgradeClient{
+		fetchLatestReleaseFn: func(owner, repo string) (*gh.LatestRelease, error) {
+			return nil, fmt.Errorf("network error: connection refused")
+		},
+	}
+	t.Cleanup(func() { upgradeGitHubClient = nil })
+
+	orig := Version
+	Version = "v0.0.1"
+	t.Cleanup(func() { Version = orig })
+
+	if err := runUpgrade(nil); err != nil {
+		t.Fatalf("runUpgrade should not fail on network error, got: %v", err)
+	}
+
+	// Plugin files should still have been written despite the network error.
+	entries, err := os.ReadDir(filepath.Join(dir, ".fabrik", "plugin"))
+	if err != nil {
+		t.Fatalf(".fabrik/plugin not created: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Error("expected plugin files to be written even when binary upgrade fails")
+	}
+}
+
+// TestRunUpgrade_BinaryUpgrade_DownloadAttempted verifies that when a newer
+// release exists with a platform-matching asset, the download URL is hit. The
+// server returns 500 so the upgrade fails gracefully and plugin refresh still
+// runs.
+func TestRunUpgrade_BinaryUpgrade_DownloadAttempted(t *testing.T) {
+	dir := t.TempDir()
+	chdirTest(t, dir)
+
+	downloaded := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		downloaded = true
+		http.Error(w, "simulated server error", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	matchingAsset := fmt.Sprintf("fabrik_v9.9.9_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	upgradeGitHubClient = &testGitHubUpgradeClient{
+		fetchLatestReleaseFn: func(owner, repo string) (*gh.LatestRelease, error) {
+			return &gh.LatestRelease{
+				TagName: "v9.9.9",
+				Assets: []gh.ReleaseAsset{
+					{Name: matchingAsset, BrowserDownloadURL: srv.URL + "/asset.tar.gz"},
+				},
+			}, nil
+		},
+	}
+	t.Cleanup(func() { upgradeGitHubClient = nil })
+
+	orig := Version
+	Version = "v0.0.1"
+	t.Cleanup(func() { Version = orig })
+
+	if err := runUpgrade(nil); err != nil {
+		t.Fatalf("runUpgrade should not fail on download error, got: %v", err)
+	}
+
+	if !downloaded {
+		t.Error("download server was not hit even though a matching asset was provided")
+	}
+
+	// Plugin files should still have been written despite the failed download.
+	entries, err := os.ReadDir(filepath.Join(dir, ".fabrik", "plugin"))
+	if err != nil {
+		t.Fatalf(".fabrik/plugin not created: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Error("expected plugin files to be written even when binary download fails")
 	}
 }
 
