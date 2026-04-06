@@ -331,10 +331,11 @@ git clone https://github.com/handarbeit/fabrik
 cd fabrik
 go build -o fabrik .
 
-<span style="color:#56d364"># 2. Initialize your project</span>
-./fabrik init
+<span style="color:#56d364"># 2. Initialize your project (pass your GitHub Project URL to skip manual config)</span>
+./fabrik init --user you https://github.com/orgs/your-org/projects/5
 <span style="color:#8b949e"># Creates .fabrik/stages/, .fabrik/config.yaml</span>
-<span style="color:#8b949e"># Prompts for owner/repo/project/user</span>
+<span style="color:#8b949e"># URL auto-populates owner, project, and owner_type; --user sets your username</span>
+<span style="color:#8b949e"># Without a URL: prompts interactively (TTY) or writes a blank template (non-TTY)</span>
 
 <span style="color:#56d364"># 3. Add your GitHub token</span>
 echo 'FABRIK_TOKEN=ghp_...' >> .env

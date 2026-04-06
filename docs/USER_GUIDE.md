@@ -51,8 +51,18 @@ go build -o fabrik .
 #   .fabrik/config.yaml   — project config template (edit this)
 ```
 
-If your terminal is interactive, `fabrik init` will prompt you for the required settings
-(owner, repo, project number, username) and write them into `config.yaml` for you.
+Pass your GitHub Project URL to auto-populate `owner`, `project`, and `owner_type` in
+`config.yaml`. The `--user` flag enables fully non-interactive setup:
+
+```bash
+./fabrik init --user you https://github.com/orgs/your-org/projects/5
+# or for a personal project:
+./fabrik init --user you https://github.com/users/you/projects/3
+```
+
+Without a URL, `fabrik init` behaves as before: if your terminal is interactive it
+prompts for owner, repo, project number, and username; otherwise it writes a
+fully-commented template for you to fill in.
 
 To refresh plugin skills without touching stages or config (e.g., after upgrading Fabrik):
 
