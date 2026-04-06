@@ -5,8 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,6 +53,12 @@ func activeJobKey(repo string, issueNumber int) string {
 	}
 	return fmt.Sprintf("#%d", issueNumber)
 }
+
+// watchExitMsg is returned by tea.ExecProcess when the fabrik watch subprocess exits.
+type watchExitMsg struct{ Err error }
+
+// claudeResumeFinishedMsg is returned by tea.ExecProcess when the claude --resume subprocess exits.
+type claudeResumeFinishedMsg struct{ Err error }
 
 // pane identifies which TUI section has focus.
 type pane int
@@ -108,10 +114,13 @@ type Model struct {
 	// statusLine shows the latest poll-level log message in the header
 	statusLine string
 
-	// terminal is the resolved terminal emulator identifier (e.g. "terminal",
-	// "iterm2", "ghostty", "kitty", "alacritty", "warp"). Empty string means
-	// use the platform default.
-	terminal string
+	// statusMsg is a transient user-facing message shown in the header instead
+	// of statusLine. It is cleared on each TickEvent so it disappears after ~1s.
+	statusMsg string
+
+	// detailPanel controls whether the inline detail panel is shown between the
+	// active and history sections in View().
+	detailPanel bool
 
 	// selection state
 	focusPane    pane
@@ -139,9 +148,8 @@ var (
 // New creates an initial TUI model.
 // pollSeconds is the configured polling interval.
 // info provides project metadata displayed in the footer.
-// terminal is the resolved terminal emulator identifier; empty string uses the platform default.
 // pluginDir is the Fabrik plugin directory passed to claude --plugin-dir (may be empty).
-func New(pollSeconds int, info ProjectInfo, terminal string, pluginDir string) Model {
+func New(pollSeconds int, info ProjectInfo, pluginDir string) Model {
 	vp := viewport.New(80, 10)
 	return Model{
 		projectInfo:    info,
@@ -152,7 +160,6 @@ func New(pollSeconds int, info ProjectInfo, terminal string, pluginDir string) M
 		historyVP:      vp,
 		spinnerFrames:  []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"},
 		now:            time.Now(),
-		terminal:       terminal,
 		pluginDir:      pluginDir,
 	}
 }
@@ -217,6 +224,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.confirmClear = false
 				return m, nil
 			}
+			if m.detailPanel {
+				m.detailPanel = false
+				return m, nil
+			}
 
 		case "tab":
 			if m.focusPane == paneActive {
@@ -254,42 +265,56 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
-		case "enter", "l":
-			// Open latest log file for selected job (active or history pane)
+		case "l":
+			// Launch fabrik watch <issueNumber> inline via tea.ExecProcess.
+			// Suspends the TUI until the user exits watch with q.
 			if m.focusPane == paneActive {
 				keys := m.sortedActiveKeys()
 				if m.activeIdx < len(keys) {
 					if job, ok := m.active[keys[m.activeIdx]]; ok {
-						logDir := logDirForJob(job)
-						return m, m.openLogViewerCmd(logDir)
+						return m, openWatchInlineCmd(job.IssueNumber, job.Repo)
 					}
 				}
 			} else if m.focusPane == paneHistory && len(m.history) > 0 {
 				realIdx := len(m.history) - 1 - m.histIdx
 				if realIdx >= 0 && realIdx < len(m.history) {
 					h := m.history[realIdx]
-					logDir := logDirForHistory(h)
-					return m, m.openLogViewerCmd(logDir)
+					return m, openWatchInlineCmd(h.IssueNumber, h.Repo)
 				}
 			}
 			return m, nil
 
+		case "enter":
+			// Toggle the inline detail panel.
+			m.detailPanel = !m.detailPanel
+			return m, nil
+
 		case "r":
-			// Active pane: open log viewer (active sessions must not be interrupted)
-			// History pane: open interactive resume session in the issue's worktree
+			// Active pane: show status message — active sessions must not be interrupted.
+			// History pane: resume an interactive Claude session in the issue's worktree,
+			// but only when the issue is not currently active.
 			if m.focusPane == paneActive {
 				keys := m.sortedActiveKeys()
 				if m.activeIdx < len(keys) {
-					if job, ok := m.active[keys[m.activeIdx]]; ok {
-						logDir := logDirForJob(job)
-						return m, m.openLogViewerCmd(logDir)
-					}
+					m.statusMsg = "stage in progress — use l to watch"
 				}
+				return m, nil
 			} else if m.focusPane == paneHistory && len(m.history) > 0 {
 				realIdx := len(m.history) - 1 - m.histIdx
 				if realIdx >= 0 && realIdx < len(m.history) {
 					h := m.history[realIdx]
-					return m, m.openResumeCmd(h.Repo, h.IssueNumber, h.StageName, h.StageModel)
+					if m.isActiveIssue(h) {
+						m.statusMsg = "stage in progress — use l to watch"
+						return m, nil
+					}
+					// Check worktree exists before launching resume.
+					cwd, _ := os.Getwd()
+					worktreePath := worktreePathForIssue(cwd, h.Repo, h.IssueNumber)
+					if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
+						m.statusMsg = fmt.Sprintf("no worktree for #%d", h.IssueNumber)
+						return m, nil
+					}
+					return m, m.openResumeInlineCmd(h.Repo, h.IssueNumber, h.StageName, h.StageModel, worktreePath)
 				}
 			}
 			return m, nil
@@ -306,9 +331,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateHistoryViewport(false)
 		return m, nil
 
+	case watchExitMsg:
+		// fabrik watch subprocess exited — nothing to do (TUI resumes automatically).
+		return m, nil
+
+	case claudeResumeFinishedMsg:
+		// claude --resume subprocess exited — nothing to do (TUI resumes automatically).
+		return m, nil
+
 	case TickEvent:
 		m.now = ev.At
 		m.spinnerIdx = (m.spinnerIdx + 1) % len(m.spinnerFrames)
+		m.statusMsg = "" // clear transient status message each tick
 		return m, tickCmd()
 
 	case PollStartedEvent:
@@ -481,6 +515,13 @@ func (m Model) View() string {
 	// ── In-Progress pane ──
 	sections = append(sections, m.viewActive())
 
+	// ── Detail panel (toggled by enter) ──
+	if m.detailPanel {
+		if detail := m.viewDetail(); detail != "" {
+			sections = append(sections, detail)
+		}
+	}
+
 	// ── History pane ──
 	sections = append(sections, m.viewHistory())
 
@@ -505,9 +546,15 @@ func (m Model) viewHeader() string {
 	}
 	timerStr := dimStyle.Render(timer)
 
+	// statusMsg is transient (cleared each tick); it takes priority over statusLine.
+	displayStatus := m.statusMsg
+	if displayStatus == "" {
+		displayStatus = m.statusLine
+	}
+
 	status := ""
-	if m.statusLine != "" {
-		status = "  " + dimStyle.Render(m.statusLine)
+	if displayStatus != "" {
+		status = "  " + dimStyle.Render(displayStatus)
 	}
 
 	// title + status on left, timer on right, single line
@@ -520,8 +567,8 @@ func (m Model) viewHeader() string {
 		//   " " + title + "  " + dimStyle(s+"…") + gap + timerStr
 		// where "  " (2 chars) is the prefix and "…" (1 char) is the suffix → 3 chars overhead.
 		maxStatus := max(available-lipgloss.Width(title)-timerWidth-3, 0)
-		if maxStatus > 0 && m.statusLine != "" {
-			s := m.statusLine
+		if maxStatus > 0 && displayStatus != "" {
+			s := displayStatus
 			// Shrink using display width (lipgloss.Width strips ANSI), matching viewFooter pattern.
 			for lipgloss.Width(s) > maxStatus {
 				runes := []rune(s)
@@ -612,7 +659,7 @@ func (m Model) viewActive() string {
 
 	hint := ""
 	if m.focusPane == paneActive && len(m.active) > 0 {
-		hint = dimStyle.Render("  [r/enter/l]ogs  [tab] history")
+		hint = dimStyle.Render("  [l] watch  [enter] details  [tab] history")
 	}
 	content := title + hint + "\n" + strings.Join(lines, "\n")
 	return borderStyle.Width(m.width - 4).Render(content)
@@ -628,7 +675,7 @@ func (m Model) viewHistory() string {
 	if m.confirmClear {
 		hint = failStyle.Render("  Clear all history? [C]onfirm / [n]o")
 	} else if m.focusPane == paneHistory && len(m.history) > 0 {
-		hint = dimStyle.Render("  [r]esume  [l]ogs  [c]lear entry  [C]lear all  [tab] in-progress")
+		hint = dimStyle.Render("  [r]esume  [l] watch  [enter] details  [c]lear  [C]lear all  [tab] in-progress")
 	}
 	content := title + hint + "\n" + m.historyVP.View()
 	return borderStyle.Width(m.width - 4).Render(content)
@@ -722,51 +769,6 @@ func logDirForIssue(repo string, issueNumber int) string {
 	return filepath.Join(home, ".fabrik", "logs", issuePart)
 }
 
-// openLogViewerCmd returns a tea.Cmd that opens a terminal showing the most
-// recent log file in the given directory, piped through the stream filter
-// for human-readable output.
-func (m Model) openLogViewerCmd(logDir string) tea.Cmd {
-	if _, err := os.Stat(logDir); err != nil {
-		return nil
-	}
-	entries, err := os.ReadDir(logDir)
-	if err != nil || len(entries) == 0 {
-		return nil
-	}
-	// Sort by modification time (most recent last) — filenames sort
-	// alphabetically by stage name, not by time.
-	sort.Slice(entries, func(i, j int) bool {
-		fi, _ := entries[i].Info()
-		fj, _ := entries[j].Info()
-		if fi == nil || fj == nil {
-			return entries[i].Name() < entries[j].Name()
-		}
-		return fi.ModTime().Before(fj.ModTime())
-	})
-	latest := entries[len(entries)-1].Name()
-
-	// Resolve fabrik binary for the stream filter
-	fabrikBin, err := os.Executable()
-	if err != nil {
-		fabrikBin = "fabrik"
-	}
-
-	// For JSON files, pipe through the stream filter; for other files, use less.
-	// Pass as a single string — openTerminalCmd sends it to Terminal.app's do script.
-	// Shell-quote path components so directories or binaries with spaces work correctly.
-	if strings.HasSuffix(latest, ".json") {
-		return m.openTerminalCmd(fmt.Sprintf(
-			"cd %s && cat %s | %s _stream-filter | less -R",
-			shellQuote(logDir), shellQuote(latest), shellQuote(fabrikBin)))
-	}
-	return m.openTerminalCmd(fmt.Sprintf("cd %s && less +F %s", shellQuote(logDir), shellQuote(latest)))
-}
-
-// shellQuote wraps s in single quotes and escapes any embedded single quotes,
-// making it safe to embed in a shell command string.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
 
 // tuiReadSessionID reads the Claude session ID for a given repo, issue and stage.
 // The path logic mirrors engine.ReadSessionID — keep in sync if either changes.
@@ -791,41 +793,6 @@ func tuiReadSessionID(repo string, issueNumber int, stageName string) string {
 	return strings.TrimSpace(string(data))
 }
 
-// openResumeCmd returns a tea.Cmd that opens a new terminal window running an
-// interactive Claude session in the issue's worktree. If a session file exists
-// for the given stage, --resume <id> is passed; otherwise a fresh session starts.
-// If the worktree directory does not exist, an error terminal window is opened.
-func (m Model) openResumeCmd(repo string, issueNumber int, stageName, stageModel string) tea.Cmd {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return nil
-	}
-	worktreeDir := filepath.Join(cwd, ".fabrik", "worktrees", fmt.Sprintf("issue-%d", issueNumber))
-	if _, statErr := os.Stat(worktreeDir); statErr != nil {
-		if os.IsNotExist(statErr) {
-			return m.openTerminalCmd(fmt.Sprintf("echo 'Worktree for issue #%d not found (%s). The issue has not been processed yet.' && read", issueNumber, worktreeDir))
-		}
-		return m.openTerminalCmd(fmt.Sprintf("echo 'Failed to access worktree for issue #%d (%s): %v' && read", issueNumber, worktreeDir, statErr))
-	}
-
-	// Build the command with properly shell-quoted arguments to handle paths
-	// with spaces or shell metacharacters.
-	parts := []string{"claude"}
-	sessionID := tuiReadSessionID(repo, issueNumber, stageName)
-	if sessionID != "" {
-		parts = append(parts, "--resume", shellQuote(sessionID))
-	}
-	if stageModel != "" {
-		parts = append(parts, "--model", shellQuote(stageModel))
-	}
-	if m.pluginDir != "" {
-		parts = append(parts, "--plugin-dir", shellQuote(m.pluginDir))
-	}
-
-	// Build: cd <worktreeDir> && claude [--resume <id>] [--model <m>] [--plugin-dir <d>]
-	cmdStr := fmt.Sprintf("cd %s && %s", shellQuote(worktreeDir), strings.Join(parts, " "))
-	return m.openTerminalCmd(cmdStr)
-}
 
 // fmtDuration formats a duration as MM:SS.
 func fmtDuration(d time.Duration) string {
@@ -844,95 +811,137 @@ func homeDir() string {
 	return h
 }
 
-// openTerminalCmd returns a tea.Cmd that opens a new terminal window running
-// cmdStr as a shell command. It dispatches to the terminal specified by
-// m.terminal; an empty string or unknown ID falls back to the platform default.
-func (m Model) openTerminalCmd(cmdStr string) tea.Cmd {
-	return func() tea.Msg {
-		var cmd *exec.Cmd
-
-		switch m.terminal {
-		case "iterm2":
-			// iTerm2 v3+ AppleScript API; macOS only. Fall back to Linux default on other platforms.
-			if runtime.GOOS == "darwin" {
-				script := fmt.Sprintf(`tell application "iTerm"
-	activate
-	create window with default profile command "%s"
-end tell`, strings.ReplaceAll(cmdStr, `"`, `\"`))
-				cmd = exec.Command("osascript", "-e", script)
-			} else {
-				cmd = linuxFallbackTerminal(cmdStr)
-			}
-
-		case "ghostty":
-			if runtime.GOOS == "darwin" {
-				// Ghostty binary cannot launch the GUI directly on macOS; use open.
-				cmd = exec.Command("open", "-na", "Ghostty.app", "--args", "-e", "sh", "-c", cmdStr)
-			} else {
-				cmd = exec.Command("ghostty", "-e", "sh", "-c", cmdStr)
-			}
-
-		case "kitty":
-			cmd = exec.Command("kitty", "sh", "-c", cmdStr)
-
-		case "alacritty":
-			cmd = exec.Command("alacritty", "-e", "sh", "-c", cmdStr)
-
-		case "warp":
-			// Warp does not support passing a command via -e; macOS only.
-			if runtime.GOOS == "darwin" {
-				fmt.Fprintf(os.Stderr, "[warn] Warp terminal does not support opening with a command; log viewer unavailable\n")
-				cmd = exec.Command("open", "-a", "Warp")
-			} else {
-				cmd = linuxFallbackTerminal(cmdStr)
-			}
-
-		case "terminal", "":
-			// Terminal.app on macOS or platform default on Linux.
-			if runtime.GOOS == "darwin" {
-				script := fmt.Sprintf(`tell application "Terminal"
-activate
-do script "%s"
-end tell`, strings.ReplaceAll(cmdStr, `"`, `\"`))
-				cmd = exec.Command("osascript", "-e", script)
-			} else {
-				cmd = linuxFallbackTerminal(cmdStr)
-			}
-
-		default:
-			// Unknown terminal ID — warn and fall through to platform default.
-			fmt.Fprintf(os.Stderr, "[warn] unknown terminal %q; falling back to platform default\n", m.terminal)
-			if runtime.GOOS == "darwin" {
-				script := fmt.Sprintf(`tell application "Terminal"
-activate
-do script "%s"
-end tell`, strings.ReplaceAll(cmdStr, `"`, `\"`))
-				cmd = exec.Command("osascript", "-e", script)
-			} else {
-				cmd = linuxFallbackTerminal(cmdStr)
-			}
-		}
-
-		if cmd == nil {
-			return nil
-		}
-		if err := cmd.Start(); err != nil {
-			fmt.Fprintf(os.Stderr, "[warn] failed to launch terminal %q: %v\n", m.terminal, err)
-		}
-		return nil
+// openWatchInlineCmd returns a tea.Cmd that suspends the TUI and launches
+// "fabrik watch <issueNumber>" in the current terminal via tea.ExecProcess.
+// The TUI is restored automatically when the user exits watch with q.
+// In multi-repo mode, --owner and --repo flags are passed explicitly so the
+// child process watches the correct repository.
+func openWatchInlineCmd(issueNumber int, repo string) tea.Cmd {
+	fabrikBin, err := os.Executable()
+	if err != nil {
+		fabrikBin = "fabrik"
 	}
+	args := []string{"watch"}
+	if repo != "" {
+		parts := strings.SplitN(repo, "/", 2)
+		if len(parts) == 2 {
+			args = append(args, "--owner", parts[0], "--repo", parts[1])
+		}
+	}
+	args = append(args, strconv.Itoa(issueNumber))
+	cmd := exec.Command(fabrikBin, args...)
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return watchExitMsg{Err: err}
+	})
 }
 
-// linuxFallbackTerminal returns an *exec.Cmd for the first available terminal
-// emulator found in PATH (gnome-terminal, xterm, konsole). Returns nil if none found.
-func linuxFallbackTerminal(cmdStr string) *exec.Cmd {
-	for _, term := range []string{"gnome-terminal", "xterm", "konsole"} {
-		if _, err := exec.LookPath(term); err == nil {
-			if term == "gnome-terminal" {
-				return exec.Command(term, "--", "sh", "-c", cmdStr)
+// openResumeInlineCmd returns a tea.Cmd that suspends the TUI and launches an
+// interactive Claude session in the issue's worktree via tea.ExecProcess.
+// worktreePath must already be verified to exist by the caller.
+// If a session file exists for the given stage, --resume <id> is passed;
+// otherwise a fresh session starts.
+func (m Model) openResumeInlineCmd(repo string, issueNumber int, stageName, stageModel, worktreePath string) tea.Cmd {
+	args := []string{}
+	sessionID := tuiReadSessionID(repo, issueNumber, stageName)
+	if sessionID != "" {
+		args = append(args, "--resume", sessionID)
+	}
+	if stageModel != "" {
+		args = append(args, "--model", stageModel)
+	}
+	if m.pluginDir != "" {
+		args = append(args, "--plugin-dir", m.pluginDir)
+	}
+	cmd := exec.Command("claude", args...)
+	cmd.Dir = worktreePath
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return claudeResumeFinishedMsg{Err: err}
+	})
+}
+
+// worktreePathForIssue returns the absolute path to the issue's git worktree.
+// In single-repo mode: <rootDir>/.fabrik/worktrees/issue-N
+// In multi-repo mode:  <rootDir>/.fabrik/worktrees/<owner>-<repo>/issue-N
+func worktreePathForIssue(rootDir, repo string, issueNumber int) string {
+	issuePart := fmt.Sprintf("issue-%d", issueNumber)
+	if repo != "" {
+		repoPart := strings.ReplaceAll(repo, "/", "-")
+		return filepath.Join(rootDir, ".fabrik", "worktrees", repoPart, issuePart)
+	}
+	return filepath.Join(rootDir, ".fabrik", "worktrees", issuePart)
+}
+
+// isActiveIssue reports whether the history entry's issue is currently being
+// processed (present in the active jobs map). Works correctly in multi-repo mode.
+func (m Model) isActiveIssue(h HistoryEntry) bool {
+	key := activeJobKey(h.Repo, h.IssueNumber)
+	_, ok := m.active[key]
+	return ok
+}
+
+// viewDetail renders an inline detail panel for the currently selected item.
+// Active pane: shows in-flight job metadata.
+// History pane: shows completed job metadata.
+// Returns an empty string when there is nothing to display.
+func (m Model) viewDetail() string {
+	var lines []string
+
+	if m.focusPane == paneActive {
+		keys := m.sortedActiveKeys()
+		if m.activeIdx < len(keys) {
+			if job, ok := m.active[keys[m.activeIdx]]; ok {
+				elapsed := fmtDuration(m.now.Sub(job.StartedAt))
+				lines = append(lines, fmt.Sprintf("Issue:   #%d", job.IssueNumber))
+				if job.Title != "" {
+					lines = append(lines, fmt.Sprintf("Title:   %s", job.Title))
+				}
+				lines = append(lines, fmt.Sprintf("Stage:   %s", job.StageName))
+				lines = append(lines, fmt.Sprintf("Elapsed: %s", elapsed))
 			}
-			return exec.Command(term, "-e", "sh", "-c", cmdStr)
+		}
+	} else if m.focusPane == paneHistory && len(m.history) > 0 {
+		realIdx := len(m.history) - 1 - m.histIdx
+		if realIdx >= 0 && realIdx < len(m.history) {
+			h := m.history[realIdx]
+			statusStr := "success"
+			if !h.Success {
+				statusStr = "error"
+			} else if h.BlockedOnInput {
+				statusStr = "awaiting input"
+			} else if !h.Completed {
+				statusStr = "incomplete"
+			}
+			lines = append(lines, fmt.Sprintf("Issue:    #%d", h.IssueNumber))
+			if h.Title != "" {
+				lines = append(lines, fmt.Sprintf("Title:    %s", h.Title))
+			}
+			lines = append(lines, fmt.Sprintf("Stage:    %s", h.StageName))
+			if h.StageModel != "" {
+				lines = append(lines, fmt.Sprintf("Model:    %s", h.StageModel))
+			}
+			lines = append(lines, fmt.Sprintf("Status:   %s", statusStr))
+			lines = append(lines, fmt.Sprintf("Duration: %s", fmtDuration(h.Duration)))
+			if h.TurnsUsed > 0 {
+				if h.MaxTurns > 0 {
+					lines = append(lines, fmt.Sprintf("Turns:    %d/%d", h.TurnsUsed, h.MaxTurns))
+				} else {
+					lines = append(lines, fmt.Sprintf("Turns:    %d", h.TurnsUsed))
+				}
+			}
+			if h.CostUSD > 0 {
+				lines = append(lines, fmt.Sprintf("Cost:     $%.4f", h.CostUSD))
+			}
+			if !h.CompletedAt.IsZero() {
+				lines = append(lines, fmt.Sprintf("At:       %s", h.CompletedAt.Format("2006-01-02 15:04:05")))
+			}
 		}
 	}
-	return nil
+
+	if len(lines) == 0 {
+		return ""
+	}
+
+	titleLine := dimStyle.Render("Detail") + "  " + dimStyle.Render("[esc] close")
+	content := titleLine + "\n" + strings.Join(lines, "\n")
+	return borderStyle.Width(m.width - 4).Render(content)
 }

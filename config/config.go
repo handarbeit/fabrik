@@ -25,7 +25,6 @@ type ProjectConfig struct {
 	Yolo          bool   `yaml:"yolo"`
 	AutoUpgrade   bool   `yaml:"auto_upgrade"`
 	TUI           *bool  `yaml:"tui"`
-	Terminal      string `yaml:"terminal"`
 	DebugOutput   bool   `yaml:"debug_output"`
 	Version       string `yaml:"version"`
 }
