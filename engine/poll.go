@@ -463,9 +463,9 @@ func (e *Engine) checkAndUpgrade() {
 		return
 	}
 
-	wm := e.primaryWorktrees()
+	wm := e.devCheckout()
 	if wm == nil {
-		e.logf(0, "upgrade", "no primary repo — skipping auto-upgrade in multi-repo mode\n")
+		e.logf(0, "upgrade", "no Fabrik source checkout — skipping dev auto-upgrade\n")
 		return
 	}
 	baseBranch := wm.DefaultBaseBranch()
@@ -565,12 +565,6 @@ func (e *Engine) checkReleaseUpgrade() {
 	lastCheck := e.lastReleaseCheck
 	e.mu.Unlock()
 	if !lastCheck.IsZero() && time.Since(lastCheck) < releaseCheckInterval {
-		return
-	}
-
-	wm := e.primaryWorktrees()
-	if wm == nil {
-		e.logf(0, "upgrade", "no primary repo — skipping release upgrade in multi-repo mode\n")
 		return
 	}
 
