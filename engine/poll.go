@@ -116,6 +116,11 @@ func (e *Engine) Run() error {
 	ticker := time.NewTicker(time.Duration(e.cfg.PollSeconds) * time.Second)
 	defer ticker.Stop()
 
+	// Validate stage names against project board columns before first poll.
+	if err := e.checkStageColumnAlignment(ctx); err != nil {
+		return err
+	}
+
 	// Run immediately on start, then on tick
 	if err := e.poll(ctx); err != nil && ctx.Err() == nil {
 		e.logf(0, "warn", "poll error: %v\n", err)
