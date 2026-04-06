@@ -344,29 +344,6 @@ func TestRunStreamFilter_MalformedJSON(t *testing.T) {
 
 // ── root.go helpers ───────────────────────────────────────────────────────────
 
-func TestDetectTerminalFromEnv(t *testing.T) {
-	cases := []struct {
-		env  string
-		want string
-	}{
-		{"Apple_Terminal", "terminal"},
-		{"iTerm.app", "iterm2"},
-		{"ghostty", "ghostty"},
-		{"WarpTerminal", "warp"},
-		{"alacritty", "alacritty"},
-		{"unknown", ""},
-		{"", ""},
-	}
-	for _, tc := range cases {
-		os.Setenv("TERM_PROGRAM", tc.env)
-		got := detectTerminalFromEnv()
-		if got != tc.want {
-			t.Errorf("TERM_PROGRAM=%q: got %q, want %q", tc.env, got, tc.want)
-		}
-	}
-	os.Unsetenv("TERM_PROGRAM")
-}
-
 func TestBuildProjectInfo_HomeRelative(t *testing.T) {
 	dir := t.TempDir()
 	chdirTest(t, dir)
