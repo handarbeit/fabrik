@@ -277,8 +277,9 @@ func (m WatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case LogLineMsg:
 		m.lines = append(m.lines, ev.Text)
-		// Only update viewport if live tab is selected.
-		if m.selectedTabIdx < len(m.stageTabs) && m.stageTabs[m.selectedTabIdx].IsLive {
+		// Update viewport if live tab is selected, or if no tabs exist yet (startup race).
+		isLive := len(m.stageTabs) == 0 || (m.selectedTabIdx < len(m.stageTabs) && m.stageTabs[m.selectedTabIdx].IsLive)
+		if isLive {
 			m.vp.SetContent(strings.Join(m.lines, ""))
 			m.vp.GotoBottom()
 		}
@@ -385,9 +386,10 @@ func issueHistory(issueNumber int) []tui.HistoryEntry {
 
 // viewportHeight returns the number of lines available for the live-output viewport.
 func (m WatchModel) viewportHeight() int {
-	// Header: ~3 lines, tab bar: ~1 line, section label: ~1 line,
-	// status bar: ~1 line, padding: ~2 lines
-	reserved := 8
+	// Overhead when labels row and tab bar are both shown (common runtime case):
+	//   header + \n: 2, labels + \n: 2, prLine + \n: 2, tabBar + \n: 2,
+	//   \n after viewport: 1, statusBar: 1 → 10 total.
+	reserved := 10
 	if m.height > reserved+5 {
 		return m.height - reserved
 	}
