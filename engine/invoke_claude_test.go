@@ -503,6 +503,59 @@ func TestRunClaude_StdoutTeeToLogFile(t *testing.T) {
 	}
 }
 
+// TestRunClaude_IssueUpdateInIntermediateTurn verifies that when a fake claude binary
+// emits FABRIK_ISSUE_UPDATE_BEGIN/END in an intermediate assistant turn (not in the
+// result field), runClaude still returns text containing the update block.
+func TestRunClaude_IssueUpdateInIntermediateTurn(t *testing.T) {
+	binDir := t.TempDir()
+	fakeClaude := filepath.Join(binDir, "claude")
+
+	// 3-line NDJSON: assistant turn with update block, user turn, result with FABRIK_STAGE_COMPLETE.
+	ndjson := `{"type":"assistant","message":{"content":[{"type":"text","text":"Here is the refined spec:\nFABRIK_ISSUE_UPDATE_BEGIN\n## My updated spec\nFABRIK_ISSUE_UPDATE_END\n"}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}
+{"type":"result","subtype":"success","result":"All done.\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_inter","num_turns":2,"total_cost_usd":0.001}
+`
+	ndjsonFile := filepath.Join(binDir, "output.ndjson")
+	if err := os.WriteFile(ndjsonFile, []byte(ndjson), 0600); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\ncat >/dev/null\ncat " + ndjsonFile + "\n"
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	os.Setenv("PATH", binDir+":"+origPath)
+	defer os.Setenv("PATH", origPath)
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "Specify",
+		Prompt:     "specify",
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 205, Title: "Intermediate update test"}
+	defer os.RemoveAll(SessionDir(205))
+	defer os.RemoveAll(LogDir(205))
+
+	output, completed, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+	if !completed {
+		t.Error("expected completed=true")
+	}
+	if !strings.Contains(output, "FABRIK_ISSUE_UPDATE_BEGIN") {
+		t.Errorf("output missing FABRIK_ISSUE_UPDATE_BEGIN; got: %q", output)
+	}
+	if !strings.Contains(output, "## My updated spec") {
+		t.Errorf("output missing update body; got: %q", output)
+	}
+	if !strings.Contains(output, "FABRIK_ISSUE_UPDATE_END") {
+		t.Errorf("output missing FABRIK_ISSUE_UPDATE_END; got: %q", output)
+	}
+}
+
 func TestSaveDebugLog(t *testing.T) {
 	dir := t.TempDir()
 	orig, err := os.Getwd()

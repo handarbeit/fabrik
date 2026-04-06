@@ -368,6 +368,14 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 		}
 
 		text = resp.Result
+		// Fallback: if the stage is complete but FABRIK_ISSUE_UPDATE_BEGIN is absent
+		// from result (emitted in an intermediate assistant turn), scan all assistant
+		// messages in the raw NDJSON for the last update block and prepend it.
+		if stageCompleteRE.MatchString(text) && !strings.Contains(text, "FABRIK_ISSUE_UPDATE_BEGIN") {
+			if block := extractIssueUpdateFromAssistantTurns(rawOutput); block != "" {
+				text = block + "\n" + text
+			}
+		}
 		usage = tokenUsageFromResponse(resp)
 		if runErr != nil {
 			claudeLog(issueNumber, "claude", "used %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
@@ -632,6 +640,47 @@ func stripLine(output, line string) string {
 // extractSummary parses a brief summary from Claude's output.
 func extractSummary(output string) string {
 	return extractBetweenMarkers(output, "FABRIK_SUMMARY_BEGIN", "FABRIK_SUMMARY_END")
+}
+
+// extractIssueUpdateFromAssistantTurns scans raw NDJSON output for the last
+// FABRIK_ISSUE_UPDATE_BEGIN/END block across all {"type":"assistant",...} messages.
+// Returns the reconstructed "FABRIK_ISSUE_UPDATE_BEGIN\n<body>\nFABRIK_ISSUE_UPDATE_END"
+// string if found, or empty string if not. Used as a fallback when the markers
+// do not appear in the result field (emitted in an intermediate turn).
+func extractIssueUpdateFromAssistantTurns(rawOutput []byte) string {
+	var lastBlock string
+	lines := bytes.Split(rawOutput, []byte("\n"))
+	for _, line := range lines {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		// Only examine assistant-type messages.
+		var envelope struct {
+			Type    string `json:"type"`
+			Message struct {
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal(line, &envelope); err != nil || envelope.Type != "assistant" {
+			continue
+		}
+		// Collect text content from all content blocks.
+		var sb strings.Builder
+		for _, block := range envelope.Message.Content {
+			if block.Type == "text" {
+				sb.WriteString(block.Text)
+			}
+		}
+		text := sb.String()
+		if body := extractUpdatedBody(text); body != "" {
+			lastBlock = "FABRIK_ISSUE_UPDATE_BEGIN\n" + body + "\nFABRIK_ISSUE_UPDATE_END"
+		}
+	}
+	return lastBlock
 }
 
 // parseClaudeJSON parses the JSON output from claude --output-format json.

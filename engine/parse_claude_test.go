@@ -193,6 +193,58 @@ func TestParseClaudeJSON_EmptyResultNoSessionID(t *testing.T) {
 	}
 }
 
+func TestExtractIssueUpdateFromAssistantTurns_PresentInIntermediateTurn(t *testing.T) {
+	// Markers appear in an assistant turn but not in the result field.
+	ndjson := `{"type":"assistant","message":{"content":[{"type":"text","text":"Here is the spec:\nFABRIK_ISSUE_UPDATE_BEGIN\n## Updated spec\nFABRIK_ISSUE_UPDATE_END\n"}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}
+{"type":"result","subtype":"success","result":"Done.\nFABRIK_STAGE_COMPLETE\n","session_id":"s","num_turns":2}
+`
+	got := extractIssueUpdateFromAssistantTurns([]byte(ndjson))
+	want := "FABRIK_ISSUE_UPDATE_BEGIN\n## Updated spec\nFABRIK_ISSUE_UPDATE_END"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestExtractIssueUpdateFromAssistantTurns_MultipleBlocks_LastUsed(t *testing.T) {
+	// Two update blocks across two assistant turns; the last (most-refined) is returned.
+	ndjson := `{"type":"assistant","message":{"content":[{"type":"text","text":"FABRIK_ISSUE_UPDATE_BEGIN\nFirst draft\nFABRIK_ISSUE_UPDATE_END\n"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"FABRIK_ISSUE_UPDATE_BEGIN\nSecond draft\nFABRIK_ISSUE_UPDATE_END\n"}]}}
+{"type":"result","subtype":"success","result":"FABRIK_STAGE_COMPLETE\n","session_id":"s","num_turns":3}
+`
+	got := extractIssueUpdateFromAssistantTurns([]byte(ndjson))
+	want := "FABRIK_ISSUE_UPDATE_BEGIN\nSecond draft\nFABRIK_ISSUE_UPDATE_END"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestExtractIssueUpdateFromAssistantTurns_NonePresent(t *testing.T) {
+	// No assistant messages contain update markers.
+	ndjson := `{"type":"assistant","message":{"content":[{"type":"text","text":"Just some output."}]}}
+{"type":"result","subtype":"success","result":"FABRIK_STAGE_COMPLETE\n","session_id":"s","num_turns":1}
+`
+	got := extractIssueUpdateFromAssistantTurns([]byte(ndjson))
+	if got != "" {
+		t.Errorf("expected empty string, got %q", got)
+	}
+}
+
+func TestExtractIssueUpdateFromAssistantTurns_ResumedSession(t *testing.T) {
+	// Replayed turns from prior session (old block) followed by current session turn
+	// (newer block). The last occurrence wins.
+	ndjson := `{"type":"result","subtype":"success","result":"old result","session_id":"old","num_turns":1}
+{"type":"assistant","message":{"content":[{"type":"text","text":"FABRIK_ISSUE_UPDATE_BEGIN\nOld draft\nFABRIK_ISSUE_UPDATE_END\n"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"FABRIK_ISSUE_UPDATE_BEGIN\nNew draft\nFABRIK_ISSUE_UPDATE_END\n"}]}}
+{"type":"result","subtype":"success","result":"FABRIK_STAGE_COMPLETE\n","session_id":"new","num_turns":2}
+`
+	got := extractIssueUpdateFromAssistantTurns([]byte(ndjson))
+	want := "FABRIK_ISSUE_UPDATE_BEGIN\nNew draft\nFABRIK_ISSUE_UPDATE_END"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
 func TestExtractUpdatedBody(t *testing.T) {
 	tests := []struct {
 		name   string
