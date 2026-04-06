@@ -136,7 +136,6 @@ max_retries: 5
 yolo: true
 auto_upgrade: true
 tui: true
-terminal: iTerm.app
 debug_output: true
 version: "2.0.0"
 `
@@ -175,9 +174,6 @@ version: "2.0.0"
 	}
 	if pc.TUI == nil || !*pc.TUI {
 		t.Error("tui: want true")
-	}
-	if pc.Terminal != "iTerm.app" {
-		t.Errorf("terminal: want iTerm.app, got %q", pc.Terminal)
 	}
 	if !pc.DebugOutput {
 		t.Error("debug_output: want true")
