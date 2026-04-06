@@ -500,6 +500,7 @@ func (m Model) handleMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 			nKeys := len(keys)
 			maxLines := activeH - 3
 			start := 0
+			hasEllipsis := false
 			if nKeys > maxLines && maxLines > 0 {
 				start = m.activeIdx - maxLines/2
 				if start < 0 {
@@ -508,8 +509,18 @@ func (m Model) handleMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 				if start+maxLines > nKeys {
 					start = max(nKeys-maxLines, 0)
 				}
+				// Mirror viewActive(): when ellipsis is shown, the last content
+				// row is the ellipsis indicator and must not be treated as a job.
+				if start > 0 || start+maxLines < nKeys {
+					maxLines--
+					hasEllipsis = true
+				}
 			}
 			visibleRow := clickY - 3
+			if hasEllipsis && visibleRow == maxLines {
+				// Clicked the "… N more" ellipsis row; focus the pane but don't select a job.
+				break
+			}
 			actualIdx := start + visibleRow
 			if actualIdx >= 0 && actualIdx < nKeys {
 				m.activeIdx = actualIdx
