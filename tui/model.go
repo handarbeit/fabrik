@@ -219,7 +219,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
-		case "n", "N", "escape":
+		case "n", "N", "esc":
 			if m.confirmClear {
 				m.confirmClear = false
 				return m, nil
