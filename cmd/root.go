@@ -293,12 +293,23 @@ func Execute() error {
 	}
 	fmt.Printf("  debug-output: %v\n", cfg.DebugOutput)
 
+	// If the process was re-exec'd after an auto-upgrade, refresh embedded plugin
+	// skills before entering the poll loop. The env var is unset immediately so
+	// the re-exec'd process doesn't loop.
+	if os.Getenv("FABRIK_AUTO_UPGRADED") == "1" {
+		os.Unsetenv("FABRIK_AUTO_UPGRADED")
+		if _, err := refreshPlugin(); err != nil {
+			fmt.Fprintf(os.Stderr, "[upgrade] warning: refreshPlugin failed: %v\n", err)
+		}
+	}
+
 	eng, err := engine.New(engine.Config{
 		Owner:         cfg.Owner,
 		Repo:          cfg.Repo,
 		ProjectNum:    cfg.ProjectNum,
 		User:          cfg.User,
 		Token:         cfg.Token,
+		Version:       Version,
 		Yolo:          cfg.Yolo,
 		AutoUpgrade:   cfg.AutoUpgrade,
 		PollSeconds:   cfg.PollSeconds,

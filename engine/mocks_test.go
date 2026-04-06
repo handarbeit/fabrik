@@ -30,6 +30,7 @@ type mockGitHubClient struct {
 	getIssueBodyFn            func(owner, repo string, issueNumber int) (string, error)
 	markPRReadyFn             func(owner, repo string, prNumber int) error
 	createDraftPRFn           func(owner, repo, title, head, base string, issueNumber int) (int, error)
+	fetchLatestReleaseFn      func(owner, repo string) (*gh.LatestRelease, error)
 
 	// Track calls — access under mu when accessed from concurrent goroutines.
 	addLabelCalls      []addLabelCall
@@ -235,6 +236,16 @@ func (m *mockGitHubClient) MarkPRReady(owner, repo string, prNumber int) error {
 		return fn(owner, repo, prNumber)
 	}
 	return nil
+}
+
+func (m *mockGitHubClient) FetchLatestRelease(owner, repo string) (*gh.LatestRelease, error) {
+	m.mu.Lock()
+	fn := m.fetchLatestReleaseFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo)
+	}
+	return nil, nil
 }
 
 func (m *mockGitHubClient) RateLimitStats() (gh.RateLimitStats, gh.RateLimitStats) {
