@@ -37,16 +37,17 @@ const configYAMLTemplate = `# .fabrik/config.yaml — project-level configuratio
 # user: your-github-username
 
 # Optional settings (defaults shown):
-# stages: ./.fabrik/stages
-# poll: 30
-# max_concurrent: 5
-# max_retries: 3
-# yolo: false
-# auto_upgrade: false
-# tui: false
-# terminal: ""
-# debug_output: false
-# version: ""
+# stages: ./.fabrik/stages      # Path to stage YAML configs directory.
+# poll: 30                      # Polling interval in seconds. Lower = more responsive, higher = fewer API calls.
+# max_concurrent: 5             # Max parallel Claude sessions. Tune based on your API tier capacity.
+# max_retries: 3                # Max stage failures before pausing an issue (0 = unlimited retries).
+# yolo: false                   # Auto-advance issues through stages without human card moves.
+# auto_upgrade: false           # Self-upgrade from origin/main when idle (self-evolving workflow).
+# tui: false                    # Enable the interactive TUI dashboard (requires a real terminal).
+# terminal: ""                  # Terminal for TUI log viewer: terminal, iterm2, ghostty, kitty, alacritty, warp.
+#                               # Auto-detected from TERM_PROGRAM if not set; set explicitly for kitty.
+# debug_output: false           # Save raw Claude output to .fabrik/debug/ for diagnosing prompt issues.
+# version: ""                   # Project version shown in TUI footer. Auto-inferred from package.json/go.mod if not set.
 `
 
 // writeConfigTemplate writes the .fabrik/config.yaml template.
