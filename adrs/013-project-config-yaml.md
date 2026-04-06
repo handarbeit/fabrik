@@ -39,7 +39,7 @@ Config is resolved in `Execute()` using an "at-default" heuristic for each setti
 
 - `config.LoadProjectConfig()` reads and unmarshals `.fabrik/config.yaml` using `gopkg.in/yaml.v3` (already a dependency)
 - Integer fields use `*int` (pointer) to distinguish "not set in file" from "explicitly set to zero" — critical for `max_retries` where 0 means "unlimited"
-- Boolean fields use plain `bool` since all defaults are `false` and setting `false` in config.yaml is indistinguishable from "not set" but is also a no-op
+- Boolean fields use plain `bool` since all defaults are `false` and setting `false` in config.yaml is indistinguishable from "not set" but is also a no-op. **Exception**: `tui` uses `*bool` because its default is `true` — absent means "use default on", while explicit `false` means "disable".
 - `config.WarnIfConfigIgnored()` prints a non-fatal stderr warning if `.fabrik/config.yaml` is listed in `.gitignore`
 - `fabrik init` generates a `.fabrik/config.yaml` template (all settings commented-out with defaults) and supports interactive prompting for required fields when stdin is a TTY
 
@@ -57,7 +57,7 @@ Config is resolved in `Execute()` using an "at-default" heuristic for each setti
 | `max_retries` | `FABRIK_MAX_RETRIES` | `--max-retries` | `3` |
 | `yolo` | `FABRIK_YOLO` | `--yolo` | `false` |
 | `auto_upgrade` | `FABRIK_AUTO_UPGRADE` | `--auto-upgrade` | `false` |
-| `tui` | `FABRIK_TUI` | `--tui` | `false` |
+| `tui` | `FABRIK_TUI` | `--notui` | `true` |
 | `terminal` | `FABRIK_TERMINAL` | *(none)* | `""` |
 | `debug_output` | `FABRIK_DEBUG_OUTPUT` | `--debug-output` | `false` |
 
