@@ -42,20 +42,20 @@ type Engine struct {
 	jobControlMode     bool                        // true when running from a non-git directory (multi-repo)
 	jobControlDir      string                      // fabrikDir when jobControlMode is true
 	mu                 sync.Mutex
-	processedSet       map[string]time.Time // key: "owner/repo#N-stageName" or "owner/repo#N-comment-ID"
-	lockedIssues       map[string]bool      // key: "owner/repo#N"; issues with fabrik:locked added but not yet released
-	totalTokens        TokenUsage           // accumulated token usage since process start
-	lastReportedCost   float64              // cost at last [stats] report; skip repeat prints when unchanged
-	retryCount         map[string]int       // key: "owner/repo#N-stageName", value: failed attempt count
-	pausedDueToRetries map[string]bool      // key: "owner/repo#N-stageName", true if engine paused this issue
-	lastUsage          map[string]TokenUsage   // key: issueKey; per-issue token usage from last processItem (for TUI)
-	lastCompleted      map[string]bool         // key: issueKey; per-issue stage completion from last processItem (for TUI)
-	lastBlocked        map[string]bool         // key: issueKey; per-issue blocked-on-input from last processItem (for TUI)
-	lastUpdatedAt      map[string]time.Time    // key: issueKey; tracks last-seen updatedAt per issue
-	idleCount          int                  // consecutive idle polls; triggers self-upgrade at threshold
+	processedSet       map[string]time.Time  // key: "owner/repo#N-stageName" or "owner/repo#N-comment-ID"
+	lockedIssues       map[string]bool       // key: "owner/repo#N"; issues with fabrik:locked added but not yet released
+	totalTokens        TokenUsage            // accumulated token usage since process start
+	lastReportedCost   float64               // cost at last [stats] report; skip repeat prints when unchanged
+	retryCount         map[string]int        // key: "owner/repo#N-stageName", value: failed attempt count
+	pausedDueToRetries map[string]bool       // key: "owner/repo#N-stageName", true if engine paused this issue
+	lastUsage          map[string]TokenUsage // key: issueKey; per-issue token usage from last processItem (for TUI)
+	lastCompleted      map[string]bool       // key: issueKey; per-issue stage completion from last processItem (for TUI)
+	lastBlocked        map[string]bool       // key: issueKey; per-issue blocked-on-input from last processItem (for TUI)
+	lastUpdatedAt      map[string]time.Time  // key: issueKey; tracks last-seen updatedAt per issue
+	idleCount          int                   // consecutive idle polls; triggers self-upgrade at threshold
 	sem                chan struct{}         // semaphore bounding concurrent workers across poll cycles
-	wg                 sync.WaitGroup       // tracks in-flight workers for graceful shutdown
-	inFlight           sync.Map             // key: issueKey string, value: bool (isPR)
+	wg                 sync.WaitGroup        // tracks in-flight workers for graceful shutdown
+	inFlight           sync.Map              // key: issueKey string, value: bool (isPR)
 	events             chan tui.Event        // nil in tests / plain-text mode; TUI goroutine consumes
 }
 
