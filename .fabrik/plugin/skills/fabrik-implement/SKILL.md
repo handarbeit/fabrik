@@ -43,13 +43,26 @@ If the plan is unclear or seems wrong based on what you find in the code, note t
 
 ### Follow the task checklist
 
-Work through tasks in the order listed. For each task:
+Work through tasks in the order listed. **Before starting each task, run `git status` and verify the working tree is clean.** If there are uncommitted changes, commit them before proceeding — do not start a new task with a dirty working tree.
+
+For each task, follow this loop exactly:
 1. Implement the change
 2. Ensure it compiles
 3. Write or update tests
-4. Commit with a clear message describing what was done
-5. Push to remote
-6. Check off the task in the Plan stage comment (see below)
+4. **You must commit** with a clear message describing the specific task completed — not "WIP" or "progress"
+5. **You must push** to remote immediately after committing
+6. **Do not proceed to the next task until `git status` shows a clean working tree** (exception: if the task produced no file changes, confirm that explicitly before moving on)
+7. Check off the task in the Plan stage comment (see below)
+
+Accumulating uncommitted changes across multiple tasks is a **workflow violation**, not a bad practice. Each task must be committed and pushed before the next begins. Good commit messages name the specific task or change:
+- `Add FetchItemDetails method for deep-fetching item comments`
+- `Update poll loop to use two-phase fetch`
+- `Fix race condition in worktree mutex handling`
+
+Bad commit messages:
+- `WIP`
+- `Updates`
+- `Fix stuff`
 
 **Documentation tasks are not optional.** If the plan includes documentation tasks (README updates, godoc, SKILL.md changes, CLAUDE.md edits, etc.), treat them exactly like code tasks: implement, commit, push. Do not defer documentation to the end or skip it assuming Review will catch it. If you discover documentation that should have been in the plan is missing, add it — the plan's doc inventory is a starting point, not a ceiling.
 
