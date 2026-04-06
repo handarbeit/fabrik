@@ -127,22 +127,22 @@ func TestChangeType(t *testing.T) {
 	}
 }
 
-func TestPrimaryWorktrees_NilWhenNoDefaultRepo(t *testing.T) {
-	// Engine with no owner/repo configured → defaultRepo() is "" → primaryWorktrees returns nil.
+func TestDevCheckout_NilWhenNoDefaultRepo(t *testing.T) {
+	// Engine with no owner/repo configured → defaultRepo() is "" → devCheckout returns nil.
 	eng := NewWithDeps(
 		Config{Owner: "", Repo: "", User: "u", Token: "t", Stages: testStages()},
 		&mockGitHubClient{}, &mockClaudeInvoker{}, nil,
 	)
-	if wm := eng.primaryWorktrees(); wm != nil {
-		t.Errorf("expected nil primaryWorktrees when no default repo, got %v", wm)
+	if wm := eng.devCheckout(); wm != nil {
+		t.Errorf("expected nil devCheckout when no default repo, got %v", wm)
 	}
 }
 
-func TestPrimaryWorktrees_ReturnsRegistered(t *testing.T) {
+func TestDevCheckout_ReturnsRegistered(t *testing.T) {
 	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
-	// testEngine already registers "owner/repo" via NewWithDeps — primaryWorktrees should return it.
-	if got := eng.primaryWorktrees(); got == nil {
-		t.Errorf("primaryWorktrees should return the WM registered for owner/repo")
+	// testEngine already registers "owner/repo" via NewWithDeps — devCheckout should return it.
+	if got := eng.devCheckout(); got == nil {
+		t.Errorf("devCheckout should return the WM registered for owner/repo")
 	}
 }
 
