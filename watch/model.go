@@ -213,7 +213,7 @@ func (m WatchModel) Init() tea.Cmd {
 // Run runs the bubbletea program with the WatchModel.
 // It injects p.Send into the log follower goroutines before starting.
 func Run(m WatchModel) error {
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	// Start background goroutines that send messages via p.Send.
 	StartLogFollower(m.logDir, func(msg tea.Msg) { p.Send(msg) }, m.done)

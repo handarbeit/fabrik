@@ -372,7 +372,7 @@ func runTUI(eng *engine.Engine, pollSeconds int, info tui.ProjectInfo, pluginDir
 	eng.SetEvents(events)
 
 	tuiModel := tui.New(pollSeconds, info, pluginDir)
-	p := tea.NewProgram(tuiModel, tea.WithAltScreen(), tea.WithoutSignalHandler())
+	p := tea.NewProgram(tuiModel, tea.WithAltScreen(), tea.WithoutSignalHandler(), tea.WithMouseCellMotion())
 
 	// Forward events from the engine's channel into bubbletea.
 	go func() {
