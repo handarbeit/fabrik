@@ -43,18 +43,22 @@ If the plan is unclear or seems wrong based on what you find in the code, note t
 
 ### Follow the task checklist
 
-Work through tasks in the order listed. **Before starting each task, run `git status` and verify the working tree is clean.** If there are uncommitted changes, commit them before proceeding — do not start a new task with a dirty working tree.
-
-For each task, follow this loop exactly:
+Work through tasks in the order listed. For each task:
 1. Implement the change
 2. Ensure it compiles
 3. Write or update tests
-4. **You must commit** with a clear message describing the specific task completed — not "WIP" or "progress"
-5. **You must push** to remote immediately after committing
-6. **Do not proceed to the next task until `git status` shows a clean working tree** (exception: if the task produced no file changes, confirm that explicitly before moving on)
-7. Check off the task in the Plan stage comment (see below)
+4. Commit with a clear message describing what was done
+5. Push to remote
+6. Check off the task in the Plan stage comment (see below)
 
-Accumulating uncommitted changes across multiple tasks is a **workflow violation**, not a bad practice. Each task must be committed and pushed before the next begins. Good commit messages name the specific task or change:
+### Commit frequently
+
+Commit after each logical unit of work — typically after each task or sub-task. Do not accumulate a large diff and commit at the end. Frequent commits:
+- Preserve progress if the session is interrupted
+- Make review easier
+- Enable bisecting if something breaks
+
+Good commit messages:
 - `Add FetchItemDetails method for deep-fetching item comments`
 - `Update poll loop to use two-phase fetch`
 - `Fix race condition in worktree mutex handling`
@@ -64,7 +68,9 @@ Bad commit messages:
 - `Updates`
 - `Fix stuff`
 
-**Documentation tasks are not optional.** If the plan includes documentation tasks (README updates, godoc, SKILL.md changes, CLAUDE.md edits, etc.), treat them exactly like code tasks: implement, commit, push. Do not defer documentation to the end or skip it assuming Review will catch it. If you discover documentation that should have been in the plan is missing, add it — the plan's doc inventory is a starting point, not a ceiling.
+### Push regularly
+
+Push after each commit or small group of related commits. The remote branch is the durable record of progress. If your session is killed, pushed commits survive.
 
 ### Update task progress
 
@@ -123,8 +129,7 @@ Before signaling completion:
 
 - **Do not redesign the approach** — the Plan stage made those decisions. If something seems wrong, note it but implement the plan.
 - **Do not skip tests** — if the plan didn't mention tests for a task, add them anyway
-- **Do not move to the next task with uncommitted changes** — run `git status` before starting each task; commit and push if the tree is dirty. Accumulating uncommitted changes across tasks is a **workflow violation**.
-- **Never use vague commit messages** ("WIP", "Updates", "Fix stuff") — each message must describe the specific task or change completed
+- **Do not accumulate large uncommitted diffs** — commit and push frequently
 - **Do not refactor unrelated code** — stay focused on the task list
 - **Do not add features not in the plan** — no scope creep
 - **Do not leave the branch in a broken state** — every push should compile and pass tests
@@ -148,7 +153,7 @@ Before signaling completion:
 ## Common Pitfalls
 
 - **Starting over instead of resuming**: Always check `git status` and `git log` first. Don't redo work.
-- **Giant commits**: Accumulating a large diff before committing is a **workflow violation** — not just a bad practice. Commit and push after each task. If `git status` is dirty when you're about to start a new task, stop and commit first.
+- **Giant commits**: Break work into small, logical commits. One task = one or a few commits.
 - **Forgetting to push**: Every commit should be pushed. Don't leave work only on local.
 - **Ignoring test failures**: Fix failing tests before moving to the next task. Don't accumulate failures.
 - **Diverging from the plan**: Follow the task list. If you discover the plan is wrong, note it and continue — don't silently redesign.

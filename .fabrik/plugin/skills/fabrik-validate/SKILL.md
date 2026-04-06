@@ -85,17 +85,7 @@ Verify existing functionality isn't broken:
 - No TODO or FIXME comments that should have been resolved
 - No debug logging left in
 - No commented-out code
-- All plan tasks checked off in `.fabrik-context/stage-Plan.md`
-
-### Documentation accuracy
-
-For each documentation file touched in the diff, verify the content reflects actual behavior — not the behavior that was planned, but the behavior that was implemented:
-
-- Flag names, config keys, command syntax, and API shapes must match the code, not the spec.
-- Cross-reference doc claims against the diff: if the diff renames a flag or changes a config key, the README must reflect the new name.
-- "Exists and isn't obviously stale" is the bar. Deep link checking or running examples is out of scope.
-
-If a documentation file was not touched but the plan listed a documentation task for it, treat it as a failed requirement — same as any other incomplete plan task.
+- All plan tasks checked off in the issue body
 
 ### Branch state
 

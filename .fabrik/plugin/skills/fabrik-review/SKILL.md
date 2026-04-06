@@ -98,13 +98,7 @@ git diff origin/main..HEAD
 **Completeness**:
 - All tasks in the plan checklist are done
 - No TODO comments that should have been resolved
-
-**Documentation**:
-- Were all documentation tasks from the plan checklist completed?
-- Do new or modified exported Go types, functions, or methods have godoc comments?
-- Do user-facing docs (README, CLAUDE.md, guides, SKILL.md files) reflect the changes?
-- Fix missing or outdated documentation the same way you fix any other issue: write it, commit it with `docs: description`, move on. Missing docs are not a reason to block — they're a reason to write.
-- Only block (do not signal completion) if a documentation issue is architectural — e.g., the docs describe a design that contradicts the actual implementation in a way that requires a human decision about which is correct.
+- Documentation updated if public API changed
 
 ### Fix what you find
 
