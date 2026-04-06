@@ -139,6 +139,16 @@ func TestExecute_EnvPluginDir(t *testing.T) {
 	executeAndStop(t)
 }
 
+func TestExecute_EnvTUIFalse(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	resetFlags()
+	t.Setenv("FABRIK_TUI", "false")
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+	executeAndStop(t)
+}
+
 func TestExecute_StreamFilterSubcommand(t *testing.T) {
 	resetFlags()
 	r, w, _ := os.Pipe()

@@ -186,7 +186,7 @@ to prevent accidental token leaks.
 | `--yolo` | Auto-advance through stages | `false` |
 | `--auto-upgrade` | Self-upgrade from origin/main when idle | `false` |
 | `--poll` | Poll interval in seconds | `30` |
-| `--tui` | Enable the interactive TUI dashboard | `false` |
+| `--notui` | Disable the interactive TUI dashboard | TUI on by default |
 | `--max-concurrent` | Maximum number of concurrent issue workers | `5` |
 | `--max-retries` | Max failed stage attempts before pausing the issue (0 = unlimited) | `3` |
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` for debugging | `false` |
