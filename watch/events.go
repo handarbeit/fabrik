@@ -19,3 +19,14 @@ type GitHubPollMsg struct{}
 // TickMsg is the generic ticker message used for periodic UI refreshes
 // (e.g. elapsed-time display).
 type TickMsg struct{}
+
+// ClaudeFinishedMsg is sent when the inline Claude subprocess launched via
+// tea.ExecProcess exits. Err is non-nil if Claude exited with an error.
+type ClaudeFinishedMsg struct {
+	Err error
+}
+
+// StatusMsgMsg carries a transient status message to display in the status bar.
+type StatusMsgMsg struct {
+	Text string
+}

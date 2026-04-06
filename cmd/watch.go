@@ -18,7 +18,7 @@ func runWatch(args []string) error {
 	owner := fs.String("owner", "", "GitHub repository owner (or FABRIK_OWNER)")
 	repo := fs.String("repo", "", "GitHub repository name (or FABRIK_REPO)")
 	token := fs.String("token", "", "GitHub token (or FABRIK_TOKEN / GITHUB_TOKEN)")
-	terminal := fs.String("terminal", "", "Terminal emulator (terminal, iterm2, ghostty, kitty, alacritty, warp)")
+	pluginDir := fs.String("plugin-dir", "", "Path to Fabrik plugin directory (or FABRIK_PLUGIN_DIR)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -56,14 +56,10 @@ func runWatch(args []string) error {
 	if *token == "" {
 		*token = config.Token()
 	}
-	// Resolve terminal
-	if *terminal == "" {
-		if v := os.Getenv("FABRIK_TERMINAL"); v != "" {
-			*terminal = v
-		} else if pc.Terminal != "" {
-			*terminal = pc.Terminal
-		} else {
-			*terminal = detectTerminalFromEnv()
+	// Resolve plugin-dir from: flag > env
+	if *pluginDir == "" {
+		if v := os.Getenv("FABRIK_PLUGIN_DIR"); v != "" {
+			*pluginDir = v
 		}
 	}
 
@@ -94,7 +90,7 @@ func runWatch(args []string) error {
 		Repo:         *repo,
 		Client:       client,
 		PollInterval: time.Duration(pollSeconds) * time.Second,
-		Terminal:     *terminal,
+		PluginDir:    *pluginDir,
 	}
 
 	model := watch.NewModel(issueNumber, opts)

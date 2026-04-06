@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -22,7 +21,7 @@ type GitHubOptions struct {
 	Repo         string
 	Client       *gh.Client
 	PollInterval time.Duration
-	Terminal     string
+	PluginDir    string
 }
 
 // issueState holds the latest GitHub-fetched state for the watched issue.
@@ -44,12 +43,20 @@ type WatchModel struct {
 	issueNumber int
 	opts        GitHubOptions
 	logDir      string
+	pluginDir   string
 
 	// UI state
 	width  int
 	height int
 	vp     viewport.Model // scrollable live-output viewport
-	lines  []string       // rendered lines from log follower
+	lines  []string       // rendered lines from log follower (live stage buffer)
+
+	// Tab bar state
+	stageTabs    []stageTab
+	selectedTabIdx int
+
+	// Transient status message (shown in status bar, cleared on TickMsg)
+	statusMsg string
 
 	// issue/PR state from GitHub
 	github issueState
@@ -69,13 +76,48 @@ func NewModel(issueNumber int, opts GitHubOptions) WatchModel {
 	logDir := issueLogDir(issueNumber)
 	vp := viewport.New(80, 20)
 	vp.SetContent("")
+
+	tabs := buildStageTabs(logDir)
+	selectedTabIdx := liveTabIdx(tabs)
+
 	return WatchModel{
-		issueNumber: issueNumber,
-		opts:        opts,
-		logDir:      logDir,
-		vp:          vp,
-		done:        make(chan struct{}),
+		issueNumber:    issueNumber,
+		opts:           opts,
+		logDir:         logDir,
+		pluginDir:      opts.PluginDir,
+		vp:             vp,
+		stageTabs:      tabs,
+		selectedTabIdx: selectedTabIdx,
+		done:           make(chan struct{}),
 	}
+}
+
+// liveTabIdx returns the index of the live tab in tabs, or 0 if none.
+func liveTabIdx(tabs []stageTab) int {
+	for i, t := range tabs {
+		if t.IsLive {
+			return i
+		}
+	}
+	return 0
+}
+
+// mergeTabSelection rebuilds the tab list and preserves the selected tab by label.
+// If the user was on the live tab (or the label no longer exists), returns the new live tab index.
+func mergeTabSelection(newTabs []stageTab, oldTabs []stageTab, oldIdx int) int {
+	// Determine whether the old selection was the live tab.
+	wasLive := oldIdx >= len(oldTabs) || (len(oldTabs) > 0 && oldTabs[oldIdx].IsLive)
+	if wasLive || oldIdx >= len(oldTabs) {
+		return liveTabIdx(newTabs)
+	}
+	// Try to find the old label in the new list.
+	oldLabel := oldTabs[oldIdx].Label
+	for i, t := range newTabs {
+		if t.Label == oldLabel {
+			return i
+		}
+	}
+	return liveTabIdx(newTabs)
 }
 
 // issueLogDir returns ~/.fabrik/logs/issue-N.
@@ -103,30 +145,7 @@ func currentStageFromLog(logDir string) string {
 	if path == "" {
 		return ""
 	}
-	base := filepath.Base(path)
-	// Format: <safeLabel>-<yyyyMMdd-HHmmss>-<nanos>.log
-	// safeLabel is stage.Name with / \ : space replaced by -
-	// First segment before the first hyphen-that-starts-a-date is the label.
-	// Simplest heuristic: take everything before the first date-like segment.
-	parts := strings.Split(strings.TrimSuffix(base, ".log"), "-")
-	var label []string
-	for _, p := range parts {
-		// Date parts are all digits; stop when we hit one of length 8 (yyyyMMdd).
-		if len(p) == 8 && isDigits(p) {
-			break
-		}
-		label = append(label, p)
-	}
-	return strings.Join(label, "-")
-}
-
-func isDigits(s string) bool {
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return false
-		}
-	}
-	return true
+	return stageNameFromFilename(filepath.Base(path))
 }
 
 // readSessionID returns the session ID for the current stage, or "" if not found.
@@ -182,6 +201,20 @@ func nextGitHubPoll(interval time.Duration) tea.Cmd {
 	})
 }
 
+// switchToTab updates the viewport content when the user selects a different tab.
+func (m *WatchModel) switchToTab(idx int) {
+	if idx < 0 || idx >= len(m.stageTabs) {
+		return
+	}
+	tab := m.stageTabs[idx]
+	if tab.IsLive {
+		m.vp.SetContent(strings.Join(m.lines, ""))
+		m.vp.GotoBottom()
+	} else {
+		m.vp.SetContent(renderLogFile(tab.LogPath))
+	}
+}
+
 // Update handles all bubbletea messages.
 func (m WatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch ev := msg.(type) {
@@ -214,28 +247,71 @@ func (m WatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.vp.GotoTop()
 			return m, nil
 
+		case "left", "h":
+			if m.selectedTabIdx > 0 {
+				m.selectedTabIdx--
+				m.switchToTab(m.selectedTabIdx)
+			}
+			return m, nil
+
+		case "right", "l":
+			if m.selectedTabIdx < len(m.stageTabs)-1 {
+				m.selectedTabIdx++
+				m.switchToTab(m.selectedTabIdx)
+			}
+			return m, nil
+
 		case "i":
-			return m, m.openClaudeCmd()
+			// Guard: block if stage is currently active.
+			stageName := currentStageFromLog(m.logDir)
+			inProgressLabel := fmt.Sprintf("stage:%s:in_progress", stageName)
+			for _, lbl := range m.github.labels {
+				if lbl == inProgressLabel {
+					return m, func() tea.Msg {
+						return StatusMsgMsg{Text: "session is active — wait for stage to complete"}
+					}
+				}
+			}
+			return m, m.openClaudeInlineCmd()
 		}
 
 	case LogLineMsg:
 		m.lines = append(m.lines, ev.Text)
-		m.vp.SetContent(strings.Join(m.lines, ""))
-		m.vp.GotoBottom()
+		// Only update viewport if live tab is selected.
+		if m.selectedTabIdx < len(m.stageTabs) && m.stageTabs[m.selectedTabIdx].IsLive {
+			m.vp.SetContent(strings.Join(m.lines, ""))
+			m.vp.GotoBottom()
+		}
 		return m, nil
 
 	case NewLogFileMsg:
-		// Stage transition: clear the viewport and start fresh for new stage.
+		// Stage transition: clear live buffer, rebuild tabs, move to live tab.
 		m.lines = nil
 		m.vp.SetContent("")
+		newTabs := buildStageTabs(m.logDir)
+		m.stageTabs = newTabs
+		m.selectedTabIdx = liveTabIdx(newTabs)
 		return m, nil
 
 	case GitHubPollMsg:
 		m.fetchGitHub()
+		// Rebuild tabs; preserve selection by label.
+		newTabs := buildStageTabs(m.logDir)
+		m.selectedTabIdx = mergeTabSelection(newTabs, m.stageTabs, m.selectedTabIdx)
+		m.stageTabs = newTabs
 		return m, nextGitHubPoll(m.opts.PollInterval)
 
 	case TickMsg:
+		m.statusMsg = ""
 		return m, tickCmd()
+
+	case ClaudeFinishedMsg:
+		// TUI has been restored automatically by tea.ExecProcess; nothing to do.
+		return m, nil
+
+	case StatusMsgMsg:
+		m.statusMsg = ev.Text
+		return m, nil
 	}
 
 	var cmd tea.Cmd
@@ -309,8 +385,9 @@ func issueHistory(issueNumber int) []tui.HistoryEntry {
 
 // viewportHeight returns the number of lines available for the live-output viewport.
 func (m WatchModel) viewportHeight() int {
-	// Header: ~3 lines, status bar: ~1 line, history: ~5 lines, padding: 2
-	reserved := 11
+	// Header: ~3 lines, tab bar: ~1 line, section label: ~1 line,
+	// status bar: ~1 line, padding: ~2 lines
+	reserved := 8
 	if m.height > reserved+5 {
 		return m.height - reserved
 	}
@@ -341,40 +418,40 @@ func (m WatchModel) View() string {
 		prLine += dimStyle.Render(fmt.Sprintf("  |  %d comments", m.github.commentCnt))
 	}
 	b.WriteString(prLine)
-	b.WriteString("\n\n")
-
-	// ── Live output viewport ──
-	b.WriteString(sectionStyle.Render("Live output"))
 	b.WriteString("\n")
-	b.WriteString(m.vp.View())
-	b.WriteString("\n\n")
 
-	// ── Stage history ──
-	b.WriteString(sectionStyle.Render("Stage history"))
-	b.WriteString("\n")
-	if len(m.history) == 0 {
-		b.WriteString(dimStyle.Render("  (no history — run engine with --tui to record)"))
-	} else {
-		// Show last 5 entries
-		start := len(m.history) - 5
-		if start < 0 {
-			start = 0
-		}
-		for _, e := range m.history[start:] {
-			status := successStyle.Render("✓")
-			if !e.Success {
-				status = failStyle.Render("✗")
-			}
-			b.WriteString(fmt.Sprintf("  %s  %-12s  %s  $%.4f\n",
-				status, e.StageName, e.Duration.Round(time.Second), e.CostUSD))
-		}
+	// ── Tab bar ──
+	if len(m.stageTabs) > 0 {
+		b.WriteString(m.tabBar())
+		b.WriteString("\n")
 	}
+
+	// ── Viewport ──
+	b.WriteString(m.vp.View())
 	b.WriteString("\n")
 
 	// ── Status bar ──
 	b.WriteString(m.statusBar())
 
 	return b.String()
+}
+
+// tabBar renders the stage tab bar.
+func (m WatchModel) tabBar() string {
+	var parts []string
+	for i, t := range m.stageTabs {
+		label := t.Label
+		if t.IsLive {
+			label += "*"
+		}
+		tab := fmt.Sprintf("[ %s ]", label)
+		if i == m.selectedTabIdx {
+			parts = append(parts, sectionStyle.Render(tab))
+		} else {
+			parts = append(parts, dimStyle.Render(tab))
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 // prStatusLine renders the PR and CI check summary.
@@ -436,7 +513,19 @@ func (m WatchModel) checkRunSummary() string {
 
 // statusBar renders the bottom status bar.
 func (m WatchModel) statusBar() string {
-	keys := dimStyle.Render("q quit  ↑↓ scroll  G bottom  g top  i open claude")
+	keys := dimStyle.Render("q quit  ↑↓ scroll  ←→ tabs  G bottom  g top  i resume claude")
+
+	// Session ID for current stage.
+	sessionID := readSessionID(m.issueNumber, currentStageFromLog(m.logDir))
+	if sessionID != "" {
+		keys += dimStyle.Render("  |  session: " + sessionID)
+	}
+
+	// Transient status message takes precedence over poll info.
+	if m.statusMsg != "" {
+		return keys + "  " + failStyle.Render(m.statusMsg)
+	}
+
 	var pollInfo string
 	if !m.lastPollAt.IsZero() {
 		ago := time.Since(m.lastPollAt).Round(time.Second)
@@ -448,89 +537,28 @@ func (m WatchModel) statusBar() string {
 	return keys + pollInfo
 }
 
-// openClaudeCmd returns a tea.Cmd that opens a new terminal window running
-// claude --resume SESSION_ID in the issue's worktree.
-func (m WatchModel) openClaudeCmd() tea.Cmd {
-	return func() tea.Msg {
-		stageName := currentStageFromLog(m.logDir)
-		sessionID := readSessionID(m.issueNumber, stageName)
-		wt := worktreeDir(m.issueNumber)
+// openClaudeInlineCmd returns a tea.Cmd that suspends the TUI and launches
+// claude --resume <session-id> inline in the current terminal via tea.ExecProcess.
+// When Claude exits, the TUI resumes and ClaudeFinishedMsg is sent.
+func (m WatchModel) openClaudeInlineCmd() tea.Cmd {
+	stageName := currentStageFromLog(m.logDir)
+	sessionID := readSessionID(m.issueNumber, stageName)
+	wt := worktreeDir(m.issueNumber)
 
-		var claudeArgs string
-		if sessionID != "" {
-			claudeArgs = fmt.Sprintf("--resume %s", shellQuote(sessionID))
-		}
-		cmdStr := fmt.Sprintf("cd %s && claude %s", shellQuote(wt), claudeArgs)
-
-		openTerminal(m.opts.Terminal, cmdStr)
-		return nil
+	var args []string
+	if sessionID != "" {
+		args = append(args, "--resume", sessionID)
 	}
-}
-
-// openTerminal opens a new terminal window running cmdStr.
-func openTerminal(terminal, cmdStr string) {
-	var cmd *exec.Cmd
-	switch terminal {
-	case "iterm2":
-		if runtime.GOOS == "darwin" {
-			script := fmt.Sprintf(`tell application "iTerm"
-	activate
-	create window with default profile command "%s"
-end tell`, strings.ReplaceAll(cmdStr, `"`, `\"`))
-			cmd = exec.Command("osascript", "-e", script)
-		} else {
-			cmd = linuxFallbackTerminal(cmdStr)
-		}
-	case "ghostty":
-		if runtime.GOOS == "darwin" {
-			cmd = exec.Command("open", "-na", "Ghostty.app", "--args", "-e", "sh", "-c", cmdStr)
-		} else {
-			cmd = exec.Command("ghostty", "-e", "sh", "-c", cmdStr)
-		}
-	case "kitty":
-		cmd = exec.Command("kitty", "sh", "-c", cmdStr)
-	case "alacritty":
-		cmd = exec.Command("alacritty", "-e", "sh", "-c", cmdStr)
-	case "warp":
-		if runtime.GOOS == "darwin" {
-			cmd = exec.Command("open", "-a", "Warp")
-		} else {
-			cmd = linuxFallbackTerminal(cmdStr)
-		}
-	default:
-		if runtime.GOOS == "darwin" {
-			script := fmt.Sprintf(`tell application "Terminal"
-activate
-do script "%s"
-end tell`, strings.ReplaceAll(cmdStr, `"`, `\"`))
-			cmd = exec.Command("osascript", "-e", script)
-		} else {
-			cmd = linuxFallbackTerminal(cmdStr)
-		}
+	if m.pluginDir != "" {
+		args = append(args, "--plugin-dir", m.pluginDir)
 	}
-	if cmd != nil {
-		if err := cmd.Start(); err != nil {
-			fmt.Fprintf(os.Stderr, "[warn] failed to launch terminal: %v\n", err)
-		}
-	}
-}
 
-// linuxFallbackTerminal returns an exec.Cmd for the first available terminal emulator.
-func linuxFallbackTerminal(cmdStr string) *exec.Cmd {
-	for _, term := range []string{"gnome-terminal", "xterm", "konsole"} {
-		if _, err := exec.LookPath(term); err == nil {
-			if term == "gnome-terminal" {
-				return exec.Command(term, "--", "sh", "-c", cmdStr)
-			}
-			return exec.Command(term, "-e", "sh", "-c", cmdStr)
-		}
-	}
-	return nil
-}
+	cmd := exec.Command("claude", args...)
+	cmd.Dir = wt
 
-// shellQuote wraps s in single quotes and escapes embedded single quotes.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return ClaudeFinishedMsg{Err: err}
+	})
 }
 
 // Styles
