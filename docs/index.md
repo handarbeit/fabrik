@@ -324,7 +324,14 @@ description: >-
 <span style="color:#8b949e"># Requires: gh auth login with access to handarbeit/fabrik</span>
 <span style="color:#8b949e"># Extracts to current directory — cd to ~/bin first, or move binary afterwards</span>
 cd ~/bin
-gh release download --repo handarbeit/fabrik --pattern '*.tar.gz' -O - | tar xz
+gh release download --repo handarbeit/fabrik \
+  --pattern "fabrik_*_$(uname -s | tr A-Z a-z)_$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/').tar.gz" \
+  -O - | tar xz
+<span style="color:#8b949e"># Platform-specific alternatives:</span>
+<span style="color:#8b949e"># darwin/arm64:  --pattern "fabrik_*_darwin_arm64.tar.gz"</span>
+<span style="color:#8b949e"># darwin/amd64:  --pattern "fabrik_*_darwin_amd64.tar.gz"</span>
+<span style="color:#8b949e"># linux/amd64:   --pattern "fabrik_*_linux_amd64.tar.gz"</span>
+<span style="color:#8b949e"># linux/arm64:   --pattern "fabrik_*_linux_arm64.tar.gz"</span>
 
 <span style="color:#56d364"># Option B: Build from source (requires Go)</span>
 git clone https://github.com/handarbeit/fabrik
