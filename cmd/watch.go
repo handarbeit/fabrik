@@ -63,6 +63,14 @@ func runWatch(args []string) error {
 		}
 	}
 
+	// Resolve stages directory: default -> FABRIK_STAGES env -> pc.StagesDir
+	stagesDir := "./.fabrik/stages"
+	if v := os.Getenv("FABRIK_STAGES"); v != "" {
+		stagesDir = v
+	} else if pc.StagesDir != "" {
+		stagesDir = pc.StagesDir
+	}
+
 	// Resolve poll interval (seconds): env > config.yaml > default 30s
 	pollSeconds := 30
 	if v := os.Getenv("FABRIK_POLL"); v != "" {
@@ -93,6 +101,6 @@ func runWatch(args []string) error {
 		PluginDir:    *pluginDir,
 	}
 
-	model := watch.NewModel(issueNumber, opts)
+	model := watch.NewModel(issueNumber, opts, stagesDir)
 	return watch.Run(model)
 }
