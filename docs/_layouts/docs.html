@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% if page.title %}{{ page.title }} — {{ site.title }}{% else %}{{ site.title }}{% endif %}</title>
+  {% seo %}
+  <link rel="stylesheet" href="{{ '/assets/css/style.css' | relative_url }}">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+  <header class="site-header">
+    <div class="container">
+      <nav class="site-nav">
+        <a href="{{ '/' | relative_url }}" class="site-logo">
+          <span class="logo-icon">🏭</span>
+          <span class="logo-text">Fabrik</span>
+        </a>
+        <div class="nav-links" id="site-nav-links">
+          <a href="{{ '/' | relative_url }}#how-it-works">How It Works</a>
+          <a href="{{ '/' | relative_url }}#features">Features</a>
+          <a href="{{ '/' | relative_url }}#quickstart">Quickstart</a>
+          <a href="{{ '/USER_GUIDE' | relative_url }}" target="_blank" rel="noopener">Docs</a>
+          <a href="https://github.com/handarbeit/fabrik" class="btn btn-sm" target="_blank" rel="noopener">GitHub</a>
+        </div>
+        <button class="nav-toggle" aria-label="Toggle navigation" aria-expanded="false" aria-controls="site-nav-links">
+          <span></span><span></span><span></span>
+        </button>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <div class="docs-content">
+      {{ content }}
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <div class="footer-content">
+        <div class="footer-brand">
+          <span class="logo-icon">🏭</span>
+          <span>Fabrik</span>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/handarbeit/fabrik" target="_blank" rel="noopener">GitHub</a>
+          <a href="{{ '/USER_GUIDE' | relative_url }}" target="_blank" rel="noopener">User Guide</a>
+          <a href="https://github.com/handarbeit/fabrik" target="_blank" rel="noopener">README</a>
+          <a href="https://github.com/handarbeit/fabrik/issues" target="_blank" rel="noopener">Issues</a>
+        </div>
+      </div>
+      <p class="footer-note">Built with Fabrik. The factory builds itself.</p>
+    </div>
+  </footer>
+
+  <script>
+    // Mobile nav toggle
+    const toggle = document.querySelector('.nav-toggle');
+    const navLinks = document.querySelector('.nav-links');
+    toggle.addEventListener('click', () => {
+      const expanded = toggle.getAttribute('aria-expanded') === 'true';
+      toggle.setAttribute('aria-expanded', !expanded);
+      navLinks.classList.toggle('open');
+    });
+  </script>
+</body>
+</html>
