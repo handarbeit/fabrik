@@ -87,11 +87,6 @@ func (e *Engine) Run() error {
 		close(e.cfg.ReadyCh)
 	}
 
-	if e.events == nil {
-		fmt.Println("\nFabrik is running. Press Ctrl+C to stop.")
-		fmt.Println()
-	}
-
 	// Handle signals in a dedicated goroutine so cancel() fires immediately
 	// even while poll() is blocking on wg.Wait(). This ensures CommandContext
 	// kills in-flight Claude child processes without waiting for the current
@@ -113,13 +108,18 @@ func (e *Engine) Run() error {
 		}
 	}()
 
-	ticker := time.NewTicker(time.Duration(e.cfg.PollSeconds) * time.Second)
-	defer ticker.Stop()
-
 	// Validate stage names against project board columns before first poll.
 	if err := e.checkStageColumnAlignment(ctx); err != nil {
 		return err
 	}
+
+	if e.events == nil {
+		fmt.Println("\nFabrik is running. Press Ctrl+C to stop.")
+		fmt.Println()
+	}
+
+	ticker := time.NewTicker(time.Duration(e.cfg.PollSeconds) * time.Second)
+	defer ticker.Stop()
 
 	// Run immediately on start, then on tick
 	if err := e.poll(ctx); err != nil && ctx.Err() == nil {
