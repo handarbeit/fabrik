@@ -826,8 +826,8 @@ func TestUpdate_NKey_CancelsConfirmClear(t *testing.T) {
 	}
 }
 
-// TestUpdate_EnterL_HistoryPane_NoLogDir verifies enter returns nil when log dir is missing.
-func TestUpdate_EnterL_HistoryPane_NoLogDir(t *testing.T) {
+// TestUpdate_EnterKey_HistoryPane_TogglesDetailPanel verifies enter in history pane toggles the detail panel.
+func TestUpdate_EnterKey_HistoryPane_TogglesDetailPanel(t *testing.T) {
 	redirectHistory(t)
 	m := New(30, ProjectInfo{}, "")
 	m.width = 80
@@ -836,9 +836,29 @@ func TestUpdate_EnterL_HistoryPane_NoLogDir(t *testing.T) {
 	m.history = []HistoryEntry{
 		{IssueNumber: 99999, StageName: "Research"},
 	}
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	// enter toggles detail panel — no subprocess launched.
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd != nil {
-		t.Error("expected nil cmd from enter when log dir doesn't exist")
+		t.Error("enter key should return nil cmd (no subprocess)")
+	}
+	nm := next.(Model)
+	if !nm.detailPanel {
+		t.Error("expected detailPanel=true after enter in history pane")
+	}
+}
+
+// TestUpdate_EscapeKey_ClosesDetailPanel verifies escape closes the detail panel.
+func TestUpdate_EscapeKey_ClosesDetailPanel(t *testing.T) {
+	m := New(30, ProjectInfo{}, "")
+	m.detailPanel = true
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil {
+		t.Error("escape key should return nil cmd")
+	}
+	nm := next.(Model)
+	if nm.detailPanel {
+		t.Error("expected detailPanel=false after escape key")
 	}
 }
 
