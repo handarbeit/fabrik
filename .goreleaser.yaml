@@ -5,8 +5,10 @@ builds:
     binary: fabrik
     goos:
       - darwin
+      - linux
     goarch:
       - arm64
+      - amd64
     env:
       - CGO_ENABLED=0
     ldflags:
