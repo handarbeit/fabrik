@@ -191,7 +191,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if m.histIdx >= len(m.history) && m.histIdx > 0 {
 						m.histIdx--
 					}
-					m.updateHistoryViewport()
+					m.updateHistoryViewport(false)
 				}
 			}
 			return m, nil
@@ -204,7 +204,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.histIdx = 0
 					m.confirmClear = false
 					SaveHistory(m.history)
-					m.updateHistoryViewport()
+					m.updateHistoryViewport(false)
 				} else {
 					// Ask for confirmation
 					m.confirmClear = true
@@ -224,7 +224,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.focusPane = paneActive
 			}
-			m.updateHistoryViewport()
+			m.updateHistoryViewport(false)
 			return m, nil
 
 		case "up", "k":
@@ -235,7 +235,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				if m.histIdx > 0 {
 					m.histIdx--
-					m.updateHistoryViewport()
+					m.updateHistoryViewport(false)
 				}
 			}
 			return m, nil
@@ -249,7 +249,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				if m.histIdx < len(m.history)-1 {
 					m.histIdx++
-					m.updateHistoryViewport()
+					m.updateHistoryViewport(false)
 				}
 			}
 			return m, nil
@@ -303,7 +303,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = ev.Width
 		m.height = ev.Height
-		m.updateHistoryViewport()
+		m.updateHistoryViewport(false)
 		return m, nil
 
 	case TickEvent:
@@ -357,7 +357,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.history = append(m.history, entry)
 		SaveHistory(m.history)
-		m.updateHistoryViewport()
+		m.updateHistoryViewport(true)
 		return m, nil
 
 	case LogEvent:
@@ -379,7 +379,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // updateHistoryViewport rebuilds the viewport content from the history slice.
 // Uses a pointer receiver so it can be called on the addressable local copy
 // in Update(); the mutations are included in the returned model value.
-func (m *Model) updateHistoryViewport() {
+// If scrollToTop is true, the viewport is scrolled to the top (newest entry);
+// otherwise the viewport is adjusted so histIdx remains visible.
+func (m *Model) updateHistoryViewport(scrollToTop bool) {
 	innerWidth := max(m.width-6, 20) // account for border + padding
 
 	var lines []string
@@ -446,8 +448,19 @@ func (m *Model) updateHistoryViewport() {
 	historyHeight := max(m.height-headerHeight()-activeHeight(len(m.active))-footerHeight()-3, 3)
 	m.historyVP.Width = innerWidth
 	m.historyVP.Height = historyHeight
-	// Scroll to top (newest) on update.
-	m.historyVP.GotoTop()
+
+	if scrollToTop {
+		// New entry arrived — scroll to top so newest is visible.
+		m.historyVP.GotoTop()
+	} else {
+		// Keep histIdx visible: clamp YOffset so histIdx falls within
+		// [YOffset, YOffset+Height-1]. SetYOffset clamps internally.
+		if m.histIdx < m.historyVP.YOffset {
+			m.historyVP.SetYOffset(m.histIdx)
+		} else if m.histIdx > m.historyVP.YOffset+m.historyVP.Height-1 {
+			m.historyVP.SetYOffset(m.histIdx - m.historyVP.Height + 1)
+		}
+	}
 }
 
 // View renders the full TUI.
