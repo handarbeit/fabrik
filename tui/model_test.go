@@ -598,6 +598,100 @@ func TestUpdate_CKey_EmptyHistory_NoOp(t *testing.T) {
 	}
 }
 
+// TestUpdate_ScrollToVisible verifies that navigating down past the visible
+// viewport area scrolls the YOffset down, and navigating back up scrolls it up.
+func TestUpdate_ScrollToVisible(t *testing.T) {
+	redirectHistory(t)
+	m := New(30, ProjectInfo{}, "", "")
+	m.width = 80
+	m.height = 24
+	m.focusPane = paneHistory
+
+	// Fill history with enough entries to exceed viewport height.
+	// historyHeight = max(24 - 1 - activeHeight(0) - 1 - 3, 3) = max(24-1-2-1-3, 3) = 17
+	const numEntries = 30
+	for i := 0; i < numEntries; i++ {
+		m.history = append(m.history, HistoryEntry{IssueNumber: i + 1, StageName: "Research"})
+	}
+	// Initialise viewport with scroll-to-visible (histIdx=0 at top).
+	m.updateHistoryViewport(false)
+	if m.historyVP.YOffset != 0 {
+		t.Fatalf("initial YOffset = %d, want 0", m.historyVP.YOffset)
+	}
+
+	// Navigate down far enough to push histIdx below the visible area.
+	// viewport height reported by historyVP.Height after updateHistoryViewport.
+	vpHeight := m.historyVP.Height
+	if vpHeight < 1 {
+		t.Fatalf("viewport height = %d, expected > 0", vpHeight)
+	}
+
+	cur := m
+	for i := 0; i < vpHeight; i++ {
+		next, _ := cur.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+		cur = next.(Model)
+	}
+	// histIdx is now == vpHeight (one past the last visible line when YOffset was 0).
+	if cur.histIdx != vpHeight {
+		t.Fatalf("histIdx = %d after %d j presses, want %d", cur.histIdx, vpHeight, vpHeight)
+	}
+	if cur.historyVP.YOffset == 0 {
+		t.Errorf("YOffset still 0 after navigating below visible area; want > 0")
+	}
+	if cur.histIdx > cur.historyVP.YOffset+cur.historyVP.Height-1 {
+		t.Errorf("histIdx %d not visible: YOffset=%d Height=%d",
+			cur.histIdx, cur.historyVP.YOffset, cur.historyVP.Height)
+	}
+
+	// Navigate back up past the top of the current viewport.
+	savedOffset := cur.historyVP.YOffset
+	for i := 0; i < vpHeight; i++ {
+		next, _ := cur.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+		cur = next.(Model)
+	}
+	if cur.historyVP.YOffset >= savedOffset {
+		t.Errorf("YOffset %d did not retreat from %d after navigating up", cur.historyVP.YOffset, savedOffset)
+	}
+	if cur.histIdx < cur.historyVP.YOffset {
+		t.Errorf("histIdx %d above viewport: YOffset=%d", cur.histIdx, cur.historyVP.YOffset)
+	}
+}
+
+// TestUpdate_JobCompletedScrollsToTop verifies that receiving a JobCompletedEvent
+// resets the viewport to the top regardless of the current selection position.
+func TestUpdate_JobCompletedScrollsToTop(t *testing.T) {
+	redirectHistory(t)
+	m := New(30, ProjectInfo{}, "", "")
+	m.width = 80
+	m.height = 24
+	m.focusPane = paneHistory
+
+	// Pre-populate history and navigate the selection down.
+	for i := 0; i < 20; i++ {
+		m.history = append(m.history, HistoryEntry{IssueNumber: i + 1, StageName: "Research"})
+	}
+	m.updateHistoryViewport(false)
+	m.histIdx = 10
+	m.updateHistoryViewport(false)
+	if m.historyVP.YOffset == 0 {
+		// Force a non-zero offset to make the assertion meaningful.
+		m.historyVP.SetYOffset(5)
+	}
+
+	// Fire a JobCompletedEvent — should scroll back to top.
+	next, _ := m.Update(JobCompletedEvent{
+		IssueNumber: 99,
+		StageName:   "Implement",
+		Success:     true,
+		Completed:   true,
+		CompletedAt: time.Now(),
+	})
+	nm := next.(Model)
+	if nm.historyVP.YOffset != 0 {
+		t.Errorf("YOffset = %d after JobCompletedEvent, want 0", nm.historyVP.YOffset)
+	}
+}
+
 // TestUpdate_CapitalC_ClearAll verifies two C presses clear all history.
 func TestUpdate_CapitalC_ClearAll(t *testing.T) {
 	redirectHistory(t)
