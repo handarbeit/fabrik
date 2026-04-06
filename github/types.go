@@ -52,6 +52,19 @@ type ReactionGroup struct {
 	Count   int
 }
 
+// LatestRelease represents the response from GET /repos/{owner}/{repo}/releases/latest.
+type LatestRelease struct {
+	TagName string         `json:"tag_name"`
+	Assets  []ReleaseAsset `json:"assets"`
+}
+
+// ReleaseAsset represents a single downloadable asset in a GitHub release.
+type ReleaseAsset struct {
+	Name               string `json:"name"`
+	BrowserDownloadURL string `json:"browser_download_url"`
+	Size               int64  `json:"size"`
+}
+
 // HasReaction returns true if the comment has at least one reaction of the given type.
 func (c Comment) HasReaction(content string) bool {
 	for _, r := range c.Reactions {

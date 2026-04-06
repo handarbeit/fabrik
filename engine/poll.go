@@ -1,12 +1,18 @@
 package engine
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -16,6 +22,15 @@ import (
 )
 
 const idleUpgradeThreshold = 2
+
+// fabrikOwner and fabrikRepo are the canonical owner/repo for fabrik itself.
+// These are used when checking the GitHub Releases API for a newer binary —
+// the release always targets handarbeit/fabrik, not the user's managed project.
+const (
+	fabrikOwner           = "arbeithand"
+	fabrikRepo            = "fabrik"
+	releaseCheckInterval  = 30 * time.Minute
+)
 
 // isTTY reports whether stdout is connected to a terminal.
 var isTTY = func() bool {
@@ -449,9 +464,15 @@ doneDispatching:
 	return nil
 }
 
-// checkAndUpgrade checks origin/main for new commits and, if found, performs a
-// fast-forward pull, rebuilds the binary, and re-execs the process in place.
+// checkAndUpgrade selects the upgrade path based on the running version:
+//   - dev builds (version starts with "dev"): git pull → go build → re-exec
+//   - release builds (all other versions): GitHub Releases API → download → atomic replace → re-exec
 func (e *Engine) checkAndUpgrade() {
+	if !strings.HasPrefix(e.cfg.Version, "dev") {
+		e.checkReleaseUpgrade()
+		return
+	}
+
 	wm := e.primaryWorktrees()
 	if wm == nil {
 		e.logf(0, "upgrade", "no primary repo — skipping auto-upgrade in multi-repo mode\n")
@@ -541,6 +562,230 @@ func gitRevParse(dir, ref string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// semverGreater reports whether version a is greater than version b.
+// Both versions may have a leading "v" which is stripped before comparison.
+// Each version is split on "." and each segment is compared as an integer.
+// Returns false (not an upgrade) on any parse error.
+func semverGreater(a, b string) bool {
+	a = strings.TrimPrefix(a, "v")
+	b = strings.TrimPrefix(b, "v")
+	aParts := strings.Split(a, ".")
+	bParts := strings.Split(b, ".")
+	// Pad shorter slice with zeros.
+	for len(aParts) < len(bParts) {
+		aParts = append(aParts, "0")
+	}
+	for len(bParts) < len(aParts) {
+		bParts = append(bParts, "0")
+	}
+	for i := range aParts {
+		av, err := strconv.Atoi(aParts[i])
+		if err != nil {
+			return false
+		}
+		bv, err := strconv.Atoi(bParts[i])
+		if err != nil {
+			return false
+		}
+		if av != bv {
+			return av > bv
+		}
+	}
+	return false
+}
+
+// extractBinaryFromTarball extracts the "fabrik" binary from a .tar.gz archive
+// at tarballPath and writes it to a temp file in destDir. Returns the path to the
+// temp file. The caller is responsible for renaming or removing it.
+func extractBinaryFromTarball(tarballPath, destDir string) (string, error) {
+	f, err := os.Open(tarballPath)
+	if err != nil {
+		return "", fmt.Errorf("opening tarball: %w", err)
+	}
+	defer f.Close()
+
+	gr, err := gzip.NewReader(f)
+	if err != nil {
+		return "", fmt.Errorf("creating gzip reader: %w", err)
+	}
+	defer gr.Close()
+
+	tr := tar.NewReader(gr)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("reading tarball: %w", err)
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		// Match the binary by base name in case GoReleaser puts it in a subdir.
+		if filepath.Base(hdr.Name) != "fabrik" {
+			continue
+		}
+		tmp, err := os.CreateTemp(destDir, "fabrik-*")
+		if err != nil {
+			return "", fmt.Errorf("creating temp file: %w", err)
+		}
+		if err := tmp.Chmod(0755); err != nil {
+			tmp.Close()
+			os.Remove(tmp.Name())
+			return "", fmt.Errorf("chmod temp file: %w", err)
+		}
+		if _, err := io.Copy(tmp, tr); err != nil {
+			tmp.Close()
+			os.Remove(tmp.Name())
+			return "", fmt.Errorf("writing temp file: %w", err)
+		}
+		if err := tmp.Close(); err != nil {
+			os.Remove(tmp.Name())
+			return "", fmt.Errorf("closing temp file: %w", err)
+		}
+		return tmp.Name(), nil
+	}
+	return "", fmt.Errorf("fabrik binary not found in tarball")
+}
+
+// checkReleaseUpgrade is the release-based upgrade path. It checks the GitHub
+// Releases API for a version newer than the running binary, downloads the
+// matching platform asset, atomically replaces the running binary, and re-execs.
+//
+// All failures are non-fatal: a warning is logged and the poll loop continues.
+func (e *Engine) checkReleaseUpgrade() {
+	// Rate-limit: skip if we checked within the last releaseCheckInterval.
+	e.mu.Lock()
+	lastCheck := e.lastReleaseCheck
+	e.mu.Unlock()
+	if !lastCheck.IsZero() && time.Since(lastCheck) < releaseCheckInterval {
+		return
+	}
+
+	wm := e.primaryWorktrees()
+	if wm == nil {
+		e.logf(0, "upgrade", "no primary repo — skipping release upgrade in multi-repo mode\n")
+		return
+	}
+
+	e.mu.Lock()
+	e.lastReleaseCheck = time.Now()
+	e.mu.Unlock()
+
+	release, err := e.client.FetchLatestRelease(fabrikOwner, fabrikRepo)
+	if err != nil {
+		e.logf(0, "upgrade", "could not fetch latest release: %v\n", err)
+		return
+	}
+	if release == nil {
+		return
+	}
+
+	latestTag := release.TagName
+	if !semverGreater(latestTag, e.cfg.Version) {
+		// Up to date; log nothing.
+		return
+	}
+
+	e.logf(0, "upgrade", "new release available: %s (running %s) — upgrading\n", latestTag, e.cfg.Version)
+
+	// Find the platform-matching asset: fabrik_VERSION_GOOS_GOARCH.tar.gz
+	wantName := fmt.Sprintf("fabrik_%s_%s_%s.tar.gz", latestTag, runtime.GOOS, runtime.GOARCH)
+	var downloadURL string
+	for _, asset := range release.Assets {
+		if asset.Name == wantName {
+			downloadURL = asset.BrowserDownloadURL
+			break
+		}
+	}
+	if downloadURL == "" {
+		e.logf(0, "upgrade", "no matching asset for %s/%s (want %s) — skipping\n", runtime.GOOS, runtime.GOARCH, wantName)
+		return
+	}
+
+	// Determine current executable path.
+	exe, err := os.Executable()
+	if err != nil {
+		e.logf(0, "upgrade", "could not determine executable path: %v\n", err)
+		return
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		e.logf(0, "upgrade", "could not resolve symlinks for executable: %v\n", err)
+		return
+	}
+
+	e.logf(0, "upgrade", "downloading %s\n", downloadURL)
+
+	// Download to a temp file.
+	tarballTmp, err := os.CreateTemp(filepath.Dir(exe), "fabrik-download-*")
+	if err != nil {
+		e.logf(0, "upgrade", "could not create download temp file: %v\n", err)
+		return
+	}
+	tarballPath := tarballTmp.Name()
+	defer os.Remove(tarballPath)
+
+	resp, err := func() (*http.Response, error) {
+		req, err := http.NewRequest("GET", downloadURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		if e.cfg.Token != "" {
+			req.Header.Set("Authorization", "Bearer "+e.cfg.Token)
+		}
+		return http.DefaultClient.Do(req)
+	}()
+	if err != nil {
+		tarballTmp.Close()
+		e.logf(0, "upgrade", "download failed: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		tarballTmp.Close()
+		e.logf(0, "upgrade", "download returned HTTP %d\n", resp.StatusCode)
+		return
+	}
+	if _, err := io.Copy(tarballTmp, resp.Body); err != nil {
+		tarballTmp.Close()
+		e.logf(0, "upgrade", "writing download: %v\n", err)
+		return
+	}
+	if err := tarballTmp.Close(); err != nil {
+		e.logf(0, "upgrade", "closing download: %v\n", err)
+		return
+	}
+
+	// Extract the binary from the tarball.
+	newBin, err := extractBinaryFromTarball(tarballPath, filepath.Dir(exe))
+	if err != nil {
+		e.logf(0, "upgrade", "extracting binary: %v\n", err)
+		return
+	}
+
+	// Atomically replace the running binary; only remove newBin if rename fails.
+	renamed := false
+	defer func() {
+		if !renamed {
+			os.Remove(newBin)
+		}
+	}()
+	if err := os.Rename(newBin, exe); err != nil {
+		e.logf(0, "upgrade", "replacing binary: %v\n", err)
+		return
+	}
+	renamed = true
+
+	e.logf(0, "upgrade", "upgraded to %s — re-executing\n", latestTag)
+
+	env := append(os.Environ(), "FABRIK_AUTO_UPGRADED=1")
+	if err := syscall.Exec(exe, os.Args, env); err != nil {
+		e.logf(0, "upgrade", "exec failed: %v\n", err)
+	}
 }
 
 // captureGitMeta captures the current branch name, short commit SHA,
