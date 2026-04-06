@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/handarbeit/fabrik/engine"
@@ -99,9 +100,13 @@ func runResume(args []string) error {
 			"Install Claude Code: https://docs.anthropic.com/en/docs/claude-code/quickstart")
 	}
 
+	// Determine the repo for namespaced session lookup by scanning the worktree root.
+	worktreeRoot := filepath.Join(cwd, ".fabrik", "worktrees")
+	repo := findRepoForIssue(worktreeRoot, issueNumber)
+
 	// Build the claude args
 	claudeArgs := []string{"claude"}
-	sessionID := engine.ReadSessionID(issueNumber, *stageName)
+	sessionID := engine.ReadSessionID(repo, issueNumber, *stageName)
 	if sessionID != "" {
 		claudeArgs = append(claudeArgs, "--resume", sessionID)
 	}
@@ -119,4 +124,70 @@ func runResume(args []string) error {
 
 	// Replace the current process with claude
 	return execFn(claudeBin, claudeArgs, os.Environ())
+}
+
+// findRepoForIssue scans worktreeRoot for a directory named issue-N (either
+// directly or one level deep in a per-repo subdir), reads its git remote, and
+// returns "owner/repo". Returns "" if the worktree or remote cannot be found.
+func findRepoForIssue(worktreeRoot string, issueNumber int) string {
+	issueDirName := fmt.Sprintf("issue-%d", issueNumber)
+
+	// Check flat path first (single-repo or pre-migration).
+	candidate := filepath.Join(worktreeRoot, issueDirName)
+	if repo := repoFromWorktree(candidate); repo != "" {
+		return repo
+	}
+
+	// Scan one level of subdirs for the namespaced layout.
+	repoDirs, err := os.ReadDir(worktreeRoot)
+	if err != nil {
+		return ""
+	}
+	for _, repoDir := range repoDirs {
+		if !repoDir.IsDir() {
+			continue
+		}
+		candidate = filepath.Join(worktreeRoot, repoDir.Name(), issueDirName)
+		if repo := repoFromWorktree(candidate); repo != "" {
+			return repo
+		}
+	}
+	return ""
+}
+
+// repoFromWorktree reads the git remote origin URL from dir and returns
+// "owner/repo", or "" if dir doesn't exist or the remote can't be read.
+func repoFromWorktree(dir string) string {
+	if _, err := os.Stat(dir); err != nil {
+		return ""
+	}
+	cmd := exec.Command("git", "remote", "get-url", "origin")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return parseOwnerRepoFromURL(strings.TrimSpace(string(out)))
+}
+
+// parseOwnerRepoFromURL parses a git remote URL and returns "owner/repo".
+// Handles both HTTPS and SSH formats. Returns "" if parsing fails.
+func parseOwnerRepoFromURL(remoteURL string) string {
+	u := strings.TrimSuffix(remoteURL, ".git")
+	// Normalize SSH format: git@github.com:owner/repo → owner/repo
+	if colonIdx := strings.LastIndex(u, ":"); colonIdx >= 0 {
+		if slashIdx := strings.Index(u, "/"); slashIdx < 0 || slashIdx > colonIdx {
+			u = u[colonIdx+1:]
+		}
+	}
+	parts := strings.Split(u, "/")
+	if len(parts) < 2 {
+		return ""
+	}
+	owner := parts[len(parts)-2]
+	repo := parts[len(parts)-1]
+	if owner == "" || repo == "" {
+		return ""
+	}
+	return owner + "/" + repo
 }
