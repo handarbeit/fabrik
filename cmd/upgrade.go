@@ -1,12 +1,16 @@
 package cmd
 
 import (
+	"bufio"
+	"crypto/sha256"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/mattn/go-isatty"
 	"github.com/verveguy/fabrik/config"
 	"github.com/verveguy/fabrik/engine"
 	gh "github.com/verveguy/fabrik/github"
@@ -40,6 +44,98 @@ func runUpgrade(args []string) error {
 	}
 	fmt.Printf("fabrik upgrade: refreshed %d plugin file(s)\n", wrote)
 	return nil
+}
+
+// checkPluginSkills compares embedded plugin files against on-disk files in
+// pluginDir. If any differ and stdin is a TTY, the user is prompted to upgrade.
+// In non-interactive mode a warning is printed to stderr and execution continues.
+// Returns nil if the directory does not exist (no fabrik init done yet).
+func checkPluginSkills(pluginDir string) error {
+	isTTY := isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
+	return checkPluginSkillsWithReader(pluginDir, isTTY, os.Stdin)
+}
+
+// checkPluginSkillsWithReader is the testable implementation of checkPluginSkills.
+// isTTY and r control interactive-prompt behaviour without requiring a real PTY.
+func checkPluginSkillsWithReader(pluginDir string, isTTY bool, r io.Reader) error {
+	if _, err := os.Stat(pluginDir); os.IsNotExist(err) {
+		return nil
+	}
+
+	diffing, err := diffingPluginFiles(pluginDir)
+	if err != nil {
+		return fmt.Errorf("checking plugin files: %w", err)
+	}
+	if len(diffing) == 0 {
+		return nil
+	}
+
+	if !isTTY {
+		fmt.Fprintf(os.Stderr, "Plugin skills on disk don't match this version of fabrik. Run `fabrik upgrade` to update them.\n")
+		return nil
+	}
+
+	fmt.Printf("Plugin skills on disk don't match this version of fabrik. Do you want to upgrade them? [y/N] ")
+	reader := bufio.NewReader(r)
+	line, _ := reader.ReadString('\n')
+	answer := strings.TrimSpace(line)
+	if strings.ToLower(answer) != "y" && strings.ToLower(answer) != "yes" {
+		return nil
+	}
+
+	for _, rel := range diffing {
+		embeddedPath := filepath.Join("fabrik-plugin", rel)
+		data, readErr := fabrikplugin.FabrikPlugin.ReadFile(embeddedPath)
+		if readErr != nil {
+			return fmt.Errorf("reading embedded %s: %w", embeddedPath, readErr)
+		}
+		destPath := filepath.Join(pluginDir, rel)
+		if mkErr := os.MkdirAll(filepath.Dir(destPath), 0755); mkErr != nil {
+			return fmt.Errorf("creating directory for %s: %w", destPath, mkErr)
+		}
+		if writeErr := os.WriteFile(destPath, data, 0644); writeErr != nil {
+			return fmt.Errorf("writing %s: %w", destPath, writeErr)
+		}
+	}
+	fmt.Printf("fabrik: upgraded %d plugin file(s)\n", len(diffing))
+	return nil
+}
+
+// diffingPluginFiles walks the embedded FabrikPlugin FS and returns the relative
+// paths (from the fabrik-plugin/ root) of files whose SHA256 differs from the
+// on-disk counterpart in pluginDir. Missing on-disk files count as differing.
+func diffingPluginFiles(pluginDir string) ([]string, error) {
+	var diffing []string
+	err := fs.WalkDir(fabrikplugin.FabrikPlugin, "fabrik-plugin", func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, _ := filepath.Rel("fabrik-plugin", p)
+		embeddedData, readErr := fabrikplugin.FabrikPlugin.ReadFile(p)
+		if readErr != nil {
+			return fmt.Errorf("reading embedded %s: %w", p, readErr)
+		}
+		embeddedSum := sha256.Sum256(embeddedData)
+
+		diskPath := filepath.Join(pluginDir, rel)
+		diskData, diskErr := os.ReadFile(diskPath)
+		if os.IsNotExist(diskErr) {
+			diffing = append(diffing, rel)
+			return nil
+		}
+		if diskErr != nil {
+			return fmt.Errorf("reading %s: %w", diskPath, diskErr)
+		}
+		diskSum := sha256.Sum256(diskData)
+		if embeddedSum != diskSum {
+			diffing = append(diffing, rel)
+		}
+		return nil
+	})
+	return diffing, err
 }
 
 // refreshPlugin overwrites .fabrik/plugin/ with the embedded plugin files.
