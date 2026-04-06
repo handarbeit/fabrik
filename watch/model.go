@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
@@ -47,10 +48,11 @@ type WatchModel struct {
 	pluginDir   string
 
 	// UI state
-	width  int
-	height int
-	vp     viewport.Model // scrollable live-output viewport
-	lines  []string       // rendered lines from log follower (live stage buffer)
+	width          int
+	height         int
+	vp             viewport.Model // scrollable live-output viewport
+	lines          []string       // rendered lines from log follower (live stage buffer)
+	currentLogPath string         // log path of the currently displayed historical tab (empty on live tab)
 
 	// Tab bar state
 	stageTabs      []stageTab
@@ -240,6 +242,16 @@ func nextGitHubPoll(interval time.Duration) tea.Cmd {
 	})
 }
 
+// wrapContent wraps s to fit within width columns, ANSI-escape-sequence-aware.
+// Prefers word breaks (whitespace / hyphen); falls back to hard wrap for
+// unbreakable tokens. Returns s unchanged when width < 1.
+func wrapContent(s string, width int) string {
+	if width < 1 {
+		return s
+	}
+	return ansi.Wrap(s, width, "")
+}
+
 // switchToTab updates the viewport content when the user selects a different tab.
 func (m *WatchModel) switchToTab(idx int) {
 	if idx < 0 || idx >= len(m.stageTabs) {
@@ -247,10 +259,12 @@ func (m *WatchModel) switchToTab(idx int) {
 	}
 	tab := m.stageTabs[idx]
 	if tab.IsLive {
-		m.vp.SetContent(strings.Join(m.lines, ""))
+		m.currentLogPath = ""
+		m.vp.SetContent(wrapContent(strings.Join(m.lines, ""), m.vp.Width))
 		m.vp.GotoBottom()
 	} else {
-		m.vp.SetContent(renderLogFile(tab.LogPath))
+		m.currentLogPath = tab.LogPath
+		m.vp.SetContent(wrapContent(renderLogFile(tab.LogPath), m.vp.Width))
 	}
 }
 
@@ -262,6 +276,12 @@ func (m WatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = ev.Height
 		m.vp.Width = ev.Width
 		m.vp.Height = m.viewportHeight()
+		// Re-wrap content at the new width.
+		if m.currentLogPath != "" {
+			m.vp.SetContent(wrapContent(renderLogFile(m.currentLogPath), m.vp.Width))
+		} else {
+			m.vp.SetContent(wrapContent(strings.Join(m.lines, ""), m.vp.Width))
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -319,7 +339,7 @@ func (m WatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Update viewport if live tab is selected, or if no tabs exist yet (startup race).
 		isLive := len(m.stageTabs) == 0 || (m.selectedTabIdx < len(m.stageTabs) && m.stageTabs[m.selectedTabIdx].IsLive)
 		if isLive {
-			m.vp.SetContent(strings.Join(m.lines, ""))
+			m.vp.SetContent(wrapContent(strings.Join(m.lines, ""), m.vp.Width))
 			m.vp.GotoBottom()
 		}
 		return m, nil
