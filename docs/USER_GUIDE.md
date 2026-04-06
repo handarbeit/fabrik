@@ -193,7 +193,7 @@ user: your-github-username
 # Intended for the self-evolving workflow where Fabrik develops itself.
 # auto_upgrade: false
 
-# Enable the interactive TUI dashboard. Requires a real (non-piped) terminal.
+# Disable the interactive TUI dashboard (enabled by default when a real terminal is detected).
 # tui: false
 
 # Terminal app for the TUI log viewer. Valid values: terminal, iterm2, ghostty,
@@ -265,7 +265,7 @@ FABRIK_USER=my-personal-username
 | `FABRIK_MAX_CONCURRENT` | `max_concurrent` | Max parallel Claude sessions | `5` |
 | `FABRIK_MAX_RETRIES` | `max_retries` | Max retries before pausing (0 = unlimited) | `3` |
 | `FABRIK_AUTO_UPGRADE` | `auto_upgrade` | Self-upgrade when idle (`true`/`1`/`yes`) | `false` |
-| `FABRIK_TUI` | `tui` | Enable TUI dashboard (`true`/`1`/`yes`) | `false` |
+| `FABRIK_TUI` | `tui` | Disable TUI dashboard (`false`/`0`/`no`) | `true` |
 | `FABRIK_TERMINAL` | `terminal` | Terminal app for TUI log viewer (`terminal`, `iterm2`, `ghostty`, `kitty`, `alacritty`, `warp`). Auto-detected from `TERM_PROGRAM` if not set. | `""` |
 | `FABRIK_PLUGIN_DIR` | *(no config.yaml key)* | Override plugin directory | `.fabrik/plugin/` |
 | `FABRIK_DEBUG_OUTPUT` | `debug_output` | Save raw Claude output for debugging | `false` |
