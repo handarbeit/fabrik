@@ -744,32 +744,6 @@ func (m Model) sortedActiveKeys() []string {
 	return keys
 }
 
-// logDirForJob returns the log directory for an active job.
-func logDirForJob(job *activeJob) string {
-	return logDirForIssue(job.Repo, job.IssueNumber)
-}
-
-// logDirForHistory returns the log directory for a history entry.
-func logDirForHistory(h HistoryEntry) string {
-	return logDirForIssue(h.Repo, h.IssueNumber)
-}
-
-// logDirForIssue returns the log directory for an issue.
-// Uses the repo-namespaced path (~/.fabrik/logs/<owner>-<repo>/issue-N/) when
-// repo is non-empty, otherwise the flat path (~/.fabrik/logs/issue-N/).
-func logDirForIssue(repo string, issueNumber int) string {
-	home := homeDir()
-	issuePart := fmt.Sprintf("issue-%d", issueNumber)
-
-	if repo != "" {
-		repoPart := strings.ReplaceAll(repo, "/", "-")
-		return filepath.Join(home, ".fabrik", "logs", repoPart, issuePart)
-	}
-
-	return filepath.Join(home, ".fabrik", "logs", issuePart)
-}
-
-
 // tuiReadSessionID reads the Claude session ID for a given repo, issue and stage.
 // The path logic mirrors engine.ReadSessionID — keep in sync if either changes.
 func tuiReadSessionID(repo string, issueNumber int, stageName string) string {
@@ -803,12 +777,6 @@ func fmtDuration(d time.Duration) string {
 	m := int(d.Minutes())
 	s := int(d.Seconds()) % 60
 	return fmt.Sprintf("%d:%02d", m, s)
-}
-
-// homeDir returns the user's home directory.
-func homeDir() string {
-	h, _ := os.UserHomeDir()
-	return h
 }
 
 // openWatchInlineCmd returns a tea.Cmd that suspends the TUI and launches

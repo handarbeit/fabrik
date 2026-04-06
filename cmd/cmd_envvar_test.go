@@ -109,15 +109,6 @@ func TestExecute_EnvYolo(t *testing.T) {
 	executeAndStop(t)
 }
 
-func TestExecute_EnvTerminal(t *testing.T) {
-	dir, stagesDir := setupValidStages(t)
-	chdirTest(t, dir)
-	resetFlags()
-	t.Setenv("FABRIK_TERMINAL", "iterm2")
-	t.Setenv("GITHUB_TOKEN", "tok")
-	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
-	executeAndStop(t)
-}
 
 func TestExecute_EnvMaxRetries_Valid(t *testing.T) {
 	dir, stagesDir := setupValidStages(t)
