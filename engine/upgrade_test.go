@@ -46,6 +46,30 @@ func TestSemverGreater(t *testing.T) {
 	}
 }
 
+// TestCheckReleaseUpgrade_MultiRepoMode verifies that checkReleaseUpgrade proceeds
+// even when no primary repo is configured (multi-repo mode). This is the regression
+// test for the bug where the release upgrade was incorrectly guarded by primaryWorktrees().
+func TestCheckReleaseUpgrade_MultiRepoMode(t *testing.T) {
+	fetched := false
+	client := &mockGitHubClient{
+		fetchLatestReleaseFn: func(owner, repo string) (*gh.LatestRelease, error) {
+			fetched = true
+			return &gh.LatestRelease{TagName: "v0.0.1"}, nil
+		},
+	}
+	// Engine with no owner/repo set — simulates multi-repo mode where devCheckout() returns nil.
+	eng := NewWithDeps(
+		Config{Owner: "", Repo: "", User: "u", Token: "t", AutoUpgrade: true, Version: "v0.0.1", Stages: testStages()},
+		client, &mockClaudeInvoker{}, nil,
+	)
+
+	eng.checkReleaseUpgrade()
+
+	if !fetched {
+		t.Error("FetchLatestRelease was not called in multi-repo mode — release upgrade was incorrectly skipped")
+	}
+}
+
 // TestCheckReleaseUpgrade_UpToDate verifies that when the running version equals
 // the latest release, no upgrade is attempted and the call returns cleanly.
 func TestCheckReleaseUpgrade_UpToDate(t *testing.T) {
