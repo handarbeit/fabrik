@@ -531,7 +531,7 @@ section {
   background: $color-surface;
   border: 1px solid $color-border;
   border-radius: $radius;
-  overflow: hidden;
+  overflow-x: auto;
 
   .code-header {
     padding: 10px 16px;
