@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	gh "github.com/verveguy/fabrik/github"
+	"github.com/verveguy/fabrik/stages"
 	"github.com/verveguy/fabrik/tui"
 )
 
@@ -52,8 +53,9 @@ type WatchModel struct {
 	lines  []string       // rendered lines from log follower (live stage buffer)
 
 	// Tab bar state
-	stageTabs    []stageTab
+	stageTabs      []stageTab
 	selectedTabIdx int
+	stageOrder     map[string]int // stage name -> pipeline order (from stages YAML)
 
 	// Transient status message (shown in status bar, cleared on TickMsg)
 	statusMsg string
@@ -72,12 +74,16 @@ type WatchModel struct {
 }
 
 // NewModel creates a WatchModel for the given issue number.
-func NewModel(issueNumber int, opts GitHubOptions) WatchModel {
+// stagesDir is the path to the stages YAML directory; used to build the
+// pipeline order map for tab sorting. If stagesDir is empty or LoadAll fails,
+// tabs fall back to chronological ordering.
+func NewModel(issueNumber int, opts GitHubOptions, stagesDir string) WatchModel {
 	logDir := issueLogDir(opts.Owner, opts.Repo, issueNumber)
 	vp := viewport.New(80, 20)
 	vp.SetContent("")
 
-	tabs := buildStageTabs(logDir)
+	stageOrder := buildStageOrder(stagesDir)
+	tabs := buildStageTabs(logDir, stageOrder)
 	selectedTabIdx := liveTabIdx(tabs)
 
 	return WatchModel{
@@ -88,8 +94,27 @@ func NewModel(issueNumber int, opts GitHubOptions) WatchModel {
 		vp:             vp,
 		stageTabs:      tabs,
 		selectedTabIdx: selectedTabIdx,
+		stageOrder:     stageOrder,
 		done:           make(chan struct{}),
 	}
+}
+
+// buildStageOrder loads stage configs from stagesDir and returns a map of
+// stage name → pipeline order value. Returns an empty map on any error,
+// enabling graceful fallback to chronological tab ordering.
+func buildStageOrder(stagesDir string) map[string]int {
+	order := make(map[string]int)
+	if stagesDir == "" {
+		return order
+	}
+	loaded, err := stages.LoadAll(stagesDir)
+	if err != nil {
+		return order
+	}
+	for _, s := range loaded {
+		order[s.Name] = s.Order
+	}
+	return order
 }
 
 // liveTabIdx returns the index of the live tab in tabs, or 0 if none.
@@ -303,7 +328,7 @@ func (m WatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Stage transition: clear live buffer, rebuild tabs, move to live tab.
 		m.lines = nil
 		m.vp.SetContent("")
-		newTabs := buildStageTabs(m.logDir)
+		newTabs := buildStageTabs(m.logDir, m.stageOrder)
 		m.stageTabs = newTabs
 		m.selectedTabIdx = liveTabIdx(newTabs)
 		return m, nil
@@ -311,7 +336,7 @@ func (m WatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case GitHubPollMsg:
 		m.fetchGitHub()
 		// Rebuild tabs; preserve selection by label.
-		newTabs := buildStageTabs(m.logDir)
+		newTabs := buildStageTabs(m.logDir, m.stageOrder)
 		m.selectedTabIdx = mergeTabSelection(newTabs, m.stageTabs, m.selectedTabIdx)
 		m.stageTabs = newTabs
 		return m, nextGitHubPoll(m.opts.PollInterval)
@@ -453,19 +478,30 @@ func (m WatchModel) View() string {
 }
 
 // tabBar renders the stage tab bar.
+// Live (currently-running) tabs are shown in orange; the selected tab is bold.
+// Four cases: live+selected → bold orange, live+not-selected → orange,
+// not-live+selected → bold blue, not-live+not-selected → dim.
 func (m WatchModel) tabBar() string {
 	var parts []string
 	for i, t := range m.stageTabs {
 		label := t.Label
 		if t.IsLive {
-			label += "*"
+			label = "● " + label
 		}
 		tab := fmt.Sprintf("[ %s ]", label)
-		if i == m.selectedTabIdx {
-			parts = append(parts, sectionStyle.Render(tab))
-		} else {
-			parts = append(parts, dimStyle.Render(tab))
+		isSelected := i == m.selectedTabIdx
+		var style lipgloss.Style
+		switch {
+		case t.IsLive && isSelected:
+			style = activeSectionStyle
+		case t.IsLive:
+			style = activeStyle
+		case isSelected:
+			style = sectionStyle
+		default:
+			style = dimStyle
 		}
+		parts = append(parts, style.Render(tab))
 	}
 	return strings.Join(parts, " ")
 }
@@ -579,10 +615,11 @@ func (m WatchModel) openClaudeInlineCmd() tea.Cmd {
 
 // Styles
 var (
-	headerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
-	sectionStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
-	dimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
-	successStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
-	failStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	activeStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	headerStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
+	sectionStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
+	activeSectionStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214"))
+	dimStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	successStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	failStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	activeStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 )

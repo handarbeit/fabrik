@@ -46,10 +46,15 @@ func isAllDigits(s string) bool {
 }
 
 // buildStageTabs scans logDir, groups .log files by stage label, picks the
-// newest log per label, sorts groups chronologically by their newest file, and
-// marks the globally newest as IsLive. Returns an empty slice if logDir is
-// unreadable or empty.
-func buildStageTabs(logDir string) []stageTab {
+// newest log per label, and sorts by pipeline order (stageOrder map). Logs
+// whose label matches "<ParentStage>-comment-review" are grouped under the
+// parent stage tab. Unknown stages are appended after known stages in
+// chronological order. The globally newest log file is marked IsLive.
+// Returns an empty slice if logDir is unreadable or empty.
+//
+// stageOrder maps stage name → pipeline order value (from Stage.Order).
+// When stageOrder is nil or empty, falls back to chronological ordering.
+func buildStageTabs(logDir string, stageOrder map[string]int) []stageTab {
 	entries, err := os.ReadDir(logDir)
 	if err != nil {
 		return nil
@@ -73,22 +78,79 @@ func buildStageTabs(logDir string) []stageTab {
 		return nil
 	}
 
-	// Build tabs slice and sort by newest filename (chronological).
-	tabs := make([]stageTab, 0, len(newestPerLabel))
+	// Two-pass comment-review grouping:
+	// Pass 1: collect direct (non-comment-review) labels.
+	// Pass 2: for labels ending in "-comment-review", if the parent is a known
+	//         stage, merge the newest file under the parent label.
+	effectiveNewest := make(map[string]string) // effective label -> newest filename
 	for label, filename := range newestPerLabel {
-		tabs = append(tabs, stageTab{
+		if strings.HasSuffix(label, "-comment-review") {
+			continue // handled in pass 2
+		}
+		effectiveNewest[label] = filename
+	}
+	for label, filename := range newestPerLabel {
+		if !strings.HasSuffix(label, "-comment-review") {
+			continue
+		}
+		parent := strings.TrimSuffix(label, "-comment-review")
+		if _, known := stageOrder[parent]; known {
+			// Merge under parent: keep whichever filename is newer.
+			if filename > effectiveNewest[parent] {
+				effectiveNewest[parent] = filename
+			}
+		} else {
+			// Unknown parent — keep as its own tab.
+			if existing, ok := effectiveNewest[label]; !ok || filename > existing {
+				effectiveNewest[label] = filename
+			}
+		}
+	}
+
+	// Separate known-stage tabs from unknown-stage tabs.
+	var knownTabs []stageTab
+	var unknownTabs []stageTab
+	for label, filename := range effectiveNewest {
+		tab := stageTab{
 			Label:   label,
 			LogPath: filepath.Join(logDir, filename),
-		})
+		}
+		if _, ok := stageOrder[label]; ok {
+			knownTabs = append(knownTabs, tab)
+		} else {
+			unknownTabs = append(unknownTabs, tab)
+		}
 	}
-	sort.Slice(tabs, func(i, j int) bool {
-		return filepath.Base(tabs[i].LogPath) < filepath.Base(tabs[j].LogPath)
+
+	// Sort known tabs by pipeline order (tie-break by label for stability).
+	sort.Slice(knownTabs, func(i, j int) bool {
+		oi, oj := stageOrder[knownTabs[i].Label], stageOrder[knownTabs[j].Label]
+		if oi != oj {
+			return oi < oj
+		}
+		return knownTabs[i].Label < knownTabs[j].Label
+	})
+	// Sort unknown tabs chronologically by newest filename.
+	sort.Slice(unknownTabs, func(i, j int) bool {
+		return filepath.Base(unknownTabs[i].LogPath) < filepath.Base(unknownTabs[j].LogPath)
 	})
 
-	// Mark the globally newest tab as live.
-	if len(tabs) > 0 {
-		tabs[len(tabs)-1].IsLive = true
+	tabs := append(knownTabs, unknownTabs...)
+
+	// Find the globally newest log file across all tabs and mark it as IsLive.
+	newestFile := ""
+	for _, t := range tabs {
+		if base := filepath.Base(t.LogPath); base > newestFile {
+			newestFile = base
+		}
 	}
+	for i, t := range tabs {
+		if filepath.Base(t.LogPath) == newestFile {
+			tabs[i].IsLive = true
+			break
+		}
+	}
+
 	return tabs
 }
 
