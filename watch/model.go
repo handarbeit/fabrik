@@ -266,7 +266,7 @@ func (m WatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		switch ev.String() {
-		case "ctrl+c", "q":
+		case "ctrl+c", "q", "esc":
 			close(m.done)
 			return m, tea.Quit
 

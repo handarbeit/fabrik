@@ -1008,3 +1008,120 @@ func TestUpdate_RKey_HistoryPane_ActiveIssue_SetsStatusMsg(t *testing.T) {
 		t.Error("expected statusMsg to be set when issue is actively running")
 	}
 }
+
+// TestUpdate_QKey_WithActiveJobs_ShowsConfirmQuit verifies that q with active jobs shows the confirm dialog.
+func TestUpdate_QKey_WithActiveJobs_ShowsConfirmQuit(t *testing.T) {
+	m := New(30, ProjectInfo{}, "")
+	key42 := activeJobKey("", 42)
+	m.active[key42] = &activeJob{IssueNumber: 42, StageName: "Implement", StartedAt: time.Now()}
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if cmd != nil {
+		t.Error("expected nil cmd (no quit yet) when q pressed with active jobs")
+	}
+	nm := next.(Model)
+	if !nm.confirmQuit {
+		t.Error("expected confirmQuit=true after q with active jobs")
+	}
+}
+
+// TestUpdate_QKey_WhenConfirmQuit_Quits verifies that q while confirmQuit is true quits immediately.
+func TestUpdate_QKey_WhenConfirmQuit_Quits(t *testing.T) {
+	m := New(30, ProjectInfo{}, "")
+	m.confirmQuit = true
+	key42 := activeJobKey("", 42)
+	m.active[key42] = &activeJob{IssueNumber: 42, StageName: "Implement", StartedAt: time.Now()}
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd (quit) when q pressed while confirmQuit=true")
+	}
+	msg := cmd()
+	if _, ok := msg.(tea.QuitMsg); !ok {
+		t.Errorf("expected tea.QuitMsg, got %T", msg)
+	}
+}
+
+// TestUpdate_NKey_CancelsConfirmQuit verifies n dismisses the quit confirmation dialog.
+func TestUpdate_NKey_CancelsConfirmQuit(t *testing.T) {
+	m := New(30, ProjectInfo{}, "")
+	m.confirmQuit = true
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	if cmd != nil {
+		t.Error("expected nil cmd after n cancels confirmQuit")
+	}
+	nm := next.(Model)
+	if nm.confirmQuit {
+		t.Error("expected confirmQuit=false after n key")
+	}
+}
+
+// TestUpdate_EscKey_WithActiveJobs_ShowsConfirmQuit verifies Escape with active jobs shows confirm dialog.
+func TestUpdate_EscKey_WithActiveJobs_ShowsConfirmQuit(t *testing.T) {
+	m := New(30, ProjectInfo{}, "")
+	key42 := activeJobKey("", 42)
+	m.active[key42] = &activeJob{IssueNumber: 42, StageName: "Implement", StartedAt: time.Now()}
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil {
+		t.Error("expected nil cmd (no quit yet) when Escape pressed with active jobs")
+	}
+	nm := next.(Model)
+	if !nm.confirmQuit {
+		t.Error("expected confirmQuit=true after Escape with active jobs")
+	}
+}
+
+// TestUpdate_EscKey_WhenConfirmQuit_Cancels verifies Escape cancels the confirmQuit dialog.
+func TestUpdate_EscKey_WhenConfirmQuit_Cancels(t *testing.T) {
+	m := New(30, ProjectInfo{}, "")
+	m.confirmQuit = true
+	key42 := activeJobKey("", 42)
+	m.active[key42] = &activeJob{IssueNumber: 42, StageName: "Implement", StartedAt: time.Now()}
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil {
+		t.Error("expected nil cmd after Escape cancels confirmQuit")
+	}
+	nm := next.(Model)
+	if nm.confirmQuit {
+		t.Error("expected confirmQuit=false after Escape key while confirmQuit=true")
+	}
+}
+
+// TestUpdate_CtrlC_BypassesConfirmQuit verifies ctrl+c quits immediately even when confirmQuit is active.
+func TestUpdate_CtrlC_BypassesConfirmQuit(t *testing.T) {
+	m := New(30, ProjectInfo{}, "")
+	m.confirmQuit = true
+	key42 := activeJobKey("", 42)
+	m.active[key42] = &activeJob{IssueNumber: 42, StageName: "Implement", StartedAt: time.Now()}
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd (quit) from ctrl+c even when confirmQuit=true")
+	}
+	msg := cmd()
+	if _, ok := msg.(tea.QuitMsg); !ok {
+		t.Errorf("expected tea.QuitMsg, got %T", msg)
+	}
+}
+
+// TestViewHistory_ConfirmQuit verifies the quit confirmation prompt is shown in viewHistory.
+func TestViewHistory_ConfirmQuit(t *testing.T) {
+	redirectHistory(t)
+	m := New(30, ProjectInfo{}, "")
+	m.width = 80
+	m.height = 24
+	key42 := activeJobKey("", 42)
+	m.active[key42] = &activeJob{IssueNumber: 42, StageName: "Implement", StartedAt: time.Now()}
+	m.confirmQuit = true
+
+	view := m.viewHistory()
+	if !strings.Contains(view, "Quit Fabrik?") {
+		t.Errorf("expected quit confirmation text in viewHistory, got: %q", view)
+	}
+	if !strings.Contains(view, "1 jobs") {
+		t.Errorf("expected job count in viewHistory confirmation, got: %q", view)
+	}
+}

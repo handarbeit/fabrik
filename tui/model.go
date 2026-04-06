@@ -127,6 +127,7 @@ type Model struct {
 	activeIdx    int  // index into sorted active issue numbers
 	histIdx      int  // index into history (0 = newest)
 	confirmClear bool // true when waiting for Y/N on clear-all
+	confirmQuit  bool // true when waiting for q/n on quit-with-active-jobs
 }
 
 var (
@@ -181,9 +182,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch ev := msg.(type) {
 	case tea.KeyMsg:
 		switch ev.String() {
-		case "ctrl+c", "q":
+		case "ctrl+c":
+			// Always quit immediately, bypassing all confirmation dialogs.
+			return m, tea.Quit
+
+		case "q":
 			if m.confirmClear {
 				m.confirmClear = false
+				return m, nil
+			}
+			if m.confirmQuit {
+				return m, tea.Quit
+			}
+			if len(m.active) > 0 {
+				m.confirmQuit = true
 				return m, nil
 			}
 			return m, tea.Quit
@@ -219,7 +231,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
-		case "n", "N", "esc":
+		case "n", "N":
+			if m.confirmClear {
+				m.confirmClear = false
+				return m, nil
+			}
+			if m.confirmQuit {
+				m.confirmQuit = false
+				return m, nil
+			}
+			if m.detailPanel {
+				m.detailPanel = false
+				return m, nil
+			}
+
+		case "esc":
+			// Priority: confirmClear → detailPanel → confirmQuit → trigger quit flow.
 			if m.confirmClear {
 				m.confirmClear = false
 				return m, nil
@@ -228,6 +255,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.detailPanel = false
 				return m, nil
 			}
+			if m.confirmQuit {
+				m.confirmQuit = false
+				return m, nil
+			}
+			if len(m.active) > 0 {
+				m.confirmQuit = true
+				return m, nil
+			}
+			return m, tea.Quit
 
 		case "tab":
 			if m.focusPane == paneActive {
@@ -674,6 +710,8 @@ func (m Model) viewHistory() string {
 	hint := ""
 	if m.confirmClear {
 		hint = failStyle.Render("  Clear all history? [C]onfirm / [n]o")
+	} else if m.confirmQuit {
+		hint = failStyle.Render(fmt.Sprintf("  Quit Fabrik? %d jobs still in progress \u2014 they will be interrupted.  [q] Quit anyway   [n/Escape] Cancel", len(m.active)))
 	} else if m.focusPane == paneHistory && len(m.history) > 0 {
 		hint = dimStyle.Render("  [r]esume  [l] watch  [enter] details  [c]lear  [C]lear all  [tab] in-progress")
 	}
