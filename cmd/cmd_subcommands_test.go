@@ -75,7 +75,7 @@ func TestWriteConfigTemplate_SkipsIfExists(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := writeConfigTemplate(false); err != nil {
+	if err := writeConfigTemplate("", "", "", "", false); err != nil {
 		t.Fatalf("writeConfigTemplate: %v", err)
 	}
 
@@ -98,7 +98,7 @@ func TestWriteConfigTemplate_ForceOverwrites(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := writeConfigTemplate(true); err != nil {
+	if err := writeConfigTemplate("", "", "", "", true); err != nil {
 		t.Fatalf("writeConfigTemplate(force): %v", err)
 	}
 
