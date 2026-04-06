@@ -2,6 +2,7 @@ package engine
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -177,4 +178,72 @@ func TestUpdateWorktreeFromMain_DirtyWorktree_Skips(t *testing.T) {
 	// (It will try to fetch from origin which will fail in test, but dirty check runs first)
 	wm.updateWorktreeFromMain(wtDir, "main", 50)
 	// If we get here without a panic, the dirty detection worked
+}
+
+// TestUpdateWorktreeFromMain_RemovesContextDir verifies that updateWorktreeFromMain
+// removes .fabrik-context/ from disk and the git index before rebasing, so that
+// previously-committed context files do not cause rebase conflicts.
+func TestUpdateWorktreeFromMain_RemovesContextDir(t *testing.T) {
+	skipIfNoGit(t)
+
+	// Create a "remote" repo that acts as origin (has main with one commit).
+	remoteDir := initBareRepo(t)
+
+	// Create the working repo by cloning the remote.
+	workingDir := t.TempDir()
+	cloneCmd := exec.Command("git", "clone", remoteDir, workingDir)
+	if out, err := cloneCmd.CombinedOutput(); err != nil {
+		t.Fatalf("clone: %s: %v", out, err)
+	}
+	// Set git user config in the clone.
+	for _, args := range [][]string{
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "Test"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = workingDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("config %v: %s: %v", args, out, err)
+		}
+	}
+
+	// Create a worktree in the working repo on a feature branch.
+	wm := NewWorktreeManager(workingDir)
+	wtDir, err := wm.EnsureWorktree(55, "main", true) // skipUpdate=true; we set up manually
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	// Commit .fabrik-context/issue.md into the worktree so it becomes tracked.
+	contextDir := filepath.Join(wtDir, ".fabrik-context")
+	if err := os.MkdirAll(contextDir, 0755); err != nil {
+		t.Fatalf("mkdir context dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(contextDir, "issue.md"), []byte("# Issue\n"), 0644); err != nil {
+		t.Fatalf("write context file: %v", err)
+	}
+	for _, args := range [][]string{
+		{"git", "add", "-A"},
+		{"git", "commit", "-m", "add context file (simulating prior session bug)"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = wtDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("commit %v: %s: %v", args, out, err)
+		}
+	}
+
+	// Verify the context file is tracked before the call.
+	if _, err := os.Stat(filepath.Join(wtDir, ".fabrik-context", "issue.md")); err != nil {
+		t.Fatalf("context file should exist before updateWorktreeFromMain: %v", err)
+	}
+
+	// Call updateWorktreeFromMain — this should remove .fabrik-context/ from
+	// disk and the index before attempting to rebase.
+	wm.updateWorktreeFromMain(wtDir, "main", 55)
+
+	// After the call, .fabrik-context/ must not exist on disk.
+	if _, err := os.Stat(filepath.Join(wtDir, ".fabrik-context")); !os.IsNotExist(err) {
+		t.Error(".fabrik-context/ should have been removed by updateWorktreeFromMain")
+	}
 }

@@ -417,3 +417,30 @@ func TestWriteCodebaseChanges_DiffWritten(t *testing.T) {
 		t.Errorf("missing 'New' status for added file: %s", content)
 	}
 }
+
+// TestWriteContextFiles_CreatesGitignore verifies that writeContextFiles writes
+// a .gitignore containing "*" inside .fabrik-context/ to prevent untracked
+// context files from being staged by git add -A.
+func TestWriteContextFiles_CreatesGitignore(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := testEngine(client, claude)
+	eng.cfg.Stages = []*stages.Stage{
+		{Name: "Research", Order: 1},
+	}
+
+	workDir := t.TempDir()
+	item := gh.ProjectItem{Number: 99, Body: "spec"}
+	stage := &stages.Stage{Name: "Research", Order: 1}
+
+	eng.writeContextFiles(item, stage, workDir, false)
+
+	gitignorePath := filepath.Join(workDir, ".fabrik-context", ".gitignore")
+	data, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatalf(".fabrik-context/.gitignore not written: %v", err)
+	}
+	if string(data) != "*\n" {
+		t.Errorf(".gitignore content = %q, want %q", string(data), "*\n")
+	}
+}

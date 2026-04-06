@@ -254,6 +254,23 @@ func (wm *WorktreeManager) updateWorktreeFromMain(wtDir, baseBranch string, issu
 		return
 	}
 
+	// Remove .fabrik-context/ from disk and the git index before rebasing.
+	// Context files committed in a prior session cause conflicts when rebasing,
+	// because the engine will write fresh versions after the rebase.
+	// os.RemoveAll is a no-op when the directory does not exist (R4 idempotence).
+	_ = os.RemoveAll(filepath.Join(wtDir, ".fabrik-context"))
+	// git rm --cached exits non-zero when the directory is not tracked — this
+	// is the normal case and is silently ignored. If files were tracked, the
+	// staged deletion is committed immediately so the index is clean for rebase.
+	rmCmd := exec.Command("git", "rm", "-rf", "--cached", ".fabrik-context/")
+	rmCmd.Dir = wtDir
+	if _, rmErr := rmCmd.CombinedOutput(); rmErr == nil {
+		// Something was tracked and removed — commit it to keep the index clean.
+		commitCmd := exec.Command("git", "commit", "-m", "chore: remove stale .fabrik-context files")
+		commitCmd.Dir = wtDir
+		_, _ = commitCmd.CombinedOutput()
+	}
+
 	// Rebase onto origin/main to keep a linear history and avoid merge commits
 	// that introduce unrelated changes into the worktree.
 	cmd = exec.Command("git", "rebase", "origin/"+baseBranch)
