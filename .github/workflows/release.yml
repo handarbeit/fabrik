@@ -33,11 +33,19 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Verify release notes exist
+        run: |
+          if [ ! -f release-notes.md ]; then
+            echo "Error: release-notes.md not found."
+            echo "Run scripts/draft-release-notes.sh, review the output, and commit it before tagging."
+            exit 1
+          fi
+
       - name: Run goreleaser
         uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
           version: latest
-          args: release --clean
+          args: release --clean --release-notes release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
