@@ -144,7 +144,7 @@ func TestNew(t *testing.T) {
 
 func TestRun_ShutdownOnSignal(t *testing.T) {
 	client := &mockGitHubClient{
-		fetchProjectBoardFn: func(owner, repo string, projectNum int) (*gh.ProjectBoard, error) {
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{}, nil
 		},
 	}

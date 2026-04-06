@@ -18,6 +18,7 @@ type Config struct {
 	Owner         string
 	Repo          string
 	ProjectNum    int
+	OwnerType     string
 	User          string
 	Token         string
 	Version       string
