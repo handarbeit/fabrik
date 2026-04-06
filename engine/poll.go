@@ -269,6 +269,13 @@ func (e *Engine) poll(ctx context.Context) error {
 		if !e.itemMayNeedWork(board.Items[i]) {
 			continue
 		}
+		// Cleanup stages don't need comments or linked-PR data — skip FetchItemDetails
+		// to avoid wasting GraphQL points on items that only need a worktree existence
+		// check and a completion label.
+		if st := stages.FindStage(e.cfg.Stages, board.Items[i].Status); st != nil && st.CleanupWorktree {
+			e.logf(0, "poll", "skipping deep-fetch for cleanup-stage item #%d\n", board.Items[i].Number)
+			continue
+		}
 		e.logf(0, "poll", "deep-fetching details for #%d\n", board.Items[i].Number)
 		if err := e.client.FetchItemDetails(&board.Items[i]); err != nil {
 			e.logf(0, "warn", "could not fetch details for #%d: %v\n", board.Items[i].Number, err)
