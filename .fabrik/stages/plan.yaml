@@ -18,6 +18,7 @@ allowed_tools:
   - Bash(gh label list)
   - Bash(gh project item-add)
   - Bash(gh project item-edit)
+  - Bash(gh project item-list)
   - WebSearch
   - WebFetch
 completion:
