@@ -161,21 +161,29 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		return true
 	}
 
-	// Awaiting-input items (paused + awaiting-input) should be checked for new
-	// comments — that's the resume trigger. They must not proceed further.
+	// Awaiting-input items (paused + awaiting-input) bypass the paused guard but
+	// still respect the lock — items locked by another user must not be processed
+	// by this instance even when awaiting input.
 	awaitingInput := isAwaitingInput(item)
+
+	// Items locked by another user are not our work — checked before the
+	// awaiting-input early return so locks are always respected.
+	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
+	otherLockPrefix := "fabrik:locked:"
+	for _, label := range item.Labels {
+		if strings.HasPrefix(label, otherLockPrefix) && label != lockLabel {
+			return false
+		}
+	}
+
+	// Awaiting-input items: new comment = resume trigger; no comment = skip.
 	if awaitingInput {
 		return len(e.findNewComments(item)) > 0
 	}
 
-	// Paused items and items locked by another user are not our work
-	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
-	otherLockPrefix := "fabrik:locked:"
+	// Paused items are not our work
 	for _, label := range item.Labels {
 		if label == "fabrik:paused" {
-			return false
-		}
-		if strings.HasPrefix(label, otherLockPrefix) && label != lockLabel {
 			return false
 		}
 	}
