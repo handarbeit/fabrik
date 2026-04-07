@@ -19,6 +19,14 @@ import (
 
 const idleUpgradeThreshold = 2
 
+// rateLimitBackoffThreshold is the fraction of GraphQL rate limit remaining
+// below which the engine activates poll backoff and logs a warning.
+const rateLimitBackoffThreshold = 0.20
+
+// rateLimitMaxBackoffMultiplier caps the backoff interval as a multiple of the
+// configured poll interval (e.g. 10× = 10 * PollSeconds).
+const rateLimitMaxBackoffMultiplier = 10
+
 // isTTY reports whether stdout is connected to a terminal.
 var isTTY = func() bool {
 	fi, err := os.Stdout.Stat()
@@ -120,13 +128,46 @@ func (e *Engine) Run() error {
 		fmt.Println()
 	}
 
-	ticker := time.NewTicker(time.Duration(e.cfg.PollSeconds) * time.Second)
+	configuredInterval := time.Duration(e.cfg.PollSeconds) * time.Second
+	ticker := time.NewTicker(configuredInterval)
 	defer ticker.Stop()
+
+	backoffActive := false
+
+	// applyBackoff checks the current GraphQL rate limit after a poll and adjusts
+	// the ticker interval. When remaining < threshold, the interval is doubled
+	// (capped at rateLimitMaxBackoffMultiplier× configured). When recovered, the
+	// configured interval is restored. Uses wait-then-new-interval semantics:
+	// ticker.Reset() after poll() means the next tick arrives after the new interval.
+	applyBackoff := func() {
+		_, graphqlStats := e.client.RateLimitStats()
+		if graphqlStats.Limit <= 0 {
+			return
+		}
+		ratio := float64(graphqlStats.Remaining) / float64(graphqlStats.Limit)
+		if ratio < rateLimitBackoffThreshold && !backoffActive {
+			backoffInterval := configuredInterval * 2
+			maxInterval := configuredInterval * time.Duration(rateLimitMaxBackoffMultiplier)
+			if backoffInterval > maxInterval {
+				backoffInterval = maxInterval
+			}
+			ticker.Reset(backoffInterval)
+			backoffActive = true
+			e.logf(0, "warn", "GraphQL rate limit low (%.0f%% remaining) — poll interval doubled to %v\n",
+				ratio*100, backoffInterval)
+		} else if ratio >= rateLimitBackoffThreshold && backoffActive {
+			ticker.Reset(configuredInterval)
+			backoffActive = false
+			e.logf(0, "poll", "GraphQL rate limit recovered (%.0f%% remaining) — poll interval restored to %v\n",
+				ratio*100, configuredInterval)
+		}
+	}
 
 	// Run immediately on start, then on tick
 	if err := e.poll(ctx); err != nil && ctx.Err() == nil {
 		e.logf(0, "warn", "poll error: %v\n", err)
 	}
+	applyBackoff()
 
 	for {
 		select {
@@ -148,6 +189,7 @@ func (e *Engine) Run() error {
 			if err := e.poll(ctx); err != nil {
 				e.logf(0, "warn", "poll error: %v\n", err)
 			}
+			applyBackoff()
 		}
 	}
 }
@@ -253,6 +295,10 @@ func (e *Engine) poll(ctx context.Context) error {
 		}
 		e.logf(0, "poll", "rate limit GraphQL: %d/%d remaining, resets at %s\n",
 			graphqlStats.Remaining, graphqlStats.Limit, resetStr)
+		if float64(graphqlStats.Remaining)/float64(graphqlStats.Limit) < rateLimitBackoffThreshold {
+			e.logf(0, "warn", "GraphQL rate limit is low (%d/%d remaining, %.0f%% threshold) — consider reducing poll frequency\n",
+				graphqlStats.Remaining, graphqlStats.Limit, rateLimitBackoffThreshold*100)
+		}
 	}
 
 	// Update the updatedAt cache for all items. This is done before dispatch
