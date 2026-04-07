@@ -1,15 +1,15 @@
-# Fabrik v0.0.15
+# Fabrik v0.0.16
 
 ## Fixes
 
-- **Items invisible after yolo catch-up advance** — Board column moves don't bump the issue's `updatedAt`, so items advanced by the yolo catch-up loop appeared "unchanged" on subsequent polls and were never processed in their new column. Fixed with two complementary changes: evicting the `updatedAt` cache entry after advancing, and using the project item's `updatedAt` (which does reflect column moves) for change detection.
-- **Multi-layer change detection** — The shallow query now tracks `updatedAt` from three sources: the project item (column moves), the issue (comments, labels), and linked PRs (reviews, commits). The latest timestamp wins, ensuring activity at any layer triggers a deep fetch.
-
-- **Dev auto-upgrade missed rebuilds** — The dev upgrade path compared the local checkout to origin/main but didn't check if the running binary was built from HEAD. If the checkout was pulled but the binary wasn't rebuilt, upgrades were silently skipped. Now compares the binary's embedded SHA against HEAD.
+- **User comments on paused issues now trigger unpause** — A user comment on a `fabrik:paused` issue is an implicit "resume." Fabrik removes the pause label, clears any failed-stage state, and processes the comment. Previously, paused issues silently ignored all comments.
+- **Comments missed during rate limit exhaustion** (#232) — Three bugs caused comments to be dropped when GraphQL rate limits were hit: deep-fetch failures weren't retried on the next poll, awaiting-input items weren't re-checked after recovery, and the `lastUpdatedAt` cache wasn't evicted on failure. All three fixed.
+- **Blocked items not unblocked when dependency closes** — Closing a blocking issue doesn't change the blocked item's `updatedAt`, so it was never re-evaluated. Items with `fabrik:blocked` now bypass the `updatedAt` cache and are deep-fetched every poll to detect dependency closure.
+- **Auto-upgrade temp file cleanup** (#241) — `syscall.Exec` replaces the process so deferred cleanup never runs. The download tarball is now explicitly removed before re-exec.
 
 ## Internal
 
-- ADR 020 updated to document the multi-layer change detection principle and the project-item-as-primary-entity design.
+- Additional tests for deep-fetch failure handling, awaiting-input bypass, and `lastUpdatedAt` eviction.
 
 ## Upgrading
 
