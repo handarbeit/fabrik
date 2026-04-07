@@ -756,7 +756,7 @@ func (m Model) viewHeader() string {
 	left := title + status
 	leftWidth := lipgloss.Width(left)
 	timerWidth := lipgloss.Width(timerStr)
-	available := m.width - 3 // leading space + align with bordered pane right edge
+	available := m.width - 4 // leading space + align with bordered pane right edge
 	if leftWidth+timerWidth > available {
 		// Truncate status to fit. The rendered structure is:
 		//   " " + title + "  " + dimStyle(s+"…") + gap + timerStr
@@ -781,7 +781,7 @@ func (m Model) viewHeader() string {
 		leftWidth = lipgloss.Width(left)
 	}
 	// Align timer with bordered pane content edge (border + padding = 2 chars on right).
-	gap := max(m.width-3-leftWidth-timerWidth, 0)
+	gap := max(m.width-4-leftWidth-timerWidth, 0)
 	return " " + left + strings.Repeat(" ", gap) + timerStr
 }
 
