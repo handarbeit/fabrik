@@ -310,8 +310,8 @@ func TestItemMayNeedWork_DependencyGate_AllClosed_NotFiltered(t *testing.T) {
 	}
 }
 
-// TestItemMayNeedWork_ClosedIssue verifies that a closed issue is skipped
-// before any stage lookup, regardless of yolo or labels.
+// TestItemMayNeedWork_ClosedIssue verifies that a closed issue in a non-cleanup
+// stage is skipped, regardless of yolo or labels.
 func TestItemMayNeedWork_ClosedIssue(t *testing.T) {
 	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
 	item := gh.ProjectItem{
@@ -325,7 +325,7 @@ func TestItemMayNeedWork_ClosedIssue(t *testing.T) {
 }
 
 // TestItemNeedsWork_ClosedIssue verifies that itemNeedsWork returns false for
-// a closed issue before any stage lookup.
+// a closed issue in a non-cleanup stage.
 func TestItemNeedsWork_ClosedIssue(t *testing.T) {
 	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
 	item := gh.ProjectItem{
@@ -335,5 +335,130 @@ func TestItemNeedsWork_ClosedIssue(t *testing.T) {
 	}
 	if eng.itemNeedsWork(item) {
 		t.Error("closed issue should not need work (itemNeedsWork)")
+	}
+}
+
+// TestItemMayNeedWork_ClosedIssue_CleanupStage verifies that a closed issue in
+// a cleanup stage still passes itemMayNeedWork when the worktree directory exists.
+func TestItemMayNeedWork_ClosedIssue_CleanupStage(t *testing.T) {
+	rootDir := t.TempDir()
+	wm := NewWorktreeManager(rootDir)
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithCleanup(),
+		},
+		&mockGitHubClient{},
+		&mockClaudeInvoker{},
+		wm,
+	)
+	const issueNum = 99
+	if err := os.MkdirAll(wm.WorktreeDir(issueNum), 0755); err != nil {
+		t.Fatal(err)
+	}
+	item := gh.ProjectItem{
+		Number:   issueNum,
+		Status:   "Done",
+		IsClosed: true,
+	}
+	if !eng.itemMayNeedWork(item) {
+		t.Error("closed issue in cleanup stage with worktree should need work")
+	}
+}
+
+// TestItemMayNeedWork_ClosedIssue_CleanupStage_NoWorktree verifies that a closed
+// issue in a cleanup stage is skipped when no worktree directory exists.
+func TestItemMayNeedWork_ClosedIssue_CleanupStage_NoWorktree(t *testing.T) {
+	rootDir := t.TempDir()
+	wm := NewWorktreeManager(rootDir)
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithCleanup(),
+		},
+		&mockGitHubClient{},
+		&mockClaudeInvoker{},
+		wm,
+	)
+	item := gh.ProjectItem{
+		Number:   99,
+		Status:   "Done",
+		IsClosed: true,
+	}
+	if eng.itemMayNeedWork(item) {
+		t.Error("closed issue in cleanup stage without worktree should not need work")
+	}
+}
+
+// TestItemNeedsWork_ClosedIssue_CleanupStage verifies that a closed issue in a
+// cleanup stage passes itemNeedsWork when no complete label is set and worktree exists.
+func TestItemNeedsWork_ClosedIssue_CleanupStage(t *testing.T) {
+	rootDir := t.TempDir()
+	wm := NewWorktreeManager(rootDir)
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithCleanup(),
+		},
+		&mockGitHubClient{},
+		&mockClaudeInvoker{},
+		wm,
+	)
+	const issueNum = 99
+	if err := os.MkdirAll(wm.WorktreeDir(issueNum), 0755); err != nil {
+		t.Fatal(err)
+	}
+	item := gh.ProjectItem{
+		Number:   issueNum,
+		Status:   "Done",
+		IsClosed: true,
+	}
+	if !eng.itemNeedsWork(item) {
+		t.Error("closed issue in cleanup stage without complete label should need work")
+	}
+}
+
+// TestItemNeedsWork_ClosedIssue_CleanupStage_Complete verifies that a closed issue
+// in a cleanup stage is skipped when the stage:Done:complete label is present.
+func TestItemNeedsWork_ClosedIssue_CleanupStage_Complete(t *testing.T) {
+	rootDir := t.TempDir()
+	wm := NewWorktreeManager(rootDir)
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithCleanup(),
+		},
+		&mockGitHubClient{},
+		&mockClaudeInvoker{},
+		wm,
+	)
+	item := gh.ProjectItem{
+		Number:   99,
+		Status:   "Done",
+		IsClosed: true,
+		Labels:   []string{"stage:Done:complete"},
+	}
+	if eng.itemNeedsWork(item) {
+		t.Error("closed issue in cleanup stage with complete label should not need work")
 	}
 }
