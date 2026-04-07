@@ -1,52 +1,51 @@
-# Fabrik v0.0.12
+# Fabrik v0.0.13
 
-## What's New
+## Features
 
-### Issue dependency gating (#228)
+### Optimized shallow board query for multi-instance deployments (#230)
 
-Issues can now declare blockers using GitHub's native "blocked by" relationship. When Fabrik detects that an issue is blocked, it applies the `fabrik:blocked` label, posts a comment explaining which issue is blocking progress, and skips the item until the blocker is resolved. Once the blocking issue is closed, Fabrik automatically removes the label and resumes normal processing. The TUI also displays blocked status inline so you can see at a glance which issues are waiting on dependencies.
+The shallow board query has been stripped down to only the fields needed for change detection: `id`, `number`, `status`, `updatedAt`, `state`, `title`, and `labels(first:5)`. Heavy fields like `body`, `author`, `assignees`, and `blockedBy` now load only during deep fetch. This dramatically reduces GraphQL rate limit consumption — critical when running multiple Fabrik instances on the same GitHub token.
 
-## Bug Fixes
+### Dynamic poll backoff on rate limit pressure (#230)
 
-### Auto-upgrade fixed for private repos (#228)
+When GraphQL rate limit remaining drops below 20%, Fabrik automatically doubles its poll interval and logs a warning. The interval recovers when the rate limit replenishes. This prevents hitting the hard 5,000 points/hour cap during heavy usage.
 
-The binary upgrade downloader was using `browser_download_url` from the GitHub releases API. GitHub redirects that URL to S3, which rejects authentication headers — causing private-repo downloads to fail with a 403. Fixed to use the GitHub API asset URL with `Accept: application/octet-stream`, which handles authentication correctly and streams the binary without redirect issues.
+### Dependency gate at stage start (#231)
 
-### Auto-upgrade was using wrong repo owner (#228)
+Issues with open `Blocked by` dependencies are now checked before running a stage, not just at advance time. Previously, a blocked issue could burn Claude turns on a stage only to be stopped when trying to advance. The gate now fires at the top of `processItem`, preventing wasted work.
 
-The `fabrikOwner` constant was hardcoded to `arbeithand` instead of `tenaciousvc`. This caused the upgrade check to look in the wrong repository for new releases. Fixed to use the correct organization.
+### FABRIK_DECOMPOSED marker for issue splitting (#39)
 
-### Yolo catch-up loop skipped dependency unblocking (#228)
+Plan can now signal `FABRIK_DECOMPOSED` when it splits an issue into sub-issues. The engine detects this marker and advances the parent directly to Done, bypassing Implement/Review/Validate.
 
-In yolo mode, the catch-up loop had an early `fabrik:blocked` check that returned before `checkDependencies` could run. This meant blocked issues were never re-evaluated and would stay blocked even after their blocker was resolved. Removed the early skip so dependency checks always execute.
+### Pending-reviewer gate for yolo auto-advance (#227)
 
-### TUI header timer alignment (#228)
+In yolo mode, stages that create or update PRs now wait for pending reviewers before auto-advancing, preventing premature advancement past Review.
 
-The elapsed-time counter in the TUI header was misaligned with the bordered pane content edge by one character. Fixed by adjusting the horizontal offset to `width-4`.
+### Closed issue handling
 
-### Log file selection used wrong match field (#228)
+Closed issues are now skipped entirely during processing. Stale lock labels on closed issues are cleaned up automatically.
 
-The log file selector was matching by full filename instead of the timestamp suffix. This caused Fabrik to tail the wrong log file when multiple log files were present. Fixed to match on the timestamp component only.
+## Fixes
 
-### Upgrade check rate limiting removed (#228)
+- Yolo catch-up loop now only operates on deep-fetched items, preventing actions on incomplete data
+- Dispatch loop iterates deep-fetch candidates instead of the full board, matching the shallow/deep split
+- `cleanupClosedIssueLocks` suppresses benign 404 warnings for already-removed labels
 
-The upgrade check was rate-limited to once per several poll cycles, making it slow to detect new releases. Since the check is a single lightweight REST call, the rate limit was unnecessary. The check now runs every idle poll cycle.
+## Internal
 
-## Documentation
-
-This release includes comprehensive documentation updates:
-
-- **USER_GUIDE.md**: Added documentation for the `fabrik:yolo` label, TUI keyboard shortcuts, watch mode shortcuts, log file paths, and a troubleshooting section.
-- **README.md**: Added descriptions of the `model:<name>` and `fabrik:yolo` labels, and documented the `fabrik upgrade` command.
-- **CLAUDE.md**: Updated stage config field reference, labels reference, startup board validation description, and multi-repo worktree paths.
-- **docs/**: Updated the stage lifecycle page and the documentation index.
+- ADR 020: Shallow board query is a read-only filter — no mutations without deep fetch
+- `/cut-release` skill for Claude Code sessions to automate release note generation
+- Plan skill updated to support issue decomposition assessment
+- `FetchItemDetails` extended to populate body, URL, author, labels, assignees, and blockedBy
+- Project context file (`.fabrik-context/project.md`) written before stage invocation
 
 ## Upgrading
 
 ```bash
-# From a previous release binary
-fabrik upgrade
+# Auto-upgrade from a running Fabrik instance
+# Fabrik checks for new releases each poll cycle and upgrades automatically with --auto-upgrade
 
 # Or download directly
-gh release download --repo tenaciousvc/fabrik --pattern '*.tar.gz' -O - | tar xz
+gh release download --repo tenaciousvc/fabrik --pattern '*darwin_arm64*' -O - | tar xz
 ```
