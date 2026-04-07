@@ -15,6 +15,7 @@ allowed_tools:
   - Bash(gh issue edit)
   - Bash(gh issue link)
   - Bash(gh issue list)
+  - Bash(gh issue view)
   - Bash(gh label list)
   - Bash(gh project item-add)
   - Bash(gh project item-edit)
