@@ -87,8 +87,27 @@ func TestItemMayNeedWork_AwaitingInput_LockedByOther(t *testing.T) {
 		Labels: []string{"fabrik:paused", "fabrik:awaiting-input", "fabrik:locked:otheruser"},
 	}
 
-	if eng.itemMayNeedWork(item) {
-		t.Error("itemMayNeedWork should return false when locked by another user")
+	// itemMayNeedWork no longer checks labels — locked check is in itemNeedsWork.
+	if !eng.itemMayNeedWork(item) {
+		t.Error("itemMayNeedWork should not filter locked items (lock check is in itemNeedsWork)")
+	}
+}
+
+func TestItemNeedsWork_AwaitingInput_LockedByOther(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+
+	item := gh.ProjectItem{
+		Number: 1,
+		Status: "Research",
+		Labels: []string{"fabrik:paused", "fabrik:awaiting-input", "fabrik:locked:otheruser"},
+		Comments: []gh.Comment{
+			{ID: "C1", Author: "testuser", Body: "Here is my answer"},
+		},
+	}
+
+	// Even though there are new comments, the item is locked by another user.
+	if eng.itemNeedsWork(item) {
+		t.Error("itemNeedsWork should return false when locked by another user")
 	}
 }
 
@@ -102,8 +121,9 @@ func TestItemMayNeedWork_PausedOnly_Blocked(t *testing.T) {
 		UpdatedAt: time.Now(),
 	}
 
-	if eng.itemMayNeedWork(item) {
-		t.Error("itemMayNeedWork should return false for plain paused item")
+	// itemMayNeedWork no longer checks labels — paused check is in itemNeedsWork.
+	if !eng.itemMayNeedWork(item) {
+		t.Error("itemMayNeedWork should not filter paused items (paused check is in itemNeedsWork)")
 	}
 }
 
