@@ -1,9 +1,15 @@
-# Fabrik v0.0.14
+# Fabrik v0.0.15
 
 ## Fixes
 
-- **New items invisible after shallow query optimization** — The `updatedAt` cache was storing timestamps for all board items, including those that were never deep-fetched. New items that appeared on the board would be marked as "unchanged" on subsequent polls and never processed. Fixed to only cache items that were actually deep-fetched. (#230)
-- **Closed issues bypass cleanup stage** — The `IsClosed` guard unconditionally skipped closed issues, preventing the cleanup stage from running after a PR merges. Worktrees accumulated on disk indefinitely. Fixed to allow closed issues through when the current board status maps to a cleanup stage. (#238)
+- **Items invisible after yolo catch-up advance** — Board column moves don't bump the issue's `updatedAt`, so items advanced by the yolo catch-up loop appeared "unchanged" on subsequent polls and were never processed in their new column. Fixed with two complementary changes: evicting the `updatedAt` cache entry after advancing, and using the project item's `updatedAt` (which does reflect column moves) for change detection.
+- **Multi-layer change detection** — The shallow query now tracks `updatedAt` from three sources: the project item (column moves), the issue (comments, labels), and linked PRs (reviews, commits). The latest timestamp wins, ensuring activity at any layer triggers a deep fetch.
+
+- **Dev auto-upgrade missed rebuilds** — The dev upgrade path compared the local checkout to origin/main but didn't check if the running binary was built from HEAD. If the checkout was pulled but the binary wasn't rebuilt, upgrades were silently skipped. Now compares the binary's embedded SHA against HEAD.
+
+## Internal
+
+- ADR 020 updated to document the multi-layer change detection principle and the project-item-as-primary-entity design.
 
 ## Upgrading
 
