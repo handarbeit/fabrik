@@ -28,6 +28,7 @@ type commentNodeData struct {
 // deep phase via FetchItemDetails to reduce GraphQL rate limit cost.
 type itemNode struct {
 	ID               string `json:"id"`
+	UpdatedAt        string `json:"updatedAt"` // Project item updatedAt (bumped by column moves)
 	FieldValueByName *struct {
 		Name string `json:"name"`
 	} `json:"fieldValueByName"`
@@ -97,6 +98,7 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
         }
         nodes {
           id
+          updatedAt
           fieldValueByName(name: "Status") {
             ... on ProjectV2ItemFieldSingleSelectValue {
               name
@@ -220,9 +222,14 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 		if t, err := parseTime(node.Content.UpdatedAt); err == nil {
 			item.UpdatedAt = t
 		}
-		// Use the latest updatedAt across the issue and its linked PRs so that
-		// comments on a linked PR are detected as changes even though the issue
-		// itself doesn't update.
+		// Project item updatedAt is bumped by board column moves, which don't
+		// affect the issue's own updatedAt. Use whichever is later.
+		if t, err := parseTime(node.UpdatedAt); err == nil && t.After(item.UpdatedAt) {
+			item.UpdatedAt = t
+		}
+		// Use the latest updatedAt across the issue, project item, and linked PRs
+		// so that comments on a linked PR are detected as changes even though the
+		// issue itself doesn't update.
 		if node.Content.LinkedPRs != nil {
 			for _, pr := range node.Content.LinkedPRs.Nodes {
 				if t, err := parseTime(pr.UpdatedAt); err == nil && t.After(item.UpdatedAt) {
