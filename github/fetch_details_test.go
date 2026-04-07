@@ -218,6 +218,125 @@ func TestFetchItemDetails_LinkedPRCommentOverflow(t *testing.T) {
 	}
 }
 
+// TestFetchItemDetails_PopulatesFullMetadata verifies that FetchItemDetails
+// populates body, url, author, labels, assignees, and blockedBy from the
+// deep-fetch response in addition to comments.
+func TestFetchItemDetails_PopulatesFullMetadata(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"data": map[string]interface{}{
+				"node": map[string]interface{}{
+					"body": "This is the issue body.",
+					"url":  "https://github.com/owner/repo/issues/42",
+					"author": map[string]interface{}{
+						"login": "authoruser",
+					},
+					"labels": map[string]interface{}{
+						"nodes": []interface{}{
+							map[string]interface{}{"name": "bug"},
+							map[string]interface{}{"name": "stage:Research:complete"},
+						},
+						"pageInfo": map[string]interface{}{
+							"hasNextPage": false,
+							"endCursor":   "",
+						},
+					},
+					"assignees": map[string]interface{}{
+						"nodes": []interface{}{
+							map[string]interface{}{"login": "assignee1"},
+						},
+					},
+					"blockedBy": map[string]interface{}{
+						"pageInfo": map[string]interface{}{"hasNextPage": false},
+						"nodes": []interface{}{
+							map[string]interface{}{
+								"number": 10,
+								"state":  "OPEN",
+								"repository": map[string]interface{}{
+									"nameWithOwner": "owner/repo",
+								},
+							},
+						},
+					},
+					"comments": map[string]interface{}{
+						"nodes":    []interface{}{},
+						"pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""},
+					},
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	item := &ProjectItem{ID: "I_42", Number: 42}
+	if err := c.FetchItemDetails(item); err != nil {
+		t.Fatalf("FetchItemDetails: %v", err)
+	}
+
+	if item.Body != "This is the issue body." {
+		t.Errorf("Body = %q, want %q", item.Body, "This is the issue body.")
+	}
+	if item.URL != "https://github.com/owner/repo/issues/42" {
+		t.Errorf("URL = %q, want URL", item.URL)
+	}
+	if item.Author != "authoruser" {
+		t.Errorf("Author = %q, want %q", item.Author, "authoruser")
+	}
+	if len(item.Labels) != 2 || item.Labels[0] != "bug" || item.Labels[1] != "stage:Research:complete" {
+		t.Errorf("Labels = %v, want [bug stage:Research:complete]", item.Labels)
+	}
+	if len(item.Assignees) != 1 || item.Assignees[0] != "assignee1" {
+		t.Errorf("Assignees = %v, want [assignee1]", item.Assignees)
+	}
+	if len(item.BlockedBy) != 1 {
+		t.Fatalf("BlockedBy = %v, want 1 entry", item.BlockedBy)
+	}
+	if item.BlockedBy[0].Number != 10 || item.BlockedBy[0].State != "OPEN" || item.BlockedBy[0].Repo != "owner/repo" {
+		t.Errorf("BlockedBy[0] = %+v", item.BlockedBy[0])
+	}
+}
+
+// TestFetchItemDetails_ResetsLabelsFromShallow verifies that FetchItemDetails
+// resets item.Labels (clearing any shallow-fetch labels) before populating from
+// the deep-fetch response. This prevents label duplication.
+func TestFetchItemDetails_ResetsLabelsFromShallow(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"data": map[string]interface{}{
+				"node": map[string]interface{}{
+					"labels": map[string]interface{}{
+						"nodes": []interface{}{
+							map[string]interface{}{"name": "deep-label"},
+						},
+						"pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""},
+					},
+					"assignees": map[string]interface{}{"nodes": []interface{}{}},
+					"comments": map[string]interface{}{
+						"nodes":    []interface{}{},
+						"pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""},
+					},
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	// Pre-populate with shallow labels (simulating what fetchProjectBoard sets)
+	item := &ProjectItem{ID: "I_1", Number: 1, Labels: []string{"shallow-label"}}
+	if err := c.FetchItemDetails(item); err != nil {
+		t.Fatalf("FetchItemDetails: %v", err)
+	}
+
+	// Should only have the deep-fetched label, not the shallow one
+	if len(item.Labels) != 1 || item.Labels[0] != "deep-label" {
+		t.Errorf("Labels = %v, want [deep-label] (shallow labels should be replaced)", item.Labels)
+	}
+}
+
 func TestFetchItemDetails_NilAuthor(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]interface{}{
