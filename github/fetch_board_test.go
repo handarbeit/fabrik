@@ -398,3 +398,130 @@ func TestFetchProjectBoard_LabelOverflow(t *testing.T) {
 		t.Errorf("unexpected labels: %v", item.Labels)
 	}
 }
+
+func makeMinimalIssueContent(id string, number int, state string) map[string]interface{} {
+	return map[string]interface{}{
+		"id":        id,
+		"number":    number,
+		"title":     "Test issue",
+		"body":      "",
+		"url":       "https://example.com",
+		"state":     state,
+		"labels":    map[string]interface{}{"nodes": []interface{}{}},
+		"assignees": map[string]interface{}{"nodes": []interface{}{}},
+	}
+}
+
+func makeMinimalPRContent(id string, number int) map[string]interface{} {
+	return map[string]interface{}{
+		"__typename": "PullRequest",
+		"id":         id,
+		"number":     number,
+		"title":      "Test PR",
+		"body":       "",
+		"url":        "https://example.com",
+		"labels":     map[string]interface{}{"nodes": []interface{}{}},
+		"assignees":  map[string]interface{}{"nodes": []interface{}{}},
+	}
+}
+
+func boardResponseWith(nodes []interface{}) map[string]interface{} {
+	return map[string]interface{}{
+		"data": map[string]interface{}{
+			"user": map[string]interface{}{
+				"projectV2": map[string]interface{}{
+					"id": "PVT_test",
+					"items": map[string]interface{}{
+						"pageInfo": map[string]interface{}{"hasNextPage": false},
+						"nodes":    nodes,
+					},
+				},
+			},
+		},
+	}
+}
+
+// TestFetchProjectBoard_IsClosed_ClosedIssue verifies that a closed Issue sets IsClosed=true.
+func TestFetchProjectBoard_IsClosed_ClosedIssue(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := boardResponseWith([]interface{}{
+			map[string]interface{}{
+				"id":               "PVTI_closed",
+				"fieldValueByName": nil,
+				"content":          makeMinimalIssueContent("I_closed", 99, "CLOSED"),
+			},
+		})
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	board, err := c.FetchProjectBoard("owner", "repo", 1, "user")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
+	}
+	if len(board.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(board.Items))
+	}
+	if !board.Items[0].IsClosed {
+		t.Error("IsClosed should be true for CLOSED issue")
+	}
+}
+
+// TestFetchProjectBoard_IsClosed_OpenIssue verifies that an open Issue sets IsClosed=false.
+func TestFetchProjectBoard_IsClosed_OpenIssue(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := boardResponseWith([]interface{}{
+			map[string]interface{}{
+				"id":               "PVTI_open",
+				"fieldValueByName": nil,
+				"content":          makeMinimalIssueContent("I_open", 7, "OPEN"),
+			},
+		})
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	board, err := c.FetchProjectBoard("owner", "repo", 1, "user")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
+	}
+	if len(board.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(board.Items))
+	}
+	if board.Items[0].IsClosed {
+		t.Error("IsClosed should be false for OPEN issue")
+	}
+}
+
+// TestFetchProjectBoard_IsClosed_PRItem verifies that a PR item always has IsClosed=false.
+func TestFetchProjectBoard_IsClosed_PRItem(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := boardResponseWith([]interface{}{
+			map[string]interface{}{
+				"id":               "PVTI_pr",
+				"fieldValueByName": nil,
+				"content":          makeMinimalPRContent("PR_1", 55),
+			},
+		})
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	board, err := c.FetchProjectBoard("owner", "repo", 1, "user")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
+	}
+	if len(board.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(board.Items))
+	}
+	item := board.Items[0]
+	if !item.IsPR {
+		t.Error("IsPR should be true for PullRequest item")
+	}
+	if item.IsClosed {
+		t.Error("IsClosed should be false for PR item (PR state is not fetched here)")
+	}
+}
