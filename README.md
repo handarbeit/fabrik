@@ -217,7 +217,7 @@ to prevent accidental token leaks.
 | `fabrik watch <issue-number>` | Open a real-time TUI for a single issue — live Claude output, stage history, PR/CI status |
 | `fabrik stream-filter` | Read NDJSON Claude output from stdin and render it as human-readable text |
 | `fabrik resume <issue-number>` | Resume an interrupted Claude session for an issue |
-| `fabrik upgrade` | Refresh plugin skills in `.fabrik/plugin/` from embedded defaults |
+| `fabrik upgrade` | Self-update the Fabrik binary (release builds) and refresh plugin skills in `.fabrik/plugin/` from embedded defaults |
 
 ### `fabrik watch`
 
@@ -244,6 +244,8 @@ Fabrik uses labels to track state:
 | `stage:<name>:complete` | Stage has been completed |
 | `stage:<name>:in_progress` | Stage is actively running |
 | `stage:<name>:failed` | Stage hit max retries and was paused |
+| `model:<name>` | Use this model for the issue (e.g. `model:opus` overrides the stage YAML default) |
+| `fabrik:yolo` | Force auto-advance even when `auto_advance: false`; also triggers auto-merge of the linked PR when Validate completes |
 
 ## Multi-User
 
