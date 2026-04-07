@@ -32,12 +32,12 @@ type itemNode struct {
 		Name string `json:"name"`
 	} `json:"fieldValueByName"`
 	Content struct {
-		Typename  string `json:"__typename"`
-		ID        string `json:"id"`
-		Number    int    `json:"number"`
-		Title     string `json:"title"`
-		State     string `json:"state"`
-		UpdatedAt string `json:"updatedAt"`
+		Typename   string `json:"__typename"`
+		ID         string `json:"id"`
+		Number     int    `json:"number"`
+		Title      string `json:"title"`
+		State      string `json:"state"`
+		UpdatedAt  string `json:"updatedAt"`
 		Repository *struct {
 			NameWithOwner string `json:"nameWithOwner"`
 		} `json:"repository"`
