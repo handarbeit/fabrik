@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mattn/go-isatty"
@@ -34,9 +35,10 @@ type Config struct {
 	TUI           bool
 	PollSeconds   int
 	MaxConcurrent int
-	MaxRetries    int
-	DebugOutput   bool
-	PluginDir     string
+	MaxRetries        int
+	ReviewWaitTimeout int // minutes; 0 means use default (15)
+	DebugOutput       bool
+	PluginDir         string
 }
 
 func Execute() error {
@@ -209,6 +211,15 @@ func Execute() error {
 			}
 		}
 	}
+	if cfg.ReviewWaitTimeout == 0 {
+		if v := os.Getenv("FABRIK_REVIEW_WAIT_TIMEOUT"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				cfg.ReviewWaitTimeout = n
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_REVIEW_WAIT_TIMEOUT=%q is invalid (must be a positive integer of minutes); using default 15\n", v)
+			}
+		}
+	}
 	if !cfg.AutoUpgrade {
 		if v := os.Getenv("FABRIK_AUTO_UPGRADE"); v != "" {
 			lv := strings.ToLower(v)
@@ -319,9 +330,10 @@ func Execute() error {
 		Yolo:          cfg.Yolo,
 		AutoUpgrade:   cfg.AutoUpgrade,
 		PollSeconds:   cfg.PollSeconds,
-		MaxConcurrent: cfg.MaxConcurrent,
-		MaxRetries:    cfg.MaxRetries,
-		DebugOutput:   cfg.DebugOutput,
+		MaxConcurrent:     cfg.MaxConcurrent,
+		MaxRetries:        cfg.MaxRetries,
+		ReviewWaitTimeout: reviewWaitTimeout(cfg.ReviewWaitTimeout),
+		DebugOutput:       cfg.DebugOutput,
 		PluginDir:     cfg.PluginDir,
 		Stages:        stageCfgs,
 		ReadyCh:       testReadyCh,
@@ -336,6 +348,15 @@ func Execute() error {
 		return runTUI(eng, cfg.PollSeconds, buildProjectInfo(cfg, pc), cfg.PluginDir)
 	}
 	return eng.Run()
+}
+
+// reviewWaitTimeout converts a ReviewWaitTimeout config value (minutes) to a
+// time.Duration. When minutes is 0 (unset), the default of 15 minutes is used.
+func reviewWaitTimeout(minutes int) time.Duration {
+	if minutes <= 0 {
+		return 15 * time.Minute
+	}
+	return time.Duration(minutes) * time.Minute
 }
 
 // buildProjectInfo assembles the TUI footer metadata from the active config.

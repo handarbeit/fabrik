@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"sync"
+	"time"
 
 	gh "github.com/verveguy/fabrik/github"
 	"github.com/verveguy/fabrik/stages"
@@ -31,6 +32,10 @@ type mockGitHubClient struct {
 	markPRReadyFn             func(owner, repo string, prNumber int) error
 	createDraftPRFn           func(owner, repo, title, head, base string, issueNumber int) (int, error)
 	fetchLatestReleaseFn      func(owner, repo string) (*gh.LatestRelease, error)
+	fetchLabelAppliedAtFn     func(owner, repo string, issueNumber int, labelName string) (time.Time, error)
+
+	// Track calls for FetchLabelAppliedAt
+	fetchLabelAppliedAtCalls []fetchLabelAppliedAtCall
 
 	// Track calls — access under mu when accessed from concurrent goroutines.
 	addLabelCalls      []addLabelCall
@@ -41,6 +46,12 @@ type mockGitHubClient struct {
 	mergePRCalls       []mergePRCall
 	markPRReadyCalls   []markPRReadyCall
 	createDraftPRCalls []createDraftPRCall
+}
+
+type fetchLabelAppliedAtCall struct {
+	owner, repo string
+	issueNumber int
+	labelName   string
 }
 
 type markPRReadyCall struct {
@@ -246,6 +257,17 @@ func (m *mockGitHubClient) FetchLatestRelease(owner, repo string) (*gh.LatestRel
 		return fn(owner, repo)
 	}
 	return nil, nil
+}
+
+func (m *mockGitHubClient) FetchLabelAppliedAt(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+	m.mu.Lock()
+	m.fetchLabelAppliedAtCalls = append(m.fetchLabelAppliedAtCalls, fetchLabelAppliedAtCall{owner, repo, issueNumber, labelName})
+	fn := m.fetchLabelAppliedAtFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, issueNumber, labelName)
+	}
+	return time.Time{}, nil
 }
 
 func (m *mockGitHubClient) RateLimitStats() (gh.RateLimitStats, gh.RateLimitStats) {
