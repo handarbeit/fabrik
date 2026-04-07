@@ -185,13 +185,15 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 }
 
 // markCommentsSeenByStage adds a rocket reaction to any user comments that were
-// present when a stage ran. These comments were included in the prompt as context
-// and should not be treated as "new" on subsequent polls — particularly to avoid
-// false-triggering the awaiting-input unblock logic.
-func (e *Engine) markCommentsSeenByStage(item gh.ProjectItem) {
+// present when a stage ran. item provides owner/repo/number context for API
+// calls; preStageComments must be the snapshot captured before stage dispatch
+// (item.Comments at dispatch time) — it must NOT be item.Comments from a
+// re-fetch, as that would include comments that arrived during the run and were
+// never processed by the stage.
+func (e *Engine) markCommentsSeenByStage(item gh.ProjectItem, preStageComments []gh.Comment) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	iKey := issueKey(item, e.defaultRepo())
-	for _, c := range item.Comments {
+	for _, c := range preStageComments {
 		if c.Author != e.cfg.User {
 			continue
 		}
