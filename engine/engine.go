@@ -54,7 +54,8 @@ type Engine struct {
 	lastUsage          map[string]TokenUsage // key: issueKey; per-issue token usage from last processItem (for TUI)
 	lastCompleted      map[string]bool       // key: issueKey; per-issue stage completion from last processItem (for TUI)
 	lastBlocked        map[string]bool       // key: issueKey; per-issue blocked-on-input from last processItem (for TUI)
-	lastUpdatedAt      map[string]time.Time  // key: issueKey; tracks last-seen updatedAt per issue
+	lastUpdatedAt        map[string]time.Time // key: issueKey; tracks last-seen updatedAt per issue
+	deepFetchFailureTime map[string]time.Time // key: issueKey; tracks when FetchItemDetails last failed
 	idleCount          int                   // consecutive idle polls; triggers self-upgrade at threshold
 	sem                chan struct{}         // semaphore bounding concurrent workers across poll cycles
 	wg                 sync.WaitGroup        // tracks in-flight workers for graceful shutdown
@@ -109,15 +110,16 @@ func New(cfg Config) (*Engine, error) {
 		worktreeManagers:   make(map[string]*WorktreeManager),
 		jobControlMode:     jobControlMode,
 		jobControlDir:      fabrikDir,
-		processedSet:       make(map[string]time.Time),
-		lockedIssues:       make(map[string]bool),
-		lastUsage:          make(map[string]TokenUsage),
-		lastCompleted:      make(map[string]bool),
-		lastBlocked:        make(map[string]bool),
-		lastUpdatedAt:      make(map[string]time.Time),
-		retryCount:         make(map[string]int),
-		pausedDueToRetries: make(map[string]bool),
-		sem:                make(chan struct{}, cfg.MaxConcurrent),
+		processedSet:         make(map[string]time.Time),
+		lockedIssues:         make(map[string]bool),
+		lastUsage:            make(map[string]TokenUsage),
+		lastCompleted:        make(map[string]bool),
+		lastBlocked:          make(map[string]bool),
+		lastUpdatedAt:        make(map[string]time.Time),
+		deepFetchFailureTime: make(map[string]time.Time),
+		retryCount:           make(map[string]int),
+		pausedDueToRetries:   make(map[string]bool),
+		sem:                  make(chan struct{}, cfg.MaxConcurrent),
 	}
 
 	if !jobControlMode && cfg.Repo != "" {
@@ -160,15 +162,16 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		client:             client,
 		claude:             claude,
 		worktreeManagers:   wms,
-		processedSet:       make(map[string]time.Time),
-		lockedIssues:       make(map[string]bool),
-		lastUsage:          make(map[string]TokenUsage),
-		lastCompleted:      make(map[string]bool),
-		lastBlocked:        make(map[string]bool),
-		lastUpdatedAt:      make(map[string]time.Time),
-		retryCount:         make(map[string]int),
-		pausedDueToRetries: make(map[string]bool),
-		sem:                make(chan struct{}, maxConcurrent),
+		processedSet:         make(map[string]time.Time),
+		lockedIssues:         make(map[string]bool),
+		lastUsage:            make(map[string]TokenUsage),
+		lastCompleted:        make(map[string]bool),
+		lastBlocked:          make(map[string]bool),
+		lastUpdatedAt:        make(map[string]time.Time),
+		deepFetchFailureTime: make(map[string]time.Time),
+		retryCount:           make(map[string]int),
+		pausedDueToRetries:   make(map[string]bool),
+		sem:                  make(chan struct{}, maxConcurrent),
 	}
 	if worktrees != nil {
 		worktrees.logfFn = eng.logf

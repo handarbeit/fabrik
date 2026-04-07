@@ -75,8 +75,11 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 			// Force deep-fetch for awaiting-review items: the gate condition
 			// changes independently of the issue's updatedAt (reviewer submits
 			// a review on the PR, which doesn't bump the issue's updatedAt).
+			// Force deep-fetch for awaiting-input items: a new user comment may
+			// have arrived even if updatedAt hasn't changed (e.g. after a failed
+			// deep-fetch in a prior poll cached a stale timestamp).
 			for _, l := range item.Labels {
-				if l == "fabrik:awaiting-review" {
+				if l == "fabrik:awaiting-review" || l == "fabrik:awaiting-input" {
 					return true
 				}
 			}
@@ -113,6 +116,21 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 	// Don't check labels or blockedBy here — those require full label data which
 	// is only available after deep fetch. Label/lock/dep-gate checks are in
 	// itemNeedsWork, which runs after FetchItemDetails populates the full label set.
+
+	// Apply a cooldown for items whose last FetchItemDetails call failed.
+	// Without this, a persistent failure (e.g. deleted issue, permission error)
+	// would cause an API call on every poll cycle. The cooldown matches the
+	// processedSet cooldown used for failed stage retries.
+	iKey := issueKey(item, e.defaultRepo())
+	e.mu.Lock()
+	lastFailure, hadFailure := e.deepFetchFailureTime[iKey]
+	e.mu.Unlock()
+	if hadFailure {
+		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
+		if time.Since(lastFailure) < cooldown {
+			return false
+		}
+	}
 
 	return true
 }
@@ -646,7 +664,14 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// These comments were included in the prompt as context — they should not
 	// trigger the awaiting-input unblock logic on subsequent polls.
 	if claudeRan {
-		e.markCommentsSeenByStage(item)
+		e.markCommentsSeenByStage(item, item.Comments)
+		// Evict lastUpdatedAt so the next poll re-evaluates this item, regardless
+		// of what updatedAt was cached during the run. This handles the race where
+		// a concurrent poll cycle cached the item's updatedAt while the goroutine
+		// was in-flight, causing a comment posted during the run to be missed.
+		e.mu.Lock()
+		delete(e.lastUpdatedAt, iKey)
+		e.mu.Unlock()
 	}
 
 	// Only honor the blocked-on-input and decomposed markers if Claude ran without error.
