@@ -82,19 +82,10 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 		}
 	}
 
-	// Cleanup stages bypass comment processing and cooldown checks.
+	// Cleanup stages: only need a worktree existence check at this stage.
+	// Label-based checks (paused, complete) are deferred to itemNeedsWork where
+	// the full label set is available after deep fetch.
 	if stage.CleanupWorktree {
-		for _, label := range item.Labels {
-			if label == "fabrik:paused" {
-				return false
-			}
-		}
-		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
-		for _, label := range item.Labels {
-			if label == completeLabel {
-				return false
-			}
-		}
 		// Fast-path: if no worktree directory exists, there is nothing to clean up.
 		// Use a direct map lookup rather than worktreesFor() to avoid a panic —
 		// worktreesFor panics if no WorktreeManager is registered, which happens in
@@ -117,37 +108,9 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 		return true
 	}
 
-	// Awaiting-input items (paused + awaiting-input) should be polled so we can
-	// detect when the user responds with a comment — they bypass the paused guard.
-	awaitingInput := isAwaitingInput(item)
-
-	// Paused items and items locked by another user are not our work
-	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
-	otherLockPrefix := "fabrik:locked:"
-	for _, label := range item.Labels {
-		if label == "fabrik:paused" && !awaitingInput {
-			return false
-		}
-		if strings.HasPrefix(label, otherLockPrefix) && label != lockLabel {
-			return false
-		}
-	}
-
-	// Dependency gate: if past the first stage and has open blockers, skip this
-	// item to avoid expensive deep-fetch. Blocked issues are gated by external
-	// state (dependency closure) not user comments, so deferring them is safe.
-	// Note: user comments on blocked issues won't be processed until they unblock.
-	if !stages.IsFirstStage(e.cfg.Stages, stage.Name) {
-		for _, dep := range item.BlockedBy {
-			if dep.State != "CLOSED" {
-				return false
-			}
-		}
-	}
-
-	// Don't check the completion label here — completed items may still have
-	// new comments that need processing. The completion check lives in
-	// itemNeedsWork where it runs after comments have been loaded.
+	// Don't check labels or blockedBy here — those require full label data which
+	// is only available after deep fetch. Label/lock/dep-gate checks are in
+	// itemNeedsWork, which runs after FetchItemDetails populates the full label set.
 
 	return true
 }
@@ -214,6 +177,18 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		}
 		if strings.HasPrefix(label, otherLockPrefix) && label != lockLabel {
 			return false
+		}
+	}
+
+	// Dependency gate: if past the first stage and has open blockers, skip this
+	// item. blockedBy is populated by FetchItemDetails (deep fetch) at this point.
+	// Items blocked by open issues are gated by external state (dependency closure)
+	// not user comments, so they are safe to defer.
+	if !stages.IsFirstStage(e.cfg.Stages, stage.Name) {
+		for _, dep := range item.BlockedBy {
+			if dep.State != "CLOSED" {
+				return false
+			}
 		}
 	}
 
