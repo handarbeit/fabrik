@@ -203,11 +203,26 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		return len(e.findNewComments(item)) > 0
 	}
 
-	// Paused items are not our work
+	// Paused items: a new user comment is an implicit "resume and handle this."
+	// Without a comment, respect the pause.
+	isPaused := false
 	for _, label := range item.Labels {
 		if label == "fabrik:paused" {
-			return false
+			isPaused = true
+			break
 		}
+	}
+	newComments := e.findNewComments(item)
+	if isPaused {
+		if len(newComments) > 0 {
+			return true // comment triggers unpause — processItem handles label removal
+		}
+		return false
+	}
+
+	// New comments are always worth processing (even on completed stages)
+	if len(newComments) > 0 {
+		return true
 	}
 
 	// Dependency gate: if past the first stage and has open blockers, skip this
@@ -220,11 +235,6 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 				return false
 			}
 		}
-	}
-
-	// Check for new comments (always worth processing)
-	if len(e.findNewComments(item)) > 0 {
-		return true
 	}
 
 	// PRs only support comment processing
@@ -309,9 +319,21 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		return nil
 	}
 
-	// Skip if paused (failure-escalation pause — not awaiting-input)
+	// Paused items: if the user commented, unpause and fall through to
+	// comment processing. Otherwise skip. A user comment on a paused issue
+	// is an implicit "resume and handle this."
 	for _, label := range item.Labels {
 		if label == "fabrik:paused" {
+			newComments := e.findNewComments(item)
+			if len(newComments) > 0 {
+				e.logf(item.Number, "unpause", "user commented on paused issue — unpausing\n")
+				if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
+					e.logf(item.Number, "warn", "could not remove fabrik:paused label: %v\n", err)
+				}
+				// Also clear any failed label so the stage retries cleanly
+				e.clearFailedStage(item, stage)
+				break // fall through to comment processing below
+			}
 			e.logf(item.Number, "skip", "is paused\n")
 			return nil
 		}
