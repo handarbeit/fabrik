@@ -261,12 +261,12 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 		}
 
 		item := ProjectItem{
-			ID:     node.Content.ID,
-			ItemID: node.ID,
-			Number: node.Content.Number,
-			Title:  node.Content.Title,
-			Body:   node.Content.Body,
-			URL:    node.Content.URL,
+			ID:       node.Content.ID,
+			ItemID:   node.ID,
+			Number:   node.Content.Number,
+			Title:    node.Content.Title,
+			Body:     node.Content.Body,
+			URL:      node.Content.URL,
 			IsPR:     node.Content.Typename == "PullRequest",
 			IsClosed: node.Content.Typename != "PullRequest" && node.Content.State == "CLOSED",
 		}

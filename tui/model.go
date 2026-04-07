@@ -48,7 +48,7 @@ type activeJob struct {
 // blockedIssue tracks an issue held at the dependency gate.
 type blockedIssue struct {
 	IssueNumber int
-	Repo        string   // "owner/repo" — empty for single-repo projects
+	Repo        string // "owner/repo" — empty for single-repo projects
 	Title       string
 	StageName   string
 	WaitingFor  []string // e.g. ["#214", "owner/repo#215"]
