@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/handarbeit/fabrik/config"
 	gh "github.com/handarbeit/fabrik/github"
@@ -72,6 +73,9 @@ func (m *testGitHubUpgradeClient) CreateDraftPR(owner, repo, title, head, base s
 }
 func (m *testGitHubUpgradeClient) MarkPRReady(owner, repo string, prNumber int) error { return nil }
 func (m *testGitHubUpgradeClient) MergePR(owner, repo string, prNumber int) error     { return nil }
+func (m *testGitHubUpgradeClient) FetchLabelAppliedAt(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+	return time.Time{}, nil
+}
 func (m *testGitHubUpgradeClient) RateLimitStats() (gh.RateLimitStats, gh.RateLimitStats) {
 	return gh.RateLimitStats{}, gh.RateLimitStats{}
 }

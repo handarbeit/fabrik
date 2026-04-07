@@ -15,22 +15,22 @@ import (
 )
 
 type Config struct {
-	Owner         string
-	Repo          string
-	ProjectNum    int
-	OwnerType     string
-	User          string
-	Token         string
-	Version       string
-	Yolo          bool
-	AutoUpgrade   bool
-	PollSeconds   int
-	MaxConcurrent int
+	Owner             string
+	Repo              string
+	ProjectNum        int
+	OwnerType         string
+	User              string
+	Token             string
+	Version           string
+	Yolo              bool
+	AutoUpgrade       bool
+	PollSeconds       int
+	MaxConcurrent     int
 	MaxRetries        int
 	ReviewWaitTimeout time.Duration // How long to wait for PR reviewers before auto-advancing anyway (default 15m)
 	DebugOutput       bool
-	PluginDir     string
-	Stages        []*stages.Stage
+	PluginDir         string
+	Stages            []*stages.Stage
 	// ReadyCh is closed once Run() has registered signal handlers. Tests use
 	// this to avoid sending SIGINT before signal.Notify is installed.
 	ReadyCh chan struct{}
