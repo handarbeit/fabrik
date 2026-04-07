@@ -351,7 +351,7 @@ There are four cases:
 3. Per-stage `auto_advance: false` in stage YAML → this stage never auto-advances, even when global `yolo: true`. This is a meaningful override — explicitly setting `false` is different from omitting the field.
 4. Per-stage `auto_advance:` absent from stage YAML → the stage inherits the global `yolo` setting.
 
-Note: there is no `fabrik:yolo` label. Yolo behavior is controlled by `config.yaml` / the `--yolo` flag and per-stage `auto_advance:` only.
+A fifth case applies at the issue level: adding the `fabrik:yolo` label to an issue forces auto-advance for that issue even when `auto_advance: false` is set in the stage YAML. The `fabrik:yolo` label also triggers auto-merge of the linked PR when the Validate stage completes (equivalent to running with `--yolo` globally, but scoped to a single issue).
 
 ---
 
@@ -419,7 +419,7 @@ You do not need to babysit the pipeline. The intended human role is:
 - **Answer questions** when Specify or Research surfaces unknowns.
 - **Move cards** (or use `--yolo` to automate this).
 - **Comment** to steer when the plan goes sideways or you want to redirect.
-- **Review PRs** before merging -- Fabrik gets them review-ready, not merge-ready.
+- **Review PRs** before merging -- Fabrik gets them review-ready, not merge-ready (unless `--yolo` or `fabrik:yolo` label is active, in which case Fabrik auto-merges after Validate).
 
 ### Draft PR Workflow
 
@@ -574,6 +574,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `model:opus` | Override Claude model to Opus for this issue |
 | `model:sonnet` | Override Claude model to Sonnet for this issue |
 | `fabrik:paused` | Manually pause processing (add to pause, remove to resume) |
+| `fabrik:yolo` | Force auto-advance for this issue even when `auto_advance: false`; also triggers auto-merge of the linked PR when Validate completes |
 
 Model label precedence: `model:<name>` label > stage YAML `model` field > default.
 
@@ -598,10 +599,16 @@ Claude sessions, and a scrollable History pane with completed jobs.
 |-----|--------|
 | `Tab` | Switch focus between In Progress and History panes |
 | `Up/Down` or `j/k` | Navigate items within the focused pane |
-| `l` | Open latest log file for selected history job |
+| `l` | Open `fabrik watch` for selected issue (live Claude output, stage tabs, PR/CI status) |
+| `enter` | Toggle inline detail panel for the selected item |
+| `r` | Resume Claude session for selected history item (history pane only, item must not be active) |
+| `Escape` | Close open dialogs; with no dialog open, triggers quit confirmation |
+| `n` / `N` | Cancel quit or clear-all confirmation dialogs |
 | `c` | Delete selected history entry |
 | `C` | Clear all history (with confirmation) |
 | `q` | Quit |
+
+Mouse support is enabled by default: click a row to select it in either pane.
 
 ### What's Displayed
 
@@ -648,10 +655,15 @@ This opens a real-time terminal UI that shows:
 
 | Key | Action |
 |-----|--------|
-| `↑` / `↓` | Scroll live output |
+| `↑` / `↓` or `k` / `j` | Scroll live output |
 | `g` / `G` | Jump to top / bottom of output |
+| `left` / `h` | Switch to previous stage tab |
+| `right` / `l` | Switch to next stage tab |
 | `i` | Open interactive Claude session in the issue's worktree (resumes current stage) |
+| `esc` | Quit (same as `q`) |
 | `q` / `ctrl+c` | Quit |
+
+The session ID for the active Claude session is shown in the header when available.
 
 #### Credentials
 
@@ -667,6 +679,8 @@ ls -lt ~/.fabrik/logs/issue-42/
 # Render a completed log as human-readable text
 cat ~/.fabrik/logs/issue-42/<stage>-output-<timestamp>.json | fabrik stream-filter | less -R
 ```
+
+In multi-repo mode, logs are namespaced by repository: `~/.fabrik/logs/<owner>-<repo>/issue-<N>/`.
 
 `fabrik stream-filter` reads NDJSON or JSON array Claude output from stdin and renders thinking blocks, text responses, and tool calls as human-readable text.
 
@@ -689,6 +703,12 @@ active items, well within the 5,000 points/hour limit.
 ---
 
 ## 9. Troubleshooting
+
+### Startup Board Validation Failure
+
+On every startup, Fabrik fetches the project board and compares stage names in `.fabrik/stages/*.yaml` to the column names on the board. If any non-cleanup stage is missing from the board, Fabrik exits with an error listing the mismatched names.
+
+To fix: ensure stage YAML `name` fields match board column names exactly (case-sensitive). If you renamed a column on the board, update the matching stage YAML. Extra board columns (with no matching stage) produce a warning but don't block startup.
 
 ### Issue Not Being Picked Up
 
