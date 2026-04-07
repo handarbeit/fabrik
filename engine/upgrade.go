@@ -234,6 +234,9 @@ func PerformReleaseUpgrade(client GitHubClient, version, token string, extraEnv 
 
 	logf("upgraded to %s — re-executing\n", latestTag)
 
+	// Clean up tarball before exec replaces the process (defers won't run).
+	os.Remove(tarballPath)
+
 	env := append(os.Environ(), extraEnv...)
 	if err := syscall.Exec(exe, os.Args, env); err != nil {
 		logf("exec failed: %v\n", err)
