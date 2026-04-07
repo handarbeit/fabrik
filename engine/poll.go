@@ -605,8 +605,15 @@ func (e *Engine) checkAndUpgrade() {
 		return
 	}
 	if localRef == remoteRef {
-		// Nothing to do — leave status line for next poll to overwrite
-		return
+		// Local checkout matches remote. But the running binary may have been
+		// built from an older commit (e.g. the checkout was pulled but the
+		// binary wasn't rebuilt). Check if the binary's embedded SHA differs
+		// from HEAD — if so, fall through to rebuild.
+		binarySHA := extractBinarySHA(e.cfg.Version) // e.g. "dev(abc1234)" → "abc1234"
+		if binarySHA == "" || strings.HasPrefix(localRef, binarySHA) {
+			return
+		}
+		e.logf(0, "upgrade", "binary built from %s but HEAD is %s — rebuilding\n", binarySHA, localRef[:7])
 	}
 
 	e.logf(0, "upgrade", "new commits detected — pulling origin/%s\n", baseBranch)
@@ -653,6 +660,15 @@ func (e *Engine) checkAndUpgrade() {
 	if err := syscall.Exec(exe, os.Args, os.Environ()); err != nil {
 		e.logf(0, "upgrade", "exec failed: %v\n", err)
 	}
+}
+
+// extractBinarySHA extracts the short SHA from a dev version string like
+// "dev(abc1234)". Returns "" if the version is not a dev build or has no SHA.
+func extractBinarySHA(version string) string {
+	if !strings.HasPrefix(version, "dev(") || !strings.HasSuffix(version, ")") {
+		return ""
+	}
+	return version[4 : len(version)-1]
 }
 
 func gitRevParse(dir, ref string) (string, error) {
