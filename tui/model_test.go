@@ -30,14 +30,14 @@ func TestFmtDuration(t *testing.T) {
 		d    time.Duration
 		want string
 	}{
-		{0, "0:00"},
-		{-5 * time.Second, "0:00"}, // negative clamped to 0
-		{30 * time.Second, "0:30"},
-		{90 * time.Second, "1:30"},
-		{61 * time.Second, "1:01"},
+		{0, "00:00"},
+		{-5 * time.Second, "00:00"}, // negative clamped to 0
+		{30 * time.Second, "00:30"},
+		{90 * time.Second, "01:30"},
+		{61 * time.Second, "01:01"},
 		{10*time.Minute + 5*time.Second, "10:05"},
-		{500 * time.Millisecond, "0:01"}, // rounds to nearest second
-		{499 * time.Millisecond, "0:00"}, // rounds down
+		{500 * time.Millisecond, "00:01"}, // rounds to nearest second
+		{499 * time.Millisecond, "00:00"}, // rounds down
 	}
 	for _, tt := range tests {
 		got := fmtDuration(tt.d)
