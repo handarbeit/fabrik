@@ -119,9 +119,10 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string, sk
 
 	// Create the branch if it doesn't exist, forking from origin/<base>
 	if !wm.branchExists(branch) {
-		// Prefer origin/<base> to handle cases where the local branch doesn't exist
-		baseRef := "origin/" + baseBranch
-		if !wm.branchExists(baseRef) {
+		// Use the fully-qualified ref to avoid ambiguity when a local branch
+		// or tag happens to share the "origin/<base>" name.
+		baseRef := "refs/remotes/origin/" + baseBranch
+		if !wm.branchExists("origin/" + baseBranch) {
 			baseRef = baseBranch
 		}
 		cmd := exec.Command("git", "branch", branch, baseRef)
