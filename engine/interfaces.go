@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"time"
 
 	gh "github.com/verveguy/fabrik/github"
 	"github.com/verveguy/fabrik/stages"
@@ -26,6 +27,7 @@ type GitHubClient interface {
 	MarkPRReady(owner, repo string, prNumber int) error
 	MergePR(owner, repo string, prNumber int) error
 	FetchLatestRelease(owner, repo string) (*gh.LatestRelease, error)
+	FetchLabelAppliedAt(owner, repo string, issueNumber int, labelName string) (time.Time, error)
 	RateLimitStats() (rest, graphql gh.RateLimitStats)
 }
 

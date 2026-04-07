@@ -375,6 +375,20 @@ query($id: ID!) {
             }
             pageInfo { hasNextPage endCursor }
           }
+          reviewRequests(first: 10) {
+            nodes {
+              requestedReviewer {
+                ... on User { login }
+                ... on Bot { login }
+              }
+            }
+          }
+          latestReviews(first: 10) {
+            nodes {
+              author { login }
+              state
+            }
+          }
         }
       }
     }
@@ -422,6 +436,21 @@ query($id: ID!) {
 								EndCursor   string `json:"endCursor"`
 							} `json:"pageInfo"`
 						} `json:"comments"`
+						ReviewRequests struct {
+							Nodes []struct {
+								RequestedReviewer struct {
+									Login string `json:"login"`
+								} `json:"requestedReviewer"`
+							} `json:"nodes"`
+						} `json:"reviewRequests"`
+						LatestReviews struct {
+							Nodes []struct {
+								Author *struct {
+									Login string `json:"login"`
+								} `json:"author"`
+								State string `json:"state"`
+							} `json:"nodes"`
+						} `json:"latestReviews"`
 					} `json:"nodes"`
 				} `json:"closedByPullRequestsReferences"`
 			} `json:"node"`
@@ -450,7 +479,7 @@ query($id: ID!) {
 		item.Comments = append(item.Comments, toComment(cm, 0))
 	}
 
-	// Merge comments from linked PRs
+	// Merge comments, review requests, and reviews from linked PRs
 	if node.LinkedPRs != nil {
 		for _, pr := range node.LinkedPRs.Nodes {
 			prCommentNodes := pr.Comments.Nodes
@@ -463,6 +492,19 @@ query($id: ID!) {
 			}
 			for _, cm := range prCommentNodes {
 				item.Comments = append(item.Comments, toComment(cm, pr.Number))
+			}
+			for _, rr := range pr.ReviewRequests.Nodes {
+				if login := rr.RequestedReviewer.Login; login != "" {
+					item.LinkedPRReviewRequests = append(item.LinkedPRReviewRequests, ReviewRequest{Login: login})
+				}
+			}
+			for _, rev := range pr.LatestReviews.Nodes {
+				if rev.Author != nil && rev.Author.Login != "" {
+					item.LinkedPRReviews = append(item.LinkedPRReviews, PRReview{
+						Author: rev.Author.Login,
+						State:  rev.State,
+					})
+				}
 			}
 		}
 	}
