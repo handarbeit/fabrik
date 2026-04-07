@@ -576,6 +576,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	if postOutput != "" {
 		postOutput = stripLine(postOutput, "FABRIK_STAGE_COMPLETE")
 		postOutput = stripLine(postOutput, "FABRIK_BLOCKED_ON_INPUT")
+		postOutput = stripLine(postOutput, "FABRIK_DECOMPOSED")
 		postOutput = stripLine(postOutput, "FABRIK_SUMMARY_BEGIN")
 		postOutput = stripLine(postOutput, "FABRIK_SUMMARY_END")
 		postOutput = strings.TrimSpace(postOutput)
@@ -652,10 +653,11 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		e.markCommentsSeenByStage(item)
 	}
 
-	// Only honor the blocked-on-input marker if Claude ran without error.
+	// Only honor the blocked-on-input and decomposed markers if Claude ran without error.
 	// If there was an error, treat the run as a retry/failure rather than
 	// silently pausing the issue.
 	blockedOnInput := err == nil && CheckBlockedOnInput(output)
+	decomposed := err == nil && CheckDecomposed(output)
 
 	// Store completion/blocked state for TUI event emission in poll.go.
 	func() {
@@ -683,6 +685,16 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			e.markPRReady(item, prNumber)
 		}
 		e.handleStageComplete(board, item, stage)
+	} else if decomposed {
+		releaseLock()
+		// Clear retry tracking for this stage — issue is decomposed, no retry needed.
+		func() {
+			e.mu.Lock()
+			defer e.mu.Unlock()
+			delete(e.retryCount, stageKey)
+			delete(e.pausedDueToRetries, stageKey)
+		}()
+		e.handleDecomposed(board, item, stage)
 	} else if blockedOnInput {
 		releaseLock()
 		e.blockOnInput(item, stage)
