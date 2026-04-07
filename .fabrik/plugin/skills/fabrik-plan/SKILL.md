@@ -16,113 +16,8 @@ Read the context files the engine has written to `.fabrik-context/` in your work
 - `.fabrik-context/issue.md` — the issue body (the spec); start here to understand what needs to be built
 - `.fabrik-context/stage-Specify.md` — the Specify stage output, if present
 - `.fabrik-context/stage-Research.md` — the research findings; this is your primary input for planning
-- `.fabrik-context/project.md` — owner, repo, project number, and owner type (needed for `gh` CLI commands if decomposing)
 
 These files are always fresher than the inline prompt. Read them before designing the approach.
-
-## Decomposition Assessment
-
-**Before designing the plan**, assess whether this issue should be split into sub-issues.
-
-### Step 1: Check depth gate
-
-Read `.fabrik-context/issue.md` and look at the `## Labels` section. If `fabrik:sub-issue` appears in the labels, **skip decomposition entirely** and proceed with a normal single-issue plan. Sub-issues are never split again (max depth = 1).
-
-### Step 2: Assess whether to split
-
-Split when **both** of the following are true:
-- The plan would require more than 2 independent work streams that each justify more than one Implement cycle, OR the codebase surface area is too broad for one Claude session to reliably hold in context.
-- Each work slice has a clear, self-contained spec that can stand alone as a GitHub issue.
-
-If the work can be implemented in a single focused Implement session (even if large), **do not split** — produce a normal plan.
-
-### Step 3: If splitting, create sub-issues
-
-Read `.fabrik-context/project.md` for the owner, repo, project number, and owner type.
-
-**Idempotency first**: Before creating any sub-issue, check whether sub-issues already exist:
-
-```bash
-gh issue list --repo <owner>/<repo> --label "fabrik:sub-issue" --search "Parent: #<parent-number>" --json number,title
-```
-
-If matching sub-issues already exist (from a crashed prior run), skip creating them — proceed with the ones already created.
-
-**For each sub-issue that doesn't exist yet:**
-
-1. Create the issue with a scoped title and a body that includes the relevant spec slice:
-   ```bash
-   gh issue create --repo <owner>/<repo> \
-     --title "<scoped title>" \
-     --body "$(cat <<'BODY'
-   Parent: #<parent-number>
-
-   ## Summary
-
-   <relevant spec slice from parent issue>
-
-   ## Context
-
-   This is a sub-issue of #<parent-number>. The parent issue was decomposed by the Plan stage into focused work items.
-   BODY
-   )"
-   ```
-
-2. Add the `fabrik:sub-issue` label:
-   ```bash
-   gh issue edit <sub-issue-number> --repo <owner>/<repo> --add-label "fabrik:sub-issue"
-   ```
-
-3. Inherit labels from the parent: check the parent's labels for `model:*` and `fabrik:yolo`, and apply them:
-   ```bash
-   # If parent has model:opus label:
-   gh issue edit <sub-issue-number> --repo <owner>/<repo> --add-label "model:opus"
-   # If parent has fabrik:yolo label:
-   gh issue edit <sub-issue-number> --repo <owner>/<repo> --add-label "fabrik:yolo"
-   ```
-
-4. Add the sub-issue to the project board and set it to the Research column:
-   ```bash
-   # Add to project (use ProjectNum and Owner from project.md)
-   gh project item-add <project-num> --owner <owner> --url "https://github.com/<owner>/<repo>/issues/<sub-issue-number>"
-
-   # Set status to Research (required — item may land in wrong column by default)
-   # First get the item ID:
-   ITEM_ID=$(gh project item-list <project-num> --owner <owner> --format json | \
-     jq -r '.items[] | select(.content.number == <sub-issue-number>) | .id')
-   # Then set the status field (field name is typically "Status"):
-   gh project item-edit --project-id <project-global-id> --id "$ITEM_ID" \
-     --field-id <status-field-id> --single-select-option-id <research-option-id>
-   ```
-
-   > **Note**: If you cannot determine the project field IDs programmatically, add the sub-issue to the project with `gh project item-add` and note in the parent update that the Research column may need to be set manually. The dependency gate will hold sub-issues regardless of column until they're picked up.
-
-5. For sub-issues with ordering constraints, create a blocking link so the dependency gate fires:
-   ```bash
-   gh issue link --repo <owner>/<repo> --type blocks \
-     <blocking-sub-issue-url> <blocked-sub-issue-url>
-   ```
-   Independent sub-issues (no ordering constraint) receive no link and may run in parallel.
-
-**After all sub-issues are created:**
-
-6. Update the parent issue body to reference the children:
-   ```bash
-   # Get current body first, then append decomposition summary
-   CURRENT=$(gh issue view <parent-number> --repo <owner>/<repo> --json body --jq .body)
-   gh issue edit <parent-number> --repo <owner>/<repo> --body "$(printf '%s\n\n---\n\n## Decomposed into Sub-Issues\n\nThis issue was split into the following sub-issues by the Plan stage:\n\n%s' "$CURRENT" "- #<sub1> <title>\n- #<sub2> <title>\n...")"
-   ```
-
-7. Output `FABRIK_DECOMPOSED` (not `FABRIK_STAGE_COMPLETE`) on its own line. The engine will add the `stage:Plan:complete` label and move this issue to **Done**, bypassing Implement/Review/Validate. Sub-issues flow through the pipeline independently.
-
-### What NOT to do when decomposing
-
-- Do not output `FABRIK_STAGE_COMPLETE` — use `FABRIK_DECOMPOSED`
-- Do not split if `fabrik:sub-issue` is already on the parent (depth gate)
-- Do not create sub-issues if they already exist (idempotency check)
-- Do not write code — Plan is read-only with respect to the git worktree
-
----
 
 ## What You Do
 
@@ -232,11 +127,9 @@ Plans typically complete in a single pass. If the spec and research are solid, t
 
 **Before you run**: The engine has created a worktree and rebased onto main. You're in a read-only stage.
 
-**Completing the stage (normal plan)**: Output `FABRIK_STAGE_COMPLETE` on its own line when the plan is complete and actionable.
+**Completing the stage**: Output `FABRIK_STAGE_COMPLETE` on its own line when the plan is complete and actionable.
 
-**Completing the stage (decomposition)**: If you split the issue into sub-issues following the Decomposition Assessment above, output `FABRIK_DECOMPOSED` on its own line instead. The engine will add the `stage:Plan:complete` label and move the parent to Done. Do not output both `FABRIK_STAGE_COMPLETE` and `FABRIK_DECOMPOSED` — they are mutually exclusive.
-
-**Blocking on input**: If there are unresolved questions that must be answered before a concrete plan can be produced, output `FABRIK_BLOCKED_ON_INPUT` on its own line instead of `FABRIK_STAGE_COMPLETE`. The engine will pause with both `fabrik:paused` and `fabrik:awaiting-input` labels and auto-resume when the user comments. Do not remove these labels manually. `FABRIK_BLOCKED_ON_INPUT`, `FABRIK_STAGE_COMPLETE`, and `FABRIK_DECOMPOSED` are all mutually exclusive — output exactly one or none.
+**Blocking on input**: If there are unresolved questions that must be answered before a concrete plan can be produced, output `FABRIK_BLOCKED_ON_INPUT` on its own line instead of `FABRIK_STAGE_COMPLETE`. The engine will pause with both `fabrik:paused` and `fabrik:awaiting-input` labels and auto-resume when the user comments. Do not remove these labels manually. These two markers are mutually exclusive — never output both.
 
 **Do NOT update the issue body.** The issue body is the spec, owned by Specify. Your plan is posted as a stage comment by the engine automatically. Do not use `FABRIK_ISSUE_UPDATE` markers — they would overwrite the spec.
 
