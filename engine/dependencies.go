@@ -1,0 +1,98 @@
+package engine
+
+import (
+	"fmt"
+	"strings"
+
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/stages"
+	"github.com/handarbeit/fabrik/tui"
+)
+
+// checkDependencies inspects item.BlockedBy and determines whether the issue
+// is gated by unresolved dependencies.
+//
+// Returns true if the issue is blocked (one or more blocking issues are not
+// CLOSED), false otherwise.
+//
+// Side effects when blocked:
+//   - Logs a "blocked" message listing what is being waited for.
+//   - If fabrik:blocked is not already on the issue, posts a comment and adds
+//     the label (only on the first-time blocked → blocked transition).
+//   - Emits an IssueBlockedEvent for the TUI.
+//
+// Side effects when unblocked:
+//   - Removes the fabrik:blocked label if present (idempotent).
+//
+// No-op (returns false immediately) for the first stage of the pipeline.
+func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) bool {
+	// First stage never blocked — it must always run to produce the spec.
+	if stages.IsFirstStage(e.cfg.Stages, stage.Name) {
+		return false
+	}
+
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
+
+	// Collect open (non-CLOSED) blocking dependencies.
+	var openDeps []gh.Dependency
+	for _, dep := range item.BlockedBy {
+		if dep.State != "CLOSED" {
+			openDeps = append(openDeps, dep)
+		}
+	}
+
+	if len(openDeps) == 0 {
+		// All dependencies resolved (or none exist) — remove fabrik:blocked if present.
+		for _, l := range item.Labels {
+			if l == "fabrik:blocked" {
+				if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:blocked"); err != nil {
+					e.logf(item.Number, "warn", "could not remove fabrik:blocked label: %v\n", err)
+				}
+				break
+			}
+		}
+		return false
+	}
+
+	// Build the "waiting for" list with appropriate formatting.
+	waitingFor := make([]string, 0, len(openDeps))
+	for _, dep := range openDeps {
+		depRepo := dep.Repo
+		if depRepo == "" || depRepo == itemRepo {
+			waitingFor = append(waitingFor, fmt.Sprintf("#%d", dep.Number))
+		} else {
+			waitingFor = append(waitingFor, fmt.Sprintf("%s#%d", depRepo, dep.Number))
+		}
+	}
+
+	e.logf(item.Number, "blocked", "waiting for %s to close\n", strings.Join(waitingFor, ", "))
+
+	// Only post the comment and add the label on the first block transition.
+	alreadyBlocked := false
+	for _, l := range item.Labels {
+		if l == "fabrik:blocked" {
+			alreadyBlocked = true
+			break
+		}
+	}
+	if !alreadyBlocked {
+		comment := "Waiting for dependencies to close: " + strings.Join(waitingFor, ", ")
+		if err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
+			e.logf(item.Number, "warn", "could not post blocked comment: %v\n", err)
+		}
+		if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:blocked"); err != nil {
+			e.logf(item.Number, "warn", "could not add fabrik:blocked label: %v\n", err)
+		}
+	}
+
+	e.emitStructural(tui.IssueBlockedEvent{
+		IssueNumber: item.Number,
+		Repo:        item.Repo,
+		Title:       item.Title,
+		StageName:   stage.Name,
+		WaitingFor:  waitingFor,
+	})
+
+	return true
+}

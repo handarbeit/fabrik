@@ -305,6 +305,16 @@ func (e *Engine) poll(ctx context.Context) error {
 		if isPaused {
 			continue
 		}
+		isBlocked := false
+		for _, l := range item.Labels {
+			if l == "fabrik:blocked" {
+				isBlocked = true
+				break
+			}
+		}
+		if isBlocked {
+			continue
+		}
 		stage := stages.FindStage(e.cfg.Stages, item.Status)
 		if stage == nil || stage.CleanupWorktree {
 			continue
@@ -322,6 +332,9 @@ func (e *Engine) poll(ctx context.Context) error {
 			}
 		}
 		if hasComplete {
+			if e.checkDependencies(board, item, stage) {
+				continue // blocked; checkDependencies handled label + comment
+			}
 			e.logf(item.Number, "advance", "yolo catch-up: stage %q already complete, advancing\n", stage.Name)
 			if err := e.advanceToNextStage(board, item, stage); err != nil {
 				e.logf(item.Number, "warn", "could not advance: %v\n", err)
