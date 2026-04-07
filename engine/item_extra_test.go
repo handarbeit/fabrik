@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -460,5 +461,207 @@ func TestItemNeedsWork_ClosedIssue_CleanupStage_Complete(t *testing.T) {
 	}
 	if eng.itemNeedsWork(item) {
 		t.Error("closed issue in cleanup stage with complete label should not need work")
+	}
+}
+
+// TestPoll_DeepFetchFailureExcludesFromLastUpdatedAt verifies that when
+// FetchItemDetails fails for an item, lastUpdatedAt is NOT updated for that
+// item, so the next poll retries the deep-fetch.
+func TestPoll_DeepFetchFailureExcludesFromLastUpdatedAt(t *testing.T) {
+	now := time.Now()
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{Number: 10, Title: "Broken", Status: "Research", UpdatedAt: now},
+				},
+			}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			return errors.New("simulated rate limit error")
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	eng.cfg.PollSeconds = 999 // very long cooldown so we don't accidentally bypass
+
+	ctx := t.Context()
+	if err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	// lastUpdatedAt must NOT be set for item #10 — failed deep-fetch must not cache.
+	eng.mu.Lock()
+	_, ok := eng.lastUpdatedAt["owner/repo#10"]
+	eng.mu.Unlock()
+	if ok {
+		t.Error("lastUpdatedAt should NOT be updated when FetchItemDetails fails")
+	}
+
+	// deepFetchFailureTime must be recorded.
+	eng.mu.Lock()
+	_, recorded := eng.deepFetchFailureTime["owner/repo#10"]
+	eng.mu.Unlock()
+	if !recorded {
+		t.Error("deepFetchFailureTime should be recorded when FetchItemDetails fails")
+	}
+}
+
+// TestPoll_DeepFetchSuccessClearsFailureTime verifies that a successful
+// FetchItemDetails clears a previously recorded deepFetchFailureTime.
+func TestPoll_DeepFetchSuccessClearsFailureTime(t *testing.T) {
+	now := time.Now()
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{Number: 11, Title: "Fixed", Status: "Research", UpdatedAt: now},
+				},
+			}, nil
+		},
+		// fetchItemDetailsFn nil = success (mock returns nil by default)
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	// Pre-seed a failure time.
+	eng.mu.Lock()
+	eng.deepFetchFailureTime["owner/repo#11"] = now.Add(-time.Minute)
+	eng.mu.Unlock()
+
+	ctx := t.Context()
+	if err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	eng.mu.Lock()
+	_, stillRecorded := eng.deepFetchFailureTime["owner/repo#11"]
+	eng.mu.Unlock()
+	if stillRecorded {
+		t.Error("deepFetchFailureTime should be cleared after a successful FetchItemDetails")
+	}
+}
+
+// TestItemMayNeedWork_AwaitingInputBypassesUnchanged verifies that an item with
+// fabrik:awaiting-input and an unchanged updatedAt still returns true from
+// itemMayNeedWork (so a new comment can be detected on the next poll).
+func TestItemMayNeedWork_AwaitingInputBypassesUnchanged(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+
+	ts := time.Now().Add(-time.Minute)
+	item := gh.ProjectItem{
+		Number:    50,
+		Status:    "Research",
+		ItemID:    "PVTI_50",
+		UpdatedAt: ts,
+		Labels:    []string{"fabrik:awaiting-input", "fabrik:paused"},
+	}
+
+	// Record the last-seen timestamp so the "unchanged" path triggers.
+	eng.mu.Lock()
+	eng.lastUpdatedAt["owner/repo#50"] = ts
+	eng.mu.Unlock()
+
+	if !eng.itemMayNeedWork(item) {
+		t.Error("awaiting-input item with unchanged updatedAt should still return true from itemMayNeedWork")
+	}
+}
+
+// TestItemMayNeedWork_DeepFetchFailureCooldown verifies that after a failure is
+// recorded in deepFetchFailureTime, itemMayNeedWork returns false within the
+// cooldown window and true after the cooldown has expired.
+func TestItemMayNeedWork_DeepFetchFailureCooldown(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.cfg.PollSeconds = 1 // 10-second cooldown
+
+	item := gh.ProjectItem{
+		Number: 51,
+		Status: "Research",
+		ItemID: "PVTI_51",
+		// UpdatedAt zero — no lastUpdatedAt entry, so "unchanged" branch won't fire
+	}
+
+	// Record a very recent failure.
+	eng.mu.Lock()
+	eng.deepFetchFailureTime["owner/repo#51"] = time.Now()
+	eng.mu.Unlock()
+
+	if eng.itemMayNeedWork(item) {
+		t.Error("item with recent deep-fetch failure should be skipped (within cooldown)")
+	}
+
+	// Simulate cooldown expiry by backdating the failure time.
+	eng.mu.Lock()
+	eng.deepFetchFailureTime["owner/repo#51"] = time.Now().Add(-20 * time.Second)
+	eng.mu.Unlock()
+
+	if !eng.itemMayNeedWork(item) {
+		t.Error("item with expired deep-fetch failure cooldown should be retried")
+	}
+}
+
+// TestProcessItem_EvictsLastUpdatedAtAfterStageRun verifies that processItem
+// deletes lastUpdatedAt[iKey] after a stage runs (claudeRan=true). This ensures
+// the next poll re-evaluates the item, catching any comments that arrived during
+// the in-flight run.
+func TestProcessItem_EvictsLastUpdatedAtAfterStageRun(t *testing.T) {
+	skipIfNoGit(t)
+
+	workDir := t.TempDir()
+	cmds := [][]string{
+		{"git", "init", "-b", "main"},
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "Test"},
+		{"git", "commit", "--allow-empty", "-m", "initial"},
+	}
+	for _, args := range cmds {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = workDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("setup %v: %s: %v", args, out, err)
+		}
+	}
+
+	wm := NewWorktreeManager(workDir)
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			PollSeconds:   60,
+			Stages:        testStages(),
+		},
+		&mockGitHubClient{},
+		&mockClaudeInvoker{output: "FABRIK_STAGE_COMPLETE\n"},
+		wm,
+	)
+
+	ts := time.Now().Add(-time.Minute)
+	item := gh.ProjectItem{
+		Number:    60,
+		Title:     "Eviction test",
+		Status:    "Research",
+		ItemID:    "PVTI_60",
+		UpdatedAt: ts,
+		Repo:      "owner/repo",
+	}
+
+	// Pre-populate lastUpdatedAt as if a concurrent poll cached this item.
+	eng.mu.Lock()
+	eng.lastUpdatedAt["owner/repo#60"] = ts
+	eng.mu.Unlock()
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	_ = eng.processItem(context.Background(), board, item)
+
+	// After processItem (with claudeRan), lastUpdatedAt must be evicted.
+	eng.mu.Lock()
+	_, stillCached := eng.lastUpdatedAt["owner/repo#60"]
+	eng.mu.Unlock()
+
+	if stillCached {
+		t.Error("lastUpdatedAt should be evicted after a stage runs so next poll re-evaluates the item")
 	}
 }
