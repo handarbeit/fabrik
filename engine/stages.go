@@ -78,7 +78,6 @@ func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem
 				}
 			}
 			if !alreadyWaiting {
-				owner, repo := itemOwnerRepo(item, e.defaultRepo())
 				if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-review"); err != nil {
 					e.logf(item.Number, "warn", "could not add fabrik:awaiting-review label: %v\n", err)
 				}
