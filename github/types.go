@@ -24,6 +24,17 @@ type Dependency struct {
 	Repo   string // "owner/repo" of the blocking issue; empty if same repo
 }
 
+// ReviewRequest represents a pending review request on a pull request.
+type ReviewRequest struct {
+	Login string // GitHub login of the requested reviewer (user or bot)
+}
+
+// PRReview represents a submitted review on a pull request.
+type PRReview struct {
+	Author string // GitHub login of the reviewer
+	State  string // "APPROVED", "CHANGES_REQUESTED", or "COMMENTED"
+}
+
 // ProjectItem represents an issue or pull request card on the project board.
 type ProjectItem struct {
 	ID        string
@@ -41,7 +52,9 @@ type ProjectItem struct {
 	Assignees []string
 	Comments  []Comment
 	Author    string
-	BlockedBy []Dependency // Issues that must be closed before this one can advance
+	BlockedBy              []Dependency   // Issues that must be closed before this one can advance
+	LinkedPRReviewRequests []ReviewRequest // Outstanding reviewer requests on the linked PR
+	LinkedPRReviews        []PRReview      // Reviews already submitted on the linked PR
 }
 
 // Comment represents a comment on an issue or linked PR.
