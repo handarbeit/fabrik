@@ -115,6 +115,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// Step 7: Strip all Fabrik markers from output before posting.
 	output = stripLine(output, "FABRIK_STAGE_COMPLETE")
 	output = stripLine(output, "FABRIK_BLOCKED_ON_INPUT")
+	output = stripLine(output, "FABRIK_DECOMPOSED")
 	output = stripLine(output, "FABRIK_SUMMARY_BEGIN")
 	output = stripLine(output, "FABRIK_SUMMARY_END")
 	output = strings.TrimSpace(output)
