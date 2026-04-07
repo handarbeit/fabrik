@@ -82,7 +82,8 @@ func TestItemMayNeedWork_StaleWithinCooldown(t *testing.T) {
 	}
 }
 
-// TestItemMayNeedWork_LockedByOtherUser verifies locked items are skipped.
+// TestItemMayNeedWork_LockedByOtherUser verifies that itemMayNeedWork no longer
+// filters locked items — that check moved to itemNeedsWork after deep fetch.
 func TestItemMayNeedWork_LockedByOtherUser(t *testing.T) {
 	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
 	item := gh.ProjectItem{
@@ -90,8 +91,23 @@ func TestItemMayNeedWork_LockedByOtherUser(t *testing.T) {
 		Status: "Research",
 		Labels: []string{"fabrik:locked:otheruser"},
 	}
-	if eng.itemMayNeedWork(item) {
-		t.Error("item locked by other user should not need work")
+	// itemMayNeedWork no longer checks labels — locked check is in itemNeedsWork.
+	if !eng.itemMayNeedWork(item) {
+		t.Error("itemMayNeedWork should not filter locked items (lock check is in itemNeedsWork)")
+	}
+}
+
+// TestItemNeedsWork_LockedByOtherUser verifies that items locked by another user
+// are filtered out in itemNeedsWork (which runs after deep fetch).
+func TestItemNeedsWork_LockedByOtherUser(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	item := gh.ProjectItem{
+		Number: 44,
+		Status: "Research",
+		Labels: []string{"fabrik:locked:otheruser"},
+	}
+	if eng.itemNeedsWork(item) {
+		t.Error("item locked by other user should not need work (itemNeedsWork)")
 	}
 }
 
@@ -220,7 +236,8 @@ func TestCommitWIP_ExcludesContextFiles(t *testing.T) {
 }
 
 // TestItemMayNeedWork_DependencyGate_OpenBlocker_PastFirstStage verifies that
-// an item past the first stage with an open blocker is filtered out.
+// itemMayNeedWork no longer filters items with open blockers — that check moved
+// to itemNeedsWork after deep fetch.
 func TestItemMayNeedWork_DependencyGate_OpenBlocker_PastFirstStage(t *testing.T) {
 	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
 	// testEngine uses testStages(): Research(1), Plan(2), Implement(3)
@@ -233,13 +250,32 @@ func TestItemMayNeedWork_DependencyGate_OpenBlocker_PastFirstStage(t *testing.T)
 		},
 	}
 
-	if eng.itemMayNeedWork(item) {
-		t.Error("expected itemMayNeedWork=false for past-first-stage item with open blocker")
+	// itemMayNeedWork no longer checks blockedBy — dep gate is in itemNeedsWork.
+	if !eng.itemMayNeedWork(item) {
+		t.Error("itemMayNeedWork should not filter items with open blockers (dep gate is in itemNeedsWork)")
+	}
+}
+
+// TestItemNeedsWork_DependencyGate_OpenBlocker_PastFirstStage verifies that
+// an item past the first stage with an open blocker is filtered in itemNeedsWork.
+func TestItemNeedsWork_DependencyGate_OpenBlocker_PastFirstStage(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	item := gh.ProjectItem{
+		Number: 5,
+		Status: "Plan",
+		BlockedBy: []gh.Dependency{
+			{Number: 4, State: "OPEN", Repo: "owner/repo"},
+		},
+	}
+
+	if eng.itemNeedsWork(item) {
+		t.Error("expected itemNeedsWork=false for past-first-stage item with open blocker")
 	}
 }
 
 // TestItemMayNeedWork_DependencyGate_FirstStage_NotFiltered verifies that
 // an item in the first stage is NOT filtered even with an open blocker.
+// (Dependency gate check is in itemNeedsWork and bypasses first-stage items.)
 func TestItemMayNeedWork_DependencyGate_FirstStage_NotFiltered(t *testing.T) {
 	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
 	// "Research" is the first stage in testStages()
@@ -258,6 +294,7 @@ func TestItemMayNeedWork_DependencyGate_FirstStage_NotFiltered(t *testing.T) {
 
 // TestItemMayNeedWork_DependencyGate_AllClosed_NotFiltered verifies that
 // an item past the first stage with all blockers closed is not filtered.
+// (Dependency gate check is in itemNeedsWork; all-closed items pass through.)
 func TestItemMayNeedWork_DependencyGate_AllClosed_NotFiltered(t *testing.T) {
 	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
 	item := gh.ProjectItem{
