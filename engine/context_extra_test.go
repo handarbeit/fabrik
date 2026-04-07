@@ -118,7 +118,7 @@ func TestMarkCommentsSeenByStage_AddsRocketToUnseenUserComments(t *testing.T) {
 		},
 	}
 
-	eng.markCommentsSeenByStage(item)
+	eng.markCommentsSeenByStage(item, item.Comments)
 
 	// Only C_1 (DatabaseID 601) should have had rocket added
 	var rocketTargets []int

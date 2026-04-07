@@ -362,9 +362,19 @@ func (e *Engine) poll(ctx context.Context) error {
 			continue
 		}
 		e.logf(0, "poll", "deep-fetching details for #%d\n", board.Items[i].Number)
+		iKey := issueKey(board.Items[i], e.defaultRepo())
 		if err := e.client.FetchItemDetails(&board.Items[i]); err != nil {
 			e.logf(0, "warn", "could not fetch details for #%d: %v\n", board.Items[i].Number, err)
+			e.mu.Lock()
+			e.deepFetchFailureTime[iKey] = time.Now()
+			e.mu.Unlock()
+			// Skip appending to deepFetchCandidates so lastUpdatedAt is NOT updated.
+			// The next poll will retry the deep-fetch for this item.
+			continue
 		}
+		e.mu.Lock()
+		delete(e.deepFetchFailureTime, iKey)
+		e.mu.Unlock()
 		deepFetchCandidates = append(deepFetchCandidates, board.Items[i])
 		deepFetched++
 	}
