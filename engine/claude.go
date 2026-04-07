@@ -20,10 +20,18 @@ import (
 
 var stageCompleteRE = regexp.MustCompile(`(?m)^FABRIK_STAGE_COMPLETE\r?$`)
 var blockedOnInputRE = regexp.MustCompile(`(?m)^FABRIK_BLOCKED_ON_INPUT\r?$`)
+var decomposedRE = regexp.MustCompile(`(?m)^FABRIK_DECOMPOSED\r?$`)
 
 // CheckBlockedOnInput reports whether output contains the FABRIK_BLOCKED_ON_INPUT marker.
 func CheckBlockedOnInput(output string) bool {
 	return blockedOnInputRE.MatchString(output)
+}
+
+// CheckDecomposed reports whether output contains the FABRIK_DECOMPOSED marker.
+// This marker signals that the Plan stage split the issue into sub-issues and
+// the parent should be moved directly to Done, bypassing remaining pipeline stages.
+func CheckDecomposed(output string) bool {
+	return decomposedRE.MatchString(output)
 }
 
 // claudeLogf is the logging function used by runClaude. Set by the Engine

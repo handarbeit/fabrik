@@ -130,6 +130,39 @@ func (e *Engine) attemptMergeOnValidate(item gh.ProjectItem) error {
 	return nil
 }
 
+// handleDecomposed is called when a stage outputs the FABRIK_DECOMPOSED marker.
+// It adds the stage completion label and moves the parent issue directly to Done
+// on the project board, bypassing all remaining pipeline stages.
+// This is only expected from the Plan stage when it splits an issue into sub-issues.
+func (e *Engine) handleDecomposed(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
+	e.logf(item.Number, "done", "stage %q decomposed issue into sub-issues — moving to Done\n", stage.Name)
+
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+
+	// Add the stage completion label so the engine won't re-run this stage on restart.
+	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
+		e.logf(item.Number, "warn", "could not add completion label: %v\n", err)
+	}
+
+	if e.statusField == nil {
+		e.logf(item.Number, "warn", "status field metadata not available; cannot move to Done\n")
+		return
+	}
+
+	optionID, ok := e.statusField.Options["Done"]
+	if !ok {
+		e.logf(item.Number, "warn", "no status option %q found on project board (available: %v); cannot move to Done\n",
+			"Done", mapKeys(e.statusField.Options))
+		return
+	}
+
+	e.logf(item.Number, "advance", "moving decomposed issue to Done\n")
+	if err := e.client.UpdateProjectItemStatus(board.ProjectID, item.ItemID, e.statusField.FieldID, optionID); err != nil {
+		e.logf(item.Number, "warn", "could not move issue to Done: %v\n", err)
+	}
+}
+
 func (e *Engine) advanceToNextStage(board *gh.ProjectBoard, item gh.ProjectItem, currentStage *stages.Stage) error {
 	next := stages.NextStage(e.cfg.Stages, currentStage.Name)
 	if next == nil {
