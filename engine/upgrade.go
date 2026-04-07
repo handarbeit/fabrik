@@ -19,9 +19,9 @@ import (
 // These are used when checking the GitHub Releases API for a newer binary —
 // the release always targets handarbeit/fabrik, not the user's managed project.
 const (
-	fabrikOwner          = "arbeithand"
+	fabrikOwner          = "handarbeit"
 	fabrikRepo           = "fabrik"
-	releaseCheckInterval = 30 * time.Minute
+	releaseCheckInterval = 5 * time.Minute
 )
 
 // SemverGreater reports whether version a is greater than version b.
