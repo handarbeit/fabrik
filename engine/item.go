@@ -513,6 +513,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	baseBranch := wm.DefaultBaseBranch()
 	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, attempted)
 	if err != nil {
+		releaseLock()
 		return fmt.Errorf("setting up worktree: %w", err)
 	}
 
@@ -577,6 +578,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	if err != nil {
 		if ctx.Err() != nil {
 			e.logf(item.Number, "skip", "cancelled during claude invocation\n")
+			releaseLock()
 			return nil
 		}
 		e.logf(item.Number, "warn", "claude invocation issue: %v\n", err)
