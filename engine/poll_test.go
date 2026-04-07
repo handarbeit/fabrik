@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 func TestPoll_FetchesBoardAndProcessesItems(t *testing.T) {
@@ -410,3 +412,42 @@ func TestYoloCatchup_SkipsClosedIssue(t *testing.T) {
 
 // TestProcessedSetConcurrency verifies that concurrent access to processedSet
 // via the mutex-protected methods does not cause data races.
+
+// TestPoll_RateLimitWarning verifies that a distinct warning is logged when the
+// GraphQL remaining/limit ratio falls below rateLimitBackoffThreshold (20%).
+func TestPoll_RateLimitWarning(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{ProjectID: "PVT_1", Items: nil}, nil
+		},
+		// Remaining=100, Limit=1000 → 10%, below 20% threshold
+		rateLimitStatsFn: func() (gh.RateLimitStats, gh.RateLimitStats) {
+			gql := gh.RateLimitStats{Limit: 1000, Remaining: 100}
+			return gh.RateLimitStats{}, gql
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+
+	// Use events channel to capture log output without hitting stdout.
+	events := make(chan tui.Event, 64)
+	eng.events = events
+
+	if err := eng.poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	close(events)
+
+	var warnSeen bool
+	for ev := range events {
+		le, ok := ev.(tui.LogEvent)
+		if !ok {
+			continue
+		}
+		if le.Tag == "warn" && strings.Contains(le.Message, "rate limit") {
+			warnSeen = true
+		}
+	}
+	if !warnSeen {
+		t.Error("expected a warn log event about GraphQL rate limit, but none was found")
+	}
+}
