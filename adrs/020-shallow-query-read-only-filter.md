@@ -37,6 +37,16 @@ Concretely:
 
 The shallow query answers exactly one question: "Does this item need a deep fetch?" Based only on `updatedAt`, `status`, `number`, and `repo`.
 
+### Multi-layer change detection
+
+Fabrik is a project-oriented system. The project item (board card) is the primary entity — it has the column, gets moved, gets dispatched. The issue is the content inside it. Change detection must cover both layers because different activities update different timestamps:
+
+- **Project item `updatedAt`** — bumped by column moves, field changes, board-level activity. This is critical because board column moves (e.g., yolo catch-up advancing an item) do NOT bump the issue's `updatedAt`.
+- **Issue `updatedAt`** — bumped by comments, label changes, body edits, assignee changes.
+- **Linked PR `updatedAt`** — bumped by PR comments, reviews, commits.
+
+The shallow query includes all three as scalar fields (no connection cost) and uses the latest of the three as the effective `updatedAt` for change detection. This ensures that activity at any layer — board, issue, or PR — triggers a deep fetch.
+
 ## Consequences
 
 **Positive:**
