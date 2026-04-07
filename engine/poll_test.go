@@ -267,5 +267,104 @@ func TestItemNeedsWork_CleanupStage_NoWorktree(t *testing.T) {
 	}
 }
 
+// TestCleanupClosedIssueLocks_RemovesLockFromClosedIssue verifies that a
+// closed issue with fabrik:locked:<user> gets the lock label removed.
+func TestCleanupClosedIssueLocks_RemovesLockFromClosedIssue(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngine(client, &mockClaudeInvoker{})
+
+	board := &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				Number:   42,
+				IsClosed: true,
+				Labels:   []string{"fabrik:locked:testuser"},
+			},
+		},
+	}
+
+	eng.cleanupClosedIssueLocks(board)
+
+	if len(client.removeLabelCalls) != 1 {
+		t.Fatalf("expected 1 RemoveLabelFromIssue call, got %d", len(client.removeLabelCalls))
+	}
+	call := client.removeLabelCalls[0]
+	if call.issueNumber != 42 {
+		t.Errorf("issueNumber = %d, want 42", call.issueNumber)
+	}
+	if call.labelName != "fabrik:locked:testuser" {
+		t.Errorf("labelName = %q, want %q", call.labelName, "fabrik:locked:testuser")
+	}
+}
+
+// TestCleanupClosedIssueLocks_IgnoresOpenIssues verifies that open issues
+// with a lock label are left untouched.
+func TestCleanupClosedIssueLocks_IgnoresOpenIssues(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngine(client, &mockClaudeInvoker{})
+
+	board := &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				Number:   10,
+				IsClosed: false,
+				Labels:   []string{"fabrik:locked:testuser"},
+			},
+		},
+	}
+
+	eng.cleanupClosedIssueLocks(board)
+
+	if len(client.removeLabelCalls) != 0 {
+		t.Errorf("expected no RemoveLabelFromIssue calls for open issue, got %d", len(client.removeLabelCalls))
+	}
+}
+
+// TestCleanupClosedIssueLocks_IgnoresOtherUsersLocks verifies that lock labels
+// belonging to other users are not removed.
+func TestCleanupClosedIssueLocks_IgnoresOtherUsersLocks(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngine(client, &mockClaudeInvoker{})
+
+	board := &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				Number:   55,
+				IsClosed: true,
+				Labels:   []string{"fabrik:locked:otheruser"},
+			},
+		},
+	}
+
+	eng.cleanupClosedIssueLocks(board)
+
+	if len(client.removeLabelCalls) != 0 {
+		t.Errorf("expected no RemoveLabelFromIssue calls for other user's lock, got %d", len(client.removeLabelCalls))
+	}
+}
+
+// TestCleanupClosedIssueLocks_NoLock verifies that a closed issue without
+// any lock label produces no API call.
+func TestCleanupClosedIssueLocks_NoLock(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngine(client, &mockClaudeInvoker{})
+
+	board := &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				Number:   7,
+				IsClosed: true,
+				Labels:   []string{"some-other-label"},
+			},
+		},
+	}
+
+	eng.cleanupClosedIssueLocks(board)
+
+	if len(client.removeLabelCalls) != 0 {
+		t.Errorf("expected no RemoveLabelFromIssue calls when no lock label, got %d", len(client.removeLabelCalls))
+	}
+}
+
 // TestProcessedSetConcurrency verifies that concurrent access to processedSet
 // via the mutex-protected methods does not cause data races.
