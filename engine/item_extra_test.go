@@ -272,3 +272,31 @@ func TestItemMayNeedWork_DependencyGate_AllClosed_NotFiltered(t *testing.T) {
 		t.Error("expected itemMayNeedWork=true for past-first-stage item with all blockers closed")
 	}
 }
+
+// TestItemMayNeedWork_ClosedIssue verifies that a closed issue is skipped
+// before any stage lookup, regardless of yolo or labels.
+func TestItemMayNeedWork_ClosedIssue(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	item := gh.ProjectItem{
+		Number:   99,
+		Status:   "Research",
+		IsClosed: true,
+	}
+	if eng.itemMayNeedWork(item) {
+		t.Error("closed issue should not need work")
+	}
+}
+
+// TestItemNeedsWork_ClosedIssue verifies that itemNeedsWork returns false for
+// a closed issue before any stage lookup.
+func TestItemNeedsWork_ClosedIssue(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	item := gh.ProjectItem{
+		Number:   99,
+		Status:   "Research",
+		IsClosed: true,
+	}
+	if eng.itemNeedsWork(item) {
+		t.Error("closed issue should not need work (itemNeedsWork)")
+	}
+}

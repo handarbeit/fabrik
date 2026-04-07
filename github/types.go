@@ -35,6 +35,7 @@ type ProjectItem struct {
 	URL       string
 	Repo      string // "owner/repo" (e.g., "verveguy/liminis")
 	IsPR      bool   // True if this item is a Pull Request (vs an Issue)
+	IsClosed  bool   // True if the underlying GitHub Issue is closed (always false for PRs)
 	UpdatedAt time.Time
 	Labels    []string
 	Assignees []string

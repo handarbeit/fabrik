@@ -37,6 +37,7 @@ type itemNode struct {
 		Title      string `json:"title"`
 		Body       string `json:"body"`
 		URL        string `json:"url"`
+		State      string `json:"state"`
 		UpdatedAt  string `json:"updatedAt"`
 		Repository *struct {
 			NameWithOwner string `json:"nameWithOwner"`
@@ -128,6 +129,7 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
               title
               body
               url
+              state
               updatedAt
               repository {
                 nameWithOwner
@@ -259,13 +261,14 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 		}
 
 		item := ProjectItem{
-			ID:     node.Content.ID,
-			ItemID: node.ID,
-			Number: node.Content.Number,
-			Title:  node.Content.Title,
-			Body:   node.Content.Body,
-			URL:    node.Content.URL,
-			IsPR:   node.Content.Typename == "PullRequest",
+			ID:       node.Content.ID,
+			ItemID:   node.ID,
+			Number:   node.Content.Number,
+			Title:    node.Content.Title,
+			Body:     node.Content.Body,
+			URL:      node.Content.URL,
+			IsPR:     node.Content.Typename == "PullRequest",
+			IsClosed: node.Content.Typename != "PullRequest" && node.Content.State == "CLOSED",
 		}
 		if node.Content.Repository != nil {
 			item.Repo = node.Content.Repository.NameWithOwner

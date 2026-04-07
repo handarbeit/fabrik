@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	gh "github.com/verveguy/fabrik/github"
 	"github.com/verveguy/fabrik/stages"
 	"github.com/verveguy/fabrik/tui"
 )
@@ -179,6 +181,37 @@ func (e *Engine) cleanupLockedIssues() {
 	}
 }
 
+// cleanupClosedIssueLocks removes fabrik:locked:<user> labels from any closed
+// issues on the board. This handles stale locks left by prior Fabrik runs where
+// an issue was closed while a stage was in-flight. It runs every poll cycle so
+// the board stays clean without requiring a manual intervention or restart.
+func (e *Engine) cleanupClosedIssueLocks(board *gh.ProjectBoard) {
+	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
+	for _, item := range board.Items {
+		if !item.IsClosed {
+			continue
+		}
+		hasLock := false
+		for _, l := range item.Labels {
+			if l == lockLabel {
+				hasLock = true
+				break
+			}
+		}
+		if !hasLock {
+			continue
+		}
+		owner, repo, num := parseIssueKey(issueKey(item, e.defaultRepo()), e.cfg.Owner, e.cfg.Repo)
+		if err := e.client.RemoveLabelFromIssue(owner, repo, num, lockLabel); err != nil {
+			if !errors.Is(err, gh.ErrNotFound) {
+				e.logf(num, "warn", "could not remove lock label from closed issue: %v\n", err)
+			}
+		} else {
+			e.logf(num, "poll", "removed stale lock label from closed issue\n")
+		}
+	}
+}
+
 func (e *Engine) poll(ctx context.Context) error {
 	e.emitStructural(tui.PollStartedEvent{Owner: e.cfg.Owner, Repo: e.cfg.Repo, Project: e.cfg.ProjectNum})
 	e.logf(0, "poll", "fetching project board %s/%s#%d\n", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
@@ -289,6 +322,9 @@ func (e *Engine) poll(ctx context.Context) error {
 	// Catch-up: auto-advance items that have fabrik:yolo + stage complete
 	// but are still sitting in the completed stage's column.
 	for _, item := range board.Items {
+		if item.IsClosed {
+			continue
+		}
 		if repoFilter != "" && item.Repo != "" && item.Repo != repoFilter {
 			continue
 		}
@@ -410,6 +446,11 @@ func (e *Engine) poll(ctx context.Context) error {
 		}()
 	}
 doneDispatching:
+
+	// Remove stale fabrik:locked labels from closed issues. This handles the case
+	// where an issue was closed while a stage was in-flight, leaving the lock label
+	// behind. We do this every poll so it also catches locks from prior Fabrik runs.
+	e.cleanupClosedIssueLocks(board)
 
 	// Report cumulative token consumption only when new cost has accrued since
 	// the last print, to avoid repeated log noise on idle polls.
