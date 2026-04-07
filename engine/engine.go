@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -207,6 +209,25 @@ func (e *Engine) worktreesFor(nameWithOwner string) *WorktreeManager {
 	return wm
 }
 
+// isFabrikSourceCheckout reports whether dir is a git checkout of the fabrik
+// source repo (tenaciousvc/fabrik or handarbeit/fabrik). Returns false on any
+// error (no git, no remote, wrong remote, etc.).
+func isFabrikSourceCheckout(dir string) bool {
+	cmd := exec.Command("git", "remote", "get-url", "origin")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	url := strings.TrimSuffix(strings.TrimSpace(string(out)), ".git")
+	for _, pattern := range []string{"tenaciousvc/fabrik", "handarbeit/fabrik"} {
+		if strings.Contains(url, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
 // devCheckout returns the WorktreeManager for Fabrik's own source checkout, or nil.
 // Only available in dev mode (version starts with "dev") when running from Fabrik's own repo.
 // Used by the dev upgrade path (git pull + go build); the release upgrade path has no dependency on this.
@@ -218,6 +239,13 @@ func (e *Engine) devCheckout() *WorktreeManager {
 	e.mu.Lock()
 	wm := e.worktreeManagers[key]
 	e.mu.Unlock()
+	if wm == nil {
+		return nil
+	}
+	if !isFabrikSourceCheckout(wm.BaseDir()) {
+		e.logf(0, "upgrade", "not in fabrik source checkout — skipping dev auto-upgrade\n")
+		return nil
+	}
 	return wm
 }
 

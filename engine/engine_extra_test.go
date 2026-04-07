@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"os/exec"
 	"testing"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -139,10 +140,50 @@ func TestDevCheckout_NilWhenNoDefaultRepo(t *testing.T) {
 }
 
 func TestDevCheckout_ReturnsRegistered(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
-	// testEngine already registers "owner/repo" via NewWithDeps — devCheckout should return it.
+	skipIfNoGit(t)
+	// Create a temp git repo with the fabrik remote so devCheckout returns non-nil.
+	repoDir := t.TempDir()
+	for _, args := range [][]string{
+		{"git", "init", "-b", "main"},
+		{"git", "remote", "add", "origin", "git@github.com:tenaciousvc/fabrik.git"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = repoDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", args, out)
+		}
+	}
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", User: "testuser", Token: "t", Stages: testStages()},
+		&mockGitHubClient{}, &mockClaudeInvoker{},
+		NewWorktreeManager(repoDir),
+	)
 	if got := eng.devCheckout(); got == nil {
-		t.Errorf("devCheckout should return the WM registered for owner/repo")
+		t.Error("devCheckout should return the WM when git remote matches fabrik source")
+	}
+}
+
+func TestDevCheckout_NilWhenWrongRemote(t *testing.T) {
+	skipIfNoGit(t)
+	// Create a temp git repo with a non-fabrik remote.
+	repoDir := t.TempDir()
+	for _, args := range [][]string{
+		{"git", "init", "-b", "main"},
+		{"git", "remote", "add", "origin", "https://github.com/example/myproject.git"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = repoDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", args, out)
+		}
+	}
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", User: "testuser", Token: "t", Stages: testStages()},
+		&mockGitHubClient{}, &mockClaudeInvoker{},
+		NewWorktreeManager(repoDir),
+	)
+	if got := eng.devCheckout(); got != nil {
+		t.Error("devCheckout should return nil when git remote does not match fabrik source")
 	}
 }
 
