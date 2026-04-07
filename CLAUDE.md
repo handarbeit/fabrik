@@ -112,9 +112,10 @@ cleanup_worktree: false         # Remove worktree when stage completes (for Done
 - **Commit frequently** during implementation — preserves progress if session is interrupted
 - **Rebase onto latest main** in Review and Validate stages before signaling completion
 - **Check `git status` first** in any stage — there may be uncommitted work from a previous session
-- **Labels are state**: `fabrik:locked:<user>`, `fabrik:editing`, `fabrik:paused`, `fabrik:awaiting-input`, `stage:<name>:in_progress`, `stage:<name>:complete`, `stage:<name>:failed`, `model:<name>`, `fabrik:yolo`
+- **Labels are state**: `fabrik:locked:<user>`, `fabrik:editing`, `fabrik:paused`, `fabrik:awaiting-input`, `fabrik:awaiting-review`, `stage:<name>:in_progress`, `stage:<name>:complete`, `stage:<name>:failed`, `model:<name>`, `fabrik:yolo`
   - `model:<name>` — set by user to select a specific model for this issue (e.g. `model:opus`)
   - `fabrik:yolo` — set by user to force auto-advance even when `auto_advance: false` in stage YAML; also triggers auto-merge of the linked PR when Validate completes
+  - `fabrik:awaiting-review` — set by engine when a stage with `wait_for_reviews: true` completes and outstanding PR reviewer requests remain; cleared when all reviewers submit or `FABRIK_REVIEW_WAIT_TIMEOUT` elapses
 
 ## Startup Board Validation
 

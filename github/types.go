@@ -37,22 +37,22 @@ type PRReview struct {
 
 // ProjectItem represents an issue or pull request card on the project board.
 type ProjectItem struct {
-	ID        string
-	ItemID    string // The project item ID (needed for mutations)
-	Number    int
-	Title     string
-	Body      string
-	Status    string // The column/status on the board
-	URL       string
-	Repo      string // "owner/repo" (e.g., "acme/widgets")
-	IsPR      bool   // True if this item is a Pull Request (vs an Issue)
-	IsClosed  bool   // True if the underlying GitHub Issue is closed (always false for PRs)
-	UpdatedAt time.Time
-	Labels    []string
-	Assignees []string
-	Comments  []Comment
-	Author    string
-	BlockedBy              []Dependency   // Issues that must be closed before this one can advance
+	ID                     string
+	ItemID                 string // The project item ID (needed for mutations)
+	Number                 int
+	Title                  string
+	Body                   string
+	Status                 string // The column/status on the board
+	URL                    string
+	Repo                   string // "owner/repo" (e.g., "acme/widgets")
+	IsPR                   bool   // True if this item is a Pull Request (vs an Issue)
+	IsClosed               bool   // True if the underlying GitHub Issue is closed (always false for PRs)
+	UpdatedAt              time.Time
+	Labels                 []string
+	Assignees              []string
+	Comments               []Comment
+	Author                 string
+	BlockedBy              []Dependency    // Issues that must be closed before this one can advance
 	LinkedPRReviewRequests []ReviewRequest // Outstanding reviewer requests on the linked PR
 	LinkedPRReviews        []PRReview      // Reviews already submitted on the linked PR
 }

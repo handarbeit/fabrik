@@ -64,6 +64,28 @@ func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem
 		if e.checkDependencies(board, item, stage) {
 			return // blocked; checkDependencies handled label + comment
 		}
+		// Path 1: handleStageComplete always has stale review data because
+		// reviewers are added only after MarkPRReady (which runs inside the
+		// stage). Rather than re-fetching, we optimistically apply
+		// fabrik:awaiting-review and let the catch-up loop (Path 2) make
+		// the real gate decision with fresh FetchItemDetails data.
+		if stage.WaitForReviews != nil && *stage.WaitForReviews {
+			alreadyWaiting := false
+			for _, l := range item.Labels {
+				if l == "fabrik:awaiting-review" {
+					alreadyWaiting = true
+					break
+				}
+			}
+			if !alreadyWaiting {
+				owner, repo := itemOwnerRepo(item, e.defaultRepo())
+				if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-review"); err != nil {
+					e.logf(item.Number, "warn", "could not add fabrik:awaiting-review label: %v\n", err)
+				}
+				e.logf(item.Number, "awaiting-review", "waiting for PR reviewers before advancing\n")
+			}
+			return // catch-up loop will advance once reviewers submit
+		}
 		if err := e.advanceToNextStage(board, item, stage); err != nil {
 			e.logf(item.Number, "warn", "could not advance: %v\n", err)
 		}
