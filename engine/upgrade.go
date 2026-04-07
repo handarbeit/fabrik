@@ -138,7 +138,7 @@ func PerformReleaseUpgrade(client GitHubClient, version, token string, extraEnv 
 	logf("new release available: %s (running %s) — upgrading\n", latestTag, version)
 
 	// Find the platform-matching asset: fabrik_VERSION_GOOS_GOARCH.tar.gz
-	wantName := fmt.Sprintf("fabrik_%s_%s_%s.tar.gz", latestTag, runtime.GOOS, runtime.GOARCH)
+	wantName := fmt.Sprintf("fabrik_%s_%s_%s.tar.gz", strings.TrimPrefix(latestTag, "v"), runtime.GOOS, runtime.GOARCH)
 	var downloadURL string
 	for _, asset := range release.Assets {
 		if asset.Name == wantName {
