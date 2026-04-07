@@ -76,9 +76,11 @@ If no decisions meet this threshold, note that explicitly so Implement doesn't w
 - What needs to happen in a specific order
 - What external dependencies might block progress
 
-### Update the issue body
+### Write the plan output
 
-Replace the issue body with the complete plan. Preserve the spec and research sections, and add:
+Your plan output is posted by the engine as a stage comment — do **not** use `FABRIK_ISSUE_UPDATE` markers or attempt to rewrite the issue body. The issue body is the spec, owned by Specify.
+
+Structure your output as:
 
 ```
 ## Implementation Plan
@@ -116,7 +118,7 @@ Description of the chosen approach and key design decisions.
 
 1. Read the spec and research findings thoroughly
 2. Design the implementation approach
-3. Update the issue body with the plan and task checklist
+3. Write the plan output (posted as a stage comment by the engine)
 4. Signal completion (or surface blocking questions)
 
 Plans typically complete in a single pass. If the spec and research are solid, there shouldn't be open questions. If there are, something was missed upstream — flag it clearly.
