@@ -1,14 +1,49 @@
 package engine
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
 )
+
+// TestWriteContextFiles_WritesProjectMD verifies that project.md is always written
+// with owner, repo, project number, and owner type from engine config.
+func TestWriteContextFiles_WritesProjectMD(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	eng.cfg.Owner = "myorg"
+	eng.cfg.Repo = "myrepo"
+	eng.cfg.ProjectNum = 42
+	eng.cfg.OwnerType = "organization"
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{Name: "Plan", Order: 2}
+	item := gh.ProjectItem{Number: 1, Body: "spec"}
+
+	eng.writeContextFiles(item, stage, workDir, false)
+
+	data, err := os.ReadFile(filepath.Join(workDir, ".fabrik-context", "project.md"))
+	if err != nil {
+		t.Fatalf("project.md not written: %v", err)
+	}
+	content := string(data)
+	for _, want := range []string{
+		fmt.Sprintf("Owner: %s", eng.cfg.Owner),
+		fmt.Sprintf("Repo: %s", eng.cfg.Repo),
+		fmt.Sprintf("ProjectNum: %d", eng.cfg.ProjectNum),
+		fmt.Sprintf("OwnerType: %s", eng.cfg.OwnerType),
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("project.md missing %q; got:\n%s", want, content)
+		}
+	}
+}
 
 // TestWriteContextFiles_PostToPR_WritesPRDescription verifies that when the current
 // stage has PostToPR=true, writeContextFiles fetches and writes the PR description.

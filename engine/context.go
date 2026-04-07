@@ -89,6 +89,14 @@ func (e *Engine) writeContextFiles(item gh.ProjectItem, currentStage *stages.Sta
 		e.logf(item.Number, "warn", "could not write .fabrik/issue.md: %v\n", err)
 	}
 
+	// Always write project identity so Claude can form gh CLI commands.
+	// The Plan stage uses this to run `gh issue create`, `gh project item-add`, etc.
+	projectMD := fmt.Sprintf("# Project Context\n\nOwner: %s\nRepo: %s\nProjectNum: %d\nOwnerType: %s\n",
+		e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
+	if err := os.WriteFile(filepath.Join(fabrikDir, "project.md"), []byte(projectMD), 0644); err != nil {
+		e.logf(item.Number, "warn", "could not write .fabrik-context/project.md: %v\n", err)
+	}
+
 	// Write context files for each stage that has a comment.
 	for _, stage := range e.cfg.Stages {
 		// For stage invocations, only include prior stages (Order < current).
