@@ -295,6 +295,15 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}
 	}
 
+	// Dependency gate: block stage start if open blockers exist. This check runs
+	// before any stage work (worktree setup, Claude invocation) so blocked issues
+	// do not burn Claude turns. checkDependencies handles the fabrik:blocked label
+	// and comment idempotently. Returns nil (silent skip) consistent with other
+	// skip paths above. The first stage is always exempt (see checkDependencies).
+	if e.checkDependencies(board, item, stage) {
+		return nil
+	}
+
 	// Cleanup stage: remove the worktree (no lock, no Claude, no comment processing needed).
 	// Runs before new-comment check — cleanup stages are terminal and should not route
 	// comments to processComments. Also handles PR items (no worktree to remove, just label).
