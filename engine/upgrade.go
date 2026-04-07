@@ -12,16 +12,14 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 )
 
 // fabrikOwner and fabrikRepo are the canonical owner/repo for fabrik itself.
 // These are used when checking the GitHub Releases API for a newer binary —
 // the release always targets handarbeit/fabrik, not the user's managed project.
 const (
-	fabrikOwner          = "tenaciousvc"
-	fabrikRepo           = "fabrik"
-	releaseCheckInterval = 5 * time.Minute
+	fabrikOwner = "tenaciousvc"
+	fabrikRepo  = "fabrik"
 )
 
 // SemverGreater reports whether version a is greater than version b.
