@@ -11,7 +11,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	gh "github.com/verveguy/fabrik/github"
 )
@@ -109,55 +108,6 @@ func TestCheckReleaseUpgrade_NoMatchingAsset(t *testing.T) {
 	eng.checkReleaseUpgrade()
 }
 
-// TestCheckReleaseUpgrade_RateLimitSuppressesSecondCall verifies that a second
-// call within 30 minutes does not invoke FetchLatestRelease again.
-func TestCheckReleaseUpgrade_RateLimitSuppressesSecondCall(t *testing.T) {
-	callCount := 0
-	client := &mockGitHubClient{
-		fetchLatestReleaseFn: func(owner, repo string) (*gh.LatestRelease, error) {
-			callCount++
-			return &gh.LatestRelease{TagName: "v0.0.1"}, nil
-		},
-	}
-	eng := testEngine(client, &mockClaudeInvoker{})
-	eng.cfg.AutoUpgrade = true
-	eng.cfg.Version = "v0.0.1"
-
-	eng.checkReleaseUpgrade()
-	eng.checkReleaseUpgrade() // should be rate-limited
-
-	if callCount != 1 {
-		t.Errorf("FetchLatestRelease called %d times, want 1 (second call should be rate-limited)", callCount)
-	}
-}
-
-// TestCheckReleaseUpgrade_RateLimitExpiry verifies that after the rate-limit
-// interval, the second call does invoke FetchLatestRelease.
-func TestCheckReleaseUpgrade_RateLimitExpiry(t *testing.T) {
-	callCount := 0
-	client := &mockGitHubClient{
-		fetchLatestReleaseFn: func(owner, repo string) (*gh.LatestRelease, error) {
-			callCount++
-			return &gh.LatestRelease{TagName: "v0.0.1"}, nil
-		},
-	}
-	eng := testEngine(client, &mockClaudeInvoker{})
-	eng.cfg.AutoUpgrade = true
-	eng.cfg.Version = "v0.0.1"
-
-	eng.checkReleaseUpgrade()
-
-	// Backdate lastReleaseCheck to simulate expiry.
-	eng.mu.Lock()
-	eng.lastReleaseCheck = time.Now().Add(-(releaseCheckInterval + time.Second))
-	eng.mu.Unlock()
-
-	eng.checkReleaseUpgrade()
-
-	if callCount != 2 {
-		t.Errorf("FetchLatestRelease called %d times after rate-limit expiry, want 2", callCount)
-	}
-}
 
 // TestCheckReleaseUpgrade_DownloadAttempted verifies that when a newer release
 // exists and an asset matching the current platform is found, the download is

@@ -570,18 +570,6 @@ func gitRevParse(dir, ref string) (string, error) {
 //
 // All failures are non-fatal: a warning is logged and the poll loop continues.
 func (e *Engine) checkReleaseUpgrade() {
-	// Rate-limit: skip if we checked within the last releaseCheckInterval.
-	e.mu.Lock()
-	lastCheck := e.lastReleaseCheck
-	e.mu.Unlock()
-	if !lastCheck.IsZero() && time.Since(lastCheck) < releaseCheckInterval {
-		return
-	}
-
-	e.mu.Lock()
-	e.lastReleaseCheck = time.Now()
-	e.mu.Unlock()
-
 	logf := func(format string, args ...any) {
 		e.logf(0, "upgrade", format, args...)
 	}
