@@ -11,6 +11,13 @@ allowed_tools:
   - Glob
   - Bash(git log)
   - Bash(git diff)
+  - Bash(gh issue create)
+  - Bash(gh issue edit)
+  - Bash(gh issue link)
+  - Bash(gh issue list)
+  - Bash(gh label list)
+  - Bash(gh project item-add)
+  - Bash(gh project item-edit)
   - WebSearch
   - WebFetch
 completion:
