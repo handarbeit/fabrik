@@ -51,7 +51,9 @@ If the research reveals ambiguities that the spec didn't address, list them as a
 
 ### Summarize findings
 
-Update the issue body with your research findings. Add a Research section (don't replace the spec — append to it):
+Write your research findings as your stage output — the engine posts this as a stage comment automatically. Do **not** use `FABRIK_ISSUE_UPDATE` markers or attempt to rewrite the issue body. The issue body is the spec, owned by Specify.
+
+Structure your findings as:
 
 ```
 ## Research Findings
@@ -88,7 +90,7 @@ Technical risks identified during research.
 
 1. Read the issue spec thoroughly
 2. Explore the codebase systematically
-3. Update the issue body with findings and any technical questions
+3. Write findings as stage output (posted as a stage comment by the engine) including any technical questions
 4. Wait for the user to answer questions via comments
 5. Incorporate answers and update findings
 6. When you have a thorough understanding and all questions are resolved, signal completion

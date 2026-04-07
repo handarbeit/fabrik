@@ -70,6 +70,7 @@ type LatestRelease struct {
 type ReleaseAsset struct {
 	Name               string `json:"name"`
 	BrowserDownloadURL string `json:"browser_download_url"`
+	APIURL             string `json:"url"` // API URL for downloading with Accept: application/octet-stream
 	Size               int64  `json:"size"`
 }
 
