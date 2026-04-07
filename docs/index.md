@@ -170,11 +170,12 @@ description: >-
       </div>
       <div class="feature-card">
         <span class="feature-icon">⚡</span>
-        <div class="feature-title">Yolo Mode</div>
+        <div class="feature-title">Yolo Mode &amp; Auto-Merge</div>
         <div class="feature-desc">
           Enable <code>--yolo</code> and Fabrik auto-advances issues through
-          every stage without human approval. Great for low-risk work or
-          trusted pipelines.
+          every stage without human approval — and auto-merges the PR when
+          Validate completes. Apply the <code>fabrik:yolo</code> label to a
+          single issue to get the same behavior scoped to just that issue.
         </div>
       </div>
       <div class="feature-card">
@@ -192,6 +193,15 @@ description: >-
           Run multiple Fabrik instances against the same board.
           <code>fabrik:locked:&lt;user&gt;</code> labels prevent conflicts.
           Each instance only processes its own user's issues.
+        </div>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">✅</span>
+        <div class="feature-title">Startup Board Validation</div>
+        <div class="feature-desc">
+          On every startup, Fabrik validates that stage names in your YAML configs
+          match board column names exactly. Mismatches are reported with a clear
+          error before any work begins — no silent misconfiguration.
         </div>
       </div>
       <div class="feature-card">
@@ -217,10 +227,11 @@ description: >-
         <div class="feature-title">Terminal UI</div>
         <div class="feature-desc">
           Fabrik launches a bubbletea control panel by default: active jobs,
-          stage progress, token costs, and history across all issues. Run
-          <code>fabrik watch &lt;issue&gt;</code> to focus on a single issue — live log
-          streaming, CI check status, and PR state. Tab to switch panes,
-          <code>l</code> to view logs, <code>q</code> to quit.
+          stage progress, token costs, and history across all issues. Press
+          <code>l</code> to open <code>fabrik watch</code> for the selected issue
+          (live log streaming, stage tabs, CI/PR status), <code>enter</code> to
+          toggle an inline detail panel, <code>r</code> to resume a Claude session
+          from history, and <code>q</code> to quit. Mouse support enabled by default.
         </div>
       </div>
       <div class="feature-card">
