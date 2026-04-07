@@ -45,6 +45,23 @@ func isAllDigits(s string) bool {
 	return true
 }
 
+// logTimestampSuffix returns the timestamp portion of a log filename:
+// <yyyyMMdd>-<HHmmss>-<nanos>.log — everything from the first 8-digit
+// all-numeric segment onward. Because timestamps are zero-padded with fixed
+// widths, lexicographic comparison of this suffix gives correct chronological
+// ordering regardless of the stage label prefix. Falls back to name unchanged
+// if no 8-digit segment is found (e.g. malformed filenames).
+func logTimestampSuffix(name string) string {
+	base := strings.TrimSuffix(name, ".log")
+	parts := strings.Split(base, "-")
+	for i, p := range parts {
+		if len(p) == 8 && isAllDigits(p) {
+			return strings.Join(parts[i:], "-") + ".log"
+		}
+	}
+	return name
+}
+
 // buildStageTabs scans logDir, groups .log files by stage label, picks the
 // newest log per label, and sorts by pipeline order (stageOrder map). Logs
 // whose label matches "<ParentStage>-comment-review" are grouped under the
@@ -96,12 +113,12 @@ func buildStageTabs(logDir string, stageOrder map[string]int) []stageTab {
 		parent := strings.TrimSuffix(label, "-comment-review")
 		if _, known := stageOrder[parent]; known {
 			// Merge under parent: keep whichever filename is newer.
-			if filename > effectiveNewest[parent] {
+			if logTimestampSuffix(filename) > logTimestampSuffix(effectiveNewest[parent]) {
 				effectiveNewest[parent] = filename
 			}
 		} else {
 			// Unknown parent — keep as its own tab.
-			if existing, ok := effectiveNewest[label]; !ok || filename > existing {
+			if existing, ok := effectiveNewest[label]; !ok || logTimestampSuffix(filename) > logTimestampSuffix(existing) {
 				effectiveNewest[label] = filename
 			}
 		}
@@ -138,9 +155,15 @@ func buildStageTabs(logDir string, stageOrder map[string]int) []stageTab {
 	tabs := append(knownTabs, unknownTabs...)
 
 	// Find the globally newest log file across all tabs and mark it as IsLive.
+	// Compare by timestamp suffix only (not full filename) so that a stage label
+	// like "Specify" (alphabetically > "Research") cannot beat a chronologically
+	// newer "Research" log.
 	newestFile := ""
+	newestSuffix := ""
 	for _, t := range tabs {
-		if base := filepath.Base(t.LogPath); base > newestFile {
+		base := filepath.Base(t.LogPath)
+		if suffix := logTimestampSuffix(base); suffix > newestSuffix {
+			newestSuffix = suffix
 			newestFile = base
 		}
 	}
@@ -203,10 +226,12 @@ func newestLogFile(logDir string) string {
 	if len(logs) == 0 {
 		return ""
 	}
-	// Sort by name (which is <label>-<timestamp>-<nanos>.log); lexicographic
-	// order gives us chronological order since timestamps are zero-padded.
+	// Sort by timestamp suffix only (not full filename) so that a stage label
+	// prefix cannot distort chronological ordering. Within a single label the
+	// sort is still correct, and across labels the timestamp alone determines
+	// which file is newest.
 	sort.Slice(logs, func(i, j int) bool {
-		return logs[i].Name() < logs[j].Name()
+		return logTimestampSuffix(logs[i].Name()) < logTimestampSuffix(logs[j].Name())
 	})
 	return filepath.Join(logDir, logs[len(logs)-1].Name())
 }
