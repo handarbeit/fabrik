@@ -108,7 +108,6 @@ func TestCheckReleaseUpgrade_NoMatchingAsset(t *testing.T) {
 	eng.checkReleaseUpgrade()
 }
 
-
 // TestCheckReleaseUpgrade_DownloadAttempted verifies that when a newer release
 // exists and an asset matching the current platform is found, the download is
 // actually attempted. The HTTP server returns a 500 so the upgrade fails
