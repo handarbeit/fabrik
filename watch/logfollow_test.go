@@ -134,3 +134,57 @@ func TestBuildStageTabs_EmptyDir(t *testing.T) {
 		t.Errorf("want 0 tabs for empty dir, got %d", len(tabs))
 	}
 }
+
+// TestBuildStageTabs_IsLive_ByTimestampNotLabel is a regression test for the
+// bug where an alphabetically-later stage label (e.g. "Specify" > "Research")
+// would be wrongly selected as IsLive even when its log has an older timestamp.
+// After the fix, the Research tab (newer timestamp) must be IsLive.
+func TestBuildStageTabs_IsLive_ByTimestampNotLabel(t *testing.T) {
+	dir := t.TempDir()
+	// Specify log is older (09:41); Research log is newer (17:04).
+	// "Specify-..." > "Research-..." lexicographically ('S' > 'R'),
+	// so without the fix Specify would wrongly win.
+	writeLog(t, dir, "Specify-20260407-094159-000000000.log")
+	writeLog(t, dir, "Research-20260407-170451-000000000.log")
+
+	stageOrder := map[string]int{
+		"Research": 1,
+		"Specify":  2,
+	}
+	tabs := buildStageTabs(dir, stageOrder)
+
+	if len(tabs) != 2 {
+		t.Fatalf("want 2 tabs, got %d", len(tabs))
+	}
+	// Pipeline order: Research(1) first, Specify(2) second.
+	if tabs[0].Label != "Research" {
+		t.Errorf("tab[0] want Research, got %s", tabs[0].Label)
+	}
+	if tabs[1].Label != "Specify" {
+		t.Errorf("tab[1] want Specify, got %s", tabs[1].Label)
+	}
+	// Research has the newer timestamp — it must be IsLive.
+	if !tabs[0].IsLive {
+		t.Error("Research tab should be IsLive (newer timestamp), not Specify")
+	}
+	if tabs[1].IsLive {
+		t.Error("Specify tab should not be IsLive (older timestamp)")
+	}
+}
+
+// TestNewestLogFile_ByTimestampNotLabel is a regression test for the bug where
+// newestLogFile would return the alphabetically-last filename regardless of
+// timestamp, so "Specify-..." would beat "Research-..." even when Research is newer.
+// After the fix, newestLogFile must return the Research log (newer timestamp).
+func TestNewestLogFile_ByTimestampNotLabel(t *testing.T) {
+	dir := t.TempDir()
+	// Specify log is older (09:00); Research log is newer (10:00).
+	writeLog(t, dir, "Specify-20260101-090000-000000000.log")
+	writeLog(t, dir, "Research-20260101-100000-000000000.log")
+
+	got := newestLogFile(dir)
+	want := filepath.Join(dir, "Research-20260101-100000-000000000.log")
+	if got != want {
+		t.Errorf("newestLogFile: want %s, got %s", filepath.Base(want), filepath.Base(got))
+	}
+}
