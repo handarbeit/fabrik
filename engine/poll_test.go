@@ -366,5 +366,47 @@ func TestCleanupClosedIssueLocks_NoLock(t *testing.T) {
 	}
 }
 
+// TestYoloCatchup_SkipsClosedIssue verifies that the yolo catch-up loop does
+// not call UpdateProjectItemStatus for a closed issue that has a stage-complete
+// label, even when yolo mode is active.
+func TestYoloCatchup_SkipsClosedIssue(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{
+						Number:   77,
+						ItemID:   "PVTI_77",
+						Status:   "Research",
+						IsClosed: true,
+						Labels:   []string{"stage:Research:complete", "fabrik:yolo"},
+					},
+				},
+			}, nil
+		},
+		fetchStatusFieldFn: func(projectID string) (*gh.StatusField, error) {
+			return &gh.StatusField{
+				FieldID: "FIELD_1",
+				Options: map[string]string{"Research": "OPT_R", "Plan": "OPT_P"},
+			}, nil
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	eng.cfg.Yolo = true
+
+	ctx := context.Background()
+	if err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	client.mu.Lock()
+	n := len(client.updateStatusCalls)
+	client.mu.Unlock()
+	if n != 0 {
+		t.Errorf("expected no UpdateProjectItemStatus calls for closed issue, got %d", n)
+	}
+}
+
 // TestProcessedSetConcurrency verifies that concurrent access to processedSet
 // via the mutex-protected methods does not cause data races.
