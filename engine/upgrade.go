@@ -142,7 +142,13 @@ func PerformReleaseUpgrade(client GitHubClient, version, token string, extraEnv 
 	var downloadURL string
 	for _, asset := range release.Assets {
 		if asset.Name == wantName {
-			downloadURL = asset.BrowserDownloadURL
+			// Use the API URL with Accept: application/octet-stream for private repos.
+			// The browser_download_url redirects to S3 which rejects the auth header.
+			if asset.APIURL != "" {
+				downloadURL = asset.APIURL
+			} else {
+				downloadURL = asset.BrowserDownloadURL
+			}
 			break
 		}
 	}
@@ -183,6 +189,8 @@ func PerformReleaseUpgrade(client GitHubClient, version, token string, extraEnv 
 		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
+		// Required for API URL downloads on private repos
+		req.Header.Set("Accept", "application/octet-stream")
 		return http.DefaultClient.Do(req)
 	}()
 	if err != nil {

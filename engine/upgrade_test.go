@@ -389,3 +389,83 @@ func TestPerformReleaseUpgrade_DownloadAttempted(t *testing.T) {
 		t.Error("download server was not hit even though a matching asset was provided")
 	}
 }
+
+// TestPerformReleaseUpgrade_PrefersAPIURL verifies that when both APIURL and
+// BrowserDownloadURL are set, the APIURL is used (required for private repos).
+// Also checks that the Accept: application/octet-stream header is sent.
+func TestPerformReleaseUpgrade_PrefersAPIURL(t *testing.T) {
+	var gotURL string
+	var gotAccept string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotURL = r.URL.Path
+		gotAccept = r.Header.Get("Accept")
+		http.Error(w, "test", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	matchingAsset := fmt.Sprintf("fabrik_9.9.9_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	client := &mockGitHubClient{
+		fetchLatestReleaseFn: func(owner, repo string) (*gh.LatestRelease, error) {
+			return &gh.LatestRelease{
+				TagName: "v9.9.9",
+				Assets: []gh.ReleaseAsset{
+					{
+						Name:               matchingAsset,
+						BrowserDownloadURL: srv.URL + "/browser-url",
+						APIURL:             srv.URL + "/api-url",
+					},
+				},
+			}, nil
+		},
+	}
+	var logs []string
+	logf := func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+
+	PerformReleaseUpgrade(client, "v0.0.1", "", nil, logf)
+
+	if gotURL != "/api-url" {
+		t.Errorf("expected request to /api-url (APIURL), got %q — BrowserDownloadURL was used instead", gotURL)
+	}
+	if gotAccept != "application/octet-stream" {
+		t.Errorf("expected Accept: application/octet-stream header, got %q", gotAccept)
+	}
+}
+
+// TestPerformReleaseUpgrade_FallsBackToBrowserURL verifies that when APIURL
+// is empty, BrowserDownloadURL is used as fallback.
+func TestPerformReleaseUpgrade_FallsBackToBrowserURL(t *testing.T) {
+	var gotURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotURL = r.URL.Path
+		http.Error(w, "test", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	matchingAsset := fmt.Sprintf("fabrik_9.9.9_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	client := &mockGitHubClient{
+		fetchLatestReleaseFn: func(owner, repo string) (*gh.LatestRelease, error) {
+			return &gh.LatestRelease{
+				TagName: "v9.9.9",
+				Assets: []gh.ReleaseAsset{
+					{
+						Name:               matchingAsset,
+						BrowserDownloadURL: srv.URL + "/browser-url",
+						APIURL:             "", // empty — should fall back
+					},
+				},
+			}, nil
+		},
+	}
+	var logs []string
+	logf := func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+
+	PerformReleaseUpgrade(client, "v0.0.1", "", nil, logf)
+
+	if gotURL != "/browser-url" {
+		t.Errorf("expected fallback to /browser-url, got %q", gotURL)
+	}
+}
