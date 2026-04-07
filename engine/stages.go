@@ -61,6 +61,9 @@ func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem
 	}
 
 	if shouldAdvance {
+		if e.checkDependencies(board, item, stage) {
+			return // blocked; checkDependencies handled label + comment
+		}
 		if err := e.advanceToNextStage(board, item, stage); err != nil {
 			e.logf(item.Number, "warn", "could not advance: %v\n", err)
 		}

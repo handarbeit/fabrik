@@ -120,6 +120,18 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 		}
 	}
 
+	// Dependency gate: if past the first stage and has open blockers, skip this
+	// item to avoid expensive deep-fetch. Blocked issues are gated by external
+	// state (dependency closure) not user comments, so deferring them is safe.
+	// Note: user comments on blocked issues won't be processed until they unblock.
+	if !stages.IsFirstStage(e.cfg.Stages, stage.Name) {
+		for _, dep := range item.BlockedBy {
+			if dep.State != "CLOSED" {
+				return false
+			}
+		}
+	}
+
 	// Don't check the completion label here — completed items may still have
 	// new comments that need processing. The completion check lives in
 	// itemNeedsWork where it runs after comments have been loaded.

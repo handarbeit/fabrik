@@ -218,3 +218,57 @@ func TestCommitWIP_ExcludesContextFiles(t *testing.T) {
 		t.Errorf("context file content should be preserved on disk")
 	}
 }
+
+// TestItemMayNeedWork_DependencyGate_OpenBlocker_PastFirstStage verifies that
+// an item past the first stage with an open blocker is filtered out.
+func TestItemMayNeedWork_DependencyGate_OpenBlocker_PastFirstStage(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	// testEngine uses testStages(): Research(1), Plan(2), Implement(3)
+	// "Research" is the first stage; "Plan" is past the first.
+	item := gh.ProjectItem{
+		Number: 5,
+		Status: "Plan",
+		BlockedBy: []gh.Dependency{
+			{Number: 4, State: "OPEN", Repo: "owner/repo"},
+		},
+	}
+
+	if eng.itemMayNeedWork(item) {
+		t.Error("expected itemMayNeedWork=false for past-first-stage item with open blocker")
+	}
+}
+
+// TestItemMayNeedWork_DependencyGate_FirstStage_NotFiltered verifies that
+// an item in the first stage is NOT filtered even with an open blocker.
+func TestItemMayNeedWork_DependencyGate_FirstStage_NotFiltered(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	// "Research" is the first stage in testStages()
+	item := gh.ProjectItem{
+		Number: 5,
+		Status: "Research",
+		BlockedBy: []gh.Dependency{
+			{Number: 4, State: "OPEN", Repo: "owner/repo"},
+		},
+	}
+
+	if !eng.itemMayNeedWork(item) {
+		t.Error("expected itemMayNeedWork=true for first-stage item regardless of blockers")
+	}
+}
+
+// TestItemMayNeedWork_DependencyGate_AllClosed_NotFiltered verifies that
+// an item past the first stage with all blockers closed is not filtered.
+func TestItemMayNeedWork_DependencyGate_AllClosed_NotFiltered(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	item := gh.ProjectItem{
+		Number: 5,
+		Status: "Plan",
+		BlockedBy: []gh.Dependency{
+			{Number: 4, State: "CLOSED", Repo: "owner/repo"},
+		},
+	}
+
+	if !eng.itemMayNeedWork(item) {
+		t.Error("expected itemMayNeedWork=true for past-first-stage item with all blockers closed")
+	}
+}
