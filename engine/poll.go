@@ -586,7 +586,6 @@ func (e *Engine) checkAndUpgrade() {
 
 	wm := e.devCheckout()
 	if wm == nil {
-		e.logf(0, "upgrade", "no Fabrik source checkout — skipping dev auto-upgrade\n")
 		return
 	}
 	baseBranch := wm.DefaultBaseBranch()
