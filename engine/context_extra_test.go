@@ -171,7 +171,9 @@ func TestItemMayNeedWork_CooldownRetry(t *testing.T) {
 }
 
 // TestItemMayNeedWork_CleanupStage_PausedItem verifies that a cleanup stage
-// item with fabrik:paused returns false.
+// item returns false when no worktree exists (nothing to clean up). The paused
+// label check has moved to itemNeedsWork; itemMayNeedWork now only checks
+// worktree existence for cleanup stages.
 func TestItemMayNeedWork_CleanupStage_PausedItem(t *testing.T) {
 	stgs := testStagesWithCleanup()
 	eng := NewWithDeps(
@@ -185,8 +187,9 @@ func TestItemMayNeedWork_CleanupStage_PausedItem(t *testing.T) {
 		Labels: []string{"fabrik:paused"},
 	}
 
+	// Returns false because no worktree exists at /tmp (not because of paused label).
 	if eng.itemMayNeedWork(item) {
-		t.Error("paused cleanup stage item should not need work")
+		t.Error("cleanup stage item with no worktree should not need work")
 	}
 }
 
