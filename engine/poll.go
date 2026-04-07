@@ -419,12 +419,14 @@ func (e *Engine) poll(ctx context.Context) error {
 	}
 
 	var dispatched int
-	for _, item := range board.Items {
+	// Dispatch only items from deepFetchCandidates — items that passed
+	// itemMayNeedWork and (for non-cleanup stages) had FetchItemDetails called to
+	// populate the full label set. Iterating board.Items here instead would
+	// incorrectly pass shallow-label items (labels(first:5) only) to itemNeedsWork,
+	// which could miss stage-complete labels beyond position 5 and re-dispatch
+	// already-completed items on every poll after their updatedAt settles.
+	for _, item := range deepFetchCandidates {
 		item := item
-		// In single-repo mode, skip items from other repos on the same project board.
-		if repoFilter != "" && item.Repo != "" && item.Repo != repoFilter {
-			continue
-		}
 		// Full check including comments (populated by deep fetch above).
 		if !e.itemNeedsWork(item) {
 			continue
