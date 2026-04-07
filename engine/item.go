@@ -41,6 +41,11 @@ func isAwaitingInput(item gh.ProjectItem) bool {
 // before the full itemNeedsWork check. This avoids expensive deep fetches for items
 // that can be ruled out by status, labels, or updatedAt alone.
 func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
+	// Closed issues are never processed, regardless of yolo mode.
+	if item.IsClosed {
+		return false
+	}
+
 	// No matching stage = nothing to do
 	stage := stages.FindStage(e.cfg.Stages, item.Status)
 	if stage == nil {
@@ -142,6 +147,11 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 // itemNeedsWork does full checks including comment inspection.
 // This runs AFTER FetchItemDetails has populated the item's Comments.
 func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
+	// Closed issues are never processed, regardless of yolo mode.
+	if item.IsClosed {
+		return false
+	}
+
 	stage := stages.FindStage(e.cfg.Stages, item.Status)
 	if stage == nil {
 		return false
