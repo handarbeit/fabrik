@@ -65,6 +65,18 @@ type JobCompletedEvent struct {
 
 func (JobCompletedEvent) tuiEvent() {}
 
+// IssueBlockedEvent is emitted when an issue is held at the dependency gate.
+// It is emitted each time checkDependencies fires for a blocked issue.
+type IssueBlockedEvent struct {
+	IssueNumber int
+	Repo        string   // "owner/repo" — empty for single-repo projects
+	Title       string
+	StageName   string
+	WaitingFor  []string // e.g. ["#214", "owner/repo#215"]
+}
+
+func (IssueBlockedEvent) tuiEvent() {}
+
 // TickEvent is emitted once per second by the TUI loop to drive timer updates.
 type TickEvent struct {
 	At time.Time

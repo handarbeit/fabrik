@@ -331,3 +331,31 @@ max_turns: 20
 		t.Errorf("AutoAdvance = %v, want explicit false", s.AutoAdvance)
 	}
 }
+
+func TestIsFirstStage(t *testing.T) {
+	s1 := &Stage{Name: "Specify", Order: 1}
+	s2 := &Stage{Name: "Research", Order: 2}
+
+	tests := []struct {
+		name      string
+		stages    []*Stage
+		stageName string
+		want      bool
+	}{
+		{"empty slice", nil, "Specify", false},
+		{"single stage match", []*Stage{s1}, "Specify", true},
+		{"single stage mismatch", []*Stage{s1}, "Research", false},
+		{"multi-stage first", []*Stage{s1, s2}, "Specify", true},
+		{"multi-stage second", []*Stage{s1, s2}, "Research", false},
+		{"multi-stage no match", []*Stage{s1, s2}, "Validate", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsFirstStage(tt.stages, tt.stageName)
+			if got != tt.want {
+				t.Errorf("IsFirstStage(%v, %q) = %v, want %v", tt.stages, tt.stageName, got, tt.want)
+			}
+		})
+	}
+}

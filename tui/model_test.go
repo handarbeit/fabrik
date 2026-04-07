@@ -1477,3 +1477,89 @@ func TestJobCompletedEvent_Dedup(t *testing.T) {
 		t.Fatalf("after Plan event: history len = %d, want 2 (different stage, not a duplicate)", len(m.history))
 	}
 }
+
+func TestUpdate_IssueBlockedEvent(t *testing.T) {
+	redirectHistory(t)
+	m := New(30, ProjectInfo{}, "")
+
+	// IssueBlockedEvent adds to blocked map
+	next, _ := m.Update(IssueBlockedEvent{
+		IssueNumber: 214,
+		Title:       "fix auto-upgrade",
+		StageName:   "Research",
+		WaitingFor:  []string{"#213"},
+	})
+	nm := next.(Model)
+	key214 := activeJobKey("", 214)
+	b, ok := nm.blocked[key214]
+	if !ok {
+		t.Fatal("expected issue 214 in blocked map after IssueBlockedEvent")
+	}
+	if b.StageName != "Research" {
+		t.Errorf("StageName = %q, want Research", b.StageName)
+	}
+	if len(b.WaitingFor) != 1 || b.WaitingFor[0] != "#213" {
+		t.Errorf("WaitingFor = %v, want [#213]", b.WaitingFor)
+	}
+
+	// JobStartedEvent for the same issue removes it from blocked
+	next2, _ := nm.Update(JobStartedEvent{
+		IssueNumber: 214,
+		StageName:   "Research",
+		StartedAt:   time.Now(),
+	})
+	nm2 := next2.(Model)
+	if _, ok := nm2.blocked[key214]; ok {
+		t.Error("expected issue 214 removed from blocked after JobStartedEvent")
+	}
+}
+
+func TestViewActive_BlockedIssue(t *testing.T) {
+	redirectHistory(t)
+	m := New(30, ProjectInfo{}, "")
+	m.width = 120
+	m.now = time.Now()
+
+	// Add a blocked issue
+	key := activeJobKey("", 215)
+	m.blocked[key] = &blockedIssue{
+		IssueNumber: 215,
+		Title:       "cut release",
+		StageName:   "Research",
+		WaitingFor:  []string{"#214"},
+	}
+
+	view := m.viewActive()
+	if !strings.Contains(view, "🔒") {
+		t.Errorf("expected 🔒 in viewActive for blocked issue, got: %q", view)
+	}
+	if !strings.Contains(view, "#215") {
+		t.Errorf("expected #215 in viewActive, got: %q", view)
+	}
+	if !strings.Contains(view, "waiting for") {
+		t.Errorf("expected 'waiting for' in viewActive, got: %q", view)
+	}
+	if !strings.Contains(view, "#214") {
+		t.Errorf("expected #214 in waiting-for list, got: %q", view)
+	}
+}
+
+func TestViewActive_BlockedCountIncludedInHeader(t *testing.T) {
+	redirectHistory(t)
+	m := New(30, ProjectInfo{}, "")
+	m.width = 120
+	m.now = time.Now()
+
+	// 1 active + 1 blocked = 2 in header
+	m.active[activeJobKey("", 10)] = &activeJob{IssueNumber: 10, StageName: "Implement", StartedAt: time.Now()}
+	m.blocked[activeJobKey("", 20)] = &blockedIssue{IssueNumber: 20, StageName: "Research", WaitingFor: []string{"#10"}}
+
+	view := m.viewActive()
+	if !strings.Contains(view, "In Progress (2)") {
+		t.Errorf("expected 'In Progress (2)' in header, got: %q", view)
+	}
+}
+
+func TestIssueBlockedEvent_tuiEvent(t *testing.T) {
+	IssueBlockedEvent{}.tuiEvent() // satisfies interface
+}

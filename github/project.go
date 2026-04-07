@@ -63,7 +63,22 @@ type itemNode struct {
 				UpdatedAt string `json:"updatedAt"`
 			} `json:"nodes"`
 		} `json:"closedByPullRequestsReferences"`
+		BlockedByNodes struct {
+			PageInfo struct {
+				HasNextPage bool `json:"hasNextPage"`
+			} `json:"pageInfo"`
+			Nodes []blockedByNode `json:"nodes"`
+		} `json:"blockedBy"`
 	} `json:"content"`
+}
+
+// blockedByNode holds raw data for a single "blocked by" relationship from the API.
+type blockedByNode struct {
+	Number     int    `json:"number"`
+	State      string `json:"state"`
+	Repository *struct {
+		NameWithOwner string `json:"nameWithOwner"`
+	} `json:"repository"`
 }
 
 // FetchProjectBoard pulls the project board with shallow item data (no comments
@@ -132,6 +147,14 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
               assignees(first: 10) {
                 nodes {
                   login
+                }
+              }
+              blockedBy(first: 25) {
+                pageInfo { hasNextPage }
+                nodes {
+                  number
+                  state
+                  repository { nameWithOwner }
                 }
               }
               closedByPullRequestsReferences(first: 5) {
@@ -283,6 +306,24 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 
 		for _, a := range node.Content.Assignees.Nodes {
 			item.Assignees = append(item.Assignees, a.Login)
+		}
+
+		// Parse blocked-by dependency relationships. The blockedBy field is only
+		// available for Issues (not PRs), and may be absent on older GHES instances;
+		// an empty node list is treated as no dependencies in both cases.
+		if node.Content.BlockedByNodes.PageInfo.HasNextPage {
+			// Log a warning — we don't paginate here (25 blockers is generous)
+			fmt.Printf("[board] #%d: blockedBy has more than 25 entries; only first 25 are used\n", node.Content.Number)
+		}
+		for _, dep := range node.Content.BlockedByNodes.Nodes {
+			d := Dependency{
+				Number: dep.Number,
+				State:  dep.State,
+			}
+			if dep.Repository != nil {
+				d.Repo = dep.Repository.NameWithOwner
+			}
+			item.BlockedBy = append(item.BlockedBy, d)
 		}
 
 		board.Items = append(board.Items, item)
