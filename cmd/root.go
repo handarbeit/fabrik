@@ -23,18 +23,18 @@ import (
 var testReadyCh chan struct{}
 
 type Config struct {
-	Owner         string
-	Repo          string
-	ProjectNum    int
-	OwnerType     string
-	User          string
-	Token         string
-	StagesDir     string
-	Yolo          bool
-	AutoUpgrade   bool
-	TUI           bool
-	PollSeconds   int
-	MaxConcurrent int
+	Owner             string
+	Repo              string
+	ProjectNum        int
+	OwnerType         string
+	User              string
+	Token             string
+	StagesDir         string
+	Yolo              bool
+	AutoUpgrade       bool
+	TUI               bool
+	PollSeconds       int
+	MaxConcurrent     int
 	MaxRetries        int
 	ReviewWaitTimeout int // minutes; 0 means use default (15)
 	DebugOutput       bool
@@ -320,23 +320,23 @@ func Execute() error {
 	}
 
 	eng, err := engine.New(engine.Config{
-		Owner:         cfg.Owner,
-		Repo:          cfg.Repo,
-		ProjectNum:    cfg.ProjectNum,
-		OwnerType:     cfg.OwnerType,
-		User:          cfg.User,
-		Token:         cfg.Token,
-		Version:       Version,
-		Yolo:          cfg.Yolo,
-		AutoUpgrade:   cfg.AutoUpgrade,
-		PollSeconds:   cfg.PollSeconds,
+		Owner:             cfg.Owner,
+		Repo:              cfg.Repo,
+		ProjectNum:        cfg.ProjectNum,
+		OwnerType:         cfg.OwnerType,
+		User:              cfg.User,
+		Token:             cfg.Token,
+		Version:           Version,
+		Yolo:              cfg.Yolo,
+		AutoUpgrade:       cfg.AutoUpgrade,
+		PollSeconds:       cfg.PollSeconds,
 		MaxConcurrent:     cfg.MaxConcurrent,
 		MaxRetries:        cfg.MaxRetries,
 		ReviewWaitTimeout: reviewWaitTimeout(cfg.ReviewWaitTimeout),
 		DebugOutput:       cfg.DebugOutput,
-		PluginDir:     cfg.PluginDir,
-		Stages:        stageCfgs,
-		ReadyCh:       testReadyCh,
+		PluginDir:         cfg.PluginDir,
+		Stages:            stageCfgs,
+		ReadyCh:           testReadyCh,
 	})
 	if err != nil {
 		return err

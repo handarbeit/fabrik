@@ -361,6 +361,9 @@ func (e *Engine) poll(ctx context.Context) error {
 			if e.checkDependencies(board, item, stage) {
 				continue // blocked; checkDependencies handled label + comment
 			}
+			if e.checkReviewGate(board, item, stage) {
+				continue // awaiting reviewers; checkReviewGate handled label
+			}
 			e.logf(item.Number, "advance", "yolo catch-up: stage %q already complete, advancing\n", stage.Name)
 			if err := e.advanceToNextStage(board, item, stage); err != nil {
 				e.logf(item.Number, "warn", "could not advance: %v\n", err)
