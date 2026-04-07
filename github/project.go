@@ -23,53 +23,34 @@ type commentNodeData struct {
 }
 
 // itemNode mirrors one element of items.nodes in the FetchProjectBoard query.
-// This is the shallow version — comments and linked PRs are fetched separately
-// via FetchItemDetails to reduce GraphQL rate limit cost.
+// This is the shallow version — only fields needed for pre-filtering are
+// included. Body, URL, Author, Assignees, and BlockedBy are fetched in the
+// deep phase via FetchItemDetails to reduce GraphQL rate limit cost.
 type itemNode struct {
 	ID               string `json:"id"`
 	FieldValueByName *struct {
 		Name string `json:"name"`
 	} `json:"fieldValueByName"`
 	Content struct {
-		Typename   string `json:"__typename"`
-		ID         string `json:"id"`
-		Number     int    `json:"number"`
-		Title      string `json:"title"`
-		Body       string `json:"body"`
-		URL        string `json:"url"`
-		State      string `json:"state"`
-		UpdatedAt  string `json:"updatedAt"`
+		Typename  string `json:"__typename"`
+		ID        string `json:"id"`
+		Number    int    `json:"number"`
+		Title     string `json:"title"`
+		State     string `json:"state"`
+		UpdatedAt string `json:"updatedAt"`
 		Repository *struct {
 			NameWithOwner string `json:"nameWithOwner"`
 		} `json:"repository"`
-		Author *struct {
-			Login string `json:"login"`
-		} `json:"author"`
 		Labels struct {
 			Nodes []struct {
 				Name string `json:"name"`
 			} `json:"nodes"`
-			PageInfo struct {
-				HasNextPage bool   `json:"hasNextPage"`
-				EndCursor   string `json:"endCursor"`
-			} `json:"pageInfo"`
 		} `json:"labels"`
-		Assignees struct {
-			Nodes []struct {
-				Login string `json:"login"`
-			} `json:"nodes"`
-		} `json:"assignees"`
 		LinkedPRs *struct {
 			Nodes []struct {
 				UpdatedAt string `json:"updatedAt"`
 			} `json:"nodes"`
 		} `json:"closedByPullRequestsReferences"`
-		BlockedByNodes struct {
-			PageInfo struct {
-				HasNextPage bool `json:"hasNextPage"`
-			} `json:"pageInfo"`
-			Nodes []blockedByNode `json:"nodes"`
-		} `json:"blockedBy"`
 	} `json:"content"`
 }
 
@@ -127,36 +108,14 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
               id
               number
               title
-              body
-              url
               state
               updatedAt
               repository {
                 nameWithOwner
               }
-              author {
-                login
-              }
-              labels(first: 100) {
+              labels(first: 5) {
                 nodes {
                   name
-                }
-                pageInfo {
-                  hasNextPage
-                  endCursor
-                }
-              }
-              assignees(first: 10) {
-                nodes {
-                  login
-                }
-              }
-              blockedBy(first: 25) {
-                pageInfo { hasNextPage }
-                nodes {
-                  number
-                  state
-                  repository { nameWithOwner }
                 }
               }
               closedByPullRequestsReferences(first: 5) {
@@ -169,27 +128,13 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
               id
               number
               title
-              body
-              url
               updatedAt
               repository {
                 nameWithOwner
               }
-              author {
-                login
-              }
-              labels(first: 100) {
+              labels(first: 5) {
                 nodes {
                   name
-                }
-                pageInfo {
-                  hasNextPage
-                  endCursor
-                }
-              }
-              assignees(first: 10) {
-                nodes {
-                  login
                 }
               }
             }
@@ -265,8 +210,6 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 			ItemID:   node.ID,
 			Number:   node.Content.Number,
 			Title:    node.Content.Title,
-			Body:     node.Content.Body,
-			URL:      node.Content.URL,
 			IsPR:     node.Content.Typename == "PullRequest",
 			IsClosed: node.Content.Typename != "PullRequest" && node.Content.State == "CLOSED",
 		}
@@ -292,41 +235,11 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 			item.Status = node.FieldValueByName.Name
 		}
 
-		if node.Content.Author != nil {
-			item.Author = node.Content.Author.Login
-		}
-
+		// Populate minimal label set (first:5) for cleanupClosedIssueLocks on
+		// closed items (which are never deep-fetched). Open items receive a full,
+		// authoritative label set from FetchItemDetails.
 		for _, l := range node.Content.Labels.Nodes {
 			item.Labels = append(item.Labels, l.Name)
-		}
-		if node.Content.Labels.PageInfo.HasNextPage {
-			extra, err := c.fetchNodeLabels(node.Content.ID, node.Content.Labels.PageInfo.EndCursor)
-			if err != nil {
-				return nil, err
-			}
-			item.Labels = append(item.Labels, extra...)
-		}
-
-		for _, a := range node.Content.Assignees.Nodes {
-			item.Assignees = append(item.Assignees, a.Login)
-		}
-
-		// Parse blocked-by dependency relationships. The blockedBy field is only
-		// available for Issues (not PRs), and may be absent on older GHES instances;
-		// an empty node list is treated as no dependencies in both cases.
-		if node.Content.BlockedByNodes.PageInfo.HasNextPage {
-			// Log a warning — we don't paginate here (25 blockers is generous)
-			fmt.Printf("[board] #%d: blockedBy has more than 25 entries; only first 25 are used\n", node.Content.Number)
-		}
-		for _, dep := range node.Content.BlockedByNodes.Nodes {
-			d := Dependency{
-				Number: dep.Number,
-				State:  dep.State,
-			}
-			if dep.Repository != nil {
-				d.Repo = dep.Repository.NameWithOwner
-			}
-			item.BlockedBy = append(item.BlockedBy, d)
 		}
 
 		board.Items = append(board.Items, item)
