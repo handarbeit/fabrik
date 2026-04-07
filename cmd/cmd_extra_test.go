@@ -183,7 +183,7 @@ func TestRunUpgrade_BinaryUpgrade_DownloadAttempted(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	matchingAsset := fmt.Sprintf("fabrik_v9.9.9_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	matchingAsset := fmt.Sprintf("fabrik_9.9.9_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
 	upgradeGitHubClient = &testGitHubUpgradeClient{
 		fetchLatestReleaseFn: func(owner, repo string) (*gh.LatestRelease, error) {
 			return &gh.LatestRelease{
