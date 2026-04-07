@@ -70,6 +70,14 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 					return true // cooldown expired, retry
 				}
 			}
+			// Force deep-fetch for awaiting-review items: the gate condition
+			// changes independently of the issue's updatedAt (reviewer submits
+			// a review on the PR, which doesn't bump the issue's updatedAt).
+			for _, l := range item.Labels {
+				if l == "fabrik:awaiting-review" {
+					return true
+				}
+			}
 			return false
 		}
 	}

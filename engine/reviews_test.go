@@ -1,0 +1,243 @@
+package engine
+
+import (
+	"testing"
+	"time"
+
+	gh "github.com/verveguy/fabrik/github"
+	"github.com/verveguy/fabrik/stages"
+)
+
+// reviewTestStages returns a two-stage pipeline for review gate tests.
+func reviewTestStages() []*stages.Stage {
+	waitTrue := true
+	return []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement", WaitForReviews: &waitTrue},
+		{Name: "Review", Order: 2, Prompt: "review"},
+	}
+}
+
+func reviewTestEngine(client *mockGitHubClient) *Engine {
+	return testEngineWithStages(client, reviewTestStages())
+}
+
+// (a) No requested reviewers → gate returns false, advance proceeds.
+func TestCheckReviewGate_NoRequestedReviewers_ReturnsFalse(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:                 10,
+		Repo:                   "owner/repo",
+		LinkedPRReviewRequests: nil, // no pending reviewers
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+
+	blocked := eng.checkReviewGate(board, item, stage)
+
+	if blocked {
+		t.Error("expected not blocked when no requested reviewers")
+	}
+	if len(client.addLabelCalls) != 0 {
+		t.Errorf("expected no label adds, got %d", len(client.addLabelCalls))
+	}
+}
+
+// (a2) Gate disabled (nil WaitForReviews) → always returns false.
+func TestCheckReviewGate_GateDisabled_ReturnsFalse(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviewRequests: []gh.ReviewRequest{
+			{Login: "copilot"},
+		},
+	}
+	// WaitForReviews is nil (not set)
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: nil}
+
+	blocked := eng.checkReviewGate(board, item, stage)
+
+	if blocked {
+		t.Error("expected not blocked when WaitForReviews is nil")
+	}
+}
+
+// (b) Reviewer requested but no review submitted → block and apply label.
+func TestCheckReviewGate_ReviewerRequested_NoReview_Blocks(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		// copilot is in reviewRequests → outstanding
+		LinkedPRReviewRequests: []gh.ReviewRequest{
+			{Login: "copilot"},
+		},
+		// No reviews submitted yet
+		LinkedPRReviews: nil,
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+
+	blocked := eng.checkReviewGate(board, item, stage)
+
+	if !blocked {
+		t.Error("expected blocked when reviewer has not submitted")
+	}
+	// Label should be applied on first block
+	if len(client.addLabelCalls) != 1 {
+		t.Fatalf("expected 1 add label call, got %d", len(client.addLabelCalls))
+	}
+	if client.addLabelCalls[0].labelName != "fabrik:awaiting-review" {
+		t.Errorf("expected fabrik:awaiting-review label, got %q", client.addLabelCalls[0].labelName)
+	}
+}
+
+// (b2) Already has awaiting-review label → still blocked but no duplicate label add.
+func TestCheckReviewGate_AlreadyWaiting_NoLabelAdd(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(client)
+	// FetchLabelAppliedAt returns recent time (no timeout)
+	recentTime := time.Now().Add(-1 * time.Minute)
+	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+		return recentTime, nil
+	}
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		Labels: []string{"fabrik:awaiting-review"},
+		LinkedPRReviewRequests: []gh.ReviewRequest{
+			{Login: "copilot"},
+		},
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+
+	blocked := eng.checkReviewGate(board, item, stage)
+
+	if !blocked {
+		t.Error("expected still blocked")
+	}
+	// No new label add (already present)
+	if len(client.addLabelCalls) != 0 {
+		t.Errorf("expected no label add when already waiting, got %d", len(client.addLabelCalls))
+	}
+}
+
+// (c) All requested reviewers have submitted → advance (no reviewers in reviewRequests).
+func TestCheckReviewGate_AllReviewersSubmitted_ReturnsFalse(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	// copilot no longer in reviewRequests (they submitted) and awaiting-review label present
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		Labels: []string{"fabrik:awaiting-review"},
+		// Empty reviewRequests = all reviewers submitted
+		LinkedPRReviewRequests: nil,
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "copilot", State: "APPROVED"},
+		},
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+
+	blocked := eng.checkReviewGate(board, item, stage)
+
+	if blocked {
+		t.Error("expected not blocked when all reviewers submitted")
+	}
+	// Label should be removed
+	if len(client.removeLabelCalls) != 1 {
+		t.Fatalf("expected 1 remove label call, got %d", len(client.removeLabelCalls))
+	}
+	if client.removeLabelCalls[0].labelName != "fabrik:awaiting-review" {
+		t.Errorf("expected removal of fabrik:awaiting-review, got %q", client.removeLabelCalls[0].labelName)
+	}
+}
+
+// (d) Timeout elapsed → advance with warning, label removed.
+func TestCheckReviewGate_TimeoutElapsed_ReturnsFalse(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(client)
+	// Override timeout to 5 minutes; label was applied 10 minutes ago → timed out
+	eng.cfg.ReviewWaitTimeout = 5 * time.Minute
+	appliedAt := time.Now().Add(-10 * time.Minute)
+	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+		return appliedAt, nil
+	}
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		Labels: []string{"fabrik:awaiting-review"},
+		// Reviewer still outstanding (would block if not for timeout)
+		LinkedPRReviewRequests: []gh.ReviewRequest{
+			{Login: "copilot"},
+		},
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+
+	blocked := eng.checkReviewGate(board, item, stage)
+
+	if blocked {
+		t.Error("expected not blocked when timeout elapsed")
+	}
+	// Label should be removed after timeout
+	if len(client.removeLabelCalls) != 1 {
+		t.Fatalf("expected 1 remove label call, got %d", len(client.removeLabelCalls))
+	}
+	if client.removeLabelCalls[0].labelName != "fabrik:awaiting-review" {
+		t.Errorf("expected removal of fabrik:awaiting-review, got %q", client.removeLabelCalls[0].labelName)
+	}
+	// FetchLabelAppliedAt should have been called for timeout check
+	if len(client.fetchLabelAppliedAtCalls) != 1 {
+		t.Errorf("expected FetchLabelAppliedAt to be called, got %d calls", len(client.fetchLabelAppliedAtCalls))
+	}
+}
+
+// (e) Dismissed reviewer re-blocks gate: reviewer re-appears in reviewRequests.
+func TestCheckReviewGate_DismissedReviewer_Reblocks(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(client)
+	// Label was applied recently — not timed out
+	recentTime := time.Now().Add(-1 * time.Minute)
+	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+		return recentTime, nil
+	}
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	// Reviewer submitted once (appears in latestReviews) but review was dismissed
+	// and they were re-added to reviewRequests — so they're outstanding again.
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		Labels: []string{"fabrik:awaiting-review"},
+		// copilot re-appears in reviewRequests after dismissal
+		LinkedPRReviewRequests: []gh.ReviewRequest{
+			{Login: "copilot"},
+		},
+		// Prior review (now dismissed)
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "copilot", State: "APPROVED"},
+		},
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+
+	blocked := eng.checkReviewGate(board, item, stage)
+
+	if !blocked {
+		t.Error("expected re-blocked after reviewer dismissal and re-request")
+	}
+	// No new label (already present)
+	if len(client.addLabelCalls) != 0 {
+		t.Errorf("expected no new label add, got %d", len(client.addLabelCalls))
+	}
+}
+
+// boolPtr is a helper to create a *bool from a bool literal.
+func boolPtr(b bool) *bool {
+	return &b
+}
