@@ -68,7 +68,8 @@ Before each stage invocation, the engine writes context documents to `.fabrik-co
 - In-flight issues tracked via `sync.Map` to prevent duplicate dispatch
 
 ### Worktrees
-- Each issue gets `.fabrik/worktrees/issue-N/` on branch `fabrik/issue-N`
+- Single-repo: each issue gets `.fabrik/worktrees/issue-N/` on branch `fabrik/issue-N`
+- Multi-repo: each issue gets `.fabrik/worktrees/<owner>/<repo>/issue-N/` on branch `fabrik/issue-N`
 - NEVER destroy worktrees with existing content — they may have partial work
 - `updateWorktreeFromMain` fetches and merges origin/main; leaves conflicts for Claude
 - Dirty worktrees (uncommitted changes) skip the update
@@ -85,18 +86,23 @@ name: Research
 order: 1
 prompt: |
   ...
+skill: fabrik-research          # Optional: plugin skill name to load for this stage
 model: sonnet
 max_turns: 50
-comment_prompt: |          # Optional: prompt for processing user comments
+comment_prompt: |               # Optional: prompt for processing user comments
   ...
-allowed_tools:             # Optional: restrict Claude's tools
+comment_skill: fabrik-research-comment  # Optional: plugin skill for comment processing
+comment_max_turns: 15           # Optional: max turns for comment review (default: min(max_turns, 15))
+allowed_tools:                  # Optional: restrict Claude's tools
   - Read
   - Grep
-update_issue_body: false   # Allow FABRIK_ISSUE_UPDATE markers to modify issue body (by convention, Specify only)
-post_to_pr: true           # Post output to linked PR instead of issue
-create_draft_pr: true      # Create draft PR before stage runs
-mark_pr_ready_on_complete: true  # Mark PR ready when stage completes
-auto_advance: false        # Override global yolo setting
+update_issue_body: false        # Allow FABRIK_ISSUE_UPDATE markers to modify issue body (by convention, Specify only)
+post_to_pr: true                # Post output to linked PR instead of issue
+create_draft_pr: true           # Create draft PR before stage runs
+mark_pr_ready_on_complete: true # Mark PR ready when stage completes
+auto_advance: false             # Override global yolo setting
+read_only: false                # Stash/restore worktree changes (for Specify/Research stages that don't write code)
+cleanup_worktree: false         # Remove worktree when stage completes (for Done/cleanup stages)
 ```
 
 ## Important Conventions
@@ -106,10 +112,17 @@ auto_advance: false        # Override global yolo setting
 - **Commit frequently** during implementation — preserves progress if session is interrupted
 - **Rebase onto latest main** in Review and Validate stages before signaling completion
 - **Check `git status` first** in any stage — there may be uncommitted work from a previous session
-- **Labels are state**: `fabrik:locked:<user>`, `fabrik:editing`, `fabrik:paused`, `fabrik:awaiting-input`, `stage:<name>:in_progress`, `stage:<name>:complete`, `stage:<name>:failed`, `model:<name>`
+- **Labels are state**: `fabrik:locked:<user>`, `fabrik:editing`, `fabrik:paused`, `fabrik:awaiting-input`, `stage:<name>:in_progress`, `stage:<name>:complete`, `stage:<name>:failed`, `model:<name>`, `fabrik:yolo`
+  - `model:<name>` — set by user to select a specific model for this issue (e.g. `model:opus`)
+  - `fabrik:yolo` — set by user to force auto-advance even when `auto_advance: false` in stage YAML; also triggers auto-merge of the linked PR when Validate completes
+
+## Startup Board Validation
+
+On every startup, Fabrik fetches the project board and compares stage names to board columns. If any non-cleanup stage is missing from the board, Fabrik exits with a detailed error message listing the mismatched names. Extra board columns (without a matching stage) produce a warning but don't block startup. This catches mismatches between stage YAML config and the GitHub Project board configuration early.
 
 ## Common Issues
 
+- **Startup board validation failure**: Stage names in `.fabrik/stages/*.yaml` must match the column names on your GitHub Project board exactly. Check both for typos.
 - **Max turns exceeded**: Increase `max_turns` in stage YAML or split the issue
 - **Merge conflicts**: Left as conflict markers for Claude to resolve — check `git status`
 - **Stale worktree**: `updateWorktreeFromMain` runs on each stage invocation; skip if dirty
