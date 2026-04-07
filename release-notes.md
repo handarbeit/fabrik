@@ -1,16 +1,17 @@
-# Fabrik v0.0.5
+# Fabrik v0.0.6
 
 ## Bug Fixes
 
-### Issue Body Updates No Longer Silently Lost (#205, #212)
+### Auto-Upgrade Asset Name Mismatch Fixed (#214, #217)
 
-When a stage (typically Specify) emits `FABRIK_ISSUE_UPDATE_BEGIN/END` markers in an early assistant turn — before additional tool calls — and then emits `FABRIK_STAGE_COMPLETE` in a later turn, the engine was silently dropping the issue body update. The `result` field in Claude's JSON output only contains the text from the **final** assistant turn, so updates written earlier were invisible to the engine.
-
-The fix scans all assistant turns in the raw output stream for the last `FABRIK_ISSUE_UPDATE` block and applies it. This resolves a long-standing frustration where the spec appeared unchanged after Specify ran successfully.
-
-### Done History No Longer Repeats the Same Issue (#124, #213)
-
-The Done pane in the TUI was showing the same completed issue repeated many times. Two complementary fixes: a worktree existence guard in the dispatch loop now prevents Done items without an active worktree from being re-dispatched (the root cause), and a deduplication layer in TUI history collapses duplicate entries as a defensive backstop. Together, they stop the "repeating Done cleanup loop" that accumulated history entries across poll cycles.
+The `fabrik upgrade` command failed silently when checking for new releases. The
+upgrade code constructed the expected asset filename using the raw git tag (e.g.
+`v0.0.6`), producing `fabrik_v0.0.6_darwin_arm64.tar.gz`. However, GoReleaser
+strips the `v` prefix when building asset names — the actual file is
+`fabrik_0.0.6_darwin_arm64.tar.gz`. The asset lookup found no match and the
+upgrade appeared to do nothing. The fix applies `strings.TrimPrefix` to remove
+the leading `v` before constructing the filename, so `fabrik upgrade` now
+correctly downloads and installs new releases.
 
 ## Upgrading
 
