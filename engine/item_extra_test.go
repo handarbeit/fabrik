@@ -606,22 +606,13 @@ func TestItemMayNeedWork_DeepFetchFailureCooldown(t *testing.T) {
 func TestProcessItem_EvictsLastUpdatedAtAfterStageRun(t *testing.T) {
 	skipIfNoGit(t)
 
-	workDir := t.TempDir()
-	cmds := [][]string{
-		{"git", "init", "-b", "main"},
-		{"git", "config", "user.email", "test@test.com"},
-		{"git", "config", "user.name", "Test"},
-		{"git", "commit", "--allow-empty", "-m", "initial"},
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+			return "FABRIK_STAGE_COMPLETE\n", true, TokenUsage{}, nil
+		},
 	}
-	for _, args := range cmds {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = workDir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("setup %v: %s: %v", args, out, err)
-		}
-	}
-
-	wm := NewWorktreeManager(workDir)
 	eng := NewWithDeps(
 		Config{
 			Owner:         "owner",
@@ -634,7 +625,7 @@ func TestProcessItem_EvictsLastUpdatedAtAfterStageRun(t *testing.T) {
 			Stages:        testStages(),
 		},
 		&mockGitHubClient{},
-		&mockClaudeInvoker{output: "FABRIK_STAGE_COMPLETE\n"},
+		claude,
 		wm,
 	)
 
