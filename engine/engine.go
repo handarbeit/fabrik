@@ -55,8 +55,7 @@ type Engine struct {
 	lastBlocked        map[string]bool       // key: issueKey; per-issue blocked-on-input from last processItem (for TUI)
 	lastUpdatedAt      map[string]time.Time  // key: issueKey; tracks last-seen updatedAt per issue
 	idleCount          int                   // consecutive idle polls; triggers self-upgrade at threshold
-	lastReleaseCheck   time.Time             // last time we checked GitHub Releases for a newer binary (in-memory rate limit)
-	sem                chan struct{}         // semaphore bounding concurrent workers across poll cycles
+sem                chan struct{}         // semaphore bounding concurrent workers across poll cycles
 	wg                 sync.WaitGroup        // tracks in-flight workers for graceful shutdown
 	inFlight           sync.Map              // key: issueKey string, value: bool (isPR)
 	events             chan tui.Event        // nil in tests / plain-text mode; TUI goroutine consumes
