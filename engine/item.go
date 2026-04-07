@@ -72,14 +72,13 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 					return true // cooldown expired, retry
 				}
 			}
-			// Force deep-fetch for awaiting-review items: the gate condition
-			// changes independently of the issue's updatedAt (reviewer submits
-			// a review on the PR, which doesn't bump the issue's updatedAt).
-			// Force deep-fetch for awaiting-input items: a new user comment may
-			// have arrived even if updatedAt hasn't changed (e.g. after a failed
-			// deep-fetch in a prior poll cached a stale timestamp).
+			// Force deep-fetch for items whose gate condition changes independently
+			// of the issue's updatedAt:
+			// - fabrik:awaiting-review: reviewer submits a review on the PR
+			// - fabrik:awaiting-input: user comment may have arrived
+			// - fabrik:blocked: a blocking issue may have closed
 			for _, l := range item.Labels {
-				if l == "fabrik:awaiting-review" || l == "fabrik:awaiting-input" {
+				if l == "fabrik:awaiting-review" || l == "fabrik:awaiting-input" || l == "fabrik:blocked" {
 					return true
 				}
 			}
