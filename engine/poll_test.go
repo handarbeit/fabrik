@@ -410,6 +410,54 @@ func TestYoloCatchup_SkipsClosedIssue(t *testing.T) {
 	}
 }
 
+// TestYoloCatchup_SkipsNotDeepFetched verifies that the yolo catch-up loop does
+// not advance an item that was not deep-fetched this poll cycle. This enforces
+// the "shallow = filter only, never act" principle (ADR 017): items skipped by
+// itemMayNeedWork are not in deepFetchedIDs and must not be mutated.
+func TestYoloCatchup_SkipsNotDeepFetched(t *testing.T) {
+	fixedTime := time.Now().Add(-time.Hour)
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{
+						Number:    55,
+						ItemID:    "PVTI_55",
+						Status:    "Research",
+						Repo:      "owner/repo",
+						UpdatedAt: fixedTime,
+						Labels:    []string{"stage:Research:complete", "fabrik:yolo"},
+					},
+				},
+			}, nil
+		},
+		fetchStatusFieldFn: func(projectID string) (*gh.StatusField, error) {
+			return &gh.StatusField{
+				FieldID: "FIELD_1",
+				Options: map[string]string{"Research": "OPT_R", "Plan": "OPT_P"},
+			}, nil
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	eng.cfg.Yolo = true
+	// Pre-seed lastUpdatedAt so itemMayNeedWork sees this item as unchanged →
+	// no deep-fetch → not in deepFetchedIDs → yolo catch-up must skip it.
+	eng.lastUpdatedAt["owner/repo#55"] = fixedTime
+
+	ctx := context.Background()
+	if err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	client.mu.Lock()
+	n := len(client.updateStatusCalls)
+	client.mu.Unlock()
+	if n != 0 {
+		t.Errorf("expected no UpdateProjectItemStatus calls for non-deep-fetched item, got %d", n)
+	}
+}
+
 // TestProcessedSetConcurrency verifies that concurrent access to processedSet
 // via the mutex-protected methods does not cause data races.
 

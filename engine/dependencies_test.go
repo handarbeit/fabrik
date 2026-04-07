@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -203,5 +204,50 @@ func TestCheckDependencies_CrossRepoDep_FormattedCorrectly(t *testing.T) {
 	// Cross-repo dep should be formatted as "other/repo#99"
 	if !strings.Contains(client.addCommentCalls[0].body, "other/repo#99") {
 		t.Errorf("expected cross-repo format in comment, got: %q", client.addCommentCalls[0].body)
+	}
+}
+
+// TestProcessItem_SkipsBlockedNonFirstStage verifies that processItem returns nil
+// without invoking Claude when an item in a non-first stage has an open BlockedBy
+// dependency. This exercises the checkDependencies call added before stage work
+// begins (Bug 1 fix).
+func TestProcessItem_SkipsBlockedNonFirstStage(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	// depTestStages: Specify (order 1), Research (order 2), Implement (order 3)
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        depTestStages(),
+		},
+		client,
+		claude,
+		NewWorktreeManager("/tmp/test-repo"),
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 42,
+		Title:  "Blocked item",
+		Status: "Research", // non-first stage
+		Repo:   "owner/repo",
+		BlockedBy: []gh.Dependency{
+			{Number: 41, State: "OPEN", Repo: "owner/repo"},
+		},
+	}
+
+	err := eng.processItem(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	// Claude must not be invoked — the dependency gate should return nil before
+	// any worktree setup or stage invocation.
+	if len(claude.calls) != 0 {
+		t.Errorf("expected no Claude invocations for blocked non-first stage item, got %d", len(claude.calls))
 	}
 }
