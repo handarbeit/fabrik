@@ -45,6 +45,15 @@ type activeJob struct {
 	LastLine    string
 }
 
+// blockedIssue tracks an issue held at the dependency gate.
+type blockedIssue struct {
+	IssueNumber int
+	Repo        string   // "owner/repo" — empty for single-repo projects
+	Title       string
+	StageName   string
+	WaitingFor  []string // e.g. ["#214", "owner/repo#215"]
+}
+
 // activeJobKey returns a unique string key for an active job.
 // Format: "owner/repo#N" when Repo is non-empty, "#N" otherwise.
 func activeJobKey(repo string, issueNumber int) string {
@@ -90,6 +99,10 @@ type Model struct {
 	// activeNumToKey maps issue number → current job key for LogEvent routing.
 	// When two repos have the same issue number, the last-started job wins.
 	activeNumToKey map[int]string
+
+	// blocked issues keyed by "owner/repo#N" (or "#N" for single-repo).
+	// These are issues held at the dependency gate waiting for blockers to close.
+	blocked map[string]*blockedIssue
 
 	// completed job history (newest last)
 	history []HistoryEntry
@@ -162,6 +175,7 @@ func New(pollSeconds int, info ProjectInfo, pluginDir string) Model {
 		pollInterval:   time.Duration(pollSeconds) * time.Second,
 		active:         make(map[string]*activeJob),
 		activeNumToKey: make(map[int]string),
+		blocked:        make(map[string]*blockedIssue),
 		history:        LoadHistory(),
 		historyVP:      vp,
 		spinnerFrames:  []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"},
@@ -406,6 +420,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			StartedAt:   ev.StartedAt,
 		}
 		m.activeNumToKey[ev.IssueNumber] = key
+		// Passively remove from blocked map if the issue is now running.
+		delete(m.blocked, key)
+		return m, nil
+
+	case IssueBlockedEvent:
+		key := activeJobKey(ev.Repo, ev.IssueNumber)
+		m.blocked[key] = &blockedIssue{
+			IssueNumber: ev.IssueNumber,
+			Repo:        ev.Repo,
+			Title:       ev.Title,
+			StageName:   ev.StageName,
+			WaitingFor:  ev.WaitingFor,
+		}
 		return m, nil
 
 	case JobCompletedEvent:
@@ -763,7 +790,7 @@ func (m Model) viewActive() string {
 	if m.focusPane == paneActive {
 		focusIndicator = "▸"
 	}
-	title := activeStyle.Render(fmt.Sprintf("%s In Progress (%d)", focusIndicator, len(m.active)))
+	title := activeStyle.Render(fmt.Sprintf("%s In Progress (%d)", focusIndicator, len(m.active)+len(m.blocked)))
 
 	var lines []string
 	keys := m.sortedActiveKeys()
@@ -805,8 +832,36 @@ func (m Model) viewActive() string {
 		lines = append(lines, line)
 	}
 
+	// Render blocked issues after active jobs.
+	blockedKeys := make([]string, 0, len(m.blocked))
+	for k := range m.blocked {
+		blockedKeys = append(blockedKeys, k)
+	}
+	sort.Strings(blockedKeys)
+	for _, key := range blockedKeys {
+		b := m.blocked[key]
+		waiting := strings.Join(b.WaitingFor, ", ")
+		titleStr := ""
+		if b.Title != "" {
+			titleStr = dimStyle.Render(b.Title) + " "
+		}
+		stagePad := 12 - lipgloss.Width(b.StageName)
+		stageDisplay := b.StageName
+		if stagePad > 0 {
+			stageDisplay += strings.Repeat(" ", stagePad)
+		}
+		line := fmt.Sprintf("🔒#%-4d %s waiting for: %s  %s",
+			b.IssueNumber, stageDisplay, waiting, titleStr)
+		maxWidth := max(m.width-6, 20)
+		if runes := []rune(line); len(runes) > maxWidth {
+			line = string(runes[:maxWidth-1]) + "…"
+		}
+		lines = append(lines, line)
+	}
+
 	// Cap visible lines to fit within activeHeight
-	maxLines := activeHeight(len(m.active)) - 3 // subtract title + border
+	totalLines := len(lines)
+	maxLines := activeHeight(len(m.active)+len(m.blocked)) - 3 // subtract title + border
 	if len(lines) > maxLines && maxLines > 0 {
 		// Show lines around the selected index
 		start := m.activeIdx - maxLines/2
@@ -816,12 +871,12 @@ func (m Model) viewActive() string {
 		if start+maxLines > len(lines) {
 			start = max(len(lines)-maxLines, 0)
 		}
-		if start > 0 || start+maxLines < len(keys) {
+		if start > 0 || start+maxLines < totalLines {
 			maxLines--
 		}
 		lines = lines[start : start+maxLines]
-		if start > 0 || start+maxLines < len(keys) {
-			lines = append(lines, dimStyle.Render(fmt.Sprintf("  … %d more", len(keys)-maxLines)))
+		if start > 0 || start+maxLines < totalLines {
+			lines = append(lines, dimStyle.Render(fmt.Sprintf("  … %d more", totalLines-maxLines)))
 		}
 	}
 
