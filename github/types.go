@@ -17,6 +17,13 @@ type ProjectBoard struct {
 	Items     []ProjectItem
 }
 
+// Dependency represents a blocking issue relationship fetched from the GitHub API.
+type Dependency struct {
+	Number int    // Issue number of the blocking issue
+	State  string // "OPEN" or "CLOSED" (GitHub GraphQL enum)
+	Repo   string // "owner/repo" of the blocking issue; empty if same repo
+}
+
 // ProjectItem represents an issue or pull request card on the project board.
 type ProjectItem struct {
 	ID        string
@@ -33,6 +40,7 @@ type ProjectItem struct {
 	Assignees []string
 	Comments  []Comment
 	Author    string
+	BlockedBy []Dependency // Issues that must be closed before this one can advance
 }
 
 // Comment represents a comment on an issue or linked PR.

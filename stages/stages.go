@@ -178,3 +178,9 @@ func FindStage(stages []*Stage, name string) *Stage {
 	}
 	return nil
 }
+
+// IsFirstStage reports whether stageName is the first stage in the pipeline
+// (i.e., stages[0].Name == stageName). Returns false for an empty slice.
+func IsFirstStage(stages []*Stage, stageName string) bool {
+	return len(stages) > 0 && stages[0].Name == stageName
+}
