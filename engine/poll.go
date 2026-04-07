@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -202,7 +203,9 @@ func (e *Engine) cleanupClosedIssueLocks(board *gh.ProjectBoard) {
 		}
 		owner, repo, num := parseIssueKey(issueKey(item, e.defaultRepo()), e.cfg.Owner, e.cfg.Repo)
 		if err := e.client.RemoveLabelFromIssue(owner, repo, num, lockLabel); err != nil {
-			e.logf(num, "warn", "could not remove lock label from closed issue: %v\n", err)
+			if !errors.Is(err, gh.ErrNotFound) {
+				e.logf(num, "warn", "could not remove lock label from closed issue: %v\n", err)
+			}
 		} else {
 			e.logf(num, "poll", "removed stale lock label from closed issue\n")
 		}
