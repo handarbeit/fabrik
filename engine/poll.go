@@ -416,6 +416,13 @@ func (e *Engine) poll(ctx context.Context) error {
 			if err := e.advanceToNextStage(board, item, stage); err != nil {
 				e.logf(item.Number, "warn", "could not advance: %v\n", err)
 			}
+			// Evict from updatedAt cache so the item is picked up in its
+			// new column on the next poll. Board column moves don't bump
+			// updatedAt, so without this the item looks "unchanged".
+			iKey := issueKey(item, e.defaultRepo())
+			e.mu.Lock()
+			delete(e.lastUpdatedAt, iKey)
+			e.mu.Unlock()
 		}
 	}
 
