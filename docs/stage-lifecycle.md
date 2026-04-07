@@ -64,7 +64,7 @@ For `read_only: true` stages (Specify, Research, Plan): dirty state is auto-stas
 
 ### Context Files
 
-Before each Claude invocation, the engine writes context documents to `.fabrik-context/` in the worktree (excluded from git via `.git/info/exclude`):
+Before each Claude invocation, the engine writes context documents to `.fabrik-context/` in the worktree. These files are excluded from git by two mechanisms: a `.gitignore` file written inside `.fabrik-context/` that excludes all files in the directory, and a pre-rebase step that runs `git rm -rf --cached .fabrik-context/` to remove any accidentally tracked context files before rebasing.
 
 | File | Content |
 |------|---------|
@@ -310,7 +310,8 @@ For `post_to_pr` stages, comment processing posts a new "(comment review)" comme
 
 The Done stage (`cleanup_worktree: true`) is terminal:
 - No Claude invocation, no lock, no labels
-- Removes worktree directory (unconditionally)
+- Skipped entirely if no worktree exists for the issue — no worktree means there's nothing to clean up
+- Removes worktree directory when it exists
 - Adds `stage:Done:complete` label
 - Respects `fabrik:paused` (skips if paused)
 
@@ -351,6 +352,7 @@ comment_prompt: |           # Inline comment prompt (legacy)
   ...
 model: sonnet               # Optional: Claude model
 max_turns: 50               # Optional: turn limit per invocation
+comment_max_turns: 15       # Optional: max turns for comment review (default: min(max_turns, 15))
 allowed_tools:              # Optional: restrict Claude's tools
   - Read
   - Grep
