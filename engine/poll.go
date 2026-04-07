@@ -305,16 +305,6 @@ func (e *Engine) poll(ctx context.Context) error {
 		if isPaused {
 			continue
 		}
-		isBlocked := false
-		for _, l := range item.Labels {
-			if l == "fabrik:blocked" {
-				isBlocked = true
-				break
-			}
-		}
-		if isBlocked {
-			continue
-		}
 		stage := stages.FindStage(e.cfg.Stages, item.Status)
 		if stage == nil || stage.CleanupWorktree {
 			continue
