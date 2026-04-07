@@ -335,14 +335,32 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 	return board, nil
 }
 
-// FetchItemDetails populates the Comments field of a ProjectItem by fetching
-// issue/PR comments and linked PR comments via individual node queries.
-// This is the "deep" phase of the two-phase fetch approach.
+// FetchItemDetails populates the Comments, Labels, Body, URL, Author, Assignees,
+// and BlockedBy fields of a ProjectItem by fetching full item data via individual
+// node queries. This is the "deep" phase of the two-phase fetch approach.
 func (c *Client) FetchItemDetails(item *ProjectItem) error {
 	query := `
 query($id: ID!) {
   node(id: $id) {
     ... on Issue {
+      body
+      url
+      author { login }
+      labels(first: 20) {
+        nodes { name }
+        pageInfo { hasNextPage endCursor }
+      }
+      assignees(first: 10) {
+        nodes { login }
+      }
+      blockedBy(first: 10) {
+        pageInfo { hasNextPage }
+        nodes {
+          number
+          state
+          repository { nameWithOwner }
+        }
+      }
       comments(first: 100) {
         nodes {
           id
@@ -393,6 +411,16 @@ query($id: ID!) {
       }
     }
     ... on PullRequest {
+      body
+      url
+      author { login }
+      labels(first: 20) {
+        nodes { name }
+        pageInfo { hasNextPage endCursor }
+      }
+      assignees(first: 10) {
+        nodes { login }
+      }
       comments(first: 100) {
         nodes {
           id
@@ -418,6 +446,31 @@ query($id: ID!) {
 	var result struct {
 		Data struct {
 			Node *struct {
+				Body   string `json:"body"`
+				URL    string `json:"url"`
+				Author *struct {
+					Login string `json:"login"`
+				} `json:"author"`
+				Labels struct {
+					Nodes []struct {
+						Name string `json:"name"`
+					} `json:"nodes"`
+					PageInfo struct {
+						HasNextPage bool   `json:"hasNextPage"`
+						EndCursor   string `json:"endCursor"`
+					} `json:"pageInfo"`
+				} `json:"labels"`
+				Assignees struct {
+					Nodes []struct {
+						Login string `json:"login"`
+					} `json:"nodes"`
+				} `json:"assignees"`
+				BlockedBy *struct {
+					PageInfo struct {
+						HasNextPage bool `json:"hasNextPage"`
+					} `json:"pageInfo"`
+					Nodes []blockedByNode `json:"nodes"`
+				} `json:"blockedBy"`
 				Comments struct {
 					Nodes    []commentNodeData `json:"nodes"`
 					PageInfo struct {
@@ -465,6 +518,50 @@ query($id: ID!) {
 	}
 
 	node := result.Data.Node
+
+	// Populate scalar fields
+	item.Body = node.Body
+	item.URL = node.URL
+	if node.Author != nil {
+		item.Author = node.Author.Login
+	}
+
+	// Reset and populate labels (authoritative set from deep fetch)
+	item.Labels = nil
+	for _, l := range node.Labels.Nodes {
+		item.Labels = append(item.Labels, l.Name)
+	}
+	if node.Labels.PageInfo.HasNextPage {
+		extra, err := c.fetchNodeLabels(item.ID, node.Labels.PageInfo.EndCursor)
+		if err != nil {
+			return err
+		}
+		item.Labels = append(item.Labels, extra...)
+	}
+
+	// Populate assignees
+	item.Assignees = nil
+	for _, a := range node.Assignees.Nodes {
+		item.Assignees = append(item.Assignees, a.Login)
+	}
+
+	// Populate blockedBy (Issues only; PRs will have nil BlockedBy node)
+	item.BlockedBy = nil
+	if node.BlockedBy != nil {
+		if node.BlockedBy.PageInfo.HasNextPage {
+			fmt.Printf("[deep-fetch] #%d: blockedBy has more than 10 entries; only first 10 are used\n", item.Number)
+		}
+		for _, dep := range node.BlockedBy.Nodes {
+			d := Dependency{
+				Number: dep.Number,
+				State:  dep.State,
+			}
+			if dep.Repository != nil {
+				d.Repo = dep.Repository.NameWithOwner
+			}
+			item.BlockedBy = append(item.BlockedBy, d)
+		}
+	}
 
 	// Process issue/PR comments
 	commentNodes := node.Comments.Nodes
