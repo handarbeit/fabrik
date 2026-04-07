@@ -81,6 +81,12 @@ type Stage struct {
 	// nil means use the global setting.
 	AutoAdvance *bool `yaml:"auto_advance,omitempty"`
 
+	// WaitForReviews enables a pending-reviewer gate on auto-advance for this
+	// stage. When true, auto-advance is held until all outstanding PR review
+	// requests have been submitted (or the FABRIK_REVIEW_WAIT_TIMEOUT elapses).
+	// Defaults to false (opt-in, consistent with all other stage YAML flags).
+	WaitForReviews *bool `yaml:"wait_for_reviews,omitempty"`
+
 	// CleanupWorktree causes the engine to remove the issue's worktree directory
 	// instead of invoking Claude. No prompt, lock, or in_progress label is needed.
 	// Use this for terminal stages like "Done" to reclaim disk space.

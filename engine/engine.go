@@ -26,8 +26,9 @@ type Config struct {
 	AutoUpgrade   bool
 	PollSeconds   int
 	MaxConcurrent int
-	MaxRetries    int
-	DebugOutput   bool
+	MaxRetries        int
+	ReviewWaitTimeout time.Duration // How long to wait for PR reviewers before auto-advancing anyway (default 15m)
+	DebugOutput       bool
 	PluginDir     string
 	Stages        []*stages.Stage
 	// ReadyCh is closed once Run() has registered signal handlers. Tests use
