@@ -3,12 +3,20 @@ package cmd
 import (
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/handarbeit/fabrik/stages"
 )
+
+func skipIfNoGit(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+}
 
 func TestRunInit_WritesFiles(t *testing.T) {
 	dir := t.TempDir()
@@ -440,5 +448,136 @@ func TestRunInit_IdempotentDestDir(t *testing.T) {
 	}
 	if err := runInit([]string{}); err != nil {
 		t.Fatalf("second runInit: %v", err)
+	}
+}
+
+// initGitRepo creates a git repo in dir, optionally with a remote.
+func initGitRepo(t *testing.T, dir, remoteURL string) {
+	t.Helper()
+	cmds := [][]string{{"git", "init", "-b", "main"}}
+	if remoteURL != "" {
+		cmds = append(cmds, []string{"git", "remote", "add", "origin", remoteURL})
+	}
+	for _, args := range cmds {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", args, out)
+		}
+	}
+}
+
+func TestRunInit_WritesGitExclude(t *testing.T) {
+	skipIfNoGit(t)
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(orig) //nolint
+
+	initGitRepo(t, dir, "https://github.com/example/project.git")
+
+	if err := runInit([]string{}); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	excludePath := filepath.Join(dir, ".git", "info", "exclude")
+	data, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatalf("reading exclude file: %v", err)
+	}
+	content := string(data)
+	for _, entry := range []string{".fabrik/worktrees/", ".fabrik/repos/", ".fabrik/plugin/", ".fabrik/debug/"} {
+		if !strings.Contains(content, entry) {
+			t.Errorf("expected %q in .git/info/exclude, got:\n%s", entry, content)
+		}
+	}
+}
+
+func TestRunInit_GitExclude_Idempotent(t *testing.T) {
+	skipIfNoGit(t)
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(orig) //nolint
+
+	initGitRepo(t, dir, "https://github.com/example/project.git")
+
+	if err := runInit([]string{}); err != nil {
+		t.Fatalf("first runInit: %v", err)
+	}
+	if err := runInit([]string{}); err != nil {
+		t.Fatalf("second runInit: %v", err)
+	}
+
+	excludePath := filepath.Join(dir, ".git", "info", "exclude")
+	data, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatalf("reading exclude file: %v", err)
+	}
+	content := string(data)
+	for _, entry := range []string{".fabrik/worktrees/", ".fabrik/repos/", ".fabrik/plugin/", ".fabrik/debug/"} {
+		count := strings.Count(content, entry)
+		if count != 1 {
+			t.Errorf("expected %q exactly once in .git/info/exclude, got %d occurrences", entry, count)
+		}
+	}
+}
+
+func TestRunInit_SkipsGitExclude_FabrikSource(t *testing.T) {
+	skipIfNoGit(t)
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(orig) //nolint
+
+	initGitRepo(t, dir, "git@github.com:handarbeit/fabrik.git")
+
+	if err := runInit([]string{}); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	excludePath := filepath.Join(dir, ".git", "info", "exclude")
+	data, _ := os.ReadFile(excludePath)
+	content := string(data)
+	if strings.Contains(content, ".fabrik/worktrees/") {
+		t.Errorf("should not write git excludes when in fabrik source repo, got:\n%s", content)
+	}
+}
+
+func TestRunInit_NoGitRepo_NoExclude(t *testing.T) {
+	skipIfNoGit(t)
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(orig) //nolint
+
+	// Plain temp dir — no git repo.
+	if err := runInit([]string{}); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	// No .git directory should be created.
+	if _, err := os.Stat(filepath.Join(dir, ".git")); !os.IsNotExist(err) {
+		t.Error("runInit should not create .git directory when not in a git repo")
 	}
 }
