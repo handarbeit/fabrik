@@ -413,12 +413,14 @@ func runTUI(eng *engine.Engine, pollSeconds int, info tui.ProjectInfo, pluginDir
 	}()
 
 	if _, err := p.Run(); err != nil {
+		p.ReleaseTerminal()
 		// TUI failed — signal the engine to stop so its goroutine and the
 		// forwarding goroutine both exit cleanly.
 		_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 		<-errCh
 		return err
 	}
+	p.ReleaseTerminal()
 	// TUI exited (user pressed q or ctrl+c). If the engine is still running
 	// (q doesn't send SIGINT), signal it to stop gracefully.
 	select {
