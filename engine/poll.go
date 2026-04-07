@@ -294,6 +294,10 @@ func (e *Engine) poll(ctx context.Context) error {
 		e.logf(0, "poll", "repos on board: %v\n", repos)
 	}
 
+	// deepFetchCandidates collects items (after FetchItemDetails runs) for the
+	// yolo catch-up loop. Populated only for items that pass itemMayNeedWork so
+	// that the catch-up loop operates on the full deep-fetched label set.
+	var deepFetchCandidates []gh.ProjectItem
 	var deepFetched int
 	for i := range board.Items {
 		if repoFilter != "" && board.Items[i].Repo != "" && board.Items[i].Repo != repoFilter {
@@ -307,12 +311,14 @@ func (e *Engine) poll(ctx context.Context) error {
 		// check and a completion label.
 		if st := stages.FindStage(e.cfg.Stages, board.Items[i].Status); st != nil && st.CleanupWorktree {
 			e.logf(0, "poll", "skipping deep-fetch for cleanup-stage item #%d\n", board.Items[i].Number)
+			deepFetchCandidates = append(deepFetchCandidates, board.Items[i])
 			continue
 		}
 		e.logf(0, "poll", "deep-fetching details for #%d\n", board.Items[i].Number)
 		if err := e.client.FetchItemDetails(&board.Items[i]); err != nil {
 			e.logf(0, "warn", "could not fetch details for #%d: %v\n", board.Items[i].Number, err)
 		}
+		deepFetchCandidates = append(deepFetchCandidates, board.Items[i])
 		deepFetched++
 	}
 	if deepFetched > 0 {
@@ -321,13 +327,8 @@ func (e *Engine) poll(ctx context.Context) error {
 
 	// Catch-up: auto-advance items that have fabrik:yolo + stage complete
 	// but are still sitting in the completed stage's column.
-	for _, item := range board.Items {
-		if item.IsClosed {
-			continue
-		}
-		if repoFilter != "" && item.Repo != "" && item.Repo != repoFilter {
-			continue
-		}
+	// Operates only on deepFetchCandidates so the full label set is available.
+	for _, item := range deepFetchCandidates {
 		if !e.cfg.Yolo && !hasYoloLabel(item) {
 			continue
 		}
