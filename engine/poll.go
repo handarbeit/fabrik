@@ -301,13 +301,18 @@ func (e *Engine) poll(ctx context.Context) error {
 		}
 	}
 
-	// Update the updatedAt cache for all items. This is done before dispatch
-	// so that itemNeedsWork can compare against the previous poll's timestamps.
+	// Update the updatedAt cache only for items that were actually deep-fetched
+	// and processed. Caching all board items would cause items that failed the
+	// shallow filter (or were skipped for other reasons) to appear "unchanged"
+	// on the next poll and never be retried.
 	// We defer the actual cache update to after the dispatch loop so that
 	// itemNeedsWork sees the OLD timestamps during this poll.
+	// The deepFetchCandidates slice is populated below; the defer captures it
+	// by reference so it sees the final contents.
+	var deepFetchCandidates []gh.ProjectItem
 	defer func() {
 		e.mu.Lock()
-		for _, item := range board.Items {
+		for _, item := range deepFetchCandidates {
 			if !item.UpdatedAt.IsZero() {
 				e.lastUpdatedAt[issueKey(item, e.defaultRepo())] = item.UpdatedAt
 			}
@@ -340,10 +345,6 @@ func (e *Engine) poll(ctx context.Context) error {
 		e.logf(0, "poll", "repos on board: %v\n", repos)
 	}
 
-	// deepFetchCandidates collects items (after FetchItemDetails runs) for the
-	// yolo catch-up loop. Populated only for items that pass itemMayNeedWork so
-	// that the catch-up loop operates on the full deep-fetched label set.
-	var deepFetchCandidates []gh.ProjectItem
 	var deepFetched int
 	for i := range board.Items {
 		if repoFilter != "" && board.Items[i].Repo != "" && board.Items[i].Repo != repoFilter {
