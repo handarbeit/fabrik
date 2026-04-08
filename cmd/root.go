@@ -13,6 +13,7 @@ import (
 	"github.com/mattn/go-isatty"
 	"github.com/verveguy/fabrik/config"
 	"github.com/verveguy/fabrik/engine"
+	fabrikplugin "github.com/verveguy/fabrik/plugin"
 	"github.com/verveguy/fabrik/stages"
 	"github.com/verveguy/fabrik/tui"
 )
@@ -307,8 +308,8 @@ func Execute() error {
 	// the re-exec'd process doesn't loop.
 	if os.Getenv("FABRIK_AUTO_UPGRADED") == "1" {
 		os.Unsetenv("FABRIK_AUTO_UPGRADED")
-		if _, err := refreshPlugin(); err != nil {
-			fmt.Fprintf(os.Stderr, "[upgrade] warning: refreshPlugin failed: %v\n", err)
+		if _, err := fabrikplugin.RefreshPlugin(); err != nil {
+			fmt.Fprintf(os.Stderr, "[upgrade] warning: RefreshPlugin failed: %v\n", err)
 		}
 	}
 

@@ -7,12 +7,13 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
+
+	fabrikplugin "github.com/verveguy/fabrik/plugin"
 )
 
 // fabrikOwner and fabrikRepo are the canonical owner/repo for fabrik itself.
@@ -240,9 +241,10 @@ func PerformReleaseUpgrade(client GitHubClient, version, token string, extraEnv 
 
 	// Refresh plugin skills from the new binary.
 	logf("refreshing plugin skills\n")
-	upgradeCmd := exec.Command(exe, "upgrade")
-	if out, err := upgradeCmd.CombinedOutput(); err != nil {
-		logf("fabrik upgrade failed (non-fatal): %v\n%s\n", err, out)
+	if wrote, err := fabrikplugin.RefreshPlugin(); err != nil {
+		logf("plugin refresh failed (non-fatal): %v\n", err)
+	} else if wrote > 0 {
+		logf("refreshed %d plugin file(s)\n", wrote)
 	}
 
 	logf("re-executing\n")
