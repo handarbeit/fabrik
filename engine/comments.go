@@ -16,10 +16,6 @@ func (e *Engine) findNewComments(item gh.ProjectItem) []gh.Comment {
 	defer e.mu.Unlock()
 	iKey := issueKey(item, e.defaultRepo())
 	for _, c := range item.Comments {
-		// Only process comments from the configured user
-		if c.Author != e.cfg.User {
-			continue
-		}
 		// Skip comments we've already processed
 		key := iKey + "-comment-" + c.ID
 		if _, seen := e.processedSet[key]; seen {
@@ -194,9 +190,6 @@ func (e *Engine) markCommentsSeenByStage(item gh.ProjectItem, preStageComments [
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	iKey := issueKey(item, e.defaultRepo())
 	for _, c := range preStageComments {
-		if c.Author != e.cfg.User {
-			continue
-		}
 		if strings.HasPrefix(c.Body, "🏭 **Fabrik") {
 			continue
 		}
