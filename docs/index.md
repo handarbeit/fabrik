@@ -255,6 +255,41 @@ description: >-
           <code>fabrik upgrade</code> refreshes them.
         </div>
       </div>
+      <div class="feature-card">
+        <span class="feature-icon">🔗</span>
+        <div class="feature-title">Formations</div>
+        <div class="feature-desc">
+          Coordinate multi-issue projects using GitHub's native "Blocked by"
+          relationships. Independent issues execute in parallel; dependent issues
+          gate automatically. The <code>fabrik:blocked</code> label is managed
+          entirely by the engine — no pre-creation needed. See the
+          <a href="{{ '/USER_GUIDE' | relative_url }}#dependency-based-sequencing-formations">USER_GUIDE §3</a>
+          for the full recipe and real-world validation numbers.
+        </div>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">🗄️</span>
+        <div class="feature-title">Auto-Archive</div>
+        <div class="feature-desc">
+          When an issue reaches Done, Fabrik archives the project board item
+          after a 24-hour grace period — keeping your board clean automatically.
+          The grace period survives engine restarts (it's based on the item's
+          GitHub timestamp, not in-memory state). Archived items remain
+          accessible via GitHub's Archive view.
+        </div>
+      </div>
+      <div class="feature-card">
+        <span class="feature-icon">👁️</span>
+        <div class="feature-title">Pending Reviewer Gate</div>
+        <div class="feature-desc">
+          Set <code>wait_for_reviews: true</code> on a stage and Fabrik waits
+          for all requested PR reviewers to submit before auto-advancing.
+          Controlled by <code>FABRIK_REVIEW_WAIT_TIMEOUT</code> (default 15 min).
+          The <code>fabrik:awaiting-review</code> label makes the wait state
+          visible on the board; the gate clears automatically when all reviews
+          are in or the timeout elapses.
+        </div>
+      </div>
     </div>
 
     <div class="factory-callout">
