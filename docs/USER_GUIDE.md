@@ -129,9 +129,9 @@ Fabrik polls the project board every 30 seconds by default (configurable with `-
 or `poll:` in `config.yaml`).
 Move an issue to `Specify` on the board to start processing it.
 
-### Multi-Repo Mode
+### Git Repositories and Worktrees
 
-Fabrik can manage issues from a **single GitHub Project board that spans multiple repositories**. Run Fabrik from any directory (no need to be inside a git checkout of a managed repo):
+Fabrik always bare-clones each managed repository on first access. Run Fabrik from any directory (no need to be inside a git checkout of a managed repo):
 
 ```bash
 mkdir ~/my-fabrik-dir && cd ~/my-fabrik-dir
@@ -609,6 +609,15 @@ Follow the instructions in the fabrik-research skill exactly.
 
 The skill is auto-loaded by Claude Code via the plugin system.
 
+### Built-in Skill: `/cut-release`
+
+The `/cut-release` skill automates the Fabrik release process. After tagging and pushing a new release, it automatically:
+
+1. Creates a GitHub issue titled `Update docs for v<version>` labeled `documentation` and `fabrik:yolo`
+2. Adds the issue to the project board and moves it to the **Specify** column
+
+This means every release automatically queues a documentation update issue that Fabrik will pick up and process through the pipeline.
+
 ### Plugin Development
 
 For developing the plugin itself, use `--plugin-dir` to point at your working copy:
@@ -746,7 +755,7 @@ ls -lt ~/.fabrik/logs/issue-42/
 cat ~/.fabrik/logs/issue-42/<stage>-output-<timestamp>.json | fabrik stream-filter | less -R
 ```
 
-In multi-repo mode, logs are namespaced by repository: `~/.fabrik/logs/<owner>-<repo>/issue-<N>/`.
+Logs are namespaced by repository: `~/.fabrik/logs/<owner>-<repo>/issue-<N>/`.
 
 `fabrik stream-filter` reads NDJSON or JSON array Claude output from stdin and renders thinking blocks, text responses, and tool calls as human-readable text.
 
@@ -798,14 +807,14 @@ label to resume.
 
 ### Stale Worktrees
 
-Worktrees are at `.fabrik/worktrees/issue-N/` on branch `fabrik/issue-N`. On each stage
+Worktrees are at `.fabrik/worktrees/<owner>-<repo>/issue-N/` on branch `fabrik/issue-N`. On each stage
 invocation, Fabrik rebases onto latest main (unless it's a retry, which preserves the
 worktree as-is to maintain Claude's context). If the rebase conflicts, it's silently
 aborted and Claude works from the current base.
 
 To manually clean up:
 ```bash
-git worktree remove --force .fabrik/worktrees/issue-N
+git worktree remove --force .fabrik/worktrees/<owner>-<repo>/issue-N
 git branch -D fabrik/issue-N
 ```
 
