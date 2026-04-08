@@ -39,8 +39,9 @@ func TestItemNeedsWork_SkipsPausedWithNewComments(t *testing.T) {
 		},
 	}
 
-	if eng.itemNeedsWork(item) {
-		t.Error("itemNeedsWork should return false for paused item even when new comments are present")
+	// Any comment (regardless of author) on a paused item triggers work.
+	if !eng.itemNeedsWork(item) {
+		t.Error("itemNeedsWork should return true for paused item with a new comment from any user")
 	}
 }
 
@@ -58,10 +59,10 @@ func TestFindNewComments(t *testing.T) {
 	}
 
 	comments := eng.findNewComments(item)
-	if len(comments) != 2 {
-		t.Fatalf("expected 2 new comments, got %d", len(comments))
+	if len(comments) != 3 {
+		t.Fatalf("expected 3 new comments, got %d", len(comments))
 	}
-	if comments[0].ID != "C1" || comments[1].ID != "C4" {
+	if comments[0].ID != "C1" || comments[1].ID != "C2" || comments[2].ID != "C4" {
 		t.Errorf("comments = %v", comments)
 	}
 
@@ -224,7 +225,7 @@ func TestMarkCommentsProcessedConcurrency(t *testing.T) {
 }
 
 // TestFindNewCommentsFiltering verifies that findNewComments correctly filters
-// already-processed, wrong-author, and fabrik-output comments.
+// already-processed and fabrik-output comments regardless of author.
 func TestFindNewCommentsFiltering(t *testing.T) {
 	e := &Engine{
 		cfg:          Config{User: "alice"},
@@ -239,17 +240,17 @@ func TestFindNewCommentsFiltering(t *testing.T) {
 		Comments: []gh.Comment{
 			{ID: "c1", Author: "alice", Body: "please fix"},        // new — should be returned
 			{ID: "c2", Author: "alice", Body: "already seen"},      // already processed
-			{ID: "c3", Author: "bob", Body: "not my user"},         // wrong author
-			{ID: "c4", Author: "alice", Body: "🏭 **Fabrik output"}, // fabrik output
+			{ID: "c3", Author: "bob", Body: "colleague comment"},   // any author — should be returned
+			{ID: "c4", Author: "alice", Body: "🏭 **Fabrik output"}, // fabrik output — skipped
 		},
 	}
 
 	result := e.findNewComments(item)
-	if len(result) != 1 {
-		t.Fatalf("expected 1 new comment, got %d", len(result))
+	if len(result) != 2 {
+		t.Fatalf("expected 2 new comments, got %d", len(result))
 	}
-	if result[0].ID != "c1" {
-		t.Errorf("expected comment c1, got %s", result[0].ID)
+	if result[0].ID != "c1" || result[1].ID != "c3" {
+		t.Errorf("expected comments c1 and c3, got %v", result)
 	}
 }
 
