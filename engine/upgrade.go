@@ -12,8 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-
-	fabrikplugin "github.com/verveguy/fabrik/plugin"
 )
 
 // fabrikOwner and fabrikRepo are the canonical owner/repo for fabrik itself.
@@ -239,14 +237,9 @@ func PerformReleaseUpgrade(client GitHubClient, version, token string, extraEnv 
 	// Clean up tarball before exec replaces the process (defers won't run).
 	os.Remove(tarballPath)
 
-	// Refresh plugin skills from the new binary.
-	logf("refreshing plugin skills\n")
-	if wrote, err := fabrikplugin.RefreshPlugin(); err != nil {
-		logf("plugin refresh failed (non-fatal): %v\n", err)
-	} else if wrote > 0 {
-		logf("refreshed %d plugin file(s)\n", wrote)
-	}
-
+	// Plugin skills are refreshed by the NEW binary after re-exec — the
+	// FABRIK_AUTO_UPGRADED=1 env var (passed via extraEnv) triggers
+	// RefreshPlugin() in root.go on startup.
 	logf("re-executing\n")
 
 	env := append(os.Environ(), extraEnv...)
