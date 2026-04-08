@@ -662,6 +662,12 @@ Writes `release-notes.md` in the repo root:
 ## Fixes
 - Description of fix (#issue)
 
+## Improvements
+- Description of improvement (#issue)
+
+## Internal
+- Summary of internal changes
+
 ## Upgrading
 
 \```bash
