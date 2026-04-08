@@ -5,9 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -44,8 +42,7 @@ type Engine struct {
 	claude             ClaudeInvoker
 	statusField        *gh.StatusField
 	worktreeManagers   map[string]*WorktreeManager // key: "owner/repo"; one WM per discovered repo
-	jobControlMode     bool                        // true when running from a non-git directory (multi-repo)
-	jobControlDir      string                      // fabrikDir when jobControlMode is true
+	fabrikDir          string                      // directory containing .fabrik/ (always os.Getwd() at startup)
 	mu                 sync.Mutex
 	processedSet       map[string]time.Time  // key: "owner/repo#N-stageName" or "owner/repo#N-comment-ID"
 	lockedIssues       map[string]bool       // key: "owner/repo#N"; issues with fabrik:locked added but not yet released
@@ -66,26 +63,12 @@ type Engine struct {
 }
 
 func New(cfg Config) (*Engine, error) {
-	// Resolve working directory. If we're in a git repo, use the repo root.
-	// If not (job-control directory for multi-repo projects), use cwd and
-	// clone the target repo as a bare repo for worktree operations.
 	// fabrikDir is the directory containing .fabrik/ (stages, plugin, config).
-	// repoDir is the git repo root used for worktree operations.
-	// In a git repo, they're the same. In a job-control directory, fabrikDir
-	// is cwd and repoDir is the bare clone at .fabrik/repo.git.
-	var fabrikDir string
-	var jobControlMode bool
-	repoDir, err := gitToplevel()
+	// Always use the current working directory — Fabrik bare-clones each managed
+	// repo to .fabrik/repos/<owner>-<repo>.git and uses worktrees from there.
+	fabrikDir, err := os.Getwd()
 	if err != nil {
-		// Not in a git repo — job-control directory for multi-repo projects.
-		// Repos are cloned lazily by ensureRepoReady when the first issue for each repo arrives.
-		fabrikDir, err = os.Getwd()
-		if err != nil {
-			return nil, fmt.Errorf("resolving working directory: %w", err)
-		}
-		jobControlMode = true
-	} else {
-		fabrikDir = repoDir
+		return nil, fmt.Errorf("resolving working directory: %w", err)
 	}
 
 	// Default to .fabrik/plugin in the fabrik dir (created by fabrik init).
@@ -110,8 +93,7 @@ func New(cfg Config) (*Engine, error) {
 		client:             gh.NewClient(cfg.Token),
 		claude:             &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},
 		worktreeManagers:   make(map[string]*WorktreeManager),
-		jobControlMode:     jobControlMode,
-		jobControlDir:      fabrikDir,
+		fabrikDir:            fabrikDir,
 		processedSet:         make(map[string]time.Time),
 		lockedIssues:         make(map[string]bool),
 		lastUsage:            make(map[string]TokenUsage),
@@ -122,16 +104,6 @@ func New(cfg Config) (*Engine, error) {
 		retryCount:           make(map[string]int),
 		pausedDueToRetries:   make(map[string]bool),
 		sem:                  make(chan struct{}, cfg.MaxConcurrent),
-	}
-
-	if !jobControlMode && cfg.Repo != "" {
-		// Single-repo git-repo mode: register the configured repo's WM upfront.
-		nameWithOwner := cfg.Owner + "/" + cfg.Repo
-		// Use "owner-repo" as the directory segment to avoid cross-owner collisions.
-		dirName := cfg.Owner + "-" + cfg.Repo
-		wm := NewWorktreeManagerForRepo(repoDir, worktreeRoot, dirName)
-		eng.worktreeManagers[nameWithOwner] = wm
-		wm.logfFn = eng.logf
 	}
 
 	// Migrate any old-style worktrees (issue-N/) to the new per-repo layout.
@@ -146,7 +118,6 @@ func New(cfg Config) (*Engine, error) {
 		func(msg string) { fmt.Printf("[startup] %s", msg) },
 	)
 
-	// In multi-repo mode (cfg.Repo == ""), WMs are registered lazily in ensureRepoReady.
 	return eng, nil
 }
 
@@ -205,46 +176,6 @@ func (e *Engine) worktreesFor(nameWithOwner string) *WorktreeManager {
 	e.mu.Unlock()
 	if !ok {
 		panic(fmt.Sprintf("engine: no WorktreeManager registered for repo %q — ensureRepoReady not called", nameWithOwner))
-	}
-	return wm
-}
-
-// isFabrikSourceCheckout reports whether dir is a git checkout of the fabrik
-// source repo (tenaciousvc/fabrik or handarbeit/fabrik). Returns false on any
-// error (no git, no remote, wrong remote, etc.).
-func isFabrikSourceCheckout(dir string) bool {
-	cmd := exec.Command("git", "remote", "get-url", "origin")
-	cmd.Dir = dir
-	out, err := cmd.Output()
-	if err != nil {
-		return false
-	}
-	url := strings.TrimSuffix(strings.TrimSpace(string(out)), ".git")
-	for _, pattern := range []string{"tenaciousvc/fabrik", "handarbeit/fabrik"} {
-		if strings.Contains(url, pattern) {
-			return true
-		}
-	}
-	return false
-}
-
-// devCheckout returns the WorktreeManager for Fabrik's own source checkout, or nil.
-// Only available in dev mode (version starts with "dev") when running from Fabrik's own repo.
-// Used by the dev upgrade path (git pull + go build); the release upgrade path has no dependency on this.
-func (e *Engine) devCheckout() *WorktreeManager {
-	key := e.defaultRepo()
-	if key == "" {
-		return nil
-	}
-	e.mu.Lock()
-	wm := e.worktreeManagers[key]
-	e.mu.Unlock()
-	if wm == nil {
-		return nil
-	}
-	if !isFabrikSourceCheckout(wm.BaseDir()) {
-		e.logf(0, "upgrade", "not in fabrik source checkout — skipping dev auto-upgrade\n")
-		return nil
 	}
 	return wm
 }
@@ -339,11 +270,11 @@ func mapKeys(m map[string]string) []string {
 var ErrSkipItem = errors.New("skip item")
 
 // ensureRepoReady guarantees that a WorktreeManager exists for the repo that
-// owns item. In single-repo git mode the WM is already registered at startup,
-// so this is a no-op. In job-control (multi-repo) mode it lazily bare-clones
-// the repo on first access. If the clone fails it posts a comment, adds
-// fabrik:paused and fabrik:awaiting-input labels, records a history entry, and
-// returns ErrSkipItem so the caller skips without treating it as a hard error.
+// owns item. On first access it bare-clones the repo to .fabrik/repos/<owner>-<repo>.git.
+// Subsequent calls are no-ops (idempotent WM registration). If the clone fails
+// it posts a comment, adds fabrik:paused and fabrik:awaiting-input labels,
+// records a history entry, and returns ErrSkipItem so the caller skips without
+// treating it as a hard error.
 func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	if owner == "" || repo == "" {
@@ -358,9 +289,8 @@ func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error
 		return nil
 	}
 
-	// Job-control mode: clone the repo bare.
-	worktreeRoot := filepath.Join(e.jobControlDir, ".fabrik", "worktrees")
-	bareDir, err := ensureBareClone(e.jobControlDir, owner, repo)
+	worktreeRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
+	bareDir, err := ensureBareClone(e.fabrikDir, owner, repo)
 	if err != nil {
 		msg := fmt.Sprintf("🏭 **Fabrik — cannot clone repo**\n\nFailed to clone `%s/%s`:\n```\n%v\n```\nHuman intervention required. Fix the clone issue and remove `fabrik:paused` to retry.", owner, repo, err)
 		if commentErr := e.client.AddComment(owner, repo, item.Number, msg); commentErr != nil {
