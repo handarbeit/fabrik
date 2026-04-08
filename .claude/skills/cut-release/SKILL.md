@@ -83,8 +83,34 @@ Omit any empty category sections. Keep descriptions concise — one line each.
 - Push: `git push origin main <version>`
 - Report the GitHub Actions release URL: `gh run list --limit 1 -R tenaciousvc/fabrik`
 
+### 7. File documentation update issue
+
+After a successful push, create a GitHub issue to update user documentation:
+
+```bash
+gh issue create -R tenaciousvc/fabrik \
+  --title "Update docs for v<version>" \
+  --label "documentation" \
+  --label "fabrik:yolo" \
+  --body "Update USER_GUIDE.md, README.md, and the marketing site to reflect changes in v<version>.
+
+## Changes to document
+
+<paste the release notes summary here>
+
+## Scope
+
+- USER_GUIDE.md — update any sections affected by new features or changed behavior
+- README.md — update feature list if new user-facing capabilities were added
+- docs/index.md — update marketing page if warranted
+- Ensure code examples and configuration references are current"
+```
+
+Move the issue to the Specify column on the Fabrik PM project board. The `fabrik:yolo` label ensures it flows through the pipeline automatically.
+
 ## Important
 
 - Never skip the build/test step — broken releases are worse than delayed releases
 - Never force-push tags — if a tag exists, stop and ask the user
 - The GitHub Actions workflow (`.github/workflows/release.yml`) uses `--release-notes release-notes.md` so the file must be committed before the tag push triggers the build
+- Always file the doc update issue — documentation drift is how users get confused
