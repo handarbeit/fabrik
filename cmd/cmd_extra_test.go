@@ -15,6 +15,7 @@ import (
 
 	"github.com/handarbeit/fabrik/config"
 	gh "github.com/handarbeit/fabrik/github"
+	fabrikplugin "github.com/handarbeit/fabrik/plugin"
 )
 
 // ── upgrade mock ──────────────────────────────────────────────────────────────
@@ -226,12 +227,12 @@ func TestRefreshPlugin_WritesFiles(t *testing.T) {
 	dir := t.TempDir()
 	chdirTest(t, dir)
 
-	n, err := refreshPlugin()
+	n, err := fabrikplugin.RefreshPlugin()
 	if err != nil {
-		t.Fatalf("refreshPlugin: %v", err)
+		t.Fatalf("RefreshPlugin: %v", err)
 	}
 	if n == 0 {
-		t.Error("expected refreshPlugin to write at least one file")
+		t.Error("expected RefreshPlugin to write at least one file")
 	}
 }
 
