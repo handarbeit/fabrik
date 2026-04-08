@@ -284,6 +284,7 @@ FABRIK_USER=my-personal-username
 | `FABRIK_TUI` | `tui` | Disable TUI dashboard (`false`/`0`/`no`) | `true` |
 | `FABRIK_PLUGIN_DIR` | *(no config.yaml key)* | Override plugin directory | `.fabrik/plugin/` |
 | `FABRIK_DEBUG_OUTPUT` | `debug_output` | Save raw Claude output for debugging | `false` |
+| `FABRIK_REVIEW_WAIT_TIMEOUT` | *(no config.yaml key)* | Minutes to wait for all requested PR reviewers to submit before auto-advancing (positive integer; invalid or unset values default to 15) | `15` |
 
 Token precedence: `--token` flag > `FABRIK_TOKEN` > `GITHUB_TOKEN`
 
@@ -328,6 +329,10 @@ auto_advance: false       # Optional. Per-stage override for the global yolo set
 cleanup_worktree: false   # Optional. Removes the issue worktree instead of invoking Claude.
                           #   Use for terminal stages (e.g., Done) where no further work
                           #   is needed on the branch.
+wait_for_reviews: false   # Optional. When true and auto-advance is active, Fabrik waits for
+                          #   all requested PR reviewers to submit before advancing the issue.
+                          #   Controlled by FABRIK_REVIEW_WAIT_TIMEOUT (default 15 minutes).
+                          #   See §3 Pending Reviewer Gate for full details.
 allowed_tools:            # Optional. Restrict Claude's available tools.
   - Read
   - Grep
@@ -518,6 +523,52 @@ In this 5-issue formation:
 - Issues #4 and #5 start after #3 is closed (in parallel with each other)
 
 **Real-world validation:** A 9-issue formation with 7 dependency edges was run on the Ambient project — 4 issues started in parallel, all pipeline constraints were respected automatically, completing in ~88 minutes wall-clock time at $31 total cost.
+
+### Pending Reviewer Gate
+
+When a stage has `wait_for_reviews: true` set and auto-advance is active (global `yolo: true`, per-stage `auto_advance: true`, or the `fabrik:yolo` label on the issue), Fabrik waits for all requested PR reviewers to submit their reviews before advancing the issue to the next stage.
+
+#### Enabling the Gate
+
+Add `wait_for_reviews: true` to the relevant stage YAML (typically Review or Validate):
+
+```yaml
+name: Review
+order: 4
+wait_for_reviews: true
+...
+```
+
+The gate only fires when auto-advance is active. If you're manually dragging cards through the board, the gate has no effect — you control the timing.
+
+#### Label Lifecycle
+
+When the gate is active, Fabrik adds the `fabrik:awaiting-review` label to the issue. This label:
+
+- Makes the wait state visible on the project board
+- Is cleared automatically when all requested reviewers submit (approve, request changes, or comment)
+- Is also cleared when the `FABRIK_REVIEW_WAIT_TIMEOUT` elapses (fail-open: Fabrik advances the issue even without all reviews)
+
+#### Timeout Configuration
+
+Set `FABRIK_REVIEW_WAIT_TIMEOUT` to the number of minutes Fabrik should wait before giving up and advancing anyway. Must be a positive integer; invalid or unset values default to 15 minutes. There is no way to disable the timeout entirely — the minimum value is 1 minute.
+
+```bash
+FABRIK_REVIEW_WAIT_TIMEOUT=30  # Wait up to 30 minutes for reviewers
+```
+
+#### Two-Phase Mechanism
+
+The gate uses a two-phase design to handle the propagation delay between when Fabrik requests reviewers and when GitHub's API returns them in the PR data:
+
+1. **Phase 1 (always-gate):** On stage completion, Fabrik immediately adds `fabrik:awaiting-review` and skips auto-advance. This fires even before reviewer assignments propagate.
+2. **Phase 2 (catch-up):** On subsequent poll cycles, Fabrik re-fetches the PR with fresh GraphQL data and evaluates whether all requested reviewers have submitted. When they have (or the timeout elapses), the gate clears and auto-advance proceeds.
+
+This means there is always at least one extra poll cycle delay after stage completion — typically 30 seconds.
+
+#### Restart Persistence
+
+The timeout is based on the timestamp of when the `fabrik:awaiting-review` label was added to the issue, which is stored in GitHub's event history. If Fabrik restarts while waiting, it recalculates the remaining wait time from the label timestamp rather than resetting the clock.
 
 ---
 
@@ -780,6 +831,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:editing` | Issue body being updated (comment processing) |
 | `fabrik:paused` | Processing paused (max retries exceeded or manual) |
 | `fabrik:awaiting-input` | Stage paused waiting for user input; auto-clears on a new comment from the configured user |
+| `fabrik:awaiting-review` | Issue waiting for all requested PR reviewers to submit; set when `wait_for_reviews: true` stage completes with auto-advance active; cleared when all reviewers submit or `FABRIK_REVIEW_WAIT_TIMEOUT` elapses |
 | `fabrik:blocked` | Issue is waiting for one or more blocking issues to close; added and removed automatically by the engine (Fabrik creates this label on first use — no pre-creation needed) |
 | `stage:<name>:in_progress` | Stage actively running |
 | `stage:<name>:complete` | Stage completed successfully |
