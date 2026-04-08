@@ -254,6 +254,43 @@ func (e *Engine) cleanupClosedIssueLocks(board *gh.ProjectBoard) {
 	}
 }
 
+// archiveDoneCompleteItems is a lazy migration pass that archives any board items
+// already in a cleanup (Done) stage that have the stage:<Name>:complete label but
+// have not yet been archived. This self-heals boards that accumulated Done items
+// before archiving was introduced.
+//
+// Note: this operates on shallow board data (ADR 020 boundary). Like
+// cleanupClosedIssueLocks, archiving is housekeeping on terminal, idempotent
+// operations — not a stage transition — so the shallow-data exception applies.
+func (e *Engine) archiveDoneCompleteItems(board *gh.ProjectBoard) {
+	archived := 0
+	for _, item := range board.Items {
+		st := stages.FindStage(e.cfg.Stages, item.Status)
+		if st == nil || !st.CleanupWorktree {
+			continue
+		}
+		completeLabel := fmt.Sprintf("stage:%s:complete", st.Name)
+		hasComplete := false
+		for _, l := range item.Labels {
+			if l == completeLabel {
+				hasComplete = true
+				break
+			}
+		}
+		if !hasComplete {
+			continue
+		}
+		if err := e.client.ArchiveProjectItem(board.ProjectID, item.ItemID); err != nil {
+			e.logf(item.Number, "warn", "could not archive done item: %v\n", err)
+			continue
+		}
+		archived++
+	}
+	if archived > 0 {
+		fmt.Printf("[poll] archived %d done item(s) from board\n", archived)
+	}
+}
+
 func (e *Engine) poll(ctx context.Context) error {
 	e.emitStructural(tui.PollStartedEvent{Owner: e.cfg.Owner, Repo: e.cfg.Repo, Project: e.cfg.ProjectNum})
 	e.logf(0, "poll", "fetching project board %s/%s#%d\n", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
@@ -524,6 +561,10 @@ doneDispatching:
 	// where an issue was closed while a stage was in-flight, leaving the lock label
 	// behind. We do this every poll so it also catches locks from prior Fabrik runs.
 	e.cleanupClosedIssueLocks(board)
+
+	// Archive any Done+complete items that pre-date the archive feature (lazy migration).
+	// Idempotent: archived items disappear from board results, so this converges to a no-op.
+	e.archiveDoneCompleteItems(board)
 
 	// Report cumulative token consumption only when new cost has accrued since
 	// the last print, to avoid repeated log noise on idle polls.
