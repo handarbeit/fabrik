@@ -296,6 +296,8 @@ When all blocking issues are closed, Fabrik detects the change within one poll c
 
 **Recipe:** file issues → add blocked-by edges in GitHub → label all `fabrik:yolo` → move to Specify → watch it run.
 
+Plan can also decompose an oversized issue autonomously — creating labeled sub-issues, setting up dependency edges, and signaling `FABRIK_DECOMPOSED`; the sub-issues then flow as a formation automatically.
+
 **Validated on the Ambient project:** 9 issues, 4 parallel starts, 7 dependency edges — all pipeline constraints respected automatically, ~88 minutes wall-clock, $31 total cost.
 
 See the [USER_GUIDE §3 — Dependency-Based Sequencing (Formations)](docs/USER_GUIDE.md#dependency-based-sequencing-formations) for the full recipe, diagram, and behavior callouts.

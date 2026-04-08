@@ -116,6 +116,60 @@ Description of the chosen approach and key design decisions.
 - **Do not ignore the research findings** — your plan must be grounded in what was discovered
 - **Do not over-engineer** — plan for what's needed now, not hypothetical future requirements
 
+## Decomposition
+
+When an issue is too broad for a single Implement cycle — the signal is that Implement would need to make major design decisions, touch too many unrelated concerns, or span more than one coherent unit of work — decompose it into focused sub-issues instead of writing a plan.
+
+### Depth Gate (Check First)
+
+Before considering decomposition, check whether the current issue has the `fabrik:sub-issue` label. If it does, **skip decomposition entirely** and produce a normal implementation plan. Sub-issues are never decomposed further — maximum depth is 1.
+
+### Idempotency Check
+
+Before creating sub-issues, search existing issues for ones already labeled `fabrik:sub-issue` that reference this parent (check their body for `#N` where N is the parent issue number). If such issues already exist, skip creating new ones — you may have been retried after a partial run.
+
+### How to Decompose
+
+Read `.fabrik-context/project.md` for the values you need:
+- `Owner` — the GitHub organization or user
+- `Repo` — the repository name
+- `ProjectNum` — the project board number
+
+Then:
+
+1. **Create each sub-issue:**
+   ```bash
+   gh issue create --repo OWNER/REPO \
+     --title "Sub-issue title" \
+     --body "Sub-issue body referencing parent #N" \
+     --label "fabrik:sub-issue"
+   ```
+   Capture the URL of each created issue.
+
+2. **Add each sub-issue to the project board:**
+   ```bash
+   gh project item-add PROJECTNUM --owner OWNER --url ISSUE_URL
+   ```
+
+3. **Set blocking edges where sub-issues have sequential dependencies:**
+   ```bash
+   # To express "SUB_B is blocked by SUB_A" (A must complete before B):
+   gh issue develop --repo OWNER/REPO SUB_B
+   gh issue link SUB_B --repo OWNER/REPO --type "blocks" SUB_A
+   # This marks SUB_A as blocking SUB_B (i.e., SUB_B depends on SUB_A)
+   # Verify direction with: gh issue link --help
+   ```
+   Only add edges where ordering is genuinely required. Parallel sub-issues need no edges.
+
+4. **Output the terminal marker on its own line and stop:**
+   ```
+   FABRIK_DECOMPOSED
+   ```
+
+### Mutual Exclusivity
+
+`FABRIK_DECOMPOSED` is mutually exclusive with `FABRIK_STAGE_COMPLETE` and `FABRIK_BLOCKED_ON_INPUT`. Output exactly one terminal marker. If you decompose, do not also signal completion.
+
 ## Interaction Pattern
 
 1. Read the spec and research findings thoroughly
@@ -131,7 +185,11 @@ Plans typically complete in a single pass. If the spec and research are solid, t
 
 **Completing the stage**: Output `FABRIK_STAGE_COMPLETE` on its own line when the plan is complete and actionable.
 
-**Blocking on input**: If there are unresolved questions that must be answered before a concrete plan can be produced, output `FABRIK_BLOCKED_ON_INPUT` on its own line instead of `FABRIK_STAGE_COMPLETE`. The engine will pause with both `fabrik:paused` and `fabrik:awaiting-input` labels and auto-resume when the user comments. Do not remove these labels manually. These two markers are mutually exclusive — never output both.
+**Blocking on input**: If there are unresolved questions that must be answered before a concrete plan can be produced, output `FABRIK_BLOCKED_ON_INPUT` on its own line instead of `FABRIK_STAGE_COMPLETE`. The engine will pause with both `fabrik:paused` and `fabrik:awaiting-input` labels and auto-resume when the user comments. Do not remove these labels manually.
+
+**Decomposing an oversized issue**: If the issue is too broad for a single Implement cycle, output `FABRIK_DECOMPOSED` on its own line after creating the sub-issues (see the Decomposition section above). The engine adds `stage:Plan:complete` and moves the parent to Done. Sub-issues flow through the pipeline independently as a formation.
+
+These three markers are mutually exclusive — output exactly one.
 
 **Do NOT update the issue body.** The issue body is the spec, owned by Specify. Your plan is posted as a stage comment by the engine automatically. Do not use `FABRIK_ISSUE_UPDATE` markers — they would overwrite the spec.
 
