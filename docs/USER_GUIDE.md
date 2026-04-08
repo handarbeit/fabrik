@@ -611,12 +611,149 @@ The skill is auto-loaded by Claude Code via the plugin system.
 
 ### Built-in Skill: `/cut-release`
 
-The `/cut-release` skill automates the Fabrik release process. After tagging and pushing a new release, it automatically:
+The `/cut-release` skill automates the Fabrik release process — pre-flight checks, release notes, commit/tag/push, and documentation issue filing — in a single invocation.
 
-1. Creates a GitHub issue titled `Update docs for v<version>` labeled `documentation` and `fabrik:yolo`
-2. Adds the issue to the project board and moves it to the **Specify** column
+#### Invocation
 
-This means every release automatically queues a documentation update issue that Fabrik will pick up and process through the pipeline.
+```
+/cut-release              # Auto-suggests next patch bump; confirms version with you
+/cut-release v0.0.12      # Uses the explicit version; no confirmation prompt
+```
+
+#### Pre-flight checks
+
+Before doing anything, `/cut-release`:
+
+1. Verifies the working tree is clean (`git status --porcelain`). Stops if dirty.
+2. Pulls latest main (`git pull origin main`).
+3. Runs `go build ./...` and `go test -race ./...`. Stops if either fails.
+
+The build/test gate is mandatory — broken releases are worse than delayed ones.
+
+#### Version determination
+
+- Reads the latest tag via `git describe --tags --abbrev=0`.
+- If you provided an explicit version, validates it: must be valid semver with a `v` prefix and greater than the current tag.
+- If no version is provided, auto-suggests the next patch bump (e.g. `v0.0.11` → `v0.0.12`) and confirms with you before proceeding.
+
+#### Change gathering
+
+Runs `git log <last-tag>..HEAD --oneline` and groups commits into four categories:
+
+| Category | What goes here |
+|----------|---------------|
+| **Features** | New user-facing capabilities |
+| **Fixes** | Bug fixes |
+| **Improvements** | Enhancements to existing features |
+| **Internal** | Refactoring, test improvements, CI — summarized briefly, not enumerated |
+
+Merge commits and `Co-Authored-By` lines are ignored.
+
+#### Release notes format
+
+Writes `release-notes.md` in the repo root:
+
+```markdown
+# Fabrik <version>
+
+## Features
+- Description of feature (#issue)
+
+## Fixes
+- Description of fix (#issue)
+
+## Upgrading
+
+\```bash
+# Auto-upgrade from a running Fabrik instance
+# Fabrik checks for new releases each poll cycle and upgrades automatically with --auto-upgrade
+
+# Or download directly
+gh release download --repo tenaciousvc/fabrik --pattern '*<os>_<arch>*' -O - | tar xz
+\```
+```
+
+Empty category sections are omitted. The `release-notes.md` file **must be committed before the tag push** because the GitHub Actions release workflow (`release.yml`) uses it to populate the GitHub Release body.
+
+#### Commit, tag, and push
+
+Once the release notes are written, `/cut-release` proceeds without a confirmation prompt (pre-flight already passed):
+
+1. `git add release-notes.md`
+2. Commits with message: `Release notes for <version>`
+3. Creates the tag: `git tag <version>`
+4. Pushes branch and tag together: `git push origin main <version>`
+5. Reports the triggered GitHub Actions run URL.
+
+**Never force-push tags.** If a tag already exists at that version, `/cut-release` stops and tells you.
+
+#### Documentation issue
+
+After a successful push, `/cut-release` automatically files a GitHub issue:
+
+- **Title**: `Update docs for v<version>`
+- **Labels**: `documentation`, `fabrik:yolo`
+- **Board position**: Added to the Fabrik PM project board and moved to the **Specify** column
+
+The `fabrik:yolo` label means Fabrik will pick it up automatically and run it through the pipeline. You don't need to do anything else for documentation updates after cutting a release.
+
+### Built-in Skill: `/audit-documentation`
+
+The `/audit-documentation` skill compares recently shipped features against `USER_GUIDE.md`, `README.md`, and `docs/index.md`, then files GitHub issues for gaps and closes existing documentation issues whose gaps are now covered.
+
+#### Invocation
+
+```
+/audit-documentation                  # Scan issues closed in the last 30 days
+/audit-documentation --since v0.0.20  # Scan issues referenced in commits since a tag
+```
+
+#### What it does
+
+1. **Discovers source issues** — finds recently closed issues using the selected mode (see below).
+2. **Filters** — excludes issues labeled `documentation` and issues that are infrastructure/tooling-only with no user-facing behavior change.
+3. **Reads the docs** — reads `USER_GUIDE.md`, `README.md`, and `docs/index.md` in full.
+4. **Analyzes gaps** — for each filtered issue, checks whether the feature is adequately described in the docs. Groups related issues into single gap entries. Errs on the side of filing — false positives are refined by the Specify stage; false negatives cause documentation drift.
+5. **Clears the deck** — for each existing open `documentation` issue whose gap is now clearly and completely covered, closes it with a comment.
+6. **Files new gap issues** — for each newly identified gap, creates a GitHub issue labeled `documentation` and `fabrik:yolo`, and places it in the **Specify** column on the PM board.
+
+#### Modes
+
+**Date-based mode (default):** Fetches closed issues via `gh issue list --state closed --search "closed:>$CUTOFF_DATE" --limit 200`.
+
+**Tag-based mode (`--since <tag>`):** Two passes — extracts `#NNN` references from commit messages since the tag, then scans merged PRs for `Closes #NNN` references.
+
+#### Output
+
+After running, `/audit-documentation` prints a structured summary:
+
+```
+## Audit Documentation — Summary
+
+**Period**: <date range or tag range scanned>
+
+**Issues scanned**: <N>
+**Issues excluded**: <N>
+  - <issue#>: <title> — <reason>
+
+**Documentation gaps found**: <N>
+
+**New gap issues filed** (<N>):
+  - #<number>: <title>
+
+**Existing documentation issues closed** (<N>):
+  - #<number>: <title>
+
+**Existing documentation issues left open** (<N>):
+  - #<number>: <title> — <reason left open>
+```
+
+If no gaps are found, it reports: "No documentation gaps found — docs appear current."
+
+#### Known limitations
+
+- **Rate limits**: May apply for repos with hundreds of closed issues.
+- **Tag-based mode coverage**: Misses issues whose PRs used `Fixes` or bare URLs instead of `Closes #NNN` in the PR body.
 
 ### Plugin Development
 
