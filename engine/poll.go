@@ -254,13 +254,11 @@ func (e *Engine) cleanupClosedIssueLocks(board *gh.ProjectBoard) {
 	}
 }
 
-// archiveDoneCompleteItems is a lazy migration pass that archives any board items
-// already in a cleanup (Done) stage that have the stage:<Name>:complete label but
-// have not yet been archived. This self-heals boards that accumulated Done items
-// before archiving was introduced.
-//
-// Operates on deep-fetched items (which have the full label set) to avoid the
-// labels(first:5) truncation in the shallow query that would miss stage:Done:complete.
+// archiveDoneCompleteItems archives board items in a cleanup (Done) stage that
+// have the stage:<Name>:complete label. Handles both legacy items (pre-archive
+// feature) and ongoing cleanup. Uses shallow board data — labels(first:15) is
+// sufficient to see stage:Done:complete even on issues with many labels.
+// Idempotent: archived items disappear from subsequent board queries.
 func (e *Engine) archiveDoneCompleteItems(projectID string, items []gh.ProjectItem) {
 	archived := 0
 	for _, item := range items {
@@ -561,10 +559,11 @@ doneDispatching:
 	// behind. We do this every poll so it also catches locks from prior Fabrik runs.
 	e.cleanupClosedIssueLocks(board)
 
-	// Archive any Done+complete items that pre-date the archive feature (lazy migration).
-	// Uses deepFetchCandidates which have the full label set from FetchItemDetails.
-	// Idempotent: archived items disappear from board results, so this converges to a no-op.
-	e.archiveDoneCompleteItems(board.ProjectID, deepFetchCandidates)
+	// Archive any Done+complete items (lazy migration + ongoing cleanup).
+	// Uses shallow board data — labels(first:15) is sufficient to see
+	// stage:Done:complete. Idempotent: archived items disappear from board
+	// results, so this converges to a no-op after legacy items are cleaned up.
+	e.archiveDoneCompleteItems(board.ProjectID, board.Items)
 
 	// Report cumulative token consumption only when new cost has accrued since
 	// the last print, to avoid repeated log noise on idle polls.
