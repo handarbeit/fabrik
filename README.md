@@ -53,15 +53,15 @@ echo '.env' >> .gitignore
 - `.env` — secrets only (`FABRIK_TOKEN` / `GITHUB_TOKEN`; must be gitignored)
 - Precedence: `CLI flag > env var > .env > config.yaml > defaults`
 
-### Development
+### Auto-upgrade
 
-Use `--auto-upgrade` to have Fabrik self-upgrade from `origin/main` when idle:
+Use `--auto-upgrade` to have Fabrik self-upgrade from GitHub Releases when idle:
 
 ```bash
 ./fabrik --auto-upgrade ...
 ```
 
-After 2 idle polls, Fabrik checks for new commits, rebuilds (`go build`), and re-execs.
+After 2 idle polls, Fabrik checks GitHub Releases for a newer version, downloads it, and re-execs.
 
 ## How It Works
 
