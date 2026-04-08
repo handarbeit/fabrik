@@ -1,8 +1,8 @@
-# Fabrik v0.0.19
+# Fabrik v0.0.20
 
 ## Fixes
 
-- **Advanced items stuck after yolo catch-up** — The yolo catch-up loop evicted the `updatedAt` cache after advancing an item, but the deferred cache update at the end of the poll re-cached the old timestamp. The item appeared "unchanged" on the next poll and the new stage never ran. Fixed by excluding advanced items from the deferred cache update.
+- **Release auto-upgrade now refreshes plugin skills** — The release upgrade path was replacing the binary but not extracting updated plugin skills. Stage prompts (Research, Plan, Implement, etc.) would remain stale after an auto-upgrade. Now calls `plugin.RefreshPlugin()` directly before re-exec, matching the dev upgrade behavior.
 
 ## Upgrading
 
