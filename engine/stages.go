@@ -18,6 +18,17 @@ func hasYoloLabel(item gh.ProjectItem) bool {
 	return false
 }
 
+// hasUnrestrictedLabel reports whether item has the "fabrik:unrestricted" label,
+// which tells the engine to pass --dangerously-skip-permissions to Claude Code.
+func hasUnrestrictedLabel(item gh.ProjectItem) bool {
+	for _, l := range item.Labels {
+		if l == "fabrik:unrestricted" {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
 	e.logf(item.Number, "done", "stage %q complete\n", stage.Name)
 

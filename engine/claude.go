@@ -200,7 +200,7 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	ld := logDirForItem(issue)
 
 	prompt := buildPrompt(stage, issue, newComments)
-	args := buildClaudeArgs(stage, sessFilePath, resume, modelOverride, stage.MaxTurns)
+	args := buildClaudeArgs(stage, sessFilePath, resume, modelOverride, stage.MaxTurns, hasUnrestrictedLabel(issue))
 
 	output, _, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, sessFilePath, ld)
 	usage.MaxTurns = stage.MaxTurns
@@ -227,7 +227,7 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 
 	prompt := buildCommentReviewPrompt(stage, issue, comments)
 	limit := commentMaxTurns(stage)
-	args := buildClaudeArgs(stage, sessFilePath, true, modelOverride, limit) // resume existing session
+	args := buildClaudeArgs(stage, sessFilePath, true, modelOverride, limit, hasUnrestrictedLabel(issue)) // resume existing session
 
 	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", sessFilePath, ld)
 	usage.MaxTurns = limit
@@ -248,10 +248,14 @@ func commentMaxTurns(stage *stages.Stage) int {
 	return 50
 }
 
-func buildClaudeArgs(stage *stages.Stage, sessFilePath string, resume bool, modelOverride string, maxTurns int) []string {
+func buildClaudeArgs(stage *stages.Stage, sessFilePath string, resume bool, modelOverride string, maxTurns int, unrestricted bool) []string {
 	args := []string{
 		"--output-format", "stream-json",
 		"--verbose",
+	}
+
+	if unrestricted {
+		args = append(args, "--dangerously-skip-permissions")
 	}
 
 	if claudePluginDir != "" {
