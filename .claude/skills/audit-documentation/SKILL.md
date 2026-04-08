@@ -61,13 +61,21 @@ TAG_DATE=$(git log -1 --format="%ci" "refs/tags/$TAG" | cut -d' ' -f1)
 gh pr list -R tenaciousvc/fabrik --state merged \
   --search "merged:>=$TAG_DATE" \
   --json number,body \
+  --limit 500 \
   --jq '.[] | .body' \
   | grep -oiE '(closes|fixes|resolves) #[0-9]+' \
   | grep -oE '[0-9]+' \
   | sort -u
 ```
 
-Combine and deduplicate the issue numbers from both passes.
+Combine and deduplicate the issue numbers from both passes into a list (e.g. `200 201 205`).
+
+Then fetch their full details for use in subsequent steps:
+```bash
+for NUM in $ISSUE_NUMBERS; do
+  gh issue view "$NUM" -R tenaciousvc/fabrik --json number,title,labels,body
+done
+```
 
 **Date-based mode (default 30 days):**
 
