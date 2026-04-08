@@ -1,8 +1,8 @@
-# Fabrik v0.0.20
+# Fabrik v0.0.21
 
 ## Fixes
 
-- **Release auto-upgrade now refreshes plugin skills** — The release upgrade path was replacing the binary but not extracting updated plugin skills. Stage prompts (Research, Plan, Implement, etc.) would remain stale after an auto-upgrade. Now calls `plugin.RefreshPlugin()` directly before re-exec, matching the dev upgrade behavior.
+- **Plugin skills now refresh from the new binary, not the old one** — v0.0.20 called `RefreshPlugin()` before `syscall.Exec`, extracting skills from the old binary's embedded FS. Now the new binary refreshes its own skills on startup via the existing `FABRIK_AUTO_UPGRADED=1` mechanism.
 
 ## Upgrading
 
