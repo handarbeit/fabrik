@@ -980,6 +980,14 @@ func TestProcessItem_CleanupStage_CleanWorktree(t *testing.T) {
 		t.Errorf("completion label = %q, want stage:Done:complete", addedLabel)
 	}
 
+	// ArchiveProjectItem should have been called with the board's projectID and item's itemID
+	if len(client.archiveProjectItemCalls) != 1 {
+		t.Fatalf("expected 1 ArchiveProjectItem call, got %d", len(client.archiveProjectItemCalls))
+	}
+	if got := client.archiveProjectItemCalls[0]; got.projectID != "PVT_1" || got.itemID != "PVTI_42" {
+		t.Errorf("ArchiveProjectItem(%q, %q), want (PVT_1, PVTI_42)", got.projectID, got.itemID)
+	}
+
 	// Should be marked in processedSet
 	eng.mu.Lock()
 	_, ok := eng.processedSet["owner/repo#42-Done"]
@@ -1097,6 +1105,13 @@ func TestProcessItem_CleanupStage_PRItem(t *testing.T) {
 	// Completion label should be applied
 	if len(client.addLabelCalls) != 1 || client.addLabelCalls[0].labelName != "stage:Done:complete" {
 		t.Errorf("expected stage:Done:complete label, got %v", client.addLabelCalls)
+	}
+	// ArchiveProjectItem should also be called for PR items
+	if len(client.archiveProjectItemCalls) != 1 {
+		t.Fatalf("expected 1 ArchiveProjectItem call for PR item, got %d", len(client.archiveProjectItemCalls))
+	}
+	if got := client.archiveProjectItemCalls[0]; got.projectID != "PVT_1" || got.itemID != "PVTI_55" {
+		t.Errorf("ArchiveProjectItem(%q, %q), want (PVT_1, PVTI_55)", got.projectID, got.itemID)
 	}
 	if len(claude.calls) != 0 {
 		t.Error("should not invoke claude for cleanup stage PR item")
