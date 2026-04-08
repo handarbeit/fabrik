@@ -149,13 +149,12 @@ To restrict processing to a single repository, pass `--repo owner/repo`.
 
 The `.fabrik/` directory (config, stages, plugin) always lives in the directory where you run `fabrik`.
 
-### Development Mode (self-upgrade)
+### Auto-upgrade
 
 The `--auto-upgrade` flag enables Fabrik to upgrade itself when idle. After 2
-consecutive idle polls, Fabrik checks `origin/main` for new commits. If found, it
-runs `git pull --ff-only`, rebuilds the binary, runs `fabrik upgrade` to refresh
-plugin skills, and re-execs itself.
-This is intended for the self-evolving workflow where Fabrik develops Fabrik.
+consecutive idle polls, Fabrik checks the GitHub Releases API for a newer version.
+If one is found, it downloads the new binary, replaces the running executable,
+runs `fabrik upgrade` to refresh plugin skills, and re-execs itself.
 
 ```bash
 ./fabrik --auto-upgrade --owner your-org --repo your-repo --project 1 --user you

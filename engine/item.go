@@ -272,8 +272,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		return nil
 	}
 
-	// Ensure the repo's WorktreeManager is registered (no-op in single-repo mode;
-	// triggers lazy bare-clone in job-control / multi-repo mode).
+	// Ensure the repo's WorktreeManager is registered; bare-clones on first access.
 	if err := e.ensureRepoReady(ctx, item); err != nil {
 		if errors.Is(err, ErrSkipItem) {
 			return nil

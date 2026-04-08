@@ -39,8 +39,8 @@ func NewWorktreeManagerWithRoot(repoDir, worktreeRoot string) *WorktreeManager {
 }
 
 // NewWorktreeManagerForRepo creates a WorktreeManager that namespaces all worktree
-// paths under worktreeRoot/<repoName>/. Use this when managing multiple repos from
-// a single Fabrik job-control directory.
+// paths under worktreeRoot/<repoName>/. Used by production code for each discovered
+// repo (baseDir is the bare-clone directory; worktreeRoot is .fabrik/worktrees).
 func NewWorktreeManagerForRepo(baseDir, worktreeRoot, rName string) *WorktreeManager {
 	return &WorktreeManager{
 		baseDir:  baseDir,
@@ -52,7 +52,7 @@ func NewWorktreeManagerForRepo(baseDir, worktreeRoot, rName string) *WorktreeMan
 // ensureBareClone creates a bare clone of the target repo at
 // .fabrik/repos/<owner>-<repo>.git if it doesn't already exist.
 // Returns the path to the bare clone directory on success.
-// This is used when Fabrik runs from a non-git job-control directory.
+// This is used for all repos — Fabrik always bare-clones managed repos.
 func ensureBareClone(baseDir, owner, repo string) (string, error) {
 	bareDir := filepath.Join(baseDir, ".fabrik", "repos", owner+"-"+repo+".git")
 	if _, err := os.Stat(bareDir); err == nil {
