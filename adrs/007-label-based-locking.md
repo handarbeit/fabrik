@@ -27,18 +27,29 @@ Use GitHub issue labels as lightweight locks:
 
 ## Locking Rules
 
-1. **User filter**: Each instance only processes changes made by its `--user`.
-   This is the primary guard — two instances rarely compete.
-2. **Lock check**: Before processing, check for `fabrik:locked:<other-user>`
-   labels. If present, skip.
+1. **Lock-then-verify**: Before processing, add `fabrik:locked:<user>`. Then
+   sleep 2 seconds and re-fetch labels. If another `fabrik:locked:*` label is
+   present, apply lexicographic tie-breaking: the instance whose username sorts
+   **lower** keeps its lock and proceeds; the **higher** username releases its
+   lock and skips this poll cycle. This is deterministic — exactly one instance
+   wins any conflict, with no deadlock or livelock.
+2. **Lock check**: Before acquiring a lock, check for `fabrik:locked:<other-user>`
+   labels already present (from a previous poll cycle's winner). If present, skip.
 3. **Editing guard**: The `fabrik:editing` label prevents any processing while
    the issue body is being rewritten.
 
 ## Trade-offs
 
-- **Not atomic**: There's a race window between checking for a lock and
-  acquiring it. In practice, the user-filter rule makes this unlikely.
+- **2-second sleep per lock acquisition**: The sleep window allows competing
+  instances to place their lock before either checks. This adds ~2s latency to
+  every stage start, which is acceptable given typical poll intervals.
+- **Not perfectly atomic**: There remains a tiny race window between the re-fetch
+  and acting on results; in practice this window is negligible and the
+  tie-breaking rule handles the worst case correctly.
 - **No TTL**: Labels don't expire. A crashed instance leaves a stale lock.
   This is acceptable for a tool where the user is present and can intervene.
 - **Label clutter**: Issues accumulate Fabrik labels. These could be cleaned
   up when an issue reaches Done.
+- **Same-username tie-breaking degrades to "both win"**: If two instances share
+  the same `--user`, tie-breaking is a no-op and both proceed. This is an
+  unsupported configuration.
