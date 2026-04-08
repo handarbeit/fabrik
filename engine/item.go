@@ -13,6 +13,10 @@ import (
 	"github.com/verveguy/fabrik/stages"
 )
 
+// lockVerifyDelay is the time to wait after acquiring a lock before re-fetching
+// labels to detect competing locks from other Fabrik instances.
+const lockVerifyDelay = 2 * time.Second
+
 // isEngineManagedPath returns true for paths that are written by the Fabrik
 // engine itself and should never be treated as user-generated dirty content.
 // These paths must not block cleanup or worktree updates.
@@ -486,14 +490,11 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 
 	inProgressLabel := fmt.Sprintf("stage:%s:in_progress", stage.Name)
 	inProgressAdded := false
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, inProgressLabel); err != nil {
-		e.logf(item.Number, "warn", "could not add in_progress label: %v\n", err)
-	} else {
-		inProgressAdded = true
-	}
 
 	// releaseLock is called when we're truly done with this issue+stage
 	// (completed, permanently failed, or paused). NOT called on cooldown retry.
+	// Defined here (before in_progress is added) so the lock-then-verify loser
+	// path can call it safely with inProgressAdded still false.
 	releaseLock := func() {
 		if lockAcquired {
 			e.removeLockLabel(owner, repo, item.Number, lockLabel)
@@ -504,6 +505,40 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		if inProgressAdded {
 			e.removeInProgressLabel(owner, repo, item.Number, stage.Name)
 		}
+	}
+
+	// Lock-then-verify: after acquiring our lock, wait briefly to let a
+	// competing instance place its own lock, then re-check. If another
+	// fabrik:locked:* label is present, apply lexicographic tie-breaking:
+	// lower username wins (keeps lock and proceeds); higher username loses
+	// (releases lock and skips this cycle). This is deterministic — exactly
+	// one instance wins any conflict. Note: identical usernames are unsupported
+	// and treated as "win" (both proceed), consistent with single-instance use.
+	if lockAcquired {
+		time.Sleep(lockVerifyDelay)
+		labels, err := e.client.FetchLabels(owner, repo, item.Number)
+		if err != nil {
+			e.logf(item.Number, "warn", "could not re-fetch labels for lock verify: %v\n", err)
+		} else {
+			for _, label := range labels {
+				if strings.HasPrefix(label, "fabrik:locked:") && label != lockLabel {
+					competing := strings.TrimPrefix(label, "fabrik:locked:")
+					if e.cfg.User > competing {
+						e.logf(item.Number, "skip", "lock conflict with %q — yielding (lexicographic tie-break)\n", competing)
+						releaseLock()
+						return nil
+					}
+					e.logf(item.Number, "info", "lock conflict with %q — proceeding as winner\n", competing)
+					break
+				}
+			}
+		}
+	}
+
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, inProgressLabel); err != nil {
+		e.logf(item.Number, "warn", "could not add in_progress label: %v\n", err)
+	} else {
+		inProgressAdded = true
 	}
 
 	// Ensure the WorktreeManager for this item's repo is ready.
