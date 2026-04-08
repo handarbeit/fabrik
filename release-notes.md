@@ -1,10 +1,10 @@
-# Fabrik v0.0.17
+# Fabrik v0.0.18
 
 ## Fixes
 
-- **Stuck labels after stage setup failure** — When worktree setup or context cancellation caused an early error in `processItem`, the `fabrik:locked` and `stage:in_progress` labels were never removed. Fabrik would never retry the issue until the labels were manually cleaned up. Both error paths now call `releaseLock()` before returning.
-
-- **Ambiguous ref when creating worktree branch** — `git branch fabrik/issue-N origin/main` could fail with "refname is ambiguous" in some repos. Fixed to use the fully-qualified `refs/remotes/origin/main` form.
+- **Dev auto-upgrade ran against user's project repo** (#240) — `devCheckout()` now verifies the git remote matches `tenaciousvc/fabrik` or `verveguy/fabrik` before attempting `git pull` + rebuild. Previously, running Fabrik from source inside a target project's git repo would pull and rebuild against the wrong repo.
+- **`fabrik init` writes .git/info/exclude** (#240) — `.fabrik/worktrees/`, `.fabrik/repos/`, `.fabrik/plugin/`, and `.fabrik/debug/` are added to `.git/info/exclude` during init, preventing Fabrik's working directories from polluting the target repo's git status. Skipped when running inside the Fabrik source repo itself.
+- **Terminal left in broken state after TUI exit** — `ReleaseTerminal()` is now called after the TUI exits to restore raw mode and mouse tracking. Fixes `^M` on enter and other terminal corruption after quitting.
 
 ## Upgrading
 
