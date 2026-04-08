@@ -499,3 +499,85 @@ func TestPoll_RateLimitWarning(t *testing.T) {
 		t.Error("expected a warn log event about GraphQL rate limit, but none was found")
 	}
 }
+
+// TestArchiveDoneCompleteItems_ArchivesCompleteItems verifies that items in a
+// CleanupWorktree stage with the stage:<Name>:complete label are archived.
+func TestArchiveDoneCompleteItems_ArchivesCompleteItems(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	eng.cfg.Stages = testStagesWithCleanup()
+
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_test",
+		Items: []gh.ProjectItem{
+			{
+				Number: 10,
+				ItemID: "PVTI_10",
+				Status: "Done",
+				Labels: []string{"stage:Done:complete"},
+			},
+		},
+	}
+
+	eng.archiveDoneCompleteItems(board)
+
+	if len(client.archiveProjectItemCalls) != 1 {
+		t.Fatalf("expected 1 ArchiveProjectItem call, got %d", len(client.archiveProjectItemCalls))
+	}
+	got := client.archiveProjectItemCalls[0]
+	if got.projectID != "PVT_test" || got.itemID != "PVTI_10" {
+		t.Errorf("ArchiveProjectItem(%q, %q), want (PVT_test, PVTI_10)", got.projectID, got.itemID)
+	}
+}
+
+// TestArchiveDoneCompleteItems_SkipsIncompleteItems verifies that Done items
+// without the stage:Done:complete label are not archived.
+func TestArchiveDoneCompleteItems_SkipsIncompleteItems(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	eng.cfg.Stages = testStagesWithCleanup()
+
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_test",
+		Items: []gh.ProjectItem{
+			{
+				Number: 20,
+				ItemID: "PVTI_20",
+				Status: "Done",
+				Labels: []string{"enhancement"}, // no complete label
+			},
+		},
+	}
+
+	eng.archiveDoneCompleteItems(board)
+
+	if len(client.archiveProjectItemCalls) != 0 {
+		t.Errorf("expected no ArchiveProjectItem calls for incomplete item, got %d", len(client.archiveProjectItemCalls))
+	}
+}
+
+// TestArchiveDoneCompleteItems_SkipsNonCleanupStages verifies that items in
+// non-cleanup stages are not archived even if they have complete labels.
+func TestArchiveDoneCompleteItems_SkipsNonCleanupStages(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	eng.cfg.Stages = testStagesWithCleanup()
+
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_test",
+		Items: []gh.ProjectItem{
+			{
+				Number: 30,
+				ItemID: "PVTI_30",
+				Status: "Research",
+				Labels: []string{"stage:Research:complete"},
+			},
+		},
+	}
+
+	eng.archiveDoneCompleteItems(board)
+
+	if len(client.archiveProjectItemCalls) != 0 {
+		t.Errorf("expected no ArchiveProjectItem calls for non-cleanup stage, got %d", len(client.archiveProjectItemCalls))
+	}
+}
