@@ -519,7 +519,7 @@ func TestArchiveDoneCompleteItems_ArchivesCompleteItems(t *testing.T) {
 		},
 	}
 
-	eng.archiveDoneCompleteItems(board)
+	eng.archiveDoneCompleteItems(board.ProjectID, board.Items)
 
 	if len(client.archiveProjectItemCalls) != 1 {
 		t.Fatalf("expected 1 ArchiveProjectItem call, got %d", len(client.archiveProjectItemCalls))
@@ -549,7 +549,7 @@ func TestArchiveDoneCompleteItems_SkipsIncompleteItems(t *testing.T) {
 		},
 	}
 
-	eng.archiveDoneCompleteItems(board)
+	eng.archiveDoneCompleteItems(board.ProjectID, board.Items)
 
 	if len(client.archiveProjectItemCalls) != 0 {
 		t.Errorf("expected no ArchiveProjectItem calls for incomplete item, got %d", len(client.archiveProjectItemCalls))
@@ -575,7 +575,7 @@ func TestArchiveDoneCompleteItems_SkipsNonCleanupStages(t *testing.T) {
 		},
 	}
 
-	eng.archiveDoneCompleteItems(board)
+	eng.archiveDoneCompleteItems(board.ProjectID, board.Items)
 
 	if len(client.archiveProjectItemCalls) != 0 {
 		t.Errorf("expected no ArchiveProjectItem calls for non-cleanup stage, got %d", len(client.archiveProjectItemCalls))

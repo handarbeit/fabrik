@@ -115,7 +115,7 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
               repository {
                 nameWithOwner
               }
-              labels(first: 15) {
+              labels(first: 5) {
                 nodes {
                   name
                 }
@@ -134,7 +134,7 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
               repository {
                 nameWithOwner
               }
-              labels(first: 15) {
+              labels(first: 5) {
                 nodes {
                   name
                 }

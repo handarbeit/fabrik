@@ -259,12 +259,11 @@ func (e *Engine) cleanupClosedIssueLocks(board *gh.ProjectBoard) {
 // have not yet been archived. This self-heals boards that accumulated Done items
 // before archiving was introduced.
 //
-// Note: this operates on shallow board data (ADR 020 boundary). Like
-// cleanupClosedIssueLocks, archiving is housekeeping on terminal, idempotent
-// operations — not a stage transition — so the shallow-data exception applies.
-func (e *Engine) archiveDoneCompleteItems(board *gh.ProjectBoard) {
+// Operates on deep-fetched items (which have the full label set) to avoid the
+// labels(first:5) truncation in the shallow query that would miss stage:Done:complete.
+func (e *Engine) archiveDoneCompleteItems(projectID string, items []gh.ProjectItem) {
 	archived := 0
-	for _, item := range board.Items {
+	for _, item := range items {
 		st := stages.FindStage(e.cfg.Stages, item.Status)
 		if st == nil || !st.CleanupWorktree {
 			continue
@@ -280,7 +279,7 @@ func (e *Engine) archiveDoneCompleteItems(board *gh.ProjectBoard) {
 		if !hasComplete {
 			continue
 		}
-		if err := e.client.ArchiveProjectItem(board.ProjectID, item.ItemID); err != nil {
+		if err := e.client.ArchiveProjectItem(projectID, item.ItemID); err != nil {
 			e.logf(item.Number, "warn", "could not archive done item: %v\n", err)
 			continue
 		}
@@ -563,8 +562,9 @@ doneDispatching:
 	e.cleanupClosedIssueLocks(board)
 
 	// Archive any Done+complete items that pre-date the archive feature (lazy migration).
+	// Uses deepFetchCandidates which have the full label set from FetchItemDetails.
 	// Idempotent: archived items disappear from board results, so this converges to a no-op.
-	e.archiveDoneCompleteItems(board)
+	e.archiveDoneCompleteItems(board.ProjectID, deepFetchCandidates)
 
 	// Report cumulative token consumption only when new cost has accrued since
 	// the last print, to avoid repeated log noise on idle polls.
