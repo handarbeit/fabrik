@@ -256,21 +256,18 @@ to prevent conflicts.
 
 ## Git Worktrees
 
-Each issue gets an isolated git worktree at `.fabrik/worktrees/issue-N/` on
-branch `fabrik/issue-N`. This means:
+Fabrik always bare-clones each managed repository on first access. Run Fabrik from any directory — no need to be inside a git checkout of a managed repo:
+
+1. Repos are discovered lazily from project board items
+2. Each repo is bare-cloned to `.fabrik/repos/<owner>-<repo>.git` on first access
+3. Each issue gets an isolated worktree at `.fabrik/worktrees/<owner>-<repo>/issue-N/` on branch `fabrik/issue-N`
+4. One worktree manager per discovered repository handles its own lifecycle
+
+This means:
 
 - Multiple issues can be worked on simultaneously without conflicts
 - Each issue's changes are on their own branch, ready for PR
 - Worktrees persist across polls for Claude session continuity
-
-## Multi-Repo Mode
-
-Fabrik can manage issues across **multiple repositories** from a single GitHub Project board. Run Fabrik from any directory — no need to be inside a git checkout of a managed repo:
-
-1. Repos are discovered lazily from project board items
-2. Each repo is bare-cloned to `.fabrik/repos/<owner>-<repo>.git` on first access
-3. Worktrees for each issue are created at `.fabrik/worktrees/<owner>-<repo>/issue-N/`
-4. One worktree manager per discovered repository handles its own lifecycle
 
 ```bash
 mkdir my-fabrik-dir && cd my-fabrik-dir
