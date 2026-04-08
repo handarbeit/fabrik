@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -232,10 +233,19 @@ func PerformReleaseUpgrade(client GitHubClient, version, token string, extraEnv 
 	}
 	renamed = true
 
-	logf("upgraded to %s — re-executing\n", latestTag)
+	logf("upgraded to %s\n", latestTag)
 
 	// Clean up tarball before exec replaces the process (defers won't run).
 	os.Remove(tarballPath)
+
+	// Refresh plugin skills from the new binary.
+	logf("refreshing plugin skills\n")
+	upgradeCmd := exec.Command(exe, "upgrade")
+	if out, err := upgradeCmd.CombinedOutput(); err != nil {
+		logf("fabrik upgrade failed (non-fatal): %v\n%s\n", err, out)
+	}
+
+	logf("re-executing\n")
 
 	env := append(os.Environ(), extraEnv...)
 	if err := syscall.Exec(exe, os.Args, env); err != nil {
