@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -91,10 +92,11 @@ func TestCaptureGitMeta_EmptyWorkDir(t *testing.T) {
 
 func TestCaptureGitMeta_ValidDir(t *testing.T) {
 	// Use the current repo root — it definitely has commits and a branch
-	repoRoot, err := gitToplevel()
+	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
 	if err != nil {
 		t.Skip("not in a git repo")
 	}
+	repoRoot := strings.TrimSpace(string(out))
 	branch, commit, _, timestamp := captureGitMeta(repoRoot, "main")
 	if branch == "unknown" {
 		t.Errorf("expected real branch, got %q", branch)
