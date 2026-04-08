@@ -48,11 +48,15 @@ Explicitly state:
 
 ### Rewrite the issue body
 
-Update the issue body (via FABRIK_ISSUE_UPDATE markers) with a structured spec. Preserve the user's original intent but add precision. Use this structure:
+Update the issue body (via FABRIK_ISSUE_UPDATE markers) with a structured spec. **Preserve the user's original motivation and problem statement** — the "why" is as important as the "what." Never reduce a detailed problem description to a terse summary that loses context. Use this structure:
 
 ```
+## Problem
+Why this change is needed. What pain point, gap, or opportunity does it address?
+Preserve the original issue's motivation — don't compress it away.
+
 ## Summary
-One-paragraph description of what this feature does and why.
+One-paragraph description of what this feature does to solve the problem.
 
 ## Requirements
 Bulleted list of specific, testable requirements.
