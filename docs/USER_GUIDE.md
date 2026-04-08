@@ -463,6 +463,62 @@ When the configured user posts a new comment:
 This is the intended mechanism for Q&A in stages like Specify — Claude asks a question,
 the configured user answers it in a comment, and the stage resumes automatically.
 
+### Dependency-Based Sequencing (Formations)
+
+Fabrik supports dependency-based sequencing of issues using GitHub's native "Blocked by" relationships. This enables **formations** — coordinated sets of issues that execute in parallel where possible and respect ordering constraints automatically.
+
+#### Setting Up Dependencies
+
+To mark one issue as blocked by another on GitHub.com:
+
+1. Open the issue in GitHub
+2. In the right sidebar, find the **Relationships** section
+3. Click **"Mark as blocked by"**
+4. Search for and select the blocking issue (same repo or cross-repo)
+
+Repeat for each dependency. This uses GitHub's native `blockedBy` GraphQL field (available on all GitHub plans since August 21, 2025).
+
+#### How Fabrik Detects and Respects Dependencies
+
+Fabrik uses the `fabrik:blocked` label to track blocked issues. The label lifecycle is fully automatic:
+
+1. **Detection**: On each poll, issues with `fabrik:blocked` are deep-fetched every cycle to detect unblocking promptly (within one poll interval, typically ~30 seconds).
+2. **First block**: When Fabrik first detects that an issue is blocked, it posts a comment listing the open blocking issues and adds the `fabrik:blocked` label automatically. Fabrik creates this label on first use — no pre-creation needed.
+3. **While blocked**: The issue is skipped silently each poll cycle (no duplicate comments).
+4. **Automatic unblocking**: When all blocking issues are closed, Fabrik removes `fabrik:blocked` and resumes processing on the next poll — no human action required.
+
+**Key behavior callouts:**
+
+- **The first stage (Specify) always runs regardless of blockers** — dependencies only gate subsequent stages. This allows a formation to be fully specified before execution begins.
+- **Independent issues start in parallel** — issues with no blockers are dispatched concurrently up to the configured `MaxConcurrent` limit.
+- **Failed issues retry independently** — a failure in one formation member does not affect siblings.
+- **Cross-repo dependencies are supported** — a blocking issue can be in a different repository. Fabrik displays cross-repo blockers as `owner/repo#N` in log output.
+
+#### Formation Recipe
+
+1. **File all issues** for the formation. Write specs at the right level of granularity — each issue should be independently implementable.
+2. **Add blocked-by edges** in GitHub using the Relationships sidebar (see above).
+3. **Label all issues `fabrik:yolo`** — this makes the formation hands-free. Without `fabrik:yolo`, each stage requires a manual card move on the project board.
+4. **Move all issues to Specify** on the project board. Fabrik will pick them up on the next poll.
+5. **Watch it run** — Fabrik executes Specify for all issues in parallel, then gates subsequent stages on dependency resolution automatically.
+
+#### Example Formation
+
+```mermaid
+graph TD
+    A["#1 Data model design"] --> C["#3 API layer"]
+    B["#2 Auth design"] --> C
+    C --> D["#4 Frontend integration"]
+    C --> E["#5 Background jobs"]
+```
+
+In this 5-issue formation:
+- Issues #1 and #2 start immediately in parallel (no blockers)
+- Issue #3 starts after both #1 and #2 are closed
+- Issues #4 and #5 start after #3 is closed (in parallel with each other)
+
+**Real-world validation:** A 9-issue formation with 7 dependency edges was run on the Ambient project — 4 issues started in parallel, all pipeline constraints were respected automatically, completing in ~88 minutes wall-clock time at $31 total cost.
+
 ---
 
 ## 4. Stage Reference
@@ -563,6 +619,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:editing` | Issue body being updated (comment processing) |
 | `fabrik:paused` | Processing paused (max retries exceeded or manual) |
 | `fabrik:awaiting-input` | Stage paused waiting for user input; auto-clears on a new comment from the configured user |
+| `fabrik:blocked` | Issue is waiting for one or more blocking issues to close; added and removed automatically by the engine (Fabrik creates this label on first use — no pre-creation needed) |
 | `stage:<name>:in_progress` | Stage actively running |
 | `stage:<name>:complete` | Stage completed successfully |
 | `stage:<name>:failed` | Stage hit max retries |

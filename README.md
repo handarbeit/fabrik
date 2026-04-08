@@ -241,6 +241,7 @@ Fabrik uses labels to track state:
 | `fabrik:editing` | Issue body is being updated (prevents concurrent processing) |
 | `fabrik:paused` | Issue is skipped entirely — no stage processing or comment processing occurs |
 | `fabrik:awaiting-input` | Stage is paused waiting for user input; auto-clears when a new comment from the configured user (`--user`) is received |
+| `fabrik:blocked` | Issue is waiting for one or more blocking issues to close; managed automatically by the engine |
 | `stage:<name>:complete` | Stage has been completed |
 | `stage:<name>:in_progress` | Stage is actively running |
 | `stage:<name>:failed` | Stage hit max retries and was paused |
@@ -281,6 +282,18 @@ mkdir my-fabrik-control && cd my-fabrik-control
 ```
 
 In single-repo mode (running from within a git repository), behavior is unchanged — the repo root is used for the worktree directory as before.
+
+## Formations
+
+Fabrik supports **dependency-based sequencing** of issues using GitHub's native "Blocked by" relationships. A **formation** is a coordinated set of issues that execute in parallel where possible and respect ordering constraints automatically — no polling, no manual unblocking.
+
+When all blocking issues are closed, Fabrik detects the change within one poll cycle and resumes the blocked issue automatically. The `fabrik:blocked` label is managed entirely by the engine (created on first use, no pre-creation needed). The first stage (Specify) always runs regardless of blockers, so an entire formation can be fully specified before execution begins.
+
+**Recipe:** file issues → add blocked-by edges in GitHub → label all `fabrik:yolo` → move to Specify → watch it run.
+
+**Validated on the Ambient project:** 9 issues, 4 parallel starts, 7 dependency edges — all pipeline constraints respected automatically, ~88 minutes wall-clock, $31 total cost.
+
+See the [USER_GUIDE §3 — Dependency-Based Sequencing (Formations)](docs/USER_GUIDE.md#dependency-based-sequencing-formations) for the full recipe, diagram, and behavior callouts.
 
 ## The Self-Evolving Factory
 
