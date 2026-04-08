@@ -300,7 +300,7 @@ When all blocking issues are closed, Fabrik detects the change within one poll c
 
 See the [USER_GUIDE §3 — Dependency-Based Sequencing (Formations)](docs/USER_GUIDE.md#dependency-based-sequencing-formations) for the full recipe, diagram, and behavior callouts.
 
-When all issues in a formation are closed, Fabrik archives the completed project board items after a 24-hour grace period — keeping the board clean automatically. Archived items remain accessible via GitHub's Archive view and the grace period survives engine restarts.
+When an issue reaches Done, Fabrik archives the project board item after a 24-hour grace period — keeping the board clean automatically. Archived items remain accessible via GitHub's Archive view and the grace period survives engine restarts.
 
 ## The Self-Evolving Factory
 
