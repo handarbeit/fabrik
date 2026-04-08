@@ -71,23 +71,22 @@ gh release download --repo tenaciousvc/fabrik --pattern '*<os>_<arch>*' -O - | t
 
 Omit any empty category sections. Keep descriptions concise — one line each.
 
-### 5. Commit and tag
+### 5. Commit, tag, and push
 
 - `git add release-notes.md`
 - Commit with message: `Release notes for <version>`
 - Create tag: `git tag <version>`
-
-### 6. Push
-
-- Show the user the release notes and ask for confirmation before pushing
-- Push: `git push origin main <version>`
+- Push immediately: `git push origin main <version>`
 - Report the GitHub Actions release URL: `gh run list --limit 1 -R tenaciousvc/fabrik`
 
-### 7. File documentation update issue
+Do NOT ask for confirmation before pushing. If builds and tests passed in step 1, proceed.
 
-After a successful push, create a GitHub issue to update user documentation:
+### 6. File documentation update issue
+
+After a successful push, create a GitHub issue to update user documentation and move it to Specify:
 
 ```bash
+# Create the issue
 gh issue create -R tenaciousvc/fabrik \
   --title "Update docs for v<version>" \
   --label "documentation" \
@@ -104,9 +103,12 @@ gh issue create -R tenaciousvc/fabrik \
 - README.md — update feature list if new user-facing capabilities were added
 - docs/index.md — update marketing page if warranted
 - Ensure code examples and configuration references are current"
+
+# Move the issue to Specify on the Fabrik PM board (org project #1)
+# First, get the issue's project item ID, then update its status
 ```
 
-Move the issue to the Specify column on the Fabrik PM project board. The `fabrik:yolo` label ensures it flows through the pipeline automatically.
+Use `gh project item-add` and `gh project item-edit` to place the issue in the Specify column on the Fabrik PM project board. The `fabrik:yolo` label ensures it flows through the pipeline automatically.
 
 ## Important
 
