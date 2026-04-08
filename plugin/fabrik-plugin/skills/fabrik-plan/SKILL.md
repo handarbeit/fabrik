@@ -52,6 +52,8 @@ Tasks should be:
 
 Include testing tasks alongside the code they test, not as a separate phase at the end.
 
+If the feature is user-facing, identify which docs need updating — check the Research findings for a "Documentation Impact" section if present; if absent, scan the repo for user-facing docs (e.g., `docs/USER_GUIDE.md`, `README.md`, `docs/index.md`). Include doc update tasks alongside the implementation tasks they document, not as a separate phase at the end; reference the spec's Problem/Summary and requirements as source material so Implement has concrete content guidance.
+
 ### Document key decisions
 
 For each significant decision:
