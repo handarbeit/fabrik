@@ -1,10 +1,8 @@
-# Fabrik v0.0.18
+# Fabrik v0.0.19
 
 ## Fixes
 
-- **Dev auto-upgrade ran against user's project repo** (#240) — `devCheckout()` now verifies the git remote matches `tenaciousvc/fabrik` or `handarbeit/fabrik` before attempting `git pull` + rebuild. Previously, running Fabrik from source inside a target project's git repo would pull and rebuild against the wrong repo.
-- **`fabrik init` writes .git/info/exclude** (#240) — `.fabrik/worktrees/`, `.fabrik/repos/`, `.fabrik/plugin/`, and `.fabrik/debug/` are added to `.git/info/exclude` during init, preventing Fabrik's working directories from polluting the target repo's git status. Skipped when running inside the Fabrik source repo itself.
-- **Terminal left in broken state after TUI exit** — `ReleaseTerminal()` is now called after the TUI exits to restore raw mode and mouse tracking. Fixes `^M` on enter and other terminal corruption after quitting.
+- **Advanced items stuck after yolo catch-up** — The yolo catch-up loop evicted the `updatedAt` cache after advancing an item, but the deferred cache update at the end of the poll re-cached the old timestamp. The item appeared "unchanged" on the next poll and the new stage never ran. Fixed by excluding advanced items from the deferred cache update.
 
 ## Upgrading
 
