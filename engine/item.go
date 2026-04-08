@@ -387,6 +387,10 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			e.logf(item.Number, "warn", "could not add completion label: %v\n", err)
 		}
 
+		if err := e.client.ArchiveProjectItem(board.ProjectID, item.ItemID); err != nil {
+			e.logf(item.Number, "warn", "could not archive project item: %v\n", err)
+		}
+
 		e.mu.Lock()
 		e.processedSet[stageKey] = time.Now()
 		e.lastCompleted[iKey] = true
