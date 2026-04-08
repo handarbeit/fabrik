@@ -56,7 +56,7 @@ func TestCheckReleaseUpgrade_MultiRepoMode(t *testing.T) {
 			return &gh.LatestRelease{TagName: "v0.0.1"}, nil
 		},
 	}
-	// Engine with no owner/repo set — simulates multi-repo mode where devCheckout() returns nil.
+	// Engine with no owner/repo set — simulates multi-repo mode.
 	eng := NewWithDeps(
 		Config{Owner: "", Repo: "", User: "u", Token: "t", AutoUpgrade: true, Version: "v0.0.1", Stages: testStages()},
 		client, &mockClaudeInvoker{}, nil,

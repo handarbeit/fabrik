@@ -1052,8 +1052,7 @@ func (m Model) openResumeInlineCmd(repo string, issueNumber int, stageName, stag
 }
 
 // worktreePathForIssue returns the absolute path to the issue's git worktree.
-// In single-repo mode: <rootDir>/.fabrik/worktrees/issue-N
-// In multi-repo mode:  <rootDir>/.fabrik/worktrees/<owner>-<repo>/issue-N
+// Path: <rootDir>/.fabrik/worktrees/<owner>-<repo>/issue-N
 func worktreePathForIssue(rootDir, repo string, issueNumber int) string {
 	issuePart := fmt.Sprintf("issue-%d", issueNumber)
 	if repo != "" {

@@ -154,9 +154,10 @@ func TestExecute_MaxConcurrentFlag(t *testing.T) {
 
 func TestExecute_ConfigYAMLApplied(t *testing.T) {
 	// Test that config.yaml values satisfy required fields (owner/repo/project/user).
-	// In multi-repo / job-control mode (no git repo in cwd), engine.New() now
-	// succeeds and starts polling. We send SIGINT to stop it and verify it did
-	// NOT fail with "missing required config" — that proves config.yaml was applied.
+	// engine.New() always uses os.Getwd() as fabrikDir now, so it succeeds
+	// regardless of whether cwd is a git repo. We send SIGINT to stop it and
+	// verify it did NOT fail with "missing required config" — that proves
+	// config.yaml was applied.
 	dir := t.TempDir()
 	chdirTest(t, dir)
 	os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".env\n"), 0644)
