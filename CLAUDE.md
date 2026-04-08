@@ -68,8 +68,9 @@ Before each stage invocation, the engine writes context documents to `.fabrik-co
 - In-flight issues tracked via `sync.Map` to prevent duplicate dispatch
 
 ### Worktrees
-- Single-repo: each issue gets `.fabrik/worktrees/issue-N/` on branch `fabrik/issue-N`
-- Multi-repo: each issue gets `.fabrik/worktrees/<owner>/<repo>/issue-N/` on branch `fabrik/issue-N`
+- Each managed repo is always bare-cloned to `.fabrik/repos/<owner>-<repo>.git` on first access
+- Each issue gets `.fabrik/worktrees/<owner>-<repo>/issue-N/` on branch `fabrik/issue-N`
+- `fabrikDir` (where `.fabrik/` config, stages, and plugin live) is always `os.Getwd()`
 - NEVER destroy worktrees with existing content — they may have partial work
 - `updateWorktreeFromMain` fetches and merges origin/main; leaves conflicts for Claude
 - Dirty worktrees (uncommitted changes) skip the update
