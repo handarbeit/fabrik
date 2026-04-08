@@ -259,6 +259,11 @@ func (e *Engine) cleanupClosedIssueLocks(board *gh.ProjectBoard) {
 // feature) and ongoing cleanup. Uses shallow board data — labels(first:15) is
 // sufficient to see stage:Done:complete even on issues with many labels.
 // Idempotent: archived items disappear from subsequent board queries.
+// archiveGracePeriod is how long a completed Done item stays visible on the
+// board before being archived. This gives users time to see what completed
+// while they were away, especially in yolo mode.
+const archiveGracePeriod = 24 * time.Hour
+
 func (e *Engine) archiveDoneCompleteItems(projectID string, items []gh.ProjectItem) {
 	archived := 0
 	for _, item := range items {
@@ -275,6 +280,11 @@ func (e *Engine) archiveDoneCompleteItems(projectID string, items []gh.ProjectIt
 			}
 		}
 		if !hasComplete {
+			continue
+		}
+		// Let completed items stay visible for 24 hours so users can see
+		// what finished while they were away.
+		if !item.UpdatedAt.IsZero() && time.Since(item.UpdatedAt) < archiveGracePeriod {
 			continue
 		}
 		if err := e.client.ArchiveProjectItem(projectID, item.ItemID); err != nil {
