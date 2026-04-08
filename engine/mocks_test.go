@@ -33,9 +33,13 @@ type mockGitHubClient struct {
 	createDraftPRFn           func(owner, repo, title, head, base string, issueNumber int) (int, error)
 	fetchLatestReleaseFn      func(owner, repo string) (*gh.LatestRelease, error)
 	fetchLabelAppliedAtFn     func(owner, repo string, issueNumber int, labelName string) (time.Time, error)
+	archiveProjectItemFn      func(projectID, itemID string) error
 
 	// Track calls for FetchLabelAppliedAt
 	fetchLabelAppliedAtCalls []fetchLabelAppliedAtCall
+
+	// Track calls for ArchiveProjectItem
+	archiveProjectItemCalls []archiveProjectItemCall
 
 	// Track calls — access under mu when accessed from concurrent goroutines.
 	addLabelCalls      []addLabelCall
@@ -52,6 +56,10 @@ type fetchLabelAppliedAtCall struct {
 	owner, repo string
 	issueNumber int
 	labelName   string
+}
+
+type archiveProjectItemCall struct {
+	projectID, itemID string
 }
 
 type markPRReadyCall struct {
@@ -268,6 +276,17 @@ func (m *mockGitHubClient) FetchLabelAppliedAt(owner, repo string, issueNumber i
 		return fn(owner, repo, issueNumber, labelName)
 	}
 	return time.Time{}, nil
+}
+
+func (m *mockGitHubClient) ArchiveProjectItem(projectID, itemID string) error {
+	m.mu.Lock()
+	m.archiveProjectItemCalls = append(m.archiveProjectItemCalls, archiveProjectItemCall{projectID, itemID})
+	fn := m.archiveProjectItemFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(projectID, itemID)
+	}
+	return nil
 }
 
 func (m *mockGitHubClient) RateLimitStats() (gh.RateLimitStats, gh.RateLimitStats) {
