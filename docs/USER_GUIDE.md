@@ -129,24 +129,25 @@ Fabrik polls the project board every 30 seconds by default (configurable with `-
 or `poll:` in `config.yaml`).
 Move an issue to `Specify` on the board to start processing it.
 
-### Multi-Repo / Job-Control Mode
+### Multi-Repo Mode
 
-Fabrik can manage issues from a **single GitHub Project board that spans multiple repositories**. To use this mode, run Fabrik from a directory that is *not* inside a git repository:
+Fabrik can manage issues from a **single GitHub Project board that spans multiple repositories**. Run Fabrik from any directory (no need to be inside a git checkout of a managed repo):
 
 ```bash
-mkdir ~/fabrik-control && cd ~/fabrik-control
+mkdir ~/my-fabrik-dir && cd ~/my-fabrik-dir
+fabrik init
 ./fabrik --owner myorg --project 5 --user me
 # No --repo needed — Fabrik processes all repos on the board
 ```
 
-In job-control mode:
-- Each repository found on the board is cloned as a bare clone at `.fabrik/repo.git/<owner>/<repo>/`
-- Worktrees are created at `.fabrik/worktrees/<owner>/<repo>/issue-N/` on branch `fabrik/issue-N`
+Fabrik **always bare-clones** each managed repository on first access:
+- Bare clones are stored at `.fabrik/repos/<owner>-<repo>.git`
+- Worktrees are created at `.fabrik/worktrees/<owner>-<repo>/issue-N/` on branch `fabrik/issue-N`
 - One worktree manager runs per discovered repository, all sharing the same poll loop
 
-To restrict processing to a single repo while still using job-control mode, pass `--repo owner/repo`.
+To restrict processing to a single repository, pass `--repo owner/repo`.
 
-In **single-repo mode** (running from within a git repository), behavior is unchanged — the existing repo root is used and no bare cloning occurs.
+The `.fabrik/` directory (config, stages, plugin) always lives in the directory where you run `fabrik`.
 
 ### Development Mode (self-upgrade)
 

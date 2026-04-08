@@ -263,25 +263,23 @@ branch `fabrik/issue-N`. This means:
 - Each issue's changes are on their own branch, ready for PR
 - Worktrees persist across polls for Claude session continuity
 
-## Multi-Repo / Job-Control Mode
+## Multi-Repo Mode
 
-Fabrik can manage issues across **multiple repositories** from a single GitHub Project board. When you run Fabrik from a directory that is not a git repository, it enters **job-control mode**:
+Fabrik can manage issues across **multiple repositories** from a single GitHub Project board. Run Fabrik from any directory — no need to be inside a git checkout of a managed repo:
 
-1. `fabrikDir` is set to the current working directory (not a git root)
-2. Repos are discovered lazily from project board items
-3. Each repo is cloned as a bare clone at `.fabrik/repo.git/<owner>/<repo>/`
-4. Worktrees for each issue are created under `.fabrik/worktrees/<owner>/<repo>/issue-N/`
-5. One worktree manager per discovered repository handles its own lifecycle
-
-This means you can run Fabrik from a dedicated "control" directory (no git repo required) and have it work across an entire GitHub organization:
+1. Repos are discovered lazily from project board items
+2. Each repo is bare-cloned to `.fabrik/repos/<owner>-<repo>.git` on first access
+3. Worktrees for each issue are created at `.fabrik/worktrees/<owner>-<repo>/issue-N/`
+4. One worktree manager per discovered repository handles its own lifecycle
 
 ```bash
-mkdir my-fabrik-control && cd my-fabrik-control
+mkdir my-fabrik-dir && cd my-fabrik-dir
+fabrik init
 ./fabrik --owner myorg --project 5 --user me
-# Fabrik will clone repos as needed into .fabrik/repo.git/
+# Fabrik bare-clones each repo as needed into .fabrik/repos/
 ```
 
-In single-repo mode (running from within a git repository), behavior is unchanged — the repo root is used for the worktree directory as before.
+Use `--repo owner/repo` to restrict processing to a single repository.
 
 ## Formations
 

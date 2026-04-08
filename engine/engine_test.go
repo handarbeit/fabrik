@@ -127,8 +127,12 @@ func TestNew(t *testing.T) {
 	if eng.claude == nil {
 		t.Error("claude should not be nil")
 	}
-	if len(eng.worktreeManagers) == 0 {
-		t.Error("worktreeManagers should not be empty")
+	// worktreeManagers starts empty — repos are registered lazily via ensureRepoReady
+	if eng.worktreeManagers == nil {
+		t.Error("worktreeManagers map should be initialized")
+	}
+	if eng.fabrikDir == "" {
+		t.Error("fabrikDir should not be empty")
 	}
 }
 
