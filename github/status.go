@@ -34,6 +34,24 @@ mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
 	return c.graphqlRequest(query, vars, &result)
 }
 
+// ArchiveProjectItem archives a project item so it no longer appears in paginated board results.
+// Archiving is idempotent — calling it on an already-archived item is a no-op.
+func (c *Client) ArchiveProjectItem(projectID, itemID string) error {
+	query := `
+mutation($projectId: ID!, $itemId: ID!) {
+  archiveProjectV2Item(input: {projectId: $projectId, itemId: $itemId}) {
+    item { id }
+  }
+}`
+	vars := map[string]interface{}{
+		"projectId": projectID,
+		"itemId":    itemID,
+	}
+
+	var result struct{}
+	return c.graphqlRequest(query, vars, &result)
+}
+
 // FetchStatusField retrieves the Status field ID and its option IDs for a project.
 func (c *Client) FetchStatusField(projectID string) (*StatusField, error) {
 	query := `

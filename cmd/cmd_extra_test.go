@@ -77,6 +77,7 @@ func (m *testGitHubUpgradeClient) MergePR(owner, repo string, prNumber int) erro
 func (m *testGitHubUpgradeClient) FetchLabelAppliedAt(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
 	return time.Time{}, nil
 }
+func (m *testGitHubUpgradeClient) ArchiveProjectItem(projectID, itemID string) error { return nil }
 func (m *testGitHubUpgradeClient) RateLimitStats() (gh.RateLimitStats, gh.RateLimitStats) {
 	return gh.RateLimitStats{}, gh.RateLimitStats{}
 }
