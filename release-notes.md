@@ -1,9 +1,21 @@
-# Fabrik v0.0.22
+# Fabrik v0.0.23
+
+## Features
+
+- **Auto-archive Done items after 24 hours** (#247) — Completed items in the Done column are automatically archived from the project board after 24 hours. This dramatically reduces board size and GraphQL pagination cost (Fabrik board went from 132 to 13 items). Items stay visible for 24 hours so users can see what finished while they were away.
+- **Mermaid diagram rendering** — GitHub Pages docs now render Mermaid diagrams client-side.
+- **Syntax highlighting** — Code blocks on the docs site now have colorized syntax.
+- **Formations documentation** — User guide updated with dependency-based issue sequencing patterns and example formations.
 
 ## Fixes
 
-- **Bare clone never fetched — new branches forked from stale base** — `git clone --bare` doesn't configure a default fetch refspec, so subsequent `git fetch origin` was silently a no-op. New issue branches were forked from the original clone point, not current `origin/main`. All worktrees created after the initial clone were working against stale code.
-- **Self-healing for existing projects** — On startup, Fabrik now repairs the missing fetch refspec on all existing bare clones before fetching. All projects across all users will self-heal on the next restart or auto-upgrade.
+- **Archive log corrupted TUI** — Archive status messages used `fmt.Printf` which bypassed the TUI event channel. Fixed to use `logf`.
+- **Shallow query labels truncated** — `labels(first:5)` missed completion labels on issues with many labels. Bumped to `labels(first:15)`.
+- **Docs content too narrow** — Widened from 800px to 1100px to match the main page width. Tables now scroll horizontally on narrow screens.
+
+## Internal
+
+- ADR 021: Housekeeping mutations exempt from shallow-data read-only rule.
 
 ## Upgrading
 

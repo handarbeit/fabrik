@@ -534,7 +534,16 @@ In this 5-issue formation:
 | **Implement** | 3 | Write code and tests, commit frequently, push to branch. |
 | **Review** | 4 | Rebase, review, fix issues, push. Posts output on PR. |
 | **Validate** | 5 | Run tests, verify requirements, confirm PR is ready. |
-| **Done** | 99 | Terminal state. Cleanup stage removes worktree. |
+| **Done** | 99 | Terminal state. Cleanup stage removes worktree and archives the item after 24 hours. |
+
+#### Done Stage and Archiving
+
+When an issue reaches Done, Fabrik:
+1. **Removes the worktree** — frees disk space from the issue's working copy
+2. **Adds `stage:Done:complete`** — marks cleanup as finished
+3. **Archives the project item after 24 hours** — removes it from the board's active view
+
+The 24-hour grace period ensures you can see what completed while you were away. Archived items are not deleted — they remain accessible via the project board's "Archive" view in GitHub. If Fabrik restarts, the timer is based on the item's last-updated timestamp on GitHub, so archiving is never lost or reset.
 
 ### Customizing Stages
 
