@@ -22,7 +22,7 @@ go vet ./...             # Lint
 - `engine/pr.go` — Output posting: issue comments, PR comments, summary extraction
 - `engine/comments.go` — Comment detection and filtering logic
 - `engine/context.go` — Context files (.fabrik-context/) and stage comment lookup
-- `engine/repo.go` — Per-repo identity helpers for multi-repo mode (parseOwnerRepo, repoName, issueKey)
+- `engine/repo.go` — Per-repo identity helpers (parseOwnerRepo, repoName, issueKey)
 - `engine/claude.go` — Claude Code invocation, prompt building, marker extraction
 - `engine/worktree.go` — Git worktree lifecycle (create, update, push, cleanup)
 - `engine/interfaces.go` — GitHubClient and ClaudeInvoker interfaces (for testing)
