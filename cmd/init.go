@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"net/url"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -208,79 +207,6 @@ func buildConfigWithValues(owner, repo, project, ownerType, user string) string 
 	return strings.Join(out, "\n")
 }
 
-// writeInitGitExcludes appends runtime-generated .fabrik/ subdirectories to
-// .git/info/exclude in the given directory so they are hidden from git tracking
-// locally without modifying the user's committed .gitignore.
-//
-// Skipped entirely when:
-//   - dir is not inside a git repo
-//   - the git remote points to the fabrik source repo itself
-//
-// Returns the list of entries actually written (nil if nothing was written).
-func writeInitGitExcludes(dir string) ([]string, error) {
-	// Find git dir
-	cmd := exec.Command("git", "rev-parse", "--git-dir")
-	cmd.Dir = dir
-	out, err := cmd.Output()
-	if err != nil {
-		// Not in a git repo — skip silently.
-		return nil, nil
-	}
-	gitDir := strings.TrimSpace(string(out))
-	if !filepath.IsAbs(gitDir) {
-		gitDir = filepath.Join(dir, gitDir)
-	}
-
-	// Skip when running in the fabrik source repo itself.
-	urlCmd := exec.Command("git", "remote", "get-url", "origin")
-	urlCmd.Dir = dir
-	urlOut, urlErr := urlCmd.Output()
-	if urlErr == nil {
-		remoteURL := strings.TrimSuffix(strings.TrimSpace(string(urlOut)), ".git")
-		for _, pattern := range []string{"tenaciousvc/fabrik", "verveguy/fabrik"} {
-			if strings.Contains(remoteURL, pattern) {
-				return nil, nil
-			}
-		}
-	}
-
-	infoDir := filepath.Join(gitDir, "info")
-	if err := os.MkdirAll(infoDir, 0755); err != nil {
-		return nil, fmt.Errorf("creating git info dir: %w", err)
-	}
-	excludePath := filepath.Join(infoDir, "exclude")
-
-	existing, _ := os.ReadFile(excludePath)
-	existingStr := string(existing)
-
-	entries := []string{
-		".fabrik/worktrees/",
-		".fabrik/repos/",
-		".fabrik/plugin/",
-		".fabrik/debug/",
-	}
-
-	f, err := os.OpenFile(excludePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		return nil, fmt.Errorf("opening git exclude file: %w", err)
-	}
-	defer f.Close()
-
-	var written []string
-	for _, entry := range entries {
-		if strings.Contains(existingStr, entry) {
-			continue
-		}
-		if _, err := f.WriteString(entry + "\n"); err != nil {
-			return written, fmt.Errorf("writing git exclude entry %q: %w", entry, err)
-		}
-		// Track locally so we don't double-write in this same call
-		existingStr += entry + "\n"
-		written = append(written, entry)
-	}
-	return written, nil
-}
-
 // runInit implements the `fabrik init` subcommand.
 // It extracts the embedded default stage YAML files into .fabrik/stages/
 // and the Fabrik plugin into .fabrik/plugin/ in the current directory.
@@ -404,15 +330,6 @@ func runInit(args []string) error {
 	// Generate .fabrik/config.yaml template
 	if err := writeConfigTemplate(owner, project, ownerType, *userFlag, *force); err != nil {
 		return err
-	}
-
-	// Write .git/info/exclude entries for runtime-generated .fabrik/ subdirectories.
-	written, err := writeInitGitExcludes(".")
-	if err != nil {
-		return fmt.Errorf("writing git excludes: %w", err)
-	}
-	for _, entry := range written {
-		fmt.Printf("  git exclude: %s\n", entry)
 	}
 
 	fmt.Println("\nFabrik is ready. Stage configs and plugin skills are in .fabrik/")

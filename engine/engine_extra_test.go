@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"os/exec"
 	"testing"
 
 	gh "github.com/verveguy/fabrik/github"
@@ -128,65 +127,6 @@ func TestChangeType(t *testing.T) {
 	}
 }
 
-func TestDevCheckout_NilWhenNoDefaultRepo(t *testing.T) {
-	// Engine with no owner/repo configured → defaultRepo() is "" → devCheckout returns nil.
-	eng := NewWithDeps(
-		Config{Owner: "", Repo: "", User: "u", Token: "t", Stages: testStages()},
-		&mockGitHubClient{}, &mockClaudeInvoker{}, nil,
-	)
-	if wm := eng.devCheckout(); wm != nil {
-		t.Errorf("expected nil devCheckout when no default repo, got %v", wm)
-	}
-}
-
-func TestDevCheckout_ReturnsRegistered(t *testing.T) {
-	skipIfNoGit(t)
-	// Create a temp git repo with the fabrik remote so devCheckout returns non-nil.
-	repoDir := t.TempDir()
-	for _, args := range [][]string{
-		{"git", "init", "-b", "main"},
-		{"git", "remote", "add", "origin", "git@github.com:tenaciousvc/fabrik.git"},
-	} {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = repoDir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("%v: %s", args, out)
-		}
-	}
-	eng := NewWithDeps(
-		Config{Owner: "owner", Repo: "repo", User: "testuser", Token: "t", Stages: testStages()},
-		&mockGitHubClient{}, &mockClaudeInvoker{},
-		NewWorktreeManager(repoDir),
-	)
-	if got := eng.devCheckout(); got == nil {
-		t.Error("devCheckout should return the WM when git remote matches fabrik source")
-	}
-}
-
-func TestDevCheckout_NilWhenWrongRemote(t *testing.T) {
-	skipIfNoGit(t)
-	// Create a temp git repo with a non-fabrik remote.
-	repoDir := t.TempDir()
-	for _, args := range [][]string{
-		{"git", "init", "-b", "main"},
-		{"git", "remote", "add", "origin", "https://github.com/example/myproject.git"},
-	} {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = repoDir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("%v: %s", args, out)
-		}
-	}
-	eng := NewWithDeps(
-		Config{Owner: "owner", Repo: "repo", User: "testuser", Token: "t", Stages: testStages()},
-		&mockGitHubClient{}, &mockClaudeInvoker{},
-		NewWorktreeManager(repoDir),
-	)
-	if got := eng.devCheckout(); got != nil {
-		t.Error("devCheckout should return nil when git remote does not match fabrik source")
-	}
-}
-
 func TestRegisterWorktrees_Idempotent(t *testing.T) {
 	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
 	// Use a new repo key (not "owner/repo" which testEngine already registers).
@@ -228,8 +168,8 @@ func TestEnsureRepoReady_CloneFailure_PostsCommentAndPauses(t *testing.T) {
 	skipIfNoGit(t)
 	client := &mockGitHubClient{}
 	eng := testEngine(client, &mockClaudeInvoker{})
-	// Set jobControlDir to a tempdir so ensureBareClone tries (and fails) to clone.
-	eng.jobControlDir = t.TempDir()
+	// Set fabrikDir to a tempdir so ensureBareClone tries (and fails) to clone.
+	eng.fabrikDir = t.TempDir()
 
 	// Item with a new (unregistered) repo — ensureBareClone will fail (no network to nonexistent).
 	item := gh.ProjectItem{Number: 77, Repo: "nonexistent-xyz/nonexistent-repo-abc123"}

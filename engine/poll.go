@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -75,15 +74,6 @@ func pollStatusClear() {
 		fmt.Println()
 		lastStatusLen = 0
 	}
-}
-
-func gitToplevel() (string, error) {
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("not inside a git repository: %w", err)
-	}
-	return strings.TrimSpace(string(out)), nil
 }
 
 func (e *Engine) Run() error {
@@ -592,7 +582,7 @@ doneDispatching:
 	if dispatched == 0 {
 		// Check whether any workers from a previous poll cycle are still running.
 		// If so, the engine is not truly idle — auto-upgrade must not run because
-		// checkAndUpgrade calls syscall.Exec which would kill in-flight workers.
+		// checkReleaseUpgrade calls syscall.Exec which would kill in-flight workers.
 		var inFlightLabels []string
 		e.inFlight.Range(func(key, val any) bool {
 			if k, ok := key.(string); ok {
@@ -614,7 +604,7 @@ doneDispatching:
 				e.idleCount++
 				if e.idleCount >= idleUpgradeThreshold {
 					e.idleCount = 0
-					e.checkAndUpgrade()
+					e.checkReleaseUpgrade()
 				}
 			}
 		}
@@ -626,111 +616,6 @@ doneDispatching:
 
 	e.emitStructural(tui.PollCompletedEvent{ItemCount: len(board.Items), Dispatched: dispatched})
 	return nil
-}
-
-// checkAndUpgrade selects the upgrade path based on the running version:
-//   - dev builds (version starts with "dev"): git pull → go build → re-exec
-//   - release builds (all other versions): GitHub Releases API → download → atomic replace → re-exec
-func (e *Engine) checkAndUpgrade() {
-	if !strings.HasPrefix(e.cfg.Version, "dev") {
-		e.checkReleaseUpgrade()
-		return
-	}
-
-	wm := e.devCheckout()
-	if wm == nil {
-		return
-	}
-	baseBranch := wm.DefaultBaseBranch()
-	dir := wm.BaseDir()
-
-	e.logf(0, "upgrade", "checking origin/%s ...\n", baseBranch)
-	pollStatus("[upgrade] checking origin/%s ...", baseBranch)
-
-	// Fetch from origin
-	fetchCmd := exec.Command("git", "fetch", "origin", baseBranch)
-	fetchCmd.Dir = dir
-	if out, err := fetchCmd.CombinedOutput(); err != nil {
-		e.logf(0, "upgrade", "git fetch failed: %v\n%s\n", err, out)
-		return
-	}
-
-	// Compare HEAD to origin/baseBranch
-	localRef, err := gitRevParse(dir, "HEAD")
-	if err != nil {
-		e.logf(0, "upgrade", "could not resolve HEAD: %v\n", err)
-		return
-	}
-	remoteRef, err := gitRevParse(dir, "origin/"+baseBranch)
-	if err != nil {
-		e.logf(0, "upgrade", "could not resolve origin/%s: %v\n", baseBranch, err)
-		return
-	}
-	if localRef == remoteRef {
-		// Local checkout matches remote. But the running binary may have been
-		// built from an older commit (e.g. the checkout was pulled but the
-		// binary wasn't rebuilt). Check if the binary's embedded SHA differs
-		// from HEAD — if so, fall through to rebuild.
-		binarySHA := extractBinarySHA(e.cfg.Version) // e.g. "dev(abc1234)" → "abc1234"
-		if binarySHA == "" || strings.HasPrefix(localRef, binarySHA) {
-			return
-		}
-		e.logf(0, "upgrade", "binary built from %s but HEAD is %s — rebuilding\n", binarySHA, localRef[:7])
-	}
-
-	e.logf(0, "upgrade", "new commits detected — pulling origin/%s\n", baseBranch)
-
-	pullCmd := exec.Command("git", "pull", "--ff-only", "origin", baseBranch)
-	pullCmd.Dir = dir
-	if out, err := pullCmd.CombinedOutput(); err != nil {
-		e.logf(0, "upgrade", "git pull --ff-only failed (local changes?): %v\n%s\n", err, out)
-		return
-	}
-
-	// Determine current executable path
-	exe, err := os.Executable()
-	if err != nil {
-		e.logf(0, "upgrade", "could not determine executable path: %v\n", err)
-		return
-	}
-	exe, err = filepath.EvalSymlinks(exe)
-	if err != nil {
-		e.logf(0, "upgrade", "could not resolve symlinks for executable: %v\n", err)
-		return
-	}
-
-	e.logf(0, "upgrade", "rebuilding binary: %s\n", exe)
-
-	buildCmd := exec.Command("go", "build", "-o", exe, ".")
-	buildCmd.Dir = dir
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		e.logf(0, "upgrade", "build failed: %v\n%s\n", err, out)
-		return
-	}
-
-	// Refresh plugin skills from the new binary.
-	e.logf(0, "upgrade", "refreshing plugin skills\n")
-	upgradeCmd := exec.Command(exe, "upgrade")
-	upgradeCmd.Dir = dir
-	if out, err := upgradeCmd.CombinedOutput(); err != nil {
-		e.logf(0, "upgrade", "fabrik upgrade failed: %v\n%s\n", err, out)
-		// Non-fatal — continue with re-exec, old skills still work
-	}
-
-	e.logf(0, "upgrade", "re-executing new binary\n")
-
-	if err := syscall.Exec(exe, os.Args, os.Environ()); err != nil {
-		e.logf(0, "upgrade", "exec failed: %v\n", err)
-	}
-}
-
-// extractBinarySHA extracts the short SHA from a dev version string like
-// "dev(abc1234)". Returns "" if the version is not a dev build or has no SHA.
-func extractBinarySHA(version string) string {
-	if !strings.HasPrefix(version, "dev(") || !strings.HasSuffix(version, ")") {
-		return ""
-	}
-	return version[4 : len(version)-1]
 }
 
 func gitRevParse(dir, ref string) (string, error) {
