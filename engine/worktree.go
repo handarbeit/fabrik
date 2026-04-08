@@ -56,8 +56,9 @@ func NewWorktreeManagerForRepo(baseDir, worktreeRoot, rName string) *WorktreeMan
 func ensureBareClone(baseDir, owner, repo string) (string, error) {
 	bareDir := filepath.Join(baseDir, ".fabrik", "repos", owner+"-"+repo+".git")
 	if _, err := os.Stat(bareDir); err == nil {
-		// Already cloned — fetch latest
-		cmd := exec.Command("git", "fetch", "origin")
+		// Already cloned — fetch latest. Use explicit refspec because bare
+		// clones don't have a default fetch refspec configured.
+		cmd := exec.Command("git", "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*")
 		cmd.Dir = bareDir
 		cmd.CombinedOutput() // best-effort
 		return bareDir, nil
@@ -72,6 +73,12 @@ func ensureBareClone(baseDir, owner, repo string) (string, error) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("cloning %s: %s: %w", cloneURL, strings.TrimSpace(string(out)), err)
 	}
+
+	// Bare clones don't set a default fetch refspec. Add one so that
+	// subsequent `git fetch origin` updates refs/remotes/origin/*.
+	cfgCmd := exec.Command("git", "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+	cfgCmd.Dir = bareDir
+	cfgCmd.CombinedOutput() // best-effort
 
 	return bareDir, nil
 }
