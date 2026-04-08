@@ -49,6 +49,18 @@ If the research reveals ambiguities that the spec didn't address, list them as a
 - "There are two patterns used for Y in the codebase — which should we follow?"
 - "Module Z has no tests — should we add them as part of this work?"
 
+### Assess documentation impact
+
+Determine whether the feature introduces or changes anything visible to users of the CLI or system. Check for:
+- New CLI commands or subcommands
+- New config options, YAML fields, or environment variables
+- New workflow steps or behavioral changes visible to users
+- New labels, markers, or output formats
+
+Then search closed GitHub issues for related problem statements that inform what documentation should cover. Use `WebSearch` or `WebFetch` against GitHub's issue search (e.g., `https://api.github.com/search/issues?q=<keywords>+repo:<owner>/<repo>+state:closed`) to find relevant prior issues. Summarize what those issues reveal about user-facing scope.
+
+If there is no documentation impact, note that explicitly — the section must always be present.
+
 ### Summarize findings
 
 Write your research findings as your stage output — the engine posts this as a stage comment automatically. Do **not** use `FABRIK_ISSUE_UPDATE` markers or attempt to rewrite the issue body. The issue body is the spec, owned by Specify.
@@ -77,6 +89,9 @@ Technical limitations and requirements discovered.
 
 ### Risks
 Technical risks identified during research.
+
+### Documentation Impact
+_No documentation impact._
 ```
 
 ## What You Do NOT Do
