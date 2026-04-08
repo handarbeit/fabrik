@@ -572,7 +572,24 @@ pre.highlight, div.highlight {
   overflow-x: auto;
   margin: 0;
 
-  code { background: none; padding: 0; }
+  code { background: none; padding: 0; border: none; }
+}
+
+// Rouge syntax highlighting — dark theme
+.highlight {
+  .c, .c1, .cm, .cs          { color: #6e7681; font-style: italic; } // comments
+  .k, .kd, .kn, .kp, .kr, .kt { color: #ff7b72; }                   // keywords
+  .s, .s1, .s2, .sb, .sc, .sd, .se, .sh, .si, .sx { color: #a5d6ff; } // strings
+  .nb, .bp                    { color: #79c0ff; }                     // builtins
+  .nf, .nx                    { color: #d2a8ff; }                     // functions
+  .nv, .vi, .vm, .vc          { color: #ffa657; }                     // variables
+  .o, .ow                     { color: #ff7b72; }                     // operators
+  .m, .mi, .mf, .mh, .mo, .il { color: #79c0ff; }                    // numbers
+  .na                         { color: #79c0ff; }                     // attributes
+  .nt                         { color: #7ee787; }                     // tags
+  .err                        { color: #f85149; }                     // errors
+  .gd                         { color: #ffa198; background: rgba(248, 81, 73, 0.1); } // diff deleted
+  .gi                         { color: #56d364; background: rgba(46, 160, 67, 0.1); } // diff inserted
 }
 
 code {
