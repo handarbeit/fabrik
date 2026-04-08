@@ -64,5 +64,8 @@ conflicts, though it means Claude must reproduce unchanged sections.
   GitHub's issue edit history.
 - **All-or-nothing**: If the markers aren't found, the output is posted as
   a comment instead. No partial body updates.
-- **Comment-only from configured user**: Only comments from `--user` trigger
-  processing. Other users' comments are ignored by this instance.
+- **Any-author processing**: Comments from any author trigger processing.
+  The original `--user`-only filter has been removed. Comments are skipped only
+  if they start with the Fabrik output prefix (`🏭 **Fabrik`) or already carry
+  a 🚀 rocket reaction (already processed). This allows colleagues, bots
+  (Copilot, Gemini), and other Fabrik instances to drive the pipeline.

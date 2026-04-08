@@ -854,10 +854,31 @@ If you see raw JSON dumped in issue/PR comments, the output was too large for th
 parser or the format changed. Fabrik now posts an error message instead of raw JSON.
 Check `~/.fabrik/logs/issue-N/` for the full output.
 
-### Multi-User Conflicts
+### Multi-User and Multi-Instance Operation
 
-Multiple users can run Fabrik against the same board. Each instance only processes
-comments by its `--user`. The `fabrik:locked:<user>` label prevents conflicts.
+Multiple users and multiple Fabrik instances can safely share a project board.
+
+**Comment processing**: Fabrik processes comments from *any* author, not just the
+configured `--user`. Human colleagues, code-review bots (Copilot, Gemini), and
+other Fabrik instances all trigger comment processing. Only two categories are
+skipped: comments that start with `🏭 **Fabrik` (Fabrik's own output) and comments
+that already carry a 🚀 rocket reaction (already processed).
+
+**Multi-instance locking**: The `fabrik:locked:<user>` label is still the
+concurrency guard, but acquisition now uses a **lock-then-verify** protocol:
+
+1. An instance adds its `fabrik:locked:<username>` label.
+2. It waits 2 seconds to let a competing instance place its own lock.
+3. It re-fetches the issue's labels.
+4. If no other `fabrik:locked:*` label is present → proceed.
+5. If a competing lock exists → **lexicographic tie-breaking**: the instance
+   whose username sorts *lower* alphabetically keeps its lock and proceeds;
+   the instance whose username sorts *higher* removes its lock and skips this
+   issue for this poll cycle. On the next poll, the winner's lock is already
+   visible, so the loser skips cleanly without retrying.
+
+This guarantees that exactly one instance processes each issue at a time, even
+when multiple instances poll simultaneously.
 
 ### Plugin Not Loading
 
