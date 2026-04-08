@@ -152,7 +152,7 @@ description: >-
         <span class="feature-icon">🌿</span>
         <div class="feature-title">Isolated Git Worktrees</div>
         <div class="feature-desc">
-          Each issue gets its own worktree at <code>.fabrik/worktrees/issue-N/</code>
+          Each issue gets its own worktree at <code>.fabrik/worktrees/&lt;owner&gt;-&lt;repo&gt;/issue-N/</code>
           on branch <code>fabrik/issue-N</code>. Multiple issues run in parallel,
           zero cross-contamination.
         </div>
@@ -238,9 +238,10 @@ description: >-
         <span class="feature-icon">🗂️</span>
         <div class="feature-title">Multi-Repo Support</div>
         <div class="feature-desc">
-          Run Fabrik from outside any git repo to manage issues across multiple
-          repositories from a single GitHub Project board. Each repo is cloned
-          lazily; worktrees are created per repo and per issue automatically.
+          Fabrik always bare-clones every managed repository on first access.
+          Run it from any directory — no checkout needed. Repos are discovered
+          lazily from the project board; worktrees are created per repo and per
+          issue automatically.
         </div>
       </div>
       <div class="feature-card">
