@@ -1,8 +1,9 @@
-# Fabrik v0.0.21
+# Fabrik v0.0.22
 
 ## Fixes
 
-- **Plugin skills now refresh from the new binary, not the old one** — v0.0.20 called `RefreshPlugin()` before `syscall.Exec`, extracting skills from the old binary's embedded FS. Now the new binary refreshes its own skills on startup via the existing `FABRIK_AUTO_UPGRADED=1` mechanism.
+- **Bare clone never fetched — new branches forked from stale base** — `git clone --bare` doesn't configure a default fetch refspec, so subsequent `git fetch origin` was silently a no-op. New issue branches were forked from the original clone point, not current `origin/main`. All worktrees created after the initial clone were working against stale code.
+- **Self-healing for existing projects** — On startup, Fabrik now repairs the missing fetch refspec on all existing bare clones before fetching. All projects across all users will self-heal on the next restart or auto-upgrade.
 
 ## Upgrading
 
