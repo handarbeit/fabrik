@@ -154,7 +154,6 @@ Then:
 3. **Set blocking edges where sub-issues have sequential dependencies:**
    ```bash
    # To express "SUB_B is blocked by SUB_A" (A must complete before B):
-   gh issue develop --repo OWNER/REPO SUB_B
    gh issue link SUB_B --repo OWNER/REPO --type "blocks" SUB_A
    # This marks SUB_A as blocking SUB_B (i.e., SUB_B depends on SUB_A)
    # Verify direction with: gh issue link --help
