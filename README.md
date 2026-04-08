@@ -219,6 +219,15 @@ to prevent accidental token leaks.
 | `fabrik resume <issue-number>` | Resume an interrupted Claude session for an issue |
 | `fabrik upgrade` | Self-update the Fabrik binary (release builds) and refresh plugin skills in `.fabrik/plugin/` from embedded defaults |
 
+## Built-in Skills
+
+Fabrik ships two user-invocable Claude Code skills (type `/skill-name` in any Claude Code session in the Fabrik repo):
+
+| Skill | Description |
+|-------|-------------|
+| `/cut-release` | Pre-flight checks, curated release notes, commit/tag/push, and auto-files a doc-update issue — see [§5 of the User Guide](docs/USER_GUIDE.md#built-in-skill-cut-release) |
+| `/audit-documentation` | Scans recently shipped issues, identifies documentation gaps, closes covered issues, and files new gap issues — see [§5 of the User Guide](docs/USER_GUIDE.md#built-in-skill-audit-documentation) |
+
 ### `fabrik watch`
 
 Monitor a single issue in real time without running the engine:
