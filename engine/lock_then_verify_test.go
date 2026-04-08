@@ -158,8 +158,9 @@ func TestLockThenVerify_CompetingLockLowerUser_YieldsAndReturnsNil(t *testing.T)
 	}
 
 	// lockedIssues map should be clean after loser path.
+	// issueKey format is "owner/repo#N" (no dash before #).
 	eng.mu.Lock()
-	_, stillLocked := eng.lockedIssues["owner/repo-#12"]
+	_, stillLocked := eng.lockedIssues["owner/repo#12"]
 	eng.mu.Unlock()
 	if stillLocked {
 		t.Error("lockedIssues entry should be cleared after loser releases lock")
