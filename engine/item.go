@@ -14,8 +14,9 @@ import (
 )
 
 // lockVerifyDelay is the time to wait after acquiring a lock before re-fetching
-// labels to detect competing locks from other Fabrik instances.
-const lockVerifyDelay = 2 * time.Second
+// labels to detect competing locks from other Fabrik instances. Declared as a
+// var (not const) so tests can set it to 0 without a 2-second sleep per test.
+var lockVerifyDelay = 2 * time.Second
 
 // isEngineManagedPath returns true for paths that are written by the Fabrik
 // engine itself and should never be treated as user-generated dirty content.
