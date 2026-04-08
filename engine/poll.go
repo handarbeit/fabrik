@@ -310,11 +310,17 @@ func (e *Engine) poll(ctx context.Context) error {
 	// The deepFetchCandidates slice is populated below; the defer captures it
 	// by reference so it sees the final contents.
 	var deepFetchCandidates []gh.ProjectItem
+	// Items advanced by the yolo catch-up loop must NOT have their updatedAt
+	// re-cached — the advance changes the item's board column but not its
+	// updatedAt, so re-caching would make the item look "unchanged" on the
+	// next poll and prevent the new stage from running.
+	advancedItems := make(map[string]bool)
 	defer func() {
 		e.mu.Lock()
 		for _, item := range deepFetchCandidates {
-			if !item.UpdatedAt.IsZero() {
-				e.lastUpdatedAt[issueKey(item, e.defaultRepo())] = item.UpdatedAt
+			iKey := issueKey(item, e.defaultRepo())
+			if !item.UpdatedAt.IsZero() && !advancedItems[iKey] {
+				e.lastUpdatedAt[iKey] = item.UpdatedAt
 			}
 		}
 		e.mu.Unlock()
@@ -426,13 +432,10 @@ func (e *Engine) poll(ctx context.Context) error {
 			if err := e.advanceToNextStage(board, item, stage); err != nil {
 				e.logf(item.Number, "warn", "could not advance: %v\n", err)
 			}
-			// Evict from updatedAt cache so the item is picked up in its
-			// new column on the next poll. Board column moves don't bump
-			// updatedAt, so without this the item looks "unchanged".
-			iKey := issueKey(item, e.defaultRepo())
-			e.mu.Lock()
-			delete(e.lastUpdatedAt, iKey)
-			e.mu.Unlock()
+			// Mark as advanced so the defer doesn't re-cache the old updatedAt.
+			// Board column moves don't bump updatedAt, so re-caching would
+			// make the item look "unchanged" on the next poll.
+			advancedItems[issueKey(item, e.defaultRepo())] = true
 		}
 	}
 
