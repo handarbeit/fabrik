@@ -524,6 +524,32 @@ In this 5-issue formation:
 
 **Real-world validation:** A 9-issue formation with 7 dependency edges was run on the Ambient project — 4 issues started in parallel, all pipeline constraints were respected automatically, completing in ~88 minutes wall-clock time at $31 total cost.
 
+### Issue Decomposition
+
+When Plan determines that an issue is too broad for a single Implement cycle, it can autonomously split it into focused sub-issues — each small enough to implement cleanly and independently.
+
+**No user configuration required.** Decomposition is Plan's judgment call. If the issue is well-scoped, Plan produces a normal implementation plan. If it's too broad, Plan decomposes it.
+
+#### What Happens
+
+1. **Plan creates sub-issues** via `gh` CLI, labels them `fabrik:sub-issue`, and adds them to the project board.
+2. **Plan sets up "blocked by" edges** between sub-issues where sequential ordering is required.
+3. **Plan outputs `FABRIK_DECOMPOSED`** and stops — no `FABRIK_STAGE_COMPLETE` is emitted.
+4. **The engine adds `stage:Plan:complete`** to the parent issue and moves it to Done.
+5. **Sub-issues appear in Research** and flow through the full pipeline independently.
+
+Sub-issues form a [formation](#dependency-based-sequencing-formations) automatically — dependency edges set by Plan are enforced during execution.
+
+#### What You Observe
+
+- The parent issue moves to Done on the project board (its label set shows `stage:Plan:complete`).
+- New issues appear in Research, each labeled `fabrik:sub-issue`.
+- If Plan set up blocking edges, sub-issues that depend on each other will wait as a formation.
+
+#### Depth Limit
+
+Sub-issues (those labeled `fabrik:sub-issue`) are **never decomposed further**. If Plan encounters an issue with that label, it produces a normal implementation plan regardless of scope. Maximum decomposition depth is 1.
+
 ### Pending Reviewer Gate
 
 When a stage has `wait_for_reviews: true` set and auto-advance is active (global `yolo: true`, per-stage `auto_advance: true`, or the `fabrik:yolo` label on the issue), Fabrik waits for all requested PR reviewers to submit their reviews before advancing the issue to the next stage.
