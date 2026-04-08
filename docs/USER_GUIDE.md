@@ -650,6 +650,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `model:sonnet` | Override Claude model to Sonnet for this issue |
 | `fabrik:paused` | Manually pause processing (add to pause, remove to resume) |
 | `fabrik:yolo` | Force auto-advance for this issue even when `auto_advance: false`; also triggers auto-merge of the linked PR when Validate completes |
+| `fabrik:unrestricted` | Pass `--dangerously-skip-permissions` to Claude Code for this issue only; use when an issue needs to write to paths not covered by `.claude/settings.json` (e.g. `.claude/skills/`). **Caution:** bypasses the permission system. |
 
 Model label precedence: `model:<name>` label > stage YAML `model` field > default.
 

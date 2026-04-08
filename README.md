@@ -247,6 +247,7 @@ Fabrik uses labels to track state:
 | `stage:<name>:failed` | Stage hit max retries and was paused |
 | `model:<name>` | Use this model for the issue (e.g. `model:opus` overrides the stage YAML default) |
 | `fabrik:yolo` | Force auto-advance even when `auto_advance: false`; also triggers auto-merge of the linked PR when Validate completes |
+| `fabrik:unrestricted` | Pass `--dangerously-skip-permissions` to Claude Code for this issue only; use when an issue needs to write to paths not covered by `.claude/settings.json` (e.g. `.claude/skills/`). **Caution:** bypasses the permission system. |
 
 ## Multi-User
 
