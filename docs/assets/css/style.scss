@@ -710,7 +710,7 @@ code {
 // Documentation pages (.docs-content)
 // ============================================================
 .docs-content {
-  max-width: 800px;
+  max-width: 1100px;
   margin: 0 auto;
   padding: 48px 24px 80px;
   font-size: 1rem;
@@ -771,6 +771,8 @@ code {
     border-collapse: collapse;
     margin-bottom: 24px;
     font-size: 0.9rem;
+    display: block;
+    overflow-x: auto;
 
     th {
       background: $color-surface-2;
