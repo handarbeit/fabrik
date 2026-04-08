@@ -287,7 +287,7 @@ func (e *Engine) archiveDoneCompleteItems(board *gh.ProjectBoard) {
 		archived++
 	}
 	if archived > 0 {
-		fmt.Printf("[poll] archived %d done item(s) from board\n", archived)
+		e.logf(0, "poll", "archived %d done item(s) from board\n", archived)
 	}
 }
 
