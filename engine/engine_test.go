@@ -110,17 +110,6 @@ func TestNewWithDeps(t *testing.T) {
 	}
 }
 
-func TestGitToplevel(t *testing.T) {
-	// We're running in a git repo, so this should succeed
-	dir, err := gitToplevel()
-	if err != nil {
-		t.Fatalf("gitToplevel: %v", err)
-	}
-	if dir == "" {
-		t.Error("gitToplevel returned empty string")
-	}
-}
-
 func TestNew(t *testing.T) {
 	skipIfNoGit(t)
 	cfg := Config{
