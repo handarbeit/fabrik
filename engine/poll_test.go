@@ -511,10 +511,11 @@ func TestArchiveDoneCompleteItems_ArchivesCompleteItems(t *testing.T) {
 		ProjectID: "PVT_test",
 		Items: []gh.ProjectItem{
 			{
-				Number: 10,
-				ItemID: "PVTI_10",
-				Status: "Done",
-				Labels: []string{"stage:Done:complete"},
+				Number:    10,
+				ItemID:    "PVTI_10",
+				Status:    "Done",
+				Labels:    []string{"stage:Done:complete"},
+				UpdatedAt: time.Now().Add(-48 * time.Hour), // older than 24h grace period
 			},
 		},
 	}

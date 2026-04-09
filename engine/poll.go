@@ -273,8 +273,9 @@ func (e *Engine) archiveDoneCompleteItems(projectID string, items []gh.ProjectIt
 			continue
 		}
 		// Let completed items stay visible for 24 hours so users can see
-		// what finished while they were away.
-		if !item.UpdatedAt.IsZero() && time.Since(item.UpdatedAt) < archiveGracePeriod {
+		// what finished while they were away. If UpdatedAt is unknown (zero),
+		// don't archive — we can't tell how old it is.
+		if item.UpdatedAt.IsZero() || time.Since(item.UpdatedAt) < archiveGracePeriod {
 			continue
 		}
 		if err := e.client.ArchiveProjectItem(projectID, item.ItemID); err != nil {
