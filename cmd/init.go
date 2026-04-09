@@ -332,7 +332,49 @@ func runInit(args []string) error {
 		return err
 	}
 
+	// If running inside a git repo, add .fabrik working directories to
+	// .git/info/exclude so they don't pollute the user's git status.
+	// This is a no-op in non-git directories (the recommended setup).
+	writeGitExclude()
+
 	fmt.Println("\nFabrik is ready. Stage configs and plugin skills are in .fabrik/")
 	fmt.Println("Edit .fabrik/config.yaml with your project settings, then run fabrik.")
 	return nil
+}
+
+// writeGitExclude adds Fabrik working directories to .git/info/exclude
+// if running inside a git repository. Idempotent — skips entries that
+// already exist. Does nothing if not in a git repo.
+func writeGitExclude() {
+	excludePath := filepath.Join(".git", "info", "exclude")
+	if _, err := os.Stat(filepath.Join(".git", "info")); os.IsNotExist(err) {
+		return // not in a git repo
+	}
+
+	entries := []string{
+		".fabrik/repos/",
+		".fabrik/worktrees/",
+		".fabrik/debug/",
+		".fabrik/history.json",
+	}
+
+	existing, _ := os.ReadFile(excludePath)
+	content := string(existing)
+
+	var added int
+	for _, entry := range entries {
+		if strings.Contains(content, entry) {
+			continue
+		}
+		if !strings.HasSuffix(content, "\n") && len(content) > 0 {
+			content += "\n"
+		}
+		content += entry + "\n"
+		added++
+	}
+
+	if added > 0 {
+		os.WriteFile(excludePath, []byte(content), 0644)
+		fmt.Printf("  git exclude: %d entries added to .git/info/exclude\n", added)
+	}
 }
