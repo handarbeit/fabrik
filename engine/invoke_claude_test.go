@@ -343,6 +343,83 @@ exit 1
 	os.RemoveAll(LogDir(60))
 }
 
+func TestInvokeClaude_MarkerOnNonZeroExit(t *testing.T) {
+	// REQ-6: when Claude exits non-zero but FABRIK_STAGE_COMPLETE is in output,
+	// InvokeClaude must return completed=true AND a non-nil error.
+	binDir := t.TempDir()
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := `#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"result":"work done\nFABRIK_STAGE_COMPLETE","session_id":"sess_mk","num_turns":10,"total_cost_usd":0.02,"is_error":true}'
+exit 1
+`
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	os.Setenv("PATH", binDir+":"+origPath)
+	defer os.Setenv("PATH", origPath)
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "Test",
+		Prompt:     "test",
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 61, Title: "T"}
+
+	output, completed, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	if err == nil {
+		t.Fatal("expected non-nil error for failing binary")
+	}
+	if !completed {
+		t.Errorf("expected completed=true when marker present in output, got false; output=%q", output)
+	}
+	os.RemoveAll(SessionDir(61))
+	os.RemoveAll(LogDir(61))
+}
+
+func TestInvokeClaude_MarkerOnCancelledCtx(t *testing.T) {
+	// REQ-3/REQ-6: when context is cancelled, FABRIK_STAGE_COMPLETE in output must
+	// NOT cause completed=true — the engine is shutting down.
+	binDir := t.TempDir()
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := `#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"result":"work done\nFABRIK_STAGE_COMPLETE","session_id":"sess_cx","num_turns":5,"total_cost_usd":0.01,"is_error":true}'
+exit 1
+`
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	os.Setenv("PATH", binDir+":"+origPath)
+	defer os.Setenv("PATH", origPath)
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "Test",
+		Prompt:     "test",
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 62, Title: "T"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before invoking
+
+	_, completed, _, err := InvokeClaude(ctx, stage, issue, nil, false, workDir, "")
+	if err == nil {
+		t.Fatal("expected non-nil error for cancelled context")
+	}
+	if completed {
+		t.Error("expected completed=false when context is cancelled, even with marker present")
+	}
+	os.RemoveAll(SessionDir(62))
+	os.RemoveAll(LogDir(62))
+}
+
 func TestInvokeClaude_WithComments(t *testing.T) {
 	binDir := t.TempDir()
 	stdinFile := filepath.Join(binDir, "stdin.txt")

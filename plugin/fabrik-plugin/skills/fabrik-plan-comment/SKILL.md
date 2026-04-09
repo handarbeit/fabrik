@@ -43,6 +43,7 @@ Do **not** use `FABRIK_ISSUE_UPDATE` markers — plan content lives in the stage
 
 When all feedback has been incorporated, open questions resolved, and the plan is concrete and complete enough for implementation to begin, signal completion:
 - Output `FABRIK_STAGE_COMPLETE` on its own line
+- Once you emit this marker, stop immediately. Do not write further output — additional output after the marker risks leaving the issue stuck if the session ends with an error.
 
 Do not signal completion if the plan still has ambiguities, unresolved questions, or tasks that are too vague to implement.
 

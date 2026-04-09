@@ -41,6 +41,7 @@ Do **not** use `FABRIK_ISSUE_UPDATE` markers — research findings live in the s
 
 When all open questions are resolved and the research findings are complete and sufficient for the Plan stage to proceed, signal completion:
 - Output `FABRIK_STAGE_COMPLETE` on its own line
+- Once you emit this marker, stop immediately. Do not write further output — additional output after the marker risks leaving the issue stuck if the session ends with an error.
 
 Do not signal completion if open questions remain, or if the research still has gaps that would impede the Plan stage.
 

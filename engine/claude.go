@@ -204,10 +204,10 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	prompt := buildPrompt(stage, issue, newComments)
 	args := buildClaudeArgs(stage, sessFilePath, resume, modelOverride, stage.MaxTurns, hasUnrestrictedLabel(issue))
 
-	output, _, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, sessFilePath, ld)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, sessFilePath, ld)
 	usage.MaxTurns = stage.MaxTurns
 	if err != nil {
-		return output, false, usage, err
+		return output, completed, usage, err
 	}
 	return output, checkCompletion(stage, output), usage, nil
 }
@@ -403,6 +403,19 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	}
 
 	if runErr != nil {
+		// If the context was cancelled (shutdown), treat as interrupted regardless of
+		// marker presence — the engine is going away, bookkeeping would be partial.
+		if ctx.Err() != nil {
+			return text, false, usage, fmt.Errorf("claude exited with error: %w", runErr)
+		}
+		// Check whether the agent emitted the completion marker before the error.
+		// This handles the case where the agent correctly signals completion but then
+		// continues doing extra work (e.g. post-completion verification) and the session
+		// ends non-zero (max_turns exceeded, API error, etc.).
+		if stageCompleteRE.MatchString(text) {
+			claudeLog(issueNumber, "warn", "stage completed (marker found) but Claude exited with error: %v\n", runErr)
+			return text, true, usage, fmt.Errorf("claude exited with error: %w", runErr)
+		}
 		return text, false, usage, fmt.Errorf("claude exited with error: %w", runErr)
 	}
 
@@ -475,6 +488,7 @@ func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Com
 	}
 	b.WriteString("When you have completed all work for this stage, end your response with the exact line:\n")
 	b.WriteString("FABRIK_STAGE_COMPLETE\n\n")
+	b.WriteString("Once you emit this marker, do not generate any further output. Continuing after the marker risks leaving the issue in a stuck state if the session ends with an error.\n\n")
 	b.WriteString("If you have unresolved questions that must be answered before the stage can proceed, output instead:\n")
 	b.WriteString("FABRIK_BLOCKED_ON_INPUT\n")
 	b.WriteString("These two markers are mutually exclusive — output exactly one or neither.\n")
