@@ -113,6 +113,16 @@ Tests are not optional and not deferred. When implementing a function, write its
 - Test both success and error paths
 - Run the full test suite before marking a task complete
 
+### Update documentation
+
+Before signaling completion, check whether the feature changes user-facing behavior — new commands, flags, workflows, config options, or output behaviors that a user would see or configure. If yes:
+
+1. **Update `docs/USER_GUIDE.md` and/or `README.md`** as appropriate for the change. Both may need updates; use judgment.
+2. **Use the Problem section of `.fabrik-context/issue.md` as source material.** Write from the user's perspective: "you have this problem → here's how Fabrik solves it." The issue's Problem section captures why the feature matters — that framing belongs in the docs.
+3. **Include doc updates in the same PR as the code changes.** Commit doc updates alongside the feature, or in a closely following commit on the same branch. Never defer to a follow-up issue.
+
+If the change is internal-only — refactors, test improvements, engine internals not visible to users — no doc updates are required.
+
 ### Build and verify
 
 Before checking off a task:
@@ -133,6 +143,7 @@ Before signaling completion:
 - **Do not refactor unrelated code** — stay focused on the task list
 - **Do not add features not in the plan** — no scope creep
 - **Do not leave the branch in a broken state** — every push should compile and pass tests
+- **Do not defer documentation** — if the change is user-facing, update the docs in the same PR. A doc update that gets "tracked as a follow-up" is a doc update that never happens.
 
 ## Engine Context
 
