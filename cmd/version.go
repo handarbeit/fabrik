@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Fabrik Contributors. All rights reserved.
+
 package cmd
 
 import "runtime/debug"

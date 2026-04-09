@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Fabrik Contributors. All rights reserved.
+
 // Package watch implements the fabrik watch TUI for monitoring a single issue.
 package watch
 
