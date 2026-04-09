@@ -165,7 +165,7 @@ FABRIK_SUMMARY_END
 
 **Your working directory**: `.fabrik/worktrees/issue-<N>/`
 
-**Completing the stage**: Output `FABRIK_STAGE_COMPLETE` on its own line when the PR is clean and ready for human review.
+**Completing the stage**: Output `FABRIK_STAGE_COMPLETE` on its own line when the PR is clean and ready for human review. Once you emit this marker, stop immediately. Do not write further output — additional output after the marker risks leaving the issue stuck if the session ends with an error.
 
 **If you find unfixable issues**: Do NOT output the completion marker. Describe the blocker clearly. The engine will retry after a cooldown, giving the user time to intervene.
 
