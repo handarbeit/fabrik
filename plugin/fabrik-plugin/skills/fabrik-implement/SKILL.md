@@ -151,7 +151,7 @@ Before signaling completion:
 
 **Your working directory**: `.fabrik/worktrees/issue-<N>/` — this is your isolated workspace.
 
-**Completing the stage**: Output `FABRIK_STAGE_COMPLETE` on its own line when all tasks are done, tests pass, and everything is pushed.
+**Completing the stage**: Output `FABRIK_STAGE_COMPLETE` on its own line when all tasks are done, tests pass, and everything is pushed. Once you emit this marker, stop immediately. Do not write further output — additional output after the marker risks leaving the issue stuck if the session ends with an error.
 
 **If you can't complete**: Don't output the completion marker. Describe what's blocking you. The engine will retry after a cooldown, and you'll resume your session.
 
