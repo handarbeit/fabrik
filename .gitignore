@@ -5,6 +5,7 @@
 !.claude/skills/
 !.claude/agents/
 .fabrik/worktrees/
+.fabrik/repos/
 .fabrik/debug/
 .fabrik/history.json
 */.fabrik/history.json
