@@ -84,7 +84,7 @@ GitHub Project Board (source of truth)
 
 ### Comment Processing
 
-When a user comments on an issue in an active stage:
+When anyone comments on an issue in an active stage:
 
 1. Fabrik reacts with :eyes: to each new comment (marks as "in review")
 2. Adds `fabrik:editing` label to lock the issue
@@ -95,8 +95,13 @@ When a user comments on an issue in an active stage:
 7. Removes `fabrik:editing` label
 8. Reacts with :rocket: to each processed comment (also used to skip already-processed comments on restart)
 
+Comments from all authors trigger processing — human colleagues, code-review bots
+(Copilot, Gemini), and other Fabrik instances alike. Only two categories are skipped:
+comments that start with `🏭 **Fabrik` (Fabrik's own output) and comments that already
+carry a 🚀 rocket reaction (already processed).
+
 This allows iterative refinement — comment to answer questions, provide feedback,
-or steer the work, and Fabrik incorporates your input into the issue.
+or steer the work, and Fabrik incorporates the input into the issue.
 
 ### Review and Fix
 
@@ -260,9 +265,11 @@ Fabrik uses labels to track state:
 
 ## Multi-User
 
-Multiple people can run Fabrik against the same project board. Each instance
-only processes changes made by its `--user`. Labels provide lightweight locking
-to prevent conflicts.
+Multiple people can run Fabrik against the same project board. Stage work is scoped
+to each instance's `--user` — an instance only picks up and runs stages for issues
+locked to its configured user. Comment processing, however, is any-author: comments
+from colleagues, bots, and other Fabrik instances all trigger processing regardless
+of who wrote them. Labels provide lightweight locking to prevent conflicts.
 
 ## Git Worktrees
 
