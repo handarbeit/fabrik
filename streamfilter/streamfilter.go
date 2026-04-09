@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Fabrik Contributors. All rights reserved.
+
 // Package streamfilter parses Claude's stream-json (NDJSON) or JSON array output
 // and converts it to human-readable text. It is used by cmd/stream-filter and by
 // watch/logfollow for live rendering of log files.
