@@ -654,10 +654,10 @@ The default skills are:
 
 | Skill | Purpose |
 |-------|---------|
-| `fabrik-specify` | Requirements clarification, consistency checks, prior art research |
-| `fabrik-research` | Codebase exploration, technical analysis, constraint discovery |
-| `fabrik-plan` | Implementation design, task checklist, decision documentation |
-| `fabrik-implement` | Code writing, testing, committing, pushing |
+| `fabrik-specify` | Requirements clarification, consistency checks, prior art research; preserves the Problem section verbatim (never compressed) and places it first in the spec |
+| `fabrik-research` | Codebase exploration, technical analysis, constraint discovery; includes a Documentation Impact section for user-facing features |
+| `fabrik-plan` | Implementation design, task checklist, decision documentation; includes explicit doc update tasks in the checklist for user-facing features |
+| `fabrik-implement` | Code writing, testing, committing, pushing; updates `USER_GUIDE.md` and/or `README.md` in the same PR for user-facing features — never defers documentation to a follow-up issue |
 | `fabrik-review` | Code review, fix issues, rebase, prepare PR |
 | `fabrik-validate` | Final verification, test suite, requirements check |
 

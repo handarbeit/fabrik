@@ -162,8 +162,10 @@ description: >-
         <div class="feature-title">Comment-Driven Steering</div>
         <div class="feature-desc">
           Comment on an issue mid-stage to redirect the work.
-          Fabrik reacts with 👀, processes your comment, and continues.
-          The full conversation history is always available to Claude.
+          Fabrik reacts with 👀, processes the comment, and continues.
+          Comments from any author trigger processing — colleagues, code-review bots,
+          and other Fabrik instances alike. Only Fabrik's own output and
+          rocket-reacted (already-processed) comments are skipped.
           When Claude needs input, it signals <code>FABRIK_BLOCKED_ON_INPUT</code> —
           the issue pauses and automatically resumes the moment you reply.
         </div>
@@ -192,7 +194,8 @@ description: >-
         <div class="feature-desc">
           Run multiple Fabrik instances against the same board.
           <code>fabrik:locked:&lt;user&gt;</code> labels prevent conflicts.
-          Each instance only processes its own user's issues.
+          Stage work is scoped to each instance's <code>--user</code>;
+          comment processing handles comments from any author.
         </div>
       </div>
       <div class="feature-card">
@@ -252,7 +255,9 @@ description: >-
           <code>.fabrik/plugin/skills/</code>. Reference a skill by name in your
           stage YAML — Fabrik injects it into Claude's prompt. Default skills
           ship with Fabrik; <code>fabrik init</code> installs them and
-          <code>fabrik upgrade</code> refreshes them.
+          <code>fabrik upgrade</code> refreshes them. Built-in user-invocable skills
+          like <code>/cut-release</code> and <code>/audit-documentation</code> are
+          also included out of the box.
         </div>
       </div>
       <div class="feature-card">
