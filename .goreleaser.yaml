@@ -32,5 +32,8 @@ changelog:
       - "^Merge "
 
 release:
+  github:
+    owner: handarbeit
+    name: fabrik
   draft: false
   prerelease: auto
