@@ -253,9 +253,7 @@ description: >-
           <code>.fabrik/plugin/skills/</code>. Reference a skill by name in your
           stage YAML — Fabrik injects it into Claude's prompt. Default skills
           ship with Fabrik; <code>fabrik init</code> installs them and
-          <code>fabrik upgrade</code> refreshes them. Built-in user-invocable skills
-          like <code>/cut-release</code> and <code>/audit-documentation</code> are
-          also included out of the box.
+          <code>fabrik upgrade</code> refreshes them.
         </div>
       </div>
       <div class="feature-card">
