@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"runtime"
+	"sync"
 	"testing"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -190,6 +192,57 @@ func TestEnsureRepoReady_CloneFailure_PostsCommentAndPauses(t *testing.T) {
 	}
 	if !pausedAdded {
 		t.Error("expected fabrik:paused label to be added on clone failure")
+	}
+}
+
+// TestEnsureRepoReady_ConcurrentSameRepo_OnlyOneCloneAttempt verifies that when
+// multiple goroutines call ensureRepoReady for the same (new) repo simultaneously,
+// exactly one AddComment call is made (the clone-failure comment) and all callers
+// return ErrSkipItem. This exercises the singleflight coordination in cloneInFlight.
+func TestEnsureRepoReady_ConcurrentSameRepo_OnlyOneCloneAttempt(t *testing.T) {
+	skipIfNoGit(t)
+	// Maximize concurrency so goroutines interleave.
+	runtime.GOMAXPROCS(runtime.NumCPU())
+
+	const numWorkers = 8
+	client := &mockGitHubClient{}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	eng.fabrikDir = t.TempDir() // causes ensureBareClone to fail (no network)
+
+	item := gh.ProjectItem{Number: 42, Repo: "nonexistent-xyz/nonexistent-repo-concurrent-test"}
+
+	// Use a barrier so all goroutines start at the same moment.
+	var barrier sync.WaitGroup
+	barrier.Add(numWorkers)
+
+	errs := make([]error, numWorkers)
+	var wg sync.WaitGroup
+	wg.Add(numWorkers)
+	for i := 0; i < numWorkers; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			barrier.Done()
+			barrier.Wait() // all goroutines reach here before any proceeds
+			errs[i] = eng.ensureRepoReady(context.Background(), item)
+		}()
+	}
+	wg.Wait()
+
+	// All callers must return ErrSkipItem.
+	for i, err := range errs {
+		if err != ErrSkipItem {
+			t.Errorf("goroutine %d: expected ErrSkipItem, got %v", i, err)
+		}
+	}
+
+	// Exactly one AddComment call must have been made (the clone-failure comment).
+	// Waiters must not post duplicate comments.
+	client.mu.Lock()
+	numComments := len(client.addCommentCalls)
+	client.mu.Unlock()
+	if numComments != 1 {
+		t.Errorf("expected exactly 1 AddComment call, got %d", numComments)
 	}
 }
 
