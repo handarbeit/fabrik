@@ -16,9 +16,9 @@ import (
 
 // fabrikOwner and fabrikRepo are the canonical owner/repo for fabrik itself.
 // These are used when checking the GitHub Releases API for a newer binary —
-// the release always targets verveguy/fabrik, not the user's managed project.
+// releases are published to shadoworg/fabrik (the public distribution repo).
 const (
-	fabrikOwner = "tenaciousvc"
+	fabrikOwner = "shadoworg"
 	fabrikRepo  = "fabrik"
 )
 

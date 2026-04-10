@@ -34,3 +34,6 @@ changelog:
 release:
   draft: false
   prerelease: auto
+  github:
+    owner: shadoworg
+    name: fabrik
