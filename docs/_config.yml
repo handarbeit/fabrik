@@ -3,8 +3,8 @@ description: >-
   Automated Claude Code SDLC driver powered by GitHub Issues and Projects.
   Fabrik watches your GitHub Project board and drives Claude Code through
   configurable pipeline stages — Research, Plan, Implement, Review, Validate.
-url: "https://tenaciousvc.github.io"
-baseurl: "/fabrik"
+url: "https://fabrik.shadoworg.dev"
+baseurl: ""
 github_username: tenaciousvc
 github_repo: fabrik
 
