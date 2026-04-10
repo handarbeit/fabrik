@@ -564,7 +564,11 @@ doneDispatching:
 	// Uses shallow board data — labels(first:15) is sufficient to see
 	// stage:Done:complete. Idempotent: archived items disappear from board
 	// results, so this converges to a no-op after legacy items are cleaned up.
-	e.archiveDoneCompleteItems(board.ProjectID, board.Items)
+	// Auto-archive disabled — too aggressive in practice, removing items
+	// before users can see what completed. Re-enable once the timing logic
+	// is reworked to track when the Done stage actually completed rather
+	// than relying on UpdatedAt.
+	// e.archiveDoneCompleteItems(board.ProjectID, board.Items)
 
 	// Report cumulative token consumption only when new cost has accrued since
 	// the last print, to avoid repeated log noise on idle polls.
