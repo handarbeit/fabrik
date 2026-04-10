@@ -28,6 +28,7 @@ func TestMain_Help(t *testing.T) {
 
 	cmd := exec.Command(os.Args[0], "-test.run=TestMain_Help")
 	cmd.Env = env
+	cmd.Dir = t.TempDir() // avoid loading .env / .fabrik/config.yaml from repo root
 	err := cmd.Run()
 	// main() should exit with error (no required flags)
 	if err == nil {
