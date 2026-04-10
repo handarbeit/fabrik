@@ -112,9 +112,7 @@ description: >-
         </div>
       </div>
       <div class="video-container">
-        {% include video-embed.html
-           title="GitHub Project Board"
-           desc="See issues move automatically through columns as Fabrik advances them through the pipeline. Comment to steer; drag to control." %}
+        <img src="{{ '/assets/images/fabrik-board.png' | relative_url }}" alt="GitHub Project Board with Fabrik pipeline stages" style="width:100%; border-radius:8px;">
         <div class="video-caption">
           <div class="caption-title">GitHub Project Board in Action</div>
           <div class="caption-desc">Drag issues across columns to control the pipeline; comment to steer Claude</div>
