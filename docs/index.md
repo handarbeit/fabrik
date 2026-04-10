@@ -105,9 +105,7 @@ description: >-
 
     <div class="demo-videos">
       <div class="video-container">
-        {% include video-embed.html
-           title="The Fabrik TUI"
-           desc="Watch Fabrik's terminal UI manage active pipeline jobs, track costs, and show real-time progress across issues." %}
+        <img src="{{ '/assets/images/fabrik-tui.png' | relative_url }}" alt="Fabrik TUI showing active pipeline jobs" style="width:100%; border-radius:8px;">
         <div class="video-caption">
           <div class="caption-title">The Fabrik TUI Control Panel</div>
           <div class="caption-desc">Active jobs, history, cost tracking — live in your terminal</div>
