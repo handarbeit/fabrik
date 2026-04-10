@@ -200,7 +200,7 @@ to prevent accidental token leaks.
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--owner` | GitHub repo owner | required |
-| `--repo` | GitHub repo name | required |
+| `--repo` | GitHub repo name; omit for multi-repo mode | optional |
 | `--project` | GitHub project number | required |
 | `--user` | Your GitHub username | required |
 | `--token` | GitHub token | `$GITHUB_TOKEN` |
@@ -293,7 +293,9 @@ fabrik init
 # Fabrik bare-clones each repo as needed into .fabrik/repos/
 ```
 
-Use `--repo owner/repo` to restrict processing to a single repository.
+Omitting `--repo` (or leaving `repo:` commented out in `.fabrik/config.yaml`) enables multi-repo mode — Fabrik processes all repos discovered on the board. Pass `--repo owner/repo` to restrict processing to a single repository.
+
+`.fabrik/repos/` is gitignored by default — bare clone directories are large and should not be committed.
 
 ## Formations
 
