@@ -980,12 +980,10 @@ func TestProcessItem_CleanupStage_CleanWorktree(t *testing.T) {
 		t.Errorf("completion label = %q, want stage:Done:complete", addedLabel)
 	}
 
-	// ArchiveProjectItem should have been called with the board's projectID and item's itemID
-	if len(client.archiveProjectItemCalls) != 1 {
-		t.Fatalf("expected 1 ArchiveProjectItem call, got %d", len(client.archiveProjectItemCalls))
-	}
-	if got := client.archiveProjectItemCalls[0]; got.projectID != "PVT_1" || got.itemID != "PVTI_42" {
-		t.Errorf("ArchiveProjectItem(%q, %q), want (PVT_1, PVTI_42)", got.projectID, got.itemID)
+	// ArchiveProjectItem should NOT be called inline — archiving is deferred to
+	// archiveDoneCompleteItems which enforces the 24-hour grace period.
+	if len(client.archiveProjectItemCalls) != 0 {
+		t.Errorf("expected no ArchiveProjectItem calls (deferred to grace period), got %d", len(client.archiveProjectItemCalls))
 	}
 
 	// Should be marked in processedSet
@@ -1106,12 +1104,9 @@ func TestProcessItem_CleanupStage_PRItem(t *testing.T) {
 	if len(client.addLabelCalls) != 1 || client.addLabelCalls[0].labelName != "stage:Done:complete" {
 		t.Errorf("expected stage:Done:complete label, got %v", client.addLabelCalls)
 	}
-	// ArchiveProjectItem should also be called for PR items
-	if len(client.archiveProjectItemCalls) != 1 {
-		t.Fatalf("expected 1 ArchiveProjectItem call for PR item, got %d", len(client.archiveProjectItemCalls))
-	}
-	if got := client.archiveProjectItemCalls[0]; got.projectID != "PVT_1" || got.itemID != "PVTI_55" {
-		t.Errorf("ArchiveProjectItem(%q, %q), want (PVT_1, PVTI_55)", got.projectID, got.itemID)
+	// ArchiveProjectItem should NOT be called inline — deferred to grace period.
+	if len(client.archiveProjectItemCalls) != 0 {
+		t.Errorf("expected no ArchiveProjectItem calls for PR item (deferred), got %d", len(client.archiveProjectItemCalls))
 	}
 	if len(claude.calls) != 0 {
 		t.Error("should not invoke claude for cleanup stage PR item")
