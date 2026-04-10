@@ -560,6 +560,8 @@ section {
     font-size: 0.85rem;
     line-height: 1.6;
     color: $color-text;
+    white-space: pre-wrap;
+    word-wrap: break-word;
   }
 }
 
