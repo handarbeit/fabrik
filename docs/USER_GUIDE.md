@@ -619,16 +619,15 @@ The timeout is based on the timestamp of when the `fabrik:awaiting-review` label
 | **Implement** | 3 | Write code and tests, commit frequently, push to branch. |
 | **Review** | 4 | Rebase, review, fix issues, push. Posts output on PR. |
 | **Validate** | 5 | Run tests, verify requirements, confirm PR is ready. |
-| **Done** | 99 | Terminal state. Cleanup stage removes worktree and archives the item after 24 hours. |
+| **Done** | 99 | Terminal state. Cleanup stage removes worktree. Item remains on the board. |
 
 #### Done Stage and Archiving
 
 When an issue reaches Done, Fabrik:
 1. **Removes the worktree** — frees disk space from the issue's working copy
 2. **Adds `stage:Done:complete`** — marks cleanup as finished
-3. **Archives the project item after 24 hours** — removes it from the board's active view
 
-The 24-hour grace period ensures you can see what completed while you were away. Archived items are not deleted — they remain accessible via the project board's "Archive" view in GitHub. If Fabrik restarts, the timer is based on the item's last-updated timestamp on GitHub, so archiving is never lost or reset.
+**Note:** Auto-archive is currently disabled. It was removing items from the board before users could see them, and is being reworked to track actual Done stage completion time. Items will remain in the Done column until auto-archive is re-enabled in a future release. When re-enabled, archived items will not be deleted — they will remain accessible via the project board's "Archive" view in GitHub.
 
 ### Customizing Stages
 
