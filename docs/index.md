@@ -244,7 +244,9 @@ description: >-
           Fabrik always bare-clones every managed repository on first access.
           Run it from any directory — no checkout needed. Repos are discovered
           lazily from the project board; worktrees are created per repo and per
-          issue automatically.
+          issue automatically. Enable multi-repo mode by omitting (or commenting
+          out) <code>repo:</code> in <code>.fabrik/config.yaml</code> — Fabrik
+          then processes issues from all repositories on the board.
         </div>
       </div>
       <div class="feature-card">
