@@ -311,7 +311,7 @@ Plan can also decompose an oversized issue autonomously — creating labeled sub
 
 See the [USER_GUIDE §3 — Dependency-Based Sequencing (Formations)](docs/USER_GUIDE.md#dependency-based-sequencing-formations) for the full recipe, diagram, and behavior callouts.
 
-When an issue reaches Done, Fabrik archives the project board item after a 24-hour grace period — keeping the board clean automatically. Archived items remain accessible via GitHub's Archive view and the grace period survives engine restarts.
+When an issue reaches Done, it remains on the board in the Done column. Auto-archive is currently disabled — it was removed items from the board before users could see them and is being reworked to track actual Done stage completion time.
 
 ## The Self-Evolving Factory
 
