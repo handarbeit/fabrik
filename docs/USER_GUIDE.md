@@ -42,9 +42,9 @@ For details on the internal stage lifecycle, see [Stage Lifecycle](stage-lifecyc
 **Option A: Install binary (requires `gh`)**
 
 ```bash
-# Requires: gh auth login (with access to tenaciousvc/fabrik)
+# Requires: gh auth login (with access to shadoworg/fabrik)
 cd ~/bin  # or any directory on your PATH
-gh release download --repo tenaciousvc/fabrik \
+gh release download --repo shadoworg/fabrik \
   --pattern "fabrik_*_$(uname -s | tr A-Z a-z)_$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/').tar.gz" \
   -O - | tar xz
 # Platform-specific alternatives:
@@ -759,7 +759,7 @@ Writes `release-notes.md` in the repo root:
 # Fabrik checks for new releases each poll cycle and upgrades automatically with --auto-upgrade
 
 # Or download directly
-gh release download --repo tenaciousvc/fabrik --pattern '*<os>_<arch>*' -O - | tar xz
+gh release download --repo shadoworg/fabrik --pattern '*<os>_<arch>*' -O - | tar xz
 \```
 ```
 

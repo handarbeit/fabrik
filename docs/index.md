@@ -20,7 +20,7 @@ description: >-
       Review, Validate — automatically. File an issue. Drag a card. Ship.
     </p>
     <div class="hero-actions">
-      <a href="https://github.com/tenaciousvc/fabrik" class="btn btn-primary" target="_blank" rel="noopener">
+      <a href="https://github.com/shadoworg/fabrik" class="btn btn-primary" target="_blank" rel="noopener">
         ★ View on GitHub
       </a>
       <a href="#quickstart" class="btn btn-secondary">
@@ -374,10 +374,10 @@ description: >-
         </div>
         <pre>
 <span style="color:#56d364"># Option A: Install binary (requires gh)</span>
-<span style="color:#8b949e"># Requires: gh auth login with access to tenaciousvc/fabrik</span>
+<span style="color:#8b949e"># Requires: gh auth login with access to shadoworg/fabrik</span>
 <span style="color:#8b949e"># Extracts to current directory — cd to ~/bin first, or move binary afterwards</span>
 cd ~/bin
-gh release download --repo tenaciousvc/fabrik \
+gh release download --repo shadoworg/fabrik \
   --pattern "fabrik_*_$(uname -s | tr A-Z a-z)_$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/').tar.gz" \
   -O - | tar xz
 <span style="color:#8b949e"># Platform-specific alternatives:</span>
@@ -387,7 +387,7 @@ gh release download --repo tenaciousvc/fabrik \
 <span style="color:#8b949e"># linux/arm64:   --pattern "fabrik_*_linux_arm64.tar.gz"</span>
 
 <span style="color:#56d364"># Option B: Build from source (requires Go)</span>
-git clone https://github.com/tenaciousvc/fabrik
+git clone https://github.com/shadoworg/fabrik
 cd fabrik
 go build -o fabrik .
 
@@ -423,7 +423,7 @@ echo '.env' >> .gitignore
     <h2 class="section-title">Learn more</h2>
 
     <div class="links-grid">
-      <a href="https://github.com/tenaciousvc/fabrik" class="link-card" target="_blank" rel="noopener">
+      <a href="https://github.com/shadoworg/fabrik" class="link-card" target="_blank" rel="noopener">
         <span class="link-icon">⭐</span>
         <div>
           <div class="link-title">GitHub Repository</div>
@@ -444,14 +444,14 @@ echo '.env' >> .gitignore
           <div class="link-desc">Engine internals, markers, context files, and comment processing</div>
         </div>
       </a>
-      <a href="https://github.com/tenaciousvc/fabrik/issues/new" class="link-card" target="_blank" rel="noopener">
+      <a href="https://github.com/shadoworg/fabrik/issues/new" class="link-card" target="_blank" rel="noopener">
         <span class="link-icon">🐛</span>
         <div>
           <div class="link-title">File an Issue</div>
           <div class="link-desc">Bug reports, feature requests, questions</div>
         </div>
       </a>
-      <a href="https://github.com/tenaciousvc/fabrik/releases" class="link-card" target="_blank" rel="noopener">
+      <a href="https://github.com/shadoworg/fabrik/releases" class="link-card" target="_blank" rel="noopener">
         <span class="link-icon">📦</span>
         <div>
           <div class="link-title">GitHub Releases</div>
