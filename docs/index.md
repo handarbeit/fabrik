@@ -278,11 +278,10 @@ description: >-
         <span class="feature-icon">🗄️</span>
         <div class="feature-title">Auto-Archive</div>
         <div class="feature-desc">
-          When an issue reaches Done, Fabrik archives the project board item
-          after a 24-hour grace period — keeping your board clean automatically.
-          The grace period survives engine restarts (it's based on the item's
-          GitHub timestamp, not in-memory state). Archived items remain
-          accessible via GitHub's Archive view.
+          Auto-archive is currently disabled — it was removing completed items
+          before users could see them. When re-enabled, Fabrik will archive
+          project board items after a grace period, keeping your board clean
+          automatically. Archived items remain accessible via GitHub's Archive view.
         </div>
       </div>
       <div class="feature-card">
