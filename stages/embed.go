@@ -1,5 +1,3 @@
-// Copyright (c) 2026 Fabrik Contributors. All rights reserved.
-
 package stages
 
 import "embed"
