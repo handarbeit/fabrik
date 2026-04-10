@@ -12,7 +12,7 @@ description: >-
 <!-- ============================================================ -->
 <section class="hero">
   <div class="container">
-    <div class="hero-eyebrow">🏭 Open Source CLI</div>
+    <div class="hero-eyebrow">🏭 Free CLI Tool</div>
     <h1>Your SDLC,<br>on <span class="accent">autopilot</span></h1>
     <p class="hero-tagline">
       Fabrik watches your GitHub Project board and drives Claude Code through
