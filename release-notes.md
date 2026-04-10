@@ -1,13 +1,12 @@
-# Fabrik v0.0.27
+# Fabrik v0.0.28
 
-## Fixes
+## Improvements
 
-- **Disable auto-archive of Done items** — Auto-archive was removing completed items from the project board before users could see them. Disabled until the timing logic is reworked to track actual Done stage completion time.
-- **Fix TestMain_Help timeout** — Test was hanging because the subprocess found `.env` and `.fabrik/config.yaml` in the repo root and started the engine. Now runs from a temp directory.
+- **Releases now published to shadoworg/fabrik** — Binary releases are published to the public repo via goreleaser cross-repo support. The auto-upgrade feature will be updated to fetch from the new location in a future release.
 
 ## Internal
 
-- Documentation updates for v0.0.26 changes (USER_GUIDE, README, stage-lifecycle, marketing site).
+- Documentation updates for v0.0.27 auto-archive changes.
 
 ## Upgrading
 
@@ -16,5 +15,5 @@
 # Fabrik checks for new releases each poll cycle and upgrades automatically with --auto-upgrade
 
 # Or download directly
-gh release download --repo tenaciousvc/fabrik --pattern '*darwin_arm64*' -O - | tar xz
+gh release download --repo shadoworg/fabrik --pattern '*darwin_arm64*' -O - | tar xz
 ```
