@@ -3,8 +3,8 @@ description: >-
   Automated Claude Code SDLC driver powered by GitHub Issues and Projects.
   Fabrik watches your GitHub Project board and drives Claude Code through
   configurable pipeline stages — Research, Plan, Implement, Review, Validate.
-url: "https://handarbeit.github.io"
-baseurl: "/fabrik"
+url: "https://fabrik.handarbeit.io"
+baseurl: ""
 github_username: handarbeit
 github_repo: fabrik
 
