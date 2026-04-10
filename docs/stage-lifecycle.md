@@ -214,7 +214,7 @@ After a stage runs, any pre-existing user comments get a rocket reaction via `ma
 
 ### Completion Path
 
-When `FABRIK_STAGE_COMPLETE` is detected:
+When `FABRIK_STAGE_COMPLETE` is detected (regardless of Claude's exit code — as of v0.0.26, a non-zero exit is treated as a warning, not a failure, when the marker is present):
 1. Lock released (`fabrik:locked:<user>` and `stage:<name>:in_progress` removed)
 2. Retry tracking cleared
 3. Draft PR created (if `create_draft_pr: true`)
@@ -321,7 +321,7 @@ The Done stage (`cleanup_worktree: true`) is terminal:
 
 | Marker | Direction | Purpose | Where Checked |
 |--------|-----------|---------|---------------|
-| `FABRIK_STAGE_COMPLETE` | Claude -> Engine | Stage finished successfully | Stage runs AND comment processing |
+| `FABRIK_STAGE_COMPLETE` | Claude -> Engine | Stage finished successfully; honored even on non-zero Claude exit (v0.0.26+) — engine logs a warning | Stage runs AND comment processing |
 | `FABRIK_BLOCKED_ON_INPUT` | Claude -> Engine | Stage needs user input | Stage runs only |
 | `FABRIK_ISSUE_UPDATE_BEGIN/END` | Claude -> Engine | Updated issue body | Stage runs AND comment processing (gated by `update_issue_body`) |
 | `FABRIK_SUMMARY_BEGIN/END` | Claude -> Engine | Brief summary for issue | Stage runs with `post_to_pr: true` |
