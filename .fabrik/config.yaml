@@ -7,8 +7,8 @@
 # Required: GitHub repository owner (org or username)
 owner: tenaciousvc
 
-# Required: GitHub repository name
-repo: fabrik
+# Required: GitHub repository name (leave empty for multi-repo mode)
+# repo: fabrik
 
 # Required: GitHub project number (the number in the project URL)
 project: 1
