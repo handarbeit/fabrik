@@ -5,7 +5,7 @@ description: >-
   configurable pipeline stages — Research, Plan, Implement, Review, Validate.
 url: "https://fabrik.shadoworg.dev"
 baseurl: ""
-github_username: tenaciousvc
+github_username: shadoworg
 github_repo: fabrik
 
 # Plugins
