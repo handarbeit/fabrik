@@ -36,6 +36,15 @@ type Config struct {
 	ReadyCh chan struct{}
 }
 
+// cloneCall coordinates concurrent bare-clone attempts for the same repo.
+// The first caller to store one in cloneInFlight performs the clone; subsequent
+// callers wait on done and share the result.
+type cloneCall struct {
+	done chan struct{} // closed when clone completes (success or failure)
+	dir  string       // bareDir on success; empty on failure
+	err  error        // clone error on failure; nil on success
+}
+
 type Engine struct {
 	cfg                Config
 	client             GitHubClient
@@ -59,6 +68,7 @@ type Engine struct {
 	sem                chan struct{}         // semaphore bounding concurrent workers across poll cycles
 	wg                 sync.WaitGroup        // tracks in-flight workers for graceful shutdown
 	inFlight           sync.Map              // key: issueKey string, value: bool (isPR)
+	cloneInFlight      sync.Map              // key: "owner/repo" string, value: *cloneCall; per-repo bare-clone coordination
 	events             chan tui.Event        // nil in tests / plain-text mode; TUI goroutine consumes
 }
 
@@ -275,6 +285,10 @@ var ErrSkipItem = errors.New("skip item")
 // it posts a comment, adds fabrik:paused and fabrik:awaiting-input labels,
 // records a history entry, and returns ErrSkipItem so the caller skips without
 // treating it as a hard error.
+//
+// Concurrent callers for the same repo are serialized via cloneInFlight: the first
+// caller performs the clone while others wait. On failure, only the first caller
+// posts the comment/labels; waiters silently return ErrSkipItem.
 func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	if owner == "" || repo == "" {
@@ -282,6 +296,7 @@ func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error
 	}
 	nameWithOwner := owner + "/" + repo
 
+	// Fast path: already registered (common case after first clone).
 	e.mu.Lock()
 	_, registered := e.worktreeManagers[nameWithOwner]
 	e.mu.Unlock()
@@ -289,9 +304,35 @@ func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error
 		return nil
 	}
 
+	// Singleflight-style coordination: elect one goroutine to perform the clone.
+	call := &cloneCall{done: make(chan struct{})}
+	actual, loaded := e.cloneInFlight.LoadOrStore(nameWithOwner, call)
+	if loaded {
+		// Another goroutine is already cloning (or has just cloned) this repo.
+		existing := actual.(*cloneCall)
+		<-existing.done
+		if existing.err != nil {
+			e.logf(item.Number, "warn", "bare clone of %s already failed for another worker — skipping\n", nameWithOwner)
+			return ErrSkipItem
+		}
+		// Clone succeeded; register the WM using the winner's bareDir.
+		worktreeRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
+		e.registerWorktrees(nameWithOwner, existing.dir, worktreeRoot)
+		return nil
+	}
+
+	// This goroutine is the owner: perform the clone.
 	worktreeRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
 	bareDir, err := ensureBareClone(e.fabrikDir, owner, repo)
+	call.dir = bareDir
+	call.err = err
+
 	if err != nil {
+		// Signal waiters before cleanup so they can read call.err.
+		close(call.done)
+		// Delete the entry so future poll cycles (after user removes fabrik:paused) can retry.
+		e.cloneInFlight.Delete(nameWithOwner)
+
 		msg := fmt.Sprintf("🏭 **Fabrik — cannot clone repo**\n\nFailed to clone `%s/%s`:\n```\n%v\n```\nHuman intervention required. Fix the clone issue and remove `fabrik:paused` to retry.", owner, repo, err)
 		if commentErr := e.client.AddComment(owner, repo, item.Number, msg); commentErr != nil {
 			e.logf(item.Number, "warn", "could not post clone-failure comment: %v\n", commentErr)
@@ -317,6 +358,10 @@ func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error
 		return ErrSkipItem
 	}
 
+	// Success: register the WM, then signal waiters.
+	// Leave the cloneInFlight entry in place (closed channel, nil err); future callers
+	// will exit at the fast-path registered check before reaching cloneInFlight.
 	e.registerWorktrees(nameWithOwner, bareDir, worktreeRoot)
+	close(call.done)
 	return nil
 }
