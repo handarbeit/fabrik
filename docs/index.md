@@ -269,16 +269,6 @@ description: >-
         </div>
       </div>
       <div class="feature-card">
-        <span class="feature-icon">🗄️</span>
-        <div class="feature-title">Auto-Archive</div>
-        <div class="feature-desc">
-          Auto-archive is currently disabled — it was removing completed items
-          before users could see them. When re-enabled, Fabrik will archive
-          project board items after a grace period, keeping your board clean
-          automatically. Archived items remain accessible via GitHub's Archive view.
-        </div>
-      </div>
-      <div class="feature-card">
         <span class="feature-icon">👁️</span>
         <div class="feature-title">Pending Reviewer Gate</div>
         <div class="feature-desc">
