@@ -435,13 +435,6 @@ echo '.env' >> .gitignore
           <div class="link-desc">Bug reports, feature requests, questions</div>
         </div>
       </a>
-      <a href="https://github.com/shadoworg/fabrik/releases" class="link-card" target="_blank" rel="noopener">
-        <span class="link-icon">📦</span>
-        <div>
-          <div class="link-title">GitHub Releases</div>
-          <div class="link-desc">Pre-built binaries and release notes</div>
-        </div>
-      </a>
     </div>
   </div>
 </section>
