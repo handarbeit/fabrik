@@ -427,7 +427,7 @@ echo '.env' >> .gitignore
         <span class="link-icon">⭐</span>
         <div>
           <div class="link-title">GitHub Repository</div>
-          <div class="link-desc">Source code, issues, and releases</div>
+          <div class="link-desc">Releases, discussions, and community skills</div>
         </div>
       </a>
       <a href="{{ '/USER_GUIDE' | relative_url }}" class="link-card">
