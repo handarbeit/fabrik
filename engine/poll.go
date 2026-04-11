@@ -41,17 +41,26 @@ var isTTY = func() bool {
 // event channel.
 var tuiMode bool
 
+// pollLogFile is the persistent log file handle, set in Engine.Run() and used
+// by pollStatus to write timestamped lines. Nil when no log file is open (tests).
+var pollLogFile *os.File
+
 // lastStatusLen tracks the length of the last overwritten status line so we
 // can clear any leftover characters when the next line is shorter.
 var lastStatusLen int
 
 // pollStatus prints a transient status line that overwrites itself on a TTY.
 // On non-TTY output it prints a normal line. No-op in TUI mode.
+// Always writes a timestamped line to the persistent log file when one is open.
 func pollStatus(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	if pollLogFile != nil {
+		ts := time.Now().UTC().Format(time.RFC3339)
+		fmt.Fprintf(pollLogFile, "%s [poll] %s\n", ts, msg)
+	}
 	if tuiMode {
 		return
 	}
-	msg := fmt.Sprintf(format, args...)
 	if isTTY {
 		// Pad with spaces to clear any leftover characters from the previous line.
 		pad := ""
@@ -96,6 +105,21 @@ func (e *Engine) Run() error {
 	lockFile.Truncate(0)
 	lockFile.Seek(0, 0)
 	fmt.Fprintf(lockFile, "%d\n", os.Getpid())
+
+	// Open the persistent poll log file. Truncated on each startup so the file
+	// always reflects the current run only. Non-fatal if the open fails.
+	logPath := filepath.Join(e.fabrikDir, ".fabrik", "fabrik.log")
+	if lf, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); err != nil {
+		fmt.Printf("warning: could not open log file %s: %v\n", logPath, err)
+	} else {
+		e.logFile = lf
+		pollLogFile = lf
+		defer func() {
+			e.logFile = nil
+			pollLogFile = nil
+			lf.Close()
+		}()
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
