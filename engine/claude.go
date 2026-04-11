@@ -252,6 +252,10 @@ func buildClaudeArgs(stage *stages.Stage, sessFilePath string, resume bool, mode
 	args := []string{
 		"--output-format", "stream-json",
 		"--verbose",
+		// --bare disables global plugin loading, hooks, LSP, and other interactive
+		// features that interfere with headless pipeline runs. The Fabrik plugin
+		// is still loaded explicitly via --plugin-dir below.
+		"--bare",
 	}
 
 	if unrestricted {
