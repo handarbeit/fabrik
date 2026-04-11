@@ -1,17 +1,19 @@
-# Fabrik v0.0.30
-
-## Fixes
-
-- **Fix duplicate stage comments** — Globally-installed Claude Code plugins (especially `superpowers`) were injecting SessionStart hooks into Fabrik's headless Claude sessions, causing parallel Agent subagents to spawn. A single dispatch could produce 7+ comments and waste API credits. Fixed by removing `superpowers` from project plugin settings. Users should also remove it globally: `rm -rf ~/.claude/plugins/cache/claude-plugins-official/superpowers`
-- **Prevent multiple Fabrik instances** — Added a PID file lock (`.fabrik/fabrik.lock`) that prevents starting a second Fabrik instance for the same project. Previously, two instances could run undetected, each dispatching workers for the same issues.
+# Fabrik v0.0.31
 
 ## Features
 
-- **Troubleshooting guide** — New docs page at [fabrik.handarbeit.io/troubleshooting](https://fabrik.handarbeit.io/troubleshooting) covering common issues: duplicate comments, multiple instances, rate limits, auth errors, and more.
+- **Dev build auto-upgrade restored** — Dev builds (`dev(sha)`) now self-upgrade when idle: detect local commits or new remote commits on `origin/main`, pull if needed, `go build`, refresh plugin skills, and re-exec. Critical for the Fabrik-builds-Fabrik workflow.
+- **Silent plugin skill refresh** — In non-interactive mode (headless daemon, CI), plugin skills are auto-refreshed when they differ from the binary's embedded defaults. No manual `fabrik upgrade` needed. Interactive mode still prompts.
+
+## Improvements
+
+- **Reduced API usage for idle boards** — Items with `fabrik:awaiting-input` or `fabrik:awaiting-review` labels no longer force a deep-fetch every poll cycle. Adding a comment or submitting a review bumps `updatedAt`, so the normal cache check detects the change. Only `fabrik:blocked` items still bypass the cache (blocking issue closure doesn't update the blocked issue). Saves ~4 unnecessary GraphQL deep-fetches per poll on boards with paused items.
+- **Troubleshooting consolidated** — All troubleshooting content is now in USER_GUIDE section 9, covering duplicate comments, multiple instances, rate limits, and more.
 
 ## Internal
 
-- Documentation updates for v0.0.29.
+- Documentation updates for v0.0.30.
+- Plugin skills refreshed to match embedded defaults.
 
 ## Upgrading
 
@@ -21,9 +23,4 @@
 
 # Or download directly
 gh release download --repo handarbeit/fabrik --pattern '*darwin_arm64*' -O - | tar xz
-```
-
-**Important:** After upgrading, remove the `superpowers` plugin globally if installed:
-```bash
-rm -rf ~/.claude/plugins/cache/claude-plugins-official/superpowers
 ```
