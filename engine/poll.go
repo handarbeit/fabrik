@@ -507,6 +507,12 @@ func (e *Engine) poll(ctx context.Context) error {
 			if e.checkReviewGate(board, item, stage) {
 				continue // awaiting reviewers; checkReviewGate handled label
 			}
+			if stage.Name == "Validate" {
+				if err := e.attemptMergeOnValidate(item); err != nil {
+					e.logf(item.Number, "warn", "PR not merged during catch-up: %v\n", err)
+					continue
+				}
+			}
 			e.logf(item.Number, "advance", "yolo catch-up: stage %q already complete, advancing\n", stage.Name)
 			if err := e.advanceToNextStage(board, item, stage); err != nil {
 				e.logf(item.Number, "warn", "could not advance: %v\n", err)
