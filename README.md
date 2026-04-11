@@ -55,13 +55,17 @@ echo '.env' >> .gitignore
 
 ### Auto-upgrade
 
-Use `--auto-upgrade` to have Fabrik self-upgrade from GitHub Releases when idle:
+Use `--auto-upgrade` to have Fabrik self-upgrade when idle:
 
 ```bash
 ./fabrik --auto-upgrade ...
 ```
 
-After 2 idle polls, Fabrik checks GitHub Releases for a newer version, downloads it, and re-execs.
+After 2 idle polls, Fabrik upgrades itself automatically and re-execs:
+
+- **Release binaries**: checks GitHub Releases for a newer version and downloads it.
+- **Dev builds** (built from source via `go build`): detects local or remote commits
+  ahead of the running binary and rebuilds in place from `origin/main`.
 
 ## How It Works
 

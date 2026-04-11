@@ -207,9 +207,11 @@ description: >-
         <span class="feature-icon">🔄</span>
         <div class="feature-title">Self-Upgrade</div>
         <div class="feature-desc">
-          Pass <code>--auto-upgrade</code> and Fabrik checks <code>handarbeit/fabrik</code>
-          GitHub Releases for a newer version when idle. If one is found, it
-          downloads the new binary and re-execs — no manual deploys.
+          Pass <code>--auto-upgrade</code> and Fabrik keeps itself current when idle.
+          Release binaries check <code>handarbeit/fabrik</code> GitHub Releases and
+          download the latest version. Dev builds (built from source) detect local or
+          remote commits ahead of the running binary and rebuild in place — both paths
+          re-exec automatically with no manual deploys.
         </div>
       </div>
       <div class="feature-card">

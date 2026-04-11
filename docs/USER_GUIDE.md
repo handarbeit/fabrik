@@ -176,6 +176,30 @@ consecutive idle polls, Fabrik checks the GitHub Releases API for a newer versio
 If one is found, it downloads the new binary, replaces the running executable,
 runs `fabrik upgrade` to refresh plugin skills, and re-execs itself.
 
+**Dev builds (built from source)** follow the same 2 idle poll threshold but use a
+different upgrade path. Fabrik detects that it is a dev build (version string starts
+with `dev`) and checks whether it is running from a `handarbeit/fabrik` or
+`handarbeit/fabrik` source checkout. If so, it compares the running binary's embedded
+commit SHA against the local `HEAD`:
+
+- **Local commits ahead of the binary**: rebuild immediately from the current working
+  tree (`go build -o fabrik .`) without pulling — useful when you have local changes
+  you've already compiled once.
+- **Remote `origin/main` ahead of HEAD**: run `git pull --ff-only` to update, then
+  rebuild.
+
+After rebuilding, Fabrik runs `fabrik upgrade` (non-interactive, silent — see below)
+and re-execs the new binary. This keeps dev builds current with the same hands-off
+experience as release binaries.
+
+> **`fabrik upgrade` in non-interactive mode**: Whether called automatically during
+> auto-upgrade or run standalone, `fabrik upgrade` behaves differently depending on
+> whether a TTY is attached. With no TTY (non-interactive), it auto-refreshes plugin
+> skills silently — no prompt, no confirmation required. With a TTY (interactive), it
+> prompts once before applying any skill updates. This means automated environments
+> (CI, background processes, auto-upgrade re-exec) always get a clean, unattended
+> skill refresh.
+
 ```bash
 ./fabrik --auto-upgrade --owner your-org --repo your-repo --project 1 --user you
 ```
@@ -1032,9 +1056,24 @@ header or plain-text log output):
 - REST API: requests remaining / limit
 - GraphQL API: points remaining / limit
 
-The GraphQL query uses a two-phase fetch (shallow board scan + targeted detail fetch)
-to minimize rate limit consumption. Typical cost is ~5-30 points per poll depending on
-active items, well within the 5,000 points/hour limit.
+The GraphQL query uses a two-phase fetch to minimize rate limit consumption:
+
+1. **Shallow board scan** — fetches all items with lightweight fields (`updatedAt`,
+   labels, status). Items whose `updatedAt` hasn't changed since the last poll are
+   skipped entirely.
+2. **Targeted detail fetch** — runs only for items that passed the shallow filter.
+   The one exception is `fabrik:blocked` items, which always receive a forced
+   deep-fetch regardless of `updatedAt`. This is necessary because the issue that's
+   _blocking_ a blocked item can be closed without bumping the blocked item's own
+   `updatedAt` timestamp.
+
+   Items with `fabrik:awaiting-input` or `fabrik:awaiting-review` do **not** force a
+   deep-fetch. New user comments bump the issue's `updatedAt`; PR review submissions
+   bump the linked PR's `updatedAt` — both are captured by the shallow scan, so the
+   targeted detail fetch fires naturally when there is actually something new to see.
+
+Typical cost is ~5–30 points per poll depending on active items, well within the
+5,000 points/hour limit.
 
 ---
 
