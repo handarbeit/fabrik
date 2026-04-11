@@ -17,7 +17,7 @@ import (
 	"github.com/verveguy/fabrik/tui"
 )
 
-const idleUpgradeThreshold = 2
+const idleUpgradeThreshold = 2 // consecutive idle polls before checking for upgrades
 
 // rateLimitBackoffThreshold is the fraction of GraphQL rate limit remaining
 // below which the engine activates poll backoff and logs a warning.
@@ -707,7 +707,6 @@ func (e *Engine) checkAndUpgrade() {
 
 	// Also check remote for new upstream commits.
 	if !needsRebuild {
-		e.logf(0, "upgrade", "checking origin/%s ...\n", baseBranch)
 		pollStatus("[upgrade] checking origin/%s ...", baseBranch)
 
 		fetchCmd := exec.Command("git", "fetch", "origin", baseBranch)
@@ -723,7 +722,19 @@ func (e *Engine) checkAndUpgrade() {
 			return
 		}
 		if localRef == remoteRef {
+			pollStatusClear()
 			return // up to date
+		}
+		// Only pull if remote is ahead of local. If local is ahead (unpushed
+		// commits), we already checked the binary SHA against local HEAD above.
+		mergeBaseCmd := exec.Command("git", "merge-base", "--is-ancestor", localRef, remoteRef)
+		mergeBaseCmd.Dir = dir
+		if err := mergeBaseCmd.Run(); err != nil {
+			// localRef is not an ancestor of remoteRef — local is ahead or diverged.
+			// Either way, nothing to pull. The binary SHA check above already
+			// handled whether a rebuild is needed.
+			pollStatusClear()
+			return
 		}
 		needsRebuild = true
 		e.logf(0, "upgrade", "new commits on origin/%s — pulling\n", baseBranch)
