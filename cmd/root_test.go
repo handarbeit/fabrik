@@ -232,8 +232,9 @@ name: Research
 order: 1
 prompt: "Do research"
 `)
-	// Run from a temp dir to avoid the PID lock from a running Fabrik instance
-	// and to prevent session migration from scanning ~/.fabrik/sessions/.
+	// Run from a temp dir to avoid the PID lock from a running Fabrik instance.
+	// Setting HOME==CWD triggers the same-path guard in migrateHomeToProject,
+	// preventing the startup migration from touching real ~/.fabrik/sessions/ files.
 	tmpDir := t.TempDir()
 	os.MkdirAll(filepath.Join(tmpDir, ".fabrik"), 0755)
 	chdirTest(t, tmpDir)

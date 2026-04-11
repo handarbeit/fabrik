@@ -198,10 +198,9 @@ func TestRunResume_SuccessfulExecWithSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Write a session file
-	home := tmp
-	t.Setenv("HOME", home)
-	sessDir := filepath.Join(home, ".fabrik", "sessions", "issue-55")
+	// Write a session file under the CWD-relative path (os.Chdir(tmp) is called below,
+	// so os.Getwd() == tmp when ReadSessionID runs).
+	sessDir := filepath.Join(tmp, ".fabrik", "sessions", "issue-55")
 	if err := os.MkdirAll(sessDir, 0700); err != nil {
 		t.Fatal(err)
 	}
