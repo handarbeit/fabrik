@@ -6,6 +6,7 @@
 !.claude/agents/
 .fabrik/worktrees/
 .fabrik/repos/
+.fabrik/fabrik.lock
 .fabrik/debug/
 .fabrik/history.json
 */.fabrik/history.json

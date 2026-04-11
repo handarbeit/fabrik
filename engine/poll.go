@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -77,6 +78,25 @@ func pollStatusClear() {
 }
 
 func (e *Engine) Run() error {
+	// Acquire an exclusive file lock to prevent multiple Fabrik instances from
+	// processing the same project board concurrently. The lock file lives in
+	// .fabrik/ so it's scoped to the project. syscall.Flock is advisory but
+	// sufficient — it's automatically released on process exit or crash.
+	lockPath := filepath.Join(e.fabrikDir, ".fabrik", "fabrik.lock")
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return fmt.Errorf("could not open lock file %s: %w", lockPath, err)
+	}
+	defer lockFile.Close()
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return fmt.Errorf("another Fabrik instance is already running for this project (lock file: %s)", lockPath)
+	}
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+	// Write our PID for diagnostics (not used for locking — flock handles that).
+	lockFile.Truncate(0)
+	lockFile.Seek(0, 0)
+	fmt.Fprintf(lockFile, "%d\n", os.Getpid())
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -481,14 +501,29 @@ func (e *Engine) poll(ctx context.Context) error {
 	// incorrectly pass shallow-label items (labels(first:5) only) to itemNeedsWork,
 	// which could miss stage-complete labels beyond position 5 and re-dispatch
 	// already-completed items on every poll after their updatedAt settles.
-	for _, item := range deepFetchCandidates {
+	debugLog("dispatch-loop-start", map[string]interface{}{
+		"candidates": len(deepFetchCandidates),
+		"defaultRepo": e.defaultRepo(),
+	})
+	for idx, item := range deepFetchCandidates {
 		item := item
+		iKeyCheck := issueKey(item, e.defaultRepo())
+		debugLog("dispatch-candidate", map[string]interface{}{
+			"idx": idx, "number": item.Number, "repo": item.Repo,
+			"status": item.Status, "key": iKeyCheck,
+		})
 		// Full check including comments (populated by deep fetch above).
 		if !e.itemNeedsWork(item) {
+			debugLog("dispatch-skip-no-work", map[string]interface{}{
+				"number": item.Number, "key": iKeyCheck,
+			})
 			continue
 		}
 		// Skip issues already being processed by a previous poll cycle's worker
-		if _, ok := e.inFlight.Load(issueKey(item, e.defaultRepo())); ok {
+		if _, ok := e.inFlight.Load(iKeyCheck); ok {
+			debugLog("dispatch-skip-inflight", map[string]interface{}{
+				"number": item.Number, "key": iKeyCheck,
+			})
 			continue
 		}
 		// Acquire semaphore slot, but abort if the context is cancelled so we
