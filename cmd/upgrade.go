@@ -71,7 +71,24 @@ func checkPluginSkillsWithReader(pluginDir string, isTTY bool, r io.Reader) erro
 	}
 
 	if !isTTY {
-		fmt.Fprintf(os.Stderr, "Plugin skills on disk don't match this version of fabrik. Run `fabrik upgrade` to update them.\n")
+		// Non-interactive (headless daemon, auto-upgrade re-exec, CI): refresh
+		// silently so dev builds and auto-upgraded builds always have matching
+		// plugin skills without manual intervention.
+		for _, rel := range diffing {
+			embeddedPath := filepath.Join("fabrik-plugin", rel)
+			data, readErr := fabrikplugin.FabrikPlugin.ReadFile(embeddedPath)
+			if readErr != nil {
+				return fmt.Errorf("reading embedded %s: %w", embeddedPath, readErr)
+			}
+			destPath := filepath.Join(pluginDir, rel)
+			if mkErr := os.MkdirAll(filepath.Dir(destPath), 0755); mkErr != nil {
+				return fmt.Errorf("creating directory for %s: %w", destPath, mkErr)
+			}
+			if writeErr := os.WriteFile(destPath, data, 0644); writeErr != nil {
+				return fmt.Errorf("writing %s: %w", destPath, writeErr)
+			}
+		}
+		fmt.Fprintf(os.Stderr, "fabrik: auto-refreshed %d plugin file(s)\n", len(diffing))
 		return nil
 	}
 
