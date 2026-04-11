@@ -271,6 +271,10 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 }
 
 func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem) error {
+	debugLog("processItem-enter", map[string]interface{}{
+		"number": item.Number, "repo": item.Repo, "status": item.Status,
+		"goroutine": fmt.Sprintf("%p", &item),
+	})
 	// Find the stage config for this item's current status
 	stage := stages.FindStage(e.cfg.Stages, item.Status)
 	if stage == nil {
