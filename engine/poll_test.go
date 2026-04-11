@@ -592,6 +592,17 @@ func TestYoloCatchUpMergesBeforeAdvance(t *testing.T) {
 			return 99, nil
 		},
 	}
+	// Set after construction so the closure can reference client.
+	client.updateProjectItemStatusFn = func(projectID, itemID, statusFieldID, statusOptionID string) error {
+		// Ordering assertion: MergePR must have been called before UpdateProjectItemStatus.
+		client.mu.Lock()
+		mergedBefore := len(client.mergePRCalls) > 0
+		client.mu.Unlock()
+		if !mergedBefore {
+			t.Error("UpdateProjectItemStatus called before MergePR — ordering violated")
+		}
+		return nil
+	}
 	eng := testEngineWithStages(client, testStagesWithValidate())
 
 	ctx := context.Background()
@@ -605,13 +616,11 @@ func TestYoloCatchUpMergesBeforeAdvance(t *testing.T) {
 	client.mu.Unlock()
 
 	if merges == 0 {
-		t.Fatal("expected MergePR to be called before advancing")
+		t.Fatal("expected MergePR to be called")
 	}
 	if advances == 0 {
 		t.Fatal("expected UpdateProjectItemStatus to be called after merge")
 	}
-	// The code path is sequential: merge must have been called before advance.
-	// Since both are non-zero and the path is serial, verifying both > 0 confirms ordering.
 	if client.mergePRCalls[0].prNumber != 99 {
 		t.Errorf("MergePR called with prNumber %d, want 99", client.mergePRCalls[0].prNumber)
 	}
