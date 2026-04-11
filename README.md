@@ -11,9 +11,9 @@ are user input, and the board columns define the workflow.
 **Option A: Install binary (requires `gh`)**
 
 ```bash
-# Requires: gh auth login (with access to tenaciousvc/fabrik)
+# Requires: gh auth login (with access to shadoworg/fabrik)
 cd ~/bin  # or any directory on your PATH
-gh release download --repo tenaciousvc/fabrik \
+gh release download --repo shadoworg/fabrik \
   --pattern "fabrik_*_$(uname -s | tr A-Z a-z)_$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/').tar.gz" \
   -O - | tar xz
 # Platform-specific alternatives:
@@ -206,7 +206,7 @@ to prevent accidental token leaks.
 | `--token` | GitHub token | `$GITHUB_TOKEN` |
 | `--stages` | Stage configs directory | `./.fabrik/stages` |
 | `--yolo` | Auto-advance through stages | `false` |
-| `--auto-upgrade` | Self-upgrade from origin/main when idle | `false` |
+| `--auto-upgrade` | Self-upgrade from shadoworg/fabrik GitHub Releases when idle | `false` |
 | `--poll` | Poll interval in seconds | `30` |
 | `--notui` | Disable the interactive TUI dashboard | TUI on by default |
 | `--max-concurrent` | Maximum number of concurrent issue workers | `5` |
