@@ -14,7 +14,6 @@
   },
   "enabledPlugins": {
     "plugin-dev@claude-plugins-official": true,
-    "skill-creator@claude-plugins-official": true,
-    "superpowers@claude-plugins-official": true
+    "skill-creator@claude-plugins-official": true
   }
 }
