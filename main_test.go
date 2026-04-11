@@ -17,18 +17,24 @@ func TestMain_Help(t *testing.T) {
 	// Build a clean environment that strips all FABRIK_* vars so the subprocess
 	// sees no config and exits with an error (missing required flags).
 	// This prevents the test from hanging when a .env file is present.
+	tmpDir := t.TempDir()
 	var env []string
 	for _, kv := range os.Environ() {
 		if strings.HasPrefix(kv, "FABRIK_") || strings.HasPrefix(kv, "GITHUB_TOKEN") {
 			continue
 		}
+		// Override HOME so session migration doesn't scan ~/.fabrik/sessions/
+		if strings.HasPrefix(kv, "HOME=") {
+			continue
+		}
 		env = append(env, kv)
 	}
 	env = append(env, "TEST_MAIN_RUN=1")
+	env = append(env, "HOME="+tmpDir)
 
 	cmd := exec.Command(os.Args[0], "-test.run=TestMain_Help")
 	cmd.Env = env
-	cmd.Dir = t.TempDir() // avoid loading .env / .fabrik/config.yaml from repo root
+	cmd.Dir = tmpDir // avoid loading .env / .fabrik/config.yaml from repo root
 	err := cmd.Run()
 	// main() should exit with error (no required flags)
 	if err == nil {
