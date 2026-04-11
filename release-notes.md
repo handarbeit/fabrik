@@ -1,19 +1,20 @@
-# Fabrik v0.0.31
+# Fabrik v0.0.32
 
 ## Features
 
-- **Dev build auto-upgrade restored** — Dev builds (`dev(sha)`) now self-upgrade when idle: detect local commits or new remote commits on `origin/main`, pull if needed, `go build`, refresh plugin skills, and re-exec. Critical for the Fabrik-builds-Fabrik workflow.
-- **Silent plugin skill refresh** — In non-interactive mode (headless daemon, CI), plugin skills are auto-refreshed when they differ from the binary's embedded defaults. No manual `fabrik upgrade` needed. Interactive mode still prompts.
+- **Persistent poll log file** (#307) — All poll-level output (deep-fetch decisions, dispatch, upgrade checks, rate limit stats) is now written to `.fabrik/fabrik.log` in both TUI and non-TUI modes. Essential for post-mortem debugging.
+- **Sessions and logs moved to `<cwd>/.fabrik/`** (#313) — Session files and stage logs are now stored under the project's `.fabrik/` directory instead of `~/.fabrik/`. Each project is fully self-contained — moving the directory preserves all state. Includes one-time migration from the old location.
 
-## Improvements
+## Fixes
 
-- **Reduced API usage for idle boards** — Items with `fabrik:awaiting-input` or `fabrik:awaiting-review` labels no longer force a deep-fetch every poll cycle. Adding a comment or submitting a review bumps `updatedAt`, so the normal cache check detects the change. Only `fabrik:blocked` items still bypass the cache (blocking issue closure doesn't update the blocked issue). Saves ~4 unnecessary GraphQL deep-fetches per poll on boards with paused items.
-- **Troubleshooting consolidated** — All troubleshooting content is now in USER_GUIDE section 9, covering duplicate comments, multiple instances, rate limits, and more.
+- **TUI: history/active hint wrapping no longer pushes footer off screen** (#305) — Menu hints are constrained to available width, preventing the status bar from being pushed off the bottom.
+- **Test suite no longer hangs** — Tests now isolate HOME and CWD to avoid interference from running Fabrik instances and stale session files. Full suite completes in ~80 seconds.
 
 ## Internal
 
-- Documentation updates for v0.0.30.
-- Plugin skills refreshed to match embedded defaults.
+- ADR 023: all Fabrik control files live under `<cwd>/.fabrik/`.
+- Documentation updates for v0.0.31.
+- Removed accidentally committed `engine/.fabrik/fabrik.lock`.
 
 ## Upgrading
 
@@ -24,3 +25,5 @@
 # Or download directly
 gh release download --repo shadoworg/fabrik --pattern '*darwin_arm64*' -O - | tar xz
 ```
+
+**Note:** On first startup after upgrading, sessions and logs are automatically migrated from `~/.fabrik/` to `<cwd>/.fabrik/`.
