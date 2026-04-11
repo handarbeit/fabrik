@@ -232,6 +232,12 @@ name: Research
 order: 1
 prompt: "Do research"
 `)
+	// Run from a temp dir to avoid the PID lock from a running Fabrik instance
+	// and to prevent session migration from scanning ~/.fabrik/sessions/.
+	tmpDir := t.TempDir()
+	os.MkdirAll(filepath.Join(tmpDir, ".fabrik"), 0755)
+	chdirTest(t, tmpDir)
+	t.Setenv("HOME", tmpDir)
 	os.Args = []string{
 		"fabrik",
 		"--owner", "o",
