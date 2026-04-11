@@ -252,15 +252,6 @@ func buildClaudeArgs(stage *stages.Stage, sessFilePath string, resume bool, mode
 	args := []string{
 		"--output-format", "stream-json",
 		"--verbose",
-		// --bare disables global plugin loading, hooks, LSP, and other interactive
-		// features that interfere with headless pipeline runs. The Fabrik plugin
-		// is still loaded explicitly via --plugin-dir below, and the repo's CLAUDE.md
-		// is loaded via --add-dir.
-		"--bare",
-		// Re-enable CLAUDE.md discovery for the target repo's worktree. --bare
-		// disables auto-discovery, so we point --add-dir at the workDir so the
-		// repo's CLAUDE.md (and any .claude/rules/) are respected.
-		"--add-dir", workDir,
 	}
 
 	if unrestricted {
