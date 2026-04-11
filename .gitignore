@@ -6,6 +6,8 @@
 !.claude/agents/
 .fabrik/worktrees/
 .fabrik/repos/
+.fabrik/sessions/
+.fabrik/logs/
 .fabrik/fabrik.lock
 .fabrik/fabrik.log
 .fabrik/debug/
