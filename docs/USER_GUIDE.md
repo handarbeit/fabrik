@@ -111,6 +111,20 @@ exactly (case-sensitive). The default pipeline uses:
 
 `Backlog` -> `Specify` -> `Research` -> `Plan` -> `Implement` -> `Review` -> `Validate` -> `Done`
 
+### Compatibility Notes
+
+> **Warning:** Global Claude Code plugins can interfere with Fabrik's headless sessions. Do not install global plugins on machines running Fabrik as a service. The `superpowers` plugin is a known offender — if installed globally, it injects unexpected behaviour into Fabrik's Claude sessions and causes duplicate comments on issues.
+>
+> To check for the problematic plugin:
+> ```bash
+> ls ~/.claude/plugins/cache/claude-plugins-official/
+> ```
+> If `superpowers` appears, remove it:
+> ```bash
+> rm -rf ~/.claude/plugins/cache/claude-plugins-official/superpowers
+> ```
+> See [§9 Troubleshooting → Duplicate Comments on Issues](#9-troubleshooting) for full details.
+
 ### First Run
 
 With settings in `.fabrik/config.yaml`:
@@ -177,6 +191,12 @@ runs `fabrik upgrade` to refresh plugin skills, and re-execs itself.
 >   -O - | tar xz
 > ```
 > After that, `--auto-upgrade` will keep you current automatically.
+
+### Instance Lock
+
+> **Note:** When Fabrik starts, it creates a PID lock file at `.fabrik/fabrik.lock`. If a second instance attempts to start in the same directory, it reads the lock file, logs an error identifying the running process, and exits immediately. The lock is automatically released when the process exits — including on crash or SIGKILL — so there is no need to manually delete the file after an unclean shutdown.
+>
+> See [§9 Troubleshooting → Multiple Fabrik Instances](#9-troubleshooting) if you encounter a stale lock or need to run multiple instances against different projects.
 
 ---
 

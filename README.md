@@ -345,6 +345,7 @@ cp ./stages/mystages/*.yaml .fabrik/stages/
 ## Documentation
 
 - [User Guide](docs/USER_GUIDE.md) — full configuration reference for the pre-v0.2 `./stages` workflow (see "Quick Start" and "Migration from `./stages`" above for the current `./.fabrik/stages` default), workflow patterns, stage details, labels, and troubleshooting
+- [Troubleshooting](docs/USER_GUIDE.md#9-troubleshooting) — common issues: plugin conflicts, PID lock, merge conflicts, max turns, and more
 
 ## Architecture Decision Records
 
