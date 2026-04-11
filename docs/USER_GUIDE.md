@@ -1121,6 +1121,36 @@ concurrency guard, but acquisition now uses a **lock-then-verify** protocol:
 This guarantees that exactly one instance processes each issue at a time, even
 when multiple instances poll simultaneously.
 
+### Duplicate Comments on Issues
+
+If a single stage run produces multiple comments on the issue (each with the
+`🏭 Fabrik — stage:` header), the cause is almost always globally-installed
+Claude Code plugins interfering with Fabrik's headless sessions.
+
+The `superpowers` plugin is a known offender — its SessionStart hook causes
+Claude to spawn parallel Agent subagents, each producing separate output that
+Fabrik posts as individual comments.
+
+**Fix:**
+- Remove interfering global plugins: `rm -rf ~/.claude/plugins/cache/claude-plugins-official/superpowers`
+- Check for other global plugins: `ls ~/.claude/plugins/cache/claude-plugins-official/`
+- Fabrik's behavior should be governed only by the repo's CLAUDE.md and the Fabrik plugin — not personal global plugins
+
+**Prevention:** Avoid installing global Claude Code plugins on machines that run Fabrik.
+
+### Multiple Fabrik Instances
+
+Running two Fabrik processes against the same project board causes duplicate
+dispatches, wasted API credits, and conflicting comments. Each instance has its
+own in-memory deduplication, so they can't detect each other.
+
+Starting with v0.0.30, Fabrik acquires an exclusive file lock on
+`.fabrik/fabrik.lock` at startup. If another instance is already running for
+the same project, it exits with a clear error. The lock is automatically
+released if the process crashes.
+
+To check for stale instances: `pgrep -la fabrik`
+
 ### Plugin Not Loading
 
 If Claude doesn't seem to follow the skill instructions:
