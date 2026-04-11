@@ -121,6 +121,10 @@ type Model struct {
 	// now (updated on each TickEvent)
 	now time.Time
 
+	// graphqlStats holds the most recent GraphQL rate limit data from the engine.
+	// Zero value (Limit==0) means no data has been received yet.
+	graphqlStats RateLimitStats
+
 	// pluginDir is the Fabrik plugin directory, passed to claude --plugin-dir
 	pluginDir string
 
@@ -407,6 +411,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case PollCompletedEvent:
 		m.pollCount++
 		m.nextPollAt = time.Now().Add(m.pollInterval)
+		if ev.GraphQLStats.Limit > 0 {
+			m.graphqlStats = ev.GraphQLStats
+		}
 		return m, nil
 
 	case JobStartedEvent:
@@ -926,7 +933,7 @@ func (m Model) viewHistory() string {
 }
 
 func (m Model) viewFooter() string {
-	// Assemble: CWD · owner/repo [· version]
+	// Assemble left side: CWD · owner/repo [· version]
 	parts := []string{}
 	if m.projectInfo.CWD != "" {
 		parts = append(parts, m.projectInfo.CWD)
@@ -937,24 +944,75 @@ func (m Model) viewFooter() string {
 	if m.projectInfo.Version != "" {
 		parts = append(parts, m.projectInfo.Version)
 	}
-	footer := dimStyle.Render(strings.Join(parts, " · "))
+	leftPlain := strings.Join(parts, " · ")
 
-	// Truncate to terminal width so the footer never wraps.
+	// Assemble right side: "<remaining>/<limit>  <countdown>" (empty when no data).
+	var rightStr string
+	if m.graphqlStats.Limit > 0 {
+		countdown := fmtRateLimitCountdown(m.graphqlStats.Reset, m.now)
+		plain := fmt.Sprintf("%d/%d  %s", m.graphqlStats.Remaining, m.graphqlStats.Limit, countdown)
+		pct := float64(m.graphqlStats.Remaining) / float64(m.graphqlStats.Limit)
+		var style lipgloss.Style
+		switch {
+		case pct > 0.5:
+			style = successStyle
+		case pct > 0.2:
+			style = activeStyle
+		default:
+			style = failStyle
+		}
+		rightStr = style.Render(plain)
+	}
+
 	maxWidth := m.width - 1
 	if maxWidth < 1 {
 		maxWidth = 1
 	}
-	if lipgloss.Width(footer) > maxWidth {
-		// Re-render with truncated plain text.
-		plain := strings.Join(parts, " · ")
-		runes := []rune(plain)
-		// Binary search is overkill; shrink until it fits.
-		for len(runes) > 0 && lipgloss.Width(dimStyle.Render(string(runes)+"…")) > maxWidth {
-			runes = runes[:len(runes)-1]
+
+	if rightStr == "" {
+		// No right side — original single-side logic.
+		footer := dimStyle.Render(leftPlain)
+		if lipgloss.Width(footer) > maxWidth {
+			runes := []rune(leftPlain)
+			for len(runes) > 0 && lipgloss.Width(dimStyle.Render(string(runes)+"…")) > maxWidth {
+				runes = runes[:len(runes)-1]
+			}
+			footer = dimStyle.Render(string(runes) + "…")
 		}
-		footer = dimStyle.Render(string(runes) + "…")
+		return footer
 	}
-	return footer
+
+	// Two-sided layout: left + gap + right.
+	// Right side is always preserved; left is truncated when space is tight.
+	rightWidth := lipgloss.Width(rightStr)
+	leftRendered := dimStyle.Render(leftPlain)
+	gap := maxWidth - lipgloss.Width(leftRendered) - rightWidth
+	if gap < 1 {
+		// Left must be truncated to make room for the right side.
+		// Reserve 1 space minimum between sides.
+		availLeft := maxWidth - rightWidth - 1
+		if availLeft < 0 {
+			availLeft = 0
+		}
+		runes := []rune(leftPlain)
+		if availLeft == 0 {
+			leftRendered = ""
+		} else {
+			for len(runes) > 0 && lipgloss.Width(dimStyle.Render(string(runes)+"…")) > availLeft {
+				runes = runes[:len(runes)-1]
+			}
+			if len(runes) == 0 {
+				leftRendered = ""
+			} else {
+				leftRendered = dimStyle.Render(string(runes) + "…")
+			}
+		}
+		gap = maxWidth - lipgloss.Width(leftRendered) - rightWidth
+		if gap < 0 {
+			gap = 0
+		}
+	}
+	return leftRendered + strings.Repeat(" ", gap) + rightStr
 }
 
 // historyHint returns the rendered hint string for the history panel, truncated
@@ -1062,6 +1120,23 @@ func fmtDuration(d time.Duration) string {
 	m := int(d.Minutes())
 	s := int(d.Seconds()) % 60
 	return fmt.Sprintf("%02d:%02d", m, s)
+}
+
+// fmtRateLimitCountdown returns a human-readable string describing how long
+// until the rate limit resets relative to now.
+func fmtRateLimitCountdown(reset time.Time, now time.Time) string {
+	remaining := reset.Sub(now)
+	if remaining <= 0 {
+		return "soon"
+	}
+	secs := int(remaining.Seconds())
+	if secs >= 3600 {
+		return fmt.Sprintf("%dh", secs/3600)
+	}
+	if secs >= 60 {
+		return fmt.Sprintf("%dm", secs/60)
+	}
+	return fmt.Sprintf("%ds", secs)
 }
 
 // openWatchInlineCmd returns a tea.Cmd that suspends the TUI and launches
