@@ -130,6 +130,10 @@ func New(cfg Config) (*Engine, error) {
 		func(msg string) { fmt.Printf("[startup] %s", msg) },
 	)
 
+	// Migrate sessions and logs from ~/.fabrik/ to <cwd>/.fabrik/ (cross-root migration).
+	// Must run after migrateSessions so home-dir sessions are already in namespaced layout.
+	migrateHomeToProject(fabrikDir, func(msg string) { fmt.Printf("[startup] %s", msg) })
+
 	return eng, nil
 }
 
