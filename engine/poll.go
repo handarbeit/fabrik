@@ -691,7 +691,15 @@ doneDispatching:
 		e.idleCount = 0
 	}
 
-	e.emitStructural(tui.PollCompletedEvent{ItemCount: len(board.Items), Dispatched: dispatched})
+	e.emitStructural(tui.PollCompletedEvent{
+		ItemCount:  len(board.Items),
+		Dispatched: dispatched,
+		GraphQLStats: tui.RateLimitStats{
+			Limit:     graphqlStats.Limit,
+			Remaining: graphqlStats.Remaining,
+			Reset:     graphqlStats.Reset,
+		},
+	})
 	return nil
 }
 
