@@ -79,11 +79,13 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 			}
 			// Force deep-fetch for items whose gate condition changes independently
 			// of the issue's updatedAt:
-			// - fabrik:awaiting-review: reviewer submits a review on the PR
-			// - fabrik:awaiting-input: user comment may have arrived
-			// - fabrik:blocked: a blocking issue may have closed
+			// - fabrik:blocked: a blocking issue may close without updating this issue's updatedAt
+			// Note: fabrik:awaiting-input and fabrik:awaiting-review do NOT need forced
+			// deep-fetch — adding a comment bumps the issue's updatedAt, and submitting
+			// a PR review bumps the linked PR's updatedAt (which Fabrik tracks in the
+			// shallow query via closedByPullRequestsReferences).
 			for _, l := range item.Labels {
-				if l == "fabrik:awaiting-review" || l == "fabrik:awaiting-input" || l == "fabrik:blocked" {
+				if l == "fabrik:blocked" {
 					return true
 				}
 			}
