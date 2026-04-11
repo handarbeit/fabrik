@@ -163,8 +163,7 @@ func TestSessionFile(t *testing.T) {
 }
 
 func TestReadSessionID_FileAbsent(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	t.Chdir(t.TempDir())
 	got := ReadSessionID("", 999, "Research")
 	if got != "" {
 		t.Errorf("expected empty string for absent file, got %q", got)
@@ -172,9 +171,9 @@ func TestReadSessionID_FileAbsent(t *testing.T) {
 }
 
 func TestReadSessionID_FileEmpty(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	dir := filepath.Join(home, ".fabrik", "sessions", "issue-1")
+	tmp := t.TempDir()
+	t.Chdir(tmp)
+	dir := filepath.Join(tmp, ".fabrik", "sessions", "issue-1")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -188,9 +187,9 @@ func TestReadSessionID_FileEmpty(t *testing.T) {
 }
 
 func TestReadSessionID_ValidID(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	dir := filepath.Join(home, ".fabrik", "sessions", "issue-42")
+	tmp := t.TempDir()
+	t.Chdir(tmp)
+	dir := filepath.Join(tmp, ".fabrik", "sessions", "issue-42")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -205,9 +204,9 @@ func TestReadSessionID_ValidID(t *testing.T) {
 }
 
 func TestReadSessionID_WhitespacePaddedID(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	dir := filepath.Join(home, ".fabrik", "sessions", "issue-7")
+	tmp := t.TempDir()
+	t.Chdir(tmp)
+	dir := filepath.Join(tmp, ".fabrik", "sessions", "issue-7")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -222,9 +221,9 @@ func TestReadSessionID_WhitespacePaddedID(t *testing.T) {
 }
 
 func TestReadSessionID_MultiRepo(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	dir := filepath.Join(home, ".fabrik", "sessions", "myorg-myrepo", "issue-55")
+	tmp := t.TempDir()
+	t.Chdir(tmp)
+	dir := filepath.Join(tmp, ".fabrik", "sessions", "myorg-myrepo", "issue-55")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -235,6 +234,135 @@ func TestReadSessionID_MultiRepo(t *testing.T) {
 	got := ReadSessionID("myorg/myrepo", 55, "Implement")
 	if got != wantID {
 		t.Errorf("expected %q, got %q", wantID, got)
+	}
+}
+
+func TestMigrateHomeToProject_Basic(t *testing.T) {
+	// Set up a fake home dir with sessions and logs.
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+
+	// Write a session file in the old home-dir location.
+	oldSessDir := filepath.Join(fakeHome, ".fabrik", "sessions", "myorg-myrepo", "issue-10")
+	if err := os.MkdirAll(oldSessDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(oldSessDir, "Research.session"), []byte("sess_abc"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a log dir in the old home-dir location.
+	oldLogDir := filepath.Join(fakeHome, ".fabrik", "logs", "myorg-myrepo", "issue-10")
+	if err := os.MkdirAll(oldLogDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(oldLogDir, "Research.log"), []byte("log data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Project dir is separate from home dir.
+	projectDir := t.TempDir()
+
+	var logs []string
+	migrateHomeToProject(projectDir, func(msg string) { logs = append(logs, msg) })
+
+	// Session should have moved.
+	newSessFile := filepath.Join(projectDir, ".fabrik", "sessions", "myorg-myrepo", "issue-10", "Research.session")
+	data, err := os.ReadFile(newSessFile)
+	if err != nil {
+		t.Fatalf("reading migrated session file: %v", err)
+	}
+	if string(data) != "sess_abc" {
+		t.Errorf("session content = %q, want sess_abc", string(data))
+	}
+
+	// Log should have moved.
+	newLogFile := filepath.Join(projectDir, ".fabrik", "logs", "myorg-myrepo", "issue-10", "Research.log")
+	logData, err := os.ReadFile(newLogFile)
+	if err != nil {
+		t.Fatalf("reading migrated log file: %v", err)
+	}
+	if string(logData) != "log data" {
+		t.Errorf("log content = %q, want 'log data'", string(logData))
+	}
+
+	// Old source dirs should be gone (emptied and removed).
+	if _, err := os.Stat(filepath.Join(fakeHome, ".fabrik", "sessions")); !os.IsNotExist(err) {
+		t.Error("old sessions dir should have been removed after migration")
+	}
+}
+
+func TestMigrateHomeToProject_Idempotent(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	projectDir := t.TempDir()
+
+	// Write session in old home-dir location.
+	oldSessDir := filepath.Join(fakeHome, ".fabrik", "sessions", "issue-5")
+	if err := os.MkdirAll(oldSessDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(oldSessDir, "Plan.session"), []byte("sess_old"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-create destination so migration must skip it.
+	newSessDir := filepath.Join(projectDir, ".fabrik", "sessions", "issue-5")
+	if err := os.MkdirAll(newSessDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(newSessDir, "Plan.session"), []byte("sess_existing"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs []string
+	migrateHomeToProject(projectDir, func(msg string) { logs = append(logs, msg) })
+
+	// Destination should still have the original content (not overwritten).
+	data, err := os.ReadFile(filepath.Join(newSessDir, "Plan.session"))
+	if err != nil {
+		t.Fatalf("reading session file: %v", err)
+	}
+	if string(data) != "sess_existing" {
+		t.Errorf("session content = %q, want sess_existing (skipped)", string(data))
+	}
+
+	// A warning should have been logged.
+	found := false
+	for _, l := range logs {
+		if strings.Contains(l, "already exists") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected 'already exists' warning, got: %v", logs)
+	}
+}
+
+func TestMigrateHomeToProject_SamePath(t *testing.T) {
+	// When HOME == fabrikDir, migration should be a no-op (same-path guard).
+	sameDir := t.TempDir()
+	t.Setenv("HOME", sameDir)
+
+	// Write a session file.
+	sessDir := filepath.Join(sameDir, ".fabrik", "sessions", "issue-1")
+	if err := os.MkdirAll(sessDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessDir, "Research.session"), []byte("sess_x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run migration with fabrikDir == fakeHome (same-path case).
+	migrateHomeToProject(sameDir, nil)
+
+	// File should still be in the original location, not moved.
+	data, err := os.ReadFile(filepath.Join(sessDir, "Research.session"))
+	if err != nil {
+		t.Fatalf("session file should still exist: %v", err)
+	}
+	if string(data) != "sess_x" {
+		t.Errorf("session content = %q, want sess_x", string(data))
 	}
 }
 
