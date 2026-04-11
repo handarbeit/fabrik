@@ -693,7 +693,7 @@ func (m *Model) updateHistoryViewport(scrollToTop bool) {
 	if lipgloss.Width(vpTitle+vpHint) > innerWidth {
 		titleAndHintLines = 2
 	}
-	historyHeight := max(m.height-headerHeight()-activeHeight(len(m.active))-footerHeight()-2-titleAndHintLines, 1)
+	historyHeight := max(m.height-headerHeight()-activeHeight(len(m.active)+len(m.blocked))-footerHeight()-2-titleAndHintLines, 1)
 	m.historyVP.Width = innerWidth
 	m.historyVP.Height = historyHeight
 
