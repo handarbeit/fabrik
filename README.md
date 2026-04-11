@@ -206,7 +206,7 @@ to prevent accidental token leaks.
 | `--token` | GitHub token | `$GITHUB_TOKEN` |
 | `--stages` | Stage configs directory | `./.fabrik/stages` |
 | `--yolo` | Auto-advance through stages | `false` |
-| `--auto-upgrade` | Self-upgrade from origin/main when idle | `false` |
+| `--auto-upgrade` | Self-upgrade from handarbeit/fabrik GitHub Releases when idle | `false` |
 | `--poll` | Poll interval in seconds | `30` |
 | `--notui` | Disable the interactive TUI dashboard | TUI on by default |
 | `--max-concurrent` | Maximum number of concurrent issue workers | `5` |
