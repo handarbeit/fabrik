@@ -2,6 +2,13 @@ package tui
 
 import "time"
 
+// RateLimitStats holds the minimal GraphQL rate limit data needed by the TUI.
+type RateLimitStats struct {
+	Limit     int
+	Remaining int
+	Reset     time.Time
+}
+
 // Event is the interface implemented by all typed engine events.
 type Event interface {
 	tuiEvent()
@@ -27,8 +34,9 @@ func (PollStartedEvent) tuiEvent() {}
 
 // PollCompletedEvent is emitted when a poll cycle finishes dispatching.
 type PollCompletedEvent struct {
-	ItemCount  int
-	Dispatched int
+	ItemCount    int
+	Dispatched   int
+	GraphQLStats RateLimitStats
 }
 
 func (PollCompletedEvent) tuiEvent() {}
