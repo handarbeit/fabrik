@@ -1031,18 +1031,34 @@ The session ID for the active Claude session is shown in the header when availab
 
 ### Log Files
 
-Session logs are saved to `~/.fabrik/logs/issue-<N>/` as NDJSON (one JSON event per line). Each stage produces a `.log` file written continuously during execution — `fabrik watch` follows this file live. To view a log manually:
+Session logs are saved to `.fabrik/logs/<owner>-<repo>/issue-<N>/` (relative to the project working directory) as NDJSON (one JSON event per line). Each stage produces a `.log` file written continuously during execution — `fabrik watch` follows this file live. To view a log manually:
 
 ```bash
-ls -lt ~/.fabrik/logs/issue-42/
+ls -lt .fabrik/logs/<owner>-<repo>/issue-42/
 
 # Render a completed log as human-readable text
-cat ~/.fabrik/logs/issue-42/<stage>-output-<timestamp>.json | fabrik stream-filter | less -R
+cat .fabrik/logs/<owner>-<repo>/issue-42/<stage>-output-<timestamp>.json | fabrik stream-filter | less -R
 ```
 
-Logs are namespaced by repository: `~/.fabrik/logs/<owner>-<repo>/issue-<N>/`.
+Logs are namespaced by repository: `.fabrik/logs/<owner>-<repo>/issue-<N>/`.
 
 `fabrik stream-filter` reads NDJSON or JSON array Claude output from stdin and renders thinking blocks, text responses, and tool calls as human-readable text.
+
+### Poll Log
+
+Fabrik writes engine-level output to `.fabrik/fabrik.log` in the project working directory. This file is **truncated on each startup** and contains only the current run.
+
+The poll log captures:
+- Deep-fetch decisions (which issues were shallow-skipped vs. fully fetched)
+- Dispatch events (which issues were dispatched to workers and why)
+- Upgrade checks and idle-upgrade transitions
+- GitHub API rate limit stats per poll cycle
+
+The poll log is written in both TUI and non-TUI modes. It is most useful for post-mortem debugging of engine-level behavior — for example, diagnosing why an issue was not picked up during a poll cycle.
+
+### Auto-migration from `~/.fabrik/`
+
+On the first startup after upgrading from a pre-v0.0.32 release, Fabrik automatically migrates session files and stage logs from `~/.fabrik/sessions/` and `~/.fabrik/logs/` to `<cwd>/.fabrik/sessions/` and `<cwd>/.fabrik/logs/`. The migration is idempotent (files whose destination already exists are skipped) and handles cross-device filesystems. Empty source directories are removed after migration.
 
 ### Debug Output
 
@@ -1120,12 +1136,10 @@ git branch -D fabrik/issue-N
 
 ### Killed or Interrupted Sessions
 
-Claude sessions are stored at `~/.fabrik/sessions/issue-N/<stage>.session`. On retry,
-Fabrik resumes from the session file. The Implement stage commits frequently to minimize
-lost work.
+Claude sessions are stored at `.fabrik/sessions/issue-N/<stage>.session` (relative to the project working directory). On retry, Fabrik resumes from the session file. The Implement stage commits frequently to minimize lost work.
 
 To force a fresh session:
-1. Remove: `rm ~/.fabrik/sessions/issue-N/<stage>.session`
+1. Remove: `rm .fabrik/sessions/issue-N/<stage>.session`
 2. Remove `stage:<name>:complete` label if incorrectly applied
 3. Fabrik starts a fresh session on next poll
 
@@ -1152,7 +1166,7 @@ For stages with `post_to_pr: true`:
 
 If you see raw JSON dumped in issue/PR comments, the output was too large for the JSON
 parser or the format changed. Fabrik now posts an error message instead of raw JSON.
-Check `~/.fabrik/logs/issue-N/` for the full output.
+Check `.fabrik/logs/<owner>-<repo>/issue-N/` for the full output.
 
 ### Multi-User and Multi-Instance Operation
 
