@@ -1,19 +1,17 @@
-# Fabrik v0.0.29
+# Fabrik v0.0.30
 
 ## Fixes
 
-- **Auto-upgrade now fetches from handarbeit/fabrik** — The upgrade check was still pointing at the private repo. Now fetches releases from the public `handarbeit/fabrik` repo where binaries are published.
+- **Fix duplicate stage comments** — Globally-installed Claude Code plugins (especially `superpowers`) were injecting SessionStart hooks into Fabrik's headless Claude sessions, causing parallel Agent subagents to spawn. A single dispatch could produce 7+ comments and waste API credits. Fixed by removing `superpowers` from project plugin settings. Users should also remove it globally: `rm -rf ~/.claude/plugins/cache/claude-plugins-official/superpowers`
+- **Prevent multiple Fabrik instances** — Added a PID file lock (`.fabrik/fabrik.lock`) that prevents starting a second Fabrik instance for the same project. Previously, two instances could run undetected, each dispatching workers for the same issues.
 
-## Improvements
+## Features
 
-- **Documentation site at fabrik.handarbeit.io** — Public docs are now served from a custom domain. All links updated to point at the public `handarbeit/fabrik` repo for releases, issues, and discussions.
-- **Hero screenshots** — Replaced video placeholders with TUI and GitHub Project Board screenshots on the docs landing page.
-- **Discussions link in footer** — Added link to GitHub Discussions in the docs site footer navigation.
+- **Troubleshooting guide** — New docs page at [fabrik.handarbeit.io/troubleshooting](https://fabrik.handarbeit.io/troubleshooting) covering common issues: duplicate comments, multiple instances, rate limits, auth errors, and more.
 
 ## Internal
 
-- Docs site cleanup: removed open source references, redundant cards, auto-archive feature card, and internal skill references.
-- CSS fix for terminal code block line wrapping.
+- Documentation updates for v0.0.29.
 
 ## Upgrading
 
@@ -23,4 +21,9 @@
 
 # Or download directly
 gh release download --repo handarbeit/fabrik --pattern '*darwin_arm64*' -O - | tar xz
+```
+
+**Important:** After upgrading, remove the `superpowers` plugin globally if installed:
+```bash
+rm -rf ~/.claude/plugins/cache/claude-plugins-official/superpowers
 ```
