@@ -1033,7 +1033,7 @@ func (m Model) sortedActiveKeys() []string {
 // tuiReadSessionID reads the Claude session ID for a given repo, issue and stage.
 // The path logic mirrors engine.ReadSessionID — keep in sync if either changes.
 func tuiReadSessionID(repo string, issueNumber int, stageName string) string {
-	home, _ := os.UserHomeDir()
+	cwd, _ := os.Getwd()
 	base := filepath.Base(stageName)
 	if base == "" || base == "." || base == "/" || base == string(filepath.Separator) {
 		base = "default"
@@ -1042,9 +1042,9 @@ func tuiReadSessionID(repo string, issueNumber int, stageName string) string {
 	var sessDir string
 	if repo != "" {
 		repoPart := strings.ReplaceAll(repo, "/", "-")
-		sessDir = filepath.Join(home, ".fabrik", "sessions", repoPart, issuePart)
+		sessDir = filepath.Join(cwd, ".fabrik", "sessions", repoPart, issuePart)
 	} else {
-		sessDir = filepath.Join(home, ".fabrik", "sessions", issuePart)
+		sessDir = filepath.Join(cwd, ".fabrik", "sessions", issuePart)
 	}
 	data, err := os.ReadFile(filepath.Join(sessDir, base+".session"))
 	if err != nil {
