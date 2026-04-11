@@ -50,7 +50,7 @@ After making any code changes:
 
 By default, do NOT output `FABRIK_STAGE_COMPLETE`. Comment processing in Validate returns control to the engine without advancing the pipeline.
 
-**Exception**: If the user's comment explicitly states the issue is resolved, all requirements are met, and validation is complete (e.g., "looks good, ship it", "all checks pass, close this out"), then you MAY output `FABRIK_STAGE_COMPLETE` to advance the pipeline.
+**Exception**: If the user's comment explicitly states the issue is resolved, all requirements are met, and validation is complete (e.g., "looks good, ship it", "all checks pass, close this out"), then you MAY output `FABRIK_STAGE_COMPLETE` to advance the pipeline. If you do, stop immediately after the marker. Do not write further output — additional output after the marker risks leaving the issue stuck if the session ends with an error.
 
 When in doubt, do not signal completion — let the user be explicit.
 
