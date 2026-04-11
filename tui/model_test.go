@@ -481,14 +481,17 @@ func TestLayoutHeightInvariant_NarrowWithHint(t *testing.T) {
 		focusPane   pane
 		confirmQuit bool
 		nActive     int
+		nBlocked    int
 		nHistory    int
 	}{
 		// Narrow terminal (40 cols) with confirmQuit hint visible — longest hint, most likely to wrap.
-		{"narrow_confirmQuit", 40, paneHistory, true, 1, 1},
+		{"narrow_confirmQuit", 40, paneHistory, true, 1, 0, 1},
 		// Narrow terminal with normal history hint visible.
-		{"narrow_normalHint", 40, paneHistory, false, 0, 1},
+		{"narrow_normalHint", 40, paneHistory, false, 0, 0, 1},
 		// Standard-ish narrow (60 cols) with confirmQuit.
-		{"medium_confirmQuit", 60, paneHistory, true, 1, 1},
+		{"medium_confirmQuit", 60, paneHistory, true, 1, 0, 1},
+		// Blocked issues must be counted in activeHeight to avoid over-allocating history viewport.
+		{"with_blocked", 80, paneHistory, false, 1, 3, 1},
 	}
 
 	for _, tc := range cases {
@@ -497,6 +500,9 @@ func TestLayoutHeightInvariant_NarrowWithHint(t *testing.T) {
 			now := time.Now()
 			for i := 0; i < tc.nActive; i++ {
 				m.active[fmt.Sprintf("issue-%d", i+1)] = &activeJob{StageName: "Research", StartedAt: now}
+			}
+			for i := 0; i < tc.nBlocked; i++ {
+				m.blocked[fmt.Sprintf("issue-%d", tc.nActive+i+1)] = &blockedIssue{IssueNumber: tc.nActive + i + 1, StageName: "Research"}
 			}
 			for i := 0; i < tc.nHistory; i++ {
 				m.history = append(m.history, HistoryEntry{IssueNumber: i + 1, StageName: "Research", Success: true, Completed: true})
