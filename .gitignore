@@ -21,3 +21,4 @@ fabrik
 .DS_Store
 tmp/
 *.out
+engine/.fabrik/
