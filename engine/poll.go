@@ -692,44 +692,48 @@ func (e *Engine) checkAndUpgrade() {
 	}
 
 	baseBranch := "main"
-	e.logf(0, "upgrade", "checking origin/%s ...\n", baseBranch)
-	pollStatus("[upgrade] checking origin/%s ...", baseBranch)
 
-	fetchCmd := exec.Command("git", "fetch", "origin", baseBranch)
-	fetchCmd.Dir = dir
-	if out, err := fetchCmd.CombinedOutput(); err != nil {
-		e.logf(0, "upgrade", "git fetch failed: %v\n%s\n", err, out)
-		return
-	}
-
+	// Check local HEAD first — detects local commits that haven't been pushed.
 	localRef, err := gitRevParse(dir, "HEAD")
 	if err != nil {
 		e.logf(0, "upgrade", "could not resolve HEAD: %v\n", err)
 		return
 	}
-	remoteRef, err := gitRevParse(dir, "origin/"+baseBranch)
-	if err != nil {
-		e.logf(0, "upgrade", "could not resolve origin/%s: %v\n", baseBranch, err)
-		return
-	}
-	if localRef == remoteRef {
-		// Local checkout matches remote. But the running binary may have been
-		// built from an older commit. Check if the binary's embedded SHA differs
-		// from HEAD — if so, fall through to rebuild.
-		binarySHA := extractBinarySHA(e.cfg.Version)
-		if binarySHA == "" || strings.HasPrefix(localRef, binarySHA) {
-			return
-		}
+	binarySHA := extractBinarySHA(e.cfg.Version)
+	needsRebuild := binarySHA != "" && !strings.HasPrefix(localRef, binarySHA)
+	if needsRebuild {
 		e.logf(0, "upgrade", "binary built from %s but HEAD is %s — rebuilding\n", binarySHA, localRef[:7])
 	}
 
-	e.logf(0, "upgrade", "new commits detected — pulling origin/%s\n", baseBranch)
+	// Also check remote for new upstream commits.
+	if !needsRebuild {
+		e.logf(0, "upgrade", "checking origin/%s ...\n", baseBranch)
+		pollStatus("[upgrade] checking origin/%s ...", baseBranch)
 
-	pullCmd := exec.Command("git", "pull", "--ff-only", "origin", baseBranch)
-	pullCmd.Dir = dir
-	if out, err := pullCmd.CombinedOutput(); err != nil {
-		e.logf(0, "upgrade", "git pull --ff-only failed (local changes?): %v\n%s\n", err, out)
-		return
+		fetchCmd := exec.Command("git", "fetch", "origin", baseBranch)
+		fetchCmd.Dir = dir
+		if out, err := fetchCmd.CombinedOutput(); err != nil {
+			e.logf(0, "upgrade", "git fetch failed: %v\n%s\n", err, out)
+			return
+		}
+
+		remoteRef, err := gitRevParse(dir, "origin/"+baseBranch)
+		if err != nil {
+			e.logf(0, "upgrade", "could not resolve origin/%s: %v\n", baseBranch, err)
+			return
+		}
+		if localRef == remoteRef {
+			return // up to date
+		}
+		needsRebuild = true
+		e.logf(0, "upgrade", "new commits on origin/%s — pulling\n", baseBranch)
+
+		pullCmd := exec.Command("git", "pull", "--ff-only", "origin", baseBranch)
+		pullCmd.Dir = dir
+		if out, err := pullCmd.CombinedOutput(); err != nil {
+			e.logf(0, "upgrade", "git pull --ff-only failed (local changes?): %v\n%s\n", err, out)
+			return
+		}
 	}
 
 	exe, err := os.Executable()
