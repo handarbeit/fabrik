@@ -207,9 +207,9 @@ description: >-
         <span class="feature-icon">🔄</span>
         <div class="feature-title">Self-Upgrade</div>
         <div class="feature-desc">
-          Pass <code>--auto-upgrade</code> and Fabrik watches <code>origin/main</code>.
-          When idle and new commits appear, it rebuilds itself and re-execs —
-          no manual deploys.
+          Pass <code>--auto-upgrade</code> and Fabrik checks <code>handarbeit/fabrik</code>
+          GitHub Releases for a newer version when idle. If one is found, it
+          downloads the new binary and re-execs — no manual deploys.
         </div>
       </div>
       <div class="feature-card">
@@ -391,7 +391,7 @@ echo '.env' >> .gitignore
 <span style="color:#56d364"># Optional: yolo mode (auto-advance all stages)</span>
 ./fabrik --yolo
 
-<span style="color:#56d364"># Optional: self-upgrade from origin/main when idle</span>
+<span style="color:#56d364"># Optional: self-upgrade from handarbeit/fabrik GitHub Releases when idle</span>
 ./fabrik --auto-upgrade</pre>
       </div>
     </div>
