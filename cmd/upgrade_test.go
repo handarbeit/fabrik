@@ -116,17 +116,14 @@ func TestCheckPluginSkillsWithReader_DifferNonTTYWarning(t *testing.T) {
 	if callErr != nil {
 		t.Fatalf("expected nil error, got %v", callErr)
 	}
-	if !strings.Contains(output, "Plugin skills on disk don't match") {
-		t.Fatalf("expected warning on stderr, got: %q", output)
-	}
-	if !strings.Contains(output, "fabrik upgrade") {
-		t.Fatalf("expected 'fabrik upgrade' hint in stderr, got: %q", output)
+	if !strings.Contains(output, "auto-refreshed") {
+		t.Fatalf("expected auto-refresh message on stderr, got: %q", output)
 	}
 
-	// File must not have been overwritten.
+	// File must have been refreshed (non-TTY silently updates).
 	data, _ := os.ReadFile(entries[0])
-	if string(data) != "modified content" {
-		t.Fatal("non-TTY path must not overwrite files")
+	if string(data) == "modified content" {
+		t.Fatal("non-TTY path should auto-refresh differing files")
 	}
 }
 
