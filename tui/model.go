@@ -678,7 +678,22 @@ func (m *Model) updateHistoryViewport(scrollToTop bool) {
 	// without pushing header/footer off screen. viewport.Model panics on
 	// non-positive Height, so the floor of 1 is both a correctness and
 	// safety requirement.
-	historyHeight := max(m.height-headerHeight()-activeHeight(len(m.active))-footerHeight()-3, 1)
+	//
+	// Compute the overhead dynamically: border-top (1) + title+hint row(s) + border-bottom (1).
+	// The hint is truncated to fit innerWidth, so titleAndHintLines is almost always 1.
+	// The width check below is defense-in-depth in case an edge case slips through.
+	// focusIndicator matches the logic in viewHistory() — keep in sync.
+	focusIndicator := " "
+	if m.focusPane == paneHistory {
+		focusIndicator = "▸"
+	}
+	vpTitle := dimStyle.Render(fmt.Sprintf("%s History (%d)", focusIndicator, len(m.history)))
+	vpHint := m.historyHint(lipgloss.Width(vpTitle), innerWidth)
+	titleAndHintLines := 1
+	if lipgloss.Width(vpTitle+vpHint) > innerWidth {
+		titleAndHintLines = 2
+	}
+	historyHeight := max(m.height-headerHeight()-activeHeight(len(m.active))-footerHeight()-2-titleAndHintLines, 1)
 	m.historyVP.Width = innerWidth
 	m.historyVP.Height = historyHeight
 
@@ -792,6 +807,8 @@ func (m Model) viewActive() string {
 	}
 	title := activeStyle.Render(fmt.Sprintf("%s In Progress (%d)", focusIndicator, len(m.active)+len(m.blocked)))
 
+	maxWidth := max(m.width-6, 20) // account for border + padding
+
 	var lines []string
 	keys := m.sortedActiveKeys()
 
@@ -822,7 +839,6 @@ func (m Model) viewActive() string {
 		line := fmt.Sprintf("#%-5d %s %s %s  %s%s %s",
 			job.IssueNumber, stageDisplay, spinner, elapsed, titleStr, tag, msg)
 		// Truncate to terminal width to prevent wrapping
-		maxWidth := max(m.width-6, 20) // account for border + padding
 		if runes := []rune(line); len(runes) > maxWidth {
 			line = string(runes[:maxWidth-1]) + "…"
 		}
@@ -852,7 +868,6 @@ func (m Model) viewActive() string {
 		}
 		line := fmt.Sprintf("🔒#%-4d %s waiting for: %s  %s",
 			b.IssueNumber, stageDisplay, waiting, titleStr)
-		maxWidth := max(m.width-6, 20)
 		if runes := []rune(line); len(runes) > maxWidth {
 			line = string(runes[:maxWidth-1]) + "…"
 		}
@@ -882,26 +897,30 @@ func (m Model) viewActive() string {
 
 	hint := ""
 	if m.focusPane == paneActive && len(m.active) > 0 {
-		hint = dimStyle.Render("  [l] watch  [enter] details  [tab] history")
+		hintPlain := "  [l] watch  [enter] details  [tab] history"
+		hintMax := max(maxWidth-lipgloss.Width(title), 0)
+		hintRunes := []rune(hintPlain)
+		for len(hintRunes) > 0 && lipgloss.Width(dimStyle.Render(string(hintRunes)+"…")) > hintMax {
+			hintRunes = hintRunes[:len(hintRunes)-1]
+		}
+		if len(hintRunes) == len([]rune(hintPlain)) {
+			hint = dimStyle.Render(hintPlain)
+		} else if len(hintRunes) > 0 {
+			hint = dimStyle.Render(string(hintRunes) + "…")
+		}
 	}
 	content := title + hint + "\n" + strings.Join(lines, "\n")
 	return borderStyle.Width(m.width - 4).Render(content)
 }
 
 func (m Model) viewHistory() string {
+	innerWidth := max(m.width-6, 20)
 	focusIndicator := " "
 	if m.focusPane == paneHistory {
 		focusIndicator = "▸"
 	}
 	title := dimStyle.Render(fmt.Sprintf("%s History (%d)", focusIndicator, len(m.history)))
-	hint := ""
-	if m.confirmClear {
-		hint = failStyle.Render("  Clear all history? [C]onfirm / [n]o")
-	} else if m.confirmQuit {
-		hint = failStyle.Render(fmt.Sprintf("  Quit Fabrik? %d jobs still in progress \u2014 they will be interrupted.  [q] Quit anyway   [n/Escape] Cancel", len(m.active)))
-	} else if m.focusPane == paneHistory && len(m.history) > 0 {
-		hint = dimStyle.Render("  [r]esume  [l] watch  [enter] details  [c]lear  [C]lear all  [tab] in-progress")
-	}
+	hint := m.historyHint(lipgloss.Width(title), innerWidth)
 	content := title + hint + "\n" + m.historyVP.View()
 	return borderStyle.Width(m.width - 4).Render(content)
 }
@@ -936,6 +955,48 @@ func (m Model) viewFooter() string {
 		footer = dimStyle.Render(string(runes) + "…")
 	}
 	return footer
+}
+
+// historyHint returns the rendered hint string for the history panel, truncated
+// to fit within innerWidth-titleDisplayWidth columns. It encapsulates all state
+// branches (confirmClear, confirmQuit, normal, empty) and is used by both
+// viewHistory() and updateHistoryViewport() to keep them in sync.
+func (m Model) historyHint(titleDisplayWidth, innerWidth int) string {
+	maxHintWidth := max(innerWidth-titleDisplayWidth, 0)
+	if maxHintWidth == 0 {
+		return ""
+	}
+
+	var plainText string
+	var style lipgloss.Style
+	if m.confirmClear {
+		plainText = "  Clear all history? [C]onfirm / [n]o"
+		style = failStyle
+	} else if m.confirmQuit {
+		plainText = fmt.Sprintf("  Quit Fabrik? %d jobs still in progress \u2014 they will be interrupted.  [q] Quit anyway   [n/Escape] Cancel", len(m.active))
+		style = failStyle
+	} else if m.focusPane == paneHistory && len(m.history) > 0 {
+		plainText = "  [r]esume  [l] watch  [enter] details  [c]lear  [C]lear all  [tab] in-progress"
+		style = dimStyle
+	} else {
+		return ""
+	}
+
+	// Check if it fits as-is.
+	rendered := style.Render(plainText)
+	if lipgloss.Width(rendered) <= maxHintWidth {
+		return rendered
+	}
+
+	// Shrink rune-by-rune until it fits with ellipsis.
+	runes := []rune(plainText)
+	for len(runes) > 0 && lipgloss.Width(style.Render(string(runes)+"…")) > maxHintWidth {
+		runes = runes[:len(runes)-1]
+	}
+	if len(runes) == 0 {
+		return ""
+	}
+	return style.Render(string(runes) + "…")
 }
 
 // headerHeight returns the approximate line height of the header pane.
