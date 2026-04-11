@@ -423,11 +423,10 @@ exit 1
 	if completed {
 		t.Error("expected completed=false when context is cancelled, even with marker present")
 	}
-	os.RemoveAll(SessionDir(62))
-	os.RemoveAll(LogDir(62))
 }
 
 func TestInvokeClaude_WithComments(t *testing.T) {
+	chdirTempDir(t)
 	binDir := t.TempDir()
 	stdinFile := filepath.Join(binDir, "stdin.txt")
 	fakeClaude := filepath.Join(binDir, "claude")
@@ -462,12 +461,11 @@ printf '%%s\n' '{"result":"comment output","session_id":"sess_c","num_turns":1,"
 	if !strings.Contains(string(stdin), "New Comments") {
 		t.Errorf("expected comments in prompt, stdin: %q", string(stdin))
 	}
-	os.RemoveAll(SessionDir(70))
-	os.RemoveAll(LogDir(70))
 }
 
 func TestDirectInvocation(t *testing.T) {
 	// Verify that InvokeClaude runs Claude directly (exec.CommandContext with piped stdin/stdout).
+	chdirTempDir(t)
 	binDir := t.TempDir()
 	fakeClaude := filepath.Join(binDir, "claude")
 	script := `#!/bin/sh
@@ -489,8 +487,6 @@ printf '%s\n' '{"result":"fallback output\nFABRIK_STAGE_COMPLETE\n","session_id"
 		Completion: stages.CompletionCriteria{Type: "claude"},
 	}
 	issue := gh.ProjectItem{Number: 74, Title: "direct invocation test"}
-	defer os.RemoveAll(SessionDir(74))
-	defer os.RemoveAll(LogDir(74))
 
 	output, completed, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
 	if err != nil {
@@ -509,6 +505,7 @@ printf '%s\n' '{"result":"fallback output\nFABRIK_STAGE_COMPLETE\n","session_id"
 // The test uses a fake claude binary that outputs NDJSON stream-json format
 // and asserts that the .log file contains the same NDJSON content.
 func TestRunClaude_StdoutTeeToLogFile(t *testing.T) {
+	chdirTempDir(t)
 	binDir := t.TempDir()
 	fakeClaude := filepath.Join(binDir, "claude")
 	// Emit two NDJSON lines: one assistant message and one result (stream-json format).
@@ -536,8 +533,6 @@ func TestRunClaude_StdoutTeeToLogFile(t *testing.T) {
 		Completion: stages.CompletionCriteria{Type: "claude"},
 	}
 	issue := gh.ProjectItem{Number: 200, Title: "Tee test"}
-	defer os.RemoveAll(SessionDir(200))
-	defer os.RemoveAll(LogDir(200))
 
 	output, completed, stats, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
 	if err != nil {
@@ -593,6 +588,7 @@ func TestRunClaude_StdoutTeeToLogFile(t *testing.T) {
 // emits FABRIK_ISSUE_UPDATE_BEGIN/END in an intermediate assistant turn (not in the
 // result field), runClaude still returns text containing the update block.
 func TestRunClaude_IssueUpdateInIntermediateTurn(t *testing.T) {
+	chdirTempDir(t)
 	binDir := t.TempDir()
 	fakeClaude := filepath.Join(binDir, "claude")
 
@@ -621,8 +617,6 @@ func TestRunClaude_IssueUpdateInIntermediateTurn(t *testing.T) {
 		Completion: stages.CompletionCriteria{Type: "claude"},
 	}
 	issue := gh.ProjectItem{Number: 205, Title: "Intermediate update test"}
-	defer os.RemoveAll(SessionDir(205))
-	defer os.RemoveAll(LogDir(205))
 
 	output, completed, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
 	if err != nil {
