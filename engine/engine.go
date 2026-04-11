@@ -70,6 +70,8 @@ type Engine struct {
 	inFlight           sync.Map              // key: issueKey string, value: bool (isPR)
 	cloneInFlight      sync.Map              // key: "owner/repo" string, value: *cloneCall; per-repo bare-clone coordination
 	events             chan tui.Event        // nil in tests / plain-text mode; TUI goroutine consumes
+	logFile            *os.File             // persistent log file at .fabrik/fabrik.log; nil if not opened
+	logMu              sync.Mutex           // serializes concurrent writes to logFile
 }
 
 func New(cfg Config) (*Engine, error) {
@@ -256,15 +258,26 @@ func (e *Engine) logf(issueNumber int, tag, format string, args ...any) {
 		case e.events <- tui.LogEvent{IssueNumber: issueNumber, Tag: tag, Message: msg}:
 		default:
 		}
-		return
-	}
-	// Plain-text mode: clear any transient status line before printing.
-	pollStatusClear()
-	if issueNumber == 0 {
-		fmt.Printf("[%s] %s", tag, msg)
 	} else {
-		fmt.Printf("[#%d %s] %s", issueNumber, tag, msg)
+		// Plain-text mode: clear any transient status line before printing.
+		pollStatusClear()
+		if issueNumber == 0 {
+			fmt.Printf("[%s] %s", tag, msg)
+		} else {
+			fmt.Printf("[#%d %s] %s", issueNumber, tag, msg)
+		}
 	}
+	// Write to persistent log file in both TUI and plain-text modes.
+	e.logMu.Lock()
+	if e.logFile != nil {
+		ts := time.Now().UTC().Format(time.RFC3339)
+		if issueNumber == 0 {
+			fmt.Fprintf(e.logFile, "%s [%s] %s", ts, tag, msg)
+		} else {
+			fmt.Fprintf(e.logFile, "%s [#%d %s] %s", ts, issueNumber, tag, msg)
+		}
+	}
+	e.logMu.Unlock()
 }
 
 func mapKeys(m map[string]string) []string {

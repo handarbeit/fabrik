@@ -8,11 +8,14 @@ import (
 func TestPollStatus_NonTTY(t *testing.T) {
 	orig := isTTY
 	origTUI := tuiMode
+	origLog := pollLogFile
 	isTTY = false
 	tuiMode = false
+	pollLogFile = nil
 	defer func() {
 		isTTY = orig
 		tuiMode = origTUI
+		pollLogFile = origLog
 	}()
 	// Should not panic
 	pollStatus("polling %s", "test")
@@ -23,11 +26,14 @@ func TestPollStatus_NonTTY(t *testing.T) {
 func TestPollStatus_TTY(t *testing.T) {
 	origTTY := isTTY
 	origTUI := tuiMode
+	origLog := pollLogFile
 	isTTY = true
 	tuiMode = false
+	pollLogFile = nil
 	defer func() {
 		isTTY = origTTY
 		tuiMode = origTUI
+		pollLogFile = origLog
 		lastStatusLen = 0
 	}()
 	// Should not panic; output goes to stdout with \r prefix
@@ -40,8 +46,13 @@ func TestPollStatus_TTY(t *testing.T) {
 // TestPollStatus_TuiMode_IsNoop verifies that pollStatus is a no-op in TUI mode.
 func TestPollStatus_TuiMode_IsNoop(t *testing.T) {
 	orig := tuiMode
+	origLog := pollLogFile
 	tuiMode = true
-	defer func() { tuiMode = orig }()
+	pollLogFile = nil
+	defer func() {
+		tuiMode = orig
+		pollLogFile = origLog
+	}()
 	// Should not panic or output anything
 	pollStatus("this should not appear")
 	pollStatusClear()
