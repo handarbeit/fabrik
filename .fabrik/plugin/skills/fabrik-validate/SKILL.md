@@ -151,7 +151,7 @@ If you find major issues (wrong architecture, missing feature, design flaw):
 
 **Before you run**: Worktree exists with implementation + review commits.
 
-**Completing the stage**: Output `FABRIK_STAGE_COMPLETE` on its own line when validation passes.
+**Completing the stage**: Output `FABRIK_STAGE_COMPLETE` on its own line when validation passes. Once you emit this marker, stop immediately. Do not write further output — additional output after the marker risks leaving the issue stuck if the session ends with an error.
 
 **Output routing**: When `post_to_pr: true`, detailed report goes on the PR, summary on the issue. Include `FABRIK_SUMMARY_BEGIN`/`END` markers.
 
