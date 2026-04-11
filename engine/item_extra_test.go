@@ -541,10 +541,11 @@ func TestPoll_DeepFetchSuccessClearsFailureTime(t *testing.T) {
 	}
 }
 
-// TestItemMayNeedWork_AwaitingInputBypassesUnchanged verifies that an item with
-// fabrik:awaiting-input and an unchanged updatedAt still returns true from
-// itemMayNeedWork (so a new comment can be detected on the next poll).
-func TestItemMayNeedWork_AwaitingInputBypassesUnchanged(t *testing.T) {
+// TestItemMayNeedWork_AwaitingInputRespectsCache verifies that an item with
+// fabrik:awaiting-input and an unchanged updatedAt returns false from
+// itemMayNeedWork. Adding a comment bumps the issue's updatedAt, so there's
+// no need to force a deep-fetch every poll — the normal cache check catches it.
+func TestItemMayNeedWork_AwaitingInputRespectsCache(t *testing.T) {
 	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
 
 	ts := time.Now().Add(-time.Minute)
@@ -561,8 +562,8 @@ func TestItemMayNeedWork_AwaitingInputBypassesUnchanged(t *testing.T) {
 	eng.lastUpdatedAt["owner/repo#50"] = ts
 	eng.mu.Unlock()
 
-	if !eng.itemMayNeedWork(item) {
-		t.Error("awaiting-input item with unchanged updatedAt should still return true from itemMayNeedWork")
+	if eng.itemMayNeedWork(item) {
+		t.Error("awaiting-input item with unchanged updatedAt should return false (comments bump updatedAt)")
 	}
 }
 
