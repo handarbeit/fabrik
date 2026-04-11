@@ -10,6 +10,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/termenv"
 )
 
 func TestMain(m *testing.M) {
@@ -388,6 +390,145 @@ func TestViewFooter_Truncation(t *testing.T) {
 	// Must contain truncation indicator when content is long.
 	if !strings.Contains(footer, "…") {
 		t.Errorf("expected truncation ellipsis in narrow footer; got: %q", footer)
+	}
+}
+
+// TestViewFooter_RateLimitHidden verifies that the rate limit section is omitted
+// when no stats have been received (Limit==0).
+func TestViewFooter_RateLimitHidden(t *testing.T) {
+	m := New(30, ProjectInfo{CWD: "~/projects/myapp", Repo: "org/myapp"}, "")
+	m.width = 120
+	// graphqlStats is zero-value (Limit==0) by default.
+	footer := m.viewFooter()
+	plain := ansi.Strip(footer)
+
+	// A rate-limit fraction would look like "4865/5000"; verify no digit precedes
+	// a "/" that is followed by a digit (which would indicate a rate limit).
+	for i := 1; i < len(plain)-1; i++ {
+		if plain[i] == '/' && plain[i-1] >= '0' && plain[i-1] <= '9' && plain[i+1] >= '0' && plain[i+1] <= '9' {
+			t.Errorf("footer should not show rate limit when Limit==0; got: %q", plain)
+			break
+		}
+	}
+}
+
+// TestViewFooter_RateLimitShown verifies the rate limit section appears once
+// graphqlStats is populated, and contains the fraction and countdown.
+func TestViewFooter_RateLimitShown(t *testing.T) {
+	m := New(30, ProjectInfo{CWD: "~/projects/myapp", Repo: "org/myapp"}, "")
+	m.width = 120
+	m.now = time.Now()
+	m.graphqlStats = RateLimitStats{
+		Limit:     5000,
+		Remaining: 4865,
+		Reset:     m.now.Add(12 * time.Minute),
+	}
+	footer := m.viewFooter()
+	plain := ansi.Strip(footer)
+
+	if !strings.Contains(plain, "4865/5000") {
+		t.Errorf("footer missing rate limit fraction; got: %q", plain)
+	}
+	if !strings.Contains(plain, "12m") {
+		t.Errorf("footer missing countdown; got: %q", plain)
+	}
+}
+
+// TestViewFooter_RateLimitColors verifies the color thresholds applied to the
+// rate limit section. Colors are forced via lipgloss.SetColorProfile so that
+// ANSI escape sequences are emitted even in a non-TTY test environment.
+func TestViewFooter_RateLimitColors(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(termenv.Ascii) })
+
+	now := time.Now()
+	reset := now.Add(10 * time.Minute)
+	cases := []struct {
+		name      string
+		remaining int
+		limit     int
+		wantColor string // lipgloss color code present in ANSI escape
+	}{
+		{"green >50%", 2600, 5000, "42"},
+		{"yellow 20-50%", 1500, 5000, "214"},
+		{"red <20%", 900, 5000, "196"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(30, ProjectInfo{CWD: "~", Repo: "org/repo"}, "")
+			m.width = 120
+			m.now = now
+			m.graphqlStats = RateLimitStats{
+				Limit:     tc.limit,
+				Remaining: tc.remaining,
+				Reset:     reset,
+			}
+			footer := m.viewFooter()
+			// The ANSI escape for the color code should be present in the raw string.
+			if !strings.Contains(footer, tc.wantColor) {
+				t.Errorf("expected color %q for %d/%d; footer=%q", tc.wantColor, tc.remaining, tc.limit, footer)
+			}
+		})
+	}
+}
+
+// TestViewFooter_TruncationWithRateLimit verifies that at narrow widths the
+// left side is truncated but the right (rate limit) side is preserved.
+func TestViewFooter_TruncationWithRateLimit(t *testing.T) {
+	now := time.Now()
+	m := New(30, ProjectInfo{
+		CWD:     "~/very/long/path/to/a/deeply/nested/project/directory",
+		Repo:    "some-long-org/some-long-repo-name",
+		Version: "99.99.99",
+	}, "")
+	m.width = 40
+	m.now = now
+	m.graphqlStats = RateLimitStats{
+		Limit:     5000,
+		Remaining: 4865,
+		Reset:     now.Add(12 * time.Minute),
+	}
+	footer := m.viewFooter()
+	plain := ansi.Strip(footer)
+
+	// Width must not exceed terminal width.
+	w := lipgloss.Width(footer)
+	if w > m.width {
+		t.Errorf("footer width %d exceeds terminal width %d", w, m.width)
+	}
+	// Right side (rate limit) must be preserved.
+	if !strings.Contains(plain, "4865/5000") {
+		t.Errorf("rate limit truncated from narrow footer; got: %q", plain)
+	}
+	// Left side must be truncated (too long to fit with right side).
+	if !strings.Contains(plain, "…") {
+		t.Errorf("expected left-side truncation ellipsis; got: %q", plain)
+	}
+}
+
+// TestFmtRateLimitCountdown verifies the countdown formatting helper.
+func TestFmtRateLimitCountdown(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name  string
+		delta time.Duration
+		want  string
+	}{
+		{"soon (past)", -5 * time.Second, "soon"},
+		{"soon (zero)", 0, "soon"},
+		{"seconds", 45 * time.Second, "45s"},
+		{"minutes", 3*time.Minute + 30*time.Second, "3m"},
+		{"hours", 2*time.Hour + 30*time.Minute, "2h"},
+		{"exactly 1 minute", 60 * time.Second, "1m"},
+		{"exactly 1 hour", 3600 * time.Second, "1h"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := fmtRateLimitCountdown(now.Add(tc.delta), now)
+			if got != tc.want {
+				t.Errorf("fmtRateLimitCountdown delta=%v: got %q, want %q", tc.delta, got, tc.want)
+			}
+		})
 	}
 }
 
