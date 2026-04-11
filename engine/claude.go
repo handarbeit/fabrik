@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	gh "github.com/verveguy/fabrik/github"
@@ -104,46 +105,46 @@ func saveDebugLog(issueNumber int, label string, output string) {
 }
 
 // SessionDir returns the directory where Claude sessions are cached for an issue.
-// The path is ~/.fabrik/sessions/issue-N/ for single-repo projects.
+// The path is <cwd>/.fabrik/sessions/issue-N/ for single-repo projects.
 // Use sessionDirForItem for multi-repo-aware paths.
 func SessionDir(issueNumber int) string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".fabrik", "sessions", fmt.Sprintf("issue-%d", issueNumber))
+	cwd, _ := os.Getwd()
+	return filepath.Join(cwd, ".fabrik", "sessions", fmt.Sprintf("issue-%d", issueNumber))
 }
 
 // sessionDirForItem returns the session directory for an issue, namespaced by
 // repo when item.Repo is set (multi-repo mode). The path is:
-//   - single-repo: ~/.fabrik/sessions/issue-N/
-//   - multi-repo:  ~/.fabrik/sessions/<owner>-<repo>/issue-N/
+//   - single-repo: <cwd>/.fabrik/sessions/issue-N/
+//   - multi-repo:  <cwd>/.fabrik/sessions/<owner>-<repo>/issue-N/
 func sessionDirForItem(issue gh.ProjectItem) string {
-	home, _ := os.UserHomeDir()
+	cwd, _ := os.Getwd()
 	issuePart := fmt.Sprintf("issue-%d", issue.Number)
 	if issue.Repo == "" {
-		return filepath.Join(home, ".fabrik", "sessions", issuePart)
+		return filepath.Join(cwd, ".fabrik", "sessions", issuePart)
 	}
 	// Sanitize "owner/repo" → "owner-repo" for use as a directory name.
 	repoPart := strings.ReplaceAll(issue.Repo, "/", "-")
-	return filepath.Join(home, ".fabrik", "sessions", repoPart, issuePart)
+	return filepath.Join(cwd, ".fabrik", "sessions", repoPart, issuePart)
 }
 
 // LogDir returns the directory where Claude session logs are stored for an issue.
 func LogDir(issueNumber int) string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".fabrik", "logs", fmt.Sprintf("issue-%d", issueNumber))
+	cwd, _ := os.Getwd()
+	return filepath.Join(cwd, ".fabrik", "logs", fmt.Sprintf("issue-%d", issueNumber))
 }
 
 // logDirForItem returns the log directory for an issue, namespaced by repo when
 // item.Repo is set (multi-repo mode). The path is:
-//   - single-repo: ~/.fabrik/logs/issue-N/
-//   - multi-repo:  ~/.fabrik/logs/<owner>-<repo>/issue-N/
+//   - single-repo: <cwd>/.fabrik/logs/issue-N/
+//   - multi-repo:  <cwd>/.fabrik/logs/<owner>-<repo>/issue-N/
 func logDirForItem(issue gh.ProjectItem) string {
-	home, _ := os.UserHomeDir()
+	cwd, _ := os.Getwd()
 	issuePart := fmt.Sprintf("issue-%d", issue.Number)
 	if issue.Repo == "" {
-		return filepath.Join(home, ".fabrik", "logs", issuePart)
+		return filepath.Join(cwd, ".fabrik", "logs", issuePart)
 	}
 	repoPart := strings.ReplaceAll(issue.Repo, "/", "-")
-	return filepath.Join(home, ".fabrik", "logs", repoPart, issuePart)
+	return filepath.Join(cwd, ".fabrik", "logs", repoPart, issuePart)
 }
 
 // sessionFile returns the path to the session ID file for a given issue+stage.
@@ -167,14 +168,14 @@ func ReadSessionID(repo string, issueNumber int, stageName string) string {
 	if base == "" || base == "." || base == "/" || base == string(filepath.Separator) {
 		base = "default"
 	}
-	home, _ := os.UserHomeDir()
+	cwd, _ := os.Getwd()
 	issuePart := fmt.Sprintf("issue-%d", issueNumber)
 	var sessDir string
 	if repo == "" {
-		sessDir = filepath.Join(home, ".fabrik", "sessions", issuePart)
+		sessDir = filepath.Join(cwd, ".fabrik", "sessions", issuePart)
 	} else {
 		repoPart := strings.ReplaceAll(repo, "/", "-")
-		sessDir = filepath.Join(home, ".fabrik", "sessions", repoPart, issuePart)
+		sessDir = filepath.Join(cwd, ".fabrik", "sessions", repoPart, issuePart)
 	}
 	data, err := os.ReadFile(filepath.Join(sessDir, base+".session"))
 	if err != nil {
@@ -865,6 +866,102 @@ func migrateSessions(sessionRoot, worktreeRoot string, logfn func(string)) {
 		}
 		if logfn != nil {
 			logfn(fmt.Sprintf("migrated session %s → %s\n", oldPath, newPath))
+		}
+	}
+}
+
+// renameWithFallback attempts os.Rename(src, dst). If that fails with a
+// cross-device link error (EXDEV — source and destination on different
+// filesystems), it falls back to copy+delete.
+func renameWithFallback(src, dst string) error {
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	} else if linkErr, ok := err.(*os.LinkError); !ok || linkErr.Err != syscall.EXDEV {
+		return err
+	}
+	// Cross-device: copy then remove.
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("open src: %w", err)
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(dst), 0700); err != nil {
+		return fmt.Errorf("mkdirall dst: %w", err)
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return fmt.Errorf("create dst: %w", err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(dst)
+		return fmt.Errorf("copy: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(dst)
+		return fmt.Errorf("close dst: %w", err)
+	}
+	return os.Remove(src)
+}
+
+// migrateHomeToProject moves session and log files from the legacy home-dir
+// location (~/.fabrik/sessions/ and ~/.fabrik/logs/) to the CWD-relative
+// location (<fabrikDir>/.fabrik/sessions/ and <fabrikDir>/.fabrik/logs/).
+// It is idempotent: files that already exist at the destination are skipped.
+// It is a no-op when src == dst (e.g. when HOME == fabrikDir in tests).
+// logfn is optional; pass nil to suppress output.
+func migrateHomeToProject(fabrikDir string, logfn func(string)) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	for _, subdir := range []string{"sessions", "logs"} {
+		src := filepath.Join(home, ".fabrik", subdir)
+		dst := filepath.Join(fabrikDir, ".fabrik", subdir)
+
+		// Same-path guard: no-op when home dir == project dir.
+		if filepath.Clean(src) == filepath.Clean(dst) {
+			continue
+		}
+
+		entries, err := os.ReadDir(src)
+		if err != nil {
+			continue // no source directory yet
+		}
+
+		for _, entry := range entries {
+			srcPath := filepath.Join(src, entry.Name())
+			dstPath := filepath.Join(dst, entry.Name())
+
+			// Skip if destination already exists.
+			if _, err := os.Stat(dstPath); err == nil {
+				if logfn != nil {
+					logfn(fmt.Sprintf("warn: migration target %s already exists — skipping %s\n", dstPath, srcPath))
+				}
+				continue
+			}
+
+			if err := os.MkdirAll(dst, 0700); err != nil {
+				if logfn != nil {
+					logfn(fmt.Sprintf("warn: cannot create dir %s: %v\n", dst, err))
+				}
+				continue
+			}
+
+			if err := renameWithFallback(srcPath, dstPath); err != nil {
+				if logfn != nil {
+					logfn(fmt.Sprintf("warn: migrate %s → %s failed: %v\n", srcPath, dstPath, err))
+				}
+				continue
+			}
+			if logfn != nil {
+				logfn(fmt.Sprintf("migrated %s/%s → %s/%s\n", subdir, entry.Name(), subdir, entry.Name()))
+			}
+		}
+
+		// Remove source dir if now empty.
+		if remaining, err := os.ReadDir(src); err == nil && len(remaining) == 0 {
+			os.Remove(src)
 		}
 	}
 }

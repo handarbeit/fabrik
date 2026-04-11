@@ -14,6 +14,7 @@ import (
 )
 
 func TestInvokeClaude_JSONOutput(t *testing.T) {
+	t.Chdir(t.TempDir())
 	binDir := t.TempDir()
 	fakeClaude := filepath.Join(binDir, "claude")
 	// Output a valid JSON envelope as --output-format json would.
@@ -39,8 +40,6 @@ printf '%s\n' '{"result":"stage output\nFABRIK_STAGE_COMPLETE\n","session_id":"s
 		Completion: stages.CompletionCriteria{Type: "claude"},
 	}
 	issue := gh.ProjectItem{Number: 77, Title: "Test JSON"}
-	defer os.RemoveAll(SessionDir(77))
-	defer os.RemoveAll(LogDir(77))
 
 	output, completed, stats, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
 	if err != nil {
@@ -81,6 +80,7 @@ func TestRealClaudeInvoker_ImplementsInterface(t *testing.T) {
 }
 
 func TestRealClaudeInvoker_Invoke(t *testing.T) {
+	t.Chdir(t.TempDir())
 	binDir := t.TempDir()
 	fakeClaude := filepath.Join(binDir, "claude")
 	script := `#!/bin/sh
@@ -110,11 +110,10 @@ printf '%s\n' '{"result":"real invoker output","session_id":"sess_ri","num_turns
 	if !strings.Contains(output, "real invoker output") {
 		t.Errorf("output = %q", output)
 	}
-	os.RemoveAll(SessionDir(80))
-	os.RemoveAll(LogDir(80))
 }
 
 func TestInvokeClaude_FakeBinary(t *testing.T) {
+	t.Chdir(t.TempDir())
 	// Create a fake claude binary that outputs a valid JSON envelope
 	binDir := t.TempDir()
 	fakeClaude := filepath.Join(binDir, "claude")
@@ -164,12 +163,10 @@ printf '%s\n' '{"result":"Claude output for test\nFABRIK_STAGE_COMPLETE\n","sess
 	if string(data) != "sess_test123" {
 		t.Errorf("session = %q", string(data))
 	}
-	// Cleanup
-	os.RemoveAll(SessionDir(42))
-	os.RemoveAll(LogDir(42))
 }
 
 func TestInvokeClaude_WithResume(t *testing.T) {
+	t.Chdir(t.TempDir())
 	binDir := t.TempDir()
 	argsFile := filepath.Join(binDir, "args.txt")
 	fakeClaude := filepath.Join(binDir, "claude")
@@ -198,8 +195,6 @@ printf '%%s\n' '{"result":"resume output","session_id":"sess_resume","num_turns"
 	sessDir := SessionDir(99)
 	os.MkdirAll(sessDir, 0700)
 	os.WriteFile(sessionFile(99, "Plan"), []byte("sess_existing"), 0600)
-	defer os.RemoveAll(sessDir)
-	defer os.RemoveAll(LogDir(99))
 
 	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, true, workDir, "")
 	if err != nil {
@@ -218,6 +213,7 @@ printf '%%s\n' '{"result":"resume output","session_id":"sess_resume","num_turns"
 }
 
 func TestInvokeClaude_WithModelAndTools(t *testing.T) {
+	t.Chdir(t.TempDir())
 	binDir := t.TempDir()
 	argsFile := filepath.Join(binDir, "args.txt")
 	fakeClaude := filepath.Join(binDir, "claude")
@@ -263,11 +259,10 @@ printf '%%s\n' '{"result":"ok","session_id":"sess_mt","num_turns":1,"total_cost_
 	if !strings.Contains(argsStr, "--allowedTools") {
 		t.Error("expected --allowedTools in args")
 	}
-	os.RemoveAll(SessionDir(50))
-	os.RemoveAll(LogDir(50))
 }
 
 func TestInvokeClaude_WithModelOverride(t *testing.T) {
+	t.Chdir(t.TempDir())
 	binDir := t.TempDir()
 	argsFile := filepath.Join(binDir, "args.txt")
 	fakeClaude := filepath.Join(binDir, "claude")
@@ -301,11 +296,10 @@ printf '%%s\n' '{"result":"ok","session_id":"sess_mo","num_turns":1,"total_cost_
 	if !strings.Contains(string(args), "opus") {
 		t.Error("expected model override 'opus' in args")
 	}
-	os.RemoveAll(SessionDir(51))
-	os.RemoveAll(LogDir(51))
 }
 
 func TestInvokeClaude_BinaryError(t *testing.T) {
+	t.Chdir(t.TempDir())
 	binDir := t.TempDir()
 	fakeClaude := filepath.Join(binDir, "claude")
 	// Binary exits with error but still outputs valid JSON with partial result
