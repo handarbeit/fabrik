@@ -466,6 +466,55 @@ func TestLayoutHeightInvariant_SmallTerminal(t *testing.T) {
 	}
 }
 
+// TestLayoutHeightInvariant_NarrowWithHint verifies that the layout height invariant
+// holds on narrow terminals where the hint line would wrap without truncation.
+// The confirmQuit hint (~90 plain-text chars) is the longest variant and is the
+// most likely to wrap on narrow terminals.
+func TestLayoutHeightInvariant_NarrowWithHint(t *testing.T) {
+	redirectHistory(t)
+
+	const termHeight = 24
+
+	cases := []struct {
+		name        string
+		termWidth   int
+		focusPane   pane
+		confirmQuit bool
+		nActive     int
+		nHistory    int
+	}{
+		// Narrow terminal (40 cols) with confirmQuit hint visible — longest hint, most likely to wrap.
+		{"narrow_confirmQuit", 40, paneHistory, true, 1, 1},
+		// Narrow terminal with normal history hint visible.
+		{"narrow_normalHint", 40, paneHistory, false, 0, 1},
+		// Standard-ish narrow (60 cols) with confirmQuit.
+		{"medium_confirmQuit", 60, paneHistory, true, 1, 1},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(30, ProjectInfo{}, "")
+			now := time.Now()
+			for i := 0; i < tc.nActive; i++ {
+				m.active[fmt.Sprintf("issue-%d", i+1)] = &activeJob{StageName: "Research", StartedAt: now}
+			}
+			for i := 0; i < tc.nHistory; i++ {
+				m.history = append(m.history, HistoryEntry{IssueNumber: i + 1, StageName: "Research", Success: true, Completed: true})
+			}
+			m.focusPane = tc.focusPane
+			m.confirmQuit = tc.confirmQuit
+
+			next, _ := m.Update(tea.WindowSizeMsg{Width: tc.termWidth, Height: termHeight})
+			m = next.(Model)
+
+			got := lipgloss.Height(m.View())
+			if got != termHeight {
+				t.Errorf("%s: View() height = %d, want %d (footer pushed off screen)", tc.name, got, termHeight)
+			}
+		})
+	}
+}
+
 // TestViewHeader_TimerAlwaysVisible verifies that when the status message is
 // long enough to trigger truncation, the timer string still appears in the output.
 func TestViewHeader_TimerAlwaysVisible(t *testing.T) {
