@@ -501,29 +501,14 @@ func (e *Engine) poll(ctx context.Context) error {
 	// incorrectly pass shallow-label items (labels(first:5) only) to itemNeedsWork,
 	// which could miss stage-complete labels beyond position 5 and re-dispatch
 	// already-completed items on every poll after their updatedAt settles.
-	debugLog("dispatch-loop-start", map[string]interface{}{
-		"candidates": len(deepFetchCandidates),
-		"defaultRepo": e.defaultRepo(),
-	})
-	for idx, item := range deepFetchCandidates {
+	for _, item := range deepFetchCandidates {
 		item := item
-		iKeyCheck := issueKey(item, e.defaultRepo())
-		debugLog("dispatch-candidate", map[string]interface{}{
-			"idx": idx, "number": item.Number, "repo": item.Repo,
-			"status": item.Status, "key": iKeyCheck,
-		})
 		// Full check including comments (populated by deep fetch above).
 		if !e.itemNeedsWork(item) {
-			debugLog("dispatch-skip-no-work", map[string]interface{}{
-				"number": item.Number, "key": iKeyCheck,
-			})
 			continue
 		}
 		// Skip issues already being processed by a previous poll cycle's worker
-		if _, ok := e.inFlight.Load(iKeyCheck); ok {
-			debugLog("dispatch-skip-inflight", map[string]interface{}{
-				"number": item.Number, "key": iKeyCheck,
-			})
+		if _, ok := e.inFlight.Load(issueKey(item, e.defaultRepo())); ok {
 			continue
 		}
 		// Acquire semaphore slot, but abort if the context is cancelled so we
