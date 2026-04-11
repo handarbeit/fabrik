@@ -680,6 +680,62 @@ func TestYoloCatchUpSkipsAdvanceOnMergeError(t *testing.T) {
 	}
 }
 
+// TestYoloCatchUpSkipsAdvanceOnUnprocessedComment verifies that when an item has
+// unprocessed comments, the catch-up loop does NOT advance the item — leaving it
+// for the dispatch loop to handle via processItem (which processes comments first).
+func TestYoloCatchUpSkipsAdvanceOnUnprocessedComment(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{
+						Number: 42,
+						ItemID: "PVTI_42",
+						Status: "Implement",
+						Repo:   "owner/repo",
+						Labels: []string{"stage:Implement:complete", "fabrik:yolo"},
+					},
+				},
+			}, nil
+		},
+		fetchStatusFieldFn: func(projectID string) (*gh.StatusField, error) {
+			return &gh.StatusField{
+				FieldID: "FIELD_1",
+				Options: map[string]string{
+					"Research":  "OPT_Research",
+					"Plan":      "OPT_Plan",
+					"Implement": "OPT_Implement",
+					"Validate":  "OPT_Validate",
+					"Done":      "OPT_Done",
+				},
+			}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			item.Comments = []gh.Comment{{
+				ID:        "C1",
+				Body:      "Please reconsider the approach",
+				Reactions: nil,
+			}}
+			return nil
+		},
+	}
+	eng := testEngineWithStages(client, testStagesWithValidate())
+
+	ctx := context.Background()
+	if err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	client.mu.Lock()
+	advances := len(client.updateStatusCalls)
+	client.mu.Unlock()
+
+	if advances != 0 {
+		t.Errorf("expected no UpdateProjectItemStatus when unprocessed comment exists, got %d", advances)
+	}
+}
+
 // TestArchiveDoneCompleteItems_SkipsNonCleanupStages verifies that items in
 // non-cleanup stages are not archived even if they have complete labels.
 func TestArchiveDoneCompleteItems_SkipsNonCleanupStages(t *testing.T) {
