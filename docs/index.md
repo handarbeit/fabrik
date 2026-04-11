@@ -428,6 +428,13 @@ echo '.env' >> .gitignore
           <div class="link-desc">Engine internals, markers, context files, and comment processing</div>
         </div>
       </a>
+      <a href="{{ '/troubleshooting' | relative_url }}" class="link-card">
+        <span class="link-icon">🔧</span>
+        <div>
+          <div class="link-title">Troubleshooting</div>
+          <div class="link-desc">Common issues and how to resolve them</div>
+        </div>
+      </a>
       <a href="https://github.com/shadoworg/fabrik/issues/new" class="link-card" target="_blank" rel="noopener">
         <span class="link-icon">🐛</span>
         <div>
