@@ -71,6 +71,7 @@ Include the ENTIRE body — not just changed sections.
 
 When all questions are resolved and the spec is clear and complete, signal completion:
 - Output `FABRIK_STAGE_COMPLETE` on its own line
+- Once you emit this marker, stop immediately. Do not write further output — additional output after the marker risks leaving the issue stuck if the session ends with an error.
 - The user will review and manually advance to Research
 
 Do not signal completion if open questions remain or if the spec still has ambiguities that would impede the Research stage.
