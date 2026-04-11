@@ -149,28 +149,28 @@ func mergeTabSelection(newTabs []stageTab, oldTabs []stageTab, oldIdx int) int {
 
 // issueLogDir returns the log directory for an issue, namespaced by repo when
 // owner and repo are non-empty (multi-repo mode).
-//   - single-repo: ~/.fabrik/logs/issue-N/
-//   - multi-repo:  ~/.fabrik/logs/<owner>-<repo>/issue-N/
+//   - single-repo: <cwd>/.fabrik/logs/issue-N/
+//   - multi-repo:  <cwd>/.fabrik/logs/<owner>-<repo>/issue-N/
 func issueLogDir(owner, repo string, issueNumber int) string {
-	home, _ := os.UserHomeDir()
+	cwd, _ := os.Getwd()
 	issuePart := fmt.Sprintf("issue-%d", issueNumber)
 	if owner == "" || repo == "" {
-		return filepath.Join(home, ".fabrik", "logs", issuePart)
+		return filepath.Join(cwd, ".fabrik", "logs", issuePart)
 	}
-	return filepath.Join(home, ".fabrik", "logs", owner+"-"+repo, issuePart)
+	return filepath.Join(cwd, ".fabrik", "logs", owner+"-"+repo, issuePart)
 }
 
 // sessionDir returns the session directory for an issue, namespaced by repo when
 // owner and repo are non-empty (multi-repo mode).
-//   - single-repo: ~/.fabrik/sessions/issue-N/
-//   - multi-repo:  ~/.fabrik/sessions/<owner>-<repo>/issue-N/
+//   - single-repo: <cwd>/.fabrik/sessions/issue-N/
+//   - multi-repo:  <cwd>/.fabrik/sessions/<owner>-<repo>/issue-N/
 func sessionDir(owner, repo string, issueNumber int) string {
-	home, _ := os.UserHomeDir()
+	cwd, _ := os.Getwd()
 	issuePart := fmt.Sprintf("issue-%d", issueNumber)
 	if owner == "" || repo == "" {
-		return filepath.Join(home, ".fabrik", "sessions", issuePart)
+		return filepath.Join(cwd, ".fabrik", "sessions", issuePart)
 	}
-	return filepath.Join(home, ".fabrik", "sessions", owner+"-"+repo, issuePart)
+	return filepath.Join(cwd, ".fabrik", "sessions", owner+"-"+repo, issuePart)
 }
 
 // worktreeDir returns .fabrik/worktrees/issue-N relative to CWD.

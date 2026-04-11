@@ -163,8 +163,16 @@ func TestSessionFile(t *testing.T) {
 }
 
 func TestReadSessionID_FileAbsent(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	tmp := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(orig) })
+
 	got := ReadSessionID("", 999, "Research")
 	if got != "" {
 		t.Errorf("expected empty string for absent file, got %q", got)
@@ -172,9 +180,17 @@ func TestReadSessionID_FileAbsent(t *testing.T) {
 }
 
 func TestReadSessionID_FileEmpty(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	dir := filepath.Join(home, ".fabrik", "sessions", "issue-1")
+	tmp := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(orig) })
+
+	dir := filepath.Join(tmp, ".fabrik", "sessions", "issue-1")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -188,9 +204,17 @@ func TestReadSessionID_FileEmpty(t *testing.T) {
 }
 
 func TestReadSessionID_ValidID(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	dir := filepath.Join(home, ".fabrik", "sessions", "issue-42")
+	tmp := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(orig) })
+
+	dir := filepath.Join(tmp, ".fabrik", "sessions", "issue-42")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -205,9 +229,17 @@ func TestReadSessionID_ValidID(t *testing.T) {
 }
 
 func TestReadSessionID_WhitespacePaddedID(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	dir := filepath.Join(home, ".fabrik", "sessions", "issue-7")
+	tmp := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(orig) })
+
+	dir := filepath.Join(tmp, ".fabrik", "sessions", "issue-7")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -222,9 +254,17 @@ func TestReadSessionID_WhitespacePaddedID(t *testing.T) {
 }
 
 func TestReadSessionID_MultiRepo(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	dir := filepath.Join(home, ".fabrik", "sessions", "myorg-myrepo", "issue-55")
+	tmp := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(orig) })
+
+	dir := filepath.Join(tmp, ".fabrik", "sessions", "myorg-myrepo", "issue-55")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}

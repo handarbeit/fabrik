@@ -8,6 +8,8 @@
 .fabrik/repos/
 .fabrik/fabrik.lock
 .fabrik/debug/
+.fabrik/sessions/
+.fabrik/logs/
 .fabrik/history.json
 */.fabrik/history.json
 .fabrik/repo.git/

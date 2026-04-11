@@ -13,7 +13,25 @@ import (
 	"github.com/verveguy/fabrik/stages"
 )
 
+// chdirTempDir changes the process working directory to a fresh temp directory
+// for the duration of the test, restoring it on cleanup. This isolates session
+// and log file creation (which use os.Getwd()) from the test binary's real CWD.
+// Note: os.Chdir is process-wide — tests using this must not call t.Parallel().
+func chdirTempDir(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { os.Chdir(orig) })
+}
+
 func TestInvokeClaude_JSONOutput(t *testing.T) {
+	chdirTempDir(t)
 	binDir := t.TempDir()
 	fakeClaude := filepath.Join(binDir, "claude")
 	// Output a valid JSON envelope as --output-format json would.
@@ -39,8 +57,6 @@ printf '%s\n' '{"result":"stage output\nFABRIK_STAGE_COMPLETE\n","session_id":"s
 		Completion: stages.CompletionCriteria{Type: "claude"},
 	}
 	issue := gh.ProjectItem{Number: 77, Title: "Test JSON"}
-	defer os.RemoveAll(SessionDir(77))
-	defer os.RemoveAll(LogDir(77))
 
 	output, completed, stats, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
 	if err != nil {
@@ -81,6 +97,7 @@ func TestRealClaudeInvoker_ImplementsInterface(t *testing.T) {
 }
 
 func TestRealClaudeInvoker_Invoke(t *testing.T) {
+	chdirTempDir(t)
 	binDir := t.TempDir()
 	fakeClaude := filepath.Join(binDir, "claude")
 	script := `#!/bin/sh
@@ -110,11 +127,10 @@ printf '%s\n' '{"result":"real invoker output","session_id":"sess_ri","num_turns
 	if !strings.Contains(output, "real invoker output") {
 		t.Errorf("output = %q", output)
 	}
-	os.RemoveAll(SessionDir(80))
-	os.RemoveAll(LogDir(80))
 }
 
 func TestInvokeClaude_FakeBinary(t *testing.T) {
+	chdirTempDir(t)
 	// Create a fake claude binary that outputs a valid JSON envelope
 	binDir := t.TempDir()
 	fakeClaude := filepath.Join(binDir, "claude")
@@ -164,12 +180,10 @@ printf '%s\n' '{"result":"Claude output for test\nFABRIK_STAGE_COMPLETE\n","sess
 	if string(data) != "sess_test123" {
 		t.Errorf("session = %q", string(data))
 	}
-	// Cleanup
-	os.RemoveAll(SessionDir(42))
-	os.RemoveAll(LogDir(42))
 }
 
 func TestInvokeClaude_WithResume(t *testing.T) {
+	chdirTempDir(t)
 	binDir := t.TempDir()
 	argsFile := filepath.Join(binDir, "args.txt")
 	fakeClaude := filepath.Join(binDir, "claude")
@@ -198,8 +212,6 @@ printf '%%s\n' '{"result":"resume output","session_id":"sess_resume","num_turns"
 	sessDir := SessionDir(99)
 	os.MkdirAll(sessDir, 0700)
 	os.WriteFile(sessionFile(99, "Plan"), []byte("sess_existing"), 0600)
-	defer os.RemoveAll(sessDir)
-	defer os.RemoveAll(LogDir(99))
 
 	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, true, workDir, "")
 	if err != nil {
@@ -218,6 +230,7 @@ printf '%%s\n' '{"result":"resume output","session_id":"sess_resume","num_turns"
 }
 
 func TestInvokeClaude_WithModelAndTools(t *testing.T) {
+	chdirTempDir(t)
 	binDir := t.TempDir()
 	argsFile := filepath.Join(binDir, "args.txt")
 	fakeClaude := filepath.Join(binDir, "claude")
@@ -263,11 +276,10 @@ printf '%%s\n' '{"result":"ok","session_id":"sess_mt","num_turns":1,"total_cost_
 	if !strings.Contains(argsStr, "--allowedTools") {
 		t.Error("expected --allowedTools in args")
 	}
-	os.RemoveAll(SessionDir(50))
-	os.RemoveAll(LogDir(50))
 }
 
 func TestInvokeClaude_WithModelOverride(t *testing.T) {
+	chdirTempDir(t)
 	binDir := t.TempDir()
 	argsFile := filepath.Join(binDir, "args.txt")
 	fakeClaude := filepath.Join(binDir, "claude")
@@ -301,11 +313,10 @@ printf '%%s\n' '{"result":"ok","session_id":"sess_mo","num_turns":1,"total_cost_
 	if !strings.Contains(string(args), "opus") {
 		t.Error("expected model override 'opus' in args")
 	}
-	os.RemoveAll(SessionDir(51))
-	os.RemoveAll(LogDir(51))
 }
 
 func TestInvokeClaude_BinaryError(t *testing.T) {
+	chdirTempDir(t)
 	binDir := t.TempDir()
 	fakeClaude := filepath.Join(binDir, "claude")
 	// Binary exits with error but still outputs valid JSON with partial result
@@ -337,11 +348,10 @@ exit 1
 	if !strings.Contains(output, "partial output") {
 		t.Errorf("expected partial output, got: %q", output)
 	}
-	os.RemoveAll(SessionDir(60))
-	os.RemoveAll(LogDir(60))
 }
 
 func TestInvokeClaude_MarkerOnNonZeroExit(t *testing.T) {
+	chdirTempDir(t)
 	// REQ-6: when Claude exits non-zero but FABRIK_STAGE_COMPLETE is in output,
 	// InvokeClaude must return completed=true AND a non-nil error.
 	binDir := t.TempDir()
@@ -374,11 +384,10 @@ exit 1
 	if !completed {
 		t.Errorf("expected completed=true when marker present in output, got false; output=%q", output)
 	}
-	os.RemoveAll(SessionDir(61))
-	os.RemoveAll(LogDir(61))
 }
 
 func TestInvokeClaude_MarkerOnCancelledCtx(t *testing.T) {
+	chdirTempDir(t)
 	// REQ-3/REQ-6: when context is cancelled, FABRIK_STAGE_COMPLETE in output must
 	// NOT cause completed=true — the engine is shutting down.
 	binDir := t.TempDir()
