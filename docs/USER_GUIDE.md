@@ -166,6 +166,18 @@ runs `fabrik upgrade` to refresh plugin skills, and re-execs itself.
 ./fabrik --auto-upgrade --owner your-org --repo your-repo --project 1 --user you
 ```
 
+> **Upgrading from v0.0.28 or earlier?** Before v0.0.29, `--auto-upgrade` fetched
+> from the private `tenaciousvc/fabrik` repo. The v0.0.29 release switched the
+> upgrade source to the public `shadoworg/fabrik` repo — but this change cannot
+> self-apply: a binary built before v0.0.29 will never auto-receive it. If you are
+> running an older binary, upgrade once manually:
+> ```bash
+> gh release download --repo shadoworg/fabrik \
+>   --pattern "fabrik_*_$(uname -s | tr A-Z a-z)_$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/').tar.gz" \
+>   -O - | tar xz
+> ```
+> After that, `--auto-upgrade` will keep you current automatically.
+
 ---
 
 ## 2. Configuration Reference
@@ -215,9 +227,9 @@ user: your-github-username
 # Per-stage auto_advance: in stage YAML can override this setting per-stage.
 # yolo: false
 
-# Self-upgrade from origin/main when idle. After 2 consecutive idle polls, Fabrik
-# checks for new commits, rebuilds the binary, runs fabrik upgrade, and re-execs.
-# Intended for the self-evolving workflow where Fabrik develops itself.
+# When idle, check shadoworg/fabrik GitHub Releases for a newer version. After 2
+# consecutive idle polls, Fabrik downloads the new binary, runs fabrik upgrade,
+# and re-execs. Requires internet access to the GitHub Releases API.
 # auto_upgrade: false
 
 # Disable the interactive TUI dashboard (enabled by default when a real terminal is detected).
@@ -265,7 +277,7 @@ FABRIK_USER=my-personal-username
 | `--token` | GitHub API token | `$GITHUB_TOKEN` |
 | `--stages` | Directory containing stage YAML configs | `./.fabrik/stages` |
 | `--yolo` | Auto-advance issues through stages without human approval | `false` |
-| `--auto-upgrade` | When idle, self-upgrade from origin/main | `false` |
+| `--auto-upgrade` | When idle, self-upgrade from shadoworg/fabrik GitHub Releases | `false` |
 | `--notui` | Disable the interactive TUI dashboard | TUI on by default |
 | `--plugin-dir` | Path to Fabrik plugin directory (overrides `.fabrik/plugin/`) | auto-detected |
 | `--poll` | Poll interval in seconds | `30` |
