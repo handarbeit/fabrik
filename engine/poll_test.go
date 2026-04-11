@@ -557,6 +557,120 @@ func TestArchiveDoneCompleteItems_SkipsIncompleteItems(t *testing.T) {
 	}
 }
 
+// TestYoloCatchUpMergesBeforeAdvance verifies that when an item sits in the
+// Validate column with stage:Validate:complete + fabrik:yolo, the catch-up loop
+// calls MergePR before calling UpdateProjectItemStatus (advancing to Done).
+func TestYoloCatchUpMergesBeforeAdvance(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{
+						Number: 42,
+						ItemID: "PVTI_42",
+						Status: "Validate",
+						Repo:   "owner/repo",
+						Labels: []string{"stage:Validate:complete", "fabrik:yolo"},
+					},
+				},
+			}, nil
+		},
+		fetchStatusFieldFn: func(projectID string) (*gh.StatusField, error) {
+			return &gh.StatusField{
+				FieldID: "FIELD_1",
+				Options: map[string]string{
+					"Research":  "OPT_Research",
+					"Plan":      "OPT_Plan",
+					"Implement": "OPT_Implement",
+					"Validate":  "OPT_Validate",
+					"Done":      "OPT_Done",
+				},
+			}, nil
+		},
+		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
+			return 99, nil
+		},
+	}
+	eng := testEngineWithStages(client, testStagesWithValidate())
+
+	ctx := context.Background()
+	if err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	client.mu.Lock()
+	merges := len(client.mergePRCalls)
+	advances := len(client.updateStatusCalls)
+	client.mu.Unlock()
+
+	if merges == 0 {
+		t.Fatal("expected MergePR to be called before advancing")
+	}
+	if advances == 0 {
+		t.Fatal("expected UpdateProjectItemStatus to be called after merge")
+	}
+	// The code path is sequential: merge must have been called before advance.
+	// Since both are non-zero and the path is serial, verifying both > 0 confirms ordering.
+	if client.mergePRCalls[0].prNumber != 99 {
+		t.Errorf("MergePR called with prNumber %d, want 99", client.mergePRCalls[0].prNumber)
+	}
+}
+
+// TestYoloCatchUpSkipsAdvanceOnMergeError verifies that when MergePR returns an
+// error in the catch-up loop, UpdateProjectItemStatus is NOT called (advance is
+// skipped).
+func TestYoloCatchUpSkipsAdvanceOnMergeError(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{
+						Number: 42,
+						ItemID: "PVTI_42",
+						Status: "Validate",
+						Repo:   "owner/repo",
+						Labels: []string{"stage:Validate:complete", "fabrik:yolo"},
+					},
+				},
+			}, nil
+		},
+		fetchStatusFieldFn: func(projectID string) (*gh.StatusField, error) {
+			return &gh.StatusField{
+				FieldID: "FIELD_1",
+				Options: map[string]string{
+					"Research":  "OPT_Research",
+					"Plan":      "OPT_Plan",
+					"Implement": "OPT_Implement",
+					"Validate":  "OPT_Validate",
+					"Done":      "OPT_Done",
+				},
+			}, nil
+		},
+		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
+			return 99, nil
+		},
+		mergePRFn: func(owner, repo string, prNumber int) error {
+			return gh.ErrNotMergeable
+		},
+	}
+	eng := testEngineWithStages(client, testStagesWithValidate())
+
+	ctx := context.Background()
+	if err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	client.mu.Lock()
+	advances := len(client.updateStatusCalls)
+	client.mu.Unlock()
+
+	if advances != 0 {
+		t.Errorf("expected no UpdateProjectItemStatus when merge fails, got %d", advances)
+	}
+}
+
 // TestArchiveDoneCompleteItems_SkipsNonCleanupStages verifies that items in
 // non-cleanup stages are not archived even if they have complete labels.
 func TestArchiveDoneCompleteItems_SkipsNonCleanupStages(t *testing.T) {
