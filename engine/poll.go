@@ -467,11 +467,11 @@ func (e *Engine) poll(ctx context.Context) error {
 		e.logf(0, "poll", "deep-fetched details for %d item(s)\n", deepFetched)
 	}
 
-	// Catch-up: auto-advance items that have fabrik:yolo + stage complete
-	// but are still sitting in the completed stage's column.
+	// Catch-up: auto-advance items that have fabrik:yolo or fabrik:cruise +
+	// stage complete but are still sitting in the completed stage's column.
 	// Operates only on deepFetchCandidates so the full label set is available.
 	for _, item := range deepFetchCandidates {
-		if !e.cfg.Yolo && !hasYoloLabel(item) {
+		if !e.cfg.Yolo && !hasYoloLabel(item) && !hasCruiseLabel(item) {
 			continue
 		}
 		isPaused := false
@@ -488,8 +488,9 @@ func (e *Engine) poll(ctx context.Context) error {
 		if stage == nil || stage.CleanupWorktree {
 			continue
 		}
-		isYolo := hasYoloLabel(item)
-		if !isYolo && stage.AutoAdvance != nil && !*stage.AutoAdvance {
+		// cruise and yolo both override auto_advance:false on individual stages.
+		isAutoAdvance := hasYoloLabel(item) || hasCruiseLabel(item)
+		if !isAutoAdvance && stage.AutoAdvance != nil && !*stage.AutoAdvance {
 			continue
 		}
 		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
@@ -508,16 +509,21 @@ func (e *Engine) poll(ctx context.Context) error {
 				continue // awaiting reviewers; checkReviewGate handled label
 			}
 			if stage.Name == "Validate" {
+				// cruise stops here: skip merge and advancement, leave for human.
+				isCruiseOnly := !e.cfg.Yolo && !hasYoloLabel(item) && hasCruiseLabel(item)
+				if isCruiseOnly {
+					continue
+				}
 				if err := e.attemptMergeOnValidate(item); err != nil {
 					e.logf(item.Number, "warn", "PR not merged during catch-up: %v\n", err)
 					continue
 				}
 			}
 			if newComments := e.findNewComments(item); len(newComments) > 0 {
-				e.logf(item.Number, "advance", "yolo catch-up: skipping advance for stage %q — %d unprocessed comment(s) pending\n", stage.Name, len(newComments))
+				e.logf(item.Number, "advance", "auto-advance catch-up: skipping advance for stage %q — %d unprocessed comment(s) pending\n", stage.Name, len(newComments))
 				continue
 			}
-			e.logf(item.Number, "advance", "yolo catch-up: stage %q already complete, advancing\n", stage.Name)
+			e.logf(item.Number, "advance", "auto-advance catch-up: stage %q already complete, advancing\n", stage.Name)
 			if err := e.advanceToNextStage(board, item, stage); err != nil {
 				e.logf(item.Number, "warn", "could not advance: %v\n", err)
 			}
