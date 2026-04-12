@@ -3,7 +3,7 @@
 ## Features
 
 - **`fabrik:cruise` label mode** (#325) — Auto-advances issues through all pipeline stages like `fabrik:yolo`, but stops at Validate without auto-merging the PR or moving to Done. The human takes over for the final step.
-- **`disable_adaptive_thinking` and `effort_level` stage config** (#321) — New stage YAML fields to control Claude Code's thinking budget. `disable_adaptive_thinking` (default: true) prevents auto-reduced thinking; `effort_level` accepts `low`, `medium`, `high`, `max` (default: `high`).
+- **`disable_adaptive_thinking` and `effort_level` stage config** (#321) — New stage YAML fields to control Claude Code's thinking budget. Adaptive thinking is now **disabled by default** for all stages — Claude Code no longer silently reduces its thinking budget mid-session. Set `disable_adaptive_thinking: false` in a stage YAML to re-enable it. `effort_level` accepts `low`, `medium`, `high`, `max` (default: `high`).
 - **Rate limit display in TUI footer** (#319) — REST and GraphQL rate limit stats are now shown in the TUI status bar.
 
 ## Fixes
