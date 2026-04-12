@@ -18,6 +18,18 @@ func hasYoloLabel(item gh.ProjectItem) bool {
 	return false
 }
 
+// hasCruiseLabel reports whether item has the "fabrik:cruise" label.
+// cruise auto-advances through all stages but stops before auto-merging
+// the PR or advancing to Done at Validate completion.
+func hasCruiseLabel(item gh.ProjectItem) bool {
+	for _, l := range item.Labels {
+		if l == "fabrik:cruise" {
+			return true
+		}
+	}
+	return false
+}
+
 // hasUnrestrictedLabel reports whether item has the "fabrik:unrestricted" label,
 // which tells the engine to pass --dangerously-skip-permissions to Claude Code.
 func hasUnrestrictedLabel(item gh.ProjectItem) bool {
@@ -48,6 +60,11 @@ func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem
 	// stage.AutoAdvance overrides advancement only — not the merge decision.
 	yoloActive := e.cfg.Yolo || hasYoloLabel(item)
 
+	// cruiseActive mirrors yoloActive for advancement but skips the two
+	// end-of-Validate actions (merge + Done advancement). When yolo is active,
+	// cruise is suppressed so yolo always takes precedence.
+	cruiseActive := !yoloActive && hasCruiseLabel(item)
+
 	// Attempt PR merge after Validate when yolo is active.
 	// This runs BEFORE adding the completion label so that on merge failure the
 	// engine can retry Validate (itemNeedsWork skips stages with a complete label).
@@ -64,11 +81,17 @@ func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem
 		e.logf(item.Number, "warn", "could not add completion label: %v\n", err)
 	}
 
-	// fabrik:yolo label overrides stage.AutoAdvance — if the user
-	// explicitly labelled the issue for yolo, respect that over YAML config.
-	shouldAdvance := yoloActive
-	if stage.AutoAdvance != nil && !hasYoloLabel(item) {
+	// fabrik:yolo or fabrik:cruise label overrides stage.AutoAdvance — if the user
+	// explicitly labelled the issue, respect that over YAML config.
+	shouldAdvance := yoloActive || cruiseActive
+	if stage.AutoAdvance != nil && !hasYoloLabel(item) && !hasCruiseLabel(item) {
 		shouldAdvance = *stage.AutoAdvance
+	}
+
+	// cruise stops at Validate: do not advance to Done or trigger any further
+	// stage movement. The PR merge was already skipped (yoloActive is false).
+	if cruiseActive && stage.Name == "Validate" {
+		shouldAdvance = false
 	}
 
 	if shouldAdvance {
