@@ -74,7 +74,8 @@ Then initialize:
 ./fabrik init
 # Creates:
 #   .fabrik/stages/       — stage YAML configs
-#   .fabrik/plugin/       — Claude Code plugin
+#   .fabrik/plugin/       — built-in Claude Code plugin (skills for default stages)
+#   .fabrik/user-plugin/  — user plugin for custom stage skills (survives upgrades)
 #   .fabrik/config.yaml   — project config template (edit this)
 # Updates:
 #   .git/info/exclude     — adds .fabrik/repos/, .fabrik/worktrees/, .fabrik/debug/,
@@ -116,9 +117,9 @@ FABRIK_TOKEN=ghp_...
 
 ### Create a Project Board
 
-Create a GitHub Project (v2) for your repository. Add board columns that correspond to
-your stage names -- the column name must match the `name` field in each stage YAML file
-exactly (case-sensitive). The default pipeline uses:
+Create a GitHub Project (v2) for your repository. Fabrik **auto-creates missing board columns** on startup, so you only need to create the project itself — columns are added automatically to match your stage YAML configs.
+
+If you prefer to set up columns manually, the column name must match the `name` field in each stage YAML file exactly (case-sensitive). The default pipeline uses:
 
 `Backlog` -> `Specify` -> `Research` -> `Plan` -> `Implement` -> `Review` -> `Validate` -> `Done`
 
@@ -1203,8 +1204,18 @@ Alternatively, enable auto-update via the plugin UI: `/plugin` → Marketplaces 
 ### How Skills Work
 
 Each stage references a **skill** -- a markdown file that contains detailed methodology
-for how Claude should approach the stage. Skills are packaged as a Claude Code plugin
-in `.fabrik/plugin/` and loaded via `--plugin-dir` on each Claude invocation.
+for how Claude should approach the stage. Skills are packaged as Claude Code plugins
+and loaded via `--plugin-dir` on each Claude invocation.
+
+Fabrik auto-discovers two plugin directories:
+- **`.fabrik/plugin/`** — built-in skills for the default pipeline stages. Managed by
+  `fabrik init` and `fabrik upgrade`; overwritten on upgrade.
+- **`.fabrik/user-plugin/`** — user-created skills for custom stages. Created by
+  `fabrik init`; **survives upgrades**. Put custom stage skills here.
+
+Both directories are passed to Claude as separate `--plugin-dir` arguments. If you use
+`--plugin-dir` or `FABRIK_PLUGIN_DIR` to override, only the specified directory is used
+(auto-discovery is disabled).
 
 The default skills are:
 
@@ -1253,6 +1264,47 @@ customizations against the new embedded version and preserve non-conflicting cha
 
 In the TUI, pressing `u` when the `[u] custom workflow` badge is shown opens the
 same three options interactively.
+
+### Custom Stages with the Workflow Assistant
+
+The built-in `fabrik-workflow-assistant` skill guides you through creating a custom
+workflow stage interactively. It collects stage parameters (name, purpose, model, PR
+behavior, etc.), validates against existing stages, and generates all three files:
+
+1. **Stage YAML** in `.fabrik/stages/<name>.yaml`
+2. **Stage skill** in `.fabrik/user-plugin/skills/<name>/SKILL.md`
+3. **Comment skill** in `.fabrik/user-plugin/skills/<name>-comment/SKILL.md`
+
+To use it, invoke the skill in a Claude Code session:
+
+```
+Follow the instructions in the fabrik-workflow-assistant skill exactly.
+```
+
+The generated stage is immediately usable — Fabrik auto-creates the matching board
+column on the next startup (see [Startup Board Validation](#startup-board-validation-and-auto-creation)).
+
+### User Plugin Directory
+
+`.fabrik/user-plugin/` is the home for custom stage skills. It has the same structure
+as the built-in plugin:
+
+```
+.fabrik/user-plugin/
+├── .claude-plugin/
+│   └── plugin.json          # Plugin manifest (created by fabrik init)
+└── skills/
+    ├── my-stage/
+    │   └── SKILL.md         # Stage skill methodology
+    └── my-stage-comment/
+        └── SKILL.md         # Comment processing skill
+```
+
+`fabrik init` bootstraps this directory with a minimal `plugin.json`. You can also
+create it manually or let the workflow assistant handle it.
+
+**Key difference from `.fabrik/plugin/`**: `fabrik upgrade` overwrites `.fabrik/plugin/`
+but never touches `.fabrik/user-plugin/`. Custom skills survive upgrades.
 
 ### Skill vs Prompt
 
@@ -1921,11 +1973,13 @@ Fabrik requires a **classic** personal access token (`ghp_...`). Fine-grained to
 2. Generate a new token with scopes: `repo`, `project`, `workflow`
 3. Update `FABRIK_TOKEN` in your `.env` file with the new `ghp_...` token
 
-### Startup Board Validation Failure
+### Startup Board Validation and Auto-Creation
 
-On every startup, Fabrik fetches the project board and compares stage names in `.fabrik/stages/*.yaml` to the column names on the board. If any non-cleanup stage is missing from the board, Fabrik exits with an error listing the mismatched names.
+On every startup, Fabrik fetches the project board and compares stage names in `.fabrik/stages/*.yaml` to the column names on the board. Missing columns are **automatically created** via the GitHub GraphQL API — no manual board setup required.
 
-To fix: ensure stage YAML `name` fields match board column names exactly (case-sensitive). If you renamed a column on the board, update the matching stage YAML. Extra board columns (with no matching stage) produce a warning but don't block startup.
+If column creation fails (e.g., insufficient token permissions), Fabrik logs a warning per failed column and falls back to an error listing the columns it could not create. The error message includes a hint to check that your token has `project` scope.
+
+Extra board columns (with no matching stage) produce a warning but don't block startup. Column name matching is case-sensitive — `Research` and `research` are different columns.
 
 ### Stage YAML Drift Warning
 
@@ -2104,11 +2158,22 @@ Fabrik then continues in poll-only mode for the remainder of the session with no
 
 For a longer-term solution that allows multiple operators to share a board without conflicting over the webhook subscription, see issue #543 (planned per-user assignee filter).
 
+### Board Column Creation Failure
+
+If Fabrik logs warnings about failing to create board columns on startup:
+- Verify your GitHub token has `project` scope (required for the `updateProjectV2FieldDefinition` mutation)
+- Check that the project URL and project number are correct in `.fabrik/config.yaml`
+- If using a fine-grained token, ensure it has "Projects" read-write permission
+
+Fabrik falls back to a hard error listing the columns it could not create.
+
 ### Plugin Not Loading
 
 If Claude doesn't seem to follow the skill instructions:
 - Verify `.fabrik/plugin/` exists (run `fabrik init` if not)
+- For custom stages, verify `.fabrik/user-plugin/` exists and contains the skill directory
 - Check that the stage YAML has `skill:` set (not `prompt:`)
+- Note: `--plugin-dir` overrides auto-discovery — if set, only the specified directory is loaded
 - For development, use `--plugin-dir` to point at your working copy
 - Verify Claude Code version supports `--plugin-dir`
 
