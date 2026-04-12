@@ -200,11 +200,22 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	sessFilePath := filepath.Join(sessDir, filepath.Base(stage.Name)+".session")
 	ld := logDirForItem(issue)
 
+	// Detect Ollama mode: label override (modelOverride starts with "ollama:") takes
+	// precedence, then fall back to the stage-level model field.
+	var ollamaModel string
+	if m, ok := parseOllamaModel(modelOverride); ok {
+		ollamaModel = m
+		modelOverride = "" // clear so --model flag is not added to claude args
+	} else if m, ok := parseOllamaModel(stage.Model); ok {
+		ollamaModel = m
+		// stage.Model is read inside buildClaudeArgs; suppress it by passing ollamaModel
+	}
+
 	prompt := buildPrompt(stage, issue, newComments)
-	args := buildClaudeArgs(stage, sessFilePath, resume, modelOverride, stage.MaxTurns, hasUnrestrictedLabel(issue), workDir)
+	args := buildClaudeArgs(stage, sessFilePath, resume, modelOverride, ollamaModel, stage.MaxTurns, hasUnrestrictedLabel(issue), workDir)
 
 	extraEnv := buildClaudeEnv(stage)
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, sessFilePath, ld, extraEnv)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, sessFilePath, ld, extraEnv, ollamaModel)
 	usage.MaxTurns = stage.MaxTurns
 	if err != nil {
 		return output, completed, usage, err
@@ -227,12 +238,21 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 	sessFilePath := filepath.Join(sessDir, filepath.Base(stage.Name)+".session")
 	ld := logDirForItem(issue)
 
+	// Detect Ollama mode: same logic as InvokeClaude.
+	var ollamaModel string
+	if m, ok := parseOllamaModel(modelOverride); ok {
+		ollamaModel = m
+		modelOverride = ""
+	} else if m, ok := parseOllamaModel(stage.Model); ok {
+		ollamaModel = m
+	}
+
 	prompt := buildCommentReviewPrompt(stage, issue, comments)
 	limit := commentMaxTurns(stage)
-	args := buildClaudeArgs(stage, sessFilePath, true, modelOverride, limit, hasUnrestrictedLabel(issue), workDir) // resume existing session
+	args := buildClaudeArgs(stage, sessFilePath, true, modelOverride, ollamaModel, limit, hasUnrestrictedLabel(issue), workDir) // resume existing session
 
 	extraEnv := buildClaudeEnv(stage)
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", sessFilePath, ld, extraEnv)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", sessFilePath, ld, extraEnv, ollamaModel)
 	usage.MaxTurns = limit
 	return output, completed, usage, err
 }
@@ -300,7 +320,22 @@ func mergeEnv(base, overrides []string) []string {
 	return append(result, overrides...)
 }
 
-func buildClaudeArgs(stage *stages.Stage, sessFilePath string, resume bool, modelOverride string, maxTurns int, unrestricted bool, workDir string) []string {
+// ollamaPrefix is the label/model prefix that activates Ollama mode.
+const ollamaPrefix = "ollama:"
+
+// parseOllamaModel extracts the model name from an "ollama:<model>" string.
+// Returns ("", false) if the string does not have the ollama: prefix.
+func parseOllamaModel(s string) (string, bool) {
+	if !strings.HasPrefix(s, ollamaPrefix) {
+		return "", false
+	}
+	return strings.TrimPrefix(s, ollamaPrefix), true
+}
+
+// buildClaudeArgs builds the argument list for the claude (or ollama-wrapped claude) CLI.
+// ollamaModel, when non-empty, indicates Ollama mode is active — the --model flag is
+// suppressed because the model is passed to the ollama wrapper instead.
+func buildClaudeArgs(stage *stages.Stage, sessFilePath string, resume bool, modelOverride string, ollamaModel string, maxTurns int, unrestricted bool, workDir string) []string {
 	args := []string{
 		"--output-format", "stream-json",
 		"--verbose",
@@ -320,11 +355,15 @@ func buildClaudeArgs(stage *stages.Stage, sessFilePath string, resume bool, mode
 		}
 	}
 
-	// Model override from labels takes precedence over stage config
-	if modelOverride != "" {
-		args = append(args, "--model", modelOverride)
-	} else if stage.Model != "" {
-		args = append(args, "--model", stage.Model)
+	// In Ollama mode the model is passed to the ollama wrapper, not to claude directly.
+	// When ollamaModel is non-empty, suppress the --model flag entirely.
+	if ollamaModel == "" {
+		// Model override from labels takes precedence over stage config
+		if modelOverride != "" {
+			args = append(args, "--model", modelOverride)
+		} else if stage.Model != "" {
+			args = append(args, "--model", stage.Model)
+		}
 	}
 
 	if maxTurns > 0 {
@@ -362,7 +401,16 @@ type claudeResponse struct {
 	} `json:"usage"`
 }
 
-func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, sessFilePath string, logDir string, extraEnv []string) (string, bool, TokenUsage, error) {
+// runClaude executes the claude CLI (or ollama launch claude in Ollama mode) with
+// the given arguments and returns the parsed output.
+// When ollamaModel is non-empty, the invocation becomes:
+//
+//	ollama launch claude --model <ollamaModel> --yes -- <args...>
+//
+// Otherwise the standard form is used:
+//
+//	claude <args...>
+func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, sessFilePath string, logDir string, extraEnv []string, ollamaModel string) (string, bool, TokenUsage, error) {
 	claudeLog(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
 
 	// Set up stderr: in TUI mode discard; in plain mode forward to os.Stderr.
@@ -397,7 +445,14 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 		}
 	}
 
-	cmd := exec.CommandContext(ctx, "claude", args...)
+	var cmd *exec.Cmd
+	if ollamaModel != "" {
+		claudeLog(issueNumber, "ollama", "ollama mode active, model: %s\n", ollamaModel)
+		ollamaArgs := append([]string{"launch", "claude", "--model", ollamaModel, "--yes", "--"}, args...)
+		cmd = exec.CommandContext(ctx, "ollama", ollamaArgs...)
+	} else {
+		cmd = exec.CommandContext(ctx, "claude", args...)
+	}
 	cmd.Dir = workDir
 	cmd.Env = mergeEnv(os.Environ(), extraEnv)
 	cmd.Stdin = strings.NewReader(prompt)

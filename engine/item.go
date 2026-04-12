@@ -890,26 +890,55 @@ func (e *Engine) unblockAwaitingInput(item gh.ProjectItem, stage *stages.Stage, 
 	e.mu.Unlock()
 }
 
-// extractModelOverride scans item labels for the first "model:<name>" label and returns <name>.
-// If multiple model labels exist, it uses the first and logs a warning.
-// Returns "" if no model label is found.
+// extractModelOverride scans item labels for model selection labels and returns
+// the effective model override string.
+//
+// Label precedence (highest first):
+//  1. "ollama:<model>" — enables Ollama mode; returns the full "ollama:<model>" string
+//     so callers can detect the prefix and switch to the ollama invocation path.
+//  2. "model:<name>"  — standard Claude model override; returns "<name>" (no prefix).
+//
+// If multiple ollama: labels are present, the first is used and a warning is logged.
+// If both ollama: and model: labels are present, ollama: wins and a warning is logged.
+// Returns "" if no model or ollama label is found.
 func (e *Engine) extractModelOverride(issueNumber int, labels []string) string {
-	const prefix = "model:"
-	var found string
+	const ollamaPrefix = "ollama:"
+	const modelPrefix = "model:"
+
+	var ollamaFound string
+	var modelFound string
+
 	for _, label := range labels {
-		if strings.HasPrefix(label, prefix) {
-			name := strings.TrimPrefix(label, prefix)
+		if strings.HasPrefix(label, ollamaPrefix) {
+			name := strings.TrimPrefix(label, ollamaPrefix)
 			if name == "" {
 				continue
 			}
-			if found == "" {
-				found = name
+			if ollamaFound == "" {
+				ollamaFound = label // return full "ollama:<model>" string
 			} else {
-				e.logf(issueNumber, "warn", "multiple model: labels found, using %q (ignoring %q)\n", found, name)
+				e.logf(issueNumber, "warn", "multiple ollama: labels found, using %q (ignoring %q)\n", ollamaFound, label)
+			}
+		} else if strings.HasPrefix(label, modelPrefix) {
+			name := strings.TrimPrefix(label, modelPrefix)
+			if name == "" {
+				continue
+			}
+			if modelFound == "" {
+				modelFound = name
+			} else {
+				e.logf(issueNumber, "warn", "multiple model: labels found, using %q (ignoring %q)\n", modelFound, name)
 			}
 		}
 	}
-	return found
+
+	if ollamaFound != "" {
+		if modelFound != "" {
+			e.logf(issueNumber, "warn", "both ollama: and model: labels found; ollama: takes precedence (%q)\n", ollamaFound)
+		}
+		return ollamaFound
+	}
+	return modelFound
 }
 
 func (e *Engine) removeEditingLabel(owner, repo string, issueNumber int) {

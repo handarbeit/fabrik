@@ -453,6 +453,14 @@ func TestExtractModelOverride(t *testing.T) {
 		{"model label among others", []string{"stage:Plan", "model:sonnet", "fabrik:locked"}, "sonnet"},
 		{"empty model name skipped", []string{"model:", "model:haiku"}, "haiku"},
 		{"multiple model labels uses first", []string{"model:opus", "model:sonnet"}, "opus"},
+		// Ollama label cases
+		{"ollama label simple model", []string{"ollama:llama3"}, "ollama:llama3"},
+		{"ollama label with colon in model name", []string{"ollama:kimi-k2.5:cloud"}, "ollama:kimi-k2.5:cloud"},
+		{"ollama label among others", []string{"stage:Plan", "ollama:llama3", "fabrik:cruise"}, "ollama:llama3"},
+		{"ollama wins over model label", []string{"model:opus", "ollama:llama3"}, "ollama:llama3"},
+		{"ollama wins over model label reversed order", []string{"ollama:kimi-k2.5:cloud", "model:sonnet"}, "ollama:kimi-k2.5:cloud"},
+		{"multiple ollama labels uses first", []string{"ollama:llama3", "ollama:mistral"}, "ollama:llama3"},
+		{"empty ollama name skipped falls through to model", []string{"ollama:", "model:haiku"}, "haiku"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -471,6 +479,23 @@ func TestExtractModelOverrideWarnsOnMultiple(t *testing.T) {
 	result := eng.extractModelOverride(0, []string{"model:opus", "model:sonnet", "model:haiku"})
 	if result != "opus" {
 		t.Errorf("expected %q, got %q", "opus", result)
+	}
+}
+
+func TestExtractModelOverrideOllamaWarnings(t *testing.T) {
+	// Verify ollama: wins over model: labels and no panic on multiple ollama: labels.
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+
+	// Multiple ollama: labels — first wins
+	result := eng.extractModelOverride(0, []string{"ollama:llama3", "ollama:mistral"})
+	if result != "ollama:llama3" {
+		t.Errorf("expected %q, got %q", "ollama:llama3", result)
+	}
+
+	// ollama: + model: — ollama wins
+	result = eng.extractModelOverride(0, []string{"model:opus", "ollama:kimi-k2.5:cloud"})
+	if result != "ollama:kimi-k2.5:cloud" {
+		t.Errorf("expected %q, got %q", "ollama:kimi-k2.5:cloud", result)
 	}
 }
 
