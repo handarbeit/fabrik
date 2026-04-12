@@ -93,23 +93,47 @@ func (e *Engine) checkStageColumnAlignment(ctx context.Context) error {
 		return nil
 	}
 
-	// Build the list of all board column names for the error report.
+	// Attempt to create missing board columns via the GitHub API.
+	var failed []*stageNameOrder
+	for _, s := range missing {
+		e.logf(0, "startup", "creating missing board column %q (order %d)...\n", s.name, s.order)
+		optionID, err := e.client.AddBoardColumn(board.ProjectID, sf.FieldID, sf.Options, s.name)
+		if err != nil {
+			e.logf(0, "startup", "warning: could not create board column %q: %v\n", s.name, err)
+			failed = append(failed, s)
+			continue
+		}
+		// Update the cached StatusField so subsequent creations include this option.
+		sf.Options[s.name] = optionID
+		e.logf(0, "startup", "created board column %q (option ID: %s)\n", s.name, optionID)
+	}
+
+	// Re-store the updated StatusField (may have new options from successful creates).
+	e.mu.Lock()
+	e.statusField = sf
+	e.mu.Unlock()
+
+	if len(failed) == 0 {
+		return nil
+	}
+
+	// Some columns could not be created — fall back to the original mismatch error.
 	allCols := make([]string, 0, len(sf.Options))
 	for colName := range sf.Options {
 		allCols = append(allCols, colName)
 	}
 	sort.Strings(allCols)
 
-	fmt.Fprintf(os.Stderr, "Fabrik startup check failed: stage/board column mismatch\n\n")
-	fmt.Fprintf(os.Stderr, "Configured stages not found on board:\n")
-	for _, s := range missing {
+	fmt.Fprintf(os.Stderr, "Fabrik startup check failed: could not create all missing board columns\n\n")
+	fmt.Fprintf(os.Stderr, "Columns that could not be created (insufficient permissions?):\n")
+	for _, s := range failed {
 		fmt.Fprintf(os.Stderr, "  - %s (order %d)\n", s.name, s.order)
 	}
 	fmt.Fprintf(os.Stderr, "\nBoard columns found:\n  %s\n\n", strings.Join(allCols, ", "))
-	fmt.Fprintf(os.Stderr, "Fix: add the missing columns to your GitHub Project board, or update\n")
-	fmt.Fprintf(os.Stderr, ".fabrik/stages/ to match your board column names (case-sensitive).\n")
+	fmt.Fprintf(os.Stderr, "Fix: ensure your GitHub token has project admin (project:write) permissions,\n")
+	fmt.Fprintf(os.Stderr, "or add the missing columns to your GitHub Project board manually.\n")
 
-	return fmt.Errorf("startup check failed: stage/board column mismatch")
+	return fmt.Errorf("startup check failed: could not create missing board columns")
 }
 
 // stageNameOrder is a helper for sorting and reporting stage names.
