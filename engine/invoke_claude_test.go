@@ -895,3 +895,76 @@ printf '%%s\n' '{"result":"done","session_id":"sess_unl","num_turns":2,"total_co
 		t.Errorf("usage.MaxTurns = %d, want 50", usage.MaxTurns)
 	}
 }
+
+func TestInvokeClaude_EnvVarsInjected(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	envFile := filepath.Join(binDir, "env.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	// Print the subprocess environment to envFile, then output a valid JSON result.
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+env > %s
+printf '%%s\n' '{"result":"env test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_env","num_turns":1,"total_cost_usd":0.0}'
+`, envFile)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	os.Setenv("PATH", binDir+":"+origPath)
+	defer os.Setenv("PATH", origPath)
+
+	workDir := t.TempDir()
+
+	t.Run("defaults inject disable+max", func(t *testing.T) {
+		stage := &stages.Stage{
+			Name:       "Research",
+			Prompt:     "Do research",
+			Completion: stages.CompletionCriteria{Type: "claude"},
+		}
+		issue := gh.ProjectItem{Number: 99, Title: "Env test"}
+		_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+		if err != nil {
+			t.Fatalf("InvokeClaude: %v", err)
+		}
+		data, err := os.ReadFile(envFile)
+		if err != nil {
+			t.Fatalf("reading env file: %v", err)
+		}
+		env := string(data)
+		if !strings.Contains(env, "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1") {
+			t.Errorf("expected CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 in env, got:\n%s", env)
+		}
+		if !strings.Contains(env, "CLAUDE_CODE_EFFORT_LEVEL=max") {
+			t.Errorf("expected CLAUDE_CODE_EFFORT_LEVEL=max in env, got:\n%s", env)
+		}
+	})
+
+	t.Run("explicit false omits disable var", func(t *testing.T) {
+		f := false
+		stage := &stages.Stage{
+			Name:                    "Research",
+			Prompt:                  "Do research",
+			Completion:              stages.CompletionCriteria{Type: "claude"},
+			DisableAdaptiveThinking: &f,
+			EffortLevel:             "low",
+		}
+		issue := gh.ProjectItem{Number: 100, Title: "Env test 2"}
+		_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+		if err != nil {
+			t.Fatalf("InvokeClaude: %v", err)
+		}
+		data, err := os.ReadFile(envFile)
+		if err != nil {
+			t.Fatalf("reading env file: %v", err)
+		}
+		env := string(data)
+		if strings.Contains(env, "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1") {
+			t.Errorf("expected CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 to be absent, got:\n%s", env)
+		}
+		if !strings.Contains(env, "CLAUDE_CODE_EFFORT_LEVEL=low") {
+			t.Errorf("expected CLAUDE_CODE_EFFORT_LEVEL=low in env, got:\n%s", env)
+		}
+	})
+}
