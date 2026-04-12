@@ -917,7 +917,7 @@ printf '%%s\n' '{"result":"env test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess
 
 	workDir := t.TempDir()
 
-	t.Run("defaults inject disable+max", func(t *testing.T) {
+	t.Run("defaults inject disable+high", func(t *testing.T) {
 		stage := &stages.Stage{
 			Name:       "Research",
 			Prompt:     "Do research",
@@ -936,8 +936,8 @@ printf '%%s\n' '{"result":"env test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess
 		if !strings.Contains(env, "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1") {
 			t.Errorf("expected CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 in env, got:\n%s", env)
 		}
-		if !strings.Contains(env, "CLAUDE_CODE_EFFORT_LEVEL=max") {
-			t.Errorf("expected CLAUDE_CODE_EFFORT_LEVEL=max in env, got:\n%s", env)
+		if !strings.Contains(env, "CLAUDE_CODE_EFFORT_LEVEL=high") {
+			t.Errorf("expected CLAUDE_CODE_EFFORT_LEVEL=high in env, got:\n%s", env)
 		}
 	})
 
