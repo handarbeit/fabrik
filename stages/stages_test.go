@@ -348,7 +348,7 @@ prompt: "Do research"
 	if s.DisableAdaptiveThinking != nil {
 		t.Errorf("DisableAdaptiveThinking = %v, want nil", s.DisableAdaptiveThinking)
 	}
-	// EffortLevel should be empty string (default = max)
+	// EffortLevel should be empty string (default = high in engine layer)
 	if s.EffortLevel != "" {
 		t.Errorf("EffortLevel = %q, want empty string", s.EffortLevel)
 	}

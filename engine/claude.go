@@ -256,17 +256,17 @@ func commentMaxTurns(stage *stages.Stage) int {
 //
 // Defaults (when fields are nil/empty):
 //   - CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 (adaptive thinking disabled)
-//   - CLAUDE_CODE_EFFORT_LEVEL=max (maximum thinking effort)
+//   - CLAUDE_CODE_EFFORT_LEVEL=high (high thinking effort)
 func buildClaudeEnv(stage *stages.Stage) []string {
 	var env []string
 	// Disable adaptive thinking by default (nil = disabled).
 	if stage.DisableAdaptiveThinking == nil || *stage.DisableAdaptiveThinking {
 		env = append(env, "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1")
 	}
-	// Set effort level; empty string = max.
+	// Set effort level; empty string = high.
 	level := stage.EffortLevel
 	if level == "" {
-		level = "max"
+		level = "high"
 	}
 	env = append(env, "CLAUDE_CODE_EFFORT_LEVEL="+level)
 	return env
