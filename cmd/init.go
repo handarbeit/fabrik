@@ -340,6 +340,13 @@ func runInit(args []string) error {
 		fmt.Printf("  plugin: %d skill files written\n", pluginWrote)
 	}
 
+	// Bootstrap the user plugin directory for custom stage skills.
+	// Creates .fabrik/user-plugin/.claude-plugin/plugin.json so Claude Code
+	// discovers it as a plugin directory. Skips if already exists.
+	if err := bootstrapUserPlugin(*force); err != nil {
+		return err
+	}
+
 	// Generate .fabrik/config.yaml template
 	if err := writeConfigTemplate(owner, project, ownerType, *userFlag, *force); err != nil {
 		return err
@@ -352,6 +359,43 @@ func runInit(args []string) error {
 
 	fmt.Println("\nFabrik is ready. Stage configs and plugin skills are in .fabrik/")
 	fmt.Println("Edit .fabrik/config.yaml with your project settings, then run fabrik.")
+	return nil
+}
+
+// bootstrapUserPlugin creates the .fabrik/user-plugin/ directory with a minimal
+// plugin.json so Claude Code discovers it as a plugin. Skips if already exists
+// (unless force is true).
+func bootstrapUserPlugin(force bool) error {
+	pluginJSON := filepath.Join(".fabrik", "user-plugin", ".claude-plugin", "plugin.json")
+	if !force {
+		if _, err := os.Stat(pluginJSON); err == nil {
+			fmt.Printf("  user-plugin: skip (already exists)\n")
+			return nil
+		}
+	}
+
+	dir := filepath.Dir(pluginJSON)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("creating %s: %w", dir, err)
+	}
+
+	content := `{
+  "name": "fabrik-user",
+  "version": "0.1.0",
+  "description": "User-created custom stage skills for the Fabrik pipeline. Skills in this directory survive Fabrik upgrades."
+}
+`
+	if err := os.WriteFile(pluginJSON, []byte(content), 0644); err != nil {
+		return fmt.Errorf("writing %s: %w", pluginJSON, err)
+	}
+
+	// Also create the skills/ directory so the structure is clear.
+	skillsDir := filepath.Join(".fabrik", "user-plugin", "skills")
+	if err := os.MkdirAll(skillsDir, 0755); err != nil {
+		return fmt.Errorf("creating %s: %w", skillsDir, err)
+	}
+
+	fmt.Printf("  user-plugin: bootstrapped at .fabrik/user-plugin/\n")
 	return nil
 }
 

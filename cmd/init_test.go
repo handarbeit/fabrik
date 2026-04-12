@@ -510,3 +510,70 @@ func TestRunInit_IdempotentDestDir(t *testing.T) {
 		t.Fatalf("second runInit: %v", err)
 	}
 }
+
+func TestRunInit_BootstrapsUserPlugin(t *testing.T) {
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(orig) //nolint
+
+	if err := runInit([]string{}); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	// Verify plugin.json exists.
+	pluginJSON := filepath.Join(dir, ".fabrik", "user-plugin", ".claude-plugin", "plugin.json")
+	data, err := os.ReadFile(pluginJSON)
+	if err != nil {
+		t.Fatalf("user-plugin plugin.json not created: %v", err)
+	}
+	if !strings.Contains(string(data), "fabrik-user") {
+		t.Errorf("plugin.json should contain 'fabrik-user', got: %s", string(data))
+	}
+
+	// Verify skills/ directory exists.
+	skillsDir := filepath.Join(dir, ".fabrik", "user-plugin", "skills")
+	fi, err := os.Stat(skillsDir)
+	if err != nil {
+		t.Fatalf("skills/ directory not created: %v", err)
+	}
+	if !fi.IsDir() {
+		t.Error("skills/ should be a directory")
+	}
+}
+
+func TestRunInit_UserPluginSkippedWhenExists(t *testing.T) {
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(orig) //nolint
+
+	// Pre-create user-plugin with custom content.
+	pluginJSON := filepath.Join(dir, ".fabrik", "user-plugin", ".claude-plugin", "plugin.json")
+	os.MkdirAll(filepath.Dir(pluginJSON), 0755)
+	os.WriteFile(pluginJSON, []byte(`{"name":"custom"}`), 0644)
+
+	if err := runInit([]string{}); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	// Verify custom content was preserved.
+	data, err := os.ReadFile(pluginJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "custom") {
+		t.Errorf("plugin.json should still have custom content, got: %s", string(data))
+	}
+}
+
