@@ -1,20 +1,25 @@
-# Fabrik v0.0.32
+# Fabrik v0.0.33
 
 ## Features
 
-- **Persistent poll log file** (#307) — All poll-level output (deep-fetch decisions, dispatch, upgrade checks, rate limit stats) is now written to `.fabrik/fabrik.log` in both TUI and non-TUI modes. Essential for post-mortem debugging.
-- **Sessions and logs moved to `<cwd>/.fabrik/`** (#313) — Session files and stage logs are now stored under the project's `.fabrik/` directory instead of `~/.fabrik/`. Each project is fully self-contained — moving the directory preserves all state. Includes one-time migration from the old location.
+- **`fabrik:cruise` label mode** (#325) — Auto-advances issues through all pipeline stages like `fabrik:yolo`, but stops at Validate without auto-merging the PR or moving to Done. The human takes over for the final step.
+- **`disable_adaptive_thinking` and `effort_level` stage config** (#321) — New stage YAML fields to control Claude Code's thinking budget. `disable_adaptive_thinking` (default: true) prevents auto-reduced thinking; `effort_level` accepts `low`, `medium`, `high`, `max` (default: `high`).
+- **Rate limit display in TUI footer** (#319) — REST and GraphQL rate limit stats are now shown in the TUI status bar.
 
 ## Fixes
 
-- **TUI: history/active hint wrapping no longer pushes footer off screen** (#305) — Menu hints are constrained to available width, preventing the status bar from being pushed off the bottom.
-- **Test suite no longer hangs** — Tests now isolate HOME and CWD to avoid interference from running Fabrik instances and stale session files. Full suite completes in ~80 seconds.
+- **Prevent parent env vars from leaking into Claude subprocess** (#328) — Claude is now invoked with a clean environment built from scratch, preventing ambient variables from affecting behavior.
+- **Yolo catch-up merges PR before advancing from Validate** (#316) — Fixed ordering bug where catch-up could advance to Done before the PR merge completed.
+- **Skip yolo catch-up advance when unprocessed comments exist** (#317) — Catch-up no longer skips pending comments when auto-advancing.
+
+## Improvements
+
+- Default `effort_level` changed from `max` to `high` to reduce token usage without sacrificing quality.
 
 ## Internal
 
-- ADR 023: all Fabrik control files live under `<cwd>/.fabrik/`.
-- Documentation updates for v0.0.31.
-- Removed accidentally committed `engine/.fabrik/fabrik.lock`.
+- Documentation updates for v0.0.32.
+- WIP stage-incomplete marker support (partial progress, not yet user-facing).
 
 ## Upgrading
 
@@ -23,7 +28,5 @@
 # Fabrik checks for new releases each poll cycle and upgrades automatically with --auto-upgrade
 
 # Or download directly
-gh release download --repo handarbeit/fabrik --pattern '*darwin_arm64*' -O - | tar xz
+gh release download --repo handarbeit/fabrik --pattern '*<os>_<arch>*' -O - | tar xz
 ```
-
-**Note:** On first startup after upgrading, sessions and logs are automatically migrated from `~/.fabrik/` to `<cwd>/.fabrik/`.
