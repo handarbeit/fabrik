@@ -259,9 +259,12 @@ func commentMaxTurns(stage *stages.Stage) int {
 //   - CLAUDE_CODE_EFFORT_LEVEL=high (high thinking effort)
 func buildClaudeEnv(stage *stages.Stage) []string {
 	var env []string
-	// Disable adaptive thinking by default (nil = disabled).
+	// Always emit CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING so mergeEnv can filter
+	// any ambient value from the parent process. Default (nil) disables it.
 	if stage.DisableAdaptiveThinking == nil || *stage.DisableAdaptiveThinking {
 		env = append(env, "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1")
+	} else {
+		env = append(env, "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=0")
 	}
 	// Set effort level; empty string = high.
 	level := stage.EffortLevel
@@ -270,6 +273,31 @@ func buildClaudeEnv(stage *stages.Stage) []string {
 	}
 	env = append(env, "CLAUDE_CODE_EFFORT_LEVEL="+level)
 	return env
+}
+
+// mergeEnv builds a subprocess environment from base (typically os.Environ()),
+// with overrides applied on top. Keys present in overrides are removed from
+// base first so that overrides take effect even when the base already contains
+// the same key (Go's os/exec does not deduplicate; first-occurrence wins on
+// POSIX systems, so appending alone is not sufficient).
+func mergeEnv(base, overrides []string) []string {
+	if len(overrides) == 0 {
+		return base
+	}
+	keys := make(map[string]bool, len(overrides))
+	for _, kv := range overrides {
+		if i := strings.IndexByte(kv, '='); i > 0 {
+			keys[kv[:i]] = true
+		}
+	}
+	result := make([]string, 0, len(base)+len(overrides))
+	for _, kv := range base {
+		if i := strings.IndexByte(kv, '='); i > 0 && keys[kv[:i]] {
+			continue // overrides provides this key
+		}
+		result = append(result, kv)
+	}
+	return append(result, overrides...)
 }
 
 func buildClaudeArgs(stage *stages.Stage, sessFilePath string, resume bool, modelOverride string, maxTurns int, unrestricted bool, workDir string) []string {
@@ -371,7 +399,7 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = workDir
-	cmd.Env = append(os.Environ(), extraEnv...)
+	cmd.Env = mergeEnv(os.Environ(), extraEnv)
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Stderr = stderrWriter
 	cmd.Stdout = stdoutWriter
