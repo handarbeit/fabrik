@@ -202,13 +202,17 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 
 	// Detect Ollama mode: label override (modelOverride starts with "ollama:") takes
 	// precedence, then fall back to the stage-level model field.
+	// Only check stage.Model when there is no label override at all (modelOverride == ""),
+	// so that a model:<name> label correctly suppresses a stage-level model: ollama:...
 	var ollamaModel string
 	if m, ok := parseOllamaModel(modelOverride); ok {
 		ollamaModel = m
 		modelOverride = "" // clear so --model flag is not added to claude args
-	} else if m, ok := parseOllamaModel(stage.Model); ok {
-		ollamaModel = m
-		// stage.Model is read inside buildClaudeArgs; suppress it by passing ollamaModel
+	} else if modelOverride == "" {
+		if m, ok := parseOllamaModel(stage.Model); ok {
+			ollamaModel = m
+			// stage.Model is read inside buildClaudeArgs; suppress it by passing ollamaModel
+		}
 	}
 
 	prompt := buildPrompt(stage, issue, newComments)
@@ -239,12 +243,15 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 	ld := logDirForItem(issue)
 
 	// Detect Ollama mode: same logic as InvokeClaude.
+	// Only fall back to stage.Model when there is no label override (modelOverride == "").
 	var ollamaModel string
 	if m, ok := parseOllamaModel(modelOverride); ok {
 		ollamaModel = m
 		modelOverride = ""
-	} else if m, ok := parseOllamaModel(stage.Model); ok {
-		ollamaModel = m
+	} else if modelOverride == "" {
+		if m, ok := parseOllamaModel(stage.Model); ok {
+			ollamaModel = m
+		}
 	}
 
 	prompt := buildCommentReviewPrompt(stage, issue, comments)

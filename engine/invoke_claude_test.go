@@ -964,6 +964,54 @@ printf '%%s\n' '{"result":"ok","session_id":"sess_ollama3","num_turns":1,"total_
 	}
 }
 
+// TestInvokeClaude_ModelLabelSuppressesStageOllamaYAML verifies that when a regular
+// model: label is present (modelOverride = "sonnet"), it suppresses the stage-level
+// "model: ollama:..." YAML — the regular claude binary is invoked, not ollama.
+func TestInvokeClaude_ModelLabelSuppressesStageOllamaYAML(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	argsFile := filepath.Join(binDir, "args.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+echo "$@" > %s
+printf '%%s\n' '{"result":"done","session_id":"sess_suppr","num_turns":1,"total_cost_usd":0.001}'
+`, argsFile)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// No fake ollama — if ollama were invoked the test would fail with "not found".
+
+	origPath := os.Getenv("PATH")
+	os.Setenv("PATH", binDir+":"+origPath)
+	defer os.Setenv("PATH", origPath)
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "Implement",
+		Prompt:     "Do it",
+		Model:      "ollama:llama3", // stage YAML has ollama — should be suppressed by label
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 303, Title: "Label suppresses stage ollama YAML"}
+
+	// modelOverride = "sonnet" simulates a model:sonnet label overriding stage YAML
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "sonnet")
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+
+	// Verify claude (not ollama) was invoked and received --model sonnet
+	args, _ := os.ReadFile(argsFile)
+	argsStr := string(args)
+	if !strings.Contains(argsStr, "--model sonnet") {
+		t.Errorf("expected --model sonnet in claude args, got: %q", argsStr)
+	}
+	if strings.Contains(argsStr, "llama3") {
+		t.Errorf("ollama model 'llama3' leaked into claude args: %q", argsStr)
+	}
+}
+
 func TestInvokeClaudeForComments_DefaultMaxTurns(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	binDir := t.TempDir()
