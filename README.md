@@ -167,6 +167,8 @@ mark_pr_ready_on_complete: true  # Optional: mark PR ready after stage completes
 auto_advance: false       # Optional: override global yolo setting for this stage
                           #   true = always auto-advance; false = never; omit = inherit yolo
 cleanup_worktree: false   # Optional: remove worktree instead of invoking Claude (terminal stages)
+disable_adaptive_thinking: true  # Optional: disable Claude Code's adaptive thinking budget (default: true)
+effort_level: high        # Optional: Claude thinking effort: low, medium, high, max (default: high)
 allowed_tools:            # Optional: restrict available tools
   - Read
   - Grep
@@ -265,6 +267,7 @@ Fabrik uses labels to track state:
 | `stage:<name>:failed` | Stage hit max retries and was paused |
 | `model:<name>` | Use this model for the issue (e.g. `model:opus` overrides the stage YAML default) |
 | `fabrik:yolo` | Force auto-advance even when `auto_advance: false`; also triggers auto-merge of the linked PR when Validate completes |
+| `fabrik:cruise` | Auto-advances through all stages like `fabrik:yolo` but stops at Validate — no auto-merge, no move to Done. If both `fabrik:cruise` and `fabrik:yolo` are present, `fabrik:yolo` takes precedence. |
 | `fabrik:unrestricted` | Pass `--dangerously-skip-permissions` to Claude Code for this issue only; use when an issue needs to write to paths not covered by `.claude/settings.json` (e.g. `.claude/skills/`). **Caution:** bypasses the permission system. |
 
 ## Multi-User
