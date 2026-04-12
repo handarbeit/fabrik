@@ -104,6 +104,9 @@ func (m *testGitHubUpgradeClient) ArchiveProjectItem(projectID, itemID string) e
 func (m *testGitHubUpgradeClient) SeedLabels(owner, repo string, stageNames []string, lockedUser string) error {
 	return nil
 }
+func (m *testGitHubUpgradeClient) AddBoardColumn(projectID, fieldID string, existingOptions map[string]string, newName string) (string, error) {
+	return "new-opt-id", nil
+}
 func (m *testGitHubUpgradeClient) RateLimitStats() (gh.RateLimitStats, gh.RateLimitStats) {
 	return gh.RateLimitStats{}, gh.RateLimitStats{}
 }

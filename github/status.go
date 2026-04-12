@@ -1,6 +1,9 @@
 package github
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+)
 
 // StatusField holds the Status field metadata for a project.
 type StatusField struct {
@@ -105,4 +108,72 @@ query($projectId: ID!) {
 	}
 
 	return sf, nil
+}
+
+// AddBoardColumn adds a new option to the Status single-select field on a
+// GitHub ProjectV2 board. The mutation replaces the entire options list, so
+// existingOptions (name→ID from a recent FetchStatusField) must be passed to
+// preserve existing columns. Returns the new option's ID.
+func (c *Client) AddBoardColumn(projectID, fieldID string, existingOptions map[string]string, newName string) (string, error) {
+	// Build the full options list: existing names (sorted for determinism) + new name.
+	names := make([]string, 0, len(existingOptions))
+	for name := range existingOptions {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	options := make([]map[string]string, 0, len(names)+1)
+	for _, name := range names {
+		options = append(options, map[string]string{"name": name})
+	}
+	options = append(options, map[string]string{"name": newName})
+
+	query := `
+mutation($projectId: ID!, $fieldId: ID!, $options: [ProjectV2SingleSelectFieldOptionInput!]!) {
+  updateProjectV2FieldDefinition(input: {
+    projectId: $projectId,
+    fieldId: $fieldId,
+    singleSelectOptions: $options
+  }) {
+    field {
+      ... on ProjectV2SingleSelectField {
+        options {
+          id
+          name
+        }
+      }
+    }
+  }
+}`
+	vars := map[string]interface{}{
+		"projectId": projectID,
+		"fieldId":   fieldID,
+		"options":   options,
+	}
+
+	var result struct {
+		Data struct {
+			UpdateProjectV2FieldDefinition struct {
+				Field struct {
+					Options []struct {
+						ID   string `json:"id"`
+						Name string `json:"name"`
+					} `json:"options"`
+				} `json:"field"`
+			} `json:"updateProjectV2FieldDefinition"`
+		} `json:"data"`
+	}
+
+	if err := c.graphqlRequest(query, vars, &result); err != nil {
+		return "", fmt.Errorf("adding board column %q: %w", newName, err)
+	}
+
+	// Find the new option's ID in the response.
+	for _, opt := range result.Data.UpdateProjectV2FieldDefinition.Field.Options {
+		if opt.Name == newName {
+			return opt.ID, nil
+		}
+	}
+
+	return "", fmt.Errorf("adding board column %q: option not found in mutation response", newName)
 }
