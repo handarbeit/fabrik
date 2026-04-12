@@ -104,6 +104,8 @@ mark_pr_ready_on_complete: true # Mark PR ready when stage completes
 auto_advance: false             # Override global yolo setting
 read_only: false                # Stash/restore worktree changes (for Specify/Research stages that don't write code)
 cleanup_worktree: false         # Remove worktree when stage completes (for Done/cleanup stages)
+disable_adaptive_thinking: true # Disable Claude Code's adaptive (auto-reduced) thinking budget. Default: true.
+effort_level: max               # Claude Code thinking effort: low, medium, high, max. Default: max.
 ```
 
 ## Important Conventions
