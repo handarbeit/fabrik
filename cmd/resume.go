@@ -129,8 +129,8 @@ func runResume(args []string) error {
 	if stage.Model != "" {
 		claudeArgs = append(claudeArgs, "--model", stage.Model)
 	}
-	if *pluginDir != "" {
-		claudeArgs = append(claudeArgs, "--plugin-dir", *pluginDir)
+	for _, dir := range resolvePluginDirs(*pluginDir) {
+		claudeArgs = append(claudeArgs, "--plugin-dir", dir)
 	}
 
 	// Change to the worktree directory before exec

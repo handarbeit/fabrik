@@ -104,8 +104,8 @@ type Model struct {
 	detailPanel            bool
 	helpPanel              bool
 
-	// plugin directory
-	pluginDir string
+	// plugin directories
+	pluginDirs []string
 
 	// wake channel — TUI sends to wake the engine poll loop
 	wakeCh chan<- struct{}
@@ -134,11 +134,11 @@ const overwriteConfirmWord = "OVERWRITE"
 // New creates an initial TUI model.
 // pollSeconds is the configured polling interval.
 // info provides project metadata displayed in the footer.
-// pluginDir is the Fabrik plugin directory passed to claude --plugin-dir (may be empty).
+// pluginDirs is the list of Fabrik plugin directories, each passed as --plugin-dir to claude (may be nil).
 // wakeCh is an optional channel the TUI sends on to wake the engine poll loop (may be nil).
 // skillsStaleCount is the number of plugin skill files that differ from embedded; 0 means up to date.
 // customWorkflow is true when the three-way plugin comparison detects operator customizations.
-func New(pollSeconds int, info ProjectInfo, pluginDir string, wakeCh chan struct{}, skillsStaleCount int, customWorkflow bool) Model {
+func New(pollSeconds int, info ProjectInfo, pluginDirs []string, wakeCh chan struct{}, skillsStaleCount int, customWorkflow bool) Model {
 	interval := time.Duration(pollSeconds) * time.Second
 	now := time.Now()
 	spinnerFrames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -155,7 +155,7 @@ func New(pollSeconds int, info ProjectInfo, pluginDir string, wakeCh chan struct
 
 	return Model{
 		focusPane: paneActive,
-		pluginDir: pluginDir,
+		pluginDirs: pluginDirs,
 		wakeCh:    wakeCh,
 		header: HeaderComponent{
 			pollInterval:     interval,
@@ -172,6 +172,19 @@ func New(pollSeconds int, info ProjectInfo, pluginDir string, wakeCh chan struct
 			now:         now,
 		},
 	}
+}
+
+// builtinPluginDir returns the path passed to upgradePluginCmd for installed-version
+// tracking. Picks the first entry in pluginDirs (which by convention is the built-in
+// .fabrik/plugin/ directory); returns "" so upgradePluginCmd falls back to its default.
+func (m Model) builtinPluginDir() string {
+	for _, d := range m.pluginDirs {
+		if strings.HasSuffix(d, "user-plugin") {
+			continue
+		}
+		return d
+	}
+	return ""
 }
 
 // Init starts the 1-second tick.
@@ -232,7 +245,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.overwriteTyped == overwriteConfirmWord {
 					m.confirmOverwrite = false
 					m.overwriteTyped = ""
-					return m, upgradePluginCmd(m.pluginDir)
+					return m, upgradePluginCmd(m.builtinPluginDir())
 				}
 				if len([]rune(m.overwriteTyped)) == len(overwriteConfirmWord) && m.overwriteTyped != overwriteConfirmWord {
 					// Full word typed but wrong — clear and cancel.
@@ -380,7 +393,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.header.SetStatusMsg(fmt.Sprintf("no worktree for #%d", entry.IssueNumber))
 					return m, nil
 				}
-				return m, openResumeInlineCmd(m.pluginDir, entry.Repo, entry.IssueNumber, entry.StageName, entry.StageModel, worktreePath)
+				return m, openResumeInlineCmd(m.pluginDirs, entry.Repo, entry.IssueNumber, entry.StageName, entry.StageModel, worktreePath)
 			}
 			return m, nil
 
@@ -443,7 +456,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "y", "Y":
 			if m.confirmUpgrade {
 				m.confirmUpgrade = false
-				return m, upgradePluginCmd(m.pluginDir)
+				return m, upgradePluginCmd(m.builtinPluginDir())
 			}
 			// Not confirming — forward to history viewport for scrolling.
 			var cmd tea.Cmd

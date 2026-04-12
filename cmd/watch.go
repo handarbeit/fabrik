@@ -106,7 +106,7 @@ func runWatch(args []string) error {
 		Repo:         *repo,
 		Client:       client,
 		PollInterval: time.Duration(pollSeconds) * time.Second,
-		PluginDir:    *pluginDir,
+		PluginDirs:   resolvePluginDirs(*pluginDir),
 	}
 
 	model := watch.NewModel(issueNumber, opts, stagesDir)

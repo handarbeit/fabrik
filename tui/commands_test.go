@@ -104,7 +104,7 @@ func TestTuiReadSessionID_NotFound(t *testing.T) {
 
 // TestUpdate_LKey_Returns_WatchCmd verifies the l key returns a non-nil tea.ExecProcess cmd.
 func TestUpdate_LKey_Returns_WatchCmd(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", nil, 0, false)
+	m := New(30, ProjectInfo{}, nil, nil, 0, false)
 	m.focusPane = paneActive
 	m.active.active[activeJobKey("", 7)] = &activeJob{IssueNumber: 7, StageName: "Research", StartedAt: time.Now()}
 	m.active.activeNumToKey[7] = activeJobKey("", 7)
@@ -119,7 +119,7 @@ func TestUpdate_LKey_Returns_WatchCmd(t *testing.T) {
 // PATH sets an error status message and returns a nil cmd (no subprocess launched).
 func TestUpdate_AKey_NoAbtop_SetsStatusMsg(t *testing.T) {
 	t.Setenv("PATH", "")
-	m := New(30, ProjectInfo{}, "", nil, 0, false)
+	m := New(30, ProjectInfo{}, nil, nil, 0, false)
 	result, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
 	if cmd != nil {
 		t.Error("expected nil cmd when abtop is not in PATH")
@@ -144,7 +144,7 @@ func TestUpdate_AKey_AbtopFound_ReturnsExecCmd(t *testing.T) {
 	}
 	t.Setenv("PATH", fmt.Sprintf("%s%c%s", dir, os.PathListSeparator, os.Getenv("PATH")))
 
-	m := New(30, ProjectInfo{}, "", nil, 0, false)
+	m := New(30, ProjectInfo{}, nil, nil, 0, false)
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
 	if cmd == nil {
 		t.Error("expected non-nil cmd (tea.ExecProcess) when abtop is found in PATH")

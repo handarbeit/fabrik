@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -604,7 +605,7 @@ func Execute() error {
 	if useTUI {
 		wakeCh := make(chan struct{}, 1)
 		eng.SetWakeCh(wakeCh)
-		return runTUI(eng, cfg.PollSeconds, buildProjectInfo(cfg, pc), cfg.PluginDir, wakeCh, skillsStaleCount, customWorkflow)
+		return runTUI(eng, cfg.PollSeconds, buildProjectInfo(cfg, pc), resolvePluginDirs(cfg.PluginDir), wakeCh, skillsStaleCount, customWorkflow)
 	}
 	if customWorkflow {
 		fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skills have local customizations — skipping auto-refresh; run 'fabrik upgrade --force' to overwrite\n")
@@ -725,11 +726,11 @@ func buildProjectInfo(cfg *Config, pc config.ProjectConfig) tui.ProjectInfo {
 // engine. The engine handles SIGINT itself; bubbletea uses WithoutSignalHandler
 // so it doesn't interfere. When the engine exits, the TUI is quit.
 // customWorkflow is true when operator customizations are detected in .fabrik/plugin/.
-func runTUI(eng *engine.Engine, pollSeconds int, info tui.ProjectInfo, pluginDir string, wakeCh chan struct{}, skillsStaleCount int, customWorkflow bool) error {
+func runTUI(eng *engine.Engine, pollSeconds int, info tui.ProjectInfo, pluginDirs []string, wakeCh chan struct{}, skillsStaleCount int, customWorkflow bool) error {
 	events := make(chan tui.Event, 256)
 	eng.SetEvents(events)
 
-	tuiModel := tui.New(pollSeconds, info, pluginDir, wakeCh, skillsStaleCount, customWorkflow)
+	tuiModel := tui.New(pollSeconds, info, pluginDirs, wakeCh, skillsStaleCount, customWorkflow)
 	p := tea.NewProgram(tuiModel, tea.WithAltScreen(), tea.WithoutSignalHandler())
 	// Register terminal cleanup so force-quit paths (SIGHUP re-exec, second
 	// SIGTERM/SIGHUP) release alt-screen before replacing or exiting the process.
@@ -781,4 +782,25 @@ func runTUI(eng *engine.Engine, pollSeconds int, info tui.ProjectInfo, pluginDir
 		_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 		return <-errCh
 	}
+}
+
+// resolvePluginDirs returns the list of plugin directories to pass to Claude.
+// If pluginDirOverride is set (from --plugin-dir flag), only that dir is used.
+// Otherwise, auto-detect .fabrik/plugin/ and .fabrik/user-plugin/.
+func resolvePluginDirs(pluginDirOverride string) []string {
+	if pluginDirOverride != "" {
+		if abs, err := filepath.Abs(pluginDirOverride); err == nil {
+			return []string{abs}
+		}
+		return []string{pluginDirOverride}
+	}
+	var dirs []string
+	for _, name := range []string{".fabrik/plugin", ".fabrik/user-plugin"} {
+		if fi, err := os.Stat(name); err == nil && fi.IsDir() {
+			if abs, err := filepath.Abs(name); err == nil {
+				dirs = append(dirs, abs)
+			}
+		}
+	}
+	return dirs
 }

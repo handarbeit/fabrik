@@ -24,7 +24,7 @@ type GitHubOptions struct {
 	Repo         string
 	Client       *gh.Client
 	PollInterval time.Duration
-	PluginDir    string
+	PluginDirs   []string
 }
 
 // issueState holds the latest GitHub-fetched state for the watched issue.
@@ -46,7 +46,7 @@ type WatchModel struct {
 	issueNumber int
 	opts        GitHubOptions
 	logDir      string
-	pluginDir   string
+	pluginDirs  []string
 
 	// UI state
 	width          int
@@ -108,7 +108,7 @@ func NewModel(issueNumber int, opts GitHubOptions, stagesDir string) WatchModel 
 		issueNumber:    issueNumber,
 		opts:           opts,
 		logDir:         logDir,
-		pluginDir:      opts.PluginDir,
+		pluginDirs:     opts.PluginDirs,
 		vp:             vp,
 		stageTabs:      tabs,
 		selectedTabIdx: selectedTabIdx,
@@ -746,8 +746,10 @@ func (m WatchModel) openClaudeInlineCmd() tea.Cmd {
 	if sessionID != "" {
 		args = append(args, "--resume", sessionID)
 	}
-	if m.pluginDir != "" {
-		args = append(args, "--plugin-dir", m.pluginDir)
+	for _, dir := range m.pluginDirs {
+		if dir != "" {
+			args = append(args, "--plugin-dir", dir)
+		}
 	}
 
 	cmd := exec.Command("claude", args...)

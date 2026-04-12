@@ -142,7 +142,7 @@ func openWatchInlineCmd(issueNumber int, repo string) tea.Cmd {
 // worktreePath must already be verified to exist by the caller.
 // If a session file exists for the given stage, --resume <id> is passed;
 // otherwise a fresh session starts.
-func openResumeInlineCmd(pluginDir, repo string, issueNumber int, stageName, stageModel, worktreePath string) tea.Cmd {
+func openResumeInlineCmd(pluginDirs []string, repo string, issueNumber int, stageName, stageModel, worktreePath string) tea.Cmd {
 	args := []string{}
 	sessionID := tuiReadSessionID(repo, issueNumber, stageName)
 	if sessionID != "" {
@@ -151,8 +151,10 @@ func openResumeInlineCmd(pluginDir, repo string, issueNumber int, stageName, sta
 	if stageModel != "" {
 		args = append(args, "--model", stageModel)
 	}
-	if pluginDir != "" {
-		args = append(args, "--plugin-dir", pluginDir)
+	for _, dir := range pluginDirs {
+		if dir != "" {
+			args = append(args, "--plugin-dir", dir)
+		}
 	}
 	cmd := exec.Command("claude", args...)
 	cmd.Dir = worktreePath
