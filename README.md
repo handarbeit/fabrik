@@ -156,7 +156,8 @@ prompt: |                 # Inline prompt (used when skill is not set)
 comment_skill: fabrik-research-comment  # Skill for comment review (overrides comment_prompt)
 comment_prompt: |         # Inline comment-review prompt (used when comment_skill is not set)
   You are reviewing user comments...
-model: sonnet             # Optional: claude model to use
+model: sonnet             # Optional: claude model to use; prefix with "ollama:" to route
+                          #   through a local Ollama instance (e.g. "ollama:llama3")
 max_turns: 50             # Optional: max conversation turns per stage invocation
 comment_max_turns: 15     # Optional: max turns when processing user comments (default: min(max_turns,15))
 read_only: false          # Optional: stash/restore worktree; use for analysis stages (Specify, Research)
@@ -263,7 +264,8 @@ Fabrik uses labels to track state:
 | `stage:<name>:complete` | Stage has been completed |
 | `stage:<name>:in_progress` | Stage is actively running |
 | `stage:<name>:failed` | Stage hit max retries and was paused |
-| `model:<name>` | Use this model for the issue (e.g. `model:opus` overrides the stage YAML default) |
+| `model:<name>` | Use this Claude model for the issue (e.g. `model:opus` overrides the stage YAML default) |
+| `ollama:<model>` | Route all stages of this issue through a local Ollama instance using `ollama launch claude --model <model>` (e.g. `ollama:llama3`). Takes precedence over `model:` labels. Requires `ollama` CLI on PATH. |
 | `fabrik:yolo` | Force auto-advance even when `auto_advance: false`; also triggers auto-merge of the linked PR when Validate completes |
 | `fabrik:unrestricted` | Pass `--dangerously-skip-permissions` to Claude Code for this issue only; use when an issue needs to write to paths not covered by `.claude/settings.json` (e.g. `.claude/skills/`). **Caution:** bypasses the permission system. |
 

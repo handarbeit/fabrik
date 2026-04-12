@@ -369,6 +369,10 @@ prompt: |                 # Inline prompt (used when skill is not set; legacy bu
 comment_prompt: |         # Inline comment-review prompt (used when comment_skill is not set).
   You are reviewing user comments...
 model: sonnet             # Optional. Claude model: "opus", "sonnet", etc.
+                          #   Use the "ollama:<model>" prefix to route the stage through
+                          #   a local Ollama instance instead of Anthropic (e.g.
+                          #   "ollama:llama3" or "ollama:kimi-k2.5:cloud"). Requires
+                          #   the `ollama` CLI on PATH.
 max_turns: 50             # Optional. Max conversation turns per main stage invocation.
 comment_max_turns: 15     # Optional. Max turns when processing user comments. Defaults to
                           #   min(max_turns, 15) when max_turns is set, otherwise 15.
@@ -932,11 +936,12 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 |-------|--------|
 | `model:opus` | Override Claude model to Opus for this issue |
 | `model:sonnet` | Override Claude model to Sonnet for this issue |
+| `ollama:<model>` | Run all stages of this issue via Ollama (e.g. `ollama:llama3`, `ollama:kimi-k2.5:cloud`). The engine invokes `ollama launch claude --model <model> --yes -- <args>` instead of `claude <args>`. Requires the `ollama` CLI on PATH. Takes precedence over `model:` labels and stage-level `model:` YAML. |
 | `fabrik:paused` | Manually pause processing (add to pause, remove to resume) |
 | `fabrik:yolo` | Force auto-advance for this issue even when `auto_advance: false`; also triggers auto-merge of the linked PR when Validate completes |
 | `fabrik:unrestricted` | Pass `--dangerously-skip-permissions` to Claude Code for this issue only; use when an issue needs to write to paths not covered by `.claude/settings.json` (e.g. `.claude/skills/`). **Caution:** bypasses the permission system. |
 
-Model label precedence: `model:<name>` label > stage YAML `model` field > default.
+Model label precedence: `ollama:<model>` label > `model:<name>` label > stage YAML `model` field > default.
 
 ---
 
