@@ -73,9 +73,9 @@ var claudeTurnProgress func(issueNumber, turnsUsed, maxTurns int)
 // process stderr is sent only to the log file (not the terminal).
 var claudeTUI bool
 
-// claudePluginDir is the path to the Fabrik plugin directory. Set by the Engine
-// during construction. When non-empty, --plugin-dir is added to Claude args.
-var claudePluginDir string
+// claudePluginDirs is the list of Fabrik plugin directories. Set by the Engine
+// during construction. Each non-empty entry adds a --plugin-dir flag to Claude args.
+var claudePluginDirs []string
 
 // claudeWaitDelay is how long runClaude waits for stdout pipe drain after the
 // Claude process exits before giving up and processing buffered output. Set by
@@ -416,8 +416,10 @@ func buildClaudeArgs(stage *stages.Stage, sessFilePath string, resume bool, mode
 		args = append(args, "--permission-mode", "dontAsk")
 	}
 
-	if claudePluginDir != "" {
-		args = append(args, "--plugin-dir", claudePluginDir)
+	for _, dir := range claudePluginDirs {
+		if dir != "" {
+			args = append(args, "--plugin-dir", dir)
+		}
 	}
 
 	if resume {

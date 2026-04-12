@@ -115,21 +115,32 @@ func New(cfg Config) (*Engine, error) {
 		return nil, fmt.Errorf("resolving working directory: %w", err)
 	}
 
-	// Default to .fabrik/plugin in the fabrik dir (created by fabrik init).
-	// --plugin-dir flag overrides this for development.
-	// Path must be absolute since Claude runs in the worktree, not the repo root.
-	pluginDir := cfg.PluginDir
-	if pluginDir == "" {
-		defaultPluginDir := filepath.Join(fabrikDir, ".fabrik", "plugin")
-		if fi, err := os.Stat(defaultPluginDir); err == nil && fi.IsDir() {
-			pluginDir = defaultPluginDir
+	// Discover plugin directories. --plugin-dir flag overrides auto-detection
+	// (dev escape hatch). Otherwise, discover both built-in and user plugin dirs.
+	// Paths must be absolute since Claude runs in the worktree, not the repo root.
+	if cfg.PluginDir != "" {
+		if abs, err := filepath.Abs(cfg.PluginDir); err == nil {
+			claudePluginDirs = []string{abs}
+		} else {
+			claudePluginDirs = []string{cfg.PluginDir}
 		}
-	}
-	if pluginDir != "" {
-		if abs, err := filepath.Abs(pluginDir); err == nil {
-			pluginDir = abs
+	} else {
+		var dirs []string
+		builtinDir := filepath.Join(fabrikDir, ".fabrik", "plugin")
+		if fi, err := os.Stat(builtinDir); err == nil && fi.IsDir() {
+			if abs, err := filepath.Abs(builtinDir); err == nil {
+				builtinDir = abs
+			}
+			dirs = append(dirs, builtinDir)
 		}
-		claudePluginDir = pluginDir
+		userDir := filepath.Join(fabrikDir, ".fabrik", "user-plugin")
+		if fi, err := os.Stat(userDir); err == nil && fi.IsDir() {
+			if abs, err := filepath.Abs(userDir); err == nil {
+				userDir = abs
+			}
+			dirs = append(dirs, userDir)
+		}
+		claudePluginDirs = dirs
 	}
 	claudeWaitDelay = cfg.ClaudeWaitDelay
 	worktreeRoot := filepath.Join(fabrikDir, ".fabrik", "worktrees")
