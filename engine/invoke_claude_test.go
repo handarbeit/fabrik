@@ -798,6 +798,172 @@ printf '%%s\n' '{"result":"comment done","session_id":"sess_cmt","num_turns":3,"
 	}
 }
 
+// TestInvokeClaude_OllamaModeFromStageModel verifies that when stage.Model has the
+// "ollama:" prefix, InvokeClaude invokes `ollama launch claude --model <model> --yes -- <args>`
+// instead of `claude <args>`, and that stdin (the prompt) is still forwarded.
+func TestInvokeClaude_OllamaModeFromStageModel(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	argsFile := filepath.Join(binDir, "args.txt")
+	stdinFile := filepath.Join(binDir, "stdin.txt")
+	// Fake ollama binary: capture args and stdin, emit valid JSON.
+	fakeOllama := filepath.Join(binDir, "ollama")
+	script := fmt.Sprintf(`#!/bin/sh
+cat > %s
+echo "$@" > %s
+printf '%%s\n' '{"result":"ollama output\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_ollama1","num_turns":2,"total_cost_usd":0.001}'
+`, stdinFile, argsFile)
+	if err := os.WriteFile(fakeOllama, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	os.Setenv("PATH", binDir+":"+origPath)
+	defer os.Setenv("PATH", origPath)
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "Implement",
+		Prompt:     "Do the implementation",
+		Model:      "ollama:llama3", // stage-level Ollama config
+		MaxTurns:   10,
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 300, Title: "Ollama stage model test"}
+
+	output, completed, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+	if !strings.Contains(output, "ollama output") {
+		t.Errorf("output = %q, expected 'ollama output'", output)
+	}
+	if !completed {
+		t.Error("expected completed=true")
+	}
+
+	// Verify the fake ollama received: launch claude --model llama3 --yes -- ...
+	args, _ := os.ReadFile(argsFile)
+	argsStr := string(args)
+	if !strings.HasPrefix(argsStr, "launch claude --model llama3 --yes --") {
+		t.Errorf("ollama args = %q, expected prefix 'launch claude --model llama3 --yes --'", argsStr)
+	}
+	// --model must NOT appear again after the -- separator (claude args must not include --model)
+	// The claude args are everything after "launch claude --model llama3 --yes --"
+	afterSep := strings.SplitN(argsStr, "-- ", 2)
+	if len(afterSep) == 2 && strings.Contains(afterSep[1], "--model") {
+		t.Errorf("claude args (after --) contain --model flag: %q", afterSep[1])
+	}
+
+	// Verify stdin (the prompt) was forwarded to ollama
+	stdin, _ := os.ReadFile(stdinFile)
+	if !strings.Contains(string(stdin), "Do the implementation") {
+		t.Errorf("stdin = %q, expected prompt text", string(stdin))
+	}
+}
+
+// TestInvokeClaude_OllamaModeFromModelOverride verifies that when modelOverride has the
+// "ollama:" prefix (as set by an ollama:<model> issue label), InvokeClaude invokes
+// the ollama wrapper and that the colon-containing model name is passed verbatim.
+func TestInvokeClaude_OllamaModeFromModelOverride(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	argsFile := filepath.Join(binDir, "args.txt")
+	fakeOllama := filepath.Join(binDir, "ollama")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+echo "$@" > %s
+printf '%%s\n' '{"result":"ollama label output","session_id":"sess_ollama2","num_turns":1,"total_cost_usd":0.001}'
+`, argsFile)
+	if err := os.WriteFile(fakeOllama, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	os.Setenv("PATH", binDir+":"+origPath)
+	defer os.Setenv("PATH", origPath)
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "Research",
+		Prompt:     "Do research",
+		Model:      "sonnet", // stage model; should be overridden by label
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 301, Title: "Ollama label override test"}
+
+	// modelOverride as returned by extractModelOverride for an "ollama:kimi-k2.5:cloud" label
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "ollama:kimi-k2.5:cloud")
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+
+	args, _ := os.ReadFile(argsFile)
+	argsStr := string(args)
+	// The model name "kimi-k2.5:cloud" contains a colon — verify it's passed verbatim.
+	if !strings.HasPrefix(argsStr, "launch claude --model kimi-k2.5:cloud --yes --") {
+		t.Errorf("ollama args = %q, expected prefix 'launch claude --model kimi-k2.5:cloud --yes --'", argsStr)
+	}
+	// stage.Model ("sonnet") must NOT appear in claude args — ollama: label takes precedence
+	afterSep := strings.SplitN(argsStr, "-- ", 2)
+	if len(afterSep) == 2 && strings.Contains(afterSep[1], "sonnet") {
+		t.Errorf("stage model 'sonnet' leaked into claude args: %q", afterSep[1])
+	}
+}
+
+// TestInvokeClaude_OllamaMode_NoModelFlagInClaudeArgs verifies that when Ollama mode is
+// active, the --model flag is NOT forwarded to the claude subprocess (it is consumed
+// by the ollama wrapper and must not appear in the args after the -- separator).
+func TestInvokeClaude_OllamaMode_NoModelFlagInClaudeArgs(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	argsFile := filepath.Join(binDir, "args.txt")
+	fakeOllama := filepath.Join(binDir, "ollama")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+echo "$@" > %s
+printf '%%s\n' '{"result":"ok","session_id":"sess_ollama3","num_turns":1,"total_cost_usd":0.001}'
+`, argsFile)
+	if err := os.WriteFile(fakeOllama, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	os.Setenv("PATH", binDir+":"+origPath)
+	defer os.Setenv("PATH", origPath)
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "Plan",
+		Prompt:     "Plan it",
+		Model:      "ollama:mistral",
+		MaxTurns:   5,
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 302, Title: "No --model in claude args"}
+
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+
+	args, _ := os.ReadFile(argsFile)
+	argsStr := string(args)
+
+	// Find the -- separator and check claude args don't contain --model
+	parts := strings.SplitN(argsStr, " -- ", 2)
+	if len(parts) != 2 {
+		t.Fatalf("expected ' -- ' separator in ollama args, got: %q", argsStr)
+	}
+	claudeArgs := parts[1]
+	if strings.Contains(claudeArgs, "--model") {
+		t.Errorf("claude args (after --) should not contain --model, got: %q", claudeArgs)
+	}
+	if strings.Contains(claudeArgs, "mistral") {
+		t.Errorf("model name 'mistral' leaked into claude args: %q", claudeArgs)
+	}
+}
+
 func TestInvokeClaudeForComments_DefaultMaxTurns(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	binDir := t.TempDir()
