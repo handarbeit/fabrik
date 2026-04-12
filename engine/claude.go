@@ -203,7 +203,8 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	prompt := buildPrompt(stage, issue, newComments)
 	args := buildClaudeArgs(stage, sessFilePath, resume, modelOverride, stage.MaxTurns, hasUnrestrictedLabel(issue), workDir)
 
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, sessFilePath, ld)
+	extraEnv := buildClaudeEnv(stage)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, sessFilePath, ld, extraEnv)
 	usage.MaxTurns = stage.MaxTurns
 	if err != nil {
 		return output, completed, usage, err
@@ -230,7 +231,8 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 	limit := commentMaxTurns(stage)
 	args := buildClaudeArgs(stage, sessFilePath, true, modelOverride, limit, hasUnrestrictedLabel(issue), workDir) // resume existing session
 
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", sessFilePath, ld)
+	extraEnv := buildClaudeEnv(stage)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", sessFilePath, ld, extraEnv)
 	usage.MaxTurns = limit
 	return output, completed, usage, err
 }
@@ -247,6 +249,27 @@ func commentMaxTurns(stage *stages.Stage) int {
 		return stage.MaxTurns
 	}
 	return 50
+}
+
+// buildClaudeEnv returns environment variable overrides to inject into the claude subprocess.
+// Fabrik's values are appended after os.Environ() so they take precedence (last-wins semantics).
+//
+// Defaults (when fields are nil/empty):
+//   - CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 (adaptive thinking disabled)
+//   - CLAUDE_CODE_EFFORT_LEVEL=max (maximum thinking effort)
+func buildClaudeEnv(stage *stages.Stage) []string {
+	var env []string
+	// Disable adaptive thinking by default (nil = disabled).
+	if stage.DisableAdaptiveThinking == nil || *stage.DisableAdaptiveThinking {
+		env = append(env, "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1")
+	}
+	// Set effort level; empty string = max.
+	level := stage.EffortLevel
+	if level == "" {
+		level = "max"
+	}
+	env = append(env, "CLAUDE_CODE_EFFORT_LEVEL="+level)
+	return env
 }
 
 func buildClaudeArgs(stage *stages.Stage, sessFilePath string, resume bool, modelOverride string, maxTurns int, unrestricted bool, workDir string) []string {
@@ -311,7 +334,7 @@ type claudeResponse struct {
 	} `json:"usage"`
 }
 
-func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, sessFilePath string, logDir string) (string, bool, TokenUsage, error) {
+func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, sessFilePath string, logDir string, extraEnv []string) (string, bool, TokenUsage, error) {
 	claudeLog(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
 
 	// Set up stderr: in TUI mode discard; in plain mode forward to os.Stderr.
@@ -348,6 +371,7 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(), extraEnv...)
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Stderr = stderrWriter
 	cmd.Stdout = stdoutWriter
