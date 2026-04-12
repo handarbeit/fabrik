@@ -281,3 +281,98 @@ func TestHandleStageComplete_MergeAPIError_LogsAndDoesNotAdvance(t *testing.T) {
 		}
 	}
 }
+
+// TestHandleStageComplete_CruiseLabel_NonValidate_Advances verifies that
+// fabrik:cruise causes the engine to advance a non-Validate stage.
+func TestHandleStageComplete_CruiseLabel_NonValidate_Advances(t *testing.T) {
+	client := &mockGitHubClient{}
+	stgs := testStagesWithValidate()
+	eng := testEngineWithStages(client, stgs)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:cruise"}}
+	stage := &stages.Stage{Name: "Research"}
+
+	eng.handleStageComplete(board, item, stage)
+
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected 1 advance via cruise label, got %d", len(client.updateStatusCalls))
+	}
+	if client.updateStatusCalls[0].optionID != "OPT_Plan" {
+		t.Errorf("advanced to wrong stage: %s", client.updateStatusCalls[0].optionID)
+	}
+}
+
+// TestHandleStageComplete_CruiseLabel_Validate_NoMergeNoAdvance verifies that
+// fabrik:cruise does NOT merge the PR and does NOT advance at Validate completion.
+func TestHandleStageComplete_CruiseLabel_Validate_NoMergeNoAdvance(t *testing.T) {
+	client := &mockGitHubClient{
+		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
+			return 99, nil
+		},
+	}
+	stgs := testStagesWithValidate()
+	eng := testEngineWithStages(client, stgs)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:cruise"}}
+	validateStage := &stages.Stage{Name: "Validate"}
+
+	eng.handleStageComplete(board, item, validateStage)
+
+	// No merge attempted
+	if len(client.mergePRCalls) != 0 {
+		t.Errorf("expected no MergePR call for cruise+Validate, got %d", len(client.mergePRCalls))
+	}
+	// No advance
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("expected no advance for cruise+Validate, got %d status updates", len(client.updateStatusCalls))
+	}
+}
+
+// TestHandleStageComplete_CruiseLabel_OverridesAutoAdvanceFalse verifies that
+// fabrik:cruise overrides auto_advance:false, causing the engine to advance.
+func TestHandleStageComplete_CruiseLabel_OverridesAutoAdvanceFalse(t *testing.T) {
+	f := false
+	client := &mockGitHubClient{}
+	stgs := testStagesWithValidate()
+	eng := testEngineWithStages(client, stgs)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:cruise"}}
+	stage := &stages.Stage{Name: "Research", AutoAdvance: &f}
+
+	eng.handleStageComplete(board, item, stage)
+
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected 1 advance: cruise overrides auto_advance:false, got %d", len(client.updateStatusCalls))
+	}
+}
+
+// TestHandleStageComplete_BothCruiseAndYolo_YoloWins verifies that when both
+// fabrik:cruise and fabrik:yolo labels are present, yolo takes precedence:
+// the PR is merged and the stage advances past Validate.
+func TestHandleStageComplete_BothCruiseAndYolo_YoloWins(t *testing.T) {
+	client := &mockGitHubClient{
+		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
+			return 99, nil
+		},
+	}
+	stgs := testStagesWithValidate()
+	eng := testEngineWithStages(client, stgs)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:yolo", "fabrik:cruise"}}
+	validateStage := &stages.Stage{Name: "Validate"}
+
+	eng.handleStageComplete(board, item, validateStage)
+
+	// yolo wins: merge should fire
+	if len(client.mergePRCalls) != 1 {
+		t.Fatalf("expected MergePR to fire when both yolo and cruise present, got %d", len(client.mergePRCalls))
+	}
+	// yolo wins: advance to Done should happen
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected advance when yolo wins over cruise, got %d status updates", len(client.updateStatusCalls))
+	}
+}
