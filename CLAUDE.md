@@ -88,7 +88,7 @@ order: 1
 prompt: |
   ...
 skill: fabrik-research          # Optional: plugin skill name to load for this stage
-model: sonnet
+model: sonnet                   # Claude model name. Use "ollama:<model>" prefix for Ollama mode (e.g. "ollama:llama3", "ollama:kimi-k2.5:cloud"); requires ollama CLI on PATH
 max_turns: 50
 comment_prompt: |               # Optional: prompt for processing user comments
   ...
@@ -115,8 +115,9 @@ effort_level: max               # Claude Code thinking effort: low, medium, high
 - **Commit frequently** during implementation — preserves progress if session is interrupted
 - **Rebase onto latest main** in Review and Validate stages before signaling completion
 - **Check `git status` first** in any stage — there may be uncommitted work from a previous session
-- **Labels are state**: `fabrik:locked:<user>`, `fabrik:editing`, `fabrik:paused`, `fabrik:awaiting-input`, `fabrik:awaiting-review`, `stage:<name>:in_progress`, `stage:<name>:complete`, `stage:<name>:failed`, `model:<name>`, `fabrik:yolo`, `fabrik:cruise`
-  - `model:<name>` — set by user to select a specific model for this issue (e.g. `model:opus`)
+- **Labels are state**: `fabrik:locked:<user>`, `fabrik:editing`, `fabrik:paused`, `fabrik:awaiting-input`, `fabrik:awaiting-review`, `stage:<name>:in_progress`, `stage:<name>:complete`, `stage:<name>:failed`, `model:<name>`, `ollama:<model>`, `fabrik:yolo`, `fabrik:cruise`
+  - `model:<name>` — set by user to select a specific Claude model for this issue (e.g. `model:opus`); overrides the stage YAML `model:` field
+  - `ollama:<model>` — set by user to run all stages of this issue via Ollama (e.g. `ollama:llama3`, `ollama:kimi-k2.5:cloud`); takes precedence over `model:` labels and stage-level `model:` YAML; requires the `ollama` CLI on PATH; the engine invokes `ollama launch claude --model <model> --yes -- <claude-args>` instead of `claude <args>`
   - `fabrik:yolo` — set by user to force auto-advance even when `auto_advance: false` in stage YAML; also triggers auto-merge of the linked PR when Validate completes
   - `fabrik:cruise` — set by user to auto-advance through all stages without auto-merging the PR or advancing to Done at Validate completion; if both cruise and yolo are present, yolo takes precedence
   - `fabrik:awaiting-review` — set by engine when a stage with `wait_for_reviews: true` completes and outstanding PR reviewer requests remain; cleared when all reviewers submit or `FABRIK_REVIEW_WAIT_TIMEOUT` elapses
@@ -133,3 +134,5 @@ On every startup, Fabrik fetches the project board and compares stage names to b
 - **Stale worktree**: `updateWorktreeFromMain` runs on each stage invocation; skip if dirty
 - **SSH key expired**: `ssh-add ~/.ssh/<key>` — git operations fail silently with warning
 - **processedSet is in-memory**: Rocket reactions provide durable "already processed" state across restarts
+- **Ollama binary not found**: When using `ollama:<model>` labels or `model: ollama:...` in stage YAML, the `ollama` CLI must be installed and on `PATH`. Install from [ollama.com](https://ollama.com) or via `brew install ollama`. The `--yes` flag auto-pulls models on first use.
+- **Ollama session cross-provider**: If an issue switches between Anthropic and Ollama mode mid-pipeline, the prior session file may be stale. The engine's existing stale-session-ID handler deletes the file and retries automatically.
