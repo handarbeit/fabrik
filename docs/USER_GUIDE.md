@@ -401,6 +401,11 @@ allowed_tools:            # Optional. Restrict Claude's available tools.
   - Read
   - Grep
   - Glob
+disable_adaptive_thinking: true  # Optional. Disables Claude Code's adaptive (auto-reduced)
+                                 #   thinking budget. Default: true.
+effort_level: high        # Optional. Claude Code thinking effort: low, medium, high, max.
+                          #   Default: high. Controls how much the model "thinks" before
+                          #   responding. Higher values use more tokens.
 completion:
   type: claude            # Only supported type (default).
 ```
@@ -421,6 +426,10 @@ There are four cases:
 4. Per-stage `auto_advance:` absent from stage YAML → the stage inherits the global `yolo` setting.
 
 A fifth case applies at the issue level: adding the `fabrik:yolo` label to an issue forces auto-advance for that issue even when `auto_advance: false` is set in the stage YAML. The `fabrik:yolo` label also triggers auto-merge of the linked PR when the Validate stage completes (equivalent to running with `--yolo` globally, but scoped to a single issue).
+
+**Thinking budget (`disable_adaptive_thinking`, `effort_level`):**
+
+These two fields control how much Claude "thinks" before responding. `disable_adaptive_thinking: true` (the default) turns off Claude Code's adaptive thinking budget, which would otherwise auto-reduce thinking depth to save tokens. With adaptive thinking disabled, the `effort_level` field directly controls thinking intensity: `low`, `medium`, `high`, or `max`. The default `effort_level` is `high` (changed from `max` in v0.0.33 to reduce token usage without sacrificing quality). Use `effort_level: max` only for your most demanding stages — complex implementation or thorough review work — where higher token cost is justified.
 
 ---
 
@@ -934,6 +943,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `model:sonnet` | Override Claude model to Sonnet for this issue |
 | `fabrik:paused` | Manually pause processing (add to pause, remove to resume) |
 | `fabrik:yolo` | Force auto-advance for this issue even when `auto_advance: false`; also triggers auto-merge of the linked PR when Validate completes |
+| `fabrik:cruise` | Auto-advances through all stages like `fabrik:yolo` but stops at Validate — no auto-merge, no move to Done. If both `fabrik:cruise` and `fabrik:yolo` are present, `fabrik:yolo` takes precedence. |
 | `fabrik:unrestricted` | Pass `--dangerously-skip-permissions` to Claude Code for this issue only; use when an issue needs to write to paths not covered by `.claude/settings.json` (e.g. `.claude/skills/`). **Caution:** bypasses the permission system. |
 
 Model label precedence: `model:<name>` label > stage YAML `model` field > default.
@@ -951,7 +961,8 @@ The interactive terminal dashboard is enabled by default when running in a real 
 ### Layout
 
 The TUI shows a compact header with poll status, an In Progress pane showing active
-Claude sessions, and a scrollable History pane with completed jobs.
+Claude sessions, a scrollable History pane with completed jobs, and a status bar
+(footer) displaying REST and GraphQL rate limit stats.
 
 ### Keyboard Shortcuts
 
@@ -1065,10 +1076,18 @@ On the first startup after upgrading from a pre-v0.0.32 release, Fabrik automati
 Enable `--debug-output` to save Claude's raw output to `.fabrik/debug/` in the
 working directory. Useful for diagnosing prompt issues or unexpected behavior.
 
+### Subprocess Environment
+
+Claude Code is invoked with a clean, isolated environment — environment variables
+from the parent process do not leak into Claude subprocesses. If you previously
+relied on ambient env vars being available inside Claude (e.g., API keys or tool
+paths set in your shell), pass them explicitly via your stage YAML or a shell
+wrapper script.
+
 ### Rate Limit Monitoring
 
 Fabrik reports GitHub API rate limit stats in each poll cycle (visible in the TUI
-header or plain-text log output):
+status bar (footer) or plain-text log output):
 - REST API: requests remaining / limit
 - GraphQL API: points remaining / limit
 
