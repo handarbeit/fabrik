@@ -761,3 +761,163 @@ func TestArchiveDoneCompleteItems_SkipsNonCleanupStages(t *testing.T) {
 		t.Errorf("expected no ArchiveProjectItem calls for non-cleanup stage, got %d", len(client.archiveProjectItemCalls))
 	}
 }
+
+// TestCruiseCatchUp_NonValidate_Advances verifies that an item with fabrik:cruise
+// sitting in a completed non-Validate stage is advanced by the catch-up loop.
+func TestCruiseCatchUp_NonValidate_Advances(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{
+						Number: 10,
+						ItemID: "PVTI_10",
+						Status: "Research",
+						Repo:   "owner/repo",
+						Labels: []string{"stage:Research:complete", "fabrik:cruise"},
+					},
+				},
+			}, nil
+		},
+		fetchStatusFieldFn: func(projectID string) (*gh.StatusField, error) {
+			return &gh.StatusField{
+				FieldID: "FIELD_1",
+				Options: map[string]string{
+					"Research":  "OPT_Research",
+					"Plan":      "OPT_Plan",
+					"Implement": "OPT_Implement",
+					"Validate":  "OPT_Validate",
+					"Done":      "OPT_Done",
+				},
+			}, nil
+		},
+	}
+	eng := testEngineWithStages(client, testStagesWithValidate())
+
+	ctx := context.Background()
+	if err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	client.mu.Lock()
+	advances := len(client.updateStatusCalls)
+	merges := len(client.mergePRCalls)
+	client.mu.Unlock()
+
+	if advances != 1 {
+		t.Errorf("expected 1 advance via cruise catch-up, got %d", advances)
+	}
+	if merges != 0 {
+		t.Errorf("expected no MergePR for non-Validate stage, got %d", merges)
+	}
+}
+
+// TestCruiseCatchUp_Validate_NoMergeNoAdvance verifies that an item with fabrik:cruise
+// sitting at stage:Validate:complete is NOT merged and NOT advanced by the catch-up loop.
+func TestCruiseCatchUp_Validate_NoMergeNoAdvance(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{
+						Number: 11,
+						ItemID: "PVTI_11",
+						Status: "Validate",
+						Repo:   "owner/repo",
+						Labels: []string{"stage:Validate:complete", "fabrik:cruise"},
+					},
+				},
+			}, nil
+		},
+		fetchStatusFieldFn: func(projectID string) (*gh.StatusField, error) {
+			return &gh.StatusField{
+				FieldID: "FIELD_1",
+				Options: map[string]string{
+					"Research":  "OPT_Research",
+					"Plan":      "OPT_Plan",
+					"Implement": "OPT_Implement",
+					"Validate":  "OPT_Validate",
+					"Done":      "OPT_Done",
+				},
+			}, nil
+		},
+		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
+			return 55, nil
+		},
+	}
+	eng := testEngineWithStages(client, testStagesWithValidate())
+
+	ctx := context.Background()
+	if err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	client.mu.Lock()
+	advances := len(client.updateStatusCalls)
+	merges := len(client.mergePRCalls)
+	client.mu.Unlock()
+
+	if merges != 0 {
+		t.Errorf("expected no MergePR for cruise+Validate catch-up, got %d", merges)
+	}
+	if advances != 0 {
+		t.Errorf("expected no advance for cruise+Validate catch-up, got %d", advances)
+	}
+}
+
+// TestCruiseCatchUp_BothCruiseAndYolo_YoloWins verifies that when both fabrik:cruise
+// and fabrik:yolo are present, yolo takes precedence: the PR is merged and the item
+// advances past Validate in the catch-up loop.
+func TestCruiseCatchUp_BothCruiseAndYolo_YoloWins(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{
+						Number: 12,
+						ItemID: "PVTI_12",
+						Status: "Validate",
+						Repo:   "owner/repo",
+						Labels: []string{"stage:Validate:complete", "fabrik:yolo", "fabrik:cruise"},
+					},
+				},
+			}, nil
+		},
+		fetchStatusFieldFn: func(projectID string) (*gh.StatusField, error) {
+			return &gh.StatusField{
+				FieldID: "FIELD_1",
+				Options: map[string]string{
+					"Research":  "OPT_Research",
+					"Plan":      "OPT_Plan",
+					"Implement": "OPT_Implement",
+					"Validate":  "OPT_Validate",
+					"Done":      "OPT_Done",
+				},
+			}, nil
+		},
+		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
+			return 66, nil
+		},
+	}
+	eng := testEngineWithStages(client, testStagesWithValidate())
+
+	ctx := context.Background()
+	if err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	client.mu.Lock()
+	advances := len(client.updateStatusCalls)
+	merges := len(client.mergePRCalls)
+	client.mu.Unlock()
+
+	if merges != 1 {
+		t.Errorf("expected MergePR to fire when yolo wins over cruise, got %d", merges)
+	}
+	if advances != 1 {
+		t.Errorf("expected advance when yolo wins over cruise, got %d", advances)
+	}
+}
