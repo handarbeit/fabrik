@@ -332,6 +332,65 @@ max_turns: 20
 	}
 }
 
+func TestLoadAll_ThinkingFields_Defaults(t *testing.T) {
+	dir := t.TempDir()
+	writeStageFile(t, dir, "stage.yaml", `
+name: Research
+prompt: "Do research"
+`)
+
+	stages, err := LoadAll(dir)
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	s := stages[0]
+	// DisableAdaptiveThinking should be nil (default = disabled via nil check)
+	if s.DisableAdaptiveThinking != nil {
+		t.Errorf("DisableAdaptiveThinking = %v, want nil", s.DisableAdaptiveThinking)
+	}
+	// EffortLevel should be empty string (default = max)
+	if s.EffortLevel != "" {
+		t.Errorf("EffortLevel = %q, want empty string", s.EffortLevel)
+	}
+}
+
+func TestLoadAll_ThinkingFields_ExplicitValues(t *testing.T) {
+	dir := t.TempDir()
+	writeStageFile(t, dir, "stage.yaml", `
+name: Research
+prompt: "Do research"
+disable_adaptive_thinking: false
+effort_level: high
+`)
+
+	stages, err := LoadAll(dir)
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	s := stages[0]
+	if s.DisableAdaptiveThinking == nil || *s.DisableAdaptiveThinking != false {
+		t.Errorf("DisableAdaptiveThinking = %v, want explicit false", s.DisableAdaptiveThinking)
+	}
+	if s.EffortLevel != "high" {
+		t.Errorf("EffortLevel = %q, want %q", s.EffortLevel, "high")
+	}
+}
+
+func TestLoadAll_ThinkingFields_InvalidEffortLevel(t *testing.T) {
+	for _, level := range []string{"ultra", "extreme", "1", "MAX"} {
+		dir := t.TempDir()
+		writeStageFile(t, dir, "stage.yaml", `
+name: Research
+prompt: "Do research"
+effort_level: `+level+`
+`)
+		_, err := LoadAll(dir)
+		if err == nil {
+			t.Errorf("effort_level %q: expected error, got nil", level)
+		}
+	}
+}
+
 func TestIsFirstStage(t *testing.T) {
 	s1 := &Stage{Name: "Specify", Order: 1}
 	s2 := &Stage{Name: "Research", Order: 2}

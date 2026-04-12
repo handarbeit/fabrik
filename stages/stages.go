@@ -91,6 +91,18 @@ type Stage struct {
 	// instead of invoking Claude. No prompt, lock, or in_progress label is needed.
 	// Use this for terminal stages like "Done" to reclaim disk space.
 	CleanupWorktree bool `yaml:"cleanup_worktree,omitempty"`
+
+	// DisableAdaptiveThinking controls whether Claude Code's adaptive (auto-reduced)
+	// thinking budget is disabled. nil means use the default (disabled). When nil or
+	// true, CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 is injected into the subprocess
+	// environment. When explicitly false, the env var is omitted (adaptive thinking
+	// is allowed).
+	DisableAdaptiveThinking *bool `yaml:"disable_adaptive_thinking,omitempty"`
+
+	// EffortLevel sets the Claude Code thinking effort level. Valid values are
+	// "low", "medium", "high", "max". Empty string means use the default ("max").
+	// Maps to the CLAUDE_CODE_EFFORT_LEVEL environment variable.
+	EffortLevel string `yaml:"effort_level,omitempty"`
 }
 
 // CompletionCriteria defines how to determine if a stage is complete.
@@ -160,6 +172,11 @@ func loadOne(path string) (*Stage, error) {
 		} else if s.Completion.Type != "claude" {
 			return nil, fmt.Errorf("stage %q: unsupported completion type %q (only \"claude\" is supported)", s.Name, s.Completion.Type)
 		}
+	}
+
+	validEffortLevels := map[string]bool{"": true, "low": true, "medium": true, "high": true, "max": true}
+	if !validEffortLevels[s.EffortLevel] {
+		return nil, fmt.Errorf("stage %q: invalid effort_level %q (must be one of: low, medium, high, max)", s.Name, s.EffortLevel)
 	}
 
 	return &s, nil
