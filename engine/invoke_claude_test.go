@@ -41,7 +41,7 @@ printf '%s\n' '{"result":"stage output\nFABRIK_STAGE_COMPLETE\n","session_id":"s
 	}
 	issue := gh.ProjectItem{Number: 77, Title: "Test JSON"}
 
-	output, completed, stats, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	output, completed, stats, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -103,7 +103,7 @@ printf '%s\n' '{"result":"real invoker output","session_id":"sess_ri","num_turns
 	}
 	issue := gh.ProjectItem{Number: 80, Title: "T"}
 
-	output, _, _, err := invoker.Invoke(context.Background(), stage, issue, nil, false, t.TempDir(), "")
+	output, _, _, err := invoker.Invoke(context.Background(), stage, issue, nil, false, t.TempDir(), InvokeOptions{})
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
@@ -143,7 +143,7 @@ printf '%s\n' '{"result":"Claude output for test\nFABRIK_STAGE_COMPLETE\n","sess
 		URL:    "https://example.com",
 	}
 
-	output, completed, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	output, completed, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -196,7 +196,7 @@ printf '%%s\n' '{"result":"resume output","session_id":"sess_resume","num_turns"
 	os.MkdirAll(sessDir, 0700)
 	os.WriteFile(sessionFile(99, "Plan"), []byte("sess_existing"), 0600)
 
-	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, true, workDir, "")
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, true, workDir, InvokeOptions{})
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -241,7 +241,7 @@ printf '%%s\n' '{"result":"ok","session_id":"sess_mt","num_turns":1,"total_cost_
 	}
 	issue := gh.ProjectItem{Number: 50, Title: "T"}
 
-	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -288,7 +288,7 @@ printf '%%s\n' '{"result":"ok","session_id":"sess_mo","num_turns":1,"total_cost_
 	}
 	issue := gh.ProjectItem{Number: 51, Title: "T"}
 
-	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "opus")
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{ModelOverride: "opus"})
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -324,7 +324,7 @@ exit 1
 	}
 	issue := gh.ProjectItem{Number: 60, Title: "T"}
 
-	output, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	output, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
 	if err == nil {
 		t.Fatal("expected error for failing binary")
 	}
@@ -360,7 +360,7 @@ exit 1
 	}
 	issue := gh.ProjectItem{Number: 61, Title: "T"}
 
-	output, completed, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	output, completed, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
 	if err == nil {
 		t.Fatal("expected non-nil error for failing binary")
 	}
@@ -399,7 +399,7 @@ exit 1
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel before invoking
 
-	_, completed, _, err := InvokeClaude(ctx, stage, issue, nil, false, workDir, "")
+	_, completed, _, err := InvokeClaude(ctx, stage, issue, nil, false, workDir, InvokeOptions{})
 	if err == nil {
 		t.Fatal("expected non-nil error for cancelled context")
 	}
@@ -436,7 +436,7 @@ printf '%%s\n' '{"result":"comment output","session_id":"sess_c","num_turns":1,"
 		{Author: "user", Body: "Fix this", CreatedAt: time.Now()},
 	}
 
-	_, _, _, err := InvokeClaude(context.Background(), stage, issue, comments, false, workDir, "")
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, comments, false, workDir, InvokeOptions{})
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -471,7 +471,7 @@ printf '%s\n' '{"result":"fallback output\nFABRIK_STAGE_COMPLETE\n","session_id"
 	}
 	issue := gh.ProjectItem{Number: 74, Title: "direct invocation test"}
 
-	output, completed, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	output, completed, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -517,7 +517,7 @@ func TestRunClaude_StdoutTeeToLogFile(t *testing.T) {
 	}
 	issue := gh.ProjectItem{Number: 200, Title: "Tee test"}
 
-	output, completed, stats, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	output, completed, stats, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -601,7 +601,7 @@ func TestRunClaude_IssueUpdateInIntermediateTurn(t *testing.T) {
 	}
 	issue := gh.ProjectItem{Number: 205, Title: "Intermediate update test"}
 
-	output, completed, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+	output, completed, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
 	if err != nil {
 		t.Fatalf("InvokeClaude: %v", err)
 	}
@@ -773,7 +773,7 @@ printf '%%s\n' '{"result":"comment done","session_id":"sess_cmt","num_turns":3,"
 		{Author: "user", Body: "Please fix the bug", CreatedAt: time.Now()},
 	}
 
-	_, _, usage, err := InvokeClaudeForComments(context.Background(), stage, issue, comments, workDir, "")
+	_, _, usage, err := InvokeClaudeForComments(context.Background(), stage, issue, comments, workDir, InvokeOptions{})
 	if err != nil {
 		t.Fatalf("InvokeClaudeForComments: %v", err)
 	}
@@ -829,7 +829,7 @@ printf '%%s\n' '{"result":"done","session_id":"sess_def","num_turns":2,"total_co
 		{Author: "user", Body: "Update the README", CreatedAt: time.Now()},
 	}
 
-	_, _, usage, err := InvokeClaudeForComments(context.Background(), stage, issue, comments, workDir, "")
+	_, _, usage, err := InvokeClaudeForComments(context.Background(), stage, issue, comments, workDir, InvokeOptions{})
 	if err != nil {
 		t.Fatalf("InvokeClaudeForComments: %v", err)
 	}
@@ -876,7 +876,7 @@ printf '%%s\n' '{"result":"done","session_id":"sess_unl","num_turns":2,"total_co
 		{Author: "user", Body: "Add more analysis", CreatedAt: time.Now()},
 	}
 
-	_, _, usage, err := InvokeClaudeForComments(context.Background(), stage, issue, comments, workDir, "")
+	_, _, usage, err := InvokeClaudeForComments(context.Background(), stage, issue, comments, workDir, InvokeOptions{})
 	if err != nil {
 		t.Fatalf("InvokeClaudeForComments: %v", err)
 	}
@@ -924,7 +924,7 @@ printf '%%s\n' '{"result":"env test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess
 			Completion: stages.CompletionCriteria{Type: "claude"},
 		}
 		issue := gh.ProjectItem{Number: 99, Title: "Env test"}
-		_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+		_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
 		if err != nil {
 			t.Fatalf("InvokeClaude: %v", err)
 		}
@@ -951,7 +951,7 @@ printf '%%s\n' '{"result":"env test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess
 			EffortLevel:             "low",
 		}
 		issue := gh.ProjectItem{Number: 100, Title: "Env test 2"}
-		_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, "")
+		_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
 		if err != nil {
 			t.Fatalf("InvokeClaude: %v", err)
 		}
@@ -965,6 +965,31 @@ printf '%%s\n' '{"result":"env test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess
 		}
 		if !strings.Contains(env, "CLAUDE_CODE_EFFORT_LEVEL=low") {
 			t.Errorf("expected CLAUDE_CODE_EFFORT_LEVEL=low in env, got:\n%s", env)
+		}
+	})
+
+	t.Run("effortOverride supersedes stage EffortLevel", func(t *testing.T) {
+		stage := &stages.Stage{
+			Name:        "Research",
+			Prompt:      "Do research",
+			Completion:  stages.CompletionCriteria{Type: "claude"},
+			EffortLevel: "low",
+		}
+		issue := gh.ProjectItem{Number: 101, Title: "Env test 3"}
+		_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{EffortOverride: "max"})
+		if err != nil {
+			t.Fatalf("InvokeClaude: %v", err)
+		}
+		data, err := os.ReadFile(envFile)
+		if err != nil {
+			t.Fatalf("reading env file: %v", err)
+		}
+		env := string(data)
+		if !strings.Contains(env, "CLAUDE_CODE_EFFORT_LEVEL=max") {
+			t.Errorf("expected CLAUDE_CODE_EFFORT_LEVEL=max (override) in env, got:\n%s", env)
+		}
+		if strings.Contains(env, "CLAUDE_CODE_EFFORT_LEVEL=low") {
+			t.Errorf("expected stage EffortLevel=low to be overridden, but found it in env:\n%s", env)
 		}
 	})
 }

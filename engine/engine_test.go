@@ -474,6 +474,59 @@ func TestExtractModelOverrideWarnsOnMultiple(t *testing.T) {
 	}
 }
 
+func TestExtractEffortOverride(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	tests := []struct {
+		name   string
+		labels []string
+		want   string
+	}{
+		{"no labels", nil, ""},
+		{"no effort label", []string{"stage:Plan:complete", "model:opus"}, ""},
+		{"single effort:high", []string{"effort:high"}, "high"},
+		{"single effort:max", []string{"effort:max"}, "max"},
+		{"single effort:low", []string{"effort:low"}, "low"},
+		{"single effort:medium", []string{"effort:medium"}, "medium"},
+		{"effort label among others", []string{"stage:Plan", "effort:high", "fabrik:locked"}, "high"},
+		{"empty effort name skipped", []string{"effort:", "effort:max"}, "max"},
+		{"invalid prefix ignored", []string{"model:opus", "fabrik:yolo"}, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := eng.extractEffortOverride(0, tc.labels)
+			if got != tc.want {
+				t.Errorf("extractEffortOverride(%v) = %q, want %q", tc.labels, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestExtractEffortOverrideMultipleLabelsPrecedence(t *testing.T) {
+	// When multiple effort: labels are present, the highest-ranked wins (max > high > medium > low).
+	// This differs from model: override which uses first-found.
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+
+	tests := []struct {
+		name   string
+		labels []string
+		want   string
+	}{
+		{"low+max → max", []string{"effort:low", "effort:max"}, "max"},
+		{"medium+high → high", []string{"effort:medium", "effort:high"}, "high"},
+		{"low+medium → medium", []string{"effort:low", "effort:medium"}, "medium"},
+		{"all four → max", []string{"effort:low", "effort:medium", "effort:high", "effort:max"}, "max"},
+		{"max+high (reverse order) → max", []string{"effort:high", "effort:max"}, "max"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := eng.extractEffortOverride(0, tc.labels)
+			if got != tc.want {
+				t.Errorf("extractEffortOverride(%v) = %q, want %q", tc.labels, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestItemNeedsWork_CleanupStage_NeedsWork(t *testing.T) {
 	rootDir := t.TempDir()
 	worktreeDir := filepath.Join(rootDir, "issue-1")
