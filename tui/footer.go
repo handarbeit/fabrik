@@ -57,6 +57,22 @@ func applyOSC8(plain, title, boardURL string) string {
 	return strings.Replace(plain, title, termenv.Hyperlink(boardURL, title), 1)
 }
 
+// renderWithOSC8 applies dimStyle to plain text but preserves OSC 8 hyperlinks.
+// Renders the entire string in dim first, then replaces the plain title with
+// the OSC 8 hyperlinked version so SGR codes flow through naturally.
+func renderWithOSC8(plain, title, boardURL string) string {
+	if title == "" || boardURL == "" || !supportsOSC8() {
+		return dimStyle.Render(plain)
+	}
+	idx := strings.Index(plain, title)
+	if idx < 0 {
+		return dimStyle.Render(plain)
+	}
+	styled := dimStyle.Render(plain)
+	link := termenv.Hyperlink(boardURL, title)
+	return strings.Replace(styled, title, link, 1)
+}
+
 func (f FooterComponent) View(width int) string {
 	// Assemble left side: CWD [· BoardTitle] [· version]
 	parts := []string{}
@@ -65,8 +81,7 @@ func (f FooterComponent) View(width int) string {
 	}
 	if f.projectInfo.BoardTitle != "" {
 		parts = append(parts, f.projectInfo.BoardTitle)
-	}
-	if f.projectInfo.Version != "" {
+	} else if f.projectInfo.Version != "" {
 		parts = append(parts, f.projectInfo.Version)
 	}
 	leftPlain := strings.Join(parts, " · ")
@@ -94,19 +109,19 @@ func (f FooterComponent) View(width int) string {
 	}
 
 	if rightStr == "" {
-		footer := dimStyle.Render(applyOSC8(leftPlain, f.projectInfo.BoardTitle, f.projectInfo.BoardURL))
+		footer := renderWithOSC8(leftPlain, f.projectInfo.BoardTitle, f.projectInfo.BoardURL)
 		if lipgloss.Width(footer) > maxWidth {
 			runes := []rune(leftPlain)
 			for len(runes) > 0 && lipgloss.Width(dimStyle.Render(string(runes)+"…")) > maxWidth {
 				runes = runes[:len(runes)-1]
 			}
-			footer = dimStyle.Render(applyOSC8(string(runes)+"…", f.projectInfo.BoardTitle, f.projectInfo.BoardURL))
+			footer = renderWithOSC8(string(runes)+"…", f.projectInfo.BoardTitle, f.projectInfo.BoardURL)
 		}
 		return footer
 	}
 
 	rightWidth := lipgloss.Width(rightStr)
-	leftRendered := dimStyle.Render(applyOSC8(leftPlain, f.projectInfo.BoardTitle, f.projectInfo.BoardURL))
+	leftRendered := renderWithOSC8(leftPlain, f.projectInfo.BoardTitle, f.projectInfo.BoardURL)
 	gap := maxWidth - lipgloss.Width(leftRendered) - rightWidth
 	if gap < 1 {
 		availLeft := maxWidth - rightWidth - 1
@@ -123,7 +138,7 @@ func (f FooterComponent) View(width int) string {
 			if len(runes) == 0 {
 				leftRendered = ""
 			} else {
-				leftRendered = dimStyle.Render(applyOSC8(string(runes)+"…", f.projectInfo.BoardTitle, f.projectInfo.BoardURL))
+				leftRendered = renderWithOSC8(string(runes)+"…", f.projectInfo.BoardTitle, f.projectInfo.BoardURL)
 			}
 		}
 		gap = maxWidth - lipgloss.Width(leftRendered) - rightWidth

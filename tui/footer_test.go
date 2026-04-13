@@ -22,10 +22,14 @@ func TestViewFooter_Content(t *testing.T) {
 	m.width = 120
 	footer := m.footer.View(m.width)
 
-	for _, want := range []string{"~/projects/myapp", "My Board", "2.0.0"} {
+	// When BoardTitle is present, Version is hidden (redundant).
+	for _, want := range []string{"~/projects/myapp", "My Board"} {
 		if !strings.Contains(footer, want) {
 			t.Errorf("viewFooter() missing %q; got: %q", want, footer)
 		}
+	}
+	if strings.Contains(footer, "2.0.0") {
+		t.Errorf("viewFooter() should hide Version when BoardTitle is present; got: %q", footer)
 	}
 }
 

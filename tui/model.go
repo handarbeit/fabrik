@@ -523,3 +523,5 @@ func (m Model) View() string {
 
 	return strings.Join(sections, "\n")
 }
+// viewHeader, viewActive, viewHistory, viewFooter, viewDetail are in their
+// respective component files (header.go, active.go, history.go, footer.go, detail.go).
