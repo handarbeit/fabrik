@@ -49,3 +49,73 @@ jobs:
           args: release --clean --release-notes release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.PUBLIC_REPO_RELEASE_TOKEN }}
+
+      - name: Announce release on Discussions
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_REPO_RELEASE_TOKEN }}
+        run: |
+          set -e
+          VERSION="${{ github.ref_name }}"
+
+          # Fetch repo ID and Announcements category ID in a single GraphQL call
+          QUERY_RESULT=$(gh api graphql -f query='
+            query {
+              repository(owner: "handarbeit", name: "fabrik") {
+                id
+                discussionCategories(first: 20) {
+                  nodes {
+                    id
+                    name
+                  }
+                }
+              }
+            }
+          ')
+
+          REPO_ID=$(echo "$QUERY_RESULT" | jq -r '.data.repository.id')
+          CATEGORY_ID=$(echo "$QUERY_RESULT" | jq -r '.data.repository.discussionCategories.nodes[] | select(.name == "Announcements") | .id')
+
+          if [ -z "$REPO_ID" ]; then
+            echo "Error: could not fetch handarbeit/fabrik repository ID"
+            exit 1
+          fi
+          if [ -z "$CATEGORY_ID" ]; then
+            echo "Error: could not find Announcements category in handarbeit/fabrik"
+            exit 1
+          fi
+
+          # Build announcement body from release-notes.md:
+          # skip line 1 (title), stop at ## Internal or ## Upgrading
+          BODY_CONTENT=$(awk '
+            NR == 1 { next }
+            /^## Internal/ || /^## Upgrading/ { exit }
+            { print }
+          ' release-notes.md)
+
+          BODY="${BODY_CONTENT}
+
+See the [full release notes and downloads](https://github.com/handarbeit/fabrik/releases/tag/${VERSION}) for binaries and complete changelog."
+
+          # Post the Discussion to handarbeit/fabrik Announcements
+          RESULT=$(gh api graphql \
+            -f query='
+              mutation($repositoryId: ID!, $categoryId: ID!, $title: String!, $body: String!) {
+                createDiscussion(input: {
+                  repositoryId: $repositoryId,
+                  categoryId: $categoryId,
+                  title: $title,
+                  body: $body
+                }) {
+                  discussion {
+                    url
+                  }
+                }
+              }
+            ' \
+            -f repositoryId="$REPO_ID" \
+            -f categoryId="$CATEGORY_ID" \
+            -f title="Fabrik ${VERSION} released" \
+            -f body="$BODY")
+
+          DISCUSSION_URL=$(echo "$RESULT" | jq -r '.data.createDiscussion.discussion.url')
+          echo "Announcement posted: $DISCUSSION_URL"
