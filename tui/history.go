@@ -223,20 +223,6 @@ func (h HistoryPaneComponent) Height() int {
 	return h.historyVP.Height + h.titleAndHintLines(0, false) + 2 // +2 for border
 }
 
-func (h *HistoryPaneComponent) HandleClick(x, y int) bool {
-	// y is relative to the history pane's top (0-based).
-	// border-top at y=0, title at y=1, viewport content starts at y=2.
-	if y >= 2 {
-		visibleRow := y - 2
-		newHistIdx := visibleRow + h.historyVP.YOffset
-		if newHistIdx >= 0 && newHistIdx < len(h.history) {
-			h.histIdx = newHistIdx
-			return true
-		}
-	}
-	return y >= 0 && y <= 1
-}
-
 // SetLayout updates the viewport dimensions based on available space.
 func (h *HistoryPaneComponent) SetLayout(width, availableHeight int, confirmQuit bool, activeCount int) {
 	h.confirmQuit = confirmQuit
@@ -411,13 +397,6 @@ func (h HistoryPaneComponent) SelectedEntry() *HistoryEntry {
 		return &h.history[realIdx]
 	}
 	return nil
-}
-
-// ForwardMouseEvent forwards a mouse event to the history viewport for scroll handling.
-func (h *HistoryPaneComponent) ForwardMouseEvent(ev tea.MouseMsg) tea.Cmd {
-	var cmd tea.Cmd
-	h.historyVP, cmd = h.historyVP.Update(ev)
-	return cmd
 }
 
 // YOffset returns the current viewport Y offset.
