@@ -229,16 +229,129 @@ func TestEnsureLabel(t *testing.T) {
 		if body["name"] != "test-label" {
 			t.Errorf("name = %v", body["name"])
 		}
-		if body["color"] != "6f42c1" {
+		if body["color"] != "0075ca" {
 			t.Errorf("color = %v", body["color"])
+		}
+		if body["description"] != "my description" {
+			t.Errorf("description = %v", body["description"])
 		}
 		w.WriteHeader(201)
 	}))
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("token", srv.URL)
-	if err := c.ensureLabel("owner", "repo", "test-label"); err != nil {
+	if err := c.ensureLabel("owner", "repo", "test-label", "my description", "0075ca"); err != nil {
 		t.Fatalf("ensureLabel: %v", err)
+	}
+}
+
+// TestSeedLabels_CreateMissing: seedOneLabel creates a label that does not exist.
+func TestSeedLabels_CreateMissing(t *testing.T) {
+	var gotMethod []string
+	var postBody map[string]interface{}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = append(gotMethod, r.Method)
+		switch r.Method {
+		case http.MethodGet:
+			// Label does not exist
+			w.WriteHeader(404)
+			w.Write([]byte(`{"message":"Not Found"}`))
+		case http.MethodPost:
+			json.NewDecoder(r.Body).Decode(&postBody)
+			w.WriteHeader(201)
+		default:
+			t.Errorf("unexpected method: %s", r.Method)
+			w.WriteHeader(500)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	d := labelDef{"fabrik:yolo", "Auto-advance all stages and auto-merge the PR at Validate", "0075ca"}
+	if err := c.seedOneLabel("owner", "repo", d); err != nil {
+		t.Fatalf("seedOneLabel: %v", err)
+	}
+	if len(gotMethod) != 2 || gotMethod[0] != "GET" || gotMethod[1] != "POST" {
+		t.Errorf("expected [GET POST], got %v", gotMethod)
+	}
+	if postBody["name"] != "fabrik:yolo" {
+		t.Errorf("POST name = %v", postBody["name"])
+	}
+	if postBody["color"] != "0075ca" {
+		t.Errorf("POST color = %v", postBody["color"])
+	}
+	if postBody["description"] != "Auto-advance all stages and auto-merge the PR at Validate" {
+		t.Errorf("POST description = %v", postBody["description"])
+	}
+}
+
+// TestSeedLabels_BackfillEmpty: seedOneLabel PATCHes an existing label that has
+// an empty description. The PATCH body must NOT contain a color field.
+func TestSeedLabels_BackfillEmpty(t *testing.T) {
+	var gotMethod []string
+	var patchBody map[string]interface{}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = append(gotMethod, r.Method)
+		switch r.Method {
+		case http.MethodGet:
+			// Label exists with empty description
+			w.WriteHeader(200)
+			json.NewEncoder(w).Encode(map[string]string{"name": "fabrik:paused", "description": ""})
+		case http.MethodPatch:
+			json.NewDecoder(r.Body).Decode(&patchBody)
+			w.WriteHeader(200)
+		default:
+			t.Errorf("unexpected method: %s", r.Method)
+			w.WriteHeader(500)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	d := labelDef{"fabrik:paused", "Stage failed or needs intervention; remove to resume", "e4e669"}
+	if err := c.seedOneLabel("owner", "repo", d); err != nil {
+		t.Fatalf("seedOneLabel: %v", err)
+	}
+	if len(gotMethod) != 2 || gotMethod[0] != "GET" || gotMethod[1] != "PATCH" {
+		t.Errorf("expected [GET PATCH], got %v", gotMethod)
+	}
+	// PATCH body must include description and must NOT include color.
+	if patchBody["description"] != "Stage failed or needs intervention; remove to resume" {
+		t.Errorf("PATCH description = %v", patchBody["description"])
+	}
+	if _, hasColor := patchBody["color"]; hasColor {
+		t.Error("PATCH body must not include color field")
+	}
+}
+
+// TestSeedLabels_SkipNonEmpty: seedOneLabel does nothing when the label already
+// has a non-empty description (preserves user customisation).
+func TestSeedLabels_SkipNonEmpty(t *testing.T) {
+	var gotMethod []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = append(gotMethod, r.Method)
+		switch r.Method {
+		case http.MethodGet:
+			// Label exists with a custom description
+			w.WriteHeader(200)
+			json.NewEncoder(w).Encode(map[string]string{"name": "fabrik:paused", "description": "user custom description"})
+		default:
+			t.Errorf("unexpected method: %s — should not PATCH when description is non-empty", r.Method)
+			w.WriteHeader(500)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	d := labelDef{"fabrik:paused", "Stage failed or needs intervention; remove to resume", "e4e669"}
+	if err := c.seedOneLabel("owner", "repo", d); err != nil {
+		t.Fatalf("seedOneLabel: %v", err)
+	}
+	if len(gotMethod) != 1 || gotMethod[0] != "GET" {
+		t.Errorf("expected [GET] only, got %v", gotMethod)
 	}
 }
 
