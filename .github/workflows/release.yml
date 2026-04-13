@@ -54,7 +54,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PUBLIC_REPO_RELEASE_TOKEN }}
         run: |
-          set -e
+          set -euo pipefail
           VERSION="${{ github.ref_name }}"
 
           # Fetch repo ID and Announcements category ID in a single GraphQL call
@@ -62,7 +62,7 @@ jobs:
             query {
               repository(owner: "handarbeit", name: "fabrik") {
                 id
-                discussionCategories(first: 20) {
+                discussionCategories(first: 100) {
                   nodes {
                     id
                     name
@@ -75,11 +75,11 @@ jobs:
           REPO_ID=$(echo "$QUERY_RESULT" | jq -r '.data.repository.id')
           CATEGORY_ID=$(echo "$QUERY_RESULT" | jq -r '.data.repository.discussionCategories.nodes[] | select(.name == "Announcements") | .id')
 
-          if [ -z "$REPO_ID" ]; then
+          if [ -z "$REPO_ID" ] || [ "$REPO_ID" = "null" ]; then
             echo "Error: could not fetch handarbeit/fabrik repository ID"
             exit 1
           fi
-          if [ -z "$CATEGORY_ID" ]; then
+          if [ -z "$CATEGORY_ID" ] || [ "$CATEGORY_ID" = "null" ]; then
             echo "Error: could not find Announcements category in handarbeit/fabrik"
             exit 1
           fi
@@ -118,4 +118,9 @@ See the [full release notes and downloads](https://github.com/handarbeit/fabrik/
             -f body="$BODY")
 
           DISCUSSION_URL=$(echo "$RESULT" | jq -r '.data.createDiscussion.discussion.url')
+          if [ -z "$DISCUSSION_URL" ] || [ "$DISCUSSION_URL" = "null" ]; then
+            echo "Error: createDiscussion mutation did not return a discussion URL"
+            echo "GraphQL response: $RESULT"
+            exit 1
+          fi
           echo "Announcement posted: $DISCUSSION_URL"
