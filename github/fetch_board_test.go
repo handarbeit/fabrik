@@ -13,7 +13,8 @@ func TestFetchProjectBoard_Success(t *testing.T) {
 			"data": map[string]interface{}{
 				"user": map[string]interface{}{
 					"projectV2": map[string]interface{}{
-						"id": "PVT_123",
+						"id":    "PVT_123",
+						"title": "My Board",
 						"items": map[string]interface{}{
 							"nodes": []interface{}{
 								map[string]interface{}{
@@ -61,6 +62,12 @@ func TestFetchProjectBoard_Success(t *testing.T) {
 
 	if board.ProjectID != "PVT_123" {
 		t.Errorf("ProjectID = %q", board.ProjectID)
+	}
+	if board.Title != "My Board" {
+		t.Errorf("Title = %q, want %q", board.Title, "My Board")
+	}
+	if board.OwnerType != "user" {
+		t.Errorf("OwnerType = %q, want %q", board.OwnerType, "user")
 	}
 	if len(board.Items) != 1 {
 		t.Fatalf("items count = %d, want 1", len(board.Items))
