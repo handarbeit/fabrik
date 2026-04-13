@@ -141,7 +141,7 @@ func (h HistoryPaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 			StageName:   entry.StageName,
 			IsComment:   entry.IsComment,
 		}
-		filtered := h.history[:0]
+		filtered := make([]HistoryEntry, 0, len(h.history))
 		for _, he := range h.history {
 			k := historyDedupKey{
 				IssueNumber: he.IssueNumber,
@@ -200,22 +200,8 @@ func (h HistoryPaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 					return h, openWatchInlineCmd(he.IssueNumber, he.Repo)
 				}
 			}
-		case "r":
-			if len(h.history) > 0 {
-				realIdx := len(h.history) - 1 - h.histIdx
-				if realIdx >= 0 && realIdx < len(h.history) {
-					he := h.history[realIdx]
-					// Check done by the root model which has access to active map and pluginDir.
-					// This returns nil here; root model handles the full r-key logic.
-					_ = he
-				}
-			}
 		}
 
-	case tea.MouseMsg:
-		var cmd tea.Cmd
-		h.historyVP, cmd = h.historyVP.Update(ev)
-		return h, cmd
 	}
 	return h, nil
 }

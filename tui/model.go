@@ -123,7 +123,6 @@ func New(pollSeconds int, info ProjectInfo, pluginDir string) Model {
 		focused:        true,
 		spinnerFrames:  spinnerFrames,
 		now:            now,
-		pluginDir:      pluginDir,
 	}
 
 	return Model{
@@ -222,6 +221,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "enter":
 			m.detailPanel = !m.detailPanel
+			m.updateLayout(false)
 			return m, nil
 
 		case "r":
