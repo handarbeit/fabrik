@@ -6,6 +6,8 @@ import (
 	"os"
 	"sort"
 	"strings"
+
+	"github.com/verveguy/fabrik/tui"
 )
 
 // checkStageColumnAlignment validates that every configured non-cleanup stage
@@ -28,6 +30,16 @@ func (e *Engine) checkStageColumnAlignment(ctx context.Context) error {
 	if board.ProjectID == "" {
 		e.logf(0, "startup", "warning: project board has no ID — skipping startup check\n")
 		return nil
+	}
+
+	// Emit project metadata to the TUI so the footer can display the board title.
+	if board.Title != "" {
+		ownerSegment := "orgs"
+		if board.OwnerType == "user" {
+			ownerSegment = "users"
+		}
+		boardURL := fmt.Sprintf("https://github.com/%s/%s/projects/%d", ownerSegment, e.cfg.Owner, e.cfg.ProjectNum)
+		e.emitStructural(tui.ProjectMetaEvent{BoardTitle: board.Title, BoardURL: boardURL})
 	}
 
 	sf, err := e.client.FetchStatusField(board.ProjectID)

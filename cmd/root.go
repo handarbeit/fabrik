@@ -380,7 +380,6 @@ func buildProjectInfo(cfg *Config, pc config.ProjectConfig) tui.ProjectInfo {
 
 	return tui.ProjectInfo{
 		CWD:           cwdDisplay,
-		Repo:          cfg.Owner + "/" + cfg.Repo,
 		Version:       version,
 		FabrikVersion: Version,
 	}
