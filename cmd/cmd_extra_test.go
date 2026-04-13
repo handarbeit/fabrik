@@ -78,6 +78,9 @@ func (m *testGitHubUpgradeClient) FetchLabelAppliedAt(owner, repo string, issueN
 	return time.Time{}, nil
 }
 func (m *testGitHubUpgradeClient) ArchiveProjectItem(projectID, itemID string) error { return nil }
+func (m *testGitHubUpgradeClient) SeedLabels(owner, repo string, stageNames []string, lockedUser string) error {
+	return nil
+}
 func (m *testGitHubUpgradeClient) RateLimitStats() (gh.RateLimitStats, gh.RateLimitStats) {
 	return gh.RateLimitStats{}, gh.RateLimitStats{}
 }
