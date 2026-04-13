@@ -187,11 +187,32 @@ func supportsOSC8() bool {
 // applyOSC8 wraps the first occurrence of title in plain with an OSC 8 hyperlink
 // pointing to boardURL. If title or boardURL is empty, or if the terminal does not
 // support OSC 8, plain is returned unchanged.
+//
+// IMPORTANT: the returned string must NOT be passed through lipgloss Style.Render()
+// as lipgloss v1 may strip OSC 8 escape sequences. Style the parts separately
+// and concatenate with the raw link.
 func applyOSC8(plain, title, boardURL string) string {
 	if title == "" || boardURL == "" || !supportsOSC8() {
 		return plain
 	}
 	return strings.Replace(plain, title, termenv.Hyperlink(boardURL, title), 1)
+}
+
+// renderWithOSC8 applies dimStyle to plain text but preserves OSC 8 hyperlinks
+// by splitting around the title, styling the non-link parts separately, and
+// inserting the raw hyperlink inline. This avoids lipgloss v1 stripping OSC 8.
+func renderWithOSC8(plain, title, boardURL string) string {
+	if title == "" || boardURL == "" || !supportsOSC8() {
+		return dimStyle.Render(plain)
+	}
+	idx := strings.Index(plain, title)
+	if idx < 0 {
+		return dimStyle.Render(plain)
+	}
+	before := plain[:idx]
+	after := plain[idx+len(title):]
+	link := termenv.Hyperlink(boardURL, title)
+	return dimStyle.Render(before) + link + dimStyle.Render(after)
 }
 
 // New creates an initial TUI model.
@@ -1002,13 +1023,13 @@ func (m Model) viewFooter() string {
 
 	if rightStr == "" {
 		// No right side — original single-side logic.
-		footer := dimStyle.Render(applyOSC8(leftPlain, m.projectInfo.BoardTitle, m.projectInfo.BoardURL))
+		footer := renderWithOSC8(leftPlain, m.projectInfo.BoardTitle, m.projectInfo.BoardURL)
 		if lipgloss.Width(footer) > maxWidth {
 			runes := []rune(leftPlain)
 			for len(runes) > 0 && lipgloss.Width(dimStyle.Render(string(runes)+"…")) > maxWidth {
 				runes = runes[:len(runes)-1]
 			}
-			footer = dimStyle.Render(applyOSC8(string(runes)+"…", m.projectInfo.BoardTitle, m.projectInfo.BoardURL))
+			footer = renderWithOSC8(string(runes)+"…", m.projectInfo.BoardTitle, m.projectInfo.BoardURL)
 		}
 		return footer
 	}
@@ -1016,7 +1037,7 @@ func (m Model) viewFooter() string {
 	// Two-sided layout: left + gap + right.
 	// Right side is always preserved; left is truncated when space is tight.
 	rightWidth := lipgloss.Width(rightStr)
-	leftRendered := dimStyle.Render(applyOSC8(leftPlain, m.projectInfo.BoardTitle, m.projectInfo.BoardURL))
+	leftRendered := renderWithOSC8(leftPlain, m.projectInfo.BoardTitle, m.projectInfo.BoardURL)
 	gap := maxWidth - lipgloss.Width(leftRendered) - rightWidth
 	if gap < 1 {
 		// Left must be truncated to make room for the right side.
@@ -1035,7 +1056,7 @@ func (m Model) viewFooter() string {
 			if len(runes) == 0 {
 				leftRendered = ""
 			} else {
-				leftRendered = dimStyle.Render(applyOSC8(string(runes)+"…", m.projectInfo.BoardTitle, m.projectInfo.BoardURL))
+				leftRendered = renderWithOSC8(string(runes)+"…", m.projectInfo.BoardTitle, m.projectInfo.BoardURL)
 			}
 		}
 		gap = maxWidth - lipgloss.Width(leftRendered) - rightWidth
