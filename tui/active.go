@@ -20,6 +20,7 @@ type ActivePaneComponent struct {
 	spinnerFrames  []string
 	spinnerIdx     int
 	now            time.Time
+	defaultRepo    string // "owner/repo" fallback for single-repo projects where activeJob.Repo is empty
 }
 
 func (a ActivePaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
@@ -141,6 +142,11 @@ func (a ActivePaneComponent) View(width int) string {
 		if a.focused && idx == a.activeIdx {
 			line = selectedStyle.Render(line)
 		}
+		repo := job.Repo
+		if repo == "" {
+			repo = a.defaultRepo
+		}
+		line = injectIssueLink(line, repo, job.IssueNumber)
 		lines = append(lines, line)
 	}
 
@@ -166,6 +172,11 @@ func (a ActivePaneComponent) View(width int) string {
 		if runes := []rune(line); len(runes) > maxWidth {
 			line = string(runes[:maxWidth-1]) + "…"
 		}
+		repo := b.Repo
+		if repo == "" {
+			repo = a.defaultRepo
+		}
+		line = injectIssueLink(line, repo, b.IssueNumber)
 		lines = append(lines, line)
 	}
 
