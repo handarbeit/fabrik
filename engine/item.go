@@ -60,6 +60,37 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 		return false
 	}
 
+	// Cleanup stages bypass the updatedAt cache — their trigger is worktree
+	// existence (a local filesystem check), not issue/PR changes. Board column
+	// moves (Validate→Done by a human) don't always bump updatedAt, so cleanup
+	// items would be permanently skipped if subject to the cache. The cost is
+	// minimal: a local Stat call, no GraphQL impact. Once cleanup runs and
+	// removes the worktree, subsequent polls see no worktree and return false.
+	if stage.CleanupWorktree {
+		key := item.Repo
+		if key == "" {
+			key = e.defaultRepo()
+		}
+		e.mu.Lock()
+		wm, ok := e.worktreeManagers[key]
+		e.mu.Unlock()
+		if ok {
+			if _, err := os.Stat(wm.WorktreeDir(item.Number)); os.IsNotExist(err) {
+				return false
+			}
+			return true
+		}
+		// No WM registered yet (e.g. after restart when only cleanup items remain).
+		// Fall back to checking the filesystem path directly.
+		owner, repo := parseOwnerRepo(key)
+		dirName := owner + "-" + repo
+		wtDir := filepath.Join(e.fabrikDir, ".fabrik", "worktrees", dirName, fmt.Sprintf("issue-%d", item.Number))
+		if _, err := os.Stat(wtDir); os.IsNotExist(err) {
+			return false
+		}
+		return true
+	}
+
 	// Skip items that haven't changed since last poll — unless in cooldown retry.
 	if !item.UpdatedAt.IsZero() {
 		iKey := issueKey(item, e.defaultRepo())
@@ -92,39 +123,6 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 			}
 			return false
 		}
-	}
-
-	// Cleanup stages: only need a worktree existence check at this stage.
-	// Label-based checks (paused, complete) are deferred to itemNeedsWork where
-	// the full label set is available after deep fetch.
-	if stage.CleanupWorktree {
-		// Fast-path: if no worktree directory exists, there is nothing to clean up.
-		// Use a direct map lookup rather than worktreesFor() to avoid a panic —
-		// worktreesFor panics if no WorktreeManager is registered, which happens in
-		// multi-repo mode when ensureRepoReady hasn't run yet for this repo.
-		key := item.Repo
-		if key == "" {
-			key = e.defaultRepo()
-		}
-		e.mu.Lock()
-		wm, ok := e.worktreeManagers[key]
-		e.mu.Unlock()
-		if ok {
-			if _, err := os.Stat(wm.WorktreeDir(item.Number)); os.IsNotExist(err) {
-				return false
-			}
-			return true
-		}
-		// No WM registered yet (e.g. after restart when only cleanup items remain).
-		// Fall back to checking the filesystem path directly using the known
-		// worktree layout: .fabrik/worktrees/<owner>-<repo>/issue-N/
-		owner, repo := parseOwnerRepo(key)
-		dirName := owner + "-" + repo
-		wtDir := filepath.Join(e.fabrikDir, ".fabrik", "worktrees", dirName, fmt.Sprintf("issue-%d", item.Number))
-		if _, err := os.Stat(wtDir); os.IsNotExist(err) {
-			return false
-		}
-		return true
 	}
 
 	// Don't check labels or blockedBy here — those require full label data which
