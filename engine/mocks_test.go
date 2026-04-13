@@ -289,6 +289,10 @@ func (m *mockGitHubClient) ArchiveProjectItem(projectID, itemID string) error {
 	return nil
 }
 
+func (m *mockGitHubClient) SeedLabels(owner, repo string, stageNames []string, lockedUser string) error {
+	return nil
+}
+
 func (m *mockGitHubClient) RateLimitStats() (gh.RateLimitStats, gh.RateLimitStats) {
 	if m.rateLimitStatsFn != nil {
 		return m.rateLimitStatsFn()
