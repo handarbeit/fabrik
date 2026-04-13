@@ -212,7 +212,10 @@ func renderWithOSC8(plain, title, boardURL string) string {
 	before := plain[:idx]
 	after := plain[idx+len(title):]
 	link := termenv.Hyperlink(boardURL, title)
-	return dimStyle.Render(before) + link + dimStyle.Render(after)
+	result := dimStyle.Render(before) + link + dimStyle.Render(after)
+	// Debug: write raw footer bytes to file for inspection
+	os.WriteFile(".fabrik/debug-footer.bin", []byte(result), 0600)
+	return result
 }
 
 // New creates an initial TUI model.
