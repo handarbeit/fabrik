@@ -131,8 +131,9 @@ func (e *Engine) checkStageColumnAlignment(ctx context.Context) error {
 		fmt.Fprintf(os.Stderr, "  - %s (order %d)\n", s.name, s.order)
 	}
 	fmt.Fprintf(os.Stderr, "\nBoard columns found:\n  %s\n\n", strings.Join(allCols, ", "))
-	fmt.Fprintf(os.Stderr, "Fix: ensure your GitHub token has project admin (project:write) permissions,\n")
-	fmt.Fprintf(os.Stderr, "or add the missing columns to your GitHub Project board manually.\n")
+	fmt.Fprintf(os.Stderr, "Fix: ensure your GitHub token has the `project` scope (classic tokens) or\n")
+	fmt.Fprintf(os.Stderr, "\"Projects read-write\" permission (fine-grained tokens), or add the missing\n")
+	fmt.Fprintf(os.Stderr, "columns to your GitHub Project board manually.\n")
 
 	return fmt.Errorf("startup check failed: could not create missing board columns")
 }
