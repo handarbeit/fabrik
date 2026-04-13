@@ -215,43 +215,6 @@ func (a ActivePaneComponent) Height() int {
 	return base
 }
 
-func (a *ActivePaneComponent) HandleClick(x, y int) bool {
-	// y is relative to the active pane's top (0-based).
-	// Content rows start at y=2 (border-top=0, title=1).
-	// Border-bottom is at y=Height()-1; don't treat it as a row selection.
-	h := a.Height()
-	if y >= 2 && y < h-1 {
-		keys := a.sortedActiveKeys()
-		nKeys := len(keys)
-		maxLines := h - 3
-		start := 0
-		hasEllipsis := false
-		if nKeys > maxLines && maxLines > 0 {
-			start = a.activeIdx - maxLines/2
-			if start < 0 {
-				start = 0
-			}
-			if start+maxLines > nKeys {
-				start = max(nKeys-maxLines, 0)
-			}
-			if start > 0 || start+maxLines < nKeys {
-				maxLines--
-				hasEllipsis = true
-			}
-		}
-		visibleRow := y - 2
-		if hasEllipsis && visibleRow == maxLines {
-			return true // clicked ellipsis row
-		}
-		actualIdx := start + visibleRow
-		if actualIdx >= 0 && actualIdx < nKeys {
-			a.activeIdx = actualIdx
-		}
-		return true
-	}
-	return y >= 0 && y < h
-}
-
 // sortedActiveKeys returns job keys from the active map in sorted order.
 func (a ActivePaneComponent) sortedActiveKeys() []string {
 	keys := make([]string, 0, len(a.active))
