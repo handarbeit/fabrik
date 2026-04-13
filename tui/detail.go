@@ -30,8 +30,9 @@ type DetailItem struct {
 // DetailPanelComponent renders metadata for a selected item.
 // It is a pure view component — Update is a no-op.
 type DetailPanelComponent struct {
-	item    *DetailItem
-	visible bool
+	item      *DetailItem
+	visible   bool
+	lastWidth int
 }
 
 func (d DetailPanelComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
@@ -100,7 +101,11 @@ func (d DetailPanelComponent) Height() int {
 	if !d.visible || d.item == nil {
 		return 0
 	}
-	view := d.View(80) // Width doesn't affect line count
+	w := d.lastWidth
+	if w == 0 {
+		w = 80
+	}
+	view := d.View(w)
 	if view == "" {
 		return 0
 	}

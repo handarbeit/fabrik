@@ -246,9 +246,9 @@ func (h *HistoryPaneComponent) SetLayout(width, availableHeight int, confirmQuit
 	// Rebuild viewport content.
 	h.rebuildViewportContent(innerWidth)
 
+	h.historyVP.Width = innerWidth
 	titleAndHintLines := h.titleAndHintLines(activeCount, confirmQuit)
 	vpHeight := max(availableHeight-2-titleAndHintLines, 1) // -2 for border
-	h.historyVP.Width = innerWidth
 	h.historyVP.Height = vpHeight
 }
 

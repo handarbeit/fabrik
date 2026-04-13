@@ -172,6 +172,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.active.ActiveCount() > 0 {
 				m.confirmQuit = true
+				m.updateLayout(false)
 				return m, nil
 			}
 			return m, tea.Quit
@@ -183,10 +184,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.confirmQuit {
 				m.confirmQuit = false
+				m.updateLayout(false)
 				return m, nil
 			}
 			if m.detailPanel {
 				m.detailPanel = false
+				m.updateLayout(false)
 				return m, nil
 			}
 
@@ -197,14 +200,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.detailPanel {
 				m.detailPanel = false
+				m.updateLayout(false)
 				return m, nil
 			}
 			if m.confirmQuit {
 				m.confirmQuit = false
+				m.updateLayout(false)
 				return m, nil
 			}
 			if m.active.ActiveCount() > 0 {
 				m.confirmQuit = true
+				m.updateLayout(false)
 				return m, nil
 			}
 			return m, tea.Quit
@@ -330,11 +336,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case JobStartedEvent:
 		comp, _ := m.active.Update(msg)
 		m.active = comp.(ActivePaneComponent)
+		m.updateLayout(false)
 		return m, nil
 
 	case IssueBlockedEvent:
 		comp, _ := m.active.Update(msg)
 		m.active = comp.(ActivePaneComponent)
+		m.updateLayout(false)
 		return m, nil
 
 	case JobCompletedEvent:
