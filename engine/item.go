@@ -42,6 +42,41 @@ func isAwaitingInput(item gh.ProjectItem) bool {
 	return hasPaused && hasAwaitingInput
 }
 
+// worktreeExistsForItem reports whether a worktree directory exists on disk
+// for item. It uses the registered WorktreeManager when available, or falls
+// back to the conventional filesystem path when no WM is registered (e.g.,
+// after a restart when only cleanup items remain). This is a local-only check
+// with no GraphQL cost.
+func (e *Engine) worktreeExistsForItem(item gh.ProjectItem) bool {
+	key := item.Repo
+	if key == "" {
+		key = e.defaultRepo()
+	}
+	e.mu.Lock()
+	wm, ok := e.worktreeManagers[key]
+	e.mu.Unlock()
+	var wtDir string
+	if ok {
+		wtDir = wm.WorktreeDir(item.Number)
+	} else {
+		owner, repo := parseOwnerRepo(key)
+		dirName := owner + "-" + repo
+		wtDir = filepath.Join(e.fabrikDir, ".fabrik", "worktrees", dirName, fmt.Sprintf("issue-%d", item.Number))
+	}
+	_, err := os.Stat(wtDir)
+	return err == nil
+}
+
+// hasLabel reports whether item.Labels contains label.
+func hasLabel(item gh.ProjectItem, label string) bool {
+	for _, l := range item.Labels {
+		if l == label {
+			return true
+		}
+	}
+	return false
+}
+
 // itemMayNeedWork does cheap pre-checks using only shallow board data (no comments).
 // Items that pass this filter will have their details fetched via FetchItemDetails
 // before the full itemNeedsWork check. This avoids expensive deep fetches for items
@@ -67,28 +102,7 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 	// minimal: a local Stat call, no GraphQL impact. Once cleanup runs and
 	// removes the worktree, subsequent polls see no worktree and return false.
 	if stage.CleanupWorktree {
-		key := item.Repo
-		if key == "" {
-			key = e.defaultRepo()
-		}
-		e.mu.Lock()
-		wm, ok := e.worktreeManagers[key]
-		e.mu.Unlock()
-		if ok {
-			if _, err := os.Stat(wm.WorktreeDir(item.Number)); os.IsNotExist(err) {
-				return false
-			}
-			return true
-		}
-		// No WM registered yet (e.g. after restart when only cleanup items remain).
-		// Fall back to checking the filesystem path directly.
-		owner, repo := parseOwnerRepo(key)
-		dirName := owner + "-" + repo
-		wtDir := filepath.Join(e.fabrikDir, ".fabrik", "worktrees", dirName, fmt.Sprintf("issue-%d", item.Number))
-		if _, err := os.Stat(wtDir); os.IsNotExist(err) {
-			return false
-		}
-		return true
+		return e.worktreeExistsForItem(item)
 	}
 
 	// Skip items that haven't changed since last poll — unless in cooldown retry.
@@ -164,42 +178,13 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 
 	// Cleanup stages bypass comment processing and cooldown checks.
 	if stage.CleanupWorktree {
-		for _, label := range item.Labels {
-			if label == "fabrik:paused" {
-				return false
-			}
-		}
-		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
-		for _, label := range item.Labels {
-			if label == completeLabel {
-				return false
-			}
-		}
-		// If no worktree directory exists, there is nothing to clean up.
-		// Use a direct map lookup rather than worktreesFor() to avoid a panic —
-		// worktreesFor panics if no WorktreeManager is registered, which can happen
-		// in multi-repo mode before ensureRepoReady has run for this repo.
-		key := item.Repo
-		if key == "" {
-			key = e.defaultRepo()
-		}
-		e.mu.Lock()
-		wm, ok := e.worktreeManagers[key]
-		e.mu.Unlock()
-		if ok {
-			if _, err := os.Stat(wm.WorktreeDir(item.Number)); os.IsNotExist(err) {
-				return false
-			}
-			return true
-		}
-		// No WM registered yet — fall back to checking the filesystem path directly.
-		owner, repo := parseOwnerRepo(key)
-		dirName := owner + "-" + repo
-		wtDir := filepath.Join(e.fabrikDir, ".fabrik", "worktrees", dirName, fmt.Sprintf("issue-%d", item.Number))
-		if _, err := os.Stat(wtDir); os.IsNotExist(err) {
+		if hasLabel(item, "fabrik:paused") {
 			return false
 		}
-		return true
+		if hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) {
+			return false
+		}
+		return e.worktreeExistsForItem(item)
 	}
 
 	// Awaiting-input items (paused + awaiting-input) bypass the paused guard but
@@ -224,13 +209,7 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 
 	// Paused items: a new user comment is an implicit "resume and handle this."
 	// Without a comment, respect the pause.
-	isPaused := false
-	for _, label := range item.Labels {
-		if label == "fabrik:paused" {
-			isPaused = true
-			break
-		}
-	}
+	isPaused := hasLabel(item, "fabrik:paused")
 	newComments := e.findNewComments(item)
 	if isPaused {
 		if len(newComments) > 0 {
