@@ -152,7 +152,3 @@ func (f FooterComponent) View(width int) string {
 func (f FooterComponent) Height() int {
 	return 1
 }
-
-func (f FooterComponent) HandleClick(x, y int) bool {
-	return false
-}
