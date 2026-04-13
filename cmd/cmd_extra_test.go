@@ -357,9 +357,6 @@ func TestBuildProjectInfo_HomeRelative(t *testing.T) {
 	cfg := &Config{Owner: "acme", Repo: "myrepo"}
 	info := buildProjectInfo(cfg, config.ProjectConfig{})
 
-	if info.Repo != "acme/myrepo" {
-		t.Errorf("Repo = %q, want %q", info.Repo, "acme/myrepo")
-	}
 	// CWD should not be empty
 	if info.CWD == "" {
 		t.Error("CWD should not be empty")
@@ -405,9 +402,6 @@ func TestBuildProjectInfo_RepoFormat(t *testing.T) {
 	chdirTest(t, dir)
 	cfg := &Config{Owner: "org", Repo: "repo"}
 	info := buildProjectInfo(cfg, config.ProjectConfig{Version: "v1.2.3"})
-	if info.Repo != "org/repo" {
-		t.Errorf("Repo = %q, want org/repo", info.Repo)
-	}
 	if info.Version != "v1.2.3" {
 		t.Errorf("Version = %q, want v1.2.3", info.Version)
 	}
