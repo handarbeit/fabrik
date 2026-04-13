@@ -360,24 +360,24 @@ func TestViewFooter_Content(t *testing.T) {
 }
 
 func TestViewFooter_NoVersion(t *testing.T) {
-	m := New(30, ProjectInfo{CWD: "~/projects/myapp", Repo: "org/myapp"}, "")
+	m := New(30, ProjectInfo{CWD: "~/projects/myapp", BoardTitle: "My Board"}, "")
 	m.width = 120
 	footer := m.viewFooter()
 
 	if !strings.Contains(footer, "~/projects/myapp") {
 		t.Error("footer missing CWD when version is absent")
 	}
-	if !strings.Contains(footer, "org/myapp") {
-		t.Error("footer missing repo when version is absent")
+	if !strings.Contains(footer, "My Board") {
+		t.Error("footer missing board title when version is absent")
 	}
 }
 
 func TestViewFooter_Truncation(t *testing.T) {
 	// Use a narrow terminal to force truncation.
 	m := New(30, ProjectInfo{
-		CWD:     "~/very/long/path/to/a/deeply/nested/project/directory",
-		Repo:    "some-long-org/some-long-repo-name",
-		Version: "99.99.99",
+		CWD:        "~/very/long/path/to/a/deeply/nested/project/directory",
+		BoardTitle: "Some Long Board Name For Truncation Test",
+		Version:    "99.99.99",
 	}, "")
 	m.width = 30
 	footer := m.viewFooter()
@@ -396,7 +396,7 @@ func TestViewFooter_Truncation(t *testing.T) {
 // TestViewFooter_RateLimitHidden verifies that the rate limit section is omitted
 // when no stats have been received (Limit==0).
 func TestViewFooter_RateLimitHidden(t *testing.T) {
-	m := New(30, ProjectInfo{CWD: "~/projects/myapp", Repo: "org/myapp"}, "")
+	m := New(30, ProjectInfo{CWD: "~/projects/myapp", BoardTitle: "My Board"}, "")
 	m.width = 120
 	// graphqlStats is zero-value (Limit==0) by default.
 	footer := m.viewFooter()
@@ -415,7 +415,7 @@ func TestViewFooter_RateLimitHidden(t *testing.T) {
 // TestViewFooter_RateLimitShown verifies the rate limit section appears once
 // graphqlStats is populated, and contains the fraction and countdown.
 func TestViewFooter_RateLimitShown(t *testing.T) {
-	m := New(30, ProjectInfo{CWD: "~/projects/myapp", Repo: "org/myapp"}, "")
+	m := New(30, ProjectInfo{CWD: "~/projects/myapp", BoardTitle: "My Board"}, "")
 	m.width = 120
 	m.now = time.Now()
 	m.graphqlStats = RateLimitStats{
@@ -455,7 +455,7 @@ func TestViewFooter_RateLimitColors(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m := New(30, ProjectInfo{CWD: "~", Repo: "org/repo"}, "")
+			m := New(30, ProjectInfo{CWD: "~", BoardTitle: "My Board"}, "")
 			m.width = 120
 			m.now = now
 			m.graphqlStats = RateLimitStats{
@@ -477,9 +477,9 @@ func TestViewFooter_RateLimitColors(t *testing.T) {
 func TestViewFooter_TruncationWithRateLimit(t *testing.T) {
 	now := time.Now()
 	m := New(30, ProjectInfo{
-		CWD:     "~/very/long/path/to/a/deeply/nested/project/directory",
-		Repo:    "some-long-org/some-long-repo-name",
-		Version: "99.99.99",
+		CWD:        "~/very/long/path/to/a/deeply/nested/project/directory",
+		BoardTitle: "Some Long Board Name For Truncation Test",
+		Version:    "99.99.99",
 	}, "")
 	m.width = 40
 	m.now = now
@@ -503,6 +503,63 @@ func TestViewFooter_TruncationWithRateLimit(t *testing.T) {
 	// Left side must be truncated (too long to fit with right side).
 	if !strings.Contains(plain, "…") {
 		t.Errorf("expected left-side truncation ellipsis; got: %q", plain)
+	}
+}
+
+// TestViewFooter_OSC8Hyperlink verifies that the board title is wrapped in an
+// OSC 8 hyperlink when the terminal reports OSC 8 support.
+func TestViewFooter_OSC8Hyperlink(t *testing.T) {
+	t.Setenv("TERM_PROGRAM", "ghostty")
+	m := New(30, ProjectInfo{
+		CWD:        "~",
+		BoardTitle: "My Board",
+		BoardURL:   "https://github.com/orgs/acme/projects/1",
+	}, "")
+	m.width = 120
+	footer := m.viewFooter()
+
+	if !strings.Contains(footer, "My Board") {
+		t.Errorf("footer missing board title; got: %q", footer)
+	}
+	if !strings.Contains(footer, "https://github.com/orgs/acme/projects/1") {
+		t.Errorf("footer missing OSC 8 hyperlink URL; got: %q", footer)
+	}
+}
+
+// TestViewFooter_PlainTextNoOSC8 verifies that the board title is rendered as
+// plain text (no URL) when the terminal does not support OSC 8.
+func TestViewFooter_PlainTextNoOSC8(t *testing.T) {
+	t.Setenv("TERM_PROGRAM", "")
+	t.Setenv("TERM", "")
+	m := New(30, ProjectInfo{
+		CWD:        "~",
+		BoardTitle: "My Board",
+		BoardURL:   "https://github.com/orgs/acme/projects/1",
+	}, "")
+	m.width = 120
+	footer := m.viewFooter()
+
+	if !strings.Contains(footer, "My Board") {
+		t.Errorf("footer missing board title; got: %q", footer)
+	}
+	if strings.Contains(footer, "https://github.com/orgs/acme/projects/1") {
+		t.Errorf("footer should not contain hyperlink URL in non-OSC8 terminal; got: %q", footer)
+	}
+}
+
+// TestViewFooter_NoTitleSlot verifies that no separator dot is shown when
+// BoardTitle is empty (footer is just CWD with no board title slot).
+func TestViewFooter_NoTitleSlot(t *testing.T) {
+	m := New(30, ProjectInfo{CWD: "~/project"}, "")
+	m.width = 120
+	footer := m.viewFooter()
+	plain := ansi.Strip(footer)
+
+	if !strings.Contains(plain, "~/project") {
+		t.Errorf("footer missing CWD; got: %q", plain)
+	}
+	if strings.Contains(plain, "·") {
+		t.Errorf("footer should not contain separator when board title is absent; got: %q", plain)
 	}
 }
 
