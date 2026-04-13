@@ -20,7 +20,6 @@ type ActivePaneComponent struct {
 	spinnerFrames  []string
 	spinnerIdx     int
 	now            time.Time
-	pluginDir      string
 }
 
 func (a ActivePaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
@@ -57,6 +56,9 @@ func (a ActivePaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 		delete(a.active, key)
 		if a.activeNumToKey[ev.IssueNumber] == key {
 			delete(a.activeNumToKey, ev.IssueNumber)
+		}
+		if a.activeIdx >= len(a.active) && a.activeIdx > 0 {
+			a.activeIdx = len(a.active) - 1
 		}
 
 	case LogEvent:
