@@ -186,10 +186,17 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		e.mu.Lock()
 		wm, ok := e.worktreeManagers[key]
 		e.mu.Unlock()
-		if !ok {
-			return false
+		if ok {
+			if _, err := os.Stat(wm.WorktreeDir(item.Number)); os.IsNotExist(err) {
+				return false
+			}
+			return true
 		}
-		if _, err := os.Stat(wm.WorktreeDir(item.Number)); os.IsNotExist(err) {
+		// No WM registered yet — fall back to checking the filesystem path directly.
+		owner, repo := parseOwnerRepo(key)
+		dirName := owner + "-" + repo
+		wtDir := filepath.Join(e.fabrikDir, ".fabrik", "worktrees", dirName, fmt.Sprintf("issue-%d", item.Number))
+		if _, err := os.Stat(wtDir); os.IsNotExist(err) {
 			return false
 		}
 		return true
