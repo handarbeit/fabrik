@@ -91,3 +91,12 @@ type TickEvent struct {
 }
 
 func (TickEvent) tuiEvent() {}
+
+// ProjectMetaEvent is emitted once after the startup board fetch succeeds.
+// It delivers the project board title and URL to the TUI for display in the footer.
+type ProjectMetaEvent struct {
+	BoardTitle string // display name of the GitHub Project board
+	BoardURL   string // https://github.com/{orgs|users}/{owner}/projects/{num}
+}
+
+func (ProjectMetaEvent) tuiEvent() {}

@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 // HistoryEntry records a completed job for the history pane.
@@ -80,7 +81,8 @@ const (
 // ProjectInfo holds display metadata about the monitored project shown in the footer.
 type ProjectInfo struct {
 	CWD           string // display-ready CWD (home-relative or absolute)
-	Repo          string // "owner/repo"
+	BoardTitle    string // GitHub Project board title; empty until startup board fetch succeeds
+	BoardURL      string // https://github.com/{orgs|users}/{owner}/projects/{num}
 	Version       string // optional version or module name of the monitored project; empty if unknown
 	FabrikVersion string // fabrik binary version (e.g. "v1.2.3" or "dev(abc1234)")
 }
@@ -167,6 +169,30 @@ var (
 	activeStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	selectedStyle = lipgloss.NewStyle().Background(lipgloss.Color("238"))
 )
+
+// supportsOSC8 returns true when the terminal is known to support OSC 8 hyperlinks.
+// Detection uses environment variables because no universal runtime query exists.
+func supportsOSC8() bool {
+	prog := strings.ToLower(os.Getenv("TERM_PROGRAM"))
+	switch prog {
+	case "iterm.app", "ghostty", "wezterm", "kitty":
+		return true
+	}
+	if strings.Contains(strings.ToLower(os.Getenv("TERM")), "kitty") {
+		return true
+	}
+	return false
+}
+
+// applyOSC8 wraps the first occurrence of title in plain with an OSC 8 hyperlink
+// pointing to boardURL. If title or boardURL is empty, or if the terminal does not
+// support OSC 8, plain is returned unchanged.
+func applyOSC8(plain, title, boardURL string) string {
+	if title == "" || boardURL == "" || !supportsOSC8() {
+		return plain
+	}
+	return strings.Replace(plain, title, termenv.Hyperlink(boardURL, title), 1)
+}
 
 // New creates an initial TUI model.
 // pollSeconds is the configured polling interval.
@@ -403,6 +429,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinnerIdx = (m.spinnerIdx + 1) % len(m.spinnerFrames)
 		m.statusMsg = "" // clear transient status message each tick
 		return m, tickCmd()
+
+	case ProjectMetaEvent:
+		m.projectInfo.BoardTitle = ev.BoardTitle
+		m.projectInfo.BoardURL = ev.BoardURL
+		return m, nil
 
 	case PollStartedEvent:
 		m.nextPollAt = time.Now().Add(m.pollInterval)
@@ -933,13 +964,13 @@ func (m Model) viewHistory() string {
 }
 
 func (m Model) viewFooter() string {
-	// Assemble left side: CWD · owner/repo [· version]
+	// Assemble left side: CWD [· BoardTitle] [· version]
 	parts := []string{}
 	if m.projectInfo.CWD != "" {
 		parts = append(parts, m.projectInfo.CWD)
 	}
-	if m.projectInfo.Repo != "" {
-		parts = append(parts, m.projectInfo.Repo)
+	if m.projectInfo.BoardTitle != "" {
+		parts = append(parts, m.projectInfo.BoardTitle)
 	}
 	if m.projectInfo.Version != "" {
 		parts = append(parts, m.projectInfo.Version)
@@ -971,13 +1002,13 @@ func (m Model) viewFooter() string {
 
 	if rightStr == "" {
 		// No right side — original single-side logic.
-		footer := dimStyle.Render(leftPlain)
+		footer := dimStyle.Render(applyOSC8(leftPlain, m.projectInfo.BoardTitle, m.projectInfo.BoardURL))
 		if lipgloss.Width(footer) > maxWidth {
 			runes := []rune(leftPlain)
 			for len(runes) > 0 && lipgloss.Width(dimStyle.Render(string(runes)+"…")) > maxWidth {
 				runes = runes[:len(runes)-1]
 			}
-			footer = dimStyle.Render(string(runes) + "…")
+			footer = dimStyle.Render(applyOSC8(string(runes)+"…", m.projectInfo.BoardTitle, m.projectInfo.BoardURL))
 		}
 		return footer
 	}
@@ -985,7 +1016,7 @@ func (m Model) viewFooter() string {
 	// Two-sided layout: left + gap + right.
 	// Right side is always preserved; left is truncated when space is tight.
 	rightWidth := lipgloss.Width(rightStr)
-	leftRendered := dimStyle.Render(leftPlain)
+	leftRendered := dimStyle.Render(applyOSC8(leftPlain, m.projectInfo.BoardTitle, m.projectInfo.BoardURL))
 	gap := maxWidth - lipgloss.Width(leftRendered) - rightWidth
 	if gap < 1 {
 		// Left must be truncated to make room for the right side.
@@ -1004,7 +1035,7 @@ func (m Model) viewFooter() string {
 			if len(runes) == 0 {
 				leftRendered = ""
 			} else {
-				leftRendered = dimStyle.Render(string(runes) + "…")
+				leftRendered = dimStyle.Render(applyOSC8(string(runes)+"…", m.projectInfo.BoardTitle, m.projectInfo.BoardURL))
 			}
 		}
 		gap = maxWidth - lipgloss.Width(leftRendered) - rightWidth
