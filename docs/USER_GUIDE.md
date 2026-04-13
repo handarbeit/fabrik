@@ -968,7 +968,7 @@ Claude sessions, and a scrollable History pane with completed jobs.
 | `C` | Clear all history (with confirmation) |
 | `q` | Quit |
 
-Mouse support is enabled by default: click a row to select it in either pane.
+In terminals that support OSC 8 hyperlinks (Ghostty, iTerm2, WezTerm, Kitty), issue numbers (`#NNN`) in the In Progress and History panes are clickable links that open the corresponding GitHub issue in your browser. The project board title in the footer is also a clickable link. Use keyboard navigation for selection and scrolling.
 
 ### What's Displayed
 
