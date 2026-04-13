@@ -76,6 +76,7 @@ type ProjectInfo struct {
 	CWD           string // display-ready CWD (home-relative or absolute)
 	BoardTitle    string // GitHub Project board title; empty until startup board fetch succeeds
 	BoardURL      string // https://github.com/{orgs|users}/{owner}/projects/{num}
+	Repo          string // "owner/repo" — used as fallback for OSC 8 issue links when per-entry Repo is empty
 	Version       string // optional version or module name of the monitored project; empty if unknown
 	FabrikVersion string // fabrik binary version (e.g. "v1.2.3" or "dev(abc1234)")
 }
@@ -101,10 +102,6 @@ type Model struct {
 	detail  DetailPanelComponent
 	footer  FooterComponent
 
-	// mouse double-click detection
-	lastClickAt time.Time
-	lastClickX  int
-	lastClickY  int
 }
 
 // New creates an initial TUI model.
@@ -364,81 +361,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case tea.MouseMsg:
-		return m.handleMouse(ev)
 	}
 
 	return m, nil
-}
-
-// handleMouse processes mouse events: forwards wheel scroll to the history
-// viewport, then performs hit-testing using component Height() returns.
-func (m Model) handleMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
-	// Forward all mouse events to the history viewport so wheel-scroll works.
-	cmd := m.history.ForwardMouseEvent(ev)
-
-	if ev.Button != tea.MouseButtonLeft || ev.Action != tea.MouseActionPress {
-		return m, cmd
-	}
-
-	// Compute layout Y positions from component Height() returns.
-	headerH := m.header.Height()
-	activeH := m.active.Height()
-
-	detailH := 0
-	if m.detailPanel {
-		m.prepareDetailItem()
-		detailH = m.detail.Height()
-	}
-
-	activeStart := headerH
-	activeEnd := activeStart + activeH
-	detailEnd := activeEnd + detailH
-	histStart := detailEnd
-
-	clickY := ev.Y
-
-	// Detect double-click: same cell within 300ms.
-	isDoubleClick := time.Since(m.lastClickAt) < 300*time.Millisecond &&
-		ev.X == m.lastClickX && ev.Y == m.lastClickY
-	m.lastClickAt = time.Now()
-	m.lastClickX = ev.X
-	m.lastClickY = ev.Y
-
-	switch {
-	case clickY >= activeStart && clickY < activeEnd:
-		m.focusPane = paneActive
-		m.syncFocus()
-		localY := clickY - activeStart
-		m.active.HandleClick(ev.X, localY)
-
-		// Double-click on active content row opens watch
-		if isDoubleClick && localY >= 2 && localY < activeH-1 {
-			if job := m.active.SelectedJob(); job != nil {
-				return m, openWatchInlineCmd(job.IssueNumber, job.Repo)
-			}
-		}
-
-	case clickY >= histStart && clickY <= histStart+1:
-		m.focusPane = paneHistory
-		m.syncFocus()
-		m.updateLayout(false)
-
-	case clickY >= histStart+2:
-		m.focusPane = paneHistory
-		m.syncFocus()
-		localY := clickY - histStart
-		m.history.HandleClick(ev.X, localY)
-		m.updateLayout(false)
-
-		if isDoubleClick {
-			if entry := m.history.SelectedEntry(); entry != nil {
-				return m, openWatchInlineCmd(entry.IssueNumber, entry.Repo)
-			}
-		}
-	}
-
-	return m, cmd
 }
 
 // syncFocus updates focused state on pane components to match m.focusPane.
