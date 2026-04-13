@@ -51,7 +51,7 @@ type mockGitHubClient struct {
 	lookupIssueProjectItemFn      func(projectID, repo string, issueNumber int) (string, string, error)
 	fetchPRClosingIssuesFn        func(owner, repo string, prNumber int) ([]int, error)
 	fetchPRsForSHAFn              func(owner, repo, sha string) ([]int, error)
-	addBoardColumnFn              func(projectID, fieldID string, existingOptions map[string]string, newName string) (string, error)
+	addBoardColumnFn              func(projectID, fieldID string, existingOptionNames []string, newName string) (string, error)
 
 	// Track call counts for FetchProjectItemStatus
 	fetchProjectItemStatusCalls []string
@@ -111,9 +111,9 @@ type prReviewCommentReactionCall struct {
 }
 
 type addBoardColumnCall struct {
-	projectID, fieldID string
-	existingOptions    map[string]string
-	newName            string
+	projectID, fieldID  string
+	existingOptionNames []string
+	newName             string
 }
 
 type fetchLabelAppliedAtCall struct {
@@ -472,13 +472,13 @@ func (m *mockGitHubClient) FetchLabelAppliedAt(owner, repo string, issueNumber i
 	return time.Time{}, nil
 }
 
-func (m *mockGitHubClient) AddBoardColumn(projectID, fieldID string, existingOptions map[string]string, newName string) (string, error) {
+func (m *mockGitHubClient) AddBoardColumn(projectID, fieldID string, existingOptionNames []string, newName string) (string, error) {
 	m.mu.Lock()
-	m.addBoardColumnCalls = append(m.addBoardColumnCalls, addBoardColumnCall{projectID, fieldID, existingOptions, newName})
+	m.addBoardColumnCalls = append(m.addBoardColumnCalls, addBoardColumnCall{projectID, fieldID, existingOptionNames, newName})
 	fn := m.addBoardColumnFn
 	m.mu.Unlock()
 	if fn != nil {
-		return fn(projectID, fieldID, existingOptions, newName)
+		return fn(projectID, fieldID, existingOptionNames, newName)
 	}
 	return "new-opt-id", nil
 }

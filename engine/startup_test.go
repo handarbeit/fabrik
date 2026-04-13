@@ -23,10 +23,12 @@ func boardWithColumns(projectID string) func(owner, repo string, projectNum int,
 func statusFieldWithOptions(names ...string) func(projectID string) (*gh.StatusField, error) {
 	return func(projectID string) (*gh.StatusField, error) {
 		opts := make(map[string]string, len(names))
+		order := make([]string, len(names))
 		for i, n := range names {
 			opts[n] = fmt.Sprintf("opt-%d", i)
+			order[i] = n
 		}
-		return &gh.StatusField{FieldID: "field-1", Options: opts}, nil
+		return &gh.StatusField{FieldID: "field-1", Options: opts, OptionOrder: order}, nil
 	}
 }
 
@@ -249,7 +251,7 @@ func TestCheckStageColumnAlignment_CreationFailure(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchProjectBoardFn: boardWithColumns("proj-1"),
 		fetchStatusFieldFn:  statusFieldWithOptions("Research", "Plan"),
-		addBoardColumnFn: func(projectID, fieldID string, existingOptions map[string]string, newName string) (string, error) {
+		addBoardColumnFn: func(projectID, fieldID string, existingOptionNames []string, newName string) (string, error) {
 			return "", fmt.Errorf("insufficient permissions")
 		},
 	}
@@ -269,7 +271,7 @@ func TestCheckStageColumnAlignment_PartialFailure(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchProjectBoardFn: boardWithColumns("proj-1"),
 		fetchStatusFieldFn:  statusFieldWithOptions("Research"),
-		addBoardColumnFn: func(projectID, fieldID string, existingOptions map[string]string, newName string) (string, error) {
+		addBoardColumnFn: func(projectID, fieldID string, existingOptionNames []string, newName string) (string, error) {
 			if newName == "Plan" {
 				return "opt-plan", nil
 			}
@@ -300,7 +302,7 @@ func TestCheckStageColumnAlignment_StatusFieldUpdated(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchProjectBoardFn: boardWithColumns("proj-1"),
 		fetchStatusFieldFn:  statusFieldWithOptions("Research", "Plan"),
-		addBoardColumnFn: func(projectID, fieldID string, existingOptions map[string]string, newName string) (string, error) {
+		addBoardColumnFn: func(projectID, fieldID string, existingOptionNames []string, newName string) (string, error) {
 			return "new-implement-id", nil
 		},
 	}

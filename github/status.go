@@ -2,13 +2,13 @@ package github
 
 import (
 	"fmt"
-	"sort"
 )
 
 // StatusField holds the Status field metadata for a project.
 type StatusField struct {
-	FieldID string
-	Options map[string]string // status name -> option ID
+	FieldID      string
+	Options      map[string]string // status name -> option ID
+	OptionOrder  []string          // option names in the order returned by the API (preserves board column order)
 }
 
 // UpdateProjectItemStatus moves an item to a different status column on the project board.
@@ -100,11 +100,13 @@ query($projectId: ID!) {
 	}
 
 	sf := &StatusField{
-		FieldID: result.Data.Node.Field.ID,
-		Options: make(map[string]string),
+		FieldID:     result.Data.Node.Field.ID,
+		Options:     make(map[string]string),
+		OptionOrder: make([]string, 0, len(result.Data.Node.Field.Options)),
 	}
 	for _, opt := range result.Data.Node.Field.Options {
 		sf.Options[opt.Name] = opt.ID
+		sf.OptionOrder = append(sf.OptionOrder, opt.Name)
 	}
 
 	return sf, nil
@@ -112,18 +114,13 @@ query($projectId: ID!) {
 
 // AddBoardColumn adds a new option to the Status single-select field on a
 // GitHub ProjectV2 board. The mutation replaces the entire options list, so
-// existingOptions (name→ID from a recent FetchStatusField) must be passed to
-// preserve existing columns. Returns the new option's ID.
-func (c *Client) AddBoardColumn(projectID, fieldID string, existingOptions map[string]string, newName string) (string, error) {
-	// Build the full options list: existing names (sorted for determinism) + new name.
-	names := make([]string, 0, len(existingOptions))
-	for name := range existingOptions {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	options := make([]map[string]string, 0, len(names)+1)
-	for _, name := range names {
+// existingOptionNames (in their original API order from StatusField.OptionOrder)
+// must be passed to preserve existing columns and their ordering.
+// Returns the new option's ID.
+func (c *Client) AddBoardColumn(projectID, fieldID string, existingOptionNames []string, newName string) (string, error) {
+	// Build the full options list: existing names (in original order) + new name appended.
+	options := make([]map[string]string, 0, len(existingOptionNames)+1)
+	for _, name := range existingOptionNames {
 		options = append(options, map[string]string{"name": name})
 	}
 	options = append(options, map[string]string{"name": newName})

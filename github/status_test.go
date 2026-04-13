@@ -56,10 +56,7 @@ func TestAddBoardColumn_Success(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("token", srv.URL)
-	existing := map[string]string{
-		"Research": "opt-2",
-		"Plan":     "opt-1",
-	}
+	existing := []string{"Plan", "Research"}
 
 	optionID, err := c.AddBoardColumn("proj-1", "field-1", existing, "Review")
 	if err != nil {
@@ -82,7 +79,7 @@ func TestAddBoardColumn_APIError(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("token", srv.URL)
-	_, err := c.AddBoardColumn("proj-1", "field-1", map[string]string{}, "Review")
+	_, err := c.AddBoardColumn("proj-1", "field-1", []string{}, "Review")
 	if err == nil {
 		t.Fatal("expected error for API error response")
 	}
@@ -106,7 +103,7 @@ func TestAddBoardColumn_OptionNotInResponse(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("token", srv.URL)
-	_, err := c.AddBoardColumn("proj-1", "field-1", map[string]string{"Research": "opt-1"}, "Review")
+	_, err := c.AddBoardColumn("proj-1", "field-1", []string{"Research"}, "Review")
 	if err == nil {
 		t.Fatal("expected error when new option not in response")
 	}

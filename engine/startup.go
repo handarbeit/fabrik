@@ -97,7 +97,7 @@ func (e *Engine) checkStageColumnAlignment(ctx context.Context) error {
 	var failed []*stageNameOrder
 	for _, s := range missing {
 		e.logf(0, "startup", "creating missing board column %q (order %d)...\n", s.name, s.order)
-		optionID, err := e.client.AddBoardColumn(board.ProjectID, sf.FieldID, sf.Options, s.name)
+		optionID, err := e.client.AddBoardColumn(board.ProjectID, sf.FieldID, sf.OptionOrder, s.name)
 		if err != nil {
 			e.logf(0, "startup", "warning: could not create board column %q: %v\n", s.name, err)
 			failed = append(failed, s)
@@ -105,6 +105,7 @@ func (e *Engine) checkStageColumnAlignment(ctx context.Context) error {
 		}
 		// Update the cached StatusField so subsequent creations include this option.
 		sf.Options[s.name] = optionID
+		sf.OptionOrder = append(sf.OptionOrder, s.name)
 		e.logf(0, "startup", "created board column %q (option ID: %s)\n", s.name, optionID)
 	}
 
