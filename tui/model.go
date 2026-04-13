@@ -496,6 +496,7 @@ func (m *Model) prepareDetailItem() {
 	} else {
 		m.detail.SetItem(nil)
 	}
+	m.detail.SetWidth(m.width)
 	m.detail.SetVisible(m.detailPanel)
 }
 
