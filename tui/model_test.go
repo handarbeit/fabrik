@@ -307,7 +307,7 @@ func TestView_BeforeWindowSize(t *testing.T) {
 }
 
 func TestView_AfterWindowSize(t *testing.T) {
-	m := New(30, ProjectInfo{Repo: "owner/repo", CWD: "~/myproject"}, "")
+	m := New(30, ProjectInfo{BoardTitle: "Acme PM", CWD: "~/myproject"}, "")
 	m.width = 80
 	m.height = 24
 	m.nextPollAt = time.Now().Add(30 * time.Second)
@@ -325,8 +325,8 @@ func TestView_AfterWindowSize(t *testing.T) {
 	if !strings.Contains(v, "History") {
 		t.Error("should show History pane")
 	}
-	if !strings.Contains(v, "owner/repo") {
-		t.Error("footer should contain repo")
+	if !strings.Contains(v, "Acme PM") {
+		t.Error("footer should contain board title")
 	}
 	if !strings.Contains(v, "~/myproject") {
 		t.Error("footer should contain CWD")
@@ -334,7 +334,7 @@ func TestView_AfterWindowSize(t *testing.T) {
 }
 
 func TestNew_StoresProjectInfo(t *testing.T) {
-	info := ProjectInfo{CWD: "~/foo", Repo: "org/bar", Version: "1.2.3"}
+	info := ProjectInfo{CWD: "~/foo", BoardTitle: "Acme Board", Version: "1.2.3"}
 	m := New(30, info, "")
 	if m.projectInfo != info {
 		t.Errorf("projectInfo = %+v, want %+v", m.projectInfo, info)
@@ -348,11 +348,11 @@ func TestFooterHeight(t *testing.T) {
 }
 
 func TestViewFooter_Content(t *testing.T) {
-	m := New(30, ProjectInfo{CWD: "~/projects/myapp", Repo: "org/myapp", Version: "2.0.0"}, "")
+	m := New(30, ProjectInfo{CWD: "~/projects/myapp", BoardTitle: "My Board", Version: "2.0.0"}, "")
 	m.width = 120
 	footer := m.viewFooter()
 
-	for _, want := range []string{"~/projects/myapp", "org/myapp", "2.0.0"} {
+	for _, want := range []string{"~/projects/myapp", "My Board", "2.0.0"} {
 		if !strings.Contains(footer, want) {
 			t.Errorf("viewFooter() missing %q; got: %q", want, footer)
 		}
