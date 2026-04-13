@@ -13,7 +13,9 @@ func TestAddBoardColumn_Success(t *testing.T) {
 			Query     string                 `json:"query"`
 			Variables map[string]interface{} `json:"variables"`
 		}
-		json.NewDecoder(r.Body).Decode(&body)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decoding request body: %v", err)
+		}
 
 		// Verify that options include both existing and new.
 		options, ok := body.Variables["options"].([]interface{})
@@ -24,11 +26,18 @@ func TestAddBoardColumn_Success(t *testing.T) {
 			t.Fatalf("expected 3 options (2 existing + 1 new), got %d", len(options))
 		}
 
-		// Verify deterministic ordering: existing sorted + new appended.
+		// Verify ordering: existing in original order + new appended.
 		names := make([]string, len(options))
 		for i, opt := range options {
-			m := opt.(map[string]interface{})
-			names[i] = m["name"].(string)
+			m, ok := opt.(map[string]interface{})
+			if !ok {
+				t.Fatalf("option[%d] is not a map", i)
+			}
+			name, ok := m["name"].(string)
+			if !ok {
+				t.Fatalf("option[%d] has no string 'name'", i)
+			}
+			names[i] = name
 		}
 		expected := []string{"Plan", "Research", "Review"}
 		for i, name := range names {
