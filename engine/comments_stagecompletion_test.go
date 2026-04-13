@@ -16,7 +16,7 @@ func TestProcessComments_StageCompleteMarker_TriggersAdvance(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, resume bool, workDir, modelOverride string) (string, bool, TokenUsage, error) {
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
 			// Output includes the stage complete marker
 			return "All looks good!\nFABRIK_STAGE_COMPLETE", false, TokenUsage{}, nil
 		},
@@ -62,7 +62,7 @@ func TestProcessComments_NoStageCompleteMarker_NoAdvance(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, resume bool, workDir, modelOverride string) (string, bool, TokenUsage, error) {
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
 			// No FABRIK_STAGE_COMPLETE marker
 			return "I've made some progress but not done yet", false, TokenUsage{}, nil
 		},

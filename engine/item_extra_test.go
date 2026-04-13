@@ -610,7 +610,7 @@ func TestProcessItem_EvictsLastUpdatedAtAfterStageRun(t *testing.T) {
 	repoDir := initBareRepo(t)
 	wm := NewWorktreeManager(repoDir)
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
 			return "FABRIK_STAGE_COMPLETE\n", true, TokenUsage{}, nil
 		},
 	}

@@ -33,10 +33,18 @@ type GitHubClient interface {
 	RateLimitStats() (rest, graphql gh.RateLimitStats)
 }
 
+// InvokeOptions bundles per-issue override parameters for Claude invocations.
+// Using a struct rather than individual parameters means future overrides
+// (e.g. DisableAdaptiveThinking) are zero-churn field additions.
+type InvokeOptions struct {
+	ModelOverride  string // from "model:<name>" label, overrides stage.Model
+	EffortOverride string // from "effort:<level>" label, overrides stage.EffortLevel
+}
+
 // ClaudeInvoker defines the interface for invoking Claude Code.
 type ClaudeInvoker interface {
-	Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (output string, completed bool, usage TokenUsage, err error)
-	InvokeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, modelOverride string) (output string, completed bool, usage TokenUsage, err error)
+	Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (output string, completed bool, usage TokenUsage, err error)
+	InvokeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (output string, completed bool, usage TokenUsage, err error)
 }
 
 // RealClaudeInvoker wraps the existing InvokeClaude function.
@@ -44,16 +52,16 @@ type RealClaudeInvoker struct {
 	DebugOutput bool
 }
 
-func (r *RealClaudeInvoker) Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
-	output, completed, usage, err := InvokeClaude(ctx, stage, issue, newComments, resume, workDir, modelOverride)
+func (r *RealClaudeInvoker) Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+	output, completed, usage, err := InvokeClaude(ctx, stage, issue, newComments, resume, workDir, opts)
 	if r.DebugOutput {
 		saveDebugLog(issue.Number, stage.Name, output)
 	}
 	return output, completed, usage, err
 }
 
-func (r *RealClaudeInvoker) InvokeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
-	output, completed, usage, err := InvokeClaudeForComments(ctx, stage, issue, comments, workDir, modelOverride)
+func (r *RealClaudeInvoker) InvokeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+	output, completed, usage, err := InvokeClaudeForComments(ctx, stage, issue, comments, workDir, opts)
 	if r.DebugOutput {
 		saveDebugLog(issue.Number, stage.Name+"-comment-review", output)
 	}
