@@ -14,6 +14,8 @@ type RateLimitStats struct {
 // ProjectBoard represents the full state of a GitHub Project (v2) board.
 type ProjectBoard struct {
 	ProjectID string
+	Title     string // display name of the project board (from projectV2.title)
+	OwnerType string // "organization" or "user", resolved by FetchProjectBoard
 	Items     []ProjectItem
 }
 

@@ -90,7 +90,8 @@ func (c *Client) fetchProjectBoard(owner, repo string, projectNum int, ownerType
 query($owner: String!, $projectNum: Int!, $cursor: String) {
   %s(login: $owner) {
     projectV2(number: $projectNum) {
-      id`, ownerType) + `
+      id
+      title`, ownerType) + `
       items(first: 100, after: $cursor) {
         pageInfo {
           hasNextPage
@@ -148,6 +149,7 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 }`
 
 	var projectID string
+	var projectTitle string
 	var allNodes []itemNode
 
 	// Paginate over items.
@@ -165,6 +167,7 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 			Data map[string]struct {
 				ProjectV2 struct {
 					ID    string `json:"id"`
+					Title string `json:"title"`
 					Items struct {
 						PageInfo struct {
 							HasNextPage bool   `json:"hasNextPage"`
@@ -187,6 +190,7 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 		proj := ownerData.ProjectV2
 		if projectID == "" {
 			projectID = proj.ID
+			projectTitle = proj.Title
 		}
 		allNodes = append(allNodes, proj.Items.Nodes...)
 
@@ -199,7 +203,7 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 		cursor = proj.Items.PageInfo.EndCursor
 	}
 
-	board := &ProjectBoard{ProjectID: projectID}
+	board := &ProjectBoard{ProjectID: projectID, Title: projectTitle, OwnerType: ownerType}
 
 	for _, node := range allNodes {
 		// Skip items whose content was not returned (empty content ID, e.g. draft issues)
