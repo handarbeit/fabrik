@@ -971,8 +971,8 @@ func (m Model) viewFooter() string {
 	}
 	if m.projectInfo.BoardTitle != "" {
 		parts = append(parts, m.projectInfo.BoardTitle)
-	}
-	if m.projectInfo.Version != "" {
+	} else if m.projectInfo.Version != "" {
+		// Show project version/module only when board title isn't available yet
 		parts = append(parts, m.projectInfo.Version)
 	}
 	leftPlain := strings.Join(parts, " · ")
