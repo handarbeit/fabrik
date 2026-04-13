@@ -1,4 +1,4 @@
-# ADR 024: InvokeOptions Struct for Per-Issue Claude Invocation Overrides
+# ADR 025: InvokeOptions Struct for Per-Issue Claude Invocation Overrides
 
 **Status**: Accepted  
 **Date**: 2026-04-13
