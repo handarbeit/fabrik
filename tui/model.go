@@ -964,7 +964,7 @@ func (m Model) viewFooter() string {
 		rightStr = style.Render(plain)
 	}
 
-	maxWidth := m.width - 1
+	maxWidth := m.width - 2 // leave 1 char margin on each side
 	if maxWidth < 1 {
 		maxWidth = 1
 	}
