@@ -120,6 +120,7 @@ func New(pollSeconds int, info ProjectInfo, pluginDir string) Model {
 		focused:        true,
 		spinnerFrames:  spinnerFrames,
 		now:            now,
+		defaultRepo:    info.Repo,
 	}
 
 	return Model{
@@ -131,7 +132,7 @@ func New(pollSeconds int, info ProjectInfo, pluginDir string) Model {
 			fabrikVersion: info.FabrikVersion,
 		},
 		active:  active,
-		history: NewHistoryPaneComponent(),
+		history: NewHistoryPaneComponent(info.Repo),
 		footer: FooterComponent{
 			projectInfo: info,
 			now:         now,
