@@ -121,6 +121,11 @@ func (d *DetailPanelComponent) SetItem(item *DetailItem) {
 	d.item = item
 }
 
+// SetWidth records the terminal width for use in Height() calculations.
+func (d *DetailPanelComponent) SetWidth(w int) {
+	d.lastWidth = w
+}
+
 // SetVisible controls whether the detail panel is shown.
 func (d *DetailPanelComponent) SetVisible(v bool) {
 	d.visible = v
