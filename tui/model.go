@@ -209,13 +209,13 @@ func renderWithOSC8(plain, title, boardURL string) string {
 	if idx < 0 {
 		return dimStyle.Render(plain)
 	}
-	before := plain[:idx]
-	after := plain[idx+len(title):]
+	// Render the entire string in dim, then replace the plain title with the
+	// OSC 8 hyperlinked version. Since the title text is the same, the SGR
+	// color codes flow through the link text naturally without any reset
+	// between the style and the OSC 8 sequence.
+	styled := dimStyle.Render(plain)
 	link := termenv.Hyperlink(boardURL, title)
-	result := dimStyle.Render(before) + link + dimStyle.Render(after)
-	// Debug: write raw footer bytes to file for inspection
-	os.WriteFile(".fabrik/debug-footer.bin", []byte(result), 0600)
-	return result
+	return strings.Replace(styled, title, link, 1)
 }
 
 // New creates an initial TUI model.
