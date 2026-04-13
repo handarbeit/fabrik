@@ -102,17 +102,20 @@ type HistoryPaneComponent struct {
 	histIdx      int
 	focused      bool
 	confirmClear bool
+	defaultRepo  string // "owner/repo" fallback for single-repo projects where HistoryEntry.Repo is empty
 	// Layout state passed by root model via SetLayout for hint rendering.
 	confirmQuit bool
 	activeCount int
 }
 
 // NewHistoryPaneComponent creates a new HistoryPaneComponent with loaded history.
-func NewHistoryPaneComponent() HistoryPaneComponent {
+// defaultRepo is "owner/repo" used for OSC 8 issue links when a history entry's Repo is empty.
+func NewHistoryPaneComponent(defaultRepo string) HistoryPaneComponent {
 	vp := viewport.New(80, 10)
 	return HistoryPaneComponent{
-		history:   LoadHistory(),
-		historyVP: vp,
+		history:     LoadHistory(),
+		historyVP:   vp,
+		defaultRepo: defaultRepo,
 	}
 }
 
@@ -307,6 +310,11 @@ func (h *HistoryPaneComponent) rebuildViewportContent(innerWidth int) {
 		if h.focused && displayIdx == h.histIdx {
 			line = selectedStyle.Render(line)
 		}
+		repo := he.Repo
+		if repo == "" {
+			repo = h.defaultRepo
+		}
+		line = injectIssueLink(line, repo, he.IssueNumber)
 		lines = append(lines, line)
 	}
 	h.historyVP.SetContent(strings.Join(lines, "\n"))
