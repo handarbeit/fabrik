@@ -39,6 +39,7 @@ type Config struct {
 	MaxConcurrent     int
 	MaxRetries        int
 	ReviewWaitTimeout int // minutes; 0 means use default (15)
+	MaxReviewCycles   int // 0 means use default (5)
 	DebugOutput       bool
 	PluginDir         string
 }
@@ -231,6 +232,15 @@ func Execute() error {
 			}
 		}
 	}
+	if cfg.MaxReviewCycles == 0 {
+		if v := os.Getenv("FABRIK_MAX_REVIEW_CYCLES"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				cfg.MaxReviewCycles = n
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_REVIEW_CYCLES=%q is invalid (must be a positive integer); using default 5\n", v)
+			}
+		}
+	}
 	if !cfg.AutoUpgrade {
 		if v := os.Getenv("FABRIK_AUTO_UPGRADE"); v != "" {
 			lv := strings.ToLower(v)
@@ -349,6 +359,7 @@ func Execute() error {
 		MaxConcurrent:     cfg.MaxConcurrent,
 		MaxRetries:        cfg.MaxRetries,
 		ReviewWaitTimeout: reviewWaitTimeout(cfg.ReviewWaitTimeout),
+		MaxReviewCycles:   maxReviewCycles(cfg.MaxReviewCycles),
 		DebugOutput:       cfg.DebugOutput,
 		PluginDir:         cfg.PluginDir,
 		Stages:            stageCfgs,
