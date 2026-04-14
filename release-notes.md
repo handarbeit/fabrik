@@ -1,33 +1,22 @@
-# Fabrik v0.0.34
+# Fabrik v0.0.35
 
 ## Features
 
-- **Click-to-open issue and board links in TUI** (#340) — Cmd+click (or Ctrl+click on Linux) on the `#NNN` column in history/active panels to open the issue in your browser. Cmd+click the board title in the footer to open the project board. Mouse capture removed; keyboard navigation unchanged.
-- **`effort:` label override** (#341) — Per-issue thinking effort control via label: `effort:low`, `effort:medium`, `effort:high`, `effort:max`. Overrides the stage YAML's `effort_level` for one issue only. Complements the existing `model:` label override.
-- **Refactor: TUI component architecture** (#279) — `tui/model.go` split into component files (header, active, history, footer, detail). Reduces the giant model file and sets up for further TUI enhancements.
-- **Release announcements to Discussions** — GitHub Actions release workflow now posts a formatted announcement to the handarbeit/fabrik Discussions "Announcements" category after each successful release.
-- **TUI footer shows clickable board title** — "Fabrik PM" (or your project board name) now appears in the footer as an OSC 8 hyperlink on supported terminals.
+- **TUI `?` help panel** (#343) — Press `?` in the TUI to open a help overlay showing all keybindings and a reference for Fabrik's labels (yolo/cruise, paused/blocked/awaiting-*, locked, stage:*, model:, effort:, unrestricted). Press `?` or `esc` to dismiss.
+- **SSH clone support** (#356) — New `--ssh` flag and `git_ssh: true` config option to clone repos via SSH instead of HTTPS. Useful for private repos where SSH keys are configured. Startup checks verify SSH agent is available.
+- **Fine-grained PAT detection** (#358) — Fabrik detects when a `github_pat_*` token is in use and warns at startup with guidance to switch to a classic PAT (which Fabrik requires for project board access). 401/403 errors now include actionable hints about token type.
+- **`.env` works without a git repo** (#351) — Loosened the `.env` safety check: when no `.git/` directory is present, Fabrik loads `.env` without requiring it to be in `.gitignore`. Useful for bare directories, containers, and CI workspaces.
 
 ## Fixes
 
-- **Done stage no longer skipped after restart** — When a Fabrik restart left only cleanup items to process, the Done stage was silently skipped because no WorktreeManager was registered for the repo. Both `itemMayNeedWork` and `itemNeedsWork` now fall back to a direct filesystem path check.
-- **Done stage runs after manual Validate→Done column move** — Board column moves don't always bump the issue's `updatedAt`, so cleanup items could be stuck by the updatedAt cache. Cleanup stages now bypass the cache entirely (worktree Stat is local, no GraphQL cost).
-- **OSC 8 hyperlinks in footer now actually work** — Lipgloss `Style.Render()` was stripping OSC 8 escape sequences. New `renderWithOSC8` renders dim style first, then injects the raw hyperlink.
-- **Rate limit text no longer touches right edge** — Footer width budget leaves a 1-char margin on both sides.
-- **Project version no longer redundantly shown alongside board title** — `github.com/handarbeit/fabrik` no longer clutters the footer once "Fabrik PM" is fetched.
-- **Board title replaces stale `owner/repo` in footer** — The old footer slot displayed `owner/` with no repo in multi-repo mode. Now shows the project board title with a clickable link.
-
-## Improvements
-
-- **Label auto-seeding at startup** — Fabrik now ensures its managed labels exist on the configured repo at startup (with descriptions and colors), so the GitHub UI shows meaningful hover text.
-- **Refactor: worktreeExistsForItem helper** — Eliminated duplicated WM lookup + filesystem fallback logic between the two item filters.
-- **Refactor: hasLabel helper** — Replaced inline label-scanning loops with a named predicate.
+- **Default branch detection in bare clones** — Fabrik no longer assumes `main`; it detects the actual default branch from `git ls-remote`. Repos using `master` or other defaults now work correctly.
+- **Worktree error messages include repo name** — Easier to diagnose which repo had a worktree issue in multi-repo mode.
+- **Robust SSH/HTTPS URL rewriting** — Startup checks order and URL-rewrite logic improved to handle edge cases.
 
 ## Internal
 
-- Test suite reliability: `TestExecute_ValidStagesReachesEngine` and `TestMain_Help` now isolate HOME/CWD so the suite completes in ~80 seconds without hangs.
-- `engine/.fabrik/` and `.fabrik/debug-footer.bin` gitignored (test/debug artifacts).
-- PR #339 merged with TUI mouse capture removal and OSC 8 hyperlinks for issue numbers.
+- Test coverage for fine-grained PAT warning and 401/403 auth hints.
+- Documentation updates for v0.0.34 features and v0.0.35 additions.
 
 ## Upgrading
 
