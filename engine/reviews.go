@@ -107,27 +107,25 @@ func (e *Engine) removeAwaitingReviewLabel(owner, repo string, item gh.ProjectIt
 	}
 }
 
-// buildSyntheticReviewComments converts PR reviews into synthetic gh.Comment objects
-// so they can be passed through the existing processComments pipeline.
-// DatabaseID is set to 0 because PR reviews don't have issue-comment DatabaseIDs;
-// callers must guard against DatabaseID==0 when calling AddCommentReaction.
-func buildSyntheticReviewComments(reviews []gh.PRReview) []gh.Comment {
-	comments := make([]gh.Comment, 0, len(reviews))
-	for _, rev := range reviews {
-		if rev.Body == "" {
-			// Skip reviews with no body — they're APPROVED/COMMENTED with no text.
+// buildReviewThreadComments returns the inline per-line comments from
+// unresolved review threads on the linked PR that have not yet been addressed
+// (no 🚀 reaction). These are real GitHub comments with real DatabaseIDs, so
+// the 👀/🚀 reaction-based dedup mechanism works normally and each thread
+// comment only triggers processing once.
+//
+// The top-level review body (if any) is not included — only thread comments,
+// which are what reviewers use to flag specific code issues. Reviews that
+// submit only a top-level body with no inline comments (e.g., bare APPROVED)
+// have nothing actionable to address.
+func buildReviewThreadComments(item gh.ProjectItem) []gh.Comment {
+	out := make([]gh.Comment, 0, len(item.LinkedPRReviewThreadComments))
+	for _, c := range item.LinkedPRReviewThreadComments {
+		if c.HasReaction("ROCKET") {
 			continue
 		}
-		id := fmt.Sprintf("review-%d", rev.DatabaseID)
-		comments = append(comments, gh.Comment{
-			ID:         id,
-			DatabaseID: 0, // no issue-comment ID; reaction calls must be skipped
-			Author:     rev.Author,
-			Body:       fmt.Sprintf("[PR Review — %s]\n\n%s", rev.State, rev.Body),
-			CreatedAt:  time.Now(),
-		})
+		out = append(out, c)
 	}
-	return comments
+	return out
 }
 
 // pauseForReviewTimeout pauses the issue when the review wait timeout elapses.
@@ -159,7 +157,7 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 // invocation runs asynchronously.
 func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
 	iKey := issueKey(item, e.defaultRepo())
-	syntheticComments := buildSyntheticReviewComments(item.LinkedPRReviews)
+	syntheticComments := buildReviewThreadComments(item)
 	if len(syntheticComments) == 0 {
 		e.logf(item.Number, "review-reinvoke", "no review bodies to process; skipping re-invocation\n")
 		return
