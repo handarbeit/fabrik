@@ -496,7 +496,9 @@ func (m Model) View() string {
 		}
 	}
 
-	sections = append(sections, m.history.View(m.width))
+	if histView := m.history.View(m.width); histView != "" {
+		sections = append(sections, histView)
+	}
 	sections = append(sections, m.footer.View(m.width))
 
 	return strings.Join(sections, "\n")

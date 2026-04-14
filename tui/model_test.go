@@ -379,6 +379,8 @@ func TestLayoutHeightInvariant_SmallTerminal(t *testing.T) {
 		{10, 0},
 		{9, 0},
 		{8, 0},
+		{7, 0}, // availableHistoryH = 1 (trimmed)
+		{6, 0}, // availableHistoryH = 0 (history omitted)
 	}
 
 	for _, tc := range cases {
