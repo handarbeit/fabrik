@@ -41,37 +41,37 @@ type Config struct {
 // callers wait on done and share the result.
 type cloneCall struct {
 	done chan struct{} // closed when clone completes (success or failure)
-	dir  string       // bareDir on success; empty on failure
-	err  error        // clone error on failure; nil on success
+	dir  string        // bareDir on success; empty on failure
+	err  error         // clone error on failure; nil on success
 }
 
 type Engine struct {
-	cfg                Config
-	client             GitHubClient
-	claude             ClaudeInvoker
-	statusField        *gh.StatusField
-	worktreeManagers   map[string]*WorktreeManager // key: "owner/repo"; one WM per discovered repo
-	fabrikDir          string                      // directory containing .fabrik/ (always os.Getwd() at startup)
-	mu                 sync.Mutex
-	processedSet       map[string]time.Time  // key: "owner/repo#N-stageName" or "owner/repo#N-comment-ID"
-	lockedIssues       map[string]bool       // key: "owner/repo#N"; issues with fabrik:locked added but not yet released
-	totalTokens        TokenUsage            // accumulated token usage since process start
-	lastReportedCost   float64               // cost at last [stats] report; skip repeat prints when unchanged
-	retryCount         map[string]int        // key: "owner/repo#N-stageName", value: failed attempt count
-	pausedDueToRetries map[string]bool       // key: "owner/repo#N-stageName", true if engine paused this issue
-	lastUsage          map[string]TokenUsage // key: issueKey; per-issue token usage from last processItem (for TUI)
-	lastCompleted      map[string]bool       // key: issueKey; per-issue stage completion from last processItem (for TUI)
-	lastBlocked        map[string]bool       // key: issueKey; per-issue blocked-on-input from last processItem (for TUI)
-	lastUpdatedAt        map[string]time.Time // key: issueKey; tracks last-seen updatedAt per issue
-	deepFetchFailureTime map[string]time.Time // key: issueKey; tracks when FetchItemDetails last failed
-	idleCount          int                   // consecutive idle polls; triggers self-upgrade at threshold
-	sem                chan struct{}         // semaphore bounding concurrent workers across poll cycles
-	wg                 sync.WaitGroup        // tracks in-flight workers for graceful shutdown
-	inFlight           sync.Map              // key: issueKey string, value: bool (isPR)
-	cloneInFlight      sync.Map              // key: "owner/repo" string, value: *cloneCall; per-repo bare-clone coordination
-	events             chan tui.Event        // nil in tests / plain-text mode; TUI goroutine consumes
-	logFile            *os.File             // persistent log file at .fabrik/fabrik.log; nil if not opened
-	logMu              sync.Mutex           // serializes concurrent writes to logFile
+	cfg                  Config
+	client               GitHubClient
+	claude               ClaudeInvoker
+	statusField          *gh.StatusField
+	worktreeManagers     map[string]*WorktreeManager // key: "owner/repo"; one WM per discovered repo
+	fabrikDir            string                      // directory containing .fabrik/ (always os.Getwd() at startup)
+	mu                   sync.Mutex
+	processedSet         map[string]time.Time  // key: "owner/repo#N-stageName" or "owner/repo#N-comment-ID"
+	lockedIssues         map[string]bool       // key: "owner/repo#N"; issues with fabrik:locked added but not yet released
+	totalTokens          TokenUsage            // accumulated token usage since process start
+	lastReportedCost     float64               // cost at last [stats] report; skip repeat prints when unchanged
+	retryCount           map[string]int        // key: "owner/repo#N-stageName", value: failed attempt count
+	pausedDueToRetries   map[string]bool       // key: "owner/repo#N-stageName", true if engine paused this issue
+	lastUsage            map[string]TokenUsage // key: issueKey; per-issue token usage from last processItem (for TUI)
+	lastCompleted        map[string]bool       // key: issueKey; per-issue stage completion from last processItem (for TUI)
+	lastBlocked          map[string]bool       // key: issueKey; per-issue blocked-on-input from last processItem (for TUI)
+	lastUpdatedAt        map[string]time.Time  // key: issueKey; tracks last-seen updatedAt per issue
+	deepFetchFailureTime map[string]time.Time  // key: issueKey; tracks when FetchItemDetails last failed
+	idleCount            int                   // consecutive idle polls; triggers self-upgrade at threshold
+	sem                  chan struct{}         // semaphore bounding concurrent workers across poll cycles
+	wg                   sync.WaitGroup        // tracks in-flight workers for graceful shutdown
+	inFlight             sync.Map              // key: issueKey string, value: bool (isPR)
+	cloneInFlight        sync.Map              // key: "owner/repo" string, value: *cloneCall; per-repo bare-clone coordination
+	events               chan tui.Event        // nil in tests / plain-text mode; TUI goroutine consumes
+	logFile              *os.File              // persistent log file at .fabrik/fabrik.log; nil if not opened
+	logMu                sync.Mutex            // serializes concurrent writes to logFile
 }
 
 func New(cfg Config) (*Engine, error) {
@@ -101,10 +101,10 @@ func New(cfg Config) (*Engine, error) {
 	}
 	worktreeRoot := filepath.Join(fabrikDir, ".fabrik", "worktrees")
 	eng := &Engine{
-		cfg:                cfg,
-		client:             gh.NewClient(cfg.Token),
-		claude:             &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},
-		worktreeManagers:   make(map[string]*WorktreeManager),
+		cfg:                  cfg,
+		client:               gh.NewClient(cfg.Token),
+		claude:               &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},
+		worktreeManagers:     make(map[string]*WorktreeManager),
 		fabrikDir:            fabrikDir,
 		processedSet:         make(map[string]time.Time),
 		lockedIssues:         make(map[string]bool),
@@ -147,10 +147,10 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 	}
 	wms := make(map[string]*WorktreeManager)
 	eng := &Engine{
-		cfg:                cfg,
-		client:             client,
-		claude:             claude,
-		worktreeManagers:   wms,
+		cfg:                  cfg,
+		client:               client,
+		claude:               claude,
+		worktreeManagers:     wms,
 		processedSet:         make(map[string]time.Time),
 		lockedIssues:         make(map[string]bool),
 		lastUsage:            make(map[string]TokenUsage),

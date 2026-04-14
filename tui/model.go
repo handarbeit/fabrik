@@ -101,7 +101,6 @@ type Model struct {
 	history HistoryPaneComponent
 	detail  DetailPanelComponent
 	footer  FooterComponent
-
 }
 
 // New creates an initial TUI model.
@@ -449,5 +448,6 @@ func (m Model) View() string {
 
 	return strings.Join(sections, "\n")
 }
+
 // viewHeader, viewActive, viewHistory, viewFooter, viewDetail are in their
 // respective component files (header.go, active.go, history.go, footer.go, detail.go).
