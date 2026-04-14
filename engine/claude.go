@@ -606,7 +606,32 @@ func buildCommentReviewPrompt(stage *stages.Stage, item gh.ProjectItem, comments
 
 	b.WriteString("## New Comments to Process\n\n")
 	for _, c := range comments {
-		b.WriteString(fmt.Sprintf("**@%s** (%s):\n%s\n\n", c.Author, c.CreatedAt.Format("2006-01-02 15:04"), c.Body))
+		if c.Path != "" {
+			// Review thread comment: include file/line/hunk context so Claude
+			// can navigate directly to the relevant location.
+			header := fmt.Sprintf("**@%s** (%s)", c.Author, c.CreatedAt.Format("2006-01-02 15:04"))
+			if c.ReviewThreadID != "" {
+				header += fmt.Sprintf(" [Thread: %s]", c.ReviewThreadID)
+			}
+			b.WriteString(header + "\n")
+			lineNum := c.Line
+			if lineNum == 0 {
+				lineNum = c.OriginalLine
+			}
+			if lineNum != 0 {
+				b.WriteString(fmt.Sprintf("**File:** `%s` **Line:** %d\n", c.Path, lineNum))
+			} else {
+				b.WriteString(fmt.Sprintf("**File:** `%s`\n", c.Path))
+			}
+			if c.DiffHunk != "" {
+				b.WriteString("**Diff context:**\n```diff\n")
+				b.WriteString(c.DiffHunk)
+				b.WriteString("\n```\n")
+			}
+			b.WriteString(c.Body + "\n\n")
+		} else {
+			b.WriteString(fmt.Sprintf("**@%s** (%s):\n%s\n\n", c.Author, c.CreatedAt.Format("2006-01-02 15:04"), c.Body))
+		}
 	}
 
 	b.WriteString("---\n\n")
