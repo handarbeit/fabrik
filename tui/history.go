@@ -106,6 +106,12 @@ type HistoryPaneComponent struct {
 	// Layout state passed by root model via SetLayout for hint rendering.
 	confirmQuit bool
 	activeCount int
+	// availableH is the total vertical space (in lines) allocated by updateLayout.
+	// -1 means SetLayout has not been called yet (no height constraint).
+	// 0 means layout was applied but no space is available (View returns "").
+	// >0 means View() trims its output to this many lines to guarantee the
+	// height invariant even when vpHeight is clamped to a minimum of 1.
+	availableH int
 }
 
 // NewHistoryPaneComponent creates a new HistoryPaneComponent with loaded history.
@@ -116,6 +122,7 @@ func NewHistoryPaneComponent(defaultRepo string) HistoryPaneComponent {
 		history:     LoadHistory(),
 		historyVP:   vp,
 		defaultRepo: defaultRepo,
+		availableH:  -1, // -1 means SetLayout has not been called; no height constraint enforced yet
 	}
 }
 
@@ -210,6 +217,10 @@ func (h HistoryPaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 }
 
 func (h HistoryPaneComponent) View(width int) string {
+	// availableH == 0: layout was applied and no space is available; render nothing.
+	if h.availableH == 0 {
+		return ""
+	}
 	innerWidth := max(width-6, 20)
 	focusIndicator := " "
 	if h.focused {
@@ -218,18 +229,27 @@ func (h HistoryPaneComponent) View(width int) string {
 	title := dimStyle.Render(fmt.Sprintf("%s History (%d)", focusIndicator, len(h.history)))
 	hint := h.historyHint(lipgloss.Width(title), innerWidth, h.confirmQuit, h.activeCount)
 	content := title + hint + "\n" + h.historyVP.View()
-	return borderStyle.Width(width - 4).Render(content)
+	result := borderStyle.Width(width - 4).Render(content)
+	// Safety net: trim rendered output to exactly availableH lines so that the
+	// total View() height invariant holds even when vpHeight is clamped to ≥1.
+	// availableH < 0 means SetLayout has not been called; skip trimming.
+	if h.availableH > 0 && lipgloss.Height(result) > h.availableH {
+		lines := strings.Split(result, "\n")
+		result = strings.Join(lines[:h.availableH], "\n")
+	}
+	return result
 }
 
 func (h HistoryPaneComponent) Height() int {
 	// Height is determined by SetLayout; return viewport height + overhead.
-	return h.historyVP.Height + h.titleAndHintLines(0, false) + 2 // +2 for border
+	return h.historyVP.Height + h.titleAndHintLines(h.activeCount, h.confirmQuit) + 2 // +2 for border
 }
 
 // SetLayout updates the viewport dimensions based on available space.
 func (h *HistoryPaneComponent) SetLayout(width, availableHeight int, confirmQuit bool, activeCount int) {
 	h.confirmQuit = confirmQuit
 	h.activeCount = activeCount
+	h.availableH = availableHeight
 	innerWidth := max(width-6, 20)
 
 	// Rebuild viewport content.

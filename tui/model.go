@@ -194,6 +194,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q":
 			if m.history.ConfirmClear() {
 				m.history.SetConfirmClear(false)
+				m.updateLayout(false)
 				return m, nil
 			}
 			if m.confirmQuit {
@@ -209,6 +210,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "n", "N":
 			if m.history.ConfirmClear() {
 				m.history.SetConfirmClear(false)
+				m.updateLayout(false)
 				return m, nil
 			}
 			if m.confirmQuit {
@@ -225,6 +227,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "esc":
 			if m.history.ConfirmClear() {
 				m.history.SetConfirmClear(false)
+				m.updateLayout(false)
 				return m, nil
 			}
 			if m.detailPanel {
