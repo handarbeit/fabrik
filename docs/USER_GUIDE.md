@@ -36,6 +36,7 @@ For details on the internal stage lifecycle, see [Stage Lifecycle](stage-lifecyc
 - GitHub **classic** personal access token (`ghp_...`) with `repo`, `project`, and `workflow` scopes
   - Fine-grained tokens (`github_pat_...`) are **not supported** — GitHub Projects v2 GraphQL requires a classic PAT
   - Create one at: https://github.com/settings/tokens (select "Tokens (classic)")
+  - If a fine-grained token is detected at startup, Fabrik prints a `[warn]` message and subsequent API calls include an actionable hint; see [GitHub API Returns 401 or Fine-Grained Token Warning](#github-api-returns-401-or-fine-grained-token-warning)
 - A GitHub Project (v2) with board columns matching your stage names
 
 
@@ -107,6 +108,8 @@ GitHub token to a gitignored `.env` file:
 # Create at: https://github.com/settings/tokens (select "Tokens (classic)")
 FABRIK_TOKEN=ghp_...
 ```
+
+> **Note:** When a `.git/` directory is present, Fabrik refuses to start if `.env` exists but is not listed in `.gitignore` (prevents accidental token leaks). In directories **without** `.git/` — containers, CI workspaces, or bare directories — this check is skipped and `.env` is loaded normally without requiring a `.gitignore` entry.
 
 ### Create a Project Board
 
@@ -193,6 +196,8 @@ git_ssh: true
 The environment variable `FABRIK_GIT_SSH=true` is also supported (useful in CI).
 
 When SSH mode is active, Fabrik uses `git@github.com:<owner>/<repo>.git` as the clone URL. This requires your SSH key to be registered with GitHub and accessible via `ssh-agent`.
+
+> **Startup behavior with SSH mode:** When `--ssh` / `git_ssh: true` is set, Fabrik suppresses the HTTPS credential helper startup check (described below) — it is not applicable. No equivalent SSH agent availability check runs at startup. If your SSH key is absent or unloaded when a clone or fetch runs, git will fail at that point rather than at startup. To verify your agent before running Fabrik: `ssh -T git@github.com`.
 
 #### HTTPS Credential Helper Warning
 
@@ -350,7 +355,7 @@ user: your-github-username
 
 ### `.env` File
 
-Keep only secrets here. Fabrik refuses to start if `.env` exists but is not gitignored.
+Keep only secrets here. When a `.git/` directory is present, Fabrik refuses to start if `.env` exists but is not listed in `.gitignore` (prevents accidental token leaks). In directories without `.git/` (containers, CI, bare directories), this check is skipped and `.env` is loaded normally.
 
 ```
 # .env (gitignored)
@@ -1042,6 +1047,27 @@ Claude sessions, a scrollable History pane with completed jobs, and a status bar
 | `C` | Clear all history (with confirmation) |
 | `?` | Toggle help panel (keybindings and labels reference) |
 | `q` | Quit |
+
+#### Help Panel (`?`)
+
+Pressing `?` opens an overlay that displays all keybindings and a labels reference. The labels reference covers every label Fabrik uses:
+
+| Label | Meaning |
+|-------|---------|
+| `fabrik:yolo` | Auto-advance through all stages and auto-merge PR on Validate completion |
+| `fabrik:cruise` | Auto-advance through all stages without auto-merging the PR |
+| `fabrik:paused` | Issue processing is paused |
+| `fabrik:awaiting-input` | Stage is blocked waiting for user input |
+| `fabrik:awaiting-review` | Stage completed; waiting for outstanding PR reviewer requests |
+| `fabrik:locked:<user>` | Issue is locked for editing by the specified user |
+| `stage:<name>:in_progress` | Named stage is currently running |
+| `stage:<name>:complete` | Named stage completed successfully |
+| `stage:<name>:failed` | Named stage failed (hit max retries) |
+| `model:<name>` | Override the model for this issue (e.g. `model:opus`) |
+| `effort:<level>` | Override thinking effort for this issue (`low`, `medium`, `high`, `max`) |
+| `fabrik:unrestricted` | Disable the `allowed_tools` restriction for this issue |
+
+Dismiss the panel by pressing `?` again or `Esc`.
 
 In terminals that support OSC 8 hyperlinks (Ghostty, iTerm2, WezTerm, Kitty), issue numbers (`#NNN`) in the In Progress and History panes are hyperlinks. **Cmd+click** (macOS) or **Ctrl+click** (Linux) on a `#NNN` to open the corresponding GitHub issue in your browser; **Cmd+click** / **Ctrl+click** the board title in the footer to open the project board. Use keyboard navigation for selection and scrolling.
 

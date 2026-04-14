@@ -235,7 +235,8 @@ description: >-
           <code>l</code> to open <code>fabrik watch</code> for the selected issue
           (live log streaming, stage tabs, CI/PR status), <code>enter</code> to
           toggle an inline detail panel, <code>r</code> to resume a Claude session
-          from history, and <code>q</code> to quit. In supported terminals (Ghostty, iTerm2, WezTerm, Kitty), <strong>Cmd+click</strong> (macOS) or <strong>Ctrl+click</strong> (Linux) on issue numbers to open them in your browser, or on the board title in the footer to open the project board.
+          from history, <code>?</code> to open a help panel (all keybindings and
+          labels reference), and <code>q</code> to quit. In supported terminals (Ghostty, iTerm2, WezTerm, Kitty), <strong>Cmd+click</strong> (macOS) or <strong>Ctrl+click</strong> (Linux) on issue numbers to open them in your browser, or on the board title in the footer to open the project board.
         </div>
       </div>
       <div class="feature-card">
