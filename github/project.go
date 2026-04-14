@@ -20,6 +20,11 @@ type commentNodeData struct {
 			TotalCount int `json:"totalCount"`
 		} `json:"reactors"`
 	} `json:"reactionGroups"`
+	// Location fields — populated only for PR review thread comments.
+	DiffHunk     string `json:"diffHunk"`
+	Path         string `json:"path"`
+	Line         int    `json:"line"`
+	OriginalLine int    `json:"originalLine"`
 }
 
 // itemNode mirrors one element of items.nodes in the FetchProjectBoard query.
@@ -337,6 +342,10 @@ query($id: ID!) {
             nodes {
               id
               isResolved
+              path
+              line
+              originalLine
+              diffSide
               comments(first: 20) {
                 nodes {
                   id
@@ -344,6 +353,10 @@ query($id: ID!) {
                   author { login }
                   body
                   createdAt
+                  diffHunk
+                  path
+                  line
+                  originalLine
                   reactionGroups {
                     content
                     reactors { totalCount }
@@ -453,9 +466,13 @@ query($id: ID!) {
 						} `json:"latestReviews"`
 						ReviewThreads struct {
 							Nodes []struct {
-								ID         string `json:"id"`
-								IsResolved bool   `json:"isResolved"`
-								Comments   struct {
+								ID           string `json:"id"`
+								IsResolved   bool   `json:"isResolved"`
+								Path         string `json:"path"`
+								Line         int    `json:"line"`
+								OriginalLine int    `json:"originalLine"`
+								DiffSide     string `json:"diffSide"`
+								Comments     struct {
 									Nodes []commentNodeData `json:"nodes"`
 								} `json:"comments"`
 							} `json:"nodes"`
@@ -580,10 +597,14 @@ query($id: ID!) {
 // toComment converts raw commentNodeData into a domain Comment.
 func toComment(cm commentNodeData, fromPR int) Comment {
 	c := Comment{
-		ID:         cm.ID,
-		DatabaseID: cm.DatabaseID,
-		Body:       cm.Body,
-		FromPR:     fromPR,
+		ID:           cm.ID,
+		DatabaseID:   cm.DatabaseID,
+		Body:         cm.Body,
+		FromPR:       fromPR,
+		Path:         cm.Path,
+		Line:         cm.Line,
+		OriginalLine: cm.OriginalLine,
+		DiffHunk:     cm.DiffHunk,
 	}
 	if cm.Author != nil {
 		c.Author = cm.Author.Login
