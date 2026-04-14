@@ -114,6 +114,26 @@ output on the linked PR and a brief summary on the issue. The Review stage
 also rebases onto latest main and resolves merge conflicts before reviewing,
 keeping the PR branch clean.
 
+The Review and Validate stages ship with `wait_for_reviews: true` enabled by
+default. When this option is set and auto-advance is active, Fabrik uses a
+three-phase reviewer gate:
+
+1. **Always-gate:** On stage completion, Fabrik adds `fabrik:awaiting-review`
+   and holds auto-advance until all requested reviewers submit.
+2. **Gate evaluation:** On each subsequent poll, Fabrik checks whether all
+   reviewers have submitted. If reviewers are still pending and the per-cycle
+   timeout expires, the issue pauses with `fabrik:awaiting-input`.
+3. **Re-invocation:** When all reviewers submit with actionable inline feedback,
+   Fabrik re-invokes the stage agent to address the feedback and push a new
+   commit, then waits for the next review round. If reviewers submit with no
+   inline comments (e.g., bot approvals), re-invocation is skipped and the
+   issue advances normally.
+
+> **Configuration:** `FABRIK_MAX_REVIEW_CYCLES` (default `5`) caps the number
+> of re-invocation cycles per session. `FABRIK_REVIEW_WAIT_TIMEOUT` (default
+> `15` minutes) sets the per-cycle wait before pausing. See
+> [USER_GUIDE.md §10](docs/USER_GUIDE.md#pending-reviewer-gate) for details.
+
 If a stage doesn't complete (e.g., unfixable issues found), it retries after
 a cooldown period rather than being permanently skipped.
 
