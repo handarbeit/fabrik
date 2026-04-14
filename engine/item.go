@@ -537,7 +537,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// On retries (resume=true), skip rebasing onto main — the worktree already
 	// has context from the previous attempt and pulling in unrelated changes
 	// mid-session confuses Claude.
-	baseBranch, err := wm.DefaultBaseBranch()
+	baseBranch, err := e.baseBranchForItem(item, wm)
 	if err != nil {
 		releaseLock()
 		return fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
@@ -948,6 +948,47 @@ func (e *Engine) extractEffortOverride(issueNumber int, labels []string) string 
 		return l
 	}
 	return ""
+}
+
+// baseBranchForItem scans item labels for a "base:<branch>" label and returns the
+// named branch if it exists on the remote. If multiple base: labels are present, it
+// uses the first and logs a warning. If the named branch does not exist on the remote,
+// it logs a warning, posts an issue comment, and falls back to DefaultBaseBranch.
+// Returns an error only when DefaultBaseBranch itself fails.
+func (e *Engine) baseBranchForItem(item gh.ProjectItem, wm *WorktreeManager) (string, error) {
+	const prefix = "base:"
+	var candidate string
+	for _, label := range item.Labels {
+		if strings.HasPrefix(label, prefix) {
+			branch := strings.TrimPrefix(label, prefix)
+			if branch == "" {
+				continue
+			}
+			if candidate == "" {
+				candidate = branch
+			} else {
+				e.logf(item.Number, "warn", "multiple base: labels found, using %q (ignoring %q)\n", candidate, branch)
+			}
+		}
+	}
+
+	if candidate == "" {
+		return wm.DefaultBaseBranch()
+	}
+
+	if wm.branchExists("origin/" + candidate) {
+		e.logf(item.Number, "base", "using base branch %q from label\n", candidate)
+		return candidate, nil
+	}
+
+	// Branch not found — log warning, post comment, fall back to default.
+	e.logf(item.Number, "warn", "base: label branch %q not found on remote, falling back to default\n", candidate)
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	body := fmt.Sprintf("⚠️ Fabrik could not find branch `%s` on the remote (from `base:%s` label). Falling back to the repository default branch.", candidate, candidate)
+	if err := e.client.AddComment(owner, repo, item.Number, body); err != nil {
+		e.logf(item.Number, "warn", "could not post base branch fallback comment: %v\n", err)
+	}
+	return wm.DefaultBaseBranch()
 }
 
 func (e *Engine) removeEditingLabel(owner, repo string, issueNumber int) {
