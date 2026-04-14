@@ -543,11 +543,15 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// On retries (resume=true), skip rebasing onto main — the worktree already
 	// has context from the previous attempt and pulling in unrelated changes
 	// mid-session confuses Claude.
-	baseBranch := wm.DefaultBaseBranch()
+	baseBranch, err := wm.DefaultBaseBranch()
+	if err != nil {
+		releaseLock()
+		return fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
+	}
 	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, attempted)
 	if err != nil {
 		releaseLock()
-		return fmt.Errorf("setting up worktree: %w", err)
+		return fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
 	}
 
 	// If this is a read-only stage, stash any unexpected dirty state (including

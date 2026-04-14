@@ -151,7 +151,10 @@ func TestDefaultBaseBranch_Main(t *testing.T) {
 	wm := NewWorktreeManager(repoDir)
 
 	// The default init branch is typically "main" in modern git
-	branch := wm.DefaultBaseBranch()
+	branch, err := wm.DefaultBaseBranch()
+	if err != nil {
+		t.Fatalf("DefaultBaseBranch error: %v", err)
+	}
 	if branch != "main" && branch != "master" {
 		t.Errorf("DefaultBaseBranch = %q, expected main or master", branch)
 	}
@@ -163,7 +166,10 @@ func TestBranchExists(t *testing.T) {
 	wm := NewWorktreeManager(repoDir)
 
 	// Default branch should exist
-	defBranch := wm.DefaultBaseBranch()
+	defBranch, err := wm.DefaultBaseBranch()
+	if err != nil {
+		t.Fatalf("DefaultBaseBranch error: %v", err)
+	}
 	if !wm.branchExists(defBranch) {
 		t.Errorf("expected %q to exist", defBranch)
 	}
@@ -240,7 +246,10 @@ func TestDefaultBaseBranch_FallbackToMaster(t *testing.T) {
 	}
 
 	wm := NewWorktreeManager(dir)
-	branch := wm.DefaultBaseBranch()
+	branch, err := wm.DefaultBaseBranch()
+	if err != nil {
+		t.Fatalf("DefaultBaseBranch error: %v", err)
+	}
 	if branch != "master" {
 		t.Errorf("DefaultBaseBranch = %q, want master", branch)
 	}
@@ -264,10 +273,13 @@ func TestDefaultBaseBranch_NeitherMainNorMaster(t *testing.T) {
 	}
 
 	wm := NewWorktreeManager(dir)
-	branch := wm.DefaultBaseBranch()
-	// Should fall back to "main" when neither main nor master exists
-	if branch != "main" {
-		t.Errorf("DefaultBaseBranch = %q, want main (fallback)", branch)
+	branch, err := wm.DefaultBaseBranch()
+	if err != nil {
+		t.Fatalf("DefaultBaseBranch error: %v", err)
+	}
+	// git symbolic-ref HEAD should return the actual branch ("develop"), not a hardcoded fallback.
+	if branch != "develop" {
+		t.Errorf("DefaultBaseBranch = %q, want develop", branch)
 	}
 }
 
@@ -313,9 +325,50 @@ func TestDefaultBaseBranch_WithOriginHead(t *testing.T) {
 	}
 
 	wm := NewWorktreeManager(localDir)
-	branch := wm.DefaultBaseBranch()
+	branch, err := wm.DefaultBaseBranch()
+	if err != nil {
+		t.Fatalf("DefaultBaseBranch error: %v", err)
+	}
 	if branch != "main" && branch != "master" {
 		t.Errorf("DefaultBaseBranch with origin = %q", branch)
+	}
+}
+
+func TestDefaultBaseBranch_SymbolicRefHEAD(t *testing.T) {
+	skipIfNoGit(t)
+
+	// Create a "remote" repo with develop as the default branch.
+	remoteDir := t.TempDir()
+	remoteCmds := [][]string{
+		{"git", "init", "-b", "develop"},
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "Test"},
+		{"git", "commit", "--allow-empty", "-m", "initial"},
+	}
+	for _, args := range remoteCmds {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = remoteDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("setup remote %v: %s: %v", args, out, err)
+		}
+	}
+
+	// Bare-clone it — simulates what ensureBareClone does.
+	// git clone --bare sets the bare clone's HEAD to the remote's default branch
+	// (refs/heads/develop) but does NOT populate refs/remotes/origin/HEAD.
+	bareDir := filepath.Join(t.TempDir(), "repo.git")
+	cloneCmd := exec.Command("git", "clone", "--bare", remoteDir, bareDir)
+	if out, err := cloneCmd.CombinedOutput(); err != nil {
+		t.Skipf("bare clone failed: %s: %v", out, err)
+	}
+
+	wm := NewWorktreeManager(bareDir)
+	branch, err := wm.DefaultBaseBranch()
+	if err != nil {
+		t.Fatalf("DefaultBaseBranch error: %v", err)
+	}
+	if branch != "develop" {
+		t.Errorf("DefaultBaseBranch = %q, want develop (via git symbolic-ref HEAD on bare clone)", branch)
 	}
 }
 

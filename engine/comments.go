@@ -57,11 +57,15 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 
 	// Step 3: Ensure worktree
 	wm := e.worktreesFor(item.Repo)
-	baseBranch := wm.DefaultBaseBranch()
+	baseBranch, err := wm.DefaultBaseBranch()
+	if err != nil {
+		e.removeEditingLabel(owner, repo, item.Number)
+		return fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
+	}
 	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, false)
 	if err != nil {
 		e.removeEditingLabel(owner, repo, item.Number)
-		return fmt.Errorf("setting up worktree: %w", err)
+		return fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
 	}
 
 	// Write context files (all stages including current) before Claude runs.
