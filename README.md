@@ -169,13 +169,23 @@ auto_advance: false       # Optional: override global yolo setting for this stag
 cleanup_worktree: false   # Optional: remove worktree instead of invoking Claude (terminal stages)
 disable_adaptive_thinking: true  # Optional: disable Claude Code's adaptive thinking budget (default: true)
 effort_level: high        # Optional: Claude thinking effort: low, medium, high, max (default: high)
-allowed_tools:            # Optional: restrict available tools
+allowed_tools:            # Optional: replaces the default tool set — not additive
   - Read
   - Grep
   - Glob
 completion:
   type: claude            # "claude" (default and only supported type)
 ```
+
+### Permission Posture
+
+Every Claude Code invocation receives `--permission-mode dontAsk` and an explicit `--allowedTools` list. Tools outside the allowed set are silently denied — no interactive prompts. This means Fabrik works correctly in headless and shared environments without requiring users to pre-configure permissions in `~/.claude/settings.json`.
+
+When a stage omits `allowed_tools`, Fabrik uses a built-in default covering file operations, git, GitHub CLI, common build systems, and shell utilities. See [§7 Permissions](docs/USER_GUIDE.md#7-permissions) in the User Guide for the full list.
+
+When `allowed_tools` is set, it **replaces** the default set entirely — it is not additive. Only the listed tools are permitted for that stage.
+
+The `fabrik:unrestricted` label bypasses this posture entirely, passing `--dangerously-skip-permissions` instead. Use only when a stage needs tools outside the default set.
 
 ## Configuration
 
@@ -270,7 +280,7 @@ Fabrik uses labels to track state:
 | `effort:<level>` | Override thinking effort for this issue only — valid values: `low`, `medium`, `high`, `max`; precedence: `max > high > medium > low`. Complements `model:` label. |
 | `fabrik:yolo` | Force auto-advance even when `auto_advance: false`; also triggers auto-merge of the linked PR when Validate completes |
 | `fabrik:cruise` | Auto-advances through all stages like `fabrik:yolo` but stops at Validate — no auto-merge, no move to Done. If both `fabrik:cruise` and `fabrik:yolo` are present, `fabrik:yolo` takes precedence. |
-| `fabrik:unrestricted` | Pass `--dangerously-skip-permissions` to Claude Code for this issue only; use when an issue needs to write to paths not covered by `.claude/settings.json` (e.g. `.claude/skills/`). **Caution:** bypasses the permission system. |
+| `fabrik:unrestricted` | Pass `--dangerously-skip-permissions` to Claude Code for this issue only, bypassing the default `--permission-mode dontAsk` posture and the entire tool allowlist. Use only when a stage needs tools outside the default set (e.g. `deno`, `bun`, or other non-standard toolchains). **Caution:** removes all tool restrictions. |
 
 ## Multi-User
 
@@ -362,7 +372,7 @@ cp ./stages/mystages/*.yaml .fabrik/stages/
 ## Documentation
 
 - [User Guide](docs/USER_GUIDE.md) — full configuration reference for the pre-v0.2 `./stages` workflow (see "Quick Start" and "Migration from `./stages`" above for the current `./.fabrik/stages` default), workflow patterns, stage details, labels, and troubleshooting
-- [Troubleshooting](docs/USER_GUIDE.md#9-troubleshooting) — common issues: plugin conflicts, PID lock, merge conflicts, max turns, and more
+- [Troubleshooting](docs/USER_GUIDE.md#10-troubleshooting) — common issues: plugin conflicts, PID lock, merge conflicts, max turns, and more
 
 ## Architecture Decision Records
 
