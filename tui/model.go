@@ -91,6 +91,7 @@ type Model struct {
 	focusPane   pane
 	confirmQuit bool
 	detailPanel bool
+	helpPanel   bool
 
 	// plugin directory
 	pluginDir string
@@ -100,8 +101,13 @@ type Model struct {
 	active  ActivePaneComponent
 	history HistoryPaneComponent
 	detail  DetailPanelComponent
+	help    HelpPanelComponent
 	footer  FooterComponent
 }
+
+// minHistoryRows is the minimum number of rows reserved for the history pane
+// when the help panel is open, ensuring history always renders.
+const minHistoryRows = 5
 
 // New creates an initial TUI model.
 // pollSeconds is the configured polling interval.
@@ -155,9 +161,35 @@ func tickCmd() tea.Cmd {
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch ev := msg.(type) {
 	case tea.KeyMsg:
+		// When help panel is open, suppress most keybindings.
+		// Scroll keys are forwarded to the help viewport; ctrl+c still quits.
+		if m.helpPanel {
+			switch ev.String() {
+			case "ctrl+c":
+				return m, tea.Quit
+			case "?", "esc":
+				m.helpPanel = false
+				m.help.SetVisible(false)
+				m.updateLayout(false)
+				return m, nil
+			default:
+				var cmd tea.Cmd
+				m.help.vp, cmd = m.help.vp.Update(msg)
+				return m, cmd
+			}
+		}
+
 		switch ev.String() {
 		case "ctrl+c":
 			return m, tea.Quit
+
+		case "?":
+			m.helpPanel = true
+			m.detailPanel = false
+			m.help.SetVisible(true)
+			m.updateLayout(false)
+			m.help.ScrollToTop()
+			return m, nil
 
 		case "q":
 			if m.history.ConfirmClear() {
@@ -372,7 +404,7 @@ func (m *Model) syncFocus() {
 	m.history.SetFocused(m.focusPane == paneHistory)
 }
 
-// updateLayout recomputes the history viewport dimensions and content.
+// updateLayout recomputes the history and help viewport dimensions and content.
 func (m *Model) updateLayout(scrollToTop bool) {
 	activeH := m.active.Height()
 	detailH := 0
@@ -380,8 +412,20 @@ func (m *Model) updateLayout(scrollToTop bool) {
 		m.prepareDetailItem()
 		detailH = m.detail.Height()
 	}
-	availableHeight := m.height - m.header.Height() - activeH - detailH - m.footer.Height()
-	m.history.SetLayout(m.width, availableHeight, m.confirmQuit, m.active.ActiveCount())
+	totalAvail := m.height - m.header.Height() - activeH - detailH - m.footer.Height()
+
+	helpH := 0
+	if m.helpPanel {
+		helpTarget := max(totalAvail-minHistoryRows, 5)
+		if helpTarget > totalAvail {
+			helpTarget = max(totalAvail, 0)
+		}
+		m.help.SetLayout(m.width, helpTarget)
+		helpH = m.help.Height()
+	}
+
+	availableHistoryH := max(totalAvail-helpH, 0)
+	m.history.SetLayout(m.width, availableHistoryH, m.confirmQuit, m.active.ActiveCount())
 	if scrollToTop {
 		m.history.ScrollToTop()
 	} else {
@@ -440,6 +484,12 @@ func (m Model) View() string {
 		m.prepareDetailItem()
 		if detail := m.detail.View(m.width); detail != "" {
 			sections = append(sections, detail)
+		}
+	}
+
+	if m.helpPanel {
+		if help := m.help.View(m.width); help != "" {
+			sections = append(sections, help)
 		}
 	}
 
