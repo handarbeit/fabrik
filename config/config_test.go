@@ -83,6 +83,7 @@ func TestLoadDotenv_NoEnvFile(t *testing.T) {
 
 func TestLoadDotenv_EnvNotInGitignore(t *testing.T) {
 	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".git"), 0755)
 	os.WriteFile(filepath.Join(dir, ".env"), []byte("FABRIK_OWNER=test\n"), 0600)
 	os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("*.log\n"), 0644)
 	chdir(t, dir)
@@ -93,6 +94,7 @@ func TestLoadDotenv_EnvNotInGitignore(t *testing.T) {
 
 func TestLoadDotenv_Success(t *testing.T) {
 	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".git"), 0755)
 	os.WriteFile(filepath.Join(dir, ".env"), []byte("FABRIK_OWNER=myorg\n"), 0600)
 	os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".env\n"), 0644)
 	chdir(t, dir)
@@ -103,6 +105,21 @@ func TestLoadDotenv_Success(t *testing.T) {
 	}
 	if got := os.Getenv("FABRIK_OWNER"); got != "myorg" {
 		t.Errorf("expected FABRIK_OWNER=myorg, got %q", got)
+	}
+}
+
+func TestLoadDotenv_NoGitRepo(t *testing.T) {
+	dir := t.TempDir()
+	// No .git directory — no repo, so gitignore check must be skipped.
+	os.WriteFile(filepath.Join(dir, ".env"), []byte("FABRIK_NOREPO_VAR=loaded\n"), 0600)
+	chdir(t, dir)
+	os.Unsetenv("FABRIK_NOREPO_VAR")
+	t.Cleanup(func() { os.Unsetenv("FABRIK_NOREPO_VAR") })
+	if err := LoadDotenv(); err != nil {
+		t.Fatalf("expected nil when no git repo present, got: %v", err)
+	}
+	if got := os.Getenv("FABRIK_NOREPO_VAR"); got != "loaded" {
+		t.Errorf("expected FABRIK_NOREPO_VAR=loaded, got %q", got)
 	}
 }
 
