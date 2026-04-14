@@ -1,18 +1,22 @@
-# Fabrik v0.0.36
+# Fabrik v0.0.37
+
+## Features
+
+- **Three-phase review gate with re-invocation loop** — The Review stage now automatically addresses PR review feedback (from bots and human reviewers) before advancing the issue. When reviews are submitted, Claude is re-invoked to address each reviewer's comments, push fixes, and re-request review. A cycle cap prevents infinite loops. If the review timeout elapses, the issue is paused with `fabrik:awaiting-input` rather than silently advancing — giving humans visibility and control before the next stage begins.
 
 ## Fixes
 
-- **Permission-independent of user's global Claude settings** (#361) — Fabrik now passes `--permission-mode dontAsk` and a comprehensive default `--allowedTools` set to every Claude invocation. Previously, Fabrik's behavior depended on the user's global `~/.claude/settings.json`: users without `"defaultMode": "dontAsk"` hit silent failures (e.g., "I'm unable to write files — the Claude Code session running this agent doesn't have write permissions pre-configured"). Now Fabrik is self-contained — its behavior is governed only by repo content and stage YAML, not personal config.
-
-## Improvements
-
-- **Default allowed-tools set** — Every Claude invocation now allows Read, Edit, Write, Glob, Grep, TodoWrite, Skill, Task, plus common dev Bash commands (git, gh, go, npm, yarn, pnpm, make, cargo, python, pip, uv, pytest, ls, cat, rm, cp, mv, mkdir, find). Stage YAML `allowed_tools` extends this default set.
-- **TodoWrite added to Research/Plan/Specify stage YAMLs** — These stages need TodoWrite for task tracking during longer sessions.
-- **CLAUDE.md updated** — Documents the `fabrik:unrestricted` label in the labels section. Documents the default permission posture and how `allowed_tools` extends the defaults.
+- **Blocked items no longer get permanently stuck** — Dependency gating has been moved from `itemNeedsWork` to `processItem` (via `checkDependencies`). Previously, items with open blockers were silently skipped in `itemNeedsWork`, which never applied the `fabrik:blocked` label — so the `updatedAt` cache-bypass logic never re-evaluated them after blockers closed (blocker closure doesn't bump the blocked item's `updatedAt`). Now items pass through to `processItem`, which applies the label and ensures re-evaluation when dependencies resolve.
+- **Skip re-invocation when all submitted PR reviews have empty bodies** — Previously, empty-body review submissions (e.g., approvals with no comment) could trigger an unnecessary Claude re-invocation. Fabrik now skips the re-invocation cycle when all submitted reviews in a batch have empty bodies.
+- **TUI header never clipped** — Enforced a height invariant in the TUI so the header line is never truncated when the terminal is resized or the window is smaller than expected.
+- **`history.View()` empty-string guard** — Guarded against an empty-string return from `history.View()` that could cause an off-by-one in height accounting, and synchronized `Height()` to match the actual rendered `View()` output.
 
 ## Internal
 
-- `cut-release` skill now explicitly verifies `conclusion == "success"` on the release workflow (not just `status == "completed"`). Previous releases had silent Discussion-announcement failures that went unnoticed.
+- Skills config checkpoint for own-dog-fooding configuration.
+- USER_GUIDE: added Permissions section; fixed §9→§10 cross-reference display text.
+- README: fixed permission wording to match current behavior.
+- Added positioning notes for future marketing (internal docs).
 
 ## Upgrading
 
