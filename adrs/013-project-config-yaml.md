@@ -57,6 +57,7 @@ Config is resolved in `Execute()` using an "at-default" heuristic for each setti
 | `max_retries` | `FABRIK_MAX_RETRIES` | `--max-retries` | `3` |
 | `yolo` | `FABRIK_YOLO` | `--yolo` | `false` |
 | `auto_upgrade` | `FABRIK_AUTO_UPGRADE` | `--auto-upgrade` | `false` |
+| `git_ssh` | `FABRIK_GIT_SSH` | `--ssh` | `false` |
 | `tui` | `FABRIK_TUI` | `--notui` | `true` |
 | `terminal` | `FABRIK_TERMINAL` | *(none)* | `""` |
 | `debug_output` | `FABRIK_DEBUG_OUTPUT` | `--debug-output` | `false` |

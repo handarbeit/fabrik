@@ -24,6 +24,7 @@ type Config struct {
 	Version           string
 	Yolo              bool
 	AutoUpgrade       bool
+	GitSSH            bool
 	PollSeconds       int
 	MaxConcurrent     int
 	MaxRetries        int
@@ -340,7 +341,7 @@ func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error
 
 	// This goroutine is the owner: perform the clone.
 	worktreeRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
-	bareDir, err := ensureBareClone(e.fabrikDir, owner, repo)
+	bareDir, err := ensureBareClone(e.fabrikDir, owner, repo, e.cfg.GitSSH)
 	call.dir = bareDir
 	call.err = err
 

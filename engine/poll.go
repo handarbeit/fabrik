@@ -157,6 +157,10 @@ func (e *Engine) Run() error {
 		return err
 	}
 
+	// Advisory startup checks: credential helper (HTTPS mode) and URL rewrites.
+	e.checkHTTPSCredentials()
+	e.checkURLRewrite()
+
 	// Seed all known Fabrik labels with descriptions and sensible default colors.
 	// Non-fatal: a seeding failure must not prevent the engine from polling.
 	stageNames := make([]string, len(e.cfg.Stages))
@@ -921,4 +925,33 @@ func captureGitMeta(workDir, baseBranch string) (branch, commit, mainSHA, timest
 	}
 
 	return branch, commit, mainSHA, timestamp
+}
+
+// checkHTTPSCredentials probes whether a git credential helper is configured
+// when using HTTPS clone mode. Prints an advisory warning if none is found.
+// Skip entirely when SSH mode is active — no credential helper is needed then.
+// This check is non-interactive and never prompts; it only reads git config.
+func (e *Engine) checkHTTPSCredentials() {
+	if e.cfg.GitSSH {
+		return
+	}
+	cmd := exec.Command("git", "config", "credential.helper")
+	out, err := cmd.Output()
+	if err != nil || len(strings.TrimSpace(string(out))) == 0 {
+		fmt.Printf("[startup] warn: no git credential helper configured; HTTPS cloning may prompt for credentials.\n")
+		fmt.Printf("[startup] warn: configure one (e.g. git-credential-osxkeychain) or use --ssh / git_ssh: true in .fabrik/config.yaml.\n")
+		fmt.Printf("[startup] note: existing bare clones retain their original remote URL and are not affected by this setting.\n")
+	}
+}
+
+// checkURLRewrite detects whether git has URL rewriting configured that would
+// redirect github.com HTTPS URLs to SSH. Prints an informational notice when
+// such rewriting is active — git applies the rewriting transparently, so
+// Fabrik's HTTPS clone URLs will automatically use SSH via the user's config.
+func (e *Engine) checkURLRewrite() {
+	cmd := exec.Command("git", "config", "--get-regexp", `url\..*\.insteadOf`)
+	out, _ := cmd.Output() // exit code 1 = no matches, not an error
+	if strings.Contains(string(out), "github.com") {
+		fmt.Printf("[startup] note: git URL rewriting for github.com is active; Fabrik's HTTPS clone URLs will be transparently redirected via your git config.\n")
+	}
 }
