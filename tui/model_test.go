@@ -457,3 +457,151 @@ func TestTuiEventMethods(t *testing.T) {
 	JobCompletedEvent{}.tuiEvent()
 	TickEvent{}.tuiEvent()
 }
+
+// TestHelpPanelToggle verifies that pressing ? opens the help panel, pressing ?
+// or esc closes it, and opening help closes the detail panel.
+func TestHelpPanelToggle(t *testing.T) {
+	redirectHistory(t)
+	m := New(30, ProjectInfo{}, "")
+	m.width = 80
+	m.height = 24
+
+	// Pressing ? opens help panel.
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
+	nm := next.(Model)
+	if cmd != nil {
+		t.Error("expected nil cmd from ? key")
+	}
+	if !nm.helpPanel {
+		t.Error("expected helpPanel=true after ? key")
+	}
+
+	// Pressing ? again closes help panel.
+	next2, _ := nm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
+	nm2 := next2.(Model)
+	if nm2.helpPanel {
+		t.Error("expected helpPanel=false after second ? key")
+	}
+
+	// Pressing esc while help is open closes help panel.
+	next3, _ := nm.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	nm3 := next3.(Model)
+	if nm3.helpPanel {
+		t.Error("expected helpPanel=false after esc while help open")
+	}
+
+	// Pressing ? while detail panel is open closes detail and opens help.
+	m2 := New(30, ProjectInfo{}, "")
+	m2.width = 80
+	m2.height = 24
+	m2.detailPanel = true
+	next4, _ := m2.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
+	nm4 := next4.(Model)
+	if !nm4.helpPanel {
+		t.Error("expected helpPanel=true after ? with detail open")
+	}
+	if nm4.detailPanel {
+		t.Error("expected detailPanel=false after ? with detail open")
+	}
+}
+
+// TestHelpPanelSuppressKeys verifies that when the help panel is open, keys that
+// would normally change model state (tab, enter, r, l) are suppressed.
+func TestHelpPanelSuppressKeys(t *testing.T) {
+	redirectHistory(t)
+	m := New(30, ProjectInfo{}, "")
+	m.width = 80
+	m.height = 24
+	// Open help panel.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
+	m = next.(Model)
+	if !m.helpPanel {
+		t.Fatal("precondition: help panel should be open")
+	}
+
+	initialFocusPane := m.focusPane
+	initialDetailPanel := m.detailPanel
+
+	// tab should not switch panes.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	nm := next.(Model)
+	if nm.focusPane != initialFocusPane {
+		t.Error("tab should be suppressed while help is open (focusPane changed)")
+	}
+
+	// enter should not toggle detail panel.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm = next.(Model)
+	if nm.detailPanel != initialDetailPanel {
+		t.Error("enter should be suppressed while help is open (detailPanel changed)")
+	}
+
+	// r should be suppressed (nil cmd, no status message change).
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	nm = next.(Model)
+	if nm.focusPane != initialFocusPane {
+		t.Error("r should be suppressed while help is open (focusPane changed)")
+	}
+
+	// q should be suppressed (no quit).
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if cmd != nil {
+		// The viewport Update forwards q to the viewport which returns nil cmd.
+		// If somehow a quit cmd is returned, that's a bug.
+		msg := cmd()
+		if _, ok := msg.(tea.QuitMsg); ok {
+			t.Error("q should be suppressed while help is open (got quit cmd)")
+		}
+	}
+}
+
+// TestLayoutHeightInvariant_WithHelp verifies that the total rendered height of View()
+// equals m.height when the help panel is open at a standard terminal size.
+func TestLayoutHeightInvariant_WithHelp(t *testing.T) {
+	redirectHistory(t)
+
+	const termWidth = 80
+	const termHeight = 24
+
+	cases := []struct {
+		name    string
+		nActive int
+		focused pane
+		nHist   int
+	}{
+		{"active_focus_no_history", 0, paneActive, 0},
+		{"active_focus_with_history", 0, paneActive, 3},
+		{"history_focus_with_history", 0, paneHistory, 3},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(30, ProjectInfo{}, "")
+			now := time.Now()
+			for i := 0; i < tc.nActive; i++ {
+				m.active.active[fmt.Sprintf("issue-%d", i+1)] = &activeJob{StageName: "Research", StartedAt: now}
+			}
+			for i := 0; i < tc.nHist; i++ {
+				m.history.history = append(m.history.history, HistoryEntry{IssueNumber: i + 1, StageName: "Research", Success: true, Completed: true})
+			}
+			m.focusPane = tc.focused
+			m.syncFocus()
+
+			// Apply window size first.
+			next, _ := m.Update(tea.WindowSizeMsg{Width: termWidth, Height: termHeight})
+			m = next.(Model)
+
+			// Open help panel.
+			next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
+			m = next.(Model)
+			if !m.helpPanel {
+				t.Fatal("precondition: help panel should be open")
+			}
+
+			got := lipgloss.Height(m.View())
+			if got != termHeight {
+				t.Errorf("%s: View() height with help = %d, want %d", tc.name, got, termHeight)
+			}
+		})
+	}
+}
