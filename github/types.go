@@ -33,8 +33,10 @@ type ReviewRequest struct {
 
 // PRReview represents a submitted review on a pull request.
 type PRReview struct {
-	Author string // GitHub login of the reviewer
-	State  string // "APPROVED", "CHANGES_REQUESTED", or "COMMENTED"
+	Author     string // GitHub login of the reviewer
+	State      string // "APPROVED", "CHANGES_REQUESTED", or "COMMENTED"
+	Body       string // Review summary body (may be empty for comment-only reviews)
+	DatabaseID int    // Numeric PR review ID (0 if not fetched or unavailable)
 }
 
 // ProjectItem represents an issue or pull request card on the project board.

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -16,19 +17,21 @@ import (
 // Path 1 (handleStageComplete) always applies fabrik:awaiting-review directly
 // because reviewer assignment happens after MarkPRReady, so data would be stale.
 //
-// Returns true if the issue should not advance yet (gate is blocking),
-// false if it should proceed.
+// Returns (blocked, timedOut):
+//   - (true, false)  — gate is blocking; advance should not proceed
+//   - (false, false) — gate cleared naturally; advance may proceed
+//   - (false, true)  — gate cleared due to timeout; caller should pause the issue
 //
 // Side effects when blocking:
 //   - Logs a message listing the pending reviewers.
 //   - Adds fabrik:awaiting-review label on first block transition (idempotent).
 //
-// Side effects when unblocking:
+// Side effects when unblocking (naturally or by timeout):
 //   - Removes fabrik:awaiting-review label if present (idempotent).
-func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) bool {
+func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) (blocked, timedOut bool) {
 	// Gate is opt-in — only active when wait_for_reviews: true.
 	if stage.WaitForReviews == nil || !*stage.WaitForReviews {
-		return false
+		return false, false
 	}
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
@@ -48,11 +51,11 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	if len(outstanding) == 0 {
 		// No outstanding reviewers — remove label if present and allow advance.
 		e.removeAwaitingReviewLabel(owner, repo, item)
-		return false
+		return false, false
 	}
 
 	// Check timeout. If fabrik:awaiting-review was applied more than
-	// ReviewWaitTimeout ago, log a warning and advance anyway.
+	// ReviewWaitTimeout ago, signal timedOut so the caller can pause the issue.
 	timeout := e.cfg.ReviewWaitTimeout
 	if timeout <= 0 {
 		timeout = 15 * time.Minute
@@ -63,10 +66,10 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 			if err != nil {
 				e.logf(item.Number, "warn", "could not fetch awaiting-review label timestamp: %v\n", err)
 			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= timeout {
-				e.logf(item.Number, "warn", "review wait timeout elapsed; advancing despite pending reviewers: %s\n",
+				e.logf(item.Number, "warn", "review wait timeout elapsed; pausing issue — pending reviewers: %s\n",
 					strings.Join(outstanding, ", "))
 				e.removeAwaitingReviewLabel(owner, repo, item)
-				return false
+				return false, true
 			}
 			break
 		}
@@ -88,7 +91,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 		}
 	}
 
-	return true
+	return true, false
 }
 
 // removeAwaitingReviewLabel removes fabrik:awaiting-review if present on the item.
@@ -100,5 +103,76 @@ func (e *Engine) removeAwaitingReviewLabel(owner, repo string, item gh.ProjectIt
 			}
 			return
 		}
+	}
+}
+
+// buildSyntheticReviewComments converts PR reviews into synthetic gh.Comment objects
+// so they can be passed through the existing processComments pipeline.
+// DatabaseID is set to 0 because PR reviews don't have issue-comment DatabaseIDs;
+// callers must guard against DatabaseID==0 when calling AddCommentReaction.
+func buildSyntheticReviewComments(reviews []gh.PRReview) []gh.Comment {
+	comments := make([]gh.Comment, 0, len(reviews))
+	for _, rev := range reviews {
+		if rev.Body == "" {
+			// Skip reviews with no body — they're APPROVED/COMMENTED with no text.
+			continue
+		}
+		id := fmt.Sprintf("review-%d", rev.DatabaseID)
+		comments = append(comments, gh.Comment{
+			ID:         id,
+			DatabaseID: 0, // no issue-comment ID; reaction calls must be skipped
+			Author:     rev.Author,
+			Body:       fmt.Sprintf("[PR Review — %s]\n\n%s", rev.State, rev.Body),
+			CreatedAt:  time.Now(),
+		})
+	}
+	return comments
+}
+
+// pauseForReviewTimeout pauses the issue when the review wait timeout elapses.
+// It applies fabrik:paused + fabrik:awaiting-input and posts an explanatory comment.
+func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	e.logf(item.Number, "review-timeout", "review wait timeout elapsed — pausing for human intervention\n")
+
+	msg := fmt.Sprintf(
+		"🏭 **Fabrik — review wait timeout**\n\nThe review gate for stage **%s** timed out waiting for outstanding reviewers.\n\n"+
+			"Fabrik has paused this issue. Please check the PR for pending reviews, address any issues, and then remove the `fabrik:paused` label to resume.",
+		stage.Name,
+	)
+	if err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
+		e.logf(item.Number, "warn", "could not post review timeout comment: %v\n", err)
+	}
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
+		e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", err)
+	}
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
+		e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", err)
+	}
+}
+
+// pauseForReviewCycleLimit pauses the issue when the maximum review re-invocation
+// cycle count is reached. It applies fabrik:paused + fabrik:awaiting-input and
+// posts an explanatory comment.
+func (e *Engine) pauseForReviewCycleLimit(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, cycleCount, maxCycles int) {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	e.logf(item.Number, "review-cycles", "review cycle limit %d reached — pausing for human intervention\n", maxCycles)
+
+	msg := fmt.Sprintf(
+		"🏭 **Fabrik — review cycle limit reached**\n\nThe stage **%s** has been re-invoked to address PR review feedback %d time(s), "+
+			"which has reached the maximum configured limit (`FABRIK_MAX_REVIEW_CYCLES=%d`).\n\n"+
+			"This usually means a reviewer (bot or human) is repeatedly requesting changes after each fix. "+
+			"Fabrik has paused this issue for human review. Once the review situation is resolved, "+
+			"remove the `fabrik:paused` label to resume.",
+		stage.Name, cycleCount, maxCycles,
+	)
+	if err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
+		e.logf(item.Number, "warn", "could not post review cycle limit comment: %v\n", err)
+	}
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
+		e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", err)
+	}
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
+		e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", err)
 	}
 }

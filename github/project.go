@@ -327,8 +327,10 @@ query($id: ID!) {
           }
           latestReviews(first: 10) {
             nodes {
+              databaseId
               author { login }
               state
+              body
             }
           }
         }
@@ -422,10 +424,12 @@ query($id: ID!) {
 						} `json:"reviewRequests"`
 						LatestReviews struct {
 							Nodes []struct {
-								Author *struct {
+								DatabaseID int    `json:"databaseId"`
+								Author     *struct {
 									Login string `json:"login"`
 								} `json:"author"`
 								State string `json:"state"`
+								Body  string `json:"body"`
 							} `json:"nodes"`
 						} `json:"latestReviews"`
 					} `json:"nodes"`
@@ -522,8 +526,10 @@ query($id: ID!) {
 			for _, rev := range pr.LatestReviews.Nodes {
 				if rev.Author != nil && rev.Author.Login != "" {
 					item.LinkedPRReviews = append(item.LinkedPRReviews, PRReview{
-						Author: rev.Author.Login,
-						State:  rev.State,
+						Author:     rev.Author.Login,
+						State:      rev.State,
+						Body:       rev.Body,
+						DatabaseID: rev.DatabaseID,
 					})
 				}
 			}
