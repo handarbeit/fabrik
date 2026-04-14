@@ -278,16 +278,16 @@ description: >-
         <span class="feature-icon">👁️</span>
         <div class="feature-title">Pending Reviewer Gate</div>
         <div class="feature-desc">
-          Set <code>wait_for_reviews: true</code> on a stage and Fabrik waits
-          for all requested PR reviewers to submit, then re-invokes the stage
-          agent to address any unresolved inline review thread comments before
-          advancing. Reviews with only top-level text (e.g., bot approvals)
-          skip re-invocation. Controlled by
-          <code>FABRIK_REVIEW_WAIT_TIMEOUT</code> (default 15 min per cycle)
-          and <code>FABRIK_MAX_REVIEW_CYCLES</code> (default 5 cycles).
-          The <code>fabrik:awaiting-review</code> label makes the wait state
-          visible on the board. Timeout or cycle-limit exceeded pauses the
-          issue with <code>fabrik:awaiting-input</code> for human review.
+          Set <code>wait_for_reviews: true</code> on a stage and Fabrik uses
+          a three-phase gate: (1) immediately apply <code>fabrik:awaiting-review</code>
+          on completion, (2) poll until all requested reviewers submit, (3)
+          re-invoke the stage agent to address any unresolved inline PR review
+          thread comments before advancing. Reviews with only top-level text
+          (e.g., bot approvals or summary-only comments) skip re-invocation.
+          Controlled by <code>FABRIK_REVIEW_WAIT_TIMEOUT</code> (default 15
+          min per cycle) and <code>FABRIK_MAX_REVIEW_CYCLES</code> (default 5
+          cycles). Timeout or cycle-limit exceeded pauses the issue with
+          <code>fabrik:awaiting-input</code> for human review.
         </div>
       </div>
     </div>
