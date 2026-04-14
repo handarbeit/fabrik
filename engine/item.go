@@ -839,11 +839,13 @@ func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 		e.logf(item.Number, "warn", "could not remove failed label: %v\n", err)
 	}
 
-	stageKey := issueKey(item, e.defaultRepo()) + "-" + stage.Name
+	iKey := issueKey(item, e.defaultRepo())
+	stageKey := iKey + "-" + stage.Name
 	e.mu.Lock()
 	delete(e.retryCount, stageKey)
 	delete(e.pausedDueToRetries, stageKey)
-	delete(e.processedSet, stageKey) // clear cooldown so the stage retries immediately
+	delete(e.processedSet, stageKey)    // clear cooldown so the stage retries immediately
+	delete(e.reviewCycleCount, iKey)    // reset review cycle counter on unpause
 	e.mu.Unlock()
 }
 
