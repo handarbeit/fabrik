@@ -53,7 +53,7 @@ func NewWorktreeManagerForRepo(baseDir, worktreeRoot, rName string) *WorktreeMan
 // .fabrik/repos/<owner>-<repo>.git if it doesn't already exist.
 // Returns the path to the bare clone directory on success.
 // This is used for all repos — Fabrik always bare-clones managed repos.
-func ensureBareClone(baseDir, owner, repo string) (string, error) {
+func ensureBareClone(baseDir, owner, repo string, useSSH bool) (string, error) {
 	bareDir := filepath.Join(baseDir, ".fabrik", "repos", owner+"-"+repo+".git")
 	if _, err := os.Stat(bareDir); err == nil {
 		// Repair: bare clones created before v0.0.22 are missing the fetch
@@ -73,7 +73,12 @@ func ensureBareClone(baseDir, owner, repo string) (string, error) {
 		return "", fmt.Errorf("creating .fabrik/repos dir: %w", err)
 	}
 
-	cloneURL := fmt.Sprintf("https://github.com/%s/%s.git", owner, repo)
+	var cloneURL string
+	if useSSH {
+		cloneURL = fmt.Sprintf("git@github.com:%s/%s.git", owner, repo)
+	} else {
+		cloneURL = fmt.Sprintf("https://github.com/%s/%s.git", owner, repo)
+	}
 	cmd := exec.Command("git", "clone", "--bare", cloneURL, bareDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("cloning %s: %s: %w", cloneURL, strings.TrimSpace(string(out)), err)

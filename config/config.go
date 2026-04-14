@@ -24,6 +24,7 @@ type ProjectConfig struct {
 	MaxRetries    *int   `yaml:"max_retries"`
 	Yolo          bool   `yaml:"yolo"`
 	AutoUpgrade   bool   `yaml:"auto_upgrade"`
+	GitSSH        bool   `yaml:"git_ssh"`
 	TUI           *bool  `yaml:"tui"`
 	DebugOutput   bool   `yaml:"debug_output"`
 	Version       string `yaml:"version"`
