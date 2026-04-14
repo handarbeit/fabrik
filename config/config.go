@@ -48,22 +48,30 @@ func LoadProjectConfig() (ProjectConfig, error) {
 
 // WarnIfConfigIgnored prints a warning to stderr if .fabrik/config.yaml is
 // listed in .gitignore. The config file should be committed to git so it
-// travels with the repo; ignoring it defeats that purpose.
+// travels with the repo; ignoring it defeats that purpose. The warning is
+// suppressed when no .git entry is present — there is no repo to leak into.
 func WarnIfConfigIgnored() {
+	if _, err := os.Stat(".git"); os.IsNotExist(err) {
+		return
+	}
 	if isInGitignore(".fabrik/config.yaml") {
 		fmt.Fprintln(os.Stderr, "[warn] .fabrik/config.yaml is listed in .gitignore — this file should be committed to git so project config travels with the repo")
 	}
 }
 
 // LoadDotenv loads .env from CWD if it exists, and verifies it is listed in .gitignore.
-// Returns nil if no .env file is present.
+// Returns nil if no .env file is present. When no .git entry exists in CWD there is no
+// git repository that could leak secrets, so the gitignore check is skipped.
 func LoadDotenv() error {
 	if _, err := os.Stat(".env"); os.IsNotExist(err) {
 		return nil
 	}
 
-	if !isInGitignore(".env") {
-		return fmt.Errorf(".env file found but not listed in .gitignore — add '.env' to .gitignore to prevent accidental token leaks")
+	if _, err := os.Stat(".git"); !os.IsNotExist(err) {
+		// A git repo is present — enforce the gitignore safety check.
+		if !isInGitignore(".env") {
+			return fmt.Errorf(".env file found but not listed in .gitignore — add '.env' to .gitignore to prevent accidental token leaks")
+		}
 	}
 
 	return godotenv.Load(".env")
