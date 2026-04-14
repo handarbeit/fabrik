@@ -198,8 +198,7 @@ FABRIK_TOKEN=ghp_...    # Preferred
 GITHUB_TOKEN=ghp_...    # Fallback
 ```
 
-**Safety:** If `.env` exists but is not listed in `.gitignore`, Fabrik refuses to start
-to prevent accidental token leaks.
+**Safety:** When a `.git/` directory is present, Fabrik refuses to start if `.env` exists but is not listed in `.gitignore` (prevents accidental token leaks). In directories without `.git/` — containers, CI workspaces, or bare directories — this check is skipped and `.env` is loaded normally.
 
 ## Flags
 
