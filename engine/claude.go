@@ -23,6 +23,17 @@ var stageCompleteRE = regexp.MustCompile(`(?m)^FABRIK_STAGE_COMPLETE\r?$`)
 var blockedOnInputRE = regexp.MustCompile(`(?m)^FABRIK_BLOCKED_ON_INPUT\r?$`)
 var decomposedRE = regexp.MustCompile(`(?m)^FABRIK_DECOMPOSED\r?$`)
 
+// defaultAllowedTools is the comprehensive set of tools Fabrik permits by default
+// when a stage does not specify allowed_tools. This ensures headless Claude Code
+// invocations work deterministically regardless of the user's global settings.
+// When a stage sets allowed_tools, that list replaces (not extends) these defaults.
+var defaultAllowedTools = []string{
+	"Read", "Edit", "Write", "Glob", "Grep", "TodoWrite", "Skill", "Task",
+	"Bash(git:*)", "Bash(gh:*)", "Bash(go:*)", "Bash(npm:*)", "Bash(npx:*)", "Bash(yarn:*)", "Bash(pnpm:*)",
+	"Bash(make:*)", "Bash(cargo:*)", "Bash(python:*)", "Bash(pip:*)", "Bash(uv:*)", "Bash(pytest:*)",
+	"Bash(ls:*)", "Bash(cat:*)", "Bash(rm:*)", "Bash(cp:*)", "Bash(mv:*)", "Bash(mkdir:*)", "Bash(find:*)",
+}
+
 // CheckBlockedOnInput reports whether output contains the FABRIK_BLOCKED_ON_INPUT marker.
 func CheckBlockedOnInput(output string) bool {
 	return blockedOnInputRE.MatchString(output)
@@ -315,6 +326,8 @@ func buildClaudeArgs(stage *stages.Stage, sessFilePath string, resume bool, mode
 
 	if unrestricted {
 		args = append(args, "--dangerously-skip-permissions")
+	} else {
+		args = append(args, "--permission-mode", "dontAsk")
 	}
 
 	if claudePluginDir != "" {
@@ -338,7 +351,11 @@ func buildClaudeArgs(stage *stages.Stage, sessFilePath string, resume bool, mode
 		args = append(args, "--max-turns", fmt.Sprintf("%d", maxTurns))
 	}
 
-	for _, tool := range stage.AllowedTools {
+	tools := stage.AllowedTools
+	if !unrestricted && len(tools) == 0 {
+		tools = defaultAllowedTools
+	}
+	for _, tool := range tools {
 		args = append(args, "--allowedTools", tool)
 	}
 
