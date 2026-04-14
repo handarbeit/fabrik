@@ -245,3 +245,124 @@ func TestDefaultPRCommentPrompt(t *testing.T) {
 		t.Error("expected mention of review feedback")
 	}
 }
+
+func TestBuildCommentReviewPrompt_ReviewThreadComment(t *testing.T) {
+	stage := &stages.Stage{Name: "Review"}
+	item := gh.ProjectItem{
+		Number: 42,
+		Title:  "My PR",
+		URL:    "https://github.com/org/repo/pull/42",
+		Body:   "PR body",
+		IsPR:   true,
+	}
+	comments := []gh.Comment{
+		{
+			Author:         "copilot",
+			Body:           "Fix the error handling here",
+			CreatedAt:      time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC),
+			ReviewThreadID: "RT_abc123",
+			Path:           "engine/claude.go",
+			Line:           243,
+			OriginalLine:   240,
+			DiffHunk:       "@@ -241,7 +241,7 @@\n-\tfoo()\n+\tbar()",
+		},
+	}
+
+	prompt := buildCommentReviewPrompt(stage, item, comments)
+
+	if !strings.Contains(prompt, "[Thread: RT_abc123]") {
+		t.Error("expected thread ID in prompt")
+	}
+	if !strings.Contains(prompt, "engine/claude.go") {
+		t.Error("expected file path in prompt")
+	}
+	if !strings.Contains(prompt, "243") {
+		t.Error("expected line number in prompt")
+	}
+	if !strings.Contains(prompt, "@@ -241,7 +241,7 @@") {
+		t.Error("expected diff hunk in prompt")
+	}
+	if !strings.Contains(prompt, "```diff") {
+		t.Error("expected fenced diff block in prompt")
+	}
+	if !strings.Contains(prompt, "Fix the error handling here") {
+		t.Error("expected comment body in prompt")
+	}
+}
+
+func TestBuildCommentReviewPrompt_RegularComment_NoLocation(t *testing.T) {
+	stage := &stages.Stage{Name: "Review"}
+	item := gh.ProjectItem{
+		Number: 42,
+		Title:  "My PR",
+		IsPR:   true,
+	}
+	comments := []gh.Comment{
+		{
+			Author:    "alice",
+			Body:      "LGTM overall",
+			CreatedAt: time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC),
+			// No Path, Line, DiffHunk — regular PR body comment
+		},
+	}
+
+	prompt := buildCommentReviewPrompt(stage, item, comments)
+
+	if !strings.Contains(prompt, "**@alice**") {
+		t.Error("expected author in prompt")
+	}
+	if !strings.Contains(prompt, "LGTM overall") {
+		t.Error("expected body in prompt")
+	}
+	if strings.Contains(prompt, "**File:**") {
+		t.Error("regular comment should not include File: field")
+	}
+	if strings.Contains(prompt, "**Diff context:**") {
+		t.Error("regular comment should not include Diff context: field")
+	}
+	if strings.Contains(prompt, "[Thread:") {
+		t.Error("regular comment should not include Thread: reference")
+	}
+}
+
+func TestBuildCommentReviewPrompt_ReviewThreadComment_ZeroLine(t *testing.T) {
+	stage := &stages.Stage{Name: "Review"}
+	item := gh.ProjectItem{Number: 42, Title: "My PR", IsPR: true}
+
+	// Case 1: Line == 0, OriginalLine != 0 — should use OriginalLine
+	c1 := gh.Comment{
+		Author:         "bot",
+		Body:           "deleted line comment",
+		CreatedAt:      time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC),
+		ReviewThreadID: "RT_del",
+		Path:           "foo.go",
+		Line:           0,
+		OriginalLine:   99,
+		DiffHunk:       "@@ -97,5 +97,4 @@",
+	}
+	prompt1 := buildCommentReviewPrompt(stage, item, []gh.Comment{c1})
+	if !strings.Contains(prompt1, "99") {
+		t.Error("expected OriginalLine (99) in prompt when Line is 0")
+	}
+	if strings.Contains(prompt1, "**Line:** 0") {
+		t.Error("should not render line 0 in prompt")
+	}
+
+	// Case 2: both Line and OriginalLine are 0 — line number should be omitted
+	c2 := gh.Comment{
+		Author:         "bot",
+		Body:           "no line info",
+		CreatedAt:      time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC),
+		ReviewThreadID: "RT_noline",
+		Path:           "bar.go",
+		Line:           0,
+		OriginalLine:   0,
+	}
+	prompt2 := buildCommentReviewPrompt(stage, item, []gh.Comment{c2})
+	if !strings.Contains(prompt2, "bar.go") {
+		t.Error("expected file path in prompt even without line number")
+	}
+	if strings.Contains(prompt2, "**Line:**") {
+		t.Error("should not render **Line:** when both Line and OriginalLine are 0")
+	}
+}
