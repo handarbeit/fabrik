@@ -529,9 +529,11 @@ func (e *Engine) poll(ctx context.Context) error {
 				e.pauseForReviewTimeout(board, item, stage)
 				continue
 			}
-			// Gate cleared naturally — if reviews were submitted, re-invoke the stage
-			// agent to address the feedback before advancing.
-			if len(item.LinkedPRReviews) > 0 {
+			// Gate cleared naturally — if reviews with actionable body text were
+			// submitted, re-invoke the stage agent to address the feedback before
+			// advancing. Reviews with empty bodies (e.g. APPROVED with no comment)
+			// have nothing to address; fall through to advance as normal.
+			if syntheticComments := buildSyntheticReviewComments(item.LinkedPRReviews); len(syntheticComments) > 0 {
 				iKey := issueKey(item, e.defaultRepo())
 				e.mu.Lock()
 				cycleCount := e.reviewCycleCount[iKey]
