@@ -976,17 +976,23 @@ func (e *Engine) baseBranchForItem(item gh.ProjectItem, wm *WorktreeManager) (st
 		return wm.DefaultBaseBranch()
 	}
 
-	if wm.branchExists("origin/" + candidate) {
+	wm.mu.Lock()
+	exists := wm.branchExists("origin/" + candidate)
+	wm.mu.Unlock()
+	if exists {
 		e.logf(item.Number, "base", "using base branch %q from label\n", candidate)
 		return candidate, nil
 	}
 
-	// Branch not found — log warning, post comment, fall back to default.
+	// Branch not found — log warning, post comment once, fall back to default.
 	e.logf(item.Number, "warn", "base: label branch %q not found on remote, falling back to default\n", candidate)
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-	body := fmt.Sprintf("⚠️ Fabrik could not find branch `%s` on the remote (from `base:%s` label). Falling back to the repository default branch.", candidate, candidate)
-	if err := e.client.AddComment(owner, repo, item.Number, body); err != nil {
-		e.logf(item.Number, "warn", "could not post base branch fallback comment: %v\n", err)
+	warnKey := fmt.Sprintf("%s/%s#%d:%s", owner, repo, item.Number, candidate)
+	if _, alreadyWarned := e.baseBranchWarnedSet.LoadOrStore(warnKey, true); !alreadyWarned {
+		body := fmt.Sprintf("⚠️ Fabrik could not find branch `%s` on the remote (from `base:%s` label). Falling back to the repository default branch.", candidate, candidate)
+		if err := e.client.AddComment(owner, repo, item.Number, body); err != nil {
+			e.logf(item.Number, "warn", "could not post base branch fallback comment: %v\n", err)
+		}
 	}
 	return wm.DefaultBaseBranch()
 }
