@@ -270,7 +270,7 @@ func TestProcessItem_BlockedOnInput_AddsLabels(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
 			return "I need more info.\nFABRIK_BLOCKED_ON_INPUT\n", false, TokenUsage{}, nil
 		},
 	}
@@ -355,7 +355,7 @@ func TestProcessItem_BlockedOnInput_ProcessedSetEntry(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
 			return "FABRIK_BLOCKED_ON_INPUT\n", false, TokenUsage{}, nil
 		},
 	}

@@ -289,6 +289,10 @@ func (m *mockGitHubClient) ArchiveProjectItem(projectID, itemID string) error {
 	return nil
 }
 
+func (m *mockGitHubClient) SeedLabels(owner, repo string, stageNames []string, lockedUser string) error {
+	return nil
+}
+
 func (m *mockGitHubClient) RateLimitStats() (gh.RateLimitStats, gh.RateLimitStats) {
 	if m.rateLimitStatsFn != nil {
 		return m.rateLimitStatsFn()
@@ -300,32 +304,32 @@ func (m *mockGitHubClient) RateLimitStats() (gh.RateLimitStats, gh.RateLimitStat
 // mu protects calls for concurrent-safe access.
 type mockClaudeInvoker struct {
 	mu       sync.Mutex
-	invokeFn func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error)
+	invokeFn func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error)
 	calls    []claudeInvokeCall
 }
 
 type claudeInvokeCall struct {
-	stageName     string
-	issueNum      int
-	resume        bool
-	workDir       string
-	modelOverride string
+	stageName string
+	issueNum  int
+	resume    bool
+	workDir   string
+	opts      InvokeOptions
 }
 
-func (m *mockClaudeInvoker) Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+func (m *mockClaudeInvoker) Invoke(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
 	m.mu.Lock()
-	m.calls = append(m.calls, claudeInvokeCall{stage.Name, issue.Number, resume, workDir, modelOverride})
+	m.calls = append(m.calls, claudeInvokeCall{stage.Name, issue.Number, resume, workDir, opts})
 	fn := m.invokeFn
 	m.mu.Unlock()
 	if fn != nil {
-		return fn(stage, issue, newComments, resume, workDir, modelOverride)
+		return fn(stage, issue, newComments, resume, workDir, opts)
 	}
 	return "mock output", false, TokenUsage{}, nil
 }
 
-func (m *mockClaudeInvoker) InvokeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+func (m *mockClaudeInvoker) InvokeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
 	if m.invokeFn != nil {
-		return m.invokeFn(stage, issue, comments, false, workDir, modelOverride)
+		return m.invokeFn(stage, issue, comments, false, workDir, opts)
 	}
 	return "mock comment output", false, TokenUsage{}, nil
 }

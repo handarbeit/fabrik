@@ -115,8 +115,9 @@ effort_level: max               # Claude Code thinking effort: low, medium, high
 - **Commit frequently** during implementation — preserves progress if session is interrupted
 - **Rebase onto latest main** in Review and Validate stages before signaling completion
 - **Check `git status` first** in any stage — there may be uncommitted work from a previous session
-- **Labels are state**: `fabrik:locked:<user>`, `fabrik:editing`, `fabrik:paused`, `fabrik:awaiting-input`, `fabrik:awaiting-review`, `stage:<name>:in_progress`, `stage:<name>:complete`, `stage:<name>:failed`, `model:<name>`, `fabrik:yolo`, `fabrik:cruise`
+- **Labels are state**: `fabrik:locked:<user>`, `fabrik:editing`, `fabrik:paused`, `fabrik:awaiting-input`, `fabrik:awaiting-review`, `stage:<name>:in_progress`, `stage:<name>:complete`, `stage:<name>:failed`, `model:<name>`, `effort:<level>`, `fabrik:yolo`, `fabrik:cruise`
   - `model:<name>` — set by user to select a specific model for this issue (e.g. `model:opus`)
+  - `effort:<level>` — set by user to override the stage's configured thinking effort for this issue only; valid values: `low`, `medium`, `high`, `max`; if multiple `effort:` labels are present, precedence is `max > high > medium > low`
   - `fabrik:yolo` — set by user to force auto-advance even when `auto_advance: false` in stage YAML; also triggers auto-merge of the linked PR when Validate completes
   - `fabrik:cruise` — set by user to auto-advance through all stages without auto-merging the PR or advancing to Done at Validate completion; if both cruise and yolo are present, yolo takes precedence
   - `fabrik:awaiting-review` — set by engine when a stage with `wait_for_reviews: true` completes and outstanding PR reviewer requests remain; cleared when all reviewers submit or `FABRIK_REVIEW_WAIT_TIMEOUT` elapses

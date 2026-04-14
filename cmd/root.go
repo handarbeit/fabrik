@@ -378,8 +378,13 @@ func buildProjectInfo(cfg *Config, pc config.ProjectConfig) tui.ProjectInfo {
 		version = config.InferVersion(cwd)
 	}
 
+	repo := ""
+	if cfg.Owner != "" && cfg.Repo != "" {
+		repo = cfg.Owner + "/" + cfg.Repo
+	}
 	return tui.ProjectInfo{
 		CWD:           cwdDisplay,
+		Repo:          repo,
 		Version:       version,
 		FabrikVersion: Version,
 	}
@@ -393,7 +398,7 @@ func runTUI(eng *engine.Engine, pollSeconds int, info tui.ProjectInfo, pluginDir
 	eng.SetEvents(events)
 
 	tuiModel := tui.New(pollSeconds, info, pluginDir)
-	p := tea.NewProgram(tuiModel, tea.WithAltScreen(), tea.WithoutSignalHandler(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(tuiModel, tea.WithAltScreen(), tea.WithoutSignalHandler())
 
 	// Forward events from the engine's channel into bubbletea.
 	go func() {
