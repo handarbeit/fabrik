@@ -258,42 +258,25 @@ func TestCheckReviewGate_DismissedReviewer_Reblocks(t *testing.T) {
 	}
 }
 
-// (f) buildSyntheticReviewComments converts reviews with bodies to synthetic comments.
-func TestBuildSyntheticReviewComments(t *testing.T) {
-	reviews := []gh.PRReview{
-		{Author: "copilot", State: "CHANGES_REQUESTED", Body: "Please fix the error handling.", DatabaseID: 42},
-		{Author: "bot2", State: "APPROVED", Body: ""},        // empty body — should be skipped
-		{Author: "human", State: "COMMENTED", Body: "LGTM."}, // no DatabaseID (0)
+// (f) buildReviewThreadComments returns inline thread comments with real DatabaseIDs.
+func TestBuildReviewThreadComments(t *testing.T) {
+	item := gh.ProjectItem{
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{ID: "PRRC_1", DatabaseID: 101, Author: "copilot", Body: "Please fix the error handling.", ReviewThreadID: "RT_1"},
+			{ID: "PRRC_2", DatabaseID: 102, Author: "human", Body: "Consider edge case.", ReviewThreadID: "RT_2"},
+		},
 	}
 
-	comments := buildSyntheticReviewComments(reviews)
+	comments := buildReviewThreadComments(item)
 
 	if len(comments) != 2 {
-		t.Fatalf("expected 2 comments (skipping empty body), got %d", len(comments))
+		t.Fatalf("expected 2 thread comments, got %d", len(comments))
 	}
-
-	// First comment — copilot with DatabaseID 42
-	c0 := comments[0]
-	if c0.Author != "copilot" {
-		t.Errorf("expected author 'copilot', got %q", c0.Author)
+	if comments[0].DatabaseID == 0 {
+		t.Error("thread comments must carry real DatabaseIDs so reactions work")
 	}
-	if c0.ID != "review-42" {
-		t.Errorf("expected ID 'review-42', got %q", c0.ID)
-	}
-	if c0.DatabaseID != 0 {
-		t.Errorf("expected DatabaseID 0 for synthetic comment, got %d", c0.DatabaseID)
-	}
-	if c0.Body == "" {
-		t.Error("expected non-empty body")
-	}
-
-	// Second comment — human with DatabaseID 0
-	c1 := comments[1]
-	if c1.Author != "human" {
-		t.Errorf("expected author 'human', got %q", c1.Author)
-	}
-	if c1.DatabaseID != 0 {
-		t.Errorf("expected DatabaseID 0, got %d", c1.DatabaseID)
+	if comments[0].ReviewThreadID == "" {
+		t.Error("thread comments must carry ReviewThreadID so threads can be resolved later")
 	}
 }
 

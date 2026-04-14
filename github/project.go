@@ -333,6 +333,25 @@ query($id: ID!) {
               body
             }
           }
+          reviewThreads(first: 50) {
+            nodes {
+              id
+              isResolved
+              comments(first: 20) {
+                nodes {
+                  id
+                  databaseId
+                  author { login }
+                  body
+                  createdAt
+                  reactionGroups {
+                    content
+                    reactors { totalCount }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }
@@ -432,6 +451,15 @@ query($id: ID!) {
 								Body  string `json:"body"`
 							} `json:"nodes"`
 						} `json:"latestReviews"`
+						ReviewThreads struct {
+							Nodes []struct {
+								ID         string `json:"id"`
+								IsResolved bool   `json:"isResolved"`
+								Comments   struct {
+									Nodes []commentNodeData `json:"nodes"`
+								} `json:"comments"`
+							} `json:"nodes"`
+						} `json:"reviewThreads"`
 					} `json:"nodes"`
 				} `json:"closedByPullRequestsReferences"`
 			} `json:"node"`
@@ -531,6 +559,16 @@ query($id: ID!) {
 						Body:       rev.Body,
 						DatabaseID: rev.DatabaseID,
 					})
+				}
+			}
+			for _, thread := range pr.ReviewThreads.Nodes {
+				if thread.IsResolved {
+					continue
+				}
+				for _, cm := range thread.Comments.Nodes {
+					c := toComment(cm, pr.Number)
+					c.ReviewThreadID = thread.ID
+					item.LinkedPRReviewThreadComments = append(item.LinkedPRReviewThreadComments, c)
 				}
 			}
 		}
