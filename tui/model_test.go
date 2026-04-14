@@ -377,6 +377,8 @@ func TestLayoutHeightInvariant_SmallTerminal(t *testing.T) {
 		{17, 7},
 		{14, 5},
 		{10, 0},
+		{9, 0},
+		{8, 0},
 	}
 
 	for _, tc := range cases {
@@ -552,6 +554,149 @@ func TestHelpPanelSuppressKeys(t *testing.T) {
 		if _, ok := msg.(tea.QuitMsg); ok {
 			t.Error("q should be suppressed while help is open (got quit cmd)")
 		}
+	}
+}
+
+// TestLayoutHeightInvariant_ConfirmClear verifies the height invariant holds when
+// the confirm-clear prompt is shown and then dismissed via n, esc, or q.
+func TestLayoutHeightInvariant_ConfirmClear(t *testing.T) {
+	redirectHistory(t)
+
+	const termWidth = 80
+	const termHeight = 24
+
+	setup := func(t *testing.T) Model {
+		t.Helper()
+		m := New(30, ProjectInfo{}, "")
+		for i := 0; i < 3; i++ {
+			m.history.history = append(m.history.history, HistoryEntry{
+				IssueNumber: i + 1, StageName: "Research", Success: true, Completed: true,
+			})
+		}
+		m.focusPane = paneHistory
+		m.syncFocus()
+		next, _ := m.Update(tea.WindowSizeMsg{Width: termWidth, Height: termHeight})
+		return next.(Model)
+	}
+
+	t.Run("shown", func(t *testing.T) {
+		m := setup(t)
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("C")})
+		m = next.(Model)
+		if !m.history.ConfirmClear() {
+			t.Fatal("precondition: confirmClear should be true after C key")
+		}
+		got := lipgloss.Height(m.View())
+		if got != termHeight {
+			t.Errorf("confirm-clear shown: View() height = %d, want %d", got, termHeight)
+		}
+	})
+
+	t.Run("dismissed_n", func(t *testing.T) {
+		m := setup(t)
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("C")})
+		m = next.(Model)
+		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+		m = next.(Model)
+		if m.history.ConfirmClear() {
+			t.Fatal("precondition: confirmClear should be false after n key")
+		}
+		got := lipgloss.Height(m.View())
+		if got != termHeight {
+			t.Errorf("confirm-clear dismissed (n): View() height = %d, want %d", got, termHeight)
+		}
+	})
+
+	t.Run("dismissed_esc", func(t *testing.T) {
+		m := setup(t)
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("C")})
+		m = next.(Model)
+		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+		m = next.(Model)
+		if m.history.ConfirmClear() {
+			t.Fatal("precondition: confirmClear should be false after esc key")
+		}
+		got := lipgloss.Height(m.View())
+		if got != termHeight {
+			t.Errorf("confirm-clear dismissed (esc): View() height = %d, want %d", got, termHeight)
+		}
+	})
+
+	t.Run("dismissed_q", func(t *testing.T) {
+		m := setup(t)
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("C")})
+		m = next.(Model)
+		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+		m = next.(Model)
+		if m.history.ConfirmClear() {
+			t.Fatal("precondition: confirmClear should be false after q key")
+		}
+		got := lipgloss.Height(m.View())
+		if got != termHeight {
+			t.Errorf("confirm-clear dismissed (q): View() height = %d, want %d", got, termHeight)
+		}
+	})
+}
+
+// TestLayoutHeightInvariant_DetailPanel verifies the height invariant holds when
+// the detail panel is opened and closed.
+func TestLayoutHeightInvariant_DetailPanel(t *testing.T) {
+	redirectHistory(t)
+
+	const termWidth = 80
+	const termHeight = 24
+
+	cases := []struct {
+		name    string
+		nActive int
+		nHist   int
+		focused pane
+	}{
+		{"no_jobs_history_focused", 0, 3, paneHistory},
+		{"with_active_job_active_focused", 1, 0, paneActive},
+		{"with_active_and_history", 2, 3, paneHistory},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(30, ProjectInfo{}, "")
+			now := time.Now()
+			for i := 0; i < tc.nActive; i++ {
+				key := fmt.Sprintf("issue-%d", i+1)
+				m.active.active[key] = &activeJob{IssueNumber: i + 1, StageName: "Research", StartedAt: now}
+			}
+			for i := 0; i < tc.nHist; i++ {
+				m.history.history = append(m.history.history, HistoryEntry{
+					IssueNumber: i + 1, StageName: "Research", Success: true, Completed: true,
+				})
+			}
+			m.focusPane = tc.focused
+			m.syncFocus()
+			next, _ := m.Update(tea.WindowSizeMsg{Width: termWidth, Height: termHeight})
+			m = next.(Model)
+
+			// Open detail panel.
+			next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			m = next.(Model)
+			if !m.detailPanel {
+				t.Fatal("precondition: detailPanel should be true after enter")
+			}
+			got := lipgloss.Height(m.View())
+			if got != termHeight {
+				t.Errorf("detail panel open: View() height = %d, want %d", got, termHeight)
+			}
+
+			// Close detail panel.
+			next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			m = next.(Model)
+			if m.detailPanel {
+				t.Fatal("precondition: detailPanel should be false after second enter")
+			}
+			got = lipgloss.Height(m.View())
+			if got != termHeight {
+				t.Errorf("detail panel closed: View() height = %d, want %d", got, termHeight)
+			}
+		})
 	}
 }
 
