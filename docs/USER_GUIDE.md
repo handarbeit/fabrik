@@ -941,12 +941,18 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 |-------|--------|
 | `model:opus` | Override Claude model to Opus for this issue |
 | `model:sonnet` | Override Claude model to Sonnet for this issue |
+| `effort:low` | Override thinking effort to low for this issue |
+| `effort:medium` | Override thinking effort to medium for this issue |
+| `effort:high` | Override thinking effort to high for this issue |
+| `effort:max` | Override thinking effort to max for this issue |
 | `fabrik:paused` | Manually pause processing (add to pause, remove to resume) |
 | `fabrik:yolo` | Force auto-advance for this issue even when `auto_advance: false`; also triggers auto-merge of the linked PR when Validate completes |
 | `fabrik:cruise` | Auto-advances through all stages like `fabrik:yolo` but stops at Validate — no auto-merge, no move to Done. If both `fabrik:cruise` and `fabrik:yolo` are present, `fabrik:yolo` takes precedence. |
 | `fabrik:unrestricted` | Pass `--dangerously-skip-permissions` to Claude Code for this issue only; use when an issue needs to write to paths not covered by `.claude/settings.json` (e.g. `.claude/skills/`). **Caution:** bypasses the permission system. |
 
 Model label precedence: `model:<name>` label > stage YAML `model` field > default.
+
+Effort label precedence: `max > high > medium > low`. If multiple `effort:` labels are present, the highest-ranked value wins and a warning is logged.
 
 ---
 
@@ -979,7 +985,7 @@ Claude sessions, a scrollable History pane with completed jobs, and a status bar
 | `C` | Clear all history (with confirmation) |
 | `q` | Quit |
 
-Mouse support is enabled by default: click a row to select it in either pane.
+In terminals that support OSC 8 hyperlinks (Ghostty, iTerm2, WezTerm, Kitty), issue numbers (`#NNN`) in the In Progress and History panes are clickable links that open the corresponding GitHub issue in your browser. The project board title in the footer is also a clickable link. Use keyboard navigation for selection and scrolling.
 
 ### What's Displayed
 

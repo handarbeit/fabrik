@@ -157,6 +157,16 @@ func (e *Engine) Run() error {
 		return err
 	}
 
+	// Seed all known Fabrik labels with descriptions and sensible default colors.
+	// Non-fatal: a seeding failure must not prevent the engine from polling.
+	stageNames := make([]string, len(e.cfg.Stages))
+	for i, s := range e.cfg.Stages {
+		stageNames[i] = s.Name
+	}
+	if err := e.client.SeedLabels(e.cfg.Owner, e.cfg.Repo, stageNames, e.cfg.User); err != nil {
+		e.logf(0, "warn", "label seeding failed (non-fatal): %v\n", err)
+	}
+
 	if e.events == nil {
 		fmt.Println("\nFabrik is running. Press Ctrl+C to stop.")
 		fmt.Println()

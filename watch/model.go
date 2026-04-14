@@ -215,7 +215,7 @@ func (m WatchModel) Init() tea.Cmd {
 // Run runs the bubbletea program with the WatchModel.
 // It injects p.Send into the log follower goroutines before starting.
 func Run(m WatchModel) error {
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(m, tea.WithAltScreen())
 
 	// Start background goroutines that send messages via p.Send.
 	StartLogFollower(m.logDir, func(msg tea.Msg) { p.Send(msg) }, m.done)
@@ -374,62 +374,11 @@ func (m WatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusMsg = ev.Text
 		return m, nil
 
-	case tea.MouseMsg:
-		// Left click on the tab bar → switch tab.
-		if ev.Button == tea.MouseButtonLeft && ev.Action == tea.MouseActionPress && len(m.stageTabs) > 0 {
-			// Tab bar Y: header(Y=0) + labels?(Y=1) + prLine + tabBar
-			tabBarY := 2 // no labels: header(0) + prLine(1) + tabBar(2)
-			if len(m.github.labels) > 0 {
-				tabBarY = 3 // header(0) + labels(1) + prLine(2) + tabBar(3)
-			}
-			if ev.Y == tabBarY {
-				if idx := m.tabClickIdx(ev.X); idx >= 0 {
-					m.selectedTabIdx = idx
-					m.switchToTab(idx)
-					return m, nil
-				}
-			}
-		}
-		// All other mouse events (wheel, etc.) pass to the viewport.
-		var cmd tea.Cmd
-		m.vp, cmd = m.vp.Update(ev)
-		return m, cmd
 	}
 
 	var cmd tea.Cmd
 	m.vp, cmd = m.vp.Update(msg)
 	return m, cmd
-}
-
-// tabClickIdx returns the index of the tab whose rendered X range contains clickX,
-// or -1 if no tab was hit. The tab rendering must match tabBar() exactly.
-func (m WatchModel) tabClickIdx(clickX int) int {
-	x := 0
-	for i, t := range m.stageTabs {
-		label := t.Label
-		if t.IsLive {
-			label = "● " + label
-		}
-		tab := fmt.Sprintf("[ %s ]", label)
-		isSelected := i == m.selectedTabIdx
-		var style lipgloss.Style
-		switch {
-		case t.IsLive && isSelected:
-			style = activeSectionStyle
-		case t.IsLive:
-			style = activeStyle
-		case isSelected:
-			style = sectionStyle
-		default:
-			style = dimStyle
-		}
-		w := lipgloss.Width(style.Render(tab))
-		if clickX >= x && clickX < x+w {
-			return i
-		}
-		x += w + 1 // 1 for the space separator between tabs
-	}
-	return -1
 }
 
 // fetchGitHub refreshes GitHub state synchronously. For a TUI this runs on the
