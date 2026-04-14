@@ -365,5 +365,7 @@ See [adrs/](adrs/) for documented decisions and their rationale.
 
 - Go 1.26.1+
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
-- GitHub personal access token with `repo` and `project` scopes
+- GitHub **classic** personal access token (`ghp_...`) with `repo`, `project`, and `workflow` scopes
+  - Fine-grained tokens (`github_pat_...`) are **not supported** — GitHub Projects v2 GraphQL requires a classic PAT
+  - Create one at: https://github.com/settings/tokens (select "Tokens (classic)")
 - A GitHub Project (v2) with board columns matching your stage names

@@ -33,7 +33,9 @@ For details on the internal stage lifecycle, see [Stage Lifecycle](stage-lifecyc
 
 - Go 1.26.1+
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
-- GitHub personal access token with `repo` and `project` scopes
+- GitHub **classic** personal access token (`ghp_...`) with `repo`, `project`, and `workflow` scopes
+  - Fine-grained tokens (`github_pat_...`) are **not supported** — GitHub Projects v2 GraphQL requires a classic PAT
+  - Create one at: https://github.com/settings/tokens (select "Tokens (classic)")
 - A GitHub Project (v2) with board columns matching your stage names
 
 
@@ -100,6 +102,9 @@ GitHub token to a gitignored `.env` file:
 
 ```
 # .env (gitignored — keep secrets here)
+# Use a CLASSIC personal access token (ghp_...) — not a fine-grained token (github_pat_...)
+# Required scopes: repo, project, workflow
+# Create at: https://github.com/settings/tokens (select "Tokens (classic)")
 FABRIK_TOKEN=ghp_...
 ```
 
@@ -300,7 +305,8 @@ Keep only secrets here. Fabrik refuses to start if `.env` exists but is not giti
 
 ```
 # .env (gitignored)
-FABRIK_TOKEN=ghp_...         # Preferred token env var
+# Classic personal access token (ghp_...) required — see https://github.com/settings/tokens
+FABRIK_TOKEN=ghp_...         # Preferred token env var (needs repo, project, workflow scopes)
 GITHUB_TOKEN=ghp_...         # Fallback token env var
 ```
 
@@ -333,8 +339,8 @@ FABRIK_USER=my-personal-username
 
 | Variable | `config.yaml` key | Description | Default |
 |----------|-------------------|-------------|---------|
-| `FABRIK_TOKEN` | *(secrets only)* | GitHub personal access token (preferred) | required |
-| `GITHUB_TOKEN` | *(secrets only)* | GitHub personal access token (fallback) | required |
+| `FABRIK_TOKEN` | *(secrets only)* | GitHub **classic** personal access token (`ghp_...`) with `repo`, `project`, `workflow` scopes (preferred) | required |
+| `GITHUB_TOKEN` | *(secrets only)* | GitHub **classic** personal access token (`ghp_...`) — fallback when `FABRIK_TOKEN` is unset | required |
 | `FABRIK_OWNER` | `owner` | GitHub repo owner | -- |
 | `FABRIK_REPO` | `repo` | GitHub repo name; optional — omitting enables multi-repo mode (all repos on the board) | -- |
 | `FABRIK_PROJECT_NUMBER` | `project` | GitHub Project (v2) number | -- |
@@ -1122,6 +1128,19 @@ Typical cost is ~5–30 points per poll depending on active items, well within t
 ---
 
 ## 9. Troubleshooting
+
+### GitHub API Returns 401 or "Fine-Grained Token" Warning
+
+Fabrik requires a **classic** personal access token (`ghp_...`). Fine-grained tokens (`github_pat_...`) are **not supported** because GitHub Projects v2 GraphQL — which Fabrik uses for status updates and board queries — is not available to fine-grained PATs.
+
+**Symptoms:**
+- Startup warning: `[warn] Fine-grained personal access tokens (github_pat_...) do not support GitHub Projects v2 GraphQL...`
+- Error on first API call: `GitHub API returned 401: ... If you used a fine-grained access token...`
+
+**Fix:**
+1. Go to https://github.com/settings/tokens and select **"Tokens (classic)"**
+2. Generate a new token with scopes: `repo`, `project`, `workflow`
+3. Update `FABRIK_TOKEN` in your `.env` file with the new `ghp_...` token
 
 ### Startup Board Validation Failure
 
