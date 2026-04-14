@@ -78,6 +78,18 @@ type Comment struct {
 	// comment belongs to. Empty for non-review-thread comments. Needed to
 	// call resolveReviewThread after the feedback is addressed.
 	ReviewThreadID string
+	// Path is the file path targeted by the PR review thread comment.
+	// Empty for regular issue and PR body comments.
+	Path string
+	// Line is the line number in the current diff. Zero when not applicable
+	// (e.g., regular comments) or when the comment targets a deleted line.
+	Line int
+	// OriginalLine is the line number in the original base diff. Used as a
+	// fallback when Line is 0. Zero when not applicable.
+	OriginalLine int
+	// DiffHunk is the diff context hunk surrounding the comment. Empty for
+	// regular issue and PR body comments.
+	DiffHunk string
 }
 
 // ReactionGroup represents a reaction type and its count on a comment.
