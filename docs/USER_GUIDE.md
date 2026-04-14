@@ -132,7 +132,7 @@ exactly (case-sensitive). The default pipeline uses:
 > ```bash
 > rm -rf ~/.claude/plugins/cache/claude-plugins-official/superpowers
 > ```
-> See [§9 Troubleshooting → Duplicate Comments on Issues](#10-troubleshooting) for full details.
+> See [§10 Troubleshooting → Duplicate Comments on Issues](#10-troubleshooting) for full details.
 
 ### First Run
 
@@ -280,7 +280,7 @@ experience as release binaries.
 
 > **Note:** When Fabrik starts, it creates a PID lock file at `.fabrik/fabrik.lock`. If a second instance attempts to start in the same directory, it reads the lock file, logs an error identifying the running process, and exits immediately. The lock is automatically released when the process exits — including on crash or SIGKILL — so there is no need to manually delete the file after an unclean shutdown.
 >
-> See [§9 Troubleshooting → Multiple Fabrik Instances](#10-troubleshooting) if you encounter a stale lock or need to run multiple instances against different projects.
+> See [§10 Troubleshooting → Multiple Fabrik Instances](#10-troubleshooting) if you encounter a stale lock or need to run multiple instances against different projects.
 
 ---
 
