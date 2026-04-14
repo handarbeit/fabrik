@@ -72,6 +72,7 @@ type Engine struct {
 	wg                   sync.WaitGroup        // tracks in-flight workers for graceful shutdown
 	inFlight             sync.Map              // key: issueKey string, value: bool (isPR)
 	cloneInFlight        sync.Map              // key: "owner/repo" string, value: *cloneCall; per-repo bare-clone coordination
+	baseBranchWarnedSet  sync.Map              // key: "owner/repo#N:branch"; prevents repeated fallback comments for bad base: labels
 	events               chan tui.Event        // nil in tests / plain-text mode; TUI goroutine consumes
 	logFile              *os.File              // persistent log file at .fabrik/fabrik.log; nil if not opened
 	logMu                sync.Mutex            // serializes concurrent writes to logFile
