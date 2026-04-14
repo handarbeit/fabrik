@@ -337,6 +337,103 @@ func TestFetchItemDetails_ResetsLabelsFromShallow(t *testing.T) {
 	}
 }
 
+// TestFetchItemDetails_ReviewThreadLocationFields verifies that location fields
+// (path, line, originalLine, diffHunk) on PR review thread comment nodes are
+// correctly decoded and surfaced in LinkedPRReviewThreadComments.
+func TestFetchItemDetails_ReviewThreadLocationFields(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"data": map[string]interface{}{
+				"node": map[string]interface{}{
+					"comments": map[string]interface{}{
+						"nodes":    []interface{}{},
+						"pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""},
+					},
+					"closedByPullRequestsReferences": map[string]interface{}{
+						"nodes": []interface{}{
+							map[string]interface{}{
+								"id":     "PR_10",
+								"number": 10,
+								"comments": map[string]interface{}{
+									"nodes":    []interface{}{},
+									"pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""},
+								},
+								"reviewRequests": map[string]interface{}{"nodes": []interface{}{}},
+								"latestReviews":  map[string]interface{}{"nodes": []interface{}{}},
+								"reviewThreads": map[string]interface{}{
+									"nodes": []interface{}{
+										map[string]interface{}{
+											"id":           "RT_abc123",
+											"isResolved":   false,
+											"path":         "engine/claude.go",
+											"line":         243,
+											"originalLine": 240,
+											"diffSide":     "RIGHT",
+											"comments": map[string]interface{}{
+												"nodes": []interface{}{
+													map[string]interface{}{
+														"id":           "PRC_1",
+														"databaseId":   1001,
+														"author":       map[string]interface{}{"login": "copilot"},
+														"body":         "Fix error handling here",
+														"createdAt":    "2026-01-15T10:30:00Z",
+														"diffHunk":     "@@ -241,7 +241,7 @@\n-\tfoo()\n+\tbar()",
+														"path":         "engine/claude.go",
+														"line":         243,
+														"originalLine": 240,
+														"reactionGroups": []interface{}{},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	item := &ProjectItem{ID: "I_1", Number: 1}
+	if err := c.FetchItemDetails(item); err != nil {
+		t.Fatalf("FetchItemDetails: %v", err)
+	}
+
+	if len(item.LinkedPRReviewThreadComments) != 1 {
+		t.Fatalf("expected 1 review thread comment, got %d", len(item.LinkedPRReviewThreadComments))
+	}
+	c2 := item.LinkedPRReviewThreadComments[0]
+	if c2.ReviewThreadID != "RT_abc123" {
+		t.Errorf("ReviewThreadID = %q, want %q", c2.ReviewThreadID, "RT_abc123")
+	}
+	if c2.Path != "engine/claude.go" {
+		t.Errorf("Path = %q, want %q", c2.Path, "engine/claude.go")
+	}
+	if c2.Line != 243 {
+		t.Errorf("Line = %d, want 243", c2.Line)
+	}
+	if c2.OriginalLine != 240 {
+		t.Errorf("OriginalLine = %d, want 240", c2.OriginalLine)
+	}
+	if c2.DiffHunk != "@@ -241,7 +241,7 @@\n-\tfoo()\n+\tbar()" {
+		t.Errorf("DiffHunk = %q, want diff hunk", c2.DiffHunk)
+	}
+	if c2.Author != "copilot" {
+		t.Errorf("Author = %q, want %q", c2.Author, "copilot")
+	}
+	if c2.Body != "Fix error handling here" {
+		t.Errorf("Body = %q, want %q", c2.Body, "Fix error handling here")
+	}
+	if c2.FromPR != 10 {
+		t.Errorf("FromPR = %d, want 10", c2.FromPR)
+	}
+}
+
 func TestFetchItemDetails_NilAuthor(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]interface{}{
