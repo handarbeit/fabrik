@@ -1,25 +1,33 @@
-# Fabrik v0.0.33
+# Fabrik v0.0.34
 
 ## Features
 
-- **`fabrik:cruise` label mode** (#325) — Auto-advances issues through all pipeline stages like `fabrik:yolo`, but stops at Validate without auto-merging the PR or moving to Done. The human takes over for the final step.
-- **`disable_adaptive_thinking` and `effort_level` stage config** (#321) — New stage YAML fields to control Claude Code's thinking budget. Adaptive thinking is now **disabled by default** for all stages — Claude Code no longer silently reduces its thinking budget mid-session. Set `disable_adaptive_thinking: false` in a stage YAML to re-enable it. `effort_level` accepts `low`, `medium`, `high`, `max` (default: `high`).
-- **Rate limit display in TUI footer** (#319) — REST and GraphQL rate limit stats are now shown in the TUI status bar.
+- **Click-to-open issue and board links in TUI** (#340) — Cmd+click (or Ctrl+click on Linux) on the `#NNN` column in history/active panels to open the issue in your browser. Cmd+click the board title in the footer to open the project board. Mouse capture removed; keyboard navigation unchanged.
+- **`effort:` label override** (#341) — Per-issue thinking effort control via label: `effort:low`, `effort:medium`, `effort:high`, `effort:max`. Overrides the stage YAML's `effort_level` for one issue only. Complements the existing `model:` label override.
+- **Refactor: TUI component architecture** (#279) — `tui/model.go` split into component files (header, active, history, footer, detail). Reduces the giant model file and sets up for further TUI enhancements.
+- **Release announcements to Discussions** — GitHub Actions release workflow now posts a formatted announcement to the shadoworg/fabrik Discussions "Announcements" category after each successful release.
+- **TUI footer shows clickable board title** — "Fabrik PM" (or your project board name) now appears in the footer as an OSC 8 hyperlink on supported terminals.
 
 ## Fixes
 
-- **Prevent parent env vars from leaking into Claude subprocess** (#328) — Claude is now invoked with a clean environment built from scratch, preventing ambient variables from affecting behavior.
-- **Yolo catch-up merges PR before advancing from Validate** (#316) — Fixed ordering bug where catch-up could advance to Done before the PR merge completed.
-- **Skip yolo catch-up advance when unprocessed comments exist** (#317) — Catch-up no longer skips pending comments when auto-advancing.
+- **Done stage no longer skipped after restart** — When a Fabrik restart left only cleanup items to process, the Done stage was silently skipped because no WorktreeManager was registered for the repo. Both `itemMayNeedWork` and `itemNeedsWork` now fall back to a direct filesystem path check.
+- **Done stage runs after manual Validate→Done column move** — Board column moves don't always bump the issue's `updatedAt`, so cleanup items could be stuck by the updatedAt cache. Cleanup stages now bypass the cache entirely (worktree Stat is local, no GraphQL cost).
+- **OSC 8 hyperlinks in footer now actually work** — Lipgloss `Style.Render()` was stripping OSC 8 escape sequences. New `renderWithOSC8` renders dim style first, then injects the raw hyperlink.
+- **Rate limit text no longer touches right edge** — Footer width budget leaves a 1-char margin on both sides.
+- **Project version no longer redundantly shown alongside board title** — `github.com/handarbeit/fabrik` no longer clutters the footer once "Fabrik PM" is fetched.
+- **Board title replaces stale `owner/repo` in footer** — The old footer slot displayed `owner/` with no repo in multi-repo mode. Now shows the project board title with a clickable link.
 
 ## Improvements
 
-- Default `effort_level` changed from `max` to `high` to reduce token usage without sacrificing quality.
+- **Label auto-seeding at startup** — Fabrik now ensures its managed labels exist on the configured repo at startup (with descriptions and colors), so the GitHub UI shows meaningful hover text.
+- **Refactor: worktreeExistsForItem helper** — Eliminated duplicated WM lookup + filesystem fallback logic between the two item filters.
+- **Refactor: hasLabel helper** — Replaced inline label-scanning loops with a named predicate.
 
 ## Internal
 
-- Documentation updates for v0.0.32.
-- WIP stage-incomplete marker support (partial progress, not yet user-facing).
+- Test suite reliability: `TestExecute_ValidStagesReachesEngine` and `TestMain_Help` now isolate HOME/CWD so the suite completes in ~80 seconds without hangs.
+- `engine/.fabrik/` and `.fabrik/debug-footer.bin` gitignored (test/debug artifacts).
+- PR #339 merged with TUI mouse capture removal and OSC 8 hyperlinks for issue numbers.
 
 ## Upgrading
 
@@ -28,5 +36,5 @@
 # Fabrik checks for new releases each poll cycle and upgrades automatically with --auto-upgrade
 
 # Or download directly
-gh release download --repo tenaciousvc/fabrik --pattern '*<os>_<arch>*' -O - | tar xz
+gh release download --repo shadoworg/fabrik --pattern '*darwin_arm64*' -O - | tar xz
 ```
