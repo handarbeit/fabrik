@@ -174,6 +174,55 @@ To restrict processing to a single repository, pass `--repo owner/repo`.
 
 The `.fabrik/` directory (config, stages, plugin) always lives in the directory where you run `fabrik`.
 
+### Git Clone Protocol (HTTPS vs SSH)
+
+By default, Fabrik uses HTTPS to bare-clone managed repos (`https://github.com/<owner>/<repo>.git`). Users who authenticate via SSH keys can switch to SSH clone URLs instead.
+
+#### Using SSH
+
+Pass `--ssh` on the command line or add `git_ssh: true` to `.fabrik/config.yaml`:
+
+```bash
+# One-time: use SSH for this run
+fabrik --ssh --owner myorg --project 5 --user me
+
+# Persistent: add to .fabrik/config.yaml
+git_ssh: true
+```
+
+The environment variable `FABRIK_GIT_SSH=true` is also supported (useful in CI).
+
+When SSH mode is active, Fabrik uses `git@github.com:<owner>/<repo>.git` as the clone URL. This requires your SSH key to be registered with GitHub and accessible via `ssh-agent`.
+
+#### HTTPS Credential Helper Warning
+
+When using HTTPS (the default), Fabrik checks at startup whether a git credential helper is configured. If none is found, you'll see an advisory warning:
+
+```
+[startup] warn: no git credential helper configured; HTTPS cloning may prompt for credentials.
+[startup] warn: configure one (e.g. git-credential-osxkeychain) or use --ssh / git_ssh: true in .fabrik/config.yaml.
+```
+
+This warning is non-fatal. If you use a GitHub token in your environment (`FABRIK_TOKEN` or `GITHUB_TOKEN`) and your git is configured to use it (e.g., via a credential helper or token-in-URL), cloning will work without further configuration.
+
+To resolve the warning, either:
+- Configure a credential helper: `git config --global credential.helper osxkeychain` (macOS), or `git config --global credential.helper store`
+- Or switch to SSH mode with `--ssh` / `git_ssh: true`
+
+#### Existing Bare Clones
+
+**Switching between HTTPS and SSH does not re-clone existing bare repos.** Once Fabrik has cloned a repo, it reuses the existing bare clone with its original remote URL. The SSH/HTTPS setting only affects new clones.
+
+If you switch to SSH mode after existing bare clones were created, those clones will continue to fetch via HTTPS. To switch an existing bare clone to SSH, update its remote URL directly:
+
+```bash
+git -C .fabrik/repos/owner-repo.git remote set-url origin git@github.com:owner/repo.git
+```
+
+#### URL Rewriting
+
+If you have `url.<base>.insteadOf` configured in your global `~/.gitconfig` (a common way to redirect HTTPS to SSH globally), Fabrik will notice at startup and print an informational message. Git applies URL rewriting transparently, so Fabrik's HTTPS clone URLs will automatically use your SSH configuration — no additional Fabrik setting is needed.
+
 ### Auto-upgrade
 
 The `--auto-upgrade` flag enables Fabrik to upgrade itself when idle. After 2

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -146,7 +147,7 @@ func TestEnsureBareClone_ExistingDir_FetchesOnly(t *testing.T) {
 
 	// ensureBareClone should see the existing directory and attempt a git fetch (best-effort).
 	// Since this is not a real git repo, fetch will fail silently.
-	_, err := ensureBareClone(tmpDir, "owner", "repo")
+	_, err := ensureBareClone(tmpDir, "owner", "repo", false)
 	if err != nil {
 		t.Errorf("ensureBareClone with existing dir returned error: %v", err)
 	}
@@ -164,7 +165,7 @@ func TestEnsureBareClone_NewDir_ClonesFromLocal(t *testing.T) {
 	// but we can test the error path: clone of a non-existent github URL fails.
 	// Instead we test that the function creates the .fabrik directory and returns an error
 	// when git clone fails (no real network in CI).
-	_, err := ensureBareClone(tmpDir, "nonexistent-owner-xyz", "nonexistent-repo-xyz-abc")
+	_, err := ensureBareClone(tmpDir, "nonexistent-owner-xyz", "nonexistent-repo-xyz-abc", false)
 	// We expect an error because the github URL doesn't exist. The key check is that
 	// the function attempts the clone and returns a wrapped error.
 	if err == nil {
@@ -178,4 +179,21 @@ func TestEnsureBareClone_NewDir_ClonesFromLocal(t *testing.T) {
 
 	// Suppress unused variable warning from srcDir
 	_ = srcDir
+}
+
+func TestEnsureBareClone_SSHMode_UsesSSHURL(t *testing.T) {
+	skipIfNoGit(t)
+	tmpDir := t.TempDir()
+
+	// With useSSH=true the clone URL should be git@github.com:owner/repo.git.
+	// The clone will fail (no network / no SSH key in CI), but the error message
+	// must reference the SSH URL, proving the correct URL was constructed.
+	_, err := ensureBareClone(tmpDir, "owner", "repo", true)
+	if err == nil {
+		t.Log("clone unexpectedly succeeded (real SSH access?)")
+		return
+	}
+	if !strings.Contains(err.Error(), "git@github.com:") {
+		t.Errorf("expected SSH clone URL in error, got: %v", err)
+	}
 }
