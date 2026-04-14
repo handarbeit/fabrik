@@ -522,9 +522,9 @@ func (wm *WorktreeManager) DefaultBaseBranch() (string, error) {
 			// Expected format: "ref: refs/heads/<branch>\tHEAD"
 			if strings.HasPrefix(line, "ref: refs/heads/") {
 				rest := strings.TrimPrefix(line, "ref: refs/heads/")
-				branch := strings.Fields(rest)[0]
-				if branch != "" {
-					return branch, nil
+				fields := strings.Fields(rest)
+				if len(fields) > 0 && fields[0] != "" {
+					return fields[0], nil
 				}
 			}
 		}
