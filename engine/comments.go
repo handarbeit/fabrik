@@ -68,7 +68,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 
 	// Step 3: Ensure worktree
 	wm := e.worktreesFor(item.Repo)
-	baseBranch, err := wm.DefaultBaseBranch()
+	baseBranch, err := e.baseBranchForItem(item, wm)
 	if err != nil {
 		e.removeEditingLabel(owner, repo, item.Number)
 		return fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
