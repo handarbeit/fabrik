@@ -241,8 +241,16 @@ func (h HistoryPaneComponent) View(width int) string {
 }
 
 func (h HistoryPaneComponent) Height() int {
-	// Height is determined by SetLayout; return viewport height + overhead.
-	return h.historyVP.Height + h.titleAndHintLines(h.activeCount, h.confirmQuit) + 2 // +2 for border
+	// When no space was allocated by updateLayout, View() returns "".
+	if h.availableH == 0 {
+		return 0
+	}
+	raw := h.historyVP.Height + h.titleAndHintLines(h.activeCount, h.confirmQuit) + 2 // +2 for border
+	// When View() trims to availableH lines, Height() must match.
+	if h.availableH > 0 && raw > h.availableH {
+		return h.availableH
+	}
+	return raw
 }
 
 // SetLayout updates the viewport dimensions based on available space.
