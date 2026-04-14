@@ -1037,6 +1037,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:yolo` | Force auto-advance for this issue even when `auto_advance: false`; also triggers auto-merge of the linked PR when Validate completes |
 | `fabrik:cruise` | Auto-advances through all stages like `fabrik:yolo` but stops at Validate — no auto-merge, no move to Done. If both `fabrik:cruise` and `fabrik:yolo` are present, `fabrik:yolo` takes precedence. |
 | `fabrik:unrestricted` | Pass `--dangerously-skip-permissions` instead of `--permission-mode dontAsk` for this issue; bypasses the default tool allowlist entirely. Use only when a stage needs tools outside the default set or when the default posture prevents required work. **Caution:** removes all tool restrictions. |
+| `base:<branch>` | Override the base branch for this issue (e.g. `base:liminis`). Fabrik will fork from, rebase onto, and target PRs at `<branch>` instead of the repository default. Apply before Research; adding mid-pipeline is unsupported and may produce unexpected results. Branch names containing `/` are supported (e.g. `base:release/1.x`). If the named branch does not exist on the remote, Fabrik falls back to the default branch and posts a comment on the issue. |
 
 Model label precedence: `model:<name>` label > stage YAML `model` field > default.
 
@@ -1115,6 +1116,7 @@ Pressing `?` opens an overlay that displays all keybindings and a labels referen
 | `model:<name>` | Override the model for this issue (e.g. `model:opus`) |
 | `effort:<level>` | Override thinking effort for this issue (`low`, `medium`, `high`, `max`) |
 | `fabrik:unrestricted` | Bypass default permission posture; passes `--dangerously-skip-permissions` instead |
+| `base:<branch>` | Override base branch for this issue (e.g. `base:liminis`); Fabrik forks from, rebases onto, and targets PRs at this branch |
 
 Dismiss the panel by pressing `?` again or `Esc`.
 
