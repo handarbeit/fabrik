@@ -87,6 +87,9 @@ func (c *Client) restGetJSON(url string, result interface{}) error {
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode == 404 {
+			return fmt.Errorf("GitHub API returned 404: %s: %w", string(respBody), ErrNotFound)
+		}
 		return fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
 	}
 

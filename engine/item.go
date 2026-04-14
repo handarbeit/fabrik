@@ -580,8 +580,12 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	if modelOverride != "" {
 		e.logf(item.Number, "model", "using model override %q\n", modelOverride)
 	}
+	effortOverride := e.extractEffortOverride(item.Number, item.Labels)
+	if effortOverride != "" {
+		e.logf(item.Number, "effort", "using effort override %q\n", effortOverride)
+	}
 	resume := attempted // resume session if we've processed this before
-	output, completed, usage, err := e.claude.Invoke(ctx, stage, item, nil, resume, workDir, modelOverride)
+	output, completed, usage, err := e.claude.Invoke(ctx, stage, item, nil, resume, workDir, InvokeOptions{ModelOverride: modelOverride, EffortOverride: effortOverride})
 	if usage.TurnsUsed > 0 || usage.InputTokens > 0 || usage.OutputTokens > 0 {
 		if usage.MaxTurns > 0 {
 			e.logf(item.Number, "stats", "used %d/%d turns, %dk input / %dk output tokens\n",
@@ -902,6 +906,48 @@ func (e *Engine) extractModelOverride(issueNumber int, labels []string) string {
 		}
 	}
 	return found
+}
+
+// effortLevelRank lists effort levels from lowest to highest priority.
+// Iterating from the end returns the highest-ranked level (max > high > medium > low).
+var effortLevelRank = []string{"low", "medium", "high", "max"}
+
+// extractEffortOverride scans item labels for "effort:<level>" labels and returns the
+// highest-priority level found. If multiple effort: labels are present, it picks the
+// highest-ranked value (max > high > medium > low) and logs a warning listing all found labels.
+// Returns "" if no effort: label is found.
+func (e *Engine) extractEffortOverride(issueNumber int, labels []string) string {
+	const prefix = "effort:"
+	found := make(map[string]bool)
+	for _, label := range labels {
+		if strings.HasPrefix(label, prefix) {
+			level := strings.TrimPrefix(label, prefix)
+			if level != "" {
+				found[level] = true
+			}
+		}
+	}
+	if len(found) == 0 {
+		return ""
+	}
+	if len(found) > 1 {
+		all := make([]string, 0, len(found))
+		for l := range found {
+			all = append(all, "effort:"+l)
+		}
+		e.logf(issueNumber, "warn", "multiple effort: labels found (%s); using highest-ranked\n", strings.Join(all, ", "))
+	}
+	// Return highest-ranked level present.
+	for i := len(effortLevelRank) - 1; i >= 0; i-- {
+		if found[effortLevelRank[i]] {
+			return effortLevelRank[i]
+		}
+	}
+	// Unknown level — return the single value if only one was found.
+	for l := range found {
+		return l
+	}
+	return ""
 }
 
 func (e *Engine) removeEditingLabel(owner, repo string, issueNumber int) {

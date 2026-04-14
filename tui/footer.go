@@ -73,6 +73,20 @@ func renderWithOSC8(plain, title, boardURL string) string {
 	return strings.Replace(styled, title, link, 1)
 }
 
+// injectIssueLink replaces the first occurrence of "#NNN" in line with an OSC 8
+// hyperlink pointing to the GitHub issue page. Returns line unchanged when the
+// terminal does not support OSC 8, repo is empty, or issueNum is zero.
+// Must be called AFTER all lipgloss Render() calls — lipgloss strips OSC 8 sequences.
+func injectIssueLink(line, repo string, issueNum int) string {
+	if !supportsOSC8() || repo == "" || issueNum == 0 {
+		return line
+	}
+	url := fmt.Sprintf("https://github.com/%s/issues/%d", repo, issueNum)
+	issueText := fmt.Sprintf("#%d", issueNum)
+	link := termenv.Hyperlink(url, issueText)
+	return strings.Replace(line, issueText, link, 1)
+}
+
 func (f FooterComponent) View(width int) string {
 	// Assemble left side: CWD [· BoardTitle] [· version]
 	parts := []string{}
@@ -151,8 +165,4 @@ func (f FooterComponent) View(width int) string {
 
 func (f FooterComponent) Height() int {
 	return 1
-}
-
-func (f FooterComponent) HandleClick(x, y int) bool {
-	return false
 }

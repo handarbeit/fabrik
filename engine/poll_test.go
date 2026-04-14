@@ -162,7 +162,7 @@ func TestPoll_ProcessItemError(t *testing.T) {
 		},
 	}
 	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
 			return "", false, TokenUsage{}, nil
 		},
 	}

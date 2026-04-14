@@ -186,9 +186,10 @@ func ReadSessionID(repo string, issueNumber int, stageName string) string {
 
 // InvokeClaude runs Claude Code with the given stage configuration and issue context.
 // workDir is the directory Claude should run in (typically a git worktree).
-// modelOverride, if non-empty, replaces the stage's configured model.
+// opts.ModelOverride, if non-empty, replaces the stage's configured model.
+// opts.EffortOverride, if non-empty, replaces the stage's configured effort level.
 // It returns Claude's output, whether Claude indicated completion, and token usage.
-func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
 	sessDir := sessionDirForItem(issue)
 	if err := os.MkdirAll(sessDir, 0700); err != nil {
 		return "", false, TokenUsage{}, fmt.Errorf("creating session dir: %w", err)
@@ -201,9 +202,9 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	ld := logDirForItem(issue)
 
 	prompt := buildPrompt(stage, issue, newComments)
-	args := buildClaudeArgs(stage, sessFilePath, resume, modelOverride, stage.MaxTurns, hasUnrestrictedLabel(issue), workDir)
+	args := buildClaudeArgs(stage, sessFilePath, resume, opts.ModelOverride, stage.MaxTurns, hasUnrestrictedLabel(issue), workDir)
 
-	extraEnv := buildClaudeEnv(stage)
+	extraEnv := buildClaudeEnv(stage, opts.EffortOverride)
 	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, sessFilePath, ld, extraEnv)
 	usage.MaxTurns = stage.MaxTurns
 	if err != nil {
@@ -214,8 +215,9 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 
 // InvokeClaudeForComments runs Claude Code with a comment-review prompt.
 // It uses the stage's CommentPrompt if defined, otherwise a default.
-// modelOverride, if non-empty, replaces the stage's configured model.
-func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, modelOverride string) (string, bool, TokenUsage, error) {
+// opts.ModelOverride, if non-empty, replaces the stage's configured model.
+// opts.EffortOverride, if non-empty, replaces the stage's configured effort level.
+func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
 	sessDir := sessionDirForItem(issue)
 	if err := os.MkdirAll(sessDir, 0700); err != nil {
 		return "", false, TokenUsage{}, fmt.Errorf("creating session dir: %w", err)
@@ -229,9 +231,9 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 
 	prompt := buildCommentReviewPrompt(stage, issue, comments)
 	limit := commentMaxTurns(stage)
-	args := buildClaudeArgs(stage, sessFilePath, true, modelOverride, limit, hasUnrestrictedLabel(issue), workDir) // resume existing session
+	args := buildClaudeArgs(stage, sessFilePath, true, opts.ModelOverride, limit, hasUnrestrictedLabel(issue), workDir) // resume existing session
 
-	extraEnv := buildClaudeEnv(stage)
+	extraEnv := buildClaudeEnv(stage, opts.EffortOverride)
 	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", sessFilePath, ld, extraEnv)
 	usage.MaxTurns = limit
 	return output, completed, usage, err
@@ -254,10 +256,12 @@ func commentMaxTurns(stage *stages.Stage) int {
 // buildClaudeEnv returns environment variable overrides to inject into the claude subprocess.
 // Fabrik's values are appended after os.Environ() so they take precedence (last-wins semantics).
 //
+// effortOverride, when non-empty, supersedes stage.EffortLevel.
+//
 // Defaults (when fields are nil/empty):
 //   - CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 (adaptive thinking disabled)
 //   - CLAUDE_CODE_EFFORT_LEVEL=high (high thinking effort)
-func buildClaudeEnv(stage *stages.Stage) []string {
+func buildClaudeEnv(stage *stages.Stage, effortOverride string) []string {
 	var env []string
 	// Always emit CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING so mergeEnv can filter
 	// any ambient value from the parent process. Default (nil) disables it.
@@ -266,8 +270,11 @@ func buildClaudeEnv(stage *stages.Stage) []string {
 	} else {
 		env = append(env, "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=0")
 	}
-	// Set effort level; empty string = high.
-	level := stage.EffortLevel
+	// Set effort level: label override takes precedence, then stage config, then default "high".
+	level := effortOverride
+	if level == "" {
+		level = stage.EffortLevel
+	}
 	if level == "" {
 		level = "high"
 	}
