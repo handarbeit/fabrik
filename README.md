@@ -220,6 +220,8 @@ to prevent accidental token leaks.
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` for debugging | `false` |
 | `--plugin-dir` | Path to Fabrik plugin directory (overrides installed plugin) | `""` |
 
+> **Releases:** New releases are announced in the [shadoworg/fabrik Discussions "Announcements" category](https://github.com/shadoworg/fabrik/discussions/categories/announcements) after each successful release.
+
 ## Subcommands
 
 | Command | Description |
@@ -266,6 +268,7 @@ Fabrik uses labels to track state:
 | `stage:<name>:in_progress` | Stage is actively running |
 | `stage:<name>:failed` | Stage hit max retries and was paused |
 | `model:<name>` | Use this model for the issue (e.g. `model:opus` overrides the stage YAML default) |
+| `effort:<level>` | Override thinking effort for this issue only — valid values: `low`, `medium`, `high`, `max`; precedence: `max > high > medium > low`. Complements `model:` label. |
 | `fabrik:yolo` | Force auto-advance even when `auto_advance: false`; also triggers auto-merge of the linked PR when Validate completes |
 | `fabrik:cruise` | Auto-advances through all stages like `fabrik:yolo` but stops at Validate — no auto-merge, no move to Done. If both `fabrik:cruise` and `fabrik:yolo` are present, `fabrik:yolo` takes precedence. |
 | `fabrik:unrestricted` | Pass `--dangerously-skip-permissions` to Claude Code for this issue only; use when an issue needs to write to paths not covered by `.claude/settings.json` (e.g. `.claude/skills/`). **Caution:** bypasses the permission system. |

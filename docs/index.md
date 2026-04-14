@@ -235,7 +235,7 @@ description: >-
           <code>l</code> to open <code>fabrik watch</code> for the selected issue
           (live log streaming, stage tabs, CI/PR status), <code>enter</code> to
           toggle an inline detail panel, <code>r</code> to resume a Claude session
-          from history, and <code>q</code> to quit. Mouse support enabled by default.
+          from history, and <code>q</code> to quit. In supported terminals (Ghostty, iTerm2, WezTerm, Kitty), <strong>Cmd+click</strong> (macOS) or <strong>Ctrl+click</strong> (Linux) on issue numbers to open them in your browser, or on the board title in the footer to open the project board.
         </div>
       </div>
       <div class="feature-card">
@@ -416,7 +416,7 @@ echo '.env' >> .gitignore
         <span class="link-icon">⭐</span>
         <div>
           <div class="link-title">GitHub Repository</div>
-          <div class="link-desc">Releases, discussions, and community skills</div>
+          <div class="link-desc">Releases (with announcements in GitHub Discussions), issue tracker, and community skills</div>
         </div>
       </a>
       <a href="{{ '/USER_GUIDE' | relative_url }}" class="link-card">

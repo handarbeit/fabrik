@@ -923,6 +923,8 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 
 ### Fabrik-Managed Labels
 
+> Fabrik auto-seeds all managed labels on the configured repository at startup — creating them with their descriptions and colors if they do not already exist, so the GitHub UI shows meaningful hover text.
+
 | Label | Purpose |
 |-------|---------|
 | `fabrik:locked:<user>` | Issue being processed by this user's instance |
@@ -985,7 +987,7 @@ Claude sessions, a scrollable History pane with completed jobs, and a status bar
 | `C` | Clear all history (with confirmation) |
 | `q` | Quit |
 
-In terminals that support OSC 8 hyperlinks (Ghostty, iTerm2, WezTerm, Kitty), issue numbers (`#NNN`) in the In Progress and History panes are clickable links that open the corresponding GitHub issue in your browser. The project board title in the footer is also a clickable link. Use keyboard navigation for selection and scrolling.
+In terminals that support OSC 8 hyperlinks (Ghostty, iTerm2, WezTerm, Kitty), issue numbers (`#NNN`) in the In Progress and History panes are hyperlinks. **Cmd+click** (macOS) or **Ctrl+click** (Linux) on a `#NNN` to open the corresponding GitHub issue in your browser; **Cmd+click** / **Ctrl+click** the board title in the footer to open the project board. Use keyboard navigation for selection and scrolling.
 
 ### What's Displayed
 
