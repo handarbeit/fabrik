@@ -175,9 +175,9 @@ func (e *Engine) writeCodebaseChanges(item gh.ProjectItem, currentStage *stages.
 
 	// Resolve current origin/{baseBranch} HEAD.
 	wm := e.worktreesFor(item.Repo)
-	baseBranch, err := wm.DefaultBaseBranch()
+	baseBranch, err := e.baseBranchForItem(item, wm)
 	if err != nil {
-		e.logf(item.Number, "warn", "could not determine default branch for codebase changes: %v\n", err)
+		e.logf(item.Number, "warn", "could not determine base branch for codebase changes: %v\n", err)
 		return
 	}
 	currentSHA, err := gitRevParse(workDir, "origin/"+baseBranch)
