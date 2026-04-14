@@ -280,7 +280,9 @@ description: >-
         <div class="feature-desc">
           Set <code>wait_for_reviews: true</code> on a stage and Fabrik waits
           for all requested PR reviewers to submit, then re-invokes the stage
-          agent to address the feedback before advancing. Controlled by
+          agent to address any unresolved inline review thread comments before
+          advancing. Reviews with only top-level text (e.g., bot approvals)
+          skip re-invocation. Controlled by
           <code>FABRIK_REVIEW_WAIT_TIMEOUT</code> (default 15 min per cycle)
           and <code>FABRIK_MAX_REVIEW_CYCLES</code> (default 5 cycles).
           The <code>fabrik:awaiting-review</code> label makes the wait state
