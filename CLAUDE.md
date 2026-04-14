@@ -117,7 +117,7 @@ effort_level: max               # Claude Code thinking effort: low, medium, high
 - **Don't commit directly to main from worktrees** — always work on the issue branch
 - **Every PR must include `Closes #N`** in the body so Fabrik can discover PR comments
 - **Commit frequently** during implementation — preserves progress if session is interrupted
-- **Rebase onto latest main** in Review and Validate stages before signaling completion
+- **Rebase onto the latest base branch** (default branch, or the branch specified by `base:<branch>` label) in Review and Validate stages before signaling completion
 - **Check `git status` first** in any stage — there may be uncommitted work from a previous session
 - **Labels are state**: `fabrik:locked:<user>`, `fabrik:editing`, `fabrik:paused`, `fabrik:awaiting-input`, `fabrik:awaiting-review`, `stage:<name>:in_progress`, `stage:<name>:complete`, `stage:<name>:failed`, `model:<name>`, `effort:<level>`, `fabrik:yolo`, `fabrik:cruise`, `fabrik:unrestricted`, `base:<branch>`
   - `model:<name>` — set by user to select a specific model for this issue (e.g. `model:opus`)
@@ -126,7 +126,7 @@ effort_level: max               # Claude Code thinking effort: low, medium, high
   - `fabrik:cruise` — set by user to auto-advance through all stages without auto-merging the PR or advancing to Done at Validate completion; if both cruise and yolo are present, yolo takes precedence
   - `fabrik:awaiting-review` — set by engine when a stage with `wait_for_reviews: true` completes and outstanding PR reviewer requests remain; cleared when all reviewers submit or `FABRIK_REVIEW_WAIT_TIMEOUT` elapses
   - `fabrik:unrestricted` — passes `--dangerously-skip-permissions` instead of `--permission-mode dontAsk`; bypasses the default tool allowlist entirely. Use only when a stage needs tools outside the default set (e.g. non-standard toolchains). **Caution:** removes all tool restrictions.
-  - `base:<branch>` — set by user to override the worktree base branch for this issue; Fabrik will fork from, rebase onto, and target PRs at `<branch>` instead of the repository default; must be set before Research; multiple `base:` labels uses the first and logs a warning; if the branch does not exist on the remote, Fabrik falls back to the default and posts a comment
+  - `base:<branch>` — set by user to override the worktree base branch for this issue; Fabrik will fork from, rebase onto, and target PRs at `<branch>` instead of the repository default; must be set before Research; multiple `base:` labels use the first and logs a warning; if the branch does not exist on the remote, Fabrik falls back to the default and posts a comment
 
 ## Startup Board Validation
 
