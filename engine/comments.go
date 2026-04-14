@@ -43,8 +43,12 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	iKey := issueKey(item, e.defaultRepo())
 
-	// Step 1: React with 👀 to all new comments
+	// Step 1: React with 👀 to all new comments (skip synthetic review comments with DatabaseID==0)
 	for _, c := range comments {
+		if c.DatabaseID == 0 {
+			e.logf(item.Number, "debug", "skipping 👀 reaction for synthetic comment %s (no DatabaseID)\n", c.ID)
+			continue
+		}
 		if err := e.client.AddCommentReaction(owner, repo, c.DatabaseID, "eyes"); err != nil {
 			e.logf(item.Number, "warn", "could not add 👀 to comment %s: %v\n", c.ID, err)
 		}
@@ -152,8 +156,12 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// Step 9: Remove editing label
 	e.removeEditingLabel(owner, repo, item.Number)
 
-	// Step 10: React with 🚀 to all processed comments
+	// Step 10: React with 🚀 to all processed comments (skip synthetic review comments with DatabaseID==0)
 	for _, c := range comments {
+		if c.DatabaseID == 0 {
+			e.logf(item.Number, "debug", "skipping 🚀 reaction for synthetic comment %s (no DatabaseID)\n", c.ID)
+			continue
+		}
 		if err := e.client.AddCommentReaction(owner, repo, c.DatabaseID, "rocket"); err != nil {
 			e.logf(item.Number, "warn", "could not add 🚀 to comment %s: %v\n", c.ID, err)
 		}

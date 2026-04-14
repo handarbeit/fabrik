@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -149,6 +150,48 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
 		e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", err)
 	}
+}
+
+// dispatchReviewReinvoke spawns a goroutine to re-invoke the stage agent via
+// processComments with synthetic review comments. It marks the item in-flight,
+// acquires the semaphore, calls processComments, then releases both.
+// This allows the catch-up loop to remain non-blocking while the Claude
+// invocation runs asynchronously.
+func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
+	iKey := issueKey(item, e.defaultRepo())
+	syntheticComments := buildSyntheticReviewComments(item.LinkedPRReviews)
+	if len(syntheticComments) == 0 {
+		e.logf(item.Number, "review-reinvoke", "no review bodies to process; skipping re-invocation\n")
+		return
+	}
+
+	// Mark in-flight to prevent the next poll cycle's dispatch loop from
+	// double-dispatching this item while the goroutine is running.
+	e.inFlight.Store(iKey, item.IsPR)
+	e.wg.Add(1)
+
+	go func() {
+		defer e.wg.Done()
+		defer e.inFlight.Delete(iKey)
+
+		// Acquire semaphore slot (respects MaxConcurrent; blocks until available).
+		select {
+		case e.sem <- struct{}{}:
+		case <-ctx.Done():
+			e.logf(item.Number, "review-reinvoke", "context cancelled before semaphore acquired\n")
+			return
+		}
+		defer func() { <-e.sem }()
+
+		e.logf(item.Number, "review-reinvoke", "re-invoking stage %q via comment processing with %d synthetic review comment(s)\n",
+			stage.Name, len(syntheticComments))
+		if err := e.processComments(ctx, board, item, stage, syntheticComments); err != nil {
+			if ctx.Err() != nil {
+				return // context cancelled; normal shutdown
+			}
+			e.logf(item.Number, "warn", "review re-invocation failed: %v\n", err)
+		}
+	}()
 }
 
 // pauseForReviewCycleLimit pauses the issue when the maximum review re-invocation
