@@ -729,9 +729,15 @@ The gate uses a three-phase design:
 
 1. **Phase 1 (always-gate):** On stage completion, Fabrik immediately adds `fabrik:awaiting-review` and skips auto-advance. This fires even before reviewer assignments propagate.
 2. **Phase 2 (gate evaluation):** On subsequent poll cycles, Fabrik re-fetches the PR with fresh GraphQL data and evaluates whether all requested reviewers have submitted. If still pending → wait. If timed out → pause with `fabrik:awaiting-input`.
-3. **Phase 3 (re-invocation):** When the gate clears with submitted reviews present, Fabrik re-invokes the stage agent via the comment-processing skill (`comment_skill`) with the PR review bodies as input. The agent addresses the feedback, commits, and signals `FABRIK_STAGE_COMPLETE`. This re-applies `fabrik:awaiting-review` and the cycle repeats from Phase 2 until no reviewers are pending.
+3. **Phase 3 (re-invocation):** When the gate clears with submitted reviews present, Fabrik re-invokes the stage agent via the comment-processing skill (`comment_skill`) with the unresolved inline review thread comments as input. The agent addresses the feedback, commits, and signals `FABRIK_STAGE_COMPLETE`. This re-applies `fabrik:awaiting-review` and the cycle repeats from Phase 2 until no reviewers are pending.
 
 This means there is always at least one extra poll cycle delay after stage completion — typically 30 seconds.
+
+#### Empty-Body Review Skip
+
+If all submitted reviews in a batch contain no unresolved inline thread comments — for example, a bot that approves with a bare "APPROVED" and no line-level feedback — Fabrik skips re-invocation entirely and advances the issue normally. There is nothing for the agent to address, so no re-invocation is needed.
+
+This prevents spurious re-invocation cycles triggered by approvals or status checks that carry no actionable feedback.
 
 #### Cycle Limit
 
