@@ -157,9 +157,11 @@ func (e *Engine) Run() error {
 		return err
 	}
 
-	// Advisory startup checks: credential helper (HTTPS mode) and URL rewrites.
-	e.checkHTTPSCredentials()
-	e.checkURLRewrite()
+	// Advisory startup checks: detect URL rewrites first so the HTTPS credential
+	// helper warning can be suppressed when HTTPS GitHub URLs are transparently
+	// rewritten to SSH by the user's git config.
+	httpsToSSH := e.checkURLRewrite()
+	e.checkHTTPSCredentials(httpsToSSH)
 
 	// Seed all known Fabrik labels with descriptions and sensible default colors.
 	// Non-fatal: a seeding failure must not prevent the engine from polling.
@@ -929,10 +931,11 @@ func captureGitMeta(workDir, baseBranch string) (branch, commit, mainSHA, timest
 
 // checkHTTPSCredentials probes whether a git credential helper is configured
 // when using HTTPS clone mode. Prints an advisory warning if none is found.
-// Skip entirely when SSH mode is active — no credential helper is needed then.
+// Skip entirely when SSH mode is active or when HTTPS→SSH URL rewriting is in
+// effect for github.com — no credential helper is needed in either case.
 // This check is non-interactive and never prompts; it only reads git config.
-func (e *Engine) checkHTTPSCredentials() {
-	if e.cfg.GitSSH {
+func (e *Engine) checkHTTPSCredentials(hasSSHRewrite bool) {
+	if e.cfg.GitSSH || hasSSHRewrite {
 		return
 	}
 	cmd := exec.Command("git", "config", "credential.helper")
@@ -944,14 +947,33 @@ func (e *Engine) checkHTTPSCredentials() {
 	}
 }
 
-// checkURLRewrite detects whether git has URL rewriting configured that would
-// redirect github.com HTTPS URLs to SSH. Prints an informational notice when
-// such rewriting is active — git applies the rewriting transparently, so
-// Fabrik's HTTPS clone URLs will automatically use SSH via the user's config.
-func (e *Engine) checkURLRewrite() {
+// checkURLRewrite detects whether git has URL rewriting configured that
+// transparently redirects github.com HTTPS URLs to SSH (e.g. via
+// url.git@github.com:.insteadOf = https://github.com/ in ~/.gitconfig).
+// Returns true when such HTTPS→SSH rewriting is active. Prints an
+// informational notice when active — git applies the rewriting transparently,
+// so Fabrik's HTTPS clone URLs will automatically use SSH.
+func (e *Engine) checkURLRewrite() bool {
 	cmd := exec.Command("git", "config", "--get-regexp", `url\..*\.insteadOf`)
 	out, _ := cmd.Output() // exit code 1 = no matches, not an error
-	if strings.Contains(string(out), "github.com") {
-		fmt.Printf("[startup] note: git URL rewriting for github.com is active; Fabrik's HTTPS clone URLs will be transparently redirected via your git config.\n")
+	// Parse each line: "url.<base>.insteadof <value>"
+	// Look specifically for entries that rewrite https://github.com URLs to an
+	// SSH base (key contains git@github.com), avoiding false positives from
+	// same-protocol or reverse (SSH→HTTPS) rewrites.
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, " ", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.ToLower(parts[0])    // url.<base>.insteadof
+		value := strings.TrimSpace(parts[1]) // the insteadOf value (URL prefix to match)
+		if strings.Contains(value, "https://github.com") && strings.Contains(key, "git@github.com") {
+			fmt.Printf("[startup] note: git URL rewriting for github.com is active (HTTPS → SSH); Fabrik's HTTPS clone URLs will be transparently redirected to SSH via your git config.\n")
+			return true
+		}
 	}
+	return false
 }
