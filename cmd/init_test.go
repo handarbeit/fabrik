@@ -450,4 +450,3 @@ func TestRunInit_IdempotentDestDir(t *testing.T) {
 		t.Fatalf("second runInit: %v", err)
 	}
 }
-
