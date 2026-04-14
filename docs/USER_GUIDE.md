@@ -457,10 +457,17 @@ wait_for_reviews: false   # Optional. When true and auto-advance is active, Fabr
                           #   all requested PR reviewers to submit before advancing the issue.
                           #   Controlled by FABRIK_REVIEW_WAIT_TIMEOUT (default 15 minutes).
                           #   See §3 Pending Reviewer Gate for full details.
-allowed_tools:            # Optional. Restrict Claude's available tools.
-  - Read
-  - Grep
-  - Glob
+allowed_tools:            # Optional. REPLACES the default tool set — not additive. When set,
+  - Read                  #   only these tools are allowed; the default list is not added.
+  - Grep                  #   When omitted, Fabrik uses a comprehensive default covering common
+  - Glob                  #   SDLC tools: Read, Edit, Write, Glob, Grep, TodoWrite, Skill, Task,
+                          #   Bash(git:*), Bash(gh:*), Bash(go:*), Bash(npm:*), Bash(npx:*),
+                          #   Bash(yarn:*), Bash(pnpm:*), Bash(make:*), Bash(cargo:*),
+                          #   Bash(python:*), Bash(pip:*), Bash(uv:*), Bash(pytest:*),
+                          #   Bash(ls:*), Bash(cat:*), Bash(rm:*), Bash(cp:*), Bash(mv:*),
+                          #   Bash(mkdir:*), Bash(find:*).
+                          #   Use this to restrict read-only stages (Research, Plan, Specify)
+                          #   or to limit Claude to project-specific tools.
 disable_adaptive_thinking: true  # Optional. Disables Claude Code's adaptive (auto-reduced)
                                  #   thinking budget. Default: true.
 effort_level: high        # Optional. Claude Code thinking effort: low, medium, high, max.
@@ -1010,11 +1017,32 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:paused` | Manually pause processing (add to pause, remove to resume) |
 | `fabrik:yolo` | Force auto-advance for this issue even when `auto_advance: false`; also triggers auto-merge of the linked PR when Validate completes |
 | `fabrik:cruise` | Auto-advances through all stages like `fabrik:yolo` but stops at Validate — no auto-merge, no move to Done. If both `fabrik:cruise` and `fabrik:yolo` are present, `fabrik:yolo` takes precedence. |
-| `fabrik:unrestricted` | Pass `--dangerously-skip-permissions` to Claude Code for this issue only; use when an issue needs to write to paths not covered by `.claude/settings.json` (e.g. `.claude/skills/`). **Caution:** bypasses the permission system. |
+| `fabrik:unrestricted` | Pass `--dangerously-skip-permissions` instead of `--permission-mode dontAsk` for this issue; bypasses the default tool allowlist entirely. Use only when a stage needs tools outside the default set or when the default posture prevents required work. **Caution:** removes all tool restrictions. |
 
 Model label precedence: `model:<name>` label > stage YAML `model` field > default.
 
 Effort label precedence: `max > high > medium > low`. If multiple `effort:` labels are present, the highest-ranked value wins and a warning is logged.
+
+### Default Permission Posture
+
+Fabrik passes `--permission-mode dontAsk` to every Claude Code invocation. In this mode Claude does not prompt for tool permissions — tools not in the allowed set are silently denied rather than triggering an interactive prompt. This ensures Fabrik works correctly in headless mode regardless of the user's `~/.claude/settings.json`.
+
+**Default allowed-tool set** (used when a stage does not specify `allowed_tools`):
+
+| Category | Tools |
+|----------|-------|
+| File operations | `Read`, `Edit`, `Write`, `Glob`, `Grep` |
+| Task management | `TodoWrite`, `Skill`, `Task` |
+| Git & GitHub | `Bash(git:*)`, `Bash(gh:*)` |
+| Build systems | `Bash(go:*)`, `Bash(npm:*)`, `Bash(npx:*)`, `Bash(yarn:*)`, `Bash(pnpm:*)`, `Bash(make:*)`, `Bash(cargo:*)` |
+| Python | `Bash(python:*)`, `Bash(pip:*)`, `Bash(uv:*)`, `Bash(pytest:*)` |
+| Shell utilities | `Bash(ls:*)`, `Bash(cat:*)`, `Bash(rm:*)`, `Bash(cp:*)`, `Bash(mv:*)`, `Bash(mkdir:*)`, `Bash(find:*)` |
+
+**`allowed_tools` replaces the defaults** — it is not additive. When a stage sets `allowed_tools`, only those tools are permitted; the default list above is not merged in. This is intentional: Research, Plan, and Specify stages set `allowed_tools` to a read-only subset to prevent Claude from writing files during those stages.
+
+**`fabrik:unrestricted` bypasses everything** — passes `--dangerously-skip-permissions` instead, granting Claude full tool access. Use this label only when a stage requires tools outside the default set (e.g. `deno`, `bun`, or other non-standard toolchains).
+
+**Note on personal `~/.claude/settings.json`:** Under `dontAsk` mode, tools the user has explicitly allowed in their own `permissions.allow` remain allowed in addition to Fabrik's list — this does not break the isolation goal, it just means personal extras carry through. If your organization deploys managed settings (MDM/enterprise level), a `deny` rule in managed settings cannot be overridden by `--allowedTools` — that is outside Fabrik's control.
 
 ---
 
@@ -1065,7 +1093,7 @@ Pressing `?` opens an overlay that displays all keybindings and a labels referen
 | `stage:<name>:failed` | Named stage failed (hit max retries) |
 | `model:<name>` | Override the model for this issue (e.g. `model:opus`) |
 | `effort:<level>` | Override thinking effort for this issue (`low`, `medium`, `high`, `max`) |
-| `fabrik:unrestricted` | Disable the `allowed_tools` restriction for this issue |
+| `fabrik:unrestricted` | Bypass default permission posture; passes `--dangerously-skip-permissions` instead |
 
 Dismiss the panel by pressing `?` again or `Esc`.
 

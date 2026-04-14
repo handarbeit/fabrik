@@ -94,9 +94,13 @@ comment_prompt: |               # Optional: prompt for processing user comments
   ...
 comment_skill: fabrik-research-comment  # Optional: plugin skill for comment processing
 comment_max_turns: 15           # Optional: max turns for comment review (default: min(max_turns, 15))
-allowed_tools:                  # Optional: restrict Claude's tools
-  - Read
-  - Grep
+allowed_tools:                  # Optional: REPLACES the default tool set (not additive). When set,
+  - Read                        # only the listed tools are allowed. When absent, Fabrik uses a
+  - Grep                        # comprehensive default: Read, Edit, Write, Glob, Grep, TodoWrite, Skill, Task,
+                                # Bash(git:*), Bash(gh:*), Bash(go:*), Bash(npm:*), Bash(npx:*), Bash(yarn:*),
+                                # Bash(pnpm:*), Bash(make:*), Bash(cargo:*), Bash(python:*), Bash(pip:*),
+                                # Bash(uv:*), Bash(pytest:*), Bash(ls:*), Bash(cat:*), Bash(rm:*), Bash(cp:*),
+                                # Bash(mv:*), Bash(mkdir:*), Bash(find:*).
 update_issue_body: false        # Allow FABRIK_ISSUE_UPDATE markers to modify issue body (by convention, Specify only)
 post_to_pr: true                # Post output to linked PR instead of issue
 create_draft_pr: true           # Create draft PR before stage runs
