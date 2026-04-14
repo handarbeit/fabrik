@@ -480,24 +480,55 @@ func (wm *WorktreeManager) Prune() {
 	_ = cmd.Run()
 }
 
-// DefaultBaseBranch returns the default branch of the repo (main or master).
-func (wm *WorktreeManager) DefaultBaseBranch() string {
-	// Try origin HEAD symref first
+// DefaultBaseBranch returns the default branch of the repo.
+// It uses a three-step fallback ladder to determine the actual remote default
+// branch without relying on hard-coded names like "main" or "master":
+//  1. git symbolic-ref refs/remotes/origin/HEAD — works for non-bare clones
+//     where origin/HEAD has been set.
+//  2. git symbolic-ref HEAD — works for bare clones; git clone --bare always
+//     sets the bare clone's own HEAD to the remote's default branch.
+//  3. git ls-remote --symref origin HEAD — network round-trip; last resort for
+//     edge cases where neither local symref is available.
+//
+// Returns an error if the default branch cannot be determined.
+func (wm *WorktreeManager) DefaultBaseBranch() (string, error) {
+	// Step 1: Try refs/remotes/origin/HEAD (set by non-bare clones).
 	cmd := exec.Command("git", "symbolic-ref", "refs/remotes/origin/HEAD")
 	cmd.Dir = wm.baseDir
-	out, err := cmd.Output()
-	if err == nil {
+	if out, err := cmd.Output(); err == nil {
 		ref := strings.TrimSpace(string(out))
 		parts := strings.Split(ref, "/")
-		if len(parts) > 0 {
-			return parts[len(parts)-1]
+		if len(parts) > 0 && parts[len(parts)-1] != "" {
+			return parts[len(parts)-1], nil
 		}
 	}
-	// Fallback: check which of main/master exists
-	for _, candidate := range []string{"main", "master"} {
-		if wm.branchExists(candidate) || wm.branchExists("origin/"+candidate) {
-			return candidate
+
+	// Step 2: Try the bare clone's own HEAD symref (set by git clone --bare).
+	cmd = exec.Command("git", "symbolic-ref", "HEAD")
+	cmd.Dir = wm.baseDir
+	if out, err := cmd.Output(); err == nil {
+		ref := strings.TrimSpace(string(out))
+		parts := strings.Split(ref, "/")
+		if len(parts) > 0 && parts[len(parts)-1] != "" {
+			return parts[len(parts)-1], nil
 		}
 	}
-	return "main"
+
+	// Step 3: Network round-trip via git ls-remote.
+	cmd = exec.Command("git", "ls-remote", "--symref", "origin", "HEAD")
+	cmd.Dir = wm.baseDir
+	if out, err := cmd.Output(); err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			// Expected format: "ref: refs/heads/<branch>\tHEAD"
+			if strings.HasPrefix(line, "ref: refs/heads/") {
+				rest := strings.TrimPrefix(line, "ref: refs/heads/")
+				branch := strings.Fields(rest)[0]
+				if branch != "" {
+					return branch, nil
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("cannot determine default branch: git symbolic-ref and git ls-remote --symref both failed for %s", wm.baseDir)
 }
