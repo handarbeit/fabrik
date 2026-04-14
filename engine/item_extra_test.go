@@ -257,9 +257,13 @@ func TestItemMayNeedWork_DependencyGate_OpenBlocker_PastFirstStage(t *testing.T)
 	}
 }
 
-// TestItemNeedsWork_DependencyGate_OpenBlocker_PastFirstStage verifies that
-// an item past the first stage with an open blocker is filtered in itemNeedsWork.
-func TestItemNeedsWork_DependencyGate_OpenBlocker_PastFirstStage(t *testing.T) {
+// TestItemNeedsWork_DependencyGate_PassesThrough verifies that itemNeedsWork
+// now passes items with open blockers through to processItem, which calls
+// checkDependencies to apply the fabrik:blocked label. The previous silent
+// skip here caused items to get stuck: without fabrik:blocked, the updatedAt
+// cache-bypass logic in itemMayNeedWork never re-evaluated them after
+// blockers closed (since blocker closure doesn't bump the item's updatedAt).
+func TestItemNeedsWork_DependencyGate_PassesThrough(t *testing.T) {
 	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
 	item := gh.ProjectItem{
 		Number: 5,
@@ -269,8 +273,9 @@ func TestItemNeedsWork_DependencyGate_OpenBlocker_PastFirstStage(t *testing.T) {
 		},
 	}
 
-	if eng.itemNeedsWork(item) {
-		t.Error("expected itemNeedsWork=false for past-first-stage item with open blocker")
+	// Dep gating moved entirely to processItem via checkDependencies.
+	if !eng.itemNeedsWork(item) {
+		t.Error("itemNeedsWork should pass blocked items through so processItem can apply fabrik:blocked")
 	}
 }
 
