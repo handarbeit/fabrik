@@ -9,6 +9,7 @@ allowed_tools:
   - Read
   - Grep
   - Glob
+  - TodoWrite
   - Bash(git log)
   - Bash(git diff)
   - WebSearch
