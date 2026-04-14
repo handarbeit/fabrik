@@ -21,9 +21,10 @@ For details on the internal stage lifecycle, see [Stage Lifecycle](stage-lifecyc
 4. [Stage Reference](#4-stage-reference)
 5. [Plugin & Skills](#5-plugin--skills)
 6. [Labels Reference](#6-labels-reference)
-7. [TUI Dashboard](#7-tui-dashboard)
-8. [Observability](#8-observability)
-9. [Troubleshooting](#9-troubleshooting)
+7. [Permissions](#7-permissions)
+8. [TUI Dashboard](#8-tui-dashboard)
+9. [Observability](#9-observability)
+10. [Troubleshooting](#10-troubleshooting)
 
 ---
 
@@ -131,7 +132,7 @@ exactly (case-sensitive). The default pipeline uses:
 > ```bash
 > rm -rf ~/.claude/plugins/cache/claude-plugins-official/superpowers
 > ```
-> See [§9 Troubleshooting → Duplicate Comments on Issues](#9-troubleshooting) for full details.
+> See [§9 Troubleshooting → Duplicate Comments on Issues](#10-troubleshooting) for full details.
 
 ### First Run
 
@@ -279,7 +280,7 @@ experience as release binaries.
 
 > **Note:** When Fabrik starts, it creates a PID lock file at `.fabrik/fabrik.lock`. If a second instance attempts to start in the same directory, it reads the lock file, logs an error identifying the running process, and exits immediately. The lock is automatically released when the process exits — including on crash or SIGKILL — so there is no need to manually delete the file after an unclean shutdown.
 >
-> See [§9 Troubleshooting → Multiple Fabrik Instances](#9-troubleshooting) if you encounter a stale lock or need to run multiple instances against different projects.
+> See [§9 Troubleshooting → Multiple Fabrik Instances](#10-troubleshooting) if you encounter a stale lock or need to run multiple instances against different projects.
 
 ---
 
@@ -1023,9 +1024,11 @@ Model label precedence: `model:<name>` label > stage YAML `model` field > defaul
 
 Effort label precedence: `max > high > medium > low`. If multiple `effort:` labels are present, the highest-ranked value wins and a warning is logged.
 
-### Default Permission Posture
+---
 
-Fabrik passes `--permission-mode dontAsk` to every Claude Code invocation. In this mode Claude does not prompt for tool permissions — tools not in the allowed set are silently denied rather than triggering an interactive prompt. This ensures Fabrik works correctly in headless mode regardless of the user's `~/.claude/settings.json`.
+## 7. Permissions
+
+Fabrik passes `--permission-mode dontAsk` to every Claude Code invocation. In this mode Claude does not prompt for tool permissions — tools not in the allowed set are silently denied rather than triggering an interactive prompt. This ensures Fabrik works correctly in headless mode and shared environments regardless of the user's `~/.claude/settings.json`. Fabrik does not require users to pre-configure permissions in their Claude Code settings.
 
 **Default allowed-tool set** (used when a stage does not specify `allowed_tools`):
 
@@ -1038,7 +1041,7 @@ Fabrik passes `--permission-mode dontAsk` to every Claude Code invocation. In th
 | Python | `Bash(python:*)`, `Bash(pip:*)`, `Bash(uv:*)`, `Bash(pytest:*)` |
 | Shell utilities | `Bash(ls:*)`, `Bash(cat:*)`, `Bash(rm:*)`, `Bash(cp:*)`, `Bash(mv:*)`, `Bash(mkdir:*)`, `Bash(find:*)` |
 
-**`allowed_tools` replaces the defaults** — it is not additive. When a stage sets `allowed_tools`, only those tools are permitted; the default list above is not merged in. This is intentional: Research, Plan, and Specify stages set `allowed_tools` to a read-only subset to prevent Claude from writing files during those stages.
+**`allowed_tools` replaces the defaults — it is not additive.** When a stage sets `allowed_tools`, only those tools are permitted; the default list above is not merged in. This is intentional: Research, Plan, and Specify stages set `allowed_tools` to a read-only subset to prevent Claude from writing files during those stages.
 
 **`fabrik:unrestricted` bypasses everything** — passes `--dangerously-skip-permissions` instead, granting Claude full tool access. Use this label only when a stage requires tools outside the default set (e.g. `deno`, `bun`, or other non-standard toolchains).
 
@@ -1046,7 +1049,7 @@ Fabrik passes `--permission-mode dontAsk` to every Claude Code invocation. In th
 
 ---
 
-## 7. TUI Dashboard
+## 8. TUI Dashboard
 
 The interactive terminal dashboard is enabled by default when running in a real terminal. To disable it, use `--notui`:
 
@@ -1120,7 +1123,7 @@ Job history is saved to `.fabrik/history.json` (project-local, alongside `.fabri
 
 ---
 
-## 8. Observability
+## 9. Observability
 
 ### `fabrik watch` — Per-Issue TUI
 
@@ -1230,7 +1233,7 @@ Typical cost is ~5–30 points per poll depending on active items, well within t
 
 ---
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 ### GitHub API Returns 401 or "Fine-Grained Token" Warning
 

@@ -434,7 +434,7 @@ echo '.env' >> .gitignore
           <div class="link-desc">Engine internals, markers, context files, and comment processing</div>
         </div>
       </a>
-      <a href="{{ '/USER_GUIDE#9-troubleshooting' | relative_url }}" class="link-card">
+      <a href="{{ '/USER_GUIDE#10-troubleshooting' | relative_url }}" class="link-card">
         <span class="link-icon">🔧</span>
         <div>
           <div class="link-title">Troubleshooting</div>
