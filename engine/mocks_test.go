@@ -170,6 +170,14 @@ func (m *mockGitHubClient) AddCommentReaction(owner, repo string, commentDatabas
 	return nil
 }
 
+func (m *mockGitHubClient) AddPRReviewCommentReaction(owner, repo string, commentDatabaseID int, content string) error {
+	return nil
+}
+
+func (m *mockGitHubClient) ResolveReviewThread(threadID string) error {
+	return nil
+}
+
 func (m *mockGitHubClient) UpdateComment(owner, repo string, commentDatabaseID int, body string) error {
 	m.mu.Lock()
 	fn := m.updateCommentFn

@@ -59,6 +59,10 @@ type ProjectItem struct {
 	BlockedBy              []Dependency    // Issues that must be closed before this one can advance
 	LinkedPRReviewRequests []ReviewRequest // Outstanding reviewer requests on the linked PR
 	LinkedPRReviews        []PRReview      // Reviews already submitted on the linked PR
+	// LinkedPRReviewThreadComments holds the inline (per-line) comments from
+	// unresolved review threads on the linked PR. These are real GitHub
+	// comments with DatabaseIDs and can be reacted to / resolved.
+	LinkedPRReviewThreadComments []Comment
 }
 
 // Comment represents a comment on an issue or linked PR.
@@ -70,6 +74,10 @@ type Comment struct {
 	CreatedAt  time.Time
 	Reactions  []ReactionGroup
 	FromPR     int // Non-zero if this comment is from a linked PR
+	// ReviewThreadID is the GraphQL node ID of the PR review thread this
+	// comment belongs to. Empty for non-review-thread comments. Needed to
+	// call resolveReviewThread after the feedback is addressed.
+	ReviewThreadID string
 }
 
 // ReactionGroup represents a reaction type and its count on a comment.

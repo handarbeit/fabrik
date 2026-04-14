@@ -43,14 +43,21 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	iKey := issueKey(item, e.defaultRepo())
 
-	// Step 1: React with 👀 to all new comments (skip synthetic review comments with DatabaseID==0)
+	// Step 1: React with 👀 to all new comments. PR review thread (inline)
+	// comments use a different REST endpoint than issue comments.
 	for _, c := range comments {
 		if c.DatabaseID == 0 {
 			e.logf(item.Number, "debug", "skipping 👀 reaction for synthetic comment %s (no DatabaseID)\n", c.ID)
 			continue
 		}
-		if err := e.client.AddCommentReaction(owner, repo, c.DatabaseID, "eyes"); err != nil {
-			e.logf(item.Number, "warn", "could not add 👀 to comment %s: %v\n", c.ID, err)
+		if c.ReviewThreadID != "" {
+			if err := e.client.AddPRReviewCommentReaction(owner, repo, c.DatabaseID, "eyes"); err != nil {
+				e.logf(item.Number, "warn", "could not add 👀 to review thread comment %s: %v\n", c.ID, err)
+			}
+		} else {
+			if err := e.client.AddCommentReaction(owner, repo, c.DatabaseID, "eyes"); err != nil {
+				e.logf(item.Number, "warn", "could not add 👀 to comment %s: %v\n", c.ID, err)
+			}
 		}
 	}
 
@@ -156,14 +163,30 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// Step 9: Remove editing label
 	e.removeEditingLabel(owner, repo, item.Number)
 
-	// Step 10: React with 🚀 to all processed comments (skip synthetic review comments with DatabaseID==0)
+	// Step 10: React with 🚀 to all processed comments and resolve any review
+	// threads that were addressed.
+	resolvedThreads := make(map[string]bool)
 	for _, c := range comments {
 		if c.DatabaseID == 0 {
 			e.logf(item.Number, "debug", "skipping 🚀 reaction for synthetic comment %s (no DatabaseID)\n", c.ID)
 			continue
 		}
-		if err := e.client.AddCommentReaction(owner, repo, c.DatabaseID, "rocket"); err != nil {
-			e.logf(item.Number, "warn", "could not add 🚀 to comment %s: %v\n", c.ID, err)
+		if c.ReviewThreadID != "" {
+			if err := e.client.AddPRReviewCommentReaction(owner, repo, c.DatabaseID, "rocket"); err != nil {
+				e.logf(item.Number, "warn", "could not add 🚀 to review thread comment %s: %v\n", c.ID, err)
+			}
+			if !resolvedThreads[c.ReviewThreadID] {
+				if err := e.client.ResolveReviewThread(c.ReviewThreadID); err != nil {
+					e.logf(item.Number, "warn", "could not resolve review thread %s: %v\n", c.ReviewThreadID, err)
+				} else {
+					e.logf(item.Number, "review", "resolved review thread %s\n", c.ReviewThreadID)
+				}
+				resolvedThreads[c.ReviewThreadID] = true
+			}
+		} else {
+			if err := e.client.AddCommentReaction(owner, repo, c.DatabaseID, "rocket"); err != nil {
+				e.logf(item.Number, "warn", "could not add 🚀 to comment %s: %v\n", c.ID, err)
+			}
 		}
 	}
 
