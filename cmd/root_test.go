@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"flag"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -292,4 +294,38 @@ func TestExecute_ConfigTUIFalse(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "tok")
 	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
 	executeAndStop(t)
+}
+
+// TestExecute_FineGrainedTokenWarning verifies that a token prefixed with
+// "github_pat_" causes a warning to be written to stderr before any API calls.
+// The test does not use t.Parallel() to avoid races on os.Stderr.
+func TestExecute_FineGrainedTokenWarning(t *testing.T) {
+	// Redirect os.Stderr to a pipe so we can capture the warning.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	origStderr := os.Stderr
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = origStderr })
+
+	resetFlags()
+	// Provide a fine-grained token but omit --user so Execute fails early.
+	// The warning must be logged before the user-check error is returned.
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--token", "github_pat_testtoken"}
+
+	Execute() //nolint:errcheck — we only care about the stderr output
+
+	w.Close()
+	output, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("reading stderr pipe: %v", err)
+	}
+
+	if !strings.Contains(string(output), "Fine-grained personal access tokens") {
+		t.Errorf("expected fine-grained PAT warning on stderr, got: %q", string(output))
+	}
+	if !strings.Contains(string(output), "classic personal access token") {
+		t.Errorf("expected classic PAT guidance on stderr, got: %q", string(output))
+	}
 }

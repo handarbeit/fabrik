@@ -69,6 +69,60 @@ func TestGraphqlRequest_HTTPError(t *testing.T) {
 	}
 }
 
+func TestGraphqlRequest_401ContainsHint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+		w.Write([]byte(`{"message":"Requires authentication"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	var result struct{}
+	err := c.graphqlRequest("{ test }", nil, &result)
+	if err == nil {
+		t.Fatal("expected error for 401 response")
+	}
+	if !containsStr(err.Error(), "classic personal access token") {
+		t.Errorf("GraphQL 401 error missing auth hint, got: %q", err.Error())
+	}
+}
+
+func TestGraphqlRequest_403ContainsHint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(403)
+		w.Write([]byte(`{"message":"Forbidden"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	var result struct{}
+	err := c.graphqlRequest("{ test }", nil, &result)
+	if err == nil {
+		t.Fatal("expected error for 403 response")
+	}
+	if !containsStr(err.Error(), "classic personal access token") {
+		t.Errorf("GraphQL 403 error missing auth hint, got: %q", err.Error())
+	}
+}
+
+func TestGraphqlRequest_500NoHint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+		w.Write([]byte(`Internal Server Error`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	var result struct{}
+	err := c.graphqlRequest("{ test }", nil, &result)
+	if err == nil {
+		t.Fatal("expected error for 500 response")
+	}
+	if containsStr(err.Error(), "classic personal access token") {
+		t.Errorf("GraphQL 500 error should not contain auth hint, got: %q", err.Error())
+	}
+}
+
 func TestGraphqlRequest_GraphQLError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
