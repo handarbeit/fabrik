@@ -409,7 +409,8 @@ FABRIK_USER=my-personal-username
 | `FABRIK_TUI` | `tui` | Disable TUI dashboard (`false`/`0`/`no`) | `true` |
 | `FABRIK_PLUGIN_DIR` | *(no config.yaml key)* | Override plugin directory | `.fabrik/plugin/` |
 | `FABRIK_DEBUG_OUTPUT` | `debug_output` | Save raw Claude output for debugging | `false` |
-| `FABRIK_REVIEW_WAIT_TIMEOUT` | *(no config.yaml key)* | Minutes to wait for all requested PR reviewers to submit before auto-advancing (positive integer; invalid or unset values default to 15) | `15` |
+| `FABRIK_REVIEW_WAIT_TIMEOUT` | *(no config.yaml key)* | Minutes to wait per review cycle for all requested PR reviewers to submit before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 15) | `15` |
+| `FABRIK_MAX_REVIEW_CYCLES` | *(no config.yaml key)* | Maximum number of review re-invocation cycles per issue before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 5) | `5` |
 
 Token precedence: `--token` flag > `FABRIK_TOKEN` > `GITHUB_TOKEN`
 
@@ -455,9 +456,12 @@ cleanup_worktree: false   # Optional. Removes the issue worktree instead of invo
                           #   Use for terminal stages (e.g., Done) where no further work
                           #   is needed on the branch.
 wait_for_reviews: false   # Optional. When true and auto-advance is active, Fabrik waits for
-                          #   all requested PR reviewers to submit before advancing the issue.
-                          #   Controlled by FABRIK_REVIEW_WAIT_TIMEOUT (default 15 minutes).
-                          #   See §3 Pending Reviewer Gate for full details.
+                          #   all requested PR reviewers to submit, then re-invokes the stage
+                          #   agent via the comment-processing path to address the feedback.
+                          #   This loop repeats until no reviewers are pending (up to
+                          #   FABRIK_MAX_REVIEW_CYCLES cycles). On timeout or cycle limit,
+                          #   Fabrik pauses with fabrik:awaiting-input instead of advancing.
+                          #   See §10 Pending Reviewer Gate for full details.
 allowed_tools:            # Optional. REPLACES the default tool set — not additive. When set,
   - Read                  #   only these tools are allowed; the default list is not added.
   - Grep                  #   When omitted, Fabrik uses a comprehensive default covering common
@@ -693,11 +697,13 @@ Sub-issues (those labeled `fabrik:sub-issue`) are **never decomposed further**. 
 
 ### Pending Reviewer Gate
 
-When a stage has `wait_for_reviews: true` set and auto-advance is active (global `yolo: true`, per-stage `auto_advance: true`, or the `fabrik:yolo` label on the issue), Fabrik waits for all requested PR reviewers to submit their reviews before advancing the issue to the next stage.
+When a stage has `wait_for_reviews: true` set and auto-advance is active (global `yolo: true`, per-stage `auto_advance: true`, or the `fabrik:yolo` label on the issue), Fabrik waits for all requested PR reviewers to submit their reviews, then re-invokes the stage agent to address the feedback before advancing.
+
+The Review and Validate stages ship with `wait_for_reviews: true` enabled by default.
 
 #### Enabling the Gate
 
-Add `wait_for_reviews: true` to the relevant stage YAML (typically Review or Validate):
+Add `wait_for_reviews: true` to the relevant stage YAML:
 
 ```yaml
 name: Review
@@ -714,28 +720,40 @@ When the gate is active, Fabrik adds the `fabrik:awaiting-review` label to the i
 
 - Makes the wait state visible on the project board
 - Is cleared automatically when all requested reviewers submit (approve, request changes, or comment)
-- Is also cleared when the `FABRIK_REVIEW_WAIT_TIMEOUT` elapses (fail-open: Fabrik advances the issue even without all reviews)
+- Triggers a re-invocation of the stage agent (via the comment-processing path) to address the submitted review feedback
+- After re-invocation, if new reviewers are assigned (e.g. bots triggered by a fresh push), the label is re-applied and the cycle continues
 
-#### Timeout Configuration
+#### Three-Phase Mechanism
 
-Set `FABRIK_REVIEW_WAIT_TIMEOUT` to the number of minutes Fabrik should wait before giving up and advancing anyway. Must be a positive integer; invalid or unset values default to 15 minutes. There is no way to disable the timeout entirely — the minimum value is 1 minute.
-
-```bash
-FABRIK_REVIEW_WAIT_TIMEOUT=30  # Wait up to 30 minutes for reviewers
-```
-
-#### Two-Phase Mechanism
-
-The gate uses a two-phase design to handle the propagation delay between when Fabrik requests reviewers and when GitHub's API returns them in the PR data:
+The gate uses a three-phase design:
 
 1. **Phase 1 (always-gate):** On stage completion, Fabrik immediately adds `fabrik:awaiting-review` and skips auto-advance. This fires even before reviewer assignments propagate.
-2. **Phase 2 (catch-up):** On subsequent poll cycles, Fabrik re-fetches the PR with fresh GraphQL data and evaluates whether all requested reviewers have submitted. When they have (or the timeout elapses), the gate clears and auto-advance proceeds.
+2. **Phase 2 (gate evaluation):** On subsequent poll cycles, Fabrik re-fetches the PR with fresh GraphQL data and evaluates whether all requested reviewers have submitted. If still pending → wait. If timed out → pause with `fabrik:awaiting-input`.
+3. **Phase 3 (re-invocation):** When the gate clears with submitted reviews present, Fabrik re-invokes the stage agent via the comment-processing skill (`comment_skill`) with the PR review bodies as input. The agent addresses the feedback, commits, and signals `FABRIK_STAGE_COMPLETE`. This re-applies `fabrik:awaiting-review` and the cycle repeats from Phase 2 until no reviewers are pending.
 
 This means there is always at least one extra poll cycle delay after stage completion — typically 30 seconds.
 
+#### Cycle Limit
+
+To prevent infinite loops (e.g., a bot that always posts new reviews after every push), Fabrik caps the number of re-invocation cycles per issue per engine session. When the limit is reached with reviewers still pending, Fabrik pauses the issue with `fabrik:awaiting-input` and posts a comment explaining the situation.
+
+```bash
+FABRIK_MAX_REVIEW_CYCLES=3  # Limit to 3 re-invocation cycles per issue (default: 5)
+```
+
+The cycle count resets on engine restart.
+
+#### Timeout Configuration
+
+`FABRIK_REVIEW_WAIT_TIMEOUT` sets the per-cycle timeout in minutes. If reviewers don't submit within the timeout, Fabrik **pauses** the issue with `fabrik:awaiting-input` (rather than auto-advancing) so a human can investigate.
+
+```bash
+FABRIK_REVIEW_WAIT_TIMEOUT=30  # Wait up to 30 minutes per cycle for reviewers (default: 15)
+```
+
 #### Restart Persistence
 
-The timeout is based on the timestamp of when the `fabrik:awaiting-review` label was added to the issue, which is stored in GitHub's event history. If Fabrik restarts while waiting, it recalculates the remaining wait time from the label timestamp rather than resetting the clock.
+The timeout is based on the timestamp of when the `fabrik:awaiting-review` label was added to the issue, which is stored in GitHub's event history. If Fabrik restarts while waiting, it recalculates the remaining wait time from the label timestamp rather than resetting the clock. The cycle count is in-memory and resets on restart.
 
 ---
 
@@ -999,7 +1017,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:editing` | Issue body being updated (comment processing) |
 | `fabrik:paused` | Processing paused (max retries exceeded or manual) |
 | `fabrik:awaiting-input` | Stage paused waiting for user input; auto-clears on a new comment from the configured user |
-| `fabrik:awaiting-review` | Issue waiting for all requested PR reviewers to submit; set when `wait_for_reviews: true` stage completes with auto-advance active; cleared when all reviewers submit or `FABRIK_REVIEW_WAIT_TIMEOUT` elapses |
+| `fabrik:awaiting-review` | Issue waiting for all requested PR reviewers to submit; set when `wait_for_reviews: true` stage completes with auto-advance active; cleared when all reviewers submit (then re-invocation fires) or when the `FABRIK_REVIEW_WAIT_TIMEOUT` elapses (then issue is paused with `fabrik:awaiting-input`) |
 | `fabrik:blocked` | Issue is waiting for one or more blocking issues to close; added and removed automatically by the engine (Fabrik creates this label on first use — no pre-creation needed) |
 | `stage:<name>:in_progress` | Stage actively running |
 | `stage:<name>:complete` | Stage completed successfully |
@@ -1089,7 +1107,7 @@ Pressing `?` opens an overlay that displays all keybindings and a labels referen
 | `fabrik:cruise` | Auto-advance through all stages without auto-merging the PR |
 | `fabrik:paused` | Issue processing is paused |
 | `fabrik:awaiting-input` | Stage is blocked waiting for user input |
-| `fabrik:awaiting-review` | Stage completed; waiting for outstanding PR reviewer requests |
+| `fabrik:awaiting-review` | Stage completed; waiting for outstanding PR reviewer requests; clears when all reviewers submit, then re-invokes the stage agent to address feedback |
 | `fabrik:locked:<user>` | Issue is locked for editing by the specified user |
 | `stage:<name>:in_progress` | Named stage is currently running |
 | `stage:<name>:complete` | Named stage completed successfully |
