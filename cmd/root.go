@@ -264,6 +264,10 @@ func Execute() error {
 		return fmt.Errorf("GitHub token required: use --token, FABRIK_TOKEN, or GITHUB_TOKEN")
 	}
 
+	if strings.HasPrefix(cfg.Token, "github_pat_") {
+		fmt.Fprintf(os.Stderr, "[warn] Fine-grained personal access tokens (github_pat_...) do not support GitHub Projects v2 GraphQL. Switch to a classic personal access token with 'repo', 'project', and 'workflow' scopes. See: https://github.com/settings/tokens\n")
+	}
+
 	if cfg.User == "" {
 		return fmt.Errorf("user is required: use --user flag or FABRIK_USER in .env")
 	}
