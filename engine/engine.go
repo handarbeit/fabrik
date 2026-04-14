@@ -29,6 +29,7 @@ type Config struct {
 	MaxConcurrent     int
 	MaxRetries        int
 	ReviewWaitTimeout time.Duration // How long to wait for PR reviewers before auto-advancing anyway (default 15m)
+	MaxReviewCycles   int           // Max review re-invocation cycles per issue before pausing (default 5)
 	DebugOutput       bool
 	PluginDir         string
 	Stages            []*stages.Stage
@@ -60,6 +61,7 @@ type Engine struct {
 	lastReportedCost     float64               // cost at last [stats] report; skip repeat prints when unchanged
 	retryCount           map[string]int        // key: "owner/repo#N-stageName", value: failed attempt count
 	pausedDueToRetries   map[string]bool       // key: "owner/repo#N-stageName", true if engine paused this issue
+	reviewCycleCount     map[string]int        // key: issueKey; review re-invocation cycle count per issue
 	lastUsage            map[string]TokenUsage // key: issueKey; per-issue token usage from last processItem (for TUI)
 	lastCompleted        map[string]bool       // key: issueKey; per-issue stage completion from last processItem (for TUI)
 	lastBlocked          map[string]bool       // key: issueKey; per-issue blocked-on-input from last processItem (for TUI)
@@ -116,6 +118,7 @@ func New(cfg Config) (*Engine, error) {
 		deepFetchFailureTime: make(map[string]time.Time),
 		retryCount:           make(map[string]int),
 		pausedDueToRetries:   make(map[string]bool),
+		reviewCycleCount:     make(map[string]int),
 		sem:                  make(chan struct{}, cfg.MaxConcurrent),
 	}
 
@@ -161,6 +164,7 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		deepFetchFailureTime: make(map[string]time.Time),
 		retryCount:           make(map[string]int),
 		pausedDueToRetries:   make(map[string]bool),
+		reviewCycleCount:     make(map[string]int),
 		sem:                  make(chan struct{}, maxConcurrent),
 	}
 	if worktrees != nil {

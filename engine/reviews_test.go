@@ -33,10 +33,13 @@ func TestCheckReviewGate_NoRequestedReviewers_ReturnsFalse(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected not blocked when no requested reviewers")
+	}
+	if timedOut {
+		t.Error("expected not timedOut when no requested reviewers")
 	}
 	if len(client.addLabelCalls) != 0 {
 		t.Errorf("expected no label adds, got %d", len(client.addLabelCalls))
@@ -58,10 +61,13 @@ func TestCheckReviewGate_GateDisabled_ReturnsFalse(t *testing.T) {
 	// WaitForReviews is nil (not set)
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: nil}
 
-	blocked := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected not blocked when WaitForReviews is nil")
+	}
+	if timedOut {
+		t.Error("expected not timedOut when WaitForReviews is nil")
 	}
 }
 
@@ -82,10 +88,13 @@ func TestCheckReviewGate_ReviewerRequested_NoReview_Blocks(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected blocked when reviewer has not submitted")
+	}
+	if timedOut {
+		t.Error("expected not timedOut when reviewer has not submitted")
 	}
 	// Label should be applied on first block
 	if len(client.addLabelCalls) != 1 {
@@ -116,10 +125,13 @@ func TestCheckReviewGate_AlreadyWaiting_NoLabelAdd(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected still blocked")
+	}
+	if timedOut {
+		t.Error("expected not timedOut when recently applied label")
 	}
 	// No new label add (already present)
 	if len(client.addLabelCalls) != 0 {
@@ -145,10 +157,13 @@ func TestCheckReviewGate_AllReviewersSubmitted_ReturnsFalse(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected not blocked when all reviewers submitted")
+	}
+	if timedOut {
+		t.Error("expected not timedOut when all reviewers submitted")
 	}
 	// Label should be removed
 	if len(client.removeLabelCalls) != 1 {
@@ -181,10 +196,13 @@ func TestCheckReviewGate_TimeoutElapsed_ReturnsFalse(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
 		t.Error("expected not blocked when timeout elapsed")
+	}
+	if !timedOut {
+		t.Error("expected timedOut == true when timeout elapsed")
 	}
 	// Label should be removed after timeout
 	if len(client.removeLabelCalls) != 1 {
@@ -226,14 +244,119 @@ func TestCheckReviewGate_DismissedReviewer_Reblocks(t *testing.T) {
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
-	blocked := eng.checkReviewGate(board, item, stage)
+	blocked, timedOut := eng.checkReviewGate(board, item, stage)
 
 	if !blocked {
 		t.Error("expected re-blocked after reviewer dismissal and re-request")
 	}
+	if timedOut {
+		t.Error("expected not timedOut on dismissed reviewer re-block")
+	}
 	// No new label (already present)
 	if len(client.addLabelCalls) != 0 {
 		t.Errorf("expected no new label add, got %d", len(client.addLabelCalls))
+	}
+}
+
+// (f) buildSyntheticReviewComments converts reviews with bodies to synthetic comments.
+func TestBuildSyntheticReviewComments(t *testing.T) {
+	reviews := []gh.PRReview{
+		{Author: "copilot", State: "CHANGES_REQUESTED", Body: "Please fix the error handling.", DatabaseID: 42},
+		{Author: "bot2", State: "APPROVED", Body: ""},        // empty body — should be skipped
+		{Author: "human", State: "COMMENTED", Body: "LGTM."}, // no DatabaseID (0)
+	}
+
+	comments := buildSyntheticReviewComments(reviews)
+
+	if len(comments) != 2 {
+		t.Fatalf("expected 2 comments (skipping empty body), got %d", len(comments))
+	}
+
+	// First comment — copilot with DatabaseID 42
+	c0 := comments[0]
+	if c0.Author != "copilot" {
+		t.Errorf("expected author 'copilot', got %q", c0.Author)
+	}
+	if c0.ID != "review-42" {
+		t.Errorf("expected ID 'review-42', got %q", c0.ID)
+	}
+	if c0.DatabaseID != 0 {
+		t.Errorf("expected DatabaseID 0 for synthetic comment, got %d", c0.DatabaseID)
+	}
+	if c0.Body == "" {
+		t.Error("expected non-empty body")
+	}
+
+	// Second comment — human with DatabaseID 0
+	c1 := comments[1]
+	if c1.Author != "human" {
+		t.Errorf("expected author 'human', got %q", c1.Author)
+	}
+	if c1.DatabaseID != 0 {
+		t.Errorf("expected DatabaseID 0, got %d", c1.DatabaseID)
+	}
+}
+
+// (g) pauseForReviewTimeout applies labels and posts a comment.
+func TestPauseForReviewTimeout(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		Labels: []string{"fabrik:awaiting-review"},
+	}
+	stage := &stages.Stage{Name: "Review", WaitForReviews: boolPtr(true)}
+
+	eng.pauseForReviewTimeout(board, item, stage)
+
+	// Should have added fabrik:paused and fabrik:awaiting-input
+	labelNames := make(map[string]bool)
+	for _, call := range client.addLabelCalls {
+		labelNames[call.labelName] = true
+	}
+	if !labelNames["fabrik:paused"] {
+		t.Error("expected fabrik:paused label to be added")
+	}
+	if !labelNames["fabrik:awaiting-input"] {
+		t.Error("expected fabrik:awaiting-input label to be added")
+	}
+
+	// Should have posted a comment
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(client.addCommentCalls))
+	}
+}
+
+// (h) pauseForReviewCycleLimit applies labels, posts a comment with cycle count.
+func TestPauseForReviewCycleLimit(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+	}
+	stage := &stages.Stage{Name: "Review", WaitForReviews: boolPtr(true)}
+
+	eng.pauseForReviewCycleLimit(board, item, stage, 5, 5)
+
+	// Should have added fabrik:paused and fabrik:awaiting-input
+	labelNames := make(map[string]bool)
+	for _, call := range client.addLabelCalls {
+		labelNames[call.labelName] = true
+	}
+	if !labelNames["fabrik:paused"] {
+		t.Error("expected fabrik:paused label to be added")
+	}
+	if !labelNames["fabrik:awaiting-input"] {
+		t.Error("expected fabrik:awaiting-input label to be added")
+	}
+
+	// Should have posted a comment mentioning the cycle count
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(client.addCommentCalls))
 	}
 }
 
