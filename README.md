@@ -307,6 +307,14 @@ Omitting `--repo` (or leaving `repo:` commented out in `.fabrik/config.yaml`) en
 
 `.fabrik/repos/` is gitignored by default — bare clone directories are large and should not be committed.
 
+### SSH vs HTTPS
+
+By default, Fabrik bare-clones repos using HTTPS. To use SSH instead (`git@github.com:<owner>/<repo>.git`), pass `--ssh` or set `git_ssh: true` in `.fabrik/config.yaml`. The `FABRIK_GIT_SSH=true` environment variable is also supported.
+
+If no git credential helper is configured, Fabrik prints an advisory warning at startup (non-fatal) directing you to configure one or switch to SSH. Existing bare clones are not re-cloned when you change this setting — only new clones are affected.
+
+See [USER_GUIDE §3 — Git Clone Protocol (HTTPS vs SSH)](docs/USER_GUIDE.md#git-clone-protocol-https-vs-ssh) for full details.
+
 ## Formations
 
 Fabrik supports **dependency-based sequencing** of issues using GitHub's native "Blocked by" relationships. A **formation** is a coordinated set of issues that execute in parallel where possible and respect ordering constraints automatically — no polling, no manual unblocking.

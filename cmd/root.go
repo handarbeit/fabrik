@@ -33,6 +33,7 @@ type Config struct {
 	StagesDir         string
 	Yolo              bool
 	AutoUpgrade       bool
+	GitSSH            bool
 	TUI               bool
 	PollSeconds       int
 	MaxConcurrent     int
@@ -76,6 +77,7 @@ func Execute() error {
 	flag.StringVar(&cfg.Token, "token", "", "GitHub token (or set GITHUB_TOKEN env var)")
 	flag.StringVar(&cfg.StagesDir, "stages", "./.fabrik/stages", "Directory containing stage YAML configs")
 	flag.BoolVar(&cfg.Yolo, "yolo", false, "Auto-advance issues through stages without waiting for human input")
+	flag.BoolVar(&cfg.GitSSH, "ssh", false, "Use SSH clone URLs (git@github.com) instead of HTTPS")
 	flag.BoolVar(&cfg.AutoUpgrade, "auto-upgrade", false, "When idle, check GitHub Releases for a newer version and self-upgrade")
 	var noTUI bool
 	flag.BoolVar(&noTUI, "notui", false, "Disable the interactive TUI dashboard (default: enabled when a real terminal is detected)")
@@ -165,6 +167,14 @@ func Execute() error {
 			cfg.Yolo = lv == "true" || lv == "1" || lv == "yes"
 		} else if pc.Yolo {
 			cfg.Yolo = true
+		}
+	}
+	if !cfg.GitSSH {
+		if v := os.Getenv("FABRIK_GIT_SSH"); v != "" {
+			lv := strings.ToLower(v)
+			cfg.GitSSH = lv == "true" || lv == "1" || lv == "yes"
+		} else if pc.GitSSH {
+			cfg.GitSSH = true
 		}
 	}
 	if cfg.PollSeconds == 30 {
@@ -334,6 +344,7 @@ func Execute() error {
 		Version:           Version,
 		Yolo:              cfg.Yolo,
 		AutoUpgrade:       cfg.AutoUpgrade,
+		GitSSH:            cfg.GitSSH,
 		PollSeconds:       cfg.PollSeconds,
 		MaxConcurrent:     cfg.MaxConcurrent,
 		MaxRetries:        cfg.MaxRetries,
