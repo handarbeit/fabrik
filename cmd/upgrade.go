@@ -154,4 +154,3 @@ func diffingPluginFiles(pluginDir string) ([]string, error) {
 	})
 	return diffing, err
 }
-

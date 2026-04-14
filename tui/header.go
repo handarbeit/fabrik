@@ -11,12 +11,12 @@ import (
 
 // HeaderComponent renders the top status bar: title, status line, and poll timer.
 type HeaderComponent struct {
-	pollInterval   time.Duration
-	nextPollAt     time.Time
-	now            time.Time
-	fabrikVersion  string
-	statusLine     string
-	statusMsg      string
+	pollInterval  time.Duration
+	nextPollAt    time.Time
+	now           time.Time
+	fabrikVersion string
+	statusLine    string
+	statusMsg     string
 }
 
 func (h HeaderComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
