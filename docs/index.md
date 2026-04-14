@@ -174,6 +174,9 @@ description: >-
           every stage without human approval — and auto-merges the PR when
           Validate completes. Apply the <code>fabrik:yolo</code> label to a
           single issue to get the same behavior scoped to just that issue.
+          For lighter automation without auto-merge, use <code>fabrik:cruise</code> —
+          it auto-advances through all stages but stops at Validate, leaving
+          the merge decision to you.
         </div>
       </div>
       <div class="feature-card">
