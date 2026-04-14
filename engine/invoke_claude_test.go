@@ -993,3 +993,182 @@ printf '%%s\n' '{"result":"env test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess
 		}
 	})
 }
+
+// TestBuildClaudeArgs_PermissionModeDontAsk verifies that --permission-mode dontAsk
+// is passed for non-unrestricted invocations.
+func TestBuildClaudeArgs_PermissionModeDontAsk(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	argsFile := filepath.Join(binDir, "args.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+echo "$@" > %s
+printf '%%s\n' '{"result":"ok","session_id":"sess_pm","num_turns":1,"total_cost_usd":0.001}'
+`, argsFile)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	os.Setenv("PATH", binDir+":"+origPath)
+	defer os.Setenv("PATH", origPath)
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "Test",
+		Prompt:     "test",
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 300, Title: "T"}
+
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+	args, _ := os.ReadFile(argsFile)
+	argsStr := string(args)
+	if !strings.Contains(argsStr, "--permission-mode") {
+		t.Error("expected --permission-mode in args")
+	}
+	if !strings.Contains(argsStr, "dontAsk") {
+		t.Error("expected dontAsk in args")
+	}
+	if strings.Contains(argsStr, "--dangerously-skip-permissions") {
+		t.Error("expected --dangerously-skip-permissions NOT to be present for non-unrestricted invocation")
+	}
+}
+
+// TestBuildClaudeArgs_DefaultToolsWhenNoAllowedTools verifies that the comprehensive
+// default tool list is used when the stage does not specify allowed_tools.
+func TestBuildClaudeArgs_DefaultToolsWhenNoAllowedTools(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	argsFile := filepath.Join(binDir, "args.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+echo "$@" > %s
+printf '%%s\n' '{"result":"ok","session_id":"sess_dt","num_turns":1,"total_cost_usd":0.001}'
+`, argsFile)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	os.Setenv("PATH", binDir+":"+origPath)
+	defer os.Setenv("PATH", origPath)
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "Test",
+		Prompt:     "test",
+		Completion: stages.CompletionCriteria{Type: "claude"},
+		// AllowedTools is intentionally empty
+	}
+	issue := gh.ProjectItem{Number: 301, Title: "T"}
+
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+	args, _ := os.ReadFile(argsFile)
+	argsStr := string(args)
+	// Verify a representative sample of default tools appears in the args.
+	for _, tool := range []string{"Read", "Edit", "Write", "TodoWrite", "Bash(git:*)", "Bash(go:*)", "Bash(rm:*)"} {
+		if !strings.Contains(argsStr, tool) {
+			t.Errorf("expected default tool %q in args, got: %q", tool, argsStr)
+		}
+	}
+}
+
+// TestBuildClaudeArgs_StageToolsReplaceDefaults verifies that when a stage specifies
+// allowed_tools, only those tools are passed — the defaults are NOT added.
+func TestBuildClaudeArgs_StageToolsReplaceDefaults(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	argsFile := filepath.Join(binDir, "args.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+echo "$@" > %s
+printf '%%s\n' '{"result":"ok","session_id":"sess_sr","num_turns":1,"total_cost_usd":0.001}'
+`, argsFile)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	os.Setenv("PATH", binDir+":"+origPath)
+	defer os.Setenv("PATH", origPath)
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:         "Research",
+		Prompt:       "research",
+		AllowedTools: []string{"Read", "Grep", "Glob"},
+		Completion:   stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 302, Title: "T"}
+
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+	args, _ := os.ReadFile(argsFile)
+	argsStr := string(args)
+	// Stage tools must be present.
+	for _, tool := range []string{"Read", "Grep", "Glob"} {
+		if !strings.Contains(argsStr, tool) {
+			t.Errorf("expected stage tool %q in args, got: %q", tool, argsStr)
+		}
+	}
+	// Default-only tools must NOT be present.
+	for _, tool := range []string{"Write", "Edit", "TodoWrite", "Bash(git:*)", "Bash(rm:*)"} {
+		if strings.Contains(argsStr, tool) {
+			t.Errorf("expected default tool %q NOT in args when stage sets allowed_tools, got: %q", tool, argsStr)
+		}
+	}
+}
+
+// TestBuildClaudeArgs_UnrestrictedSkipsPermissionMode verifies that --dangerously-skip-permissions
+// is used (not --permission-mode dontAsk) when the issue has the fabrik:unrestricted label.
+func TestBuildClaudeArgs_UnrestrictedSkipsPermissionMode(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	argsFile := filepath.Join(binDir, "args.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+echo "$@" > %s
+printf '%%s\n' '{"result":"ok","session_id":"sess_ur","num_turns":1,"total_cost_usd":0.001}'
+`, argsFile)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	os.Setenv("PATH", binDir+":"+origPath)
+	defer os.Setenv("PATH", origPath)
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "Test",
+		Prompt:     "test",
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 303, Title: "T", Labels: []string{"fabrik:unrestricted"}}
+
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+	args, _ := os.ReadFile(argsFile)
+	argsStr := string(args)
+	if !strings.Contains(argsStr, "--dangerously-skip-permissions") {
+		t.Error("expected --dangerously-skip-permissions in args for unrestricted issue")
+	}
+	if strings.Contains(argsStr, "--permission-mode") {
+		t.Error("expected --permission-mode NOT to be present for unrestricted issue")
+	}
+}
