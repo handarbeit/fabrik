@@ -223,17 +223,11 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		return true
 	}
 
-	// Dependency gate: if past the first stage and has open blockers, skip this
-	// item. blockedBy is populated by FetchItemDetails (deep fetch) at this point.
-	// Items blocked by open issues are gated by external state (dependency closure)
-	// not user comments, so they are safe to defer.
-	if !stages.IsFirstStage(e.cfg.Stages, stage.Name) {
-		for _, dep := range item.BlockedBy {
-			if dep.State != "CLOSED" {
-				return false
-			}
-		}
-	}
+	// Dependency gate is handled by processItem via checkDependencies, which
+	// applies fabrik:blocked (so the updatedAt cache-bypass logic in
+	// itemMayNeedWork picks up dependency state changes). A silent return here
+	// would skip the item without labelling it blocked, leaving it permanently
+	// stuck once its updatedAt is cached — even after blockers close.
 
 	// PRs only support comment processing
 	if item.IsPR {
