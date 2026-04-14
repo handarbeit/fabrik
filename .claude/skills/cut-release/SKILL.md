@@ -77,11 +77,42 @@ Omit any empty category sections. Keep descriptions concise — one line each.
 - Commit with message: `Release notes for <version>`
 - Create tag: `git tag <version>`
 - Push immediately: `git push origin main <version>`
-- Report the GitHub Actions release URL: `gh run list --limit 1 -R handarbeit/fabrik`
 
 Do NOT ask for confirmation before pushing. If builds and tests passed in step 1, proceed.
 
-### 6. File documentation update issue
+### 6. Verify the release workflow succeeded
+
+**This step is not optional.** The release workflow does multiple things (build binaries, publish to handarbeit/fabrik, post Discussion announcement). Any of these can fail silently. A workflow that shows `completed` is NOT the same as `success` — only the **conclusion** tells you whether it actually worked.
+
+```bash
+# Get the run ID for the v<version> tag push
+RUN_ID=$(gh run list --workflow release.yml --limit 1 -R handarbeit/fabrik \
+  --json databaseId,headBranch --jq ".[] | select(.headBranch==\"v<version>\") | .databaseId")
+
+# Wait for it to finish
+gh run watch $RUN_ID -R handarbeit/fabrik
+
+# CRITICAL: check the conclusion (not just the status)
+CONCLUSION=$(gh run view $RUN_ID -R handarbeit/fabrik --json conclusion --jq .conclusion)
+if [ "$CONCLUSION" != "success" ]; then
+  echo "Release workflow FAILED with conclusion: $CONCLUSION"
+  gh run view $RUN_ID -R handarbeit/fabrik --log-failed | tail -50
+  # STOP — do not proceed. Tell the user the release failed and show the failing step.
+fi
+```
+
+Also verify the release actually exists on the public repo:
+```bash
+gh release view v<version> --repo handarbeit/fabrik --json tagName
+```
+
+Report the result explicitly:
+- ✅ "Release v<version> published to handarbeit/fabrik (run #<id>) — all steps green"
+- ❌ "Release v<version> workflow FAILED at step X — <reason>" (and show the failing log lines)
+
+Never report a release as successful unless `conclusion == "success"` AND the release exists on handarbeit/fabrik.
+
+### 7. File documentation update issue
 
 After a successful push, create a GitHub issue to update user documentation and move it to Specify:
 
