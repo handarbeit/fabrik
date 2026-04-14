@@ -19,7 +19,7 @@ KEYBOARD SHORTCUTS
     tab        Switch focus: In Progress <-> History
     ↑/↓  k/j  Navigate items in the focused pane
     enter      Toggle inline detail panel
-    esc        Close open panels; or triggers quit confirmation
+    esc        Close open panels; with none open, triggers quit confirmation
     n / N      Cancel quit or clear-all confirmation
 
   Active Jobs (In Progress pane)
@@ -44,7 +44,7 @@ LABELS REFERENCE
   Engine-managed state
     fabrik:locked:<user>   Issue being processed by this user's instance
     fabrik:editing         Issue body being updated (comment processing)
-    fabrik:paused          Processing paused (max retries exceeded)
+    fabrik:paused          Processing paused (max retries exceeded or manual)
     fabrik:awaiting-input  Stage paused waiting for user input
     fabrik:awaiting-review Waiting for PR reviewers to submit
     fabrik:blocked         Waiting for blocking issues to close
@@ -61,7 +61,7 @@ LABELS REFERENCE
   Per-issue overrides (user-set)
     model:<name>        Override Claude model (e.g. opus, sonnet)
     effort:<level>      Override thinking effort (low/medium/high/max)
-    fabrik:paused       Manually pause (add to pause, remove to resume)
+    fabrik:paused       Manually pause (same label; add to pause, remove to resume)
     fabrik:unrestricted Skip permissions check (use with caution)
 
   Other
@@ -119,11 +119,17 @@ func (h *HelpPanelComponent) SetVisible(v bool) {
 
 // SetLayout sizes the internal viewport to fit within targetHeight terminal rows.
 // The viewport height is targetHeight - 3 (subtracting 1 title and 2 border lines).
+// On resize the existing scroll offset is preserved so an open panel stays in place.
 func (h *HelpPanelComponent) SetLayout(width, targetHeight int) {
 	vpH := max(targetHeight-3, 1)
-	innerWidth := max(width-4, 20) // -4 for border+padding
-	h.vp = viewport.New(innerWidth, vpH)
-	h.vp.SetContent(helpContent)
+	innerWidth := max(width-6, 20) // -6 for border+padding, matching other bordered components
+	if h.vp.Width == 0 && h.vp.Height == 0 {
+		h.vp = viewport.New(innerWidth, vpH)
+		h.vp.SetContent(helpContent)
+	} else {
+		h.vp.Width = innerWidth
+		h.vp.Height = vpH
+	}
 	h.lastWidth = width
 }
 
