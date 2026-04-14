@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -522,6 +524,99 @@ func TestExtractEffortOverrideMultipleLabelsPrecedence(t *testing.T) {
 			got := eng.extractEffortOverride(0, tc.labels)
 			if got != tc.want {
 				t.Errorf("extractEffortOverride(%v) = %q, want %q", tc.labels, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBaseBranchForItem(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+
+	// Get the HEAD SHA so we can inject remote tracking refs.
+	shaCmd := exec.Command("git", "rev-parse", "HEAD")
+	shaCmd.Dir = repoDir
+	shaOut, err := shaCmd.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse HEAD: %v", err)
+	}
+	sha := strings.TrimSpace(string(shaOut))
+
+	// Inject remote tracking refs for valid-branch tests.
+	for _, branch := range []string{"liminis", "release/1.x", "feature/a"} {
+		cmd := exec.Command("git", "update-ref", "refs/remotes/origin/"+branch, sha)
+		cmd.Dir = repoDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git update-ref origin/%s: %s: %v", branch, out, err)
+		}
+	}
+
+	tests := []struct {
+		name        string
+		labels      []string
+		want        string
+		wantComment bool
+	}{
+		{
+			name:   "no base label returns default",
+			labels: []string{"stage:Plan:complete", "model:opus"},
+			want:   "main",
+		},
+		{
+			name:   "empty base label skipped returns default",
+			labels: []string{"base:"},
+			want:   "main",
+		},
+		{
+			name:   "valid base:liminis returns liminis",
+			labels: []string{"base:liminis"},
+			want:   "liminis",
+		},
+		{
+			name:   "base with slash base:release/1.x returns release/1.x",
+			labels: []string{"base:release/1.x"},
+			want:   "release/1.x",
+		},
+		{
+			name:        "nonexistent branch falls back to default and posts comment",
+			labels:      []string{"base:nonexistent"},
+			want:        "main",
+			wantComment: true,
+		},
+		{
+			name:   "multiple base labels uses first",
+			labels: []string{"base:liminis", "base:feature/a"},
+			want:   "liminis",
+		},
+		{
+			name:   "base label among other labels",
+			labels: []string{"stage:Research:complete", "base:liminis", "model:sonnet"},
+			want:   "liminis",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &mockGitHubClient{}
+			eng := testEngine(client, &mockClaudeInvoker{})
+			wm := NewWorktreeManager(repoDir)
+			item := gh.ProjectItem{Number: 42, Labels: tc.labels}
+
+			got, err := eng.baseBranchForItem(item, wm)
+			if err != nil {
+				t.Fatalf("baseBranchForItem: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+			client.mu.Lock()
+			commentCount := len(client.addCommentCalls)
+			client.mu.Unlock()
+			if tc.wantComment && commentCount == 0 {
+				t.Error("expected fallback comment to be posted, but none was")
+			}
+			if !tc.wantComment && commentCount > 0 {
+				t.Errorf("unexpected comment posted: %q", client.addCommentCalls[0].body)
 			}
 		})
 	}
