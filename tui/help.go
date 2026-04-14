@@ -63,6 +63,7 @@ LABELS REFERENCE
     effort:<level>      Override thinking effort (low/medium/high/max)
     fabrik:paused       Manually pause (same label; add to pause, remove to resume)
     fabrik:unrestricted Skip permissions check (use with caution)
+    base:<branch>       Override base branch (e.g. base:develop)
 
   Other
     fabrik:sub-issue  Plan-created sub-issues; never decomposed further
