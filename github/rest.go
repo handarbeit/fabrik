@@ -33,6 +33,17 @@ var ErrUnprocessableEntity = errors.New("unprocessable entity")
 // detect unsupported operations (e.g. rebase merge not allowed by repo policy).
 var ErrMethodNotAllowed = errors.New("method not allowed")
 
+// authErrorHint returns an actionable hint string for 401/403 HTTP errors and
+// an empty string for all other status codes. The hint advises users to switch
+// to a classic personal access token, which is required for GitHub Projects v2
+// GraphQL operations that fine-grained tokens do not support.
+func authErrorHint(statusCode int) string {
+	if statusCode == 401 || statusCode == 403 {
+		return " If you used a fine-grained access token (github_pat_...), switch to a classic personal access token with 'repo', 'project', and 'workflow' scopes. See: https://github.com/settings/tokens"
+	}
+	return ""
+}
+
 func (c *Client) restRequest(method, url string, body interface{}) error {
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
@@ -63,7 +74,7 @@ func (c *Client) restRequest(method, url string, body interface{}) error {
 		case 422:
 			return fmt.Errorf("GitHub API returned 422: %s: %w", string(respBody), ErrUnprocessableEntity)
 		}
-		return fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("GitHub API returned %d: %s%s", resp.StatusCode, string(respBody), authErrorHint(resp.StatusCode))
 	}
 
 	return nil
@@ -90,7 +101,7 @@ func (c *Client) restGetJSON(url string, result interface{}) error {
 		if resp.StatusCode == 404 {
 			return fmt.Errorf("GitHub API returned 404: %s: %w", string(respBody), ErrNotFound)
 		}
-		return fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("GitHub API returned %d: %s%s", resp.StatusCode, string(respBody), authErrorHint(resp.StatusCode))
 	}
 
 	return json.NewDecoder(resp.Body).Decode(result)
@@ -121,7 +132,7 @@ func (c *Client) restGet(url string) (*SearchResult, error) {
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("GitHub API returned %d: %s%s", resp.StatusCode, string(respBody), authErrorHint(resp.StatusCode))
 	}
 
 	var result SearchResult
@@ -160,7 +171,7 @@ func (c *Client) restPostWithResponse(url string, body interface{}, target inter
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("GitHub API returned %d: %s%s", resp.StatusCode, string(respBody), authErrorHint(resp.StatusCode))
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
@@ -204,7 +215,7 @@ func (c *Client) restPutWithResponse(url string, body interface{}, target interf
 		case 422:
 			return fmt.Errorf("GitHub API returned 422: %s: %w", string(respBody), ErrUnprocessableEntity)
 		}
-		return fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("GitHub API returned %d: %s%s", resp.StatusCode, string(respBody), authErrorHint(resp.StatusCode))
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
@@ -234,7 +245,7 @@ func (c *Client) restDelete(url string) error {
 		if resp.StatusCode == 404 {
 			return fmt.Errorf("GitHub API returned 404: %s: %w", string(respBody), ErrNotFound)
 		}
-		return fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("GitHub API returned %d: %s%s", resp.StatusCode, string(respBody), authErrorHint(resp.StatusCode))
 	}
 
 	return nil
