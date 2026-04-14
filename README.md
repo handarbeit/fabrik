@@ -123,11 +123,12 @@ three-phase reviewer gate:
 2. **Gate evaluation:** On each subsequent poll, Fabrik checks whether all
    reviewers have submitted. If reviewers are still pending and the per-cycle
    timeout expires, the issue pauses with `fabrik:awaiting-input`.
-3. **Re-invocation:** When all reviewers submit with actionable inline feedback,
-   Fabrik re-invokes the stage agent to address the feedback and push a new
-   commit, then waits for the next review round. If reviewers submit with no
-   inline comments (e.g., bot approvals), re-invocation is skipped and the
-   issue advances normally.
+3. **Re-invocation:** When all reviewers submit and there are unresolved PR
+   review thread comments, Fabrik re-invokes the stage agent to address that
+   inline feedback and push a new commit, then waits for the next review
+   round. Reviews with no inline thread comments—including reviews with only
+   top-level review text (for example, bot approvals or summary-only
+   comments)—do not trigger re-invocation, and the issue advances normally.
 
 > **Configuration:** `FABRIK_MAX_REVIEW_CYCLES` (default `5`) caps the number
 > of re-invocation cycles per session. `FABRIK_REVIEW_WAIT_TIMEOUT` (default
