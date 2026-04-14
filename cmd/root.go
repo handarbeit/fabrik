@@ -386,6 +386,15 @@ func reviewWaitTimeout(minutes int) time.Duration {
 	return time.Duration(minutes) * time.Minute
 }
 
+// maxReviewCycles returns the configured MaxReviewCycles value, defaulting to 5
+// when n is 0 (unset).
+func maxReviewCycles(n int) int {
+	if n <= 0 {
+		return 5
+	}
+	return n
+}
+
 // buildProjectInfo assembles the TUI footer metadata from the active config.
 func buildProjectInfo(cfg *Config, pc config.ProjectConfig) tui.ProjectInfo {
 	// Format CWD as home-relative path when possible.

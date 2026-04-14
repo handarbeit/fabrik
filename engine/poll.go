@@ -521,8 +521,32 @@ func (e *Engine) poll(ctx context.Context) error {
 			if e.checkDependencies(board, item, stage) {
 				continue // blocked; checkDependencies handled label + comment
 			}
-			if e.checkReviewGate(board, item, stage) {
+			blocked, timedOut := e.checkReviewGate(board, item, stage)
+			if blocked {
 				continue // awaiting reviewers; checkReviewGate handled label
+			}
+			if timedOut {
+				e.pauseForReviewTimeout(board, item, stage)
+				continue
+			}
+			// Gate cleared naturally — if reviews were submitted, re-invoke the stage
+			// agent to address the feedback before advancing.
+			if len(item.LinkedPRReviews) > 0 {
+				iKey := issueKey(item, e.defaultRepo())
+				e.mu.Lock()
+				cycleCount := e.reviewCycleCount[iKey]
+				maxCycles := e.cfg.MaxReviewCycles
+				e.mu.Unlock()
+				if cycleCount >= maxCycles {
+					e.pauseForReviewCycleLimit(board, item, stage, cycleCount, maxCycles)
+				} else {
+					e.mu.Lock()
+					e.reviewCycleCount[iKey]++
+					e.mu.Unlock()
+					e.dispatchReviewReinvoke(ctx, board, item, stage)
+					advancedItems[issueKey(item, e.defaultRepo())] = true
+				}
+				continue
 			}
 			if stage.Name == "Validate" {
 				// cruise stops here: skip merge and advancement, leave for human.
