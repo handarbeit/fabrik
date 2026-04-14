@@ -132,3 +132,96 @@ func TestRestPost_NoRateLimitHeaders(t *testing.T) {
 		t.Errorf("rest.Limit = %d, want 0 when headers absent", rest.Limit)
 	}
 }
+
+func TestAuthErrorHint_401ContainsHint(t *testing.T) {
+	hint := authErrorHint(401)
+	if hint == "" {
+		t.Fatal("expected non-empty hint for 401")
+	}
+	if !containsStr(hint, "classic personal access token") {
+		t.Errorf("hint for 401 missing expected text, got: %q", hint)
+	}
+}
+
+func TestAuthErrorHint_403ContainsHint(t *testing.T) {
+	hint := authErrorHint(403)
+	if hint == "" {
+		t.Fatal("expected non-empty hint for 403")
+	}
+	if !containsStr(hint, "classic personal access token") {
+		t.Errorf("hint for 403 missing expected text, got: %q", hint)
+	}
+}
+
+func TestAuthErrorHint_500NoHint(t *testing.T) {
+	if hint := authErrorHint(500); hint != "" {
+		t.Errorf("expected empty hint for 500, got: %q", hint)
+	}
+}
+
+func TestAuthErrorHint_404NoHint(t *testing.T) {
+	if hint := authErrorHint(404); hint != "" {
+		t.Errorf("expected empty hint for 404, got: %q", hint)
+	}
+}
+
+func TestRestPost_401ContainsHint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+		w.Write([]byte(`{"message":"Requires authentication"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	err := c.restPost(srv.URL+"/test", map[string]string{})
+	if err == nil {
+		t.Fatal("expected error for 401 response")
+	}
+	if !containsStr(err.Error(), "classic personal access token") {
+		t.Errorf("401 error missing auth hint, got: %q", err.Error())
+	}
+}
+
+func TestRestPost_403ContainsHint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(403)
+		w.Write([]byte(`{"message":"Forbidden"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	err := c.restPost(srv.URL+"/test", map[string]string{})
+	if err == nil {
+		t.Fatal("expected error for 403 response")
+	}
+	if !containsStr(err.Error(), "classic personal access token") {
+		t.Errorf("403 error missing auth hint, got: %q", err.Error())
+	}
+}
+
+func TestRestPost_500NoHint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+		w.Write([]byte(`Internal Server Error`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	err := c.restPost(srv.URL+"/test", map[string]string{})
+	if err == nil {
+		t.Fatal("expected error for 500 response")
+	}
+	if containsStr(err.Error(), "classic personal access token") {
+		t.Errorf("500 error should not contain auth hint, got: %q", err.Error())
+	}
+}
+
+// containsStr reports whether substr is found in s.
+func containsStr(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
