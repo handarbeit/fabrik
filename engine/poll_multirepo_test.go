@@ -44,7 +44,7 @@ func TestPoll_MultiRepoFilter_SkipsOtherRepos(t *testing.T) {
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
 
-	if err := eng.poll(context.Background()); err != nil {
+	if _, err := eng.poll(context.Background()); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 	// Wait for all dispatched workers to finish before inspecting results.
@@ -93,7 +93,7 @@ func TestPoll_MultiRepoFilter_YoloCatchup_SkipsOtherRepos(t *testing.T) {
 		Options: map[string]string{"Research": "OPT_1", "Plan": "OPT_2"},
 	}
 
-	if err := eng.poll(context.Background()); err != nil {
+	if _, err := eng.poll(context.Background()); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 	eng.wg.Wait()

@@ -68,6 +68,8 @@ type Engine struct {
 	lastUpdatedAt        map[string]time.Time  // key: issueKey; tracks last-seen updatedAt per issue
 	deepFetchFailureTime map[string]time.Time  // key: issueKey; tracks when FetchItemDetails last failed
 	idleCount            int                   // consecutive idle polls; triggers self-upgrade at threshold
+	idleStart            time.Time             // when consecutive idle polls began; zero value = not idle
+	wakeCh               chan struct{}          // TUI sends on this to wake the poll loop immediately; nil if no TUI
 	sem                  chan struct{}         // semaphore bounding concurrent workers across poll cycles
 	wg                   sync.WaitGroup        // tracks in-flight workers for graceful shutdown
 	inFlight             sync.Map              // key: issueKey string, value: bool (isPR)
@@ -217,6 +219,12 @@ func (e *Engine) registerWorktrees(nameWithOwner, baseDir, worktreeRoot string) 
 	wm.logfFn = e.logf
 	e.worktreeManagers[nameWithOwner] = wm
 	return wm
+}
+
+// SetWakeCh configures the wake channel. The TUI sends on this channel to
+// reset idle backoff and trigger an immediate poll. Must be called before Run().
+func (e *Engine) SetWakeCh(ch chan struct{}) {
+	e.wakeCh = ch
 }
 
 // SetEvents configures the event channel. Must be called before Run().

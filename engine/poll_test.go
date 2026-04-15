@@ -33,7 +33,7 @@ func TestPoll_FetchesBoardAndProcessesItems(t *testing.T) {
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
 
-	err := eng.poll(context.Background())
+	_, err := eng.poll(context.Background())
 	if err != nil {
 		t.Fatalf("poll: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestPoll_Error(t *testing.T) {
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
 
-	err := eng.poll(context.Background())
+	_, err := eng.poll(context.Background())
 	if err == nil {
 		t.Fatal("expected error from poll")
 	}
@@ -69,7 +69,7 @@ func TestPoll_StatusFieldFetchError(t *testing.T) {
 	eng := testEngine(client, &mockClaudeInvoker{})
 
 	// Should not error — status field failure is a warning
-	err := eng.poll(context.Background())
+	_, err := eng.poll(context.Background())
 	if err != nil {
 		t.Fatalf("poll: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestPoll_StatusFieldAlreadySet(t *testing.T) {
 	eng := testEngine(client, &mockClaudeInvoker{})
 	eng.statusField = &gh.StatusField{FieldID: "already-set"}
 
-	eng.poll(context.Background())
+	_, _ = eng.poll(context.Background())
 }
 
 func TestPoll_EmptyProjectID(t *testing.T) {
@@ -106,7 +106,7 @@ func TestPoll_EmptyProjectID(t *testing.T) {
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
 
-	eng.poll(context.Background())
+	_, _ = eng.poll(context.Background())
 }
 
 func TestPoll_RateLimitLogging(t *testing.T) {
@@ -124,7 +124,7 @@ func TestPoll_RateLimitLogging(t *testing.T) {
 	eng := testEngine(client, &mockClaudeInvoker{})
 
 	// poll() must succeed and not panic when rate limit stats are non-zero.
-	if err := eng.poll(context.Background()); err != nil {
+	if _, err := eng.poll(context.Background()); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 }
@@ -142,7 +142,7 @@ func TestPoll_RateLimitLogging_ZeroReset(t *testing.T) {
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
 
-	if err := eng.poll(context.Background()); err != nil {
+	if _, err := eng.poll(context.Background()); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 }
@@ -173,7 +173,7 @@ func TestPoll_ProcessItemError(t *testing.T) {
 	)
 
 	// poll should not return error even when processItem fails
-	err := eng.poll(context.Background())
+	_, err := eng.poll(context.Background())
 	if err != nil {
 		t.Fatalf("poll should not error from processItem failures: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestPoll_CleanupStageItemNotDeepFetched(t *testing.T) {
 		wm,
 	)
 
-	if err := eng.poll(context.Background()); err != nil {
+	if _, err := eng.poll(context.Background()); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 	eng.wg.Wait()
@@ -399,7 +399,7 @@ func TestYoloCatchup_AdvancesClosedIssue(t *testing.T) {
 	eng.cfg.Yolo = true
 
 	ctx := context.Background()
-	if err := eng.poll(ctx); err != nil {
+	if _, err := eng.poll(ctx); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 
@@ -447,7 +447,7 @@ func TestYoloCatchup_SkipsNotDeepFetched(t *testing.T) {
 	eng.lastUpdatedAt["owner/repo#55"] = fixedTime
 
 	ctx := context.Background()
-	if err := eng.poll(ctx); err != nil {
+	if _, err := eng.poll(ctx); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 
@@ -481,7 +481,7 @@ func TestPoll_RateLimitWarning(t *testing.T) {
 	events := make(chan tui.Event, 64)
 	eng.events = events
 
-	if err := eng.poll(context.Background()); err != nil {
+	if _, err := eng.poll(context.Background()); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 	close(events)
@@ -607,7 +607,7 @@ func TestYoloCatchUpMergesBeforeAdvance(t *testing.T) {
 	eng := testEngineWithStages(client, testStagesWithValidate())
 
 	ctx := context.Background()
-	if err := eng.poll(ctx); err != nil {
+	if _, err := eng.poll(ctx); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 
@@ -668,7 +668,7 @@ func TestYoloCatchUpSkipsAdvanceOnMergeError(t *testing.T) {
 	eng := testEngineWithStages(client, testStagesWithValidate())
 
 	ctx := context.Background()
-	if err := eng.poll(ctx); err != nil {
+	if _, err := eng.poll(ctx); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 
@@ -724,7 +724,7 @@ func TestYoloCatchUpSkipsAdvanceOnUnprocessedComment(t *testing.T) {
 	eng := testEngineWithStages(client, testStagesWithValidate())
 
 	ctx := context.Background()
-	if err := eng.poll(ctx); err != nil {
+	if _, err := eng.poll(ctx); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 
@@ -797,7 +797,7 @@ func TestCruiseCatchUp_NonValidate_Advances(t *testing.T) {
 	eng := testEngineWithStages(client, testStagesWithValidate())
 
 	ctx := context.Background()
-	if err := eng.poll(ctx); err != nil {
+	if _, err := eng.poll(ctx); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 
@@ -851,7 +851,7 @@ func TestCruiseCatchUp_Validate_NoMergeNoAdvance(t *testing.T) {
 	eng := testEngineWithStages(client, testStagesWithValidate())
 
 	ctx := context.Background()
-	if err := eng.poll(ctx); err != nil {
+	if _, err := eng.poll(ctx); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 
@@ -906,7 +906,7 @@ func TestCruiseCatchUp_BothCruiseAndYolo_YoloWins(t *testing.T) {
 	eng := testEngineWithStages(client, testStagesWithValidate())
 
 	ctx := context.Background()
-	if err := eng.poll(ctx); err != nil {
+	if _, err := eng.poll(ctx); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 
@@ -920,5 +920,98 @@ func TestCruiseCatchUp_BothCruiseAndYolo_YoloWins(t *testing.T) {
 	}
 	if advances != 1 {
 		t.Errorf("expected advance when yolo wins over cruise, got %d", advances)
+	}
+}
+
+func TestIdleBackoffMultiplier(t *testing.T) {
+	cases := []struct {
+		idle time.Duration
+		want int
+	}{
+		{0, 1},
+		{2 * time.Minute, 1},
+		{4*time.Minute + 59*time.Second, 1},
+		{5 * time.Minute, 2},
+		{7 * time.Minute, 2},
+		{9*time.Minute + 59*time.Second, 2},
+		{10 * time.Minute, 4},
+		{15 * time.Minute, 4},
+		{19*time.Minute + 59*time.Second, 4},
+		{20 * time.Minute, 0},
+		{60 * time.Minute, 0},
+	}
+	for _, tc := range cases {
+		got := idleBackoffMultiplier(tc.idle)
+		if got != tc.want {
+			t.Errorf("idleBackoffMultiplier(%v) = %d, want %d", tc.idle, got, tc.want)
+		}
+	}
+}
+
+func TestComputeEffectiveInterval(t *testing.T) {
+	base := 30 * time.Second
+
+	cases := []struct {
+		name         string
+		idle         time.Duration
+		rateLimitLow bool
+		want         time.Duration
+	}{
+		{"no idle no rateLimit", 0, false, 30 * time.Second},
+		{"3min idle no rateLimit", 3 * time.Minute, false, 30 * time.Second},
+		{"6min idle (2x)", 6 * time.Minute, false, 60 * time.Second},
+		{"12min idle (4x)", 12 * time.Minute, false, 2 * time.Minute},
+		{"25min idle (max)", 25 * time.Minute, false, 5 * time.Minute},
+		{"rateLimit only", 0, true, 60 * time.Second},
+		{"idle 2x wins over rateLimit 2x", 6 * time.Minute, true, 60 * time.Second},
+		{"idle 4x wins over rateLimit 2x", 12 * time.Minute, true, 2 * time.Minute},
+		{"rateLimit 2x wins over idle 1x", 3 * time.Minute, true, 60 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := computeEffectiveInterval(base, tc.idle, tc.rateLimitLow)
+			if got != tc.want {
+				t.Errorf("computeEffectiveInterval(%v, %v, %v) = %v, want %v",
+					base, tc.idle, tc.rateLimitLow, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestComputeEffectiveInterval_CapAt5Min(t *testing.T) {
+	// With a large configured interval (e.g. 3 minutes), 4x would be 12min,
+	// but we cap at 5 minutes.
+	base := 3 * time.Minute
+	got := computeEffectiveInterval(base, 12*time.Minute, false)
+	if got != 5*time.Minute {
+		t.Errorf("expected cap at 5m, got %v", got)
+	}
+
+	// Even 2x of 3 minutes (= 6min) should cap at 5min.
+	got = computeEffectiveInterval(base, 6*time.Minute, false)
+	if got != 5*time.Minute {
+		t.Errorf("expected cap at 5m for 2x of 3min base, got %v", got)
+	}
+}
+
+func TestComputeEffectiveInterval_MaxIdleRateLimit(t *testing.T) {
+	// Both backoffs active: idle at max (5min) and rate limit at 2x.
+	// max(5min, 2*30s=1min) = 5min.
+	base := 30 * time.Second
+	got := computeEffectiveInterval(base, 25*time.Minute, true)
+	if got != 5*time.Minute {
+		t.Errorf("expected 5m, got %v", got)
+	}
+}
+
+func TestComputeEffectiveInterval_RateLimitExceeds5Min(t *testing.T) {
+	// Rate-limit backoff alone can exceed 5 minutes (the idle cap doesn't apply).
+	// With 3min base and rateLimitLow=true, rate-limit interval = 6min.
+	// Idle is not active (0 duration), so idleInterval = 3min.
+	// max(3min, 6min) = 6min — the 5min idle cap must NOT clamp this.
+	base := 3 * time.Minute
+	got := computeEffectiveInterval(base, 0, true)
+	if got != 6*time.Minute {
+		t.Errorf("expected 6m (rate-limit 2x of 3min base), got %v", got)
 	}
 }
