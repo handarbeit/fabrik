@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -260,14 +261,18 @@ func TestCheckReviewGate_DismissedReviewer_Reblocks(t *testing.T) {
 
 // (f) buildReviewThreadComments returns inline thread comments with real DatabaseIDs.
 func TestBuildReviewThreadComments(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(client)
 	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
 		LinkedPRReviewThreadComments: []gh.Comment{
 			{ID: "PRRC_1", DatabaseID: 101, Author: "copilot", Body: "Please fix the error handling.", ReviewThreadID: "RT_1"},
 			{ID: "PRRC_2", DatabaseID: 102, Author: "human", Body: "Consider edge case.", ReviewThreadID: "RT_2"},
 		},
 	}
 
-	comments := buildReviewThreadComments(item)
+	comments := eng.buildReviewThreadComments(item)
 
 	if len(comments) != 2 {
 		t.Fatalf("expected 2 thread comments, got %d", len(comments))
@@ -277,6 +282,95 @@ func TestBuildReviewThreadComments(t *testing.T) {
 	}
 	if comments[0].ReviewThreadID == "" {
 		t.Error("thread comments must carry ReviewThreadID so threads can be resolved later")
+	}
+}
+
+// (f2) buildReviewThreadComments skips comments already present in processedSet.
+func TestBuildReviewThreadComments_ProcessedSetSkip(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		LinkedPRReviewThreadComments: []gh.Comment{
+			{ID: "PRRC_1", DatabaseID: 101, Author: "copilot", Body: "Already handled.", ReviewThreadID: "RT_1"},
+			{ID: "PRRC_2", DatabaseID: 102, Author: "human", Body: "Not yet handled.", ReviewThreadID: "RT_2"},
+		},
+	}
+
+	// Pre-populate processedSet for comment PRRC_1 (simulates markCommentsProcessed).
+	iKey := issueKey(item, eng.defaultRepo())
+	eng.mu.Lock()
+	eng.processedSet[iKey+"-comment-PRRC_1"] = time.Now()
+	eng.mu.Unlock()
+
+	comments := eng.buildReviewThreadComments(item)
+
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment (PRRC_1 should be skipped), got %d", len(comments))
+	}
+	if comments[0].ID != "PRRC_2" {
+		t.Errorf("expected remaining comment to be PRRC_2, got %q", comments[0].ID)
+	}
+}
+
+// (f3) catch-up loop skips dispatchReviewReinvoke when a goroutine is already
+// in-flight for the item, and does NOT increment reviewCycleCount.
+func TestCatchUpLoop_InFlightGuard(t *testing.T) {
+	threadComment := gh.Comment{
+		ID:             "PRRC_guard_1",
+		DatabaseID:     201,
+		Author:         "copilot",
+		Body:           "Please fix this.",
+		ReviewThreadID: "RT_guard_1",
+	}
+
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{
+						Number: 42,
+						ItemID: "PVTI_42",
+						Status: "Implement",
+						Repo:   "owner/repo",
+						Labels: []string{"stage:Implement:complete", "fabrik:yolo"},
+					},
+				},
+			}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			// Simulate FetchItemDetails populating review thread comments.
+			item.LinkedPRReviewThreadComments = []gh.Comment{threadComment}
+			return nil
+		},
+	}
+
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement"},
+		{Name: "Review", Order: 2, Prompt: "review"},
+	}
+	eng := testEngineWithStages(client, stgs)
+	eng.cfg.MaxReviewCycles = 5
+
+	// Pre-store inFlight for this item to simulate a goroutine already running.
+	iKey := "owner/repo#42"
+	eng.inFlight.Store(iKey, false)
+
+	ctx := context.Background()
+	if err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	// Drain any goroutines (none should have been launched, but be safe).
+	eng.wg.Wait()
+
+	// reviewCycleCount must remain 0 — the inFlight guard must prevent the dispatch.
+	eng.mu.Lock()
+	count := eng.reviewCycleCount[iKey]
+	eng.mu.Unlock()
+	if count != 0 {
+		t.Errorf("reviewCycleCount = %d; want 0 (dispatch must be suppressed when in-flight)", count)
 	}
 }
 
