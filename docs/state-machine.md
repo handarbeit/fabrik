@@ -341,6 +341,8 @@ When new comments are detected on an issue (or synthetic review comments on a PR
 2. Skip comments with body starting with `🏭 **Fabrik` (engine-generated output)
 3. Skip comments with a ROCKET (🚀) reaction (durable cross-restart marker)
 
+> **Invariant:** every engine-emitted `AddComment` call must start with `🏭 **Fabrik — <context>**`. This is an engine-wide convention enforced by `TestAddCommentCompliance` in `engine/compliance_test.go`, not just a detection heuristic.
+
 ### 4.2 The 11-Step Flow
 
 | Step | Action | Code | Side Effects |
