@@ -376,8 +376,8 @@ func TestBuildPrompt_BaseBranch(t *testing.T) {
 	if !strings.Contains(prompt, "liminis") {
 		t.Error("expected branch name 'liminis' in prompt when baseBranch is non-empty")
 	}
-	if !strings.Contains(prompt, "files changed on liminis") {
-		t.Errorf("expected 'files changed on liminis' in codebase-changes description, got prompt:\n%s", prompt)
+	if !strings.Contains(prompt, "files changed on `liminis`") {
+		t.Errorf("expected 'files changed on `liminis`' in codebase-changes description, got prompt:\n%s", prompt)
 	}
 	if !strings.Contains(prompt, "default base branch is `liminis`") {
 		t.Errorf("expected explicit base branch statement with 'liminis', got prompt:\n%s", prompt)
@@ -406,9 +406,9 @@ func TestBuildCommentReviewPrompt_BaseBranch(t *testing.T) {
 		t.Errorf("expected explicit base branch statement with 'liminis', got:\n%s", prompt)
 	}
 
-	// Empty baseBranch: fallback text should appear instead.
+	// Empty baseBranch: no base branch statement should be emitted.
 	promptEmpty := buildCommentReviewPrompt(stage, item, comments, "")
-	if !strings.Contains(promptEmpty, "the default branch") {
-		t.Errorf("expected 'the default branch' fallback when baseBranch is empty, got:\n%s", promptEmpty)
+	if strings.Contains(promptEmpty, "default base branch is") {
+		t.Errorf("prompt should not include base branch statement when baseBranch is empty, got:\n%s", promptEmpty)
 	}
 }

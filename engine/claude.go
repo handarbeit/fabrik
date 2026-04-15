@@ -545,17 +545,18 @@ func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Com
 		}
 	}
 
-	baseBranchDesc := baseBranch
-	if baseBranchDesc == "" {
-		baseBranchDesc = "the default branch"
-	}
-
 	b.WriteString("---\n\n")
-	b.WriteString(fmt.Sprintf("The repository's default base branch is `%s`.\n\n", baseBranchDesc))
+	if baseBranch != "" {
+		b.WriteString(fmt.Sprintf("The repository's default base branch is `%s`.\n\n", baseBranch))
+	}
 	b.WriteString("Context files are available in `.fabrik-context/` in your working directory:\n")
 	b.WriteString("- `.fabrik-context/issue.md` — the issue body (spec)\n")
 	b.WriteString("- `.fabrik-context/stage-{Name}.md` — output from prior stages (e.g. `.fabrik-context/stage-Research.md`)\n")
-	b.WriteString(fmt.Sprintf("- `.fabrik-context/codebase-changes.md` — files changed on %s since the last stage (if any)\n", baseBranchDesc))
+	if baseBranch != "" {
+		b.WriteString(fmt.Sprintf("- `.fabrik-context/codebase-changes.md` — files changed on `%s` since the last stage (if any)\n", baseBranch))
+	} else {
+		b.WriteString("- `.fabrik-context/codebase-changes.md` — files changed on the default branch since the last stage (if any)\n")
+	}
 	if stage.PostToPR {
 		b.WriteString("- `.fabrik-context/pr-description.md` — the linked PR description\n")
 	}
@@ -640,13 +641,10 @@ func buildCommentReviewPrompt(stage *stages.Stage, item gh.ProjectItem, comments
 		}
 	}
 
-	baseBranchDesc := baseBranch
-	if baseBranchDesc == "" {
-		baseBranchDesc = "the default branch"
-	}
-
 	b.WriteString("---\n\n")
-	b.WriteString(fmt.Sprintf("The repository's default base branch is `%s`.\n\n", baseBranchDesc))
+	if baseBranch != "" {
+		b.WriteString(fmt.Sprintf("The repository's default base branch is `%s`.\n\n", baseBranch))
+	}
 	b.WriteString("Context files are available in `.fabrik-context/` in your working directory:\n")
 	b.WriteString("- `.fabrik-context/issue.md` — the issue body (spec)\n")
 	b.WriteString("- `.fabrik-context/stage-{Name}.md` — the current stage output (e.g. `.fabrik-context/stage-Specify.md`) and prior stage outputs\n")
