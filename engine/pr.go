@@ -229,3 +229,62 @@ func formatMetaLine(branch, commit, mainSHA, timestamp string) string {
 	}
 	return fmt.Sprintf("*branch: %s | commit: %s | %s*", branch, commit, timestamp)
 }
+
+// reviewThreadEntry holds the resolved location data for a single PR review thread.
+// Line is already resolved: Comment.Line if nonzero, else Comment.OriginalLine.
+// A zero Line means no line number was available.
+type reviewThreadEntry struct {
+	Path string
+	Line int
+}
+
+// buildThreadEntries constructs a deduplicated list of reviewThreadEntry values
+// from the input comments. One entry per unique ReviewThreadID; first occurrence
+// wins. Line is resolved from Comment.Line (nonzero) or Comment.OriginalLine.
+func buildThreadEntries(comments []gh.Comment) []reviewThreadEntry {
+	seen := make(map[string]bool)
+	var entries []reviewThreadEntry
+	for _, c := range comments {
+		if c.ReviewThreadID == "" {
+			continue
+		}
+		if seen[c.ReviewThreadID] {
+			continue
+		}
+		seen[c.ReviewThreadID] = true
+		line := c.Line
+		if line == 0 {
+			line = c.OriginalLine
+		}
+		entries = append(entries, reviewThreadEntry{Path: c.Path, Line: line})
+	}
+	return entries
+}
+
+// formatReviewFeedbackComment formats a Fabrik-marked comment for posting on a
+// linked PR after review-reinvoke processing completes. It includes:
+//   - a header line identifying the stage and action
+//   - standard metadata (branch, commit, main SHA, timestamp)
+//   - Claude's cleaned output (truncated at 60k)
+//   - a per-thread footer listing each addressed thread by path:line
+//   - a summary line with thread and comment counts
+func formatReviewFeedbackComment(stageName, output, branch, commit, mainSHA, timestamp string, threads []reviewThreadEntry, totalComments int) string {
+	const maxLen = 60000
+	if len(output) > maxLen {
+		output = output[:maxLen] + "\n\n... (truncated)"
+	}
+	meta := formatMetaLine(branch, commit, mainSHA, timestamp)
+	title := stageName + " (review feedback addressed)"
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("🏭 **Fabrik — stage: %s**\n%s\n\n%s\n\n---\n**Threads addressed:**\n", title, meta, output))
+	for _, e := range threads {
+		if e.Line > 0 {
+			sb.WriteString(fmt.Sprintf("- `%s:%d` — resolved\n", e.Path, e.Line))
+		} else {
+			sb.WriteString(fmt.Sprintf("- `%s` — resolved\n", e.Path))
+		}
+	}
+	sb.WriteString(fmt.Sprintf("\nResolved %d review thread(s) across %d comment(s).", len(threads), totalComments))
+	return sb.String()
+}
