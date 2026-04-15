@@ -9,9 +9,9 @@ package engine
 // A body argument is compliant if and only if:
 //   - It is a call to formatOutputComment or formatPRSummaryComment, OR
 //   - It is a string literal whose value starts with "🏭 **Fabrik", OR
-//   - It is a local variable whose most-recent assignment in the same function
-//     scope is either of the above (i.e. a fmt.Sprintf whose format string
-//     starts with "🏭 **Fabrik", or a call to the canonical formatters).
+//   - It is a local variable where any assignment in the same function scope
+//     is compliant (i.e. a fmt.Sprintf whose format string starts with
+//     "🏭 **Fabrik", or a call to the canonical formatters).
 //
 // Test files (*_test.go) are excluded because mock AddComment implementations
 // may accept arbitrary bodies.
@@ -113,12 +113,20 @@ func collectVarAssignments(body *ast.BlockStmt, assigns map[string][]ast.Expr) {
 		if !ok {
 			return true
 		}
+		// Handle two cases:
+		//   1. Parallel assignment: a, b := x, y — each LHS maps to its own RHS.
+		//   2. Multi-return call: a, b := f() — a single RHS maps to all LHS idents.
 		for i, lhs := range stmt.Lhs {
 			ident, ok := lhs.(*ast.Ident)
-			if !ok || i >= len(stmt.Rhs) {
+			if !ok {
 				continue
 			}
-			assigns[ident.Name] = append(assigns[ident.Name], stmt.Rhs[i])
+			if i < len(stmt.Rhs) {
+				assigns[ident.Name] = append(assigns[ident.Name], stmt.Rhs[i])
+			} else if len(stmt.Rhs) == 1 {
+				// Multi-return call: associate the single call with every LHS ident.
+				assigns[ident.Name] = append(assigns[ident.Name], stmt.Rhs[0])
+			}
 		}
 		return true
 	})
@@ -166,7 +174,8 @@ func isCompliantCallExpr(call *ast.CallExpr) bool {
 	case *ast.SelectorExpr:
 		// fmt.Sprintf("🏭 **Fabrik...", ...) — the first arg may be a plain literal
 		// or a binary string concatenation expression ("..." + "...").
-		if fn.Sel.Name == "Sprintf" && len(call.Args) > 0 {
+		pkg, ok := fn.X.(*ast.Ident)
+		if ok && pkg.Name == "fmt" && fn.Sel.Name == "Sprintf" && len(call.Args) > 0 {
 			if lit := leftmostStringLit(call.Args[0]); lit != nil {
 				return isFabrikHeaderLit(lit)
 			}
