@@ -409,8 +409,8 @@ FABRIK_USER=my-personal-username
 | `FABRIK_TUI` | `tui` | Disable TUI dashboard (`false`/`0`/`no`) | `true` |
 | `FABRIK_PLUGIN_DIR` | *(no config.yaml key)* | Override plugin directory | `.fabrik/plugin/` |
 | `FABRIK_DEBUG_OUTPUT` | `debug_output` | Save raw Claude output for debugging | `false` |
-| `FABRIK_REVIEW_WAIT_TIMEOUT` | *(no config.yaml key)* | Minutes to wait per review cycle for all requested PR reviewers to submit before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 15) | `15` |
-| `FABRIK_MAX_REVIEW_CYCLES` | *(no config.yaml key)* | Maximum number of review re-invocation cycles per issue before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 5) | `5` |
+| `FABRIK_REVIEW_WAIT_TIMEOUT` | *(no config.yaml key)* | Minutes to wait per review cycle for all requested PR reviewers to submit before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 15); also `--review-wait-timeout` CLI flag | `15` |
+| `FABRIK_MAX_REVIEW_CYCLES` | *(no config.yaml key)* | Maximum number of review re-invocation cycles per issue before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 5); also `--max-review-cycles` CLI flag | `5` |
 
 Token precedence: `--token` flag > `FABRIK_TOKEN` > `GITHUB_TOKEN`
 
@@ -745,6 +745,8 @@ To prevent infinite loops (e.g., a bot that always posts new reviews after every
 
 ```bash
 FABRIK_MAX_REVIEW_CYCLES=3  # Limit to 3 re-invocation cycles per issue (default: 5)
+# or equivalently:
+fabrik --max-review-cycles=3
 ```
 
 The cycle count resets on engine restart.
@@ -755,6 +757,8 @@ The cycle count resets on engine restart.
 
 ```bash
 FABRIK_REVIEW_WAIT_TIMEOUT=30  # Wait up to 30 minutes per cycle for reviewers (default: 15)
+# or equivalently:
+fabrik --review-wait-timeout=30
 ```
 
 #### Restart Persistence
