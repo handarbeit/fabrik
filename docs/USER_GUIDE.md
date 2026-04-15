@@ -1312,8 +1312,8 @@ label to resume.
 
 Worktrees are at `.fabrik/worktrees/<owner>-<repo>/issue-N/` on branch `fabrik/issue-N`. On each stage
 invocation, Fabrik rebases onto the latest base branch (or the branch specified by a
-`base:<branch>` label — unless it's a retry, which preserves the worktree as-is to
-maintain Claude's context). If the rebase conflicts, it's silently aborted and Claude
+`base:<branch>` label), unless it's a retry, which preserves the worktree as-is to
+maintain Claude's context. If the rebase conflicts, it's silently aborted and Claude
 works from the current base.
 
 To manually clean up:
