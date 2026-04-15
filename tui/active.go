@@ -218,12 +218,13 @@ func (a ActivePaneComponent) View(width int) string {
 }
 
 func (a ActivePaneComponent) Height() int {
+	// In Progress always gets the rows it needs — one row per active/blocked
+	// item plus title and borders. History is sacrificed to make room.
+	// No cap: if the terminal can't fit everything, the history viewport
+	// truncates first and, in the extreme, the View() "… N more" fallback
+	// inside Active handles anything that still can't fit.
 	n := len(a.active) + len(a.blocked)
-	base := max(n+1, 2) + 2
-	if base > 10 {
-		return 11
-	}
-	return base
+	return max(n+1, 2) + 2
 }
 
 // sortedActiveKeys returns job keys from the active map in sorted order.
