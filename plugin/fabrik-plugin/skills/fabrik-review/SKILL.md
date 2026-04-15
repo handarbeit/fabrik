@@ -122,7 +122,7 @@ git push
 
 ## Output
 
-Your detailed findings and fixes are posted on the PR (when `post_to_pr: true`). A brief summary is posted on the issue.
+The engine captures your stdout and posts it on the PR (when `post_to_pr: true`). A brief summary is posted on the issue.
 
 ### PR comment structure
 
@@ -158,6 +158,11 @@ FABRIK_SUMMARY_END
 - **Do not add features** — review what's there, not what could be there
 - **Do not nitpick style** unless it violates project conventions
 - **Do not approve if something is wrong** — if you can't fix an issue, do NOT signal completion. Describe the blocker clearly.
+- **Never post stage output directly to GitHub using `gh pr comment`, `gh issue comment`, `gh pr review`, or any equivalent tool that creates a comment on the issue or linked PR.** Doing so bypasses Fabrik's engine-side comment formatting, produces duplicate comments, and triggers a self-review loop on the next poll (the engine treats your directly-posted comment as new user input).
+
+  Write all stage output to stdout only. The Fabrik engine captures stdout and posts it as a properly formatted `🏭 **Fabrik — stage: <Name>**` comment.
+
+  **Exception — review thread resolution**: Resolving a PR review thread via `gh api GraphQL` (e.g., the `resolveReviewThread` mutation) is permitted. Only *comment creation* is prohibited, not *thread resolution*.
 
 ## Engine Context
 

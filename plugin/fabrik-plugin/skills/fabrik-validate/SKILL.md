@@ -147,6 +147,14 @@ If you find major issues (wrong architecture, missing feature, design flaw):
 - Report it clearly
 - Do NOT signal completion
 
+## What You Do NOT Do
+
+- **Never post stage output directly to GitHub using `gh pr comment`, `gh issue comment`, `gh pr review`, or any equivalent tool that creates a comment on the issue or linked PR.** Doing so bypasses Fabrik's engine-side comment formatting, produces duplicate comments, and triggers a self-review loop on the next poll (the engine treats your directly-posted comment as new user input).
+
+  Write all stage output to stdout only. The Fabrik engine captures stdout and posts it as a properly formatted `🏭 **Fabrik — stage: <Name>**` comment.
+
+  **Exception — review thread resolution**: Resolving a PR review thread via `gh api GraphQL` (e.g., the `resolveReviewThread` mutation) is permitted. Only *comment creation* is prohibited, not *thread resolution*.
+
 ## Engine Context
 
 **Before you run**: Worktree exists with implementation + review commits.
