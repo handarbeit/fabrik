@@ -922,3 +922,84 @@ func TestCruiseCatchUp_BothCruiseAndYolo_YoloWins(t *testing.T) {
 		t.Errorf("expected advance when yolo wins over cruise, got %d", advances)
 	}
 }
+
+func TestIdleBackoffMultiplier(t *testing.T) {
+	cases := []struct {
+		idle time.Duration
+		want int
+	}{
+		{0, 1},
+		{2 * time.Minute, 1},
+		{4*time.Minute + 59*time.Second, 1},
+		{5 * time.Minute, 2},
+		{7 * time.Minute, 2},
+		{9*time.Minute + 59*time.Second, 2},
+		{10 * time.Minute, 4},
+		{15 * time.Minute, 4},
+		{19*time.Minute + 59*time.Second, 4},
+		{20 * time.Minute, 0},
+		{60 * time.Minute, 0},
+	}
+	for _, tc := range cases {
+		got := idleBackoffMultiplier(tc.idle)
+		if got != tc.want {
+			t.Errorf("idleBackoffMultiplier(%v) = %d, want %d", tc.idle, got, tc.want)
+		}
+	}
+}
+
+func TestComputeEffectiveInterval(t *testing.T) {
+	base := 30 * time.Second
+
+	cases := []struct {
+		name         string
+		idle         time.Duration
+		rateLimitLow bool
+		want         time.Duration
+	}{
+		{"no idle no rateLimit", 0, false, 30 * time.Second},
+		{"3min idle no rateLimit", 3 * time.Minute, false, 30 * time.Second},
+		{"6min idle (2x)", 6 * time.Minute, false, 60 * time.Second},
+		{"12min idle (4x)", 12 * time.Minute, false, 2 * time.Minute},
+		{"25min idle (max)", 25 * time.Minute, false, 5 * time.Minute},
+		{"rateLimit only", 0, true, 60 * time.Second},
+		{"idle 2x wins over rateLimit 2x", 6 * time.Minute, true, 60 * time.Second},
+		{"idle 4x wins over rateLimit 2x", 12 * time.Minute, true, 2 * time.Minute},
+		{"rateLimit 2x wins over idle 1x", 3 * time.Minute, true, 60 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := computeEffectiveInterval(base, tc.idle, tc.rateLimitLow)
+			if got != tc.want {
+				t.Errorf("computeEffectiveInterval(%v, %v, %v) = %v, want %v",
+					base, tc.idle, tc.rateLimitLow, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestComputeEffectiveInterval_CapAt5Min(t *testing.T) {
+	// With a large configured interval (e.g. 3 minutes), 4x would be 12min,
+	// but we cap at 5 minutes.
+	base := 3 * time.Minute
+	got := computeEffectiveInterval(base, 12*time.Minute, false)
+	if got != 5*time.Minute {
+		t.Errorf("expected cap at 5m, got %v", got)
+	}
+
+	// Even 2x of 3 minutes (= 6min) should cap at 5min.
+	got = computeEffectiveInterval(base, 6*time.Minute, false)
+	if got != 5*time.Minute {
+		t.Errorf("expected cap at 5m for 2x of 3min base, got %v", got)
+	}
+}
+
+func TestComputeEffectiveInterval_MaxIdleRateLimit(t *testing.T) {
+	// Both backoffs active: idle at max (5min) and rate limit at 2x.
+	// max(5min, 2*30s=1min) = 5min, capped at 5min.
+	base := 30 * time.Second
+	got := computeEffectiveInterval(base, 25*time.Minute, true)
+	if got != 5*time.Minute {
+		t.Errorf("expected 5m, got %v", got)
+	}
+}
