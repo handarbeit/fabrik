@@ -1,22 +1,28 @@
-# Fabrik v0.0.37
+# Fabrik v0.0.38
 
 ## Features
 
-- **Three-phase review gate with re-invocation loop** — The Review stage now automatically addresses PR review feedback (from bots and human reviewers) before advancing the issue. When reviews are submitted, Claude is re-invoked to address each reviewer's comments, push fixes, and re-request review. A cycle cap prevents infinite loops. If the review timeout elapses, the issue is paused with `fabrik:awaiting-input` rather than silently advancing — giving humans visibility and control before the next stage begins.
+- **Per-issue base branch override via `base:<branch>` label** — Fabrik forks from, rebases onto, and targets PRs at the specified branch instead of the repository default. Must be set before Research; falls back to the default branch (with a comment) if the branch does not exist on the remote.
+- **`--review-wait-timeout` and `--max-review-cycles` CLI flags** — First-class flags for tuning the reviewer gate. Explicit `=0` values are honored and no longer silently overridden by environment variables.
+- **Richer PR review thread context** — Review thread comments now include the file, line, and diff-hunk context so the review-comment skill can navigate straight to the affected location instead of searching for the code.
+- **Closed issues auto-advance when their current stage is complete** — Keeps the board moving when an issue is closed externally after its stage finished.
 
 ## Fixes
 
-- **Blocked items no longer get permanently stuck** — Dependency gating has been moved from `itemNeedsWork` to `processItem` (via `checkDependencies`). Previously, items with open blockers were silently skipped in `itemNeedsWork`, which never applied the `fabrik:blocked` label — so the `updatedAt` cache-bypass logic never re-evaluated them after blockers closed (blocker closure doesn't bump the blocked item's `updatedAt`). Now items pass through to `processItem`, which applies the label and ensures re-evaluation when dependencies resolve.
-- **Skip re-invocation when all submitted PR reviews have empty bodies** — Previously, empty-body review submissions (e.g., approvals with no comment) could trigger an unnecessary Claude re-invocation. Fabrik now skips the re-invocation cycle when all submitted reviews in a batch have empty bodies.
-- **TUI header never clipped** — Enforced a height invariant in the TUI so the header line is never truncated when the terminal is resized or the window is smaller than expected.
-- **`history.View()` empty-string guard** — Guarded against an empty-string return from `history.View()` that could cause an off-by-one in height accounting, and synchronized `Height()` to match the actual rendered `View()` output.
+- **Stop runaway review re-invocation loop** — Added an `inFlight` guard and moved it before the cycle-limit check so issues don't get prematurely paused; only unresolved inline thread comments now trigger re-invocation; `reviewCycleCount` resets on unpause.
+- **Use real PR review thread comments for re-invocation** — Prevents phantom cycles driven by unrelated issue comments.
+- **Thread `baseBranch` through prompt builder** — Prompts no longer hardcode `main`; the base-branch statement is omitted when empty and fallback prose is never backtick-wrapped as a branch name.
+- **Robust review thread decoding** — Use `*int`/`*string` for nullable GraphQL fields so missing location data doesn't break the decode.
+- **Worktree mutex held around `branchExists`** — Serializes base-branch existence checks and deduplicates the fallback comment.
+- **`gh`/`git` execution safety** — Fixed a 4-backtick fence issue in the review-comment SKILL.md example so nested code blocks render correctly.
+
+## Improvements
+
+- **TUI In Progress panel is no longer height-capped** — The panel can grow to show all in-flight workers.
 
 ## Internal
 
-- Skills config checkpoint for own-dog-fooding configuration.
-- USER_GUIDE: added Permissions section; fixed §9→§10 cross-reference display text.
-- README: fixed permission wording to match current behavior.
-- Added positioning notes for future marketing (internal docs).
+- Docs refreshed for `base:<branch>` label, reviewer-gate CLI flags, and the three-phase Pending Reviewer Gate behavior across README, USER_GUIDE, index.md, CLAUDE.md, and tui/help.go.
 
 ## Upgrading
 
