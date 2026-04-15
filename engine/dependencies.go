@@ -77,7 +77,7 @@ func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, 
 		}
 	}
 	if !alreadyBlocked {
-		comment := "Waiting for dependencies to close: " + strings.Join(waitingFor, ", ")
+		comment := fmt.Sprintf("🏭 **Fabrik — blocked on dependencies**\n\nWaiting for the following issues to close: %s", strings.Join(waitingFor, ", "))
 		if err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
 			e.logf(item.Number, "warn", "could not post blocked comment: %v\n", err)
 		}
