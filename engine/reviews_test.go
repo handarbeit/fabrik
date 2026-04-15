@@ -366,8 +366,9 @@ func TestCatchUpLoop_InFlightGuard(t *testing.T) {
 	eng.wg.Wait()
 
 	// reviewCycleCount must remain 0 — the inFlight guard must prevent the dispatch.
+	stageKey := iKey + "-Implement" // item.Status == "Implement"
 	eng.mu.Lock()
-	count := eng.reviewCycleCount[iKey]
+	count := eng.reviewCycleCount[stageKey]
 	eng.mu.Unlock()
 	if count != 0 {
 		t.Errorf("reviewCycleCount = %d; want 0 (dispatch must be suppressed when in-flight)", count)
@@ -434,6 +435,75 @@ func TestPauseForReviewCycleLimit(t *testing.T) {
 	// Should have posted a comment mentioning the cycle count
 	if len(client.addCommentCalls) != 1 {
 		t.Fatalf("expected 1 comment, got %d", len(client.addCommentCalls))
+	}
+}
+
+// (i1) reviewCycleCount is per-stage: cycles consumed by one stage do not
+// reduce the budget for a different stage on the same issue.
+func TestReviewCycleCount_PerStageNotPerIssue(t *testing.T) {
+	client := &mockGitHubClient{}
+	stgs := []*stages.Stage{
+		{Name: "Review", Order: 1, Prompt: "review"},
+		{Name: "Validate", Order: 2, Prompt: "validate"},
+	}
+	eng := testEngineWithStages(client, stgs)
+	iKey := "owner/repo#10"
+
+	// Simulate Review consuming 3 cycles out of 5.
+	eng.mu.Lock()
+	eng.reviewCycleCount[iKey+"-Review"] = 3
+	eng.mu.Unlock()
+
+	// Validate stage must have an independent budget: its counter is still 0.
+	eng.mu.Lock()
+	validateCount := eng.reviewCycleCount[iKey+"-Validate"]
+	eng.mu.Unlock()
+
+	if validateCount != 0 {
+		t.Errorf("Validate reviewCycleCount = %d; want 0 (must be independent of Review cycles)", validateCount)
+	}
+}
+
+// (i2) clearFailedStage resets only the paused stage's reviewCycleCount; a
+// different stage's counter on the same issue is unaffected.
+func TestClearFailedStage_ReviewCycleCount_ResetsOnlyCurrentStage(t *testing.T) {
+	client := &mockGitHubClient{}
+	stgs := []*stages.Stage{
+		{Name: "Review", Order: 1, Prompt: "review", WaitForReviews: boolPtr(true)},
+		{Name: "Validate", Order: 2, Prompt: "validate", WaitForReviews: boolPtr(true)},
+	}
+	eng := testEngineWithStages(client, stgs)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		Labels: []string{"stage:Review:failed", "fabrik:paused"},
+	}
+	iKey := "owner/repo#10"
+	reviewStageKey := iKey + "-Review"
+	validateStageKey := iKey + "-Validate"
+
+	// Simulate both stages having consumed cycles (Review hit limit; Validate consumed 2).
+	eng.mu.Lock()
+	eng.reviewCycleCount[reviewStageKey] = 5
+	eng.reviewCycleCount[validateStageKey] = 2
+	eng.mu.Unlock()
+
+	// User manually unpauses Review.
+	reviewStage := &stages.Stage{Name: "Review", Order: 1}
+	eng.clearFailedStage(item, reviewStage)
+
+	// Review's counter must be reset to 0.
+	eng.mu.Lock()
+	afterReview := eng.reviewCycleCount[reviewStageKey]
+	afterValidate := eng.reviewCycleCount[validateStageKey]
+	eng.mu.Unlock()
+
+	if afterReview != 0 {
+		t.Errorf("Review reviewCycleCount = %d after clearFailedStage; want 0", afterReview)
+	}
+	// Validate's counter must be untouched — it has an independent budget.
+	if afterValidate != 2 {
+		t.Errorf("Validate reviewCycleCount = %d after clearing Review; want 2 (independent)", afterValidate)
 	}
 }
 

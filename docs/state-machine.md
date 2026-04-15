@@ -445,7 +445,7 @@ After the review gate clears (Path 2), if there are unresolved PR review thread 
 
 1. `buildReviewThreadComments()` collects inline comments from unresolved review threads that haven't been processed (no ROCKET reaction, not in `processedSet`)
 2. **inFlight guard:** If a reinvoke goroutine from a previous poll cycle is still running, the entire reinvoke path is skipped (including cycle-limit checks)
-3. **Cycle limit check:** `reviewCycleCount[iKey]` is compared against `MaxReviewCycles` (default 5)
+3. **Cycle limit check:** `reviewCycleCount[stageKey]` is compared against `MaxReviewCycles` (default 5)
    - If exceeded: `pauseForReviewCycleLimit()` adds `fabrik:paused` + `fabrik:awaiting-input` and posts comment
    - If not exceeded: increment count, dispatch reinvoke
 4. `dispatchReviewReinvoke()` spawns an async goroutine:
@@ -541,7 +541,7 @@ Closed issues are normally skipped by `itemMayNeedWork()` and `itemNeedsWork()`.
 | Cooldown timer | `processedSet[stageKey]` | None | Lost — item retried immediately |
 | Retry count | `retryCount[stageKey]` | None | Lost — retries restart from 0 |
 | Paused-due-to-retries | `pausedDueToRetries[stageKey]` | `fabrik:paused` + `stage:<X>:failed` | Labels survive; in-memory flag lost but `processItem()` detects the failed label directly |
-| Review cycle count | `reviewCycleCount[iKey]` | None | Lost — cycle count restarts from 0 |
+| Review cycle count | `reviewCycleCount[stageKey]` | None | Lost — cycle count restarts from 0 |
 | Comment processed | `processedSet[key]` | ROCKET (🚀) reaction | Reaction survives restart; in-memory dedup is defense-in-depth |
 | Lock tracking | `lockedIssues[iKey]` | `fabrik:locked:<user>` label | Label may survive if process crashes; `cleanupLockedIssues()` runs on graceful shutdown |
 | Last updatedAt | `lastUpdatedAt[iKey]` | None | Lost — all items re-evaluated on first poll |

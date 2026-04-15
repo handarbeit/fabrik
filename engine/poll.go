@@ -649,6 +649,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			// have nothing to address; fall through to advance as normal.
 			if syntheticComments := e.buildReviewThreadComments(item); len(syntheticComments) > 0 {
 				iKey := issueKey(item, e.defaultRepo())
+				stageKey := iKey + "-" + stage.Name
 				// Guard: if a goroutine from a previous poll cycle is still
 				// running dispatchReviewReinvoke for this item, skip the entire
 				// reinvoke path — including cycle-limit checks — to avoid
@@ -660,14 +661,14 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 					continue
 				}
 				e.mu.Lock()
-				cycleCount := e.reviewCycleCount[iKey]
+				cycleCount := e.reviewCycleCount[stageKey]
 				maxCycles := e.cfg.MaxReviewCycles
 				e.mu.Unlock()
 				if cycleCount >= maxCycles {
 					e.pauseForReviewCycleLimit(board, item, stage, cycleCount, maxCycles)
 				} else {
 					e.mu.Lock()
-					e.reviewCycleCount[iKey]++
+					e.reviewCycleCount[stageKey]++
 					e.mu.Unlock()
 					e.dispatchReviewReinvoke(ctx, board, item, stage)
 					advancedItems[issueKey(item, e.defaultRepo())] = true

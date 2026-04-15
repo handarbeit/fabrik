@@ -61,7 +61,7 @@ type Engine struct {
 	lastReportedCost     float64               // cost at last [stats] report; skip repeat prints when unchanged
 	retryCount           map[string]int        // key: "owner/repo#N-stageName", value: failed attempt count
 	pausedDueToRetries   map[string]bool       // key: "owner/repo#N-stageName", true if engine paused this issue
-	reviewCycleCount     map[string]int        // key: issueKey; review re-invocation cycle count per issue
+	reviewCycleCount     map[string]int        // key: "owner/repo#N-stageName"; review re-invocation cycle count per stage
 	lastUsage            map[string]TokenUsage // key: issueKey; per-issue token usage from last processItem (for TUI)
 	lastCompleted        map[string]bool       // key: issueKey; per-issue stage completion from last processItem (for TUI)
 	lastBlocked          map[string]bool       // key: issueKey; per-issue blocked-on-input from last processItem (for TUI)
