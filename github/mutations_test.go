@@ -18,13 +18,19 @@ func TestAddComment_Success(t *testing.T) {
 		if body["body"] != "Hello world" {
 			t.Errorf("body = %v", body["body"])
 		}
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(201)
+		w.Write([]byte(`{"id": 12345}`))
 	}))
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("token", srv.URL)
-	if err := c.AddComment("owner", "repo", 42, "Hello world"); err != nil {
+	id, err := c.AddComment("owner", "repo", 42, "Hello world")
+	if err != nil {
 		t.Fatalf("AddComment: %v", err)
+	}
+	if id != 12345 {
+		t.Errorf("expected id=12345, got %d", id)
 	}
 }
 
@@ -36,7 +42,7 @@ func TestAddComment_Error(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("token", srv.URL)
-	if err := c.AddComment("owner", "repo", 42, "test"); err == nil {
+	if _, err := c.AddComment("owner", "repo", 42, "test"); err == nil {
 		t.Fatal("expected error for 403 response")
 	}
 }
