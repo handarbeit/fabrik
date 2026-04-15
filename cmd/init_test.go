@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	fabrikplugin "github.com/verveguy/fabrik/plugin"
 	"github.com/verveguy/fabrik/stages"
 )
 
@@ -74,6 +75,58 @@ func TestRunInit_WritesFiles(t *testing.T) {
 		}
 		if string(written) != string(source) {
 			t.Errorf("file %s: content mismatch", e.Name())
+		}
+	}
+}
+
+func TestRunInit_WritesPluginFiles(t *testing.T) {
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(orig) //nolint
+
+	if err := runInit([]string{}); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	// Collect all embedded plugin file paths.
+	var embeddedPaths []string
+	if err := fs.WalkDir(fabrikplugin.FabrikPlugin, "fabrik-plugin", func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !d.IsDir() {
+			embeddedPaths = append(embeddedPaths, p)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walking embedded plugin: %v", err)
+	}
+	if len(embeddedPaths) == 0 {
+		t.Fatal("no embedded plugin files found")
+	}
+
+	// Verify each embedded file was written to .fabrik/plugin/ with matching content.
+	for _, p := range embeddedPaths {
+		rel, _ := filepath.Rel("fabrik-plugin", p)
+		destPath := filepath.Join(dir, ".fabrik", "plugin", rel)
+
+		written, err := os.ReadFile(destPath)
+		if err != nil {
+			t.Errorf("plugin file %s not written: %v", rel, err)
+			continue
+		}
+		source, err := fabrikplugin.FabrikPlugin.ReadFile(p)
+		if err != nil {
+			t.Fatalf("reading embedded plugin file %s: %v", p, err)
+		}
+		if string(written) != string(source) {
+			t.Errorf("plugin file %s: content mismatch", rel)
 		}
 	}
 }
