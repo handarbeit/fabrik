@@ -154,6 +154,16 @@ Or pass settings as flags:
 
 Fabrik polls the project board every 30 seconds by default (configurable with `--poll`
 or `poll:` in `config.yaml`).
+
+**Idle backoff**: When nothing needs work, Fabrik progressively slows down polling to conserve API rate limit budget. The backoff is time-based — after 5 minutes of idle polls, the interval doubles; after 10 minutes it quadruples; after 20 minutes it caps at 5 minutes. Any activity (items dispatched or deep-fetched) immediately resets the interval to the configured value. Press `w` in the TUI to wake polling instantly if you've just made changes on the board.
+
+| Idle duration | Effective interval | At 30s base |
+|---|---|---|
+| 0–5 min | 1× (configured) | 30s |
+| 5–10 min | 2× | 60s |
+| 10–20 min | 4× | 120s |
+| 20+ min | max (5 minutes) | 300s |
+
 Move an issue to `Specify` on the board to start processing it.
 
 ### Git Repositories and Worktrees
@@ -1109,6 +1119,7 @@ Claude sessions, a scrollable History pane with completed jobs, and a status bar
 | `n` / `N` | Cancel quit or clear-all confirmation dialogs |
 | `c` | Delete selected history entry |
 | `C` | Clear all history (with confirmation) |
+| `w` | Wake: reset idle backoff and poll immediately |
 | `?` | Toggle help panel (keybindings and labels reference) |
 | `q` | Quit |
 
