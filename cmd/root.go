@@ -45,6 +45,28 @@ type Config struct {
 }
 
 func Execute() error {
+	// Install a custom usage function before any subcommand dispatch so it fires
+	// for the main daemon path (subcommands return early and never reach flag.Parse).
+	// We set both flag.Usage (package-level) and flag.CommandLine.Usage (FlagSet
+	// field) so the custom function is invoked regardless of whether CommandLine
+	// was replaced by a test harness (resetFlags replaces CommandLine but doesn't
+	// install the commandLineUsage hook that normally delegates to flag.Usage).
+	customUsage := func() {
+		out := flag.CommandLine.Output()
+		fmt.Fprintf(out, "Fabrik — GitHub Project board orchestration for Claude Code\n\n")
+		fmt.Fprintf(out, "Usage: fabrik [flags] | fabrik <subcommand> [args]\n\n")
+		fmt.Fprintf(out, "Subcommands:\n")
+		fmt.Fprintf(out, "  init [<project-url>]      Initialize .fabrik/ in the current directory\n")
+		fmt.Fprintf(out, "  watch <issue-number>      Watch a single issue's Claude session live\n")
+		fmt.Fprintf(out, "  resume <issue-number>     Resume an interactive Claude session for an issue\n")
+		fmt.Fprintf(out, "  upgrade                   Upgrade the Fabrik binary and plugin skills\n")
+		fmt.Fprintf(out, "  stream-filter             Filter and pretty-print Claude streaming JSON (stdin → stdout)\n\n")
+		fmt.Fprintf(out, "Flags:\n")
+		flag.CommandLine.PrintDefaults()
+	}
+	flag.Usage = customUsage
+	flag.CommandLine.Usage = customUsage
+
 	// Dispatch subcommands before flag parsing so they get their own flag sets.
 	if len(os.Args) > 1 && os.Args[1] == "init" {
 		return runInit(os.Args[2:])
@@ -77,18 +99,22 @@ func Execute() error {
 	flag.StringVar(&cfg.User, "user", "", "GitHub username (only process changes by this user)")
 	flag.StringVar(&cfg.Token, "token", "", "GitHub token (or set GITHUB_TOKEN env var)")
 	flag.StringVar(&cfg.StagesDir, "stages", "./.fabrik/stages", "Directory containing stage YAML configs")
-	flag.BoolVar(&cfg.Yolo, "yolo", false, "Auto-advance issues through stages without waiting for human input")
+	flag.BoolVar(&cfg.Yolo, "yolo", false, "Auto-advance issues through stages without waiting for human input; also auto-merges the linked PR when Validate completes")
 	flag.BoolVar(&cfg.GitSSH, "ssh", false, "Use SSH clone URLs (git@github.com) instead of HTTPS")
-	flag.BoolVar(&cfg.AutoUpgrade, "auto-upgrade", false, "When idle, check GitHub Releases for a newer version and self-upgrade")
+	flag.BoolVar(&cfg.AutoUpgrade, "auto-upgrade", false, "When idle, check GitHub Releases for a newer version and self-upgrade; dev builds (built from source) rebuild from origin/main instead")
 	var noTUI bool
 	flag.BoolVar(&noTUI, "notui", false, "Disable the interactive TUI dashboard (default: enabled when a real terminal is detected)")
 	flag.IntVar(&cfg.PollSeconds, "poll", 30, "Polling interval in seconds")
 	flag.IntVar(&cfg.MaxConcurrent, "max-concurrent", 5, "Maximum number of concurrent issue workers")
 	flag.IntVar(&cfg.MaxRetries, "max-retries", 3, "Max failed stage attempts before pausing the issue (0 = unlimited)")
+	flag.IntVar(&cfg.ReviewWaitTimeout, "review-wait-timeout", 0, "Maximum time in minutes to wait for PR reviewers before advancing (0 = use default of 15; also FABRIK_REVIEW_WAIT_TIMEOUT)")
+	flag.IntVar(&cfg.MaxReviewCycles, "max-review-cycles", 0, "Maximum number of review-and-fix cycles per issue (0 = use default of 5; also FABRIK_MAX_REVIEW_CYCLES)")
 	flag.BoolVar(&cfg.DebugOutput, "debug-output", false, "Save Claude stage output to .fabrik/debug/ for debugging")
 	flag.StringVar(&cfg.PluginDir, "plugin-dir", "", "Path to Fabrik plugin directory (for development; overrides installed plugin)")
 
-	flag.Parse()
+	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
+		return err
+	}
 
 	if versionFlag {
 		fmt.Println(Version)
@@ -275,8 +301,7 @@ func Execute() error {
 	}
 
 	if cfg.Owner == "" || cfg.ProjectNum == 0 {
-		fmt.Fprintf(os.Stderr, "Usage: fabrik --owner OWNER --project NUM [--repo REPO] [options]\n\n")
-		flag.PrintDefaults()
+		flag.Usage()
 		return fmt.Errorf("missing required config: owner and project (use flags or .env file)")
 	}
 
