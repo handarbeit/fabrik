@@ -279,10 +279,14 @@ func formatReviewFeedbackComment(stageName, output, branch, commit, mainSHA, tim
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("🏭 **Fabrik — stage: %s**\n%s\n\n%s\n\n---\n**Threads addressed:**\n", title, meta, output))
 	for _, e := range threads {
+		displayPath := e.Path
+		if displayPath == "" {
+			displayPath = "(unknown path)"
+		}
 		if e.Line > 0 {
-			sb.WriteString(fmt.Sprintf("- `%s:%d` — resolved\n", e.Path, e.Line))
+			sb.WriteString(fmt.Sprintf("- `%s:%d` — resolved\n", displayPath, e.Line))
 		} else {
-			sb.WriteString(fmt.Sprintf("- `%s` — resolved\n", e.Path))
+			sb.WriteString(fmt.Sprintf("- `%s` — resolved\n", displayPath))
 		}
 	}
 	sb.WriteString(fmt.Sprintf("\nResolved %d review thread(s) across %d comment(s).", len(threads), totalComments))
