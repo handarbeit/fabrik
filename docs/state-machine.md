@@ -214,9 +214,9 @@ Nine distinct event types drive state transitions:
 
 ### 2.9 Review Reinvoke
 
-**Trigger:** The catch-up loop detects unresolved PR review thread comments after the review gate clears.
+**Trigger:** The catch-up loop Phase 1 detects unresolved PR review thread comments on any `stage:<X>:complete` item — regardless of whether the item has `fabrik:yolo`, `fabrik:cruise`, or any `auto_advance` config. Phase 1 runs unconditionally; only Phase 2 (stage advancement) is gated on those labels.
 
-**Code path:** `poll()` catch-up loop → `buildReviewThreadComments()` → cycle limit check → `dispatchReviewReinvoke()` → async goroutine → `processComments()` with synthetic comments
+**Code path:** `poll()` catch-up loop Phase 1 → `buildReviewThreadComments()` → cycle limit check → `dispatchReviewReinvoke()` → async goroutine → `processComments()` with synthetic comments
 
 **Distinct from regular comment processing because:**
 - Uses synthetic comments derived from PR review threads (`LinkedPRReviewThreadComments`), not issue comments
@@ -443,18 +443,27 @@ The review gate has two paths that handle different timing scenarios:
 
 ### 6.2 Review Reinvoke Mechanics
 
-After the review gate clears (Path 2), if there are unresolved PR review thread comments with actionable content:
+The catch-up loop in `poll()` is split into two phases for every `stage:<X>:complete` non-paused non-cleanup item:
 
-1. `buildReviewThreadComments()` collects inline comments from unresolved review threads that haven't been processed (no ROCKET reaction, not in `processedSet`)
-2. **inFlight guard:** If a reinvoke goroutine from a previous poll cycle is still running, the entire reinvoke path is skipped (including cycle-limit checks)
-3. **Cycle limit check:** `reviewCycleCount[stageKey]` is compared against `MaxReviewCycles` (default 5)
+**Phase 1 — unconditional (all items, regardless of yolo/cruise/auto_advance):**
+1. `checkDependencies()` — if blocked, skip
+2. `checkReviewGate()` — if awaiting reviewers, skip; if timed out, pause
+3. `buildReviewThreadComments()` collects inline comments from unresolved review threads (no ROCKET reaction, not in `processedSet`)
+4. **inFlight guard:** If a reinvoke goroutine from a previous poll cycle is still running, the entire reinvoke path is skipped (including cycle-limit checks)
+5. **Cycle limit check:** `reviewCycleCount[stageKey]` is compared against `MaxReviewCycles` (default 5)
    - If exceeded: `pauseForReviewCycleLimit()` adds `fabrik:paused` + `fabrik:awaiting-input` and posts comment
-   - If not exceeded: increment count, dispatch reinvoke
-4. `dispatchReviewReinvoke()` spawns an async goroutine:
-   - Marks item in `inFlight` (prevents double-dispatch by dispatch loop)
-   - Acquires semaphore slot (respects `MaxConcurrent`)
-   - Calls `processComments()` with the synthetic review comments
-   - On exit: releases semaphore, clears `inFlight`
+   - If not exceeded: increment count, dispatch reinvoke via `dispatchReviewReinvoke()`:
+     - Marks item in `inFlight` (prevents double-dispatch)
+     - Acquires semaphore slot (respects `MaxConcurrent`)
+     - Calls `processComments()` with the synthetic review comments asynchronously
+     - On exit: releases semaphore, clears `inFlight`
+
+**Phase 2 — gated (yolo/cruise/auto_advance only):**
+- Only runs when no unresolved review threads remain (Phase 1 `continue`s on reinvoke)
+- Gated on: `e.cfg.Yolo` OR `fabrik:yolo` label OR `fabrik:cruise` label OR stage `auto_advance: true`
+- Runs `attemptMergeOnValidate()` (yolo only), skips if unprocessed comments exist, then calls `advanceToNextStage()`
+
+**processComments widening:** `processComments()` itself also merges any unresolved `LinkedPRReviewThreadComments` at entry, before Step 1. This closes the race where a user nudge arrives before the catch-up loop Phase 1 fires — the review thread comments are addressed in the same invocation as the nudge comment.
 
 **Review thread resolution:** Step 10 of `processComments()` resolves addressed review threads via `ResolveReviewThread()` after adding ROCKET reactions.
 
@@ -467,7 +476,7 @@ After the review gate clears (Path 2), if there are unresolved PR review thread 
 | Dispatch | Synchronous in `processItem()` | Async goroutine via `dispatchReviewReinvoke()` |
 | Cycle limits | None | `MaxReviewCycles` (default 5) |
 | Timeout | None | Integrated with `ReviewWaitTimeout` |
-| Thread resolution | No | Yes — resolves review threads after processing |
+| Thread resolution | Yes — `processComments()` merges unresolved `LinkedPRReviewThreadComments` at entry, so a user nudge resolves threads in the same invocation | Yes — resolves review threads after processing |
 | inFlight guard | Uses dispatch loop's `inFlight` check | Has its own `inFlight` check in catch-up loop |
 
 ### 6.4 Decompose Path
@@ -721,7 +730,12 @@ stateDiagram-v2
 stateDiagram-v2
     direction TB
 
-    StageComplete --> CheckReviewGate : Catch-up loop (Path 2)
+    StageComplete --> CheckDependencies : Catch-up loop Phase 1\n(unconditional — all items)
+    CheckDependencies --> Blocked : Has open blockers
+    CheckDependencies --> CheckReviewGate : No blockers
+
+    Blocked --> CheckDependencies : Next poll tick
+
     CheckReviewGate --> WaitingForReviewers : Outstanding reviewers
     CheckReviewGate --> TimedOut : Timeout elapsed
     CheckReviewGate --> GateCleared : All reviewers submitted
@@ -732,7 +746,7 @@ stateDiagram-v2
     note right of PausedForTimeout : fabrik:paused\nfabrik:awaiting-input
 
     GateCleared --> CheckThreads : buildReviewThreadComments()
-    CheckThreads --> Advance : No unresolved threads
+    CheckThreads --> Phase2 : No unresolved threads → Phase 2
     CheckThreads --> CheckInFlight : Unresolved threads exist
 
     CheckInFlight --> SkipReinvoke : Already in-flight
@@ -744,9 +758,13 @@ stateDiagram-v2
     CheckCycleLimit --> DispatchReinvoke : cycleCount < MaxReviewCycles
     DispatchReinvoke --> ProcessComments : Async goroutine
     ProcessComments --> CheckReviewGate : Next poll (if new reviews arrive)
-    ProcessComments --> Advance : Stage complete after addressing feedback
+    ProcessComments --> Phase2 : Stage complete after addressing feedback
 
     SkipReinvoke --> CheckReviewGate : Next poll tick
+
+    Phase2 --> Advance : yolo/cruise/auto_advance gate passes
+    Phase2 --> Idle : Gate not met — no advancement
+    note right of Idle : Item stays in stage:X:complete\nuntil user advances manually\nor adds yolo/cruise label
 ```
 
 ---
@@ -762,10 +780,19 @@ Stage advancement can occur through two code paths:
 | **Review data** | Stale (just ran MarkPRReady) | Fresh (from FetchItemDetails) |
 | **Review gate** | Optimistic: applies `fabrik:awaiting-review`, returns | Real: calls `checkReviewGate()`, evaluates timeout |
 | **Label freshness** | Re-fetched (handles mid-run yolo/cruise) | Already fresh from deep fetch |
-| **Merge at Validate** | `attemptMergeOnValidate()` called directly | `attemptMergeOnValidate()` called from catch-up |
-| **Advancement** | `advanceToNextStage()` if should advance and no gate | `advanceToNextStage()` after gate evaluation |
+| **Merge at Validate** | `attemptMergeOnValidate()` called directly | `attemptMergeOnValidate()` called from catch-up (yolo only) |
+| **Advancement** | `advanceToNextStage()` if should advance and no gate | `advanceToNextStage()` after Phase 2 gate (yolo/cruise/auto_advance) |
 
 **Label re-fetch in Path 1:** At `stages.go:55`, `handleStageComplete()` calls `FetchLabels()` to pick up changes made while the stage was running (e.g., `fabrik:yolo` added mid-run). This ensures the advancement decision uses current label state, not the stale snapshot from dispatch time.
+
+**Path 2 is split into two phases:**
+
+| Phase | Gate | What it does |
+|-------|------|--------------|
+| **Phase 1** | Unconditional (all `stage:<X>:complete` non-paused non-cleanup items) | `checkDependencies()` → `checkReviewGate()` → `buildReviewThreadComments()` / `dispatchReviewReinvoke()` |
+| **Phase 2** | `fabrik:yolo` (cfg or label) OR `fabrik:cruise` label OR stage `auto_advance: true` | `attemptMergeOnValidate()` (yolo only) → `findNewComments()` deferral → `advanceToNextStage()` |
+
+Phase 1 ensures inline PR review thread comments (from Copilot, Gemini, or human reviewers) are addressed on **all** issues, not just yolo/cruise ones. Phase 2 keeps stage advancement gated as before. Items that pass Phase 1 (review reinvoke dispatched) skip Phase 2 on that poll cycle and are re-evaluated on the next poll.
 
 ## Appendix B: Guard Evaluation in `itemMayNeedWork()` (Shallow Pre-Filter)
 
