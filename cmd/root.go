@@ -116,6 +116,13 @@ func Execute() error {
 		return err
 	}
 
+	// Track which flags were explicitly provided on the command line so that env
+	// var fallbacks are only applied when the flag was omitted entirely.  Without
+	// this, an explicit --review-wait-timeout=0 (or --max-review-cycles=0) would
+	// be indistinguishable from "flag not set" and the env var would override it.
+	explicitFlags := make(map[string]bool)
+	flag.CommandLine.Visit(func(f *flag.Flag) { explicitFlags[f.Name] = true })
+
 	if versionFlag {
 		fmt.Println(Version)
 		return nil
@@ -249,7 +256,7 @@ func Execute() error {
 			}
 		}
 	}
-	if cfg.ReviewWaitTimeout == 0 {
+	if !explicitFlags["review-wait-timeout"] {
 		if v := os.Getenv("FABRIK_REVIEW_WAIT_TIMEOUT"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				cfg.ReviewWaitTimeout = n
@@ -258,7 +265,7 @@ func Execute() error {
 			}
 		}
 	}
-	if cfg.MaxReviewCycles == 0 {
+	if !explicitFlags["max-review-cycles"] {
 		if v := os.Getenv("FABRIK_MAX_REVIEW_CYCLES"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				cfg.MaxReviewCycles = n
