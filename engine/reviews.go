@@ -109,18 +109,28 @@ func (e *Engine) removeAwaitingReviewLabel(owner, repo string, item gh.ProjectIt
 
 // buildReviewThreadComments returns the inline per-line comments from
 // unresolved review threads on the linked PR that have not yet been addressed
-// (no 🚀 reaction). These are real GitHub comments with real DatabaseIDs, so
-// the 👀/🚀 reaction-based dedup mechanism works normally and each thread
-// comment only triggers processing once.
+// (no 🚀 reaction and not already present in processedSet). These are real
+// GitHub comments with real DatabaseIDs, so the 👀/🚀 reaction-based dedup
+// mechanism works normally and each thread comment only triggers processing once.
 //
 // The top-level review body (if any) is not included — only thread comments,
 // which are what reviewers use to flag specific code issues. Reviews that
 // submit only a top-level body with no inline comments (e.g., bare APPROVED)
 // have nothing actionable to address.
-func buildReviewThreadComments(item gh.ProjectItem) []gh.Comment {
+//
+// processedSet is checked as defense-in-depth for within-session races: if a
+// comment was processed this session (markCommentsProcessed wrote its key) but
+// the ROCKET reaction hasn't propagated from the API yet, we still skip it.
+func (e *Engine) buildReviewThreadComments(item gh.ProjectItem) []gh.Comment {
+	iKey := issueKey(item, e.defaultRepo())
 	out := make([]gh.Comment, 0, len(item.LinkedPRReviewThreadComments))
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	for _, c := range item.LinkedPRReviewThreadComments {
 		if c.HasReaction("ROCKET") {
+			continue
+		}
+		if _, seen := e.processedSet[iKey+"-comment-"+c.ID]; seen {
 			continue
 		}
 		out = append(out, c)
@@ -157,7 +167,7 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 // invocation runs asynchronously.
 func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
 	iKey := issueKey(item, e.defaultRepo())
-	syntheticComments := buildReviewThreadComments(item)
+	syntheticComments := e.buildReviewThreadComments(item)
 	if len(syntheticComments) == 0 {
 		e.logf(item.Number, "review-reinvoke", "no review bodies to process; skipping re-invocation\n")
 		return

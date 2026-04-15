@@ -533,7 +533,7 @@ func (e *Engine) poll(ctx context.Context) error {
 			// submitted, re-invoke the stage agent to address the feedback before
 			// advancing. Reviews with empty bodies (e.g. APPROVED with no comment)
 			// have nothing to address; fall through to advance as normal.
-			if syntheticComments := buildReviewThreadComments(item); len(syntheticComments) > 0 {
+			if syntheticComments := e.buildReviewThreadComments(item); len(syntheticComments) > 0 {
 				iKey := issueKey(item, e.defaultRepo())
 				e.mu.Lock()
 				cycleCount := e.reviewCycleCount[iKey]
@@ -542,6 +542,14 @@ func (e *Engine) poll(ctx context.Context) error {
 				if cycleCount >= maxCycles {
 					e.pauseForReviewCycleLimit(board, item, stage, cycleCount, maxCycles)
 				} else {
+					// Guard: if a goroutine from a previous poll cycle is still
+					// running dispatchReviewReinvoke for this item, skip dispatch
+					// to avoid concurrent reinvocations. The goroutine clears
+					// inFlight when it exits; the next poll will retry if needed.
+					if _, ok := e.inFlight.Load(iKey); ok {
+						e.logf(item.Number, "review-reinvoke", "skipping dispatch — review reinvoke already in-flight\n")
+						continue
+					}
 					e.mu.Lock()
 					e.reviewCycleCount[iKey]++
 					e.mu.Unlock()
@@ -994,7 +1002,7 @@ func (e *Engine) checkURLRewrite() bool {
 		if len(parts) != 2 {
 			continue
 		}
-		key := strings.ToLower(parts[0])    // url.<base>.insteadof
+		key := strings.ToLower(parts[0])     // url.<base>.insteadof
 		value := strings.TrimSpace(parts[1]) // the insteadOf value (URL prefix to match)
 		if strings.Contains(value, "https://github.com") && strings.Contains(key, "git@github.com") {
 			fmt.Printf("[startup] note: git URL rewriting for github.com is active (HTTPS → SSH); Fabrik's HTTPS clone URLs will be transparently redirected to SSH via your git config.\n")
