@@ -383,10 +383,13 @@ func TestBuildPrompt_BaseBranch(t *testing.T) {
 		t.Errorf("expected explicit base branch statement with 'develop', got prompt:\n%s", prompt)
 	}
 
-	// Empty baseBranch: fallback text should appear instead.
+	// Empty baseBranch: explicit statement is omitted; codebase-changes line uses plain "the default branch".
 	promptEmpty := buildPrompt(stage, issue, nil, "")
+	if strings.Contains(promptEmpty, "default base branch is") {
+		t.Error("prompt should not include explicit base branch statement when baseBranch is empty")
+	}
 	if !strings.Contains(promptEmpty, "the default branch") {
-		t.Errorf("expected 'the default branch' fallback in prompt when baseBranch is empty, got:\n%s", promptEmpty)
+		t.Errorf("expected 'the default branch' in codebase-changes description when baseBranch is empty, got:\n%s", promptEmpty)
 	}
 	if strings.Contains(promptEmpty, "files changed on main") {
 		t.Error("prompt should not hardcode 'main' as the branch name")
