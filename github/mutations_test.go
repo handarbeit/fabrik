@@ -47,6 +47,20 @@ func TestAddComment_Error(t *testing.T) {
 	}
 }
 
+func TestAddComment_MissingID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(201)
+		w.Write([]byte(`{}`)) // valid JSON but no "id" field
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	if _, err := c.AddComment("owner", "repo", 42, "test"); err == nil {
+		t.Fatal("expected error when response omits id")
+	}
+}
+
 func TestAddLabelToIssue_Success(t *testing.T) {
 	callCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
