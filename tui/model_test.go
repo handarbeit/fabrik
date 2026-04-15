@@ -752,3 +752,44 @@ func TestLayoutHeightInvariant_WithHelp(t *testing.T) {
 		})
 	}
 }
+
+// TestUpdate_WKey_SendsOnWakeCh verifies that pressing w sends on wakeCh
+// and sets the status message to "waking up...".
+func TestUpdate_WKey_SendsOnWakeCh(t *testing.T) {
+	wakeCh := make(chan struct{}, 1)
+	m := New(30, ProjectInfo{}, "", wakeCh)
+	m.width = 80
+	m.height = 24
+	m.header.nextPollAt = time.Now().Add(5 * time.Minute)
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("w")})
+	nm := next.(Model)
+
+	if cmd != nil {
+		t.Error("expected nil cmd from w key")
+	}
+	if nm.header.statusMsg != "waking up..." {
+		t.Errorf("statusMsg = %q, want %q", nm.header.statusMsg, "waking up...")
+	}
+	// The wake channel should have received a signal.
+	select {
+	case <-wakeCh:
+		// ok
+	default:
+		t.Error("expected signal on wakeCh after pressing w")
+	}
+}
+
+// TestUpdate_WKey_NilWakeCh_NoOp verifies that pressing w with no wakeCh is a no-op.
+func TestUpdate_WKey_NilWakeCh_NoOp(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil)
+	m.width = 80
+	m.height = 24
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("w")})
+	nm := next.(Model)
+
+	if nm.header.statusMsg != "" {
+		t.Errorf("expected empty statusMsg with nil wakeCh, got %q", nm.header.statusMsg)
+	}
+}
