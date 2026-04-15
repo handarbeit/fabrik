@@ -2,6 +2,8 @@ package engine
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	gh "github.com/verveguy/fabrik/github"
@@ -32,14 +34,64 @@ func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) int {
 		return 0
 	}
 
+	// Build seed body from context files; fall back to minimal body on read errors
+	workDir := wm.WorktreeDir(item.Number)
+	seedBody := e.buildSeedBody(item, workDir)
+
 	head := fmt.Sprintf("fabrik/issue-%d", item.Number)
-	prNum, err := e.client.CreateDraftPR(owner, repo, item.Title, head, baseBranch, fmt.Sprintf("Closes #%d", item.Number), item.Number)
+	prNum, err := e.client.CreateDraftPR(owner, repo, item.Title, head, baseBranch, seedBody, item.Number)
 	if err != nil {
 		e.logf(item.Number, "warn", "could not create draft PR: %v\n", err)
 		return 0
 	}
 	e.logf(item.Number, "pr", "created draft PR #%d\n", prNum)
 	return prNum
+}
+
+// buildSeedBody reads .fabrik-context/issue.md and .fabrik-context/stage-Plan.md from
+// workDir and constructs the structured PR seed body. File read errors are non-fatal:
+// missing files produce empty strings which buildPRSeedBody handles with placeholders.
+func (e *Engine) buildSeedBody(item gh.ProjectItem, workDir string) string {
+	issueContent := readContextFile(workDir, "issue.md")
+	planContent := readContextFile(workDir, "stage-Plan.md")
+	return buildPRSeedBody(issueContent, planContent, item.Number)
+}
+
+// readContextFile reads a file from the .fabrik-context/ directory in workDir.
+// Returns empty string on any error (missing file, permission error, etc.).
+func readContextFile(workDir, filename string) string {
+	data, err := os.ReadFile(filepath.Join(workDir, ".fabrik-context", filename))
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+// updatePRVerification updates the ## Verification section of the PR body with summary.
+// No-op if summary is empty. Warns and skips if the section is not found in the PR body.
+func (e *Engine) updatePRVerification(item gh.ProjectItem, prNumber int, summary string) {
+	if summary == "" {
+		return
+	}
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+
+	currentBody, err := e.client.GetIssueBody(owner, repo, prNumber)
+	if err != nil {
+		e.logf(item.Number, "warn", "could not fetch PR #%d body for Verification update: %v\n", prNumber, err)
+		return
+	}
+
+	updatedBody, found := replaceVerificationSection(currentBody, summary)
+	if !found {
+		e.logf(item.Number, "warn", "PR #%d body has no ## Verification section — skipping update\n", prNumber)
+		return
+	}
+
+	if err := e.client.UpdateIssueBody(owner, repo, prNumber, updatedBody); err != nil {
+		e.logf(item.Number, "warn", "could not update PR #%d Verification section: %v\n", prNumber, err)
+		return
+	}
+	e.logf(item.Number, "pr", "updated PR #%d Verification section\n", prNumber)
 }
 
 // ensurePRLinksIssue checks that a PR body contains "Closes #N" and adds it if missing.
