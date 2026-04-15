@@ -110,7 +110,7 @@ var ErrNotMergeable = errors.New("PR is not mergeable")
 // CreateDraftPR creates a draft pull request for the given issue branch.
 // Returns the PR number. Callers should first call FindPRForIssue to avoid duplicates.
 // The body parameter is the full PR body; callers are responsible for including "Closes #N".
-func (c *Client) CreateDraftPR(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+func (c *Client) CreateDraftPR(owner, repo, title, head, base, body string, _ int) (int, error) {
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls", c.baseURL, owner, repo)
 	reqBody := map[string]interface{}{
 		"title": title,
