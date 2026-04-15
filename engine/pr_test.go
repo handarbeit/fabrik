@@ -434,6 +434,126 @@ func TestEnsureDraftPR_NewPR_MissingContextFiles_UsesPlaceholders(t *testing.T) 
 	}
 }
 
+// ── buildThreadEntries ────────────────────────────────────────────────────────
+
+func TestBuildThreadEntries_DedupsByReviewThreadID(t *testing.T) {
+	comments := []gh.Comment{
+		{ReviewThreadID: "RT_1", Path: "engine/foo.go", Line: 42},
+		{ReviewThreadID: "RT_1", Path: "engine/foo.go", Line: 43}, // duplicate thread
+		{ReviewThreadID: "RT_2", Path: "engine/bar.go", Line: 10},
+	}
+	entries := buildThreadEntries(comments)
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries (deduped), got %d", len(entries))
+	}
+	if entries[0].Path != "engine/foo.go" || entries[0].Line != 42 {
+		t.Errorf("entry[0] = {%q, %d}, want {engine/foo.go, 42}", entries[0].Path, entries[0].Line)
+	}
+	if entries[1].Path != "engine/bar.go" || entries[1].Line != 10 {
+		t.Errorf("entry[1] = {%q, %d}, want {engine/bar.go, 10}", entries[1].Path, entries[1].Line)
+	}
+}
+
+func TestBuildThreadEntries_FallsBackToOriginalLine(t *testing.T) {
+	comments := []gh.Comment{
+		{ReviewThreadID: "RT_1", Path: "engine/foo.go", Line: 0, OriginalLine: 55},
+	}
+	entries := buildThreadEntries(comments)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	if entries[0].Line != 55 {
+		t.Errorf("expected Line=55 (from OriginalLine fallback), got %d", entries[0].Line)
+	}
+}
+
+func TestBuildThreadEntries_ZeroLineWhenBothZero(t *testing.T) {
+	comments := []gh.Comment{
+		{ReviewThreadID: "RT_1", Path: "engine/foo.go", Line: 0, OriginalLine: 0},
+	}
+	entries := buildThreadEntries(comments)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	if entries[0].Line != 0 {
+		t.Errorf("expected Line=0 when both Line and OriginalLine are zero, got %d", entries[0].Line)
+	}
+}
+
+func TestBuildThreadEntries_SkipsNonReviewComments(t *testing.T) {
+	comments := []gh.Comment{
+		{ReviewThreadID: "", Path: "", Line: 0},          // regular issue comment
+		{ReviewThreadID: "RT_1", Path: "x.go", Line: 1}, // review thread comment
+	}
+	entries := buildThreadEntries(comments)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry (skipping non-review comment), got %d", len(entries))
+	}
+}
+
+// ── formatReviewFeedbackComment ───────────────────────────────────────────────
+
+func TestFormatReviewFeedbackComment_HeaderContainsTitle(t *testing.T) {
+	threads := []reviewThreadEntry{{Path: "engine/foo.go", Line: 42}}
+	result := formatReviewFeedbackComment("Review", "Claude output", "branch", "abc123", "main123", "2024-01-01", threads, 3)
+
+	if !strings.Contains(result, "🏭 **Fabrik — stage: Review (review feedback addressed)**") {
+		t.Errorf("header not found in:\n%s", result)
+	}
+}
+
+func TestFormatReviewFeedbackComment_FooterSection(t *testing.T) {
+	threads := []reviewThreadEntry{{Path: "engine/foo.go", Line: 42}}
+	result := formatReviewFeedbackComment("Review", "output", "branch", "c", "m", "ts", threads, 3)
+
+	if !strings.Contains(result, "**Threads addressed:**") {
+		t.Errorf("missing 'Threads addressed:' section in:\n%s", result)
+	}
+}
+
+func TestFormatReviewFeedbackComment_ThreadBulletWithLine(t *testing.T) {
+	threads := []reviewThreadEntry{{Path: "engine/foo.go", Line: 42}}
+	result := formatReviewFeedbackComment("Review", "output", "b", "c", "m", "ts", threads, 1)
+
+	if !strings.Contains(result, "`engine/foo.go:42` — resolved") {
+		t.Errorf("expected path:line bullet, got:\n%s", result)
+	}
+}
+
+func TestFormatReviewFeedbackComment_ThreadBulletWithoutLine(t *testing.T) {
+	threads := []reviewThreadEntry{{Path: "engine/bar.go", Line: 0}}
+	result := formatReviewFeedbackComment("Review", "output", "b", "c", "m", "ts", threads, 1)
+
+	if !strings.Contains(result, "`engine/bar.go` — resolved") {
+		t.Errorf("expected path-only bullet, got:\n%s", result)
+	}
+	if strings.Contains(result, "engine/bar.go:0") {
+		t.Error("zero line number must not appear as :0 in the bullet")
+	}
+}
+
+func TestFormatReviewFeedbackComment_SummaryLine(t *testing.T) {
+	threads := []reviewThreadEntry{
+		{Path: "a.go", Line: 1},
+		{Path: "b.go", Line: 2},
+	}
+	result := formatReviewFeedbackComment("Review", "output", "b", "c", "m", "ts", threads, 5)
+
+	if !strings.Contains(result, "Resolved 2 review thread(s) across 5 comment(s).") {
+		t.Errorf("expected summary line, got:\n%s", result)
+	}
+}
+
+func TestFormatReviewFeedbackComment_TruncatesLongOutput(t *testing.T) {
+	long := strings.Repeat("x", 70000)
+	threads := []reviewThreadEntry{{Path: "a.go", Line: 1}}
+	result := formatReviewFeedbackComment("Review", long, "b", "c", "m", "ts", threads, 1)
+
+	if !strings.Contains(result, "... (truncated)") {
+		t.Error("expected truncation marker for output > 60000 chars")
+	}
+}
+
 // ── processItem Verification update integration test ─────────────────────────
 
 func TestProcessItem_ImplementStage_UpdatesVerificationOnComplete(t *testing.T) {
