@@ -731,7 +731,7 @@ The gate uses a three-phase design:
 
 1. **Phase 1 (always-gate):** On stage completion, Fabrik immediately adds `fabrik:awaiting-review` and skips auto-advance. This fires even before reviewer assignments propagate.
 2. **Phase 2 (gate evaluation):** On subsequent poll cycles, Fabrik re-fetches the PR with fresh GraphQL data and evaluates whether all requested reviewers have submitted. If still pending → wait. If timed out → pause with `fabrik:awaiting-input`.
-3. **Phase 3 (re-invocation):** When the gate clears with submitted reviews present, Fabrik re-invokes the stage agent via the comment-processing skill (`comment_skill`) with the unresolved inline review thread comments as input. Top-level PR review bodies are not included, so a review that only contains general feedback without inline thread comments does not provide re-invocation input. The agent addresses the feedback, commits, and signals `FABRIK_STAGE_COMPLETE`. This re-applies `fabrik:awaiting-review` and the cycle repeats from Phase 2 until no reviewers are pending.
+3. **Phase 3 (re-invocation):** When the gate clears with submitted reviews present, Fabrik re-invokes the stage agent via the comment-processing skill (`comment_skill`) with the unresolved inline review thread comments as input. Top-level PR review bodies are not included, so a review that only contains general feedback without inline thread comments does not provide re-invocation input. Each inline thread comment is enriched with its **file path**, **line number**, and **raw diff-hunk context** so the agent understands exactly where in the code the reviewer's feedback applies. The agent addresses the feedback, commits, and signals `FABRIK_STAGE_COMPLETE`. This re-applies `fabrik:awaiting-review` and the cycle repeats from Phase 2 until no reviewers are pending.
 
 This means there is always at least one extra poll cycle delay after stage completion — typically 30 seconds.
 
@@ -791,6 +791,8 @@ When an issue reaches Done, Fabrik:
 2. **Adds `stage:Done:complete`** — marks cleanup as finished
 
 **Note:** Auto-archive is currently disabled. It was removing items from the board before users could see them, and is being reworked to track actual Done stage completion time. Items will remain in the Done column until auto-archive is re-enabled in a future release. When re-enabled, archived items will not be deleted — they will remain accessible via the project board's "Archive" view in GitHub.
+
+**Closed-issue auto-advance:** If an issue is closed externally (for example, a PR merge closes it) while it is still in an intermediate stage column with a `stage:<name>:complete` label already applied, Fabrik automatically advances it to Done on the next poll. No manual board move is required — Fabrik detects the closed state and completes the normal auto-advance path. This typically happens when a PR merge closes an issue that is sitting in the Validate column waiting for the Done stage to run.
 
 ### Customizing Stages
 
@@ -1309,9 +1311,10 @@ label to resume.
 ### Stale Worktrees
 
 Worktrees are at `.fabrik/worktrees/<owner>-<repo>/issue-N/` on branch `fabrik/issue-N`. On each stage
-invocation, Fabrik rebases onto latest main (unless it's a retry, which preserves the
-worktree as-is to maintain Claude's context). If the rebase conflicts, it's silently
-aborted and Claude works from the current base.
+invocation, Fabrik rebases onto the latest base branch (or the branch specified by a
+`base:<branch>` label — unless it's a retry, which preserves the worktree as-is to
+maintain Claude's context). If the rebase conflicts, it's silently aborted and Claude
+works from the current base.
 
 To manually clean up:
 ```bash
