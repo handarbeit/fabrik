@@ -1004,7 +1004,7 @@ func (e *Engine) baseBranchForItem(item gh.ProjectItem, wm *WorktreeManager) (st
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	warnKey := fmt.Sprintf("%s/%s#%d:%s", owner, repo, item.Number, candidate)
 	if _, alreadyWarned := e.baseBranchWarnedSet.LoadOrStore(warnKey, true); !alreadyWarned {
-		body := fmt.Sprintf("⚠️ Fabrik could not find branch `%s` on the remote (from `base:%s` label). Falling back to the repository default branch.", candidate, candidate)
+		body := fmt.Sprintf("🏭 **Fabrik — base branch not found**\n\nFabrik could not find branch `%s` on the remote (from `base:%s` label). Falling back to the repository default branch.", candidate, candidate)
 		if err := e.client.AddComment(owner, repo, item.Number, body); err != nil {
 			e.logf(item.Number, "warn", "could not post base branch fallback comment: %v\n", err)
 		}
