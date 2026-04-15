@@ -12,11 +12,11 @@ import (
 )
 
 // checkReviewGate inspects item.LinkedPRReviewRequests and determines whether
-// auto-advance is gated by outstanding PR reviewer requests.
+// the review gate is blocking review reinvoke or stage advancement.
 //
-// This function is only called from the catch-up path (Path 2) in poll.go,
+// This function is only called from the catch-up loop (Phase 1) in poll.go,
 // where item.LinkedPRReviewRequests contains fresh data from FetchItemDetails.
-// Path 1 (handleStageComplete) always applies fabrik:awaiting-review directly
+// handleStageComplete (Path 1) always applies fabrik:awaiting-review directly
 // because reviewer assignment happens after MarkPRReady, so data would be stale.
 //
 // Returns (blocked, timedOut):
