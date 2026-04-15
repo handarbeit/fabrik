@@ -544,6 +544,15 @@ func TestFormatReviewFeedbackComment_SummaryLine(t *testing.T) {
 	}
 }
 
+func TestFormatReviewFeedbackComment_EmptyPathFallback(t *testing.T) {
+	threads := []reviewThreadEntry{{Path: "", Line: 0}}
+	result := formatReviewFeedbackComment("Review", "output", "b", "c", "m", "ts", threads, 1)
+
+	if !strings.Contains(result, "`(unknown path)` — resolved") {
+		t.Errorf("expected (unknown path) fallback bullet, got:\n%s", result)
+	}
+}
+
 func TestFormatReviewFeedbackComment_TruncatesLongOutput(t *testing.T) {
 	long := strings.Repeat("x", 70000)
 	threads := []reviewThreadEntry{{Path: "a.go", Line: 1}}
