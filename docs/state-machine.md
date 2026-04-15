@@ -33,7 +33,7 @@ Specify → Research → Plan → Implement → Review → Validate → Done
 | Validate | 5 | No | No | Yes | No | No | Yes* | No |
 | Done | 99 | N/A | N/A | No | No | No | No | Yes |
 
-\* `wait_for_reviews` is opt-in per stage YAML; Review is the typical user of this flag.
+\* `wait_for_reviews` is opt-in per stage YAML; both Review and Validate use this flag in the default configuration.
 
 ---
 
