@@ -52,7 +52,7 @@ Tasks should be:
 
 Include testing tasks alongside the code they test, not as a separate phase at the end.
 
-If the feature is user-facing, identify which docs need updating — check the Research findings for a "Documentation Impact" section if present; if absent, scan the repo for user-facing docs (e.g., `docs/USER_GUIDE.md`, `README.md`, `docs/index.md`). Include doc update tasks alongside the implementation tasks they document, not as a separate phase at the end; reference the spec's Problem/Summary and requirements as source material so Implement has concrete content guidance. If the feature has no user-facing impact (no new commands, flags, workflows, config options, or output behaviors visible to users), state that explicitly in the plan so the Implement agent doesn't wonder whether documentation updates were overlooked.
+Identify which docs need updating — check the Research findings for a "Documentation Impact" section if present; if absent, scan the repo for both user-facing docs (e.g., `README.md`, user guides, config references) and as-built engineering docs (e.g., architecture specs, state machines, protocol docs, internal API references). Include doc update tasks alongside the implementation tasks they document, not as a separate phase at the end; reference the spec's Problem/Summary and requirements as source material so Implement has concrete content guidance. If neither user-facing nor engineering docs require updating, state that explicitly in the plan so the Implement agent doesn't wonder whether documentation updates were overlooked.
 
 ### Document key decisions
 
@@ -203,3 +203,4 @@ Before signaling completion, verify:
 - [ ] The plan is grounded in the research findings
 - [ ] An implementer could follow this plan without making design decisions
 - [ ] Testing is integrated into the task list, not deferred
+- [ ] Documentation impact is reflected in the plan, covering both user-facing and engineering/as-built docs as applicable
