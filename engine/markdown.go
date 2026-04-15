@@ -15,12 +15,12 @@ func extractMarkdownSection(content, heading string) string {
 	var collected []string
 	for _, line := range lines {
 		if inSection {
-			// Stop at any other ## heading or the --- divider
-			if strings.HasPrefix(line, "## ") || line == "---" {
+			// Stop at any other ## heading (--- horizontal rules can appear inside sections)
+			if strings.HasPrefix(strings.TrimSpace(line), "## ") {
 				break
 			}
 			collected = append(collected, line)
-		} else if strings.ToLower(line) == target {
+		} else if strings.EqualFold(strings.TrimSpace(line), target) {
 			inSection = true
 		}
 	}
@@ -114,7 +114,7 @@ func replaceVerificationSection(prBody, summary string) (string, bool) {
 	lines := strings.Split(prBody, "\n")
 	verificationIdx := -1
 	for i, line := range lines {
-		if strings.ToLower(line) == "## verification" {
+		if strings.EqualFold(strings.TrimSpace(line), "## verification") {
 			verificationIdx = i
 			break
 		}
@@ -123,10 +123,13 @@ func replaceVerificationSection(prBody, summary string) (string, bool) {
 		return prBody, false
 	}
 
-	// Find the end of the Verification section: next ## heading or --- divider
+	// Find the end of the Verification section: next ## heading, --- divider, or Closes # footer.
+	// Stopping at "Closes #" ensures the issue link is preserved even when the --- divider
+	// is absent (e.g., manually edited PR body).
 	endIdx := len(lines)
 	for i := verificationIdx + 1; i < len(lines); i++ {
-		if strings.HasPrefix(lines[i], "## ") || lines[i] == "---" {
+		trimmed := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(trimmed, "## ") || trimmed == "---" || strings.HasPrefix(trimmed, "Closes #") {
 			endIdx = i
 			break
 		}
