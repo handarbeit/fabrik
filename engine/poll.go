@@ -535,6 +535,16 @@ func (e *Engine) poll(ctx context.Context) error {
 			// have nothing to address; fall through to advance as normal.
 			if syntheticComments := e.buildReviewThreadComments(item); len(syntheticComments) > 0 {
 				iKey := issueKey(item, e.defaultRepo())
+				// Guard: if a goroutine from a previous poll cycle is still
+				// running dispatchReviewReinvoke for this item, skip the entire
+				// reinvoke path — including cycle-limit checks — to avoid
+				// pausing an item while valid work is still in progress. The
+				// goroutine clears inFlight when it exits; the next poll will
+				// re-evaluate.
+				if _, ok := e.inFlight.Load(iKey); ok {
+					e.logf(item.Number, "review-reinvoke", "skipping dispatch — review reinvoke already in-flight\n")
+					continue
+				}
 				e.mu.Lock()
 				cycleCount := e.reviewCycleCount[iKey]
 				maxCycles := e.cfg.MaxReviewCycles
@@ -542,14 +552,6 @@ func (e *Engine) poll(ctx context.Context) error {
 				if cycleCount >= maxCycles {
 					e.pauseForReviewCycleLimit(board, item, stage, cycleCount, maxCycles)
 				} else {
-					// Guard: if a goroutine from a previous poll cycle is still
-					// running dispatchReviewReinvoke for this item, skip dispatch
-					// to avoid concurrent reinvocations. The goroutine clears
-					// inFlight when it exits; the next poll will retry if needed.
-					if _, ok := e.inFlight.Load(iKey); ok {
-						e.logf(item.Number, "review-reinvoke", "skipping dispatch — review reinvoke already in-flight\n")
-						continue
-					}
 					e.mu.Lock()
 					e.reviewCycleCount[iKey]++
 					e.mu.Unlock()
