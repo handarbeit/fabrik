@@ -11,12 +11,13 @@ import (
 
 // HeaderComponent renders the top status bar: title, status line, and poll timer.
 type HeaderComponent struct {
-	pollInterval  time.Duration
-	nextPollAt    time.Time
-	now           time.Time
-	fabrikVersion string
-	statusLine    string
-	statusMsg     string
+	pollInterval      time.Duration
+	effectiveInterval time.Duration // last computed effective interval (includes idle/rate-limit backoff)
+	nextPollAt        time.Time
+	now               time.Time
+	fabrikVersion     string
+	statusLine        string
+	statusMsg         string
 }
 
 func (h HeaderComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
@@ -25,9 +26,18 @@ func (h HeaderComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 		h.now = ev.At
 		h.statusMsg = ""
 	case PollStartedEvent:
-		h.nextPollAt = time.Now().Add(h.pollInterval)
+		interval := h.effectiveInterval
+		if interval == 0 {
+			interval = h.pollInterval
+		}
+		h.nextPollAt = time.Now().Add(interval)
 	case PollCompletedEvent:
-		h.nextPollAt = time.Now().Add(h.pollInterval)
+		if ev.EffectiveInterval > 0 {
+			h.effectiveInterval = ev.EffectiveInterval
+			h.nextPollAt = time.Now().Add(ev.EffectiveInterval)
+		} else {
+			h.nextPollAt = time.Now().Add(h.pollInterval)
+		}
 	case LogEvent:
 		if ev.IssueNumber == 0 {
 			h.statusLine = fmt.Sprintf("[%s] %s", ev.Tag, strings.TrimRight(ev.Message, "\n"))

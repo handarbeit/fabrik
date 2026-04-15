@@ -404,7 +404,9 @@ func Execute() error {
 	// When TUI is enabled (and we have a real terminal), run the bubbletea
 	// TUI. Otherwise fall through to plain-text mode.
 	if useTUI {
-		return runTUI(eng, cfg.PollSeconds, buildProjectInfo(cfg, pc), cfg.PluginDir)
+		wakeCh := make(chan struct{}, 1)
+		eng.SetWakeCh(wakeCh)
+		return runTUI(eng, cfg.PollSeconds, buildProjectInfo(cfg, pc), cfg.PluginDir, wakeCh)
 	}
 	return eng.Run()
 }
@@ -460,11 +462,11 @@ func buildProjectInfo(cfg *Config, pc config.ProjectConfig) tui.ProjectInfo {
 // runTUI wires the event channel, starts the bubbletea program, and runs the
 // engine. The engine handles SIGINT itself; bubbletea uses WithoutSignalHandler
 // so it doesn't interfere. When the engine exits, the TUI is quit.
-func runTUI(eng *engine.Engine, pollSeconds int, info tui.ProjectInfo, pluginDir string) error {
+func runTUI(eng *engine.Engine, pollSeconds int, info tui.ProjectInfo, pluginDir string, wakeCh chan struct{}) error {
 	events := make(chan tui.Event, 256)
 	eng.SetEvents(events)
 
-	tuiModel := tui.New(pollSeconds, info, pluginDir)
+	tuiModel := tui.New(pollSeconds, info, pluginDir, wakeCh)
 	p := tea.NewProgram(tuiModel, tea.WithAltScreen(), tea.WithoutSignalHandler())
 
 	// Forward events from the engine's channel into bubbletea.
