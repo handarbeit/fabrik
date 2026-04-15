@@ -8,6 +8,7 @@ import (
 
 	gh "github.com/verveguy/fabrik/github"
 	"github.com/verveguy/fabrik/stages"
+	"github.com/verveguy/fabrik/tui"
 )
 
 // checkReviewGate inspects item.LinkedPRReviewRequests and determines whether
@@ -178,6 +179,8 @@ func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBo
 	e.inFlight.Store(iKey, item.IsPR)
 	e.wg.Add(1)
 
+	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
+
 	go func() {
 		defer e.wg.Done()
 		defer e.inFlight.Delete(iKey)
@@ -191,9 +194,46 @@ func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBo
 		}
 		defer func() { <-e.sem }()
 
+		startTime := time.Now()
+		e.emitStructural(tui.JobStartedEvent{
+			IssueNumber: item.Number,
+			Repo:        itemRepo,
+			Title:       item.Title,
+			StageName:   stage.Name,
+			IsComment:   true,
+			StartedAt:   startTime,
+		})
+
 		e.logf(item.Number, "review-reinvoke", "re-invoking stage %q via comment processing with %d synthetic review comment(s)\n",
 			stage.Name, len(syntheticComments))
-		if err := e.processComments(ctx, board, item, stage, syntheticComments); err != nil {
+		err := e.processComments(ctx, board, item, stage, syntheticComments)
+
+		e.mu.Lock()
+		usage := e.lastUsage[iKey]
+		completed := e.lastCompleted[iKey]
+		blocked := e.lastBlocked[iKey]
+		delete(e.lastUsage, iKey)
+		delete(e.lastCompleted, iKey)
+		delete(e.lastBlocked, iKey)
+		e.mu.Unlock()
+		e.emitStructural(tui.JobCompletedEvent{
+			IssueNumber:    item.Number,
+			Repo:           itemRepo,
+			Title:          item.Title,
+			StageName:      stage.Name,
+			StageModel:     stage.Model,
+			IsComment:      true,
+			Success:        err == nil,
+			Completed:      completed,
+			BlockedOnInput: blocked,
+			Duration:       time.Since(startTime),
+			CompletedAt:    time.Now(),
+			TurnsUsed:      usage.TurnsUsed,
+			MaxTurns:       usage.MaxTurns,
+			CostUSD:        usage.CostUSD,
+		})
+
+		if err != nil {
 			if ctx.Err() != nil {
 				return // context cancelled; normal shutdown
 			}
