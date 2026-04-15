@@ -295,3 +295,44 @@ func TestAddComment_ReactsWithRocket(t *testing.T) {
 			postedCommentID, "rocket", client.addCommentReactionCalls)
 	}
 }
+
+// ── isReviewReinvoke ──────────────────────────────────────────────────────────
+
+func TestIsReviewReinvoke_AllReviewThreadIDs_ReturnsTrue(t *testing.T) {
+	comments := []gh.Comment{
+		{ID: "C_1", ReviewThreadID: "RT_abc"},
+		{ID: "C_2", ReviewThreadID: "RT_def"},
+	}
+	if !isReviewReinvoke(comments) {
+		t.Error("expected true when all comments have ReviewThreadID")
+	}
+}
+
+func TestIsReviewReinvoke_MixedComments_ReturnsFalse(t *testing.T) {
+	comments := []gh.Comment{
+		{ID: "C_1", ReviewThreadID: "RT_abc"},
+		{ID: "C_2", ReviewThreadID: ""},
+	}
+	if isReviewReinvoke(comments) {
+		t.Error("expected false for mixed batch (some without ReviewThreadID)")
+	}
+}
+
+func TestIsReviewReinvoke_NoReviewThreadIDs_ReturnsFalse(t *testing.T) {
+	comments := []gh.Comment{
+		{ID: "C_1", ReviewThreadID: ""},
+		{ID: "C_2", ReviewThreadID: ""},
+	}
+	if isReviewReinvoke(comments) {
+		t.Error("expected false when no comments have ReviewThreadID")
+	}
+}
+
+func TestIsReviewReinvoke_EmptySlice_ReturnsFalse(t *testing.T) {
+	if isReviewReinvoke(nil) {
+		t.Error("expected false for nil slice")
+	}
+	if isReviewReinvoke([]gh.Comment{}) {
+		t.Error("expected false for empty slice")
+	}
+}
