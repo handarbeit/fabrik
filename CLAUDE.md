@@ -132,6 +132,17 @@ effort_level: max               # Claude Code thinking effort: low, medium, high
   - `fabrik:unrestricted` — passes `--dangerously-skip-permissions` instead of `--permission-mode dontAsk`; bypasses the default tool allowlist entirely. Use only when a stage needs tools outside the default set (e.g. non-standard toolchains). **Caution:** removes all tool restrictions.
   - `base:<branch>` — set by user to override the worktree base branch for this issue; Fabrik will fork from, rebase onto, and target PRs at `<branch>` instead of the repository default; must be set before Research; multiple `base:` labels use the first and logs a warning; if the branch does not exist on the remote, Fabrik falls back to the default and posts a comment
 
+## Canonical Documentation
+
+These files are the authoritative as-built specifications for Fabrik's engine behavior. They must be kept in sync with the code — any PR that changes behavior in the areas they cover must update the corresponding doc in the same change set.
+
+- **`docs/state-machine.md`** — As-built specification for: engine state transitions, label semantics, `FABRIK_*` marker handling, comment processing lifecycle, review gate and review reinvoke, PR lifecycle coupling, and guard/filter behavior in `itemMayNeedWork` / `itemNeedsWork`.
+- **`docs/stage-lifecycle.md`** — As-built specification for the per-invocation lifecycle: what happens before, during, and after a single Claude invocation (context files, worktree setup, Claude invocation, output handling).
+
+These are **as-built docs** — they describe what the engine currently does. They are distinct from `adrs/*.md`, which record architectural decisions and design rationale, not current state. Do not put state-machine content into ADRs or vice versa.
+
+PRs introducing new as-built behavioral docs should also add an entry here.
+
 ## Startup Board Validation
 
 On every startup, Fabrik fetches the project board and compares stage names to board columns. If any non-cleanup stage is missing from the board, Fabrik exits with a detailed error message listing the mismatched names. Extra board columns (without a matching stage) produce a warning but don't block startup. This catches mismatches between stage YAML config and the GitHub Project board configuration early.
