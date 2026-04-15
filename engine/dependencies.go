@@ -78,8 +78,10 @@ func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, 
 	}
 	if !alreadyBlocked {
 		comment := fmt.Sprintf("🏭 **Fabrik — blocked on dependencies**\n\nWaiting for the following issues to close: %s", strings.Join(waitingFor, ", "))
-		if err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
+		if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
 			e.logf(item.Number, "warn", "could not post blocked comment: %v\n", err)
+		} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
 		}
 		if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:blocked"); err != nil {
 			e.logf(item.Number, "warn", "could not add fabrik:blocked label: %v\n", err)

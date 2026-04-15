@@ -48,8 +48,8 @@ func (m *testGitHubUpgradeClient) AddLabelToIssue(owner, repo string, issueNumbe
 func (m *testGitHubUpgradeClient) RemoveLabelFromIssue(owner, repo string, issueNumber int, labelName string) error {
 	return nil
 }
-func (m *testGitHubUpgradeClient) AddComment(owner, repo string, issueNumber int, body string) error {
-	return nil
+func (m *testGitHubUpgradeClient) AddComment(owner, repo string, issueNumber int, body string) (int, error) {
+	return 0, nil
 }
 func (m *testGitHubUpgradeClient) AddCommentReaction(owner, repo string, commentDatabaseID int, content string) error {
 	return nil

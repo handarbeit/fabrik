@@ -21,7 +21,8 @@ type mockGitHubClient struct {
 	fetchStatusFieldFn        func(projectID string) (*gh.StatusField, error)
 	addLabelToIssueFn         func(owner, repo string, issueNumber int, labelName string) error
 	removeLabelFromIssueFn    func(owner, repo string, issueNumber int, labelName string) error
-	addCommentFn              func(owner, repo string, issueNumber int, body string) error
+	addCommentFn              func(owner, repo string, issueNumber int, body string) (int, error)
+	addCommentReactionFn      func(owner, repo string, commentDatabaseID int, content string) error
 	updateCommentFn           func(owner, repo string, commentDatabaseID int, body string) error
 	updateIssueBodyFn         func(owner, repo string, issueNumber int, body string) error
 	updateProjectItemStatusFn func(projectID, itemID, statusFieldID, statusOptionID string) error
@@ -42,16 +43,17 @@ type mockGitHubClient struct {
 	archiveProjectItemCalls []archiveProjectItemCall
 
 	// Track calls — access under mu when accessed from concurrent goroutines.
-	addLabelCalls                    []addLabelCall
-	removeLabelCalls                 []removeLabelCall
-	addCommentCalls                  []addCommentCall
-	updateCommentCalls               []updateCommentCall
-	updateStatusCalls                []updateStatusCall
-	mergePRCalls                     []mergePRCall
-	markPRReadyCalls                 []markPRReadyCall
-	createDraftPRCalls               []createDraftPRCall
-	resolveReviewThreadCalls         []string
-	addPRReviewCommentReactionCalls  []prReviewCommentReactionCall
+	addLabelCalls                   []addLabelCall
+	removeLabelCalls                []removeLabelCall
+	addCommentCalls                 []addCommentCall
+	addCommentReactionCalls         []addCommentReactionCall
+	updateCommentCalls              []updateCommentCall
+	updateStatusCalls               []updateStatusCall
+	mergePRCalls                    []mergePRCall
+	markPRReadyCalls                []markPRReadyCall
+	createDraftPRCalls              []createDraftPRCall
+	resolveReviewThreadCalls        []string
+	addPRReviewCommentReactionCalls []prReviewCommentReactionCall
 }
 
 type prReviewCommentReactionCall struct {
@@ -110,6 +112,12 @@ type updateCommentCall struct {
 	body        string
 }
 
+type addCommentReactionCall struct {
+	owner, repo       string
+	commentDatabaseID int
+	content           string
+}
+
 type updateStatusCall struct {
 	projectID, itemID, fieldID, optionID string
 }
@@ -164,7 +172,7 @@ func (m *mockGitHubClient) RemoveLabelFromIssue(owner, repo string, issueNumber 
 	return nil
 }
 
-func (m *mockGitHubClient) AddComment(owner, repo string, issueNumber int, body string) error {
+func (m *mockGitHubClient) AddComment(owner, repo string, issueNumber int, body string) (int, error) {
 	m.mu.Lock()
 	m.addCommentCalls = append(m.addCommentCalls, addCommentCall{owner, repo, issueNumber, body})
 	fn := m.addCommentFn
@@ -172,10 +180,17 @@ func (m *mockGitHubClient) AddComment(owner, repo string, issueNumber int, body 
 	if fn != nil {
 		return fn(owner, repo, issueNumber, body)
 	}
-	return nil
+	return 0, nil
 }
 
 func (m *mockGitHubClient) AddCommentReaction(owner, repo string, commentDatabaseID int, content string) error {
+	m.mu.Lock()
+	m.addCommentReactionCalls = append(m.addCommentReactionCalls, addCommentReactionCall{owner, repo, commentDatabaseID, content})
+	fn := m.addCommentReactionFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, commentDatabaseID, content)
+	}
 	return nil
 }
 
