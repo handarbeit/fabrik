@@ -38,7 +38,7 @@ func TestActiveHeight(t *testing.T) {
 
 func TestUpdate_JobStartedAndCompleted(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	start := time.Now()
 
 	// JobStartedEvent adds to active
@@ -79,7 +79,7 @@ func TestUpdate_JobStartedAndCompleted(t *testing.T) {
 }
 
 func TestUpdate_LogEvent_UpdatesActiveJob(t *testing.T) {
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	key7 := activeJobKey("", 7)
 	m.active.active[key7] = &activeJob{IssueNumber: 7, StageName: "Research", StartedAt: time.Now()}
 	m.active.activeNumToKey[7] = key7
@@ -101,7 +101,7 @@ func TestUpdate_LogEvent_UpdatesActiveJob(t *testing.T) {
 
 func TestUpdate_LogEvent_UnknownIssue(t *testing.T) {
 	// LogEvent for an issue not in active map should not panic
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	next, _ := m.Update(LogEvent{IssueNumber: 999, Tag: "warn", Message: "something\n"})
 	nm := next.(Model)
 	if _, ok := nm.active.active[activeJobKey("", 999)]; ok {
@@ -111,7 +111,7 @@ func TestUpdate_LogEvent_UnknownIssue(t *testing.T) {
 
 // TestUpdate_JK_ActivePane verifies j/k navigation in the active pane.
 func TestUpdate_JK_ActivePane(t *testing.T) {
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.active.active[activeJobKey("", 1)] = &activeJob{StageName: "Research", StartedAt: time.Now()}
 	m.active.active[activeJobKey("", 2)] = &activeJob{StageName: "Plan", StartedAt: time.Now()}
 
@@ -129,7 +129,7 @@ func TestUpdate_JK_ActivePane(t *testing.T) {
 
 // TestUpdate_RKey_ActivePane_SetsStatusMsg verifies r on an active pane item sets statusMsg.
 func TestUpdate_RKey_ActivePane_SetsStatusMsg(t *testing.T) {
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.focusPane = paneActive
 	key7 := activeJobKey("", 7)
 	m.active.active[key7] = &activeJob{IssueNumber: 7, StageName: "Research", StartedAt: time.Now()}
@@ -147,7 +147,7 @@ func TestUpdate_RKey_ActivePane_SetsStatusMsg(t *testing.T) {
 }
 
 func TestUpdate_RKey_ActivePane_NoJobs_NoOp(t *testing.T) {
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.focusPane = paneActive
 	// No active jobs: r is a no-op
 
@@ -159,7 +159,7 @@ func TestUpdate_RKey_ActivePane_NoJobs_NoOp(t *testing.T) {
 
 // TestViewActive_IsComment verifies the 💬 emoji appears for comment jobs.
 func TestViewActive_IsComment(t *testing.T) {
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.width = 80
 	m.height = 24
 	m.active.active[activeJobKey("", 5)] = &activeJob{StageName: "Implement", IsComment: true, StartedAt: time.Now()}
@@ -171,7 +171,7 @@ func TestViewActive_IsComment(t *testing.T) {
 
 func TestUpdate_IssueBlockedEvent(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 
 	// IssueBlockedEvent adds to blocked map
 	next, _ := m.Update(IssueBlockedEvent{
@@ -207,7 +207,7 @@ func TestUpdate_IssueBlockedEvent(t *testing.T) {
 
 func TestViewActive_BlockedIssue(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.width = 120
 	m.active.now = time.Now()
 
@@ -237,7 +237,7 @@ func TestViewActive_BlockedIssue(t *testing.T) {
 
 func TestViewActive_BlockedCountIncludedInHeader(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.width = 120
 	m.active.now = time.Now()
 

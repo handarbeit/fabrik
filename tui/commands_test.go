@@ -65,7 +65,7 @@ func TestTuiReadSessionID_NotFound(t *testing.T) {
 
 // TestUpdate_LKey_Returns_WatchCmd verifies the l key returns a non-nil tea.ExecProcess cmd.
 func TestUpdate_LKey_Returns_WatchCmd(t *testing.T) {
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.focusPane = paneActive
 	m.active.active[activeJobKey("", 7)] = &activeJob{IssueNumber: 7, StageName: "Research", StartedAt: time.Now()}
 	m.active.activeNumToKey[7] = activeJobKey("", 7)

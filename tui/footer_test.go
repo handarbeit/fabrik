@@ -18,7 +18,7 @@ func TestFooterHeight(t *testing.T) {
 }
 
 func TestViewFooter_Content(t *testing.T) {
-	m := New(30, ProjectInfo{CWD: "~/projects/myapp", BoardTitle: "My Board", Version: "2.0.0"}, "")
+	m := New(30, ProjectInfo{CWD: "~/projects/myapp", BoardTitle: "My Board", Version: "2.0.0"}, "", nil)
 	m.width = 120
 	footer := m.footer.View(m.width)
 
@@ -34,7 +34,7 @@ func TestViewFooter_Content(t *testing.T) {
 }
 
 func TestViewFooter_NoVersion(t *testing.T) {
-	m := New(30, ProjectInfo{CWD: "~/projects/myapp", BoardTitle: "My Board"}, "")
+	m := New(30, ProjectInfo{CWD: "~/projects/myapp", BoardTitle: "My Board"}, "", nil)
 	m.width = 120
 	footer := m.footer.View(m.width)
 
@@ -52,7 +52,7 @@ func TestViewFooter_Truncation(t *testing.T) {
 		CWD:        "~/very/long/path/to/a/deeply/nested/project/directory",
 		BoardTitle: "Some Long Board Name For Truncation Test",
 		Version:    "99.99.99",
-	}, "")
+	}, "", nil)
 	m.width = 30
 	footer := m.footer.View(m.width)
 
@@ -70,7 +70,7 @@ func TestViewFooter_Truncation(t *testing.T) {
 // TestViewFooter_RateLimitHidden verifies that the rate limit section is omitted
 // when no stats have been received (Limit==0).
 func TestViewFooter_RateLimitHidden(t *testing.T) {
-	m := New(30, ProjectInfo{CWD: "~/projects/myapp", BoardTitle: "My Board"}, "")
+	m := New(30, ProjectInfo{CWD: "~/projects/myapp", BoardTitle: "My Board"}, "", nil)
 	m.width = 120
 	// graphqlStats is zero-value (Limit==0) by default.
 	footer := m.footer.View(m.width)
@@ -89,7 +89,7 @@ func TestViewFooter_RateLimitHidden(t *testing.T) {
 // TestViewFooter_RateLimitShown verifies the rate limit section appears once
 // graphqlStats is populated, and contains the fraction and countdown.
 func TestViewFooter_RateLimitShown(t *testing.T) {
-	m := New(30, ProjectInfo{CWD: "~/projects/myapp", BoardTitle: "My Board"}, "")
+	m := New(30, ProjectInfo{CWD: "~/projects/myapp", BoardTitle: "My Board"}, "", nil)
 	m.width = 120
 	m.footer.now = time.Now()
 	m.footer.graphqlStats = RateLimitStats{
@@ -129,7 +129,7 @@ func TestViewFooter_RateLimitColors(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m := New(30, ProjectInfo{CWD: "~", BoardTitle: "My Board"}, "")
+			m := New(30, ProjectInfo{CWD: "~", BoardTitle: "My Board"}, "", nil)
 			m.width = 120
 			m.footer.now = now
 			m.footer.graphqlStats = RateLimitStats{
@@ -154,7 +154,7 @@ func TestViewFooter_TruncationWithRateLimit(t *testing.T) {
 		CWD:        "~/very/long/path/to/a/deeply/nested/project/directory",
 		BoardTitle: "Some Long Board Name For Truncation Test",
 		Version:    "99.99.99",
-	}, "")
+	}, "", nil)
 	m.width = 40
 	m.footer.now = now
 	m.footer.graphqlStats = RateLimitStats{
@@ -188,7 +188,7 @@ func TestViewFooter_OSC8Hyperlink(t *testing.T) {
 		CWD:        "~",
 		BoardTitle: "My Board",
 		BoardURL:   "https://github.com/orgs/acme/projects/1",
-	}, "")
+	}, "", nil)
 	m.width = 120
 	footer := m.footer.View(m.width)
 
@@ -209,7 +209,7 @@ func TestViewFooter_PlainTextNoOSC8(t *testing.T) {
 		CWD:        "~",
 		BoardTitle: "My Board",
 		BoardURL:   "https://github.com/orgs/acme/projects/1",
-	}, "")
+	}, "", nil)
 	m.width = 120
 	footer := m.footer.View(m.width)
 
@@ -224,7 +224,7 @@ func TestViewFooter_PlainTextNoOSC8(t *testing.T) {
 // TestViewFooter_NoTitleSlot verifies that no separator dot is shown when
 // BoardTitle is empty (footer is just CWD with no board title slot).
 func TestViewFooter_NoTitleSlot(t *testing.T) {
-	m := New(30, ProjectInfo{CWD: "~/project"}, "")
+	m := New(30, ProjectInfo{CWD: "~/project"}, "", nil)
 	m.width = 120
 	footer := m.footer.View(m.width)
 	plain := ansi.Strip(footer)

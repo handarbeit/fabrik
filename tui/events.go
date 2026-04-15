@@ -34,9 +34,10 @@ func (PollStartedEvent) tuiEvent() {}
 
 // PollCompletedEvent is emitted when a poll cycle finishes dispatching.
 type PollCompletedEvent struct {
-	ItemCount    int
-	Dispatched   int
-	GraphQLStats RateLimitStats
+	ItemCount         int
+	Dispatched        int
+	GraphQLStats      RateLimitStats
+	EffectiveInterval time.Duration
 }
 
 func (PollCompletedEvent) tuiEvent() {}
