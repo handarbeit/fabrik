@@ -13,7 +13,7 @@ import (
 )
 
 func TestNew(t *testing.T) {
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	if m.header.pollInterval != 30*time.Second {
 		t.Errorf("pollInterval = %v, want 30s", m.header.pollInterval)
 	}
@@ -30,7 +30,7 @@ func TestNew(t *testing.T) {
 
 func TestNew_StoresProjectInfo(t *testing.T) {
 	info := ProjectInfo{CWD: "~/foo", BoardTitle: "Acme Board", Version: "1.2.3"}
-	m := New(30, info, "")
+	m := New(30, info, "", nil)
 	if m.footer.projectInfo != info {
 		t.Errorf("projectInfo = %+v, want %+v", m.footer.projectInfo, info)
 	}
@@ -38,7 +38,7 @@ func TestNew_StoresProjectInfo(t *testing.T) {
 
 // TestInit verifies Init returns a non-nil cmd (the initial tick).
 func TestInit(t *testing.T) {
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	cmd := m.Init()
 	if cmd == nil {
 		t.Error("Init() should return a non-nil cmd")
@@ -46,7 +46,7 @@ func TestInit(t *testing.T) {
 }
 
 func TestUpdate_TickEvent(t *testing.T) {
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.width = 80
 	m.height = 24
 	initial := m.active.spinnerIdx
@@ -67,7 +67,7 @@ func TestUpdate_TickEvent(t *testing.T) {
 }
 
 func TestUpdate_PollStartedAndCompleted(t *testing.T) {
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	before := time.Now()
 
 	next, _ := m.Update(PollStartedEvent{Owner: "o", Repo: "r", Project: 1})
@@ -85,7 +85,7 @@ func TestUpdate_PollStartedAndCompleted(t *testing.T) {
 }
 
 func TestUpdate_QuitKey(t *testing.T) {
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
 	if cmd == nil {
 		t.Error("expected quit cmd from 'q' key")
@@ -99,7 +99,7 @@ func TestUpdate_QuitKey(t *testing.T) {
 
 // TestUpdate_TabKey_SwitchesPanes verifies tab toggles focus between panes.
 func TestUpdate_TabKey_SwitchesPanes(t *testing.T) {
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.width = 80
 	m.height = 24
 	if m.focusPane != paneActive {
@@ -124,7 +124,7 @@ func TestUpdate_RKey_HistoryPane_WithEntry_MissingWorktree(t *testing.T) {
 	redirectHistory(t)
 	// Chdir to a temp dir so worktree path won't accidentally exist.
 	t.Chdir(t.TempDir())
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.focusPane = paneHistory
 	m.history.history = []HistoryEntry{
 		{IssueNumber: 42, StageName: "Research", StageModel: "sonnet", Success: true},
@@ -150,7 +150,7 @@ func TestUpdate_RKey_HistoryPane_WithWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(dir)
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.focusPane = paneHistory
 	m.history.history = []HistoryEntry{
 		{IssueNumber: 42, StageName: "Research", StageModel: "sonnet", Success: true},
@@ -164,7 +164,7 @@ func TestUpdate_RKey_HistoryPane_WithWorktree(t *testing.T) {
 }
 
 func TestUpdate_RKey_HistoryPane_NoEntries_NoOp(t *testing.T) {
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.focusPane = paneHistory
 	m.history.history = nil
 
@@ -176,7 +176,7 @@ func TestUpdate_RKey_HistoryPane_NoEntries_NoOp(t *testing.T) {
 
 func TestUpdate_RKey_HistoryPane_ActiveIssue_SetsStatusMsg(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.focusPane = paneHistory
 	// Add issue 42 to both active map and history.
 	key42 := activeJobKey("", 42)
@@ -196,7 +196,7 @@ func TestUpdate_RKey_HistoryPane_ActiveIssue_SetsStatusMsg(t *testing.T) {
 }
 
 func TestUpdate_LogEvent_IssueZero_StatusLine(t *testing.T) {
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.width = 80
 	m.height = 24
 	next, _ := m.Update(LogEvent{IssueNumber: 0, Tag: "poll", Message: "polling now\n"})
@@ -207,7 +207,7 @@ func TestUpdate_LogEvent_IssueZero_StatusLine(t *testing.T) {
 }
 
 func TestUpdate_QKey_WithActiveJobs_ShowsConfirmQuit(t *testing.T) {
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	key42 := activeJobKey("", 42)
 	m.active.active[key42] = &activeJob{IssueNumber: 42, StageName: "Implement", StartedAt: time.Now()}
 
@@ -222,7 +222,7 @@ func TestUpdate_QKey_WithActiveJobs_ShowsConfirmQuit(t *testing.T) {
 }
 
 func TestUpdate_QKey_WhenConfirmQuit_Quits(t *testing.T) {
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.confirmQuit = true
 	key42 := activeJobKey("", 42)
 	m.active.active[key42] = &activeJob{IssueNumber: 42, StageName: "Implement", StartedAt: time.Now()}
@@ -238,7 +238,7 @@ func TestUpdate_QKey_WhenConfirmQuit_Quits(t *testing.T) {
 }
 
 func TestUpdate_NKey_CancelsConfirmQuit(t *testing.T) {
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.confirmQuit = true
 
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
@@ -252,7 +252,7 @@ func TestUpdate_NKey_CancelsConfirmQuit(t *testing.T) {
 }
 
 func TestUpdate_EscKey_WithActiveJobs_ShowsConfirmQuit(t *testing.T) {
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	key42 := activeJobKey("", 42)
 	m.active.active[key42] = &activeJob{IssueNumber: 42, StageName: "Implement", StartedAt: time.Now()}
 
@@ -267,7 +267,7 @@ func TestUpdate_EscKey_WithActiveJobs_ShowsConfirmQuit(t *testing.T) {
 }
 
 func TestUpdate_EscKey_WhenConfirmQuit_Cancels(t *testing.T) {
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.confirmQuit = true
 	key42 := activeJobKey("", 42)
 	m.active.active[key42] = &activeJob{IssueNumber: 42, StageName: "Implement", StartedAt: time.Now()}
@@ -283,7 +283,7 @@ func TestUpdate_EscKey_WhenConfirmQuit_Cancels(t *testing.T) {
 }
 
 func TestUpdate_CtrlC_BypassesConfirmQuit(t *testing.T) {
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.confirmQuit = true
 	key42 := activeJobKey("", 42)
 	m.active.active[key42] = &activeJob{IssueNumber: 42, StageName: "Implement", StartedAt: time.Now()}
@@ -299,7 +299,7 @@ func TestUpdate_CtrlC_BypassesConfirmQuit(t *testing.T) {
 }
 
 func TestView_BeforeWindowSize(t *testing.T) {
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	// Before width is set, View should return a loading placeholder without panicking
 	v := m.View()
 	if !strings.Contains(v, "Loading") {
@@ -308,7 +308,7 @@ func TestView_BeforeWindowSize(t *testing.T) {
 }
 
 func TestView_AfterWindowSize(t *testing.T) {
-	m := New(30, ProjectInfo{BoardTitle: "Acme PM", CWD: "~/myproject"}, "")
+	m := New(30, ProjectInfo{BoardTitle: "Acme PM", CWD: "~/myproject"}, "", nil)
 	m.width = 80
 	m.height = 24
 	m.header.nextPollAt = time.Now().Add(30 * time.Second)
@@ -344,7 +344,7 @@ func TestLayoutHeightInvariant(t *testing.T) {
 
 	for _, n := range []int{0, 1, 7, 8, 15} {
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
-			m := New(30, ProjectInfo{}, "")
+			m := New(30, ProjectInfo{}, "", nil)
 			// Add n active jobs.
 			now := time.Now()
 			for i := 0; i < n; i++ {
@@ -385,7 +385,7 @@ func TestLayoutHeightInvariant_SmallTerminal(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(fmt.Sprintf("h=%d,n=%d", tc.termHeight, tc.nActive), func(t *testing.T) {
-			m := New(30, ProjectInfo{}, "")
+			m := New(30, ProjectInfo{}, "", nil)
 			now := time.Now()
 			for i := 0; i < tc.nActive; i++ {
 				m.active.active[fmt.Sprintf("issue-%d", i+1)] = &activeJob{StageName: "Research", StartedAt: now}
@@ -426,7 +426,7 @@ func TestLayoutHeightInvariant_NarrowWithHint(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m := New(30, ProjectInfo{}, "")
+			m := New(30, ProjectInfo{}, "", nil)
 			now := time.Now()
 			for i := 0; i < tc.nActive; i++ {
 				m.active.active[fmt.Sprintf("issue-%d", i+1)] = &activeJob{StageName: "Research", StartedAt: now}
@@ -466,7 +466,7 @@ func TestTuiEventMethods(t *testing.T) {
 // or esc closes it, and opening help closes the detail panel.
 func TestHelpPanelToggle(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.width = 80
 	m.height = 24
 
@@ -495,7 +495,7 @@ func TestHelpPanelToggle(t *testing.T) {
 	}
 
 	// Pressing ? while detail panel is open closes detail and opens help.
-	m2 := New(30, ProjectInfo{}, "")
+	m2 := New(30, ProjectInfo{}, "", nil)
 	m2.width = 80
 	m2.height = 24
 	m2.detailPanel = true
@@ -513,7 +513,7 @@ func TestHelpPanelToggle(t *testing.T) {
 // would normally change model state (tab, enter, r, l) are suppressed.
 func TestHelpPanelSuppressKeys(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.width = 80
 	m.height = 24
 	// Open help panel.
@@ -569,7 +569,7 @@ func TestLayoutHeightInvariant_ConfirmClear(t *testing.T) {
 
 	setup := func(t *testing.T) Model {
 		t.Helper()
-		m := New(30, ProjectInfo{}, "")
+		m := New(30, ProjectInfo{}, "", nil)
 		for i := 0; i < 3; i++ {
 			m.history.history = append(m.history.history, HistoryEntry{
 				IssueNumber: i + 1, StageName: "Research", Success: true, Completed: true,
@@ -661,7 +661,7 @@ func TestLayoutHeightInvariant_DetailPanel(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m := New(30, ProjectInfo{}, "")
+			m := New(30, ProjectInfo{}, "", nil)
 			now := time.Now()
 			for i := 0; i < tc.nActive; i++ {
 				key := fmt.Sprintf("issue-%d", i+1)
@@ -723,7 +723,7 @@ func TestLayoutHeightInvariant_WithHelp(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m := New(30, ProjectInfo{}, "")
+			m := New(30, ProjectInfo{}, "", nil)
 			now := time.Now()
 			for i := 0; i < tc.nActive; i++ {
 				m.active.active[fmt.Sprintf("issue-%d", i+1)] = &activeJob{StageName: "Research", StartedAt: now}

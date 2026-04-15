@@ -96,6 +96,9 @@ type Model struct {
 	// plugin directory
 	pluginDir string
 
+	// wake channel — TUI sends to wake the engine poll loop
+	wakeCh chan<- struct{}
+
 	// components
 	header  HeaderComponent
 	active  ActivePaneComponent
@@ -113,7 +116,8 @@ const minHistoryRows = 5
 // pollSeconds is the configured polling interval.
 // info provides project metadata displayed in the footer.
 // pluginDir is the Fabrik plugin directory passed to claude --plugin-dir (may be empty).
-func New(pollSeconds int, info ProjectInfo, pluginDir string) Model {
+// wakeCh is an optional channel the TUI sends on to wake the engine poll loop (may be nil).
+func New(pollSeconds int, info ProjectInfo, pluginDir string, wakeCh chan struct{}) Model {
 	interval := time.Duration(pollSeconds) * time.Second
 	now := time.Now()
 	spinnerFrames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -131,6 +135,7 @@ func New(pollSeconds int, info ProjectInfo, pluginDir string) Model {
 	return Model{
 		focusPane: paneActive,
 		pluginDir: pluginDir,
+		wakeCh:    wakeCh,
 		header: HeaderComponent{
 			pollInterval:  interval,
 			now:           now,
@@ -284,6 +289,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				return m, openResumeInlineCmd(m.pluginDir, entry.Repo, entry.IssueNumber, entry.StageName, entry.StageModel, worktreePath)
+			}
+			return m, nil
+
+		case "w":
+			if m.wakeCh != nil {
+				select {
+				case m.wakeCh <- struct{}{}:
+				default:
+				}
+				m.header.SetStatusMsg("waking up...")
+				m.header.nextPollAt = time.Now()
 			}
 			return m, nil
 

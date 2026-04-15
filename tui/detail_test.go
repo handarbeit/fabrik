@@ -10,7 +10,7 @@ import (
 // TestUpdate_EnterKey_HistoryPane_TogglesDetailPanel verifies enter in history pane toggles the detail panel.
 func TestUpdate_EnterKey_HistoryPane_TogglesDetailPanel(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.width = 80
 	m.height = 24
 	m.focusPane = paneHistory
@@ -30,7 +30,7 @@ func TestUpdate_EnterKey_HistoryPane_TogglesDetailPanel(t *testing.T) {
 
 // TestUpdate_EscapeKey_ClosesDetailPanel verifies escape closes the detail panel.
 func TestUpdate_EscapeKey_ClosesDetailPanel(t *testing.T) {
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.detailPanel = true
 
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
@@ -45,7 +45,7 @@ func TestUpdate_EscapeKey_ClosesDetailPanel(t *testing.T) {
 
 // TestUpdate_EnterKey_ActivePane_TogglesDetailPanel verifies enter in active pane toggles the detail panel.
 func TestUpdate_EnterKey_ActivePane_TogglesDetailPanel(t *testing.T) {
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.width = 80
 	m.height = 24
 	m.focusPane = paneActive
