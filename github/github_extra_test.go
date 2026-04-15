@@ -208,7 +208,7 @@ func TestCreateDraftPR_Success(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("token", srv.URL)
-	prNum, err := c.CreateDraftPR("owner", "repo", "My PR", "fabrik/issue-42", "main", 42)
+	prNum, err := c.CreateDraftPR("owner", "repo", "My PR", "fabrik/issue-42", "main", "Closes #42", 42)
 	if err != nil {
 		t.Fatalf("CreateDraftPR: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestCreateDraftPR_Error(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("token", srv.URL)
-	_, err := c.CreateDraftPR("owner", "repo", "My PR", "head", "main", 1)
+	_, err := c.CreateDraftPR("owner", "repo", "My PR", "head", "main", "Closes #1", 1)
 	if err == nil {
 		t.Fatal("expected error for 422 response")
 	}

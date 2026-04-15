@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -86,5 +87,87 @@ func TestProcessComments_NoStageCompleteMarker_NoAdvance(t *testing.T) {
 	// No advancement should happen
 	if len(client.updateStatusCalls) > 0 {
 		t.Errorf("expected no UpdateProjectItemStatus when no FABRIK_STAGE_COMPLETE, got %d calls", len(client.updateStatusCalls))
+	}
+}
+
+// TestProcessComments_SummaryBeforeStrip verifies that the Verification section of the
+// PR body is updated when comment processing completes a stage that includes a summary.
+// This is the critical "summary-before-strip" timing test: the summary must be captured
+// from the raw output before FABRIK_SUMMARY_BEGIN/END are stripped in-place.
+func TestProcessComments_SummaryBeforeStrip_VerificationUpdated(t *testing.T) {
+	skipIfNoGit(t)
+
+	const prNum = 300
+	const issueNum = 30
+	const summaryText = "All green, ready to ship."
+
+	var verificationBody string
+	client := &mockGitHubClient{
+		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
+			return prNum, nil
+		},
+		getIssueBodyFn: func(owner, repo string, issueNumber int) (string, error) {
+			if issueNumber == prNum {
+				return "## Verification\n\n(Populated by Implement on completion)\n\n---\n\nCloses #30", nil
+			}
+			return "issue body", nil
+		},
+		updateIssueBodyFn: func(owner, repo string, issueNumber int, body string) error {
+			if issueNumber == prNum {
+				verificationBody = body
+			}
+			return nil
+		},
+	}
+
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			// Output includes both FABRIK_STAGE_COMPLETE and FABRIK_SUMMARY_BEGIN...END
+			output := "Changes applied.\nFABRIK_SUMMARY_BEGIN\n" + summaryText + "\nFABRIK_SUMMARY_END\nFABRIK_STAGE_COMPLETE"
+			return output, false, TokenUsage{}, nil
+		},
+	}
+
+	eng := testEngineWithRepo(t, client, claude)
+	eng.cfg.Yolo = true
+	stgs := []*stages.Stage{
+		{
+			Name:          "Implement",
+			Order:         1,
+			CreateDraftPR: true,
+			Completion:    stages.CompletionCriteria{Type: "claude"},
+		},
+	}
+	eng.cfg.Stages = stgs
+	opts := make(map[string]string)
+	for _, s := range stgs {
+		opts[s.Name] = "OPT_" + s.Name
+	}
+	eng.statusField = &gh.StatusField{FieldID: "FIELD_1", Options: opts}
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	stage := &stages.Stage{Name: "Implement", Order: 1, CreateDraftPR: true}
+	item := gh.ProjectItem{
+		Number: issueNum,
+		Status: "Implement",
+		ItemID: "PVTI_30",
+	}
+	userComments := []gh.Comment{
+		{ID: "C_1", DatabaseID: 601, Author: "testuser", Body: "looks good"},
+	}
+
+	err := eng.processComments(context.Background(), board, item, stage, userComments)
+	if err != nil {
+		t.Fatalf("processComments: %v", err)
+	}
+
+	if verificationBody == "" {
+		t.Fatal("expected UpdateIssueBody to be called on PR for Verification update after comment processing")
+	}
+	if !strings.Contains(verificationBody, summaryText) {
+		t.Errorf("Verification section should contain summary %q, got body: %q", summaryText, verificationBody)
+	}
+	if !strings.Contains(verificationBody, "Closes #30") {
+		t.Error("Closes #30 must be preserved in updated body")
 	}
 }

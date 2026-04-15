@@ -773,6 +773,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		var prNumber int
 		if stage.CreateDraftPR {
 			prNumber = e.ensureDraftPR(item, baseBranch)
+			e.updatePRVerification(item, prNumber, extractSummary(output))
 		}
 		if stage.MarkPRReadyOnComplete {
 			e.markPRReady(item, prNumber)
