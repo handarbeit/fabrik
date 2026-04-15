@@ -196,6 +196,29 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		}
 	}
 
+	// Step 8b: When this is a review-reinvoke (all comments are PR inline review
+	// thread comments), also post a Fabrik-marked summary on the linked PR so
+	// reviewers can see at a glance that their feedback was addressed. The
+	// existing issue comment from Step 8 is unchanged (R4). Gate: output != ""
+	// and a linked PR exists. No post_to_pr check — linked-PR existence is the
+	// only gate (R5).
+	if isReviewReinvoke(comments) && output != "" {
+		prNumber, prErr := e.client.FindPRForIssue(owner, repo, item.Number)
+		if prErr != nil {
+			e.logf(item.Number, "warn", "review reinvoke: could not find PR for issue: %v\n", prErr)
+		} else if prNumber > 0 {
+			threads := buildThreadEntries(comments)
+			prComment := formatReviewFeedbackComment(stage.Name, output, branch, commit, mainSHA, timestamp, threads, len(comments))
+			if err := e.client.AddComment(owner, repo, prNumber, prComment); err != nil {
+				e.logf(item.Number, "warn", "could not post review feedback summary to PR #%d: %v\n", prNumber, err)
+			} else {
+				e.logf(item.Number, "post", "review feedback summary posted to PR #%d (%d thread(s))\n", prNumber, len(threads))
+			}
+		} else {
+			e.logf(item.Number, "warn", "review reinvoke: no linked PR found — skipping PR summary comment\n")
+		}
+	}
+
 	// Step 9: Remove editing label
 	e.removeEditingLabel(owner, repo, item.Number)
 
@@ -255,6 +278,21 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	}
 
 	return nil
+}
+
+// isReviewReinvoke reports whether this processComments invocation originated
+// from a review-reinvoke dispatch (i.e., all comments are PR inline review
+// thread comments). Returns false for an empty slice.
+func isReviewReinvoke(comments []gh.Comment) bool {
+	if len(comments) == 0 {
+		return false
+	}
+	for _, c := range comments {
+		if c.ReviewThreadID == "" {
+			return false
+		}
+	}
+	return true
 }
 
 // markCommentsSeenByStage adds a rocket reaction to any user comments that were
