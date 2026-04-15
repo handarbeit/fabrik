@@ -458,7 +458,7 @@ query($id: ID!) {
 						} `json:"reviewRequests"`
 						LatestReviews struct {
 							Nodes []struct {
-								DatabaseID int    `json:"databaseId"`
+								DatabaseID int `json:"databaseId"`
 								Author     *struct {
 									Login string `json:"login"`
 								} `json:"author"`
