@@ -28,6 +28,22 @@ func runResume(args []string) error {
 	stagesDir := fset.String("stages", ".fabrik/stages", "Directory containing stage YAML configs")
 	pluginDir := fset.String("plugin-dir", "", "Path to Fabrik plugin directory")
 
+	fset.Usage = func() {
+		fmt.Fprintf(fset.Output(), "Usage: fabrik resume <issue-number> [--stage <name>] [flags]\n\n")
+		fmt.Fprintf(fset.Output(), "Arguments:\n")
+		fmt.Fprintf(fset.Output(), "  <issue-number>    GitHub issue number (required)\n\n")
+		fmt.Fprintf(fset.Output(), "Flags:\n")
+		fset.PrintDefaults()
+	}
+
+	// Detect --help/-h as the first arg before treating it as the issue number.
+	// This prevents "--help" from being parsed as the issue number and producing
+	// a confusing "must be a positive integer" error.
+	if len(args) > 0 && (args[0] == "--help" || args[0] == "-h") {
+		fset.Usage()
+		return flag.ErrHelp
+	}
+
 	// Support `fabrik resume <issue-number> [flags]`: extract the issue number
 	// from the front of args before flag parsing (flag.FlagSet stops at first
 	// non-flag argument, so we must pull the positional out first).

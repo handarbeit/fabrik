@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
@@ -264,4 +265,11 @@ func containsSeq(slice []string, a, b string) bool {
 		}
 	}
 	return false
+}
+
+func TestRunResume_HelpFlag(t *testing.T) {
+	err := runResume([]string{"--help"})
+	if err != flag.ErrHelp {
+		t.Errorf("expected flag.ErrHelp, got %v", err)
+	}
 }

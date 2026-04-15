@@ -20,6 +20,14 @@ func runWatch(args []string) error {
 	token := fs.String("token", "", "GitHub token (or FABRIK_TOKEN / GITHUB_TOKEN)")
 	pluginDir := fs.String("plugin-dir", "", "Path to Fabrik plugin directory (or FABRIK_PLUGIN_DIR)")
 
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage: fabrik watch <issue-number> [flags]\n\n")
+		fmt.Fprintf(fs.Output(), "Arguments:\n")
+		fmt.Fprintf(fs.Output(), "  <issue-number>    GitHub issue number to watch (required)\n\n")
+		fmt.Fprintf(fs.Output(), "Flags:\n")
+		fs.PrintDefaults()
+	}
+
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
