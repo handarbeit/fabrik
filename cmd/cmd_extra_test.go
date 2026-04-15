@@ -69,7 +69,7 @@ func (m *testGitHubUpgradeClient) GetIssueBody(owner, repo string, issueNumber i
 func (m *testGitHubUpgradeClient) FindPRForIssue(owner, repo string, issueNumber int) (int, error) {
 	return 0, nil
 }
-func (m *testGitHubUpgradeClient) CreateDraftPR(owner, repo, title, head, base string, issueNumber int) (int, error) {
+func (m *testGitHubUpgradeClient) CreateDraftPR(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
 	return 0, nil
 }
 func (m *testGitHubUpgradeClient) MarkPRReady(owner, repo string, prNumber int) error { return nil }

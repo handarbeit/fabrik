@@ -2,10 +2,14 @@ package engine
 
 import (
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	gh "github.com/verveguy/fabrik/github"
+	"github.com/verveguy/fabrik/stages"
 )
 
 func TestEnsureDraftPR_ExistingPR_SkipsCreate(t *testing.T) {
@@ -208,5 +212,302 @@ func TestPostOutputToPR_NoPR_FallsBackToIssue(t *testing.T) {
 	}
 	if addCommentCalls[0].issueNumber != 4 {
 		t.Errorf("expected comment on issue #4, got #%d", addCommentCalls[0].issueNumber)
+	}
+}
+
+// ── updatePRVerification ──────────────────────────────────────────────────────
+
+func TestUpdatePRVerification_ReplacesSectionAndCallsUpdateIssueBody(t *testing.T) {
+	var updatedBody string
+	var updatedPRNum int
+	client := &mockGitHubClient{
+		getIssueBodyFn: func(owner, repo string, issueNumber int) (string, error) {
+			return "## Verification\n\n(Populated by Implement on completion)\n\n---\n\nCloses #10", nil
+		},
+		updateIssueBodyFn: func(owner, repo string, issueNumber int, body string) error {
+			updatedPRNum = issueNumber
+			updatedBody = body
+			return nil
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+
+	item := gh.ProjectItem{Number: 10, Title: "My issue"}
+	eng.updatePRVerification(item, 99, "All tests pass.")
+
+	if updatedPRNum != 99 {
+		t.Errorf("UpdateIssueBody called with issueNumber=%d, want 99", updatedPRNum)
+	}
+	if !strings.Contains(updatedBody, "All tests pass.") {
+		t.Errorf("updated body missing summary content: %q", updatedBody)
+	}
+	if !strings.Contains(updatedBody, "Closes #10") {
+		t.Error("updated body must preserve Closes #10")
+	}
+	if strings.Contains(updatedBody, "(Populated by Implement on completion)") {
+		t.Error("placeholder should have been replaced")
+	}
+}
+
+func TestUpdatePRVerification_EmptySummaryIsNoop(t *testing.T) {
+	called := false
+	client := &mockGitHubClient{
+		getIssueBodyFn: func(owner, repo string, issueNumber int) (string, error) {
+			called = true
+			return "## Verification\n\nplaceholder.\n\n---\n\nCloses #1", nil
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	eng.updatePRVerification(gh.ProjectItem{Number: 1}, 55, "")
+
+	if called {
+		t.Error("GetIssueBody should not be called when summary is empty")
+	}
+}
+
+func TestUpdatePRVerification_SectionNotFound_WarnsAndSkips(t *testing.T) {
+	updateCalled := false
+	client := &mockGitHubClient{
+		getIssueBodyFn: func(owner, repo string, issueNumber int) (string, error) {
+			return "## Summary\n\nSome summary.\n\n---\n\nCloses #2", nil
+		},
+		updateIssueBodyFn: func(owner, repo string, issueNumber int, body string) error {
+			updateCalled = true
+			return nil
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	eng.updatePRVerification(gh.ProjectItem{Number: 2}, 88, "my summary")
+
+	if updateCalled {
+		t.Error("UpdateIssueBody should not be called when ## Verification section is missing")
+	}
+}
+
+// ── ensureDraftPR — new-PR path (requires git) ────────────────────────────────
+
+// initRepoWithRemote creates a source repo that has a bare repo as its "origin".
+// Returns the source repo directory. The source repo has an initial commit and a
+// configured remote so that PushBranch succeeds.
+func initRepoWithRemote(t *testing.T) string {
+	t.Helper()
+	remoteDir := t.TempDir()
+	if out, err := exec.Command("git", "init", "--bare", "-b", "main", remoteDir).CombinedOutput(); err != nil {
+		t.Fatalf("init bare: %s: %v", out, err)
+	}
+	sourceDir := t.TempDir()
+	cmds := [][]string{
+		{"git", "init", "-b", "main"},
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "Test"},
+		{"git", "commit", "--allow-empty", "-m", "initial"},
+		{"git", "remote", "add", "origin", remoteDir},
+		{"git", "push", "-u", "origin", "main"},
+	}
+	for _, args := range cmds {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = sourceDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("setup %v: %s: %v", args, out, err)
+		}
+	}
+	return sourceDir
+}
+
+func TestEnsureDraftPR_NewPR_SeedsBodyFromContextFiles(t *testing.T) {
+	skipIfNoGit(t)
+
+	sourceDir := initRepoWithRemote(t)
+	wm := NewWorktreeManager(sourceDir)
+
+	wtDir, err := wm.EnsureWorktree(42, "main", false)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	contextDir := filepath.Join(wtDir, ".fabrik-context")
+	if err := os.MkdirAll(contextDir, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	issueContent := "## Summary\n\nBrief summary of the issue.\n\n## Problem\n\nThe problem statement.\n"
+	planContent := "🏭 **Fabrik — stage: Plan**\n*branch: fabrik/issue-42*\n\n## Approach\n\nThe implementation approach.\n"
+	if err := os.WriteFile(filepath.Join(contextDir, "issue.md"), []byte(issueContent), 0644); err != nil {
+		t.Fatalf("WriteFile issue.md: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(contextDir, "stage-Plan.md"), []byte(planContent), 0644); err != nil {
+		t.Fatalf("WriteFile stage-Plan.md: %v", err)
+	}
+
+	var createdBody string
+	client := &mockGitHubClient{
+		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
+			return 0, nil
+		},
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			createdBody = body
+			return 77, nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", MaxConcurrent: 1, Stages: testStages()},
+		client,
+		&mockClaudeInvoker{},
+		wm,
+	)
+
+	item := gh.ProjectItem{Number: 42, Title: "My issue"}
+	result := eng.ensureDraftPR(item, "main")
+	if result != 77 {
+		t.Fatalf("ensureDraftPR returned %d, want 77", result)
+	}
+
+	if !strings.Contains(createdBody, "## Summary") {
+		t.Error("seed body missing ## Summary")
+	}
+	if !strings.Contains(createdBody, "Brief summary of the issue.") {
+		t.Error("seed body missing summary content")
+	}
+	if !strings.Contains(createdBody, "## Problem") {
+		t.Error("seed body missing ## Problem")
+	}
+	if !strings.Contains(createdBody, "The problem statement.") {
+		t.Error("seed body missing problem content")
+	}
+	if !strings.Contains(createdBody, "## Approach") {
+		t.Error("seed body missing ## Approach")
+	}
+	if !strings.Contains(createdBody, "The implementation approach.") {
+		t.Error("seed body missing approach content")
+	}
+	if !strings.Contains(createdBody, "## Verification") {
+		t.Error("seed body missing ## Verification")
+	}
+	if !strings.Contains(createdBody, "Closes #42") {
+		t.Error("seed body missing Closes #42")
+	}
+	if !strings.HasSuffix(strings.TrimSpace(createdBody), "Closes #42") {
+		t.Errorf("Closes #42 must be at the end of seed body")
+	}
+}
+
+func TestEnsureDraftPR_NewPR_MissingContextFiles_UsesPlaceholders(t *testing.T) {
+	skipIfNoGit(t)
+
+	sourceDir := initRepoWithRemote(t)
+	wm := NewWorktreeManager(sourceDir)
+
+	_, err := wm.EnsureWorktree(43, "main", false)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	var createdBody string
+	client := &mockGitHubClient{
+		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
+			return 0, nil
+		},
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			createdBody = body
+			return 78, nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", MaxConcurrent: 1, Stages: testStages()},
+		client,
+		&mockClaudeInvoker{},
+		wm,
+	)
+
+	item := gh.ProjectItem{Number: 43, Title: "My issue"}
+	result := eng.ensureDraftPR(item, "main")
+	if result != 78 {
+		t.Fatalf("ensureDraftPR returned %d, want 78", result)
+	}
+
+	if !strings.Contains(createdBody, "(Populated by Implement)") {
+		t.Error("missing context files should produce placeholder for Approach")
+	}
+	if !strings.Contains(createdBody, "Closes #43") {
+		t.Error("Closes #43 must always be present")
+	}
+}
+
+// ── processItem Verification update integration test ─────────────────────────
+
+func TestProcessItem_ImplementStage_UpdatesVerificationOnComplete(t *testing.T) {
+	skipIfNoGit(t)
+
+	const issueNum = 50
+	const prNum = 200
+
+	var verificationUpdateBody string
+	client := &mockGitHubClient{
+		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
+			return prNum, nil
+		},
+		getIssueBodyFn: func(owner, repo string, issueNumber int) (string, error) {
+			if issueNumber == prNum {
+				return "## Verification\n\n(Populated by Implement on completion)\n\n---\n\nCloses #50", nil
+			}
+			return "issue body", nil
+		},
+		updateIssueBodyFn: func(owner, repo string, issueNumber int, body string) error {
+			if issueNumber == prNum {
+				verificationUpdateBody = body
+			}
+			return nil
+		},
+		fetchLabelsFn: func(owner, repo string, issueNumber int) ([]string, error) {
+			return nil, nil
+		},
+	}
+
+	const summary = "Tests pass, build clean."
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			output := "Implementation done.\nFABRIK_SUMMARY_BEGIN\n" + summary + "\nFABRIK_SUMMARY_END\nFABRIK_STAGE_COMPLETE"
+			return output, true, TokenUsage{}, nil
+		},
+	}
+
+	eng := testEngineWithRepo(t, client, claude)
+
+	stgs := []*stages.Stage{
+		{
+			Name:                  "Implement",
+			Order:                 1,
+			Prompt:                "implement it",
+			CreateDraftPR:         true,
+			MarkPRReadyOnComplete: true,
+			Completion:            stages.CompletionCriteria{Type: "claude"},
+		},
+	}
+	eng.cfg.Stages = stgs
+	opts := make(map[string]string)
+	for _, s := range stgs {
+		opts[s.Name] = "OPT_" + s.Name
+	}
+	eng.statusField = &gh.StatusField{FieldID: "FIELD_1", Options: opts}
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: issueNum,
+		Title:  "My feature",
+		Status: "Implement",
+		ItemID: "PVTI_50",
+	}
+
+	eng.processItem(t.Context(), board, item)
+
+	if verificationUpdateBody == "" {
+		t.Fatal("expected UpdateIssueBody to be called on PR for Verification update")
+	}
+	if !strings.Contains(verificationUpdateBody, summary) {
+		t.Errorf("Verification section should contain summary %q, got body: %q", summary, verificationUpdateBody)
+	}
+	if !strings.Contains(verificationUpdateBody, "Closes #50") {
+		t.Error("Closes #50 must be preserved in updated body")
 	}
 }
