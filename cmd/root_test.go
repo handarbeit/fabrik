@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"flag"
 	"io"
 	"os"
@@ -327,5 +328,52 @@ func TestExecute_FineGrainedTokenWarning(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "classic personal access token") {
 		t.Errorf("expected classic PAT guidance on stderr, got: %q", string(output))
+	}
+}
+
+func TestExecute_ReviewWaitTimeoutFlag(t *testing.T) {
+	resetFlags()
+	stagesDir := t.TempDir()
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--token", "tok", "--stages", stagesDir, "--review-wait-timeout", "30"}
+
+	err := Execute()
+	if err == nil {
+		t.Fatal("expected error (no stages)")
+	}
+	if err.Error() == "unknown flag: --review-wait-timeout" {
+		t.Error("--review-wait-timeout flag not registered")
+	}
+}
+
+func TestExecute_MaxReviewCyclesFlag(t *testing.T) {
+	resetFlags()
+	stagesDir := t.TempDir()
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--token", "tok", "--stages", stagesDir, "--max-review-cycles", "3"}
+
+	err := Execute()
+	if err == nil {
+		t.Fatal("expected error (no stages)")
+	}
+	if err.Error() == "unknown flag: --max-review-cycles" {
+		t.Error("--max-review-cycles flag not registered")
+	}
+}
+
+func TestExecute_HelpIncludesSubcommands(t *testing.T) {
+	resetFlags()
+	// Route flag.CommandLine output to a buffer so we can inspect usage text.
+	var buf bytes.Buffer
+	flag.CommandLine.SetOutput(&buf)
+	os.Args = []string{"fabrik", "--help"}
+
+	err := Execute()
+	if err != flag.ErrHelp {
+		t.Errorf("expected flag.ErrHelp, got %v", err)
+	}
+	output := buf.String()
+	for _, want := range []string{"init", "watch", "resume", "upgrade", "stream-filter"} {
+		if !strings.Contains(output, want) {
+			t.Errorf("usage output missing %q; got:\n%s", want, output)
+		}
 	}
 }

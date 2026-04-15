@@ -224,6 +224,18 @@ func runInit(args []string) error {
 	fset := flag.NewFlagSet("init", flag.ContinueOnError)
 	force := fset.Bool("force", false, "Overwrite existing files")
 	userFlag := fset.String("user", "", "Your GitHub username")
+
+	fset.Usage = func() {
+		fmt.Fprintf(fset.Output(), "Usage: fabrik init [<project-url>] [flags]\n\n")
+		fmt.Fprintf(fset.Output(), "Arguments:\n")
+		fmt.Fprintf(fset.Output(), "  <project-url>    GitHub Project URL (optional); pre-fills owner, project number,\n")
+		fmt.Fprintf(fset.Output(), "                   and owner_type in .fabrik/config.yaml.\n")
+		fmt.Fprintf(fset.Output(), "                   Forms: https://github.com/orgs/<org>/projects/<N>\n")
+		fmt.Fprintf(fset.Output(), "                          https://github.com/users/<user>/projects/<N>\n\n")
+		fmt.Fprintf(fset.Output(), "Flags:\n")
+		fset.PrintDefaults()
+	}
+
 	if err := fset.Parse(args); err != nil {
 		return err
 	}
