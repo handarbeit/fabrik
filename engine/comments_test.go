@@ -217,3 +217,81 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// TestFindNewComments_SkipsRocketReactedComment verifies that findNewComments
+// skips a comment that has a 🚀 reaction even if the body lacks the Fabrik header.
+// This is the defense-in-depth dedup signal for engine-authored comments.
+func TestFindNewComments_SkipsRocketReactedComment(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	item := gh.ProjectItem{
+		Number: 20,
+		Comments: []gh.Comment{
+			{
+				ID:         "C_rocketed",
+				DatabaseID: 500,
+				Author:     "fabrik-bot",
+				Body:       "Waiting for dependencies to close: #100", // no 🏭 header
+				Reactions:  []gh.ReactionGroup{{Content: "ROCKET", Count: 1}},
+			},
+		},
+	}
+
+	newComments := eng.findNewComments(item)
+	if len(newComments) != 0 {
+		t.Errorf("expected 0 new comments (should skip rocket-reacted), got %d", len(newComments))
+	}
+}
+
+// TestAddComment_ReactsWithRocket verifies that processComments adds a 🚀 reaction
+// to every comment it posts via AddComment, using the returned database ID.
+func TestAddComment_ReactsWithRocket(t *testing.T) {
+	skipIfNoGit(t)
+
+	const postedCommentID = 99
+
+	client := &mockGitHubClient{
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			return postedCommentID, nil
+		},
+	}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "some output from Claude", false, TokenUsage{}, nil
+		},
+	}
+
+	eng := testEngineWithRepo(t, client, claude)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	stage := &stages.Stage{Name: "Research", Order: 1}
+	item := gh.ProjectItem{
+		Number:   21,
+		Body:     "spec",
+		Comments: []gh.Comment{}, // no existing stage comment → will call AddComment
+	}
+	userComments := []gh.Comment{
+		{ID: "C_user", DatabaseID: 600, Author: "testuser", Body: "please do research"},
+	}
+
+	err := eng.processComments(context.Background(), board, item, stage, userComments)
+	if err != nil {
+		t.Fatalf("processComments: %v", err)
+	}
+
+	// AddComment should have been called and produced a reaction call
+	if len(client.addCommentCalls) == 0 {
+		t.Fatal("expected AddComment to be called")
+	}
+
+	// Verify AddCommentReaction was called with the returned comment ID and "rocket"
+	var rocketFound bool
+	for _, rc := range client.addCommentReactionCalls {
+		if rc.commentDatabaseID == postedCommentID && rc.content == "rocket" {
+			rocketFound = true
+			break
+		}
+	}
+	if !rocketFound {
+		t.Errorf("expected AddCommentReaction(_, _, %d, %q) to be called; got calls: %+v",
+			postedCommentID, "rocket", client.addCommentReactionCalls)
+	}
+}
