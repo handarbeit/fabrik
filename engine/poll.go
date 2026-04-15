@@ -692,9 +692,10 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		}
 
 		if stage.Name == "Validate" {
-			// cruise stops here: skip merge and advancement, leave for human.
-			isCruiseOnly := !e.cfg.Yolo && !hasYoloLabel(item) && hasCruiseLabel(item)
-			if isCruiseOnly {
+			// auto-merge is yolo-only — matches handleStageComplete gating.
+			// cruise and auto_advance:true both stop here without merging.
+			yoloActive := e.cfg.Yolo || hasYoloLabel(item)
+			if !yoloActive {
 				continue
 			}
 			if err := e.attemptMergeOnValidate(item); err != nil {
