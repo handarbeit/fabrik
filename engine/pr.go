@@ -33,7 +33,7 @@ func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) int {
 	}
 
 	head := fmt.Sprintf("fabrik/issue-%d", item.Number)
-	prNum, err := e.client.CreateDraftPR(owner, repo, item.Title, head, baseBranch, item.Number)
+	prNum, err := e.client.CreateDraftPR(owner, repo, item.Title, head, baseBranch, fmt.Sprintf("Closes #%d", item.Number), item.Number)
 	if err != nil {
 		e.logf(item.Number, "warn", "could not create draft PR: %v\n", err)
 		return 0
