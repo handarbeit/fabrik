@@ -448,19 +448,37 @@ func TestReviewCycleCount_PerStageNotPerIssue(t *testing.T) {
 	}
 	eng := testEngineWithStages(client, stgs)
 	iKey := "owner/repo#10"
+	reviewStageKey := iKey + "-Review"
+	validateStageKey := iKey + "-Validate"
 
 	// Simulate Review consuming 3 cycles out of 5.
 	eng.mu.Lock()
-	eng.reviewCycleCount[iKey+"-Review"] = 3
+	eng.reviewCycleCount[reviewStageKey] = 3
+	_, validateExistsBefore := eng.reviewCycleCount[validateStageKey]
 	eng.mu.Unlock()
 
-	// Validate stage must have an independent budget: its counter is still 0.
+	// Before Validate "runs", it must not even have a stage-specific entry yet —
+	// proving Review's counter did not bleed into Validate's key.
+	if validateExistsBefore {
+		t.Fatalf("Validate reviewCycleCount entry already exists before Validate runs; want no entry")
+	}
+
+	// Simulate Validate consuming one cycle and verify it uses its own counter
+	// without disturbing Review's existing count.
 	eng.mu.Lock()
-	validateCount := eng.reviewCycleCount[iKey+"-Validate"]
+	eng.reviewCycleCount[validateStageKey]++
+	reviewCount := eng.reviewCycleCount[reviewStageKey]
+	validateCount, validateExistsAfter := eng.reviewCycleCount[validateStageKey]
 	eng.mu.Unlock()
 
-	if validateCount != 0 {
-		t.Errorf("Validate reviewCycleCount = %d; want 0 (must be independent of Review cycles)", validateCount)
+	if reviewCount != 3 {
+		t.Errorf("Review reviewCycleCount = %d after Validate increment; want 3", reviewCount)
+	}
+	if !validateExistsAfter {
+		t.Fatalf("Validate reviewCycleCount entry missing after Validate increment; want stage-specific entry")
+	}
+	if validateCount != 1 {
+		t.Errorf("Validate reviewCycleCount = %d; want 1 (must be independent of Review cycles)", validateCount)
 	}
 }
 
