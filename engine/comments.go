@@ -91,7 +91,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	if effortOverride != "" {
 		e.logf(item.Number, "effort", "using effort override %q\n", effortOverride)
 	}
-	output, _, usage, err := e.claude.InvokeForComments(ctx, stage, item, comments, workDir, InvokeOptions{ModelOverride: modelOverride, EffortOverride: effortOverride})
+	output, _, usage, err := e.claude.InvokeForComments(ctx, stage, item, comments, workDir, InvokeOptions{ModelOverride: modelOverride, EffortOverride: effortOverride, BaseBranch: baseBranch})
 	func() {
 		e.mu.Lock()
 		defer e.mu.Unlock()

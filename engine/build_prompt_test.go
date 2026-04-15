@@ -21,7 +21,7 @@ func TestBuildPrompt_Basic(t *testing.T) {
 		Body:   "It is broken",
 	}
 
-	prompt := buildPrompt(stage, issue, nil)
+	prompt := buildPrompt(stage, issue, nil, "")
 
 	if !strings.Contains(prompt, "You are a research agent.") {
 		t.Error("prompt missing stage prompt")
@@ -48,7 +48,7 @@ func TestBuildPrompt_WithLabels(t *testing.T) {
 		Labels: []string{"bug", "priority"},
 	}
 
-	prompt := buildPrompt(stage, issue, nil)
+	prompt := buildPrompt(stage, issue, nil, "")
 	if !strings.Contains(prompt, "## Labels") {
 		t.Error("prompt missing labels section")
 	}
@@ -68,7 +68,7 @@ func TestBuildPrompt_WithComments(t *testing.T) {
 		},
 	}
 
-	prompt := buildPrompt(stage, issue, comments)
+	prompt := buildPrompt(stage, issue, comments, "")
 	if !strings.Contains(prompt, "## New Comments") {
 		t.Error("prompt missing comments section")
 	}
@@ -84,7 +84,7 @@ func TestBuildPrompt_NoLabelsSection(t *testing.T) {
 	stage := &stages.Stage{Name: "Test", Prompt: "prompt"}
 	issue := gh.ProjectItem{Number: 1, Title: "T"}
 
-	prompt := buildPrompt(stage, issue, nil)
+	prompt := buildPrompt(stage, issue, nil, "")
 	if strings.Contains(prompt, "## Labels") {
 		t.Error("prompt should not have labels section when no labels")
 	}
@@ -94,7 +94,7 @@ func TestBuildPrompt_NoCommentsSection(t *testing.T) {
 	stage := &stages.Stage{Name: "Test", Prompt: "prompt"}
 	issue := gh.ProjectItem{Number: 1, Title: "T"}
 
-	prompt := buildPrompt(stage, issue, nil)
+	prompt := buildPrompt(stage, issue, nil, "")
 	if strings.Contains(prompt, "## New Comments") {
 		t.Error("prompt should not have comments section when no comments")
 	}
@@ -112,7 +112,7 @@ func TestBuildCommentReviewPrompt_Issue(t *testing.T) {
 		{Author: "alice", Body: "looks good", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
 	}
 
-	prompt := buildCommentReviewPrompt(stage, item, comments)
+	prompt := buildCommentReviewPrompt(stage, item, comments, "")
 
 	if !strings.Contains(prompt, "# Issue #42: Test Issue") {
 		t.Error("expected issue header in prompt")
@@ -141,7 +141,7 @@ func TestBuildCommentReviewPrompt_PR(t *testing.T) {
 		{Author: "bot", Body: "suggestion: use const", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
 	}
 
-	prompt := buildCommentReviewPrompt(stage, item, comments)
+	prompt := buildCommentReviewPrompt(stage, item, comments, "")
 
 	if !strings.Contains(prompt, "# PR #7: Fix bug") {
 		t.Error("expected PR header in prompt")
@@ -168,7 +168,7 @@ func TestBuildCommentReviewPrompt_CustomCommentPrompt(t *testing.T) {
 		{Author: "user", Body: "hello", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
 	}
 
-	prompt := buildCommentReviewPrompt(stage, item, comments)
+	prompt := buildCommentReviewPrompt(stage, item, comments, "")
 
 	if !strings.Contains(prompt, "Custom prompt text") {
 		t.Error("expected custom comment prompt to be used")
@@ -192,7 +192,7 @@ func TestBuildCommentReviewPrompt_CommentSkill(t *testing.T) {
 		{Author: "user", Body: "clarification", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
 	}
 
-	prompt := buildCommentReviewPrompt(stage, item, comments)
+	prompt := buildCommentReviewPrompt(stage, item, comments, "")
 
 	if !strings.Contains(prompt, "fabrik-specify-comment") {
 		t.Error("expected comment skill name in prompt")
@@ -222,7 +222,7 @@ func TestBuildCommentReviewPrompt_CommentSkillPR(t *testing.T) {
 		{Author: "user", Body: "looks good", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
 	}
 
-	prompt := buildCommentReviewPrompt(stage, item, comments)
+	prompt := buildCommentReviewPrompt(stage, item, comments, "")
 
 	if !strings.Contains(prompt, "PR #55") {
 		t.Errorf("expected 'PR #55' in prompt, got: %s", prompt)
@@ -268,7 +268,7 @@ func TestBuildCommentReviewPrompt_ReviewThreadComment(t *testing.T) {
 		},
 	}
 
-	prompt := buildCommentReviewPrompt(stage, item, comments)
+	prompt := buildCommentReviewPrompt(stage, item, comments, "")
 
 	if !strings.Contains(prompt, "[Thread: RT_abc123]") {
 		t.Error("expected thread ID in prompt")
@@ -306,7 +306,7 @@ func TestBuildCommentReviewPrompt_RegularComment_NoLocation(t *testing.T) {
 		},
 	}
 
-	prompt := buildCommentReviewPrompt(stage, item, comments)
+	prompt := buildCommentReviewPrompt(stage, item, comments, "")
 
 	if !strings.Contains(prompt, "**@alice**") {
 		t.Error("expected author in prompt")
@@ -340,7 +340,7 @@ func TestBuildCommentReviewPrompt_ReviewThreadComment_ZeroLine(t *testing.T) {
 		OriginalLine:   99,
 		DiffHunk:       "@@ -97,5 +97,4 @@",
 	}
-	prompt1 := buildCommentReviewPrompt(stage, item, []gh.Comment{c1})
+	prompt1 := buildCommentReviewPrompt(stage, item, []gh.Comment{c1}, "")
 	if !strings.Contains(prompt1, "99") {
 		t.Error("expected OriginalLine (99) in prompt when Line is 0")
 	}
@@ -358,11 +358,57 @@ func TestBuildCommentReviewPrompt_ReviewThreadComment_ZeroLine(t *testing.T) {
 		Line:           0,
 		OriginalLine:   0,
 	}
-	prompt2 := buildCommentReviewPrompt(stage, item, []gh.Comment{c2})
+	prompt2 := buildCommentReviewPrompt(stage, item, []gh.Comment{c2}, "")
 	if !strings.Contains(prompt2, "bar.go") {
 		t.Error("expected file path in prompt even without line number")
 	}
 	if strings.Contains(prompt2, "**Line:**") {
 		t.Error("should not render **Line:** when both Line and OriginalLine are 0")
+	}
+}
+
+func TestBuildPrompt_BaseBranch(t *testing.T) {
+	stage := &stages.Stage{Name: "Research", Prompt: "Do research."}
+	issue := gh.ProjectItem{Number: 1, Title: "T"}
+
+	// Non-empty baseBranch: branch name should appear in codebase-changes line and explicit statement.
+	prompt := buildPrompt(stage, issue, nil, "develop")
+	if !strings.Contains(prompt, "develop") {
+		t.Error("expected branch name 'develop' in prompt when baseBranch is non-empty")
+	}
+	if !strings.Contains(prompt, "files changed on develop") {
+		t.Errorf("expected 'files changed on develop' in codebase-changes description, got prompt:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "default base branch is `develop`") {
+		t.Errorf("expected explicit base branch statement with 'develop', got prompt:\n%s", prompt)
+	}
+
+	// Empty baseBranch: fallback text should appear instead.
+	promptEmpty := buildPrompt(stage, issue, nil, "")
+	if !strings.Contains(promptEmpty, "the default branch") {
+		t.Errorf("expected 'the default branch' fallback in prompt when baseBranch is empty, got:\n%s", promptEmpty)
+	}
+	if strings.Contains(promptEmpty, "files changed on main") {
+		t.Error("prompt should not hardcode 'main' as the branch name")
+	}
+}
+
+func TestBuildCommentReviewPrompt_BaseBranch(t *testing.T) {
+	stage := &stages.Stage{Name: "Review"}
+	item := gh.ProjectItem{Number: 7, Title: "Fix bug", IsPR: true}
+	comments := []gh.Comment{
+		{Author: "alice", Body: "LGTM", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
+	}
+
+	// Non-empty baseBranch: branch name should appear in explicit statement.
+	prompt := buildCommentReviewPrompt(stage, item, comments, "develop")
+	if !strings.Contains(prompt, "default base branch is `develop`") {
+		t.Errorf("expected explicit base branch statement with 'develop', got:\n%s", prompt)
+	}
+
+	// Empty baseBranch: fallback text should appear instead.
+	promptEmpty := buildCommentReviewPrompt(stage, item, comments, "")
+	if !strings.Contains(promptEmpty, "the default branch") {
+		t.Errorf("expected 'the default branch' fallback when baseBranch is empty, got:\n%s", promptEmpty)
 	}
 }
