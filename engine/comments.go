@@ -209,7 +209,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		} else if prNumber > 0 {
 			threads := buildThreadEntries(comments)
 			prComment := formatReviewFeedbackComment(stage.Name, output, branch, commit, mainSHA, timestamp, threads, len(comments))
-			if err := e.client.AddComment(owner, repo, prNumber, prComment); err != nil {
+			if _, err := e.client.AddComment(owner, repo, prNumber, prComment); err != nil {
 				e.logf(item.Number, "warn", "could not post review feedback summary to PR #%d: %v\n", prNumber, err)
 			} else {
 				e.logf(item.Number, "post", "review feedback summary posted to PR #%d (%d thread(s))\n", prNumber, len(threads))
