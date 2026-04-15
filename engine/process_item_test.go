@@ -616,8 +616,8 @@ func TestProcessItem_LabelAndCommentErrors(t *testing.T) {
 		addLabelToIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
 			return fmt.Errorf("label error")
 		},
-		addCommentFn: func(owner, repo string, issueNumber int, body string) error {
-			return fmt.Errorf("comment error")
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			return 0, fmt.Errorf("comment error")
 		},
 	}
 	claude := &mockClaudeInvoker{

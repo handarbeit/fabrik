@@ -179,8 +179,8 @@ func TestPostOutputToPR_AddCommentErrors_LogsWarnings(t *testing.T) {
 		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
 			return 30, nil
 		},
-		addCommentFn: func(owner, repo string, issueNumber int, body string) error {
-			return errors.New("post error") // all AddComment calls fail
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			return 0, errors.New("post error") // all AddComment calls fail
 		},
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
@@ -196,9 +196,9 @@ func TestPostOutputToPR_NoPR_FallsBackToIssue(t *testing.T) {
 		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
 			return 0, nil // no PR
 		},
-		addCommentFn: func(owner, repo string, issueNumber int, body string) error {
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
 			addCommentCalls = append(addCommentCalls, addCommentCall{owner, repo, issueNumber, body})
-			return nil
+			return 0, nil
 		},
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})

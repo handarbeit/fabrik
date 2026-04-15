@@ -335,11 +335,17 @@ When new comments are detected on an issue (or synthetic review comments on a PR
 
 ### 4.1 Comment Detection
 
-`findNewComments()` filters `item.Comments` to find unprocessed comments:
+`findNewComments()` filters `item.Comments` to find unprocessed comments using three independent dedup signals:
 
-1. Skip comments already in `processedSet` (in-memory, session-scoped)
-2. Skip comments with body starting with `🏭 **Fabrik` (engine-generated output)
-3. Skip comments with a ROCKET (🚀) reaction (durable cross-restart marker)
+1. **In-memory `processedSet`** (session-scoped) — skip comments whose key is already present. Fast but lost on restart.
+2. **`🏭 **Fabrik` body prefix** (engine-authored output convention) — skip comments whose body starts with this header. Durable but requires the header to be present.
+3. **🚀 ROCKET reaction** (durable, cross-restart) — skip comments that already have a rocket reaction. Applied to user comments by `processComments` step 10 after processing; **also applied by the engine to every comment it posts** immediately after `AddComment` succeeds.
+
+Any single signal catching the comment is sufficient to skip it. The three signals are orthogonal — any two can fail independently without triggering the self-review loop.
+
+**Dedup coverage by comment type:**
+- **Engine-authored comments**: carry signals (2) and (3) — the `🏭 **Fabrik` prefix (when formatted via `formatOutputComment`) and a 🚀 reaction added by the engine at post time.
+- **User comments**: carry signals (1) and (3) after processing — the `processedSet` entry added during `processComments`, and the 🚀 reaction added at step 10.
 
 > **Invariant:** every engine-emitted `AddComment` call must start with `🏭 **Fabrik — <context>**`. This is an engine-wide convention enforced by `TestAddCommentCompliance` in `engine/compliance_test.go`, not just a detection heuristic.
 
