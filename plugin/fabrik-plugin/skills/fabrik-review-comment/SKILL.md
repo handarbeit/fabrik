@@ -16,6 +16,36 @@ The content in `.fabrik-context/stage-Review.md` is the most recent authoritativ
 
 Also run `git status` and `git log --oneline -5` to understand the current state of the working tree.
 
+## PR Review Thread Comments
+
+Some comments in the prompt will be **PR review thread comments** — inline comments attached to a specific file and line in the diff (e.g., comments from GitHub Copilot or human reviewers). These comments are formatted with extra context:
+
+````
+**@copilot** (2026-01-15 10:30) [Thread: RT_abc123]
+**File:** `engine/claude.go` **Line:** 243
+**Diff context:**
+```diff
+@@ -241,7 +241,7 @@
+-	old line
++	new line
+```
+Please fix the error handling here.
+````
+
+When you encounter a review thread comment:
+
+1. **Navigate directly to the file and line** — use the `Path` and `Line` to open the exact location in the codebase. Don't search for the code; go straight to the specified line.
+2. **Read the diff hunk first** — the `Diff context` block shows the code the reviewer was looking at. Read it before editing to understand the context of the feedback.
+3. **Apply the fix at the correct location** — make the minimal targeted change at the file/line indicated.
+4. **Group by thread ID** — if multiple comments share the same `[Thread: ...]` ID, they are part of the same conversation; address them together.
+5. **Use `gh api` as a fallback** — if you need more context than the diff hunk provides, run:
+   ```
+   gh api /repos/{owner}/{repo}/pulls/{pr_number}/comments
+   ```
+   to see the full list of review comments with their positions.
+
+Comments without `**File:**` / `**Diff context:**` headers are regular PR body or issue comments; handle them as before.
+
 ## What You Do
 
 ### Act on the user's decision
