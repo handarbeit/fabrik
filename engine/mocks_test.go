@@ -42,14 +42,22 @@ type mockGitHubClient struct {
 	archiveProjectItemCalls []archiveProjectItemCall
 
 	// Track calls — access under mu when accessed from concurrent goroutines.
-	addLabelCalls      []addLabelCall
-	removeLabelCalls   []removeLabelCall
-	addCommentCalls    []addCommentCall
-	updateCommentCalls []updateCommentCall
-	updateStatusCalls  []updateStatusCall
-	mergePRCalls       []mergePRCall
-	markPRReadyCalls   []markPRReadyCall
-	createDraftPRCalls []createDraftPRCall
+	addLabelCalls                    []addLabelCall
+	removeLabelCalls                 []removeLabelCall
+	addCommentCalls                  []addCommentCall
+	updateCommentCalls               []updateCommentCall
+	updateStatusCalls                []updateStatusCall
+	mergePRCalls                     []mergePRCall
+	markPRReadyCalls                 []markPRReadyCall
+	createDraftPRCalls               []createDraftPRCall
+	resolveReviewThreadCalls         []string
+	addPRReviewCommentReactionCalls  []prReviewCommentReactionCall
+}
+
+type prReviewCommentReactionCall struct {
+	owner, repo string
+	commentID   int
+	content     string
 }
 
 type fetchLabelAppliedAtCall struct {
@@ -172,10 +180,16 @@ func (m *mockGitHubClient) AddCommentReaction(owner, repo string, commentDatabas
 }
 
 func (m *mockGitHubClient) AddPRReviewCommentReaction(owner, repo string, commentDatabaseID int, content string) error {
+	m.mu.Lock()
+	m.addPRReviewCommentReactionCalls = append(m.addPRReviewCommentReactionCalls, prReviewCommentReactionCall{owner, repo, commentDatabaseID, content})
+	m.mu.Unlock()
 	return nil
 }
 
 func (m *mockGitHubClient) ResolveReviewThread(threadID string) error {
+	m.mu.Lock()
+	m.resolveReviewThreadCalls = append(m.resolveReviewThreadCalls, threadID)
+	m.mu.Unlock()
 	return nil
 }
 

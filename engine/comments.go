@@ -37,11 +37,40 @@ func (e *Engine) findNewComments(item gh.ProjectItem) []gh.Comment {
 // processComments handles new user comments on an issue.
 // Flow: 👀 reactions → editing label → invoke Claude → perform actions / update issue body → remove editing label → 🚀 reactions
 func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, comments []gh.Comment) error {
-	e.logf(item.Number, "comments", "processing %d new comment(s) — stage: %s\n",
-		len(comments), stage.Name)
-
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	iKey := issueKey(item, e.defaultRepo())
+
+	// Merge any unresolved PR review thread comments into the working slice.
+	// This ensures that when a user nudge arrives (e.g. "please address Copilot
+	// feedback"), the review thread comments are processed alongside the
+	// conversation comment without requiring a separate dispatchReviewReinvoke
+	// cycle. For non-PR-backed items LinkedPRReviewThreadComments is empty, so
+	// this is a no-op. For dispatchReviewReinvoke call sites the synthetic
+	// comments were already filtered by buildReviewThreadComments, so the merge
+	// adds nothing (ID dedup prevents duplicates).
+	if len(item.LinkedPRReviewThreadComments) > 0 {
+		existingIDs := make(map[string]bool, len(comments))
+		for _, c := range comments {
+			existingIDs[c.ID] = true
+		}
+		e.mu.Lock()
+		for _, c := range item.LinkedPRReviewThreadComments {
+			if existingIDs[c.ID] {
+				continue
+			}
+			if c.HasReaction("ROCKET") {
+				continue
+			}
+			if _, seen := e.processedSet[iKey+"-comment-"+c.ID]; seen {
+				continue
+			}
+			comments = append(comments, c)
+		}
+		e.mu.Unlock()
+	}
+
+	e.logf(item.Number, "comments", "processing %d new comment(s) — stage: %s\n",
+		len(comments), stage.Name)
 
 	// Step 1: React with 👀 to all new comments. PR review thread (inline)
 	// comments use a different REST endpoint than issue comments.
