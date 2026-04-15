@@ -20,7 +20,7 @@ Also run `git status` and `git log --oneline -5` to understand the current state
 
 Some comments in the prompt will be **PR review thread comments** — inline comments attached to a specific file and line in the diff (e.g., comments from GitHub Copilot or human reviewers). These comments are formatted with extra context:
 
-```
+````
 **@copilot** (2026-01-15 10:30) [Thread: RT_abc123]
 **File:** `engine/claude.go` **Line:** 243
 **Diff context:**
@@ -30,7 +30,7 @@ Some comments in the prompt will be **PR review thread comments** — inline com
 +	new line
 ```
 Please fix the error handling here.
-```
+````
 
 When you encounter a review thread comment:
 
