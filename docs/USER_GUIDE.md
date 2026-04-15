@@ -381,13 +381,15 @@ FABRIK_USER=my-personal-username
 | `--user` | Your GitHub username -- only processes comments by this user | required |
 | `--token` | GitHub API token | `$GITHUB_TOKEN` |
 | `--stages` | Directory containing stage YAML configs | `./.fabrik/stages` |
-| `--yolo` | Auto-advance issues through stages without human approval | `false` |
-| `--auto-upgrade` | When idle, self-upgrade from handarbeit/fabrik GitHub Releases | `false` |
+| `--yolo` | Auto-advance issues through stages without human approval; also auto-merges the linked PR when Validate completes | `false` |
+| `--auto-upgrade` | When idle, check GitHub Releases for a newer version and self-upgrade; dev builds (built from source) rebuild from `origin/main` instead | `false` |
 | `--notui` | Disable the interactive TUI dashboard | TUI on by default |
 | `--plugin-dir` | Path to Fabrik plugin directory (overrides `.fabrik/plugin/`) | auto-detected |
 | `--poll` | Poll interval in seconds | `30` |
 | `--max-concurrent` | Maximum number of concurrent issue workers | `5` |
 | `--max-retries` | Max failed stage attempts before pausing the issue (0 = unlimited) | `3` |
+| `--review-wait-timeout` | Minutes to wait for all requested PR reviewers before advancing (0 = use default of 15; also `FABRIK_REVIEW_WAIT_TIMEOUT`) | `0` (15 min) |
+| `--max-review-cycles` | Maximum number of review-and-fix cycles per issue (0 = use default of 5; also `FABRIK_MAX_REVIEW_CYCLES`) | `0` (5 cycles) |
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` | `false` |
 
 ### Environment Variables
@@ -409,8 +411,8 @@ FABRIK_USER=my-personal-username
 | `FABRIK_TUI` | `tui` | Disable TUI dashboard (`false`/`0`/`no`) | `true` |
 | `FABRIK_PLUGIN_DIR` | *(no config.yaml key)* | Override plugin directory | `.fabrik/plugin/` |
 | `FABRIK_DEBUG_OUTPUT` | `debug_output` | Save raw Claude output for debugging | `false` |
-| `FABRIK_REVIEW_WAIT_TIMEOUT` | *(no config.yaml key)* | Minutes to wait per review cycle for all requested PR reviewers to submit before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 15); also `--review-wait-timeout` CLI flag | `15` |
-| `FABRIK_MAX_REVIEW_CYCLES` | *(no config.yaml key)* | Maximum number of review re-invocation cycles per issue before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 5); also `--max-review-cycles` CLI flag | `5` |
+| `FABRIK_REVIEW_WAIT_TIMEOUT` | *(no config.yaml key)* | Minutes to wait per review cycle for all requested PR reviewers to submit before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 15) | `15` |
+| `FABRIK_MAX_REVIEW_CYCLES` | *(no config.yaml key)* | Maximum number of review re-invocation cycles per issue before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 5) | `5` |
 
 Token precedence: `--token` flag > `FABRIK_TOKEN` > `GITHUB_TOKEN`
 
