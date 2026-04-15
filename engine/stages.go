@@ -144,7 +144,7 @@ func (e *Engine) attemptMergeOnValidate(item gh.ProjectItem) error {
 
 	if err := e.client.MergePR(owner, repo, prNumber); err != nil {
 		if errors.Is(err, gh.ErrNotMergeable) {
-			msg := fmt.Sprintf("Auto-merge skipped: PR #%d is not mergeable (GitHub reports a merge conflict or the mergeable status is not yet computed). Please resolve any conflicts and merge manually.", prNumber)
+			msg := fmt.Sprintf("🏭 **Fabrik — auto-merge skipped**\n\nAuto-merge skipped: PR #%d is not mergeable (GitHub reports a merge conflict or the mergeable status is not yet computed). Please resolve any conflicts and merge manually.", prNumber)
 			if cerr := e.client.AddComment(owner, repo, item.Number, msg); cerr != nil {
 				e.logf(item.Number, "warn", "could not post unmergeable comment: %v\n", cerr)
 			}
