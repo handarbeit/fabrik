@@ -214,7 +214,7 @@ func (e *Engine) Run() error {
 	}
 
 	// Run immediately on start, then on tick
-	if err := e.poll(ctx); err != nil && ctx.Err() == nil {
+	if _, err := e.poll(ctx); err != nil && ctx.Err() == nil {
 		e.logf(0, "warn", "poll error: %v\n", err)
 	}
 	applyBackoff()
@@ -236,7 +236,7 @@ func (e *Engine) Run() error {
 				e.wg.Wait()
 				return nil
 			}
-			if err := e.poll(ctx); err != nil {
+			if _, err := e.poll(ctx); err != nil {
 				e.logf(0, "warn", "poll error: %v\n", err)
 			}
 			applyBackoff()
@@ -349,14 +349,14 @@ func (e *Engine) archiveDoneCompleteItems(projectID string, items []gh.ProjectIt
 	}
 }
 
-func (e *Engine) poll(ctx context.Context) error {
+func (e *Engine) poll(ctx context.Context) (bool, error) {
 	e.emitStructural(tui.PollStartedEvent{Owner: e.cfg.Owner, Repo: e.cfg.Repo, Project: e.cfg.ProjectNum})
 	e.logf(0, "poll", "fetching project board %s/%s#%d\n", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
 
 	board, err := e.client.FetchProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
 	if err != nil {
 		pollStatusClear()
-		return err
+		return false, err
 	}
 
 	// Fetch status field metadata (for mutations) on first poll
@@ -753,16 +753,8 @@ doneDispatching:
 		e.idleCount = 0
 	}
 
-	e.emitStructural(tui.PollCompletedEvent{
-		ItemCount:  len(board.Items),
-		Dispatched: dispatched,
-		GraphQLStats: tui.RateLimitStats{
-			Limit:     graphqlStats.Limit,
-			Remaining: graphqlStats.Remaining,
-			Reset:     graphqlStats.Reset,
-		},
-	})
-	return nil
+	active := dispatched > 0 || deepFetched > 0
+	return active, nil
 }
 
 func gitRevParse(dir, ref string) (string, error) {

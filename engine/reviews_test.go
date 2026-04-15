@@ -359,7 +359,7 @@ func TestCatchUpLoop_InFlightGuard(t *testing.T) {
 	eng.inFlight.Store(iKey, false)
 
 	ctx := context.Background()
-	if err := eng.poll(ctx); err != nil {
+	if _, err := eng.poll(ctx); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 	// Drain any goroutines (none should have been launched, but be safe).

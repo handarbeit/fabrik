@@ -33,7 +33,7 @@ func TestPoll_FetchesBoardAndProcessesItems(t *testing.T) {
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
 
-	err := eng.poll(context.Background())
+	_, err := eng.poll(context.Background())
 	if err != nil {
 		t.Fatalf("poll: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestPoll_Error(t *testing.T) {
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
 
-	err := eng.poll(context.Background())
+	_, err := eng.poll(context.Background())
 	if err == nil {
 		t.Fatal("expected error from poll")
 	}
@@ -69,7 +69,7 @@ func TestPoll_StatusFieldFetchError(t *testing.T) {
 	eng := testEngine(client, &mockClaudeInvoker{})
 
 	// Should not error — status field failure is a warning
-	err := eng.poll(context.Background())
+	_, err := eng.poll(context.Background())
 	if err != nil {
 		t.Fatalf("poll: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestPoll_StatusFieldAlreadySet(t *testing.T) {
 	eng := testEngine(client, &mockClaudeInvoker{})
 	eng.statusField = &gh.StatusField{FieldID: "already-set"}
 
-	eng.poll(context.Background())
+	_, _ = eng.poll(context.Background())
 }
 
 func TestPoll_EmptyProjectID(t *testing.T) {
@@ -106,7 +106,7 @@ func TestPoll_EmptyProjectID(t *testing.T) {
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
 
-	eng.poll(context.Background())
+	_, _ = eng.poll(context.Background())
 }
 
 func TestPoll_RateLimitLogging(t *testing.T) {
@@ -124,7 +124,7 @@ func TestPoll_RateLimitLogging(t *testing.T) {
 	eng := testEngine(client, &mockClaudeInvoker{})
 
 	// poll() must succeed and not panic when rate limit stats are non-zero.
-	if err := eng.poll(context.Background()); err != nil {
+	if _, err := eng.poll(context.Background()); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 }
@@ -142,7 +142,7 @@ func TestPoll_RateLimitLogging_ZeroReset(t *testing.T) {
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
 
-	if err := eng.poll(context.Background()); err != nil {
+	if _, err := eng.poll(context.Background()); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 }
@@ -173,7 +173,7 @@ func TestPoll_ProcessItemError(t *testing.T) {
 	)
 
 	// poll should not return error even when processItem fails
-	err := eng.poll(context.Background())
+	_, err := eng.poll(context.Background())
 	if err != nil {
 		t.Fatalf("poll should not error from processItem failures: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestPoll_CleanupStageItemNotDeepFetched(t *testing.T) {
 		wm,
 	)
 
-	if err := eng.poll(context.Background()); err != nil {
+	if _, err := eng.poll(context.Background()); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 	eng.wg.Wait()
@@ -399,7 +399,7 @@ func TestYoloCatchup_AdvancesClosedIssue(t *testing.T) {
 	eng.cfg.Yolo = true
 
 	ctx := context.Background()
-	if err := eng.poll(ctx); err != nil {
+	if _, err := eng.poll(ctx); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 
@@ -447,7 +447,7 @@ func TestYoloCatchup_SkipsNotDeepFetched(t *testing.T) {
 	eng.lastUpdatedAt["owner/repo#55"] = fixedTime
 
 	ctx := context.Background()
-	if err := eng.poll(ctx); err != nil {
+	if _, err := eng.poll(ctx); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 
@@ -481,7 +481,7 @@ func TestPoll_RateLimitWarning(t *testing.T) {
 	events := make(chan tui.Event, 64)
 	eng.events = events
 
-	if err := eng.poll(context.Background()); err != nil {
+	if _, err := eng.poll(context.Background()); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 	close(events)
@@ -607,7 +607,7 @@ func TestYoloCatchUpMergesBeforeAdvance(t *testing.T) {
 	eng := testEngineWithStages(client, testStagesWithValidate())
 
 	ctx := context.Background()
-	if err := eng.poll(ctx); err != nil {
+	if _, err := eng.poll(ctx); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 
@@ -668,7 +668,7 @@ func TestYoloCatchUpSkipsAdvanceOnMergeError(t *testing.T) {
 	eng := testEngineWithStages(client, testStagesWithValidate())
 
 	ctx := context.Background()
-	if err := eng.poll(ctx); err != nil {
+	if _, err := eng.poll(ctx); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 
@@ -724,7 +724,7 @@ func TestYoloCatchUpSkipsAdvanceOnUnprocessedComment(t *testing.T) {
 	eng := testEngineWithStages(client, testStagesWithValidate())
 
 	ctx := context.Background()
-	if err := eng.poll(ctx); err != nil {
+	if _, err := eng.poll(ctx); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 
@@ -797,7 +797,7 @@ func TestCruiseCatchUp_NonValidate_Advances(t *testing.T) {
 	eng := testEngineWithStages(client, testStagesWithValidate())
 
 	ctx := context.Background()
-	if err := eng.poll(ctx); err != nil {
+	if _, err := eng.poll(ctx); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 
@@ -851,7 +851,7 @@ func TestCruiseCatchUp_Validate_NoMergeNoAdvance(t *testing.T) {
 	eng := testEngineWithStages(client, testStagesWithValidate())
 
 	ctx := context.Background()
-	if err := eng.poll(ctx); err != nil {
+	if _, err := eng.poll(ctx); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 
@@ -906,7 +906,7 @@ func TestCruiseCatchUp_BothCruiseAndYolo_YoloWins(t *testing.T) {
 	eng := testEngineWithStages(client, testStagesWithValidate())
 
 	ctx := context.Background()
-	if err := eng.poll(ctx); err != nil {
+	if _, err := eng.poll(ctx); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 
