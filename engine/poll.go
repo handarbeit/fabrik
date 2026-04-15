@@ -597,13 +597,17 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		e.logf(0, "poll", "deep-fetched details for %d item(s)\n", deepFetched)
 	}
 
-	// Catch-up: auto-advance items that have fabrik:yolo or fabrik:cruise +
-	// stage complete but are still sitting in the completed stage's column.
-	// Operates only on deepFetchCandidates so the full label set is available.
+	// Catch-up loop: operates only on deepFetchCandidates so the full label set is available.
+	//
+	// Phase 1 (unconditional): for every non-paused, non-cleanup item with a
+	// stage:<X>:complete label, run dependency check, review gate, and review
+	// reinvoke regardless of yolo/cruise/auto_advance. This ensures inline PR
+	// review thread comments (Copilot, Gemini, human inline) are addressed on
+	// all issues, not just yolo/cruise ones.
+	//
+	// Phase 2 (gated): stage advancement, gated on yolo/cruise/auto_advance.
 	for _, item := range deepFetchCandidates {
-		if !e.cfg.Yolo && !hasYoloLabel(item) && !hasCruiseLabel(item) {
-			continue
-		}
+		// Skip paused items in both phases.
 		isPaused := false
 		for _, l := range item.Labels {
 			if l == "fabrik:paused" {
@@ -618,11 +622,6 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		if stage == nil || stage.CleanupWorktree {
 			continue
 		}
-		// cruise and yolo both override auto_advance:false on individual stages.
-		isAutoAdvance := hasYoloLabel(item) || hasCruiseLabel(item)
-		if !isAutoAdvance && stage.AutoAdvance != nil && !*stage.AutoAdvance {
-			continue
-		}
 		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
 		hasComplete := false
 		for _, l := range item.Labels {
@@ -631,74 +630,90 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 				break
 			}
 		}
-		if hasComplete {
-			if e.checkDependencies(board, item, stage) {
-				continue // blocked; checkDependencies handled label + comment
-			}
-			blocked, timedOut := e.checkReviewGate(board, item, stage)
-			if blocked {
-				continue // awaiting reviewers; checkReviewGate handled label
-			}
-			if timedOut {
-				e.pauseForReviewTimeout(board, item, stage)
-				continue
-			}
-			// Gate cleared naturally — if reviews with actionable body text were
-			// submitted, re-invoke the stage agent to address the feedback before
-			// advancing. Reviews with empty bodies (e.g. APPROVED with no comment)
-			// have nothing to address; fall through to advance as normal.
-			if syntheticComments := e.buildReviewThreadComments(item); len(syntheticComments) > 0 {
-				iKey := issueKey(item, e.defaultRepo())
-				stageKey := iKey + "-" + stage.Name
-				// Guard: if a goroutine from a previous poll cycle is still
-				// running dispatchReviewReinvoke for this item, skip the entire
-				// reinvoke path — including cycle-limit checks — to avoid
-				// pausing an item while valid work is still in progress. The
-				// goroutine clears inFlight when it exits; the next poll will
-				// re-evaluate.
-				if _, ok := e.inFlight.Load(iKey); ok {
-					e.logf(item.Number, "review-reinvoke", "skipping dispatch — review reinvoke already in-flight\n")
-					continue
-				}
-				e.mu.Lock()
-				cycleCount := e.reviewCycleCount[stageKey]
-				maxCycles := e.cfg.MaxReviewCycles
-				e.mu.Unlock()
-				if cycleCount >= maxCycles {
-					e.pauseForReviewCycleLimit(board, item, stage, cycleCount, maxCycles)
-				} else {
-					e.mu.Lock()
-					e.reviewCycleCount[stageKey]++
-					e.mu.Unlock()
-					e.dispatchReviewReinvoke(ctx, board, item, stage)
-					advancedItems[issueKey(item, e.defaultRepo())] = true
-				}
-				continue
-			}
-			if stage.Name == "Validate" {
-				// cruise stops here: skip merge and advancement, leave for human.
-				isCruiseOnly := !e.cfg.Yolo && !hasYoloLabel(item) && hasCruiseLabel(item)
-				if isCruiseOnly {
-					continue
-				}
-				if err := e.attemptMergeOnValidate(item); err != nil {
-					e.logf(item.Number, "warn", "PR not merged during catch-up: %v\n", err)
-					continue
-				}
-			}
-			if newComments := e.findNewComments(item); len(newComments) > 0 {
-				e.logf(item.Number, "advance", "auto-advance catch-up: skipping advance for stage %q — %d unprocessed comment(s) pending\n", stage.Name, len(newComments))
-				continue
-			}
-			e.logf(item.Number, "advance", "auto-advance catch-up: stage %q already complete, advancing\n", stage.Name)
-			if err := e.advanceToNextStage(board, item, stage); err != nil {
-				e.logf(item.Number, "warn", "could not advance: %v\n", err)
-			}
-			// Mark as advanced so the defer doesn't re-cache the old updatedAt.
-			// Board column moves don't bump updatedAt, so re-caching would
-			// make the item look "unchanged" on the next poll.
-			advancedItems[issueKey(item, e.defaultRepo())] = true
+		if !hasComplete {
+			continue
 		}
+
+		// Phase 1: unconditional dependency check, review gate, and review reinvoke.
+		if e.checkDependencies(board, item, stage) {
+			continue // blocked; checkDependencies handled label + comment
+		}
+		blocked, timedOut := e.checkReviewGate(board, item, stage)
+		if blocked {
+			continue // awaiting reviewers; checkReviewGate handled label
+		}
+		if timedOut {
+			e.pauseForReviewTimeout(board, item, stage)
+			continue
+		}
+		// Gate cleared naturally — if reviews with actionable body text were
+		// submitted, re-invoke the stage agent to address the feedback before
+		// advancing. Reviews with empty bodies (e.g. APPROVED with no comment)
+		// have nothing to address; fall through to Phase 2.
+		if syntheticComments := e.buildReviewThreadComments(item); len(syntheticComments) > 0 {
+			iKey := issueKey(item, e.defaultRepo())
+			stageKey := iKey + "-" + stage.Name
+			// Guard: if a goroutine from a previous poll cycle is still
+			// running dispatchReviewReinvoke for this item, skip the entire
+			// reinvoke path — including cycle-limit checks — to avoid
+			// pausing an item while valid work is still in progress. The
+			// goroutine clears inFlight when it exits; the next poll will
+			// re-evaluate.
+			if _, ok := e.inFlight.Load(iKey); ok {
+				e.logf(item.Number, "review-reinvoke", "skipping dispatch — review reinvoke already in-flight\n")
+				continue
+			}
+			e.mu.Lock()
+			cycleCount := e.reviewCycleCount[stageKey]
+			maxCycles := e.cfg.MaxReviewCycles
+			e.mu.Unlock()
+			if cycleCount >= maxCycles {
+				e.pauseForReviewCycleLimit(board, item, stage, cycleCount, maxCycles)
+			} else {
+				e.mu.Lock()
+				e.reviewCycleCount[stageKey]++
+				e.mu.Unlock()
+				e.dispatchReviewReinvoke(ctx, board, item, stage)
+				advancedItems[issueKey(item, e.defaultRepo())] = true
+			}
+			continue
+		}
+
+		// Phase 2: gated stage advancement.
+		// Gate: yolo (cfg or label), cruise label, or stage-level auto_advance:true.
+		isAutoAdvance := hasYoloLabel(item) || hasCruiseLabel(item)
+		if !e.cfg.Yolo && !isAutoAdvance && !(stage.AutoAdvance != nil && *stage.AutoAdvance) {
+			continue
+		}
+		// cruise and yolo labels override auto_advance:false on individual stages;
+		// cfg.Yolo alone does not (allows per-stage opt-out to be respected).
+		if !isAutoAdvance && stage.AutoAdvance != nil && !*stage.AutoAdvance {
+			continue
+		}
+
+		if stage.Name == "Validate" {
+			// cruise stops here: skip merge and advancement, leave for human.
+			isCruiseOnly := !e.cfg.Yolo && !hasYoloLabel(item) && hasCruiseLabel(item)
+			if isCruiseOnly {
+				continue
+			}
+			if err := e.attemptMergeOnValidate(item); err != nil {
+				e.logf(item.Number, "warn", "PR not merged during catch-up: %v\n", err)
+				continue
+			}
+		}
+		if newComments := e.findNewComments(item); len(newComments) > 0 {
+			e.logf(item.Number, "advance", "auto-advance catch-up: skipping advance for stage %q — %d unprocessed comment(s) pending\n", stage.Name, len(newComments))
+			continue
+		}
+		e.logf(item.Number, "advance", "auto-advance catch-up: stage %q already complete, advancing\n", stage.Name)
+		if err := e.advanceToNextStage(board, item, stage); err != nil {
+			e.logf(item.Number, "warn", "could not advance: %v\n", err)
+		}
+		// Mark as advanced so the defer doesn't re-cache the old updatedAt.
+		// Board column moves don't bump updatedAt, so re-caching would
+		// make the item look "unchanged" on the next poll.
+		advancedItems[issueKey(item, e.defaultRepo())] = true
 	}
 
 	var dispatched int
