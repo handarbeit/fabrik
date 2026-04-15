@@ -14,6 +14,9 @@ func (c *Client) AddComment(owner, repo string, issueNumber int, body string) (i
 	if err := c.restPostWithResponse(apiURL, payload, &resp); err != nil {
 		return 0, err
 	}
+	if resp.ID <= 0 {
+		return 0, fmt.Errorf("github: add comment response missing valid id")
+	}
 	return resp.ID, nil
 }
 
