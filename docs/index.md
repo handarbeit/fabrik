@@ -150,7 +150,8 @@ description: >-
         <div class="feature-desc">
           Each issue gets its own worktree at <code>.fabrik/worktrees/&lt;owner&gt;-&lt;repo&gt;/issue-N/</code>
           on branch <code>fabrik/issue-N</code>. Multiple issues run in parallel,
-          zero cross-contamination.
+          zero cross-contamination. The <code>base:&lt;branch&gt;</code> label overrides
+          the fork and PR target branch per issue — useful for feature branches and release trains.
         </div>
       </div>
       <div class="feature-card">
@@ -284,8 +285,10 @@ description: >-
           re-invoke the stage agent to address any unresolved inline PR review
           thread comments before advancing. Reviews with only top-level text
           (e.g., bot approvals or summary-only comments) skip re-invocation.
-          Controlled by <code>FABRIK_REVIEW_WAIT_TIMEOUT</code> (default 15
-          min per cycle) and <code>FABRIK_MAX_REVIEW_CYCLES</code> (default 5
+          Controlled by <code>--review-wait-timeout</code> /
+          <code>FABRIK_REVIEW_WAIT_TIMEOUT</code> (default 15
+          min per cycle) and <code>--max-review-cycles</code> /
+          <code>FABRIK_MAX_REVIEW_CYCLES</code> (default 5
           cycles). Timeout or cycle-limit exceeded pauses the issue with
           <code>fabrik:awaiting-input</code> for human review.
         </div>

@@ -111,7 +111,7 @@ or steer the work, and Fabrik incorporates the input into the issue.
 
 Stages with `post_to_pr: true` (like the default Review stage) post detailed
 output on the linked PR and a brief summary on the issue. The Review stage
-also rebases onto latest main and resolves merge conflicts before reviewing,
+also rebases onto the configured base branch and resolves merge conflicts before reviewing,
 keeping the PR branch clean.
 
 The Review and Validate stages ship with `wait_for_reviews: true` enabled by
@@ -130,9 +130,12 @@ three-phase reviewer gate:
    top-level review text (for example, bot approvals or summary-only
    comments)—do not trigger re-invocation, and the issue advances normally.
 
-> **Configuration:** `FABRIK_MAX_REVIEW_CYCLES` (default `5`) caps the number
-> of re-invocation cycles per session. `FABRIK_REVIEW_WAIT_TIMEOUT` (default
-> `15` minutes) sets the per-cycle wait before pausing. See
+> **Configuration:** `--max-review-cycles` / `FABRIK_MAX_REVIEW_CYCLES` (default `5`)
+> caps the number of re-invocation cycles per session. `--review-wait-timeout` /
+> `FABRIK_REVIEW_WAIT_TIMEOUT` (default `15` minutes) sets the per-cycle wait before
+> pausing. The env var is only consulted when the corresponding CLI flag is absent; if
+> `--review-wait-timeout=0` or `--max-review-cycles=0` is explicitly passed, the
+> built-in default is used and the env var is bypassed. See
 > [USER_GUIDE.md §10](docs/USER_GUIDE.md#pending-reviewer-gate) for details.
 
 If a stage doesn't complete (e.g., unfixable issues found), it retries after
@@ -247,6 +250,8 @@ GITHUB_TOKEN=ghp_...    # Fallback
 | `--notui` | Disable the interactive TUI dashboard | TUI on by default |
 | `--max-concurrent` | Maximum number of concurrent issue workers | `5` |
 | `--max-retries` | Max failed stage attempts before pausing the issue (0 = unlimited) | `3` |
+| `--review-wait-timeout` | Minutes to wait per reviewer-gate cycle before pausing; `0` or absent uses default of `15`. When explicitly set (even to `0`), `FABRIK_REVIEW_WAIT_TIMEOUT` is not consulted. | `0` |
+| `--max-review-cycles` | Max re-invocation cycles per reviewer-gate session; `0` or absent uses default of `5`. When explicitly set (even to `0`), `FABRIK_MAX_REVIEW_CYCLES` is not consulted. | `0` |
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` for debugging | `false` |
 | `--plugin-dir` | Path to Fabrik plugin directory (overrides installed plugin) | `""` |
 
@@ -294,6 +299,7 @@ Fabrik uses labels to track state:
 | `fabrik:paused` | Issue is skipped entirely — no stage processing or comment processing occurs |
 | `fabrik:awaiting-input` | Stage is paused waiting for user input; auto-clears when a new comment from the configured user (`--user`) is received |
 | `fabrik:blocked` | Issue is waiting for one or more blocking issues to close; managed automatically by the engine |
+| `fabrik:awaiting-review` | Set by the engine when a `wait_for_reviews: true` stage completes with outstanding reviewer requests; cleared when all reviewers submit (approve, request changes, or comment) or `FABRIK_REVIEW_WAIT_TIMEOUT` elapses |
 | `stage:<name>:complete` | Stage has been completed |
 | `stage:<name>:in_progress` | Stage is actively running |
 | `stage:<name>:failed` | Stage hit max retries and was paused |
@@ -302,6 +308,7 @@ Fabrik uses labels to track state:
 | `fabrik:yolo` | Force auto-advance even when `auto_advance: false`; also triggers auto-merge of the linked PR when Validate completes |
 | `fabrik:cruise` | Auto-advances through all stages like `fabrik:yolo` but stops at Validate — no auto-merge, no move to Done. If both `fabrik:cruise` and `fabrik:yolo` are present, `fabrik:yolo` takes precedence. |
 | `fabrik:unrestricted` | Pass `--dangerously-skip-permissions` to Claude Code for this issue only, bypassing the default `--permission-mode dontAsk` posture and the entire tool allowlist. Use only when a stage needs tools outside the default set (e.g. `deno`, `bun`, or other non-standard toolchains). **Caution:** removes all tool restrictions. |
+| `base:<branch>` | Override the base branch for this issue — Fabrik forks from, rebases onto, and targets PRs at `<branch>` instead of the repository default. Must be set before Research. If the branch does not exist on the remote, Fabrik falls back to the default branch and posts a comment. |
 
 ## Multi-User
 
