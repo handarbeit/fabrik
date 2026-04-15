@@ -169,23 +169,30 @@ func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output, footer, 
 	if prNumber > 0 {
 		// Post detailed output on the PR
 		comment := formatOutputComment(stageName, output, footer, branch, commit, mainSHA, timestamp)
-		if err := e.client.AddComment(owner, repo, prNumber, comment); err != nil {
+		if dbID, err := e.client.AddComment(owner, repo, prNumber, comment); err != nil {
 			e.logf(item.Number, "warn", "could not post to PR #%d: %v\n", prNumber, err)
 		} else {
 			e.logf(item.Number, "post", "detailed %s output posted to PR #%d\n", stageName, prNumber)
+			if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+				e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+			}
 		}
 
 		// Post brief summary on the issue
 		summary := formatPRSummaryComment(stageName, prNumber, output, branch, commit, mainSHA, timestamp)
-		if err := e.client.AddComment(owner, repo, item.Number, summary); err != nil {
+		if dbID, err := e.client.AddComment(owner, repo, item.Number, summary); err != nil {
 			e.logf(item.Number, "warn", "could not post summary: %v\n", err)
+		} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
 		}
 	} else {
 		// No PR found — fall back to posting on the issue
 		e.logf(item.Number, "warn", "no open PR found, posting on issue instead\n")
 		comment := formatOutputComment(stageName, output, footer, branch, commit, mainSHA, timestamp)
-		if err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
+		if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
 			e.logf(item.Number, "warn", "could not post comment: %v\n", err)
+		} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
 		}
 	}
 }

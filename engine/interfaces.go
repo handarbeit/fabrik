@@ -16,7 +16,7 @@ type GitHubClient interface {
 	FetchLabels(owner, repo string, issueNumber int) ([]string, error)
 	AddLabelToIssue(owner, repo string, issueNumber int, labelName string) error
 	RemoveLabelFromIssue(owner, repo string, issueNumber int, labelName string) error
-	AddComment(owner, repo string, issueNumber int, body string) error
+	AddComment(owner, repo string, issueNumber int, body string) (int, error)
 	AddCommentReaction(owner, repo string, commentDatabaseID int, content string) error
 	AddPRReviewCommentReaction(owner, repo string, commentDatabaseID int, content string) error
 	ResolveReviewThread(threadID string) error

@@ -121,9 +121,9 @@ func TestPostOutputToPR_WithPR_PostsToPRAndIssue(t *testing.T) {
 		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
 			return 20, nil
 		},
-		addCommentFn: func(owner, repo string, issueNumber int, body string) error {
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
 			addCommentCalls = append(addCommentCalls, addCommentCall{owner, repo, issueNumber, body})
-			return nil
+			return 0, nil
 		},
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
@@ -158,9 +158,9 @@ func TestPostOutputToPR_FindPRError_FallsBackToIssue(t *testing.T) {
 		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
 			return 0, errors.New("api error") // error + 0 PR number
 		},
-		addCommentFn: func(owner, repo string, issueNumber int, body string) error {
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
 			addCommentIssues = append(addCommentIssues, issueNumber)
-			return nil
+			return 0, nil
 		},
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
