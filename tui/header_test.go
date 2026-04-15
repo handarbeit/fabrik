@@ -102,9 +102,10 @@ func TestViewHeader_EffectiveInterval(t *testing.T) {
 	})
 	nm := next.(Model)
 
-	// The header should now show approximately "poll in 02:00" (not "00:30").
+	// The header should show approximately "poll in 02:00" (not "00:30").
+	// Allow 01:59 due to timing: time.Now() in Update vs View can differ by ~1s.
 	header := nm.header.View(nm.width)
-	if !strings.Contains(header, "02:") {
+	if !strings.Contains(header, "02:") && !strings.Contains(header, "01:59") {
 		t.Errorf("header should show ~02:xx for 2min effective interval, got: %q", header)
 	}
 	if strings.Contains(header, "00:3") {
@@ -130,7 +131,7 @@ func TestViewHeader_PollStartedUsesEffectiveInterval(t *testing.T) {
 	nm := next.(Model)
 
 	header := nm.header.View(nm.width)
-	if !strings.Contains(header, "02:") {
+	if !strings.Contains(header, "02:") && !strings.Contains(header, "01:59") {
 		t.Errorf("PollStartedEvent should use effective interval of 2min, got: %q", header)
 	}
 }
