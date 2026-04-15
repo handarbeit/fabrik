@@ -177,7 +177,7 @@ Nine distinct event types drive state transitions:
 
 **Trigger:** Claude's output contains one of the Fabrik markers. Checked after each stage invocation.
 
-**Markers and priority order** (checked in `processItem()` at lines 752-753):
+**Markers and priority order** (enforced by the `if/else if` dispatch chain in `processItem()`):
 1. `FABRIK_STAGE_COMPLETE` — highest priority; checked first via `checkCompletion()`
 2. `FABRIK_DECOMPOSED` — checked second; only honored if `completed` is false and `err == nil`
 3. `FABRIK_BLOCKED_ON_INPUT` — checked third; only honored if `completed` and `decomposed` are both false and `err == nil`
