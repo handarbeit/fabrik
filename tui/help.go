@@ -33,6 +33,7 @@ KEYBOARD SHORTCUTS
     C          Clear all history (with confirmation)
 
   Global
+    w          Wake: reset idle backoff and poll immediately
     ?          Toggle this help panel
     q          Quit
     ctrl+c     Force quit
