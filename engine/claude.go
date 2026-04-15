@@ -212,7 +212,7 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	sessFilePath := filepath.Join(sessDir, filepath.Base(stage.Name)+".session")
 	ld := logDirForItem(issue)
 
-	prompt := buildPrompt(stage, issue, newComments)
+	prompt := buildPrompt(stage, issue, newComments, opts.BaseBranch)
 	args := buildClaudeArgs(stage, sessFilePath, resume, opts.ModelOverride, stage.MaxTurns, hasUnrestrictedLabel(issue), workDir)
 
 	extraEnv := buildClaudeEnv(stage, opts.EffortOverride)
@@ -240,7 +240,7 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 	sessFilePath := filepath.Join(sessDir, filepath.Base(stage.Name)+".session")
 	ld := logDirForItem(issue)
 
-	prompt := buildCommentReviewPrompt(stage, issue, comments)
+	prompt := buildCommentReviewPrompt(stage, issue, comments, opts.BaseBranch)
 	limit := commentMaxTurns(stage)
 	args := buildClaudeArgs(stage, sessFilePath, true, opts.ModelOverride, limit, hasUnrestrictedLabel(issue), workDir) // resume existing session
 
@@ -509,7 +509,7 @@ func checkCompletion(stage *stages.Stage, output string) bool {
 	}
 }
 
-func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment) string {
+func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, baseBranch string) string {
 	var b strings.Builder
 
 	if stage.Skill != "" {
@@ -545,11 +545,17 @@ func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Com
 		}
 	}
 
+	baseBranchDesc := baseBranch
+	if baseBranchDesc == "" {
+		baseBranchDesc = "the default branch"
+	}
+
 	b.WriteString("---\n\n")
+	b.WriteString(fmt.Sprintf("The repository's default base branch is `%s`.\n\n", baseBranchDesc))
 	b.WriteString("Context files are available in `.fabrik-context/` in your working directory:\n")
 	b.WriteString("- `.fabrik-context/issue.md` — the issue body (spec)\n")
 	b.WriteString("- `.fabrik-context/stage-{Name}.md` — output from prior stages (e.g. `.fabrik-context/stage-Research.md`)\n")
-	b.WriteString("- `.fabrik-context/codebase-changes.md` — files changed on main since the last stage (if any)\n")
+	b.WriteString(fmt.Sprintf("- `.fabrik-context/codebase-changes.md` — files changed on %s since the last stage (if any)\n", baseBranchDesc))
 	if stage.PostToPR {
 		b.WriteString("- `.fabrik-context/pr-description.md` — the linked PR description\n")
 	}
@@ -571,7 +577,7 @@ func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Com
 	return b.String()
 }
 
-func buildCommentReviewPrompt(stage *stages.Stage, item gh.ProjectItem, comments []gh.Comment) string {
+func buildCommentReviewPrompt(stage *stages.Stage, item gh.ProjectItem, comments []gh.Comment, baseBranch string) string {
 	var b strings.Builder
 
 	// Use stage-specific comment skill directive if available, then CommentPrompt, then default
@@ -634,7 +640,13 @@ func buildCommentReviewPrompt(stage *stages.Stage, item gh.ProjectItem, comments
 		}
 	}
 
+	baseBranchDesc := baseBranch
+	if baseBranchDesc == "" {
+		baseBranchDesc = "the default branch"
+	}
+
 	b.WriteString("---\n\n")
+	b.WriteString(fmt.Sprintf("The repository's default base branch is `%s`.\n\n", baseBranchDesc))
 	b.WriteString("Context files are available in `.fabrik-context/` in your working directory:\n")
 	b.WriteString("- `.fabrik-context/issue.md` — the issue body (spec)\n")
 	b.WriteString("- `.fabrik-context/stage-{Name}.md` — the current stage output (e.g. `.fabrik-context/stage-Specify.md`) and prior stage outputs\n")
