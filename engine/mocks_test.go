@@ -30,7 +30,7 @@ type mockGitHubClient struct {
 	rateLimitStatsFn          func() (gh.RateLimitStats, gh.RateLimitStats)
 	getIssueBodyFn            func(owner, repo string, issueNumber int) (string, error)
 	markPRReadyFn             func(owner, repo string, prNumber int) error
-	createDraftPRFn           func(owner, repo, title, head, base string, issueNumber int) (int, error)
+	createDraftPRFn           func(owner, repo, title, head, base, body string, issueNumber int) (int, error)
 	fetchLatestReleaseFn      func(owner, repo string) (*gh.LatestRelease, error)
 	fetchLabelAppliedAtFn     func(owner, repo string, issueNumber int, labelName string) (time.Time, error)
 	archiveProjectItemFn      func(projectID, itemID string) error
@@ -69,6 +69,7 @@ type markPRReadyCall struct {
 
 type createDraftPRCall struct {
 	owner, repo, title, head, base string
+	body                           string
 	issueNumber                    int
 }
 
@@ -243,13 +244,13 @@ func (m *mockGitHubClient) GetIssueBody(owner, repo string, issueNumber int) (st
 	return "", nil
 }
 
-func (m *mockGitHubClient) CreateDraftPR(owner, repo, title, head, base string, issueNumber int) (int, error) {
+func (m *mockGitHubClient) CreateDraftPR(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
 	m.mu.Lock()
-	m.createDraftPRCalls = append(m.createDraftPRCalls, createDraftPRCall{owner, repo, title, head, base, issueNumber})
+	m.createDraftPRCalls = append(m.createDraftPRCalls, createDraftPRCall{owner, repo, title, head, base, body, issueNumber})
 	fn := m.createDraftPRFn
 	m.mu.Unlock()
 	if fn != nil {
-		return fn(owner, repo, title, head, base, issueNumber)
+		return fn(owner, repo, title, head, base, body, issueNumber)
 	}
 	return 0, nil
 }
