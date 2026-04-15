@@ -173,8 +173,10 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	if output != "" {
 		if stage.PostToPR {
 			comment := formatOutputComment(stage.Name+" (comment review)", output, "", branch, commit, mainSHA, timestamp)
-			if err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
+			if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
 				e.logf(item.Number, "warn", "could not post comment: %v\n", err)
+			} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+				e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
 			}
 		} else {
 			existing := findStageComment(item.Comments, stage.Name)
@@ -185,8 +187,10 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 					e.logf(item.Number, "warn", "could not update stage comment: %v\n", err)
 				}
 			} else {
-				if err := e.client.AddComment(owner, repo, item.Number, stageComment); err != nil {
+				if dbID, err := e.client.AddComment(owner, repo, item.Number, stageComment); err != nil {
 					e.logf(item.Number, "warn", "could not post stage comment: %v\n", err)
+				} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+					e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
 				}
 			}
 		}

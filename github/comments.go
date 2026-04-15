@@ -2,13 +2,19 @@ package github
 
 import "fmt"
 
-// AddComment posts a comment on an issue.
-func (c *Client) AddComment(owner, repo string, issueNumber int, body string) error {
+// AddComment posts a comment on an issue and returns the comment's database ID.
+func (c *Client) AddComment(owner, repo string, issueNumber int, body string) (int, error) {
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments", c.baseURL, owner, repo, issueNumber)
 	payload := map[string]interface{}{
 		"body": body,
 	}
-	return c.restPost(apiURL, payload)
+	var resp struct {
+		ID int `json:"id"`
+	}
+	if err := c.restPostWithResponse(apiURL, payload, &resp); err != nil {
+		return 0, err
+	}
+	return resp.ID, nil
 }
 
 // AddCommentReaction adds a reaction to an issue comment (or issue-level PR

@@ -34,9 +34,9 @@ func TestProcessComments_CreatesNewStageComment(t *testing.T) {
 
 	var addCommentBody string
 	client := &mockGitHubClient{
-		addCommentFn: func(owner, repo string, issueNumber int, body string) error {
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
 			addCommentBody = body
-			return nil
+			return 0, nil
 		},
 	}
 	claude := &mockClaudeInvoker{
