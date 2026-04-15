@@ -85,10 +85,18 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 	// No matching stage = nothing to do
 	stage := stages.FindStage(e.cfg.Stages, item.Status)
 
-	// Closed issues are skipped unless the current stage is a cleanup stage —
-	// cleanup stages must run after an issue closes to remove the worktree.
-	if item.IsClosed && (stage == nil || !stage.CleanupWorktree) {
-		return false
+	// Closed issues are skipped unless the current stage is a cleanup stage
+	// (so cleanup can remove the worktree) OR the current stage is marked
+	// complete (so the yolo catch-up can advance to the next stage — e.g.,
+	// a PR merge closes an issue sitting in Validate; it needs to move to
+	// Done for cleanup).
+	if item.IsClosed {
+		if stage == nil {
+			return false
+		}
+		if !stage.CleanupWorktree && !hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) {
+			return false
+		}
 	}
 
 	if stage == nil {
@@ -166,10 +174,16 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	stage := stages.FindStage(e.cfg.Stages, item.Status)
 
-	// Closed issues are skipped unless the current stage is a cleanup stage —
-	// cleanup stages must run after an issue closes to remove the worktree.
-	if item.IsClosed && (stage == nil || !stage.CleanupWorktree) {
-		return false
+	// Closed issues are skipped unless the current stage is a cleanup stage
+	// (so cleanup can remove the worktree) OR the current stage is already
+	// marked complete (so the catch-up loop can advance to the next stage).
+	if item.IsClosed {
+		if stage == nil {
+			return false
+		}
+		if !stage.CleanupWorktree && !hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) {
+			return false
+		}
 	}
 
 	if stage == nil {
