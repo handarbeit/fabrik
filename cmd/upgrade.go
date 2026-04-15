@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"crypto/sha256"
+	"flag"
 	"fmt"
 	"io"
 	"io/fs"
@@ -27,6 +28,19 @@ var upgradeGitHubClient engine.GitHubClient
 // skills are extracted. Dev builds skip the binary check and only refresh
 // plugin skills from the current binary's embedded defaults.
 func runUpgrade(args []string) error {
+	fset := flag.NewFlagSet("upgrade", flag.ContinueOnError)
+	fset.Usage = func() {
+		fmt.Fprintf(fset.Output(), "Usage: fabrik upgrade\n\n")
+		fmt.Fprintf(fset.Output(), "Upgrade the Fabrik binary and refresh embedded plugin skills.\n\n")
+		fmt.Fprintf(fset.Output(), "For release builds: downloads the latest binary from GitHub Releases and\n")
+		fmt.Fprintf(fset.Output(), "re-execs with the updated binary. For dev builds (built from source):\n")
+		fmt.Fprintf(fset.Output(), "rebuilds from origin/main rather than downloading a release binary.\n")
+		fmt.Fprintf(fset.Output(), "In both cases, embedded plugin skills are refreshed on disk.\n")
+	}
+	if err := fset.Parse(args); err != nil {
+		return err
+	}
+
 	if !strings.HasPrefix(Version, "dev") {
 		token := config.Token()
 		client := upgradeGitHubClient

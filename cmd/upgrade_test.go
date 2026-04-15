@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"flag"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -198,5 +199,14 @@ func TestCheckPluginSkillsWithReader_DifferTTYNo(t *testing.T) {
 				t.Fatalf("answer %q: expected file to remain unmodified", answer)
 			}
 		})
+	}
+}
+
+func TestRunUpgrade_HelpFlag(t *testing.T) {
+	dir := t.TempDir()
+	chdirTest(t, dir)
+	err := runUpgrade([]string{"--help"})
+	if err != flag.ErrHelp {
+		t.Errorf("expected flag.ErrHelp, got %v", err)
 	}
 }
