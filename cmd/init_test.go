@@ -88,7 +88,11 @@ func TestRunInit_WritesPluginFiles(t *testing.T) {
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chdir(orig) //nolint
+	t.Cleanup(func() {
+		if err := os.Chdir(orig); err != nil {
+			t.Fatalf("restoring working directory: %v", err)
+		}
+	})
 
 	if err := runInit([]string{}); err != nil {
 		t.Fatalf("runInit: %v", err)
@@ -113,7 +117,10 @@ func TestRunInit_WritesPluginFiles(t *testing.T) {
 
 	// Verify each embedded file was written to .fabrik/plugin/ with matching content.
 	for _, p := range embeddedPaths {
-		rel, _ := filepath.Rel("fabrik-plugin", p)
+		rel, err := filepath.Rel("fabrik-plugin", p)
+		if err != nil {
+			t.Fatalf("computing relative path for embedded plugin file %s: %v", p, err)
+		}
 		destPath := filepath.Join(dir, ".fabrik", "plugin", rel)
 
 		written, err := os.ReadFile(destPath)
