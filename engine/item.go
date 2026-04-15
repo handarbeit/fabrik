@@ -583,7 +583,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		e.logf(item.Number, "effort", "using effort override %q\n", effortOverride)
 	}
 	resume := attempted // resume session if we've processed this before
-	output, completed, usage, err := e.claude.Invoke(ctx, stage, item, nil, resume, workDir, InvokeOptions{ModelOverride: modelOverride, EffortOverride: effortOverride})
+	output, completed, usage, err := e.claude.Invoke(ctx, stage, item, nil, resume, workDir, InvokeOptions{ModelOverride: modelOverride, EffortOverride: effortOverride, BaseBranch: baseBranch})
 	if usage.TurnsUsed > 0 || usage.InputTokens > 0 || usage.OutputTokens > 0 {
 		if usage.MaxTurns > 0 {
 			e.logf(item.Number, "stats", "used %d/%d turns, %dk input / %dk output tokens\n",

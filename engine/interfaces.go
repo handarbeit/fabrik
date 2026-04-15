@@ -41,6 +41,7 @@ type GitHubClient interface {
 type InvokeOptions struct {
 	ModelOverride  string // from "model:<name>" label, overrides stage.Model
 	EffortOverride string // from "effort:<level>" label, overrides stage.EffortLevel
+	BaseBranch     string // actual default base branch for the managed repo (e.g. "develop", not always "main")
 }
 
 // ClaudeInvoker defines the interface for invoking Claude Code.
