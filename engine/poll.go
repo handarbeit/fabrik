@@ -47,10 +47,11 @@ func idleBackoffMultiplier(idleDuration time.Duration) int {
 }
 
 // computeEffectiveInterval returns the effective poll interval considering both
-// idle backoff and rate-limit backoff. The result is max(idle, rateLimit),
-// capped at maxIdleBackoff (5 minutes).
+// idle backoff and rate-limit backoff. The result is max(idle, rateLimit).
+// The idle component is capped at maxIdleBackoff (5 minutes); the rate-limit
+// component uses its own cap (rateLimitMaxBackoffMultiplier × configured).
 func computeEffectiveInterval(configuredInterval time.Duration, idleDuration time.Duration, rateLimitLow bool) time.Duration {
-	idleInterval := configuredInterval
+	var idleInterval time.Duration
 	mult := idleBackoffMultiplier(idleDuration)
 	if mult == 0 {
 		idleInterval = maxIdleBackoff
@@ -73,9 +74,6 @@ func computeEffectiveInterval(configuredInterval time.Duration, idleDuration tim
 	effective := idleInterval
 	if rateLimitInterval > effective {
 		effective = rateLimitInterval
-	}
-	if effective > maxIdleBackoff {
-		effective = maxIdleBackoff
 	}
 	return effective
 }
@@ -323,9 +321,12 @@ func (e *Engine) Run() error {
 					e.logf(0, "warn", "poll error: %v\n", err)
 				}
 			case <-e.wakeCh:
+				select {
+				case <-ticker.C:
+				default:
+				}
 				e.idleStart = time.Time{}
 				prevMultiplier = 1
-				rateLimitLow = false
 				e.logf(0, "poll", "wake requested — polling immediately\n")
 				if err := doPollCycle(); err != nil {
 					e.logf(0, "warn", "poll error: %v\n", err)
