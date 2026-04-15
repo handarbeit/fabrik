@@ -859,8 +859,8 @@ func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 	e.mu.Lock()
 	delete(e.retryCount, stageKey)
 	delete(e.pausedDueToRetries, stageKey)
-	delete(e.processedSet, stageKey) // clear cooldown so the stage retries immediately
-	delete(e.reviewCycleCount, iKey) // reset review cycle counter on unpause
+	delete(e.processedSet, stageKey)    // clear cooldown so the stage retries immediately
+	delete(e.reviewCycleCount, stageKey) // reset review cycle counter on unpause
 	e.mu.Unlock()
 }
 
