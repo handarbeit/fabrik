@@ -37,8 +37,12 @@ go vet ./...             # Lint
 - `stages/stages.go` — YAML stage config loading
 - `stages/examples/` — Default stage YAML sources, embedded in binary via `//go:embed`
 - `stages/embed.go` — Exposes embedded default stages as `stages.DefaultStages`
+- `plugin/embed.go` — `FabrikPlugin` embed.FS; source of truth for all built-in skills
+- `plugin/refresh.go` — `RefreshPlugin()` overwrites `.fabrik/plugin/` from the embedded source
 - `cmd/init.go` — `fabrik init` subcommand; extracts embedded YAMLs to `.fabrik/stages/`
 - `.fabrik/stages/` — Live stage configs for this project (tracked in git)
+
+> **Editing built-in skills**: modify `plugin/fabrik-plugin/skills/<name>/SKILL.md` — the embedded source baked into the binary. `.fabrik/plugin/` is the local deployed copy written by `fabrik init` and refreshed by `fabrik upgrade`; it is not tracked in git and edits there will be silently overwritten on the next refresh.
 
 ## Key Patterns
 
