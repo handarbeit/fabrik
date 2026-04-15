@@ -73,6 +73,10 @@ func (e *Engine) updatePRVerification(item gh.ProjectItem, prNumber int, summary
 	if summary == "" {
 		return
 	}
+	if prNumber <= 0 {
+		e.logf(item.Number, "warn", "invalid PR number %d for Verification update — skipping\n", prNumber)
+		return
+	}
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
 	currentBody, err := e.client.GetIssueBody(owner, repo, prNumber)
