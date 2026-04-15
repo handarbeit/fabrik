@@ -21,10 +21,12 @@ type commentNodeData struct {
 		} `json:"reactors"`
 	} `json:"reactionGroups"`
 	// Location fields — populated only for PR review thread comments.
+	// Line and OriginalLine are *int because the GitHub API returns null for
+	// file-level comments and outdated comments.
 	DiffHunk     string `json:"diffHunk"`
 	Path         string `json:"path"`
-	Line         int    `json:"line"`
-	OriginalLine int    `json:"originalLine"`
+	Line         *int   `json:"line"`
+	OriginalLine *int   `json:"originalLine"`
 }
 
 // itemNode mirrors one element of items.nodes in the FetchProjectBoard query.
@@ -466,12 +468,12 @@ query($id: ID!) {
 						} `json:"latestReviews"`
 						ReviewThreads struct {
 							Nodes []struct {
-								ID           string `json:"id"`
-								IsResolved   bool   `json:"isResolved"`
-								Path         string `json:"path"`
-								Line         int    `json:"line"`
-								OriginalLine int    `json:"originalLine"`
-								DiffSide     string `json:"diffSide"`
+								ID           string  `json:"id"`
+								IsResolved   bool    `json:"isResolved"`
+								Path         string  `json:"path"`
+								Line         *int    `json:"line"`
+								OriginalLine *int    `json:"originalLine"`
+								DiffSide     *string `json:"diffSide"`
 								Comments     struct {
 									Nodes []commentNodeData `json:"nodes"`
 								} `json:"comments"`
@@ -596,14 +598,21 @@ query($id: ID!) {
 
 // toComment converts raw commentNodeData into a domain Comment.
 func toComment(cm commentNodeData, fromPR int) Comment {
+	var line, originalLine int
+	if cm.Line != nil {
+		line = *cm.Line
+	}
+	if cm.OriginalLine != nil {
+		originalLine = *cm.OriginalLine
+	}
 	c := Comment{
 		ID:           cm.ID,
 		DatabaseID:   cm.DatabaseID,
 		Body:         cm.Body,
 		FromPR:       fromPR,
 		Path:         cm.Path,
-		Line:         cm.Line,
-		OriginalLine: cm.OriginalLine,
+		Line:         line,
+		OriginalLine: originalLine,
 		DiffHunk:     cm.DiffHunk,
 	}
 	if cm.Author != nil {
