@@ -112,7 +112,10 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	branch, commit, mainSHA, timestamp := captureGitMeta(workDir, baseBranch)
 
 	// Step 5: Check for stage completion marker before stripping.
+	// Capture summary before markers are stripped in-place below — once stripped,
+	// extractSummary(output) returns "" and the Verification update is silently lost.
 	completed := checkCompletion(stage, output)
+	summary := extractSummary(output)
 
 	// Step 6: Strip FABRIK_ISSUE_UPDATE block from output, then update issue body if allowed.
 	if updatedBody := extractUpdatedBody(output); updatedBody != "" {
@@ -205,11 +208,13 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 			delete(e.pausedDueToRetries, stageKey)
 			e.lastCompleted[iKey] = true
 		}()
+		var prNumber int
 		if stage.CreateDraftPR {
-			e.ensureDraftPR(item, baseBranch)
+			prNumber = e.ensureDraftPR(item, baseBranch)
+			e.updatePRVerification(item, prNumber, summary)
 		}
 		if stage.MarkPRReadyOnComplete {
-			e.markPRReady(item, 0)
+			e.markPRReady(item, prNumber)
 		}
 		e.handleStageComplete(board, item, stage)
 	} else {
