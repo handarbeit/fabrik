@@ -996,10 +996,22 @@ func TestComputeEffectiveInterval_CapAt5Min(t *testing.T) {
 
 func TestComputeEffectiveInterval_MaxIdleRateLimit(t *testing.T) {
 	// Both backoffs active: idle at max (5min) and rate limit at 2x.
-	// max(5min, 2*30s=1min) = 5min, capped at 5min.
+	// max(5min, 2*30s=1min) = 5min.
 	base := 30 * time.Second
 	got := computeEffectiveInterval(base, 25*time.Minute, true)
 	if got != 5*time.Minute {
 		t.Errorf("expected 5m, got %v", got)
+	}
+}
+
+func TestComputeEffectiveInterval_RateLimitExceeds5Min(t *testing.T) {
+	// Rate-limit backoff alone can exceed 5 minutes (the idle cap doesn't apply).
+	// With 3min base and rateLimitLow=true, rate-limit interval = 6min.
+	// Idle is not active (0 duration), so idleInterval = 3min.
+	// max(3min, 6min) = 6min — the 5min idle cap must NOT clamp this.
+	base := 3 * time.Minute
+	got := computeEffectiveInterval(base, 0, true)
+	if got != 6*time.Minute {
+		t.Errorf("expected 6m (rate-limit 2x of 3min base), got %v", got)
 	}
 }
