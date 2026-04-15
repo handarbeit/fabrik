@@ -88,7 +88,7 @@ func checkAddCommentBody(t *testing.T, fset *token.FileSet, body *ast.BlockStmt)
 			if !isCompliantAddCommentArg(bodyArg, assigns) {
 				pos := fset.Position(v.Pos())
 				t.Errorf(
-					"non-compliant AddComment body at %s:%d — body must start with %q or go through formatOutputComment/formatPRSummaryComment",
+					"non-compliant AddComment body at %s:%d — body must start with %q or go through formatOutputComment/formatPRSummaryComment/formatReviewFeedbackComment",
 					pos.Filename, pos.Line, "🏭 **Fabrik",
 				)
 			}
@@ -165,12 +165,13 @@ func isCompliantRHS(expr ast.Expr) bool {
 }
 
 // isCompliantCallExpr returns true for formatOutputComment, formatPRSummaryComment,
-// or fmt.Sprintf whose first argument is a Fabrik-header literal (or a string
-// concatenation expression whose leftmost literal is a Fabrik-header literal).
+// formatReviewFeedbackComment, or fmt.Sprintf whose first argument is a
+// Fabrik-header literal (or a string concatenation expression whose leftmost
+// literal is a Fabrik-header literal).
 func isCompliantCallExpr(call *ast.CallExpr) bool {
 	switch fn := call.Fun.(type) {
 	case *ast.Ident:
-		return fn.Name == "formatOutputComment" || fn.Name == "formatPRSummaryComment"
+		return fn.Name == "formatOutputComment" || fn.Name == "formatPRSummaryComment" || fn.Name == "formatReviewFeedbackComment"
 	case *ast.SelectorExpr:
 		// fmt.Sprintf("🏭 **Fabrik...", ...) — the first arg may be a plain literal
 		// or a binary string concatenation expression ("..." + "...").
