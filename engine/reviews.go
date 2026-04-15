@@ -150,8 +150,10 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 			"Fabrik has paused this issue. Please check the PR for pending reviews, address any issues, and then remove the `fabrik:paused` label to resume.",
 		stage.Name,
 	)
-	if err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
+	if dbID, err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
 		e.logf(item.Number, "warn", "could not post review timeout comment: %v\n", err)
+	} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+		e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
 	}
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
 		e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", err)
@@ -257,8 +259,10 @@ func (e *Engine) pauseForReviewCycleLimit(board *gh.ProjectBoard, item gh.Projec
 			"remove the `fabrik:paused` label to resume.",
 		stage.Name, cycleCount, maxCycles,
 	)
-	if err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
+	if dbID, err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
 		e.logf(item.Number, "warn", "could not post review cycle limit comment: %v\n", err)
+	} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+		e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
 	}
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
 		e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", err)

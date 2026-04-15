@@ -365,8 +365,10 @@ func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error
 		e.cloneInFlight.Delete(nameWithOwner)
 
 		msg := fmt.Sprintf("🏭 **Fabrik — cannot clone repo**\n\nFailed to clone `%s/%s`:\n```\n%v\n```\nHuman intervention required. Fix the clone issue and remove `fabrik:paused` to retry.", owner, repo, err)
-		if commentErr := e.client.AddComment(owner, repo, item.Number, msg); commentErr != nil {
+		if dbID, commentErr := e.client.AddComment(owner, repo, item.Number, msg); commentErr != nil {
 			e.logf(item.Number, "warn", "could not post clone-failure comment: %v\n", commentErr)
+		} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
 		}
 		if labelErr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); labelErr != nil {
 			e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", labelErr)

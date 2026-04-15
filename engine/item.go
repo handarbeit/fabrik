@@ -675,8 +675,10 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			e.postOutputToPR(item, stage.Name, postOutput, footer, branch, commit, mainSHA, timestamp)
 		} else {
 			comment := formatOutputComment(stage.Name, postOutput, footer, branch, commit, mainSHA, timestamp)
-			if err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
+			if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
 				e.logf(item.Number, "warn", "could not post comment: %v\n", err)
+			} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+				e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
 			}
 		}
 	}
@@ -713,8 +715,10 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	if claudeRan && err == nil && strings.TrimSpace(output) == "" {
 		e.logf(item.Number, "warn", "stage %q ran without error but produced no output\n", stage.Name)
 		warnComment := fmt.Sprintf("🏭 **Fabrik — empty stage output**\n\nStage **%s** ran without error but produced no output.", stage.Name)
-		if commentErr := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, warnComment); commentErr != nil {
+		if dbID, commentErr := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, warnComment); commentErr != nil {
 			e.logf(item.Number, "warn", "could not post empty-output warning: %v\n", commentErr)
+		} else if reactErr := e.client.AddCommentReaction(e.cfg.Owner, e.cfg.Repo, dbID, "rocket"); reactErr != nil {
+			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
 		}
 	}
 
@@ -831,8 +835,10 @@ func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 		"🏭 **Fabrik — stage failed**\n\nStage **%s** failed to complete after %d attempt(s). The issue has been paused (`fabrik:paused`).\n\nTo retry: investigate the failure, make any needed fixes, then remove the `fabrik:paused` label.",
 		stage.Name, e.cfg.MaxRetries,
 	)
-	if err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
+	if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
 		e.logf(item.Number, "warn", "could not post escalation comment: %v\n", err)
+	} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+		e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
 	}
 
 	stageKey := issueKey(item, e.defaultRepo()) + "-" + stage.Name
@@ -1005,8 +1011,10 @@ func (e *Engine) baseBranchForItem(item gh.ProjectItem, wm *WorktreeManager) (st
 	warnKey := fmt.Sprintf("%s/%s#%d:%s", owner, repo, item.Number, candidate)
 	if _, alreadyWarned := e.baseBranchWarnedSet.LoadOrStore(warnKey, true); !alreadyWarned {
 		body := fmt.Sprintf("🏭 **Fabrik — base branch not found**\n\nFabrik could not find branch `%s` on the remote (from `base:%s` label). Falling back to the repository default branch.", candidate, candidate)
-		if err := e.client.AddComment(owner, repo, item.Number, body); err != nil {
+		if dbID, err := e.client.AddComment(owner, repo, item.Number, body); err != nil {
 			e.logf(item.Number, "warn", "could not post base branch fallback comment: %v\n", err)
+		} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
 		}
 	}
 	return wm.DefaultBaseBranch()
