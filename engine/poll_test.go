@@ -368,10 +368,11 @@ func TestCleanupClosedIssueLocks_NoLock(t *testing.T) {
 	}
 }
 
-// TestYoloCatchup_SkipsClosedIssue verifies that the yolo catch-up loop does
-// not call UpdateProjectItemStatus for a closed issue that has a stage-complete
-// label, even when yolo mode is active.
-func TestYoloCatchup_SkipsClosedIssue(t *testing.T) {
+// TestYoloCatchup_AdvancesClosedIssue verifies that the yolo catch-up loop
+// DOES advance a closed issue whose current stage is marked complete — this
+// is the common "PR merge closes issue sitting in Validate, need to move to
+// Done" path. Without this, closed issues get stuck forever.
+func TestYoloCatchup_AdvancesClosedIssue(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{
@@ -405,8 +406,8 @@ func TestYoloCatchup_SkipsClosedIssue(t *testing.T) {
 	client.mu.Lock()
 	n := len(client.updateStatusCalls)
 	client.mu.Unlock()
-	if n != 0 {
-		t.Errorf("expected no UpdateProjectItemStatus calls for closed issue, got %d", n)
+	if n != 1 {
+		t.Errorf("expected 1 UpdateProjectItemStatus call to advance closed issue, got %d", n)
 	}
 }
 
