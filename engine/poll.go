@@ -27,6 +27,57 @@ const rateLimitBackoffThreshold = 0.20
 // configured poll interval (e.g. 10× = 10 * PollSeconds).
 const rateLimitMaxBackoffMultiplier = 10
 
+// maxIdleBackoff is the absolute maximum poll interval during idle backoff,
+// regardless of the configured poll interval.
+const maxIdleBackoff = 5 * time.Minute
+
+// idleBackoffMultiplier returns the backoff multiplier for the given idle duration.
+// Schedule: 0–5min → 1x, 5–10min → 2x, 10–20min → 4x, 20+ min → 0 (use maxIdleBackoff).
+func idleBackoffMultiplier(idleDuration time.Duration) int {
+	switch {
+	case idleDuration < 5*time.Minute:
+		return 1
+	case idleDuration < 10*time.Minute:
+		return 2
+	case idleDuration < 20*time.Minute:
+		return 4
+	default:
+		return 0
+	}
+}
+
+// computeEffectiveInterval returns the effective poll interval considering both
+// idle backoff and rate-limit backoff. The result is max(idle, rateLimit).
+// The idle component is capped at maxIdleBackoff (5 minutes); the rate-limit
+// component uses its own cap (rateLimitMaxBackoffMultiplier × configured).
+func computeEffectiveInterval(configuredInterval time.Duration, idleDuration time.Duration, rateLimitLow bool) time.Duration {
+	var idleInterval time.Duration
+	mult := idleBackoffMultiplier(idleDuration)
+	if mult == 0 {
+		idleInterval = maxIdleBackoff
+	} else {
+		idleInterval = configuredInterval * time.Duration(mult)
+	}
+	if idleInterval > maxIdleBackoff {
+		idleInterval = maxIdleBackoff
+	}
+
+	rateLimitInterval := configuredInterval
+	if rateLimitLow {
+		rateLimitInterval = configuredInterval * 2
+		maxRL := configuredInterval * time.Duration(rateLimitMaxBackoffMultiplier)
+		if rateLimitInterval > maxRL {
+			rateLimitInterval = maxRL
+		}
+	}
+
+	effective := idleInterval
+	if rateLimitInterval > effective {
+		effective = rateLimitInterval
+	}
+	return effective
+}
+
 // isTTY reports whether stdout is connected to a terminal.
 var isTTY = func() bool {
 	fi, err := os.Stdout.Stat()
@@ -182,64 +233,121 @@ func (e *Engine) Run() error {
 	ticker := time.NewTicker(configuredInterval)
 	defer ticker.Stop()
 
-	backoffActive := false
+	prevMultiplier := 1
+	rateLimitLow := false
 
-	// applyBackoff checks the current GraphQL rate limit after a poll and adjusts
-	// the ticker interval. When remaining < threshold, the interval is doubled
-	// (capped at rateLimitMaxBackoffMultiplier× configured). When recovered, the
-	// configured interval is restored. Uses wait-then-new-interval semantics:
-	// ticker.Reset() after poll() means the next tick arrives after the new interval.
-	applyBackoff := func() {
-		_, graphqlStats := e.client.RateLimitStats()
-		if graphqlStats.Limit <= 0 {
-			return
+	// doPollCycle runs poll(), updates idle/backoff state, emits PollCompletedEvent,
+	// and resets the ticker to the effective interval. Returns the error from poll().
+	doPollCycle := func() error {
+		result, err := e.poll(ctx)
+		if err != nil {
+			return err
 		}
-		ratio := float64(graphqlStats.Remaining) / float64(graphqlStats.Limit)
-		if ratio < rateLimitBackoffThreshold && !backoffActive {
-			backoffInterval := configuredInterval * 2
-			maxInterval := configuredInterval * time.Duration(rateLimitMaxBackoffMultiplier)
-			if backoffInterval > maxInterval {
-				backoffInterval = maxInterval
+
+		// Update idle timer.
+		if result.Active {
+			if !e.idleStart.IsZero() {
+				e.logf(0, "poll", "activity detected — idle backoff reset, poll interval restored to %v\n", configuredInterval)
 			}
-			ticker.Reset(backoffInterval)
-			backoffActive = true
-			e.logf(0, "warn", "GraphQL rate limit low (%.0f%% remaining) — poll interval doubled to %v\n",
-				ratio*100, backoffInterval)
-		} else if ratio >= rateLimitBackoffThreshold && backoffActive {
-			ticker.Reset(configuredInterval)
-			backoffActive = false
-			e.logf(0, "poll", "GraphQL rate limit recovered (%.0f%% remaining) — poll interval restored to %v\n",
-				ratio*100, configuredInterval)
+			e.idleStart = time.Time{}
+		} else if e.idleStart.IsZero() {
+			e.idleStart = time.Now()
 		}
+
+		// Update rate-limit state.
+		_, graphqlStats := e.client.RateLimitStats()
+		if graphqlStats.Limit > 0 {
+			ratio := float64(graphqlStats.Remaining) / float64(graphqlStats.Limit)
+			wasLow := rateLimitLow
+			rateLimitLow = ratio < rateLimitBackoffThreshold
+			if rateLimitLow && !wasLow {
+				e.logf(0, "warn", "GraphQL rate limit low (%.0f%% remaining) — activating rate-limit backoff\n", ratio*100)
+			} else if !rateLimitLow && wasLow {
+				e.logf(0, "poll", "GraphQL rate limit recovered (%.0f%% remaining)\n", ratio*100)
+			}
+		}
+
+		// Compute and apply effective interval.
+		var idleDuration time.Duration
+		if !e.idleStart.IsZero() {
+			idleDuration = time.Since(e.idleStart)
+		}
+		effectiveInterval := computeEffectiveInterval(configuredInterval, idleDuration, rateLimitLow)
+
+		// Log backoff level transitions.
+		mult := idleBackoffMultiplier(idleDuration)
+		if mult != prevMultiplier && !e.idleStart.IsZero() {
+			if mult == 0 {
+				e.logf(0, "poll", "idle backoff: max (%v)\n", effectiveInterval)
+			} else if mult > 1 {
+				e.logf(0, "poll", "idle backoff: %dx (%v)\n", mult, effectiveInterval)
+			}
+			prevMultiplier = mult
+		}
+		if result.Active {
+			prevMultiplier = 1
+		}
+
+		ticker.Reset(effectiveInterval)
+
+		e.emitStructural(tui.PollCompletedEvent{
+			ItemCount:         result.ItemCount,
+			Dispatched:        result.Dispatched,
+			GraphQLStats:      tui.RateLimitStats{Limit: graphqlStats.Limit, Remaining: graphqlStats.Remaining, Reset: graphqlStats.Reset},
+			EffectiveInterval: effectiveInterval,
+		})
+		return nil
 	}
 
 	// Run immediately on start, then on tick
-	if err := e.poll(ctx); err != nil && ctx.Err() == nil {
+	if err := doPollCycle(); err != nil && ctx.Err() == nil {
 		e.logf(0, "warn", "poll error: %v\n", err)
 	}
-	applyBackoff()
 
 	for {
-		select {
-		case <-ctx.Done():
-			// Signal goroutine called cancel(); poll() returned because
-			// CommandContext killed the child processes.
-			e.cleanupLockedIssues()
-			// Wait for all worker goroutines before returning.
-			// emitStructural now sends synchronously, so events are in the buffer
-			// before wg.Done() fires — no separate structuralWg needed.
-			e.wg.Wait()
-			return nil
-		case <-ticker.C:
-			if ctx.Err() != nil {
+		if e.wakeCh != nil {
+			select {
+			case <-ctx.Done():
 				e.cleanupLockedIssues()
 				e.wg.Wait()
 				return nil
+			case <-ticker.C:
+				if ctx.Err() != nil {
+					e.cleanupLockedIssues()
+					e.wg.Wait()
+					return nil
+				}
+				if err := doPollCycle(); err != nil {
+					e.logf(0, "warn", "poll error: %v\n", err)
+				}
+			case <-e.wakeCh:
+				select {
+				case <-ticker.C:
+				default:
+				}
+				e.idleStart = time.Time{}
+				prevMultiplier = 1
+				e.logf(0, "poll", "wake requested — polling immediately\n")
+				if err := doPollCycle(); err != nil {
+					e.logf(0, "warn", "poll error: %v\n", err)
+				}
 			}
-			if err := e.poll(ctx); err != nil {
-				e.logf(0, "warn", "poll error: %v\n", err)
+		} else {
+			select {
+			case <-ctx.Done():
+				e.cleanupLockedIssues()
+				e.wg.Wait()
+				return nil
+			case <-ticker.C:
+				if ctx.Err() != nil {
+					e.cleanupLockedIssues()
+					e.wg.Wait()
+					return nil
+				}
+				if err := doPollCycle(); err != nil {
+					e.logf(0, "warn", "poll error: %v\n", err)
+				}
 			}
-			applyBackoff()
 		}
 	}
 }
@@ -349,14 +457,20 @@ func (e *Engine) archiveDoneCompleteItems(projectID string, items []gh.ProjectIt
 	}
 }
 
-func (e *Engine) poll(ctx context.Context) error {
+type pollResult struct {
+	Active     bool
+	ItemCount  int
+	Dispatched int
+}
+
+func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	e.emitStructural(tui.PollStartedEvent{Owner: e.cfg.Owner, Repo: e.cfg.Repo, Project: e.cfg.ProjectNum})
 	e.logf(0, "poll", "fetching project board %s/%s#%d\n", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
 
 	board, err := e.client.FetchProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
 	if err != nil {
 		pollStatusClear()
-		return err
+		return pollResult{}, err
 	}
 
 	// Fetch status field metadata (for mutations) on first poll
@@ -753,16 +867,11 @@ doneDispatching:
 		e.idleCount = 0
 	}
 
-	e.emitStructural(tui.PollCompletedEvent{
+	return pollResult{
+		Active:     dispatched > 0 || deepFetched > 0,
 		ItemCount:  len(board.Items),
 		Dispatched: dispatched,
-		GraphQLStats: tui.RateLimitStats{
-			Limit:     graphqlStats.Limit,
-			Remaining: graphqlStats.Remaining,
-			Reset:     graphqlStats.Reset,
-		},
-	})
-	return nil
+	}, nil
 }
 
 func gitRevParse(dir, ref string) (string, error) {

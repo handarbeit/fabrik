@@ -26,7 +26,7 @@ func redirectHistory(t *testing.T) {
 // TestUpdate_JK_HistoryPane verifies j/k navigation in the history pane.
 func TestUpdate_JK_HistoryPane(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.width = 80
 	m.height = 24
 	m.focusPane = paneHistory
@@ -59,7 +59,7 @@ func TestUpdate_JK_HistoryPane(t *testing.T) {
 // TestUpdate_CKey_DeletesHistoryEntry verifies c removes the selected entry.
 func TestUpdate_CKey_DeletesHistoryEntry(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.width = 80
 	m.height = 24
 	m.focusPane = paneHistory
@@ -80,7 +80,7 @@ func TestUpdate_CKey_DeletesHistoryEntry(t *testing.T) {
 
 // TestUpdate_CKey_EmptyHistory_NoOp verifies c is a no-op with no history.
 func TestUpdate_CKey_EmptyHistory_NoOp(t *testing.T) {
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.focusPane = paneHistory
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
 	if cmd != nil {
@@ -92,7 +92,7 @@ func TestUpdate_CKey_EmptyHistory_NoOp(t *testing.T) {
 // viewport area scrolls the YOffset down, and navigating back up scrolls it up.
 func TestUpdate_ScrollToVisible(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.width = 80
 	m.height = 24
 	m.focusPane = paneHistory
@@ -149,7 +149,7 @@ func TestUpdate_ScrollToVisible(t *testing.T) {
 // resets the viewport to the top regardless of the current selection position.
 func TestUpdate_JobCompletedScrollsToTop(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.width = 80
 	m.height = 24
 	m.focusPane = paneHistory
@@ -183,7 +183,7 @@ func TestUpdate_JobCompletedScrollsToTop(t *testing.T) {
 // TestUpdate_CapitalC_ClearAll verifies two C presses clear all history.
 func TestUpdate_CapitalC_ClearAll(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.width = 80
 	m.height = 24
 	m.focusPane = paneHistory
@@ -213,7 +213,7 @@ func TestUpdate_CapitalC_ClearAll(t *testing.T) {
 
 // TestUpdate_QuitDuringConfirmClear_Cancels verifies q cancels confirmClear state.
 func TestUpdate_QuitDuringConfirmClear_Cancels(t *testing.T) {
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.history.SetConfirmClear(true)
 	m.focusPane = paneHistory
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
@@ -228,7 +228,7 @@ func TestUpdate_QuitDuringConfirmClear_Cancels(t *testing.T) {
 
 // TestUpdate_NKey_CancelsConfirmClear verifies n cancels the clear confirmation.
 func TestUpdate_NKey_CancelsConfirmClear(t *testing.T) {
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.history.SetConfirmClear(true)
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
 	nm := next.(Model)
@@ -240,7 +240,7 @@ func TestUpdate_NKey_CancelsConfirmClear(t *testing.T) {
 // TestViewHistory_ConfirmClear verifies the confirmation prompt is shown.
 func TestViewHistory_ConfirmClear(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.width = 80
 	m.height = 24
 	m.focusPane = paneHistory
@@ -255,7 +255,7 @@ func TestViewHistory_ConfirmClear(t *testing.T) {
 // TestViewHistory_IsComment verifies the 💬 emoji appears for comment history entries.
 func TestViewHistory_IsComment(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.width = 80
 	m.height = 24
 	m.history.history = []HistoryEntry{{IssueNumber: 5, StageName: "Implement", IsComment: true, Success: true}}
@@ -270,7 +270,7 @@ func TestViewHistory_IsComment(t *testing.T) {
 // TestViewHistory_ConfirmQuit verifies the quit confirmation prompt is shown in viewHistory.
 func TestViewHistory_ConfirmQuit(t *testing.T) {
 	redirectHistory(t)
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.width = 80
 	m.height = 24
 	key42 := activeJobKey("", 42)
@@ -393,7 +393,7 @@ func TestLoadHistory_Dedup(t *testing.T) {
 func TestJobCompletedEvent_Dedup(t *testing.T) {
 	redirectHistory(t)
 
-	m := New(30, ProjectInfo{}, "")
+	m := New(30, ProjectInfo{}, "", nil)
 	m.width = 80
 	m.height = 24
 

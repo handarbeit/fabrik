@@ -491,7 +491,7 @@ func TestPoll_DeepFetchFailureExcludesFromLastUpdatedAt(t *testing.T) {
 	eng.cfg.PollSeconds = 999 // very long cooldown so we don't accidentally bypass
 
 	ctx := t.Context()
-	if err := eng.poll(ctx); err != nil {
+	if _, err := eng.poll(ctx); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 
@@ -534,7 +534,7 @@ func TestPoll_DeepFetchSuccessClearsFailureTime(t *testing.T) {
 	eng.mu.Unlock()
 
 	ctx := t.Context()
-	if err := eng.poll(ctx); err != nil {
+	if _, err := eng.poll(ctx); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 
