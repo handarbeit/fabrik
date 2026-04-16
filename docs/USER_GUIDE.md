@@ -1109,6 +1109,22 @@ Model label precedence: `model:<name>` label > stage YAML `model` field > defaul
 
 Effort label precedence: `max > high > medium > low`. If multiple `effort:` labels are present, the highest-ranked value wins and a warning is logged.
 
+### Advanced: `base:<branch>` timing
+
+The `base:<branch>` label is read on every stage invocation, so a change takes effect from the next stage onward. However, Fabrik cannot retroactively re-create past work — the issue branch is forked once, commits accumulate on it, and the PR is opened once. The later you apply or change the label, the more of that history is already locked to the original base.
+
+| When applied | Effect |
+|---|---|
+| **Before any stage runs** | Clean. The issue branch is forked from the specified base, all commits stack on the right base, the PR targets the right base. This is the intended path. |
+| **After Specify, before Research** | Fairly clean. The worktree exists but no commits yet. The next stage's `updateWorktreeFromMain` rebases onto the new base — usually no conflict. |
+| **After Research, before Implement** | Similar — Research is read-only, so no commits. Rebase onto the new base works. |
+| **After Implement (commits exist, no PR yet)** | Messy. The issue branch has commits forked from the old base. Rebase onto the new base may produce conflicts that Claude must resolve. The PR, when created, will target the new base correctly. |
+| **After PR creation** | **Broken without manual intervention today.** The PR's base is set at creation time. Fabrik does not currently update the PR's base when the label changes, so the PR keeps targeting the old base even though new stage runs use the new base. Tracking the fix in issue #416. Workaround: edit the PR's base branch manually via the GitHub UI, or close the PR and delete the issue branch to let Fabrik recreate it. |
+
+**Natural language in the issue body is NOT parsed.** Writing "use the `develop` branch" in the Problem section has no effect on Fabrik's base-branch selection. The `base:<branch>` label is the only structured signal.
+
+If the named branch does not exist on the remote, Fabrik falls back to the repository's default branch and posts a comment on the issue explaining the fallback. Fabrik keeps `refs/remotes/origin/HEAD` in sync with the remote's current default branch on every fetch, so a default-branch change on the remote (after Fabrik initially cloned the repo) is detected automatically on the next stage invocation.
+
 ---
 
 ## 7. Permissions
