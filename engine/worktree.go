@@ -66,6 +66,15 @@ func ensureBareClone(baseDir, owner, repo string, useSSH bool) (string, error) {
 		cmd := exec.Command("git", "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*")
 		cmd.Dir = bareDir
 		cmd.CombinedOutput() // best-effort
+
+		// Sync refs/remotes/origin/HEAD with the remote's current default
+		// branch. Without this, a default-branch change on the remote after
+		// the initial clone leaves the local symref stale, and
+		// DefaultBaseBranch returns the wrong branch — causing PRs to target
+		// the wrong base and Closes #N auto-close to not fire.
+		refreshCmd := exec.Command("git", "remote", "set-head", "origin", "--auto")
+		refreshCmd.Dir = bareDir
+		refreshCmd.CombinedOutput() // best-effort
 		return bareDir, nil
 	}
 
@@ -89,6 +98,21 @@ func ensureBareClone(baseDir, owner, repo string, useSSH bool) (string, error) {
 	cfgCmd := exec.Command("git", "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
 	cfgCmd.Dir = bareDir
 	cfgCmd.CombinedOutput() // best-effort
+
+	// Initial fetch so refs/remotes/origin/* is populated before we set HEAD.
+	fetchCmd := exec.Command("git", "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*")
+	fetchCmd.Dir = bareDir
+	fetchCmd.CombinedOutput() // best-effort
+
+	// Set refs/remotes/origin/HEAD to the remote's current default branch.
+	// git clone --bare sets the bare clone's own HEAD correctly at clone
+	// time, but does not create refs/remotes/origin/HEAD — which is what
+	// DefaultBaseBranch's step 1 looks at. Without this, step 1 fails and
+	// the ladder falls through to the bare clone's local HEAD, which
+	// becomes stale if the remote's default branch changes later.
+	refreshCmd := exec.Command("git", "remote", "set-head", "origin", "--auto")
+	refreshCmd.Dir = bareDir
+	refreshCmd.CombinedOutput() // best-effort
 
 	return bareDir, nil
 }
@@ -488,16 +512,25 @@ func (wm *WorktreeManager) Prune() {
 // DefaultBaseBranch returns the default branch of the repo.
 // It uses a three-step fallback ladder to determine the actual remote default
 // branch without relying on hard-coded names like "main" or "master":
-//  1. git symbolic-ref refs/remotes/origin/HEAD — works for non-bare clones
-//     where origin/HEAD has been set.
-//  2. git symbolic-ref HEAD — works for bare clones; git clone --bare always
-//     sets the bare clone's own HEAD to the remote's default branch.
-//  3. git ls-remote --symref origin HEAD — network round-trip; last resort for
-//     edge cases where neither local symref is available.
+//  1. git symbolic-ref refs/remotes/origin/HEAD — kept fresh by ensureBareClone
+//     running `git remote set-head origin --auto` on every entry, so this
+//     reflects the remote's current default branch.
+//  2. git ls-remote --symref origin HEAD — authoritative network round-trip,
+//     used when refs/remotes/origin/HEAD is missing (e.g. set-head failed at
+//     clone time due to a transient network error).
+//  3. git symbolic-ref HEAD — the bare clone's own HEAD, frozen at clone time.
+//     Last-resort fallback when both local origin/HEAD and the network lookup
+//     are unavailable; may be STALE if the remote default branch changed
+//     after the initial clone.
+//
+// Step 2 is ordered before step 3 intentionally: the bare clone's local HEAD
+// is never refreshed after clone time, so trusting it over the authoritative
+// remote lookup caused PRs to target stale defaults (e.g. targeting `main`
+// after a repo's default branch was changed to `develop`).
 //
 // Returns an error if the default branch cannot be determined.
 func (wm *WorktreeManager) DefaultBaseBranch() (string, error) {
-	// Step 1: Try refs/remotes/origin/HEAD (set by non-bare clones).
+	// Step 1: Try refs/remotes/origin/HEAD (kept fresh by ensureBareClone).
 	cmd := exec.Command("git", "symbolic-ref", "refs/remotes/origin/HEAD")
 	cmd.Dir = wm.baseDir
 	if out, err := cmd.Output(); err == nil {
@@ -508,18 +541,7 @@ func (wm *WorktreeManager) DefaultBaseBranch() (string, error) {
 		}
 	}
 
-	// Step 2: Try the bare clone's own HEAD symref (set by git clone --bare).
-	cmd = exec.Command("git", "symbolic-ref", "HEAD")
-	cmd.Dir = wm.baseDir
-	if out, err := cmd.Output(); err == nil {
-		ref := strings.TrimSpace(string(out))
-		parts := strings.Split(ref, "/")
-		if len(parts) > 0 && parts[len(parts)-1] != "" {
-			return parts[len(parts)-1], nil
-		}
-	}
-
-	// Step 3: Network round-trip via git ls-remote.
+	// Step 2: Network round-trip via git ls-remote — authoritative.
 	cmd = exec.Command("git", "ls-remote", "--symref", "origin", "HEAD")
 	cmd.Dir = wm.baseDir
 	if out, err := cmd.Output(); err == nil {
@@ -532,6 +554,20 @@ func (wm *WorktreeManager) DefaultBaseBranch() (string, error) {
 					return fields[0], nil
 				}
 			}
+		}
+	}
+
+	// Step 3: Last-resort — the bare clone's own HEAD, frozen at clone time.
+	// This may be STALE if the remote default changed after the clone, but
+	// it's the only thing we have when both the local origin/HEAD and the
+	// network are unavailable.
+	cmd = exec.Command("git", "symbolic-ref", "HEAD")
+	cmd.Dir = wm.baseDir
+	if out, err := cmd.Output(); err == nil {
+		ref := strings.TrimSpace(string(out))
+		parts := strings.Split(ref, "/")
+		if len(parts) > 0 && parts[len(parts)-1] != "" {
+			return parts[len(parts)-1], nil
 		}
 	}
 
