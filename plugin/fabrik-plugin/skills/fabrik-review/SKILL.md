@@ -152,6 +152,17 @@ Reviewed implementation of <feature>. Fixed N issues (describe briefly). Tests p
 FABRIK_SUMMARY_END
 ```
 
+### Numbering findings in your output
+
+When you list or number multiple findings — from Copilot, Gemini, human reviewers, or your own review — **do not use bare `#N` ordinals**. GitHub renders any bare `#N` in a comment body as a cross-reference to issue/PR N in the same repository. Unrelated issues get auto-linked with their titles surfaced in hovercards and previews, which looks like you're quoting unrelated work into the review.
+
+Use bracketed or descriptive numbering instead:
+
+- ✅ `Copilot [1]`, `Copilot finding 1`, `thread (2)`
+- ❌ `Copilot #1`, `Gemini #2`
+
+This applies anywhere in your output that reaches a GitHub comment body — Review findings, thread references, file enumerations, or any list.
+
 ## What You Do NOT Do
 
 - **Do not rewrite the implementation** — fix issues, don't redesign
