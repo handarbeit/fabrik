@@ -296,3 +296,84 @@ func TestFetchLinkedPR_NotFound(t *testing.T) {
 		t.Errorf("expected nil PR for empty response, got %+v", pr)
 	}
 }
+
+func TestGetPRBase_DecodesBaseRef(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if r.URL.Path != "/repos/owner/repo/pulls/42" {
+			t.Errorf("path = %s, want /repos/owner/repo/pulls/42", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"base": map[string]string{"ref": "feature/foo"},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	base, err := c.GetPRBase("owner", "repo", 42)
+	if err != nil {
+		t.Fatalf("GetPRBase: %v", err)
+	}
+	if base != "feature/foo" {
+		t.Errorf("base = %q, want %q", base, "feature/foo")
+	}
+}
+
+func TestGetPRBase_Error(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404)
+		w.Write([]byte(`{"message":"Not Found"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	_, err := c.GetPRBase("owner", "repo", 999)
+	if err == nil {
+		t.Fatal("expected error for 404 response")
+	}
+}
+
+func TestUpdatePRBase_SendsPatchWithBase(t *testing.T) {
+	var gotMethod, gotPath string
+	var gotBody map[string]interface{}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]interface{}{"number": 42})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	if err := c.UpdatePRBase("owner", "repo", 42, "feature/bar"); err != nil {
+		t.Fatalf("UpdatePRBase: %v", err)
+	}
+	if gotMethod != "PATCH" {
+		t.Errorf("method = %s, want PATCH", gotMethod)
+	}
+	if gotPath != "/repos/owner/repo/pulls/42" {
+		t.Errorf("path = %s, want /repos/owner/repo/pulls/42", gotPath)
+	}
+	if gotBody["base"] != "feature/bar" {
+		t.Errorf("body[base] = %v, want %q", gotBody["base"], "feature/bar")
+	}
+}
+
+func TestUpdatePRBase_Error(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(422)
+		w.Write([]byte(`{"message":"Validation Failed"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	err := c.UpdatePRBase("owner", "repo", 42, "nonexistent-branch")
+	if err == nil {
+		t.Fatal("expected error for 422 response")
+	}
+}
