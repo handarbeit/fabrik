@@ -563,6 +563,95 @@ func TestFormatReviewFeedbackComment_TruncatesLongOutput(t *testing.T) {
 	}
 }
 
+// ── syncPRBase ────────────────────────────────────────────────────────────────
+
+func TestSyncPRBase_NoPR_NoUpdateAttempted(t *testing.T) {
+	client := &mockGitHubClient{
+		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
+			return 0, nil // no PR
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	item := gh.ProjectItem{Number: 1}
+
+	eng.syncPRBase(item, "main") // must not panic or call UpdatePRBase
+
+	if len(client.updatePRBaseCalls) != 0 {
+		t.Errorf("UpdatePRBase should not be called when no PR exists, got %d calls", len(client.updatePRBaseCalls))
+	}
+	if len(client.getPRBaseCalls) != 0 {
+		t.Errorf("GetPRBase should not be called when no PR exists, got %d calls", len(client.getPRBaseCalls))
+	}
+}
+
+func TestSyncPRBase_MatchingBase_NoUpdateAttempted(t *testing.T) {
+	client := &mockGitHubClient{
+		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
+			return 42, nil
+		},
+		getPRBaseFn: func(owner, repo string, prNumber int) (string, error) {
+			return "main", nil
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	item := gh.ProjectItem{Number: 1}
+
+	eng.syncPRBase(item, "main") // base matches — no update
+
+	if len(client.updatePRBaseCalls) != 0 {
+		t.Errorf("UpdatePRBase should not be called when base already matches, got %d calls", len(client.updatePRBaseCalls))
+	}
+}
+
+func TestSyncPRBase_MismatchedBase_UpdatesExactlyOnce(t *testing.T) {
+	client := &mockGitHubClient{
+		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
+			return 42, nil
+		},
+		getPRBaseFn: func(owner, repo string, prNumber int) (string, error) {
+			return "main", nil // current base
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	item := gh.ProjectItem{Number: 1}
+
+	eng.syncPRBase(item, "feature/foo") // desired base differs
+
+	if len(client.updatePRBaseCalls) != 1 {
+		t.Fatalf("expected exactly 1 UpdatePRBase call, got %d", len(client.updatePRBaseCalls))
+	}
+	got := client.updatePRBaseCalls[0]
+	if got.prNumber != 42 {
+		t.Errorf("UpdatePRBase called with PR #%d, want 42", got.prNumber)
+	}
+	if got.newBase != "feature/foo" {
+		t.Errorf("UpdatePRBase called with base %q, want %q", got.newBase, "feature/foo")
+	}
+}
+
+func TestSyncPRBase_UpdateError_StageContinues(t *testing.T) {
+	client := &mockGitHubClient{
+		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
+			return 42, nil
+		},
+		getPRBaseFn: func(owner, repo string, prNumber int) (string, error) {
+			return "main", nil
+		},
+		updatePRBaseFn: func(owner, repo string, prNumber int, newBase string) error {
+			return errors.New("github: unprocessable entity")
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	item := gh.ProjectItem{Number: 1}
+
+	// syncPRBase must not propagate the error — caller sees no return value
+	eng.syncPRBase(item, "feature/bar")
+
+	if len(client.updatePRBaseCalls) != 1 {
+		t.Fatalf("expected 1 UpdatePRBase attempt even on error, got %d", len(client.updatePRBaseCalls))
+	}
+}
+
 // ── processItem Verification update integration test ─────────────────────────
 
 func TestProcessItem_ImplementStage_UpdatesVerificationOnComplete(t *testing.T) {
