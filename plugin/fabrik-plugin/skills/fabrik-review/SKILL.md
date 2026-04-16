@@ -112,10 +112,11 @@ Commit after each fix, not in bulk. This makes it easy to review your review.
 
 ### Push and verify
 
-After all fixes:
+After all fixes, run the project's build and test commands. **Always include a per-test timeout** appropriate to the framework (e.g., `pytest --timeout=60`, `go test -timeout 5m`, `jest --testTimeout=30000`). Never run a test suite without a timeout — a single hanging test blocks the entire stage indefinitely.
+
 ```bash
 go build ./...        # or equivalent
-go test -race ./...   # full test suite
+go test -race -timeout 5m ./...   # full test suite — always with timeout
 go vet ./...          # linter
 git push
 ```
