@@ -120,11 +120,14 @@ default. When this option is set, Fabrik uses a three-phase reviewer gate
 requires auto-advance to be active):
 
 1. **Always-gate:** On stage completion, Fabrik adds `fabrik:awaiting-review`
-   and holds auto-advance until all requested reviewers submit.
-2. **Gate evaluation:** On each subsequent poll, Fabrik checks whether all
-   reviewers have submitted. If reviewers are still pending and the per-cycle
-   timeout expires, the issue pauses with `fabrik:awaiting-input`.
-3. **Re-invocation:** When all reviewers submit and there are unresolved PR
+   and holds auto-advance until the gate clears.
+2. **Gate evaluation:** On each subsequent poll, Fabrik checks the dual
+   condition: no requested reviewers are outstanding **and** at least one
+   review has been submitted (this catches bot reviewers like Copilot and
+   Gemini that self-trigger via webhook without appearing in the formal
+   reviewer list). If the condition isn't met and the per-cycle timeout
+   expires, the issue pauses with `fabrik:awaiting-input`.
+3. **Re-invocation:** When the gate clears and there are unresolved PR
    review thread comments, Fabrik re-invokes the stage agent to address that
    inline feedback and push a new commit, then waits for the next review
    round. Reviews with no inline thread comments—including reviews with only
