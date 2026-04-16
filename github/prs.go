@@ -44,6 +44,7 @@ func (c *Client) FetchPRDetails(owner, repo string, prNumber int) (*PRDetails, e
 
 // CheckRun holds the result of a single CI check run.
 type CheckRun struct {
+	ID         int64  // GitHub check run ID (used to fetch logs via gh run view)
 	Name       string
 	Status     string // "queued", "in_progress", "completed"
 	Conclusion string // "success", "failure", "neutral", "cancelled", "skipped", "timed_out", "action_required", or ""
@@ -54,6 +55,7 @@ func (c *Client) FetchCheckRuns(owner, repo, sha string) ([]CheckRun, error) {
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/commits/%s/check-runs", c.baseURL, owner, repo, sha)
 	var raw struct {
 		CheckRuns []struct {
+			ID         int64  `json:"id"`
 			Name       string `json:"name"`
 			Status     string `json:"status"`
 			Conclusion string `json:"conclusion"`
@@ -64,7 +66,7 @@ func (c *Client) FetchCheckRuns(owner, repo, sha string) ([]CheckRun, error) {
 	}
 	out := make([]CheckRun, len(raw.CheckRuns))
 	for i, cr := range raw.CheckRuns {
-		out[i] = CheckRun{Name: cr.Name, Status: cr.Status, Conclusion: cr.Conclusion}
+		out[i] = CheckRun{ID: cr.ID, Name: cr.Name, Status: cr.Status, Conclusion: cr.Conclusion}
 	}
 	return out, nil
 }
