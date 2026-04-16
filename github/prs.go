@@ -196,6 +196,33 @@ func (c *Client) FindPRForIssue(owner, repo string, issueNumber int) (int, error
 	return resp.Items[0].Number, nil
 }
 
+// GetPRBase fetches the current base branch reference of an open pull request.
+// Returns the base branch name (e.g. "main" or "feature/foo"), or an error if
+// the API call fails.
+func (c *Client) GetPRBase(owner, repo string, prNumber int) (string, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", c.baseURL, owner, repo, prNumber)
+	var raw struct {
+		Base struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
+	}
+	if err := c.restGetJSON(apiURL, &raw); err != nil {
+		return "", fmt.Errorf("fetching PR #%d base: %w", prNumber, err)
+	}
+	return raw.Base.Ref, nil
+}
+
+// UpdatePRBase changes the base branch of an open pull request via the GitHub REST API.
+// GitHub accepts base-branch changes on open PRs; the PR may become unmergeable if
+// the head and new base have diverged, but the API call itself succeeds.
+func (c *Client) UpdatePRBase(owner, repo string, prNumber int, newBase string) error {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", c.baseURL, owner, repo, prNumber)
+	if err := c.restPatch(apiURL, map[string]interface{}{"base": newBase}); err != nil {
+		return fmt.Errorf("updating PR #%d base to %q: %w", prNumber, newBase, err)
+	}
+	return nil
+}
+
 // MergePR merges the pull request identified by prNumber. It first checks
 // GitHub's mergeable status: if null (not yet computed) or false, it returns
 // ErrNotMergeable. It attempts a rebase merge first; if the repository does

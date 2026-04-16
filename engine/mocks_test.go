@@ -27,6 +27,8 @@ type mockGitHubClient struct {
 	updateIssueBodyFn         func(owner, repo string, issueNumber int, body string) error
 	updateProjectItemStatusFn func(projectID, itemID, statusFieldID, statusOptionID string) error
 	findPRForIssueFn          func(owner, repo string, issueNumber int) (int, error)
+	getPRBaseFn               func(owner, repo string, prNumber int) (string, error)
+	updatePRBaseFn            func(owner, repo string, prNumber int, newBase string) error
 	mergePRFn                 func(owner, repo string, prNumber int) error
 	rateLimitStatsFn          func() (gh.RateLimitStats, gh.RateLimitStats)
 	getIssueBodyFn            func(owner, repo string, issueNumber int) (string, error)
@@ -43,6 +45,8 @@ type mockGitHubClient struct {
 	archiveProjectItemCalls []archiveProjectItemCall
 
 	// Track calls — access under mu when accessed from concurrent goroutines.
+	getPRBaseCalls                  []getPRBaseCall
+	updatePRBaseCalls               []updatePRBaseCall
 	addLabelCalls                   []addLabelCall
 	removeLabelCalls                []removeLabelCall
 	addCommentCalls                 []addCommentCall
@@ -81,6 +85,17 @@ type createDraftPRCall struct {
 	owner, repo, title, head, base string
 	body                           string
 	issueNumber                    int
+}
+
+type getPRBaseCall struct {
+	owner, repo string
+	prNumber    int
+}
+
+type updatePRBaseCall struct {
+	owner, repo string
+	prNumber    int
+	newBase     string
 }
 
 type mergePRCall struct {
@@ -250,6 +265,28 @@ func (m *mockGitHubClient) FindPRForIssue(owner, repo string, issueNumber int) (
 		return fn(owner, repo, issueNumber)
 	}
 	return 0, nil
+}
+
+func (m *mockGitHubClient) GetPRBase(owner, repo string, prNumber int) (string, error) {
+	m.mu.Lock()
+	m.getPRBaseCalls = append(m.getPRBaseCalls, getPRBaseCall{owner, repo, prNumber})
+	fn := m.getPRBaseFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, prNumber)
+	}
+	return "", nil
+}
+
+func (m *mockGitHubClient) UpdatePRBase(owner, repo string, prNumber int, newBase string) error {
+	m.mu.Lock()
+	m.updatePRBaseCalls = append(m.updatePRBaseCalls, updatePRBaseCall{owner, repo, prNumber, newBase})
+	fn := m.updatePRBaseFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, prNumber, newBase)
+	}
+	return nil
 }
 
 func (m *mockGitHubClient) MergePR(owner, repo string, prNumber int) error {
