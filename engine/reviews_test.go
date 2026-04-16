@@ -22,25 +22,60 @@ func reviewTestEngine(client *mockGitHubClient) *Engine {
 	return testEngineWithStages(client, reviewTestStages())
 }
 
-// (a) No requested reviewers → gate returns false, advance proceeds.
-func TestCheckReviewGate_NoRequestedReviewers_ReturnsFalse(t *testing.T) {
+// (a) No requested reviewers AND no reviews submitted → gate STAYS BLOCKED,
+// waiting for self-assigning bot reviewers (Copilot, Gemini) to post. This
+// is the common yolo case: the pipeline marks the PR ready and immediately
+// evaluates the gate; bots are still processing and haven't submitted yet,
+// so we wait.
+func TestCheckReviewGate_NoReviewersNoReviews_Blocks(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := reviewTestEngine(client)
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
 		Number:                 10,
 		Repo:                   "owner/repo",
-		LinkedPRReviewRequests: nil, // no pending reviewers
+		LinkedPRReviewRequests: nil, // no requested reviewers (bots don't use this)
+		LinkedPRReviews:        nil, // no reviews submitted yet
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+
+	blocked, timedOut := eng.checkReviewGate(board, item, stage)
+
+	if !blocked {
+		t.Error("expected blocked when no reviews submitted yet (bots may still be processing)")
+	}
+	if timedOut {
+		t.Error("expected not timedOut on first evaluation")
+	}
+	if len(client.addLabelCalls) != 1 {
+		t.Errorf("expected 1 label add (fabrik:awaiting-review), got %d", len(client.addLabelCalls))
+	}
+}
+
+// (a2) No requested reviewers but at least one review submitted → gate clears.
+// This covers the case where a bot like Copilot or Gemini has self-submitted
+// without ever appearing in reviewRequests.
+func TestCheckReviewGate_NoReviewersWithReview_Clears(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:                 10,
+		Repo:                   "owner/repo",
+		LinkedPRReviewRequests: nil, // no requested reviewers
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "copilot-pull-request-reviewer", State: "COMMENTED", Body: "## Pull request overview\n\nLGTM."},
+		},
 	}
 	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
 
 	blocked, timedOut := eng.checkReviewGate(board, item, stage)
 
 	if blocked {
-		t.Error("expected not blocked when no requested reviewers")
+		t.Error("expected not blocked once a review has been submitted")
 	}
 	if timedOut {
-		t.Error("expected not timedOut when no requested reviewers")
+		t.Error("expected not timedOut")
 	}
 	if len(client.addLabelCalls) != 0 {
 		t.Errorf("expected no label adds, got %d", len(client.addLabelCalls))
