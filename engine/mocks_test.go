@@ -27,6 +27,8 @@ type mockGitHubClient struct {
 	updateIssueBodyFn         func(owner, repo string, issueNumber int, body string) error
 	updateProjectItemStatusFn func(projectID, itemID, statusFieldID, statusOptionID string) error
 	findPRForIssueFn          func(owner, repo string, issueNumber int) (int, error)
+	fetchLinkedPRFn           func(owner, repo string, issueNumber int) (*gh.PRDetails, error)
+	fetchCheckRunsFn          func(owner, repo, sha string) ([]gh.CheckRun, error)
 	getPRBaseFn               func(owner, repo string, prNumber int) (string, error)
 	updatePRBaseFn            func(owner, repo string, prNumber int, newBase string) error
 	mergePRFn                 func(owner, repo string, prNumber int) error
@@ -265,6 +267,26 @@ func (m *mockGitHubClient) FindPRForIssue(owner, repo string, issueNumber int) (
 		return fn(owner, repo, issueNumber)
 	}
 	return 0, nil
+}
+
+func (m *mockGitHubClient) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+	m.mu.Lock()
+	fn := m.fetchLinkedPRFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, issueNumber)
+	}
+	return nil, nil
+}
+
+func (m *mockGitHubClient) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, error) {
+	m.mu.Lock()
+	fn := m.fetchCheckRunsFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, sha)
+	}
+	return nil, nil
 }
 
 func (m *mockGitHubClient) GetPRBase(owner, repo string, prNumber int) (string, error) {

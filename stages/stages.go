@@ -87,6 +87,17 @@ type Stage struct {
 	// Defaults to false (opt-in, consistent with all other stage YAML flags).
 	WaitForReviews *bool `yaml:"wait_for_reviews,omitempty"`
 
+	// WaitForCI enables the CI gate on auto-advance for this stage. When true,
+	// auto-advance is held until all CI check runs complete successfully. If any
+	// check fails, the engine dispatches a CI-fix re-invocation (mirroring the
+	// review reinvoke pattern). Defaults to false; the default Validate stage
+	// sets this to true.
+	WaitForCI *bool `yaml:"wait_for_ci,omitempty"`
+
+	// CIFixSkill names the plugin skill to invoke for CI-fix re-invocations.
+	// When absent, falls back to CommentSkill.
+	CIFixSkill string `yaml:"ci_fix_skill,omitempty"`
+
 	// CleanupWorktree causes the engine to remove the issue's worktree directory
 	// instead of invoking Claude. No prompt, lock, or in_progress label is needed.
 	// Use this for terminal stages like "Done" to reclaim disk space.

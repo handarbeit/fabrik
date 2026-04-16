@@ -30,6 +30,8 @@ type Config struct {
 	MaxRetries        int
 	ReviewWaitTimeout time.Duration // How long to wait for PR reviewers before auto-advancing anyway (default 15m)
 	MaxReviewCycles   int           // Max review re-invocation cycles per issue before pausing (default 5)
+	CIWaitTimeout     time.Duration // How long to wait for CI in the merge guard before pausing (default 30m)
+	MaxCiFixCycles    int           // Max CI-fix re-invocation cycles per issue before pausing (default 5)
 	DebugOutput       bool
 	PluginDir         string
 	Stages            []*stages.Stage
@@ -62,6 +64,8 @@ type Engine struct {
 	retryCount           map[string]int        // key: "owner/repo#N-stageName", value: failed attempt count
 	pausedDueToRetries   map[string]bool       // key: "owner/repo#N-stageName", true if engine paused this issue
 	reviewCycleCount     map[string]int        // key: "owner/repo#N-stageName"; review re-invocation cycle count per stage
+	ciFixCycleCount      map[string]int        // key: "owner/repo#N-stageName"; CI-fix re-invocation cycle count per stage
+	ciMergePendingSince  map[string]time.Time  // key: issueKey; when CI was first observed in_progress in the merge guard
 	lastUsage            map[string]TokenUsage // key: issueKey; per-issue token usage from last processItem (for TUI)
 	lastCompleted        map[string]bool       // key: issueKey; per-issue stage completion from last processItem (for TUI)
 	lastBlocked          map[string]bool       // key: issueKey; per-issue blocked-on-input from last processItem (for TUI)
@@ -122,6 +126,8 @@ func New(cfg Config) (*Engine, error) {
 		retryCount:           make(map[string]int),
 		pausedDueToRetries:   make(map[string]bool),
 		reviewCycleCount:     make(map[string]int),
+		ciFixCycleCount:      make(map[string]int),
+		ciMergePendingSince:  make(map[string]time.Time),
 		sem:                  make(chan struct{}, cfg.MaxConcurrent),
 	}
 
@@ -168,6 +174,8 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		retryCount:           make(map[string]int),
 		pausedDueToRetries:   make(map[string]bool),
 		reviewCycleCount:     make(map[string]int),
+		ciFixCycleCount:      make(map[string]int),
+		ciMergePendingSince:  make(map[string]time.Time),
 		sem:                  make(chan struct{}, maxConcurrent),
 	}
 	if worktrees != nil {
