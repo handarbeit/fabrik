@@ -1,15 +1,13 @@
-# Fabrik v0.0.41
+# Fabrik v0.0.42
 
 ## Fixes
 
-- `MergePR` now returns success when the PR is already merged (e.g., merged manually by a human). Previously, an already-merged PR had `mergeable: null`, which returned `ErrNotMergeable` — causing the yolo catch-up loop to skip advancement to Done forever. The issue would sit stuck in the Validate column on every poll cycle.
-- Review and review-comment skills now prohibit bare `#N` ordinals when numbering findings (#410). GitHub's issue renderer auto-links `#N` tokens to unrelated issues in the same repo, producing confusing output where reviewer finding labels like "Gemini #1" expand to include the title of whatever issue #1 happens to be.
-- Release download command in the `cut-release` skill and all published release notes now uses the canonical auto-detect form from the marketing site (correct repo `shadoworg/fabrik`, auto-detects OS and architecture via `uname`).
-- Verification section auto-update gating condition and review cycle limit comment corrected.
+- **Review gate now waits for actual review submission, not just requested reviewers.** `checkReviewGate` previously cleared immediately when `LinkedPRReviewRequests` was empty — but Copilot, Gemini, and other bot reviewers self-trigger via webhooks and never appear in the formal requested-reviewer list. With `fabrik:yolo` active, the pipeline raced through Validate → merge → Done in 30-60 seconds while bots were still processing their reviews. The gate now requires both `LinkedPRReviewRequests` empty AND `LinkedPRReviews` non-empty before clearing, which catches self-submitting bot reviews naturally. Existing `ReviewWaitTimeout` (default 15 min) is the fallback when no reviews ever arrive.
+- **`fabrik-implement`, `fabrik-review`, and `fabrik-validate` skills now require per-test timeouts.** A hanging pytest suite with no timeout flag kept a Claude CLI process alive for 39+ minutes after the Review stage completed (burning three full Review runs before manual intervention). Skills now instruct: always include `--timeout=60` for pytest, `-timeout 5m` for `go test`, `--testTimeout=30000` for jest, etc.
 
 ## Improvements
 
-- USER_GUIDE.md, README.md, and docs/index.md updated for v0.0.39 behavior changes (review-feedback processing for all issues, PR summary comments, idle backoff, rate-limit backoff).
+- Documentation and grammar refinements to `fabrik:yolo` and yolo auto-merge sections.
 
 ## Upgrading
 
