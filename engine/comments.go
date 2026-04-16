@@ -108,6 +108,9 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		return fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
 	}
 
+	// If a PR exists and its base branch doesn't match the resolved base, update it.
+	e.syncPRBase(item, baseBranch)
+
 	// Write context files (all stages including current) before Claude runs.
 	e.writeContextFiles(item, stage, workDir, true)
 
