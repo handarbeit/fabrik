@@ -601,11 +601,11 @@ The Implement stage creates a **draft PR** linked to the issue when `create_draf
 | `## Summary` | Extracted from the issue spec (`.fabrik-context/issue.md`) |
 | `## Problem` | Extracted from the issue spec (`.fabrik-context/issue.md`) |
 | `## Approach` | Extracted from the Plan stage output (`.fabrik-context/stage-Plan.md`); falls back to a placeholder if absent |
-| `## Verification` | Placeholder text, auto-replaced by the stage summary on completion |
+| `## Verification` | Placeholder text, auto-replaced by an extracted stage summary when available |
 
 The `Closes #N` footer in the PR body links the PR to the issue so Fabrik can discover PR comments via GraphQL.
 
-**Verification auto-update**: When a `post_to_pr` stage completes and includes a `FABRIK_SUMMARY` in its output, Fabrik replaces the `## Verification` section of the PR body with that summary. This keeps the PR description current as each stage contributes its findings.
+**Verification auto-update**: For draft PRs created with `create_draft_pr: true`, Fabrik updates the `## Verification` section only when it can extract a summary block delimited by `FABRIK_SUMMARY_BEGIN` and `FABRIK_SUMMARY_END` from stage output. This keeps the PR description current when a stage provides a structured summary for PR-body updates.
 
 ### Retry and Escalation
 
@@ -796,7 +796,7 @@ The "Threads addressed" footer lists each inline thread by file path and line nu
 To prevent infinite loops (e.g., a bot that always posts new reviews after every push), Fabrik caps the number of re-invocation cycles per issue per stage per engine session. When the limit is reached with reviewers still pending, Fabrik pauses the issue with `fabrik:awaiting-input` and posts a comment explaining the situation.
 
 ```bash
-FABRIK_MAX_REVIEW_CYCLES=3  # Limit to 3 re-invocation cycles per issue (default: 5)
+FABRIK_MAX_REVIEW_CYCLES=3  # Limit to 3 re-invocation cycles per issue per stage (default: 5)
 # or equivalently:
 fabrik --max-review-cycles=3
 ```
