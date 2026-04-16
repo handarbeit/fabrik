@@ -48,6 +48,40 @@ func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) int {
 	return prNum
 }
 
+// syncPRBase checks whether the open PR for this issue has the expected base branch and
+// updates it via the GitHub API if not. All errors are non-fatal: a warning is logged
+// and the stage continues regardless.
+//
+// Insertion point: called after EnsureWorktree succeeds (baseBranch is resolved and the
+// worktree lock is held) but before Claude is invoked.
+func (e *Engine) syncPRBase(item gh.ProjectItem, baseBranch string) {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+
+	prNumber, err := e.client.FindPRForIssue(owner, repo, item.Number)
+	if err != nil {
+		e.logf(item.Number, "warn", "syncPRBase: could not find PR: %v\n", err)
+		return
+	}
+	if prNumber == 0 {
+		return // no PR yet — nothing to sync
+	}
+
+	currentBase, err := e.client.GetPRBase(owner, repo, prNumber)
+	if err != nil {
+		e.logf(item.Number, "warn", "syncPRBase: could not fetch PR #%d base: %v\n", prNumber, err)
+		return
+	}
+	if currentBase == baseBranch {
+		return // already correct
+	}
+
+	if err := e.client.UpdatePRBase(owner, repo, prNumber, baseBranch); err != nil {
+		e.logf(item.Number, "warn", "syncPRBase: could not update PR #%d base %q → %q: %v\n", prNumber, currentBase, baseBranch, err)
+		return
+	}
+	e.logf(item.Number, "pr", "updated PR #%d base: %s → %s\n", prNumber, currentBase, baseBranch)
+}
+
 // buildSeedBody reads .fabrik-context/issue.md and .fabrik-context/stage-Plan.md from
 // workDir and constructs the structured PR seed body. File read errors are non-fatal:
 // missing files produce empty strings which buildPRSeedBody handles with placeholders.

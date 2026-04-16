@@ -562,6 +562,9 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		return fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
 	}
 
+	// If a PR exists and its base branch doesn't match the resolved base, update it.
+	e.syncPRBase(item, baseBranch)
+
 	// If this is a read-only stage, stash any unexpected dirty state (including
 	// untracked files) before invocation so the stage sees a clean worktree, and
 	// restore it afterward.
