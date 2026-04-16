@@ -201,13 +201,17 @@ func (c *Client) FindPRForIssue(owner, repo string, issueNumber int) (int, error
 // ErrNotMergeable. It attempts a rebase merge first; if the repository does
 // not allow rebase merges (405), it falls back to a regular merge commit.
 func (c *Client) MergePR(owner, repo string, prNumber int) error {
-	// Check mergeable status.
+	// Check PR state and mergeable status.
 	prURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", c.baseURL, owner, repo, prNumber)
 	var prData struct {
+		Merged    bool  `json:"merged"`
 		Mergeable *bool `json:"mergeable"`
 	}
 	if err := c.restGetJSON(prURL, &prData); err != nil {
 		return fmt.Errorf("fetching PR mergeable status: %w", err)
+	}
+	if prData.Merged {
+		return nil // already merged (e.g., human merged manually) — nothing to do
 	}
 	if prData.Mergeable == nil || !*prData.Mergeable {
 		return ErrNotMergeable
