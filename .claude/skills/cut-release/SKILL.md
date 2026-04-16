@@ -64,8 +64,10 @@ Write `release-notes.md` in the repo root with this structure:
 # Auto-upgrade from a running Fabrik instance
 # Fabrik checks for new releases each poll cycle and upgrades automatically with --auto-upgrade
 
-# Or download directly
-gh release download --repo tenaciousvc/fabrik --pattern '*<os>_<arch>*' -O - | tar xz
+# Or download directly (auto-detects OS and architecture)
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+ARCH=$(uname -m); case "$ARCH" in x86_64) ARCH=amd64 ;; aarch64) ARCH=arm64 ;; esac
+gh release download --repo shadoworg/fabrik --pattern "*${OS}_${ARCH}*" -O - | tar xz
 \```
 ```
 
