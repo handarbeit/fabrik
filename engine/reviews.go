@@ -12,13 +12,31 @@ import (
 	"github.com/handarbeit/fabrik/tui"
 )
 
-// checkReviewGate inspects item.LinkedPRReviewRequests and determines whether
-// the review gate is blocking review reinvoke or stage advancement.
+// checkReviewGate inspects item.LinkedPRReviewRequests and item.LinkedPRReviews
+// to determine whether the review gate is blocking review reinvoke or stage
+// advancement.
 //
 // This function is only called from the catch-up loop (Phase 1) in poll.go,
-// where item.LinkedPRReviewRequests contains fresh data from FetchItemDetails.
-// handleStageComplete (Path 1) always applies fabrik:awaiting-review directly
-// because reviewer assignment happens after MarkPRReady, so data would be stale.
+// where item.LinkedPRReviewRequests and item.LinkedPRReviews contain fresh
+// data from FetchItemDetails. handleStageComplete (Path 1) always applies
+// fabrik:awaiting-review directly because reviewer assignment happens after
+// MarkPRReady, so data would be stale.
+//
+// The gate clears under either of these conditions:
+//
+//  1. No outstanding requested reviewers AND at least one review has been
+//     submitted. This handles both the "requested reviewers finished" case
+//     and the "bot reviewer self-submitted" case. Bots like Copilot and
+//     Gemini do not use the requested-reviewer mechanism — they self-trigger
+//     via webhooks when the PR is marked ready and only appear in
+//     LinkedPRReviews (not LinkedPRReviewRequests). Waiting on the reviews
+//     array is the signal that catches them.
+//
+// The gate stays closed (returning blocked=true) when:
+//
+//   - There are outstanding requested reviewers who haven't submitted, OR
+//   - No reviews have been submitted yet (even with no requested reviewers —
+//     bot reviewers are typically 30s–10m behind PR-ready).
 //
 // Returns (blocked, timedOut):
 //   - (true, false)  — gate is blocking; advance should not proceed
@@ -26,7 +44,7 @@ import (
 //   - (false, true)  — gate cleared due to timeout; caller should pause the issue
 //
 // Side effects when blocking:
-//   - Logs a message listing the pending reviewers.
+//   - Logs a message listing why we're waiting.
 //   - Adds fabrik:awaiting-review label on first block transition (idempotent).
 //
 // Side effects when unblocking (naturally or by timeout):
@@ -39,26 +57,27 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
-	// Build set of reviewers who have already submitted any review (APPROVED,
-	// CHANGES_REQUESTED, or COMMENTED). A dismissed review means the reviewer
-	// is back in reviewRequests, so we rely on the GraphQL data directly:
-	// if they appear in reviewRequests, they're outstanding; if not, they're done.
-	// latestReviews is informational for logging.
+	// Outstanding requested reviewers (humans or bots using the formal
+	// request mechanism). A dismissed review puts the reviewer back here;
+	// if they're not here, they've finished.
 	outstanding := make([]string, 0, len(item.LinkedPRReviewRequests))
 	for _, rr := range item.LinkedPRReviewRequests {
 		if rr.Login != "" {
 			outstanding = append(outstanding, rr.Login)
 		}
 	}
+	hasReviews := len(item.LinkedPRReviews) > 0
 
-	if len(outstanding) == 0 {
-		// No outstanding reviewers — remove label if present and allow advance.
+	// Gate clears when all outstanding requested reviewers have responded
+	// AND at least one review exists. This catches both human reviewers who
+	// submit formally and bot reviewers (Copilot, Gemini) who self-submit
+	// without ever appearing in reviewRequests.
+	if len(outstanding) == 0 && hasReviews {
 		e.removeAwaitingReviewLabel(owner, repo, item)
 		return false, false
 	}
 
-	// Check timeout. If fabrik:awaiting-review was applied more than
-	// ReviewWaitTimeout ago, signal timedOut so the caller can pause the issue.
+	// Still waiting. Check timeout before continuing to block.
 	timeout := e.cfg.ReviewWaitTimeout
 	if timeout <= 0 {
 		timeout = 15 * time.Minute
@@ -69,8 +88,13 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 			if err != nil {
 				e.logf(item.Number, "warn", "could not fetch awaiting-review label timestamp: %v\n", err)
 			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= timeout {
-				e.logf(item.Number, "warn", "review wait timeout elapsed; pausing issue — pending reviewers: %s\n",
-					strings.Join(outstanding, ", "))
+				var reason string
+				if len(outstanding) > 0 {
+					reason = "pending reviewers: " + strings.Join(outstanding, ", ")
+				} else {
+					reason = "no reviews submitted yet (bots may not have responded)"
+				}
+				e.logf(item.Number, "warn", "review wait timeout elapsed; pausing issue — %s\n", reason)
 				e.removeAwaitingReviewLabel(owner, repo, item)
 				return false, true
 			}
@@ -78,7 +102,11 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 		}
 	}
 
-	e.logf(item.Number, "awaiting-review", "waiting for reviewers: %s\n", strings.Join(outstanding, ", "))
+	if len(outstanding) > 0 {
+		e.logf(item.Number, "awaiting-review", "waiting for reviewers: %s\n", strings.Join(outstanding, ", "))
+	} else {
+		e.logf(item.Number, "awaiting-review", "waiting for initial review submission (no reviewers requested; bot reviewers may still be processing)\n")
+	}
 
 	// Apply label on first block transition.
 	alreadyWaiting := false
