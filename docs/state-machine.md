@@ -417,10 +417,10 @@ Fabrik discovers PR comments through the `closedByPullRequestsReferences` GraphQ
 
 **Flow:**
 1. Find linked PR via `FindPRForIssue()`
-2. Attempt merge via `MergePR()`
+2. Attempt merge via `MergePR()`. `MergePR` first checks the PR's `merged` field — if the PR was already merged (e.g., by a human), it returns nil immediately (no-op success). Otherwise it checks `mergeable` and attempts the merge.
 3. On `ErrNotMergeable`: post comment, add `fabrik:paused`, return error (prevents completion label from being added, allowing retry)
 4. On other API errors: return error (same retry behavior)
-5. On success: log and return nil
+5. On success (including already-merged): log and return nil — advancement proceeds
 
 **Important — Path 1 vs Path 2 distinction:** In Path 1 (`handleStageComplete`), the merge runs BEFORE adding `stage:Validate:complete`. On merge failure, the completion label is not added, so `itemNeedsWork` won't skip the stage and the engine can retry the entire Validate invocation after cooldown. In Path 2 (catch-up loop), the completion label already exists when `attemptMergeOnValidate()` runs (the catch-up loop operates on items with `stage:Validate:complete`). A merge failure in Path 2 pauses the issue but does NOT remove the completion label — the stage will not be re-invoked; only the merge attempt will be retried after unpausing.
 
