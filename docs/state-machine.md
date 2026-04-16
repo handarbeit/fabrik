@@ -68,7 +68,7 @@ These labels do not define distinct states but influence transition behavior:
 | `fabrik:unrestricted` | Passes `--dangerously-skip-permissions` to Claude Code |
 | `model:<name>` | Selects a specific model for this issue (e.g., `model:opus`) |
 | `effort:<level>` | Overrides stage effort level (`low`, `medium`, `high`, `max`); highest wins |
-| `base:<branch>` | Overrides worktree base branch; must exist on remote |
+| `base:<branch>` | Overrides worktree base branch; falls back to default if not on remote; updates PR base if PR exists |
 | `fabrik:sub-issue` | Informational; marks issue as created by decomposition |
 
 ### 1.3 Reachable States by Board Column
