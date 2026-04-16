@@ -440,12 +440,13 @@ The review gate has two paths that handle different timing scenarios:
 
 **Path 2: Catch-up loop in `poll()` (in poll goroutine)**
 - Runs on subsequent poll cycles for items with `stage:<X>:complete`
-- Has FRESH reviewer data from `FetchItemDetails()`
+- Has FRESH reviewer data from `FetchItemDetails()` (both `LinkedPRReviewRequests` and `LinkedPRReviews`)
 - Calls `checkReviewGate()` for the real gate evaluation
+- **Gate clears only when `len(LinkedPRReviewRequests) == 0` AND `len(LinkedPRReviews) > 0`.** This means: no requested reviewers are outstanding AND at least one review has been submitted. Waiting on `LinkedPRReviews` (not just `LinkedPRReviewRequests`) is what catches bot reviewers like Copilot and Gemini that self-trigger via webhooks without ever appearing in the formal requested-reviewer list.
 - Three outcomes:
-  - `(blocked=true, timedOut=false)` — still waiting; `fabrik:awaiting-review` maintained
+  - `(blocked=true, timedOut=false)` — still waiting; `fabrik:awaiting-review` maintained. Either outstanding requested reviewers remain, or no reviews have been submitted yet (bots may still be processing).
   - `(blocked=false, timedOut=false)` — gate cleared naturally; `fabrik:awaiting-review` removed; advance or reinvoke
-  - `(blocked=false, timedOut=true)` — gate cleared by timeout; `fabrik:awaiting-review` removed; `pauseForReviewTimeout()` pauses issue
+  - `(blocked=false, timedOut=true)` — gate cleared by timeout (`ReviewWaitTimeout`, default 15 min); `fabrik:awaiting-review` removed; `pauseForReviewTimeout()` pauses issue. The timeout applies whether we were waiting for requested reviewers or for bot reviewers that never submitted.
 
 ### 6.2 Review Reinvoke Mechanics
 
