@@ -61,9 +61,10 @@ Create a verification checklist:
 
 ### Test suite
 
-Run the full test suite:
+Run the full test suite. **Always include a per-test timeout** appropriate to the project's test framework (e.g., `pytest --timeout=60`, `go test -timeout 5m`, `jest --testTimeout=30000`). Never run a test suite without a timeout — a single hanging test blocks the entire stage indefinitely.
+
 ```bash
-go test -race ./...    # or project-equivalent
+go test -race -timeout 5m ./...    # or project-equivalent — always with timeout
 go vet ./...
 go build ./...
 ```

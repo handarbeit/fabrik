@@ -112,6 +112,7 @@ Tests are not optional and not deferred. When implementing a function, write its
 - Follow naming conventions from existing tests
 - Test both success and error paths
 - Run the full test suite before marking a task complete
+- **Always run tests with a per-test timeout** appropriate to the project's test framework (e.g., `pytest --timeout=60`, `go test -timeout 5m`, `jest --testTimeout=30000`). Never run a test suite without a timeout — a single hanging test blocks the entire stage indefinitely and wastes CI budget.
 
 ### Update documentation
 
