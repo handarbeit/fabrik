@@ -282,10 +282,12 @@ description: >-
           Set <code>wait_for_reviews: true</code> on a stage and Fabrik uses
           a three-phase gate: (1) immediately apply <code>fabrik:awaiting-review</code>
           on completion, (2) poll until all requested reviewers submit, (3)
-          re-invoke the stage agent to address any unresolved inline PR review
-          thread comments before advancing. Reviews with only top-level text
-          (e.g., bot approvals or summary-only comments) skip re-invocation.
-          Controlled by <code>--review-wait-timeout</code> /
+          unconditionally re-invoke the stage agent to address any unresolved
+          inline PR review thread comments — regardless of whether auto-advance
+          is active. Reviews with only top-level text (e.g., bot approvals or
+          summary-only comments) skip re-invocation. Auto-advancement to the
+          next stage after re-invocation still requires auto-advance to be
+          active. Controlled by <code>--review-wait-timeout</code> /
           <code>FABRIK_REVIEW_WAIT_TIMEOUT</code> (default 15
           min per cycle) and <code>--max-review-cycles</code> /
           <code>FABRIK_MAX_REVIEW_CYCLES</code> (default 5
@@ -439,6 +441,13 @@ echo '.env' >> .gitignore
         <div>
           <div class="link-title">Stage Lifecycle</div>
           <div class="link-desc">Engine internals, markers, context files, and comment processing</div>
+        </div>
+      </a>
+      <a href="{{ '/state-machine' | relative_url }}" class="link-card">
+        <span class="link-icon">🔄</span>
+        <div>
+          <div class="link-title">State Machine</div>
+          <div class="link-desc">Authoritative spec for engine state transitions, label semantics, and review gate behavior</div>
         </div>
       </a>
       <a href="{{ '/USER_GUIDE#10-troubleshooting' | relative_url }}" class="link-card">
