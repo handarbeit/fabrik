@@ -305,7 +305,7 @@ Fabrik uses labels to track state:
 | `fabrik:paused` | Issue is skipped entirely — no stage processing or comment processing occurs |
 | `fabrik:awaiting-input` | Stage is paused waiting for user input; auto-clears when a new comment from the configured user (`--user`) is received |
 | `fabrik:blocked` | Issue is waiting for one or more blocking issues to close; managed automatically by the engine |
-| `fabrik:awaiting-review` | Set by the engine when a `wait_for_reviews: true` stage completes with outstanding reviewer requests; cleared when no requested reviewers are outstanding and at least one review has been submitted (the dual condition catches bot reviewers like Copilot and Gemini that self-trigger via webhook without appearing in the formal reviewer list), or when the reviewer-wait timeout elapses as a fallback (`--review-wait-timeout` / `FABRIK_REVIEW_WAIT_TIMEOUT`) |
+| `fabrik:awaiting-review` | Applied optimistically by the engine whenever a `wait_for_reviews: true` stage completes (reviewer request data may still be stale at that moment); removed when no requested reviewers are outstanding and at least one review has been submitted (the dual condition catches bot reviewers like Copilot and Gemini that self-trigger via webhook without appearing in the formal reviewer list), or when the reviewer-wait timeout elapses as a fallback (`--review-wait-timeout` / `FABRIK_REVIEW_WAIT_TIMEOUT`), at which point the issue is paused with `fabrik:awaiting-input` |
 | `stage:<name>:complete` | Stage has been completed |
 | `stage:<name>:in_progress` | Stage is actively running |
 | `stage:<name>:failed` | Stage hit max retries and was paused |
