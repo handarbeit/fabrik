@@ -115,8 +115,9 @@ also rebases onto the configured base branch and resolves merge conflicts before
 keeping the PR branch clean.
 
 The Review and Validate stages ship with `wait_for_reviews: true` enabled by
-default. When this option is set and auto-advance is active, Fabrik uses a
-three-phase reviewer gate:
+default. When this option is set, Fabrik uses a three-phase reviewer gate
+(re-invocation fires unconditionally; auto-advancement to the next stage still
+requires auto-advance to be active):
 
 1. **Always-gate:** On stage completion, Fabrik adds `fabrik:awaiting-review`
    and holds auto-advance until all requested reviewers submit.
@@ -129,6 +130,8 @@ three-phase reviewer gate:
    round. Reviews with no inline thread comments—including reviews with only
    top-level review text (for example, bot approvals or summary-only
    comments)—do not trigger re-invocation, and the issue advances normally.
+   After each re-invocation cycle, Fabrik posts a PR summary comment with a
+   per-thread footer listing how each inline review thread was addressed.
 
 > **Configuration:** `--max-review-cycles` / `FABRIK_MAX_REVIEW_CYCLES` (default `5`)
 > caps the number of re-invocation cycles per session. `--review-wait-timeout` /
@@ -400,6 +403,7 @@ cp ./stages/mystages/*.yaml .fabrik/stages/
 ## Documentation
 
 - [User Guide](docs/USER_GUIDE.md) — full configuration reference for the pre-v0.2 `./stages` workflow (see "Quick Start" and "Migration from `./stages`" above for the current `./.fabrik/stages` default), workflow patterns, stage details, labels, and troubleshooting
+- [State Machine](docs/state-machine.md) — authoritative spec for engine state transitions, label semantics, and review gate behavior
 - [Troubleshooting](docs/USER_GUIDE.md#10-troubleshooting) — common issues: plugin conflicts, PID lock, merge conflicts, max turns, and more
 
 ## Architecture Decision Records
