@@ -76,6 +76,17 @@ After applying any fixes:
 2. Commit with a clear message
 3. Push to the remote branch
 
+## Numbering findings in your output
+
+When you list or summarize multiple review findings (e.g., distinguishing one Copilot comment from another, or grouping Gemini suggestions), **do not use bare `#N` ordinals**. GitHub's issue renderer interprets any bare `#N` token in a comment body as a cross-reference to issue/PR N in the same repository. Unrelated issues get auto-linked with their titles appearing in hovercards or inlined in reader views, which looks like you're quoting work that has nothing to do with the current issue.
+
+Use bracketed or descriptive numbering instead:
+
+- ✅ `Gemini [1]`, `Gemini finding 1`, `Copilot (thread 2)`
+- ❌ `Gemini #1`, `Copilot #2`
+
+The same rule applies any time you number something in output that posts to a GitHub comment — threads, files, findings, or list items.
+
 ## Completion
 
 Do NOT output `FABRIK_STAGE_COMPLETE`. Comment processing in Review returns control to the engine without advancing the pipeline. The Review stage continues until all findings are resolved and the main Review workflow signals completion.
