@@ -1,12 +1,17 @@
-# Fabrik v0.0.40
+# Fabrik v0.0.41
 
 ## Fixes
 
-- **Hotfix for v0.0.39 crash on startup.** `dispatchReviewReinvoke` now calls `ensureRepoReady` before invoking `processComments`. Without this, the Phase 1 catch-up loop introduced in v0.0.39 could reach `processComments` before any `WorktreeManager` was registered for the repo, causing `processComments` → `e.worktreesFor(item.Repo)` to panic on a freshly-started Fabrik that had unresolved PR review threads. On clone failure the goroutine now logs and bails instead of crashing.
+- `MergePR` now returns success when the PR is already merged (e.g., merged manually by a human). Previously, an already-merged PR had `mergeable: null`, which returned `ErrNotMergeable` — causing the yolo catch-up loop to skip advancement to Done forever. The issue would sit stuck in the Validate column on every poll cycle.
+- Review and review-comment skills now prohibit bare `#N` ordinals when numbering findings (#410). GitHub's issue renderer auto-links `#N` tokens to unrelated issues in the same repo, producing confusing output where reviewer finding labels like "Gemini #1" expand to include the title of whatever issue #1 happens to be.
+- Release download command in the `cut-release` skill and all published release notes now uses the canonical auto-detect form from the marketing site (correct repo `shadoworg/fabrik`, auto-detects OS and architecture via `uname`).
+- Verification section auto-update gating condition and review cycle limit comment corrected.
+
+## Improvements
+
+- USER_GUIDE.md, README.md, and docs/index.md updated for v0.0.39 behavior changes (review-feedback processing for all issues, PR summary comments, idle backoff, rate-limit backoff).
 
 ## Upgrading
-
-Upgrade is strongly recommended for all v0.0.39 users — v0.0.39 will crash-loop on any multi-repo board with unresolved PR review threads across repos that have not yet been touched by the dispatch loop.
 
 ```bash
 # Auto-upgrade from a running Fabrik instance
