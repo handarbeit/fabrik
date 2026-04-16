@@ -1083,7 +1083,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:editing` | Issue body being updated (comment processing) |
 | `fabrik:paused` | Processing paused (max retries exceeded or manual) |
 | `fabrik:awaiting-input` | Stage paused waiting for user input; auto-clears on a new comment from the configured user |
-| `fabrik:awaiting-review` | Issue waiting for all requested PR reviewers to submit; set when a `wait_for_reviews: true` stage completes; cleared when all reviewers submit (then re-invocation fires unconditionally) or when the `FABRIK_REVIEW_WAIT_TIMEOUT` elapses (then issue is paused with `fabrik:awaiting-input`) |
+| `fabrik:awaiting-review` | Set when a `wait_for_reviews: true` stage completes with outstanding reviewer requests; cleared when no requested reviewers are outstanding **and** at least one review has been submitted (then re-invocation fires unconditionally), or when the `FABRIK_REVIEW_WAIT_TIMEOUT` elapses (then issue is paused with `fabrik:awaiting-input`) |
 | `fabrik:blocked` | Issue is waiting for one or more blocking issues to close; added and removed automatically by the engine (Fabrik creates this label on first use — no pre-creation needed) |
 | `stage:<name>:in_progress` | Stage actively running |
 | `stage:<name>:complete` | Stage completed successfully |
@@ -1175,7 +1175,7 @@ Pressing `?` opens an overlay that displays all keybindings and a labels referen
 | `fabrik:cruise` | Auto-advance through all stages without auto-merging the PR |
 | `fabrik:paused` | Issue processing is paused |
 | `fabrik:awaiting-input` | Stage is blocked waiting for user input |
-| `fabrik:awaiting-review` | Stage completed; waiting for outstanding PR reviewer requests; clears when all reviewers submit, then re-invokes the stage agent to address feedback |
+| `fabrik:awaiting-review` | Stage completed; waiting for outstanding PR reviewer requests; clears when no requested reviewers are outstanding and at least one review has been submitted, then re-invokes the stage agent to address feedback |
 | `fabrik:locked:<user>` | Issue is locked for editing by the specified user |
 | `stage:<name>:in_progress` | Named stage is currently running |
 | `stage:<name>:complete` | Named stage completed successfully |
