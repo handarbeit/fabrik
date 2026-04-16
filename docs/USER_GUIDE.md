@@ -10,6 +10,7 @@ This guide covers everything you need to set up, configure, and use Fabrik effec
 
 For a quick overview see the [README](../README.md).
 For details on the internal stage lifecycle, see [Stage Lifecycle](stage-lifecycle.md).
+For the authoritative engine state-machine spec (label semantics, review gate transitions, marker handling), see [State Machine](state-machine.md).
 
 ---
 
@@ -163,6 +164,8 @@ or `poll:` in `config.yaml`).
 | 5–10 min | 2× | 60s |
 | 10–20 min | 4× | 120s |
 | 20+ min | max (5 minutes) | 300s |
+
+**Rate-limit backoff**: When Fabrik detects GraphQL API quota pressure, the same interval infrastructure adds a separate rate-limit component. This component is capped at `10 × configured poll interval` (300s at the default 30s base; 600s at 60s base) — there is no separate 5-minute ceiling for the rate-limit contributor. The effective poll interval is `max(idle interval, rate-limit interval)`, so whichever is larger governs at any given moment.
 
 Move an issue to `Specify` on the board to start processing it.
 
@@ -467,13 +470,15 @@ auto_advance: false       # Optional. Per-stage override for the global yolo set
 cleanup_worktree: false   # Optional. Removes the issue worktree instead of invoking Claude.
                           #   Use for terminal stages (e.g., Done) where no further work
                           #   is needed on the branch.
-wait_for_reviews: false   # Optional. When true and auto-advance is active, Fabrik waits for
-                          #   all requested PR reviewers to submit, then re-invokes the stage
-                          #   agent via the comment-processing path to address the feedback.
-                          #   This loop repeats until no reviewers are pending (up to
-                          #   FABRIK_MAX_REVIEW_CYCLES cycles). On timeout or cycle limit,
-                          #   Fabrik pauses with fabrik:awaiting-input instead of advancing.
-                          #   See §10 Pending Reviewer Gate for full details.
+wait_for_reviews: false   # Optional. When true, Fabrik waits for all requested PR reviewers
+                          #   to submit and re-invokes the stage agent via the comment-processing
+                          #   path to address submitted inline feedback. Re-invocation is
+                          #   unconditional — it fires regardless of the auto-advance setting.
+                          #   Auto-advancement to the next stage after re-invocation still requires
+                          #   auto-advance to be active. This loop repeats until no reviewers are
+                          #   pending (up to FABRIK_MAX_REVIEW_CYCLES cycles). On timeout or cycle
+                          #   limit, Fabrik pauses with fabrik:awaiting-input instead of advancing.
+                          #   See §3 Pending Reviewer Gate for full details.
 allowed_tools:            # Optional. REPLACES the default tool set — not additive. When set,
   - Read                  #   only these tools are allowed; the default list is not added.
   - Grep                  #   When omitted, Fabrik uses a comprehensive default covering common
@@ -566,6 +571,8 @@ When you post a comment:
 
 The rocket reaction is durable -- on restart, Fabrik skips comments that already have it.
 
+Engine-posted comments are identified by **two dedup signals**: the `🏭 **Fabrik` header (primary) and the 🚀 rocket reaction (secondary). Both categories are skipped when scanning for new user comments to process.
+
 ### Reaction Flow
 
 | Reaction | Meaning |
@@ -585,9 +592,20 @@ You do not need to babysit the pipeline. The intended human role is:
 
 ### Draft PR Workflow
 
-The Implement stage creates a **draft PR** linked to the issue. This gives you a place
-to review incrementally. The Review stage then rebases, reviews, fixes, and pushes --
-turning the draft into a review-ready PR.
+The Implement stage creates a **draft PR** linked to the issue when `create_draft_pr: true` is set (the default for Implement). This gives you a place to review incrementally. The Review stage then rebases, reviews, fixes, and pushes — turning the draft into a review-ready PR.
+
+**PR body seeding**: When the draft PR is created, Fabrik seeds the PR body from context files already written in the worktree:
+
+| Section | Source |
+|---------|--------|
+| `## Summary` | Extracted from the issue spec (`.fabrik-context/issue.md`) |
+| `## Problem` | Extracted from the issue spec (`.fabrik-context/issue.md`) |
+| `## Approach` | Extracted from the Plan stage output (`.fabrik-context/stage-Plan.md`); falls back to a placeholder if absent |
+| `## Verification` | Placeholder text, auto-replaced by an extracted stage summary when available |
+
+The `Closes #N` footer in the PR body links the PR to the issue so Fabrik can discover PR comments via GraphQL.
+
+**Verification auto-update**: For draft PRs created with `create_draft_pr: true`, Fabrik updates the `## Verification` section only when it can extract a summary block delimited by `FABRIK_SUMMARY_BEGIN` and `FABRIK_SUMMARY_END` from stage output. This keeps the PR description current when a stage provides a structured summary for PR-body updates.
 
 ### Retry and Escalation
 
@@ -709,7 +727,9 @@ Sub-issues (those labeled `fabrik:sub-issue`) are **never decomposed further**. 
 
 ### Pending Reviewer Gate
 
-When a stage has `wait_for_reviews: true` set and auto-advance is active (global `yolo: true`, per-stage `auto_advance: true`, or the `fabrik:yolo` label on the issue), Fabrik waits for all requested PR reviewers to submit their reviews, then re-invokes the stage agent to address the feedback before advancing.
+When a stage has `wait_for_reviews: true` set, Fabrik waits for all requested PR reviewers to submit their reviews, then re-invokes the stage agent to address any submitted inline feedback. **Re-invocation is unconditional** — it fires for any issue with submitted inline review thread comments, regardless of whether auto-advance is active. Auto-advancement to the next stage after re-invocation still requires auto-advance to be active (global `yolo: true`, per-stage `auto_advance: true`, or the `fabrik:yolo` label on the issue).
+
+For the authoritative spec on label lifecycle and gate transitions, see [State Machine](state-machine.md).
 
 The Review and Validate stages ship with `wait_for_reviews: true` enabled by default.
 
@@ -724,7 +744,7 @@ wait_for_reviews: true
 ...
 ```
 
-The gate only fires when auto-advance is active. If you're manually dragging cards through the board, the gate has no effect — you control the timing.
+The reviewer wait and re-invocation cycle fire unconditionally — they activate whenever `wait_for_reviews: true` and inline review feedback is present, regardless of whether auto-advance is active. If you're manually dragging cards through the board, re-invocation still happens; the issue will not advance automatically after the cycle completes — you still move the card manually.
 
 #### Label Lifecycle
 
@@ -741,7 +761,7 @@ The gate uses a three-phase design:
 
 1. **Phase 1 (always-gate):** On stage completion, Fabrik immediately adds `fabrik:awaiting-review` and skips auto-advance. This fires even before reviewer assignments propagate.
 2. **Phase 2 (gate evaluation):** On subsequent poll cycles, Fabrik re-fetches the PR with fresh GraphQL data and evaluates whether all requested reviewers have submitted. If still pending → wait. If timed out → pause with `fabrik:awaiting-input`.
-3. **Phase 3 (re-invocation):** When the gate clears with submitted reviews present, Fabrik re-invokes the stage agent via the comment-processing skill (`comment_skill`) with the unresolved inline review thread comments as input. Top-level PR review bodies are not included, so a review that only contains general feedback without inline thread comments does not provide re-invocation input. Each inline thread comment is enriched with its **file path** and, when available, **line number** and **raw diff-hunk context** (line number and hunk may be absent for file-level or outdated comments) so the agent understands where in the code the reviewer's feedback applies. The agent addresses the feedback, commits, and signals `FABRIK_STAGE_COMPLETE`. This re-applies `fabrik:awaiting-review` and the cycle repeats from Phase 2 until no reviewers are pending.
+3. **Phase 3 (re-invocation):** When the gate clears with submitted reviews present, Fabrik re-invokes the stage agent via the comment-processing skill (`comment_skill`) with the unresolved inline review thread comments as input. Top-level PR review bodies are not included, so a review that only contains general feedback without inline thread comments does not provide re-invocation input. Each inline thread comment is enriched with its **file path** and, when available, **line number** and **raw diff-hunk context** (line number and hunk may be absent for file-level or outdated comments) so the agent understands where in the code the reviewer's feedback applies. The agent addresses the feedback, commits, and signals `FABRIK_STAGE_COMPLETE`. This re-applies `fabrik:awaiting-review` and the cycle repeats from Phase 2 until no reviewers are pending. **As of v0.0.39, re-invocation is unconditional** — it fires for any issue with `wait_for_reviews: true` and submitted inline feedback, regardless of whether auto-advance is active.
 
 This means there is always at least one extra poll cycle delay after stage completion — typically 30 seconds.
 
@@ -751,12 +771,32 @@ If a submitted-review batch leaves no unresolved inline PR review thread comment
 
 This prevents spurious re-invocation cycles when reviews contain no actionable inline thread feedback for the agent to address.
 
+#### PR Summary Comment
+
+After each re-invocation cycle, Fabrik posts a summary comment on the **linked PR** (not the issue) with the following format:
+
+```
+🏭 **Fabrik — stage: {StageName} (review feedback addressed)**
+*branch: {branch} | commit: {sha} | main: {mainSHA} | {timestamp}*
+
+{Claude output}
+
+---
+**Threads addressed:**
+- `path/to/file.go:42` — resolved
+- `other/file.go` — resolved
+
+Resolved N review thread(s) across M comment(s).
+```
+
+The "Threads addressed" footer lists each inline thread by file path and line number (when available); file-level or outdated threads show only the file path. This comment is posted only when Claude produces output and a linked PR is found. It carries the `🏭 **Fabrik` header so it is not reprocessed as user input on subsequent polls.
+
 #### Cycle Limit
 
-To prevent infinite loops (e.g., a bot that always posts new reviews after every push), Fabrik caps the number of re-invocation cycles per issue per engine session. When the limit is reached with reviewers still pending, Fabrik pauses the issue with `fabrik:awaiting-input` and posts a comment explaining the situation.
+To prevent infinite loops (e.g., a bot that always posts new reviews after every push), Fabrik caps the number of re-invocation cycles per issue per stage per engine session. When the limit is reached with reviewers still pending, Fabrik pauses the issue with `fabrik:awaiting-input` and posts a comment explaining the situation.
 
 ```bash
-FABRIK_MAX_REVIEW_CYCLES=3  # Limit to 3 re-invocation cycles per issue (default: 5)
+FABRIK_MAX_REVIEW_CYCLES=3  # Limit to 3 re-invocation cycles per issue per stage (default: 5)
 # or equivalently:
 fabrik --max-review-cycles=3
 ```
@@ -1031,6 +1071,8 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 
 ## 6. Labels Reference
 
+> For the authoritative label lifecycle spec — when each label is added, cleared, and what transitions it guards — see [State Machine](state-machine.md).
+
 ### Fabrik-Managed Labels
 
 > Fabrik auto-seeds all managed labels on the configured repository at startup — creating them with their descriptions and colors if they do not already exist, so the GitHub UI shows meaningful hover text.
@@ -1041,7 +1083,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:editing` | Issue body being updated (comment processing) |
 | `fabrik:paused` | Processing paused (max retries exceeded or manual) |
 | `fabrik:awaiting-input` | Stage paused waiting for user input; auto-clears on a new comment from the configured user |
-| `fabrik:awaiting-review` | Issue waiting for all requested PR reviewers to submit; set when `wait_for_reviews: true` stage completes with auto-advance active; cleared when all reviewers submit (then re-invocation fires) or when the `FABRIK_REVIEW_WAIT_TIMEOUT` elapses (then issue is paused with `fabrik:awaiting-input`) |
+| `fabrik:awaiting-review` | Issue waiting for all requested PR reviewers to submit; set when a `wait_for_reviews: true` stage completes; cleared when all reviewers submit (then re-invocation fires unconditionally) or when the `FABRIK_REVIEW_WAIT_TIMEOUT` elapses (then issue is paused with `fabrik:awaiting-input`) |
 | `fabrik:blocked` | Issue is waiting for one or more blocking issues to close; added and removed automatically by the engine (Fabrik creates this label on first use — no pre-creation needed) |
 | `stage:<name>:in_progress` | Stage actively running |
 | `stage:<name>:complete` | Stage completed successfully |
@@ -1149,7 +1191,7 @@ In terminals that support OSC 8 hyperlinks (Ghostty, iTerm2, WezTerm, Kitty), is
 
 ### What's Displayed
 
-**In Progress**: Issue number, stage name, elapsed time, issue title, latest status message.
+**In Progress**: Issue number, stage name, elapsed time, issue title, latest status message. Review-reinvoke jobs appear here alongside regular stage jobs — they emit `JobStarted`/`JobCompleted` events and display with the issue number, stage name, and elapsed time, just like a normal stage invocation.
 
 **History**: Issue number, stage name, success/fail icon, duration, timestamp, turns used,
 cost, and issue title. Status icons:
