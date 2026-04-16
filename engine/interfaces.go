@@ -26,6 +26,8 @@ type GitHubClient interface {
 	ArchiveProjectItem(projectID, itemID string) error
 	GetIssueBody(owner, repo string, issueNumber int) (string, error)
 	FindPRForIssue(owner, repo string, issueNumber int) (int, error)
+	GetPRBase(owner, repo string, prNumber int) (string, error)
+	UpdatePRBase(owner, repo string, prNumber int, newBase string) error
 	CreateDraftPR(owner, repo, title, head, base, body string, issueNumber int) (int, error)
 	MarkPRReady(owner, repo string, prNumber int) error
 	MergePR(owner, repo string, prNumber int) error
