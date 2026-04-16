@@ -1,28 +1,33 @@
-# Fabrik v0.0.38
+# Fabrik v0.0.39
 
 ## Features
 
-- **Per-issue base branch override via `base:<branch>` label** — Fabrik forks from, rebases onto, and targets PRs at the specified branch instead of the repository default. Must be set before Research; falls back to the default branch (with a comment) if the branch does not exist on the remote.
-- **`--review-wait-timeout` and `--max-review-cycles` CLI flags** — First-class flags for tuning the reviewer gate. Explicit `=0` values are honored and no longer silently overridden by environment variables.
-- **Richer PR review thread context** — Review thread comments now include the file, line, and diff-hunk context so the review-comment skill can navigate straight to the affected location instead of searching for the code.
-- **Closed issues auto-advance when their current stage is complete** — Keeps the board moving when an issue is closed externally after its stage finished.
+- Review-feedback processing now runs for **all** issues, not just `fabrik:yolo` or `fabrik:cruise` (#392). The catch-up loop is split into Phase 1 (review gate + review reinvoke — unconditional) and Phase 2 (advancement — still gated). Copilot/Gemini/human inline review comments are addressed automatically after Review and Validate complete.
+- Post a Fabrik-marked summary comment on the PR after addressing review-thread feedback, with a machine-generated per-thread footer (#394). Reviewers can confirm at a glance which threads were addressed.
+- `processComments` now widens its input on PR-backed items to include unresolved review-thread comments alongside any user-nudge conversation comments — closes the race where a user nudge would leave threads unresolved (#392).
+- Seed PR body from context files on creation and auto-update a "Verification" section as stages complete.
+- Unified idle/rate-limit backoff in the poll loop — `w` key wakes the poll early; backoff honors rate-limit reset windows.
+- Auto-react with 🚀 on engine-posted comments as a secondary dedup signal, complementing the 🏭 header check (#399).
 
 ## Fixes
 
-- **Stop runaway review re-invocation loop** — Added an `inFlight` guard and moved it before the cycle-limit check so issues don't get prematurely paused; only unresolved inline thread comments now trigger re-invocation; `reviewCycleCount` resets on unpause.
-- **Use real PR review thread comments for re-invocation** — Prevents phantom cycles driven by unrelated issue comments.
-- **Thread `baseBranch` through prompt builder** — Prompts no longer hardcode `main`; the base-branch statement is omitted when empty and fallback prose is never backtick-wrapped as a branch name.
-- **Robust review thread decoding** — Use `*int`/`*string` for nullable GraphQL fields so missing location data doesn't break the decode.
-- **Worktree mutex held around `branchExists`** — Serializes base-branch existence checks and deduplicates the fallback comment.
-- **`gh`/`git` execution safety** — Fixed a 4-backtick fence issue in the review-comment SKILL.md example so nested code blocks render correctly.
+- Prefix every engine-emitted comment with the 🏭 Fabrik header (#398). Three sites were missing the prefix (base-branch fallback, unmergeable-PR notice, dependency-block notice), which caused Fabrik to re-process its own comments as user input.
+- Key `reviewCycleCount` by stage instead of by issue (#393). Review's reinvoke cycles no longer consume Validate's budget.
+- Emit `JobStarted`/`JobCompleted` TUI events for review reinvoke — review-feedback processing now appears in the In Progress panel.
+- `AddComment` correctly captures the created comment ID from the REST response; empty-path review-thread comments fall back cleanly in the per-thread footer.
+- Rate-limit backoff no longer caps at the 5-minute idle ceiling — long resets are honored in full.
 
 ## Improvements
 
-- **TUI In Progress panel is no longer height-capped** — The panel can grow to show all in-flight workers.
+- Broaden the `fabrik-plan` skill's doc-impact framing to cover engineering/as-built docs, not only user-facing ones (#395).
+- Add a "Canonical Documentation" section to Fabrik's root `CLAUDE.md` naming `docs/state-machine.md` and `docs/stage-lifecycle.md` as authoritative as-built docs that must be updated alongside engine behavior changes (#396).
+- Ship a comprehensive issue state machine specification at `docs/state-machine.md` — the authoritative as-built reference for state transitions, label semantics, marker handling, review gating, and PR lifecycle coupling (#383).
+- Prohibit direct `gh pr comment` / `gh issue comment` posting in stage skills with `post_to_pr: true` (#397). Claude's output flows to stdout only; the engine is the single posting point.
 
 ## Internal
 
-- Docs refreshed for `base:<branch>` label, reviewer-gate CLI flags, and the three-phase Pending Reviewer Gate behavior across README, USER_GUIDE, index.md, CLAUDE.md, and tui/help.go.
+- `.fabrik/plugin/` is no longer tracked in git — it is a generated mirror refreshed from the embedded source on each `fabrik init` / `fabrik upgrade`. The authoritative source is `plugin/fabrik-plugin/skills/`.
+- Unit test coverage expanded for review-reinvoke detection, thread-entry building, PR summary formatting, per-stage cycle counting, idle backoff, and TUI header rendering.
 
 ## Upgrading
 
@@ -31,5 +36,5 @@
 # Fabrik checks for new releases each poll cycle and upgrades automatically with --auto-upgrade
 
 # Or download directly
-gh release download --repo shadoworg/fabrik --pattern '*darwin_arm64*' -O - | tar xz
+gh release download --repo tenaciousvc/fabrik --pattern '*<os>_<arch>*' -O - | tar xz
 ```
