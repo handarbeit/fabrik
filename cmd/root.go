@@ -40,6 +40,8 @@ type Config struct {
 	MaxRetries        int
 	ReviewWaitTimeout int // minutes; 0 means use default (15)
 	MaxReviewCycles   int // 0 means use default (5)
+	CIWaitTimeout     int // minutes; 0 means use default (30)
+	MaxCiFixCycles    int // 0 means use default (5)
 	DebugOutput       bool
 	PluginDir         string
 }
@@ -109,6 +111,8 @@ func Execute() error {
 	flag.IntVar(&cfg.MaxRetries, "max-retries", 3, "Max failed stage attempts before pausing the issue (0 = unlimited)")
 	flag.IntVar(&cfg.ReviewWaitTimeout, "review-wait-timeout", 0, "Maximum time in minutes to wait for PR reviewers before advancing (0 = use default of 15; also FABRIK_REVIEW_WAIT_TIMEOUT)")
 	flag.IntVar(&cfg.MaxReviewCycles, "max-review-cycles", 0, "Maximum number of review-and-fix cycles per issue (0 = use default of 5; also FABRIK_MAX_REVIEW_CYCLES)")
+	flag.IntVar(&cfg.CIWaitTimeout, "ci-wait-timeout", 0, "Maximum time in minutes to wait for CI in the merge guard before pausing (0 = use default of 30; also FABRIK_CI_WAIT_TIMEOUT)")
+	flag.IntVar(&cfg.MaxCiFixCycles, "max-ci-fix-cycles", 0, "Maximum number of CI-fix cycles per issue before pausing (0 = use default of 5; also FABRIK_MAX_CI_FIX_CYCLES)")
 	flag.BoolVar(&cfg.DebugOutput, "debug-output", false, "Save Claude stage output to .fabrik/debug/ for debugging")
 	flag.StringVar(&cfg.PluginDir, "plugin-dir", "", "Path to Fabrik plugin directory (for development; overrides installed plugin)")
 
@@ -274,6 +278,24 @@ func Execute() error {
 			}
 		}
 	}
+	if !explicitFlags["ci-wait-timeout"] {
+		if v := os.Getenv("FABRIK_CI_WAIT_TIMEOUT"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				cfg.CIWaitTimeout = n
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_CI_WAIT_TIMEOUT=%q is invalid (must be a positive integer of minutes); using default 30\n", v)
+			}
+		}
+	}
+	if !explicitFlags["max-ci-fix-cycles"] {
+		if v := os.Getenv("FABRIK_MAX_CI_FIX_CYCLES"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				cfg.MaxCiFixCycles = n
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_CI_FIX_CYCLES=%q is invalid (must be a positive integer); using default 5\n", v)
+			}
+		}
+	}
 	if !cfg.AutoUpgrade {
 		if v := os.Getenv("FABRIK_AUTO_UPGRADE"); v != "" {
 			lv := strings.ToLower(v)
@@ -392,6 +414,8 @@ func Execute() error {
 		MaxRetries:        cfg.MaxRetries,
 		ReviewWaitTimeout: reviewWaitTimeout(cfg.ReviewWaitTimeout),
 		MaxReviewCycles:   maxReviewCycles(cfg.MaxReviewCycles),
+		CIWaitTimeout:     ciWaitTimeout(cfg.CIWaitTimeout),
+		MaxCiFixCycles:    maxCiFixCycles(cfg.MaxCiFixCycles),
 		DebugOutput:       cfg.DebugOutput,
 		PluginDir:         cfg.PluginDir,
 		Stages:            stageCfgs,
@@ -423,6 +447,24 @@ func reviewWaitTimeout(minutes int) time.Duration {
 // maxReviewCycles returns the configured MaxReviewCycles value, defaulting to 5
 // when n is 0 (unset).
 func maxReviewCycles(n int) int {
+	if n <= 0 {
+		return 5
+	}
+	return n
+}
+
+// ciWaitTimeout converts a CIWaitTimeout config value (minutes) to a
+// time.Duration. When minutes is 0 (unset), the default of 30 minutes is used.
+func ciWaitTimeout(minutes int) time.Duration {
+	if minutes <= 0 {
+		return 30 * time.Minute
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+// maxCiFixCycles returns the configured MaxCiFixCycles value, defaulting to 5
+// when n is 0 (unset).
+func maxCiFixCycles(n int) int {
 	if n <= 0 {
 		return 5
 	}
