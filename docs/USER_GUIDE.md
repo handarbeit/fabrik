@@ -751,7 +751,7 @@ The reviewer wait and re-invocation cycle fire unconditionally — they activate
 When the gate is active, Fabrik adds the `fabrik:awaiting-review` label to the issue. This label:
 
 - Makes the wait state visible on the project board
-- Is cleared automatically when all requested reviewers submit (approve, request changes, or comment)
+- Is cleared automatically when no requested reviewers are outstanding **and** at least one review has been submitted — this dual condition catches bot reviewers (Copilot, Gemini) that self-trigger via webhook without ever appearing in the formal requested-reviewer list
 - Triggers a re-invocation of the stage agent (via the comment-processing path) to address the submitted review feedback
 - After re-invocation, if new reviewers are assigned (e.g. bots triggered by a fresh push), the label is re-applied and the cycle continues
 
@@ -760,7 +760,7 @@ When the gate is active, Fabrik adds the `fabrik:awaiting-review` label to the i
 The gate uses a three-phase design:
 
 1. **Phase 1 (always-gate):** On stage completion, Fabrik immediately adds `fabrik:awaiting-review` and skips auto-advance. This fires even before reviewer assignments propagate.
-2. **Phase 2 (gate evaluation):** On subsequent poll cycles, Fabrik re-fetches the PR with fresh GraphQL data and evaluates whether all requested reviewers have submitted. If still pending → wait. If timed out → pause with `fabrik:awaiting-input`.
+2. **Phase 2 (gate evaluation):** On subsequent poll cycles, Fabrik re-fetches the PR with fresh GraphQL data and evaluates the dual condition: the gate clears only when no requested reviewers are outstanding **and** at least one review has been submitted. Requiring at least one review (not just an empty pending list) is what catches bot reviewers like Copilot and Gemini that self-trigger via webhook without ever appearing in the formal requested-reviewer list — if only the pending list were checked, the gate would race through while bots were still processing. If still pending → wait. If timed out → pause with `fabrik:awaiting-input`.
 3. **Phase 3 (re-invocation):** When the gate clears with submitted reviews present, Fabrik re-invokes the stage agent via the comment-processing skill (`comment_skill`) with the unresolved inline review thread comments as input. Top-level PR review bodies are not included, so a review that only contains general feedback without inline thread comments does not provide re-invocation input. Each inline thread comment is enriched with its **file path** and, when available, **line number** and **raw diff-hunk context** (line number and hunk may be absent for file-level or outdated comments) so the agent understands where in the code the reviewer's feedback applies. The agent addresses the feedback, commits, and signals `FABRIK_STAGE_COMPLETE`. This re-applies `fabrik:awaiting-review` and the cycle repeats from Phase 2 until no reviewers are pending. **As of v0.0.39, re-invocation is unconditional** — it fires for any issue with `wait_for_reviews: true` and submitted inline feedback, regardless of whether auto-advance is active.
 
 This means there is always at least one extra poll cycle delay after stage completion — typically 30 seconds.
@@ -805,7 +805,7 @@ The cycle count resets on engine restart.
 
 #### Timeout Configuration
 
-`FABRIK_REVIEW_WAIT_TIMEOUT` sets the per-cycle timeout in minutes. If reviewers don't submit within the timeout, Fabrik **pauses** the issue with `fabrik:awaiting-input` (rather than auto-advancing) so a human can investigate.
+`FABRIK_REVIEW_WAIT_TIMEOUT` sets the per-cycle timeout in minutes. If reviewers don't submit within the timeout, Fabrik **pauses** the issue with `fabrik:awaiting-input` (rather than auto-advancing) so a human can investigate. This timeout also acts as the fallback when no reviews ever arrive — for example, if all bot reviewers fail to post — since the dual-condition gate requires at least one submitted review and would otherwise wait indefinitely.
 
 ```bash
 FABRIK_REVIEW_WAIT_TIMEOUT=30  # Wait up to 30 minutes per cycle for reviewers (default: 15)
