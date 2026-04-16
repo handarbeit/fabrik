@@ -13,7 +13,7 @@ Upgrade is strongly recommended for all v0.0.39 users — v0.0.39 will crash-loo
 # Fabrik checks for new releases each poll cycle and upgrades automatically with --auto-upgrade
 
 # Or download directly (auto-detects OS and architecture)
-OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-ARCH=$(uname -m); case "$ARCH" in x86_64) ARCH=amd64 ;; aarch64) ARCH=arm64 ;; esac
-gh release download --repo handarbeit/fabrik --pattern "*${OS}_${ARCH}*" -O - | tar xz
+gh release download --repo handarbeit/fabrik \
+  --pattern "fabrik_*_$(uname -s | tr A-Z a-z)_$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/').tar.gz" \
+  -O - | tar xz
 ```
