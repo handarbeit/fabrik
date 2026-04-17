@@ -679,6 +679,40 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			continue
 		}
 
+		// CI gate: evaluate CI status for stages configured with wait_for_ci: true.
+		// This runs in Phase 1 (unconditional) so CI failures are fixed regardless
+		// of auto-advance setting. checkCIGate returns (blocked, ciFailure, timedOut).
+		ciBlocked, ciFailure, ciTimedOut := e.checkCIGate(board, item, stage)
+		if ciTimedOut {
+			e.pauseForCITimeout(board, item, stage)
+			continue
+		}
+		if ciFailure {
+			iKey := issueKey(item, e.defaultRepo())
+			stageKey := iKey + "-" + stage.Name
+			if _, ok := e.inFlight.Load(iKey); ok {
+				e.logf(item.Number, "ci-fix-reinvoke", "skipping dispatch — CI-fix reinvoke already in-flight\n")
+				continue
+			}
+			e.mu.Lock()
+			cycleCount := e.ciFixCycleCount[stageKey]
+			maxCycles := e.cfg.MaxCiFixCycles
+			e.mu.Unlock()
+			if cycleCount >= maxCycles {
+				e.pauseForCIFixCycleLimit(board, item, stage, cycleCount, maxCycles)
+			} else {
+				e.mu.Lock()
+				e.ciFixCycleCount[stageKey]++
+				e.mu.Unlock()
+				e.dispatchCIFixReinvoke(ctx, board, item, stage)
+				advancedItems[issueKey(item, e.defaultRepo())] = true
+			}
+			continue
+		}
+		if ciBlocked {
+			continue // CI still pending; re-evaluate on next poll
+		}
+
 		// Phase 2: gated stage advancement.
 		// Gate: yolo (cfg or label), cruise label, or stage-level auto_advance:true.
 		isAutoAdvance := hasYoloLabel(item) || hasCruiseLabel(item)

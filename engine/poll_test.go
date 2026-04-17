@@ -589,8 +589,8 @@ func TestYoloCatchUpMergesBeforeAdvance(t *testing.T) {
 				},
 			}, nil
 		},
-		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
-			return 99, nil
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 99, HeadSHA: "sha1"}, nil
 		},
 	}
 	// Set after construction so the closure can reference client.
@@ -658,8 +658,8 @@ func TestYoloCatchUpSkipsAdvanceOnMergeError(t *testing.T) {
 				},
 			}, nil
 		},
-		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
-			return 99, nil
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 99, HeadSHA: "sha1"}, nil
 		},
 		mergePRFn: func(owner, repo string, prNumber int) error {
 			return gh.ErrNotMergeable
@@ -899,8 +899,8 @@ func TestCruiseCatchUp_BothCruiseAndYolo_YoloWins(t *testing.T) {
 				},
 			}, nil
 		},
-		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
-			return 66, nil
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 66, HeadSHA: "sha1"}, nil
 		},
 	}
 	eng := testEngineWithStages(client, testStagesWithValidate())
