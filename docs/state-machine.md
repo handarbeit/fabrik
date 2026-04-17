@@ -89,6 +89,7 @@ Each active stage column has the same set of reachable sub-states:
 | **Paused + Failed** | `fabrik:paused`, `stage:<X>:failed` | Engine paused after MaxRetries exhausted |
 | **Awaiting Input** | `fabrik:paused`, `fabrik:awaiting-input` | Claude signaled FABRIK_BLOCKED_ON_INPUT; waiting for user comment |
 | **Awaiting Review** | `fabrik:awaiting-review`, `stage:<X>:complete` | Review gate active; waiting for PR reviewers (only on stages with `wait_for_reviews: true`) |
+| **Awaiting CI** | `fabrik:awaiting-ci`, `stage:<X>:complete` | CI gate active; PR CI checks failed; engine dispatching CI-fix re-invocation (only on stages with `wait_for_ci: true`) |
 | **Blocked** | `fabrik:blocked` | Dependency gate active; waiting for blocking issues to close |
 | **Complete** | `stage:<X>:complete` | Stage finished; waiting for advancement (manual or auto) |
 | **Locked by Other** | `fabrik:locked:<other_user>` | Another Fabrik instance owns this issue |
@@ -110,9 +111,10 @@ Each active stage column has the same set of reachable sub-states:
 |-------|----------|------------|------------|--------------|-------|
 | `fabrik:locked:<user>` | `processItem` | Before stage invocation (lock-then-verify protocol) | `releaseLock` | On stage completion, permanent failure, blocked-on-input, decomposed, or lock conflict loss | Prevents other instances from processing the item |
 | `fabrik:editing` | `processComments` | Step 2 of comment processing | `processComments` | Step 9 of comment processing (also on error paths) | Prevents `processItem` from starting a new stage invocation |
-| `fabrik:paused` | `escalateFailedStage`, `blockOnInput`, `pauseForReviewTimeout`, `pauseForReviewCycleLimit`, `attemptMergeOnValidate` (on ErrNotMergeable) | After MaxRetries, FABRIK_BLOCKED_ON_INPUT, review timeout, review cycle limit, or unmergeable PR | User (manual removal), or `processItem` (on new comment that triggers unpause) | When user removes it manually, or user comments on a paused issue | Blocks all processing; user comment is an implicit resume |
-| `fabrik:awaiting-input` | `blockOnInput`, `pauseForReviewTimeout`, `pauseForReviewCycleLimit` | After FABRIK_BLOCKED_ON_INPUT or review timeout/cycle limit | `unblockAwaitingInput` | When user comment arrives | Combined with `fabrik:paused`, identifies the "awaiting user input" pause variant |
+| `fabrik:paused` | `escalateFailedStage`, `blockOnInput`, `pauseForReviewTimeout`, `pauseForReviewCycleLimit`, `pauseForCITimeout`, `pauseForCIFixCycleLimit`, `attemptMergeOnValidate` (on ErrNotMergeable or CI wait timeout) | After MaxRetries, FABRIK_BLOCKED_ON_INPUT, review/CI timeout, review/CI cycle limit, or unmergeable PR | User (manual removal), or `processItem` (on new comment that triggers unpause) | When user removes it manually, or user comments on a paused issue | Blocks all processing; user comment is an implicit resume |
+| `fabrik:awaiting-input` | `blockOnInput`, `pauseForReviewTimeout`, `pauseForReviewCycleLimit`, `pauseForCITimeout`, `pauseForCIFixCycleLimit` | After FABRIK_BLOCKED_ON_INPUT or review/CI timeout/cycle limit | `unblockAwaitingInput` | When user comment arrives | Combined with `fabrik:paused`, identifies the "awaiting user input" pause variant |
 | `fabrik:awaiting-review` | `handleStageComplete` (Path 1), `checkReviewGate` (Path 2) | Path 1: optimistically after stage completion when `wait_for_reviews: true` (does not check reviewer state — data is stale). Path 2: when `LinkedPRReviewRequests` is non-empty (real gate evaluation) | `checkReviewGate` (both natural clear and timeout paths) | When all reviewers submit, or when timeout elapses (removed by `checkReviewGate` before `pauseForReviewTimeout` is called) | Blocks auto-advance until review gate clears |
+| `fabrik:awaiting-ci` | `checkCIGate` (catch-up loop), `attemptMergeOnValidate` (merge guard) | When CI check runs for the PR head SHA have `conclusion: failure/timed_out/action_required`. NOT added for pending/queued checks (R10c — no label churn for transient states). Applied idempotently. | `checkCIGate` (when CI passes or gate times out); `attemptMergeOnValidate` (when CI passes) | When all CI checks pass (green); or when timeout elapses (removed before `pauseForCITimeout` is called) | Signals confirmed CI failure; triggers `itemMayNeedWork` updatedAt cache bypass; blocks auto-advance until CI gate clears |
 | `fabrik:blocked` | `checkDependencies` | When open blocking issues exist (first transition only — idempotent) | `checkDependencies` | When all blocking issues close | Blocks stage start (first stage is exempt) |
 | `stage:<X>:in_progress` | `processItem` | After lock acquired and verified | `releaseLock` | Same as `fabrik:locked:<user>` | Informational — shows which stage is active on GitHub |
 | `stage:<X>:complete` | `handleStageComplete`, `handleDecomposed`, cleanup stage handler | After Claude signals FABRIK_STAGE_COMPLETE or FABRIK_DECOMPOSED; or after worktree cleanup | Never removed | Permanent | Prevents re-invocation of the stage; triggers catch-up advancement |
@@ -129,7 +131,7 @@ Each active stage column has the same set of reachable sub-states:
 
 ## 2. Event Enumeration
 
-Nine distinct event types drive state transitions:
+Ten distinct event types drive state transitions:
 
 ### 2.1 Poll Tick
 
@@ -227,6 +229,20 @@ Nine distinct event types drive state transitions:
 - The `inFlight` guard prevents double-dispatch across poll cycles
 - Resolves review threads (marks them resolved on GitHub) after processing
 
+### 2.10 CI Check Completed
+
+**Trigger:** CI check runs on the PR head SHA transition from pending to a terminal state (success, failure, etc.). Fabrik detects this by polling `FetchCheckRuns` (REST) on each catch-up loop iteration — there are no webhooks.
+
+**Code path:** `poll()` catch-up loop Phase 1 → `checkCIGate()` → `FetchLinkedPR()` (REST, for head SHA) → `FetchCheckRuns()` (REST) → evaluates check run statuses → optionally dispatches `dispatchCIFixReinvoke()` → async goroutine → `processComments()` with synthetic CI failure comment
+
+**Distinct from Review Reinvoke because:**
+- Triggered by check run status changes, not reviewer submissions
+- Uses `fabrik:awaiting-ci` label (not `fabrik:awaiting-review`)
+- Only active on stages with `wait_for_ci: true`
+- `fabrik:awaiting-ci` is only applied on **confirmed failure**, not on pending/queued checks (R10c)
+- Timeout tracked via `FetchLabelAppliedAt` on `fabrik:awaiting-ci` (durable across restarts), not in-memory
+- CI-fix cycle counter is `ciFixCycleCount` (keyed by `issueKey + "-" + stageName`)
+
 ---
 
 ## 3. Transition Tables
@@ -304,6 +320,16 @@ This table shows the normal flow when an issue progresses through the pipeline w
 | Same column, Awaiting Review + Complete | PR review submitted | All reviewers submitted | Same column, Complete → advance | | `fabrik:awaiting-review` | Gate cleared; falls through to advance or review reinvoke |
 | Same column, Awaiting Review + Complete | Poll tick (catch-up) | Timeout elapsed | Same column, Awaiting Input | `fabrik:paused`, `fabrik:awaiting-input` | `fabrik:awaiting-review` | `pauseForReviewTimeout()` posts explanatory comment |
 
+#### Awaiting CI (wait_for_ci gate)
+
+| Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
+|--------------|-------|-------|-----------------|--------------|----------------|--------------|
+| Column `<X>`, Locked + In Progress | FABRIK_STAGE_COMPLETE | `wait_for_ci: true`, yolo active, stage is Validate | Same column, Complete | `stage:<X>:complete` | `fabrik:locked:<user>`, `stage:<X>:in_progress` | Approach A: completion label added; merge and advancement deferred to catch-up loop (no `fabrik:awaiting-ci` at this point — CI not yet checked) |
+| Same column, Complete | Poll tick (catch-up) | CI checks still pending (no failure) | Same (blocked) | (none — R10c: no label for pending) | | `checkCIGate` logs pending checks; re-evaluates next poll |
+| Same column, Complete | Poll tick (catch-up) | Any CI check failed | Same column, Awaiting CI | `fabrik:awaiting-ci` | | CI failure detected; dispatch CI-fix reinvoke or pause on cycle limit |
+| Same column, Awaiting CI + Complete | Poll tick (catch-up) | All CI checks green | Same column, Complete → advance | | `fabrik:awaiting-ci` | Gate cleared; falls through to advance (or merge for Validate+yolo) |
+| Same column, Awaiting CI + Complete | Poll tick (catch-up) | `fabrik:awaiting-ci` applied ≥ CIWaitTimeout ago | Same column, Awaiting Input | `fabrik:paused`, `fabrik:awaiting-input` | `fabrik:awaiting-ci` | `pauseForCITimeout()` posts explanatory comment; timeout detected via `FetchLabelAppliedAt` |
+
 #### Cooldown Retry and Failed Stage Escalation
 
 | Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
@@ -327,6 +353,14 @@ This table shows the normal flow when an issue progresses through the pipeline w
 | Column `<X>`, Awaiting Review + Complete | Review gate clears + unresolved thread comments | Not in-flight, cycle count < MaxReviewCycles | Same column (comment processing via async goroutine) | `fabrik:editing` (during processing) | | `dispatchReviewReinvoke()` spawns goroutine; `reviewCycleCount` incremented; `inFlight` set; semaphore acquired |
 | Column `<X>`, Awaiting Review + Complete | Review gate clears + unresolved thread comments | Cycle count ≥ MaxReviewCycles | Same column, Awaiting Input | `fabrik:paused`, `fabrik:awaiting-input` | | `pauseForReviewCycleLimit()` posts comment |
 | Column `<X>`, Awaiting Review + Complete | Review gate clears + unresolved thread comments | Already in-flight | Same (skipped) | | | Previous reinvoke goroutine still running; skipped entirely (no cycle-limit check) |
+
+#### CI Fix Reinvoke
+
+| Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
+|--------------|-------|-------|-----------------|--------------|----------------|--------------|
+| Column `<X>`, Awaiting CI + Complete | Poll tick (catch-up) | CI failed; not in-flight; `ciFixCycleCount` < MaxCiFixCycles | Same column (CI-fix goroutine running) | `fabrik:editing` (during processing) | | `dispatchCIFixReinvoke()` spawns goroutine; `ciFixCycleCount` incremented; `inFlight` set; semaphore acquired; synthetic CI-fix comment passed to `processComments()` |
+| Column `<X>`, Awaiting CI + Complete | Poll tick (catch-up) | CI failed; `ciFixCycleCount` ≥ MaxCiFixCycles | Same column, Awaiting Input | `fabrik:paused`, `fabrik:awaiting-input` | | `pauseForCIFixCycleLimit()` posts explanatory comment |
+| Column `<X>`, Awaiting CI + Complete | Poll tick (catch-up) | CI failed; already in-flight | Same (skipped) | | | Previous CI-fix goroutine still running; skipped entirely |
 
 ---
 
@@ -490,7 +524,71 @@ The catch-up loop in `poll()` is split into two phases for every `stage:<X>:comp
 | PR summary posting | None | Posts `"<StageName> (review feedback addressed)"` on the linked PR with per-thread footer (one `path:line — resolved` bullet per unique `ReviewThreadID`); skipped when `output == ""` or no linked PR |
 | inFlight guard | Uses dispatch loop's `inFlight` check | Has its own `inFlight` check in catch-up loop |
 
-### 6.4 Decompose Path
+### 6.4 CI Gate and CI-Fix Reinvoke
+
+#### 6.4.1 Two-Phase CI Gate
+
+The CI gate has two paths that handle different timing scenarios:
+
+**Path 1: `attemptMergeOnValidate()` (Merge Guard)**
+- Embedded directly in the auto-merge path for Validate+yolo items
+- Uses in-memory `ciMergePendingSince` map (keyed by `issueKey`) to track how long CI has been pending
+- Fetches PR head SHA via `FetchLinkedPR()` (REST), then check run statuses via `FetchCheckRuns()` (REST)
+- **R5:** No check runs → gate clears (repo has no CI)
+- **R4:** All checks green → clear `ciMergePendingSince`; clear `fabrik:awaiting-ci`; proceed to merge
+- **R3:** Any check failed → add `fabrik:awaiting-ci`; return error (advance skipped)
+- **R2:** Any check pending → start timer in `ciMergePendingSince` (first observation); return error (**R10c:** no label applied — avoids label churn for transient pending state)
+- **R6:** Pending elapsed ≥ `CIWaitTimeout` → post comment; add `fabrik:paused` + `fabrik:awaiting-input`; return error
+
+**Path 2: Catch-up loop Phase 1 (`checkCIGate()`)**
+- Runs for all `stage:<X>:complete` items on stages with `wait_for_ci: true`
+- Has FRESH data from `FetchItemDetails()` and makes targeted REST calls for head SHA and check runs
+- Uses `FetchLabelAppliedAt` on `fabrik:awaiting-ci` for timeout tracking (durable across restarts)
+- Three outcomes:
+  - `(ciBlocked=true, ciFailure=false, ciTimedOut=false)` — checks still pending; skip to next item (**R10c**: no label applied — no churn for transient pending state)
+  - `(ciBlocked=true, ciFailure=true, ciTimedOut=false)` — failure confirmed; `fabrik:awaiting-ci` applied (idempotent); dispatch `dispatchCIFixReinvoke()` or pause on cycle limit
+  - `(ciBlocked=false, ciFailure=false, ciTimedOut=true)` — `fabrik:awaiting-ci` has been present ≥ `CIWaitTimeout`; pause via `pauseForCITimeout()`
+
+**Two different timeout strategies:**
+- **Path 1** (merge guard): In-memory `ciMergePendingSince` map. Acceptable because merge-guard state is transient — engine restarts simply re-evaluate CI on the next poll.
+- **Path 2** (catch-up loop): `FetchLabelAppliedAt` REST call on `fabrik:awaiting-ci`. Durable across restarts because the label itself persists. Only called when CI has already failed and the label is present — a rare, high-signal path.
+
+#### 6.4.2 CI Fix Reinvoke Mechanics
+
+The catch-up loop Phase 1 calls `checkCIGate()` after the review gate check. When CI has failed:
+
+1. **inFlight guard:** If a CI-fix goroutine from a previous poll is still running for this item, skip dispatch entirely (no cycle-limit check either)
+2. **Cycle limit check:** `ciFixCycleCount[stageKey]` is compared against `MaxCiFixCycles` (default 5)
+   - If exceeded: `pauseForCIFixCycleLimit()` adds `fabrik:paused` + `fabrik:awaiting-input` and posts comment
+   - If not exceeded: increment count, dispatch reinvoke via `dispatchCIFixReinvoke()`:
+     - Marks item in `inFlight` (prevents double-dispatch)
+     - Acquires semaphore slot (respects `MaxConcurrent`)
+     - Calls `buildCIFixComment()` to construct a synthetic `gh.Comment` (`DatabaseID: 0`) with a structured CI failure report — classifies each failed check as **NEW REGRESSION** (not failing on base branch) or **pre-existing** (also failing on base branch)
+     - Calls `processComments()` with the synthetic comment and the `ci_fix_skill` (falls back to `comment_skill` if unset)
+     - On exit: releases semaphore, clears `inFlight`
+
+**`DatabaseID: 0` guard:** Synthetic CI-fix comments have `DatabaseID: 0`, which skips the 👀 and 🚀 reaction steps in `processComments()` (reactions require a real GitHub comment ID).
+
+**CI-fix cycle counter reset:** `ciFixCycleCount[stageKey]` is reset to 0 by `clearFailedStage()` when the user removes `fabrik:paused` from a paused-failed item, allowing fresh CI-fix attempts after human intervention.
+
+#### 6.4.3 CI Fix Reinvoke vs Review Reinvoke
+
+| Aspect | Review Reinvoke | CI Fix Reinvoke |
+|--------|-----------------|-----------------|
+| Trigger | Unresolved PR review thread comments | CI check runs with failure/timed_out/action_required conclusion |
+| Source data | `item.LinkedPRReviewThreadComments` | `FetchCheckRuns()` REST call on PR head SHA |
+| Label on waiting | `fabrik:awaiting-review` (always applied) | `fabrik:awaiting-ci` (only on confirmed failure — R10c) |
+| Timeout tracking | In-memory `ReviewWaitTimeout` timer | `FetchLabelAppliedAt` on `fabrik:awaiting-ci` (durable across restarts) |
+| Cycle counter | `reviewCycleCount[stageKey]` | `ciFixCycleCount[stageKey]` |
+| Max cycles | `MaxReviewCycles` (default 5) | `MaxCiFixCycles` (default 5) |
+| Skill | `comment_skill` | `ci_fix_skill` (falls back to `comment_skill`) |
+| Synthetic comment | PR review thread text | Structured CI failure report with NEW REGRESSION classification |
+| inFlight guard | Yes — shared `inFlight` sync.Map | Yes — same `inFlight` sync.Map |
+| Thread resolution | Yes — `ResolveReviewThread()` after processing | No |
+| PR summary comment | Yes — `"<StageName> (review feedback addressed)"` on linked PR | No |
+| Stage gate config | `wait_for_reviews: true` | `wait_for_ci: true` |
+
+### 6.5 Decompose Path
 
 **Trigger:** Claude outputs `FABRIK_DECOMPOSED` marker (expected only from Plan stage).
 
@@ -564,6 +662,8 @@ Closed issues are normally skipped by `itemMayNeedWork()` and `itemNeedsWork()`.
 | Retry count | `retryCount[stageKey]` | None | Lost — retries restart from 0 |
 | Paused-due-to-retries | `pausedDueToRetries[stageKey]` | `fabrik:paused` + `stage:<X>:failed` | Labels survive; in-memory flag lost but `processItem()` detects the failed label directly |
 | Review cycle count | `reviewCycleCount[stageKey]` | None | Lost — cycle count restarts from 0 |
+| CI-fix cycle count | `ciFixCycleCount[stageKey]` | None | Lost — cycle count restarts from 0 |
+| CI merge pending since | `ciMergePendingSince[issueKey]` | None | Lost — merge guard re-evaluates CI fresh on next poll |
 | Comment processed | `processedSet[key]` | ROCKET (🚀) reaction | Reaction survives restart; in-memory dedup is defense-in-depth |
 | Lock tracking | `lockedIssues[iKey]` | `fabrik:locked:<user>` label | Label may survive if process crashes; `cleanupLockedIssues()` runs on graceful shutdown |
 | Last updatedAt | `lastUpdatedAt[iKey]` | None | Lost — all items re-evaluated on first poll |
@@ -626,15 +726,15 @@ No special handling. Each is independent. The engine only checks the in_progress
 
 ### 9.1 Semaphore
 
-`Engine.sem` is a buffered channel of size `MaxConcurrent` (default 5). Both the dispatch loop and `dispatchReviewReinvoke()` acquire slots from this semaphore before invoking Claude.
+`Engine.sem` is a buffered channel of size `MaxConcurrent` (default 5). The dispatch loop, `dispatchReviewReinvoke()`, and `dispatchCIFixReinvoke()` all acquire slots from this semaphore before invoking Claude.
 
 ### 9.2 inFlight Map
 
 `Engine.inFlight` (`sync.Map`) tracks items currently being processed by worker goroutines. Key: `issueKey` string, Value: `bool` (isPR).
 
-- **Set by:** dispatch loop (before goroutine launch) and `dispatchReviewReinvoke()` (inside goroutine, before semaphore acquire)
+- **Set by:** dispatch loop (before goroutine launch), `dispatchReviewReinvoke()` (inside goroutine, before semaphore acquire), and `dispatchCIFixReinvoke()` (inside goroutine, before semaphore acquire)
 - **Cleared by:** goroutine defer (after `processItem()` or `processComments()` returns)
-- **Used by:** dispatch loop (skip already in-flight items) and catch-up loop (skip reinvoke if already in-flight)
+- **Used by:** dispatch loop (skip already in-flight items) and catch-up loop (skip reinvoke/CI-fix dispatch if already in-flight)
 
 ### 9.3 Worktree Mutex
 
@@ -651,7 +751,7 @@ The `advancedItems` map prevents items advanced by the catch-up loop from having
 
 ### 9.5 processedSet Mutex
 
-`Engine.mu` (sync.Mutex) protects all in-memory state maps: `processedSet`, `lockedIssues`, `retryCount`, `pausedDueToRetries`, `reviewCycleCount`, `lastUpdatedAt`, `deepFetchFailureTime`, `lastUsage`, `lastCompleted`, `lastBlocked`, `totalTokens`, `lastReportedCost`. Critical sections are kept small — typically a single map read/write.
+`Engine.mu` (sync.Mutex) protects all in-memory state maps: `processedSet`, `lockedIssues`, `retryCount`, `pausedDueToRetries`, `reviewCycleCount`, `ciFixCycleCount`, `ciMergePendingSince`, `lastUpdatedAt`, `deepFetchFailureTime`, `lastUsage`, `lastCompleted`, `lastBlocked`, `totalTokens`, `lastReportedCost`. Critical sections are kept small — typically a single map read/write.
 
 ---
 
@@ -723,6 +823,13 @@ stateDiagram-v2
         AwaitingReview --> NextStage : Gate clears, no threads
         ReviewReinvoke --> AwaitingReview : Reinvoke completes, new reviews arrive
         ReviewReinvoke --> AwaitingInput : Cycle limit exceeded
+
+        Complete --> AwaitingCI : wait_for_ci gate (CI failure detected)
+        AwaitingCI --> CIFixReinvoke : CI failed, cycle ok
+        AwaitingCI --> NextStage : CI checks all pass
+        AwaitingCI --> AwaitingInput : CI timeout or cycle limit
+        CIFixReinvoke --> AwaitingCI : Reinvoke completes, CI re-evaluated next poll
+        CIFixReinvoke --> AwaitingInput : Cycle limit exceeded
 
         Complete --> NextStage : Auto-advance or human move
         CommentProcessing --> Complete : FABRIK_STAGE_COMPLETE in comment output
@@ -800,10 +907,10 @@ Stage advancement can occur through two code paths:
 
 | Phase | Gate | What it does |
 |-------|------|--------------|
-| **Phase 1** | Unconditional (all `stage:<X>:complete` non-paused non-cleanup items) | `checkDependencies()` → `checkReviewGate()` → `buildReviewThreadComments()` / `dispatchReviewReinvoke()` |
+| **Phase 1** | Unconditional (all `stage:<X>:complete` non-paused non-cleanup items) | `checkDependencies()` → `checkReviewGate()` → `checkCIGate()` → `buildReviewThreadComments()` / `dispatchReviewReinvoke()` / `dispatchCIFixReinvoke()` |
 | **Phase 2** | `fabrik:yolo` (cfg or label) OR `fabrik:cruise` label OR stage `auto_advance: true` | `attemptMergeOnValidate()` (yolo only) → `findNewComments()` deferral → `advanceToNextStage()` |
 
-Phase 1 ensures inline PR review thread comments (from Copilot, Gemini, or human reviewers) are addressed on **all** issues, not just yolo/cruise ones. Phase 2 keeps stage advancement gated as before. Items that pass Phase 1 (review reinvoke dispatched) skip Phase 2 on that poll cycle and are re-evaluated on the next poll.
+Phase 1 ensures inline PR review thread comments (from Copilot, Gemini, or human reviewers) are addressed and CI failures are fixed on **all** issues, not just yolo/cruise ones. Phase 2 keeps stage advancement gated as before. Items that dispatch a reinvoke in Phase 1 (review reinvoke or CI-fix reinvoke) skip Phase 2 on that poll cycle and are re-evaluated on the next poll.
 
 ## Appendix B: Guard Evaluation in `itemMayNeedWork()` (Shallow Pre-Filter)
 
@@ -814,7 +921,7 @@ Phase 1 ensures inline PR review thread comments (from Copilot, Gemini, or human
 | Stage exists | `FindStage(stages, item.Status) != nil` |
 | Closed issue | Not closed, OR cleanup stage, OR has `stage:<X>:complete` label |
 | Cleanup stage | Worktree exists on disk (local filesystem check only) |
-| updatedAt cache | `item.UpdatedAt` is newer than cached value, OR cooldown expired, OR `fabrik:blocked` label present |
+| updatedAt cache | `item.UpdatedAt` is newer than cached value, OR cooldown expired, OR `fabrik:blocked` or `fabrik:awaiting-ci` label present |
 | Deep-fetch failure cooldown | No recent `FetchItemDetails` failure, OR failure cooldown expired |
 
 **Note:** `itemMayNeedWork()` intentionally does NOT check lock, editing, pause, or dependency labels — those require the full label set from deep fetch and are checked in `itemNeedsWork()`.

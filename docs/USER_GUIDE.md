@@ -403,6 +403,8 @@ FABRIK_USER=my-personal-username
 | `--max-retries` | Max failed stage attempts before pausing the issue (0 = unlimited) | `3` |
 | `--review-wait-timeout` | Minutes to wait for all requested PR reviewers before advancing (0 = use default of 15; also `FABRIK_REVIEW_WAIT_TIMEOUT`) | `0` (15 min) |
 | `--max-review-cycles` | Maximum number of review-and-fix cycles per issue (0 = use default of 5; also `FABRIK_MAX_REVIEW_CYCLES`) | `0` (5 cycles) |
+| `--ci-wait-timeout` | Minutes to wait for CI checks to pass before pausing (0 = use default of 30; also `FABRIK_CI_WAIT_TIMEOUT`) | `0` (30 min) |
+| `--max-ci-fix-cycles` | Maximum number of CI-fix re-invocation cycles per issue (0 = use default of 5; also `FABRIK_MAX_CI_FIX_CYCLES`) | `0` (5 cycles) |
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` | `false` |
 
 ### Environment Variables
@@ -426,6 +428,8 @@ FABRIK_USER=my-personal-username
 | `FABRIK_DEBUG_OUTPUT` | `debug_output` | Save raw Claude output for debugging | `false` |
 | `FABRIK_REVIEW_WAIT_TIMEOUT` | *(no config.yaml key)* | Minutes to wait per review cycle at the review gate (whether waiting for requested reviewers to submit or for at least one review to exist) before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 15) | `15` |
 | `FABRIK_MAX_REVIEW_CYCLES` | *(no config.yaml key)* | Maximum number of review re-invocation cycles per issue before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 5) | `5` |
+| `FABRIK_CI_WAIT_TIMEOUT` | *(no config.yaml key)* | Minutes to wait for CI checks to pass before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 30) | `30` |
+| `FABRIK_MAX_CI_FIX_CYCLES` | *(no config.yaml key)* | Maximum number of CI-fix re-invocation cycles per issue before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 5) | `5` |
 
 Token precedence: `--token` flag > `FABRIK_TOKEN` > `GITHUB_TOKEN`
 
@@ -479,6 +483,17 @@ wait_for_reviews: false   # Optional. When true, Fabrik waits for all requested 
                           #   pending (up to FABRIK_MAX_REVIEW_CYCLES cycles). On timeout or cycle
                           #   limit, Fabrik pauses with fabrik:awaiting-input instead of advancing.
                           #   See §3 Pending Reviewer Gate for full details.
+wait_for_ci: false        # Optional. When true, Fabrik gates auto-advance (and auto-merge for
+                          #   Validate+yolo) on CI checks passing on the PR head. On CI failure,
+                          #   Fabrik adds `fabrik:awaiting-ci` and re-invokes the stage agent via
+                          #   ci_fix_skill (falls back to comment_skill) with a structured report
+                          #   classifying each failed check as NEW REGRESSION or pre-existing.
+                          #   Re-invocation repeats up to FABRIK_MAX_CI_FIX_CYCLES times. On CI
+                          #   timeout or cycle limit, Fabrik pauses with fabrik:awaiting-input.
+                          #   Enabled by default on the Validate stage.
+                          #   See §3 CI Gate and CI-Fix Workflow for full details.
+ci_fix_skill:             # Optional. Plugin skill name for CI-fix re-invocations (the synthetic
+                          #   CI failure report comment). Defaults to comment_skill if unset.
 allowed_tools:            # Optional. REPLACES the default tool set — not additive. When set,
   - Read                  #   only these tools are allowed; the default list is not added.
   - Grep                  #   When omitted, Fabrik uses a comprehensive default covering common
@@ -816,6 +831,126 @@ fabrik --review-wait-timeout=30
 #### Restart Persistence
 
 The timeout is based on the timestamp of when the `fabrik:awaiting-review` label was added to the issue, which is stored in GitHub's event history. If Fabrik restarts while waiting, it recalculates the remaining wait time from the label timestamp rather than resetting the clock. The cycle count is in-memory and resets on restart.
+
+---
+
+### CI Gate and CI-Fix Workflow
+
+When a stage has `wait_for_ci: true` set, Fabrik gates auto-advance (and auto-merge for Validate+yolo) on CI checks passing on the PR head. If checks fail, Fabrik re-invokes the stage agent with a structured failure report so it can fix the regression and push again. **Re-invocation is unconditional** — it fires for any issue with `wait_for_ci: true` and a failing CI check, regardless of whether auto-advance is active.
+
+For the authoritative spec on label lifecycle and gate transitions, see [State Machine](state-machine.md).
+
+The Validate stage ships with `wait_for_ci: true` enabled by default.
+
+#### Enabling the Gate
+
+Add `wait_for_ci: true` to the relevant stage YAML:
+
+```yaml
+name: Validate
+order: 5
+wait_for_ci: true
+...
+```
+
+CI checks are only evaluated on the **PR head SHA** — Fabrik makes two REST calls per poll: one to get the head SHA via the linked PR, and one to fetch the check runs. If no check runs exist (the repo has no CI), the gate clears immediately.
+
+#### Label Lifecycle
+
+When CI fails, Fabrik adds the `fabrik:awaiting-ci` label to the issue. This label:
+
+- Makes the CI-blocked state visible on the project board
+- Is **only applied on confirmed failure** — while checks are still running (pending/queued), no label is applied to avoid label churn for transient states
+- Is cleared automatically when all CI checks pass; or when the CI wait timeout elapses (removed before pausing with `fabrik:awaiting-input`)
+- Triggers the `itemMayNeedWork` cache bypass — CI results change independently of the issue's GitHub `updatedAt`, so items with `fabrik:awaiting-ci` bypass the staleness cache and are re-evaluated on every poll
+
+#### The CI-Fix Report
+
+When CI fails and Fabrik re-invokes the stage agent, it passes a synthetic CI failure comment with the following structure:
+
+```
+🏭 **Fabrik — CI Fix Required**
+
+CI checks failed on the PR head. Fix **NEW REGRESSION** failures before proceeding.
+
+### Failed checks
+
+| Check | Status | Classification |
+|-------|--------|----------------|
+| Go tests | failure | **NEW REGRESSION** |
+| Go vet | failure | pre-existing (also failing on base branch) |
+
+### Base branch CI status (for comparison)
+
+| Check | Status |
+|-------|--------|
+| Go tests | success |
+| Go vet | failure |
+```
+
+- **NEW REGRESSION** — the check passes on the base branch but fails on this PR. The agent should fix these.
+- **pre-existing** — the check also fails on the base branch. The agent should not attempt to fix these.
+
+The agent should fix NEW REGRESSION failures, commit, push, and **not** emit `FABRIK_STAGE_COMPLETE`. Fabrik re-evaluates CI on the next poll and advances the issue once all checks pass.
+
+#### Two-Prong CI Gate
+
+The CI gate operates on two different paths depending on whether the item is being auto-merged or just being polled:
+
+**Merge guard (Validate+yolo auto-merge path):**
+- Checks CI before attempting the merge in `attemptMergeOnValidate()`
+- While CI is pending: returns an error (no label applied — avoids churn)
+- On CI failure: adds `fabrik:awaiting-ci`, returns error (skips merge)
+- On timeout (pending too long): pauses with `fabrik:paused` + `fabrik:awaiting-input`
+
+**Catch-up loop (all other paths):**
+- Evaluates CI on every poll for `stage:<X>:complete` items with `wait_for_ci: true`
+- On pending: skips (no label applied — R10c)
+- On failure: adds `fabrik:awaiting-ci`; dispatches CI-fix re-invocation
+- On timeout: pauses with `fabrik:paused` + `fabrik:awaiting-input`; timeout measured from when `fabrik:awaiting-ci` was first applied (durable across restarts)
+
+#### CI-Fix Skill
+
+By default, CI-fix re-invocations use the stage's `comment_skill`. To use a dedicated skill for CI fixes, set `ci_fix_skill`:
+
+```yaml
+name: Validate
+order: 5
+wait_for_ci: true
+ci_fix_skill: fabrik-validate-ci-fix   # Custom skill for CI-fix re-invocations
+comment_skill: fabrik-validate-comment  # Used for regular comment processing
+...
+```
+
+When `ci_fix_skill` is not set, `comment_skill` is used. When neither is set, the stage's primary skill is used.
+
+#### Cycle Limit
+
+To prevent infinite loops (e.g., a non-deterministic flaky test that keeps failing), Fabrik caps the number of CI-fix re-invocation cycles per issue per stage per engine session:
+
+```bash
+FABRIK_MAX_CI_FIX_CYCLES=3  # Limit to 3 CI-fix cycles per issue per stage (default: 5)
+# or equivalently:
+fabrik --max-ci-fix-cycles=3
+```
+
+The cycle count resets on engine restart, and is also reset by `clearFailedStage()` when the user manually unpauses a failed issue.
+
+#### Timeout Configuration
+
+`FABRIK_CI_WAIT_TIMEOUT` sets the timeout in minutes for the CI gate (catch-up loop path). If `fabrik:awaiting-ci` has been present for longer than this duration, Fabrik pauses the issue with `fabrik:awaiting-input` rather than continuing to re-invoke.
+
+```bash
+FABRIK_CI_WAIT_TIMEOUT=60  # Wait up to 60 minutes for CI to pass (default: 30)
+# or equivalently:
+fabrik --ci-wait-timeout=60
+```
+
+Unlike the review gate, the CI timeout is measured from when `fabrik:awaiting-ci` was first applied — not from stage completion. This timeout only starts after a CI failure is confirmed; while checks are merely pending, no timeout accumulates.
+
+#### Restart Persistence
+
+The CI timeout is measured from the `fabrik:awaiting-ci` label's creation timestamp (fetched via the GitHub API), making it durable across engine restarts. The cycle count is in-memory and resets on restart.
 
 ---
 
