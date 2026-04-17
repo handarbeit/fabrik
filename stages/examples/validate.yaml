@@ -6,5 +6,6 @@ model: sonnet
 max_turns: 50
 post_to_pr: true
 wait_for_reviews: true
+wait_for_ci: true
 completion:
   type: claude
