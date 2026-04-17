@@ -102,8 +102,8 @@ func TestHandleStageComplete_YoloLabel_Advances(t *testing.T) {
 
 func TestHandleStageComplete_YoloLabel_ValidateMergeableAdvances(t *testing.T) {
 	client := &mockGitHubClient{
-		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
-			return 99, nil
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 99, HeadSHA: "abc123"}, nil
 		},
 	}
 	stgs := testStagesWithValidate()
@@ -130,8 +130,8 @@ func TestHandleStageComplete_YoloLabel_ValidateMergeableAdvances(t *testing.T) {
 
 func TestHandleStageComplete_YoloLabel_ValidateUnmergeable_CommentPauseNoAdvance(t *testing.T) {
 	client := &mockGitHubClient{
-		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
-			return 99, nil
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 99, HeadSHA: "abc123"}, nil
 		},
 		mergePRFn: func(owner, repo string, prNumber int) error {
 			return gh.ErrNotMergeable
@@ -167,10 +167,10 @@ func TestHandleStageComplete_YoloLabel_ValidateUnmergeable_CommentPauseNoAdvance
 }
 
 func TestHandleStageComplete_YoloLabel_ValidateNoPR_AdvancesAnyway(t *testing.T) {
-	// FindPRForIssue returns 0 — no PR found
+	// FetchLinkedPR returns nil — no PR found
 	client := &mockGitHubClient{
-		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
-			return 0, nil
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return nil, nil
 		},
 	}
 	stgs := testStagesWithValidate()
@@ -219,8 +219,8 @@ func TestHandleStageComplete_AutoAdvanceFalse_OverridesAdvanceButMergeStillFires
 	// auto_advance:false is respected (item-level yolo would override it).
 	f := false
 	client := &mockGitHubClient{
-		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
-			return 77, nil
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 77, HeadSHA: "abc123"}, nil
 		},
 	}
 	stgs := testStagesWithValidate()
@@ -248,8 +248,8 @@ func TestHandleStageComplete_MergeAPIError_LogsAndDoesNotAdvance(t *testing.T) {
 	// This prevents silently moving to Done when the PR merge failed (e.g. transient
 	// 5xx, permissions). The engine will retry Validate on the next cooldown cycle.
 	client := &mockGitHubClient{
-		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
-			return 88, nil
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 88, HeadSHA: "abc123"}, nil
 		},
 		mergePRFn: func(owner, repo string, prNumber int) error {
 			return errors.New("network error")
@@ -306,11 +306,7 @@ func TestHandleStageComplete_CruiseLabel_NonValidate_Advances(t *testing.T) {
 // TestHandleStageComplete_CruiseLabel_Validate_NoMergeNoAdvance verifies that
 // fabrik:cruise does NOT merge the PR and does NOT advance at Validate completion.
 func TestHandleStageComplete_CruiseLabel_Validate_NoMergeNoAdvance(t *testing.T) {
-	client := &mockGitHubClient{
-		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
-			return 99, nil
-		},
-	}
+	client := &mockGitHubClient{}
 	stgs := testStagesWithValidate()
 	eng := testEngineWithStages(client, stgs)
 
@@ -354,8 +350,8 @@ func TestHandleStageComplete_CruiseLabel_OverridesAutoAdvanceFalse(t *testing.T)
 // the PR is merged and the stage advances past Validate.
 func TestHandleStageComplete_BothCruiseAndYolo_YoloWins(t *testing.T) {
 	client := &mockGitHubClient{
-		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
-			return 99, nil
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 99, HeadSHA: "abc123"}, nil
 		},
 	}
 	stgs := testStagesWithValidate()

@@ -662,3 +662,55 @@ func TestProcessItem_EvictsLastUpdatedAtAfterStageRun(t *testing.T) {
 		t.Error("lastUpdatedAt should be evicted after a stage runs so next poll re-evaluates the item")
 	}
 }
+
+// TestItemMayNeedWork_AwaitingCI_BypassesUpdatedAtCache verifies that items with
+// fabrik:awaiting-ci bypass the updatedAt cache so the catch-up loop can
+// re-evaluate CI status on every poll even when the issue hasn't changed.
+func TestItemMayNeedWork_AwaitingCI_BypassesUpdatedAtCache(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.cfg.PollSeconds = 60 // long cooldown that would normally suppress
+
+	ts := time.Now().Add(-time.Minute)
+	item := gh.ProjectItem{
+		Number:    61,
+		Status:    "Research",
+		ItemID:    "PVTI_61",
+		UpdatedAt: ts,
+		Labels:    []string{"fabrik:awaiting-ci"},
+	}
+
+	// Seed lastUpdatedAt so the "unchanged" path would normally trigger.
+	eng.mu.Lock()
+	eng.lastUpdatedAt["owner/repo#61"] = ts
+	eng.processedSet["owner/repo#61-Research"] = time.Now() // just processed — within cooldown
+	eng.mu.Unlock()
+
+	if !eng.itemMayNeedWork(item) {
+		t.Error("item with fabrik:awaiting-ci should bypass the updatedAt cache and return true")
+	}
+}
+
+// TestItemMayNeedWork_NoSpecialLabel_RespectsUpdatedAtCache verifies that without
+// fabrik:awaiting-ci, a stale item within cooldown is filtered (cache respected).
+func TestItemMayNeedWork_NoSpecialLabel_RespectsUpdatedAtCache(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.cfg.PollSeconds = 60 // long cooldown
+
+	ts := time.Now().Add(-time.Minute)
+	item := gh.ProjectItem{
+		Number:    62,
+		Status:    "Research",
+		ItemID:    "PVTI_62",
+		UpdatedAt: ts,
+		Labels:    []string{"stage:Validate:complete"}, // no fabrik:awaiting-ci
+	}
+
+	eng.mu.Lock()
+	eng.lastUpdatedAt["owner/repo#62"] = ts
+	eng.processedSet["owner/repo#62-Research"] = time.Now()
+	eng.mu.Unlock()
+
+	if eng.itemMayNeedWork(item) {
+		t.Error("item without bypass labels should be filtered by updatedAt cache")
+	}
+}

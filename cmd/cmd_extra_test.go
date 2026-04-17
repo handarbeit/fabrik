@@ -69,6 +69,12 @@ func (m *testGitHubUpgradeClient) GetIssueBody(owner, repo string, issueNumber i
 func (m *testGitHubUpgradeClient) FindPRForIssue(owner, repo string, issueNumber int) (int, error) {
 	return 0, nil
 }
+func (m *testGitHubUpgradeClient) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+	return nil, nil
+}
+func (m *testGitHubUpgradeClient) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, error) {
+	return nil, nil
+}
 func (m *testGitHubUpgradeClient) GetPRBase(owner, repo string, prNumber int) (string, error) {
 	return "", nil
 }
