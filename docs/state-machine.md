@@ -52,6 +52,7 @@ These labels define distinct states (their presence changes what the engine does
 | `fabrik:paused` | Pause | Yes — blocks all processing unless a comment arrives |
 | `fabrik:awaiting-input` | Sub-pause | Yes (with `fabrik:paused`) — blocked-on-input variant |
 | `fabrik:awaiting-review` | Gate | Yes — review gate is active |
+| `fabrik:awaiting-ci` | Gate | Yes — CI gate is active; CI checks failed on the PR |
 | `fabrik:blocked` | Dependency | Yes — blocked by open dependency issues |
 | `stage:<X>:in_progress` | Progress | Yes — a stage invocation is active |
 | `stage:<X>:complete` | Completion | Yes — stage finished successfully |

@@ -186,6 +186,16 @@ This applies anywhere in your output that reaches a GitHub comment body — Revi
 
 **If you find unfixable issues**: Do NOT output the completion marker. Describe the blocker clearly. The engine will retry after a cooldown, giving the user time to intervene.
 
+**CI-fix re-invocation**: If `wait_for_ci: true` is configured for this stage and CI checks fail after your work, the engine re-invokes you with a `🏭 **Fabrik — CI Fix Required**` comment containing:
+- Which checks failed (marked **NEW REGRESSION** if introduced by this PR, or **pre-existing** if also failing on the base branch)
+- The base branch CI status for comparison
+
+When you receive this comment:
+1. Run `gh run list --branch fabrik/issue-<N> --limit 5` then `gh run view <run-id> --log-failed` to inspect logs
+2. Fix only **NEW REGRESSION** failures — do not attempt to fix pre-existing base-branch failures
+3. Commit and push your fixes
+4. **Do NOT emit `FABRIK_STAGE_COMPLETE`** — the engine will advance once CI passes on the next poll
+
 **Output routing**: When `post_to_pr: true`, your detailed output goes on the PR and a summary goes on the issue. Include `FABRIK_SUMMARY_BEGIN`/`END` markers for the issue summary.
 
 **Mark PR ready**: If `mark_pr_ready_on_complete: true`, the engine transitions the draft PR to ready-for-review after you signal completion. Make sure everything is pushed first.
