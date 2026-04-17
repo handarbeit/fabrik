@@ -139,7 +139,7 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 			// a PR review bumps the linked PR's updatedAt (which Fabrik tracks in the
 			// shallow query via closedByPullRequestsReferences).
 			for _, l := range item.Labels {
-				if l == "fabrik:blocked" {
+				if l == "fabrik:blocked" || l == "fabrik:awaiting-ci" {
 					return true
 				}
 			}
@@ -868,8 +868,9 @@ func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 	e.mu.Lock()
 	delete(e.retryCount, stageKey)
 	delete(e.pausedDueToRetries, stageKey)
-	delete(e.processedSet, stageKey)    // clear cooldown so the stage retries immediately
+	delete(e.processedSet, stageKey)     // clear cooldown so the stage retries immediately
 	delete(e.reviewCycleCount, stageKey) // reset review cycle counter on unpause
+	delete(e.ciFixCycleCount, stageKey)  // reset CI-fix cycle counter on unpause
 	e.mu.Unlock()
 }
 

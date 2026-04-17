@@ -3,6 +3,8 @@ package engine
 import (
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
@@ -66,9 +68,14 @@ func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem
 	cruiseActive := !yoloActive && hasCruiseLabel(item)
 
 	// Attempt PR merge after Validate when yolo is active.
+	// When wait_for_ci: true, skip attemptMergeOnValidate here and defer to the
+	// catch-up loop's Phase 2 CI gate (Approach A). The completion label is added
+	// below so the catch-up loop can evaluate the CI gate and attempt merge after
+	// CI passes. See ADR 027 for design rationale.
 	// This runs BEFORE adding the completion label so that on merge failure the
 	// engine can retry Validate (itemNeedsWork skips stages with a complete label).
-	if yoloActive && stage.Name == "Validate" {
+	waitForCI := stage.WaitForCI != nil && *stage.WaitForCI
+	if yoloActive && stage.Name == "Validate" && !waitForCI {
 		if err := e.attemptMergeOnValidate(item); err != nil {
 			// Merge failed: post/pause already handled inside attemptMergeOnValidate.
 			e.logf(item.Number, "warn", "PR not merged: %v\n", err)
@@ -119,6 +126,14 @@ func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem
 			}
 			return // catch-up loop will advance once reviewers submit
 		}
+		// When wait_for_ci is enabled, the catch-up loop evaluates the CI gate
+		// (checkCIGate) and dispatches CI-fix reinvokes as needed before advancing.
+		// fabrik:awaiting-ci is NOT applied here (R10c) — the catch-up loop adds
+		// it only on confirmed failure, after FetchCheckRuns.
+		if waitForCI {
+			e.logf(item.Number, "awaiting-ci", "waiting for CI checks before advancing\n")
+			return // catch-up loop evaluates CI gate and advances once checks pass
+		}
 		if err := e.advanceToNextStage(board, item, stage); err != nil {
 			e.logf(item.Number, "warn", "could not advance: %v\n", err)
 		}
@@ -127,24 +142,126 @@ func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem
 	}
 }
 
-// attemptMergeOnValidate finds the linked PR for item and merges it.
-// Returns nil on success or when no PR exists (no-PR is logged and skipped).
-// Returns an error that has been handled (comment+pause posted) on ErrNotMergeable.
+// attemptMergeOnValidate finds the linked PR for item, gates on CI status,
+// and merges it. Returns nil on success or when no PR exists.
+// Returns a handled error (comment+pause already posted) on ErrNotMergeable or
+// CI timeout. Returns a retriable error (caller should retry) when CI is pending
+// or when a transient API error occurs.
+//
+// CI gate logic (R1–R6):
+//   - No check runs → gate clears (R5: repo has no CI)
+//   - Any pending/queued → block; track ciMergePendingSince; pause after CIWaitTimeout
+//   - Any failed → add fabrik:awaiting-ci; return error
+//   - All green → clear ciMergePendingSince; clear fabrik:awaiting-ci; proceed to merge
 func (e *Engine) attemptMergeOnValidate(item gh.ProjectItem) error {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-	prNumber, err := e.client.FindPRForIssue(owner, repo, item.Number)
+	iKey := issueKey(item, e.defaultRepo())
+
+	// Use FetchLinkedPR (REST) to get both the PR number and head SHA in one call.
+	pr, err := e.client.FetchLinkedPR(owner, repo, item.Number)
 	if err != nil {
 		e.logf(item.Number, "warn", "could not find PR for merge: %v\n", err)
 		return nil
 	}
-	if prNumber == 0 {
+	if pr == nil {
 		e.logf(item.Number, "warn", "no linked PR found at Validate completion; skipping auto-merge\n")
 		return nil
 	}
 
-	if err := e.client.MergePR(owner, repo, prNumber); err != nil {
+	// CI gate: fetch check runs and evaluate (R1-R6).
+	if pr.HeadSHA != "" {
+		checkRuns, err := e.client.FetchCheckRuns(owner, repo, pr.HeadSHA)
+		if err != nil {
+			e.logf(item.Number, "warn", "could not fetch check runs for merge guard: %v — proceeding\n", err)
+		} else if len(checkRuns) > 0 {
+			var pending, failed []gh.CheckRun
+			for _, cr := range checkRuns {
+				switch cr.Status {
+				case "queued", "in_progress":
+					pending = append(pending, cr)
+				case "completed":
+					switch cr.Conclusion {
+					case "failure", "timed_out", "action_required":
+						failed = append(failed, cr)
+					}
+				}
+			}
+
+			if len(failed) > 0 {
+				// R3: CI failed — apply label and block merge.
+				names := make([]string, 0, len(failed))
+				for _, cr := range failed {
+					names = append(names, fmt.Sprintf("%s (%s)", cr.Name, cr.Conclusion))
+				}
+				e.logf(item.Number, "ci-gate", "merge blocked — CI failed: %s\n", strings.Join(names, ", "))
+				if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-ci"); lerr != nil {
+					e.logf(item.Number, "warn", "could not add fabrik:awaiting-ci: %v\n", lerr)
+				}
+				// Clean up pending timer since we now have a definitive failure state.
+				e.mu.Lock()
+				delete(e.ciMergePendingSince, iKey)
+				e.mu.Unlock()
+				return fmt.Errorf("merge blocked: CI checks failed")
+			}
+
+			if len(pending) > 0 {
+				// R2: CI still running — check timeout (R6).
+				names := make([]string, 0, len(pending))
+				for _, cr := range pending {
+					names = append(names, cr.Name)
+				}
+				e.logf(item.Number, "ci-gate", "merge blocked — CI still running: %s\n", strings.Join(names, ", "))
+
+				timeout := e.cfg.CIWaitTimeout
+				if timeout <= 0 {
+					timeout = 30 * time.Minute
+				}
+				e.mu.Lock()
+				since, tracked := e.ciMergePendingSince[iKey]
+				if !tracked {
+					e.ciMergePendingSince[iKey] = time.Now()
+					since = e.ciMergePendingSince[iKey]
+				}
+				e.mu.Unlock()
+
+				if time.Since(since) >= timeout {
+					// R6: timeout elapsed — pause issue.
+					e.mu.Lock()
+					delete(e.ciMergePendingSince, iKey)
+					e.mu.Unlock()
+					msg := fmt.Sprintf("🏭 **Fabrik — CI wait timeout (merge guard)**\n\n"+
+						"Auto-merge blocked: CI checks for PR #%d have been in progress for longer than "+
+						"the configured timeout (%s). Fabrik has paused this issue for human review.\n\n"+
+						"Pending checks: %s\n\nOnce CI resolves, remove `fabrik:paused` to resume.",
+						pr.Number, timeout, strings.Join(names, ", "))
+					if dbID, cerr := e.client.AddComment(owner, repo, item.Number, msg); cerr != nil {
+						e.logf(item.Number, "warn", "could not post CI timeout comment: %v\n", cerr)
+					} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+						e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+					}
+					if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); lerr != nil {
+						e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", lerr)
+					}
+					if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); lerr != nil {
+						e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", lerr)
+					}
+					return fmt.Errorf("merge guard: CI wait timeout elapsed after %s", timeout)
+				}
+				return fmt.Errorf("merge blocked: CI checks still running")
+			}
+
+			// R4: All checks green — clear pending timer and awaiting-ci label.
+			e.mu.Lock()
+			delete(e.ciMergePendingSince, iKey)
+			e.mu.Unlock()
+			e.removeAwaitingCILabel(owner, repo, item)
+		}
+		// R5: len(checkRuns) == 0 — no CI configured; gate clears.
+	}
+
+	if err := e.client.MergePR(owner, repo, pr.Number); err != nil {
 		if errors.Is(err, gh.ErrNotMergeable) {
-			msg := fmt.Sprintf("🏭 **Fabrik — auto-merge skipped**\n\nAuto-merge skipped: PR #%d is not mergeable (GitHub reports a merge conflict or the mergeable status is not yet computed). Please resolve any conflicts and merge manually.", prNumber)
+			msg := fmt.Sprintf("🏭 **Fabrik — auto-merge skipped**\n\nAuto-merge skipped: PR #%d is not mergeable (GitHub reports a merge conflict or the mergeable status is not yet computed). Please resolve any conflicts and merge manually.", pr.Number)
 			if dbID, cerr := e.client.AddComment(owner, repo, item.Number, msg); cerr != nil {
 				e.logf(item.Number, "warn", "could not post unmergeable comment: %v\n", cerr)
 			} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
@@ -153,16 +270,15 @@ func (e *Engine) attemptMergeOnValidate(item gh.ProjectItem) error {
 			if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); lerr != nil {
 				e.logf(item.Number, "warn", "could not add fabrik:paused label: %v\n", lerr)
 			}
-			return fmt.Errorf("PR #%d not mergeable", prNumber)
+			return fmt.Errorf("PR #%d not mergeable", pr.Number)
 		}
 		// Other API errors (transient 5xx, permissions, etc.): log and return an
-		// error so the caller skips the completion label and stage advancement.
-		// The engine will retry Validate on the next cooldown cycle.
-		e.logf(item.Number, "warn", "auto-merge of PR #%d failed: %v\n", prNumber, err)
+		// error so the caller retries on the next cooldown cycle.
+		e.logf(item.Number, "warn", "auto-merge of PR #%d failed: %v\n", pr.Number, err)
 		return fmt.Errorf("auto-merge failed: %w", err)
 	}
 
-	e.logf(item.Number, "info", "auto-merged PR #%d\n", prNumber)
+	e.logf(item.Number, "info", "auto-merged PR #%d\n", pr.Number)
 	return nil
 }
 
