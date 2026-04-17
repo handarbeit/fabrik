@@ -164,7 +164,17 @@ If you find major issues (wrong architecture, missing feature, design flaw):
 
 **Output routing**: When `post_to_pr: true`, detailed report goes on the PR, summary on the issue. Include `FABRIK_SUMMARY_BEGIN`/`END` markers.
 
-**After completion**: The engine may auto-advance the issue to Done. The PR is ready for human merge review.
+**After completion**: The engine evaluates CI before advancing. With `wait_for_ci: true` (default), the engine re-checks CI on every poll after you emit `FABRIK_STAGE_COMPLETE`. Advancement and auto-merge only happen once all CI checks pass.
+
+**CI-fix re-invocation**: If CI checks fail after your work, the engine re-invokes you with a `🏭 **Fabrik — CI Fix Required**` comment containing:
+- Which checks failed (marked **NEW REGRESSION** if introduced by this PR, or **pre-existing** if also failing on the base branch)
+- The base branch CI status for comparison
+
+When you receive this comment:
+1. Run `gh run list --branch fabrik/issue-<N> --limit 5` then `gh run view <run-id> --log-failed` to inspect logs
+2. Fix only **NEW REGRESSION** failures — do not attempt to fix pre-existing base-branch failures
+3. Commit and push your fixes
+4. **Do NOT emit `FABRIK_STAGE_COMPLETE`** — the engine will advance once CI passes on the next poll
 
 **If blocked**: The engine retries after a cooldown. The user can intervene via comments.
 
