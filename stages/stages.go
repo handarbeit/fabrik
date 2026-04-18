@@ -72,11 +72,6 @@ type Stage struct {
 	// the draft PR and triggers external review bots.
 	MarkPRReadyOnComplete bool `yaml:"mark_pr_ready_on_complete,omitempty"`
 
-	// UpdateIssueBody allows this stage to update the issue body via
-	// FABRIK_ISSUE_UPDATE markers. Only the Specify stage should have this
-	// set to true — other stages post output as stage comments.
-	UpdateIssueBody bool `yaml:"update_issue_body,omitempty"`
-
 	// AutoAdvance overrides the global yolo setting for this specific stage.
 	// nil means use the global setting.
 	AutoAdvance *bool `yaml:"auto_advance,omitempty"`
