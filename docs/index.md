@@ -295,6 +295,20 @@ description: >-
           <code>fabrik:awaiting-input</code> for human review.
         </div>
       </div>
+      <div class="feature-card">
+        <span class="feature-icon">✅</span>
+        <div class="feature-title">CI Gate</div>
+        <div class="feature-desc">
+          Set <code>wait_for_ci: true</code> on a stage (the Validate stage ships
+          with this enabled by default) and Fabrik blocks auto-advance and
+          auto-merge until all CI checks pass. On failure, Fabrik re-invokes the
+          stage agent with a structured report classifying each failed check as a
+          new regression or pre-existing failure, so it can fix the code and push
+          again. Cycle limit (<code>--max-ci-fix-cycles</code>) and timeout
+          (<code>FABRIK_CI_WAIT_TIMEOUT</code>) exceeded pauses the issue with
+          <code>fabrik:awaiting-input</code> for human review.
+        </div>
+      </div>
     </div>
 
     <div class="factory-callout">
