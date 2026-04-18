@@ -23,15 +23,15 @@ Issues traverse a linear pipeline of stages, each corresponding to a column on t
 Specify → Research → Plan → Implement → Review → Validate → Done
 ```
 
-| Stage | Order | Read-Only | UpdateIssueBody | PostToPR | CreateDraftPR | MarkPRReady | WaitForReviews | CleanupWorktree |
-|-------|-------|-----------|-----------------|----------|---------------|-------------|----------------|-----------------|
-| Specify | 0 | Yes | Yes | No | No | No | No | No |
-| Research | 1 | Yes | No | No | No | No | No | No |
-| Plan | 2 | Yes | No | No | No | No | No | No |
-| Implement | 3 | No | No | Yes | Yes | Yes | No | No |
-| Review | 4 | No | No | Yes | No | Yes | Yes* | No |
-| Validate | 5 | No | No | Yes | No | No | Yes* | No |
-| Done | 99 | N/A | N/A | No | No | No | No | Yes |
+| Stage | Order | Read-Only | PostToPR | CreateDraftPR | MarkPRReady | WaitForReviews | CleanupWorktree |
+|-------|-------|-----------|----------|---------------|-------------|----------------|-----------------|
+| Specify | 0 | Yes | No | No | No | No | No |
+| Research | 1 | Yes | No | No | No | No | No |
+| Plan | 2 | Yes | No | No | No | No | No |
+| Implement | 3 | No | Yes | Yes | Yes | No | No |
+| Review | 4 | No | Yes | No | Yes | Yes* | No |
+| Validate | 5 | No | Yes | No | No | Yes* | No |
+| Done | 99 | N/A | No | No | No | No | Yes |
 
 \* All flags in this table reflect the **default stage configuration** shipped in `.fabrik/stages/`. Each flag is opt-in per stage YAML and may differ in custom configurations. `wait_for_reviews` is enabled for Review and Validate in the defaults.
 
@@ -393,7 +393,7 @@ Any single signal catching the comment is sufficient to skip it. The three signa
 | 3 | Ensure worktree exists | `EnsureWorktree()` | Creates or updates worktree; writes context files |
 | 4 | Invoke Claude with comment review prompt | `InvokeForComments()` | Uses `comment_prompt` / `comment_skill` and `comment_max_turns` |
 | 5 | Check for FABRIK_STAGE_COMPLETE in output | `checkCompletion()` | Determines if comment processing resolved the stage |
-| 6 | Extract and apply FABRIK_ISSUE_UPDATE if present | `extractUpdatedBody()` | Only applied if `update_issue_body: true` |
+| 6 | Extract and apply FABRIK_ISSUE_UPDATE if present | `extractUpdatedBody()` | Applied unconditionally when markers are present; stripped from output regardless |
 | 7 | Strip all Fabrik markers from output | `stripLine()` calls | Removes FABRIK_STAGE_COMPLETE, FABRIK_BLOCKED_ON_INPUT, FABRIK_DECOMPOSED, FABRIK_SUMMARY_BEGIN/END |
 | 8 | Post or update stage comment | `AddComment()` / `UpdateComment()` | For `post_to_pr` stages: always posts new comment on issue (labeled as "comment review"); for other stages: rewrites existing stage comment or creates new one. **Review-reinvoke branch (Step 8b):** when the input batch is all-`ReviewThreadID` comments (`isReviewReinvoke` == true) and `output != ""`, also posts a Fabrik-marked `"<StageName> (review feedback addressed)"` comment on the linked PR (via `FindPRForIssue`); includes per-thread footer with path:line for each addressed thread; skipped if no linked PR is found (logs warning). The issue comment is always posted first; the PR comment is additive. |
 | 9 | Remove `fabrik:editing` label | `RemoveLabelFromIssue("fabrik:editing")` | Releases the editing mutex |

@@ -105,7 +105,6 @@ allowed_tools:                  # Optional: REPLACES the default tool set (not a
                                 # Bash(pnpm:*), Bash(make:*), Bash(cargo:*), Bash(python:*), Bash(pip:*),
                                 # Bash(uv:*), Bash(pytest:*), Bash(ls:*), Bash(cat:*), Bash(rm:*), Bash(cp:*),
                                 # Bash(mv:*), Bash(mkdir:*), Bash(find:*).
-update_issue_body: false        # Allow FABRIK_ISSUE_UPDATE markers to modify issue body (by convention, Specify only)
 post_to_pr: true                # Post output to linked PR instead of issue
 create_draft_pr: true           # Create draft PR before stage runs
 mark_pr_ready_on_complete: true # Mark PR ready when stage completes
