@@ -183,7 +183,7 @@ func TestProcessComments_UpdatesIssueBodyOnMarker(t *testing.T) {
 
 	eng := testEngineWithRepo(t, client, claude)
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
-	stage := &stages.Stage{Name: "Specify", Order: 0, UpdateIssueBody: true}
+	stage := &stages.Stage{Name: "Specify", Order: 0}
 	item := gh.ProjectItem{
 		Number: 13,
 		Body:   "old spec",

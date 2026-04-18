@@ -650,19 +650,12 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	branch, commit, mainSHA, timestamp := captureGitMeta(workDir, baseBranch)
 
 	// Check for issue body update markers in stage output.
-	// Only stages with UpdateIssueBody=true (e.g., Specify) are allowed to
-	// update the issue body. Other stages post output as stage comments only.
 	if output != "" {
 		if updatedBody := extractUpdatedBody(output); updatedBody != "" {
-			if stage.UpdateIssueBody {
-				e.logf(item.Number, "edit", "updating issue body from stage output\n")
-				if err := e.client.UpdateIssueBody(owner, repo, item.Number, updatedBody); err != nil {
-					e.logf(item.Number, "warn", "could not update issue body: %v\n", err)
-				}
-			} else {
-				e.logf(item.Number, "warn", "stage %q produced FABRIK_ISSUE_UPDATE markers but is not allowed to update the issue body — ignoring\n", stage.Name)
+			e.logf(item.Number, "edit", "updating issue body from stage output\n")
+			if err := e.client.UpdateIssueBody(owner, repo, item.Number, updatedBody); err != nil {
+				e.logf(item.Number, "warn", "could not update issue body: %v\n", err)
 			}
-			// Always strip the markers from the output
 			output = stripMarkers(output, "FABRIK_ISSUE_UPDATE_BEGIN", "FABRIK_ISSUE_UPDATE_END")
 		}
 	}
