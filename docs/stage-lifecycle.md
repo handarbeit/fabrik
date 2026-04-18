@@ -15,15 +15,15 @@ This document describes what the Fabrik engine does before, during, and after ea
 Backlog → Specify → Research → Plan → Implement → Review → Validate → Done
 ```
 
-| Stage | Order | Read-Only | UpdateIssueBody | PostToPR | CreateDraftPR | MarkPRReady | MaxTurns |
-|-------|-------|-----------|-----------------|----------|---------------|-------------|----------|
-| Specify | 0 | Yes | Yes | No | No | No | 20 |
-| Research | 1 | Yes | No | No | No | No | 50 |
-| Plan | 2 | Yes | No | No | No | No | 50 |
-| Implement | 3 | No | No | Yes | Yes | Yes | 50 |
-| Review | 4 | No | No | Yes | No | Yes | 30 |
-| Validate | 5 | No | No | Yes | No | No | 50 |
-| Done | 99 | N/A | N/A | No | No | No | N/A |
+| Stage | Order | Read-Only | PostToPR | CreateDraftPR | MarkPRReady | MaxTurns |
+|-------|-------|-----------|----------|---------------|-------------|----------|
+| Specify | 0 | Yes | No | No | No | 20 |
+| Research | 1 | Yes | No | No | No | 50 |
+| Plan | 2 | Yes | No | No | No | 50 |
+| Implement | 3 | No | Yes | Yes | Yes | 50 |
+| Review | 4 | No | Yes | No | Yes | 30 |
+| Validate | 5 | No | Yes | No | No | 50 |
+| Done | 99 | N/A | No | No | No | N/A |
 
 ---
 
@@ -186,9 +186,9 @@ If parsing fails: error message posted instead of raw output. Full output in log
 ### Issue Body Update
 
 Before posting output, checks for `FABRIK_ISSUE_UPDATE_BEGIN`/`END` markers:
-- **Only applied if `update_issue_body: true`** (Specify only)
-- Other stages: warning logged, markers stripped, issue body untouched
-- Enforced by the engine — skills can't override this
+- When present, the issue body is updated unconditionally
+- By convention, only the Specify stage produces these markers
+- Markers are always stripped from output before posting
 
 ### Marker Stripping
 
@@ -265,7 +265,7 @@ A comment is "new" if it:
 5. **Claude invoked** with `comment_skill` (or default comment prompt)
    - Always resumes existing session
 6. **Output processed**:
-   - `FABRIK_ISSUE_UPDATE` markers: applied if `update_issue_body: true`, stripped regardless
+   - `FABRIK_ISSUE_UPDATE` markers: applied unconditionally when present, then stripped
    - All Fabrik markers stripped
    - Stage comment rewritten (or created) via `findStageComment` + `UpdateComment`
    - Exception: `post_to_pr` stages post a new "(comment review)" comment on the issue
@@ -299,7 +299,7 @@ For `post_to_pr` stages, comment processing posts a new "(comment review)" comme
 | Worktree update | Skip on retry | Always rebase |
 | Completion | Checked, honored | Checked, honored |
 | Blocked-on-input | Checked, honored | Not checked |
-| Issue body update | If `update_issue_body: true` | If `update_issue_body: true` |
+| Issue body update | When markers present | When markers present |
 | Output destination | Stage comment or PR | Rewrite stage comment or new issue comment |
 | Lock | `fabrik:locked:<user>` | `fabrik:editing` |
 | Reaction flow | Comments marked seen (rocket) | Eyes → editing → rocket |
@@ -323,7 +323,7 @@ The Done stage (`cleanup_worktree: true`) is terminal:
 |--------|-----------|---------|---------------|
 | `FABRIK_STAGE_COMPLETE` | Claude -> Engine | Stage finished successfully; honored even on non-zero Claude exit (v0.0.26+) — engine logs a warning | Stage runs AND comment processing |
 | `FABRIK_BLOCKED_ON_INPUT` | Claude -> Engine | Stage needs user input | Stage runs only |
-| `FABRIK_ISSUE_UPDATE_BEGIN/END` | Claude -> Engine | Updated issue body | Stage runs AND comment processing (gated by `update_issue_body`) |
+| `FABRIK_ISSUE_UPDATE_BEGIN/END` | Claude -> Engine | Updated issue body | Stage runs AND comment processing |
 | `FABRIK_SUMMARY_BEGIN/END` | Claude -> Engine | Brief summary for issue | Stage runs with `post_to_pr: true` |
 
 ## Labels Reference
@@ -357,7 +357,6 @@ allowed_tools:              # Optional: restrict Claude's tools
   - Read
   - Grep
 read_only: false            # Stash/restore worktree (for analysis stages)
-update_issue_body: false    # Allow FABRIK_ISSUE_UPDATE to modify issue body (Specify only)
 post_to_pr: false           # Route output to linked PR
 create_draft_pr: false      # Create draft PR on completion
 mark_pr_ready_on_complete: false  # Mark PR ready on completion
