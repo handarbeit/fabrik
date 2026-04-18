@@ -47,6 +47,17 @@ Do not signal completion if open questions remain, or if the research still has 
 
 If the user's comment only partially answers questions and new questions arise, do not signal completion — let the research continue.
 
+## Numbering in your output
+
+When you number items in output that posts to a GitHub comment body — findings, questions, list entries — **do not use bare `#N` ordinals**. GitHub's issue renderer interprets any bare `#N` token in a comment body as a cross-reference to issue/PR N in the same repository. Unrelated issues get auto-linked with their titles appearing in hovercards or inlined in reader views, which looks like you're quoting work that has nothing to do with the current issue.
+
+Use bracketed or descriptive numbering instead:
+
+- ✅ `[1]`, `(1)`, `finding 1`, `item 1`
+- ❌ `#1`, `#2`
+
+This applies anywhere in your output that reaches a GitHub comment body — numbered findings, enumerated questions, or any inline ordinal reference.
+
 ## What You Do NOT Do
 
 - **Do not commit code changes** — Research is a read-only stage; no code is modified
