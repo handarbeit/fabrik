@@ -304,9 +304,10 @@ description: >-
           auto-merge until all CI checks pass. On failure, Fabrik re-invokes the
           stage agent with a structured report classifying each failed check as a
           new regression or pre-existing failure, so it can fix the code and push
-          again. Cycle limit (<code>--max-ci-fix-cycles</code>) and timeout
-          (<code>FABRIK_CI_WAIT_TIMEOUT</code>) exceeded pauses the issue with
-          <code>fabrik:awaiting-input</code> for human review.
+          again. If the cycle limit (<code>--max-ci-fix-cycles</code>) or
+          timeout (<code>FABRIK_CI_WAIT_TIMEOUT</code>) is exceeded, Fabrik
+          pauses the issue with <code>fabrik:awaiting-input</code> for human
+          review.
         </div>
       </div>
     </div>

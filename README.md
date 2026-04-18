@@ -144,7 +144,7 @@ requires auto-advance to be active):
 > built-in default is used and the env var is bypassed. See
 > [USER_GUIDE.md §10](docs/USER_GUIDE.md#pending-reviewer-gate) for details.
 
-The Validate stage also ships with `wait_for_ci: true` enabled by default. Fabrik gates auto-advance and auto-merge on CI checks passing; if checks fail, it re-invokes the stage agent with a structured failure report to fix the regression.
+The Validate stage also ships with `wait_for_ci: true` enabled by default. Fabrik gates auto-advance and, when applicable, auto-merge on CI checks passing; if checks fail, it re-invokes the stage agent with a structured CI-fix report to address new-regression failures.
 
 If a stage doesn't complete (e.g., unfixable issues found), it retries after
 a cooldown period rather than being permanently skipped.
