@@ -1015,3 +1015,87 @@ func TestComputeEffectiveInterval_RateLimitExceeds5Min(t *testing.T) {
 		t.Errorf("expected 6m (rate-limit 2x of 3min base), got %v", got)
 	}
 }
+
+// TestItemMayNeedWork_WaitForCI_CompleteLabel_BypassesCache verifies that an item
+// whose stage has wait_for_ci: true AND has a stage:<name>:complete label is NOT
+// filtered by the updatedAt cache. CI check run completions don't bump the issue's
+// updatedAt, so items waiting for CI would be permanently skipped without this bypass.
+func TestItemMayNeedWork_WaitForCI_CompleteLabel_BypassesCache(t *testing.T) {
+	waitForCI := true
+	stgs := []*stages.Stage{
+		{
+			Name:       "Validate",
+			Order:      3,
+			Prompt:     "Validate it",
+			WaitForCI:  &waitForCI,
+			Completion: stages.CompletionCriteria{Type: "claude"},
+		},
+	}
+	client := &mockGitHubClient{}
+	eng := NewWithDeps(Config{
+		Owner:         "owner",
+		Repo:          "repo",
+		ProjectNum:    1,
+		User:          "testuser",
+		Token:         "token",
+		MaxConcurrent: 5,
+		Stages:        stgs,
+	}, client, &mockClaudeInvoker{}, NewWorktreeManager("/tmp/test-repo"))
+
+	fixedTime := time.Now().Add(-time.Hour)
+	item := gh.ProjectItem{
+		Number:    99,
+		ItemID:    "PVTI_99",
+		Status:    "Validate",
+		Repo:      "owner/repo",
+		UpdatedAt: fixedTime,
+		Labels:    []string{"stage:Validate:complete"},
+	}
+	// Pre-seed lastUpdatedAt so the updatedAt cache would normally return false.
+	eng.lastUpdatedAt["owner/repo#99"] = fixedTime
+
+	if !eng.itemMayNeedWork(item) {
+		t.Error("expected itemMayNeedWork to return true for wait_for_ci: true stage with complete label, got false")
+	}
+}
+
+// TestItemMayNeedWork_NoWaitForCI_CompleteLabel_FilteredByCache verifies that an item
+// whose stage does NOT have wait_for_ci: true is still filtered by the updatedAt cache
+// even when it has a stage:<name>:complete label. The CI bypass must be conditional.
+func TestItemMayNeedWork_NoWaitForCI_CompleteLabel_FilteredByCache(t *testing.T) {
+	stgs := []*stages.Stage{
+		{
+			Name:       "Validate",
+			Order:      3,
+			Prompt:     "Validate it",
+			WaitForCI:  nil, // wait_for_ci not set
+			Completion: stages.CompletionCriteria{Type: "claude"},
+		},
+	}
+	client := &mockGitHubClient{}
+	eng := NewWithDeps(Config{
+		Owner:         "owner",
+		Repo:          "repo",
+		ProjectNum:    1,
+		User:          "testuser",
+		Token:         "token",
+		MaxConcurrent: 5,
+		Stages:        stgs,
+	}, client, &mockClaudeInvoker{}, NewWorktreeManager("/tmp/test-repo"))
+
+	fixedTime := time.Now().Add(-time.Hour)
+	item := gh.ProjectItem{
+		Number:    99,
+		ItemID:    "PVTI_99",
+		Status:    "Validate",
+		Repo:      "owner/repo",
+		UpdatedAt: fixedTime,
+		Labels:    []string{"stage:Validate:complete"},
+	}
+	// Pre-seed lastUpdatedAt so the updatedAt cache returns false.
+	eng.lastUpdatedAt["owner/repo#99"] = fixedTime
+
+	if eng.itemMayNeedWork(item) {
+		t.Error("expected itemMayNeedWork to return false for non-wait_for_ci stage (filtered by cache), got true")
+	}
+}
