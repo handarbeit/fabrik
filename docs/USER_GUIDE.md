@@ -167,6 +167,8 @@ or `poll:` in `config.yaml`).
 
 **Rate-limit backoff**: When Fabrik detects GraphQL API quota pressure, the same interval infrastructure adds a separate rate-limit component. This component is capped at `10 × configured poll interval` (300s at the default 30s base; 600s at 60s base) — there is no separate 5-minute ceiling for the rate-limit contributor. The effective poll interval is `max(idle interval, rate-limit interval)`, so whichever is larger governs at any given moment.
 
+Rate-limit backoff uses two-threshold hysteresis to prevent thrashing: it **activates** when GraphQL remaining quota drops below **20%** of the hourly limit, and **clears only when quota rises above 50%** of the limit. Activity detection (items deep-fetched or dispatched) resets idle backoff but does NOT reset rate-limit backoff — the two concerns are independent. When rate-limit backoff is active, Fabrik logs the effective poll interval each cycle so operators can observe the actual cadence.
+
 Move an issue to `Specify` on the board to start processing it.
 
 ### Git Repositories and Worktrees
@@ -674,7 +676,7 @@ Repeat for each dependency. This uses GitHub's native `blockedBy` GraphQL field 
 
 Fabrik uses the `fabrik:blocked` label to track blocked issues. The label lifecycle is fully automatic:
 
-1. **Detection**: On each poll, issues with `fabrik:blocked` are deep-fetched every cycle to detect unblocking promptly (within one poll interval, typically ~30 seconds).
+1. **Detection**: When a blocking issue closes, its `updatedAt` timestamp changes and is visible in the shallow board fetch. Fabrik detects this on the next poll and re-evaluates the blocked item — unblocking is typically detected within one poll interval (~30 seconds).
 2. **First block**: When Fabrik first detects that an issue is blocked, it posts a comment listing the open blocking issues and adds the `fabrik:blocked` label automatically. Fabrik creates this label on first use — no pre-creation needed.
 3. **While blocked**: The issue is skipped silently each poll cycle (no duplicate comments).
 4. **Automatic unblocking**: When all blocking issues are closed, Fabrik removes `fabrik:blocked` and resumes processing on the next poll — no human action required.

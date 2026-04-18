@@ -174,7 +174,7 @@ Ten distinct event types drive state transitions:
 
 **Code path:** `processItem()` → `checkDependencies()` inspects `item.BlockedBy[].State`
 
-**Effect:** When all blocking issues are closed, `fabrik:blocked` is removed and the stage proceeds. The `fabrik:blocked` label forces deep-fetch bypass in `itemMayNeedWork()` so dependency state changes are detected even when the blocked issue's `updatedAt` hasn't changed.
+**Effect:** When all blocking issues are closed, `fabrik:blocked` is removed and the stage proceeds. Blocked items are subject to normal `updatedAt` cache filtering — no forced deep-fetch is needed. When a blocking issue closes, its own `updatedAt` changes and is visible in the shallow fetch; this triggers re-evaluation of the blocked item on the next poll.
 
 ### 2.6 Claude Output Markers
 
@@ -928,7 +928,7 @@ Phase 1 ensures inline PR review thread comments (from Copilot, Gemini, or human
 | Stage exists | `FindStage(stages, item.Status) != nil` |
 | Closed issue | Not closed, OR cleanup stage, OR has `stage:<X>:complete` label |
 | Cleanup stage | Worktree exists on disk (local filesystem check only) |
-| updatedAt cache | `item.UpdatedAt` is newer than cached value, OR cooldown expired, OR `fabrik:blocked` or `fabrik:awaiting-ci` label present |
+| updatedAt cache | `item.UpdatedAt` is newer than cached value, OR cooldown expired, OR `fabrik:awaiting-ci` label present |
 | Deep-fetch failure cooldown | No recent `FetchItemDetails` failure, OR failure cooldown expired |
 
 **Note:** `itemMayNeedWork()` intentionally does NOT check lock, editing, pause, or dependency labels — those require the full label set from deep fetch and are checked in `itemNeedsWork()`.
