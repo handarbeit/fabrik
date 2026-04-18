@@ -23,8 +23,9 @@ import (
 //   - (false, false, false) — gate cleared; advance/merge may proceed.
 //     This includes: no PR found, no check runs (R5), all checks green.
 //
-//   - (true, false, false)  — checks still pending (in_progress/queued); re-evaluate on next poll.
-//     fabrik:awaiting-ci is NOT applied for pending checks (R10c).
+//   - (true, false, false)  — gate blocked but no confirmed failure; re-evaluate on next poll.
+//     Covers: checks still pending (in_progress/queued), and transient API errors
+//     (FetchLinkedPR or FetchCheckRuns fail). fabrik:awaiting-ci is NOT applied (R10c).
 //
 //   - (true, true, false)   — CI failed; fabrik:awaiting-ci applied; caller should dispatch CI-fix.
 //
@@ -39,8 +40,8 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 
 	pr, err := e.client.FetchLinkedPR(owner, repo, item.Number)
 	if err != nil {
-		e.logf(item.Number, "ci-gate", "could not fetch linked PR: %v — skipping CI gate\n", err)
-		return false, false, false
+		e.logf(item.Number, "ci-gate", "could not fetch linked PR: %v — blocking until API recovers\n", err)
+		return true, false, false // transient error; retry on next poll
 	}
 	if pr == nil || pr.HeadSHA == "" {
 		e.logf(item.Number, "ci-gate", "no linked PR found; skipping CI gate\n")
@@ -49,8 +50,8 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 
 	checkRuns, err := e.client.FetchCheckRuns(owner, repo, pr.HeadSHA)
 	if err != nil {
-		e.logf(item.Number, "ci-gate", "could not fetch check runs: %v — skipping CI gate\n", err)
-		return false, false, false
+		e.logf(item.Number, "ci-gate", "could not fetch check runs: %v — blocking until API recovers\n", err)
+		return true, false, false // transient error; retry on next poll
 	}
 
 	// R5: no check runs = no CI configured; gate clears.

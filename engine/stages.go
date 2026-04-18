@@ -160,8 +160,8 @@ func (e *Engine) attemptMergeOnValidate(item gh.ProjectItem) error {
 	// Use FetchLinkedPR (REST) to get both the PR number and head SHA in one call.
 	pr, err := e.client.FetchLinkedPR(owner, repo, item.Number)
 	if err != nil {
-		e.logf(item.Number, "warn", "could not find PR for merge: %v\n", err)
-		return nil
+		e.logf(item.Number, "warn", "could not fetch linked PR for merge: %v — will retry\n", err)
+		return fmt.Errorf("fetch linked PR: %w", err)
 	}
 	if pr == nil {
 		e.logf(item.Number, "warn", "no linked PR found at Validate completion; skipping auto-merge\n")
@@ -172,7 +172,8 @@ func (e *Engine) attemptMergeOnValidate(item gh.ProjectItem) error {
 	if pr.HeadSHA != "" {
 		checkRuns, err := e.client.FetchCheckRuns(owner, repo, pr.HeadSHA)
 		if err != nil {
-			e.logf(item.Number, "warn", "could not fetch check runs for merge guard: %v — proceeding\n", err)
+			e.logf(item.Number, "warn", "could not fetch check runs for merge guard: %v — skipping merge until CI status can be fetched\n", err)
+			return fmt.Errorf("merge guard: fetch check runs: %w", err)
 		} else if len(checkRuns) > 0 {
 			var pending, failed []gh.CheckRun
 			for _, cr := range checkRuns {

@@ -499,9 +499,16 @@ The catch-up loop in `poll()` is split into two phases for every `stage:<X>:comp
      - Acquires semaphore slot (respects `MaxConcurrent`)
      - Calls `processComments()` with the synthetic review comments asynchronously
      - On exit: releases semaphore, clears `inFlight`
+   - Either way: `continue` — Phase 2 is skipped this cycle; item re-evaluated on next poll
+6. **CI gate** (only reached if no review reinvoke was dispatched in step 5): `checkCIGate()` evaluates CI check runs for stages with `wait_for_ci: true`
+   - Pending/API error: skip (blocked, not failed); item re-evaluated on next poll
+   - Timed out: `pauseForCITimeout()` pauses issue
+   - CI failed: **inFlight guard** + **cycle limit check** (`ciFixCycleCount[stageKey]` vs `MaxCiFixCycles`):
+     - If exceeded: `pauseForCIFixCycleLimit()` pauses issue
+     - If not exceeded: dispatch `dispatchCIFixReinvoke()`; `continue`
 
 **Phase 2 — gated (yolo/cruise/auto_advance only):**
-- Only runs when no unresolved review threads remain (Phase 1 `continue`s on reinvoke)
+- Only runs when no reinvoke was dispatched in Phase 1 (review or CI-fix reinvoke both `continue`)
 - Gated on: `e.cfg.Yolo` OR `fabrik:yolo` label OR `fabrik:cruise` label OR stage `auto_advance: true`
 - Runs `attemptMergeOnValidate()` (yolo only), skips if unprocessed comments exist, then calls `advanceToNextStage()`
 
@@ -907,7 +914,7 @@ Stage advancement can occur through two code paths:
 
 | Phase | Gate | What it does |
 |-------|------|--------------|
-| **Phase 1** | Unconditional (all `stage:<X>:complete` non-paused non-cleanup items) | `checkDependencies()` → `checkReviewGate()` → `checkCIGate()` → `buildReviewThreadComments()` / `dispatchReviewReinvoke()` / `dispatchCIFixReinvoke()` |
+| **Phase 1** | Unconditional (all `stage:<X>:complete` non-paused non-cleanup items) | `checkDependencies()` → `checkReviewGate()` → `buildReviewThreadComments()` / `dispatchReviewReinvoke()` → `checkCIGate()` / `dispatchCIFixReinvoke()` (review reinvoke and CI-fix reinvoke are mutually exclusive per poll cycle) |
 | **Phase 2** | `fabrik:yolo` (cfg or label) OR `fabrik:cruise` label OR stage `auto_advance: true` | `attemptMergeOnValidate()` (yolo only) → `findNewComments()` deferral → `advanceToNextStage()` |
 
 Phase 1 ensures inline PR review thread comments (from Copilot, Gemini, or human reviewers) are addressed and CI failures are fixed on **all** issues, not just yolo/cruise ones. Phase 2 keeps stage advancement gated as before. Items that dispatch a reinvoke in Phase 1 (review reinvoke or CI-fix reinvoke) skip Phase 2 on that poll cycle and are re-evaluated on the next poll.
