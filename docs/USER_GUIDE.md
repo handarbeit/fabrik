@@ -676,7 +676,7 @@ Repeat for each dependency. This uses GitHub's native `blockedBy` GraphQL field 
 
 Fabrik uses the `fabrik:blocked` label to track blocked issues. The label lifecycle is fully automatic:
 
-1. **Detection**: When a blocking issue closes, its `updatedAt` timestamp changes and is visible in the shallow board fetch. Fabrik detects this on the next poll and re-evaluates the blocked item — unblocking is typically detected within one poll interval (~30 seconds).
+1. **Detection**: Fabrik re-evaluates blocked items periodically via a cooldown timer (every `10 × poll interval`, typically ~5 minutes at the default 30s poll). When the timer fires, Fabrik deep-fetches the blocked item and checks whether its dependencies have closed. If GitHub also bumps the blocked item's `updatedAt` when a dependency closes (common but not guaranteed), unblocking is detected sooner — on the next poll cycle.
 2. **First block**: When Fabrik first detects that an issue is blocked, it posts a comment listing the open blocking issues and adds the `fabrik:blocked` label automatically. Fabrik creates this label on first use — no pre-creation needed.
 3. **While blocked**: The issue is skipped silently each poll cycle (no duplicate comments).
 4. **Automatic unblocking**: When all blocking issues are closed, Fabrik removes `fabrik:blocked` and resumes processing on the next poll — no human action required.
