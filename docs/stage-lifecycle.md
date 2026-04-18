@@ -17,11 +17,11 @@ Backlog → Specify → Research → Plan → Implement → Review → Validate 
 
 | Stage | Order | Read-Only | PostToPR | CreateDraftPR | MarkPRReady | MaxTurns |
 |-------|-------|-----------|----------|---------------|-------------|----------|
-| Specify | 0 | Yes | No | No | No | 20 |
+| Specify | 0 | Yes | No | No | No | 50 |
 | Research | 1 | Yes | No | No | No | 50 |
 | Plan | 2 | Yes | No | No | No | 50 |
 | Implement | 3 | No | Yes | Yes | Yes | 50 |
-| Review | 4 | No | Yes | No | Yes | 30 |
+| Review | 4 | No | Yes | No | Yes | 50 |
 | Validate | 5 | No | Yes | No | No | 50 |
 | Done | 99 | N/A | No | No | No | N/A |
 
