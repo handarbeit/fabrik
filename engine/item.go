@@ -134,12 +134,22 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 			// Force deep-fetch for items whose gate condition changes independently
 			// of the issue's updatedAt:
 			// - fabrik:blocked: a blocking issue may close without updating this issue's updatedAt
+			// - fabrik:awaiting-ci: CI check run completions don't bump the issue/PR updatedAt
 			// Note: fabrik:awaiting-input and fabrik:awaiting-review do NOT need forced
 			// deep-fetch — adding a comment bumps the issue's updatedAt, and submitting
 			// a PR review bumps the linked PR's updatedAt (which Fabrik tracks in the
 			// shallow query via closedByPullRequestsReferences).
 			for _, l := range item.Labels {
 				if l == "fabrik:blocked" || l == "fabrik:awaiting-ci" {
+					return true
+				}
+			}
+			// Force deep-fetch for CI-gated stages with a completion label but no
+			// fabrik:awaiting-ci label yet (CI still running): CI check run status
+			// changes don't bump the issue/PR updatedAt, so items waiting for CI
+			// would be permanently filtered by the updatedAt cache.
+			if stage.WaitForCI != nil && *stage.WaitForCI {
+				if hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) {
 					return true
 				}
 			}
