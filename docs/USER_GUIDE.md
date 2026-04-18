@@ -1219,6 +1219,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:paused` | Processing paused (max retries exceeded or manual) |
 | `fabrik:awaiting-input` | Stage paused waiting for user input; auto-clears on a new comment from the configured user |
 | `fabrik:awaiting-review` | Set when a `wait_for_reviews: true` stage completes with outstanding reviewer requests; cleared when no requested reviewers are outstanding **and** at least one review has been submitted (then re-invocation fires unconditionally), or when the `FABRIK_REVIEW_WAIT_TIMEOUT` elapses (then issue is paused with `fabrik:awaiting-input`) |
+| `fabrik:awaiting-ci` | Set when CI checks fail on a `wait_for_ci: true` stage; triggers `itemMayNeedWork` cache bypass so CI results are re-evaluated on every poll; cleared when all checks pass or the CI wait timeout elapses (then issue is paused with `fabrik:awaiting-input`). See [§3 CI Gate](USER_GUIDE.md#ci-gate-and-ci-fix-workflow). |
 | `fabrik:blocked` | Issue is waiting for one or more blocking issues to close; added and removed automatically by the engine (Fabrik creates this label on first use — no pre-creation needed) |
 | `stage:<name>:in_progress` | Stage actively running |
 | `stage:<name>:complete` | Stage completed successfully |
@@ -1254,7 +1255,7 @@ The `base:<branch>` label is read on every stage invocation, so a change takes e
 | **After Specify, before Research** | Fairly clean. The worktree exists but no commits yet. The next stage's `updateWorktreeFromMain` rebases onto the new base — usually no conflict. |
 | **After Research, before Implement** | Similar — Research is read-only, so no commits. Rebase onto the new base works. |
 | **After Implement (commits exist, no PR yet)** | Messy. The issue branch has commits forked from the old base. Rebase onto the new base may produce conflicts that Claude must resolve. The PR, when created, will target the new base correctly. |
-| **After PR creation** | **Broken without manual intervention today.** The PR's base is set at creation time. Fabrik does not currently update the PR's base when the label changes, so the PR keeps targeting the old base even though new stage runs use the new base. Tracking the fix in issue #416. Workaround: edit the PR's base branch manually via the GitHub UI, or close the PR and delete the issue branch to let Fabrik recreate it. |
+| **After PR creation** | Fabrik automatically updates the PR's base branch when the `base:<branch>` label changes mid-pipeline. No manual intervention required. |
 
 **Natural language in the issue body is NOT parsed.** Writing "use the `develop` branch" in the Problem section has no effect on Fabrik's base-branch selection. The `base:<branch>` label is the only structured signal.
 
