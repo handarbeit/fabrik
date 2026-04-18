@@ -23,6 +23,12 @@ const idleUpgradeThreshold = 2 // consecutive idle polls before checking for upg
 // below which the engine activates poll backoff and logs a warning.
 const rateLimitBackoffThreshold = 0.20
 
+// rateLimitHealthyThreshold is the fraction of GraphQL rate limit remaining
+// above which the engine clears an active rate-limit backoff. Using a higher
+// threshold than rateLimitBackoffThreshold (hysteresis) prevents thrashing on
+// busy boards where quota fluctuates near the activation point.
+const rateLimitHealthyThreshold = 0.50
+
 // rateLimitMaxBackoffMultiplier caps the backoff interval as a multiple of the
 // configured poll interval (e.g. 10× = 10 * PollSeconds).
 const rateLimitMaxBackoffMultiplier = 10
@@ -44,6 +50,20 @@ func idleBackoffMultiplier(idleDuration time.Duration) int {
 	default:
 		return 0
 	}
+}
+
+// nextRateLimitLow applies two-threshold hysteresis to the rate-limit backoff state.
+// Activate when ratio < rateLimitBackoffThreshold (20%) and not already low.
+// Clear when ratio > rateLimitHealthyThreshold (50%) and currently low.
+// Between the two thresholds, state is unchanged (sticky).
+func nextRateLimitLow(current bool, ratio float64) bool {
+	if !current && ratio < rateLimitBackoffThreshold {
+		return true
+	}
+	if current && ratio > rateLimitHealthyThreshold {
+		return false
+	}
+	return current
 }
 
 // computeEffectiveInterval returns the effective poll interval considering both
@@ -247,24 +267,26 @@ func (e *Engine) Run() error {
 		// Update idle timer.
 		if result.Active {
 			if !e.idleStart.IsZero() {
-				e.logf(0, "poll", "activity detected — idle backoff reset, poll interval restored to %v\n", configuredInterval)
+				e.logf(0, "poll", "activity detected — idle backoff reset\n")
 			}
 			e.idleStart = time.Time{}
 		} else if e.idleStart.IsZero() {
 			e.idleStart = time.Now()
 		}
 
-		// Update rate-limit state.
+		// Update rate-limit state using two-threshold hysteresis:
+		// activate when ratio drops below 20%; clear only when ratio rises above 50%.
+		// Activity detection does NOT reset rate-limit backoff — it is a separate concern.
 		_, graphqlStats := e.client.RateLimitStats()
 		if graphqlStats.Limit > 0 {
 			ratio := float64(graphqlStats.Remaining) / float64(graphqlStats.Limit)
-			wasLow := rateLimitLow
-			rateLimitLow = ratio < rateLimitBackoffThreshold
-			if rateLimitLow && !wasLow {
+			newRateLimitLow := nextRateLimitLow(rateLimitLow, ratio)
+			if newRateLimitLow && !rateLimitLow {
 				e.logf(0, "warn", "GraphQL rate limit low (%.0f%% remaining) — activating rate-limit backoff\n", ratio*100)
-			} else if !rateLimitLow && wasLow {
+			} else if !newRateLimitLow && rateLimitLow {
 				e.logf(0, "poll", "GraphQL rate limit recovered (%.0f%% remaining)\n", ratio*100)
 			}
+			rateLimitLow = newRateLimitLow
 		}
 
 		// Compute and apply effective interval.
@@ -289,6 +311,9 @@ func (e *Engine) Run() error {
 		}
 
 		ticker.Reset(effectiveInterval)
+		if rateLimitLow {
+			e.logf(0, "poll", "rate-limit backoff active — effective poll interval: %v\n", effectiveInterval)
+		}
 
 		e.emitStructural(tui.PollCompletedEvent{
 			ItemCount:         result.ItemCount,

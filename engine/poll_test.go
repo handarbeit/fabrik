@@ -1016,6 +1016,47 @@ func TestComputeEffectiveInterval_RateLimitExceeds5Min(t *testing.T) {
 	}
 }
 
+// TestNextRateLimitLow_ActivatesWhenLow verifies that nextRateLimitLow transitions
+// from false to true when the ratio drops below rateLimitBackoffThreshold (20%).
+func TestNextRateLimitLow_ActivatesWhenLow(t *testing.T) {
+	if nextRateLimitLow(false, 0.15) != true {
+		t.Error("expected true: ratio 15% should activate rate-limit backoff from false")
+	}
+	if nextRateLimitLow(false, 0.20) != false {
+		t.Error("expected false: ratio exactly 20% should not activate (threshold is strictly <)")
+	}
+}
+
+// TestNextRateLimitLow_StickyBetweenThresholds verifies that once rate-limit backoff
+// is active, it remains active when the ratio is between the two thresholds (20%–50%).
+func TestNextRateLimitLow_StickyBetweenThresholds(t *testing.T) {
+	if nextRateLimitLow(true, 0.25) != true {
+		t.Error("expected true: ratio 25% is between thresholds — backoff must stay active (sticky)")
+	}
+	if nextRateLimitLow(true, 0.49) != true {
+		t.Error("expected true: ratio 49% is still below healthy threshold — backoff must stay active")
+	}
+}
+
+// TestNextRateLimitLow_ClearsWhenHealthy verifies that rate-limit backoff clears
+// only when the ratio rises above rateLimitHealthyThreshold (50%).
+func TestNextRateLimitLow_ClearsWhenHealthy(t *testing.T) {
+	if nextRateLimitLow(true, 0.51) != false {
+		t.Error("expected false: ratio 51% exceeds healthy threshold — backoff should clear")
+	}
+	if nextRateLimitLow(true, 0.50) != true {
+		t.Error("expected true: ratio exactly 50% should not clear (threshold is strictly >)")
+	}
+}
+
+// TestNextRateLimitLow_NoActivationAboveThreshold verifies that when rate-limit
+// backoff is not active and quota is healthy, it stays inactive.
+func TestNextRateLimitLow_NoActivationAboveThreshold(t *testing.T) {
+	if nextRateLimitLow(false, 0.80) != false {
+		t.Error("expected false: healthy ratio should not activate backoff")
+	}
+}
+
 // TestItemMayNeedWork_WaitForCI_CompleteLabel_BypassesCache verifies that an item
 // whose stage has wait_for_ci: true AND has a stage:<name>:complete label is NOT
 // filtered by the updatedAt cache. CI check run completions don't bump the issue's
