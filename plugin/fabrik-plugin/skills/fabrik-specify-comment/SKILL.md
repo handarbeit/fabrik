@@ -78,14 +78,14 @@ Do not signal completion if open questions remain or if the spec still has ambig
 
 ## Numbering in your output
 
-When you number items in output that posts to a GitHub issue or comment body — requirements, questions, list entries — **do not use bare `#N` ordinals**. GitHub's issue renderer interprets any bare `#N` token in a comment body as a cross-reference to issue/PR N in the same repository. Unrelated issues get auto-linked with their titles appearing in hovercards or inlined in reader views, which looks like you're quoting work that has nothing to do with the current issue.
+When you number items in output that posts to a GitHub issue or comment body — requirements, questions, list entries — **do not use bare `#N` ordinals**. GitHub's issue renderer interprets any bare `#N` token in an issue or comment body as a cross-reference to issue/PR N in the same repository. Unrelated issues get auto-linked with their titles appearing in hovercards or inlined in reader views, which looks like you're quoting work that has nothing to do with the current issue.
 
 Use bracketed or descriptive numbering instead:
 
 - ✅ `[1]`, `(1)`, `finding 1`, `item 1`
 - ❌ `#1`, `#2`
 
-This applies anywhere in your output that reaches a GitHub comment body — numbered lists, enumerated questions, or any inline ordinal reference.
+This applies to your own numbered items or inline ordinal references anywhere in output that reaches a GitHub issue or comment body. If you intentionally mean to reference an actual GitHub issue or PR, using `#NNN` is allowed.
 
 ## What You Do NOT Do
 

@@ -58,7 +58,7 @@ Use bracketed or descriptive numbering instead:
 - ✅ `[1]`, `(1)`, `task 1`, `item 1`
 - ❌ `#1`, `#2`
 
-This applies anywhere in your output that reaches a GitHub comment body — numbered tasks, enumerated decisions, or any inline ordinal reference.
+This applies anywhere in your output that reaches a GitHub comment body where you are numbering your own tasks, decisions, or other inline ordinals. If you intentionally mean a GitHub issue or PR reference, `#NNN` is fine.
 
 ## What You Do NOT Do
 
