@@ -144,6 +144,8 @@ requires auto-advance to be active):
 > built-in default is used and the env var is bypassed. See
 > [USER_GUIDE.md §10](docs/USER_GUIDE.md#pending-reviewer-gate) for details.
 
+The Validate stage also ships with `wait_for_ci: true` enabled by default. Fabrik gates auto-advance and auto-merge on CI checks passing; if checks fail, it re-invokes the stage agent with a structured failure report to fix the regression.
+
 If a stage doesn't complete (e.g., unfixable issues found), it retries after
 a cooldown period rather than being permanently skipped.
 
@@ -306,6 +308,7 @@ Fabrik uses labels to track state:
 | `fabrik:awaiting-input` | Stage is paused waiting for user input; auto-clears when a new comment from the configured user (`--user`) is received |
 | `fabrik:blocked` | Issue is waiting for one or more blocking issues to close; managed automatically by the engine |
 | `fabrik:awaiting-review` | Applied optimistically by the engine whenever a `wait_for_reviews: true` stage completes (reviewer request data may still be stale at that moment); removed when no requested reviewers are outstanding and at least one review has been submitted (the dual condition catches bot reviewers like Copilot and Gemini that self-trigger via webhook without appearing in the formal reviewer list), or when the reviewer-wait timeout elapses as a fallback (`--review-wait-timeout` / `FABRIK_REVIEW_WAIT_TIMEOUT`), at which point the issue is paused with `fabrik:awaiting-input` |
+| `fabrik:awaiting-ci` | Applied when CI checks fail on a `wait_for_ci: true` stage; triggers cache bypass so CI results are re-evaluated on every poll; cleared when all checks pass or the CI wait timeout elapses, at which point the issue is paused with `fabrik:awaiting-input` |
 | `stage:<name>:complete` | Stage has been completed |
 | `stage:<name>:in_progress` | Stage is actively running |
 | `stage:<name>:failed` | Stage hit max retries and was paused |
