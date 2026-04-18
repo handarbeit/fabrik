@@ -134,10 +134,11 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 			// Force deep-fetch for fabrik:awaiting-ci items: CI check run completions
 			// don't bump the issue/PR updatedAt, so these items would be permanently
 			// filtered by the updatedAt cache without this bypass.
-			// Note: fabrik:blocked does NOT need forced deep-fetch — when a blocking
-			// issue closes, its own updatedAt changes and is visible in the shallow fetch,
-			// which is sufficient to trigger re-evaluation of the blocked item.
-			// fabrik:awaiting-input and fabrik:awaiting-review similarly don't need it —
+			// Note: fabrik:blocked does NOT need a forced deep-fetch here — processItem
+			// sets processedSet[stageKey] whenever checkDependencies returns true, so
+			// the cooldown retry path above ensures periodic re-evaluation (every
+			// 10 × PollSeconds) even if the blocked item's updatedAt never changes.
+			// fabrik:awaiting-input and fabrik:awaiting-review don't need it either —
 			// comments bump updatedAt, and PR review submissions bump linkedPR updatedAt.
 			for _, l := range item.Labels {
 				if l == "fabrik:awaiting-ci" {
@@ -248,8 +249,8 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	}
 
 	// Dependency gate is handled by processItem via checkDependencies, which
-	// applies fabrik:blocked (so the updatedAt cache-bypass logic in
-	// itemMayNeedWork picks up dependency state changes). A silent return here
+	// applies fabrik:blocked and sets processedSet so the cooldown retry in
+	// itemMayNeedWork triggers periodic re-evaluation. A silent return here
 	// would skip the item without labelling it blocked, leaving it permanently
 	// stuck once its updatedAt is cached — even after blockers close.
 
@@ -360,6 +361,14 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// and comment idempotently. Returns nil (silent skip) consistent with other
 	// skip paths above. The first stage is always exempt (see checkDependencies).
 	if e.checkDependencies(board, item, stage) {
+		// Record in processedSet so the cooldown-retry path in itemMayNeedWork
+		// triggers periodic re-evaluation. Without this, a blocked item whose
+		// updatedAt never changes (GitHub may not propagate a dependency's
+		// closure to the blocked item) would be permanently filtered by the
+		// updatedAt cache and never unblocked.
+		e.mu.Lock()
+		e.processedSet[stageKey] = time.Now()
+		e.mu.Unlock()
 		return nil
 	}
 
