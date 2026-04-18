@@ -63,7 +63,7 @@ Use bracketed or descriptive numbering instead:
 - ✅ `[1]`, `(1)`, `change 1`, `item 1`
 - ❌ `#1`, `#2`
 
-This applies anywhere in your output that reaches a GitHub comment body — numbered changes, enumerated items, or any inline ordinal reference.
+This applies when you are using `#N` as an ordinal label for your own numbered changes, enumerated items, or inline references in content that will reach a GitHub comment body. If you intentionally mean a real GitHub issue or PR reference, using `#NNN` for that purpose is allowed.
 
 ## What You Do NOT Do
 

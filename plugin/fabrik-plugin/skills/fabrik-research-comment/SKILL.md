@@ -56,7 +56,7 @@ Use bracketed or descriptive numbering instead:
 - ✅ `[1]`, `(1)`, `finding 1`, `item 1`
 - ❌ `#1`, `#2`
 
-This applies anywhere in your output that reaches a GitHub comment body — numbered findings, enumerated questions, or any inline ordinal reference.
+This applies to ordinal labels for your own findings, questions, and list items anywhere in output that reaches a GitHub comment body. If you intentionally mean a GitHub cross-reference to an issue or PR, `#NNN` is allowed.
 
 ## What You Do NOT Do
 
