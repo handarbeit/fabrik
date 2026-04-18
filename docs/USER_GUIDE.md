@@ -1456,10 +1456,11 @@ The GraphQL query uses a two-phase fetch to minimize rate limit consumption:
    labels, status). Items whose `updatedAt` hasn't changed since the last poll are
    skipped entirely.
 2. **Targeted detail fetch** — runs only for items that passed the shallow filter.
-   The one exception is `fabrik:blocked` items, which always receive a forced
-   deep-fetch regardless of `updatedAt`. This is necessary because the issue that's
-   _blocking_ a blocked item can be closed without bumping the blocked item's own
-   `updatedAt` timestamp.
+   `fabrik:blocked` items do not receive a forced deep-fetch. Instead, they are
+   re-evaluated via the standard `processedSet` cooldown (every `10 × poll interval`,
+   typically ~5 minutes at the default 30s base). If GitHub bumps the blocked item's
+   `updatedAt` when a dependency closes, unblocking may also be detected sooner — on
+   the next poll cycle.
 
    Items with `fabrik:awaiting-input` or `fabrik:awaiting-review` do **not** force a
    deep-fetch. New user comments bump the issue's `updatedAt`; PR review submissions
