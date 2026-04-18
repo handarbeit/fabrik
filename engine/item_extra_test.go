@@ -690,6 +690,33 @@ func TestItemMayNeedWork_AwaitingCI_BypassesUpdatedAtCache(t *testing.T) {
 	}
 }
 
+// TestItemMayNeedWork_BlockedRespectsUpdatedAtCache verifies that a fabrik:blocked
+// item with an unchanged updatedAt is NOT force-deep-fetched. The dependency item's
+// own updatedAt changes when it closes, which is visible in the shallow fetch —
+// the blocked item does not need a special bypass.
+func TestItemMayNeedWork_BlockedRespectsUpdatedAtCache(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.cfg.PollSeconds = 60 // long cooldown
+
+	ts := time.Now().Add(-time.Minute)
+	item := gh.ProjectItem{
+		Number:    63,
+		Status:    "Research",
+		ItemID:    "PVTI_63",
+		UpdatedAt: ts,
+		Labels:    []string{"fabrik:blocked"},
+	}
+
+	eng.mu.Lock()
+	eng.lastUpdatedAt["owner/repo#63"] = ts
+	eng.processedSet["owner/repo#63-Research"] = time.Now() // just processed — within cooldown
+	eng.mu.Unlock()
+
+	if eng.itemMayNeedWork(item) {
+		t.Error("fabrik:blocked item with unchanged updatedAt should be filtered by updatedAt cache (no forced deep-fetch)")
+	}
+}
+
 // TestItemMayNeedWork_NoSpecialLabel_RespectsUpdatedAtCache verifies that without
 // fabrik:awaiting-ci, a stale item within cooldown is filtered (cache respected).
 func TestItemMayNeedWork_NoSpecialLabel_RespectsUpdatedAtCache(t *testing.T) {

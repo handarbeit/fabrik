@@ -131,16 +131,16 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 					return true // cooldown expired, retry
 				}
 			}
-			// Force deep-fetch for items whose gate condition changes independently
-			// of the issue's updatedAt:
-			// - fabrik:blocked: a blocking issue may close without updating this issue's updatedAt
-			// - fabrik:awaiting-ci: CI check run completions don't bump the issue/PR updatedAt
-			// Note: fabrik:awaiting-input and fabrik:awaiting-review do NOT need forced
-			// deep-fetch — adding a comment bumps the issue's updatedAt, and submitting
-			// a PR review bumps the linked PR's updatedAt (which Fabrik tracks in the
-			// shallow query via closedByPullRequestsReferences).
+			// Force deep-fetch for fabrik:awaiting-ci items: CI check run completions
+			// don't bump the issue/PR updatedAt, so these items would be permanently
+			// filtered by the updatedAt cache without this bypass.
+			// Note: fabrik:blocked does NOT need forced deep-fetch — when a blocking
+			// issue closes, its own updatedAt changes and is visible in the shallow fetch,
+			// which is sufficient to trigger re-evaluation of the blocked item.
+			// fabrik:awaiting-input and fabrik:awaiting-review similarly don't need it —
+			// comments bump updatedAt, and PR review submissions bump linkedPR updatedAt.
 			for _, l := range item.Labels {
-				if l == "fabrik:blocked" || l == "fabrik:awaiting-ci" {
+				if l == "fabrik:awaiting-ci" {
 					return true
 				}
 			}
