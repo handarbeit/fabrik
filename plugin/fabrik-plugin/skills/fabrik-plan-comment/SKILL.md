@@ -49,6 +49,17 @@ Do not signal completion if the plan still has ambiguities, unresolved questions
 
 If the user's comment adjusts the plan but the plan still needs further refinement or the user is clearly not done providing feedback, do not signal completion.
 
+## Numbering in your output
+
+When you number items in output that posts to a GitHub comment body — tasks, decisions, list entries — **do not use bare `#N` ordinals**. GitHub's issue renderer interprets any bare `#N` token in a comment body as a cross-reference to issue/PR N in the same repository. Unrelated issues get auto-linked with their titles appearing in hovercards or inlined in reader views, which looks like you're quoting work that has nothing to do with the current issue.
+
+Use bracketed or descriptive numbering instead:
+
+- ✅ `[1]`, `(1)`, `task 1`, `item 1`
+- ❌ `#1`, `#2`
+
+This applies anywhere in your output that reaches a GitHub comment body — numbered tasks, enumerated decisions, or any inline ordinal reference.
+
 ## What You Do NOT Do
 
 - **Do not commit code changes** — Plan is a read-only stage; no code is modified

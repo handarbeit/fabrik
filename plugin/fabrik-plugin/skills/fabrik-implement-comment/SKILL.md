@@ -54,6 +54,17 @@ Then update the relevant checkbox in the comment body.
 
 Do NOT output `FABRIK_STAGE_COMPLETE`. Comment processing in Implement returns control to the engine without advancing the pipeline. The Implement stage continues with the remaining tasks after the comment is processed.
 
+## Numbering in your output
+
+When you number items in output that posts to a GitHub comment body — changes applied, list entries, status items — **do not use bare `#N` ordinals**. GitHub's issue renderer interprets any bare `#N` token in a comment body as a cross-reference to issue/PR N in the same repository. Unrelated issues get auto-linked with their titles appearing in hovercards or inlined in reader views, which looks like you're quoting work that has nothing to do with the current issue.
+
+Use bracketed or descriptive numbering instead:
+
+- ✅ `[1]`, `(1)`, `change 1`, `item 1`
+- ❌ `#1`, `#2`
+
+This applies anywhere in your output that reaches a GitHub comment body — numbered changes, enumerated items, or any inline ordinal reference.
+
 ## What You Do NOT Do
 
 - **Do not signal stage completion** — never output `FABRIK_STAGE_COMPLETE`
