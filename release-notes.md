@@ -1,13 +1,27 @@
-# Fabrik v0.0.42
+# Fabrik v0.0.43
+
+## Features
+
+- **CI gate before auto-merge (#418).** New `wait_for_ci: true` stage config option (enabled by default on Validate). The engine checks CI check-run status via REST before allowing auto-merge. If checks are still running, the merge blocks until they complete. If checks fail, the engine dispatches a CI-fix reinvoke — Claude is re-invoked with the failure context and base-branch CI comparison to fix regressions. Cycle limit and timeout prevent runaway loops. New `fabrik:awaiting-ci` label tracks CI gate state.
+- **Sync PR base branch on `base:<branch>` label change (#416).** When the `base:<branch>` label is added or changed mid-pipeline, Fabrik now updates the existing PR's base branch via the GitHub API. Previously, PRs created before the label change kept targeting the old base.
 
 ## Fixes
 
-- **Review gate now waits for actual review submission, not just requested reviewers.** `checkReviewGate` previously cleared immediately when `LinkedPRReviewRequests` was empty — but Copilot, Gemini, and other bot reviewers self-trigger via webhooks and never appear in the formal requested-reviewer list. With `fabrik:yolo` active, the pipeline raced through Validate → merge → Done in 30-60 seconds while bots were still processing their reviews. The gate now requires both `LinkedPRReviewRequests` empty AND `LinkedPRReviews` non-empty before clearing, which catches self-submitting bot reviews naturally. Existing `ReviewWaitTimeout` (default 15 min) is the fallback when no reviews ever arrive.
-- **`fabrik-implement`, `fabrik-review`, and `fabrik-validate` skills now require per-test timeouts.** A hanging pytest suite with no timeout flag kept a Claude CLI process alive for 39+ minutes after the Review stage completed (burning three full Review runs before manual intervention). Skills now instruct: always include `--timeout=60` for pytest, `-timeout 5m` for `go test`, `--testTimeout=30000` for jest, etc.
+- **Stale default-branch detection after bare clone.** `DefaultBaseBranch` now runs `git remote set-head origin --auto` on every `ensureBareClone` entry, keeping `refs/remotes/origin/HEAD` in sync with the remote. The fallback ladder is reordered: authoritative `ls-remote` now takes precedence over the frozen bare-clone local HEAD. Fixes PRs targeting the wrong base when a repo's default branch changed after Fabrik's initial clone.
+- **Copilot review findings on CI gate code** — API errors in `FetchLinkedPR`/`FetchCheckRuns` now block instead of silently clearing the gate. `CheckRun.ID` comment corrected. State machine doc Phase 1 ordering fixed.
 
 ## Improvements
 
-- Documentation and grammar refinements to `fabrik:yolo` and yolo auto-merge sections.
+- Advanced `base:<branch>` timing semantics documented in USER_GUIDE.md — full matrix of when the label takes effect cleanly vs. with caveats.
+- Review gate documentation updated across USER_GUIDE.md and README.md for the v0.0.42 dual-condition behavior (`LinkedPRReviewRequests` empty AND `LinkedPRReviews` non-empty).
+- State machine documentation expanded with CI gate sections (§6.x CI Gate and CI-Fix Reinvoke, new sub-states, transition tables, Mermaid diagrams).
+
+## Internal
+
+- New `engine/ci.go` + `engine/ci_test.go` — mirrors the review-reinvoke pattern (`checkCIGate`, `dispatchCIFixReinvoke`, `pauseForCITimeout`, `pauseForCIFixCycleLimit`).
+- `GetPRBase` and `UpdatePRBase` added to `github/prs.go` + interface.
+- `syncPRBase` called from `processItem` and `processComments` at each stage invocation.
+- `WaitForCI` bypass added to `itemMayNeedWork` for items with stage-complete labels.
 
 ## Upgrading
 
