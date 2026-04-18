@@ -149,15 +149,11 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	completed := checkCompletion(stage, output)
 	summary := extractSummary(output)
 
-	// Step 6: Strip FABRIK_ISSUE_UPDATE block from output, then update issue body if allowed.
+	// Step 6: Strip FABRIK_ISSUE_UPDATE block from output, then update issue body.
 	if updatedBody := extractUpdatedBody(output); updatedBody != "" {
-		if stage.UpdateIssueBody {
-			e.logf(item.Number, "edit", "updating issue body\n")
-			if err := e.client.UpdateIssueBody(owner, repo, item.Number, updatedBody); err != nil {
-				e.logf(item.Number, "warn", "could not update issue body: %v\n", err)
-			}
-		} else {
-			e.logf(item.Number, "warn", "stage %q comment processing produced FABRIK_ISSUE_UPDATE markers but is not allowed to update the issue body — ignoring\n", stage.Name)
+		e.logf(item.Number, "edit", "updating issue body\n")
+		if err := e.client.UpdateIssueBody(owner, repo, item.Number, updatedBody); err != nil {
+			e.logf(item.Number, "warn", "could not update issue body: %v\n", err)
 		}
 		output = stripMarkers(output, "FABRIK_ISSUE_UPDATE_BEGIN", "FABRIK_ISSUE_UPDATE_END")
 	}
