@@ -174,7 +174,7 @@ Ten distinct event types drive state transitions:
 
 **Code path:** `processItem()` → `checkDependencies()` inspects `item.BlockedBy[].State`
 
-**Effect:** When all blocking issues are closed, `fabrik:blocked` is removed and the stage proceeds. Blocked items are subject to normal `updatedAt` cache filtering — no forced deep-fetch is needed. When a blocking issue closes, its own `updatedAt` changes and is visible in the shallow fetch; this triggers re-evaluation of the blocked item on the next poll.
+**Effect:** When all blocking issues are closed, `fabrik:blocked` is removed and the stage proceeds. Blocked items are subject to normal `updatedAt` cache filtering — no forced deep-fetch on every poll. `processItem()` sets `processedSet[stageKey]` each time `checkDependencies()` returns true (blocked). This ensures the cooldown-retry path in `itemMayNeedWork()` re-evaluates blocked items after `10 × PollSeconds` even if the blocked item's own `updatedAt` never changes when its dependency closes.
 
 ### 2.6 Claude Output Markers
 
