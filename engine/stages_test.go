@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -313,5 +314,50 @@ func TestHandleStageComplete_WaitForCI_SkipsMergeAndReturns(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected stage:Validate:complete label even with wait_for_ci=true")
+	}
+}
+
+// TestAttemptMergeOnValidate_FetchLinkedPRError_ReturnsError verifies that a
+// transient FetchLinkedPR API error returns an error (retriable) rather than nil
+// (which would allow the caller to advance past Validate without merging the PR).
+func TestAttemptMergeOnValidate_FetchLinkedPRError_ReturnsError(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return nil, errors.New("network error")
+		},
+	}
+	eng := testEngineForMerge(client)
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+
+	err := eng.attemptMergeOnValidate(item)
+	if err == nil {
+		t.Fatal("expected error when FetchLinkedPR fails, got nil (would incorrectly allow advancement)")
+	}
+	if len(client.mergePRCalls) != 0 {
+		t.Errorf("expected no MergePR on FetchLinkedPR error, got %d", len(client.mergePRCalls))
+	}
+}
+
+// TestAttemptMergeOnValidate_FetchCheckRunsError_ReturnsError verifies that a
+// transient FetchCheckRuns API error returns an error (retriable) rather than
+// proceeding to merge with unknown CI status.
+func TestAttemptMergeOnValidate_FetchCheckRunsError_ReturnsError(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, HeadSHA: "sha1"}, nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return nil, errors.New("GitHub API 503")
+		},
+	}
+	eng := testEngineForMerge(client)
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+
+	err := eng.attemptMergeOnValidate(item)
+	if err == nil {
+		t.Fatal("expected error when FetchCheckRuns fails, got nil (would proceed to merge with unknown CI status)")
+	}
+	if len(client.mergePRCalls) != 0 {
+		t.Errorf("expected no MergePR on FetchCheckRuns error, got %d", len(client.mergePRCalls))
 	}
 }

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -256,6 +257,54 @@ func TestBuildCIFixComment_IncludesFailedChecks(t *testing.T) {
 	}
 	if !strings.Contains(comment.Body, "CI Fix Required") {
 		t.Error("expected CI Fix Required header in comment body")
+	}
+}
+
+// TestCheckCIGate_FetchLinkedPRError_BlocksGate verifies that a transient
+// FetchLinkedPR API error returns blocked=true rather than clearing the gate,
+// preventing auto-advance when CI status is unknown.
+func TestCheckCIGate_FetchLinkedPRError_BlocksGate(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return nil, fmt.Errorf("transient network error")
+		},
+	}
+	eng := testEngineForMerge(client)
+	tr := true
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	if !blocked {
+		t.Error("expected blocked=true when FetchLinkedPR returns an error")
+	}
+	if ciFailure || timedOut {
+		t.Errorf("expected ciFailure=false timedOut=false on API error, got ciFailure=%v timedOut=%v", ciFailure, timedOut)
+	}
+}
+
+// TestCheckCIGate_FetchCheckRunsError_BlocksGate verifies that a transient
+// FetchCheckRuns API error returns blocked=true rather than clearing the gate.
+func TestCheckCIGate_FetchCheckRunsError_BlocksGate(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, HeadSHA: "sha1"}, nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return nil, fmt.Errorf("GitHub API 503")
+		},
+	}
+	eng := testEngineForMerge(client)
+	tr := true
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	if !blocked {
+		t.Error("expected blocked=true when FetchCheckRuns returns an error")
+	}
+	if ciFailure || timedOut {
+		t.Errorf("expected ciFailure=false timedOut=false on API error, got ciFailure=%v timedOut=%v", ciFailure, timedOut)
 	}
 }
 
