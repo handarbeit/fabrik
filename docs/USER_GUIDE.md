@@ -457,9 +457,6 @@ comment_max_turns: 15     # Optional. Max turns when processing user comments. D
 read_only: true           # Optional. Stashes the dirty worktree before Claude runs and
                           #   restores it after. Use for analysis stages that should not
                           #   modify files (e.g., Specify, Research).
-update_issue_body: false  # Optional. Allow FABRIK_ISSUE_UPDATE_BEGIN/END markers in Claude
-                          #   output to update the issue body. By convention only Specify
-                          #   sets this to true.
 post_to_pr: true          # Optional. Routes detailed Claude output to the linked PR; a
                           #   brief summary is still posted on the issue. Falls back to
                           #   posting on the issue if no linked PR is found.
