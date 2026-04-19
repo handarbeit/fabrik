@@ -236,11 +236,16 @@ func TestFindPRForIssue_Found(t *testing.T) {
 		if r.Method != http.MethodGet {
 			t.Errorf("method = %s, want GET", r.Method)
 		}
+		// Verify we hit the core REST pulls endpoint, not /search/issues.
+		if !strings.HasPrefix(r.URL.Path, "/repos/owner/repo/pulls") {
+			t.Errorf("path = %s, want /repos/owner/repo/pulls (core REST, not search API)", r.URL.Path)
+		}
 		if !strings.Contains(r.URL.RawQuery, "fabrik") {
 			t.Errorf("query missing fabrik: %s", r.URL.RawQuery)
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"items": []map[string]interface{}{{"number": 55}},
+		// /repos/{o}/{r}/pulls returns an array of PR objects.
+		json.NewEncoder(w).Encode([]map[string]interface{}{
+			{"number": 55, "title": "test", "state": "open", "head": map[string]interface{}{"sha": "abc"}},
 		})
 	}))
 	defer srv.Close()
@@ -257,7 +262,7 @@ func TestFindPRForIssue_Found(t *testing.T) {
 
 func TestFindPRForIssue_NotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{"items": []interface{}{}})
+		json.NewEncoder(w).Encode([]interface{}{})
 	}))
 	defer srv.Close()
 
