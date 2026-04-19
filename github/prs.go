@@ -180,22 +180,24 @@ mutation($prId: ID!) {
 	return c.graphqlRequest(mutation, mutVars, &mutResult)
 }
 
-// FindPRForIssue finds the open PR associated with an issue by looking for
-// a PR whose head branch matches the fabrik/issue-N convention.
-// Returns the PR number, or 0 if no matching PR is found.
+// FindPRForIssue finds the PR associated with an issue by looking for a PR
+// whose head branch matches the fabrik/issue-N convention. Returns the PR
+// number, or 0 if no matching PR is found.
+//
+// Uses FetchLinkedPR internally, which hits the core REST pulls endpoint
+// (/repos/{owner}/{repo}/pulls?head=...). Previously this used the GitHub
+// search API (/search/issues) which has a 30/minute rate limit — heavy
+// polling exhausted that quota. Core REST has a 5000/hour limit, ~167x
+// more headroom.
 func (c *Client) FindPRForIssue(owner, repo string, issueNumber int) (int, error) {
-	query := fmt.Sprintf("repo:%s/%s is:pr is:open head:fabrik/issue-%d", owner, repo, issueNumber)
-	searchURL := fmt.Sprintf("%s/search/issues?q=%s", c.baseURL, url.QueryEscape(query))
-
-	resp, err := c.restGet(searchURL)
+	pr, err := c.FetchLinkedPR(owner, repo, issueNumber)
 	if err != nil {
-		return 0, fmt.Errorf("searching for PR: %w", err)
+		return 0, err
 	}
-
-	if len(resp.Items) == 0 {
+	if pr == nil {
 		return 0, nil
 	}
-	return resp.Items[0].Number, nil
+	return pr.Number, nil
 }
 
 // GetPRBase fetches the current base branch reference of an open pull request.
