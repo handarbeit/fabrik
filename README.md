@@ -364,7 +364,7 @@ See [USER_GUIDE §3 — Git Clone Protocol (HTTPS vs SSH)](docs/USER_GUIDE.md#gi
 
 Fabrik supports **dependency-based sequencing** of issues using GitHub's native "Blocked by" relationships. A **formation** is a coordinated set of issues that execute in parallel where possible and respect ordering constraints automatically — no polling, no manual unblocking.
 
-When all blocking issues are closed, Fabrik typically detects the change within one poll cycle (when GitHub updates the item's timestamp) and guarantees re-evaluation within ~10× the poll interval (~5 minutes at default settings), then resumes the blocked issue automatically. The `fabrik:blocked` label is managed entirely by the engine (created on first use, no pre-creation needed). The first stage (Specify) always runs regardless of blockers, so an entire formation can be fully specified before execution begins.
+When all blocking issues are closed, Fabrik guarantees re-evaluation of a blocked issue within ~10× the poll interval (~5 minutes at default settings), then resumes it automatically once dependencies are satisfied. The `fabrik:blocked` label is managed entirely by the engine (created on first use, no pre-creation needed). The first stage (Specify) always runs regardless of blockers, so an entire formation can be fully specified before execution begins.
 
 **Recipe:** file issues → add blocked-by edges in GitHub → label all `fabrik:yolo` → move to Specify → watch it run.
 
