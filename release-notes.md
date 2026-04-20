@@ -1,19 +1,12 @@
-# Fabrik v0.0.44
+# Fabrik v0.0.45
 
 ## Fixes
 
-- **Rate-limit backoff hysteresis (#420).** Rate-limit backoff no longer resets eagerly on any activity detection. The backoff now uses a hysteresis threshold: it only relaxes when GraphQL quota recovers above 50%, not on the first `updatedAt` change. Idle backoff (no dispatches) still resets on activity as before. The `fabrik:blocked` deep-fetch bypass that contributed to quota pressure has been removed — blocked items now use the standard `processedSet` cooldown for re-evaluation.
-- **Removed `update_issue_body` stage config flag (#419).** This flag was a silent breaking change for existing projects — it defaulted to false but the Specify stage depended on it being true. The feature has been removed entirely; all references cleaned from docs, stage YAMLs, and engine code.
-- **Narrowed `#N` auto-link prohibition in skills (#410).** The blanket prohibition on `#N` was too strict — it blocked intentional issue references like "see #392". The skill guidance now only prohibits `#N` when used as ordinal labels (e.g., "Copilot #1", "finding #2"); deliberate issue/PR references are allowed.
-- **Corrected MaxTurns in pipeline table.** Specify and Review were showing incorrect defaults (20 and 30); corrected to 50 to match actual stage YAML config.
-- **Set `processedSet` on blocked items** so cooldown-based re-evaluation works correctly after the `fabrik:blocked` deep-fetch bypass was removed.
+- **`FindPRForIssue` now uses core REST instead of search API (#430).** Previously hit `/search/issues` which has a 30/minute rate limit — heavy polling on boards with many items exhausted the search quota (observed as `REST: 28/30 remaining` in logs) even when core REST and GraphQL had plenty of headroom. Now uses `/repos/{owner}/{repo}/pulls?head=...` via `FetchLinkedPR`, which is core REST with a 5000/hour limit — ~167x more quota headroom. Same function signature, zero caller changes.
 
 ## Improvements
 
-- `fabrik:awaiting-ci` label and CI gate description added to README and USER_GUIDE label tables.
-- CI Gate feature card added to the marketing site features grid.
-- Rate-limit backoff and dependency detection documentation updated in state-machine.md.
-- All `*-comment` skills now carry the narrowed `#N` ordinal prohibition (R2 from #410).
+- Clarified `fabrik:blocked` re-evaluation documentation — blocked items are deep-fetched on cooldown expiry, not forced on every poll (stale doc from before #420's bypass removal).
 
 ## Upgrading
 
