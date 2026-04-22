@@ -141,14 +141,19 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 			// fabrik:awaiting-input and fabrik:awaiting-review don't need it either —
 			// comments bump updatedAt, and PR review submissions bump linkedPR updatedAt.
 			for _, l := range item.Labels {
-				if l == "fabrik:awaiting-ci" {
+				if l == "fabrik:awaiting-ci" || l == "fabrik:rebase-needed" {
+					// fabrik:rebase-needed: mergeability re-computes when origin
+					// advances but the issue's updatedAt won't bump, so force
+					// deep-fetch for the merge-gate to re-check.
 					return true
 				}
 			}
 			// Force deep-fetch for CI-gated stages with a completion label but no
 			// fabrik:awaiting-ci label yet (CI still running): CI check run status
 			// changes don't bump the issue/PR updatedAt, so items waiting for CI
-			// would be permanently filtered by the updatedAt cache.
+			// would be permanently filtered by the updatedAt cache. The same
+			// reasoning applies to the merge-conflict gate — the base branch may
+			// advance without bumping our item's updatedAt.
 			if stage.WaitForCI != nil && *stage.WaitForCI {
 				if hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) {
 					return true
@@ -883,6 +888,7 @@ func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 	delete(e.processedSet, stageKey)     // clear cooldown so the stage retries immediately
 	delete(e.reviewCycleCount, stageKey) // reset review cycle counter on unpause
 	delete(e.ciFixCycleCount, stageKey)  // reset CI-fix cycle counter on unpause
+	delete(e.rebaseCycleCount, stageKey) // reset rebase cycle counter on unpause
 	e.mu.Unlock()
 }
 

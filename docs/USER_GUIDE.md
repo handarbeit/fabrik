@@ -407,6 +407,7 @@ FABRIK_USER=my-personal-username
 | `--max-review-cycles` | Maximum number of review-and-fix cycles per issue (0 = use default of 5; also `FABRIK_MAX_REVIEW_CYCLES`) | `0` (5 cycles) |
 | `--ci-wait-timeout` | Minutes to wait for CI checks to pass before pausing (0 = use default of 30; also `FABRIK_CI_WAIT_TIMEOUT`) | `0` (30 min) |
 | `--max-ci-fix-cycles` | Maximum number of CI-fix re-invocation cycles per issue (0 = use default of 5; also `FABRIK_MAX_CI_FIX_CYCLES`) | `0` (5 cycles) |
+| `--max-rebase-cycles` | Maximum number of rebase re-invocation cycles per issue before pausing (0 = use default of 3; also `FABRIK_MAX_REBASE_CYCLES`) | `0` (3 cycles) |
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` | `false` |
 
 ### Environment Variables
@@ -432,6 +433,7 @@ FABRIK_USER=my-personal-username
 | `FABRIK_MAX_REVIEW_CYCLES` | *(no config.yaml key)* | Maximum number of review re-invocation cycles per issue before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 5) | `5` |
 | `FABRIK_CI_WAIT_TIMEOUT` | *(no config.yaml key)* | Minutes to wait for CI checks to pass before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 30) | `30` |
 | `FABRIK_MAX_CI_FIX_CYCLES` | *(no config.yaml key)* | Maximum number of CI-fix re-invocation cycles per issue before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 5) | `5` |
+| `FABRIK_MAX_REBASE_CYCLES` | *(no config.yaml key)* | Maximum number of rebase re-invocation cycles per issue before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 3). Lower than CI/review because rebase either succeeds in one shot or needs human judgment for a semantic conflict. | `3` |
 
 Token precedence: `--token` flag > `FABRIK_TOKEN` > `GITHUB_TOKEN`
 
@@ -1219,6 +1221,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:awaiting-input` | Stage paused waiting for user input; auto-clears on a new comment from the configured user |
 | `fabrik:awaiting-review` | Set when a `wait_for_reviews: true` stage completes with outstanding reviewer requests; cleared when no requested reviewers are outstanding **and** at least one review has been submitted (then re-invocation fires unconditionally), or when the `FABRIK_REVIEW_WAIT_TIMEOUT` elapses (then issue is paused with `fabrik:awaiting-input`) |
 | `fabrik:awaiting-ci` | Set when CI checks fail on a `wait_for_ci: true` stage; triggers `itemMayNeedWork` cache bypass so CI results are re-evaluated on every poll; cleared when all checks pass or the CI wait timeout elapses (then issue is paused with `fabrik:awaiting-input`). See [§3 CI Gate](USER_GUIDE.md#ci-gate-and-ci-fix-workflow). |
+| `fabrik:rebase-needed` | Set when GitHub reports the linked PR as `mergeable: false` on a `wait_for_ci: true` stage — typically because another PR merged into the base branch during the CI-await window. The engine dispatches a rebase re-invocation instructing Claude to `git fetch && git rebase origin/<base>`, resolve conflicts conservatively (watching for semantic collisions like duplicated ADR numbers), and force-push. The label clears when GitHub flips `mergeable` back to `true`. Triggers `itemMayNeedWork` cache bypass because base-branch advances don't bump the item's `updatedAt`. |
 | `fabrik:blocked` | Issue is waiting for one or more blocking issues to close; added and removed automatically by the engine (Fabrik creates this label on first use — no pre-creation needed) |
 | `stage:<name>:in_progress` | Stage actively running |
 | `stage:<name>:complete` | Stage completed successfully |
