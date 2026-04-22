@@ -42,6 +42,7 @@ type Config struct {
 	MaxReviewCycles   int // 0 means use default (5)
 	CIWaitTimeout     int // minutes; 0 means use default (30)
 	MaxCiFixCycles    int // 0 means use default (5)
+	MaxRebaseCycles   int // 0 means use default (3)
 	DebugOutput       bool
 	PluginDir         string
 }
@@ -113,6 +114,7 @@ func Execute() error {
 	flag.IntVar(&cfg.MaxReviewCycles, "max-review-cycles", 0, "Maximum number of review-and-fix cycles per issue (0 = use default of 5; also FABRIK_MAX_REVIEW_CYCLES)")
 	flag.IntVar(&cfg.CIWaitTimeout, "ci-wait-timeout", 0, "Maximum time in minutes to wait for CI in the merge guard before pausing (0 = use default of 30; also FABRIK_CI_WAIT_TIMEOUT)")
 	flag.IntVar(&cfg.MaxCiFixCycles, "max-ci-fix-cycles", 0, "Maximum number of CI-fix cycles per issue before pausing (0 = use default of 5; also FABRIK_MAX_CI_FIX_CYCLES)")
+	flag.IntVar(&cfg.MaxRebaseCycles, "max-rebase-cycles", 0, "Maximum number of rebase-reinvoke cycles per issue before pausing (0 = use default of 3; also FABRIK_MAX_REBASE_CYCLES)")
 	flag.BoolVar(&cfg.DebugOutput, "debug-output", false, "Save Claude stage output to .fabrik/debug/ for debugging")
 	flag.StringVar(&cfg.PluginDir, "plugin-dir", "", "Path to Fabrik plugin directory (for development; overrides installed plugin)")
 
@@ -296,6 +298,15 @@ func Execute() error {
 			}
 		}
 	}
+	if !explicitFlags["max-rebase-cycles"] {
+		if v := os.Getenv("FABRIK_MAX_REBASE_CYCLES"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				cfg.MaxRebaseCycles = n
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_REBASE_CYCLES=%q is invalid (must be a positive integer); using default 3\n", v)
+			}
+		}
+	}
 	if !cfg.AutoUpgrade {
 		if v := os.Getenv("FABRIK_AUTO_UPGRADE"); v != "" {
 			lv := strings.ToLower(v)
@@ -416,6 +427,7 @@ func Execute() error {
 		MaxReviewCycles:   maxReviewCycles(cfg.MaxReviewCycles),
 		CIWaitTimeout:     ciWaitTimeout(cfg.CIWaitTimeout),
 		MaxCiFixCycles:    maxCiFixCycles(cfg.MaxCiFixCycles),
+		MaxRebaseCycles:   maxRebaseCycles(cfg.MaxRebaseCycles),
 		DebugOutput:       cfg.DebugOutput,
 		PluginDir:         cfg.PluginDir,
 		Stages:            stageCfgs,
@@ -467,6 +479,16 @@ func ciWaitTimeout(minutes int) time.Duration {
 func maxCiFixCycles(n int) int {
 	if n <= 0 {
 		return 5
+	}
+	return n
+}
+
+// maxRebaseCycles returns the configured MaxRebaseCycles value, defaulting to 3
+// when n is 0 (unset). The default is lower than CI/review because rebase
+// either works in one shot or needs human intervention on a semantic conflict.
+func maxRebaseCycles(n int) int {
+	if n <= 0 {
+		return 3
 	}
 	return n
 }
