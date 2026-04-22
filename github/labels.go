@@ -29,6 +29,7 @@ var staticLabelDefs = []labelDef{
 	{"fabrik:awaiting-input", "Stage blocked on FABRIK_BLOCKED_ON_INPUT; comment to unblock", "e4e669"},
 	{"fabrik:awaiting-review", "Validate complete; waiting for requested PR reviewers", "e4e669"},
 	{"fabrik:awaiting-ci", "CI checks failed; engine is retrying CI-fix invocation", "e4e669"},
+	{"fabrik:rebase-needed", "Base branch advanced and PR no longer merges; engine is retrying a rebase invocation", "e4e669"},
 
 	// --- danger labels (red) ---
 	{"fabrik:blocked", "Blocked by one or more open dependency issues", "d73a4a"},
