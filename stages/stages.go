@@ -93,6 +93,11 @@ type Stage struct {
 	// When absent, falls back to CommentSkill.
 	CIFixSkill string `yaml:"ci_fix_skill,omitempty"`
 
+	// RebaseSkill names the plugin skill to invoke for rebase re-invocations
+	// (triggered when the merge-conflict gate detects mergeable=false on the
+	// linked PR). When absent, falls back to CommentSkill.
+	RebaseSkill string `yaml:"rebase_skill,omitempty"`
+
 	// CleanupWorktree causes the engine to remove the issue's worktree directory
 	// instead of invoking Claude. No prompt, lock, or in_progress label is needed.
 	// Use this for terminal stages like "Done" to reclaim disk space.
