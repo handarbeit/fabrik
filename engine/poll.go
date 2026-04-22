@@ -709,7 +709,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		// of the engine spinning on CI-await polls while the underlying
 		// blocker is a conflict. Gated by the same wait_for_ci flag — the only
 		// stages that participate in the post-complete catch-up loop.
-		mergeBlocked, mergeConflict := e.checkMergeabilityGate(board, item, stage)
+		mergeBlocked, mergeConflict := e.checkMergeabilityGate(item, stage)
 		if mergeConflict {
 			iKey := issueKey(item, e.defaultRepo())
 			stageKey := iKey + "-" + stage.Name
