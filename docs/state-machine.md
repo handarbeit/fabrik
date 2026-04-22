@@ -53,6 +53,7 @@ These labels define distinct states (their presence changes what the engine does
 | `fabrik:awaiting-input` | Sub-pause | Yes (with `fabrik:paused`) — blocked-on-input variant |
 | `fabrik:awaiting-review` | Gate | Yes — review gate is active |
 | `fabrik:awaiting-ci` | Gate | Yes — CI gate is active; CI checks failed on the PR |
+| `fabrik:rebase-needed` | Gate | Yes — merge-conflict gate is active; PR is not mergeable against its base |
 | `fabrik:blocked` | Dependency | Yes — blocked by open dependency issues |
 | `stage:<X>:in_progress` | Progress | Yes — a stage invocation is active |
 | `stage:<X>:complete` | Completion | Yes — stage finished successfully |
@@ -90,6 +91,7 @@ Each active stage column has the same set of reachable sub-states:
 | **Awaiting Input** | `fabrik:paused`, `fabrik:awaiting-input` | Claude signaled FABRIK_BLOCKED_ON_INPUT; waiting for user comment |
 | **Awaiting Review** | `fabrik:awaiting-review`, `stage:<X>:complete` | Review gate active; waiting for PR reviewers (only on stages with `wait_for_reviews: true`) |
 | **Awaiting CI** | `fabrik:awaiting-ci`, `stage:<X>:complete` | CI gate active; PR CI checks failed; engine dispatching CI-fix re-invocation (only on stages with `wait_for_ci: true`) |
+| **Rebase Needed** | `fabrik:rebase-needed`, `stage:<X>:complete` | Merge-conflict gate active; PR is not mergeable against its base; engine dispatching a rebase re-invocation (only on stages with `wait_for_ci: true`) |
 | **Blocked** | `fabrik:blocked` | Dependency gate active; waiting for blocking issues to close |
 | **Complete** | `stage:<X>:complete` | Stage finished; waiting for advancement (manual or auto) |
 | **Locked by Other** | `fabrik:locked:<other_user>` | Another Fabrik instance owns this issue |
@@ -111,10 +113,11 @@ Each active stage column has the same set of reachable sub-states:
 |-------|----------|------------|------------|--------------|-------|
 | `fabrik:locked:<user>` | `processItem` | Before stage invocation (lock-then-verify protocol) | `releaseLock` | On stage completion, permanent failure, blocked-on-input, decomposed, or lock conflict loss | Prevents other instances from processing the item |
 | `fabrik:editing` | `processComments` | Step 2 of comment processing | `processComments` | Step 9 of comment processing (also on error paths) | Prevents `processItem` from starting a new stage invocation |
-| `fabrik:paused` | `escalateFailedStage`, `blockOnInput`, `pauseForReviewTimeout`, `pauseForReviewCycleLimit`, `pauseForCITimeout`, `pauseForCIFixCycleLimit`, `attemptMergeOnValidate` (on ErrNotMergeable or CI wait timeout) | After MaxRetries, FABRIK_BLOCKED_ON_INPUT, review/CI timeout, review/CI cycle limit, or unmergeable PR | User (manual removal), or `processItem` (on new comment that triggers unpause) | When user removes it manually, or user comments on a paused issue | Blocks all processing; user comment is an implicit resume |
+| `fabrik:paused` | `escalateFailedStage`, `blockOnInput`, `pauseForReviewTimeout`, `pauseForReviewCycleLimit`, `pauseForCITimeout`, `pauseForCIFixCycleLimit`, `pauseForRebaseCycleLimit`, `attemptMergeOnValidate` (on ErrNotMergeable or CI wait timeout) | After MaxRetries, FABRIK_BLOCKED_ON_INPUT, review/CI/rebase timeout or cycle limit, or unmergeable PR | User (manual removal), or `processItem` (on new comment that triggers unpause) | When user removes it manually, or user comments on a paused issue | Blocks all processing; user comment is an implicit resume |
 | `fabrik:awaiting-input` | `blockOnInput`, `pauseForReviewTimeout`, `pauseForReviewCycleLimit`, `pauseForCITimeout`, `pauseForCIFixCycleLimit` | After FABRIK_BLOCKED_ON_INPUT or review/CI timeout/cycle limit | `unblockAwaitingInput` | When user comment arrives | Combined with `fabrik:paused`, identifies the "awaiting user input" pause variant |
 | `fabrik:awaiting-review` | `handleStageComplete` (Path 1), `checkReviewGate` (Path 2) | Path 1: optimistically after stage completion when `wait_for_reviews: true` (does not check reviewer state — data is stale). Path 2: when `LinkedPRReviewRequests` is non-empty (real gate evaluation) | `checkReviewGate` (both natural clear and timeout paths) | When all reviewers submit, or when timeout elapses (removed by `checkReviewGate` before `pauseForReviewTimeout` is called) | Blocks auto-advance until review gate clears |
 | `fabrik:awaiting-ci` | `checkCIGate` (catch-up loop), `attemptMergeOnValidate` (merge guard) | When CI check runs for the PR head SHA have `conclusion: failure/timed_out/action_required`. NOT added for pending/queued checks (R10c — no label churn for transient states). Applied idempotently. | `checkCIGate` (when CI passes or gate times out); `attemptMergeOnValidate` (when CI passes) | When all CI checks pass (green); or when timeout elapses (removed before `pauseForCITimeout` is called) | Signals confirmed CI failure; triggers `itemMayNeedWork` updatedAt cache bypass; blocks auto-advance until CI gate clears |
+| `fabrik:rebase-needed` | `checkMergeabilityGate` (catch-up loop) | When GitHub reports `mergeable == false` on the linked PR — a confirmed base-branch conflict. NOT added when `mergeable == null` (GitHub still computing) — same no-churn principle as R10c. Applied idempotently. | `checkMergeabilityGate` (when mergeable flips back to true) | When GitHub reports `mergeable == true` on the next poll (e.g., after Claude pushes a rebase) | Signals confirmed merge conflict; triggers `itemMayNeedWork` updatedAt cache bypass (base-branch advances don't bump the item's `updatedAt`); blocks CI gate and auto-advance until rebase resolves the conflict |
 | `fabrik:blocked` | `checkDependencies` | When open blocking issues exist (first transition only — idempotent) | `checkDependencies` | When all blocking issues close | Blocks stage start (first stage is exempt) |
 | `stage:<X>:in_progress` | `processItem` | After lock acquired and verified | `releaseLock` | Same as `fabrik:locked:<user>` | Informational — shows which stage is active on GitHub |
 | `stage:<X>:complete` | `handleStageComplete`, `handleDecomposed`, cleanup stage handler | After Claude signals FABRIK_STAGE_COMPLETE or FABRIK_DECOMPOSED; or after worktree cleanup | Never removed | Permanent | Prevents re-invocation of the stage; triggers catch-up advancement |
@@ -243,6 +246,21 @@ Ten distinct event types drive state transitions:
 - Timeout tracked via `FetchLabelAppliedAt` on `fabrik:awaiting-ci` (durable across restarts), not in-memory
 - CI-fix cycle counter is `ciFixCycleCount` (keyed by `issueKey + "-" + stageName`)
 
+### 2.11 Base Branch Advanced
+
+**Trigger:** The PR's base branch moves forward (a different PR merges) while this branch is sitting in the post-`stage:Validate:complete` catch-up window. GitHub recomputes `mergeable` on the linked PR; if the new base conflicts with this branch, `mergeable` transitions from `true` (or `null`) to `false`.
+
+**Code path:** `poll()` catch-up loop Phase 1 → `checkMergeabilityGate()` → `FetchLinkedPR()` (REST, for PR number) → `FetchPRMergeable()` (REST, for the single-PR `mergeable` field) → evaluates the flag → optionally dispatches `dispatchRebaseReinvoke()` → async goroutine → `processComments()` with a synthetic rebase-required comment
+
+**Distinct from CI Check Completed because:**
+- Triggered by base-branch movement, not check run status changes
+- Uses `fabrik:rebase-needed` label (not `fabrik:awaiting-ci`)
+- Runs **before** the CI gate in catch-up Phase 1 — a PR that cannot merge has no reason to spin on CI-await
+- Only active on stages with `wait_for_ci: true` (same opt-in as the CI gate — these are the stages that enter the post-complete catch-up window)
+- `fabrik:rebase-needed` is only applied on **confirmed conflict** (`mergeable == false`), not on `mergeable == null` (GitHub still computing)
+- Rebase cycle counter is `rebaseCycleCount` (keyed by `issueKey + "-" + stageName`)
+- Resolution relies on Claude rebasing in the worktree (to handle semantic collisions like duplicated ADR numbers) rather than an engine-side `git rebase`
+
 ---
 
 ## 3. Transition Tables
@@ -330,6 +348,15 @@ This table shows the normal flow when an issue progresses through the pipeline w
 | Same column, Awaiting CI + Complete | Poll tick (catch-up) | All CI checks green | Same column, Complete → advance | | `fabrik:awaiting-ci` | Gate cleared; falls through to advance (or merge for Validate+yolo) |
 | Same column, Awaiting CI + Complete | Poll tick (catch-up) | `fabrik:awaiting-ci` applied ≥ CIWaitTimeout ago | Same column, Awaiting Input | `fabrik:paused`, `fabrik:awaiting-input` | `fabrik:awaiting-ci` | `pauseForCITimeout()` posts explanatory comment; timeout detected via `FetchLabelAppliedAt` |
 
+**Merge-conflict gate (`wait_for_ci: true` only; runs before the CI gate):**
+
+| Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
+|--------------|-------|-------|-----------------|--------------|----------------|--------------|
+| Same column, Complete | Poll tick (catch-up) | `mergeable == false` on linked PR | Same column, Rebase Needed | `fabrik:rebase-needed` | | Dispatch rebase reinvoke or pause on cycle limit |
+| Same column, Rebase Needed + Complete | Poll tick (catch-up) | `mergeable == true` on linked PR (Claude's rebase push landed) | Same column, Complete → (CI gate evaluates next) | | `fabrik:rebase-needed` | Gate cleared; catch-up falls through to the CI gate on the same poll |
+| Same column, Complete | Poll tick (catch-up) | `mergeable == null` (GitHub still computing) | Same (blocked, no label) | | | Re-evaluated on next poll; no label churn for transient unknown state |
+| Same column, Rebase Needed + Complete | Poll tick (catch-up) | `rebaseCycleCount` ≥ `MaxRebaseCycles` | Same column, Awaiting Input | `fabrik:paused`, `fabrik:awaiting-input` | | `pauseForRebaseCycleLimit()` posts explanatory comment; `fabrik:rebase-needed` is left in place so the human can see why Fabrik stopped |
+
 #### Cooldown Retry and Failed Stage Escalation
 
 | Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
@@ -361,6 +388,14 @@ This table shows the normal flow when an issue progresses through the pipeline w
 | Column `<X>`, Awaiting CI + Complete | Poll tick (catch-up) | CI failed; not in-flight; `ciFixCycleCount` < MaxCiFixCycles | Same column (CI-fix goroutine running) | `fabrik:editing` (during processing) | | `dispatchCIFixReinvoke()` spawns goroutine; `ciFixCycleCount` incremented; `inFlight` set; semaphore acquired; synthetic CI-fix comment passed to `processComments()` |
 | Column `<X>`, Awaiting CI + Complete | Poll tick (catch-up) | CI failed; `ciFixCycleCount` ≥ MaxCiFixCycles | Same column, Awaiting Input | `fabrik:paused`, `fabrik:awaiting-input` | | `pauseForCIFixCycleLimit()` posts explanatory comment |
 | Column `<X>`, Awaiting CI + Complete | Poll tick (catch-up) | CI failed; already in-flight | Same (skipped) | | | Previous CI-fix goroutine still running; skipped entirely |
+
+#### Rebase Reinvoke
+
+| Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
+|--------------|-------|-------|-----------------|--------------|----------------|--------------|
+| Column `<X>`, Rebase Needed + Complete | Poll tick (catch-up) | `mergeable == false`; not in-flight; `rebaseCycleCount` < MaxRebaseCycles | Same column (rebase goroutine running) | `fabrik:editing` (during processing) | | `dispatchRebaseReinvoke()` spawns goroutine; `rebaseCycleCount` incremented; `inFlight` set; semaphore acquired; synthetic rebase-required comment passed to `processComments()` |
+| Column `<X>`, Rebase Needed + Complete | Poll tick (catch-up) | `mergeable == false`; `rebaseCycleCount` ≥ MaxRebaseCycles | Same column, Awaiting Input | `fabrik:paused`, `fabrik:awaiting-input` | | `pauseForRebaseCycleLimit()` posts explanatory comment (usually signals a semantic conflict needing human judgment) |
+| Column `<X>`, Rebase Needed + Complete | Poll tick (catch-up) | `mergeable == false`; already in-flight | Same (skipped) | | | Previous rebase goroutine still running; skipped entirely |
 
 ---
 
@@ -500,7 +535,13 @@ The catch-up loop in `poll()` is split into two phases for every `stage:<X>:comp
      - Calls `processComments()` with the synthetic review comments asynchronously
      - On exit: releases semaphore, clears `inFlight`
    - Either way: `continue` — Phase 2 is skipped this cycle; item re-evaluated on next poll
-6. **CI gate** (only reached if no review reinvoke was dispatched in step 5): `checkCIGate()` evaluates CI check runs for stages with `wait_for_ci: true`
+6. **Merge-conflict gate** (only reached if no review reinvoke was dispatched in step 5; only runs for stages with `wait_for_ci: true`, the same opt-in as the CI gate): `checkMergeabilityGate()` fetches GitHub's `mergeable` flag for the linked PR
+   - `mergeable == true` (or no PR): clear any stale `fabrik:rebase-needed` label; fall through to the CI gate
+   - `mergeable == null` (GitHub still computing) or transient API error: skip to next item; re-evaluated on next poll (**no label churn** — mirrors the CI gate's R10c rule)
+   - `mergeable == false` (confirmed conflict): apply `fabrik:rebase-needed` idempotently, then **inFlight guard** + **cycle limit check** (`rebaseCycleCount[stageKey]` vs `MaxRebaseCycles`, default 3):
+     - If exceeded: `pauseForRebaseCycleLimit()` pauses issue
+     - If not exceeded: dispatch `dispatchRebaseReinvoke()`; `continue`. The catch-up loop never reaches the CI gate while a conflict is outstanding — there is no point spinning on CI-await when the branch cannot merge.
+7. **CI gate** (only reached if the merge-conflict gate cleared): `checkCIGate()` evaluates CI check runs for stages with `wait_for_ci: true`
    - Pending/API error: skip (blocked, not failed); item re-evaluated on next poll
    - Timed out: `pauseForCITimeout()` pauses issue
    - CI failed: **inFlight guard** + **cycle limit check** (`ciFixCycleCount[stageKey]` vs `MaxCiFixCycles`):
@@ -508,7 +549,7 @@ The catch-up loop in `poll()` is split into two phases for every `stage:<X>:comp
      - If not exceeded: dispatch `dispatchCIFixReinvoke()`; `continue`
 
 **Phase 2 — gated (yolo/cruise/auto_advance only):**
-- Only runs when no reinvoke was dispatched in Phase 1 (review or CI-fix reinvoke both `continue`)
+- Only runs when no reinvoke was dispatched in Phase 1 (review, rebase, and CI-fix reinvoke all `continue`)
 - Gated on: `e.cfg.Yolo` OR `fabrik:yolo` label OR `fabrik:cruise` label OR stage `auto_advance: true`
 - Runs `attemptMergeOnValidate()` (yolo only), skips if unprocessed comments exist, then calls `advanceToNextStage()`
 
@@ -576,7 +617,7 @@ The catch-up loop Phase 1 calls `checkCIGate()` after the review gate check. Whe
 
 **`DatabaseID: 0` guard:** Synthetic CI-fix comments have `DatabaseID: 0`, which skips the 👀 and 🚀 reaction steps in `processComments()` (reactions require a real GitHub comment ID).
 
-**CI-fix cycle counter reset:** `ciFixCycleCount[stageKey]` is reset to 0 by `clearFailedStage()` when the user removes `fabrik:paused` from a paused-failed item, allowing fresh CI-fix attempts after human intervention.
+**CI-fix cycle counter reset:** `ciFixCycleCount[stageKey]` is reset to 0 by `clearFailedStage()` when the user removes `fabrik:paused` from a paused-failed item, allowing fresh CI-fix attempts after human intervention. `rebaseCycleCount[stageKey]` is reset in the same call for the same reason.
 
 #### 6.4.3 CI Fix Reinvoke vs Review Reinvoke
 
@@ -595,7 +636,68 @@ The catch-up loop Phase 1 calls `checkCIGate()` after the review gate check. Whe
 | PR summary comment | Yes — `"<StageName> (review feedback addressed)"` on linked PR | No |
 | Stage gate config | `wait_for_reviews: true` | `wait_for_ci: true` |
 
-### 6.5 Decompose Path
+### 6.5 Merge-Conflict Gate and Rebase Reinvoke
+
+The merge-conflict gate is a third prong of the catch-up loop Phase 1, sitting between review reinvoke and the CI gate. It is the direct response to the failure mode in which a base-branch advance during the CI-await window leaves a PR unmergeable — the CI gate alone will happily keep polling check runs on the branch head while the real blocker is a conflict.
+
+#### 6.5.1 Gate Mechanics
+
+`checkMergeabilityGate()` runs only when `stage.WaitForCI` is true (the same opt-in that puts an item into the post-complete catch-up window). It returns `(blocked, conflict)`:
+
+- `(false, false)` — clear: no linked PR, or `mergeable == true`, or a transient API error (deferred to next poll). Any stale `fabrik:rebase-needed` label is removed.
+- `(true, false)` — GitHub reports `mergeable == null` (still computing). The gate blocks but **no label is applied** — transient unknown states must not produce label churn (same principle as the CI gate's R10c).
+- `(true, true)` — confirmed conflict (`mergeable == false`). `fabrik:rebase-needed` is applied idempotently. The caller in `poll()` dispatches a rebase reinvoke or pauses on the cycle limit.
+
+Two REST calls are made: `FetchLinkedPR` for the PR number, then `FetchPRMergeable` (hitting `/repos/{owner}/{repo}/pulls/{number}`). The single-PR endpoint is required — the list endpoint used by `FetchLinkedPR` does not return `mergeable`.
+
+#### 6.5.2 Ordering Against the CI Gate
+
+The merge-conflict gate runs **before** the CI gate so that a confirmed conflict preempts CI-await polling. The rationale: a PR that cannot merge has no reason to wait for CI, and Claude on CI-fix reinvoke cannot productively act on a branch that must first be rebased. When the merge gate emits `conflict`, Phase 1 `continue`s without reaching the CI gate.
+
+When the merge gate clears (`mergeable == true`), Phase 1 falls through to the CI gate on the same poll. When the merge gate is blocked with no confirmed conflict (`mergeable == null`), Phase 1 skips to the next item — GitHub will have a definite answer on the next poll.
+
+#### 6.5.3 Rebase Reinvoke Mechanics
+
+When `checkMergeabilityGate` returns `conflict=true`:
+
+1. **inFlight guard:** if a rebase goroutine from a previous poll is still running for this item, skip dispatch entirely (no cycle-limit check).
+2. **Cycle limit check:** `rebaseCycleCount[stageKey]` is compared against `MaxRebaseCycles` (default 3 — lower than review/CI because rebase either works in one shot or needs human judgment):
+   - If exceeded: `pauseForRebaseCycleLimit()` pauses the issue with `fabrik:paused` + `fabrik:awaiting-input`; `fabrik:rebase-needed` is intentionally left in place so the reason is visible.
+   - If not exceeded: increment count, dispatch `dispatchRebaseReinvoke()`:
+     - Marks item in `inFlight` (prevents double-dispatch)
+     - Acquires semaphore slot (respects `MaxConcurrent`)
+     - Calls `buildRebaseComment()` to construct a synthetic `gh.Comment` (`DatabaseID: 0`) instructing Claude to `git fetch origin <base> && git rebase origin/<base>`, resolve conflicts conservatively (never dropping code from base), watch for semantic collisions (duplicated ADR numbers, migration slots), run the project's build + tests, and force-push with `--force-with-lease`.
+     - Calls `processComments()` with the synthetic comment and the `rebase_skill` (falls back to `comment_skill` if unset)
+     - On exit: releases semaphore, clears `inFlight`
+
+**`DatabaseID: 0` guard:** like the CI-fix and review synthetic comments, the rebase synthetic comment uses `DatabaseID: 0` so `processComments()` skips the 👀 and 🚀 reaction steps (no real GitHub comment exists to react to).
+
+#### 6.5.4 Why Claude Rebases (Not the Engine)
+
+The engine could in principle run `git fetch && git rebase` directly from the worker, but does not. Automatic rebase is *right most of the time* and *catastrophically wrong sometimes*: two PRs independently pick `adr-054.md`, both PRs pick migration slot `0042`, both PRs add a new line at the same point in a shared config file. A mechanical rebase drops one side silently; a Claude-driven rebase can rename, renumber, and keep both contributions. The synthetic comment explicitly flags this — "watch for semantic collisions" — so Claude's judgment is applied where it matters.
+
+The cost is a re-invocation rather than an inline `exec.Cmd`. This is why `MaxRebaseCycles` defaults to 3 rather than 5: if Claude cannot rebase cleanly in three attempts the conflict almost certainly needs a human.
+
+#### 6.5.5 Rebase Reinvoke vs CI Fix Reinvoke
+
+| Aspect | CI Fix Reinvoke | Rebase Reinvoke |
+|--------|-----------------|-----------------|
+| Trigger | CI check runs in failure state | `mergeable == false` on linked PR |
+| Source data | `FetchCheckRuns()` REST call on PR head SHA | `FetchPRMergeable()` REST call on linked PR |
+| Label on waiting | `fabrik:awaiting-ci` (only on confirmed failure) | `fabrik:rebase-needed` (only on confirmed `mergeable == false`) |
+| Order in Phase 1 | After merge-conflict gate | Before CI gate |
+| Cycle counter | `ciFixCycleCount[stageKey]` | `rebaseCycleCount[stageKey]` |
+| Max cycles | `MaxCiFixCycles` (default 5) | `MaxRebaseCycles` (default 3) |
+| Skill | `ci_fix_skill` (falls back to `comment_skill`) | `rebase_skill` (falls back to `comment_skill`) |
+| Synthetic comment | Structured CI failure report with NEW REGRESSION classification | Rebase instructions with explicit semantic-collision guidance |
+| Thread resolution | No | No |
+| PR summary comment | No | No |
+| Stage gate config | `wait_for_ci: true` | `wait_for_ci: true` (same opt-in — these are the stages that enter the catch-up window) |
+| Label left on pause | `fabrik:awaiting-ci` removed before pause | `fabrik:rebase-needed` **retained** on pause so the human sees the reason |
+
+**References:** [ADR-028: Merge-Conflict Gate and Rebase Reinvoke](../adrs/028-merge-conflict-gate-and-rebase-reinvoke.md)
+
+### 6.6 Decompose Path
 
 **Trigger:** Claude outputs `FABRIK_DECOMPOSED` marker (expected only from Plan stage).
 
@@ -928,7 +1030,7 @@ Phase 1 ensures inline PR review thread comments (from Copilot, Gemini, or human
 | Stage exists | `FindStage(stages, item.Status) != nil` |
 | Closed issue | Not closed, OR cleanup stage, OR has `stage:<X>:complete` label |
 | Cleanup stage | Worktree exists on disk (local filesystem check only) |
-| updatedAt cache | `item.UpdatedAt` is newer than cached value, OR cooldown expired, OR `fabrik:awaiting-ci` label present |
+| updatedAt cache | `item.UpdatedAt` is newer than cached value, OR cooldown expired, OR `fabrik:awaiting-ci` label present, OR `fabrik:rebase-needed` label present, OR stage has `wait_for_ci: true` AND `stage:<X>:complete` label present (mergeability and CI status can change without bumping `updatedAt`) |
 | Deep-fetch failure cooldown | No recent `FetchItemDetails` failure, OR failure cooldown expired |
 
 **Note:** `itemMayNeedWork()` intentionally does NOT check lock, editing, pause, or dependency labels — those require the full label set from deep fetch and are checked in `itemNeedsWork()`.

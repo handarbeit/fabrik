@@ -704,6 +704,38 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			continue
 		}
 
+		// Merge-conflict gate: runs before the CI gate so that a PR made
+		// unmergeable by a base-branch advance is rebased immediately instead
+		// of the engine spinning on CI-await polls while the underlying
+		// blocker is a conflict. Gated by the same wait_for_ci flag — the only
+		// stages that participate in the post-complete catch-up loop.
+		mergeBlocked, mergeConflict := e.checkMergeabilityGate(board, item, stage)
+		if mergeConflict {
+			iKey := issueKey(item, e.defaultRepo())
+			stageKey := iKey + "-" + stage.Name
+			if _, ok := e.inFlight.Load(iKey); ok {
+				e.logf(item.Number, "rebase-reinvoke", "skipping dispatch — rebase reinvoke already in-flight\n")
+				continue
+			}
+			e.mu.Lock()
+			cycleCount := e.rebaseCycleCount[stageKey]
+			maxCycles := e.cfg.MaxRebaseCycles
+			e.mu.Unlock()
+			if cycleCount >= maxCycles {
+				e.pauseForRebaseCycleLimit(board, item, stage, cycleCount, maxCycles)
+			} else {
+				e.mu.Lock()
+				e.rebaseCycleCount[stageKey]++
+				e.mu.Unlock()
+				e.dispatchRebaseReinvoke(ctx, board, item, stage)
+				advancedItems[issueKey(item, e.defaultRepo())] = true
+			}
+			continue
+		}
+		if mergeBlocked {
+			continue // mergeability not yet computed; re-evaluate on next poll
+		}
+
 		// CI gate: evaluate CI status for stages configured with wait_for_ci: true.
 		// This runs in Phase 1 (unconditional) so CI failures are fixed regardless
 		// of auto-advance setting. checkCIGate returns (blocked, ciFailure, timedOut).
