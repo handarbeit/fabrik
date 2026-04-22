@@ -28,6 +28,7 @@ type mockGitHubClient struct {
 	updateProjectItemStatusFn func(projectID, itemID, statusFieldID, statusOptionID string) error
 	findPRForIssueFn          func(owner, repo string, issueNumber int) (int, error)
 	fetchLinkedPRFn           func(owner, repo string, issueNumber int) (*gh.PRDetails, error)
+	fetchPRMergeableFn        func(owner, repo string, prNumber int) (*bool, error)
 	fetchCheckRunsFn          func(owner, repo, sha string) ([]gh.CheckRun, error)
 	getPRBaseFn               func(owner, repo string, prNumber int) (string, error)
 	updatePRBaseFn            func(owner, repo string, prNumber int, newBase string) error
@@ -285,6 +286,16 @@ func (m *mockGitHubClient) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRu
 	m.mu.Unlock()
 	if fn != nil {
 		return fn(owner, repo, sha)
+	}
+	return nil, nil
+}
+
+func (m *mockGitHubClient) FetchPRMergeable(owner, repo string, prNumber int) (*bool, error) {
+	m.mu.Lock()
+	fn := m.fetchPRMergeableFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, prNumber)
 	}
 	return nil, nil
 }

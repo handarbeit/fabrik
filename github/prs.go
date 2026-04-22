@@ -16,6 +16,26 @@ type PRDetails struct {
 	HeadSHA string
 }
 
+// FetchPRMergeable returns GitHub's mergeable flag for a single PR.
+//
+// The returned pointer is nil when GitHub has not yet computed mergeability
+// (the field is null on the REST response); callers should treat this as
+// "unknown — try again on the next poll". A non-nil *false indicates a
+// confirmed conflict with the base branch.
+//
+// Only the single-PR endpoint (/pulls/{number}) returns this field reliably;
+// the list endpoint used by FetchLinkedPR does not.
+func (c *Client) FetchPRMergeable(owner, repo string, prNumber int) (*bool, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", c.baseURL, owner, repo, prNumber)
+	var raw struct {
+		Mergeable *bool `json:"mergeable"`
+	}
+	if err := c.restGetJSON(apiURL, &raw); err != nil {
+		return nil, fmt.Errorf("fetching PR #%d mergeable: %w", prNumber, err)
+	}
+	return raw.Mergeable, nil
+}
+
 // FetchPRDetails retrieves a single pull request via the REST API.
 func (c *Client) FetchPRDetails(owner, repo string, prNumber int) (*PRDetails, error) {
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", c.baseURL, owner, repo, prNumber)

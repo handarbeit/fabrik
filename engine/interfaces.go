@@ -27,6 +27,7 @@ type GitHubClient interface {
 	GetIssueBody(owner, repo string, issueNumber int) (string, error)
 	FindPRForIssue(owner, repo string, issueNumber int) (int, error)
 	FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDetails, error)
+	FetchPRMergeable(owner, repo string, prNumber int) (*bool, error)
 	FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, error)
 	GetPRBase(owner, repo string, prNumber int) (string, error)
 	UpdatePRBase(owner, repo string, prNumber int, newBase string) error
