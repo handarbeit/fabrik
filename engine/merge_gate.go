@@ -18,16 +18,17 @@ import (
 //
 // Returns (blocked, conflict):
 //
-//   - (false, false) — gate clears. No PR, mergeable==true, wait_for_ci
-//     disabled, or a transient API error (next poll re-evaluates).
+//   - (false, false) — gate clears. No PR, mergeable==true, or wait_for_ci
+//     disabled. Caller falls through to the CI gate on the same poll.
 //
 //   - (true, false)  — blocked but no confirmed conflict. Mergeable is nil
-//     (GitHub has not yet computed it). Caller should skip to next item; the
-//     next poll re-evaluates. The fabrik:rebase-needed label is not touched.
+//     (GitHub has not yet computed it), or a transient API error was seen
+//     while fetching. Caller should skip to next item; the next poll
+//     re-evaluates. The fabrik:rebase-needed label is not touched.
 //
 //   - (true, true)   — confirmed conflict. fabrik:rebase-needed applied
-//     (idempotent). Caller should dispatch dispatchRebaseReinvoke.
-func (e *Engine) checkMergeabilityGate(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) (blocked, conflict bool) {
+//     (idempotent). Caller should dispatch a rebase reinvoke.
+func (e *Engine) checkMergeabilityGate(item gh.ProjectItem, stage *stages.Stage) (blocked, conflict bool) {
 	if stage.WaitForCI == nil || !*stage.WaitForCI {
 		return false, false
 	}
@@ -36,8 +37,12 @@ func (e *Engine) checkMergeabilityGate(board *gh.ProjectBoard, item gh.ProjectIt
 
 	pr, err := e.client.FetchLinkedPR(owner, repo, item.Number)
 	if err != nil {
-		e.logf(item.Number, "merge-gate", "could not fetch linked PR: %v — deferring to next poll\n", err)
-		return false, false
+		// Transient API error. Block this item for the rest of Phase 1 so we
+		// don't run the CI gate on stale data (it would make its own REST
+		// call against an unknown mergeability state). Mirrors checkCIGate's
+		// transient-error handling.
+		e.logf(item.Number, "merge-gate", "could not fetch linked PR: %v — blocking until API recovers\n", err)
+		return true, false
 	}
 	if pr == nil || pr.Number == 0 {
 		return false, false
@@ -45,8 +50,8 @@ func (e *Engine) checkMergeabilityGate(board *gh.ProjectBoard, item gh.ProjectIt
 
 	mergeable, err := e.client.FetchPRMergeable(owner, repo, pr.Number)
 	if err != nil {
-		e.logf(item.Number, "merge-gate", "could not fetch mergeable: %v — deferring to next poll\n", err)
-		return false, false
+		e.logf(item.Number, "merge-gate", "could not fetch mergeable: %v — blocking until API recovers\n", err)
+		return true, false
 	}
 
 	if mergeable == nil {
@@ -98,13 +103,17 @@ func (e *Engine) removeRebaseNeededLabel(owner, repo string, item gh.ProjectItem
 // because semantic conflicts (two PRs adding the same ADR number, two PRs
 // choosing the same migration ID) require judgment that a plain rebase would
 // silently mishandle.
+//
+// The stage name is embedded in the body so the agent knows which stage is
+// being re-invoked (the comment lands through processComments, which strips
+// stage-level framing).
 func (e *Engine) buildRebaseComment(item gh.ProjectItem, stage *stages.Stage, baseBranch string) gh.Comment {
 	branchName := fmt.Sprintf("fabrik/issue-%d", item.Number)
 	if baseBranch == "" {
 		baseBranch = "main"
 	}
 	body := fmt.Sprintf(
-		"🏭 **Fabrik — Rebase required**\n\n"+
+		"🏭 **Fabrik — Rebase required** (re-invoking stage: %s)\n\n"+
 			"GitHub reports PR for issue #%d as not mergeable — the base branch `%s` has moved "+
 			"since this branch was last rebased, and a conflict exists.\n\n"+
 			"**Instructions:**\n"+
@@ -116,7 +125,7 @@ func (e *Engine) buildRebaseComment(item gh.ProjectItem, stage *stages.Stage, ba
 			"6. `git push --force-with-lease` once clean.\n"+
 			"7. **Do NOT emit `FABRIK_STAGE_COMPLETE`.** The engine re-evaluates mergeability on the next poll and resumes the CI gate once the push lands.\n\n"+
 			"If a conflict cannot be resolved safely (the required judgment is beyond an automated fix), `git rebase --abort`, leave the branch untouched, and explain the situation so a human can take over.\n",
-		item.Number, baseBranch, branchName, baseBranch, baseBranch, baseBranch,
+		stage.Name, item.Number, baseBranch, branchName, baseBranch, baseBranch, baseBranch,
 	)
 	return gh.Comment{
 		ID:         "rebase-synthetic",
@@ -228,7 +237,7 @@ func (e *Engine) pauseForRebaseCycleLimit(board *gh.ProjectBoard, item gh.Projec
 
 	msg := fmt.Sprintf(
 		"🏭 **Fabrik — rebase cycle limit reached**\n\nThe stage **%s** has been re-invoked to rebase onto the base branch %d time(s), "+
-			"which has reached the maximum configured limit (`FABRIK_MAX_REBASE_CYCLES=%d`).\n\n"+
+			"which has reached the configured limit of %d (override with `--max-rebase-cycles` or `FABRIK_MAX_REBASE_CYCLES`).\n\n"+
 			"GitHub still reports the PR as not mergeable. This usually means the conflict requires human judgment "+
 			"(for example: two PRs picked the same ADR number or migration slot, or a semantic overlap that cannot be "+
 			"resolved by automated rebase).\n\n"+
