@@ -19,7 +19,7 @@ func TestCheckMergeabilityGate_WaitForCIFalse_ClearsImmediately(t *testing.T) {
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate"} // WaitForCI is nil
 
-	blocked, conflict := eng.checkMergeabilityGate(nil, item, stage)
+	blocked, conflict := eng.checkMergeabilityGate(item, stage)
 	if blocked || conflict {
 		t.Errorf("expected clear when wait_for_ci not set, got blocked=%v conflict=%v", blocked, conflict)
 	}
@@ -39,7 +39,7 @@ func TestCheckMergeabilityGate_NoPR_ClearsGate(t *testing.T) {
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, conflict := eng.checkMergeabilityGate(nil, item, stage)
+	blocked, conflict := eng.checkMergeabilityGate(item, stage)
 	if blocked || conflict {
 		t.Errorf("expected clear when no PR found, got blocked=%v conflict=%v", blocked, conflict)
 	}
@@ -59,7 +59,7 @@ func TestCheckMergeabilityGate_Mergeable_ClearsGate_RemovesStaleLabel(t *testing
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:rebase-needed"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, conflict := eng.checkMergeabilityGate(nil, item, stage)
+	blocked, conflict := eng.checkMergeabilityGate(item, stage)
 	if blocked || conflict {
 		t.Errorf("expected clear when mergeable=true, got blocked=%v conflict=%v", blocked, conflict)
 	}
@@ -88,7 +88,7 @@ func TestCheckMergeabilityGate_NilMergeable_BlockedNoConflict(t *testing.T) {
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, conflict := eng.checkMergeabilityGate(nil, item, stage)
+	blocked, conflict := eng.checkMergeabilityGate(item, stage)
 	if !blocked || conflict {
 		t.Errorf("expected blocked=true conflict=false for mergeable=null, got blocked=%v conflict=%v", blocked, conflict)
 	}
@@ -114,7 +114,7 @@ func TestCheckMergeabilityGate_FalseMergeable_AppliesLabelAndSignalsConflict(t *
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, conflict := eng.checkMergeabilityGate(nil, item, stage)
+	blocked, conflict := eng.checkMergeabilityGate(item, stage)
 	if !blocked || !conflict {
 		t.Errorf("expected blocked=true conflict=true for mergeable=false, got blocked=%v conflict=%v", blocked, conflict)
 	}
@@ -145,7 +145,7 @@ func TestCheckMergeabilityGate_FalseMergeable_LabelIdempotent(t *testing.T) {
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:rebase-needed"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	_, conflict := eng.checkMergeabilityGate(nil, item, stage)
+	_, conflict := eng.checkMergeabilityGate(item, stage)
 	if !conflict {
 		t.Error("expected conflict=true")
 	}
@@ -156,7 +156,7 @@ func TestCheckMergeabilityGate_FalseMergeable_LabelIdempotent(t *testing.T) {
 	}
 }
 
-func TestCheckMergeabilityGate_FetchPRError_DefersToNextPoll(t *testing.T) {
+func TestCheckMergeabilityGate_FetchPRError_BlocksForRetry(t *testing.T) {
 	tr := true
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
@@ -167,13 +167,18 @@ func TestCheckMergeabilityGate_FetchPRError_DefersToNextPoll(t *testing.T) {
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, conflict := eng.checkMergeabilityGate(nil, item, stage)
-	if blocked || conflict {
-		t.Errorf("expected clear on transient API error, got blocked=%v conflict=%v", blocked, conflict)
+	blocked, conflict := eng.checkMergeabilityGate(item, stage)
+	if !blocked || conflict {
+		t.Errorf("expected blocked=true conflict=false on transient FetchLinkedPR error, got blocked=%v conflict=%v", blocked, conflict)
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:rebase-needed" {
+			t.Error("should not add fabrik:rebase-needed on transient API error (no confirmed conflict)")
+		}
 	}
 }
 
-func TestCheckMergeabilityGate_FetchMergeableError_DefersToNextPoll(t *testing.T) {
+func TestCheckMergeabilityGate_FetchMergeableError_BlocksForRetry(t *testing.T) {
 	tr := true
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
@@ -187,9 +192,14 @@ func TestCheckMergeabilityGate_FetchMergeableError_DefersToNextPoll(t *testing.T
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, conflict := eng.checkMergeabilityGate(nil, item, stage)
-	if blocked || conflict {
-		t.Errorf("expected clear on transient mergeable-fetch error, got blocked=%v conflict=%v", blocked, conflict)
+	blocked, conflict := eng.checkMergeabilityGate(item, stage)
+	if !blocked || conflict {
+		t.Errorf("expected blocked=true conflict=false on transient mergeable-fetch error, got blocked=%v conflict=%v", blocked, conflict)
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:rebase-needed" {
+			t.Error("should not add fabrik:rebase-needed on transient API error (no confirmed conflict)")
+		}
 	}
 }
 

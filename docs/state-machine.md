@@ -537,7 +537,7 @@ The catch-up loop in `poll()` is split into two phases for every `stage:<X>:comp
    - Either way: `continue` — Phase 2 is skipped this cycle; item re-evaluated on next poll
 6. **Merge-conflict gate** (only reached if no review reinvoke was dispatched in step 5; only runs for stages with `wait_for_ci: true`, the same opt-in as the CI gate): `checkMergeabilityGate()` fetches GitHub's `mergeable` flag for the linked PR
    - `mergeable == true` (or no PR): clear any stale `fabrik:rebase-needed` label; fall through to the CI gate
-   - `mergeable == null` (GitHub still computing) or transient API error: skip to next item; re-evaluated on next poll (**no label churn** — mirrors the CI gate's R10c rule)
+   - `mergeable == null` (GitHub still computing) **or** transient API error on either REST call: block this item for the rest of Phase 1 (skip to next item) — re-evaluated on the next poll (**no label churn** — mirrors the CI gate's R10c rule and matches how the CI gate handles its own transient errors)
    - `mergeable == false` (confirmed conflict): apply `fabrik:rebase-needed` idempotently, then **inFlight guard** + **cycle limit check** (`rebaseCycleCount[stageKey]` vs `MaxRebaseCycles`, default 3):
      - If exceeded: `pauseForRebaseCycleLimit()` pauses issue
      - If not exceeded: dispatch `dispatchRebaseReinvoke()`; `continue`. The catch-up loop never reaches the CI gate while a conflict is outstanding — there is no point spinning on CI-await when the branch cannot merge.
@@ -644,8 +644,8 @@ The merge-conflict gate is a third prong of the catch-up loop Phase 1, sitting b
 
 `checkMergeabilityGate()` runs only when `stage.WaitForCI` is true (the same opt-in that puts an item into the post-complete catch-up window). It returns `(blocked, conflict)`:
 
-- `(false, false)` — clear: no linked PR, or `mergeable == true`, or a transient API error (deferred to next poll). Any stale `fabrik:rebase-needed` label is removed.
-- `(true, false)` — GitHub reports `mergeable == null` (still computing). The gate blocks but **no label is applied** — transient unknown states must not produce label churn (same principle as the CI gate's R10c).
+- `(false, false)` — clear: no linked PR, or `mergeable == true`. Any stale `fabrik:rebase-needed` label is removed. Caller falls through to the CI gate.
+- `(true, false)` — GitHub reports `mergeable == null` (still computing) **or** a transient API error was seen on either REST call. The gate blocks but **no label is applied** — unknown states must not produce label churn (same principle as the CI gate's R10c). Caller skips to the next item; the next poll re-evaluates.
 - `(true, true)` — confirmed conflict (`mergeable == false`). `fabrik:rebase-needed` is applied idempotently. The caller in `poll()` dispatches a rebase reinvoke or pauses on the cycle limit.
 
 Two REST calls are made: `FetchLinkedPR` for the PR number, then `FetchPRMergeable` (hitting `/repos/{owner}/{repo}/pulls/{number}`). The single-PR endpoint is required — the list endpoint used by `FetchLinkedPR` does not return `mergeable`.
@@ -654,7 +654,7 @@ Two REST calls are made: `FetchLinkedPR` for the PR number, then `FetchPRMergeab
 
 The merge-conflict gate runs **before** the CI gate so that a confirmed conflict preempts CI-await polling. The rationale: a PR that cannot merge has no reason to wait for CI, and Claude on CI-fix reinvoke cannot productively act on a branch that must first be rebased. When the merge gate emits `conflict`, Phase 1 `continue`s without reaching the CI gate.
 
-When the merge gate clears (`mergeable == true`), Phase 1 falls through to the CI gate on the same poll. When the merge gate is blocked with no confirmed conflict (`mergeable == null`), Phase 1 skips to the next item — GitHub will have a definite answer on the next poll.
+When the merge gate clears (`mergeable == true`), Phase 1 falls through to the CI gate on the same poll. When the merge gate is blocked with no confirmed conflict (`mergeable == null` or a transient API error), Phase 1 skips to the next item — the next poll re-evaluates once GitHub has a definite answer or the API recovers.
 
 #### 6.5.3 Rebase Reinvoke Mechanics
 
