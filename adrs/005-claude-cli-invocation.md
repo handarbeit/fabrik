@@ -109,6 +109,10 @@ syscall code while keeping the Windows build clean.
   Increase if Claude's final output write is unusually slow; decrease in test
   environments where fast recovery is preferred.
 
+### Proactive Kill for Stuck Processes
+
+`WaitDelay` only fires after Claude exits. It provides no bound when Claude itself hangs and never exits. [ADR 029](029-proactive-kill-timeout.md) adds two proactive kill mechanisms on top of this passive layer: a per-stage `max_wall_time` YAML field and a hardcoded 15-minute inactivity watchdog, both using the SIGTERM→10s→SIGKILL sequence via `killProcGroupGraceful`. After either kill, the already-buffered output is scanned for `FABRIK_STAGE_COMPLETE` in intermediate assistant NDJSON turns so completed work is not re-run.
+
 ## Future Consideration
 
 If Anthropic releases a Go SDK or agent framework, we could switch to
