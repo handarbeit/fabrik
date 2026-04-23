@@ -112,9 +112,7 @@ func New(cfg Config) (*Engine, error) {
 		}
 		claudePluginDir = pluginDir
 	}
-	if cfg.ClaudeWaitDelay > 0 {
-		claudeWaitDelay = cfg.ClaudeWaitDelay
-	}
+	claudeWaitDelay = cfg.ClaudeWaitDelay
 	worktreeRoot := filepath.Join(fabrikDir, ".fabrik", "worktrees")
 	eng := &Engine{
 		cfg:                  cfg,
