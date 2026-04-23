@@ -43,6 +43,7 @@ type Config struct {
 	CIWaitTimeout     int // minutes; 0 means use default (30)
 	MaxCiFixCycles    int // 0 means use default (5)
 	MaxRebaseCycles   int // 0 means use default (3)
+	ClaudeWaitDelay   int // seconds; 0 means use default (30)
 	DebugOutput       bool
 	PluginDir         string
 }
@@ -115,6 +116,7 @@ func Execute() error {
 	flag.IntVar(&cfg.CIWaitTimeout, "ci-wait-timeout", 0, "Maximum time in minutes to wait for CI in the merge guard before pausing (0 = use default of 30; also FABRIK_CI_WAIT_TIMEOUT)")
 	flag.IntVar(&cfg.MaxCiFixCycles, "max-ci-fix-cycles", 0, "Maximum number of CI-fix cycles per issue before pausing (0 = use default of 5; also FABRIK_MAX_CI_FIX_CYCLES)")
 	flag.IntVar(&cfg.MaxRebaseCycles, "max-rebase-cycles", 0, "Maximum number of rebase-reinvoke cycles per issue before pausing (0 = use default of 3; also FABRIK_MAX_REBASE_CYCLES)")
+	flag.IntVar(&cfg.ClaudeWaitDelay, "claude-wait-delay", 0, "Seconds to wait after Claude exits before recovering buffered output when grandchildren hold stdout pipe open (0 = use default of 30; also FABRIK_CLAUDE_WAIT_DELAY)")
 	flag.BoolVar(&cfg.DebugOutput, "debug-output", false, "Save Claude stage output to .fabrik/debug/ for debugging")
 	flag.StringVar(&cfg.PluginDir, "plugin-dir", "", "Path to Fabrik plugin directory (for development; overrides installed plugin)")
 
@@ -307,6 +309,15 @@ func Execute() error {
 			}
 		}
 	}
+	if !explicitFlags["claude-wait-delay"] {
+		if v := os.Getenv("FABRIK_CLAUDE_WAIT_DELAY"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				cfg.ClaudeWaitDelay = n
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_CLAUDE_WAIT_DELAY=%q is invalid (must be a positive integer of seconds); using default 30\n", v)
+			}
+		}
+	}
 	if !cfg.AutoUpgrade {
 		if v := os.Getenv("FABRIK_AUTO_UPGRADE"); v != "" {
 			lv := strings.ToLower(v)
@@ -428,6 +439,7 @@ func Execute() error {
 		CIWaitTimeout:     ciWaitTimeout(cfg.CIWaitTimeout),
 		MaxCiFixCycles:    maxCiFixCycles(cfg.MaxCiFixCycles),
 		MaxRebaseCycles:   maxRebaseCycles(cfg.MaxRebaseCycles),
+		ClaudeWaitDelay:   claudeWaitDelay(cfg.ClaudeWaitDelay),
 		DebugOutput:       cfg.DebugOutput,
 		PluginDir:         cfg.PluginDir,
 		Stages:            stageCfgs,
@@ -491,6 +503,15 @@ func maxRebaseCycles(n int) int {
 		return 3
 	}
 	return n
+}
+
+// claudeWaitDelay converts a ClaudeWaitDelay config value (seconds) to a
+// time.Duration. When seconds is 0 (unset), the default of 30 seconds is used.
+func claudeWaitDelay(seconds int) time.Duration {
+	if seconds <= 0 {
+		return 30 * time.Second
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 // buildProjectInfo assembles the TUI footer metadata from the active config.
