@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -114,6 +115,14 @@ type Stage struct {
 	// "low", "medium", "high", "max". Empty string means use the default ("max").
 	// Maps to the CLAUDE_CODE_EFFORT_LEVEL environment variable.
 	EffortLevel string `yaml:"effort_level,omitempty"`
+
+	// MaxWallTimeRaw is the raw YAML string (e.g. "30m", "1h") parsed into MaxWallTime.
+	// Use MaxWallTime for runtime comparisons; MaxWallTimeRaw is only for YAML round-tripping.
+	MaxWallTimeRaw string `yaml:"max_wall_time,omitempty"`
+
+	// MaxWallTime is the parsed wall-clock timeout for a single Claude invocation.
+	// Zero means no wall-clock timeout (the default). Set from MaxWallTimeRaw by loadOne.
+	MaxWallTime time.Duration `yaml:"-"`
 }
 
 // CompletionCriteria defines how to determine if a stage is complete.
@@ -188,6 +197,17 @@ func loadOne(path string) (*Stage, error) {
 	validEffortLevels := map[string]bool{"": true, "low": true, "medium": true, "high": true, "max": true}
 	if !validEffortLevels[s.EffortLevel] {
 		return nil, fmt.Errorf("stage %q: invalid effort_level %q (must be one of: low, medium, high, max)", s.Name, s.EffortLevel)
+	}
+
+	if s.MaxWallTimeRaw != "" {
+		d, err := time.ParseDuration(s.MaxWallTimeRaw)
+		if err != nil {
+			return nil, fmt.Errorf("stage %q: invalid max_wall_time %q: %w", s.Name, s.MaxWallTimeRaw, err)
+		}
+		if d < 0 {
+			return nil, fmt.Errorf("stage %q: max_wall_time must not be negative, got %q", s.Name, s.MaxWallTimeRaw)
+		}
+		s.MaxWallTime = d
 	}
 
 	return &s, nil
