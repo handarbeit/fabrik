@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+	"time"
 )
 
 // setCmdProcAttr starts cmd in its own process group so grandchild processes
@@ -26,5 +27,19 @@ func killProcGroup(cmd *exec.Cmd) {
 	// Negative PID targets the process group (PGID == Claude's PID when Setpgid is set).
 	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
 		fmt.Fprintf(os.Stderr, "[engine] killProcGroup: unexpected error killing process group %d: %v\n", cmd.Process.Pid, err)
+	}
+}
+
+// killProcGroupGraceful sends SIGTERM to the process group, waits 10 seconds for
+// a graceful shutdown, then sends SIGKILL. This reaps hung background children
+// (dangling pytest, tail -f, polling loops) in addition to the Claude CLI itself.
+// ESRCH is silently ignored — the group may already be gone.
+func killProcGroupGraceful(pid, issueNumber int, label string) {
+	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
+		fmt.Fprintf(os.Stderr, "[#%d engine] killProcGroupGraceful %q: SIGTERM error on pgid %d: %v\n", issueNumber, label, pid, err)
+	}
+	time.Sleep(10 * time.Second)
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+		fmt.Fprintf(os.Stderr, "[#%d engine] killProcGroupGraceful %q: SIGKILL error on pgid %d: %v\n", issueNumber, label, pid, err)
 	}
 }
