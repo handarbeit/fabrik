@@ -168,6 +168,14 @@ Context files are available in .fabrik-context/
 
 Raw Claude output saved to `~/.fabrik/logs/issue-<N>/<stage>-output-<timestamp>.json` after every invocation. Viewable through the TUI's `l` key (piped through `fabrik _stream-filter` for human-readable display).
 
+### Subprocess Cleanup
+
+After `cmd.Run()` returns, two cleanup steps run unconditionally:
+
+1. **Process group kill**: Claude is started in its own process group (`Setpgid: true` on Unix). After `cmd.Run()` returns, `SIGKILL` is sent to the entire process group to clean up grandchild processes (e.g. `tail -f` from the Monitor tool, polling loops spawned via `run_in_background: true`). This is scoped to the specific Claude invocation and does not affect worktree file state — grandchild monitoring processes have no side effects on the filesystem.
+
+2. **WaitDelay bound**: `cmd.WaitDelay` is set to 30s (configurable via `--claude-wait-delay` / `FABRIK_CLAUDE_WAIT_DELAY`). When grandchild processes hold the stdout pipe open after Claude exits, Go's `cmd.Wait()` would otherwise block indefinitely. With `WaitDelay`, Go forcibly closes its end of the pipe after the deadline and returns `exec.ErrWaitDelay`. The engine detects this error, logs a diagnostic warning, clears the error, and processes the buffered output normally — including any `FABRIK_STAGE_COMPLETE` marker. This prevents the worker goroutine from being permanently stuck when Claude uses `run_in_background` or the Monitor tool.
+
 ---
 
 ## Phase 4: Post-Stage Handling
