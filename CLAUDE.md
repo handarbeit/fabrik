@@ -111,6 +111,11 @@ mark_pr_ready_on_complete: true # Mark PR ready when stage completes
 auto_advance: false             # Override global yolo setting
 read_only: false                # Stash/restore worktree changes (for Specify/Research stages that don't write code)
 cleanup_worktree: false         # Remove worktree when stage completes (for Done/cleanup stages)
+max_wall_time: "45m"            # Optional: wall-clock deadline for a single Claude invocation (e.g. "30m", "1h").
+                                # When exceeded, SIGTERM → 10s → SIGKILL sent to the process group. Output
+                                # collected before the kill is scanned for FABRIK_STAGE_COMPLETE so completed
+                                # stages are not re-run. Absent or zero = no cap. A hardcoded 15-minute
+                                # inactivity timeout (no output received) applies to every invocation regardless.
 disable_adaptive_thinking: true # Disable Claude Code's adaptive (auto-reduced) thinking budget. Default: true.
 effort_level: max               # Claude Code thinking effort: low, medium, high, max. Default: high.
 ```
