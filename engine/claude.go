@@ -444,7 +444,7 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	runErr := cmd.Run()
 	killProcGroup(cmd)
 	rawOutput := stdout.Bytes()
-	if errors.Is(runErr, exec.ErrWaitDelay) {
+	if errors.Is(runErr, exec.ErrWaitDelay) && ctx.Err() == nil {
 		claudeLog(issueNumber, "warn", "WaitDelay fired: Claude exited but grandchild processes held stdout pipe open; processing buffered output (%d bytes)\n", len(rawOutput))
 		runErr = nil
 	}
