@@ -311,10 +311,15 @@ func Execute() error {
 	}
 	if !explicitFlags["claude-wait-delay"] {
 		if v := os.Getenv("FABRIK_CLAUDE_WAIT_DELAY"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				cfg.ClaudeWaitDelay = n
+			if n, err := strconv.Atoi(v); err == nil {
+				if n > 0 {
+					cfg.ClaudeWaitDelay = n
+				} else if n < 0 {
+					fmt.Fprintf(os.Stderr, "[warn] FABRIK_CLAUDE_WAIT_DELAY=%q is invalid (must be 0 or a positive integer of seconds); using default 30\n", v)
+				}
+				// n == 0: silently use default (same semantics as --claude-wait-delay 0)
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_CLAUDE_WAIT_DELAY=%q is invalid (must be a positive integer of seconds); using default 30\n", v)
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_CLAUDE_WAIT_DELAY=%q is invalid (must be 0 or a positive integer of seconds); using default 30\n", v)
 			}
 		}
 	}
