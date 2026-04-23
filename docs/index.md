@@ -311,7 +311,7 @@ description: >-
           timeout (<code>FABRIK_CI_WAIT_TIMEOUT</code>) is exceeded, Fabrik
           pauses the issue with <code>fabrik:awaiting-input</code> for human
           review. When GitHub reports the PR as <code>mergeable: false</code>
-          (a conflicting merge landed on the base branch), Fabrik applies
+          (the PR has merge conflicts with the base branch), Fabrik applies
           <code>fabrik:rebase-needed</code> and dispatches a rebase
           re-invocation for Claude to fetch, rebase, resolve conflicts, and
           force-push.
