@@ -185,7 +185,10 @@ description: >-
         <div class="feature-title">Configurable Stages</div>
         <div class="feature-desc">
           Each stage is a YAML file: custom prompt, model choice, tool restrictions,
-          max turns, PR posting, and more. Ship the default pipeline or build your own.
+          max turns, PR posting, and more. Per-stage wall-clock caps
+          (<code>max_wall_time</code>) and a 15-minute inactivity watchdog keep
+          runaway sessions from blocking the pipeline. Ship the default pipeline
+          or build your own.
         </div>
       </div>
       <div class="feature-card">
@@ -307,7 +310,11 @@ description: >-
           again. If the cycle limit (<code>--max-ci-fix-cycles</code>) or
           timeout (<code>FABRIK_CI_WAIT_TIMEOUT</code>) is exceeded, Fabrik
           pauses the issue with <code>fabrik:awaiting-input</code> for human
-          review.
+          review. When GitHub reports the PR as <code>mergeable: false</code>
+          (a conflicting merge landed on the base branch), Fabrik applies
+          <code>fabrik:rebase-needed</code> and dispatches a rebase
+          re-invocation for Claude to fetch, rebase, resolve conflicts, and
+          force-push.
         </div>
       </div>
     </div>
