@@ -260,6 +260,7 @@ GITHUB_TOKEN=ghp_...    # Fallback
 | `--claude-wait-delay` | Seconds to wait after Claude exits before recovering buffered output when grandchild processes hold stdout pipe open (env: `FABRIK_CLAUDE_WAIT_DELAY`). Prevents worker goroutines from blocking indefinitely when Claude uses `run_in_background` or the Monitor tool. | `30` |
 | `--review-wait-timeout` | Minutes to wait per reviewer-gate cycle before pausing. Explicitly passing `0` uses the built-in default of `15` and bypasses `FABRIK_REVIEW_WAIT_TIMEOUT`. When absent, `FABRIK_REVIEW_WAIT_TIMEOUT` is consulted first; falls back to `15` if unset. | `0` |
 | `--max-review-cycles` | Max re-invocation cycles per reviewer-gate session. Explicitly passing `0` uses the built-in default of `5` and bypasses `FABRIK_MAX_REVIEW_CYCLES`. When absent, `FABRIK_MAX_REVIEW_CYCLES` is consulted first; falls back to `5` if unset. | `0` |
+| `--max-rebase-cycles` | Maximum rebase re-invocation cycles per issue before pausing (0 = default 3; also `FABRIK_MAX_REBASE_CYCLES`) | `0` (3 cycles) |
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` for debugging | `false` |
 | `--plugin-dir` | Path to Fabrik plugin directory (overrides installed plugin) | `""` |
 
