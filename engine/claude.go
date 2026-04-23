@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -65,6 +66,23 @@ var claudePluginDir string
 // the Engine during construction from Config.ClaudeWaitDelay. Default (0) is
 // resolved to 30s in runClaude.
 var claudeWaitDelay time.Duration
+
+// claudeInactivityTimeout is the maximum time runClaude will wait without
+// receiving any streamed output before killing the Claude process. Hardcoded
+// at 15 minutes; overridable in tests.
+var claudeInactivityTimeout = 15 * time.Minute
+
+// activityWriter wraps an io.Writer and updates a shared atomic timestamp on
+// every Write call. Used by the inactivity watchdog to detect stuck sessions.
+type activityWriter struct {
+	inner        io.Writer
+	lastActivity *atomic.Int64
+}
+
+func (w *activityWriter) Write(p []byte) (int, error) {
+	w.lastActivity.Store(time.Now().UnixNano())
+	return w.inner.Write(p)
+}
 
 func claudeLog(issueNumber int, tag, format string, args ...any) {
 	if claudeLogf != nil {
@@ -223,7 +241,7 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	args := buildClaudeArgs(stage, sessFilePath, resume, opts.ModelOverride, stage.MaxTurns, hasUnrestrictedLabel(issue), workDir)
 
 	extraEnv := buildClaudeEnv(stage, opts.EffortOverride)
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, sessFilePath, ld, extraEnv)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, sessFilePath, ld, extraEnv, stage.MaxWallTime)
 	usage.MaxTurns = stage.MaxTurns
 	if err != nil {
 		return output, completed, usage, err
@@ -252,7 +270,7 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 	args := buildClaudeArgs(stage, sessFilePath, true, opts.ModelOverride, limit, hasUnrestrictedLabel(issue), workDir) // resume existing session
 
 	extraEnv := buildClaudeEnv(stage, opts.EffortOverride)
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", sessFilePath, ld, extraEnv)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", sessFilePath, ld, extraEnv, stage.MaxWallTime)
 	usage.MaxTurns = limit
 	return output, completed, usage, err
 }
@@ -393,7 +411,7 @@ type claudeResponse struct {
 	} `json:"usage"`
 }
 
-func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, sessFilePath string, logDir string, extraEnv []string) (string, bool, TokenUsage, error) {
+func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, sessFilePath string, logDir string, extraEnv []string, maxWallTime time.Duration) (string, bool, TokenUsage, error) {
 	claudeLog(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
 
 	// Set up stderr: in TUI mode discard; in plain mode forward to os.Stderr.
@@ -428,7 +446,22 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 		}
 	}
 
-	cmd := exec.CommandContext(ctx, "claude", args...)
+	// Per-invocation context: with wall-time timeout if configured, or plain parent ctx.
+	// Clock starts here (after log setup) — at process spawn time, satisfying R2.
+	stageCtx := ctx
+	stageCancel := context.CancelFunc(func() {})
+	if maxWallTime > 0 {
+		stageCtx, stageCancel = context.WithTimeout(ctx, maxWallTime)
+	}
+	defer stageCancel()
+
+	// Track last-write timestamp for the inactivity watchdog.
+	var lastActivity atomic.Int64
+	lastActivity.Store(time.Now().UnixNano())
+	// Wrap stdoutWriter so every write updates lastActivity, resetting the inactivity timer.
+	stdoutWriter = &activityWriter{inner: stdoutWriter, lastActivity: &lastActivity}
+
+	cmd := exec.CommandContext(stageCtx, "claude", args...)
 	cmd.Dir = workDir
 	cmd.Env = mergeEnv(os.Environ(), extraEnv)
 	cmd.Stdin = strings.NewReader(prompt)
@@ -441,9 +474,56 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	cmd.WaitDelay = waitDelay
 	setCmdProcAttr(cmd)
 
+	// Override cmd.Cancel to use a graceful SIGTERM → 10s → SIGKILL sequence
+	// (targeting the process group) when stageCtx is cancelled (wall-time exceeded).
+	// This reaps hung background children (dangling pytest, tail -f, polling loops).
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			claudeLog(issueNumber, "warn", "stage %q exceeded max_wall_time — killing Claude process\n", label)
+			killProcGroupGraceful(cmd.Process.Pid, issueNumber, label)
+		}
+		return nil
+	}
+
+	// Inactivity watchdog: kills the process group if no stdout is received for
+	// claudeInactivityTimeout, indicating a stuck session regardless of wall time.
+	// Runs concurrently with cmd.Run(); stopped via watchdogCtx after Run returns.
+	var inactivityFired atomic.Bool
+	watchdogCtx, watchdogCancel := context.WithCancel(context.Background())
+	defer watchdogCancel() // ensures goroutine is cleaned up even on panic
+	go func() {
+		timer := time.NewTimer(claudeInactivityTimeout)
+		defer timer.Stop()
+		for {
+			select {
+			case <-timer.C:
+				since := time.Since(time.Unix(0, lastActivity.Load()))
+				if since >= claudeInactivityTimeout {
+					if cmd.Process != nil {
+						claudeLog(issueNumber, "warn", "stage %q idle for 15m with no output — killing Claude process\n", label)
+						inactivityFired.Store(true)
+						killProcGroupGraceful(cmd.Process.Pid, issueNumber, label)
+					}
+					return
+				}
+				timer.Reset(claudeInactivityTimeout - since)
+			case <-watchdogCtx.Done():
+				return
+			}
+		}
+	}()
+
 	runErr := cmd.Run()
+	watchdogCancel() // stop the watchdog goroutine promptly
 	killProcGroup(cmd)
 	rawOutput := stdout.Bytes()
+
+	// wasTimedOut is true when this process was terminated by our own timeout
+	// (wall-time deadline or inactivity watchdog) rather than an external engine
+	// shutdown. When true, the ctx.Err() engine-shutdown guard is bypassed so
+	// we still process whatever output was collected before the kill.
+	wasTimedOut := inactivityFired.Load() || (stageCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil)
+
 	if errors.Is(runErr, exec.ErrWaitDelay) && ctx.Err() == nil {
 		claudeLog(issueNumber, "warn", "WaitDelay fired: Claude exited but grandchild processes held stdout pipe open; processing buffered output (%d bytes)\n", len(rawOutput))
 		runErr = nil
@@ -490,21 +570,27 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 			claudeLog(issueNumber, "claude", "completed in %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
 		}
 		saveSessionIDDirect(sessFilePath, resp.SessionID)
+	} else if wasTimedOut {
+		// Process was killed before emitting a result JSON line. Extract text from
+		// intermediate assistant turns collected before the kill so we can detect
+		// FABRIK_STAGE_COMPLETE and avoid a costly re-run of an already-done stage.
+		text = extractTextFromAssistantTurns(rawOutput)
+		claudeLog(issueNumber, "warn", "timeout: processing %d bytes of streamed output for markers\n", len(rawOutput))
 	} else {
 		claudeLog(issueNumber, "warn", "JSON parse failed (%d bytes); output not posted\n", len(rawOutput))
 		text = fmt.Sprintf("⚠️ Claude output could not be parsed (raw output was %d bytes). Check logs at `%s` for details.", len(rawOutput), logDir)
 	}
 
 	if runErr != nil {
-		// If the context was cancelled (shutdown), treat as interrupted regardless of
-		// marker presence — the engine is going away, bookkeeping would be partial.
-		if ctx.Err() != nil {
+		// If the context was cancelled (engine shutdown) and this was NOT our own
+		// timeout kill, treat as interrupted — the engine is going away, bookkeeping
+		// would be partial.
+		if ctx.Err() != nil && !wasTimedOut {
 			return text, false, usage, fmt.Errorf("claude exited with error: %w", runErr)
 		}
 		// Check whether the agent emitted the completion marker before the error.
-		// This handles the case where the agent correctly signals completion but then
-		// continues doing extra work (e.g. post-completion verification) and the session
-		// ends non-zero (max_turns exceeded, API error, etc.).
+		// This handles: (a) normal completion followed by extra work that ends non-zero,
+		// and (b) timeout kills where FABRIK_STAGE_COMPLETE appeared in streamed output.
 		if stageCompleteRE.MatchString(text) {
 			claudeLog(issueNumber, "warn", "stage completed (marker found) but Claude exited with error: %v\n", runErr)
 			return text, true, usage, fmt.Errorf("claude exited with error: %w", runErr)
@@ -837,6 +923,39 @@ func extractIssueUpdateFromAssistantTurns(rawOutput []byte) string {
 		}
 	}
 	return lastBlock
+}
+
+// extractTextFromAssistantTurns scans raw NDJSON output and concatenates all text
+// content from {"type":"assistant",...} messages. Used after a timeout kill to
+// recover FABRIK_STAGE_COMPLETE and other markers from the streamed output when
+// the Claude process was terminated before emitting a final "result" JSON line.
+func extractTextFromAssistantTurns(rawOutput []byte) string {
+	var sb strings.Builder
+	lines := bytes.Split(rawOutput, []byte("\n"))
+	for _, line := range lines {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		var envelope struct {
+			Type    string `json:"type"`
+			Message struct {
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal(line, &envelope); err != nil || envelope.Type != "assistant" {
+			continue
+		}
+		for _, block := range envelope.Message.Content {
+			if block.Type == "text" {
+				sb.WriteString(block.Text)
+			}
+		}
+	}
+	return sb.String()
 }
 
 // parseClaudeJSON parses the JSON output from claude --output-format json.
