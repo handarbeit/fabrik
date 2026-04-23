@@ -474,9 +474,14 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	cmd.WaitDelay = waitDelay
 	setCmdProcAttr(cmd)
 
+	// watchdogCtx is used to stop the inactivity goroutine after cmd.Wait returns.
+	watchdogCtx, watchdogCancel := context.WithCancel(context.Background())
+	defer watchdogCancel() // ensures goroutine is cleaned up even on panic
+
 	// Override cmd.Cancel to use a graceful SIGTERM → 10s → SIGKILL sequence
 	// (targeting the process group) when stageCtx is cancelled (wall-time exceeded).
-	// This reaps hung background children (dangling pytest, tail -f, polling loops).
+	// cmd.Cancel is only invoked by Go's exec cancel goroutine, which is started
+	// inside cmd.Start() after cmd.Process is set — so cmd.Process.Pid is safe here.
 	cmd.Cancel = func() error {
 		if cmd.Process != nil {
 			claudeLog(issueNumber, "warn", "stage %q exceeded max_wall_time — killing Claude process\n", label)
@@ -485,13 +490,22 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 		return nil
 	}
 
+	// Split Start + Wait so we can capture the PID before starting the watchdog
+	// goroutine, avoiding a data race on cmd.Process between the goroutine and
+	// cmd.Start (which writes cmd.Process).
+	if err := cmd.Start(); err != nil {
+		watchdogCancel()
+		return "", false, TokenUsage{}, fmt.Errorf("starting claude: %w", err)
+	}
+	// cmd.Process is written once by cmd.Start and never modified again.
+	// Capture it here (same goroutine, post-Start) for the watchdog.
+	pid := cmd.Process.Pid
+
 	// Inactivity watchdog: kills the process group if no stdout is received for
 	// claudeInactivityTimeout, indicating a stuck session regardless of wall time.
-	// Runs concurrently with cmd.Run(); stopped via watchdogCtx after Run returns.
+	// Stopped via watchdogCtx after cmd.Wait returns.
 	var inactivityFired atomic.Bool
-	watchdogCtx, watchdogCancel := context.WithCancel(context.Background())
-	defer watchdogCancel() // ensures goroutine is cleaned up even on panic
-	go func() {
+	go func(pid int) {
 		timer := time.NewTimer(claudeInactivityTimeout)
 		defer timer.Stop()
 		for {
@@ -499,11 +513,9 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 			case <-timer.C:
 				since := time.Since(time.Unix(0, lastActivity.Load()))
 				if since >= claudeInactivityTimeout {
-					if cmd.Process != nil {
-						claudeLog(issueNumber, "warn", "stage %q idle for 15m with no output — killing Claude process\n", label)
-						inactivityFired.Store(true)
-						killProcGroupGraceful(cmd.Process.Pid, issueNumber, label)
-					}
+					claudeLog(issueNumber, "warn", "stage %q idle for 15m with no output — killing Claude process\n", label)
+					inactivityFired.Store(true)
+					killProcGroupGraceful(pid, issueNumber, label)
 					return
 				}
 				timer.Reset(claudeInactivityTimeout - since)
@@ -511,9 +523,9 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 				return
 			}
 		}
-	}()
+	}(pid)
 
-	runErr := cmd.Run()
+	runErr := cmd.Wait()
 	watchdogCancel() // stop the watchdog goroutine promptly
 	killProcGroup(cmd)
 	rawOutput := stdout.Bytes()

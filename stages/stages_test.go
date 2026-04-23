@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func writeStageFile(t *testing.T, dir, name, content string) {
@@ -388,6 +389,69 @@ effort_level: `+level+`
 		if err == nil {
 			t.Errorf("effort_level %q: expected error, got nil", level)
 		}
+	}
+}
+
+func TestLoadAll_MaxWallTime(t *testing.T) {
+	tests := []struct {
+		name      string
+		yaml      string
+		wantErr   bool
+		wantValue time.Duration
+	}{
+		{
+			name: "valid minutes",
+			yaml: `name: Implement
+prompt: "do it"
+max_wall_time: "45m"`,
+			wantValue: 45 * time.Minute,
+		},
+		{
+			name: "valid hours",
+			yaml: `name: Implement
+prompt: "do it"
+max_wall_time: "1h30m"`,
+			wantValue: 90 * time.Minute,
+		},
+		{
+			name: "absent means zero (no timeout)",
+			yaml: `name: Implement
+prompt: "do it"`,
+			wantValue: 0,
+		},
+		{
+			name: "invalid format",
+			yaml: `name: Implement
+prompt: "do it"
+max_wall_time: "forever"`,
+			wantErr: true,
+		},
+		{
+			name: "negative value",
+			yaml: `name: Implement
+prompt: "do it"
+max_wall_time: "-5m"`,
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeStageFile(t, dir, "stage.yaml", tt.yaml)
+			stages, err := LoadAll(dir)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LoadAll: %v", err)
+			}
+			if got := stages[0].MaxWallTime; got != tt.wantValue {
+				t.Errorf("MaxWallTime = %v, want %v", got, tt.wantValue)
+			}
+		})
 	}
 }
 
