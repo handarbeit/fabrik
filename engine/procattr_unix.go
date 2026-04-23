@@ -33,12 +33,22 @@ func killProcGroup(cmd *exec.Cmd) {
 // killProcGroupGraceful sends SIGTERM to the process group, waits 10 seconds for
 // a graceful shutdown, then sends SIGKILL. This reaps hung background children
 // (dangling pytest, tail -f, polling loops) in addition to the Claude CLI itself.
-// ESRCH is silently ignored — the group may already be gone.
+// Returns immediately if the process group is already gone (ESRCH) — avoids the
+// PID-reuse hazard where sleeping 10s then SIGKILLing could hit an unrelated group
+// that recycled the same PGID.
 func killProcGroupGraceful(pid, issueNumber int, label string) {
-	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
+	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
+		if err == syscall.ESRCH {
+			return // group already gone; nothing to clean up
+		}
 		fmt.Fprintf(os.Stderr, "[#%d engine] killProcGroupGraceful %q: SIGTERM error on pgid %d: %v\n", issueNumber, label, pid, err)
 	}
 	time.Sleep(10 * time.Second)
+	// Re-probe before SIGKILL: if the group exited during the grace period, return
+	// rather than risk hitting a recycled PGID.
+	if err := syscall.Kill(-pid, 0); err == syscall.ESRCH {
+		return
+	}
 	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
 		fmt.Fprintf(os.Stderr, "[#%d engine] killProcGroupGraceful %q: SIGKILL error on pgid %d: %v\n", issueNumber, label, pid, err)
 	}
