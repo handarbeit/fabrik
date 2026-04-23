@@ -479,12 +479,16 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	defer watchdogCancel() // ensures goroutine is cleaned up even on panic
 
 	// Override cmd.Cancel to use a graceful SIGTERM → 10s → SIGKILL sequence
-	// (targeting the process group) when stageCtx is cancelled (wall-time exceeded).
-	// cmd.Cancel is only invoked by Go's exec cancel goroutine, which is started
-	// inside cmd.Start() after cmd.Process is set — so cmd.Process.Pid is safe here.
+	// (targeting the process group) when stageCtx is cancelled. cmd.Cancel is only
+	// invoked by Go's exec cancel goroutine, started inside cmd.Start() after
+	// cmd.Process is set — so cmd.Process.Pid is safe to read here.
 	cmd.Cancel = func() error {
 		if cmd.Process != nil {
-			claudeLog(issueNumber, "warn", "stage %q exceeded max_wall_time — killing Claude process\n", label)
+			if maxWallTime > 0 {
+				claudeLog(issueNumber, "warn", "stage %q exceeded max_wall_time (%s) — killing Claude process\n", label, maxWallTime)
+			} else {
+				claudeLog(issueNumber, "warn", "stage %q context cancelled — killing Claude process gracefully\n", label)
+			}
 			killProcGroupGraceful(cmd.Process.Pid, issueNumber, label)
 		}
 		return nil
