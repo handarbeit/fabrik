@@ -33,6 +33,7 @@ type Config struct {
 	CIWaitTimeout     time.Duration // How long to wait for CI in the merge guard before pausing (default 30m)
 	MaxCiFixCycles    int           // Max CI-fix re-invocation cycles per issue before pausing (default 5)
 	MaxRebaseCycles   int           // Max rebase re-invocation cycles per issue before pausing (default 3)
+	ClaudeWaitDelay   time.Duration // How long to wait after Claude exits before giving up on pipe drain and recovering output (default 30s)
 	DebugOutput       bool
 	PluginDir         string
 	Stages            []*stages.Stage
@@ -110,6 +111,9 @@ func New(cfg Config) (*Engine, error) {
 			pluginDir = abs
 		}
 		claudePluginDir = pluginDir
+	}
+	if cfg.ClaudeWaitDelay > 0 {
+		claudeWaitDelay = cfg.ClaudeWaitDelay
 	}
 	worktreeRoot := filepath.Join(fabrikDir, ".fabrik", "worktrees")
 	eng := &Engine{

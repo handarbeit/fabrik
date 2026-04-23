@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -58,6 +59,12 @@ var claudeTUI bool
 // claudePluginDir is the path to the Fabrik plugin directory. Set by the Engine
 // during construction. When non-empty, --plugin-dir is added to Claude args.
 var claudePluginDir string
+
+// claudeWaitDelay is how long runClaude waits for stdout pipe drain after the
+// Claude process exits before giving up and processing buffered output. Set by
+// the Engine during construction from Config.ClaudeWaitDelay. Default (0) is
+// resolved to 30s in runClaude.
+var claudeWaitDelay time.Duration
 
 func claudeLog(issueNumber int, tag, format string, args ...any) {
 	if claudeLogf != nil {
@@ -427,9 +434,20 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Stderr = stderrWriter
 	cmd.Stdout = stdoutWriter
+	waitDelay := claudeWaitDelay
+	if waitDelay <= 0 {
+		waitDelay = 30 * time.Second
+	}
+	cmd.WaitDelay = waitDelay
+	setCmdProcAttr(cmd)
 
 	runErr := cmd.Run()
+	killProcGroup(cmd)
 	rawOutput := stdout.Bytes()
+	if errors.Is(runErr, exec.ErrWaitDelay) {
+		claudeLog(issueNumber, "warn", "WaitDelay fired: Claude exited but grandchild processes held stdout pipe open; processing buffered output (%d bytes)\n", len(rawOutput))
+		runErr = nil
+	}
 
 	// Save the raw NDJSON output to an -output-*.json file for backward compatibility
 	// (e.g., the existing TUI log viewer and stream-filter tooling).
