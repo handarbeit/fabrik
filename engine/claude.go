@@ -517,7 +517,7 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 			case <-timer.C:
 				since := time.Since(time.Unix(0, lastActivity.Load()))
 				if since >= claudeInactivityTimeout {
-					claudeLog(issueNumber, "warn", "stage %q idle for 15m with no output — killing Claude process\n", label)
+					claudeLog(issueNumber, "warn", "stage %q idle for %s with no output — killing Claude process\n", label, claudeInactivityTimeout)
 					inactivityFired.Store(true)
 					killProcGroupGraceful(pid, issueNumber, label)
 					return
