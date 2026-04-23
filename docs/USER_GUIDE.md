@@ -458,6 +458,18 @@ max_turns: 50             # Optional. Max conversation turns per main stage invo
 comment_max_turns: 15     # Optional. Max turns when processing user comments. Defaults to
                           #   min(max_turns, 15) when max_turns is set, otherwise 15.
                           #   Keeps comment processing bounded independently of stage budget.
+max_wall_time: "45m"      # Optional. Wall-clock deadline for a single Claude invocation.
+                          #   Accepts Go duration strings (e.g. "30m", "1h", "1h30m").
+                          #   When the deadline is reached, Fabrik sends SIGTERM to the
+                          #   Claude process group, waits 10 s, then sends SIGKILL (reaping
+                          #   any hung background children). Output collected before the kill
+                          #   is processed normally — if FABRIK_STAGE_COMPLETE appears in
+                          #   the streamed output, the stage is marked complete without a
+                          #   retry. When absent or zero, no wall-clock cap is applied.
+                          #   Recommended: "45m" for Implement and Review stages in
+                          #   production use. The hardcoded 15-minute inactivity timeout
+                          #   (see below) acts as a universal backstop even when this field
+                          #   is not set.
 read_only: true           # Optional. Stashes the dirty worktree before Claude runs and
                           #   restores it after. Use for analysis stages that should not
                           #   modify files (e.g., Specify, Research).
@@ -535,6 +547,16 @@ A fifth case applies at the issue level: adding the `fabrik:yolo` label to an is
 **Thinking budget (`disable_adaptive_thinking`, `effort_level`):**
 
 These two fields control how much Claude "thinks" before responding. `disable_adaptive_thinking: true` (the default) turns off Claude Code's adaptive thinking budget, which would otherwise auto-reduce thinking depth to save tokens. With adaptive thinking disabled, the `effort_level` field directly controls thinking intensity: `low`, `medium`, `high`, or `max`. The default `effort_level` is `high` (changed from `max` in v0.0.33 to reduce token usage without sacrificing quality). Use `effort_level: max` only for your most demanding stages — complex implementation or thorough review work — where higher token cost is justified.
+
+**Timeout and inactivity protection (`max_wall_time` + 15-minute inactivity kill):**
+
+Fabrik applies two complementary timeout mechanisms to every Claude invocation to prevent indefinite hangs from stuck background processes:
+
+1. **`max_wall_time` (per-stage, opt-in):** A hard wall-clock deadline. When the deadline expires, Fabrik sends `SIGTERM` to the Claude process group (which includes any background children spawned during the session), waits 10 seconds for a graceful exit, then sends `SIGKILL` to any surviving processes. Recommended: `"45m"` for Implement and Review stages in production. Legitimately long stages (e.g., a 90-minute Review on a large PR) should either set a higher limit or leave this field unset.
+
+2. **15-minute inactivity timeout (global, always active):** If no streamed output is received from Claude for 15 consecutive minutes, the process group is killed using the same SIGTERM → 10s → SIGKILL sequence. This catches sessions that are stuck on a hung background task even when `max_wall_time` is not set — as long as Claude is actively producing output, it continues indefinitely. The threshold is hardcoded and cannot be configured.
+
+In both cases, if `FABRIK_STAGE_COMPLETE` was emitted before the kill (visible in the streamed `assistant` turns), the stage is treated as successfully completed without retrying. Both timeouts apply equally to main-stage invocations and comment-processing invocations.
 
 ---
 
