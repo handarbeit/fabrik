@@ -24,3 +24,4 @@ contributors and future maintainers.
 | [012](012-stage-comment-living-document.md) | Stage Comment as Living Document | Accepted |
 | [013](013-project-config-yaml.md) | `.fabrik/config.yaml` as Project-Level Config Source | Accepted |
 | [028](028-rate-limit-backoff-hysteresis.md) | Two-Threshold Hysteresis for Rate-Limit Backoff | Accepted |
+| [030](030-progress-based-turn-extension.md) | Progress-Based Turn Extension | Accepted |
