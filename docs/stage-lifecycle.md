@@ -176,6 +176,43 @@ After `cmd.Run()` returns, two cleanup steps run unconditionally:
 
 2. **WaitDelay bound**: `cmd.WaitDelay` is set to 30s (configurable via `--claude-wait-delay` / `FABRIK_CLAUDE_WAIT_DELAY`). When grandchild processes hold the stdout pipe open after Claude exits, Go's `cmd.Wait()` would otherwise block indefinitely. With `WaitDelay`, Go forcibly closes its end of the pipe after the deadline and returns `exec.ErrWaitDelay`. The engine detects this error, logs a diagnostic warning, clears the error, and processes the buffered output normally — including any `FABRIK_STAGE_COMPLETE` marker. This prevents the worker goroutine from being permanently stuck when Claude uses `run_in_background` or the Monitor tool.
 
+### Progress Baseline Snapshot
+
+Immediately before the first invocation, `snapshotBaseline` captures observable progress state for this stage:
+
+| Stage | Baseline fields captured |
+|-------|--------------------------|
+| **Implement** | `gitHeadSHA` — `git rev-parse HEAD` in the worktree |
+| **Review** | `gitHeadSHA` + `resolvedThreadCount` — `LinkedPRResolvedThreadCount` from the poll cycle's `FetchItemDetails` |
+| **Validate** | `commentCount` — `len(item.Comments)` from the poll cycle's `FetchItemDetails` |
+| **All others** | (empty — no extension possible) |
+
+The baseline is purely in-memory; it is lost on engine restart (an acceptable risk per ADR 030).
+
+### Turn-Limit Extension Loop
+
+The `e.claude.Invoke()` call runs inside an extension loop. On each iteration:
+
+1. `opts.MaxTurnsOverride` is set to `currentBudget` (first iteration: `stage.MaxTurns`, or `2 × stage.MaxTurns` if `fabrik:extend-turns` is present).
+2. Claude is invoked. Output is appended to `totalOutput`; usage is accumulated into `totalUsage`.
+3. Turn-limit check: `!completed && err == nil && stage.MaxTurns > 0 && invUsage.TurnsUsed >= currentBudget`.
+4. If turn limit was NOT hit (or stage completed), exit the loop.
+5. If `totalMultiple >= 3` (hard cap), exit the loop (fail as turn-limit).
+6. Call `detectProgress`. If progress → `totalMultiple++`, set `currentBudget = stage.MaxTurns`, set `resume = true`, log `[#N extend-turns]`, loop.
+7. If no progress or progress check fails → exit the loop (fail as turn-limit).
+
+**`detectProgress` per stage:**
+- **Implement**: `git rev-parse HEAD` in worktree; progress if SHA changed.
+- **Review**: `git rev-parse HEAD`; if SHA same → `FetchItemDetails` re-fetch; progress if `LinkedPRResolvedThreadCount` increased. One GraphQL call only when no new commits.
+- **Validate**: `FetchItemDetails` re-fetch; progress if `len(Comments)` increased. One GraphQL call per check.
+- **All others**: return `false` immediately.
+
+**Output accumulation:** Each `--resume` invocation produces only the delta output for that session continuation. The engine concatenates all invocations' output before posting. The empty-output check (`strings.TrimSpace(output) == ""`) applies to the accumulated total.
+
+**Deferred WIP commit and push:** The `commitWIP` and `PushBranch` calls happen AFTER the extension loop completes, not between invocations. This preserves worktree state across extensions.
+
+**Stats footer:** After the loop, `usage.MaxTurns` is set to `totalMultiple × stage.MaxTurns`, so the stats line reflects the total budget (e.g., `used 130/150 turns`).
+
 ---
 
 ## Phase 4: Post-Stage Handling
@@ -225,10 +262,11 @@ After a stage runs, any pre-existing user comments get a rocket reaction via `ma
 When `FABRIK_STAGE_COMPLETE` is detected (regardless of Claude's exit code — as of v0.0.26, a non-zero exit is treated as a warning, not a failure, when the marker is present):
 1. Lock released (`fabrik:locked:<user>` and `stage:<name>:in_progress` removed)
 2. Retry tracking cleared
-3. Draft PR created (if `create_draft_pr: true`)
-4. PR marked ready (if `mark_pr_ready_on_complete: true`)
-5. `stage:<name>:complete` label added
-6. Auto-advance to next stage (if `auto_advance: true` or global `yolo`)
+3. `fabrik:extend-turns` removed (if present); `ErrNotFound` treated as success (user already removed it)
+4. Draft PR created (if `create_draft_pr: true`)
+5. PR marked ready (if `mark_pr_ready_on_complete: true`)
+6. `stage:<name>:complete` label added
+7. Auto-advance to next stage (if `auto_advance: true` or global `yolo`)
 
 ### Blocked-on-Input Path
 
