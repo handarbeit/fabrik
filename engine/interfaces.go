@@ -44,9 +44,10 @@ type GitHubClient interface {
 // Using a struct rather than individual parameters means future overrides
 // (e.g. DisableAdaptiveThinking) are zero-churn field additions.
 type InvokeOptions struct {
-	ModelOverride  string // from "model:<name>" label, overrides stage.Model
-	EffortOverride string // from "effort:<level>" label, overrides stage.EffortLevel
-	BaseBranch     string // actual default base branch for the managed repo (e.g. "liminis", not always "main")
+	ModelOverride    string // from "model:<name>" label, overrides stage.Model
+	EffortOverride   string // from "effort:<level>" label, overrides stage.EffortLevel
+	BaseBranch       string // actual default base branch for the managed repo (e.g. "liminis", not always "main")
+	MaxTurnsOverride int    // when > 0, overrides stage.MaxTurns for this invocation; 0 means use stage.MaxTurns
 }
 
 // ClaudeInvoker defines the interface for invoking Claude Code.
