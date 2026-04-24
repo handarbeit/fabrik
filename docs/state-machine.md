@@ -376,9 +376,9 @@ This table shows the normal flow when an issue progresses through the pipeline w
 
 #### Turn Limit Extension
 
-When Claude exits a stage invocation due to `max_turns` (i.e., `usage.TurnsUsed >= currentBudget && !completed && err == nil`), the engine evaluates whether to extend before entering the cooldown/retry path.
+When Claude exits a stage invocation due to `max_turns` (i.e., the per-invocation turn usage satisfies `invUsage.TurnsUsed >= currentBudget` and `!completed && err == nil`), the engine evaluates whether to extend before entering the cooldown/retry path.
 
-**Extension trigger condition:** `!completed && err == nil && stage.MaxTurns > 0 && usage.TurnsUsed >= currentBudget`
+**Extension trigger condition:** `!completed && err == nil && stage.MaxTurns > 0 && invUsage.TurnsUsed >= currentBudget`
 
 **Hard cap:** 3× `stage.MaxTurns` total across all invocations. When `totalMultiple >= 3`, no further extension is attempted.
 
