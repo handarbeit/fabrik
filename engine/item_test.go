@@ -44,7 +44,7 @@ func TestExtensionLoop_ProgressDetected(t *testing.T) {
 				cmd := exec.Command("git", "commit", "--allow-empty", "-m", "progress commit")
 				cmd.Dir = workDir
 				if out, err := cmd.CombinedOutput(); err != nil {
-					t.Logf("git commit in mock: %s: %v", out, err)
+					t.Fatalf("git commit in mock failed: %s: %v", out, err)
 				}
 				return "output-from-ext1\n", false, TokenUsage{TurnsUsed: 10, InputTokens: 100}, nil
 			case 2:
@@ -163,7 +163,7 @@ func TestExtensionLoop_HardCap(t *testing.T) {
 				"-m", "progress commit "+string(rune('0'+callCount)))
 			cmd.Dir = workDir
 			if out, err := cmd.CombinedOutput(); err != nil {
-				t.Logf("git commit: %s: %v", out, err)
+				t.Fatalf("git commit failed: %s: %v", out, err)
 			}
 			return "output\n", false, TokenUsage{TurnsUsed: 10}, nil
 		},

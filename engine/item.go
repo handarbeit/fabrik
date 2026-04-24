@@ -626,11 +626,17 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	resume := attempted // resume session if we've processed this before
 	opts := InvokeOptions{ModelOverride: modelOverride, EffortOverride: effortOverride, BaseBranch: baseBranch}
 
+	// Snapshot extend-turns presence before any FetchItemDetails re-fetches (which
+	// refresh item.Labels). Using a stable boolean ensures the first-budget calc and
+	// the completion-block auto-removal decision are consistent regardless of what
+	// a mid-loop re-fetch changes in item.Labels.
+	hadExtendTurnsLabel := hasExtendTurnsLabel(item)
+
 	// Determine initial turn budget. When fabrik:extend-turns is present the first
 	// invocation gets a 2× budget (pre-granted extension, no progress check needed).
 	firstBudget := stage.MaxTurns
 	totalMultiple := 1
-	if hasExtendTurnsLabel(item) && stage.MaxTurns > 0 {
+	if hadExtendTurnsLabel && stage.MaxTurns > 0 {
 		firstBudget = 2 * stage.MaxTurns
 		totalMultiple = 2
 	}
@@ -841,7 +847,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}()
 		// Remove fabrik:extend-turns on successful completion so the next stage
 		// gets a normal budget. ErrNotFound means the user already removed it.
-		if hasExtendTurnsLabel(item) {
+		if hadExtendTurnsLabel {
 			if removeErr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:extend-turns"); removeErr != nil &&
 				!errors.Is(removeErr, gh.ErrNotFound) {
 				e.logf(item.Number, "warn", "could not remove extend-turns label: %v\n", removeErr)
