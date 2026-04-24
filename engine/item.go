@@ -624,7 +624,53 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		e.logf(item.Number, "effort", "using effort override %q\n", effortOverride)
 	}
 	resume := attempted // resume session if we've processed this before
-	output, completed, usage, err := e.claude.Invoke(ctx, stage, item, nil, resume, workDir, InvokeOptions{ModelOverride: modelOverride, EffortOverride: effortOverride, BaseBranch: baseBranch})
+	opts := InvokeOptions{ModelOverride: modelOverride, EffortOverride: effortOverride, BaseBranch: baseBranch}
+
+	// Determine initial turn budget. When fabrik:extend-turns is present the first
+	// invocation gets a 2× budget (pre-granted extension, no progress check needed).
+	firstBudget := stage.MaxTurns
+	totalMultiple := 1
+	if hasExtendTurnsLabel(item) && stage.MaxTurns > 0 {
+		firstBudget = 2 * stage.MaxTurns
+		totalMultiple = 2
+	}
+	baseline := snapshotBaseline(stage, item, workDir)
+
+	// Extension loop: re-invoke with --resume when max_turns is hit and progress is detected.
+	// Hard cap is 3× stage.MaxTurns total across all invocations.
+	var output string
+	var completed bool
+	var usage TokenUsage
+	currentBudget := firstBudget
+	for {
+		opts.MaxTurnsOverride = currentBudget
+		var invOutput string
+		var invUsage TokenUsage
+		invOutput, completed, invUsage, err = e.claude.Invoke(ctx, stage, item, nil, resume, workDir, opts)
+		output += invOutput
+		usage = usage.add(invUsage)
+
+		hitLimit := !completed && err == nil && stage.MaxTurns > 0 && invUsage.TurnsUsed >= currentBudget
+		if !hitLimit || totalMultiple >= 3 {
+			break
+		}
+		hasProgress, progressErr := detectProgress(ctx, stage, &item, baseline, workDir, e.client)
+		if progressErr != nil {
+			e.logf(item.Number, "extend-turns", "progress check failed: %v\n", progressErr)
+			break
+		}
+		if !hasProgress {
+			break
+		}
+		totalMultiple++
+		currentBudget = stage.MaxTurns
+		e.logf(item.Number, "extend-turns", "progress detected — extending to %d× budget (%d turns used)\n",
+			totalMultiple, usage.TurnsUsed)
+		resume = true
+	}
+	// Report cumulative budget across all extensions in stats footer.
+	usage.MaxTurns = totalMultiple * stage.MaxTurns
+
 	if usage.TurnsUsed > 0 || usage.InputTokens > 0 || usage.OutputTokens > 0 {
 		if usage.MaxTurns > 0 {
 			e.logf(item.Number, "stats", "used %d/%d turns, %dk input / %dk output tokens\n",
@@ -793,6 +839,14 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			delete(e.retryCount, stageKey)
 			delete(e.pausedDueToRetries, stageKey)
 		}()
+		// Remove fabrik:extend-turns on successful completion so the next stage
+		// gets a normal budget. ErrNotFound means the user already removed it.
+		if hasExtendTurnsLabel(item) {
+			if removeErr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:extend-turns"); removeErr != nil &&
+				!errors.Is(removeErr, gh.ErrNotFound) {
+				e.logf(item.Number, "warn", "could not remove extend-turns label: %v\n", removeErr)
+			}
+		}
 		// Post-stage: create draft PR and/or mark ready now that commits exist
 		var prNumber int
 		if stage.CreateDraftPR {
@@ -1118,4 +1172,83 @@ func (e *Engine) commitWIP(workDir string, issueNumber int, stageName string) {
 	}
 
 	e.logf(issueNumber, "info", "committed WIP changes for incomplete %s stage\n", stageName)
+}
+
+// progressBaseline captures observable progress signals at the start of a stage
+// invocation. Used by detectProgress to determine whether extension is warranted
+// when Claude hits max_turns.
+type progressBaseline struct {
+	gitHeadSHA          string // HEAD commit SHA in the worktree (Implement, Review)
+	commentCount        int    // total comment count on item (Validate)
+	resolvedThreadCount int    // resolved PR review threads (Review)
+}
+
+// hasExtendTurnsLabel returns true if item carries the "fabrik:extend-turns" label.
+func hasExtendTurnsLabel(item gh.ProjectItem) bool {
+	return hasLabel(item, "fabrik:extend-turns")
+}
+
+// snapshotBaseline captures observable progress state for stage before the first invocation.
+func snapshotBaseline(stage *stages.Stage, item gh.ProjectItem, workDir string) progressBaseline {
+	var b progressBaseline
+	switch stage.Name {
+	case "Implement":
+		if sha, err := gitHeadSHA(workDir); err == nil {
+			b.gitHeadSHA = sha
+		}
+	case "Review":
+		if sha, err := gitHeadSHA(workDir); err == nil {
+			b.gitHeadSHA = sha
+		}
+		b.resolvedThreadCount = item.LinkedPRResolvedThreadCount
+	case "Validate":
+		b.commentCount = len(item.Comments)
+	}
+	return b
+}
+
+// gitHeadSHA runs "git rev-parse HEAD" in dir and returns the trimmed SHA.
+func gitHeadSHA(dir string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse HEAD: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// detectProgress checks whether measurable progress was made since baseline.
+// Implement: new commits (git HEAD SHA changed). Review: new commits OR resolved
+// reviewer thread count increased (GitHub re-fetch). Validate: total comment count
+// increased (GitHub re-fetch). All other stages return false — no extension.
+// If a GitHub re-fetch fails, returns false and the error (conservative: fail as today).
+func detectProgress(_ context.Context, stage *stages.Stage, item *gh.ProjectItem, baseline progressBaseline, workDir string, client GitHubClient) (bool, error) {
+	switch stage.Name {
+	case "Implement":
+		sha, err := gitHeadSHA(workDir)
+		if err != nil {
+			return false, err
+		}
+		return sha != baseline.gitHeadSHA, nil
+	case "Review":
+		sha, err := gitHeadSHA(workDir)
+		if err != nil {
+			return false, err
+		}
+		if sha != baseline.gitHeadSHA {
+			return true, nil
+		}
+		// No new commits — re-fetch to check resolved reviewer threads.
+		if err := client.FetchItemDetails(item); err != nil {
+			return false, fmt.Errorf("re-fetching item for progress check: %w", err)
+		}
+		return item.LinkedPRResolvedThreadCount > baseline.resolvedThreadCount, nil
+	case "Validate":
+		if err := client.FetchItemDetails(item); err != nil {
+			return false, fmt.Errorf("re-fetching item for progress check: %w", err)
+		}
+		return len(item.Comments) > baseline.commentCount, nil
+	}
+	return false, nil
 }
