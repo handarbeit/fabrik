@@ -582,6 +582,7 @@ query($id: ID!) {
 			}
 			for _, thread := range pr.ReviewThreads.Nodes {
 				if thread.IsResolved {
+					item.LinkedPRResolvedThreadCount++
 					continue
 				}
 				for _, cm := range thread.Comments.Nodes {

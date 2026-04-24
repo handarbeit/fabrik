@@ -23,6 +23,7 @@ var staticLabelDefs = []labelDef{
 	// --- behaviour labels (blue) ---
 	{"fabrik:yolo", "Auto-advance all stages and auto-merge the PR at Validate", "0075ca"},
 	{"fabrik:cruise", "Auto-advance all stages; stop at Validate without merging", "0075ca"},
+	{"fabrik:extend-turns", "Override: pre-grant 2× turn budget; auto-removed on stage success", "0075ca"},
 
 	// --- warning / waiting labels (yellow) ---
 	{"fabrik:paused", "Stage failed or needs intervention; remove to resume", "e4e669"},

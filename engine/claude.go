@@ -111,6 +111,7 @@ func (t TokenUsage) add(other TokenUsage) TokenUsage {
 		CacheCreationTokens: t.CacheCreationTokens + other.CacheCreationTokens,
 		CacheReadTokens:     t.CacheReadTokens + other.CacheReadTokens,
 		CostUSD:             t.CostUSD + other.CostUSD,
+		TurnsUsed:           t.TurnsUsed + other.TurnsUsed,
 	}
 }
 
@@ -238,11 +239,15 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	ld := logDirForItem(issue)
 
 	prompt := buildPrompt(stage, issue, newComments, opts.BaseBranch)
-	args := buildClaudeArgs(stage, sessFilePath, resume, opts.ModelOverride, stage.MaxTurns, hasUnrestrictedLabel(issue), workDir)
+	effectiveBudget := stage.MaxTurns
+	if opts.MaxTurnsOverride > 0 {
+		effectiveBudget = opts.MaxTurnsOverride
+	}
+	args := buildClaudeArgs(stage, sessFilePath, resume, opts.ModelOverride, effectiveBudget, hasUnrestrictedLabel(issue), workDir)
 
 	extraEnv := buildClaudeEnv(stage, opts.EffortOverride)
 	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, sessFilePath, ld, extraEnv, stage.MaxWallTime)
-	usage.MaxTurns = stage.MaxTurns
+	usage.MaxTurns = effectiveBudget
 	if err != nil {
 		return output, completed, usage, err
 	}
