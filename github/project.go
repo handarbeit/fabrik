@@ -538,6 +538,14 @@ query($id: ID!) {
 		}
 	}
 
+	// Reset append-to fields before repopulating so repeated FetchItemDetails calls
+	// (e.g. during progress detection in the turn-extension loop) are idempotent.
+	item.Comments = nil
+	item.LinkedPRReviewRequests = nil
+	item.LinkedPRReviews = nil
+	item.LinkedPRReviewThreadComments = nil
+	item.LinkedPRResolvedThreadCount = 0
+
 	// Process issue/PR comments
 	commentNodes := node.Comments.Nodes
 	if node.Comments.PageInfo.HasNextPage {
