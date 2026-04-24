@@ -63,6 +63,9 @@ type ProjectItem struct {
 	// unresolved review threads on the linked PR. These are real GitHub
 	// comments with DatabaseIDs and can be reacted to / resolved.
 	LinkedPRReviewThreadComments []Comment
+	// LinkedPRResolvedThreadCount is the number of review threads on the linked PR
+	// that are currently resolved. Used by progress detection during turn extension.
+	LinkedPRResolvedThreadCount int
 }
 
 // Comment represents a comment on an issue or linked PR.
