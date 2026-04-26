@@ -136,188 +136,111 @@ description: >-
     </p>
 
     <div class="features-grid">
-      <div class="feature-card">
+      <a class="feature-card" href="{{ '/state-machine' | relative_url }}#pipeline-overview" aria-label="GitHub-Native Pipeline — open documentation">
         <span class="feature-icon">📋</span>
         <div class="feature-title">GitHub-Native Pipeline</div>
         <div class="feature-desc">
-          Board columns <em>are</em> stages. Move a card to trigger a stage.
-          Labels track completion state. No external CI glue required.
+          Board columns are stages and labels are state — no CI glue needed.
         </div>
-      </div>
-      <div class="feature-card">
+      </a>
+      <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#git-repositories-and-worktrees" aria-label="Isolated Git Worktrees — open documentation">
         <span class="feature-icon">🌿</span>
         <div class="feature-title">Isolated Git Worktrees</div>
         <div class="feature-desc">
-          Each issue gets its own worktree at <code>.fabrik/worktrees/&lt;owner&gt;-&lt;repo&gt;/issue-N/</code>
-          on branch <code>fabrik/issue-N</code>. Multiple issues run in parallel,
-          zero cross-contamination. The <code>base:&lt;branch&gt;</code> label overrides
-          the fork and PR target branch per issue — useful for feature branches and release trains.
+          Every issue gets a dedicated branch and worktree with zero cross-contamination.
         </div>
-      </div>
-      <div class="feature-card">
+      </a>
+      <a class="feature-card" href="{{ '/state-machine' | relative_url }}#4-comment-processing-lifecycle" aria-label="Comment-Driven Steering — open documentation">
         <span class="feature-icon">💬</span>
         <div class="feature-title">Comment-Driven Steering</div>
         <div class="feature-desc">
-          Comment on an issue mid-stage to redirect the work.
-          Fabrik reacts with 👀, processes the comment, and continues.
-          Comments from any author trigger processing — colleagues, code-review bots,
-          and other Fabrik instances alike. Only Fabrik's own output and
-          rocket-reacted (already-processed) comments are skipped.
-          When Claude needs input, it signals <code>FABRIK_BLOCKED_ON_INPUT</code> —
-          the issue pauses and automatically resumes the moment you reply.
+          Comment on any issue mid-stage to redirect the work in progress.
         </div>
-      </div>
-      <div class="feature-card">
+      </a>
+      <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#yolo-mode-and-auto-merge" aria-label="Yolo Mode &amp; Auto-Merge — open documentation">
         <span class="feature-icon">⚡</span>
         <div class="feature-title">Yolo Mode &amp; Auto-Merge</div>
         <div class="feature-desc">
-          Enable <code>--yolo</code> and Fabrik auto-advances issues through
-          every stage without human approval — and auto-merges the PR when
-          Validate completes. Apply the <code>fabrik:yolo</code> label to a
-          single issue to get the same behavior scoped to just that issue.
-          For lighter automation without auto-merge, use <code>fabrik:cruise</code> —
-          it auto-advances through all stages but stops at Validate, leaving
-          the merge decision to you.
+          Auto-advances through every stage and merges the PR on Validate completion.
         </div>
-      </div>
-      <div class="feature-card">
+      </a>
+      <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#stage-yaml-reference" aria-label="Configurable Stages — open documentation">
         <span class="feature-icon">🔧</span>
         <div class="feature-title">Configurable Stages</div>
         <div class="feature-desc">
-          Each stage is a YAML file: custom prompt, model choice, tool restrictions,
-          max turns, PR posting, and more. Per-stage wall-clock caps
-          (<code>max_wall_time</code>) and a 15-minute inactivity watchdog keep
-          runaway sessions from blocking the pipeline. Ship the default pipeline
-          or build your own.
+          Customize each stage's prompt, model, tools, and turn budget in YAML.
         </div>
-      </div>
-      <div class="feature-card">
+      </a>
+      <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#multi-user-and-multi-instance-operation" aria-label="Multi-User Safe — open documentation">
         <span class="feature-icon">👥</span>
         <div class="feature-title">Multi-User Safe</div>
         <div class="feature-desc">
-          Run multiple Fabrik instances against the same board.
-          <code>fabrik:locked:&lt;user&gt;</code> labels prevent conflicts.
-          Stage work is scoped to each instance's <code>--user</code>;
-          comment processing handles comments from any author.
+          Multiple Fabrik instances share one project board without conflicts.
         </div>
-      </div>
-      <div class="feature-card">
+      </a>
+      <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#startup-board-validation" aria-label="Startup Board Validation — open documentation">
         <span class="feature-icon">✅</span>
         <div class="feature-title">Startup Board Validation</div>
         <div class="feature-desc">
-          On every startup, Fabrik validates that stage names in your YAML configs
-          match board column names exactly. Mismatches are reported with a clear
-          error before any work begins — no silent misconfiguration.
+          Stage configs are validated against board columns on every startup.
         </div>
-      </div>
-      <div class="feature-card">
+      </a>
+      <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#auto-upgrade" aria-label="Self-Upgrade — open documentation">
         <span class="feature-icon">🔄</span>
         <div class="feature-title">Self-Upgrade</div>
         <div class="feature-desc">
-          Pass <code>--auto-upgrade</code> and Fabrik keeps itself current when idle.
-          Release binaries check <code>shadoworg/fabrik</code> GitHub Releases and
-          download the latest version. Dev builds (built from source) detect local or
-          remote commits ahead of the running binary and rebuild in place — both paths
-          re-exec automatically with no manual deploys.
+          Detects and installs the latest release automatically when idle.
         </div>
-      </div>
-      <div class="feature-card">
+      </a>
+      <a class="feature-card" href="{{ '/state-machine' | relative_url }}#5-pr-lifecycle-integration" aria-label="PR Lifecycle Management — open documentation">
         <span class="feature-icon">🔀</span>
         <div class="feature-title">PR Lifecycle Management</div>
         <div class="feature-desc">
-          Implement creates a draft PR. Review rebases, fixes conflicts, posts
-          detailed output. Validate marks the PR ready. Full lifecycle, zero
-          manual steps.
+          Draft PR created at Implement and marked ready to merge at Validate.
         </div>
-      </div>
-      <div class="feature-card">
+      </a>
+      <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#8-tui-dashboard" aria-label="Terminal UI — open documentation">
         <span class="feature-icon">🖥️</span>
         <div class="feature-title">Terminal UI</div>
         <div class="feature-desc">
-          Fabrik launches a bubbletea control panel by default: active jobs,
-          stage progress, token costs, and history across all issues. Press
-          <code>l</code> to open <code>fabrik watch</code> for the selected issue
-          (live log streaming, stage tabs, CI/PR status), <code>enter</code> to
-          toggle an inline detail panel, <code>r</code> to resume a Claude session
-          from history, <code>?</code> to open a help panel (all keybindings and
-          labels reference), and <code>q</code> to quit. In supported terminals (Ghostty, iTerm2, WezTerm, Kitty), <strong>Cmd+click</strong> (macOS) or <strong>Ctrl+click</strong> (Linux) on issue numbers to open them in your browser, or on the board title in the footer to open the project board.
-          Active jobs show a live turn counter (<code>[N/M turns]</code>) in the In Progress pane.
+          Live dashboard shows active jobs, stage progress, token costs, and history.
         </div>
-      </div>
-      <div class="feature-card">
+      </a>
+      <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#multi-repo-support" aria-label="Multi-Repo Support — open documentation">
         <span class="feature-icon">🗂️</span>
         <div class="feature-title">Multi-Repo Support</div>
         <div class="feature-desc">
-          Fabrik always bare-clones every managed repository on first access.
-          Run it from any directory — no checkout needed. Repos are discovered
-          lazily from the project board; worktrees are created per repo and per
-          issue automatically. Enable multi-repo mode by omitting (or commenting
-          out) <code>repo:</code> in <code>.fabrik/config.yaml</code> — Fabrik
-          then processes issues from all repositories on the board.
+          One Fabrik instance manages issues across every repo on the board.
         </div>
-      </div>
-      <div class="feature-card">
+      </a>
+      <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#5-plugin--skills" aria-label="Plugin &amp; Skills — open documentation">
         <span class="feature-icon">🧩</span>
         <div class="feature-title">Plugin &amp; Skills</div>
         <div class="feature-desc">
-          Customize Claude's methodology per stage with markdown skill files in
-          <code>.fabrik/plugin/skills/</code>. Reference a skill by name in your
-          stage YAML — Fabrik injects it into Claude's prompt. Default skills
-          ship with Fabrik; <code>fabrik init</code> installs them and
-          <code>fabrik upgrade</code> refreshes them.
+          Inject custom methodology per stage with plain markdown skill files.
         </div>
-      </div>
-      <div class="feature-card">
+      </a>
+      <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#dependency-based-sequencing-formations" aria-label="Formations — open documentation">
         <span class="feature-icon">🔗</span>
         <div class="feature-title">Formations</div>
         <div class="feature-desc">
-          Coordinate multi-issue projects using GitHub's native "Blocked by"
-          relationships. Independent issues execute in parallel; dependent issues
-          gate automatically. The <code>fabrik:blocked</code> label is managed
-          entirely by the engine — no pre-creation needed. See the
-          <a href="{{ '/USER_GUIDE' | relative_url }}#dependency-based-sequencing-formations">USER_GUIDE §3</a>
-          for the full recipe and real-world validation numbers.
+          Chain issues with GitHub's blocked-by relationships for automatic parallel execution.
         </div>
-      </div>
-      <div class="feature-card">
+      </a>
+      <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#pending-reviewer-gate" aria-label="Pending Reviewer Gate — open documentation">
         <span class="feature-icon">👁️</span>
         <div class="feature-title">Pending Reviewer Gate</div>
         <div class="feature-desc">
-          Set <code>wait_for_reviews: true</code> on a stage and Fabrik uses
-          a three-phase gate: (1) immediately apply <code>fabrik:awaiting-review</code>
-          on completion, (2) poll until all requested reviewers submit, (3)
-          unconditionally re-invoke the stage agent to address any unresolved
-          inline PR review thread comments — regardless of whether auto-advance
-          is active. Reviews with only top-level text (e.g., bot approvals or
-          summary-only comments) skip re-invocation. Auto-advancement to the
-          next stage after re-invocation still requires auto-advance to be
-          active. Controlled by <code>--review-wait-timeout</code> /
-          <code>FABRIK_REVIEW_WAIT_TIMEOUT</code> (default 15
-          min per cycle) and <code>--max-review-cycles</code> /
-          <code>FABRIK_MAX_REVIEW_CYCLES</code> (default 5
-          cycles). Timeout or cycle-limit exceeded pauses the issue with
-          <code>fabrik:awaiting-input</code> for human review.
+          Waits for all requested PR reviewers then re-invokes the stage to address comments.
         </div>
-      </div>
-      <div class="feature-card">
+      </a>
+      <a class="feature-card" href="{{ '/state-machine' | relative_url }}#64-ci-gate-and-ci-fix-reinvoke" aria-label="CI Gate — open documentation">
         <span class="feature-icon">✅</span>
         <div class="feature-title">CI Gate</div>
         <div class="feature-desc">
-          Set <code>wait_for_ci: true</code> on a stage (the Validate stage ships
-          with this enabled by default) and Fabrik blocks auto-advance and
-          auto-merge until all CI checks pass. On failure, Fabrik re-invokes the
-          stage agent with a structured report classifying each failed check as a
-          new regression or pre-existing failure, so it can fix the code and push
-          again. If the cycle limit (<code>--max-ci-fix-cycles</code>) or
-          timeout (<code>FABRIK_CI_WAIT_TIMEOUT</code>) is exceeded, Fabrik
-          pauses the issue with <code>fabrik:awaiting-input</code> for human
-          review. When GitHub reports the PR as <code>mergeable: false</code>
-          (the PR has merge conflicts with the base branch), Fabrik applies
-          <code>fabrik:rebase-needed</code> and dispatches a rebase
-          re-invocation for Claude to fetch, rebase, resolve conflicts, and
-          force-push.
+          Blocks merge until CI passes and auto-fixes failing checks each cycle.
         </div>
-      </div>
+      </a>
     </div>
 
     <div class="factory-callout">
