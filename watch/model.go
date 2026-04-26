@@ -59,9 +59,10 @@ type WatchModel struct {
 	selectedTabIdx int
 	stageOrder     map[string]int // stage name -> pipeline order (from stages YAML)
 
-	// Turn counter for the live stage (resets on stage transition)
-	turnsUsed     int
-	stageMaxTurns map[string]int // stage name -> configured max_turns (0 = unlimited)
+	// Turn counter for the live stage (resets on new log file / invocation change)
+	turnsUsed              int
+	cachedEffectiveMaxTurns int            // cached result of effectiveMaxTurns(); updated on NewLogFileMsg/GitHubPollMsg
+	stageMaxTurns          map[string]int  // stage name -> configured max_turns (0 = unlimited)
 
 	// Transient status message (shown in status bar, cleared on TickMsg)
 	statusMsg string
@@ -161,10 +162,15 @@ func logFileCountForStage(logDir, stageName string) int {
 // effectiveMaxTurns returns the effective turn budget for the currently live stage.
 // Applies 2× multiplier when fabrik:extend-turns label is present and this is the
 // first invocation for the stage (one log file = not yet in extension loop).
-// Returns 0 when the stage has no configured limit.
+// Returns 0 when the stage has no configured limit or for comment-review invocations
+// (which use their own smaller budget not tracked in stageMaxTurns).
 func (m *WatchModel) effectiveMaxTurns() int {
 	stageName := currentStageFromLog(m.logDir)
 	if stageName == "" {
+		return 0
+	}
+	// Comment-review invocations use comment_max_turns (not stage.MaxTurns); show turn N without denominator.
+	if strings.HasSuffix(stageName, "-comment-review") {
 		return 0
 	}
 	base, ok := m.stageMaxTurns[stageName]
@@ -420,6 +426,7 @@ func (m WatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		newTabs := buildStageTabs(m.logDir, m.stageOrder)
 		m.stageTabs = newTabs
 		m.selectedTabIdx = liveTabIdx(newTabs)
+		m.cachedEffectiveMaxTurns = m.effectiveMaxTurns()
 		return m, nil
 
 	case GitHubPollMsg:
@@ -428,6 +435,7 @@ func (m WatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		newTabs := buildStageTabs(m.logDir, m.stageOrder)
 		m.selectedTabIdx = mergeTabSelection(newTabs, m.stageTabs, m.selectedTabIdx)
 		m.stageTabs = newTabs
+		m.cachedEffectiveMaxTurns = m.effectiveMaxTurns()
 		return m, nextGitHubPoll(m.opts.PollInterval)
 
 	case TickMsg:
@@ -550,9 +558,8 @@ func (m WatchModel) View() string {
 	}
 	isLive := len(m.stageTabs) == 0 || (m.selectedTabIdx < len(m.stageTabs) && m.stageTabs[m.selectedTabIdx].IsLive)
 	if isLive && m.turnsUsed > 0 {
-		effective := m.effectiveMaxTurns()
-		if effective > 0 {
-			prLine += dimStyle.Render(fmt.Sprintf("  |  turn %d/%d", m.turnsUsed, effective))
+		if m.cachedEffectiveMaxTurns > 0 {
+			prLine += dimStyle.Render(fmt.Sprintf("  |  turn %d/%d", m.turnsUsed, m.cachedEffectiveMaxTurns))
 		} else {
 			prLine += dimStyle.Render(fmt.Sprintf("  |  turn %d", m.turnsUsed))
 		}
