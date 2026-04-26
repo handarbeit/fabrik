@@ -278,9 +278,10 @@ func TestAttemptMergeOnValidate_ErrNotMergeable_PostsComment(t *testing.T) {
 	}
 }
 
-// TestHandleStageComplete_WaitForCI_SkipsMergeAndReturns verifies Approach A: when
-// wait_for_ci is true, handleStageComplete adds the completion label and returns
-// without calling attemptMergeOnValidate.
+// TestHandleStageComplete_WaitForCI_SkipsMergeAndReturns verifies Approach A': when
+// wait_for_ci is true, handleStageComplete adds fabrik:awaiting-ci, does NOT add
+// stage:Validate:complete, and does NOT call attemptMergeOnValidate.
+// The completion label is deferred to checkCIGate in the catch-up loop (ADR 032).
 func TestHandleStageComplete_WaitForCI_SkipsMergeAndReturns(t *testing.T) {
 	merged := false
 	client := &mockGitHubClient{
@@ -303,17 +304,23 @@ func TestHandleStageComplete_WaitForCI_SkipsMergeAndReturns(t *testing.T) {
 	eng.handleStageComplete(board, item, validateStage)
 
 	if merged {
-		t.Error("MergePR must not be called when wait_for_ci is true (Approach A)")
+		t.Error("MergePR must not be called when wait_for_ci is true")
 	}
-	// Completion label should still be added.
-	found := false
+	// Completion label must NOT be added — deferred to checkCIGate (ADR 032).
 	for _, c := range client.addLabelCalls {
 		if c.labelName == "stage:Validate:complete" {
-			found = true
+			t.Error("stage:Validate:complete must not be added by handleStageComplete when wait_for_ci: true")
 		}
 	}
-	if !found {
-		t.Error("expected stage:Validate:complete label even with wait_for_ci=true")
+	// fabrik:awaiting-ci must be added as the in-flight durable marker.
+	foundCI := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:awaiting-ci" {
+			foundCI = true
+		}
+	}
+	if !foundCI {
+		t.Error("fabrik:awaiting-ci must be added when wait_for_ci: true")
 	}
 }
 

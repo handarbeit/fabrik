@@ -741,3 +741,57 @@ func TestItemMayNeedWork_NoSpecialLabel_RespectsUpdatedAtCache(t *testing.T) {
 		t.Error("item without bypass labels should be filtered by updatedAt cache")
 	}
 }
+
+// ── fabrik:awaiting-ci conjunctive gate dispatch guards ──────────────────────
+
+// TestItemNeedsWork_AwaitingCI_NoDispatch verifies that itemNeedsWork returns
+// false when fabrik:awaiting-ci is present, preventing re-dispatch during CI
+// await (R3). The catch-up loop evaluates CI; processItem must not be called.
+func TestItemNeedsWork_AwaitingCI_NoDispatch(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	item := gh.ProjectItem{
+		Number: 64,
+		Status: "Research",
+		Labels: []string{"fabrik:awaiting-ci"},
+	}
+	if eng.itemNeedsWork(item) {
+		t.Error("itemNeedsWork must return false when fabrik:awaiting-ci is present (R3)")
+	}
+}
+
+// TestItemMayNeedWork_ClosedIssue_AwaitingCI_Passes verifies that a closed item
+// with fabrik:awaiting-ci passes the closed-issue guard in itemMayNeedWork, so
+// the catch-up loop can complete the CI gate after a PR merge closes the issue.
+func TestItemMayNeedWork_ClosedIssue_AwaitingCI_Passes(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	item := gh.ProjectItem{
+		Number:   65,
+		Status:   "Research",
+		IsClosed: true,
+		Labels:   []string{"fabrik:awaiting-ci"},
+	}
+	// itemMayNeedWork should NOT filter this closed item — it has fabrik:awaiting-ci
+	if !eng.itemMayNeedWork(item) {
+		t.Error("closed item with fabrik:awaiting-ci should pass itemMayNeedWork closed-issue guard")
+	}
+}
+
+// TestItemNeedsWork_ClosedIssue_AwaitingCI_Passes verifies that a closed item
+// with fabrik:awaiting-ci passes the closed-issue guard in itemNeedsWork.
+func TestItemNeedsWork_ClosedIssue_AwaitingCI_Passes(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	item := gh.ProjectItem{
+		Number:   66,
+		Status:   "Research",
+		IsClosed: true,
+		Labels:   []string{"fabrik:awaiting-ci"},
+	}
+	// itemNeedsWork: the awaiting-ci gate (return false) runs AFTER the
+	// closed-issue guard, so a closed item with awaiting-ci passes the closed
+	// guard but is still filtered by the awaiting-ci gate (no dispatch).
+	// This verifies the item is NOT dispatched, which is the correct behavior:
+	// the catch-up loop (not processItem) handles the CI gate transition.
+	if eng.itemNeedsWork(item) {
+		t.Error("closed item with fabrik:awaiting-ci should be filtered by awaiting-ci gate (not dispatched)")
+	}
+}

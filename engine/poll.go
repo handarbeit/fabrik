@@ -649,13 +649,20 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		}
 		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
 		hasComplete := false
+		hasAwaitingCI := false
 		for _, l := range item.Labels {
 			if l == completeLabel {
 				hasComplete = true
-				break
+			}
+			if l == "fabrik:awaiting-ci" {
+				hasAwaitingCI = true
 			}
 		}
-		if !hasComplete {
+		// Admit items with fabrik:awaiting-ci on a wait_for_ci stage even when
+		// stage:X:complete is absent — handleStageComplete now defers the
+		// completion label until checkCIGate confirms CI is green (R4).
+		isWaitForCI := stage.WaitForCI != nil && *stage.WaitForCI
+		if !hasComplete && !(hasAwaitingCI && isWaitForCI) {
 			continue
 		}
 
