@@ -135,13 +135,14 @@ func TestBuildStageTabs_EmptyDir(t *testing.T) {
 	}
 }
 
-// TestIsAssistantTurn verifies NDJSON assistant-type detection for the watch follower.
-func TestIsAssistantTurn(t *testing.T) {
+// TestIsUserTurn verifies NDJSON user-type detection for the watch follower.
+func TestIsUserTurn(t *testing.T) {
 	tests := []struct {
 		line string
 		want bool
 	}{
-		{`{"type":"assistant","message":{}}` + "\n", true},
+		{`{"type":"user","message":{}}` + "\n", true},
+		{`{"type":"assistant","message":{}}` + "\n", false},
 		{`{"type":"result","num_turns":10}` + "\n", false},
 		{`{"type":"tool_use"}` + "\n", false},
 		{"not json\n", false},
@@ -149,9 +150,9 @@ func TestIsAssistantTurn(t *testing.T) {
 		{"{}\n", false},
 	}
 	for _, tt := range tests {
-		got := isAssistantTurn([]byte(tt.line))
+		got := isUserTurn([]byte(tt.line))
 		if got != tt.want {
-			t.Errorf("isAssistantTurn(%q) = %v, want %v", tt.line, got, tt.want)
+			t.Errorf("isUserTurn(%q) = %v, want %v", tt.line, got, tt.want)
 		}
 	}
 }
