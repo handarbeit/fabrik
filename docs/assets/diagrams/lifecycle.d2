@@ -81,10 +81,32 @@ Research -> Plan
 Plan -> Implement: "Draft PR created"
 Implement -> Review
 Review -> Validate: "Review Gate\n(all reviewers submit)"
-Validate -> Done: "CI + Merge Gate\n(checks pass)"
+Validate -> Done: "CI Gate + Merge Gate\n(checks pass, no conflicts)"
 
 # ---- Gate off-ramps ----
 waiting: "Awaiting Input" {
+  shape: rectangle
+  style: {
+    fill: "#3d1f1f"
+    stroke: "#f87171"
+    font-color: "#fecaca"
+    border-radius: 6
+    stroke-dash: 4
+  }
+}
+
+awaiting-ci: "Awaiting CI" {
+  shape: rectangle
+  style: {
+    fill: "#3d1f1f"
+    stroke: "#f87171"
+    font-color: "#fecaca"
+    border-radius: 6
+    stroke-dash: 4
+  }
+}
+
+awaiting-rebase: "Awaiting Rebase" {
   shape: rectangle
   style: {
     fill: "#3d1f1f"
@@ -102,7 +124,14 @@ Review -> waiting: "timeout / cycle limit" {
     font-color: "#f87171"
   }
 }
-Validate -> waiting: "CI failure / merge conflict" {
+Validate -> awaiting-ci: "CI Gate\n(checks failed)" {
+  style: {
+    stroke: "#f87171"
+    stroke-dash: 4
+    font-color: "#f87171"
+  }
+}
+Validate -> awaiting-rebase: "Merge Gate\n(conflict)" {
   style: {
     stroke: "#f87171"
     stroke-dash: 4
