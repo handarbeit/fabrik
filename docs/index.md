@@ -140,7 +140,7 @@ description: >-
         <span class="feature-icon">📋</span>
         <div class="feature-title">GitHub-Native Pipeline</div>
         <div class="feature-desc">
-          Board columns are stages and labels are state — no CI glue needed.
+          Board columns define stages and labels define state.
         </div>
       </a>
       <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#git-repositories-and-worktrees" aria-label="Isolated Git Worktrees — open documentation">
