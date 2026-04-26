@@ -57,13 +57,14 @@ func TestSaveDebugLog_WritesFile(t *testing.T) {
 	}
 }
 
-// TestIsAssistantTurnLine verifies assistant-type detection from NDJSON lines.
-func TestIsAssistantTurnLine(t *testing.T) {
+// TestIsUserTurnLine verifies user-type detection from NDJSON lines.
+func TestIsUserTurnLine(t *testing.T) {
 	tests := []struct {
 		line string
 		want bool
 	}{
-		{`{"type":"assistant","message":{}}` + "\n", true},
+		{`{"type":"user","message":{}}` + "\n", true},
+		{`{"type":"assistant","message":{}}` + "\n", false},
 		{`{"type":"result","num_turns":5}` + "\n", false},
 		{`{"type":"tool_use"}` + "\n", false},
 		{"not json\n", false},
@@ -71,16 +72,17 @@ func TestIsAssistantTurnLine(t *testing.T) {
 		{"{}\n", false},
 	}
 	for _, tt := range tests {
-		got := isAssistantTurnLine([]byte(tt.line))
+		got := isUserTurnLine([]byte(tt.line))
 		if got != tt.want {
-			t.Errorf("isAssistantTurnLine(%q) = %v, want %v", tt.line, got, tt.want)
+			t.Errorf("isUserTurnLine(%q) = %v, want %v", tt.line, got, tt.want)
 		}
 	}
 }
 
-// TestTurnCountingWriter_CountsAssistantTurns verifies that turnCountingWriter
-// increments count and calls the callback on each assistant-type NDJSON line.
-func TestTurnCountingWriter_CountsAssistantTurns(t *testing.T) {
+// TestTurnCountingWriter_CountsUserTurns verifies that turnCountingWriter
+// increments count and calls the callback on each user-type NDJSON line,
+// not on assistant-type lines.
+func TestTurnCountingWriter_CountsUserTurns(t *testing.T) {
 	var inner bytes.Buffer
 	var calls []struct{ turns, max int }
 	prev := claudeTurnProgress
@@ -94,10 +96,10 @@ func TestTurnCountingWriter_CountsAssistantTurns(t *testing.T) {
 
 	tcw := &turnCountingWriter{inner: &inner, issueNumber: 42, maxTurns: 10}
 
-	// Write two assistant lines and one non-assistant line.
-	line1 := []byte(`{"type":"assistant"}` + "\n")
+	// Two user lines separated by a non-user line; only user lines should trigger callbacks.
+	line1 := []byte(`{"type":"user"}` + "\n")
 	line2 := []byte(`{"type":"result","num_turns":1}` + "\n")
-	line3 := []byte(`{"type":"assistant"}` + "\n")
+	line3 := []byte(`{"type":"user"}` + "\n")
 
 	tcw.Write(line1)
 	tcw.Write(line2)
@@ -112,6 +114,16 @@ func TestTurnCountingWriter_CountsAssistantTurns(t *testing.T) {
 	if calls[1].turns != 2 || calls[1].max != 10 {
 		t.Errorf("call[1] = %+v, want {2 10}", calls[1])
 	}
+
+	// ±1 boundary: at max_turns=2, two user events produce TurnsUsed=2.
+	tcw2 := &turnCountingWriter{inner: &inner, issueNumber: 42, maxTurns: 2}
+	var boundCalls []int
+	claudeTurnProgress = func(_, turnsUsed, _ int) { boundCalls = append(boundCalls, turnsUsed) }
+	tcw2.Write([]byte(`{"type":"user"}` + "\n"))
+	tcw2.Write([]byte(`{"type":"user"}` + "\n"))
+	if len(boundCalls) != 2 || boundCalls[1] != 2 {
+		t.Errorf("boundary: got calls %v, want [1 2]", boundCalls)
+	}
 }
 
 // TestTurnCountingWriter_SplitLine verifies detection when a line arrives in multiple writes.
@@ -124,8 +136,8 @@ func TestTurnCountingWriter_SplitLine(t *testing.T) {
 
 	tcw := &turnCountingWriter{inner: &inner, issueNumber: 1, maxTurns: 5}
 	// Split the line across two Write calls.
-	tcw.Write([]byte(`{"type":"assi`))
-	tcw.Write([]byte(`stant"}` + "\n"))
+	tcw.Write([]byte(`{"type":"us`))
+	tcw.Write([]byte(`er"}` + "\n"))
 
 	if callCount != 1 {
 		t.Errorf("expected 1 callback after split-line write, got %d", callCount)
@@ -141,5 +153,31 @@ func TestTurnCountingWriter_NilCallback(t *testing.T) {
 	var inner bytes.Buffer
 	tcw := &turnCountingWriter{inner: &inner, issueNumber: 1, maxTurns: 5}
 	// Should not panic.
+	tcw.Write([]byte(`{"type":"user"}` + "\n"))
+}
+
+// TestTurnCountingWriter_MultiToolUseSequence verifies that a realistic turn with
+// multiple tool-use blocks (one user event + multiple assistant events) counts as
+// exactly one turn, not four.
+func TestTurnCountingWriter_MultiToolUseSequence(t *testing.T) {
+	var inner bytes.Buffer
+	callCount := 0
+	prev := claudeTurnProgress
+	claudeTurnProgress = func(_, _, _ int) { callCount++ }
+	defer func() { claudeTurnProgress = prev }()
+
+	tcw := &turnCountingWriter{inner: &inner, issueNumber: 1, maxTurns: 5}
+
+	// One logical turn: one user event (tool results) followed by three assistant
+	// events (text response + two tool_use blocks).
+	tcw.Write([]byte(`{"type":"user"}` + "\n"))
 	tcw.Write([]byte(`{"type":"assistant"}` + "\n"))
+	tcw.Write([]byte(`{"type":"assistant"}` + "\n"))
+	tcw.Write([]byte(`{"type":"assistant"}` + "\n"))
+	// Second logical turn.
+	tcw.Write([]byte(`{"type":"user"}` + "\n"))
+
+	if callCount != 2 {
+		t.Errorf("expected 2 callback calls (one per logical turn), got %d", callCount)
+	}
 }

@@ -38,6 +38,14 @@ The `followFile` goroutine in `watch/logfollow.go` already reads individual NDJS
 - `watch/events.go`: new `TurnCountMsg` message type
 - `watch/model.go`: `turnsUsed` field updated on each `TurnCountMsg`; reset to 0 on `NewLogFileMsg` (stage transition); `effectiveMaxTurns()` derives the budget heuristically from stage config + `fabrik:extend-turns` label + log file count
 
+## Correction (Issue #447, 2026-04-26)
+
+The original implementation counted `{"type":"assistant"}` NDJSON events as the turn boundary. This was incorrect: a single logical Claude turn (one user→assistant cycle) produces **one** `{"type":"user"}` event followed by **one or more** `{"type":"assistant"}` events — one text response plus one per `tool_use` block. Counting `"assistant"` events therefore over-counted by the number of tool calls per turn, causing the live badge to routinely display values like "76/50" while Claude internally counted 50 turns.
+
+The fix (applied to both `engine/claude.go` and `watch/logfollow.go`) switches the detected event type from `"assistant"` to `"user"`. Each logical turn begins with exactly one `"user"` event (either the initial prompt or tool-result responses), so counting `"user"` events aligns precisely with Claude's own `num_turns` accounting.
+
+The function `isAssistantTurn(line []byte) bool` (watch path) and `isAssistantTurnLine(line []byte) bool` (engine path) were renamed to `isUserTurn` and `isUserTurnLine` respectively, with the detection string updated accordingly.
+
 ## Implications for Future Real-Time Data in the Watch View
 
 The core constraint driving this decision — **the watch view is a separate process and cannot receive the engine's in-process TUI channel events** — applies to any future real-time data addition to the watch view.
