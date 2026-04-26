@@ -22,7 +22,7 @@ The `yolo` auto-merge path already called `MergePR` directly. A CI gate is embed
 
 - Fetch the PR's head SHA via `FetchLinkedPR` (REST — avoids extending the existing large GraphQL query).
 - Fetch check runs via `FetchCheckRuns`.
-- **R5**: No check runs → gate clears (repo has no CI).
+- **R5**: No check runs → if `prHasHadChecks[issueKey]` is true (this PR previously had check runs), gate blocks and waits — the engine is in the post-push registration window. If the flag is false (first-ever poll for this PR), gate clears (repo has no CI).
 - **R4**: All checks green → clear `ciMergePendingSince`; clear `fabrik:awaiting-ci`; proceed to merge.
 - **R3**: Any check failed → add `fabrik:awaiting-ci`; return error (caller logs and skips advance).
 - **R2**: Any check pending → track start time in `ciMergePendingSince`; return error (no label added — R10c).
@@ -40,7 +40,7 @@ For stages with `wait_for_ci: true`, `handleStageComplete` uses **Approach A**:
 The catch-up loop Phase 1 (`poll()`) now calls `checkCIGate(board, item, stage)` after the review gate:
 
 - `(false, false, false)` — gate clear; fall through to Phase 2 (advancement/merge).
-- `(true, false, false)` — CI still pending; skip to next item. **`fabrik:awaiting-ci` is NOT applied (R10c)** — label churn from transient pending states would produce noise and mislead users. The item's `fabrik:awaiting-ci` label presence triggers `itemMayNeedWork` to bypass the `updatedAt` cache, ensuring re-evaluation on every poll.
+- `(true, false, false)` — CI still pending, **or** post-push registration delay (R5: zero check runs but `prHasHadChecks[issueKey]` is true); skip to next item. **`fabrik:awaiting-ci` is NOT applied (R10c)** — label churn from transient pending states would produce noise and mislead users. The item's `fabrik:awaiting-ci` label presence triggers `itemMayNeedWork` to bypass the `updatedAt` cache, ensuring re-evaluation on every poll.
 - `(true, true, false)` — CI failed; `fabrik:awaiting-ci` applied (idempotent); dispatch `dispatchCIFixReinvoke` or pause if cycle limit exceeded.
 - `(false, false, true)` — Timeout: `fabrik:awaiting-ci` already present ≥ `CIWaitTimeout` (checked via `FetchLabelAppliedAt`); pause with `fabrik:paused` + `fabrik:awaiting-input`.
 
@@ -50,6 +50,7 @@ The two prongs use different timeout strategies due to their different lifecycle
 
 - **Prong 1** (merge guard): Uses an in-memory `ciMergePendingSince` map. Acceptable because merge-guard state is transient — if the engine restarts, it simply re-evaluates CI on the next poll.
 - **Prong 2** (catch-up loop): Uses `FetchLabelAppliedAt` on `fabrik:awaiting-ci`. The label is durable across restarts. `FetchLabelAppliedAt` makes a REST API call, but only when CI has already failed and the label is present — a rare, high-signal path.
+- **Post-push registration delay guard**: The in-memory `prHasHadChecks map[string]bool` (keyed by `issueKey`) records whether `FetchCheckRuns` has ever returned a non-empty result for a given issue in this process lifetime. When R5 fires (zero check runs), `checkCIGate` consults this flag: if true, the gate blocks (post-push window); if false, the gate clears (no CI configured). On engine restart the flag resets — the worst case is one poll cycle where a newly-registered post-push SHA gets a false "no CI" read, after which the next poll will re-block correctly.
 
 ### CI-Fix Re-invocation
 

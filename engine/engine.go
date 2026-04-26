@@ -69,6 +69,7 @@ type Engine struct {
 	ciFixCycleCount      map[string]int        // key: "owner/repo#N-stageName"; CI-fix re-invocation cycle count per stage
 	rebaseCycleCount     map[string]int        // key: "owner/repo#N-stageName"; rebase re-invocation cycle count per stage
 	ciMergePendingSince  map[string]time.Time  // key: issueKey; when CI was first observed in_progress in the merge guard
+	prHasHadChecks       map[string]bool       // key: issueKey; true once FetchCheckRuns has returned non-empty for this issue
 	lastUsage            map[string]TokenUsage // key: issueKey; per-issue token usage from last processItem (for TUI)
 	lastCompleted        map[string]bool       // key: issueKey; per-issue stage completion from last processItem (for TUI)
 	lastBlocked          map[string]bool       // key: issueKey; per-issue blocked-on-input from last processItem (for TUI)
@@ -133,6 +134,7 @@ func New(cfg Config) (*Engine, error) {
 		ciFixCycleCount:      make(map[string]int),
 		rebaseCycleCount:     make(map[string]int),
 		ciMergePendingSince:  make(map[string]time.Time),
+		prHasHadChecks:       make(map[string]bool),
 		sem:                  make(chan struct{}, cfg.MaxConcurrent),
 	}
 
@@ -182,6 +184,7 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		ciFixCycleCount:      make(map[string]int),
 		rebaseCycleCount:     make(map[string]int),
 		ciMergePendingSince:  make(map[string]time.Time),
+		prHasHadChecks:       make(map[string]bool),
 		sem:                  make(chan struct{}, maxConcurrent),
 	}
 	if worktrees != nil {
