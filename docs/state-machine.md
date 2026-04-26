@@ -136,7 +136,7 @@ Each active stage column has the same set of reachable sub-states:
 
 ## 2. Event Enumeration
 
-Ten distinct event types drive state transitions:
+Eleven distinct event types drive state transitions (§2.1–2.11), plus one TUI display event (§2.12) that does not drive transitions:
 
 ### 2.1 Poll Tick
 
@@ -264,6 +264,23 @@ Ten distinct event types drive state transitions:
 - `fabrik:rebase-needed` is only applied on **confirmed conflict** (`mergeable == false`), not on `mergeable == null` (GitHub still computing)
 - Rebase cycle counter is `rebaseCycleCount` (keyed by `issueKey + "-" + stageName`)
 - Resolution relies on Claude rebasing in the worktree (to handle semantic collisions like duplicated ADR numbers) rather than an engine-side `git rebase`
+
+### 2.12 TurnProgressEvent (TUI Display Event)
+
+**Trigger:** A `{"type":"assistant"}` NDJSON line is written to Claude's stdout pipe during a Claude invocation, indicating that one assistant turn has completed.
+
+**Code path:** `runClaude()` stdout pipe → `turnCountingWriter.Write()` → detects `type == "assistant"` line → increments per-invocation counter → calls `claudeTurnProgress(issueNumber, turnsUsed, maxTurns)` → `Engine.emitStructural(TurnProgressEvent{...})` → TUI channel
+
+**Effect:** Purely additive display — does not trigger any state transitions, label mutations, or issue processing. The TUI consumes `TurnProgressEvent` to update the live turn counter shown in:
+- The In Progress pane row for the active issue (width-adaptive badge `[N/M turns]` / `[N/M]` / omitted)
+- The detail panel for the selected active item (`Turns: N/M`)
+
+`TurnProgressEvent` is only emitted in TUI mode (`claudeTurnProgress` is nil in plain-text mode and tests). It uses `emitStructural` (blocking channel send) to avoid dropping events; at most one event per assistant turn, so the 256-deep channel buffer is not a concern in normal operation.
+
+**`MaxTurns` in the event** carries the effective budget for the current invocation — `effectiveBudget` as computed in `InvokeClaude()` (which already accounts for `opts.MaxTurnsOverride` from the extension loop). This means:
+- First invocation without `fabrik:extend-turns`: `stage.MaxTurns`
+- First invocation with `fabrik:extend-turns`: `2 × stage.MaxTurns`
+- Extension loop second iteration: `stage.MaxTurns` (per-invocation limit, not cumulative)
 
 ---
 

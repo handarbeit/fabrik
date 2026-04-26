@@ -251,7 +251,7 @@ func (e *Engine) SetEvents(ch chan tui.Event) {
 	claudeTUI = ch != nil
 	if ch != nil {
 		claudeTurnProgress = func(issueNumber, turnsUsed, maxTurns int) {
-			e.emitStructural(tui.TurnProgressEvent{
+			e.emit(tui.TurnProgressEvent{
 				IssueNumber: issueNumber,
 				TurnsUsed:   turnsUsed,
 				MaxTurns:    maxTurns,
