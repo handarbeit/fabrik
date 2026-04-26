@@ -25,9 +25,12 @@ type ProjectConfig struct {
 	Yolo          bool   `yaml:"yolo"`
 	AutoUpgrade   bool   `yaml:"auto_upgrade"`
 	GitSSH        bool   `yaml:"git_ssh"`
-	TUI           *bool  `yaml:"tui"`
-	DebugOutput   bool   `yaml:"debug_output"`
-	Version       string `yaml:"version"`
+	TUI           *bool    `yaml:"tui"`
+	DebugOutput   bool     `yaml:"debug_output"`
+	Version       string   `yaml:"version"`
+	Webhooks      bool     `yaml:"webhooks"`
+	WebhookPort   *int     `yaml:"webhook_port"`
+	WebhookEvents []string `yaml:"webhook_events"`
 }
 
 // LoadProjectConfig reads .fabrik/config.yaml from CWD.

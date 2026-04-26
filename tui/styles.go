@@ -16,4 +16,5 @@ var (
 	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 	activeStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	selectedStyle = lipgloss.NewStyle().Background(lipgloss.Color("238"))
+	infoStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("39")) // blue: webhook starting-up indicator
 )

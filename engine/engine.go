@@ -37,6 +37,9 @@ type Config struct {
 	DebugOutput       bool
 	PluginDir         string
 	Stages            []*stages.Stage
+	Webhooks          bool
+	WebhookPort       int
+	WebhookEvents     []string
 	// ReadyCh is closed once Run() has registered signal handlers. Tests use
 	// this to avoid sending SIGINT before signal.Notify is installed.
 	ReadyCh chan struct{}
@@ -86,6 +89,7 @@ type Engine struct {
 	events               chan tui.Event        // nil in tests / plain-text mode; TUI goroutine consumes
 	logFile              *os.File              // persistent log file at .fabrik/fabrik.log; nil if not opened
 	logMu                sync.Mutex            // serializes concurrent writes to logFile
+	webhookMgr           *webhookManager       // nil when webhooks are disabled
 }
 
 func New(cfg Config) (*Engine, error) {
