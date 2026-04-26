@@ -31,8 +31,8 @@ type StatusMsgMsg struct {
 	Text string
 }
 
-// TurnCountMsg is sent by the log follower each time it detects an assistant
-// turn in the live NDJSON stream, carrying the cumulative per-invocation count.
+// TurnCountMsg is sent by the log follower each time it detects a user event
+// (logical turn start) in the live NDJSON stream, carrying the cumulative per-invocation count.
 type TurnCountMsg struct {
 	TurnsUsed int
 }
