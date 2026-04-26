@@ -295,7 +295,7 @@ func followFile(path, logDir string, send func(tea.Msg), done <-chan struct{}) {
 
 			line, err := reader.ReadBytes('\n')
 			if len(line) > 0 {
-				if isAssistantTurn(line) {
+				if isUserTurn(line) {
 					turnCount++
 					send(TurnCountMsg{TurnsUsed: turnCount})
 				}
@@ -332,15 +332,15 @@ func followFile(path, logDir string, send func(tea.Msg), done <-chan struct{}) {
 	}
 }
 
-// isAssistantTurn returns true if line is a JSON object with type == "assistant".
-func isAssistantTurn(line []byte) bool {
+// isUserTurn returns true if line is a JSON object with type == "user".
+func isUserTurn(line []byte) bool {
 	if len(line) == 0 || line[0] != '{' {
 		return false
 	}
 	var envelope struct {
 		Type string `json:"type"`
 	}
-	return json.Unmarshal(line, &envelope) == nil && envelope.Type == "assistant"
+	return json.Unmarshal(line, &envelope) == nil && envelope.Type == "user"
 }
 
 // pollForNewLogFile polls logDir every 2 seconds. When it observes a .log

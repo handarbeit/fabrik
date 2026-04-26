@@ -53,8 +53,8 @@ func CheckDecomposed(output string) bool {
 // Falls back to stderr when nil (e.g. in tests).
 var claudeLogf func(issueNumber int, tag, format string, args ...any)
 
-// claudeTurnProgress is called after each assistant turn completes during a Claude
-// invocation. Set by the Engine during construction (same block as claudeLogf).
+// claudeTurnProgress is called after each user event (logical turn start) during a
+// Claude invocation. Set by the Engine during construction (same block as claudeLogf).
 // nil when no TUI is active (tests, plain-text mode).
 var claudeTurnProgress func(issueNumber, turnsUsed, maxTurns int)
 
@@ -89,9 +89,9 @@ func (w *activityWriter) Write(p []byte) (int, error) {
 	return w.inner.Write(p)
 }
 
-// turnCountingWriter wraps an io.Writer, counts assistant turns from the NDJSON
-// stream in real time, and calls claudeTurnProgress after each turn.
-// It buffers bytes until '\n', then checks each line for type == "assistant".
+// turnCountingWriter wraps an io.Writer, counts logical turns from the NDJSON
+// stream in real time, and calls claudeTurnProgress after each user event.
+// It buffers bytes until '\n', then checks each line for type == "user".
 // Safe for use from a single goroutine only (one per runClaude invocation).
 type turnCountingWriter struct {
 	inner       io.Writer
@@ -110,7 +110,7 @@ func (w *turnCountingWriter) Write(p []byte) (int, error) {
 		}
 		line := w.buf[:idx+1]
 		w.buf = w.buf[idx+1:]
-		if isAssistantTurnLine(line) {
+		if isUserTurnLine(line) {
 			w.count++
 			if claudeTurnProgress != nil {
 				claudeTurnProgress(w.issueNumber, w.count, w.maxTurns)
@@ -120,8 +120,8 @@ func (w *turnCountingWriter) Write(p []byte) (int, error) {
 	return w.inner.Write(p)
 }
 
-// isAssistantTurnLine returns true if line is a JSON object with type == "assistant".
-func isAssistantTurnLine(line []byte) bool {
+// isUserTurnLine returns true if line is a JSON object with type == "user".
+func isUserTurnLine(line []byte) bool {
 	line = bytes.TrimSpace(line)
 	if len(line) == 0 || line[0] != '{' {
 		return false
@@ -129,7 +129,7 @@ func isAssistantTurnLine(line []byte) bool {
 	var envelope struct {
 		Type string `json:"type"`
 	}
-	return json.Unmarshal(line, &envelope) == nil && envelope.Type == "assistant"
+	return json.Unmarshal(line, &envelope) == nil && envelope.Type == "user"
 }
 
 func claudeLog(issueNumber int, tag, format string, args ...any) {
