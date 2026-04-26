@@ -94,7 +94,9 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 		if stage == nil {
 			return false
 		}
-		if !stage.CleanupWorktree && !hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) {
+		// Also admit closed items with fabrik:awaiting-ci so the catch-up loop
+		// can complete the CI gate after a PR merge closes the issue.
+		if !stage.CleanupWorktree && !hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) && !hasLabel(item, "fabrik:awaiting-ci") {
 			return false
 		}
 	}
@@ -148,17 +150,6 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 					return true
 				}
 			}
-			// Force deep-fetch for CI-gated stages with a completion label but no
-			// fabrik:awaiting-ci label yet (CI still running): CI check run status
-			// changes don't bump the issue/PR updatedAt, so items waiting for CI
-			// would be permanently filtered by the updatedAt cache. The same
-			// reasoning applies to the merge-conflict gate — the base branch may
-			// advance without bumping our item's updatedAt.
-			if stage.WaitForCI != nil && *stage.WaitForCI {
-				if hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) {
-					return true
-				}
-			}
 			return false
 		}
 	}
@@ -192,12 +183,13 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 
 	// Closed issues are skipped unless the current stage is a cleanup stage
 	// (so cleanup can remove the worktree) OR the current stage is already
-	// marked complete (so the catch-up loop can advance to the next stage).
+	// marked complete (so the catch-up loop can advance to the next stage) OR
+	// fabrik:awaiting-ci is present (so the catch-up loop can finish the CI gate).
 	if item.IsClosed {
 		if stage == nil {
 			return false
 		}
-		if !stage.CleanupWorktree && !hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) {
+		if !stage.CleanupWorktree && !hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) && !hasLabel(item, "fabrik:awaiting-ci") {
 			return false
 		}
 	}
@@ -270,6 +262,12 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		if label == completeLabel {
 			return false
 		}
+	}
+
+	// CI gate in-flight: catch-up loop evaluates CI via checkCIGate; dispatcher
+	// must not re-invoke while CI is being awaited (R3).
+	if hasLabel(item, "fabrik:awaiting-ci") {
+		return false
 	}
 
 	// Check cooldown

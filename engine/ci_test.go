@@ -116,9 +116,17 @@ func TestCheckCIGate_Pending_BlocksNoLabel(t *testing.T) {
 	if ciFailure || timedOut {
 		t.Errorf("expected ciFailure=false timedOut=false for pending, got ciFailure=%v timedOut=%v", ciFailure, timedOut)
 	}
+	// checkCIGate must not add fabrik:awaiting-ci when CI is only pending;
+	// it was already applied by handleStageComplete when the stage completed.
 	for _, c := range client.addLabelCalls {
 		if c.labelName == "fabrik:awaiting-ci" {
-			t.Error("fabrik:awaiting-ci must NOT be added when CI is only pending (R10c)")
+			t.Error("checkCIGate must NOT add fabrik:awaiting-ci when CI is only pending")
+		}
+	}
+	// stage:X:complete must not be added while CI is pending
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Validate:complete" {
+			t.Error("stage:Validate:complete must NOT be added when CI is pending")
 		}
 	}
 }
@@ -227,6 +235,155 @@ func TestCheckCIGate_Failed_AlreadyLabeledNotYetTimedOut_Blocked(t *testing.T) {
 	}
 	if timedOut {
 		t.Error("expected timedOut=false when timeout has not elapsed")
+	}
+}
+
+// ── checkCIGate adds stage:X:complete on gate clear ──────────────────────────
+
+// TestCheckCIGate_AllGreen_AddsCompleteLabel verifies that checkCIGate adds
+// stage:X:complete when all CI checks pass (R5 — gate cleared).
+func TestCheckCIGate_AllGreen_AddsCompleteLabel(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, HeadSHA: "sha10"}, nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return []gh.CheckRun{
+				{Name: "build", Status: "completed", Conclusion: "success"},
+			}, nil
+		},
+	}
+	eng := testEngineForMerge(client)
+	tr := true
+	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	if blocked || ciFailure || timedOut {
+		t.Errorf("expected gate cleared, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
+	}
+	foundComplete := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Validate:complete" {
+			foundComplete = true
+		}
+	}
+	if !foundComplete {
+		t.Error("expected stage:Validate:complete to be added when all CI checks pass")
+	}
+	// fabrik:awaiting-ci should also be removed
+	foundRemove := false
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-ci" {
+			foundRemove = true
+		}
+	}
+	if !foundRemove {
+		t.Error("expected fabrik:awaiting-ci to be removed when gate clears")
+	}
+}
+
+// TestCheckCIGate_NoCheckRuns_AddsCompleteLabel verifies that checkCIGate adds
+// stage:X:complete when no check runs exist (no CI configured).
+func TestCheckCIGate_NoCheckRuns_AddsCompleteLabel(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, HeadSHA: "sha11"}, nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return nil, nil // no check runs (R5)
+		},
+	}
+	eng := testEngineForMerge(client)
+	tr := true
+	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	blocked, _, _ := eng.checkCIGate(nil, item, stage)
+	if blocked {
+		t.Error("expected gate cleared for no check runs (R5)")
+	}
+	foundComplete := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Validate:complete" {
+			foundComplete = true
+		}
+	}
+	if !foundComplete {
+		t.Error("expected stage:Validate:complete to be added when no CI is configured (R5)")
+	}
+}
+
+// TestCheckCIGate_Failed_DoesNotAddCompleteLabel verifies that checkCIGate does
+// NOT add stage:X:complete when CI checks have failed.
+func TestCheckCIGate_Failed_DoesNotAddCompleteLabel(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, HeadSHA: "sha12"}, nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return []gh.CheckRun{
+				{Name: "lint", Status: "completed", Conclusion: "failure"},
+			}, nil
+		},
+	}
+	eng := testEngineForMerge(client)
+	tr := true
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	_, ciFailure, _ := eng.checkCIGate(nil, item, stage)
+	if !ciFailure {
+		t.Error("expected ciFailure=true for failed CI")
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Validate:complete" {
+			t.Error("stage:Validate:complete must NOT be added when CI failed")
+		}
+	}
+}
+
+// TestCheckCIGate_NonValidateStage_AddsCorrectCompleteLabel verifies that
+// checkCIGate uses the correct stage name when adding the completion label
+// (not hard-coded to "Validate").
+func TestCheckCIGate_NonValidateStage_AddsCorrectCompleteLabel(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, HeadSHA: "sha13"}, nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return []gh.CheckRun{
+				{Name: "build", Status: "completed", Conclusion: "success"},
+			}, nil
+		},
+	}
+	eng := testEngineForMerge(client)
+	tr := true
+	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
+	// Use a non-Validate stage name
+	stage := &stages.Stage{Name: "Review", WaitForCI: &tr}
+
+	blocked, _, _ := eng.checkCIGate(nil, item, stage)
+	if blocked {
+		t.Error("expected gate cleared")
+	}
+	foundComplete := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Review:complete" {
+			foundComplete = true
+		}
+		if c.labelName == "stage:Validate:complete" {
+			t.Error("wrong completion label added — should be stage:Review:complete")
+		}
+	}
+	if !foundComplete {
+		t.Errorf("expected stage:Review:complete, got add calls: %v", func() []string {
+			var names []string
+			for _, c := range client.addLabelCalls {
+				names = append(names, c.labelName)
+			}
+			return names
+		}())
 	}
 }
 

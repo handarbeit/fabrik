@@ -67,13 +67,11 @@ func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem
 	// cruise is suppressed so yolo always takes precedence.
 	cruiseActive := !yoloActive && hasCruiseLabel(item)
 
-	// Attempt PR merge after Validate when yolo is active.
-	// When wait_for_ci: true, skip attemptMergeOnValidate here and defer to the
-	// catch-up loop's Phase 2 CI gate (Approach A). The completion label is added
-	// below so the catch-up loop can evaluate the CI gate and attempt merge after
-	// CI passes. See ADR 027 for design rationale.
-	// This runs BEFORE adding the completion label so that on merge failure the
-	// engine can retry Validate (itemNeedsWork skips stages with a complete label).
+	// Attempt PR merge after Validate when yolo is active and wait_for_ci is false.
+	// When wait_for_ci: true the merge happens in the catch-up loop's Phase 2 after
+	// the CI gate clears (see ADR 032). This runs BEFORE adding the completion label
+	// so that on merge failure the engine can retry Validate (itemNeedsWork skips
+	// stages with a complete label).
 	waitForCI := stage.WaitForCI != nil && *stage.WaitForCI
 	if yoloActive && stage.Name == "Validate" && !waitForCI {
 		if err := e.attemptMergeOnValidate(item); err != nil {
@@ -81,6 +79,43 @@ func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem
 			e.logf(item.Number, "warn", "PR not merged: %v\n", err)
 			return
 		}
+	}
+
+	// Conjunctive gate: for wait_for_ci stages, defer stage:X:complete until
+	// the CI gate clears. Adding fabrik:awaiting-ci here (idempotent) keeps the
+	// item durable in the "CI await" state so the dispatcher skips it and the
+	// catch-up loop can evaluate CI on every poll (R1, R2, R3).
+	if waitForCI {
+		alreadyAwaitingCI := false
+		for _, l := range item.Labels {
+			if l == "fabrik:awaiting-ci" {
+				alreadyAwaitingCI = true
+				break
+			}
+		}
+		if !alreadyAwaitingCI {
+			if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-ci"); err != nil {
+				e.logf(item.Number, "warn", "could not add fabrik:awaiting-ci label: %v\n", err)
+			}
+		}
+		// Also seed fabrik:awaiting-review optimistically (Path 1 idempotent), so
+		// the catch-up loop's review gate runs before the CI gate when both apply.
+		if stage.WaitForReviews != nil && *stage.WaitForReviews {
+			alreadyAwaitingReview := false
+			for _, l := range item.Labels {
+				if l == "fabrik:awaiting-review" {
+					alreadyAwaitingReview = true
+					break
+				}
+			}
+			if !alreadyAwaitingReview {
+				if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-review"); err != nil {
+					e.logf(item.Number, "warn", "could not add fabrik:awaiting-review label: %v\n", err)
+				}
+			}
+		}
+		e.logf(item.Number, "awaiting-ci", "deferring stage:%s:complete until CI gate clears\n", stage.Name)
+		return // catch-up loop adds stage:X:complete when checkCIGate clears
 	}
 
 	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
@@ -125,14 +160,6 @@ func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem
 				e.logf(item.Number, "awaiting-review", "waiting for PR reviewers before advancing\n")
 			}
 			return // catch-up loop will advance once reviewers submit
-		}
-		// When wait_for_ci is enabled, the catch-up loop evaluates the CI gate
-		// (checkCIGate) and dispatches CI-fix reinvokes as needed before advancing.
-		// fabrik:awaiting-ci is NOT applied here (R10c) — the catch-up loop adds
-		// it only on confirmed failure, after FetchCheckRuns.
-		if waitForCI {
-			e.logf(item.Number, "awaiting-ci", "waiting for CI checks before advancing\n")
-			return // catch-up loop evaluates CI gate and advances once checks pass
 		}
 		if err := e.advanceToNextStage(board, item, stage); err != nil {
 			e.logf(item.Number, "warn", "could not advance: %v\n", err)
