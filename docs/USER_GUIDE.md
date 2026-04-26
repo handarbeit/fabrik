@@ -297,9 +297,9 @@ experience as release binaries.
 
 ### Startup Board Validation
 
-On every startup, Fabrik fetches the project board and compares stage names in your YAML configs against the column names on the board. If any non-cleanup stage is missing from the board, Fabrik exits with a detailed error listing the mismatched names — catching config drift before any work begins. Extra board columns without a matching stage produce a warning but do not block startup.
+On startup, Fabrik attempts to fetch the project board and status field so it can compare stage names in your YAML configs against the column names on the board. When that metadata is fetched successfully, any non-cleanup stage missing from the board causes Fabrik to exit with a detailed error listing the mismatched names — catching config drift before any work begins. Extra board columns without a matching stage produce a warning but do not block startup. If Fabrik cannot fetch the board or status field, it logs a warning and continues without blocking startup.
 
-See [§10 Troubleshooting → Startup Board Validation Failure](#startup-board-validation-failure) if you encounter this error.
+See [§10 Troubleshooting → Startup Board Validation Failure](#startup-board-validation-failure) if validation succeeds and reports a mismatch.
 
 ### Instance Lock
 
