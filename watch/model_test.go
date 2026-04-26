@@ -119,3 +119,81 @@ func TestUpdate_CtrlC_Quits(t *testing.T) {
 		t.Errorf("expected tea.QuitMsg, got %T", msg)
 	}
 }
+
+// TestUpdate_TurnCountMsg_UpdatesTurnsUsed verifies that TurnCountMsg sets turnsUsed.
+func TestUpdate_TurnCountMsg_UpdatesTurnsUsed(t *testing.T) {
+	m := newTestModel()
+	model, _ := m.Update(TurnCountMsg{TurnsUsed: 7})
+	wm := model.(WatchModel)
+	if wm.turnsUsed != 7 {
+		t.Errorf("turnsUsed = %d, want 7", wm.turnsUsed)
+	}
+
+	// Subsequent message updates the count.
+	model2, _ := wm.Update(TurnCountMsg{TurnsUsed: 12})
+	wm2 := model2.(WatchModel)
+	if wm2.turnsUsed != 12 {
+		t.Errorf("turnsUsed = %d after second TurnCountMsg, want 12", wm2.turnsUsed)
+	}
+}
+
+// TestUpdate_NewLogFileMsg_ResetsTurnsUsed verifies that NewLogFileMsg resets turnsUsed.
+func TestUpdate_NewLogFileMsg_ResetsTurnsUsed(t *testing.T) {
+	m := newTestModel()
+	m.turnsUsed = 23
+	model, _ := m.Update(NewLogFileMsg{Path: "/tmp/fake-Research-20260101-100000-000000000.log"})
+	wm := model.(WatchModel)
+	if wm.turnsUsed != 0 {
+		t.Errorf("turnsUsed = %d after NewLogFileMsg, want 0", wm.turnsUsed)
+	}
+}
+
+// TestView_TurnCounter_WithDenominator verifies that View shows "turn N/M" when
+// a live stage tab is present and cachedEffectiveMaxTurns > 0.
+func TestView_TurnCounter_WithDenominator(t *testing.T) {
+	m := newTestModel()
+	m.vp = viewport.New(80, 20)
+	m.stageTabs = []stageTab{{Label: "Research", IsLive: true}}
+	m.selectedTabIdx = 0
+	m.turnsUsed = 5
+	m.cachedEffectiveMaxTurns = 50
+
+	view := m.View()
+	if !strings.Contains(view, "turn 5/50") {
+		t.Errorf("expected 'turn 5/50' in view, got:\n%s", view)
+	}
+}
+
+// TestView_TurnCounter_Unlimited verifies "turn N" (no denominator) when
+// cachedEffectiveMaxTurns == 0 (unlimited stage).
+func TestView_TurnCounter_Unlimited(t *testing.T) {
+	m := newTestModel()
+	m.vp = viewport.New(80, 20)
+	m.stageTabs = []stageTab{{Label: "Research", IsLive: true}}
+	m.selectedTabIdx = 0
+	m.turnsUsed = 3
+	m.cachedEffectiveMaxTurns = 0
+
+	view := m.View()
+	if !strings.Contains(view, "turn 3") {
+		t.Errorf("expected 'turn 3' in view, got:\n%s", view)
+	}
+	if strings.Contains(view, "turn 3/") {
+		t.Errorf("expected no denominator for unlimited stage, got:\n%s", view)
+	}
+}
+
+// TestView_TurnCounter_Hidden_WhenNoTurns verifies turn counter is absent when turnsUsed == 0.
+func TestView_TurnCounter_Hidden_WhenNoTurns(t *testing.T) {
+	m := newTestModel()
+	m.vp = viewport.New(80, 20)
+	m.stageTabs = []stageTab{{Label: "Research", IsLive: true}}
+	m.selectedTabIdx = 0
+	m.turnsUsed = 0
+	m.cachedEffectiveMaxTurns = 50
+
+	view := m.View()
+	if strings.Contains(view, "turn") {
+		t.Errorf("expected no turn counter when turnsUsed=0, got:\n%s", view)
+	}
+}
