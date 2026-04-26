@@ -249,6 +249,17 @@ func (e *Engine) SetEvents(ch chan tui.Event) {
 	tuiMode = ch != nil
 	claudeLogf = e.logf
 	claudeTUI = ch != nil
+	if ch != nil {
+		claudeTurnProgress = func(issueNumber, turnsUsed, maxTurns int) {
+			e.emitStructural(tui.TurnProgressEvent{
+				IssueNumber: issueNumber,
+				TurnsUsed:   turnsUsed,
+				MaxTurns:    maxTurns,
+			})
+		}
+	} else {
+		claudeTurnProgress = nil
+	}
 	// Update logfFn for all registered WorktreeManagers.
 	e.mu.Lock()
 	for _, wm := range e.worktreeManagers {

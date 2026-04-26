@@ -101,3 +101,14 @@ type ProjectMetaEvent struct {
 }
 
 func (ProjectMetaEvent) tuiEvent() {}
+
+// TurnProgressEvent is emitted after each assistant turn completes during a
+// Claude invocation. It carries the current live turn count and effective budget
+// so the TUI can display a real-time turn counter for in-progress stages.
+type TurnProgressEvent struct {
+	IssueNumber int
+	TurnsUsed   int
+	MaxTurns    int // 0 means unlimited
+}
+
+func (TurnProgressEvent) tuiEvent() {}
