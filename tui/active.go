@@ -143,7 +143,7 @@ func (a ActivePaneComponent) View(width int) string {
 			stageDisplay += strings.Repeat(" ", stagePad)
 		}
 		essential := fmt.Sprintf("#%-5d %s %s %s  ", job.IssueNumber, stageDisplay, spinner, elapsed)
-		remaining := maxWidth - len([]rune(essential))
+		remaining := maxWidth - lipgloss.Width(essential)
 		badge := turnBadge(job.TurnsUsed, job.MaxTurns, remaining)
 		if badge != "" {
 			badge += " "
