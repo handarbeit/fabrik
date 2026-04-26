@@ -62,6 +62,14 @@ func (a ActivePaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 			a.activeIdx = len(a.active) - 1
 		}
 
+	case TurnProgressEvent:
+		if key, known := a.activeNumToKey[ev.IssueNumber]; known {
+			if job, ok := a.active[key]; ok {
+				job.TurnsUsed = ev.TurnsUsed
+				job.MaxTurns = ev.MaxTurns
+			}
+		}
+
 	case LogEvent:
 		if ev.IssueNumber != 0 {
 			if key, known := a.activeNumToKey[ev.IssueNumber]; known {
@@ -134,8 +142,13 @@ func (a ActivePaneComponent) View(width int) string {
 		if stagePad > 0 {
 			stageDisplay += strings.Repeat(" ", stagePad)
 		}
-		line := fmt.Sprintf("#%-5d %s %s %s  %s%s %s",
-			job.IssueNumber, stageDisplay, spinner, elapsed, titleStr, tag, msg)
+		essential := fmt.Sprintf("#%-5d %s %s %s  ", job.IssueNumber, stageDisplay, spinner, elapsed)
+		remaining := maxWidth - len([]rune(essential))
+		badge := turnBadge(job.TurnsUsed, job.MaxTurns, remaining)
+		if badge != "" {
+			badge += " "
+		}
+		line := essential + badge + titleStr + tag + " " + msg
 		if runes := []rune(line); len(runes) > maxWidth {
 			line = string(runes[:maxWidth-1]) + "…"
 		}
@@ -225,6 +238,31 @@ func (a ActivePaneComponent) Height() int {
 	// inside Active handles anything that still can't fit.
 	n := len(a.active) + len(a.blocked)
 	return max(n+1, 2) + 2
+}
+
+// turnBadge returns a turn counter badge string that fits within available rune columns.
+// Returns full "[N/M turns]", compact "[N/M]", or "" depending on available space.
+// When maxTurns == 0 (unlimited), returns "[N turns]" / "[N]" / "".
+func turnBadge(turnsUsed, maxTurns, available int) string {
+	if turnsUsed <= 0 || available <= 0 {
+		return ""
+	}
+	var full, compact string
+	if maxTurns > 0 {
+		full = fmt.Sprintf("[%d/%d turns]", turnsUsed, maxTurns)
+		compact = fmt.Sprintf("[%d/%d]", turnsUsed, maxTurns)
+	} else {
+		full = fmt.Sprintf("[%d turns]", turnsUsed)
+		compact = fmt.Sprintf("[%d]", turnsUsed)
+	}
+	switch {
+	case len([]rune(full)) <= available:
+		return full
+	case len([]rune(compact)) <= available:
+		return compact
+	default:
+		return ""
+	}
 }
 
 // sortedActiveKeys returns job keys from the active map in sorted order.

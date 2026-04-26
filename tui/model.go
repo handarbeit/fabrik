@@ -37,6 +37,8 @@ type activeJob struct {
 	StartedAt   time.Time
 	LastTag     string
 	LastLine    string
+	TurnsUsed   int
+	MaxTurns    int // 0 means unlimited
 }
 
 // blockedIssue tracks an issue held at the dependency gate.
@@ -412,6 +414,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case TurnProgressEvent:
+		comp, _ := m.active.Update(msg)
+		m.active = comp.(ActivePaneComponent)
+		return m, nil
+
 	}
 
 	return m, nil
@@ -462,6 +469,8 @@ func (m *Model) prepareDetailItem() {
 				StageName:   job.StageName,
 				IsActive:    true,
 				Elapsed:     m.header.now.Sub(job.StartedAt),
+				TurnsUsed:   job.TurnsUsed,
+				MaxTurns:    job.MaxTurns,
 			})
 		} else {
 			m.detail.SetItem(nil)
