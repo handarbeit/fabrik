@@ -957,7 +957,7 @@ The `advancedItems` map prevents items advanced by the catch-up loop from having
 
 ```mermaid
 stateDiagram-v2
-    direction LR
+    direction TB
 
     [*] --> Specify_Idle : Issue added to board
     Specify_Idle --> Specify_Running : Poll tick
@@ -974,7 +974,10 @@ stateDiagram-v2
     Plan_Complete --> Implement_Idle : Auto-advance or human move
     Implement_Idle --> Implement_Running : Poll tick
     Implement_Running --> Implement_Complete : FABRIK_STAGE_COMPLETE
-    note right of Implement_Running : Draft PR created\nPR marked ready
+    note right of Implement_Running
+        Draft PR created
+        PR marked ready
+    end note
 
     Implement_Complete --> Review_Idle : Auto-advance or human move
     Review_Idle --> Review_Running : Poll tick
@@ -1044,7 +1047,7 @@ stateDiagram-v2
 stateDiagram-v2
     direction TB
 
-    StageComplete --> CheckDependencies : Catch-up loop Phase 1\n(unconditional — all items)
+    StageComplete --> CheckDependencies : Catch-up loop Phase 1 (unconditional — all items)
     CheckDependencies --> Blocked : Has open blockers
     CheckDependencies --> CheckReviewGate : No blockers
 
@@ -1057,7 +1060,10 @@ stateDiagram-v2
     WaitingForReviewers --> CheckReviewGate : Next poll tick
 
     TimedOut --> PausedForTimeout : pauseForReviewTimeout()
-    note right of PausedForTimeout : fabrik:paused\nfabrik:awaiting-input
+    note right of PausedForTimeout
+        fabrik:paused
+        fabrik:awaiting-input
+    end note
 
     GateCleared --> CheckThreads : buildReviewThreadComments()
     CheckThreads --> Phase2 : No unresolved threads → Phase 2
@@ -1067,7 +1073,10 @@ stateDiagram-v2
     CheckInFlight --> CheckCycleLimit : Not in-flight
 
     CheckCycleLimit --> PausedForCycles : cycleCount >= MaxReviewCycles
-    note right of PausedForCycles : fabrik:paused\nfabrik:awaiting-input
+    note right of PausedForCycles
+        fabrik:paused
+        fabrik:awaiting-input
+    end note
 
     CheckCycleLimit --> DispatchReinvoke : cycleCount < MaxReviewCycles
     DispatchReinvoke --> ProcessComments : Async goroutine
@@ -1078,7 +1087,11 @@ stateDiagram-v2
 
     Phase2 --> Advance : yolo/cruise/auto_advance gate passes
     Phase2 --> Idle : Gate not met — no advancement
-    note right of Idle : Item stays in stage:X:complete\nuntil user advances manually\nor adds yolo/cruise label
+    note right of Idle
+        Item stays in stage:X:complete
+        until user advances manually
+        or adds yolo/cruise label
+    end note
 ```
 
 ---
