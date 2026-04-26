@@ -1375,7 +1375,9 @@ In terminals that support OSC 8 hyperlinks (Ghostty, iTerm2, WezTerm, Kitty), is
 
 ### What's Displayed
 
-**In Progress**: Issue number, stage name, elapsed time, issue title, latest status message. Review-reinvoke jobs appear here alongside regular stage jobs — they emit `JobStarted`/`JobCompleted` events and display with the issue number, stage name, and elapsed time, just like a normal stage invocation.
+**In Progress**: Issue number, stage name, elapsed time, a live turn counter (`[N/M turns]` or compact `[N/M]` when terminal width is tight), issue title, and latest status message. The turn counter updates in real time as Claude advances through turns; the denominator reflects the effective budget, which is `2× stage.MaxTurns` when `fabrik:extend-turns` is present. Review-reinvoke jobs appear here alongside regular stage jobs — they emit `JobStarted`/`JobCompleted` events and display with the issue number, stage name, and elapsed time, just like a normal stage invocation.
+
+Pressing `Enter` on an active item opens the inline detail panel, which shows Issue, Stage, Elapsed, and a live `Turns: N/M` counter for in-progress stages.
 
 **History**: Issue number, stage name, success/fail icon, duration, timestamp, turns used,
 cost, and issue title. Status icons:
@@ -1409,6 +1411,7 @@ fabrik watch 42 --owner myorg --repo myrepo --token ghp_...
 This opens a real-time terminal UI that shows:
 - Issue title, labels, and current stage
 - **Live Claude output** — streams from the `.log` file as Claude writes it (no polling)
+- **Live turn counter** — `turn N/M` shown inline in the PR/CI row while a stage is active; updates in real time as Claude advances through turns (`turn N` when the stage has no turn limit)
 - **Stage history** — completed stages with duration and cost
 - **PR status** — linked PR number, open/draft/merged state
 - **CI check results** — compact pass/fail/pending summary
