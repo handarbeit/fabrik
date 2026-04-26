@@ -418,7 +418,7 @@ section {
 
 .feature-card {
   display: block;
-  background: $color-surface;
+  background-color: $color-surface;
   border: 1px solid $color-border;
   border-radius: $radius-lg;
   padding: 24px;
@@ -432,7 +432,7 @@ section {
 
   &:hover {
     border-color: $color-accent;
-    background: $color-surface-2;
+    background-color: $color-surface-2;
     text-decoration: none;
   }
 
