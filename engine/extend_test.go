@@ -287,8 +287,8 @@ func TestDetectProgress_Review_FetchError(t *testing.T) {
 func captureLogf() (func(tag, format string, args ...any), func() []string) {
 	var lines []string
 	fn := func(tag, format string, args ...any) {
-		import_ := fmt.Sprintf("[%s] ", tag) + fmt.Sprintf(format, args...)
-		lines = append(lines, import_)
+		line := fmt.Sprintf("[%s] ", tag) + fmt.Sprintf(format, args...)
+		lines = append(lines, line)
 	}
 	return fn, func() []string { return lines }
 }
