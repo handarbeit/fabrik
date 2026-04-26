@@ -416,14 +416,16 @@ When Claude exits a stage invocation due to `max_turns` (i.e., the per-invocatio
 
 | Stage | Progress Signal | API Cost |
 |-------|----------------|----------|
-| **Implement** | New git commit on `fabrik/issue-N` branch (HEAD SHA changed) | Zero — local git only |
+| **Implement** | New git commit (HEAD SHA changed) OR (baseline was clean AND working tree is now dirty — uncommitted file edits by Claude) | Zero — local git only |
 | **Review** | New git commit OR `LinkedPRResolvedThreadCount` increased | One `FetchItemDetails` GraphQL call (only if no new commit) |
 | **Validate** | Total comment count on issue/PR increased | One `FetchItemDetails` GraphQL call |
 | **All others** (Research, Specify, Plan, custom) | No signal — always fail on turn-limit | None |
 
+The "baseline clean AND working tree dirty" guard for Implement prevents a pre-existing dirty worktree (e.g. from a prior interrupted session) from counting as progress. Only new uncommitted changes made during the invocation trigger extension.
+
 **Extension loop behavior (within a single `processItem` call — no poll-cycle gap):**
 
-1. At invocation start, a `progressBaseline` is snapshotted (git HEAD SHA, comment count, resolved thread count).
+1. At invocation start, a `progressBaseline` is snapshotted: git HEAD SHA (Implement, Review), working-tree dirty state (Implement), comment count (Validate), and resolved thread count (Review).
 2. Claude is invoked with the current budget.
 3. If the turn limit is hit AND `totalMultiple < 3`: call `detectProgress`. If progress → `totalMultiple++`, re-invoke with `--resume`. If no progress or progress check fails → proceed to cooldown/retry as today.
 4. Output is accumulated across all invocations before posting as a single stage comment.
@@ -431,7 +433,7 @@ When Claude exits a stage invocation due to `max_turns` (i.e., the per-invocatio
 
 **`fabrik:extend-turns` label:** When present at invocation start, the first invocation receives `2 × stage.MaxTurns` as its budget (pre-granted extension, no progress check required for the first turn-limit hit). Subsequent extensions beyond 2× still require the progress check. The label is auto-removed on successful stage completion; `ErrNotFound` on removal is treated as success (user removed it manually). The label is a no-op when `stage.MaxTurns == 0`.
 
-**Log tag:** `[#N extend-turns]` — emitted when an extension is granted, including the new multiple and cumulative turns used.
+**Log tag:** `[#N extend-turns]` — emitted on **every** `detectProgress` call (pass or fail), reporting the evaluated signals and `has_progress=true/false`. When extension is granted, an additional line logs the new budget multiple and cumulative turns used.
 
 | Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
 |--------------|-------|-------|-----------------|--------------|----------------|--------------|
