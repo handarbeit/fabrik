@@ -260,11 +260,18 @@ func (e *Engine) Run() error {
 	// Start webhook manager when enabled. Failures are non-fatal: the engine
 	// continues in polling-only mode.
 	if e.cfg.Webhooks {
+		// Seed the known-repo set so the first subprocess invocation has at least
+		// one --repo arg. Multi-repo boards discover additional repos via UpdateRepos
+		// after the first poll, at which point the subprocess restarts with the full set.
+		var initialRepos map[string]bool
+		if e.cfg.Owner != "" && e.cfg.Repo != "" {
+			initialRepos = map[string]bool{e.cfg.Owner + "/" + e.cfg.Repo: true}
+		}
 		wm := newWebhookManager(
 			e.logf,
 			e.wakeCh,
 			e.emit,
-			nil, // repos populated by UpdateRepos after first poll
+			initialRepos,
 			e.cfg.WebhookEvents,
 		)
 		if err := wm.Start(ctx, e.cfg.WebhookPort); err == nil {
