@@ -20,12 +20,12 @@ import (
 //
 // Returns (blocked, ciFailure, timedOut):
 //
-//   - (false, false, false) — gate cleared; advance/merge may proceed.
+//   - (false, false, false) — gate cleared; stage:X:complete added, fabrik:awaiting-ci removed.
 //     This includes: no PR found, no check runs (R5), all checks green.
 //
 //   - (true, false, false)  — gate blocked but no confirmed failure; re-evaluate on next poll.
 //     Covers: checks still pending (in_progress/queued), and transient API errors
-//     (FetchLinkedPR or FetchCheckRuns fail). fabrik:awaiting-ci is NOT applied (R10c).
+//     (FetchLinkedPR or FetchCheckRuns fail). fabrik:awaiting-ci is NOT modified.
 //
 //   - (true, true, false)   — CI failed; fabrik:awaiting-ci applied; caller should dispatch CI-fix.
 //
@@ -57,7 +57,7 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 	// R5: no check runs = no CI configured; gate clears.
 	if len(checkRuns) == 0 {
 		e.logf(item.Number, "ci-gate", "no check runs found for SHA %s; CI gate clears (no CI configured)\n", pr.HeadSHA[:min(8, len(pr.HeadSHA))])
-		e.removeAwaitingCILabel(owner, repo, item)
+		e.addCompleteLabelAndRemoveCI(owner, repo, item, stage)
 		return false, false, false
 	}
 
@@ -78,11 +78,12 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 	// All checks green (no pending, no failed) — gate clears.
 	if len(pending) == 0 && len(failed) == 0 {
 		e.logf(item.Number, "ci-gate", "all CI checks passed for SHA %s\n", pr.HeadSHA[:min(8, len(pr.HeadSHA))])
-		e.removeAwaitingCILabel(owner, repo, item)
+		e.addCompleteLabelAndRemoveCI(owner, repo, item, stage)
 		return false, false, false
 	}
 
-	// Checks still running — block but do NOT apply label (R10c).
+	// Checks still running — gate blocked; fabrik:awaiting-ci was already applied
+	// by handleStageComplete when Claude signalled completion.
 	if len(failed) == 0 {
 		names := make([]string, 0, len(pending))
 		for _, cr := range pending {
@@ -148,6 +149,17 @@ func (e *Engine) removeAwaitingCILabel(owner, repo string, item gh.ProjectItem) 
 			return
 		}
 	}
+}
+
+// addCompleteLabelAndRemoveCI adds stage:X:complete and removes fabrik:awaiting-ci
+// when the CI gate clears. Called from the two gate-cleared paths in checkCIGate
+// so that stage:X:complete is only ever set after CI has been verified green (R5).
+func (e *Engine) addCompleteLabelAndRemoveCI(owner, repo string, item gh.ProjectItem, stage *stages.Stage) {
+	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
+		e.logf(item.Number, "warn", "could not add completion label %s: %v\n", completeLabel, err)
+	}
+	e.removeAwaitingCILabel(owner, repo, item)
 }
 
 // buildCIFixComment constructs the synthetic comment body for a CI-fix reinvocation.
