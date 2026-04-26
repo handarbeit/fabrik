@@ -135,6 +135,27 @@ func TestBuildStageTabs_EmptyDir(t *testing.T) {
 	}
 }
 
+// TestIsAssistantTurn verifies NDJSON assistant-type detection for the watch follower.
+func TestIsAssistantTurn(t *testing.T) {
+	tests := []struct {
+		line string
+		want bool
+	}{
+		{`{"type":"assistant","message":{}}` + "\n", true},
+		{`{"type":"result","num_turns":10}` + "\n", false},
+		{`{"type":"tool_use"}` + "\n", false},
+		{"not json\n", false},
+		{"", false},
+		{"{}\n", false},
+	}
+	for _, tt := range tests {
+		got := isAssistantTurn([]byte(tt.line))
+		if got != tt.want {
+			t.Errorf("isAssistantTurn(%q) = %v, want %v", tt.line, got, tt.want)
+		}
+	}
+}
+
 // TestBuildStageTabs_IsLive_ByTimestampNotLabel is a regression test for the
 // bug where an alphabetically-later stage label (e.g. "Specify" > "Research")
 // would be wrongly selected as IsLive even when its log has an older timestamp.
