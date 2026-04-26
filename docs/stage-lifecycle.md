@@ -170,10 +170,10 @@ Raw Claude output saved to `~/.fabrik/logs/issue-<N>/<stage>-output-<timestamp>.
 
 ### Turn Progress Emission
 
-During each Claude invocation, the engine counts intermediate assistant turns in real time via a `turnCountingWriter` wrapping the stdout pipe. Each time a `{"type":"assistant"}` NDJSON line is detected, the writer increments a per-invocation counter and fires the `claudeTurnProgress` callback (set during engine construction), which emits a `TurnProgressEvent` to the TUI channel. The event carries:
+During each Claude invocation, the engine counts logical turns in real time via a `turnCountingWriter` wrapping the stdout pipe. Each time a `{"type":"user"}` NDJSON line is detected (one per logical turn — the initial prompt or a tool-result round), the writer increments a per-invocation counter and fires the `claudeTurnProgress` callback (set during engine construction), which emits a `TurnProgressEvent` to the TUI channel. The event carries:
 
 - `IssueNumber` — the issue being processed
-- `TurnsUsed` — the current per-invocation assistant-turn count
+- `TurnsUsed` — the current per-invocation logical-turn count
 - `MaxTurns` — the effective budget for this invocation (accounts for `opts.MaxTurnsOverride` from the extension loop)
 
 This is a purely additive display mechanism — it does not affect Claude's execution, the output buffer, or any engine state. In plain-text mode and tests, `claudeTurnProgress` is nil and no events are emitted.

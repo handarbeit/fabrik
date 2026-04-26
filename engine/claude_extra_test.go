@@ -157,8 +157,8 @@ func TestTurnCountingWriter_NilCallback(t *testing.T) {
 }
 
 // TestTurnCountingWriter_MultiToolUseSequence verifies that a realistic turn with
-// multiple tool-use blocks (one user event + multiple assistant events) counts as
-// exactly one turn, not four.
+// multiple tool-use blocks (one user event + three assistant events) counts as
+// exactly one turn, not three (one per assistant event).
 func TestTurnCountingWriter_MultiToolUseSequence(t *testing.T) {
 	var inner bytes.Buffer
 	callCount := 0
