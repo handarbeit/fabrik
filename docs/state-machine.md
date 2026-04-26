@@ -891,7 +891,7 @@ The poll loop's effective interval grows when there is nothing to do (idle backo
 - Base interval: `PollSeconds` (default 30s).
 - Activity multiplier: doubles each poll cycle where no work was dispatched, up to the idle cap.
 - Activity reset: any dispatched work OR any received webhook event resets `idleStart` and the multiplier back to 1×.
-- Rate-limit adjustment: when the GitHub API signals rate limit pressure (`rateLimitLow`), the effective interval is raised to `max(PollSeconds, 60s)`.
+- Rate-limit adjustment: when the GitHub API signals rate limit pressure (`rateLimitLow`), `computeEffectiveInterval` doubles the configured interval for rate-limit backoff, capped at `rateLimitMaxBackoffMultiplier×` the configured interval.
 
 **Idle cap selection** (`effectiveIdleCap` in `engine/poll.go`):
 
@@ -908,15 +908,15 @@ When the webhook stream is healthy or starting up, steady-state polling is suppr
 
 | State | Meaning | Idle cap used | TUI indicator |
 |-------|---------|---------------|---------------|
-| `WebhookStreamStartingUp` | Subprocess launched; within startup grace (30s); no event received yet | 60 min | Blue ○ |
+| `WebhookStreamStartingUp` | Subprocess launched; no verified event received yet. The state persists until the first event arrives or `webhookStartupGrace` (30s) + `webhookHealthWindow` (10 min) elapses with no event. | 60 min | Blue ○ |
 | `WebhookStreamHealthy` | At least one event received within the last health window (10 min) | 60 min | Green ● |
-| `WebhookStreamUnhealthy` | Grace expired with no first event, or health window (10 min) elapsed since last event | 5 min | Yellow ◌ |
+| `WebhookStreamUnhealthy` | No first event received before `webhookStartupGrace` (30s) + `webhookHealthWindow` (10 min) after subprocess launch, or health window (10 min) elapsed since last event | 5 min | Yellow ◌ |
 
 **State transitions:**
-- `StartingUp → Healthy`: first verified webhook event received at any point during grace or after.
-- `StartingUp → Unhealthy`: `webhookStartupGrace` (30s) + `webhookHealthWindow` (10 min) elapsed with no event received.
+- `StartingUp → Healthy`: first verified webhook event received at any point after subprocess launch.
+- `StartingUp → Unhealthy`: no verified event received for `webhookStartupGrace` (30s) + `webhookHealthWindow` (10 min) after subprocess launch.
 - `Healthy → Unhealthy`: no event received for `webhookHealthWindow` (10 min).
-- `* → StartingUp`: subprocess restart (secret rotation, crash recovery) resets grace.
+- `* → StartingUp`: subprocess restart (secret rotation, crash recovery) resets grace and waits for a new first event.
 
 **Webhook mode is always non-fatal.** If the `gh webhook forward` subprocess fails to start, the stream state stays `Unhealthy` and the 5-minute idle cap applies. The poll loop continues normally.
 
