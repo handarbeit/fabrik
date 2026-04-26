@@ -2,6 +2,7 @@ package watch
 
 import (
 	"bufio"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -282,6 +283,7 @@ func followFile(path, logDir string, send func(tea.Msg), done <-chan struct{}) {
 
 		reader := bufio.NewReader(f)
 		switchFile := false
+		turnCount := 0
 	readLoop:
 		for {
 			select {
@@ -293,6 +295,10 @@ func followFile(path, logDir string, send func(tea.Msg), done <-chan struct{}) {
 
 			line, err := reader.ReadBytes('\n')
 			if len(line) > 0 {
+				if isAssistantTurn(line) {
+					turnCount++
+					send(TurnCountMsg{TurnsUsed: turnCount})
+				}
 				if rendered := streamfilter.RenderLine(line); rendered != "" {
 					send(LogLineMsg{Text: rendered})
 				}
@@ -324,6 +330,17 @@ func followFile(path, logDir string, send func(tea.Msg), done <-chan struct{}) {
 			return
 		}
 	}
+}
+
+// isAssistantTurn returns true if line is a JSON object with type == "assistant".
+func isAssistantTurn(line []byte) bool {
+	if len(line) == 0 || line[0] != '{' {
+		return false
+	}
+	var envelope struct {
+		Type string `json:"type"`
+	}
+	return json.Unmarshal(line, &envelope) == nil && envelope.Type == "assistant"
 }
 
 // pollForNewLogFile polls logDir every 2 seconds. When it observes a .log

@@ -59,6 +59,10 @@ type WatchModel struct {
 	selectedTabIdx int
 	stageOrder     map[string]int // stage name -> pipeline order (from stages YAML)
 
+	// Turn counter for the live stage (resets on stage transition)
+	turnsUsed     int
+	stageMaxTurns map[string]int // stage name -> configured max_turns (0 = unlimited)
+
 	// Transient status message (shown in status bar, cleared on TickMsg)
 	statusMsg string
 
@@ -85,6 +89,7 @@ func NewModel(issueNumber int, opts GitHubOptions, stagesDir string) WatchModel 
 	vp.SetContent("")
 
 	stageOrder := buildStageOrder(stagesDir)
+	stageMaxTurns := buildStageMaxTurns(stagesDir)
 	tabs := buildStageTabs(logDir, stageOrder)
 	selectedTabIdx := liveTabIdx(tabs)
 
@@ -97,6 +102,7 @@ func NewModel(issueNumber int, opts GitHubOptions, stagesDir string) WatchModel 
 		stageTabs:      tabs,
 		selectedTabIdx: selectedTabIdx,
 		stageOrder:     stageOrder,
+		stageMaxTurns:  stageMaxTurns,
 		done:           make(chan struct{}),
 	}
 }
@@ -117,6 +123,63 @@ func buildStageOrder(stagesDir string) map[string]int {
 		order[s.Name] = s.Order
 	}
 	return order
+}
+
+// buildStageMaxTurns loads stage configs from stagesDir and returns a map of
+// stage name → max_turns value. Returns an empty map on any error.
+func buildStageMaxTurns(stagesDir string) map[string]int {
+	m := make(map[string]int)
+	if stagesDir == "" {
+		return m
+	}
+	loaded, err := stages.LoadAll(stagesDir)
+	if err != nil {
+		return m
+	}
+	for _, s := range loaded {
+		m[s.Name] = s.MaxTurns
+	}
+	return m
+}
+
+// logFileCountForStage counts .log files in logDir whose stage label matches stageName.
+func logFileCountForStage(logDir, stageName string) int {
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".log") &&
+			stageNameFromFilename(e.Name()) == stageName {
+			count++
+		}
+	}
+	return count
+}
+
+// effectiveMaxTurns returns the effective turn budget for the currently live stage.
+// Applies 2× multiplier when fabrik:extend-turns label is present and this is the
+// first invocation for the stage (one log file = not yet in extension loop).
+// Returns 0 when the stage has no configured limit.
+func (m *WatchModel) effectiveMaxTurns() int {
+	stageName := currentStageFromLog(m.logDir)
+	if stageName == "" {
+		return 0
+	}
+	base, ok := m.stageMaxTurns[stageName]
+	if !ok || base == 0 {
+		return 0
+	}
+	for _, lbl := range m.github.labels {
+		if lbl == "fabrik:extend-turns" {
+			if logFileCountForStage(m.logDir, stageName) == 1 {
+				return 2 * base
+			}
+			break
+		}
+	}
+	return base
 }
 
 // liveTabIdx returns the index of the live tab in tabs, or 0 if none.
@@ -344,11 +407,16 @@ func (m WatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case TurnCountMsg:
+		m.turnsUsed = ev.TurnsUsed
+		return m, nil
+
 	case NewLogFileMsg:
 		// Stage transition: clear live buffer, rebuild tabs, move to live tab.
 		m.lines = nil
 		m.currentLogPath = ""
 		m.vp.SetContent("")
+		m.turnsUsed = 0
 		newTabs := buildStageTabs(m.logDir, m.stageOrder)
 		m.stageTabs = newTabs
 		m.selectedTabIdx = liveTabIdx(newTabs)
@@ -475,10 +543,19 @@ func (m WatchModel) View() string {
 		b.WriteString("\n")
 	}
 
-	// PR/CI row
+	// PR/CI row (also shows live turn counter when a stage is active)
 	prLine := m.prStatusLine()
 	if m.github.commentCnt > 0 {
 		prLine += dimStyle.Render(fmt.Sprintf("  |  %d comments", m.github.commentCnt))
+	}
+	isLive := len(m.stageTabs) == 0 || (m.selectedTabIdx < len(m.stageTabs) && m.stageTabs[m.selectedTabIdx].IsLive)
+	if isLive && m.turnsUsed > 0 {
+		effective := m.effectiveMaxTurns()
+		if effective > 0 {
+			prLine += dimStyle.Render(fmt.Sprintf("  |  turn %d/%d", m.turnsUsed, effective))
+		} else {
+			prLine += dimStyle.Render(fmt.Sprintf("  |  turn %d", m.turnsUsed))
+		}
 	}
 	b.WriteString(prLine)
 	b.WriteString("\n")
