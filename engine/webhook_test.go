@@ -272,6 +272,33 @@ func TestSecretRotationTrigger(t *testing.T) {
 	}
 }
 
+// TestFailureWindowReset verifies that consecutive-failure tracking resets when
+// a new failure arrives after the rotation window has elapsed.
+func TestFailureWindowReset(t *testing.T) {
+	wm, _ := newTestWebhookManager(t)
+	secret, _ := generateSecret()
+	wm.mu.Lock()
+	wm.state = WebhookStreamHealthy
+	wm.secret = secret
+	// Simulate 3 failures that happened beyond the rotation window.
+	wm.consecutiveFailures = 3
+	wm.firstFailureAt = time.Now().Add(-(webhookRotationWindow + time.Second))
+	wm.mu.Unlock()
+
+	// A new failure should reset the window; consecutiveFailures becomes 1.
+	body := []byte(`{"action":"created"}`)
+	req := signedRequest(t, body, "wrongsecret")
+	rr := httptest.NewRecorder()
+	wm.handleWebhook(rr, req)
+
+	wm.mu.Lock()
+	failures := wm.consecutiveFailures
+	wm.mu.Unlock()
+	if failures != 1 {
+		t.Errorf("consecutiveFailures = %d after window reset, want 1", failures)
+	}
+}
+
 // TestRotationFallback verifies that when rotateCycleCount already equals the max,
 // the next threshold breach triggers disabled=true instead of another rotation.
 func TestRotationFallback(t *testing.T) {
@@ -296,10 +323,14 @@ func TestRotationFallback(t *testing.T) {
 
 	wm.mu.Lock()
 	disabled := wm.disabled
+	state := wm.state
 	wm.mu.Unlock()
 
 	if !disabled {
 		t.Error("webhookManager should be disabled after max rotation cycles")
+	}
+	if state != WebhookStreamUnhealthy {
+		t.Errorf("state = %q after disable, want %q", state, WebhookStreamUnhealthy)
 	}
 }
 
