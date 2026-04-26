@@ -608,30 +608,48 @@ func (wm *webhookManager) handleWebhook(w http.ResponseWriter, r *http.Request) 
 	if !verifySignature(body, sig, secret) {
 		wm.mu.Lock()
 		now := time.Now()
-		if wm.consecutiveFailures == 0 {
+		// Reset the failure window when it has elapsed so spread-out failures
+		// don't anchor the window to a stale start time.
+		if wm.consecutiveFailures == 0 || wm.firstFailureAt.IsZero() || now.Sub(wm.firstFailureAt) > webhookRotationWindow {
 			wm.firstFailureAt = now
+			wm.consecutiveFailures = 1
+		} else {
+			wm.consecutiveFailures++
 		}
-		wm.consecutiveFailures++
 		failures := wm.consecutiveFailures
 		firstAt := wm.firstFailureAt
-		rotateCycles := wm.rotateCycleCount
-		disabled := wm.disabled
+		// Make the threshold check and state update atomic so concurrent
+		// requests cannot both trigger a rotation or double-disable.
+		shouldDisable := false
+		shouldRotate := false
+		if !wm.disabled && failures >= webhookRotationFailures && now.Sub(firstAt) <= webhookRotationWindow {
+			if wm.rotateCycleCount >= webhookRotationMaxCycles {
+				wm.disabled = true
+				wm.state = WebhookStreamUnhealthy
+				shouldDisable = true
+			} else {
+				// Reserve this threshold breach; reset counters so a concurrent
+				// request doesn't also trigger rotation.
+				wm.consecutiveFailures = 0
+				wm.firstFailureAt = time.Time{}
+				shouldRotate = true
+			}
+		}
+		cmd := wm.currentCmd
 		wm.mu.Unlock()
 
 		wm.logFn(0, "webhook", "HMAC verification failed (consecutive: %d)\n", failures)
 
-		if !disabled && failures >= webhookRotationFailures && now.Sub(firstAt) <= webhookRotationWindow {
-			if rotateCycles >= webhookRotationMaxCycles {
-				wm.mu.Lock()
-				wm.disabled = true
-				wm.mu.Unlock()
-				wm.logFn(0, "webhook", "HMAC failures persist after %d rotation cycles — "+
-					"disabling webhook mode for this session; run 'gh auth status' and restart Fabrik\n",
-					webhookRotationMaxCycles)
-				wm.emitCurrentState()
-			} else {
-				wm.rotateSecret()
+		if shouldDisable {
+			wm.logFn(0, "webhook", "HMAC failures persist after %d rotation cycles — "+
+				"disabling webhook mode for this session; run 'gh auth status' and restart Fabrik\n",
+				webhookRotationMaxCycles)
+			wm.emitCurrentState()
+			if cmd != nil && cmd.Process != nil {
+				killProcGroup(cmd)
 			}
+		} else if shouldRotate {
+			wm.rotateSecret()
 		}
 
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
