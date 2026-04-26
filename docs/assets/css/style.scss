@@ -417,13 +417,30 @@ section {
 }
 
 .feature-card {
+  display: block;
   background: $color-surface;
   border: 1px solid $color-border;
   border-radius: $radius-lg;
   padding: 24px;
-  transition: border-color 0.2s;
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+  transition: border-color 0.2s, background-color 0.2s;
 
-  &:hover { border-color: $color-accent; }
+  &:hover {
+    border-color: $color-accent;
+    background: $color-surface-2;
+    text-decoration: none;
+  }
+
+  &:focus-visible {
+    outline: 2px solid $color-accent-2;
+    outline-offset: 2px;
+    border-color: $color-accent-2;
+  }
 
   .feature-icon {
     font-size: 1.6rem;
