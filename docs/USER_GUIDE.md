@@ -1289,7 +1289,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:yolo` | Force auto-advance for this issue even when `auto_advance: false`; also triggers auto-merge of the linked PR when Validate completes. If the linked PR was already manually merged when auto-merge runs, Fabrik treats it as a success and advances the issue to Done normally. |
 | `fabrik:cruise` | Auto-advances through all stages like `fabrik:yolo` but stops at Validate — no auto-merge, no move to Done. If both `fabrik:cruise` and `fabrik:yolo` are present, `fabrik:yolo` takes precedence. |
 | `fabrik:unrestricted` | Pass `--dangerously-skip-permissions` instead of `--permission-mode dontAsk` for this issue; bypasses the default tool allowlist entirely. Use only when a stage needs tools outside the default set or when the default posture prevents required work. **Caution:** removes all tool restrictions. |
-| `fabrik:extend-turns` | Pre-grant 2× `max_turns` for the first invocation of the next stage. Auto-extends to 3× when actual progress is detected during that invocation (Implement: new git commit; Review: new git commit or resolved reviewer thread count; Validate: new comment; other stages: no progress signal). Auto-removed by the engine on successful stage completion. No-op when `max_turns` is 0 (unlimited). The displayed turn counter denominator always reflects the effective budget. |
+| `fabrik:extend-turns` | Pre-grant 2× `max_turns` for the first invocation of the next stage. Auto-extends to 3× when actual progress is detected during that invocation (Implement: new git commit (HEAD SHA changed) OR (baseline was clean AND working tree is now dirty — uncommitted file edits by Claude); Review: new git commit or resolved reviewer thread count; Validate: new comment; other stages: no progress signal). Auto-removed by the engine on successful stage completion. No-op when `max_turns` is 0 (unlimited). The displayed turn counter denominator always reflects the effective budget. |
 | `base:<branch>` | Override the base branch for this issue (e.g. `base:develop`). Fabrik will fork from, rebase onto, and target PRs at `<branch>` instead of the repository default. Apply before Research; adding mid-pipeline is unsupported and may produce unexpected results. Branch names containing `/` are supported (e.g. `base:release/1.x`). If the named branch does not exist on the remote, Fabrik falls back to the default branch and posts a comment on the issue. |
 
 Model label precedence: `model:<name>` label > stage YAML `model` field > default.
@@ -1479,6 +1479,7 @@ The poll log captures:
 - Dispatch events (which issues were dispatched to workers and why)
 - Upgrade checks and idle-upgrade transitions
 - GitHub API rate limit stats per poll cycle
+- `[#N extend-turns]` verdict lines — emitted on every `detectProgress` call (pass or fail) without `--debug-output`; useful for diagnosing why a stage did or didn't receive a turn extension
 
 The poll log is written in both TUI and non-TUI modes. It is most useful for post-mortem debugging of engine-level behavior — for example, diagnosing why an issue was not picked up during a poll cycle.
 
