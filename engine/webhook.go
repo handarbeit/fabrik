@@ -379,15 +379,15 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 		events := wm.events
 		port := wm.port
 		orgModeFailed := wm.orgModeFailed
-		wm.mu.Unlock()
-
-		// Determine org mode
+		// Detect org mode inside the lock so wm.repos isn't read concurrently
+		// with UpdateRepos mutations.
 		org := ""
 		if !orgModeFailed {
 			if o, ok := detectOrgMode(wm.repos); ok {
 				org = o
 			}
 		}
+		wm.mu.Unlock()
 
 		args := buildGhArgs(org, repos, port, secret, events)
 		startedAt := time.Now()
@@ -545,9 +545,9 @@ func (wm *webhookManager) checkHealthTransitions() {
 	}
 
 	if newState != "" && newState != state {
-		wm.logFn(0, "webhook", "health state: %s → %s\n", state, newState)
 		wm.state = newState
 		wm.mu.Unlock()
+		wm.logFn(0, "webhook", "health state: %s → %s\n", state, newState)
 		wm.emitCurrentState()
 		return
 	}
@@ -663,11 +663,13 @@ func (wm *webhookManager) handleWebhook(w http.ResponseWriter, r *http.Request) 
 	wm.eventCounts[eventType]++
 	prevState := wm.state
 	if prevState != WebhookStreamHealthy {
-		wm.logFn(0, "webhook", "health state: %s → %s\n", prevState, WebhookStreamHealthy)
 		wm.state = WebhookStreamHealthy
 	}
 	wm.lastEventTime = time.Now()
 	wm.mu.Unlock()
+	if prevState != WebhookStreamHealthy {
+		wm.logFn(0, "webhook", "health state: %s → %s\n", prevState, WebhookStreamHealthy)
+	}
 
 	wm.emitCurrentState()
 
