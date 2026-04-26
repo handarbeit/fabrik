@@ -512,7 +512,7 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	var lastActivity atomic.Int64
 	lastActivity.Store(time.Now().UnixNano())
 	// Wrap stdoutWriter with a turn-counting writer that fires claudeTurnProgress on
-	// each assistant turn, then with the activity writer for inactivity tracking.
+	// each user event (logical turn start), then with the activity writer for inactivity tracking.
 	tcw := &turnCountingWriter{inner: stdoutWriter, issueNumber: issueNumber, maxTurns: maxTurns}
 	stdoutWriter = &activityWriter{inner: tcw, lastActivity: &lastActivity}
 
