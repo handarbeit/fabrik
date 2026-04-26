@@ -1,0 +1,111 @@
+# Fabrik Issue Lifecycle — overview pipeline diagram
+# Regenerate: cd docs/assets/diagrams && d2 lifecycle.d2 lifecycle.svg --theme=200
+
+direction: right
+
+# ---- Stage pipeline ----
+Specify: Specify {
+  shape: rectangle
+  style: {
+    fill: "#1e3a5f"
+    stroke: "#4a90d9"
+    font-color: "#e8f0fe"
+    border-radius: 6
+  }
+}
+
+Research: Research {
+  shape: rectangle
+  style: {
+    fill: "#1e3a5f"
+    stroke: "#4a90d9"
+    font-color: "#e8f0fe"
+    border-radius: 6
+  }
+}
+
+Plan: Plan {
+  shape: rectangle
+  style: {
+    fill: "#1e3a5f"
+    stroke: "#4a90d9"
+    font-color: "#e8f0fe"
+    border-radius: 6
+  }
+}
+
+Implement: Implement {
+  shape: rectangle
+  style: {
+    fill: "#1e3a5f"
+    stroke: "#4a90d9"
+    font-color: "#e8f0fe"
+    border-radius: 6
+  }
+}
+
+Review: Review {
+  shape: rectangle
+  style: {
+    fill: "#1e3a5f"
+    stroke: "#4a90d9"
+    font-color: "#e8f0fe"
+    border-radius: 6
+  }
+}
+
+Validate: Validate {
+  shape: rectangle
+  style: {
+    fill: "#1e3a5f"
+    stroke: "#4a90d9"
+    font-color: "#e8f0fe"
+    border-radius: 6
+  }
+}
+
+Done: Done {
+  shape: rectangle
+  style: {
+    fill: "#1a4731"
+    stroke: "#4ade80"
+    font-color: "#d1fae5"
+    border-radius: 6
+    bold: true
+  }
+}
+
+# ---- Main flow ----
+Specify -> Research
+Research -> Plan
+Plan -> Implement: "Draft PR created"
+Implement -> Review
+Review -> Validate: "Review Gate\n(all reviewers submit)"
+Validate -> Done: "CI + Merge Gate\n(checks pass)"
+
+# ---- Gate off-ramps ----
+waiting: "Awaiting Input" {
+  shape: rectangle
+  style: {
+    fill: "#3d1f1f"
+    stroke: "#f87171"
+    font-color: "#fecaca"
+    border-radius: 6
+    stroke-dash: 4
+  }
+}
+
+Review -> waiting: "timeout / cycle limit" {
+  style: {
+    stroke: "#f87171"
+    stroke-dash: 4
+    font-color: "#f87171"
+  }
+}
+Validate -> waiting: "CI failure / merge conflict" {
+  style: {
+    stroke: "#f87171"
+    stroke-dash: 4
+    font-color: "#f87171"
+  }
+}
