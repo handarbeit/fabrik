@@ -470,7 +470,7 @@ echo '.env' >> .gitignore
         <span class="link-icon">🔄</span>
         <div>
           <div class="link-title">State Machine</div>
-          <div class="link-desc">Authoritative spec for engine state transitions, label semantics, and review gate behavior</div>
+          <div class="link-desc">Visual lifecycle overview plus authoritative spec for engine state transitions, label semantics, and review gate behavior</div>
         </div>
       </a>
       <a href="{{ '/USER_GUIDE#10-troubleshooting' | relative_url }}" class="link-card">
