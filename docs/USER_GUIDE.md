@@ -193,6 +193,10 @@ To restrict processing to a single repository, pass `--repo owner/repo`.
 
 The `.fabrik/` directory (config, stages, plugin) always lives in the directory where you run `fabrik`.
 
+### Multi-Repo Support
+
+Fabrik can manage issues across every repository on the board in a single run. To enable multi-repo mode, omit (or comment out) the `repo:` field in `.fabrik/config.yaml` — Fabrik then discovers repositories lazily from the project board and processes issues from all of them. Each repository gets its own bare clone at `.fabrik/repos/<owner>-<repo>.git` and its own set of worktrees, all driven by the same poll loop.
+
 ### Git Clone Protocol (HTTPS vs SSH)
 
 By default, Fabrik uses HTTPS to bare-clone managed repos (`https://github.com/<owner>/<repo>.git`). Users who authenticate via SSH keys can switch to SSH clone URLs instead.
@@ -290,6 +294,12 @@ experience as release binaries.
 >   -O - | tar xz
 > ```
 > After that, `--auto-upgrade` will keep you current automatically.
+
+### Startup Board Validation
+
+On every startup, Fabrik fetches the project board and compares stage names in your YAML configs against the column names on the board. If any non-cleanup stage is missing from the board, Fabrik exits with a detailed error listing the mismatched names — catching config drift before any work begins. Extra board columns without a matching stage produce a warning but do not block startup.
+
+See [§10 Troubleshooting → Startup Board Validation Failure](#startup-board-validation-failure) if you encounter this error.
 
 ### Instance Lock
 
@@ -629,6 +639,14 @@ You do not need to babysit the pipeline. The intended human role is:
 - **Move cards** (or use `--yolo` to automate this).
 - **Comment** to steer when the plan goes sideways or you want to redirect.
 - **Review PRs** before merging -- Fabrik gets them review-ready, not merge-ready (unless `--yolo` or `fabrik:yolo` label is active, in which case Fabrik auto-merges after Validate).
+
+### Yolo Mode and Auto-Merge
+
+Pass `--yolo` to enable global auto-advance: Fabrik moves issues through every stage automatically without waiting for human approval, and auto-merges the linked PR once Validate completes. To scope the same behavior to a single issue, apply the `fabrik:yolo` label — Fabrik auto-advances and auto-merges that issue only.
+
+For lighter automation without auto-merge, use `fabrik:cruise`: it auto-advances through all stages but stops at Validate, leaving the merge decision to you.
+
+See [Stage YAML Reference](#stage-yaml-reference) for the `auto_advance` field, which controls auto-advance behavior per stage independent of the global `--yolo` flag.
 
 ### Draft PR Workflow
 
