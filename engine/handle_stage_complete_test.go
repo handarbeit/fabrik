@@ -2,6 +2,7 @@ package engine
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	gh "github.com/verveguy/fabrik/github"
@@ -342,6 +343,141 @@ func TestHandleStageComplete_CruiseLabel_OverridesAutoAdvanceFalse(t *testing.T)
 
 	if len(client.updateStatusCalls) != 1 {
 		t.Fatalf("expected 1 advance: cruise overrides auto_advance:false, got %d", len(client.updateStatusCalls))
+	}
+}
+
+// ── wait_for_ci: true conjunctive gate ───────────────────────────────────────
+
+// TestHandleStageComplete_WaitForCI_AddsAwaitingCINotComplete verifies that
+// when wait_for_ci: true, handleStageComplete adds fabrik:awaiting-ci and does
+// NOT add stage:X:complete (R1, R2).
+func TestHandleStageComplete_WaitForCI_AddsAwaitingCINotComplete(t *testing.T) {
+	tr := true
+	client := &mockGitHubClient{}
+	stgs := testStagesWithValidate()
+	eng := testEngineWithStages(client, stgs)
+	eng.cfg.Yolo = true // ensure yolo doesn't bypass the new gate
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:yolo"}}
+	validateStage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	eng.handleStageComplete(board, item, validateStage)
+
+	foundAwaitingCI := false
+	foundComplete := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:awaiting-ci" {
+			foundAwaitingCI = true
+		}
+		if c.labelName == "stage:Validate:complete" {
+			foundComplete = true
+		}
+	}
+	if !foundAwaitingCI {
+		t.Error("expected fabrik:awaiting-ci to be added when wait_for_ci: true")
+	}
+	if foundComplete {
+		t.Error("stage:Validate:complete must NOT be added when wait_for_ci: true (deferred to checkCIGate)")
+	}
+	// No stage advancement either
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("expected no advance when wait_for_ci: true, got %d", len(client.updateStatusCalls))
+	}
+}
+
+// TestHandleStageComplete_WaitForCI_Idempotent verifies that when
+// fabrik:awaiting-ci is already present, handleStageComplete does not re-add it.
+func TestHandleStageComplete_WaitForCI_Idempotent(t *testing.T) {
+	tr := true
+	client := &mockGitHubClient{}
+	stgs := testStagesWithValidate()
+	eng := testEngineWithStages(client, stgs)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	// Item already has the awaiting-ci label
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:awaiting-ci"}}
+	validateStage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	eng.handleStageComplete(board, item, validateStage)
+
+	count := 0
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:awaiting-ci" {
+			count++
+		}
+	}
+	if count != 0 {
+		t.Errorf("fabrik:awaiting-ci should not be re-added when already present, got %d add calls", count)
+	}
+}
+
+// TestHandleStageComplete_WaitForCI_AlsoAddsAwaitingReview verifies that
+// when wait_for_ci: true AND wait_for_reviews: true, both labels are added.
+func TestHandleStageComplete_WaitForCI_AlsoAddsAwaitingReview(t *testing.T) {
+	tr := true
+	client := &mockGitHubClient{}
+	stgs := testStagesWithValidate()
+	eng := testEngineWithStages(client, stgs)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+	validateStage := &stages.Stage{Name: "Validate", WaitForCI: &tr, WaitForReviews: &tr}
+
+	eng.handleStageComplete(board, item, validateStage)
+
+	foundCI := false
+	foundReview := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:awaiting-ci" {
+			foundCI = true
+		}
+		if c.labelName == "fabrik:awaiting-review" {
+			foundReview = true
+		}
+	}
+	if !foundCI {
+		t.Error("expected fabrik:awaiting-ci when wait_for_ci: true")
+	}
+	if !foundReview {
+		t.Error("expected fabrik:awaiting-review when wait_for_ci: true and wait_for_reviews: true")
+	}
+}
+
+// TestHandleStageComplete_WaitForCI_AppliesRegardlessOfYolo verifies that the
+// wait_for_ci gate fires for both yolo and non-yolo items (R1 applies regardless).
+func TestHandleStageComplete_WaitForCI_AppliesRegardlessOfYolo(t *testing.T) {
+	tr := true
+	for _, yolo := range []bool{true, false} {
+		t.Run(fmt.Sprintf("yolo=%v", yolo), func(t *testing.T) {
+			client := &mockGitHubClient{}
+			stgs := testStagesWithValidate()
+			eng := testEngineWithStages(client, stgs)
+			eng.cfg.Yolo = yolo
+
+			board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+			item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+			validateStage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+			eng.handleStageComplete(board, item, validateStage)
+
+			foundCI := false
+			foundComplete := false
+			for _, c := range client.addLabelCalls {
+				if c.labelName == "fabrik:awaiting-ci" {
+					foundCI = true
+				}
+				if c.labelName == "stage:Validate:complete" {
+					foundComplete = true
+				}
+			}
+			if !foundCI {
+				t.Errorf("yolo=%v: expected fabrik:awaiting-ci regardless of yolo setting", yolo)
+			}
+			if foundComplete {
+				t.Errorf("yolo=%v: stage:Validate:complete must not be added for wait_for_ci: true", yolo)
+			}
+		})
 	}
 }
 
