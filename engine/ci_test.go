@@ -70,6 +70,37 @@ func TestCheckCIGate_NoCheckRuns_ClearsGate(t *testing.T) {
 	}
 }
 
+func TestCheckCIGate_PostPushDelay_BlocksGate(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, HeadSHA: "sha-new"}, nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return nil, nil // no checks yet for the new SHA
+		},
+	}
+	eng := testEngineForMerge(client)
+	// Pre-seed: this issue has previously had check runs registered.
+	eng.prHasHadChecks["owner/repo#1"] = true
+
+	tr := true
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	if !blocked {
+		t.Error("expected blocked=true when zero check runs after previously seeing checks (post-push delay)")
+	}
+	if ciFailure || timedOut {
+		t.Errorf("expected ciFailure=false timedOut=false for post-push delay, got ciFailure=%v timedOut=%v", ciFailure, timedOut)
+	}
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-ci" {
+			t.Error("fabrik:awaiting-ci must NOT be removed during post-push registration delay")
+		}
+	}
+}
+
 func TestCheckCIGate_AllGreen_ClearsGate(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {

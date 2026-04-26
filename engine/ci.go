@@ -38,6 +38,7 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 	}
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	key := issueKey(item, e.defaultRepo())
 
 	pr, err := e.client.FetchLinkedPR(owner, repo, item.Number)
 	if err != nil {
@@ -56,8 +57,22 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 		return true, false, false // transient error; retry on next poll
 	}
 
-	// R5: no check runs = no CI configured; gate clears.
+	if len(checkRuns) > 0 {
+		e.mu.Lock()
+		e.prHasHadChecks[key] = true
+		e.mu.Unlock()
+	}
+
+	// R5: no check runs found. If this PR has had checks before, we're likely in
+	// the post-push registration window — block and wait rather than clearing.
 	if len(checkRuns) == 0 {
+		e.mu.Lock()
+		hadChecks := e.prHasHadChecks[key]
+		e.mu.Unlock()
+		if hadChecks {
+			e.logf(item.Number, "ci-gate", "no check runs for SHA %s — likely post-push registration delay; waiting\n", pr.HeadSHA[:min(8, len(pr.HeadSHA))])
+			return true, false, false
+		}
 		e.logf(item.Number, "ci-gate", "no check runs found for SHA %s; CI gate clears (no CI configured)\n", pr.HeadSHA[:min(8, len(pr.HeadSHA))])
 		e.addCompleteLabelAndRemoveCI(owner, repo, item, stage)
 		return false, false, false
