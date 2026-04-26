@@ -254,3 +254,87 @@ func TestViewActive_BlockedCountIncludedInHeader(t *testing.T) {
 func TestIssueBlockedEvent_tuiEvent(t *testing.T) {
 	IssueBlockedEvent{}.tuiEvent() // satisfies interface
 }
+
+// TestTurnBadge verifies full/compact/omit rendering.
+func TestTurnBadge(t *testing.T) {
+	tests := []struct {
+		turnsUsed int
+		maxTurns  int
+		available int
+		want      string
+	}{
+		{5, 50, 100, "[5/50 turns]"},
+		{5, 50, 12, "[5/50 turns]"},
+		{5, 50, 11, "[5/50]"},
+		{5, 50, 7, "[5/50]"},
+		{5, 50, 6, "[5/50]"},
+		{5, 50, 5, ""},
+		{0, 50, 100, ""},    // no turns yet
+		{5, 50, 0, ""},      // no space
+		{5, 50, -1, ""},     // negative space
+		{3, 0, 100, "[3 turns]"},  // unlimited
+		{3, 0, 9, "[3 turns]"},
+		{3, 0, 8, "[3]"},
+		{3, 0, 2, ""},
+	}
+	for _, tt := range tests {
+		got := turnBadge(tt.turnsUsed, tt.maxTurns, tt.available)
+		if got != tt.want {
+			t.Errorf("turnBadge(%d,%d,%d) = %q, want %q",
+				tt.turnsUsed, tt.maxTurns, tt.available, got, tt.want)
+		}
+	}
+}
+
+// TestUpdate_TurnProgressEvent_UpdatesJob verifies that TurnProgressEvent updates the active job.
+func TestUpdate_TurnProgressEvent_UpdatesJob(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil)
+	key42 := activeJobKey("", 42)
+	m.active.active[key42] = &activeJob{IssueNumber: 42, StageName: "Research", StartedAt: time.Now()}
+	m.active.activeNumToKey[42] = key42
+
+	next, _ := m.Update(TurnProgressEvent{IssueNumber: 42, TurnsUsed: 7, MaxTurns: 50})
+	nm := next.(Model)
+
+	job, ok := nm.active.active[key42]
+	if !ok {
+		t.Fatal("issue 42 missing from active after TurnProgressEvent")
+	}
+	if job.TurnsUsed != 7 {
+		t.Errorf("TurnsUsed = %d, want 7", job.TurnsUsed)
+	}
+	if job.MaxTurns != 50 {
+		t.Errorf("MaxTurns = %d, want 50", job.MaxTurns)
+	}
+}
+
+// TestUpdate_TurnProgressEvent_UnknownIssue verifies that an unknown issue number does not panic.
+func TestUpdate_TurnProgressEvent_UnknownIssue(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil)
+	// Should not panic for an issue not in the active map.
+	next, _ := m.Update(TurnProgressEvent{IssueNumber: 999, TurnsUsed: 5, MaxTurns: 30})
+	nm := next.(Model)
+	if _, ok := nm.active.active[activeJobKey("", 999)]; ok {
+		t.Error("unknown issue should not be added to active via TurnProgressEvent")
+	}
+}
+
+// TestUpdate_TurnProgressEvent_ResetOnJobStarted verifies that starting a new job resets turn state.
+func TestUpdate_TurnProgressEvent_ResetOnJobStarted(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil)
+	key5 := activeJobKey("", 5)
+	m.active.active[key5] = &activeJob{IssueNumber: 5, StageName: "Research", StartedAt: time.Now(), TurnsUsed: 10, MaxTurns: 30}
+	m.active.activeNumToKey[5] = key5
+
+	// Simulate a new stage start that replaces the existing job.
+	next, _ := m.Update(JobStartedEvent{IssueNumber: 5, StageName: "Plan", StartedAt: time.Now()})
+	nm := next.(Model)
+
+	job := nm.active.active[activeJobKey("", 5)]
+	if job.TurnsUsed != 0 {
+		t.Errorf("TurnsUsed = %d after new JobStartedEvent, want 0", job.TurnsUsed)
+	}
+	if job.MaxTurns != 0 {
+		t.Errorf("MaxTurns = %d after new JobStartedEvent, want 0", job.MaxTurns)
+	}
+}
