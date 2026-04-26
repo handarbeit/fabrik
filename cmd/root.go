@@ -361,7 +361,7 @@ func Execute() error {
 			cfg.PluginDir = v
 		}
 	}
-	if !cfg.Webhooks {
+	if !explicitFlags["webhooks"] {
 		if v := os.Getenv("FABRIK_WEBHOOKS"); v != "" {
 			lv := strings.ToLower(v)
 			cfg.Webhooks = lv == "true" || lv == "1" || lv == "yes"
