@@ -262,30 +262,13 @@ func (wm *WorktreeManager) branchExists(branch string) bool {
 // Errors are non-fatal — the worktree is still usable, just potentially behind.
 func (wm *WorktreeManager) updateWorktreeFromMain(wtDir, baseBranch string, issueNumber int) {
 	// Check for uncommitted changes — skip update if dirty.
-	// Ignore .fabrik-context/ (engine-written context files) which are always
+	// Engine-managed files (.fabrik-context/, .fabrik/issue.md) are always
 	// present but should never block a rebase. Other untracked files (e.g. new
 	// source files from an interrupted Claude session) DO block the rebase
 	// to avoid losing work-in-progress.
-	statusCmd := exec.Command("git", "status", "--porcelain")
-	statusCmd.Dir = wtDir
-	if out, err := statusCmd.Output(); err == nil {
-		dirty := false
-		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-			if line == "" {
-				continue
-			}
-			// Extract the file path (status is first 2 chars + space + path)
-			path := strings.TrimSpace(line[2:])
-			if strings.HasPrefix(path, ".fabrik-context/") || strings.HasPrefix(path, ".fabrik/issue.md") {
-				continue // engine-managed, safe to ignore
-			}
-			dirty = true
-			break
-		}
-		if dirty {
-			wm.logf(issueNumber, "worktree", "has uncommitted changes, skipping update from main\n")
-			return
-		}
+	if dirty, err := isWorkingTreeDirty(wtDir); err == nil && dirty {
+		wm.logf(issueNumber, "worktree", "has uncommitted changes, skipping update from main\n")
+		return
 	}
 
 	// Fetch latest from origin

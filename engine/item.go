@@ -660,7 +660,10 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		if !hitLimit || totalMultiple >= 3 {
 			break
 		}
-		hasProgress, progressErr := detectProgress(ctx, stage, &item, baseline, workDir, e.client)
+		issueLogf := func(tag, format string, args ...any) {
+			e.logf(item.Number, tag, format, args...)
+		}
+		hasProgress, progressErr := detectProgress(ctx, stage, &item, baseline, workDir, e.client, issueLogf)
 		if progressErr != nil {
 			e.logf(item.Number, "extend-turns", "progress check failed: %v\n", progressErr)
 			break
@@ -670,8 +673,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}
 		totalMultiple++
 		currentBudget = stage.MaxTurns
-		e.logf(item.Number, "extend-turns", "progress detected — extending to %d× budget (%d turns used)\n",
-			totalMultiple, usage.TurnsUsed)
+		e.logf(item.Number, "extend-turns", "extending to %d× budget (%d turns used)\n", totalMultiple, usage.TurnsUsed)
 		resume = true
 	}
 	// Report cumulative budget across all extensions in stats footer.
@@ -1141,12 +1143,9 @@ func (e *Engine) removeFailedLabel(owner, repo string, issueNumber int, stageNam
 // commitWIP commits any uncommitted changes in the worktree as a WIP commit.
 // This preserves partial work when Claude hits max_turns or errors out.
 func (e *Engine) commitWIP(workDir string, issueNumber int, stageName string) {
-	// Check for uncommitted changes
-	statusCmd := exec.Command("git", "status", "--porcelain")
-	statusCmd.Dir = workDir
-	out, err := statusCmd.Output()
-	if err != nil || len(strings.TrimSpace(string(out))) == 0 {
-		return // clean worktree, nothing to commit
+	dirty, err := isWorkingTreeDirty(workDir)
+	if err != nil || !dirty {
+		return // clean worktree or error checking, nothing to commit
 	}
 
 	// Stage all changes
@@ -1187,6 +1186,7 @@ type progressBaseline struct {
 	gitHeadSHA          string // HEAD commit SHA in the worktree (Implement, Review)
 	commentCount        int    // total comment count on item (Validate)
 	resolvedThreadCount int    // resolved PR review threads (Review)
+	workingTreeDirty    bool   // true if worktree had uncommitted changes at baseline (Implement)
 }
 
 // hasExtendTurnsLabel returns true if item carries the "fabrik:extend-turns" label.
@@ -1201,6 +1201,9 @@ func snapshotBaseline(stage *stages.Stage, item gh.ProjectItem, workDir string) 
 	case "Implement":
 		if sha, err := gitHeadSHA(workDir); err == nil {
 			b.gitHeadSHA = sha
+		}
+		if dirty, err := isWorkingTreeDirty(workDir); err == nil {
+			b.workingTreeDirty = dirty
 		}
 	case "Review":
 		if sha, err := gitHeadSHA(workDir); err == nil {
@@ -1224,37 +1227,97 @@ func gitHeadSHA(dir string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// isWorkingTreeDirty returns true if dir has uncommitted changes other than
+// engine-managed files (.fabrik-context/, .fabrik/issue.md).
+func isWorkingTreeDirty(dir string) (bool, error) {
+	cmd := exec.Command("git", "status", "--porcelain")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("git status --porcelain: %w", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		path := strings.TrimSpace(line[2:])
+		if isEngineManagedPath(path) || strings.HasPrefix(path, ".fabrik/issue.md") {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
 // detectProgress checks whether measurable progress was made since baseline.
-// Implement: new commits (git HEAD SHA changed). Review: new commits OR resolved
-// reviewer thread count increased (GitHub re-fetch). Validate: total comment count
-// increased (GitHub re-fetch). All other stages return false — no extension.
+// Implement: new commits OR (baseline was clean AND working tree is now dirty).
+// Review: new commits OR resolved reviewer thread count increased (GitHub re-fetch).
+// Validate: total comment count increased (GitHub re-fetch).
+// All other stages return false — no extension.
+// logfFn is called exactly once per invocation with the verdict and evaluated signals.
 // If a GitHub re-fetch fails, returns false and the error (conservative: fail as today).
-func detectProgress(_ context.Context, stage *stages.Stage, item *gh.ProjectItem, baseline progressBaseline, workDir string, client GitHubClient) (bool, error) {
+func detectProgress(_ context.Context, stage *stages.Stage, item *gh.ProjectItem, baseline progressBaseline, workDir string, client GitHubClient, logfFn func(tag, format string, args ...any)) (bool, error) {
 	switch stage.Name {
 	case "Implement":
 		sha, err := gitHeadSHA(workDir)
 		if err != nil {
 			return false, err
 		}
-		return sha != baseline.gitHeadSHA, nil
+		if sha != baseline.gitHeadSHA {
+			logfFn("extend-turns", "progress check: HEAD %s → %s (new commits), has_progress=true\n", baseline.gitHeadSHA, sha)
+			return true, nil
+		}
+		// HEAD unchanged — check for uncommitted working-tree changes, but only
+		// if the baseline was clean. A pre-existing dirty worktree does not count.
+		dirty, err := isWorkingTreeDirty(workDir)
+		if err != nil {
+			logfFn("extend-turns", "progress check: HEAD %s (unchanged), working-tree check failed: %v, has_progress=false — no extension\n", sha, err)
+			return false, nil
+		}
+		if !baseline.workingTreeDirty && dirty {
+			logfFn("extend-turns", "progress check: HEAD %s (unchanged), working-tree dirty (baseline was clean), has_progress=true\n", sha)
+			return true, nil
+		}
+		reason := "working-tree clean"
+		if baseline.workingTreeDirty {
+			reason = "baseline already dirty"
+		}
+		logfFn("extend-turns", "progress check: HEAD %s (unchanged), %s, has_progress=false — no extension\n", sha, reason)
+		return false, nil
 	case "Review":
 		sha, err := gitHeadSHA(workDir)
 		if err != nil {
 			return false, err
 		}
 		if sha != baseline.gitHeadSHA {
+			logfFn("extend-turns", "progress check: HEAD %s → %s (new commits), has_progress=true\n", baseline.gitHeadSHA, sha)
 			return true, nil
 		}
 		// No new commits — re-fetch to check resolved reviewer threads.
 		if err := client.FetchItemDetails(item); err != nil {
 			return false, fmt.Errorf("re-fetching item for progress check: %w", err)
 		}
-		return item.LinkedPRResolvedThreadCount > baseline.resolvedThreadCount, nil
+		progress := item.LinkedPRResolvedThreadCount > baseline.resolvedThreadCount
+		if progress {
+			logfFn("extend-turns", "progress check: HEAD %s (unchanged), resolved threads %d → %d, has_progress=true\n",
+				sha, baseline.resolvedThreadCount, item.LinkedPRResolvedThreadCount)
+		} else {
+			logfFn("extend-turns", "progress check: HEAD %s (unchanged), resolved threads %d (unchanged), has_progress=false — no extension\n",
+				sha, baseline.resolvedThreadCount)
+		}
+		return progress, nil
 	case "Validate":
 		if err := client.FetchItemDetails(item); err != nil {
 			return false, fmt.Errorf("re-fetching item for progress check: %w", err)
 		}
-		return len(item.Comments) > baseline.commentCount, nil
+		progress := len(item.Comments) > baseline.commentCount
+		if progress {
+			logfFn("extend-turns", "progress check: comments %d → %d, has_progress=true\n", baseline.commentCount, len(item.Comments))
+		} else {
+			logfFn("extend-turns", "progress check: comments %d (unchanged), has_progress=false — no extension\n", baseline.commentCount)
+		}
+		return progress, nil
 	}
+	logfFn("extend-turns", "progress check: stage %s has no progress signal, has_progress=false\n", stage.Name)
 	return false, nil
 }
