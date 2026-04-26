@@ -377,7 +377,11 @@ func Execute() error {
 				fmt.Fprintf(os.Stderr, "[warn] FABRIK_WEBHOOK_PORT=%q is invalid (must be 0 or a positive integer); using OS-assigned port\n", v)
 			}
 		} else if pc.WebhookPort != nil {
-			cfg.WebhookPort = *pc.WebhookPort
+			if *pc.WebhookPort >= 0 {
+				cfg.WebhookPort = *pc.WebhookPort
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] webhook_port=%d is invalid (must be 0 or a positive integer); using OS-assigned port\n", *pc.WebhookPort)
+			}
 		}
 	}
 	if cfg.WebhookEvents == "" {
