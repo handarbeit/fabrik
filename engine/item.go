@@ -23,7 +23,7 @@ var lockVerifyDelay = 2 * time.Second
 // engine itself and should never be treated as user-generated dirty content.
 // These paths must not block cleanup or worktree updates.
 func isEngineManagedPath(path string) bool {
-	return strings.HasPrefix(path, ".fabrik-context/")
+	return strings.HasPrefix(path, ".fabrik-context/") || path == ".fabrik/issue.md"
 }
 
 // isAwaitingInput returns true iff the item has both fabrik:paused and
@@ -1241,7 +1241,7 @@ func isWorkingTreeDirty(dir string) (bool, error) {
 			continue
 		}
 		path := strings.TrimSpace(line[2:])
-		if isEngineManagedPath(path) || strings.HasPrefix(path, ".fabrik/issue.md") {
+		if isEngineManagedPath(path) {
 			continue
 		}
 		return true, nil
@@ -1261,6 +1261,7 @@ func detectProgress(_ context.Context, stage *stages.Stage, item *gh.ProjectItem
 	case "Implement":
 		sha, err := gitHeadSHA(workDir)
 		if err != nil {
+			logfFn("extend-turns", "progress check: git HEAD lookup failed: %v, has_progress=false — no extension\n", err)
 			return false, err
 		}
 		if sha != baseline.gitHeadSHA {
@@ -1287,6 +1288,7 @@ func detectProgress(_ context.Context, stage *stages.Stage, item *gh.ProjectItem
 	case "Review":
 		sha, err := gitHeadSHA(workDir)
 		if err != nil {
+			logfFn("extend-turns", "progress check: git HEAD lookup failed: %v, has_progress=false — no extension\n", err)
 			return false, err
 		}
 		if sha != baseline.gitHeadSHA {
@@ -1295,6 +1297,7 @@ func detectProgress(_ context.Context, stage *stages.Stage, item *gh.ProjectItem
 		}
 		// No new commits — re-fetch to check resolved reviewer threads.
 		if err := client.FetchItemDetails(item); err != nil {
+			logfFn("extend-turns", "progress check: HEAD %s (unchanged), re-fetch failed: %v, has_progress=false — no extension\n", sha, err)
 			return false, fmt.Errorf("re-fetching item for progress check: %w", err)
 		}
 		progress := item.LinkedPRResolvedThreadCount > baseline.resolvedThreadCount
@@ -1308,7 +1311,9 @@ func detectProgress(_ context.Context, stage *stages.Stage, item *gh.ProjectItem
 		return progress, nil
 	case "Validate":
 		if err := client.FetchItemDetails(item); err != nil {
-			return false, fmt.Errorf("re-fetching item for progress check: %w", err)
+			fetchErr := fmt.Errorf("re-fetching item for progress check: %w", err)
+			logfFn("extend-turns", "progress check: comments %d (fetch failed), has_progress=false, err=%v\n", baseline.commentCount, fetchErr)
+			return false, fetchErr
 		}
 		progress := len(item.Comments) > baseline.commentCount
 		if progress {
