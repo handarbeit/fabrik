@@ -25,7 +25,8 @@ For the authoritative engine state-machine spec (label semantics, review gate tr
 7. [Permissions](#7-permissions)
 8. [TUI Dashboard](#8-tui-dashboard)
 9. [Observability](#9-observability)
-10. [Troubleshooting](#10-troubleshooting)
+10. [Webhook Mode](#10-webhook-mode)
+11. [Troubleshooting](#11-troubleshooting)
 
 ---
 
@@ -133,7 +134,7 @@ exactly (case-sensitive). The default pipeline uses:
 > ```bash
 > rm -rf ~/.claude/plugins/cache/claude-plugins-official/superpowers
 > ```
-> See [§10 Troubleshooting → Duplicate Comments on Issues](#10-troubleshooting) for full details.
+> See [§11 Troubleshooting → Duplicate Comments on Issues](#11-troubleshooting) for full details.
 
 ### First Run
 
@@ -299,13 +300,13 @@ experience as release binaries.
 
 On startup, Fabrik attempts to fetch the project board and status field so it can compare stage names in your YAML configs against the column names on the board. When that metadata is fetched successfully, any non-cleanup stage missing from the board causes Fabrik to exit with a detailed error listing the mismatched names — catching config drift before any work begins. Extra board columns without a matching stage produce a warning but do not block startup. If Fabrik cannot fetch the board or status field, it logs a warning and continues without blocking startup.
 
-See [§10 Troubleshooting → Startup Board Validation Failure](#startup-board-validation-failure) if validation succeeds and reports a mismatch.
+See [§11 Troubleshooting → Startup Board Validation Failure](#startup-board-validation-failure) if validation succeeds and reports a mismatch.
 
 ### Instance Lock
 
 > **Note:** When Fabrik starts, it creates a PID lock file at `.fabrik/fabrik.lock`. If a second instance attempts to start in the same directory, it reads the lock file, logs an error identifying the running process, and exits immediately. The lock is automatically released when the process exits — including on crash or SIGKILL — so there is no need to manually delete the file after an unclean shutdown.
 >
-> See [§10 Troubleshooting → Multiple Fabrik Instances](#10-troubleshooting) if you encounter a stale lock or need to run multiple instances against different projects.
+> See [§11 Troubleshooting → Multiple Fabrik Instances](#11-troubleshooting) if you encounter a stale lock or need to run multiple instances against different projects.
 
 ---
 
@@ -1532,7 +1533,100 @@ Typical cost is ~5–30 points per poll depending on active items, well within t
 
 ---
 
-## 10. Troubleshooting
+## 10. Webhook Mode
+
+Webhook mode is an optional feature that dramatically reduces GraphQL usage and cuts event latency from up to 30 seconds to near-zero. When enabled, Fabrik receives GitHub events within seconds of them occurring instead of waiting for the next poll tick.
+
+### How It Works
+
+Fabrik spawns `gh webhook forward` as a background subprocess. This tool connects outbound to GitHub's SSE stream and forwards every matching event as an HTTP POST to a local listener on `127.0.0.1:<port>`. No public endpoint, no ngrok, no infrastructure changes. Each event payload is authenticated with HMAC-SHA256 before Fabrik acts on it.
+
+Events are translated into immediate poll wakeups — the existing board-fetch and filter logic handles the rest. The poll loop continues running as a safety net (up to once every 60 minutes when the webhook stream is healthy) so missed or delayed events never strand work.
+
+### Prerequisites
+
+- **`gh` CLI version ≥ 2.32.0** (released October 2023). `gh webhook forward` was introduced in this version. Run `gh --version` to check.
+- **`gh auth login`** with a token that has `admin:repo_hook` write scope (classic PAT) or equivalent repo admin access. Fine-grained tokens may lack this scope.
+- **Repo admin access** on each repository on your board, or org-admin access for org-level subscription.
+
+If any prerequisite is missing, Fabrik logs a clear warning and falls back to polling-only mode. Webhook mode failure is always non-fatal.
+
+### Enabling Webhook Mode
+
+Three equivalent ways to enable:
+
+**CLI flag:**
+```bash
+fabrik --webhooks
+```
+
+**Environment variable:**
+```bash
+FABRIK_WEBHOOKS=true fabrik
+```
+
+**`.fabrik/config.yaml`:**
+```yaml
+webhooks: true
+```
+
+### Configuration Options
+
+| Option | Flag | Env var | Config YAML | Default |
+|--------|------|---------|-------------|---------|
+| Enable webhooks | `--webhooks` | `FABRIK_WEBHOOKS` | `webhooks: true` | off |
+| Listener port | `--webhook-port=<N>` | `FABRIK_WEBHOOK_PORT` | `webhook_port: <N>` | 0 (OS-assigned) |
+| Event filter | `--webhook-events=<csv>` | `FABRIK_WEBHOOK_EVENTS` | `webhook_events: [...]` | all supported events |
+
+By default, Fabrik subscribes to: `issue_comment`, `issues`, `pull_request`, `pull_request_review`, `pull_request_review_comment`, `check_run`, `check_suite`, and `projects_v2_item` (board column changes — see note below).
+
+### Health States and TUI Indicator
+
+The TUI footer shows a webhook health indicator when webhook mode is enabled:
+
+| Indicator | State | Meaning |
+|-----------|-------|---------|
+| `● webhook (N)` (green) | Healthy | At least one event received in the last 10 minutes. Idle cap: 60 min. |
+| `○ webhook (N)` (blue) | Starting Up | Subprocess launched; waiting for first event (up to 30s grace). Idle cap: 60 min. |
+| `◌ webhook (N)` (yellow) | Unhealthy | No event received in 10+ minutes or startup grace expired. Idle cap: 5 min (same as polling-only). |
+
+`N` is the total number of webhook events received since startup. You can also verify the stream by checking `fabrik.log` for `[webhook]` tag lines.
+
+### Expected GraphQL Load Reduction
+
+On an active board that would poll every 30 seconds without webhooks, enabling webhook mode reduces steady-state GraphQL polling to at most once every 60 minutes — roughly a 120× reduction in GraphQL points consumed while idle. During active periods, polls are triggered immediately by webhook events instead of waiting for the tick.
+
+### `projects_v2_item` (Board Column Changes)
+
+Fabrik attempts to subscribe to `projects_v2_item` events, which fire when an issue is moved between board columns. If `gh webhook forward` does not support this event type for your installation, Fabrik logs a warning and continues without it. In this case, board-column changes are caught by the safety-net poll within 60 minutes (or 5 minutes if the stream is unhealthy). All other event types continue to work normally.
+
+### Security
+
+- The HTTP listener binds exclusively to `127.0.0.1` and is never reachable from outside your machine.
+- Every incoming payload is verified with HMAC-SHA256 before Fabrik acts on it. A malicious local process cannot spoof events without the secret.
+- The webhook secret is generated from `crypto/rand` (32 bytes) at startup and is never written to disk or logged.
+- If HMAC verification fails repeatedly (5 consecutive failures within 2 minutes), Fabrik automatically rotates the secret and restarts the subprocess. After 2 failed rotation cycles, webhook mode is disabled for the session with a clear log message.
+
+### Multi-Repo Boards
+
+On multi-repo boards, Fabrik uses a single `gh webhook forward` subprocess:
+
+1. If your token has org-admin access, Fabrik uses `--org=<org>` to subscribe to all repos in the org with one subscription — no restarts needed when new repos appear.
+2. Otherwise, Fabrik subscribes per-repo. When a new repo appears on the board, the subprocess is briefly restarted with the updated repo list (the safety-net poll covers any events missed during the restart).
+
+### Troubleshooting Webhook Mode
+
+**"prerequisite check failed"** — `gh` is missing or too old. Install or upgrade: <https://cli.github.com>
+
+**Stream shows yellow "unhealthy"** — The subprocess may have exited or GitHub isn't delivering events. Check `fabrik.log` for `[webhook]` error lines. Run `gh auth status` to verify your token has `admin:repo_hook` scope.
+
+**HMAC failures logged** — Usually caused by a `gh auth refresh` that invalidated the webhook secret. Fabrik auto-rotates; if failures persist after 2 cycles, restart Fabrik.
+
+**`projects_v2_item` warning** — Board column changes fall back to the 60-minute safety-net poll. Not a problem for most workflows.
+
+---
+
+## 11. Troubleshooting
 
 ### GitHub API Returns 401 or "Fine-Grained Token" Warning
 
