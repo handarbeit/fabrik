@@ -112,3 +112,13 @@ type TurnProgressEvent struct {
 }
 
 func (TurnProgressEvent) tuiEvent() {}
+
+// WebhookStatusEvent is emitted when the webhook stream health state changes
+// or when new events are received. State is one of: "starting_up", "healthy",
+// "unhealthy", or "" (webhook mode disabled).
+type WebhookStatusEvent struct {
+	State       string         // WebhookHealthState as string to avoid import cycle
+	EventCounts map[string]int // per-event-type received counts
+}
+
+func (WebhookStatusEvent) tuiEvent() {}
