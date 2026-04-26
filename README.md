@@ -321,7 +321,7 @@ Fabrik uses labels to track state:
 | `fabrik:yolo` | Force auto-advance even when `auto_advance: false`; also triggers auto-merge of the linked PR when Validate completes |
 | `fabrik:cruise` | Auto-advances through all stages like `fabrik:yolo` but stops at Validate — no auto-merge, no move to Done. If both `fabrik:cruise` and `fabrik:yolo` are present, `fabrik:yolo` takes precedence. |
 | `fabrik:unrestricted` | Pass `--dangerously-skip-permissions` to Claude Code for this issue only, bypassing the default `--permission-mode dontAsk` posture and the entire tool allowlist. Use only when a stage needs tools outside the default set (e.g. `deno`, `bun`, or other non-standard toolchains). **Caution:** removes all tool restrictions. |
-| `fabrik:extend-turns` | Pre-grant 2× `max_turns` budget for the next invocation; auto-extends to 3× when progress is detected (new git commit or new comment, depending on stage); auto-removed on successful stage completion. |
+| `fabrik:extend-turns` | Pre-grant 2× `max_turns` budget for the next invocation; auto-extends to 3× when stage progress is detected; auto-removed on successful stage completion. |
 | `base:<branch>` | Override the base branch for this issue — Fabrik forks from, rebases onto, and targets PRs at `<branch>` instead of the repository default. Must be set before Research. If the branch does not exist on the remote, Fabrik falls back to the default branch and posts a comment. |
 
 ## Multi-User
