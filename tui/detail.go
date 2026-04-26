@@ -54,6 +54,13 @@ func (d DetailPanelComponent) View(width int) string {
 		}
 		lines = append(lines, fmt.Sprintf("Stage:   %s", item.StageName))
 		lines = append(lines, fmt.Sprintf("Elapsed: %s", fmtDuration(item.Elapsed)))
+		if item.TurnsUsed > 0 {
+			if item.MaxTurns > 0 {
+				lines = append(lines, fmt.Sprintf("Turns:   %d/%d", item.TurnsUsed, item.MaxTurns))
+			} else {
+				lines = append(lines, fmt.Sprintf("Turns:   %d", item.TurnsUsed))
+			}
+		}
 	} else {
 		statusStr := "success"
 		if !item.Success {

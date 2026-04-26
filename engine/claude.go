@@ -53,6 +53,11 @@ func CheckDecomposed(output string) bool {
 // Falls back to stderr when nil (e.g. in tests).
 var claudeLogf func(issueNumber int, tag, format string, args ...any)
 
+// claudeTurnProgress is called after each assistant turn completes during a Claude
+// invocation. Set by the Engine during construction (same block as claudeLogf).
+// nil when no TUI is active (tests, plain-text mode).
+var claudeTurnProgress func(issueNumber, turnsUsed, maxTurns int)
+
 // claudeTUI indicates whether the TUI is active. When true, Claude's child
 // process stderr is sent only to the log file (not the terminal).
 var claudeTUI bool
@@ -82,6 +87,49 @@ type activityWriter struct {
 func (w *activityWriter) Write(p []byte) (int, error) {
 	w.lastActivity.Store(time.Now().UnixNano())
 	return w.inner.Write(p)
+}
+
+// turnCountingWriter wraps an io.Writer, counts assistant turns from the NDJSON
+// stream in real time, and calls claudeTurnProgress after each turn.
+// It buffers bytes until '\n', then checks each line for type == "assistant".
+// Safe for use from a single goroutine only (one per runClaude invocation).
+type turnCountingWriter struct {
+	inner       io.Writer
+	issueNumber int
+	maxTurns    int
+	buf         []byte
+	count       int
+}
+
+func (w *turnCountingWriter) Write(p []byte) (int, error) {
+	w.buf = append(w.buf, p...)
+	for {
+		idx := bytes.IndexByte(w.buf, '\n')
+		if idx < 0 {
+			break
+		}
+		line := w.buf[:idx+1]
+		w.buf = w.buf[idx+1:]
+		if isAssistantTurnLine(line) {
+			w.count++
+			if claudeTurnProgress != nil {
+				claudeTurnProgress(w.issueNumber, w.count, w.maxTurns)
+			}
+		}
+	}
+	return w.inner.Write(p)
+}
+
+// isAssistantTurnLine returns true if line is a JSON object with type == "assistant".
+func isAssistantTurnLine(line []byte) bool {
+	line = bytes.TrimSpace(line)
+	if len(line) == 0 || line[0] != '{' {
+		return false
+	}
+	var envelope struct {
+		Type string `json:"type"`
+	}
+	return json.Unmarshal(line, &envelope) == nil && envelope.Type == "assistant"
 }
 
 func claudeLog(issueNumber int, tag, format string, args ...any) {
@@ -246,7 +294,7 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	args := buildClaudeArgs(stage, sessFilePath, resume, opts.ModelOverride, effectiveBudget, hasUnrestrictedLabel(issue), workDir)
 
 	extraEnv := buildClaudeEnv(stage, opts.EffortOverride)
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, sessFilePath, ld, extraEnv, stage.MaxWallTime)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, sessFilePath, ld, extraEnv, stage.MaxWallTime, effectiveBudget)
 	usage.MaxTurns = effectiveBudget
 	if err != nil {
 		return output, completed, usage, err
@@ -275,7 +323,7 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 	args := buildClaudeArgs(stage, sessFilePath, true, opts.ModelOverride, limit, hasUnrestrictedLabel(issue), workDir) // resume existing session
 
 	extraEnv := buildClaudeEnv(stage, opts.EffortOverride)
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", sessFilePath, ld, extraEnv, stage.MaxWallTime)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", sessFilePath, ld, extraEnv, stage.MaxWallTime, limit)
 	usage.MaxTurns = limit
 	return output, completed, usage, err
 }
@@ -416,7 +464,7 @@ type claudeResponse struct {
 	} `json:"usage"`
 }
 
-func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, sessFilePath string, logDir string, extraEnv []string, maxWallTime time.Duration) (string, bool, TokenUsage, error) {
+func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, sessFilePath string, logDir string, extraEnv []string, maxWallTime time.Duration, maxTurns int) (string, bool, TokenUsage, error) {
 	claudeLog(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
 
 	// Set up stderr: in TUI mode discard; in plain mode forward to os.Stderr.
@@ -463,8 +511,10 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	// Track last-write timestamp for the inactivity watchdog.
 	var lastActivity atomic.Int64
 	lastActivity.Store(time.Now().UnixNano())
-	// Wrap stdoutWriter so every write updates lastActivity, resetting the inactivity timer.
-	stdoutWriter = &activityWriter{inner: stdoutWriter, lastActivity: &lastActivity}
+	// Wrap stdoutWriter with a turn-counting writer that fires claudeTurnProgress on
+	// each assistant turn, then with the activity writer for inactivity tracking.
+	tcw := &turnCountingWriter{inner: stdoutWriter, issueNumber: issueNumber, maxTurns: maxTurns}
+	stdoutWriter = &activityWriter{inner: tcw, lastActivity: &lastActivity}
 
 	cmd := exec.CommandContext(stageCtx, "claude", args...)
 	cmd.Dir = workDir
