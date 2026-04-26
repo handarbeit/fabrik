@@ -21,20 +21,20 @@ The engine writes a small JSON file (e.g., `.fabrik/state/issue-<N>-turns.json`)
 
 ### Option B: Watch view parses the live NDJSON log file
 
-The watch view's `followFile` goroutine already reads individual NDJSON lines from the live log file (written by the engine in real time). It can detect `{"type":"assistant"}` lines and count them locally, with no engine-side changes beyond what the log already records.
+The watch view's `followFile` goroutine already reads individual NDJSON lines from the live log file (written by the engine in real time). It can detect `{"type":"user"}` lines and count them locally, with no engine-side changes beyond what the log already records.
 
 **Pros:** Zero new I/O on the engine's critical path; no new files to clean up; self-contained in the watch package; any existing log file can be replayed to reconstruct the count.  
-**Cons:** Watch view must understand enough NDJSON to detect assistant turns; count may approximate Claude's internal `num_turns` (in practice they match, since each assistant response = one turn).
+**Cons:** Watch view must understand enough NDJSON to detect logical turn boundaries; count matches Claude's internal `num_turns` exactly (each logical turn emits exactly one `{"type":"user"}` event). *(Note: the original implementation used `{"type":"assistant"}` events, which over-counted when turns had multiple tool calls — see Correction below.)*
 
 ## Decision
 
-**Option B**: The watch view parses `{"type":"assistant"}` NDJSON lines from the live log file directly.
+**Option B**: The watch view parses `{"type":"user"}` NDJSON lines from the live log file directly, counting one logical turn per user event. *(The original implementation used `{"type":"assistant"}` lines — see Correction below for why user events are the correct boundary.)*
 
 The `followFile` goroutine in `watch/logfollow.go` already reads individual NDJSON lines using `bufio.Reader.ReadBytes('\n')`. Adding a minimal JSON type-check (`json.Unmarshal` into `struct{ Type string }`) on each line is fast and self-contained. The turn count is incremented in a local variable that resets when `followFile` switches to a new log file (stage transition).
 
 ## Implementation
 
-- `watch/logfollow.go`: `isAssistantTurn(line []byte) bool` helper; `followFile` counts turns and sends `TurnCountMsg{TurnsUsed int}` on each match
+- `watch/logfollow.go`: `isUserTurn(line []byte) bool` helper; `followFile` counts turns and sends `TurnCountMsg{TurnsUsed int}` on each match *(originally `isAssistantTurn` — renamed in issue #447)*
 - `watch/events.go`: new `TurnCountMsg` message type
 - `watch/model.go`: `turnsUsed` field updated on each `TurnCountMsg`; reset to 0 on `NewLogFileMsg` (stage transition); `effectiveMaxTurns()` derives the budget heuristically from stage config + `fabrik:extend-turns` label + log file count
 
