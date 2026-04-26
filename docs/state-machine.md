@@ -269,13 +269,13 @@ Eleven distinct event types drive state transitions (§2.1–2.11), plus one TUI
 
 **Trigger:** A `{"type":"assistant"}` NDJSON line is written to Claude's stdout pipe during a Claude invocation, indicating that one assistant turn has completed.
 
-**Code path:** `runClaude()` stdout pipe → `turnCountingWriter.Write()` → detects `type == "assistant"` line → increments per-invocation counter → calls `claudeTurnProgress(issueNumber, turnsUsed, maxTurns)` → `Engine.emitStructural(TurnProgressEvent{...})` → TUI channel
+**Code path:** `runClaude()` stdout pipe → `turnCountingWriter.Write()` → detects `type == "assistant"` line → increments per-invocation counter → calls `claudeTurnProgress(issueNumber, turnsUsed, maxTurns)` → `Engine.emit(TurnProgressEvent{...})` → TUI channel
 
 **Effect:** Purely additive display — does not trigger any state transitions, label mutations, or issue processing. The TUI consumes `TurnProgressEvent` to update the live turn counter shown in:
 - The In Progress pane row for the active issue (width-adaptive badge `[N/M turns]` / `[N/M]` / omitted)
 - The detail panel for the selected active item (`Turns: N/M`)
 
-`TurnProgressEvent` is only emitted in TUI mode (`claudeTurnProgress` is nil in plain-text mode and tests). It uses `emitStructural` (blocking channel send) to avoid dropping events; at most one event per assistant turn, so the 256-deep channel buffer is not a concern in normal operation.
+`TurnProgressEvent` is only emitted in TUI mode (`claudeTurnProgress` is nil in plain-text mode and tests). It uses the non-blocking `emit` path (drop-if-full), so turn-progress updates are best-effort and may be dropped under backpressure. This does not affect engine behavior because the event is display-only; at most one event is produced per assistant turn.
 
 **`MaxTurns` in the event** carries the effective budget for the current invocation — `effectiveBudget` as computed in `InvokeClaude()` (which already accounts for `opts.MaxTurnsOverride` from the extension loop). This means:
 - First invocation without `fabrik:extend-turns`: `stage.MaxTurns`
