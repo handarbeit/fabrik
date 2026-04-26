@@ -14,7 +14,7 @@ Every issue in Fabrik follows a defined lifecycle: from intake through a series 
 
 **Not an engineer?** The diagram and the [Pipeline Overview](#pipeline-overview) table are the fastest way to understand Fabrik's workflow.
 
-**Engine contributor or debugger?** The dense reference below covers every reachable state, every label mutation, every guard condition, and the visual state diagrams in [§10](#10-state-diagrams). Use the [State Machine spec](#1-overview) as the authoritative source when diagnosing unexpected engine behavior.
+**Engine contributor or debugger?** The dense reference below covers every reachable state, every label mutation, every guard condition, and the visual state diagrams in [§10](#10-state-diagrams). Use the [State Enumeration](#1-state-enumeration) section as the authoritative source when diagnosing unexpected engine behavior.
 
 ---
 
