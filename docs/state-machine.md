@@ -883,6 +883,45 @@ Two proactive kill mechanisms cap how long a single Claude invocation can run. B
 
 **No-op on Windows:** `killProcGroupGraceful` is a no-op on Windows (process groups work differently). Both timeout mechanisms still fire and set their flags, but the kill is a best-effort `cmd.Cancel`.
 
+### 7.7 Poll Loop Idle Backoff and Webhook Health State
+
+The poll loop's effective interval grows when there is nothing to do (idle backoff). The cap on that backoff depends on the webhook stream health state.
+
+**Idle backoff algorithm** (`computeEffectiveInterval` in `engine/poll.go`):
+- Base interval: `PollSeconds` (default 30s).
+- Activity multiplier: doubles each poll cycle where no work was dispatched, up to the idle cap.
+- Activity reset: any dispatched work OR any received webhook event resets `idleStart` and the multiplier back to 1×.
+- Rate-limit adjustment: when the GitHub API signals rate limit pressure (`rateLimitLow`), the effective interval is raised to `max(PollSeconds, 60s)`.
+
+**Idle cap selection** (`effectiveIdleCap` in `engine/poll.go`):
+
+| Webhook stream state | Idle cap |
+|---------------------|----------|
+| `WebhookStreamHealthy` | 60 minutes (`webhookIdleCap`) |
+| `WebhookStreamStartingUp` | 60 minutes (`webhookIdleCap`) |
+| `WebhookStreamUnhealthy` | 5 minutes (`maxIdleBackoff`) |
+| Webhook mode disabled | 5 minutes (`maxIdleBackoff`) |
+
+When the webhook stream is healthy or starting up, steady-state polling is suppressed to a 60-minute safety-net interval. Events that arrive on the webhook stream (`wakeCh` signal) reset the multiplier and trigger an immediate poll regardless of the current interval.
+
+**Webhook stream health states** (managed by `webhookManager` in `engine/webhook.go`):
+
+| State | Meaning | Idle cap used | TUI indicator |
+|-------|---------|---------------|---------------|
+| `WebhookStreamStartingUp` | Subprocess launched; within startup grace (30s); no event received yet | 60 min | Blue ○ |
+| `WebhookStreamHealthy` | At least one event received within the last health window (10 min) | 60 min | Green ● |
+| `WebhookStreamUnhealthy` | Grace expired with no first event, or health window (10 min) elapsed since last event | 5 min | Yellow ◌ |
+
+**State transitions:**
+- `StartingUp → Healthy`: first verified webhook event received at any point during grace or after.
+- `StartingUp → Unhealthy`: `webhookStartupGrace` (30s) + `webhookHealthWindow` (10 min) elapsed with no event received.
+- `Healthy → Unhealthy`: no event received for `webhookHealthWindow` (10 min).
+- `* → StartingUp`: subprocess restart (secret rotation, crash recovery) resets grace.
+
+**Webhook mode is always non-fatal.** If the `gh webhook forward` subprocess fails to start, the stream state stays `Unhealthy` and the 5-minute idle cap applies. The poll loop continues normally.
+
+**References:** [ADR-032: Webhook-Driven Event Delivery](../adrs/032-webhook-event-delivery.md)
+
 ---
 
 ## 8. Invalid / Unexpected States
