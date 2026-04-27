@@ -1,12 +1,18 @@
-# Fabrik v0.0.51
+# Fabrik v0.0.52
 
-This release adds resilience to GitHub Projects v2 indexer degradation. During an April 2026 GitHub outage, the same project-board GraphQL query — hit back-to-back within a single second — returned either {nodes:100, totalCount:136} or {nodes:0, totalCount:0} at random, with no errors and HTTP 200 in both cases. Fabrik accepted the empty responses verbatim, logged "found 0 items on board", and silently went idle. Items on page 2 of large project boards (>100 items) were especially affected — they were never deep-fetched, so auto-merges and cross-stage advancements stalled even though the issues themselves were healthy on GitHub.
+This release fixes an over-aggressive CI gate that blocked auto-merge whenever any GitHub check run completed with `conclusion=failure` — even when the failed check was a non-required workflow job (e.g. `Cleanup artifacts`) and GitHub itself reported the PR as `mergeStateStatus=CLEAN`. The gate contradicted GitHub's own merge decision, kept reapplying `fabrik:awaiting-ci`, and held issues stuck in Validate even with `fabrik:yolo` set.
+
+Real-world impact (verveguy/liminis#716): PR #717 was MERGEABLE/CLEAN with all required checks green, but a `Cleanup artifacts` check on the head SHA had failed early in the workflow run. Every catch-up loop iteration saw the failure, re-applied `fabrik:awaiting-ci`, and refused to merge — for hours, despite human-visible green CI.
 
 ## Fixes
 
-- **Retry project board fetch on indexer-degraded responses.** `FetchProjectBoard` now queries `totalCount` alongside the items pagination, tracks the maximum totalCount observed across pages (in case the indexer flaps mid-pagination), and retries the entire fetch up to 3 times (1s, 2s linear backoff) when the raw node count is below the reported totalCount. After the last attempt, accept whatever we got — a project that consistently reports 0/0 is treated as genuinely empty. The comparison is against the raw GraphQL node count, not Fabrik's filtered `board.Items` list, so projects with non-Issue/non-PR items don't false-positive on the mismatch detector.
+- **CI gate now consults GitHub's branch-protection-aware `mergeable_state`.** Both `checkCIGate` and `attemptMergeOnValidate` now fetch `mergeable_state` from the linked PR (REST single-PR endpoint — the list endpoint returns null) before classifying raw check_runs. When `mergeable_state` is `clean` (ready to merge per branch protection) or `unstable` (non-required checks failing, still mergeable), the gate skips the raw check_runs classification and proceeds directly to the gate-cleared path. `checkCIGate` clears `stage:X:complete` + removes `fabrik:awaiting-ci`; `attemptMergeOnValidate` falls through directly to `MergePR`. Other states (`blocked`, `behind`, `dirty`, `unknown`, `has_hooks`, `draft`, empty) still fall through to the per-check classification so genuinely-blocked PRs get the right failure-vs-pending dispatch decision.
 
-- **Visibility for indexer retries.** When the retry fires, Fabrik logs `[warn] project board fetch returned N items, totalCount=M (attempt X/3) — retrying in case of indexer hiccup`. Lands in `fabrik.log` alongside other engine logs so future GitHub-side flapping is diagnosable from the local fabrik.log without needing reproduction.
+- **`fabrik:awaiting-ci` no longer survives a successful mergeable_state shortcut.** Stale labels left behind by the prior over-aggressive gate are explicitly cleared when the new shortcut path fires.
+
+## Notes
+
+If your existing `.fabrik/stages/validate.yaml` predates v0.0.49, it may be missing `wait_for_ci: true` and `wait_for_reviews: true`. Without those flags, the catch-up loop falls through to `attemptMergeOnValidate` (which is also fixed in this release) instead of the conjunctive CI gate. Either path now correctly handles non-required check_run failures, but the conjunctive gate provides better per-check observability and timeouts. Compare your local stage YAMLs against the embedded defaults in `plugin/fabrik-plugin` (or in the source repo) and update as needed; Fabrik does not auto-overwrite local stage configs.
 
 ## Upgrading
 
