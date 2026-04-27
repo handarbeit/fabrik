@@ -169,6 +169,14 @@ or `poll:` in `config.yaml`).
 
 Rate-limit backoff uses two-threshold hysteresis to prevent thrashing: it **activates** when GraphQL remaining quota drops below **20%** of the hourly limit, and **clears only when quota rises above 50%** of the limit. Activity detection (items deep-fetched or dispatched) resets idle backoff but does NOT reset rate-limit backoff — the two concerns are independent. When rate-limit backoff is active, Fabrik logs the effective poll interval each cycle so operators can observe the actual cadence.
 
+**Board fetch resilience**: `FetchProjectBoard` automatically retries up to 3 times (with 1s/2s backoff) when GitHub returns fewer nodes than `totalCount` reports. This masks transient GitHub Projects v2 indexer degradation that intermittently returns empty or incomplete boards for non-empty projects. The log line:
+
+```
+[warn] project board fetch returned N items, totalCount=M (attempt X/3) — retrying in case of indexer hiccup
+```
+
+indicates the retry is occurring. It is transient and requires no user action unless it persists across all three attempts (in which case Fabrik accepts the last response and continues, which may appear as a temporarily idle engine).
+
 Move an issue to `Specify` on the board to start processing it.
 
 ### Git Repositories and Worktrees
@@ -944,15 +952,19 @@ The CI gate operates on two different paths depending on whether the item is bei
 
 **Merge guard (Validate+yolo auto-merge path):**
 - Checks CI before attempting the merge in `attemptMergeOnValidate()`
+- **`mergeable_state` shortcut (v0.0.52):** `attemptMergeOnValidate` queries GitHub's `mergeable_state` first; if `clean` or `unstable`, the gate clears immediately and proceeds to merge — per-check classification is skipped entirely
 - While CI is pending: returns an error (no label applied — avoids churn)
 - On CI failure: adds `fabrik:awaiting-ci`, returns error (skips merge)
 - On timeout (pending too long): pauses with `fabrik:paused` + `fabrik:awaiting-input`
 
 **Catch-up loop (all other paths):**
 - Evaluates CI on every poll for items with `fabrik:awaiting-ci` on stages with `wait_for_ci: true`
+- **`mergeable_state` shortcut (v0.0.52):** `checkCIGate` queries GitHub's `mergeable_state` first; if `clean` or `unstable`, `addCompleteLabelAndRemoveCI` runs immediately — stale `fabrik:awaiting-ci` is cleared, `stage:<X>:complete` is added, and per-check classification is skipped entirely
 - On pending: `fabrik:awaiting-ci` is already present (applied at FABRIK_STAGE_COMPLETE); no additional label applied, re-evaluates next poll
 - On failure: `fabrik:awaiting-ci` applied idempotently; dispatches CI-fix re-invocation
 - On timeout: pauses with `fabrik:paused` + `fabrik:awaiting-input`; timeout measured from when `fabrik:awaiting-ci` was first applied (durable across restarts)
+
+> **Rationale for the `mergeable_state` shortcut:** GitHub's `mergeable_state` reflects branch protection rules — it already aggregates required check status, reviewer approvals, and protection constraints. Non-required check_run failures (e.g., cleanup workflow jobs, notification steps) do not block merges per branch protection, so Fabrik's gate must not block on them either. Consulting `mergeable_state` first avoids over-aggressive blocking caused by raw per-check classification that cannot distinguish required from non-required checks.
 
 #### Merge-Conflict Gate
 
