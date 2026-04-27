@@ -509,13 +509,15 @@ wait_for_reviews: false   # Optional. When true, Fabrik waits for all requested 
                           #   limit, Fabrik pauses with fabrik:awaiting-input instead of advancing.
                           #   See §3 Pending Reviewer Gate for full details.
 wait_for_ci: false        # Optional. When true, Fabrik gates auto-advance (and auto-merge for
-                          #   Validate+yolo) on CI checks passing on the PR head. On CI failure,
-                          #   Fabrik adds `fabrik:awaiting-ci` and re-invokes the stage agent via
-                          #   ci_fix_skill (falls back to comment_skill) with a structured report
-                          #   classifying each failed check as NEW REGRESSION or pre-existing.
-                          #   Re-invocation repeats up to FABRIK_MAX_CI_FIX_CYCLES times. On CI
-                          #   timeout or cycle limit, Fabrik pauses with fabrik:awaiting-input.
-                          #   Enabled by default on the Validate stage.
+                          #   Validate+yolo) on CI checks passing on the PR head. At
+                          #   FABRIK_STAGE_COMPLETE, Fabrik immediately adds `fabrik:awaiting-ci`
+                          #   and withholds `stage:X:complete` until the CI gate clears (covering
+                          #   both pending and failed CI states). When CI fails, Fabrik re-invokes
+                          #   the stage agent via ci_fix_skill (falls back to comment_skill) with a
+                          #   structured report classifying each failed check as NEW REGRESSION or
+                          #   pre-existing. Re-invocation repeats up to FABRIK_MAX_CI_FIX_CYCLES
+                          #   times. On CI timeout or cycle limit, Fabrik pauses with
+                          #   fabrik:awaiting-input. Enabled by default on the Validate stage.
                           #   See §3 CI Gate and CI-Fix Workflow for full details.
 ci_fix_skill:             # Optional. Plugin skill name for CI-fix re-invocations (the synthetic
                           #   CI failure report comment). Defaults to comment_skill if unset.
@@ -900,12 +902,12 @@ CI checks are only evaluated on the **PR head SHA** — Fabrik makes two REST ca
 
 #### Label Lifecycle
 
-When CI fails, Fabrik adds the `fabrik:awaiting-ci` label to the issue. This label:
+When a `wait_for_ci: true` stage emits `FABRIK_STAGE_COMPLETE`, Fabrik immediately adds the `fabrik:awaiting-ci` label to the issue — it means "CI gate active" and covers both pending and failed CI states. `stage:X:complete` is withheld until `checkCIGate` confirms all checks pass (conjunctive gate, ADR 032). This label:
 
-- Makes the CI-blocked state visible on the project board
-- Is **only applied on confirmed failure** — while checks are still running (pending/queued), no label is applied to avoid label churn for transient states
+- Makes the CI-blocked state visible on the project board; present whether checks are still running or have failed
 - Is cleared automatically when all CI checks pass; or when the CI wait timeout elapses (removed before pausing with `fabrik:awaiting-input`)
 - Triggers the `itemMayNeedWork` cache bypass — CI results change independently of the issue's GitHub `updatedAt`, so items with `fabrik:awaiting-ci` bypass the staleness cache and are re-evaluated on every poll
+- **R5 post-push guard**: within the current engine run, if the PR has previously had check runs, empty check run results after a push are treated as a post-push registration delay (GitHub takes a few seconds to register new runs) rather than "no CI configured" — the gate does not prematurely clear
 
 #### The CI-Fix Report
 
@@ -947,9 +949,9 @@ The CI gate operates on two different paths depending on whether the item is bei
 - On timeout (pending too long): pauses with `fabrik:paused` + `fabrik:awaiting-input`
 
 **Catch-up loop (all other paths):**
-- Evaluates CI on every poll for `stage:<X>:complete` items with `wait_for_ci: true`
-- On pending: skips (no label applied — R10c)
-- On failure: adds `fabrik:awaiting-ci`; dispatches CI-fix re-invocation
+- Evaluates CI on every poll for items with `fabrik:awaiting-ci` on stages with `wait_for_ci: true`
+- On pending: `fabrik:awaiting-ci` is already present (applied at FABRIK_STAGE_COMPLETE); no additional label applied, re-evaluates next poll
+- On failure: `fabrik:awaiting-ci` applied idempotently; dispatches CI-fix re-invocation
 - On timeout: pauses with `fabrik:paused` + `fabrik:awaiting-input`; timeout measured from when `fabrik:awaiting-ci` was first applied (durable across restarts)
 
 #### Merge-Conflict Gate
@@ -995,7 +997,7 @@ FABRIK_CI_WAIT_TIMEOUT=60  # Wait up to 60 minutes for CI to pass (default: 30)
 fabrik --ci-wait-timeout=60
 ```
 
-Unlike the review gate, the CI timeout is measured from when `fabrik:awaiting-ci` was first applied — not from stage completion. This timeout only starts after a CI failure is confirmed; while checks are merely pending, no timeout accumulates.
+Unlike the review gate, the CI timeout is measured from when `fabrik:awaiting-ci` was first applied. Because the label is applied immediately at FABRIK_STAGE_COMPLETE, the timeout covers both pending and failed CI states — it starts from when the stage finishes, not from when CI first fails.
 
 #### Restart Persistence
 
@@ -1268,7 +1270,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:paused` | Processing paused (max retries exceeded or manual) |
 | `fabrik:awaiting-input` | Stage paused waiting for user input; auto-clears on a new comment from the configured user |
 | `fabrik:awaiting-review` | Set when a `wait_for_reviews: true` stage completes with outstanding reviewer requests; cleared when no requested reviewers are outstanding **and** at least one review has been submitted (then re-invocation fires unconditionally), or when the `FABRIK_REVIEW_WAIT_TIMEOUT` elapses (then issue is paused with `fabrik:awaiting-input`) |
-| `fabrik:awaiting-ci` | Set when CI checks fail on a `wait_for_ci: true` stage; triggers `itemMayNeedWork` cache bypass so CI results are re-evaluated on every poll; cleared when all checks pass or the CI wait timeout elapses (then issue is paused with `fabrik:awaiting-input`). See [§3 CI Gate](USER_GUIDE.md#ci-gate-and-ci-fix-workflow). |
+| `fabrik:awaiting-ci` | Applied immediately when a `wait_for_ci: true` stage emits `FABRIK_STAGE_COMPLETE`; means "CI gate active" and covers both pending and failed CI states; `stage:X:complete` is deferred until this label is cleared (conjunctive gate, ADR 032). Triggers `itemMayNeedWork` cache bypass so CI results are re-evaluated on every poll. Cleared when all checks pass or the CI wait timeout elapses (then issue is paused with `fabrik:awaiting-input`). See [§3 CI Gate](USER_GUIDE.md#ci-gate-and-ci-fix-workflow). |
 | `fabrik:rebase-needed` | Set when GitHub reports the linked PR as `mergeable: false` on a `wait_for_ci: true` stage — typically because another PR merged into the base branch during the CI-await window. The engine dispatches a rebase re-invocation instructing Claude to `git fetch && git rebase origin/<base>`, resolve conflicts conservatively (watching for semantic collisions like duplicated ADR numbers), and force-push. The label clears when GitHub flips `mergeable` back to `true`. Triggers `itemMayNeedWork` cache bypass because base-branch advances don't bump the item's `updatedAt`. |
 | `fabrik:blocked` | Issue is waiting for one or more blocking issues to close; added and removed automatically by the engine (Fabrik creates this label on first use — no pre-creation needed) |
 | `stage:<name>:in_progress` | Stage actively running |
