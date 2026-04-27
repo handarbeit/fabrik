@@ -182,7 +182,7 @@ Plans typically complete in a single pass. If the spec and research are solid, t
 
 **Before you run**: The engine has created a worktree and rebased onto main. You're in a read-only stage.
 
-**Completing the stage**: Output `FABRIK_STAGE_COMPLETE` on its own line when the plan is complete and actionable. Once you emit this marker, stop immediately. Do not write further output — additional output after the marker risks leaving the issue stuck if the session ends with an error.
+**Completing the stage**: When the plan is complete and actionable, emit the literal token `FABRIK_STAGE_COMPLETE` as the sole content of its own line — no backticks, no code fence, no markdown formatting, no trailing punctuation. The engine matches `^FABRIK_STAGE_COMPLETE$` exactly; backtick-wrapped or formatted variants are silently rejected and you will be re-invoked in a wasteful loop. Once you emit it, stop immediately. Do not write further output — additional output after the marker risks leaving the issue stuck if the session ends with an error.
 
 **Blocking on input**: If there are unresolved questions that must be answered before a concrete plan can be produced, output `FABRIK_BLOCKED_ON_INPUT` on its own line instead of `FABRIK_STAGE_COMPLETE`. The engine will pause with both `fabrik:paused` and `fabrik:awaiting-input` labels and auto-resume when the user comments. Do not remove these labels manually.
 

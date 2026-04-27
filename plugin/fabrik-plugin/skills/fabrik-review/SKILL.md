@@ -182,7 +182,7 @@ This applies anywhere in your output that reaches a GitHub comment body — Revi
 
 **Your working directory**: `.fabrik/worktrees/issue-<N>/`
 
-**Completing the stage**: Output `FABRIK_STAGE_COMPLETE` on its own line when the PR is clean and ready for human review. Once you emit this marker, stop immediately. Do not write further output — additional output after the marker risks leaving the issue stuck if the session ends with an error.
+**Completing the stage**: When the PR is clean and ready for human review, emit the literal token `FABRIK_STAGE_COMPLETE` as the sole content of its own line — no backticks, no code fence, no markdown formatting, no trailing punctuation. The engine matches `^FABRIK_STAGE_COMPLETE$` exactly; backtick-wrapped or formatted variants are silently rejected and you will be re-invoked in a wasteful loop. Once you emit it, stop immediately. Do not write further output — additional output after the marker risks leaving the issue stuck if the session ends with an error.
 
 **If you find unfixable issues**: Do NOT output the completion marker. Describe the blocker clearly. The engine will retry after a cooldown, giving the user time to intervene.
 
