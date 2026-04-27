@@ -18,7 +18,7 @@ GitHub's `mergeable_state` field on a PR aggregates all branch protection signal
 | Value | Meaning |
 |-------|---------|
 | `clean` | All branch-protection requirements satisfied; PR is ready to merge |
-| `unstable` | CI checks are still running but no required check has failed; GitHub allows merge |
+| `unstable` | Non-required checks have failed but all branch-protection-required checks are satisfied; GitHub allows merge |
 | `blocked` | A branch protection rule is blocking the merge (required check failed, approval missing, etc.) |
 | `behind` | Branch is behind the base; a rebase or merge is required |
 | `dirty` | Merge conflict |
@@ -65,7 +65,7 @@ For all other values, the gate falls through to the original per-check classific
 
 Replicating this logic in Fabrik via raw check_run analysis is redundant at best and error-prone in practice. Non-required check_runs appear identical to required ones in the Checks API response — Fabrik has no reliable way to distinguish them without querying the branch protection rules themselves (an additional API call that would require repository admin scope). Trusting `mergeable_state` avoids this complexity entirely.
 
-The `unstable` state is intentionally included in the shortcut: GitHub defines `unstable` as "some checks have not completed, but the branch protection rules that *are* required are all satisfied and GitHub allows the merge." Blocking on `unstable` would replicate the same over-aggressive gate that caused liminis#716/717.
+The `unstable` state is intentionally included in the shortcut: GitHub defines `unstable` as "non-required checks have failed, but all branch-protection-required checks are satisfied and GitHub allows the merge." Blocking on `unstable` would replicate the same over-aggressive gate that caused liminis#716/717.
 
 ## Alternatives Considered
 
