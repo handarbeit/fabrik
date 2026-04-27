@@ -1,29 +1,25 @@
-# Fabrik v0.0.48
+# Fabrik v0.0.49
 
-This release is the v0.0.47 follow-up: both the live turn counter and the progress-based turn extension shipped in v0.0.47 had subtle bugs that surfaced in production use. Both are now fixed.
+This release fixes the wasteful "Validate fires every 3 minutes during CI await" pattern observed on production issues. Under v0.0.48 and earlier, a Validate stage with `wait_for_ci: true` would re-invoke Claude on every poll cycle while CI was running — the `stage:Validate:complete` label was set as soon as Claude emitted `FABRIK_STAGE_COMPLETE`, but the dispatcher couldn't distinguish "Claude is done, engine is waiting on CI" from "stage needs work." Now it can.
 
 ## Fixes
 
-- **Live turn counter now matches Claude's own turn accounting (#447).** The TUI's live "N/M turns" badge was counting `{"type":"assistant"}` NDJSON events, but a single logical Claude turn produces one user event followed by *multiple* assistant events (one per `tool_use` block). On tool-heavy runs the badge inflated to e.g. `76/50` while Claude internally was at turn 50. Now counts `{"type":"user"}` events, which aligns exactly with Claude's `num_turns`. Same fix applied to `fabrik watch`'s independent log-follow path (`watch/logfollow.go`).
+- **Conjunctive CI gate completion (#456, ADR 032).** `stage:X:complete` is no longer applied immediately when Claude emits `FABRIK_STAGE_COMPLETE` on a `wait_for_ci: true` stage. Instead, `fabrik:awaiting-ci` is applied as the in-progress marker, and `stage:X:complete` is added only when `checkCIGate` confirms CI is green. The dispatcher (`itemNeedsWork`) treats `fabrik:awaiting-ci` as "engine owns the next decision" and skips re-dispatch. Catch-up loop entry broadened to admit items with either label so the gate continues to evaluate. Net effect: zero Claude invocations during CI await; CI is polled via cheap REST every cycle as designed. Real-world impact (acme/widgets #710): three full Validate Claude runs over six minutes during CI wait → zero with this fix.
 
-- **Progress-based extension now detects uncommitted work for Implement (#448).** The Implement progress signal was HEAD-SHA-only — if Claude spent 50 turns editing files without reaching a commit milestone, `detectProgress` returned false and the engine retried the entire stage from scratch. Real-world impact: develop issue #705 retried three times (~$21 total) on work a single 100–150 turn run could have completed. Implement now extends when SHA changed *or* when the working tree was clean at baseline and is now dirty. The baseline-clean guard prevents pre-existing dirty state from counting as progress.
+- **R5 post-push registration race (#457).** `checkCIGate` rule R5 (`len(checkRuns) == 0` → "no CI configured, gate clears") was firing during the brief window between Claude's CI-fix push and GitHub registering the new check runs against the new HEAD SHA. Under the conjunctive gate design that's a load-bearing edge: a premature R5 firing would strip `fabrik:awaiting-ci` and let the dispatcher fire a fresh Validate run before CI even started. Fixed via a per-issue `prHasHadChecks` sticky flag — once we've ever seen check runs for a PR, `len=0` means "not yet registered, keep waiting" instead of "no CI configured." First-ever zero polls still clear the gate (preserves existing no-CI repo behavior).
 
-- **`detectProgress` always logs its verdict.** Previously a `false` return was silent, making non-extensions impossible to diagnose without reflog forensics on the worktree. Every call now emits a structured log line on both pass and fail, listing the evaluated signals and the `has_progress` verdict. No debug flag required.
+- **`checkCIGate` no-PR path now applies the conjunctive label.** When `FetchLinkedPR` returns nil (no linked PR found), the function previously returned gate-cleared without adding `stage:X:complete` or removing `fabrik:awaiting-ci`. Under the new label semantics this would leave the item in CI-await forever. Now the no-PR path calls `addCompleteLabelAndRemoveCI` to match the no-check-runs and all-green paths.
 
-- **Startup board validation message clarified** as best-effort when the board fetch itself fails.
+- **CI gate timeout now covers the full CI-await window.** Previously, CI checks stuck in `queued`/`in_progress` indefinitely would never trigger `pauseForCITimeout` because the timeout was tied to `fabrik:awaiting-ci` being applied — and that label was only set on confirmed failure. Under ADR 032's expanded semantics (label present from `FABRIK_STAGE_COMPLETE`), the timeout now applies to stuck-pending checks too.
+
+- **`addCompleteLabelAndRemoveCI` returns early on label-add failure.** A transient API error during `AddLabelToIssue` would previously drop `fabrik:awaiting-ci` while CI was still pending, allowing the dispatcher to re-invoke the stage on the next poll. Now the function returns early so the in-progress marker is preserved.
+
+- **`itemNeedsWork` awaiting-ci guard scoped to `wait_for_ci: true` stages.** A stale `fabrik:awaiting-ci` label on a non-CI-gated stage would previously suppress dispatch permanently. The guard now only fires for stages that actually use the CI gate.
 
 ## Documentation
 
-- **State-machine doc gains an executive summary + lifecycle overview SVG** (#444 follow-up). The §10 Mermaid diagrams were also unrenderable due to literal `\n` in note bodies; fixed and direction switched to top-to-bottom to avoid viewport overflow.
-- **User guide stubs added** for Multi-Repo Support, Startup Board Validation, and Yolo Mode (filling broken anchors from the marketing site).
-- **`fabrik:extend-turns` label and live turn counter documented** in USER_GUIDE, README, and the Help Panel (#442).
-- Marketing site (`docs/index.md`): feature cards converted to brief tagline links; tagline tightening; CSS polish for block-link interactivity and focus rings.
-
-## Internal
-
-- `isWorkingTreeDirty` extracted as a shared helper for `commitWIP`, `updateWorktreeFromMain`, and the new progress check, with consistent filtering of engine-managed paths.
-- New unit tests in `engine/extend_test.go` covering the dirty-tree progress path, baseline-dirty guard, log output verification, and `isWorkingTreeDirty` itself.
-- Test helper rename (`import_` → `line` in `captureLogf`).
+- New ADR 032 documenting the evolution from Approach A (immediate `stage:X:complete`) to Approach A' (deferred until CI green). Explains why ADR 027's rejection of Approach B doesn't apply, the semantic expansion of `fabrik:awaiting-ci`, and the dispatcher consequences.
+- USER_GUIDE updated for v0.0.48 features: `fabrik:extend-turns` Implement progress signal expanded to mention the uncommitted-edits case; `[#N extend-turns]` verdict log lines added to the Poll Log reference so users can diagnose turn-extension decisions without `--debug-output`.
 
 ## Upgrading
 
