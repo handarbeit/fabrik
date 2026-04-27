@@ -9,7 +9,7 @@ Fabrik's CI gate (ADR 027) and conjunctive completion label design (ADR 032) bot
 
 This approach has a fundamental flaw: Fabrik's per-check classification does not know which checks are *required* by branch protection. A non-required check_run (e.g., a `Cleanup artifacts` workflow job, a notification step, or an informational check) can fail without affecting branch-protection-level mergeability — GitHub itself will allow the merge — but Fabrik's gate treats it as a blocking NEW REGRESSION and prevents auto-merge.
 
-This was observed in production: liminis issues #716 and #717 were blocked by a failing `Cleanup artifacts` check_run for hours even though all required checks were green and GitHub's own merge button was enabled. `mergeable_state` was `CLEAN` throughout. The only way to resolve the block without Fabrik support was to manually remove `fabrik:awaiting-ci` and trigger the merge.
+This was observed in production: liminis issues #716 and #717 were blocked by a failing `Cleanup artifacts` check_run for hours even though all required checks were green and GitHub's own merge button was enabled. `mergeable_state` was `clean` throughout. The only way to resolve the block without Fabrik support was to manually remove `fabrik:awaiting-ci` and trigger the merge.
 
 ### The `mergeable_state` Field
 
@@ -65,7 +65,7 @@ For all other values, the gate falls through to the original per-check classific
 
 Replicating this logic in Fabrik via raw check_run analysis is redundant at best and error-prone in practice. Non-required check_runs appear identical to required ones in the Checks API response — Fabrik has no reliable way to distinguish them without querying the branch protection rules themselves (an additional API call that would require repository admin scope). Trusting `mergeable_state` avoids this complexity entirely.
 
-The `unstable` state is intentionally included in the shortcut: GitHub defines `unstable` as "non-required checks have failed, but all branch-protection-required checks are satisfied and GitHub allows the merge." Blocking on `unstable` would replicate the same over-aggressive gate that caused liminis#716/717.
+The `unstable` state is intentionally included in the shortcut: GitHub uses `unstable` for PRs that remain mergeable under branch protection even though some non-blocking checks may still be pending or failing. The required branch-protection conditions are satisfied enough for GitHub to allow the merge; any remaining failing or incomplete checks are non-required. Blocking on `unstable` would replicate the same over-aggressive gate that caused liminis#716/717.
 
 ## Alternatives Considered
 
