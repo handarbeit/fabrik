@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"testing"
 	"time"
 
@@ -405,6 +406,77 @@ func TestIsHealthyOrStartingUp(t *testing.T) {
 	wm.mu.Unlock()
 	if wm.IsHealthyOrStartingUp() {
 		t.Error("state unhealthy: IsHealthyOrStartingUp() = true, want false")
+	}
+}
+
+// TestUpdateRepos_NewRepoTriggersRestart verifies that discovering a new repo updates
+// wm.repos and kills the current subprocess.
+func TestUpdateRepos_NewRepoTriggersRestart(t *testing.T) {
+	wm, _ := newTestWebhookManager(t)
+	// Override killFn with a counter; no real subprocess needed.
+	killCount := 0
+	wm.killFn = func(*exec.Cmd) { killCount++ }
+	// Seed with a single repo and point currentCmd to a non-nil sentinel.
+	wm.mu.Lock()
+	wm.repos = map[string]bool{"owner/a": true}
+	wm.currentCmd = &exec.Cmd{} // non-nil so killFn is invoked
+	wm.mu.Unlock()
+
+	wm.UpdateRepos(map[string]bool{"owner/a": true, "owner/b": true})
+
+	wm.mu.Lock()
+	repos := copyRepoSet(wm.repos)
+	wm.mu.Unlock()
+
+	if !repos["owner/a"] || !repos["owner/b"] {
+		t.Errorf("repos = %v, want {owner/a, owner/b}", repos)
+	}
+	if killCount != 1 {
+		t.Errorf("killFn called %d times, want 1 on new-repo discovery", killCount)
+	}
+}
+
+// TestUpdateRepos_NoNewRepos_NoRestart verifies that calling UpdateRepos with an
+// unchanged repo set does not kill the subprocess.
+func TestUpdateRepos_NoNewRepos_NoRestart(t *testing.T) {
+	wm, _ := newTestWebhookManager(t)
+	killCount := 0
+	wm.killFn = func(*exec.Cmd) { killCount++ }
+	wm.mu.Lock()
+	wm.repos = map[string]bool{"owner/a": true}
+	wm.currentCmd = &exec.Cmd{}
+	wm.mu.Unlock()
+
+	wm.UpdateRepos(map[string]bool{"owner/a": true})
+
+	if killCount != 0 {
+		t.Errorf("killFn called %d times on no-change update, want 0", killCount)
+	}
+}
+
+// TestUpdateRepos_DisabledManager_NoOp verifies that a disabled manager ignores
+// UpdateRepos calls entirely.
+func TestUpdateRepos_DisabledManager_NoOp(t *testing.T) {
+	wm, _ := newTestWebhookManager(t)
+	killCount := 0
+	wm.killFn = func(*exec.Cmd) { killCount++ }
+	wm.mu.Lock()
+	wm.disabled = true
+	wm.repos = map[string]bool{"owner/a": true}
+	wm.currentCmd = &exec.Cmd{}
+	wm.mu.Unlock()
+
+	wm.UpdateRepos(map[string]bool{"owner/a": true, "owner/b": true})
+
+	wm.mu.Lock()
+	repos := copyRepoSet(wm.repos)
+	wm.mu.Unlock()
+
+	if repos["owner/b"] {
+		t.Error("disabled manager should not update repos")
+	}
+	if killCount != 0 {
+		t.Error("disabled manager should not call killFn")
 	}
 }
 

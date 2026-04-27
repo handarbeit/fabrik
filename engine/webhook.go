@@ -66,18 +66,28 @@ type webhookManager struct {
 	wakeCh chan struct{}
 	emitFn func(tui.Event)
 
+	// killFn terminates a subprocess. Defaults to killProcGroup; overridable in tests.
+	// The caller is responsible for the cmd != nil check; killFn handles nil Process.
+	killFn func(*exec.Cmd)
+
 	// listener — bound once before first subprocess start, reused across restarts
 	listener net.Listener
 	port     int
 
 	// subprocess state (protected by mu)
-	currentCmd      *exec.Cmd
-	secret          string
-	repos           map[string]bool
-	events          []string
-	orgModeFailed   bool // true after org-level probe fails; use per-repo thereafter
-	stopOnce        sync.Once
-	stopCh          chan struct{}
+	currentCmd    *exec.Cmd
+	secret        string
+	repos         map[string]bool
+	events        []string
+	orgModeFailed bool // true after org-level probe fails; use per-repo thereafter
+	stopOnce      sync.Once
+	stopCh        chan struct{}
+
+	// repoReadyCh is closed when the first non-empty repo set is known.
+	// supervise blocks on this before launching the subprocess so multi-repo
+	// boards don't attempt a subscription with no --repo or --org args.
+	repoReadyCh chan struct{}
+	repoReady   bool // whether repoReadyCh has been closed (protected by mu)
 
 	// health (protected by mu)
 	state         WebhookHealthState
@@ -106,7 +116,7 @@ func newWebhookManager(
 		evts = make([]string, len(defaultWebhookEvents))
 		copy(evts, defaultWebhookEvents)
 	}
-	return &webhookManager{
+	wm := &webhookManager{
 		logFn:       logFn,
 		wakeCh:      wakeCh,
 		emitFn:      emitFn,
@@ -115,6 +125,27 @@ func newWebhookManager(
 		state:       WebhookStreamUnhealthy, // becomes StartingUp when subprocess launches
 		eventCounts: make(map[string]int),
 		stopCh:      make(chan struct{}),
+		repoReadyCh: make(chan struct{}),
+		killFn: func(cmd *exec.Cmd) {
+			if cmd != nil && cmd.Process != nil {
+				killProcGroup(cmd)
+			}
+		},
+	}
+	// Close repoReadyCh immediately if repos are already known at construction.
+	if len(repos) > 0 {
+		close(wm.repoReadyCh)
+		wm.repoReady = true
+	}
+	return wm
+}
+
+// signalRepoReady closes repoReadyCh the first time it is called. Must be called
+// with wm.mu held.
+func (wm *webhookManager) signalRepoReady() {
+	if !wm.repoReady {
+		wm.repoReady = true
+		close(wm.repoReadyCh)
 	}
 }
 
@@ -208,6 +239,11 @@ func semverAtLeast(vStr string, major, minor, patch int) bool {
 
 // detectOrgMode returns the common owner when all repos share the same GitHub org/user,
 // enabling --org=<org> subscription instead of per-repo subscriptions.
+//
+// Single-repo sets also satisfy this condition (the one repo's owner becomes the candidate org).
+// The supervise loop's org-mode probe handles the case where the user isn't org-admin —
+// falling back to per-repo subscription within orgModeProbeTimeout when the org-level
+// subprocess exits quickly with a permission-shaped error in its stderr output.
 func detectOrgMode(repos map[string]bool) (string, bool) {
 	var org string
 	for r := range repos {
@@ -219,6 +255,39 @@ func detectOrgMode(repos map[string]bool) (string, bool) {
 		}
 	}
 	return org, org != ""
+}
+
+// isAuthShapedError returns true when the stderr output suggests an authentication
+// or permission failure — used to distinguish org-mode permission denials from
+// transient crashes when the subprocess exits quickly.
+func isAuthShapedError(s string) bool {
+	lower := strings.ToLower(s)
+	return strings.Contains(lower, "403") ||
+		strings.Contains(lower, "forbidden") ||
+		strings.Contains(lower, "permission denied") ||
+		strings.Contains(lower, "requires admin") ||
+		strings.Contains(lower, "not allowed")
+}
+
+// containsEvent reports whether name is in the events slice.
+func containsEvent(events []string, name string) bool {
+	for _, e := range events {
+		if e == name {
+			return true
+		}
+	}
+	return false
+}
+
+// filterOutEvent returns a new slice with name removed; does not modify the original.
+func filterOutEvent(events []string, name string) []string {
+	filtered := make([]string, 0, len(events))
+	for _, e := range events {
+		if e != name {
+			filtered = append(filtered, e)
+		}
+	}
+	return filtered
 }
 
 // buildGhArgs constructs the argument list for `gh webhook forward`.
@@ -310,8 +379,8 @@ func (wm *webhookManager) Stop() {
 	cmd := wm.currentCmd
 	l := wm.listener
 	wm.mu.Unlock()
-	if cmd != nil && cmd.Process != nil {
-		killProcGroup(cmd)
+	if cmd != nil {
+		wm.killFn(cmd)
 	}
 	if l != nil {
 		l.Close()
@@ -326,35 +395,60 @@ func (wm *webhookManager) IsHealthyOrStartingUp() bool {
 }
 
 // UpdateRepos is called after each board poll. When new repos appear, the subprocess
-// is restarted with the updated repo set so it subscribes to new repos.
+// is restarted with the updated repo set so it subscribes to new repos. On multi-repo
+// boards the first UpdateRepos call also signals repoReadyCh to unblock supervise.
 func (wm *webhookManager) UpdateRepos(repos map[string]bool) {
 	wm.mu.Lock()
 	if wm.disabled {
 		wm.mu.Unlock()
 		return
 	}
-	hasNew := false
+
+	var newRepos []string
 	for r := range repos {
 		if !wm.repos[r] {
-			wm.logFn(0, "webhook", "new repo discovered: %s — restarting webhook subscription\n", r)
-			hasNew = true
+			newRepos = append(newRepos, r)
 		}
 	}
-	if !hasNew {
+
+	firstInit := !wm.repoReady && len(repos) > 0
+
+	if len(newRepos) == 0 && !firstInit {
 		wm.mu.Unlock()
 		return
 	}
+
 	wm.repos = copyRepoSet(repos)
 	cmd := wm.currentCmd
+	wm.signalRepoReady()
 	wm.mu.Unlock()
 
-	if cmd != nil && cmd.Process != nil {
-		killProcGroup(cmd)
+	// Log outside the lock (logFn must not be called while holding wm.mu).
+	for _, r := range newRepos {
+		wm.logFn(0, "webhook", "new repo discovered: %s — restarting webhook subscription\n", r)
+	}
+
+	if len(newRepos) > 0 && cmd != nil {
+		wm.killFn(cmd)
 	}
 }
 
 // supervise manages the subprocess lifecycle: start, wait for exit, restart with backoff.
+// It blocks on repoReadyCh before launching the first subprocess so that multi-repo
+// boards don't attempt a subscription with an empty repo list.
 func (wm *webhookManager) supervise(ctx context.Context) {
+	// Wait until at least one repo is known before starting the subprocess.
+	// On single-repo boards repoReadyCh is already closed at construction.
+	// On multi-repo boards it is closed by the first UpdateRepos call.
+	select {
+	case <-ctx.Done():
+		return
+	case <-wm.stopCh:
+		return
+	case <-wm.repoReadyCh:
+		// repos are known; proceed
+	}
+
 	backoff := time.Second
 
 	for {
@@ -391,7 +485,7 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 
 		args := buildGhArgs(org, repos, port, secret, events)
 		startedAt := time.Now()
-		cmd, err := wm.startSubprocessInternal(ctx, args)
+		cmd, stderrCh, err := wm.startSubprocessInternal(ctx, args)
 		if err != nil {
 			wm.logFn(0, "webhook", "failed to start gh webhook forward: %v\n", err)
 			select {
@@ -418,6 +512,16 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 		waitErr := cmd.Wait()
 		elapsed := time.Since(startedAt)
 
+		// Collect accumulated stderr (the goroutine should finish shortly after
+		// the process exits and the pipe reaches EOF).
+		stderrContent := ""
+		select {
+		case s := <-stderrCh:
+			stderrContent = s
+		case <-time.After(500 * time.Millisecond):
+			// goroutine didn't finish in time; proceed without stderr content
+		}
+
 		select {
 		case <-ctx.Done():
 			return
@@ -426,14 +530,35 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 		default:
 		}
 
-		// Detect org mode rejection: subprocess exits quickly when org perm is missing.
-		if org != "" && elapsed < orgModeProbeTimeout {
-			wm.logFn(0, "webhook", "org-level webhook exited in %v — falling back to per-repo subscription\n", elapsed.Round(time.Millisecond))
+		// Time-based convergent fallback for projects_v2_item in per-repo mode.
+		// If the subprocess exits quickly and projects_v2_item is still in the event
+		// list (meaning the stderr-based detection did not fire), drop it for the next
+		// restart to break any infinite crash-restart cycle.
+		if org == "" && elapsed < orgModeProbeTimeout {
 			wm.mu.Lock()
-			wm.orgModeFailed = true
-			wm.mu.Unlock()
-			// No backoff for org mode probe failure — restart immediately.
-			continue
+			if containsEvent(wm.events, "projects_v2_item") {
+				wm.events = filterOutEvent(wm.events, "projects_v2_item")
+				wm.mu.Unlock()
+				wm.logFn(0, "webhook", "WARNING: projects_v2_item may have caused subprocess crash — "+
+					"dropping it for next restart (board-column changes covered by safety-net poll)\n")
+			} else {
+				wm.mu.Unlock()
+			}
+		}
+
+		// Detect org mode rejection: combine time-based and stderr content signals.
+		// A quick exit with an auth-shaped error → permanent per-repo fallback.
+		// A quick exit without an auth error → transient crash; retry org mode with backoff.
+		if org != "" && elapsed < orgModeProbeTimeout {
+			if isAuthShapedError(stderrContent) {
+				wm.logFn(0, "webhook", "org-level webhook failed (permission error, %v) — falling back to per-repo subscription\n", elapsed.Round(time.Millisecond))
+				wm.mu.Lock()
+				wm.orgModeFailed = true
+				wm.mu.Unlock()
+				continue // no backoff for org probe auth failure
+			}
+			// Fast exit without permission error: treat as transient, retry org mode.
+			wm.logFn(0, "webhook", "org-level webhook exited in %v without permission error — treating as transient, retrying\n", elapsed.Round(time.Millisecond))
 		}
 
 		if waitErr != nil {
@@ -454,58 +579,69 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 }
 
 // startSubprocessInternal starts `gh webhook forward` with the given args.
-// Stderr is captured to the engine log. Returns the started cmd.
-func (wm *webhookManager) startSubprocessInternal(ctx context.Context, args []string) (*exec.Cmd, error) {
-	_ = ctx // kept for future use (CommandContext replacement)
-	cmd := exec.Command("gh", args...)
+// Returns the started cmd and a channel that receives the accumulated stderr content
+// once the drainer goroutine finishes (use with a timeout when reading).
+func (wm *webhookManager) startSubprocessInternal(ctx context.Context, args []string) (*exec.Cmd, <-chan string, error) {
+	cmd := exec.CommandContext(ctx, "gh", args...)
 	setCmdProcAttr(cmd)
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return nil, fmt.Errorf("stderr pipe: %w", err)
+		return nil, nil, fmt.Errorf("stderr pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("starting gh webhook forward: %w", err)
+		return nil, nil, fmt.Errorf("starting gh webhook forward: %w", err)
 	}
 
-	// Drain stderr to engine log; detect projects_v2_item rejection.
+	stderrCh := make(chan string, 1)
+
+	// Drain stderr to engine log and accumulate for caller inspection.
+	// The accumulated string is sent on stderrCh when the goroutine finishes.
+	//
+	// projects_v2_item rejection matcher: check for "projects_v2_item" as the gating
+	// keyword, plus any of the known rejection phrases from gh CLI. Update this list
+	// if future gh versions change their error wording.
 	go func() {
+		var accum strings.Builder
 		buf := make([]byte, 4096)
 		for {
-			n, err := stderr.Read(buf)
+			n, readErr := stderr.Read(buf)
 			if n > 0 {
 				line := strings.TrimRight(string(buf[:n]), "\n\r")
-				// Detect projects_v2_item rejection and remove it from the event list.
+				lower := strings.ToLower(line)
+				// Detect projects_v2_item rejection. The gating keyword is always
+				// "projects_v2_item"; the rejection phrases cover current and plausible
+				// future gh CLI wording.
 				if strings.Contains(line, "projects_v2_item") &&
-					(strings.Contains(strings.ToLower(line), "invalid") || strings.Contains(strings.ToLower(line), "unknown")) {
+					(strings.Contains(lower, "invalid") ||
+						strings.Contains(lower, "unknown") ||
+						strings.Contains(lower, "not recognized") ||
+						strings.Contains(lower, "unsupported") ||
+						strings.Contains(lower, "bad request")) {
 					wm.logFn(0, "webhook", "WARNING: projects_v2_item event not supported by gh webhook forward — "+
 						"board-column changes caught by safety-net poll only (up to 60 min delay)\n")
 					wm.mu.Lock()
-					filtered := make([]string, 0, len(wm.events))
-					for _, e := range wm.events {
-						if e != "projects_v2_item" {
-							filtered = append(filtered, e)
-						}
-					}
-					wm.events = filtered
+					wm.events = filterOutEvent(wm.events, "projects_v2_item")
 					c := wm.currentCmd
 					wm.mu.Unlock()
-					// Kill subprocess so supervise restarts without projects_v2_item.
-					if c != nil && c.Process != nil {
-						killProcGroup(c)
+					if c != nil {
+						wm.killFn(c)
 					}
+					stderrCh <- accum.String()
 					return
 				}
+				accum.WriteString(line + "\n")
 				wm.logFn(0, "webhook", "[gh] %s\n", line)
 			}
-			if err != nil {
+			if readErr != nil {
 				break
 			}
 		}
+		stderrCh <- accum.String()
 	}()
 
-	return cmd, nil
+	return cmd, stderrCh, nil
 }
 
 // runHealthMonitor periodically checks time-based health state transitions.
@@ -645,8 +781,8 @@ func (wm *webhookManager) handleWebhook(w http.ResponseWriter, r *http.Request) 
 				"disabling webhook mode for this session; run 'gh auth status' and restart Fabrik\n",
 				webhookRotationMaxCycles)
 			wm.emitCurrentState()
-			if cmd != nil && cmd.Process != nil {
-				killProcGroup(cmd)
+			if cmd != nil {
+				wm.killFn(cmd)
 			}
 		} else if shouldRotate {
 			wm.rotateSecret()
@@ -719,8 +855,8 @@ func (wm *webhookManager) rotateSecret() {
 	wm.logFn(0, "webhook", "rotating webhook secret (cycle %d/%d) — restarting subprocess\n",
 		cycle, webhookRotationMaxCycles)
 
-	if cmd != nil && cmd.Process != nil {
-		killProcGroup(cmd)
+	if cmd != nil {
+		wm.killFn(cmd)
 	}
 }
 
