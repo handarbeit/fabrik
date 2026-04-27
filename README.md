@@ -144,7 +144,7 @@ requires auto-advance to be active):
 > built-in default is used and the env var is bypassed. See
 > [USER_GUIDE.md §10](docs/USER_GUIDE.md#pending-reviewer-gate) for details.
 
-The Validate stage also ships with `wait_for_ci: true` enabled by default. Fabrik gates auto-advance and, when applicable, auto-merge on CI checks passing; if checks fail, it re-invokes the stage agent with a structured CI-fix report to address new-regression failures.
+The Validate stage also ships with `wait_for_ci: true` enabled by default. Fabrik gates auto-advance and, when applicable, auto-merge on CI checks passing; if checks fail, it re-invokes the stage agent with a structured CI-fix report to address new-regression failures. Non-required check_run failures do not block the gate — Fabrik trusts GitHub's `mergeable_state` as the authoritative merge-readiness signal, so only failures that branch protection itself considers blocking will prevent auto-merge.
 
 If a stage doesn't complete (e.g., unfixable issues found), it retries after
 a cooldown period rather than being permanently skipped.
