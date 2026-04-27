@@ -154,6 +154,11 @@ func New(cfg Config) (*Engine, error) {
 	// Must run after migrateSessions so home-dir sessions are already in namespaced layout.
 	migrateHomeToProject(fabrikDir, func(msg string) { fmt.Printf("[startup] %s", msg) })
 
+	// Wire the github package's diagnostic logger to engine.logf so retry/
+	// degradation warnings (e.g. project board indexer mismatches) reach
+	// fabrik.log in both TUI and plain-text modes.
+	gh.Logf = eng.logf
+
 	return eng, nil
 }
 
