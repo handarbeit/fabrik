@@ -383,6 +383,8 @@ func Execute() error {
 		return fmt.Errorf("no stage configurations found in %s", cfg.StagesDir)
 	}
 
+	stages.WarnStageDrift(stageCfgs, Version, os.Stderr)
+
 	// TUI is enabled by default when a real terminal is detected; use --notui to disable.
 	useTUI := cfg.TUI &&
 		(isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())) &&
