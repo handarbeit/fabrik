@@ -1,18 +1,12 @@
-# Fabrik v0.0.50
+# Fabrik v0.0.51
 
-This release tightens the stage-skill instructions for emitting `FABRIK_STAGE_COMPLETE`. v0.0.49 and earlier left the marker description ambiguous enough that Claude could mimic the surrounding code formatting and emit it wrapped in backticks (`` `FABRIK_STAGE_COMPLETE` ``) — which the engine regex correctly rejects, but only after Claude had declared the stage "ready to merge." The result was an infinite re-dispatch loop where `fabrik:yolo` never triggered auto-merge because completion was never recognised.
+This release adds resilience to GitHub Projects v2 indexer degradation. During an April 2026 GitHub outage, the same project-board GraphQL query — hit back-to-back within a single second — returned either {nodes:100, totalCount:136} or {nodes:0, totalCount:0} at random, with no errors and HTTP 200 in both cases. Fabrik accepted the empty responses verbatim, logged "found 0 items on board", and silently went idle. Items on page 2 of large project boards (>100 items) were especially affected — they were never deep-fetched, so auto-merges and cross-stage advancements stalled even though the issues themselves were healthy on GitHub.
 
 ## Fixes
 
-- **Hardened `FABRIK_STAGE_COMPLETE` emission across all six stage skills.** Each skill (`fabrik-specify`, `fabrik-research`, `fabrik-plan`, `fabrik-implement`, `fabrik-review`, `fabrik-validate`) now states the exact engine regex (`^FABRIK_STAGE_COMPLETE$`), requires the marker as the sole content of its own line, and explicitly lists silently-rejected variants: backticks, code fence, bold, blockquote, embedded-in-sentence, trailing punctuation. The `fabrik-validate` skill additionally calls out the specific failure mode — "ready to merge but no marker" producing the dispatch loop — and includes a worked example showing the marker as plain text on a line of its own. Real-world impact: acme/widgets#716 ran Validate 12× over 54 minutes against a clean, mergeable PR before being unstuck manually.
+- **Retry project board fetch on indexer-degraded responses.** `FetchProjectBoard` now queries `totalCount` alongside the items pagination, tracks the maximum totalCount observed across pages (in case the indexer flaps mid-pagination), and retries the entire fetch up to 3 times (1s, 2s linear backoff) when the raw node count is below the reported totalCount. After the last attempt, accept whatever we got — a project that consistently reports 0/0 is treated as genuinely empty. The comparison is against the raw GraphQL node count, not Fabrik's filtered `board.Items` list, so projects with non-Issue/non-PR items don't false-positive on the mismatch detector.
 
-## Documentation
-
-- README and USER_GUIDE updates for the v0.0.49 conjunctive CI gate semantics (`fabrik:awaiting-ci` set on `FABRIK_STAGE_COMPLETE`, `stage:X:complete` deferred until CI green).
-
-## Internal
-
-- `cut-release` skill now requires explicit verification of the current branch (`git branch --show-current`) before any tag operations; closes a near-miss from v0.0.49 where pre-flight ran on a detached HEAD.
+- **Visibility for indexer retries.** When the retry fires, Fabrik logs `[warn] project board fetch returned N items, totalCount=M (attempt X/3) — retrying in case of indexer hiccup`. Lands in `fabrik.log` alongside other engine logs so future GitHub-side flapping is diagnosable from the local fabrik.log without needing reproduction.
 
 ## Upgrading
 
