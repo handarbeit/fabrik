@@ -33,10 +33,10 @@ func warnDriftFrom(userStages []*Stage, version string, w io.Writer, defaults fs
 		byName[s.Name] = s
 	}
 
-	// Walk embedded defaults.
-	err := fs.WalkDir(defaults, "examples", func(path string, d fs.DirEntry, err error) error {
+	// Walk embedded defaults (best-effort; individual entry errors skip that entry).
+	fs.WalkDir(defaults, "examples", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			return nil // skip unreadable entries rather than aborting the walk
 		}
 		if d.IsDir() {
 			return nil
@@ -86,12 +86,10 @@ func warnDriftFrom(userStages []*Stage, version string, w io.Writer, defaults fs
 			return nil
 		}
 
-		filename := filepath.Base(userStage.FilePath)
-		fmt.Fprintf(w, "[startup] warning: .fabrik/stages/%s is missing fields present in %s defaults: %s. Run `fabrik upgrade` to see what changed.\n",
-			filename, version, strings.Join(missing, ", "))
+		fmt.Fprintf(w, "[startup] warning: %s is missing fields present in %s defaults: %s. Run `fabrik upgrade` to see what changed.\n",
+			userStage.FilePath, version, strings.Join(missing, ", "))
 		return nil
 	})
-	_ = err // best-effort; errors in walk are skipped per file
 }
 
 // missingTopLevelKeys reads the YAML file at userPath and returns a sorted slice
