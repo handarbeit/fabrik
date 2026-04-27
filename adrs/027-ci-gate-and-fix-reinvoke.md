@@ -22,7 +22,7 @@ The `yolo` auto-merge path already called `MergePR` directly. A CI gate is embed
 
 - Fetch the PR's head SHA via `FetchLinkedPR` (REST — avoids extending the existing large GraphQL query).
 - Fetch check runs via `FetchCheckRuns`.
-- **R5**: No check runs → if `prHasHadChecks[issueKey]` is true (this PR previously had check runs), gate blocks and waits — the engine is in the post-push registration window. If the flag is false (first-ever poll for this PR), gate clears (repo has no CI).
+- **R5**: No check runs → gate clears (repo has no CI). The post-push registration-window guard based on `prHasHadChecks[issueKey]` applies to the catch-up loop (`checkCIGate`, Prong 2) only — not here.
 - **R4**: All checks green → clear `ciMergePendingSince`; clear `fabrik:awaiting-ci`; proceed to merge.
 - **R3**: Any check failed → add `fabrik:awaiting-ci`; return error (caller logs and skips advance).
 - **R2**: Any check pending → track start time in `ciMergePendingSince`; return error (no label added — R10c).
