@@ -157,7 +157,7 @@ Before signaling completion:
 
 **Your working directory**: `.fabrik/worktrees/issue-<N>/` — this is your isolated workspace.
 
-**Completing the stage**: Output `FABRIK_STAGE_COMPLETE` on its own line when all tasks are done, tests pass, and everything is pushed. Once you emit this marker, stop immediately. Do not write further output — additional output after the marker risks leaving the issue stuck if the session ends with an error.
+**Completing the stage**: When all tasks are done, tests pass, and everything is pushed, emit the literal token `FABRIK_STAGE_COMPLETE` as the sole content of its own line — no backticks, no code fence, no markdown formatting, no trailing punctuation. The engine matches `^FABRIK_STAGE_COMPLETE$` exactly; backtick-wrapped or formatted variants are silently rejected and you will be re-invoked in a wasteful loop. Once you emit it, stop immediately. Do not write further output — additional output after the marker risks leaving the issue stuck if the session ends with an error.
 
 **If you can't complete**: Don't output the completion marker. Describe what's blocking you. The engine will retry after a cooldown, and you'll resume your session.
 
