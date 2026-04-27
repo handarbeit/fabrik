@@ -1057,11 +1057,17 @@ func TestNextRateLimitLow_NoActivationAboveThreshold(t *testing.T) {
 	}
 }
 
-// TestItemMayNeedWork_WaitForCI_CompleteLabel_BypassesCache verifies that an item
-// whose stage has wait_for_ci: true AND has a stage:<name>:complete label is NOT
-// filtered by the updatedAt cache. CI check run completions don't bump the issue's
-// updatedAt, so items waiting for CI would be permanently skipped without this bypass.
-func TestItemMayNeedWork_WaitForCI_CompleteLabel_BypassesCache(t *testing.T) {
+// TestItemMayNeedWork_WaitForCI_CompleteLabelOnly_FilteredByCache verifies that
+// an item with wait_for_ci: true and ONLY stage:X:complete (no fabrik:awaiting-ci)
+// is filtered by the updatedAt cache. In the new conjunctive gate design (ADR 032):
+//   - During CI await: fabrik:awaiting-ci is present → bypasses cache via the
+//     existing fabrik:awaiting-ci bypass in itemMayNeedWork.
+//   - After CI clears: checkCIGate adds stage:X:complete and removes
+//     fabrik:awaiting-ci. The label mutation bumps the issue's updatedAt on GitHub,
+//     so the item naturally passes the updatedAt check on the next poll.
+//
+// The old wait_for_ci + stage:X:complete bypass is therefore no longer needed.
+func TestItemMayNeedWork_WaitForCI_CompleteLabelOnly_FilteredByCache(t *testing.T) {
 	waitForCI := true
 	stgs := []*stages.Stage{
 		{
@@ -1090,19 +1096,21 @@ func TestItemMayNeedWork_WaitForCI_CompleteLabel_BypassesCache(t *testing.T) {
 		Status:    "Validate",
 		Repo:      "owner/repo",
 		UpdatedAt: fixedTime,
-		Labels:    []string{"stage:Validate:complete"},
+		Labels:    []string{"stage:Validate:complete"}, // no fabrik:awaiting-ci
 	}
-	// Pre-seed lastUpdatedAt so the updatedAt cache would normally return false.
+	// Pre-seed lastUpdatedAt so the updatedAt cache returns false.
 	eng.lastUpdatedAt["owner/repo#99"] = fixedTime
 
-	if !eng.itemMayNeedWork(item) {
-		t.Error("expected itemMayNeedWork to return true for wait_for_ci: true stage with complete label, got false")
+	// Post-CI-clear: stage:Validate:complete only (no fabrik:awaiting-ci) is
+	// filtered by cache, just like non-CI-gated stages with a completion label.
+	if eng.itemMayNeedWork(item) {
+		t.Error("expected itemMayNeedWork to return false for wait_for_ci stage with only stage:complete (post-CI-clear state)")
 	}
 }
 
 // TestItemMayNeedWork_NoWaitForCI_CompleteLabel_FilteredByCache verifies that an item
-// whose stage does NOT have wait_for_ci: true is still filtered by the updatedAt cache
-// even when it has a stage:<name>:complete label. The CI bypass must be conditional.
+// whose stage does NOT have wait_for_ci: true is filtered by the updatedAt cache when
+// it has only a stage:<name>:complete label (no fabrik:awaiting-ci).
 func TestItemMayNeedWork_NoWaitForCI_CompleteLabel_FilteredByCache(t *testing.T) {
 	stgs := []*stages.Stage{
 		{
