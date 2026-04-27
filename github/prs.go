@@ -14,6 +14,15 @@ type PRDetails struct {
 	Merged  bool
 	Draft   bool
 	HeadSHA string
+	// MergeableState reflects GitHub's branch-protection-aware mergeable
+	// status: "clean" (ready to merge), "unstable" (non-required checks
+	// failing but still mergeable), "blocked" (required checks pending or
+	// failing), "behind" (head is out of date with base), "dirty" (merge
+	// conflict), "draft" (PR is a draft), "has_hooks" (clean but hooks
+	// will run on merge), "unknown" (not yet computed). Used by Fabrik's
+	// CI gate as the authoritative signal — non-required check_run
+	// failures (e.g., workflow cleanup jobs) do not block "clean"/"unstable".
+	MergeableState string
 }
 
 // FetchPRMergeable returns GitHub's mergeable flag for a single PR.
@@ -36,16 +45,37 @@ func (c *Client) FetchPRMergeable(owner, repo string, prNumber int) (*bool, erro
 	return raw.Mergeable, nil
 }
 
+// FetchPRMergeableState returns GitHub's branch-protection-aware mergeable_state
+// for a single PR (e.g. "clean", "unstable", "blocked", "behind", "dirty",
+// "draft", "has_hooks", "unknown"). Used by Fabrik's CI gate as the
+// authoritative signal for whether non-required check_run failures should
+// block a merge.
+//
+// Returns "" when GitHub has not yet computed it. Only the single-PR endpoint
+// returns this field reliably; the list endpoint used by FetchLinkedPR omits
+// it (returns null).
+func (c *Client) FetchPRMergeableState(owner, repo string, prNumber int) (string, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", c.baseURL, owner, repo, prNumber)
+	var raw struct {
+		MergeableState string `json:"mergeable_state"`
+	}
+	if err := c.restGetJSON(apiURL, &raw); err != nil {
+		return "", fmt.Errorf("fetching PR #%d mergeable_state: %w", prNumber, err)
+	}
+	return raw.MergeableState, nil
+}
+
 // FetchPRDetails retrieves a single pull request via the REST API.
 func (c *Client) FetchPRDetails(owner, repo string, prNumber int) (*PRDetails, error) {
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", c.baseURL, owner, repo, prNumber)
 	var raw struct {
-		Number int    `json:"number"`
-		Title  string `json:"title"`
-		State  string `json:"state"`
-		Merged bool   `json:"merged"`
-		Draft  bool   `json:"draft"`
-		Head   struct {
+		Number         int    `json:"number"`
+		Title          string `json:"title"`
+		State          string `json:"state"`
+		Merged         bool   `json:"merged"`
+		Draft          bool   `json:"draft"`
+		MergeableState string `json:"mergeable_state"`
+		Head           struct {
 			SHA string `json:"sha"`
 		} `json:"head"`
 	}
@@ -53,12 +83,13 @@ func (c *Client) FetchPRDetails(owner, repo string, prNumber int) (*PRDetails, e
 		return nil, fmt.Errorf("fetching PR #%d: %w", prNumber, err)
 	}
 	return &PRDetails{
-		Number:  raw.Number,
-		Title:   raw.Title,
-		State:   raw.State,
-		Merged:  raw.Merged,
-		Draft:   raw.Draft,
-		HeadSHA: raw.Head.SHA,
+		Number:         raw.Number,
+		Title:          raw.Title,
+		State:          raw.State,
+		Merged:         raw.Merged,
+		Draft:          raw.Draft,
+		HeadSHA:        raw.Head.SHA,
+		MergeableState: raw.MergeableState,
 	}, nil
 }
 
@@ -99,12 +130,13 @@ func (c *Client) FetchLinkedPR(owner, repo string, issueNumber int) (*PRDetails,
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls?head=%s:%s&state=all&per_page=1",
 		c.baseURL, owner, repo, url.PathEscape(owner), url.PathEscape(branch))
 	var raw []struct {
-		Number int    `json:"number"`
-		Title  string `json:"title"`
-		State  string `json:"state"`
-		Merged bool   `json:"merged"`
-		Draft  bool   `json:"draft"`
-		Head   struct {
+		Number         int    `json:"number"`
+		Title          string `json:"title"`
+		State          string `json:"state"`
+		Merged         bool   `json:"merged"`
+		Draft          bool   `json:"draft"`
+		MergeableState string `json:"mergeable_state"`
+		Head           struct {
 			SHA string `json:"sha"`
 		} `json:"head"`
 	}
@@ -115,13 +147,26 @@ func (c *Client) FetchLinkedPR(owner, repo string, issueNumber int) (*PRDetails,
 		return nil, nil
 	}
 	return &PRDetails{
-		Number:  raw[0].Number,
-		Title:   raw[0].Title,
-		State:   raw[0].State,
-		Merged:  raw[0].Merged,
-		Draft:   raw[0].Draft,
-		HeadSHA: raw[0].Head.SHA,
+		Number:         raw[0].Number,
+		Title:          raw[0].Title,
+		State:          raw[0].State,
+		Merged:         raw[0].Merged,
+		Draft:          raw[0].Draft,
+		HeadSHA:        raw[0].Head.SHA,
+		MergeableState: raw[0].MergeableState,
 	}, nil
+}
+
+// MergeableStateAccepted reports whether GitHub's mergeable_state value
+// indicates the PR is mergeable per branch protection rules. "clean" means
+// fully ready; "unstable" means non-required checks have failed but the PR
+// is still mergeable. Other values ("blocked", "behind", "dirty", "draft",
+// "has_hooks", "unknown", "") fall through to the per-check classification.
+//
+// "has_hooks" is treated as not-accepted here because pre-merge hooks may
+// modify the merge outcome; conservative to use the per-check path.
+func MergeableStateAccepted(mergeableState string) bool {
+	return mergeableState == "clean" || mergeableState == "unstable"
 }
 
 // ErrNotMergeable is returned by MergePR when the PR cannot be merged because
