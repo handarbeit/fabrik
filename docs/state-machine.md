@@ -660,7 +660,7 @@ The CI gate has two paths that handle different timing scenarios:
 - Embedded directly in the auto-merge path for Validate+yolo items
 - Uses in-memory `ciMergePendingSince` map (keyed by `issueKey`) to track how long CI has been pending
 - Fetches PR head SHA via `FetchLinkedPR()` (REST), then check run statuses via `FetchCheckRuns()` (REST)
-- **R5:** No check runs → if `prHasHadChecks[issueKey]` is true (PR has had checks this process lifetime), return `(true, false, false)` — post-push registration delay, gate blocks and waits; if false, gate clears (repo has no CI)
+- **R5:** No check runs → gate clears (repo has no CI). The `prHasHadChecks` post-push delay guard applies to `checkCIGate()` (Path 2) only, not to this merge-guard path
 - **R4:** All checks green → clear `ciMergePendingSince`; clear `fabrik:awaiting-ci`; proceed to merge
 - **R3:** Any check failed → add `fabrik:awaiting-ci`; return error (advance skipped)
 - **R2:** Any check pending → start timer in `ciMergePendingSince` (first observation); return error (**R10c:** no label applied — avoids label churn for transient pending state)
