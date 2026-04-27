@@ -78,6 +78,9 @@ func (m *testGitHubUpgradeClient) FetchCheckRuns(owner, repo, sha string) ([]gh.
 func (m *testGitHubUpgradeClient) FetchPRMergeable(owner, repo string, prNumber int) (*bool, error) {
 	return nil, nil
 }
+func (m *testGitHubUpgradeClient) FetchPRMergeableState(owner, repo string, prNumber int) (string, error) {
+	return "", nil
+}
 func (m *testGitHubUpgradeClient) GetPRBase(owner, repo string, prNumber int) (string, error) {
 	return "", nil
 }

@@ -195,8 +195,34 @@ func (e *Engine) attemptMergeOnValidate(item gh.ProjectItem) error {
 		return nil
 	}
 
-	// CI gate: fetch check runs and evaluate (R1-R6).
+	// Trust GitHub's branch-protection-aware mergeable_state when it's
+	// positive: "clean" = ready to merge per branch protection; "unstable" =
+	// non-required checks failing but still mergeable. In both cases, skip
+	// the raw check_runs gate below — that gate is over-aggressive, treating
+	// any check_run failure (including non-required workflow jobs like
+	// "Cleanup artifacts") as blocking, which contradicts GitHub's own
+	// merge decision. mergeable_state is only available from the single-PR
+	// endpoint, so this requires an extra REST call.
+	bypassCheckRunsGate := false
 	if pr.HeadSHA != "" {
+		mergeableState, msErr := e.client.FetchPRMergeableState(owner, repo, pr.Number)
+		if msErr != nil {
+			e.logf(item.Number, "warn", "could not fetch mergeable_state: %v — falling back to check-runs gate\n", msErr)
+		} else if gh.MergeableStateAccepted(mergeableState) {
+			e.logf(item.Number, "ci-gate", "mergeable_state=%q — skipping check_runs gate, proceeding to merge\n", mergeableState)
+			// Clear stale CI-await state so a stuck fabrik:awaiting-ci from
+			// the prior over-aggressive gate doesn't survive past the merge.
+			e.removeAwaitingCILabel(owner, repo, item)
+			e.mu.Lock()
+			delete(e.ciMergePendingSince, iKey)
+			e.mu.Unlock()
+			bypassCheckRunsGate = true
+		}
+	}
+
+	// CI gate: fetch check runs and evaluate (R1-R6). Skipped when GitHub's
+	// mergeable_state already says the PR is mergeable (above).
+	if !bypassCheckRunsGate && pr.HeadSHA != "" {
 		checkRuns, err := e.client.FetchCheckRuns(owner, repo, pr.HeadSHA)
 		if err != nil {
 			e.logf(item.Number, "warn", "could not fetch check runs for merge guard: %v — skipping merge until CI status can be fetched\n", err)
