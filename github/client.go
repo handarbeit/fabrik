@@ -13,6 +13,20 @@ import (
 
 const defaultBaseURL = "https://api.github.com"
 
+// Logf is an optional package-level logger callback. When non-nil, internal
+// retry/diagnostic warnings (e.g. project board indexer mismatches) are routed
+// here. Engine wires this to its own logf during construction so messages land
+// in fabrik.log; tests that don't set it get silent retries.
+var Logf func(issueNumber int, tag, format string, args ...any)
+
+// logf is the package-internal helper that fans out to Logf if set, otherwise
+// silent. Always pass issueNumber=0 for non-issue-scoped messages.
+func logf(issueNumber int, tag, format string, args ...any) {
+	if Logf != nil {
+		Logf(issueNumber, tag, format, args...)
+	}
+}
+
 // Client is a GitHub GraphQL API client.
 type Client struct {
 	token      string

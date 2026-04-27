@@ -523,3 +523,101 @@ func TestFetchProjectBoard_IsClosed_PRItem(t *testing.T) {
 		t.Error("IsClosed should be false for PR item (PR state is not fetched here)")
 	}
 }
+
+// TestFetchProjectBoard_RetriesOnEmptyResponse verifies that fetchProjectBoard
+// retries when GitHub returns 0 items + totalCount=0 (the indexer-degraded
+// response shape observed during GitHub Projects v2 outages). The retry is
+// meant to mask transient indexer hiccups: hitting the same query twice in
+// a row returned 100 items or 0 items at random during the April 2026 outage.
+func TestFetchProjectBoard_RetriesOnEmptyResponse(t *testing.T) {
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount < 3 {
+			// First two attempts: degraded response (empty items + totalCount=0).
+			resp := map[string]interface{}{
+				"data": map[string]interface{}{
+					"user": map[string]interface{}{
+						"projectV2": map[string]interface{}{
+							"id": "PVT_123",
+							"items": map[string]interface{}{
+								"totalCount": 0,
+								"pageInfo":   map[string]interface{}{"hasNextPage": false, "endCursor": ""},
+								"nodes":      []interface{}{},
+							},
+						},
+					},
+				},
+			}
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+		// Third attempt: indexer is back, returns the real data.
+		resp := map[string]interface{}{
+			"data": map[string]interface{}{
+				"user": map[string]interface{}{
+					"projectV2": map[string]interface{}{
+						"id": "PVT_123",
+						"items": map[string]interface{}{
+							"totalCount": 1,
+							"pageInfo":   map[string]interface{}{"hasNextPage": false, "endCursor": ""},
+							"nodes":      []interface{}{makeItem("I_1", "PVTI_1", "Recovered")},
+						},
+					},
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	board, err := c.FetchProjectBoard("owner", "repo", 1, "user")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
+	}
+	if callCount != 3 {
+		t.Errorf("expected 3 API calls (2 empty + 1 success), got %d", callCount)
+	}
+	if len(board.Items) != 1 || board.Items[0].Title != "Recovered" {
+		t.Errorf("expected 1 item titled 'Recovered', got: %v", board.Items)
+	}
+}
+
+// TestFetchProjectBoard_AcceptsGenuinelyEmpty verifies that a project that
+// reports zero items consistently across all retry attempts is accepted as
+// genuinely empty (not treated as a permanent error).
+func TestFetchProjectBoard_AcceptsGenuinelyEmpty(t *testing.T) {
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		resp := map[string]interface{}{
+			"data": map[string]interface{}{
+				"user": map[string]interface{}{
+					"projectV2": map[string]interface{}{
+						"id": "PVT_123",
+						"items": map[string]interface{}{
+							"totalCount": 0,
+							"pageInfo":   map[string]interface{}{"hasNextPage": false, "endCursor": ""},
+							"nodes":      []interface{}{},
+						},
+					},
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	board, err := c.FetchProjectBoard("owner", "repo", 1, "user")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
+	}
+	if callCount != projectBoardFetchAttempts {
+		t.Errorf("expected %d API calls (all retries exhausted), got %d", projectBoardFetchAttempts, callCount)
+	}
+	if len(board.Items) != 0 {
+		t.Errorf("expected empty board, got %d items", len(board.Items))
+	}
+}
