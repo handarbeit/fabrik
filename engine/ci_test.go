@@ -131,6 +131,50 @@ func TestCheckCIGate_Pending_BlocksNoLabel(t *testing.T) {
 	}
 }
 
+// TestCheckCIGate_Pending_TimedOut verifies that when CI checks are stuck in
+// pending indefinitely, CIWaitTimeout fires (R7 — covers the full CI-await window).
+// Under ADR 032, fabrik:awaiting-ci is present from handleStageComplete so the
+// timeout tracks the whole pending window, not just confirmed-failure windows.
+func TestCheckCIGate_Pending_TimedOut(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, HeadSHA: "sha_pending_timeout"}, nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return []gh.CheckRun{
+				{Name: "slow-ci", Status: "in_progress"},
+			}, nil
+		},
+		fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+			// Simulate fabrik:awaiting-ci applied over 1 hour ago — well past any timeout.
+			return time.Now().Add(-2 * time.Hour), nil
+		},
+	}
+	eng := testEngineForMerge(client)
+	eng.cfg.CIWaitTimeout = 30 * time.Minute
+	tr := true
+	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	if !timedOut {
+		t.Error("expected timedOut=true when CI is pending and CIWaitTimeout elapsed")
+	}
+	if blocked || ciFailure {
+		t.Errorf("expected blocked=false ciFailure=false on timeout, got blocked=%v ciFailure=%v", blocked, ciFailure)
+	}
+	// fabrik:awaiting-ci must be removed on timeout
+	foundRemove := false
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-ci" {
+			foundRemove = true
+		}
+	}
+	if !foundRemove {
+		t.Error("expected fabrik:awaiting-ci to be removed on timeout")
+	}
+}
+
 func TestCheckCIGate_Failed_BlocksAndAddsLabel(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
@@ -423,6 +467,37 @@ func TestCheckCIGate_NonValidateStage_AddsCorrectCompleteLabel(t *testing.T) {
 			}
 			return names
 		}())
+	}
+}
+
+// ── addCompleteLabelAndRemoveCI atomic-ish behavior ──────────────────────────
+
+// TestAddCompleteLabelAndRemoveCI_AddLabelFails_PreservesAwaitingCI verifies
+// that fabrik:awaiting-ci is NOT removed when AddLabelToIssue fails.
+// This preserves R3 — the in-flight marker must stay while CI is still pending,
+// so the dispatcher continues to suppress re-invocation on the next poll.
+func TestAddCompleteLabelAndRemoveCI_AddLabelFails_PreservesAwaitingCI(t *testing.T) {
+	client := &mockGitHubClient{
+		addLabelToIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			// Simulate a transient GitHub API failure.
+			if labelName == fmt.Sprintf("stage:%s:complete", "Validate") {
+				return fmt.Errorf("GitHub API 503")
+			}
+			return nil
+		},
+	}
+	eng := testEngineForMerge(client)
+	tr := true
+	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	eng.addCompleteLabelAndRemoveCI("owner", "repo", item, stage)
+
+	// fabrik:awaiting-ci must NOT be removed — AddLabelToIssue failed.
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-ci" {
+			t.Error("fabrik:awaiting-ci must NOT be removed when AddLabelToIssue fails (R3 preservation)")
+		}
 	}
 }
 
