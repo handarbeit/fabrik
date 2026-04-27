@@ -44,7 +44,8 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 		return true, false, false // transient error; retry on next poll
 	}
 	if pr == nil || pr.HeadSHA == "" {
-		e.logf(item.Number, "ci-gate", "no linked PR found; skipping CI gate\n")
+		e.logf(item.Number, "ci-gate", "no linked PR found; CI gate clears (no PR to check)\n")
+		e.addCompleteLabelAndRemoveCI(owner, repo, item, stage)
 		return false, false, false
 	}
 
