@@ -169,7 +169,7 @@ or `poll:` in `config.yaml`).
 
 Rate-limit backoff uses two-threshold hysteresis to prevent thrashing: it **activates** when GraphQL remaining quota drops below **20%** of the hourly limit, and **clears only when quota rises above 50%** of the limit. Activity detection (items deep-fetched or dispatched) resets idle backoff but does NOT reset rate-limit backoff — the two concerns are independent. When rate-limit backoff is active, Fabrik logs the effective poll interval each cycle so operators can observe the actual cadence.
 
-**Board fetch resilience**: `FetchProjectBoard` automatically retries up to 3 times (with 1s/2s backoff) when GitHub returns fewer nodes than `totalCount` reports. This masks transient GitHub Projects v2 indexer degradation that intermittently returns empty or incomplete boards for non-empty projects. The log line:
+**Board fetch resilience**: `FetchProjectBoard` automatically retries up to 3 times (with 1s/2s backoff) when GitHub returns an empty response (zero items), which occurs during transient Projects v2 indexer degradation that intermittently returns empty boards for non-empty projects (both returned node count and `totalCount` are zero in degraded responses). The log line:
 
 ```
 [warn] project board fetch returned N items, totalCount=M (attempt X/3) — retrying in case of indexer hiccup
