@@ -314,6 +314,45 @@ func TestCheckCIGate_NoCheckRuns_AddsCompleteLabel(t *testing.T) {
 	}
 }
 
+// TestCheckCIGate_NoPR_AddsCompleteLabel verifies that checkCIGate adds
+// stage:X:complete when there is no linked PR (gate clears — no PR, no CI).
+// Regression test: before the fix, fabrik:awaiting-ci was never removed and
+// stage:X:complete was never added when FetchLinkedPR returns nil.
+func TestCheckCIGate_NoPR_AddsCompleteLabel(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return nil, nil // no linked PR
+		},
+	}
+	eng := testEngineForMerge(client)
+	tr := true
+	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	if blocked || ciFailure || timedOut {
+		t.Errorf("expected gate cleared for no PR, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
+	}
+	foundComplete := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Validate:complete" {
+			foundComplete = true
+		}
+	}
+	if !foundComplete {
+		t.Error("expected stage:Validate:complete to be added when no linked PR (R5 equivalent)")
+	}
+	foundRemove := false
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-ci" {
+			foundRemove = true
+		}
+	}
+	if !foundRemove {
+		t.Error("expected fabrik:awaiting-ci to be removed when gate clears (no linked PR)")
+	}
+}
+
 // TestCheckCIGate_Failed_DoesNotAddCompleteLabel verifies that checkCIGate does
 // NOT add stage:X:complete when CI checks have failed.
 func TestCheckCIGate_Failed_DoesNotAddCompleteLabel(t *testing.T) {
