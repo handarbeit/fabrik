@@ -301,6 +301,30 @@ On startup, Fabrik attempts to fetch the project board and status field so it ca
 
 See [§10 Troubleshooting → Startup Board Validation Failure](#startup-board-validation-failure) if validation succeeds and reports a mismatch.
 
+### Stage YAML Drift Warning
+
+After loading your stage YAMLs from `.fabrik/stages/`, Fabrik compares each stage against the embedded default with the same `name:` field. If the embedded default contains top-level YAML keys that your file does not, Fabrik prints a warning to stderr at startup:
+
+```
+[startup] warning: .fabrik/stages/validate.yaml is missing fields present in v0.0.49 defaults: wait_for_ci, wait_for_reviews. Run `fabrik upgrade` to see what changed.
+```
+
+This warning is **informational only** — the engine continues running with your existing config. The missing keys are behavioral options added in a newer binary that your stage file predates.
+
+**What to do:**
+
+1. Run `fabrik upgrade` to refresh the embedded plugin skills — it does not automatically overwrite your stage YAMLs, but its changelog and the embedded `stages/examples/` files tell you what changed.
+2. Review the missing keys in the embedded defaults (e.g., `wait_for_ci: true` in `validate.yaml`).
+3. Manually add any fields you want into your customized stage files.
+
+**Common keys that trigger this warning:**
+
+- `wait_for_ci: true` — enables the CI gate on Validate auto-advance (added in v0.0.49)
+- `wait_for_reviews: true` — enables the reviewer gate on Validate auto-advance (added in v0.0.49)
+- `completion:` — marks the stage completion type (added as an explicit top-level key; omitting it is safe because the engine defaults it to `{type: claude}`)
+
+Custom stages (names not present in any embedded default) are silently skipped — no warning is produced for them.
+
 ### Instance Lock
 
 > **Note:** When Fabrik starts, it creates a PID lock file at `.fabrik/fabrik.lock`. If a second instance attempts to start in the same directory, it reads the lock file, logs an error identifying the running process, and exits immediately. The lock is automatically released when the process exits — including on crash or SIGKILL — so there is no need to manually delete the file after an unclean shutdown.
