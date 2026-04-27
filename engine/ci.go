@@ -24,8 +24,9 @@ import (
 //     This includes: no PR found, no check runs (R5), all checks green.
 //
 //   - (true, false, false)  — gate blocked but no confirmed failure; re-evaluate on next poll.
-//     Covers: checks still pending (in_progress/queued), and transient API errors
-//     (FetchLinkedPR or FetchCheckRuns fail). fabrik:awaiting-ci is NOT modified.
+//     Covers: checks still pending (in_progress/queued) and not yet timed out,
+//     and transient API errors (FetchLinkedPR or FetchCheckRuns fail).
+//     fabrik:awaiting-ci is NOT modified.
 //
 //   - (true, true, false)   — CI failed; fabrik:awaiting-ci applied; caller should dispatch CI-fix.
 //
@@ -83,8 +84,35 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 		return false, false, false
 	}
 
-	// Checks still running — gate blocked; fabrik:awaiting-ci was already applied
-	// by handleStageComplete when Claude signalled completion.
+	// CIWaitTimeout applies to the full CI-await window — both pending and failed
+	// checks (R7). Under ADR 032, fabrik:awaiting-ci is present from the moment
+	// handleStageComplete fires, so timeout tracking covers "checks still running"
+	// as well as "checks failed". Without this, CI stuck in queued/in_progress
+	// indefinitely would never time out and pause the issue.
+	if hasLabel(item, "fabrik:awaiting-ci") {
+		timeout := e.cfg.CIWaitTimeout
+		if timeout <= 0 {
+			timeout = 30 * time.Minute
+		}
+		appliedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:awaiting-ci")
+		if err != nil {
+			e.logf(item.Number, "warn", "could not fetch awaiting-ci label timestamp: %v\n", err)
+		} else if !appliedAt.IsZero() && time.Since(appliedAt) >= timeout {
+			allNames := make([]string, 0, len(pending)+len(failed))
+			for _, cr := range pending {
+				allNames = append(allNames, cr.Name+" (pending)")
+			}
+			for _, cr := range failed {
+				allNames = append(allNames, fmt.Sprintf("%s (%s)", cr.Name, cr.Conclusion))
+			}
+			e.logf(item.Number, "warn", "CI wait timeout elapsed; pausing issue — checks: %s\n", strings.Join(allNames, ", "))
+			e.removeAwaitingCILabel(owner, repo, item)
+			return false, false, true
+		}
+	}
+
+	// Checks still running — gate blocked; fabrik:awaiting-ci already present
+	// from handleStageComplete.
 	if len(failed) == 0 {
 		names := make([]string, 0, len(pending))
 		for _, cr := range pending {
@@ -94,44 +122,14 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 		return true, false, false
 	}
 
-	// CI failed — check timeout via label timestamp.
-	timeout := e.cfg.CIWaitTimeout
-	if timeout <= 0 {
-		timeout = 30 * time.Minute
-	}
-	for _, l := range item.Labels {
-		if l == "fabrik:awaiting-ci" {
-			appliedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:awaiting-ci")
-			if err != nil {
-				e.logf(item.Number, "warn", "could not fetch awaiting-ci label timestamp: %v\n", err)
-			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= timeout {
-				failedNames := make([]string, 0, len(failed))
-				for _, cr := range failed {
-					failedNames = append(failedNames, cr.Name)
-				}
-				e.logf(item.Number, "warn", "CI wait timeout elapsed; pausing issue — failed: %s\n", strings.Join(failedNames, ", "))
-				e.removeAwaitingCILabel(owner, repo, item)
-				return false, false, true
-			}
-			break
-		}
-	}
-
-	// Apply fabrik:awaiting-ci on confirmed failure (idempotent).
+	// CI failed — apply fabrik:awaiting-ci idempotently and return blocked.
 	failedNames := make([]string, 0, len(failed))
 	for _, cr := range failed {
 		failedNames = append(failedNames, fmt.Sprintf("%s (%s)", cr.Name, cr.Conclusion))
 	}
 	e.logf(item.Number, "ci-gate", "CI check(s) failed: %s\n", strings.Join(failedNames, ", "))
 
-	alreadyWaiting := false
-	for _, l := range item.Labels {
-		if l == "fabrik:awaiting-ci" {
-			alreadyWaiting = true
-			break
-		}
-	}
-	if !alreadyWaiting {
+	if !hasLabel(item, "fabrik:awaiting-ci") {
 		if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-ci"); err != nil {
 			e.logf(item.Number, "warn", "could not add fabrik:awaiting-ci label: %v\n", err)
 		}
@@ -152,13 +150,15 @@ func (e *Engine) removeAwaitingCILabel(owner, repo string, item gh.ProjectItem) 
 	}
 }
 
-// addCompleteLabelAndRemoveCI adds stage:X:complete and removes fabrik:awaiting-ci
-// when the CI gate clears. Called from the two gate-cleared paths in checkCIGate
-// so that stage:X:complete is only ever set after CI has been verified green (R5).
+// addCompleteLabelAndRemoveCI adds stage:X:complete and, only after that succeeds,
+// removes fabrik:awaiting-ci when the CI gate clears. If adding the completion label
+// fails, fabrik:awaiting-ci is preserved so the next poll cycle retries (R3 — the
+// in-flight marker must not be dropped while CI is still being gated).
 func (e *Engine) addCompleteLabelAndRemoveCI(owner, repo string, item gh.ProjectItem, stage *stages.Stage) {
 	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
 		e.logf(item.Number, "warn", "could not add completion label %s: %v\n", completeLabel, err)
+		return // preserve fabrik:awaiting-ci so the next poll retries
 	}
 	e.removeAwaitingCILabel(owner, repo, item)
 }

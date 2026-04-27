@@ -745,17 +745,35 @@ func TestItemMayNeedWork_NoSpecialLabel_RespectsUpdatedAtCache(t *testing.T) {
 // ── fabrik:awaiting-ci conjunctive gate dispatch guards ──────────────────────
 
 // TestItemNeedsWork_AwaitingCI_NoDispatch verifies that itemNeedsWork returns
-// false when fabrik:awaiting-ci is present, preventing re-dispatch during CI
-// await (R3). The catch-up loop evaluates CI; processItem must not be called.
+// false when fabrik:awaiting-ci is present on a wait_for_ci: true stage (R3).
+// The catch-up loop evaluates CI; processItem must not be called.
 func TestItemNeedsWork_AwaitingCI_NoDispatch(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	tr := true
+	stgs := []*stages.Stage{{Name: "Validate", Order: 3, WaitForCI: &tr}}
+	eng := testEngineWithStages(&mockGitHubClient{}, stgs)
 	item := gh.ProjectItem{
 		Number: 64,
-		Status: "Research",
+		Status: "Validate",
 		Labels: []string{"fabrik:awaiting-ci"},
 	}
 	if eng.itemNeedsWork(item) {
-		t.Error("itemNeedsWork must return false when fabrik:awaiting-ci is present (R3)")
+		t.Error("itemNeedsWork must return false when fabrik:awaiting-ci is present on a wait_for_ci stage (R3)")
+	}
+}
+
+// TestItemNeedsWork_AwaitingCI_NonCIGatedStage_Dispatches verifies that
+// fabrik:awaiting-ci does NOT suppress dispatch for non-wait_for_ci stages.
+// A stale label from a prior CI-gated invocation must not permanently block
+// a stage that was moved to a different (non-CI-gated) column.
+func TestItemNeedsWork_AwaitingCI_NonCIGatedStage_Dispatches(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	item := gh.ProjectItem{
+		Number: 67,
+		Status: "Research", // no wait_for_ci
+		Labels: []string{"fabrik:awaiting-ci"},
+	}
+	if !eng.itemNeedsWork(item) {
+		t.Error("itemNeedsWork must not suppress dispatch for fabrik:awaiting-ci on a non-CI-gated stage")
 	}
 }
 
@@ -763,10 +781,12 @@ func TestItemNeedsWork_AwaitingCI_NoDispatch(t *testing.T) {
 // with fabrik:awaiting-ci passes the closed-issue guard in itemMayNeedWork, so
 // the catch-up loop can complete the CI gate after a PR merge closes the issue.
 func TestItemMayNeedWork_ClosedIssue_AwaitingCI_Passes(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	tr := true
+	stgs := []*stages.Stage{{Name: "Validate", Order: 3, WaitForCI: &tr}}
+	eng := testEngineWithStages(&mockGitHubClient{}, stgs)
 	item := gh.ProjectItem{
 		Number:   65,
-		Status:   "Research",
+		Status:   "Validate",
 		IsClosed: true,
 		Labels:   []string{"fabrik:awaiting-ci"},
 	}
@@ -777,21 +797,21 @@ func TestItemMayNeedWork_ClosedIssue_AwaitingCI_Passes(t *testing.T) {
 }
 
 // TestItemNeedsWork_ClosedIssue_AwaitingCI_Passes verifies that a closed item
-// with fabrik:awaiting-ci passes the closed-issue guard in itemNeedsWork.
+// with fabrik:awaiting-ci on a wait_for_ci stage passes the closed-issue guard
+// but is still filtered by the awaiting-ci dispatch gate (no Claude invocation).
 func TestItemNeedsWork_ClosedIssue_AwaitingCI_Passes(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	tr := true
+	stgs := []*stages.Stage{{Name: "Validate", Order: 3, WaitForCI: &tr}}
+	eng := testEngineWithStages(&mockGitHubClient{}, stgs)
 	item := gh.ProjectItem{
 		Number:   66,
-		Status:   "Research",
+		Status:   "Validate",
 		IsClosed: true,
 		Labels:   []string{"fabrik:awaiting-ci"},
 	}
-	// itemNeedsWork: the awaiting-ci gate (return false) runs AFTER the
-	// closed-issue guard, so a closed item with awaiting-ci passes the closed
-	// guard but is still filtered by the awaiting-ci gate (no dispatch).
-	// This verifies the item is NOT dispatched, which is the correct behavior:
-	// the catch-up loop (not processItem) handles the CI gate transition.
+	// Passes the closed-issue guard (fabrik:awaiting-ci present) but is filtered
+	// by the awaiting-ci dispatch gate — the catch-up loop handles the CI gate.
 	if eng.itemNeedsWork(item) {
-		t.Error("closed item with fabrik:awaiting-ci should be filtered by awaiting-ci gate (not dispatched)")
+		t.Error("closed item with fabrik:awaiting-ci on wait_for_ci stage should be filtered by awaiting-ci dispatch gate")
 	}
 }

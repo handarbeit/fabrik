@@ -265,8 +265,10 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	}
 
 	// CI gate in-flight: catch-up loop evaluates CI via checkCIGate; dispatcher
-	// must not re-invoke while CI is being awaited (R3).
-	if hasLabel(item, "fabrik:awaiting-ci") {
+	// must not re-invoke while CI is being awaited (R3). Scoped to wait_for_ci
+	// stages so a stale label on a non-CI-gated stage does not permanently
+	// suppress dispatch (e.g., if a user manually moves an item to a different stage).
+	if stage.WaitForCI != nil && *stage.WaitForCI && hasLabel(item, "fabrik:awaiting-ci") {
 		return false
 	}
 
