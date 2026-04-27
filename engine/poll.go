@@ -625,10 +625,11 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// Catch-up loop: operates only on deepFetchCandidates so the full label set is available.
 	//
 	// Phase 1 (unconditional): for every non-paused, non-cleanup item with a
-	// stage:<X>:complete label, run dependency check, review gate, and review
-	// reinvoke regardless of yolo/cruise/auto_advance. This ensures inline PR
-	// review thread comments (Copilot, Gemini, human inline) are addressed on
-	// all issues, not just yolo/cruise ones.
+	// stage:<X>:complete label OR fabrik:awaiting-ci (on a wait_for_ci stage),
+	// run dependency check, review gate, CI gate, and review reinvoke regardless
+	// of yolo/cruise/auto_advance. This ensures inline PR review thread comments
+	// (Copilot, Gemini, human inline) are addressed on all issues, and that the
+	// CI gate is evaluated every poll cycle during CI await.
 	//
 	// Phase 2 (gated): stage advancement, gated on yolo/cruise/auto_advance.
 	for _, item := range deepFetchCandidates {
