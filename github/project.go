@@ -92,7 +92,70 @@ func (c *Client) FetchProjectBoard(owner, repo string, projectNum int, ownerType
 	return board, err
 }
 
+// projectBoardFetchAttempts is the maximum number of times fetchProjectBoard
+// will retry the entire pagination if GitHub returns a response that disagrees
+// with itself: fewer raw items than totalCount claims, or zero items at all.
+//
+// Empirically, the GitHub Projects v2 GraphQL endpoint can return inconsistent
+// responses during indexer degradation — the same query, hit back-to-back
+// within a single second, returned 100 items or 0 items at random. The 0-item
+// responses came back with totalCount=0 and HTTP 200, indistinguishable at the
+// API level from a genuinely empty project. Without retry, Fabrik silently
+// goes idle every poll until GitHub recovers. With retry, transient bad
+// indexer hits get masked.
+const projectBoardFetchAttempts = 3
+
+// projectBoardFetchBackoff returns the sleep before retry attempt n (1-indexed):
+// 0 for the first attempt, then linear (1s, 2s, ...).
+func projectBoardFetchBackoff(attempt int) time.Duration {
+	if attempt <= 1 {
+		return 0
+	}
+	return time.Duration(attempt-1) * time.Second
+}
+
 func (c *Client) fetchProjectBoard(owner, repo string, projectNum int, ownerType string) (*ProjectBoard, error) {
+	var lastBoard *ProjectBoard
+	for attempt := 1; attempt <= projectBoardFetchAttempts; attempt++ {
+		if d := projectBoardFetchBackoff(attempt); d > 0 {
+			time.Sleep(d)
+		}
+		board, rawNodeCount, totalCount, err := c.fetchProjectBoardOnce(owner, repo, projectNum, ownerType)
+		if err != nil {
+			// Errors return immediately — retry is for empty/inconsistent
+			// successes, not transport failures (the caller may want to
+			// fall back to a different ownerType on error).
+			return nil, err
+		}
+		lastBoard = board
+		// Healthy response: either we collected at least totalCount nodes (the
+		// indexer-agrees-with-itself case, using >= because totalCount can
+		// shift if items are added/removed between page fetches), or we have
+		// nodes at all (handles older/test responses where totalCount may not
+		// be present — degraded responses always return both rawNodeCount=0
+		// AND totalCount=0 together, so "nodes present" is sufficient).
+		if (totalCount > 0 && rawNodeCount >= totalCount) || rawNodeCount > 0 {
+			return board, nil
+		}
+		// Inconsistent response: zero raw nodes AND zero totalCount. Could be
+		// a genuinely empty project, or the indexer briefly forgot the project
+		// (observed during GitHub Projects degradation). Worth retrying; if
+		// every attempt agrees, accept it as genuinely empty.
+		if attempt < projectBoardFetchAttempts {
+			logf(0, "warn",
+				"project board fetch returned %d items, totalCount=%d (attempt %d/%d) — retrying in case of indexer hiccup\n",
+				rawNodeCount, totalCount, attempt, projectBoardFetchAttempts)
+		}
+	}
+	return lastBoard, nil
+}
+
+// fetchProjectBoardOnce performs one full pagination pass and returns the
+// resulting board, the raw GraphQL node count (before Fabrik's drafts/repo
+// filtering), and the maximum totalCount observed across pages. Callers
+// compare rawNodeCount to totalCount to detect indexer-degraded responses
+// and decide whether to retry.
+func (c *Client) fetchProjectBoardOnce(owner, repo string, projectNum int, ownerType string) (*ProjectBoard, int, int, error) {
 	query := fmt.Sprintf(`
 query($owner: String!, $projectNum: Int!, $cursor: String) {
   %s(login: $owner) {
@@ -100,6 +163,7 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
       id
       title`, ownerType) + `
       items(first: 100, after: $cursor) {
+        totalCount
         pageInfo {
           hasNextPage
           endCursor
@@ -158,6 +222,9 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 	var projectID string
 	var projectTitle string
 	var allNodes []itemNode
+	// maxTotalCount tracks the largest totalCount observed across pages.
+	// Compared to len(allNodes) post-pagination to detect partial fetches.
+	maxTotalCount := 0
 
 	// Paginate over items.
 	cursor := ""
@@ -176,7 +243,8 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 					ID    string `json:"id"`
 					Title string `json:"title"`
 					Items struct {
-						PageInfo struct {
+						TotalCount int `json:"totalCount"`
+						PageInfo   struct {
 							HasNextPage bool   `json:"hasNextPage"`
 							EndCursor   string `json:"endCursor"`
 						} `json:"pageInfo"`
@@ -187,17 +255,20 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 		}
 
 		if err := c.graphqlRequest(query, vars, &result); err != nil {
-			return nil, fmt.Errorf("fetching project board: %w", err)
+			return nil, 0, 0, fmt.Errorf("fetching project board: %w", err)
 		}
 
 		ownerData, ok := result.Data[ownerType]
 		if !ok {
-			return nil, fmt.Errorf("fetching project board: no %s data in response", ownerType)
+			return nil, 0, 0, fmt.Errorf("fetching project board: no %s data in response", ownerType)
 		}
 		proj := ownerData.ProjectV2
 		if projectID == "" {
 			projectID = proj.ID
 			projectTitle = proj.Title
+		}
+		if proj.Items.TotalCount > maxTotalCount {
+			maxTotalCount = proj.Items.TotalCount
 		}
 		allNodes = append(allNodes, proj.Items.Nodes...)
 
@@ -205,7 +276,7 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 			break
 		}
 		if proj.Items.PageInfo.EndCursor == "" {
-			return nil, fmt.Errorf("fetching project board: hasNextPage=true but endCursor is empty")
+			return nil, 0, 0, fmt.Errorf("fetching project board: hasNextPage=true but endCursor is empty")
 		}
 		cursor = proj.Items.PageInfo.EndCursor
 	}
@@ -263,7 +334,7 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 		board.Items = append(board.Items, item)
 	}
 
-	return board, nil
+	return board, len(allNodes), maxTotalCount, nil
 }
 
 // FetchItemDetails populates the Comments, Labels, Body, URL, Author, Assignees,
