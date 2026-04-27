@@ -1614,6 +1614,8 @@ On multi-repo boards, Fabrik uses a single `gh webhook forward` subprocess:
 1. If your token has org-admin access, Fabrik uses `--org=<org>` to subscribe to all repos in the org with one subscription — no restarts needed when new repos appear.
 2. Otherwise, Fabrik subscribes per-repo. When a new repo appears on the board, the subprocess is briefly restarted with the updated repo list (the safety-net poll covers any events missed during the restart).
 
+> **Startup delay on multi-repo boards**: Webhook subscriptions are established after the first board poll completes (up to one poll interval, typically 30 seconds). During this window the TUI shows the blue "starting up" indicator and the safety-net poll is in effect. This is expected — the webhook manager waits until the repo list is known before subscribing.
+
 ### Troubleshooting Webhook Mode
 
 **"prerequisite check failed"** — `gh` is missing or too old. Install or upgrade: <https://cli.github.com>
