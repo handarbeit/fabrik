@@ -21,11 +21,12 @@ import (
 // Returns (blocked, ciFailure, timedOut):
 //
 //   - (false, false, false) — gate cleared; stage:X:complete added, fabrik:awaiting-ci removed.
-//     This includes: no PR found, no check runs (R5), all checks green.
+//     This includes: no PR found, no check runs when prHasHadChecks is false (R5 — no CI configured), all checks green.
 //
 //   - (true, false, false)  — gate blocked but no confirmed failure; re-evaluate on next poll.
-//     Covers: checks still pending (in_progress/queued) and not yet timed out,
-//     and transient API errors (FetchLinkedPR or FetchCheckRuns fail).
+//     Covers: checks still pending (in_progress/queued) and not yet timed out;
+//     transient API errors (FetchLinkedPR or FetchCheckRuns fail);
+//     and post-push registration delay — no check runs for new SHA but prHasHadChecks is true (R5).
 //     fabrik:awaiting-ci is NOT modified.
 //
 //   - (true, true, false)   — CI failed; fabrik:awaiting-ci applied; caller should dispatch CI-fix.
