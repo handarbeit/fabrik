@@ -624,3 +624,106 @@ func TestBuildCIFixComment_SyntheticHasDatabaseIDZero(t *testing.T) {
 		t.Errorf("Author = %q, want %q", comment.Author, "fabrik")
 	}
 }
+
+// TestCheckCIGate_MergeableStateClean_ClearsGate verifies that when GitHub
+// reports mergeable_state=clean, the gate clears regardless of raw check_runs
+// state. The raw check_runs gate was over-aggressive (any run with
+// conclusion=failure blocked, even non-required workflow jobs). When GitHub
+// itself says the PR is ready to merge, trust that.
+func TestCheckCIGate_MergeableStateClean_ClearsGate(t *testing.T) {
+	addCalls := []string{}
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, HeadSHA: "shaA"}, nil
+		},
+		fetchPRMergeableStateFn: func(owner, repo string, prNumber int) (string, error) {
+			return "clean", nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			t.Error("FetchCheckRuns must NOT be called when mergeable_state=clean")
+			return nil, nil
+		},
+		addLabelToIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			addCalls = append(addCalls, labelName)
+			return nil
+		},
+	}
+	eng := testEngineForMerge(client)
+	tr := true
+	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	if blocked || ciFailure || timedOut {
+		t.Errorf("expected gate clear, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
+	}
+	// addCompleteLabelAndRemoveCI should have applied stage:Validate:complete.
+	foundComplete := false
+	for _, l := range addCalls {
+		if l == "stage:Validate:complete" {
+			foundComplete = true
+		}
+	}
+	if !foundComplete {
+		t.Errorf("expected stage:Validate:complete to be added, got addLabelToIssue calls: %v", addCalls)
+	}
+}
+
+// TestCheckCIGate_MergeableStateUnstable_ClearsGate verifies that
+// mergeable_state=unstable (non-required checks failing) also clears the gate.
+// This is the "Cleanup artifacts failed but PR is otherwise mergeable" case.
+func TestCheckCIGate_MergeableStateUnstable_ClearsGate(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, HeadSHA: "shaB"}, nil
+		},
+		fetchPRMergeableStateFn: func(owner, repo string, prNumber int) (string, error) {
+			return "unstable", nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			t.Error("FetchCheckRuns must NOT be called when mergeable_state=unstable")
+			return nil, nil
+		},
+	}
+	eng := testEngineForMerge(client)
+	tr := true
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	if blocked || ciFailure || timedOut {
+		t.Errorf("expected gate clear for unstable, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
+	}
+}
+
+// TestCheckCIGate_MergeableStateBlocked_FallsThroughToCheckRuns verifies that
+// mergeable_state=blocked does NOT shortcut — instead the existing per-check
+// classification runs to distinguish failure vs pending and apply the right
+// label/dispatch.
+func TestCheckCIGate_MergeableStateBlocked_FallsThroughToCheckRuns(t *testing.T) {
+	checkRunsCalled := false
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, HeadSHA: "shaC"}, nil
+		},
+		fetchPRMergeableStateFn: func(owner, repo string, prNumber int) (string, error) {
+			return "blocked", nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			checkRunsCalled = true
+			return []gh.CheckRun{{Name: "ci", Status: "in_progress"}}, nil
+		},
+	}
+	eng := testEngineForMerge(client)
+	tr := true
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	blocked, ciFailure, _ := eng.checkCIGate(nil, item, stage)
+	if !checkRunsCalled {
+		t.Error("FetchCheckRuns must be called when mergeable_state=blocked (fall through)")
+	}
+	if !blocked || ciFailure {
+		t.Errorf("expected blocked-pending for mergeable_state=blocked + in_progress checks, got blocked=%v ciFailure=%v", blocked, ciFailure)
+	}
+}

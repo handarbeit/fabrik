@@ -52,6 +52,22 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 		return false, false, false
 	}
 
+	// Trust GitHub's branch-protection-aware mergeable_state when positive:
+	// "clean" = ready to merge per branch protection; "unstable" = non-required
+	// checks failing but still mergeable. Skip the raw check_runs gate in
+	// those cases — that gate is over-aggressive (any check_run conclusion
+	// in {failure, timed_out, action_required} blocks, including non-required
+	// workflow jobs like "Cleanup artifacts" that GitHub itself does not treat
+	// as merge blockers). Falls through to per-check classification when
+	// mergeable_state is empty/unknown/blocked/etc.
+	if mergeableState, msErr := e.client.FetchPRMergeableState(owner, repo, pr.Number); msErr != nil {
+		e.logf(item.Number, "warn", "could not fetch mergeable_state: %v — falling back to check-runs gate\n", msErr)
+	} else if gh.MergeableStateAccepted(mergeableState) {
+		e.logf(item.Number, "ci-gate", "mergeable_state=%q — gate clears (skipping check_runs classification)\n", mergeableState)
+		e.addCompleteLabelAndRemoveCI(owner, repo, item, stage)
+		return false, false, false
+	}
+
 	checkRuns, err := e.client.FetchCheckRuns(owner, repo, pr.HeadSHA)
 	if err != nil {
 		e.logf(item.Number, "ci-gate", "could not fetch check runs: %v — blocking until API recovers\n", err)
