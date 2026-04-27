@@ -16,6 +16,7 @@ Invoked as `/cut-release` or `/cut-release v0.0.12`. If no version is provided, 
 
 ### 1. Pre-flight checks
 
+- **Verify on main branch.** Run `git branch --show-current`. If the output is anything other than `main` (including empty output, which indicates a detached HEAD), check out main with `git checkout main` before proceeding. **Do NOT skip this** — this skill has caused off-branch tag pushes (v0.0.46) and detached-HEAD near-misses (v0.0.49) when assumed-on-main turned out to be wrong.
 - Ensure working tree is clean (`git status --porcelain`). If dirty, stop and tell the user.
 - Pull latest main: `git pull origin main`.
 - Run `go build ./...` and `go test -race ./...`. If either fails, stop.
