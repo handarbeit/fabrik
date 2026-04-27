@@ -122,11 +122,35 @@ Structure your output clearly:
 
 ## Decision: Complete or Block
 
-**Signal completion** (`FABRIK_STAGE_COMPLETE`) when:
+**You MUST signal completion when** all of these hold:
 - All requirements verified
 - Full test suite passes
 - No regressions detected
 - Branch is clean and pushed
+
+In that case the verdict is READY TO MERGE and you have one job left: emit the completion marker. The PR will not auto-merge, the pipeline will not advance, and the engine will keep dispatching you in a wasteful loop until you do. "Awaiting human merge" is *not* a terminal state for Validate — completion is. Do not stop with "everything looks good" and no marker; that creates an infinite Claude-invocation loop.
+
+### How to emit the marker — read carefully
+
+The engine matches the marker with the regex `^FABRIK_STAGE_COMPLETE$` (line-anchored, exact, no surrounding characters). Any deviation from the literal form below will be silently rejected and you will be re-invoked.
+
+**Correct** — the line is bare, no formatting:
+
+```
+...end of your validation report.
+
+FABRIK_STAGE_COMPLETE
+```
+
+**Wrong — these are all silently rejected**:
+- `` `FABRIK_STAGE_COMPLETE` `` (backticks)
+- ` ```FABRIK_STAGE_COMPLETE``` ` (code fence)
+- `**FABRIK_STAGE_COMPLETE**` (bold)
+- `> FABRIK_STAGE_COMPLETE` (blockquote)
+- `Stage complete: FABRIK_STAGE_COMPLETE` (embedded in a sentence)
+- `FABRIK_STAGE_COMPLETE.` (trailing punctuation)
+
+The marker must be the *only* content on its line. Treat it as a control signal, not as prose or code — the rest of this document mentions it in code formatting because it is a literal token, but **when you actually emit it, write it as plain text on a line by itself**.
 
 **Do NOT signal completion** when:
 - Any requirement is unmet
@@ -160,7 +184,7 @@ If you find major issues (wrong architecture, missing feature, design flaw):
 
 **Before you run**: Worktree exists with implementation + review commits.
 
-**Completing the stage**: Output `FABRIK_STAGE_COMPLETE` on its own line when validation passes. Once you emit this marker, stop immediately. Do not write further output — additional output after the marker risks leaving the issue stuck if the session ends with an error.
+**Completing the stage**: Emit the literal token `FABRIK_STAGE_COMPLETE` as the sole content of its own line — no backticks, no code fence, no markdown formatting, no trailing punctuation. See "How to emit the marker" above. Once you emit it, stop immediately. Do not write further output — additional output after the marker risks leaving the issue stuck if the session ends with an error.
 
 **Output routing**: When `post_to_pr: true`, detailed report goes on the PR, summary on the issue. Include `FABRIK_SUMMARY_BEGIN`/`END` markers.
 
