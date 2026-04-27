@@ -124,7 +124,7 @@ type Stage struct {
 	// Zero means no wall-clock timeout (the default). Set from MaxWallTimeRaw by loadOne.
 	MaxWallTime time.Duration `yaml:"-"`
 
-	// FilePath is the absolute path to the YAML file this stage was loaded from.
+	// FilePath is the path to the YAML file this stage was loaded from, as provided to loadOne.
 	// Not parsed from YAML — set by loadOne. Used by drift detection.
 	FilePath string `yaml:"-"`
 }

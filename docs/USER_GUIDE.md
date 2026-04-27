@@ -321,7 +321,7 @@ This warning is **informational only** — the engine continues running with you
 
 - `wait_for_ci: true` — enables the CI gate on Validate auto-advance (added in v0.0.49)
 - `wait_for_reviews: true` — enables the reviewer gate on Validate auto-advance (added in v0.0.49)
-- `completion:` — marks the stage completion type (added as an explicit top-level key; omitting it is safe because the engine defaults it to `{type: claude}`)
+- `completion:` — marks the stage completion type (added as an explicit top-level key; omitting it is safe for normal Claude-invoked stages because the engine defaults it to `{type: claude}`)
 
 Custom stages (names not present in any embedded default) are silently skipped — no warning is produced for them.
 
