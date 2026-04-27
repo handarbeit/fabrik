@@ -123,6 +123,10 @@ type Stage struct {
 	// MaxWallTime is the parsed wall-clock timeout for a single Claude invocation.
 	// Zero means no wall-clock timeout (the default). Set from MaxWallTimeRaw by loadOne.
 	MaxWallTime time.Duration `yaml:"-"`
+
+	// FilePath is the absolute path to the YAML file this stage was loaded from.
+	// Not parsed from YAML — set by loadOne. Used by drift detection.
+	FilePath string `yaml:"-"`
 }
 
 // CompletionCriteria defines how to determine if a stage is complete.
@@ -209,6 +213,8 @@ func loadOne(path string) (*Stage, error) {
 		}
 		s.MaxWallTime = d
 	}
+
+	s.FilePath = path
 
 	return &s, nil
 }
