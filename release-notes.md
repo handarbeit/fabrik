@@ -1,18 +1,20 @@
-# Fabrik v0.0.52
+# Fabrik v0.0.53
 
-This release fixes an over-aggressive CI gate that blocked auto-merge whenever any GitHub check run completed with `conclusion=failure` — even when the failed check was a non-required workflow job (e.g. `Cleanup artifacts`) and GitHub itself reported the PR as `mergeStateStatus=CLEAN`. The gate contradicted GitHub's own merge decision, kept reapplying `fabrik:awaiting-ci`, and held issues stuck in Validate even with `fabrik:yolo` set.
+This release adds stage-config drift detection at startup and bundles documentation updates that bring the as-built specs and the user-facing docs back in sync with v0.0.51 (project board indexer retry) and v0.0.52 (`mergeable_state` CI gate shortcut). The drift detection in particular would have caught the missing `wait_for_ci: true` flag on liminis's validate.yaml that contributed to verveguy/liminis#716 sitting stuck for hours during yesterday's GitHub outage.
 
-Real-world impact (verveguy/liminis#716): PR #717 was MERGEABLE/CLEAN with all required checks green, but a `Cleanup artifacts` check on the head SHA had failed early in the workflow run. Every catch-up loop iteration saw the failure, re-applied `fabrik:awaiting-ci`, and refused to merge — for hours, despite human-visible green CI.
+## Features
 
-## Fixes
+- **Stage YAML drift detection at startup (#464).** When Fabrik starts, it now compares each loaded stage in `.fabrik/stages/` against the corresponding embedded default and logs a `[startup] warning: ...` line for every field present in the embedded version but missing locally (e.g. `wait_for_ci: true`, `wait_for_reviews: true` on Validate). Local stage YAMLs are NOT auto-overwritten — users may have intentional customizations — but the drift surfaces loudly so silent feature degradation after `fabrik upgrade` is no longer possible. Useful in particular for users whose stage configs predate later v0.0.x releases.
 
-- **CI gate now consults GitHub's branch-protection-aware `mergeable_state`.** Both `checkCIGate` and `attemptMergeOnValidate` now fetch `mergeable_state` from the linked PR (REST single-PR endpoint — the list endpoint returns null) before classifying raw check_runs. When `mergeable_state` is `clean` (ready to merge per branch protection) or `unstable` (non-required checks failing, still mergeable), the gate skips the raw check_runs classification and proceeds directly to the gate-cleared path. `checkCIGate` clears `stage:X:complete` + removes `fabrik:awaiting-ci`; `attemptMergeOnValidate` falls through directly to `MergePR`. Other states (`blocked`, `behind`, `dirty`, `unknown`, `has_hooks`, `draft`, empty) still fall through to the per-check classification so genuinely-blocked PRs get the right failure-vs-pending dispatch decision.
+## Documentation
 
-- **`fabrik:awaiting-ci` no longer survives a successful mergeable_state shortcut.** Stale labels left behind by the prior over-aggressive gate are explicitly cleared when the new shortcut path fires.
+- **ADR 033 — `mergeable_state` over raw `check_runs`.** Documents the v0.0.52 decision to consult GitHub's branch-protection-aware `mergeable_state` before classifying raw check_runs in both `checkCIGate` and `attemptMergeOnValidate`, including why "clean" and "unstable" are accepted but "has_hooks" is not.
+- **State machine spec updated for `mergeable_state` shortcut.** §1.4 (label semantics), §2.10 (CI Check Completed), §3.2 (Awaiting CI transitions), §5.4 (Auto-Merge on Validate), and §6.2 (catch-up loop Phase 1) all now reflect the new shortcut path and clarify that it sits *after* `stage:Validate:complete` is set, so it cannot skip Validate-Claude work.
+- **USER_GUIDE and README updated** for both v0.0.51 board-fetch retry and the v0.0.52 CI gate behavior. CLAUDE.md gained a short note about the new stage-drift warning so contributors know to update embedded defaults when adding stage fields.
 
-## Notes
+## Internal
 
-If your existing `.fabrik/stages/validate.yaml` predates v0.0.49, it may be missing `wait_for_ci: true` and `wait_for_reviews: true`. Without those flags, the catch-up loop falls through to `attemptMergeOnValidate` (which is also fixed in this release) instead of the conjunctive CI gate. Either path now correctly handles non-required check_run failures, but the conjunctive gate provides better per-check observability and timeouts. Compare your local stage YAMLs against the embedded defaults in `plugin/fabrik-plugin` (or in the source repo) and update as needed; Fabrik does not auto-overwrite local stage configs.
+- Several Copilot-review-driven fixups across ADR 033, the USER_GUIDE board-fetch note, and the drift-detection PR.
 
 ## Upgrading
 
