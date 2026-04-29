@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -54,7 +55,7 @@ func TestHandleStageComplete_NoYolo_NoAdvance(t *testing.T) {
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 	stage := &stages.Stage{Name: "Research"}
 
-	eng.handleStageComplete(board, item, stage)
+	eng.handleStageComplete(context.Background(), board, item, stage)
 
 	if len(client.updateStatusCalls) != 0 {
 		t.Errorf("expected no advance without yolo, got %d status updates", len(client.updateStatusCalls))
@@ -71,7 +72,7 @@ func TestHandleStageComplete_CfgYolo_Advances(t *testing.T) {
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 	stage := &stages.Stage{Name: "Research"}
 
-	eng.handleStageComplete(board, item, stage)
+	eng.handleStageComplete(context.Background(), board, item, stage)
 
 	if len(client.updateStatusCalls) != 1 {
 		t.Fatalf("expected 1 advance, got %d", len(client.updateStatusCalls))
@@ -91,7 +92,7 @@ func TestHandleStageComplete_YoloLabel_Advances(t *testing.T) {
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:yolo"}}
 	stage := &stages.Stage{Name: "Research"}
 
-	eng.handleStageComplete(board, item, stage)
+	eng.handleStageComplete(context.Background(), board, item, stage)
 
 	if len(client.updateStatusCalls) != 1 {
 		t.Fatalf("expected 1 advance via label, got %d", len(client.updateStatusCalls))
@@ -114,7 +115,7 @@ func TestHandleStageComplete_YoloLabel_ValidateMergeableAdvances(t *testing.T) {
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:yolo"}}
 	validateStage := &stages.Stage{Name: "Validate"}
 
-	eng.handleStageComplete(board, item, validateStage)
+	eng.handleStageComplete(context.Background(), board, item, validateStage)
 
 	// MergePR should have been called once
 	if len(client.mergePRCalls) != 1 {
@@ -129,7 +130,7 @@ func TestHandleStageComplete_YoloLabel_ValidateMergeableAdvances(t *testing.T) {
 	}
 }
 
-func TestHandleStageComplete_YoloLabel_ValidateUnmergeable_CommentPauseNoAdvance(t *testing.T) {
+func TestHandleStageComplete_YoloLabel_ValidateUnmergeable_RebaseDispatched(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 			return &gh.PRDetails{Number: 99, HeadSHA: "abc123"}, nil
@@ -140,30 +141,39 @@ func TestHandleStageComplete_YoloLabel_ValidateUnmergeable_CommentPauseNoAdvance
 	}
 	stgs := testStagesWithValidate()
 	eng := testEngineWithStages(client, stgs)
+	eng.cfg.MaxRebaseCycles = 3
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:yolo"}}
 	validateStage := &stages.Stage{Name: "Validate"}
 
-	eng.handleStageComplete(board, item, validateStage)
+	eng.handleStageComplete(context.Background(), board, item, validateStage)
+	// Wait for the dispatched rebase goroutine (exits early via ErrSkipItem in tests).
+	eng.wg.Wait()
 
-	// Should post a comment explaining why merge didn't happen
-	if len(client.addCommentCalls) == 0 {
-		t.Error("expected a comment explaining unmergeable PR")
-	}
-	// Should add fabrik:paused label
-	found := false
+	// stage:Validate:complete must be added so catch-up loop retries the merge.
+	foundComplete := false
 	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Validate:complete" {
+			foundComplete = true
+		}
 		if c.labelName == "fabrik:paused" {
-			found = true
+			t.Error("fabrik:paused must NOT be added when dispatching rebase")
 		}
 	}
-	if !found {
-		t.Error("expected fabrik:paused label to be added")
+	if !foundComplete {
+		t.Error("expected stage:Validate:complete to be added when rebase dispatched (Path 1 ordering)")
 	}
-	// Should NOT advance
+	// Should NOT advance to the next stage — rebase is in progress.
 	if len(client.updateStatusCalls) != 0 {
-		t.Errorf("expected no advance on unmergeable PR, got %d status updates", len(client.updateStatusCalls))
+		t.Errorf("expected no advance when rebase dispatched, got %d status updates", len(client.updateStatusCalls))
+	}
+	stageKey := "owner/repo#1-Validate"
+	eng.mu.Lock()
+	count := eng.rebaseCycleCount[stageKey]
+	eng.mu.Unlock()
+	if count != 1 {
+		t.Errorf("expected rebaseCycleCount[%q] == 1, got %d", stageKey, count)
 	}
 }
 
@@ -181,7 +191,7 @@ func TestHandleStageComplete_YoloLabel_ValidateNoPR_AdvancesAnyway(t *testing.T)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:yolo"}}
 	validateStage := &stages.Stage{Name: "Validate"}
 
-	eng.handleStageComplete(board, item, validateStage)
+	eng.handleStageComplete(context.Background(), board, item, validateStage)
 
 	// No MergePR call (no PR to merge)
 	if len(client.mergePRCalls) != 0 {
@@ -203,7 +213,7 @@ func TestHandleStageComplete_YoloLabel_NonValidate_NoMergeAttempt(t *testing.T) 
 	// Implement is NOT Validate — no merge should be attempted
 	implementStage := &stages.Stage{Name: "Implement"}
 
-	eng.handleStageComplete(board, item, implementStage)
+	eng.handleStageComplete(context.Background(), board, item, implementStage)
 
 	if len(client.mergePRCalls) != 0 {
 		t.Errorf("expected no MergePR call for non-Validate stage, got %d", len(client.mergePRCalls))
@@ -232,7 +242,7 @@ func TestHandleStageComplete_AutoAdvanceFalse_OverridesAdvanceButMergeStillFires
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"} // no fabrik:yolo label
 	validateStage := &stages.Stage{Name: "Validate", AutoAdvance: &f}
 
-	eng.handleStageComplete(board, item, validateStage)
+	eng.handleStageComplete(context.Background(), board, item, validateStage)
 
 	// Merge should still fire (global yolo active)
 	if len(client.mergePRCalls) != 1 {
@@ -263,7 +273,7 @@ func TestHandleStageComplete_MergeAPIError_LogsAndDoesNotAdvance(t *testing.T) {
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:yolo"}}
 	validateStage := &stages.Stage{Name: "Validate"}
 
-	eng.handleStageComplete(board, item, validateStage)
+	eng.handleStageComplete(context.Background(), board, item, validateStage)
 
 	// Should NOT post unmergeable comment or fabrik:paused (not ErrNotMergeable)
 	for _, c := range client.addLabelCalls {
@@ -294,7 +304,7 @@ func TestHandleStageComplete_CruiseLabel_NonValidate_Advances(t *testing.T) {
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:cruise"}}
 	stage := &stages.Stage{Name: "Research"}
 
-	eng.handleStageComplete(board, item, stage)
+	eng.handleStageComplete(context.Background(), board, item, stage)
 
 	if len(client.updateStatusCalls) != 1 {
 		t.Fatalf("expected 1 advance via cruise label, got %d", len(client.updateStatusCalls))
@@ -315,7 +325,7 @@ func TestHandleStageComplete_CruiseLabel_Validate_NoMergeNoAdvance(t *testing.T)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:cruise"}}
 	validateStage := &stages.Stage{Name: "Validate"}
 
-	eng.handleStageComplete(board, item, validateStage)
+	eng.handleStageComplete(context.Background(), board, item, validateStage)
 
 	// No merge attempted
 	if len(client.mergePRCalls) != 0 {
@@ -339,7 +349,7 @@ func TestHandleStageComplete_CruiseLabel_OverridesAutoAdvanceFalse(t *testing.T)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:cruise"}}
 	stage := &stages.Stage{Name: "Research", AutoAdvance: &f}
 
-	eng.handleStageComplete(board, item, stage)
+	eng.handleStageComplete(context.Background(), board, item, stage)
 
 	if len(client.updateStatusCalls) != 1 {
 		t.Fatalf("expected 1 advance: cruise overrides auto_advance:false, got %d", len(client.updateStatusCalls))
@@ -362,7 +372,7 @@ func TestHandleStageComplete_WaitForCI_AddsAwaitingCINotComplete(t *testing.T) {
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:yolo"}}
 	validateStage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	eng.handleStageComplete(board, item, validateStage)
+	eng.handleStageComplete(context.Background(), board, item, validateStage)
 
 	foundAwaitingCI := false
 	foundComplete := false
@@ -399,7 +409,7 @@ func TestHandleStageComplete_WaitForCI_Idempotent(t *testing.T) {
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:awaiting-ci"}}
 	validateStage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	eng.handleStageComplete(board, item, validateStage)
+	eng.handleStageComplete(context.Background(), board, item, validateStage)
 
 	count := 0
 	for _, c := range client.addLabelCalls {
@@ -424,7 +434,7 @@ func TestHandleStageComplete_WaitForCI_AlsoAddsAwaitingReview(t *testing.T) {
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 	validateStage := &stages.Stage{Name: "Validate", WaitForCI: &tr, WaitForReviews: &tr}
 
-	eng.handleStageComplete(board, item, validateStage)
+	eng.handleStageComplete(context.Background(), board, item, validateStage)
 
 	foundCI := false
 	foundReview := false
@@ -459,7 +469,7 @@ func TestHandleStageComplete_WaitForCI_AppliesRegardlessOfYolo(t *testing.T) {
 			item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 			validateStage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-			eng.handleStageComplete(board, item, validateStage)
+			eng.handleStageComplete(context.Background(), board, item, validateStage)
 
 			foundCI := false
 			foundComplete := false
@@ -497,7 +507,7 @@ func TestHandleStageComplete_BothCruiseAndYolo_YoloWins(t *testing.T) {
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:yolo", "fabrik:cruise"}}
 	validateStage := &stages.Stage{Name: "Validate"}
 
-	eng.handleStageComplete(board, item, validateStage)
+	eng.handleStageComplete(context.Background(), board, item, validateStage)
 
 	// yolo wins: merge should fire
 	if len(client.mergePRCalls) != 1 {
