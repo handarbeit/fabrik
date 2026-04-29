@@ -810,6 +810,11 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			if err := e.attemptMergeOnValidate(ctx, board, item, stage); err != nil {
 				if errors.Is(err, errRebaseDispatched) {
 					e.logf(item.Number, "rebase-reinvoke", "PR merge deferred — rebase dispatched during catch-up\n")
+					// Mark as dispatched so the defer does not re-cache lastUpdatedAt —
+					// mirrors Phase 1 dispatch behavior (review/rebase/CI-fix reinvokes).
+					// Without this, if the label add fails and GitHub doesn't bump
+					// updatedAt, itemMayNeedWork could filter the item on the next poll.
+					advancedItems[issueKey(item, e.defaultRepo())] = true
 				} else {
 					e.logf(item.Number, "warn", "PR not merged during catch-up: %v\n", err)
 				}
