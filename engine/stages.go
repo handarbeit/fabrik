@@ -190,9 +190,14 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 
 // attemptMergeOnValidate finds the linked PR for item, gates on CI status,
 // and merges it. Returns nil on success or when no PR exists.
-// Returns a handled error (comment+pause already posted) on ErrNotMergeable or
-// CI timeout. Returns a retriable error (caller should retry) when CI is pending
-// or when a transient API error occurs.
+// On CI timeout, returns a handled error (pause already applied).
+// On ErrNotMergeable (base-branch conflict): applies fabrik:rebase-needed
+// idempotently, then dispatches dispatchRebaseReinvoke and returns the
+// errRebaseDispatched sentinel (caller must add stage:Validate:complete so
+// the catch-up loop retries the merge). At MaxRebaseCycles, falls back to
+// pauseForRebaseCycleLimit (handled error, pause applied).
+// Returns a retriable error (caller should retry) when CI is pending or a
+// transient API error occurs.
 //
 // CI gate logic (R1–R6):
 //   - No check runs → gate clears (R5: repo has no CI)
