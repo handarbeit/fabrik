@@ -808,7 +808,11 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 				continue
 			}
 			if err := e.attemptMergeOnValidate(ctx, board, item, stage); err != nil {
-				e.logf(item.Number, "warn", "PR not merged during catch-up: %v\n", err)
+				if errors.Is(err, errRebaseDispatched) {
+					e.logf(item.Number, "rebase-reinvoke", "PR merge deferred — rebase dispatched during catch-up\n")
+				} else {
+					e.logf(item.Number, "warn", "PR not merged during catch-up: %v\n", err)
+				}
 				continue
 			}
 		}
