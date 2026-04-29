@@ -666,11 +666,14 @@ func TestYoloCatchUpSkipsAdvanceOnMergeError(t *testing.T) {
 		},
 	}
 	eng := testEngineWithStages(client, testStagesWithValidate())
+	eng.cfg.MaxRebaseCycles = 3
 
 	ctx := context.Background()
 	if _, err := eng.poll(ctx); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
+	// Wait for the dispatched rebase goroutine to exit (exits early via ErrSkipItem in tests).
+	eng.wg.Wait()
 
 	client.mu.Lock()
 	advances := len(client.updateStatusCalls)
@@ -678,6 +681,19 @@ func TestYoloCatchUpSkipsAdvanceOnMergeError(t *testing.T) {
 
 	if advances != 0 {
 		t.Errorf("expected no UpdateProjectItemStatus when merge fails, got %d", advances)
+	}
+	// Rebase dispatch should have fired, not immediate pause.
+	stageKey := "owner/repo#42-Validate"
+	eng.mu.Lock()
+	count := eng.rebaseCycleCount[stageKey]
+	eng.mu.Unlock()
+	if count != 1 {
+		t.Errorf("expected rebaseCycleCount[%q] == 1, got %d", stageKey, count)
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			t.Error("fabrik:paused must NOT be added when dispatching rebase reinvoke")
+		}
 	}
 }
 
