@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -190,6 +191,15 @@ func (e *Engine) Run() error {
 			pollLogFile = nil
 			lf.Close()
 		}()
+	}
+
+	// Emit stage-config drift warnings to both stderr (visible at startup) and
+	// fabrik.log (durable for post-mortems). Without the log copy, recurrences
+	// of "same drift bit us again" are invisible from the persistent log alone.
+	if e.logFile != nil {
+		stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, io.MultiWriter(os.Stderr, e.logFile))
+	} else {
+		stages.WarnStageDrift(e.cfg.Stages, e.cfg.Version, os.Stderr)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
