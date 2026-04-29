@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,6 +10,13 @@ import (
 	gh "github.com/verveguy/fabrik/github"
 	"github.com/verveguy/fabrik/stages"
 )
+
+// errRebaseDispatched is returned by attemptMergeOnValidate when a rebase
+// reinvoke has been dispatched instead of immediately pausing. handleStageComplete
+// detects this sentinel and adds stage:Validate:complete so the catch-up loop's
+// Phase 2 drives the merge retry rather than itemNeedsWork triggering a full
+// Validate re-invocation.
+var errRebaseDispatched = errors.New("rebase reinvoke dispatched")
 
 // hasYoloLabel reports whether item has the "fabrik:yolo" label.
 func hasYoloLabel(item gh.ProjectItem) bool {
@@ -43,7 +51,7 @@ func hasUnrestrictedLabel(item gh.ProjectItem) bool {
 	return false
 }
 
-func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
+func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
 	e.logf(item.Number, "done", "stage %q complete\n", stage.Name)
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
@@ -74,9 +82,20 @@ func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem
 	// stages with a complete label).
 	waitForCI := stage.WaitForCI != nil && *stage.WaitForCI
 	if yoloActive && stage.Name == "Validate" && !waitForCI {
-		if err := e.attemptMergeOnValidate(item); err != nil {
-			// Merge failed: post/pause already handled inside attemptMergeOnValidate.
-			e.logf(item.Number, "warn", "PR not merged: %v\n", err)
+		if err := e.attemptMergeOnValidate(ctx, board, item, stage); err != nil {
+			if errors.Is(err, errRebaseDispatched) {
+				// Rebase reinvoke dispatched — add completion label so the catch-up
+				// loop retries the merge rather than itemNeedsWork triggering a full
+				// Validate re-invocation.
+				completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
+				if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); lerr != nil {
+					e.logf(item.Number, "warn", "could not add completion label: %v\n", lerr)
+				}
+				e.logf(item.Number, "rebase-reinvoke", "PR merge deferred — rebase dispatched\n")
+			} else {
+				// Merge failed: post/pause already handled inside attemptMergeOnValidate.
+				e.logf(item.Number, "warn", "PR not merged: %v\n", err)
+			}
 			return
 		}
 	}
@@ -180,7 +199,7 @@ func (e *Engine) handleStageComplete(board *gh.ProjectBoard, item gh.ProjectItem
 //   - Any pending/queued → block; track ciMergePendingSince; pause after CIWaitTimeout
 //   - Any failed → add fabrik:awaiting-ci; return error
 //   - All green → clear ciMergePendingSince; clear fabrik:awaiting-ci; proceed to merge
-func (e *Engine) attemptMergeOnValidate(item gh.ProjectItem) error {
+func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) error {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	iKey := issueKey(item, e.defaultRepo())
 
@@ -315,16 +334,39 @@ func (e *Engine) attemptMergeOnValidate(item gh.ProjectItem) error {
 
 	if err := e.client.MergePR(owner, repo, pr.Number); err != nil {
 		if errors.Is(err, gh.ErrNotMergeable) {
-			msg := fmt.Sprintf("🏭 **Fabrik — auto-merge skipped**\n\nAuto-merge skipped: PR #%d is not mergeable (GitHub reports a merge conflict or the mergeable status is not yet computed). Please resolve any conflicts and merge manually.", pr.Number)
-			if dbID, cerr := e.client.AddComment(owner, repo, item.Number, msg); cerr != nil {
-				e.logf(item.Number, "warn", "could not post unmergeable comment: %v\n", cerr)
-			} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-				e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+			// Apply fabrik:rebase-needed idempotently.
+			alreadyLabeled := false
+			for _, l := range item.Labels {
+				if l == "fabrik:rebase-needed" {
+					alreadyLabeled = true
+					break
+				}
 			}
-			if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); lerr != nil {
-				e.logf(item.Number, "warn", "could not add fabrik:paused label: %v\n", lerr)
+			if !alreadyLabeled {
+				if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:rebase-needed"); lerr != nil {
+					e.logf(item.Number, "warn", "could not add fabrik:rebase-needed label: %v\n", lerr)
+				}
 			}
-			return fmt.Errorf("PR #%d not mergeable", pr.Number)
+			// inFlight guard: if a rebase goroutine is already running, skip
+			// dispatch and cycle-limit check to avoid counter drift.
+			if _, ok := e.inFlight.Load(iKey); ok {
+				e.logf(item.Number, "rebase-reinvoke", "skipping dispatch — rebase reinvoke already in-flight\n")
+				return fmt.Errorf("PR #%d not mergeable (rebase in-flight)", pr.Number)
+			}
+			stageKey := iKey + "-" + stage.Name
+			e.mu.Lock()
+			cycleCount := e.rebaseCycleCount[stageKey]
+			maxCycles := e.cfg.MaxRebaseCycles
+			e.mu.Unlock()
+			if cycleCount >= maxCycles {
+				e.pauseForRebaseCycleLimit(board, item, stage, cycleCount, maxCycles)
+				return fmt.Errorf("PR #%d not mergeable — rebase cycle limit reached", pr.Number)
+			}
+			e.mu.Lock()
+			e.rebaseCycleCount[stageKey]++
+			e.mu.Unlock()
+			e.dispatchRebaseReinvoke(ctx, board, item, stage)
+			return errRebaseDispatched
 		}
 		// Other API errors (transient 5xx, permissions, etc.): log and return an
 		// error so the caller retries on the next cooldown cycle.
@@ -332,6 +374,7 @@ func (e *Engine) attemptMergeOnValidate(item gh.ProjectItem) error {
 		return fmt.Errorf("auto-merge failed: %w", err)
 	}
 
+	e.removeRebaseNeededLabel(owner, repo, item)
 	e.logf(item.Number, "info", "auto-merged PR #%d\n", pr.Number)
 	return nil
 }

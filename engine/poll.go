@@ -807,7 +807,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			if !yoloActive {
 				continue
 			}
-			if err := e.attemptMergeOnValidate(item); err != nil {
+			if err := e.attemptMergeOnValidate(ctx, board, item, stage); err != nil {
 				e.logf(item.Number, "warn", "PR not merged during catch-up: %v\n", err)
 				continue
 			}

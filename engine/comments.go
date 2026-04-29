@@ -271,7 +271,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		if stage.MarkPRReadyOnComplete {
 			e.markPRReady(item, prNumber)
 		}
-		e.handleStageComplete(board, item, stage)
+		e.handleStageComplete(ctx, board, item, stage)
 	} else {
 		e.logf(item.Number, "done", "comment processing complete\n")
 	}

@@ -864,7 +864,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		if stage.MarkPRReadyOnComplete {
 			e.markPRReady(item, prNumber)
 		}
-		e.handleStageComplete(board, item, stage)
+		e.handleStageComplete(ctx, board, item, stage)
 	} else if decomposed {
 		releaseLock()
 		// Clear retry tracking for this stage — issue is decomposed, no retry needed.
