@@ -383,7 +383,8 @@ func Execute() error {
 		return fmt.Errorf("no stage configurations found in %s", cfg.StagesDir)
 	}
 
-	stages.WarnStageDrift(stageCfgs, Version, os.Stderr)
+	// Stage drift warnings are emitted from engine.Run() once the persistent
+	// log file is open, so they land in fabrik.log as well as stderr.
 
 	// TUI is enabled by default when a real terminal is detected; use --notui to disable.
 	useTUI := cfg.TUI &&
