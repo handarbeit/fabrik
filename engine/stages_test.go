@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -29,7 +30,7 @@ func TestAttemptMergeOnValidate_NoCheckRuns_MergeProceeds(t *testing.T) {
 	eng := testEngineForMerge(client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 
-	if err := eng.attemptMergeOnValidate(item); err != nil {
+	if err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(client.mergePRCalls) != 1 {
@@ -62,7 +63,7 @@ func TestAttemptMergeOnValidate_AllGreen_MergeProceeds(t *testing.T) {
 	eng.mu.Unlock()
 
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
-	if err := eng.attemptMergeOnValidate(item); err != nil {
+	if err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(client.mergePRCalls) != 1 {
@@ -93,7 +94,7 @@ func TestAttemptMergeOnValidate_CIFailed_BlocksMerge(t *testing.T) {
 	eng := testEngineForMerge(client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 
-	err := eng.attemptMergeOnValidate(item)
+	err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
 	if err == nil {
 		t.Fatal("expected error when CI failed, got nil")
 	}
@@ -127,7 +128,7 @@ func TestAttemptMergeOnValidate_CIPending_BlocksMergeNoLabel(t *testing.T) {
 	eng := testEngineForMerge(client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 
-	err := eng.attemptMergeOnValidate(item)
+	err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
 	if err == nil {
 		t.Fatal("expected error when CI pending, got nil")
 	}
@@ -165,7 +166,7 @@ func TestAttemptMergeOnValidate_CIPending_TracksTimer(t *testing.T) {
 		t.Fatal("expected no pending entry before first call")
 	}
 
-	_ = eng.attemptMergeOnValidate(item)
+	_ = eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
 
 	eng.mu.Lock()
 	_, after := eng.ciMergePendingSince[iKey]
@@ -199,7 +200,7 @@ func TestAttemptMergeOnValidate_CIPendingTimeout_PausesIssue(t *testing.T) {
 	eng.mu.Unlock()
 
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
-	err := eng.attemptMergeOnValidate(item)
+	err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
 	if err == nil {
 		t.Fatal("expected error on CI timeout, got nil")
 	}
@@ -238,7 +239,7 @@ func TestAttemptMergeOnValidate_NoPR_ReturnsNil(t *testing.T) {
 	eng := testEngineForMerge(client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 
-	if err := eng.attemptMergeOnValidate(item); err != nil {
+	if err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"}); err != nil {
 		t.Fatalf("expected nil when no PR, got %v", err)
 	}
 	if len(client.mergePRCalls) != 0 {
@@ -246,9 +247,10 @@ func TestAttemptMergeOnValidate_NoPR_ReturnsNil(t *testing.T) {
 	}
 }
 
-// TestAttemptMergeOnValidate_ErrNotMergeable_PostsComment verifies that
-// ErrNotMergeable results in a comment and fabrik:paused, but no advance.
-func TestAttemptMergeOnValidate_ErrNotMergeable_PostsComment(t *testing.T) {
+// TestAttemptMergeOnValidate_ErrNotMergeable_DispatchesRebase verifies that
+// ErrNotMergeable dispatches a rebase reinvoke (not immediate pause) and returns
+// errRebaseDispatched, adding fabrik:rebase-needed but NOT fabrik:paused.
+func TestAttemptMergeOnValidate_ErrNotMergeable_DispatchesRebase(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 			return &gh.PRDetails{Number: 20, HeadSHA: "sha7"}, nil
@@ -258,23 +260,82 @@ func TestAttemptMergeOnValidate_ErrNotMergeable_PostsComment(t *testing.T) {
 		},
 	}
 	eng := testEngineForMerge(client)
+	eng.cfg.MaxRebaseCycles = 3
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+	stage := &stages.Stage{Name: "Validate"}
 
-	err := eng.attemptMergeOnValidate(item)
-	if err == nil {
-		t.Fatal("expected error for ErrNotMergeable")
+	err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, stage)
+	// Wait for the dispatched goroutine to exit (exits early via ErrSkipItem in tests).
+	eng.wg.Wait()
+
+	if !errors.Is(err, errRebaseDispatched) {
+		t.Fatalf("expected errRebaseDispatched, got %v", err)
 	}
-	if len(client.addCommentCalls) == 0 {
-		t.Error("expected unmergeable comment")
-	}
-	found := false
+	foundRebaseNeeded := false
 	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:rebase-needed" {
+			foundRebaseNeeded = true
+		}
 		if c.labelName == "fabrik:paused" {
-			found = true
+			t.Error("fabrik:paused must NOT be added when dispatching rebase")
 		}
 	}
-	if !found {
-		t.Error("expected fabrik:paused on ErrNotMergeable")
+	if !foundRebaseNeeded {
+		t.Error("expected fabrik:rebase-needed to be added on ErrNotMergeable")
+	}
+	stageKey := "owner/repo#1-Validate"
+	eng.mu.Lock()
+	count := eng.rebaseCycleCount[stageKey]
+	eng.mu.Unlock()
+	if count != 1 {
+		t.Errorf("expected rebaseCycleCount[%q] == 1, got %d", stageKey, count)
+	}
+}
+
+// TestAttemptMergeOnValidate_ErrNotMergeable_CycleLimitPause verifies that
+// when the rebase cycle limit is already reached, ErrNotMergeable falls through
+// to the existing pause path: fabrik:paused + fabrik:awaiting-input.
+func TestAttemptMergeOnValidate_ErrNotMergeable_CycleLimitPause(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 21, HeadSHA: "sha8"}, nil
+		},
+		mergePRFn: func(owner, repo string, prNumber int) error {
+			return gh.ErrNotMergeable
+		},
+	}
+	eng := testEngineForMerge(client)
+	eng.cfg.MaxRebaseCycles = 3
+	stageKey := "owner/repo#1-Validate"
+	eng.mu.Lock()
+	eng.rebaseCycleCount[stageKey] = 3 // already at limit
+	eng.mu.Unlock()
+
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+	stage := &stages.Stage{Name: "Validate"}
+
+	err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, stage)
+	if err == nil {
+		t.Fatal("expected error at cycle limit")
+	}
+	if errors.Is(err, errRebaseDispatched) {
+		t.Fatal("expected plain error at cycle limit, not errRebaseDispatched")
+	}
+	foundPaused := false
+	foundRebaseNeeded := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			foundPaused = true
+		}
+		if c.labelName == "fabrik:rebase-needed" {
+			foundRebaseNeeded = true
+		}
+	}
+	if !foundPaused {
+		t.Error("expected fabrik:paused when rebase cycle limit reached")
+	}
+	if !foundRebaseNeeded {
+		t.Error("expected fabrik:rebase-needed to be added on ErrNotMergeable")
 	}
 }
 
@@ -301,7 +362,7 @@ func TestHandleStageComplete_WaitForCI_SkipsMergeAndReturns(t *testing.T) {
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:yolo"}}
 
-	eng.handleStageComplete(board, item, validateStage)
+	eng.handleStageComplete(context.Background(), board, item, validateStage)
 
 	if merged {
 		t.Error("MergePR must not be called when wait_for_ci is true")
@@ -336,7 +397,7 @@ func TestAttemptMergeOnValidate_FetchLinkedPRError_ReturnsError(t *testing.T) {
 	eng := testEngineForMerge(client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 
-	err := eng.attemptMergeOnValidate(item)
+	err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
 	if err == nil {
 		t.Fatal("expected error when FetchLinkedPR fails, got nil (would incorrectly allow advancement)")
 	}
@@ -360,7 +421,7 @@ func TestAttemptMergeOnValidate_FetchCheckRunsError_ReturnsError(t *testing.T) {
 	eng := testEngineForMerge(client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 
-	err := eng.attemptMergeOnValidate(item)
+	err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
 	if err == nil {
 		t.Fatal("expected error when FetchCheckRuns fails, got nil (would proceed to merge with unknown CI status)")
 	}
