@@ -216,3 +216,62 @@ func TestRefreshStages_InteractiveRequiresApply(t *testing.T) {
 		t.Errorf("expected --interactive requires --apply error, got: %v", err)
 	}
 }
+
+func TestRefreshStages_ApplySequenceValue(t *testing.T) {
+	dir := t.TempDir()
+	writeUserStage(t, dir, "implement.yaml", "name: Implement\nmax_turns: 50\n")
+
+	defaults := syntheticDefaultsFS("Implement", map[string]string{
+		"max_turns":     "50",
+		"allowed_tools": "- Read\n- Write\n- Edit",
+	})
+
+	var out strings.Builder
+	err := refreshStagesWithReader(dir, true, false, false, strings.NewReader(""), &out, defaults)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(dir, "implement.yaml"))
+	content := string(data)
+
+	if !strings.Contains(content, "allowed_tools") {
+		t.Errorf("expected allowed_tools in file after apply, got:\n%s", content)
+	}
+	if !strings.Contains(content, "Read") {
+		t.Errorf("expected sequence items in file after apply, got:\n%s", content)
+	}
+	if !strings.Contains(content, "max_turns") {
+		t.Errorf("existing max_turns must survive apply, got:\n%s", content)
+	}
+}
+
+func TestRefreshStages_ApplyPreservesBlockScalar(t *testing.T) {
+	dir := t.TempDir()
+	// User file has a block-scalar prompt that must survive the round-trip.
+	origContent := "name: Research\nprompt: |\n  Do research on the codebase.\n  Look for relevant files.\n"
+	path := writeUserStage(t, dir, "research.yaml", origContent)
+
+	defaults := syntheticDefaultsFS("Research", map[string]string{
+		"prompt":      "do stuff",
+		"wait_for_ci": "true",
+	})
+
+	var out strings.Builder
+	err := refreshStagesWithReader(dir, true, false, false, strings.NewReader(""), &out, defaults)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, _ := os.ReadFile(path)
+	content := string(data)
+
+	// Block scalar content must be preserved.
+	if !strings.Contains(content, "Do research on the codebase.") {
+		t.Errorf("block scalar content lost after apply, got:\n%s", content)
+	}
+	// Missing key must be added.
+	if !strings.Contains(content, "wait_for_ci") {
+		t.Errorf("expected wait_for_ci added after apply, got:\n%s", content)
+	}
+}
