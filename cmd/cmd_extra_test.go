@@ -106,6 +106,12 @@ func (m *testGitHubUpgradeClient) SeedLabels(owner, repo string, stageNames []st
 func (m *testGitHubUpgradeClient) RateLimitStats() (gh.RateLimitStats, gh.RateLimitStats) {
 	return gh.RateLimitStats{}, gh.RateLimitStats{}
 }
+func (m *testGitHubUpgradeClient) DeleteReviewRequest(owner, repo string, prNumber int, reviewers []string) error {
+	return nil
+}
+func (m *testGitHubUpgradeClient) AddReviewRequest(owner, repo string, prNumber int, reviewers []string) error {
+	return nil
+}
 
 // ── upgrade ───────────────────────────────────────────────────────────────────
 
