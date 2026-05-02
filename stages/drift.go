@@ -81,20 +81,20 @@ func warnDriftFrom(userStages []*Stage, version string, w io.Writer, defaults fs
 			defaultKeys[k] = true
 		}
 
-		missing, err := missingTopLevelKeys(userStage.FilePath, defaultKeys)
+		missing, err := MissingTopLevelKeys(userStage.FilePath, defaultKeys)
 		if err != nil || len(missing) == 0 {
 			return nil
 		}
 
-		fmt.Fprintf(w, "[startup] warning: %s is missing fields present in %s defaults: %s. Run `fabrik upgrade` to see what changed.\n",
+		fmt.Fprintf(w, "[startup] warning: %s is missing fields present in %s defaults: %s. Run `fabrik refresh-stages --apply` to add the missing keys.\n",
 			userStage.FilePath, version, strings.Join(missing, ", "))
 		return nil
 	})
 }
 
-// missingTopLevelKeys reads the YAML file at userPath and returns a sorted slice
+// MissingTopLevelKeys reads the YAML file at userPath and returns a sorted slice
 // of keys from defaultKeys that are absent from the user file's top-level map.
-func missingTopLevelKeys(userPath string, defaultKeys map[string]bool) ([]string, error) {
+func MissingTopLevelKeys(userPath string, defaultKeys map[string]bool) ([]string, error) {
 	data, err := os.ReadFile(userPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", userPath, err)

@@ -163,7 +163,7 @@ func TestMissingTopLevelKeys_ReturnsMissingKeys(t *testing.T) {
 		"wait_for_ci": true,
 	}
 
-	missing, err := missingTopLevelKeys(path, defaultKeys)
+	missing, err := MissingTopLevelKeys(path, defaultKeys)
 	if err != nil {
 		t.Fatalf("missingTopLevelKeys: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestMissingTopLevelKeys_NoneWhenAllPresent(t *testing.T) {
 		"wait_for_ci": true,
 	}
 
-	missing, err := missingTopLevelKeys(path, defaultKeys)
+	missing, err := MissingTopLevelKeys(path, defaultKeys)
 	if err != nil {
 		t.Fatalf("missingTopLevelKeys: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestMissingTopLevelKeys_SortedOutput(t *testing.T) {
 
 	defaultKeys := map[string]bool{"zebra": true, "apple": true, "mango": true}
 
-	missing, err := missingTopLevelKeys(path, defaultKeys)
+	missing, err := MissingTopLevelKeys(path, defaultKeys)
 	if err != nil {
 		t.Fatalf("missingTopLevelKeys: %v", err)
 	}
