@@ -35,6 +35,8 @@ type GitHubClient interface {
 	CreateDraftPR(owner, repo, title, head, base, body string, issueNumber int) (int, error)
 	MarkPRReady(owner, repo string, prNumber int) error
 	MergePR(owner, repo string, prNumber int) error
+	DeleteReviewRequest(owner, repo string, prNumber int, reviewers []string) error
+	AddReviewRequest(owner, repo string, prNumber int, reviewers []string) error
 	FetchLatestRelease(owner, repo string) (*gh.LatestRelease, error)
 	FetchLabelAppliedAt(owner, repo string, issueNumber int, labelName string) (time.Time, error)
 	SeedLabels(owner, repo string, stageNames []string, lockedUser string) error

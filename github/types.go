@@ -1,6 +1,9 @@
 package github
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // RateLimitStats holds the latest GitHub API rate limit values parsed from response headers.
 type RateLimitStats struct {
@@ -29,6 +32,26 @@ type Dependency struct {
 // ReviewRequest represents a pending review request on a pull request.
 type ReviewRequest struct {
 	Login string // GitHub login of the requested reviewer (user or bot)
+	IsBot bool   // True if the reviewer is a bot (from __typename or login-pattern fallback)
+}
+
+// isBotLogin returns true if the login matches known bot patterns.
+// Used as a fallback when the GraphQL __typename field is absent or not "Bot".
+func isBotLogin(login string) bool {
+	lower := strings.ToLower(login)
+	if strings.HasSuffix(lower, "[bot]") {
+		return true
+	}
+	if strings.HasSuffix(lower, "-bot") {
+		return true
+	}
+	if strings.HasPrefix(lower, "copilot-") {
+		return true
+	}
+	if lower == "dependabot" || lower == "gemini-code-assist" {
+		return true
+	}
+	return false
 }
 
 // PRReview represents a submitted review on a pull request.
@@ -57,6 +80,7 @@ type ProjectItem struct {
 	Comments               []Comment
 	Author                 string
 	BlockedBy              []Dependency    // Issues that must be closed before this one can advance
+	LinkedPRNumber         int             // PR number of the first linked PR (0 if none); for REST re-request calls
 	LinkedPRReviewRequests []ReviewRequest // Outstanding reviewer requests on the linked PR
 	LinkedPRReviews        []PRReview      // Reviews already submitted on the linked PR
 	// LinkedPRReviewThreadComments holds the inline (per-line) comments from

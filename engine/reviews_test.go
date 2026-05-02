@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -558,6 +559,378 @@ func TestClearFailedStage_ReviewCycleCount_ResetsOnlyCurrentStage(t *testing.T) 
 	if afterValidate != 2 {
 		t.Errorf("Validate reviewCycleCount = %d after clearing Review; want 2 (independent)", afterValidate)
 	}
+}
+
+// --- Bot-reviewer escalation ladder tests ---
+
+// Phase 1: pure-bot outstanding, awaiting-review timeout elapsed, no reprompted label.
+// Verifies DELETE+POST review requests, @mention PR comment, and label are applied.
+// Gate returns (true, false) — still blocked.
+func TestCheckReviewGate_BotPhase1_Reprompts(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(client)
+	eng.cfg.ReviewWaitTimeout = 5 * time.Minute
+
+	// awaiting-review label was applied 10 minutes ago — 1× timeout elapsed.
+	awaitingApplied := time.Now().Add(-10 * time.Minute)
+	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+		if labelName == "fabrik:awaiting-review" {
+			return awaitingApplied, nil
+		}
+		return time.Time{}, nil
+	}
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 42,
+		Labels:         []string{"fabrik:awaiting-review"},
+		LinkedPRReviewRequests: []gh.ReviewRequest{
+			{Login: "copilot-pull-request-reviewer", IsBot: true},
+		},
+		LinkedPRReviews: nil,
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+
+	blocked, timedOut := eng.checkReviewGate(board, item, stage)
+
+	if !blocked {
+		t.Error("expected still blocked after Phase 1 re-prompt")
+	}
+	if timedOut {
+		t.Error("expected not timedOut after Phase 1 (still blocked)")
+	}
+
+	// DeleteReviewRequest + AddReviewRequest should each have been called once.
+	if len(client.deleteReviewRequestCalls) != 1 {
+		t.Errorf("expected 1 DeleteReviewRequest call, got %d", len(client.deleteReviewRequestCalls))
+	}
+	if len(client.addReviewRequestCalls) != 1 {
+		t.Errorf("expected 1 AddReviewRequest call, got %d", len(client.addReviewRequestCalls))
+	}
+
+	// @mention comment should have been posted on the PR.
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 PR @mention comment, got %d", len(client.addCommentCalls))
+	}
+	if client.addCommentCalls[0].issueNumber != 42 {
+		t.Errorf("expected comment on PR #42, got #%d", client.addCommentCalls[0].issueNumber)
+	}
+
+	// fabrik:bot-reprompted:<login> label should have been applied.
+	var foundReprompted bool
+	for _, call := range client.addLabelCalls {
+		if call.labelName == "fabrik:bot-reprompted:copilot-pull-request-reviewer" {
+			foundReprompted = true
+		}
+	}
+	if !foundReprompted {
+		t.Error("expected fabrik:bot-reprompted:copilot-pull-request-reviewer label to be added")
+	}
+}
+
+// Phase 1 idempotency: if fabrik:bot-reprompted:* already present, Phase 1 does not re-fire.
+// When the reprompted label is present but not yet timed out, the gate stays blocked silently.
+func TestCheckReviewGate_BotPhase1_Idempotent_StillBlocked(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(client)
+	eng.cfg.ReviewWaitTimeout = 5 * time.Minute
+
+	awaitingApplied := time.Now().Add(-10 * time.Minute)
+	repromptedApplied := time.Now().Add(-2 * time.Minute) // 2 min ago — not yet timed out for Phase 2
+	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+		if labelName == "fabrik:awaiting-review" {
+			return awaitingApplied, nil
+		}
+		if labelName == "fabrik:bot-reprompted:copilot-pull-request-reviewer" {
+			return repromptedApplied, nil
+		}
+		return time.Time{}, nil
+	}
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 42,
+		Labels:         []string{"fabrik:awaiting-review", "fabrik:bot-reprompted:copilot-pull-request-reviewer"},
+		LinkedPRReviewRequests: []gh.ReviewRequest{
+			{Login: "copilot-pull-request-reviewer", IsBot: true},
+		},
+		LinkedPRReviews: nil,
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+
+	blocked, timedOut := eng.checkReviewGate(board, item, stage)
+
+	if !blocked {
+		t.Error("expected still blocked between Phase 1 and Phase 2")
+	}
+	if timedOut {
+		t.Error("expected not timedOut between Phase 1 and Phase 2")
+	}
+	// No new review requests or comments — Phase 1 does not re-fire.
+	if len(client.deleteReviewRequestCalls) != 0 {
+		t.Errorf("expected no DeleteReviewRequest (Phase 1 idempotency), got %d", len(client.deleteReviewRequestCalls))
+	}
+	if len(client.addReviewRequestCalls) != 0 {
+		t.Errorf("expected no AddReviewRequest (Phase 1 idempotency), got %d", len(client.addReviewRequestCalls))
+	}
+}
+
+// Phase 2: bot-reprompted label timed out — gate fires (false, true) and cleans up labels.
+// pauseForReviewTimeout then detects Phase 2 context and posts a contextual message.
+func TestCheckReviewGate_BotPhase2_PausesForHuman(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(client)
+	eng.cfg.ReviewWaitTimeout = 5 * time.Minute
+
+	awaitingApplied := time.Now().Add(-15 * time.Minute)
+	repromptedApplied := time.Now().Add(-10 * time.Minute) // 10 min > 5 min timeout → Phase 2
+	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+		if labelName == "fabrik:awaiting-review" {
+			return awaitingApplied, nil
+		}
+		if labelName == "fabrik:bot-reprompted:copilot-pull-request-reviewer" {
+			return repromptedApplied, nil
+		}
+		return time.Time{}, nil
+	}
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 42,
+		Labels:         []string{"fabrik:awaiting-review", "fabrik:bot-reprompted:copilot-pull-request-reviewer"},
+		LinkedPRReviewRequests: []gh.ReviewRequest{
+			{Login: "copilot-pull-request-reviewer", IsBot: true},
+		},
+		LinkedPRReviews: nil,
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+
+	blocked, timedOut := eng.checkReviewGate(board, item, stage)
+
+	if blocked {
+		t.Error("expected not blocked on Phase 2 (should return false, true)")
+	}
+	if !timedOut {
+		t.Error("expected timedOut == true on Phase 2")
+	}
+
+	// fabrik:bot-reprompted:* and fabrik:awaiting-review should both be removed.
+	removedLabels := make(map[string]bool)
+	for _, call := range client.removeLabelCalls {
+		removedLabels[call.labelName] = true
+	}
+	if !removedLabels["fabrik:bot-reprompted:copilot-pull-request-reviewer"] {
+		t.Error("expected fabrik:bot-reprompted:copilot-pull-request-reviewer to be removed in Phase 2")
+	}
+	if !removedLabels["fabrik:awaiting-review"] {
+		t.Error("expected fabrik:awaiting-review to be removed in Phase 2")
+	}
+
+	// Verify pauseForReviewTimeout posts a Phase 2 contextual message.
+	eng2 := reviewTestEngine(client)
+	eng2.pauseForReviewTimeout(board, item, stage) // item still has pre-cleanup labels
+
+	var foundPhase2Comment bool
+	for _, call := range client.addCommentCalls {
+		if len(call.body) > 0 && containsAll(call.body, "after bot re-prompt", "copilot-pull-request-reviewer") {
+			foundPhase2Comment = true
+		}
+	}
+	if !foundPhase2Comment {
+		t.Error("expected pauseForReviewTimeout to post a Phase 2 contextual message mentioning the bot and re-prompt")
+	}
+}
+
+// Pure-bot stuck then bot responds before Phase 2 — gate clears naturally.
+func TestCheckReviewGate_BotRespondsBeforePhase2_Clears(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(client)
+	eng.cfg.ReviewWaitTimeout = 5 * time.Minute
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 42,
+		Labels:         []string{"fabrik:awaiting-review"},
+		// Bot submitted a review and no longer in reviewRequests.
+		LinkedPRReviewRequests: nil,
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "copilot-pull-request-reviewer", State: "COMMENTED"},
+		},
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+
+	blocked, timedOut := eng.checkReviewGate(board, item, stage)
+
+	if blocked {
+		t.Error("expected not blocked when bot submitted a review")
+	}
+	if timedOut {
+		t.Error("expected not timedOut when bot submitted a review")
+	}
+	// Gate clears naturally — no re-prompt calls.
+	if len(client.deleteReviewRequestCalls) != 0 {
+		t.Errorf("expected no DeleteReviewRequest when gate clears, got %d", len(client.deleteReviewRequestCalls))
+	}
+}
+
+// Mixed bot+human outstanding at 1× timeout — existing pause path fires, no re-prompt.
+func TestCheckReviewGate_MixedBotHuman_PausesWithoutReprompt(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(client)
+	eng.cfg.ReviewWaitTimeout = 5 * time.Minute
+
+	awaitingApplied := time.Now().Add(-10 * time.Minute) // 1× elapsed
+	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+		if labelName == "fabrik:awaiting-review" {
+			return awaitingApplied, nil
+		}
+		return time.Time{}, nil
+	}
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 42,
+		Labels:         []string{"fabrik:awaiting-review"},
+		LinkedPRReviewRequests: []gh.ReviewRequest{
+			{Login: "copilot-pull-request-reviewer", IsBot: true},
+			{Login: "alice", IsBot: false}, // human reviewer present
+		},
+		LinkedPRReviews: nil,
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+
+	blocked, timedOut := eng.checkReviewGate(board, item, stage)
+
+	if blocked {
+		t.Error("expected not blocked (timeout elapsed → timedOut)")
+	}
+	if !timedOut {
+		t.Error("expected timedOut == true when mixed outstanding at 1× timeout")
+	}
+	// Phase 1 must NOT have fired for mixed outstanding.
+	if len(client.deleteReviewRequestCalls) != 0 {
+		t.Errorf("expected no DeleteReviewRequest for mixed outstanding, got %d", len(client.deleteReviewRequestCalls))
+	}
+	if len(client.addReviewRequestCalls) != 0 {
+		t.Errorf("expected no AddReviewRequest for mixed outstanding, got %d", len(client.addReviewRequestCalls))
+	}
+	// No bot-reprompted label should have been applied.
+	for _, call := range client.addLabelCalls {
+		if strings.HasPrefix(call.labelName, "fabrik:bot-reprompted:") {
+			t.Errorf("unexpected bot-reprompted label added for mixed outstanding: %q", call.labelName)
+		}
+	}
+}
+
+// Pure-human outstanding at 1× timeout — existing pause path fires.
+func TestCheckReviewGate_PureHuman_PausesWithoutReprompt(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(client)
+	eng.cfg.ReviewWaitTimeout = 5 * time.Minute
+
+	awaitingApplied := time.Now().Add(-10 * time.Minute)
+	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+		if labelName == "fabrik:awaiting-review" {
+			return awaitingApplied, nil
+		}
+		return time.Time{}, nil
+	}
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 42,
+		Labels:         []string{"fabrik:awaiting-review"},
+		LinkedPRReviewRequests: []gh.ReviewRequest{
+			{Login: "alice", IsBot: false},
+		},
+		LinkedPRReviews: nil,
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+
+	blocked, timedOut := eng.checkReviewGate(board, item, stage)
+
+	if blocked {
+		t.Error("expected not blocked (timeout elapsed → timedOut)")
+	}
+	if !timedOut {
+		t.Error("expected timedOut == true for pure-human at 1× timeout")
+	}
+	if len(client.deleteReviewRequestCalls) != 0 {
+		t.Errorf("expected no DeleteReviewRequest for pure-human, got %d", len(client.deleteReviewRequestCalls))
+	}
+}
+
+// pauseForReviewTimeout enhanced comment lists reviewers with bot/human tags.
+func TestPauseForReviewTimeout_ListsReviewerTypes(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		Labels: []string{"fabrik:awaiting-review"},
+		LinkedPRReviewRequests: []gh.ReviewRequest{
+			{Login: "copilot-pull-request-reviewer", IsBot: true},
+			{Login: "alice", IsBot: false},
+		},
+	}
+	stage := &stages.Stage{Name: "Review", WaitForReviews: boolPtr(true)}
+
+	eng.pauseForReviewTimeout(board, item, stage)
+
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	if !containsAll(body, "copilot-pull-request-reviewer", "bot", "alice", "human") {
+		t.Errorf("pause comment should list reviewers with bot/human tags; got:\n%s", body)
+	}
+}
+
+// removeAwaitingReviewLabel also removes fabrik:bot-reprompted:* labels.
+func TestRemoveAwaitingReviewLabel_CleansRepromptedLabels(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(client)
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		Labels: []string{"fabrik:awaiting-review", "fabrik:bot-reprompted:copilot-pull-request-reviewer"},
+	}
+
+	eng.removeAwaitingReviewLabel("owner", "repo", item)
+
+	removedLabels := make(map[string]bool)
+	for _, call := range client.removeLabelCalls {
+		removedLabels[call.labelName] = true
+	}
+	if !removedLabels["fabrik:awaiting-review"] {
+		t.Error("expected fabrik:awaiting-review to be removed")
+	}
+	if !removedLabels["fabrik:bot-reprompted:copilot-pull-request-reviewer"] {
+		t.Error("expected fabrik:bot-reprompted:copilot-pull-request-reviewer to be removed")
+	}
+}
+
+// containsAll checks that all substrings appear in s (case-sensitive).
+func containsAll(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if !strings.Contains(s, sub) {
+			return false
+		}
+	}
+	return true
 }
 
 // boolPtr is a helper to create a *bool from a bool literal.
