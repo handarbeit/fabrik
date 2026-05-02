@@ -614,6 +614,7 @@ query($id: ID!) {
 	// Reset append-to fields before repopulating so repeated FetchItemDetails calls
 	// (e.g. during progress detection in the turn-extension loop) are idempotent.
 	item.Comments = nil
+	item.LinkedPRNumber = 0
 	item.LinkedPRReviewRequests = nil
 	item.LinkedPRReviews = nil
 	item.LinkedPRReviewThreadComments = nil
