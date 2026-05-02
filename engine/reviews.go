@@ -172,7 +172,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 						} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
 							e.logf(item.Number, "warn", "phase 1: could not add 🚀 to re-prompt comment: %v\n", reactErr)
 						}
-						labelName := fmt.Sprintf("fabrik:bot-reprompted:%s", login)
+						labelName := botRepromptedLabel(login)
 						if err := e.client.AddLabelToIssue(owner, repo, item.Number, labelName); err != nil {
 							e.logf(item.Number, "warn", "phase 1: could not add %s: %v\n", labelName, err)
 						}
@@ -241,6 +241,15 @@ func (e *Engine) removeAwaitingReviewLabel(owner, repo string, item gh.ProjectIt
 			}
 		}
 	}
+}
+
+// botRepromptedLabel returns the fabrik:bot-reprompted:<login> label name.
+// GitHub's REST API does not enforce a hard character limit on label names
+// (the documented 50-char limit applies only to the web UI), so we do not
+// truncate. The label is cleaned up at Phase 2 or gate-clear, so stale long
+// names never accumulate.
+func botRepromptedLabel(login string) string {
+	return "fabrik:bot-reprompted:" + login
 }
 
 // buildReviewThreadComments returns the inline per-line comments from

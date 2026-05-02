@@ -469,3 +469,152 @@ func TestFetchItemDetails_NilAuthor(t *testing.T) {
 		t.Errorf("Comment Author = %q, want empty", item.Comments[0].Author)
 	}
 }
+
+// TestFetchItemDetails_LinkedPRNumber_AndBotDetection verifies that:
+// - item.LinkedPRNumber is populated from the first linked PR's number field
+// - ReviewRequest.IsBot is set from __typename == "Bot" (primary signal)
+// - ReviewRequest.IsBot falls back to isBotLogin() when __typename is "User"
+func TestFetchItemDetails_LinkedPRNumber_AndBotDetection(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"data": map[string]interface{}{
+				"node": map[string]interface{}{
+					"comments": map[string]interface{}{
+						"nodes":    []interface{}{},
+						"pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""},
+					},
+					"closedByPullRequestsReferences": map[string]interface{}{
+						"nodes": []interface{}{
+							map[string]interface{}{
+								"id":     "PR_77",
+								"number": 77,
+								"comments": map[string]interface{}{
+									"nodes":    []interface{}{},
+									"pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""},
+								},
+								"reviewRequests": map[string]interface{}{
+									"nodes": []interface{}{
+										// Bot via __typename
+										map[string]interface{}{
+											"requestedReviewer": map[string]interface{}{
+												"__typename": "Bot",
+												"login":      "copilot-pull-request-reviewer",
+											},
+										},
+										// Human via __typename
+										map[string]interface{}{
+											"requestedReviewer": map[string]interface{}{
+												"__typename": "User",
+												"login":      "alice",
+											},
+										},
+										// Bot via login pattern fallback (__typename mismatch)
+										map[string]interface{}{
+											"requestedReviewer": map[string]interface{}{
+												"__typename": "User",
+												"login":      "dependabot",
+											},
+										},
+									},
+								},
+								"latestReviews": map[string]interface{}{"nodes": []interface{}{}},
+								"reviewThreads": map[string]interface{}{"nodes": []interface{}{}},
+							},
+						},
+					},
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	item := &ProjectItem{ID: "I_1", Number: 1}
+	if err := c.FetchItemDetails(item); err != nil {
+		t.Fatalf("FetchItemDetails: %v", err)
+	}
+
+	if item.LinkedPRNumber != 77 {
+		t.Errorf("LinkedPRNumber = %d, want 77", item.LinkedPRNumber)
+	}
+	if len(item.LinkedPRReviewRequests) != 3 {
+		t.Fatalf("LinkedPRReviewRequests = %d, want 3", len(item.LinkedPRReviewRequests))
+	}
+
+	// copilot-pull-request-reviewer: __typename == "Bot" → IsBot
+	if item.LinkedPRReviewRequests[0].Login != "copilot-pull-request-reviewer" || !item.LinkedPRReviewRequests[0].IsBot {
+		t.Errorf("rr[0] = %+v, want {Login:copilot-pull-request-reviewer IsBot:true}", item.LinkedPRReviewRequests[0])
+	}
+	// alice: __typename == "User" → not a bot
+	if item.LinkedPRReviewRequests[1].Login != "alice" || item.LinkedPRReviewRequests[1].IsBot {
+		t.Errorf("rr[1] = %+v, want {Login:alice IsBot:false}", item.LinkedPRReviewRequests[1])
+	}
+	// dependabot: login-pattern fallback → IsBot even though __typename == "User"
+	if item.LinkedPRReviewRequests[2].Login != "dependabot" || !item.LinkedPRReviewRequests[2].IsBot {
+		t.Errorf("rr[2] = %+v, want {Login:dependabot IsBot:true}", item.LinkedPRReviewRequests[2])
+	}
+}
+
+// TestFetchItemDetails_LinkedPRNumber_ResetOnRepeat verifies that LinkedPRNumber
+// is reset to 0 on repeated FetchItemDetails calls when no linked PRs are present.
+func TestFetchItemDetails_LinkedPRNumber_ResetOnRepeat(t *testing.T) {
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		var linkedPRs interface{}
+		if callCount == 1 {
+			// First call: linked PR present
+			linkedPRs = map[string]interface{}{
+				"nodes": []interface{}{
+					map[string]interface{}{
+						"id":     "PR_55",
+						"number": 55,
+						"comments": map[string]interface{}{
+							"nodes":    []interface{}{},
+							"pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""},
+						},
+						"reviewRequests": map[string]interface{}{"nodes": []interface{}{}},
+						"latestReviews":  map[string]interface{}{"nodes": []interface{}{}},
+						"reviewThreads":  map[string]interface{}{"nodes": []interface{}{}},
+					},
+				},
+			}
+		} else {
+			// Second call: no linked PRs
+			linkedPRs = nil
+		}
+		resp := map[string]interface{}{
+			"data": map[string]interface{}{
+				"node": map[string]interface{}{
+					"comments": map[string]interface{}{
+						"nodes":    []interface{}{},
+						"pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""},
+					},
+					"closedByPullRequestsReferences": linkedPRs,
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	item := &ProjectItem{ID: "I_1", Number: 1}
+
+	// First call: LinkedPRNumber should be set
+	if err := c.FetchItemDetails(item); err != nil {
+		t.Fatalf("first FetchItemDetails: %v", err)
+	}
+	if item.LinkedPRNumber != 55 {
+		t.Errorf("after first call: LinkedPRNumber = %d, want 55", item.LinkedPRNumber)
+	}
+
+	// Second call: LinkedPRNumber should be reset to 0
+	if err := c.FetchItemDetails(item); err != nil {
+		t.Fatalf("second FetchItemDetails: %v", err)
+	}
+	if item.LinkedPRNumber != 0 {
+		t.Errorf("after second call: LinkedPRNumber = %d, want 0 (should be reset)", item.LinkedPRNumber)
+	}
+}

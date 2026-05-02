@@ -377,3 +377,86 @@ func TestUpdatePRBase_Error(t *testing.T) {
 		t.Fatal("expected error for 422 response")
 	}
 }
+
+func TestDeleteReviewRequest_SendsDeleteWithBody(t *testing.T) {
+	var gotMethod, gotPath string
+	var gotBody map[string]interface{}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	if err := c.DeleteReviewRequest("owner", "repo", 42, []string{"copilot-pull-request-reviewer"}); err != nil {
+		t.Fatalf("DeleteReviewRequest: %v", err)
+	}
+	if gotMethod != "DELETE" {
+		t.Errorf("method = %s, want DELETE", gotMethod)
+	}
+	if gotPath != "/repos/owner/repo/pulls/42/requested_reviewers" {
+		t.Errorf("path = %s, want /repos/owner/repo/pulls/42/requested_reviewers", gotPath)
+	}
+	reviewers, ok := gotBody["reviewers"].([]interface{})
+	if !ok || len(reviewers) != 1 || reviewers[0] != "copilot-pull-request-reviewer" {
+		t.Errorf("body[reviewers] = %v, want [copilot-pull-request-reviewer]", gotBody["reviewers"])
+	}
+}
+
+func TestDeleteReviewRequest_Error(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(422)
+		w.Write([]byte(`{"message":"Validation Failed"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	if err := c.DeleteReviewRequest("owner", "repo", 42, []string{"bot"}); err == nil {
+		t.Fatal("expected error for 422 response")
+	}
+}
+
+func TestAddReviewRequest_SendsPost(t *testing.T) {
+	var gotMethod, gotPath string
+	var gotBody map[string]interface{}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(201)
+		json.NewEncoder(w).Encode(map[string]interface{}{})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	if err := c.AddReviewRequest("owner", "repo", 42, []string{"copilot-pull-request-reviewer"}); err != nil {
+		t.Fatalf("AddReviewRequest: %v", err)
+	}
+	if gotMethod != "POST" {
+		t.Errorf("method = %s, want POST", gotMethod)
+	}
+	if gotPath != "/repos/owner/repo/pulls/42/requested_reviewers" {
+		t.Errorf("path = %s, want /repos/owner/repo/pulls/42/requested_reviewers", gotPath)
+	}
+	reviewers, ok := gotBody["reviewers"].([]interface{})
+	if !ok || len(reviewers) != 1 || reviewers[0] != "copilot-pull-request-reviewer" {
+		t.Errorf("body[reviewers] = %v, want [copilot-pull-request-reviewer]", gotBody["reviewers"])
+	}
+}
+
+func TestAddReviewRequest_Error(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(422)
+		w.Write([]byte(`{"message":"Validation Failed"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	if err := c.AddReviewRequest("owner", "repo", 42, []string{"bot"}); err == nil {
+		t.Fatal("expected error for 422 response")
+	}
+}
