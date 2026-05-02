@@ -64,7 +64,8 @@ func Execute() error {
 		fmt.Fprintf(out, "  watch <issue-number>      Watch a single issue's Claude session live\n")
 		fmt.Fprintf(out, "  resume <issue-number>     Resume an interactive Claude session for an issue\n")
 		fmt.Fprintf(out, "  upgrade                   Upgrade the Fabrik binary and plugin skills\n")
-		fmt.Fprintf(out, "  stream-filter             Filter and pretty-print Claude streaming JSON (stdin → stdout)\n\n")
+		fmt.Fprintf(out, "  refresh-stages            Show (or apply) missing stage YAML keys from embedded defaults\n")
+	fmt.Fprintf(out, "  stream-filter             Filter and pretty-print Claude streaming JSON (stdin → stdout)\n\n")
 		fmt.Fprintf(out, "Flags:\n")
 		flag.CommandLine.PrintDefaults()
 	}
@@ -91,6 +92,9 @@ func Execute() error {
 	if len(os.Args) > 1 && os.Args[1] == "_debug-server" {
 		RunDebugServer()
 		return nil
+	}
+	if len(os.Args) > 1 && os.Args[1] == "refresh-stages" {
+		return runRefreshStages(os.Args[2:])
 	}
 	cfg := &Config{}
 
