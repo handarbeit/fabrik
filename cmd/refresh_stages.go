@@ -42,7 +42,7 @@ func runRefreshStages(args []string) error {
 
 // defaultNodeIndex holds the parsed yaml.Node data for a single embedded default stage.
 type defaultNodeIndex struct {
-	keySet    map[string]bool
+	keySet     map[string]bool
 	nodesByKey map[string][2]*yaml.Node // key string → [keyNode, valueNode]
 }
 
@@ -126,7 +126,9 @@ func refreshStagesWithReader(
 		if interactive {
 			// Show diff and prompt.
 			fmt.Fprint(w, diff)
-			fmt.Fprintf(w, "Apply changes to %s? [y/N] ", userPath)
+			if isTTY {
+				fmt.Fprintf(w, "Apply changes to %s? [y/N] ", userPath)
+			}
 			line, _ := inputReader.ReadString('\n')
 			answer := strings.TrimSpace(line)
 			if strings.ToLower(answer) != "y" && strings.ToLower(answer) != "yes" {
@@ -191,7 +193,7 @@ func buildDefaultNodeIndex(defaults fs.FS) (map[string]*defaultNodeIndex, error)
 		}
 
 		idx := &defaultNodeIndex{
-			keySet:    make(map[string]bool),
+			keySet:     make(map[string]bool),
 			nodesByKey: make(map[string][2]*yaml.Node),
 		}
 
@@ -299,4 +301,3 @@ func applyMissingKeys(userPath string, missing []string, idx *defaultNodeIndex) 
 	}
 	return nil
 }
-
