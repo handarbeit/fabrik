@@ -280,8 +280,8 @@ func (e *Engine) buildReviewThreadComments(item gh.ProjectItem) []gh.Comment {
 
 // pauseForReviewTimeout pauses the issue when the review wait timeout elapses.
 // It applies fabrik:paused + fabrik:awaiting-input and posts an explanatory comment.
-// If item.Labels contains any fabrik:bot-reprompted:* labels (the pre-cleanup snapshot
-// captured before checkReviewGate removed them), Phase 2 context is detected and a
+// If item.Labels contains the fabrik:bot-reprompted label (the pre-cleanup snapshot
+// captured before checkReviewGate removed it), Phase 2 context is detected and a
 // more specific "after re-prompt" message is posted.
 func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
