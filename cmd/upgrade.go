@@ -36,6 +36,7 @@ func runUpgrade(args []string) error {
 		fmt.Fprintf(fset.Output(), "re-execs with the updated binary. For dev builds (built from source):\n")
 		fmt.Fprintf(fset.Output(), "rebuilds from origin/main rather than downloading a release binary.\n")
 		fmt.Fprintf(fset.Output(), "In both cases, embedded plugin skills are refreshed on disk.\n")
+		fmt.Fprintf(fset.Output(), "\nTo update stage YAML files with missing keys, run: fabrik refresh-stages --apply\n")
 	}
 	if err := fset.Parse(args); err != nil {
 		return err
