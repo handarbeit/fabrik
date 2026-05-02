@@ -125,17 +125,16 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 			}
 			if time.Since(repromptedAt) >= timeout {
 				e.logf(item.Number, "review-gate", "phase 2: bot(s) unresponsive after re-prompt — pausing for human\n")
-				// Remove all fabrik:bot-reprompted:* labels (item.Labels is the
-				// pre-cleanup snapshot, so pauseForReviewTimeout can still detect
-				// Phase 2 context from it).
+				// Remove all fabrik:bot-reprompted:* labels and fabrik:awaiting-review.
+				// item.Labels is the pre-cleanup snapshot so pauseForReviewTimeout
+				// can still detect Phase 2 context from it after we return.
 				for _, l := range item.Labels {
-					if strings.HasPrefix(l, "fabrik:bot-reprompted:") {
+					if strings.HasPrefix(l, "fabrik:bot-reprompted:") || l == "fabrik:awaiting-review" {
 						if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, l); err != nil {
 							e.logf(item.Number, "warn", "phase 2: could not remove %s: %v\n", l, err)
 						}
 					}
 				}
-				e.removeAwaitingReviewLabel(owner, repo, item)
 				return false, true
 			}
 		}
@@ -167,7 +166,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 						if err := e.client.AddReviewRequest(owner, repo, item.LinkedPRNumber, []string{login}); err != nil {
 							e.logf(item.Number, "warn", "phase 1: could not re-add review request for %s: %v\n", login, err)
 						}
-						msg := fmt.Sprintf("@%s just checking in — could you take a look at this PR?", login)
+						msg := fmt.Sprintf("🏭 **Fabrik — review re-prompt**\n\n@%s just checking in — could you take a look at this PR?", login)
 						if dbID, err := e.client.AddComment(owner, repo, item.LinkedPRNumber, msg); err != nil {
 							e.logf(item.Number, "warn", "phase 1: could not post re-prompt comment for %s: %v\n", login, err)
 						} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
