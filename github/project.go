@@ -398,6 +398,7 @@ query($id: ID!) {
           reviewRequests(first: 10) {
             nodes {
               requestedReviewer {
+                __typename
                 ... on User { login }
                 ... on Bot { login }
               }
@@ -523,7 +524,8 @@ query($id: ID!) {
 						ReviewRequests struct {
 							Nodes []struct {
 								RequestedReviewer struct {
-									Login string `json:"login"`
+									Typename string `json:"__typename"`
+									Login    string `json:"login"`
 								} `json:"requestedReviewer"`
 							} `json:"nodes"`
 						} `json:"reviewRequests"`
@@ -632,7 +634,11 @@ query($id: ID!) {
 
 	// Merge comments, review requests, and reviews from linked PRs
 	if node.LinkedPRs != nil {
-		for _, pr := range node.LinkedPRs.Nodes {
+		for i, pr := range node.LinkedPRs.Nodes {
+			// Record the first linked PR's number for REST re-request and @mention calls.
+			if i == 0 {
+				item.LinkedPRNumber = pr.Number
+			}
 			prCommentNodes := pr.Comments.Nodes
 			if pr.Comments.PageInfo.HasNextPage {
 				extra, err := c.fetchNodeComments(pr.ID, pr.Comments.PageInfo.EndCursor)
@@ -646,7 +652,8 @@ query($id: ID!) {
 			}
 			for _, rr := range pr.ReviewRequests.Nodes {
 				if login := rr.RequestedReviewer.Login; login != "" {
-					item.LinkedPRReviewRequests = append(item.LinkedPRReviewRequests, ReviewRequest{Login: login})
+					isBot := rr.RequestedReviewer.Typename == "Bot" || isBotLogin(login)
+					item.LinkedPRReviewRequests = append(item.LinkedPRReviewRequests, ReviewRequest{Login: login, IsBot: isBot})
 				}
 			}
 			for _, rev := range pr.LatestReviews.Nodes {
