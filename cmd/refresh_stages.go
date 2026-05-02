@@ -54,6 +54,10 @@ func refreshStagesWithReader(
 	w io.Writer,
 	defaults fs.FS,
 ) error {
+	if interactive && !apply {
+		return fmt.Errorf("--interactive requires --apply")
+	}
+
 	// Build a map from stage name → defaultNodeIndex by walking the embedded FS.
 	defaultsByName, err := buildDefaultNodeIndex(defaults)
 	if err != nil {
