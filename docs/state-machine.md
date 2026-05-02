@@ -631,8 +631,8 @@ When all outstanding requested reviewers are bots (detected via `ReviewRequest.I
 | Pure human(s) | How long before the engine pauses for human input (existing behavior, unchanged) |
 
 **Label lifecycle for bot escalation:**
-- `fabrik:bot-reprompted:<login>` — applied during Phase 1; removed when gate clears naturally (all reviewers submitted), when Phase 2 fires, or when the gate times out on a mixed/human case. Never persists beyond the gate cycle.
-- `fabrik:awaiting-review` — applied on first block; removed on natural gate clear or on any timeout path (Phase 2, mixed, pure-human).
+- `fabrik:bot-reprompted:<login>` — applied during Phase 1; removed when Phase 2 fires (as part of Phase 2 cleanup) or when the gate clears naturally via `removeAwaitingReviewLabel` (all reviewers submitted). Only exists while the pure-bot escalation is in progress.
+- `fabrik:awaiting-review` — applied on first block; removed on natural gate clear or when Phase 2 fires; persists while the issue is paused (mixed/human/Phase-2 timeout paths — `pauseForReviewTimeout` does not remove it).
 
 ### 6.2 Review Reinvoke Mechanics
 
