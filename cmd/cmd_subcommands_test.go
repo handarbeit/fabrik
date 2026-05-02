@@ -3,8 +3,23 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// TestExecute_RefreshStagesSubcommand verifies that Execute() dispatches
+// "refresh-stages" correctly. --interactive without --apply returns a
+// specific error that confirms the subcommand was reached.
+func TestExecute_RefreshStagesSubcommand(t *testing.T) {
+	dir := t.TempDir()
+	chdirTest(t, dir)
+	resetFlags()
+	os.Args = []string{"fabrik", "refresh-stages", "--interactive"}
+	err := Execute()
+	if err == nil || !strings.Contains(err.Error(), "--interactive requires --apply") {
+		t.Errorf("expected --interactive requires --apply error from refresh-stages dispatch, got: %v", err)
+	}
+}
 
 // TestExecute_UpgradeSubcommand invokes `fabrik upgrade` via Execute().
 func TestExecute_UpgradeSubcommand(t *testing.T) {
