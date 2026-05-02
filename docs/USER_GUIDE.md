@@ -314,16 +314,17 @@ See [§10 Troubleshooting → Startup Board Validation Failure](#startup-board-v
 After loading your stage YAMLs from `.fabrik/stages/`, Fabrik compares each stage against the embedded default with the same `name:` field. If the embedded default contains top-level YAML keys that your file does not, Fabrik prints a warning to stderr at startup:
 
 ```
-[startup] warning: .fabrik/stages/validate.yaml is missing fields present in v0.0.49 defaults: wait_for_ci, wait_for_reviews. Run `fabrik upgrade` to see what changed.
+[startup] warning: .fabrik/stages/validate.yaml is missing fields present in v0.0.49 defaults: wait_for_ci, wait_for_reviews. Run `fabrik refresh-stages --apply` to add the missing keys.
 ```
 
 This warning is **informational only** — the engine continues running with your existing config. The missing keys are behavioral options added in a newer binary that your stage file predates.
 
 **What to do:**
 
-1. Run `fabrik upgrade` to refresh the embedded plugin skills — it does not automatically overwrite your stage YAMLs, but its changelog and the embedded `stages/examples/` files tell you what changed.
-2. Review the missing keys in the embedded defaults (e.g., `wait_for_ci: true` in `validate.yaml`).
-3. Manually add any fields you want into your customized stage files.
+1. Run `fabrik refresh-stages` to preview missing keys as a unified diff (no file changes).
+2. Run `fabrik refresh-stages --apply` to add the missing keys to your stage YAMLs (additive only — never removes or overwrites existing values).
+3. Run `git diff` to review the changes.
+4. `git commit` to record the update.
 
 **Common keys that trigger this warning:**
 
