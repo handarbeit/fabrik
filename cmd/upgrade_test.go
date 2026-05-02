@@ -157,9 +157,18 @@ func TestCheckPluginSkillsWithReader_DifferTTYYes(t *testing.T) {
 	}
 
 	// The modified file must now match the embedded version.
-	rel, _ := filepath.Rel(pluginDir, modifiedFile)
-	embeddedData, _ := fabrikplugin.FabrikPlugin.ReadFile(filepath.Join("fabrik-workflows", rel))
-	diskData, _ := os.ReadFile(modifiedFile)
+	rel, err := filepath.Rel(pluginDir, modifiedFile)
+	if err != nil {
+		t.Fatalf("filepath.Rel(%q, %q): %v", pluginDir, modifiedFile, err)
+	}
+	embeddedData, err := fabrikplugin.FabrikPlugin.ReadFile(filepath.Join("fabrik-workflows", rel))
+	if err != nil {
+		t.Fatalf("reading embedded fabrik-workflows/%s: %v", rel, err)
+	}
+	diskData, err := os.ReadFile(modifiedFile)
+	if err != nil {
+		t.Fatalf("reading on-disk %s: %v", modifiedFile, err)
+	}
 	if !bytes.Equal(embeddedData, diskData) {
 		t.Fatal("expected modified file to be overwritten with embedded content")
 	}
