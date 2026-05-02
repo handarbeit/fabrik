@@ -618,15 +618,15 @@ func TestCheckReviewGate_BotPhase1_Reprompts(t *testing.T) {
 		t.Errorf("expected comment on PR #42, got #%d", client.addCommentCalls[0].issueNumber)
 	}
 
-	// fabrik:bot-reprompted:<login> label should have been applied.
+	// fabrik:bot-reprompted label should have been applied once (not per-login).
 	var foundReprompted bool
 	for _, call := range client.addLabelCalls {
-		if call.labelName == "fabrik:bot-reprompted:copilot-pull-request-reviewer" {
+		if call.labelName == "fabrik:bot-reprompted" {
 			foundReprompted = true
 		}
 	}
 	if !foundReprompted {
-		t.Error("expected fabrik:bot-reprompted:copilot-pull-request-reviewer label to be added")
+		t.Error("expected fabrik:bot-reprompted label to be added")
 	}
 }
 
@@ -643,7 +643,7 @@ func TestCheckReviewGate_BotPhase1_Idempotent_StillBlocked(t *testing.T) {
 		if labelName == "fabrik:awaiting-review" {
 			return awaitingApplied, nil
 		}
-		if labelName == "fabrik:bot-reprompted:copilot-pull-request-reviewer" {
+		if labelName == "fabrik:bot-reprompted" {
 			return repromptedApplied, nil
 		}
 		return time.Time{}, nil
@@ -654,7 +654,7 @@ func TestCheckReviewGate_BotPhase1_Idempotent_StillBlocked(t *testing.T) {
 		Number:         10,
 		Repo:           "owner/repo",
 		LinkedPRNumber: 42,
-		Labels:         []string{"fabrik:awaiting-review", "fabrik:bot-reprompted:copilot-pull-request-reviewer"},
+		Labels:         []string{"fabrik:awaiting-review", "fabrik:bot-reprompted"},
 		LinkedPRReviewRequests: []gh.ReviewRequest{
 			{Login: "copilot-pull-request-reviewer", IsBot: true},
 		},
@@ -692,7 +692,7 @@ func TestCheckReviewGate_BotPhase2_PausesForHuman(t *testing.T) {
 		if labelName == "fabrik:awaiting-review" {
 			return awaitingApplied, nil
 		}
-		if labelName == "fabrik:bot-reprompted:copilot-pull-request-reviewer" {
+		if labelName == "fabrik:bot-reprompted" {
 			return repromptedApplied, nil
 		}
 		return time.Time{}, nil
@@ -703,7 +703,7 @@ func TestCheckReviewGate_BotPhase2_PausesForHuman(t *testing.T) {
 		Number:         10,
 		Repo:           "owner/repo",
 		LinkedPRNumber: 42,
-		Labels:         []string{"fabrik:awaiting-review", "fabrik:bot-reprompted:copilot-pull-request-reviewer"},
+		Labels:         []string{"fabrik:awaiting-review", "fabrik:bot-reprompted"},
 		LinkedPRReviewRequests: []gh.ReviewRequest{
 			{Login: "copilot-pull-request-reviewer", IsBot: true},
 		},
@@ -720,13 +720,13 @@ func TestCheckReviewGate_BotPhase2_PausesForHuman(t *testing.T) {
 		t.Error("expected timedOut == true on Phase 2")
 	}
 
-	// fabrik:bot-reprompted:* and fabrik:awaiting-review should both be removed.
+	// fabrik:bot-reprompted and fabrik:awaiting-review should both be removed.
 	removedLabels := make(map[string]bool)
 	for _, call := range client.removeLabelCalls {
 		removedLabels[call.labelName] = true
 	}
-	if !removedLabels["fabrik:bot-reprompted:copilot-pull-request-reviewer"] {
-		t.Error("expected fabrik:bot-reprompted:copilot-pull-request-reviewer to be removed in Phase 2")
+	if !removedLabels["fabrik:bot-reprompted"] {
+		t.Error("expected fabrik:bot-reprompted to be removed in Phase 2")
 	}
 	if !removedLabels["fabrik:awaiting-review"] {
 		t.Error("expected fabrik:awaiting-review to be removed in Phase 2")
@@ -826,7 +826,7 @@ func TestCheckReviewGate_MixedBotHuman_PausesWithoutReprompt(t *testing.T) {
 	}
 	// No bot-reprompted label should have been applied.
 	for _, call := range client.addLabelCalls {
-		if strings.HasPrefix(call.labelName, "fabrik:bot-reprompted:") {
+		if call.labelName == "fabrik:bot-reprompted" {
 			t.Errorf("unexpected bot-reprompted label added for mixed outstanding: %q", call.labelName)
 		}
 	}
@@ -899,14 +899,14 @@ func TestPauseForReviewTimeout_ListsReviewerTypes(t *testing.T) {
 	}
 }
 
-// removeAwaitingReviewLabel also removes fabrik:bot-reprompted:* labels.
+// removeAwaitingReviewLabel also removes the fabrik:bot-reprompted label.
 func TestRemoveAwaitingReviewLabel_CleansRepromptedLabels(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := reviewTestEngine(client)
 	item := gh.ProjectItem{
 		Number: 10,
 		Repo:   "owner/repo",
-		Labels: []string{"fabrik:awaiting-review", "fabrik:bot-reprompted:copilot-pull-request-reviewer"},
+		Labels: []string{"fabrik:awaiting-review", "fabrik:bot-reprompted"},
 	}
 
 	eng.removeAwaitingReviewLabel("owner", "repo", item)
@@ -918,8 +918,16 @@ func TestRemoveAwaitingReviewLabel_CleansRepromptedLabels(t *testing.T) {
 	if !removedLabels["fabrik:awaiting-review"] {
 		t.Error("expected fabrik:awaiting-review to be removed")
 	}
-	if !removedLabels["fabrik:bot-reprompted:copilot-pull-request-reviewer"] {
-		t.Error("expected fabrik:bot-reprompted:copilot-pull-request-reviewer to be removed")
+	if !removedLabels["fabrik:bot-reprompted"] {
+		t.Error("expected fabrik:bot-reprompted to be removed")
+	}
+}
+
+// TestBotRepromptedLabelLength guards against the botRepromptedLabel constant
+// exceeding GitHub's 50-character REST API limit for label names.
+func TestBotRepromptedLabelLength(t *testing.T) {
+	if len(botRepromptedLabel) > 50 {
+		t.Errorf("botRepromptedLabel is %d chars (max 50): %q", len(botRepromptedLabel), botRepromptedLabel)
 	}
 }
 

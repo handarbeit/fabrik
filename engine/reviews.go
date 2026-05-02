@@ -12,6 +12,12 @@ import (
 	"github.com/handarbeit/fabrik/tui"
 )
 
+// botRepromptedLabel is the idempotency guard for Phase 1 of the bot-reviewer
+// escalation ladder and the timing anchor for Phase 2. Fixed label, not per-login,
+// because the guard is bot-agnostic: Phase 1 fires once per gate cycle for all
+// outstanding bots in one round. Must stay ≤50 chars (GitHub REST API limit).
+const botRepromptedLabel = "fabrik:bot-reprompted"
+
 // checkReviewGate inspects item.LinkedPRReviewRequests and item.LinkedPRReviews
 // to determine whether the review gate is blocking review reinvoke or stage
 // advancement.
@@ -43,10 +49,10 @@ import (
 //
 //   - Phase 1 (fires at 1× ReviewWaitTimeout from fabrik:awaiting-review): sends
 //     a formal re-request (DELETE+POST) and an @mention comment on the PR for
-//     each unresponsive bot; applies fabrik:bot-reprompted:<login> labels; returns
+//     each unresponsive bot; applies fabrik:bot-reprompted label; returns
 //     (true, false) — still blocked.
-//   - Phase 2 (fires at 1× ReviewWaitTimeout from fabrik:bot-reprompted:<login>):
-//     removes bot-reprompted labels and fabrik:awaiting-review, then returns
+//   - Phase 2 (fires at 1× ReviewWaitTimeout from fabrik:bot-reprompted):
+//     removes fabrik:bot-reprompted and fabrik:awaiting-review, then returns
 //     (false, true) so the caller fires pauseForReviewTimeout with a contextual
 //     "re-prompt was already attempted" message.
 //
@@ -63,7 +69,7 @@ import (
 //
 // Side effects when unblocking (naturally or by timeout):
 //   - Removes fabrik:awaiting-review label if present (idempotent).
-//   - Removes fabrik:bot-reprompted:* labels if present (idempotent).
+//   - Removes fabrik:bot-reprompted label if present (idempotent).
 func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) (blocked, timedOut bool) {
 	// Gate is opt-in — only active when wait_for_reviews: true.
 	if stage.WaitForReviews == nil || !*stage.WaitForReviews {
@@ -101,21 +107,20 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 		}
 	}
 
-	// Find any existing fabrik:bot-reprompted:* label (idempotency guard for
-	// Phase 1 and timing anchor for Phase 2).
-	var repromptedLogin string
+	// Find the fabrik:bot-reprompted label (idempotency guard for Phase 1 and
+	// timing anchor for Phase 2).
+	var reprompted bool
 	for _, l := range item.Labels {
-		if strings.HasPrefix(l, "fabrik:bot-reprompted:") {
-			repromptedLogin = strings.TrimPrefix(l, "fabrik:bot-reprompted:")
+		if l == botRepromptedLabel {
+			reprompted = true
 			break
 		}
 	}
 
 	// Phase 2 check: if a re-prompt was already sent and another full timeout
 	// window has elapsed without response, pause for human.
-	if repromptedLogin != "" && allBots {
-		repromptedLabelName := fmt.Sprintf("fabrik:bot-reprompted:%s", repromptedLogin)
-		repromptedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, repromptedLabelName)
+	if reprompted && allBots {
+		repromptedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, botRepromptedLabel)
 		if err != nil {
 			e.logf(item.Number, "warn", "could not fetch bot-reprompted label timestamp: %v\n", err)
 		} else if !repromptedAt.IsZero() {
@@ -125,11 +130,11 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 			}
 			if time.Since(repromptedAt) >= timeout {
 				e.logf(item.Number, "review-gate", "phase 2: bot(s) unresponsive after re-prompt — pausing for human\n")
-				// Remove all fabrik:bot-reprompted:* labels and fabrik:awaiting-review.
+				// Remove fabrik:bot-reprompted and fabrik:awaiting-review.
 				// item.Labels is the pre-cleanup snapshot so pauseForReviewTimeout
 				// can still detect Phase 2 context from it after we return.
 				for _, l := range item.Labels {
-					if strings.HasPrefix(l, "fabrik:bot-reprompted:") || l == "fabrik:awaiting-review" {
+					if l == botRepromptedLabel || l == "fabrik:awaiting-review" {
 						if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, l); err != nil {
 							e.logf(item.Number, "warn", "phase 2: could not remove %s: %v\n", l, err)
 						}
@@ -152,7 +157,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 				e.logf(item.Number, "warn", "could not fetch awaiting-review label timestamp: %v\n", err)
 			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= timeout {
 				// 1× timeout elapsed.
-				if allBots && item.LinkedPRNumber > 0 && repromptedLogin == "" {
+				if allBots && item.LinkedPRNumber > 0 && !reprompted {
 					// Phase 1: re-prompt all outstanding bot reviewers.
 					var repromptedLogins []string
 					for _, rr := range item.LinkedPRReviewRequests {
@@ -172,11 +177,10 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 						} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
 							e.logf(item.Number, "warn", "phase 1: could not add 🚀 to re-prompt comment: %v\n", reactErr)
 						}
-						labelName := botRepromptedLabel(login)
-						if err := e.client.AddLabelToIssue(owner, repo, item.Number, labelName); err != nil {
-							e.logf(item.Number, "warn", "phase 1: could not add %s: %v\n", labelName, err)
-						}
 						repromptedLogins = append(repromptedLogins, login)
+					}
+					if err := e.client.AddLabelToIssue(owner, repo, item.Number, botRepromptedLabel); err != nil {
+						e.logf(item.Number, "warn", "phase 1: could not add %s: %v\n", botRepromptedLabel, err)
 					}
 					e.logf(item.Number, "review-gate", "phase 1: re-prompted bot reviewer(s): %s\n", strings.Join(repromptedLogins, ", "))
 					return true, false
@@ -184,7 +188,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 
 				// If Phase 1 already fired (reprompted label present) and Phase 2
 				// hasn't timed out yet, stay blocked and let Phase 2 handle it.
-				if allBots && repromptedLogin != "" {
+				if allBots && reprompted {
 					break
 				}
 
@@ -226,8 +230,8 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	return true, false
 }
 
-// removeAwaitingReviewLabel removes fabrik:awaiting-review and any
-// fabrik:bot-reprompted:* labels present on the item (gate-cycle cleanup).
+// removeAwaitingReviewLabel removes fabrik:awaiting-review and the
+// fabrik:bot-reprompted label if present on the item (gate-cycle cleanup).
 func (e *Engine) removeAwaitingReviewLabel(owner, repo string, item gh.ProjectItem) {
 	for _, l := range item.Labels {
 		if l == "fabrik:awaiting-review" {
@@ -235,21 +239,12 @@ func (e *Engine) removeAwaitingReviewLabel(owner, repo string, item gh.ProjectIt
 				e.logf(item.Number, "warn", "could not remove fabrik:awaiting-review label: %v\n", err)
 			}
 		}
-		if strings.HasPrefix(l, "fabrik:bot-reprompted:") {
+		if l == botRepromptedLabel {
 			if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, l); err != nil {
 				e.logf(item.Number, "warn", "could not remove %s label: %v\n", l, err)
 			}
 		}
 	}
-}
-
-// botRepromptedLabel returns the fabrik:bot-reprompted:<login> label name.
-// GitHub's REST API does not enforce a hard character limit on label names
-// (the documented 50-char limit applies only to the web UI), so we do not
-// truncate. The label is cleaned up at Phase 2 or gate-clear, so stale long
-// names never accumulate.
-func botRepromptedLabel(login string) string {
-	return "fabrik:bot-reprompted:" + login
 }
 
 // buildReviewThreadComments returns the inline per-line comments from
@@ -305,12 +300,19 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 		reviewerParts = append(reviewerParts, fmt.Sprintf("`%s` (%s)", rr.Login, tag))
 	}
 
-	// Detect Phase 2 context: checkReviewGate removed the labels from GitHub but
-	// item.Labels is the pre-cleanup snapshot, so the labels are still present here.
+	// Detect Phase 2 context: checkReviewGate removed the label from GitHub but
+	// item.Labels is the pre-cleanup snapshot, so the label is still present here.
+	// Derive bot logins from LinkedPRReviewRequests (bots haven't responded, so
+	// they're still in the requests list).
 	var repromptedLogins []string
 	for _, l := range item.Labels {
-		if strings.HasPrefix(l, "fabrik:bot-reprompted:") {
-			repromptedLogins = append(repromptedLogins, strings.TrimPrefix(l, "fabrik:bot-reprompted:"))
+		if l == botRepromptedLabel {
+			for _, rr := range item.LinkedPRReviewRequests {
+				if rr.IsBot && rr.Login != "" {
+					repromptedLogins = append(repromptedLogins, rr.Login)
+				}
+			}
+			break
 		}
 	}
 

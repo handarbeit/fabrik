@@ -31,6 +31,7 @@ var staticLabelDefs = []labelDef{
 	{"fabrik:awaiting-review", "Validate complete; waiting for requested PR reviewers", "e4e669"},
 	{"fabrik:awaiting-ci", "CI gate active; waiting for CI checks to pass (checks may be running or have failed)", "e4e669"},
 	{"fabrik:rebase-needed", "Base branch advanced and PR no longer merges; engine is retrying a rebase invocation", "e4e669"},
+	{"fabrik:bot-reprompted", "Bot re-prompt sent; waiting for bot to respond (transient; removed at gate-cycle end)", "e4e669"},
 
 	// --- danger labels (red) ---
 	{"fabrik:blocked", "Blocked by one or more open dependency issues", "d73a4a"},
@@ -82,11 +83,6 @@ func labelDefFor(name string) (description, color string) {
 	// fabrik:locked:<user>
 	if strings.HasPrefix(name, "fabrik:locked:") {
 		return "Another Fabrik instance is processing this issue", "cfd3d7"
-	}
-
-	// fabrik:bot-reprompted:<login> — transient; cleaned when gate cycle ends
-	if strings.HasPrefix(name, "fabrik:bot-reprompted:") {
-		return "Bot re-prompt sent; waiting for bot to respond", "e4e669"
 	}
 
 	return "", "6f42c1"
