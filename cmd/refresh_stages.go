@@ -182,7 +182,7 @@ func buildDefaultNodeIndex(defaults fs.FS) (map[string]*defaultNodeIndex, error)
 		// Parse to yaml.Node for value extraction.
 		var docNode yaml.Node
 		if err := yaml.Unmarshal(data, &docNode); err != nil {
-			return nil
+			return fmt.Errorf("parsing embedded default %s: %w", path, err)
 		}
 		if docNode.Kind == 0 || len(docNode.Content) == 0 {
 			return nil
@@ -291,7 +291,7 @@ func applyMissingKeys(userPath string, missing []string, idx *defaultNodeIndex) 
 		mappingNode.Content = append(mappingNode.Content, pair[0], pair[1])
 	}
 
-	out, err := yaml.Marshal(mappingNode)
+	out, err := yaml.Marshal(&docNode)
 	if err != nil {
 		return fmt.Errorf("marshaling: %w", err)
 	}
