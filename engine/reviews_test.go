@@ -630,7 +630,7 @@ func TestCheckReviewGate_BotPhase1_Reprompts(t *testing.T) {
 	}
 }
 
-// Phase 1 idempotency: if fabrik:bot-reprompted:* already present, Phase 1 does not re-fire.
+// Phase 1 idempotency: if fabrik:bot-reprompted already present, Phase 1 does not re-fire.
 // When the reprompted label is present but not yet timed out, the gate stays blocked silently.
 func TestCheckReviewGate_BotPhase1_Idempotent_StillBlocked(t *testing.T) {
 	client := &mockGitHubClient{}
