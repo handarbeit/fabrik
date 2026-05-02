@@ -604,10 +604,35 @@ The review gate has two paths that handle different timing scenarios:
 - Has FRESH reviewer data from `FetchItemDetails()` (both `LinkedPRReviewRequests` and `LinkedPRReviews`)
 - Calls `checkReviewGate()` for the real gate evaluation
 - **Gate clears only when `len(LinkedPRReviewRequests) == 0` AND `len(LinkedPRReviews) > 0`.** This means: no requested reviewers are outstanding AND at least one review has been submitted. Waiting on `LinkedPRReviews` (not just `LinkedPRReviewRequests`) is what catches bot reviewers like Copilot and Gemini that self-trigger via webhooks without ever appearing in the formal requested-reviewer list.
-- Three outcomes:
-  - `(blocked=true, timedOut=false)` — still waiting; `fabrik:awaiting-review` maintained. Either outstanding requested reviewers remain, or no reviews have been submitted yet (bots may still be processing).
-  - `(blocked=false, timedOut=false)` — gate cleared naturally; `fabrik:awaiting-review` removed; advance or reinvoke
-  - `(blocked=false, timedOut=true)` — gate cleared by timeout (`ReviewWaitTimeout`, default 15 min); `fabrik:awaiting-review` removed; `pauseForReviewTimeout()` pauses issue. The timeout applies whether we were waiting for requested reviewers or for bot reviewers that never submitted.
+- `ReviewRequest.IsBot` is populated from `requestedReviewer.__typename == "Bot"` in the GraphQL query, with a login-pattern fallback (`*[bot]`, `*-bot`, `copilot-*`, `dependabot`, `gemini-code-assist`). This drives the bot-aware escalation ladder.
+- Four outcomes from `checkReviewGate()`:
+  - `(blocked=true, timedOut=false)` — still waiting; `fabrik:awaiting-review` maintained. Either outstanding requested reviewers remain, or no reviews submitted yet (bots may still be processing). Also returned after Phase 1 (bot re-prompt fired, waiting for Phase 2 window).
+  - `(blocked=false, timedOut=false)` — gate cleared naturally; `fabrik:awaiting-review` removed; `fabrik:bot-reprompted:*` labels cleaned; advance or reinvoke.
+  - `(blocked=false, timedOut=true)` — gate cleared by timeout; `fabrik:awaiting-review` removed; `pauseForReviewTimeout()` pauses issue. Fires at `1× ReviewWaitTimeout` for mixed/pure-human outstanding (existing path) or at `2× ReviewWaitTimeout` for pure-bot outstanding (Phase 2 — after the re-prompt window expired).
+
+**Bot-aware escalation ladder (pure-bot outstanding only):**
+
+When all outstanding requested reviewers are bots (detected via `ReviewRequest.IsBot`) and `item.LinkedPRNumber > 0`, `checkReviewGate` applies a two-phase escalation instead of immediately pausing:
+
+- **Phase 1 (fires at 1× `ReviewWaitTimeout` from `fabrik:awaiting-review`):** For each outstanding bot reviewer: deletes then re-adds the formal review request (DELETE+POST to `requested_reviewers` — the delete-then-add cycle is required to re-trigger the bot's webhook; a plain POST is a silent no-op if the reviewer is already listed), posts an `@<login> just checking in` comment on the linked PR, and applies `fabrik:bot-reprompted:<login>` (idempotency guard). Returns `(true, false)` — still blocked. Phase 1 fires once per gate cycle (idempotency enforced by presence of `fabrik:bot-reprompted:*` labels).
+
+- **Phase 2 (fires at 1× `ReviewWaitTimeout` from `fabrik:bot-reprompted:<login>`):** If the bot still has not responded after a full additional `ReviewWaitTimeout` window, all `fabrik:bot-reprompted:*` labels are removed, `fabrik:awaiting-review` is removed, and `(false, true)` is returned. The caller fires `pauseForReviewTimeout()`, which detects Phase 2 context from the pre-cleanup `item.Labels` snapshot and posts a named, contextual pause comment explaining that a re-prompt was already attempted. Human-in-the-loop is preserved — the engine never auto-advances past a `wait_for_reviews: true` gate.
+
+**Mixed bot+human outstanding:** Phase 1 does NOT fire. The gate falls through to the existing `pauseForReviewTimeout()` at `1× ReviewWaitTimeout` from `fabrik:awaiting-review`, unchanged. Re-prompting humans is not appropriate (they have inbox notifications; webhooks don't apply).
+
+**`pauseForReviewTimeout()` enhanced comment:** In all timeout paths (Phase 2, mixed, pure-human), the pause comment now names all outstanding reviewers and tags each as `(bot)` or `(human)` for easy triage. In Phase 2, the comment explicitly notes that a re-prompt was already attempted and provides four recovery options.
+
+**`ReviewWaitTimeout` semantics (depends on outstanding-reviewer mix):**
+
+| Outstanding reviewers | Meaning of `ReviewWaitTimeout` |
+|---|---|
+| Pure bot(s) | How long before Phase 1 fires (bot re-prompt); Phase 2 pause triggers at 2× (1× from `fabrik:awaiting-review` + 1× from `fabrik:bot-reprompted:<login>`) |
+| Mixed bot(s) + human(s) | How long before the engine pauses for human input (existing behavior, Phase 1 does not fire) |
+| Pure human(s) | How long before the engine pauses for human input (existing behavior, unchanged) |
+
+**Label lifecycle for bot escalation:**
+- `fabrik:bot-reprompted:<login>` — applied during Phase 1; removed when gate clears naturally (all reviewers submitted), when Phase 2 fires, or when the gate times out on a mixed/human case. Never persists beyond the gate cycle.
+- `fabrik:awaiting-review` — applied on first block; removed on natural gate clear or on any timeout path (Phase 2, mixed, pure-human).
 
 ### 6.2 Review Reinvoke Mechanics
 
