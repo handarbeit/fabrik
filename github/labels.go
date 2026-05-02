@@ -84,6 +84,11 @@ func labelDefFor(name string) (description, color string) {
 		return "Another Fabrik instance is processing this issue", "cfd3d7"
 	}
 
+	// fabrik:bot-reprompted:<login> — transient; cleaned when gate cycle ends
+	if strings.HasPrefix(name, "fabrik:bot-reprompted:") {
+		return "Bot re-prompt sent; waiting for bot to respond", "e4e669"
+	}
+
 	return "", "6f42c1"
 }
 
