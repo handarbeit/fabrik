@@ -12,11 +12,11 @@ import (
 func RefreshPlugin() (int, error) {
 	pluginDir := ".fabrik/plugin"
 	wrote := 0
-	err := fs.WalkDir(FabrikPlugin, "fabrik-plugin", func(p string, d fs.DirEntry, walkErr error) error {
+	err := fs.WalkDir(FabrikPlugin, "fabrik-workflows", func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		rel, _ := filepath.Rel("fabrik-plugin", p)
+		rel, _ := filepath.Rel("fabrik-workflows", p)
 		destPath := filepath.Join(pluginDir, rel)
 
 		if d.IsDir() {
