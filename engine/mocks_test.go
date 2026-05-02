@@ -41,6 +41,8 @@ type mockGitHubClient struct {
 	fetchLatestReleaseFn      func(owner, repo string) (*gh.LatestRelease, error)
 	fetchLabelAppliedAtFn     func(owner, repo string, issueNumber int, labelName string) (time.Time, error)
 	archiveProjectItemFn      func(projectID, itemID string) error
+	deleteReviewRequestFn     func(owner, repo string, prNumber int, reviewers []string) error
+	addReviewRequestFn        func(owner, repo string, prNumber int, reviewers []string) error
 
 	// Track calls for FetchLabelAppliedAt
 	fetchLabelAppliedAtCalls []fetchLabelAppliedAtCall
@@ -62,6 +64,14 @@ type mockGitHubClient struct {
 	createDraftPRCalls              []createDraftPRCall
 	resolveReviewThreadCalls        []string
 	addPRReviewCommentReactionCalls []prReviewCommentReactionCall
+	deleteReviewRequestCalls        []reviewRequestCall
+	addReviewRequestCalls           []reviewRequestCall
+}
+
+type reviewRequestCall struct {
+	owner, repo string
+	prNumber    int
+	reviewers   []string
 }
 
 type prReviewCommentReactionCall struct {
@@ -409,6 +419,28 @@ func (m *mockGitHubClient) ArchiveProjectItem(projectID, itemID string) error {
 }
 
 func (m *mockGitHubClient) SeedLabels(owner, repo string, stageNames []string, lockedUser string) error {
+	return nil
+}
+
+func (m *mockGitHubClient) DeleteReviewRequest(owner, repo string, prNumber int, reviewers []string) error {
+	m.mu.Lock()
+	m.deleteReviewRequestCalls = append(m.deleteReviewRequestCalls, reviewRequestCall{owner, repo, prNumber, reviewers})
+	fn := m.deleteReviewRequestFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, prNumber, reviewers)
+	}
+	return nil
+}
+
+func (m *mockGitHubClient) AddReviewRequest(owner, repo string, prNumber int, reviewers []string) error {
+	m.mu.Lock()
+	m.addReviewRequestCalls = append(m.addReviewRequestCalls, reviewRequestCall{owner, repo, prNumber, reviewers})
+	fn := m.addReviewRequestFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, prNumber, reviewers)
+	}
 	return nil
 }
 

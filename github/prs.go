@@ -292,6 +292,28 @@ func (c *Client) UpdatePRBase(owner, repo string, prNumber int, newBase string) 
 	return nil
 }
 
+// DeleteReviewRequest removes one or more reviewer requests from a pull request.
+// GitHub's DELETE endpoint requires a JSON body with the reviewer list, so this
+// uses restRequest("DELETE", ...) rather than restDelete (which sends no body).
+func (c *Client) DeleteReviewRequest(owner, repo string, prNumber int, reviewers []string) error {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/requested_reviewers", c.baseURL, owner, repo, prNumber)
+	body := map[string]interface{}{"reviewers": reviewers}
+	if err := c.restRequest("DELETE", apiURL, body); err != nil {
+		return fmt.Errorf("deleting review request on PR #%d: %w", prNumber, err)
+	}
+	return nil
+}
+
+// AddReviewRequest adds one or more reviewer requests to a pull request.
+func (c *Client) AddReviewRequest(owner, repo string, prNumber int, reviewers []string) error {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/requested_reviewers", c.baseURL, owner, repo, prNumber)
+	body := map[string]interface{}{"reviewers": reviewers}
+	if err := c.restPost(apiURL, body); err != nil {
+		return fmt.Errorf("adding review request on PR #%d: %w", prNumber, err)
+	}
+	return nil
+}
+
 // MergePR merges the pull request identified by prNumber. It first checks
 // GitHub's mergeable status: if null (not yet computed) or false, it returns
 // ErrNotMergeable. It attempts a rebase merge first; if the repository does
