@@ -569,7 +569,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	e.emitStructural(tui.PollStartedEvent{Owner: e.cfg.Owner, Repo: e.cfg.Repo, Project: e.cfg.ProjectNum})
 	e.logf(0, "poll", "fetching project board %s/%s#%d\n", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
 
-	board, err := e.client.FetchProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
+	board, err := e.readClient.FetchProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
 	if err != nil {
 		pollStatusClear()
 		return pollResult{}, err
@@ -578,7 +578,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// Fetch status field metadata (for mutations) on first poll
 	e.mu.Lock()
 	if e.statusField == nil && board.ProjectID != "" {
-		sf, err := e.client.FetchStatusField(board.ProjectID)
+		sf, err := e.readClient.FetchStatusField(board.ProjectID)
 		if err != nil {
 			e.logf(0, "warn", "could not fetch status field: %v\n", err)
 		} else {
@@ -694,7 +694,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		}
 		e.logf(0, "poll", "deep-fetching details for #%d\n", board.Items[i].Number)
 		iKey := issueKey(board.Items[i], e.defaultRepo())
-		if err := e.client.FetchItemDetails(&board.Items[i]); err != nil {
+		if err := e.readClient.FetchItemDetails(&board.Items[i]); err != nil {
 			e.logf(0, "warn", "could not fetch details for #%d: %v\n", board.Items[i].Number, err)
 			e.mu.Lock()
 			e.deepFetchFailureTime[iKey] = time.Now()

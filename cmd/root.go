@@ -49,6 +49,7 @@ type Config struct {
 	Webhooks          bool
 	WebhookPort       int
 	WebhookEvents     string // comma-separated; empty means default event set
+	BoardCacheMode    string // "in-memory" or "none"; empty = auto (in-memory when webhooks enabled)
 }
 
 func Execute() error {
@@ -129,6 +130,7 @@ func Execute() error {
 	flag.BoolVar(&cfg.Webhooks, "webhooks", false, "Enable webhook-driven event delivery via gh webhook forward (requires gh ≥ 2.32.0; also FABRIK_WEBHOOKS)")
 	flag.IntVar(&cfg.WebhookPort, "webhook-port", 0, "Local port for the webhook HTTP listener (0 = OS-assigned; also FABRIK_WEBHOOK_PORT)")
 	flag.StringVar(&cfg.WebhookEvents, "webhook-events", "", "Comma-separated list of GitHub event types to subscribe to (default: all supported events; also FABRIK_WEBHOOK_EVENTS)")
+	flag.StringVar(&cfg.BoardCacheMode, "board-cache", "", `Board cache mode: "in-memory" (cache board state; requires --webhooks) or "none" (always fetch from GitHub). Default: "in-memory" when --webhooks is enabled, "none" otherwise. Also FABRIK_BOARD_CACHE.`)
 
 	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
 		return err
@@ -393,6 +395,27 @@ func Execute() error {
 			cfg.WebhookEvents = v
 		}
 	}
+	if !explicitFlags["board-cache"] {
+		if v := os.Getenv("FABRIK_BOARD_CACHE"); v != "" {
+			cfg.BoardCacheMode = v
+		}
+	}
+
+	// Apply board-cache default: "in-memory" when webhooks are enabled; "none" otherwise.
+	// Explicit --board-cache=in-memory without --webhooks is a configuration error.
+	if cfg.BoardCacheMode == "" {
+		if cfg.Webhooks {
+			cfg.BoardCacheMode = "in-memory"
+		} else {
+			cfg.BoardCacheMode = "none"
+		}
+	}
+	if cfg.BoardCacheMode == "in-memory" && !cfg.Webhooks {
+		return fmt.Errorf("--board-cache=in-memory requires --webhooks (no delta source without webhook events)")
+	}
+	if cfg.BoardCacheMode != "in-memory" && cfg.BoardCacheMode != "none" {
+		return fmt.Errorf("invalid --board-cache value %q: must be \"in-memory\" or \"none\"", cfg.BoardCacheMode)
+	}
 
 	if cfg.Owner == "" || cfg.ProjectNum == 0 {
 		flag.Usage()
@@ -505,6 +528,7 @@ func Execute() error {
 		Webhooks:          cfg.Webhooks,
 		WebhookPort:       cfg.WebhookPort,
 		WebhookEvents:     webhookEvents,
+		BoardCacheMode:    cfg.BoardCacheMode,
 		ReadyCh:           testReadyCh,
 	})
 	if err != nil {
