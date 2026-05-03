@@ -159,9 +159,9 @@ func TestProcessComments_MergesReviewThreadComments(t *testing.T) {
 		ReviewThreadID: "RT_merge_1",
 	}
 	item := gh.ProjectItem{
-		Number: 20,
-		Repo:   "owner/repo",
-		Body:   "spec",
+		Number:                       20,
+		Repo:                         "owner/repo",
+		Body:                         "spec",
 		LinkedPRReviewThreadComments: []gh.Comment{reviewThreadComment},
 	}
 
