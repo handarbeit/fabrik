@@ -260,13 +260,27 @@ func detectOrgMode(repos map[string]bool) (string, bool) {
 // isAuthShapedError returns true when the stderr output suggests an authentication
 // or permission failure — used to distinguish org-mode permission denials from
 // transient crashes when the subprocess exits quickly.
+//
+// GitHub returns HTTP 404 (not 403) for permission-denied access to org and repo
+// resources, to avoid leaking org/repo existence. So we also recognize 404 errors
+// scoped to a /orgs/<org>/hooks or /repos/<owner>/<repo>/hooks endpoint as
+// auth-shaped. A bare 404 on any other path is not treated as auth-shaped to
+// avoid false positives on legitimate not-found errors.
 func isAuthShapedError(s string) bool {
 	lower := strings.ToLower(s)
-	return strings.Contains(lower, "403") ||
+	if strings.Contains(lower, "403") ||
 		strings.Contains(lower, "forbidden") ||
 		strings.Contains(lower, "permission denied") ||
 		strings.Contains(lower, "requires admin") ||
-		strings.Contains(lower, "not allowed")
+		strings.Contains(lower, "not allowed") {
+		return true
+	}
+	if strings.Contains(lower, "404") &&
+		(strings.Contains(lower, "/orgs/") || strings.Contains(lower, "/repos/")) &&
+		strings.Contains(lower, "/hooks") {
+		return true
+	}
+	return false
 }
 
 // containsEvent reports whether name is in the events slice.
