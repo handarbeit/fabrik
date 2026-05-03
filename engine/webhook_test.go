@@ -181,8 +181,7 @@ func TestDetectOrgMode(t *testing.T) {
 }
 
 // newTestWebhookManager creates a webhookManager wired for unit testing.
-// cfgUser is the Fabrik username to inject (pass "" for no self-sender filtering).
-func newTestWebhookManager(t *testing.T, cfgUser string) (*webhookManager, chan tui.Event) {
+func newTestWebhookManager(t *testing.T) (*webhookManager, chan tui.Event) {
 	t.Helper()
 	events := make(chan tui.Event, 16)
 	wm := newWebhookManager(
@@ -191,7 +190,6 @@ func newTestWebhookManager(t *testing.T, cfgUser string) (*webhookManager, chan 
 		func(e tui.Event) { events <- e },
 		map[string]bool{"myorg/myrepo": true},
 		nil,
-		cfgUser,
 	)
 	return wm, events
 }
@@ -199,7 +197,7 @@ func newTestWebhookManager(t *testing.T, cfgUser string) (*webhookManager, chan 
 // TestHealthStateTransitions exercises the time-based health state machine.
 func TestHealthStateTransitions(t *testing.T) {
 	t.Run("startup grace → healthy on first verified event", func(t *testing.T) {
-		wm, _ := newTestWebhookManager(t, "")
+		wm, _ := newTestWebhookManager(t)
 		wm.mu.Lock()
 		wm.state = WebhookStreamStartingUp
 		wm.startupTime = time.Now()
@@ -225,7 +223,7 @@ func TestHealthStateTransitions(t *testing.T) {
 	})
 
 	t.Run("starting up → unhealthy after grace + health window", func(t *testing.T) {
-		wm, _ := newTestWebhookManager(t, "")
+		wm, _ := newTestWebhookManager(t)
 		wm.mu.Lock()
 		wm.state = WebhookStreamStartingUp
 		// Set startup time far in the past so grace + health window have both elapsed.
@@ -243,7 +241,7 @@ func TestHealthStateTransitions(t *testing.T) {
 	})
 
 	t.Run("healthy → unhealthy after health window with no events", func(t *testing.T) {
-		wm, _ := newTestWebhookManager(t, "")
+		wm, _ := newTestWebhookManager(t)
 		wm.mu.Lock()
 		wm.state = WebhookStreamHealthy
 		wm.lastEventTime = time.Now().Add(-(webhookHealthWindow + time.Second))
@@ -260,7 +258,7 @@ func TestHealthStateTransitions(t *testing.T) {
 	})
 
 	t.Run("healthy stays healthy within health window", func(t *testing.T) {
-		wm, _ := newTestWebhookManager(t, "")
+		wm, _ := newTestWebhookManager(t)
 		wm.mu.Lock()
 		wm.state = WebhookStreamHealthy
 		wm.lastEventTime = time.Now().Add(-1 * time.Minute) // within 10 min window
@@ -280,7 +278,7 @@ func TestHealthStateTransitions(t *testing.T) {
 // TestSecretRotationTrigger verifies that 5 consecutive HMAC failures within 2 min
 // trigger a secret rotation (rotateCycleCount increments).
 func TestSecretRotationTrigger(t *testing.T) {
-	wm, _ := newTestWebhookManager(t, "")
+	wm, _ := newTestWebhookManager(t)
 	wm.mu.Lock()
 	wm.state = WebhookStreamHealthy
 	secret, _ := generateSecret()
@@ -316,7 +314,7 @@ func TestSecretRotationTrigger(t *testing.T) {
 // TestFailureWindowReset verifies that consecutive-failure tracking resets when
 // a new failure arrives after the rotation window has elapsed.
 func TestFailureWindowReset(t *testing.T) {
-	wm, _ := newTestWebhookManager(t, "")
+	wm, _ := newTestWebhookManager(t)
 	secret, _ := generateSecret()
 	wm.mu.Lock()
 	wm.state = WebhookStreamHealthy
@@ -343,7 +341,7 @@ func TestFailureWindowReset(t *testing.T) {
 // TestRotationFallback verifies that when rotateCycleCount already equals the max,
 // the next threshold breach triggers disabled=true instead of another rotation.
 func TestRotationFallback(t *testing.T) {
-	wm, _ := newTestWebhookManager(t, "")
+	wm, _ := newTestWebhookManager(t)
 	secret, _ := generateSecret()
 	wm.mu.Lock()
 	wm.state = WebhookStreamHealthy
@@ -377,7 +375,7 @@ func TestRotationFallback(t *testing.T) {
 
 // TestHandleWebhookIncrementsCounters verifies per-type event counting and wakeCh.
 func TestHandleWebhookIncrementsCounters(t *testing.T) {
-	wm, _ := newTestWebhookManager(t, "")
+	wm, _ := newTestWebhookManager(t)
 	secret, _ := generateSecret()
 	wm.mu.Lock()
 	wm.state = WebhookStreamStartingUp
@@ -430,7 +428,7 @@ func TestBuildGhArgs(t *testing.T) {
 
 // TestIsHealthyOrStartingUp covers the backoff-coupling helper.
 func TestIsHealthyOrStartingUp(t *testing.T) {
-	wm, _ := newTestWebhookManager(t, "")
+	wm, _ := newTestWebhookManager(t)
 
 	for _, s := range []WebhookHealthState{WebhookStreamStartingUp, WebhookStreamHealthy} {
 		wm.mu.Lock()
@@ -452,7 +450,7 @@ func TestIsHealthyOrStartingUp(t *testing.T) {
 // TestUpdateRepos_NewRepoTriggersRestart verifies that discovering a new repo updates
 // wm.repos and kills the current subprocess.
 func TestUpdateRepos_NewRepoTriggersRestart(t *testing.T) {
-	wm, _ := newTestWebhookManager(t, "")
+	wm, _ := newTestWebhookManager(t)
 	// Override killFn with a counter; no real subprocess needed.
 	killCount := 0
 	wm.killFn = func(*exec.Cmd) { killCount++ }
@@ -479,7 +477,7 @@ func TestUpdateRepos_NewRepoTriggersRestart(t *testing.T) {
 // TestUpdateRepos_NoNewRepos_NoRestart verifies that calling UpdateRepos with an
 // unchanged repo set does not kill the subprocess.
 func TestUpdateRepos_NoNewRepos_NoRestart(t *testing.T) {
-	wm, _ := newTestWebhookManager(t, "")
+	wm, _ := newTestWebhookManager(t)
 	killCount := 0
 	wm.killFn = func(*exec.Cmd) { killCount++ }
 	wm.mu.Lock()
@@ -497,7 +495,7 @@ func TestUpdateRepos_NoNewRepos_NoRestart(t *testing.T) {
 // TestUpdateRepos_DisabledManager_NoOp verifies that a disabled manager ignores
 // UpdateRepos calls entirely.
 func TestUpdateRepos_DisabledManager_NoOp(t *testing.T) {
-	wm, _ := newTestWebhookManager(t, "")
+	wm, _ := newTestWebhookManager(t)
 	killCount := 0
 	wm.killFn = func(*exec.Cmd) { killCount++ }
 	wm.mu.Lock()
@@ -520,71 +518,10 @@ func TestUpdateRepos_DisabledManager_NoOp(t *testing.T) {
 	}
 }
 
-// TestHandleWebhookSelfSenderSkip verifies that events from Fabrik's own GitHub login
-// do not trigger a wakeCh signal (health state still updates).
-func TestHandleWebhookSelfSenderSkip(t *testing.T) {
-	wm, _ := newTestWebhookManager(t, "fabrik-bot")
-	secret, _ := generateSecret()
-	wm.mu.Lock()
-	wm.state = WebhookStreamStartingUp
-	wm.startupTime = time.Now()
-	wm.secret = secret
-	wm.mu.Unlock()
-
-	body := []byte(`{"action":"labeled","repository":{"full_name":"myorg/myrepo"},"sender":{"login":"fabrik-bot"}}`)
-	req := signedRequest(t, body, secret)
-	rr := httptest.NewRecorder()
-	wm.handleWebhook(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rr.Code)
-	}
-	// Health state must still have updated despite the skipped wake.
-	wm.mu.Lock()
-	state := wm.state
-	wm.mu.Unlock()
-	if state != WebhookStreamHealthy {
-		t.Errorf("state = %q, want %q", state, WebhookStreamHealthy)
-	}
-	// wakeCh must remain empty.
-	select {
-	case <-wm.wakeCh:
-		t.Error("wakeCh should not have been signaled for self-sender event")
-	default:
-	}
-}
-
-// TestHandleWebhookNonSelfSenderWakes verifies that events from a different sender
-// do trigger a wakeCh signal.
-func TestHandleWebhookNonSelfSenderWakes(t *testing.T) {
-	wm, _ := newTestWebhookManager(t, "fabrik-bot")
-	secret, _ := generateSecret()
-	wm.mu.Lock()
-	wm.state = WebhookStreamStartingUp
-	wm.startupTime = time.Now()
-	wm.secret = secret
-	wm.mu.Unlock()
-
-	body := []byte(`{"action":"created","repository":{"full_name":"myorg/myrepo"},"sender":{"login":"human-user"}}`)
-	req := signedRequest(t, body, secret)
-	rr := httptest.NewRecorder()
-	wm.handleWebhook(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rr.Code)
-	}
-	select {
-	case <-wm.wakeCh:
-		// good
-	default:
-		t.Error("wakeCh should have been signaled for non-self-sender event")
-	}
-}
-
-// TestHandleWebhookBurstCoalescence verifies that N rapid webhook events from a
-// non-self sender result in at most 1 item queued on the buffered wakeCh.
+// TestHandleWebhookBurstCoalescence verifies that N rapid webhook events result in
+// at most 1 item queued on the buffered wakeCh (single-slot channel collapses bursts).
 func TestHandleWebhookBurstCoalescence(t *testing.T) {
-	wm, _ := newTestWebhookManager(t, "fabrik-bot")
+	wm, _ := newTestWebhookManager(t)
 	secret, _ := generateSecret()
 	wm.mu.Lock()
 	wm.state = WebhookStreamStartingUp
@@ -592,7 +529,7 @@ func TestHandleWebhookBurstCoalescence(t *testing.T) {
 	wm.secret = secret
 	wm.mu.Unlock()
 
-	body := []byte(`{"action":"created","repository":{"full_name":"myorg/myrepo"},"sender":{"login":"human-user"}}`)
+	body := []byte(`{"action":"created","repository":{"full_name":"myorg/myrepo"}}`)
 
 	const burst = 5
 	for i := 0; i < burst; i++ {

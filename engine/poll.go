@@ -303,7 +303,6 @@ func (e *Engine) Run() error {
 			e.emit,
 			initialRepos,
 			e.cfg.WebhookEvents,
-			e.cfg.User,
 		)
 		if err := wm.Start(ctx, e.cfg.WebhookPort); err == nil {
 			e.webhookMgr = wm
