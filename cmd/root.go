@@ -46,6 +46,9 @@ type Config struct {
 	ClaudeWaitDelay   int // seconds; 0 means use default (30)
 	DebugOutput       bool
 	PluginDir         string
+	Webhooks          bool
+	WebhookPort       int
+	WebhookEvents     string // comma-separated; empty means default event set
 }
 
 func Execute() error {
@@ -123,6 +126,9 @@ func Execute() error {
 	flag.IntVar(&cfg.ClaudeWaitDelay, "claude-wait-delay", 0, "Seconds to wait after Claude exits before recovering buffered output when grandchildren hold stdout pipe open (0 = use default of 30; also FABRIK_CLAUDE_WAIT_DELAY)")
 	flag.BoolVar(&cfg.DebugOutput, "debug-output", false, "Save Claude stage output to .fabrik/debug/ for debugging")
 	flag.StringVar(&cfg.PluginDir, "plugin-dir", "", "Path to Fabrik plugin directory (for development; overrides installed plugin)")
+	flag.BoolVar(&cfg.Webhooks, "webhooks", false, "Enable webhook-driven event delivery via gh webhook forward (requires gh ≥ 2.32.0; also FABRIK_WEBHOOKS)")
+	flag.IntVar(&cfg.WebhookPort, "webhook-port", 0, "Local port for the webhook HTTP listener (0 = OS-assigned; also FABRIK_WEBHOOK_PORT)")
+	flag.StringVar(&cfg.WebhookEvents, "webhook-events", "", "Comma-separated list of GitHub event types to subscribe to (default: all supported events; also FABRIK_WEBHOOK_EVENTS)")
 
 	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
 		return err
@@ -359,6 +365,34 @@ func Execute() error {
 			cfg.PluginDir = v
 		}
 	}
+	if !explicitFlags["webhooks"] {
+		if v := os.Getenv("FABRIK_WEBHOOKS"); v != "" {
+			lv := strings.ToLower(v)
+			cfg.Webhooks = lv == "true" || lv == "1" || lv == "yes"
+		} else if pc.Webhooks {
+			cfg.Webhooks = true
+		}
+	}
+	if !explicitFlags["webhook-port"] {
+		if v := os.Getenv("FABRIK_WEBHOOK_PORT"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				cfg.WebhookPort = n
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_WEBHOOK_PORT=%q is invalid (must be 0 or a positive integer); using OS-assigned port\n", v)
+			}
+		} else if pc.WebhookPort != nil {
+			if *pc.WebhookPort >= 0 {
+				cfg.WebhookPort = *pc.WebhookPort
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] webhook_port=%d is invalid (must be 0 or a positive integer); using OS-assigned port\n", *pc.WebhookPort)
+			}
+		}
+	}
+	if cfg.WebhookEvents == "" {
+		if v := os.Getenv("FABRIK_WEBHOOK_EVENTS"); v != "" {
+			cfg.WebhookEvents = v
+		}
+	}
 
 	if cfg.Owner == "" || cfg.ProjectNum == 0 {
 		flag.Usage()
@@ -432,6 +466,19 @@ func Execute() error {
 		fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skill check failed: %v\n", err)
 	}
 
+	// Parse webhook events from comma-separated string.
+	var webhookEvents []string
+	if cfg.WebhookEvents != "" {
+		for _, ev := range strings.Split(cfg.WebhookEvents, ",") {
+			ev = strings.TrimSpace(ev)
+			if ev != "" {
+				webhookEvents = append(webhookEvents, ev)
+			}
+		}
+	} else if len(pc.WebhookEvents) > 0 {
+		webhookEvents = pc.WebhookEvents
+	}
+
 	eng, err := engine.New(engine.Config{
 		Owner:             cfg.Owner,
 		Repo:              cfg.Repo,
@@ -455,6 +502,9 @@ func Execute() error {
 		DebugOutput:       cfg.DebugOutput,
 		PluginDir:         cfg.PluginDir,
 		Stages:            stageCfgs,
+		Webhooks:          cfg.Webhooks,
+		WebhookPort:       cfg.WebhookPort,
+		WebhookEvents:     webhookEvents,
 		ReadyCh:           testReadyCh,
 	})
 	if err != nil {

@@ -11,11 +11,14 @@ import (
 	"github.com/muesli/termenv"
 )
 
-// FooterComponent renders the bottom status bar: project info and rate limit stats.
+// FooterComponent renders the bottom status bar: project info, rate limit stats,
+// and (when webhook mode is active) the webhook health indicator.
 type FooterComponent struct {
-	projectInfo  ProjectInfo
-	graphqlStats RateLimitStats
-	now          time.Time
+	projectInfo   ProjectInfo
+	graphqlStats  RateLimitStats
+	now           time.Time
+	webhookState  string         // "", "starting_up", "healthy", "unhealthy"
+	webhookCounts map[string]int // per-type event counts
 }
 
 func (f FooterComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
@@ -29,8 +32,32 @@ func (f FooterComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 	case ProjectMetaEvent:
 		f.projectInfo.BoardTitle = ev.BoardTitle
 		f.projectInfo.BoardURL = ev.BoardURL
+	case WebhookStatusEvent:
+		f.webhookState = ev.State
+		if ev.EventCounts != nil {
+			f.webhookCounts = ev.EventCounts
+		}
 	}
 	return f, nil
+}
+
+// webhookIndicator returns the rendered webhook health indicator string, or "" when
+// webhook mode is disabled.
+func (f FooterComponent) webhookIndicator() string {
+	total := 0
+	for _, n := range f.webhookCounts {
+		total += n
+	}
+	switch f.webhookState {
+	case "healthy":
+		return successStyle.Render(fmt.Sprintf("● webhook (%d)", total))
+	case "starting_up":
+		return infoStyle.Render(fmt.Sprintf("○ webhook (%d)", total))
+	case "unhealthy":
+		return activeStyle.Render(fmt.Sprintf("◌ webhook (%d)", total))
+	default:
+		return ""
+	}
 }
 
 // supportsOSC8 returns true when the terminal is known to support OSC 8 hyperlinks.
@@ -100,7 +127,10 @@ func (f FooterComponent) View(width int) string {
 	}
 	leftPlain := strings.Join(parts, " · ")
 
-	var rightStr string
+	var rightParts []string
+	if whInd := f.webhookIndicator(); whInd != "" {
+		rightParts = append(rightParts, whInd)
+	}
 	if f.graphqlStats.Limit > 0 {
 		countdown := fmtRateLimitCountdown(f.graphqlStats.Reset, f.now)
 		plain := fmt.Sprintf("%d/%d  %s", f.graphqlStats.Remaining, f.graphqlStats.Limit, countdown)
@@ -114,7 +144,11 @@ func (f FooterComponent) View(width int) string {
 		default:
 			style = failStyle
 		}
-		rightStr = style.Render(plain)
+		rightParts = append(rightParts, style.Render(plain))
+	}
+	var rightStr string
+	if len(rightParts) > 0 {
+		rightStr = strings.Join(rightParts, "  ")
 	}
 
 	maxWidth := width - 2 // leave 1 char margin on each side
