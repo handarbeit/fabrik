@@ -27,6 +27,10 @@ title: Fabrik Positioning
 - **Linear AI Agents** — first-class agent delegation from issues; Copilot integration opens draft PRs from Linear issues.
 - **GitHub Agentic Workflows** (technical preview, Feb 2026) — Markdown-described workflows run Claude Code/Copilot/Codex in GitHub Actions; triggered by issue events, schedules, or comment commands; MIT licensed.
 
+### Issue-tracker-driven competitors
+
+- **Symphony** (OpenAI, github.com/openai/symphony) — newly-published long-running daemon that polls Linear, runs Codex agents in per-issue workspaces, keeps workflow policy in `WORKFLOW.md`. Closest architectural cousin to Fabrik; tracker-coupled (Linear-only in v1) and DB-free, but with materially different internal contracts (single-prompt workflow, agent writes tracker state, hooks-driven workspace bootstrap, mandated observability). See [`competitive/symphony.md`](competitive/symphony.md) for the deep comparison.
+
 ### Patterns observed
 
 - Most tools build their own proprietary kanban rather than integrating with GitHub Projects.
