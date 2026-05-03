@@ -130,6 +130,13 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 			if attempted {
 				cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
 				if time.Since(lastAttempt) >= cooldown {
+					// Completed stages have no work to retry — skip the cooldown retry.
+					// This prevents perpetual deep-fetches for terminal items (cruise+Validate
+					// complete, paused+complete, closed-with-stage-complete) where every poll
+					// after cooldown expiry would otherwise trigger a no-op deep-fetch.
+					if hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) {
+						return false
+					}
 					return true // cooldown expired, retry
 				}
 			}
