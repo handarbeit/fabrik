@@ -6,6 +6,9 @@ on:
       - "docs/**"
       - "scripts/generate-llms-full.sh"
 
+permissions:
+  contents: read
+
 jobs:
   check-llms-full:
     name: Verify llms-full.txt is up to date
@@ -16,7 +19,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Regenerate llms-full.txt
-        run: scripts/generate-llms-full.sh
+        run: bash scripts/generate-llms-full.sh
 
       - name: Fail if llms-full.txt is out of date
         run: |
