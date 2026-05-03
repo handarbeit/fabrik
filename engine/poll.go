@@ -303,6 +303,7 @@ func (e *Engine) Run() error {
 			e.emit,
 			initialRepos,
 			e.cfg.WebhookEvents,
+			e.cfg.User,
 		)
 		if err := wm.Start(ctx, e.cfg.WebhookPort); err == nil {
 			e.webhookMgr = wm
@@ -428,8 +429,6 @@ func (e *Engine) Run() error {
 				case <-ticker.C:
 				default:
 				}
-				e.idleStart = time.Time{}
-				prevMultiplier = 1
 				e.logf(0, "poll", "wake requested — polling immediately\n")
 				if err := doPollCycle(); err != nil {
 					e.logf(0, "warn", "poll error: %v\n", err)
