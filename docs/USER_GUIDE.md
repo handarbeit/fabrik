@@ -1589,7 +1589,11 @@ Events are translated into immediate poll wakeups — the existing board-fetch a
 
 ### Prerequisites
 
-- **`gh` CLI version ≥ 2.32.0** (released October 2023). `gh webhook forward` was introduced in this version. Run `gh --version` to check.
+- **`cli/gh-webhook` extension** — `gh webhook forward` is **not** a built-in `gh` subcommand; it ships as a separate extension that must be installed once:
+  ```bash
+  gh extension install cli/gh-webhook
+  ```
+  Verify installation: `gh webhook --help` (should print usage, not `unknown command "webhook"`). No minimum `gh` version is required.
 - **`gh auth login`** with a token that has `admin:repo_hook` write scope (classic PAT) or equivalent repo admin access. Fine-grained tokens may lack this scope.
 - **Repo admin access** on each repository on your board, or org-admin access for org-level subscription.
 
@@ -1662,7 +1666,7 @@ On multi-repo boards, Fabrik uses a single `gh webhook forward` subprocess:
 
 ### Troubleshooting Webhook Mode
 
-**"prerequisite check failed"** — `gh` is missing or too old. Install or upgrade: <https://cli.github.com>
+**"prerequisite check failed"** — `gh` is missing or the `gh-webhook` extension is not installed. Install `gh` at <https://cli.github.com>, then run `gh extension install cli/gh-webhook`.
 
 **Stream shows yellow "unhealthy"** — The subprocess may have exited or GitHub isn't delivering events. Check `fabrik.log` for `[webhook]` error lines. Run `gh auth status` to verify your token has `admin:repo_hook` scope.
 
@@ -1816,6 +1820,25 @@ the same project, it exits with a clear error. The lock is automatically
 released if the process crashes.
 
 To check for stale instances: `pgrep -la fabrik`
+
+### `unknown command "webhook" for "gh"` in Webhook Mode
+
+**Symptom:** Fabrik logs lines like:
+
+```
+[webhook] [gh] unknown command "webhook" for "gh"
+[webhook] gh webhook forward exited: exit status 1 — restarting in 1s
+```
+
+**Cause:** `gh webhook forward` is not a built-in `gh` subcommand — it is the [`cli/gh-webhook`](https://github.com/cli/gh-webhook) extension, which must be installed separately.
+
+**Fix:**
+```bash
+gh extension install cli/gh-webhook
+gh webhook --help   # verify: should print usage
+```
+
+Then restart Fabrik. The extension is a one-time install and persists across `gh` upgrades.
 
 ### Plugin Not Loading
 
