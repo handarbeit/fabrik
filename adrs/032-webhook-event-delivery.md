@@ -106,42 +106,41 @@ The webhook secret is generated from `crypto/rand` (32 bytes, hex-encoded) at st
 
 ---
 
-## Addendum: Self-Feedback Loop Fix (Issue #490, 2026-05-03)
+## Addendum: Self-Feedback Loop Analysis and Partial Fix (Issue #490, 2026-05-03)
 
 ### Problem
 
-The original design translated **all** verified webhook events to `wakeCh` signals with no sender filtering. Fabrik's own API actions — label mutations, comment posts, status field updates, PR opens — each generate one or more webhook events on the watched repos. Every arriving event triggered an immediate full board fetch, and the wake handler unconditionally reset idle backoff to 1× before polling. The net effect: Fabrik's own stage advances produced a self-reinforcing sequence of webhook wakes that defeated the idle-backoff savings webhooks were added to provide.
+The original design translated **all** verified webhook events to `wakeCh` signals with no filtering. Fabrik's own API actions — label mutations, comment posts, status field updates, PR opens — each generate one or more webhook events on the watched repos. Every arriving event triggered an immediate full board fetch, and the wake handler unconditionally reset idle backoff to 1× before polling. The net effect: Fabrik's own stage advances produced a self-reinforcing sequence of webhook wakes that defeated the idle-backoff savings webhooks were added to provide.
 
 A single stage advance typically performs 3–6 API mutations, each generating a distinct webhook event (`issues.labeled`, `issues.unlabeled`, `projects_v2_item.edited`, `issue_comment.created`, etc.). The single-slot `wakeCh` buffer collapsed a burst of N events to at most 1–2 extra polls, but each self-event still wiped the backoff multiplier and triggered an unnecessary board fetch.
 
-### Mitigation
+### Sender-Filter Approach — Considered and Rejected
 
-Two changes were made:
+An initial approach added a sender-login filter: parse `sender.login` from the webhook payload and suppress the `wakeCh` signal when the sender matches `cfg.User`. This was implemented and then reverted for a fundamental reason:
 
-**1. Sender filter.** `webhookManager` now stores the configured Fabrik username (`cfgUser`). In `handleWebhook`, after updating health state and event counters (which run for all events regardless of sender), a guard is inserted before the `wakeCh` send:
+**Fabrik runs authenticated as the user's own GitHub account.** `cfg.User` is the human operator's login (e.g., `arbeithand`), not a dedicated bot account. Filtering by `cfg.User` would suppress not only Fabrik's own API actions but also every event the human user generates — label changes, comments, PR reviews — silencing the webhook stream for the most important input class.
 
-```go
-if wm.cfgUser != "" && strings.EqualFold(payload.Sender.Login, wm.cfgUser) {
-    wm.logFn(0, "webhook", "skipping wake: self-event from %s\n", payload.Sender.Login)
-    w.WriteHeader(http.StatusOK)
-    return
-}
-```
+The sender-filter design is only viable when Fabrik runs as a dedicated bot account distinct from any human user. That is a future change; this PR does not implement it.
 
-If `cfgUser` is empty (not configured), no events are filtered — the guard is a no-op. `strings.EqualFold` is used because GitHub logins are case-insensitive by convention, consistent with the rest of the codebase.
+### Applied Fix: Backoff Preservation
 
-Health state (transition to `WebhookStreamHealthy`, `lastEventTime` refresh) and `eventCounts` still update for self-sender events. Only the `wakeCh` signal is suppressed.
+The one correctness fix that does not require a bot account: the `case <-e.wakeCh:` branch in `poll.go`'s `Run()` loop unconditionally reset `e.idleStart` and `prevMultiplier` to 1× before calling `doPollCycle`. These two lines were removed. Backoff is now only reset inside `doPollCycle` when `result.Active == true` — the location that was already correct.
 
-**2. Backoff preservation.** The `case <-e.wakeCh:` branch in `poll.go`'s `Run()` loop previously reset `e.idleStart` and `prevMultiplier` unconditionally before calling `doPollCycle`. These two lines were removed. Backoff is now only reset inside `doPollCycle` when `result.Active == true` — the correct location that was already in place.
+This means webhook wakes no longer unconditionally destroy the idle-backoff state. A wake during a quiet period still triggers an immediate poll (correct), but if the poll finds nothing active, the backoff multiplier is preserved rather than reset to 1×. The full backoff-reset-on-activity behavior is unchanged.
 
-### Design Trade-Off
+### Burst Coalescence (Existing Behavior, Confirmed)
 
-Self-sender events are filtered out entirely. Fabrik already knows about the state changes it caused (it caused them), so skipping a re-poll on its own events is safe. If Fabrik's action produced side-effects visible only via a fresh board fetch (e.g., a bot reacting to a label change), the safety-net poll at the extended idle cap will pick those up within 60 minutes — consistent with the at-most-once delivery semantics already accepted in this ADR.
+The single-slot `wakeCh` channel (cap 1) naturally coalesces bursts: N simultaneous events queue at most 1 wake. This property was confirmed by a new test (`TestHandleWebhookBurstCoalescence`) and is unchanged by this fix.
 
-Bot-triggered events (e.g., `copilot-pull-request-reviewer` commenting on a PR Fabrik opened) are deliberately **not** filtered. Those represent genuinely new external state worth waking on immediately, and their sender login does not match `cfgUser`.
+### Remaining Gap
+
+Fabrik-generated events still trigger webhook wakes (one per burst of actions). Each wake produces one unnecessary poll cycle, partially defeating the GraphQL budget savings that webhooks provide. The full fix requires either:
+- Running Fabrik as a dedicated bot account (so sender-filter is safe), or
+- A different event-attribution mechanism (e.g., X-request-ID correlation, or suppressing wakes during an active stage invocation window).
+
+This is tracked as a known gap, not a regression. The burst-coalescence guarantee bounds the damage: a stage advance producing N API actions generates at most 1 extra poll, not N.
 
 ### Scope
 
-- `engine/webhook.go`: `minWebhookPayload.Sender`, `webhookManager.cfgUser`, `newWebhookManager` 6th parameter, sender-filter guard in `handleWebhook`.
-- `engine/poll.go`: `newWebhookManager` call site updated; two pre-poll backoff reset lines removed from `case <-e.wakeCh:`.
-- `engine/webhook_test.go`: `newTestWebhookManager` gains a `cfgUser` parameter; three new tests cover self-sender skip, non-self-sender wake, and burst coalescence.
+- `engine/poll.go`: two pre-poll backoff reset lines removed from `case <-e.wakeCh:`.
+- `engine/webhook_test.go`: `TestHandleWebhookBurstCoalescence` confirms burst coalescence is preserved.
