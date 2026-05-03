@@ -60,9 +60,9 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	e.removeFailedLabel(owner, repo, item.Number, stage.Name)
 
 	// Re-fetch labels so we see changes made while the stage was running
-	// (e.g., fabrik:yolo added mid-run). The item snapshot from dispatch
-	// time may be stale. On error, keep existing labels.
-	if freshLabels, err := e.readClient.FetchLabels(e.cfg.Owner, e.cfg.Repo, item.Number); err == nil && len(freshLabels) > 0 {
+	// (e.g., fabrik:yolo added mid-run). Must bypass cache — the webhook for a
+	// label added mid-run may not have been applied yet. On error, keep existing labels.
+	if freshLabels, err := e.client.FetchLabels(e.cfg.Owner, e.cfg.Repo, item.Number); err == nil && len(freshLabels) > 0 {
 		item.Labels = freshLabels
 	}
 
