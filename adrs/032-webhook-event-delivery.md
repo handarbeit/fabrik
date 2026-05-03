@@ -103,3 +103,45 @@ The webhook secret is generated from `crypto/rand` (32 bytes, hex-encoded) at st
 - **Non-fatal failures:** All webhook plumbing failures are non-fatal. The engine never blocks on webhook health.
 - **Subprocess supervision:** A new long-running subprocess (`gh webhook forward`) is added to the engine's lifecycle. It follows the `runClaude` process-group patterns but runs asynchronously for the engine's lifetime.
 - **ADR 003 is superseded** but its core insight (polling as the reliable foundation) remains: polling is now the safety net rather than the only mechanism.
+
+---
+
+## Addendum: Self-Feedback Loop Fix (Issue #490, 2026-05-03)
+
+### Problem
+
+The original design translated **all** verified webhook events to `wakeCh` signals with no sender filtering. Fabrik's own API actions — label mutations, comment posts, status field updates, PR opens — each generate one or more webhook events on the watched repos. Every arriving event triggered an immediate full board fetch, and the wake handler unconditionally reset idle backoff to 1× before polling. The net effect: Fabrik's own stage advances produced a self-reinforcing sequence of webhook wakes that defeated the idle-backoff savings webhooks were added to provide.
+
+A single stage advance typically performs 3–6 API mutations, each generating a distinct webhook event (`issues.labeled`, `issues.unlabeled`, `projects_v2_item.edited`, `issue_comment.created`, etc.). The single-slot `wakeCh` buffer collapsed a burst of N events to at most 1–2 extra polls, but each self-event still wiped the backoff multiplier and triggered an unnecessary board fetch.
+
+### Mitigation
+
+Two changes were made:
+
+**1. Sender filter.** `webhookManager` now stores the configured Fabrik username (`cfgUser`). In `handleWebhook`, after updating health state and event counters (which run for all events regardless of sender), a guard is inserted before the `wakeCh` send:
+
+```go
+if wm.cfgUser != "" && strings.EqualFold(payload.Sender.Login, wm.cfgUser) {
+    wm.logFn(0, "webhook", "skipping wake: self-event from %s\n", payload.Sender.Login)
+    w.WriteHeader(http.StatusOK)
+    return
+}
+```
+
+If `cfgUser` is empty (not configured), no events are filtered — the guard is a no-op. `strings.EqualFold` is used because GitHub logins are case-insensitive by convention, consistent with the rest of the codebase.
+
+Health state (transition to `WebhookStreamHealthy`, `lastEventTime` refresh) and `eventCounts` still update for self-sender events. Only the `wakeCh` signal is suppressed.
+
+**2. Backoff preservation.** The `case <-e.wakeCh:` branch in `poll.go`'s `Run()` loop previously reset `e.idleStart` and `prevMultiplier` unconditionally before calling `doPollCycle`. These two lines were removed. Backoff is now only reset inside `doPollCycle` when `result.Active == true` — the correct location that was already in place.
+
+### Design Trade-Off
+
+Self-sender events are filtered out entirely. Fabrik already knows about the state changes it caused (it caused them), so skipping a re-poll on its own events is safe. If Fabrik's action produced side-effects visible only via a fresh board fetch (e.g., a bot reacting to a label change), the safety-net poll at the extended idle cap will pick those up within 60 minutes — consistent with the at-most-once delivery semantics already accepted in this ADR.
+
+Bot-triggered events (e.g., `copilot-pull-request-reviewer` commenting on a PR Fabrik opened) are deliberately **not** filtered. Those represent genuinely new external state worth waking on immediately, and their sender login does not match `cfgUser`.
+
+### Scope
+
+- `engine/webhook.go`: `minWebhookPayload.Sender`, `webhookManager.cfgUser`, `newWebhookManager` 6th parameter, sender-filter guard in `handleWebhook`.
+- `engine/poll.go`: `newWebhookManager` call site updated; two pre-poll backoff reset lines removed from `case <-e.wakeCh:`.
+- `engine/webhook_test.go`: `newTestWebhookManager` gains a `cfgUser` parameter; three new tests cover self-sender skip, non-self-sender wake, and burst coalescence.
