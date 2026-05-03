@@ -35,7 +35,7 @@ func (e *Engine) checkMergeabilityGate(item gh.ProjectItem, stage *stages.Stage)
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
-	pr, err := e.client.FetchLinkedPR(owner, repo, item.Number)
+	pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number)
 	if err != nil {
 		// Transient API error. Block this item for the rest of Phase 1 so we
 		// don't run the CI gate on stale data (it would make its own REST
@@ -48,7 +48,7 @@ func (e *Engine) checkMergeabilityGate(item gh.ProjectItem, stage *stages.Stage)
 		return false, false
 	}
 
-	mergeable, err := e.client.FetchPRMergeable(owner, repo, pr.Number)
+	mergeable, err := e.readClient.FetchPRMergeable(owner, repo, pr.Number)
 	if err != nil {
 		e.logf(item.Number, "merge-gate", "could not fetch mergeable: %v — blocking until API recovers\n", err)
 		return true, false
