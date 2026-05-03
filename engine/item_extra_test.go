@@ -868,6 +868,37 @@ func TestItemMayNeedWork_IncompleteStageStillRetried(t *testing.T) {
 	}
 }
 
+// TestItemMayNeedWork_AwaitingReview_WithCompleteLabel verifies the critical
+// interaction: an item with BOTH stage:X:complete AND fabrik:awaiting-review must
+// still be admitted via the cooldown retry path after cooldown expires, so
+// Phase 1/Phase 2 review-reprompt timers can fire. Part 1's stage-complete
+// suppression explicitly exempts awaiting-review items for this reason.
+func TestItemMayNeedWork_AwaitingReview_WithCompleteLabel(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.cfg.PollSeconds = 1 // short cooldown (10s)
+
+	ts := time.Now().Add(-time.Minute)
+	item := gh.ProjectItem{
+		Number:    69,
+		Status:    "Research",
+		ItemID:    "PVTI_69",
+		UpdatedAt: ts,
+		Labels:    []string{"stage:Research:complete", "fabrik:awaiting-review"},
+	}
+
+	eng.mu.Lock()
+	eng.lastUpdatedAt["owner/repo#69"] = ts
+	eng.processedSet["owner/repo#69-Research"] = time.Now().Add(-2 * time.Minute) // expired
+	eng.mu.Unlock()
+
+	// Must return true: awaiting-review exempts the item from stage-complete suppression.
+	// If this returns false, Phase 1/Phase 2 reprompt timers can never fire.
+	if !eng.itemMayNeedWork(item) {
+		t.Error("item with stage:X:complete AND fabrik:awaiting-review and expired cooldown must be re-admitted — awaiting-review exempts from stage-complete suppression so Phase 1/Phase 2 timers can fire")
+	}
+}
+
+
 // ── fabrik:awaiting-ci conjunctive gate dispatch guards ──────────────────────
 
 // TestItemNeedsWork_AwaitingCI_NoDispatch verifies that itemNeedsWork returns
