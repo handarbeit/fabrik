@@ -3680,7 +3680,7 @@ Either `skill` or `prompt` is required (unless `cleanup_worktree` is true). When
 
 ---
 
-# Fabrik Positioning Notes
+# Fabrik Positioning
 
 Source: https://fabrik.handarbeit.io/positioning
 
