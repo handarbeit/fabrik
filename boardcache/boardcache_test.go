@@ -463,6 +463,64 @@ func TestDeltaPullRequestReviewSubmittedUpsert(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Delta: pull_request_review_comment.created — idempotent by NodeID
+// ---------------------------------------------------------------------------
+
+func pullRequestReviewCommentPayloadJSON(action, repo string, prNum, dbID int, nodeID, body, user string) []byte {
+	p := pullRequestReviewCommentPayload{Action: action}
+	p.Repository.FullName = repo
+	p.PullRequest.Number = prNum
+	p.Comment.NodeID = nodeID
+	p.Comment.DatabaseID = dbID
+	p.Comment.Body = body
+	p.Comment.User.Login = user
+	p.Comment.CreatedAt = time.Now().Format(time.RFC3339)
+	p.Comment.DiffHunk = "@@ -1,3 +1,4 @@"
+	p.Comment.Path = "main.go"
+	b, _ := json.Marshal(p)
+	return b
+}
+
+func TestDeltaPullRequestReviewCommentCreated(t *testing.T) {
+	c := seedCache(t)
+	c.mu.Lock()
+	c.items[itemKey("owner/repo", 1)].LinkedPRNumber = 42
+	c.mu.Unlock()
+
+	payload := pullRequestReviewCommentPayloadJSON("created", "owner/repo", 42, 200, "RC_node_1", "looks good", "bob")
+	c.ApplyDelta("pull_request_review_comment", payload)
+
+	c.mu.RLock()
+	item := c.items[itemKey("owner/repo", 1)]
+	comments := cloneComments(item.LinkedPRReviewThreadComments)
+	c.mu.RUnlock()
+
+	if len(comments) != 1 || comments[0].ID != "RC_node_1" || comments[0].Author != "bob" {
+		t.Errorf("unexpected review thread comments: %+v", comments)
+	}
+}
+
+func TestDeltaPullRequestReviewCommentCreatedIdempotent(t *testing.T) {
+	c := seedCache(t)
+	c.mu.Lock()
+	c.items[itemKey("owner/repo", 1)].LinkedPRNumber = 42
+	c.mu.Unlock()
+
+	payload := pullRequestReviewCommentPayloadJSON("created", "owner/repo", 42, 200, "RC_node_1", "looks good", "bob")
+	c.ApplyDelta("pull_request_review_comment", payload)
+	c.ApplyDelta("pull_request_review_comment", payload) // duplicate
+
+	c.mu.RLock()
+	item := c.items[itemKey("owner/repo", 1)]
+	count := len(item.LinkedPRReviewThreadComments)
+	c.mu.RUnlock()
+
+	if count != 1 {
+		t.Errorf("expected exactly 1 review thread comment after duplicate, got %d", count)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Delta: check_run.completed — upsert by ID
 // ---------------------------------------------------------------------------
 
