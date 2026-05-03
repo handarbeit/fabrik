@@ -1076,8 +1076,11 @@ func TestComputeEffectiveInterval_RateLimitStepwise(t *testing.T) {
 		{"not in backoff (1.0)", 1.0, 30 * time.Second},
 		{"sticky zone (0.35)", 0.35, 60 * time.Second},
 		{"active 10-20% (0.15)", 0.15, 60 * time.Second},
+		{"boundary exactly 10% (0.10)", 0.10, 60 * time.Second},  // >=0.10 → 2× tier
 		{"just below 10% (0.099)", 0.099, 2 * time.Minute},
+		{"boundary exactly 5% (0.05)", 0.05, 2 * time.Minute},    // >=0.05 → 4× tier
 		{"just below 5% (0.049)", 0.049, 3 * time.Minute},
+		{"boundary exactly 1% (0.01)", 0.01, 3 * time.Minute},    // >=0.01 → 6× tier
 		{"just below 1% (0.009)", 0.009, 5 * time.Minute},
 		{"zero remaining (0.0)", 0.0, 5 * time.Minute},
 	}
