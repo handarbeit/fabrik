@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/verveguy/fabrik/boardcache"
 	gh "github.com/verveguy/fabrik/github"
 	"github.com/verveguy/fabrik/stages"
 	"github.com/verveguy/fabrik/tui"
@@ -287,6 +288,9 @@ func (e *Engine) Run() error {
 		e.logf(0, "warn", "label seeding failed (non-fatal): %v\n", err)
 	}
 
+	// Extract in-memory cache if configured (nil when board-cache=none).
+	cacheImpl, _ := e.readClient.(*boardcache.CacheImpl)
+
 	// Start webhook manager when enabled. Failures are non-fatal: the engine
 	// continues in polling-only mode.
 	if e.cfg.Webhooks {
@@ -297,16 +301,40 @@ func (e *Engine) Run() error {
 		if e.cfg.Owner != "" && e.cfg.Repo != "" {
 			initialRepos = map[string]bool{e.cfg.Owner + "/" + e.cfg.Repo: true}
 		}
+		var deltaFn func(string, []byte)
+		var healthChangeFn func(bool)
+		if cacheImpl != nil {
+			deltaFn = cacheImpl.ApplyDelta
+			healthChangeFn = func(healthy bool) {
+				if healthy {
+					e.reconcileCache(cacheImpl)
+					cacheImpl.Resume()
+				} else {
+					cacheImpl.Pause()
+				}
+			}
+		}
 		wm := newWebhookManager(
 			e.logf,
 			e.wakeCh,
 			e.emit,
 			initialRepos,
 			e.cfg.WebhookEvents,
+			deltaFn,
+			healthChangeFn,
 		)
 		if err := wm.Start(ctx, e.cfg.WebhookPort); err == nil {
 			e.webhookMgr = wm
 			defer wm.Stop()
+			if cacheImpl != nil {
+				board, err := e.client.FetchProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
+				if err != nil {
+					e.logf(0, "cache", "bootstrap fetch failed — cache will be populated on first miss: %v\n", err)
+				} else {
+					cacheImpl.Bootstrap(board)
+				}
+				go e.runReconciliationLoop(ctx, cacheImpl)
+			}
 		}
 	}
 
@@ -1347,4 +1375,31 @@ func (e *Engine) checkURLRewrite() bool {
 		}
 	}
 	return false
+}
+
+// reconcileCache fetches a fresh board snapshot from GitHub and applies it to
+// the in-memory cache, preserving deep fields already fetched for individual items.
+func (e *Engine) reconcileCache(cache *boardcache.CacheImpl) {
+	board, err := e.client.FetchProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
+	if err != nil {
+		e.logf(0, "cache", "reconciliation fetch failed: %v\n", err)
+		return
+	}
+	cache.Reconcile(board)
+}
+
+// runReconciliationLoop periodically reconciles the in-memory cache with GitHub
+// by fetching a full board snapshot. It runs once per webhookIdleCap (60 min)
+// so the cache self-heals any deltas missed by the webhook stream.
+func (e *Engine) runReconciliationLoop(ctx context.Context, cache *boardcache.CacheImpl) {
+	ticker := time.NewTicker(webhookIdleCap)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			e.reconcileCache(cache)
+		}
+	}
 }
