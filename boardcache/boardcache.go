@@ -289,7 +289,7 @@ func (c *CacheImpl) FetchItemDetails(item *gh.ProjectItem) error {
 	// Store the deep fields in the cache.
 	c.mu.Lock()
 	if cached, ok := c.items[key]; ok {
-		mergeDeepFields(cached, item)
+		copyDeepFields(cached, item)
 	} else {
 		cp := *item
 		c.items[key] = &cp
@@ -408,20 +408,6 @@ func copyDeepFields(dst, src *gh.ProjectItem) {
 	dst.LinkedPRResolvedThreadCount = src.LinkedPRResolvedThreadCount
 }
 
-// mergeDeepFields copies deep fields from src into dst (for cache population after fallback).
-func mergeDeepFields(dst, src *gh.ProjectItem) {
-	dst.Body = src.Body
-	dst.URL = src.URL
-	dst.Author = src.Author
-	dst.Assignees = cloneStrings(src.Assignees)
-	dst.BlockedBy = cloneDependencies(src.BlockedBy)
-	dst.Comments = cloneComments(src.Comments)
-	dst.LinkedPRNumber = src.LinkedPRNumber
-	dst.LinkedPRReviewRequests = cloneReviewRequests(src.LinkedPRReviewRequests)
-	dst.LinkedPRReviews = clonePRReviews(src.LinkedPRReviews)
-	dst.LinkedPRReviewThreadComments = cloneComments(src.LinkedPRReviewThreadComments)
-	dst.LinkedPRResolvedThreadCount = src.LinkedPRResolvedThreadCount
-}
 
 func cloneStrings(s []string) []string {
 	if s == nil {
