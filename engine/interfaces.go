@@ -41,6 +41,8 @@ type GitHubClient interface {
 	FetchLabelAppliedAt(owner, repo string, issueNumber int, labelName string) (time.Time, error)
 	SeedLabels(owner, repo string, stageNames []string, lockedUser string) error
 	RateLimitStats() (rest, graphql gh.RateLimitStats)
+	FetchProjectItemStatus(itemID string) (string, error)
+	FetchProjectItemStatusBatch(projectID string) (map[string]string, error)
 }
 
 // InvokeOptions bundles per-issue override parameters for Claude invocations.

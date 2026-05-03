@@ -962,3 +962,132 @@ func TestFetchCheckRunsFallsThroughWhenPaused(t *testing.T) {
 		t.Errorf("expected live run (ID=99) from fallback when paused, got %+v", runs)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// UpdateItemStatus tests
+// ---------------------------------------------------------------------------
+
+func TestUpdateItemStatusSetsStatusAndUpdatedAt(t *testing.T) {
+	c := seedCache(t)
+	key := ItemKey("owner/repo", 1)
+
+	before := time.Now()
+	c.UpdateItemStatus(key, "Plan")
+	after := time.Now()
+
+	c.mu.RLock()
+	item := c.items[key]
+	c.mu.RUnlock()
+
+	if item.Status != "Plan" {
+		t.Errorf("want Status %q, got %q", "Plan", item.Status)
+	}
+	if item.UpdatedAt.Before(before) || item.UpdatedAt.After(after) {
+		t.Errorf("UpdatedAt %v not in expected range [%v, %v]", item.UpdatedAt, before, after)
+	}
+}
+
+func TestUpdateItemStatusNoopForUnknownKey(t *testing.T) {
+	c := seedCache(t)
+	// Should not panic; just log and return.
+	c.UpdateItemStatus("nonexistent/repo#999", "Done")
+}
+
+func TestUpdateItemStatusIsIdempotent(t *testing.T) {
+	c := seedCache(t)
+	key := ItemKey("owner/repo", 1)
+	c.UpdateItemStatus(key, "Plan")
+	c.UpdateItemStatus(key, "Plan")
+
+	c.mu.RLock()
+	item := c.items[key]
+	c.mu.RUnlock()
+	if item.Status != "Plan" {
+		t.Errorf("want Status %q after repeated calls, got %q", "Plan", item.Status)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ApplyStatusBatch tests
+// ---------------------------------------------------------------------------
+
+func TestApplyStatusBatchUpdatesDriftedItems(t *testing.T) {
+	c := seedCache(t)
+	// PVTI_001 is item #1 (status "Research"); drift it to "Plan".
+	c.ApplyStatusBatch(map[string]string{"PVTI_001": "Plan"})
+
+	c.mu.RLock()
+	item := c.items[ItemKey("owner/repo", 1)]
+	c.mu.RUnlock()
+
+	if item.Status != "Plan" {
+		t.Errorf("want Status %q, got %q", "Plan", item.Status)
+	}
+}
+
+func TestApplyStatusBatchLeavesUndriftedItemsUnchanged(t *testing.T) {
+	c := seedCache(t)
+	key2 := ItemKey("owner/repo", 2)
+
+	c.mu.RLock()
+	origUpdatedAt := c.items[key2].UpdatedAt
+	c.mu.RUnlock()
+
+	// Item 2 already has Status "Plan" — sending same value should not change UpdatedAt.
+	c.ApplyStatusBatch(map[string]string{"PVTI_002": "Plan"})
+
+	c.mu.RLock()
+	item := c.items[key2]
+	c.mu.RUnlock()
+
+	if item.UpdatedAt != origUpdatedAt {
+		t.Error("UpdatedAt should not change when Status is already up to date")
+	}
+}
+
+func TestApplyStatusBatchSkipsUnknownItemIDs(t *testing.T) {
+	c := seedCache(t)
+	// Should not panic or add entries for unknown PVTI IDs.
+	c.ApplyStatusBatch(map[string]string{"PVTI_UNKNOWN": "Done"})
+	if len(c.items) != 2 {
+		t.Errorf("item count should remain 2, got %d", len(c.items))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GetItemID and ProjectID tests
+// ---------------------------------------------------------------------------
+
+func TestGetItemIDReturnsNodeID(t *testing.T) {
+	c := seedCache(t)
+	key := ItemKey("owner/repo", 1)
+	itemID, ok := c.GetItemID(key)
+	if !ok {
+		t.Fatal("GetItemID returned !ok for known key")
+	}
+	if itemID != "PVTI_001" {
+		t.Errorf("want %q, got %q", "PVTI_001", itemID)
+	}
+}
+
+func TestGetItemIDReturnsFalseForUnknownKey(t *testing.T) {
+	c := seedCache(t)
+	_, ok := c.GetItemID("nonexistent/repo#999")
+	if ok {
+		t.Error("expected !ok for unknown key")
+	}
+}
+
+func TestProjectIDReturnsBootstrappedID(t *testing.T) {
+	c := seedCache(t)
+	if got := c.ProjectID(); got != "PID" {
+		t.Errorf("want %q, got %q", "PID", got)
+	}
+}
+
+func TestProjectIDReturnsEmptyBeforeBootstrap(t *testing.T) {
+	c := NewCacheImpl(&mockClient{}, nopLog)
+	if got := c.ProjectID(); got != "" {
+		t.Errorf("want empty string before bootstrap, got %q", got)
+	}
+}
