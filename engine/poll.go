@@ -87,10 +87,10 @@ func effectiveIdleCap(webhookHealthy bool) time.Duration {
 // no rate-limit backoff is active; pass the actual fraction when backoff is active.
 // The stepwise escalation schedule (activates when ratio < 1.0):
 //
-//	10%–100% remaining: 2× configured  (includes sticky hysteresis zone 20%–50%)
-//	 5%–10% remaining:  4× configured
-//	 1%– 5% remaining:  6× configured
-//	  < 1% remaining:  10× configured  (rateLimitMaxBackoffMultiplier)
+//	>=10% remaining: 2× configured  (includes sticky hysteresis zone 20%–50%)
+//	>=5% and <10%:   4× configured
+//	>=1% and <5%:    6× configured
+//	    <1%:        10× configured  (rateLimitMaxBackoffMultiplier)
 func computeEffectiveInterval(configuredInterval time.Duration, idleDuration time.Duration, rateLimitRatio float64, webhookHealthy bool) time.Duration {
 	cap := effectiveIdleCap(webhookHealthy)
 
