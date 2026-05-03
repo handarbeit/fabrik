@@ -47,6 +47,10 @@ for entry in "${ORDERED[@]}"; do
 
   # Extract the first H1 heading from the body (reads from file, no SIGPIPE risk).
   title=$(awk '/^# /{sub(/^# /, ""); print; exit}' "${TMPFILE}")
+  if [[ -z "$title" ]]; then
+    echo "error: no H1 heading found in ${file}" >&2
+    exit 1
+  fi
 
   printf '# %s\n\nSource: %s\n\n' "$title" "$url" >> "$OUT"
 
