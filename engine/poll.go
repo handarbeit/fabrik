@@ -633,6 +633,16 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			if !item.UpdatedAt.IsZero() && !advancedItems[iKey] {
 				e.lastUpdatedAt[iKey] = item.UpdatedAt
 			}
+			// Belt-and-suspenders: refresh processedSet for non-advanced items that
+			// completed a full poll cycle without dispatching work. This caps deep-fetch
+			// frequency to once per cooldown period for terminal items even when the
+			// stage-complete label isn't within the first 15 shallow labels (where Part 1
+			// would suppress the retry entirely).
+			if !advancedItems[iKey] {
+				if stage := stages.FindStage(e.cfg.Stages, item.Status); stage != nil && !stage.CleanupWorktree {
+					e.processedSet[iKey+"-"+stage.Name] = time.Now()
+				}
+			}
 		}
 		e.mu.Unlock()
 	}()
