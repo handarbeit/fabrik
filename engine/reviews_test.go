@@ -960,6 +960,7 @@ func TestBotMentionHandle(t *testing.T) {
 	}{
 		{"copilot-pull-request-reviewer", "copilot"},
 		{"copilot", "copilot"},
+		{"Copilot-pull-request-reviewer", "copilot"},
 		{"dependabot[bot]", "dependabot[bot]"},
 		{"someuser", "someuser"},
 	}
