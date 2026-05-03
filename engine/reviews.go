@@ -171,7 +171,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 						if err := e.client.AddReviewRequest(owner, repo, item.LinkedPRNumber, []string{login}); err != nil {
 							e.logf(item.Number, "warn", "phase 1: could not re-add review request for %s: %v\n", login, err)
 						}
-						msg := fmt.Sprintf("🏭 **Fabrik — review re-prompt**\n\n@%s just checking in — could you take a look at this PR?", login)
+						msg := fmt.Sprintf("🏭 **Fabrik — review re-prompt**\n\n@%s just checking in — could you take a look at this PR?", botMentionHandle(login))
 						if dbID, err := e.client.AddComment(owner, repo, item.LinkedPRNumber, msg); err != nil {
 							e.logf(item.Number, "warn", "phase 1: could not post re-prompt comment for %s: %v\n", login, err)
 						} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
@@ -485,4 +485,12 @@ func (e *Engine) pauseForReviewCycleLimit(board *gh.ProjectBoard, item gh.Projec
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
 		e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", err)
 	}
+}
+
+// botMentionHandle maps copilot-* logins to "copilot" — GitHub's canonical mention surface for the reviewer bot.
+func botMentionHandle(login string) string {
+	if strings.HasPrefix(login, "copilot") {
+		return "copilot"
+	}
+	return login
 }
