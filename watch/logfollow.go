@@ -67,12 +67,16 @@ func logTimestampSuffix(name string) string {
 // newest log per label, and sorts by pipeline order (stageOrder map). Logs
 // whose label matches "<ParentStage>-comment-review" are grouped under the
 // parent stage tab. Unknown stages are appended after known stages in
-// chronological order. The globally newest log file is marked IsLive.
-// Returns an empty slice if logDir is unreadable or empty.
+// chronological order.
+//
+// IsLive selection: when activeStage is non-empty and a tab with that label
+// exists, it is marked IsLive (label-driven; GitHub state takes precedence
+// over log file timestamps). When activeStage is empty or names a stage with
+// no tab, falls back to the globally newest log file.
 //
 // stageOrder maps stage name → pipeline order value (from Stage.Order).
 // When stageOrder is nil or empty, falls back to chronological ordering.
-func buildStageTabs(logDir string, stageOrder map[string]int) []stageTab {
+func buildStageTabs(logDir string, stageOrder map[string]int, activeStage string) []stageTab {
 	entries, err := os.ReadDir(logDir)
 	if err != nil {
 		return nil
@@ -155,10 +159,21 @@ func buildStageTabs(logDir string, stageOrder map[string]int) []stageTab {
 
 	tabs := append(knownTabs, unknownTabs...)
 
-	// Find the globally newest log file across all tabs and mark it as IsLive.
-	// Compare by timestamp suffix only (not full filename) so that a stage label
-	// like "Specify" (alphabetically > "Research") cannot beat a chronologically
-	// newer "Research" log.
+	// Determine which tab is IsLive.
+	// Primary: when activeStage is non-empty, find the tab with that label.
+	// Fallback: pick the tab whose LogPath has the globally newest timestamp suffix.
+	if activeStage != "" {
+		for i, t := range tabs {
+			if t.Label == activeStage {
+				tabs[i].IsLive = true
+				return tabs
+			}
+		}
+		// activeStage names a stage that has no tab yet — fall through to timestamp heuristic.
+	}
+	// Timestamp-based fallback: compare by timestamp suffix only (not full filename)
+	// so that a stage label like "Specify" (alphabetically > "Research") cannot beat
+	// a chronologically newer "Research" log.
 	newestFile := ""
 	newestSuffix := ""
 	for _, t := range tabs {
@@ -204,9 +219,11 @@ func renderLogFile(path string) string {
 //  2. A directory-poll goroutine (2s interval) that detects when a new .log
 //     file appears (stage transition) and calls send(NewLogFileMsg).
 //
+// getActiveStage is called by the follow goroutine to determine which stage's
+// log to follow; "" means fall back to the globally newest log file.
 // Both goroutines run until the done channel is closed.
-func StartLogFollower(logDir string, send func(tea.Msg), done <-chan struct{}) {
-	go followLatestLog(logDir, send, done)
+func StartLogFollower(logDir string, send func(tea.Msg), done <-chan struct{}, getActiveStage func() string) {
+	go followLatestLog(logDir, getActiveStage, send, done)
 	go pollForNewLogFile(logDir, send, done)
 }
 
@@ -237,17 +254,45 @@ func newestLogFile(logDir string) string {
 	return filepath.Join(logDir, logs[len(logs)-1].Name())
 }
 
-// followLatestLog finds the newest .log file in logDir, then follows it in
-// real time (like tail -F). It blocks until done is closed. When a
-// NewLogFileMsg is needed (stage transition), pollForNewLogFile handles that
-// separately — this goroutine simply re-opens the new file path when
-// instructed via a reload.
-func followLatestLog(logDir string, send func(tea.Msg), done <-chan struct{}) {
+// bestLogFileForStage returns the path of the most recent .log file in logDir
+// whose stage label is stageName or stageName+"-comment-review". When stageName
+// is empty or no matching file exists, falls back to newestLogFile.
+func bestLogFileForStage(logDir, stageName string) string {
+	if stageName == "" {
+		return newestLogFile(logDir)
+	}
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		return newestLogFile(logDir)
+	}
+	var best string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".log") {
+			continue
+		}
+		label := stageNameFromFilename(e.Name())
+		if label != stageName && label != stageName+"-comment-review" {
+			continue
+		}
+		if logTimestampSuffix(e.Name()) > logTimestampSuffix(best) {
+			best = e.Name()
+		}
+	}
+	if best == "" {
+		return newestLogFile(logDir)
+	}
+	return filepath.Join(logDir, best)
+}
+
+// followLatestLog finds the best .log file in logDir for the active stage (or
+// globally newest when stage is unknown), then follows it in real time (like
+// tail -F). It blocks until done is closed.
+func followLatestLog(logDir string, getActiveStage func() string, send func(tea.Msg), done <-chan struct{}) {
 	// Wait for the log directory and a .log file to exist.
 	var currentPath string
 	for {
 		if currentPath == "" {
-			currentPath = newestLogFile(logDir)
+			currentPath = bestLogFileForStage(logDir, getActiveStage())
 		}
 		if currentPath != "" {
 			break
@@ -259,23 +304,24 @@ func followLatestLog(logDir string, send func(tea.Msg), done <-chan struct{}) {
 		}
 	}
 
-	followFile(currentPath, logDir, send, done)
+	followFile(currentPath, logDir, getActiveStage, send, done)
 }
 
 // followFile reads from path, rendering each NDJSON line via streamfilter.
-// It loops — switching to newer .log files as they appear — until done is closed.
-// Using a loop instead of recursion avoids goroutine stack growth across stage transitions.
-func followFile(path, logDir string, send func(tea.Msg), done <-chan struct{}) {
+// It loops — switching to the best log file for the active stage as files
+// appear — until done is closed. Using a loop instead of recursion avoids
+// goroutine stack growth across stage transitions.
+func followFile(path, logDir string, getActiveStage func() string, send func(tea.Msg), done <-chan struct{}) {
 	for {
 		f, err := os.Open(path)
 		if err != nil {
-			// File disappeared; wait briefly and try the next newest.
+			// File disappeared; wait briefly and try the best file for the active stage.
 			select {
 			case <-done:
 				return
 			case <-time.After(200 * time.Millisecond):
 			}
-			if next := newestLogFile(logDir); next != "" && next != path {
+			if next := bestLogFileForStage(logDir, getActiveStage()); next != "" && next != path {
 				path = next
 			}
 			continue
@@ -309,8 +355,8 @@ func followFile(path, logDir string, send func(tea.Msg), done <-chan struct{}) {
 					f.Close()
 					return
 				}
-				// EOF: check for a newer log file (stage transition).
-				if next := newestLogFile(logDir); next != "" && next != path {
+				// EOF: check for the best log file for the active stage (stage transition).
+				if next := bestLogFileForStage(logDir, getActiveStage()); next != "" && next != path {
 					path = next
 					switchFile = true
 					break readLoop
