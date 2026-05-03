@@ -798,3 +798,67 @@ func TestResumeReenablesDeltaApplication(t *testing.T) {
 		t.Error("delta should have been applied after resume")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Paused read methods fall through to GitHub (stream-health failover)
+// ---------------------------------------------------------------------------
+
+func TestFetchProjectBoardFallsThroughWhenPaused(t *testing.T) {
+	mc := &mockClient{projectBoardResult: &gh.ProjectBoard{
+		ProjectID: "PID2", Items: []gh.ProjectItem{{Number: 42, Repo: "o/r"}},
+	}}
+	c := NewCacheImpl(mc, nopLog)
+	c.Bootstrap(&gh.ProjectBoard{
+		ProjectID: "PID", Title: "T", OwnerType: "organization",
+		Items: []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"}},
+	})
+	c.Pause()
+
+	board, err := c.FetchProjectBoard("o", "r", 1, "organization")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
+	}
+	// Should return the fallback's board (ProjectID: "PID2"), not the cached one.
+	if board.ProjectID != "PID2" {
+		t.Errorf("expected fallback board (PID2) when paused, got %q", board.ProjectID)
+	}
+}
+
+func TestFetchLabelsFallsThroughWhenPaused(t *testing.T) {
+	mc := &mockClient{labelsResult: []string{"live-label"}}
+	c := NewCacheImpl(mc, nopLog)
+	c.Bootstrap(&gh.ProjectBoard{
+		ProjectID: "PID", Title: "T", OwnerType: "organization",
+		Items: []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Labels: []string{"cached-label"}}},
+	})
+	c.Pause()
+
+	labels, err := c.FetchLabels("owner", "repo", 1)
+	if err != nil {
+		t.Fatalf("FetchLabels: %v", err)
+	}
+	if len(labels) != 1 || labels[0] != "live-label" {
+		t.Errorf("expected live-label from fallback when paused, got %v", labels)
+	}
+	if mc.fetchLabelsCount != 1 {
+		t.Errorf("expected exactly 1 fallback call, got %d", mc.fetchLabelsCount)
+	}
+}
+
+func TestFetchCheckRunsFallsThroughWhenPaused(t *testing.T) {
+	mc := &mockClient{checkRunsResult: []gh.CheckRun{{ID: 99, Name: "live", Status: "completed", Conclusion: "success"}}}
+	c := NewCacheImpl(mc, nopLog)
+	// Pre-populate cache check runs so we can verify the paused path bypasses them.
+	c.mu.Lock()
+	c.checkRuns["sha_x"] = []gh.CheckRun{{ID: 1, Name: "cached"}}
+	c.mu.Unlock()
+	c.Pause()
+
+	runs, err := c.FetchCheckRuns("owner", "repo", "sha_x")
+	if err != nil {
+		t.Fatalf("FetchCheckRuns: %v", err)
+	}
+	if len(runs) != 1 || runs[0].ID != 99 {
+		t.Errorf("expected live run (ID=99) from fallback when paused, got %+v", runs)
+	}
+}

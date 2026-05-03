@@ -240,13 +240,15 @@ func (c *CacheImpl) IsPaused() bool {
 }
 
 // FetchProjectBoard returns a *gh.ProjectBoard reconstructed from the items map.
-// Falls back to GitHub when the cache has not been bootstrapped.
+// Falls back to GitHub when the cache has not been bootstrapped or is paused.
 func (c *CacheImpl) FetchProjectBoard(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 	c.mu.RLock()
 
-	if len(c.items) == 0 {
+	if len(c.items) == 0 || c.paused {
 		c.mu.RUnlock()
-		c.logFn("[cache] miss: FetchProjectBoard not yet bootstrapped — fetching from GitHub\n")
+		if len(c.items) == 0 {
+			c.logFn("[cache] miss: FetchProjectBoard not yet bootstrapped — fetching from GitHub\n")
+		}
 		return c.fallback.FetchProjectBoard(owner, repo, projectNum, ownerType)
 	}
 
@@ -272,6 +274,10 @@ func (c *CacheImpl) FetchItemDetails(item *gh.ProjectItem) error {
 	key := itemKey(item.Repo, item.Number)
 
 	c.mu.RLock()
+	if c.paused {
+		c.mu.RUnlock()
+		return c.fallback.FetchItemDetails(item)
+	}
 	cached, ok := c.items[key]
 	deepFetched := c.deepFetched[key]
 	if ok && deepFetched {
@@ -302,6 +308,10 @@ func (c *CacheImpl) FetchItemDetails(item *gh.ProjectItem) error {
 // FetchCheckRuns returns cached check runs for a SHA; falls back to GitHub on miss.
 func (c *CacheImpl) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, error) {
 	c.mu.RLock()
+	if c.paused {
+		c.mu.RUnlock()
+		return c.fallback.FetchCheckRuns(owner, repo, sha)
+	}
 	if runs, ok := c.checkRuns[sha]; ok {
 		result := make([]gh.CheckRun, len(runs))
 		copy(result, runs)
@@ -327,6 +337,10 @@ func (c *CacheImpl) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDe
 	issKey := itemKey(owner+"/"+repo, issueNumber)
 
 	c.mu.RLock()
+	if c.paused {
+		c.mu.RUnlock()
+		return c.fallback.FetchLinkedPR(owner, repo, issueNumber)
+	}
 	item, itemOK := c.items[issKey]
 	if itemOK && item.LinkedPRNumber != 0 {
 		pk := prKey(owner+"/"+repo, item.LinkedPRNumber)
@@ -371,6 +385,10 @@ func (c *CacheImpl) FetchLabels(owner, repo string, issueNumber int) ([]string, 
 	key := itemKey(owner+"/"+repo, issueNumber)
 
 	c.mu.RLock()
+	if c.paused {
+		c.mu.RUnlock()
+		return c.fallback.FetchLabels(owner, repo, issueNumber)
+	}
 	if item, ok := c.items[key]; ok {
 		labels := cloneStrings(item.Labels)
 		c.mu.RUnlock()
