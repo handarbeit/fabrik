@@ -41,7 +41,7 @@ func TestSnapshotBaseline_NoSignalStages(t *testing.T) {
 	skipIfNoGit(t)
 	repoDir := initBareRepo(t)
 	item := gh.ProjectItem{
-		Comments: []gh.Comment{{Body: "c1"}, {Body: "c2"}},
+		Comments:                    []gh.Comment{{Body: "c1"}, {Body: "c2"}},
 		LinkedPRResolvedThreadCount: 3,
 	}
 
@@ -481,4 +481,3 @@ func TestIsWorkingTreeDirty_EngineManagedOnly(t *testing.T) {
 		t.Error("engine-managed files should not cause dirty=true")
 	}
 }
-

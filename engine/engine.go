@@ -80,7 +80,7 @@ type Engine struct {
 	deepFetchFailureTime map[string]time.Time  // key: issueKey; tracks when FetchItemDetails last failed
 	idleCount            int                   // consecutive idle polls; triggers self-upgrade at threshold
 	idleStart            time.Time             // when consecutive idle polls began; zero value = not idle
-	wakeCh               chan struct{}          // TUI sends on this to wake the poll loop immediately; nil if no TUI
+	wakeCh               chan struct{}         // TUI sends on this to wake the poll loop immediately; nil if no TUI
 	sem                  chan struct{}         // semaphore bounding concurrent workers across poll cycles
 	wg                   sync.WaitGroup        // tracks in-flight workers for graceful shutdown
 	inFlight             sync.Map              // key: issueKey string, value: bool (isPR)

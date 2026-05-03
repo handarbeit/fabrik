@@ -269,10 +269,10 @@ func TestTurnBadge(t *testing.T) {
 		{5, 50, 7, "[5/50]"},
 		{5, 50, 6, "[5/50]"},
 		{5, 50, 5, ""},
-		{0, 50, 100, ""},    // no turns yet
-		{5, 50, 0, ""},      // no space
-		{5, 50, -1, ""},     // negative space
-		{3, 0, 100, "[3 turns]"},  // unlimited
+		{0, 50, 100, ""},         // no turns yet
+		{5, 50, 0, ""},           // no space
+		{5, 50, -1, ""},          // negative space
+		{3, 0, 100, "[3 turns]"}, // unlimited
 		{3, 0, 9, "[3 turns]"},
 		{3, 0, 8, "[3]"},
 		{3, 0, 2, ""},

@@ -482,7 +482,7 @@ func TestBuildThreadEntries_ZeroLineWhenBothZero(t *testing.T) {
 
 func TestBuildThreadEntries_SkipsNonReviewComments(t *testing.T) {
 	comments := []gh.Comment{
-		{ReviewThreadID: "", Path: "", Line: 0},          // regular issue comment
+		{ReviewThreadID: "", Path: "", Line: 0},         // regular issue comment
 		{ReviewThreadID: "RT_1", Path: "x.go", Line: 1}, // review thread comment
 	}
 	entries := buildThreadEntries(comments)

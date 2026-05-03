@@ -932,13 +932,13 @@ The poll loop's effective interval grows when there is nothing to do (idle backo
 **Idle backoff algorithm** (`computeEffectiveInterval` in `engine/poll.go`):
 - Base interval: `PollSeconds` (default 30s).
 - Activity multiplier: doubles each poll cycle where no work was dispatched, up to the idle cap.
-- Activity reset: any dispatched work OR any received webhook event resets `idleStart` and the multiplier back to 1×.
+- Activity reset: only a poll cycle where `result.Active == true` (work was dispatched or a deep fetch ran) resets `idleStart` and the multiplier back to 1×. A `wakeCh` signal triggers an immediate poll but does **not** unconditionally reset the backoff — the multiplier is only reset if that poll finds active work.
 - Rate-limit adjustment (`nextRateLimitLow` + `computeEffectiveInterval` in `engine/poll.go`):
   - **Activation**: rate-limit backoff engages when remaining GraphQL quota drops below 20% (`rateLimitBackoffThreshold`). The actual remaining fraction is passed to `computeEffectiveInterval` as `rateLimitRatio`.
   - **Clearance**: backoff clears only when quota rises above 50% (`rateLimitHealthyThreshold`). Between 20% and 50% the state is sticky — backoff remains active to prevent thrashing on boards where quota fluctuates near the activation point.
   - **Stepwise escalation**: the multiplier scales with depletion depth — 2× at >=10% remaining (includes the 20%–50% sticky zone), 4× at >=5% and <10%, 6× at >=1% and <5%, 10× (`rateLimitMaxBackoffMultiplier`) below 1%.
   - **No idle cap**: the rate-limit component has no 5-minute ceiling; it is capped only at `rateLimitMaxBackoffMultiplier × configuredInterval`.
-  - **Independence from idle backoff**: activity detection (items dispatched or webhooks received) resets idle backoff but does NOT reset rate-limit backoff.
+  - **Independence from idle backoff**: activity detection (items dispatched) resets idle backoff but does NOT reset rate-limit backoff.
 
 **Idle cap selection** (`effectiveIdleCap` in `engine/poll.go`):
 
@@ -949,7 +949,7 @@ The poll loop's effective interval grows when there is nothing to do (idle backo
 | `WebhookStreamUnhealthy` | 5 minutes (`maxIdleBackoff`) |
 | Webhook mode disabled | 5 minutes (`maxIdleBackoff`) |
 
-When the webhook stream is healthy or starting up, steady-state polling is suppressed to a 60-minute safety-net interval. Events that arrive on the webhook stream (`wakeCh` signal) reset the multiplier and trigger an immediate poll regardless of the current interval.
+When the webhook stream is healthy or starting up, steady-state polling is suppressed to a 60-minute safety-net interval. Events that arrive on the webhook stream signal the `wakeCh` channel, which triggers an immediate poll regardless of the current interval. The backoff multiplier is preserved unless that poll finds active work (see "Activity reset" above).
 
 **Webhook stream health states** (managed by `webhookManager` in `engine/webhook.go`):
 
@@ -968,6 +968,16 @@ When the webhook stream is healthy or starting up, steady-state polling is suppr
 **Webhook mode is always non-fatal.** If the `gh webhook forward` subprocess fails to start, the stream state stays `Unhealthy` and the 5-minute idle cap applies. The poll loop continues normally.
 
 **References:** [ADR-032: Webhook-Driven Event Delivery](../adrs/032-webhook-event-delivery.md)
+
+### 7.8 Webhook Wake Semantics: Burst Coalescence and Self-Feedback
+
+**Burst coalescence.** `wakeCh` is a buffered channel with capacity 1. When multiple webhook events arrive in rapid succession, at most one wake is queued. Additional sends while the channel is full are dropped (non-blocking). This means a burst of N simultaneous events produces at most 1 extra poll cycle rather than N. Test: `TestHandleWebhookBurstCoalescence` in `engine/webhook_test.go`.
+
+**Self-feedback loop (known gap).** Fabrik runs as the human operator's own GitHub account. Every API action Fabrik takes — label mutations, comment posts, status field updates, PR opens — generates webhook events from that account. These events arrive at the webhook handler and signal `wakeCh`, triggering one extra poll cycle per burst of activity. The burst-coalescence guarantee bounds the damage: a stage advance producing N API actions generates at most 1 extra poll.
+
+**Sender-filter approach — considered and rejected.** Suppressing `wakeCh` signals when `sender.login` matches `cfg.User` would eliminate these spurious wakes, but `cfg.User` is the human operator's login. Filtering by it would also suppress every event the user generates (comments, label changes, PR reviews) — the most important input class. Sender filtering is only viable when Fabrik runs as a dedicated bot account separate from any human user. That is a future change; no sender filtering is currently implemented.
+
+**Backoff impact.** Before the fix for issue #490, the `case <-e.wakeCh:` branch unconditionally reset `e.idleStart` and `prevMultiplier = 1` before calling `doPollCycle`. Self-feedback events would therefore destroy the idle-backoff state on every stage advance, defeating the GraphQL budget savings webhooks provide. After the fix, those unconditional resets are removed. A webhook wake triggers an immediate poll, but backoff is preserved unless `result.Active == true` (see 7.7).
 
 ---
 
