@@ -18,11 +18,14 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DOCS_DIR="${REPO_ROOT}/docs"
 OUT="${DOCS_DIR}/llms-full.txt"
 
-# Strip YAML front matter (---...---) from a file; pass through unchanged if none.
+TMPFILE="$(mktemp)"
+trap 'rm -f "${TMPFILE}"' EXIT
+
+# Strip YAML front matter (---...---) from a file into TMPFILE; pass through unchanged if none.
 # The done flag prevents --- horizontal rules in the body (e.g., USER_GUIDE.md) from
 # being misidentified as the front matter closing delimiter.
-strip_front_matter() {
-  awk 'BEGIN{fm=0; done=0} /^---$/ && !done { fm++; if(fm==2){done=1}; next } done || fm==0 {print}' "$1"
+strip_front_matter_to_tmp() {
+  awk 'BEGIN{fm=0; done=0} /^---$/ && !done { fm++; if(fm==2){done=1}; next } done || fm==0 {print}' "$1" > "${TMPFILE}"
 }
 
 # Pages in fixed order — do not reorder; CI drift checks require bitwise-identical output.
@@ -40,19 +43,21 @@ for entry in "${ORDERED[@]}"; do
   file="${DOCS_DIR}/${entry%%:*}"
   url="${entry#*:}"
 
-  # Extract the first H1 heading from the file body (after stripping front matter).
-  title=$(strip_front_matter "$file" | awk '/^# /{sub(/^# /, ""); print; exit}')
+  strip_front_matter_to_tmp "$file"
+
+  # Extract the first H1 heading from the body (reads from file, no SIGPIPE risk).
+  title=$(awk '/^# /{sub(/^# /, ""); print; exit}' "${TMPFILE}")
 
   printf '# %s\n\nSource: %s\n\n' "$title" "$url" >> "$OUT"
 
   # Output body content, skipping leading blank lines and the first H1 heading
-  # so the H1 appears exactly once (in the Source header above).
-  strip_front_matter "$file" | awk '
+  # so the H1 appears exactly once (in the section header above).
+  awk '
     BEGIN { skipping=1 }
     skipping && /^[[:space:]]*$/ { next }
     skipping && /^# /            { skipping=0; next }
     { skipping=0; print }
-  ' >> "$OUT"
+  ' "${TMPFILE}" >> "$OUT"
 
   printf '\n---\n\n' >> "$OUT"
 done
