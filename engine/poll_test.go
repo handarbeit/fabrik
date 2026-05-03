@@ -968,27 +968,27 @@ func TestComputeEffectiveInterval(t *testing.T) {
 	base := 30 * time.Second
 
 	cases := []struct {
-		name         string
-		idle         time.Duration
-		rateLimitLow bool
-		want         time.Duration
+		name           string
+		idle           time.Duration
+		rateLimitRatio float64
+		want           time.Duration
 	}{
-		{"no idle no rateLimit", 0, false, 30 * time.Second},
-		{"3min idle no rateLimit", 3 * time.Minute, false, 30 * time.Second},
-		{"6min idle (2x)", 6 * time.Minute, false, 60 * time.Second},
-		{"12min idle (4x)", 12 * time.Minute, false, 2 * time.Minute},
-		{"25min idle (max)", 25 * time.Minute, false, 5 * time.Minute},
-		{"rateLimit only", 0, true, 60 * time.Second},
-		{"idle 2x wins over rateLimit 2x", 6 * time.Minute, true, 60 * time.Second},
-		{"idle 4x wins over rateLimit 2x", 12 * time.Minute, true, 2 * time.Minute},
-		{"rateLimit 2x wins over idle 1x", 3 * time.Minute, true, 60 * time.Second},
+		{"no idle no rateLimit", 0, 1.0, 30 * time.Second},
+		{"3min idle no rateLimit", 3 * time.Minute, 1.0, 30 * time.Second},
+		{"6min idle (2x)", 6 * time.Minute, 1.0, 60 * time.Second},
+		{"12min idle (4x)", 12 * time.Minute, 1.0, 2 * time.Minute},
+		{"25min idle (max)", 25 * time.Minute, 1.0, 5 * time.Minute},
+		{"rateLimit only (2x tier)", 0, 0.15, 60 * time.Second},
+		{"idle 2x wins over rateLimit 2x", 6 * time.Minute, 0.15, 60 * time.Second},
+		{"idle 4x wins over rateLimit 2x", 12 * time.Minute, 0.15, 2 * time.Minute},
+		{"rateLimit 2x wins over idle 1x", 3 * time.Minute, 0.15, 60 * time.Second},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := computeEffectiveInterval(base, tc.idle, tc.rateLimitLow, false)
+			got := computeEffectiveInterval(base, tc.idle, tc.rateLimitRatio, false)
 			if got != tc.want {
 				t.Errorf("computeEffectiveInterval(%v, %v, %v, false) = %v, want %v",
-					base, tc.idle, tc.rateLimitLow, got, tc.want)
+					base, tc.idle, tc.rateLimitRatio, got, tc.want)
 			}
 		})
 	}
@@ -998,43 +998,97 @@ func TestComputeEffectiveInterval_CapAt5Min(t *testing.T) {
 	// With a large configured interval (e.g. 3 minutes), 4x would be 12min,
 	// but we cap at 5 minutes.
 	base := 3 * time.Minute
-	got := computeEffectiveInterval(base, 12*time.Minute, false, false)
+	got := computeEffectiveInterval(base, 12*time.Minute, 1.0, false)
 	if got != 5*time.Minute {
 		t.Errorf("expected cap at 5m, got %v", got)
 	}
 
 	// Even 2x of 3 minutes (= 6min) should cap at 5min.
-	got = computeEffectiveInterval(base, 6*time.Minute, false, false)
+	got = computeEffectiveInterval(base, 6*time.Minute, 1.0, false)
 	if got != 5*time.Minute {
 		t.Errorf("expected cap at 5m for 2x of 3min base, got %v", got)
 	}
 
 	// With webhookHealthy=true the cap rises to 60 min.
-	got = computeEffectiveInterval(base, 60*time.Minute, false, true)
+	got = computeEffectiveInterval(base, 60*time.Minute, 1.0, true)
 	if got != webhookIdleCap {
 		t.Errorf("expected webhookIdleCap (%v) when webhook healthy, got %v", webhookIdleCap, got)
 	}
 }
 
 func TestComputeEffectiveInterval_MaxIdleRateLimit(t *testing.T) {
-	// Both backoffs active: idle at max (5min) and rate limit at 2x.
-	// max(5min, 2*30s=1min) = 5min.
 	base := 30 * time.Second
-	got := computeEffectiveInterval(base, 25*time.Minute, true, false)
+
+	// Both backoffs active: idle at max (5min) and rate limit at 2× tier (0.15).
+	// max(5min, 2*30s=60s) = 5min.
+	got := computeEffectiveInterval(base, 25*time.Minute, 0.15, false)
 	if got != 5*time.Minute {
-		t.Errorf("expected 5m, got %v", got)
+		t.Errorf("expected 5m (idle wins over 2× rate-limit), got %v", got)
+	}
+
+	// Both backoffs active: idle at max (5min) and rate limit at 10× tier (0.005).
+	// 10×30s = 300s = 5min. max(5min, 5min) = 5min (tie — idle cap governs).
+	got = computeEffectiveInterval(base, 25*time.Minute, 0.005, false)
+	if got != 5*time.Minute {
+		t.Errorf("expected 5m (tie: idle cap == 10× rate-limit at 30s base), got %v", got)
 	}
 }
 
 func TestComputeEffectiveInterval_RateLimitExceeds5Min(t *testing.T) {
 	// Rate-limit backoff alone can exceed 5 minutes (the idle cap doesn't apply).
-	// With 3min base and rateLimitLow=true, rate-limit interval = 6min.
-	// Idle is not active (0 duration), so idleInterval = 3min.
-	// max(3min, 6min) = 6min — the 5min idle cap must NOT clamp this.
+	// Idle is not active (0 duration), so idleInterval = 3min base.
 	base := 3 * time.Minute
-	got := computeEffectiveInterval(base, 0, true, false)
+
+	// ratio=0.15 (2× tier): rate-limit interval = 2*3min = 6min.
+	// max(3min, 6min) = 6min — the 5min idle cap must NOT clamp this.
+	got := computeEffectiveInterval(base, 0, 0.15, false)
 	if got != 6*time.Minute {
-		t.Errorf("expected 6m (rate-limit 2x of 3min base), got %v", got)
+		t.Errorf("expected 6m (2× of 3min base), got %v", got)
+	}
+
+	// ratio=0.07 (4× tier): rate-limit interval = 4*3min = 12min.
+	got = computeEffectiveInterval(base, 0, 0.07, false)
+	if got != 12*time.Minute {
+		t.Errorf("expected 12m (4× of 3min base), got %v", got)
+	}
+
+	// ratio=0.03 (6× tier): rate-limit interval = 6*3min = 18min.
+	got = computeEffectiveInterval(base, 0, 0.03, false)
+	if got != 18*time.Minute {
+		t.Errorf("expected 18m (6× of 3min base), got %v", got)
+	}
+
+	// ratio=0.005 (10× tier): rate-limit interval = 10*3min = 30min.
+	got = computeEffectiveInterval(base, 0, 0.005, false)
+	if got != 30*time.Minute {
+		t.Errorf("expected 30m (10× of 3min base), got %v", got)
+	}
+}
+
+func TestComputeEffectiveInterval_RateLimitStepwise(t *testing.T) {
+	base := 30 * time.Second
+
+	cases := []struct {
+		name  string
+		ratio float64
+		want  time.Duration
+	}{
+		{"not in backoff (1.0)", 1.0, 30 * time.Second},
+		{"sticky zone (0.35)", 0.35, 60 * time.Second},
+		{"active 10-20% (0.15)", 0.15, 60 * time.Second},
+		{"just below 10% (0.099)", 0.099, 2 * time.Minute},
+		{"just below 5% (0.049)", 0.049, 3 * time.Minute},
+		{"just below 1% (0.009)", 0.009, 5 * time.Minute},
+		{"zero remaining (0.0)", 0.0, 5 * time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := computeEffectiveInterval(base, 0, tc.ratio, false)
+			if got != tc.want {
+				t.Errorf("computeEffectiveInterval(30s, 0, %v, false) = %v, want %v",
+					tc.ratio, got, tc.want)
+			}
+		})
 	}
 }
 
