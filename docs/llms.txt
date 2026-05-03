@@ -1,0 +1,22 @@
+# Fabrik
+
+> Fabrik is a Go CLI that orchestrates Claude Code through an SDLC pipeline
+> defined on a GitHub Project board. Issues are the unit of work; the pipeline
+> stages (Research → Plan → Implement → Review → Validate) are configured via
+> YAML files and driven by the Fabrik engine against your GitHub Project board.
+
+## User Guide
+
+- [User Guide](https://fabrik.shadoworg.dev/USER_GUIDE): Installation, configuration, pipeline walkthrough, and operational reference for running Fabrik.
+
+## State Machine
+
+- [Issue State Machine](https://fabrik.shadoworg.dev/state-machine): As-built specification of engine state transitions, label semantics, FABRIK_* marker handling, and guard/filter behavior.
+
+## Stage Lifecycle
+
+- [Stage Lifecycle](https://fabrik.shadoworg.dev/stage-lifecycle): Per-invocation lifecycle — context files, worktree setup, Claude invocation, progress baseline, extension loop, and output handling.
+
+## Positioning
+
+- [Fabrik Positioning](https://fabrik.shadoworg.dev/positioning): Landscape overview comparing Fabrik to similar agentic development tools.
