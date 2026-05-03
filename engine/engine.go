@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
@@ -40,6 +41,7 @@ type Config struct {
 	Webhooks          bool
 	WebhookPort       int
 	WebhookEvents     []string
+	BoardCacheMode    string // "in-memory" or "none"; default "none" when webhooks off, "in-memory" when on
 	// ReadyCh is closed once Run() has registered signal handlers. Tests use
 	// this to avoid sending SIGINT before signal.Notify is installed.
 	ReadyCh chan struct{}
@@ -57,6 +59,7 @@ type cloneCall struct {
 type Engine struct {
 	cfg                  Config
 	client               GitHubClient
+	readClient           boardcache.ReadClient // read-only GitHub calls; may be CacheImpl or GitHubAdapter
 	claude               ClaudeInvoker
 	statusField          *gh.StatusField
 	worktreeManagers     map[string]*WorktreeManager // key: "owner/repo"; one WM per discovered repo
@@ -163,6 +166,16 @@ func New(cfg Config) (*Engine, error) {
 	// fabrik.log in both TUI and plain-text modes.
 	gh.Logf = eng.logf
 
+	// Initialize the read client: GitHubAdapter (pass-through) unless the in-memory
+	// board cache is enabled, in which case CacheImpl is created (bootstrap happens in Run()).
+	adapter := boardcache.NewGitHubAdapter(eng.client)
+	if cfg.BoardCacheMode == "in-memory" {
+		cacheLogFn := func(format string, args ...any) { eng.logf(0, "cache", format, args...) }
+		eng.readClient = boardcache.NewCacheImpl(adapter, cacheLogFn)
+	} else {
+		eng.readClient = adapter
+	}
+
 	return eng, nil
 }
 
@@ -204,6 +217,8 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		}
 		wms[key] = worktrees
 	}
+	// Tests always use pass-through adapter (--board-cache=none behavior).
+	eng.readClient = boardcache.NewGitHubAdapter(client)
 	return eng
 }
 

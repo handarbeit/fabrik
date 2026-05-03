@@ -22,7 +22,7 @@ import (
 // On success the fetched StatusField is stored in e.statusField so poll()'s
 // lazy guard skips the redundant second FetchStatusField call.
 func (e *Engine) checkStageColumnAlignment(ctx context.Context) error {
-	board, err := e.client.FetchProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
+	board, err := e.readClient.FetchProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
 	if err != nil {
 		e.logf(0, "startup", "warning: could not fetch project board for startup check: %v\n", err)
 		return nil
@@ -42,7 +42,7 @@ func (e *Engine) checkStageColumnAlignment(ctx context.Context) error {
 		e.emitStructural(tui.ProjectMetaEvent{BoardTitle: board.Title, BoardURL: boardURL})
 	}
 
-	sf, err := e.client.FetchStatusField(board.ProjectID)
+	sf, err := e.readClient.FetchStatusField(board.ProjectID)
 	if err != nil {
 		e.logf(0, "startup", "warning: could not fetch status field for startup check: %v\n", err)
 		return nil
