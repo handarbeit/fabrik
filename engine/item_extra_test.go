@@ -816,6 +816,58 @@ func TestItemMayNeedWork_NoSpecialLabel_RespectsUpdatedAtCache(t *testing.T) {
 	}
 }
 
+// TestItemMayNeedWork_CompleteStageBypassed verifies that an item with a
+// stage:X:complete label in shallow labels is NOT retried via the cooldown path
+// after the cooldown has expired — completed stages have no work to retry.
+func TestItemMayNeedWork_CompleteStageBypassed(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.cfg.PollSeconds = 1 // short cooldown (10s)
+
+	ts := time.Now().Add(-time.Minute)
+	item := gh.ProjectItem{
+		Number:    70,
+		Status:    "Research",
+		ItemID:    "PVTI_70",
+		UpdatedAt: ts,
+		Labels:    []string{"stage:Research:complete"},
+	}
+
+	eng.mu.Lock()
+	eng.lastUpdatedAt["owner/repo#70"] = ts
+	eng.processedSet["owner/repo#70-Research"] = time.Now().Add(-2 * time.Minute) // expired
+	eng.mu.Unlock()
+
+	if eng.itemMayNeedWork(item) {
+		t.Error("stage-complete item with expired cooldown should NOT be retried — stage is already done")
+	}
+}
+
+// TestItemMayNeedWork_IncompleteStageStillRetried verifies that an item WITHOUT a
+// stage:X:complete label is still retried via the cooldown path after expiry —
+// the exemption only applies to completed stages.
+func TestItemMayNeedWork_IncompleteStageStillRetried(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.cfg.PollSeconds = 1 // short cooldown (10s)
+
+	ts := time.Now().Add(-time.Minute)
+	item := gh.ProjectItem{
+		Number:    71,
+		Status:    "Research",
+		ItemID:    "PVTI_71",
+		UpdatedAt: ts,
+		Labels:    nil, // no stage:Research:complete
+	}
+
+	eng.mu.Lock()
+	eng.lastUpdatedAt["owner/repo#71"] = ts
+	eng.processedSet["owner/repo#71-Research"] = time.Now().Add(-2 * time.Minute) // expired
+	eng.mu.Unlock()
+
+	if !eng.itemMayNeedWork(item) {
+		t.Error("incomplete stage with expired cooldown should still be retried")
+	}
+}
+
 // ── fabrik:awaiting-ci conjunctive gate dispatch guards ──────────────────────
 
 // TestItemNeedsWork_AwaitingCI_NoDispatch verifies that itemNeedsWork returns
