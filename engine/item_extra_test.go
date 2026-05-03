@@ -690,6 +690,39 @@ func TestItemMayNeedWork_AwaitingCI_BypassesUpdatedAtCache(t *testing.T) {
 	}
 }
 
+// TestItemMayNeedWork_AwaitingReview_BypassesUpdatedAtCache verifies that items with
+// fabrik:awaiting-review bypass the updatedAt cache so the catch-up loop can re-evaluate
+// the Phase 1 / Phase 2 review-reprompt timers on every poll, even when the issue itself
+// hasn't changed. A non-responsive bot reviewer produces no comment, no review, and no
+// PR activity — so updatedAt never moves. Without this bypass, the cache filter would
+// permanently skip the item and the timers (which fire on label-applied-at age) would
+// never get a chance to run. Real-world repro: issue #467 — fabrik filed this regression
+// after observing an issue stuck for hours waiting on Copilot when Phase 1 should have
+// re-fired after 15 minutes.
+func TestItemMayNeedWork_AwaitingReview_BypassesUpdatedAtCache(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.cfg.PollSeconds = 60 // long cooldown that would normally suppress
+
+	ts := time.Now().Add(-time.Minute)
+	item := gh.ProjectItem{
+		Number:    67,
+		Status:    "Research",
+		ItemID:    "PVTI_67",
+		UpdatedAt: ts,
+		Labels:    []string{"fabrik:awaiting-review"},
+	}
+
+	// Seed lastUpdatedAt so the "unchanged" path would normally trigger.
+	eng.mu.Lock()
+	eng.lastUpdatedAt["owner/repo#67"] = ts
+	eng.processedSet["owner/repo#67-Research"] = time.Now() // just processed — within cooldown
+	eng.mu.Unlock()
+
+	if !eng.itemMayNeedWork(item) {
+		t.Error("item with fabrik:awaiting-review should bypass the updatedAt cache and return true")
+	}
+}
+
 // TestItemMayNeedWork_BlockedRespectsUpdatedAtCache verifies that a fabrik:blocked
 // item with an unchanged updatedAt is NOT force-deep-fetched. The dependency item's
 // own updatedAt changes when it closes, which is visible in the shallow fetch —
