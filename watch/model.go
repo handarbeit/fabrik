@@ -315,6 +315,9 @@ func Run(m WatchModel) error {
 
 	asp := m.activeStagePtr
 	getActiveStage := func() string {
+		if asp == nil {
+			return ""
+		}
 		v, _ := asp.Load().(string)
 		return v
 	}
