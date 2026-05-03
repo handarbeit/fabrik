@@ -489,7 +489,7 @@ func (e *Engine) pauseForReviewCycleLimit(board *gh.ProjectBoard, item gh.Projec
 
 // botMentionHandle maps copilot-* logins to "copilot" — GitHub's canonical mention surface for the reviewer bot.
 func botMentionHandle(login string) string {
-	if strings.HasPrefix(login, "copilot") {
+	if strings.HasPrefix(strings.ToLower(login), "copilot") {
 		return "copilot"
 	}
 	return login
