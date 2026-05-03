@@ -133,36 +133,46 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 					return true // cooldown expired, retry
 				}
 			}
-			// Force deep-fetch for items whose progress depends on a timer or external
-			// state change that does NOT bump the issue/project-item/linked-PR updatedAt.
-			// Without these bypasses the cache filter would permanently skip them.
+			// Force deep-fetch for items whose progress depends on a state change that
+			// does NOT bump the issue/project-item/linked-PR updatedAt and that needs
+			// re-evaluation every poll. The cooldown retry path above is the cheaper
+			// alternative for cases where periodic re-evaluation (every 10 × PollSeconds)
+			// is sufficient — see the "labels NOT in this list" note below.
 			//
 			//   fabrik:awaiting-ci      — CI check run completions don't bump updatedAt;
 			//                             the catch-up loop must re-evaluate every poll
-			//                             until checks complete or timeout.
+			//                             until checks complete or timeout. Per-poll
+			//                             cadence is needed because CI failures should
+			//                             trigger a CI-fix re-invocation as soon as
+			//                             they're observed.
 			//   fabrik:rebase-needed    — mergeability re-computes when origin advances,
 			//                             but the issue's updatedAt won't bump on a base-
 			//                             branch advance; the merge-gate must re-check.
-			//   fabrik:awaiting-review  — Phase 1 / Phase 2 timers in checkReviewGate fire
-			//                             on label-applied-at age, not on updatedAt
-			//                             movement. A non-responsive bot reviewer produces
-			//                             no comment, no review, no PR activity, so
-			//                             updatedAt never moves and the timer would never
-			//                             get a chance to fire without this bypass.
 			//
-			// Notes on labels deliberately NOT in this list:
+			// Labels deliberately NOT in this list — they use the cooldown retry path
+			// (processedSet) instead, evaluated every 10 × PollSeconds:
+			//
 			//   fabrik:blocked        — processItem sets processedSet[stageKey] whenever
-			//                           checkDependencies returns true, so the cooldown
-			//                           retry path above (every 10 × PollSeconds) ensures
-			//                           periodic re-evaluation. No bypass needed.
-			//   fabrik:awaiting-input — the auto-clear trigger is a new user comment, which
-			//                           bumps updatedAt; no timer-driven escape exists today.
-			//                           If a timeout is added here later, this label needs
-			//                           to join the bypass list too.
+			//                           checkDependencies returns true. Blocker closure
+			//                           doesn't bump the blocked item's updatedAt, so
+			//                           cooldown retry is what re-evaluates the gate.
+			//   fabrik:awaiting-review — the catch-up loop's review-gate path sets
+			//                            processedSet[stageKey] when checkReviewGate
+			//                            returns blocked=true. Phase 1 and Phase 2 of
+			//                            checkReviewGate fire on label-applied-at age,
+			//                            so periodic (not per-poll) re-evaluation is
+			//                            sufficient — and on busy boards with many
+			//                            review-waiting items this avoids turning a
+			//                            long-lived label into a permanent GraphQL
+			//                            hot path.
+			//   fabrik:awaiting-input — the auto-clear trigger is a new user comment,
+			//                           which bumps updatedAt; no timer-driven escape
+			//                           exists today. If a timeout is added here later,
+			//                           this label will need to join either the bypass
+			//                           list or the cooldown-recording catch-up path.
 			for _, l := range item.Labels {
 				if l == "fabrik:awaiting-ci" ||
-					l == "fabrik:rebase-needed" ||
-					l == "fabrik:awaiting-review" {
+					l == "fabrik:rebase-needed" {
 					return true
 				}
 			}
