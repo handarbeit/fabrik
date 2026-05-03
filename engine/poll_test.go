@@ -985,9 +985,9 @@ func TestComputeEffectiveInterval(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := computeEffectiveInterval(base, tc.idle, tc.rateLimitLow)
+			got := computeEffectiveInterval(base, tc.idle, tc.rateLimitLow, false)
 			if got != tc.want {
-				t.Errorf("computeEffectiveInterval(%v, %v, %v) = %v, want %v",
+				t.Errorf("computeEffectiveInterval(%v, %v, %v, false) = %v, want %v",
 					base, tc.idle, tc.rateLimitLow, got, tc.want)
 			}
 		})
@@ -998,15 +998,21 @@ func TestComputeEffectiveInterval_CapAt5Min(t *testing.T) {
 	// With a large configured interval (e.g. 3 minutes), 4x would be 12min,
 	// but we cap at 5 minutes.
 	base := 3 * time.Minute
-	got := computeEffectiveInterval(base, 12*time.Minute, false)
+	got := computeEffectiveInterval(base, 12*time.Minute, false, false)
 	if got != 5*time.Minute {
 		t.Errorf("expected cap at 5m, got %v", got)
 	}
 
 	// Even 2x of 3 minutes (= 6min) should cap at 5min.
-	got = computeEffectiveInterval(base, 6*time.Minute, false)
+	got = computeEffectiveInterval(base, 6*time.Minute, false, false)
 	if got != 5*time.Minute {
 		t.Errorf("expected cap at 5m for 2x of 3min base, got %v", got)
+	}
+
+	// With webhookHealthy=true the cap rises to 60 min.
+	got = computeEffectiveInterval(base, 60*time.Minute, false, true)
+	if got != webhookIdleCap {
+		t.Errorf("expected webhookIdleCap (%v) when webhook healthy, got %v", webhookIdleCap, got)
 	}
 }
 
@@ -1014,7 +1020,7 @@ func TestComputeEffectiveInterval_MaxIdleRateLimit(t *testing.T) {
 	// Both backoffs active: idle at max (5min) and rate limit at 2x.
 	// max(5min, 2*30s=1min) = 5min.
 	base := 30 * time.Second
-	got := computeEffectiveInterval(base, 25*time.Minute, true)
+	got := computeEffectiveInterval(base, 25*time.Minute, true, false)
 	if got != 5*time.Minute {
 		t.Errorf("expected 5m, got %v", got)
 	}
@@ -1026,7 +1032,7 @@ func TestComputeEffectiveInterval_RateLimitExceeds5Min(t *testing.T) {
 	// Idle is not active (0 duration), so idleInterval = 3min.
 	// max(3min, 6min) = 6min — the 5min idle cap must NOT clamp this.
 	base := 3 * time.Minute
-	got := computeEffectiveInterval(base, 0, true)
+	got := computeEffectiveInterval(base, 0, true, false)
 	if got != 6*time.Minute {
 		t.Errorf("expected 6m (rate-limit 2x of 3min base), got %v", got)
 	}
