@@ -617,6 +617,13 @@ func TestCheckReviewGate_BotPhase1_Reprompts(t *testing.T) {
 	if client.addCommentCalls[0].issueNumber != 42 {
 		t.Errorf("expected comment on PR #42, got #%d", client.addCommentCalls[0].issueNumber)
 	}
+	// Copilot login must be mentioned as @copilot, not @copilot-pull-request-reviewer.
+	if !strings.Contains(client.addCommentCalls[0].body, "@copilot") {
+		t.Errorf("expected @copilot in reprompt comment body, got: %q", client.addCommentCalls[0].body)
+	}
+	if strings.Contains(client.addCommentCalls[0].body, "@copilot-pull-request-reviewer") {
+		t.Errorf("reprompt comment must not contain @copilot-pull-request-reviewer, got: %q", client.addCommentCalls[0].body)
+	}
 
 	// fabrik:bot-reprompted label should have been applied once (not per-login).
 	var foundReprompted bool
@@ -944,4 +951,60 @@ func containsAll(s string, subs ...string) bool {
 // boolPtr is a helper to create a *bool from a bool literal.
 func boolPtr(b bool) *bool {
 	return &b
+}
+
+func TestBotMentionHandle(t *testing.T) {
+	cases := []struct {
+		login string
+		want  string
+	}{
+		{"copilot-pull-request-reviewer", "copilot"},
+		{"copilot", "copilot"},
+		{"dependabot[bot]", "dependabot[bot]"},
+		{"someuser", "someuser"},
+	}
+	for _, tc := range cases {
+		got := botMentionHandle(tc.login)
+		if got != tc.want {
+			t.Errorf("botMentionHandle(%q) = %q, want %q", tc.login, got, tc.want)
+		}
+	}
+}
+
+// Phase 1: non-Copilot bot reviewer — reprompt comment must mention @<login> directly.
+func TestCheckReviewGate_BotPhase1_NonCopilot_MentionsLogin(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(client)
+	eng.cfg.ReviewWaitTimeout = 5 * time.Minute
+
+	awaitingApplied := time.Now().Add(-10 * time.Minute)
+	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+		if labelName == "fabrik:awaiting-review" {
+			return awaitingApplied, nil
+		}
+		return time.Time{}, nil
+	}
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 42,
+		Labels:         []string{"fabrik:awaiting-review"},
+		LinkedPRReviewRequests: []gh.ReviewRequest{
+			{Login: "dependabot[bot]", IsBot: true},
+		},
+		LinkedPRReviews: nil,
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+
+	eng.checkReviewGate(board, item, stage)
+
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 PR @mention comment, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	if !strings.Contains(body, "@dependabot[bot]") {
+		t.Errorf("expected @dependabot[bot] in reprompt comment body, got: %q", body)
+	}
 }
