@@ -2,6 +2,7 @@ package watch
 
 import (
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/charmbracelet/bubbles/viewport"
@@ -11,9 +12,12 @@ import (
 // newTestModel creates a minimal WatchModel for key-handler tests.
 // It avoids filesystem calls by using an empty logDir and no stagesDir.
 func newTestModel() WatchModel {
+	asp := new(atomic.Value)
+	asp.Store("")
 	m := WatchModel{
-		issueNumber: 1,
-		done:        make(chan struct{}),
+		issueNumber:    1,
+		done:           make(chan struct{}),
+		activeStagePtr: asp,
 	}
 	return m
 }
@@ -195,5 +199,81 @@ func TestView_TurnCounter_Hidden_WhenNoTurns(t *testing.T) {
 	view := m.View()
 	if strings.Contains(view, "turn") {
 		t.Errorf("expected no turn counter when turnsUsed=0, got:\n%s", view)
+	}
+}
+
+// TestActiveStageFromLabels verifies the helper that extracts the in-progress stage from labels.
+func TestActiveStageFromLabels(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels []string
+		want   string
+	}{
+		{"single in-progress", []string{"stage:Review:in_progress"}, "Review"},
+		{"multiple labels, one in-progress", []string{"fabrik:yolo", "stage:Implement:in_progress", "stage:Research:complete"}, "Implement"},
+		{"no in-progress label", []string{"stage:Research:complete", "fabrik:yolo"}, ""},
+		{"empty labels", []string{}, ""},
+		{"nil labels", nil, ""},
+		{"stage prefix but no in_progress suffix", []string{"stage:Review:complete"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := activeStageFromLabels(tt.labels)
+			if got != tt.want {
+				t.Errorf("activeStageFromLabels(%v) = %q, want %q", tt.labels, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestUpdate_NewLogFileMsg_LabelOverride is the primary regression test: when an
+// Implement-comment-review log has a newer timestamp than a Review log but GitHub
+// labels say "stage:Review:in_progress", the Review tab must be IsLive after
+// processing a NewLogFileMsg.
+func TestUpdate_NewLogFileMsg_LabelOverride(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write an Implement log, an Implement-comment-review log (newest), and a Review log.
+	writeLog(t, dir, "Implement-20260101-120000-000000000.log")
+	writeLog(t, dir, "Review-20260101-180000-000000000.log")
+	writeLog(t, dir, "Implement-comment-review-20260101-190000-000000000.log") // newest timestamp
+
+	asp := new(atomic.Value)
+	asp.Store("")
+	m := WatchModel{
+		issueNumber: 99,
+		logDir:      dir,
+		done:        make(chan struct{}),
+		stageOrder: map[string]int{
+			"Implement": 3,
+			"Review":    4,
+		},
+		github: issueState{
+			labels: []string{"stage:Review:in_progress"},
+		},
+		activeStagePtr: asp,
+	}
+
+	model, _ := m.Update(NewLogFileMsg{Path: dir + "/Implement-comment-review-20260101-190000-000000000.log"})
+	wm := model.(WatchModel)
+
+	var reviewLive, implementLive bool
+	for _, tab := range wm.stageTabs {
+		if tab.Label == "Review" {
+			reviewLive = tab.IsLive
+		}
+		if tab.Label == "Implement" {
+			implementLive = tab.IsLive
+		}
+	}
+	if !reviewLive {
+		t.Error("Review tab must be IsLive (activeStage=Review from labels), even though Implement-comment-review log is newer")
+	}
+	if implementLive {
+		t.Error("Implement tab must NOT be IsLive when Review is the active stage")
+	}
+	// Selected tab should be the live (Review) tab.
+	if wm.selectedTabIdx >= len(wm.stageTabs) || !wm.stageTabs[wm.selectedTabIdx].IsLive {
+		t.Errorf("selectedTabIdx=%d does not point to live tab", wm.selectedTabIdx)
 	}
 }

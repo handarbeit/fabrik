@@ -27,7 +27,7 @@ func TestBuildStageTabs_PipelineOrder(t *testing.T) {
 		"Research":  1,
 		"Implement": 3,
 	}
-	tabs := buildStageTabs(dir, stageOrder)
+	tabs := buildStageTabs(dir, stageOrder, "")
 
 	if len(tabs) != 2 {
 		t.Fatalf("want 2 tabs, got %d", len(tabs))
@@ -57,7 +57,7 @@ func TestBuildStageTabs_CommentReviewGrouped(t *testing.T) {
 	writeLog(t, dir, "Specify-comment-review-20260101-100000-000000000.log")
 
 	stageOrder := map[string]int{"Specify": 2}
-	tabs := buildStageTabs(dir, stageOrder)
+	tabs := buildStageTabs(dir, stageOrder, "")
 
 	if len(tabs) != 1 {
 		t.Fatalf("want 1 tab (grouped), got %d", len(tabs))
@@ -86,7 +86,7 @@ func TestBuildStageTabs_FallbackChronological(t *testing.T) {
 	writeLog(t, dir, "Alpha-20260101-070000-000000000.log")
 	writeLog(t, dir, "Beta-20260101-080000-000000000.log")
 
-	tabs := buildStageTabs(dir, map[string]int{})
+	tabs := buildStageTabs(dir, map[string]int{}, "")
 
 	if len(tabs) != 2 {
 		t.Fatalf("want 2 tabs, got %d", len(tabs))
@@ -113,7 +113,7 @@ func TestBuildStageTabs_UnknownAppended(t *testing.T) {
 	writeLog(t, dir, "Freeform-20260101-100000-000000000.log")
 
 	stageOrder := map[string]int{"Research": 1}
-	tabs := buildStageTabs(dir, stageOrder)
+	tabs := buildStageTabs(dir, stageOrder, "")
 
 	if len(tabs) != 2 {
 		t.Fatalf("want 2 tabs, got %d", len(tabs))
@@ -129,7 +129,7 @@ func TestBuildStageTabs_UnknownAppended(t *testing.T) {
 // TestBuildStageTabs_EmptyDir verifies that an empty log directory returns nil.
 func TestBuildStageTabs_EmptyDir(t *testing.T) {
 	dir := t.TempDir()
-	tabs := buildStageTabs(dir, map[string]int{"Research": 1})
+	tabs := buildStageTabs(dir, map[string]int{"Research": 1}, "")
 	if len(tabs) != 0 {
 		t.Errorf("want 0 tabs for empty dir, got %d", len(tabs))
 	}
@@ -173,7 +173,7 @@ func TestBuildStageTabs_IsLive_ByTimestampNotLabel(t *testing.T) {
 		"Research": 1,
 		"Specify":  2,
 	}
-	tabs := buildStageTabs(dir, stageOrder)
+	tabs := buildStageTabs(dir, stageOrder, "")
 
 	if len(tabs) != 2 {
 		t.Fatalf("want 2 tabs, got %d", len(tabs))
@@ -208,5 +208,116 @@ func TestNewestLogFile_ByTimestampNotLabel(t *testing.T) {
 	want := filepath.Join(dir, "Research-20260101-100000-000000000.log")
 	if got != want {
 		t.Errorf("newestLogFile: want %s, got %s", filepath.Base(want), filepath.Base(got))
+	}
+}
+
+// TestBestLogFileForStage_FiltersByStage verifies that bestLogFileForStage returns
+// the newest log matching the requested stage and ignores other stages.
+func TestBestLogFileForStage_FiltersByStage(t *testing.T) {
+	dir := t.TempDir()
+	writeLog(t, dir, "Review-20260101-090000-000000000.log")
+	writeLog(t, dir, "Implement-20260101-100000-000000000.log") // newer, but wrong stage
+
+	got := bestLogFileForStage(dir, "Review")
+	want := filepath.Join(dir, "Review-20260101-090000-000000000.log")
+	if got != want {
+		t.Errorf("bestLogFileForStage(Review): want %s, got %s", filepath.Base(want), filepath.Base(got))
+	}
+}
+
+// TestBestLogFileForStage_IncludesCommentReview verifies that a comment-review log
+// for the requested stage is included and returned when it is newer.
+func TestBestLogFileForStage_IncludesCommentReview(t *testing.T) {
+	dir := t.TempDir()
+	writeLog(t, dir, "Review-20260101-090000-000000000.log")
+	writeLog(t, dir, "Review-comment-review-20260101-100000-000000000.log") // newer
+
+	got := bestLogFileForStage(dir, "Review")
+	want := filepath.Join(dir, "Review-comment-review-20260101-100000-000000000.log")
+	if got != want {
+		t.Errorf("bestLogFileForStage(Review) should return comment-review file; got %s", filepath.Base(got))
+	}
+}
+
+// TestBestLogFileForStage_FallbackWhenNoMatch verifies that bestLogFileForStage
+// falls back to newestLogFile when no file matches the requested stage.
+func TestBestLogFileForStage_FallbackWhenNoMatch(t *testing.T) {
+	dir := t.TempDir()
+	writeLog(t, dir, "Implement-20260101-090000-000000000.log")
+	writeLog(t, dir, "Research-20260101-100000-000000000.log")
+
+	// Ask for a stage that has no log file; should fall back to the globally newest.
+	got := bestLogFileForStage(dir, "Validate")
+	want := filepath.Join(dir, "Research-20260101-100000-000000000.log")
+	if got != want {
+		t.Errorf("bestLogFileForStage(Validate) fallback: want %s, got %s", filepath.Base(want), filepath.Base(got))
+	}
+}
+
+// TestBestLogFileForStage_EmptyStageName verifies that an empty stageName falls
+// back to newestLogFile behaviour (globally newest file).
+func TestBestLogFileForStage_EmptyStageName(t *testing.T) {
+	dir := t.TempDir()
+	writeLog(t, dir, "Research-20260101-090000-000000000.log")
+	writeLog(t, dir, "Implement-20260101-100000-000000000.log")
+
+	got := bestLogFileForStage(dir, "")
+	want := filepath.Join(dir, "Implement-20260101-100000-000000000.log")
+	if got != want {
+		t.Errorf("bestLogFileForStage(\"\") should behave like newestLogFile; got %s", filepath.Base(got))
+	}
+}
+
+// TestBuildStageTabs_LabelOverride_BeatTimestamp is the primary regression test:
+// an Implement-comment-review log with a newer timestamp must NOT steal IsLive
+// from the Review tab when "Review" is the active stage from labels.
+func TestBuildStageTabs_LabelOverride_BeatTimestamp(t *testing.T) {
+	dir := t.TempDir()
+	// Review log is older; Implement-comment-review log is newer.
+	writeLog(t, dir, "Review-20260101-180000-000000000.log")
+	writeLog(t, dir, "Implement-comment-review-20260101-190000-000000000.log")
+	writeLog(t, dir, "Implement-20260101-120000-000000000.log")
+
+	stageOrder := map[string]int{
+		"Research":  1,
+		"Implement": 3,
+		"Review":    4,
+	}
+	tabs := buildStageTabs(dir, stageOrder, "Review")
+
+	// Find the Review tab and assert it is live.
+	var reviewLive, implementLive bool
+	for _, t2 := range tabs {
+		if t2.Label == "Review" {
+			reviewLive = t2.IsLive
+		}
+		if t2.Label == "Implement" {
+			implementLive = t2.IsLive
+		}
+	}
+	if !reviewLive {
+		t.Error("Review tab must be IsLive when activeStage=Review, even though Implement-comment-review log is newer")
+	}
+	if implementLive {
+		t.Error("Implement tab must NOT be IsLive when activeStage=Review")
+	}
+}
+
+// TestBuildStageTabs_LabelOverride_FallbackWhenNoMatch verifies that when the
+// activeStage label names a stage with no tab, the timestamp heuristic is used.
+func TestBuildStageTabs_LabelOverride_FallbackWhenNoMatch(t *testing.T) {
+	dir := t.TempDir()
+	// Only Research log exists; activeStage says "Validate" (no tab for it).
+	writeLog(t, dir, "Research-20260101-100000-000000000.log")
+
+	stageOrder := map[string]int{"Research": 1, "Validate": 5}
+	tabs := buildStageTabs(dir, stageOrder, "Validate")
+
+	if len(tabs) != 1 {
+		t.Fatalf("want 1 tab, got %d", len(tabs))
+	}
+	// Falls back to timestamp heuristic: Research is the only tab and must be IsLive.
+	if !tabs[0].IsLive {
+		t.Error("Research tab must be IsLive via timestamp fallback when activeStage tab doesn't exist")
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/bubbles/viewport"
@@ -78,6 +79,11 @@ type WatchModel struct {
 
 	// done channel — closed on quit to stop background goroutines
 	done chan struct{}
+
+	// activeStagePtr holds the current in_progress stage name derived from GitHub labels.
+	// Heap-allocated so the followFile goroutine can observe updates made by fetchGitHub
+	// despite WatchModel being a bubbletea value type. Stores string; "" means unknown.
+	activeStagePtr *atomic.Value
 }
 
 // NewModel creates a WatchModel for the given issue number.
@@ -91,7 +97,11 @@ func NewModel(issueNumber int, opts GitHubOptions, stagesDir string) WatchModel 
 
 	stageOrder := buildStageOrder(stagesDir)
 	stageMaxTurns := buildStageMaxTurns(stagesDir)
-	tabs := buildStageTabs(logDir, stageOrder)
+
+	// Labels haven't been fetched yet on startup; activeStage defaults to "" (fallback to timestamp heuristic).
+	asp := new(atomic.Value)
+	asp.Store("")
+	tabs := buildStageTabs(logDir, stageOrder, "")
 	selectedTabIdx := liveTabIdx(tabs)
 
 	return WatchModel{
@@ -105,6 +115,7 @@ func NewModel(issueNumber int, opts GitHubOptions, stagesDir string) WatchModel 
 		stageOrder:     stageOrder,
 		stageMaxTurns:  stageMaxTurns,
 		done:           make(chan struct{}),
+		activeStagePtr: asp,
 	}
 }
 
@@ -141,6 +152,22 @@ func buildStageMaxTurns(stagesDir string) map[string]int {
 		m[s.Name] = s.MaxTurns
 	}
 	return m
+}
+
+// activeStageFromLabels returns the stage name from a "stage:X:in_progress" label,
+// or "" if no such label is present.
+func activeStageFromLabels(labels []string) string {
+	for _, l := range labels {
+		after, ok := strings.CutPrefix(l, "stage:")
+		if !ok {
+			continue
+		}
+		name, ok := strings.CutSuffix(after, ":in_progress")
+		if ok {
+			return name
+		}
+	}
+	return ""
 }
 
 // logFileCountForStage counts .log files in logDir whose stage label matches stageName.
@@ -286,8 +313,14 @@ func (m WatchModel) Init() tea.Cmd {
 func Run(m WatchModel) error {
 	p := tea.NewProgram(m, tea.WithAltScreen())
 
+	asp := m.activeStagePtr
+	getActiveStage := func() string {
+		v, _ := asp.Load().(string)
+		return v
+	}
+
 	// Start background goroutines that send messages via p.Send.
-	StartLogFollower(m.logDir, func(msg tea.Msg) { p.Send(msg) }, m.done)
+	StartLogFollower(m.logDir, func(msg tea.Msg) { p.Send(msg) }, m.done, getActiveStage)
 
 	_, err := p.Run()
 	return err
@@ -423,7 +456,7 @@ func (m WatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.currentLogPath = ""
 		m.vp.SetContent("")
 		m.turnsUsed = 0
-		newTabs := buildStageTabs(m.logDir, m.stageOrder)
+		newTabs := buildStageTabs(m.logDir, m.stageOrder, activeStageFromLabels(m.github.labels))
 		m.stageTabs = newTabs
 		m.selectedTabIdx = liveTabIdx(newTabs)
 		m.cachedEffectiveMaxTurns = m.effectiveMaxTurns()
@@ -432,7 +465,7 @@ func (m WatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case GitHubPollMsg:
 		m.fetchGitHub()
 		// Rebuild tabs; preserve selection by label.
-		newTabs := buildStageTabs(m.logDir, m.stageOrder)
+		newTabs := buildStageTabs(m.logDir, m.stageOrder, activeStageFromLabels(m.github.labels))
 		m.selectedTabIdx = mergeTabSelection(newTabs, m.stageTabs, m.selectedTabIdx)
 		m.stageTabs = newTabs
 		m.cachedEffectiveMaxTurns = m.effectiveMaxTurns()
@@ -477,6 +510,9 @@ func (m *WatchModel) fetchGitHub() {
 	m.github.state = issue.State
 	m.github.labels = issue.Labels
 	m.github.commentCnt = issue.Comments
+	if m.activeStagePtr != nil {
+		m.activeStagePtr.Store(activeStageFromLabels(m.github.labels))
+	}
 
 	// Discover the linked PR by convention (branch fabrik/issue-N).
 	// Cache the PR number once found; re-fetch details on each poll.
