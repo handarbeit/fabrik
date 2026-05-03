@@ -67,6 +67,8 @@ After 2 idle polls, Fabrik upgrades itself automatically and re-execs:
 - **Dev builds** (built from source via `go build`): detects local or remote commits
   ahead of the running binary and rebuilds in place from `origin/main`.
 
+When Fabrik is upgraded, it also compares your `.fabrik/stages/*.yaml` files against the embedded defaults and prints a startup warning for any stage file that is missing fields added in the newer binary. Run `fabrik refresh-stages --apply` to add the missing keys, then review with `git diff` and commit. See [Stage YAML Drift Warning](docs/USER_GUIDE.md#stage-yaml-drift-warning) in the User Guide for details.
+
 ## How It Works
 
 ```
