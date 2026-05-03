@@ -690,6 +690,80 @@ func TestItemMayNeedWork_AwaitingCI_BypassesUpdatedAtCache(t *testing.T) {
 	}
 }
 
+// TestItemMayNeedWork_AwaitingReview_CooldownPattern verifies that items with
+// fabrik:awaiting-review use the processedSet cooldown pattern (same as fabrik:blocked)
+// rather than per-poll cache bypass. The cooldown is 10 × PollSeconds (matches the
+// existing cooldown retry path at item.go). The catch-up loop's review-gate path
+// records processedSet[stageKey] when checkReviewGate returns blocked=true, which
+// makes itemMayNeedWork re-admit the item every 10 × PollSeconds — enough for Phase 1
+// and Phase 2 reprompt timers (which fire at 1× ReviewWaitTimeout = 15 min default)
+// to fire within ~150s of their actual due time, without turning long-lived review-
+// waiting items into a permanent GraphQL hot path.
+//
+// Real-world repro: issue #467 — fabrik filed this regression after observing an
+// issue stuck for hours waiting on Copilot when Phase 1 should have re-fired.
+func TestItemMayNeedWork_AwaitingReview_CooldownPattern(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.cfg.PollSeconds = 60 // cooldown = 10 × 60s = 600s
+
+	ts := time.Now().Add(-time.Minute)
+	item := gh.ProjectItem{
+		Number:    67,
+		Status:    "Research",
+		ItemID:    "PVTI_67",
+		UpdatedAt: ts,
+		Labels:    []string{"fabrik:awaiting-review"},
+	}
+
+	// Within cooldown: processedSet has a recent entry → must NOT re-admit yet.
+	eng.mu.Lock()
+	eng.lastUpdatedAt["owner/repo#67"] = ts
+	eng.processedSet["owner/repo#67-Research"] = time.Now() // just processed
+	eng.mu.Unlock()
+
+	if eng.itemMayNeedWork(item) {
+		t.Error("fabrik:awaiting-review item within cooldown window should be filtered (cooldown not yet expired)")
+	}
+
+	// Past cooldown: processedSet entry is older than 10 × PollSeconds → must re-admit.
+	eng.mu.Lock()
+	eng.processedSet["owner/repo#67-Research"] = time.Now().Add(-15 * time.Minute) // well past 600s cooldown
+	eng.mu.Unlock()
+
+	if !eng.itemMayNeedWork(item) {
+		t.Error("fabrik:awaiting-review item past cooldown window should be re-admitted by cooldown retry path")
+	}
+}
+
+// TestItemMayNeedWork_AwaitingReview_NotBypassedDirectly verifies that
+// fabrik:awaiting-review is NOT in the unconditional cache-bypass list (unlike
+// fabrik:awaiting-ci and fabrik:rebase-needed). Without a processedSet entry, the
+// item is filtered by the standard updatedAt cache. This is the intentional
+// design choice from the #495 fix — use cooldown pattern, not per-poll bypass.
+func TestItemMayNeedWork_AwaitingReview_NotBypassedDirectly(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.cfg.PollSeconds = 60
+
+	ts := time.Now().Add(-time.Minute)
+	item := gh.ProjectItem{
+		Number:    68,
+		Status:    "Research",
+		ItemID:    "PVTI_68",
+		UpdatedAt: ts,
+		Labels:    []string{"fabrik:awaiting-review"},
+	}
+
+	// No processedSet entry: cooldown retry path doesn't fire. Without unconditional
+	// bypass, the cache filter wins and we return false.
+	eng.mu.Lock()
+	eng.lastUpdatedAt["owner/repo#68"] = ts
+	eng.mu.Unlock()
+
+	if eng.itemMayNeedWork(item) {
+		t.Error("fabrik:awaiting-review without processedSet entry should be filtered (no per-poll bypass)")
+	}
+}
+
 // TestItemMayNeedWork_BlockedRespectsUpdatedAtCache verifies that a fabrik:blocked
 // item with an unchanged updatedAt is NOT force-deep-fetched. The dependency item's
 // own updatedAt changes when it closes, which is visible in the shallow fetch —
