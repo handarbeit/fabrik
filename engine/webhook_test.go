@@ -121,6 +121,44 @@ func TestSemverAtLeast(t *testing.T) {
 	}
 }
 
+// TestIsAuthShapedError covers stderr-shape detection for org/repo permission denials.
+// GitHub returns 404 (not 403) for permission-denied access to org/repo resources to
+// avoid leaking existence — the matcher must recognize that shape on hooks endpoints
+// so the supervise loop falls back to per-repo mode instead of looping on transient
+// retries.
+func TestIsAuthShapedError(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		// Classic auth-shaped messages.
+		{"403", "Error: HTTP 403", true},
+		{"forbidden", "Forbidden: insufficient scopes", true},
+		{"permission denied", "permission denied for hook", true},
+		{"requires admin", "this action requires admin access", true},
+		{"not allowed", "operation not allowed for this user", true},
+		// 404 on org hooks endpoint — the bug this test guards against.
+		{"404 on /orgs/.../hooks", "Error: error creating webhook: HTTP 404: Not Found (https://api.github.com/orgs/handarbeit/hooks)", true},
+		// 404 on repo hooks endpoint — symmetric per-repo case.
+		{"404 on /repos/.../hooks", "Error: error creating webhook: HTTP 404: Not Found (https://api.github.com/repos/handarbeit/fabrik/hooks)", true},
+		// Negative cases — bare 404s on other paths must not be treated as auth-shaped
+		// (false positives would cause permanent fallback on legitimate not-found errors).
+		{"404 unrelated path", "Error: HTTP 404: Not Found (https://api.github.com/users/missing)", false},
+		{"404 issues endpoint", "Error: HTTP 404: Not Found (https://api.github.com/repos/x/y/issues/9999)", false},
+		{"empty", "", false},
+		{"unrelated noise", "connection reset by peer", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isAuthShapedError(tc.in)
+			if got != tc.want {
+				t.Errorf("isAuthShapedError(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestDetectOrgMode covers org detection from a repo set.
 func TestDetectOrgMode(t *testing.T) {
 	sameOrg := map[string]bool{"myorg/repo1": true, "myorg/repo2": true}
