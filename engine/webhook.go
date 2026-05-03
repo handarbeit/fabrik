@@ -850,14 +850,17 @@ func (wm *webhookManager) handleWebhook(w http.ResponseWriter, r *http.Request) 
 
 	wm.emitCurrentState()
 
-	// Apply cache delta before waking the poll loop, so the cache is fresh when poll runs.
-	if wm.deltaFn != nil {
-		wm.deltaFn(eventType, body)
-	}
-
-	// Notify health-change listener when stream recovers from unhealthy/starting-up.
+	// On recovery from unhealthy/starting-up, reconcile and resume the cache first
+	// so the delta applied below lands on coherent state rather than being dropped
+	// because the cache is still paused.
 	if prevState != WebhookStreamHealthy && wm.healthChangeFn != nil {
 		wm.healthChangeFn(true)
+	}
+
+	// Apply cache delta after any recovery reconciliation, so the cache is fresh
+	// when the poll loop wakes.
+	if wm.deltaFn != nil {
+		wm.deltaFn(eventType, body)
 	}
 
 	// Wake the poll loop immediately.
