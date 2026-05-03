@@ -323,16 +323,20 @@ func (e *Engine) Run() error {
 			deltaFn,
 			healthChangeFn,
 		)
+		// Bootstrap the cache before accepting webhook events so no delta is
+		// dropped into an empty cache during the startup window.
+		if cacheImpl != nil {
+			board, err := e.client.FetchProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
+			if err != nil {
+				e.logf(0, "cache", "bootstrap fetch failed — cache will be populated on first miss: %v\n", err)
+			} else {
+				cacheImpl.Bootstrap(board)
+			}
+		}
 		if err := wm.Start(ctx, e.cfg.WebhookPort); err == nil {
 			e.webhookMgr = wm
 			defer wm.Stop()
 			if cacheImpl != nil {
-				board, err := e.client.FetchProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
-				if err != nil {
-					e.logf(0, "cache", "bootstrap fetch failed — cache will be populated on first miss: %v\n", err)
-				} else {
-					cacheImpl.Bootstrap(board)
-				}
 				go e.runReconciliationLoop(ctx, cacheImpl)
 			}
 		}
