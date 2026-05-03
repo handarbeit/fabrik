@@ -41,7 +41,7 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	key := issueKey(item, e.defaultRepo())
 
-	pr, err := e.client.FetchLinkedPR(owner, repo, item.Number)
+	pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number)
 	if err != nil {
 		e.logf(item.Number, "ci-gate", "could not fetch linked PR: %v — blocking until API recovers\n", err)
 		return true, false, false // transient error; retry on next poll
@@ -60,7 +60,7 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 	// workflow jobs like "Cleanup artifacts" that GitHub itself does not treat
 	// as merge blockers). Falls through to per-check classification when
 	// mergeable_state is empty/unknown/blocked/etc.
-	if mergeableState, msErr := e.client.FetchPRMergeableState(owner, repo, pr.Number); msErr != nil {
+	if mergeableState, msErr := e.readClient.FetchPRMergeableState(owner, repo, pr.Number); msErr != nil {
 		e.logf(item.Number, "warn", "could not fetch mergeable_state: %v — falling back to check-runs gate\n", msErr)
 	} else if gh.MergeableStateAccepted(mergeableState) {
 		e.logf(item.Number, "ci-gate", "mergeable_state=%q — gate clears (skipping check_runs classification)\n", mergeableState)
@@ -68,7 +68,7 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 		return false, false, false
 	}
 
-	checkRuns, err := e.client.FetchCheckRuns(owner, repo, pr.HeadSHA)
+	checkRuns, err := e.readClient.FetchCheckRuns(owner, repo, pr.HeadSHA)
 	if err != nil {
 		e.logf(item.Number, "ci-gate", "could not fetch check runs: %v — blocking until API recovers\n", err)
 		return true, false, false // transient error; retry on next poll
@@ -205,9 +205,9 @@ func (e *Engine) buildCIFixComment(item gh.ProjectItem, stage *stages.Stage, wor
 	var baseBranch string
 
 	// Fetch PR check runs.
-	pr, err := e.client.FetchLinkedPR(owner, repo, item.Number)
+	pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number)
 	if err == nil && pr != nil && pr.HeadSHA != "" {
-		prFailures, _ = e.client.FetchCheckRuns(owner, repo, pr.HeadSHA)
+		prFailures, _ = e.readClient.FetchCheckRuns(owner, repo, pr.HeadSHA)
 	}
 
 	// Fetch base branch check runs for comparison.
@@ -216,7 +216,7 @@ func (e *Engine) buildCIFixComment(item gh.ProjectItem, stage *stages.Stage, wor
 	if err == nil {
 		baseBranch = bb
 		if baseSHA, err := gitRevParse(workDir, "origin/"+baseBranch); err == nil && baseSHA != "" {
-			baseRuns, _ = e.client.FetchCheckRuns(owner, repo, baseSHA)
+			baseRuns, _ = e.readClient.FetchCheckRuns(owner, repo, baseSHA)
 		}
 	}
 
