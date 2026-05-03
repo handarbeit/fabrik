@@ -933,7 +933,12 @@ The poll loop's effective interval grows when there is nothing to do (idle backo
 - Base interval: `PollSeconds` (default 30s).
 - Activity multiplier: doubles each poll cycle where no work was dispatched, up to the idle cap.
 - Activity reset: any dispatched work OR any received webhook event resets `idleStart` and the multiplier back to 1×.
-- Rate-limit adjustment: when `rateLimitRatio < 1.0` (backoff active), `computeEffectiveInterval` applies a stepwise escalation — 2× at >=10% remaining (including the 20%–50% sticky hysteresis zone), 4× at >=5% and <10%, 6× at >=1% and <5%, and 10× (`rateLimitMaxBackoffMultiplier`) below 1%. The rate-limit component has no 5-minute ceiling; only the caller-supplied `rateLimitMaxBackoffMultiplier` cap applies.
+- Rate-limit adjustment (`nextRateLimitLow` + `computeEffectiveInterval` in `engine/poll.go`):
+  - **Activation**: rate-limit backoff engages when remaining GraphQL quota drops below 20% (`rateLimitBackoffThreshold`). The actual remaining fraction is passed to `computeEffectiveInterval` as `rateLimitRatio`.
+  - **Clearance**: backoff clears only when quota rises above 50% (`rateLimitHealthyThreshold`). Between 20% and 50% the state is sticky — backoff remains active to prevent thrashing on boards where quota fluctuates near the activation point.
+  - **Stepwise escalation**: the multiplier scales with depletion depth — 2× at >=10% remaining (includes the 20%–50% sticky zone), 4× at >=5% and <10%, 6× at >=1% and <5%, 10× (`rateLimitMaxBackoffMultiplier`) below 1%.
+  - **No idle cap**: the rate-limit component has no 5-minute ceiling; it is capped only at `rateLimitMaxBackoffMultiplier × configuredInterval`.
+  - **Independence from idle backoff**: activity detection (items dispatched or webhooks received) resets idle backoff but does NOT reset rate-limit backoff.
 
 **Idle cap selection** (`effectiveIdleCap` in `engine/poll.go`):
 
