@@ -166,9 +166,16 @@ or `poll:` in `config.yaml`).
 | 10–20 min | 4× | 120s |
 | 20+ min | max (5 minutes) | 300s |
 
-**Rate-limit backoff**: When Fabrik detects GraphQL API quota pressure, the same interval infrastructure adds a separate rate-limit component. This component is capped at `10 × configured poll interval` (300s at the default 30s base; 600s at 60s base) — there is no separate 5-minute ceiling for the rate-limit contributor. The effective poll interval is `max(idle interval, rate-limit interval)`, so whichever is larger governs at any given moment.
+**Rate-limit backoff**: When Fabrik detects GraphQL API quota pressure, the same interval infrastructure adds a separate rate-limit component that escalates as quota depletes. There is no separate 5-minute ceiling for the rate-limit contributor — it can exceed 5 minutes when the configured base interval is large. The effective poll interval is `max(idle interval, rate-limit interval)`, so whichever is larger governs at any given moment.
 
-Rate-limit backoff uses two-threshold hysteresis to prevent thrashing: it **activates** when GraphQL remaining quota drops below **20%** of the hourly limit, and **clears only when quota rises above 50%** of the limit. Activity detection (items deep-fetched or dispatched) resets idle backoff but does NOT reset rate-limit backoff — the two concerns are independent. When rate-limit backoff is active, Fabrik logs the effective poll interval each cycle so operators can observe the actual cadence.
+| Remaining GraphQL quota | Multiplier | At 30s base | At 60s base |
+|---|---|---|---|
+| 10%–20% (backoff active) | 2× | 60s | 120s |
+| 5%–10% | 4× | 120s | 240s |
+| 1%–5% | 6× | 180s | 360s |
+| < 1% | 10× (cap) | 300s | 600s |
+
+Rate-limit backoff uses two-threshold hysteresis to prevent thrashing: it **activates** when GraphQL remaining quota drops below **20%** of the hourly limit, and **clears only when quota rises above 50%** of the limit. While quota is recovering (20%–50%, sticky zone), the 2× tier applies. Activity detection (items deep-fetched or dispatched) resets idle backoff but does NOT reset rate-limit backoff — the two concerns are independent. When rate-limit backoff is active, Fabrik logs the effective poll interval each cycle so operators can observe the actual cadence.
 
 **Board fetch resilience**: `FetchProjectBoard` automatically retries up to 3 times (with 1s/2s backoff) when GitHub returns an empty response (zero items), which occurs during transient Projects v2 indexer degradation that intermittently returns empty boards for non-empty projects (both returned node count and `totalCount` are zero in degraded responses). The log line:
 

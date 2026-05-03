@@ -82,7 +82,16 @@ func effectiveIdleCap(webhookHealthy bool) time.Duration {
 // idle backoff and rate-limit backoff. The result is max(idle, rateLimit).
 // The idle component is capped at effectiveIdleCap(webhookHealthy); the rate-limit
 // component uses its own cap (rateLimitMaxBackoffMultiplier × configured).
-func computeEffectiveInterval(configuredInterval time.Duration, idleDuration time.Duration, rateLimitLow bool, webhookHealthy bool) time.Duration {
+//
+// rateLimitRatio is the remaining-to-total GraphQL quota fraction. Pass 1.0 when
+// no rate-limit backoff is active; pass the actual fraction when backoff is active.
+// The stepwise escalation schedule (activates when ratio < 1.0):
+//
+//	10%–100% remaining: 2× configured  (includes sticky hysteresis zone 20%–50%)
+//	 5%–10% remaining:  4× configured
+//	 1%– 5% remaining:  6× configured
+//	  < 1% remaining:  10× configured  (rateLimitMaxBackoffMultiplier)
+func computeEffectiveInterval(configuredInterval time.Duration, idleDuration time.Duration, rateLimitRatio float64, webhookHealthy bool) time.Duration {
 	cap := effectiveIdleCap(webhookHealthy)
 
 	var idleInterval time.Duration
@@ -97,8 +106,19 @@ func computeEffectiveInterval(configuredInterval time.Duration, idleDuration tim
 	}
 
 	rateLimitInterval := configuredInterval
-	if rateLimitLow {
-		rateLimitInterval = configuredInterval * 2
+	if rateLimitRatio < 1.0 {
+		var rlMult int
+		switch {
+		case rateLimitRatio >= 0.10:
+			rlMult = 2
+		case rateLimitRatio >= 0.05:
+			rlMult = 4
+		case rateLimitRatio >= 0.01:
+			rlMult = 6
+		default:
+			rlMult = rateLimitMaxBackoffMultiplier
+		}
+		rateLimitInterval = configuredInterval * time.Duration(rlMult)
 		maxRL := configuredInterval * time.Duration(rateLimitMaxBackoffMultiplier)
 		if rateLimitInterval > maxRL {
 			rateLimitInterval = maxRL
@@ -301,6 +321,7 @@ func (e *Engine) Run() error {
 
 	prevMultiplier := 1
 	rateLimitLow := false
+	rateLimitRatio := 1.0
 
 	// doPollCycle runs poll(), updates idle/backoff state, emits PollCompletedEvent,
 	// and resets the ticker to the effective interval. Returns the error from poll().
@@ -333,6 +354,11 @@ func (e *Engine) Run() error {
 				e.logf(0, "poll", "GraphQL rate limit recovered (%.0f%% remaining)\n", ratio*100)
 			}
 			rateLimitLow = newRateLimitLow
+			if rateLimitLow {
+				rateLimitRatio = ratio
+			} else {
+				rateLimitRatio = 1.0
+			}
 		}
 
 		// Compute and apply effective interval.
@@ -341,7 +367,7 @@ func (e *Engine) Run() error {
 			idleDuration = time.Since(e.idleStart)
 		}
 		webhookHealthy := e.webhookMgr != nil && e.webhookMgr.IsHealthyOrStartingUp()
-		effectiveInterval := computeEffectiveInterval(configuredInterval, idleDuration, rateLimitLow, webhookHealthy)
+		effectiveInterval := computeEffectiveInterval(configuredInterval, idleDuration, rateLimitRatio, webhookHealthy)
 
 		// Notify webhook manager of any new repos discovered during this poll.
 		if e.webhookMgr != nil && result.SeenRepos != nil {
