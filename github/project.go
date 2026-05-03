@@ -900,3 +900,119 @@ query($id: ID!, $cursor: String) {
 func parseTime(s string) (time.Time, error) {
 	return time.Parse(time.RFC3339, s)
 }
+
+// FetchProjectItemStatus fetches only the Status field value for a single project
+// item identified by its node ID (PVTI_...). Returns "" when no status is set.
+func (c *Client) FetchProjectItemStatus(itemID string) (string, error) {
+	query := `
+query($id: ID!) {
+  node(id: $id) {
+    ... on ProjectV2Item {
+      fieldValueByName(name: "Status") {
+        ... on ProjectV2ItemFieldSingleSelectValue {
+          name
+        }
+      }
+    }
+  }
+}`
+	vars := map[string]interface{}{"id": itemID}
+
+	var result struct {
+		Data struct {
+			Node struct {
+				FieldValueByName *struct {
+					Name string `json:"name"`
+				} `json:"fieldValueByName"`
+			} `json:"node"`
+		} `json:"data"`
+	}
+
+	if err := c.graphqlRequest(query, vars, &result); err != nil {
+		return "", fmt.Errorf("fetching status for item %s: %w", itemID, err)
+	}
+	if result.Data.Node.FieldValueByName == nil {
+		return "", nil
+	}
+	return result.Data.Node.FieldValueByName.Name, nil
+}
+
+// FetchProjectItemStatusBatch fetches a map of projectItemNodeID → statusName for
+// every item in the project. Dramatically cheaper than FetchProjectBoard because it
+// fetches no nested fields. Paginates identically to fetchProjectBoardOnce.
+func (c *Client) FetchProjectItemStatusBatch(projectID string) (map[string]string, error) {
+	query := `
+query($id: ID!, $cursor: String) {
+  node(id: $id) {
+    ... on ProjectV2 {
+      items(first: 100, after: $cursor) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        nodes {
+          id
+          fieldValueByName(name: "Status") {
+            ... on ProjectV2ItemFieldSingleSelectValue {
+              name
+            }
+          }
+        }
+      }
+    }
+  }
+}`
+
+	type statusNode struct {
+		ID               string `json:"id"`
+		FieldValueByName *struct {
+			Name string `json:"name"`
+		} `json:"fieldValueByName"`
+	}
+
+	out := make(map[string]string)
+	cursor := ""
+
+	for {
+		vars := map[string]interface{}{"id": projectID}
+		if cursor != "" {
+			vars["cursor"] = cursor
+		}
+
+		var result struct {
+			Data struct {
+				Node struct {
+					Items struct {
+						PageInfo struct {
+							HasNextPage bool   `json:"hasNextPage"`
+							EndCursor   string `json:"endCursor"`
+						} `json:"pageInfo"`
+						Nodes []statusNode `json:"nodes"`
+					} `json:"items"`
+				} `json:"node"`
+			} `json:"data"`
+		}
+
+		if err := c.graphqlRequest(query, vars, &result); err != nil {
+			return nil, fmt.Errorf("fetching project item status batch: %w", err)
+		}
+
+		for _, n := range result.Data.Node.Items.Nodes {
+			if n.FieldValueByName != nil {
+				out[n.ID] = n.FieldValueByName.Name
+			} else {
+				out[n.ID] = ""
+			}
+		}
+
+		if !result.Data.Node.Items.PageInfo.HasNextPage {
+			break
+		}
+		if result.Data.Node.Items.PageInfo.EndCursor == "" {
+			return nil, fmt.Errorf("fetching project item status batch: hasNextPage=true but endCursor is empty")
+		}
+		cursor = result.Data.Node.Items.PageInfo.EndCursor
+	}
+
+	return out, nil
+}
