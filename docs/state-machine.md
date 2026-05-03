@@ -1287,3 +1287,84 @@ The `processedSet` map (in-memory, keyed by `issueKey(item, defaultRepo()) + "-"
 | 8 | PR item | Not a PR (PRs only support comments, checked after comment check) |
 | 9 | Stage complete | No `stage:<X>:complete` label |
 | 10 | Cooldown | Not attempted, OR cooldown expired |
+
+---
+
+## Appendix D: In-Memory Board Cache Lifecycle
+
+When `--webhooks` and `--board-cache=in-memory` are both active (the default when webhooks are enabled), the engine maintains an in-memory cache of board state in `boardcache.CacheImpl`. This appendix describes the cache lifecycle, delta semantics, reconciliation, and stream-health failover.
+
+### D.1 Bootstrap
+
+Immediately after `wm.Start()` succeeds (webhook manager listener bound and subprocess launched), the engine calls `e.client.FetchProjectBoard(...)` directly — bypassing the cache — and passes the result to `cacheImpl.Bootstrap(board)`. Bootstrap populates `items`, `shaToKey`, and `itemIDToKey` from the full board snapshot. Deep fields (comments, linked PR data) are not populated at bootstrap; they are fetched lazily on first `FetchItemDetails` call.
+
+If the bootstrap fetch fails (e.g., transient network error), the cache starts empty and populates through fallback on the first cache miss. No data is lost; latency for the first deep-fetch is slightly higher.
+
+### D.2 Delta Application
+
+Every verified webhook payload is passed to `cacheImpl.ApplyDelta(eventType, payload []byte)` before the poll loop is woken. `ApplyDelta` is a no-op when `IsPaused()` returns true. Otherwise it dispatches to a typed handler:
+
+| Event type | Handler | Effect |
+|------------|---------|--------|
+| `issue_comment.created` | `applyIssueCommentCreated` | Appends comment to `item.Comments`; idempotent by NodeID |
+| `issues.labeled` | `applyIssuesLabeled` | Adds label to `item.Labels`; set-membership (no duplicates) |
+| `issues.unlabeled` | `applyIssuesUnlabeled` | Removes label from `item.Labels` |
+| `pull_request.opened/closed/synchronize` | `applyPullRequestDelta` | Upserts `linkedPRs[prKey]`; updates `shaToKey[sha]`; rotates old SHA on synchronize |
+| `pull_request_review.submitted` | `applyPullRequestReviewSubmitted` | Upserts review in `linkedPRs[prKey].Reviews` by DatabaseID |
+| `pull_request_review_comment.created` | `applyPullRequestReviewCommentCreated` | Appends to `LinkedPRReviewThreadComments`; idempotent by NodeID |
+| `check_run.completed` | `applyCheckRunCompleted` | Upserts check run in `checkRuns[sha]` by CheckRun.ID |
+| `projects_v2_item.edited` | `applyProjectsV2ItemEdited` | Updates `item.Status` via `itemIDToKey` reverse lookup |
+
+All delta functions hold the write lock for their mutation only. They silently drop events for unknown items (e.g., items not yet on the board) rather than returning errors.
+
+### D.3 Cache Read Semantics
+
+`CacheImpl` implements `boardcache.ReadClient`. When the poll loop calls a read method:
+
+| Method | Cache behavior |
+|--------|----------------|
+| `FetchProjectBoard` | Returns reconstructed board from `items` map; falls back to GitHub when cache is empty |
+| `FetchItemDetails` | Serves deep fields from cache when `deepFetched[key]` is true; falls back to GitHub and populates on miss; logs `[cache] miss for #N — fetching from GitHub` |
+| `FetchCheckRuns` | Serves from `checkRuns[sha]`; falls back and caches on miss |
+| `FetchLinkedPR` | Looks up `linkedPRs[prKey]` via `item.LinkedPRNumber`; falls back on miss |
+| `FetchPRMergeable` | Always delegates to fallback (mergeability changes without webhook events) |
+| `FetchPRMergeableState` | Always delegates to fallback |
+| `FetchLabels` | Serves from `item.Labels` when item is cached; falls back on miss |
+| `FetchStatusField` | Always delegates to fallback (static field metadata) |
+| `RateLimitStats` | Always delegates to fallback |
+
+### D.4 Reconciliation
+
+A `runReconciliationLoop` goroutine tickers at `webhookIdleCap` (60 min). Each tick calls `e.client.FetchProjectBoard(...)` directly and passes the result to `cacheImpl.Reconcile(board)`.
+
+`Reconcile` performs a partial update:
+- For each item in the fresh board snapshot: update shallow fields (`Status`, shallow `Labels`, `UpdatedAt`, etc.) in-place. Deep fields (`Comments`, `LinkedPR*`, etc.) are **preserved** from the existing cache entry to avoid triggering a burst of FetchItemDetails calls after each reconciliation.
+- Items present in the cache but absent from the new snapshot are removed (they were archived or moved off the board).
+- `itemIDToKey` and `shaToKey` are rebuilt.
+- Logs `[reconciliation] N items differed` at the end.
+
+Reconciliation is also triggered inline on stream recovery (see §D.5).
+
+### D.5 Stream-Health Failover
+
+The `healthChangeFn` callback injected into `webhookManager` is called on health state transitions:
+
+| Transition | Action |
+|------------|--------|
+| Any → `WebhookStreamUnhealthy` (from `checkHealthTransitions`) | `cacheImpl.Pause()` |
+| Any → `WebhookStreamHealthy` (from `handleWebhook` on first recovery event) | `reconcileCache()` inline → `cacheImpl.Resume()` |
+
+When `IsPaused()` is true:
+- `ApplyDelta` is a no-op (deltas are dropped rather than applied to a potentially stale cache).
+- All `CacheImpl` read methods fall through to the `fallback` ReadClient (live GitHub API), so correctness is preserved at the cost of increased GraphQL usage.
+
+On recovery, `reconcileCache()` fetches a fresh board snapshot before `Resume()` so the cache is coherent immediately when `IsPaused()` returns false.
+
+### D.6 Cache Mode Selection
+
+| `--board-cache` | `--webhooks` | Behavior |
+|-----------------|--------------|----------|
+| `in-memory` (default when webhooks on) | required | `CacheImpl` with delta/failover |
+| `none` | any | `GitHubAdapter` pass-through (no caching) |
+
+Specifying `--board-cache=in-memory` without `--webhooks` is a configuration error: without a webhook stream there is no delta source and the cache would only reconcile every 60 minutes, which is worse than direct polling.

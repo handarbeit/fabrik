@@ -62,9 +62,11 @@ type webhookManager struct {
 	mu sync.Mutex
 
 	// injected dependencies
-	logFn  func(issueNumber int, tag, format string, args ...any)
-	wakeCh chan struct{}
-	emitFn func(tui.Event)
+	logFn         func(issueNumber int, tag, format string, args ...any)
+	wakeCh        chan struct{}
+	emitFn        func(tui.Event)
+	deltaFn       func(eventType string, payload []byte) // nil when board cache disabled
+	healthChangeFn func(healthy bool)                    // nil when board cache disabled
 
 	// killFn terminates a subprocess. Defaults to killProcGroup; overridable in tests.
 	// The caller is responsible for the cmd != nil check; killFn handles nil Process.
@@ -110,6 +112,8 @@ func newWebhookManager(
 	emitFn func(tui.Event),
 	repos map[string]bool,
 	events []string,
+	deltaFn func(string, []byte),
+	healthChangeFn func(bool),
 ) *webhookManager {
 	evts := events
 	if len(evts) == 0 {
@@ -117,15 +121,17 @@ func newWebhookManager(
 		copy(evts, defaultWebhookEvents)
 	}
 	wm := &webhookManager{
-		logFn:       logFn,
-		wakeCh:      wakeCh,
-		emitFn:      emitFn,
-		repos:       copyRepoSet(repos),
-		events:      evts,
-		state:       WebhookStreamUnhealthy, // becomes StartingUp when subprocess launches
-		eventCounts: make(map[string]int),
-		stopCh:      make(chan struct{}),
-		repoReadyCh: make(chan struct{}),
+		logFn:          logFn,
+		wakeCh:         wakeCh,
+		emitFn:         emitFn,
+		deltaFn:        deltaFn,
+		healthChangeFn: healthChangeFn,
+		repos:          copyRepoSet(repos),
+		events:         evts,
+		state:          WebhookStreamUnhealthy, // becomes StartingUp when subprocess launches
+		eventCounts:    make(map[string]int),
+		stopCh:         make(chan struct{}),
+		repoReadyCh:    make(chan struct{}),
 		killFn: func(cmd *exec.Cmd) {
 			if cmd != nil && cmd.Process != nil {
 				killProcGroup(cmd)
@@ -699,6 +705,9 @@ func (wm *webhookManager) checkHealthTransitions() {
 		wm.mu.Unlock()
 		wm.logFn(0, "webhook", "health state: %s → %s\n", state, newState)
 		wm.emitCurrentState()
+		if newState == WebhookStreamUnhealthy && wm.healthChangeFn != nil {
+			wm.healthChangeFn(false)
+		}
 		return
 	}
 	wm.mu.Unlock()
@@ -840,6 +849,16 @@ func (wm *webhookManager) handleWebhook(w http.ResponseWriter, r *http.Request) 
 	}
 
 	wm.emitCurrentState()
+
+	// Apply cache delta before waking the poll loop, so the cache is fresh when poll runs.
+	if wm.deltaFn != nil {
+		wm.deltaFn(eventType, body)
+	}
+
+	// Notify health-change listener when stream recovers from unhealthy/starting-up.
+	if prevState != WebhookStreamHealthy && wm.healthChangeFn != nil {
+		wm.healthChangeFn(true)
+	}
 
 	// Wake the poll loop immediately.
 	select {

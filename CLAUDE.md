@@ -41,6 +41,8 @@ go vet ./...             # Lint
 - `plugin/refresh.go` — `RefreshPlugin()` overwrites `.fabrik/plugin/` from the embedded source
 - `cmd/init.go` — `fabrik init` subcommand; extracts embedded YAMLs to `.fabrik/stages/`
 - `.fabrik/stages/` — Live stage configs for this project (tracked in git)
+- `boardcache/boardcache.go` — `ReadClient` interface (9-method read-only subset of `GitHubClient`), `GitHubAdapter` (pass-through), `CacheImpl` (in-memory cache with delta, reconcile, pause/resume)
+- `boardcache/delta.go` — Typed webhook delta functions: apply `issue_comment`, `issues`, `pull_request`, `pull_request_review`, `pull_request_review_comment`, `check_run`, and `projects_v2_item` payloads as state mutations
 
 > **Editing built-in skills**: modify `plugin/fabrik-plugin/skills/<name>/SKILL.md` — the embedded source baked into the binary. `.fabrik/plugin/` is the local deployed copy written by `fabrik init` and refreshed by `fabrik upgrade`; it is not tracked in git and edits there will be silently overwritten on the next refresh.
 
