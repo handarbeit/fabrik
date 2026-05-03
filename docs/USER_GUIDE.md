@@ -1625,6 +1625,7 @@ webhooks: true
 | Enable webhooks | `--webhooks` | `FABRIK_WEBHOOKS` | `webhooks: true` | off |
 | Listener port | `--webhook-port=<N>` | `FABRIK_WEBHOOK_PORT` | `webhook_port: <N>` | 0 (OS-assigned) |
 | Event filter | `--webhook-events=<csv>` | `FABRIK_WEBHOOK_EVENTS` | `webhook_events: [...]` | all supported events |
+| Board cache | `--board-cache=<mode>` | `FABRIK_BOARD_CACHE` | `board_cache: <mode>` | `in-memory` when `--webhooks`, else `none` |
 
 By default, Fabrik subscribes to: `issue_comment`, `issues`, `pull_request`, `pull_request_review`, `pull_request_review_comment`, `check_run`, `check_suite`, and `projects_v2_item` (board column changes — see note below).
 
@@ -1643,6 +1644,28 @@ The TUI footer shows a webhook health indicator when webhook mode is enabled:
 ### Expected GraphQL Load Reduction
 
 On an active board that would poll every 30 seconds without webhooks, enabling webhook mode reduces steady-state GraphQL polling to at most once every 60 minutes — roughly a 120× reduction in GraphQL points consumed while idle. During active periods, polls are triggered immediately by webhook events instead of waiting for the tick.
+
+### In-Memory Board Cache (`--board-cache`)
+
+When webhook mode is active, Fabrik maintains an in-memory board cache (`--board-cache=in-memory`, the default). Incoming webhook payloads are applied as typed state deltas to the cache before the poll loop wakes, so most reads are served from memory rather than GitHub's API.
+
+**Cache modes:**
+
+| Mode | When | Behavior |
+|------|------|----------|
+| `in-memory` | `--webhooks` enabled (default) | Cache populated at startup; deltas from webhooks; reconciles every 60 min; falls back to GitHub when stream is unhealthy |
+| `none` | `--webhooks` disabled (default), or explicit override | All reads go directly to GitHub API (original behavior) |
+
+**To disable the cache while keeping webhooks:**
+```bash
+fabrik --webhooks --board-cache=none
+```
+
+**Stream-health failover:** If the webhook stream goes unhealthy (no events for 10 minutes), the cache pauses and all reads fall back to the live GitHub API. When the stream recovers, the cache reconciles from GitHub before resuming. This ensures correctness is never compromised by a degraded webhook stream.
+
+**Reconciliation:** Every 60 minutes (matching the idle-cap for healthy webhook streams), Fabrik fetches a fresh board snapshot from GitHub and updates the cache. This heals any events the webhook stream may have missed. Reconciliation also runs inline when the stream recovers from unhealthy.
+
+> **Note:** `--board-cache=in-memory` requires `--webhooks`. Without a webhook stream, there is no delta source and the cache would only reconcile every 60 minutes — worse than the default polling behavior.
 
 ### `projects_v2_item` (Board Column Changes)
 

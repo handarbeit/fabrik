@@ -190,6 +190,8 @@ func newTestWebhookManager(t *testing.T) (*webhookManager, chan tui.Event) {
 		func(e tui.Event) { events <- e },
 		map[string]bool{"myorg/myrepo": true},
 		nil,
+		nil,
+		nil,
 	)
 	return wm, events
 }
