@@ -48,12 +48,14 @@ Layered, per [`SPEC §3.2`](https://github.com/openai/symphony/blob/58cf97d/SPEC
 
 Same outer shape, different internal contracts (cross-references: [`docs/state-machine.md`](../state-machine.md), [`docs/stage-lifecycle.md`](../stage-lifecycle.md), and the `adrs/` directory).
 
-1. **Stage configs** — N per-stage YAMLs in `.fabrik/stages/`, each with its own `prompt`, optional `skill`, `model`, `max_turns`, `allowed_tools`, lifecycle flags (`post_to_pr`, `create_draft_pr`, `read_only`, `cleanup_worktree`, `wait_for_reviews`, `wait_for_ci`, `mark_pr_ready_on_complete`, `auto_advance`), and optional `comment_prompt` / `comment_skill` / `comment_max_turns` (ADR 004). Defaults are embedded in the binary; `fabrik init` extracts them and `fabrik upgrade` overwrites them. **No hot reload.**
-2. **Skills** — Markdown skill bodies under `plugin/fabrik-plugin/skills/` are baked into the binary via `embed.FS` (`plugin/embed.go`) and deployed to `.fabrik/plugin/` by `fabrik init`/`fabrik upgrade`.
+1. **Stage configs** — N per-stage YAMLs in `.fabrik/stages/`, each with its own `prompt`, optional `skill`, `model`, `max_turns`, `allowed_tools`, lifecycle flags (`post_to_pr`, `create_draft_pr`, `read_only`, `cleanup_worktree`, `wait_for_reviews`, `wait_for_ci`, `mark_pr_ready_on_complete`, `auto_advance`), and optional `comment_prompt` / `comment_skill` / `comment_max_turns` (ADR 004). Defaults are embedded in the binary; `fabrik init` extracts them, and `fabrik refresh-stages --apply` adds keys that newer binary defaults introduced (additive only — existing values are never overwritten). **No hot reload.**
+2. **Skills** — Markdown skill bodies under `plugin/fabrik-plugin/skills/` are baked into the binary via `embed.FS` (`plugin/embed.go`) and deployed to `.fabrik/plugin/` by `fabrik init`; `fabrik upgrade` upgrades the binary and refreshes the deployed plugin skills (separate path from stage YAML refresh).
 3. **Tracker client** — GitHub Projects, single GraphQL fetch per poll (`github/project.go`) — items, comments, linked PRs in one call. **The engine performs tracker writes itself**: labels (`github/labels.go`), reactions (`github/comments.go`), status (`github/status.go`), draft PR creation, mark-ready (`github/prs.go`). The agent emits markers (`FABRIK_STAGE_COMPLETE`, `FABRIK_BLOCKED_ON_INPUT`, `FABRIK_ISSUE_UPDATE_*`, `FABRIK_SUMMARY_*`) on stdout; the engine scrapes them and translates them into mutations.
 4. **Engine / poll loop** — `engine/poll.go` semaphore-dispatches workers up to `MaxConcurrent` (default 5). `sync.Map` for in-flight tracking, `sync.Mutex` around `processedSet` and worktree creation.
 5. **Per-issue worker** — `engine/item.go` runs one stage per invocation, not a single multi-turn loop. Stage selection is driven by `stage:<name>:complete` / `stage:<name>:in_progress` labels. After a stage completes, the worker exits; the next poll dispatches the next stage.
-6. **Worktrees** — bare clone at `.fabrik/repos/<owner>-<repo>.git`, per-issue worktree at `.fabrik/worktrees/<owner>-<repo>/issue-N/` on branch `fabrik/issue-N` (`engine/worktree.go`; ADR 006, ADR 014, ADR 022, ADR 023). Git operations (clone, fetch, rebase, push, conflict pass-through) are baked into the engine. **No hooks.**
+6. **Worktrees** — bare clone at `.fabrik/repos/<owner>-<repo>.git`, per-issue worktree at `.fabrik/worktrees/<owner>-<repo>/issue-N/` on branch `fabrik/issue-N` (`engine/worktree.go`; ADR 006, ADR 014 (per-repo worktree manager), ADR 022, ADR 023). Git operations (clone, fetch, rebase, push, conflict pass-through) are baked into the engine. **No hooks.**
+
+> **A note on ADR citations.** This repo currently has duplicate ADR numbers (014, 017, 028 each have two or three files). Where the number alone would be ambiguous, this doc cites by number + short title (e.g. `ADR 028 (merge-conflict gate)` vs. `ADR 028 (rate-limit backoff hysteresis)`). Where context already pins which one is meant, the bare number is used.
 7. **Agent integration** — Claude Code via `claude` CLI (`engine/claude.go`). Default tool allowlist is enumerated in `CLAUDE.md`; `--permission-mode dontAsk` by default; `fabrik:unrestricted` label flips to `--dangerously-skip-permissions`. Per-stage `allowed_tools` *replaces* (not extends) the default set. `max_wall_time` enforces SIGTERM→SIGKILL deadlines; a 15-minute inactivity timeout applies regardless.
 8. **Concurrency / retries** — single `MaxConcurrent` semaphore. No per-stage caps. Stage retries are not separately tracked; if a stage fails to complete, the next poll re-invokes it. Progress is preserved across restart by **rocket reactions** (👀/🚀; ADR 009) and `stage:<name>:complete` labels — both durable on github.com.
 9. **Reconciliation** — the poll loop refetches the board each tick; `itemMayNeedWork` / `itemNeedsWork` filter to the dispatchable set. CI/review gates (`fabrik:awaiting-ci`, `fabrik:awaiting-review`) are evaluated by a separate catch-up loop without re-invoking Claude.
@@ -80,7 +82,7 @@ This is the single most consequential divergence and warrants the depth.
 
 Symphony's "the orchestrator runs the agent; the agent writes the ticket" boundary is genuinely interesting. It pushes all tracker mutation responsibility onto the workflow author and the agent's tool repertoire. The win: consistent audit trail (every state change has an agent reasoning trace behind it), uniform auth surface (one client, one token, one set of rate limits), and the workflow body becomes self-contained — `WORKFLOW.md` is *the* policy. The cost: every tracker change is a turn cost; failure modes are agent-shaped (the agent decided not to update status, vs. an explicit bug); auth attack surface widens because the agent now has full Linear write capability via `linear_graphql`.
 
-Fabrik takes the opposite stance. The engine is the trusted writer for mechanical state (labels, reactions, status, draft PR creation/marking). The agent only writes content via markers the engine extracts (ADRs 002, 007, 009, 012, 017). The win: predictable, cheap state transitions; small audit surface for engine writes; the agent does not need GitHub write tools at all. The cost: the engine is a meaningful body of code (`github/`, ~6 files) that needs to keep up with GitHub's API; behavioral changes ripple through engine + state-machine docs.
+Fabrik takes the opposite stance. The engine is the trusted writer for mechanical state (labels, reactions, status, draft PR creation/marking). The agent only writes content via markers the engine extracts (ADRs 002, 007, 009, 012, and 017 (decomposed marker state machine)). The win: predictable, cheap state transitions; small audit surface for engine writes; the agent does not need GitHub write tools at all. The cost: the engine is a meaningful body of code (`github/`, ~6 files) that needs to keep up with GitHub's API; behavioral changes ripple through engine + state-machine docs.
 
 **Verdict — different, value-neutral on net.** Fabrik's choice is a better fit for GitHub Projects (where labels and status are the natural primitives and reactions provide free durable state). Symphony's choice is a better fit for Linear (where state is a typed enum and the "agent writes the ticket" boundary is conceptually clean). Neither approach is portable to the other tracker without conceptual loss.
 
@@ -91,7 +93,7 @@ Fabrik takes the opposite stance. The engine is the trusted writer for mechanica
 | Form | Single `WORKFLOW.md` — YAML front matter + Liquid prompt body (§5) | N per-stage YAMLs + Markdown skill bodies (ADR 004) |
 | Number of prompts per issue | 1 | One per stage invocation (Research / Plan / Implement / Review / Validate, plus `comment_prompt` per stage) |
 | Routing | Encoded in the Markdown body (e.g. `## Status map`, `## Step 0` in Symphony's reference workflow) | Encoded in the engine via stage labels |
-| Hot reload | **REQUIRED** (§6.2) — file watcher re-applies config without restart | **Not supported** — operator runs `fabrik upgrade` and restarts |
+| Hot reload | **REQUIRED** (§6.2) — file watcher re-applies config without restart | **Not supported** — operator edits `.fabrik/stages/*.yaml` (or runs `fabrik refresh-stages --apply` to pick up new default keys) and restarts |
 | Templating | Liquid, strict (unknown vars/filters fail) | None — prompts are literal Markdown |
 
 **Where Symphony is better**: hot reload is a real operator-UX win, and strict Liquid templating is a defensible discipline. Reloading workflow without restart is genuinely useful when iterating on prompts against a live board. The strict-templating posture (fail loudly on unknown vars) is harder to add to a system that doesn't have templating in the first place.
@@ -126,7 +128,7 @@ Fabrik takes the opposite stance. The engine is the trusted writer for mechanica
 | Preservation | Across runs and across successful exits; cleaned only on terminal-state transition or startup sweep | Across all states except `cleanup_worktree: true` stages (e.g. Done) |
 | Concurrency safety | Spec is silent; reference impl serializes its own state mutation | Worktree creation serialized by `sync.Mutex` (git config isn't concurrent-safe) |
 
-**Where Fabrik is better**: built-in VCS operations are simpler for the common case (one repo, GitHub-flow, default branch). Conflict resolution is left as a marker pass-through to Claude (ADR 028) — the engine doesn't try to resolve conflicts, but it doesn't make the operator script that path either. Worktree management is opinionated and tested; the operator does not write shell.
+**Where Fabrik is better**: built-in VCS operations are simpler for the common case (one repo, GitHub-flow, default branch). Conflict resolution is left as a marker pass-through to Claude (ADR 028 (merge-conflict gate)) — the engine doesn't try to resolve conflicts, but it doesn't make the operator script that path either. Worktree management is opinionated and tested; the operator does not write shell.
 
 **Where Symphony is better**: hooks are genuinely more flexible. A workflow that needs a custom dependency install, language-specific setup (`mix deps.get`, `npm ci`, `cargo build`), or a non-git VCS can express that without forking Symphony itself. Fabrik's "engine bakes git in" is an explicit scope choice — but that means a non-git project, an exotic monorepo layout, or a multi-repo workflow has no escape hatch short of a Bash-tooled `before_run`-equivalent inside the agent prompt.
 
@@ -160,7 +162,7 @@ Fabrik takes the opposite stance. The engine is the trusted writer for mechanica
 
 **Where Fabrik is better**: marker-based separation (engine owns mechanical state, agent owns content state) is genuinely clean. The full label vocabulary (`stage:*:in_progress`, `fabrik:awaiting-input`, `fabrik:awaiting-review`, `fabrik:awaiting-ci`, `fabrik:bot-reprompted`, `effort:*`, `model:*`, `base:*`, etc., per `CLAUDE.md`) makes engine state mechanically inspectable from github.com without parsing prose. Symphony's reliance on tracker-state-as-string is a thinner state surface — it works, but every dimension of state has to be encoded in the workflow's tracker-state vocabulary, which couples policy and state more tightly.
 
-**Where Symphony is better**: less code. Fabrik's label/marker/reaction system is a meaningful body of mechanism (ADRs 002, 007, 009, 012, 017, 026, 027, 028, 032, 033). Symphony delegates that to the workflow author + agent, which is less code in the orchestrator at the cost of more responsibility on the workflow author.
+**Where Symphony is better**: less code. Fabrik's label/marker/reaction system is a meaningful body of mechanism (ADRs 002, 007, 009, 012, 017 (decomposed marker state machine), 026, 027, 028 (merge-conflict gate), 032, 033). Symphony delegates that to the workflow author + agent, which is less code in the orchestrator at the cost of more responsibility on the workflow author.
 
 **Different**: marker-based vs. tracker-write-based is a deep architectural choice; both are internally consistent.
 
@@ -170,7 +172,7 @@ Fabrik takes the opposite stance. The engine is the trusted writer for mechanica
 |---|---|---|
 | Structured logs | **REQUIRED** — `issue_id`, `issue_identifier`, `session_id`, key=value (§13) | `[#N tag] ...` stdout prefix; not key=value structured |
 | Token accounting | **REQUIRED** in orchestrator state | None |
-| Rate-limit tracking | **REQUIRED** in orchestrator state (rate-limit window, headroom) | Internal hysteresis logic exists (ADR 028 / hysteresis ADR) but not surfaced |
+| Rate-limit tracking | **REQUIRED** in orchestrator state (rate-limit window, headroom) | Internal hysteresis logic exists (ADR 028 (rate-limit backoff hysteresis)) but not surfaced |
 | HTTP API | Optional `/api/v1/state`, `/api/v1/<identifier>`, `/api/v1/refresh` | None |
 | Dashboard | Optional `/` dashboard | None — but a TUI exists (`tui/`) |
 | Live snapshot fields | `running` / `retrying` / `codex_totals` / `rate_limits` | N/A |
@@ -216,7 +218,7 @@ The honest call-out: Fabrik should not ship a dashboard (it conflicts with `docs
 
 **Where Symphony is better**: by deferring PR lifecycle entirely, Symphony avoids being coupled to GitHub's PR semantics. Linear's "Merging" tracker state is a state, not a PR object, which is a thinner contract.
 
-**Different**: Fabrik's PR-lifecycle gating is a real engineering investment (ADRs 026/027/028/032/033, a dedicated bot-reviewer escalation ladder, a CI-failure path). Symphony has no equivalent because PRs are not in scope at the orchestrator layer.
+**Different**: Fabrik's PR-lifecycle gating is a real engineering investment (ADRs 026, 027, 028 (merge-conflict gate), 032, 033, a dedicated bot-reviewer escalation ladder, a CI-failure path). Symphony has no equivalent because PRs are not in scope at the orchestrator layer.
 
 ### 10. Comment / human-in-the-loop interaction
 
@@ -259,7 +261,7 @@ Triage tags: `adopt` / `consider` / `reject` / `watch`. Default is one or two se
 
 7. **Per-state concurrency caps (§8.3).** `consider` — Fabrik has a single `MaxConcurrent`. A per-stage cap (e.g. "max 2 Implement workers, max 5 Validate workers") would be useful for token budget management and review-bot rate limiting. Low priority but cheap.
 
-8. **Hot reload of stage YAMLs (§6.2).** `consider` — Symphony REQUIRES hot reload; Fabrik requires `fabrik upgrade` and a restart. Hot reload would speed iteration, particularly when tuning prompts. Watch-and-reload is well-trodden territory; the implementation cost is moderate. The reason to defer: Fabrik's stage YAMLs are tracked in git and edited per-repo, not centrally; a reload would need to refresh per-repo configs and the embedded plugin source, with subtle ordering. Worth doing; not urgent.
+8. **Hot reload of stage YAMLs (§6.2).** `consider` — Symphony REQUIRES hot reload; Fabrik requires editing `.fabrik/stages/*.yaml` and restarting (with `fabrik refresh-stages --apply` to pick up new default keys when upgrading). Hot reload would speed iteration, particularly when tuning prompts. Watch-and-reload is well-trodden territory; the implementation cost is moderate. The reason to defer: Fabrik's stage YAMLs are tracked in git and edited per-repo, not centrally; a reload would need to refresh per-repo configs and the embedded plugin source, with subtle ordering. Worth doing; not urgent.
 
 ### Reject
 
