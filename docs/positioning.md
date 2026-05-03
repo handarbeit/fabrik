@@ -1,3 +1,8 @@
+---
+layout: docs
+title: Fabrik Positioning
+---
+
 # Fabrik Positioning Notes
 
 > Working notes for future marketing use. Not finished copy. Landscape snapshot as of 2026-04.
