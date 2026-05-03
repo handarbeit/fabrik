@@ -49,7 +49,8 @@ type Config struct {
 	Webhooks          bool
 	WebhookPort       int
 	WebhookEvents     string // comma-separated; empty means default event set
-	BoardCacheMode    string // "in-memory" or "none"; empty = auto (in-memory when webhooks enabled)
+	BoardCacheMode       string // "in-memory" or "none"; empty = auto (in-memory when webhooks enabled)
+	StatusPollSeconds    int    // Layer 2 status-only sweep cadence in seconds; 0 = use default (600)
 }
 
 func Execute() error {
@@ -131,6 +132,7 @@ func Execute() error {
 	flag.IntVar(&cfg.WebhookPort, "webhook-port", 0, "Local port for the webhook HTTP listener (0 = OS-assigned; also FABRIK_WEBHOOK_PORT)")
 	flag.StringVar(&cfg.WebhookEvents, "webhook-events", "", "Comma-separated list of GitHub event types to subscribe to (default: all supported events; also FABRIK_WEBHOOK_EVENTS)")
 	flag.StringVar(&cfg.BoardCacheMode, "board-cache", "", `Board cache mode: "in-memory" (cache board state; requires --webhooks) or "none" (always fetch from GitHub). Default: "in-memory" when --webhooks is enabled, "none" otherwise. Also FABRIK_BOARD_CACHE.`)
+	flag.IntVar(&cfg.StatusPollSeconds, "status-poll", 0, "Cadence in seconds for the periodic status-only board sweep (Layer 2; 0 = use default of 600; also FABRIK_STATUS_POLL)")
 
 	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
 		return err
@@ -400,6 +402,21 @@ func Execute() error {
 			cfg.BoardCacheMode = v
 		}
 	}
+	if !explicitFlags["status-poll"] {
+		if v := os.Getenv("FABRIK_STATUS_POLL"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				cfg.StatusPollSeconds = n
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_STATUS_POLL=%q is invalid (must be a positive integer); using default 600\n", v)
+			}
+		} else if pc.StatusPoll != nil {
+			if *pc.StatusPoll <= 0 {
+				fmt.Fprintf(os.Stderr, "[warn] config.yaml status_poll=%d is invalid (must be a positive integer); using default 600\n", *pc.StatusPoll)
+			} else {
+				cfg.StatusPollSeconds = *pc.StatusPoll
+			}
+		}
+	}
 
 	// Apply board-cache default: "in-memory" when webhooks are enabled; "none" otherwise.
 	// Explicit --board-cache=in-memory without --webhooks is a configuration error.
@@ -528,8 +545,9 @@ func Execute() error {
 		Webhooks:          cfg.Webhooks,
 		WebhookPort:       cfg.WebhookPort,
 		WebhookEvents:     webhookEvents,
-		BoardCacheMode:    cfg.BoardCacheMode,
-		ReadyCh:           testReadyCh,
+		BoardCacheMode:           cfg.BoardCacheMode,
+		ProjectStatusPollSeconds: statusPollSeconds(cfg.StatusPollSeconds),
+		ReadyCh:                  testReadyCh,
 	})
 	if err != nil {
 		return err
@@ -598,6 +616,15 @@ func claudeWaitDelay(seconds int) time.Duration {
 		return 30 * time.Second
 	}
 	return time.Duration(seconds) * time.Second
+}
+
+// statusPollSeconds returns the configured ProjectStatusPollSeconds, defaulting
+// to 600 (10 min) when n is 0 (unset).
+func statusPollSeconds(n int) int {
+	if n <= 0 {
+		return 600
+	}
+	return n
 }
 
 // buildProjectInfo assembles the TUI footer metadata from the active config.

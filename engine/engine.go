@@ -41,7 +41,8 @@ type Config struct {
 	Webhooks          bool
 	WebhookPort       int
 	WebhookEvents     []string
-	BoardCacheMode    string // "in-memory" or "none"; default "none" when webhooks off, "in-memory" when on
+	BoardCacheMode           string // "in-memory" or "none"; default "none" when webhooks off, "in-memory" when on
+	ProjectStatusPollSeconds int    // Layer 2 status-only sweep cadence in seconds; default 600 (10 min)
 	// ReadyCh is closed once Run() has registered signal handlers. Tests use
 	// this to avoid sending SIGINT before signal.Notify is installed.
 	ReadyCh chan struct{}

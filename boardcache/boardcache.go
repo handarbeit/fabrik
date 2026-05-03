@@ -3,6 +3,7 @@ package boardcache
 import (
 	"strconv"
 	"sync"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 )
@@ -68,9 +69,16 @@ func (a *GitHubAdapter) RateLimitStats() (rest, graphql gh.RateLimitStats) {
 	return a.client.RateLimitStats()
 }
 
-// itemKey returns the cache key for an issue item: "owner/repo#number".
-func itemKey(repo string, number int) string {
+// ItemKey returns the cache key for an issue item: "owner/repo#number".
+// Exported so callers in other packages (e.g. engine) can construct keys
+// without duplicating the format string.
+func ItemKey(repo string, number int) string {
 	return repo + "#" + strconv.Itoa(number)
+}
+
+// itemKey is the package-internal alias for ItemKey.
+func itemKey(repo string, number int) string {
+	return ItemKey(repo, number)
 }
 
 // prKey returns the cache key for a PR: "owner/repo#pr<prNumber>".
@@ -419,6 +427,62 @@ func (c *CacheImpl) FetchStatusField(projectID string) (*gh.StatusField, error) 
 // RateLimitStats always delegates to GitHub.
 func (c *CacheImpl) RateLimitStats() (rest, graphql gh.RateLimitStats) {
 	return c.fallback.RateLimitStats()
+}
+
+// UpdateItemStatus updates the Status field for the item identified by key.
+// No-op when the key is not in the cache. Safe for concurrent use.
+func (c *CacheImpl) UpdateItemStatus(key, newStatus string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	item, ok := c.items[key]
+	if !ok {
+		c.logFn("[cache] UpdateItemStatus: key %q not found — no-op\n", key)
+		return
+	}
+	item.Status = newStatus
+	item.UpdatedAt = time.Now()
+}
+
+// ApplyStatusBatch updates Status for items identified by project-item node IDs.
+// Entries whose itemID is not in itemIDToKey are silently skipped (not yet bootstrapped).
+// Safe for concurrent use.
+func (c *CacheImpl) ApplyStatusBatch(updates map[string]string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for itemID, status := range updates {
+		key, ok := c.itemIDToKey[itemID]
+		if !ok {
+			continue
+		}
+		item, ok := c.items[key]
+		if !ok {
+			continue
+		}
+		if item.Status != status {
+			item.Status = status
+			item.UpdatedAt = time.Now()
+		}
+	}
+}
+
+// GetItemID returns the project-item node ID (PVTI_...) for the given cache key.
+// Returns ("", false) when the key is not present or has no ItemID.
+func (c *CacheImpl) GetItemID(key string) (string, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	item, ok := c.items[key]
+	if !ok || item.ItemID == "" {
+		return "", false
+	}
+	return item.ItemID, true
+}
+
+// ProjectID returns the project node ID stored from the last Bootstrap/Reconcile call.
+// Returns "" when the cache has not yet been bootstrapped.
+func (c *CacheImpl) ProjectID() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.projectID
 }
 
 // copyDeepFields overlays the deep fields from src onto dst.
