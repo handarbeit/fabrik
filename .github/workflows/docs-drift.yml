@@ -1,0 +1,28 @@
+name: Docs drift check
+
+on:
+  pull_request:
+    paths:
+      - "docs/**"
+      - "scripts/generate-llms-full.sh"
+
+jobs:
+  check-llms-full:
+    name: Verify llms-full.txt is up to date
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Regenerate llms-full.txt
+        run: scripts/generate-llms-full.sh
+
+      - name: Fail if llms-full.txt is out of date
+        run: |
+          if ! git diff --exit-code docs/llms-full.txt; then
+            echo ""
+            echo "docs/llms-full.txt is out of date."
+            echo "Run 'scripts/generate-llms-full.sh' and commit the result alongside your doc changes."
+            exit 1
+          fi
