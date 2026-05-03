@@ -134,7 +134,10 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 					// This prevents perpetual deep-fetches for terminal items (cruise+Validate
 					// complete, paused+complete, closed-with-stage-complete) where every poll
 					// after cooldown expiry would otherwise trigger a no-op deep-fetch.
-					if hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) {
+					// Exception: fabrik:awaiting-review items also carry stage:X:complete
+					// but still need periodic re-evaluation for Phase 1/Phase 2 timers.
+					if hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) &&
+						!hasLabel(item, "fabrik:awaiting-review") {
 						return false
 					}
 					return true // cooldown expired, retry
