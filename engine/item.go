@@ -579,7 +579,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// and treated as "win" (both proceed), consistent with single-instance use.
 	if lockAcquired {
 		time.Sleep(lockVerifyDelay)
-		labels, err := e.client.FetchLabels(owner, repo, item.Number)
+		labels, err := e.readClient.FetchLabels(owner, repo, item.Number)
 		if err != nil {
 			e.logf(item.Number, "warn", "could not re-fetch labels for lock verify: %v\n", err)
 		} else {

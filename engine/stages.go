@@ -62,7 +62,7 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	// Re-fetch labels so we see changes made while the stage was running
 	// (e.g., fabrik:yolo added mid-run). The item snapshot from dispatch
 	// time may be stale. On error, keep existing labels.
-	if freshLabels, err := e.client.FetchLabels(e.cfg.Owner, e.cfg.Repo, item.Number); err == nil && len(freshLabels) > 0 {
+	if freshLabels, err := e.readClient.FetchLabels(e.cfg.Owner, e.cfg.Repo, item.Number); err == nil && len(freshLabels) > 0 {
 		item.Labels = freshLabels
 	}
 
@@ -209,7 +209,7 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 	iKey := issueKey(item, e.defaultRepo())
 
 	// Use FetchLinkedPR (REST) to get both the PR number and head SHA in one call.
-	pr, err := e.client.FetchLinkedPR(owner, repo, item.Number)
+	pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number)
 	if err != nil {
 		e.logf(item.Number, "warn", "could not fetch linked PR for merge: %v — will retry\n", err)
 		return fmt.Errorf("fetch linked PR: %w", err)
@@ -229,7 +229,7 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 	// endpoint, so this requires an extra REST call.
 	bypassCheckRunsGate := false
 	if pr.HeadSHA != "" {
-		mergeableState, msErr := e.client.FetchPRMergeableState(owner, repo, pr.Number)
+		mergeableState, msErr := e.readClient.FetchPRMergeableState(owner, repo, pr.Number)
 		if msErr != nil {
 			e.logf(item.Number, "warn", "could not fetch mergeable_state: %v — falling back to check-runs gate\n", msErr)
 		} else if gh.MergeableStateAccepted(mergeableState) {
@@ -247,7 +247,7 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 	// CI gate: fetch check runs and evaluate (R1-R6). Skipped when GitHub's
 	// mergeable_state already says the PR is mergeable (above).
 	if !bypassCheckRunsGate && pr.HeadSHA != "" {
-		checkRuns, err := e.client.FetchCheckRuns(owner, repo, pr.HeadSHA)
+		checkRuns, err := e.readClient.FetchCheckRuns(owner, repo, pr.HeadSHA)
 		if err != nil {
 			e.logf(item.Number, "warn", "could not fetch check runs for merge guard: %v — skipping merge until CI status can be fetched\n", err)
 			return fmt.Errorf("merge guard: fetch check runs: %w", err)
