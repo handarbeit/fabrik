@@ -726,6 +726,15 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		}
 		blocked, timedOut := e.checkReviewGate(board, item, stage)
 		if blocked {
+			// Record processedSet so itemMayNeedWork's cooldown retry path
+			// re-evaluates this item every 10 × PollSeconds even when nothing
+			// bumps updatedAt. This is what lets Phase 1 / Phase 2 review-reprompt
+			// timers fire on a non-responsive bot reviewer (issue #495).
+			iKey := issueKey(item, e.defaultRepo())
+			stageKey := iKey + "-" + stage.Name
+			e.mu.Lock()
+			e.processedSet[stageKey] = time.Now()
+			e.mu.Unlock()
 			continue // awaiting reviewers; checkReviewGate handled label
 		}
 		if timedOut {
