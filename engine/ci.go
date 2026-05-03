@@ -436,4 +436,3 @@ func (e *Engine) pauseForCIFixCycleLimit(board *gh.ProjectBoard, item gh.Project
 		e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", err)
 	}
 }
-

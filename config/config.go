@@ -13,18 +13,18 @@ import (
 // ProjectConfig holds the non-secret, project-level settings read from
 // .fabrik/config.yaml. All fields are optional; absent fields stay zero/nil.
 type ProjectConfig struct {
-	Owner         string `yaml:"owner"`
-	Repo          string `yaml:"repo"`
-	ProjectNum    *int   `yaml:"project"`
-	OwnerType     string `yaml:"owner_type"`
-	User          string `yaml:"user"`
-	StagesDir     string `yaml:"stages"`
-	Poll          *int   `yaml:"poll"`
-	MaxConcurrent *int   `yaml:"max_concurrent"`
-	MaxRetries    *int   `yaml:"max_retries"`
-	Yolo          bool   `yaml:"yolo"`
-	AutoUpgrade   bool   `yaml:"auto_upgrade"`
-	GitSSH        bool   `yaml:"git_ssh"`
+	Owner         string   `yaml:"owner"`
+	Repo          string   `yaml:"repo"`
+	ProjectNum    *int     `yaml:"project"`
+	OwnerType     string   `yaml:"owner_type"`
+	User          string   `yaml:"user"`
+	StagesDir     string   `yaml:"stages"`
+	Poll          *int     `yaml:"poll"`
+	MaxConcurrent *int     `yaml:"max_concurrent"`
+	MaxRetries    *int     `yaml:"max_retries"`
+	Yolo          bool     `yaml:"yolo"`
+	AutoUpgrade   bool     `yaml:"auto_upgrade"`
+	GitSSH        bool     `yaml:"git_ssh"`
 	TUI           *bool    `yaml:"tui"`
 	DebugOutput   bool     `yaml:"debug_output"`
 	Version       string   `yaml:"version"`

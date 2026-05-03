@@ -25,11 +25,11 @@ func TestVerifySignature(t *testing.T) {
 	validSig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
 
 	tests := []struct {
-		name    string
-		body    []byte
-		sig     string
-		secret  string
-		want    bool
+		name   string
+		body   []byte
+		sig    string
+		secret string
+		want   bool
 	}{
 		{
 			name:   "valid signature",
@@ -67,9 +67,9 @@ func TestVerifySignature(t *testing.T) {
 			want:   false,
 		},
 		{
-			name:   "empty body valid sig",
-			body:   []byte{},
-			sig:    func() string {
+			name: "empty body valid sig",
+			body: []byte{},
+			sig: func() string {
 				m := hmac.New(sha256.New, []byte(secret))
 				return "sha256=" + hex.EncodeToString(m.Sum(nil))
 			}(),
@@ -98,16 +98,16 @@ func TestVerifySignature(t *testing.T) {
 // TestSemverAtLeast covers version comparison edge cases.
 func TestSemverAtLeast(t *testing.T) {
 	tests := []struct {
-		ver           string
+		ver                 string
 		major, minor, patch int
-		want          bool
+		want                bool
 	}{
 		{"2.40.1", 2, 32, 0, true},
 		{"2.32.0", 2, 32, 0, true},
 		{"2.31.9", 2, 32, 0, false},
 		{"3.0.0", 2, 32, 0, true},
 		{"1.99.99", 2, 32, 0, false},
-		{"v2.40.1", 2, 32, 0, true},  // leading v
+		{"v2.40.1", 2, 32, 0, true},    // leading v
 		{"2.32.0-rc1", 2, 32, 0, true}, // pre-release suffix
 	}
 	for _, tc := range tests {

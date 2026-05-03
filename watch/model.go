@@ -61,9 +61,9 @@ type WatchModel struct {
 	stageOrder     map[string]int // stage name -> pipeline order (from stages YAML)
 
 	// Turn counter for the live stage (resets on new log file / invocation change)
-	turnsUsed              int
+	turnsUsed               int
 	cachedEffectiveMaxTurns int            // cached result of effectiveMaxTurns(); updated on NewLogFileMsg/GitHubPollMsg
-	stageMaxTurns          map[string]int  // stage name -> configured max_turns (0 = unlimited)
+	stageMaxTurns           map[string]int // stage name -> configured max_turns (0 = unlimited)
 
 	// Transient status message (shown in status bar, cleared on TickMsg)
 	statusMsg string
