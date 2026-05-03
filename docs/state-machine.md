@@ -1245,7 +1245,7 @@ Phase 1 ensures inline PR review thread comments (from Copilot, Gemini, or human
 | Stage exists | `FindStage(stages, item.Status) != nil` |
 | Closed issue | Not closed, OR cleanup stage, OR has `stage:<X>:complete` label |
 | Cleanup stage | Worktree exists on disk (local filesystem check only) |
-| updatedAt cache | `item.UpdatedAt` is newer than cached value, OR (cooldown expired AND `stage:X:complete` absent from shallow labels, OR `stage:X:complete` present AND `fabrik:awaiting-review` also present), OR `fabrik:awaiting-ci` label present (CI completions don't bump `updatedAt`), OR `fabrik:rebase-needed` label present (base-branch advances don't bump `updatedAt`). See processedSet cache-key strategy below. |
+| updatedAt cache | `item.UpdatedAt` is newer than cached value, OR (cooldown expired AND `stage:X:complete` absent from shallow labels, OR `stage:X:complete` present but `fabrik:awaiting-review` also present), OR `fabrik:awaiting-ci` label present (CI check-run completions don't bump `updatedAt`), OR `fabrik:rebase-needed` label present (base-branch advances don't bump `updatedAt`). See processedSet cache-key strategy below. |
 | Deep-fetch failure cooldown | No recent `FetchItemDetails` failure, OR failure cooldown expired |
 
 **Note:** `itemMayNeedWork()` intentionally does NOT check lock, editing, pause, or dependency labels — those require the full label set from deep fetch and are checked in `itemNeedsWork()`.
@@ -1258,7 +1258,8 @@ The `processedSet` map (in-memory, keyed by `issueKey(item, defaultRepo()) + "-"
 - `processItem()` sets it when `claudeRan=true` — stage ran (whether completed or not)
 - `processItem()` sets it when `checkDependencies()` returns true — item is blocked
 - `processItem()` sets it when cleanup completes
-- The deferred cache-write block in `runPollCycle()` resets it for non-advanced items after each full poll cycle — a belt-and-suspenders refresh that caps deep-fetch frequency to once per cooldown period even when Part 1's stage-complete check doesn't fire (e.g., if the label is beyond position 15 in the shallow query window)
+- `checkReviewGate()` (catch-up loop) sets it when the review gate blocks — ensures Phase 1/Phase 2 reprompt timers fire via the cooldown retry path even when no `updatedAt` change occurs
+- The deferred cache-write block in `Engine.poll()` (invoked by the `doPollCycle` closure) resets an *existing* entry for non-advanced items after each full poll cycle — a belt-and-suspenders refresh that caps deep-fetch frequency to once per cooldown period even when Part 1's stage-complete check doesn't fire (e.g., if the label is beyond position 15 in the shallow query window); items with no prior `processedSet` entry are not affected
 
 **What bypasses the cooldown gate (returns `true` regardless of cooldown):**
 - `fabrik:awaiting-ci` label: CI check-run completions don't bump `updatedAt`, so forced re-evaluation is necessary
@@ -1266,9 +1267,9 @@ The `processedSet` map (in-memory, keyed by `issueKey(item, defaultRepo()) + "-"
 - `stage:X:complete` label is ABSENT and cooldown has expired: retry for genuinely incomplete stages
 
 **What suppresses the cooldown gate (returns `false` despite expired cooldown):**
-- `stage:X:complete` label is PRESENT in shallow labels: completed stages need no retry (introduced in #488 to fix perpetual deep-fetch loop)
+- `stage:X:complete` label is PRESENT in shallow labels AND `fabrik:awaiting-review` is absent: completed stages with no pending review need no retry (introduced in #488 to fix perpetual deep-fetch loop). Items with both `stage:X:complete` and `fabrik:awaiting-review` are still retried every cooldown period so Phase 1/Phase 2 timers can fire.
 
-**Root-cause fix (#488):** Terminal items (cruise+Validate complete, paused+complete, closed-with-stage-complete) triggered a perpetual deep-fetch loop: `processedSet[stageKey]` was only written by `processItem()` when work actually ran, so after cooldown expiry, `itemMayNeedWork()` returned `true` on every poll cycle indefinitely — each producing a no-op deep-fetch that did not update `processedSet`. The fix has two parts: (1) primary — check `stage:X:complete` in shallow labels before returning `true` from the cooldown-expired branch; (2) belt-and-suspenders — the deferred block in `runPollCycle()` now also writes `processedSet[stageKey]` for non-advanced items after each full cycle, capping deep-fetch frequency to once per cooldown period for items where Part 1 doesn't fire.
+**Root-cause fix (#488):** Terminal items (cruise+Validate complete, paused+complete, closed-with-stage-complete) triggered a perpetual deep-fetch loop: `processedSet[stageKey]` was only written by `processItem()` when work actually ran, so after cooldown expiry, `itemMayNeedWork()` returned `true` on every poll cycle indefinitely — each producing a no-op deep-fetch that did not update `processedSet`. The fix has two parts: (1) primary — check `stage:X:complete` in shallow labels before returning `true` from the cooldown-expired branch, with an exemption for `fabrik:awaiting-review` items (which also carry `stage:X:complete` but need periodic re-evaluation for Phase 1/Phase 2 timers); (2) belt-and-suspenders — the deferred block in `Engine.poll()` now refreshes an existing `processedSet[stageKey]` entry for non-advanced items after each full cycle, capping deep-fetch frequency to once per cooldown period for items where Part 1 doesn't fire.
 
 ## Appendix C: Guard Evaluation in `itemNeedsWork()` (Full Filter)
 
