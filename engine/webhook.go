@@ -62,10 +62,9 @@ type webhookManager struct {
 	mu sync.Mutex
 
 	// injected dependencies
-	logFn   func(issueNumber int, tag, format string, args ...any)
-	wakeCh  chan struct{}
-	emitFn  func(tui.Event)
-	cfgUser string // Fabrik's own GitHub login; self-sent events skip the wake
+	logFn  func(issueNumber int, tag, format string, args ...any)
+	wakeCh chan struct{}
+	emitFn func(tui.Event)
 
 	// killFn terminates a subprocess. Defaults to killProcGroup; overridable in tests.
 	// The caller is responsible for the cmd != nil check; killFn handles nil Process.
@@ -111,7 +110,6 @@ func newWebhookManager(
 	emitFn func(tui.Event),
 	repos map[string]bool,
 	events []string,
-	cfgUser string,
 ) *webhookManager {
 	evts := events
 	if len(evts) == 0 {
@@ -122,7 +120,6 @@ func newWebhookManager(
 		logFn:       logFn,
 		wakeCh:      wakeCh,
 		emitFn:      emitFn,
-		cfgUser:     cfgUser,
 		repos:       copyRepoSet(repos),
 		events:      evts,
 		state:       WebhookStreamUnhealthy, // becomes StartingUp when subprocess launches
@@ -737,9 +734,6 @@ type minWebhookPayload struct {
 	PullRequest *struct {
 		Number int `json:"number"`
 	} `json:"pull_request"`
-	Sender struct {
-		Login string `json:"login"`
-	} `json:"sender"`
 }
 
 // handleWebhook is the HTTP handler for incoming webhook POSTs from gh webhook forward.
@@ -846,13 +840,6 @@ func (wm *webhookManager) handleWebhook(w http.ResponseWriter, r *http.Request) 
 	}
 
 	wm.emitCurrentState()
-
-	// Skip wake for events Fabrik generated itself to prevent a self-feedback loop.
-	if wm.cfgUser != "" && strings.EqualFold(payload.Sender.Login, wm.cfgUser) {
-		wm.logFn(0, "webhook", "skipping wake: self-event from %s\n", payload.Sender.Login)
-		w.WriteHeader(http.StatusOK)
-		return
-	}
 
 	// Wake the poll loop immediately.
 	select {
