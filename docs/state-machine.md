@@ -933,7 +933,7 @@ The poll loop's effective interval grows when there is nothing to do (idle backo
 - Base interval: `PollSeconds` (default 30s).
 - Activity multiplier: doubles each poll cycle where no work was dispatched, up to the idle cap.
 - Activity reset: any dispatched work OR any received webhook event resets `idleStart` and the multiplier back to 1×.
-- Rate-limit adjustment: when the GitHub API signals rate limit pressure (`rateLimitLow`), `computeEffectiveInterval` doubles the configured interval for rate-limit backoff, capped at `rateLimitMaxBackoffMultiplier×` the configured interval.
+- Rate-limit adjustment: when `rateLimitRatio < 1.0` (backoff active), `computeEffectiveInterval` applies a stepwise escalation — 2× at 10%–100% remaining (including the 20%–50% sticky hysteresis zone), 4× at 5%–10%, 6× at 1%–5%, and 10× (`rateLimitMaxBackoffMultiplier`) below 1%. The rate-limit component has no 5-minute ceiling; only the caller-supplied `rateLimitMaxBackoffMultiplier` cap applies.
 
 **Idle cap selection** (`effectiveIdleCap` in `engine/poll.go`):
 
