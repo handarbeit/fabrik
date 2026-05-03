@@ -95,7 +95,7 @@ func (c *Client) FetchPRDetails(owner, repo string, prNumber int) (*PRDetails, e
 
 // CheckRun holds the result of a single CI check run.
 type CheckRun struct {
-	ID         int64  // GitHub check run ID
+	ID         int64 // GitHub check run ID
 	Name       string
 	Status     string // "queued", "in_progress", "completed"
 	Conclusion string // "success", "failure", "neutral", "cancelled", "skipped", "timed_out", "action_required", or ""
