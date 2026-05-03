@@ -194,6 +194,8 @@ func (c *CacheImpl) applyIssueCommentCreated(payload []byte) {
 		}
 	}
 	item.Comments = append(item.Comments, comment)
+	// Bump UpdatedAt so itemMayNeedWork detects this item as changed on the next poll.
+	item.UpdatedAt = time.Now()
 }
 
 func (c *CacheImpl) applyIssuesDelta(payload []byte) {
@@ -225,6 +227,7 @@ func (c *CacheImpl) applyIssuesLabeled(p issuesPayload) {
 		}
 	}
 	item.Labels = append(item.Labels, p.Label.Name)
+	item.UpdatedAt = time.Now()
 }
 
 func (c *CacheImpl) applyIssuesUnlabeled(p issuesPayload) {
@@ -236,6 +239,7 @@ func (c *CacheImpl) applyIssuesUnlabeled(p issuesPayload) {
 	if !ok {
 		return
 	}
+	before := len(item.Labels)
 	filtered := item.Labels[:0]
 	for _, l := range item.Labels {
 		if l != p.Label.Name {
@@ -243,6 +247,9 @@ func (c *CacheImpl) applyIssuesUnlabeled(p issuesPayload) {
 		}
 	}
 	item.Labels = filtered
+	if len(item.Labels) < before {
+		item.UpdatedAt = time.Now()
+	}
 }
 
 func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
@@ -324,6 +331,7 @@ func (c *CacheImpl) applyPullRequestReviewSubmitted(payload []byte) {
 			if !updated {
 				item.LinkedPRReviews = append(item.LinkedPRReviews, review)
 			}
+			item.UpdatedAt = time.Now()
 			break
 		}
 	}
@@ -357,7 +365,7 @@ func (c *CacheImpl) applyPullRequestReviewCommentCreated(payload []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	for _, item := range c.items {
+	for key, item := range c.items {
 		if item.Repo == repo && item.LinkedPRNumber == p.PullRequest.Number {
 			// Idempotent: skip if comment with this ID already exists.
 			for _, existing := range item.LinkedPRReviewThreadComments {
@@ -366,6 +374,12 @@ func (c *CacheImpl) applyPullRequestReviewCommentCreated(payload []byte) {
 				}
 			}
 			item.LinkedPRReviewThreadComments = append(item.LinkedPRReviewThreadComments, comment)
+			item.UpdatedAt = time.Now()
+			// The webhook payload does not carry the review thread's GraphQL node ID
+			// (ReviewThreadID). Reset deepFetched so the next FetchItemDetails call
+			// fetches from GitHub and populates ReviewThreadID correctly, allowing the
+			// engine to resolve the review thread after it's addressed.
+			delete(c.deepFetched, key)
 			break
 		}
 	}
@@ -438,4 +452,5 @@ func (c *CacheImpl) applyProjectsV2ItemEdited(payload []byte) {
 		return
 	}
 	item.Status = newStatus
+	item.UpdatedAt = time.Now()
 }
