@@ -291,13 +291,6 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 			break
 		}
 	}
-
-	// Also index by new SHA for check_run lookup.
-	if sha != "" {
-		// If we don't know the issue yet, the SHA entry will be populated when
-		// the item is deep-fetched (LinkedPRNumber set) and the next PR event arrives.
-		// For now, try to find via the PR cache entries.
-	}
 }
 
 func (c *CacheImpl) applyPullRequestReviewSubmitted(payload []byte) {
