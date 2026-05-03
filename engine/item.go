@@ -133,20 +133,46 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 					return true // cooldown expired, retry
 				}
 			}
-			// Force deep-fetch for fabrik:awaiting-ci items: CI check run completions
-			// don't bump the issue/PR updatedAt, so these items would be permanently
-			// filtered by the updatedAt cache without this bypass.
-			// Note: fabrik:blocked does NOT need a forced deep-fetch here — processItem
-			// sets processedSet[stageKey] whenever checkDependencies returns true, so
-			// the cooldown retry path above ensures periodic re-evaluation (every
-			// 10 × PollSeconds) even if the blocked item's updatedAt never changes.
-			// fabrik:awaiting-input and fabrik:awaiting-review don't need it either —
-			// comments bump updatedAt, and PR review submissions bump linkedPR updatedAt.
+			// Force deep-fetch for items whose progress depends on a state change that
+			// does NOT bump the issue/project-item/linked-PR updatedAt and that needs
+			// re-evaluation every poll. The cooldown retry path above is the cheaper
+			// alternative for cases where periodic re-evaluation (every 10 × PollSeconds)
+			// is sufficient — see the "labels NOT in this list" note below.
+			//
+			//   fabrik:awaiting-ci      — CI check run completions don't bump updatedAt;
+			//                             the catch-up loop must re-evaluate every poll
+			//                             until checks complete or timeout. Per-poll
+			//                             cadence is needed because CI failures should
+			//                             trigger a CI-fix re-invocation as soon as
+			//                             they're observed.
+			//   fabrik:rebase-needed    — mergeability re-computes when origin advances,
+			//                             but the issue's updatedAt won't bump on a base-
+			//                             branch advance; the merge-gate must re-check.
+			//
+			// Labels deliberately NOT in this list — they use the cooldown retry path
+			// (processedSet) instead, evaluated every 10 × PollSeconds:
+			//
+			//   fabrik:blocked        — processItem sets processedSet[stageKey] whenever
+			//                           checkDependencies returns true. Blocker closure
+			//                           doesn't bump the blocked item's updatedAt, so
+			//                           cooldown retry is what re-evaluates the gate.
+			//   fabrik:awaiting-review — the catch-up loop's review-gate path sets
+			//                            processedSet[stageKey] when checkReviewGate
+			//                            returns blocked=true. Phase 1 and Phase 2 of
+			//                            checkReviewGate fire on label-applied-at age,
+			//                            so periodic (not per-poll) re-evaluation is
+			//                            sufficient — and on busy boards with many
+			//                            review-waiting items this avoids turning a
+			//                            long-lived label into a permanent GraphQL
+			//                            hot path.
+			//   fabrik:awaiting-input — the auto-clear trigger is a new user comment,
+			//                           which bumps updatedAt; no timer-driven escape
+			//                           exists today. If a timeout is added here later,
+			//                           this label will need to join either the bypass
+			//                           list or the cooldown-recording catch-up path.
 			for _, l := range item.Labels {
-				if l == "fabrik:awaiting-ci" || l == "fabrik:rebase-needed" {
-					// fabrik:rebase-needed: mergeability re-computes when origin
-					// advances but the issue's updatedAt won't bump, so force
-					// deep-fetch for the merge-gate to re-check.
+				if l == "fabrik:awaiting-ci" ||
+					l == "fabrik:rebase-needed" {
 					return true
 				}
 			}
