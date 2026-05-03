@@ -1227,3 +1227,72 @@ func TestItemMayNeedWork_NoWaitForCI_CompleteLabel_FilteredByCache(t *testing.T)
 		t.Error("expected itemMayNeedWork to return false for non-wait_for_ci stage (filtered by cache), got true")
 	}
 }
+
+// TestPoll_CruiseValidateComplete_NoRepeatDeepFetch is a regression test for the
+// perpetual deep-fetch loop (issue #488). Terminal items — cruise+Validate complete,
+// paused+complete, closed-with-stage-complete — would trigger a deep-fetch on every
+// poll cycle once the processedSet cooldown expired, indefinitely. This test verifies
+// that at most one deep-fetch occurs across two poll cycles in multi-repo mode.
+func TestPoll_CruiseValidateComplete_NoRepeatDeepFetch(t *testing.T) {
+	fixedTime := time.Now().Add(-time.Hour)
+	deepFetchCount := 0
+
+	stgs := testStagesWithValidate()
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{
+						Number:    732,
+						ItemID:    "PVTI_732",
+						Status:    "Validate",
+						Repo:      "owner/repo",
+						UpdatedAt: fixedTime,
+						Labels:    []string{"stage:Validate:complete", "fabrik:cruise"},
+					},
+				},
+			}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCount++
+			return nil
+		},
+	}
+
+	// Multi-repo mode: cfg.Repo == "" so all repos on the board are processed.
+	eng := NewWithDeps(Config{
+		Owner:         "owner",
+		Repo:          "",
+		ProjectNum:    1,
+		User:          "testuser",
+		Token:         "token",
+		MaxConcurrent: 5,
+		PollSeconds:   1, // 10s cooldown
+		Stages:        stgs,
+	}, client, &mockClaudeInvoker{}, NewWorktreeManager("/tmp/test-repo"))
+
+	// Simulate the perpetual-loop trigger: stable updatedAt cached, processedSet expired.
+	eng.mu.Lock()
+	eng.lastUpdatedAt["owner/repo#732"] = fixedTime
+	eng.processedSet["owner/repo#732-Validate"] = time.Now().Add(-2 * time.Minute)
+	eng.mu.Unlock()
+
+	ctx := context.Background()
+
+	// Poll 1: with Part 1 fix, stage:Validate:complete suppresses the cooldown retry.
+	// With Part 2 fix only (label absent), this poll triggers one deep-fetch and then
+	// resets the processedSet cooldown so Poll 2 is suppressed.
+	if _, err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll 1: %v", err)
+	}
+
+	// Poll 2: regardless of which part fires, no additional deep-fetch should occur.
+	if _, err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll 2: %v", err)
+	}
+
+	if deepFetchCount > 1 {
+		t.Errorf("FetchItemDetails called %d times across 2 polls; want at most 1 — perpetual deep-fetch loop must not recur", deepFetchCount)
+	}
+}
