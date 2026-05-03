@@ -800,6 +800,54 @@ func TestResumeReenablesDeltaApplication(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Delta: UpdatedAt bumped so itemMayNeedWork picks up webhook-changed items
+// ---------------------------------------------------------------------------
+
+func TestDeltaBumpsUpdatedAt(t *testing.T) {
+	c := seedCache(t)
+
+	// Record item #1's initial UpdatedAt (zero from seed).
+	c.mu.RLock()
+	before := c.items[itemKey("owner/repo", 1)].UpdatedAt
+	c.mu.RUnlock()
+
+	payload := issuesLabeledPayloadJSON("labeled", "owner/repo", 1, "newlabel")
+	c.ApplyDelta("issues", payload)
+
+	c.mu.RLock()
+	after := c.items[itemKey("owner/repo", 1)].UpdatedAt
+	c.mu.RUnlock()
+
+	if !after.After(before) {
+		t.Errorf("expected UpdatedAt to advance after labeled delta; before=%v after=%v", before, after)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Delta: pull_request_review_comment resets deepFetched for ReviewThreadID
+// ---------------------------------------------------------------------------
+
+func TestDeltaReviewCommentResetsDeepFetched(t *testing.T) {
+	c := seedCache(t)
+	c.mu.Lock()
+	c.items[itemKey("owner/repo", 1)].LinkedPRNumber = 42
+	// Mark as already deep-fetched.
+	c.deepFetched[itemKey("owner/repo", 1)] = true
+	c.mu.Unlock()
+
+	payload := pullRequestReviewCommentPayloadJSON("created", "owner/repo", 42, 200, "RC_node_2", "inline comment", "alice")
+	c.ApplyDelta("pull_request_review_comment", payload)
+
+	c.mu.RLock()
+	df := c.deepFetched[itemKey("owner/repo", 1)]
+	c.mu.RUnlock()
+
+	if df {
+		t.Error("expected deepFetched to be reset after review comment delta so next FetchItemDetails fetches ReviewThreadID from GitHub")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Paused read methods fall through to GitHub (stream-health failover)
 // ---------------------------------------------------------------------------
 
