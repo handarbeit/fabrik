@@ -170,10 +170,10 @@ or `poll:` in `config.yaml`).
 
 | Remaining GraphQL quota | Multiplier | At 30s base | At 60s base |
 |---|---|---|---|
-| 10%–20% (backoff active) | 2× | 60s | 120s |
-| 5%–10% | 4× | 120s | 240s |
-| 1%–5% | 6× | 180s | 360s |
-| < 1% | 10× (cap) | 300s | 600s |
+| >=10% (incl. sticky zone 20%–50%) | 2× | 60s | 120s |
+| >=5% and <10% | 4× | 120s | 240s |
+| >=1% and <5% | 6× | 180s | 360s |
+| <1% | 10× (cap) | 300s | 600s |
 
 Rate-limit backoff uses two-threshold hysteresis to prevent thrashing: it **activates** when GraphQL remaining quota drops below **20%** of the hourly limit, and **clears only when quota rises above 50%** of the limit. While quota is recovering (20%–50%, sticky zone), the 2× tier applies. Activity detection (items deep-fetched or dispatched) resets idle backoff but does NOT reset rate-limit backoff — the two concerns are independent. When rate-limit backoff is active, Fabrik logs the effective poll interval each cycle so operators can observe the actual cadence.
 
