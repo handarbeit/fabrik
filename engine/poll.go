@@ -634,13 +634,17 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 				e.lastUpdatedAt[iKey] = item.UpdatedAt
 			}
 			// Belt-and-suspenders: refresh processedSet for non-advanced items that
-			// completed a full poll cycle without dispatching work. This caps deep-fetch
-			// frequency to once per cooldown period for terminal items even when the
-			// stage-complete label isn't within the first 15 shallow labels (where Part 1
-			// would suppress the retry entirely).
+			// completed a full poll cycle without dispatching work. Only updates an
+			// *existing* entry — items that never had Claude run have no cooldown state
+			// and don't need this refresh. This caps deep-fetch frequency to once per
+			// cooldown period for terminal items where the stage-complete label isn't
+			// within the first 15 shallow labels (where Part 1 suppresses retries).
 			if !advancedItems[iKey] {
 				if stage := stages.FindStage(e.cfg.Stages, item.Status); stage != nil && !stage.CleanupWorktree {
-					e.processedSet[iKey+"-"+stage.Name] = time.Now()
+					stageKey := iKey + "-" + stage.Name
+					if _, exists := e.processedSet[stageKey]; exists {
+						e.processedSet[stageKey] = time.Now()
+					}
 				}
 			}
 		}
