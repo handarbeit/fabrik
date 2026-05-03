@@ -42,7 +42,12 @@ type mockGitHubClient struct {
 	fetchLabelAppliedAtFn     func(owner, repo string, issueNumber int, labelName string) (time.Time, error)
 	archiveProjectItemFn      func(projectID, itemID string) error
 	deleteReviewRequestFn     func(owner, repo string, prNumber int, reviewers []string) error
-	addReviewRequestFn        func(owner, repo string, prNumber int, reviewers []string) error
+	addReviewRequestFn              func(owner, repo string, prNumber int, reviewers []string) error
+	fetchProjectItemStatusFn        func(itemID string) (string, error)
+	fetchProjectItemStatusBatchFn   func(projectID string) (map[string]string, error)
+
+	// Track call counts for FetchProjectItemStatus
+	fetchProjectItemStatusCalls []string
 
 	// Track calls for FetchLabelAppliedAt
 	fetchLabelAppliedAtCalls []fetchLabelAppliedAtCall
@@ -449,6 +454,27 @@ func (m *mockGitHubClient) RateLimitStats() (gh.RateLimitStats, gh.RateLimitStat
 		return m.rateLimitStatsFn()
 	}
 	return gh.RateLimitStats{}, gh.RateLimitStats{}
+}
+
+func (m *mockGitHubClient) FetchProjectItemStatus(itemID string) (string, error) {
+	m.mu.Lock()
+	m.fetchProjectItemStatusCalls = append(m.fetchProjectItemStatusCalls, itemID)
+	fn := m.fetchProjectItemStatusFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(itemID)
+	}
+	return "", nil
+}
+
+func (m *mockGitHubClient) FetchProjectItemStatusBatch(projectID string) (map[string]string, error) {
+	m.mu.Lock()
+	fn := m.fetchProjectItemStatusBatchFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(projectID)
+	}
+	return map[string]string{}, nil
 }
 
 // mockClaudeInvoker implements ClaudeInvoker for testing.

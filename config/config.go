@@ -31,6 +31,7 @@ type ProjectConfig struct {
 	Webhooks      bool     `yaml:"webhooks"`
 	WebhookPort   *int     `yaml:"webhook_port"`
 	WebhookEvents []string `yaml:"webhook_events"`
+	StatusPoll    *int     `yaml:"status_poll"`
 }
 
 // LoadProjectConfig reads .fabrik/config.yaml from CWD.
