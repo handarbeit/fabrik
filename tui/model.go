@@ -371,6 +371,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.footer = comp.(FooterComponent)
 		return m, nil
 
+	case WebhookStatusEvent:
+		comp, _ := m.footer.Update(msg)
+		m.footer = comp.(FooterComponent)
+		return m, nil
+
 	case PollStartedEvent:
 		comp, _ := m.header.Update(msg)
 		m.header = comp.(HeaderComponent)

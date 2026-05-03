@@ -67,20 +67,33 @@ func nextRateLimitLow(current bool, ratio float64) bool {
 	return current
 }
 
+// effectiveIdleCap returns the idle backoff cap based on webhook stream health.
+// When the webhook stream is healthy or starting up, the cap is extended to
+// webhookIdleCap (60 min) since the stream covers events that would otherwise
+// require frequent polling. Falls back to maxIdleBackoff (5 min) when unhealthy.
+func effectiveIdleCap(webhookHealthy bool) time.Duration {
+	if webhookHealthy {
+		return webhookIdleCap
+	}
+	return maxIdleBackoff
+}
+
 // computeEffectiveInterval returns the effective poll interval considering both
 // idle backoff and rate-limit backoff. The result is max(idle, rateLimit).
-// The idle component is capped at maxIdleBackoff (5 minutes); the rate-limit
+// The idle component is capped at effectiveIdleCap(webhookHealthy); the rate-limit
 // component uses its own cap (rateLimitMaxBackoffMultiplier × configured).
-func computeEffectiveInterval(configuredInterval time.Duration, idleDuration time.Duration, rateLimitLow bool) time.Duration {
+func computeEffectiveInterval(configuredInterval time.Duration, idleDuration time.Duration, rateLimitLow bool, webhookHealthy bool) time.Duration {
+	cap := effectiveIdleCap(webhookHealthy)
+
 	var idleInterval time.Duration
 	mult := idleBackoffMultiplier(idleDuration)
 	if mult == 0 {
-		idleInterval = maxIdleBackoff
+		idleInterval = cap
 	} else {
 		idleInterval = configuredInterval * time.Duration(mult)
 	}
-	if idleInterval > maxIdleBackoff {
-		idleInterval = maxIdleBackoff
+	if idleInterval > cap {
+		idleInterval = cap
 	}
 
 	rateLimitInterval := configuredInterval
@@ -254,6 +267,29 @@ func (e *Engine) Run() error {
 		e.logf(0, "warn", "label seeding failed (non-fatal): %v\n", err)
 	}
 
+	// Start webhook manager when enabled. Failures are non-fatal: the engine
+	// continues in polling-only mode.
+	if e.cfg.Webhooks {
+		// Seed the known-repo set so the first subprocess invocation has at least
+		// one --repo arg. Multi-repo boards discover additional repos via UpdateRepos
+		// after the first poll, at which point the subprocess restarts with the full set.
+		var initialRepos map[string]bool
+		if e.cfg.Owner != "" && e.cfg.Repo != "" {
+			initialRepos = map[string]bool{e.cfg.Owner + "/" + e.cfg.Repo: true}
+		}
+		wm := newWebhookManager(
+			e.logf,
+			e.wakeCh,
+			e.emit,
+			initialRepos,
+			e.cfg.WebhookEvents,
+		)
+		if err := wm.Start(ctx, e.cfg.WebhookPort); err == nil {
+			e.webhookMgr = wm
+			defer wm.Stop()
+		}
+	}
+
 	if e.events == nil {
 		fmt.Println("\nFabrik is running. Press Ctrl+C to stop.")
 		fmt.Println()
@@ -304,7 +340,13 @@ func (e *Engine) Run() error {
 		if !e.idleStart.IsZero() {
 			idleDuration = time.Since(e.idleStart)
 		}
-		effectiveInterval := computeEffectiveInterval(configuredInterval, idleDuration, rateLimitLow)
+		webhookHealthy := e.webhookMgr != nil && e.webhookMgr.IsHealthyOrStartingUp()
+		effectiveInterval := computeEffectiveInterval(configuredInterval, idleDuration, rateLimitLow, webhookHealthy)
+
+		// Notify webhook manager of any new repos discovered during this poll.
+		if e.webhookMgr != nil && result.SeenRepos != nil {
+			e.webhookMgr.UpdateRepos(result.SeenRepos)
+		}
 
 		// Log backoff level transitions.
 		mult := idleBackoffMultiplier(idleDuration)
@@ -496,6 +538,7 @@ type pollResult struct {
 	Active     bool
 	ItemCount  int
 	Dispatched int
+	SeenRepos  map[string]bool // all repos observed on the board in this poll
 }
 
 func (e *Engine) poll(ctx context.Context) (pollResult, error) {
@@ -1006,6 +1049,7 @@ doneDispatching:
 		Active:     dispatched > 0 || deepFetched > 0,
 		ItemCount:  len(board.Items),
 		Dispatched: dispatched,
+		SeenRepos:  seenRepos,
 	}, nil
 }
 
