@@ -1586,7 +1586,7 @@ Events are translated into immediate poll wakeups — the existing board-fetch a
   ```bash
   gh extension install cli/gh-webhook
   ```
-  Verify installation: `gh webhook --help` (should print usage, not `unknown command "webhook"`). No minimum `gh` version is required.
+  Verify installation: `gh webhook --help` (should print usage, not `unknown command "webhook"`). No specific minimum version is pinned; any recent `gh` with extension support works.
 - **`gh auth login`** with a token that has `admin:repo_hook` write scope (classic PAT) or equivalent repo admin access. Fine-grained tokens may lack this scope.
 - **Repo admin access** on each repository on your board, or org-admin access for org-level subscription.
 
@@ -1659,7 +1659,7 @@ On multi-repo boards, Fabrik uses a single `gh webhook forward` subprocess:
 
 ### Troubleshooting Webhook Mode
 
-**"prerequisite check failed"** — `gh` is missing or the `gh-webhook` extension is not installed. Install `gh` at <https://cli.github.com>, then run `gh extension install cli/gh-webhook`.
+**"prerequisite check failed"** — `gh` is missing or the `cli/gh-webhook` extension is not installed. Install `gh` at <https://cli.github.com>, then run `gh extension install cli/gh-webhook`.
 
 **Stream shows yellow "unhealthy"** — The subprocess may have exited or GitHub isn't delivering events. Check `fabrik.log` for `[webhook]` error lines. Run `gh auth status` to verify your token has `admin:repo_hook` scope.
 
