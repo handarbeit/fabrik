@@ -223,6 +223,9 @@ func renderLogFile(path string) string {
 // log to follow; "" means fall back to the globally newest log file.
 // Both goroutines run until the done channel is closed.
 func StartLogFollower(logDir string, send func(tea.Msg), done <-chan struct{}, getActiveStage func() string) {
+	if getActiveStage == nil {
+		getActiveStage = func() string { return "" }
+	}
 	go followLatestLog(logDir, getActiveStage, send, done)
 	go pollForNewLogFile(logDir, send, done)
 }
