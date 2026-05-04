@@ -897,7 +897,7 @@ Closed issues are normally skipped by `itemMayNeedWork()` and `itemNeedsWork()`.
 | CI merge pending since | `ciMergePendingSince[issueKey]` | None | Lost — merge guard re-evaluates CI fresh on next poll |
 | Comment processed | `processedSet[key]` | ROCKET (🚀) reaction | Reaction survives restart; in-memory dedup is defense-in-depth |
 | Lock tracking | `lockedIssues[iKey]` | `fabrik:locked:<user>` label | Label may survive if process crashes; `cleanupLockedIssues()` runs on graceful shutdown |
-| Last updatedAt | `lastUpdatedAt[iKey]` | None | Lost — all items re-evaluated on first poll |
+| Last updatedAt | `seenUpdatedAt[iKey]` | None | Lost — all items re-evaluated on first poll |
 | Deep-fetch failure | `deepFetchFailureTime[iKey]` | None | Lost — failed items retried immediately |
 
 ### 7.6 Invocation-Level Kill Mechanisms
@@ -1058,7 +1058,7 @@ Within a single `poll()` call:
 1. **Catch-up loop** runs first — processes items with `stage:<X>:complete` labels for yolo/cruise advancement, review gate evaluation, and review reinvoke dispatch
 2. **Dispatch loop** runs second — processes items that need stage invocations or comment processing
 
-The `advancedItems` map prevents items advanced by the catch-up loop from having their `lastUpdatedAt` re-cached (which would make them invisible on the next poll). The `inFlight` map prevents items dispatched by `dispatchReviewReinvoke()` in the catch-up loop from being double-dispatched by the dispatch loop.
+The `advancedItems` map prevents items advanced by the catch-up loop from having their `seenUpdatedAt` re-cached (which would make them invisible on the next poll). The `inFlight` map prevents items dispatched by `dispatchReviewReinvoke()` in the catch-up loop from being double-dispatched by the dispatch loop.
 
 ### 9.5 processedSet Mutex
 
