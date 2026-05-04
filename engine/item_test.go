@@ -400,6 +400,61 @@ func TestExtendTurns_RemovedOnCleanupStage(t *testing.T) {
 	}
 }
 
+// TestExtendTurns_RemovedOnCleanupStage_LabelNotInShallowItem verifies that fabrik:extend-turns
+// removal is attempted unconditionally in the cleanup branch even when item.Labels does not
+// contain the label. Cleanup items arrive from shallow board queries (labels(first:15)) and the
+// label may be present on GitHub without appearing in the local slice. The engine must call
+// RemoveLabelFromIssue regardless; ErrNotFound is tolerated as success.
+func TestExtendTurns_RemovedOnCleanupStage_LabelNotInShallowItem(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	// Mock returns ErrNotFound (label absent on GitHub side too) — must be tolerated.
+	client := &mockGitHubClient{
+		removeLabelFromIssueFn: func(owner, repo string, number int, label string) error {
+			if label == "fabrik:extend-turns" {
+				return gh.ErrNotFound
+			}
+			return nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+
+	eng := NewWithDeps(
+		Config{
+			Owner: "owner", Repo: "repo", ProjectNum: 1,
+			User: "testuser", Token: "token",
+			Stages: cleanupStageList(),
+		},
+		client, claude, wm,
+	)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	// Label deliberately absent from item.Labels (simulates shallow board query truncation).
+	item := gh.ProjectItem{
+		Number: 10,
+		Title:  "Shallow Board Item Test",
+		Status: "Done",
+		ItemID: "PVTI_10",
+		Labels: []string{}, // fabrik:extend-turns not in shallow list
+	}
+
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	// The engine must have attempted removal even though the label wasn't in item.Labels.
+	found := false
+	for _, call := range client.removeLabelCalls {
+		if call.labelName == "fabrik:extend-turns" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected RemoveLabelFromIssue to be called for fabrik:extend-turns even when label absent from shallow item.Labels")
+	}
+}
+
 // TestExtendTurns_ManualRemoval_DefaultBudget verifies that when fabrik:extend-turns is absent,
 // the stage runs with the default 1× budget (MaxTurnsOverride == stage.MaxTurns).
 func TestExtendTurns_ManualRemoval_DefaultBudget(t *testing.T) {

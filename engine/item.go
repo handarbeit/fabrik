@@ -462,14 +462,15 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		// Remove fabrik:extend-turns at cleanup (Done) stage — this is the designated
 		// removal site. The label persists across all intermediate stages so the operator
 		// can apply it once and have it take effect on every stage until Done.
-		if hasLabel(item, "fabrik:extend-turns") {
-			if removeErr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:extend-turns"); removeErr != nil &&
-				!errors.Is(removeErr, gh.ErrNotFound) {
-				e.logf(item.Number, "warn", "could not remove extend-turns label: %v\n", removeErr)
-			} else if removeErr == nil {
-				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:extend-turns")
-				}
+		// Called unconditionally (not guarded by hasLabel) because cleanup items are
+		// dispatched from shallow board items (labels(first:15)) and the label may be
+		// present on GitHub without appearing in item.Labels. ErrNotFound = already gone.
+		if removeErr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:extend-turns"); removeErr != nil &&
+			!errors.Is(removeErr, gh.ErrNotFound) {
+			e.logf(item.Number, "warn", "could not remove extend-turns label: %v\n", removeErr)
+		} else if removeErr == nil {
+			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:extend-turns")
 			}
 		}
 
