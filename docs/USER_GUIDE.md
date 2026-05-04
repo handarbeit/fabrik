@@ -770,7 +770,7 @@ Fabrik uses the `fabrik:blocked` label to track blocked issues. The label lifecy
 
 **Key behavior callouts:**
 
-- **The first stage (Specify) always runs regardless of blockers** — dependencies only gate subsequent stages. This allows a formation to be fully specified before execution begins.
+- **All stages, including the first (Specify), are subject to the dependency gate** — if an issue has open blockers when it enters any stage, it pauses with `fabrik:blocked` until all blockers close.
 - **Independent issues start in parallel** — issues with no blockers are dispatched concurrently up to the configured `MaxConcurrent` limit.
 - **Failed issues retry independently** — a failure in one formation member does not affect siblings.
 - **Cross-repo dependencies are supported** — a blocking issue can be in a different repository. Fabrik displays cross-repo blockers as `owner/repo#N` in log output.
@@ -781,7 +781,7 @@ Fabrik uses the `fabrik:blocked` label to track blocked issues. The label lifecy
 2. **Add blocked-by edges** in GitHub using the Relationships sidebar (see above).
 3. **Label all issues `fabrik:yolo`** — this makes the formation hands-free. Without `fabrik:yolo`, each stage requires a manual card move on the project board.
 4. **Move all issues to Specify** on the project board. Fabrik will pick them up on the next poll.
-5. **Watch it run** — Fabrik executes Specify for all issues in parallel, then gates subsequent stages on dependency resolution automatically.
+5. **Watch it run** — Fabrik gates every stage, including Specify, on dependency resolution. Issues with no blockers start immediately; blocked issues wait with `fabrik:blocked` until their dependencies close.
 
 #### Example Formation
 
