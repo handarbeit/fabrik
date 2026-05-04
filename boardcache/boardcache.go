@@ -130,6 +130,7 @@ func parseItemKey(key string) (repo string, number int, ok bool) {
 func snapshotToProjectItem(snap itemstate.Snapshot) gh.ProjectItem {
 	s := snap.State()
 	pi := gh.ProjectItem{
+		ID:        s.ID,
 		ItemID:    s.ItemID,
 		Number:    s.Number,
 		Title:     s.Title,
@@ -303,6 +304,13 @@ func (c *CacheImpl) Reconcile(board *gh.ProjectBoard) {
 		if !newKeys[key] {
 			drifted++
 			c.store.Remove(snap.Repo(), snap.Number())
+			// Clean up CacheImpl-side prNumToKey so stale PR numbers don't resurrect ghost items.
+			if lpr := snap.LinkedPR(); lpr != nil && lpr.Number != 0 {
+				pk := prKey(snap.Repo(), lpr.Number)
+				c.mu.Lock()
+				delete(c.prNumToKey, pk)
+				c.mu.Unlock()
+			}
 		}
 	}
 
@@ -448,6 +456,17 @@ func (c *CacheImpl) FetchItemDetails(item *gh.ProjectItem) error {
 		Number:     item.Number,
 		FreshState: *item,
 	})
+	// If FetchItemDetails learned a LinkedPRNumber, backfill prNumToKey so that
+	// future PR review/comment deltas can route via the normal (non-auto-heal) path.
+	if item.LinkedPRNumber != 0 {
+		pk := prKey(item.Repo, item.LinkedPRNumber)
+		issKey := itemKey(item.Repo, item.Number)
+		c.mu.Lock()
+		if _, exists := c.prNumToKey[pk]; !exists {
+			c.prNumToKey[pk] = issKey
+		}
+		c.mu.Unlock()
+	}
 	return nil
 }
 

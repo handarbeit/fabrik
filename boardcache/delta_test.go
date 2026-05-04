@@ -56,7 +56,12 @@ func TestStoreDelegationBootstrap(t *testing.T) {
 		t.Errorf("store.All: want 2 items, got %d", len(all))
 	}
 
-	// FetchProjectBoard reconstructs identical board.
+	// Store preserves the content node ID (used by github.Client.FetchItemDetails GraphQL query).
+	if snap1.State().ID != "I_1" {
+		t.Errorf("store.Get(1) ID: want I_1, got %q", snap1.State().ID)
+	}
+
+	// FetchProjectBoard reconstructs identical board with ID preserved.
 	fetched, err := c.FetchProjectBoard("owner", "repo", 1, "organization")
 	if err != nil {
 		t.Fatalf("FetchProjectBoard: %v", err)
@@ -66,6 +71,16 @@ func TestStoreDelegationBootstrap(t *testing.T) {
 	}
 	if fetched.ProjectID != "PID" {
 		t.Errorf("FetchProjectBoard.ProjectID: want PID, got %q", fetched.ProjectID)
+	}
+	// Verify ID is present in reconstructed board items so FetchItemDetails GraphQL queries work.
+	found := false
+	for _, item := range fetched.Items {
+		if item.Number == 1 && item.ID == "I_1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("FetchProjectBoard: item #1 ID not preserved; want I_1 in reconstructed items")
 	}
 }
 
@@ -299,6 +314,82 @@ func TestStoreDelegationNegativeCacheTTLExpiry(t *testing.T) {
 	c.ApplyDelta("pull_request_review", pullRequestReviewPayloadJSON("submitted", "owner/repo", 33, 9003, "approved", "bot3"))
 	if callCount != 2 {
 		t.Errorf("want 2 REST calls after TTL expiry, got %d", callCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 11. FetchItemDetails backfills prNumToKey so PR review/comment deltas route
+//     without auto-heal after the first deep fetch.
+// ---------------------------------------------------------------------------
+
+func TestFetchItemDetailsBackfillsPrNumToKey(t *testing.T) {
+	mc := &mockClient{
+		itemDetailsResult: &gh.ProjectItem{
+			Body:           "body",
+			Author:         "alice",
+			LinkedPRNumber: 42,
+		},
+	}
+	c := NewCacheImpl(mc, nopLog)
+	c.Bootstrap(&gh.ProjectBoard{
+		ProjectID: "PID", Title: "T", OwnerType: "organization",
+		Items: []gh.ProjectItem{
+			{ID: "I_1", ItemID: "PVTI_1", Number: 1, Repo: "owner/repo", Status: "Research"},
+		},
+	})
+
+	item := gh.ProjectItem{ID: "I_1", Number: 1, Repo: "owner/repo"}
+	if err := c.FetchItemDetails(&item); err != nil {
+		t.Fatalf("FetchItemDetails: %v", err)
+	}
+	if item.LinkedPRNumber != 42 {
+		t.Fatalf("want LinkedPRNumber 42, got %d", item.LinkedPRNumber)
+	}
+
+	// prNumToKey must be backfilled so PR deltas can route by PR number.
+	pk := prKey("owner/repo", 42)
+	c.mu.RLock()
+	issKey, found := c.prNumToKey[pk]
+	c.mu.RUnlock()
+	if !found {
+		t.Errorf("prNumToKey not backfilled after FetchItemDetails with LinkedPRNumber=42")
+	}
+	wantKey := itemKey("owner/repo", 1)
+	if issKey != wantKey {
+		t.Errorf("prNumToKey: want %q, got %q", wantKey, issKey)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 12. Reconcile item removal cleans up stale prNumToKey entries.
+// ---------------------------------------------------------------------------
+
+func TestReconcileRemoveCleansUpPrNumToKey(t *testing.T) {
+	c := seedCache(t)
+	// Establish PR linkage for item #1 → PR #10.
+	testSetLinkedPR(c, "owner/repo", 1, 10)
+
+	pk := prKey("owner/repo", 10)
+	c.mu.RLock()
+	_, beforeReconcile := c.prNumToKey[pk]
+	c.mu.RUnlock()
+	if !beforeReconcile {
+		t.Fatalf("prNumToKey for PR #10 not set before Reconcile")
+	}
+
+	// Reconcile with a board that no longer contains item #1.
+	c.Reconcile(&gh.ProjectBoard{
+		ProjectID: "PID", Title: "T", OwnerType: "organization",
+		Items: []gh.ProjectItem{
+			{ID: "I_002", ItemID: "PVTI_002", Number: 2, Repo: "owner/repo", Status: "Plan"},
+		},
+	})
+
+	c.mu.RLock()
+	_, afterReconcile := c.prNumToKey[pk]
+	c.mu.RUnlock()
+	if afterReconcile {
+		t.Errorf("prNumToKey entry for PR #10 survived after item #1 removed by Reconcile")
 	}
 }
 
