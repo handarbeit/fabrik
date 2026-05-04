@@ -7,6 +7,7 @@ import (
 	"time"
 
 	gh "github.com/verveguy/fabrik/github"
+	"github.com/verveguy/fabrik/internal/itemstate"
 	"github.com/verveguy/fabrik/stages"
 )
 
@@ -81,7 +82,7 @@ func TestCheckCIGate_PostPushDelay_BlocksGate(t *testing.T) {
 	}
 	eng := testEngineForMerge(client)
 	// Pre-seed: this issue has previously had check runs registered.
-	eng.prHasHadChecks["owner/repo#1"] = true
+	eng.store.Apply(itemstate.PRChecksObserved{Repo: "owner/repo", Number: 1})
 
 	tr := true
 	item := gh.ProjectItem{Number: 1}

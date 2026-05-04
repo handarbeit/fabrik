@@ -8,6 +8,7 @@ import (
 
 	"github.com/verveguy/fabrik/boardcache"
 	gh "github.com/verveguy/fabrik/github"
+	"github.com/verveguy/fabrik/internal/itemstate"
 	"github.com/verveguy/fabrik/stages"
 )
 
@@ -58,10 +59,7 @@ func TestAttemptMergeOnValidate_AllGreen_MergeProceeds(t *testing.T) {
 	}
 	eng := testEngineForMerge(client)
 	// Seed a stale pending timer to confirm it gets cleared on green.
-	iKey := "owner/repo#1"
-	eng.mu.Lock()
-	eng.ciMergePendingSince[iKey] = time.Now().Add(-1 * time.Minute)
-	eng.mu.Unlock()
+	eng.store.Apply(itemstate.CIMergePendingStarted{Repo: "owner/repo", Number: 1, At: time.Now().Add(-1 * time.Minute)})
 
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 	if err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"}); err != nil {
@@ -70,10 +68,8 @@ func TestAttemptMergeOnValidate_AllGreen_MergeProceeds(t *testing.T) {
 	if len(client.mergePRCalls) != 1 {
 		t.Fatalf("expected MergePR called once, got %d", len(client.mergePRCalls))
 	}
-	eng.mu.Lock()
-	_, still := eng.ciMergePendingSince[iKey]
-	eng.mu.Unlock()
-	if still {
+	snap, _ := eng.store.Get("owner/repo", 1)
+	if lpr := snap.LinkedPR(); lpr != nil && !lpr.CIMergePendingSince.IsZero() {
 		t.Error("ciMergePendingSince should be cleared on all-green")
 	}
 }
@@ -158,21 +154,20 @@ func TestAttemptMergeOnValidate_CIPending_TracksTimer(t *testing.T) {
 	}
 	eng := testEngineForMerge(client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
-	iKey := "owner/repo#1"
 
-	eng.mu.Lock()
-	_, before := eng.ciMergePendingSince[iKey]
-	eng.mu.Unlock()
-	if before {
+	snapBefore, _ := eng.store.Get("owner/repo", 1)
+	if lpr := snapBefore.LinkedPR(); lpr != nil && !lpr.CIMergePendingSince.IsZero() {
 		t.Fatal("expected no pending entry before first call")
 	}
 
 	_ = eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
 
-	eng.mu.Lock()
-	_, after := eng.ciMergePendingSince[iKey]
-	eng.mu.Unlock()
-	if !after {
+	snapAfter, _ := eng.store.Get("owner/repo", 1)
+	var afterSince time.Time
+	if lpr := snapAfter.LinkedPR(); lpr != nil {
+		afterSince = lpr.CIMergePendingSince
+	}
+	if afterSince.IsZero() {
 		t.Error("expected ciMergePendingSince to be set after first pending observation")
 	}
 }
@@ -195,10 +190,7 @@ func TestAttemptMergeOnValidate_CIPendingTimeout_PausesIssue(t *testing.T) {
 	eng.cfg.CIWaitTimeout = 1 * time.Millisecond // tiny timeout for test
 
 	// Pre-seed as if first observed 1 second ago (well past 1ms timeout).
-	iKey := "owner/repo#1"
-	eng.mu.Lock()
-	eng.ciMergePendingSince[iKey] = time.Now().Add(-1 * time.Second)
-	eng.mu.Unlock()
+	eng.store.Apply(itemstate.CIMergePendingStarted{Repo: "owner/repo", Number: 1, At: time.Now().Add(-1 * time.Second)})
 
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 	err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
@@ -220,11 +212,9 @@ func TestAttemptMergeOnValidate_CIPendingTimeout_PausesIssue(t *testing.T) {
 	if !foundPaused {
 		t.Error("expected fabrik:paused label on CI timeout")
 	}
-	// ciMergePendingSince entry should be cleared after timeout.
-	eng.mu.Lock()
-	_, still := eng.ciMergePendingSince[iKey]
-	eng.mu.Unlock()
-	if still {
+	// CIMergePendingSince should be cleared after timeout.
+	snapTimeout, _ := eng.store.Get("owner/repo", 1)
+	if lpr := snapTimeout.LinkedPR(); lpr != nil && !lpr.CIMergePendingSince.IsZero() {
 		t.Error("ciMergePendingSince should be deleted after timeout fires")
 	}
 }
