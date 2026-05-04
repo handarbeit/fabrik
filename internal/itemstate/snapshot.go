@@ -71,10 +71,11 @@ func newSnapshot(s ItemState) Snapshot {
 	return Snapshot{state: c}
 }
 
-// State returns the underlying ItemState value.
-// The returned value is itself a copy; mutating it does not affect the Snapshot.
+// State returns a deep copy of the underlying ItemState value.
+// Mutating the returned value — including its slice and map fields — does not
+// affect the Snapshot or the Store.
 func (s Snapshot) State() ItemState {
-	return s.state
+	return newSnapshot(s.state).state
 }
 
 // Repo returns the "owner/repo" identifier.
@@ -150,7 +151,13 @@ func copyComments(src []gh.Comment) []gh.Comment {
 	}
 	dst := make([]gh.Comment, len(src))
 	copy(dst, src)
-	// gh.Comment contains only value or string fields; a shallow element copy is sufficient.
+	// gh.Comment.Reactions is a slice; copy it so Snapshot elements don't alias src.
+	for i := range dst {
+		if src[i].Reactions != nil {
+			dst[i].Reactions = make([]gh.ReactionGroup, len(src[i].Reactions))
+			copy(dst[i].Reactions, src[i].Reactions)
+		}
+	}
 	return dst
 }
 
