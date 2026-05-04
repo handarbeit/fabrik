@@ -682,14 +682,13 @@ func TestItemMayNeedWork_AwaitingCI_BypassesUpdatedAtCache(t *testing.T) {
 }
 
 // TestItemMayNeedWork_AwaitingReview_CooldownPattern verifies that items with
-// fabrik:awaiting-review use the processedSet cooldown pattern (same as fabrik:blocked)
-// rather than per-poll cache bypass. The cooldown is 10 × PollSeconds (matches the
-// existing cooldown retry path at item.go). The catch-up loop's review-gate path
-// records processedSet[stageKey] when checkReviewGate returns blocked=true, which
-// makes itemMayNeedWork re-admit the item every 10 × PollSeconds — enough for Phase 1
-// and Phase 2 reprompt timers (which fire at 1× ReviewWaitTimeout = 15 min default)
-// to fire within ~150s of their actual due time, without turning long-lived review-
-// waiting items into a permanent GraphQL hot path.
+// fabrik:awaiting-review use the CooldownAt["review-blocked"] path (same as fabrik:blocked)
+// rather than per-poll cache bypass. The cooldown is 10 × PollSeconds. The catch-up
+// loop's review-gate path records CooldownAt["review-blocked"] when checkReviewGate
+// returns blocked=true, which makes itemMayNeedWork re-admit the item every 10 ×
+// PollSeconds — enough for Phase 1 and Phase 2 reprompt timers (which fire at 1×
+// ReviewWaitTimeout = 15 min default) to fire within ~150s of their actual due time,
+// without turning long-lived review-waiting items into a permanent GraphQL hot path.
 //
 // Real-world repro: issue #467 — fabrik filed this regression after observing an
 // issue stuck for hours waiting on Copilot when Phase 1 should have re-fired.
@@ -726,9 +725,9 @@ func TestItemMayNeedWork_AwaitingReview_CooldownPattern(t *testing.T) {
 
 // TestItemMayNeedWork_AwaitingReview_NotBypassedDirectly verifies that
 // fabrik:awaiting-review is NOT in the unconditional cache-bypass list (unlike
-// fabrik:awaiting-ci and fabrik:rebase-needed). Without a processedSet entry, the
+// fabrik:awaiting-ci and fabrik:rebase-needed). Without a CooldownAt entry, the
 // item is filtered by the standard updatedAt cache. This is the intentional
-// design choice from the #495 fix — use cooldown pattern, not per-poll bypass.
+// design choice from the #495 fix — use CooldownAt pattern, not per-poll bypass.
 func TestItemMayNeedWork_AwaitingReview_NotBypassedDirectly(t *testing.T) {
 	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 60
@@ -963,10 +962,9 @@ func TestItemNeedsWork_ClosedIssue_AwaitingCI_Passes(t *testing.T) {
 }
 
 // TestPoll_DeferredRefresh_DoesNotRefreshIncompleteItem verifies that the deferred
-// processedSet refresh in poll() does NOT refresh entries for incomplete items —
-// those without stage:X:complete in their full label set. Refreshing an incomplete
-// item's entry would defeat the retry-after-cooldown mechanism and block retries
-// indefinitely (#504 regression fix).
+// CooldownAt["periodic-re-eval"] refresh in poll() does NOT refresh LastAttemptAt
+// for incomplete items. Refreshing LastAttemptAt would defeat the retry-after-cooldown
+// mechanism and block retries indefinitely (#504 regression fix).
 func TestPoll_DeferredRefresh_DoesNotRefreshIncompleteItem(t *testing.T) {
 	ts := time.Now().Add(-time.Minute)
 	client := &mockGitHubClient{
@@ -1013,12 +1011,11 @@ func TestPoll_DeferredRefresh_DoesNotRefreshIncompleteItem(t *testing.T) {
 	}
 }
 
-// TestPoll_DeferredRefresh_RefreshesTerminalItem verifies that the deferred
-// processedSet refresh in poll() DOES refresh entries for terminal items —
-// those where stage:X:complete appears in the full label set from deep-fetch
-// (even if the label is beyond the 15-label shallow query window). This is the
-// #488 belt-and-suspenders behavior: it caps deep-fetch frequency for terminal
-// items so they don't trigger a perpetual deep-fetch loop.
+// TestPoll_DeferredRefresh_RefreshesTerminalItem verifies that the deferred block in
+// poll() DOES refresh CooldownAt["periodic-re-eval"] for terminal items — those where
+// stage:X:complete appears in the full label set from deep-fetch (even if beyond the
+// 15-label shallow query window). This is the #488 belt-and-suspenders behavior: it
+// caps deep-fetch frequency for terminal items so they don't trigger a perpetual loop.
 func TestPoll_DeferredRefresh_RefreshesTerminalItem(t *testing.T) {
 	ts := time.Now().Add(-time.Minute)
 	client := &mockGitHubClient{

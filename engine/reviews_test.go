@@ -322,7 +322,7 @@ func TestBuildReviewThreadComments(t *testing.T) {
 	}
 }
 
-// (f2) buildReviewThreadComments skips comments already present in processedSet.
+// (f2) buildReviewThreadComments skips comments already present in ProcessedComments.
 func TestBuildReviewThreadComments_ProcessedSetSkip(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := reviewTestEngine(client)
@@ -349,7 +349,7 @@ func TestBuildReviewThreadComments_ProcessedSetSkip(t *testing.T) {
 }
 
 // (f3) catch-up loop skips dispatchReviewReinvoke when a goroutine is already
-// in-flight for the item, and does NOT increment reviewCycleCount.
+// in-flight for the item, and does NOT increment ReviewCycles.
 func TestCatchUpLoop_InFlightGuard(t *testing.T) {
 	threadComment := gh.Comment{
 		ID:             "PRRC_guard_1",
@@ -469,7 +469,7 @@ func TestPauseForReviewCycleLimit(t *testing.T) {
 	}
 }
 
-// (i1) reviewCycleCount is per-stage: cycles consumed by one stage do not
+// (i1) ReviewCycles is per-stage: cycles consumed by one stage do not
 // reduce the budget for a different stage on the same issue.
 func TestReviewCycleCount_PerStageNotPerIssue(t *testing.T) {
 	client := &mockGitHubClient{}
@@ -506,7 +506,7 @@ func TestReviewCycleCount_PerStageNotPerIssue(t *testing.T) {
 	}
 }
 
-// (i2) clearFailedStage resets only the paused stage's reviewCycleCount; a
+// (i2) clearFailedStage resets only the paused stage's ReviewCycles; a
 // different stage's counter on the same issue is unaffected.
 func TestClearFailedStage_ReviewCycleCount_ResetsOnlyCurrentStage(t *testing.T) {
 	client := &mockGitHubClient{}
