@@ -1112,3 +1112,231 @@ func TestProjectIDReturnsEmptyBeforeBootstrap(t *testing.T) {
 		t.Errorf("want empty string before bootstrap, got %q", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Auto-heal: PR-targeted delta handlers repair stale LinkedPRNumber
+// ---------------------------------------------------------------------------
+
+// seedCacheWithPR seeds a cache with item #1 at LinkedPRNumber=0 and deepFetched=true.
+func seedCacheWithStalePRLink(t *testing.T, mc *mockClient) *CacheImpl {
+	t.Helper()
+	c := NewCacheImpl(mc, nopLog)
+	board := &gh.ProjectBoard{
+		ProjectID: "PID", Title: "T", OwnerType: "organization",
+		Items: []gh.ProjectItem{
+			{ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo",
+				Status: "Implement", LinkedPRNumber: 0},
+		},
+	}
+	c.Bootstrap(board)
+	// Mark as deep-fetched so we can verify deepFetched is cleared by heal.
+	c.mu.Lock()
+	c.deepFetched[itemKey("owner/repo", 1)] = true
+	c.mu.Unlock()
+	return c
+}
+
+func TestAutoHealPullRequestReviewSubmitted(t *testing.T) {
+	mc := &mockClient{
+		fetchPRClosingIssuesFn: func(owner, repo string, prNumber int) ([]int, error) {
+			return []int{1}, nil // PR #42 closes issue #1
+		},
+	}
+	c := seedCacheWithStalePRLink(t, mc)
+
+	payload := pullRequestReviewPayloadJSON("submitted", "owner/repo", 42, 2001, "approved", "reviewer")
+	c.ApplyDelta("pull_request_review", payload)
+
+	c.mu.RLock()
+	item := c.items[itemKey("owner/repo", 1)]
+	linkedPR := item.LinkedPRNumber
+	reviews := clonePRReviews(item.LinkedPRReviews)
+	df := c.deepFetched[itemKey("owner/repo", 1)]
+	c.mu.RUnlock()
+
+	if linkedPR != 42 {
+		t.Errorf("expected LinkedPRNumber=42 after heal, got %d", linkedPR)
+	}
+	if len(reviews) != 1 || reviews[0].Author != "reviewer" || reviews[0].State != "APPROVED" {
+		t.Errorf("unexpected reviews after heal: %+v", reviews)
+	}
+	if df {
+		t.Error("expected deepFetched to be cleared after auto-heal")
+	}
+	if mc.fetchPRClosingIssuesCount != 1 {
+		t.Errorf("expected exactly 1 REST call, got %d", mc.fetchPRClosingIssuesCount)
+	}
+}
+
+func TestAutoHealPullRequestReviewCommentCreated(t *testing.T) {
+	mc := &mockClient{
+		fetchPRClosingIssuesFn: func(owner, repo string, prNumber int) ([]int, error) {
+			return []int{1}, nil
+		},
+	}
+	c := seedCacheWithStalePRLink(t, mc)
+
+	payload := pullRequestReviewCommentPayloadJSON("created", "owner/repo", 42, 300, "RC_heal_1", "inline comment", "reviewer")
+	c.ApplyDelta("pull_request_review_comment", payload)
+
+	c.mu.RLock()
+	item := c.items[itemKey("owner/repo", 1)]
+	linkedPR := item.LinkedPRNumber
+	comments := cloneComments(item.LinkedPRReviewThreadComments)
+	df := c.deepFetched[itemKey("owner/repo", 1)]
+	c.mu.RUnlock()
+
+	if linkedPR != 42 {
+		t.Errorf("expected LinkedPRNumber=42 after heal, got %d", linkedPR)
+	}
+	if len(comments) != 1 || comments[0].ID != "RC_heal_1" {
+		t.Errorf("unexpected comments after heal: %+v", comments)
+	}
+	if df {
+		t.Error("expected deepFetched to be cleared after auto-heal")
+	}
+	if mc.fetchPRClosingIssuesCount != 1 {
+		t.Errorf("expected exactly 1 REST call, got %d", mc.fetchPRClosingIssuesCount)
+	}
+}
+
+func TestAutoHealCheckRunCompleted(t *testing.T) {
+	mc := &mockClient{
+		fetchPRsForSHAFn: func(owner, repo, sha string) ([]int, error) {
+			return []int{42}, nil
+		},
+		fetchPRClosingIssuesFn: func(owner, repo string, prNumber int) ([]int, error) {
+			return []int{1}, nil
+		},
+	}
+	c := seedCacheWithStalePRLink(t, mc)
+
+	before := time.Now()
+	payload := checkRunPayloadJSON("completed", "owner/repo", 5001, "ci", "completed", "success", "sha_heal")
+	c.ApplyDelta("check_run", payload)
+
+	c.mu.RLock()
+	item := c.items[itemKey("owner/repo", 1)]
+	linkedPR := item.LinkedPRNumber
+	shaKey, shaOK := c.shaToKey["sha_heal"]
+	df := c.deepFetched[itemKey("owner/repo", 1)]
+	updatedAt := item.UpdatedAt
+	c.mu.RUnlock()
+
+	if linkedPR != 42 {
+		t.Errorf("expected LinkedPRNumber=42 after heal, got %d", linkedPR)
+	}
+	if !shaOK || shaKey != itemKey("owner/repo", 1) {
+		t.Errorf("expected shaToKey[sha_heal]=owner/repo#1, got %q (ok=%v)", shaKey, shaOK)
+	}
+	if df {
+		t.Error("expected deepFetched to be cleared after auto-heal")
+	}
+	if !updatedAt.After(before) {
+		t.Error("expected UpdatedAt to be bumped after auto-heal")
+	}
+	if mc.fetchPRsForSHACount != 1 {
+		t.Errorf("expected 1 FetchPRsForSHA call, got %d", mc.fetchPRsForSHACount)
+	}
+	if mc.fetchPRClosingIssuesCount != 1 {
+		t.Errorf("expected 1 FetchPRClosingIssues call, got %d", mc.fetchPRClosingIssuesCount)
+	}
+}
+
+func TestAutoHealDropsWhenNoPRClosingKeyword(t *testing.T) {
+	var logBuf strings.Builder
+	logFn := func(format string, args ...any) { logBuf.WriteString(format) }
+
+	mc := &mockClient{
+		fetchPRClosingIssuesFn: func(owner, repo string, prNumber int) ([]int, error) {
+			return nil, nil // PR body has no closing reference
+		},
+	}
+	c := seedCacheWithStalePRLink2(t, logFn)
+	c.fallback = mc
+
+	payload := pullRequestReviewPayloadJSON("submitted", "owner/repo", 99, 3001, "approved", "bot")
+	c.ApplyDelta("pull_request_review", payload)
+
+	c.mu.RLock()
+	item := c.items[itemKey("owner/repo", 1)]
+	linkedPR := item.LinkedPRNumber
+	reviews := clonePRReviews(item.LinkedPRReviews)
+	c.mu.RUnlock()
+
+	if linkedPR != 0 {
+		t.Errorf("expected LinkedPRNumber=0 (no mutation), got %d", linkedPR)
+	}
+	if len(reviews) != 0 {
+		t.Errorf("expected no reviews appended on drop, got %+v", reviews)
+	}
+	if !strings.Contains(logBuf.String(), "dropped") {
+		t.Errorf("expected 'dropped' in log, got: %q", logBuf.String())
+	}
+}
+
+func TestAutoHealDropsSilentlyWhenIssuNotInCache(t *testing.T) {
+	mc := &mockClient{
+		fetchPRClosingIssuesFn: func(owner, repo string, prNumber int) ([]int, error) {
+			return []int{999}, nil // issue #999 not in cache
+		},
+	}
+	c := seedCacheWithStalePRLink(t, mc)
+
+	payload := pullRequestReviewPayloadJSON("submitted", "owner/repo", 77, 4001, "approved", "bot")
+	c.ApplyDelta("pull_request_review", payload)
+
+	c.mu.RLock()
+	item := c.items[itemKey("owner/repo", 1)]
+	linkedPR := item.LinkedPRNumber
+	reviews := clonePRReviews(item.LinkedPRReviews)
+	c.mu.RUnlock()
+
+	if linkedPR != 0 {
+		t.Errorf("expected no mutation (issue not in cache), got LinkedPRNumber=%d", linkedPR)
+	}
+	if len(reviews) != 0 {
+		t.Errorf("expected no reviews appended for unmanaged issue, got %+v", reviews)
+	}
+}
+
+func TestAutoHealNegativeCachePreventsRepeatedRESTCall(t *testing.T) {
+	mc := &mockClient{
+		fetchPRClosingIssuesFn: func(owner, repo string, prNumber int) ([]int, error) {
+			return nil, nil // no closing reference — will populate negative cache
+		},
+	}
+	c := seedCacheWithStalePRLink(t, mc)
+
+	// First delta — triggers REST call and populates negative cache.
+	payload := pullRequestReviewPayloadJSON("submitted", "owner/repo", 55, 5001, "approved", "bot")
+	c.ApplyDelta("pull_request_review", payload)
+	if mc.fetchPRClosingIssuesCount != 1 {
+		t.Fatalf("expected 1 REST call after first delta, got %d", mc.fetchPRClosingIssuesCount)
+	}
+
+	// Second delta for same PR — negative cache should suppress the REST call.
+	payload2 := pullRequestReviewPayloadJSON("submitted", "owner/repo", 55, 5002, "approved", "bot2")
+	c.ApplyDelta("pull_request_review", payload2)
+	if mc.fetchPRClosingIssuesCount != 1 {
+		t.Errorf("expected negative cache to suppress second REST call, got %d calls total", mc.fetchPRClosingIssuesCount)
+	}
+}
+
+// seedCacheWithStalePRLink variant accepting a custom logFn for log-capture tests.
+func seedCacheWithStalePRLink2(t *testing.T, logFn func(string, ...any)) *CacheImpl {
+	t.Helper()
+	c := NewCacheImpl(&mockClient{}, logFn)
+	board := &gh.ProjectBoard{
+		ProjectID: "PID", Title: "T", OwnerType: "organization",
+		Items: []gh.ProjectItem{
+			{ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo",
+				Status: "Implement", LinkedPRNumber: 0},
+		},
+	}
+	c.Bootstrap(board)
+	c.mu.Lock()
+	c.deepFetched[itemKey("owner/repo", 1)] = true
+	c.mu.Unlock()
+	return c
+}
