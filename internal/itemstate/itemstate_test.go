@@ -60,6 +60,28 @@ func TestSnapshotDoesNotAliasStore(t *testing.T) {
 	}
 }
 
+// TestStateReturnIsDeepCopy verifies that mutating an element inside a slice
+// returned by State() does not affect the Snapshot (covers index-mutation,
+// not just append — the case that a shallow State() copy would fail).
+func TestStateReturnIsDeepCopy(t *testing.T) {
+	s := NewStore(nil)
+	snap := applyOpened(t, s, "owner/repo", 10)
+
+	// Index-assign into the Labels slice returned by State().
+	st := snap.State()
+	if len(st.Labels) == 0 {
+		t.Skip("no labels to mutate")
+	}
+	original := st.Labels[0]
+	st.Labels[0] = "MUTATED_IN_PLACE"
+
+	// The Snapshot itself must be unchanged.
+	st2 := snap.State()
+	if st2.Labels[0] != original {
+		t.Errorf("State() slice mutation affected Snapshot: got %q; want %q", st2.Labels[0], original)
+	}
+}
+
 // TestSnapshotLabelSliceIsIndependent verifies that appending to a Labels slice
 // returned by a Snapshot does not mutate the Snapshot itself or the Store.
 func TestSnapshotLabelSliceIsIndependent(t *testing.T) {
