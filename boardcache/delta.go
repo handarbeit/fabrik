@@ -6,6 +6,7 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 )
 
 // ApplyDelta dispatches a webhook payload to the appropriate typed delta function.
@@ -162,47 +163,8 @@ type projectsV2ItemPayload struct {
 }
 
 // ---------------------------------------------------------------------------
-// Inner-mutation helpers — called by both normal and post-heal paths
+// Helpers
 // ---------------------------------------------------------------------------
-
-// applyReviewToItem upserts a PR review into the item's LinkedPRReviews by DatabaseID.
-func applyReviewToItem(item *gh.ProjectItem, review gh.PRReview) {
-	for i, r := range item.LinkedPRReviews {
-		if r.DatabaseID == review.DatabaseID && review.DatabaseID != 0 {
-			item.LinkedPRReviews[i] = review
-			return
-		}
-	}
-	item.LinkedPRReviews = append(item.LinkedPRReviews, review)
-}
-
-// applyReviewCommentToItem appends a review thread comment to the item if not already
-// present (idempotent by NodeID), and clears the deepFetched flag so the next
-// FetchItemDetails call re-fetches the ReviewThreadID from GitHub.
-// Returns true if the comment was added, false if it was a duplicate.
-func applyReviewCommentToItem(item *gh.ProjectItem, comment gh.Comment, key string, deepFetched map[string]bool) bool {
-	for _, existing := range item.LinkedPRReviewThreadComments {
-		if existing.ID == comment.ID {
-			return false
-		}
-	}
-	item.LinkedPRReviewThreadComments = append(item.LinkedPRReviewThreadComments, comment)
-	delete(deepFetched, key)
-	return true
-}
-
-// updateSHAToKey removes stale SHA entries for the given key and sets the new SHA.
-func updateSHAToKey(shaToKey map[string]string, sha, key string) {
-	if sha == "" {
-		return
-	}
-	for existingSHA, existingKey := range shaToKey {
-		if existingKey == key && existingSHA != sha {
-			delete(shaToKey, existingSHA)
-		}
-	}
-	shaToKey[sha] = key
-}
 
 // splitRepo splits "owner/repo" into ("owner", "repo", true). Returns false on invalid input.
 func splitRepo(fullName string) (owner, repo string, ok bool) {
@@ -211,6 +173,15 @@ func splitRepo(fullName string) (owner, repo string, ok bool) {
 		return "", "", false
 	}
 	return parts[0], parts[1], true
+}
+
+// bumpLocalDeltaAt records that a webhook has touched the item at key.
+// Must be called WITHOUT holding c.mu.
+func (c *CacheImpl) bumpLocalDeltaAt(key string) {
+	now := time.Now()
+	c.mu.Lock()
+	c.localDeltaAt[key] = now
+	c.mu.Unlock()
 }
 
 // ---------------------------------------------------------------------------
@@ -222,7 +193,9 @@ func (c *CacheImpl) applyIssueCommentCreated(payload []byte) {
 	if err := json.Unmarshal(payload, &p); err != nil || p.Action != "created" {
 		return
 	}
-	key := itemKey(p.Repository.FullName, p.Issue.Number)
+	fullRepo := p.Repository.FullName
+	issNum := p.Issue.Number
+	key := itemKey(fullRepo, issNum)
 
 	createdAt, _ := time.Parse(time.RFC3339, p.Comment.CreatedAt)
 	comment := gh.Comment{
@@ -233,21 +206,20 @@ func (c *CacheImpl) applyIssueCommentCreated(payload []byte) {
 		CreatedAt:  createdAt,
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	item, ok := c.items[key]
-	if !ok {
+	// Guard: only apply to items already in the Store.
+	if _, err := c.store.Get(fullRepo, issNum); err != nil {
 		return
 	}
-	// Idempotent: skip if comment with this ID already exists.
-	for _, existing := range item.Comments {
-		if existing.ID == comment.ID {
-			return
-		}
+
+	_, changes, _ := c.store.Apply(itemstate.IssueCommentCreated{
+		Repo:    fullRepo,
+		Number:  issNum,
+		Comment: comment,
+	})
+	if len(changes) == 0 {
+		return // no-op (duplicate comment or item missing)
 	}
-	item.Comments = append(item.Comments, comment)
-	// Bump UpdatedAt so itemMayNeedWork detects this item as changed on the next poll.
-	item.UpdatedAt = time.Now()
+	c.bumpLocalDeltaAt(key)
 }
 
 func (c *CacheImpl) applyIssuesDelta(payload []byte) {
@@ -264,44 +236,43 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 }
 
 func (c *CacheImpl) applyIssuesLabeled(p issuesPayload) {
-	key := itemKey(p.Repository.FullName, p.Issue.Number)
+	fullRepo := p.Repository.FullName
+	issNum := p.Issue.Number
+	key := itemKey(fullRepo, issNum)
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	item, ok := c.items[key]
-	if !ok {
+	if _, err := c.store.Get(fullRepo, issNum); err != nil {
 		return
 	}
-	// Set-membership add: skip if label already present.
-	for _, l := range item.Labels {
-		if l == p.Label.Name {
-			return
-		}
+
+	_, changes, _ := c.store.Apply(itemstate.IssueLabeled{
+		Repo:   fullRepo,
+		Number: issNum,
+		Label:  p.Label.Name,
+	})
+	if len(changes) == 0 {
+		return // no-op (label already present or item missing)
 	}
-	item.Labels = append(item.Labels, p.Label.Name)
-	item.UpdatedAt = time.Now()
+	c.bumpLocalDeltaAt(key)
 }
 
 func (c *CacheImpl) applyIssuesUnlabeled(p issuesPayload) {
-	key := itemKey(p.Repository.FullName, p.Issue.Number)
+	fullRepo := p.Repository.FullName
+	issNum := p.Issue.Number
+	key := itemKey(fullRepo, issNum)
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	item, ok := c.items[key]
-	if !ok {
+	if _, err := c.store.Get(fullRepo, issNum); err != nil {
 		return
 	}
-	before := len(item.Labels)
-	filtered := item.Labels[:0]
-	for _, l := range item.Labels {
-		if l != p.Label.Name {
-			filtered = append(filtered, l)
-		}
+
+	_, changes, _ := c.store.Apply(itemstate.IssueUnlabeled{
+		Repo:   fullRepo,
+		Number: issNum,
+		Label:  p.Label.Name,
+	})
+	if len(changes) == 0 {
+		return
 	}
-	item.Labels = filtered
-	if len(item.Labels) < before {
-		item.UpdatedAt = time.Now()
-	}
+	c.bumpLocalDeltaAt(key)
 }
 
 func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
@@ -334,34 +305,37 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 		return
 	}
 
-	c.mu.Lock()
-
 	// Always store/update PR details regardless of whether we find a linked issue.
+	c.mu.Lock()
 	c.linkedPRs[pk] = prDetails
+	issKey, issFound := c.prNumToKey[pk]
+	c.mu.Unlock()
 
-	// Find the issue in cache that links this PR and update shaToKey.
-	for key, item := range c.items {
-		if item.Repo == repo && item.LinkedPRNumber == prNum {
-			updateSHAToKey(c.shaToKey, sha, key)
-			c.mu.Unlock()
-			return
+	if issFound {
+		// Normal path: linked issue is already known.
+		issRepo, issNum2, parseOK := parseItemKey(issKey)
+		if parseOK {
+			c.store.Apply(itemstate.PRHeadSHAUpdated{
+				Repo:   issRepo,
+				Number: issNum2,
+				SHA:    sha,
+			})
+			c.bumpLocalDeltaAt(issKey)
 		}
+		return
 	}
 
 	// Miss: check negative cache.
 	mk := missKey(repo, prNum)
-	if t, found := c.recentMissCache[mk]; found {
-		if time.Since(t) < recentMissTTL {
-			c.mu.Unlock()
-			return
-		}
-		delete(c.recentMissCache, mk)
+	c.mu.RLock()
+	if t, found := c.recentMissCache[mk]; found && time.Since(t) < recentMissTTL {
+		c.mu.RUnlock()
+		return
 	}
-
-	c.mu.Unlock()
+	c.mu.RUnlock()
 
 	// Auto-heal: resolve PR linkage via REST.
-	key, _, found, healErr := c.resolvePRLinkage(owner, repoName, prNum)
+	key, resolvedIssNum, found, healErr := c.resolvePRLinkage(owner, repoName, prNum)
 
 	c.mu.Lock()
 	if !found {
@@ -372,19 +346,24 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 		c.logFn("[cache] dropped pull_request delta for PR #%d: no closing issue in cache\n", prNum)
 		return
 	}
-	item, itemOK := c.items[key]
-	if !itemOK {
+	// Confirm item still in Store before updating prNumToKey.
+	if _, storeErr := c.store.Get(repo, resolvedIssNum); storeErr != nil {
 		c.recentMissCache[mk] = time.Now()
 		c.mu.Unlock()
 		return
 	}
-	item.LinkedPRNumber = prNum
-	delete(c.deepFetched, key)
-	item.UpdatedAt = time.Now()
-	updateSHAToKey(c.shaToKey, sha, key)
-	issNum := item.Number
+	c.prNumToKey[pk] = key
 	c.mu.Unlock()
-	c.logFn("[cache] auto-heal: PR #%d → issue #%d; deep cache invalidated and delta re-applied\n", prNum, issNum)
+
+	c.store.Apply(itemstate.PRHeadSHAUpdated{
+		Repo:        repo,
+		Number:      resolvedIssNum,
+		LinkedPRNum: prNum,
+		SHA:         sha,
+	})
+	c.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: resolvedIssNum})
+	c.bumpLocalDeltaAt(key)
+	c.logFn("[cache] auto-heal: PR #%d → issue #%d; deep cache invalidated and delta re-applied\n", prNum, resolvedIssNum)
 }
 
 func (c *CacheImpl) applyPullRequestReviewSubmitted(payload []byte) {
@@ -394,6 +373,7 @@ func (c *CacheImpl) applyPullRequestReviewSubmitted(payload []byte) {
 	}
 	repo := p.Repository.FullName
 	prNum := p.PullRequest.Number
+	pk := prKey(repo, prNum)
 
 	owner, repoName, ok := splitRepo(repo)
 	if !ok {
@@ -407,33 +387,36 @@ func (c *CacheImpl) applyPullRequestReviewSubmitted(payload []byte) {
 		DatabaseID: p.Review.DatabaseID,
 	}
 
-	c.mu.Lock()
+	// Normal path: look up issue via prNumToKey.
+	c.mu.RLock()
+	issKey, issFound := c.prNumToKey[pk]
+	c.mu.RUnlock()
 
-	// Normal path: find the item with this PR linked.
-	for _, item := range c.items {
-		if item.Repo == repo && item.LinkedPRNumber == prNum {
-			applyReviewToItem(item, review)
-			item.UpdatedAt = time.Now()
-			c.mu.Unlock()
-			return
+	if issFound {
+		issRepo, issNum, parseOK := parseItemKey(issKey)
+		if parseOK {
+			c.store.Apply(itemstate.PRReviewSubmitted{
+				Repo:   issRepo,
+				Number: issNum,
+				Review: review,
+			})
+			c.bumpLocalDeltaAt(issKey)
 		}
+		return
 	}
 
 	// Miss: check negative cache.
 	mk := missKey(repo, prNum)
-	if t, found := c.recentMissCache[mk]; found {
-		if time.Since(t) < recentMissTTL {
-			c.mu.Unlock()
-			c.logFn("[cache] dropped pull_request_review delta for PR #%d: negative cache hit\n", prNum)
-			return
-		}
-		delete(c.recentMissCache, mk)
+	c.mu.RLock()
+	if t, found := c.recentMissCache[mk]; found && time.Since(t) < recentMissTTL {
+		c.mu.RUnlock()
+		c.logFn("[cache] dropped pull_request_review delta for PR #%d: negative cache hit\n", prNum)
+		return
 	}
-
-	c.mu.Unlock()
+	c.mu.RUnlock()
 
 	// Auto-heal: resolve PR linkage via REST.
-	key, _, found, healErr := c.resolvePRLinkage(owner, repoName, prNum)
+	key, resolvedIssNum, found, healErr := c.resolvePRLinkage(owner, repoName, prNum)
 
 	c.mu.Lock()
 	if !found {
@@ -444,19 +427,27 @@ func (c *CacheImpl) applyPullRequestReviewSubmitted(payload []byte) {
 		c.logFn("[cache] dropped pull_request_review delta for PR #%d: no closing issue in cache\n", prNum)
 		return
 	}
-	item, itemOK := c.items[key]
-	if !itemOK {
+	if _, storeErr := c.store.Get(repo, resolvedIssNum); storeErr != nil {
 		c.recentMissCache[mk] = time.Now()
 		c.mu.Unlock()
 		return
 	}
-	item.LinkedPRNumber = prNum
-	delete(c.deepFetched, key)
-	item.UpdatedAt = time.Now()
-	applyReviewToItem(item, review)
-	issNum := item.Number
+	c.prNumToKey[pk] = key
 	c.mu.Unlock()
-	c.logFn("[cache] auto-heal: PR #%d → issue #%d; deep cache invalidated and delta re-applied\n", prNum, issNum)
+
+	c.store.Apply(itemstate.PRHeadSHAUpdated{
+		Repo:        repo,
+		Number:      resolvedIssNum,
+		LinkedPRNum: prNum,
+	})
+	c.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: resolvedIssNum})
+	c.store.Apply(itemstate.PRReviewSubmitted{
+		Repo:   repo,
+		Number: resolvedIssNum,
+		Review: review,
+	})
+	c.bumpLocalDeltaAt(key)
+	c.logFn("[cache] auto-heal: PR #%d → issue #%d; deep cache invalidated and delta re-applied\n", prNum, resolvedIssNum)
 }
 
 func (c *CacheImpl) applyPullRequestReviewCommentCreated(payload []byte) {
@@ -466,6 +457,7 @@ func (c *CacheImpl) applyPullRequestReviewCommentCreated(payload []byte) {
 	}
 	repo := p.Repository.FullName
 	prNum := p.PullRequest.Number
+	pk := prKey(repo, prNum)
 
 	owner, repoName, ok := splitRepo(repo)
 	if !ok {
@@ -490,34 +482,40 @@ func (c *CacheImpl) applyPullRequestReviewCommentCreated(payload []byte) {
 		comment.OriginalLine = *p.Comment.OriginalLine
 	}
 
-	c.mu.Lock()
+	// Normal path: look up issue via prNumToKey.
+	c.mu.RLock()
+	issKey, issFound := c.prNumToKey[pk]
+	c.mu.RUnlock()
 
-	// Normal path: find the item with this PR linked.
-	for key, item := range c.items {
-		if item.Repo == repo && item.LinkedPRNumber == prNum {
-			if applyReviewCommentToItem(item, comment, key, c.deepFetched) {
-				item.UpdatedAt = time.Now()
+	if issFound {
+		issRepo, issNum, parseOK := parseItemKey(issKey)
+		if parseOK {
+			_, changes, _ := c.store.Apply(itemstate.ReviewThreadCommentAdded{
+				Repo:        issRepo,
+				IssueNumber: issNum,
+				Comment:     comment,
+			})
+			if len(changes) > 0 {
+				// New comment: invalidate deep cache (ReviewThreadID not yet populated).
+				c.store.Apply(itemstate.DeepFetchInvalidated{Repo: issRepo, Number: issNum})
+				c.bumpLocalDeltaAt(issKey)
 			}
-			c.mu.Unlock()
-			return
 		}
+		return
 	}
 
 	// Miss: check negative cache.
 	mk := missKey(repo, prNum)
-	if t, found := c.recentMissCache[mk]; found {
-		if time.Since(t) < recentMissTTL {
-			c.mu.Unlock()
-			c.logFn("[cache] dropped pull_request_review_comment delta for PR #%d: negative cache hit\n", prNum)
-			return
-		}
-		delete(c.recentMissCache, mk)
+	c.mu.RLock()
+	if t, found := c.recentMissCache[mk]; found && time.Since(t) < recentMissTTL {
+		c.mu.RUnlock()
+		c.logFn("[cache] dropped pull_request_review_comment delta for PR #%d: negative cache hit\n", prNum)
+		return
 	}
-
-	c.mu.Unlock()
+	c.mu.RUnlock()
 
 	// Auto-heal: resolve PR linkage via REST.
-	key, _, found, healErr := c.resolvePRLinkage(owner, repoName, prNum)
+	key, resolvedIssNum, found, healErr := c.resolvePRLinkage(owner, repoName, prNum)
 
 	c.mu.Lock()
 	if !found {
@@ -528,19 +526,27 @@ func (c *CacheImpl) applyPullRequestReviewCommentCreated(payload []byte) {
 		c.logFn("[cache] dropped pull_request_review_comment delta for PR #%d: no closing issue in cache\n", prNum)
 		return
 	}
-	item, itemOK := c.items[key]
-	if !itemOK {
+	if _, storeErr := c.store.Get(repo, resolvedIssNum); storeErr != nil {
 		c.recentMissCache[mk] = time.Now()
 		c.mu.Unlock()
 		return
 	}
-	item.LinkedPRNumber = prNum
-	delete(c.deepFetched, key)
-	item.UpdatedAt = time.Now()
-	applyReviewCommentToItem(item, comment, key, c.deepFetched)
-	issNum := item.Number
+	c.prNumToKey[pk] = key
 	c.mu.Unlock()
-	c.logFn("[cache] auto-heal: PR #%d → issue #%d; deep cache invalidated and delta re-applied\n", prNum, issNum)
+
+	c.store.Apply(itemstate.PRHeadSHAUpdated{
+		Repo:        repo,
+		Number:      resolvedIssNum,
+		LinkedPRNum: prNum,
+	})
+	c.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: resolvedIssNum})
+	c.store.Apply(itemstate.ReviewThreadCommentAdded{
+		Repo:        repo,
+		IssueNumber: resolvedIssNum,
+		Comment:     comment,
+	})
+	c.bumpLocalDeltaAt(key)
+	c.logFn("[cache] auto-heal: PR #%d → issue #%d; deep cache invalidated and delta re-applied\n", prNum, resolvedIssNum)
 }
 
 func (c *CacheImpl) applyCheckRunCompleted(payload []byte) {
@@ -566,9 +572,10 @@ func (c *CacheImpl) applyCheckRunCompleted(payload []byte) {
 		Conclusion: p.CheckRun.Conclusion,
 	}
 
+	// Always upsert the check run by ID into CacheImpl's checkRuns map.
+	// This keeps pre-linkage runs available via FetchCheckRuns even before
+	// the SHA↔item linkage is established in the Store.
 	c.mu.Lock()
-
-	// Always upsert the check run by ID.
 	runs := c.checkRuns[sha]
 	updated := false
 	for i, existing := range runs {
@@ -582,27 +589,29 @@ func (c *CacheImpl) applyCheckRunCompleted(payload []byte) {
 		runs = append(runs, cr)
 	}
 	c.checkRuns[sha] = runs
+	c.mu.Unlock()
 
-	// shaToKey reverse lookup: if found, bump UpdatedAt on the linked issue.
-	if key, found := c.shaToKey[sha]; found {
-		if item, ok := c.items[key]; ok {
-			item.UpdatedAt = time.Now()
-		}
-		c.mu.Unlock()
+	// Also apply to the Store — only works if SHA is indexed in Store's shaToKey.
+	snap, changes, _ := c.store.Apply(itemstate.CheckRunCompleted{
+		Repo: repo,
+		SHA:  sha,
+		Run:  cr,
+	})
+	if len(changes) > 0 {
+		// SHA was known — bump localDeltaAt and return.
+		key := itemKey(snap.Repo(), snap.Number())
+		c.bumpLocalDeltaAt(key)
 		return
 	}
 
-	// shaToKey miss: check negative cache for this SHA.
+	// SHA not in Store's shaToKey index — check negative cache.
 	msha := missKeyForSHA(sha)
-	if t, found := c.recentMissCache[msha]; found {
-		if time.Since(t) < recentMissTTL {
-			c.mu.Unlock()
-			return
-		}
-		delete(c.recentMissCache, msha)
+	c.mu.RLock()
+	if t, found := c.recentMissCache[msha]; found && time.Since(t) < recentMissTTL {
+		c.mu.RUnlock()
+		return
 	}
-
-	c.mu.Unlock()
+	c.mu.RUnlock()
 
 	// Auto-heal step 1: fetch PRs associated with this SHA.
 	prNums, err := c.fallback.FetchPRsForSHA(owner, repoName, sha)
@@ -621,7 +630,7 @@ func (c *CacheImpl) applyCheckRunCompleted(payload []byte) {
 	prNum := prNums[0]
 
 	// Auto-heal step 2: resolve which issue the PR closes.
-	key, issNum, found, healErr := c.resolvePRLinkage(owner, repoName, prNum)
+	key, resolvedIssNum, found, healErr := c.resolvePRLinkage(owner, repoName, prNum)
 
 	c.mu.Lock()
 	if !found {
@@ -632,18 +641,29 @@ func (c *CacheImpl) applyCheckRunCompleted(payload []byte) {
 		c.logFn("[cache] dropped check_run delta for SHA %s: no closing issue in cache for PR #%d\n", sha, prNum)
 		return
 	}
-	item, itemOK := c.items[key]
-	if !itemOK {
+	if _, storeErr := c.store.Get(repo, resolvedIssNum); storeErr != nil {
 		c.recentMissCache[msha] = time.Now()
 		c.mu.Unlock()
 		return
 	}
-	item.LinkedPRNumber = prNum
-	c.shaToKey[sha] = key
-	delete(c.deepFetched, key)
-	item.UpdatedAt = time.Now()
+	pk := prKey(repo, prNum)
+	c.prNumToKey[pk] = key
 	c.mu.Unlock()
-	c.logFn("[cache] auto-heal: check_run SHA %s → PR #%d → issue #%d; deep cache invalidated\n", sha, prNum, issNum)
+
+	// Update Store: set LinkedPRNum + SHA (updates shaToKey index), invalidate deep cache.
+	c.store.Apply(itemstate.PRHeadSHAUpdated{
+		Repo:        repo,
+		Number:      resolvedIssNum,
+		LinkedPRNum: prNum,
+		SHA:         sha,
+	})
+	c.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: resolvedIssNum})
+
+	// Now that shaToKey is updated, replay the CheckRunCompleted on the Store.
+	c.store.Apply(itemstate.CheckRunCompleted{Repo: repo, SHA: sha, Run: cr})
+
+	c.bumpLocalDeltaAt(key)
+	c.logFn("[cache] auto-heal: check_run SHA %s → PR #%d → issue #%d; deep cache invalidated\n", sha, prNum, resolvedIssNum)
 }
 
 func (c *CacheImpl) applyProjectsV2ItemEdited(payload []byte) {
@@ -663,17 +683,13 @@ func (c *CacheImpl) applyProjectsV2ItemEdited(payload []byte) {
 	}
 	itemID := p.ProjectsV2Item.ID
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	key, ok := c.itemIDToKey[itemID]
-	if !ok {
+	snap, changes, _ := c.store.Apply(itemstate.ProjectV2ItemEdited{
+		ItemID:    itemID,
+		NewStatus: newStatus,
+	})
+	if len(changes) == 0 {
 		return
 	}
-	item, ok := c.items[key]
-	if !ok {
-		return
-	}
-	item.Status = newStatus
-	item.UpdatedAt = time.Now()
+	key := itemKey(snap.Repo(), snap.Number())
+	c.bumpLocalDeltaAt(key)
 }

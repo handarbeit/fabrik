@@ -2,10 +2,12 @@ package boardcache
 
 import (
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 )
 
 // ReadClient is the subset of engine.GitHubClient covering read-only board/item/PR/check-run state.
@@ -108,10 +110,217 @@ func missKeyForSHA(sha string) string {
 
 const recentMissTTL = 10 * time.Minute
 
+// parseItemKey parses "owner/repo#N" into (repo, number, true).
+// Returns ("", 0, false) on invalid input.
+func parseItemKey(key string) (repo string, number int, ok bool) {
+	idx := strings.LastIndex(key, "#")
+	if idx < 0 {
+		return "", 0, false
+	}
+	repo = key[:idx]
+	numStr := key[idx+1:]
+	n, err := strconv.Atoi(numStr)
+	if err != nil {
+		return "", 0, false
+	}
+	return repo, n, true
+}
+
+// snapshotToProjectItem converts a Store Snapshot to a gh.ProjectItem.
+func snapshotToProjectItem(snap itemstate.Snapshot) gh.ProjectItem {
+	s := snap.State()
+	pi := gh.ProjectItem{
+		ItemID:    s.ItemID,
+		Number:    s.Number,
+		Title:     s.Title,
+		Body:      s.Body,
+		Status:    s.Status,
+		URL:       s.URL,
+		Repo:      s.Repo,
+		IsPR:      s.IsPR,
+		IsClosed:  s.IsClosed,
+		UpdatedAt: s.UpdatedAt,
+		Labels:    s.Labels,
+		Assignees: s.Assignees,
+		Comments:  s.Comments,
+		Author:    s.Author,
+		BlockedBy: s.BlockedBy,
+	}
+	if s.LinkedPR != nil {
+		pi.LinkedPRNumber = s.LinkedPR.Number
+		pi.LinkedPRReviews = s.LinkedPR.Reviews
+		pi.LinkedPRReviewRequests = s.LinkedPR.ReviewRequests
+		pi.LinkedPRReviewThreadComments = s.LinkedPR.ThreadComments
+		pi.LinkedPRResolvedThreadCount = s.LinkedPR.ResolvedThreadCount
+	}
+	return pi
+}
+
+// CacheImpl is a goroutine-safe in-memory board cache. Webhook delta functions write
+// to it; the poll loop reads from it via the ReadClient interface. Falls back to a
+// fallback ReadClient on cache miss.
+//
+// Internal ownership split:
+//   - store owns: items, shaToKey, itemIDToKey
+//   - CacheImpl owns: paused, recentMissCache, projectID/Title/OwnerType,
+//     linkedPRs, checkRuns, prNumToKey, localDeltaAt
+//
+// Locking invariant: mu guards CacheImpl-local fields only. Store has its own
+// internal mutex. NEVER hold mu while calling any Store method — this prevents
+// deadlock if Store observers call back into CacheImpl.
+type CacheImpl struct {
+	// mu guards CacheImpl-local fields only. Never held during Store calls.
+	mu sync.RWMutex
+
+	// Board metadata (from last Bootstrap/Reconcile).
+	projectID        string
+	projectTitle     string
+	projectOwnerType string
+
+	// paused is a stream-health control flag. When true, ApplyDelta is a no-op.
+	paused bool
+
+	// recentMissCache is a negative cache preventing repeated REST lookups.
+	// Keys are "miss:owner/repo#prN" or "miss:sha:SHA".
+	recentMissCache map[string]time.Time
+
+	// checkRuns stores check runs keyed by commit SHA. Stays on CacheImpl because
+	// the Store silently drops CheckRunCompleted for SHAs not yet linked to any
+	// item. Pre-linkage runs are kept here and also forwarded to Store once linkage
+	// is resolved.
+	checkRuns map[string][]gh.CheckRun
+
+	// linkedPRs stores full PR details keyed by prKey(repo, prNum).
+	// TODO(phase3-x): migrate to Store when LinkedPRState gains Title/State/Merged/Draft.
+	linkedPRs map[string]*gh.PRDetails
+
+	// prNumToKey maps prKey(repo, prNum) → issue itemKey.
+	// Replaces the linear scan of Store items for PR-number → issue lookups in delta handlers.
+	prNumToKey map[string]string
+
+	// localDeltaAt records the last time a webhook bumped an item.
+	// FetchProjectBoard uses max(ItemState.UpdatedAt, localDeltaAt[key]) so that
+	// webhook-driven changes are visible to itemMayNeedWork before the next Reconcile.
+	localDeltaAt map[string]time.Time
+
+	// store owns per-item state (items, shaToKey, itemIDToKey).
+	store *itemstate.Store
+
+	fallback ReadClient
+	logFn    func(format string, args ...any)
+}
+
+// NewCacheImpl creates an empty cache backed by fallback for misses.
+func NewCacheImpl(fallback ReadClient, logFn func(format string, args ...any)) *CacheImpl {
+	return &CacheImpl{
+		checkRuns:       make(map[string][]gh.CheckRun),
+		linkedPRs:       make(map[string]*gh.PRDetails),
+		prNumToKey:      make(map[string]string),
+		localDeltaAt:    make(map[string]time.Time),
+		recentMissCache: make(map[string]time.Time),
+		store:           itemstate.NewStore(nil),
+		fallback:        fallback,
+		logFn:           logFn,
+	}
+}
+
+// Bootstrap populates the cache wholesale from a freshly-fetched board.
+// Called once at engine startup before the first dispatch cycle.
+func (c *CacheImpl) Bootstrap(board *gh.ProjectBoard) {
+	// Reset Store atomically — clears all prior item state and indexes.
+	c.store.Reset(board.Items)
+
+	c.mu.Lock()
+	c.projectID = board.ProjectID
+	c.projectTitle = board.Title
+	c.projectOwnerType = board.OwnerType
+	// Reset CacheImpl-local maps so they're consistent with the fresh Store state.
+	c.prNumToKey = make(map[string]string)
+	c.localDeltaAt = make(map[string]time.Time)
+	c.linkedPRs = make(map[string]*gh.PRDetails)
+	c.checkRuns = make(map[string][]gh.CheckRun)
+	c.mu.Unlock()
+
+	c.logFn("[cache] bootstrap complete: %d items\n", len(board.Items))
+}
+
+// Reconcile replaces shallow board state from a fresh board fetch.
+// Preserves deep fields (Comments, LinkedPRReviews, etc.) for items that have
+// already been deep-fetched. Logs the drift count when items differ.
+// Shallow drift in linkage (LinkedPRNumber) invalidates deep cache for the
+// affected key, forcing a fresh FetchItemDetails on next access.
+func (c *CacheImpl) Reconcile(board *gh.ProjectBoard) {
+	newKeys := make(map[string]bool, len(board.Items))
+	drifted := 0
+
+	for i := range board.Items {
+		pi := &board.Items[i]
+		key := itemKey(pi.Repo, pi.Number)
+		newKeys[key] = true
+
+		snap, err := c.store.Get(pi.Repo, pi.Number)
+		if err != nil {
+			// New item not in Store — add it fully.
+			drifted++
+			c.store.Apply(itemstate.IssueOpened{Item: *pi})
+			continue
+		}
+
+		s := snap.State()
+
+		// Detect shallow drift to count items that differ.
+		if s.Status != pi.Status ||
+			len(s.Labels) != len(pi.Labels) ||
+			!s.UpdatedAt.Equal(pi.UpdatedAt) {
+			drifted++
+		}
+
+		// Apply shallow update to Store (preserves deep fields).
+		c.store.Apply(itemstate.ShallowBoardItemUpdated{
+			Repo:   pi.Repo,
+			Number: pi.Number,
+			Item:   *pi,
+		})
+
+		// Detect linkage drift: deep cache's LinkedPRNumber ≠ fresh shallow board value.
+		if !s.LastDeepFetchAt.IsZero() {
+			var deepPRNum int
+			if s.LinkedPR != nil {
+				deepPRNum = s.LinkedPR.Number
+			}
+			shallowPRNum := pi.LinkedPRNumberShallow
+			if deepPRNum != shallowPRNum {
+				c.store.Apply(itemstate.DeepFetchInvalidated{Repo: pi.Repo, Number: pi.Number})
+				c.logFn("[cache] linkage drift detected for issue #%d: stale linked PR=%d, fresh=%d — invalidating deep cache\n",
+					pi.Number, deepPRNum, shallowPRNum)
+			}
+		}
+	}
+
+	// Remove items no longer on the board.
+	for _, snap := range c.store.All() {
+		key := itemKey(snap.Repo(), snap.Number())
+		if !newKeys[key] {
+			drifted++
+			c.store.Remove(snap.Repo(), snap.Number())
+		}
+	}
+
+	c.mu.Lock()
+	c.projectID = board.ProjectID
+	c.projectTitle = board.Title
+	c.projectOwnerType = board.OwnerType
+	c.mu.Unlock()
+
+	if drifted > 0 {
+		c.logFn("[reconciliation] %d items differed\n", drifted)
+	}
+}
+
 // resolvePRLinkage looks up which cached issue is closed by the given PR by
 // fetching the PR body via REST and parsing closing keywords. Must be called
 // without c.mu held (the REST call is a network operation). Returns the cache
-// key and issue number of the first closing issue found in c.items. On a
+// key and issue number of the first closing issue found in the Store. On a
 // transient REST error the error is returned and callers should NOT record a
 // negative-miss entry (a retry on the next webhook may succeed). Returns
 // ("", 0, false, nil) when the PR body has no recognized closing reference or
@@ -127,171 +336,14 @@ func (c *CacheImpl) resolvePRLinkage(owner, repo string, prNumber int) (key stri
 		return "", 0, false, nil
 	}
 
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	// Store has nil fallback — Get returns ErrNotFound on miss without calling GitHub.
 	for _, issNum := range issues {
 		k := itemKey(fullRepo, issNum)
-		if _, ok := c.items[k]; ok {
+		if _, storeErr := c.store.Get(fullRepo, issNum); storeErr == nil {
 			return k, issNum, true, nil
 		}
 	}
 	return "", 0, false, nil
-}
-
-// CacheImpl is a goroutine-safe in-memory board cache. Webhook delta functions write
-// to it; the poll loop reads from it via the ReadClient interface. Falls back to a
-// fallback ReadClient on cache miss.
-type CacheImpl struct {
-	mu sync.RWMutex
-
-	// Board items: key = owner/repo#issueNumber
-	items      map[string]*gh.ProjectItem
-	deepFetched map[string]bool // set of keys that have had FetchItemDetails called
-
-	// Check runs: key = commit SHA
-	checkRuns map[string][]gh.CheckRun
-
-	// PR details: key = owner/repo#pr<prNumber>
-	linkedPRs map[string]*gh.PRDetails
-
-	// Reverse lookups
-	shaToKey    map[string]string // SHA → issueKey (owner/repo#number)
-	itemIDToKey map[string]string // ItemID → issueKey
-
-	// Board metadata (from last Bootstrap/Reconcile)
-	projectID       string
-	projectTitle    string
-	projectOwnerType string
-
-	// Stream health: when paused, ApplyDelta is a no-op
-	paused bool
-
-	// Negative cache: keys are "miss:owner/repo#prN" or "miss:sha:SHA".
-	// Entries with TTL > 10 minutes are pruned lazily on access.
-	recentMissCache map[string]time.Time
-
-	// Fallback for cache misses
-	fallback ReadClient
-	logFn    func(format string, args ...any)
-}
-
-// NewCacheImpl creates an empty cache backed by fallback for misses.
-func NewCacheImpl(fallback ReadClient, logFn func(format string, args ...any)) *CacheImpl {
-	return &CacheImpl{
-		items:           make(map[string]*gh.ProjectItem),
-		deepFetched:     make(map[string]bool),
-		checkRuns:       make(map[string][]gh.CheckRun),
-		linkedPRs:       make(map[string]*gh.PRDetails),
-		shaToKey:        make(map[string]string),
-		itemIDToKey:     make(map[string]string),
-		recentMissCache: make(map[string]time.Time),
-		fallback:        fallback,
-		logFn:           logFn,
-	}
-}
-
-// Bootstrap populates the cache wholesale from a freshly-fetched board.
-// Called once at engine startup before the first dispatch cycle.
-func (c *CacheImpl) Bootstrap(board *gh.ProjectBoard) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.populateFromBoard(board)
-	c.logFn("[cache] bootstrap complete: %d items\n", len(board.Items))
-}
-
-// Reconcile replaces shallow board state from a fresh board fetch.
-// Preserves deep fields (Comments, LinkedPRReviews, etc.) for items that have
-// already been deep-fetched. Logs the drift count when items differ.
-// Shallow drift in linkage (LinkedPRNumber) invalidates deep cache for the
-// affected key, forcing a fresh FetchItemDetails on next access.
-func (c *CacheImpl) Reconcile(board *gh.ProjectBoard) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	newKeys := make(map[string]bool, len(board.Items))
-	drifted := 0
-
-	for i := range board.Items {
-		item := &board.Items[i]
-		key := itemKey(item.Repo, item.Number)
-		newKeys[key] = true
-
-		if existing, ok := c.items[key]; ok {
-			if existing.Status != item.Status ||
-				len(existing.Labels) != len(item.Labels) ||
-				existing.UpdatedAt != item.UpdatedAt {
-				drifted++
-			}
-			// Update shallow fields; preserve deep fields from cache.
-			existing.Status = item.Status
-			existing.Labels = cloneStrings(item.Labels)
-			existing.Title = item.Title
-			existing.UpdatedAt = item.UpdatedAt
-			existing.IsClosed = item.IsClosed
-			existing.IsPR = item.IsPR
-			existing.ItemID = item.ItemID
-			existing.URL = item.URL
-			// Update the ItemID reverse lookup.
-			if item.ItemID != "" {
-				c.itemIDToKey[item.ItemID] = key
-			}
-			// Detect linkage drift: if deep cache says LinkedPRNumber=X but the
-			// fresh shallow board shows a different value, the cached deep state was
-			// captured before the issue↔PR linkage appeared (or changed) on GitHub.
-			// Invalidate deepFetched so the next FetchItemDetails re-fetches from GitHub.
-			if c.deepFetched[key] && existing.LinkedPRNumber != item.LinkedPRNumberShallow {
-				delete(c.deepFetched, key)
-				c.logFn("[cache] linkage drift detected for issue #%d: stale linked PR=%d, fresh=%d — invalidating deep cache\n",
-					item.Number, existing.LinkedPRNumber, item.LinkedPRNumberShallow)
-			}
-		} else {
-			drifted++
-			cp := *item
-			c.items[key] = &cp
-			if item.ItemID != "" {
-				c.itemIDToKey[item.ItemID] = key
-			}
-		}
-	}
-
-	// Remove items that are no longer on the board.
-	for key := range c.items {
-		if !newKeys[key] {
-			drifted++
-			delete(c.items, key)
-			delete(c.deepFetched, key)
-		}
-	}
-
-	c.projectID = board.ProjectID
-	c.projectTitle = board.Title
-	c.projectOwnerType = board.OwnerType
-
-	if drifted > 0 {
-		c.logFn("[reconciliation] %d items differed\n", drifted)
-	}
-}
-
-// populateFromBoard replaces items map entirely from a board fetch.
-// Must be called with c.mu held (write).
-func (c *CacheImpl) populateFromBoard(board *gh.ProjectBoard) {
-	c.projectID = board.ProjectID
-	c.projectTitle = board.Title
-	c.projectOwnerType = board.OwnerType
-
-	c.items = make(map[string]*gh.ProjectItem, len(board.Items))
-	c.itemIDToKey = make(map[string]string, len(board.Items))
-	c.deepFetched = make(map[string]bool)
-
-	for i := range board.Items {
-		item := board.Items[i]
-		key := itemKey(item.Repo, item.Number)
-		cp := item
-		c.items[key] = &cp
-		if item.ItemID != "" {
-			c.itemIDToKey[item.ItemID] = key
-		}
-	}
 }
 
 // Pause stops delta application (called on WebhookStreamUnhealthy transition).
@@ -315,31 +367,51 @@ func (c *CacheImpl) IsPaused() bool {
 	return c.paused
 }
 
-// FetchProjectBoard returns a *gh.ProjectBoard reconstructed from the items map.
+// FetchProjectBoard returns a *gh.ProjectBoard reconstructed from the Store.
 // Falls back to GitHub when the cache has not been bootstrapped or is paused.
 func (c *CacheImpl) FetchProjectBoard(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+	// Check paused first; Store.All is called outside any c.mu hold.
 	c.mu.RLock()
+	paused := c.paused
+	c.mu.RUnlock()
 
-	if len(c.items) == 0 || c.paused {
-		c.mu.RUnlock()
-		if len(c.items) == 0 {
+	snaps := c.store.All()
+
+	if len(snaps) == 0 || paused {
+		if len(snaps) == 0 {
 			c.logFn("[cache] miss: FetchProjectBoard not yet bootstrapped — fetching from GitHub\n")
 		}
 		return c.fallback.FetchProjectBoard(owner, repo, projectNum, ownerType)
 	}
 
-	items := make([]gh.ProjectItem, 0, len(c.items))
-	for _, item := range c.items {
-		items = append(items, *item)
-	}
-	board := &gh.ProjectBoard{
-		ProjectID: c.projectID,
-		Title:     c.projectTitle,
-		OwnerType: c.projectOwnerType,
-		Items:     items,
+	c.mu.RLock()
+	projectID := c.projectID
+	projectTitle := c.projectTitle
+	projectOwnerType := c.projectOwnerType
+	// Snapshot localDeltaAt for consistent max(UpdatedAt, deltaAt) computation.
+	localDeltaAtCopy := make(map[string]time.Time, len(c.localDeltaAt))
+	for k, v := range c.localDeltaAt {
+		localDeltaAtCopy[k] = v
 	}
 	c.mu.RUnlock()
-	return board, nil
+
+	items := make([]gh.ProjectItem, 0, len(snaps))
+	for _, snap := range snaps {
+		pi := snapshotToProjectItem(snap)
+		// Override UpdatedAt if a webhook has bumped it more recently than GitHub's timestamp.
+		key := itemKey(snap.Repo(), snap.Number())
+		if t, ok := localDeltaAtCopy[key]; ok && t.After(pi.UpdatedAt) {
+			pi.UpdatedAt = t
+		}
+		items = append(items, pi)
+	}
+
+	return &gh.ProjectBoard{
+		ProjectID: projectID,
+		Title:     projectTitle,
+		OwnerType: projectOwnerType,
+		Items:     items,
+	}, nil
 }
 
 // FetchItemDetails copies cached deep fields into the passed item pointer.
@@ -347,37 +419,35 @@ func (c *CacheImpl) FetchProjectBoard(owner, repo string, projectNum int, ownerT
 // LinkedPRReviewRequests, LinkedPRReviews, LinkedPRReviewThreadComments, LinkedPRResolvedThreadCount.
 // Falls back to GitHub on cache miss and populates the cache with the result.
 func (c *CacheImpl) FetchItemDetails(item *gh.ProjectItem) error {
-	key := itemKey(item.Repo, item.Number)
-
 	c.mu.RLock()
-	if c.paused {
-		c.mu.RUnlock()
+	paused := c.paused
+	c.mu.RUnlock()
+
+	if paused {
 		return c.fallback.FetchItemDetails(item)
 	}
-	cached, ok := c.items[key]
-	deepFetched := c.deepFetched[key]
-	if ok && deepFetched {
-		copyDeepFields(item, cached)
-		c.mu.RUnlock()
-		return nil
+
+	snap, err := c.store.Get(item.Repo, item.Number)
+	if err == nil {
+		s := snap.State()
+		if !s.LastDeepFetchAt.IsZero() {
+			// Cache hit — copy deep fields into item.
+			copyDeepFieldsFromState(item, s)
+			return nil
+		}
 	}
-	c.mu.RUnlock()
 
 	c.logFn("[cache] miss for #%d — fetching from GitHub\n", item.Number)
 	if err := c.fallback.FetchItemDetails(item); err != nil {
 		return err
 	}
 
-	// Store the deep fields in the cache.
-	c.mu.Lock()
-	if cached, ok := c.items[key]; ok {
-		copyDeepFields(cached, item)
-	} else {
-		cp := *item
-		c.items[key] = &cp
-	}
-	c.deepFetched[key] = true
-	c.mu.Unlock()
+	// Write back to Store via ItemDeepFetched.
+	c.store.Apply(itemstate.ItemDeepFetched{
+		Repo:       item.Repo,
+		Number:     item.Number,
+		FreshState: *item,
+	})
 	return nil
 }
 
@@ -410,23 +480,36 @@ func (c *CacheImpl) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, erro
 
 // FetchLinkedPR returns cached PR details for an issue; falls back to GitHub on miss.
 func (c *CacheImpl) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-	issKey := itemKey(owner+"/"+repo, issueNumber)
+	fullRepo := owner + "/" + repo
+	issKey := itemKey(fullRepo, issueNumber)
 
 	c.mu.RLock()
-	if c.paused {
-		c.mu.RUnlock()
+	paused := c.paused
+	c.mu.RUnlock()
+
+	if paused {
 		return c.fallback.FetchLinkedPR(owner, repo, issueNumber)
 	}
-	item, itemOK := c.items[issKey]
-	if itemOK && item.LinkedPRNumber != 0 {
-		pk := prKey(owner+"/"+repo, item.LinkedPRNumber)
+
+	// Get LinkedPRNumber from Store (Store has its own mutex; no c.mu held).
+	var linkedPRNum int
+	snap, snapErr := c.store.Get(fullRepo, issueNumber)
+	if snapErr == nil {
+		if lpr := snap.LinkedPR(); lpr != nil {
+			linkedPRNum = lpr.Number
+		}
+	}
+
+	if linkedPRNum != 0 {
+		pk := prKey(fullRepo, linkedPRNum)
+		c.mu.RLock()
 		if pr, ok := c.linkedPRs[pk]; ok {
 			prCopy := *pr
 			c.mu.RUnlock()
 			return &prCopy, nil
 		}
+		c.mu.RUnlock()
 	}
-	c.mu.RUnlock()
 
 	c.logFn("[cache] miss: FetchLinkedPR #%d — fetching from GitHub\n", issueNumber)
 	pr, err := c.fallback.FetchLinkedPR(owner, repo, issueNumber)
@@ -434,14 +517,26 @@ func (c *CacheImpl) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDe
 		return nil, err
 	}
 	if pr != nil {
-		pk := prKey(owner+"/"+repo, pr.Number)
+		pk := prKey(fullRepo, pr.Number)
 		c.mu.Lock()
 		c.linkedPRs[pk] = pr
-		// Update item's LinkedPRNumber if not set.
-		if item2, ok := c.items[issKey]; ok && item2.LinkedPRNumber == 0 {
-			item2.LinkedPRNumber = pr.Number
-		}
 		c.mu.Unlock()
+		// If the item had no LinkedPRNumber in Store, update it via deep fetch write-back.
+		if linkedPRNum == 0 && snapErr == nil {
+			// Construct a fresh ProjectItem from current Store state + new PR number.
+			pi := snapshotToProjectItem(snap)
+			pi.LinkedPRNumber = pr.Number
+			c.store.Apply(itemstate.ItemDeepFetched{
+				Repo:       fullRepo,
+				Number:     issueNumber,
+				FreshState: pi,
+			})
+			// Also update prNumToKey.
+			pk2 := prKey(fullRepo, pr.Number)
+			c.mu.Lock()
+			c.prNumToKey[pk2] = issKey
+			c.mu.Unlock()
+		}
 	}
 	return pr, nil
 }
@@ -458,19 +553,20 @@ func (c *CacheImpl) FetchPRMergeableState(owner, repo string, prNumber int) (str
 
 // FetchLabels returns the cached label list for an issue; falls back to GitHub on miss.
 func (c *CacheImpl) FetchLabels(owner, repo string, issueNumber int) ([]string, error) {
-	key := itemKey(owner+"/"+repo, issueNumber)
+	fullRepo := owner + "/" + repo
 
 	c.mu.RLock()
-	if c.paused {
-		c.mu.RUnlock()
+	paused := c.paused
+	c.mu.RUnlock()
+
+	if paused {
 		return c.fallback.FetchLabels(owner, repo, issueNumber)
 	}
-	if item, ok := c.items[key]; ok {
-		labels := cloneStrings(item.Labels)
-		c.mu.RUnlock()
-		return labels, nil
+
+	snap, err := c.store.Get(fullRepo, issueNumber)
+	if err == nil {
+		return cloneStrings(snap.Labels()), nil
 	}
-	c.mu.RUnlock()
 
 	c.logFn("[cache] miss: FetchLabels #%d — fetching from GitHub\n", issueNumber)
 	return c.fallback.FetchLabels(owner, repo, issueNumber)
@@ -499,49 +595,62 @@ func (c *CacheImpl) RateLimitStats() (rest, graphql gh.RateLimitStats) {
 // UpdateItemStatus updates the Status field for the item identified by key.
 // No-op when the key is not in the cache. Safe for concurrent use.
 func (c *CacheImpl) UpdateItemStatus(key, newStatus string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	item, ok := c.items[key]
+	repo, number, ok := parseItemKey(key)
 	if !ok {
 		c.logFn("[cache] UpdateItemStatus: key %q not found — no-op\n", key)
 		return
 	}
-	item.Status = newStatus
-	item.UpdatedAt = time.Now()
+	_, changes, _ := c.store.Apply(itemstate.LocalStatusUpdated{
+		Repo:      repo,
+		Number:    number,
+		NewStatus: newStatus,
+	})
+	if len(changes) == 0 {
+		// Item not found in Store or status unchanged.
+		return
+	}
+	now := time.Now()
+	c.mu.Lock()
+	c.localDeltaAt[key] = now
+	c.mu.Unlock()
 }
 
 // ApplyStatusBatch updates Status for items identified by project-item node IDs.
-// Entries whose itemID is not in itemIDToKey are silently skipped (not yet bootstrapped).
+// Entries whose itemID is not in the Store's itemIDToKey index are silently skipped.
 // Safe for concurrent use.
 func (c *CacheImpl) ApplyStatusBatch(updates map[string]string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	for itemID, status := range updates {
-		key, ok := c.itemIDToKey[itemID]
-		if !ok {
+		snap, changes, _ := c.store.Apply(itemstate.ProjectV2ItemEdited{
+			ItemID:    itemID,
+			NewStatus: status,
+		})
+		if len(changes) == 0 {
 			continue
 		}
-		item, ok := c.items[key]
-		if !ok {
-			continue
-		}
-		if item.Status != status {
-			item.Status = status
-			item.UpdatedAt = time.Now()
-		}
+		key := itemKey(snap.Repo(), snap.Number())
+		now := time.Now()
+		c.mu.Lock()
+		c.localDeltaAt[key] = now
+		c.mu.Unlock()
 	}
 }
 
 // GetItemID returns the project-item node ID (PVTI_...) for the given cache key.
 // Returns ("", false) when the key is not present or has no ItemID.
 func (c *CacheImpl) GetItemID(key string) (string, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	item, ok := c.items[key]
-	if !ok || item.ItemID == "" {
+	repo, number, ok := parseItemKey(key)
+	if !ok {
 		return "", false
 	}
-	return item.ItemID, true
+	snap, err := c.store.Get(repo, number)
+	if err != nil {
+		return "", false
+	}
+	s := snap.State()
+	if s.ItemID == "" {
+		return "", false
+	}
+	return s.ItemID, true
 }
 
 // ProjectID returns the project node ID stored from the last Bootstrap/Reconcile call.
@@ -550,6 +659,24 @@ func (c *CacheImpl) ProjectID() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.projectID
+}
+
+// copyDeepFieldsFromState overlays deep fields from an ItemState onto a *gh.ProjectItem.
+// Shallow fields (Labels, Status, Title, UpdatedAt) are left unchanged in dst.
+func copyDeepFieldsFromState(dst *gh.ProjectItem, s itemstate.ItemState) {
+	dst.Body = s.Body
+	dst.URL = s.URL
+	dst.Author = s.Author
+	dst.Assignees = cloneStrings(s.Assignees)
+	dst.BlockedBy = cloneDependencies(s.BlockedBy)
+	dst.Comments = cloneComments(s.Comments)
+	if s.LinkedPR != nil {
+		dst.LinkedPRNumber = s.LinkedPR.Number
+		dst.LinkedPRReviews = clonePRReviews(s.LinkedPR.Reviews)
+		dst.LinkedPRReviewRequests = cloneReviewRequests(s.LinkedPR.ReviewRequests)
+		dst.LinkedPRReviewThreadComments = cloneComments(s.LinkedPR.ThreadComments)
+		dst.LinkedPRResolvedThreadCount = s.LinkedPR.ResolvedThreadCount
+	}
 }
 
 // copyDeepFields overlays the deep fields from src onto dst.
@@ -567,7 +694,6 @@ func copyDeepFields(dst, src *gh.ProjectItem) {
 	dst.LinkedPRReviewThreadComments = cloneComments(src.LinkedPRReviewThreadComments)
 	dst.LinkedPRResolvedThreadCount = src.LinkedPRResolvedThreadCount
 }
-
 
 func cloneStrings(s []string) []string {
 	if s == nil {
