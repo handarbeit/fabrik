@@ -491,6 +491,113 @@ func TestRunInit_UserFlag(t *testing.T) {
 	}
 }
 
+func TestRunInit_WritesWorkflowTemplate(t *testing.T) {
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(orig) //nolint
+
+	if err := runInit([]string{}); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	workflowPath := filepath.Join(dir, ".github", "workflows", "fabrik-advance.yml")
+	data, err := os.ReadFile(workflowPath)
+	if err != nil {
+		t.Fatalf("workflow template not written: %v", err)
+	}
+	content := string(data)
+
+	markers := []string{
+		"check_suite",
+		"FABRIK_PROJECT_NUMBER",
+		"FABRIK_TARGET_STAGE",
+		"updateProjectV2ItemFieldValue",
+		"exit 1",
+	}
+	for _, m := range markers {
+		if !strings.Contains(content, m) {
+			t.Errorf("expected %q in workflow template", m)
+		}
+	}
+}
+
+func TestRunInit_WorkflowTemplateSkipsExisting(t *testing.T) {
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(orig) //nolint
+
+	workflowDir := filepath.Join(dir, ".github", "workflows")
+	if err := os.MkdirAll(workflowDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	workflowPath := filepath.Join(workflowDir, "fabrik-advance.yml")
+	sentinel := []byte("# sentinel workflow\n")
+	if err := os.WriteFile(workflowPath, sentinel, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runInit([]string{}); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	got, err := os.ReadFile(workflowPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(sentinel) {
+		t.Errorf("existing workflow was overwritten without --force; want sentinel, got %q", string(got))
+	}
+}
+
+func TestRunInit_WorkflowTemplateForceOverwrites(t *testing.T) {
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(orig) //nolint
+
+	workflowDir := filepath.Join(dir, ".github", "workflows")
+	if err := os.MkdirAll(workflowDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	workflowPath := filepath.Join(workflowDir, "fabrik-advance.yml")
+	sentinel := []byte("# sentinel workflow\n")
+	if err := os.WriteFile(workflowPath, sentinel, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runInit([]string{"--force"}); err != nil {
+		t.Fatalf("force runInit: %v", err)
+	}
+
+	got, err := os.ReadFile(workflowPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) == string(sentinel) {
+		t.Error("--force did not overwrite existing workflow template")
+	}
+	if !strings.Contains(string(got), "updateProjectV2ItemFieldValue") {
+		t.Error("expected template content after --force overwrite")
+	}
+}
+
 func TestRunInit_IdempotentDestDir(t *testing.T) {
 	dir := t.TempDir()
 	orig, err := os.Getwd()
