@@ -678,7 +678,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		for _, item := range deepFetchCandidates {
 			iKey := issueKey(item, e.defaultRepo())
 			if !item.UpdatedAt.IsZero() && !advancedItems[iKey] {
-				e.lastUpdatedAt[iKey] = item.UpdatedAt
+				e.seenUpdatedAt[iKey] = item.UpdatedAt
 			}
 			// Belt-and-suspenders: refresh processedSet for non-advanced *terminal*
 			// items that completed a full poll cycle without dispatching work. Only
@@ -750,7 +750,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 				Number: board.Items[i].Number,
 				At:     time.Now(),
 			})
-			// Skip appending to deepFetchCandidates so lastUpdatedAt is NOT updated.
+			// Skip appending to deepFetchCandidates so seenUpdatedAt is NOT updated.
 			// The next poll will retry the deep-fetch for this item.
 			continue
 		}
@@ -953,7 +953,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			if err := e.attemptMergeOnValidate(ctx, board, item, stage); err != nil {
 				if errors.Is(err, errRebaseDispatched) {
 					e.logf(item.Number, "rebase-reinvoke", "PR merge deferred — rebase dispatched during catch-up\n")
-					// Mark as dispatched so the defer does not re-cache lastUpdatedAt —
+					// Mark as dispatched so the defer does not re-cache seenUpdatedAt —
 					// mirrors Phase 1 dispatch behavior (review/rebase/CI-fix reinvokes).
 					// Without this, if the label add fails and GitHub doesn't bump
 					// updatedAt, itemMayNeedWork could filter the item on the next poll.

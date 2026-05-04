@@ -11,6 +11,7 @@ import (
 	"time"
 
 	gh "github.com/verveguy/fabrik/github"
+	"github.com/verveguy/fabrik/internal/itemstate"
 	"github.com/verveguy/fabrik/stages"
 	"github.com/verveguy/fabrik/tui"
 )
@@ -49,7 +50,7 @@ func TestItemMayNeedWork_StaleButCooldownExpired(t *testing.T) {
 
 	// Record the last-seen timestamp so the "unchanged" path triggers
 	eng.mu.Lock()
-	eng.lastUpdatedAt["owner/repo#42"] = ts
+	eng.seenUpdatedAt["owner/repo#42"] = ts
 	// Record a processedSet entry from >cooldown ago
 	eng.processedSet["owner/repo#42-Research"] = time.Now().Add(-2 * time.Minute)
 	eng.mu.Unlock()
@@ -74,7 +75,7 @@ func TestItemMayNeedWork_StaleWithinCooldown(t *testing.T) {
 	}
 
 	eng.mu.Lock()
-	eng.lastUpdatedAt["owner/repo#43"] = ts
+	eng.seenUpdatedAt["owner/repo#43"] = ts
 	eng.processedSet["owner/repo#43-Research"] = time.Now() // just processed
 	eng.mu.Unlock()
 
@@ -470,7 +471,7 @@ func TestItemNeedsWork_ClosedIssue_CleanupStage_Complete(t *testing.T) {
 }
 
 // TestPoll_DeepFetchFailureExcludesFromLastUpdatedAt verifies that when
-// FetchItemDetails fails for an item, lastUpdatedAt is NOT updated for that
+// FetchItemDetails fails for an item, seenUpdatedAt is NOT updated for that
 // item, so the next poll retries the deep-fetch.
 func TestPoll_DeepFetchFailureExcludesFromLastUpdatedAt(t *testing.T) {
 	now := time.Now()
@@ -495,19 +496,17 @@ func TestPoll_DeepFetchFailureExcludesFromLastUpdatedAt(t *testing.T) {
 		t.Fatalf("poll: %v", err)
 	}
 
-	// lastUpdatedAt must NOT be set for item #10 — failed deep-fetch must not cache.
+	// seenUpdatedAt must NOT be set for item #10 — failed deep-fetch must not cache.
 	eng.mu.Lock()
-	_, ok := eng.lastUpdatedAt["owner/repo#10"]
+	_, ok := eng.seenUpdatedAt["owner/repo#10"]
 	eng.mu.Unlock()
 	if ok {
-		t.Error("lastUpdatedAt should NOT be updated when FetchItemDetails fails")
+		t.Error("seenUpdatedAt should NOT be updated when FetchItemDetails fails")
 	}
 
-	// deepFetchFailureTime must be recorded.
-	eng.mu.Lock()
-	_, recorded := eng.deepFetchFailureTime["owner/repo#10"]
-	eng.mu.Unlock()
-	if !recorded {
+	// LastDeepFetchFailureAt must be recorded in the store.
+	snap, _ := eng.store.Get("owner/repo", 10)
+	if snap.State().LastDeepFetchFailureAt.IsZero() {
 		t.Error("deepFetchFailureTime should be recorded when FetchItemDetails fails")
 	}
 }
@@ -528,20 +527,16 @@ func TestPoll_DeepFetchSuccessClearsFailureTime(t *testing.T) {
 		// fetchItemDetailsFn nil = success (mock returns nil by default)
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
-	// Pre-seed a failure time.
-	eng.mu.Lock()
-	eng.deepFetchFailureTime["owner/repo#11"] = now.Add(-time.Minute)
-	eng.mu.Unlock()
+	// Pre-seed a failure time via the store.
+	eng.store.Apply(itemstate.DeepFetchFailed{Repo: "owner/repo", Number: 11, At: now.Add(-time.Minute)})
 
 	ctx := t.Context()
 	if _, err := eng.poll(ctx); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 
-	eng.mu.Lock()
-	_, stillRecorded := eng.deepFetchFailureTime["owner/repo#11"]
-	eng.mu.Unlock()
-	if stillRecorded {
+	snapAfter, _ := eng.store.Get("owner/repo", 11)
+	if !snapAfter.State().LastDeepFetchFailureAt.IsZero() {
 		t.Error("deepFetchFailureTime should be cleared after a successful FetchItemDetails")
 	}
 }
@@ -564,7 +559,7 @@ func TestItemMayNeedWork_AwaitingInputRespectsCache(t *testing.T) {
 
 	// Record the last-seen timestamp so the "unchanged" path triggers.
 	eng.mu.Lock()
-	eng.lastUpdatedAt["owner/repo#50"] = ts
+	eng.seenUpdatedAt["owner/repo#50"] = ts
 	eng.mu.Unlock()
 
 	if eng.itemMayNeedWork(item) {
@@ -583,7 +578,7 @@ func TestItemMayNeedWork_DeepFetchFailureCooldown(t *testing.T) {
 		Number: 51,
 		Status: "Research",
 		ItemID: "PVTI_51",
-		// UpdatedAt zero — no lastUpdatedAt entry, so "unchanged" branch won't fire
+		// UpdatedAt zero — no seenUpdatedAt entry, so "unchanged" branch won't fire
 	}
 
 	// Record a very recent failure.
@@ -606,7 +601,7 @@ func TestItemMayNeedWork_DeepFetchFailureCooldown(t *testing.T) {
 }
 
 // TestProcessItem_EvictsLastUpdatedAtAfterStageRun verifies that processItem
-// deletes lastUpdatedAt[iKey] after a stage runs (claudeRan=true). This ensures
+// deletes seenUpdatedAt[iKey] after a stage runs (claudeRan=true). This ensures
 // the next poll re-evaluates the item, catching any comments that arrived during
 // the in-flight run.
 func TestProcessItem_EvictsLastUpdatedAtAfterStageRun(t *testing.T) {
@@ -645,21 +640,21 @@ func TestProcessItem_EvictsLastUpdatedAtAfterStageRun(t *testing.T) {
 		Repo:      "owner/repo",
 	}
 
-	// Pre-populate lastUpdatedAt as if a concurrent poll cached this item.
+	// Pre-populate seenUpdatedAt as if a concurrent poll cached this item.
 	eng.mu.Lock()
-	eng.lastUpdatedAt["owner/repo#60"] = ts
+	eng.seenUpdatedAt["owner/repo#60"] = ts
 	eng.mu.Unlock()
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	_ = eng.processItem(context.Background(), board, item)
 
-	// After processItem (with claudeRan), lastUpdatedAt must be evicted.
+	// After processItem (with claudeRan), seenUpdatedAt must be evicted.
 	eng.mu.Lock()
-	_, stillCached := eng.lastUpdatedAt["owner/repo#60"]
+	_, stillCached := eng.seenUpdatedAt["owner/repo#60"]
 	eng.mu.Unlock()
 
 	if stillCached {
-		t.Error("lastUpdatedAt should be evicted after a stage runs so next poll re-evaluates the item")
+		t.Error("seenUpdatedAt should be evicted after a stage runs so next poll re-evaluates the item")
 	}
 }
 
@@ -679,9 +674,9 @@ func TestItemMayNeedWork_AwaitingCI_BypassesUpdatedAtCache(t *testing.T) {
 		Labels:    []string{"fabrik:awaiting-ci"},
 	}
 
-	// Seed lastUpdatedAt so the "unchanged" path would normally trigger.
+	// Seed seenUpdatedAt so the "unchanged" path would normally trigger.
 	eng.mu.Lock()
-	eng.lastUpdatedAt["owner/repo#61"] = ts
+	eng.seenUpdatedAt["owner/repo#61"] = ts
 	eng.processedSet["owner/repo#61-Research"] = time.Now() // just processed — within cooldown
 	eng.mu.Unlock()
 
@@ -717,7 +712,7 @@ func TestItemMayNeedWork_AwaitingReview_CooldownPattern(t *testing.T) {
 
 	// Within cooldown: processedSet has a recent entry → must NOT re-admit yet.
 	eng.mu.Lock()
-	eng.lastUpdatedAt["owner/repo#67"] = ts
+	eng.seenUpdatedAt["owner/repo#67"] = ts
 	eng.processedSet["owner/repo#67-Research"] = time.Now() // just processed
 	eng.mu.Unlock()
 
@@ -756,7 +751,7 @@ func TestItemMayNeedWork_AwaitingReview_NotBypassedDirectly(t *testing.T) {
 	// No processedSet entry: cooldown retry path doesn't fire. Without unconditional
 	// bypass, the cache filter wins and we return false.
 	eng.mu.Lock()
-	eng.lastUpdatedAt["owner/repo#68"] = ts
+	eng.seenUpdatedAt["owner/repo#68"] = ts
 	eng.mu.Unlock()
 
 	if eng.itemMayNeedWork(item) {
@@ -782,7 +777,7 @@ func TestItemMayNeedWork_BlockedRespectsUpdatedAtCache(t *testing.T) {
 	}
 
 	eng.mu.Lock()
-	eng.lastUpdatedAt["owner/repo#63"] = ts
+	eng.seenUpdatedAt["owner/repo#63"] = ts
 	eng.processedSet["owner/repo#63-Research"] = time.Now() // just processed — within cooldown
 	eng.mu.Unlock()
 
@@ -807,7 +802,7 @@ func TestItemMayNeedWork_NoSpecialLabel_RespectsUpdatedAtCache(t *testing.T) {
 	}
 
 	eng.mu.Lock()
-	eng.lastUpdatedAt["owner/repo#62"] = ts
+	eng.seenUpdatedAt["owner/repo#62"] = ts
 	eng.processedSet["owner/repo#62-Research"] = time.Now()
 	eng.mu.Unlock()
 
@@ -833,7 +828,7 @@ func TestItemMayNeedWork_CompleteStageBypassed(t *testing.T) {
 	}
 
 	eng.mu.Lock()
-	eng.lastUpdatedAt["owner/repo#70"] = ts
+	eng.seenUpdatedAt["owner/repo#70"] = ts
 	eng.processedSet["owner/repo#70-Research"] = time.Now().Add(-2 * time.Minute) // expired
 	eng.mu.Unlock()
 
@@ -859,7 +854,7 @@ func TestItemMayNeedWork_IncompleteStageStillRetried(t *testing.T) {
 	}
 
 	eng.mu.Lock()
-	eng.lastUpdatedAt["owner/repo#71"] = ts
+	eng.seenUpdatedAt["owner/repo#71"] = ts
 	eng.processedSet["owner/repo#71-Research"] = time.Now().Add(-2 * time.Minute) // expired
 	eng.mu.Unlock()
 
@@ -887,7 +882,7 @@ func TestItemMayNeedWork_AwaitingReview_WithCompleteLabel(t *testing.T) {
 	}
 
 	eng.mu.Lock()
-	eng.lastUpdatedAt["owner/repo#69"] = ts
+	eng.seenUpdatedAt["owner/repo#69"] = ts
 	eng.processedSet["owner/repo#69-Research"] = time.Now().Add(-2 * time.Minute) // expired
 	eng.mu.Unlock()
 
@@ -1000,7 +995,7 @@ func TestPoll_DeferredRefresh_DoesNotRefreshIncompleteItem(t *testing.T) {
 
 	initial := time.Now().Add(-2 * time.Minute) // expired cooldown
 	eng.mu.Lock()
-	eng.lastUpdatedAt["owner/repo#80"] = ts // unchanged updatedAt → cooldown path
+	eng.seenUpdatedAt["owner/repo#80"] = ts // unchanged updatedAt → cooldown path
 	eng.processedSet["owner/repo#80-Research"] = initial
 	eng.mu.Unlock()
 
@@ -1049,7 +1044,7 @@ func TestPoll_DeferredRefresh_RefreshesTerminalItem(t *testing.T) {
 	eng.cfg.PollSeconds = 1 // cooldown = 10s
 
 	eng.mu.Lock()
-	eng.lastUpdatedAt["owner/repo#81"] = ts // unchanged updatedAt → cooldown path
+	eng.seenUpdatedAt["owner/repo#81"] = ts // unchanged updatedAt → cooldown path
 	eng.processedSet["owner/repo#81-Research"] = time.Now().Add(-2 * time.Minute)
 	eng.mu.Unlock()
 
