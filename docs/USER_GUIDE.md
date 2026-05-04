@@ -1048,6 +1048,69 @@ The CI timeout is measured from when `fabrik:awaiting-ci` was first applied. Bec
 
 The CI timeout is measured from the `fabrik:awaiting-ci` label's creation timestamp (fetched via the GitHub API), making it durable across engine restarts. The cycle count is in-memory and resets on restart.
 
+### CI Auto-Advance Workflow
+
+`fabrik init` generates a GitHub Actions workflow template at
+`.github/workflows/fabrik-advance.yml`. This workflow advances a Fabrik-managed
+project board item to a target stage column when CI passes on a `fabrik/*` branch —
+providing event-driven board advancement as an alternative to Fabrik's built-in
+poll-based `wait_for_ci` gate.
+
+#### When to use it
+
+Use the generated workflow when you want the board card to move _immediately_ after
+CI passes, without waiting for Fabrik's next poll cycle. If you prefer Fabrik to own
+the CI gate entirely (and tolerate up to one poll interval of latency), set
+`wait_for_ci: true` in the stage YAML instead and omit this workflow.
+
+#### Required setup
+
+Before the workflow can run, set the following in your repository
+**Settings → Secrets and variables**:
+
+| Kind | Name | Value |
+|------|------|-------|
+| Repository variable | `FABRIK_PROJECT_NUMBER` | The integer in the project URL: `.../projects/<NUMBER>` |
+| Repository variable | `FABRIK_TARGET_STAGE` | Exact stage column name to advance to, e.g. `Review` |
+| Repository secret | `FABRIK_TOKEN` | Classic PAT with `repo`, `project`, and `workflow` scopes (same token the engine uses) |
+
+#### How it works
+
+1. Triggers on `check_suite: completed` for branches matching `fabrik/*`.
+2. Skips if the suite conclusion is anything other than `success` — failed CI does
+   not advance the card.
+3. Uses `repository.issue.projectItems` to look up the board item by issue number
+   (O(1), pagination-safe — works on boards of any size).
+4. Fetches the Status field options from the project to resolve `FABRIK_TARGET_STAGE`
+   to a `singleSelectOptionId`.
+5. Calls `updateProjectV2ItemFieldValue` to advance the card.
+6. Exits non-zero with a descriptive message if the issue is not on the board or if
+   the target stage name does not match any board column — distinguishing a real
+   misconfiguration from a silent empty-result bug.
+
+#### Regenerating the template
+
+```bash
+fabrik init --force
+```
+
+`--force` overwrites `.github/workflows/fabrik-advance.yml` with the latest template.
+Commit the updated file if you want the change tracked in git.
+
+#### Distinction from Fabrik's internal CI gate
+
+Fabrik has a built-in CI gate (`wait_for_ci: true` in stage YAML) that polls for CI
+status and advances the board via the engine's own `advanceToNextStage` path. Both
+mechanisms ultimately call `updateProjectV2ItemFieldValue`; the difference is timing
+and ownership:
+
+| | `wait_for_ci: true` | Generated workflow |
+|--|---|---|
+| **Latency** | Up to one poll interval after CI passes | Event-driven (minutes) |
+| **Requires workflow file** | No | Yes |
+| **Board advance ownership** | Fabrik engine | GitHub Actions |
+| **Use when** | Simpler setup is preferred | Low-latency advance is important |
+
 ---
 
 ## 4. Stage Reference
