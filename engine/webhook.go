@@ -858,15 +858,11 @@ func (wm *webhookManager) handleWebhook(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Apply cache delta after any recovery reconciliation, so the cache is fresh
-	// when the poll loop wakes.
+	// when the poll loop wakes. The wakeChObserver registered on the cache store
+	// fires a non-blocking wakeCh send for every interesting ChangeFlag, replacing
+	// the unconditional send that was here previously.
 	if wm.deltaFn != nil {
 		wm.deltaFn(eventType, body)
-	}
-
-	// Wake the poll loop immediately.
-	select {
-	case wm.wakeCh <- struct{}{}:
-	default:
 	}
 
 	w.WriteHeader(http.StatusOK)
