@@ -577,6 +577,12 @@ query($id: ID!) {
 
 	node := result.Data.Node
 
+	// Populate item.Number from GraphQL response if it was zero (e.g., projects_v2_item.created
+	// provides only a node_id, so the caller sets item.Number=0 and we fill it in here).
+	if item.Number == 0 && node.Number > 0 {
+		item.Number = node.Number
+	}
+
 	// Populate scalar fields
 	item.Body = node.Body
 	item.URL = node.URL
@@ -1026,4 +1032,47 @@ query($id: ID!, $cursor: String) {
 	}
 
 	return out, nil
+}
+
+// FetchProjectItem fetches a minimal ProjectItem for an issue via REST GET
+// /repos/{owner}/{repo}/issues/{number}. Used by the boardcache fallback path
+// when a webhook event arrives for an issue not yet in the cache.
+func (c *Client) FetchProjectItem(owner, repo string, issueNumber int) (*ProjectItem, error) {
+	url := c.baseURL + "/repos/" + owner + "/" + repo + "/issues/" + strconv.Itoa(issueNumber)
+
+	var raw struct {
+		Number    int    `json:"number"`
+		Title     string `json:"title"`
+		Body      string `json:"body"`
+		State     string `json:"state"`
+		HTMLURL   string `json:"html_url"`
+		NodeID    string `json:"node_id"`
+		Labels    []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
+		Assignees []struct {
+			Login string `json:"login"`
+		} `json:"assignees"`
+	}
+
+	if err := c.restGetJSON(url, &raw); err != nil {
+		return nil, fmt.Errorf("fetching project item for %s/%s#%d: %w", owner, repo, issueNumber, err)
+	}
+
+	pi := &ProjectItem{
+		ID:       raw.NodeID,
+		Number:   raw.Number,
+		Title:    raw.Title,
+		Body:     raw.Body,
+		IsClosed: raw.State == "closed",
+		URL:      raw.HTMLURL,
+		Repo:     owner + "/" + repo,
+	}
+	for _, l := range raw.Labels {
+		pi.Labels = append(pi.Labels, l.Name)
+	}
+	for _, a := range raw.Assignees {
+		pi.Assignees = append(pi.Assignees, a.Login)
+	}
+	return pi, nil
 }
