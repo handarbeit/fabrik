@@ -1544,6 +1544,39 @@ func TestCacheImplSubscribeUnsubscribeStopsCalls(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// SubscribePause tests
+// ---------------------------------------------------------------------------
+
+func TestSubscribePauseFiresOnPause(t *testing.T) {
+	c := seedCache(t)
+	var got []bool
+	unsub := c.SubscribePause(func(paused bool) { got = append(got, paused) })
+	defer unsub()
+
+	c.Pause()
+	if len(got) != 1 || !got[0] {
+		t.Errorf("want [true] after Pause, got %v", got)
+	}
+	c.Resume()
+	if len(got) != 2 || got[1] {
+		t.Errorf("want [true, false] after Resume, got %v", got)
+	}
+}
+
+func TestSubscribePauseUnsubscribeStopsCalls(t *testing.T) {
+	c := seedCache(t)
+	var calls int
+	unsub := c.SubscribePause(func(bool) { calls++ })
+	unsub()
+
+	c.Pause()
+	c.Resume()
+	if calls != 0 {
+		t.Errorf("want 0 calls after unsubscribe, got %d", calls)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // ApplyCommentAdded tests
 // ---------------------------------------------------------------------------
 

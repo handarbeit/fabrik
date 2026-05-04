@@ -186,6 +186,13 @@ type CacheImpl struct {
 	// paused is a stream-health control flag. When true, ApplyDelta is a no-op.
 	paused bool
 
+	// pauseObsMu guards pauseObservers. Separate from mu to avoid deadlock
+	// when observers call back into CacheImpl (which acquires mu).
+	pauseObsMu sync.Mutex
+	// pauseObservers are called outside mu after every Pause/Resume transition.
+	// Each func receives true on Pause and false on Resume.
+	pauseObservers []func(bool)
+
 	// recentMissCache is a negative cache preventing repeated REST lookups.
 	// Keys are "miss:owner/repo#prN" or "miss:sha:SHA".
 	recentMissCache map[string]time.Time
@@ -360,17 +367,57 @@ func (c *CacheImpl) resolvePRLinkage(owner, repo string, prNumber int) (key stri
 }
 
 // Pause stops delta application (called on WebhookStreamUnhealthy transition).
+// Pause observers are called after the lock is released to avoid deadlock
+// if an observer calls back into CacheImpl.
 func (c *CacheImpl) Pause() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.paused = true
+	c.mu.Unlock()
+	c.callPauseObservers(true)
 }
 
 // Resume re-enables delta application (called after reconciliation on stream recovery).
+// Resume observers are called after the lock is released.
 func (c *CacheImpl) Resume() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.paused = false
+	c.mu.Unlock()
+	c.callPauseObservers(false)
+}
+
+// callPauseObservers snapshots and calls all registered pause observers.
+// Must be called outside c.mu to avoid deadlock.
+func (c *CacheImpl) callPauseObservers(paused bool) {
+	c.pauseObsMu.Lock()
+	obs := make([]func(bool), len(c.pauseObservers))
+	copy(obs, c.pauseObservers)
+	c.pauseObsMu.Unlock()
+	for _, fn := range obs {
+		if fn != nil {
+			fn(paused)
+		}
+	}
+}
+
+// SubscribePause registers a function that is called after every Pause/Resume
+// transition. The function receives true when the cache is paused and false when
+// resumed. Observers must not call Pause or Resume (would cause recursive locking
+// in a caller's context if they re-enter CacheImpl methods — deadlock-free here
+// because observers run outside c.mu, but re-entrancy into Pause/Resume is
+// semantically wrong). The returned func unsubscribes the observer.
+func (c *CacheImpl) SubscribePause(fn func(bool)) func() {
+	c.pauseObsMu.Lock()
+	c.pauseObservers = append(c.pauseObservers, fn)
+	idx := len(c.pauseObservers) - 1
+	c.pauseObsMu.Unlock()
+	return func() {
+		c.pauseObsMu.Lock()
+		// Nil the slot; callPauseObservers skips nils on next call.
+		if idx < len(c.pauseObservers) {
+			c.pauseObservers[idx] = nil
+		}
+		c.pauseObsMu.Unlock()
+	}
 }
 
 // IsPaused returns true when delta application is paused.
