@@ -13,3 +13,7 @@ func killProcGroup(cmd *exec.Cmd) {}
 
 // killProcGroupGraceful is a no-op on Windows.
 func killProcGroupGraceful(pid, issueNumber int, label string) {}
+
+// isProcessAlive returns true on Windows — process liveness via signal 0
+// is Unix-specific. The stale-lock detector is conservative on Windows.
+func isProcessAlive(pid int) bool { return true }

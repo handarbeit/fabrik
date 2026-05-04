@@ -30,6 +30,12 @@ func killProcGroup(cmd *exec.Cmd) {
 	}
 }
 
+// isProcessAlive returns true if the process with the given PID is alive.
+// Uses signal 0 (does not kill the process; only probes existence/permissions).
+func isProcessAlive(pid int) bool {
+	return syscall.Kill(pid, 0) == nil
+}
+
 // killProcGroupGraceful sends SIGTERM to the process group, waits 10 seconds for
 // a graceful shutdown, then sends SIGKILL. This reaps hung background children
 // (dangling pytest, tail -f, polling loops) in addition to the Claude CLI itself.
