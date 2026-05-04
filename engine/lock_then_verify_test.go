@@ -157,13 +157,10 @@ func TestLockThenVerify_CompetingLockLowerUser_YieldsAndReturnsNil(t *testing.T)
 		}
 	}
 
-	// lockedIssues map should be clean after loser path.
-	// issueKey format is "owner/repo#N" (no dash before #).
-	eng.mu.Lock()
-	_, stillLocked := eng.lockedIssues["owner/repo#12"]
-	eng.mu.Unlock()
-	if stillLocked {
-		t.Error("lockedIssues entry should be cleared after loser releases lock")
+	// Store should have no held lock for this issue after the loser path.
+	snap, _ := eng.store.Get("owner/repo", 12)
+	if lock := snap.Lock(); lock != nil && lock.HeldByThis {
+		t.Error("store lock should be cleared after loser releases lock")
 	}
 }
 

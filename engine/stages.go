@@ -9,6 +9,7 @@ import (
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -248,9 +249,7 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 			// Clear stale CI-await state so a stuck fabrik:awaiting-ci from
 			// the prior over-aggressive gate doesn't survive past the merge.
 			e.removeAwaitingCILabel(owner, repo, item)
-			e.mu.Lock()
-			delete(e.ciMergePendingSince, iKey)
-			e.mu.Unlock()
+			e.store.Apply(itemstate.CIMergePendingCleared{Repo: owner + "/" + repo, Number: item.Number})
 			bypassCheckRunsGate = true
 		}
 	}
@@ -289,9 +288,7 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 					cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-ci")
 				}
 				// Clean up pending timer since we now have a definitive failure state.
-				e.mu.Lock()
-				delete(e.ciMergePendingSince, iKey)
-				e.mu.Unlock()
+				e.store.Apply(itemstate.CIMergePendingCleared{Repo: owner + "/" + repo, Number: item.Number})
 				return fmt.Errorf("merge blocked: CI checks failed")
 			}
 
@@ -307,19 +304,20 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 				if timeout <= 0 {
 					timeout = 30 * time.Minute
 				}
-				e.mu.Lock()
-				since, tracked := e.ciMergePendingSince[iKey]
-				if !tracked {
-					e.ciMergePendingSince[iKey] = time.Now()
-					since = e.ciMergePendingSince[iKey]
+				snap, _ := e.store.Get(owner+"/"+repo, item.Number)
+				var since time.Time
+				if lpr := snap.LinkedPR(); lpr != nil {
+					since = lpr.CIMergePendingSince
 				}
-				e.mu.Unlock()
+				if since.IsZero() {
+					now := time.Now()
+					e.store.Apply(itemstate.CIMergePendingStarted{Repo: owner + "/" + repo, Number: item.Number, At: now})
+					since = now
+				}
 
 				if time.Since(since) >= timeout {
 					// R6: timeout elapsed — pause issue.
-					e.mu.Lock()
-					delete(e.ciMergePendingSince, iKey)
-					e.mu.Unlock()
+					e.store.Apply(itemstate.CIMergePendingCleared{Repo: owner + "/" + repo, Number: item.Number})
 					msg := fmt.Sprintf("🏭 **Fabrik — CI wait timeout (merge guard)**\n\n"+
 						"Auto-merge blocked: CI checks for PR #%d have been in progress for longer than "+
 						"the configured timeout (%s). Fabrik has paused this issue for human review.\n\n"+
@@ -354,9 +352,7 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 			}
 
 			// R4: All checks green — clear pending timer and awaiting-ci label.
-			e.mu.Lock()
-			delete(e.ciMergePendingSince, iKey)
-			e.mu.Unlock()
+			e.store.Apply(itemstate.CIMergePendingCleared{Repo: owner + "/" + repo, Number: item.Number})
 			e.removeAwaitingCILabel(owner, repo, item)
 		}
 		// R5: len(checkRuns) == 0 — no CI configured; gate clears.

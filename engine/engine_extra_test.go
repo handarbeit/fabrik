@@ -5,8 +5,10 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/tui"
 )
 
@@ -51,11 +53,10 @@ func TestCleanupLockedIssues_RemovesLabels(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := testEngine(client, &mockClaudeInvoker{})
 
-	// Seed the lockedIssues map (keys are "owner/repo#N" format)
-	eng.mu.Lock()
-	eng.lockedIssues["owner/repo#10"] = true
-	eng.lockedIssues["owner/repo#11"] = true
-	eng.mu.Unlock()
+	// Seed locks in the store via LocalLockAcquired mutations.
+	now := time.Now()
+	eng.store.Apply(itemstate.LocalLockAcquired{Repo: "owner/repo", Number: 10, User: "testuser", AcquiredAt: now})
+	eng.store.Apply(itemstate.LocalLockAcquired{Repo: "owner/repo", Number: 11, User: "testuser", AcquiredAt: now})
 
 	eng.cleanupLockedIssues()
 
@@ -70,12 +71,11 @@ func TestCleanupLockedIssues_RemovesLabels(t *testing.T) {
 		}
 	}
 
-	// lockedIssues should be empty after cleanup
-	eng.mu.Lock()
-	remaining := len(eng.lockedIssues)
-	eng.mu.Unlock()
-	if remaining != 0 {
-		t.Errorf("lockedIssues should be empty after cleanup, got %d", remaining)
+	// Store should have no held locks after cleanup.
+	for _, snap := range eng.store.All() {
+		if lock := snap.Lock(); lock != nil && lock.HeldByThis {
+			t.Errorf("store still has held lock for %s#%d after cleanup", snap.Repo(), snap.Number())
+		}
 	}
 }
 

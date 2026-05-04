@@ -13,6 +13,7 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 )
 
 func TestItemNeedsWork_SkipsPaused(t *testing.T) {
@@ -277,8 +278,8 @@ func TestConcurrentItemDispatch(t *testing.T) {
 			MaxConcurrent: maxConcurrent,
 			Stages:        nil, // no matching stage → processItem returns nil immediately
 		},
+		store:        itemstate.NewStore(nil),
 		processedSet: make(map[string]time.Time),
-		lockedIssues: make(map[string]bool),
 		sem:          make(chan struct{}, maxConcurrent),
 	}
 
