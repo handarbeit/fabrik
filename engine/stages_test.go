@@ -274,12 +274,9 @@ func TestAttemptMergeOnValidate_ErrNotMergeable_DispatchesRebase(t *testing.T) {
 	if !foundRebaseNeeded {
 		t.Error("expected fabrik:rebase-needed to be added on ErrNotMergeable")
 	}
-	stageKey := "owner/repo#1-Validate"
-	eng.mu.Lock()
-	count := eng.rebaseCycleCount[stageKey]
-	eng.mu.Unlock()
-	if count != 1 {
-		t.Errorf("expected rebaseCycleCount[%q] == 1, got %d", stageKey, count)
+	snap1, _ := eng.store.Get("owner/repo", 1)
+	if snap1.RebaseCycles("Validate") != 1 {
+		t.Errorf("expected RebaseCycles(Validate) == 1, got %d", snap1.RebaseCycles("Validate"))
 	}
 }
 
@@ -297,10 +294,10 @@ func TestAttemptMergeOnValidate_ErrNotMergeable_CycleLimitPause(t *testing.T) {
 	}
 	eng := testEngineForMerge(client)
 	eng.cfg.MaxRebaseCycles = 3
-	stageKey := "owner/repo#1-Validate"
-	eng.mu.Lock()
-	eng.rebaseCycleCount[stageKey] = 3 // already at limit
-	eng.mu.Unlock()
+	// Pre-seed 3 rebase cycles to simulate hitting the limit
+	for i := 0; i < 3; i++ {
+		eng.store.Apply(itemstate.RebaseCycleIncremented{Repo: "owner/repo", Number: 1, StageName: "Validate"})
+	}
 
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 	stage := &stages.Stage{Name: "Validate"}

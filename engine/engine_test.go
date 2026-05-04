@@ -218,7 +218,7 @@ func TestMarkCommentsProcessedConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			item := gh.ProjectItem{Number: n + 1}
+			item := gh.ProjectItem{Number: n + 1, Repo: "owner/repo"}
 			comments := []gh.Comment{
 				{ID: fmt.Sprintf("c-%d-a", n)},
 				{ID: fmt.Sprintf("c-%d-b", n)},
@@ -229,7 +229,7 @@ func TestMarkCommentsProcessedConcurrency(t *testing.T) {
 	wg.Wait()
 
 	// Verify a sample entry is recorded correctly
-	snap, err := e.store.Get("", 1)
+	snap, err := e.store.Get("owner/repo", 1)
 	if err != nil {
 		t.Fatalf("store.Get: %v", err)
 	}
@@ -247,10 +247,11 @@ func TestFindNewCommentsFiltering(t *testing.T) {
 	}
 
 	// Pre-mark one comment as processed via the store
-	e.store.Apply(itemstate.CommentProcessed{Repo: "", Number: 42, CommentID: "c2", At: time.Now()})
+	e.store.Apply(itemstate.CommentProcessed{Repo: "owner/repo", Number: 42, CommentID: "c2", At: time.Now()})
 
 	item := gh.ProjectItem{
 		Number: 42,
+		Repo:   "owner/repo",
 		Comments: []gh.Comment{
 			{ID: "c1", Author: "alice", Body: "please fix"},        // new — should be returned
 			{ID: "c2", Author: "alice", Body: "already seen"},      // already processed

@@ -382,18 +382,17 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 				e.logf(item.Number, "rebase-reinvoke", "skipping dispatch — rebase reinvoke already in-flight\n")
 				return fmt.Errorf("PR #%d not mergeable (rebase in-flight)", pr.Number)
 			}
-			stageKey := iKey + "-" + stage.Name
-			e.mu.Lock()
-			cycleCount := e.rebaseCycleCount[stageKey]
+			repoStr := itemOwnerRepoString(item, e.defaultRepo())
+			var cycleCount int
+			if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
+				cycleCount = snap.RebaseCycles(stage.Name)
+			}
 			maxCycles := e.cfg.MaxRebaseCycles
-			e.mu.Unlock()
 			if cycleCount >= maxCycles {
 				e.pauseForRebaseCycleLimit(board, item, stage, cycleCount, maxCycles)
 				return fmt.Errorf("PR #%d not mergeable — rebase cycle limit reached", pr.Number)
 			}
-			e.mu.Lock()
-			e.rebaseCycleCount[stageKey]++
-			e.mu.Unlock()
+			e.store.Apply(itemstate.RebaseCycleIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 			e.dispatchRebaseReinvoke(ctx, board, item, stage)
 			return errRebaseDispatched
 		}

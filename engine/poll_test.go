@@ -13,6 +13,7 @@ import (
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
 )
@@ -686,12 +687,9 @@ func TestYoloCatchUpSkipsAdvanceOnMergeError(t *testing.T) {
 		t.Errorf("expected no UpdateProjectItemStatus when merge fails, got %d", advances)
 	}
 	// Rebase dispatch should have fired, not immediate pause.
-	stageKey := "owner/repo#42-Validate"
-	eng.mu.Lock()
-	count := eng.rebaseCycleCount[stageKey]
-	eng.mu.Unlock()
-	if count != 1 {
-		t.Errorf("expected rebaseCycleCount[%q] == 1, got %d", stageKey, count)
+	snap42, _ := eng.store.Get("owner/repo", 42)
+	if snap42.RebaseCycles("Validate") != 1 {
+		t.Errorf("expected rebaseCycles(Validate) == 1, got %d", snap42.RebaseCycles("Validate"))
 	}
 	for _, c := range client.addLabelCalls {
 		if c.labelName == "fabrik:paused" {
@@ -1275,11 +1273,14 @@ func TestPoll_CruiseValidateComplete_NoRepeatDeepFetch(t *testing.T) {
 		Stages:        stgs,
 	}, client, &mockClaudeInvoker{}, NewWorktreeManager("/tmp/test-repo"))
 
-	// Simulate the perpetual-loop trigger: stable updatedAt cached, processedSet expired.
+	// Simulate the perpetual-loop trigger: stable updatedAt cached, CooldownAt["periodic-re-eval"] expired.
 	eng.mu.Lock()
 	eng.seenUpdatedAt["owner/repo#732"] = fixedTime
-	eng.processedSet["owner/repo#732-Validate"] = time.Now().Add(-2 * time.Minute)
 	eng.mu.Unlock()
+	eng.store.Apply(itemstate.CooldownRecorded{
+		Repo: "owner/repo", Number: 732, Reason: "periodic-re-eval",
+		Until: time.Now().Add(-2 * time.Minute),
+	})
 
 	ctx := context.Background()
 

@@ -57,14 +57,10 @@ func TestCatchUpLoop_NonYolo_ReviewReinvoke_Fires(t *testing.T) {
 	}
 	eng.wg.Wait()
 
-	// reviewCycleCount should be 1 — dispatchReviewReinvoke was dispatched.
-	// Key is stageKey ("owner/repo#N-stageName"), not iKey, for per-stage isolation.
-	stageKey := "owner/repo#55-Implement"
-	eng.mu.Lock()
-	count := eng.reviewCycleCount[stageKey]
-	eng.mu.Unlock()
-	if count != 1 {
-		t.Errorf("reviewCycleCount = %d; want 1 (reinvoke must fire for non-yolo items with unresolved review threads)", count)
+	// ReviewCycles should be 1 — dispatchReviewReinvoke was dispatched.
+	snap55, _ := eng.store.Get("owner/repo", 55)
+	if snap55.ReviewCycles("Implement") != 1 {
+		t.Errorf("ReviewCycles(Implement) = %d; want 1 (reinvoke must fire for non-yolo items with unresolved review threads)", snap55.ReviewCycles("Implement"))
 	}
 
 	// No stage advancement should have occurred (Phase 2 is gated on yolo/cruise).
@@ -122,11 +118,9 @@ func TestCatchUpLoop_NonYolo_NoThreads_NoAdvance(t *testing.T) {
 	if statusCalls != 0 {
 		t.Errorf("updateStatusCalls = %d; want 0 (non-yolo items must not auto-advance)", statusCalls)
 	}
-	eng.mu.Lock()
-	count := eng.reviewCycleCount["owner/repo#56-Implement"]
-	eng.mu.Unlock()
-	if count != 0 {
-		t.Errorf("reviewCycleCount = %d; want 0 (no review threads, no reinvoke)", count)
+	snap56, _ := eng.store.Get("owner/repo", 56)
+	if snap56.ReviewCycles("Implement") != 0 {
+		t.Errorf("ReviewCycles(Implement) = %d; want 0 (no review threads, no reinvoke)", snap56.ReviewCycles("Implement"))
 	}
 }
 
@@ -259,11 +253,8 @@ func TestCatchUpLoop_YoloIssue_ReviewReinvoke_StillFires(t *testing.T) {
 	}
 	eng.wg.Wait()
 
-	stageKey := "owner/repo#57-Implement"
-	eng.mu.Lock()
-	count := eng.reviewCycleCount[stageKey]
-	eng.mu.Unlock()
-	if count != 1 {
-		t.Errorf("reviewCycleCount = %d; want 1 (yolo items must still trigger review reinvoke)", count)
+	snap57, _ := eng.store.Get("owner/repo", 57)
+	if snap57.ReviewCycles("Implement") != 1 {
+		t.Errorf("ReviewCycles(Implement) = %d; want 1 (yolo items must still trigger review reinvoke)", snap57.ReviewCycles("Implement"))
 	}
 }
