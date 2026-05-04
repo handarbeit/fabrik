@@ -638,6 +638,81 @@ func (c *CacheImpl) UpdateItemStatus(key, newStatus string) {
 	c.mu.Unlock()
 }
 
+// ApplyLabelAdded updates the cached label list for the item identified by key,
+// appending label if not already present. No-op when the key is not in the cache.
+// Safe for concurrent use.
+func (c *CacheImpl) ApplyLabelAdded(key, label string) {
+	repo, number, ok := parseItemKey(key)
+	if !ok {
+		c.logFn("[cache] ApplyLabelAdded: key %q invalid — no-op\n", key)
+		return
+	}
+	_, changes, _ := c.store.Apply(itemstate.LocalLabelAdded{
+		Repo:   repo,
+		Number: number,
+		Label:  label,
+	})
+	if len(changes) == 0 {
+		return
+	}
+	now := time.Now()
+	c.mu.Lock()
+	c.localDeltaAt[key] = now
+	c.mu.Unlock()
+}
+
+// ApplyLabelRemoved updates the cached label list for the item identified by key,
+// removing label if present. No-op when the key is not in the cache or label is absent.
+// Safe for concurrent use.
+func (c *CacheImpl) ApplyLabelRemoved(key, label string) {
+	repo, number, ok := parseItemKey(key)
+	if !ok {
+		c.logFn("[cache] ApplyLabelRemoved: key %q invalid — no-op\n", key)
+		return
+	}
+	_, changes, _ := c.store.Apply(itemstate.LocalLabelRemoved{
+		Repo:   repo,
+		Number: number,
+		Label:  label,
+	})
+	if len(changes) == 0 {
+		return
+	}
+	now := time.Now()
+	c.mu.Lock()
+	c.localDeltaAt[key] = now
+	c.mu.Unlock()
+}
+
+// ApplyCommentAdded appends comment to the cached comment list for the item
+// identified by key. No-op when the key is not in the cache.
+// Safe for concurrent use.
+//
+// Note: LocalCommentAdded is a raw append (not idempotent by DatabaseID).
+// If a webhook echo for the same comment arrives before the next Reconcile,
+// the comment may appear twice in the cache until Reconcile replaces it.
+// This is acceptable because dispatch-relevant comment checks use rocket-reaction
+// detection rather than DatabaseID uniqueness.
+func (c *CacheImpl) ApplyCommentAdded(key string, comment gh.Comment) {
+	repo, number, ok := parseItemKey(key)
+	if !ok {
+		c.logFn("[cache] ApplyCommentAdded: key %q invalid — no-op\n", key)
+		return
+	}
+	_, changes, _ := c.store.Apply(itemstate.LocalCommentAdded{
+		Repo:    repo,
+		Number:  number,
+		Comment: comment,
+	})
+	if len(changes) == 0 {
+		return
+	}
+	now := time.Now()
+	c.mu.Lock()
+	c.localDeltaAt[key] = now
+	c.mu.Unlock()
+}
+
 // ApplyStatusBatch updates Status for items identified by project-item node IDs.
 // Entries whose itemID is not in the Store's itemIDToKey index are silently skipped.
 // Safe for concurrent use.
