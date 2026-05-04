@@ -197,6 +197,7 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		client:               client,
 		claude:               claude,
 		worktreeManagers:     wms,
+		store:                itemstate.NewStore(nil),
 		processedSet:         make(map[string]time.Time),
 		lockedIssues:         make(map[string]bool),
 		lastUsage:            make(map[string]TokenUsage),
