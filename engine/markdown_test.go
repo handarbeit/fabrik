@@ -302,3 +302,130 @@ func TestReplaceVerificationSection_CaseInsensitive(t *testing.T) {
 		t.Error("new content missing")
 	}
 }
+
+func TestReplaceVerificationSection_UnclosedFenceInSummary(t *testing.T) {
+	prBody := "## Verification\n\n(placeholder)\n\n---\n\nCloses #3"
+	// summary contains an unclosed fence — would hide --- and Closes #3
+	summary := "Here is an example:\n\n```bash\nsome command"
+	updated, ok := replaceVerificationSection(prBody, summary)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if !strings.Contains(updated, "Closes #3") {
+		t.Errorf("Closes #3 must be preserved, got: %q", updated)
+	}
+	// The body must end with Closes #3 (outside any fence)
+	if !strings.HasSuffix(strings.TrimSpace(updated), "Closes #3") {
+		t.Errorf("Closes #3 must be at end of body, got tail: %q", updated)
+	}
+}
+
+// ── balanceFences ─────────────────────────────────────────────────────────────
+
+func TestBalanceFences_UnclosedBacktick(t *testing.T) {
+	body := "## Approach\n\n```\ncode here\n\n---\n\nCloses #1"
+	result := balanceFences(body)
+	if !strings.HasSuffix(strings.TrimSpace(result), "Closes #1") {
+		t.Errorf("Closes #1 must remain at end, got: %q", result)
+	}
+	// A closing fence must appear before ---
+	if !strings.Contains(result, "```\n---") {
+		t.Errorf("closing fence must appear before ---, got: %q", result)
+	}
+}
+
+func TestBalanceFences_UnclosedTilde(t *testing.T) {
+	body := "## Approach\n\n~~~\ncode here\n\n---\n\nCloses #2"
+	result := balanceFences(body)
+	if !strings.HasSuffix(strings.TrimSpace(result), "Closes #2") {
+		t.Errorf("Closes #2 must remain at end, got: %q", result)
+	}
+	if !strings.Contains(result, "```\n---") {
+		t.Errorf("closing ``` fence must appear before ---, got: %q", result)
+	}
+}
+
+func TestBalanceFences_UnclosedWithHint(t *testing.T) {
+	body := "## Approach\n\n```bash\necho hi\n\n---\n\nCloses #3"
+	result := balanceFences(body)
+	if !strings.HasSuffix(strings.TrimSpace(result), "Closes #3") {
+		t.Errorf("Closes #3 must remain at end, got: %q", result)
+	}
+	if !strings.Contains(result, "```\n---") {
+		t.Errorf("closing fence must appear before ---, got: %q", result)
+	}
+}
+
+func TestBalanceFences_Balanced_Noop(t *testing.T) {
+	body := "## Approach\n\n```bash\necho hi\n```\n\n---\n\nCloses #4"
+	result := balanceFences(body)
+	if result != body {
+		t.Errorf("balanced body must be unchanged, got: %q", result)
+	}
+}
+
+func TestBalanceFences_Empty(t *testing.T) {
+	result := balanceFences("")
+	if result != "" {
+		t.Errorf("empty body must remain empty, got: %q", result)
+	}
+}
+
+func TestBalanceFences_NoSeparator_FallbackToClosesLine(t *testing.T) {
+	body := "Some text\n\n```\ncode\n\nCloses #5"
+	result := balanceFences(body)
+	if !strings.HasSuffix(strings.TrimSpace(result), "Closes #5") {
+		t.Errorf("Closes #5 must remain at end, got: %q", result)
+	}
+}
+
+func TestBalanceFences_NoSeparatorNoClosesLine_AppendsAtEnd(t *testing.T) {
+	body := "Some text\n\n```\ncode here"
+	result := balanceFences(body)
+	if !strings.HasSuffix(result, "\n```") {
+		t.Errorf("closing fence must be appended at end, got: %q", result)
+	}
+}
+
+// ── buildPRSeedBody fence-balancing ───────────────────────────────────────────
+
+func TestBuildPRSeedBody_UnclosedBacktickInPlan(t *testing.T) {
+	planContent := "## Approach\n\nSee below:\n\n```\nsome example that was never closed\n"
+	body := buildPRSeedBody("## Summary\n\nS.\n", planContent, 10)
+	trimmed := strings.TrimSpace(body)
+	if !strings.HasSuffix(trimmed, "Closes #10") {
+		t.Errorf("Closes #10 must be at end, got tail: %q", trimmed[max(0, len(trimmed)-60):])
+	}
+}
+
+func TestBuildPRSeedBody_UnclosedTildeInPlan(t *testing.T) {
+	planContent := "## Approach\n\nSee below:\n\n~~~\nsome example that was never closed\n"
+	body := buildPRSeedBody("## Summary\n\nS.\n", planContent, 11)
+	trimmed := strings.TrimSpace(body)
+	if !strings.HasSuffix(trimmed, "Closes #11") {
+		t.Errorf("Closes #11 must be at end, got tail: %q", trimmed[max(0, len(trimmed)-60):])
+	}
+}
+
+func TestBuildPRSeedBody_UnclosedHintedFenceInPlan(t *testing.T) {
+	planContent := "## Approach\n\nSee below:\n\n```yaml\nfoo: bar\n"
+	body := buildPRSeedBody("## Summary\n\nS.\n", planContent, 12)
+	trimmed := strings.TrimSpace(body)
+	if !strings.HasSuffix(trimmed, "Closes #12") {
+		t.Errorf("Closes #12 must be at end, got tail: %q", trimmed[max(0, len(trimmed)-60):])
+	}
+}
+
+func TestBuildPRSeedBody_BalancedFencesInPlan(t *testing.T) {
+	planContent := "## Approach\n\nSee below:\n\n```bash\necho hi\n```\n\nDone.\n"
+	body := buildPRSeedBody("## Summary\n\nS.\n", planContent, 13)
+	trimmed := strings.TrimSpace(body)
+	if !strings.HasSuffix(trimmed, "Closes #13") {
+		t.Errorf("Closes #13 must be at end, got tail: %q", trimmed[max(0, len(trimmed)-60):])
+	}
+	// Count fence delimiters: should be exactly 2 (open + close from plan)
+	count := strings.Count(body, "```")
+	if count != 2 {
+		t.Errorf("balanced plan should have exactly 2 fence delimiters, got %d in: %q", count, body)
+	}
+}
