@@ -521,15 +521,19 @@ func (c *CacheImpl) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDe
 		c.mu.Lock()
 		c.linkedPRs[pk] = pr
 		c.mu.Unlock()
-		// If the item had no LinkedPRNumber in Store, update it via deep fetch write-back.
+		// If the item had no LinkedPRNumber in Store, update it without touching deep-fetch state.
+		// Original behavior: only set LinkedPRNumber; do not change LastDeepFetchAt.
 		if linkedPRNum == 0 && snapErr == nil {
-			// Construct a fresh ProjectItem from current Store state + new PR number.
-			pi := snapshotToProjectItem(snap)
-			pi.LinkedPRNumber = pr.Number
-			c.store.Apply(itemstate.ItemDeepFetched{
-				Repo:       fullRepo,
-				Number:     issueNumber,
-				FreshState: pi,
+			// Preserve existing HeadSHA if any (LinkedPR may already have a SHA from a webhook).
+			existingSHA := ""
+			if s := snap.State(); s.LinkedPR != nil {
+				existingSHA = s.LinkedPR.HeadSHA
+			}
+			c.store.Apply(itemstate.PRHeadSHAUpdated{
+				Repo:        fullRepo,
+				Number:      issueNumber,
+				LinkedPRNum: pr.Number,
+				SHA:         existingSHA,
 			})
 			// Also update prNumToKey.
 			pk2 := prKey(fullRepo, pr.Number)
