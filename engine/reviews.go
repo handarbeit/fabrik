@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
@@ -137,6 +138,8 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 					if l == botRepromptedLabel || l == "fabrik:awaiting-review" {
 						if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, l); err != nil {
 							e.logf(item.Number, "warn", "phase 2: could not remove %s: %v\n", l, err)
+						} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+							cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), l)
 						}
 					}
 				}
@@ -172,8 +175,10 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 							e.logf(item.Number, "warn", "phase 1: could not re-add review request for %s: %v\n", login, err)
 						}
 						msg := fmt.Sprintf("🏭 **Fabrik — review re-prompt**\n\n@%s just checking in — could you take a look at this PR?", botMentionHandle(login))
+						// no write-through: excluded — posts to item.LinkedPRNumber (PR comment thread, not issue cache)
 						if dbID, err := e.client.AddComment(owner, repo, item.LinkedPRNumber, msg); err != nil {
 							e.logf(item.Number, "warn", "phase 1: could not post re-prompt comment for %s: %v\n", login, err)
+							// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
 						} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
 							e.logf(item.Number, "warn", "phase 1: could not add 🚀 to re-prompt comment: %v\n", reactErr)
 						}
@@ -181,6 +186,8 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 					}
 					if err := e.client.AddLabelToIssue(owner, repo, item.Number, botRepromptedLabel); err != nil {
 						e.logf(item.Number, "warn", "phase 1: could not add %s: %v\n", botRepromptedLabel, err)
+					} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+						cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), botRepromptedLabel)
 					}
 					e.logf(item.Number, "review-gate", "phase 1: re-prompted bot reviewer(s): %s\n", strings.Join(repromptedLogins, ", "))
 					return true, false
@@ -224,6 +231,8 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	if !alreadyWaiting {
 		if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-review"); err != nil {
 			e.logf(item.Number, "warn", "could not add fabrik:awaiting-review label: %v\n", err)
+		} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-review")
 		}
 	}
 
@@ -237,11 +246,15 @@ func (e *Engine) removeAwaitingReviewLabel(owner, repo string, item gh.ProjectIt
 		if l == "fabrik:awaiting-review" {
 			if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:awaiting-review"); err != nil {
 				e.logf(item.Number, "warn", "could not remove fabrik:awaiting-review label: %v\n", err)
+			} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-review")
 			}
 		}
 		if l == botRepromptedLabel {
 			if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, l); err != nil {
 				e.logf(item.Number, "warn", "could not remove %s label: %v\n", l, err)
+			} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), l)
 			}
 		}
 	}
@@ -352,14 +365,26 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 
 	if dbID, err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
 		e.logf(item.Number, "warn", "could not post review timeout comment: %v\n", err)
-	} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-		e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+				DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
+			})
+		}
+		// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
+		if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+		}
 	}
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
 		e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
 	}
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
 		e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
 	}
 }
 
@@ -476,14 +501,26 @@ func (e *Engine) pauseForReviewCycleLimit(board *gh.ProjectBoard, item gh.Projec
 	)
 	if dbID, err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
 		e.logf(item.Number, "warn", "could not post review cycle limit comment: %v\n", err)
-	} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-		e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+				DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
+			})
+		}
+		// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
+		if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+		}
 	}
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
 		e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
 	}
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
 		e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
 	}
 }
 
