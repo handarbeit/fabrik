@@ -16,21 +16,24 @@ import (
 // ---------------------------------------------------------------------------
 
 type mockClient struct {
-	fetchItemDetailsCount      int
-	fetchCheckRunsCount        int
-	fetchLinkedPRCount         int
-	fetchLabelsCount           int
-	fetchPRClosingIssuesCount  int
-	fetchPRsForSHACount        int
+	fetchItemDetailsCount     int
+	fetchCheckRunsCount       int
+	fetchLinkedPRCount        int
+	fetchLabelsCount          int
+	fetchPRClosingIssuesCount int
+	fetchPRsForSHACount       int
+	fetchProjectItemCount     int
 
 	itemDetailsResult  *gh.ProjectItem
 	checkRunsResult    []gh.CheckRun
 	linkedPRResult     *gh.PRDetails
 	labelsResult       []string
 	projectBoardResult *gh.ProjectBoard
+	projectItemResult  *gh.ProjectItem
 
 	fetchPRClosingIssuesFn func(owner, repo string, prNumber int) ([]int, error)
 	fetchPRsForSHAFn       func(owner, repo, sha string) ([]int, error)
+	fetchProjectItemFn     func(owner, repo string, issueNumber int) (*gh.ProjectItem, error)
 }
 
 func (m *mockClient) FetchProjectBoard(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
@@ -92,6 +95,18 @@ func (m *mockClient) FetchPRClosingIssues(owner, repo string, prNumber int) ([]i
 	m.fetchPRClosingIssuesCount++
 	if m.fetchPRClosingIssuesFn != nil {
 		return m.fetchPRClosingIssuesFn(owner, repo, prNumber)
+	}
+	return nil, nil
+}
+
+func (m *mockClient) FetchProjectItem(owner, repo string, issueNumber int) (*gh.ProjectItem, error) {
+	m.fetchProjectItemCount++
+	if m.fetchProjectItemFn != nil {
+		return m.fetchProjectItemFn(owner, repo, issueNumber)
+	}
+	if m.projectItemResult != nil {
+		cp := *m.projectItemResult
+		return &cp, nil
 	}
 	return nil, nil
 }
