@@ -272,11 +272,12 @@ After a stage runs, any pre-existing user comments get a rocket reaction via `ma
 When `FABRIK_STAGE_COMPLETE` is detected (regardless of Claude's exit code — as of v0.0.26, a non-zero exit is treated as a warning, not a failure, when the marker is present):
 1. Lock released (`fabrik:locked:<user>` and `stage:<name>:in_progress` removed)
 2. Retry tracking cleared
-3. `fabrik:extend-turns` removed (if present); `ErrNotFound` treated as success (user already removed it)
-4. Draft PR created (if `create_draft_pr: true`)
-5. PR marked ready (if `mark_pr_ready_on_complete: true`)
-6. `stage:<name>:complete` label added
-7. Auto-advance to next stage (if `auto_advance: true` or global `yolo`)
+3. Draft PR created (if `create_draft_pr: true`)
+4. PR marked ready (if `mark_pr_ready_on_complete: true`)
+5. `stage:<name>:complete` label added
+6. Auto-advance to next stage (if `auto_advance: true` or global `yolo`)
+
+Note: `fabrik:extend-turns` is **not** removed here. It persists across all intermediate stages and is removed only during the Done stage's cleanup path (see Cleanup Stage below).
 
 ### Blocked-on-Input Path
 
@@ -365,10 +366,11 @@ For `post_to_pr` stages, comment processing posts a new "(comment review)" comme
 ## Phase 6: Cleanup Stage (Done)
 
 The Done stage (`cleanup_worktree: true`) is terminal:
-- No Claude invocation, no lock, no labels
-- Skipped entirely if no worktree exists for the issue — no worktree means there's nothing to clean up
-- Removes worktree directory when it exists
+- No Claude invocation, no lock, no in-progress label management
+- Skipped entirely if `stage:Done:complete` is already present
+- Removes worktree directory when it exists (for non-PR items)
 - Adds `stage:Done:complete` label
+- Removes `fabrik:extend-turns` label if present (this is the designated removal site; the label is not removed during any earlier stage completion)
 - Respects `fabrik:paused` (skips if paused)
 
 ---
