@@ -596,6 +596,9 @@ func (s *Store) updateIndexes(before, after ItemState, key string) {
 func applyProjectItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 	var flags ChangeFlags
 
+	if item.ID != pi.ID && pi.ID != "" {
+		item.ID = pi.ID
+	}
 	if item.ItemID != pi.ItemID {
 		item.ItemID = pi.ItemID
 	}
@@ -763,6 +766,9 @@ func (s *Store) Reset(items []gh.ProjectItem) {
 func applyShallowItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 	var flags ChangeFlags
 
+	if item.ID != pi.ID && pi.ID != "" {
+		item.ID = pi.ID
+	}
 	if item.ItemID != pi.ItemID && pi.ItemID != "" {
 		item.ItemID = pi.ItemID
 	}
