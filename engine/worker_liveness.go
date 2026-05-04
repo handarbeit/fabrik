@@ -94,9 +94,12 @@ func (e *Engine) runWorkerDetectorScan() {
 }
 
 // cleanupStaleWorker removes the lock and in-progress labels for a dead worker
-// and clears the Worker entry in the store.
+// and clears the Worker and Lock entries in the store.
 func (e *Engine) cleanupStaleWorker(repo string, number int, lockLabel string, stageName string) {
 	e.store.Apply(itemstate.WorkerExited{Repo: repo, Number: number})
+	// Also release the lock state so cleanupLockedIssues() on graceful shutdown
+	// does not try to remove already-absent labels and log spurious warnings.
+	e.store.Apply(itemstate.LocalLockReleased{Repo: repo, Number: number})
 
 	owner, repoName := parseOwnerRepo(repo)
 	e.removeLockLabel(owner, repoName, number, lockLabel)
