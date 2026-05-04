@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/verveguy/fabrik/boardcache"
 	gh "github.com/verveguy/fabrik/github"
 	"github.com/verveguy/fabrik/stages"
 )
@@ -427,5 +428,93 @@ func TestAttemptMergeOnValidate_FetchCheckRunsError_ReturnsError(t *testing.T) {
 	}
 	if len(client.mergePRCalls) != 0 {
 		t.Errorf("expected no MergePR on FetchCheckRuns error, got %d", len(client.mergePRCalls))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Layer 0 write-through tests
+// ---------------------------------------------------------------------------
+
+// TestAdvanceToNextStage_WritesThrough_Cache verifies Layer 0: after a successful
+// advanceToNextStage call, the in-memory cache reflects the new status immediately,
+// without waiting for a Layer 2 sweep.
+func TestAdvanceToNextStage_WritesThrough_Cache(t *testing.T) {
+	const (
+		repo      = "owner/repo"
+		issueNum  = 42
+		itemID    = "PVTI_42"
+		projectID = "PID_1"
+	)
+
+	client := &mockGitHubClient{
+		updateProjectItemStatusFn: func(projectID, itemID, fieldID, optionID string) error {
+			return nil
+		},
+	}
+	stgs := testStagesWithValidate()
+	eng := testEngineWithStages(client, stgs)
+
+	// Replace readClient with a CacheImpl bootstrapped with the test item in Research.
+	cache := boardcache.NewCacheImpl(boardcache.NewGitHubAdapter(client), func(format string, args ...any) {})
+	cache.Bootstrap(&gh.ProjectBoard{
+		ProjectID: projectID,
+		Items: []gh.ProjectItem{
+			{
+				ID:     "I_42",
+				ItemID: itemID,
+				Repo:   repo,
+				Number: issueNum,
+				Status: "Research",
+			},
+		},
+	})
+	eng.readClient = cache
+
+	board := &gh.ProjectBoard{ProjectID: projectID}
+	item := gh.ProjectItem{
+		ID:     "I_42",
+		ItemID: itemID,
+		Repo:   repo,
+		Number: issueNum,
+		Status: "Research",
+	}
+	currentStage := stgs[0] // Research
+
+	if err := eng.advanceToNextStage(board, item, currentStage); err != nil {
+		t.Fatalf("advanceToNextStage: %v", err)
+	}
+
+	// The cache should immediately reflect the new status without Layer 2 sweep.
+	gotID, ok := cache.GetItemID(boardcache.ItemKey(repo, issueNum))
+	if !ok {
+		t.Fatal("GetItemID returned !ok after advanceToNextStage")
+	}
+	if gotID != itemID {
+		t.Errorf("item ID mismatch: want %q, got %q", itemID, gotID)
+	}
+
+	// Read status via the cache internals using GetItemID to confirm the key.
+	key := boardcache.ItemKey(repo, issueNum)
+	_ = key // key confirmed via GetItemID above
+
+	// Use ApplyStatusBatch with a no-op to flush nothing; read via GetItemID side-channel.
+	// Directly verify by checking that the cache returns the updated status through the
+	// UpdateItemStatus path: the cache item should now have status "Plan".
+	gotItems, err := cache.FetchProjectBoard("owner", "repo", 1, "organization")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
+	}
+	var found *gh.ProjectItem
+	for i := range gotItems.Items {
+		if gotItems.Items[i].Number == issueNum {
+			found = &gotItems.Items[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("item not found in cache after advanceToNextStage")
+	}
+	if found.Status != "Plan" {
+		t.Errorf("cache Status = %q after advanceToNextStage, want %q", found.Status, "Plan")
 	}
 }
