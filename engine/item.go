@@ -124,38 +124,9 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 		lastSeen, seen := e.seenUpdatedAt[iKey]
 		e.mu.Unlock()
 		if seen && !item.UpdatedAt.After(lastSeen) {
-			// Item unchanged — check CooldownAt for periodic re-eval suppression/expiry.
-			// Any unexpired CooldownAt entry suppresses deep-fetch during its window.
-			// Any expired entry allows re-evaluation once the window passes, preventing
-			// a dependency-blocked or review-blocked item from being silently skipped forever.
-			repo := itemOwnerRepoString(item, e.defaultRepo())
-			if snap, snapErr := e.store.Get(repo, item.Number); snapErr == nil {
-				now := time.Now()
-				var hasActiveCooldown, hasExpiredCooldown bool
-				for _, t := range snap.State().CooldownAt {
-					if now.Before(t) {
-						hasActiveCooldown = true
-					} else if !t.IsZero() {
-						hasExpiredCooldown = true
-					}
-				}
-				if hasActiveCooldown {
-					return false // within cooldown window, suppress deep-fetch
-				}
-				if hasExpiredCooldown {
-					// Cooldown window has passed — allow re-evaluation, except for completed
-					// stages that have no retry work. fabrik:awaiting-review items carry
-					// stage:X:complete but still need Phase 1/Phase 2 timer re-evaluation.
-					if hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) &&
-						!hasLabel(item, "fabrik:awaiting-review") {
-						return false
-					}
-					return true
-				}
-			}
 			// Force deep-fetch for items whose progress depends on a state change that
 			// does NOT bump the issue/project-item/linked-PR updatedAt and that needs
-			// re-evaluation every poll. The CooldownAt path above handles the cheaper
+			// re-evaluation every poll. The CooldownAt path below handles the cheaper
 			// periodic re-evaluation (every 10 × PollSeconds) for blocked/gated items.
 			//
 			//   fabrik:awaiting-ci      — CI check run completions don't bump updatedAt;
@@ -168,6 +139,22 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 			//                             but the issue's updatedAt won't bump on a base-
 			//                             branch advance; the merge-gate must re-check.
 			//
+			// These labels must be checked BEFORE the CooldownAt block below:
+			// poll.go's defer writes CooldownAt["periodic-re-eval"] for ALL
+			// deepFetchCandidates (not just terminal ones), so an awaiting-ci or
+			// rebase-needed item that also received a periodic-re-eval stamp would
+			// be incorrectly suppressed for up to 10 × PollSeconds.
+			for _, l := range item.Labels {
+				if l == "fabrik:awaiting-ci" ||
+					l == "fabrik:rebase-needed" {
+					return true
+				}
+			}
+			// Item unchanged — check CooldownAt for periodic re-eval suppression/expiry.
+			// Any unexpired CooldownAt entry suppresses deep-fetch during its window.
+			// Any expired entry allows re-evaluation once the window passes, preventing
+			// a dependency-blocked or review-blocked item from being silently skipped forever.
+			//
 			// Labels using the CooldownAt path (periodic re-eval every 10 × PollSeconds):
 			//   fabrik:blocked        — processItem sets CooldownAt["dep-blocked"] when
 			//                           checkDependencies returns true. Blocker closure
@@ -179,9 +166,20 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 			//                           per-poll) re-evaluation is sufficient.
 			//   fabrik:awaiting-input — auto-clear trigger is a new user comment (bumps
 			//                           updatedAt); no CooldownAt entry needed today.
-			for _, l := range item.Labels {
-				if l == "fabrik:awaiting-ci" ||
-					l == "fabrik:rebase-needed" {
+			repo := itemOwnerRepoString(item, e.defaultRepo())
+			if snap, snapErr := e.store.Get(repo, item.Number); snapErr == nil {
+				now := time.Now()
+				if snap.HasActiveCooldown(now) {
+					return false // within cooldown window, suppress deep-fetch
+				}
+				if snap.HasExpiredCooldown(now) {
+					// Cooldown window has passed — allow re-evaluation, except for completed
+					// stages that have no retry work. fabrik:awaiting-review items carry
+					// stage:X:complete but still need Phase 1/Phase 2 timer re-evaluation.
+					if hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) &&
+						!hasLabel(item, "fabrik:awaiting-review") {
+						return false
+					}
 					return true
 				}
 			}
