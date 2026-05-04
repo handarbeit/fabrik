@@ -1323,6 +1323,43 @@ func TestAutoHealNegativeCachePreventsRepeatedRESTCall(t *testing.T) {
 	}
 }
 
+func TestAutoHealPullRequestDelta(t *testing.T) {
+	mc := &mockClient{
+		fetchPRClosingIssuesFn: func(owner, repo string, prNumber int) ([]int, error) {
+			return []int{1}, nil // PR #42 closes issue #1
+		},
+	}
+	c := seedCacheWithStalePRLink(t, mc)
+
+	before := time.Now()
+	payload := pullRequestPayloadJSON("opened", "owner/repo", 42, "sha_heal_pr", "open", false, false)
+	c.ApplyDelta("pull_request", payload)
+
+	c.mu.RLock()
+	item := c.items[itemKey("owner/repo", 1)]
+	linkedPR := item.LinkedPRNumber
+	shaKey, shaOK := c.shaToKey["sha_heal_pr"]
+	df := c.deepFetched[itemKey("owner/repo", 1)]
+	updatedAt := item.UpdatedAt
+	c.mu.RUnlock()
+
+	if linkedPR != 42 {
+		t.Errorf("expected LinkedPRNumber=42 after heal, got %d", linkedPR)
+	}
+	if !shaOK || shaKey != itemKey("owner/repo", 1) {
+		t.Errorf("expected shaToKey[sha_heal_pr]=%q, got %q (ok=%v)", itemKey("owner/repo", 1), shaKey, shaOK)
+	}
+	if df {
+		t.Error("expected deepFetched to be cleared after auto-heal")
+	}
+	if !updatedAt.After(before) {
+		t.Error("expected UpdatedAt to be bumped after auto-heal")
+	}
+	if mc.fetchPRClosingIssuesCount != 1 {
+		t.Errorf("expected exactly 1 REST call, got %d", mc.fetchPRClosingIssuesCount)
+	}
+}
+
 // seedCacheWithStalePRLink variant accepting a custom logFn for log-capture tests.
 func seedCacheWithStalePRLink2(t *testing.T, logFn func(string, ...any)) *CacheImpl {
 	t.Helper()
