@@ -683,12 +683,12 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			}
 		}
 		e.mu.Unlock()
-		// Refresh CooldownAt["periodic-re-eval"] for all non-advanced, non-cleanup items
-		// that completed a full poll cycle without dispatching work. This preserves the
-		// #488 fix: terminal and gated items are deep-fetched at most once per cooldown
-		// window. The stage:X:complete guard is removed here because LastAttemptAt (not
-		// CooldownAt) now carries dispatch suppression — refreshing CooldownAt for ALL
-		// non-worker items is safe regardless of completion state (#504 structural fix).
+		// Refresh CooldownAt["periodic-re-eval"] for all non-advanced, non-cleanup
+		// deepFetchCandidates after each full poll cycle. This preserves the #488 fix:
+		// items are deep-fetched at most once per cooldown window. The stage:X:complete
+		// terminal-only guard is removed here: LastAttemptAt (not CooldownAt) now carries
+		// dispatch suppression, so refreshing CooldownAt for ALL non-advanced
+		// deepFetchCandidates is safe regardless of completion state (#504 structural fix).
 		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
 		for _, item := range deepFetchCandidates {
 			iKey := issueKey(item, e.defaultRepo())
