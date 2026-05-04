@@ -438,6 +438,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.LastInvocationCompleted = v.Completed
 		item.LastInvocationBlocked = v.Blocked
 		item.LastInvocationIsComment = v.IsComment
+		item.LastInvocationDuration = v.Duration
 		item.LastTokenUsage = v.Usage
 		return InvocationChanged
 
