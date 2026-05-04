@@ -201,11 +201,15 @@ func TestApplyLocalCommentAdded(t *testing.T) {
 
 func TestApplyLocalLockAcquired(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
-	w := &WorkerHandle{PID: 999, StageName: "Implement", StartedAt: time.Now()}
-	applyExpect(t, s, LocalLockAcquired{Repo: testRepo, Number: 1, User: "alice", Worker: w}, LockChanged|WorkerChanged)
+	acquiredAt := time.Now()
+	w := &WorkerHandle{PID: 999, StageName: "Implement", StartedAt: acquiredAt}
+	applyExpect(t, s, LocalLockAcquired{Repo: testRepo, Number: 1, User: "alice", Worker: w, AcquiredAt: acquiredAt}, LockChanged|WorkerChanged)
 	st := getItem(t, s, testRepo, 1)
 	if st.Lock == nil || st.Lock.HolderUser != "alice" || !st.Lock.HeldByThis {
 		t.Error("Lock not set correctly")
+	}
+	if !st.Lock.AcquiredAt.Equal(acquiredAt) {
+		t.Error("Lock.AcquiredAt not set from mutation")
 	}
 	if st.Worker == nil || st.Worker.PID != 999 {
 		t.Error("Worker not set correctly")
@@ -214,7 +218,7 @@ func TestApplyLocalLockAcquired(t *testing.T) {
 
 func TestApplyLocalLockReleased(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
-	s.Apply(LocalLockAcquired{Repo: testRepo, Number: 1, User: "alice", Worker: nil})
+	s.Apply(LocalLockAcquired{Repo: testRepo, Number: 1, User: "alice", Worker: nil, AcquiredAt: time.Now()})
 	applyExpect(t, s, LocalLockReleased{Repo: testRepo, Number: 1}, LockChanged)
 	if getItem(t, s, testRepo, 1).Lock != nil {
 		t.Error("Lock not cleared")

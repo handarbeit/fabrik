@@ -172,10 +172,11 @@ func (m LocalCommentAdded) itemKey() string { return itemKeyFor(m.Repo, m.Number
 
 // LocalLockAcquired is applied after fabrik adds the fabrik:locked:<user> label.
 type LocalLockAcquired struct {
-	Repo   string
-	Number int
-	User   string
-	Worker *WorkerHandle
+	Repo       string
+	Number     int
+	User       string
+	Worker     *WorkerHandle
+	AcquiredAt time.Time // caller-provided time; enables idempotent/no-op detection
 }
 
 func (LocalLockAcquired) isMutation() {}
@@ -349,8 +350,9 @@ func (BaseBranchWarnRecorded) isMutation() {}
 func (m BaseBranchWarnRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // itemKeyFor constructs the canonical "owner/repo#N" item key used throughout the Store.
+// Returns "" when repo is empty (indicating an invalid or unroutable mutation).
 func itemKeyFor(repo string, number int) string {
-	if repo == "" && number == 0 {
+	if repo == "" {
 		return ""
 	}
 	return repo + "#" + strconv.Itoa(number)
