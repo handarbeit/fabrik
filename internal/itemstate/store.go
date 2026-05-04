@@ -276,6 +276,12 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return StateChanged
 
 	case IssueCommentCreated:
+		// Idempotent: skip if comment with this DatabaseID already exists.
+		for _, existing := range item.Comments {
+			if existing.DatabaseID == v.Comment.DatabaseID && v.Comment.DatabaseID != 0 {
+				return 0
+			}
+		}
 		item.Comments = append(item.Comments, v.Comment)
 		return CommentsChanged
 
@@ -393,13 +399,52 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 
 	case PRReviewSubmitted:
 		ensureLinkedPR(item, v.Number)
+		// Upsert by DatabaseID so a re-review replaces the prior entry.
+		for i, r := range item.LinkedPR.Reviews {
+			if r.DatabaseID == v.Review.DatabaseID && v.Review.DatabaseID != 0 {
+				item.LinkedPR.Reviews[i] = v.Review
+				return LinkedPRChanged
+			}
+		}
 		item.LinkedPR.Reviews = append(item.LinkedPR.Reviews, v.Review)
 		return LinkedPRChanged
 
 	case PRReviewCommentCreated:
 		ensureLinkedPR(item, v.PRNumber)
+		// Idempotent: skip if comment with this NodeID already exists.
+		for _, existing := range item.LinkedPR.ThreadComments {
+			if existing.ID == v.Comment.ID {
+				return 0
+			}
+		}
 		item.LinkedPR.ThreadComments = append(item.LinkedPR.ThreadComments, v.Comment)
 		return LinkedPRChanged | CommentsChanged
+
+	case DeepFetchInvalidated:
+		item.LastDeepFetchAt = time.Time{}
+		return DeepFetchChanged
+
+	case PRHeadSHAUpdated:
+		ensureLinkedPR(item, v.LinkedPRNum)
+		if v.LinkedPRNum != 0 {
+			item.LinkedPR.Number = v.LinkedPRNum
+		}
+		item.LinkedPR.HeadSHA = v.SHA
+		return LinkedPRChanged
+
+	case ReviewThreadCommentAdded:
+		ensureLinkedPR(item, 0)
+		// Idempotent by NodeID.
+		for _, existing := range item.LinkedPR.ThreadComments {
+			if existing.ID == v.Comment.ID {
+				return 0
+			}
+		}
+		item.LinkedPR.ThreadComments = append(item.LinkedPR.ThreadComments, v.Comment)
+		return LinkedPRChanged | CommentsChanged
+
+	case ShallowBoardItemUpdated:
+		return applyShallowItem(item, v.Item)
 	}
 
 	return 0
@@ -645,6 +690,111 @@ func applyProjectItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 
 	item.Repo = pi.Repo
 	item.Number = pi.Number
+
+	return flags
+}
+
+// All returns an immutable snapshot of every item currently in the Store.
+// The returned slice is a point-in-time snapshot; subsequent mutations do not
+// affect it. Safe to call concurrently with Apply.
+func (s *Store) All() []Snapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	snaps := make([]Snapshot, 0, len(s.items))
+	for _, item := range s.items {
+		snaps = append(snaps, newSnapshot(*item))
+	}
+	return snaps
+}
+
+// Remove deletes the item identified by (repo, number) from the Store and
+// updates the shaToKey and itemIDToKey indexes accordingly.
+// No-op when the item is not present.
+func (s *Store) Remove(repo string, number int) {
+	key := itemKeyFor(repo, number)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.items[key]
+	if !ok {
+		return
+	}
+	if item.ItemID != "" {
+		delete(s.itemIDToKey, item.ItemID)
+	}
+	if item.LinkedPR != nil && item.LinkedPR.HeadSHA != "" {
+		delete(s.shaToKey, item.LinkedPR.HeadSHA)
+	}
+	delete(s.items, key)
+}
+
+// Reset atomically replaces all Store state with the items in the given slice.
+// Existing items, indexes, and deep-fetch state are cleared. This is used by
+// Bootstrap to ensure a clean slate (unlike Reconcile, which preserves deep state).
+func (s *Store) Reset(items []gh.ProjectItem) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.items = make(map[string]*ItemState, len(items))
+	s.shaToKey = make(map[string]string, len(items))
+	s.itemIDToKey = make(map[string]string, len(items))
+	for i := range items {
+		pi := items[i]
+		key := itemKeyFor(pi.Repo, pi.Number)
+		if key == "" {
+			continue
+		}
+		item := &ItemState{Repo: pi.Repo, Number: pi.Number}
+		applyProjectItem(item, pi)
+		s.items[key] = item
+		if item.ItemID != "" {
+			s.itemIDToKey[item.ItemID] = key
+		}
+		if item.LinkedPR != nil && item.LinkedPR.HeadSHA != "" {
+			s.shaToKey[item.LinkedPR.HeadSHA] = key
+		}
+	}
+}
+
+// applyShallowItem updates only the shallow board fields of item from pi.
+// Deep fields (Body, Comments, Assignees, BlockedBy, LinkedPRReviews, etc.)
+// are left unchanged. Used by CacheImpl.Reconcile to apply shallow board
+// updates without wiping deep-fetched data.
+func applyShallowItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
+	var flags ChangeFlags
+
+	if item.ItemID != pi.ItemID && pi.ItemID != "" {
+		item.ItemID = pi.ItemID
+	}
+
+	if item.Title != pi.Title {
+		item.Title = pi.Title
+		flags |= TitleBodyChanged
+	}
+
+	if item.URL != pi.URL && pi.URL != "" {
+		item.URL = pi.URL
+		flags |= TitleBodyChanged
+	}
+
+	if item.State != stateFrom(pi) || item.IsClosed != pi.IsClosed || item.IsPR != pi.IsPR {
+		item.State = stateFrom(pi)
+		item.IsClosed = pi.IsClosed
+		item.IsPR = pi.IsPR
+		flags |= StateChanged
+	}
+
+	if !reflect.DeepEqual(item.Labels, pi.Labels) {
+		item.Labels = copyStrings(pi.Labels)
+		flags |= LabelsChanged
+	}
+
+	if item.Status != pi.Status {
+		item.Status = pi.Status
+		flags |= StatusChanged
+	}
+
+	if !item.UpdatedAt.Equal(pi.UpdatedAt) {
+		item.UpdatedAt = pi.UpdatedAt
+	}
 
 	return flags
 }
