@@ -248,8 +248,10 @@ func TestApplyStageAttempted(t *testing.T) {
 	at := time.Now()
 	applyExpect(t, s, StageAttempted{Repo: testRepo, Number: 1, StageName: "Implement", At: at}, StageStateChanged)
 	st := getItem(t, s, testRepo, 1)
-	if st.StageState.Attempts["Implement"] != 1 {
-		t.Errorf("Attempts[Implement] = %d; want 1", st.StageState.Attempts["Implement"])
+	// StageAttempted only sets LastAttemptAt; it does NOT increment Attempts.
+	// Attempts is incremented exclusively by StageRetryIncremented (on stage failure).
+	if st.StageState.Attempts["Implement"] != 0 {
+		t.Errorf("Attempts[Implement] = %d; want 0 (StageAttempted must not touch Attempts)", st.StageState.Attempts["Implement"])
 	}
 	if !st.StageState.LastAttemptAt["Implement"].Equal(at) {
 		t.Error("LastAttemptAt not set")
@@ -260,10 +262,11 @@ func TestApplyStageAttempted(t *testing.T) {
 
 func TestApplyStageRetryIncremented(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
+	// StageAttempted does not increment Attempts; StageRetryIncremented does.
 	s.Apply(StageAttempted{Repo: testRepo, Number: 1, StageName: "Review", At: time.Now()})
 	applyExpect(t, s, StageRetryIncremented{Repo: testRepo, Number: 1, StageName: "Review"}, StageStateChanged)
-	if getItem(t, s, testRepo, 1).StageState.Attempts["Review"] != 2 {
-		t.Error("Attempts not incremented to 2")
+	if getItem(t, s, testRepo, 1).StageState.Attempts["Review"] != 1 {
+		t.Error("Attempts not incremented to 1")
 	}
 }
 
@@ -271,7 +274,7 @@ func TestApplyStageRetryIncremented(t *testing.T) {
 
 func TestApplyStageRetryCleared(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
-	s.Apply(StageAttempted{Repo: testRepo, Number: 1, StageName: "Implement", At: time.Now()})
+	s.Apply(StageRetryIncremented{Repo: testRepo, Number: 1, StageName: "Implement"})
 	applyExpect(t, s, StageRetryCleared{Repo: testRepo, Number: 1, StageName: "Implement"}, StageStateChanged)
 	if getItem(t, s, testRepo, 1).StageState.Attempts["Implement"] != 0 {
 		t.Error("Attempts not cleared")
