@@ -743,19 +743,22 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			continue
 		}
 		e.logf(0, "poll", "deep-fetching details for #%d\n", board.Items[i].Number)
-		iKey := issueKey(board.Items[i], e.defaultRepo())
 		if err := e.readClient.FetchItemDetails(&board.Items[i]); err != nil {
 			e.logf(0, "warn", "could not fetch details for #%d: %v\n", board.Items[i].Number, err)
-			e.mu.Lock()
-			e.deepFetchFailureTime[iKey] = time.Now()
-			e.mu.Unlock()
+			e.store.Apply(itemstate.DeepFetchFailed{
+				Repo:   itemOwnerRepoString(board.Items[i], e.defaultRepo()),
+				Number: board.Items[i].Number,
+				At:     time.Now(),
+			})
 			// Skip appending to deepFetchCandidates so lastUpdatedAt is NOT updated.
 			// The next poll will retry the deep-fetch for this item.
 			continue
 		}
-		e.mu.Lock()
-		delete(e.deepFetchFailureTime, iKey)
-		e.mu.Unlock()
+		e.store.Apply(itemstate.ItemDeepFetched{
+			Repo:       itemOwnerRepoString(board.Items[i], e.defaultRepo()),
+			Number:     board.Items[i].Number,
+			FreshState: board.Items[i],
+		})
 		deepFetchCandidates = append(deepFetchCandidates, board.Items[i])
 		deepFetched++
 	}

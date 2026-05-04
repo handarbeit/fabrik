@@ -9,6 +9,7 @@ import (
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
 )
@@ -40,7 +41,7 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 	}
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-	key := issueKey(item, e.defaultRepo())
+	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
 
 	pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number)
 	if err != nil {
@@ -76,17 +77,21 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 	}
 
 	if len(checkRuns) > 0 {
-		e.mu.Lock()
-		e.prHasHadChecks[key] = true
-		e.mu.Unlock()
+		e.store.Apply(itemstate.PRChecksObserved{
+			Repo:   itemRepo,
+			Number: item.Number,
+		})
 	}
 
 	// R5: no check runs found. If this PR has had checks before, we're likely in
 	// the post-push registration window — block and wait rather than clearing.
 	if len(checkRuns) == 0 {
-		e.mu.Lock()
-		hadChecks := e.prHasHadChecks[key]
-		e.mu.Unlock()
+		var hadChecks bool
+		if snap, snapErr := e.store.Get(itemRepo, item.Number); snapErr == nil {
+			if lpr := snap.LinkedPR(); lpr != nil {
+				hadChecks = lpr.HasHadChecks
+			}
+		}
 		if hadChecks {
 			e.logf(item.Number, "ci-gate", "no check runs for SHA %s — likely post-push registration delay; waiting\n", pr.HeadSHA[:min(8, len(pr.HeadSHA))])
 			return true, false, false
@@ -358,14 +363,14 @@ func (e *Engine) dispatchCIFixReinvoke(ctx context.Context, board *gh.ProjectBoa
 		e.logf(item.Number, "ci-fix-reinvoke", "re-invoking stage %q via comment processing with CI failure context\n", stage.Name)
 		err := e.processComments(ctx, board, item, &ciFixStage, []gh.Comment{syntheticComment})
 
-		e.mu.Lock()
-		usage := e.lastUsage[iKey]
-		completed := e.lastCompleted[iKey]
-		blocked := e.lastBlocked[iKey]
-		delete(e.lastUsage, iKey)
-		delete(e.lastCompleted, iKey)
-		delete(e.lastBlocked, iKey)
-		e.mu.Unlock()
+		var usage TokenUsage
+		var completed, blocked bool
+		if snap, snapErr := e.store.Get(itemRepo, item.Number); snapErr == nil {
+			st := snap.State()
+			usage = st.LastTokenUsage
+			completed = st.LastInvocationCompleted
+			blocked = st.LastInvocationBlocked
+		}
 		e.emitStructural(tui.JobCompletedEvent{
 			IssueNumber:    item.Number,
 			Repo:           itemRepo,
