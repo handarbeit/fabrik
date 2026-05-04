@@ -784,7 +784,7 @@ func TestProjectsV2ItemCreated(t *testing.T) {
 	c := NewCacheImpl(mc, nopLog)
 	c.Bootstrap(&gh.ProjectBoard{ProjectID: "P", Title: "T", OwnerType: "organization"})
 
-	payload := projectsV2ItemCreatedPayloadJSON("I_88", "Issue")
+	payload := projectsV2ItemCreatedPayloadJSON("I_88", "Issue", "PVTI_088")
 	c.ApplyDelta("projects_v2_item", payload)
 
 	s := testGetState(t, c, "owner/repo", 88)
@@ -794,6 +794,11 @@ func TestProjectsV2ItemCreated(t *testing.T) {
 	if mc.fetchItemDetailsCount != 1 {
 		t.Errorf("want exactly 1 FetchItemDetails call, got %d", mc.fetchItemDetailsCount)
 	}
+	// Verify the board item ID was stored so subsequent edited/deleted/archived
+	// events can be resolved through itemIDToKey.
+	if itemID, ok := c.GetItemID(itemKey("owner/repo", 88)); !ok || itemID != "PVTI_088" {
+		t.Errorf("want itemIDToKey[PVTI_088]=owner/repo#88; GetItemID returned (%q, %v)", itemID, ok)
+	}
 }
 
 func TestProjectsV2ItemCreatedNonIssueIgnored(t *testing.T) {
@@ -802,7 +807,7 @@ func TestProjectsV2ItemCreatedNonIssueIgnored(t *testing.T) {
 	c.Bootstrap(&gh.ProjectBoard{ProjectID: "P", Title: "T", OwnerType: "organization"})
 
 	// PullRequest content type must be ignored.
-	c.ApplyDelta("projects_v2_item", projectsV2ItemCreatedPayloadJSON("PR_123", "PullRequest"))
+	c.ApplyDelta("projects_v2_item", projectsV2ItemCreatedPayloadJSON("PR_123", "PullRequest", "PVTI_PR"))
 
 	if mc.fetchItemDetailsCount != 0 {
 		t.Errorf("PullRequest content_type should not trigger FetchItemDetails, got %d calls", mc.fetchItemDetailsCount)
