@@ -2,7 +2,8 @@
 
 **Status**: Accepted  
 **Date**: 2026-04-26  
-**Supersedes**: ADR 003 (Polling Over Webhooks)
+**Supersedes**: ADR 003 (Polling Over Webhooks)  
+**Supplemented by**: ADR 035 (Four-Layer Status Reconciliation) — replaces the 60-minute full-board reconcile described in §Board-column changes with a lightweight 10-minute status-only sweep
 
 ## Context
 
