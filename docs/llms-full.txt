@@ -768,7 +768,7 @@ Fabrik uses the `fabrik:blocked` label to track blocked issues. The label lifecy
 
 **Key behavior callouts:**
 
-- **The first stage (Specify) always runs regardless of blockers** — dependencies only gate subsequent stages. This allows a formation to be fully specified before execution begins.
+- **All stages, including the first (Specify), are subject to the dependency gate** — if an issue has open blockers when it enters any stage, it pauses with `fabrik:blocked` until all blockers close.
 - **Independent issues start in parallel** — issues with no blockers are dispatched concurrently up to the configured `MaxConcurrent` limit.
 - **Failed issues retry independently** — a failure in one formation member does not affect siblings.
 - **Cross-repo dependencies are supported** — a blocking issue can be in a different repository. Fabrik displays cross-repo blockers as `owner/repo#N` in log output.
@@ -779,7 +779,7 @@ Fabrik uses the `fabrik:blocked` label to track blocked issues. The label lifecy
 2. **Add blocked-by edges** in GitHub using the Relationships sidebar (see above).
 3. **Label all issues `fabrik:yolo`** — this makes the formation hands-free. Without `fabrik:yolo`, each stage requires a manual card move on the project board.
 4. **Move all issues to Specify** on the project board. Fabrik will pick them up on the next poll.
-5. **Watch it run** — Fabrik executes Specify for all issues in parallel, then gates subsequent stages on dependency resolution automatically.
+5. **Watch it run** — Fabrik gates every stage, including Specify, on dependency resolution. Issues with no blockers start immediately; blocked issues wait with `fabrik:blocked` until their dependencies close.
 
 #### Example Formation
 
@@ -1045,6 +1045,69 @@ The CI timeout is measured from when `fabrik:awaiting-ci` was first applied. Bec
 #### Restart Persistence
 
 The CI timeout is measured from the `fabrik:awaiting-ci` label's creation timestamp (fetched via the GitHub API), making it durable across engine restarts. The cycle count is in-memory and resets on restart.
+
+### CI Auto-Advance Workflow
+
+`fabrik init` generates a GitHub Actions workflow template at
+`.github/workflows/fabrik-advance.yml`. This workflow advances a Fabrik-managed
+project board item to a target stage column when CI passes on a `fabrik/*` branch —
+providing event-driven board advancement as an alternative to Fabrik's built-in
+poll-based `wait_for_ci` gate.
+
+#### When to use it
+
+Use the generated workflow when you want the board card to move _immediately_ after
+CI passes, without waiting for Fabrik's next poll cycle. If you prefer Fabrik to own
+the CI gate entirely (and tolerate up to one poll interval of latency), set
+`wait_for_ci: true` in the stage YAML instead and omit this workflow.
+
+#### Required setup
+
+Before the workflow can run, set the following in your repository
+**Settings → Secrets and variables**:
+
+| Kind | Name | Value |
+|------|------|-------|
+| Repository variable | `FABRIK_PROJECT_NUMBER` | The integer in the project URL: `.../projects/<NUMBER>` |
+| Repository variable | `FABRIK_TARGET_STAGE` | Exact stage column name to advance to, e.g. `Review` |
+| Repository secret | `FABRIK_TOKEN` | Classic PAT with `repo`, `project`, and `workflow` scopes (same token the engine uses) |
+
+#### How it works
+
+1. Triggers on `check_suite: completed` for branches matching `fabrik/*`.
+2. Skips if the suite conclusion is anything other than `success` — failed CI does
+   not advance the card.
+3. Uses `repository.issue.projectItems` to look up the board item by issue number
+   (O(1), pagination-safe — works on boards of any size).
+4. Fetches the Status field options from the project to resolve `FABRIK_TARGET_STAGE`
+   to a `singleSelectOptionId`.
+5. Calls `updateProjectV2ItemFieldValue` to advance the card.
+6. Exits non-zero with a descriptive message if the issue is not on the board or if
+   the target stage name does not match any board column — distinguishing a real
+   misconfiguration from a silent empty-result bug.
+
+#### Regenerating the template
+
+```bash
+fabrik init --force
+```
+
+`--force` overwrites `.github/workflows/fabrik-advance.yml` with the latest template.
+Commit the updated file if you want the change tracked in git.
+
+#### Distinction from Fabrik's internal CI gate
+
+Fabrik has a built-in CI gate (`wait_for_ci: true` in stage YAML) that polls for CI
+status and advances the board via the engine's own `advanceToNextStage` path. Both
+mechanisms ultimately call `updateProjectV2ItemFieldValue`; the difference is timing
+and ownership:
+
+| | `wait_for_ci: true` | Generated workflow |
+|--|---|---|
+| **Latency** | Up to one poll interval after CI passes | Event-driven (minutes) |
+| **Requires workflow file** | No | Yes |
+| **Board advance ownership** | Fabrik engine | GitHub Actions |
+| **Use when** | Simpler setup is preferred | Low-latency advance is important |
 
 ---
 
@@ -2015,7 +2078,7 @@ Each active stage column has the same set of reachable sub-states:
 | `fabrik:awaiting-review` | `handleStageComplete` (Path 1), `checkReviewGate` (Path 2) | Path 1: optimistically after stage completion when `wait_for_reviews: true` (does not check reviewer state — data is stale). Path 2: when `LinkedPRReviewRequests` is non-empty OR when `len(outstanding)==0 && !hasReviews` (the bot self-submission case — covers Copilot/Gemini-style reviewers that don't appear in the formal requested-reviewer list but still need to submit a review) | `checkReviewGate` (both natural clear and timeout paths) | When all reviewers submit, or when timeout elapses (removed by `checkReviewGate` before `pauseForReviewTimeout` is called) | Phase 1 / Phase 2 reprompt timers in `checkReviewGate` fire on label-applied-at age (not on `updatedAt` movement). A non-responsive bot reviewer produces no comment / no review / no PR activity, so `updatedAt` never moves — without periodic re-evaluation the timers would never get a chance to fire. The catch-up loop's blocked-path records `CooldownAt("review-blocked")` (via `CooldownRecorded{Reason: "review-blocked"}` mutation) so `itemMayNeedWork`'s cooldown retry path re-admits the item every 10 × `PollSeconds` (same pattern as `fabrik:blocked`); a per-poll cache bypass is intentionally avoided because long-lived review-waiting items would otherwise become a permanent GraphQL hot path. Blocks auto-advance until review gate clears |
 | `fabrik:awaiting-ci` | `handleStageComplete` (on FABRIK_STAGE_COMPLETE for `wait_for_ci: true` stages; idempotent); `checkCIGate` (on confirmed CI failure; idempotent) | `handleStageComplete`: immediately on FABRIK_STAGE_COMPLETE — replaces premature `stage:X:complete` and keeps the item in the CI-await window (ADR 032). `checkCIGate`: when CI check runs for the PR head SHA have `conclusion: failure/timed_out/action_required`. | `checkCIGate` (when `mergeable_state ∈ {clean, unstable}`, when CI check classification reports all-green, or when gate times out); `attemptMergeOnValidate` (when `mergeable_state ∈ {clean, unstable}` shortcut fires) | When GitHub's `mergeable_state` indicates the PR is mergeable (v0.0.52 shortcut — the `MergeableStateAccepted` allowlist); when all CI checks pass (green) under the per-check classification fallback; or when timeout elapses (removed before `pauseForCITimeout` is called) | Signals CI gate is active (pending or failed); triggers `itemMayNeedWork` updatedAt cache bypass; suppresses dispatcher re-invocation (`itemNeedsWork` returns false); blocks auto-advance until CI gate clears. **`stage:X:complete` is absent while this label is present — it is added by `checkCIGate` when CI clears (R5) or when `mergeable_state` shortcut clears the gate (v0.0.52).** |
 | `fabrik:rebase-needed` | `checkMergeabilityGate` (catch-up loop, `wait_for_ci: true` stages); `attemptMergeOnValidate` (legacy auto-merge path, yolo+Validate without `wait_for_ci`) | When GitHub reports `mergeable == false` on the linked PR — a confirmed base-branch conflict. Applied idempotently in both paths. NOT added when `mergeable == null` (GitHub still computing). | `checkMergeabilityGate` (when mergeable flips back to true); `attemptMergeOnValidate` (on successful merge, via `removeRebaseNeededLabel` — no-op when absent) | When GitHub reports `mergeable == true` (after Claude's rebase push lands), or when `MergePR` succeeds | Signals confirmed merge conflict; triggers `itemMayNeedWork` updatedAt cache bypass (base-branch advances don't bump the item's `updatedAt`); blocks CI gate and auto-advance until rebase resolves the conflict |
-| `fabrik:blocked` | `checkDependencies` | When open blocking issues exist (first transition only — idempotent) | `checkDependencies` | When all blocking issues close | Blocks stage start (first stage is exempt) |
+| `fabrik:blocked` | `checkDependencies` | When open blocking issues exist (first transition only — idempotent) | `checkDependencies` | When all blocking issues close | Blocks stage start |
 | `stage:<X>:in_progress` | `processItem` | After lock acquired and verified | `releaseLock` | Same as `fabrik:locked:<user>` | Informational — shows which stage is active on GitHub |
 | `stage:<X>:complete` | `handleStageComplete` (for non-`wait_for_ci` stages), `checkCIGate` (for `wait_for_ci: true` stages — added only after CI passes), `handleDecomposed`, cleanup stage handler | `handleStageComplete`: after Claude signals FABRIK_STAGE_COMPLETE on stages without `wait_for_ci: true`. `checkCIGate`: when all CI checks pass (R5) — this is the conjunctive gate (ADR 032): `stage:X:complete` is deferred until the CI gate actually clears, not applied on FABRIK_STAGE_COMPLETE. After FABRIK_DECOMPOSED or worktree cleanup. | Never removed | Permanent | Prevents re-invocation of the stage; triggers catch-up advancement |
 | `stage:<X>:failed` | `escalateFailedStage` | After MaxRetries exhausted | `clearFailedStage` | When user removes `fabrik:paused` (manual unpause) | Indicates permanent failure; paired with `fabrik:paused` |
@@ -2237,9 +2300,8 @@ This table shows the normal flow when an issue progresses through the pipeline w
 
 | Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
 |--------------|-------|-------|-----------------|--------------|----------------|--------------|
-| Any column (not first stage), Idle | Poll tick | Open blockers in `item.BlockedBy` | Same column, Blocked | `fabrik:blocked` | | Comment posted listing blockers (first time only); TUI event emitted |
+| Any column, Idle | Poll tick | Open blockers in `item.BlockedBy` | Same column, Blocked | `fabrik:blocked` | | Comment posted listing blockers (first time only); TUI event emitted |
 | Same column, Blocked | Poll tick | All blockers now CLOSED | Same column, Idle | | `fabrik:blocked` | Item eligible for processing on next poll |
-| First stage, Idle | Poll tick | Open blockers exist | Same column, Idle | | | First stage is exempt from dependency blocking |
 
 #### Awaiting Input (FABRIK_BLOCKED_ON_INPUT)
 
