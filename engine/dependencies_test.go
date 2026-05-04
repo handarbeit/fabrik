@@ -257,3 +257,51 @@ func TestProcessItem_SkipsBlockedNonFirstStage(t *testing.T) {
 		t.Errorf("expected no Claude invocations for blocked non-first stage item, got %d", len(claude.calls))
 	}
 }
+
+// TestProcessItem_SkipsBlockedFirstStage verifies the regression path from #473:
+// processItem must skip Claude invocation for the first stage (Specify) when the
+// item has an open BlockedBy dependency. Previously, checkDependencies exempted
+// the first stage and Specify ran against pre-merge code despite open blockers.
+func TestProcessItem_SkipsBlockedFirstStage(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	// depTestStages: Specify (order 1), Research (order 2), Implement (order 3)
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        depTestStages(),
+		},
+		client,
+		claude,
+		NewWorktreeManager("/tmp/test-repo"),
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 43,
+		Title:  "Blocked first-stage item",
+		Status: "Specify", // first stage
+		Repo:   "owner/repo",
+		BlockedBy: []gh.Dependency{
+			{Number: 41, State: "OPEN", Repo: "owner/repo"},
+		},
+	}
+
+	err := eng.processItem(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	// Claude must not be invoked — the dependency gate now applies to the first stage.
+	if len(claude.calls) != 0 {
+		t.Errorf("expected no Claude invocations for blocked first-stage item, got %d", len(claude.calls))
+	}
+	// fabrik:blocked label must be added.
+	if len(client.addLabelCalls) != 1 || client.addLabelCalls[0].labelName != "fabrik:blocked" {
+		t.Errorf("expected fabrik:blocked to be added, got addLabelCalls=%v", client.addLabelCalls)
+	}
+}
