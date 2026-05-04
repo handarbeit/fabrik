@@ -94,41 +94,14 @@ jobs:
             echo "ERROR: could not parse issue number from branch '$BRANCH'" >&2
             exit 1
           fi
+          if [[ ! "$ISSUE_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: branch '$BRANCH' does not encode a numeric issue number (got '$ISSUE_NUMBER')" >&2
+            exit 1
+          fi
 
           echo "Advancing issue #$ISSUE_NUMBER to stage '$TARGET_STAGE' on project $PROJECT_NUMBER"
 
-          # Step 1: Find the project board item for this issue.
-          # Uses repository.issue.projectItems (O(1), no pagination needed — an
-          # issue belongs to at most a handful of projects).
-          ITEM_QUERY='
-            query($owner: String!, $repo: String!, $number: Int!) {
-              repository(owner: $owner, name: $repo) {
-                issue(number: $number) {
-                  projectItems(first: 5) {
-                    nodes {
-                      id
-                      project { number }
-                    }
-                  }
-                }
-              }
-            }
-          '
-          ITEM_ID=$(gh api graphql \
-            -f query="$ITEM_QUERY" \
-            -f owner="$OWNER" \
-            -f repo="$REPO_NAME" \
-            -F number="$ISSUE_NUMBER" \
-            --jq ".data.repository.issue.projectItems.nodes[] | select(.project.number == $PROJECT_NUMBER) | .id")
-
-          if [[ -z "$ITEM_ID" ]]; then
-            echo "ERROR: issue #$ISSUE_NUMBER not found on project board $PROJECT_NUMBER" >&2
-            echo "       Verify that FABRIK_PROJECT_NUMBER is set correctly and the issue is on the board." >&2
-            exit 1
-          fi
-          echo "Found board item: $ITEM_ID"
-
-          # Step 2: Fetch the project node ID.
+          # Step 1: Fetch the project node ID (globally unique; used to filter board items).
           PROJECT_ID=$(gh api graphql \
             -f query='query($owner: String!, $n: Int!) { repositoryOwner(login: $owner) { ... on ProjectV2Owner { projectV2(number: $n) { id } } } }' \
             -f owner="$OWNER" \
@@ -140,12 +113,45 @@ jobs:
             exit 1
           fi
 
+          # Step 2: Find the project board item for this issue.
+          # Uses repository.issue.projectItems (O(1), no pagination needed — an
+          # issue belongs to at most a handful of projects). Filters by project.id
+          # (globally unique) rather than project.number to avoid selecting the
+          # wrong item when an issue appears on multiple projects.
+          ITEM_QUERY='
+            query($owner: String!, $repo: String!, $number: Int!) {
+              repository(owner: $owner, name: $repo) {
+                issue(number: $number) {
+                  projectItems(first: 5) {
+                    nodes {
+                      id
+                      project { id }
+                    }
+                  }
+                }
+              }
+            }
+          '
+          ITEM_ID=$(gh api graphql \
+            -f query="$ITEM_QUERY" \
+            -f owner="$OWNER" \
+            -f repo="$REPO_NAME" \
+            -F number="$ISSUE_NUMBER" \
+            | jq -r --arg pid "$PROJECT_ID" '.data.repository.issue.projectItems.nodes[] | select(.project.id == $pid) | .id')
+
+          if [[ -z "$ITEM_ID" ]]; then
+            echo "ERROR: issue #$ISSUE_NUMBER not found on project board $PROJECT_NUMBER" >&2
+            echo "       Verify that FABRIK_PROJECT_NUMBER is set correctly and the issue is on the board." >&2
+            exit 1
+          fi
+          echo "Found board item: $ITEM_ID"
+
           # Step 3: Find the Status field ID and the target stage option ID.
           FIELD_QUERY='
             query($projectId: ID!) {
               node(id: $projectId) {
                 ... on ProjectV2 {
-                  fields(first: 20) {
+                  fields(first: 100) {
                     nodes {
                       ... on ProjectV2SingleSelectField {
                         id
@@ -162,6 +168,11 @@ jobs:
             -f query="$FIELD_QUERY" \
             -f projectId="$PROJECT_ID" \
             --jq '.data.node.fields.nodes[] | select(.name == "Status")')
+
+          if [[ -z "$FIELDS_JSON" ]]; then
+            echo "ERROR: Status field not found on project $PROJECT_NUMBER" >&2
+            exit 1
+          fi
 
           STATUS_FIELD_ID=$(echo "$FIELDS_JSON" | jq -r '.id')
           OPTION_ID=$(echo "$FIELDS_JSON" | jq -r --arg stage "$TARGET_STAGE" '.options[] | select(.name == $stage) | .id')
