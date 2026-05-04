@@ -7,6 +7,7 @@ import (
 	"time"
 
 	gh "github.com/verveguy/fabrik/github"
+	"github.com/verveguy/fabrik/internal/itemstate"
 	"github.com/verveguy/fabrik/stages"
 )
 
@@ -334,11 +335,8 @@ func TestBuildReviewThreadComments_ProcessedSetSkip(t *testing.T) {
 		},
 	}
 
-	// Pre-populate processedSet for comment PRRC_1 (simulates markCommentsProcessed).
-	iKey := issueKey(item, eng.defaultRepo())
-	eng.mu.Lock()
-	eng.processedSet[iKey+"-comment-PRRC_1"] = time.Now()
-	eng.mu.Unlock()
+	// Pre-populate ProcessedComments for comment PRRC_1 (simulates markCommentsProcessed).
+	eng.store.Apply(itemstate.CommentProcessed{Repo: "owner/repo", Number: 10, CommentID: "PRRC_1", At: time.Now()})
 
 	comments := eng.buildReviewThreadComments(item)
 
@@ -401,13 +399,10 @@ func TestCatchUpLoop_InFlightGuard(t *testing.T) {
 	// Drain any goroutines (none should have been launched, but be safe).
 	eng.wg.Wait()
 
-	// reviewCycleCount must remain 0 — the inFlight guard must prevent the dispatch.
-	stageKey := iKey + "-Implement" // item.Status == "Implement"
-	eng.mu.Lock()
-	count := eng.reviewCycleCount[stageKey]
-	eng.mu.Unlock()
-	if count != 0 {
-		t.Errorf("reviewCycleCount = %d; want 0 (dispatch must be suppressed when in-flight)", count)
+	// ReviewCycles must remain 0 — the inFlight guard must prevent the dispatch.
+	snap42, _ := eng.store.Get("owner/repo", 42)
+	if snap42.ReviewCycles("Implement") != 0 {
+		t.Errorf("ReviewCycles(Implement) = %d; want 0 (dispatch must be suppressed when in-flight)", snap42.ReviewCycles("Implement"))
 	}
 }
 
@@ -483,38 +478,31 @@ func TestReviewCycleCount_PerStageNotPerIssue(t *testing.T) {
 		{Name: "Validate", Order: 2, Prompt: "validate"},
 	}
 	eng := testEngineWithStages(client, stgs)
-	iKey := "owner/repo#10"
-	reviewStageKey := iKey + "-Review"
-	validateStageKey := iKey + "-Validate"
 
 	// Simulate Review consuming 3 cycles out of 5.
-	eng.mu.Lock()
-	eng.reviewCycleCount[reviewStageKey] = 3
-	_, validateExistsBefore := eng.reviewCycleCount[validateStageKey]
-	eng.mu.Unlock()
+	for i := 0; i < 3; i++ {
+		eng.store.Apply(itemstate.ReviewCycleIncremented{Repo: "owner/repo", Number: 10, StageName: "Review"})
+	}
 
-	// Before Validate "runs", it must not even have a stage-specific entry yet —
-	// proving Review's counter did not bleed into Validate's key.
-	if validateExistsBefore {
-		t.Fatalf("Validate reviewCycleCount entry already exists before Validate runs; want no entry")
+	// Before Validate "runs", its counter must be 0 — proving Review's counter
+	// did not bleed into Validate's key.
+	snapBefore, _ := eng.store.Get("owner/repo", 10)
+	if snapBefore.ReviewCycles("Validate") != 0 {
+		t.Fatalf("Validate ReviewCycles = %d before Validate runs; want 0 (must be independent)", snapBefore.ReviewCycles("Validate"))
 	}
 
 	// Simulate Validate consuming one cycle and verify it uses its own counter
 	// without disturbing Review's existing count.
-	eng.mu.Lock()
-	eng.reviewCycleCount[validateStageKey]++
-	reviewCount := eng.reviewCycleCount[reviewStageKey]
-	validateCount, validateExistsAfter := eng.reviewCycleCount[validateStageKey]
-	eng.mu.Unlock()
+	eng.store.Apply(itemstate.ReviewCycleIncremented{Repo: "owner/repo", Number: 10, StageName: "Validate"})
+	snapAfter, _ := eng.store.Get("owner/repo", 10)
+	reviewCount := snapAfter.ReviewCycles("Review")
+	validateCount := snapAfter.ReviewCycles("Validate")
 
 	if reviewCount != 3 {
-		t.Errorf("Review reviewCycleCount = %d after Validate increment; want 3", reviewCount)
-	}
-	if !validateExistsAfter {
-		t.Fatalf("Validate reviewCycleCount entry missing after Validate increment; want stage-specific entry")
+		t.Errorf("Review ReviewCycles = %d after Validate increment; want 3", reviewCount)
 	}
 	if validateCount != 1 {
-		t.Errorf("Validate reviewCycleCount = %d; want 1 (must be independent of Review cycles)", validateCount)
+		t.Errorf("Validate ReviewCycles = %d; want 1 (must be independent of Review cycles)", validateCount)
 	}
 }
 
@@ -532,32 +520,30 @@ func TestClearFailedStage_ReviewCycleCount_ResetsOnlyCurrentStage(t *testing.T) 
 		Repo:   "owner/repo",
 		Labels: []string{"stage:Review:failed", "fabrik:paused"},
 	}
-	iKey := "owner/repo#10"
-	reviewStageKey := iKey + "-Review"
-	validateStageKey := iKey + "-Validate"
 
 	// Simulate both stages having consumed cycles (Review hit limit; Validate consumed 2).
-	eng.mu.Lock()
-	eng.reviewCycleCount[reviewStageKey] = 5
-	eng.reviewCycleCount[validateStageKey] = 2
-	eng.mu.Unlock()
+	for i := 0; i < 5; i++ {
+		eng.store.Apply(itemstate.ReviewCycleIncremented{Repo: "owner/repo", Number: 10, StageName: "Review"})
+	}
+	for i := 0; i < 2; i++ {
+		eng.store.Apply(itemstate.ReviewCycleIncremented{Repo: "owner/repo", Number: 10, StageName: "Validate"})
+	}
 
 	// User manually unpauses Review.
 	reviewStage := &stages.Stage{Name: "Review", Order: 1}
 	eng.clearFailedStage(item, reviewStage)
 
 	// Review's counter must be reset to 0.
-	eng.mu.Lock()
-	afterReview := eng.reviewCycleCount[reviewStageKey]
-	afterValidate := eng.reviewCycleCount[validateStageKey]
-	eng.mu.Unlock()
+	snapAfter, _ := eng.store.Get("owner/repo", 10)
+	afterReview := snapAfter.ReviewCycles("Review")
+	afterValidate := snapAfter.ReviewCycles("Validate")
 
 	if afterReview != 0 {
-		t.Errorf("Review reviewCycleCount = %d after clearFailedStage; want 0", afterReview)
+		t.Errorf("Review ReviewCycles = %d after clearFailedStage; want 0", afterReview)
 	}
 	// Validate's counter must be untouched — it has an independent budget.
 	if afterValidate != 2 {
-		t.Errorf("Validate reviewCycleCount = %d after clearing Review; want 2 (independent)", afterValidate)
+		t.Errorf("Validate ReviewCycles = %d after clearing Review; want 2 (independent)", afterValidate)
 	}
 }
 

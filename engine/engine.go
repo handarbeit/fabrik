@@ -68,14 +68,8 @@ type Engine struct {
 	fabrikDir            string                      // directory containing .fabrik/ (always os.Getwd() at startup)
 	mu                   sync.Mutex
 	store                *itemstate.Store      // per-item engine state (locks, invocation outcomes, deep-fetch, CI-gate); see ADR-036
-	processedSet         map[string]time.Time  // key: "owner/repo#N-stageName" or "owner/repo#N-comment-ID"
 	totalTokens          TokenUsage            // accumulated token usage since process start
 	lastReportedCost     float64               // cost at last [stats] report; skip repeat prints when unchanged
-	retryCount           map[string]int        // key: "owner/repo#N-stageName", value: failed attempt count
-	pausedDueToRetries   map[string]bool       // key: "owner/repo#N-stageName", true if engine paused this issue
-	reviewCycleCount     map[string]int        // key: "owner/repo#N-stageName"; review re-invocation cycle count per stage
-	ciFixCycleCount      map[string]int        // key: "owner/repo#N-stageName"; CI-fix re-invocation cycle count per stage
-	rebaseCycleCount     map[string]int        // key: "owner/repo#N-stageName"; rebase re-invocation cycle count per stage
 	seenUpdatedAt        map[string]time.Time  // key: issueKey; tracks last-seen updatedAt per issue (deferred to Phase 3-H)
 	idleCount            int                   // consecutive idle polls; triggers self-upgrade at threshold
 	idleStart            time.Time             // when consecutive idle polls began; zero value = not idle
@@ -125,13 +119,7 @@ func New(cfg Config) (*Engine, error) {
 		worktreeManagers:     make(map[string]*WorktreeManager),
 		fabrikDir:            fabrikDir,
 		store:                itemstate.NewStore(nil),
-		processedSet:         make(map[string]time.Time),
 		seenUpdatedAt:        make(map[string]time.Time),
-		retryCount:           make(map[string]int),
-		pausedDueToRetries:   make(map[string]bool),
-		reviewCycleCount:     make(map[string]int),
-		ciFixCycleCount:      make(map[string]int),
-		rebaseCycleCount:     make(map[string]int),
 		sem:                  make(chan struct{}, cfg.MaxConcurrent),
 	}
 
@@ -184,13 +172,7 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		claude:               claude,
 		worktreeManagers:     wms,
 		store:                itemstate.NewStore(nil),
-		processedSet:         make(map[string]time.Time),
 		seenUpdatedAt:        make(map[string]time.Time),
-		retryCount:           make(map[string]int),
-		pausedDueToRetries:   make(map[string]bool),
-		reviewCycleCount:     make(map[string]int),
-		ciFixCycleCount:      make(map[string]int),
-		rebaseCycleCount:     make(map[string]int),
 		sem:                  make(chan struct{}, maxConcurrent),
 	}
 	if worktrees != nil {
