@@ -400,6 +400,40 @@ type BaseBranchWarnRecorded struct {
 func (BaseBranchWarnRecorded) isMutation() {}
 func (m BaseBranchWarnRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// CIMergePendingStarted records that CI-gate merge polling has begun for the item's
+// linked PR. Sets LinkedPRState.CIMergePendingSince to At.
+// Replaces engine.ciMergePendingSince[iKey] = time.Now().
+type CIMergePendingStarted struct {
+	Repo   string
+	Number int
+	At     time.Time
+}
+
+func (CIMergePendingStarted) isMutation() {}
+func (m CIMergePendingStarted) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// CIMergePendingCleared records that CI-gate merge polling has ended for the item's
+// linked PR. Zeros LinkedPRState.CIMergePendingSince.
+// Replaces delete(engine.ciMergePendingSince, iKey).
+type CIMergePendingCleared struct {
+	Repo   string
+	Number int
+}
+
+func (CIMergePendingCleared) isMutation() {}
+func (m CIMergePendingCleared) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// PRChecksObserved records that the linked PR has had at least one CI check run
+// returned by FetchCheckRuns (REST path). Sets LinkedPRState.HasHadChecks = true.
+// Replaces engine.prHasHadChecks[iKey] = true.
+type PRChecksObserved struct {
+	Repo   string
+	Number int
+}
+
+func (PRChecksObserved) isMutation() {}
+func (m PRChecksObserved) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // itemKeyFor constructs the canonical "owner/repo#N" item key used throughout the Store.
 // Returns "" when repo is empty (indicating an invalid or unroutable mutation).
 func itemKeyFor(repo string, number int) string {
