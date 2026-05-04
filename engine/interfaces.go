@@ -56,6 +56,9 @@ type InvokeOptions struct {
 	EffortOverride   string // from "effort:<level>" label, overrides stage.EffortLevel
 	BaseBranch       string // actual default base branch for the managed repo (e.g. "liminis", not always "main")
 	MaxTurnsOverride int    // when > 0, overrides stage.MaxTurns for this invocation; 0 means use stage.MaxTurns
+	// OnPIDReady, if non-nil, is called once after cmd.Start() with the Claude subprocess PID.
+	// Used by the heartbeat/liveness system to record the PID in the store.
+	OnPIDReady func(pid int)
 }
 
 // ClaudeInvoker defines the interface for invoking Claude Code.
