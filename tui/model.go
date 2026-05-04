@@ -424,6 +424,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.active = comp.(ActivePaneComponent)
 		return m, nil
 
+	case StageChangedEvent:
+		comp, _ := m.active.Update(msg)
+		m.active = comp.(ActivePaneComponent)
+		return m, nil
+
 	}
 
 	return m, nil
