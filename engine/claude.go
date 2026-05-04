@@ -18,6 +18,7 @@ import (
 	"time"
 
 	gh "github.com/verveguy/fabrik/github"
+	"github.com/verveguy/fabrik/internal/itemstate"
 	"github.com/verveguy/fabrik/stages"
 )
 
@@ -140,26 +141,20 @@ func claudeLog(issueNumber int, tag, format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "[#%d %s] "+format, append([]any{issueNumber, tag}, args...)...)
 }
 
-// TokenUsage holds token consumption data from a single Claude invocation.
-type TokenUsage struct {
-	InputTokens         int
-	OutputTokens        int
-	CacheCreationTokens int
-	CacheReadTokens     int
-	CostUSD             float64
-	TurnsUsed           int
-	MaxTurns            int
-}
+// TokenUsage is a type alias for itemstate.TokenUsage. Using an alias ensures
+// engine.TokenUsage and itemstate.TokenUsage are the same type with zero-cost
+// assignment between the two packages (Phase 3-E).
+type TokenUsage = itemstate.TokenUsage
 
-// add returns a new TokenUsage that is the sum of t and other.
-func (t TokenUsage) add(other TokenUsage) TokenUsage {
+// addTokenUsage returns a new TokenUsage that is the sum of a and b.
+func addTokenUsage(a, b TokenUsage) TokenUsage {
 	return TokenUsage{
-		InputTokens:         t.InputTokens + other.InputTokens,
-		OutputTokens:        t.OutputTokens + other.OutputTokens,
-		CacheCreationTokens: t.CacheCreationTokens + other.CacheCreationTokens,
-		CacheReadTokens:     t.CacheReadTokens + other.CacheReadTokens,
-		CostUSD:             t.CostUSD + other.CostUSD,
-		TurnsUsed:           t.TurnsUsed + other.TurnsUsed,
+		InputTokens:         a.InputTokens + b.InputTokens,
+		OutputTokens:        a.OutputTokens + b.OutputTokens,
+		CacheCreationTokens: a.CacheCreationTokens + b.CacheCreationTokens,
+		CacheReadTokens:     a.CacheReadTokens + b.CacheReadTokens,
+		CostUSD:             a.CostUSD + b.CostUSD,
+		TurnsUsed:           a.TurnsUsed + b.TurnsUsed,
 	}
 }
 
