@@ -380,31 +380,6 @@ func (e *Engine) dispatchCIFixReinvoke(ctx context.Context, board *gh.ProjectBoa
 		e.logf(item.Number, "ci-fix-reinvoke", "re-invoking stage %q via comment processing with CI failure context\n", stage.Name)
 		err := e.processComments(ctx, board, item, &ciFixStage, []gh.Comment{syntheticComment}, onPIDReady)
 
-		var usage TokenUsage
-		var completed, blocked bool
-		if snap, snapErr := e.store.Get(itemRepo, item.Number); snapErr == nil {
-			st := snap.State()
-			usage = st.LastTokenUsage
-			completed = st.LastInvocationCompleted
-			blocked = st.LastInvocationBlocked
-		}
-		e.emitStructural(tui.JobCompletedEvent{
-			IssueNumber:    item.Number,
-			Repo:           itemRepo,
-			Title:          item.Title,
-			StageName:      stage.Name,
-			StageModel:     stage.Model,
-			IsComment:      true,
-			Success:        err == nil,
-			Completed:      completed,
-			BlockedOnInput: blocked,
-			Duration:       time.Since(startTime),
-			CompletedAt:    time.Now(),
-			TurnsUsed:      usage.TurnsUsed,
-			MaxTurns:       usage.MaxTurns,
-			CostUSD:        usage.CostUSD,
-		})
-
 		if err != nil {
 			if ctx.Err() != nil {
 				return
