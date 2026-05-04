@@ -16,6 +16,7 @@ import (
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
 )
@@ -496,21 +497,23 @@ func (e *Engine) Run() error {
 // cleanupLockedIssues removes fabrik:locked labels for any issues that were locked
 // at shutdown time but never released (e.g., because the worker was killed mid-run).
 func (e *Engine) cleanupLockedIssues() {
-	e.mu.Lock()
-	keys := make([]string, 0, len(e.lockedIssues))
-	for key := range e.lockedIssues {
-		keys = append(keys, key)
-	}
-	e.mu.Unlock()
+	snaps := e.store.All()
+	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
 
-	if len(keys) == 0 {
+	var locked []itemstate.Snapshot
+	for _, snap := range snaps {
+		if lock := snap.Lock(); lock != nil && lock.HeldByThis {
+			locked = append(locked, snap)
+		}
+	}
+
+	if len(locked) == 0 {
 		return
 	}
-	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
-	e.logf(0, "shutdown", "removing lock labels from %d issue(s)\n", len(keys))
-	for _, key := range keys {
-		// Parse "owner/repo#N" back into components for the API call.
-		owner, repo, num := parseIssueKey(key, e.cfg.Owner, e.cfg.Repo)
+	e.logf(0, "shutdown", "removing lock labels from %d issue(s)\n", len(locked))
+	for _, snap := range locked {
+		owner, repo := parseOwnerRepo(snap.Repo())
+		num := snap.Number()
 		if err := e.client.RemoveLabelFromIssue(owner, repo, num, lockLabel); err != nil {
 			e.logf(num, "warn", "could not remove lock label during shutdown: %v\n", err)
 		} else {
@@ -519,9 +522,7 @@ func (e *Engine) cleanupLockedIssues() {
 				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, num), lockLabel)
 			}
 		}
-		e.mu.Lock()
-		delete(e.lockedIssues, key)
-		e.mu.Unlock()
+		e.store.Apply(itemstate.LocalLockReleased{Repo: snap.Repo(), Number: num})
 	}
 }
 

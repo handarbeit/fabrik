@@ -69,7 +69,6 @@ type Engine struct {
 	mu                   sync.Mutex
 	store                *itemstate.Store      // per-item engine state (locks, invocation outcomes, deep-fetch, CI-gate); see ADR-036
 	processedSet         map[string]time.Time  // key: "owner/repo#N-stageName" or "owner/repo#N-comment-ID"
-	lockedIssues         map[string]bool       // key: "owner/repo#N"; issues with fabrik:locked added but not yet released
 	totalTokens          TokenUsage            // accumulated token usage since process start
 	lastReportedCost     float64               // cost at last [stats] report; skip repeat prints when unchanged
 	retryCount           map[string]int        // key: "owner/repo#N-stageName", value: failed attempt count
@@ -133,7 +132,6 @@ func New(cfg Config) (*Engine, error) {
 		fabrikDir:            fabrikDir,
 		store:                itemstate.NewStore(nil),
 		processedSet:         make(map[string]time.Time),
-		lockedIssues:         make(map[string]bool),
 		lastUsage:            make(map[string]TokenUsage),
 		lastCompleted:        make(map[string]bool),
 		lastBlocked:          make(map[string]bool),
@@ -199,7 +197,6 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		worktreeManagers:     wms,
 		store:                itemstate.NewStore(nil),
 		processedSet:         make(map[string]time.Time),
-		lockedIssues:         make(map[string]bool),
 		lastUsage:            make(map[string]TokenUsage),
 		lastCompleted:        make(map[string]bool),
 		lastBlocked:          make(map[string]bool),
