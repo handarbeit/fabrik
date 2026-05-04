@@ -705,7 +705,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		var invUsage TokenUsage
 		invOutput, completed, invUsage, err = e.claude.Invoke(ctx, stage, item, nil, resume, workDir, opts)
 		output += invOutput
-		usage = usage.add(invUsage)
+		usage = addTokenUsage(usage, invUsage)
 
 		hitLimit := !completed && err == nil && stage.MaxTurns > 0 && invUsage.TurnsUsed >= currentBudget
 		if !hitLimit || totalMultiple >= 3 {
@@ -742,7 +742,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	func() {
 		e.mu.Lock()
 		defer e.mu.Unlock()
-		e.totalTokens = e.totalTokens.add(usage)
+		e.totalTokens = addTokenUsage(e.totalTokens, usage)
 		e.lastUsage[iKey] = usage
 	}()
 

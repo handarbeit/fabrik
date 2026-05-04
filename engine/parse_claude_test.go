@@ -127,7 +127,7 @@ func TestTokenUsageFromResponse_MultiModel(t *testing.T) {
 func TestTokenUsageAdd(t *testing.T) {
 	a := TokenUsage{InputTokens: 10, OutputTokens: 5, CacheCreationTokens: 2, CacheReadTokens: 3, CostUSD: 0.001}
 	b := TokenUsage{InputTokens: 20, OutputTokens: 15, CacheCreationTokens: 8, CacheReadTokens: 7, CostUSD: 0.002}
-	got := a.add(b)
+	got := addTokenUsage(a, b)
 	if got.InputTokens != 30 {
 		t.Errorf("InputTokens = %d, want 30", got.InputTokens)
 	}
@@ -145,7 +145,7 @@ func TestTokenUsageAdd(t *testing.T) {
 	}
 	// Adding zero value leaves original unchanged
 	zero := TokenUsage{}
-	if a.add(zero) != a {
+	if addTokenUsage(a, zero) != a {
 		t.Error("adding zero TokenUsage should return original")
 	}
 }
