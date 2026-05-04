@@ -82,6 +82,10 @@ type ItemState struct {
 	// emitted FABRIK_BLOCKED_ON_INPUT. Replaces engine.lastBlocked[iKey].
 	LastInvocationBlocked bool
 
+	// LastInvocationIsComment is true when the most recent invocation processed a
+	// user comment rather than running a full stage. Mirrors InvocationRecorded.IsComment.
+	LastInvocationIsComment bool
+
 	// LastTokenUsage holds token consumption from the most recent Claude invocation.
 	// Replaces engine.lastUsage[iKey].
 	LastTokenUsage TokenUsage
