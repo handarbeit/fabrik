@@ -571,7 +571,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), lockLabel)
 		}
 		workerDone = make(chan struct{})
-		go e.startHeartbeat(ctx, repoStr, item.Number, workerDone)
+		e.startHeartbeat(ctx, repoStr, item.Number, workerDone)
 	}
 	defer func() {
 		if workerDone != nil {
