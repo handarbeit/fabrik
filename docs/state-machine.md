@@ -1062,7 +1062,29 @@ The `advancedItems` map prevents items advanced by the catch-up loop from having
 
 ### 9.5 processedSet Mutex
 
-`Engine.mu` (sync.Mutex) protects all in-memory state maps: `processedSet`, `lockedIssues`, `retryCount`, `pausedDueToRetries`, `reviewCycleCount`, `ciFixCycleCount`, `ciMergePendingSince`, `lastUpdatedAt`, `deepFetchFailureTime`, `lastUsage`, `lastCompleted`, `lastBlocked`, `totalTokens`, `lastReportedCost`. Critical sections are kept small — typically a single map read/write.
+`Engine.mu` (sync.Mutex) protects in-memory state that is not covered by its own synchronization primitive: `processedSet`, `retryCount`, `pausedDueToRetries`, `reviewCycleCount`, `ciFixCycleCount`, `rebaseCycleCount`, `seenUpdatedAt`, `totalTokens`, `lastReportedCost`. Critical sections are kept small — typically a single map read/write.
+
+Per-item engine state previously stored in `Engine.mu`-protected maps has been migrated to `itemstate.Store` (Phase 3-E; see ADR-036). Those fields — `Lock`, `LastTokenUsage`, `LastInvocationCompleted`, `LastInvocationBlocked`, `LastDeepFetchFailureAt`, `LinkedPR.HasHadChecks`, `LinkedPR.CIMergePendingSince` — are now read via `e.store.Get(repo, n)` (returning an immutable `Snapshot`) and written via `e.store.Apply(Mutation)`. The Store has its own internal mutex; no `Engine.mu` guard is needed for these fields.
+
+### 9.6 Engine Internal State (itemstate.Store)
+
+Per-item engine state lives in `Engine.store *itemstate.Store`, an engine-owned store separate from `CacheImpl`'s internal store. It is initialized with `itemstate.NewStore(nil)` in both `New()` and `NewWithDeps()`. Unification into a single store is deferred to a later phase (see ADR-036).
+
+The following fields are stored in `ItemState` / `LinkedPRState` and accessed exclusively through the store:
+
+| `ItemState` field | Mutation (write) | Snapshot accessor (read) | Former Engine map |
+|---|---|---|---|
+| `Lock` (`LockState`) | `LocalLockAcquired`, `LocalLockReleased` | `snap.Lock()` | `e.lockedIssues[iKey]` |
+| `LastTokenUsage` | `InvocationRecorded{Usage: ...}` | `snap.State().LastTokenUsage` | `e.lastUsage[iKey]` |
+| `LastInvocationCompleted` | `InvocationRecorded{Completed: ...}` | `snap.State().LastInvocationCompleted` | `e.lastCompleted[iKey]` |
+| `LastInvocationBlocked` | `InvocationRecorded{Blocked: ...}` | `snap.State().LastInvocationBlocked` | `e.lastBlocked[iKey]` |
+| `LastDeepFetchFailureAt` | `DeepFetchFailed{At: ...}` (set); `ItemDeepFetched` (clears) | `snap.State().LastDeepFetchFailureAt` | `e.deepFetchFailureTime[iKey]` |
+| `LinkedPR.HasHadChecks` | `PRChecksObserved` (REST path); `CheckRunCompleted` (webhook path) | `snap.LinkedPR().HasHadChecks` | `e.prHasHadChecks[iKey]` |
+| `LinkedPR.CIMergePendingSince` | `CIMergePendingStarted{At: ...}` (set); `CIMergePendingCleared` (clear) | `snap.LinkedPR().CIMergePendingSince` | `e.ciMergePendingSince[iKey]` |
+
+**`seenUpdatedAt` (deferred):** The map `e.seenUpdatedAt` (formerly `e.lastUpdatedAt`) tracks the last-seen `UpdatedAt` timestamp per issue. It is kept as a plain `Engine.mu`-protected map pending Phase 3-H, when change-feed observers will replace its purpose. It is intentionally excluded from `itemstate.Store` in this phase.
+
+See also: ADR-036 (`adrs/036-reactive-cache-single-owner.md`) for the full rationale and migration plan.
 
 ---
 
