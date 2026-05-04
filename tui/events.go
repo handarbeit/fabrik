@@ -122,3 +122,15 @@ type WebhookStatusEvent struct {
 }
 
 func (WebhookStatusEvent) tuiEvent() {}
+
+// StageChangedEvent is emitted when an issue moves to a new project-board stage.
+// It allows the TUI to reactively update the displayed stage for an active item
+// without waiting for the next full poll cycle.
+type StageChangedEvent struct {
+	Repo     string // "owner/repo" — empty for single-repo projects
+	Number   int
+	Title    string
+	NewStage string // the new board column / stage name
+}
+
+func (StageChangedEvent) tuiEvent() {}
