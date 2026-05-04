@@ -216,8 +216,8 @@ func (s *Store) applySingleItem(m Mutation) (Snapshot, []Change, error) {
 
 	// No-op detection: if nothing changed, skip observers.
 	if reflect.DeepEqual(before, *item) {
+		snap := newSnapshot(*item) // capture while lock held
 		s.mu.Unlock()
-		snap := newSnapshot(*item)
 		return snap, nil, nil
 	}
 
@@ -497,8 +497,9 @@ func (s *Store) applyProjectV2ItemEdited(v ProjectV2ItemEdited) (Snapshot, []Cha
 	before := newSnapshot(*item).state
 	item.Status = v.NewStatus
 	if reflect.DeepEqual(before, *item) {
+		snap := newSnapshot(*item)
 		s.mu.Unlock()
-		return newSnapshot(*item), nil, nil
+		return snap, nil, nil
 	}
 	snap := newSnapshot(*item)
 	repo, number := item.Repo, item.Number
@@ -539,8 +540,9 @@ func (s *Store) applyCheckRunCompleted(v CheckRunCompleted) (Snapshot, []Change,
 	item.LinkedPR.HasHadChecks = true
 
 	if reflect.DeepEqual(before, *item) {
+		snap := newSnapshot(*item)
 		s.mu.Unlock()
-		return newSnapshot(*item), nil, nil
+		return snap, nil, nil
 	}
 	snap := newSnapshot(*item)
 	repo, number := item.Repo, item.Number
