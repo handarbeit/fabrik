@@ -121,7 +121,7 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 	if !item.UpdatedAt.IsZero() {
 		iKey := issueKey(item, e.defaultRepo())
 		e.mu.Lock()
-		lastSeen, seen := e.lastUpdatedAt[iKey]
+		lastSeen, seen := e.seenUpdatedAt[iKey]
 		e.mu.Unlock()
 		if seen && !item.UpdatedAt.After(lastSeen) {
 			// Item unchanged — but still allow cooldown retries
@@ -889,12 +889,12 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// trigger the awaiting-input unblock logic on subsequent polls.
 	if claudeRan {
 		e.markCommentsSeenByStage(item, item.Comments)
-		// Evict lastUpdatedAt so the next poll re-evaluates this item, regardless
+		// Evict seenUpdatedAt so the next poll re-evaluates this item, regardless
 		// of what updatedAt was cached during the run. This handles the race where
 		// a concurrent poll cycle cached the item's updatedAt while the goroutine
 		// was in-flight, causing a comment posted during the run to be missed.
 		e.mu.Lock()
-		delete(e.lastUpdatedAt, iKey)
+		delete(e.seenUpdatedAt, iKey)
 		e.mu.Unlock()
 	}
 

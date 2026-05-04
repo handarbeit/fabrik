@@ -445,9 +445,9 @@ func TestYoloCatchup_SkipsNotDeepFetched(t *testing.T) {
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
 	eng.cfg.Yolo = true
-	// Pre-seed lastUpdatedAt so itemMayNeedWork sees this item as unchanged →
+	// Pre-seed seenUpdatedAt so itemMayNeedWork sees this item as unchanged →
 	// no deep-fetch → not in deepFetchedIDs → yolo catch-up must skip it.
-	eng.lastUpdatedAt["owner/repo#55"] = fixedTime
+	eng.seenUpdatedAt["owner/repo#55"] = fixedTime
 
 	ctx := context.Background()
 	if _, err := eng.poll(ctx); err != nil {
@@ -1180,8 +1180,8 @@ func TestItemMayNeedWork_WaitForCI_CompleteLabelOnly_FilteredByCache(t *testing.
 		UpdatedAt: fixedTime,
 		Labels:    []string{"stage:Validate:complete"}, // no fabrik:awaiting-ci
 	}
-	// Pre-seed lastUpdatedAt so the updatedAt cache returns false.
-	eng.lastUpdatedAt["owner/repo#99"] = fixedTime
+	// Pre-seed seenUpdatedAt so the updatedAt cache returns false.
+	eng.seenUpdatedAt["owner/repo#99"] = fixedTime
 
 	// Post-CI-clear: stage:Validate:complete only (no fabrik:awaiting-ci) is
 	// filtered by cache, just like non-CI-gated stages with a completion label.
@@ -1223,8 +1223,8 @@ func TestItemMayNeedWork_NoWaitForCI_CompleteLabel_FilteredByCache(t *testing.T)
 		UpdatedAt: fixedTime,
 		Labels:    []string{"stage:Validate:complete"},
 	}
-	// Pre-seed lastUpdatedAt so the updatedAt cache returns false.
-	eng.lastUpdatedAt["owner/repo#99"] = fixedTime
+	// Pre-seed seenUpdatedAt so the updatedAt cache returns false.
+	eng.seenUpdatedAt["owner/repo#99"] = fixedTime
 
 	if eng.itemMayNeedWork(item) {
 		t.Error("expected itemMayNeedWork to return false for non-wait_for_ci stage (filtered by cache), got true")
@@ -1277,7 +1277,7 @@ func TestPoll_CruiseValidateComplete_NoRepeatDeepFetch(t *testing.T) {
 
 	// Simulate the perpetual-loop trigger: stable updatedAt cached, processedSet expired.
 	eng.mu.Lock()
-	eng.lastUpdatedAt["owner/repo#732"] = fixedTime
+	eng.seenUpdatedAt["owner/repo#732"] = fixedTime
 	eng.processedSet["owner/repo#732-Validate"] = time.Now().Add(-2 * time.Minute)
 	eng.mu.Unlock()
 
