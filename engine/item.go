@@ -580,7 +580,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			Number:     item.Number,
 			User:       e.cfg.User,
 			AcquiredAt: workerStartedAt,
-			Worker:     &itemstate.WorkerHandle{StageName: stage.Name, StartedAt: workerStartedAt},
+			Worker:     &itemstate.WorkerHandle{StageName: stage.Name, StartedAt: workerStartedAt, LastSignAt: workerStartedAt},
 		})
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), lockLabel)
