@@ -199,14 +199,14 @@ func (e *Engine) dispatchRebaseReinvoke(ctx context.Context, board *gh.ProjectBo
 		e.logf(item.Number, "rebase-reinvoke", "re-invoking stage %q via comment processing with rebase context\n", stage.Name)
 		err := e.processComments(ctx, board, item, &rebaseStage, []gh.Comment{syntheticComment})
 
-		e.mu.Lock()
-		usage := e.lastUsage[iKey]
-		completed := e.lastCompleted[iKey]
-		blocked := e.lastBlocked[iKey]
-		delete(e.lastUsage, iKey)
-		delete(e.lastCompleted, iKey)
-		delete(e.lastBlocked, iKey)
-		e.mu.Unlock()
+		var usage TokenUsage
+		var completed, blocked bool
+		if snap, snapErr := e.store.Get(itemRepo, item.Number); snapErr == nil {
+			st := snap.State()
+			usage = st.LastTokenUsage
+			completed = st.LastInvocationCompleted
+			blocked = st.LastInvocationBlocked
+		}
 		e.emitStructural(tui.JobCompletedEvent{
 			IssueNumber:    item.Number,
 			Repo:           itemRepo,
