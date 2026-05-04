@@ -450,7 +450,9 @@ func TestYoloCatchup_SkipsNotDeepFetched(t *testing.T) {
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
 	eng.cfg.Yolo = true
-	// Item not in cycleSet (mayNeedWork is empty) and no CooldownAt entry →
+	// Seed the store so the pre-filter sees this as a known (previously-processed) item.
+	eng.store.Apply(itemstate.InvocationRecorded{Repo: "owner/repo", Number: 55, Completed: true})
+	// Not in cycleSet (mayNeedWork is empty), in store but no CooldownAt →
 	// no deep-fetch → not in deepFetchedIDs → yolo catch-up must skip it.
 
 	ctx := context.Background()
@@ -1200,9 +1202,11 @@ func TestPollPreFilter_WaitForCI_CompleteLabelOnly_Skipped(t *testing.T) {
 		MaxConcurrent: 5,
 		Stages:        stgs,
 	}, client, &mockClaudeInvoker{}, NewWorktreeManager("/tmp/test-repo"))
+	// Seed the store so the pre-filter sees this as a known (previously-processed) item.
+	eng.store.Apply(itemstate.InvocationRecorded{Repo: "owner/repo", Number: 99, Completed: true})
 
 	// Post-CI-clear: stage:Validate:complete only (no fabrik:awaiting-ci), not in cycleSet,
-	// no expired CooldownAt → must be filtered (stage is already done).
+	// in store but no CooldownAt → must be filtered (stage is already done).
 	if _, err := eng.poll(t.Context()); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
@@ -1249,8 +1253,10 @@ func TestPollPreFilter_NoWaitForCI_CompleteLabel_Skipped(t *testing.T) {
 		MaxConcurrent: 5,
 		Stages:        stgs,
 	}, client, &mockClaudeInvoker{}, NewWorktreeManager("/tmp/test-repo"))
+	// Seed the store so the pre-filter sees this as a known (previously-processed) item.
+	eng.store.Apply(itemstate.InvocationRecorded{Repo: "owner/repo", Number: 99, Completed: true})
 
-	// Not in cycleSet, no expired CooldownAt → stage-complete item must be skipped.
+	// Not in cycleSet, in store but no CooldownAt → stage-complete item must be skipped.
 	if _, err := eng.poll(t.Context()); err != nil {
 		t.Fatalf("poll: %v", err)
 	}

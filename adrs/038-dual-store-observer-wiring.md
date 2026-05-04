@@ -67,7 +67,7 @@ type CacheImpl struct {
 
 `SubscribePause(fn func(bool)) func()` adds to this list and returns an unsubscribe func that nil-slots the entry (to avoid index shifting). `Pause()` and `Resume()` snapshot the observer list before releasing `c.mu`, then call observers on the snapshot outside any lock — mirroring `Store`'s captureObservers pattern.
 
-**Invariant**: Pause observers MUST NOT call back into `CacheImpl` methods that acquire `c.mu`. Violation causes deadlock.
+**Invariant**: Pause observers MUST NOT call `Pause()` or `Resume()` re-entrantly. `c.mu` is released before observers are called, so calling other `CacheImpl` methods from an observer is deadlock-free; however, calling `Pause`/`Resume` from within a pause observer produces semantic recursion (double-fire, inconsistent state). The real guard is against re-entrant `Pause`/`Resume` calls, not against `c.mu` re-entry.
 
 ### 4. Observer-type-to-store mapping
 

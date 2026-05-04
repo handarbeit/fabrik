@@ -842,7 +842,8 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		//   (a) it is in cycleSet (an observer saw a relevant Store change), OR
 		//   (b) it is a cleanup stage (checks local filesystem, not board state), OR
 		//   (c) it has a bypass label (awaiting-ci or rebase-needed need per-poll eval), OR
-		//   (d) it has an expired CooldownAt (periodic re-evaluation gate has passed).
+		//   (d) it has an expired CooldownAt (periodic re-evaluation gate has passed), OR
+		//   (e) it is not yet recorded in the engine store (first poll / fresh startup).
 		// Items with an active CooldownAt but no other signal are suppressed.
 		item := board.Items[i]
 		iKey := issueKey(item, e.defaultRepo())
@@ -850,7 +851,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			stage := stages.FindStage(e.cfg.Stages, item.Status)
 			isCleanup := stage != nil && stage.CleanupWorktree
 			hasAwaitingLabel := hasLabel(item, "fabrik:awaiting-ci") || hasLabel(item, "fabrik:rebase-needed")
-			var hasExpiredCooldown bool
+			var hasExpiredCooldown, notInStore bool
 			if !isCleanup && !hasAwaitingLabel {
 				repo := itemOwnerRepoString(item, e.defaultRepo())
 				if snap, snapErr := e.store.Get(repo, item.Number); snapErr == nil {
@@ -859,9 +860,13 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 					if snap.HasActiveCooldown(now) && !hasExpiredCooldown {
 						continue // within cooldown window: no change + no expired window
 					}
+				} else {
+					// Item not yet recorded in the engine store (first poll or fresh startup):
+					// let it through so the deep-fetch path can populate the store.
+					notInStore = true
 				}
 			}
-			if !isCleanup && !hasAwaitingLabel && !hasExpiredCooldown {
+			if !isCleanup && !hasAwaitingLabel && !hasExpiredCooldown && !notInStore {
 				continue // no state change, no bypass — skip this cycle
 			}
 		}
