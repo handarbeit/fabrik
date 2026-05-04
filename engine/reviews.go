@@ -271,19 +271,18 @@ func (e *Engine) removeAwaitingReviewLabel(owner, repo string, item gh.ProjectIt
 // submit only a top-level body with no inline comments (e.g., bare APPROVED)
 // have nothing actionable to address.
 //
-// processedSet is checked as defense-in-depth for within-session races: if a
-// comment was processed this session (markCommentsProcessed wrote its key) but
-// the ROCKET reaction hasn't propagated from the API yet, we still skip it.
+// The store's ProcessedComments map is checked as defense-in-depth for
+// within-session races: if a comment was processed this session but the ROCKET
+// reaction hasn't propagated from the API yet, we still skip it.
 func (e *Engine) buildReviewThreadComments(item gh.ProjectItem) []gh.Comment {
-	iKey := issueKey(item, e.defaultRepo())
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	snap, _ := e.store.Get(repoStr, item.Number)
 	out := make([]gh.Comment, 0, len(item.LinkedPRReviewThreadComments))
-	e.mu.Lock()
-	defer e.mu.Unlock()
 	for _, c := range item.LinkedPRReviewThreadComments {
 		if c.HasReaction("ROCKET") {
 			continue
 		}
-		if _, seen := e.processedSet[iKey+"-comment-"+c.ID]; seen {
+		if !snap.CommentProcessed(c.ID).IsZero() {
 			continue
 		}
 		out = append(out, c)

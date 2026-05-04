@@ -14,13 +14,11 @@ import (
 
 func (e *Engine) findNewComments(item gh.ProjectItem) []gh.Comment {
 	var newComments []gh.Comment
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	iKey := issueKey(item, e.defaultRepo())
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	snap, _ := e.store.Get(repoStr, item.Number)
 	for _, c := range item.Comments {
 		// Skip comments we've already processed
-		key := iKey + "-comment-" + c.ID
-		if _, seen := e.processedSet[key]; seen {
+		if !snap.CommentProcessed(c.ID).IsZero() {
 			continue
 		}
 		// Skip comments that look like Fabrik output
@@ -40,7 +38,6 @@ func (e *Engine) findNewComments(item gh.ProjectItem) []gh.Comment {
 // Flow: 👀 reactions → editing label → invoke Claude → perform actions / update issue body → remove editing label → 🚀 reactions
 func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, comments []gh.Comment) error {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-	iKey := issueKey(item, e.defaultRepo())
 
 	// Merge any unresolved PR review thread comments into the working slice.
 	// This ensures that when a user nudge arrives (e.g. "please address Copilot
@@ -55,7 +52,8 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		for _, c := range comments {
 			existingIDs[c.ID] = true
 		}
-		e.mu.Lock()
+		repoStr := itemOwnerRepoString(item, e.defaultRepo())
+		snap, _ := e.store.Get(repoStr, item.Number)
 		for _, c := range item.LinkedPRReviewThreadComments {
 			if existingIDs[c.ID] {
 				continue
@@ -63,12 +61,11 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 			if c.HasReaction("ROCKET") {
 				continue
 			}
-			if _, seen := e.processedSet[iKey+"-comment-"+c.ID]; seen {
+			if !snap.CommentProcessed(c.ID).IsZero() {
 				continue
 			}
 			comments = append(comments, c)
 		}
-		e.mu.Unlock()
 	}
 
 	e.logf(item.Number, "comments", "processing %d new comment(s) — stage: %s\n",
@@ -285,13 +282,9 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// This avoids an unnecessary extra stage invocation after unblocking.
 	if completed {
 		e.logf(item.Number, "done", "comment processing completed stage %q\n", stage.Name)
-		stageKey := iKey + "-" + stage.Name
-		func() {
-			e.mu.Lock()
-			defer e.mu.Unlock()
-			delete(e.retryCount, stageKey)
-			delete(e.pausedDueToRetries, stageKey)
-		}()
+		repoStr := itemOwnerRepoString(item, e.defaultRepo())
+		e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+		e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 		e.store.Apply(itemstate.InvocationRecorded{
 			Repo:      itemOwnerRepoString(item, e.defaultRepo()),
 			Number:    item.Number,
@@ -337,7 +330,7 @@ func isReviewReinvoke(comments []gh.Comment) bool {
 // never processed by the stage.
 func (e *Engine) markCommentsSeenByStage(item gh.ProjectItem, preStageComments []gh.Comment) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-	iKey := issueKey(item, e.defaultRepo())
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	for _, c := range preStageComments {
 		if strings.HasPrefix(c.Body, "🏭 **Fabrik") {
 			continue
@@ -350,20 +343,14 @@ func (e *Engine) markCommentsSeenByStage(item gh.ProjectItem, preStageComments [
 		if err := e.client.AddCommentReaction(owner, repo, c.DatabaseID, "rocket"); err != nil {
 			e.logf(item.Number, "warn", "could not add rocket to seen comment %s: %v\n", c.ID, err)
 		}
-		e.mu.Lock()
-		key := iKey + "-comment-" + c.ID
-		e.processedSet[key] = time.Now()
-		e.mu.Unlock()
+		e.store.Apply(itemstate.CommentProcessed{Repo: repoStr, Number: item.Number, CommentID: c.ID, At: time.Now()})
 	}
 }
 
 // markCommentsProcessed records comments as processed so they won't be retried.
 func (e *Engine) markCommentsProcessed(item gh.ProjectItem, comments []gh.Comment) {
-	iKey := issueKey(item, e.defaultRepo())
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	for _, c := range comments {
-		key := iKey + "-comment-" + c.ID
-		e.processedSet[key] = time.Now()
+		e.store.Apply(itemstate.CommentProcessed{Repo: repoStr, Number: item.Number, CommentID: c.ID, At: time.Now()})
 	}
 }
