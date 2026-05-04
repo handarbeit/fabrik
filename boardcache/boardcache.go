@@ -380,6 +380,12 @@ func (c *CacheImpl) IsPaused() bool {
 	return c.paused
 }
 
+// Subscribe registers an observer on the underlying Store. The returned func
+// unsubscribes the observer. Safe to call from any goroutine.
+func (c *CacheImpl) Subscribe(o itemstate.Observer) func() {
+	return c.store.Subscribe(o)
+}
+
 // FetchProjectBoard returns a *gh.ProjectBoard reconstructed from the Store.
 // Falls back to GitHub when the cache has not been bootstrapped or is paused.
 func (c *CacheImpl) FetchProjectBoard(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
