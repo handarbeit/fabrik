@@ -920,7 +920,7 @@ query($id: ID!) {
 
 	var result struct {
 		Data struct {
-			Node struct {
+			Node *struct {
 				FieldValueByName *struct {
 					Name string `json:"name"`
 				} `json:"fieldValueByName"`
@@ -930,6 +930,9 @@ query($id: ID!) {
 
 	if err := c.graphqlRequest(query, vars, &result); err != nil {
 		return "", fmt.Errorf("fetching status for item %s: %w", itemID, err)
+	}
+	if result.Data.Node == nil {
+		return "", fmt.Errorf("fetching status for item %s: item not found or not a ProjectV2Item", itemID)
 	}
 	if result.Data.Node.FieldValueByName == nil {
 		return "", nil
@@ -981,7 +984,7 @@ query($id: ID!, $cursor: String) {
 
 		var result struct {
 			Data struct {
-				Node struct {
+				Node *struct {
 					Items struct {
 						PageInfo struct {
 							HasNextPage bool   `json:"hasNextPage"`
@@ -995,6 +998,9 @@ query($id: ID!, $cursor: String) {
 
 		if err := c.graphqlRequest(query, vars, &result); err != nil {
 			return nil, fmt.Errorf("fetching project item status batch: %w", err)
+		}
+		if result.Data.Node == nil {
+			return nil, fmt.Errorf("fetching project item status batch: project not found or not a ProjectV2")
 		}
 
 		for _, n := range result.Data.Node.Items.Nodes {
