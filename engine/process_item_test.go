@@ -519,7 +519,7 @@ func TestProcessItem_ClaudeError(t *testing.T) {
 	// A start-failure (*exec.Error / binary not found) — LastAttemptAt must NOT be updated
 	snap, _ := eng.store.Get("o/r", 6)
 	if !snap.LastAttemptAt("Research").IsZero() {
-		t.Error("processedSet should NOT be updated on a start-failure error")
+		t.Error("LastAttemptAt should NOT be set on a start-failure error")
 	}
 }
 
@@ -554,7 +554,7 @@ func TestProcessItem_ClaudeExitError(t *testing.T) {
 	// An *exec.ExitError means Claude ran — LastAttemptAt MUST be updated (cooldown applies)
 	snap, _ := eng.store.Get("o/r", 7)
 	if snap.LastAttemptAt("Research").IsZero() {
-		t.Error("processedSet should be updated when Claude ran and exited non-zero")
+		t.Error("LastAttemptAt should be set when Claude ran and exited non-zero")
 	}
 }
 
@@ -585,7 +585,7 @@ func TestProcessItem_ResumeOnReprocess(t *testing.T) {
 		// processComments uses InvokeClaudeForComments (global), not the mock.
 	}
 
-	// First call — not yet in processedSet, resume=false
+	// First call — LastAttemptAt not set yet, resume=false
 	eng.processItem(context.Background(), board, item)
 
 	// Second call — PollSeconds=0 means cooldown=0, so item is retried with resume=true
@@ -717,7 +717,7 @@ func TestProcessItem_EscalatesAtMaxRetries(t *testing.T) {
 	// PausedByEngine should be set in the store
 	snap, _ := eng.store.Get("owner/repo", 10)
 	if !snap.PausedByEngine("Research") {
-		t.Error("expected pausedDueToRetries to be set")
+		t.Error("expected PausedByEngine to be set")
 	}
 }
 
@@ -782,7 +782,7 @@ func TestProcessItem_ResetsOnUnpause(t *testing.T) {
 	// PausedByEngine should be cleared (cleared by clearFailedStage, not re-set since we don't hit limit yet)
 	snap, _ := eng.store.Get("owner/repo", 11)
 	if snap.PausedByEngine("Research") {
-		t.Error("expected pausedDueToRetries to be cleared after unpause")
+		t.Error("expected PausedByEngine to be cleared after unpause")
 	}
 }
 
@@ -835,7 +835,7 @@ func TestProcessItem_UnlimitedWhenMaxRetriesZero(t *testing.T) {
 	// Attempts should remain 0 (not incremented when MaxRetries=0)
 	snap, _ := eng.store.Get("owner/repo", 12)
 	if snap.Attempts("Research") != 0 {
-		t.Errorf("expected retryCount=0 when MaxRetries=0, got %d", snap.Attempts("Research"))
+		t.Errorf("expected Attempts=0 when MaxRetries=0, got %d", snap.Attempts("Research"))
 	}
 }
 
@@ -881,10 +881,10 @@ func TestProcessItem_ClearsRetryCountOnCompletion(t *testing.T) {
 	// Both store fields should be cleared after successful completion
 	snap, _ := eng.store.Get("owner/repo", 13)
 	if snap.Attempts("Research") != 0 {
-		t.Errorf("expected retryCount to be cleared on completion, got %d", snap.Attempts("Research"))
+		t.Errorf("expected Attempts to be cleared on completion, got %d", snap.Attempts("Research"))
 	}
 	if snap.PausedByEngine("Research") {
-		t.Error("expected pausedDueToRetries to be cleared on completion")
+		t.Error("expected PausedByEngine to be cleared on completion")
 	}
 }
 
@@ -969,7 +969,7 @@ func TestProcessItem_CleanupStage_CleanWorktree(t *testing.T) {
 	// CooldownAt["periodic-re-eval"] should be set so itemMayNeedWork suppresses future deep-fetches
 	snapCleanup, _ := eng.store.Get("owner/repo", 42)
 	if snapCleanup.CooldownAt("periodic-re-eval").IsZero() {
-		t.Error("item should be marked in processedSet after cleanup")
+		t.Error("CooldownAt[periodic-re-eval] should be set after cleanup stage")
 	}
 
 	// Claude should not have been invoked
