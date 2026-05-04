@@ -117,79 +117,12 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 		return e.worktreeExistsForItem(item)
 	}
 
-	// Skip items that haven't changed since last poll — CooldownAt expiry allows re-evaluation.
-	if !item.UpdatedAt.IsZero() {
-		iKey := issueKey(item, e.defaultRepo())
-		e.mu.Lock()
-		lastSeen, seen := e.seenUpdatedAt[iKey]
-		e.mu.Unlock()
-		if seen && !item.UpdatedAt.After(lastSeen) {
-			// Force deep-fetch for items whose progress depends on a state change that
-			// does NOT bump the issue/project-item/linked-PR updatedAt and that needs
-			// re-evaluation every poll. The CooldownAt path below handles the cheaper
-			// periodic re-evaluation (every 10 × PollSeconds) for blocked/gated items.
-			//
-			//   fabrik:awaiting-ci      — CI check run completions don't bump updatedAt;
-			//                             the catch-up loop must re-evaluate every poll
-			//                             until checks complete or timeout. Per-poll
-			//                             cadence is needed because CI failures should
-			//                             trigger a CI-fix re-invocation as soon as
-			//                             they're observed.
-			//   fabrik:rebase-needed    — mergeability re-computes when origin advances,
-			//                             but the issue's updatedAt won't bump on a base-
-			//                             branch advance; the merge-gate must re-check.
-			//
-			// These labels must be checked BEFORE the CooldownAt block below:
-			// poll.go's defer writes CooldownAt["periodic-re-eval"] for ALL
-			// deepFetchCandidates (not just terminal ones), so an awaiting-ci or
-			// rebase-needed item that also received a periodic-re-eval stamp would
-			// be incorrectly suppressed for up to 10 × PollSeconds.
-			for _, l := range item.Labels {
-				if l == "fabrik:awaiting-ci" ||
-					l == "fabrik:rebase-needed" {
-					return true
-				}
-			}
-			// Item unchanged — check CooldownAt for periodic re-eval suppression/expiry.
-			// Any unexpired CooldownAt entry suppresses deep-fetch during its window.
-			// Any expired entry allows re-evaluation once the window passes, preventing
-			// a dependency-blocked or review-blocked item from being silently skipped forever.
-			//
-			// Labels using the CooldownAt path (periodic re-eval every 10 × PollSeconds):
-			//   fabrik:blocked        — processItem sets CooldownAt["dep-blocked"] when
-			//                           checkDependencies returns true. Blocker closure
-			//                           doesn't bump the blocked item's updatedAt, so
-			//                           CooldownAt expiry is what re-evaluates the gate.
-			//   fabrik:awaiting-review — checkReviewGate sets CooldownAt["review-blocked"]
-			//                           when it returns blocked=true. Phase 1 and Phase 2
-			//                           fire on label-applied-at age, so periodic (not
-			//                           per-poll) re-evaluation is sufficient.
-			//   fabrik:awaiting-input — auto-clear trigger is a new user comment (bumps
-			//                           updatedAt); no CooldownAt entry needed today.
-			repo := itemOwnerRepoString(item, e.defaultRepo())
-			if snap, snapErr := e.store.Get(repo, item.Number); snapErr == nil {
-				now := time.Now()
-				if snap.HasActiveCooldown(now) {
-					return false // within cooldown window, suppress deep-fetch
-				}
-				if snap.HasExpiredCooldown(now) {
-					// Cooldown window has passed — allow re-evaluation, except for completed
-					// stages that have no retry work. fabrik:awaiting-review items carry
-					// stage:X:complete but still need Phase 1/Phase 2 timer re-evaluation.
-					if hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) &&
-						!hasLabel(item, "fabrik:awaiting-review") {
-						return false
-					}
-					return true
-				}
-			}
-			return false
-		}
-	}
-
 	// Don't check labels or blockedBy here — those require full label data which
 	// is only available after deep fetch. Label/lock/dep-gate checks are in
 	// itemNeedsWork, which runs after FetchItemDetails populates the full label set.
+	// The "has this item changed since last poll?" gate was previously implemented
+	// here via seenUpdatedAt. It is now handled by the mayNeedWork pre-filter in
+	// poll.go (see poll() function), which is populated by Store observers.
 
 	// Apply a cooldown for items whose last FetchItemDetails call failed.
 	// Without this, a persistent failure (e.g. deleted issue, permission error)
@@ -340,8 +273,6 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	// "owner/repo" string for store operations.
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
-	// Unique key for this issue across all repos (used for seenUpdatedAt eviction).
-	iKey := issueKey(item, e.defaultRepo())
 
 	// Check if this issue is locked by another driver instance
 	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
@@ -925,13 +856,9 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// trigger the awaiting-input unblock logic on subsequent polls.
 	if claudeRan {
 		e.markCommentsSeenByStage(item, item.Comments)
-		// Evict seenUpdatedAt so the next poll re-evaluates this item, regardless
-		// of what updatedAt was cached during the run. This handles the race where
-		// a concurrent poll cycle cached the item's updatedAt while the goroutine
-		// was in-flight, causing a comment posted during the run to be missed.
-		e.mu.Lock()
-		delete(e.seenUpdatedAt, iKey)
-		e.mu.Unlock()
+		// The InvocationObserver fires on InvocationChanged (from InvocationRecorded
+		// below) and adds this item to e.mayNeedWork, ensuring it is re-evaluated in
+		// the next poll cycle. No explicit eviction is needed.
 	}
 
 	// Only honor the blocked-on-input and decomposed markers if Claude ran without error.
