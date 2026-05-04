@@ -350,6 +350,23 @@ func (e *Engine) dispatchCIFixReinvoke(ctx context.Context, board *gh.ProjectBoa
 			ciFixStage.CommentPrompt = ""
 		}
 
+		// Register WorkerHandle so the heartbeat/liveness system tracks this goroutine.
+		now := time.Now()
+		e.store.Apply(itemstate.LocalLockAcquired{
+			Repo:       itemRepo,
+			Number:     item.Number,
+			User:       e.cfg.User,
+			AcquiredAt: now,
+			Worker:     &itemstate.WorkerHandle{StageName: stage.Name, StartedAt: now},
+		})
+		done := make(chan struct{})
+		defer close(done)
+		go e.startHeartbeat(ctx, itemRepo, item.Number, done)
+		defer e.store.Apply(itemstate.WorkerExited{Repo: itemRepo, Number: item.Number})
+		onPIDReady := func(pid int) {
+			e.store.Apply(itemstate.WorkerPIDSet{Repo: itemRepo, Number: item.Number, PID: pid})
+		}
+
 		startTime := time.Now()
 		e.emitStructural(tui.JobStartedEvent{
 			IssueNumber: item.Number,
@@ -361,7 +378,7 @@ func (e *Engine) dispatchCIFixReinvoke(ctx context.Context, board *gh.ProjectBoa
 		})
 
 		e.logf(item.Number, "ci-fix-reinvoke", "re-invoking stage %q via comment processing with CI failure context\n", stage.Name)
-		err := e.processComments(ctx, board, item, &ciFixStage, []gh.Comment{syntheticComment})
+		err := e.processComments(ctx, board, item, &ciFixStage, []gh.Comment{syntheticComment}, onPIDReady)
 
 		var usage TokenUsage
 		var completed, blocked bool
