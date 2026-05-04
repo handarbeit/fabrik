@@ -244,9 +244,9 @@ func TestExtensionLoop_ExtendTurnsLabel(t *testing.T) {
 	}
 }
 
-// TestExtensionLoop_ExtendTurnsLabel_AutoRemoved verifies that fabrik:extend-turns
-// is removed after successful stage completion.
-func TestExtensionLoop_ExtendTurnsLabel_AutoRemoved(t *testing.T) {
+// TestExtensionLoop_ExtendTurnsLabel_PersistsAcrossStage verifies that fabrik:extend-turns
+// is NOT removed after successful non-cleanup stage completion.
+func TestExtensionLoop_ExtendTurnsLabel_PersistsAcrossStage(t *testing.T) {
 	skipIfNoGit(t)
 	repoDir := initBareRepo(t)
 	wm := NewWorktreeManager(repoDir)
@@ -273,7 +273,7 @@ func TestExtensionLoop_ExtendTurnsLabel_AutoRemoved(t *testing.T) {
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
 		Number: 5,
-		Title:  "Auto Remove Test",
+		Title:  "Persist Test",
 		Status: "Implement",
 		ItemID: "PVTI_5",
 		Labels: []string{"fabrik:extend-turns"},
@@ -283,7 +283,112 @@ func TestExtensionLoop_ExtendTurnsLabel_AutoRemoved(t *testing.T) {
 		t.Fatalf("processItem: %v", err)
 	}
 
-	// Verify fabrik:extend-turns was removed
+	// Verify fabrik:extend-turns was NOT removed on non-cleanup stage completion
+	for _, call := range client.removeLabelCalls {
+		if call.labelName == "fabrik:extend-turns" {
+			t.Error("fabrik:extend-turns must not be removed on successful non-cleanup stage completion")
+		}
+	}
+}
+
+// multiStageList returns a stage list with Specify→Research→Plan→Implement, all non-cleanup.
+func multiStageList(maxTurns int) []*stages.Stage {
+	return []*stages.Stage{
+		{Name: "Specify", Order: 1, MaxTurns: maxTurns, Prompt: "Specify it",
+			Completion: stages.CompletionCriteria{Type: "claude"}},
+		{Name: "Research", Order: 2, MaxTurns: maxTurns, Prompt: "Research it",
+			Completion: stages.CompletionCriteria{Type: "claude"}},
+		{Name: "Plan", Order: 3, MaxTurns: maxTurns, Prompt: "Plan it",
+			Completion: stages.CompletionCriteria{Type: "claude"}},
+		{Name: "Implement", Order: 4, MaxTurns: maxTurns, Prompt: "Implement it",
+			Completion: stages.CompletionCriteria{Type: "claude"}},
+	}
+}
+
+// TestExtendTurns_PersistsAcrossMultipleStages verifies that fabrik:extend-turns is not
+// removed after any of the non-cleanup stages in the Specify→Research→Plan→Implement sequence.
+func TestExtendTurns_PersistsAcrossMultipleStages(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "FABRIK_STAGE_COMPLETE\n", true, TokenUsage{}, nil
+		},
+	}
+	eng := NewWithDeps(
+		Config{
+			Owner: "owner", Repo: "repo", ProjectNum: 1,
+			User: "testuser", Token: "token",
+			Stages: multiStageList(10),
+		},
+		client, claude, wm,
+	)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	for _, stageName := range []string{"Specify", "Research", "Plan", "Implement"} {
+		item := gh.ProjectItem{
+			Number: 6,
+			Title:  "Multi Stage Test",
+			Status: stageName,
+			ItemID: "PVTI_6",
+			Labels: []string{"fabrik:extend-turns"},
+		}
+		if err := eng.processItem(context.Background(), board, item); err != nil {
+			t.Fatalf("processItem(%s): %v", stageName, err)
+		}
+		// After each non-cleanup stage, extend-turns must still be present (not removed)
+		for _, call := range client.removeLabelCalls {
+			if call.labelName == "fabrik:extend-turns" {
+				t.Errorf("fabrik:extend-turns was removed after %s stage — must persist until Done", stageName)
+			}
+		}
+		// Reset spy for the next iteration
+		client.removeLabelCalls = nil
+	}
+}
+
+// cleanupStageList returns a single Done stage with CleanupWorktree: true.
+func cleanupStageList() []*stages.Stage {
+	return []*stages.Stage{
+		{Name: "Done", Order: 1, CleanupWorktree: true, Prompt: ""},
+	}
+}
+
+// TestExtendTurns_RemovedOnCleanupStage verifies that fabrik:extend-turns is removed
+// when the cleanup (Done) stage runs.
+func TestExtendTurns_RemovedOnCleanupStage(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	// No Claude invocation needed — cleanup stage never calls Claude.
+	claude := &mockClaudeInvoker{}
+
+	eng := NewWithDeps(
+		Config{
+			Owner: "owner", Repo: "repo", ProjectNum: 1,
+			User: "testuser", Token: "token",
+			Stages: cleanupStageList(),
+		},
+		client, claude, wm,
+	)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 7,
+		Title:  "Cleanup Stage Test",
+		Status: "Done",
+		ItemID: "PVTI_7",
+		Labels: []string{"fabrik:extend-turns"},
+	}
+
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
 	found := false
 	for _, call := range client.removeLabelCalls {
 		if call.labelName == "fabrik:extend-turns" {
@@ -291,6 +396,86 @@ func TestExtensionLoop_ExtendTurnsLabel_AutoRemoved(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Error("expected fabrik:extend-turns to be removed on successful completion")
+		t.Error("expected fabrik:extend-turns to be removed in cleanup (Done) stage")
+	}
+}
+
+// TestExtendTurns_ManualRemoval_DefaultBudget verifies that when fabrik:extend-turns is absent,
+// the stage runs with the default 1× budget (MaxTurnsOverride == stage.MaxTurns).
+func TestExtendTurns_ManualRemoval_DefaultBudget(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	var gotOverride int
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			gotOverride = opts.MaxTurnsOverride
+			return "FABRIK_STAGE_COMPLETE\n", true, TokenUsage{}, nil
+		},
+	}
+	eng := NewWithDeps(
+		Config{
+			Owner: "owner", Repo: "repo", ProjectNum: 1,
+			User: "testuser", Token: "token",
+			Stages: implementStages(10),
+		},
+		client, claude, wm,
+	)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	// No fabrik:extend-turns label — simulates manual removal before dispatch.
+	item := gh.ProjectItem{
+		Number: 8,
+		Title:  "No Extend Label",
+		Status: "Implement",
+		ItemID: "PVTI_8",
+		Labels: []string{},
+	}
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if gotOverride != 10 {
+		t.Errorf("expected MaxTurnsOverride = 10 (1×), got %d", gotOverride)
+	}
+}
+
+// TestExtendTurns_MaxTurnsZero_NoOp verifies that when max_turns: 0 (unlimited), the presence
+// of fabrik:extend-turns has no effect — the override passed to Claude remains 0.
+func TestExtendTurns_MaxTurnsZero_NoOp(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	var gotOverride int
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			gotOverride = opts.MaxTurnsOverride
+			return "FABRIK_STAGE_COMPLETE\n", true, TokenUsage{}, nil
+		},
+	}
+	eng := NewWithDeps(
+		Config{
+			Owner: "owner", Repo: "repo", ProjectNum: 1,
+			User: "testuser", Token: "token",
+			Stages: implementStages(0), // MaxTurns == 0 → unlimited
+		},
+		client, claude, wm,
+	)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 9,
+		Title:  "Zero MaxTurns",
+		Status: "Implement",
+		ItemID: "PVTI_9",
+		Labels: []string{"fabrik:extend-turns"},
+	}
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	// With MaxTurns == 0, budget must remain 0 regardless of extend-turns label.
+	if gotOverride != 0 {
+		t.Errorf("expected MaxTurnsOverride = 0 for unlimited stage, got %d", gotOverride)
 	}
 }
