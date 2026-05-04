@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/verveguy/fabrik/boardcache"
 	gh "github.com/verveguy/fabrik/github"
 	"github.com/verveguy/fabrik/stages"
 )
@@ -414,6 +415,10 @@ func (e *Engine) handleDecomposed(board *gh.ProjectBoard, item gh.ProjectItem, s
 	e.logf(item.Number, "advance", "moving decomposed issue to Done\n")
 	if err := e.client.UpdateProjectItemStatus(board.ProjectID, item.ItemID, e.statusField.FieldID, optionID); err != nil {
 		e.logf(item.Number, "warn", "could not move issue to Done: %v\n", err)
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.UpdateItemStatus(boardcache.ItemKey(item.Repo, item.Number), "Done")
+		}
 	}
 }
 
@@ -435,5 +440,11 @@ func (e *Engine) advanceToNextStage(board *gh.ProjectBoard, item gh.ProjectItem,
 	}
 
 	e.logf(item.Number, "advance", "moving to stage %q\n", next.Name)
-	return e.client.UpdateProjectItemStatus(board.ProjectID, item.ItemID, e.statusField.FieldID, optionID)
+	err := e.client.UpdateProjectItemStatus(board.ProjectID, item.ItemID, e.statusField.FieldID, optionID)
+	if err == nil {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.UpdateItemStatus(boardcache.ItemKey(item.Repo, item.Number), next.Name)
+		}
+	}
+	return err
 }
