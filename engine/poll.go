@@ -307,36 +307,7 @@ func (e *Engine) Run() error {
 		if cacheImpl != nil {
 			deltaFn = func(eventType string, payload []byte) {
 				cacheImpl.ApplyDelta(eventType, payload)
-				if cacheImpl.IsPaused() {
-					return
-				}
-				if eventType != "issues" && eventType != "issue_comment" {
-					return
-				}
-				// Layer 1: opportunistic per-event Status refresh.
-				// Parse just enough to identify the project item.
-				var ev struct {
-					Issue struct {
-						Number int `json:"number"`
-					} `json:"issue"`
-					Repository struct {
-						FullName string `json:"full_name"`
-					} `json:"repository"`
-				}
-				if err := json.Unmarshal(payload, &ev); err != nil || ev.Repository.FullName == "" || ev.Issue.Number == 0 {
-					return
-				}
-				key := boardcache.ItemKey(ev.Repository.FullName, ev.Issue.Number)
-				itemID, ok := cacheImpl.GetItemID(key)
-				if !ok {
-					return
-				}
-				status, err := e.client.FetchProjectItemStatus(itemID)
-				if err != nil {
-					e.logf(ev.Issue.Number, "warn", "layer1 status fetch failed for %s: %v\n", itemID, err)
-					return
-				}
-				cacheImpl.UpdateItemStatus(key, status)
+				e.applyLayer1StatusRefresh(eventType, payload, cacheImpl)
 			}
 			healthChangeFn = func(healthy bool) {
 				if healthy {
@@ -370,7 +341,11 @@ func (e *Engine) Run() error {
 			e.webhookMgr = wm
 			defer wm.Stop()
 			if cacheImpl != nil {
-				go e.runReconciliationLoop(ctx, cacheImpl)
+				cadence := time.Duration(e.cfg.ProjectStatusPollSeconds) * time.Second
+				if cadence <= 0 {
+					cadence = 600 * time.Second
+				}
+				go e.runReconciliationLoop(ctx, cacheImpl, cadence)
 			}
 		}
 	}
@@ -1432,11 +1407,7 @@ func (e *Engine) reconcileCache(cache *boardcache.CacheImpl) {
 // project item and applies any drift to the in-memory cache (Layer 2).
 // This replaces the former 60-min full-board reconcile for the periodic path;
 // reconcileCache (full board fetch) is preserved for stream-recovery only.
-func (e *Engine) runReconciliationLoop(ctx context.Context, cache *boardcache.CacheImpl) {
-	cadence := time.Duration(e.cfg.ProjectStatusPollSeconds) * time.Second
-	if cadence <= 0 {
-		cadence = 600 * time.Second
-	}
+func (e *Engine) runReconciliationLoop(ctx context.Context, cache *boardcache.CacheImpl, cadence time.Duration) {
 	ticker := time.NewTicker(cadence)
 	defer ticker.Stop()
 	for {
@@ -1457,4 +1428,40 @@ func (e *Engine) runReconciliationLoop(ctx context.Context, cache *boardcache.Ca
 			cache.ApplyStatusBatch(updates)
 		}
 	}
+}
+
+// applyLayer1StatusRefresh handles the Layer 1 opportunistic per-event Status
+// refresh. Called from the deltaFn closure after ApplyDelta. For issue and
+// issue_comment events on a known cache item, it fetches the current Status
+// from GitHub and updates the cache immediately. All errors are best-effort:
+// logged as warnings and never returned.
+func (e *Engine) applyLayer1StatusRefresh(eventType string, payload []byte, cache *boardcache.CacheImpl) {
+	if cache.IsPaused() {
+		return
+	}
+	if eventType != "issues" && eventType != "issue_comment" {
+		return
+	}
+	var ev struct {
+		Issue struct {
+			Number int `json:"number"`
+		} `json:"issue"`
+		Repository struct {
+			FullName string `json:"full_name"`
+		} `json:"repository"`
+	}
+	if err := json.Unmarshal(payload, &ev); err != nil || ev.Repository.FullName == "" || ev.Issue.Number == 0 {
+		return
+	}
+	key := boardcache.ItemKey(ev.Repository.FullName, ev.Issue.Number)
+	itemID, ok := cache.GetItemID(key)
+	if !ok {
+		return
+	}
+	status, err := e.client.FetchProjectItemStatus(itemID)
+	if err != nil {
+		e.logf(ev.Issue.Number, "warn", "layer1 status fetch failed for %s: %v\n", itemID, err)
+		return
+	}
+	cache.UpdateItemStatus(key, status)
 }
