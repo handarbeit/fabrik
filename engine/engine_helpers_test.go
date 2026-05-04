@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"github.com/handarbeit/fabrik/boardcache"
+	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -42,6 +44,33 @@ func testEngine(client *mockGitHubClient, claude *mockClaudeInvoker) *Engine {
 		NewWorktreeManager("/tmp/test-repo"),
 	)
 }
+// testEngineWithCache creates an Engine with a live CacheImpl wired as readClient.
+// Returns the engine and the cache so tests can query cached state directly.
+// The cache is bootstrapped with a single item: owner/repo issue #1 in "Research".
+func testEngineWithCache(client *mockGitHubClient, claude *mockClaudeInvoker) (*Engine, *boardcache.CacheImpl) {
+	eng := testEngine(client, claude)
+
+	cache := boardcache.NewCacheImpl(client, func(string, ...any) {})
+	cache.Bootstrap(&gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Title:     "Test Board",
+		OwnerType: "organization",
+		Items: []gh.ProjectItem{
+			{
+				ID:     "I_001",
+				ItemID: "PVTI_001",
+				Number: 1,
+				Title:  "Test Issue",
+				Repo:   "owner/repo",
+				Status: "Research",
+				Labels: []string{},
+			},
+		},
+	})
+	eng.readClient = cache
+	return eng, cache
+}
+
 func testStagesWithCleanup() []*stages.Stage {
 	ss := testStages()
 	return append(ss, &stages.Stage{
