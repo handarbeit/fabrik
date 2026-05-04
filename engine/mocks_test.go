@@ -45,6 +45,8 @@ type mockGitHubClient struct {
 	addReviewRequestFn              func(owner, repo string, prNumber int, reviewers []string) error
 	fetchProjectItemStatusFn        func(itemID string) (string, error)
 	fetchProjectItemStatusBatchFn   func(projectID string) (map[string]string, error)
+	fetchPRClosingIssuesFn          func(owner, repo string, prNumber int) ([]int, error)
+	fetchPRsForSHAFn                func(owner, repo, sha string) ([]int, error)
 
 	// Track call counts for FetchProjectItemStatus
 	fetchProjectItemStatusCalls []string
@@ -447,6 +449,26 @@ func (m *mockGitHubClient) AddReviewRequest(owner, repo string, prNumber int, re
 		return fn(owner, repo, prNumber, reviewers)
 	}
 	return nil
+}
+
+func (m *mockGitHubClient) FetchPRClosingIssues(owner, repo string, prNumber int) ([]int, error) {
+	m.mu.Lock()
+	fn := m.fetchPRClosingIssuesFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, prNumber)
+	}
+	return nil, nil
+}
+
+func (m *mockGitHubClient) FetchPRsForSHA(owner, repo, sha string) ([]int, error) {
+	m.mu.Lock()
+	fn := m.fetchPRsForSHAFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, sha)
+	}
+	return nil, nil
 }
 
 func (m *mockGitHubClient) RateLimitStats() (gh.RateLimitStats, gh.RateLimitStats) {
