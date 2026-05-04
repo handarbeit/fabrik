@@ -467,31 +467,6 @@ func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBo
 			stage.Name, len(syntheticComments))
 		err := e.processComments(ctx, board, item, stage, syntheticComments, onPIDReady)
 
-		var usage TokenUsage
-		var completed, blocked bool
-		if snap, snapErr := e.store.Get(itemRepo, item.Number); snapErr == nil {
-			st := snap.State()
-			usage = st.LastTokenUsage
-			completed = st.LastInvocationCompleted
-			blocked = st.LastInvocationBlocked
-		}
-		e.emitStructural(tui.JobCompletedEvent{
-			IssueNumber:    item.Number,
-			Repo:           itemRepo,
-			Title:          item.Title,
-			StageName:      stage.Name,
-			StageModel:     stage.Model,
-			IsComment:      true,
-			Success:        err == nil,
-			Completed:      completed,
-			BlockedOnInput: blocked,
-			Duration:       time.Since(startTime),
-			CompletedAt:    time.Now(),
-			TurnsUsed:      usage.TurnsUsed,
-			MaxTurns:       usage.MaxTurns,
-			CostUSD:        usage.CostUSD,
-		})
-
 		if err != nil {
 			if ctx.Err() != nil {
 				return // context cancelled; normal shutdown
