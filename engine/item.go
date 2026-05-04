@@ -459,6 +459,20 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
 		}
 
+		// Remove fabrik:extend-turns at cleanup (Done) stage — this is the designated
+		// removal site. The label persists across all intermediate stages so the operator
+		// can apply it once and have it take effect on every stage until Done.
+		if hasLabel(item, "fabrik:extend-turns") {
+			if removeErr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:extend-turns"); removeErr != nil &&
+				!errors.Is(removeErr, gh.ErrNotFound) {
+				e.logf(item.Number, "warn", "could not remove extend-turns label: %v\n", removeErr)
+			} else if removeErr == nil {
+				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:extend-turns")
+				}
+			}
+		}
+
 		// Archive is handled by archiveDoneCompleteItems in the poll loop,
 		// which enforces the 24-hour grace period so completed items remain
 		// visible on the board.
@@ -687,9 +701,8 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	opts := InvokeOptions{ModelOverride: modelOverride, EffortOverride: effortOverride, BaseBranch: baseBranch}
 
 	// Snapshot extend-turns presence before any FetchItemDetails re-fetches (which
-	// refresh item.Labels). Using a stable boolean ensures the first-budget calc and
-	// the completion-block auto-removal decision are consistent regardless of what
-	// a mid-loop re-fetch changes in item.Labels.
+	// refresh item.Labels). Using a stable boolean ensures the first-budget calc is
+	// consistent regardless of what a mid-loop re-fetch changes in item.Labels.
 	hadExtendTurnsLabel := hasExtendTurnsLabel(item)
 
 	// Determine initial turn budget. When fabrik:extend-turns is present the first
@@ -924,18 +937,6 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		// Clear retry tracking for this stage — no longer needed after success.
 		e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 		e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
-		// Remove fabrik:extend-turns on successful completion so the next stage
-		// gets a normal budget. ErrNotFound means the user already removed it.
-		if hadExtendTurnsLabel {
-			if removeErr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:extend-turns"); removeErr != nil &&
-				!errors.Is(removeErr, gh.ErrNotFound) {
-				e.logf(item.Number, "warn", "could not remove extend-turns label: %v\n", removeErr)
-			} else if removeErr == nil {
-				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:extend-turns")
-				}
-			}
-		}
 		// Post-stage: create draft PR and/or mark ready now that commits exist
 		var prNumber int
 		if stage.CreateDraftPR {
