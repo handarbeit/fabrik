@@ -768,7 +768,7 @@ Fabrik uses the `fabrik:blocked` label to track blocked issues. The label lifecy
 
 **Key behavior callouts:**
 
-- **All stages, including the first (Specify), are subject to the dependency gate** — if an issue has open blockers when it enters any stage, it pauses with `fabrik:blocked` until all blockers close.
+- **The first stage (Specify) always runs regardless of blockers** — dependencies only gate subsequent stages. This allows a formation to be fully specified before execution begins.
 - **Independent issues start in parallel** — issues with no blockers are dispatched concurrently up to the configured `MaxConcurrent` limit.
 - **Failed issues retry independently** — a failure in one formation member does not affect siblings.
 - **Cross-repo dependencies are supported** — a blocking issue can be in a different repository. Fabrik displays cross-repo blockers as `owner/repo#N` in log output.
@@ -779,7 +779,7 @@ Fabrik uses the `fabrik:blocked` label to track blocked issues. The label lifecy
 2. **Add blocked-by edges** in GitHub using the Relationships sidebar (see above).
 3. **Label all issues `fabrik:yolo`** — this makes the formation hands-free. Without `fabrik:yolo`, each stage requires a manual card move on the project board.
 4. **Move all issues to Specify** on the project board. Fabrik will pick them up on the next poll.
-5. **Watch it run** — Fabrik gates every stage, including Specify, on dependency resolution. Issues with no blockers start immediately; blocked issues wait with `fabrik:blocked` until their dependencies close.
+5. **Watch it run** — Fabrik executes Specify for all issues in parallel, then gates subsequent stages on dependency resolution automatically.
 
 #### Example Formation
 
@@ -1334,7 +1334,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `fabrik:yolo` | Force auto-advance for this issue even when `auto_advance: false`; also triggers auto-merge of the linked PR when Validate completes. If the linked PR was already manually merged when auto-merge runs, Fabrik treats it as a success and advances the issue to Done normally. |
 | `fabrik:cruise` | Auto-advances through all stages like `fabrik:yolo` but stops at Validate — no auto-merge, no move to Done. If both `fabrik:cruise` and `fabrik:yolo` are present, `fabrik:yolo` takes precedence. |
 | `fabrik:unrestricted` | Pass `--dangerously-skip-permissions` instead of `--permission-mode dontAsk` for this issue; bypasses the default tool allowlist entirely. Use only when a stage needs tools outside the default set or when the default posture prevents required work. **Caution:** removes all tool restrictions. |
-| `fabrik:extend-turns` | Pre-grant 2× `max_turns` for the first invocation of the next stage. Auto-extends to 3× when actual progress is detected during that invocation (Implement: new git commit (HEAD SHA changed) OR (baseline was clean AND working tree is now dirty — uncommitted file edits by Claude); Review: new git commit or resolved reviewer thread count; Validate: new comment; other stages: no progress signal). Auto-removed by the engine on successful stage completion. No-op when `max_turns` is 0 (unlimited). The displayed turn counter denominator always reflects the effective budget. |
+| `fabrik:extend-turns` | Pre-grant 2× `max_turns` for every stage invocation while the label is present. Auto-extends to 3× when actual progress is detected during an invocation (Implement: new git commit (HEAD SHA changed) OR (baseline was clean AND working tree is now dirty — uncommitted file edits by Claude); Review: new git commit or resolved reviewer thread count; Validate: new comment; other stages: no progress signal). The label **persists across all stages** — apply it once and every stage from the current one through Done will benefit. It is removed automatically when the Done stage cleanup runs. No-op when `max_turns` is 0 (unlimited). The displayed turn counter denominator always reflects the effective budget. |
 | `base:<branch>` | Override the base branch for this issue (e.g. `base:liminis`). Fabrik will fork from, rebase onto, and target PRs at `<branch>` instead of the repository default. Apply before Research; adding mid-pipeline is unsupported and may produce unexpected results. Branch names containing `/` are supported (e.g. `base:release/1.x`). If the named branch does not exist on the remote, Fabrik falls back to the default branch and posts a comment on the issue. |
 
 Model label precedence: `model:<name>` label > stage YAML `model` field > default.
@@ -1431,7 +1431,7 @@ Pressing `?` opens an overlay that displays all keybindings and a labels referen
 | `model:<name>` | Override the model for this issue (e.g. `model:opus`) |
 | `effort:<level>` | Override thinking effort for this issue (`low`, `medium`, `high`, `max`) |
 | `fabrik:unrestricted` | Bypass default permission posture; passes `--dangerously-skip-permissions` instead |
-| `fabrik:extend-turns` | Pre-grant 2× max turns budget; auto-extends to 3× when progress is detected (see the Labels Reference / state-machine semantics for the full definition); auto-removed on success; the turn counter denominator reflects the effective budget |
+| `fabrik:extend-turns` | Pre-grant 2× max turns budget for every stage while present; auto-extends to 3× when progress is detected; persists across all stages until Done cleanup; the turn counter denominator reflects the effective budget |
 | `base:<branch>` | Override base branch for this issue (e.g. `base:liminis`); Fabrik forks from, rebases onto, and targets PRs at this branch |
 
 Dismiss the panel by pressing `?` again or `Esc`.
@@ -1964,7 +1964,7 @@ These labels do not define distinct states but influence transition behavior:
 | `fabrik:yolo` | Forces auto-advance; triggers auto-merge at Validate; overrides `auto_advance: false` |
 | `fabrik:cruise` | Forces auto-advance without auto-merge; stops at Validate completion; suppressed by yolo |
 | `fabrik:unrestricted` | Passes `--dangerously-skip-permissions` to Claude Code |
-| `fabrik:extend-turns` | Pre-grants a 2× turn budget for the next stage invocation; auto-removed on stage success; no-op when `max_turns == 0` |
+| `fabrik:extend-turns` | Pre-grants a 2× turn budget for every stage invocation while present; persists across stages; removed only at the Done cleanup stage or manually; no-op when `max_turns == 0` |
 | `model:<name>` | Selects a specific model for this issue (e.g., `model:opus`) |
 | `effort:<level>` | Overrides stage effort level (`low`, `medium`, `high`, `max`); highest wins |
 | `base:<branch>` | Overrides worktree base branch; falls back to default if not on remote; updates PR base if PR exists |
@@ -2015,14 +2015,14 @@ Each active stage column has the same set of reachable sub-states:
 | `fabrik:awaiting-review` | `handleStageComplete` (Path 1), `checkReviewGate` (Path 2) | Path 1: optimistically after stage completion when `wait_for_reviews: true` (does not check reviewer state — data is stale). Path 2: when `LinkedPRReviewRequests` is non-empty OR when `len(outstanding)==0 && !hasReviews` (the bot self-submission case — covers Copilot/Gemini-style reviewers that don't appear in the formal requested-reviewer list but still need to submit a review) | `checkReviewGate` (both natural clear and timeout paths) | When all reviewers submit, or when timeout elapses (removed by `checkReviewGate` before `pauseForReviewTimeout` is called) | Phase 1 / Phase 2 reprompt timers in `checkReviewGate` fire on label-applied-at age (not on `updatedAt` movement). A non-responsive bot reviewer produces no comment / no review / no PR activity, so `updatedAt` never moves — without periodic re-evaluation the timers would never get a chance to fire. The catch-up loop's blocked-path records `CooldownAt("review-blocked")` (via `CooldownRecorded{Reason: "review-blocked"}` mutation) so `itemMayNeedWork`'s cooldown retry path re-admits the item every 10 × `PollSeconds` (same pattern as `fabrik:blocked`); a per-poll cache bypass is intentionally avoided because long-lived review-waiting items would otherwise become a permanent GraphQL hot path. Blocks auto-advance until review gate clears |
 | `fabrik:awaiting-ci` | `handleStageComplete` (on FABRIK_STAGE_COMPLETE for `wait_for_ci: true` stages; idempotent); `checkCIGate` (on confirmed CI failure; idempotent) | `handleStageComplete`: immediately on FABRIK_STAGE_COMPLETE — replaces premature `stage:X:complete` and keeps the item in the CI-await window (ADR 032). `checkCIGate`: when CI check runs for the PR head SHA have `conclusion: failure/timed_out/action_required`. | `checkCIGate` (when `mergeable_state ∈ {clean, unstable}`, when CI check classification reports all-green, or when gate times out); `attemptMergeOnValidate` (when `mergeable_state ∈ {clean, unstable}` shortcut fires) | When GitHub's `mergeable_state` indicates the PR is mergeable (v0.0.52 shortcut — the `MergeableStateAccepted` allowlist); when all CI checks pass (green) under the per-check classification fallback; or when timeout elapses (removed before `pauseForCITimeout` is called) | Signals CI gate is active (pending or failed); triggers `itemMayNeedWork` updatedAt cache bypass; suppresses dispatcher re-invocation (`itemNeedsWork` returns false); blocks auto-advance until CI gate clears. **`stage:X:complete` is absent while this label is present — it is added by `checkCIGate` when CI clears (R5) or when `mergeable_state` shortcut clears the gate (v0.0.52).** |
 | `fabrik:rebase-needed` | `checkMergeabilityGate` (catch-up loop, `wait_for_ci: true` stages); `attemptMergeOnValidate` (legacy auto-merge path, yolo+Validate without `wait_for_ci`) | When GitHub reports `mergeable == false` on the linked PR — a confirmed base-branch conflict. Applied idempotently in both paths. NOT added when `mergeable == null` (GitHub still computing). | `checkMergeabilityGate` (when mergeable flips back to true); `attemptMergeOnValidate` (on successful merge, via `removeRebaseNeededLabel` — no-op when absent) | When GitHub reports `mergeable == true` (after Claude's rebase push lands), or when `MergePR` succeeds | Signals confirmed merge conflict; triggers `itemMayNeedWork` updatedAt cache bypass (base-branch advances don't bump the item's `updatedAt`); blocks CI gate and auto-advance until rebase resolves the conflict |
-| `fabrik:blocked` | `checkDependencies` | When open blocking issues exist (first transition only — idempotent) | `checkDependencies` | When all blocking issues close | Blocks stage start |
+| `fabrik:blocked` | `checkDependencies` | When open blocking issues exist (first transition only — idempotent) | `checkDependencies` | When all blocking issues close | Blocks stage start (first stage is exempt) |
 | `stage:<X>:in_progress` | `processItem` | After lock acquired and verified | `releaseLock` | Same as `fabrik:locked:<user>` | Informational — shows which stage is active on GitHub |
 | `stage:<X>:complete` | `handleStageComplete` (for non-`wait_for_ci` stages), `checkCIGate` (for `wait_for_ci: true` stages — added only after CI passes), `handleDecomposed`, cleanup stage handler | `handleStageComplete`: after Claude signals FABRIK_STAGE_COMPLETE on stages without `wait_for_ci: true`. `checkCIGate`: when all CI checks pass (R5) — this is the conjunctive gate (ADR 032): `stage:X:complete` is deferred until the CI gate actually clears, not applied on FABRIK_STAGE_COMPLETE. After FABRIK_DECOMPOSED or worktree cleanup. | Never removed | Permanent | Prevents re-invocation of the stage; triggers catch-up advancement |
 | `stage:<X>:failed` | `escalateFailedStage` | After MaxRetries exhausted | `clearFailedStage` | When user removes `fabrik:paused` (manual unpause) | Indicates permanent failure; paired with `fabrik:paused` |
 | `fabrik:yolo` | User (manual) | Any time | User (manual) | Any time | Forces auto-advance; triggers auto-merge at Validate; overrides `auto_advance: false` per stage |
 | `fabrik:cruise` | User (manual) | Any time | User (manual) | Any time | Forces auto-advance without merge; stops at Validate; suppressed when yolo is also present |
 | `fabrik:unrestricted` | User (manual) | Any time | User (manual) | Any time | Passes `--dangerously-skip-permissions` instead of `--permission-mode dontAsk` |
-| `fabrik:extend-turns` | User (manual) | Any time | `processItem` (on success) or User (manual) | On successful stage completion; or manual removal | Pre-grants 2× `stage.MaxTurns` budget for the first invocation; no-op when `max_turns == 0` (unlimited); subsequent extensions beyond 2× still require progress detection |
+| `fabrik:extend-turns` | User (manual) | Any time | `processItem` cleanup branch or User (manual) | At Done cleanup stage completion; or manual removal | Pre-grants 2× `stage.MaxTurns` budget for every invocation while present; persists across all intermediate stages; no-op when `max_turns == 0` (unlimited); subsequent extensions beyond 2× still require progress detection |
 | `model:<name>` | User (manual) | Any time | User (manual) | Any time | Selects Claude model; first label wins if multiple present |
 | `effort:<level>` | User (manual) | Any time | User (manual) | Any time | Overrides stage effort level; highest-ranked wins if multiple present |
 | `base:<branch>` | User (manual) | Before Research (recommended) | User (manual) | Any time | Overrides worktree base branch; falls back to default if branch not found on remote; if a PR exists, its base branch is updated to match on each stage invocation |
@@ -2237,8 +2237,9 @@ This table shows the normal flow when an issue progresses through the pipeline w
 
 | Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
 |--------------|-------|-------|-----------------|--------------|----------------|--------------|
-| Any column, Idle | Poll tick | Open blockers in `item.BlockedBy` | Same column, Blocked | `fabrik:blocked` | | Comment posted listing blockers (first time only); TUI event emitted |
+| Any column (not first stage), Idle | Poll tick | Open blockers in `item.BlockedBy` | Same column, Blocked | `fabrik:blocked` | | Comment posted listing blockers (first time only); TUI event emitted |
 | Same column, Blocked | Poll tick | All blockers now CLOSED | Same column, Idle | | `fabrik:blocked` | Item eligible for processing on next poll |
+| First stage, Idle | Poll tick | Open blockers exist | Same column, Idle | | | First stage is exempt from dependency blocking |
 
 #### Awaiting Input (FABRIK_BLOCKED_ON_INPUT)
 
@@ -2318,7 +2319,7 @@ The "baseline clean AND working tree dirty" guard for Implement prevents a pre-e
 4. Output is accumulated across all invocations before posting as a single stage comment.
 5. WIP commit and push are deferred to after the loop.
 
-**`fabrik:extend-turns` label:** When present at invocation start, the first invocation receives `2 × stage.MaxTurns` as its budget (pre-granted extension, no progress check required for the first turn-limit hit). Subsequent extensions beyond 2× still require the progress check. The label is auto-removed on successful stage completion; `ErrNotFound` on removal is treated as success (user removed it manually). The label is a no-op when `stage.MaxTurns == 0`.
+**`fabrik:extend-turns` label:** When present at invocation start, the first invocation receives `2 × stage.MaxTurns` as its budget (pre-granted extension, no progress check required for the first turn-limit hit). Subsequent extensions beyond 2× still require the progress check. The label **persists across all intermediate stages** — it is not removed on stage completion. It is removed only in the cleanup (Done) stage branch of `processItem`, after the `stage:Done:complete` label is added. `ErrNotFound` on removal is treated as success (user removed it manually). The label is a no-op when `stage.MaxTurns == 0`.
 
 **Log tag:** `[#N extend-turns]` — emitted on **every** `detectProgress` call (pass or fail), reporting the evaluated signals and `has_progress=true/false`. When extension is granted, an additional line logs the new budget multiple and cumulative turns used.
 
@@ -2327,13 +2328,13 @@ The "baseline clean AND working tree dirty" guard for Implement prevents a pre-e
 | Column `<X>`, Locked + In Progress | Turn limit hit | `totalMultiple < 3`; progress detected | Same column, Locked + In Progress (extension) | | | `totalMultiple++`; `resume=true`; output accumulated; no WIP commit or push between extensions |
 | Column `<X>`, Locked + In Progress | Turn limit hit | `totalMultiple >= 3` (hard cap) | Same column, Cooldown | | | Hard cap reached; treated as turn-limit failure; `CooldownAt("periodic-re-eval")` recorded; WIP commit + push |
 | Column `<X>`, Locked + In Progress | Turn limit hit | No progress detected or progress check failed | Same column, Cooldown | | | No extension; treated as turn-limit failure; `CooldownAt("periodic-re-eval")` recorded; WIP commit + push |
-| Column `<X>`, Locked + In Progress | FABRIK_STAGE_COMPLETE (any extension) | `completed = true` | Same column, Complete | `stage:<X>:complete` | `fabrik:locked:<user>`, `stage:<X>:in_progress`, `fabrik:extend-turns` (if present) | Normal completion flow; extend-turns label auto-removed |
+| Column `<X>`, Locked + In Progress | FABRIK_STAGE_COMPLETE (any extension) | `completed = true` | Same column, Complete | `stage:<X>:complete` | `fabrik:locked:<user>`, `stage:<X>:in_progress` | Normal completion flow; extend-turns label persists to next stage |
 
 #### Cleanup Stage
 
 | Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
 |--------------|-------|-------|-----------------|--------------|----------------|--------------|
-| Done, Pending Cleanup | Poll tick | Worktree exists, not paused, not already complete | Done, Complete | `stage:Done:complete` | | Worktree removed; no lock/Claude/comment processing |
+| Done, Pending Cleanup | Poll tick | Worktree exists, not paused, not already complete | Done, Complete | `stage:Done:complete` | `fabrik:extend-turns` (if present) | Worktree removed; no lock/Claude/comment processing |
 | Done, Complete | Poll tick | Already complete | Done, Complete (no-op) | | | Skipped by both `itemMayNeedWork` and `processItem` |
 
 #### Review Reinvoke
@@ -3659,11 +3660,12 @@ After a stage runs, any pre-existing user comments get a rocket reaction via `ma
 When `FABRIK_STAGE_COMPLETE` is detected (regardless of Claude's exit code — as of v0.0.26, a non-zero exit is treated as a warning, not a failure, when the marker is present):
 1. Lock released (`fabrik:locked:<user>` and `stage:<name>:in_progress` removed)
 2. Retry tracking cleared
-3. `fabrik:extend-turns` removed (if present); `ErrNotFound` treated as success (user already removed it)
-4. Draft PR created (if `create_draft_pr: true`)
-5. PR marked ready (if `mark_pr_ready_on_complete: true`)
-6. `stage:<name>:complete` label added
-7. Auto-advance to next stage (if `auto_advance: true` or global `yolo`)
+3. Draft PR created (if `create_draft_pr: true`)
+4. PR marked ready (if `mark_pr_ready_on_complete: true`)
+5. `stage:<name>:complete` label added
+6. Auto-advance to next stage (if `auto_advance: true` or global `yolo`)
+
+Note: `fabrik:extend-turns` is **not** removed here. It persists across all intermediate stages and is removed only during the Done stage's cleanup path (see Cleanup Stage below).
 
 ### Blocked-on-Input Path
 
@@ -3752,10 +3754,11 @@ For `post_to_pr` stages, comment processing posts a new "(comment review)" comme
 ## Phase 6: Cleanup Stage (Done)
 
 The Done stage (`cleanup_worktree: true`) is terminal:
-- No Claude invocation, no lock, no labels
-- Skipped entirely if no worktree exists for the issue — no worktree means there's nothing to clean up
-- Removes worktree directory when it exists
+- No Claude invocation, no lock, no in-progress label management
+- Skipped entirely if `stage:Done:complete` is already present
+- Removes worktree directory when it exists (for non-PR items)
 - Adds `stage:Done:complete` label
+- Removes `fabrik:extend-turns` label if present (this is the designated removal site; the label is not removed during any earlier stage completion)
 - Respects `fabrik:paused` (skips if paused)
 
 ---
