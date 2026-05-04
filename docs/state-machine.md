@@ -1096,9 +1096,9 @@ The following fields are stored in `ItemState` / `LinkedPRState` and accessed ex
 | `StageState.ProcessedComments` | `CommentProcessed{CommentID, At}` | `snap.CommentProcessed(commentID)` | `e.processedSet["…comment-ID"]` |
 | `Worker` (`*WorkerHandle`) | `LocalLockAcquired{Worker: &WorkerHandle{...}}` (set); `WorkerPIDSet{PID}` (update PID); `WorkerHeartbeat{At}` (update `LastSignAt`); `WorkerExited` (clear) | `snap.Worker()` | N/A (new in Phase 3-G) |
 
-**`seenUpdatedAt` (deferred):** The map `e.seenUpdatedAt` (formerly `e.lastUpdatedAt`) tracks the last-seen `UpdatedAt` timestamp per issue. It is kept as a plain `Engine.mu`-protected map pending Phase 3-H, when change-feed observers will replace its purpose. It is intentionally excluded from `itemstate.Store` in this phase.
+**`mayNeedWork` (Phase 3-H):** The map `e.mayNeedWork map[string]bool` (protected by `e.mayNeedWorkMu`) is the Phase 3-H replacement for the removed `e.seenUpdatedAt` map. It is populated by the `mayNeedWorkObserver` registered on both `engine.store` and `cacheImpl.store` whenever a Change includes any `wakeChFlag`. Each poll cycle drains the map into a local `cycleSet` — only items in the set (or with bypass conditions) proceed to deep-fetch evaluation. See section 9.8 for the full observer pattern description.
 
-See also: ADR-036 (`adrs/036-reactive-cache-single-owner.md`) for the full rationale and migration plan.
+See also: ADR-036 (`adrs/036-reactive-cache-single-owner.md`) for the full rationale and migration plan. ADR-038 (`adrs/038-dual-store-observer-wiring.md`) documents the dual-store registration contract.
 
 ### 9.7 Worker Liveness (Heartbeat and Stale-Lock Recovery)
 
@@ -1186,6 +1186,101 @@ The lock label is now removed by four paths (previously two):
 | Graceful shutdown | Engine receives SIGINT/SIGTERM | `cleanupLockedIssues()` |
 | **Stale-worker detector** | Worker PID dead + heartbeat stale > 2min | `cleanupStaleWorker()` |
 | **Startup cleanup** | Engine restart; Worker nil + lock label present | `runStartupCleanup()` |
+
+### 9.8 Change-feed / Observer Pattern (Phase 3-H)
+
+Phase 3-H wires `itemstate.Store.Subscribe` into the engine to replace polling-based "has this item changed?" detection with a reactive change-feed. The key concept: after every non-no-op `Store.Apply` call, registered observers are called synchronously (outside the store's write-lock) with a `Change` value indicating which fields changed and for which item.
+
+#### Two-Store Architecture
+
+There are two separate `*itemstate.Store` instances:
+
+| Store | Owner | Contains |
+|-------|-------|----------|
+| `engine.store` | `Engine` struct | Locks, invocations, stage state, cooldowns, deep-fetch tracking, workers |
+| `cacheImpl.store` | `CacheImpl` (private field) | GitHub board state: status, labels, comments, linked PR, check runs |
+
+Observers that care about changes from both stores **must be registered on both**. A new `CacheImpl.Subscribe(o itemstate.Observer) func()` method exposes `cacheImpl.store.Subscribe` to engine code.
+
+#### ChangeFlags and Which Store Produces Them
+
+| ChangeFlag | Source store | Trigger mutations |
+|------------|-------------|-------------------|
+| `StatusChanged` | `cacheImpl.store` | `LocalStatusUpdated` (reconcile, board fetch), `projects_v2_item` webhook delta |
+| `LabelsChanged` | `cacheImpl.store` | `IssueLabeled`, `IssueUnlabeled`, `LocalLabelAdded`, `LocalLabelRemoved` |
+| `LockChanged` | `engine.store` | `LocalLockAcquired`, `LocalLockReleased` |
+| `LinkedPRChanged` | `cacheImpl.store` | PR review, check runs, head SHA updates |
+| `CommentsChanged` | `cacheImpl.store` | `IssueCommentCreated`, `LocalCommentAdded` |
+| `InvocationChanged` | `engine.store` | `InvocationRecorded` (token usage, completed, blocked, IsComment) |
+| `StageStateChanged` | `engine.store` | `StageAttempted`, `StageRetryIncremented`, `ReviewCycleIncremented`, etc. |
+| `WorkerChanged` | `engine.store` | `LocalLockAcquired` (with Worker), `WorkerPIDSet`, `WorkerHeartbeat`, `WorkerExited` |
+| `CooldownChanged` | `engine.store` | `CooldownRecorded` |
+| `DeepFetchChanged` | `engine.store` | `DeepFetchFailed`, `ItemDeepFetched` |
+
+#### wakeChFlags: Which Changes Wake the Poll Loop
+
+The `wakeChObserver` is registered on **both** stores. It fires a non-blocking send on `wakeCh` when `Change.Fields & wakeChFlags != 0`:
+
+```
+wakeChFlags = StatusChanged | LabelsChanged | CommentsChanged | LockChanged | LinkedPRChanged
+```
+
+Changes that do NOT fire `wakeCh`: `InvocationChanged`, `StageStateChanged`, `WorkerChanged`, `CooldownChanged`, `AssigneesChanged`, `TitleBodyChanged`, `StateChanged`, `BlockedByChanged`, `DeepFetchChanged`, `BaseBranchChanged`.
+
+The unconditional `wakeCh <- struct{}{}` send that previously lived in the webhook handler has been removed. The observer path is the sole mechanism.
+
+#### Registered Observers and Where They Live
+
+| Observer | Registered on | Fires when | Emits |
+|----------|--------------|-----------|-------|
+| `wakeChObserver` | both stores | `Change.Fields & wakeChFlags != 0` | `wakeCh <- struct{}{}` (non-blocking) |
+| `mayNeedWorkObserver` | both stores | `Change.Fields & wakeChFlags != 0` | adds `repo#number` to `e.mayNeedWork` |
+| `InvocationObserver` | `engine.store` only | `Change.Fields & InvocationChanged != 0` | `tui.JobCompletedEvent` |
+| `StageChangeObserver` | `cacheImpl.store` only | `Change.Fields & StatusChanged != 0` | `tui.StageChangedEvent` |
+| Pause observer (closure) | `CacheImpl.SubscribePause` | `Pause()` / `Resume()` | `tui.WebhookStatusEvent` |
+
+All observers are registered in `Engine.Run()` after extracting `cacheImpl`. Their unsubscribe funcs are deferred so observers are cleaned up when `Run()` returns.
+
+#### mayNeedWork Set: Poll Cycle Pre-Filter
+
+`Engine.mayNeedWork map[string]bool` (protected by `Engine.mayNeedWorkMu`) is populated by `mayNeedWorkObserver` on every change that includes `wakeChFlags`. At the start of each poll cycle, `poll()` drains it to a local `cycleSet`:
+
+```go
+cycleSet := func() map[string]bool {
+    e.mayNeedWorkMu.Lock()
+    defer e.mayNeedWorkMu.Unlock()
+    s := e.mayNeedWork
+    e.mayNeedWork = make(map[string]bool)
+    return s
+}()
+```
+
+Each item in `board.Items` passes the pre-filter if **any** of these bypass conditions apply:
+
+| Bypass condition | Rationale |
+|-----------------|-----------|
+| Item is in `cycleSet` | Observer saw a relevant change since last poll |
+| Stage has `CleanupWorktree: true` | Cleanup triggers on local filesystem state, not board changes |
+| Item has `fabrik:awaiting-ci` label | CI gate must be evaluated every poll |
+| Item has `fabrik:rebase-needed` label | Rebase gate must be evaluated every poll |
+| `snap.HasExpiredCooldown(now)` is true | Periodic re-evaluation window has passed |
+
+Items not meeting any bypass condition are skipped for that poll cycle (no deep-fetch, no dispatch). Items with an **active** CooldownAt (not yet expired) are also skipped — the CooldownAt["periodic-re-eval"] entry gates time-based re-evaluation.
+
+This replaces the removed `engine.seenUpdatedAt map[string]time.Time`, which performed an equivalent "has this item changed?" gate via timestamp comparison.
+
+#### CacheImpl.SubscribePause
+
+In addition to `Store.Subscribe`, `CacheImpl` exposes `SubscribePause(fn func(bool)) func()` for components that need to react to pause/resume transitions (e.g., the TUI `WebhookStatusEvent`). Pause observers are called **outside `c.mu`** — `Pause()` and `Resume()` snapshot the list before releasing `c.mu`, then call observers on the snapshot. This mirrors `Store`'s snapshot-then-call pattern. Observers registered via `SubscribePause` MUST NOT call back into `CacheImpl` methods that acquire `c.mu`.
+
+#### Invariants
+
+- **I1 (Single fire)**: Each `Store.Apply` call produces at most one `Change` per observer registration. Observers are called in registration order.
+- **I2 (Outside lock)**: Observers are called after the store's write-lock is released. Observers may safely call `store.Get` or other read methods without deadlock.
+- **I3 (Dual registration)**: Any observer that cares about `wakeChFlags` spanning both stores must be registered on both `engine.store` and `cacheImpl.store`. Registering on only one store silently drops events from the other. See ADR-038.
+- **I4 (Non-blocking wakeCh)**: The `wakeChObserver` always uses a non-blocking send. A full `wakeCh` (capacity 1) means a poll is already pending; dropping the signal is correct (burst coalescence).
+
+**References:** [ADR-038: Dual-Store Observer Wiring](../adrs/038-dual-store-observer-wiring.md), [ADR-036: Reactive Cache Single-Owner](../adrs/036-reactive-cache-single-owner.md).
 
 ---
 
