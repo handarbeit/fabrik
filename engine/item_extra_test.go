@@ -555,7 +555,10 @@ func TestPollPreFilter_AwaitingInput_WithoutChange_Skipped(t *testing.T) {
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
-	// item not in cycleSet, no bypass label (awaiting-input is NOT a bypass), no expired CooldownAt
+	// Seed the store so the pre-filter sees this as a known (previously-processed) item.
+	// InvocationRecorded fires InvocationChanged (not wakeChFlags) so no observer side-effect.
+	eng.store.Apply(itemstate.InvocationRecorded{Repo: "owner/repo", Number: 50, Completed: true})
+	// Not in cycleSet, no bypass label (awaiting-input is NOT a bypass), no expired CooldownAt.
 	if _, err := eng.poll(t.Context()); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
@@ -687,7 +690,10 @@ func TestPollPreFilter_AwaitingReview_NoCooldown_NotBypassed(t *testing.T) {
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 60
-	// No CooldownAt entry, not in cycleSet, no awaiting-ci/rebase-needed → should be skipped
+	// Seed the store so the pre-filter sees this as a known (previously-processed) item.
+	// Item is in store but has no CooldownAt → not bypassed by the active-cooldown path.
+	eng.store.Apply(itemstate.InvocationRecorded{Repo: "owner/repo", Number: 68, Completed: true})
+	// Not in cycleSet, no awaiting-ci/rebase-needed, no CooldownAt → should be skipped.
 	if _, err := eng.poll(t.Context()); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
