@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/tui"
 )
 
@@ -181,16 +182,26 @@ func TestDetectOrgMode(t *testing.T) {
 }
 
 // newTestWebhookManager creates a webhookManager wired for unit testing.
+// It wires a real Store + wakeChObserver so tests that check wm.wakeCh work
+// correctly: webhook → deltaFn → store.Apply → observer → wakeCh.
 func newTestWebhookManager(t *testing.T) (*webhookManager, chan tui.Event) {
 	t.Helper()
 	events := make(chan tui.Event, 16)
+	wakeCh := make(chan struct{}, 1)
+	store := itemstate.NewStore(nil)
+	unsub := store.Subscribe(newWakeChObserver(wakeCh))
+	t.Cleanup(unsub)
+	deltaFn := func(_ string, _ []byte) {
+		// Apply a LabelsChanged mutation so the wakeChObserver fires.
+		store.Apply(itemstate.LocalLabelAdded{Repo: "myorg/myrepo", Number: 1, Label: "test"})
+	}
 	wm := newWebhookManager(
 		func(_ int, _, _ string, _ ...any) {},
-		make(chan struct{}, 1),
+		wakeCh,
 		func(e tui.Event) { events <- e },
 		map[string]bool{"myorg/myrepo": true},
 		nil,
-		nil,
+		deltaFn,
 		nil,
 	)
 	return wm, events
