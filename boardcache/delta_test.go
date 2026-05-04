@@ -7,6 +7,7 @@ package boardcache
 // behavioral tests in boardcache_test.go with focused Store-delegation checks.
 
 import (
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
@@ -390,6 +391,512 @@ func TestReconcileRemoveCleansUpPrNumToKey(t *testing.T) {
 	c.mu.RUnlock()
 	if afterReconcile {
 		t.Errorf("prNumToKey entry for PR #10 survived after item #1 removed by Reconcile")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3-D: issues.* delta handlers — per-action coverage
+// ---------------------------------------------------------------------------
+
+func TestIssuesOpened(t *testing.T) {
+	c := NewCacheImpl(&mockClient{}, nopLog)
+	c.Bootstrap(&gh.ProjectBoard{ProjectID: "P", Title: "T", OwnerType: "organization"})
+
+	payload := issuesOpenedPayloadJSON("owner/repo", 99, "I_99", "New Issue", "body text",
+		[]string{"enhancement"}, []string{"alice"})
+	c.ApplyDelta("issues", payload)
+
+	s := testGetState(t, c, "owner/repo", 99)
+	if s.Title != "New Issue" {
+		t.Errorf("Title: want %q, got %q", "New Issue", s.Title)
+	}
+	if s.Body != "body text" {
+		t.Errorf("Body: want %q, got %q", "body text", s.Body)
+	}
+	if !containsStr(s.Labels, "enhancement") {
+		t.Errorf("Labels: want [enhancement], got %v", s.Labels)
+	}
+	if !containsStr(s.Assignees, "alice") {
+		t.Errorf("Assignees: want [alice], got %v", s.Assignees)
+	}
+}
+
+func TestIssuesOpenedIdempotent(t *testing.T) {
+	c := NewCacheImpl(&mockClient{}, nopLog)
+	c.Bootstrap(&gh.ProjectBoard{ProjectID: "P", Title: "T", OwnerType: "organization"})
+
+	payload := issuesOpenedPayloadJSON("owner/repo", 99, "I_99", "Issue", "", []string{"bug"}, nil)
+	c.ApplyDelta("issues", payload)
+	c.ApplyDelta("issues", payload) // duplicate
+
+	s := testGetState(t, c, "owner/repo", 99)
+	count := 0
+	for _, l := range s.Labels {
+		if l == "bug" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("label 'bug' should appear exactly once after duplicate open, got %d", count)
+	}
+}
+
+func TestIssuesClosed(t *testing.T) {
+	c := seedCache(t)
+	c.ApplyDelta("issues", issuesActionPayloadJSON("closed", "owner/repo", 1))
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if !s.IsClosed {
+		t.Error("want IsClosed=true after issues.closed")
+	}
+}
+
+func TestIssuesReopened(t *testing.T) {
+	c := seedCache(t)
+	c.ApplyDelta("issues", issuesActionPayloadJSON("closed", "owner/repo", 1))
+	c.ApplyDelta("issues", issuesActionPayloadJSON("reopened", "owner/repo", 1))
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.IsClosed {
+		t.Error("want IsClosed=false after issues.reopened")
+	}
+}
+
+func TestIssuesEdited(t *testing.T) {
+	c := seedCache(t)
+	c.ApplyDelta("issues", issuesEditedPayloadJSON("owner/repo", 1, "Updated Title", "Updated body"))
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.Title != "Updated Title" {
+		t.Errorf("Title: want %q, got %q", "Updated Title", s.Title)
+	}
+	if s.Body != "Updated body" {
+		t.Errorf("Body: want %q, got %q", "Updated body", s.Body)
+	}
+}
+
+func TestIssuesDeleted(t *testing.T) {
+	c := seedCache(t)
+	c.ApplyDelta("issues", issuesActionPayloadJSON("deleted", "owner/repo", 1))
+
+	if _, err := c.store.Get("owner/repo", 1); err == nil {
+		t.Error("want ErrNotFound after issues.deleted, but item still in store")
+	}
+	// Item #2 must be unaffected.
+	if _, err := c.store.Get("owner/repo", 2); err != nil {
+		t.Errorf("item #2 should still be present after unrelated delete: %v", err)
+	}
+}
+
+func TestIssuesTransferred(t *testing.T) {
+	c := seedCache(t)
+	c.ApplyDelta("issues", issuesActionPayloadJSON("transferred", "owner/repo", 1))
+
+	if _, err := c.store.Get("owner/repo", 1); err == nil {
+		t.Error("want ErrNotFound after issues.transferred, but item still in store")
+	}
+}
+
+func TestIssuesDeletedCleansPRLinkage(t *testing.T) {
+	c := seedCache(t)
+	testSetLinkedPR(c, "owner/repo", 1, 42)
+
+	c.ApplyDelta("issues", issuesActionPayloadJSON("deleted", "owner/repo", 1))
+
+	c.mu.RLock()
+	_, found := c.prNumToKey[prKey("owner/repo", 42)]
+	c.mu.RUnlock()
+	if found {
+		t.Error("prNumToKey entry for PR #42 should have been removed after issues.deleted")
+	}
+}
+
+func TestIssuesAssigned(t *testing.T) {
+	c := seedCache(t)
+	c.ApplyDelta("issues", issuesAssignedPayloadJSON("assigned", "owner/repo", 1, []string{"alice", "bob"}))
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if !containsStr(s.Assignees, "alice") || !containsStr(s.Assignees, "bob") {
+		t.Errorf("Assignees: want [alice bob], got %v", s.Assignees)
+	}
+}
+
+func TestIssuesUnassigned(t *testing.T) {
+	c := seedCache(t)
+	// Assign alice first.
+	c.ApplyDelta("issues", issuesAssignedPayloadJSON("assigned", "owner/repo", 1, []string{"alice"}))
+	// Unassign: full list is now empty.
+	c.ApplyDelta("issues", issuesAssignedPayloadJSON("unassigned", "owner/repo", 1, []string{}))
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if containsStr(s.Assignees, "alice") {
+		t.Errorf("want alice removed after unassigned; Assignees: %v", s.Assignees)
+	}
+}
+
+// TestFabrikWentDeaf_IssuesLabeledBeforeOpened is the primary regression test for the
+// "fabrik went deaf" bug class. Without this PR's fix, the labeled delta for an
+// unknown issue is silently dropped. With the fix, ensureIssueInStore calls
+// FetchProjectItem, populates the cache, and then applies the label.
+//
+// This test MUST fail without the ensureIssueInStore fallback.
+func TestFabrikWentDeaf_IssuesLabeledBeforeOpened(t *testing.T) {
+	mc := &mockClient{
+		projectItemResult: &gh.ProjectItem{
+			Number: 99,
+			Title:  "Brand New Issue",
+			Repo:   "owner/repo",
+			Labels: nil, // no labels yet from GitHub
+		},
+	}
+	// Cache starts empty — issue #99 is NOT in the cache.
+	c := NewCacheImpl(mc, nopLog)
+	c.Bootstrap(&gh.ProjectBoard{ProjectID: "P", Title: "T", OwnerType: "organization"})
+
+	// Deliver labeled event BEFORE the item is in the cache (out-of-order delivery).
+	c.ApplyDelta("issues", issuesLabeledPayloadJSON("labeled", "owner/repo", 99, "fabrik:yolo"))
+
+	// The item should now be in the cache (populated via fallback) with the label applied.
+	s := testGetState(t, c, "owner/repo", 99)
+	if !containsStr(s.Labels, "fabrik:yolo") {
+		t.Errorf("want label 'fabrik:yolo' on issue #99 after fallback+labeled; got Labels=%v", s.Labels)
+	}
+	if mc.fetchProjectItemCount != 1 {
+		t.Errorf("want exactly 1 FetchProjectItem call (fallback), got %d", mc.fetchProjectItemCount)
+	}
+}
+
+func TestOutOfOrderIssuesLabeledBeforeOpened(t *testing.T) {
+	mc := &mockClient{
+		projectItemResult: &gh.ProjectItem{
+			Number: 77,
+			Title:  "OOO Issue",
+			Repo:   "owner/repo",
+		},
+	}
+	c := NewCacheImpl(mc, nopLog)
+	c.Bootstrap(&gh.ProjectBoard{ProjectID: "P", Title: "T", OwnerType: "organization"})
+
+	// labeled arrives first (out of order).
+	c.ApplyDelta("issues", issuesLabeledPayloadJSON("labeled", "owner/repo", 77, "stage:Research"))
+
+	// opened arrives after — should be idempotent.
+	c.ApplyDelta("issues", issuesOpenedPayloadJSON("owner/repo", 77, "I_77", "OOO Issue", "", nil, nil))
+
+	s := testGetState(t, c, "owner/repo", 77)
+	if !containsStr(s.Labels, "stage:Research") {
+		t.Errorf("label 'stage:Research' should be present after out-of-order delivery; got %v", s.Labels)
+	}
+}
+
+func TestIssuesClosedFallbackFetch(t *testing.T) {
+	mc := &mockClient{
+		projectItemResult: &gh.ProjectItem{
+			Number: 55,
+			Title:  "Missing Issue",
+			Repo:   "owner/repo",
+		},
+	}
+	c := NewCacheImpl(mc, nopLog)
+	c.Bootstrap(&gh.ProjectBoard{ProjectID: "P", Title: "T", OwnerType: "organization"})
+
+	// closed arrives but issue not in cache — should trigger fetch then close.
+	c.ApplyDelta("issues", issuesActionPayloadJSON("closed", "owner/repo", 55))
+
+	s := testGetState(t, c, "owner/repo", 55)
+	if !s.IsClosed {
+		t.Error("want IsClosed=true after fallback fetch + closed delta")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3-D: pull_request.* — draft and reviewer handlers
+// ---------------------------------------------------------------------------
+
+func TestPullRequestReadyForReview(t *testing.T) {
+	c := seedCache(t)
+	testSetLinkedPR(c, "owner/repo", 1, 42)
+	// Establish linkedPRs entry with Draft=true.
+	c.ApplyDelta("pull_request", pullRequestPayloadJSON("opened", "owner/repo", 42, "sha1", "open", false, true))
+
+	c.ApplyDelta("pull_request", pullRequestDraftPayloadJSON("ready_for_review", "owner/repo", 42))
+
+	c.mu.RLock()
+	pr := c.linkedPRs[prKey("owner/repo", 42)]
+	c.mu.RUnlock()
+	if pr == nil || pr.Draft {
+		t.Errorf("want Draft=false after ready_for_review; pr=%v", pr)
+	}
+}
+
+func TestPullRequestConvertedToDraft(t *testing.T) {
+	c := seedCache(t)
+	testSetLinkedPR(c, "owner/repo", 1, 42)
+	// Establish linkedPRs entry with Draft=false.
+	c.ApplyDelta("pull_request", pullRequestPayloadJSON("opened", "owner/repo", 42, "sha1", "open", false, false))
+
+	c.ApplyDelta("pull_request", pullRequestDraftPayloadJSON("converted_to_draft", "owner/repo", 42))
+
+	c.mu.RLock()
+	pr := c.linkedPRs[prKey("owner/repo", 42)]
+	c.mu.RUnlock()
+	if pr == nil || !pr.Draft {
+		t.Errorf("want Draft=true after converted_to_draft; pr=%v", pr)
+	}
+}
+
+func TestPullRequestReviewRequested(t *testing.T) {
+	c := seedCache(t)
+	testSetLinkedPR(c, "owner/repo", 1, 42)
+
+	payload := pullRequestReviewRequestedPayloadJSON("owner/repo", 42, []string{"alice"}, "alice")
+	c.ApplyDelta("pull_request", payload)
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.LinkedPR == nil || len(s.LinkedPR.ReviewRequests) != 1 {
+		t.Fatalf("want 1 review request; LinkedPR=%v", s.LinkedPR)
+	}
+	if s.LinkedPR.ReviewRequests[0].Login != "alice" {
+		t.Errorf("want reviewer alice, got %q", s.LinkedPR.ReviewRequests[0].Login)
+	}
+}
+
+func TestPullRequestReviewRequestRemoved(t *testing.T) {
+	c := seedCache(t)
+	testSetLinkedPR(c, "owner/repo", 1, 42)
+
+	// Add reviewer first.
+	c.ApplyDelta("pull_request", pullRequestReviewRequestedPayloadJSON("owner/repo", 42, []string{"alice"}, "alice"))
+	// Remove reviewer.
+	c.ApplyDelta("pull_request", pullRequestReviewRequestRemovedPayloadJSON("owner/repo", 42, "alice"))
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.LinkedPR != nil && len(s.LinkedPR.ReviewRequests) != 0 {
+		t.Errorf("want 0 review requests after removal; got %v", s.LinkedPR.ReviewRequests)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3-D: documented no-ops — verify no crash and no state change
+// ---------------------------------------------------------------------------
+
+func TestIssueCommentEditedNoOp(t *testing.T) {
+	c := seedCache(t)
+	// First add a comment.
+	c.ApplyDelta("issue_comment", issueCommentPayloadJSON("created", "owner/repo", 1, "C1", 1, "original", "alice"))
+	// Edit the comment — must not panic or alter stored comments.
+	c.ApplyDelta("issue_comment", issueCommentPayloadJSON("edited", "owner/repo", 1, "C1", 1, "edited text", "alice"))
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if len(s.Comments) != 1 || s.Comments[0].Body != "original" {
+		t.Errorf("comment edit should be a no-op; got %+v", s.Comments)
+	}
+}
+
+func TestPRReviewEditedNoOp(t *testing.T) {
+	c := seedCache(t)
+	testSetLinkedPR(c, "owner/repo", 1, 42)
+	// Submit a review.
+	c.ApplyDelta("pull_request_review", pullRequestReviewPayloadJSON("submitted", "owner/repo", 42, 1001, "approved", "alice"))
+	// Edit the review — must be a no-op.
+	c.ApplyDelta("pull_request_review", pullRequestReviewPayloadJSON("edited", "owner/repo", 42, 1001, "approved", "alice"))
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.LinkedPR == nil || len(s.LinkedPR.Reviews) != 1 {
+		t.Errorf("want exactly 1 review after edit no-op; got %v", s.LinkedPR)
+	}
+}
+
+func TestPRReviewCommentEditedNoOp(t *testing.T) {
+	c := seedCache(t)
+	testSetLinkedPR(c, "owner/repo", 1, 42)
+	c.ApplyDelta("pull_request_review_comment",
+		pullRequestReviewCommentPayloadJSON("created", "owner/repo", 42, 200, "RC_1", "original", "bob"))
+	c.ApplyDelta("pull_request_review_comment",
+		pullRequestReviewCommentPayloadJSON("edited", "owner/repo", 42, 200, "RC_1", "edited", "bob"))
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.LinkedPR == nil || len(s.LinkedPR.ThreadComments) != 1 {
+		t.Errorf("want exactly 1 thread comment after edit no-op; got %v", s.LinkedPR)
+	}
+}
+
+func TestCheckRunCreatedNoOp(t *testing.T) {
+	c := seedCache(t)
+	before := testGetState(t, c, "owner/repo", 1)
+
+	// check_run.created must not alter any item state.
+	c.ApplyDelta("check_run", checkRunPayloadJSON("created", "owner/repo", 5555, "build", "in_progress", "", "sha_xyz"))
+
+	after := testGetState(t, c, "owner/repo", 1)
+	if after.Title != before.Title {
+		t.Errorf("check_run.created should be a no-op; Title changed from %q to %q", before.Title, after.Title)
+	}
+}
+
+func TestCheckSuiteNoOp(t *testing.T) {
+	c := seedCache(t)
+	before := testGetState(t, c, "owner/repo", 1)
+
+	// All check_suite actions must be no-ops.
+	for _, action := range []string{"completed", "requested", "rerequested"} {
+		payload, _ := json.Marshal(map[string]string{"action": action})
+		c.ApplyDelta("check_suite", payload)
+	}
+
+	after := testGetState(t, c, "owner/repo", 1)
+	if after.Title != before.Title {
+		t.Errorf("check_suite should be a no-op; state changed")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3-D: projects_v2_item handlers
+// ---------------------------------------------------------------------------
+
+func TestProjectsV2ItemCreated(t *testing.T) {
+	mc := &mockClient{
+		itemDetailsResult: &gh.ProjectItem{
+			Number: 88,
+			Repo:   "owner/repo",
+			Title:  "Board Issue",
+		},
+	}
+	c := NewCacheImpl(mc, nopLog)
+	c.Bootstrap(&gh.ProjectBoard{ProjectID: "P", Title: "T", OwnerType: "organization"})
+
+	payload := projectsV2ItemCreatedPayloadJSON("I_88", "Issue")
+	c.ApplyDelta("projects_v2_item", payload)
+
+	s := testGetState(t, c, "owner/repo", 88)
+	if s.Number != 88 {
+		t.Errorf("want Number=88, got %d", s.Number)
+	}
+	if mc.fetchItemDetailsCount != 1 {
+		t.Errorf("want exactly 1 FetchItemDetails call, got %d", mc.fetchItemDetailsCount)
+	}
+}
+
+func TestProjectsV2ItemCreatedNonIssueIgnored(t *testing.T) {
+	mc := &mockClient{}
+	c := NewCacheImpl(mc, nopLog)
+	c.Bootstrap(&gh.ProjectBoard{ProjectID: "P", Title: "T", OwnerType: "organization"})
+
+	// PullRequest content type must be ignored.
+	c.ApplyDelta("projects_v2_item", projectsV2ItemCreatedPayloadJSON("PR_123", "PullRequest"))
+
+	if mc.fetchItemDetailsCount != 0 {
+		t.Errorf("PullRequest content_type should not trigger FetchItemDetails, got %d calls", mc.fetchItemDetailsCount)
+	}
+}
+
+func TestProjectsV2ItemDeleted(t *testing.T) {
+	c := seedCache(t)
+	// Item #1 has ItemID "PVTI_001" (set by seedCache via Bootstrap).
+	c.ApplyDelta("projects_v2_item", projectsV2ItemRemovedPayloadJSON("deleted", "PVTI_001"))
+
+	if _, err := c.store.Get("owner/repo", 1); err == nil {
+		t.Error("want item #1 removed after projects_v2_item.deleted")
+	}
+	// Item #2 must be unaffected.
+	if _, err := c.store.Get("owner/repo", 2); err != nil {
+		t.Errorf("item #2 should still be present: %v", err)
+	}
+}
+
+func TestProjectsV2ItemArchived(t *testing.T) {
+	c := seedCache(t)
+	c.ApplyDelta("projects_v2_item", projectsV2ItemRemovedPayloadJSON("archived", "PVTI_001"))
+
+	if _, err := c.store.Get("owner/repo", 1); err == nil {
+		t.Error("want item #1 removed after projects_v2_item.archived")
+	}
+}
+
+func TestProjectsV2ItemDeletedCleansPRLinkage(t *testing.T) {
+	c := seedCache(t)
+	testSetLinkedPR(c, "owner/repo", 1, 42)
+	c.mu.Lock()
+	c.linkedPRs[prKey("owner/repo", 42)] = &gh.PRDetails{Number: 42}
+	c.mu.Unlock()
+
+	c.ApplyDelta("projects_v2_item", projectsV2ItemRemovedPayloadJSON("deleted", "PVTI_001"))
+
+	c.mu.RLock()
+	_, pkFound := c.prNumToKey[prKey("owner/repo", 42)]
+	_, lrFound := c.linkedPRs[prKey("owner/repo", 42)]
+	c.mu.RUnlock()
+	if pkFound || lrFound {
+		t.Error("prNumToKey and linkedPRs entries for PR #42 should be cleaned up after item deletion")
+	}
+}
+
+func TestProjectsV2ItemRestoredNoOp(t *testing.T) {
+	c := seedCache(t)
+	before := len(c.store.All())
+
+	// restored must not crash or duplicate items.
+	p := projectsV2ItemPayload{Action: "restored"}
+	p.ProjectsV2Item.ID = "PVTI_001"
+	payload, _ := json.Marshal(p)
+	c.ApplyDelta("projects_v2_item", payload)
+
+	if after := len(c.store.All()); after != before {
+		t.Errorf("projects_v2_item.restored must not change item count; before=%d after=%d", before, after)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3-D: cache pause drops deltas
+// ---------------------------------------------------------------------------
+
+func TestCachePauseDropsDelta(t *testing.T) {
+	c := seedCache(t)
+	c.Pause()
+
+	// Delta delivered while paused must be dropped.
+	c.ApplyDelta("issues", issuesLabeledPayloadJSON("labeled", "owner/repo", 1, "during-pause"))
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if containsStr(s.Labels, "during-pause") {
+		t.Error("label applied while cache was paused; expected no-op")
+	}
+
+	c.Resume()
+	// Same delta delivered after resume must be applied.
+	c.ApplyDelta("issues", issuesLabeledPayloadJSON("labeled", "owner/repo", 1, "during-pause"))
+
+	s = testGetState(t, c, "owner/repo", 1)
+	if !containsStr(s.Labels, "during-pause") {
+		t.Error("label should be applied after cache is resumed")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3-D: concurrent delta — race detector clean
+// ---------------------------------------------------------------------------
+
+func TestConcurrentDeltaSameIssue(t *testing.T) {
+	c := seedCache(t)
+
+	const n = 50
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			if idx%2 == 0 {
+				c.ApplyDelta("issues", issuesLabeledPayloadJSON("labeled", "owner/repo", 1, "concurrent-label"))
+			} else {
+				c.ApplyDelta("issues", issuesLabeledPayloadJSON("unlabeled", "owner/repo", 1, "concurrent-label"))
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	// After concurrent writes, item must still be accessible.
+	if _, err := c.store.Get("owner/repo", 1); err != nil {
+		t.Errorf("item #1 must be accessible after concurrent deltas: %v", err)
 	}
 }
 
