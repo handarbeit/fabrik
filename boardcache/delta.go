@@ -361,11 +361,13 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 	c.mu.Unlock()
 
 	// Auto-heal: resolve PR linkage via REST.
-	key, _, found := c.resolvePRLinkage(owner, repoName, prNum)
+	key, _, found, healErr := c.resolvePRLinkage(owner, repoName, prNum)
 
 	c.mu.Lock()
 	if !found {
-		c.recentMissCache[mk] = time.Now()
+		if healErr == nil {
+			c.recentMissCache[mk] = time.Now()
+		}
 		c.mu.Unlock()
 		c.logFn("[cache] dropped pull_request delta for PR #%d: no closing issue in cache\n", prNum)
 		return
@@ -431,11 +433,13 @@ func (c *CacheImpl) applyPullRequestReviewSubmitted(payload []byte) {
 	c.mu.Unlock()
 
 	// Auto-heal: resolve PR linkage via REST.
-	key, _, found := c.resolvePRLinkage(owner, repoName, prNum)
+	key, _, found, healErr := c.resolvePRLinkage(owner, repoName, prNum)
 
 	c.mu.Lock()
 	if !found {
-		c.recentMissCache[mk] = time.Now()
+		if healErr == nil {
+			c.recentMissCache[mk] = time.Now()
+		}
 		c.mu.Unlock()
 		c.logFn("[cache] dropped pull_request_review delta for PR #%d: no closing issue in cache\n", prNum)
 		return
@@ -513,11 +517,13 @@ func (c *CacheImpl) applyPullRequestReviewCommentCreated(payload []byte) {
 	c.mu.Unlock()
 
 	// Auto-heal: resolve PR linkage via REST.
-	key, _, found := c.resolvePRLinkage(owner, repoName, prNum)
+	key, _, found, healErr := c.resolvePRLinkage(owner, repoName, prNum)
 
 	c.mu.Lock()
 	if !found {
-		c.recentMissCache[mk] = time.Now()
+		if healErr == nil {
+			c.recentMissCache[mk] = time.Now()
+		}
 		c.mu.Unlock()
 		c.logFn("[cache] dropped pull_request_review_comment delta for PR #%d: no closing issue in cache\n", prNum)
 		return
@@ -602,6 +608,8 @@ func (c *CacheImpl) applyCheckRunCompleted(payload []byte) {
 	prNums, err := c.fallback.FetchPRsForSHA(owner, repoName, sha)
 	if err != nil {
 		c.logFn("[cache] applyCheckRunCompleted: FetchPRsForSHA for %s: %v\n", sha, err)
+		// Transient error — do not record a negative miss; retry on next webhook.
+		return
 	}
 	if len(prNums) == 0 {
 		c.mu.Lock()
@@ -613,11 +621,13 @@ func (c *CacheImpl) applyCheckRunCompleted(payload []byte) {
 	prNum := prNums[0]
 
 	// Auto-heal step 2: resolve which issue the PR closes.
-	key, issNum, found := c.resolvePRLinkage(owner, repoName, prNum)
+	key, issNum, found, healErr := c.resolvePRLinkage(owner, repoName, prNum)
 
 	c.mu.Lock()
 	if !found {
-		c.recentMissCache[msha] = time.Now()
+		if healErr == nil {
+			c.recentMissCache[msha] = time.Now()
+		}
 		c.mu.Unlock()
 		c.logFn("[cache] dropped check_run delta for SHA %s: no closing issue in cache for PR #%d\n", sha, prNum)
 		return
