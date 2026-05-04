@@ -182,13 +182,20 @@ func (c *Client) ensureLabel(owner, repo, name, description, color string) error
 	return nil
 }
 
+// ErrNoRepoConfigured is returned by SeedLabels when repo is empty.
+var ErrNoRepoConfigured = errors.New("repo must not be empty")
+
 // SeedLabels ensures all known Fabrik labels exist on the given repo and that
 // any label with an empty description is backfilled. It never changes an
 // existing label's color or non-empty description. stageNames is the list of
 // stage names from the loaded config; lockedUser is the current Fabrik user.
-// Returns the first error encountered, but callers should treat this as
-// non-fatal (log a warning and continue).
+// Returns ErrNoRepoConfigured when repo is empty. Per-label failures are logged
+// internally and do not cause an early return.
 func (c *Client) SeedLabels(owner, repo string, stageNames []string, lockedUser string) error {
+	if repo == "" {
+		return ErrNoRepoConfigured
+	}
+
 	// Collect all labels to seed.
 	defs := make([]labelDef, 0, len(staticLabelDefs)+len(stageNames)*3+1)
 	defs = append(defs, staticLabelDefs...)
@@ -220,7 +227,7 @@ func (c *Client) SeedLabels(owner, repo string, stageNames []string, lockedUser 
 
 	for _, d := range defs {
 		if err := c.seedOneLabel(owner, repo, d); err != nil {
-			return fmt.Errorf("seeding label %q: %w", d.name, err)
+			logf(0, "warn", "seeding label %q: %v\n", d.name, err)
 		}
 	}
 	return nil
