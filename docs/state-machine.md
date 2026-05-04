@@ -81,7 +81,7 @@ These labels do not define distinct states but influence transition behavior:
 | `fabrik:yolo` | Forces auto-advance; triggers auto-merge at Validate; overrides `auto_advance: false` |
 | `fabrik:cruise` | Forces auto-advance without auto-merge; stops at Validate completion; suppressed by yolo |
 | `fabrik:unrestricted` | Passes `--dangerously-skip-permissions` to Claude Code |
-| `fabrik:extend-turns` | Pre-grants a 2× turn budget for the next stage invocation; auto-removed on stage success; no-op when `max_turns == 0` |
+| `fabrik:extend-turns` | Pre-grants a 2× turn budget for every stage invocation while present; persists across stages; removed only at the Done cleanup stage or manually; no-op when `max_turns == 0` |
 | `model:<name>` | Selects a specific model for this issue (e.g., `model:opus`) |
 | `effort:<level>` | Overrides stage effort level (`low`, `medium`, `high`, `max`); highest wins |
 | `base:<branch>` | Overrides worktree base branch; falls back to default if not on remote; updates PR base if PR exists |
@@ -139,7 +139,7 @@ Each active stage column has the same set of reachable sub-states:
 | `fabrik:yolo` | User (manual) | Any time | User (manual) | Any time | Forces auto-advance; triggers auto-merge at Validate; overrides `auto_advance: false` per stage |
 | `fabrik:cruise` | User (manual) | Any time | User (manual) | Any time | Forces auto-advance without merge; stops at Validate; suppressed when yolo is also present |
 | `fabrik:unrestricted` | User (manual) | Any time | User (manual) | Any time | Passes `--dangerously-skip-permissions` instead of `--permission-mode dontAsk` |
-| `fabrik:extend-turns` | User (manual) | Any time | `processItem` (on success) or User (manual) | On successful stage completion; or manual removal | Pre-grants 2× `stage.MaxTurns` budget for the first invocation; no-op when `max_turns == 0` (unlimited); subsequent extensions beyond 2× still require progress detection |
+| `fabrik:extend-turns` | User (manual) | Any time | `processItem` cleanup branch or User (manual) | At Done cleanup stage completion; or manual removal | Pre-grants 2× `stage.MaxTurns` budget for every invocation while present; persists across all intermediate stages; no-op when `max_turns == 0` (unlimited); subsequent extensions beyond 2× still require progress detection |
 | `model:<name>` | User (manual) | Any time | User (manual) | Any time | Selects Claude model; first label wins if multiple present |
 | `effort:<level>` | User (manual) | Any time | User (manual) | Any time | Overrides stage effort level; highest-ranked wins if multiple present |
 | `base:<branch>` | User (manual) | Before Research (recommended) | User (manual) | Any time | Overrides worktree base branch; falls back to default if branch not found on remote; if a PR exists, its base branch is updated to match on each stage invocation |
@@ -435,7 +435,7 @@ The "baseline clean AND working tree dirty" guard for Implement prevents a pre-e
 4. Output is accumulated across all invocations before posting as a single stage comment.
 5. WIP commit and push are deferred to after the loop.
 
-**`fabrik:extend-turns` label:** When present at invocation start, the first invocation receives `2 × stage.MaxTurns` as its budget (pre-granted extension, no progress check required for the first turn-limit hit). Subsequent extensions beyond 2× still require the progress check. The label is auto-removed on successful stage completion; `ErrNotFound` on removal is treated as success (user removed it manually). The label is a no-op when `stage.MaxTurns == 0`.
+**`fabrik:extend-turns` label:** When present at invocation start, the first invocation receives `2 × stage.MaxTurns` as its budget (pre-granted extension, no progress check required for the first turn-limit hit). Subsequent extensions beyond 2× still require the progress check. The label **persists across all intermediate stages** — it is not removed on stage completion. It is removed only in the cleanup (Done) stage branch of `processItem`, after the `stage:Done:complete` label is added. `ErrNotFound` on removal is treated as success (user removed it manually). The label is a no-op when `stage.MaxTurns == 0`.
 
 **Log tag:** `[#N extend-turns]` — emitted on **every** `detectProgress` call (pass or fail), reporting the evaluated signals and `has_progress=true/false`. When extension is granted, an additional line logs the new budget multiple and cumulative turns used.
 
@@ -444,13 +444,13 @@ The "baseline clean AND working tree dirty" guard for Implement prevents a pre-e
 | Column `<X>`, Locked + In Progress | Turn limit hit | `totalMultiple < 3`; progress detected | Same column, Locked + In Progress (extension) | | | `totalMultiple++`; `resume=true`; output accumulated; no WIP commit or push between extensions |
 | Column `<X>`, Locked + In Progress | Turn limit hit | `totalMultiple >= 3` (hard cap) | Same column, Cooldown | | | Hard cap reached; treated as turn-limit failure; `CooldownAt("periodic-re-eval")` recorded; WIP commit + push |
 | Column `<X>`, Locked + In Progress | Turn limit hit | No progress detected or progress check failed | Same column, Cooldown | | | No extension; treated as turn-limit failure; `CooldownAt("periodic-re-eval")` recorded; WIP commit + push |
-| Column `<X>`, Locked + In Progress | FABRIK_STAGE_COMPLETE (any extension) | `completed = true` | Same column, Complete | `stage:<X>:complete` | `fabrik:locked:<user>`, `stage:<X>:in_progress`, `fabrik:extend-turns` (if present) | Normal completion flow; extend-turns label auto-removed |
+| Column `<X>`, Locked + In Progress | FABRIK_STAGE_COMPLETE (any extension) | `completed = true` | Same column, Complete | `stage:<X>:complete` | `fabrik:locked:<user>`, `stage:<X>:in_progress` | Normal completion flow; extend-turns label persists to next stage |
 
 #### Cleanup Stage
 
 | Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
 |--------------|-------|-------|-----------------|--------------|----------------|--------------|
-| Done, Pending Cleanup | Poll tick | Worktree exists, not paused, not already complete | Done, Complete | `stage:Done:complete` | | Worktree removed; no lock/Claude/comment processing |
+| Done, Pending Cleanup | Poll tick | Worktree exists, not paused, not already complete | Done, Complete | `stage:Done:complete` | `fabrik:extend-turns` (if present) | Worktree removed; no lock/Claude/comment processing |
 | Done, Complete | Poll tick | Already complete | Done, Complete (no-op) | | | Skipped by both `itemMayNeedWork` and `processItem` |
 
 #### Review Reinvoke
