@@ -108,15 +108,15 @@ type pullRequestReviewPayload struct {
 type pullRequestReviewCommentPayload struct {
 	Action  string `json:"action"`
 	Comment struct {
-		NodeID     string  `json:"node_id"`
-		DatabaseID int     `json:"id"`
-		Body       string  `json:"body"`
-		CreatedAt  string  `json:"created_at"`
-		DiffHunk   string  `json:"diff_hunk"`
-		Path       string  `json:"path"`
-		Line       *int    `json:"line"`
-		OriginalLine *int  `json:"original_line"`
-		User       struct {
+		NodeID       string `json:"node_id"`
+		DatabaseID   int    `json:"id"`
+		Body         string `json:"body"`
+		CreatedAt    string `json:"created_at"`
+		DiffHunk     string `json:"diff_hunk"`
+		Path         string `json:"path"`
+		Line         *int   `json:"line"`
+		OriginalLine *int   `json:"original_line"`
+		User         struct {
 			Login string `json:"login"`
 		} `json:"user"`
 		PullRequestURL string `json:"pull_request_url"`
@@ -159,6 +159,58 @@ type projectsV2ItemPayload struct {
 		ContentNodeID string `json:"content_node_id"`
 		ContentType   string `json:"content_type"`
 	} `json:"projects_v2_item"`
+}
+
+// ---------------------------------------------------------------------------
+// Inner-mutation helpers — called by both normal and post-heal paths
+// ---------------------------------------------------------------------------
+
+// applyReviewToItem upserts a PR review into the item's LinkedPRReviews by DatabaseID.
+func applyReviewToItem(item *gh.ProjectItem, review gh.PRReview) {
+	for i, r := range item.LinkedPRReviews {
+		if r.DatabaseID == review.DatabaseID && review.DatabaseID != 0 {
+			item.LinkedPRReviews[i] = review
+			return
+		}
+	}
+	item.LinkedPRReviews = append(item.LinkedPRReviews, review)
+}
+
+// applyReviewCommentToItem appends a review thread comment to the item if not already
+// present (idempotent by NodeID), and clears the deepFetched flag so the next
+// FetchItemDetails call re-fetches the ReviewThreadID from GitHub.
+// Returns true if the comment was added, false if it was a duplicate.
+func applyReviewCommentToItem(item *gh.ProjectItem, comment gh.Comment, key string, deepFetched map[string]bool) bool {
+	for _, existing := range item.LinkedPRReviewThreadComments {
+		if existing.ID == comment.ID {
+			return false
+		}
+	}
+	item.LinkedPRReviewThreadComments = append(item.LinkedPRReviewThreadComments, comment)
+	delete(deepFetched, key)
+	return true
+}
+
+// updateSHAToKey removes stale SHA entries for the given key and sets the new SHA.
+func updateSHAToKey(shaToKey map[string]string, sha, key string) {
+	if sha == "" {
+		return
+	}
+	for existingSHA, existingKey := range shaToKey {
+		if existingKey == key && existingSHA != sha {
+			delete(shaToKey, existingSHA)
+		}
+	}
+	shaToKey[sha] = key
+}
+
+// splitRepo splits "owner/repo" into ("owner", "repo", true). Returns false on invalid input.
+func splitRepo(fullName string) (owner, repo string, ok bool) {
+	parts := strings.SplitN(fullName, "/", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
 }
 
 // ---------------------------------------------------------------------------
@@ -264,40 +316,73 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 	}
 
 	repo := p.Repository.FullName
-	pk := prKey(repo, p.PullRequest.Number)
+	prNum := p.PullRequest.Number
+	pk := prKey(repo, prNum)
+	sha := p.PullRequest.Head.SHA
 	prDetails := &gh.PRDetails{
-		Number:         p.PullRequest.Number,
+		Number:         prNum,
 		Title:          p.PullRequest.Title,
 		State:          p.PullRequest.State,
 		Merged:         p.PullRequest.Merged,
 		Draft:          p.PullRequest.Draft,
-		HeadSHA:        p.PullRequest.Head.SHA,
+		HeadSHA:        sha,
 		MergeableState: p.PullRequest.MergeableState,
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	owner, repoName, ok := splitRepo(repo)
+	if !ok {
+		return
+	}
 
-	// Store/update PR details.
+	c.mu.Lock()
+
+	// Always store/update PR details regardless of whether we find a linked issue.
 	c.linkedPRs[pk] = prDetails
 
 	// Find the issue in cache that links this PR and update shaToKey.
-	sha := p.PullRequest.Head.SHA
 	for key, item := range c.items {
-		if item.Repo == repo && item.LinkedPRNumber == p.PullRequest.Number {
-			if sha != "" {
-				// On synchronize, the old SHA is now stale — remove it from the map
-				// by overwriting any existing entry for this issue with the new SHA.
-				for existingSHA, existingKey := range c.shaToKey {
-					if existingKey == key && existingSHA != sha {
-						delete(c.shaToKey, existingSHA)
-					}
-				}
-				c.shaToKey[sha] = key
-			}
-			break
+		if item.Repo == repo && item.LinkedPRNumber == prNum {
+			updateSHAToKey(c.shaToKey, sha, key)
+			c.mu.Unlock()
+			return
 		}
 	}
+
+	// Miss: check negative cache.
+	mk := missKey(repo, prNum)
+	if t, found := c.recentMissCache[mk]; found {
+		if time.Since(t) < recentMissTTL {
+			c.mu.Unlock()
+			return
+		}
+		delete(c.recentMissCache, mk)
+	}
+
+	c.mu.Unlock()
+
+	// Auto-heal: resolve PR linkage via REST.
+	key, _, found := c.resolvePRLinkage(owner, repoName, prNum)
+
+	c.mu.Lock()
+	if !found {
+		c.recentMissCache[mk] = time.Now()
+		c.mu.Unlock()
+		c.logFn("[cache] dropped pull_request delta for PR #%d: no closing issue in cache\n", prNum)
+		return
+	}
+	item, itemOK := c.items[key]
+	if !itemOK {
+		c.recentMissCache[mk] = time.Now()
+		c.mu.Unlock()
+		return
+	}
+	item.LinkedPRNumber = prNum
+	delete(c.deepFetched, key)
+	item.UpdatedAt = time.Now()
+	updateSHAToKey(c.shaToKey, sha, key)
+	issNum := item.Number
+	c.mu.Unlock()
+	c.logFn("[cache] auto-heal: PR #%d → issue #%d; deep cache invalidated and delta re-applied\n", prNum, issNum)
 }
 
 func (c *CacheImpl) applyPullRequestReviewSubmitted(payload []byte) {
@@ -306,35 +391,68 @@ func (c *CacheImpl) applyPullRequestReviewSubmitted(payload []byte) {
 		return
 	}
 	repo := p.Repository.FullName
+	prNum := p.PullRequest.Number
+
+	owner, repoName, ok := splitRepo(repo)
+	if !ok {
+		return
+	}
+
+	review := gh.PRReview{
+		Author:     p.Review.User.Login,
+		State:      strings.ToUpper(p.Review.State),
+		Body:       p.Review.Body,
+		DatabaseID: p.Review.DatabaseID,
+	}
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
-	// Find the issue that has this PR linked.
+	// Normal path: find the item with this PR linked.
 	for _, item := range c.items {
-		if item.Repo == repo && item.LinkedPRNumber == p.PullRequest.Number {
-			review := gh.PRReview{
-				Author:     p.Review.User.Login,
-				State:      strings.ToUpper(p.Review.State),
-				Body:       p.Review.Body,
-				DatabaseID: p.Review.DatabaseID,
-			}
-			// Idempotent: upsert by DatabaseID (replace existing review from same author/id).
-			updated := false
-			for i, r := range item.LinkedPRReviews {
-				if r.DatabaseID == review.DatabaseID && review.DatabaseID != 0 {
-					item.LinkedPRReviews[i] = review
-					updated = true
-					break
-				}
-			}
-			if !updated {
-				item.LinkedPRReviews = append(item.LinkedPRReviews, review)
-			}
+		if item.Repo == repo && item.LinkedPRNumber == prNum {
+			applyReviewToItem(item, review)
 			item.UpdatedAt = time.Now()
-			break
+			c.mu.Unlock()
+			return
 		}
 	}
+
+	// Miss: check negative cache.
+	mk := missKey(repo, prNum)
+	if t, found := c.recentMissCache[mk]; found {
+		if time.Since(t) < recentMissTTL {
+			c.mu.Unlock()
+			c.logFn("[cache] dropped pull_request_review delta for PR #%d: negative cache hit\n", prNum)
+			return
+		}
+		delete(c.recentMissCache, mk)
+	}
+
+	c.mu.Unlock()
+
+	// Auto-heal: resolve PR linkage via REST.
+	key, _, found := c.resolvePRLinkage(owner, repoName, prNum)
+
+	c.mu.Lock()
+	if !found {
+		c.recentMissCache[mk] = time.Now()
+		c.mu.Unlock()
+		c.logFn("[cache] dropped pull_request_review delta for PR #%d: no closing issue in cache\n", prNum)
+		return
+	}
+	item, itemOK := c.items[key]
+	if !itemOK {
+		c.recentMissCache[mk] = time.Now()
+		c.mu.Unlock()
+		return
+	}
+	item.LinkedPRNumber = prNum
+	delete(c.deepFetched, key)
+	item.UpdatedAt = time.Now()
+	applyReviewToItem(item, review)
+	issNum := item.Number
+	c.mu.Unlock()
+	c.logFn("[cache] auto-heal: PR #%d → issue #%d; deep cache invalidated and delta re-applied\n", prNum, issNum)
 }
 
 func (c *CacheImpl) applyPullRequestReviewCommentCreated(payload []byte) {
@@ -343,6 +461,12 @@ func (c *CacheImpl) applyPullRequestReviewCommentCreated(payload []byte) {
 		return
 	}
 	repo := p.Repository.FullName
+	prNum := p.PullRequest.Number
+
+	owner, repoName, ok := splitRepo(repo)
+	if !ok {
+		return
+	}
 
 	createdAt, _ := time.Parse(time.RFC3339, p.Comment.CreatedAt)
 	comment := gh.Comment{
@@ -353,7 +477,7 @@ func (c *CacheImpl) applyPullRequestReviewCommentCreated(payload []byte) {
 		CreatedAt:  createdAt,
 		DiffHunk:   p.Comment.DiffHunk,
 		Path:       p.Comment.Path,
-		FromPR:     p.PullRequest.Number,
+		FromPR:     prNum,
 	}
 	if p.Comment.Line != nil {
 		comment.Line = *p.Comment.Line
@@ -363,26 +487,54 @@ func (c *CacheImpl) applyPullRequestReviewCommentCreated(payload []byte) {
 	}
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
+	// Normal path: find the item with this PR linked.
 	for key, item := range c.items {
-		if item.Repo == repo && item.LinkedPRNumber == p.PullRequest.Number {
-			// Idempotent: skip if comment with this ID already exists.
-			for _, existing := range item.LinkedPRReviewThreadComments {
-				if existing.ID == comment.ID {
-					return
-				}
+		if item.Repo == repo && item.LinkedPRNumber == prNum {
+			if applyReviewCommentToItem(item, comment, key, c.deepFetched) {
+				item.UpdatedAt = time.Now()
 			}
-			item.LinkedPRReviewThreadComments = append(item.LinkedPRReviewThreadComments, comment)
-			item.UpdatedAt = time.Now()
-			// The webhook payload does not carry the review thread's GraphQL node ID
-			// (ReviewThreadID). Reset deepFetched so the next FetchItemDetails call
-			// fetches from GitHub and populates ReviewThreadID correctly, allowing the
-			// engine to resolve the review thread after it's addressed.
-			delete(c.deepFetched, key)
-			break
+			c.mu.Unlock()
+			return
 		}
 	}
+
+	// Miss: check negative cache.
+	mk := missKey(repo, prNum)
+	if t, found := c.recentMissCache[mk]; found {
+		if time.Since(t) < recentMissTTL {
+			c.mu.Unlock()
+			c.logFn("[cache] dropped pull_request_review_comment delta for PR #%d: negative cache hit\n", prNum)
+			return
+		}
+		delete(c.recentMissCache, mk)
+	}
+
+	c.mu.Unlock()
+
+	// Auto-heal: resolve PR linkage via REST.
+	key, _, found := c.resolvePRLinkage(owner, repoName, prNum)
+
+	c.mu.Lock()
+	if !found {
+		c.recentMissCache[mk] = time.Now()
+		c.mu.Unlock()
+		c.logFn("[cache] dropped pull_request_review_comment delta for PR #%d: no closing issue in cache\n", prNum)
+		return
+	}
+	item, itemOK := c.items[key]
+	if !itemOK {
+		c.recentMissCache[mk] = time.Now()
+		c.mu.Unlock()
+		return
+	}
+	item.LinkedPRNumber = prNum
+	delete(c.deepFetched, key)
+	item.UpdatedAt = time.Now()
+	applyReviewCommentToItem(item, comment, key, c.deepFetched)
+	issNum := item.Number
+	c.mu.Unlock()
+	c.logFn("[cache] auto-heal: PR #%d → issue #%d; deep cache invalidated and delta re-applied\n", prNum, issNum)
 }
 
 func (c *CacheImpl) applyCheckRunCompleted(payload []byte) {
@@ -394,6 +546,13 @@ func (c *CacheImpl) applyCheckRunCompleted(payload []byte) {
 	if sha == "" {
 		return
 	}
+	repo := p.Repository.FullName
+
+	owner, repoName, ok := splitRepo(repo)
+	if !ok {
+		return
+	}
+
 	cr := gh.CheckRun{
 		ID:         p.CheckRun.ID,
 		Name:       p.CheckRun.Name,
@@ -402,9 +561,8 @@ func (c *CacheImpl) applyCheckRunCompleted(payload []byte) {
 	}
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
-	// Upsert by ID: replace existing check run with same ID, or append.
+	// Always upsert the check run by ID.
 	runs := c.checkRuns[sha]
 	updated := false
 	for i, existing := range runs {
@@ -419,8 +577,63 @@ func (c *CacheImpl) applyCheckRunCompleted(payload []byte) {
 	}
 	c.checkRuns[sha] = runs
 
-	// shaToKey reverse lookup is updated by pull_request deltas.
-	// The check_run delta is stored by SHA; the engine always has the SHA from the linked PR.
+	// shaToKey reverse lookup: if found, bump UpdatedAt on the linked issue.
+	if key, found := c.shaToKey[sha]; found {
+		if item, ok := c.items[key]; ok {
+			item.UpdatedAt = time.Now()
+		}
+		c.mu.Unlock()
+		return
+	}
+
+	// shaToKey miss: check negative cache for this SHA.
+	msha := missKeyForSHA(sha)
+	if t, found := c.recentMissCache[msha]; found {
+		if time.Since(t) < recentMissTTL {
+			c.mu.Unlock()
+			return
+		}
+		delete(c.recentMissCache, msha)
+	}
+
+	c.mu.Unlock()
+
+	// Auto-heal step 1: fetch PRs associated with this SHA.
+	prNums, err := c.fallback.FetchPRsForSHA(owner, repoName, sha)
+	if err != nil {
+		c.logFn("[cache] applyCheckRunCompleted: FetchPRsForSHA for %s: %v\n", sha, err)
+	}
+	if len(prNums) == 0 {
+		c.mu.Lock()
+		c.recentMissCache[msha] = time.Now()
+		c.mu.Unlock()
+		c.logFn("[cache] dropped check_run delta for SHA %s: no associated PR found\n", sha)
+		return
+	}
+	prNum := prNums[0]
+
+	// Auto-heal step 2: resolve which issue the PR closes.
+	key, issNum, found := c.resolvePRLinkage(owner, repoName, prNum)
+
+	c.mu.Lock()
+	if !found {
+		c.recentMissCache[msha] = time.Now()
+		c.mu.Unlock()
+		c.logFn("[cache] dropped check_run delta for SHA %s: no closing issue in cache for PR #%d\n", sha, prNum)
+		return
+	}
+	item, itemOK := c.items[key]
+	if !itemOK {
+		c.recentMissCache[msha] = time.Now()
+		c.mu.Unlock()
+		return
+	}
+	item.LinkedPRNumber = prNum
+	c.shaToKey[sha] = key
+	delete(c.deepFetched, key)
+	item.UpdatedAt = time.Now()
+	c.mu.Unlock()
+	c.logFn("[cache] auto-heal: check_run SHA %s → PR #%d → issue #%d; deep cache invalidated\n", sha, prNum, issNum)
 }
 
 func (c *CacheImpl) applyProjectsV2ItemEdited(payload []byte) {
