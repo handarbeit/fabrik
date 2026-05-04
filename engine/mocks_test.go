@@ -73,6 +73,8 @@ type mockGitHubClient struct {
 	addPRReviewCommentReactionCalls []prReviewCommentReactionCall
 	deleteReviewRequestCalls        []reviewRequestCall
 	addReviewRequestCalls           []reviewRequestCall
+	seedLabelsCalls                 []seedLabelsCall
+	seedLabelsFn                    func(owner, repo string, stageNames []string, lockedUser string) error
 }
 
 type reviewRequestCall struct {
@@ -95,6 +97,12 @@ type fetchLabelAppliedAtCall struct {
 
 type archiveProjectItemCall struct {
 	projectID, itemID string
+}
+
+type seedLabelsCall struct {
+	owner, repo string
+	stageNames  []string
+	lockedUser  string
 }
 
 type markPRReadyCall struct {
@@ -426,6 +434,13 @@ func (m *mockGitHubClient) ArchiveProjectItem(projectID, itemID string) error {
 }
 
 func (m *mockGitHubClient) SeedLabels(owner, repo string, stageNames []string, lockedUser string) error {
+	m.mu.Lock()
+	m.seedLabelsCalls = append(m.seedLabelsCalls, seedLabelsCall{owner, repo, stageNames, lockedUser})
+	fn := m.seedLabelsFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, stageNames, lockedUser)
+	}
 	return nil
 }
 
