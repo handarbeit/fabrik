@@ -581,19 +581,15 @@ func TestItemMayNeedWork_DeepFetchFailureCooldown(t *testing.T) {
 		// UpdatedAt zero — no seenUpdatedAt entry, so "unchanged" branch won't fire
 	}
 
-	// Record a very recent failure.
-	eng.mu.Lock()
-	eng.deepFetchFailureTime["owner/repo#51"] = time.Now()
-	eng.mu.Unlock()
+	// Record a very recent failure via the store.
+	eng.store.Apply(itemstate.DeepFetchFailed{Repo: "owner/repo", Number: 51, At: time.Now()})
 
 	if eng.itemMayNeedWork(item) {
 		t.Error("item with recent deep-fetch failure should be skipped (within cooldown)")
 	}
 
 	// Simulate cooldown expiry by backdating the failure time.
-	eng.mu.Lock()
-	eng.deepFetchFailureTime["owner/repo#51"] = time.Now().Add(-20 * time.Second)
-	eng.mu.Unlock()
+	eng.store.Apply(itemstate.DeepFetchFailed{Repo: "owner/repo", Number: 51, At: time.Now().Add(-20 * time.Second)})
 
 	if !eng.itemMayNeedWork(item) {
 		t.Error("item with expired deep-fetch failure cooldown should be retried")
