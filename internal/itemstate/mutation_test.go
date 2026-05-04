@@ -378,6 +378,30 @@ func TestApplyInvocationRecorded(t *testing.T) {
 	}
 }
 
+func TestApplyInvocationRecordedIsComment(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, InvocationRecorded{
+		Repo:      testRepo,
+		Number:    1,
+		IsComment: true,
+	}, InvocationChanged)
+	st := getItem(t, s, testRepo, 1)
+	if !st.LastInvocationIsComment {
+		t.Error("LastInvocationIsComment not set when IsComment=true")
+	}
+
+	// A subsequent stage-run invocation (IsComment=false) clears the flag.
+	applyExpect(t, s, InvocationRecorded{
+		Repo:      testRepo,
+		Number:    1,
+		IsComment: false,
+	}, InvocationChanged)
+	st = getItem(t, s, testRepo, 1)
+	if st.LastInvocationIsComment {
+		t.Error("LastInvocationIsComment should be false after IsComment=false invocation")
+	}
+}
+
 // ---- DeepFetchFailed ----
 
 func TestApplyDeepFetchFailed(t *testing.T) {
