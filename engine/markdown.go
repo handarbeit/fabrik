@@ -49,6 +49,52 @@ func firstParagraph(content string) string {
 	return strings.TrimSpace(strings.Join(para, "\n"))
 }
 
+// balanceFences scans body for fence delimiter lines (any line whose trimmed content starts
+// with ``` or ~~~, including language hints such as ```bash) and toggles a parity bit for
+// each. If the final parity is odd (unclosed fence), a closing ``` line is inserted
+// immediately before the first "---" line. If no "---" is present, it inserts before the
+// first "Closes #" line. If neither is present, it appends at the end. This ensures that
+// interpolated content with unclosed fences cannot hide trailing lines from GitHub's parser.
+func balanceFences(body string) string {
+	lines := strings.Split(body, "\n")
+	odd := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
+			odd = !odd
+		}
+	}
+	if !odd {
+		return body
+	}
+	// Insert closing fence before first "---" line.
+	insertIdx := -1
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "---" {
+			insertIdx = i
+			break
+		}
+	}
+	if insertIdx < 0 {
+		// Fallback: before first "Closes #" line.
+		for i, line := range lines {
+			if strings.HasPrefix(strings.TrimSpace(line), "Closes #") {
+				insertIdx = i
+				break
+			}
+		}
+	}
+	if insertIdx < 0 {
+		// Fallback: append at end.
+		return body + "\n```"
+	}
+	newLines := make([]string, 0, len(lines)+1)
+	newLines = append(newLines, lines[:insertIdx]...)
+	newLines = append(newLines, "```")
+	newLines = append(newLines, lines[insertIdx:]...)
+	return strings.Join(newLines, "\n")
+}
+
 // buildPRSeedBody constructs the structured PR body template from issue and plan context.
 // issueContent is the contents of .fabrik-context/issue.md.
 // planContent is the contents of .fabrik-context/stage-Plan.md (may be empty if missing).
@@ -84,7 +130,7 @@ func buildPRSeedBody(issueContent, planContent string, issueNumber int) string {
 		approach = "(Populated by Implement)"
 	}
 
-	return fmt.Sprintf(`## Summary
+	body := fmt.Sprintf(`## Summary
 
 %s
 
@@ -103,6 +149,7 @@ func buildPRSeedBody(issueContent, planContent string, issueNumber int) string {
 ---
 
 Closes #%d`, summary, problem, approach, issueNumber)
+	return balanceFences(body)
 }
 
 // replaceVerificationSection replaces the content of the `## Verification` section in
@@ -142,5 +189,6 @@ func replaceVerificationSection(prBody, summary string) (string, bool) {
 	result = append(result, summary)
 	result = append(result, "")
 	result = append(result, lines[endIdx:]...) // from --- or next ## onward
-	return strings.TrimRight(strings.Join(result, "\n"), "\n"), true
+	joined := balanceFences(strings.Join(result, "\n"))
+	return strings.TrimRight(joined, "\n"), true
 }

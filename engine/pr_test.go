@@ -70,6 +70,38 @@ func TestEnsurePRLinksIssue_Missing_AddsKeyword(t *testing.T) {
 	}
 }
 
+func TestEnsurePRLinksIssue_FencedClosesN_SelfHeals(t *testing.T) {
+	// Closes #7 is present in the body but inside an unclosed code fence, so GitHub's
+	// parser would treat it as code. balanceFences must close the fence so Closes #7
+	// becomes reachable, and no duplicate Closes #7 must be appended.
+	fencedBody := "Some PR description\n\n```bash\ncode example\n\n---\n\nCloses #7"
+	var updateCalls []string
+	client := &mockGitHubClient{
+		getIssueBodyFn: func(owner, repo string, issueNumber int) (string, error) {
+			return fencedBody, nil
+		},
+		updateIssueBodyFn: func(owner, repo string, issueNumber int, body string) error {
+			updateCalls = append(updateCalls, body)
+			return nil
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+
+	eng.ensurePRLinksIssue(gh.ProjectItem{Number: 7}, 10)
+
+	if len(updateCalls) != 1 {
+		t.Fatalf("expected exactly 1 UpdateIssueBody call (fence fix), got %d", len(updateCalls))
+	}
+	got := updateCalls[0]
+	if strings.Count(got, "Closes #7") != 1 {
+		t.Errorf("Closes #7 must appear exactly once (no duplicate), got body: %q", got)
+	}
+	// The fence must be closed before ---
+	if !strings.Contains(got, "```\n---") {
+		t.Errorf("balanced body must have closing fence before ---, got: %q", got)
+	}
+}
+
 func TestMarkPRReady_WithKnownPR_CallsMarkReady(t *testing.T) {
 	skipIfNoGit(t)
 	repoDir := initBareRepo(t)
