@@ -281,8 +281,8 @@ func TestItemNeedsWork_DependencyGate_PassesThrough(t *testing.T) {
 }
 
 // TestItemMayNeedWork_DependencyGate_FirstStage_NotFiltered verifies that
-// an item in the first stage is NOT filtered even with an open blocker.
-// (Dependency gate check is in itemNeedsWork and bypasses first-stage items.)
+// itemMayNeedWork does not filter first-stage items with open blockers.
+// The dep gate runs in processItem (via checkDependencies), not in itemMayNeedWork.
 func TestItemMayNeedWork_DependencyGate_FirstStage_NotFiltered(t *testing.T) {
 	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
 	// "Research" is the first stage in testStages()
