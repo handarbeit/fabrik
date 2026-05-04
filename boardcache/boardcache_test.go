@@ -46,6 +46,15 @@ func (m *mockClient) FetchProjectBoard(owner, repo string, projectNum int, owner
 func (m *mockClient) FetchItemDetails(item *gh.ProjectItem) error {
 	m.fetchItemDetailsCount++
 	if m.itemDetailsResult != nil {
+		// Mirror the real FetchItemDetails behaviour: populate Number and Repo only
+		// when the caller hasn't already set them (e.g. projects_v2_item.created path
+		// passes a bare ProjectItem{ID: nodeID} with Number=0 and Repo="").
+		if item.Number == 0 && m.itemDetailsResult.Number > 0 {
+			item.Number = m.itemDetailsResult.Number
+		}
+		if item.Repo == "" && m.itemDetailsResult.Repo != "" {
+			item.Repo = m.itemDetailsResult.Repo
+		}
 		item.Body = m.itemDetailsResult.Body
 		item.Comments = cloneComments(m.itemDetailsResult.Comments)
 		item.LinkedPRNumber = m.itemDetailsResult.LinkedPRNumber
@@ -1590,4 +1599,121 @@ func TestConcurrentWriteThrough(t *testing.T) {
 	if count > 1 {
 		t.Errorf("want at most 1 'concurrent-label', got %d; labels=%v", count, labels)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Additional payload builders for Phase 3-D delta coverage tests
+// ---------------------------------------------------------------------------
+
+// issuesOpenedPayloadJSON builds an issues.opened payload with full issue data.
+func issuesOpenedPayloadJSON(repo string, issNum int, nodeID, title, body string, labels, assignees []string) []byte {
+	p := issuesPayload{Action: "opened"}
+	p.Repository.FullName = repo
+	p.Issue.Number = issNum
+	p.Issue.NodeID = nodeID
+	p.Issue.Title = title
+	p.Issue.Body = body
+	for _, l := range labels {
+		p.Issue.Labels = append(p.Issue.Labels, struct {
+			Name string `json:"name"`
+		}{Name: l})
+	}
+	for _, a := range assignees {
+		p.Issue.Assignees = append(p.Issue.Assignees, struct {
+			Login string `json:"login"`
+		}{Login: a})
+	}
+	b, _ := json.Marshal(p)
+	return b
+}
+
+// issuesActionPayloadJSON builds a simple issues payload (closed/reopened/deleted/transferred)
+// with just repo and issue number.
+func issuesActionPayloadJSON(action, repo string, issNum int) []byte {
+	p := issuesPayload{Action: action}
+	p.Repository.FullName = repo
+	p.Issue.Number = issNum
+	b, _ := json.Marshal(p)
+	return b
+}
+
+// issuesEditedPayloadJSON builds an issues.edited payload.
+func issuesEditedPayloadJSON(repo string, issNum int, title, body string) []byte {
+	p := issuesPayload{Action: "edited"}
+	p.Repository.FullName = repo
+	p.Issue.Number = issNum
+	p.Issue.Title = title
+	p.Issue.Body = body
+	b, _ := json.Marshal(p)
+	return b
+}
+
+// issuesAssignedPayloadJSON builds an issues.assigned/unassigned payload with
+// the post-mutation full assignee list.
+func issuesAssignedPayloadJSON(action, repo string, issNum int, assignees []string) []byte {
+	p := issuesPayload{Action: action}
+	p.Repository.FullName = repo
+	p.Issue.Number = issNum
+	for _, a := range assignees {
+		p.Issue.Assignees = append(p.Issue.Assignees, struct {
+			Login string `json:"login"`
+		}{Login: a})
+	}
+	b, _ := json.Marshal(p)
+	return b
+}
+
+// projectsV2ItemCreatedPayloadJSON builds a projects_v2_item.created payload.
+func projectsV2ItemCreatedPayloadJSON(contentNodeID, contentType string) []byte {
+	p := projectsV2ItemPayload{Action: "created"}
+	p.ProjectsV2Item.ContentNodeID = contentNodeID
+	p.ProjectsV2Item.ContentType = contentType
+	b, _ := json.Marshal(p)
+	return b
+}
+
+// projectsV2ItemRemovedPayloadJSON builds a projects_v2_item.deleted or .archived payload.
+func projectsV2ItemRemovedPayloadJSON(action, itemID string) []byte {
+	p := projectsV2ItemPayload{Action: action}
+	p.ProjectsV2Item.ID = itemID
+	b, _ := json.Marshal(p)
+	return b
+}
+
+// pullRequestDraftPayloadJSON builds a pull_request.ready_for_review or .converted_to_draft payload.
+func pullRequestDraftPayloadJSON(action, repo string, prNum int) []byte {
+	p := pullRequestPayload{Action: action}
+	p.Repository.FullName = repo
+	p.PullRequest.Number = prNum
+	b, _ := json.Marshal(p)
+	return b
+}
+
+// pullRequestReviewRequestedPayloadJSON builds a pull_request.review_requested payload.
+// allReviewers is the full list after adding; singleLogin/singleType is the one being added.
+func pullRequestReviewRequestedPayloadJSON(repo string, prNum int, allLogins []string, singleLogin string) []byte {
+	p := pullRequestPayload{Action: "review_requested"}
+	p.Repository.FullName = repo
+	p.PullRequest.Number = prNum
+	for _, login := range allLogins {
+		p.PullRequest.RequestedReviewers = append(p.PullRequest.RequestedReviewers, struct {
+			Login string `json:"login"`
+			Type  string `json:"type"`
+		}{Login: login, Type: "User"})
+	}
+	p.RequestedReviewer.Login = singleLogin
+	p.RequestedReviewer.Type = "User"
+	b, _ := json.Marshal(p)
+	return b
+}
+
+// pullRequestReviewRequestRemovedPayloadJSON builds a pull_request.review_request_removed payload.
+func pullRequestReviewRequestRemovedPayloadJSON(repo string, prNum int, removedLogin string) []byte {
+	p := pullRequestPayload{Action: "review_request_removed"}
+	p.Repository.FullName = repo
+	p.PullRequest.Number = prNum
+	p.RequestedReviewer.Login = removedLogin
+	p.RequestedReviewer.Type = "User"
+	b, _ := json.Marshal(p)
+	return b
 }
