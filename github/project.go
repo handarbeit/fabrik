@@ -356,6 +356,7 @@ query($id: ID!) {
       number
       body
       url
+      repository { nameWithOwner }
       author { login }
       labels(first: 20) {
         nodes { name }
@@ -490,6 +491,9 @@ query($id: ID!) {
 				Number int    `json:"number"`
 				Body   string `json:"body"`
 				URL    string `json:"url"`
+				Repository *struct {
+					NameWithOwner string `json:"nameWithOwner"`
+				} `json:"repository"`
 				Author *struct {
 					Login string `json:"login"`
 				} `json:"author"`
@@ -581,6 +585,12 @@ query($id: ID!) {
 	// provides only a node_id, so the caller sets item.Number=0 and we fill it in here).
 	if item.Number == 0 && node.Number > 0 {
 		item.Number = node.Number
+	}
+
+	// Populate item.Repo when not yet set (e.g. projects_v2_item.created path where
+	// the caller constructs a bare ProjectItem with only ID set).
+	if item.Repo == "" && node.Repository != nil {
+		item.Repo = node.Repository.NameWithOwner
 	}
 
 	// Populate scalar fields
