@@ -19,6 +19,8 @@ type ReadClient interface {
 	FetchPRMergeableState(owner, repo string, prNumber int) (string, error)
 	FetchLabels(owner, repo string, issueNumber int) ([]string, error)
 	FetchStatusField(projectID string) (*gh.StatusField, error)
+	FetchPRClosingIssues(owner, repo string, prNumber int) ([]int, error)
+	FetchPRsForSHA(owner, repo, sha string) ([]int, error)
 	RateLimitStats() (rest, graphql gh.RateLimitStats)
 }
 
@@ -65,6 +67,14 @@ func (a *GitHubAdapter) FetchStatusField(projectID string) (*gh.StatusField, err
 	return a.client.FetchStatusField(projectID)
 }
 
+func (a *GitHubAdapter) FetchPRClosingIssues(owner, repo string, prNumber int) ([]int, error) {
+	return a.client.FetchPRClosingIssues(owner, repo, prNumber)
+}
+
+func (a *GitHubAdapter) FetchPRsForSHA(owner, repo, sha string) ([]int, error) {
+	return a.client.FetchPRsForSHA(owner, repo, sha)
+}
+
 func (a *GitHubAdapter) RateLimitStats() (rest, graphql gh.RateLimitStats) {
 	return a.client.RateLimitStats()
 }
@@ -84,6 +94,45 @@ func itemKey(repo string, number int) string {
 // prKey returns the cache key for a PR: "owner/repo#pr<prNumber>".
 func prKey(repo string, prNumber int) string {
 	return repo + "#pr" + strconv.Itoa(prNumber)
+}
+
+// missKey returns the negative-cache key for a PR number: "miss:owner/repo#prN".
+func missKey(repo string, prNumber int) string {
+	return "miss:" + repo + "#" + strconv.Itoa(prNumber)
+}
+
+// missKeyForSHA returns the negative-cache key for a commit SHA: "miss:sha:SHA".
+func missKeyForSHA(sha string) string {
+	return "miss:sha:" + sha
+}
+
+const recentMissTTL = 10 * time.Minute
+
+// resolvePRLinkage looks up which cached issue is closed by the given PR by
+// fetching the PR body via REST and parsing closing keywords. Must be called
+// without c.mu held (the REST call is a network operation). Returns the cache
+// key and issue number of the first closing issue found in c.items, or
+// ("", 0, false) when no match is found.
+func (c *CacheImpl) resolvePRLinkage(owner, repo string, prNumber int) (key string, issueNumber int, found bool) {
+	fullRepo := owner + "/" + repo
+	issues, err := c.fallback.FetchPRClosingIssues(owner, repo, prNumber)
+	if err != nil {
+		c.logFn("[cache] resolvePRLinkage: fetch closing issues for PR #%d: %v\n", prNumber, err)
+		return "", 0, false
+	}
+	if len(issues) == 0 {
+		return "", 0, false
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, issNum := range issues {
+		k := itemKey(fullRepo, issNum)
+		if _, ok := c.items[k]; ok {
+			return k, issNum, true
+		}
+	}
+	return "", 0, false
 }
 
 // CacheImpl is a goroutine-safe in-memory board cache. Webhook delta functions write
@@ -114,6 +163,10 @@ type CacheImpl struct {
 	// Stream health: when paused, ApplyDelta is a no-op
 	paused bool
 
+	// Negative cache: keys are "miss:owner/repo#prN" or "miss:sha:SHA".
+	// Entries with TTL > 10 minutes are pruned lazily on access.
+	recentMissCache map[string]time.Time
+
 	// Fallback for cache misses
 	fallback ReadClient
 	logFn    func(format string, args ...any)
@@ -122,14 +175,15 @@ type CacheImpl struct {
 // NewCacheImpl creates an empty cache backed by fallback for misses.
 func NewCacheImpl(fallback ReadClient, logFn func(format string, args ...any)) *CacheImpl {
 	return &CacheImpl{
-		items:       make(map[string]*gh.ProjectItem),
-		deepFetched: make(map[string]bool),
-		checkRuns:   make(map[string][]gh.CheckRun),
-		linkedPRs:   make(map[string]*gh.PRDetails),
-		shaToKey:    make(map[string]string),
-		itemIDToKey: make(map[string]string),
-		fallback:    fallback,
-		logFn:       logFn,
+		items:           make(map[string]*gh.ProjectItem),
+		deepFetched:     make(map[string]bool),
+		checkRuns:       make(map[string][]gh.CheckRun),
+		linkedPRs:       make(map[string]*gh.PRDetails),
+		shaToKey:        make(map[string]string),
+		itemIDToKey:     make(map[string]string),
+		recentMissCache: make(map[string]time.Time),
+		fallback:        fallback,
+		logFn:           logFn,
 	}
 }
 
@@ -422,6 +476,16 @@ func (c *CacheImpl) FetchLabels(owner, repo string, issueNumber int) ([]string, 
 // FetchStatusField always delegates to GitHub — project metadata, not board-item state.
 func (c *CacheImpl) FetchStatusField(projectID string) (*gh.StatusField, error) {
 	return c.fallback.FetchStatusField(projectID)
+}
+
+// FetchPRClosingIssues always delegates to GitHub — used by the auto-heal path in delta handlers.
+func (c *CacheImpl) FetchPRClosingIssues(owner, repo string, prNumber int) ([]int, error) {
+	return c.fallback.FetchPRClosingIssues(owner, repo, prNumber)
+}
+
+// FetchPRsForSHA always delegates to GitHub — used by the auto-heal path in applyCheckRunCompleted.
+func (c *CacheImpl) FetchPRsForSHA(owner, repo, sha string) ([]int, error) {
+	return c.fallback.FetchPRsForSHA(owner, repo, sha)
 }
 
 // RateLimitStats always delegates to GitHub.

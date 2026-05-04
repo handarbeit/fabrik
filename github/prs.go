@@ -4,7 +4,66 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
+	"strconv"
 )
+
+// reClosingKeyword matches GitHub closing keywords followed by a same-repo issue
+// reference (#N). Cross-repo references (owner/repo#N) are intentionally excluded.
+var reClosingKeyword = regexp.MustCompile(`(?i)(?:closes|fixes|resolves)\s+#(\d+)`)
+
+// FetchPRClosingIssues returns the issue numbers referenced by GitHub closing keywords
+// (Closes, Fixes, Resolves + #N) in the body of the given pull request. Only same-repo
+// references are returned; cross-repo references are out of scope.
+// Returns nil, nil on 404 or when the PR body contains no recognized closing references.
+func (c *Client) FetchPRClosingIssues(owner, repo string, prNumber int) ([]int, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", c.baseURL, owner, repo, prNumber)
+	var raw struct {
+		Body string `json:"body"`
+	}
+	if err := c.restGetJSON(apiURL, &raw); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("fetching PR #%d body: %w", prNumber, err)
+	}
+	matches := reClosingKeyword.FindAllStringSubmatch(raw.Body, -1)
+	if len(matches) == 0 {
+		return nil, nil
+	}
+	out := make([]int, 0, len(matches))
+	for _, m := range matches {
+		n, err := strconv.Atoi(m[1])
+		if err != nil {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+// FetchPRsForSHA returns the PR numbers associated with the given commit SHA via
+// GET /repos/{owner}/{repo}/commits/{sha}/pulls. Returns nil, nil on 404 or empty.
+func (c *Client) FetchPRsForSHA(owner, repo, sha string) ([]int, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/commits/%s/pulls", c.baseURL, owner, repo, sha)
+	var raw []struct {
+		Number int `json:"number"`
+	}
+	if err := c.restGetJSON(apiURL, &raw); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("fetching PRs for SHA %s: %w", sha, err)
+	}
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	out := make([]int, len(raw))
+	for i, pr := range raw {
+		out[i] = pr.Number
+	}
+	return out, nil
+}
 
 // PRDetails holds the fields from a GitHub pull request needed by fabrik watch.
 type PRDetails struct {
