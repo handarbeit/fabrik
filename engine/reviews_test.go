@@ -323,7 +323,7 @@ func TestBuildReviewThreadComments(t *testing.T) {
 }
 
 // (f2) buildReviewThreadComments skips comments already present in ProcessedComments.
-func TestBuildReviewThreadComments_ProcessedSetSkip(t *testing.T) {
+func TestBuildReviewThreadComments_ProcessedCommentsSkip(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := reviewTestEngine(client)
 	item := gh.ProjectItem{

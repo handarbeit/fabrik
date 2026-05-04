@@ -261,7 +261,7 @@ func TestProcessItem_AwaitingInput_NoComment_Skips(t *testing.T) {
 	}
 }
 
-// --- (f) processItem calls blockOnInput, does not increment retryCount ---
+// --- (f) processItem calls blockOnInput, does not increment Attempts ---
 
 func TestProcessItem_BlockedOnInput_AddsLabels(t *testing.T) {
 	skipIfNoGit(t)
@@ -345,7 +345,7 @@ func TestProcessItem_BlockedOnInput_AddsLabels(t *testing.T) {
 	}
 }
 
-func TestProcessItem_BlockedOnInput_ProcessedSetEntry(t *testing.T) {
+func TestProcessItem_BlockedOnInput_LastAttemptAtSet(t *testing.T) {
 	skipIfNoGit(t)
 	repoDir := initBareRepo(t)
 	wm := NewWorktreeManager(repoDir)
