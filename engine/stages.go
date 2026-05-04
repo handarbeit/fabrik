@@ -218,7 +218,6 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 //   - All green → clear ciMergePendingSince; clear fabrik:awaiting-ci; proceed to merge
 func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) error {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-	iKey := issueKey(item, e.defaultRepo())
 
 	// Use FetchLinkedPR (REST) to get both the PR number and head SHA in one call.
 	pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number)
