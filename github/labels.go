@@ -227,7 +227,7 @@ func (c *Client) SeedLabels(owner, repo string, stageNames []string, lockedUser 
 
 	for _, d := range defs {
 		if err := c.seedOneLabel(owner, repo, d); err != nil {
-			logf(0, "warn", "seeding label %q: %v\n", d.name, err)
+			logf(0, "warn", "seeding label %q on %s/%s: %v\n", d.name, owner, repo, err)
 		}
 	}
 	return nil

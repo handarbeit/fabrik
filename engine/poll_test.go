@@ -1493,8 +1493,8 @@ func TestSeedLabels_multiRepo(t *testing.T) {
 	board := &gh.ProjectBoard{
 		ProjectID: "PVT_1",
 		Items: []gh.ProjectItem{
-			{Number: 1, Title: "Issue 1", Status: "Research", Repo: "owner/repo1"},
-			{Number: 2, Title: "Issue 2", Status: "Research", Repo: "owner/repo2"},
+			{Number: 1, Title: "Issue 1", Status: "Done", Repo: "owner/repo1"},
+			{Number: 2, Title: "Issue 2", Status: "Done", Repo: "owner/repo2"},
 		},
 	}
 	client := &mockGitHubClient{
