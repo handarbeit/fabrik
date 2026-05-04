@@ -401,6 +401,10 @@ func TestYoloCatchup_AdvancesClosedIssue(t *testing.T) {
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
 	eng.cfg.Yolo = true
+	// Seed item into cycleSet so the pre-filter admits it (simulates observer firing).
+	eng.mayNeedWorkMu.Lock()
+	eng.mayNeedWork["owner/repo#77"] = true
+	eng.mayNeedWorkMu.Unlock()
 
 	ctx := context.Background()
 	if _, err := eng.poll(ctx); err != nil {
@@ -446,9 +450,8 @@ func TestYoloCatchup_SkipsNotDeepFetched(t *testing.T) {
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
 	eng.cfg.Yolo = true
-	// Pre-seed seenUpdatedAt so itemMayNeedWork sees this item as unchanged →
+	// Item not in cycleSet (mayNeedWork is empty) and no CooldownAt entry →
 	// no deep-fetch → not in deepFetchedIDs → yolo catch-up must skip it.
-	eng.seenUpdatedAt["owner/repo#55"] = fixedTime
 
 	ctx := context.Background()
 	if _, err := eng.poll(ctx); err != nil {
@@ -609,6 +612,10 @@ func TestYoloCatchUpMergesBeforeAdvance(t *testing.T) {
 		return nil
 	}
 	eng := testEngineWithStages(client, testStagesWithValidate())
+	// Seed item into cycleSet so the pre-filter admits it (simulates observer firing).
+	eng.mayNeedWorkMu.Lock()
+	eng.mayNeedWork["owner/repo#42"] = true
+	eng.mayNeedWorkMu.Unlock()
 
 	ctx := context.Background()
 	if _, err := eng.poll(ctx); err != nil {
@@ -671,6 +678,10 @@ func TestYoloCatchUpSkipsAdvanceOnMergeError(t *testing.T) {
 	}
 	eng := testEngineWithStages(client, testStagesWithValidate())
 	eng.cfg.MaxRebaseCycles = 3
+	// Seed item into cycleSet so the pre-filter admits it (simulates observer firing).
+	eng.mayNeedWorkMu.Lock()
+	eng.mayNeedWork["owner/repo#42"] = true
+	eng.mayNeedWorkMu.Unlock()
 
 	ctx := context.Background()
 	if _, err := eng.poll(ctx); err != nil {
@@ -812,6 +823,10 @@ func TestCruiseCatchUp_NonValidate_Advances(t *testing.T) {
 		},
 	}
 	eng := testEngineWithStages(client, testStagesWithValidate())
+	// Seed item into cycleSet so the pre-filter admits it (simulates observer firing).
+	eng.mayNeedWorkMu.Lock()
+	eng.mayNeedWork["owner/repo#10"] = true
+	eng.mayNeedWorkMu.Unlock()
 
 	ctx := context.Background()
 	if _, err := eng.poll(ctx); err != nil {
@@ -921,6 +936,10 @@ func TestCruiseCatchUp_BothCruiseAndYolo_YoloWins(t *testing.T) {
 		},
 	}
 	eng := testEngineWithStages(client, testStagesWithValidate())
+	// Seed item into cycleSet so the pre-filter admits it (simulates observer firing).
+	eng.mayNeedWorkMu.Lock()
+	eng.mayNeedWork["owner/repo#12"] = true
+	eng.mayNeedWorkMu.Unlock()
 
 	ctx := context.Background()
 	if _, err := eng.poll(ctx); err != nil {
@@ -1137,17 +1156,16 @@ func TestNextRateLimitLow_NoActivationAboveThreshold(t *testing.T) {
 	}
 }
 
-// TestItemMayNeedWork_WaitForCI_CompleteLabelOnly_FilteredByCache verifies that
-// an item with wait_for_ci: true and ONLY stage:X:complete (no fabrik:awaiting-ci)
-// is filtered by the updatedAt cache. In the new conjunctive gate design (ADR 032):
-//   - During CI await: fabrik:awaiting-ci is present → bypasses cache via the
-//     existing fabrik:awaiting-ci bypass in itemMayNeedWork.
+// TestPollPreFilter_WaitForCI_CompleteLabelOnly_Skipped verifies that an item with
+// wait_for_ci: true and ONLY stage:X:complete (no fabrik:awaiting-ci) is filtered by
+// the poll pre-filter when not in cycleSet and no expired CooldownAt. In the
+// conjunctive gate design (ADR 032):
+//   - During CI await: fabrik:awaiting-ci is present → bypasses the pre-filter.
 //   - After CI clears: checkCIGate adds stage:X:complete and removes
-//     fabrik:awaiting-ci. The label mutation bumps the issue's updatedAt on GitHub,
-//     so the item naturally passes the updatedAt check on the next poll.
+//     fabrik:awaiting-ci. The label mutation fires an observer → cycleSet on next poll.
 //
 // The old wait_for_ci + stage:X:complete bypass is therefore no longer needed.
-func TestItemMayNeedWork_WaitForCI_CompleteLabelOnly_FilteredByCache(t *testing.T) {
+func TestPollPreFilter_WaitForCI_CompleteLabelOnly_Skipped(t *testing.T) {
 	waitForCI := true
 	stgs := []*stages.Stage{
 		{
@@ -1158,7 +1176,21 @@ func TestItemMayNeedWork_WaitForCI_CompleteLabelOnly_FilteredByCache(t *testing.
 			Completion: stages.CompletionCriteria{Type: "claude"},
 		},
 	}
-	client := &mockGitHubClient{}
+	fixedTime := time.Now().Add(-time.Hour)
+	var deepFetched bool
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{{
+					Number: 99, ItemID: "PVTI_99", Status: "Validate",
+					Repo: "owner/repo", UpdatedAt: fixedTime,
+					Labels: []string{"stage:Validate:complete"}, // no fabrik:awaiting-ci
+				}},
+			}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
+	}
 	eng := NewWithDeps(Config{
 		Owner:         "owner",
 		Repo:          "repo",
@@ -1169,29 +1201,21 @@ func TestItemMayNeedWork_WaitForCI_CompleteLabelOnly_FilteredByCache(t *testing.
 		Stages:        stgs,
 	}, client, &mockClaudeInvoker{}, NewWorktreeManager("/tmp/test-repo"))
 
-	fixedTime := time.Now().Add(-time.Hour)
-	item := gh.ProjectItem{
-		Number:    99,
-		ItemID:    "PVTI_99",
-		Status:    "Validate",
-		Repo:      "owner/repo",
-		UpdatedAt: fixedTime,
-		Labels:    []string{"stage:Validate:complete"}, // no fabrik:awaiting-ci
+	// Post-CI-clear: stage:Validate:complete only (no fabrik:awaiting-ci), not in cycleSet,
+	// no expired CooldownAt → must be filtered (stage is already done).
+	if _, err := eng.poll(t.Context()); err != nil {
+		t.Fatalf("poll: %v", err)
 	}
-	// Pre-seed seenUpdatedAt so the updatedAt cache returns false.
-	eng.seenUpdatedAt["owner/repo#99"] = fixedTime
-
-	// Post-CI-clear: stage:Validate:complete only (no fabrik:awaiting-ci) is
-	// filtered by cache, just like non-CI-gated stages with a completion label.
-	if eng.itemMayNeedWork(item) {
-		t.Error("expected itemMayNeedWork to return false for wait_for_ci stage with only stage:complete (post-CI-clear state)")
+	if deepFetched {
+		t.Error("expected item not to be deep-fetched for wait_for_ci stage with only stage:complete (post-CI-clear state)")
 	}
 }
 
-// TestItemMayNeedWork_NoWaitForCI_CompleteLabel_FilteredByCache verifies that an item
-// whose stage does NOT have wait_for_ci: true is filtered by the updatedAt cache when
-// it has only a stage:<name>:complete label (no fabrik:awaiting-ci).
-func TestItemMayNeedWork_NoWaitForCI_CompleteLabel_FilteredByCache(t *testing.T) {
+// TestPollPreFilter_NoWaitForCI_CompleteLabel_Skipped verifies that an item whose
+// stage does NOT have wait_for_ci: true is filtered by the poll pre-filter when it
+// has only a stage:<name>:complete label (no fabrik:awaiting-ci), is not in cycleSet,
+// and has no expired CooldownAt.
+func TestPollPreFilter_NoWaitForCI_CompleteLabel_Skipped(t *testing.T) {
 	stgs := []*stages.Stage{
 		{
 			Name:       "Validate",
@@ -1201,7 +1225,21 @@ func TestItemMayNeedWork_NoWaitForCI_CompleteLabel_FilteredByCache(t *testing.T)
 			Completion: stages.CompletionCriteria{Type: "claude"},
 		},
 	}
-	client := &mockGitHubClient{}
+	fixedTime := time.Now().Add(-time.Hour)
+	var deepFetched bool
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{{
+					Number: 99, ItemID: "PVTI_99", Status: "Validate",
+					Repo: "owner/repo", UpdatedAt: fixedTime,
+					Labels: []string{"stage:Validate:complete"},
+				}},
+			}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
+	}
 	eng := NewWithDeps(Config{
 		Owner:         "owner",
 		Repo:          "repo",
@@ -1212,20 +1250,12 @@ func TestItemMayNeedWork_NoWaitForCI_CompleteLabel_FilteredByCache(t *testing.T)
 		Stages:        stgs,
 	}, client, &mockClaudeInvoker{}, NewWorktreeManager("/tmp/test-repo"))
 
-	fixedTime := time.Now().Add(-time.Hour)
-	item := gh.ProjectItem{
-		Number:    99,
-		ItemID:    "PVTI_99",
-		Status:    "Validate",
-		Repo:      "owner/repo",
-		UpdatedAt: fixedTime,
-		Labels:    []string{"stage:Validate:complete"},
+	// Not in cycleSet, no expired CooldownAt → stage-complete item must be skipped.
+	if _, err := eng.poll(t.Context()); err != nil {
+		t.Fatalf("poll: %v", err)
 	}
-	// Pre-seed seenUpdatedAt so the updatedAt cache returns false.
-	eng.seenUpdatedAt["owner/repo#99"] = fixedTime
-
-	if eng.itemMayNeedWork(item) {
-		t.Error("expected itemMayNeedWork to return false for non-wait_for_ci stage (filtered by cache), got true")
+	if deepFetched {
+		t.Error("expected item not to be deep-fetched for non-wait_for_ci stage with only stage:complete")
 	}
 }
 
@@ -1273,10 +1303,7 @@ func TestPoll_CruiseValidateComplete_NoRepeatDeepFetch(t *testing.T) {
 		Stages:        stgs,
 	}, client, &mockClaudeInvoker{}, NewWorktreeManager("/tmp/test-repo"))
 
-	// Simulate the perpetual-loop trigger: stable updatedAt cached, CooldownAt["periodic-re-eval"] expired.
-	eng.mu.Lock()
-	eng.seenUpdatedAt["owner/repo#732"] = fixedTime
-	eng.mu.Unlock()
+	// Simulate the perpetual-loop trigger: CooldownAt["periodic-re-eval"] expired.
 	eng.store.Apply(itemstate.CooldownRecorded{
 		Repo: "owner/repo", Number: 732, Reason: "periodic-re-eval",
 		Until: time.Now().Add(-2 * time.Minute),
