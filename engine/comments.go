@@ -137,9 +137,10 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		e.totalTokens = addTokenUsage(e.totalTokens, usage)
 	}()
 	e.store.Apply(itemstate.InvocationRecorded{
-		Repo:   itemOwnerRepoString(item, e.defaultRepo()),
-		Number: item.Number,
-		Usage:  usage,
+		Repo:      itemOwnerRepoString(item, e.defaultRepo()),
+		Number:    item.Number,
+		Usage:     usage,
+		IsComment: true,
 	})
 	if err != nil {
 		e.removeEditingLabel(owner, repo, item.Number)
@@ -294,6 +295,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 			Number:    item.Number,
 			Completed: true,
 			Usage:     usage,
+			IsComment: true,
 		})
 		var prNumber int
 		if stage.CreateDraftPR {

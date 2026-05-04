@@ -429,6 +429,10 @@ type InvocationRecorded struct {
 	Completed bool
 	Blocked   bool
 	Usage     TokenUsage
+	// IsComment is true when the invocation processed a user comment rather than
+	// running a stage. Stored in ItemState.LastInvocationIsComment so that the
+	// InvocationObserver can forward the correct flag to the TUI.
+	IsComment bool
 }
 
 func (InvocationRecorded) isMutation() {}
