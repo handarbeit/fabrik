@@ -24,7 +24,7 @@ const (
 	CommentsChanged
 	// AssigneesChanged indicates the Assignees slice changed.
 	AssigneesChanged
-	// TitleBodyChanged indicates Title or Body changed.
+	// TitleBodyChanged indicates Title, Body, URL, or Author changed.
 	TitleBodyChanged
 	// StateChanged indicates the open/closed State or IsClosed changed.
 	StateChanged
