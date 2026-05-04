@@ -674,31 +674,36 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// next poll and prevent the new stage from running.
 	advancedItems := make(map[string]bool)
 	defer func() {
+		// Update seenUpdatedAt under e.mu (seenUpdatedAt is an engine map, not in store).
 		e.mu.Lock()
 		for _, item := range deepFetchCandidates {
 			iKey := issueKey(item, e.defaultRepo())
 			if !item.UpdatedAt.IsZero() && !advancedItems[iKey] {
 				e.seenUpdatedAt[iKey] = item.UpdatedAt
 			}
-			// Belt-and-suspenders: refresh processedSet for non-advanced *terminal*
-			// items that completed a full poll cycle without dispatching work. Only
-			// updates an *existing* entry, and only when stage:<X>:complete is present
-			// in the full label set (items that deep-fetched have all labels here).
-			// This caps deep-fetch frequency to once per cooldown period for terminal
-			// items where the stage-complete label isn't within the first 15 shallow
-			// labels (where Part 1 suppresses retries). Incomplete items (no
-			// stage:X:complete) are intentionally excluded — refreshing their entry
-			// would defeat the retry-after-cooldown mechanism (#504).
-			if !advancedItems[iKey] {
-				if stage := stages.FindStage(e.cfg.Stages, item.Status); stage != nil && !stage.CleanupWorktree {
-					stageKey := iKey + "-" + stage.Name
-					if _, exists := e.processedSet[stageKey]; exists && hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) {
-						e.processedSet[stageKey] = time.Now()
-					}
-				}
-			}
 		}
 		e.mu.Unlock()
+		// Refresh CooldownAt["periodic-re-eval"] for all non-advanced, non-cleanup items
+		// that completed a full poll cycle without dispatching work. This preserves the
+		// #488 fix: terminal and gated items are deep-fetched at most once per cooldown
+		// window. The stage:X:complete guard is removed here because LastAttemptAt (not
+		// CooldownAt) now carries dispatch suppression — refreshing CooldownAt for ALL
+		// non-worker items is safe regardless of completion state (#504 structural fix).
+		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
+		for _, item := range deepFetchCandidates {
+			iKey := issueKey(item, e.defaultRepo())
+			if advancedItems[iKey] {
+				continue
+			}
+			if stage := stages.FindStage(e.cfg.Stages, item.Status); stage != nil && !stage.CleanupWorktree {
+				e.store.Apply(itemstate.CooldownRecorded{
+					Repo:   itemOwnerRepoString(item, e.defaultRepo()),
+					Number: item.Number,
+					Reason: "periodic-re-eval",
+					Until:  time.Now().Add(cooldown),
+				})
+			}
+		}
 	}()
 
 	// Deep-fetch details (comments, linked PRs) only for items that pass the
@@ -817,15 +822,17 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		}
 		blocked, timedOut := e.checkReviewGate(board, item, stage)
 		if blocked {
-			// Record processedSet so itemMayNeedWork's cooldown retry path
-			// re-evaluates this item every 10 × PollSeconds even when nothing
-			// bumps updatedAt. This is what lets Phase 1 / Phase 2 review-reprompt
-			// timers fire on a non-responsive bot reviewer (issue #495).
-			iKey := issueKey(item, e.defaultRepo())
-			stageKey := iKey + "-" + stage.Name
-			e.mu.Lock()
-			e.processedSet[stageKey] = time.Now()
-			e.mu.Unlock()
+			// Record CooldownAt["review-blocked"] so itemMayNeedWork's expiry path
+			// re-evaluates this item every 10 × PollSeconds even when nothing bumps
+			// updatedAt. This lets Phase 1/Phase 2 review-reprompt timers fire on a
+			// non-responsive bot reviewer (issue #495).
+			cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
+			e.store.Apply(itemstate.CooldownRecorded{
+				Repo:   itemOwnerRepoString(item, e.defaultRepo()),
+				Number: item.Number,
+				Reason: "review-blocked",
+				Until:  time.Now().Add(cooldown),
+			})
 			continue // awaiting reviewers; checkReviewGate handled label
 		}
 		if timedOut {
@@ -838,7 +845,6 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		// have nothing to address; fall through to Phase 2.
 		if syntheticComments := e.buildReviewThreadComments(item); len(syntheticComments) > 0 {
 			iKey := issueKey(item, e.defaultRepo())
-			stageKey := iKey + "-" + stage.Name
 			// Guard: if a goroutine from a previous poll cycle is still
 			// running dispatchReviewReinvoke for this item, skip the entire
 			// reinvoke path — including cycle-limit checks — to avoid
@@ -849,18 +855,18 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 				e.logf(item.Number, "review-reinvoke", "skipping dispatch — review reinvoke already in-flight\n")
 				continue
 			}
-			e.mu.Lock()
-			cycleCount := e.reviewCycleCount[stageKey]
+			repoStr := itemOwnerRepoString(item, e.defaultRepo())
+			var cycleCount int
+			if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
+				cycleCount = snap.ReviewCycles(stage.Name)
+			}
 			maxCycles := e.cfg.MaxReviewCycles
-			e.mu.Unlock()
 			if cycleCount >= maxCycles {
 				e.pauseForReviewCycleLimit(board, item, stage, cycleCount, maxCycles)
 			} else {
-				e.mu.Lock()
-				e.reviewCycleCount[stageKey]++
-				e.mu.Unlock()
+				e.store.Apply(itemstate.ReviewCycleIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 				e.dispatchReviewReinvoke(ctx, board, item, stage)
-				advancedItems[issueKey(item, e.defaultRepo())] = true
+				advancedItems[iKey] = true
 			}
 			continue
 		}
@@ -873,23 +879,22 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		mergeBlocked, mergeConflict := e.checkMergeabilityGate(item, stage)
 		if mergeConflict {
 			iKey := issueKey(item, e.defaultRepo())
-			stageKey := iKey + "-" + stage.Name
 			if _, ok := e.inFlight.Load(iKey); ok {
 				e.logf(item.Number, "rebase-reinvoke", "skipping dispatch — rebase reinvoke already in-flight\n")
 				continue
 			}
-			e.mu.Lock()
-			cycleCount := e.rebaseCycleCount[stageKey]
+			repoStr := itemOwnerRepoString(item, e.defaultRepo())
+			var cycleCount int
+			if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
+				cycleCount = snap.RebaseCycles(stage.Name)
+			}
 			maxCycles := e.cfg.MaxRebaseCycles
-			e.mu.Unlock()
 			if cycleCount >= maxCycles {
 				e.pauseForRebaseCycleLimit(board, item, stage, cycleCount, maxCycles)
 			} else {
-				e.mu.Lock()
-				e.rebaseCycleCount[stageKey]++
-				e.mu.Unlock()
+				e.store.Apply(itemstate.RebaseCycleIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 				e.dispatchRebaseReinvoke(ctx, board, item, stage)
-				advancedItems[issueKey(item, e.defaultRepo())] = true
+				advancedItems[iKey] = true
 			}
 			continue
 		}
@@ -907,23 +912,22 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		}
 		if ciFailure {
 			iKey := issueKey(item, e.defaultRepo())
-			stageKey := iKey + "-" + stage.Name
 			if _, ok := e.inFlight.Load(iKey); ok {
 				e.logf(item.Number, "ci-fix-reinvoke", "skipping dispatch — CI-fix reinvoke already in-flight\n")
 				continue
 			}
-			e.mu.Lock()
-			cycleCount := e.ciFixCycleCount[stageKey]
+			repoStr := itemOwnerRepoString(item, e.defaultRepo())
+			var cycleCount int
+			if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
+				cycleCount = snap.CIFixCycles(stage.Name)
+			}
 			maxCycles := e.cfg.MaxCiFixCycles
-			e.mu.Unlock()
 			if cycleCount >= maxCycles {
 				e.pauseForCIFixCycleLimit(board, item, stage, cycleCount, maxCycles)
 			} else {
-				e.mu.Lock()
-				e.ciFixCycleCount[stageKey]++
-				e.mu.Unlock()
+				e.store.Apply(itemstate.CIFixCycleIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 				e.dispatchCIFixReinvoke(ctx, board, item, stage)
-				advancedItems[issueKey(item, e.defaultRepo())] = true
+				advancedItems[iKey] = true
 			}
 			continue
 		}
