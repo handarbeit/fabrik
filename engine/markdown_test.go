@@ -387,6 +387,22 @@ func TestBalanceFences_NoSeparatorNoClosesLine_AppendsAtEnd(t *testing.T) {
 	}
 }
 
+func TestBalanceFences_MultipleSeparators_UsesLastOne(t *testing.T) {
+	// A manually-edited PR body may have an earlier --- that appears before the unclosed
+	// fence opener. The closer must go before the LAST --- (the one preceding Closes #N),
+	// not the first one, to avoid inserting before the opener itself.
+	body := "## Intro\n\n---\n\n## Approach\n\n```bash\ncode\n\n---\n\nCloses #6"
+	result := balanceFences(body)
+	if !strings.HasSuffix(strings.TrimSpace(result), "Closes #6") {
+		t.Errorf("Closes #6 must remain at end, got: %q", result)
+	}
+	// The closing fence must appear before the LAST ---, not the first.
+	// After fix: body contains ```\n---\n\nCloses #6 at the tail.
+	if !strings.Contains(result, "```\n---\n\nCloses #6") {
+		t.Errorf("closing fence must appear before the last ---, got: %q", result)
+	}
+}
+
 // ── buildPRSeedBody fence-balancing ───────────────────────────────────────────
 
 func TestBuildPRSeedBody_UnclosedBacktickInPlan(t *testing.T) {
