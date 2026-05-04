@@ -224,9 +224,10 @@ func (s *Store) applySingleItem(m Mutation) (Snapshot, []Change, error) {
 	s.updateIndexes(before, *item, key)
 
 	snap := newSnapshot(*item)
+	repo, number := item.Repo, item.Number
 	s.mu.Unlock()
 
-	change := Change{Repo: item.Repo, Number: item.Number, Fields: flags}
+	change := Change{Repo: repo, Number: number, Fields: flags}
 	obs := s.captureObservers()
 	s.notify(obs, change, snap)
 
