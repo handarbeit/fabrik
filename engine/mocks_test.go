@@ -471,6 +471,10 @@ func (m *mockGitHubClient) FetchPRsForSHA(owner, repo, sha string) ([]int, error
 	return nil, nil
 }
 
+func (m *mockGitHubClient) FetchProjectItem(owner, repo string, issueNumber int) (*gh.ProjectItem, error) {
+	return nil, nil
+}
+
 func (m *mockGitHubClient) RateLimitStats() (gh.RateLimitStats, gh.RateLimitStats) {
 	if m.rateLimitStatsFn != nil {
 		return m.rateLimitStatsFn()
