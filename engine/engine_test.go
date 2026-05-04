@@ -231,12 +231,12 @@ func TestMarkCommentsProcessedConcurrency(t *testing.T) {
 // already-processed and fabrik-output comments regardless of author.
 func TestFindNewCommentsFiltering(t *testing.T) {
 	e := &Engine{
-		cfg:          Config{User: "alice"},
-		processedSet: make(map[string]time.Time),
+		cfg:   Config{User: "alice"},
+		store: itemstate.NewStore(nil),
 	}
 
-	// Pre-mark one comment as processed
-	e.processedSet["#42-comment-c2"] = time.Now()
+	// Pre-mark one comment as processed via the store
+	e.store.Apply(itemstate.CommentProcessed{Repo: "", Number: 42, CommentID: "c2", At: time.Now()})
 
 	item := gh.ProjectItem{
 		Number: 42,
