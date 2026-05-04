@@ -29,7 +29,7 @@ Progress signals are per-stage and observable without parsing Claude's output st
 | Validate | Total comment count on issue or linked PR increased |
 | All others | No signal — always fail on turn-limit |
 
-A `fabrik:extend-turns` label is retained as a **manual safety valve**: when present, the first invocation gets 2× the normal budget without requiring a progress check. Subsequent extensions beyond 2× still require progress. The label is auto-removed on successful completion.
+A `fabrik:extend-turns` label is retained as a **manual safety valve**: when present, the first invocation gets 2× the normal budget without requiring a progress check. Subsequent extensions beyond 2× still require progress. ~~The label is auto-removed on successful completion.~~ See Amendment below.
 
 ## Why In-Dispatch (Not a Catch-Up Loop)
 
@@ -76,3 +76,13 @@ The `fabrik:extend-turns` label provides a bypass that does not depend on progre
 - Review and Validate progress detection costs one GraphQL call per turn-limit hit — bounded and acceptable.
 - Plan, Research, and Specify always fail on turn-limit (no observable progress signal within a dispatch).
 - ADRs 026–028 (reinvoke patterns) are unaffected; extension is orthogonal to those patterns.
+
+## Amendment — 2026-05-04 (issue #530)
+
+**`fabrik:extend-turns` lifecycle changed from single-use to persistent.**
+
+The original decision described the label as auto-removed on successful stage completion so that "the next stage gets a normal budget." In practice this required the operator to time the label precisely — applying it too early meant an unneeded stage consumed it, while applying it too late meant the offending stage had already overrun. This produced repeated operational dances (pause → re-apply → unpause) across issues #516–#519.
+
+**New behavior:** The label persists across all intermediate stages and is removed only when the Done stage's `CleanupWorktree` branch runs (or when the operator removes it manually). Every stage invocation that runs while the label is present receives the 2× budget pre-grant. The 2×→3× progressive extension within a stage is unchanged. No-op when `max_turns == 0` remains unchanged.
+
+The removal site moved from `processItem`'s `completed` block to the `CleanupWorktree` branch in `engine/item.go`. The as-built docs (`docs/state-machine.md`, `docs/stage-lifecycle.md`, `CLAUDE.md`, `docs/USER_GUIDE.md`) reflect the new semantics.
