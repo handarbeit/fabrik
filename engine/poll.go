@@ -1450,7 +1450,11 @@ func (e *Engine) applyLayer1StatusRefresh(eventType string, payload []byte, cach
 			FullName string `json:"full_name"`
 		} `json:"repository"`
 	}
-	if err := json.Unmarshal(payload, &ev); err != nil || ev.Repository.FullName == "" || ev.Issue.Number == 0 {
+	if err := json.Unmarshal(payload, &ev); err != nil {
+		e.logf(0, "warn", "layer1 status refresh: failed to parse %s payload: %v\n", eventType, err)
+		return
+	}
+	if ev.Repository.FullName == "" || ev.Issue.Number == 0 {
 		return
 	}
 	key := boardcache.ItemKey(ev.Repository.FullName, ev.Issue.Number)
