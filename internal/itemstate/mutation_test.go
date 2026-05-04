@@ -596,3 +596,99 @@ func TestNoOpCooldownSameValue(t *testing.T) {
 		t.Errorf("cooldown no-op produced change (changes=%d, fired=%d)", len(changes), fired)
 	}
 }
+
+// ---- CIMergePendingStarted / CIMergePendingCleared ----
+
+func TestApplyCIMergePendingStarted(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	at := time.Unix(12345, 0)
+	applyExpect(t, s, CIMergePendingStarted{Repo: testRepo, Number: 1, At: at}, LinkedPRChanged)
+	st := getItem(t, s, testRepo, 1)
+	if st.LinkedPR == nil {
+		t.Fatal("LinkedPR is nil after CIMergePendingStarted")
+	}
+	if !st.LinkedPR.CIMergePendingSince.Equal(at) {
+		t.Errorf("CIMergePendingSince = %v; want %v", st.LinkedPR.CIMergePendingSince, at)
+	}
+}
+
+func TestApplyCIMergePendingCleared(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	at := time.Unix(12345, 0)
+	s.Apply(CIMergePendingStarted{Repo: testRepo, Number: 1, At: at})
+	applyExpect(t, s, CIMergePendingCleared{Repo: testRepo, Number: 1}, LinkedPRChanged)
+	st := getItem(t, s, testRepo, 1)
+	if st.LinkedPR != nil && !st.LinkedPR.CIMergePendingSince.IsZero() {
+		t.Errorf("CIMergePendingSince not cleared: %v", st.LinkedPR.CIMergePendingSince)
+	}
+}
+
+func TestApplyCIMergePendingClearedWithNoLinkedPR(t *testing.T) {
+	// CIMergePendingCleared on an item with no LinkedPR should be a no-op (not panic).
+	s := newStoreWithItem(t, testRepo, 1)
+	_, changes, err := s.Apply(CIMergePendingCleared{Repo: testRepo, Number: 1})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	// No-op: LinkedPR is nil so clearing is trivially done; we allow no changes.
+	_ = changes
+}
+
+// ---- PRChecksObserved ----
+
+func TestApplyPRChecksObserved(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, PRChecksObserved{Repo: testRepo, Number: 1}, LinkedPRChanged)
+	st := getItem(t, s, testRepo, 1)
+	if st.LinkedPR == nil || !st.LinkedPR.HasHadChecks {
+		t.Error("HasHadChecks not set after PRChecksObserved")
+	}
+}
+
+func TestApplyPRChecksObservedIsMonotonic(t *testing.T) {
+	// Applying PRChecksObserved twice: second should be no-op (stays true).
+	s := newStoreWithItem(t, testRepo, 1)
+	s.Apply(PRChecksObserved{Repo: testRepo, Number: 1})
+
+	var fired int
+	s.Subscribe(ObserverFunc(func(c Change, snap Snapshot) { fired++ }))
+	_, changes, _ := s.Apply(PRChecksObserved{Repo: testRepo, Number: 1})
+	if len(changes) != 0 || fired != 0 {
+		t.Errorf("second PRChecksObserved was not a no-op (changes=%d, fired=%d)", len(changes), fired)
+	}
+}
+
+// ---- ItemDeepFetched clears LastDeepFetchFailureAt ----
+
+func TestItemDeepFetchedClearsFailureAt(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	at := time.Now()
+	s.Apply(DeepFetchFailed{Repo: testRepo, Number: 1, At: at})
+	if st := getItem(t, s, testRepo, 1); st.LastDeepFetchFailureAt.IsZero() {
+		t.Fatal("precondition: LastDeepFetchFailureAt not set")
+	}
+
+	fresh := testProjectItem(testRepo, 1)
+	s.Apply(ItemDeepFetched{Repo: testRepo, Number: 1, FreshState: fresh})
+	if st := getItem(t, s, testRepo, 1); !st.LastDeepFetchFailureAt.IsZero() {
+		t.Errorf("LastDeepFetchFailureAt not cleared by ItemDeepFetched: %v", st.LastDeepFetchFailureAt)
+	}
+}
+
+// ---- Snapshot immutability for LinkedPR fields ----
+
+func TestHeldSnapshotLinkedPRFieldsUnchanged(t *testing.T) {
+	// Verify that mutations to CIMergePendingSince and HasHadChecks do not affect
+	// a held Snapshot taken before the mutation.
+	s := newStoreWithItem(t, testRepo, 99)
+	held, _ := s.Get(testRepo, 99)
+	// held.LinkedPR() is nil at this point.
+
+	s.Apply(CIMergePendingStarted{Repo: testRepo, Number: 99, At: time.Unix(999, 0)})
+	s.Apply(PRChecksObserved{Repo: testRepo, Number: 99})
+
+	// Held snapshot should still have nil LinkedPR.
+	if lpr := held.LinkedPR(); lpr != nil {
+		t.Errorf("held snapshot LinkedPR became non-nil after mutations: %+v", lpr)
+	}
+}
