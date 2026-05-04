@@ -200,14 +200,12 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 	// Without this, a persistent failure (e.g. deleted issue, permission error)
 	// would cause an API call on every poll cycle. The cooldown matches the
 	// processedSet cooldown used for failed stage retries.
-	iKey := issueKey(item, e.defaultRepo())
-	e.mu.Lock()
-	lastFailure, hadFailure := e.deepFetchFailureTime[iKey]
-	e.mu.Unlock()
-	if hadFailure {
-		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
-		if time.Since(lastFailure) < cooldown {
-			return false
+	if snap, snapErr := e.store.Get(itemOwnerRepoString(item, e.defaultRepo()), item.Number); snapErr == nil {
+		if lastFailure := snap.State().LastDeepFetchFailureAt; !lastFailure.IsZero() {
+			cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
+			if time.Since(lastFailure) < cooldown {
+				return false
+			}
 		}
 	}
 
