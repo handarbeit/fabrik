@@ -172,45 +172,43 @@ func TestHeartbeatGoroutineCleanup(t *testing.T) {
 	e.heartbeatIntervalOverride = 5 * time.Millisecond
 
 	bootstrapItem(t, e, 3, nil)
-	setWorker(e, 3, os.Getpid(), "Plan", time.Now())
+	startedAt := time.Now()
+	setWorker(e, 3, os.Getpid(), "Plan", startedAt)
 
 	ctx := context.Background()
 	done := make(chan struct{})
 
-	// Start heartbeat and observe that after closing done, no more heartbeats fire.
+	// Start heartbeat and poll until at least one tick fires (up to 500ms).
 	e.startHeartbeat(ctx, "owner/repo", 3, done)
 
-	// Let at least one heartbeat fire.
-	time.Sleep(30 * time.Millisecond)
-
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		snap, _ := e.store.Get("owner/repo", 3)
+		if snap.Worker() != nil && snap.Worker().LastSignAt.After(startedAt) {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 	snap, _ := e.store.Get("owner/repo", 3)
-	firstSignAt := snap.Worker().LastSignAt
+	if snap.Worker() == nil || !snap.Worker().LastSignAt.After(startedAt) {
+		t.Fatal("no heartbeat tick fired within 500ms")
+	}
 
 	// Close done to signal the goroutine to stop.
 	close(done)
 
-	// Give goroutine time to exit.
+	// Poll until the goroutine has exited: LastSignAt stops advancing.
+	// We check twice with a gap to confirm it truly stopped.
 	time.Sleep(20 * time.Millisecond)
-
-	// Record LastSignAt after stopping.
 	snap, _ = e.store.Get("owner/repo", 3)
 	stoppedAt := snap.Worker().LastSignAt
 
-	// Wait another tick interval to confirm no more heartbeats fire.
-	time.Sleep(30 * time.Millisecond)
-
+	// Wait two tick intervals and confirm no more heartbeats fired.
+	time.Sleep(20 * time.Millisecond)
 	snap, _ = e.store.Get("owner/repo", 3)
-	finalSignAt := snap.Worker().LastSignAt
-
-	// The heartbeat should have advanced at least once (first tick).
-	if !firstSignAt.IsZero() && firstSignAt.Equal(snap.Worker().StartedAt) {
-		t.Log("no heartbeat tick fired during the window (timing-sensitive, may be flaky)")
-	}
-
-	// After closing done, LastSignAt must not advance.
-	if !finalSignAt.Equal(stoppedAt) {
+	if snap.Worker().LastSignAt != stoppedAt {
 		t.Errorf("heartbeat goroutine still firing after done closed: stoppedAt=%v finalSignAt=%v",
-			stoppedAt, finalSignAt)
+			stoppedAt, snap.Worker().LastSignAt)
 	}
 }
 
