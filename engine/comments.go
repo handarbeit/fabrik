@@ -8,6 +8,7 @@ import (
 
 	"github.com/verveguy/fabrik/boardcache"
 	gh "github.com/verveguy/fabrik/github"
+	"github.com/verveguy/fabrik/internal/itemstate"
 	"github.com/verveguy/fabrik/stages"
 )
 
@@ -133,8 +134,12 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		e.totalTokens = addTokenUsage(e.totalTokens, usage)
-		e.lastUsage[issueKey(item, e.defaultRepo())] = usage
 	}()
+	e.store.Apply(itemstate.InvocationRecorded{
+		Repo:   itemOwnerRepoString(item, e.defaultRepo()),
+		Number: item.Number,
+		Usage:  usage,
+	})
 	if err != nil {
 		e.removeEditingLabel(owner, repo, item.Number)
 		if ctx.Err() != nil {
@@ -286,8 +291,13 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 			defer e.mu.Unlock()
 			delete(e.retryCount, stageKey)
 			delete(e.pausedDueToRetries, stageKey)
-			e.lastCompleted[iKey] = true
 		}()
+		e.store.Apply(itemstate.InvocationRecorded{
+			Repo:      itemOwnerRepoString(item, e.defaultRepo()),
+			Number:    item.Number,
+			Completed: true,
+			Usage:     usage,
+		})
 		var prNumber int
 		if stage.CreateDraftPR {
 			prNumber = e.ensureDraftPR(item, baseBranch)
