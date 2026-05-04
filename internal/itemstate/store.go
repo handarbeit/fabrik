@@ -418,9 +418,16 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 
 	case WorkerHeartbeat:
 		if item.Worker == nil {
-			item.Worker = &WorkerHandle{}
+			return 0 // no-op: heartbeat for a worker that has already exited
 		}
 		item.Worker.LastSignAt = v.At
+		return WorkerChanged
+
+	case WorkerPIDSet:
+		if item.Worker == nil {
+			return 0 // no-op: worker already exited
+		}
+		item.Worker.PID = v.PID
 		return WorkerChanged
 
 	case WorkerExited:

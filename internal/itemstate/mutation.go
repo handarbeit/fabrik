@@ -402,6 +402,17 @@ type WorkerHeartbeat struct {
 func (WorkerHeartbeat) isMutation() {}
 func (m WorkerHeartbeat) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// WorkerPIDSet records the Claude subprocess PID once cmd.Start() returns.
+// No-op if Worker is nil (e.g., WorkerExited arrived first).
+type WorkerPIDSet struct {
+	Repo   string
+	Number int
+	PID    int
+}
+
+func (WorkerPIDSet) isMutation() {}
+func (m WorkerPIDSet) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // WorkerExited clears the Worker handle when a Claude invocation finishes.
 type WorkerExited struct {
 	Repo   string
