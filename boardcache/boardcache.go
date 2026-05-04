@@ -367,22 +367,29 @@ func (c *CacheImpl) resolvePRLinkage(owner, repo string, prNumber int) (key stri
 }
 
 // Pause stops delta application (called on WebhookStreamUnhealthy transition).
-// Pause observers are called after the lock is released to avoid deadlock
-// if an observer calls back into CacheImpl.
+// Observers are called after the lock is released, and only on an actual
+// false→true transition to avoid spamming observers on repeated Pause calls.
 func (c *CacheImpl) Pause() {
 	c.mu.Lock()
+	prior := c.paused
 	c.paused = true
 	c.mu.Unlock()
-	c.callPauseObservers(true)
+	if !prior {
+		c.callPauseObservers(true)
+	}
 }
 
 // Resume re-enables delta application (called after reconciliation on stream recovery).
-// Resume observers are called after the lock is released.
+// Observers are called after the lock is released, and only on an actual
+// true→false transition to avoid spamming observers on repeated Resume calls.
 func (c *CacheImpl) Resume() {
 	c.mu.Lock()
+	prior := c.paused
 	c.paused = false
 	c.mu.Unlock()
-	c.callPauseObservers(false)
+	if prior {
+		c.callPauseObservers(false)
+	}
 }
 
 // callPauseObservers snapshots and calls all registered pause observers.
@@ -401,10 +408,10 @@ func (c *CacheImpl) callPauseObservers(paused bool) {
 
 // SubscribePause registers a function that is called after every Pause/Resume
 // transition. The function receives true when the cache is paused and false when
-// resumed. Observers must not call Pause or Resume (would cause recursive locking
-// in a caller's context if they re-enter CacheImpl methods — deadlock-free here
-// because observers run outside c.mu, but re-entrancy into Pause/Resume is
-// semantically wrong). The returned func unsubscribes the observer.
+// resumed. Observers run outside c.mu, so calling other CacheImpl methods from an
+// observer is safe. Calling Pause or Resume re-entrantly from within an observer
+// is semantically wrong (double-fire, inconsistent state) and must be avoided.
+// The returned func unsubscribes the observer.
 func (c *CacheImpl) SubscribePause(fn func(bool)) func() {
 	c.pauseObsMu.Lock()
 	c.pauseObservers = append(c.pauseObservers, fn)
