@@ -1341,17 +1341,20 @@ func TestLayer1StatusRefresh_UpdatesCacheOnIssueCommentEvent(t *testing.T) {
 		t.Errorf("want FetchProjectItemStatus called once with %q, got %v", "PVTI_001", calls)
 	}
 
-	// Verify the item still exists in the cache (not corrupted by the refresh).
-	itemID, ok := cache.GetItemID(boardcache.ItemKey("owner/repo", 1))
-	if !ok {
-		t.Fatal("item no longer found in cache after Layer 1 refresh")
+	// Verify the cache now reflects "Plan" — the status returned by FetchProjectItemStatus.
+	board, err := cache.FetchProjectBoard("owner", "repo", 1, "")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
 	}
-	if itemID != "PVTI_001" {
-		t.Fatalf("unexpected itemID %q", itemID)
+	var gotStatus string
+	for _, item := range board.Items {
+		if item.Number == 1 {
+			gotStatus = item.Status
+		}
 	}
-	// The cache-side update (UpdateItemStatus sets Status="Plan") is verified by
-	// boardcache_test.go:TestUpdateItemStatusSetsStatusAndUpdatedAt. Here we confirm
-	// the engine called the right API path, which is the engine-level invariant.
+	if gotStatus != "Plan" {
+		t.Errorf("want cached Status %q after Layer 1 refresh, got %q", "Plan", gotStatus)
+	}
 }
 
 func TestLayer1StatusRefresh_SkipsWhenCachePaused(t *testing.T) {
@@ -1422,17 +1425,40 @@ func TestRunReconciliationLoop_AppliesStatusDrift(t *testing.T) {
 	// Wait up to 500ms for the cache to reflect the drifted status.
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		// Check via ApplyStatusBatch idempotency: if UpdatedAt advances, status changed.
-		// Simplest: try to detect via FetchProjectItemStatusBatch call count + direct read.
-		if atomic.LoadInt32(&batchCalls) > 0 {
-			break
+		board, err := cache.FetchProjectBoard("owner", "repo", 1, "")
+		if err != nil {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		for _, item := range board.Items {
+			if item.Number == 1 && item.Status == "Implement" {
+				cancel()
+				return
+			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	cancel()
+	// Give the goroutine time to finish any in-flight ApplyStatusBatch.
+	time.Sleep(25 * time.Millisecond)
 
 	if atomic.LoadInt32(&batchCalls) == 0 {
 		t.Fatal("FetchProjectItemStatusBatch was never called within 500ms")
+	}
+
+	// Verify the cache reflects the drifted status.
+	board, err := cache.FetchProjectBoard("owner", "repo", 1, "")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard after layer2 sweep: %v", err)
+	}
+	var gotStatus string
+	for _, item := range board.Items {
+		if item.Number == 1 {
+			gotStatus = item.Status
+		}
+	}
+	if gotStatus != "Implement" {
+		t.Errorf("want cached Status %q after Layer 2 sweep, got %q", "Implement", gotStatus)
 	}
 }
 
