@@ -501,7 +501,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// retries so other instances don't pick it up.
 	lockAcquired := false
 	var workerDone chan struct{}
-	var workerStartedAt time.Time
+	workerStartedAt := time.Now()
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, lockLabel); err != nil {
 		e.logf(item.Number, "warn", "could not add lock label: %v\n", err)
 	} else {
