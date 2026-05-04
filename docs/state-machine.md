@@ -466,16 +466,16 @@ The "baseline clean AND working tree dirty" guard for Implement prevents a pre-e
 
 | Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
 |--------------|-------|-------|-----------------|--------------|----------------|--------------|
-| Column `<X>`, Awaiting CI | Poll tick (catch-up) | CI failed; not in-flight; `ciFixCycleCount` < MaxCiFixCycles | Same column (CI-fix goroutine running) | `fabrik:editing` (during processing) | | `dispatchCIFixReinvoke()` spawns goroutine; `ciFixCycleCount` incremented; `inFlight` set; semaphore acquired; synthetic CI-fix comment passed to `processComments()` |
-| Column `<X>`, Awaiting CI | Poll tick (catch-up) | CI failed; `ciFixCycleCount` ≥ MaxCiFixCycles | Same column, Awaiting Input | `fabrik:paused`, `fabrik:awaiting-input` | | `pauseForCIFixCycleLimit()` posts explanatory comment |
+| Column `<X>`, Awaiting CI | Poll tick (catch-up) | CI failed; not in-flight; `snap.CIFixCycles(stageName)` < MaxCiFixCycles | Same column (CI-fix goroutine running) | `fabrik:editing` (during processing) | | `dispatchCIFixReinvoke()` spawns goroutine; `CIFixCycleIncremented` applied; `inFlight` set; semaphore acquired; synthetic CI-fix comment passed to `processComments()` |
+| Column `<X>`, Awaiting CI | Poll tick (catch-up) | CI failed; `snap.CIFixCycles(stageName)` ≥ MaxCiFixCycles | Same column, Awaiting Input | `fabrik:paused`, `fabrik:awaiting-input` | | `pauseForCIFixCycleLimit()` posts explanatory comment |
 | Column `<X>`, Awaiting CI | Poll tick (catch-up) | CI failed; already in-flight | Same (skipped) | | | Previous CI-fix goroutine still running; skipped entirely |
 
 #### Rebase Reinvoke
 
 | Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
 |--------------|-------|-------|-----------------|--------------|----------------|--------------|
-| Column `<X>`, Rebase Needed + Complete | Poll tick (catch-up) | `mergeable == false`; not in-flight; `rebaseCycleCount` < MaxRebaseCycles | Same column (rebase goroutine running) | `fabrik:editing` (during processing) | | `dispatchRebaseReinvoke()` spawns goroutine; `rebaseCycleCount` incremented; `inFlight` set; semaphore acquired; synthetic rebase-required comment passed to `processComments()` |
-| Column `<X>`, Rebase Needed + Complete | Poll tick (catch-up) | `mergeable == false`; `rebaseCycleCount` ≥ MaxRebaseCycles | Same column, Awaiting Input | `fabrik:paused`, `fabrik:awaiting-input` | | `pauseForRebaseCycleLimit()` posts explanatory comment (usually signals a semantic conflict needing human judgment) |
+| Column `<X>`, Rebase Needed + Complete | Poll tick (catch-up) | `mergeable == false`; not in-flight; `snap.RebaseCycles(stageName)` < MaxRebaseCycles | Same column (rebase goroutine running) | `fabrik:editing` (during processing) | | `dispatchRebaseReinvoke()` spawns goroutine; `RebaseCycleIncremented` applied; `inFlight` set; semaphore acquired; synthetic rebase-required comment passed to `processComments()` |
+| Column `<X>`, Rebase Needed + Complete | Poll tick (catch-up) | `mergeable == false`; `snap.RebaseCycles(stageName)` ≥ MaxRebaseCycles | Same column, Awaiting Input | `fabrik:paused`, `fabrik:awaiting-input` | | `pauseForRebaseCycleLimit()` posts explanatory comment (usually signals a semantic conflict needing human judgment) |
 | Column `<X>`, Rebase Needed + Complete | Poll tick (catch-up) | `mergeable == false`; already in-flight | Same (skipped) | | | Previous rebase goroutine still running; skipped entirely |
 
 ---
@@ -573,15 +573,15 @@ Fabrik discovers PR comments through the `closedByPullRequestsReferences` GraphQ
 4. Attempt merge via `MergePR()`. `MergePR` first checks the PR's `merged` field — if the PR was already merged (e.g., by a human), it returns nil immediately (no-op success). Otherwise it checks `mergeable` and attempts the merge.
 5. On `ErrNotMergeable`: apply `fabrik:rebase-needed` idempotently. Then:
    - **inFlight guard:** if a rebase goroutine is already running for this item, return a plain error (skip — prevents cycle-counter drift).
-   - **Cycle limit check:** compare `rebaseCycleCount[stageKey]` against `MaxRebaseCycles` (default 3):
+   - **Cycle limit check:** compare `snap.RebaseCycles(stage.Name)` against `MaxRebaseCycles` (default 3):
      - If at or above the limit: call `pauseForRebaseCycleLimit()` (`fabrik:paused` + `fabrik:awaiting-input` + explanatory comment); return a plain error.
-     - If below the limit: increment `rebaseCycleCount[stageKey]`, call `dispatchRebaseReinvoke()`, return the `errRebaseDispatched` sentinel.
+     - If below the limit: apply `RebaseCycleIncremented`, call `dispatchRebaseReinvoke()`, return the `errRebaseDispatched` sentinel.
 6. On other API errors: return error (same retry behavior)
 7. On success (including already-merged): call `removeRebaseNeededLabel()` (no-op when absent), log and return nil — advancement proceeds
 
 **Why the `mergeable_state` shortcut (v0.0.52):** the per-check classification at step 3 was over-aggressive — any check_run with `conclusion ∈ {failure, timed_out, action_required}` blocked the merge, including non-required workflow jobs (e.g. `Cleanup artifacts`) that GitHub itself does not treat as merge blockers per branch protection. When `mergeable_state` says the PR is mergeable, Fabrik now trusts that and bypasses the per-check gate. The shortcut sits *after* `stage:Validate:complete` is already on the issue (the catch-up loop's entry condition), so it cannot cause Validate-Claude work to be skipped — it only changes the behavior of the post-completion CI wait.
 
-**Unified rebase-reinvoke recovery (Path 1 and Path 2):** Both code paths now use the same `rebaseCycleCount[stageKey]` map, `dispatchRebaseReinvoke()`, and `pauseForRebaseCycleLimit()`. The `MaxRebaseCycles` and `--max-rebase-cycles` / `FABRIK_MAX_REBASE_CYCLES` controls apply to both paths. Previously, Path 1 immediately paused on `ErrNotMergeable`; it now dispatches the rebase reinvoke autopilot instead, falling back to the pause only when the cycle limit is reached.
+**Unified rebase-reinvoke recovery (Path 1 and Path 2):** Both code paths now use the same `snap.RebaseCycles(stage.Name)` + `RebaseCycleIncremented` mutation, `dispatchRebaseReinvoke()`, and `pauseForRebaseCycleLimit()`. The `MaxRebaseCycles` and `--max-rebase-cycles` / `FABRIK_MAX_REBASE_CYCLES` controls apply to both paths. Previously, Path 1 immediately paused on `ErrNotMergeable`; it now dispatches the rebase reinvoke autopilot instead, falling back to the pause only when the cycle limit is reached.
 
 **Important — Path 1 vs Path 2 distinction:** In Path 1 (`handleStageComplete`), the merge runs BEFORE adding `stage:Validate:complete`. On a plain merge failure (non-`ErrNotMergeable`), no completion label is added, so `itemNeedsWork` can retry the full Validate invocation after cooldown. On `ErrNotMergeable`, `handleStageComplete` detects the `errRebaseDispatched` sentinel and **adds `stage:Validate:complete` before returning** — ensuring the catch-up loop's Phase 2 drives the merge retry rather than `itemNeedsWork` triggering a new full Validate invocation. In Path 2 (catch-up loop), `stage:Validate:complete` already exists when `attemptMergeOnValidate()` runs; on `ErrNotMergeable` the rebase is dispatched and the catch-up loop retries on the next poll.
 
@@ -641,9 +641,9 @@ The catch-up loop in `poll()` is split into two phases for every non-paused non-
 **Phase 1 — unconditional (all items, regardless of yolo/cruise/auto_advance):**
 1. `checkDependencies()` — if blocked, skip
 2. `checkReviewGate()` — if awaiting reviewers, skip; if timed out, pause
-3. `buildReviewThreadComments()` collects inline comments from unresolved review threads (no ROCKET reaction, not in `processedSet`)
+3. `buildReviewThreadComments()` collects inline comments from unresolved review threads (no ROCKET reaction, not in `snap.CommentProcessed(c.ID)`)
 4. **inFlight guard:** If a reinvoke goroutine from a previous poll cycle is still running, the entire reinvoke path is skipped (including cycle-limit checks)
-5. **Cycle limit check:** `reviewCycleCount[stageKey]` is compared against `MaxReviewCycles` (default 5)
+5. **Cycle limit check:** `snap.ReviewCycles(stage.Name)` is compared against `MaxReviewCycles` (default 5)
    - If exceeded: `pauseForReviewCycleLimit()` adds `fabrik:paused` + `fabrik:awaiting-input` and posts comment
    - If not exceeded: increment count, dispatch reinvoke via `dispatchReviewReinvoke()`:
      - Marks item in `inFlight` (prevents double-dispatch)
@@ -654,7 +654,7 @@ The catch-up loop in `poll()` is split into two phases for every non-paused non-
 6. **Merge-conflict gate** (only reached if no review reinvoke was dispatched in step 5; only runs for stages with `wait_for_ci: true`, the same opt-in as the CI gate): `checkMergeabilityGate()` fetches GitHub's `mergeable` flag for the linked PR
    - `mergeable == true` (or no PR): clear any stale `fabrik:rebase-needed` label; fall through to the CI gate
    - `mergeable == null` (GitHub still computing) **or** transient API error on either REST call: block this item for the rest of Phase 1 (skip to next item) — re-evaluated on the next poll (**no label churn** — mirrors the CI gate's R10c rule and matches how the CI gate handles its own transient errors)
-   - `mergeable == false` (confirmed conflict): apply `fabrik:rebase-needed` idempotently, then **inFlight guard** + **cycle limit check** (`rebaseCycleCount[stageKey]` vs `MaxRebaseCycles`, default 3):
+   - `mergeable == false` (confirmed conflict): apply `fabrik:rebase-needed` idempotently, then **inFlight guard** + **cycle limit check** (`snap.RebaseCycles(stage.Name)` vs `MaxRebaseCycles`, default 3):
      - If exceeded: `pauseForRebaseCycleLimit()` pauses issue
      - If not exceeded: dispatch `dispatchRebaseReinvoke()`; `continue`. The catch-up loop never reaches the CI gate while a conflict is outstanding — there is no point spinning on CI-await when the branch cannot merge.
 7. **CI gate** (only reached if the merge-conflict gate cleared): `checkCIGate()` evaluates CI for stages with `wait_for_ci: true`
@@ -662,7 +662,7 @@ The catch-up loop in `poll()` is split into two phases for every non-paused non-
    - Per-check classification (fallback): fetches `FetchCheckRuns()` and applies R1–R6
    - Pending/API error: skip (blocked, not failed); item re-evaluated on next poll
    - Timed out: `pauseForCITimeout()` pauses issue
-   - CI failed: **inFlight guard** + **cycle limit check** (`ciFixCycleCount[stageKey]` vs `MaxCiFixCycles`):
+   - CI failed: **inFlight guard** + **cycle limit check** (`snap.CIFixCycles(stage.Name)` vs `MaxCiFixCycles`):
      - If exceeded: `pauseForCIFixCycleLimit()` pauses issue
      - If not exceeded: dispatch `dispatchCIFixReinvoke()`; `continue`
 
@@ -725,7 +725,7 @@ The CI gate has two paths that handle different timing scenarios:
 The catch-up loop Phase 1 calls `checkCIGate()` after the review gate check. When CI has failed:
 
 1. **inFlight guard:** If a CI-fix goroutine from a previous poll is still running for this item, skip dispatch entirely (no cycle-limit check either)
-2. **Cycle limit check:** `ciFixCycleCount[stageKey]` is compared against `MaxCiFixCycles` (default 5)
+2. **Cycle limit check:** `snap.CIFixCycles(stage.Name)` is compared against `MaxCiFixCycles` (default 5)
    - If exceeded: `pauseForCIFixCycleLimit()` adds `fabrik:paused` + `fabrik:awaiting-input` and posts comment
    - If not exceeded: increment count, dispatch reinvoke via `dispatchCIFixReinvoke()`:
      - Marks item in `inFlight` (prevents double-dispatch)
@@ -736,7 +736,7 @@ The catch-up loop Phase 1 calls `checkCIGate()` after the review gate check. Whe
 
 **`DatabaseID: 0` guard:** Synthetic CI-fix comments have `DatabaseID: 0`, which skips the 👀 and 🚀 reaction steps in `processComments()` (reactions require a real GitHub comment ID).
 
-**CI-fix cycle counter reset:** `ciFixCycleCount[stageKey]` is reset to 0 by `clearFailedStage()` when the user removes `fabrik:paused` from a paused-failed item, allowing fresh CI-fix attempts after human intervention. `rebaseCycleCount[stageKey]` is reset in the same call for the same reason.
+**CI-fix cycle counter reset:** `StageState.CIFixCycles[stageName]` is reset to 0 by `clearFailedStage()` (via `EngineCyclesCleared` mutation) when the user removes `fabrik:paused` from a paused-failed item, allowing fresh CI-fix attempts after human intervention. `StageState.RebaseCycles[stageName]` is reset in the same call for the same reason.
 
 #### 6.4.3 CI Fix Reinvoke vs Review Reinvoke
 
@@ -746,7 +746,7 @@ The catch-up loop Phase 1 calls `checkCIGate()` after the review gate check. Whe
 | Source data | `item.LinkedPRReviewThreadComments` | `FetchCheckRuns()` REST call on PR head SHA |
 | Label on waiting | `fabrik:awaiting-review` (always applied) | `fabrik:awaiting-ci` (applied by `handleStageComplete` on FABRIK_STAGE_COMPLETE; present for both pending and failed checks — covers the full CI-await window) |
 | Timeout tracking | In-memory `ReviewWaitTimeout` timer | `FetchLabelAppliedAt` on `fabrik:awaiting-ci` (durable across restarts; label is present from FABRIK_STAGE_COMPLETE onwards) |
-| Cycle counter | `reviewCycleCount[stageKey]` | `ciFixCycleCount[stageKey]` |
+| Cycle counter | `snap.ReviewCycles(stageName)` / `ReviewCycleIncremented` | `snap.CIFixCycles(stageName)` / `CIFixCycleIncremented` |
 | Max cycles | `MaxReviewCycles` (default 5) | `MaxCiFixCycles` (default 5) |
 | Skill | `comment_skill` | `ci_fix_skill` (falls back to `comment_skill`) |
 | Synthetic comment | PR review thread text | Structured CI failure report with NEW REGRESSION classification |
@@ -759,7 +759,7 @@ The catch-up loop Phase 1 calls `checkCIGate()` after the review gate check. Whe
 
 The merge-conflict gate is a third prong of the catch-up loop Phase 1, sitting between review reinvoke and the CI gate. It is the direct response to the failure mode in which a base-branch advance during the CI-await window leaves a PR unmergeable — the CI gate alone will happily keep polling check runs on the branch head while the real blocker is a conflict.
 
-**Note:** `attemptMergeOnValidate()` (§5.4, the legacy auto-merge path for stages without `wait_for_ci: true`) now uses the same `rebaseCycleCount[stageKey]`, `dispatchRebaseReinvoke()`, and `pauseForRebaseCycleLimit()` pattern as the conjunctive gate described in this section. The two paths share the same cycle-counter map; `MaxRebaseCycles` applies to both.
+**Note:** `attemptMergeOnValidate()` (§5.4, the legacy auto-merge path for stages without `wait_for_ci: true`) now uses the same `snap.RebaseCycles(stage.Name)` + `RebaseCycleIncremented`, `dispatchRebaseReinvoke()`, and `pauseForRebaseCycleLimit()` pattern as the conjunctive gate described in this section. Both paths share the same per-item store field; `MaxRebaseCycles` applies to both.
 
 #### 6.5.1 Gate Mechanics
 
@@ -782,7 +782,7 @@ When the merge gate clears (`mergeable == true`), Phase 1 falls through to the C
 When `checkMergeabilityGate` returns `conflict=true`:
 
 1. **inFlight guard:** if a rebase goroutine from a previous poll is still running for this item, skip dispatch entirely (no cycle-limit check).
-2. **Cycle limit check:** `rebaseCycleCount[stageKey]` is compared against `MaxRebaseCycles` (default 3 — lower than review/CI because rebase either works in one shot or needs human judgment):
+2. **Cycle limit check:** `snap.RebaseCycles(stage.Name)` is compared against `MaxRebaseCycles` (default 3 — lower than review/CI because rebase either works in one shot or needs human judgment):
    - If exceeded: `pauseForRebaseCycleLimit()` pauses the issue with `fabrik:paused` + `fabrik:awaiting-input`; `fabrik:rebase-needed` is intentionally left in place so the reason is visible.
    - If not exceeded: increment count, dispatch `dispatchRebaseReinvoke()`:
      - Marks item in `inFlight` (prevents double-dispatch)
@@ -807,7 +807,7 @@ The cost is a re-invocation rather than an inline `exec.Cmd`. This is why `MaxRe
 | Source data | `FetchCheckRuns()` REST call on PR head SHA | `FetchPRMergeable()` REST call on linked PR |
 | Label on waiting | `fabrik:awaiting-ci` (only on confirmed failure) | `fabrik:rebase-needed` (only on confirmed `mergeable == false`) |
 | Order in Phase 1 | After merge-conflict gate | Before CI gate |
-| Cycle counter | `ciFixCycleCount[stageKey]` | `rebaseCycleCount[stageKey]` |
+| Cycle counter | `snap.CIFixCycles(stageName)` / `CIFixCycleIncremented` | `snap.RebaseCycles(stageName)` / `RebaseCycleIncremented` |
 | Max cycles | `MaxCiFixCycles` (default 5) | `MaxRebaseCycles` (default 3) |
 | Skill | `ci_fix_skill` (falls back to `comment_skill`) | `rebase_skill` (falls back to `comment_skill`) |
 | Synthetic comment | Structured CI failure report with NEW REGRESSION classification | Rebase instructions with explicit semantic-collision guidance |
@@ -1004,11 +1004,11 @@ Guards are checked in this order. The first matching guard determines behavior:
 | 8 | Paused, no comment | `fabrik:paused` | Skip with log |
 | 9 | Dependencies blocked | `checkDependencies()` returns true | Skip (label + comment handled by checkDependencies) |
 | 10 | Cleanup stage | `stage.CleanupWorktree` | Remove worktree, add complete label |
-| 11 | Failed label + unpause detection | `stage:<X>:failed` present or `pausedDueToRetries` | `clearFailedStage()` then continue |
+| 11 | Failed label + unpause detection | `stage:<X>:failed` present or `snap.PausedByEngine(stage.Name)` | `clearFailedStage()` then continue |
 | 12 | New comments | `findNewComments()` non-empty | `processComments()` |
 | 13 | PR item | `item.IsPR` | Skip (PRs only support comments) |
 | 14 | Stage complete | `stage:<X>:complete` present | Skip |
-| 15 | Cooldown active | `processedSet[stageKey]` within cooldown | Skip |
+| 15 | Cooldown active | `snap.LastAttemptAt(stage.Name)` within cooldown window | Skip |
 | 16 | (all guards pass) | — | Acquire lock → invoke Claude |
 
 ### 8.2 Notable Unexpected Scenarios
@@ -1277,7 +1277,7 @@ Phase 1 ensures inline PR review thread comments (from Copilot, Gemini, or human
 | Stage exists | `FindStage(stages, item.Status) != nil` |
 | Closed issue | Not closed, OR cleanup stage, OR has `stage:<X>:complete` label |
 | Cleanup stage | Worktree exists on disk (local filesystem check only) |
-| updatedAt cache | `item.UpdatedAt` is newer than cached value, OR (cooldown expired AND `stage:X:complete` absent from shallow labels, OR `stage:X:complete` present but `fabrik:awaiting-review` also present), OR `fabrik:awaiting-ci` label present (CI check-run completions don't bump `updatedAt`), OR `fabrik:rebase-needed` label present (base-branch advances don't bump `updatedAt`). See processedSet cache-key strategy below. |
+| updatedAt cache | `item.UpdatedAt` is newer than cached value, OR (cooldown expired AND `stage:X:complete` absent from shallow labels, OR `stage:X:complete` present but `fabrik:awaiting-review` also present), OR `fabrik:awaiting-ci` label present (CI check-run completions don't bump `updatedAt`), OR `fabrik:rebase-needed` label present (base-branch advances don't bump `updatedAt`). See "Cooldown Cache-Key Strategy" section in Appendix B below. |
 | Deep-fetch failure cooldown | No recent `FetchItemDetails` failure, OR failure cooldown expired |
 
 **Note:** `itemMayNeedWork()` intentionally does NOT check lock, editing, pause, or dependency labels — those require the full label set from deep fetch and are checked in `itemNeedsWork()`.
