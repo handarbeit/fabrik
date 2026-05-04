@@ -568,8 +568,8 @@ Fabrik discovers PR comments through the `closedByPullRequestsReferences` GraphQ
 
 **Flow:**
 1. Find linked PR via `FindPRForIssue()` / `FetchLinkedPR()` (the latter also returns the head SHA needed for the per-check classification fallback).
-2. Query `FetchPRMergeableState()` (REST single-PR endpoint). If the result is `clean` or `unstable` (per `github.MergeableStateAccepted`), **skip the raw check_runs gate**: clear any stale `fabrik:awaiting-ci` label, drop the in-memory `ciMergePendingSince` entry, and proceed directly to step 4. Other states fall through to the per-check classification in step 3.
-3. **Per-check classification (fallback)**: fetch check runs via `FetchCheckRuns()`. Apply R1–R6 rules (no checks → R5 clears; failed → R3 applies `fabrik:awaiting-ci` and returns error; pending → R2 returns error and tracks `ciMergePendingSince` for the timeout; all green → R4 clears).
+2. Query `FetchPRMergeableState()` (REST single-PR endpoint). If the result is `clean` or `unstable` (per `github.MergeableStateAccepted`), **skip the raw check_runs gate**: clear any stale `fabrik:awaiting-ci` label, clear the `LinkedPRState.CIMergePendingSince` entry in the store, and proceed directly to step 4. Other states fall through to the per-check classification in step 3.
+3. **Per-check classification (fallback)**: fetch check runs via `FetchCheckRuns()`. Apply R1–R6 rules (no checks → R5 clears; failed → R3 applies `fabrik:awaiting-ci` and returns error; pending → R2 returns error and tracks `LinkedPRState.CIMergePendingSince` for the timeout; all green → R4 clears).
 4. Attempt merge via `MergePR()`. `MergePR` first checks the PR's `merged` field — if the PR was already merged (e.g., by a human), it returns nil immediately (no-op success). Otherwise it checks `mergeable` and attempts the merge.
 5. On `ErrNotMergeable`: apply `fabrik:rebase-needed` idempotently. Then:
    - **inFlight guard:** if a rebase goroutine is already running for this item, return a plain error (skip — prevents cycle-counter drift).
@@ -698,12 +698,12 @@ The CI gate has two paths that handle different timing scenarios:
 
 **Path 1: `attemptMergeOnValidate()` (Merge Guard)**
 - Embedded directly in the auto-merge path for Validate+yolo items
-- Uses in-memory `ciMergePendingSince` map (keyed by `issueKey`) to track how long CI has been pending
+- Uses `itemstate.Store` → `LinkedPRState.CIMergePendingSince` (via `CIMergePendingStarted`/`CIMergePendingCleared` mutations) to track how long CI has been pending
 - Fetches PR head SHA via `FetchLinkedPR()` (REST), then check run statuses via `FetchCheckRuns()` (REST)
-- **R5:** No check runs → gate clears (repo has no CI). The `prHasHadChecks` post-push delay guard applies to `checkCIGate()` (Path 2) only, not to this merge-guard path
-- **R4:** All checks green → clear `ciMergePendingSince`; clear `fabrik:awaiting-ci`; proceed to merge
+- **R5:** No check runs → gate clears (repo has no CI). The `LinkedPRState.HasHadChecks` post-push delay guard applies to `checkCIGate()` (Path 2) only, not to this merge-guard path
+- **R4:** All checks green → apply `CIMergePendingCleared`; clear `fabrik:awaiting-ci`; proceed to merge
 - **R3:** Any check failed → add `fabrik:awaiting-ci`; return error (advance skipped)
-- **R2:** Any check pending → start timer in `ciMergePendingSince` (first observation); return error (**R10c:** no label applied — avoids label churn for transient pending state)
+- **R2:** Any check pending → apply `CIMergePendingStarted` on first observation; return error (**R10c:** no label applied — avoids label churn for transient pending state)
 - **R6:** Pending elapsed ≥ `CIWaitTimeout` → post comment; add `fabrik:paused` + `fabrik:awaiting-input`; return error
 
 **Path 2: Catch-up loop Phase 1 (`checkCIGate()`)**
@@ -717,7 +717,7 @@ The CI gate has two paths that handle different timing scenarios:
 - **Gate cleared outcome:** When all checks pass (or no check runs exist — R5), `checkCIGate` calls `addCompleteLabelAndRemoveCI`: adds `stage:X:complete` and removes `fabrik:awaiting-ci`. This is the only place `stage:X:complete` is added for `wait_for_ci: true` stages (conjunctive gate invariant, ADR 032).
 
 **Two different timeout strategies:**
-- **Path 1** (merge guard): In-memory `ciMergePendingSince` map. Acceptable because merge-guard state is transient — engine restarts simply re-evaluate CI on the next poll.
+- **Path 1** (merge guard): `itemstate.Store` → `LinkedPRState.CIMergePendingSince`. Acceptable because merge-guard state is transient — engine restarts simply re-evaluate CI on the next poll (store is in-memory only; not persisted across restarts).
 - **Path 2** (catch-up loop): `FetchLabelAppliedAt` REST call on `fabrik:awaiting-ci`. Durable across restarts because the label itself persists. The label is present from the moment Claude emits FABRIK_STAGE_COMPLETE on a `wait_for_ci: true` stage, so timeout tracking is accurate from the start of the CI-await window.
 
 #### 6.4.2 CI Fix Reinvoke Mechanics
@@ -845,7 +845,7 @@ When Claude runs but does not output any completion marker, the engine enters a 
 - **State:** In-memory only (`processedSet[stageKey]` timestamp). No label is added for cooldown.
 - **Lock behavior:** The lock (`fabrik:locked:<user>` and `stage:<X>:in_progress`) is NOT released during cooldown. This prevents other instances from picking up the item.
 - **Resume behavior:** On retry, `resume=true` is passed to Claude (resumes the session rather than starting fresh)
-- **On restart:** Cooldown state is lost. The lock label is still present but `lockedIssues` in-memory map is empty — the shutdown cleanup removes lock labels. If the process crashes without cleanup, the lock label remains as a stale artifact until another instance or manual cleanup removes it.
+- **On restart:** Cooldown state is lost. The lock label is still present but the in-memory `ItemState.Lock` in the `itemstate.Store` is empty — the shutdown cleanup removes lock labels. If the process crashes without cleanup, the lock label remains as a stale artifact until another instance or manual cleanup removes it.
 - **Stage-complete exemption:** Items where `stage:X:complete` appears in the shallow label set are NOT subject to cooldown retry — they have no work to retry. When the cooldown-expired branch fires in `itemMayNeedWork()`, the engine checks for `stage:X:complete` in shallow labels before returning `true`; if present, it returns `false`. This prevents perpetual deep-fetch loops for terminal items (cruise+Validate complete, paused+complete, closed-with-stage-complete) where every poll after cooldown expiry would otherwise trigger a no-op deep-fetch indefinitely.
 
 ### 7.2 Failed Stage / Pause on Retry Limit
@@ -894,11 +894,11 @@ Closed issues are normally skipped by `itemMayNeedWork()` and `itemNeedsWork()`.
 | Paused-due-to-retries | `pausedDueToRetries[stageKey]` | `fabrik:paused` + `stage:<X>:failed` | Labels survive; in-memory flag lost but `processItem()` detects the failed label directly |
 | Review cycle count | `reviewCycleCount[stageKey]` | None | Lost — cycle count restarts from 0 |
 | CI-fix cycle count | `ciFixCycleCount[stageKey]` | None | Lost — cycle count restarts from 0 |
-| CI merge pending since | `ciMergePendingSince[issueKey]` | None | Lost — merge guard re-evaluates CI fresh on next poll |
+| CI merge pending since | `itemstate.Store` → `LinkedPRState.CIMergePendingSince` | None | Lost — merge guard re-evaluates CI fresh on next poll |
 | Comment processed | `processedSet[key]` | ROCKET (🚀) reaction | Reaction survives restart; in-memory dedup is defense-in-depth |
-| Lock tracking | `lockedIssues[iKey]` | `fabrik:locked:<user>` label | Label may survive if process crashes; `cleanupLockedIssues()` runs on graceful shutdown |
+| Lock tracking | `itemstate.Store` → `ItemState.Lock` | `fabrik:locked:<user>` label | Label may survive if process crashes; `cleanupLockedIssues()` runs on graceful shutdown |
 | Last updatedAt | `seenUpdatedAt[iKey]` | None | Lost — all items re-evaluated on first poll |
-| Deep-fetch failure | `deepFetchFailureTime[iKey]` | None | Lost — failed items retried immediately |
+| Deep-fetch failure | `itemstate.Store` → `ItemState.LastDeepFetchFailureAt` | None | Lost — failed items retried immediately |
 
 ### 7.6 Invocation-Level Kill Mechanisms
 
