@@ -844,7 +844,7 @@ When Claude runs but does not output any completion marker, the engine enters a 
 - **State:** In-memory only (`CooldownAt("periodic-re-eval")` written to `itemstate.Store` via `CooldownRecorded` mutation). No label is added for cooldown.
 - **Lock behavior:** The lock (`fabrik:locked:<user>` and `stage:<X>:in_progress`) is NOT released during cooldown. This prevents other instances from picking up the item.
 - **Resume behavior:** On retry, `resume=true` is passed to Claude (resumes the session rather than starting fresh)
-- **On restart:** Cooldown state is lost. The lock label is still present but the in-memory `ItemState.Lock` in the `itemstate.Store` is empty — the shutdown cleanup removes lock labels. If the process crashes without cleanup, the lock label remains as a stale artifact until another instance or manual cleanup removes it.
+- **On restart:** Cooldown state is lost. The lock label is still present but the in-memory `ItemState.Lock` in the `itemstate.Store` is empty — the shutdown cleanup removes lock labels. If the process crashes without cleanup, the startup cleanup pass (§9.7) removes stale `fabrik:locked:<user>` and `stage:*:in_progress` labels after the first poll cycle populates the store.
 - **Stage-complete exemption:** Items where `stage:X:complete` appears in the shallow label set are NOT subject to cooldown retry — they have no work to retry. When the cooldown-expired branch fires in `itemMayNeedWork()`, the engine checks for `stage:X:complete` in shallow labels before returning `true`; if present, it returns `false`. This prevents perpetual deep-fetch loops for terminal items (cruise+Validate complete, paused+complete, closed-with-stage-complete) where every poll after cooldown expiry would otherwise trigger a no-op deep-fetch indefinitely.
 
 ### 7.2 Failed Stage / Pause on Retry Limit
@@ -1042,11 +1042,13 @@ No special handling. Each is independent. The engine only checks the in_progress
 
 ### 9.2 inFlight Map
 
-`Engine.inFlight` (`sync.Map`) tracks items currently being processed by worker goroutines. Key: `issueKey` string, Value: `bool` (isPR).
+`Engine.inFlight` (`sync.Map`) prevents double-dispatch of goroutines. Key: `issueKey` string, Value: `bool` (isPR).
 
 - **Set by:** dispatch loop (before goroutine launch), `dispatchReviewReinvoke()` (inside goroutine, before semaphore acquire), and `dispatchCIFixReinvoke()` (inside goroutine, before semaphore acquire)
 - **Cleared by:** goroutine defer (after `processItem()` or `processComments()` returns)
-- **Used by:** dispatch loop (skip already in-flight items) and catch-up loop (skip reinvoke/CI-fix dispatch if already in-flight)
+- **Used by:** dispatch loop only — to prevent launching a second goroutine for the same issue
+
+The semantic question "is a worker currently active for this issue?" is answered by `snap.Worker() != nil` (see §9.7), not by `inFlight`. The catch-up loop, CI-fix reinvoke guard, rebase reinvoke guard, and TUI idle display all use the store read. `inFlight` is retained solely as a goroutine-launch deduplication guard for the main dispatch loop.
 
 ### 9.3 Worktree Mutex
 
@@ -1090,10 +1092,98 @@ The following fields are stored in `ItemState` / `LinkedPRState` and accessed ex
 | `StageState.CIFixCycles` | `CIFixCycleIncremented` (increment); `EngineCyclesCleared` (reset) | `snap.CIFixCycles(stageName)` | `e.ciFixCycleCount[stageKey]` |
 | `StageState.RebaseCycles` | `RebaseCycleIncremented` (increment); `EngineCyclesCleared` (reset) | `snap.RebaseCycles(stageName)` | `e.rebaseCycleCount[stageKey]` |
 | `StageState.ProcessedComments` | `CommentProcessed{CommentID, At}` | `snap.CommentProcessed(commentID)` | `e.processedSet["…comment-ID"]` |
+| `Worker` (`*WorkerHandle`) | `LocalLockAcquired{Worker: &WorkerHandle{...}}` (set); `WorkerPIDSet{PID}` (update PID); `WorkerHeartbeat{At}` (update `LastSignAt`); `WorkerExited` (clear) | `snap.Worker()` | N/A (new in Phase 3-G) |
 
 **`seenUpdatedAt` (deferred):** The map `e.seenUpdatedAt` (formerly `e.lastUpdatedAt`) tracks the last-seen `UpdatedAt` timestamp per issue. It is kept as a plain `Engine.mu`-protected map pending Phase 3-H, when change-feed observers will replace its purpose. It is intentionally excluded from `itemstate.Store` in this phase.
 
 See also: ADR-036 (`adrs/036-reactive-cache-single-owner.md`) for the full rationale and migration plan.
+
+### 9.7 Worker Liveness (Heartbeat and Stale-Lock Recovery)
+
+Phase 3-G adds a heartbeat-based liveness system that allows the engine to detect and recover from stale `fabrik:locked:<user>` labels left by crashed worker processes.
+
+#### WorkerHandle Struct
+
+```go
+type WorkerHandle struct {
+    PID        int       // Claude subprocess PID (0 until cmd.Start() returns)
+    StageName  string    // name of the stage being invoked
+    StartedAt  time.Time // time LocalLockAcquired was applied
+    LastSignAt time.Time // time of the most recent WorkerHeartbeat mutation
+}
+```
+
+`ItemState.Worker` is non-nil while a worker goroutine is in flight; nil when no worker is active. `snap.Worker()` returns a deep copy (nil-safe).
+
+#### Heartbeat Protocol
+
+Every Claude-spawning dispatch path starts a heartbeat goroutine at dispatch time:
+
+| Dispatch site | File |
+|---|---|
+| `processItem()` — main stage invocation | `engine/item.go` |
+| `dispatchReviewReinvoke()` — review comment processing | `engine/reviews.go` |
+| `dispatchCIFixReinvoke()` — CI failure re-processing | `engine/ci.go` |
+| `dispatchRebaseReinvoke()` — rebase conflict re-processing | `engine/merge_gate.go` |
+
+**Lifecycle per dispatch path:**
+
+1. `store.Apply(LocalLockAcquired{Worker: &WorkerHandle{StageName, StartedAt, PID: 0}})` — Worker set with PID=0 (subprocess not yet started).
+2. A `done := make(chan struct{})` is created; `defer close(done)` is set on the dispatch goroutine.
+3. `go startHeartbeat(ctx, repo, number, done)` — heartbeat goroutine starts. It applies `WorkerHeartbeat{At: time.Now()}` every 30 seconds until `done` is closed or `ctx` is cancelled.
+4. Claude is invoked. After `cmd.Start()`, `opts.OnPIDReady(pid)` applies `WorkerPIDSet{PID: pid}` — the Claude subprocess PID is recorded in Worker.
+5. When the dispatch goroutine exits (defer): `close(done)` stops the heartbeat goroutine; `store.Apply(WorkerExited{})` sets `Worker = nil`.
+
+**No-op semantics:**
+- `WorkerHeartbeat` is a no-op when `Worker == nil` (race-safe: heartbeat may fire just after `WorkerExited`).
+- `WorkerPIDSet` is a no-op when `Worker == nil`.
+- `WorkerExited` is idempotent (safe to apply when already nil).
+
+#### Stale-Worker Detector (Runtime Crash Case)
+
+`startWorkerDetector(ctx)` launches a background goroutine in `Run()` that scans for stale workers every 30 seconds.
+
+**Detection criteria:** `Worker != nil` AND `time.Since(Worker.LastSignAt) > 2 minutes`.
+
+**PID=0 skip:** Workers with `PID == 0` (PID not yet set) are skipped regardless of heartbeat age — they are in the narrow window between `LocalLockAcquired` and `cmd.Start()`.
+
+**Signal-0 liveness check** (`os.FindProcess(pid)` + `process.Signal(syscall.Signal(0))`):
+
+| Outcome | Action |
+|---------|--------|
+| Signal-0 fails (PID dead) | `store.Apply(WorkerExited{})` + `RemoveLabel(fabrik:locked:<user>)` + `RemoveLabel(stage:<StageName>:in_progress)` + log cleanup message |
+| Signal-0 succeeds (PID alive) | Log warning only; do not remove labels or kill the process; re-check on next scan |
+
+`StageName` for label construction is taken from `Worker.StageName`, which was set at dispatch time.
+
+#### Startup Cleanup Pass (Restart Case)
+
+When a Fabrik process crashes, deferred cleanup never runs. On the next startup, stale `fabrik:locked:<user>` and `stage:*:in_progress` labels may remain on issues. The startup cleanup pass removes them.
+
+**Trigger:** Immediately after the first `doPollCycle()` completes (not a wall-clock timer). This guarantees the store is populated before the scan in both webhook and non-webhook modes.
+
+**Grace period:** Any lock acquired during the first poll cycle already has `Worker != nil` in the store (set by `LocalLockAcquired`). The scan skips these items — no artificial sleep is needed.
+
+**Detection:** Scan `store.All()` for items where:
+- `snap.Labels()` contains `"fabrik:locked:" + e.cfg.User` (raw label check — `Lock.HeldByThis` is nil on restart since no `LocalLockAcquired` was applied in this session), AND
+- `snap.Worker() == nil`
+
+**Cleanup per item:**
+1. `RemoveLabel(fabrik:locked:<user>)` from GitHub (with write-through to cache).
+2. For each label in `snap.Labels()` matching `strings.HasPrefix("stage:") && strings.HasSuffix(":in_progress")`: `RemoveLabel(label)` from GitHub (with write-through). `StageName` is unavailable; labels are identified by pattern.
+3. `store.Apply(WorkerExited{})` — no-op since `Worker` is already nil; applied for idempotency.
+4. Log the cleanup at `"startup"` tag.
+
+#### Updated `fabrik:locked:<user>` Label Lifecycle
+
+The lock label is now removed by four paths (previously two):
+
+| Path | Trigger | Function |
+|------|---------|----------|
+| Normal completion | Stage completes (any outcome) | `releaseLock()` |
+| Graceful shutdown | Engine receives SIGINT/SIGTERM | `cleanupLockedIssues()` |
+| **Stale-worker detector** | Worker PID dead + heartbeat stale > 2min | `cleanupStaleWorker()` |
+| **Startup cleanup** | Engine restart; Worker nil + lock label present | `runStartupCleanup()` |
 
 ---
 
