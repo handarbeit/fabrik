@@ -155,14 +155,14 @@ func TestCheckDependencies_OpenDeps_AlreadyBlocked_NoComment(t *testing.T) {
 	}
 }
 
-func TestCheckDependencies_FirstStage_AlwaysFalse(t *testing.T) {
+func TestCheckDependencies_FirstStage_BlockedWithOpenDeps(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := depTestEngine(client)
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
 		Number: 10,
 		Repo:   "owner/repo",
-		// Has open blocker — but should be ignored for first stage
+		// Has open blocker — first stage is no longer exempt (#473)
 		BlockedBy: []gh.Dependency{
 			{Number: 8, State: "OPEN", Repo: "owner/repo"},
 		},
@@ -172,11 +172,17 @@ func TestCheckDependencies_FirstStage_AlwaysFalse(t *testing.T) {
 
 	blocked := eng.checkDependencies(board, item, stage)
 
-	if blocked {
-		t.Error("expected not blocked for first stage regardless of deps")
+	if !blocked {
+		t.Error("expected blocked for first stage when open deps exist")
 	}
-	if len(client.addLabelCalls) != 0 || len(client.addCommentCalls) != 0 {
-		t.Error("expected no label or comment ops for first stage")
+	if len(client.addLabelCalls) != 1 {
+		t.Fatalf("expected 1 add label call, got %d", len(client.addLabelCalls))
+	}
+	if client.addLabelCalls[0].labelName != "fabrik:blocked" {
+		t.Errorf("expected fabrik:blocked, got %q", client.addLabelCalls[0].labelName)
+	}
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(client.addCommentCalls))
 	}
 }
 
