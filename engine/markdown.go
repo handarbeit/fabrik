@@ -52,9 +52,10 @@ func firstParagraph(content string) string {
 // balanceFences scans body for fence delimiter lines (any line whose trimmed content starts
 // with ``` or ~~~, including language hints such as ```bash) and toggles a parity bit for
 // each. If the final parity is odd (unclosed fence), a closing ``` line is inserted
-// immediately before the first "---" line. If no "---" is present, it inserts before the
-// first "Closes #" line. If neither is present, it appends at the end. This ensures that
-// interpolated content with unclosed fences cannot hide trailing lines from GitHub's parser.
+// immediately before the last "---" line (the separator before Closes #N). If no "---" is
+// present, it inserts before the first "Closes #" line. If neither is present, it appends
+// at the end. This ensures that interpolated content with unclosed fences cannot hide
+// trailing lines from GitHub's parser.
 func balanceFences(body string) string {
 	lines := strings.Split(body, "\n")
 	odd := false
@@ -67,12 +68,13 @@ func balanceFences(body string) string {
 	if !odd {
 		return body
 	}
-	// Insert closing fence before first "---" line.
+	// Insert closing fence before the last "---" line (the separator before Closes #N).
+	// Using the last "---" rather than the first prevents inserting before an unclosed fence
+	// opener when earlier "---" dividers appear in manually-edited PR bodies.
 	insertIdx := -1
 	for i, line := range lines {
 		if strings.TrimSpace(line) == "---" {
 			insertIdx = i
-			break
 		}
 	}
 	if insertIdx < 0 {
