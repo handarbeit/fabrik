@@ -1664,8 +1664,10 @@ func issuesAssignedPayloadJSON(action, repo string, issNum int, assignees []stri
 }
 
 // projectsV2ItemCreatedPayloadJSON builds a projects_v2_item.created payload.
-func projectsV2ItemCreatedPayloadJSON(contentNodeID, contentType string) []byte {
+// boardItemID is the PVTI_xxx board-side item ID stored in projects_v2_item.id.
+func projectsV2ItemCreatedPayloadJSON(contentNodeID, contentType, boardItemID string) []byte {
 	p := projectsV2ItemPayload{Action: "created"}
+	p.ProjectsV2Item.ID = boardItemID
 	p.ProjectsV2Item.ContentNodeID = contentNodeID
 	p.ProjectsV2Item.ContentType = contentType
 	b, _ := json.Marshal(p)
