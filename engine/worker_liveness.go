@@ -20,8 +20,12 @@ const (
 // heartbeatInterval until done is closed or ctx is cancelled. The goroutine
 // exits cleanly when the dispatch goroutine's defer closes done.
 func (e *Engine) startHeartbeat(ctx context.Context, repo string, number int, done <-chan struct{}) {
+	interval := heartbeatInterval
+	if e.heartbeatIntervalOverride > 0 {
+		interval = e.heartbeatIntervalOverride
+	}
 	go func() {
-		ticker := time.NewTicker(heartbeatInterval)
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
