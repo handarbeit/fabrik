@@ -101,7 +101,7 @@ jobs:
           # Uses repository.issue.projectItems (O(1), no pagination needed — an
           # issue belongs to at most a handful of projects).
           ITEM_QUERY='
-            query($owner: String!, $repo: String!, $number: Int!, $projectNumber: Int!) {
+            query($owner: String!, $repo: String!, $number: Int!) {
               repository(owner: $owner, name: $repo) {
                 issue(number: $number) {
                   projectItems(first: 5) {
@@ -119,7 +119,6 @@ jobs:
             -f owner="$OWNER" \
             -f repo="$REPO_NAME" \
             -F number="$ISSUE_NUMBER" \
-            -F projectNumber="$PROJECT_NUMBER" \
             --jq ".data.repository.issue.projectItems.nodes[] | select(.project.number == $PROJECT_NUMBER) | .id")
 
           if [[ -z "$ITEM_ID" ]]; then
