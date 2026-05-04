@@ -36,7 +36,7 @@ func (e *Engine) findNewComments(item gh.ProjectItem) []gh.Comment {
 
 // processComments handles new user comments on an issue.
 // Flow: 👀 reactions → editing label → invoke Claude → perform actions / update issue body → remove editing label → 🚀 reactions
-func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, comments []gh.Comment) error {
+func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, comments []gh.Comment, onPIDReady ...func(int)) error {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
 	// Merge any unresolved PR review thread comments into the working slice.
@@ -126,7 +126,11 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	if effortOverride != "" {
 		e.logf(item.Number, "effort", "using effort override %q\n", effortOverride)
 	}
-	output, _, usage, err := e.claude.InvokeForComments(ctx, stage, item, comments, workDir, InvokeOptions{ModelOverride: modelOverride, EffortOverride: effortOverride, BaseBranch: baseBranch})
+	invokeOpts := InvokeOptions{ModelOverride: modelOverride, EffortOverride: effortOverride, BaseBranch: baseBranch}
+	if len(onPIDReady) > 0 && onPIDReady[0] != nil {
+		invokeOpts.OnPIDReady = onPIDReady[0]
+	}
+	output, _, usage, err := e.claude.InvokeForComments(ctx, stage, item, comments, workDir, invokeOpts)
 	func() {
 		e.mu.Lock()
 		defer e.mu.Unlock()

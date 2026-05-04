@@ -376,13 +376,12 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 					cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:rebase-needed")
 				}
 			}
-			// inFlight guard: if a rebase goroutine is already running, skip
-			// dispatch and cycle-limit check to avoid counter drift.
-			if _, ok := e.inFlight.Load(iKey); ok {
+			// Store Worker field is the semantic source of truth for in-flight state.
+			repoStr := itemOwnerRepoString(item, e.defaultRepo())
+			if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil && snap.Worker() != nil {
 				e.logf(item.Number, "rebase-reinvoke", "skipping dispatch — rebase reinvoke already in-flight\n")
 				return fmt.Errorf("PR #%d not mergeable (rebase in-flight)", pr.Number)
 			}
-			repoStr := itemOwnerRepoString(item, e.defaultRepo())
 			var cycleCount int
 			if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
 				cycleCount = snap.RebaseCycles(stage.Name)

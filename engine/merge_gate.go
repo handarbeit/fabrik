@@ -8,6 +8,7 @@ import (
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
 )
@@ -186,6 +187,23 @@ func (e *Engine) dispatchRebaseReinvoke(ctx context.Context, board *gh.ProjectBo
 			rebaseStage.CommentPrompt = ""
 		}
 
+		// Register WorkerHandle so the heartbeat/liveness system tracks this goroutine.
+		now := time.Now()
+		e.store.Apply(itemstate.LocalLockAcquired{
+			Repo:       itemRepo,
+			Number:     item.Number,
+			User:       e.cfg.User,
+			AcquiredAt: now,
+			Worker:     &itemstate.WorkerHandle{StageName: stage.Name, StartedAt: now},
+		})
+		done := make(chan struct{})
+		defer close(done)
+		go e.startHeartbeat(ctx, itemRepo, item.Number, done)
+		defer e.store.Apply(itemstate.WorkerExited{Repo: itemRepo, Number: item.Number})
+		onPIDReady := func(pid int) {
+			e.store.Apply(itemstate.WorkerPIDSet{Repo: itemRepo, Number: item.Number, PID: pid})
+		}
+
 		startTime := time.Now()
 		e.emitStructural(tui.JobStartedEvent{
 			IssueNumber: item.Number,
@@ -197,7 +215,7 @@ func (e *Engine) dispatchRebaseReinvoke(ctx context.Context, board *gh.ProjectBo
 		})
 
 		e.logf(item.Number, "rebase-reinvoke", "re-invoking stage %q via comment processing with rebase context\n", stage.Name)
-		err := e.processComments(ctx, board, item, &rebaseStage, []gh.Comment{syntheticComment})
+		err := e.processComments(ctx, board, item, &rebaseStage, []gh.Comment{syntheticComment}, onPIDReady)
 
 		var usage TokenUsage
 		var completed, blocked bool
