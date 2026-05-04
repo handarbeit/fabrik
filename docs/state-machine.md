@@ -1335,15 +1335,30 @@ All delta functions hold the write lock for their mutation only. They silently d
 
 ### D.4 Reconciliation
 
-A `runReconciliationLoop` goroutine tickers at `webhookIdleCap` (60 min). Each tick calls `e.client.FetchProjectBoard(...)` directly and passes the result to `cacheImpl.Reconcile(board)`.
+Reconciliation operates at two levels:
 
-`Reconcile` performs a partial update:
+**Periodic status-only sweep (Layer 2)**
+
+A `runReconciliationLoop` goroutine ticks at `ProjectStatusPollSeconds` (default 600 s, configurable via `--status-poll` / `FABRIK_STATUS_POLL` / `config.yaml status_poll`). Each tick calls `e.client.FetchProjectItemStatusBatch(projectID)` — a lightweight GraphQL query returning only `itemNodeID → statusName` for every board item — and passes the result to `cacheImpl.ApplyStatusBatch(updates)`.
+
+`ApplyStatusBatch` holds the write lock for one pass:
+- For each `(itemID, newStatus)` pair, look up the cache key via `itemIDToKey`.
+- If the status differs from the cached value, update `Status` and `UpdatedAt`. Unchanged items are skipped.
+- Unknown item IDs (not yet bootstrapped) are silently skipped.
+
+This sweep is far cheaper than a full board fetch (no nested fields, no comments, no labels) and can run at 10-minute cadence without meaningful GraphQL budget pressure.
+
+The loop skips a tick and logs a warning if `cacheImpl.ProjectID()` is empty, which means the bootstrap has not yet completed.
+
+**Full reconcile — stream-recovery only**
+
+`reconcileCache` (which calls `e.client.FetchProjectBoard(...)` and `cacheImpl.Reconcile(board)`) is preserved but is **no longer called by the periodic loop**. It is called only on webhook stream recovery (see §D.5).
+
+`Reconcile` performs a deep partial update:
 - For each item in the fresh board snapshot: update shallow fields (`Status`, shallow `Labels`, `UpdatedAt`, etc.) in-place. Deep fields (`Comments`, `LinkedPR*`, etc.) are **preserved** from the existing cache entry to avoid triggering a burst of FetchItemDetails calls after each reconciliation.
 - Items present in the cache but absent from the new snapshot are removed (they were archived or moved off the board).
 - `itemIDToKey` and `shaToKey` are rebuilt.
 - Logs `[reconciliation] N items differed` at the end.
-
-Reconciliation is also triggered inline on stream recovery (see §D.5).
 
 ### D.5 Stream-Health Failover
 
@@ -1367,4 +1382,27 @@ On recovery, `reconcileCache()` fetches a fresh board snapshot before `Resume()`
 | `in-memory` (default when webhooks on) | required | `CacheImpl` with delta/failover |
 | `none` | any | `GitHubAdapter` pass-through (no caching) |
 
-Specifying `--board-cache=in-memory` without `--webhooks` is a configuration error: without a webhook stream there is no delta source and the cache would only reconcile every 60 minutes, which is worse than direct polling.
+Specifying `--board-cache=in-memory` without `--webhooks` is a configuration error: without a webhook stream there is no delta source and the cache relies solely on the periodic status sweep — worse than direct polling.
+
+### D.7 Status field reconciliation in user mode
+
+In user mode (PAT-based, repo-level webhooks via `gh webhook forward`), GitHub does **not** deliver `projects_v2_item` events. Board-column changes — including the Status field that drives stage selection — are invisible to the webhook stream. Fabrik uses a four-layer strategy to keep the cached Status current despite this gap:
+
+| Layer | Mechanism | Latency | Cost |
+|-------|-----------|---------|------|
+| **0** Write-through | After any successful `UpdateProjectItemStatus` call in the engine, `CacheImpl.UpdateItemStatus` is called immediately | Zero | Zero |
+| **1** Per-event refresh | After `ApplyDelta` for an `issues` or `issue_comment` event on a known item, `FetchProjectItemStatus` fetches the current Status | Seconds (best-effort) | ~1–5 pts/event |
+| **2** Periodic status sweep | `runReconciliationLoop` calls `FetchProjectItemStatusBatch` at `ProjectStatusPollSeconds` cadence (default 10 min) | Up to 10 min | O(⌈N/100⌉) per sweep |
+| **Bootstrap / stream-recovery** | Full `FetchProjectBoard` + `Reconcile` on startup and on webhook stream recovery | Minutes | Full board cost |
+
+**Residual latency**: For external column moves (user moves issue on the board), the upper bound on detection latency is the Layer 2 cadence (`ProjectStatusPollSeconds`). If the column move happens to coincide with any other issue activity (a comment, label change, etc.), Layer 1 may catch it sooner. Layer 0 applies only to Fabrik's own stage transitions.
+
+**Layer 0 write-through convention**: Every call site that calls `UpdateProjectItemStatus` to mutate a project item's Status **must** also call `cacheImpl.UpdateItemStatus` on success. This invariant prevents the cache from staling on self-driven transitions. Use the safe type assertion pattern:
+
+```go
+if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+    cacheImpl.UpdateItemStatus(boardcache.ItemKey(item.Repo, item.Number), newStatus)
+}
+```
+
+**Layer 1 scope**: Only `issues` and `issue_comment` event types trigger a per-event status fetch. `pull_request`, `pull_request_review`, `check_run`, and other event types are excluded from Layer 1 (finding the linked issue for a PR event requires an O(N) cache scan; `check_run` does not carry an item ID). Layer 2's periodic sweep covers these cases within its cadence.

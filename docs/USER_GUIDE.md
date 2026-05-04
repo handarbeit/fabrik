@@ -1585,7 +1585,7 @@ Webhook mode is an optional feature that dramatically reduces GraphQL usage and 
 
 Fabrik spawns `gh webhook forward` as a background subprocess. This tool connects outbound to GitHub's SSE stream and forwards every matching event as an HTTP POST to a local listener on `127.0.0.1:<port>`. No public endpoint, no ngrok, no infrastructure changes. Each event payload is authenticated with HMAC-SHA256 before Fabrik acts on it.
 
-Events are translated into immediate poll wakeups — the existing board-fetch and filter logic handles the rest. The poll loop continues running as a safety net (up to once every 60 minutes when the webhook stream is healthy) so missed or delayed events never strand work.
+Events are translated into immediate poll wakeups — the existing board-fetch and filter logic handles the rest. The poll loop continues running as a safety net (up to once every 60 minutes when the webhook stream is healthy) so missed or delayed events never strand work. Board-column changes that aren't delivered as events are caught by a lightweight status sweep that runs every 10 minutes by default (see `--status-poll`).
 
 ### Prerequisites
 
@@ -1635,8 +1635,8 @@ The TUI footer shows a webhook health indicator when webhook mode is enabled:
 
 | Indicator | State | Meaning |
 |-----------|-------|---------|
-| `● webhook (N)` (green) | Healthy | At least one event received in the last 10 minutes. Idle cap: 60 min. |
-| `○ webhook (N)` (blue) | Starting Up | Subprocess launched; waiting for first event (up to 30s grace). Idle cap: 60 min. |
+| `● webhook (N)` (green) | Healthy | At least one event received in the last 10 minutes. Full-board idle cap: 60 min; status sweep: 10 min. |
+| `○ webhook (N)` (blue) | Starting Up | Subprocess launched; waiting for first event (up to 30s grace). Full-board idle cap: 60 min; status sweep: 10 min. |
 | `◌ webhook (N)` (yellow) | Unhealthy | No event received in 10+ minutes or startup grace expired. Idle cap: 5 min (same as polling-only). |
 
 `N` is the total number of webhook events received since startup. You can also verify the stream by checking `fabrik.log` for `[webhook]` tag lines.
