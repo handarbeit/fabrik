@@ -515,6 +515,9 @@ func (e *Engine) cleanupLockedIssues() {
 			e.logf(num, "warn", "could not remove lock label during shutdown: %v\n", err)
 		} else {
 			e.logf(num, "shutdown", "removed lock label\n")
+			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, num), lockLabel)
+			}
 		}
 		e.mu.Lock()
 		delete(e.lockedIssues, key)
@@ -549,6 +552,9 @@ func (e *Engine) cleanupClosedIssueLocks(board *gh.ProjectBoard) {
 			}
 		} else {
 			e.logf(num, "poll", "removed stale lock label from closed issue\n")
+			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), lockLabel)
+			}
 		}
 	}
 }
