@@ -484,7 +484,7 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 		}
 		reviewers := make([]gh.ReviewRequest, 0, len(p.PullRequest.RequestedReviewers))
 		for _, r := range p.PullRequest.RequestedReviewers {
-			reviewers = append(reviewers, gh.ReviewRequest{Login: r.Login, IsBot: r.Type == "Bot"})
+			reviewers = append(reviewers, gh.ReviewRequest{Login: r.Login, IsBot: r.Type == "Bot" || gh.IsBotLogin(r.Login)})
 		}
 		c.store.Apply(itemstate.PRReviewRequested{
 			Repo:      issRepo,
@@ -955,6 +955,9 @@ func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
 			c.logFn("[cache] applyProjectsV2ItemDelta(created): incomplete item for node %s (number=%d repo=%q)\n", nodeID, pi.Number, pi.Repo)
 			return
 		}
+		// Record the board-side item ID (PVTI_xxx) so that subsequent
+		// projects_v2_item.edited/deleted/archived events can resolve via itemIDToKey.
+		pi.ItemID = p.ProjectsV2Item.ID
 		_, changes, _ := c.store.Apply(itemstate.IssueOpened{Item: *pi})
 		if len(changes) == 0 {
 			return
