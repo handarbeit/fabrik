@@ -312,6 +312,11 @@ func (e *Engine) Run() error {
 
 		// wakeChObserver fires on board-state changes from both stores.
 		// engine.store fires LockChanged; cacheImpl.store fires Status/Labels/Comments/LinkedPR.
+		// The same observer instance is registered on both stores. This is safe because
+		// newWakeChObserver returns a stateless closure (reads change.Fields, does a
+		// non-blocking channel send on wakeCh). Concurrent calls from two goroutines
+		// each do their own select/default, with the channel's built-in atomicity ensuring
+		// no more than one send lands per buffered slot.
 		if e.wakeCh != nil {
 			wakeObs := newWakeChObserver(e.wakeCh)
 			unsubs = append(unsubs, e.store.Subscribe(wakeObs))
