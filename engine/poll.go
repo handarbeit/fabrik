@@ -450,14 +450,18 @@ func (e *Engine) Run() error {
 	}
 
 	// Run immediately on start, then on tick
-	if err := doPollCycle(); err != nil && ctx.Err() == nil {
-		e.logf(0, "warn", "poll error: %v\n", err)
+	firstPollErr := doPollCycle()
+	if firstPollErr != nil && ctx.Err() == nil {
+		e.logf(0, "warn", "poll error: %v\n", firstPollErr)
 	}
 
 	// One-time startup cleanup: remove stale fabrik:locked:<user> labels from items
 	// that have no active Worker in the store (restart case: prior crash left labels).
-	// Runs after the first poll cycle so the store is populated before the scan.
-	e.runStartupCleanup()
+	// Only runs after a successful first poll cycle so the store is populated.
+	// Skipped on poll failure to avoid scanning an empty/partial store.
+	if firstPollErr == nil {
+		e.runStartupCleanup()
+	}
 
 	// Start background stale-worker detector. Scans for workers whose heartbeat
 	// has gone stale and cleans up if the process is confirmed dead via signal 0.
