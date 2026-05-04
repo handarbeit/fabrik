@@ -1213,6 +1213,8 @@ func (e *Engine) baseBranchForItem(item gh.ProjectItem, wm *WorktreeManager) (st
 func (e *Engine) removeEditingLabel(owner, repo string, issueNumber int) {
 	if err := e.client.RemoveLabelFromIssue(owner, repo, issueNumber, "fabrik:editing"); err != nil {
 		e.logf(issueNumber, "warn", "could not remove editing label: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, issueNumber), "fabrik:editing")
 	}
 }
 
