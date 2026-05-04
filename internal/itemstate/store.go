@@ -771,6 +771,32 @@ func (s *Store) Remove(repo string, number int) {
 	delete(s.items, key)
 }
 
+// RemoveByItemID removes the item identified by its project ItemID (board-side ID).
+// Returns the repo and number of the removed item, and ok=true, so callers can
+// clean up secondary state (e.g. prNumToKey entries). No-op and ok=false if the
+// ItemID is not in the index.
+func (s *Store) RemoveByItemID(itemID string) (repo string, number int, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key, found := s.itemIDToKey[itemID]
+	if !found {
+		return "", 0, false
+	}
+	item, exists := s.items[key]
+	if !exists {
+		delete(s.itemIDToKey, itemID)
+		return "", 0, false
+	}
+	repo = item.Repo
+	number = item.Number
+	if item.LinkedPR != nil && item.LinkedPR.HeadSHA != "" {
+		delete(s.shaToKey, item.LinkedPR.HeadSHA)
+	}
+	delete(s.itemIDToKey, itemID)
+	delete(s.items, key)
+	return repo, number, true
+}
+
 // Reset atomically replaces all Store state with the items in the given slice.
 // Existing items, indexes, and deep-fetch state are cleared. This is used by
 // Bootstrap to ensure a clean slate (unlike Reconcile, which preserves deep state).

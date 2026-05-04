@@ -18,19 +18,24 @@ func (c *CacheImpl) ApplyDelta(eventType string, payload []byte) {
 
 	switch eventType {
 	case "issue_comment":
-		c.applyIssueCommentCreated(payload)
+		c.applyIssueCommentDelta(payload)
 	case "issues":
 		c.applyIssuesDelta(payload)
 	case "pull_request":
 		c.applyPullRequestDelta(payload)
 	case "pull_request_review":
-		c.applyPullRequestReviewSubmitted(payload)
+		c.applyPullRequestReviewDelta(payload)
 	case "pull_request_review_comment":
-		c.applyPullRequestReviewCommentCreated(payload)
+		c.applyPullRequestReviewCommentDelta(payload)
 	case "check_run":
-		c.applyCheckRunCompleted(payload)
+		c.applyCheckRunDelta(payload)
+	case "check_suite":
+		// No-op: check_suite events are coarse-grained aggregates. Individual
+		// check run outcomes are tracked via check_run.completed, which provides
+		// the per-run Name, Conclusion, and SHA needed for the CI gate.
+		c.applyCheckSuite(payload)
 	case "projects_v2_item":
-		c.applyProjectsV2ItemEdited(payload)
+		c.applyProjectsV2ItemDelta(payload)
 	}
 }
 
@@ -204,15 +209,52 @@ func (c *CacheImpl) bumpLocalDeltaAt(key string) {
 	c.mu.Unlock()
 }
 
+// ensureIssueInStore guarantees the item (fullRepo, issNum) exists in the Store.
+// If the item is already present it is a fast no-op. On miss it fetches a minimal
+// ProjectItem from GitHub via FetchProjectItem and applies IssueOpened to the Store.
+//
+// This implements the "unknown-issue fallback" contract from ADR 034 §4: every
+// handler that would silently drop a delta for a missing item calls ensureIssueInStore
+// first so the item is populated before the delta is applied.
+//
+// Must be called WITHOUT holding c.mu (the network fetch must not hold any lock).
+func (c *CacheImpl) ensureIssueInStore(owner, fullRepo string, issNum int) error {
+	// Fast path: item already in Store.
+	if _, err := c.store.Get(fullRepo, issNum); err == nil {
+		return nil
+	}
+	// Miss: fetch from GitHub and populate.
+	pi, err := c.fallback.FetchProjectItem(owner, fullRepo[len(owner)+1:], issNum)
+	if err != nil {
+		return err
+	}
+	if pi.Repo == "" {
+		pi.Repo = fullRepo
+	}
+	c.store.Apply(itemstate.IssueOpened{Item: *pi})
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Delta functions
 // ---------------------------------------------------------------------------
 
-func (c *CacheImpl) applyIssueCommentCreated(payload []byte) {
+func (c *CacheImpl) applyIssueCommentDelta(payload []byte) {
 	var p issueCommentPayload
-	if err := json.Unmarshal(payload, &p); err != nil || p.Action != "created" {
+	if err := json.Unmarshal(payload, &p); err != nil {
 		return
 	}
+	switch p.Action {
+	case "created":
+		// handled below
+	case "edited", "deleted":
+		// Comment edits and deletes are not tracked in the cache; the engine
+		// re-fetches comments via FetchItemDetails on the next poll cycle.
+		return
+	default:
+		return
+	}
+
 	fullRepo := p.Repository.FullName
 	issNum := p.Issue.Number
 	key := itemKey(fullRepo, issNum)
@@ -247,52 +289,144 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return
 	}
+
+	fullRepo := p.Repository.FullName
+	issNum := p.Issue.Number
+	key := itemKey(fullRepo, issNum)
+
+	owner, _, ok := splitRepo(fullRepo)
+	if !ok {
+		return
+	}
+
 	switch p.Action {
+	case "opened":
+		// Build a minimal ProjectItem from the webhook payload.
+		labels := make([]string, len(p.Issue.Labels))
+		for i, l := range p.Issue.Labels {
+			labels[i] = l.Name
+		}
+		assignees := make([]string, len(p.Issue.Assignees))
+		for i, a := range p.Issue.Assignees {
+			assignees[i] = a.Login
+		}
+		pi := gh.ProjectItem{
+			ID:        p.Issue.NodeID,
+			Number:    issNum,
+			Title:     p.Issue.Title,
+			Body:      p.Issue.Body,
+			Repo:      fullRepo,
+			Labels:    labels,
+			Assignees: assignees,
+		}
+		_, changes, _ := c.store.Apply(itemstate.IssueOpened{Item: pi})
+		if len(changes) == 0 {
+			return
+		}
+		c.bumpLocalDeltaAt(key)
+
+	case "closed":
+		if err := c.ensureIssueInStore(owner, fullRepo, issNum); err != nil {
+			c.logFn("[cache] applyIssuesDelta(closed): ensure #%d: %v\n", issNum, err)
+			return
+		}
+		_, changes, _ := c.store.Apply(itemstate.IssueClosed{Repo: fullRepo, Number: issNum})
+		if len(changes) == 0 {
+			return
+		}
+		c.bumpLocalDeltaAt(key)
+
+	case "reopened":
+		if err := c.ensureIssueInStore(owner, fullRepo, issNum); err != nil {
+			c.logFn("[cache] applyIssuesDelta(reopened): ensure #%d: %v\n", issNum, err)
+			return
+		}
+		_, changes, _ := c.store.Apply(itemstate.IssueReopened{Repo: fullRepo, Number: issNum})
+		if len(changes) == 0 {
+			return
+		}
+		c.bumpLocalDeltaAt(key)
+
+	case "transferred", "deleted":
+		// Remove the item from the Store and clean up any PR linkage entries.
+		c.store.Remove(fullRepo, issNum)
+		c.mu.Lock()
+		for pk, ik := range c.prNumToKey {
+			if ik == key {
+				delete(c.prNumToKey, pk)
+				delete(c.linkedPRs, pk)
+			}
+		}
+		c.mu.Unlock()
+
+	case "edited":
+		if err := c.ensureIssueInStore(owner, fullRepo, issNum); err != nil {
+			c.logFn("[cache] applyIssuesDelta(edited): ensure #%d: %v\n", issNum, err)
+			return
+		}
+		_, changes, _ := c.store.Apply(itemstate.IssueEdited{
+			Repo:   fullRepo,
+			Number: issNum,
+			Title:  p.Issue.Title,
+			Body:   p.Issue.Body,
+		})
+		if len(changes) == 0 {
+			return
+		}
+		c.bumpLocalDeltaAt(key)
+
+	case "assigned", "unassigned":
+		if err := c.ensureIssueInStore(owner, fullRepo, issNum); err != nil {
+			c.logFn("[cache] applyIssuesDelta(%s): ensure #%d: %v\n", p.Action, issNum, err)
+			return
+		}
+		assignees := make([]string, len(p.Issue.Assignees))
+		for i, a := range p.Issue.Assignees {
+			assignees[i] = a.Login
+		}
+		_, changes, _ := c.store.Apply(itemstate.IssueAssigneesUpdated{
+			Repo:      fullRepo,
+			Number:    issNum,
+			Assignees: assignees,
+		})
+		if len(changes) == 0 {
+			return
+		}
+		c.bumpLocalDeltaAt(key)
+
 	case "labeled":
-		c.applyIssuesLabeled(p)
+		if err := c.ensureIssueInStore(owner, fullRepo, issNum); err != nil {
+			c.logFn("[cache] applyIssuesDelta(labeled): ensure #%d: %v\n", issNum, err)
+			return
+		}
+		_, changes, _ := c.store.Apply(itemstate.IssueLabeled{
+			Repo:   fullRepo,
+			Number: issNum,
+			Label:  p.Label.Name,
+		})
+		if len(changes) == 0 {
+			return
+		}
+		c.bumpLocalDeltaAt(key)
+
 	case "unlabeled":
-		c.applyIssuesUnlabeled(p)
+		if err := c.ensureIssueInStore(owner, fullRepo, issNum); err != nil {
+			c.logFn("[cache] applyIssuesDelta(unlabeled): ensure #%d: %v\n", issNum, err)
+			return
+		}
+		_, changes, _ := c.store.Apply(itemstate.IssueUnlabeled{
+			Repo:   fullRepo,
+			Number: issNum,
+			Label:  p.Label.Name,
+		})
+		if len(changes) == 0 {
+			return
+		}
+		c.bumpLocalDeltaAt(key)
+
+	// milestoned, demilestoned, locked, unlocked, pinned, unpinned:
+	// no state in the engine's pipeline depends on these fields.
 	}
-}
-
-func (c *CacheImpl) applyIssuesLabeled(p issuesPayload) {
-	fullRepo := p.Repository.FullName
-	issNum := p.Issue.Number
-	key := itemKey(fullRepo, issNum)
-
-	if _, err := c.store.Get(fullRepo, issNum); err != nil {
-		return
-	}
-
-	_, changes, _ := c.store.Apply(itemstate.IssueLabeled{
-		Repo:   fullRepo,
-		Number: issNum,
-		Label:  p.Label.Name,
-	})
-	if len(changes) == 0 {
-		return // no-op (label already present or item missing)
-	}
-	c.bumpLocalDeltaAt(key)
-}
-
-func (c *CacheImpl) applyIssuesUnlabeled(p issuesPayload) {
-	fullRepo := p.Repository.FullName
-	issNum := p.Issue.Number
-	key := itemKey(fullRepo, issNum)
-
-	if _, err := c.store.Get(fullRepo, issNum); err != nil {
-		return
-	}
-
-	_, changes, _ := c.store.Apply(itemstate.IssueUnlabeled{
-		Repo:   fullRepo,
-		Number: issNum,
-		Label:  p.Label.Name,
-	})
-	if len(changes) == 0 {
-		return
-	}
-	c.bumpLocalDeltaAt(key)
 }
 
 func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
@@ -300,15 +434,88 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return
 	}
-	switch p.Action {
-	case "opened", "closed", "synchronize", "reopened":
-	default:
-		return
-	}
 
 	repo := p.Repository.FullName
 	prNum := p.PullRequest.Number
 	pk := prKey(repo, prNum)
+
+	switch p.Action {
+	case "opened", "closed", "synchronize", "reopened":
+		// SHA-tracking path — handled after this switch.
+
+	case "ready_for_review":
+		c.mu.Lock()
+		if pr, ok := c.linkedPRs[pk]; ok {
+			pr.Draft = false
+		}
+		issKey, _ := c.prNumToKey[pk]
+		c.mu.Unlock()
+		if issKey != "" {
+			c.bumpLocalDeltaAt(issKey)
+		}
+		return
+
+	case "converted_to_draft":
+		c.mu.Lock()
+		if pr, ok := c.linkedPRs[pk]; ok {
+			pr.Draft = true
+		}
+		issKey, _ := c.prNumToKey[pk]
+		c.mu.Unlock()
+		if issKey != "" {
+			c.bumpLocalDeltaAt(issKey)
+		}
+		return
+
+	case "review_requested":
+		c.mu.RLock()
+		issKey, issFound := c.prNumToKey[pk]
+		c.mu.RUnlock()
+		if !issFound {
+			return
+		}
+		issRepo, issNum, parseOK := parseItemKey(issKey)
+		if !parseOK {
+			return
+		}
+		reviewers := make([]gh.ReviewRequest, 0, len(p.PullRequest.RequestedReviewers))
+		for _, r := range p.PullRequest.RequestedReviewers {
+			reviewers = append(reviewers, gh.ReviewRequest{Login: r.Login, IsBot: r.Type == "Bot"})
+		}
+		c.store.Apply(itemstate.PRReviewRequested{
+			Repo:      issRepo,
+			Number:    issNum,
+			Reviewers: reviewers,
+		})
+		c.bumpLocalDeltaAt(issKey)
+		return
+
+	case "review_request_removed":
+		c.mu.RLock()
+		issKey, issFound := c.prNumToKey[pk]
+		c.mu.RUnlock()
+		if !issFound {
+			return
+		}
+		issRepo, issNum, parseOK := parseItemKey(issKey)
+		if !parseOK {
+			return
+		}
+		c.store.Apply(itemstate.PRReviewRequestRemoved{
+			Repo:   issRepo,
+			Number: issNum,
+			Login:  p.RequestedReviewer.Login,
+		})
+		c.bumpLocalDeltaAt(issKey)
+		return
+
+	// labeled, unlabeled, assigned, unassigned, edited: no engine pipeline state
+	// depends on PR-level labels/assignees/metadata. These are intentional no-ops.
+	default:
+		return
+	}
+
+	// --- SHA-tracking path (opened, closed, synchronize, reopened) ---
 	sha := p.PullRequest.Head.SHA
 	prDetails := &gh.PRDetails{
 		Number:         prNum,
@@ -386,9 +593,19 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 	c.logFn("[cache] auto-heal: PR #%d → issue #%d; deep cache invalidated and delta re-applied\n", prNum, resolvedIssNum)
 }
 
-func (c *CacheImpl) applyPullRequestReviewSubmitted(payload []byte) {
+func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 	var p pullRequestReviewPayload
-	if err := json.Unmarshal(payload, &p); err != nil || p.Action != "submitted" {
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return
+	}
+	switch p.Action {
+	case "submitted":
+		// handled below
+	case "edited", "dismissed":
+		// Review edits and dismissals do not change the set of pending reviewers
+		// or the overall approval state tracked by the engine.
+		return
+	default:
 		return
 	}
 	repo := p.Repository.FullName
@@ -470,9 +687,19 @@ func (c *CacheImpl) applyPullRequestReviewSubmitted(payload []byte) {
 	c.logFn("[cache] auto-heal: PR #%d → issue #%d; deep cache invalidated and delta re-applied\n", prNum, resolvedIssNum)
 }
 
-func (c *CacheImpl) applyPullRequestReviewCommentCreated(payload []byte) {
+func (c *CacheImpl) applyPullRequestReviewCommentDelta(payload []byte) {
 	var p pullRequestReviewCommentPayload
-	if err := json.Unmarshal(payload, &p); err != nil || p.Action != "created" {
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return
+	}
+	switch p.Action {
+	case "created":
+		// handled below
+	case "edited", "deleted":
+		// Comment edits and deletes are not tracked in the cache; the engine
+		// re-fetches review thread state via FetchItemDetails on the next poll cycle.
+		return
+	default:
 		return
 	}
 	repo := p.Repository.FullName
@@ -569,9 +796,20 @@ func (c *CacheImpl) applyPullRequestReviewCommentCreated(payload []byte) {
 	c.logFn("[cache] auto-heal: PR #%d → issue #%d; deep cache invalidated and delta re-applied\n", prNum, resolvedIssNum)
 }
 
-func (c *CacheImpl) applyCheckRunCompleted(payload []byte) {
+func (c *CacheImpl) applyCheckRunDelta(payload []byte) {
 	var p checkRunPayload
-	if err := json.Unmarshal(payload, &p); err != nil || p.Action != "completed" {
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return
+	}
+	switch p.Action {
+	case "completed":
+		// handled below
+	case "created", "rerequested", "requested_action":
+		// created: run started but has no outcome yet.
+		// rerequested/requested_action: administrative UX signals.
+		// The engine watches outcomes only (completed) for the CI gate.
+		return
+	default:
 		return
 	}
 	sha := p.CheckRun.HeadSHA
@@ -686,30 +924,73 @@ func (c *CacheImpl) applyCheckRunCompleted(payload []byte) {
 	c.logFn("[cache] auto-heal: check_run SHA %s → PR #%d → issue #%d; deep cache invalidated\n", sha, prNum, resolvedIssNum)
 }
 
-func (c *CacheImpl) applyProjectsV2ItemEdited(payload []byte) {
+// applyCheckSuite is a documented no-op. The comment in ApplyDelta's switch explains
+// why check_suite is skipped; this stub exists only so the call site compiles.
+func (c *CacheImpl) applyCheckSuite(_ []byte) {}
+
+func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
 	var p projectsV2ItemPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return
 	}
-	if p.Action != "edited" {
-		return
-	}
-	if p.Changes.FieldValue.FieldType != "single_select" {
-		return
-	}
-	newStatus := p.Changes.FieldValue.To.Name
-	if newStatus == "" {
-		return
-	}
-	itemID := p.ProjectsV2Item.ID
 
-	snap, changes, _ := c.store.Apply(itemstate.ProjectV2ItemEdited{
-		ItemID:    itemID,
-		NewStatus: newStatus,
-	})
-	if len(changes) == 0 {
-		return
+	switch p.Action {
+	case "created":
+		// An existing issue was added to the project board. The payload provides only
+		// content_node_id; fetch full item details from GraphQL to get number and repo.
+		nodeID := p.ProjectsV2Item.ContentNodeID
+		if nodeID == "" || p.ProjectsV2Item.ContentType != "Issue" {
+			return
+		}
+		pi := &gh.ProjectItem{ID: nodeID}
+		if err := c.fallback.FetchItemDetails(pi); err != nil {
+			c.logFn("[cache] applyProjectsV2ItemDelta(created): FetchItemDetails for node %s: %v\n", nodeID, err)
+			return
+		}
+		if pi.Number == 0 || pi.Repo == "" {
+			c.logFn("[cache] applyProjectsV2ItemDelta(created): incomplete item for node %s (number=%d repo=%q)\n", nodeID, pi.Number, pi.Repo)
+			return
+		}
+		_, changes, _ := c.store.Apply(itemstate.IssueOpened{Item: *pi})
+		if len(changes) == 0 {
+			return
+		}
+		c.bumpLocalDeltaAt(itemKey(pi.Repo, pi.Number))
+
+	case "edited":
+		if p.Changes.FieldValue.FieldType != "single_select" {
+			return
+		}
+		newStatus := p.Changes.FieldValue.To.Name
+		if newStatus == "" {
+			return
+		}
+		snap, changes, _ := c.store.Apply(itemstate.ProjectV2ItemEdited{
+			ItemID:    p.ProjectsV2Item.ID,
+			NewStatus: newStatus,
+		})
+		if len(changes) == 0 {
+			return
+		}
+		c.bumpLocalDeltaAt(itemKey(snap.Repo(), snap.Number()))
+
+	case "deleted", "archived":
+		// Remove the item from the Store and clean up any PR linkage entries.
+		repo, number, ok := c.store.RemoveByItemID(p.ProjectsV2Item.ID)
+		if !ok {
+			return
+		}
+		key := itemKey(repo, number)
+		c.mu.Lock()
+		for pk, ik := range c.prNumToKey {
+			if ik == key {
+				delete(c.prNumToKey, pk)
+				delete(c.linkedPRs, pk)
+			}
+		}
+		c.mu.Unlock()
+
+	// restored: item is back on the board; the next poll reconcile will re-add it.
+	// reordered: no position state in the engine.
 	}
-	key := itemKey(snap.Repo(), snap.Number())
-	c.bumpLocalDeltaAt(key)
 }
