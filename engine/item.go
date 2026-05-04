@@ -12,6 +12,7 @@ import (
 
 	"github.com/verveguy/fabrik/boardcache"
 	gh "github.com/verveguy/fabrik/github"
+	"github.com/verveguy/fabrik/internal/itemstate"
 	"github.com/verveguy/fabrik/stages"
 )
 
@@ -553,9 +554,12 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		e.logf(item.Number, "warn", "could not add lock label: %v\n", err)
 	} else {
 		lockAcquired = true
-		e.mu.Lock()
-		e.lockedIssues[iKey] = true
-		e.mu.Unlock()
+		e.store.Apply(itemstate.LocalLockAcquired{
+			Repo:       itemOwnerRepoString(item, e.defaultRepo()),
+			Number:     item.Number,
+			User:       e.cfg.User,
+			AcquiredAt: time.Now(),
+		})
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), lockLabel)
 		}
@@ -571,9 +575,10 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	releaseLock := func() {
 		if lockAcquired {
 			e.removeLockLabel(owner, repo, item.Number, lockLabel)
-			e.mu.Lock()
-			delete(e.lockedIssues, iKey)
-			e.mu.Unlock()
+			e.store.Apply(itemstate.LocalLockReleased{
+				Repo:   itemOwnerRepoString(item, e.defaultRepo()),
+				Number: item.Number,
+			})
 		}
 		if inProgressAdded {
 			e.removeInProgressLabel(owner, repo, item.Number, stage.Name)
