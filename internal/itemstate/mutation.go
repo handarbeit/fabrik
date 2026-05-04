@@ -477,6 +477,53 @@ type PRChecksObserved struct {
 func (PRChecksObserved) isMutation() {}
 func (m PRChecksObserved) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// CommentProcessed records that a comment has been processed by the engine.
+// Prevents reprocessing the same comment on subsequent polls or restarts
+// (backed by rocket reactions on GitHub for cross-restart durability).
+type CommentProcessed struct {
+	Repo      string
+	Number    int
+	CommentID string
+	At        time.Time
+}
+
+func (CommentProcessed) isMutation() {}
+func (m CommentProcessed) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// StageLastAttemptCleared zeroes LastAttemptAt for a stage so it re-runs promptly.
+// Used by unblockAwaitingInput to reset the dispatch cooldown after user input.
+type StageLastAttemptCleared struct {
+	Repo      string
+	Number    int
+	StageName string
+}
+
+func (StageLastAttemptCleared) isMutation() {}
+func (m StageLastAttemptCleared) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// EngineUnpaused clears PausedByEngine for a stage, used when a user comment
+// triggers an unpause or when clearFailedStage resets engine-managed pause state.
+type EngineUnpaused struct {
+	Repo      string
+	Number    int
+	StageName string
+}
+
+func (EngineUnpaused) isMutation() {}
+func (m EngineUnpaused) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// EngineCyclesCleared zeroes ReviewCycles, CIFixCycles, and RebaseCycles for a
+// stage. Called by clearFailedStage on unpause/success to prevent stale counters
+// from triggering premature max-cycle pauses on the next run.
+type EngineCyclesCleared struct {
+	Repo      string
+	Number    int
+	StageName string
+}
+
+func (EngineCyclesCleared) isMutation() {}
+func (m EngineCyclesCleared) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // itemKeyFor constructs the canonical "owner/repo#N" item key used throughout the Store.
 // Returns "" when repo is empty (indicating an invalid or unroutable mutation).
 func itemKeyFor(repo string, number int) string {

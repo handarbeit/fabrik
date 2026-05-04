@@ -388,6 +388,28 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.StageState.PausedByEngine[v.StageName] = true
 		return StageStateChanged
 
+	case EngineUnpaused:
+		ensureStageStateMaps(item)
+		delete(item.StageState.PausedByEngine, v.StageName)
+		return StageStateChanged
+
+	case EngineCyclesCleared:
+		ensureStageStateMaps(item)
+		delete(item.StageState.ReviewCycles, v.StageName)
+		delete(item.StageState.CIFixCycles, v.StageName)
+		delete(item.StageState.RebaseCycles, v.StageName)
+		return StageStateChanged
+
+	case StageLastAttemptCleared:
+		ensureStageStateMaps(item)
+		delete(item.StageState.LastAttemptAt, v.StageName)
+		return StageStateChanged
+
+	case CommentProcessed:
+		ensureStageStateMaps(item)
+		item.StageState.ProcessedComments[v.CommentID] = v.At
+		return StageStateChanged
+
 	case CooldownRecorded:
 		if item.CooldownAt == nil {
 			item.CooldownAt = make(map[string]time.Time)
