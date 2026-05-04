@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -48,10 +47,6 @@ func TestItemMayNeedWork_StaleButCooldownExpired(t *testing.T) {
 		UpdatedAt: ts,
 	}
 
-	// Record the last-seen timestamp so the "unchanged" path triggers
-	eng.mu.Lock()
-	eng.seenUpdatedAt["owner/repo#42"] = ts
-	eng.mu.Unlock()
 	// Set an expired CooldownAt entry (>cooldown ago) so re-eval fires
 	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 42, Reason: "periodic-re-eval", Until: time.Now().Add(-2 * time.Minute)})
 
@@ -60,27 +55,29 @@ func TestItemMayNeedWork_StaleButCooldownExpired(t *testing.T) {
 	}
 }
 
-// TestItemMayNeedWork_StaleWithinCooldown verifies that a stale item within
-// cooldown is skipped.
-func TestItemMayNeedWork_StaleWithinCooldown(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
-	eng.cfg.PollSeconds = 60 // long cooldown
-
+// TestPollPreFilter_StaleItemWithinCooldown_Skipped verifies that a stale item
+// within cooldown is not deep-fetched by the poll pre-filter.
+func TestPollPreFilter_StaleItemWithinCooldown_Skipped(t *testing.T) {
 	ts := time.Now().Add(-time.Minute)
-	item := gh.ProjectItem{
-		Number:    43,
-		Status:    "Research",
-		ItemID:    "PVTI_43",
-		UpdatedAt: ts,
+	var deepFetched bool
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{{Number: 43, Status: "Research", ItemID: "PVTI_43", UpdatedAt: ts}},
+			}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
 	}
-
-	eng.mu.Lock()
-	eng.seenUpdatedAt["owner/repo#43"] = ts
-	eng.mu.Unlock()
+	eng := testEngine(client, &mockClaudeInvoker{})
+	eng.cfg.PollSeconds = 60
 	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 43, Reason: "periodic-re-eval", Until: time.Now().Add(10 * time.Minute)})
-
-	if eng.itemMayNeedWork(item) {
-		t.Error("stale item within cooldown should not need work")
+	// item not in cycleSet (eng.mayNeedWork is empty), active CooldownAt → must be skipped
+	if _, err := eng.poll(t.Context()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if deepFetched {
+		t.Error("stale item within active cooldown should not be deep-fetched")
 	}
 }
 
@@ -471,8 +468,8 @@ func TestItemNeedsWork_ClosedIssue_CleanupStage_Complete(t *testing.T) {
 }
 
 // TestPoll_DeepFetchFailureExcludesFromLastUpdatedAt verifies that when
-// FetchItemDetails fails for an item, seenUpdatedAt is NOT updated for that
-// item, so the next poll retries the deep-fetch.
+// FetchItemDetails fails for an item, the failure is recorded in the store so
+// the next poll retries the deep-fetch after the cooldown expires.
 func TestPoll_DeepFetchFailureExcludesFromLastUpdatedAt(t *testing.T) {
 	now := time.Now()
 	client := &mockGitHubClient{
@@ -490,18 +487,14 @@ func TestPoll_DeepFetchFailureExcludesFromLastUpdatedAt(t *testing.T) {
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 999 // very long cooldown so we don't accidentally bypass
+	// Seed item into cycleSet so the pre-filter admits it for deep-fetch.
+	eng.mayNeedWorkMu.Lock()
+	eng.mayNeedWork["owner/repo#10"] = true
+	eng.mayNeedWorkMu.Unlock()
 
 	ctx := t.Context()
 	if _, err := eng.poll(ctx); err != nil {
 		t.Fatalf("poll: %v", err)
-	}
-
-	// seenUpdatedAt must NOT be set for item #10 — failed deep-fetch must not cache.
-	eng.mu.Lock()
-	_, ok := eng.seenUpdatedAt["owner/repo#10"]
-	eng.mu.Unlock()
-	if ok {
-		t.Error("seenUpdatedAt should NOT be updated when FetchItemDetails fails")
 	}
 
 	// LastDeepFetchFailureAt must be recorded in the store.
@@ -529,6 +522,10 @@ func TestPoll_DeepFetchSuccessClearsFailureTime(t *testing.T) {
 	eng := testEngine(client, &mockClaudeInvoker{})
 	// Pre-seed a failure time via the store.
 	eng.store.Apply(itemstate.DeepFetchFailed{Repo: "owner/repo", Number: 11, At: now.Add(-time.Minute)})
+	// Seed item into cycleSet so the pre-filter admits it for deep-fetch.
+	eng.mayNeedWorkMu.Lock()
+	eng.mayNeedWork["owner/repo#11"] = true
+	eng.mayNeedWorkMu.Unlock()
 
 	ctx := t.Context()
 	if _, err := eng.poll(ctx); err != nil {
@@ -541,29 +538,29 @@ func TestPoll_DeepFetchSuccessClearsFailureTime(t *testing.T) {
 	}
 }
 
-// TestItemMayNeedWork_AwaitingInputRespectsCache verifies that an item with
-// fabrik:awaiting-input and an unchanged updatedAt returns false from
-// itemMayNeedWork. Adding a comment bumps the issue's updatedAt, so there's
-// no need to force a deep-fetch every poll — the normal cache check catches it.
-func TestItemMayNeedWork_AwaitingInputRespectsCache(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
-
+// TestPollPreFilter_AwaitingInput_WithoutChange_Skipped verifies that an item with
+// fabrik:awaiting-input is not deep-fetched when it has not changed (not in cycleSet)
+// and has no expired CooldownAt. Adding a comment bumps updatedAt (fires observer),
+// so the normal cycleSet mechanism catches it.
+func TestPollPreFilter_AwaitingInput_WithoutChange_Skipped(t *testing.T) {
 	ts := time.Now().Add(-time.Minute)
-	item := gh.ProjectItem{
-		Number:    50,
-		Status:    "Research",
-		ItemID:    "PVTI_50",
-		UpdatedAt: ts,
-		Labels:    []string{"fabrik:awaiting-input", "fabrik:paused"},
+	var deepFetched bool
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{{Number: 50, Status: "Research", ItemID: "PVTI_50", UpdatedAt: ts, Labels: []string{"fabrik:awaiting-input", "fabrik:paused"}}},
+			}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
 	}
-
-	// Record the last-seen timestamp so the "unchanged" path triggers.
-	eng.mu.Lock()
-	eng.seenUpdatedAt["owner/repo#50"] = ts
-	eng.mu.Unlock()
-
-	if eng.itemMayNeedWork(item) {
-		t.Error("awaiting-input item with unchanged updatedAt should return false (comments bump updatedAt)")
+	eng := testEngine(client, &mockClaudeInvoker{})
+	// item not in cycleSet, no bypass label (awaiting-input is NOT a bypass), no expired CooldownAt
+	if _, err := eng.poll(t.Context()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if deepFetched {
+		t.Error("awaiting-input item without observer-triggered change should not be deep-fetched")
 	}
 }
 
@@ -578,7 +575,7 @@ func TestItemMayNeedWork_DeepFetchFailureCooldown(t *testing.T) {
 		Number: 51,
 		Status: "Research",
 		ItemID: "PVTI_51",
-		// UpdatedAt zero — no seenUpdatedAt entry, so "unchanged" branch won't fire
+		// UpdatedAt zero — not in cycleSet, so pre-filter would skip unless failure cooldown fires
 	}
 
 	// Record a very recent failure via the store.
@@ -596,63 +593,6 @@ func TestItemMayNeedWork_DeepFetchFailureCooldown(t *testing.T) {
 	}
 }
 
-// TestProcessItem_EvictsLastUpdatedAtAfterStageRun verifies that processItem
-// deletes seenUpdatedAt[iKey] after a stage runs (claudeRan=true). This ensures
-// the next poll re-evaluates the item, catching any comments that arrived during
-// the in-flight run.
-func TestProcessItem_EvictsLastUpdatedAtAfterStageRun(t *testing.T) {
-	skipIfNoGit(t)
-
-	repoDir := initBareRepo(t)
-	wm := NewWorktreeManager(repoDir)
-	claude := &mockClaudeInvoker{
-		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
-			return "FABRIK_STAGE_COMPLETE\n", true, TokenUsage{}, nil
-		},
-	}
-	eng := NewWithDeps(
-		Config{
-			Owner:         "owner",
-			Repo:          "repo",
-			ProjectNum:    1,
-			User:          "testuser",
-			Token:         "token",
-			MaxConcurrent: 5,
-			PollSeconds:   60,
-			Stages:        testStages(),
-		},
-		&mockGitHubClient{},
-		claude,
-		wm,
-	)
-
-	ts := time.Now().Add(-time.Minute)
-	item := gh.ProjectItem{
-		Number:    60,
-		Title:     "Eviction test",
-		Status:    "Research",
-		ItemID:    "PVTI_60",
-		UpdatedAt: ts,
-		Repo:      "owner/repo",
-	}
-
-	// Pre-populate seenUpdatedAt as if a concurrent poll cached this item.
-	eng.mu.Lock()
-	eng.seenUpdatedAt["owner/repo#60"] = ts
-	eng.mu.Unlock()
-
-	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
-	_ = eng.processItem(context.Background(), board, item)
-
-	// After processItem (with claudeRan), seenUpdatedAt must be evicted.
-	eng.mu.Lock()
-	_, stillCached := eng.seenUpdatedAt["owner/repo#60"]
-	eng.mu.Unlock()
-
-	if stillCached {
-		t.Error("seenUpdatedAt should be evicted after a stage runs so next poll re-evaluates the item")
-	}
-}
 
 // TestItemMayNeedWork_AwaitingCI_BypassesUpdatedAtCache verifies that items with
 // fabrik:awaiting-ci bypass the updatedAt cache so the catch-up loop can
@@ -670,219 +610,222 @@ func TestItemMayNeedWork_AwaitingCI_BypassesUpdatedAtCache(t *testing.T) {
 		Labels:    []string{"fabrik:awaiting-ci"},
 	}
 
-	// Seed seenUpdatedAt so the "unchanged" path would normally trigger.
 	// No CooldownAt entry — awaiting-ci items use per-poll bypass (not cooldown path).
-	eng.mu.Lock()
-	eng.seenUpdatedAt["owner/repo#61"] = ts
-	eng.mu.Unlock()
-
 	if !eng.itemMayNeedWork(item) {
 		t.Error("item with fabrik:awaiting-ci should bypass the updatedAt cache and return true")
 	}
 }
 
-// TestItemMayNeedWork_AwaitingReview_CooldownPattern verifies that items with
-// fabrik:awaiting-review use the CooldownAt["review-blocked"] path (same as fabrik:blocked)
-// rather than per-poll cache bypass. The cooldown is 10 × PollSeconds. The catch-up
-// loop's review-gate path records CooldownAt["review-blocked"] when checkReviewGate
-// returns blocked=true, which makes itemMayNeedWork re-admit the item every 10 ×
-// PollSeconds — enough for Phase 1 and Phase 2 reprompt timers (which fire at 1×
-// ReviewWaitTimeout = 15 min default) to fire within ~150s of their actual due time,
-// without turning long-lived review-waiting items into a permanent GraphQL hot path.
+// TestPollPreFilter_AwaitingReview_WithinCooldown_Skipped verifies that items with
+// fabrik:awaiting-review use the CooldownAt["review-blocked"] path and are skipped
+// when the cooldown is still active (not in cycleSet, no bypass).
 //
 // Real-world repro: issue #467 — fabrik filed this regression after observing an
 // issue stuck for hours waiting on Copilot when Phase 1 should have re-fired.
-func TestItemMayNeedWork_AwaitingReview_CooldownPattern(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
-	eng.cfg.PollSeconds = 60 // cooldown = 10 × 60s = 600s
-
+func TestPollPreFilter_AwaitingReview_WithinCooldown_Skipped(t *testing.T) {
 	ts := time.Now().Add(-time.Minute)
-	item := gh.ProjectItem{
-		Number:    67,
-		Status:    "Research",
-		ItemID:    "PVTI_67",
-		UpdatedAt: ts,
-		Labels:    []string{"fabrik:awaiting-review"},
+	var deepFetched bool
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{{Number: 67, Status: "Research", ItemID: "PVTI_67", UpdatedAt: ts, Labels: []string{"fabrik:awaiting-review"}}},
+			}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
 	}
-
-	// Within cooldown: active CooldownAt["review-blocked"] → must NOT re-admit yet.
-	eng.mu.Lock()
-	eng.seenUpdatedAt["owner/repo#67"] = ts
-	eng.mu.Unlock()
+	eng := testEngine(client, &mockClaudeInvoker{})
+	eng.cfg.PollSeconds = 60
 	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 67, Reason: "review-blocked", Until: time.Now().Add(10 * time.Minute)})
-
-	if eng.itemMayNeedWork(item) {
-		t.Error("fabrik:awaiting-review item within cooldown window should be filtered (cooldown not yet expired)")
+	if _, err := eng.poll(t.Context()); err != nil {
+		t.Fatalf("poll: %v", err)
 	}
-
-	// Past cooldown: expired CooldownAt["review-blocked"] → must re-admit.
-	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 67, Reason: "review-blocked", Until: time.Now().Add(-15 * time.Minute)})
-
-	if !eng.itemMayNeedWork(item) {
-		t.Error("fabrik:awaiting-review item past cooldown window should be re-admitted by cooldown retry path")
+	if deepFetched {
+		t.Error("fabrik:awaiting-review item within cooldown should not be deep-fetched")
 	}
 }
 
-// TestItemMayNeedWork_AwaitingReview_NotBypassedDirectly verifies that
-// fabrik:awaiting-review is NOT in the unconditional cache-bypass list (unlike
-// fabrik:awaiting-ci and fabrik:rebase-needed). Without a CooldownAt entry, the
-// item is filtered by the standard updatedAt cache. This is the intentional
-// design choice from the #495 fix — use CooldownAt pattern, not per-poll bypass.
-func TestItemMayNeedWork_AwaitingReview_NotBypassedDirectly(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
-	eng.cfg.PollSeconds = 60
-
+// TestPollPreFilter_AwaitingReview_ExpiredCooldown_Admitted verifies that items with
+// fabrik:awaiting-review and an expired CooldownAt["review-blocked"] are re-admitted.
+func TestPollPreFilter_AwaitingReview_ExpiredCooldown_Admitted(t *testing.T) {
 	ts := time.Now().Add(-time.Minute)
-	item := gh.ProjectItem{
-		Number:    68,
-		Status:    "Research",
-		ItemID:    "PVTI_68",
-		UpdatedAt: ts,
-		Labels:    []string{"fabrik:awaiting-review"},
+	var deepFetched bool
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{{Number: 67, Status: "Research", ItemID: "PVTI_67", UpdatedAt: ts, Labels: []string{"fabrik:awaiting-review"}}},
+			}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
 	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 67, Reason: "review-blocked", Until: time.Now().Add(-15 * time.Minute)})
+	if _, err := eng.poll(t.Context()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if !deepFetched {
+		t.Error("fabrik:awaiting-review item past cooldown should be deep-fetched")
+	}
+}
 
-	// No CooldownAt entry: cooldown retry path doesn't fire. Without unconditional
-	// bypass, the cache filter wins and we return false.
-	eng.mu.Lock()
-	eng.seenUpdatedAt["owner/repo#68"] = ts
-	eng.mu.Unlock()
-
-	if eng.itemMayNeedWork(item) {
+// TestPollPreFilter_AwaitingReview_NoCooldown_NotBypassed verifies that
+// fabrik:awaiting-review is NOT in the unconditional bypass list (unlike
+// fabrik:awaiting-ci and fabrik:rebase-needed). Without a CooldownAt entry and
+// without being in cycleSet, the item is filtered by the pre-filter.
+func TestPollPreFilter_AwaitingReview_NoCooldown_NotBypassed(t *testing.T) {
+	ts := time.Now().Add(-time.Minute)
+	var deepFetched bool
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{{Number: 68, Status: "Research", ItemID: "PVTI_68", UpdatedAt: ts, Labels: []string{"fabrik:awaiting-review"}}},
+			}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	eng.cfg.PollSeconds = 60
+	// No CooldownAt entry, not in cycleSet, no awaiting-ci/rebase-needed → should be skipped
+	if _, err := eng.poll(t.Context()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if deepFetched {
 		t.Error("fabrik:awaiting-review without CooldownAt entry should be filtered (no per-poll bypass)")
 	}
 }
 
-// TestItemMayNeedWork_BlockedRespectsUpdatedAtCache verifies that a fabrik:blocked
-// item with an unchanged updatedAt is NOT force-deep-fetched. The dependency item's
-// own updatedAt changes when it closes, which is visible in the shallow fetch —
-// the blocked item does not need a special bypass.
-func TestItemMayNeedWork_BlockedRespectsUpdatedAtCache(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
-	eng.cfg.PollSeconds = 60 // long cooldown
-
+// TestPollPreFilter_Blocked_WithinCooldown_Skipped verifies that a fabrik:blocked
+// item with an active CooldownAt is not deep-fetched. The dependency item's own
+// updatedAt changes when it closes (fires observer), so no special bypass is needed.
+func TestPollPreFilter_Blocked_WithinCooldown_Skipped(t *testing.T) {
 	ts := time.Now().Add(-time.Minute)
-	item := gh.ProjectItem{
-		Number:    63,
-		Status:    "Research",
-		ItemID:    "PVTI_63",
-		UpdatedAt: ts,
-		Labels:    []string{"fabrik:blocked"},
+	var deepFetched bool
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{{Number: 63, Status: "Research", ItemID: "PVTI_63", UpdatedAt: ts, Labels: []string{"fabrik:blocked"}}},
+			}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
 	}
-
-	eng.mu.Lock()
-	eng.seenUpdatedAt["owner/repo#63"] = ts
-	eng.mu.Unlock()
+	eng := testEngine(client, &mockClaudeInvoker{})
+	eng.cfg.PollSeconds = 60
 	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 63, Reason: "dep-blocked", Until: time.Now().Add(10 * time.Minute)})
-
-	if eng.itemMayNeedWork(item) {
-		t.Error("fabrik:blocked item with active CooldownAt should be filtered (no forced deep-fetch)")
+	if _, err := eng.poll(t.Context()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if deepFetched {
+		t.Error("fabrik:blocked item with active CooldownAt should not be deep-fetched")
 	}
 }
 
-// TestItemMayNeedWork_NoSpecialLabel_RespectsUpdatedAtCache verifies that without
-// fabrik:awaiting-ci, a stale item within cooldown is filtered (cache respected).
-func TestItemMayNeedWork_NoSpecialLabel_RespectsUpdatedAtCache(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
-	eng.cfg.PollSeconds = 60 // long cooldown
-
+// TestPollPreFilter_NoSpecialLabel_WithinCooldown_Skipped verifies that without
+// fabrik:awaiting-ci, a stale item within cooldown is filtered by the pre-filter.
+func TestPollPreFilter_NoSpecialLabel_WithinCooldown_Skipped(t *testing.T) {
 	ts := time.Now().Add(-time.Minute)
-	item := gh.ProjectItem{
-		Number:    62,
-		Status:    "Research",
-		ItemID:    "PVTI_62",
-		UpdatedAt: ts,
-		Labels:    []string{"stage:Validate:complete"}, // no fabrik:awaiting-ci
+	var deepFetched bool
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{{Number: 62, Status: "Research", ItemID: "PVTI_62", UpdatedAt: ts, Labels: []string{"stage:Validate:complete"}}},
+			}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
 	}
-
-	eng.mu.Lock()
-	eng.seenUpdatedAt["owner/repo#62"] = ts
-	eng.mu.Unlock()
+	eng := testEngine(client, &mockClaudeInvoker{})
+	eng.cfg.PollSeconds = 60
 	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 62, Reason: "periodic-re-eval", Until: time.Now().Add(10 * time.Minute)})
-
-	if eng.itemMayNeedWork(item) {
+	if _, err := eng.poll(t.Context()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if deepFetched {
 		t.Error("item without bypass labels should be filtered by active CooldownAt")
 	}
 }
 
-// TestItemMayNeedWork_CompleteStageBypassed verifies that an item with a
-// stage:X:complete label in shallow labels is NOT retried via the cooldown path
-// after the cooldown has expired — completed stages have no work to retry.
-func TestItemMayNeedWork_CompleteStageBypassed(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
-	eng.cfg.PollSeconds = 1 // short cooldown (10s)
-
+// TestPollPreFilter_CompleteStage_ExpiredCooldown_DeepFetched verifies that an item
+// with a stage:X:complete label IS deep-fetched when the cooldown has expired — the
+// pre-filter admits it, and suppression happens in itemNeedsWork (not the pre-filter).
+// After the deep-fetch, the deferred refresh sets a new CooldownAt so the next poll
+// cycle is suppressed (see TestPoll_CruiseValidateComplete_NoRepeatDeepFetch).
+func TestPollPreFilter_CompleteStage_ExpiredCooldown_DeepFetched(t *testing.T) {
 	ts := time.Now().Add(-time.Minute)
-	item := gh.ProjectItem{
-		Number:    70,
-		Status:    "Research",
-		ItemID:    "PVTI_70",
-		UpdatedAt: ts,
-		Labels:    []string{"stage:Research:complete"},
+	var deepFetched bool
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{{Number: 70, Status: "Research", ItemID: "PVTI_70", UpdatedAt: ts, Labels: []string{"stage:Research:complete"}}},
+			}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
 	}
-
-	eng.mu.Lock()
-	eng.seenUpdatedAt["owner/repo#70"] = ts
-	eng.mu.Unlock()
+	eng := testEngine(client, &mockClaudeInvoker{})
+	eng.cfg.PollSeconds = 1
 	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 70, Reason: "periodic-re-eval", Until: time.Now().Add(-2 * time.Minute)})
-
-	if eng.itemMayNeedWork(item) {
-		t.Error("stage-complete item with expired cooldown should NOT be retried — stage is already done")
+	if _, err := eng.poll(t.Context()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if !deepFetched {
+		t.Error("stage-complete item with expired cooldown should be deep-fetched (suppression is in itemNeedsWork, not the pre-filter)")
 	}
 }
 
-// TestItemMayNeedWork_IncompleteStageStillRetried verifies that an item WITHOUT a
-// stage:X:complete label is still retried via the cooldown path after expiry —
-// the exemption only applies to completed stages.
-func TestItemMayNeedWork_IncompleteStageStillRetried(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
-	eng.cfg.PollSeconds = 1 // short cooldown (10s)
-
+// TestPollPreFilter_IncompleteStage_ExpiredCooldown_Admitted verifies that an item
+// WITHOUT a stage:X:complete label is deep-fetched when the cooldown has expired —
+// the stage-complete suppression only applies to completed stages.
+func TestPollPreFilter_IncompleteStage_ExpiredCooldown_Admitted(t *testing.T) {
 	ts := time.Now().Add(-time.Minute)
-	item := gh.ProjectItem{
-		Number:    71,
-		Status:    "Research",
-		ItemID:    "PVTI_71",
-		UpdatedAt: ts,
-		Labels:    nil, // no stage:Research:complete
+	var deepFetched bool
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{{Number: 71, Status: "Research", ItemID: "PVTI_71", UpdatedAt: ts}},
+			}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
 	}
-
-	eng.mu.Lock()
-	eng.seenUpdatedAt["owner/repo#71"] = ts
-	eng.mu.Unlock()
+	eng := testEngine(client, &mockClaudeInvoker{})
+	eng.cfg.PollSeconds = 1
 	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 71, Reason: "periodic-re-eval", Until: time.Now().Add(-2 * time.Minute)})
-
-	if !eng.itemMayNeedWork(item) {
-		t.Error("incomplete stage with expired cooldown should still be retried")
+	if _, err := eng.poll(t.Context()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if !deepFetched {
+		t.Error("incomplete stage with expired cooldown should be deep-fetched")
 	}
 }
 
-// TestItemMayNeedWork_AwaitingReview_WithCompleteLabel verifies the critical
-// interaction: an item with BOTH stage:X:complete AND fabrik:awaiting-review must
-// still be admitted via the cooldown retry path after cooldown expires, so
-// Phase 1/Phase 2 review-reprompt timers can fire. Part 1's stage-complete
-// suppression explicitly exempts awaiting-review items for this reason.
-func TestItemMayNeedWork_AwaitingReview_WithCompleteLabel(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
-	eng.cfg.PollSeconds = 1 // short cooldown (10s)
-
+// TestPollPreFilter_AwaitingReview_WithCompleteLabel_ExpiredCooldown_Admitted verifies
+// the critical interaction: an item with BOTH stage:X:complete AND fabrik:awaiting-review
+// must still be deep-fetched when the cooldown expires, so Phase 1/Phase 2
+// review-reprompt timers can fire. The stage-complete suppression explicitly exempts
+// awaiting-review items for this reason.
+func TestPollPreFilter_AwaitingReview_WithCompleteLabel_ExpiredCooldown_Admitted(t *testing.T) {
 	ts := time.Now().Add(-time.Minute)
-	item := gh.ProjectItem{
-		Number:    69,
-		Status:    "Research",
-		ItemID:    "PVTI_69",
-		UpdatedAt: ts,
-		Labels:    []string{"stage:Research:complete", "fabrik:awaiting-review"},
+	var deepFetched bool
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{{Number: 69, Status: "Research", ItemID: "PVTI_69", UpdatedAt: ts, Labels: []string{"stage:Research:complete", "fabrik:awaiting-review"}}},
+			}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
 	}
-
-	eng.mu.Lock()
-	eng.seenUpdatedAt["owner/repo#69"] = ts
-	eng.mu.Unlock()
+	eng := testEngine(client, &mockClaudeInvoker{})
+	eng.cfg.PollSeconds = 1
 	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 69, Reason: "review-blocked", Until: time.Now().Add(-2 * time.Minute)})
-
-	// Must return true: awaiting-review exempts the item from stage-complete suppression.
-	// If this returns false, Phase 1/Phase 2 reprompt timers can never fire.
-	if !eng.itemMayNeedWork(item) {
-		t.Error("item with stage:X:complete AND fabrik:awaiting-review and expired cooldown must be re-admitted — awaiting-review exempts from stage-complete suppression so Phase 1/Phase 2 timers can fire")
+	if _, err := eng.poll(t.Context()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if !deepFetched {
+		t.Error("item with stage:X:complete AND fabrik:awaiting-review and expired cooldown must be deep-fetched (awaiting-review exempts from stage-complete suppression)")
 	}
 }
 
@@ -986,9 +929,6 @@ func TestPoll_DeferredRefresh_DoesNotRefreshIncompleteItem(t *testing.T) {
 	eng.cfg.PollSeconds = 1 // cooldown = 10s
 
 	initial := time.Now().Add(-2 * time.Minute) // expired timestamp
-	eng.mu.Lock()
-	eng.seenUpdatedAt["owner/repo#80"] = ts // unchanged updatedAt → cooldown path
-	eng.mu.Unlock()
 	// Seed LastAttemptAt to verify the deferred block never refreshes it
 	eng.store.Apply(itemstate.StageAttempted{Repo: "owner/repo", Number: 80, StageName: "Research", At: initial})
 	// Seed expired CooldownAt so itemMayNeedWork enters the re-eval path (returns true → deep-fetch)
@@ -1038,10 +978,7 @@ func TestPoll_DeferredRefresh_RefreshesTerminalItem(t *testing.T) {
 	eng := testEngine(client, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 1 // cooldown = 10s
 
-	eng.mu.Lock()
-	eng.seenUpdatedAt["owner/repo#81"] = ts // unchanged updatedAt → cooldown path
-	eng.mu.Unlock()
-	// Seed expired CooldownAt so itemMayNeedWork enters the re-eval path (returns true → deep-fetch)
+	// Seed expired CooldownAt so the pre-filter admits the item for deep-fetch
 	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 81, Reason: "periodic-re-eval", Until: time.Now().Add(-2 * time.Minute)})
 
 	ctx := t.Context()
