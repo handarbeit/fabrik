@@ -57,6 +57,7 @@ type itemNode struct {
 		LinkedPRs *struct {
 			Nodes []struct {
 				UpdatedAt string `json:"updatedAt"`
+				Number    int    `json:"number"`
 			} `json:"nodes"`
 		} `json:"closedByPullRequestsReferences"`
 	} `json:"content"`
@@ -195,6 +196,7 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
               closedByPullRequestsReferences(first: 5) {
                 nodes {
                   updatedAt
+                  number
                 }
               }
             }
@@ -317,6 +319,9 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 				if t, err := parseTime(pr.UpdatedAt); err == nil && t.After(item.UpdatedAt) {
 					item.UpdatedAt = t
 				}
+			}
+			if len(node.Content.LinkedPRs.Nodes) > 0 {
+				item.LinkedPRNumberShallow = node.Content.LinkedPRs.Nodes[0].Number
 			}
 		}
 
