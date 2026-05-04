@@ -301,7 +301,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.Lock = &LockState{
 			HolderUser: v.User,
 			HeldByThis: true,
-			AcquiredAt: time.Now(),
+			AcquiredAt: v.AcquiredAt,
 		}
 		var flags ChangeFlags = LockChanged
 		if v.Worker != nil {
@@ -610,7 +610,10 @@ func applyProjectItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 			!reflect.DeepEqual(lpr.ReviewRequests, pi.LinkedPRReviewRequests) ||
 			!reflect.DeepEqual(lpr.ThreadComments, pi.LinkedPRReviewThreadComments) ||
 			lpr.ResolvedThreadCount != pi.LinkedPRResolvedThreadCount {
-			lpr.Number = pi.LinkedPRNumber
+			if lpr.Number != pi.LinkedPRNumber {
+				lpr.Number = pi.LinkedPRNumber
+				flags |= LinkedPRChanged
+			}
 			if !reflect.DeepEqual(lpr.Reviews, pi.LinkedPRReviews) {
 				lpr.Reviews = copyPRReviews(pi.LinkedPRReviews)
 				flags |= LinkedPRChanged
