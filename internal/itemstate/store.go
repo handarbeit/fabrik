@@ -355,7 +355,6 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 	case StageAttempted:
 		ensureStageStateMaps(item)
 		item.StageState.LastAttemptAt[v.StageName] = v.At
-		item.StageState.Attempts[v.StageName]++
 		return StageStateChanged
 
 	case StageRetryIncremented:
