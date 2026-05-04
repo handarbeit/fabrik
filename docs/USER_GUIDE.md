@@ -1496,7 +1496,7 @@ Pressing `?` opens an overlay that displays all keybindings and a labels referen
 | `model:<name>` | Override the model for this issue (e.g. `model:opus`) |
 | `effort:<level>` | Override thinking effort for this issue (`low`, `medium`, `high`, `max`) |
 | `fabrik:unrestricted` | Bypass default permission posture; passes `--dangerously-skip-permissions` instead |
-| `fabrik:extend-turns` | Pre-grant 2× max turns budget; auto-extends to 3× when progress is detected (see the Labels Reference / state-machine semantics for the full definition); auto-removed on success; the turn counter denominator reflects the effective budget |
+| `fabrik:extend-turns` | Pre-grant 2× max turns budget for every stage while present; auto-extends to 3× when progress is detected; persists across all stages until Done cleanup; the turn counter denominator reflects the effective budget |
 | `base:<branch>` | Override base branch for this issue (e.g. `base:develop`); Fabrik forks from, rebases onto, and targets PRs at this branch |
 
 Dismiss the panel by pressing `?` again or `Esc`.
