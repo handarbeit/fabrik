@@ -157,7 +157,7 @@ func (e *Engine) ensurePRLinksIssue(item gh.ProjectItem, prNumber int) {
 	}
 
 	if strings.Contains(balanced, closingKeyword) {
-		return // already linked (possibly inside a fence that was just fixed)
+		return // already linked
 	}
 
 	// Append closing keyword
