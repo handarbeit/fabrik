@@ -676,6 +676,25 @@ func TestPullRequestReviewRequestRemoved(t *testing.T) {
 	}
 }
 
+// TestPRLinkage_opened verifies that pull_request.opened for a PR with a
+// "Closes #N" body triggers the auto-heal path and populates LinkedPRNumber on
+// the linked issue's cached item.
+func TestPRLinkage_opened(t *testing.T) {
+	mc := &mockClient{
+		fetchPRClosingIssuesFn: func(owner, repo string, prNumber int) ([]int, error) {
+			return []int{1}, nil // PR #42 closes issue #1
+		},
+	}
+	c := seedCacheWithStalePRLink(t, mc) // item #1 with LinkedPRNumber=0
+
+	c.ApplyDelta("pull_request", pullRequestPayloadJSON("opened", "owner/repo", 42, "sha-link", "open", false, false))
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.LinkedPR == nil || s.LinkedPR.Number != 42 {
+		t.Errorf("want LinkedPR.Number=42 after pull_request.opened auto-heal, got LinkedPR=%v", s.LinkedPR)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Phase 3-D: documented no-ops — verify no crash and no state change
 // ---------------------------------------------------------------------------
