@@ -84,6 +84,9 @@ type Engine struct {
 	logFile              *os.File              // persistent log file at .fabrik/fabrik.log; nil if not opened
 	logMu                sync.Mutex            // serializes concurrent writes to logFile
 	webhookMgr           *webhookManager       // nil when webhooks are disabled
+	// heartbeatIntervalOverride overrides the package-level heartbeatInterval constant
+	// when non-zero. Used by tests to reduce the heartbeat period to sub-millisecond.
+	heartbeatIntervalOverride time.Duration
 }
 
 func New(cfg Config) (*Engine, error) {
