@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -304,7 +305,39 @@ func (e *Engine) Run() error {
 		var deltaFn func(string, []byte)
 		var healthChangeFn func(bool)
 		if cacheImpl != nil {
-			deltaFn = cacheImpl.ApplyDelta
+			deltaFn = func(eventType string, payload []byte) {
+				cacheImpl.ApplyDelta(eventType, payload)
+				if cacheImpl.IsPaused() {
+					return
+				}
+				if eventType != "issues" && eventType != "issue_comment" {
+					return
+				}
+				// Layer 1: opportunistic per-event Status refresh.
+				// Parse just enough to identify the project item.
+				var ev struct {
+					Issue struct {
+						Number int `json:"number"`
+					} `json:"issue"`
+					Repository struct {
+						FullName string `json:"full_name"`
+					} `json:"repository"`
+				}
+				if err := json.Unmarshal(payload, &ev); err != nil || ev.Repository.FullName == "" || ev.Issue.Number == 0 {
+					return
+				}
+				key := boardcache.ItemKey(ev.Repository.FullName, ev.Issue.Number)
+				itemID, ok := cacheImpl.GetItemID(key)
+				if !ok {
+					return
+				}
+				status, err := e.client.FetchProjectItemStatus(itemID)
+				if err != nil {
+					e.logf(ev.Issue.Number, "warn", "layer1 status fetch failed for %s: %v\n", itemID, err)
+					return
+				}
+				cacheImpl.UpdateItemStatus(key, status)
+			}
 			healthChangeFn = func(healthy bool) {
 				if healthy {
 					e.reconcileCache(cacheImpl)
@@ -1395,18 +1428,33 @@ func (e *Engine) reconcileCache(cache *boardcache.CacheImpl) {
 	cache.Reconcile(board)
 }
 
-// runReconciliationLoop periodically reconciles the in-memory cache with GitHub
-// by fetching a full board snapshot. It runs once per webhookIdleCap (60 min)
-// so the cache self-heals any deltas missed by the webhook stream.
+// runReconciliationLoop periodically fetches only the Status field for every
+// project item and applies any drift to the in-memory cache (Layer 2).
+// This replaces the former 60-min full-board reconcile for the periodic path;
+// reconcileCache (full board fetch) is preserved for stream-recovery only.
 func (e *Engine) runReconciliationLoop(ctx context.Context, cache *boardcache.CacheImpl) {
-	ticker := time.NewTicker(webhookIdleCap)
+	cadence := time.Duration(e.cfg.ProjectStatusPollSeconds) * time.Second
+	if cadence <= 0 {
+		cadence = 600 * time.Second
+	}
+	ticker := time.NewTicker(cadence)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			e.reconcileCache(cache)
+			projectID := cache.ProjectID()
+			if projectID == "" {
+				e.logf(0, "cache", "layer2 status sweep skipped: cache not yet bootstrapped\n")
+				continue
+			}
+			updates, err := e.client.FetchProjectItemStatusBatch(projectID)
+			if err != nil {
+				e.logf(0, "cache", "layer2 status sweep failed: %v\n", err)
+				continue
+			}
+			cache.ApplyStatusBatch(updates)
 		}
 	}
 }
