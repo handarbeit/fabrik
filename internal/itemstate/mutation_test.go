@@ -487,10 +487,15 @@ func TestChangeFlagsCoverage(t *testing.T) {
 		{StageStateChanged, "StageStateChanged", func(s *Store, n int) Mutation {
 			return StageAttempted{Repo: testRepo, Number: n, StageName: "S", At: time.Now()}
 		}},
-		{WorkerChanged, "WorkerChanged", func(s *Store, n int) Mutation {
+		{WorkerChanged, "WorkerChanged/Heartbeat", func(s *Store, n int) Mutation {
 			now := time.Now()
 			s.Apply(LocalLockAcquired{Repo: testRepo, Number: n, User: "u", AcquiredAt: now, Worker: &WorkerHandle{StageName: "X", StartedAt: now}})
 			return WorkerHeartbeat{Repo: testRepo, Number: n, At: now}
+		}},
+		{WorkerChanged, "WorkerChanged/PIDSet", func(s *Store, n int) Mutation {
+			now := time.Now()
+			s.Apply(LocalLockAcquired{Repo: testRepo, Number: n, User: "u", AcquiredAt: now, Worker: &WorkerHandle{StageName: "X", StartedAt: now}})
+			return WorkerPIDSet{Repo: testRepo, Number: n, PID: 12345}
 		}},
 		{CooldownChanged, "CooldownChanged", func(s *Store, n int) Mutation {
 			return CooldownRecorded{Repo: testRepo, Number: n, Reason: "r", Until: time.Now().Add(time.Minute)}
