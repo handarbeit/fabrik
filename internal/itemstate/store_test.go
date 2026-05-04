@@ -374,3 +374,117 @@ func TestSHAIndexMaintained(t *testing.T) {
 		t.Fatalf("CheckRunCompleted: err=%v changes=%d", err, len(changes))
 	}
 }
+
+// ---- Phase 3-E: new mutation handler tests ----
+
+// TestCIMergePendingStartedAndCleared verifies CIMergePendingStarted sets
+// CIMergePendingSince and CIMergePendingCleared zeroes it.
+func TestCIMergePendingStartedAndCleared(t *testing.T) {
+	s := NewStore(nil)
+	s.Apply(IssueOpened{Item: testProjectItem(testRepo, 1)})
+
+	pendingAt := time.Now().Add(-5 * time.Minute)
+	_, _, err := s.Apply(CIMergePendingStarted{Repo: testRepo, Number: 1, At: pendingAt})
+	if err != nil {
+		t.Fatalf("CIMergePendingStarted: %v", err)
+	}
+
+	snap, _ := s.Get(testRepo, 1)
+	lpr := snap.LinkedPR()
+	if lpr == nil {
+		t.Fatal("expected LinkedPR non-nil after CIMergePendingStarted")
+	}
+	if !lpr.CIMergePendingSince.Equal(pendingAt) {
+		t.Errorf("CIMergePendingSince = %v, want %v", lpr.CIMergePendingSince, pendingAt)
+	}
+
+	// Snapshot immutability: a held snapshot must not see the clear.
+	snapHeld := snap
+
+	_, _, err = s.Apply(CIMergePendingCleared{Repo: testRepo, Number: 1})
+	if err != nil {
+		t.Fatalf("CIMergePendingCleared: %v", err)
+	}
+	snap2, _ := s.Get(testRepo, 1)
+	if lpr2 := snap2.LinkedPR(); lpr2 != nil && !lpr2.CIMergePendingSince.IsZero() {
+		t.Error("expected CIMergePendingSince zeroed after CIMergePendingCleared")
+	}
+
+	// Original snapshot must be unchanged.
+	if lprHeld := snapHeld.LinkedPR(); lprHeld == nil || lprHeld.CIMergePendingSince.IsZero() {
+		t.Error("held snapshot should still show the original CIMergePendingSince")
+	}
+}
+
+// TestPRChecksObservedMonotonic verifies HasHadChecks transitions false→true and stays true.
+func TestPRChecksObservedMonotonic(t *testing.T) {
+	s := NewStore(nil)
+	s.Apply(IssueOpened{Item: testProjectItem(testRepo, 2)})
+
+	// Initially no linked PR: snap.LinkedPR() is nil.
+	snap0, _ := s.Get(testRepo, 2)
+	if lpr := snap0.LinkedPR(); lpr != nil && lpr.HasHadChecks {
+		t.Fatal("expected HasHadChecks=false initially")
+	}
+
+	_, _, err := s.Apply(PRChecksObserved{Repo: testRepo, Number: 2})
+	if err != nil {
+		t.Fatalf("PRChecksObserved: %v", err)
+	}
+
+	snap1, _ := s.Get(testRepo, 2)
+	lpr1 := snap1.LinkedPR()
+	if lpr1 == nil || !lpr1.HasHadChecks {
+		t.Fatal("expected HasHadChecks=true after PRChecksObserved")
+	}
+
+	// Second application: no-op (monotonic).
+	_, changes, _ := s.Apply(PRChecksObserved{Repo: testRepo, Number: 2})
+	if len(changes) != 0 {
+		t.Error("second PRChecksObserved should be a no-op (no change)")
+	}
+
+	snap2, _ := s.Get(testRepo, 2)
+	if lpr2 := snap2.LinkedPR(); lpr2 == nil || !lpr2.HasHadChecks {
+		t.Error("HasHadChecks should still be true after redundant PRChecksObserved")
+	}
+}
+
+// TestItemDeepFetchedClearsLastDeepFetchFailureAt verifies that applying ItemDeepFetched
+// zeroes the LastDeepFetchFailureAt field (set by a prior DeepFetchFailed).
+func TestItemDeepFetchedClearsLastDeepFetchFailureAt(t *testing.T) {
+	s := NewStore(nil)
+	s.Apply(IssueOpened{Item: testProjectItem(testRepo, 3)})
+
+	failedAt := time.Now().Add(-time.Minute)
+	s.Apply(DeepFetchFailed{Repo: testRepo, Number: 3, At: failedAt})
+
+	snap1, _ := s.Get(testRepo, 3)
+	if snap1.State().LastDeepFetchFailureAt.IsZero() {
+		t.Fatal("expected LastDeepFetchFailureAt set after DeepFetchFailed")
+	}
+
+	freshItem := testProjectItem(testRepo, 3)
+	s.Apply(ItemDeepFetched{Repo: testRepo, Number: 3, FreshState: freshItem})
+
+	snap2, _ := s.Get(testRepo, 3)
+	if !snap2.State().LastDeepFetchFailureAt.IsZero() {
+		t.Error("expected LastDeepFetchFailureAt zeroed after ItemDeepFetched")
+	}
+}
+
+// TestLinkedPRSnapshotImmutabilityAfterCIMerge verifies that a snapshot taken
+// before CIMergePendingStarted is not retroactively mutated.
+func TestLinkedPRSnapshotImmutabilityAfterCIMerge(t *testing.T) {
+	s := NewStore(nil)
+	s.Apply(IssueOpened{Item: testProjectItem(testRepo, 4)})
+
+	snapBefore, _ := s.Get(testRepo, 4)
+
+	s.Apply(CIMergePendingStarted{Repo: testRepo, Number: 4, At: time.Now()})
+
+	// snapBefore must not see the mutation.
+	if lpr := snapBefore.LinkedPR(); lpr != nil && !lpr.CIMergePendingSince.IsZero() {
+		t.Error("snapshot taken before CIMergePendingStarted should not reflect the mutation")
+	}
+}
