@@ -678,30 +678,14 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		}
 	}
 
-	// Update the updatedAt cache only for items that were actually deep-fetched
-	// and processed. Caching all board items would cause items that failed the
-	// shallow filter (or were skipped for other reasons) to appear "unchanged"
-	// on the next poll and never be retried.
-	// We defer the actual cache update to after the dispatch loop so that
-	// itemNeedsWork sees the OLD timestamps during this poll.
-	// The deepFetchCandidates slice is populated below; the defer captures it
-	// by reference so it sees the final contents.
+	// deepFetchCandidates is populated below; the defer captures it by reference
+	// so it sees the final contents.
 	var deepFetchCandidates []gh.ProjectItem
-	// Items advanced by the yolo catch-up loop must NOT have their updatedAt
-	// re-cached — the advance changes the item's board column but not its
-	// updatedAt, so re-caching would make the item look "unchanged" on the
-	// next poll and prevent the new stage from running.
+	// Items advanced by the yolo catch-up loop must NOT have their CooldownAt
+	// re-stamped — the advance changes the item's board column, so the new stage
+	// must dispatch on the next poll without waiting for the cooldown.
 	advancedItems := make(map[string]bool)
 	defer func() {
-		// Update seenUpdatedAt under e.mu (seenUpdatedAt is an engine map, not in store).
-		e.mu.Lock()
-		for _, item := range deepFetchCandidates {
-			iKey := issueKey(item, e.defaultRepo())
-			if !item.UpdatedAt.IsZero() && !advancedItems[iKey] {
-				e.seenUpdatedAt[iKey] = item.UpdatedAt
-			}
-		}
-		e.mu.Unlock()
 		// Refresh CooldownAt["periodic-re-eval"] for all non-advanced, non-cleanup
 		// deepFetchCandidates after each full poll cycle. This preserves the #488 fix:
 		// items are deep-fetched at most once per cooldown window. The stage:X:complete
@@ -782,10 +766,50 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		}
 	}
 
+	// Drain mayNeedWork into a local cycleSet for this poll cycle. Observers fire
+	// asynchronously (from any goroutine calling Apply) and write to e.mayNeedWork;
+	// we snapshot it here so the dispatch loop works with a consistent view and so
+	// that new changes arriving during this cycle are queued for the NEXT cycle.
+	cycleSet := func() map[string]bool {
+		e.mayNeedWorkMu.Lock()
+		defer e.mayNeedWorkMu.Unlock()
+		s := e.mayNeedWork
+		e.mayNeedWork = make(map[string]bool)
+		return s
+	}()
+
 	var deepFetched int
 	for i := range board.Items {
 		if repoFilter != "" && board.Items[i].Repo != "" && board.Items[i].Repo != repoFilter {
 			continue
+		}
+		// Pre-filter: skip items that haven't changed since the last poll cycle.
+		// An item is eligible for deep-fetch evaluation if:
+		//   (a) it is in cycleSet (an observer saw a relevant Store change), OR
+		//   (b) it is a cleanup stage (checks local filesystem, not board state), OR
+		//   (c) it has a bypass label (awaiting-ci or rebase-needed need per-poll eval), OR
+		//   (d) it has an expired CooldownAt (periodic re-evaluation gate has passed).
+		// Items with an active CooldownAt but no other signal are suppressed.
+		item := board.Items[i]
+		iKey := issueKey(item, e.defaultRepo())
+		if !cycleSet[iKey] {
+			stage := stages.FindStage(e.cfg.Stages, item.Status)
+			isCleanup := stage != nil && stage.CleanupWorktree
+			hasAwaitingLabel := hasLabel(item, "fabrik:awaiting-ci") || hasLabel(item, "fabrik:rebase-needed")
+			var hasExpiredCooldown bool
+			if !isCleanup && !hasAwaitingLabel {
+				repo := itemOwnerRepoString(item, e.defaultRepo())
+				if snap, snapErr := e.store.Get(repo, item.Number); snapErr == nil {
+					now := time.Now()
+					hasExpiredCooldown = snap.HasExpiredCooldown(now)
+					if snap.HasActiveCooldown(now) && !hasExpiredCooldown {
+						continue // within cooldown window: no change + no expired window
+					}
+				}
+			}
+			if !isCleanup && !hasAwaitingLabel && !hasExpiredCooldown {
+				continue // no state change, no bypass — skip this cycle
+			}
 		}
 		if !e.itemMayNeedWork(board.Items[i]) {
 			continue
@@ -806,7 +830,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 				Number: board.Items[i].Number,
 				At:     time.Now(),
 			})
-			// Skip appending to deepFetchCandidates so seenUpdatedAt is NOT updated.
+			// Skip appending to deepFetchCandidates.
 			// The next poll will retry the deep-fetch for this item.
 			continue
 		}
@@ -1007,10 +1031,9 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			if err := e.attemptMergeOnValidate(ctx, board, item, stage); err != nil {
 				if errors.Is(err, errRebaseDispatched) {
 					e.logf(item.Number, "rebase-reinvoke", "PR merge deferred — rebase dispatched during catch-up\n")
-					// Mark as dispatched so the defer does not re-cache seenUpdatedAt —
-					// mirrors Phase 1 dispatch behavior (review/rebase/CI-fix reinvokes).
-					// Without this, if the label add fails and GitHub doesn't bump
-					// updatedAt, itemMayNeedWork could filter the item on the next poll.
+					// Mark as advanced so CooldownAt["periodic-re-eval"] is NOT stamped —
+					// the column move fires StatusChanged → mayNeedWork observer already
+					// queues re-evaluation for the next poll cycle.
 					advancedItems[issueKey(item, e.defaultRepo())] = true
 				} else {
 					e.logf(item.Number, "warn", "PR not merged during catch-up: %v\n", err)

@@ -70,7 +70,8 @@ type Engine struct {
 	store                *itemstate.Store      // per-item engine state (locks, invocation outcomes, deep-fetch, CI-gate); see ADR-036
 	totalTokens          TokenUsage            // accumulated token usage since process start
 	lastReportedCost     float64               // cost at last [stats] report; skip repeat prints when unchanged
-	seenUpdatedAt        map[string]time.Time  // key: issueKey; tracks last-seen updatedAt per issue (deferred to Phase 3-H)
+	mayNeedWork    map[string]bool // key: issueKey; items that have changed since the last poll cycle
+	mayNeedWorkMu  sync.Mutex      // guards mayNeedWork
 	seededRepos          map[string]bool       // key: "owner/repo"; in-memory guard to avoid re-seeding on every poll
 	idleCount            int                   // consecutive idle polls; triggers self-upgrade at threshold
 	idleStart            time.Time             // when consecutive idle polls began; zero value = not idle
@@ -122,10 +123,10 @@ func New(cfg Config) (*Engine, error) {
 		claude:               &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},
 		worktreeManagers:     make(map[string]*WorktreeManager),
 		fabrikDir:            fabrikDir,
-		store:                itemstate.NewStore(nil),
-		seenUpdatedAt:        make(map[string]time.Time),
-		seededRepos:          make(map[string]bool),
-		sem:                  make(chan struct{}, cfg.MaxConcurrent),
+		store:        itemstate.NewStore(nil),
+		mayNeedWork:  make(map[string]bool),
+		seededRepos:  make(map[string]bool),
+		sem:          make(chan struct{}, cfg.MaxConcurrent),
 	}
 
 	// Migrate any old-style worktrees (issue-N/) to the new per-repo layout.
@@ -176,10 +177,10 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		client:               client,
 		claude:               claude,
 		worktreeManagers:     wms,
-		store:                itemstate.NewStore(nil),
-		seenUpdatedAt:        make(map[string]time.Time),
-		seededRepos:          make(map[string]bool),
-		sem:                  make(chan struct{}, maxConcurrent),
+		store:       itemstate.NewStore(nil),
+		mayNeedWork: make(map[string]bool),
+		seededRepos: make(map[string]bool),
+		sem:         make(chan struct{}, maxConcurrent),
 	}
 	if worktrees != nil {
 		worktrees.logfFn = eng.logf
