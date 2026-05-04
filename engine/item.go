@@ -874,6 +874,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		Completed: completed,
 		Blocked:   blockedOnInput,
 		Usage:     usage,
+		Duration:  time.Since(workerStartedAt),
 	})
 
 	if completed {

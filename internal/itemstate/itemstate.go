@@ -86,6 +86,10 @@ type ItemState struct {
 	// user comment rather than running a full stage. Mirrors InvocationRecorded.IsComment.
 	LastInvocationIsComment bool
 
+	// LastInvocationDuration is the wall-clock time of the most recent Claude invocation.
+	// Zero when not recorded (comment-processing paths that don't track start time).
+	LastInvocationDuration time.Duration
+
 	// LastTokenUsage holds token consumption from the most recent Claude invocation.
 	// Replaces engine.lastUsage[iKey].
 	LastTokenUsage TokenUsage
