@@ -324,6 +324,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 	case ItemDeepFetched:
 		flags := applyProjectItem(item, v.FreshState)
 		item.LastDeepFetchAt = time.Now()
+		item.LastDeepFetchFailureAt = time.Time{} // clear failure on success
 		return flags | DeepFetchChanged
 
 	case StageAttempted:
@@ -389,6 +390,25 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 	case DeepFetchFailed:
 		item.LastDeepFetchFailureAt = v.At
 		return DeepFetchChanged
+
+	case CIMergePendingStarted:
+		ensureLinkedPR(item, 0)
+		item.LinkedPR.CIMergePendingSince = v.At
+		return LinkedPRChanged
+
+	case CIMergePendingCleared:
+		if item.LinkedPR != nil {
+			item.LinkedPR.CIMergePendingSince = time.Time{}
+		}
+		return LinkedPRChanged
+
+	case PRChecksObserved:
+		ensureLinkedPR(item, 0)
+		if item.LinkedPR.HasHadChecks {
+			return 0 // already set; no-op
+		}
+		item.LinkedPR.HasHadChecks = true
+		return LinkedPRChanged
 
 	case BaseBranchWarnRecorded:
 		if item.BaseBranchWarned == nil {
