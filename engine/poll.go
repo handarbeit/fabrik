@@ -299,6 +299,55 @@ func (e *Engine) Run() error {
 	// Extract in-memory cache if configured (nil when board-cache=none).
 	cacheImpl, _ := e.readClient.(*boardcache.CacheImpl)
 
+	// Register reactive observers. All returned unsubscribe funcs are collected
+	// and called when Run returns. Observers on cacheImpl are gated on cacheImpl != nil;
+	// observers on engine.store are always registered.
+	{
+		var unsubs []func()
+		defer func() {
+			for _, unsub := range unsubs {
+				unsub()
+			}
+		}()
+
+		// wakeChObserver fires on board-state changes from both stores.
+		// engine.store fires LockChanged; cacheImpl.store fires Status/Labels/Comments/LinkedPR.
+		if e.wakeCh != nil {
+			wakeObs := newWakeChObserver(e.wakeCh)
+			unsubs = append(unsubs, e.store.Subscribe(wakeObs))
+			if cacheImpl != nil {
+				unsubs = append(unsubs, cacheImpl.Subscribe(wakeObs))
+			}
+		}
+
+		// mayNeedWorkObserver populates e.mayNeedWork from both stores so the
+		// dispatch loop only evaluates items that have changed.
+		mwnObs := newMayNeedWorkObserver(&e.mayNeedWorkMu, &e.mayNeedWork)
+		unsubs = append(unsubs, e.store.Subscribe(mwnObs))
+		if cacheImpl != nil {
+			unsubs = append(unsubs, cacheImpl.Subscribe(mwnObs))
+		}
+
+		// InvocationObserver fires on engine.store only (InvocationRecorded path).
+		invObs := &InvocationObserver{Stages: e.cfg.Stages, Emit: e.emitStructural}
+		unsubs = append(unsubs, e.store.Subscribe(invObs))
+
+		// StageChangeObserver fires on cacheImpl.store (StatusChanged from reconcile/webhook).
+		if cacheImpl != nil {
+			stageObs := &StageChangeObserver{Emit: e.emitStructural}
+			unsubs = append(unsubs, cacheImpl.Subscribe(stageObs))
+
+			// WebhookHealthObserver fires tui.WebhookStatusEvent on pause/resume transitions.
+			unsubs = append(unsubs, cacheImpl.SubscribePause(func(paused bool) {
+				state := "healthy"
+				if paused {
+					state = "unhealthy"
+				}
+				e.emitStructural(tui.WebhookStatusEvent{State: state})
+			}))
+		}
+	}
+
 	// Start webhook manager when enabled. Failures are non-fatal: the engine
 	// continues in polling-only mode.
 	if e.cfg.Webhooks {
