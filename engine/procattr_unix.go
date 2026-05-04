@@ -32,8 +32,11 @@ func killProcGroup(cmd *exec.Cmd) {
 
 // isProcessAlive returns true if the process with the given PID is alive.
 // Uses signal 0 (does not kill the process; only probes existence/permissions).
+// EPERM means the process exists but we lack permission — treat as alive.
+// ESRCH means no such process — treat as dead.
 func isProcessAlive(pid int) bool {
-	return syscall.Kill(pid, 0) == nil
+	err := syscall.Kill(pid, 0)
+	return err == nil || err == syscall.EPERM
 }
 
 // killProcGroupGraceful sends SIGTERM to the process group, waits 10 seconds for
