@@ -14,16 +14,21 @@ import (
 // ---------------------------------------------------------------------------
 
 type mockClient struct {
-	fetchItemDetailsCount int
-	fetchCheckRunsCount   int
-	fetchLinkedPRCount    int
-	fetchLabelsCount      int
+	fetchItemDetailsCount      int
+	fetchCheckRunsCount        int
+	fetchLinkedPRCount         int
+	fetchLabelsCount           int
+	fetchPRClosingIssuesCount  int
+	fetchPRsForSHACount        int
 
 	itemDetailsResult  *gh.ProjectItem
 	checkRunsResult    []gh.CheckRun
 	linkedPRResult     *gh.PRDetails
 	labelsResult       []string
 	projectBoardResult *gh.ProjectBoard
+
+	fetchPRClosingIssuesFn func(owner, repo string, prNumber int) ([]int, error)
+	fetchPRsForSHAFn       func(owner, repo, sha string) ([]int, error)
 }
 
 func (m *mockClient) FetchProjectBoard(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
@@ -79,6 +84,22 @@ func (m *mockClient) FetchStatusField(projectID string) (*gh.StatusField, error)
 
 func (m *mockClient) RateLimitStats() (rest, graphql gh.RateLimitStats) {
 	return gh.RateLimitStats{}, gh.RateLimitStats{}
+}
+
+func (m *mockClient) FetchPRClosingIssues(owner, repo string, prNumber int) ([]int, error) {
+	m.fetchPRClosingIssuesCount++
+	if m.fetchPRClosingIssuesFn != nil {
+		return m.fetchPRClosingIssuesFn(owner, repo, prNumber)
+	}
+	return nil, nil
+}
+
+func (m *mockClient) FetchPRsForSHA(owner, repo, sha string) ([]int, error) {
+	m.fetchPRsForSHACount++
+	if m.fetchPRsForSHAFn != nil {
+		return m.fetchPRsForSHAFn(owner, repo, sha)
+	}
+	return nil, nil
 }
 
 // ---------------------------------------------------------------------------
