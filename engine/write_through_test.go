@@ -38,24 +38,40 @@ func TestLabelWriteThrough(t *testing.T) {
 	}
 }
 
-// TestLockLabelWriteThrough verifies that removeLockLabel immediately updates the cache.
+// TestLockLabelWriteThrough verifies both the add and remove write-through paths
+// for lock-style labels.
 func TestLockLabelWriteThrough(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng, cache := testEngineWithCache(client, &mockClaudeInvoker{})
 
-	// Seed the lock label into the cache first via ApplyLabelAdded.
-	lockLabel := "fabrik:locked:testuser"
-	cache.ApplyLabelAdded(boardcache.ItemKey("owner/repo", 1), lockLabel)
+	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
+	stage := testStages()[0]
+
+	// Acquisition path: blockOnInput calls AddLabelToIssue for fabrik:paused and
+	// fabrik:awaiting-input using the same write-through pattern as processItem's
+	// lock acquire (direct AddLabelToIssue → cache.ApplyLabelAdded on success).
+	eng.blockOnInput(item, stage)
 
 	labels, err := cache.FetchLabels("owner", "repo", 1)
 	if err != nil {
-		t.Fatalf("FetchLabels before remove: %v", err)
+		t.Fatalf("FetchLabels after blockOnInput: %v", err)
+	}
+	if !containsLabel(labels, "fabrik:paused") {
+		t.Errorf("add write-through: expected fabrik:paused in cache after blockOnInput, got %v", labels)
+	}
+
+	// Removal path: seed the lock label, then verify removeLockLabel updates the cache.
+	lockLabel := "fabrik:locked:testuser"
+	cache.ApplyLabelAdded(boardcache.ItemKey("owner/repo", 1), lockLabel)
+
+	labels, err = cache.FetchLabels("owner", "repo", 1)
+	if err != nil {
+		t.Fatalf("FetchLabels before removeLockLabel: %v", err)
 	}
 	if !containsLabel(labels, lockLabel) {
 		t.Fatalf("precondition: expected lock label in cache, got %v", labels)
 	}
 
-	// removeLockLabel → cache should immediately drop the lock label.
 	eng.removeLockLabel("owner", "repo", 1, lockLabel)
 
 	labels, err = cache.FetchLabels("owner", "repo", 1)
@@ -63,7 +79,7 @@ func TestLockLabelWriteThrough(t *testing.T) {
 		t.Fatalf("FetchLabels after removeLockLabel: %v", err)
 	}
 	if containsLabel(labels, lockLabel) {
-		t.Errorf("expected lock label absent from cache after removeLockLabel, got %v", labels)
+		t.Errorf("removal write-through: expected lock label absent after removeLockLabel, got %v", labels)
 	}
 }
 
@@ -130,12 +146,14 @@ func TestWriteThroughOnFailure(t *testing.T) {
 	}
 }
 
-// TestAdvanceLoopRegression verifies the core bug: after advanceToNextStage succeeds,
-// the cache reflects the new status immediately — preventing re-dispatch on the next poll cycle.
-// (advanceToNextStage already had UpdateItemStatus write-through; this test is a non-regression guard.)
+// TestAdvanceLoopRegression verifies the core advance-loop bug class: after
+// advanceToNextStage succeeds, FetchProjectBoard immediately returns the new
+// Status — so the catch-up loop on the next poll sees the updated column and
+// does not re-dispatch. Without write-through, the cache would still show the
+// old Status and the catch-up loop would fire again every 15 seconds.
 func TestAdvanceLoopRegression(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng, _ := testEngineWithCache(client, &mockClaudeInvoker{})
+	eng, cache := testEngineWithCache(client, &mockClaudeInvoker{})
 	eng.statusField = &gh.StatusField{
 		FieldID: "FIELD_1",
 		Options: map[string]string{
@@ -145,25 +163,40 @@ func TestAdvanceLoopRegression(t *testing.T) {
 	}
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
-	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo"}
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_001", Repo: "owner/repo"}
 
-	// advanceToNextStage from Research → Plan; UpdateProjectItemStatus should be called once.
+	// Precondition: cache shows item in "Research".
+	b0, err := cache.FetchProjectBoard("owner", "repo", 1, "organization")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard (before): %v", err)
+	}
+	if len(b0.Items) == 0 || b0.Items[0].Status != "Research" {
+		t.Fatalf("precondition: expected Status=Research, got %+v", b0.Items)
+	}
+
 	from := testStages()[0] // Research
 	if err := eng.advanceToNextStage(board, item, from); err != nil {
 		t.Fatalf("advanceToNextStage: %v", err)
 	}
-	if len(client.updateStatusCalls) != 1 {
-		t.Fatalf("expected 1 UpdateProjectItemStatus call, got %d", len(client.updateStatusCalls))
-	}
 
-	// Calling again immediately should still call UpdateProjectItemStatus (stage hasn't changed
-	// in the live board; the cache write-through prevents re-reading stale status mid-cycle).
-	// This test guards against the "advance fires twice on the same item" regression.
-	if err := eng.advanceToNextStage(board, item, from); err != nil {
-		t.Fatalf("advanceToNextStage (2nd call): %v", err)
+	// The cache must immediately reflect the new Status. If it did not, the
+	// catch-up loop would still see Status="Research" and re-advance, looping
+	// every poll cycle — the advance-loop bug observed on issues #501 and #506.
+	b1, err := cache.FetchProjectBoard("owner", "repo", 1, "organization")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard (after): %v", err)
 	}
-	if len(client.updateStatusCalls) != 2 {
-		t.Fatalf("expected 2 total UpdateProjectItemStatus calls, got %d", len(client.updateStatusCalls))
+	var found bool
+	for _, pi := range b1.Items {
+		if pi.Number == 1 {
+			found = true
+			if pi.Status != "Plan" {
+				t.Errorf("advance-loop regression: expected Status=Plan after advanceToNextStage, got %q — stale cache would cause re-dispatch loop", pi.Status)
+			}
+		}
+	}
+	if !found {
+		t.Error("item not found in FetchProjectBoard result after advance")
 	}
 }
 
