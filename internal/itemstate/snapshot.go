@@ -129,6 +129,30 @@ func (s Snapshot) CooldownAt(reason string) time.Time {
 	return s.state.CooldownAt[reason]
 }
 
+// HasActiveCooldown reports whether any CooldownAt entry has not yet expired
+// relative to now. Reads directly from the snapshot's already-copied map —
+// no additional allocation.
+func (s Snapshot) HasActiveCooldown(now time.Time) bool {
+	for _, t := range s.state.CooldownAt {
+		if now.Before(t) {
+			return true
+		}
+	}
+	return false
+}
+
+// HasExpiredCooldown reports whether any CooldownAt entry is non-zero and
+// has already expired relative to now. Reads directly from the snapshot's
+// already-copied map — no additional allocation.
+func (s Snapshot) HasExpiredCooldown(now time.Time) bool {
+	for _, t := range s.state.CooldownAt {
+		if !t.IsZero() && !now.Before(t) {
+			return true
+		}
+	}
+	return false
+}
+
 // LastAttemptAt returns the last invocation timestamp for a given stage, or zero.
 func (s Snapshot) LastAttemptAt(stageName string) time.Time {
 	return s.state.StageState.LastAttemptAt[stageName]
