@@ -1390,19 +1390,44 @@ In user mode (PAT-based, repo-level webhooks via `gh webhook forward`), GitHub d
 
 | Layer | Mechanism | Latency | Cost |
 |-------|-----------|---------|------|
-| **0** Write-through | After any successful `UpdateProjectItemStatus` call in the engine, `CacheImpl.UpdateItemStatus` is called immediately | Zero | Zero |
+| **0** Write-through | After any successful mutation call in the engine (status, labels, comments), the corresponding `CacheImpl` method is called immediately | Zero | Zero |
 | **1** Per-event refresh | After `ApplyDelta` for an `issues` or `issue_comment` event on a known item, `FetchProjectItemStatus` fetches the current Status | Seconds (best-effort) | ~1–5 pts/event |
 | **2** Periodic status sweep | `runReconciliationLoop` calls `FetchProjectItemStatusBatch` at `ProjectStatusPollSeconds` cadence (default 10 min) | Up to 10 min | O(⌈N/100⌉) per sweep |
 | **Bootstrap / stream-recovery** | Full `FetchProjectBoard` + `Reconcile` on startup and on webhook stream recovery | Minutes | Full board cost |
 
-**Residual latency**: For external column moves (user moves issue on the board), the upper bound on detection latency is the Layer 2 cadence (`ProjectStatusPollSeconds`). If the column move happens to coincide with any other issue activity (a comment, label change, etc.), Layer 1 may catch it sooner. Layer 0 applies only to Fabrik's own stage transitions.
+**Residual latency**: For external column moves (user moves issue on the board), the upper bound on detection latency is the Layer 2 cadence (`ProjectStatusPollSeconds`). If the column move happens to coincide with any other issue activity (a comment, label change, etc.), Layer 1 may catch it sooner. Layer 0 applies only to Fabrik's own mutations.
 
-**Layer 0 write-through convention**: Every call site that calls `UpdateProjectItemStatus` to mutate a project item's Status **must** also call `cacheImpl.UpdateItemStatus` on success. This invariant prevents the cache from staling on self-driven transitions. Use the safe type assertion pattern:
+**Layer 0 write-through convention**: Every engine call site that mutates dispatch-relevant cache state **must** call the corresponding `CacheImpl` write-through method immediately after the API call succeeds. The safe type-assertion pattern used at every site:
 
 ```go
 if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-    cacheImpl.UpdateItemStatus(boardcache.ItemKey(item.Repo, item.Number), newStatus)
+    cacheImpl.<Method>(boardcache.ItemKey(item.Repo, item.Number), ...)
 }
 ```
+
+This is a no-op when `e.readClient` is a `GitHubAdapter` (cache-disabled mode), so the guard is always safe to include.
+
+**Covered mutation types and their `CacheImpl` methods:**
+
+| Mutation | `CacheImpl` method | Dispatch relevance |
+|----------|--------------------|--------------------|
+| `UpdateProjectItemStatus` | `UpdateItemStatus` | Stage selection reads `Status` |
+| `AddLabelToIssue` | `ApplyLabelAdded` | Label guards (`fabrik:locked`, `stage:*:complete`, etc.) |
+| `RemoveLabelFromIssue` | `ApplyLabelRemoved` | Same |
+| `AddComment` (issue-targeted) | `ApplyCommentAdded` | Comment dispatch reads `Comments` for rocket-reaction checks |
+
+**Excluded mutation types** (annotated with `// no write-through: excluded —` at each call site):
+
+| Mutation | Reason excluded |
+|----------|----------------|
+| `AddCommentReaction` | Reactions are not read from cache for dispatch decisions |
+| `AddPRReviewCommentReaction` | Same |
+| `AddComment` targeting a PR number | Posts to PR comment thread, not issue cache |
+| `UpdateIssueBody` | Issue body is not read from cache for dispatch decisions |
+| `CreateDraftPR` | PR existence is resolved live via `FindPRForIssue`; not cached |
+| `MarkPRReady` | Draft state is not read from cache for dispatch decisions |
+| `MergePR` | Merge state is not read from cache for dispatch decisions |
+
+**`CacheImpl` existence guard**: All three new write-through methods (`ApplyLabelAdded`, `ApplyLabelRemoved`, `ApplyCommentAdded`) call `c.store.Get(repo, number)` before applying the mutation. If the key is not present in the Store (i.e., was never bootstrapped), the method returns without creating a phantom Store entry.
 
 **Layer 1 scope**: Only `issues` and `issue_comment` event types trigger a per-event status fetch. `pull_request`, `pull_request_review`, `check_run`, and other event types are excluded from Layer 1 (finding the linked issue for a PR event requires an O(N) cache scan; `check_run` does not carry an item ID). Layer 2's periodic sweep covers these cases within its cadence.

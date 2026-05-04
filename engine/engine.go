@@ -420,14 +420,26 @@ func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error
 		msg := fmt.Sprintf("🏭 **Fabrik — cannot clone repo**\n\nFailed to clone `%s/%s`:\n```\n%v\n```\nHuman intervention required. Fix the clone issue and remove `fabrik:paused` to retry.", owner, repo, err)
 		if dbID, commentErr := e.client.AddComment(owner, repo, item.Number, msg); commentErr != nil {
 			e.logf(item.Number, "warn", "could not post clone-failure comment: %v\n", commentErr)
-		} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+		} else {
+			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+					DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
+				})
+			}
+			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
+			if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+				e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+			}
 		}
 		if labelErr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); labelErr != nil {
 			e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", labelErr)
+		} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
 		}
 		if labelErr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); labelErr != nil {
 			e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", labelErr)
+		} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
 		}
 		// Append a history entry so the TUI records the failure.
 		hist := tui.LoadHistory()
