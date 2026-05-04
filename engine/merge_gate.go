@@ -194,7 +194,7 @@ func (e *Engine) dispatchRebaseReinvoke(ctx context.Context, board *gh.ProjectBo
 			Number:     item.Number,
 			User:       e.cfg.User,
 			AcquiredAt: now,
-			Worker:     &itemstate.WorkerHandle{StageName: stage.Name, StartedAt: now},
+			Worker:     &itemstate.WorkerHandle{StageName: stage.Name, StartedAt: now, LastSignAt: now},
 		})
 		done := make(chan struct{})
 		defer close(done)
