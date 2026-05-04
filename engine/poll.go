@@ -752,11 +752,15 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			if already {
 				continue
 			}
-			parts := strings.SplitN(ownerRepo, "/", 2)
-			if len(parts) != 2 {
+			owner, repo := parseOwnerRepo(ownerRepo)
+			if owner == "" {
+				e.logf(0, "warn", "label seeding skipped: malformed repo %q\n", ownerRepo)
+				e.mu.Lock()
+				e.seededRepos[ownerRepo] = true
+				e.mu.Unlock()
 				continue
 			}
-			if err := e.client.SeedLabels(parts[0], parts[1], sn, e.cfg.User); err != nil {
+			if err := e.client.SeedLabels(owner, repo, sn, e.cfg.User); err != nil {
 				e.logf(0, "warn", "label seeding for %s failed (non-fatal): %v\n", ownerRepo, err)
 			}
 			e.mu.Lock()
