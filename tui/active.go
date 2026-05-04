@@ -62,6 +62,12 @@ func (a ActivePaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 			a.activeIdx = len(a.active) - 1
 		}
 
+	case StageChangedEvent:
+		key := activeJobKey(ev.Repo, ev.Number)
+		if job, ok := a.active[key]; ok {
+			job.StageName = ev.NewStage
+		}
+
 	case TurnProgressEvent:
 		if key, known := a.activeNumToKey[ev.IssueNumber]; known {
 			if job, ok := a.active[key]; ok {
