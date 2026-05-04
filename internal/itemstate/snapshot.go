@@ -134,6 +134,38 @@ func (s Snapshot) LastAttemptAt(stageName string) time.Time {
 	return s.state.StageState.LastAttemptAt[stageName]
 }
 
+// Attempts returns the failed attempt count for a given stage, or zero.
+func (s Snapshot) Attempts(stageName string) int {
+	return s.state.StageState.Attempts[stageName]
+}
+
+// PausedByEngine reports whether the engine has paused this stage due to
+// repeated failures. This flag is in-memory only and does not survive restart.
+func (s Snapshot) PausedByEngine(stageName string) bool {
+	return s.state.StageState.PausedByEngine[stageName]
+}
+
+// ReviewCycles returns the review re-invocation cycle count for a given stage.
+func (s Snapshot) ReviewCycles(stageName string) int {
+	return s.state.StageState.ReviewCycles[stageName]
+}
+
+// CIFixCycles returns the CI-fix re-invocation cycle count for a given stage.
+func (s Snapshot) CIFixCycles(stageName string) int {
+	return s.state.StageState.CIFixCycles[stageName]
+}
+
+// RebaseCycles returns the rebase re-invocation cycle count for a given stage.
+func (s Snapshot) RebaseCycles(stageName string) int {
+	return s.state.StageState.RebaseCycles[stageName]
+}
+
+// CommentProcessed returns the timestamp when a comment was last processed,
+// or zero if it has not been seen.
+func (s Snapshot) CommentProcessed(commentID string) time.Time {
+	return s.state.StageState.ProcessedComments[commentID]
+}
+
 // ---- deep-copy helpers ----
 
 func copyStrings(src []string) []string {
