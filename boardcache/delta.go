@@ -2,6 +2,7 @@ package boardcache
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -227,6 +228,9 @@ func (c *CacheImpl) ensureIssueInStore(owner, fullRepo string, issNum int) error
 	pi, err := c.fallback.FetchProjectItem(owner, fullRepo[len(owner)+1:], issNum)
 	if err != nil {
 		return err
+	}
+	if pi == nil {
+		return fmt.Errorf("FetchProjectItem returned nil for %s#%d", fullRepo, issNum)
 	}
 	if pi.Repo == "" {
 		pi.Repo = fullRepo
