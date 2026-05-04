@@ -621,3 +621,80 @@ func TestFetchProjectBoard_AcceptsGenuinelyEmpty(t *testing.T) {
 		t.Errorf("expected empty board, got %d items", len(board.Items))
 	}
 }
+
+// TestFetchProjectBoard_LinkedPRNumberShallow_Populated verifies that
+// LinkedPRNumberShallow is set from the first closedByPullRequestsReferences node.
+func TestFetchProjectBoard_LinkedPRNumberShallow_Populated(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := boardResponseWith([]interface{}{
+			map[string]interface{}{
+				"id":               "PVTI_001",
+				"fieldValueByName": nil,
+				"content": map[string]interface{}{
+					"id":     "I_1",
+					"number": 1,
+					"title":  "Issue with linked PR",
+					"labels": map[string]interface{}{"nodes": []interface{}{}},
+					"closedByPullRequestsReferences": map[string]interface{}{
+						"nodes": []interface{}{
+							map[string]interface{}{
+								"updatedAt": "2026-01-01T00:00:00Z",
+								"number":    502,
+							},
+						},
+					},
+				},
+			},
+		})
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	board, err := c.FetchProjectBoard("owner", "repo", 1, "user")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
+	}
+	if len(board.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(board.Items))
+	}
+	if board.Items[0].LinkedPRNumberShallow != 502 {
+		t.Errorf("LinkedPRNumberShallow = %d, want 502", board.Items[0].LinkedPRNumberShallow)
+	}
+}
+
+// TestFetchProjectBoard_LinkedPRNumberShallow_Empty verifies that
+// LinkedPRNumberShallow stays 0 when closedByPullRequestsReferences is absent or empty.
+func TestFetchProjectBoard_LinkedPRNumberShallow_Empty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := boardResponseWith([]interface{}{
+			map[string]interface{}{
+				"id":               "PVTI_001",
+				"fieldValueByName": nil,
+				"content": map[string]interface{}{
+					"id":     "I_1",
+					"number": 1,
+					"title":  "Issue without linked PR",
+					"labels": map[string]interface{}{"nodes": []interface{}{}},
+					"closedByPullRequestsReferences": map[string]interface{}{
+						"nodes": []interface{}{},
+					},
+				},
+			},
+		})
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	board, err := c.FetchProjectBoard("owner", "repo", 1, "user")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
+	}
+	if len(board.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(board.Items))
+	}
+	if board.Items[0].LinkedPRNumberShallow != 0 {
+		t.Errorf("LinkedPRNumberShallow = %d, want 0 when no linked PRs", board.Items[0].LinkedPRNumberShallow)
+	}
+}
