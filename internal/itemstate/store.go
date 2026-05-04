@@ -275,6 +275,25 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.IsClosed = false
 		return StateChanged
 
+	case IssueEdited:
+		item.Title = v.Title
+		item.Body = v.Body
+		return TitleBodyChanged
+
+	case IssueAssigneesUpdated:
+		item.Assignees = copyStrings(v.Assignees)
+		return AssigneesChanged
+
+	case PRReviewRequested:
+		ensureLinkedPR(item, 0)
+		item.LinkedPR.ReviewRequests = copyReviewRequests(v.Reviewers)
+		return LinkedPRChanged
+
+	case PRReviewRequestRemoved:
+		ensureLinkedPR(item, 0)
+		item.LinkedPR.ReviewRequests = removeReviewRequest(item.LinkedPR.ReviewRequests, v.Login)
+		return LinkedPRChanged
+
 	case IssueCommentCreated:
 		// Idempotent: skip if comment with this DatabaseID already exists.
 		for _, existing := range item.Comments {
@@ -872,6 +891,19 @@ func containsString(ss []string, s string) bool {
 		}
 	}
 	return false
+}
+
+func removeReviewRequest(rrs []gh.ReviewRequest, login string) []gh.ReviewRequest {
+	out := rrs[:0:0]
+	for _, rr := range rrs {
+		if rr.Login != login {
+			out = append(out, rr)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func removeString(ss []string, s string) []string {

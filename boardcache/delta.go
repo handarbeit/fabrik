@@ -63,7 +63,17 @@ type issuesPayload struct {
 		Name string `json:"name"`
 	} `json:"label"`
 	Issue struct {
-		Number int `json:"number"`
+		Number    int    `json:"number"`
+		NodeID    string `json:"node_id"`
+		Title     string `json:"title"`
+		Body      string `json:"body"`
+		State     string `json:"state"`
+		Labels    []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
+		Assignees []struct {
+			Login string `json:"login"`
+		} `json:"assignees"`
 	} `json:"issue"`
 	Repository struct {
 		FullName string `json:"full_name"`
@@ -80,9 +90,19 @@ type pullRequestPayload struct {
 		Draft   bool   `json:"draft"`
 		Head    struct {
 			SHA string `json:"sha"`
+			Ref string `json:"ref"`
 		} `json:"head"`
-		MergeableState string `json:"mergeable_state"`
+		MergeableState     string `json:"mergeable_state"`
+		RequestedReviewers []struct {
+			Login string `json:"login"`
+			Type  string `json:"type"`
+		} `json:"requested_reviewers"`
 	} `json:"pull_request"`
+	// RequestedReviewer is present in review_requested/review_request_removed events.
+	RequestedReviewer struct {
+		Login string `json:"login"`
+		Type  string `json:"type"`
+	} `json:"requested_reviewer"`
 	Repository struct {
 		FullName string `json:"full_name"`
 	} `json:"repository"`

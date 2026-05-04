@@ -32,6 +32,7 @@ type GitHubClient interface {
 	FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, error)
 	FetchPRClosingIssues(owner, repo string, prNumber int) ([]int, error)
 	FetchPRsForSHA(owner, repo, sha string) ([]int, error)
+	FetchProjectItem(owner, repo string, issueNumber int) (*gh.ProjectItem, error)
 	GetPRBase(owner, repo string, prNumber int) (string, error)
 	UpdatePRBase(owner, repo string, prNumber int, newBase string) error
 	CreateDraftPR(owner, repo, title, head, base, body string, issueNumber int) (int, error)

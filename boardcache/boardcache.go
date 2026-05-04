@@ -23,6 +23,7 @@ type ReadClient interface {
 	FetchStatusField(projectID string) (*gh.StatusField, error)
 	FetchPRClosingIssues(owner, repo string, prNumber int) ([]int, error)
 	FetchPRsForSHA(owner, repo, sha string) ([]int, error)
+	FetchProjectItem(owner, repo string, issueNumber int) (*gh.ProjectItem, error)
 	RateLimitStats() (rest, graphql gh.RateLimitStats)
 }
 
@@ -75,6 +76,10 @@ func (a *GitHubAdapter) FetchPRClosingIssues(owner, repo string, prNumber int) (
 
 func (a *GitHubAdapter) FetchPRsForSHA(owner, repo, sha string) ([]int, error) {
 	return a.client.FetchPRsForSHA(owner, repo, sha)
+}
+
+func (a *GitHubAdapter) FetchProjectItem(owner, repo string, issueNumber int) (*gh.ProjectItem, error) {
+	return a.client.FetchProjectItem(owner, repo, issueNumber)
 }
 
 func (a *GitHubAdapter) RateLimitStats() (rest, graphql gh.RateLimitStats) {
@@ -608,6 +613,11 @@ func (c *CacheImpl) FetchPRClosingIssues(owner, repo string, prNumber int) ([]in
 // FetchPRsForSHA always delegates to GitHub — used by the auto-heal path in applyCheckRunCompleted.
 func (c *CacheImpl) FetchPRsForSHA(owner, repo, sha string) ([]int, error) {
 	return c.fallback.FetchPRsForSHA(owner, repo, sha)
+}
+
+// FetchProjectItem always delegates to GitHub — used by ensureIssueInStore for the fallback fetch path.
+func (c *CacheImpl) FetchProjectItem(owner, repo string, issueNumber int) (*gh.ProjectItem, error) {
+	return c.fallback.FetchProjectItem(owner, repo, issueNumber)
 }
 
 // RateLimitStats always delegates to GitHub.

@@ -2,6 +2,7 @@ package github
 
 import (
 	"fmt"
+	"strconv"
 	"time"
 )
 
@@ -345,11 +346,14 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 // FetchItemDetails populates the Comments, Labels, Body, URL, Author, Assignees,
 // and BlockedBy fields of a ProjectItem by fetching full item data via individual
 // node queries. This is the "deep" phase of the two-phase fetch approach.
+// If item.Number is zero (e.g., for projects_v2_item.created with only a node_id),
+// it is populated from the GraphQL response.
 func (c *Client) FetchItemDetails(item *ProjectItem) error {
 	query := `
 query($id: ID!) {
   node(id: $id) {
     ... on Issue {
+      number
       body
       url
       author { login }
@@ -483,6 +487,7 @@ query($id: ID!) {
 	var result struct {
 		Data struct {
 			Node *struct {
+				Number int    `json:"number"`
 				Body   string `json:"body"`
 				URL    string `json:"url"`
 				Author *struct {

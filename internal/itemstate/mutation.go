@@ -71,6 +71,49 @@ type IssueReopened struct {
 func (IssueReopened) isMutation() {}
 func (m IssueReopened) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// IssueEdited is emitted when an issue's title or body is changed.
+type IssueEdited struct {
+	Repo   string
+	Number int
+	Title  string
+	Body   string
+}
+
+func (IssueEdited) isMutation() {}
+func (m IssueEdited) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// IssueAssigneesUpdated is emitted when the assignee list changes (assigned or unassigned).
+// Assignees is the full post-mutation list from the webhook payload.
+type IssueAssigneesUpdated struct {
+	Repo      string
+	Number    int
+	Assignees []string
+}
+
+func (IssueAssigneesUpdated) isMutation() {}
+func (m IssueAssigneesUpdated) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// PRReviewRequested is emitted when reviewers are added to the linked PR.
+// Reviewers is the full post-mutation list from the webhook payload.
+type PRReviewRequested struct {
+	Repo      string
+	Number    int // issue number
+	Reviewers []gh.ReviewRequest
+}
+
+func (PRReviewRequested) isMutation() {}
+func (m PRReviewRequested) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// PRReviewRequestRemoved is emitted when one reviewer is removed from the linked PR.
+type PRReviewRequestRemoved struct {
+	Repo   string
+	Number int // issue number
+	Login  string
+}
+
+func (PRReviewRequestRemoved) isMutation() {}
+func (m PRReviewRequestRemoved) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // IssueCommentCreated is emitted when a new comment is added to an issue.
 type IssueCommentCreated struct {
 	Repo    string
