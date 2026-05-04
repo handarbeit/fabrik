@@ -213,6 +213,57 @@ type ItemDeepFetched struct {
 func (ItemDeepFetched) isMutation() {}
 func (m ItemDeepFetched) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// DeepFetchInvalidated clears LastDeepFetchAt so the next FetchItemDetails call
+// re-fetches deep fields from GitHub. Used by delta handlers that detect stale
+// deep state (e.g., new PR linkage discovered, new review thread comment added).
+type DeepFetchInvalidated struct {
+	Repo   string
+	Number int
+}
+
+func (DeepFetchInvalidated) isMutation() {}
+func (m DeepFetchInvalidated) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// PRHeadSHAUpdated sets LinkedPR.HeadSHA for the given item and triggers the
+// Store's shaToKey index to be updated. Used by delta handlers when a push event
+// updates the PR's head commit.
+// LinkedPRNum, if non-zero, also sets LinkedPR.Number (used in auto-heal paths
+// where the PR↔issue linkage is being established for the first time).
+type PRHeadSHAUpdated struct {
+	Repo        string
+	Number      int // issue number
+	LinkedPRNum int // PR number to set (0 = leave unchanged)
+	SHA         string
+}
+
+func (PRHeadSHAUpdated) isMutation() {}
+func (m PRHeadSHAUpdated) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// ReviewThreadCommentAdded appends an inline review-thread comment to an item's
+// LinkedPR.ThreadComments, idempotent by NodeID. Uses the ISSUE number (not the
+// PR number) as the routing key. Used by boardcache delta handlers.
+type ReviewThreadCommentAdded struct {
+	Repo        string
+	IssueNumber int
+	Comment     gh.Comment
+}
+
+func (ReviewThreadCommentAdded) isMutation() {}
+func (m ReviewThreadCommentAdded) itemKey() string { return itemKeyFor(m.Repo, m.IssueNumber) }
+
+// ShallowBoardItemUpdated updates only the shallow fields of an existing item
+// during a Reconcile pass. Unlike ItemDeepFetched or IssueOpened, it does NOT
+// overwrite deep fields (Comments, Body, Assignees, BlockedBy, LinkedPRReviews,
+// etc.). Used exclusively by CacheImpl.Reconcile.
+type ShallowBoardItemUpdated struct {
+	Repo   string
+	Number int
+	Item   gh.ProjectItem
+}
+
+func (ShallowBoardItemUpdated) isMutation() {}
+func (m ShallowBoardItemUpdated) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // ---- Engine internals ----
 
 // StageAttempted records the start of a new Claude invocation for a stage.

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 )
 
 // ---------------------------------------------------------------------------
@@ -103,10 +104,56 @@ func (m *mockClient) FetchPRsForSHA(owner, repo, sha string) ([]int, error) {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Test helpers — Store-based accessors
 // ---------------------------------------------------------------------------
 
 var nopLog = func(format string, args ...any) {}
+
+// testGetState returns a deep-copy of the ItemState for (repo, number).
+// Fails the test immediately if not found.
+func testGetState(t *testing.T, c *CacheImpl, repo string, number int) itemstate.ItemState {
+	t.Helper()
+	snap, err := c.store.Get(repo, number)
+	if err != nil {
+		t.Fatalf("testGetState: %s#%d: %v", repo, number, err)
+	}
+	return snap.State()
+}
+
+// testSetDeepFetched marks an item as deep-fetched in the Store by applying
+// an ItemDeepFetched mutation with the item's current shallow state.
+func testSetDeepFetched(c *CacheImpl, repo string, number int) {
+	snap, err := c.store.Get(repo, number)
+	if err != nil {
+		return
+	}
+	pi := snapshotToProjectItem(snap)
+	c.store.Apply(itemstate.ItemDeepFetched{Repo: repo, Number: number, FreshState: pi})
+}
+
+// testIsDeepFetched returns whether the item has a non-zero LastDeepFetchAt.
+func testIsDeepFetched(c *CacheImpl, repo string, number int) bool {
+	snap, err := c.store.Get(repo, number)
+	if err != nil {
+		return false
+	}
+	return !snap.State().LastDeepFetchAt.IsZero()
+}
+
+// testSetLinkedPR sets up item (repo, issNum) as linked to prNum in both the
+// Store and c.prNumToKey, so delta handlers can route events by PR number.
+func testSetLinkedPR(c *CacheImpl, repo string, issNum, prNum int) {
+	pk := prKey(repo, prNum)
+	ik := itemKey(repo, issNum)
+	c.store.Apply(itemstate.PRHeadSHAUpdated{Repo: repo, Number: issNum, LinkedPRNum: prNum})
+	c.mu.Lock()
+	c.prNumToKey[pk] = ik
+	c.mu.Unlock()
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 func seedCache(t *testing.T) *CacheImpl {
 	t.Helper()
@@ -221,7 +268,7 @@ func TestFetchItemDetailsFallbackPopulatesCache(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Delta: issue_comment.created — idempotent by comment ID
+// Delta: issue_comment.created — idempotent by DatabaseID
 // ---------------------------------------------------------------------------
 
 func issueCommentPayloadJSON(action, repo string, issueNum int, nodeID string, dbID int, body, user string) []byte {
@@ -239,50 +286,26 @@ func issueCommentPayloadJSON(action, repo string, issueNum int, nodeID string, d
 
 func TestDeltaIssueCommentCreated(t *testing.T) {
 	c := seedCache(t)
-	// Make sure item #1 is deep-fetched first (so Comments isn't nil from fallback).
-	c.mu.Lock()
-	c.deepFetched[itemKey("owner/repo", 1)] = true
-	c.mu.Unlock()
 
 	payload := issueCommentPayloadJSON("created", "owner/repo", 1, "C_abc", 100, "test comment", "alice")
 	c.ApplyDelta("issue_comment", payload)
 
-	board, _ := c.FetchProjectBoard("", "", 0, "")
-	var item *gh.ProjectItem
-	for i := range board.Items {
-		if board.Items[i].Number == 1 {
-			item = &board.Items[i]
-			break
-		}
-	}
-	if item == nil {
-		t.Fatal("item #1 not found")
-	}
-	// FetchProjectBoard returns shallow copy; comments are in cache.
-	// We need to check via FetchItemDetails.
-	c.mu.RLock()
-	cached := c.items[itemKey("owner/repo", 1)]
-	c.mu.RUnlock()
-	if len(cached.Comments) != 1 || cached.Comments[0].ID != "C_abc" {
-		t.Errorf("expected comment C_abc, got %+v", cached.Comments)
+	s := testGetState(t, c, "owner/repo", 1)
+	if len(s.Comments) != 1 || s.Comments[0].ID != "C_abc" {
+		t.Errorf("expected comment C_abc, got %+v", s.Comments)
 	}
 }
 
 func TestDeltaIssueCommentCreatedIdempotent(t *testing.T) {
 	c := seedCache(t)
-	c.mu.Lock()
-	c.deepFetched[itemKey("owner/repo", 1)] = true
-	c.mu.Unlock()
 
 	payload := issueCommentPayloadJSON("created", "owner/repo", 1, "C_abc", 100, "test", "alice")
 	c.ApplyDelta("issue_comment", payload)
 	c.ApplyDelta("issue_comment", payload) // duplicate
 
-	c.mu.RLock()
-	cached := c.items[itemKey("owner/repo", 1)]
-	c.mu.RUnlock()
-	if len(cached.Comments) != 1 {
-		t.Errorf("expected exactly 1 comment after duplicate, got %d", len(cached.Comments))
+	s := testGetState(t, c, "owner/repo", 1)
+	if len(s.Comments) != 1 {
+		t.Errorf("expected exactly 1 comment after duplicate, got %d", len(s.Comments))
 	}
 }
 
@@ -304,10 +327,8 @@ func TestDeltaIssuesLabeled(t *testing.T) {
 	payload := issuesLabeledPayloadJSON("labeled", "owner/repo", 1, "bug")
 	c.ApplyDelta("issues", payload)
 
-	c.mu.RLock()
-	item := c.items[itemKey("owner/repo", 1)]
-	labels := cloneStrings(item.Labels)
-	c.mu.RUnlock()
+	s := testGetState(t, c, "owner/repo", 1)
+	labels := cloneStrings(s.Labels)
 
 	found := false
 	for _, l := range labels {
@@ -326,15 +347,13 @@ func TestDeltaIssuesLabeledIdempotent(t *testing.T) {
 	c.ApplyDelta("issues", payload)
 	c.ApplyDelta("issues", payload) // add same label twice
 
-	c.mu.RLock()
-	item := c.items[itemKey("owner/repo", 1)]
+	s := testGetState(t, c, "owner/repo", 1)
 	count := 0
-	for _, l := range item.Labels {
+	for _, l := range s.Labels {
 		if l == "enhancement" {
 			count++
 		}
 	}
-	c.mu.RUnlock()
 
 	if count != 1 {
 		t.Errorf("label 'enhancement' should appear exactly once, got %d", count)
@@ -347,20 +366,17 @@ func TestDeltaIssuesUnlabeled(t *testing.T) {
 	payload := issuesLabeledPayloadJSON("unlabeled", "owner/repo", 1, "enhancement")
 	c.ApplyDelta("issues", payload)
 
-	c.mu.RLock()
-	item := c.items[itemKey("owner/repo", 1)]
-	for _, l := range item.Labels {
+	s := testGetState(t, c, "owner/repo", 1)
+	for _, l := range s.Labels {
 		if l == "enhancement" {
-			c.mu.RUnlock()
 			t.Error("label 'enhancement' should have been removed")
 			return
 		}
 	}
-	c.mu.RUnlock()
 }
 
 // ---------------------------------------------------------------------------
-// Delta: pull_request — update linkedPRs and shaToKey
+// Delta: pull_request — update linkedPRs and SHA index in Store
 // ---------------------------------------------------------------------------
 
 func pullRequestPayloadJSON(action, repo string, prNum int, sha, state string, merged, draft bool) []byte {
@@ -377,17 +393,14 @@ func pullRequestPayloadJSON(action, repo string, prNum int, sha, state string, m
 
 func TestDeltaPullRequestOpened(t *testing.T) {
 	c := seedCache(t)
-	// Set LinkedPRNumber on item #1 so shaToKey can be populated.
-	c.mu.Lock()
-	c.items[itemKey("owner/repo", 1)].LinkedPRNumber = 42
-	c.mu.Unlock()
+	// Set item #1 as linked to PR #42 so the delta handler routes correctly.
+	testSetLinkedPR(c, "owner/repo", 1, 42)
 
 	payload := pullRequestPayloadJSON("opened", "owner/repo", 42, "sha123", "open", false, false)
 	c.ApplyDelta("pull_request", payload)
 
 	c.mu.RLock()
 	pr, ok := c.linkedPRs[prKey("owner/repo", 42)]
-	shaKey, shaOK := c.shaToKey["sha123"]
 	c.mu.RUnlock()
 
 	if !ok || pr == nil {
@@ -396,32 +409,28 @@ func TestDeltaPullRequestOpened(t *testing.T) {
 	if pr != nil && pr.HeadSHA != "sha123" {
 		t.Errorf("expected HeadSHA sha123, got %q", pr.HeadSHA)
 	}
-	if !shaOK || shaKey != itemKey("owner/repo", 1) {
-		t.Errorf("expected shaToKey[sha123] = owner/repo#1, got %q (ok=%v)", shaKey, shaOK)
+	// Verify SHA is indexed in Store by checking item's LinkedPR.HeadSHA.
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.LinkedPR == nil || s.LinkedPR.HeadSHA != "sha123" {
+		t.Errorf("expected item #1's LinkedPR.HeadSHA=sha123, got %v", s.LinkedPR)
 	}
 }
 
 func TestDeltaPullRequestSynchronizeUpdatesShaTKey(t *testing.T) {
 	c := seedCache(t)
-	c.mu.Lock()
-	c.items[itemKey("owner/repo", 1)].LinkedPRNumber = 42
-	c.mu.Unlock()
+	testSetLinkedPR(c, "owner/repo", 1, 42)
 
-	// Initial SHA
+	// Initial SHA.
 	c.ApplyDelta("pull_request", pullRequestPayloadJSON("opened", "owner/repo", 42, "sha_old", "open", false, false))
-	// New push — SHA changes
+	// New push — SHA changes.
 	c.ApplyDelta("pull_request", pullRequestPayloadJSON("synchronize", "owner/repo", 42, "sha_new", "open", false, false))
 
-	c.mu.RLock()
-	_, oldOK := c.shaToKey["sha_old"]
-	_, newOK := c.shaToKey["sha_new"]
-	c.mu.RUnlock()
-
-	if oldOK {
-		t.Error("old SHA should have been removed from shaToKey")
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.LinkedPR != nil && s.LinkedPR.HeadSHA == "sha_old" {
+		t.Error("old SHA should have been replaced in item's LinkedPR.HeadSHA")
 	}
-	if !newOK {
-		t.Error("new SHA should be in shaToKey")
+	if s.LinkedPR == nil || s.LinkedPR.HeadSHA != "sha_new" {
+		t.Error("new SHA should be stored in item's LinkedPR.HeadSHA")
 	}
 }
 
@@ -442,17 +451,16 @@ func pullRequestReviewPayloadJSON(action, repo string, prNum, reviewID int, stat
 
 func TestDeltaPullRequestReviewSubmitted(t *testing.T) {
 	c := seedCache(t)
-	c.mu.Lock()
-	c.items[itemKey("owner/repo", 1)].LinkedPRNumber = 42
-	c.mu.Unlock()
+	testSetLinkedPR(c, "owner/repo", 1, 42)
 
 	payload := pullRequestReviewPayloadJSON("submitted", "owner/repo", 42, 1001, "approved", "alice")
 	c.ApplyDelta("pull_request_review", payload)
 
-	c.mu.RLock()
-	item := c.items[itemKey("owner/repo", 1)]
-	reviews := clonePRReviews(item.LinkedPRReviews)
-	c.mu.RUnlock()
+	s := testGetState(t, c, "owner/repo", 1)
+	var reviews []gh.PRReview
+	if s.LinkedPR != nil {
+		reviews = clonePRReviews(s.LinkedPR.Reviews)
+	}
 
 	if len(reviews) != 1 || reviews[0].Author != "alice" || reviews[0].State != "APPROVED" {
 		t.Errorf("unexpected reviews: %+v", reviews)
@@ -461,24 +469,23 @@ func TestDeltaPullRequestReviewSubmitted(t *testing.T) {
 
 func TestDeltaPullRequestReviewSubmittedUpsert(t *testing.T) {
 	c := seedCache(t)
-	c.mu.Lock()
-	c.items[itemKey("owner/repo", 1)].LinkedPRNumber = 42
-	c.mu.Unlock()
+	testSetLinkedPR(c, "owner/repo", 1, 42)
 
-	// First review: changes_requested
+	// First review: changes_requested.
 	c.ApplyDelta("pull_request_review", pullRequestReviewPayloadJSON("submitted", "owner/repo", 42, 1001, "changes_requested", "alice"))
-	// Second review with same ID: approve (author re-reviews)
+	// Second review with same ID: approve (author re-reviews).
 	c.ApplyDelta("pull_request_review", pullRequestReviewPayloadJSON("submitted", "owner/repo", 42, 1001, "approved", "alice"))
 
-	c.mu.RLock()
-	item := c.items[itemKey("owner/repo", 1)]
-	reviews := clonePRReviews(item.LinkedPRReviews)
-	c.mu.RUnlock()
+	s := testGetState(t, c, "owner/repo", 1)
+	var reviews []gh.PRReview
+	if s.LinkedPR != nil {
+		reviews = clonePRReviews(s.LinkedPR.Reviews)
+	}
 
 	if len(reviews) != 1 {
 		t.Errorf("upsert: expected 1 review after re-review, got %d", len(reviews))
 	}
-	if reviews[0].State != "APPROVED" {
+	if len(reviews) > 0 && reviews[0].State != "APPROVED" {
 		t.Errorf("expected APPROVED state after upsert, got %q", reviews[0].State)
 	}
 }
@@ -504,17 +511,16 @@ func pullRequestReviewCommentPayloadJSON(action, repo string, prNum, dbID int, n
 
 func TestDeltaPullRequestReviewCommentCreated(t *testing.T) {
 	c := seedCache(t)
-	c.mu.Lock()
-	c.items[itemKey("owner/repo", 1)].LinkedPRNumber = 42
-	c.mu.Unlock()
+	testSetLinkedPR(c, "owner/repo", 1, 42)
 
 	payload := pullRequestReviewCommentPayloadJSON("created", "owner/repo", 42, 200, "RC_node_1", "looks good", "bob")
 	c.ApplyDelta("pull_request_review_comment", payload)
 
-	c.mu.RLock()
-	item := c.items[itemKey("owner/repo", 1)]
-	comments := cloneComments(item.LinkedPRReviewThreadComments)
-	c.mu.RUnlock()
+	s := testGetState(t, c, "owner/repo", 1)
+	var comments []gh.Comment
+	if s.LinkedPR != nil {
+		comments = cloneComments(s.LinkedPR.ThreadComments)
+	}
 
 	if len(comments) != 1 || comments[0].ID != "RC_node_1" || comments[0].Author != "bob" {
 		t.Errorf("unexpected review thread comments: %+v", comments)
@@ -523,18 +529,17 @@ func TestDeltaPullRequestReviewCommentCreated(t *testing.T) {
 
 func TestDeltaPullRequestReviewCommentCreatedIdempotent(t *testing.T) {
 	c := seedCache(t)
-	c.mu.Lock()
-	c.items[itemKey("owner/repo", 1)].LinkedPRNumber = 42
-	c.mu.Unlock()
+	testSetLinkedPR(c, "owner/repo", 1, 42)
 
 	payload := pullRequestReviewCommentPayloadJSON("created", "owner/repo", 42, 200, "RC_node_1", "looks good", "bob")
 	c.ApplyDelta("pull_request_review_comment", payload)
 	c.ApplyDelta("pull_request_review_comment", payload) // duplicate
 
-	c.mu.RLock()
-	item := c.items[itemKey("owner/repo", 1)]
-	count := len(item.LinkedPRReviewThreadComments)
-	c.mu.RUnlock()
+	s := testGetState(t, c, "owner/repo", 1)
+	var count int
+	if s.LinkedPR != nil {
+		count = len(s.LinkedPR.ThreadComments)
+	}
 
 	if count != 1 {
 		t.Errorf("expected exactly 1 review thread comment after duplicate, got %d", count)
@@ -573,9 +578,9 @@ func TestDeltaCheckRunCompleted(t *testing.T) {
 
 func TestDeltaCheckRunUpsertById(t *testing.T) {
 	c := seedCache(t)
-	// First run: failure
+	// First run: failure.
 	c.ApplyDelta("check_run", checkRunPayloadJSON("completed", "owner/repo", 9001, "build", "completed", "failure", "sha_abc"))
-	// Same ID: success (re-run)
+	// Same ID: success (re-run).
 	c.ApplyDelta("check_run", checkRunPayloadJSON("completed", "owner/repo", 9001, "build", "completed", "success", "sha_abc"))
 
 	c.mu.RLock()
@@ -585,7 +590,7 @@ func TestDeltaCheckRunUpsertById(t *testing.T) {
 	if len(runs) != 1 {
 		t.Errorf("upsert: expected 1 run after re-run, got %d", len(runs))
 	}
-	if runs[0].Conclusion != "success" {
+	if len(runs) > 0 && runs[0].Conclusion != "success" {
 		t.Errorf("expected success after upsert, got %q", runs[0].Conclusion)
 	}
 }
@@ -609,13 +614,9 @@ func TestDeltaProjectsV2ItemEdited(t *testing.T) {
 	payload := projectsV2ItemPayloadJSON("edited", "PVTI_001", "Plan")
 	c.ApplyDelta("projects_v2_item", payload)
 
-	c.mu.RLock()
-	item := c.items[itemKey("owner/repo", 1)]
-	status := item.Status
-	c.mu.RUnlock()
-
-	if status != "Plan" {
-		t.Errorf("expected status 'Plan', got %q", status)
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.Status != "Plan" {
+		t.Errorf("expected status 'Plan', got %q", s.Status)
 	}
 }
 
@@ -707,12 +708,9 @@ func TestReconcileReplacesShallowData(t *testing.T) {
 		},
 	})
 
-	c.mu.RLock()
-	status := c.items[itemKey("owner/repo", 1)].Status
-	c.mu.RUnlock()
-
-	if status != "Plan" {
-		t.Errorf("expected status 'Plan' after reconcile, got %q", status)
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.Status != "Plan" {
+		t.Errorf("expected status 'Plan' after reconcile, got %q", s.Status)
 	}
 	if !strings.Contains(logBuf.String(), "reconciliation") {
 		t.Errorf("expected [reconciliation] log, got: %q", logBuf.String())
@@ -721,10 +719,11 @@ func TestReconcileReplacesShallowData(t *testing.T) {
 
 func TestReconcilePreservesDeepFields(t *testing.T) {
 	c := seedCache(t)
-	c.mu.Lock()
-	c.items[itemKey("owner/repo", 1)].Comments = []gh.Comment{{ID: "C1", Body: "preserved"}}
-	c.deepFetched[itemKey("owner/repo", 1)] = true
-	c.mu.Unlock()
+	// Set comments and mark as deep-fetched via ItemDeepFetched mutation.
+	snap, _ := c.store.Get("owner/repo", 1)
+	pi := snapshotToProjectItem(snap)
+	pi.Comments = []gh.Comment{{ID: "C1", Body: "preserved"}}
+	c.store.Apply(itemstate.ItemDeepFetched{Repo: "owner/repo", Number: 1, FreshState: pi})
 
 	c.Reconcile(&gh.ProjectBoard{
 		ProjectID: "PID", Title: "T", OwnerType: "organization",
@@ -733,17 +732,15 @@ func TestReconcilePreservesDeepFields(t *testing.T) {
 		},
 	})
 
-	c.mu.RLock()
-	item := c.items[itemKey("owner/repo", 1)]
-	preserved := len(item.Comments) == 1 && item.Comments[0].ID == "C1"
-	deepFetched := c.deepFetched[itemKey("owner/repo", 1)]
-	c.mu.RUnlock()
+	s := testGetState(t, c, "owner/repo", 1)
+	preserved := len(s.Comments) == 1 && s.Comments[0].ID == "C1"
+	deepFetched := !s.LastDeepFetchAt.IsZero()
 
 	if !preserved {
 		t.Error("expected deep-fetched comments to be preserved after reconcile")
 	}
 	if !deepFetched {
-		t.Error("expected deepFetched flag to be preserved after reconcile")
+		t.Error("expected LastDeepFetchAt to be preserved after reconcile")
 	}
 }
 
@@ -763,9 +760,7 @@ func TestReconcileLinkageDriftInvalidatesDeepCache(t *testing.T) {
 	})
 
 	// Mark as deep-fetched with LinkedPRNumber=0 (linkage not yet visible on GitHub).
-	c.mu.Lock()
-	c.deepFetched[itemKey("owner/repo", 1)] = true
-	c.mu.Unlock()
+	testSetDeepFetched(c, "owner/repo", 1)
 
 	// Board now shows LinkedPRNumberShallow=502 — linkage has materialized.
 	c.Reconcile(&gh.ProjectBoard{
@@ -776,12 +771,9 @@ func TestReconcileLinkageDriftInvalidatesDeepCache(t *testing.T) {
 		},
 	})
 
-	// deepFetched must be invalidated so next FetchItemDetails hits GitHub.
-	c.mu.RLock()
-	df := c.deepFetched[itemKey("owner/repo", 1)]
-	c.mu.RUnlock()
-	if df {
-		t.Error("expected deepFetched to be invalidated when linkage drift is detected")
+	// LastDeepFetchAt must be zeroed so next FetchItemDetails hits GitHub.
+	if testIsDeepFetched(c, "owner/repo", 1) {
+		t.Error("expected deep cache to be invalidated when linkage drift is detected")
 	}
 
 	// Next FetchItemDetails call must fall through to the mock (cache miss).
@@ -791,7 +783,7 @@ func TestReconcileLinkageDriftInvalidatesDeepCache(t *testing.T) {
 		t.Fatalf("FetchItemDetails returned error: %v", err)
 	}
 	if mc.fetchItemDetailsCount <= beforeCount {
-		t.Error("expected FetchItemDetails to call fallback after deepFetched was invalidated")
+		t.Error("expected FetchItemDetails to call fallback after deep cache was invalidated")
 	}
 	// The mock should have populated LinkedPRNumber=502 into item.
 	if item.LinkedPRNumber != 502 {
@@ -806,15 +798,12 @@ func TestReconcileRemovesStaleItems(t *testing.T) {
 		ProjectID: "PID", Title: "T", OwnerType: "organization",
 		Items: []gh.ProjectItem{
 			{ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", Status: "Research"},
-			// Item #2 removed from board
+			// Item #2 removed from board.
 		},
 	})
 
-	c.mu.RLock()
-	_, item2Exists := c.items[itemKey("owner/repo", 2)]
-	c.mu.RUnlock()
-
-	if item2Exists {
+	_, err := c.store.Get("owner/repo", 2)
+	if err == nil {
 		t.Error("item #2 should have been removed from cache after reconcile")
 	}
 }
@@ -830,16 +819,13 @@ func TestPauseStopsDeltaApplication(t *testing.T) {
 	payload := issuesLabeledPayloadJSON("labeled", "owner/repo", 1, "blocked")
 	c.ApplyDelta("issues", payload)
 
-	c.mu.RLock()
-	item := c.items[itemKey("owner/repo", 1)]
-	for _, l := range item.Labels {
+	s := testGetState(t, c, "owner/repo", 1)
+	for _, l := range s.Labels {
 		if l == "blocked" {
-			c.mu.RUnlock()
 			t.Error("delta should not have been applied when paused")
 			return
 		}
 	}
-	c.mu.RUnlock()
 }
 
 func TestResumeReenablesDeltaApplication(t *testing.T) {
@@ -857,15 +843,13 @@ func TestResumeReenablesDeltaApplication(t *testing.T) {
 	payload := issuesLabeledPayloadJSON("labeled", "owner/repo", 1, "newlabel")
 	c.ApplyDelta("issues", payload)
 
-	c.mu.RLock()
-	item := c.items[itemKey("owner/repo", 1)]
+	s := testGetState(t, c, "owner/repo", 1)
 	found := false
-	for _, l := range item.Labels {
+	for _, l := range s.Labels {
 		if l == "newlabel" {
 			found = true
 		}
 	}
-	c.mu.RUnlock()
 
 	if !found {
 		t.Error("delta should have been applied after resume")
@@ -878,45 +862,40 @@ func TestResumeReenablesDeltaApplication(t *testing.T) {
 
 func TestDeltaBumpsUpdatedAt(t *testing.T) {
 	c := seedCache(t)
+	key := itemKey("owner/repo", 1)
 
-	// Record item #1's initial UpdatedAt (zero from seed).
+	// Record initial localDeltaAt (zero before any webhook).
 	c.mu.RLock()
-	before := c.items[itemKey("owner/repo", 1)].UpdatedAt
+	before := c.localDeltaAt[key]
 	c.mu.RUnlock()
 
 	payload := issuesLabeledPayloadJSON("labeled", "owner/repo", 1, "newlabel")
 	c.ApplyDelta("issues", payload)
 
 	c.mu.RLock()
-	after := c.items[itemKey("owner/repo", 1)].UpdatedAt
+	after := c.localDeltaAt[key]
 	c.mu.RUnlock()
 
 	if !after.After(before) {
-		t.Errorf("expected UpdatedAt to advance after labeled delta; before=%v after=%v", before, after)
+		t.Errorf("expected localDeltaAt to advance after labeled delta; before=%v after=%v", before, after)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Delta: pull_request_review_comment resets deepFetched for ReviewThreadID
+// Delta: pull_request_review_comment resets deep cache for ReviewThreadID
 // ---------------------------------------------------------------------------
 
 func TestDeltaReviewCommentResetsDeepFetched(t *testing.T) {
 	c := seedCache(t)
-	c.mu.Lock()
-	c.items[itemKey("owner/repo", 1)].LinkedPRNumber = 42
+	testSetLinkedPR(c, "owner/repo", 1, 42)
 	// Mark as already deep-fetched.
-	c.deepFetched[itemKey("owner/repo", 1)] = true
-	c.mu.Unlock()
+	testSetDeepFetched(c, "owner/repo", 1)
 
 	payload := pullRequestReviewCommentPayloadJSON("created", "owner/repo", 42, 200, "RC_node_2", "inline comment", "alice")
 	c.ApplyDelta("pull_request_review_comment", payload)
 
-	c.mu.RLock()
-	df := c.deepFetched[itemKey("owner/repo", 1)]
-	c.mu.RUnlock()
-
-	if df {
-		t.Error("expected deepFetched to be reset after review comment delta so next FetchItemDetails fetches ReviewThreadID from GitHub")
+	if testIsDeepFetched(c, "owner/repo", 1) {
+		t.Error("expected deep cache to be reset after review comment delta so next FetchItemDetails fetches ReviewThreadID from GitHub")
 	}
 }
 
@@ -996,15 +975,17 @@ func TestUpdateItemStatusSetsStatusAndUpdatedAt(t *testing.T) {
 	c.UpdateItemStatus(key, "Plan")
 	after := time.Now()
 
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.Status != "Plan" {
+		t.Errorf("want Status %q, got %q", "Plan", s.Status)
+	}
+	// UpdateItemStatus bumps localDeltaAt (not item.UpdatedAt directly).
 	c.mu.RLock()
-	item := c.items[key]
+	deltaAt := c.localDeltaAt[key]
 	c.mu.RUnlock()
 
-	if item.Status != "Plan" {
-		t.Errorf("want Status %q, got %q", "Plan", item.Status)
-	}
-	if item.UpdatedAt.Before(before) || item.UpdatedAt.After(after) {
-		t.Errorf("UpdatedAt %v not in expected range [%v, %v]", item.UpdatedAt, before, after)
+	if deltaAt.Before(before) || deltaAt.After(after) {
+		t.Errorf("localDeltaAt %v not in expected range [%v, %v]", deltaAt, before, after)
 	}
 }
 
@@ -1020,11 +1001,9 @@ func TestUpdateItemStatusIsIdempotent(t *testing.T) {
 	c.UpdateItemStatus(key, "Plan")
 	c.UpdateItemStatus(key, "Plan")
 
-	c.mu.RLock()
-	item := c.items[key]
-	c.mu.RUnlock()
-	if item.Status != "Plan" {
-		t.Errorf("want Status %q after repeated calls, got %q", "Plan", item.Status)
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.Status != "Plan" {
+		t.Errorf("want Status %q after repeated calls, got %q", "Plan", s.Status)
 	}
 }
 
@@ -1037,12 +1016,9 @@ func TestApplyStatusBatchUpdatesDriftedItems(t *testing.T) {
 	// PVTI_001 is item #1 (status "Research"); drift it to "Plan".
 	c.ApplyStatusBatch(map[string]string{"PVTI_001": "Plan"})
 
-	c.mu.RLock()
-	item := c.items[ItemKey("owner/repo", 1)]
-	c.mu.RUnlock()
-
-	if item.Status != "Plan" {
-		t.Errorf("want Status %q, got %q", "Plan", item.Status)
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.Status != "Plan" {
+		t.Errorf("want Status %q, got %q", "Plan", s.Status)
 	}
 }
 
@@ -1051,18 +1027,18 @@ func TestApplyStatusBatchLeavesUndriftedItemsUnchanged(t *testing.T) {
 	key2 := ItemKey("owner/repo", 2)
 
 	c.mu.RLock()
-	origUpdatedAt := c.items[key2].UpdatedAt
+	origDeltaAt := c.localDeltaAt[key2]
 	c.mu.RUnlock()
 
-	// Item 2 already has Status "Plan" — sending same value should not change UpdatedAt.
+	// Item 2 already has Status "Plan" — sending same value should not bump localDeltaAt.
 	c.ApplyStatusBatch(map[string]string{"PVTI_002": "Plan"})
 
 	c.mu.RLock()
-	item := c.items[key2]
+	newDeltaAt := c.localDeltaAt[key2]
 	c.mu.RUnlock()
 
-	if item.UpdatedAt != origUpdatedAt {
-		t.Error("UpdatedAt should not change when Status is already up to date")
+	if newDeltaAt != origDeltaAt {
+		t.Error("localDeltaAt should not change when Status is already up to date")
 	}
 }
 
@@ -1070,8 +1046,8 @@ func TestApplyStatusBatchSkipsUnknownItemIDs(t *testing.T) {
 	c := seedCache(t)
 	// Should not panic or add entries for unknown PVTI IDs.
 	c.ApplyStatusBatch(map[string]string{"PVTI_UNKNOWN": "Done"})
-	if len(c.items) != 2 {
-		t.Errorf("item count should remain 2, got %d", len(c.items))
+	if len(c.store.All()) != 2 {
+		t.Errorf("item count should remain 2, got %d", len(c.store.All()))
 	}
 }
 
@@ -1117,7 +1093,7 @@ func TestProjectIDReturnsEmptyBeforeBootstrap(t *testing.T) {
 // Auto-heal: PR-targeted delta handlers repair stale LinkedPRNumber
 // ---------------------------------------------------------------------------
 
-// seedCacheWithPR seeds a cache with item #1 at LinkedPRNumber=0 and deepFetched=true.
+// seedCacheWithStalePRLink seeds a cache with item #1 at LinkedPRNumber=0 and deep-fetched.
 func seedCacheWithStalePRLink(t *testing.T, mc *mockClient) *CacheImpl {
 	t.Helper()
 	c := NewCacheImpl(mc, nopLog)
@@ -1129,10 +1105,8 @@ func seedCacheWithStalePRLink(t *testing.T, mc *mockClient) *CacheImpl {
 		},
 	}
 	c.Bootstrap(board)
-	// Mark as deep-fetched so we can verify deepFetched is cleared by heal.
-	c.mu.Lock()
-	c.deepFetched[itemKey("owner/repo", 1)] = true
-	c.mu.Unlock()
+	// Mark as deep-fetched so we can verify deep cache is cleared by heal.
+	testSetDeepFetched(c, "owner/repo", 1)
 	return c
 }
 
@@ -1147,12 +1121,14 @@ func TestAutoHealPullRequestReviewSubmitted(t *testing.T) {
 	payload := pullRequestReviewPayloadJSON("submitted", "owner/repo", 42, 2001, "approved", "reviewer")
 	c.ApplyDelta("pull_request_review", payload)
 
-	c.mu.RLock()
-	item := c.items[itemKey("owner/repo", 1)]
-	linkedPR := item.LinkedPRNumber
-	reviews := clonePRReviews(item.LinkedPRReviews)
-	df := c.deepFetched[itemKey("owner/repo", 1)]
-	c.mu.RUnlock()
+	s := testGetState(t, c, "owner/repo", 1)
+	var linkedPR int
+	var reviews []gh.PRReview
+	if s.LinkedPR != nil {
+		linkedPR = s.LinkedPR.Number
+		reviews = clonePRReviews(s.LinkedPR.Reviews)
+	}
+	df := testIsDeepFetched(c, "owner/repo", 1)
 
 	if linkedPR != 42 {
 		t.Errorf("expected LinkedPRNumber=42 after heal, got %d", linkedPR)
@@ -1161,7 +1137,7 @@ func TestAutoHealPullRequestReviewSubmitted(t *testing.T) {
 		t.Errorf("unexpected reviews after heal: %+v", reviews)
 	}
 	if df {
-		t.Error("expected deepFetched to be cleared after auto-heal")
+		t.Error("expected deep cache to be cleared after auto-heal")
 	}
 	if mc.fetchPRClosingIssuesCount != 1 {
 		t.Errorf("expected exactly 1 REST call, got %d", mc.fetchPRClosingIssuesCount)
@@ -1179,12 +1155,14 @@ func TestAutoHealPullRequestReviewCommentCreated(t *testing.T) {
 	payload := pullRequestReviewCommentPayloadJSON("created", "owner/repo", 42, 300, "RC_heal_1", "inline comment", "reviewer")
 	c.ApplyDelta("pull_request_review_comment", payload)
 
-	c.mu.RLock()
-	item := c.items[itemKey("owner/repo", 1)]
-	linkedPR := item.LinkedPRNumber
-	comments := cloneComments(item.LinkedPRReviewThreadComments)
-	df := c.deepFetched[itemKey("owner/repo", 1)]
-	c.mu.RUnlock()
+	s := testGetState(t, c, "owner/repo", 1)
+	var linkedPR int
+	var comments []gh.Comment
+	if s.LinkedPR != nil {
+		linkedPR = s.LinkedPR.Number
+		comments = cloneComments(s.LinkedPR.ThreadComments)
+	}
+	df := testIsDeepFetched(c, "owner/repo", 1)
 
 	if linkedPR != 42 {
 		t.Errorf("expected LinkedPRNumber=42 after heal, got %d", linkedPR)
@@ -1193,7 +1171,7 @@ func TestAutoHealPullRequestReviewCommentCreated(t *testing.T) {
 		t.Errorf("unexpected comments after heal: %+v", comments)
 	}
 	if df {
-		t.Error("expected deepFetched to be cleared after auto-heal")
+		t.Error("expected deep cache to be cleared after auto-heal")
 	}
 	if mc.fetchPRClosingIssuesCount != 1 {
 		t.Errorf("expected exactly 1 REST call, got %d", mc.fetchPRClosingIssuesCount)
@@ -1215,25 +1193,29 @@ func TestAutoHealCheckRunCompleted(t *testing.T) {
 	payload := checkRunPayloadJSON("completed", "owner/repo", 5001, "ci", "completed", "success", "sha_heal")
 	c.ApplyDelta("check_run", payload)
 
+	s := testGetState(t, c, "owner/repo", 1)
+	var linkedPR int
+	if s.LinkedPR != nil {
+		linkedPR = s.LinkedPR.Number
+	}
+	// SHA indexed in Store when item's LinkedPR.HeadSHA is set.
+	shaIndexed := s.LinkedPR != nil && s.LinkedPR.HeadSHA == "sha_heal"
+	df := testIsDeepFetched(c, "owner/repo", 1)
 	c.mu.RLock()
-	item := c.items[itemKey("owner/repo", 1)]
-	linkedPR := item.LinkedPRNumber
-	shaKey, shaOK := c.shaToKey["sha_heal"]
-	df := c.deepFetched[itemKey("owner/repo", 1)]
-	updatedAt := item.UpdatedAt
+	deltaAt := c.localDeltaAt[itemKey("owner/repo", 1)]
 	c.mu.RUnlock()
 
 	if linkedPR != 42 {
 		t.Errorf("expected LinkedPRNumber=42 after heal, got %d", linkedPR)
 	}
-	if !shaOK || shaKey != itemKey("owner/repo", 1) {
-		t.Errorf("expected shaToKey[sha_heal]=owner/repo#1, got %q (ok=%v)", shaKey, shaOK)
+	if !shaIndexed {
+		t.Errorf("expected SHA sha_heal to be stored in item's LinkedPR.HeadSHA")
 	}
 	if df {
-		t.Error("expected deepFetched to be cleared after auto-heal")
+		t.Error("expected deep cache to be cleared after auto-heal")
 	}
-	if !updatedAt.After(before) {
-		t.Error("expected UpdatedAt to be bumped after auto-heal")
+	if !deltaAt.After(before) {
+		t.Error("expected localDeltaAt to be bumped after auto-heal")
 	}
 	if mc.fetchPRsForSHACount != 1 {
 		t.Errorf("expected 1 FetchPRsForSHA call, got %d", mc.fetchPRsForSHACount)
@@ -1258,11 +1240,13 @@ func TestAutoHealDropsWhenNoPRClosingKeyword(t *testing.T) {
 	payload := pullRequestReviewPayloadJSON("submitted", "owner/repo", 99, 3001, "approved", "bot")
 	c.ApplyDelta("pull_request_review", payload)
 
-	c.mu.RLock()
-	item := c.items[itemKey("owner/repo", 1)]
-	linkedPR := item.LinkedPRNumber
-	reviews := clonePRReviews(item.LinkedPRReviews)
-	c.mu.RUnlock()
+	s := testGetState(t, c, "owner/repo", 1)
+	var linkedPR int
+	var reviews []gh.PRReview
+	if s.LinkedPR != nil {
+		linkedPR = s.LinkedPR.Number
+		reviews = clonePRReviews(s.LinkedPR.Reviews)
+	}
 
 	if linkedPR != 0 {
 		t.Errorf("expected LinkedPRNumber=0 (no mutation), got %d", linkedPR)
@@ -1286,11 +1270,13 @@ func TestAutoHealDropsSilentlyWhenIssuNotInCache(t *testing.T) {
 	payload := pullRequestReviewPayloadJSON("submitted", "owner/repo", 77, 4001, "approved", "bot")
 	c.ApplyDelta("pull_request_review", payload)
 
-	c.mu.RLock()
-	item := c.items[itemKey("owner/repo", 1)]
-	linkedPR := item.LinkedPRNumber
-	reviews := clonePRReviews(item.LinkedPRReviews)
-	c.mu.RUnlock()
+	s := testGetState(t, c, "owner/repo", 1)
+	var linkedPR int
+	var reviews []gh.PRReview
+	if s.LinkedPR != nil {
+		linkedPR = s.LinkedPR.Number
+		reviews = clonePRReviews(s.LinkedPR.Reviews)
+	}
 
 	if linkedPR != 0 {
 		t.Errorf("expected no mutation (issue not in cache), got LinkedPRNumber=%d", linkedPR)
@@ -1335,25 +1321,28 @@ func TestAutoHealPullRequestDelta(t *testing.T) {
 	payload := pullRequestPayloadJSON("opened", "owner/repo", 42, "sha_heal_pr", "open", false, false)
 	c.ApplyDelta("pull_request", payload)
 
+	s := testGetState(t, c, "owner/repo", 1)
+	var linkedPR int
+	if s.LinkedPR != nil {
+		linkedPR = s.LinkedPR.Number
+	}
+	shaIndexed := s.LinkedPR != nil && s.LinkedPR.HeadSHA == "sha_heal_pr"
+	df := testIsDeepFetched(c, "owner/repo", 1)
 	c.mu.RLock()
-	item := c.items[itemKey("owner/repo", 1)]
-	linkedPR := item.LinkedPRNumber
-	shaKey, shaOK := c.shaToKey["sha_heal_pr"]
-	df := c.deepFetched[itemKey("owner/repo", 1)]
-	updatedAt := item.UpdatedAt
+	deltaAt := c.localDeltaAt[itemKey("owner/repo", 1)]
 	c.mu.RUnlock()
 
 	if linkedPR != 42 {
 		t.Errorf("expected LinkedPRNumber=42 after heal, got %d", linkedPR)
 	}
-	if !shaOK || shaKey != itemKey("owner/repo", 1) {
-		t.Errorf("expected shaToKey[sha_heal_pr]=%q, got %q (ok=%v)", itemKey("owner/repo", 1), shaKey, shaOK)
+	if !shaIndexed {
+		t.Errorf("expected SHA sha_heal_pr to be stored in item's LinkedPR.HeadSHA")
 	}
 	if df {
-		t.Error("expected deepFetched to be cleared after auto-heal")
+		t.Error("expected deep cache to be cleared after auto-heal")
 	}
-	if !updatedAt.After(before) {
-		t.Error("expected UpdatedAt to be bumped after auto-heal")
+	if !deltaAt.After(before) {
+		t.Error("expected localDeltaAt to be bumped after auto-heal")
 	}
 	if mc.fetchPRClosingIssuesCount != 1 {
 		t.Errorf("expected exactly 1 REST call, got %d", mc.fetchPRClosingIssuesCount)
@@ -1372,8 +1361,6 @@ func seedCacheWithStalePRLink2(t *testing.T, logFn func(string, ...any)) *CacheI
 		},
 	}
 	c.Bootstrap(board)
-	c.mu.Lock()
-	c.deepFetched[itemKey("owner/repo", 1)] = true
-	c.mu.Unlock()
+	testSetDeepFetched(c, "owner/repo", 1)
 	return c
 }
