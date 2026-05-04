@@ -11,6 +11,7 @@ import (
 	"time"
 
 	gh "github.com/verveguy/fabrik/github"
+	"github.com/verveguy/fabrik/internal/itemstate"
 	"github.com/verveguy/fabrik/stages"
 )
 
@@ -137,8 +138,8 @@ func TestProcessItem_SkipsAlreadyProcessedNoNewComments(t *testing.T) {
 	eng := testEngine(client, claude)
 	eng.cfg.PollSeconds = 100 // cooldown = 1000s — ensures recently-processed item stays in cooldown
 
-	// Mark as already processed
-	eng.processedSet["owner/repo#1-Research"] = time.Now()
+	// Mark as already processed (sets LastAttemptAt so dispatch cooldown applies)
+	eng.store.Apply(itemstate.StageAttempted{Repo: "owner/repo", Number: 1, StageName: "Research", At: time.Now()})
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
@@ -515,12 +516,9 @@ func TestProcessItem_ClaudeError(t *testing.T) {
 		t.Fatalf("expected 1 comment with partial output, got %d", len(client.addCommentCalls))
 	}
 
-	// A start-failure (*exec.Error / binary not found) — processedSet must NOT be updated
-	itemKey := fmt.Sprintf("o/r#%d-%s", 6, "Research")
-	eng.mu.Lock()
-	_, recorded := eng.processedSet[itemKey]
-	eng.mu.Unlock()
-	if recorded {
+	// A start-failure (*exec.Error / binary not found) — LastAttemptAt must NOT be updated
+	snap, _ := eng.store.Get("o/r", 6)
+	if !snap.LastAttemptAt("Research").IsZero() {
 		t.Error("processedSet should NOT be updated on a start-failure error")
 	}
 }
@@ -553,12 +551,9 @@ func TestProcessItem_ClaudeExitError(t *testing.T) {
 		t.Fatalf("processItem: %v", err)
 	}
 
-	// An *exec.ExitError means Claude ran — processedSet MUST be updated (cooldown applies)
-	itemKey := fmt.Sprintf("o/r#%d-%s", 7, "Research")
-	eng.mu.Lock()
-	_, recorded := eng.processedSet[itemKey]
-	eng.mu.Unlock()
-	if !recorded {
+	// An *exec.ExitError means Claude ran — LastAttemptAt MUST be updated (cooldown applies)
+	snap, _ := eng.store.Get("o/r", 7)
+	if snap.LastAttemptAt("Research").IsZero() {
 		t.Error("processedSet should be updated when Claude ran and exited non-zero")
 	}
 }
@@ -719,12 +714,9 @@ func TestProcessItem_EscalatesAtMaxRetries(t *testing.T) {
 		t.Error("expected escalation comment to be posted")
 	}
 
-	// pausedDueToRetries should be set
-	itemKey := fmt.Sprintf("owner/repo#%d-%s", 10, "Research")
-	eng.mu.Lock()
-	paused := eng.pausedDueToRetries[itemKey]
-	eng.mu.Unlock()
-	if !paused {
+	// PausedByEngine should be set in the store
+	snap, _ := eng.store.Get("owner/repo", 10)
+	if !snap.PausedByEngine("Research") {
 		t.Error("expected pausedDueToRetries to be set")
 	}
 }
@@ -757,11 +749,10 @@ func TestProcessItem_ResetsOnUnpause(t *testing.T) {
 	)
 
 	// Simulate a previous escalation: engine had paused this issue after 3 failures
-	itemKey := fmt.Sprintf("owner/repo#%d-%s", 11, "Research")
-	eng.mu.Lock()
-	eng.retryCount[itemKey] = 3
-	eng.pausedDueToRetries[itemKey] = true
-	eng.mu.Unlock()
+	for i := 0; i < 3; i++ {
+		eng.store.Apply(itemstate.StageRetryIncremented{Repo: "owner/repo", Number: 11, StageName: "Research"})
+	}
+	eng.store.Apply(itemstate.EnginePaused{Repo: "owner/repo", Number: 11, StageName: "Research"})
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	// Item does NOT have fabrik:paused — user has removed it to signal investigation done
@@ -788,11 +779,9 @@ func TestProcessItem_ResetsOnUnpause(t *testing.T) {
 		t.Error("expected stage:Research:failed label to be removed on unpause")
 	}
 
-	// pausedDueToRetries should be cleared (cleared by clearFailedStage, not re-set since we don't hit limit yet)
-	eng.mu.Lock()
-	stillPaused := eng.pausedDueToRetries[itemKey]
-	eng.mu.Unlock()
-	if stillPaused {
+	// PausedByEngine should be cleared (cleared by clearFailedStage, not re-set since we don't hit limit yet)
+	snap, _ := eng.store.Get("owner/repo", 11)
+	if snap.PausedByEngine("Research") {
 		t.Error("expected pausedDueToRetries to be cleared after unpause")
 	}
 }
@@ -843,13 +832,10 @@ func TestProcessItem_UnlimitedWhenMaxRetriesZero(t *testing.T) {
 		}
 	}
 
-	// retryCount should remain 0 (not incremented when MaxRetries=0)
-	itemKey := fmt.Sprintf("owner/repo#%d-%s", 12, "Research")
-	eng.mu.Lock()
-	count := eng.retryCount[itemKey]
-	eng.mu.Unlock()
-	if count != 0 {
-		t.Errorf("expected retryCount=0 when MaxRetries=0, got %d", count)
+	// Attempts should remain 0 (not incremented when MaxRetries=0)
+	snap, _ := eng.store.Get("owner/repo", 12)
+	if snap.Attempts("Research") != 0 {
+		t.Errorf("expected retryCount=0 when MaxRetries=0, got %d", snap.Attempts("Research"))
 	}
 }
 
@@ -881,11 +867,9 @@ func TestProcessItem_ClearsRetryCountOnCompletion(t *testing.T) {
 	)
 
 	// Pre-seed retry state as if previous failures occurred
-	itemKey := fmt.Sprintf("owner/repo#%d-%s", 13, "Research")
-	eng.mu.Lock()
-	eng.retryCount[itemKey] = 2
-	eng.pausedDueToRetries[itemKey] = false
-	eng.mu.Unlock()
+	for i := 0; i < 2; i++ {
+		eng.store.Apply(itemstate.StageRetryIncremented{Repo: "owner/repo", Number: 13, StageName: "Research"})
+	}
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 13, Title: "Completion test", Status: "Research", ItemID: "PVTI_13"}
@@ -894,16 +878,12 @@ func TestProcessItem_ClearsRetryCountOnCompletion(t *testing.T) {
 		t.Fatalf("processItem: %v", err)
 	}
 
-	// Both maps should be cleared after successful completion
-	eng.mu.Lock()
-	count := eng.retryCount[itemKey]
-	paused := eng.pausedDueToRetries[itemKey]
-	eng.mu.Unlock()
-
-	if count != 0 {
-		t.Errorf("expected retryCount to be cleared on completion, got %d", count)
+	// Both store fields should be cleared after successful completion
+	snap, _ := eng.store.Get("owner/repo", 13)
+	if snap.Attempts("Research") != 0 {
+		t.Errorf("expected retryCount to be cleared on completion, got %d", snap.Attempts("Research"))
 	}
-	if paused {
+	if snap.PausedByEngine("Research") {
 		t.Error("expected pausedDueToRetries to be cleared on completion")
 	}
 }
@@ -986,11 +966,9 @@ func TestProcessItem_CleanupStage_CleanWorktree(t *testing.T) {
 		t.Errorf("expected no ArchiveProjectItem calls (deferred to grace period), got %d", len(client.archiveProjectItemCalls))
 	}
 
-	// Should be marked in processedSet
-	eng.mu.Lock()
-	_, ok := eng.processedSet["owner/repo#42-Done"]
-	eng.mu.Unlock()
-	if !ok {
+	// CooldownAt["periodic-re-eval"] should be set so itemMayNeedWork suppresses future deep-fetches
+	snapCleanup, _ := eng.store.Get("owner/repo", 42)
+	if snapCleanup.CooldownAt("periodic-re-eval").IsZero() {
 		t.Error("item should be marked in processedSet after cleanup")
 	}
 
