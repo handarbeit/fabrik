@@ -1150,11 +1150,10 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		case <-ctx.Done():
 			goto doneDispatching
 		}
-		// Capture stage name, model, and start time for job tracking.
-		var stageName, stageModel string
+		// Capture stage name and start time for job tracking.
+		var stageName string
 		if s := stages.FindStage(e.cfg.Stages, item.Status); s != nil {
 			stageName = s.Name
-			stageModel = s.Model
 		}
 		isComment := len(e.findNewComments(item)) > 0
 		startTime := time.Now()
@@ -1176,30 +1175,6 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 				StartedAt:   startTime,
 			})
 			err := e.processItem(ctx, board, item)
-			var usage TokenUsage
-			var completed, blocked bool
-			if snap, snapErr := e.store.Get(itemRepo, item.Number); snapErr == nil {
-				st := snap.State()
-				usage = st.LastTokenUsage
-				completed = st.LastInvocationCompleted
-				blocked = st.LastInvocationBlocked
-			}
-			e.emitStructural(tui.JobCompletedEvent{
-				IssueNumber:    item.Number,
-				Repo:           itemRepo,
-				Title:          item.Title,
-				StageName:      stageName,
-				StageModel:     stageModel,
-				IsComment:      isComment,
-				Success:        err == nil,
-				Completed:      completed,
-				BlockedOnInput: blocked,
-				Duration:       time.Since(startTime),
-				CompletedAt:    time.Now(),
-				TurnsUsed:      usage.TurnsUsed,
-				MaxTurns:       usage.MaxTurns,
-				CostUSD:        usage.CostUSD,
-			})
 			if err != nil {
 				e.logf(item.Number, "error", "%v\n", err)
 			}
