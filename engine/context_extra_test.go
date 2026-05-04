@@ -120,33 +120,19 @@ func TestMarkCommentsSeenByStage_AddsRocketToUnseenUserComments(t *testing.T) {
 
 	eng.markCommentsSeenByStage(item, item.Comments)
 
-	// Only C_1 (DatabaseID 601) should have had rocket added
-	var rocketTargets []int
-	for _, c := range client.addCommentCalls {
-		// AddComment is not used here; reactions go through AddCommentReaction
-		_ = c
+	// Verify via the store: C_1 should be recorded, C_2 (bot) and C_3 (rocket) should not.
+	snap, err := eng.store.Get("owner/repo", 30)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
 	}
-	// The mock's AddCommentReaction doesn't track calls — but we can verify
-	// the processedSet was populated for C_1
-	eng.mu.Lock()
-	key1 := "owner/repo#30-comment-C_1"
-	key2 := "owner/repo#30-comment-C_2"
-	key3 := "owner/repo#30-comment-C_3"
-	_, sawC1 := eng.processedSet[key1]
-	_, sawC2 := eng.processedSet[key2]
-	_, sawC3 := eng.processedSet[key3]
-	eng.mu.Unlock()
-
-	_ = rocketTargets
-
-	if !sawC1 {
-		t.Error("C_1 should be in processedSet after markCommentsSeenByStage")
+	if snap.CommentProcessed("C_1").IsZero() {
+		t.Error("C_1 should be recorded in store after markCommentsSeenByStage")
 	}
-	if sawC2 {
-		t.Error("C_2 (bot comment) should NOT be in processedSet")
+	if !snap.CommentProcessed("C_2").IsZero() {
+		t.Error("C_2 (bot comment) should NOT be recorded in store")
 	}
-	if sawC3 {
-		t.Error("C_3 (already had rocket) should NOT be in processedSet")
+	if !snap.CommentProcessed("C_3").IsZero() {
+		t.Error("C_3 (already had rocket) should NOT be recorded in store")
 	}
 }
 
