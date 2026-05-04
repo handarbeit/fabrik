@@ -454,6 +454,15 @@ func (e *Engine) Run() error {
 		e.logf(0, "warn", "poll error: %v\n", err)
 	}
 
+	// One-time startup cleanup: remove stale fabrik:locked:<user> labels from items
+	// that have no active Worker in the store (restart case: prior crash left labels).
+	// Runs after the first poll cycle so the store is populated before the scan.
+	e.runStartupCleanup()
+
+	// Start background stale-worker detector. Scans for workers whose heartbeat
+	// has gone stale and cleans up if the process is confirmed dead via signal 0.
+	e.startWorkerDetector(ctx)
+
 	for {
 		if e.wakeCh != nil {
 			select {
@@ -883,17 +892,16 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		// have nothing to address; fall through to Phase 2.
 		if syntheticComments := e.buildReviewThreadComments(item); len(syntheticComments) > 0 {
 			iKey := issueKey(item, e.defaultRepo())
+			repoStr := itemOwnerRepoString(item, e.defaultRepo())
 			// Guard: if a goroutine from a previous poll cycle is still
 			// running dispatchReviewReinvoke for this item, skip the entire
 			// reinvoke path — including cycle-limit checks — to avoid
 			// pausing an item while valid work is still in progress. The
-			// goroutine clears inFlight when it exits; the next poll will
-			// re-evaluate.
-			if _, ok := e.inFlight.Load(iKey); ok {
+			// store Worker field is the semantic source of truth for in-flight state.
+			if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil && snap.Worker() != nil {
 				e.logf(item.Number, "review-reinvoke", "skipping dispatch — review reinvoke already in-flight\n")
 				continue
 			}
-			repoStr := itemOwnerRepoString(item, e.defaultRepo())
 			var cycleCount int
 			if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
 				cycleCount = snap.ReviewCycles(stage.Name)
@@ -917,11 +925,11 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		mergeBlocked, mergeConflict := e.checkMergeabilityGate(item, stage)
 		if mergeConflict {
 			iKey := issueKey(item, e.defaultRepo())
-			if _, ok := e.inFlight.Load(iKey); ok {
+			repoStr := itemOwnerRepoString(item, e.defaultRepo())
+			if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil && snap.Worker() != nil {
 				e.logf(item.Number, "rebase-reinvoke", "skipping dispatch — rebase reinvoke already in-flight\n")
 				continue
 			}
-			repoStr := itemOwnerRepoString(item, e.defaultRepo())
 			var cycleCount int
 			if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
 				cycleCount = snap.RebaseCycles(stage.Name)
@@ -950,11 +958,11 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		}
 		if ciFailure {
 			iKey := issueKey(item, e.defaultRepo())
-			if _, ok := e.inFlight.Load(iKey); ok {
+			repoStr := itemOwnerRepoString(item, e.defaultRepo())
+			if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil && snap.Worker() != nil {
 				e.logf(item.Number, "ci-fix-reinvoke", "skipping dispatch — CI-fix reinvoke already in-flight\n")
 				continue
 			}
-			repoStr := itemOwnerRepoString(item, e.defaultRepo())
 			var cycleCount int
 			if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
 				cycleCount = snap.CIFixCycles(stage.Name)
@@ -1157,16 +1165,12 @@ doneDispatching:
 		// If so, the engine is not truly idle — auto-upgrade must not run because
 		// checkAndUpgrade calls syscall.Exec which would kill in-flight workers.
 		var inFlightLabels []string
-		e.inFlight.Range(func(key, val any) bool {
-			if k, ok := key.(string); ok {
-				if isPR, _ := val.(bool); isPR {
-					inFlightLabels = append(inFlightLabels, "PR:"+k)
-				} else {
-					inFlightLabels = append(inFlightLabels, k)
-				}
+		for _, snap := range e.store.All() {
+			if snap.Worker() != nil {
+				k := snap.Repo() + "#" + fmt.Sprint(snap.Number())
+				inFlightLabels = append(inFlightLabels, k)
 			}
-			return true
-		})
+		}
 
 		if len(inFlightLabels) > 0 {
 			e.logf(0, "poll", "workers active\n")
