@@ -383,7 +383,7 @@ func TestProcessItem_BlockedOnInput_ProcessedSetEntry(t *testing.T) {
 
 	// Now simulate user comment arriving — unblockAwaitingInput should clear it
 	stage := testStages()[0] // Research
-	eng.unblockAwaitingInput(item, stage, itemKey)
+	eng.unblockAwaitingInput(item, stage)
 
 	eng.mu.Lock()
 	_, stillHasEntry := eng.processedSet[itemKey]

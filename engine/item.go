@@ -1010,10 +1010,8 @@ func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 		}
 	}
 
-	stageKey := issueKey(item, e.defaultRepo()) + "-" + stage.Name
-	e.mu.Lock()
-	e.pausedDueToRetries[stageKey] = true
-	e.mu.Unlock()
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 }
 
 // clearFailedStage is called when the user removes fabrik:paused from an issue
@@ -1033,16 +1031,11 @@ func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 		}
 	}
 
-	iKey := issueKey(item, e.defaultRepo())
-	stageKey := iKey + "-" + stage.Name
-	e.mu.Lock()
-	delete(e.retryCount, stageKey)
-	delete(e.pausedDueToRetries, stageKey)
-	delete(e.processedSet, stageKey)     // clear cooldown so the stage retries immediately
-	delete(e.reviewCycleCount, stageKey) // reset review cycle counter on unpause
-	delete(e.ciFixCycleCount, stageKey)  // reset CI-fix cycle counter on unpause
-	delete(e.rebaseCycleCount, stageKey) // reset rebase cycle counter on unpause
-	e.mu.Unlock()
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+	e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+	e.store.Apply(itemstate.StageLastAttemptCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+	e.store.Apply(itemstate.EngineCyclesCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 }
 
 // blockOnInput is called when Claude outputs FABRIK_BLOCKED_ON_INPUT. It pauses
@@ -1066,9 +1059,9 @@ func (e *Engine) blockOnInput(item gh.ProjectItem, stage *stages.Stage) {
 }
 
 // unblockAwaitingInput is called when a user comment arrives on an issue that
-// was paused via blockOnInput. It removes both labels and clears the
-// processedSet entry so the stage re-runs promptly after comment processing.
-func (e *Engine) unblockAwaitingInput(item gh.ProjectItem, stage *stages.Stage, stageKey string) {
+// was paused via blockOnInput. It removes both labels and clears LastAttemptAt
+// so the stage re-runs promptly after comment processing.
+func (e *Engine) unblockAwaitingInput(item gh.ProjectItem, stage *stages.Stage) {
 	e.logf(item.Number, "unblock", "user comment received — removing awaiting-input pause\n")
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
@@ -1089,9 +1082,12 @@ func (e *Engine) unblockAwaitingInput(item gh.ProjectItem, stage *stages.Stage, 
 		}
 	}
 
-	e.mu.Lock()
-	delete(e.processedSet, stageKey)
-	e.mu.Unlock()
+	// Clear LastAttemptAt so the stage re-runs immediately after comment processing,
+	// and reset retry/pause state that may have accumulated before the block.
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	e.store.Apply(itemstate.StageLastAttemptCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+	e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+	e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 }
 
 // extractModelOverride scans item labels for the first "model:<name>" label and returns <name>.
