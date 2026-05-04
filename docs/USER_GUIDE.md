@@ -1643,7 +1643,7 @@ The TUI footer shows a webhook health indicator when webhook mode is enabled:
 
 ### Expected GraphQL Load Reduction
 
-On an active board that would poll every 30 seconds without webhooks, enabling webhook mode reduces steady-state GraphQL polling to at most once every 60 minutes — roughly a 120× reduction in GraphQL points consumed while idle. During active periods, polls are triggered immediately by webhook events instead of waiting for the tick.
+On an active board that would poll every 30 seconds without webhooks, enabling webhook mode reduces steady-state full-board GraphQL polling to at most once every 60 minutes — roughly a 120× reduction in GraphQL points consumed while idle. A lightweight status-only sweep (default every 10 minutes) runs separately at very low cost to catch board-column changes. During active periods, polls are triggered immediately by webhook events instead of waiting for the tick.
 
 ### In-Memory Board Cache (`--board-cache`)
 
@@ -1653,7 +1653,7 @@ When webhook mode is active, Fabrik maintains an in-memory board cache (`--board
 
 | Mode | When | Behavior |
 |------|------|----------|
-| `in-memory` | `--webhooks` enabled (default) | Cache populated at startup; deltas from webhooks; reconciles every 60 min; falls back to GitHub when stream is unhealthy |
+| `in-memory` | `--webhooks` enabled (default) | Cache populated at startup; deltas from webhooks; status sweep every 10 min (default); full reconcile on stream recovery; falls back to GitHub when stream is unhealthy |
 | `none` | `--webhooks` disabled (default), or explicit override | All reads go directly to GitHub API (original behavior) |
 
 **To disable the cache while keeping webhooks:**
@@ -1663,13 +1663,13 @@ fabrik --webhooks --board-cache=none
 
 **Stream-health failover:** If the webhook stream goes unhealthy (no events for 10 minutes), the cache pauses and all reads fall back to the live GitHub API. When the stream recovers, the cache reconciles from GitHub before resuming. This ensures correctness is never compromised by a degraded webhook stream.
 
-**Reconciliation:** Every 60 minutes (matching the idle-cap for healthy webhook streams), Fabrik fetches a fresh board snapshot from GitHub and updates the cache. This heals any events the webhook stream may have missed. Reconciliation also runs inline when the stream recovers from unhealthy.
+**Reconciliation:** Fabrik uses a two-level reconciliation strategy. A lightweight status-only sweep runs every `--status-poll` seconds (default 10 minutes), fetching only the Status field for every board item at very low GraphQL cost — this is the primary mechanism for catching board-column changes. A full board snapshot is fetched only on stream recovery (webhook stream goes unhealthy then recovers), ensuring all cached fields are coherent after a gap in event delivery.
 
-> **Note:** `--board-cache=in-memory` requires `--webhooks`. Without a webhook stream, there is no delta source and the cache would only reconcile every 60 minutes — worse than the default polling behavior.
+> **Note:** `--board-cache=in-memory` requires `--webhooks`. Without a webhook stream, there is no delta source and the cache relies solely on the periodic status sweep — worse than the default polling behavior.
 
 ### `projects_v2_item` (Board Column Changes)
 
-Fabrik attempts to subscribe to `projects_v2_item` events, which fire when an issue is moved between board columns. If `gh webhook forward` does not support this event type for your installation, Fabrik logs a warning and continues without it. In this case, board-column changes are caught by the safety-net poll within 60 minutes (or 5 minutes if the stream is unhealthy). All other event types continue to work normally.
+Fabrik attempts to subscribe to `projects_v2_item` events, which fire when an issue is moved between board columns. If `gh webhook forward` does not support this event type for your installation, Fabrik logs a warning and continues without it. In this case, board-column changes are caught by the periodic status sweep within `--status-poll` seconds (default 10 minutes), or within 5 minutes if the stream is unhealthy (full reconcile on recovery). All other event types continue to work normally.
 
 ### Security
 
@@ -1695,7 +1695,7 @@ On multi-repo boards, Fabrik uses a single `gh webhook forward` subprocess:
 
 **HMAC failures logged** — Usually caused by a `gh auth refresh` that invalidated the webhook secret. Fabrik auto-rotates; if failures persist after 2 cycles, restart Fabrik.
 
-**`projects_v2_item` warning** — Board column changes fall back to the 60-minute safety-net poll. Not a problem for most workflows.
+**`projects_v2_item` warning** — Board column changes are caught by the periodic status sweep (default every 10 minutes). Not a problem for most workflows.
 
 ---
 
