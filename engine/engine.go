@@ -77,12 +77,7 @@ type Engine struct {
 	ciFixCycleCount      map[string]int        // key: "owner/repo#N-stageName"; CI-fix re-invocation cycle count per stage
 	rebaseCycleCount     map[string]int        // key: "owner/repo#N-stageName"; rebase re-invocation cycle count per stage
 	ciMergePendingSince  map[string]time.Time  // key: issueKey; when CI was first observed in_progress in the merge guard
-	prHasHadChecks       map[string]bool       // key: issueKey; true once FetchCheckRuns has returned non-empty for this issue
-	lastUsage            map[string]TokenUsage // key: issueKey; per-issue token usage from last processItem (for TUI)
-	lastCompleted        map[string]bool       // key: issueKey; per-issue stage completion from last processItem (for TUI)
-	lastBlocked          map[string]bool       // key: issueKey; per-issue blocked-on-input from last processItem (for TUI)
 	lastUpdatedAt        map[string]time.Time  // key: issueKey; tracks last-seen updatedAt per issue
-	deepFetchFailureTime map[string]time.Time  // key: issueKey; tracks when FetchItemDetails last failed
 	idleCount            int                   // consecutive idle polls; triggers self-upgrade at threshold
 	idleStart            time.Time             // when consecutive idle polls began; zero value = not idle
 	wakeCh               chan struct{}         // TUI sends on this to wake the poll loop immediately; nil if no TUI
@@ -132,18 +127,13 @@ func New(cfg Config) (*Engine, error) {
 		fabrikDir:            fabrikDir,
 		store:                itemstate.NewStore(nil),
 		processedSet:         make(map[string]time.Time),
-		lastUsage:            make(map[string]TokenUsage),
-		lastCompleted:        make(map[string]bool),
-		lastBlocked:          make(map[string]bool),
 		lastUpdatedAt:        make(map[string]time.Time),
-		deepFetchFailureTime: make(map[string]time.Time),
 		retryCount:           make(map[string]int),
 		pausedDueToRetries:   make(map[string]bool),
 		reviewCycleCount:     make(map[string]int),
 		ciFixCycleCount:      make(map[string]int),
 		rebaseCycleCount:     make(map[string]int),
 		ciMergePendingSince:  make(map[string]time.Time),
-		prHasHadChecks:       make(map[string]bool),
 		sem:                  make(chan struct{}, cfg.MaxConcurrent),
 	}
 
@@ -197,18 +187,13 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		worktreeManagers:     wms,
 		store:                itemstate.NewStore(nil),
 		processedSet:         make(map[string]time.Time),
-		lastUsage:            make(map[string]TokenUsage),
-		lastCompleted:        make(map[string]bool),
-		lastBlocked:          make(map[string]bool),
 		lastUpdatedAt:        make(map[string]time.Time),
-		deepFetchFailureTime: make(map[string]time.Time),
 		retryCount:           make(map[string]int),
 		pausedDueToRetries:   make(map[string]bool),
 		reviewCycleCount:     make(map[string]int),
 		ciFixCycleCount:      make(map[string]int),
 		rebaseCycleCount:     make(map[string]int),
 		ciMergePendingSince:  make(map[string]time.Time),
-		prHasHadChecks:       make(map[string]bool),
 		sem:                  make(chan struct{}, maxConcurrent),
 	}
 	if worktrees != nil {
