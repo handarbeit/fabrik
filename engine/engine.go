@@ -11,6 +11,7 @@ import (
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
 )
@@ -66,6 +67,7 @@ type Engine struct {
 	worktreeManagers     map[string]*WorktreeManager // key: "owner/repo"; one WM per discovered repo
 	fabrikDir            string                      // directory containing .fabrik/ (always os.Getwd() at startup)
 	mu                   sync.Mutex
+	store                *itemstate.Store      // per-item engine state (locks, invocation outcomes, deep-fetch, CI-gate); see ADR-036
 	processedSet         map[string]time.Time  // key: "owner/repo#N-stageName" or "owner/repo#N-comment-ID"
 	lockedIssues         map[string]bool       // key: "owner/repo#N"; issues with fabrik:locked added but not yet released
 	totalTokens          TokenUsage            // accumulated token usage since process start
@@ -129,6 +131,7 @@ func New(cfg Config) (*Engine, error) {
 		claude:               &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},
 		worktreeManagers:     make(map[string]*WorktreeManager),
 		fabrikDir:            fabrikDir,
+		store:                itemstate.NewStore(nil),
 		processedSet:         make(map[string]time.Time),
 		lockedIssues:         make(map[string]bool),
 		lastUsage:            make(map[string]TokenUsage),
