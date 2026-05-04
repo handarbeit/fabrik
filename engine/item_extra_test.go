@@ -972,3 +972,99 @@ func TestItemNeedsWork_ClosedIssue_AwaitingCI_Passes(t *testing.T) {
 		t.Error("closed item with fabrik:awaiting-ci on wait_for_ci stage should be filtered by awaiting-ci dispatch gate")
 	}
 }
+
+// TestPoll_DeferredRefresh_DoesNotRefreshIncompleteItem verifies that the deferred
+// processedSet refresh in poll() does NOT refresh entries for incomplete items —
+// those without stage:X:complete in their full label set. Refreshing an incomplete
+// item's entry would defeat the retry-after-cooldown mechanism and block retries
+// indefinitely (#504 regression fix).
+func TestPoll_DeferredRefresh_DoesNotRefreshIncompleteItem(t *testing.T) {
+	ts := time.Now().Add(-time.Minute)
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{Number: 80, Status: "Research", UpdatedAt: ts},
+				},
+			}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			// Locked by another user — prevents dispatch. No stage:Research:complete.
+			item.Labels = append(item.Labels, "fabrik:locked:otheruser")
+			return nil
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	eng.cfg.PollSeconds = 1 // cooldown = 10s
+
+	initial := time.Now().Add(-2 * time.Minute) // expired cooldown
+	eng.mu.Lock()
+	eng.lastUpdatedAt["owner/repo#80"] = ts // unchanged updatedAt → cooldown path
+	eng.processedSet["owner/repo#80-Research"] = initial
+	eng.mu.Unlock()
+
+	ctx := t.Context()
+	if _, err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	eng.mu.Lock()
+	after := eng.processedSet["owner/repo#80-Research"]
+	eng.mu.Unlock()
+
+	// Entry must NOT have been refreshed — incomplete stages must be allowed
+	// to retry once their cooldown expires.
+	if time.Since(after) < 90*time.Second {
+		t.Error("processedSet entry for incomplete item was refreshed by the deferred block; retry-after-cooldown is defeated")
+	}
+}
+
+// TestPoll_DeferredRefresh_RefreshesTerminalItem verifies that the deferred
+// processedSet refresh in poll() DOES refresh entries for terminal items —
+// those where stage:X:complete appears in the full label set from deep-fetch
+// (even if the label is beyond the 15-label shallow query window). This is the
+// #488 belt-and-suspenders behavior: it caps deep-fetch frequency for terminal
+// items so they don't trigger a perpetual deep-fetch loop.
+func TestPoll_DeferredRefresh_RefreshesTerminalItem(t *testing.T) {
+	ts := time.Now().Add(-time.Minute)
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					// No stage:Research:complete in shallow labels — simulates
+					// the label being beyond the first 15 shallow positions.
+					{Number: 81, Status: "Research", UpdatedAt: ts},
+				},
+			}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			// Full label set (from deep-fetch) has the complete label.
+			item.Labels = append(item.Labels, "stage:Research:complete")
+			return nil
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	eng.cfg.PollSeconds = 1 // cooldown = 10s
+
+	eng.mu.Lock()
+	eng.lastUpdatedAt["owner/repo#81"] = ts // unchanged updatedAt → cooldown path
+	eng.processedSet["owner/repo#81-Research"] = time.Now().Add(-2 * time.Minute)
+	eng.mu.Unlock()
+
+	ctx := t.Context()
+	if _, err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	eng.mu.Lock()
+	after := eng.processedSet["owner/repo#81-Research"]
+	eng.mu.Unlock()
+
+	// Entry must have been refreshed — terminal items use the deferred refresh
+	// to cap deep-fetch frequency (#488 behavior preserved).
+	if time.Since(after) > 5*time.Second {
+		t.Error("processedSet entry for terminal item was NOT refreshed by the deferred block; #488 behavior is broken")
+	}
+}

@@ -665,16 +665,19 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			if !item.UpdatedAt.IsZero() && !advancedItems[iKey] {
 				e.lastUpdatedAt[iKey] = item.UpdatedAt
 			}
-			// Belt-and-suspenders: refresh processedSet for non-advanced items that
-			// completed a full poll cycle without dispatching work. Only updates an
-			// *existing* entry — items that never had Claude run have no cooldown state
-			// and don't need this refresh. This caps deep-fetch frequency to once per
-			// cooldown period for terminal items where the stage-complete label isn't
-			// within the first 15 shallow labels (where Part 1 suppresses retries).
+			// Belt-and-suspenders: refresh processedSet for non-advanced *terminal*
+			// items that completed a full poll cycle without dispatching work. Only
+			// updates an *existing* entry, and only when stage:<X>:complete is present
+			// in the full label set (items that deep-fetched have all labels here).
+			// This caps deep-fetch frequency to once per cooldown period for terminal
+			// items where the stage-complete label isn't within the first 15 shallow
+			// labels (where Part 1 suppresses retries). Incomplete items (no
+			// stage:X:complete) are intentionally excluded — refreshing their entry
+			// would defeat the retry-after-cooldown mechanism (#504).
 			if !advancedItems[iKey] {
 				if stage := stages.FindStage(e.cfg.Stages, item.Status); stage != nil && !stage.CleanupWorktree {
 					stageKey := iKey + "-" + stage.Name
-					if _, exists := e.processedSet[stageKey]; exists {
+					if _, exists := e.processedSet[stageKey]; exists && hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) {
 						e.processedSet[stageKey] = time.Now()
 					}
 				}
