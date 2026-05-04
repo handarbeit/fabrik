@@ -463,8 +463,8 @@ func TestYoloCatchup_SkipsNotDeepFetched(t *testing.T) {
 	}
 }
 
-// TestProcessedSetConcurrency verifies that concurrent access to processedSet
-// via the mutex-protected methods does not cause data races.
+// TestProcessedSetConcurrency verifies that concurrent access to item state
+// via the store does not cause data races.
 
 // TestPoll_RateLimitWarning verifies that a distinct warning is logged when the
 // GraphQL remaining/limit ratio falls below rateLimitBackoffThreshold (20%).
@@ -1232,8 +1232,8 @@ func TestItemMayNeedWork_NoWaitForCI_CompleteLabel_FilteredByCache(t *testing.T)
 // TestPoll_CruiseValidateComplete_NoRepeatDeepFetch is a regression test for the
 // perpetual deep-fetch loop (issue #488). Terminal items — cruise+Validate complete,
 // paused+complete, closed-with-stage-complete — would trigger a deep-fetch on every
-// poll cycle once the processedSet cooldown expired, indefinitely. This test verifies
-// that at most one deep-fetch occurs across two poll cycles in multi-repo mode.
+// poll cycle once the CooldownAt["periodic-re-eval"] window expired, indefinitely.
+// This test verifies that at most one deep-fetch occurs across two poll cycles.
 func TestPoll_CruiseValidateComplete_NoRepeatDeepFetch(t *testing.T) {
 	fixedTime := time.Now().Add(-time.Hour)
 	deepFetchCount := 0
@@ -1284,9 +1284,9 @@ func TestPoll_CruiseValidateComplete_NoRepeatDeepFetch(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Poll 1: with Part 1 fix, stage:Validate:complete suppresses the cooldown retry.
+	// Poll 1: with Part 1 fix, stage:Validate:complete suppresses the cooldown re-eval.
 	// With Part 2 fix only (label absent), this poll triggers one deep-fetch and then
-	// resets the processedSet cooldown so Poll 2 is suppressed.
+	// refreshes CooldownAt["periodic-re-eval"] so Poll 2 is suppressed.
 	if _, err := eng.poll(ctx); err != nil {
 		t.Fatalf("poll 1: %v", err)
 	}

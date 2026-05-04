@@ -1041,7 +1041,7 @@ func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 // blockOnInput is called when Claude outputs FABRIK_BLOCKED_ON_INPUT. It pauses
 // the issue with fabrik:paused + fabrik:awaiting-input labels so the engine
 // knows to auto-unblock when the user responds with a comment.
-// It does NOT add a stage:<name>:failed label and does NOT touch retryCount.
+// It does NOT add a stage:<name>:failed label and does NOT touch Attempts.
 func (e *Engine) blockOnInput(item gh.ProjectItem, stage *stages.Stage) {
 	e.logf(item.Number, "block", "stage %q needs user input — pausing with awaiting-input\n", stage.Name)
 
