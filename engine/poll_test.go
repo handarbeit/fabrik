@@ -1341,29 +1341,17 @@ func TestLayer1StatusRefresh_UpdatesCacheOnIssueCommentEvent(t *testing.T) {
 		t.Errorf("want FetchProjectItemStatus called once with %q, got %v", "PVTI_001", calls)
 	}
 
-	// Cache must reflect the new status without a Layer 2 sweep.
+	// Verify the item still exists in the cache (not corrupted by the refresh).
 	itemID, ok := cache.GetItemID(boardcache.ItemKey("owner/repo", 1))
 	if !ok {
-		t.Fatal("item not found in cache")
+		t.Fatal("item no longer found in cache after Layer 1 refresh")
 	}
 	if itemID != "PVTI_001" {
 		t.Fatalf("unexpected itemID %q", itemID)
 	}
-	// Read status via ApplyStatusBatch side-channel: verify by bootstrapping and checking.
-	// Easier: read directly via a status-batch round-trip.
-	// Actually the simplest check: call GetItemID to confirm item exists, and check via
-	// a single-item ApplyStatusBatch that won't touch our item if it's already "Plan".
-	// Let's bootstrap a second cache from the current state and compare.
-	// The simplest approach: verify via FetchProjectItemStatusBatch call above succeeding
-	// and then checking via cache-internal state. Since we're in a separate package,
-	// use the public API: UpdateItemStatus → GetItemID still returns the old/new value
-	// via indirect observation through ApplyStatusBatch.
-	// Simpler: just confirm no second FetchProjectItemStatus call was made (idempotent).
-	// The most direct check is via the UpdateItemStatus side-effect in ApplyStatusBatch.
-	// Since this is package engine (black-box for boardcache), use ProjectID as a canary.
-	if cache.ProjectID() != "PVT_test" {
-		t.Error("unexpected cache state after Layer 1 refresh")
-	}
+	// The cache-side update (UpdateItemStatus sets Status="Plan") is verified by
+	// boardcache_test.go:TestUpdateItemStatusSetsStatusAndUpdatedAt. Here we confirm
+	// the engine called the right API path, which is the engine-level invariant.
 }
 
 func TestLayer1StatusRefresh_SkipsWhenCachePaused(t *testing.T) {
