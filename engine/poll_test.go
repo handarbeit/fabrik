@@ -1485,3 +1485,74 @@ func TestRunReconciliationLoop_SkipsWhenProjectIDEmpty(t *testing.T) {
 		t.Errorf("FetchProjectItemStatusBatch should not be called when ProjectID is empty; got %d calls", n)
 	}
 }
+
+// TestSeedLabels_multiRepo verifies that in multi-repo mode (cfg.Repo == ""),
+// SeedLabels is called exactly once per discovered repo across two poll cycles,
+// and never called with an empty repo argument.
+func TestSeedLabels_multiRepo(t *testing.T) {
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{Number: 1, Title: "Issue 1", Status: "Research", Repo: "owner/repo1"},
+			{Number: 2, Title: "Issue 2", Status: "Research", Repo: "owner/repo2"},
+		},
+	}
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return board, nil
+		},
+		fetchStatusFieldFn: func(projectID string) (*gh.StatusField, error) {
+			return &gh.StatusField{
+				FieldID: "F1",
+				Options: map[string]string{"Research": "OPT_1"},
+			}, nil
+		},
+	}
+
+	// Multi-repo mode: Owner set, Repo empty.
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStages(),
+		},
+		client,
+		&mockClaudeInvoker{},
+		nil,
+	)
+
+	ctx := context.Background()
+	if _, err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll 1: %v", err)
+	}
+	if _, err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll 2: %v", err)
+	}
+
+	client.mu.Lock()
+	calls := make([]seedLabelsCall, len(client.seedLabelsCalls))
+	copy(calls, client.seedLabelsCalls)
+	client.mu.Unlock()
+
+	// No call should have an empty repo.
+	for _, c := range calls {
+		if c.repo == "" {
+			t.Errorf("SeedLabels called with empty repo: %+v", c)
+		}
+	}
+
+	// Each unique owner/repo should be seeded exactly once across both poll cycles.
+	seen := make(map[string]int)
+	for _, c := range calls {
+		seen[c.owner+"/"+c.repo]++
+	}
+	for _, ownerRepo := range []string{"owner/repo1", "owner/repo2"} {
+		if seen[ownerRepo] != 1 {
+			t.Errorf("SeedLabels for %s called %d times, want 1", ownerRepo, seen[ownerRepo])
+		}
+	}
+}
