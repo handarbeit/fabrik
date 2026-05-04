@@ -111,17 +111,20 @@ const recentMissTTL = 10 * time.Minute
 // resolvePRLinkage looks up which cached issue is closed by the given PR by
 // fetching the PR body via REST and parsing closing keywords. Must be called
 // without c.mu held (the REST call is a network operation). Returns the cache
-// key and issue number of the first closing issue found in c.items, or
-// ("", 0, false) when no match is found.
-func (c *CacheImpl) resolvePRLinkage(owner, repo string, prNumber int) (key string, issueNumber int, found bool) {
+// key and issue number of the first closing issue found in c.items. On a
+// transient REST error the error is returned and callers should NOT record a
+// negative-miss entry (a retry on the next webhook may succeed). Returns
+// ("", 0, false, nil) when the PR body has no recognized closing reference or
+// none of the referenced issues are in this cache.
+func (c *CacheImpl) resolvePRLinkage(owner, repo string, prNumber int) (key string, issueNumber int, found bool, err error) {
 	fullRepo := owner + "/" + repo
 	issues, err := c.fallback.FetchPRClosingIssues(owner, repo, prNumber)
 	if err != nil {
 		c.logFn("[cache] resolvePRLinkage: fetch closing issues for PR #%d: %v\n", prNumber, err)
-		return "", 0, false
+		return "", 0, false, err
 	}
 	if len(issues) == 0 {
-		return "", 0, false
+		return "", 0, false, nil
 	}
 
 	c.mu.RLock()
@@ -129,10 +132,10 @@ func (c *CacheImpl) resolvePRLinkage(owner, repo string, prNumber int) (key stri
 	for _, issNum := range issues {
 		k := itemKey(fullRepo, issNum)
 		if _, ok := c.items[k]; ok {
-			return k, issNum, true
+			return k, issNum, true, nil
 		}
 	}
-	return "", 0, false
+	return "", 0, false, nil
 }
 
 // CacheImpl is a goroutine-safe in-memory board cache. Webhook delta functions write
