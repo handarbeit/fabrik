@@ -168,12 +168,12 @@ func TestHandleStageComplete_YoloLabel_ValidateUnmergeable_RebaseDispatched(t *t
 	if len(client.updateStatusCalls) != 0 {
 		t.Errorf("expected no advance when rebase dispatched, got %d status updates", len(client.updateStatusCalls))
 	}
-	stageKey := "owner/repo#1-Validate"
-	eng.mu.Lock()
-	count := eng.rebaseCycleCount[stageKey]
-	eng.mu.Unlock()
-	if count != 1 {
-		t.Errorf("expected rebaseCycleCount[%q] == 1, got %d", stageKey, count)
+	snap, snapErr := eng.store.Get("owner/repo", 1)
+	if snapErr != nil {
+		t.Fatalf("store.Get: %v", snapErr)
+	}
+	if snap.RebaseCycles("Validate") != 1 {
+		t.Errorf("expected RebaseCycles[Validate] == 1, got %d", snap.RebaseCycles("Validate"))
 	}
 }
 

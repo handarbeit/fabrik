@@ -109,8 +109,8 @@ func TestNewWithDeps(t *testing.T) {
 	if eng.cfg.Owner != "o" {
 		t.Errorf("Owner = %q", eng.cfg.Owner)
 	}
-	if eng.processedSet == nil {
-		t.Error("processedSet should be initialized")
+	if eng.store == nil {
+		t.Error("store should be initialized")
 	}
 }
 
@@ -173,28 +173,35 @@ func TestRun_ShutdownOnSignal(t *testing.T) {
 	}
 }
 
-func TestProcessedSetConcurrency(t *testing.T) {
+func TestStoreCommentConcurrency(t *testing.T) {
 	e := &Engine{
-		cfg:          Config{User: "testuser"},
-		processedSet: make(map[string]time.Time),
+		cfg:   Config{User: "testuser"},
+		store: itemstate.NewStore(nil),
 	}
 
 	var wg sync.WaitGroup
-	// Simulate concurrent writes from multiple workers
+	// Simulate concurrent CommentProcessed writes from multiple workers
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			key := fmt.Sprintf("%d-TestStage", n)
-			e.mu.Lock()
-			e.processedSet[key] = time.Now()
-			e.mu.Unlock()
+			e.store.Apply(itemstate.CommentProcessed{
+				Repo:      "owner/repo",
+				Number:    n + 1,
+				CommentID: fmt.Sprintf("c-%d", n),
+				At:        time.Now(),
+			})
 		}(i)
 	}
 	wg.Wait()
 
-	if len(e.processedSet) != 100 {
-		t.Errorf("expected 100 entries, got %d", len(e.processedSet))
+	// Verify one of the entries was recorded
+	snap, err := e.store.Get("owner/repo", 1)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.CommentProcessed("c-0").IsZero() {
+		t.Error("expected CommentProcessed[c-0] to be set")
 	}
 }
 
@@ -202,8 +209,8 @@ func TestProcessedSetConcurrency(t *testing.T) {
 // when called from multiple goroutines.
 func TestMarkCommentsProcessedConcurrency(t *testing.T) {
 	e := &Engine{
-		cfg:          Config{User: "testuser"},
-		processedSet: make(map[string]time.Time),
+		cfg:   Config{User: "testuser"},
+		store: itemstate.NewStore(nil),
 	}
 
 	var wg sync.WaitGroup
@@ -211,7 +218,7 @@ func TestMarkCommentsProcessedConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			item := gh.ProjectItem{Number: n}
+			item := gh.ProjectItem{Number: n + 1}
 			comments := []gh.Comment{
 				{ID: fmt.Sprintf("c-%d-a", n)},
 				{ID: fmt.Sprintf("c-%d-b", n)},
@@ -221,9 +228,13 @@ func TestMarkCommentsProcessedConcurrency(t *testing.T) {
 	}
 	wg.Wait()
 
-	// 20 items * 2 comments each = 40 entries
-	if len(e.processedSet) != 40 {
-		t.Errorf("expected 40 entries, got %d", len(e.processedSet))
+	// Verify a sample entry is recorded correctly
+	snap, err := e.store.Get("", 1)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.CommentProcessed("c-0-a").IsZero() {
+		t.Error("expected CommentProcessed[c-0-a] to be set after markCommentsProcessed")
 	}
 }
 
@@ -278,9 +289,8 @@ func TestConcurrentItemDispatch(t *testing.T) {
 			MaxConcurrent: maxConcurrent,
 			Stages:        nil, // no matching stage → processItem returns nil immediately
 		},
-		store:        itemstate.NewStore(nil),
-		processedSet: make(map[string]time.Time),
-		sem:          make(chan struct{}, maxConcurrent),
+		store: itemstate.NewStore(nil),
+		sem:   make(chan struct{}, maxConcurrent),
 	}
 
 	board := &gh.ProjectBoard{}
@@ -362,8 +372,7 @@ func TestPollNonBlockingAtCapacity(t *testing.T) {
 			MaxConcurrent: maxConcurrent,
 			Stages:        nil,
 		},
-		processedSet: make(map[string]time.Time),
-		sem:          make(chan struct{}, maxConcurrent),
+		sem: make(chan struct{}, maxConcurrent),
 	}
 
 	// Fill the semaphore to simulate two in-flight workers from a previous cycle.
@@ -420,8 +429,7 @@ func TestIdleCountNotIncrementedWhileWorkersInFlight(t *testing.T) {
 			AutoUpgrade:   true,
 			MaxConcurrent: 1,
 		},
-		processedSet: make(map[string]time.Time),
-		sem:          make(chan struct{}, 1),
+		sem: make(chan struct{}, 1),
 	}
 
 	// Simulate an in-flight worker by populating the map directly.

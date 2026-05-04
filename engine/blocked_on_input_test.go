@@ -327,13 +327,10 @@ func TestProcessItem_BlockedOnInput_AddsLabels(t *testing.T) {
 		}
 	}
 
-	// retryCount should NOT be incremented
-	itemKey := "owner/repo#10-Research"
-	eng.mu.Lock()
-	count := eng.retryCount[itemKey]
-	eng.mu.Unlock()
-	if count != 0 {
-		t.Errorf("retryCount should be 0 after blocked-on-input, got %d", count)
+	// Attempts should NOT be incremented (blocked-on-input is not a failure)
+	snap, snapErr := eng.store.Get("owner/repo", 10)
+	if snapErr == nil && snap.Attempts("Research") != 0 {
+		t.Errorf("Attempts[Research] should be 0 after blocked-on-input, got %d", snap.Attempts("Research"))
 	}
 
 	// Lock should be released (since blockOnInput calls releaseLock)
@@ -372,23 +369,24 @@ func TestProcessItem_BlockedOnInput_ProcessedSetEntry(t *testing.T) {
 		t.Fatalf("processItem: %v", err)
 	}
 
-	// processedSet should have an entry (Claude ran)
-	itemKey := "owner/repo#11-Research"
-	eng.mu.Lock()
-	_, hasEntry := eng.processedSet[itemKey]
-	eng.mu.Unlock()
-	if !hasEntry {
-		t.Error("processedSet should have entry after blocked-on-input (Claude ran)")
+	// LastAttemptAt["Research"] should be set (Claude ran)
+	snap, err := eng.store.Get("owner/repo", 11)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.LastAttemptAt("Research").IsZero() {
+		t.Error("LastAttemptAt[Research] should be set after blocked-on-input (Claude ran)")
 	}
 
 	// Now simulate user comment arriving — unblockAwaitingInput should clear it
 	stage := testStages()[0] // Research
 	eng.unblockAwaitingInput(item, stage)
 
-	eng.mu.Lock()
-	_, stillHasEntry := eng.processedSet[itemKey]
-	eng.mu.Unlock()
-	if stillHasEntry {
-		t.Error("processedSet entry should be cleared after unblockAwaitingInput")
+	snap2, err := eng.store.Get("owner/repo", 11)
+	if err != nil {
+		t.Fatalf("store.Get after unblock: %v", err)
+	}
+	if !snap2.LastAttemptAt("Research").IsZero() {
+		t.Error("LastAttemptAt[Research] should be cleared after unblockAwaitingInput")
 	}
 }

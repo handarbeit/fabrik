@@ -51,9 +51,9 @@ func TestItemMayNeedWork_StaleButCooldownExpired(t *testing.T) {
 	// Record the last-seen timestamp so the "unchanged" path triggers
 	eng.mu.Lock()
 	eng.seenUpdatedAt["owner/repo#42"] = ts
-	// Record a processedSet entry from >cooldown ago
-	eng.processedSet["owner/repo#42-Research"] = time.Now().Add(-2 * time.Minute)
 	eng.mu.Unlock()
+	// Set an expired CooldownAt entry (>cooldown ago) so re-eval fires
+	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 42, Reason: "periodic-re-eval", Until: time.Now().Add(-2 * time.Minute)})
 
 	if !eng.itemMayNeedWork(item) {
 		t.Error("stale item with expired cooldown should need work")
@@ -76,8 +76,8 @@ func TestItemMayNeedWork_StaleWithinCooldown(t *testing.T) {
 
 	eng.mu.Lock()
 	eng.seenUpdatedAt["owner/repo#43"] = ts
-	eng.processedSet["owner/repo#43-Research"] = time.Now() // just processed
 	eng.mu.Unlock()
+	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 43, Reason: "periodic-re-eval", Until: time.Now().Add(10 * time.Minute)})
 
 	if eng.itemMayNeedWork(item) {
 		t.Error("stale item within cooldown should not need work")
@@ -671,9 +671,9 @@ func TestItemMayNeedWork_AwaitingCI_BypassesUpdatedAtCache(t *testing.T) {
 	}
 
 	// Seed seenUpdatedAt so the "unchanged" path would normally trigger.
+	// No CooldownAt entry — awaiting-ci items use per-poll bypass (not cooldown path).
 	eng.mu.Lock()
 	eng.seenUpdatedAt["owner/repo#61"] = ts
-	eng.processedSet["owner/repo#61-Research"] = time.Now() // just processed — within cooldown
 	eng.mu.Unlock()
 
 	if !eng.itemMayNeedWork(item) {
@@ -706,20 +706,18 @@ func TestItemMayNeedWork_AwaitingReview_CooldownPattern(t *testing.T) {
 		Labels:    []string{"fabrik:awaiting-review"},
 	}
 
-	// Within cooldown: processedSet has a recent entry → must NOT re-admit yet.
+	// Within cooldown: active CooldownAt["review-blocked"] → must NOT re-admit yet.
 	eng.mu.Lock()
 	eng.seenUpdatedAt["owner/repo#67"] = ts
-	eng.processedSet["owner/repo#67-Research"] = time.Now() // just processed
 	eng.mu.Unlock()
+	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 67, Reason: "review-blocked", Until: time.Now().Add(10 * time.Minute)})
 
 	if eng.itemMayNeedWork(item) {
 		t.Error("fabrik:awaiting-review item within cooldown window should be filtered (cooldown not yet expired)")
 	}
 
-	// Past cooldown: processedSet entry is older than 10 × PollSeconds → must re-admit.
-	eng.mu.Lock()
-	eng.processedSet["owner/repo#67-Research"] = time.Now().Add(-15 * time.Minute) // well past 600s cooldown
-	eng.mu.Unlock()
+	// Past cooldown: expired CooldownAt["review-blocked"] → must re-admit.
+	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 67, Reason: "review-blocked", Until: time.Now().Add(-15 * time.Minute)})
 
 	if !eng.itemMayNeedWork(item) {
 		t.Error("fabrik:awaiting-review item past cooldown window should be re-admitted by cooldown retry path")
@@ -744,14 +742,14 @@ func TestItemMayNeedWork_AwaitingReview_NotBypassedDirectly(t *testing.T) {
 		Labels:    []string{"fabrik:awaiting-review"},
 	}
 
-	// No processedSet entry: cooldown retry path doesn't fire. Without unconditional
+	// No CooldownAt entry: cooldown retry path doesn't fire. Without unconditional
 	// bypass, the cache filter wins and we return false.
 	eng.mu.Lock()
 	eng.seenUpdatedAt["owner/repo#68"] = ts
 	eng.mu.Unlock()
 
 	if eng.itemMayNeedWork(item) {
-		t.Error("fabrik:awaiting-review without processedSet entry should be filtered (no per-poll bypass)")
+		t.Error("fabrik:awaiting-review without CooldownAt entry should be filtered (no per-poll bypass)")
 	}
 }
 
@@ -774,11 +772,11 @@ func TestItemMayNeedWork_BlockedRespectsUpdatedAtCache(t *testing.T) {
 
 	eng.mu.Lock()
 	eng.seenUpdatedAt["owner/repo#63"] = ts
-	eng.processedSet["owner/repo#63-Research"] = time.Now() // just processed — within cooldown
 	eng.mu.Unlock()
+	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 63, Reason: "dep-blocked", Until: time.Now().Add(10 * time.Minute)})
 
 	if eng.itemMayNeedWork(item) {
-		t.Error("fabrik:blocked item with unchanged updatedAt should be filtered by updatedAt cache (no forced deep-fetch)")
+		t.Error("fabrik:blocked item with active CooldownAt should be filtered (no forced deep-fetch)")
 	}
 }
 
@@ -799,11 +797,11 @@ func TestItemMayNeedWork_NoSpecialLabel_RespectsUpdatedAtCache(t *testing.T) {
 
 	eng.mu.Lock()
 	eng.seenUpdatedAt["owner/repo#62"] = ts
-	eng.processedSet["owner/repo#62-Research"] = time.Now()
 	eng.mu.Unlock()
+	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 62, Reason: "periodic-re-eval", Until: time.Now().Add(10 * time.Minute)})
 
 	if eng.itemMayNeedWork(item) {
-		t.Error("item without bypass labels should be filtered by updatedAt cache")
+		t.Error("item without bypass labels should be filtered by active CooldownAt")
 	}
 }
 
@@ -825,8 +823,8 @@ func TestItemMayNeedWork_CompleteStageBypassed(t *testing.T) {
 
 	eng.mu.Lock()
 	eng.seenUpdatedAt["owner/repo#70"] = ts
-	eng.processedSet["owner/repo#70-Research"] = time.Now().Add(-2 * time.Minute) // expired
 	eng.mu.Unlock()
+	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 70, Reason: "periodic-re-eval", Until: time.Now().Add(-2 * time.Minute)})
 
 	if eng.itemMayNeedWork(item) {
 		t.Error("stage-complete item with expired cooldown should NOT be retried — stage is already done")
@@ -851,8 +849,8 @@ func TestItemMayNeedWork_IncompleteStageStillRetried(t *testing.T) {
 
 	eng.mu.Lock()
 	eng.seenUpdatedAt["owner/repo#71"] = ts
-	eng.processedSet["owner/repo#71-Research"] = time.Now().Add(-2 * time.Minute) // expired
 	eng.mu.Unlock()
+	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 71, Reason: "periodic-re-eval", Until: time.Now().Add(-2 * time.Minute)})
 
 	if !eng.itemMayNeedWork(item) {
 		t.Error("incomplete stage with expired cooldown should still be retried")
@@ -879,8 +877,8 @@ func TestItemMayNeedWork_AwaitingReview_WithCompleteLabel(t *testing.T) {
 
 	eng.mu.Lock()
 	eng.seenUpdatedAt["owner/repo#69"] = ts
-	eng.processedSet["owner/repo#69-Research"] = time.Now().Add(-2 * time.Minute) // expired
 	eng.mu.Unlock()
+	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 69, Reason: "review-blocked", Until: time.Now().Add(-2 * time.Minute)})
 
 	// Must return true: awaiting-review exempts the item from stage-complete suppression.
 	// If this returns false, Phase 1/Phase 2 reprompt timers can never fire.
@@ -989,25 +987,29 @@ func TestPoll_DeferredRefresh_DoesNotRefreshIncompleteItem(t *testing.T) {
 	eng := testEngine(client, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 1 // cooldown = 10s
 
-	initial := time.Now().Add(-2 * time.Minute) // expired cooldown
+	initial := time.Now().Add(-2 * time.Minute) // expired timestamp
 	eng.mu.Lock()
 	eng.seenUpdatedAt["owner/repo#80"] = ts // unchanged updatedAt → cooldown path
-	eng.processedSet["owner/repo#80-Research"] = initial
 	eng.mu.Unlock()
+	// Seed LastAttemptAt to verify the deferred block never refreshes it
+	eng.store.Apply(itemstate.StageAttempted{Repo: "owner/repo", Number: 80, StageName: "Research", At: initial})
+	// Seed expired CooldownAt so itemMayNeedWork enters the re-eval path (returns true → deep-fetch)
+	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 80, Reason: "periodic-re-eval", Until: initial})
 
 	ctx := t.Context()
 	if _, err := eng.poll(ctx); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 
-	eng.mu.Lock()
-	after := eng.processedSet["owner/repo#80-Research"]
-	eng.mu.Unlock()
-
-	// Entry must NOT have been refreshed — incomplete stages must be allowed
-	// to retry once their cooldown expires.
-	if time.Since(after) < 90*time.Second {
-		t.Error("processedSet entry for incomplete item was refreshed by the deferred block; retry-after-cooldown is defeated")
+	// LastAttemptAt["Research"] must NOT have been refreshed by the deferred block.
+	// The deferred block only updates CooldownAt["periodic-re-eval"], never LastAttemptAt.
+	// This is the structural fix for the #504 regression.
+	snap, snapErr := eng.store.Get("owner/repo", 80)
+	if snapErr != nil {
+		t.Fatalf("store.Get after poll: %v", snapErr)
+	}
+	if time.Since(snap.LastAttemptAt("Research")) < 90*time.Second {
+		t.Error("LastAttemptAt[Research] was refreshed by the deferred block; retry-after-cooldown is defeated (#504 regression)")
 	}
 }
 
@@ -1041,21 +1043,22 @@ func TestPoll_DeferredRefresh_RefreshesTerminalItem(t *testing.T) {
 
 	eng.mu.Lock()
 	eng.seenUpdatedAt["owner/repo#81"] = ts // unchanged updatedAt → cooldown path
-	eng.processedSet["owner/repo#81-Research"] = time.Now().Add(-2 * time.Minute)
 	eng.mu.Unlock()
+	// Seed expired CooldownAt so itemMayNeedWork enters the re-eval path (returns true → deep-fetch)
+	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 81, Reason: "periodic-re-eval", Until: time.Now().Add(-2 * time.Minute)})
 
 	ctx := t.Context()
 	if _, err := eng.poll(ctx); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 
-	eng.mu.Lock()
-	after := eng.processedSet["owner/repo#81-Research"]
-	eng.mu.Unlock()
-
-	// Entry must have been refreshed — terminal items use the deferred refresh
-	// to cap deep-fetch frequency (#488 behavior preserved).
-	if time.Since(after) > 5*time.Second {
-		t.Error("processedSet entry for terminal item was NOT refreshed by the deferred block; #488 behavior is broken")
+	// CooldownAt["periodic-re-eval"] must have been refreshed by the deferred block.
+	// Terminal items cap their own deep-fetch frequency via CooldownAt (#488 behavior preserved).
+	snap, snapErr := eng.store.Get("owner/repo", 81)
+	if snapErr != nil {
+		t.Fatalf("store.Get after poll: %v", snapErr)
+	}
+	if time.Until(snap.CooldownAt("periodic-re-eval")) < -5*time.Second {
+		t.Error("CooldownAt[periodic-re-eval] was NOT refreshed by the deferred block; #488 behavior is broken")
 	}
 }
