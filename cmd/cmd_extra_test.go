@@ -112,6 +112,12 @@ func (m *testGitHubUpgradeClient) DeleteReviewRequest(owner, repo string, prNumb
 func (m *testGitHubUpgradeClient) AddReviewRequest(owner, repo string, prNumber int, reviewers []string) error {
 	return nil
 }
+func (m *testGitHubUpgradeClient) FetchProjectItemStatus(itemID string) (string, error) {
+	return "", nil
+}
+func (m *testGitHubUpgradeClient) FetchProjectItemStatusBatch(projectID string) (map[string]string, error) {
+	return nil, nil
+}
 
 // ── upgrade ───────────────────────────────────────────────────────────────────
 
