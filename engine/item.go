@@ -569,20 +569,31 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// processItem return. This keeps the issue locked through cooldown
 	// retries so other instances don't pick it up.
 	lockAcquired := false
+	var workerDone chan struct{}
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, lockLabel); err != nil {
 		e.logf(item.Number, "warn", "could not add lock label: %v\n", err)
 	} else {
 		lockAcquired = true
+		workerStartedAt := time.Now()
 		e.store.Apply(itemstate.LocalLockAcquired{
-			Repo:       itemOwnerRepoString(item, e.defaultRepo()),
+			Repo:       repoStr,
 			Number:     item.Number,
 			User:       e.cfg.User,
-			AcquiredAt: time.Now(),
+			AcquiredAt: workerStartedAt,
+			Worker:     &itemstate.WorkerHandle{StageName: stage.Name, StartedAt: workerStartedAt},
 		})
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), lockLabel)
 		}
+		workerDone = make(chan struct{})
+		go e.startHeartbeat(ctx, repoStr, item.Number, workerDone)
 	}
+	defer func() {
+		if workerDone != nil {
+			close(workerDone)
+		}
+	}()
+	defer e.store.Apply(itemstate.WorkerExited{Repo: repoStr, Number: item.Number})
 
 	inProgressLabel := fmt.Sprintf("stage:%s:in_progress", stage.Name)
 	inProgressAdded := false
@@ -699,7 +710,12 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		e.logf(item.Number, "effort", "using effort override %q\n", effortOverride)
 	}
 	resume := !lastAttempt.IsZero() // resume session if we've processed this before
-	opts := InvokeOptions{ModelOverride: modelOverride, EffortOverride: effortOverride, BaseBranch: baseBranch}
+	opts := InvokeOptions{
+		ModelOverride:  modelOverride,
+		EffortOverride: effortOverride,
+		BaseBranch:     baseBranch,
+		OnPIDReady:     func(pid int) { e.store.Apply(itemstate.WorkerPIDSet{Repo: repoStr, Number: item.Number, PID: pid}) },
+	}
 
 	// Snapshot extend-turns presence before any FetchItemDetails re-fetches (which
 	// refresh item.Labels). Using a stable boolean ensures the first-budget calc is
