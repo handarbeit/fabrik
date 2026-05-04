@@ -146,12 +146,22 @@ func (e *Engine) ensurePRLinksIssue(item gh.ProjectItem, prNumber int) {
 		return
 	}
 
-	if strings.Contains(body, closingKeyword) {
-		return // already linked
+	// Self-heal unclosed code fences that could hide Closes #N from GitHub's parser.
+	balanced := balanceFences(body)
+	if balanced != body {
+		if err := e.client.UpdateIssueBody(owner, repo, prNumber, balanced); err != nil {
+			e.logf(item.Number, "warn", "could not update PR #%d body to close fence: %v\n", prNumber, err)
+			return
+		}
+		e.logf(item.Number, "pr", "balanced unclosed code fence in PR #%d body\n", prNumber)
+	}
+
+	if strings.Contains(balanced, closingKeyword) {
+		return // already linked (possibly inside a fence that was just fixed)
 	}
 
 	// Append closing keyword
-	updatedBody := body + "\n\n" + closingKeyword
+	updatedBody := balanced + "\n\n" + closingKeyword
 	if err := e.client.UpdateIssueBody(owner, repo, prNumber, updatedBody); err != nil {
 		e.logf(item.Number, "warn", "could not update PR #%d body: %v\n", prNumber, err)
 		return
