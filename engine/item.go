@@ -506,7 +506,6 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		e.logf(item.Number, "warn", "could not add lock label: %v\n", err)
 	} else {
 		lockAcquired = true
-		workerStartedAt = time.Now()
 		e.store.Apply(itemstate.LocalLockAcquired{
 			Repo:       repoStr,
 			Number:     item.Number,
