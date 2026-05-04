@@ -402,6 +402,20 @@ func TestApplyInvocationRecordedIsComment(t *testing.T) {
 	}
 }
 
+func TestApplyInvocationRecordedDuration(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	d := 42 * time.Second
+	applyExpect(t, s, InvocationRecorded{
+		Repo:     testRepo,
+		Number:   1,
+		Duration: d,
+	}, InvocationChanged)
+	st := getItem(t, s, testRepo, 1)
+	if st.LastInvocationDuration != d {
+		t.Errorf("LastInvocationDuration = %v; want %v", st.LastInvocationDuration, d)
+	}
+}
+
 // ---- DeepFetchFailed ----
 
 func TestApplyDeepFetchFailed(t *testing.T) {
