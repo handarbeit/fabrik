@@ -1,6 +1,7 @@
 package itemstate
 
 import (
+	"strconv"
 	"time"
 
 	gh "github.com/verveguy/fabrik/github"
@@ -352,29 +353,8 @@ func itemKeyFor(repo string, number int) string {
 	if repo == "" && number == 0 {
 		return ""
 	}
-	return repo + "#" + itoa(number)
+	return repo + "#" + strconv.Itoa(number)
 }
 
-// itoa converts an int to its decimal string representation without importing strconv.
-// Only called from itemKeyFor where performance is not critical.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	buf := make([]byte, 20)
-	pos := len(buf)
-	for n > 0 {
-		pos--
-		buf[pos] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		pos--
-		buf[pos] = '-'
-	}
-	return string(buf[pos:])
-}
+// itoa is an alias for strconv.Itoa used by test helpers in this package.
+func itoa(n int) string { return strconv.Itoa(n) }
