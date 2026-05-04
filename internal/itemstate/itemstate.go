@@ -21,6 +21,9 @@ type ItemState struct {
 	Repo string
 	// Number is the issue number.
 	Number int
+	// ID is the GitHub content node ID (e.g. "I_kwDO..." for issues, "PR_kwDO..." for PRs).
+	// Used by github.Client.FetchItemDetails for its GraphQL node lookup.
+	ID string
 	// ItemID is the GitHub Project item node ID (empty if not on the board).
 	ItemID string
 
