@@ -117,39 +117,46 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 		return e.worktreeExistsForItem(item)
 	}
 
-	// Skip items that haven't changed since last poll — unless in cooldown retry.
+	// Skip items that haven't changed since last poll — CooldownAt expiry allows re-evaluation.
 	if !item.UpdatedAt.IsZero() {
 		iKey := issueKey(item, e.defaultRepo())
 		e.mu.Lock()
 		lastSeen, seen := e.seenUpdatedAt[iKey]
 		e.mu.Unlock()
 		if seen && !item.UpdatedAt.After(lastSeen) {
-			// Item unchanged — but still allow cooldown retries
-			stageKey := iKey + "-" + stage.Name
-			e.mu.Lock()
-			lastAttempt, attempted := e.processedSet[stageKey]
-			e.mu.Unlock()
-			if attempted {
-				cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
-				if time.Since(lastAttempt) >= cooldown {
-					// Completed stages have no work to retry — skip the cooldown retry.
-					// This prevents perpetual deep-fetches for terminal items (cruise+Validate
-					// complete, paused+complete, closed-with-stage-complete) where every poll
-					// after cooldown expiry would otherwise trigger a no-op deep-fetch.
-					// Exception: fabrik:awaiting-review items also carry stage:X:complete
-					// but still need periodic re-evaluation for Phase 1/Phase 2 timers.
+			// Item unchanged — check CooldownAt for periodic re-eval suppression/expiry.
+			// Any unexpired CooldownAt entry suppresses deep-fetch during its window.
+			// Any expired entry allows re-evaluation once the window passes, preventing
+			// a dependency-blocked or review-blocked item from being silently skipped forever.
+			repo := itemOwnerRepoString(item, e.defaultRepo())
+			if snap, snapErr := e.store.Get(repo, item.Number); snapErr == nil {
+				now := time.Now()
+				var hasActiveCooldown, hasExpiredCooldown bool
+				for _, t := range snap.State().CooldownAt {
+					if now.Before(t) {
+						hasActiveCooldown = true
+					} else if !t.IsZero() {
+						hasExpiredCooldown = true
+					}
+				}
+				if hasActiveCooldown {
+					return false // within cooldown window, suppress deep-fetch
+				}
+				if hasExpiredCooldown {
+					// Cooldown window has passed — allow re-evaluation, except for completed
+					// stages that have no retry work. fabrik:awaiting-review items carry
+					// stage:X:complete but still need Phase 1/Phase 2 timer re-evaluation.
 					if hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) &&
 						!hasLabel(item, "fabrik:awaiting-review") {
 						return false
 					}
-					return true // cooldown expired, retry
+					return true
 				}
 			}
 			// Force deep-fetch for items whose progress depends on a state change that
 			// does NOT bump the issue/project-item/linked-PR updatedAt and that needs
-			// re-evaluation every poll. The cooldown retry path above is the cheaper
-			// alternative for cases where periodic re-evaluation (every 10 × PollSeconds)
-			// is sufficient — see the "labels NOT in this list" note below.
+			// re-evaluation every poll. The CooldownAt path above handles the cheaper
+			// periodic re-evaluation (every 10 × PollSeconds) for blocked/gated items.
 			//
 			//   fabrik:awaiting-ci      — CI check run completions don't bump updatedAt;
 			//                             the catch-up loop must re-evaluate every poll
@@ -161,27 +168,17 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 			//                             but the issue's updatedAt won't bump on a base-
 			//                             branch advance; the merge-gate must re-check.
 			//
-			// Labels deliberately NOT in this list — they use the cooldown retry path
-			// (processedSet) instead, evaluated every 10 × PollSeconds:
-			//
-			//   fabrik:blocked        — processItem sets processedSet[stageKey] whenever
+			// Labels using the CooldownAt path (periodic re-eval every 10 × PollSeconds):
+			//   fabrik:blocked        — processItem sets CooldownAt["dep-blocked"] when
 			//                           checkDependencies returns true. Blocker closure
 			//                           doesn't bump the blocked item's updatedAt, so
-			//                           cooldown retry is what re-evaluates the gate.
-			//   fabrik:awaiting-review — the catch-up loop's review-gate path sets
-			//                            processedSet[stageKey] when checkReviewGate
-			//                            returns blocked=true. Phase 1 and Phase 2 of
-			//                            checkReviewGate fire on label-applied-at age,
-			//                            so periodic (not per-poll) re-evaluation is
-			//                            sufficient — and on busy boards with many
-			//                            review-waiting items this avoids turning a
-			//                            long-lived label into a permanent GraphQL
-			//                            hot path.
-			//   fabrik:awaiting-input — the auto-clear trigger is a new user comment,
-			//                           which bumps updatedAt; no timer-driven escape
-			//                           exists today. If a timeout is added here later,
-			//                           this label will need to join either the bypass
-			//                           list or the cooldown-recording catch-up path.
+			//                           CooldownAt expiry is what re-evaluates the gate.
+			//   fabrik:awaiting-review — checkReviewGate sets CooldownAt["review-blocked"]
+			//                           when it returns blocked=true. Phase 1 and Phase 2
+			//                           fire on label-applied-at age, so periodic (not
+			//                           per-poll) re-evaluation is sufficient.
+			//   fabrik:awaiting-input — auto-clear trigger is a new user comment (bumps
+			//                           updatedAt); no CooldownAt entry needed today.
 			for _, l := range item.Labels {
 				if l == "fabrik:awaiting-ci" ||
 					l == "fabrik:rebase-needed" {
@@ -198,8 +195,8 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 
 	// Apply a cooldown for items whose last FetchItemDetails call failed.
 	// Without this, a persistent failure (e.g. deleted issue, permission error)
-	// would cause an API call on every poll cycle. The cooldown matches the
-	// processedSet cooldown used for failed stage retries.
+	// would cause an API call on every poll cycle. The cooldown duration matches
+	// the retry window used by LastAttemptAt and CooldownAt.
 	if snap, snapErr := e.store.Get(itemOwnerRepoString(item, e.defaultRepo()), item.Number); snapErr == nil {
 		if lastFailure := snap.State().LastDeepFetchFailureAt; !lastFailure.IsZero() {
 			cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
@@ -282,10 +279,10 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	}
 
 	// Dependency gate is handled by processItem via checkDependencies, which
-	// applies fabrik:blocked and sets processedSet so the cooldown retry in
-	// itemMayNeedWork triggers periodic re-evaluation. A silent return here
-	// would skip the item without labelling it blocked, leaving it permanently
-	// stuck once its updatedAt is cached — even after blockers close.
+	// applies fabrik:blocked and sets CooldownAt["dep-blocked"] so itemMayNeedWork
+	// triggers periodic re-evaluation on expiry. A silent return here would skip
+	// the item without labelling it blocked, leaving it permanently stuck once
+	// its updatedAt is cached — even after blockers close.
 
 	// PRs only support comment processing
 	if item.IsPR {
@@ -308,16 +305,18 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		return false
 	}
 
-	// Check cooldown
-	iKey := issueKey(item, e.defaultRepo())
-	stageKey := iKey + "-" + stage.Name
-	e.mu.Lock()
-	lastAttempt, attempted := e.processedSet[stageKey]
-	e.mu.Unlock()
-	if attempted {
-		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
-		if time.Since(lastAttempt) < cooldown {
-			return false
+	// Check dispatch cooldown: suppress re-dispatch while LastAttemptAt is within the
+	// retry window. Unlike CooldownAt (deep-fetch suppression), LastAttemptAt is only
+	// written when Claude actually runs — never refreshed by mere observation — so it
+	// accurately reflects real invocation recency.
+	repo := itemOwnerRepoString(item, e.defaultRepo())
+	if snap, snapErr := e.store.Get(repo, item.Number); snapErr == nil {
+		lastAttempt := snap.LastAttemptAt(stage.Name)
+		if !lastAttempt.IsZero() {
+			cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
+			if time.Since(lastAttempt) < cooldown {
+				return false
+			}
 		}
 	}
 
@@ -341,10 +340,10 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 
 	// Derive per-issue owner/repo for all API calls.
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-	// Unique key for this issue across all repos.
+	// "owner/repo" string for store operations.
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	// Unique key for this issue across all repos (used for seenUpdatedAt eviction).
 	iKey := issueKey(item, e.defaultRepo())
-	// Unique key for this issue+stage combination.
-	stageKey := iKey + "-" + stage.Name
 
 	// Check if this issue is locked by another driver instance
 	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
@@ -369,7 +368,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	if isAwaitingInput(item) {
 		newComments := e.findNewComments(item)
 		if len(newComments) > 0 {
-			e.unblockAwaitingInput(item, stage, stageKey)
+			e.unblockAwaitingInput(item, stage)
 			return e.processComments(ctx, board, item, stage, newComments)
 		}
 		e.logf(item.Number, "skip", "awaiting user input\n")
@@ -406,14 +405,17 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// and comment idempotently. Returns nil (silent skip) consistent with other
 	// skip paths above. The first stage is always exempt (see checkDependencies).
 	if e.checkDependencies(board, item, stage) {
-		// Record in processedSet so the cooldown-retry path in itemMayNeedWork
-		// triggers periodic re-evaluation. Without this, a blocked item whose
-		// updatedAt never changes (GitHub may not propagate a dependency's
-		// closure to the blocked item) would be permanently filtered by the
-		// updatedAt cache and never unblocked.
-		e.mu.Lock()
-		e.processedSet[stageKey] = time.Now()
-		e.mu.Unlock()
+		// Record CooldownAt["dep-blocked"] so itemMayNeedWork's CooldownAt expiry
+		// path triggers periodic re-evaluation. Without this, a blocked item whose
+		// updatedAt never changes (GitHub may not propagate a dependency's closure
+		// to the blocked item) would be permanently filtered and never unblocked.
+		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
+		e.store.Apply(itemstate.CooldownRecorded{
+			Repo:   repoStr,
+			Number: item.Number,
+			Reason: "dep-blocked",
+			Until:  time.Now().Add(cooldown),
+		})
 		return nil
 	}
 
@@ -463,9 +465,15 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		// which enforces the 24-hour grace period so completed items remain
 		// visible on the board.
 
-		e.mu.Lock()
-		e.processedSet[stageKey] = time.Now()
-		e.mu.Unlock()
+		// Record CooldownAt["periodic-re-eval"] so itemMayNeedWork suppresses
+		// deep-fetches for this terminal item during the cooldown window.
+		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
+		e.store.Apply(itemstate.CooldownRecorded{
+			Repo:   repoStr,
+			Number: item.Number,
+			Reason: "periodic-re-eval",
+			Until:  time.Now().Add(cooldown),
+		})
 		e.store.Apply(itemstate.InvocationRecorded{
 			Repo:      itemOwnerRepoString(item, e.defaultRepo()),
 			Number:    item.Number,
@@ -487,11 +495,9 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}
 	}
 	var wasPaused bool
-	func() {
-		e.mu.Lock()
-		defer e.mu.Unlock()
-		wasPaused = e.pausedDueToRetries[stageKey]
-	}()
+	if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
+		wasPaused = snap.PausedByEngine(stage.Name)
+	}
 	if wasPaused || hasFailedLabel {
 		e.clearFailedStage(item, stage)
 	}
@@ -517,16 +523,14 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}
 	}
 
-	// Determine if we need to run the stage
+	// Determine if we need to run the stage. LastAttemptAt is set only when Claude
+	// actually runs — never refreshed by observation — so it accurately reflects
+	// real invocation recency and prevents hot-looping after an incomplete run.
 	var lastAttempt time.Time
-	var attempted bool
-	func() {
-		e.mu.Lock()
-		defer e.mu.Unlock()
-		lastAttempt, attempted = e.processedSet[stageKey]
-	}()
-
-	if attempted {
+	if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
+		lastAttempt = snap.LastAttemptAt(stage.Name)
+	}
+	if !lastAttempt.IsZero() {
 		// If stage completed, the completion label above would have caught it.
 		// If we're here, the stage was attempted but didn't complete.
 		// Apply a cooldown to avoid hot-looping.
@@ -638,7 +642,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		releaseLock()
 		return fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
 	}
-	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, attempted)
+	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, !lastAttempt.IsZero())
 	if err != nil {
 		releaseLock()
 		return fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
@@ -681,7 +685,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	if effortOverride != "" {
 		e.logf(item.Number, "effort", "using effort override %q\n", effortOverride)
 	}
-	resume := attempted // resume session if we've processed this before
+	resume := !lastAttempt.IsZero() // resume session if we've processed this before
 	opts := InvokeOptions{ModelOverride: modelOverride, EffortOverride: effortOverride, BaseBranch: baseBranch}
 
 	// Snapshot extend-turns presence before any FetchItemDetails re-fetches (which
@@ -843,11 +847,15 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}
 	}
 	if claudeRan {
-		func() {
-			e.mu.Lock()
-			defer e.mu.Unlock()
-			e.processedSet[stageKey] = time.Now()
-		}()
+		// Record that Claude ran. LastAttemptAt is the ONLY write site for this
+		// field — it is never refreshed by the deep-fetch defer or any other
+		// observation path, which is the structural fix for the #504 regression.
+		e.store.Apply(itemstate.StageAttempted{
+			Repo:      repoStr,
+			Number:    item.Number,
+			StageName: stage.Name,
+			At:        time.Now(),
+		})
 	}
 
 	// Warn the user when Claude ran without error but produced no output at all.
@@ -916,12 +924,8 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	if completed {
 		releaseLock()
 		// Clear retry tracking for this stage — no longer needed after success.
-		func() {
-			e.mu.Lock()
-			defer e.mu.Unlock()
-			delete(e.retryCount, stageKey)
-			delete(e.pausedDueToRetries, stageKey)
-		}()
+		e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+		e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 		// Remove fabrik:extend-turns on successful completion so the next stage
 		// gets a normal budget. ErrNotFound means the user already removed it.
 		if hadExtendTurnsLabel {
@@ -947,12 +951,8 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	} else if decomposed {
 		releaseLock()
 		// Clear retry tracking for this stage — issue is decomposed, no retry needed.
-		func() {
-			e.mu.Lock()
-			defer e.mu.Unlock()
-			delete(e.retryCount, stageKey)
-			delete(e.pausedDueToRetries, stageKey)
-		}()
+		e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+		e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 		e.handleDecomposed(board, item, stage)
 	} else if blockedOnInput {
 		releaseLock()
@@ -961,13 +961,11 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
 		e.logf(item.Number, "wait", "stage %q did not complete — will retry after %v\n", stage.Name, cooldown)
 		if claudeRan && e.cfg.MaxRetries > 0 {
+			e.store.Apply(itemstate.StageRetryIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 			var count int
-			func() {
-				e.mu.Lock()
-				defer e.mu.Unlock()
-				e.retryCount[stageKey]++
-				count = e.retryCount[stageKey]
-			}()
+			if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
+				count = snap.Attempts(stage.Name)
+			}
 			if count >= e.cfg.MaxRetries {
 				e.escalateFailedStage(item, stage)
 				releaseLock() // permanently giving up — release the lock
