@@ -401,7 +401,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// before any stage work (worktree setup, Claude invocation) so blocked issues
 	// do not burn Claude turns. checkDependencies handles the fabrik:blocked label
 	// and comment idempotently. Returns nil (silent skip) consistent with other
-	// skip paths above. The first stage is always exempt (see checkDependencies).
+	// skip paths above. Applies uniformly to every stage, including the first.
 	if e.checkDependencies(board, item, stage) {
 		// Record CooldownAt["dep-blocked"] so itemMayNeedWork's CooldownAt expiry
 		// path triggers periodic re-evaluation. Without this, a blocked item whose

@@ -26,13 +26,10 @@ import (
 // Side effects when unblocked:
 //   - Removes the fabrik:blocked label if present (idempotent).
 //
-// No-op (returns false immediately) for the first stage of the pipeline.
+// Applies uniformly to every stage, including the first. When a user sets a
+// blockedBy edge, they assert that the blocker's merged state matters to how
+// this issue should be processed — even at specification time. (#473)
 func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) bool {
-	// First stage never blocked — it must always run to produce the spec.
-	if stages.IsFirstStage(e.cfg.Stages, stage.Name) {
-		return false
-	}
-
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
 
