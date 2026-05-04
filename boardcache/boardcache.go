@@ -137,6 +137,8 @@ func (c *CacheImpl) Bootstrap(board *gh.ProjectBoard) {
 // Reconcile replaces shallow board state from a fresh board fetch.
 // Preserves deep fields (Comments, LinkedPRReviews, etc.) for items that have
 // already been deep-fetched. Logs the drift count when items differ.
+// Shallow drift in linkage (LinkedPRNumber) invalidates deep cache for the
+// affected key, forcing a fresh FetchItemDetails on next access.
 func (c *CacheImpl) Reconcile(board *gh.ProjectBoard) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -167,6 +169,15 @@ func (c *CacheImpl) Reconcile(board *gh.ProjectBoard) {
 			// Update the ItemID reverse lookup.
 			if item.ItemID != "" {
 				c.itemIDToKey[item.ItemID] = key
+			}
+			// Detect linkage drift: if deep cache says LinkedPRNumber=X but the
+			// fresh shallow board shows a different value, the cached deep state was
+			// captured before the issue↔PR linkage appeared (or changed) on GitHub.
+			// Invalidate deepFetched so the next FetchItemDetails re-fetches from GitHub.
+			if c.deepFetched[key] && existing.LinkedPRNumber != item.LinkedPRNumberShallow {
+				delete(c.deepFetched, key)
+				c.logFn("[cache] linkage drift detected for issue #%d: stale linked PR=%d, fresh=%d — invalidating deep cache\n",
+					item.Number, existing.LinkedPRNumber, item.LinkedPRNumberShallow)
 			}
 		} else {
 			drifted++

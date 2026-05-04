@@ -726,6 +726,58 @@ func TestReconcilePreservesDeepFields(t *testing.T) {
 	}
 }
 
+func TestReconcileLinkageDriftInvalidatesDeepCache(t *testing.T) {
+	mc := &mockClient{
+		itemDetailsResult: &gh.ProjectItem{
+			LinkedPRNumber: 502,
+		},
+	}
+	c := NewCacheImpl(mc, nopLog)
+	c.Bootstrap(&gh.ProjectBoard{
+		ProjectID: "PID", Title: "T", OwnerType: "organization",
+		Items: []gh.ProjectItem{
+			{ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", Status: "Research",
+				LinkedPRNumber: 0, LinkedPRNumberShallow: 0},
+		},
+	})
+
+	// Mark as deep-fetched with LinkedPRNumber=0 (linkage not yet visible on GitHub).
+	c.mu.Lock()
+	c.deepFetched[itemKey("owner/repo", 1)] = true
+	c.mu.Unlock()
+
+	// Board now shows LinkedPRNumberShallow=502 — linkage has materialized.
+	c.Reconcile(&gh.ProjectBoard{
+		ProjectID: "PID", Title: "T", OwnerType: "organization",
+		Items: []gh.ProjectItem{
+			{ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", Status: "Research",
+				LinkedPRNumberShallow: 502},
+		},
+	})
+
+	// deepFetched must be invalidated so next FetchItemDetails hits GitHub.
+	c.mu.RLock()
+	df := c.deepFetched[itemKey("owner/repo", 1)]
+	c.mu.RUnlock()
+	if df {
+		t.Error("expected deepFetched to be invalidated when linkage drift is detected")
+	}
+
+	// Next FetchItemDetails call must fall through to the mock (cache miss).
+	beforeCount := mc.fetchItemDetailsCount
+	item := &gh.ProjectItem{Number: 1, Repo: "owner/repo", ID: "I_001"}
+	if err := c.FetchItemDetails(item); err != nil {
+		t.Fatalf("FetchItemDetails returned error: %v", err)
+	}
+	if mc.fetchItemDetailsCount <= beforeCount {
+		t.Error("expected FetchItemDetails to call fallback after deepFetched was invalidated")
+	}
+	// The mock should have populated LinkedPRNumber=502 into item.
+	if item.LinkedPRNumber != 502 {
+		t.Errorf("expected LinkedPRNumber=502 after re-fetch, got %d", item.LinkedPRNumber)
+	}
+}
+
 func TestReconcileRemovesStaleItems(t *testing.T) {
 	c := seedCache(t) // has items #1 and #2
 
