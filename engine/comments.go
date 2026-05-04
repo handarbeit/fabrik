@@ -132,7 +132,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	func() {
 		e.mu.Lock()
 		defer e.mu.Unlock()
-		e.totalTokens = e.totalTokens.add(usage)
+		e.totalTokens = addTokenUsage(e.totalTokens, usage)
 		e.lastUsage[issueKey(item, e.defaultRepo())] = usage
 	}()
 	if err != nil {
