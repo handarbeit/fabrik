@@ -1491,6 +1491,59 @@ func TestApplyLabelRemovedNoopWhenAbsent(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Subscribe tests
+// ---------------------------------------------------------------------------
+
+func TestCacheImplSubscribeReceivesChanges(t *testing.T) {
+	c := seedCache(t)
+	key := ItemKey("owner/repo", 1)
+
+	var mu sync.Mutex
+	var calls []itemstate.Change
+	unsub := c.Subscribe(itemstate.ObserverFunc(func(ch itemstate.Change, _ itemstate.Snapshot) {
+		mu.Lock()
+		calls = append(calls, ch)
+		mu.Unlock()
+	}))
+	defer unsub()
+
+	c.ApplyLabelAdded(key, "fabrik:awaiting-ci")
+
+	mu.Lock()
+	n := len(calls)
+	mu.Unlock()
+	if n == 0 {
+		t.Fatal("want observer called after ApplyLabelAdded, got 0 calls")
+	}
+	if calls[0].Fields&itemstate.LabelsChanged == 0 {
+		t.Errorf("want LabelsChanged flag set, got flags=%b", calls[0].Fields)
+	}
+}
+
+func TestCacheImplSubscribeUnsubscribeStopsCalls(t *testing.T) {
+	c := seedCache(t)
+	key := ItemKey("owner/repo", 1)
+
+	var mu sync.Mutex
+	var calls int
+	unsub := c.Subscribe(itemstate.ObserverFunc(func(_ itemstate.Change, _ itemstate.Snapshot) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+	}))
+	unsub()
+
+	c.ApplyLabelAdded(key, "fabrik:awaiting-ci")
+
+	mu.Lock()
+	n := calls
+	mu.Unlock()
+	if n != 0 {
+		t.Errorf("want 0 calls after unsubscribe, got %d", n)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // ApplyCommentAdded tests
 // ---------------------------------------------------------------------------
 
