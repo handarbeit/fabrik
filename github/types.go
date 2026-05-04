@@ -35,8 +35,11 @@ type ReviewRequest struct {
 	IsBot bool   // True if the reviewer is a bot (from __typename or login-pattern fallback)
 }
 
-// isBotLogin returns true if the login matches known bot patterns.
+// IsBotLogin returns true if the login matches known bot patterns.
 // Used as a fallback when the GraphQL __typename field is absent or not "Bot".
+func IsBotLogin(login string) bool { return isBotLogin(login) }
+
+// isBotLogin is the unexported implementation; call IsBotLogin from outside this package.
 func isBotLogin(login string) bool {
 	lower := strings.ToLower(login)
 	if strings.HasSuffix(lower, "[bot]") {
