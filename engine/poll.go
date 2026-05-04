@@ -1047,14 +1047,14 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 				StartedAt:   startTime,
 			})
 			err := e.processItem(ctx, board, item)
-			e.mu.Lock()
-			usage := e.lastUsage[iKey]
-			completed := e.lastCompleted[iKey]
-			blocked := e.lastBlocked[iKey]
-			delete(e.lastUsage, iKey)
-			delete(e.lastCompleted, iKey)
-			delete(e.lastBlocked, iKey)
-			e.mu.Unlock()
+			var usage TokenUsage
+			var completed, blocked bool
+			if snap, snapErr := e.store.Get(itemRepo, item.Number); snapErr == nil {
+				st := snap.State()
+				usage = st.LastTokenUsage
+				completed = st.LastInvocationCompleted
+				blocked = st.LastInvocationBlocked
+			}
 			e.emitStructural(tui.JobCompletedEvent{
 				IssueNumber:    item.Number,
 				Repo:           itemRepo,

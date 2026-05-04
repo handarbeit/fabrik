@@ -467,8 +467,12 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 
 		e.mu.Lock()
 		e.processedSet[stageKey] = time.Now()
-		e.lastCompleted[iKey] = true
 		e.mu.Unlock()
+		e.store.Apply(itemstate.InvocationRecorded{
+			Repo:      itemOwnerRepoString(item, e.defaultRepo()),
+			Number:    item.Number,
+			Completed: true,
+		})
 
 		return nil
 	}
@@ -748,7 +752,6 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		e.totalTokens = addTokenUsage(e.totalTokens, usage)
-		e.lastUsage[iKey] = usage
 	}()
 
 	// Restore any stashed changes now that the read-only stage has finished.
@@ -903,13 +906,14 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	blockedOnInput := err == nil && CheckBlockedOnInput(output)
 	decomposed := err == nil && CheckDecomposed(output)
 
-	// Store completion/blocked state for TUI event emission in poll.go.
-	func() {
-		e.mu.Lock()
-		defer e.mu.Unlock()
-		e.lastCompleted[iKey] = completed
-		e.lastBlocked[iKey] = blockedOnInput
-	}()
+	// Store completion/blocked/usage state for TUI event emission in poll.go.
+	e.store.Apply(itemstate.InvocationRecorded{
+		Repo:      itemOwnerRepoString(item, e.defaultRepo()),
+		Number:    item.Number,
+		Completed: completed,
+		Blocked:   blockedOnInput,
+		Usage:     usage,
+	})
 
 	if completed {
 		releaseLock()
