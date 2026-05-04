@@ -282,12 +282,18 @@ func (e *Engine) Run() error {
 
 	// Seed all known Fabrik labels with descriptions and sensible default colors.
 	// Non-fatal: a seeding failure must not prevent the engine from polling.
+	// In multi-repo mode (cfg.Repo == ""), skip here; poll() seeds each discovered repo instead.
 	stageNames := make([]string, len(e.cfg.Stages))
 	for i, s := range e.cfg.Stages {
 		stageNames[i] = s.Name
 	}
-	if err := e.client.SeedLabels(e.cfg.Owner, e.cfg.Repo, stageNames, e.cfg.User); err != nil {
-		e.logf(0, "warn", "label seeding failed (non-fatal): %v\n", err)
+	if e.cfg.Repo != "" {
+		if err := e.client.SeedLabels(e.cfg.Owner, e.cfg.Repo, stageNames, e.cfg.User); err != nil {
+			e.logf(0, "warn", "label seeding failed (non-fatal): %v\n", err)
+		}
+		e.mu.Lock()
+		e.seededRepos[e.cfg.Owner+"/"+e.cfg.Repo] = true
+		e.mu.Unlock()
 	}
 
 	// Extract in-memory cache if configured (nil when board-cache=none).
@@ -729,6 +735,34 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			repos = append(repos, r)
 		}
 		e.logf(0, "poll", "repos on board: %v\n", repos)
+	}
+
+	// Seed labels on repos discovered for the first time this process run.
+	// seededRepos is guarded by e.mu; the poll loop is single-goroutine but
+	// lock for future-safety consistent with other Engine maps.
+	{
+		sn := make([]string, len(e.cfg.Stages))
+		for i, s := range e.cfg.Stages {
+			sn[i] = s.Name
+		}
+		for ownerRepo := range seenRepos {
+			e.mu.Lock()
+			already := e.seededRepos[ownerRepo]
+			e.mu.Unlock()
+			if already {
+				continue
+			}
+			parts := strings.SplitN(ownerRepo, "/", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			if err := e.client.SeedLabels(parts[0], parts[1], sn, e.cfg.User); err != nil {
+				e.logf(0, "warn", "label seeding for %s failed (non-fatal): %v\n", ownerRepo, err)
+			}
+			e.mu.Lock()
+			e.seededRepos[ownerRepo] = true
+			e.mu.Unlock()
+		}
 	}
 
 	var deepFetched int

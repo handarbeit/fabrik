@@ -71,6 +71,7 @@ type Engine struct {
 	totalTokens          TokenUsage            // accumulated token usage since process start
 	lastReportedCost     float64               // cost at last [stats] report; skip repeat prints when unchanged
 	seenUpdatedAt        map[string]time.Time  // key: issueKey; tracks last-seen updatedAt per issue (deferred to Phase 3-H)
+	seededRepos          map[string]bool       // key: "owner/repo"; in-memory guard to avoid re-seeding on every poll
 	idleCount            int                   // consecutive idle polls; triggers self-upgrade at threshold
 	idleStart            time.Time             // when consecutive idle polls began; zero value = not idle
 	wakeCh               chan struct{}         // TUI sends on this to wake the poll loop immediately; nil if no TUI
@@ -120,6 +121,7 @@ func New(cfg Config) (*Engine, error) {
 		fabrikDir:            fabrikDir,
 		store:                itemstate.NewStore(nil),
 		seenUpdatedAt:        make(map[string]time.Time),
+		seededRepos:          make(map[string]bool),
 		sem:                  make(chan struct{}, cfg.MaxConcurrent),
 	}
 
@@ -173,6 +175,7 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		worktreeManagers:     wms,
 		store:                itemstate.NewStore(nil),
 		seenUpdatedAt:        make(map[string]time.Time),
+		seededRepos:          make(map[string]bool),
 		sem:                  make(chan struct{}, maxConcurrent),
 	}
 	if worktrees != nil {
