@@ -83,9 +83,10 @@ func (o *InvocationObserver) OnChange(change itemstate.Change, snap itemstate.Sn
 		StageName:      st.Status,
 		StageModel:     model,
 		IsComment:      st.LastInvocationIsComment,
-		Success:        true, // InvocationRecorded is called after Claude completes
+		Success:        true, // InvocationRecorded is only applied after Claude returns
 		Completed:      st.LastInvocationCompleted,
 		BlockedOnInput: st.LastInvocationBlocked,
+		Duration:       st.LastInvocationDuration,
 		CompletedAt:    time.Now(),
 		TurnsUsed:      st.LastTokenUsage.TurnsUsed,
 		MaxTurns:       st.LastTokenUsage.MaxTurns,

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/verveguy/fabrik/internal/itemstate"
 	"github.com/verveguy/fabrik/stages"
@@ -173,6 +174,7 @@ func TestInvocationObserver_FiresJobCompletedEventOnInvocationChanged(t *testing
 		Completed: true,
 		Blocked:   false,
 		IsComment: true,
+		Duration:  30 * time.Second,
 	})
 
 	if len(emitted) == 0 {
@@ -196,6 +198,9 @@ func TestInvocationObserver_FiresJobCompletedEventOnInvocationChanged(t *testing
 	}
 	if !ev.Success {
 		t.Error("Success: got false, want true")
+	}
+	if ev.Duration != 30*time.Second {
+		t.Errorf("Duration: got %v, want 30s", ev.Duration)
 	}
 }
 
