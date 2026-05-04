@@ -337,6 +337,8 @@ func TestApplyCooldownRecorded(t *testing.T) {
 
 func TestApplyWorkerHeartbeat(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
+	now := time.Now()
+	s.Apply(LocalLockAcquired{Repo: testRepo, Number: 1, User: "u", AcquiredAt: now, Worker: &WorkerHandle{StageName: "X", StartedAt: now}})
 	at := time.Now()
 	applyExpect(t, s, WorkerHeartbeat{Repo: testRepo, Number: 1, At: at}, WorkerChanged)
 	st := getItem(t, s, testRepo, 1)
@@ -347,7 +349,8 @@ func TestApplyWorkerHeartbeat(t *testing.T) {
 
 func TestApplyWorkerExited(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
-	s.Apply(WorkerHeartbeat{Repo: testRepo, Number: 1, At: time.Now()})
+	now := time.Now()
+	s.Apply(LocalLockAcquired{Repo: testRepo, Number: 1, User: "u", AcquiredAt: now, Worker: &WorkerHandle{StageName: "X", StartedAt: now}})
 	applyExpect(t, s, WorkerExited{Repo: testRepo, Number: 1}, WorkerChanged)
 	if getItem(t, s, testRepo, 1).Worker != nil {
 		t.Error("Worker not cleared")
@@ -485,7 +488,9 @@ func TestChangeFlagsCoverage(t *testing.T) {
 			return StageAttempted{Repo: testRepo, Number: n, StageName: "S", At: time.Now()}
 		}},
 		{WorkerChanged, "WorkerChanged", func(s *Store, n int) Mutation {
-			return WorkerHeartbeat{Repo: testRepo, Number: n, At: time.Now()}
+			now := time.Now()
+			s.Apply(LocalLockAcquired{Repo: testRepo, Number: n, User: "u", AcquiredAt: now, Worker: &WorkerHandle{StageName: "X", StartedAt: now}})
+			return WorkerHeartbeat{Repo: testRepo, Number: n, At: now}
 		}},
 		{CooldownChanged, "CooldownChanged", func(s *Store, n int) Mutation {
 			return CooldownRecorded{Repo: testRepo, Number: n, Reason: "r", Until: time.Now().Add(time.Minute)}
