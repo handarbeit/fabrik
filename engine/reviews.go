@@ -447,7 +447,7 @@ func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBo
 		})
 		done := make(chan struct{})
 		defer close(done)
-		go e.startHeartbeat(ctx, itemRepo, item.Number, done)
+		e.startHeartbeat(ctx, itemRepo, item.Number, done)
 		defer e.store.Apply(itemstate.WorkerExited{Repo: itemRepo, Number: item.Number})
 		onPIDReady := func(pid int) {
 			e.store.Apply(itemstate.WorkerPIDSet{Repo: itemRepo, Number: item.Number, PID: pid})
