@@ -647,6 +647,10 @@ func (c *CacheImpl) ApplyLabelAdded(key, label string) {
 		c.logFn("[cache] ApplyLabelAdded: key %q invalid — no-op\n", key)
 		return
 	}
+	// Guard: do not create a phantom Store entry for a key that was never bootstrapped.
+	if _, err := c.store.Get(repo, number); err != nil {
+		return
+	}
 	_, changes, _ := c.store.Apply(itemstate.LocalLabelAdded{
 		Repo:   repo,
 		Number: number,
@@ -668,6 +672,10 @@ func (c *CacheImpl) ApplyLabelRemoved(key, label string) {
 	repo, number, ok := parseItemKey(key)
 	if !ok {
 		c.logFn("[cache] ApplyLabelRemoved: key %q invalid — no-op\n", key)
+		return
+	}
+	// Guard: do not create a phantom Store entry for a key that was never bootstrapped.
+	if _, err := c.store.Get(repo, number); err != nil {
 		return
 	}
 	_, changes, _ := c.store.Apply(itemstate.LocalLabelRemoved{
@@ -697,6 +705,10 @@ func (c *CacheImpl) ApplyCommentAdded(key string, comment gh.Comment) {
 	repo, number, ok := parseItemKey(key)
 	if !ok {
 		c.logFn("[cache] ApplyCommentAdded: key %q invalid — no-op\n", key)
+		return
+	}
+	// Guard: do not create a phantom Store entry for a key that was never bootstrapped.
+	if _, err := c.store.Get(repo, number); err != nil {
 		return
 	}
 	_, changes, _ := c.store.Apply(itemstate.LocalCommentAdded{

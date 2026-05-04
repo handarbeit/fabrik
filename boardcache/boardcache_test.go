@@ -3,6 +3,7 @@ package boardcache
 import (
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1363,4 +1364,215 @@ func seedCacheWithStalePRLink2(t *testing.T, logFn func(string, ...any)) *CacheI
 	c.Bootstrap(board)
 	testSetDeepFetched(c, "owner/repo", 1)
 	return c
+}
+
+// ---------------------------------------------------------------------------
+// ApplyLabelAdded tests
+// ---------------------------------------------------------------------------
+
+func TestApplyLabelAdded(t *testing.T) {
+	c := seedCache(t) // item #1 has labels: ["enhancement"]
+	key := ItemKey("owner/repo", 1)
+
+	before := time.Now()
+	c.ApplyLabelAdded(key, "fabrik:awaiting-ci")
+
+	labels, err := c.FetchLabels("owner", "repo", 1)
+	if err != nil {
+		t.Fatalf("FetchLabels: %v", err)
+	}
+	found := false
+	for _, l := range labels {
+		if l == "fabrik:awaiting-ci" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("want fabrik:awaiting-ci in labels after ApplyLabelAdded, got %v", labels)
+	}
+
+	// localDeltaAt must be bumped.
+	c.mu.RLock()
+	deltaAt := c.localDeltaAt[key]
+	c.mu.RUnlock()
+	if !deltaAt.After(before) {
+		t.Error("want localDeltaAt bumped after ApplyLabelAdded")
+	}
+}
+
+func TestApplyLabelAddedIdempotent(t *testing.T) {
+	c := seedCache(t)
+	key := ItemKey("owner/repo", 1)
+
+	c.ApplyLabelAdded(key, "enhancement") // already present
+
+	labels, err := c.FetchLabels("owner", "repo", 1)
+	if err != nil {
+		t.Fatalf("FetchLabels: %v", err)
+	}
+	count := 0
+	for _, l := range labels {
+		if l == "enhancement" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("want exactly 1 'enhancement' label, got %d; labels=%v", count, labels)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ApplyLabelRemoved tests
+// ---------------------------------------------------------------------------
+
+func TestApplyLabelRemoved(t *testing.T) {
+	c := seedCache(t) // item #1 has labels: ["enhancement"]
+	key := ItemKey("owner/repo", 1)
+
+	before := time.Now()
+	c.ApplyLabelRemoved(key, "enhancement")
+
+	labels, err := c.FetchLabels("owner", "repo", 1)
+	if err != nil {
+		t.Fatalf("FetchLabels: %v", err)
+	}
+	for _, l := range labels {
+		if l == "enhancement" {
+			t.Errorf("want 'enhancement' removed, still present in %v", labels)
+		}
+	}
+
+	c.mu.RLock()
+	deltaAt := c.localDeltaAt[key]
+	c.mu.RUnlock()
+	if !deltaAt.After(before) {
+		t.Error("want localDeltaAt bumped after ApplyLabelRemoved")
+	}
+}
+
+func TestApplyLabelRemovedNoopWhenAbsent(t *testing.T) {
+	c := seedCache(t)
+	key := ItemKey("owner/repo", 1)
+
+	before := time.Now()
+	c.ApplyLabelRemoved(key, "nonexistent-label")
+
+	// localDeltaAt must NOT be bumped — no state change.
+	c.mu.RLock()
+	deltaAt := c.localDeltaAt[key]
+	c.mu.RUnlock()
+	if deltaAt.After(before) {
+		t.Error("want localDeltaAt NOT bumped for no-op ApplyLabelRemoved")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ApplyCommentAdded tests
+// ---------------------------------------------------------------------------
+
+func TestApplyCommentAdded(t *testing.T) {
+	c := seedCache(t)
+	key := ItemKey("owner/repo", 1)
+
+	// First set up deep-fetch state so FetchItemDetails serves from cache.
+	testSetDeepFetched(c, "owner/repo", 1)
+
+	comment := gh.Comment{
+		ID:         "C_new",
+		DatabaseID: 42,
+		Author:     "fabrik-bot",
+		Body:       "Stage complete.",
+		CreatedAt:  time.Now(),
+	}
+
+	before := time.Now()
+	c.ApplyCommentAdded(key, comment)
+
+	// FetchItemDetails should now return the comment from cache (no fallback).
+	mc := &mockClient{} // empty fallback — fallback hit would panic on nil
+	c.fallback = mc
+	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
+	if err := c.FetchItemDetails(&item); err != nil {
+		t.Fatalf("FetchItemDetails: %v", err)
+	}
+	if mc.fetchItemDetailsCount != 0 {
+		t.Errorf("want cache hit (no fallback), got %d fallback calls", mc.fetchItemDetailsCount)
+	}
+	found := false
+	for _, cm := range item.Comments {
+		if cm.DatabaseID == 42 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("want comment #42 in item.Comments after ApplyCommentAdded, got %v", item.Comments)
+	}
+
+	c.mu.RLock()
+	deltaAt := c.localDeltaAt[key]
+	c.mu.RUnlock()
+	if !deltaAt.After(before) {
+		t.Error("want localDeltaAt bumped after ApplyCommentAdded")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Unknown key — no-op tests
+// ---------------------------------------------------------------------------
+
+func TestWriteThroughNoopOnUnknownKey(t *testing.T) {
+	c := seedCache(t)
+	unknownKey := ItemKey("owner/repo", 9999)
+
+	c.ApplyLabelAdded(unknownKey, "foo")
+	c.ApplyLabelRemoved(unknownKey, "foo")
+	c.ApplyCommentAdded(unknownKey, gh.Comment{DatabaseID: 1, Body: "hello"})
+
+	// localDeltaAt must not contain the unknown key.
+	c.mu.RLock()
+	_, ok := c.localDeltaAt[unknownKey]
+	c.mu.RUnlock()
+	if ok {
+		t.Error("want localDeltaAt NOT updated for unknown key")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Concurrent write-through test
+// ---------------------------------------------------------------------------
+
+func TestConcurrentWriteThrough(t *testing.T) {
+	c := seedCache(t)
+	key := ItemKey("owner/repo", 1)
+
+	const iterations = 100
+	var wg sync.WaitGroup
+	wg.Add(iterations * 2)
+
+	for i := 0; i < iterations; i++ {
+		go func() {
+			defer wg.Done()
+			c.ApplyLabelAdded(key, "concurrent-label")
+		}()
+		go func() {
+			defer wg.Done()
+			c.ApplyLabelRemoved(key, "concurrent-label")
+		}()
+	}
+	wg.Wait()
+
+	// Final label state must be consistent (no panic, no data race).
+	labels, err := c.FetchLabels("owner", "repo", 1)
+	if err != nil {
+		t.Fatalf("FetchLabels: %v", err)
+	}
+	count := 0
+	for _, l := range labels {
+		if l == "concurrent-label" {
+			count++
+		}
+	}
+	if count > 1 {
+		t.Errorf("want at most 1 'concurrent-label', got %d; labels=%v", count, labels)
+	}
 }
