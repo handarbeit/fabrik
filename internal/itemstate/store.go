@@ -253,7 +253,13 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 	switch v := m.(type) {
 
 	case IssueOpened:
-		return applyProjectItem(item, v.Item)
+		// Merge labels: opened may arrive out-of-order, after labeled/unlabeled
+		// events have already been applied. Unioning preserves any labels added
+		// by subsequent delta events rather than overwriting them with the
+		// (stale) creation-time label list from the webhook payload.
+		merged := v.Item
+		merged.Labels = unionStrings(item.Labels, v.Item.Labels)
+		return applyProjectItem(item, merged)
 
 	case IssueLabeled:
 		if !containsString(item.Labels, v.Label) {
@@ -930,6 +936,18 @@ func removeReviewRequest(rrs []gh.ReviewRequest, login string) []gh.ReviewReques
 		return nil
 	}
 	return out
+}
+
+// unionStrings returns a slice containing all elements of existing plus any
+// elements from incoming that are not already present. Order is preserved.
+func unionStrings(existing, incoming []string) []string {
+	result := copyStrings(existing)
+	for _, s := range incoming {
+		if !containsString(result, s) {
+			result = append(result, s)
+		}
+	}
+	return result
 }
 
 func removeString(ss []string, s string) []string {

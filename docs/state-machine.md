@@ -1324,20 +1324,55 @@ If the bootstrap fetch fails (e.g., transient network error), the cache starts e
 
 ### D.2 Delta Application
 
-Every verified webhook payload is passed to `cacheImpl.ApplyDelta(eventType, payload []byte)` before the poll loop is woken. `ApplyDelta` is a no-op when `IsPaused()` returns true. Otherwise it dispatches to a typed handler:
+Every verified webhook payload is passed to `cacheImpl.ApplyDelta(eventType, payload []byte)` before the poll loop is woken. `ApplyDelta` is a no-op when `IsPaused()` returns true. Otherwise it dispatches to a typed handler.
 
-| Event type | Handler | Effect |
-|------------|---------|--------|
-| `issue_comment.created` | `applyIssueCommentCreated` | Appends comment to `item.Comments`; idempotent by NodeID |
-| `issues.labeled` | `applyIssuesLabeled` | Adds label to `item.Labels`; set-membership (no duplicates) |
-| `issues.unlabeled` | `applyIssuesUnlabeled` | Removes label from `item.Labels` |
-| `pull_request.opened/closed/synchronize` | `applyPullRequestDelta` | Upserts `linkedPRs[prKey]`; updates `shaToKey[sha]`; rotates old SHA on synchronize |
-| `pull_request_review.submitted` | `applyPullRequestReviewSubmitted` | Upserts review in `linkedPRs[prKey].Reviews` by DatabaseID |
-| `pull_request_review_comment.created` | `applyPullRequestReviewCommentCreated` | Appends to `LinkedPRReviewThreadComments`; idempotent by NodeID |
-| `check_run.completed` | `applyCheckRunCompleted` | Upserts check run in `checkRuns[sha]` by CheckRun.ID |
-| `projects_v2_item.edited` | `applyProjectsV2ItemEdited` | Updates `item.Status` via `itemIDToKey` reverse lookup |
+#### D.2.1 Unknown-item fallback
 
-All delta functions hold the write lock for their mutation only. They silently drop events for unknown items (e.g., items not yet on the board) rather than returning errors.
+When a delta handler looks up an item that is not yet in the cache (e.g., `issues.labeled` arrives before `issues.opened`), the handler calls `ensureIssueInStore(owner, fullRepo, issueNumber)`. This helper:
+1. Fast path: if the item is already in the Store, returns immediately.
+2. Miss path: calls `fallback.FetchProjectItem(owner, repo, issueNumber)` via REST GET `/repos/{owner}/{repo}/issues/{number}`, applies `IssueOpened{Item: *pi}` to the Store, then continues with the original delta.
+
+This resolves the "fabrik went deaf" bug class where webhooks for new issues were silently dropped because the issue had not yet been seen in a board reconcile.
+
+**Exception**: `issues.opened` itself creates the item from the webhook payload directly (no REST call needed — the payload contains full issue data). `issues.transferred` and `issues.deleted` remove the item rather than ensureing it.
+
+#### D.2.2 Webhook event coverage table
+
+All handlers hold the write lock for their mutation only. No lock is held during network calls (the `ensureIssueInStore` fallback fetch and `resolvePRLinkage` auto-heal are performed without holding `c.mu` — ADR 037 lock-ordering invariant).
+
+| Event type | Action | Handler decision | Cache mutation | Engine reaction |
+|------------|--------|-----------------|---------------|-----------------|
+| `issues` | `opened` | Create item from payload | `IssueOpened` (builds item from full webhook payload; no API call) | Item appears in next `FetchProjectBoard` |
+| `issues` | `closed` | Fallback if missing; update state | `IssueClosed` | `IsClosed=true`; `itemMayNeedWork` skips unless cleanup stage |
+| `issues` | `reopened` | Fallback if missing; update state | `IssueReopened` | `IsClosed=false`; re-enters dispatch |
+| `issues` | `transferred` | Remove item | `store.Remove` + `prNumToKey` cleanup | Item gone from next board fetch |
+| `issues` | `deleted` | Remove item | `store.Remove` + `prNumToKey` cleanup | Item gone from next board fetch |
+| `issues` | `edited` | Fallback if missing; update title+body | `IssueEdited` | `Title`/`Body` updated; next FetchItemDetails serves updated body |
+| `issues` | `assigned` | Fallback if missing; update assignees | `IssueAssigneesUpdated` (full list replace) | `Assignees` updated |
+| `issues` | `unassigned` | Fallback if missing; update assignees | `IssueAssigneesUpdated` (full list replace) | `Assignees` updated |
+| `issues` | `labeled` | Fallback if missing; add label | `IssueLabeled` | `Labels` updated; poll woken for next dispatch |
+| `issues` | `unlabeled` | Fallback if missing; remove label | `IssueUnlabeled` | `Labels` updated; poll woken |
+| `issues` | `milestoned`, `demilestoned`, `locked`, `unlocked`, `pinned`, `unpinned` | No-op | — | No engine state depends on these fields |
+| `issue_comment` | `created` | Guard: item must be in Store; append comment | `IssueCommentCreated` | Comment appears in next FetchItemDetails; poll woken for comment processing |
+| `issue_comment` | `edited`, `deleted` | No-op | — | Reaction-based state machine reads reactions not bodies; next deep-fetch heals |
+| `pull_request` | `opened`, `closed`, `reopened`, `synchronize` | Store PR details; resolve closing issue; update SHA | `PRHeadSHAUpdated`; `DeepFetchInvalidated` on auto-heal | `shaToKey` updated; CI gate can evaluate this SHA |
+| `pull_request` | `ready_for_review` | Update `linkedPRs[pk].Draft = false` | CacheImpl-local only (Draft not in Store per ADR 037) | PR no longer draft; review bots can see it |
+| `pull_request` | `converted_to_draft` | Update `linkedPRs[pk].Draft = true` | CacheImpl-local only | PR back to draft |
+| `pull_request` | `review_requested` | Look up linked issue via `prNumToKey`; replace reviewer list | `PRReviewRequested` (full list replace) | `LinkedPRReviewRequests` updated; review gate re-evaluated |
+| `pull_request` | `review_request_removed` | Look up linked issue via `prNumToKey`; remove one reviewer | `PRReviewRequestRemoved` (remove by login) | `LinkedPRReviewRequests` updated |
+| `pull_request` | `labeled`, `unlabeled`, `assigned`, `unassigned`, `edited` | No-op | — | PR-level labels/assignees/metadata not tracked; `Closes #N` linkage healed by next Reconcile |
+| `pull_request_review` | `submitted` | Route via `prNumToKey`; auto-heal if missing | `PRReviewSubmitted`; `PRHeadSHAUpdated` + `DeepFetchInvalidated` on auto-heal | `LinkedPRReviews` updated; review gate re-evaluated |
+| `pull_request_review` | `edited`, `dismissed` | No-op | — | Review state captured at submit; edits/dismissals don't affect Fabrik's approval tracking |
+| `pull_request_review_comment` | `created` | Route via `prNumToKey`; auto-heal if missing | `ReviewThreadCommentAdded`; `DeepFetchInvalidated` | Thread comment appears; review reinvoke path can see it |
+| `pull_request_review_comment` | `edited`, `deleted` | No-op | — | Thread comment content not decision-relevant; next deep-fetch heals |
+| `check_run` | `completed` | Upsert in `checkRuns[sha]`; index via `shaToKey`; auto-heal if SHA unknown | `CheckRunCompleted`; `PRHeadSHAUpdated` + `DeepFetchInvalidated` on auto-heal | CI gate evaluates conclusion; `LinkedPRCheckRuns` updated |
+| `check_run` | `created`, `rerequested`, `requested_action` | No-op | — | Only terminal state (`completed`) matters for CI gate |
+| `check_suite` | `completed`, `requested`, `rerequested` | No-op | — | Check suites are coarse aggregates; individual runs tracked via `check_run.completed` |
+| `projects_v2_item` | `created` | Call `FetchItemDetails` by `content_node_id`; apply as new item | `IssueOpened` | Item appears in board; triggers dispatch on next poll |
+| `projects_v2_item` | `edited` | Update `Status` via `itemIDToKey` reverse lookup | `ProjectV2ItemEdited` | `Status` updated; stage selection uses new column |
+| `projects_v2_item` | `deleted`, `archived` | Remove item; clean up `prNumToKey` | `store.Remove` + `prNumToKey`/`linkedPRs` cleanup | Item gone from next board fetch |
+| `projects_v2_item` | `restored` | No-op | — | Next Reconcile re-adds the item from the full board snapshot |
+| `projects_v2_item` | `reordered` | No-op | — | Column order not modeled in Fabrik's cache or engine |
 
 ### D.3 Cache Read Semantics
 
