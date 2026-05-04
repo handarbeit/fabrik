@@ -362,6 +362,7 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 		// R5: len(checkRuns) == 0 — no CI configured; gate clears.
 	}
 
+	// no write-through: excluded — MergePR affects PR state, not issue/label cache
 	if err := e.client.MergePR(owner, repo, pr.Number); err != nil {
 		if errors.Is(err, gh.ErrNotMergeable) {
 			// Apply fabrik:rebase-needed idempotently.
@@ -441,6 +442,7 @@ func (e *Engine) handleDecomposed(board *gh.ProjectBoard, item gh.ProjectItem, s
 	}
 
 	e.logf(item.Number, "advance", "moving decomposed issue to Done\n")
+	// write-through: already covered by cacheImpl.UpdateItemStatus call in the else block below
 	if err := e.client.UpdateProjectItemStatus(board.ProjectID, item.ItemID, e.statusField.FieldID, optionID); err != nil {
 		e.logf(item.Number, "warn", "could not move issue to Done: %v\n", err)
 	} else {
@@ -468,6 +470,7 @@ func (e *Engine) advanceToNextStage(board *gh.ProjectBoard, item gh.ProjectItem,
 	}
 
 	e.logf(item.Number, "advance", "moving to stage %q\n", next.Name)
+	// write-through: already covered by cacheImpl.UpdateItemStatus call in the else block below
 	err := e.client.UpdateProjectItemStatus(board.ProjectID, item.ItemID, e.statusField.FieldID, optionID)
 	if err == nil {
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {

@@ -3,7 +3,9 @@ package engine
 import (
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/verveguy/fabrik/boardcache"
 	gh "github.com/verveguy/fabrik/github"
 	"github.com/verveguy/fabrik/stages"
 	"github.com/verveguy/fabrik/tui"
@@ -48,6 +50,8 @@ func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, 
 			if l == "fabrik:blocked" {
 				if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:blocked"); err != nil {
 					e.logf(item.Number, "warn", "could not remove fabrik:blocked label: %v\n", err)
+				} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:blocked")
 				}
 				break
 			}
@@ -80,11 +84,21 @@ func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, 
 		comment := fmt.Sprintf("🏭 **Fabrik — blocked on dependencies**\n\nWaiting for the following issues to close: %s", strings.Join(waitingFor, ", "))
 		if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
 			e.logf(item.Number, "warn", "could not post blocked comment: %v\n", err)
-		} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+		} else {
+			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+					DatabaseID: dbID, Body: comment, Author: e.cfg.User, CreatedAt: time.Now(),
+				})
+			}
+			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
+			if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+				e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+			}
 		}
 		if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:blocked"); err != nil {
 			e.logf(item.Number, "warn", "could not add fabrik:blocked label: %v\n", err)
+		} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:blocked")
 		}
 	}
 

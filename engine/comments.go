@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/verveguy/fabrik/boardcache"
 	gh "github.com/verveguy/fabrik/github"
 	"github.com/verveguy/fabrik/stages"
 )
@@ -80,10 +81,12 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 			continue
 		}
 		if c.ReviewThreadID != "" {
+			// no write-through: excluded — AddPRReviewCommentReaction does not affect dispatch-relevant cache state
 			if err := e.client.AddPRReviewCommentReaction(owner, repo, c.DatabaseID, "eyes"); err != nil {
 				e.logf(item.Number, "warn", "could not add 👀 to review thread comment %s: %v\n", c.ID, err)
 			}
 		} else {
+			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
 			if err := e.client.AddCommentReaction(owner, repo, c.DatabaseID, "eyes"); err != nil {
 				e.logf(item.Number, "warn", "could not add 👀 to comment %s: %v\n", c.ID, err)
 			}
@@ -93,6 +96,8 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// Step 2: Add editing label
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:editing"); err != nil {
 		return fmt.Errorf("adding editing label: %w", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:editing")
 	}
 
 	// Step 3: Ensure worktree
@@ -152,6 +157,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// Step 6: Strip FABRIK_ISSUE_UPDATE block from output, then update issue body.
 	if updatedBody := extractUpdatedBody(output); updatedBody != "" {
 		e.logf(item.Number, "edit", "updating issue body\n")
+		// no write-through: excluded — issue body is not read from cache for dispatch decisions
 		if err := e.client.UpdateIssueBody(owner, repo, item.Number, updatedBody); err != nil {
 			e.logf(item.Number, "warn", "could not update issue body: %v\n", err)
 		}
@@ -174,8 +180,16 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 			comment := formatOutputComment(stage.Name+" (comment review)", output, "", branch, commit, mainSHA, timestamp)
 			if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
 				e.logf(item.Number, "warn", "could not post comment: %v\n", err)
-			} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-				e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+			} else {
+				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+					cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+						DatabaseID: dbID, Body: comment, Author: e.cfg.User, CreatedAt: time.Now(),
+					})
+				}
+				// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
+				if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+					e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+				}
 			}
 		} else {
 			existing := findStageComment(item.Comments, stage.Name)
@@ -188,8 +202,16 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 			} else {
 				if dbID, err := e.client.AddComment(owner, repo, item.Number, stageComment); err != nil {
 					e.logf(item.Number, "warn", "could not post stage comment: %v\n", err)
-				} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-					e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+				} else {
+					if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+						cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+							DatabaseID: dbID, Body: stageComment, Author: e.cfg.User, CreatedAt: time.Now(),
+						})
+					}
+					// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
+					if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+						e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+					}
 				}
 			}
 		}
@@ -208,6 +230,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		} else if prNumber > 0 {
 			threads := buildThreadEntries(comments)
 			prComment := formatReviewFeedbackComment(stage.Name, output, branch, commit, mainSHA, timestamp, threads, len(comments))
+			// no write-through: excluded — posts to prNumber (PR comment thread, not issue cache)
 			if _, err := e.client.AddComment(owner, repo, prNumber, prComment); err != nil {
 				e.logf(item.Number, "warn", "could not post review feedback summary to PR #%d: %v\n", prNumber, err)
 			} else {
@@ -230,6 +253,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 			continue
 		}
 		if c.ReviewThreadID != "" {
+			// no write-through: excluded — AddPRReviewCommentReaction does not affect dispatch-relevant cache state
 			if err := e.client.AddPRReviewCommentReaction(owner, repo, c.DatabaseID, "rocket"); err != nil {
 				e.logf(item.Number, "warn", "could not add 🚀 to review thread comment %s: %v\n", c.ID, err)
 			}
@@ -242,6 +266,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 				resolvedThreads[c.ReviewThreadID] = true
 			}
 		} else {
+			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
 			if err := e.client.AddCommentReaction(owner, repo, c.DatabaseID, "rocket"); err != nil {
 				e.logf(item.Number, "warn", "could not add 🚀 to comment %s: %v\n", c.ID, err)
 			}
@@ -311,6 +336,7 @@ func (e *Engine) markCommentsSeenByStage(item gh.ProjectItem, preStageComments [
 			continue
 		}
 		// This comment was seen by the stage — mark it so it won't trigger unblock
+		// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
 		if err := e.client.AddCommentReaction(owner, repo, c.DatabaseID, "rocket"); err != nil {
 			e.logf(item.Number, "warn", "could not add rocket to seen comment %s: %v\n", c.ID, err)
 		}

@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/verveguy/fabrik/boardcache"
 	gh "github.com/verveguy/fabrik/github"
 )
 
@@ -39,6 +41,7 @@ func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) int {
 	seedBody := e.buildSeedBody(item, workDir)
 
 	head := fmt.Sprintf("fabrik/issue-%d", item.Number)
+	// no write-through: excluded — CreateDraftPR affects PR state, not issue/label cache
 	prNum, err := e.client.CreateDraftPR(owner, repo, item.Title, head, baseBranch, seedBody, item.Number)
 	if err != nil {
 		e.logf(item.Number, "warn", "could not create draft PR: %v\n", err)
@@ -125,6 +128,7 @@ func (e *Engine) updatePRVerification(item gh.ProjectItem, prNumber int, summary
 		return
 	}
 
+	// no write-through: excluded — issue body is not read from cache for dispatch decisions
 	if err := e.client.UpdateIssueBody(owner, repo, prNumber, updatedBody); err != nil {
 		e.logf(item.Number, "warn", "could not update PR #%d Verification section: %v\n", prNumber, err)
 		return
@@ -149,6 +153,7 @@ func (e *Engine) ensurePRLinksIssue(item gh.ProjectItem, prNumber int) {
 	// Self-heal unclosed code fences that could hide Closes #N from GitHub's parser.
 	balanced := balanceFences(body)
 	if balanced != body {
+		// no write-through: excluded — issue body is not read from cache for dispatch decisions
 		if err := e.client.UpdateIssueBody(owner, repo, prNumber, balanced); err != nil {
 			e.logf(item.Number, "warn", "could not update PR #%d body to close fence: %v\n", prNumber, err)
 			return
@@ -162,6 +167,7 @@ func (e *Engine) ensurePRLinksIssue(item gh.ProjectItem, prNumber int) {
 
 	// Append closing keyword
 	updatedBody := balanced + "\n\n" + closingKeyword
+	// no write-through: excluded — issue body is not read from cache for dispatch decisions
 	if err := e.client.UpdateIssueBody(owner, repo, prNumber, updatedBody); err != nil {
 		e.logf(item.Number, "warn", "could not update PR #%d body: %v\n", prNumber, err)
 		return
@@ -195,6 +201,7 @@ func (e *Engine) markPRReady(item gh.ProjectItem, knownPR int) {
 		return
 	}
 
+	// no write-through: excluded — MarkPRReady affects PR state, not issue/label cache
 	if err := e.client.MarkPRReady(owner, repo, prNumber); err != nil {
 		e.logf(item.Number, "warn", "could not mark PR #%d ready: %v\n", prNumber, err)
 		return
@@ -212,11 +219,13 @@ func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output, footer, 
 
 	if prNumber > 0 {
 		// Post detailed output on the PR
+		// no write-through: excluded — posts to prNumber (PR comment thread, not issue cache)
 		comment := formatOutputComment(stageName, output, footer, branch, commit, mainSHA, timestamp)
 		if dbID, err := e.client.AddComment(owner, repo, prNumber, comment); err != nil {
 			e.logf(item.Number, "warn", "could not post to PR #%d: %v\n", prNumber, err)
 		} else {
 			e.logf(item.Number, "post", "detailed %s output posted to PR #%d\n", stageName, prNumber)
+			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
 			if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
 				e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
 			}
@@ -226,8 +235,16 @@ func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output, footer, 
 		summary := formatPRSummaryComment(stageName, prNumber, output, branch, commit, mainSHA, timestamp)
 		if dbID, err := e.client.AddComment(owner, repo, item.Number, summary); err != nil {
 			e.logf(item.Number, "warn", "could not post summary: %v\n", err)
-		} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+		} else {
+			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+					DatabaseID: dbID, Body: summary, Author: e.cfg.User, CreatedAt: time.Now(),
+				})
+			}
+			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
+			if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+				e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+			}
 		}
 	} else {
 		// No PR found — fall back to posting on the issue
@@ -235,8 +252,16 @@ func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output, footer, 
 		comment := formatOutputComment(stageName, output, footer, branch, commit, mainSHA, timestamp)
 		if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
 			e.logf(item.Number, "warn", "could not post comment: %v\n", err)
-		} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+		} else {
+			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+					DatabaseID: dbID, Body: comment, Author: e.cfg.User, CreatedAt: time.Now(),
+				})
+			}
+			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
+			if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+				e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+			}
 		}
 	}
 }

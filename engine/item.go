@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/verveguy/fabrik/boardcache"
 	gh "github.com/verveguy/fabrik/github"
 	"github.com/verveguy/fabrik/stages"
 )
@@ -386,6 +387,10 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 				e.logf(item.Number, "unpause", "user commented on paused issue — unpausing\n")
 				if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
 					e.logf(item.Number, "warn", "could not remove fabrik:paused label: %v\n", err)
+				} else {
+					if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+						cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
+					}
 				}
 				// Also clear any failed label so the stage retries cleanly
 				e.clearFailedStage(item, stage)
@@ -451,6 +456,8 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 
 		if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
 			e.logf(item.Number, "warn", "could not add completion label: %v\n", err)
+		} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
 		}
 
 		// Archive is handled by archiveDoneCompleteItems in the poll loop,
@@ -549,6 +556,9 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		e.mu.Lock()
 		e.lockedIssues[iKey] = true
 		e.mu.Unlock()
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), lockLabel)
+		}
 	}
 
 	inProgressLabel := fmt.Sprintf("stage:%s:in_progress", stage.Name)
@@ -604,6 +614,9 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		e.logf(item.Number, "warn", "could not add in_progress label: %v\n", err)
 	} else {
 		inProgressAdded = true
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), inProgressLabel)
+		}
 	}
 
 	// Ensure the WorktreeManager for this item's repo is ready.
@@ -759,6 +772,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	if output != "" {
 		if updatedBody := extractUpdatedBody(output); updatedBody != "" {
 			e.logf(item.Number, "edit", "updating issue body from stage output\n")
+			// no write-through: excluded — issue body is not read from cache for dispatch decisions
 			if err := e.client.UpdateIssueBody(owner, repo, item.Number, updatedBody); err != nil {
 				e.logf(item.Number, "warn", "could not update issue body: %v\n", err)
 			}
@@ -789,8 +803,16 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			comment := formatOutputComment(stage.Name, postOutput, footer, branch, commit, mainSHA, timestamp)
 			if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
 				e.logf(item.Number, "warn", "could not post comment: %v\n", err)
-			} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-				e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+			} else {
+				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+					cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+						DatabaseID: dbID, Body: comment, Author: e.cfg.User, CreatedAt: time.Now(),
+					})
+				}
+				// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
+				if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+					e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+				}
 			}
 		}
 	}
@@ -829,8 +851,16 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		warnComment := fmt.Sprintf("🏭 **Fabrik — empty stage output**\n\nStage **%s** ran without error but produced no output.", stage.Name)
 		if dbID, commentErr := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, warnComment); commentErr != nil {
 			e.logf(item.Number, "warn", "could not post empty-output warning: %v\n", commentErr)
-		} else if reactErr := e.client.AddCommentReaction(e.cfg.Owner, e.cfg.Repo, dbID, "rocket"); reactErr != nil {
-			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+		} else {
+			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+					DatabaseID: dbID, Body: warnComment, Author: e.cfg.User, CreatedAt: time.Now(),
+				})
+			}
+			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
+			if reactErr := e.client.AddCommentReaction(e.cfg.Owner, e.cfg.Repo, dbID, "rocket"); reactErr != nil {
+				e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+			}
 		}
 	}
 
@@ -891,6 +921,10 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			if removeErr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:extend-turns"); removeErr != nil &&
 				!errors.Is(removeErr, gh.ErrNotFound) {
 				e.logf(item.Number, "warn", "could not remove extend-turns label: %v\n", removeErr)
+			} else if removeErr == nil {
+				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:extend-turns")
+				}
 			}
 		}
 		// Post-stage: create draft PR and/or mark ready now that commits exist
@@ -947,6 +981,8 @@ func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
 		e.logf(item.Number, "warn", "could not add paused label: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
 	}
 
 	e.addFailedLabel(owner, repo, item.Number, stage.Name)
@@ -957,8 +993,16 @@ func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 	)
 	if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
 		e.logf(item.Number, "warn", "could not post escalation comment: %v\n", err)
-	} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-		e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+				DatabaseID: dbID, Body: comment, Author: e.cfg.User, CreatedAt: time.Now(),
+			})
+		}
+		// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
+		if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+		}
 	}
 
 	stageKey := issueKey(item, e.defaultRepo()) + "-" + stage.Name
@@ -978,6 +1022,10 @@ func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 	if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, failedLabel); err != nil &&
 		!errors.Is(err, gh.ErrNotFound) {
 		e.logf(item.Number, "warn", "could not remove failed label: %v\n", err)
+	} else if err == nil {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), failedLabel)
+		}
 	}
 
 	iKey := issueKey(item, e.defaultRepo())
@@ -1002,9 +1050,13 @@ func (e *Engine) blockOnInput(item gh.ProjectItem, stage *stages.Stage) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
 		e.logf(item.Number, "warn", "could not add paused label: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
 	}
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
 		e.logf(item.Number, "warn", "could not add awaiting-input label: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
 	}
 }
 
@@ -1018,10 +1070,18 @@ func (e *Engine) unblockAwaitingInput(item gh.ProjectItem, stage *stages.Stage, 
 	if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:paused"); err != nil &&
 		!errors.Is(err, gh.ErrNotFound) {
 		e.logf(item.Number, "warn", "could not remove paused label: %v\n", err)
+	} else if err == nil {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
+		}
 	}
 	if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil &&
 		!errors.Is(err, gh.ErrNotFound) {
 		e.logf(item.Number, "warn", "could not remove awaiting-input label: %v\n", err)
+	} else if err == nil {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
+		}
 	}
 
 	e.mu.Lock()
@@ -1135,8 +1195,16 @@ func (e *Engine) baseBranchForItem(item gh.ProjectItem, wm *WorktreeManager) (st
 		body := fmt.Sprintf("🏭 **Fabrik — base branch not found**\n\nFabrik could not find branch `%s` on the remote (from `base:%s` label). Falling back to the repository default branch.", candidate, candidate)
 		if dbID, err := e.client.AddComment(owner, repo, item.Number, body); err != nil {
 			e.logf(item.Number, "warn", "could not post base branch fallback comment: %v\n", err)
-		} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+		} else {
+			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+					DatabaseID: dbID, Body: body, Author: e.cfg.User, CreatedAt: time.Now(),
+				})
+			}
+			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
+			if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+				e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+			}
 		}
 	}
 	return wm.DefaultBaseBranch()
@@ -1152,6 +1220,10 @@ func (e *Engine) removeLockLabel(owner, repo string, issueNumber int, label stri
 	if err := e.client.RemoveLabelFromIssue(owner, repo, issueNumber, label); err != nil &&
 		!errors.Is(err, gh.ErrNotFound) {
 		e.logf(issueNumber, "warn", "could not remove lock label: %v\n", err)
+	} else if err == nil {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, issueNumber), label)
+		}
 	}
 }
 
@@ -1160,6 +1232,10 @@ func (e *Engine) removeInProgressLabel(owner, repo string, issueNumber int, stag
 	if err := e.client.RemoveLabelFromIssue(owner, repo, issueNumber, label); err != nil &&
 		!errors.Is(err, gh.ErrNotFound) {
 		e.logf(issueNumber, "warn", "could not remove in_progress label: %v\n", err)
+	} else if err == nil {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, issueNumber), label)
+		}
 	}
 }
 
@@ -1167,6 +1243,8 @@ func (e *Engine) addFailedLabel(owner, repo string, issueNumber int, stageName s
 	label := fmt.Sprintf("stage:%s:failed", stageName)
 	if err := e.client.AddLabelToIssue(owner, repo, issueNumber, label); err != nil {
 		e.logf(issueNumber, "warn", "could not add failed label: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, issueNumber), label)
 	}
 }
 
@@ -1175,6 +1253,10 @@ func (e *Engine) removeFailedLabel(owner, repo string, issueNumber int, stageNam
 	if err := e.client.RemoveLabelFromIssue(owner, repo, issueNumber, label); err != nil &&
 		!errors.Is(err, gh.ErrNotFound) {
 		e.logf(issueNumber, "warn", "could not remove failed label: %v\n", err)
+	} else if err == nil {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, issueNumber), label)
+		}
 	}
 }
 
