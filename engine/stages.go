@@ -91,6 +91,8 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 				completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
 				if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); lerr != nil {
 					e.logf(item.Number, "warn", "could not add completion label: %v\n", lerr)
+				} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+					cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
 				}
 				e.logf(item.Number, "rebase-reinvoke", "PR merge deferred — rebase dispatched\n")
 			} else {
@@ -116,6 +118,8 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 		if !alreadyAwaitingCI {
 			if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-ci"); err != nil {
 				e.logf(item.Number, "warn", "could not add fabrik:awaiting-ci label: %v\n", err)
+			} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-ci")
 			}
 		}
 		// Also seed fabrik:awaiting-review optimistically (Path 1 idempotent), so
@@ -131,6 +135,8 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 			if !alreadyAwaitingReview {
 				if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-review"); err != nil {
 					e.logf(item.Number, "warn", "could not add fabrik:awaiting-review label: %v\n", err)
+				} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+					cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-review")
 				}
 			}
 		}
@@ -141,6 +147,8 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
 		e.logf(item.Number, "warn", "could not add completion label: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
 	}
 
 	// fabrik:yolo or fabrik:cruise label overrides stage.AutoAdvance — if the user
@@ -176,6 +184,8 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 			if !alreadyWaiting {
 				if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-review"); err != nil {
 					e.logf(item.Number, "warn", "could not add fabrik:awaiting-review label: %v\n", err)
+				} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+					cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-review")
 				}
 				e.logf(item.Number, "awaiting-review", "waiting for PR reviewers before advancing\n")
 			}
@@ -275,6 +285,8 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 				e.logf(item.Number, "ci-gate", "merge blocked — CI failed: %s\n", strings.Join(names, ", "))
 				if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-ci"); lerr != nil {
 					e.logf(item.Number, "warn", "could not add fabrik:awaiting-ci: %v\n", lerr)
+				} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+					cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-ci")
 				}
 				// Clean up pending timer since we now have a definitive failure state.
 				e.mu.Lock()
@@ -315,14 +327,26 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 						pr.Number, timeout, strings.Join(names, ", "))
 					if dbID, cerr := e.client.AddComment(owner, repo, item.Number, msg); cerr != nil {
 						e.logf(item.Number, "warn", "could not post CI timeout comment: %v\n", cerr)
-					} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-						e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+					} else {
+						if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+							cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+								DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
+							})
+						}
+						// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
+						if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+							e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+						}
 					}
 					if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); lerr != nil {
 						e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", lerr)
+					} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+						cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
 					}
 					if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); lerr != nil {
 						e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", lerr)
+					} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+						cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
 					}
 					return fmt.Errorf("merge guard: CI wait timeout elapsed after %s", timeout)
 				}
@@ -351,6 +375,8 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 			if !alreadyLabeled {
 				if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:rebase-needed"); lerr != nil {
 					e.logf(item.Number, "warn", "could not add fabrik:rebase-needed label: %v\n", lerr)
+				} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+					cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:rebase-needed")
 				}
 			}
 			// inFlight guard: if a rebase goroutine is already running, skip
@@ -398,6 +424,8 @@ func (e *Engine) handleDecomposed(board *gh.ProjectBoard, item gh.ProjectItem, s
 	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
 		e.logf(item.Number, "warn", "could not add completion label: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
 	}
 
 	if e.statusField == nil {
