@@ -839,7 +839,7 @@ func TestProcessItem_UnlimitedWhenMaxRetriesZero(t *testing.T) {
 	}
 }
 
-func TestProcessItem_ClearsRetryCountOnCompletion(t *testing.T) {
+func TestProcessItem_ClearsAttemptsOnCompletion(t *testing.T) {
 	skipIfNoGit(t)
 	repoDir := initBareRepo(t)
 	wm := NewWorktreeManager(repoDir)
