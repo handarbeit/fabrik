@@ -433,6 +433,9 @@ type InvocationRecorded struct {
 	// running a stage. Stored in ItemState.LastInvocationIsComment so that the
 	// InvocationObserver can forward the correct flag to the TUI.
 	IsComment bool
+	// Duration is the wall-clock time from invocation start to completion.
+	// Zero when not set (e.g., comment-processing paths that don't track start time).
+	Duration time.Duration
 }
 
 func (InvocationRecorded) isMutation() {}
