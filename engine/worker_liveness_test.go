@@ -484,7 +484,9 @@ func TestWorkerStoreReflectsDispatchPaths(t *testing.T) {
 // TestRunStartupCleanup_StaleEditingLabel verifies that runStartupCleanup removes
 // fabrik:editing from an item whose Worker is nil (orphaned by a prior crash).
 func TestRunStartupCleanup_StaleEditingLabel(t *testing.T) {
+	orig := editingLabelRetryDelay
 	editingLabelRetryDelay = 0
+	t.Cleanup(func() { editingLabelRetryDelay = orig })
 	client := &mockGitHubClient{}
 	e := testEngine(client, &mockClaudeInvoker{})
 
@@ -506,7 +508,9 @@ func TestRunStartupCleanup_StaleEditingLabel(t *testing.T) {
 // TestRunStartupCleanup_ActiveWorkerSkipsEditing verifies that runStartupCleanup
 // does NOT remove fabrik:editing when the item has an active Worker.
 func TestRunStartupCleanup_ActiveWorkerSkipsEditing(t *testing.T) {
+	orig := editingLabelRetryDelay
 	editingLabelRetryDelay = 0
+	t.Cleanup(func() { editingLabelRetryDelay = orig })
 	client := &mockGitHubClient{}
 	e := testEngine(client, &mockClaudeInvoker{})
 
@@ -524,7 +528,9 @@ func TestRunStartupCleanup_ActiveWorkerSkipsEditing(t *testing.T) {
 // TestRunStartupCleanup_EditingLabelErrNotFound_Silent verifies that ErrNotFound
 // during startup editing-label cleanup is treated as a no-op (idempotency).
 func TestRunStartupCleanup_EditingLabelErrNotFound_Silent(t *testing.T) {
+	orig := editingLabelRetryDelay
 	editingLabelRetryDelay = 0
+	t.Cleanup(func() { editingLabelRetryDelay = orig })
 	client := &mockGitHubClient{
 		removeLabelFromIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
 			if labelName == "fabrik:editing" {
