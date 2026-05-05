@@ -473,6 +473,184 @@ func TestItemDeepFetchedClearsLastDeepFetchFailureAt(t *testing.T) {
 	}
 }
 
+// ---- Reset observer tests ----
+
+// TestResetNotifiesObserversOnAdd verifies that Reset emits a Change for every
+// item in the new slice, with non-zero Fields.
+func TestResetNotifiesObserversOnAdd(t *testing.T) {
+	s := NewStore(nil)
+
+	var mu sync.Mutex
+	var received []Change
+	s.Subscribe(ObserverFunc(func(c Change, _ Snapshot) {
+		mu.Lock()
+		received = append(received, c)
+		mu.Unlock()
+	}))
+
+	items := []gh.ProjectItem{
+		testProjectItem(testRepo, 10),
+		testProjectItem(testRepo, 11),
+		testProjectItem(testRepo, 12),
+	}
+	s.Reset(items)
+
+	mu.Lock()
+	got := len(received)
+	mu.Unlock()
+
+	if got != 3 {
+		t.Fatalf("expected 3 Changes from Reset, got %d", got)
+	}
+	for _, c := range received {
+		if c.Fields == 0 {
+			t.Errorf("Change for #%d has zero Fields; want non-zero", c.Number)
+		}
+		if c.Fields&ItemRemoved != 0 {
+			t.Errorf("Change for #%d has ItemRemoved set unexpectedly", c.Number)
+		}
+	}
+}
+
+// TestResetNotifiesObserversOnRemoval verifies that Reset emits ItemRemoved Changes
+// for items present in the old map but absent from the new slice.
+func TestResetNotifiesObserversOnRemoval(t *testing.T) {
+	s := NewStore(nil)
+
+	// Populate three items via Apply.
+	for _, n := range []int{20, 21, 22} {
+		s.Apply(IssueOpened{Item: testProjectItem(testRepo, n)})
+	}
+
+	var mu sync.Mutex
+	var received []Change
+	s.Subscribe(ObserverFunc(func(c Change, _ Snapshot) {
+		mu.Lock()
+		received = append(received, c)
+		mu.Unlock()
+	}))
+
+	// Reset with only 2 of the 3 items — #22 is removed.
+	s.Reset([]gh.ProjectItem{
+		testProjectItem(testRepo, 20),
+		testProjectItem(testRepo, 21),
+	})
+
+	mu.Lock()
+	got := make([]Change, len(received))
+	copy(got, received)
+	mu.Unlock()
+
+	if len(got) != 3 {
+		t.Fatalf("expected 3 Changes (2 retained + 1 removed), got %d", len(got))
+	}
+
+	var removals, retained int
+	for _, c := range got {
+		if c.Fields&ItemRemoved != 0 {
+			removals++
+			if c.Number != 22 {
+				t.Errorf("ItemRemoved Change for unexpected item #%d", c.Number)
+			}
+		} else {
+			retained++
+		}
+	}
+	if removals != 1 {
+		t.Errorf("expected 1 ItemRemoved Change, got %d", removals)
+	}
+	if retained != 2 {
+		t.Errorf("expected 2 non-removal Changes, got %d", retained)
+	}
+}
+
+// TestResetObserverCalledOutsideLock verifies that observers can call Store.Get
+// inside the Reset callback without deadlocking.
+func TestResetObserverCalledOutsideLock(t *testing.T) {
+	s := NewStore(nil)
+
+	done := make(chan struct{}, 1)
+	s.Subscribe(ObserverFunc(func(c Change, _ Snapshot) {
+		// Would deadlock if called under the write lock.
+		s.Get(c.Repo, c.Number)
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}))
+
+	s.Reset([]gh.ProjectItem{testProjectItem(testRepo, 30)})
+
+	select {
+	case <-done:
+		// OK — observer completed without deadlock.
+	case <-time.After(5 * time.Second):
+		t.Fatal("deadlock: observer could not call Store.Get during Reset dispatch")
+	}
+}
+
+// TestConcurrentReset verifies no data race when Reset, Apply, Subscribe, and
+// Unsubscribe run concurrently.
+func TestConcurrentReset(t *testing.T) {
+	s := NewStore(nil)
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// Concurrent Resets.
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				s.Reset([]gh.ProjectItem{testProjectItem(testRepo, n+100)})
+			}
+		}(i)
+	}
+
+	// Concurrent Applies.
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				s.Apply(IssueLabeled{Repo: testRepo, Number: n + 100, Label: "x"})
+			}
+		}(i)
+	}
+
+	// Concurrent Subscribe/Unsubscribe.
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				cancel := s.Subscribe(ObserverFunc(func(Change, Snapshot) {}))
+				cancel()
+			}
+		}()
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+}
+
 // TestLinkedPRSnapshotImmutabilityAfterCIMerge verifies that a snapshot taken
 // before CIMergePendingStarted is not retroactively mutated.
 func TestLinkedPRSnapshotImmutabilityAfterCIMerge(t *testing.T) {
