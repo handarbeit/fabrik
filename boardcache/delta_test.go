@@ -319,11 +319,11 @@ func TestStoreDelegationNegativeCacheTTLExpiry(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 11. FetchItemDetails backfills prNumToKey so PR review/comment deltas route
+// 11. FetchItemDetails backfills store.prToKey so PR review/comment deltas route
 //     without auto-heal after the first deep fetch.
 // ---------------------------------------------------------------------------
 
-func TestFetchItemDetailsBackfillsPrNumToKey(t *testing.T) {
+func TestFetchItemDetailsBackfillsPrToKey(t *testing.T) {
 	mc := &mockClient{
 		itemDetailsResult: &gh.ProjectItem{
 			Body:           "body",
@@ -362,7 +362,7 @@ func TestFetchItemDetailsBackfillsPrNumToKey(t *testing.T) {
 // 12. Reconcile item removal cleans up stale prToKey entries.
 // ---------------------------------------------------------------------------
 
-func TestReconcileRemoveCleansUpPrNumToKey(t *testing.T) {
+func TestReconcileRemoveCleansUpPrToKey(t *testing.T) {
 	c := seedCache(t)
 	// Establish PR linkage for item #1 → PR #10.
 	testSetLinkedPR(c, "owner/repo", 1, 10)
