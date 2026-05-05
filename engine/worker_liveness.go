@@ -186,6 +186,6 @@ func (e *Engine) runStartupCleanup() {
 		cleanedEditing++
 	}
 	if cleanedEditing > 0 {
-		e.logf(0, "startup", "startup cleanup: removed stale editing labels from %d issue(s)\n", cleanedEditing)
+		e.logf(0, "startup", "startup cleanup: attempted stale editing label removal on %d issue(s)\n", cleanedEditing)
 	}
 }
