@@ -680,7 +680,11 @@ type pollResult struct {
 
 func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	e.emitStructural(tui.PollStartedEvent{Owner: e.cfg.Owner, Repo: e.cfg.Repo, Project: e.cfg.ProjectNum})
-	e.logf(0, "poll", "fetching project board %s/%s#%d\n", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
+	if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok && cacheImpl.IsBootstrapped() && !cacheImpl.IsPaused() {
+		e.logf(0, "poll", "reading project board from cache: %s/%s#%d\n", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
+	} else {
+		e.logf(0, "poll", "fetching project board from GitHub: %s/%s#%d\n", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
+	}
 
 	board, err := e.readClient.FetchProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
 	if err != nil {
@@ -874,7 +878,11 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			deepFetchCandidates = append(deepFetchCandidates, board.Items[i])
 			continue
 		}
-		e.logf(0, "poll", "deep-fetching details for #%d\n", board.Items[i].Number)
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok && !cacheImpl.IsPaused() && cacheImpl.IsItemDeepFetched(board.Items[i].Repo, board.Items[i].Number) {
+			e.logf(0, "poll", "reading details for #%d from cache\n", board.Items[i].Number)
+		} else {
+			e.logf(0, "poll", "deep-fetching details for #%d from GitHub\n", board.Items[i].Number)
+		}
 		if err := e.readClient.FetchItemDetails(&board.Items[i]); err != nil {
 			e.logf(0, "warn", "could not fetch details for #%d: %v\n", board.Items[i].Number, err)
 			e.store.Apply(itemstate.DeepFetchFailed{
