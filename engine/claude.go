@@ -315,6 +315,9 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 
 	prompt := buildCommentReviewPrompt(stage, issue, comments, opts.BaseBranch)
 	limit := commentMaxTurns(stage)
+	if opts.MaxTurnsOverride > 0 {
+		limit = opts.MaxTurnsOverride
+	}
 	args := buildClaudeArgs(stage, sessFilePath, true, opts.ModelOverride, limit, hasUnrestrictedLabel(issue), workDir) // resume existing session
 
 	extraEnv := buildClaudeEnv(stage, opts.EffortOverride)
