@@ -1799,3 +1799,50 @@ func TestPoll_LogItemFromCache(t *testing.T) {
 		t.Errorf("item log = %q; must not contain \"from GitHub\"", itemLog)
 	}
 }
+
+// TestNoCooldownForInFlightItem verifies that CooldownAt("periodic-re-eval") is
+// NOT stamped for items whose dispatch was skipped solely because a worker from a
+// prior poll cycle is still in flight. Stamping the cooldown in this case delays
+// the next-stage dispatch by up to PollSeconds*10 (~150s at defaults).
+func TestNoCooldownForInFlightItem(t *testing.T) {
+	deepFetchCalled := false
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{Number: 77, Repo: "owner/repo", Status: "Research", ItemID: "PVTI_77"},
+				},
+			}, nil
+		},
+		fetchStatusFieldFn: func(projectID string) (*gh.StatusField, error) {
+			return &gh.StatusField{FieldID: "F1", Options: map[string]string{}}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalled = true
+			return nil
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+
+	// Simulate a worker still running from a prior poll cycle.
+	eng.inFlight.Store("owner/repo#77", false)
+
+	if _, err := eng.poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	eng.wg.Wait()
+
+	if !deepFetchCalled {
+		t.Error("expected FetchItemDetails to be called for the in-flight item")
+	}
+
+	snap, err := eng.store.Get("owner/repo", 77)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if !snap.CooldownAt("periodic-re-eval").IsZero() {
+		t.Errorf("expected no CooldownAt(periodic-re-eval) for in-flight item, got %v",
+			snap.CooldownAt("periodic-re-eval"))
+	}
+}
