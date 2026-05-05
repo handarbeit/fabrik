@@ -143,19 +143,25 @@ func (e *Engine) buildRebaseComment(item gh.ProjectItem, stage *stages.Stage, ba
 
 // dispatchRebaseReinvoke spawns a goroutine that re-invokes the stage agent
 // with a synthetic rebase-required comment. Mirrors dispatchCIFixReinvoke /
-// dispatchReviewReinvoke: marks inFlight, acquires the semaphore, calls
-// processComments, then releases both.
+// dispatchReviewReinvoke: marks the item in-flight via WorkerEntered, acquires
+// the semaphore, calls processComments, then releases both.
 func (e *Engine) dispatchRebaseReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
-	iKey := issueKey(item, e.defaultRepo())
-
-	e.inFlight.Store(iKey, item.IsPR)
-	e.wg.Add(1)
-
 	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
+
+	// Mark in-flight via the Store so the dispatch guard (snap.Worker() != nil) blocks
+	// double-dispatch before the goroutine starts. WorkerExited is deferred inside the
+	// goroutine so any early exit also clears it.
+	e.store.Apply(itemstate.WorkerEntered{
+		Repo:      itemRepo,
+		Number:    item.Number,
+		StageName: stage.Name,
+		StartedAt: time.Now(),
+	})
+	e.wg.Add(1)
 
 	go func() {
 		defer e.wg.Done()
-		defer e.inFlight.Delete(iKey)
+		defer e.store.Apply(itemstate.WorkerExited{Repo: itemRepo, Number: item.Number})
 
 		select {
 		case e.sem <- struct{}{}:
@@ -199,7 +205,6 @@ func (e *Engine) dispatchRebaseReinvoke(ctx context.Context, board *gh.ProjectBo
 		done := make(chan struct{})
 		defer close(done)
 		e.startHeartbeat(ctx, itemRepo, item.Number, done)
-		defer e.store.Apply(itemstate.WorkerExited{Repo: itemRepo, Number: item.Number})
 		onPIDReady := func(pid int) {
 			e.store.Apply(itemstate.WorkerPIDSet{Repo: itemRepo, Number: item.Number, PID: pid})
 		}
