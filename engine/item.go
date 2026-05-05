@@ -194,6 +194,12 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		}
 	}
 
+	// Items being edited by a comment-processing worker must not receive a new
+	// stage dispatch — pre-dispatch gate symmetric with fabrik:locked:<other-user>.
+	if hasLabel(item, "fabrik:editing") {
+		return false
+	}
+
 	// Awaiting-input items: new comment = resume trigger; no comment = skip.
 	if awaitingInput {
 		return len(e.findNewComments(item)) > 0
