@@ -3,6 +3,7 @@ package itemstate
 import (
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +37,7 @@ type Store struct {
 	// Reverse-lookup indexes maintained on every Apply that touches the relevant fields.
 	shaToKey    map[string]string // LinkedPR.HeadSHA → itemKey
 	itemIDToKey map[string]string // ItemState.ItemID → itemKey
+	prToKey     map[string]string // prKeyFor(repo, prNum) → itemKey
 
 	observerMu sync.RWMutex
 	observers  []observerEntry
@@ -83,6 +85,7 @@ func NewStore(fallback FallbackFetcher, opts ...StoreOption) *Store {
 		items:       make(map[string]*ItemState),
 		shaToKey:    make(map[string]string),
 		itemIDToKey: make(map[string]string),
+		prToKey:     make(map[string]string),
 		fallback:    fallback,
 		logger:      o.logger,
 	}
@@ -519,6 +522,15 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.LinkedPR.HeadSHA = v.SHA
 		return LinkedPRChanged
 
+	case PRDetailsUpdated:
+		ensureLinkedPR(item, v.PRNumber)
+		item.LinkedPR.Number = v.PRNumber
+		item.LinkedPR.Title = v.Title
+		item.LinkedPR.State = v.State
+		item.LinkedPR.Merged = v.Merged
+		item.LinkedPR.Draft = v.Draft
+		return LinkedPRChanged
+
 	case ReviewThreadCommentAdded:
 		ensureLinkedPR(item, 0)
 		// Idempotent by NodeID.
@@ -675,6 +687,26 @@ func (s *Store) updateIndexes(before, after ItemState, key string) {
 	} else if afterSHA != "" {
 		s.shaToKey[afterSHA] = key
 	}
+
+	// PR-number index: maps prKeyFor(repo, prNum) → itemKey.
+	beforePRNum := 0
+	afterPRNum := 0
+	if before.LinkedPR != nil {
+		beforePRNum = before.LinkedPR.Number
+	}
+	if after.LinkedPR != nil {
+		afterPRNum = after.LinkedPR.Number
+	}
+	if beforePRNum != afterPRNum {
+		if beforePRNum != 0 {
+			delete(s.prToKey, prKeyFor(before.Repo, beforePRNum))
+		}
+		if afterPRNum != 0 {
+			s.prToKey[prKeyFor(after.Repo, afterPRNum)] = key
+		}
+	} else if afterPRNum != 0 {
+		s.prToKey[prKeyFor(after.Repo, afterPRNum)] = key
+	}
 }
 
 // ---- helpers ----
@@ -808,7 +840,7 @@ func (s *Store) All() []Snapshot {
 }
 
 // Remove deletes the item identified by (repo, number) from the Store and
-// updates the shaToKey and itemIDToKey indexes accordingly.
+// updates the shaToKey, itemIDToKey, and prToKey indexes accordingly.
 // No-op when the item is not present.
 func (s *Store) Remove(repo string, number int) {
 	key := itemKeyFor(repo, number)
@@ -824,13 +856,15 @@ func (s *Store) Remove(repo string, number int) {
 	if item.LinkedPR != nil && item.LinkedPR.HeadSHA != "" {
 		delete(s.shaToKey, item.LinkedPR.HeadSHA)
 	}
+	if item.LinkedPR != nil && item.LinkedPR.Number != 0 {
+		delete(s.prToKey, prKeyFor(item.Repo, item.LinkedPR.Number))
+	}
 	delete(s.items, key)
 }
 
 // RemoveByItemID removes the item identified by its project ItemID (board-side ID).
-// Returns the repo and number of the removed item, and ok=true, so callers can
-// clean up secondary state (e.g. prNumToKey entries). No-op and ok=false if the
-// ItemID is not in the index.
+// Updates shaToKey, itemIDToKey, and prToKey indexes accordingly.
+// No-op and ok=false if the ItemID is not in the index.
 func (s *Store) RemoveByItemID(itemID string) (repo string, number int, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -848,9 +882,23 @@ func (s *Store) RemoveByItemID(itemID string) (repo string, number int, ok bool)
 	if item.LinkedPR != nil && item.LinkedPR.HeadSHA != "" {
 		delete(s.shaToKey, item.LinkedPR.HeadSHA)
 	}
+	if item.LinkedPR != nil && item.LinkedPR.Number != 0 {
+		delete(s.prToKey, prKeyFor(item.Repo, item.LinkedPR.Number))
+	}
 	delete(s.itemIDToKey, itemID)
 	delete(s.items, key)
 	return repo, number, true
+}
+
+// GetByPRKey returns the item key for the issue that is closed by the given PR.
+// Returns ("", false) if no item in the Store has a LinkedPR.Number matching prNum
+// in the given repo. The returned key can be parsed with parseKey to extract
+// repo and number for a subsequent Get call.
+func (s *Store) GetByPRKey(repo string, prNum int) (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	key, ok := s.prToKey[prKeyFor(repo, prNum)]
+	return key, ok
 }
 
 // resetNotification holds a Change and Snapshot for deferred observer dispatch.
@@ -870,6 +918,7 @@ func (s *Store) Reset(items []gh.ProjectItem) {
 	s.items = make(map[string]*ItemState, len(items))
 	s.shaToKey = make(map[string]string, len(items))
 	s.itemIDToKey = make(map[string]string, len(items))
+	s.prToKey = make(map[string]string, len(items))
 
 	newKeys := make(map[string]bool, len(items))
 	var notifications []resetNotification
@@ -889,6 +938,9 @@ func (s *Store) Reset(items []gh.ProjectItem) {
 		}
 		if item.LinkedPR != nil && item.LinkedPR.HeadSHA != "" {
 			s.shaToKey[item.LinkedPR.HeadSHA] = key
+		}
+		if item.LinkedPR != nil && item.LinkedPR.Number != 0 {
+			s.prToKey[prKeyFor(item.Repo, item.LinkedPR.Number)] = key
 		}
 		notifications = append(notifications, resetNotification{
 			change: Change{Repo: item.Repo, Number: item.Number, Fields: flags},
@@ -1046,6 +1098,13 @@ func removeString(ss []string, s string) []string {
 		return nil
 	}
 	return out
+}
+
+// prKeyFor constructs the PR reverse-index key "owner/repo#pr<N>".
+// Same semantics as boardcache.prKey; duplicated here to keep the Store
+// package self-contained (boardcache is a separate package).
+func prKeyFor(repo string, prNum int) string {
+	return repo + "#pr" + strconv.Itoa(prNum)
 }
 
 // parseKey splits "owner/repo#N" into repo and number.
