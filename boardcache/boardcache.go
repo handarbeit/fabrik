@@ -167,9 +167,9 @@ func snapshotToProjectItem(snap itemstate.Snapshot) gh.ProjectItem {
 // fallback ReadClient on cache miss.
 //
 // Internal ownership split:
-//   - store owns: items, shaToKey, itemIDToKey
+//   - store owns: items, shaToKey, itemIDToKey, prToKey
 //   - CacheImpl owns: paused, recentMissCache, projectID/Title/OwnerType,
-//     linkedPRs, checkRuns, prNumToKey, localDeltaAt
+//     checkRuns, localDeltaAt
 //
 // Locking invariant: mu guards CacheImpl-local fields only. Store has its own
 // internal mutex. NEVER hold mu while calling any Store method — this prevents
@@ -203,20 +203,12 @@ type CacheImpl struct {
 	// is resolved.
 	checkRuns map[string][]gh.CheckRun
 
-	// linkedPRs stores full PR details keyed by prKey(repo, prNum).
-	// TODO(phase3-x): migrate to Store when LinkedPRState gains Title/State/Merged/Draft.
-	linkedPRs map[string]*gh.PRDetails
-
-	// prNumToKey maps prKey(repo, prNum) → issue itemKey.
-	// Replaces the linear scan of Store items for PR-number → issue lookups in delta handlers.
-	prNumToKey map[string]string
-
 	// localDeltaAt records the last time a webhook bumped an item.
 	// FetchProjectBoard uses max(ItemState.UpdatedAt, localDeltaAt[key]) so that
 	// webhook-driven changes are visible to itemMayNeedWork before the next Reconcile.
 	localDeltaAt map[string]time.Time
 
-	// store owns per-item state (items, shaToKey, itemIDToKey).
+	// store owns per-item state (items, shaToKey, itemIDToKey, prToKey).
 	store *itemstate.Store
 
 	fallback ReadClient
@@ -231,8 +223,6 @@ func NewCacheImpl(fallback ReadClient, store *itemstate.Store, logFn func(format
 	}
 	return &CacheImpl{
 		checkRuns:       make(map[string][]gh.CheckRun),
-		linkedPRs:       make(map[string]*gh.PRDetails),
-		prNumToKey:      make(map[string]string),
 		localDeltaAt:    make(map[string]time.Time),
 		recentMissCache: make(map[string]time.Time),
 		store:           store,
@@ -252,10 +242,9 @@ func (c *CacheImpl) Bootstrap(board *gh.ProjectBoard) {
 	c.projectID = board.ProjectID
 	c.projectTitle = board.Title
 	c.projectOwnerType = board.OwnerType
-	// Reset CacheImpl-local maps so they're consistent with the fresh Store state.
-	c.prNumToKey = make(map[string]string)
+	// Reset CacheImpl-local maps. linkedPRs and prNumToKey have been migrated to the
+	// Store (PRDetailsUpdated + prToKey index), so Store.Reset above handles them.
 	c.localDeltaAt = make(map[string]time.Time)
-	c.linkedPRs = make(map[string]*gh.PRDetails)
 	c.checkRuns = make(map[string][]gh.CheckRun)
 	c.mu.Unlock()
 
@@ -316,18 +305,12 @@ func (c *CacheImpl) Reconcile(board *gh.ProjectBoard) {
 	}
 
 	// Remove items no longer on the board.
+	// Store.Remove handles cleanup of the prToKey index automatically.
 	for _, snap := range c.store.All() {
 		key := itemKey(snap.Repo(), snap.Number())
 		if !newKeys[key] {
 			drifted++
 			c.store.Remove(snap.Repo(), snap.Number())
-			// Clean up CacheImpl-side prNumToKey so stale PR numbers don't resurrect ghost items.
-			if lpr := snap.LinkedPR(); lpr != nil && lpr.Number != 0 {
-				pk := prKey(snap.Repo(), lpr.Number)
-				c.mu.Lock()
-				delete(c.prNumToKey, pk)
-				c.mu.Unlock()
-			}
 		}
 	}
 
@@ -539,22 +522,14 @@ func (c *CacheImpl) FetchItemDetails(item *gh.ProjectItem) error {
 	}
 
 	// Write back to Store via ItemDeepFetched.
+	// ItemDeepFetched → applyProjectItem → ensureLinkedPR sets lpr.Number = pi.LinkedPRNumber,
+	// which then triggers updateIndexes to populate the prToKey index automatically.
+	// No explicit prNumToKey backfill needed.
 	c.store.Apply(itemstate.ItemDeepFetched{
 		Repo:       item.Repo,
 		Number:     item.Number,
 		FreshState: *item,
 	})
-	// If FetchItemDetails learned a LinkedPRNumber, backfill prNumToKey so that
-	// future PR review/comment deltas can route via the normal (non-auto-heal) path.
-	if item.LinkedPRNumber != 0 {
-		pk := prKey(item.Repo, item.LinkedPRNumber)
-		issKey := itemKey(item.Repo, item.Number)
-		c.mu.Lock()
-		if _, exists := c.prNumToKey[pk]; !exists {
-			c.prNumToKey[pk] = issKey
-		}
-		c.mu.Unlock()
-	}
 	return nil
 }
 
@@ -588,7 +563,6 @@ func (c *CacheImpl) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, erro
 // FetchLinkedPR returns cached PR details for an issue; falls back to GitHub on miss.
 func (c *CacheImpl) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 	fullRepo := owner + "/" + repo
-	issKey := itemKey(fullRepo, issueNumber)
 
 	c.mu.RLock()
 	paused := c.paused
@@ -598,7 +572,7 @@ func (c *CacheImpl) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDe
 		return c.fallback.FetchLinkedPR(owner, repo, issueNumber)
 	}
 
-	// Get LinkedPRNumber from Store (Store has its own mutex; no c.mu held).
+	// Get LinkedPR state from Store (Store has its own mutex; no c.mu held).
 	var linkedPRNum int
 	snap, snapErr := c.store.Get(fullRepo, issueNumber)
 	if snapErr == nil {
@@ -607,15 +581,19 @@ func (c *CacheImpl) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDe
 		}
 	}
 
-	if linkedPRNum != 0 {
-		pk := prKey(fullRepo, linkedPRNum)
-		c.mu.RLock()
-		if pr, ok := c.linkedPRs[pk]; ok {
-			prCopy := *pr
-			c.mu.RUnlock()
-			return &prCopy, nil
+	// Cache-hit: PR details are in the Store (Title is non-empty once PRDetailsUpdated fires).
+	if linkedPRNum != 0 && snapErr == nil {
+		if lpr := snap.LinkedPR(); lpr != nil && lpr.Title != "" {
+			return &gh.PRDetails{
+				Number:         lpr.Number,
+				Title:          lpr.Title,
+				State:          lpr.State,
+				Merged:         lpr.Merged,
+				Draft:          lpr.Draft,
+				HeadSHA:        lpr.HeadSHA,
+				MergeableState: lpr.MergeableState,
+			}, nil
 		}
-		c.mu.RUnlock()
 	}
 
 	c.logFn("[cache] miss: FetchLinkedPR #%d — fetching from GitHub\n", issueNumber)
@@ -624,14 +602,20 @@ func (c *CacheImpl) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDe
 		return nil, err
 	}
 	if pr != nil {
-		pk := prKey(fullRepo, pr.Number)
-		c.mu.Lock()
-		c.linkedPRs[pk] = pr
-		c.mu.Unlock()
-		// If the item had no LinkedPRNumber in Store, update it without touching deep-fetch state.
-		// Original behavior: only set LinkedPRNumber; do not change LastDeepFetchAt.
+		// Write PR details into the Store via PRDetailsUpdated. This fires LinkedPRChanged
+		// so observers see the change, and updates the prToKey reverse index automatically.
+		c.store.Apply(itemstate.PRDetailsUpdated{
+			Repo:     fullRepo,
+			Number:   issueNumber,
+			PRNumber: pr.Number,
+			Title:    pr.Title,
+			State:    pr.State,
+			Merged:   pr.Merged,
+			Draft:    pr.Draft,
+		})
+		// If the item had no LinkedPRNumber in Store, also register the PR linkage
+		// without touching deep-fetch state. prToKey is maintained by PRDetailsUpdated above.
 		if linkedPRNum == 0 && snapErr == nil {
-			// Preserve existing HeadSHA if any (LinkedPR may already have a SHA from a webhook).
 			existingSHA := ""
 			if s := snap.State(); s.LinkedPR != nil {
 				existingSHA = s.LinkedPR.HeadSHA
@@ -642,11 +626,6 @@ func (c *CacheImpl) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDe
 				LinkedPRNum: pr.Number,
 				SHA:         existingSHA,
 			})
-			// Also update prNumToKey.
-			pk2 := prKey(fullRepo, pr.Number)
-			c.mu.Lock()
-			c.prNumToKey[pk2] = issKey
-			c.mu.Unlock()
 		}
 	}
 	return pr, nil
