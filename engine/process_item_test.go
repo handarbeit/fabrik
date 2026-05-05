@@ -58,6 +58,28 @@ func TestProcessItem_SkipsLockedByOther(t *testing.T) {
 	}
 }
 
+func TestProcessItem_SkipsEditing(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := testEngine(client, claude)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 1,
+		Title:  "Test",
+		Status: "Research",
+		Labels: []string{"fabrik:editing"},
+	}
+
+	err := eng.processItem(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if len(claude.calls) != 0 {
+		t.Error("should not invoke claude for item being edited (defense-in-depth)")
+	}
+}
+
 func TestProcessItem_SkipsPaused(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
