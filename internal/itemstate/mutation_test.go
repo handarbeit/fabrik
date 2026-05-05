@@ -333,7 +333,54 @@ func TestApplyCooldownRecorded(t *testing.T) {
 	}
 }
 
-// ---- WorkerHeartbeat / WorkerExited ----
+// ---- WorkerEntered / WorkerHeartbeat / WorkerExited ----
+
+func TestApplyWorkerEntered(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	now := time.Now()
+	applyExpect(t, s, WorkerEntered{Repo: testRepo, Number: 1, StageName: "Plan", StartedAt: now}, WorkerChanged)
+	st := getItem(t, s, testRepo, 1)
+	if st.Worker == nil {
+		t.Fatal("Worker should be non-nil after WorkerEntered")
+	}
+	if st.Worker.StageName != "Plan" {
+		t.Errorf("Worker.StageName = %q; want %q", st.Worker.StageName, "Plan")
+	}
+	if !st.Worker.StartedAt.Equal(now) {
+		t.Errorf("Worker.StartedAt = %v; want %v", st.Worker.StartedAt, now)
+	}
+	if !st.Worker.LastSignAt.Equal(now) {
+		t.Errorf("Worker.LastSignAt = %v; want %v", st.Worker.LastSignAt, now)
+	}
+}
+
+func TestWorkerEnteredOverwrittenByLocalLockAcquired(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	now := time.Now()
+	s.Apply(WorkerEntered{Repo: testRepo, Number: 1, StageName: "Plan", StartedAt: now})
+	later := now.Add(time.Second)
+	s.Apply(LocalLockAcquired{Repo: testRepo, Number: 1, User: "bot", AcquiredAt: later,
+		Worker: &WorkerHandle{StageName: "Plan", StartedAt: now, PID: 42}})
+	st := getItem(t, s, testRepo, 1)
+	if st.Worker == nil || st.Worker.PID != 42 {
+		t.Errorf("LocalLockAcquired should overwrite WorkerEntered placeholder; Worker.PID = %v", func() int {
+			if st.Worker != nil {
+				return st.Worker.PID
+			}
+			return -1
+		}())
+	}
+}
+
+func TestWorkerEnteredThenExited(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	now := time.Now()
+	s.Apply(WorkerEntered{Repo: testRepo, Number: 1, StageName: "Research", StartedAt: now})
+	applyExpect(t, s, WorkerExited{Repo: testRepo, Number: 1}, WorkerChanged)
+	if getItem(t, s, testRepo, 1).Worker != nil {
+		t.Error("Worker should be nil after WorkerExited")
+	}
+}
 
 func TestApplyWorkerHeartbeat(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
