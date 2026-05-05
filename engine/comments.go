@@ -130,7 +130,66 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	if len(onPIDReady) > 0 && onPIDReady[0] != nil {
 		invokeOpts.OnPIDReady = onPIDReady[0]
 	}
-	output, _, usage, err := e.claude.InvokeForComments(ctx, stage, item, comments, workDir, invokeOpts)
+
+	// Snapshot extend-turns label before loop (stable across any mid-loop FetchItemDetails re-fetch).
+	hadExtendTurnsLabel := hasExtendTurnsLabel(item)
+
+	// Determine initial turn budget. Label absent → MaxTurnsOverride=0 (InvokeClaudeForComments uses
+	// commentMaxTurns naturally). Label present → 2× pre-granted budget (no progress check for first hit).
+	base := commentMaxTurns(stage)
+	firstBudget := 0
+	totalMultiple := 1
+	if hadExtendTurnsLabel && base > 0 {
+		firstBudget = 2 * base
+		totalMultiple = 2
+	}
+	baseline := snapshotBaseline(stage, item, workDir)
+
+	// Extension loop: InvokeForComments resumes the existing session internally.
+	// Hard cap is 3× commentMaxTurns across all invocations.
+	var output string
+	var usage TokenUsage
+	currentBudget := firstBudget
+	for {
+		invokeOpts.MaxTurnsOverride = currentBudget
+		var invOutput string
+		var invCompleted bool
+		var invUsage TokenUsage
+		invOutput, invCompleted, invUsage, err = e.claude.InvokeForComments(ctx, stage, item, comments, workDir, invokeOpts)
+		output += invOutput
+		usage = addTokenUsage(usage, invUsage)
+
+		hitLimit := !invCompleted && err == nil && currentBudget > 0 && invUsage.TurnsUsed >= currentBudget
+		if !hitLimit || totalMultiple >= 3 {
+			break
+		}
+		issueLogf := func(tag, format string, args ...any) {
+			e.logf(item.Number, tag, format, args...)
+		}
+		hasProgress, progressErr := detectProgress(ctx, stage, &item, baseline, workDir, e.client, issueLogf)
+		if progressErr != nil {
+			e.logf(item.Number, "extend-turns", "comment progress check failed: %v\n", progressErr)
+			break
+		}
+		if !hasProgress {
+			break
+		}
+		totalMultiple++
+		currentBudget = base
+		e.logf(item.Number, "extend-turns", "extending comment review to %d× budget (%d turns used)\n", totalMultiple, usage.TurnsUsed)
+	}
+	// Report cumulative budget across all extensions.
+	usage.MaxTurns = totalMultiple * base
+
+	if usage.TurnsUsed > 0 || usage.InputTokens > 0 || usage.OutputTokens > 0 {
+		if usage.MaxTurns > 0 {
+			e.logf(item.Number, "stats", "used %d/%d turns, %dk input / %dk output tokens\n",
+				usage.TurnsUsed, usage.MaxTurns, usage.InputTokens/1000, usage.OutputTokens/1000)
+		} else {
+			e.logf(item.Number, "stats", "used %d turns, %dk input / %dk output tokens\n",
+				usage.TurnsUsed, usage.InputTokens/1000, usage.OutputTokens/1000)
+		}
+	}
 	func() {
 		e.mu.Lock()
 		defer e.mu.Unlock()

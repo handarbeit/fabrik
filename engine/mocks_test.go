@@ -542,15 +542,24 @@ func (m *mockGitHubClient) LookupIssueProjectItem(projectID, repo string, issueN
 // mockClaudeInvoker implements ClaudeInvoker for testing.
 // mu protects calls for concurrent-safe access.
 type mockClaudeInvoker struct {
-	mu       sync.Mutex
-	invokeFn func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error)
-	calls    []claudeInvokeCall
+	mu                  sync.Mutex
+	invokeFn            func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error)
+	calls               []claudeInvokeCall
+	invokeForCommentsFn func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error)
+	forCommentsCalls    []commentInvokeCall
 }
 
 type claudeInvokeCall struct {
 	stageName string
 	issueNum  int
 	resume    bool
+	workDir   string
+	opts      InvokeOptions
+}
+
+type commentInvokeCall struct {
+	stageName string
+	issueNum  int
 	workDir   string
 	opts      InvokeOptions
 }
@@ -567,8 +576,16 @@ func (m *mockClaudeInvoker) Invoke(ctx context.Context, stage *stages.Stage, iss
 }
 
 func (m *mockClaudeInvoker) InvokeForComments(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
-	if m.invokeFn != nil {
-		return m.invokeFn(stage, issue, comments, false, workDir, opts)
+	m.mu.Lock()
+	m.forCommentsCalls = append(m.forCommentsCalls, commentInvokeCall{stage.Name, issue.Number, workDir, opts})
+	fn := m.invokeForCommentsFn
+	fallback := m.invokeFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(stage, issue, comments, workDir, opts)
+	}
+	if fallback != nil {
+		return fallback(stage, issue, comments, false, workDir, opts)
 	}
 	return "mock comment output", false, TokenUsage{}, nil
 }
