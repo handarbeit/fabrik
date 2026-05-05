@@ -352,16 +352,8 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 		c.bumpLocalDeltaAt(key)
 
 	case "transferred", "deleted":
-		// Remove the item from the Store and clean up any PR linkage entries.
+		// Remove the item from the Store. Store.Remove handles prToKey index cleanup.
 		c.store.Remove(fullRepo, issNum)
-		c.mu.Lock()
-		for pk, ik := range c.prNumToKey {
-			if ik == key {
-				delete(c.prNumToKey, pk)
-				delete(c.linkedPRs, pk)
-			}
-		}
-		c.mu.Unlock()
 
 	case "edited":
 		if err := c.ensureIssueInStore(owner, fullRepo, issNum); err != nil {
@@ -746,7 +738,6 @@ func (c *CacheImpl) applyPullRequestReviewCommentDelta(payload []byte) {
 	}
 	repo := p.Repository.FullName
 	prNum := p.PullRequest.Number
-	pk := prKey(repo, prNum)
 
 	owner, repoName, ok := splitRepo(repo)
 	if !ok {
@@ -944,9 +935,8 @@ func (c *CacheImpl) applyCheckRunDelta(payload []byte) {
 		c.mu.Unlock()
 		return
 	}
-	pk := prKey(repo, prNum)
-	c.prNumToKey[pk] = key
 	c.mu.Unlock()
+	// prToKey is populated by PRHeadSHAUpdated via updateIndexes — no explicit write needed.
 
 	// Update Store: set LinkedPRNum + SHA (updates shaToKey index), invalidate deep cache.
 	c.store.Apply(itemstate.PRHeadSHAUpdated{
@@ -1018,20 +1008,11 @@ func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
 		c.bumpLocalDeltaAt(itemKey(snap.Repo(), snap.Number()))
 
 	case "deleted", "archived":
-		// Remove the item from the Store and clean up any PR linkage entries.
-		repo, number, ok := c.store.RemoveByItemID(p.ProjectsV2Item.ID)
+		// Remove the item from the Store. Store.RemoveByItemID handles prToKey index cleanup.
+		_, _, ok := c.store.RemoveByItemID(p.ProjectsV2Item.ID)
 		if !ok {
 			return
 		}
-		key := itemKey(repo, number)
-		c.mu.Lock()
-		for pk, ik := range c.prNumToKey {
-			if ik == key {
-				delete(c.prNumToKey, pk)
-				delete(c.linkedPRs, pk)
-			}
-		}
-		c.mu.Unlock()
 
 	// restored: item is back on the board; the next poll reconcile will re-add it.
 	// reordered: no position state in the engine.
