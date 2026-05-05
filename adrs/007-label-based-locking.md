@@ -22,8 +22,7 @@ Use GitHub issue labels as lightweight locks:
 - **No infrastructure**: No external lock service, no database, no Redis.
   Labels are stored in GitHub alongside everything else.
 - **Self-documenting**: The label name tells you who locked it and why.
-- **Recoverable**: If a Fabrik instance crashes, the label remains but can
-  be manually removed. No orphaned locks in an external system.
+- **Self-healing**: If a Fabrik instance crashes, stale `fabrik:locked:<user>` and `fabrik:editing` labels are automatically removed by `runStartupCleanup()` on the next restart. No orphaned locks in an external system. If labels cannot be cleared automatically (e.g., network errors exhaust retry budget), they can be manually removed.
 
 ## Locking Rules
 
@@ -46,8 +45,7 @@ Use GitHub issue labels as lightweight locks:
 - **Not perfectly atomic**: There remains a tiny race window between the re-fetch
   and acting on results; in practice this window is negligible and the
   tie-breaking rule handles the worst case correctly.
-- **No TTL**: Labels don't expire. A crashed instance leaves a stale lock.
-  This is acceptable for a tool where the user is present and can intervene.
+- **No TTL**: Labels don't expire. A crashed instance leaves a stale lock, but `runStartupCleanup()` removes stale `fabrik:locked:<user>` and `fabrik:editing` labels on the next restart, so the stuck state is self-healing without manual intervention in the common case.
 - **Label clutter**: Issues accumulate Fabrik labels. These could be cleaned
   up when an issue reaches Done.
 - **Same-username tie-breaking degrades to "both win"**: If two instances share
