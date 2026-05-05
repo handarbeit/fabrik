@@ -1859,3 +1859,37 @@ func TestNoCooldownForInFlightItem(t *testing.T) {
 			snap.CooldownAt("periodic-re-eval"))
 	}
 }
+
+// TestWorkerExitedWakesObserver verifies the end-to-end wakeChFlags wiring for
+// WorkerChanged. Both WorkerEntered and WorkerExited must fire the wake channel
+// because WorkerChanged is in wakeChFlags (Fix B for #544).
+func TestWorkerExitedWakesObserver(t *testing.T) {
+	store := itemstate.NewStore(nil)
+	wakeCh := make(chan struct{}, 4)
+
+	obs := newWakeChObserver(wakeCh)
+	store.Subscribe(obs)
+
+	// WorkerEntered must wake because WorkerChanged is in wakeChFlags.
+	store.Apply(itemstate.WorkerEntered{
+		Repo:      "owner/repo",
+		Number:    99,
+		StageName: "Implement",
+		StartedAt: time.Now(),
+	})
+	select {
+	case <-wakeCh:
+		// expected
+	case <-time.After(100 * time.Millisecond):
+		t.Error("wake channel did not fire after WorkerEntered")
+	}
+
+	// WorkerExited must also wake (deterministic re-dispatch after worker finishes).
+	store.Apply(itemstate.WorkerExited{Repo: "owner/repo", Number: 99})
+	select {
+	case <-wakeCh:
+		// expected
+	case <-time.After(100 * time.Millisecond):
+		t.Error("wake channel did not fire after WorkerExited")
+	}
+}
