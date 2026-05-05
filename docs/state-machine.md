@@ -1073,7 +1073,9 @@ Per-item engine state previously stored in `Engine.mu`-protected maps has been m
 
 ### 9.6 Engine Internal State (itemstate.Store)
 
-Per-item state lives in a single shared `*itemstate.Store` instance. The Engine creates it (`sharedStore := itemstate.NewStore(nil)` in `New()`), assigns it to `eng.store`, and passes it to `boardcache.NewCacheImpl`. All mutations — engine-side (locks, invocations, stage state) and webhook/reconcile-side (status, labels, comments, linked PR) — flow through `sharedStore.Apply`. `NewWithDeps` (test factory) constructs its own independent store because it never creates a `CacheImpl`.
+Per-item state lives in a single shared `*itemstate.Store` instance. The Engine creates it (`sharedStore := itemstate.NewStore(nil)` in `New()`), assigns it to `eng.store`, and passes it to `boardcache.NewCacheImpl`. All mutations — engine-side (locks, invocations, stage state) and webhook/reconcile-side (status, labels, comments, linked-PR fields) — flow through `sharedStore.Apply`. `NewWithDeps` (test factory) constructs its own independent store because it never creates a `CacheImpl`.
+
+Note: `CacheImpl` retains two private maps that are **not** in `itemstate.Store`: `linkedPRs map[string]*gh.PRDetails` (full PR detail objects for `ReadClient` interface serving) and `checkRuns map[string][]gh.CheckRun` (check-run lists keyed by commit SHA). These are cache-layer storage for board reads; the `itemstate.Store` holds the per-item *state fields* derived from PR mutations (`LinkedPRState`: head SHA, mergeable, reviews, HasHadChecks, etc.).
 
 Field ownership is by **mutation type**, not by store identity: a reader calling `store.Get("owner/repo", 1)` receives a Snapshot with all field groups populated regardless of which code path applied each mutation. This is the single-Store design originally proposed in ADR-036 and completed in Phase 5 F3 (issue #537).
 
@@ -1200,9 +1202,12 @@ There is exactly one `*itemstate.Store` instance. `Engine.New()` creates it and 
 | Mutation category | Mutation types | ChangeFlags produced |
 |-------------------|----------------|----------------------|
 | Engine-side | `LocalLockAcquired`, `LocalLockReleased`, `InvocationRecorded`, `StageAttempted`, `CooldownRecorded`, `WorkerPIDSet`, `WorkerHeartbeat`, `WorkerExited`, `PRChecksObserved`, … | `LockChanged`, `InvocationChanged`, `StageStateChanged`, `CooldownChanged`, `WorkerChanged`, `LinkedPRChanged` (partial) |
-| Webhook/reconcile-side | `IssueLabeled`, `IssueUnlabeled`, `LocalStatusUpdated`, `IssueCommentCreated`, `PRReviewSubmitted`, `CheckRunCompleted`, … | `LabelsChanged`, `StatusChanged`, `CommentsChanged`, `LinkedPRChanged`, `AssigneesChanged`, … |
+| Webhook/reconcile-side | `IssueLabeled`, `IssueUnlabeled`, `IssueCommentCreated`, `PRReviewSubmitted`, `CheckRunCompleted`, … | `LabelsChanged`, `CommentsChanged`, `LinkedPRChanged`, `AssigneesChanged`, … |
+| Both | `LocalStatusUpdated` (reconcile/webhook delta path **and** engine write-through via `cacheImpl.UpdateItemStatus`) | `StatusChanged` |
 
 Because both categories write to the same store, any `store.Get(...)` returns a Snapshot with all field groups populated. `CacheImpl.Subscribe` is a thin wrapper over `c.store.Subscribe`; since `c.store` is the shared store, engine code should call `e.store.Subscribe` directly rather than going through `cacheImpl.Subscribe` to avoid double-registration.
+
+**Boundary note**: `CacheImpl` also holds `linkedPRs map[string]*gh.PRDetails` and `checkRuns map[string][]gh.CheckRun` as private maps **outside** `itemstate.Store`. These serve the `ReadClient` interface (`GetLinkedPR`, `GetCheckRuns`) and are populated by CacheImpl's delta/reconcile logic. They are cache-layer storage, not engine state — `snap.LinkedPR()` returns `LinkedPRState` (head SHA, mergeable, reviews, HasHadChecks, etc.), not the full `gh.PRDetails` object from `linkedPRs`.
 
 #### ChangeFlags and Their Trigger Mutations
 
@@ -1210,7 +1215,7 @@ All ChangeFlags are produced by the single shared store. Field ownership is by m
 
 | ChangeFlag | Mutation category | Trigger mutations |
 |------------|-------------------|-------------------|
-| `StatusChanged` | Webhook/reconcile | `LocalStatusUpdated` (reconcile, board fetch), `projects_v2_item` webhook delta |
+| `StatusChanged` | Both | `LocalStatusUpdated` (reconcile, board fetch, `projects_v2_item` webhook delta); also engine-side via `cacheImpl.UpdateItemStatus` called from `advanceToNextStage`/`handleStageComplete` (`stages.go`) |
 | `LabelsChanged` | Webhook/reconcile | `IssueLabeled`, `IssueUnlabeled`, `LocalLabelAdded`, `LocalLabelRemoved` |
 | `LockChanged` | Engine-side | `LocalLockAcquired`, `LocalLockReleased` |
 | `LinkedPRChanged` | Both | PR review, check runs, head SHA updates (webhook); `PRChecksObserved`, `CIMergePendingStarted/Cleared` (engine) |
