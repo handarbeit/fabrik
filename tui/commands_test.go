@@ -1,6 +1,10 @@
 package tui
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -73,5 +77,41 @@ func TestUpdate_LKey_Returns_WatchCmd(t *testing.T) {
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
 	if cmd == nil {
 		t.Error("expected non-nil cmd (tea.ExecProcess) from l key with active job")
+	}
+}
+
+// TestUpdate_AKey_NoAbtop_SetsStatusMsg verifies that pressing 'a' when abtop is not in
+// PATH sets an error status message and returns a nil cmd (no subprocess launched).
+func TestUpdate_AKey_NoAbtop_SetsStatusMsg(t *testing.T) {
+	t.Setenv("PATH", "")
+	m := New(30, ProjectInfo{}, "", nil)
+	result, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	if cmd != nil {
+		t.Error("expected nil cmd when abtop is not in PATH")
+	}
+	got := result.(Model).header.statusMsg
+	want := "abtop not found in PATH — install from github.com/graykode/abtop"
+	if got != want {
+		t.Errorf("status message = %q, want %q", got, want)
+	}
+}
+
+// TestUpdate_AKey_AbtopFound_ReturnsExecCmd verifies that pressing 'a' when abtop is
+// found in PATH returns a non-nil tea.ExecProcess cmd.
+func TestUpdate_AKey_AbtopFound_ReturnsExecCmd(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix executable permissions")
+	}
+	dir := t.TempDir()
+	abtopPath := filepath.Join(dir, "abtop")
+	if err := os.WriteFile(abtopPath, []byte{}, 0755); err != nil {
+		t.Fatalf("create fake abtop: %v", err)
+	}
+	t.Setenv("PATH", fmt.Sprintf("%s%c%s", dir, os.PathListSeparator, os.Getenv("PATH")))
+
+	m := New(30, ProjectInfo{}, "", nil)
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	if cmd == nil {
+		t.Error("expected non-nil cmd (tea.ExecProcess) when abtop is found in PATH")
 	}
 }
