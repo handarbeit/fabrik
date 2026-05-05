@@ -1341,7 +1341,7 @@ func TestPoll_CruiseValidateComplete_NoRepeatDeepFetch(t *testing.T) {
 // seedTestCache creates a CacheImpl bootstrapped with one item (PVTI_001, owner/repo#1, "Research").
 func seedTestCache(t *testing.T, client *mockGitHubClient) *boardcache.CacheImpl {
 	t.Helper()
-	cache := boardcache.NewCacheImpl(client, func(format string, args ...any) {})
+	cache := boardcache.NewCacheImpl(client, itemstate.NewStore(nil), func(format string, args ...any) {})
 	board := &gh.ProjectBoard{
 		ProjectID: "PVT_test",
 		Items: []gh.ProjectItem{
@@ -1505,7 +1505,7 @@ func TestRunReconciliationLoop_SkipsWhenProjectIDEmpty(t *testing.T) {
 		},
 	}
 	// Cache with no Bootstrap call — ProjectID() returns "".
-	cache := boardcache.NewCacheImpl(client, func(format string, args ...any) {})
+	cache := boardcache.NewCacheImpl(client, itemstate.NewStore(nil), func(format string, args ...any) {})
 	eng := testEngine(client, &mockClaudeInvoker{})
 
 	ctx, cancel := context.WithCancel(context.Background())

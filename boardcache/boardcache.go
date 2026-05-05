@@ -224,21 +224,26 @@ type CacheImpl struct {
 }
 
 // NewCacheImpl creates an empty cache backed by fallback for misses.
-func NewCacheImpl(fallback ReadClient, logFn func(format string, args ...any)) *CacheImpl {
+// store must be the shared *itemstate.Store owned by the engine — passing nil panics.
+func NewCacheImpl(fallback ReadClient, store *itemstate.Store, logFn func(format string, args ...any)) *CacheImpl {
+	if store == nil {
+		panic("boardcache.NewCacheImpl: store must not be nil")
+	}
 	return &CacheImpl{
 		checkRuns:       make(map[string][]gh.CheckRun),
 		linkedPRs:       make(map[string]*gh.PRDetails),
 		prNumToKey:      make(map[string]string),
 		localDeltaAt:    make(map[string]time.Time),
 		recentMissCache: make(map[string]time.Time),
-		store:           itemstate.NewStore(nil),
+		store:           store,
 		fallback:        fallback,
 		logFn:           logFn,
 	}
 }
 
 // Bootstrap populates the cache wholesale from a freshly-fetched board.
-// Called once at engine startup before the first dispatch cycle.
+// Must be called before any engine mutations flow through the shared store —
+// Reset wipes all state including engine-side fields (Lock, Worker, StageState).
 func (c *CacheImpl) Bootstrap(board *gh.ProjectBoard) {
 	// Reset Store atomically — clears all prior item state and indexes.
 	c.store.Reset(board.Items)

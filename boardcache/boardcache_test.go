@@ -182,7 +182,7 @@ func testSetLinkedPR(c *CacheImpl, repo string, issNum, prNum int) {
 
 func seedCache(t *testing.T) *CacheImpl {
 	t.Helper()
-	c := NewCacheImpl(&mockClient{}, nopLog)
+	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
 	board := &gh.ProjectBoard{
 		ProjectID: "PID",
 		Title:     "Test Board",
@@ -230,7 +230,7 @@ func TestFetchProjectBoardFallsBackWhenEmpty(t *testing.T) {
 	mc := &mockClient{projectBoardResult: &gh.ProjectBoard{
 		ProjectID: "PID", Items: []gh.ProjectItem{{Number: 5, Repo: "o/r"}},
 	}}
-	c := NewCacheImpl(mc, nopLog)
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
 	board, err := c.FetchProjectBoard("o", "r", 1, "organization")
 	if err != nil {
 		t.Fatalf("FetchProjectBoard: %v", err)
@@ -255,7 +255,7 @@ func TestFetchItemDetailsFallbackPopulatesCache(t *testing.T) {
 			},
 		},
 	}
-	c := NewCacheImpl(mc, nopLog)
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
 	board := &gh.ProjectBoard{
 		ProjectID: "PID", Title: "T", OwnerType: "organization",
 		Items: []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"}},
@@ -651,7 +651,7 @@ func TestDeltaProjectsV2ItemEdited(t *testing.T) {
 
 func TestFetchCheckRunsFallback(t *testing.T) {
 	mc := &mockClient{checkRunsResult: []gh.CheckRun{{ID: 42, Name: "test", Status: "completed", Conclusion: "success"}}}
-	c := NewCacheImpl(mc, nopLog)
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
 
 	runs, err := c.FetchCheckRuns("owner", "repo", "sha_xyz")
 	if err != nil {
@@ -694,7 +694,7 @@ func TestFetchLabelsFromCache(t *testing.T) {
 
 func TestFetchLabelsFallbackOnMiss(t *testing.T) {
 	mc := &mockClient{labelsResult: []string{"foo"}}
-	c := NewCacheImpl(mc, nopLog)
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
 	// No bootstrap — empty cache.
 	labels, err := c.FetchLabels("owner", "repo", 99)
 	if err != nil {
@@ -717,7 +717,7 @@ func TestReconcileReplacesShallowData(t *testing.T) {
 	logFn := func(format string, args ...any) {
 		logBuf.WriteString(format)
 	}
-	c := NewCacheImpl(&mockClient{}, logFn)
+	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), logFn)
 	c.Bootstrap(&gh.ProjectBoard{
 		ProjectID: "PID", Title: "T", OwnerType: "organization",
 		Items: []gh.ProjectItem{
@@ -775,7 +775,7 @@ func TestReconcileLinkageDriftInvalidatesDeepCache(t *testing.T) {
 			LinkedPRNumber: 502,
 		},
 	}
-	c := NewCacheImpl(mc, nopLog)
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
 	c.Bootstrap(&gh.ProjectBoard{
 		ProjectID: "PID", Title: "T", OwnerType: "organization",
 		Items: []gh.ProjectItem{
@@ -932,7 +932,7 @@ func TestFetchProjectBoardFallsThroughWhenPaused(t *testing.T) {
 	mc := &mockClient{projectBoardResult: &gh.ProjectBoard{
 		ProjectID: "PID2", Items: []gh.ProjectItem{{Number: 42, Repo: "o/r"}},
 	}}
-	c := NewCacheImpl(mc, nopLog)
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
 	c.Bootstrap(&gh.ProjectBoard{
 		ProjectID: "PID", Title: "T", OwnerType: "organization",
 		Items: []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"}},
@@ -951,7 +951,7 @@ func TestFetchProjectBoardFallsThroughWhenPaused(t *testing.T) {
 
 func TestFetchLabelsFallsThroughWhenPaused(t *testing.T) {
 	mc := &mockClient{labelsResult: []string{"live-label"}}
-	c := NewCacheImpl(mc, nopLog)
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
 	c.Bootstrap(&gh.ProjectBoard{
 		ProjectID: "PID", Title: "T", OwnerType: "organization",
 		Items: []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Labels: []string{"cached-label"}}},
@@ -972,7 +972,7 @@ func TestFetchLabelsFallsThroughWhenPaused(t *testing.T) {
 
 func TestFetchCheckRunsFallsThroughWhenPaused(t *testing.T) {
 	mc := &mockClient{checkRunsResult: []gh.CheckRun{{ID: 99, Name: "live", Status: "completed", Conclusion: "success"}}}
-	c := NewCacheImpl(mc, nopLog)
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
 	// Pre-populate cache check runs so we can verify the paused path bypasses them.
 	c.mu.Lock()
 	c.checkRuns["sha_x"] = []gh.CheckRun{{ID: 1, Name: "cached"}}
@@ -1108,7 +1108,7 @@ func TestProjectIDReturnsBootstrappedID(t *testing.T) {
 }
 
 func TestProjectIDReturnsEmptyBeforeBootstrap(t *testing.T) {
-	c := NewCacheImpl(&mockClient{}, nopLog)
+	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
 	if got := c.ProjectID(); got != "" {
 		t.Errorf("want empty string before bootstrap, got %q", got)
 	}
@@ -1121,7 +1121,7 @@ func TestProjectIDReturnsEmptyBeforeBootstrap(t *testing.T) {
 // seedCacheWithStalePRLink seeds a cache with item #1 at LinkedPRNumber=0 and deep-fetched.
 func seedCacheWithStalePRLink(t *testing.T, mc *mockClient) *CacheImpl {
 	t.Helper()
-	c := NewCacheImpl(mc, nopLog)
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
 	board := &gh.ProjectBoard{
 		ProjectID: "PID", Title: "T", OwnerType: "organization",
 		Items: []gh.ProjectItem{
@@ -1377,7 +1377,7 @@ func TestAutoHealPullRequestDelta(t *testing.T) {
 // seedCacheWithStalePRLink variant accepting a custom logFn for log-capture tests.
 func seedCacheWithStalePRLink2(t *testing.T, logFn func(string, ...any)) *CacheImpl {
 	t.Helper()
-	c := NewCacheImpl(&mockClient{}, logFn)
+	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), logFn)
 	board := &gh.ProjectBoard{
 		ProjectID: "PID", Title: "T", OwnerType: "organization",
 		Items: []gh.ProjectItem{

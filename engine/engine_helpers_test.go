@@ -50,7 +50,7 @@ func testEngine(client *mockGitHubClient, claude *mockClaudeInvoker) *Engine {
 func testEngineWithCache(client *mockGitHubClient, claude *mockClaudeInvoker) (*Engine, *boardcache.CacheImpl) {
 	eng := testEngine(client, claude)
 
-	cache := boardcache.NewCacheImpl(client, func(string, ...any) {})
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
 	cache.Bootstrap(&gh.ProjectBoard{
 		ProjectID: "PVT_1",
 		Title:     "Test Board",

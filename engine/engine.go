@@ -117,13 +117,14 @@ func New(cfg Config) (*Engine, error) {
 	}
 	claudeWaitDelay = cfg.ClaudeWaitDelay
 	worktreeRoot := filepath.Join(fabrikDir, ".fabrik", "worktrees")
+	sharedStore := itemstate.NewStore(nil)
 	eng := &Engine{
 		cfg:                  cfg,
 		client:               gh.NewClient(cfg.Token),
 		claude:               &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},
 		worktreeManagers:     make(map[string]*WorktreeManager),
 		fabrikDir:            fabrikDir,
-		store:        itemstate.NewStore(nil),
+		store:        sharedStore,
 		mayNeedWork:  make(map[string]bool),
 		seededRepos:  make(map[string]bool),
 		sem:          make(chan struct{}, cfg.MaxConcurrent),
@@ -152,10 +153,12 @@ func New(cfg Config) (*Engine, error) {
 
 	// Initialize the read client: GitHubAdapter (pass-through) unless the in-memory
 	// board cache is enabled, in which case CacheImpl is created (bootstrap happens in Run()).
+	// The shared store is passed to CacheImpl so all mutations — engine-side and
+	// webhook-delta-side — flow through one Store instance.
 	adapter := boardcache.NewGitHubAdapter(eng.client)
 	if cfg.BoardCacheMode == "in-memory" {
 		cacheLogFn := func(format string, args ...any) { eng.logf(0, "cache", format, args...) }
-		eng.readClient = boardcache.NewCacheImpl(adapter, cacheLogFn)
+		eng.readClient = boardcache.NewCacheImpl(adapter, sharedStore, cacheLogFn)
 	} else {
 		eng.readClient = adapter
 	}
