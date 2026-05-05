@@ -15,7 +15,9 @@ import (
 // TestRemoveEditingLabel_NonTransientNoRetry verifies that a non-transient error
 // logs a warning immediately (no retry) and returns after exactly one attempt.
 func TestRemoveEditingLabel_NonTransientNoRetry(t *testing.T) {
+	orig := editingLabelRetryDelay
 	editingLabelRetryDelay = 0
+	t.Cleanup(func() { editingLabelRetryDelay = orig })
 	var calls int
 	client := &mockGitHubClient{
 		removeLabelFromIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
@@ -36,7 +38,9 @@ func TestRemoveEditingLabel_NonTransientNoRetry(t *testing.T) {
 // TestRemoveEditingLabel_TransientRetrySucceeds verifies that a transient error
 // retried twice followed by success results in exactly 3 calls and no panic.
 func TestRemoveEditingLabel_TransientRetrySucceeds(t *testing.T) {
+	orig := editingLabelRetryDelay
 	editingLabelRetryDelay = 0
+	t.Cleanup(func() { editingLabelRetryDelay = orig })
 	var calls int
 	client := &mockGitHubClient{
 		removeLabelFromIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
@@ -60,7 +64,9 @@ func TestRemoveEditingLabel_TransientRetrySucceeds(t *testing.T) {
 // TestRemoveEditingLabel_TransientExhausted verifies that 3 consecutive transient
 // errors exhaust the retry budget: exactly 3 calls are made and no panic occurs.
 func TestRemoveEditingLabel_TransientExhausted(t *testing.T) {
+	orig := editingLabelRetryDelay
 	editingLabelRetryDelay = 0
+	t.Cleanup(func() { editingLabelRetryDelay = orig })
 	var calls int
 	client := &mockGitHubClient{
 		removeLabelFromIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
@@ -81,7 +87,9 @@ func TestRemoveEditingLabel_TransientExhausted(t *testing.T) {
 // TestRemoveEditingLabel_ErrNotFoundSilent verifies that ErrNotFound is silently
 // ignored (label already absent) — exactly one call, no panic.
 func TestRemoveEditingLabel_ErrNotFoundSilent(t *testing.T) {
+	orig := editingLabelRetryDelay
 	editingLabelRetryDelay = 0
+	t.Cleanup(func() { editingLabelRetryDelay = orig })
 	var calls int
 	client := &mockGitHubClient{
 		removeLabelFromIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
