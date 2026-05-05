@@ -897,11 +897,8 @@ func (s *Store) Reset(items []gh.ProjectItem) {
 
 	s.mu.Unlock()
 
-	if len(notifications) == 0 {
-		return
-	}
-	obs := s.captureObservers()
 	for _, n := range notifications {
+		obs := s.captureObservers()
 		s.notify(obs, n.change, n.snap)
 	}
 }
