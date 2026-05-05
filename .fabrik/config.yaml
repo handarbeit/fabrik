@@ -23,6 +23,10 @@ max_concurrent: 5
 # max_retries: 3
 # yolo: false
 auto_upgrade: true
+# Re-enabled 2026-05-05 after the cache-coherency cluster landed (Phase 3-A through 3-H,
+# plus #537 single-Store unification). Verification per docs/cache-refactor/04-phase4-audit.md §6.
+webhooks: true
+board_cache_mode: in-memory
 tui: true
 terminal: ghostty
 # debug_output: false
