@@ -430,6 +430,21 @@ type WorkerPIDSet struct {
 func (WorkerPIDSet) isMutation() {}
 func (m WorkerPIDSet) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// WorkerEntered sets a non-nil Worker placeholder immediately before the goroutine is
+// launched. This makes snap.Worker() != nil an effective dispatch guard from the instant
+// the goroutine is started, closing the window between goroutine launch and
+// LocalLockAcquired (which fires only after the GitHub lock label is acquired).
+// LocalLockAcquired overwrites the placeholder with full details.
+type WorkerEntered struct {
+	Repo      string
+	Number    int
+	StageName string
+	StartedAt time.Time
+}
+
+func (WorkerEntered) isMutation() {}
+func (m WorkerEntered) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // WorkerExited clears the Worker handle when a Claude invocation finishes.
 type WorkerExited struct {
 	Repo   string
