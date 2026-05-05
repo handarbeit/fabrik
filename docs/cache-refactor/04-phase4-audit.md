@@ -16,9 +16,9 @@ The reactive plumbing (wakeCh, mayNeedWork set, TUI events) is wired correctly t
 - **F2**: Finish migrating `boardcache.linkedPRs` and `prNumToKey` into Store. (TODO present in code at `boardcache/boardcache.go:207`.)
 - **F3**: Decide and document the two-store split — either unify or make the split explicit with API guards (so `e.store.Get(...).Status()` can't return a stale-by-design empty value).
 - **F4**: Audit `boardcache.checkRuns` retention strategy; the comment at `boardcache/boardcache.go:200-203` notes Store silently drops `CheckRunCompleted` for unlinked SHAs and CacheImpl mirrors them. Validate this is correct or move check-run state into Store-level negative-cache + per-item.
-- **F5**: Tighten observer-registration discipline so future observers can't be registered on only one store when they should fire from both.
+- **F5**: ~~Tighten observer-registration discipline~~ — **Superseded by F3** (PR #538, issue #537). F3 unified `engine.store` and `cacheImpl.store` into a single shared `*itemstate.Store` instance. With only one store, there is no "which store" registration choice to make; the mis-registration risk is structurally eliminated.
 
-Severity: F1 is a duplication that's likely benign in practice (both maps tracked together) but it's the exact "double source of truth" that motivated this refactor and should be eliminated. F2/F3/F4 are technical-debt cleanups. F5 is preventive.
+Severity: F1 is a duplication that's likely benign in practice (both maps tracked together) but it's the exact "double source of truth" that motivated this refactor and should be eliminated. F2/F3/F4 are technical-debt cleanups. F5 is superseded (resolved structurally by F3's store unification).
 
 The architecture is in a much, much better place than 24 hours ago. The remaining items don't block re-enabling the cache+webhooks in `dev` config — they're follow-up improvements.
 
@@ -109,7 +109,7 @@ Phase 5 issue F3 captures the choice.
 
 The mayNeedWork drain pattern (`engine/poll.go:823-831`) atomically swaps the map with a fresh empty one under lock — no missed events, no double-processing.
 
-Issue: this dual-store registration is **not enforced**. A future observer that should fire from both stores could be accidentally registered on only one. No type-system or test guard against this. Phase 5 F5.
+**F5 superseded:** The dual-store registration concern captured as Phase 5 F5 is no longer applicable. F3 (PR #538, issue #537) unified `engine.store` and `cacheImpl.store` into a single shared `*itemstate.Store` instance. All observers now register on `e.store`, which is the same instance held by `cacheImpl`. There is no "which store" choice; the mis-registration risk is structurally eliminated.
 
 ## §3 Per-reader audit findings
 
@@ -205,13 +205,11 @@ Worker liveness label reads need fixing either way: route to cacheImpl.
 
 **Tests:** existing tests cover the dual-track flow. Add a test for "CheckRunCompleted arrives before linkage; subsequent linkage causes pre-linkage runs to be replayed."
 
-### F5 — observer-registration discipline
+### F5 — observer-registration discipline (**Superseded by F3**)
 
-**Problem:** `engine/poll.go:310-360` correctly registers each observer on the right store(s), but the choice is hand-coded per observer. Future observers could be mis-registered (e.g. only on `engine.store` when they should fire from both).
+**Superseded:** F3 (PR #538, issue #537) unified `engine.store` and `cacheImpl.store` into a single shared `*itemstate.Store` instance — engine creates it and passes it to `NewCacheImpl`. With only one `Store`, the registration discipline concern is structurally eliminated: there is no "which store" choice to make. Every observer subscribes once on `e.store` (see `engine/poll.go:305-345`).
 
-**Fix:** introduce an `Observer.RequiredStores()` method (or struct field) that documents which stores the observer needs to subscribe to; have the registration site enforce it. Or: introduce a wrapper "broadcast subscribe" that registers on every Store the engine knows about, with per-observer filters via Change flags.
-
-**Tests:** test that an observer with `Stores: [Engine, Cache]` is correctly invoked from both; with `Stores: [Engine]` not invoked from cache.
+The proposed fixes (`Observer.RequiredStores()` method, broadcast-subscribe wrapper) were **not adopted** and are now dead architecture given the single-Store reality. No implementation required.
 
 ## §5 What did NOT need fixing
 
