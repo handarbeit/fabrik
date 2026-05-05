@@ -3,6 +3,7 @@ package github
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -1085,4 +1086,85 @@ func (c *Client) FetchProjectItem(owner, repo string, issueNumber int) (*Project
 		pi.Assignees = append(pi.Assignees, a.Login)
 	}
 	return pi, nil
+}
+
+// LookupIssueProjectItem fetches the project-item node ID and current Status for
+// a given issue, filtered to the specified projectID. It queries
+// repository.issue.projectItems (first: 20), iterating nodes until one whose
+// project.id matches projectID is found. Returns ("", "", nil) when the issue is
+// not in the specified project. Returns an error on any GraphQL failure.
+//
+// Note: first:20 covers issues in up to 20 GitHub Projects. Issues belonging to
+// more than 20 projects are not supported (vanishingly rare in practice).
+func (c *Client) LookupIssueProjectItem(projectID, repo string, issueNumber int) (itemID string, status string, err error) {
+	slash := strings.LastIndex(repo, "/")
+	if slash < 0 {
+		return "", "", fmt.Errorf("LookupIssueProjectItem: invalid repo %q (expected owner/name)", repo)
+	}
+	owner := repo[:slash]
+	repoName := repo[slash+1:]
+
+	query := `
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    issue(number: $number) {
+      projectItems(first: 20) {
+        nodes {
+          id
+          project {
+            id
+          }
+          fieldValueByName(name: "Status") {
+            ... on ProjectV2ItemFieldSingleSelectValue {
+              name
+            }
+          }
+        }
+      }
+    }
+  }
+}`
+
+	vars := map[string]interface{}{
+		"owner":  owner,
+		"repo":   repoName,
+		"number": issueNumber,
+	}
+
+	var result struct {
+		Data struct {
+			Repository *struct {
+				Issue *struct {
+					ProjectItems struct {
+						Nodes []struct {
+							ID      string `json:"id"`
+							Project struct {
+								ID string `json:"id"`
+							} `json:"project"`
+							FieldValueByName *struct {
+								Name string `json:"name"`
+							} `json:"fieldValueByName"`
+						} `json:"nodes"`
+					} `json:"projectItems"`
+				} `json:"issue"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+
+	if err := c.graphqlRequest(query, vars, &result); err != nil {
+		return "", "", fmt.Errorf("LookupIssueProjectItem for %s#%d: %w", repo, issueNumber, err)
+	}
+	if result.Data.Repository == nil || result.Data.Repository.Issue == nil {
+		return "", "", nil
+	}
+	for _, node := range result.Data.Repository.Issue.ProjectItems.Nodes {
+		if node.Project.ID == projectID {
+			st := ""
+			if node.FieldValueByName != nil {
+				st = node.FieldValueByName.Name
+			}
+			return node.ID, st, nil
+		}
+	}
+	return "", "", nil
 }

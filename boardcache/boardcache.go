@@ -820,6 +820,36 @@ func (c *CacheImpl) ApplyStatusBatch(updates map[string]string) {
 	}
 }
 
+// RegisterItemID sets the project-item node ID for an existing cache entry that
+// was added without one (e.g., via issues.opened before projects_v2_item.created).
+// No-op when key is not in the Store or itemID is empty. Safe for concurrent use.
+func (c *CacheImpl) RegisterItemID(key, itemID string) {
+	if itemID == "" {
+		return
+	}
+	repo, number, ok := parseItemKey(key)
+	if !ok {
+		c.logFn("[cache] RegisterItemID: key %q invalid — no-op\n", key)
+		return
+	}
+	// Guard: do not create a phantom Store entry for a key that was never bootstrapped.
+	if _, err := c.store.Get(repo, number); err != nil {
+		return
+	}
+	_, changes, _ := c.store.Apply(itemstate.ItemIDRegistered{
+		Repo:   repo,
+		Number: number,
+		ItemID: itemID,
+	})
+	if len(changes) == 0 {
+		return
+	}
+	now := time.Now()
+	c.mu.Lock()
+	c.localDeltaAt[key] = now
+	c.mu.Unlock()
+}
+
 // GetItemID returns the project-item node ID (PVTI_...) for the given cache key.
 // Returns ("", false) when the key is not present or has no ItemID.
 func (c *CacheImpl) GetItemID(key string) (string, bool) {

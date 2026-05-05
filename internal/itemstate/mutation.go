@@ -173,6 +173,20 @@ func (m CheckRunCompleted) itemKey() string {
 
 // ---- Self-mutations (write-through from fabrik's own GitHub mutations) ----
 
+// ItemIDRegistered sets the project-item node ID for an existing Store entry that
+// was added without one (e.g., via issues.opened before projects_v2_item.created).
+// Returns ChangeFlags(0) — the itemIDToKey reverse index is updated via
+// reflect.DeepEqual detection in applySingleItem regardless of the returned flags.
+// Dispatch is triggered only by the subsequent UpdateItemStatus call, not by this.
+type ItemIDRegistered struct {
+	Repo   string
+	Number int
+	ItemID string
+}
+
+func (ItemIDRegistered) isMutation() {}
+func (m ItemIDRegistered) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // LocalStatusUpdated is applied after fabrik calls UpdateProjectItemStatus.
 type LocalStatusUpdated struct {
 	Repo      string
