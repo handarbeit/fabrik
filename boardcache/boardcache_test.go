@@ -1702,6 +1702,106 @@ func TestConcurrentWriteThrough(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// RegisterItemID
+// ---------------------------------------------------------------------------
+
+func TestRegisterItemID(t *testing.T) {
+	t.Run("populates itemID and GetItemID returns it", func(t *testing.T) {
+		// Bootstrap an item without an itemID (simulates issues.opened path).
+		c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
+		board := &gh.ProjectBoard{
+			ProjectID: "PID", OwnerType: "organization",
+			Items: []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"}},
+		}
+		c.Bootstrap(board)
+
+		key := ItemKey("owner/repo", 1)
+		// Item exists but has no itemID.
+		if id, ok := c.GetItemID(key); ok || id != "" {
+			t.Fatalf("expected no itemID before RegisterItemID, got %q ok=%v", id, ok)
+		}
+
+		c.RegisterItemID(key, "PVTI_new")
+
+		id, ok := c.GetItemID(key)
+		if !ok {
+			t.Fatal("GetItemID returned !ok after RegisterItemID")
+		}
+		if id != "PVTI_new" {
+			t.Errorf("GetItemID = %q, want %q", id, "PVTI_new")
+		}
+	})
+
+	t.Run("other fields remain intact after RegisterItemID", func(t *testing.T) {
+		c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
+		board := &gh.ProjectBoard{
+			ProjectID: "PID", OwnerType: "organization",
+			Items: []gh.ProjectItem{
+				{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research", Labels: []string{"bug"}},
+			},
+		}
+		c.Bootstrap(board)
+
+		key := ItemKey("owner/repo", 1)
+		c.RegisterItemID(key, "PVTI_xyz")
+
+		s := testGetState(t, c, "owner/repo", 1)
+		if s.ItemID != "PVTI_xyz" {
+			t.Errorf("ItemID = %q, want %q", s.ItemID, "PVTI_xyz")
+		}
+		if s.Status != "Research" {
+			t.Errorf("Status = %q, want %q", s.Status, "Research")
+		}
+		if len(s.Labels) != 1 || s.Labels[0] != "bug" {
+			t.Errorf("Labels = %v, want [bug]", s.Labels)
+		}
+	})
+
+	t.Run("no-op when key not in Store", func(t *testing.T) {
+		c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
+		// Empty cache — no Bootstrap.
+		key := ItemKey("owner/repo", 99)
+		c.RegisterItemID(key, "PVTI_phantom") // must not create phantom entry
+		if _, ok := c.GetItemID(key); ok {
+			t.Error("RegisterItemID created a phantom Store entry for an unknown key")
+		}
+	})
+
+	t.Run("idempotent when called twice with same value", func(t *testing.T) {
+		c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
+		board := &gh.ProjectBoard{
+			ProjectID: "PID", OwnerType: "organization",
+			Items: []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"}},
+		}
+		c.Bootstrap(board)
+		key := ItemKey("owner/repo", 1)
+
+		c.RegisterItemID(key, "PVTI_same")
+		c.RegisterItemID(key, "PVTI_same") // second call — same value
+
+		id, ok := c.GetItemID(key)
+		if !ok || id != "PVTI_same" {
+			t.Errorf("after double call, GetItemID = %q ok=%v, want PVTI_same true", id, ok)
+		}
+	})
+
+	t.Run("no-op when itemID is empty", func(t *testing.T) {
+		c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
+		board := &gh.ProjectBoard{
+			ProjectID: "PID", OwnerType: "organization",
+			Items: []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"}},
+		}
+		c.Bootstrap(board)
+		key := ItemKey("owner/repo", 1)
+
+		c.RegisterItemID(key, "") // empty — must be ignored
+		if id, ok := c.GetItemID(key); ok || id != "" {
+			t.Errorf("RegisterItemID(\"\") should be no-op, got %q ok=%v", id, ok)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
 // Additional payload builders for Phase 3-D delta coverage tests
 // ---------------------------------------------------------------------------
 
