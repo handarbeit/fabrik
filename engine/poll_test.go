@@ -1825,8 +1825,21 @@ func TestNoCooldownForInFlightItem(t *testing.T) {
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
 
-	// Simulate a worker still running from a prior poll cycle.
-	eng.inFlight.Store("owner/repo#77", false)
+	// Register the mayNeedWork observer so that WorkerEntered (which fires WorkerChanged,
+	// now in wakeChFlags) populates cycleSet for the upcoming poll. Without this,
+	// the pre-filter would skip the item because it's already in the store with no
+	// new activity, and the test's FetchItemDetails assertion would be vacuously wrong.
+	mwnObs := newMayNeedWorkObserver(&eng.mayNeedWorkMu, &eng.mayNeedWork)
+	eng.store.Subscribe(mwnObs)
+
+	// Simulate a worker still running from a prior poll cycle via the Store.
+	// WorkerChanged (now in wakeChFlags) fires the observer, adding #77 to mayNeedWork.
+	eng.store.Apply(itemstate.WorkerEntered{
+		Repo:      "owner/repo",
+		Number:    77,
+		StageName: "Research",
+		StartedAt: time.Now(),
+	})
 
 	if _, err := eng.poll(context.Background()); err != nil {
 		t.Fatalf("poll: %v", err)

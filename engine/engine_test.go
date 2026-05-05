@@ -390,17 +390,14 @@ func TestPollNonBlockingAtCapacity(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for _, item := range items {
-			item := item
+		for range items {
 			select {
 			case e.sem <- struct{}{}:
-				e.inFlight.Store(item.Number, struct{}{})
 				e.wg.Add(1)
 				dispatched++
 				go func() {
 					defer e.wg.Done()
 					defer func() { <-e.sem }()
-					defer e.inFlight.Delete(item.Number)
 				}()
 			default:
 				// skipped — at capacity
@@ -430,16 +427,27 @@ func TestIdleCountNotIncrementedWhileWorkersInFlight(t *testing.T) {
 			AutoUpgrade:   true,
 			MaxConcurrent: 1,
 		},
-		sem: make(chan struct{}, 1),
+		sem:   make(chan struct{}, 1),
+		store: itemstate.NewStore(nil),
 	}
 
-	// Simulate an in-flight worker by populating the map directly.
-	e.inFlight.Store(42, struct{}{})
+	// Simulate an in-flight worker via the Store (mirrors the actual dispatch path).
+	e.store.Apply(itemstate.WorkerEntered{
+		Repo:      "owner/repo",
+		Number:    42,
+		StageName: "test",
+		StartedAt: time.Now(),
+	})
 
 	// With dispatched==0 and an in-flight worker, idleCount must not increment.
 	dispatched := 0
 	var hasInFlight bool
-	e.inFlight.Range(func(_, _ any) bool { hasInFlight = true; return false })
+	for _, snap := range e.store.All() {
+		if snap.Worker() != nil {
+			hasInFlight = true
+			break
+		}
+	}
 
 	if hasInFlight {
 		e.idleCount = 0
