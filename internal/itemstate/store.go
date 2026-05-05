@@ -328,6 +328,14 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.Comments = append(item.Comments, v.Comment)
 		return CommentsChanged
 
+	case ItemIDRegistered:
+		if item.ItemID != v.ItemID {
+			item.ItemID = v.ItemID
+		}
+		// Return 0: updateIndexes fires via reflect.DeepEqual detection when ItemID changed.
+		// Dispatch is triggered only by the subsequent UpdateItemStatus call.
+		return 0
+
 	case LocalLockAcquired:
 		item.Lock = &LockState{
 			HolderUser: v.User,
