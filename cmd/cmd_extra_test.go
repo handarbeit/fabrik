@@ -127,6 +127,9 @@ func (m *testGitHubUpgradeClient) FetchPRsForSHA(owner, repo, sha string) ([]int
 func (m *testGitHubUpgradeClient) FetchProjectItem(owner, repo string, issueNumber int) (*gh.ProjectItem, error) {
 	return nil, nil
 }
+func (m *testGitHubUpgradeClient) LookupIssueProjectItem(projectID, repo string, issueNumber int) (string, string, error) {
+	return "", "", nil
+}
 
 // ── upgrade ───────────────────────────────────────────────────────────────────
 
