@@ -299,6 +299,23 @@ type PRHeadSHAUpdated struct {
 func (PRHeadSHAUpdated) isMutation() {}
 func (m PRHeadSHAUpdated) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// PRDetailsUpdated sets LinkedPR.Title, State, Merged, and Draft for the given item.
+// These four fields were previously stored only in CacheImpl.linkedPRs; this mutation
+// moves them into the Store so PR-detail changes are observable via LinkedPRChanged.
+// PRNumber also ensures the prToKey reverse index is current.
+type PRDetailsUpdated struct {
+	Repo     string
+	Number   int // issue number
+	PRNumber int
+	Title    string
+	State    string
+	Merged   bool
+	Draft    bool
+}
+
+func (PRDetailsUpdated) isMutation() {}
+func (m PRDetailsUpdated) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // ReviewThreadCommentAdded appends an inline review-thread comment to an item's
 // LinkedPR.ThreadComments, idempotent by NodeID. Uses the ISSUE number (not the
 // PR number) as the routing key. Used by boardcache delta handlers.
