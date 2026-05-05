@@ -165,15 +165,10 @@ func testIsDeepFetched(c *CacheImpl, repo string, number int) bool {
 	return !snap.State().LastDeepFetchAt.IsZero()
 }
 
-// testSetLinkedPR sets up item (repo, issNum) as linked to prNum in both the
-// Store and c.prNumToKey, so delta handlers can route events by PR number.
+// testSetLinkedPR sets up item (repo, issNum) as linked to prNum in the Store
+// so delta handlers can route events by PR number via store.GetByPRKey.
 func testSetLinkedPR(c *CacheImpl, repo string, issNum, prNum int) {
-	pk := prKey(repo, prNum)
-	ik := itemKey(repo, issNum)
 	c.store.Apply(itemstate.PRHeadSHAUpdated{Repo: repo, Number: issNum, LinkedPRNum: prNum})
-	c.mu.Lock()
-	c.prNumToKey[pk] = ik
-	c.mu.Unlock()
 }
 
 // ---------------------------------------------------------------------------
@@ -465,6 +460,7 @@ func pullRequestPayloadJSON(action, repo string, prNum int, sha, state string, m
 	p := pullRequestPayload{Action: action}
 	p.Repository.FullName = repo
 	p.PullRequest.Number = prNum
+	p.PullRequest.Title = "Test PR Title"
 	p.PullRequest.Head.SHA = sha
 	p.PullRequest.State = state
 	p.PullRequest.Merged = merged
@@ -481,20 +477,15 @@ func TestDeltaPullRequestOpened(t *testing.T) {
 	payload := pullRequestPayloadJSON("opened", "owner/repo", 42, "sha123", "open", false, false)
 	c.ApplyDelta("pull_request", payload)
 
-	c.mu.RLock()
-	pr, ok := c.linkedPRs[prKey("owner/repo", 42)]
-	c.mu.RUnlock()
-
-	if !ok || pr == nil {
-		t.Error("expected linkedPRs entry for PR #42")
-	}
-	if pr != nil && pr.HeadSHA != "sha123" {
-		t.Errorf("expected HeadSHA sha123, got %q", pr.HeadSHA)
-	}
-	// Verify SHA is indexed in Store by checking item's LinkedPR.HeadSHA.
 	s := testGetState(t, c, "owner/repo", 1)
-	if s.LinkedPR == nil || s.LinkedPR.HeadSHA != "sha123" {
-		t.Errorf("expected item #1's LinkedPR.HeadSHA=sha123, got %v", s.LinkedPR)
+	if s.LinkedPR == nil || s.LinkedPR.Number != 42 {
+		t.Fatalf("expected LinkedPR.Number=42 after pull_request.opened, got %v", s.LinkedPR)
+	}
+	if s.LinkedPR.HeadSHA != "sha123" {
+		t.Errorf("expected HeadSHA sha123, got %q", s.LinkedPR.HeadSHA)
+	}
+	if s.LinkedPR.Title == "" {
+		t.Errorf("expected non-empty LinkedPR.Title after pull_request.opened")
 	}
 }
 

@@ -347,22 +347,19 @@ func TestFetchItemDetailsBackfillsPrNumToKey(t *testing.T) {
 		t.Fatalf("want LinkedPRNumber 42, got %d", item.LinkedPRNumber)
 	}
 
-	// prNumToKey must be backfilled so PR deltas can route by PR number.
-	pk := prKey("owner/repo", 42)
-	c.mu.RLock()
-	issKey, found := c.prNumToKey[pk]
-	c.mu.RUnlock()
+	// prToKey in Store must be backfilled so PR deltas can route by PR number.
+	issKey, found := c.store.GetByPRKey("owner/repo", 42)
 	if !found {
-		t.Errorf("prNumToKey not backfilled after FetchItemDetails with LinkedPRNumber=42")
+		t.Errorf("store.prToKey not backfilled after FetchItemDetails with LinkedPRNumber=42")
 	}
 	wantKey := itemKey("owner/repo", 1)
 	if issKey != wantKey {
-		t.Errorf("prNumToKey: want %q, got %q", wantKey, issKey)
+		t.Errorf("store.prToKey: want %q, got %q", wantKey, issKey)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// 12. Reconcile item removal cleans up stale prNumToKey entries.
+// 12. Reconcile item removal cleans up stale prToKey entries.
 // ---------------------------------------------------------------------------
 
 func TestReconcileRemoveCleansUpPrNumToKey(t *testing.T) {
@@ -370,12 +367,8 @@ func TestReconcileRemoveCleansUpPrNumToKey(t *testing.T) {
 	// Establish PR linkage for item #1 → PR #10.
 	testSetLinkedPR(c, "owner/repo", 1, 10)
 
-	pk := prKey("owner/repo", 10)
-	c.mu.RLock()
-	_, beforeReconcile := c.prNumToKey[pk]
-	c.mu.RUnlock()
-	if !beforeReconcile {
-		t.Fatalf("prNumToKey for PR #10 not set before Reconcile")
+	if _, found := c.store.GetByPRKey("owner/repo", 10); !found {
+		t.Fatalf("store.prToKey for PR #10 not set before Reconcile")
 	}
 
 	// Reconcile with a board that no longer contains item #1.
@@ -386,11 +379,8 @@ func TestReconcileRemoveCleansUpPrNumToKey(t *testing.T) {
 		},
 	})
 
-	c.mu.RLock()
-	_, afterReconcile := c.prNumToKey[pk]
-	c.mu.RUnlock()
-	if afterReconcile {
-		t.Errorf("prNumToKey entry for PR #10 survived after item #1 removed by Reconcile")
+	if _, found := c.store.GetByPRKey("owner/repo", 10); found {
+		t.Errorf("store.prToKey entry for PR #10 survived after item #1 removed by Reconcile")
 	}
 }
 
@@ -503,11 +493,8 @@ func TestIssuesDeletedCleansPRLinkage(t *testing.T) {
 
 	c.ApplyDelta("issues", issuesActionPayloadJSON("deleted", "owner/repo", 1))
 
-	c.mu.RLock()
-	_, found := c.prNumToKey[prKey("owner/repo", 42)]
-	c.mu.RUnlock()
-	if found {
-		t.Error("prNumToKey entry for PR #42 should have been removed after issues.deleted")
+	if _, found := c.store.GetByPRKey("owner/repo", 42); found {
+		t.Error("store.prToKey entry for PR #42 should have been removed after issues.deleted")
 	}
 }
 
@@ -616,32 +603,28 @@ func TestIssuesClosedFallbackFetch(t *testing.T) {
 func TestPullRequestReadyForReview(t *testing.T) {
 	c := seedCache(t)
 	testSetLinkedPR(c, "owner/repo", 1, 42)
-	// Establish linkedPRs entry with Draft=true.
+	// Establish PR details with Draft=true via opened delta.
 	c.ApplyDelta("pull_request", pullRequestPayloadJSON("opened", "owner/repo", 42, "sha1", "open", false, true))
 
 	c.ApplyDelta("pull_request", pullRequestDraftPayloadJSON("ready_for_review", "owner/repo", 42))
 
-	c.mu.RLock()
-	pr := c.linkedPRs[prKey("owner/repo", 42)]
-	c.mu.RUnlock()
-	if pr == nil || pr.Draft {
-		t.Errorf("want Draft=false after ready_for_review; pr=%v", pr)
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.LinkedPR == nil || s.LinkedPR.Draft {
+		t.Errorf("want Draft=false after ready_for_review; LinkedPR=%v", s.LinkedPR)
 	}
 }
 
 func TestPullRequestConvertedToDraft(t *testing.T) {
 	c := seedCache(t)
 	testSetLinkedPR(c, "owner/repo", 1, 42)
-	// Establish linkedPRs entry with Draft=false.
+	// Establish PR details with Draft=false via opened delta.
 	c.ApplyDelta("pull_request", pullRequestPayloadJSON("opened", "owner/repo", 42, "sha1", "open", false, false))
 
 	c.ApplyDelta("pull_request", pullRequestDraftPayloadJSON("converted_to_draft", "owner/repo", 42))
 
-	c.mu.RLock()
-	pr := c.linkedPRs[prKey("owner/repo", 42)]
-	c.mu.RUnlock()
-	if pr == nil || !pr.Draft {
-		t.Errorf("want Draft=true after converted_to_draft; pr=%v", pr)
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.LinkedPR == nil || !s.LinkedPR.Draft {
+		t.Errorf("want Draft=true after converted_to_draft; LinkedPR=%v", s.LinkedPR)
 	}
 }
 
@@ -840,18 +823,11 @@ func TestProjectsV2ItemArchived(t *testing.T) {
 func TestProjectsV2ItemDeletedCleansPRLinkage(t *testing.T) {
 	c := seedCache(t)
 	testSetLinkedPR(c, "owner/repo", 1, 42)
-	c.mu.Lock()
-	c.linkedPRs[prKey("owner/repo", 42)] = &gh.PRDetails{Number: 42}
-	c.mu.Unlock()
 
 	c.ApplyDelta("projects_v2_item", projectsV2ItemRemovedPayloadJSON("deleted", "PVTI_001"))
 
-	c.mu.RLock()
-	_, pkFound := c.prNumToKey[prKey("owner/repo", 42)]
-	_, lrFound := c.linkedPRs[prKey("owner/repo", 42)]
-	c.mu.RUnlock()
-	if pkFound || lrFound {
-		t.Error("prNumToKey and linkedPRs entries for PR #42 should be cleaned up after item deletion")
+	if _, found := c.store.GetByPRKey("owner/repo", 42); found {
+		t.Error("store.prToKey entry for PR #42 should be cleaned up after item deletion")
 	}
 }
 
