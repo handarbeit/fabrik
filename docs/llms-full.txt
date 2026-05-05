@@ -1472,6 +1472,7 @@ Claude sessions, a scrollable History pane with completed jobs, and a status bar
 | `n` / `N` | Cancel quit or clear-all confirmation dialogs |
 | `c` | Delete selected history entry |
 | `C` | Clear all history (with confirmation) |
+| `a` | Open abtop AI session monitor (shows token usage, context window, rate limits for all Claude sessions) |
 | `w` | Wake: reset idle backoff and poll immediately |
 | `?` | Toggle help panel (keybindings and labels reference) |
 | `q` | Quit |
@@ -3098,7 +3099,7 @@ Per-item engine state previously stored in `Engine.mu`-protected maps has been m
 
 Per-item state lives in a single shared `*itemstate.Store` instance. The Engine creates it (`sharedStore := itemstate.NewStore(nil)` in `New()`), assigns it to `eng.store`, and passes it to `boardcache.NewCacheImpl`. All mutations — engine-side (locks, invocations, stage state) and webhook/reconcile-side (status, labels, comments, linked-PR fields) — flow through `sharedStore.Apply`. `NewWithDeps` (test factory) constructs its own independent store because it never creates a `CacheImpl`.
 
-Note: `CacheImpl` retains two private maps that are **not** in `itemstate.Store`: `linkedPRs map[string]*gh.PRDetails` (full PR detail objects for `ReadClient` interface serving) and `checkRuns map[string][]gh.CheckRun` (check-run lists keyed by commit SHA). These are cache-layer storage for board reads; the `itemstate.Store` holds the per-item *state fields* derived from PR mutations (`LinkedPRState`: head SHA, mergeable, reviews, HasHadChecks, etc.).
+Note: `CacheImpl` retains one private map that is **not** in `itemstate.Store`: `checkRuns map[string][]gh.CheckRun` (check-run lists keyed by commit SHA). The previously separate `linkedPRs map[string]*gh.PRDetails` and `prNumToKey map[string]string` maps were removed in Phase 5 F2 (issue #562) and migrated into `itemstate.Store`: PR detail fields (Title, State, Merged, Draft) are now stored in `LinkedPRState` via `PRDetailsUpdated` mutations, and the PR→issue reverse-index is `store.prToKey` (populated by `PRHeadSHAUpdated` / `PRDetailsUpdated`; queried via `store.GetByPRKey`).
 
 Field ownership is by **mutation type**, not by store identity: a reader calling `store.Get("owner/repo", 1)` receives a Snapshot with all field groups populated regardless of which code path applied each mutation. This is the single-Store design originally proposed in ADR-036 and completed in Phase 5 F3 (issue #537).
 
@@ -3113,6 +3114,8 @@ The following fields are stored in `ItemState` / `LinkedPRState` and accessed ex
 | `LastDeepFetchFailureAt` | `DeepFetchFailed{At: ...}` (set); `ItemDeepFetched` (clears) | `snap.State().LastDeepFetchFailureAt` | `e.deepFetchFailureTime[iKey]` |
 | `LinkedPR.HasHadChecks` | `PRChecksObserved` (REST path); `CheckRunCompleted` (webhook path) | `snap.LinkedPR().HasHadChecks` | `e.prHasHadChecks[iKey]` |
 | `LinkedPR.CIMergePendingSince` | `CIMergePendingStarted{At: ...}` (set); `CIMergePendingCleared` (clear) | `snap.LinkedPR().CIMergePendingSince` | `e.ciMergePendingSince[iKey]` |
+| `LinkedPR.Number`, `LinkedPR.HeadSHA` | `PRHeadSHAUpdated{LinkedPRNum, SHA}` | `snap.LinkedPR().Number`, `snap.LinkedPR().HeadSHA` | CacheImpl: `c.prNumToKey[pk]` (routing), `c.linkedPRs[pk].HeadSHA` (Phase 5 F2: migrated in #562) |
+| `LinkedPR.Title`, `LinkedPR.State`, `LinkedPR.Merged`, `LinkedPR.Draft` | `PRDetailsUpdated{Title, State, Merged, Draft}` | `snap.LinkedPR().Title`, etc. | CacheImpl: `c.linkedPRs[pk].*` (Phase 5 F2: migrated in #562) |
 | `StageState.LastAttemptAt` | `StageAttempted{StageName, At}` (set); `StageLastAttemptCleared` (clear) | `snap.LastAttemptAt(stageName)` | `e.processedSet[stageKey]` (invocation timestamp) |
 | `ItemState.CooldownAt` | `CooldownRecorded{Reason, Until}` | `snap.CooldownAt(reason)` | `e.processedSet[stageKey]` (cooldown timestamp; same key, different semantic — now split) |
 | `StageState.Attempts` | `StageRetryIncremented` (increment); `StageRetryCleared` (reset) | `snap.Attempts(stageName)` | `e.retryCount[stageKey]` |
@@ -3231,7 +3234,7 @@ There is exactly one `*itemstate.Store` instance. `Engine.New()` creates it and 
 
 Because both categories write to the same store, any `store.Get(...)` returns a Snapshot with all field groups populated. `CacheImpl.Subscribe` is a thin wrapper over `c.store.Subscribe`; since `c.store` is the shared store, engine code should call `e.store.Subscribe` directly rather than going through `cacheImpl.Subscribe` to avoid double-registration.
 
-**Boundary note**: `CacheImpl` also holds `linkedPRs map[string]*gh.PRDetails` and `checkRuns map[string][]gh.CheckRun` as private maps **outside** `itemstate.Store`. These serve the `ReadClient` interface (`GetLinkedPR`, `GetCheckRuns`) and are populated by CacheImpl's delta/reconcile logic. They are cache-layer storage, not engine state — `snap.LinkedPR()` returns `LinkedPRState` (head SHA, mergeable, reviews, HasHadChecks, etc.), not the full `gh.PRDetails` object from `linkedPRs`.
+**Boundary note**: `CacheImpl` holds `checkRuns map[string][]gh.CheckRun` as a private map **outside** `itemstate.Store` (F4, tracked separately). This serves the `ReadClient` interface and is populated by CacheImpl's delta/reconcile logic. The previously separate `linkedPRs` map was removed in Phase 5 F2 (issue #562) — PR detail fields (Title, State, Merged, Draft) are now in `LinkedPRState` via `PRDetailsUpdated`, and `FetchLinkedPR` reconstructs `*gh.PRDetails` from the Store snapshot.
 
 #### ChangeFlags and Their Trigger Mutations
 
@@ -3585,8 +3588,8 @@ All handlers hold the write lock for their mutation only. No lock is held during
 | `issues` | `opened` | Create item from payload | `IssueOpened` (builds item from full webhook payload; no API call) | Item appears in next `FetchProjectBoard` |
 | `issues` | `closed` | Fallback if missing; update state | `IssueClosed` | `IsClosed=true`; `itemMayNeedWork` skips unless cleanup stage |
 | `issues` | `reopened` | Fallback if missing; update state | `IssueReopened` | `IsClosed=false`; re-enters dispatch |
-| `issues` | `transferred` | Remove item | `store.Remove` + `prNumToKey` cleanup | Item gone from next board fetch |
-| `issues` | `deleted` | Remove item | `store.Remove` + `prNumToKey` cleanup | Item gone from next board fetch |
+| `issues` | `transferred` | Remove item | `store.Remove` (cleans `prToKey` index automatically) | Item gone from next board fetch |
+| `issues` | `deleted` | Remove item | `store.Remove` (cleans `prToKey` index automatically) | Item gone from next board fetch |
 | `issues` | `edited` | Fallback if missing; update title+body | `IssueEdited` | `Title`/`Body` updated; next FetchItemDetails serves updated body |
 | `issues` | `assigned` | Fallback if missing; update assignees | `IssueAssigneesUpdated` (full list replace) | `Assignees` updated |
 | `issues` | `unassigned` | Fallback if missing; update assignees | `IssueAssigneesUpdated` (full list replace) | `Assignees` updated |
@@ -3595,22 +3598,22 @@ All handlers hold the write lock for their mutation only. No lock is held during
 | `issues` | `milestoned`, `demilestoned`, `locked`, `unlocked`, `pinned`, `unpinned` | No-op | — | No engine state depends on these fields |
 | `issue_comment` | `created` | Guard: item must be in Store; append comment | `IssueCommentCreated` | Comment appears in next FetchItemDetails; poll woken for comment processing |
 | `issue_comment` | `edited`, `deleted` | No-op | — | Reaction-based state machine reads reactions not bodies; next deep-fetch heals |
-| `pull_request` | `opened`, `closed`, `reopened`, `synchronize` | Store PR details; resolve closing issue; update SHA | `PRHeadSHAUpdated`; `DeepFetchInvalidated` on auto-heal | `shaToKey` updated; CI gate can evaluate this SHA |
-| `pull_request` | `ready_for_review` | Update `linkedPRs[pk].Draft = false` | CacheImpl-local only (Draft not in Store per ADR 037) | PR no longer draft; review bots can see it |
-| `pull_request` | `converted_to_draft` | Update `linkedPRs[pk].Draft = true` | CacheImpl-local only | PR back to draft |
-| `pull_request` | `review_requested` | Look up linked issue via `prNumToKey`; replace reviewer list | `PRReviewRequested` (full list replace) | `LinkedPRReviewRequests` updated; review gate re-evaluated |
-| `pull_request` | `review_request_removed` | Look up linked issue via `prNumToKey`; remove one reviewer | `PRReviewRequestRemoved` (remove by login) | `LinkedPRReviewRequests` updated |
+| `pull_request` | `opened`, `closed`, `reopened`, `synchronize` | Store PR details; resolve closing issue; update SHA | `PRHeadSHAUpdated` + `PRDetailsUpdated`; `DeepFetchInvalidated` on auto-heal | `shaToKey` + `prToKey` updated; CI gate can evaluate this SHA; `LinkedPR.Title/State/Merged/Draft` populated |
+| `pull_request` | `ready_for_review` | Look up linked issue via `store.GetByPRKey`; read current `LinkedPR` snapshot; apply `Draft=false` | `PRDetailsUpdated{Draft: false}` (preserves Title/State/Merged from snapshot) | `LinkedPR.Draft=false`; PR no longer draft; review bots can see it |
+| `pull_request` | `converted_to_draft` | Look up linked issue via `store.GetByPRKey`; read current `LinkedPR` snapshot; apply `Draft=true` | `PRDetailsUpdated{Draft: true}` (preserves Title/State/Merged from snapshot) | `LinkedPR.Draft=true`; PR back to draft |
+| `pull_request` | `review_requested` | Look up linked issue via `store.GetByPRKey`; replace reviewer list | `PRReviewRequested` (full list replace) | `LinkedPRReviewRequests` updated; review gate re-evaluated |
+| `pull_request` | `review_request_removed` | Look up linked issue via `store.GetByPRKey`; remove one reviewer | `PRReviewRequestRemoved` (remove by login) | `LinkedPRReviewRequests` updated |
 | `pull_request` | `labeled`, `unlabeled`, `assigned`, `unassigned`, `edited` | No-op | — | PR-level labels/assignees/metadata not tracked; `Closes #N` linkage healed by next Reconcile |
-| `pull_request_review` | `submitted` | Route via `prNumToKey`; auto-heal if missing | `PRReviewSubmitted`; `PRHeadSHAUpdated` + `DeepFetchInvalidated` on auto-heal | `LinkedPRReviews` updated; review gate re-evaluated |
+| `pull_request_review` | `submitted` | Route via `store.GetByPRKey`; auto-heal if missing | `PRReviewSubmitted`; `PRHeadSHAUpdated` + `DeepFetchInvalidated` on auto-heal | `LinkedPRReviews` updated; review gate re-evaluated |
 | `pull_request_review` | `edited`, `dismissed` | No-op | — | Review state captured at submit; edits/dismissals don't affect Fabrik's approval tracking |
-| `pull_request_review_comment` | `created` | Route via `prNumToKey`; auto-heal if missing | `ReviewThreadCommentAdded`; `DeepFetchInvalidated` | Thread comment appears; review reinvoke path can see it |
+| `pull_request_review_comment` | `created` | Route via `store.GetByPRKey`; auto-heal if missing | `ReviewThreadCommentAdded`; `DeepFetchInvalidated` | Thread comment appears; review reinvoke path can see it |
 | `pull_request_review_comment` | `edited`, `deleted` | No-op | — | Thread comment content not decision-relevant; next deep-fetch heals |
 | `check_run` | `completed` | Upsert in `checkRuns[sha]`; index via `shaToKey`; auto-heal if SHA unknown | `CheckRunCompleted`; `PRHeadSHAUpdated` + `DeepFetchInvalidated` on auto-heal | CI gate evaluates conclusion; `LinkedPRCheckRuns` updated |
 | `check_run` | `created`, `rerequested`, `requested_action` | No-op | — | Only terminal state (`completed`) matters for CI gate |
 | `check_suite` | `completed`, `requested`, `rerequested` | No-op | — | Check suites are coarse aggregates; individual runs tracked via `check_run.completed` |
 | `projects_v2_item` | `created` | Call `FetchItemDetails` by `content_node_id`; apply as new item | `IssueOpened` | Item appears in board; triggers dispatch on next poll |
 | `projects_v2_item` | `edited` | Update `Status` via `itemIDToKey` reverse lookup | `ProjectV2ItemEdited` | `Status` updated; stage selection uses new column |
-| `projects_v2_item` | `deleted`, `archived` | Remove item; clean up `prNumToKey` | `store.Remove` + `prNumToKey`/`linkedPRs` cleanup | Item gone from next board fetch |
+| `projects_v2_item` | `deleted`, `archived` | Remove item | `store.RemoveByItemID` (cleans `prToKey` index automatically) | Item gone from next board fetch |
 | `projects_v2_item` | `restored` | No-op | — | Next Reconcile re-adds the item from the full board snapshot |
 | `projects_v2_item` | `reordered` | No-op | — | Column order not modeled in Fabrik's cache or engine |
 
@@ -3623,7 +3626,7 @@ All handlers hold the write lock for their mutation only. No lock is held during
 | `FetchProjectBoard` | Returns reconstructed board from `items` map; falls back to GitHub when cache is empty |
 | `FetchItemDetails` | Serves deep fields from cache when `deepFetched[key]` is true; falls back to GitHub and populates on miss; logs `[cache] miss for #N — fetching from GitHub` |
 | `FetchCheckRuns` | Serves from `checkRuns[sha]`; falls back and caches on miss |
-| `FetchLinkedPR` | Looks up `linkedPRs[prKey]` via `item.LinkedPRNumber`; falls back on miss |
+| `FetchLinkedPR` | Cache hit when `snap.LinkedPR().Title != ""` (set by `PRDetailsUpdated`); reconstructs `*gh.PRDetails` from Store snapshot; falls back to GitHub REST on miss and applies `PRDetailsUpdated` write-back |
 | `FetchPRMergeable` | Always delegates to fallback (mergeability changes without webhook events) |
 | `FetchPRMergeableState` | Always delegates to fallback |
 | `FetchLabels` | Serves from `item.Labels` when item is cached; falls back on miss |
