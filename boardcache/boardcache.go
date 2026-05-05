@@ -439,6 +439,23 @@ func (c *CacheImpl) IsPaused() bool {
 	return c.paused
 }
 
+// IsBootstrapped returns true when the cache has been populated with at least
+// one item — i.e., Bootstrap has been called. Called outside c.mu per the
+// "NEVER hold mu while calling Store" invariant.
+func (c *CacheImpl) IsBootstrapped() bool {
+	return len(c.store.All()) > 0
+}
+
+// IsItemDeepFetched returns true when the cache holds deep-fetched details for
+// the given item (LastDeepFetchAt is non-zero). Called outside c.mu.
+func (c *CacheImpl) IsItemDeepFetched(repo string, number int) bool {
+	snap, err := c.store.Get(repo, number)
+	if err != nil {
+		return false
+	}
+	return !snap.State().LastDeepFetchAt.IsZero()
+}
+
 // Subscribe registers an observer on the underlying Store. The returned func
 // unsubscribes the observer. Safe to call from any goroutine.
 func (c *CacheImpl) Subscribe(o itemstate.Observer) func() {
