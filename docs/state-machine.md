@@ -1073,7 +1073,9 @@ Per-item engine state previously stored in `Engine.mu`-protected maps has been m
 
 ### 9.6 Engine Internal State (itemstate.Store)
 
-Per-item engine state lives in `Engine.store *itemstate.Store`, an engine-owned store separate from `CacheImpl`'s internal store. It is initialized with `itemstate.NewStore(nil)` in both `New()` and `NewWithDeps()`. Unification into a single store is deferred to a later phase (see ADR-036).
+Per-item state lives in a single shared `*itemstate.Store` instance. The Engine creates it (`sharedStore := itemstate.NewStore(nil)` in `New()`), assigns it to `eng.store`, and passes it to `boardcache.NewCacheImpl`. All mutations — engine-side (locks, invocations, stage state) and webhook/reconcile-side (status, labels, comments, linked PR) — flow through `sharedStore.Apply`. `NewWithDeps` (test factory) constructs its own independent store because it never creates a `CacheImpl`.
+
+Field ownership is by **mutation type**, not by store identity: a reader calling `store.Get("owner/repo", 1)` receives a Snapshot with all field groups populated regardless of which code path applied each mutation. This is the single-Store design originally proposed in ADR-036 and completed in Phase 5 F3 (issue #537).
 
 The following fields are stored in `ItemState` / `LinkedPRState` and accessed exclusively through the store:
 
@@ -1096,9 +1098,9 @@ The following fields are stored in `ItemState` / `LinkedPRState` and accessed ex
 | `StageState.ProcessedComments` | `CommentProcessed{CommentID, At}` | `snap.CommentProcessed(commentID)` | `e.processedSet["…comment-ID"]` |
 | `Worker` (`*WorkerHandle`) | `LocalLockAcquired{Worker: &WorkerHandle{...}}` (set); `WorkerPIDSet{PID}` (update PID); `WorkerHeartbeat{At}` (update `LastSignAt`); `WorkerExited` (clear) | `snap.Worker()` | N/A (new in Phase 3-G) |
 
-**`mayNeedWork` (Phase 3-H):** The map `e.mayNeedWork map[string]bool` (protected by `e.mayNeedWorkMu`) is the Phase 3-H replacement for the removed `e.seenUpdatedAt` map. It is populated by the `mayNeedWorkObserver` registered on both `engine.store` and `cacheImpl.store` whenever a Change includes any `wakeChFlag`. Each poll cycle drains the map into a local `cycleSet` — only items in the set (or with bypass conditions) proceed to deep-fetch evaluation. See section 9.8 for the full observer pattern description.
+**`mayNeedWork` (Phase 3-H):** The map `e.mayNeedWork map[string]bool` (protected by `e.mayNeedWorkMu`) is the Phase 3-H replacement for the removed `e.seenUpdatedAt` map. It is populated by the `mayNeedWorkObserver` registered once on the shared store whenever a Change includes any `wakeChFlag`. All mutation types — engine-side and webhook/reconcile-side — now fire through the same observer registration. Each poll cycle drains the map into a local `cycleSet` — only items in the set (or with bypass conditions) proceed to deep-fetch evaluation. See section 9.8 for the full observer pattern description.
 
-See also: ADR-036 (`adrs/036-reactive-cache-single-owner.md`) for the full rationale and migration plan. ADR-038 (`adrs/038-dual-store-observer-wiring.md`) documents the dual-store registration contract.
+See also: ADR-036 (`adrs/036-reactive-cache-single-owner.md`) for the full rationale and the Phase 5 F3 addendum documenting the unification. ADR-038 (`adrs/038-dual-store-observer-wiring.md`) documents the historical dual-store registration design (superseded by the unification).
 
 ### 9.7 Worker Liveness (Heartbeat and Stale-Lock Recovery)
 
@@ -1191,35 +1193,37 @@ The lock label is now removed by four paths (previously two):
 
 Phase 3-H wires `itemstate.Store.Subscribe` into the engine to replace polling-based "has this item changed?" detection with a reactive change-feed. The key concept: after every non-no-op `Store.Apply` call, registered observers are called synchronously (outside the store's write-lock) with a `Change` value indicating which fields changed and for which item.
 
-#### Two-Store Architecture
+#### Single-Store Architecture (Phase 5 F3)
 
-There are two separate `*itemstate.Store` instances:
+There is exactly one `*itemstate.Store` instance. `Engine.New()` creates it and passes it to `boardcache.NewCacheImpl`. Both `eng.store` and `cacheImpl.store` reference the same pointer. Field ownership is by mutation type:
 
-| Store | Owner | Contains |
-|-------|-------|----------|
-| `engine.store` | `Engine` struct | Locks, invocations, stage state, cooldowns, deep-fetch tracking, workers |
-| `cacheImpl.store` | `CacheImpl` (private field) | GitHub board state: status, labels, comments, linked PR, check runs |
+| Mutation category | Mutation types | ChangeFlags produced |
+|-------------------|----------------|----------------------|
+| Engine-side | `LocalLockAcquired`, `LocalLockReleased`, `InvocationRecorded`, `StageAttempted`, `CooldownRecorded`, `WorkerPIDSet`, `WorkerHeartbeat`, `WorkerExited`, `PRChecksObserved`, … | `LockChanged`, `InvocationChanged`, `StageStateChanged`, `CooldownChanged`, `WorkerChanged`, `LinkedPRChanged` (partial) |
+| Webhook/reconcile-side | `IssueLabeled`, `IssueUnlabeled`, `LocalStatusUpdated`, `IssueCommentCreated`, `PRReviewSubmitted`, `CheckRunCompleted`, … | `LabelsChanged`, `StatusChanged`, `CommentsChanged`, `LinkedPRChanged`, `AssigneesChanged`, … |
 
-Observers that care about changes from both stores **must be registered on both**. A new `CacheImpl.Subscribe(o itemstate.Observer) func()` method exposes `cacheImpl.store.Subscribe` to engine code.
+Because both categories write to the same store, any `store.Get(...)` returns a Snapshot with all field groups populated. `CacheImpl.Subscribe` is a thin wrapper over `c.store.Subscribe`; since `c.store` is the shared store, engine code should call `e.store.Subscribe` directly rather than going through `cacheImpl.Subscribe` to avoid double-registration.
 
-#### ChangeFlags and Which Store Produces Them
+#### ChangeFlags and Their Trigger Mutations
 
-| ChangeFlag | Source store | Trigger mutations |
-|------------|-------------|-------------------|
-| `StatusChanged` | `cacheImpl.store` | `LocalStatusUpdated` (reconcile, board fetch), `projects_v2_item` webhook delta |
-| `LabelsChanged` | `cacheImpl.store` | `IssueLabeled`, `IssueUnlabeled`, `LocalLabelAdded`, `LocalLabelRemoved` |
-| `LockChanged` | `engine.store` | `LocalLockAcquired`, `LocalLockReleased` |
-| `LinkedPRChanged` | `cacheImpl.store` | PR review, check runs, head SHA updates |
-| `CommentsChanged` | `cacheImpl.store` | `IssueCommentCreated`, `LocalCommentAdded` |
-| `InvocationChanged` | `engine.store` | `InvocationRecorded` (token usage, completed, blocked, IsComment) |
-| `StageStateChanged` | `engine.store` | `StageAttempted`, `StageRetryIncremented`, `ReviewCycleIncremented`, etc. |
-| `WorkerChanged` | `engine.store` | `LocalLockAcquired` (with Worker), `WorkerPIDSet`, `WorkerHeartbeat`, `WorkerExited` |
-| `CooldownChanged` | `engine.store` | `CooldownRecorded` |
-| `DeepFetchChanged` | `engine.store` | `DeepFetchFailed`, `ItemDeepFetched` |
+All ChangeFlags are produced by the single shared store. Field ownership is by mutation type (see table above).
+
+| ChangeFlag | Mutation category | Trigger mutations |
+|------------|-------------------|-------------------|
+| `StatusChanged` | Webhook/reconcile | `LocalStatusUpdated` (reconcile, board fetch), `projects_v2_item` webhook delta |
+| `LabelsChanged` | Webhook/reconcile | `IssueLabeled`, `IssueUnlabeled`, `LocalLabelAdded`, `LocalLabelRemoved` |
+| `LockChanged` | Engine-side | `LocalLockAcquired`, `LocalLockReleased` |
+| `LinkedPRChanged` | Both | PR review, check runs, head SHA updates (webhook); `PRChecksObserved`, `CIMergePendingStarted/Cleared` (engine) |
+| `CommentsChanged` | Webhook/reconcile | `IssueCommentCreated`, `LocalCommentAdded` |
+| `InvocationChanged` | Engine-side | `InvocationRecorded` (token usage, completed, blocked, IsComment) |
+| `StageStateChanged` | Engine-side | `StageAttempted`, `StageRetryIncremented`, `ReviewCycleIncremented`, etc. |
+| `WorkerChanged` | Engine-side | `LocalLockAcquired` (with Worker), `WorkerPIDSet`, `WorkerHeartbeat`, `WorkerExited` |
+| `CooldownChanged` | Engine-side | `CooldownRecorded` |
+| `DeepFetchChanged` | Engine-side | `DeepFetchFailed`, `ItemDeepFetched` |
 
 #### wakeChFlags: Which Changes Wake the Poll Loop
 
-The `wakeChObserver` is registered on **both** stores. It fires a non-blocking send on `wakeCh` when `Change.Fields & wakeChFlags != 0`:
+The `wakeChObserver` is registered once on the shared store. It fires a non-blocking send on `wakeCh` when `Change.Fields & wakeChFlags != 0`:
 
 ```
 wakeChFlags = StatusChanged | LabelsChanged | CommentsChanged | LockChanged | LinkedPRChanged
@@ -1227,16 +1231,16 @@ wakeChFlags = StatusChanged | LabelsChanged | CommentsChanged | LockChanged | Li
 
 Changes that do NOT fire `wakeCh`: `InvocationChanged`, `StageStateChanged`, `WorkerChanged`, `CooldownChanged`, `AssigneesChanged`, `TitleBodyChanged`, `StateChanged`, `BlockedByChanged`, `DeepFetchChanged`, `BaseBranchChanged`.
 
-The unconditional `wakeCh <- struct{}{}` send that previously lived in the webhook handler has been removed. The observer path is the sole mechanism.
+The unconditional `wakeCh <- struct{}{}` send that previously lived in the webhook handler has been removed. The observer path is the sole mechanism. Because all mutation types flow through the single shared store, the single `wakeChObserver` registration is sufficient — no per-source registration is needed.
 
 #### Registered Observers and Where They Live
 
 | Observer | Registered on | Fires when | Emits |
 |----------|--------------|-----------|-------|
-| `wakeChObserver` | both stores | `Change.Fields & wakeChFlags != 0` | `wakeCh <- struct{}{}` (non-blocking) |
-| `mayNeedWorkObserver` | both stores | `Change.Fields & wakeChFlags != 0` | adds `repo#number` to `e.mayNeedWork` |
-| `InvocationObserver` | `engine.store` only | `Change.Fields & InvocationChanged != 0` | `tui.JobCompletedEvent` |
-| `StageChangeObserver` | `cacheImpl.store` only | `Change.Fields & StatusChanged != 0` | `tui.StageChangedEvent` |
+| `wakeChObserver` | shared store (once) | `Change.Fields & wakeChFlags != 0` | `wakeCh <- struct{}{}` (non-blocking) |
+| `mayNeedWorkObserver` | shared store (once) | `Change.Fields & wakeChFlags != 0` | adds `repo#number` to `e.mayNeedWork` |
+| `InvocationObserver` | shared store | `Change.Fields & InvocationChanged != 0` | `tui.JobCompletedEvent` |
+| `StageChangeObserver` | shared store | `Change.Fields & StatusChanged != 0` | `tui.StageChangedEvent` |
 | Pause observer (closure) | `CacheImpl.SubscribePause` | `Pause()` / `Resume()` | `tui.WebhookStatusEvent` |
 
 All observers are registered in `Engine.Run()` after extracting `cacheImpl`. Their unsubscribe funcs are deferred so observers are cleaned up when `Run()` returns.
@@ -1277,10 +1281,10 @@ In addition to `Store.Subscribe`, `CacheImpl` exposes `SubscribePause(fn func(bo
 
 - **I1 (Single fire)**: Each `Store.Apply` call produces at most one `Change` per observer registration. Observers are called in registration order.
 - **I2 (Outside lock)**: Observers are called after the store's write-lock is released. Observers may safely call `store.Get` or other read methods without deadlock.
-- **I3 (Dual registration)**: Any observer that cares about `wakeChFlags` spanning both stores must be registered on both `engine.store` and `cacheImpl.store`. Registering on only one store silently drops events from the other. See ADR-038.
+- **I3 (Single registration)**: Each observer is registered exactly once on the shared store. Since `engine.store` and `cacheImpl.store` are the same pointer, calling both `e.store.Subscribe(obs)` and `cacheImpl.Subscribe(obs)` registers the observer twice, causing every Apply to fire it twice. Register once via `e.store.Subscribe`. See ADR-038 for the historical dual-store design that this replaced.
 - **I4 (Non-blocking wakeCh)**: The `wakeChObserver` always uses a non-blocking send. A full `wakeCh` (capacity 1) means a poll is already pending; dropping the signal is correct (burst coalescence).
 
-**References:** [ADR-038: Dual-Store Observer Wiring](../adrs/038-dual-store-observer-wiring.md), [ADR-036: Reactive Cache Single-Owner](../adrs/036-reactive-cache-single-owner.md).
+**References:** [ADR-036: Reactive Cache Single-Owner](../adrs/036-reactive-cache-single-owner.md), [ADR-038: Observer Wiring (historical dual-store design)](../adrs/038-dual-store-observer-wiring.md).
 
 ---
 
