@@ -25,7 +25,7 @@ type FallbackFetcher interface {
 // Apply; all reads flow through Get or Observer subscriptions.
 //
 // Concurrency model:
-//   - mu guards items, shaToKey, and itemIDToKey.
+//   - mu guards items, shaToKey, itemIDToKey, and pendingCheckRuns.
 //   - observerMu guards the observers slice independently to avoid holding mu
 //     while calling observer callbacks (which may themselves call Apply or Get).
 //   - Apply holds mu for the write, captures the observer slice under observerMu,
@@ -38,6 +38,12 @@ type Store struct {
 	shaToKey    map[string]string // LinkedPR.HeadSHA → itemKey
 	itemIDToKey map[string]string // ItemState.ItemID → itemKey
 	prToKey     map[string]string // prKeyFor(repo, prNum) → itemKey
+
+	// pendingCheckRuns buffers check runs for SHAs not yet linked to any item.
+	// Populated by applyCheckRunCompleted when shaToKey has no entry for the SHA.
+	// Drained into LinkedPR.CheckRuns by the PRHeadSHAUpdated handler when linkage
+	// is established. Cleared by Reset to ensure a clean slate after Bootstrap.
+	pendingCheckRuns map[string][]gh.CheckRun // SHA → buffered pre-linkage runs
 
 	observerMu sync.RWMutex
 	observers  []observerEntry
@@ -82,12 +88,13 @@ func NewStore(fallback FallbackFetcher, opts ...StoreOption) *Store {
 		opt(o)
 	}
 	return &Store{
-		items:       make(map[string]*ItemState),
-		shaToKey:    make(map[string]string),
-		itemIDToKey: make(map[string]string),
-		prToKey:     make(map[string]string),
-		fallback:    fallback,
-		logger:      o.logger,
+		items:            make(map[string]*ItemState),
+		shaToKey:         make(map[string]string),
+		itemIDToKey:      make(map[string]string),
+		prToKey:          make(map[string]string),
+		pendingCheckRuns: make(map[string][]gh.CheckRun),
+		fallback:         fallback,
+		logger:           o.logger,
 	}
 }
 
@@ -520,7 +527,27 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 			item.LinkedPR.Number = v.LinkedPRNum
 		}
 		item.LinkedPR.HeadSHA = v.SHA
-		return LinkedPRChanged
+		flags := ChangeFlags(LinkedPRChanged)
+		// Drain any pre-linkage check runs buffered for this SHA.
+		if pending, ok := s.pendingCheckRuns[v.SHA]; ok && len(pending) > 0 {
+			for _, run := range pending {
+				found := false
+				for i, existing := range item.LinkedPR.CheckRuns {
+					if existing.ID == run.ID {
+						item.LinkedPR.CheckRuns[i] = run
+						found = true
+						break
+					}
+				}
+				if !found {
+					item.LinkedPR.CheckRuns = append(item.LinkedPR.CheckRuns, run)
+				}
+			}
+			item.LinkedPR.HasHadChecks = true
+			delete(s.pendingCheckRuns, v.SHA)
+			flags |= CheckRunChanged
+		}
+		return flags
 
 	case PRDetailsUpdated:
 		ensureLinkedPR(item, v.PRNumber)
@@ -611,13 +638,33 @@ func (s *Store) applyProjectV2ItemEdited(v ProjectV2ItemEdited) (Snapshot, []Cha
 }
 
 // applyCheckRunCompleted routes a check run to the item whose LinkedPR.HeadSHA matches.
+// When the SHA is not yet linked to any item, the run is buffered in pendingCheckRuns
+// and a CheckRunChanged change is returned so observers can see pre-linkage arrivals.
+// The buffer is drained into the item's LinkedPR.CheckRuns when PRHeadSHAUpdated fires.
 func (s *Store) applyCheckRunCompleted(v CheckRunCompleted) (Snapshot, []Change, error) {
 	s.mu.Lock()
 	key, ok := s.shaToKey[v.SHA]
 	if !ok {
+		// SHA not yet linked — buffer the run in pendingCheckRuns by ID (upsert).
+		runs := s.pendingCheckRuns[v.SHA]
+		updated := false
+		for i, existing := range runs {
+			if existing.ID == v.Run.ID {
+				runs[i] = v.Run
+				updated = true
+				break
+			}
+		}
+		if !updated {
+			runs = append(runs, v.Run)
+		}
+		s.pendingCheckRuns[v.SHA] = runs
 		s.mu.Unlock()
-		s.logf("CheckRunCompleted: unknown SHA %s", v.SHA)
-		return Snapshot{}, nil, nil
+		s.logf("CheckRunCompleted: unknown SHA %s — buffered in pendingCheckRuns", v.SHA)
+		change := Change{Fields: CheckRunChanged}
+		obs := s.captureObservers()
+		s.notify(obs, change, Snapshot{})
+		return Snapshot{}, []Change{change}, nil
 	}
 	item := s.items[key]
 	before := newSnapshot(*item).state
@@ -901,6 +948,38 @@ func (s *Store) GetByPRKey(repo string, prNum int) (string, bool) {
 	return key, ok
 }
 
+// CheckRunsBySHA returns all check runs known for a commit SHA, combining:
+//   - runs buffered in pendingCheckRuns (pre-linkage, SHA not yet linked to any item)
+//   - runs in the linked item's LinkedPR.CheckRuns (post-linkage)
+//
+// Returns a deep copy; callers may mutate the result without affecting Store state.
+// Returns nil if no runs are known for the SHA.
+func (s *Store) CheckRunsBySHA(sha string) []gh.CheckRun {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var result []gh.CheckRun
+
+	// Pre-linkage buffer.
+	if pending, ok := s.pendingCheckRuns[sha]; ok {
+		result = append(result, pending...)
+	}
+
+	// Per-item (post-linkage) runs.
+	if key, ok := s.shaToKey[sha]; ok {
+		if item, ok := s.items[key]; ok && item.LinkedPR != nil {
+			result = append(result, item.LinkedPR.CheckRuns...)
+		}
+	}
+
+	if len(result) == 0 {
+		return nil
+	}
+	out := make([]gh.CheckRun, len(result))
+	copy(out, result)
+	return out
+}
+
 // resetNotification holds a Change and Snapshot for deferred observer dispatch.
 type resetNotification struct {
 	change Change
@@ -919,6 +998,7 @@ func (s *Store) Reset(items []gh.ProjectItem) {
 	s.shaToKey = make(map[string]string, len(items))
 	s.itemIDToKey = make(map[string]string, len(items))
 	s.prToKey = make(map[string]string, len(items))
+	s.pendingCheckRuns = make(map[string][]gh.CheckRun)
 
 	newKeys := make(map[string]bool, len(items))
 	var notifications []resetNotification
