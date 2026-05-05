@@ -159,4 +159,33 @@ func (e *Engine) runStartupCleanup() {
 	if cleaned > 0 {
 		e.logf(0, "startup", "startup cleanup: removed stale locks from %d issue(s)\n", cleaned)
 	}
+
+	// Second pass: remove stale fabrik:editing labels left by prior crashes.
+	var cleanedEditing int
+	for _, snap := range e.store.All() {
+		if snap.Worker() != nil {
+			continue
+		}
+		hasEditing := false
+		for _, l := range snap.Labels() {
+			if l == "fabrik:editing" {
+				hasEditing = true
+				break
+			}
+		}
+		if !hasEditing {
+			continue
+		}
+
+		repo := snap.Repo()
+		number := snap.Number()
+		owner, repoName := parseOwnerRepo(repo)
+
+		e.logf(number, "startup", "found stale editing label from prior crash — removing\n")
+		e.removeEditingLabel(owner, repoName, number)
+		cleanedEditing++
+	}
+	if cleanedEditing > 0 {
+		e.logf(0, "startup", "startup cleanup: removed stale editing labels from %d issue(s)\n", cleanedEditing)
+	}
 }
