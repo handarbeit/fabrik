@@ -698,13 +698,17 @@ func (c *CacheImpl) UpdateItemStatus(key, newStatus string) {
 		c.logFn("[cache] UpdateItemStatus: key %q not found — no-op\n", key)
 		return
 	}
+	// Guard: do not create a phantom Store entry for a key that was never bootstrapped.
+	if _, err := c.store.Get(repo, number); err != nil {
+		return
+	}
 	_, changes, _ := c.store.Apply(itemstate.LocalStatusUpdated{
 		Repo:      repo,
 		Number:    number,
 		NewStatus: newStatus,
 	})
 	if len(changes) == 0 {
-		// Item not found in Store or status unchanged.
+		// Status unchanged.
 		return
 	}
 	now := time.Now()
