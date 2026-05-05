@@ -1197,7 +1197,10 @@ func (e *Engine) removeEditingLabel(owner, repo string, issueNumber int) {
 			return
 		}
 		if errors.Is(err, gh.ErrNotFound) {
-			// Label already absent — treat as success.
+			// Label already absent — treat as success and sync cache.
+			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, issueNumber), "fabrik:editing")
+			}
 			return
 		}
 		if !isTransientError(err) {
@@ -1205,8 +1208,10 @@ func (e *Engine) removeEditingLabel(owner, repo string, issueNumber int) {
 			return
 		}
 		lastErr = err
-		delay := editingLabelRetryDelay << attempt
-		time.Sleep(delay)
+		if attempt < maxAttempts-1 {
+			delay := editingLabelRetryDelay << attempt
+			time.Sleep(delay)
+		}
 	}
 	e.logf(issueNumber, "warn", "could not remove editing label after %d attempts: %v\n", maxAttempts, lastErr)
 }
