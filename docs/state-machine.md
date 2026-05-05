@@ -1225,6 +1225,7 @@ All ChangeFlags are produced by the single shared store. Field ownership is by m
 | `WorkerChanged` | Engine-side | `LocalLockAcquired` (with Worker), `WorkerPIDSet`, `WorkerHeartbeat`, `WorkerExited` |
 | `CooldownChanged` | Engine-side | `CooldownRecorded` |
 | `DeepFetchChanged` | Engine-side | `DeepFetchFailed`, `ItemDeepFetched` |
+| `ItemRemoved` | Reset | `Store.Reset` for items present in the old map but absent from the new items slice |
 
 #### wakeChFlags: Which Changes Wake the Poll Loop
 
@@ -1234,7 +1235,7 @@ The `wakeChObserver` is registered once on the shared store. It fires a non-bloc
 wakeChFlags = StatusChanged | LabelsChanged | CommentsChanged | LockChanged | LinkedPRChanged
 ```
 
-Changes that do NOT fire `wakeCh`: `InvocationChanged`, `StageStateChanged`, `WorkerChanged`, `CooldownChanged`, `AssigneesChanged`, `TitleBodyChanged`, `StateChanged`, `BlockedByChanged`, `DeepFetchChanged`, `BaseBranchChanged`.
+Changes that do NOT fire `wakeCh`: `InvocationChanged`, `StageStateChanged`, `WorkerChanged`, `CooldownChanged`, `AssigneesChanged`, `TitleBodyChanged`, `StateChanged`, `BlockedByChanged`, `DeepFetchChanged`, `BaseBranchChanged`, `ItemRemoved`.
 
 The unconditional `wakeCh <- struct{}{}` send that previously lived in the webhook handler has been removed. The observer path is the sole mechanism. Because all mutation types flow through the single shared store, the single `wakeChObserver` registration is sufficient — no per-source registration is needed.
 
@@ -1284,7 +1285,7 @@ In addition to `Store.Subscribe`, `CacheImpl` exposes `SubscribePause(fn func(bo
 
 #### Invariants
 
-- **I1 (Single fire)**: Each `Store.Apply` call produces at most one `Change` per observer registration. Observers are called in registration order.
+- **I1 (Single fire)**: Each `Store.Apply` call produces at most one `Change` per observer registration. `Store.Reset` produces one `Change` per item (add, update, or removal). Observers are called in registration order.
 - **I2 (Outside lock)**: Observers are called after the store's write-lock is released. Observers may safely call `store.Get` or other read methods without deadlock.
 - **I3 (Single registration)**: Each observer is registered exactly once on the shared store. Since `engine.store` and `cacheImpl.store` are the same pointer, calling both `e.store.Subscribe(obs)` and `cacheImpl.Subscribe(obs)` registers the observer twice, causing every Apply to fire it twice. Register once via `e.store.Subscribe`. See ADR-038 for the historical dual-store design that this replaced.
 - **I4 (Non-blocking wakeCh)**: The `wakeChObserver` always uses a non-blocking send. A full `wakeCh` (capacity 1) means a poll is already pending; dropping the signal is correct (burst coalescence).
@@ -1528,6 +1529,8 @@ When `--webhooks` and `--board-cache=in-memory` are both active (the default whe
 ### D.1 Bootstrap
 
 Immediately after `wm.Start()` succeeds (webhook manager listener bound and subprocess launched), the engine calls `e.client.FetchProjectBoard(...)` directly — bypassing the cache — and passes the result to `cacheImpl.Bootstrap(board)`. Bootstrap populates `items`, `shaToKey`, and `itemIDToKey` from the full board snapshot. Deep fields (comments, linked PR data) are not populated at bootstrap; they are fetched lazily on first `FetchItemDetails` call.
+
+Bootstrap calls `Store.Reset`, which fires observer notifications for every item (one `Change` per item, with non-zero `Fields`). Observers (`wakeChObserver`, `mayNeedWorkObserver`) are registered in `Engine.Run()` **before** Bootstrap is called, so bootstrapped items are visible to the dispatch loop on the first poll cycle — no external webhook event is needed to unblock them.
 
 If the bootstrap fetch fails (e.g., transient network error), the cache starts empty and populates through fallback on the first cache miss. No data is lost; latency for the first deep-fetch is slightly higher.
 
