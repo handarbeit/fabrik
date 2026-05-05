@@ -242,6 +242,49 @@ After F2, every per-item state mutation in both the engine and boardcache flows 
 | **PR detail fields (Title, State, Merged, Draft)** | **`CacheImpl.linkedPRs` (bypass)** | **Store (`PRDetailsUpdated`)** |
 | **PR→issue routing index** | **`CacheImpl.prNumToKey` (bypass)** | **`Store.prToKey` (index)** |
 
+## Addendum — Phase 5 F4: checkRuns → pendingCheckRuns Migration (2026-05-05)
+
+### Remaining bypass
+
+After Phase 5 F2 (`linkedPRs`/`prNumToKey` migration), one `CacheImpl`-owned map still lived outside the Store:
+
+- `checkRuns map[string][]gh.CheckRun` — check-run lists keyed by commit SHA. The `applyCheckRunDelta` handler unconditionally wrote to this map for every `check_run.completed` webhook, even before the SHA was linked to any issue in the Store. The Store's `applyCheckRunCompleted` silently dropped mutations for unknown SHAs (no `shaToKey` entry). `FetchCheckRuns` read from `c.checkRuns[sha]` on cache hit.
+
+The consequence: pre-linkage check_run arrivals were invisible to observers (TUI, dispatcher, future reactive consumers) until the auto-heal cycle completed and the SHA was linked to an item. The same "responsibility split" pattern that motivated F2 applied here.
+
+### Resolution
+
+Issue #563 completed the migration:
+
+1. **`Store.pendingCheckRuns` field added** — `pendingCheckRuns map[string][]gh.CheckRun` added to `internal/itemstate/Store`, protected by `s.mu`. This is a Store-global pre-linkage buffer (not per-item state). Cleared by `Store.Reset` so `Bootstrap` provides a clean slate.
+
+2. **`CheckRunChanged` ChangeFlag added** — new constant in `internal/itemstate/change.go`, placed after `ItemRemoved`. **Not added to `wakeChFlags`**: the CI gate is evaluated by the catch-up loop on every poll cycle, not by reactive dispatch. Adding it to `wakeChFlags` would cause spurious poll wakes for every check_run webhook while CI is running. The flag exists solely for observability (future TUI consumers tracking CI progress) without impacting dispatcher behavior.
+
+3. **`applyCheckRunCompleted` modified** — when `shaToKey[sha]` is absent, the run is now upserted by ID into `pendingCheckRuns[sha]` and a `Change{Fields: CheckRunChanged}` is returned (the `Repo` and `Number` fields are empty since no item is associated yet). This replaces the previous silent drop and makes pre-linkage arrivals observable.
+
+4. **`PRHeadSHAUpdated` drain added** — when `PRHeadSHAUpdated` fires and establishes `shaToKey[sha]`, the handler drains `pendingCheckRuns[sha]` into `item.LinkedPR.CheckRuns` via upsert-by-ID (matching the existing `applyCheckRunCompleted` merge semantics), sets `item.LinkedPR.HasHadChecks = true`, and deletes the buffer entry. Returned flags include `LinkedPRChanged | CheckRunChanged`. This eliminates the explicit `CheckRunCompleted` replay call that previously appeared in `applyCheckRunDelta` after the auto-heal path completed.
+
+5. **`Store.CheckRunsBySHA` method added** — exported read method that returns the union of `pendingCheckRuns[sha]` (pre-linkage buffer) and the linked item's `LinkedPR.CheckRuns` (post-linkage), under `s.mu.RLock`, as a deep copy.
+
+6. **`CacheImpl.checkRuns` removed** — field deleted from struct; `NewCacheImpl` and `Bootstrap` updated. `applyCheckRunDelta` simplified: the unconditional parallel-map upsert block is removed; the early-return guard is narrowed from `len(changes) > 0` to `len(changes) > 0 && changes[0].Fields&itemstate.LinkedPRChanged != 0` so the auto-heal path still fires for pre-linkage SHAs (which now return `CheckRunChanged` instead of no changes). The explicit `CheckRunCompleted` replay at the end of the auto-heal block is removed.
+
+7. **`FetchCheckRuns` rewritten** — reads from `store.CheckRunsBySHA(sha)` first; on total miss, falls back to GitHub and populates the Store via `CheckRunCompleted` mutations (one per run) rather than writing to the removed `c.checkRuns` map. No re-entrancy risk: no lock is held across the network call.
+
+### Structural invariant fully realized
+
+After F4, **every** per-item AND global pre-linkage state mutation flows through `Store.Apply` and emits an observable Change. ADR 036's single-owner reactive cache invariant is completely enforced.
+
+| State structure | Pre-F4 | Post-F4 |
+|----------------|--------|---------|
+| Item status / labels / comments | Store | Store |
+| Lock / worker PID | Store | Store |
+| Invocation outcomes, stage state | Store | Store |
+| Worker lifecycle (in-flight guard) | Store (post-F1) | Store |
+| PR detail fields (Title, State, Merged, Draft) | Store (post-F2) | Store |
+| PR→issue routing index | Store (post-F2) | Store |
+| **Pre-linkage check-run buffer** | **`CacheImpl.checkRuns` (bypass)** | **`Store.pendingCheckRuns` (observable)** |
+| **Per-item check runs** | `LinkedPR.CheckRuns` (Store, but only post-linkage) | `LinkedPR.CheckRuns` (Store, pre-linkage runs now drained on `PRHeadSHAUpdated`) |
+
 ## References
 
 - `docs/cache-refactor/01-state-inventory.md` — inventory of every existing state structure with read/write sites and known bugs.
