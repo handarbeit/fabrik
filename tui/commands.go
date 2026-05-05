@@ -111,6 +111,17 @@ func openResumeInlineCmd(pluginDir, repo string, issueNumber int, stageName, sta
 	})
 }
 
+// openAbtopInlineCmd returns a tea.Cmd that suspends the TUI and launches abtop
+// inline in the current terminal via tea.ExecProcess.
+// The TUI is restored automatically when the user exits abtop.
+// The caller must verify abtop is in PATH before calling this function.
+func openAbtopInlineCmd() tea.Cmd {
+	cmd := exec.Command("abtop")
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return abtopFinishedMsg{Err: err}
+	})
+}
+
 // worktreePathForIssue returns the absolute path to the issue's git worktree.
 // Path: <rootDir>/.fabrik/worktrees/<owner>-<repo>/issue-N
 func worktreePathForIssue(rootDir, repo string, issueNumber int) string {

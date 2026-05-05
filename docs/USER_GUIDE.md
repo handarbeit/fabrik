@@ -1474,6 +1474,7 @@ Claude sessions, a scrollable History pane with completed jobs, and a status bar
 | `n` / `N` | Cancel quit or clear-all confirmation dialogs |
 | `c` | Delete selected history entry |
 | `C` | Clear all history (with confirmation) |
+| `a` | Open abtop AI session monitor (shows token usage, context window, rate limits for all Claude sessions) |
 | `w` | Wake: reset idle backoff and poll immediately |
 | `?` | Toggle help panel (keybindings and labels reference) |
 | `q` | Quit |
