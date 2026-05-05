@@ -1589,3 +1589,213 @@ func TestSeedLabels_multiRepo(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Poll log: 'from cache' vs 'from GitHub' wording (Tasks 4-8)
+// ---------------------------------------------------------------------------
+
+// collectPollLogs captures log messages emitted during a single poll call.
+// The channel is not closed after poll returns so that background goroutines
+// spawned by the dispatch loop can still send to it without panicking.
+// Poll-level log lines (board fetch, item deep-fetch) are emitted synchronously
+// before any goroutines are launched, so they are always in the buffer on return.
+func collectPollLogs(t *testing.T, eng *Engine) []string {
+	t.Helper()
+	events := make(chan tui.Event, 256)
+	eng.events = events
+	if _, err := eng.poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	// Non-blocking drain: read what's already buffered without closing the channel.
+	var msgs []string
+	for {
+		select {
+		case ev := <-events:
+			if le, ok := ev.(tui.LogEvent); ok {
+				msgs = append(msgs, le.Message)
+			}
+		default:
+			return msgs
+		}
+	}
+}
+
+// TestPoll_LogBoardFromGitHub verifies the board fetch log says "from GitHub"
+// when readClient is a pass-through GitHubAdapter (no-cache mode).
+func TestPoll_LogBoardFromGitHub(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{ProjectID: "PVT_1", Items: nil}, nil
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+
+	logs := collectPollLogs(t, eng)
+
+	var boardLog string
+	for _, m := range logs {
+		if strings.Contains(m, "project board") {
+			boardLog = m
+			break
+		}
+	}
+	if !strings.Contains(boardLog, "from GitHub") {
+		t.Errorf("board log = %q; want to contain \"from GitHub\"", boardLog)
+	}
+	if strings.Contains(boardLog, "from cache") {
+		t.Errorf("board log = %q; must not contain \"from cache\"", boardLog)
+	}
+}
+
+// TestPoll_LogBoardFromCache verifies the board fetch log says "from cache"
+// when readClient is a bootstrapped, unpaused CacheImpl.
+func TestPoll_LogBoardFromCache(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng, _ := testEngineWithCache(client, &mockClaudeInvoker{})
+
+	logs := collectPollLogs(t, eng)
+
+	var boardLog string
+	for _, m := range logs {
+		if strings.Contains(m, "project board") {
+			boardLog = m
+			break
+		}
+	}
+	if !strings.Contains(boardLog, "from cache") {
+		t.Errorf("board log = %q; want to contain \"from cache\"", boardLog)
+	}
+	if strings.Contains(boardLog, "from GitHub") {
+		t.Errorf("board log = %q; must not contain \"from GitHub\"", boardLog)
+	}
+}
+
+// TestPoll_LogBoardBootstrapThenCache verifies the board log says "from GitHub"
+// before Bootstrap and "from cache" after Bootstrap.
+func TestPoll_LogBoardBootstrapThenCache(t *testing.T) {
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_test",
+		Items: []gh.ProjectItem{
+			{Number: 1, ItemID: "PVTI_001", Status: "Research", Repo: "owner/repo"},
+		},
+	}
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return board, nil
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	eng.readClient = cache
+
+	// Poll 1: cache not yet bootstrapped — must fetch from GitHub.
+	logs1 := collectPollLogs(t, eng)
+	var boardLog1 string
+	for _, m := range logs1 {
+		if strings.Contains(m, "project board") {
+			boardLog1 = m
+			break
+		}
+	}
+	if !strings.Contains(boardLog1, "from GitHub") {
+		t.Errorf("poll 1 board log = %q; want \"from GitHub\"", boardLog1)
+	}
+
+	// Simulate a webhook-triggered Bootstrap.
+	cache.Bootstrap(board)
+
+	// Poll 2: cache is now bootstrapped — must serve from cache.
+	logs2 := collectPollLogs(t, eng)
+	var boardLog2 string
+	for _, m := range logs2 {
+		if strings.Contains(m, "project board") {
+			boardLog2 = m
+			break
+		}
+	}
+	if !strings.Contains(boardLog2, "from cache") {
+		t.Errorf("poll 2 board log = %q; want \"from cache\"", boardLog2)
+	}
+}
+
+// TestPoll_LogItemFromGitHub verifies the item deep-fetch log says "from GitHub"
+// when the item is not yet in the cache (falls through to GitHub on cache miss).
+// Uses an unbootstrapped CacheImpl so the item is "notInStore" on first poll,
+// which bypasses the cycleSet requirement.
+func TestPoll_LogItemFromGitHub(t *testing.T) {
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_test",
+		Items:     []gh.ProjectItem{{Number: 1, ItemID: "PVTI_001", Status: "Research", Repo: "owner/repo"}},
+	}
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return board, nil
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	// Wire an unbootstrapped CacheImpl so FetchProjectBoard falls through to GitHub
+	// and the item is "notInStore" (passes the poll pre-filter on first poll).
+	eng.readClient = boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+
+	logs := collectPollLogs(t, eng)
+
+	var itemLog string
+	for _, m := range logs {
+		if strings.Contains(m, "details for") {
+			itemLog = m
+			break
+		}
+	}
+	if !strings.Contains(itemLog, "from GitHub") {
+		t.Errorf("item log = %q; want to contain \"from GitHub\"", itemLog)
+	}
+	if strings.Contains(itemLog, "from cache") {
+		t.Errorf("item log = %q; must not contain \"from cache\"", itemLog)
+	}
+}
+
+// TestPoll_LogItemFromCache verifies the item deep-fetch log says "from cache"
+// when the item's deep-fetch state is already populated in the store.
+// Registers the mayNeedWorkObserver before Bootstrap so Bootstrap's StatusChanged
+// notification populates cycleSet, letting the item reach the deep-fetch section.
+func TestPoll_LogItemFromCache(t *testing.T) {
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_test",
+		Items:     []gh.ProjectItem{{Number: 1, ItemID: "PVTI_001", Status: "Research", Repo: "owner/repo"}},
+	}
+	client := &mockGitHubClient{}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+
+	// Register the mayNeedWorkObserver before Bootstrap so the StatusChanged
+	// notification from Bootstrap populates e.mayNeedWork → cycleSet on next poll.
+	eng.store.Subscribe(newMayNeedWorkObserver(&eng.mayNeedWorkMu, &eng.mayNeedWork))
+
+	// Bootstrap → store has item #1; StatusChanged fires → "owner/repo#1" in mayNeedWork.
+	cache.Bootstrap(board)
+
+	// Pre-populate LastDeepFetchAt so IsItemDeepFetched returns true.
+	eng.store.Apply(itemstate.ItemDeepFetched{
+		Repo:       "owner/repo",
+		Number:     1,
+		FreshState: gh.ProjectItem{Number: 1, Repo: "owner/repo", Status: "Research"},
+	})
+
+	eng.readClient = cache
+
+	logs := collectPollLogs(t, eng)
+
+	var itemLog string
+	for _, m := range logs {
+		if strings.Contains(m, "details for") {
+			itemLog = m
+			break
+		}
+	}
+	if !strings.Contains(itemLog, "from cache") {
+		t.Errorf("item log = %q; want to contain \"from cache\"", itemLog)
+	}
+	if strings.Contains(itemLog, "from GitHub") {
+		t.Errorf("item log = %q; must not contain \"from GitHub\"", itemLog)
+	}
+}
