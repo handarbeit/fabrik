@@ -782,6 +782,14 @@ func applyProjectItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 	return flags
 }
 
+// HasItems reports whether the Store contains at least one item. O(1) and
+// non-allocating. Safe to call concurrently with Apply.
+func (s *Store) HasItems() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.items) > 0
+}
+
 // All returns an immutable snapshot of every item currently in the Store.
 // The returned slice is a point-in-time snapshot; subsequent mutations do not
 // affect it. Safe to call concurrently with Apply.
