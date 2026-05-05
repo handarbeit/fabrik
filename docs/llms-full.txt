@@ -1654,8 +1654,9 @@ Events are translated into immediate poll wakeups — the existing board-fetch a
   ```bash
   gh extension install cli/gh-webhook
   ```
-  Verify installation: `gh webhook --help` (should print usage, not `unknown command "webhook"`). No specific minimum version is pinned; any recent `gh` with extension support works.
+  Verify installation: `gh webhook --help` (should print usage, not `unknown command "webhook"`). Fabrik requires `gh` ≥ 2.32.0, enforced at startup with a clear error if the version is too old.
 - **`gh auth login`** with a token that has `admin:repo_hook` write scope (classic PAT) or equivalent repo admin access. Fine-grained tokens may lack this scope.
+- **`admin:org` scope** for org-level webhook subscription (see [Multi-Repo Boards](#multi-repo-boards)). If your token lacks this scope, Fabrik falls back to per-repo subscriptions automatically. To add it: `gh auth refresh -h github.com -s admin:org`. (`admin:org_hook` is a narrower alternative that grants only the webhook management permission.)
 - **Repo admin access** on each repository on your board, or org-admin access for org-level subscription.
 
 If any prerequisite is missing, Fabrik logs a clear warning and falls back to polling-only mode. Webhook mode failure is always non-fatal.
@@ -1732,6 +1733,8 @@ fabrik --webhooks --board-cache=none
 
 Fabrik attempts to subscribe to `projects_v2_item` events, which fire when an issue is moved between board columns. If `gh webhook forward` does not support this event type for your installation, Fabrik logs a warning and continues without it. In this case, board-column changes are caught by the periodic status sweep within `--status-poll` seconds (default 10 minutes), or within 5 minutes if the stream is unhealthy (full reconcile on recovery). All other event types continue to work normally.
 
+**Per-repo webhooks never deliver `projects_v2_item` events.** This is a GitHub platform constraint, not a Fabrik limitation. GitHub only sends board-column events to org-level webhook subscriptions. If Fabrik is in per-repo mode (either because org-level subscription failed, or because the board spans multiple owners — see [Multi-Repo Boards](#multi-repo-boards)), `projects_v2_item` events will never arrive regardless of configuration. Board-column changes in per-repo mode are caught exclusively by the periodic status sweep.
+
 ### Security
 
 - The HTTP listener binds exclusively to `127.0.0.1` and is never reachable from outside your machine.
@@ -1743,10 +1746,20 @@ Fabrik attempts to subscribe to `projects_v2_item` events, which fire when an is
 
 On multi-repo boards, Fabrik uses a single `gh webhook forward` subprocess:
 
-1. If your token has org-admin access, Fabrik uses `--org=<org>` to subscribe to all repos in the org with one subscription — no restarts needed when new repos appear.
+1. If your token has org-admin access, Fabrik uses `--org=<org>` to subscribe to all repos in the org with one subscription. New repos in that org are covered automatically — when a new repo appears, the subprocess is briefly restarted, but the org-level subscription covers all repos in the org so no events are missed.
 2. Otherwise, Fabrik subscribes per-repo. When a new repo appears on the board, the subprocess is briefly restarted with the updated repo list (the safety-net poll covers any events missed during the restart).
 
+**Mixed-owner boards disable org mode entirely.** Org-level subscription requires every managed repo on the board to share the same owner. If your board spans two orgs or users (for example, during a repo migration), Fabrik silently falls back to per-repo webhooks for *all* repos — even if your token has admin access to both orgs. As noted above, per-repo webhooks never deliver `projects_v2_item` events, so board-column changes in this configuration are caught only by the periodic status sweep. To avoid this: migrate all repos to the target org simultaneously, or run two separate Fabrik instances (one per org) during the transition.
+
 > **Startup delay on multi-repo boards**: Webhook subscriptions are established after the first board poll completes (up to one poll interval, typically 30 seconds). During this window the TUI shows the blue "starting up" indicator and the safety-net poll is in effect. This is expected — the webhook manager waits until the repo list is known before subscribing.
+
+### Migration / Permission Changes
+
+Fabrik probes org mode each time the webhook subprocess starts or restarts. If the probe fails with a permission error (the subprocess exits within 10 seconds with an auth-shaped error), org mode is disabled for the rest of the session — Fabrik switches to per-repo subscriptions and does not retry. A Fabrik restart always clears this sticky state and re-probes org mode from scratch.
+
+- **You just gained org-admin access** (or migrated repos to a new org you own): no state needs clearing. Restart Fabrik and it will detect org-level subscription automatically on the next startup.
+- **You lost org-admin access mid-session**: the running subprocess continues in org mode until it exits or restarts. On the next restart cycle, the probe fails with a permission error and Fabrik falls back to per-repo mode for the remainder of the session. Restart Fabrik to immediately settle into per-repo mode.
+- **Per-repo mode after a permission failure**: a prior org-mode probe failed with an auth error (token lacks `admin:org` or org-admin access). Fabrik will not retry org mode until restarted.
 
 ### Troubleshooting Webhook Mode
 
@@ -2058,6 +2071,8 @@ Each active stage column has the same set of reachable sub-states:
 | **Cooldown** | (no label; in-memory `LastAttemptAt[stageName]` in `itemstate.StageState`) | Stage attempted but didn't complete; waiting for dispatch cooldown to expire |
 
 > **Note:** The Cooldown sub-state is purely in-memory — there is no label for it. The engine uses `LastAttemptAt[stageName]` from `itemstate.StageState` (written by `StageAttempted` mutation) to enforce dispatch cooldown. On restart, cooldown state is lost and the item is retried immediately.
+>
+> Distinct from Cooldown is **Deferred Dispatch**: an item whose dispatch was skipped in the current poll cycle solely because a worker from a prior cycle is still running. Deferred-Dispatch items still receive the `CooldownAt("periodic-re-eval")` stamp at end-of-poll — the cooldown avoids repeated deep-fetch evaluation (and the fallback GraphQL fetch when the cache is invalidated or disabled) for an item the dispatch guard (`snap.Worker() != nil`) would block anyway. Prompt re-dispatch after the prior worker exits is guaranteed by `WorkerExited → WorkerLifecycleChanged`, which is in `wakeChFlags` and adds the item to `mayNeedWork`, bypassing any active cooldown (#544). See §3.2 and §9.8.
 
 #### Done (Cleanup Stage)
 
@@ -2095,7 +2110,7 @@ Each active stage column has the same set of reachable sub-states:
 
 ## 2. Event Enumeration
 
-Eleven distinct event types drive state transitions (§2.1–2.11), plus one TUI display event (§2.12) that does not drive transitions:
+Thirteen distinct event types drive state transitions (§2.1–2.11, §2.13, §2.14), plus one TUI display event (§2.12) that does not drive transitions:
 
 ### 2.1 Poll Tick
 
@@ -2192,7 +2207,7 @@ Eleven distinct event types drive state transitions (§2.1–2.11), plus one TUI
 - Has cycle limits (`MaxReviewCycles`, default 5) — exceeding pauses the issue
 - Has timeout integration (review wait timeout can also trigger pause)
 - Dispatches asynchronously via goroutine with semaphore slot
-- The `inFlight` guard prevents double-dispatch across poll cycles
+- The worker guard (`snap.Worker() != nil`) prevents double-dispatch across poll cycles
 - Resolves review threads (marks them resolved on GitHub) after processing
 
 ### 2.10 CI Check Completed
@@ -2243,6 +2258,28 @@ Eleven distinct event types drive state transitions (§2.1–2.11), plus one TUI
 - First invocation with `fabrik:extend-turns`: `2 × stage.MaxTurns`
 - Extension loop second iteration: `stage.MaxTurns` (per-invocation limit, not cumulative)
 
+### 2.13 Manual Assignee Change
+
+**Webhook event:** `issues.assigned` / `issues.unassigned`
+
+**Detection:** `applyIssuesDelta` (boardcache/delta.go:382) applies `IssueAssigneesUpdated`, which emits the `AssigneesChanged` flag. The `mayNeedWorkObserver` and `wakeChObserver` (engine/observers.go) include `AssigneesChanged` in `wakeChFlags`, so the assignment fires both a wake signal and a `mayNeedWork` cycleSet entry.
+
+**Effect:** Dispatcher re-evaluates the item on the next poll cycle. The engine does not currently filter dispatch on assignee — assignee changes do not change what work happens, only that the item is re-considered. Future assignee-as-dispatch-filter work (planned, not yet filed) will give this event additional dispatch semantics.
+
+**Why:** Assignment is a strong "please look at this" signal from the user, and is the mechanical underpinning of multi-user shared boards (each fabrik instance picking up only items assigned to its `cfg.User`).
+
+### 2.14 Worker Lifecycle
+
+**Source:** Engine-internal mutation, not a webhook.
+
+**Detection:** The dispatch loop (and each reinvoke dispatcher — `dispatchReviewReinvoke`, `dispatchCIFixReinvoke`, `dispatchRebaseReinvoke`) applies `WorkerEntered{Repo, Number, StageName, StartedAt}` synchronously before the goroutine is launched. `WorkerExited{Repo, Number}` is deferred at the top of each goroutine so it fires on any exit path (context cancel, `ensureRepoReady` failure, normal return). Both mutations emit `WorkerChanged | WorkerLifecycleChanged`; `WorkerLifecycleChanged` (not the broader `WorkerChanged`) is the flag in `wakeChFlags`. `WorkerHeartbeat` and `WorkerPIDSet` emit only `WorkerChanged` and do not wake the poll loop — this prevents deep-fetch churn for active workers (30s heartbeat × N workers would otherwise trigger repeated deep-fetches for items that can't be dispatched anyway).
+
+**Effect:** `WorkerExited` deterministically wakes the dispatcher and adds the item to `mayNeedWork`, so the next poll cycle re-evaluates without depending on cooldown expiry or external events. This eliminates the previous race where self-advance to the next stage would wait up to 150s (`PollSeconds × 10`) if the departing worker had not finished cleanup before the post-advance dispatch loop ran.
+
+**Dispatch guard:** The dispatch loop uses `snap.Worker() != nil` (Store-backed) instead of the former `e.inFlight.Load(iKey)` (sync.Map). Because `WorkerEntered` is applied before `wg.Add(1)` and before the goroutine starts, `snap.Worker() != nil` is true from the instant the goroutine is scheduled — there is no window where a new dispatch cycle could race in and double-dispatch the item.
+
+**Why:** Worker lifecycle is engine state the dispatcher must react to. Pre-Fix B (issue #544), it lived in `e.inFlight` (sync.Map) outside the Store — a known bypass that violated ADR 036's single-owner reactive cache invariant. `WorkerEntered`/`WorkerExited` complete the migration begun by the Phase 5 F3 store unification.
+
 ---
 
 ## 3. Transition Tables
@@ -2268,6 +2305,10 @@ This table shows the normal flow when an issue progresses through the pipeline w
 5. If `cruiseActive && stage.Name == "Validate"`: `shouldAdvance = false` — cruise stops at Validate
 
 **Catch-up loop `shouldAdvance` resolution (Path 2):** The catch-up loop first checks `cfg.Yolo || hasYoloLabel(item) || hasCruiseLabel(item)` — items without any of these are skipped entirely. Then: if neither yolo nor cruise LABEL is present and `stage.AutoAdvance` is explicitly false, the item is skipped. This produces the same behavior as Path 1.
+
+> **Self-advance wake guarantee (Fix B, #544):** When `advanceToNextStage` runs, two independent wake events fire: the new column status (`LocalStatusUpdated → StatusChanged`) and the worker exit (`WorkerExited → WorkerLifecycleChanged`). Both flags are in `wakeChFlags`, so the dispatcher re-evaluates the item on the next poll cycle without waiting for cooldown expiry. This eliminates the previous race where the departing worker was still alive when the post-advance dispatch loop ran, causing the item to receive a 150s `CooldownAt("periodic-re-eval")` stamp and wait the full cooldown window before the next stage was dispatched.
+>
+> The same guarantee applies to the **Review → Validate catch-up advance**: when a review reinvoke worker exits after clearing the review gate, `WorkerExited → WorkerLifecycleChanged` wakes the poll loop and adds the item to `mayNeedWork`. The next poll's catch-up loop sees `stage:Review:complete` and advances to Validate (typically within 15s). Pre-Fix B, this transition depended on external event noise — e.g., an unrelated `check_run` webhook for a different PR opportunistically waking the dispatcher — because `CooldownAt("review-blocked")` was still active from the gate-waiting period. The `CooldownAt("review-blocked")` retry timer (10 × PollSeconds) remains valid for non-responsive bot reviewers where no event fires, but it is no longer the primary re-admission path after the gate clears.
 
 **Validate → Done special cases:**
 
@@ -2354,6 +2395,8 @@ In the conjunctive gate design (ADR 032), `stage:X:complete` is **withheld** unt
 | Same column, Cooldown | Retry count ≥ MaxRetries | `claudeRan && MaxRetries > 0` | Same column, Paused + Failed | `fabrik:paused`, `stage:<X>:failed` | `fabrik:locked:<user>`, `stage:<X>:in_progress` | `escalateFailedStage()` posts comment; lock released |
 | Same column, Paused + Failed | Human removes `fabrik:paused` | `stage:<X>:failed` present OR `snap.PausedByEngine(stageName)` | Same column, Idle | | `stage:<X>:failed` | `clearFailedStage()` applies `StageRetryCleared`, `EngineUnpaused`, `StageLastAttemptCleared`, `EngineCyclesCleared` |
 
+> **In-flight items and cooldown (#544):** `CooldownAt("periodic-re-eval")` **is** stamped for in-flight items (those where a prior worker is still running at end-of-poll). Stamping is intentional: without it, once a prior expired cooldown ages out, the item would be re-admitted to the deep-fetch path on every poll cycle until the worker exits — causing repeated unnecessary deep-fetch evaluation work (and the fallback GraphQL fetch when the cache is invalidated or disabled) for items that can't be dispatched anyway (`snap.Worker() != nil` blocks them). The prompt re-dispatch after the worker finishes is guaranteed by `WorkerExited → WorkerLifecycleChanged`, which is in `wakeChFlags` and adds the item to `mayNeedWork` (bypassing any active cooldown). See §2.14 and §9.8.
+
 #### Turn Limit Extension
 
 When Claude exits a stage invocation due to `max_turns` (i.e., the per-invocation turn usage satisfies `invUsage.TurnsUsed >= currentBudget` and `!completed && err == nil`), the engine evaluates whether to extend before entering the cooldown/retry path.
@@ -2403,25 +2446,25 @@ The "baseline clean AND working tree dirty" guard for Implement prevents a pre-e
 
 | Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
 |--------------|-------|-------|-----------------|--------------|----------------|--------------|
-| Column `<X>`, Awaiting Review + Complete | Review gate clears + unresolved thread comments | Not in-flight, cycle count < MaxReviewCycles | Same column (comment processing via async goroutine) | `fabrik:editing` (during processing) | | `dispatchReviewReinvoke()` spawns goroutine; `ReviewCycleIncremented` applied; `inFlight` set; semaphore acquired |
+| Column `<X>`, Awaiting Review + Complete | Review gate clears + unresolved thread comments | `snap.Worker() == nil`, cycle count < MaxReviewCycles | Same column (comment processing via async goroutine) | `fabrik:editing` (during processing) | | `dispatchReviewReinvoke()` spawns goroutine; `ReviewCycleIncremented` applied; `WorkerEntered` applied; semaphore acquired |
 | Column `<X>`, Awaiting Review + Complete | Review gate clears + unresolved thread comments | Cycle count ≥ MaxReviewCycles | Same column, Awaiting Input | `fabrik:paused`, `fabrik:awaiting-input` | | `pauseForReviewCycleLimit()` posts comment |
-| Column `<X>`, Awaiting Review + Complete | Review gate clears + unresolved thread comments | Already in-flight | Same (skipped) | | | Previous reinvoke goroutine still running; skipped entirely (no cycle-limit check) |
+| Column `<X>`, Awaiting Review + Complete | Review gate clears + unresolved thread comments | `snap.Worker() != nil` | Same (skipped) | | | Previous reinvoke goroutine still running; skipped entirely (no cycle-limit check) |
 
 #### CI Fix Reinvoke
 
 | Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
 |--------------|-------|-------|-----------------|--------------|----------------|--------------|
-| Column `<X>`, Awaiting CI | Poll tick (catch-up) | CI failed; not in-flight; `snap.CIFixCycles(stageName)` < MaxCiFixCycles | Same column (CI-fix goroutine running) | `fabrik:editing` (during processing) | | `dispatchCIFixReinvoke()` spawns goroutine; `CIFixCycleIncremented` applied; `inFlight` set; semaphore acquired; synthetic CI-fix comment passed to `processComments()` |
+| Column `<X>`, Awaiting CI | Poll tick (catch-up) | CI failed; `snap.Worker() == nil`; `snap.CIFixCycles(stageName)` < MaxCiFixCycles | Same column (CI-fix goroutine running) | `fabrik:editing` (during processing) | | `dispatchCIFixReinvoke()` spawns goroutine; `CIFixCycleIncremented` applied; `WorkerEntered` applied; semaphore acquired; synthetic CI-fix comment passed to `processComments()` |
 | Column `<X>`, Awaiting CI | Poll tick (catch-up) | CI failed; `snap.CIFixCycles(stageName)` ≥ MaxCiFixCycles | Same column, Awaiting Input | `fabrik:paused`, `fabrik:awaiting-input` | | `pauseForCIFixCycleLimit()` posts explanatory comment |
-| Column `<X>`, Awaiting CI | Poll tick (catch-up) | CI failed; already in-flight | Same (skipped) | | | Previous CI-fix goroutine still running; skipped entirely |
+| Column `<X>`, Awaiting CI | Poll tick (catch-up) | CI failed; `snap.Worker() != nil` | Same (skipped) | | | Previous CI-fix goroutine still running; skipped entirely |
 
 #### Rebase Reinvoke
 
 | Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
 |--------------|-------|-------|-----------------|--------------|----------------|--------------|
-| Column `<X>`, Rebase Needed + Complete | Poll tick (catch-up) | `mergeable == false`; not in-flight; `snap.RebaseCycles(stageName)` < MaxRebaseCycles | Same column (rebase goroutine running) | `fabrik:editing` (during processing) | | `dispatchRebaseReinvoke()` spawns goroutine; `RebaseCycleIncremented` applied; `inFlight` set; semaphore acquired; synthetic rebase-required comment passed to `processComments()` |
+| Column `<X>`, Rebase Needed + Complete | Poll tick (catch-up) | `mergeable == false`; `snap.Worker() == nil`; `snap.RebaseCycles(stageName)` < MaxRebaseCycles | Same column (rebase goroutine running) | `fabrik:editing` (during processing) | | `dispatchRebaseReinvoke()` spawns goroutine; `RebaseCycleIncremented` applied; `WorkerEntered` applied; semaphore acquired; synthetic rebase-required comment passed to `processComments()` |
 | Column `<X>`, Rebase Needed + Complete | Poll tick (catch-up) | `mergeable == false`; `snap.RebaseCycles(stageName)` ≥ MaxRebaseCycles | Same column, Awaiting Input | `fabrik:paused`, `fabrik:awaiting-input` | | `pauseForRebaseCycleLimit()` posts explanatory comment (usually signals a semantic conflict needing human judgment) |
-| Column `<X>`, Rebase Needed + Complete | Poll tick (catch-up) | `mergeable == false`; already in-flight | Same (skipped) | | | Previous rebase goroutine still running; skipped entirely |
+| Column `<X>`, Rebase Needed + Complete | Poll tick (catch-up) | `mergeable == false`; `snap.Worker() != nil` | Same (skipped) | | | Previous rebase goroutine still running; skipped entirely |
 
 ---
 
@@ -2517,7 +2560,7 @@ Fabrik discovers PR comments through the `closedByPullRequestsReferences` GraphQ
 3. **Per-check classification (fallback)**: fetch check runs via `FetchCheckRuns()`. Apply R1–R6 rules (no checks → R5 clears; failed → R3 applies `fabrik:awaiting-ci` and returns error; pending → R2 returns error and tracks `LinkedPRState.CIMergePendingSince` for the timeout; all green → R4 clears).
 4. Attempt merge via `MergePR()`. `MergePR` first checks the PR's `merged` field — if the PR was already merged (e.g., by a human), it returns nil immediately (no-op success). Otherwise it checks `mergeable` and attempts the merge.
 5. On `ErrNotMergeable`: apply `fabrik:rebase-needed` idempotently. Then:
-   - **inFlight guard:** if a rebase goroutine is already running for this item, return a plain error (skip — prevents cycle-counter drift).
+   - **Worker guard (`snap.Worker() != nil`):** if a rebase goroutine is already running for this item, return a plain error (skip — prevents cycle-counter drift).
    - **Cycle limit check:** compare `snap.RebaseCycles(stage.Name)` against `MaxRebaseCycles` (default 3):
      - If at or above the limit: call `pauseForRebaseCycleLimit()` (`fabrik:paused` + `fabrik:awaiting-input` + explanatory comment); return a plain error.
      - If below the limit: apply `RebaseCycleIncremented`, call `dispatchRebaseReinvoke()`, return the `errRebaseDispatched` sentinel.
@@ -2587,19 +2630,19 @@ The catch-up loop in `poll()` is split into two phases for every non-paused non-
 1. `checkDependencies()` — if blocked, skip
 2. `checkReviewGate()` — if awaiting reviewers, skip; if timed out, pause
 3. `buildReviewThreadComments()` collects inline comments from unresolved review threads (no ROCKET reaction, not in `snap.CommentProcessed(c.ID)`)
-4. **inFlight guard:** If a reinvoke goroutine from a previous poll cycle is still running, the entire reinvoke path is skipped (including cycle-limit checks)
+4. **Worker guard (`snap.Worker() != nil`):** If a reinvoke goroutine from a previous poll cycle is still running, the entire reinvoke path is skipped (including cycle-limit checks)
 5. **Cycle limit check:** `snap.ReviewCycles(stage.Name)` is compared against `MaxReviewCycles` (default 5)
    - If exceeded: `pauseForReviewCycleLimit()` adds `fabrik:paused` + `fabrik:awaiting-input` and posts comment
    - If not exceeded: increment count, dispatch reinvoke via `dispatchReviewReinvoke()`:
-     - Marks item in `inFlight` (prevents double-dispatch)
+     - Applies `WorkerEntered` (prevents double-dispatch)
      - Acquires semaphore slot (respects `MaxConcurrent`)
      - Calls `processComments()` with the synthetic review comments asynchronously
-     - On exit: releases semaphore, clears `inFlight`
+     - On exit: releases semaphore, applies `WorkerExited`
    - Either way: `continue` — Phase 2 is skipped this cycle; item re-evaluated on next poll
 6. **Merge-conflict gate** (only reached if no review reinvoke was dispatched in step 5; only runs for stages with `wait_for_ci: true`, the same opt-in as the CI gate): `checkMergeabilityGate()` fetches GitHub's `mergeable` flag for the linked PR
    - `mergeable == true` (or no PR): clear any stale `fabrik:rebase-needed` label; fall through to the CI gate
    - `mergeable == null` (GitHub still computing) **or** transient API error on either REST call: block this item for the rest of Phase 1 (skip to next item) — re-evaluated on the next poll (**no label churn** — mirrors the CI gate's R10c rule and matches how the CI gate handles its own transient errors)
-   - `mergeable == false` (confirmed conflict): apply `fabrik:rebase-needed` idempotently, then **inFlight guard** + **cycle limit check** (`snap.RebaseCycles(stage.Name)` vs `MaxRebaseCycles`, default 3):
+   - `mergeable == false` (confirmed conflict): apply `fabrik:rebase-needed` idempotently, then **worker guard (`snap.Worker() != nil`)** + **cycle limit check** (`snap.RebaseCycles(stage.Name)` vs `MaxRebaseCycles`, default 3):
      - If exceeded: `pauseForRebaseCycleLimit()` pauses issue
      - If not exceeded: dispatch `dispatchRebaseReinvoke()`; `continue`. The catch-up loop never reaches the CI gate while a conflict is outstanding — there is no point spinning on CI-await when the branch cannot merge.
 7. **CI gate** (only reached if the merge-conflict gate cleared): `checkCIGate()` evaluates CI for stages with `wait_for_ci: true`
@@ -2607,7 +2650,7 @@ The catch-up loop in `poll()` is split into two phases for every non-paused non-
    - Per-check classification (fallback): fetches `FetchCheckRuns()` and applies R1–R6
    - Pending/API error: skip (blocked, not failed); item re-evaluated on next poll
    - Timed out: `pauseForCITimeout()` pauses issue
-   - CI failed: **inFlight guard** + **cycle limit check** (`snap.CIFixCycles(stage.Name)` vs `MaxCiFixCycles`):
+   - CI failed: **worker guard (`snap.Worker() != nil`)** + **cycle limit check** (`snap.CIFixCycles(stage.Name)` vs `MaxCiFixCycles`):
      - If exceeded: `pauseForCIFixCycleLimit()` pauses issue
      - If not exceeded: dispatch `dispatchCIFixReinvoke()`; `continue`
 
@@ -2633,7 +2676,7 @@ The catch-up loop in `poll()` is split into two phases for every non-paused non-
 | Timeout | None | Integrated with `ReviewWaitTimeout` |
 | Thread resolution | Yes — `processComments()` merges unresolved `LinkedPRReviewThreadComments` at entry, so a user nudge resolves threads in the same invocation | Yes — resolves review threads after processing |
 | PR summary posting | None | Posts `"<StageName> (review feedback addressed)"` on the linked PR with per-thread footer (one `path:line — resolved` bullet per unique `ReviewThreadID`); skipped when `output == ""` or no linked PR |
-| inFlight guard | Uses dispatch loop's `inFlight` check | Has its own `inFlight` check in catch-up loop |
+| Worker guard | Uses dispatch loop's `snap.Worker() != nil` | Has its own `snap.Worker() != nil` check in catch-up loop |
 
 ### 6.4 CI Gate and CI-Fix Reinvoke
 
@@ -2669,15 +2712,15 @@ The CI gate has two paths that handle different timing scenarios:
 
 The catch-up loop Phase 1 calls `checkCIGate()` after the review gate check. When CI has failed:
 
-1. **inFlight guard:** If a CI-fix goroutine from a previous poll is still running for this item, skip dispatch entirely (no cycle-limit check either)
+1. **Worker guard (`snap.Worker() != nil`):** If a CI-fix goroutine from a previous poll is still running for this item, skip dispatch entirely (no cycle-limit check either)
 2. **Cycle limit check:** `snap.CIFixCycles(stage.Name)` is compared against `MaxCiFixCycles` (default 5)
    - If exceeded: `pauseForCIFixCycleLimit()` adds `fabrik:paused` + `fabrik:awaiting-input` and posts comment
    - If not exceeded: increment count, dispatch reinvoke via `dispatchCIFixReinvoke()`:
-     - Marks item in `inFlight` (prevents double-dispatch)
+     - Applies `WorkerEntered` (prevents double-dispatch)
      - Acquires semaphore slot (respects `MaxConcurrent`)
      - Calls `buildCIFixComment()` to construct a synthetic `gh.Comment` (`DatabaseID: 0`) with a structured CI failure report — classifies each failed check as **NEW REGRESSION** (not failing on base branch) or **pre-existing** (also failing on base branch)
      - Calls `processComments()` with the synthetic comment and the `ci_fix_skill` (falls back to `comment_skill` if unset)
-     - On exit: releases semaphore, clears `inFlight`
+     - On exit: releases semaphore, applies `WorkerExited`
 
 **`DatabaseID: 0` guard:** Synthetic CI-fix comments have `DatabaseID: 0`, which skips the 👀 and 🚀 reaction steps in `processComments()` (reactions require a real GitHub comment ID).
 
@@ -2695,7 +2738,7 @@ The catch-up loop Phase 1 calls `checkCIGate()` after the review gate check. Whe
 | Max cycles | `MaxReviewCycles` (default 5) | `MaxCiFixCycles` (default 5) |
 | Skill | `comment_skill` | `ci_fix_skill` (falls back to `comment_skill`) |
 | Synthetic comment | PR review thread text | Structured CI failure report with NEW REGRESSION classification |
-| inFlight guard | Yes — shared `inFlight` sync.Map | Yes — same `inFlight` sync.Map |
+| Worker guard | Yes — `snap.Worker() != nil` | Yes — `snap.Worker() != nil` |
 | Thread resolution | Yes — `ResolveReviewThread()` after processing | No |
 | PR summary comment | Yes — `"<StageName> (review feedback addressed)"` on linked PR | No |
 | Stage gate config | `wait_for_reviews: true` | `wait_for_ci: true` |
@@ -2726,15 +2769,15 @@ When the merge gate clears (`mergeable == true`), Phase 1 falls through to the C
 
 When `checkMergeabilityGate` returns `conflict=true`:
 
-1. **inFlight guard:** if a rebase goroutine from a previous poll is still running for this item, skip dispatch entirely (no cycle-limit check).
+1. **Worker guard (`snap.Worker() != nil`):** if a rebase goroutine from a previous poll is still running for this item, skip dispatch entirely (no cycle-limit check).
 2. **Cycle limit check:** `snap.RebaseCycles(stage.Name)` is compared against `MaxRebaseCycles` (default 3 — lower than review/CI because rebase either works in one shot or needs human judgment):
    - If exceeded: `pauseForRebaseCycleLimit()` pauses the issue with `fabrik:paused` + `fabrik:awaiting-input`; `fabrik:rebase-needed` is intentionally left in place so the reason is visible.
    - If not exceeded: increment count, dispatch `dispatchRebaseReinvoke()`:
-     - Marks item in `inFlight` (prevents double-dispatch)
+     - Applies `WorkerEntered` (prevents double-dispatch)
      - Acquires semaphore slot (respects `MaxConcurrent`)
      - Calls `buildRebaseComment()` to construct a synthetic `gh.Comment` (`DatabaseID: 0`) instructing Claude to `git fetch origin <base> && git rebase origin/<base>`, resolve conflicts conservatively (never dropping code from base), watch for semantic collisions (duplicated ADR numbers, migration slots), run the project's build + tests, and force-push with `--force-with-lease`.
      - Calls `processComments()` with the synthetic comment and the `rebase_skill` (falls back to `comment_skill` if unset)
-     - On exit: releases semaphore, clears `inFlight`
+     - On exit: releases semaphore, applies `WorkerExited`
 
 **`DatabaseID: 0` guard:** like the CI-fix and review synthetic comments, the rebase synthetic comment uses `DatabaseID: 0` so `processComments()` skips the 👀 and 🚀 reaction steps (no real GitHub comment exists to react to).
 
@@ -2790,7 +2833,7 @@ When Claude runs but does not output any completion marker, the engine enters a 
 - **State:** In-memory only (`CooldownAt("periodic-re-eval")` written to `itemstate.Store` via `CooldownRecorded` mutation). No label is added for cooldown.
 - **Lock behavior:** The lock (`fabrik:locked:<user>` and `stage:<X>:in_progress`) is NOT released during cooldown. This prevents other instances from picking up the item.
 - **Resume behavior:** On retry, `resume=true` is passed to Claude (resumes the session rather than starting fresh)
-- **On restart:** Cooldown state is lost. The lock label is still present but the in-memory `ItemState.Lock` in the `itemstate.Store` is empty — the shutdown cleanup removes lock labels. If the process crashes without cleanup, the lock label remains as a stale artifact until another instance or manual cleanup removes it.
+- **On restart:** Cooldown state is lost. The lock label is still present but the in-memory `ItemState.Lock` in the `itemstate.Store` is empty — the shutdown cleanup removes lock labels. If the process crashes without cleanup, the startup cleanup pass (§9.7) removes stale `fabrik:locked:<user>` and `stage:*:in_progress` labels after the first poll cycle populates the store.
 - **Stage-complete exemption:** Items where `stage:X:complete` appears in the shallow label set are NOT subject to cooldown retry — they have no work to retry. When the cooldown-expired branch fires in `itemMayNeedWork()`, the engine checks for `stage:X:complete` in shallow labels before returning `true`; if present, it returns `false`. This prevents perpetual deep-fetch loops for terminal items (cruise+Validate complete, paused+complete, closed-with-stage-complete) where every poll after cooldown expiry would otherwise trigger a no-op deep-fetch indefinitely.
 
 ### 7.2 Failed Stage / Pause on Retry Limit
@@ -2844,7 +2887,7 @@ Closed issues are normally skipped by `itemMayNeedWork()` and `itemNeedsWork()`.
 | CI merge pending since | `itemstate.Store` → `LinkedPRState.CIMergePendingSince` | None | Lost — merge guard re-evaluates CI fresh on next poll |
 | Comment processed | `itemstate.Store` → `StageState.ProcessedComments[commentID]` | ROCKET (🚀) reaction | Reaction survives restart; in-memory dedup is defense-in-depth |
 | Lock tracking | `itemstate.Store` → `ItemState.Lock` | `fabrik:locked:<user>` label | Label may survive if process crashes; `cleanupLockedIssues()` runs on graceful shutdown |
-| Last updatedAt | `seenUpdatedAt[iKey]` | None | Lost — all items re-evaluated on first poll |
+| Change-feed set | `Engine.mayNeedWork[iKey]` (`Engine.mayNeedWorkMu`) | None | Lost — all items re-evaluated on first poll |
 | Deep-fetch failure | `itemstate.Store` → `ItemState.LastDeepFetchFailureAt` | None | Lost — failed items retried immediately |
 
 ### 7.6 Invocation-Level Kill Mechanisms
@@ -2919,9 +2962,11 @@ When the webhook stream is healthy or starting up, steady-state polling is suppr
 
 ### 7.8 Webhook Wake Semantics: Burst Coalescence and Self-Feedback
 
-**Burst coalescence.** `wakeCh` is a buffered channel with capacity 1. When multiple webhook events arrive in rapid succession, at most one wake is queued. Additional sends while the channel is full are dropped (non-blocking). This means a burst of N simultaneous events produces at most 1 extra poll cycle rather than N. Test: `TestHandleWebhookBurstCoalescence` in `engine/webhook_test.go`.
+**Burst coalescence.** `wakeCh` is a buffered channel with capacity 1. When multiple webhook events arrive in rapid succession, at most one wake is queued. The wakeChObserver uses a non-blocking send (`select { case wakeCh <- struct{}{}: default: }`), so additional fires while the channel is full are dropped. A burst of N simultaneous events produces at most 1 extra poll cycle. Test: `TestHandleWebhookBurstCoalescence` in `engine/webhook_test.go`.
 
-**Self-feedback loop (known gap).** Fabrik runs as the human operator's own GitHub account. Every API action Fabrik takes — label mutations, comment posts, status field updates, PR opens — generates webhook events from that account. These events arrive at the webhook handler and signal `wakeCh`, triggering one extra poll cycle per burst of activity. The burst-coalescence guarantee bounds the damage: a stage advance producing N API actions generates at most 1 extra poll.
+**Observer-based signaling (Phase 3-H).** `wakeCh` is no longer signaled directly by the webhook handler. Instead, `newWakeChObserver` is registered on the shared store. The observer fires a non-blocking send whenever a `Change` includes any `wakeChFlag` (`StatusChanged | LabelsChanged | CommentsChanged | LockChanged | LinkedPRChanged | AssigneesChanged | WorkerLifecycleChanged`). The webhook handler calls `deltaFn(eventType, body)`, which applies typed mutations to the cache store via boardcache delta functions; those Apply calls synchronously invoke all registered observers, including wakeChObserver. Changes that don't affect dispatch eligibility (e.g., `InvocationChanged`, `StageStateChanged`, `WorkerChanged` from heartbeats/PID-sets) are filtered out and do not wake the poll loop. `AssigneesChanged` was added in issue #543; `WorkerLifecycleChanged` was added in Fix B (issue #544) — see §9.8.
+
+**Self-feedback loop (known gap).** Fabrik runs as the human operator's own GitHub account. Every API action Fabrik takes — label mutations, comment posts, status field updates, PR opens — generates webhook events from that account. These events arrive at the webhook handler and signal `wakeCh` (via the observer), triggering one extra poll cycle per burst of activity. The burst-coalescence guarantee bounds the damage: a stage advance producing N API actions generates at most 1 extra poll.
 
 **Sender-filter approach — considered and rejected.** Suppressing `wakeCh` signals when `sender.login` matches `cfg.User` would eliminate these spurious wakes, but `cfg.User` is the human operator's login. Filtering by it would also suppress every event the user generates (comments, label changes, PR reviews) — the most important input class. Sender filtering is only viable when Fabrik runs as a dedicated bot account separate from any human user. That is a future change; no sender filtering is currently implemented.
 
@@ -2986,13 +3031,17 @@ No special handling. Each is independent. The engine only checks the in_progress
 
 `Engine.sem` is a buffered channel of size `MaxConcurrent` (default 5). The dispatch loop, `dispatchReviewReinvoke()`, and `dispatchCIFixReinvoke()` all acquire slots from this semaphore before invoking Claude.
 
-### 9.2 inFlight Map
+### 9.2 Worker In-Flight Guard (formerly inFlight Map)
 
-`Engine.inFlight` (`sync.Map`) tracks items currently being processed by worker goroutines. Key: `issueKey` string, Value: `bool` (isPR).
+**`Engine.inFlight` (`sync.Map`) has been removed (Fix B, issue #544).** The dispatch guard is now entirely Store-backed.
 
-- **Set by:** dispatch loop (before goroutine launch), `dispatchReviewReinvoke()` (inside goroutine, before semaphore acquire), and `dispatchCIFixReinvoke()` (inside goroutine, before semaphore acquire)
-- **Cleared by:** goroutine defer (after `processItem()` or `processComments()` returns)
-- **Used by:** dispatch loop (skip already in-flight items) and catch-up loop (skip reinvoke/CI-fix dispatch if already in-flight)
+The dispatch loop uses `snap.Worker() != nil` to detect whether a goroutine is already running for an item. `WorkerEntered{Repo, Number, StageName, StartedAt}` is applied synchronously before `wg.Add(1)` and before the goroutine is launched, so the store guard is effective from the instant the goroutine is scheduled. The reinvoke dispatchers (`dispatchReviewReinvoke`, `dispatchCIFixReinvoke`, `dispatchRebaseReinvoke`) follow the same pattern. `WorkerExited` is deferred at the top of each goroutine.
+
+- **Set by:** dispatch loop applies `WorkerEntered` before goroutine launch; each reinvoke dispatcher applies `WorkerEntered` before goroutine launch
+- **Cleared by:** goroutine-top `defer store.Apply(WorkerExited{...})` — fires on any exit path including early return from context cancel or `ensureRepoReady` failure
+- **Read by:** `snap.Worker() != nil` — used by all dispatch guards (main loop, reinvoke catch-up guards), the idle display ("workers active" log), and auto-upgrade guard
+
+Both mutations emit `WorkerChanged | WorkerLifecycleChanged` (§2.14). Only `WorkerLifecycleChanged` is in `wakeChFlags`, so worker entry and exit deterministically wake the poll loop. `WorkerHeartbeat` and `WorkerPIDSet` emit only `WorkerChanged` and do not trigger a wake.
 
 ### 9.3 Worktree Mutex
 
@@ -3005,17 +3054,21 @@ Within a single `poll()` call:
 1. **Catch-up loop** runs first — processes items with `stage:<X>:complete` labels for yolo/cruise advancement, review gate evaluation, and review reinvoke dispatch
 2. **Dispatch loop** runs second — processes items that need stage invocations or comment processing
 
-The `advancedItems` map prevents items advanced by the catch-up loop from having their `seenUpdatedAt` re-cached (which would make them invisible on the next poll). The `inFlight` map prevents items dispatched by `dispatchReviewReinvoke()` in the catch-up loop from being double-dispatched by the dispatch loop.
+The `advancedItems` map tracks items that the catch-up loop advanced during this poll cycle. Items in `advancedItems` are excluded from the deferred `CooldownAt["periodic-re-eval"]` refresh at the end of `poll()`, so they appear in the next poll cycle's cycleSet naturally (via the observer that fires when their status changes) rather than being suppressed by cooldown. Items dispatched by `dispatchReviewReinvoke()` in the catch-up loop are guarded from double-dispatch by the dispatch loop via `snap.Worker() != nil` (see §9.2).
 
 ### 9.5 Engine.mu Mutex
 
-`Engine.mu` (sync.Mutex) protects in-memory state that is not covered by its own synchronization primitive: `seenUpdatedAt`, `totalTokens`, `lastReportedCost`. Critical sections are kept small — typically a single map read/write.
+`Engine.mu` (sync.Mutex) protects in-memory state that is not covered by its own synchronization primitive: `totalTokens`, `lastReportedCost`. Critical sections are kept small — typically a single map read/write. `Engine.mayNeedWork` is protected by its own `Engine.mayNeedWorkMu` (a separate mutex) so that observer callbacks writing to `mayNeedWork` from any goroutine don't contend with `Engine.mu`-held code paths.
 
 Per-item engine state previously stored in `Engine.mu`-protected maps has been migrated to `itemstate.Store` (Phase 3-E and 3-F; see ADR-036). Those fields — `Lock`, `LastTokenUsage`, `LastInvocationCompleted`, `LastInvocationBlocked`, `LastDeepFetchFailureAt`, `LinkedPR.HasHadChecks`, `LinkedPR.CIMergePendingSince`, plus the Phase 3-F fields `StageState.LastAttemptAt`, `StageState.Attempts`, `StageState.PausedByEngine`, `StageState.ReviewCycles`, `StageState.CIFixCycles`, `StageState.RebaseCycles`, `StageState.ProcessedComments`, and `ItemState.CooldownAt` — are now read via `e.store.Get(repo, n)` (returning an immutable `Snapshot`) and written via `e.store.Apply(Mutation)`. The Store has its own internal mutex; no `Engine.mu` guard is needed for these fields.
 
 ### 9.6 Engine Internal State (itemstate.Store)
 
-Per-item engine state lives in `Engine.store *itemstate.Store`, an engine-owned store separate from `CacheImpl`'s internal store. It is initialized with `itemstate.NewStore(nil)` in both `New()` and `NewWithDeps()`. Unification into a single store is deferred to a later phase (see ADR-036).
+Per-item state lives in a single shared `*itemstate.Store` instance. The Engine creates it (`sharedStore := itemstate.NewStore(nil)` in `New()`), assigns it to `eng.store`, and passes it to `boardcache.NewCacheImpl`. All mutations — engine-side (locks, invocations, stage state) and webhook/reconcile-side (status, labels, comments, linked-PR fields) — flow through `sharedStore.Apply`. `NewWithDeps` (test factory) constructs its own independent store because it never creates a `CacheImpl`.
+
+Note: `CacheImpl` retains two private maps that are **not** in `itemstate.Store`: `linkedPRs map[string]*gh.PRDetails` (full PR detail objects for `ReadClient` interface serving) and `checkRuns map[string][]gh.CheckRun` (check-run lists keyed by commit SHA). These are cache-layer storage for board reads; the `itemstate.Store` holds the per-item *state fields* derived from PR mutations (`LinkedPRState`: head SHA, mergeable, reviews, HasHadChecks, etc.).
+
+Field ownership is by **mutation type**, not by store identity: a reader calling `store.Get("owner/repo", 1)` receives a Snapshot with all field groups populated regardless of which code path applied each mutation. This is the single-Store design originally proposed in ADR-036 and completed in Phase 5 F3 (issue #537).
 
 The following fields are stored in `ItemState` / `LinkedPRState` and accessed exclusively through the store:
 
@@ -3036,10 +3089,204 @@ The following fields are stored in `ItemState` / `LinkedPRState` and accessed ex
 | `StageState.CIFixCycles` | `CIFixCycleIncremented` (increment); `EngineCyclesCleared` (reset) | `snap.CIFixCycles(stageName)` | `e.ciFixCycleCount[stageKey]` |
 | `StageState.RebaseCycles` | `RebaseCycleIncremented` (increment); `EngineCyclesCleared` (reset) | `snap.RebaseCycles(stageName)` | `e.rebaseCycleCount[stageKey]` |
 | `StageState.ProcessedComments` | `CommentProcessed{CommentID, At}` | `snap.CommentProcessed(commentID)` | `e.processedSet["…comment-ID"]` |
+| `Worker` (`*WorkerHandle`) | `WorkerEntered{StageName, StartedAt}` (placeholder, before goroutine launch); `LocalLockAcquired{Worker: &WorkerHandle{...}}` (full details, after lock acquired); `WorkerPIDSet{PID}` (update PID); `WorkerHeartbeat{At}` (update `LastSignAt`); `WorkerExited` (clear) | `snap.Worker()` | N/A (new in Phase 3-G; `WorkerEntered` added in Fix B, #544) |
 
-**`seenUpdatedAt` (deferred):** The map `e.seenUpdatedAt` (formerly `e.lastUpdatedAt`) tracks the last-seen `UpdatedAt` timestamp per issue. It is kept as a plain `Engine.mu`-protected map pending Phase 3-H, when change-feed observers will replace its purpose. It is intentionally excluded from `itemstate.Store` in this phase.
+**`mayNeedWork` (Phase 3-H):** The map `e.mayNeedWork map[string]bool` (protected by `e.mayNeedWorkMu`) is the Phase 3-H replacement for the removed `e.seenUpdatedAt` map. It is populated by the `mayNeedWorkObserver` registered once on the shared store whenever a Change includes any `wakeChFlag`. All mutation types — engine-side and webhook/reconcile-side — now fire through the same observer registration. Each poll cycle drains the map into a local `cycleSet` — only items in the set (or with bypass conditions) proceed to deep-fetch evaluation. See section 9.8 for the full observer pattern description.
 
-See also: ADR-036 (`adrs/036-reactive-cache-single-owner.md`) for the full rationale and migration plan.
+See also: ADR-036 (`adrs/036-reactive-cache-single-owner.md`) for the full rationale and the Phase 5 F3 addendum documenting the unification. ADR-038 (`adrs/038-dual-store-observer-wiring.md`) documents the historical dual-store registration design (superseded by the unification).
+
+### 9.7 Worker Liveness (Heartbeat and Stale-Lock Recovery)
+
+Phase 3-G adds a heartbeat-based liveness system that allows the engine to detect and recover from stale `fabrik:locked:<user>` labels left by crashed worker processes.
+
+#### WorkerHandle Struct
+
+```go
+type WorkerHandle struct {
+    PID        int       // Claude subprocess PID (0 until cmd.Start() returns)
+    StageName  string    // name of the stage being invoked
+    StartedAt  time.Time // time LocalLockAcquired was applied
+    LastSignAt time.Time // time of the most recent WorkerHeartbeat mutation
+}
+```
+
+`ItemState.Worker` is non-nil while a worker goroutine is in flight; nil when no worker is active. `snap.Worker()` returns a deep copy (nil-safe).
+
+#### Heartbeat Protocol
+
+Every Claude-spawning dispatch path starts a heartbeat goroutine at dispatch time:
+
+| Dispatch site | File |
+|---|---|
+| `processItem()` — main stage invocation | `engine/item.go` |
+| `dispatchReviewReinvoke()` — review comment processing | `engine/reviews.go` |
+| `dispatchCIFixReinvoke()` — CI failure re-processing | `engine/ci.go` |
+| `dispatchRebaseReinvoke()` — rebase conflict re-processing | `engine/merge_gate.go` |
+
+**Lifecycle per dispatch path:**
+
+0. **Before goroutine launch:** `store.Apply(WorkerEntered{StageName, StartedAt})` — placeholder Worker set so `snap.Worker() != nil` is true from the instant the goroutine is scheduled. `WorkerEntered` emits `WorkerLifecycleChanged`, which wakes the poll loop.
+1. **Inside goroutine (after lock acquired):** `store.Apply(LocalLockAcquired{Worker: &WorkerHandle{StageName, StartedAt, PID: 0}})` — full Worker details replace the placeholder (PID=0 until subprocess starts).
+2. A `done := make(chan struct{})` is created; `defer close(done)` is set on the dispatch goroutine.
+3. `go startHeartbeat(ctx, repo, number, done)` — heartbeat goroutine starts. It applies `WorkerHeartbeat{At: time.Now()}` every 30 seconds until `done` is closed or `ctx` is cancelled. `WorkerHeartbeat` emits only `WorkerChanged` (not `WorkerLifecycleChanged`) so it does not wake the poll loop.
+4. Claude is invoked. After `cmd.Start()`, `opts.OnPIDReady(pid)` applies `WorkerPIDSet{PID: pid}` — the Claude subprocess PID is recorded in Worker. Emits only `WorkerChanged`.
+5. When the dispatch goroutine exits (defer): `close(done)` stops the heartbeat goroutine; `store.Apply(WorkerExited{})` sets `Worker = nil`. `WorkerExited` emits `WorkerLifecycleChanged`, deterministically waking the poll loop.
+
+**No-op semantics:**
+- `WorkerHeartbeat` is a no-op when `Worker == nil` (race-safe: heartbeat may fire just after `WorkerExited`).
+- `WorkerPIDSet` is a no-op when `Worker == nil`.
+- `WorkerExited` is idempotent (safe to apply when already nil).
+
+#### Stale-Worker Detector (Runtime Crash Case)
+
+`startWorkerDetector(ctx)` launches a background goroutine in `Run()` that scans for stale workers every 30 seconds.
+
+**Detection criteria:** `Worker != nil` AND `time.Since(Worker.LastSignAt) > 2 minutes`.
+
+**PID=0 skip:** Workers with `PID == 0` (PID not yet set) are skipped regardless of heartbeat age — they are in the narrow window between `LocalLockAcquired` and `cmd.Start()`.
+
+**Signal-0 liveness check** (`os.FindProcess(pid)` + `process.Signal(syscall.Signal(0))`):
+
+| Outcome | Action |
+|---------|--------|
+| Signal-0 fails (PID dead) | `store.Apply(WorkerExited{})` + `RemoveLabel(fabrik:locked:<user>)` + `RemoveLabel(stage:<StageName>:in_progress)` + log cleanup message |
+| Signal-0 succeeds (PID alive) | Log warning only; do not remove labels or kill the process; re-check on next scan |
+
+`StageName` for label construction is taken from `Worker.StageName`, which was set at dispatch time.
+
+#### Startup Cleanup Pass (Restart Case)
+
+When a Fabrik process crashes, deferred cleanup never runs. On the next startup, stale `fabrik:locked:<user>` and `stage:*:in_progress` labels may remain on issues. The startup cleanup pass removes them.
+
+**Trigger:** Immediately after the first `doPollCycle()` completes (not a wall-clock timer). This guarantees the store is populated before the scan in both webhook and non-webhook modes.
+
+**Grace period:** Any lock acquired during the first poll cycle already has `Worker != nil` in the store (set by `LocalLockAcquired`). The scan skips these items — no artificial sleep is needed.
+
+**Detection:** Scan `store.All()` for items where:
+- `snap.Labels()` contains `"fabrik:locked:" + e.cfg.User` (raw label check — `Lock.HeldByThis` is nil on restart since no `LocalLockAcquired` was applied in this session), AND
+- `snap.Worker() == nil`
+
+**Cleanup per item:**
+1. `RemoveLabel(fabrik:locked:<user>)` from GitHub (with write-through to cache).
+2. For each label in `snap.Labels()` matching `strings.HasPrefix("stage:") && strings.HasSuffix(":in_progress")`: `RemoveLabel(label)` from GitHub (with write-through). `StageName` is unavailable; labels are identified by pattern.
+3. `store.Apply(WorkerExited{})` — no-op since `Worker` is already nil; applied for idempotency.
+4. Log the cleanup at `"startup"` tag.
+
+#### Updated `fabrik:locked:<user>` Label Lifecycle
+
+The lock label is now removed by four paths (previously two):
+
+| Path | Trigger | Function |
+|------|---------|----------|
+| Normal completion | Stage completes (any outcome) | `releaseLock()` |
+| Graceful shutdown | Engine receives SIGINT/SIGTERM | `cleanupLockedIssues()` |
+| **Stale-worker detector** | Worker PID dead + heartbeat stale > 2min | `cleanupStaleWorker()` |
+| **Startup cleanup** | Engine restart; Worker nil + lock label present | `runStartupCleanup()` |
+
+### 9.8 Change-feed / Observer Pattern (Phase 3-H)
+
+Phase 3-H wires `itemstate.Store.Subscribe` into the engine to replace polling-based "has this item changed?" detection with a reactive change-feed. The key concept: after every non-no-op `Store.Apply` call, registered observers are called synchronously (outside the store's write-lock) with a `Change` value indicating which fields changed and for which item.
+
+#### Single-Store Architecture (Phase 5 F3)
+
+There is exactly one `*itemstate.Store` instance. `Engine.New()` creates it and passes it to `boardcache.NewCacheImpl`. Both `eng.store` and `cacheImpl.store` reference the same pointer. Field ownership is by mutation type:
+
+| Mutation category | Mutation types | ChangeFlags produced |
+|-------------------|----------------|----------------------|
+| Engine-side | `LocalLockAcquired`, `LocalLockReleased`, `InvocationRecorded`, `StageAttempted`, `CooldownRecorded`, `WorkerEntered`, `WorkerPIDSet`, `WorkerHeartbeat`, `WorkerExited`, `PRChecksObserved`, … | `LockChanged`, `InvocationChanged`, `StageStateChanged`, `CooldownChanged`, `WorkerChanged`, `WorkerLifecycleChanged` (only `WorkerEntered`/`WorkerExited`), `LinkedPRChanged` (partial) |
+| Webhook/reconcile-side | `IssueLabeled`, `IssueUnlabeled`, `IssueCommentCreated`, `PRReviewSubmitted`, `CheckRunCompleted`, … | `LabelsChanged`, `CommentsChanged`, `LinkedPRChanged`, `AssigneesChanged`, … |
+| Both | `LocalStatusUpdated` (reconcile/webhook delta path **and** engine write-through via `cacheImpl.UpdateItemStatus`) | `StatusChanged` |
+
+Because both categories write to the same store, any `store.Get(...)` returns a Snapshot with all field groups populated. `CacheImpl.Subscribe` is a thin wrapper over `c.store.Subscribe`; since `c.store` is the shared store, engine code should call `e.store.Subscribe` directly rather than going through `cacheImpl.Subscribe` to avoid double-registration.
+
+**Boundary note**: `CacheImpl` also holds `linkedPRs map[string]*gh.PRDetails` and `checkRuns map[string][]gh.CheckRun` as private maps **outside** `itemstate.Store`. These serve the `ReadClient` interface (`GetLinkedPR`, `GetCheckRuns`) and are populated by CacheImpl's delta/reconcile logic. They are cache-layer storage, not engine state — `snap.LinkedPR()` returns `LinkedPRState` (head SHA, mergeable, reviews, HasHadChecks, etc.), not the full `gh.PRDetails` object from `linkedPRs`.
+
+#### ChangeFlags and Their Trigger Mutations
+
+All ChangeFlags are produced by the single shared store. Field ownership is by mutation type (see table above).
+
+| ChangeFlag | Mutation category | Trigger mutations |
+|------------|-------------------|-------------------|
+| `StatusChanged` | Both | `LocalStatusUpdated` (reconcile, board fetch, `projects_v2_item` webhook delta); also engine-side via `cacheImpl.UpdateItemStatus` called from `advanceToNextStage`/`handleStageComplete` (`stages.go`) |
+| `LabelsChanged` | Webhook/reconcile | `IssueLabeled`, `IssueUnlabeled`, `LocalLabelAdded`, `LocalLabelRemoved` |
+| `LockChanged` | Engine-side | `LocalLockAcquired`, `LocalLockReleased` |
+| `LinkedPRChanged` | Both | PR review, check runs, head SHA updates (webhook); `PRChecksObserved`, `CIMergePendingStarted/Cleared` (engine) |
+| `CommentsChanged` | Webhook/reconcile | `IssueCommentCreated`, `LocalCommentAdded` |
+| `AssigneesChanged` | Webhook/reconcile | `IssueAssigneesUpdated` (via `applyIssuesDelta` on `issues.assigned`/`issues.unassigned` events) |
+| `InvocationChanged` | Engine-side | `InvocationRecorded` (token usage, completed, blocked, IsComment) |
+| `StageStateChanged` | Engine-side | `StageAttempted`, `StageRetryIncremented`, `ReviewCycleIncremented`, etc. |
+| `WorkerChanged` | Engine-side | `WorkerEntered`, `LocalLockAcquired` (with Worker), `WorkerPIDSet`, `WorkerHeartbeat`, `WorkerExited` — all worker-handle mutations |
+| `WorkerLifecycleChanged` | Engine-side | `WorkerEntered`, `WorkerExited` only — lifecycle transitions that change dispatch eligibility; emitted alongside `WorkerChanged`; this is the wake-relevant sub-flag |
+| `CooldownChanged` | Engine-side | `CooldownRecorded` |
+| `DeepFetchChanged` | Engine-side | `DeepFetchFailed`, `ItemDeepFetched` |
+| `ItemRemoved` | Reset | `Store.Reset` for items present in the old map but absent from the new items slice |
+
+#### wakeChFlags: Which Changes Wake the Poll Loop
+
+The `wakeChObserver` is registered once on the shared store. It fires a non-blocking send on `wakeCh` when `Change.Fields & wakeChFlags != 0`:
+
+```
+wakeChFlags = StatusChanged | LabelsChanged | CommentsChanged | LockChanged | LinkedPRChanged | AssigneesChanged | WorkerLifecycleChanged
+```
+
+`AssigneesChanged` was added in issue #543 so that assignment webhooks wake the dispatcher. `WorkerLifecycleChanged` was added in Fix B (issue #544) so that `WorkerEntered` and `WorkerExited` mutations deterministically wake the poll loop. The broader `WorkerChanged` flag (which also covers `WorkerHeartbeat` and `WorkerPIDSet`) is intentionally **not** in `wakeChFlags` — heartbeats fire every 30s per active worker and would otherwise cause repeated deep-fetch cycles for items that cannot be dispatched. See §2.14.
+
+Changes that do NOT fire `wakeCh`: `InvocationChanged`, `StageStateChanged`, `CooldownChanged`, `WorkerChanged` (from heartbeats/PID-sets/lock-with-worker), `TitleBodyChanged`, `StateChanged`, `BlockedByChanged`, `DeepFetchChanged`, `BaseBranchChanged`, `ItemRemoved`.
+
+The unconditional `wakeCh <- struct{}{}` send that previously lived in the webhook handler has been removed. The observer path is the sole mechanism. Because all mutation types flow through the single shared store, the single `wakeChObserver` registration is sufficient — no per-source registration is needed.
+
+#### Registered Observers and Where They Live
+
+| Observer | Registered on | Fires when | Emits |
+|----------|--------------|-----------|-------|
+| `wakeChObserver` | shared store (once) | `Change.Fields & wakeChFlags != 0` | `wakeCh <- struct{}{}` (non-blocking) |
+| `mayNeedWorkObserver` | shared store (once) | `Change.Fields & wakeChFlags != 0` | adds `repo#number` to `e.mayNeedWork` |
+| `InvocationObserver` | shared store | `Change.Fields & InvocationChanged != 0` | `tui.JobCompletedEvent` |
+| `StageChangeObserver` | shared store | `Change.Fields & StatusChanged != 0` | `tui.StageChangedEvent` |
+| Pause observer (closure) | `CacheImpl.SubscribePause` | `Pause()` / `Resume()` | `tui.WebhookStatusEvent` |
+
+All observers are registered in `Engine.Run()` after extracting `cacheImpl`. Their unsubscribe funcs are deferred so observers are cleaned up when `Run()` returns.
+
+#### mayNeedWork Set: Poll Cycle Pre-Filter
+
+`Engine.mayNeedWork map[string]bool` (protected by `Engine.mayNeedWorkMu`) is populated by `mayNeedWorkObserver` on every change that includes `wakeChFlags`. At the start of each poll cycle, `poll()` drains it to a local `cycleSet`:
+
+```go
+cycleSet := func() map[string]bool {
+    e.mayNeedWorkMu.Lock()
+    defer e.mayNeedWorkMu.Unlock()
+    s := e.mayNeedWork
+    e.mayNeedWork = make(map[string]bool)
+    return s
+}()
+```
+
+Each item in `board.Items` passes the pre-filter if **any** of these bypass conditions apply:
+
+| Bypass condition | Rationale |
+|-----------------|-----------|
+| Item is in `cycleSet` | Observer saw a relevant change since last poll |
+| Stage has `CleanupWorktree: true` | Cleanup triggers on local filesystem state, not board changes |
+| Item has `fabrik:awaiting-ci` label | CI gate must be evaluated every poll |
+| Item has `fabrik:rebase-needed` label | Rebase gate must be evaluated every poll |
+| `snap.HasExpiredCooldown(now)` is true | Periodic re-evaluation window has passed |
+
+Items not meeting any bypass condition are skipped for that poll cycle (no deep-fetch, no dispatch). Items with an **active** CooldownAt (not yet expired) are also skipped — the CooldownAt["periodic-re-eval"] entry gates time-based re-evaluation.
+
+This replaces the removed `engine.seenUpdatedAt map[string]time.Time`, which performed an equivalent "has this item changed?" gate via timestamp comparison.
+
+#### CacheImpl.SubscribePause
+
+In addition to `Store.Subscribe`, `CacheImpl` exposes `SubscribePause(fn func(bool)) func()` for components that need to react to pause/resume transitions (e.g., the TUI `WebhookStatusEvent`). Pause observers are called **outside `c.mu`** — `Pause()` and `Resume()` snapshot the list before releasing `c.mu`, then call observers on the snapshot. This mirrors `Store`'s snapshot-then-call pattern. Observers registered via `SubscribePause` MUST NOT call `Pause()` or `Resume()` re-entrantly. Because `c.mu` is released before observers are called, calling other `CacheImpl` methods from an observer is deadlock-free; however, calling `Pause`/`Resume` from within a pause observer produces semantic re-entrancy (double-fire, inconsistent paused state).
+
+#### Invariants
+
+- **I1 (Single fire)**: Each `Store.Apply` call produces at most one `Change` per observer registration. `Store.Reset` produces one `Change` per item (add, update, or removal). Observers are called in registration order.
+- **I2 (Outside lock)**: Observers are called after the store's write-lock is released. Observers may safely call `store.Get` or other read methods without deadlock.
+- **I3 (Single registration)**: Each observer is registered exactly once on the shared store. Since `engine.store` and `cacheImpl.store` are the same pointer, calling both `e.store.Subscribe(obs)` and `cacheImpl.Subscribe(obs)` registers the observer twice, causing every Apply to fire it twice. Register once via `e.store.Subscribe`. See ADR-038 for the historical dual-store design that this replaced.
+- **I4 (Non-blocking wakeCh)**: The `wakeChObserver` always uses a non-blocking send. A full `wakeCh` (capacity 1) means a poll is already pending; dropping the signal is correct (burst coalescence).
+
+**References:** [ADR-036: Reactive Cache Single-Owner](../adrs/036-reactive-cache-single-owner.md), [ADR-038: Observer Wiring (historical dual-store design)](../adrs/038-dual-store-observer-wiring.md).
 
 ---
 
@@ -3236,7 +3483,7 @@ The engine uses two distinct in-memory stores (both in `itemstate.Store`) for co
 
 **What writes `CooldownAt("periodic-re-eval")`:**
 - `processItem()` sets it when cleanup completes (cleanup-stage terminal path)
-- The deferred cache-write block in `Engine.poll()` (invoked by the `doPollCycle` closure) sets it for ALL non-advanced, non-cleanup `deepFetchCandidates` after each full poll cycle — a belt-and-suspenders refresh that caps deep-fetch frequency to once per cooldown period. The `stage:X:complete` terminal-only guard was removed in Phase 3-F: `LastAttemptAt[stageName]` (not `CooldownAt`) now carries dispatch suppression for incomplete stages, so refreshing `CooldownAt["periodic-re-eval"]` for all non-cleanup items is safe regardless of completion state (#504 structural fix).
+- The deferred cache-write block in `Engine.poll()` (invoked by the `doPollCycle` closure) sets it for non-advanced, non-cleanup `deepFetchCandidates` after each full poll cycle — a belt-and-suspenders refresh that caps deep-fetch frequency to once per cooldown period. **In-flight items (`snap.Worker() != nil`) are included**: the cooldown prevents repeated deep-fetch evaluation (and the fallback GraphQL fetch when the cache is invalidated or disabled) for items the dispatch guard would block anyway. Prompt re-dispatch after the prior-cycle worker exits is guaranteed by `WorkerExited → WorkerLifecycleChanged`, which is in `wakeChFlags` and adds the item to `mayNeedWork`, bypassing any active cooldown (#544). The `stage:X:complete` terminal-only guard was removed in Phase 3-F: `LastAttemptAt[stageName]` (not `CooldownAt`) now carries dispatch suppression for incomplete stages, so refreshing `CooldownAt["periodic-re-eval"]` for all non-cleanup items is safe regardless of completion state (#504 structural fix).
 
 **What writes other `CooldownAt` reason keys:**
 - `CooldownAt("dep-blocked")`: `processItem()` sets it via `CooldownRecorded{Reason: "dep-blocked"}` each time `checkDependencies()` returns true — blocked on dependencies
@@ -3278,6 +3525,8 @@ When `--webhooks` and `--board-cache=in-memory` are both active (the default whe
 ### D.1 Bootstrap
 
 Immediately after `wm.Start()` succeeds (webhook manager listener bound and subprocess launched), the engine calls `e.client.FetchProjectBoard(...)` directly — bypassing the cache — and passes the result to `cacheImpl.Bootstrap(board)`. Bootstrap populates `items`, `shaToKey`, and `itemIDToKey` from the full board snapshot. Deep fields (comments, linked PR data) are not populated at bootstrap; they are fetched lazily on first `FetchItemDetails` call.
+
+Bootstrap calls `Store.Reset`, which fires observer notifications for every item (one `Change` per item, with non-zero `Fields`). Observers (`wakeChObserver`, `mayNeedWorkObserver`) are registered in `Engine.Run()` **before** Bootstrap is called, so bootstrapped items are visible to the dispatch loop on the first poll cycle — no external webhook event is needed to unblock them.
 
 If the bootstrap fetch fails (e.g., transient network error), the cache starts empty and populates through fallback on the first cache miss. No data is lost; latency for the first deep-fetch is slightly higher.
 
@@ -3407,7 +3656,7 @@ In user mode (PAT-based, repo-level webhooks via `gh webhook forward`), GitHub d
 | Layer | Mechanism | Latency | Cost |
 |-------|-----------|---------|------|
 | **0** Write-through | After any successful mutation call in the engine (status, labels, comments), the corresponding `CacheImpl` method is called immediately | Zero | Zero |
-| **1** Per-event refresh | After `ApplyDelta` for an `issues` or `issue_comment` event on a known item, `FetchProjectItemStatus` fetches the current Status | Seconds (best-effort) | ~1–5 pts/event |
+| **1** Per-event refresh | After `ApplyDelta` for an `issues` or `issue_comment` event, fetches the current Status: fast path (`FetchProjectItemStatus`) when the item's `itemID` is cached; fallback (`LookupIssueProjectItem`) when it isn't yet (e.g., brand-new issues arriving via `issues.opened` before `projects_v2_item.created`) | Seconds (best-effort) | ~1–5 pts/event |
 | **2** Periodic status sweep | `runReconciliationLoop` calls `FetchProjectItemStatusBatch` at `ProjectStatusPollSeconds` cadence (default 10 min) | Up to 10 min | O(⌈N/100⌉) per sweep |
 | **Bootstrap / stream-recovery** | Full `FetchProjectBoard` + `Reconcile` on startup and on webhook stream recovery | Minutes | Full board cost |
 
@@ -3447,6 +3696,8 @@ This is a no-op when `e.readClient` is a `GitHubAdapter` (cache-disabled mode), 
 **`CacheImpl` existence guard**: All three new write-through methods (`ApplyLabelAdded`, `ApplyLabelRemoved`, `ApplyCommentAdded`) call `c.store.Get(repo, number)` before applying the mutation. If the key is not present in the Store (i.e., was never bootstrapped), the method returns without creating a phantom Store entry.
 
 **Layer 1 scope**: Only `issues` and `issue_comment` event types trigger a per-event status fetch. `pull_request`, `pull_request_review`, `check_run`, and other event types are excluded from Layer 1 (finding the linked issue for a PR event requires an O(N) cache scan; `check_run` does not carry an item ID). Layer 2's periodic sweep covers these cases within its cadence.
+
+For new issues whose `itemID` is not yet in the cache (e.g., added via `issues.opened` before a `projects_v2_item.created` event is received), Layer 1 falls back to `LookupIssueProjectItem` to populate both `itemID` and current Status in one GraphQL query (`repository.issue.projectItems`). If `cache.ProjectID()` is empty (Bootstrap not yet complete), the fallback is skipped. After a successful fallback, subsequent Layer 1 calls for the same issue use the cheaper `FetchProjectItemStatus` fast path.
 
 ---
 
