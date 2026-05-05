@@ -37,6 +37,11 @@ const (
 	InvocationChanged
 	// BaseBranchChanged indicates BaseBranchWarned map changed.
 	BaseBranchChanged
+	// ItemRemoved indicates the item was removed from the board during a Reset.
+	// This flag is distinct from StateChanged (issue open/closed) and is emitted
+	// only by Store.Reset for items present in the old map but absent from the
+	// new items slice.
+	ItemRemoved
 )
 
 // Change describes what fields a mutation altered. Delivered to every Observer
