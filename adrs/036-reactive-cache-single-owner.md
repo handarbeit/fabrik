@@ -183,13 +183,13 @@ The consequence (issue #544): after self-advance to the next stage, if the depar
 
 Issue #544 completed the migration. Two changes landed:
 
-**Fix A (band-aid):** The end-of-poll deferred cooldown block now checks `snap.Worker() != nil` before stamping `CooldownAt("periodic-re-eval")`. Items skipped only because their prior worker is still running are excluded from the stamp; the next poll re-evaluates them without delay.
+**Fix A (band-aid, superseded by Fix B):** The original Fix A excluded in-flight items from the `CooldownAt("periodic-re-eval")` stamp. This was revised during code review: in-flight items now receive the cooldown stamp (preventing deep-fetch churn while the worker runs), and the `WorkerExited → WorkerLifecycleChanged` wake signal guarantees prompt re-dispatch after the worker finishes, bypassing the cooldown via the `mayNeedWork` cycleSet.
 
 **Fix B (architectural):** `e.inFlight sync.Map` has been removed from the Engine struct. Worker lifecycle is now entirely Store-backed:
 
 - `WorkerEntered{Repo, Number, StageName, StartedAt}` — new mutation type; applied synchronously at the 4 dispatch sites (main dispatch loop + 3 reinvoke dispatchers) before `wg.Add(1)` and before the goroutine starts.
 - `WorkerExited{Repo, Number}` — already existed; deferred at the top of each goroutine so it fires on any exit path (context cancel, `ensureRepoReady` failure, normal return).
-- Both mutations emit `WorkerChanged`; `WorkerChanged` has been added to `wakeChFlags`.
+- Both mutations emit `WorkerChanged | WorkerLifecycleChanged`; `WorkerLifecycleChanged` (not the broader `WorkerChanged`) has been added to `wakeChFlags` — this prevents `WorkerHeartbeat`/`WorkerPIDSet` (which emit only `WorkerChanged`) from causing spurious deep-fetch cycles for in-flight items.
 - The dispatch guard changed from `e.inFlight.Load(iKey) != nil` to `snap.Worker() != nil` (Store-backed).
 
 **Effect:** `WorkerExited` deterministically wakes the dispatcher. The previous race window — where a departing worker's cleanup delayed next-stage dispatch by up to 150s — is eliminated. The Store is now the single source of truth for all engine state the dispatcher cares about.
