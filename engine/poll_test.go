@@ -1595,10 +1595,9 @@ func TestSeedLabels_multiRepo(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // collectPollLogs captures log messages emitted during a single poll call.
-// The channel is not closed after poll returns so that background goroutines
-// spawned by the dispatch loop can still send to it without panicking.
-// Poll-level log lines (board fetch, item deep-fetch) are emitted synchronously
-// before any goroutines are launched, so they are always in the buffer on return.
+// Waits for all dispatched worker goroutines to finish (via eng.wg) before
+// returning so that callers can safely reassign eng.events for a subsequent poll
+// without racing against goroutines that still read the field.
 func collectPollLogs(t *testing.T, eng *Engine) []string {
 	t.Helper()
 	events := make(chan tui.Event, 256)
@@ -1606,7 +1605,8 @@ func collectPollLogs(t *testing.T, eng *Engine) []string {
 	if _, err := eng.poll(context.Background()); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
-	// Non-blocking drain: read what's already buffered without closing the channel.
+	eng.wg.Wait() // drain background workers before caller touches eng.events again
+	// Non-blocking drain: read what's already buffered.
 	var msgs []string
 	for {
 		select {
