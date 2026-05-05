@@ -171,12 +171,13 @@ func (m CheckRunCompleted) itemKey() string {
 	return ""
 }
 
-// ---- Self-mutations (write-through from fabrik's own GitHub mutations) ----
+// ---- Cache enrichment mutations (populated from read-side lookups) ----
 
 // ItemIDRegistered sets the project-item node ID for an existing Store entry that
 // was added without one (e.g., via issues.opened before projects_v2_item.created).
-// Returns ChangeFlags(0) — the itemIDToKey reverse index is updated via
-// reflect.DeepEqual detection in applySingleItem regardless of the returned flags.
+// This is triggered by the Layer 1 fallback GraphQL lookup, not by a Fabrik-initiated
+// GitHub mutation. Returns ChangeFlags(0) — the itemIDToKey reverse index is updated
+// via reflect.DeepEqual detection in applySingleItem regardless of the returned flags.
 // Dispatch is triggered only by the subsequent UpdateItemStatus call, not by this.
 type ItemIDRegistered struct {
 	Repo   string
@@ -186,6 +187,8 @@ type ItemIDRegistered struct {
 
 func (ItemIDRegistered) isMutation() {}
 func (m ItemIDRegistered) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// ---- Self-mutations (write-through from fabrik's own GitHub mutations) ----
 
 // LocalStatusUpdated is applied after fabrik calls UpdateProjectItemStatus.
 type LocalStatusUpdated struct {
