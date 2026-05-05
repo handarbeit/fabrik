@@ -56,6 +56,20 @@ func TestWakeChObserver_SendsOnLabelsChanged(t *testing.T) {
 	}
 }
 
+func TestWakeChObserver_SendsOnAssigneesChanged(t *testing.T) {
+	wakeCh := make(chan struct{}, 1)
+	store := newTestStore()
+	unsub := store.Subscribe(newWakeChObserver(wakeCh))
+	defer unsub()
+
+	store.Apply(itemstate.IssueAssigneesUpdated{Repo: "owner/repo", Number: 1, Assignees: []string{"user1"}})
+	select {
+	case <-wakeCh:
+	default:
+		t.Fatal("expected wake signal on AssigneesChanged")
+	}
+}
+
 func TestWakeChObserver_SkipsInvocationChanged(t *testing.T) {
 	wakeCh := make(chan struct{}, 1)
 	store := newTestStore()
@@ -147,6 +161,23 @@ func TestMayNeedWorkObserver_KeyFormat(t *testing.T) {
 	mu.Unlock()
 	if !ok {
 		t.Fatalf("expected key %q in set", want)
+	}
+}
+
+func TestMayNeedWorkObserver_PopulatesKeyOnAssigneesChanged(t *testing.T) {
+	var mu sync.Mutex
+	set := make(map[string]bool)
+	store := newTestStore()
+	unsub := store.Subscribe(newMayNeedWorkObserver(&mu, &set))
+	defer unsub()
+
+	store.Apply(itemstate.IssueAssigneesUpdated{Repo: "owner/repo", Number: 1, Assignees: []string{"user1"}})
+
+	mu.Lock()
+	ok := set["owner/repo#1"]
+	mu.Unlock()
+	if !ok {
+		t.Fatalf("expected key %q in mayNeedWork set", "owner/repo#1")
 	}
 }
 
