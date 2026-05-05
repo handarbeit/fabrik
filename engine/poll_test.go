@@ -1800,10 +1800,10 @@ func TestPoll_LogItemFromCache(t *testing.T) {
 	}
 }
 
-// TestNoCooldownForInFlightItem verifies that CooldownAt("periodic-re-eval") is
-// NOT stamped for items whose dispatch was skipped solely because a worker from a
-// prior poll cycle is still in flight. Stamping the cooldown in this case delays
-// the next-stage dispatch by up to PollSeconds*10 (~150s at defaults).
+// TestCooldownStampedForInFlightItem verifies that CooldownAt("periodic-re-eval") IS
+// stamped for items whose dispatch was skipped because a worker from a prior poll cycle
+// is still in flight. Stamping is intentional — it prevents repeated deep-fetch churn
+// while the worker runs. Prompt re-dispatch is guaranteed by WorkerExited → WorkerLifecycleChanged.
 func TestCooldownStampedForInFlightItem(t *testing.T) {
 	// In-flight items are still deep-fetched (to keep their Store state fresh)
 	// and receive a CooldownAt["periodic-re-eval"] stamp to prevent repeated
