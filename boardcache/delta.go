@@ -441,40 +441,77 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 
 	repo := p.Repository.FullName
 	prNum := p.PullRequest.Number
-	pk := prKey(repo, prNum)
 
 	switch p.Action {
 	case "opened", "closed", "synchronize", "reopened":
 		// SHA-tracking path — handled after this switch.
 
 	case "ready_for_review":
-		c.mu.Lock()
-		if pr, ok := c.linkedPRs[pk]; ok {
-			pr.Draft = false
+		// Look up linked issue via Store's prToKey index (no c.mu held).
+		// Requires PR linkage to be established first via PRHeadSHAUpdated.
+		issKey, issFound := c.store.GetByPRKey(repo, prNum)
+		if !issFound {
+			return
 		}
-		issKey, _ := c.prNumToKey[pk]
-		c.mu.Unlock()
-		if issKey != "" {
-			c.bumpLocalDeltaAt(issKey)
+		issRepo, issNum, parseOK := parseItemKey(issKey)
+		if !parseOK {
+			return
 		}
+		// Read current PR details and apply updated Draft=false.
+		snap, snapErr := c.store.Get(issRepo, issNum)
+		if snapErr != nil {
+			return
+		}
+		lpr := snap.LinkedPR()
+		if lpr == nil {
+			return
+		}
+		c.store.Apply(itemstate.PRDetailsUpdated{
+			Repo:     issRepo,
+			Number:   issNum,
+			PRNumber: lpr.Number,
+			Title:    lpr.Title,
+			State:    lpr.State,
+			Merged:   lpr.Merged,
+			Draft:    false,
+		})
+		c.bumpLocalDeltaAt(issKey)
 		return
 
 	case "converted_to_draft":
-		c.mu.Lock()
-		if pr, ok := c.linkedPRs[pk]; ok {
-			pr.Draft = true
+		// Look up linked issue via Store's prToKey index (no c.mu held).
+		// Requires PR linkage to be established first via PRHeadSHAUpdated.
+		issKey, issFound := c.store.GetByPRKey(repo, prNum)
+		if !issFound {
+			return
 		}
-		issKey, _ := c.prNumToKey[pk]
-		c.mu.Unlock()
-		if issKey != "" {
-			c.bumpLocalDeltaAt(issKey)
+		issRepo, issNum, parseOK := parseItemKey(issKey)
+		if !parseOK {
+			return
 		}
+		// Read current PR details and apply updated Draft=true.
+		snap, snapErr := c.store.Get(issRepo, issNum)
+		if snapErr != nil {
+			return
+		}
+		lpr := snap.LinkedPR()
+		if lpr == nil {
+			return
+		}
+		c.store.Apply(itemstate.PRDetailsUpdated{
+			Repo:     issRepo,
+			Number:   issNum,
+			PRNumber: lpr.Number,
+			Title:    lpr.Title,
+			State:    lpr.State,
+			Merged:   lpr.Merged,
+			Draft:    true,
+		})
+		c.bumpLocalDeltaAt(issKey)
 		return
 
 	case "review_requested":
-		c.mu.RLock()
-		issKey, issFound := c.prNumToKey[pk]
-		c.mu.RUnlock()
+		issKey, issFound := c.store.GetByPRKey(repo, prNum)
 		if !issFound {
 			return
 		}
@@ -495,9 +532,7 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 		return
 
 	case "review_request_removed":
-		c.mu.RLock()
-		issKey, issFound := c.prNumToKey[pk]
-		c.mu.RUnlock()
+		issKey, issFound := c.store.GetByPRKey(repo, prNum)
 		if !issFound {
 			return
 		}
@@ -521,31 +556,28 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 
 	// --- SHA-tracking path (opened, closed, synchronize, reopened) ---
 	sha := p.PullRequest.Head.SHA
-	prDetails := &gh.PRDetails{
-		Number:         prNum,
-		Title:          p.PullRequest.Title,
-		State:          p.PullRequest.State,
-		Merged:         p.PullRequest.Merged,
-		Draft:          p.PullRequest.Draft,
-		HeadSHA:        sha,
-		MergeableState: p.PullRequest.MergeableState,
-	}
 
 	owner, repoName, ok := splitRepo(repo)
 	if !ok {
 		return
 	}
 
-	// Always store/update PR details regardless of whether we find a linked issue.
-	c.mu.Lock()
-	c.linkedPRs[pk] = prDetails
-	issKey, issFound := c.prNumToKey[pk]
-	c.mu.Unlock()
+	// Look up linked issue via Store's prToKey index (no c.mu held).
+	issKey, issFound := c.store.GetByPRKey(repo, prNum)
 
 	if issFound {
 		// Normal path: linked issue is already known.
 		issRepo, issNum2, parseOK := parseItemKey(issKey)
 		if parseOK {
+			c.store.Apply(itemstate.PRDetailsUpdated{
+				Repo:     issRepo,
+				Number:   issNum2,
+				PRNumber: prNum,
+				Title:    p.PullRequest.Title,
+				State:    p.PullRequest.State,
+				Merged:   p.PullRequest.Merged,
+				Draft:    p.PullRequest.Draft,
+			})
 			c.store.Apply(itemstate.PRHeadSHAUpdated{
 				Repo:   issRepo,
 				Number: issNum2,
@@ -577,15 +609,24 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 		c.logFn("[cache] dropped pull_request delta for PR #%d: no closing issue in cache\n", prNum)
 		return
 	}
-	// Confirm item still in Store before updating prNumToKey.
+	// Confirm item still in Store before proceeding.
 	if _, storeErr := c.store.Get(repo, resolvedIssNum); storeErr != nil {
 		c.recentMissCache[mk] = time.Now()
 		c.mu.Unlock()
 		return
 	}
-	c.prNumToKey[pk] = key
 	c.mu.Unlock()
+	// prToKey is populated by PRHeadSHAUpdated via updateIndexes — no explicit write needed.
 
+	c.store.Apply(itemstate.PRDetailsUpdated{
+		Repo:     repo,
+		Number:   resolvedIssNum,
+		PRNumber: prNum,
+		Title:    p.PullRequest.Title,
+		State:    p.PullRequest.State,
+		Merged:   p.PullRequest.Merged,
+		Draft:    p.PullRequest.Draft,
+	})
 	c.store.Apply(itemstate.PRHeadSHAUpdated{
 		Repo:        repo,
 		Number:      resolvedIssNum,
@@ -614,7 +655,6 @@ func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 	}
 	repo := p.Repository.FullName
 	prNum := p.PullRequest.Number
-	pk := prKey(repo, prNum)
 
 	owner, repoName, ok := splitRepo(repo)
 	if !ok {
@@ -628,10 +668,8 @@ func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 		DatabaseID: p.Review.DatabaseID,
 	}
 
-	// Normal path: look up issue via prNumToKey.
-	c.mu.RLock()
-	issKey, issFound := c.prNumToKey[pk]
-	c.mu.RUnlock()
+	// Normal path: look up issue via Store's prToKey index (no c.mu held).
+	issKey, issFound := c.store.GetByPRKey(repo, prNum)
 
 	if issFound {
 		issRepo, issNum, parseOK := parseItemKey(issKey)
@@ -673,8 +711,8 @@ func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 		c.mu.Unlock()
 		return
 	}
-	c.prNumToKey[pk] = key
 	c.mu.Unlock()
+	// prToKey is populated by PRHeadSHAUpdated via updateIndexes — no explicit write needed.
 
 	c.store.Apply(itemstate.PRHeadSHAUpdated{
 		Repo:        repo,
@@ -733,10 +771,8 @@ func (c *CacheImpl) applyPullRequestReviewCommentDelta(payload []byte) {
 		comment.OriginalLine = *p.Comment.OriginalLine
 	}
 
-	// Normal path: look up issue via prNumToKey.
-	c.mu.RLock()
-	issKey, issFound := c.prNumToKey[pk]
-	c.mu.RUnlock()
+	// Normal path: look up issue via Store's prToKey index (no c.mu held).
+	issKey, issFound := c.store.GetByPRKey(repo, prNum)
 
 	if issFound {
 		issRepo, issNum, parseOK := parseItemKey(issKey)
@@ -782,8 +818,8 @@ func (c *CacheImpl) applyPullRequestReviewCommentDelta(payload []byte) {
 		c.mu.Unlock()
 		return
 	}
-	c.prNumToKey[pk] = key
 	c.mu.Unlock()
+	// prToKey is populated by PRHeadSHAUpdated via updateIndexes — no explicit write needed.
 
 	c.store.Apply(itemstate.PRHeadSHAUpdated{
 		Repo:        repo,
