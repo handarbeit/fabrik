@@ -453,6 +453,9 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return WorkerChanged
 
 	case WorkerExited:
+		if item.Worker == nil {
+			return 0 // no-op: already exited (e.g. redundant defer in processItem after the goroutine-level defer fires)
+		}
 		item.Worker = nil
 		return WorkerChanged | WorkerLifecycleChanged
 
