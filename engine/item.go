@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +22,10 @@ import (
 // labels to detect competing locks from other Fabrik instances. Declared as a
 // var (not const) so tests can set it to 0 without a 2-second sleep per test.
 var lockVerifyDelay = 2 * time.Second
+
+// editingLabelRetryDelay is the base delay for removeEditingLabel retry backoff.
+// Declared as a var so tests can set it to 0 to avoid sleeping.
+var editingLabelRetryDelay = 500 * time.Millisecond
 
 // isEngineManagedPath returns true for paths that are written by the Fabrik
 // engine itself and should never be treated as user-generated dirty content.
@@ -1155,12 +1161,54 @@ func (e *Engine) baseBranchForItem(item gh.ProjectItem, wm *WorktreeManager) (st
 	return wm.DefaultBaseBranch()
 }
 
-func (e *Engine) removeEditingLabel(owner, repo string, issueNumber int) {
-	if err := e.client.RemoveLabelFromIssue(owner, repo, issueNumber, "fabrik:editing"); err != nil {
-		e.logf(issueNumber, "warn", "could not remove editing label: %v\n", err)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, issueNumber), "fabrik:editing")
+// isTransientError reports whether err represents a transient failure that is
+// safe to retry: network-layer errors, unexpected EOF on partial responses, HTTP
+// 5xx responses from GitHub, or connection-reset/i/o-timeout strings.
+func isTransientError(err error) bool {
+	if err == nil {
+		return false
 	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "GitHub API returned 5") {
+		return true
+	}
+	if strings.Contains(msg, "connection reset") || strings.Contains(msg, "i/o timeout") {
+		return true
+	}
+	return false
+}
+
+func (e *Engine) removeEditingLabel(owner, repo string, issueNumber int) {
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		err := e.client.RemoveLabelFromIssue(owner, repo, issueNumber, "fabrik:editing")
+		if err == nil {
+			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, issueNumber), "fabrik:editing")
+			}
+			return
+		}
+		if errors.Is(err, gh.ErrNotFound) {
+			// Label already absent — treat as success.
+			return
+		}
+		if !isTransientError(err) {
+			e.logf(issueNumber, "warn", "could not remove editing label: %v\n", err)
+			return
+		}
+		lastErr = err
+		delay := editingLabelRetryDelay << attempt
+		time.Sleep(delay)
+	}
+	e.logf(issueNumber, "warn", "could not remove editing label after %d attempts: %v\n", maxAttempts, lastErr)
 }
 
 func (e *Engine) removeLockLabel(owner, repo string, issueNumber int, label string) {
