@@ -226,6 +226,20 @@ func TestBootstrapPopulatesItems(t *testing.T) {
 	}
 }
 
+func TestNewCacheImplNilStorePanic(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("NewCacheImpl(adapter, nil, logFn) should have panicked")
+		}
+		msg, ok := r.(string)
+		if !ok || msg != "boardcache.NewCacheImpl: store must not be nil" {
+			t.Errorf("unexpected panic value: %v", r)
+		}
+	}()
+	NewCacheImpl(&mockClient{}, nil, nopLog)
+}
+
 func TestFetchProjectBoardFallsBackWhenEmpty(t *testing.T) {
 	mc := &mockClient{projectBoardResult: &gh.ProjectBoard{
 		ProjectID: "PID", Items: []gh.ProjectItem{{Number: 5, Repo: "o/r"}},
