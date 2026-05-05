@@ -480,3 +480,63 @@ func TestWorkerStoreReflectsDispatchPaths(t *testing.T) {
 		t.Errorf("expected Worker == nil when LocalLockAcquired.Worker is nil, got %+v", snap.Worker())
 	}
 }
+
+// TestRunStartupCleanup_StaleEditingLabel verifies that runStartupCleanup removes
+// fabrik:editing from an item whose Worker is nil (orphaned by a prior crash).
+func TestRunStartupCleanup_StaleEditingLabel(t *testing.T) {
+	editingLabelRetryDelay = 0
+	client := &mockGitHubClient{}
+	e := testEngine(client, &mockClaudeInvoker{})
+
+	bootstrapItem(t, e, 20, []string{"fabrik:editing"})
+
+	// Confirm Worker is nil.
+	if w := getWorker(t, e, 20); w != nil {
+		t.Fatalf("expected Worker == nil before cleanup, got %+v", w)
+	}
+
+	e.runStartupCleanup()
+
+	removed := removeLabelsCalled(client, 20)
+	if !hasRemovedLabel(removed, "fabrik:editing") {
+		t.Errorf("expected fabrik:editing to be removed; got: %v", removed)
+	}
+}
+
+// TestRunStartupCleanup_ActiveWorkerSkipsEditing verifies that runStartupCleanup
+// does NOT remove fabrik:editing when the item has an active Worker.
+func TestRunStartupCleanup_ActiveWorkerSkipsEditing(t *testing.T) {
+	editingLabelRetryDelay = 0
+	client := &mockGitHubClient{}
+	e := testEngine(client, &mockClaudeInvoker{})
+
+	bootstrapItem(t, e, 21, []string{"fabrik:editing"})
+	setWorker(e, 21, os.Getpid(), "Implement", time.Now())
+
+	e.runStartupCleanup()
+
+	removed := removeLabelsCalled(client, 21)
+	if hasRemovedLabel(removed, "fabrik:editing") {
+		t.Errorf("startup cleanup incorrectly removed fabrik:editing for active worker")
+	}
+}
+
+// TestRunStartupCleanup_EditingLabelErrNotFound_Silent verifies that ErrNotFound
+// during startup editing-label cleanup is treated as a no-op (idempotency).
+func TestRunStartupCleanup_EditingLabelErrNotFound_Silent(t *testing.T) {
+	editingLabelRetryDelay = 0
+	client := &mockGitHubClient{
+		removeLabelFromIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			if labelName == "fabrik:editing" {
+				return gh.ErrNotFound
+			}
+			return nil
+		},
+	}
+	e := testEngine(client, &mockClaudeInvoker{})
+
+	bootstrapItem(t, e, 22, []string{"fabrik:editing"})
+
+	// Should not panic and should not produce a warning.
+	e.runStartupCleanup()
+}
