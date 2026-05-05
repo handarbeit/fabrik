@@ -159,6 +159,9 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		output += invOutput
 		usage = addTokenUsage(usage, invUsage)
 
+		// hitLimit uses currentBudget > 0 (not base > 0) so that extension only fires
+		// when fabrik:extend-turns is present. Unlike the stage path, comment-review
+		// extension is intentionally label-gated: no silent budget expansion without opt-in.
 		hitLimit := !invCompleted && err == nil && currentBudget > 0 && invUsage.TurnsUsed >= currentBudget
 		if !hitLimit || totalMultiple >= 3 {
 			break
