@@ -78,7 +78,6 @@ type Engine struct {
 	wakeCh               chan struct{}         // TUI sends on this to wake the poll loop immediately; nil if no TUI
 	sem                  chan struct{}         // semaphore bounding concurrent workers across poll cycles
 	wg                   sync.WaitGroup        // tracks in-flight workers for graceful shutdown
-	inFlight             sync.Map              // key: issueKey string, value: bool (isPR)
 	cloneInFlight        sync.Map              // key: "owner/repo" string, value: *cloneCall; per-repo bare-clone coordination
 	baseBranchWarnedSet  sync.Map              // key: "owner/repo#N:branch"; prevents repeated fallback comments for bad base: labels
 	events               chan tui.Event        // nil in tests / plain-text mode; TUI goroutine consumes
