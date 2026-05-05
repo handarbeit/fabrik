@@ -336,3 +336,195 @@ func TestIsReviewReinvoke_EmptySlice_ReturnsFalse(t *testing.T) {
 		t.Error("expected false for empty slice")
 	}
 }
+
+// ── fabrik:extend-turns in comment processing ─────────────────────────────────
+
+// TestCommentProcessingExtendTurnsLabelAbsent verifies that when fabrik:extend-turns
+// is absent, MaxTurnsOverride=0 is passed to InvokeForComments (base budget used).
+func TestCommentProcessingExtendTurnsLabelAbsent(t *testing.T) {
+	skipIfNoGit(t)
+
+	client := &mockGitHubClient{
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			return 0, nil
+		},
+	}
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(s *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "comment output", false, TokenUsage{TurnsUsed: 3}, nil
+		},
+	}
+
+	eng := testEngineWithRepo(t, client, claude)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	stage := &stages.Stage{Name: "Research", CommentMaxTurns: 5}
+	item := gh.ProjectItem{
+		Number: 30,
+		Body:   "spec",
+		// No fabrik:extend-turns label
+	}
+	userComments := []gh.Comment{
+		{ID: "C_1", DatabaseID: 800, Author: "testuser", Body: "please research"},
+	}
+
+	if err := eng.processComments(context.Background(), board, item, stage, userComments); err != nil {
+		t.Fatalf("processComments: %v", err)
+	}
+
+	calls := claude.forCommentsCalls
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 InvokeForComments call, got %d", len(calls))
+	}
+	if calls[0].opts.MaxTurnsOverride != 0 {
+		t.Errorf("MaxTurnsOverride = %d, want 0 (label absent → base budget)", calls[0].opts.MaxTurnsOverride)
+	}
+}
+
+// TestCommentProcessingExtendTurnsLabelPresent verifies that when fabrik:extend-turns
+// is present, the first InvokeForComments call uses 2× commentMaxTurns as MaxTurnsOverride.
+func TestCommentProcessingExtendTurnsLabelPresent(t *testing.T) {
+	skipIfNoGit(t)
+
+	client := &mockGitHubClient{
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			return 0, nil
+		},
+	}
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(s *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "comment output", false, TokenUsage{TurnsUsed: 3}, nil
+		},
+	}
+
+	eng := testEngineWithRepo(t, client, claude)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	stage := &stages.Stage{Name: "Research", CommentMaxTurns: 5}
+	item := gh.ProjectItem{
+		Number: 31,
+		Body:   "spec",
+		Labels: []string{"fabrik:extend-turns"},
+	}
+	userComments := []gh.Comment{
+		{ID: "C_2", DatabaseID: 801, Author: "testuser", Body: "please research"},
+	}
+
+	if err := eng.processComments(context.Background(), board, item, stage, userComments); err != nil {
+		t.Fatalf("processComments: %v", err)
+	}
+
+	calls := claude.forCommentsCalls
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 InvokeForComments call, got %d", len(calls))
+	}
+	wantOverride := 2 * commentMaxTurns(stage) // 2 × 5 = 10
+	if calls[0].opts.MaxTurnsOverride != wantOverride {
+		t.Errorf("MaxTurnsOverride = %d, want %d (2× commentMaxTurns)", calls[0].opts.MaxTurnsOverride, wantOverride)
+	}
+}
+
+// TestCommentProcessingExtendTurnsProgressDetected verifies the full 2×→3× loop:
+// label present, first invocation hits limit, progress detected → second invocation at 3× total.
+// Uses Validate stage: detectProgress checks comment count via FetchItemDetails mock.
+func TestCommentProcessingExtendTurnsProgressDetected(t *testing.T) {
+	skipIfNoGit(t)
+
+	const commentMaxTurnsVal = 5
+	budget2x := 2 * commentMaxTurnsVal // 10
+	budget1x := commentMaxTurnsVal     // 5 (second slot)
+
+	var callCount int
+	client := &mockGitHubClient{
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			return 0, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			// Simulate progress: add a new comment on re-fetch.
+			item.Comments = append(item.Comments, gh.Comment{Body: "new comment"})
+			return nil
+		},
+	}
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(s *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			callCount++
+			if callCount == 1 {
+				// Hit the budget without completing.
+				return "partial output", false, TokenUsage{TurnsUsed: opts.MaxTurnsOverride}, nil
+			}
+			return "final output", true, TokenUsage{TurnsUsed: 3}, nil
+		},
+	}
+
+	eng := testEngineWithRepo(t, client, claude)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	stage := &stages.Stage{Name: "Validate", CommentMaxTurns: commentMaxTurnsVal}
+	item := gh.ProjectItem{
+		Number: 32,
+		Body:   "spec",
+		Labels: []string{"fabrik:extend-turns"},
+		// No comments initially → baseline commentCount=0; FetchItemDetails adds one.
+	}
+	userComments := []gh.Comment{
+		{ID: "C_3", DatabaseID: 802, Author: "testuser", Body: "please validate"},
+	}
+
+	if err := eng.processComments(context.Background(), board, item, stage, userComments); err != nil {
+		t.Fatalf("processComments: %v", err)
+	}
+
+	calls := claude.forCommentsCalls
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 InvokeForComments calls (2×→3× extension), got %d", len(calls))
+	}
+	if calls[0].opts.MaxTurnsOverride != budget2x {
+		t.Errorf("first call MaxTurnsOverride = %d, want %d (2× budget)", calls[0].opts.MaxTurnsOverride, budget2x)
+	}
+	if calls[1].opts.MaxTurnsOverride != budget1x {
+		t.Errorf("second call MaxTurnsOverride = %d, want %d (1× extension)", calls[1].opts.MaxTurnsOverride, budget1x)
+	}
+}
+
+// TestCommentProcessingExtendTurnsNoProgress verifies that when label is present, budget is
+// hit, but no progress is detected, there is no re-invoke.
+// Uses Research stage: detectProgress always returns false for no-signal stages.
+func TestCommentProcessingExtendTurnsNoProgress(t *testing.T) {
+	skipIfNoGit(t)
+
+	const commentMaxTurnsVal = 5
+	budget2x := 2 * commentMaxTurnsVal // 10
+
+	client := &mockGitHubClient{
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			return 0, nil
+		},
+	}
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(s *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			// Hit the budget without completing; no progress signal for Research stage.
+			return "partial output", false, TokenUsage{TurnsUsed: opts.MaxTurnsOverride}, nil
+		},
+	}
+
+	eng := testEngineWithRepo(t, client, claude)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	stage := &stages.Stage{Name: "Research", CommentMaxTurns: commentMaxTurnsVal}
+	item := gh.ProjectItem{
+		Number: 33,
+		Body:   "spec",
+		Labels: []string{"fabrik:extend-turns"},
+	}
+	userComments := []gh.Comment{
+		{ID: "C_4", DatabaseID: 803, Author: "testuser", Body: "please research"},
+	}
+
+	if err := eng.processComments(context.Background(), board, item, stage, userComments); err != nil {
+		t.Fatalf("processComments: %v", err)
+	}
+
+	calls := claude.forCommentsCalls
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 InvokeForComments call (no re-invoke on no-progress), got %d", len(calls))
+	}
+	if calls[0].opts.MaxTurnsOverride != budget2x {
+		t.Errorf("MaxTurnsOverride = %d, want %d (2× budget pre-granted)", calls[0].opts.MaxTurnsOverride, budget2x)
+	}
+}
