@@ -94,7 +94,7 @@ func TestStoreUnification_WorkerLivenessLabelRead(t *testing.T) {
 	eng, cache := testEngineWithCache(client, &mockClaudeInvoker{})
 
 	// Simulate a webhook delivering "fabrik:locked:testuser" to the cache's delta path.
-	// cacheImpl.ApplyLabelAdded applies IssueLabeled on c.store, which after unification
+	// cacheImpl.ApplyLabelAdded applies LocalLabelAdded on c.store, which after unification
 	// is the same pointer as eng.store.
 	lockLabel := fmt.Sprintf("fabrik:locked:%s", eng.cfg.User)
 	cache.ApplyLabelAdded(boardcache.ItemKey("owner/repo", 1), lockLabel)
