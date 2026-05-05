@@ -1591,6 +1591,47 @@ func TestCacheImplSubscribeUnsubscribeStopsCalls(t *testing.T) {
 	}
 }
 
+// TestPullRequestDeltaFiresLinkedPRChangedObserver verifies the end-to-end
+// path: a pull_request "opened" webhook delta emits LinkedPRChanged via the
+// Store observer, and the resulting snapshot has LinkedPR.Title populated.
+// Mirrors TestCacheImplSubscribeReceivesChanges but exercises the PR-details
+// mutation path introduced in Phase 5 F2 (issue #562).
+func TestPullRequestDeltaFiresLinkedPRChangedObserver(t *testing.T) {
+	c := seedCache(t)
+	// Establish PR linkage: item #1 → PR #42.
+	testSetLinkedPR(c, "owner/repo", 1, 42)
+
+	var mu sync.Mutex
+	var seenLinkedPRChanged bool
+	var titleAfterChange string
+	unsub := c.Subscribe(itemstate.ObserverFunc(func(ch itemstate.Change, snap itemstate.Snapshot) {
+		if ch.Fields&itemstate.LinkedPRChanged != 0 {
+			mu.Lock()
+			seenLinkedPRChanged = true
+			if lpr := snap.LinkedPR(); lpr != nil {
+				titleAfterChange = lpr.Title
+			}
+			mu.Unlock()
+		}
+	}))
+	defer unsub()
+
+	// "opened" delta carries title/state/draft and updates LinkedPR details.
+	c.ApplyDelta("pull_request", pullRequestPayloadJSON("opened", "owner/repo", 42, "sha-abc", "open", false, false))
+
+	mu.Lock()
+	saw := seenLinkedPRChanged
+	title := titleAfterChange
+	mu.Unlock()
+
+	if !saw {
+		t.Error("want LinkedPRChanged observer fired after pull_request.opened delta; got none")
+	}
+	if title == "" {
+		t.Error("want non-empty LinkedPR.Title in observer snapshot; got empty")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // SubscribePause tests
 // ---------------------------------------------------------------------------
