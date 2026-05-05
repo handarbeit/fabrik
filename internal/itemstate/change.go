@@ -14,8 +14,12 @@ const (
 	LockChanged
 	// StageStateChanged indicates StageState (attempts, cycles, pauses) changed.
 	StageStateChanged
-	// WorkerChanged indicates the Worker handle was set or cleared.
+	// WorkerChanged indicates any Worker-handle field changed (set, cleared, heartbeat, PID).
 	WorkerChanged
+	// WorkerLifecycleChanged is a sub-flag emitted only by WorkerEntered and WorkerExited.
+	// It is the flag that drives wakeChFlags / mayNeedWork so heartbeats and PID-sets
+	// do not cause spurious deep-fetch cycles for in-flight items.
+	WorkerLifecycleChanged
 	// CooldownChanged indicates CooldownAt map entries were added or removed.
 	CooldownChanged
 	// LinkedPRChanged indicates LinkedPR state (including check runs) changed.
