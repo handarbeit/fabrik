@@ -389,10 +389,8 @@ func TestCatchUpLoop_InFlightGuard(t *testing.T) {
 	eng.cfg.MaxReviewCycles = 5
 
 	// Pre-populate the store Worker to simulate a goroutine already running.
-	// The review reinvoke catch-up loop uses store.Worker != nil as the semantic
-	// in-flight guard (not inFlight). Also set inFlight for the main dispatch guard.
-	iKey := "owner/repo#42"
-	eng.inFlight.Store(iKey, false)
+	// The dispatch guard uses snap.Worker() != nil (Store-backed) so only the
+	// Store mutation is needed; no separate inFlight map entry is required.
 	eng.store.Apply(itemstate.LocalLockAcquired{
 		Repo:       "owner/repo",
 		Number:     42,
