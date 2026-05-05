@@ -110,6 +110,34 @@ func TestItemNeedsWork_LockedByOtherUser(t *testing.T) {
 	}
 }
 
+// TestItemNeedsWork_Editing_ReturnsFalse verifies that items with fabrik:editing
+// are filtered out in itemNeedsWork (pre-dispatch gate).
+func TestItemNeedsWork_Editing_ReturnsFalse(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	item := gh.ProjectItem{
+		Number: 44,
+		Status: "Research",
+		Labels: []string{"fabrik:editing"},
+	}
+	if eng.itemNeedsWork(item) {
+		t.Error("item with fabrik:editing should not need work (itemNeedsWork pre-dispatch gate)")
+	}
+}
+
+// TestItemNeedsWork_Editing_Cleared_ReturnsTrue confirms the gate clears when
+// fabrik:editing is absent.
+func TestItemNeedsWork_Editing_Cleared_ReturnsTrue(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	item := gh.ProjectItem{
+		Number: 44,
+		Status: "Research",
+		Labels: []string{},
+	}
+	if !eng.itemNeedsWork(item) {
+		t.Error("item without fabrik:editing should need work (gate should clear)")
+	}
+}
+
 // TestBlockOnInput_Success covers both AddLabel calls.
 func TestBlockOnInput_Success(t *testing.T) {
 	client := &mockGitHubClient{}
