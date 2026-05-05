@@ -453,7 +453,7 @@ func TestDeltaIssuesUnlabeled(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Delta: pull_request — update linkedPRs and SHA index in Store
+// Delta: pull_request — update PR details (LinkedPRState) and SHA index in Store
 // ---------------------------------------------------------------------------
 
 func pullRequestPayloadJSON(action, repo string, prNum int, sha, state string, merged, draft bool) []byte {
