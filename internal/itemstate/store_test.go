@@ -822,8 +822,19 @@ func TestCheckRunBufferedForUnknownSHA(t *testing.T) {
 		t.Errorf("CheckRunsBySHA: got run ID %d, want 42", runs[0].ID)
 	}
 
+	// Identical duplicate is a no-op: zero changes returned, no observer notification.
+	var observedNoOp bool
+	unsub := s.Subscribe(ObserverFunc(func(_ Change, _ Snapshot) { observedNoOp = true }))
+	_, noopChanges, _ := s.Apply(CheckRunCompleted{Repo: testRepo, SHA: "sha_prelinkage", Run: run})
+	unsub()
+	if len(noopChanges) != 0 {
+		t.Errorf("identical duplicate: expected 0 changes, got %d", len(noopChanges))
+	}
+	if observedNoOp {
+		t.Error("identical duplicate: observer must not be notified")
+	}
+
 	// Upsert idempotency: applying the same-ID run twice keeps only one copy.
-	s.Apply(CheckRunCompleted{Repo: testRepo, SHA: "sha_prelinkage", Run: run})
 	runs2 := s.CheckRunsBySHA("sha_prelinkage")
 	if len(runs2) != 1 {
 		t.Errorf("upsert: expected 1 run after duplicate apply, got %d", len(runs2))
