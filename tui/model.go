@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -64,6 +65,9 @@ type watchExitMsg struct{ Err error }
 
 // claudeResumeFinishedMsg is returned by tea.ExecProcess when the claude --resume subprocess exits.
 type claudeResumeFinishedMsg struct{ Err error }
+
+// abtopFinishedMsg is returned by tea.ExecProcess when the abtop subprocess exits.
+type abtopFinishedMsg struct{ Err error }
 
 // pane identifies which TUI section has focus.
 type pane int
@@ -305,6 +309,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
+		case "a":
+			if _, err := exec.LookPath("abtop"); err != nil {
+				m.header.SetStatusMsg("abtop not found in PATH — install from github.com/graykode/abtop")
+				return m, nil
+			}
+			return m, openAbtopInlineCmd()
+
 		case "c", "C":
 			if m.focusPane == paneHistory {
 				comp, cmd := m.history.Update(msg)
@@ -354,6 +365,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case claudeResumeFinishedMsg:
+		return m, nil
+
+	case abtopFinishedMsg:
 		return m, nil
 
 	case TickEvent:
