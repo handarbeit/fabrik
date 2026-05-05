@@ -33,6 +33,7 @@ KEYBOARD SHORTCUTS
     C          Clear all history (with confirmation)
 
   Global
+    a          Open abtop AI session monitor
     w          Wake: reset idle backoff and poll immediately
     ?          Toggle this help panel
     q          Quit
