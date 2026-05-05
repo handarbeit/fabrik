@@ -792,3 +792,111 @@ func TestPRToKeyPopulatedByPRHeadSHAUpdated(t *testing.T) {
 		t.Errorf("key = %q; want %q", key, want)
 	}
 }
+
+// TestCheckRunBufferedForUnknownSHA verifies that CheckRunCompleted for an unknown SHA
+// buffers the run in pendingCheckRuns and returns a CheckRunChanged change.
+func TestCheckRunBufferedForUnknownSHA(t *testing.T) {
+	s := NewStore(nil)
+
+	run := gh.CheckRun{ID: 42, Name: "ci/test", Status: "completed", Conclusion: "success"}
+	_, changes, err := s.Apply(CheckRunCompleted{Repo: testRepo, SHA: "sha_prelinkage", Run: run})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(changes) != 1 {
+		t.Fatalf("expected 1 change, got %d", len(changes))
+	}
+	if changes[0].Fields&CheckRunChanged == 0 {
+		t.Errorf("expected CheckRunChanged flag; got %v", changes[0].Fields)
+	}
+	if changes[0].Repo != "" || changes[0].Number != 0 {
+		t.Errorf("pre-linkage change should have empty Repo/Number; got %q/%d", changes[0].Repo, changes[0].Number)
+	}
+
+	// CheckRunsBySHA must return the buffered run.
+	runs := s.CheckRunsBySHA("sha_prelinkage")
+	if len(runs) != 1 {
+		t.Fatalf("CheckRunsBySHA: expected 1 run, got %d", len(runs))
+	}
+	if runs[0].ID != 42 {
+		t.Errorf("CheckRunsBySHA: got run ID %d, want 42", runs[0].ID)
+	}
+
+	// Upsert idempotency: applying the same-ID run twice keeps only one copy.
+	s.Apply(CheckRunCompleted{Repo: testRepo, SHA: "sha_prelinkage", Run: run})
+	runs2 := s.CheckRunsBySHA("sha_prelinkage")
+	if len(runs2) != 1 {
+		t.Errorf("upsert: expected 1 run after duplicate apply, got %d", len(runs2))
+	}
+
+	// Reset must clear the buffer.
+	s.Reset(nil)
+	if got := s.CheckRunsBySHA("sha_prelinkage"); len(got) != 0 {
+		t.Errorf("after Reset, expected empty buffer; got %d runs", len(got))
+	}
+}
+
+// TestCheckRunDrainOnPRHeadSHAUpdated verifies that PRHeadSHAUpdated drains the
+// pendingCheckRuns buffer into the linked item's LinkedPR.CheckRuns.
+func TestCheckRunDrainOnPRHeadSHAUpdated(t *testing.T) {
+	s := NewStore(nil)
+	s.Apply(IssueOpened{Item: testProjectItem(testRepo, 20)})
+
+	// Buffer two runs before linkage is established.
+	run1 := gh.CheckRun{ID: 10, Name: "ci/build", Status: "completed", Conclusion: "success"}
+	run2 := gh.CheckRun{ID: 11, Name: "ci/test", Status: "completed", Conclusion: "failure"}
+	s.Apply(CheckRunCompleted{Repo: testRepo, SHA: "sha_drain", Run: run1})
+	s.Apply(CheckRunCompleted{Repo: testRepo, SHA: "sha_drain", Run: run2})
+
+	// Apply the same run1 again — should not produce a duplicate.
+	s.Apply(CheckRunCompleted{Repo: testRepo, SHA: "sha_drain", Run: run1})
+
+	// Establish linkage via PRHeadSHAUpdated — drains the buffer.
+	_, changes, err := s.Apply(PRHeadSHAUpdated{
+		Repo:        testRepo,
+		Number:      20,
+		LinkedPRNum: 88,
+		SHA:         "sha_drain",
+	})
+	if err != nil {
+		t.Fatalf("PRHeadSHAUpdated: %v", err)
+	}
+	// Must emit both LinkedPRChanged and CheckRunChanged.
+	if len(changes) == 0 {
+		t.Fatal("expected at least one change from PRHeadSHAUpdated")
+	}
+	got := changes[0].Fields
+	if got&LinkedPRChanged == 0 {
+		t.Errorf("expected LinkedPRChanged in flags; got %v", got)
+	}
+	if got&CheckRunChanged == 0 {
+		t.Errorf("expected CheckRunChanged in flags; got %v", got)
+	}
+
+	// Snapshot must contain exactly 2 runs (run1 deduplicated).
+	snap, _ := s.Get(testRepo, 20)
+	lpr := snap.LinkedPR()
+	if lpr == nil {
+		t.Fatal("expected LinkedPR non-nil after PRHeadSHAUpdated")
+	}
+	if len(lpr.CheckRuns) != 2 {
+		t.Errorf("expected 2 CheckRuns after drain, got %d: %v", len(lpr.CheckRuns), lpr.CheckRuns)
+	}
+	if !lpr.HasHadChecks {
+		t.Error("expected HasHadChecks=true after drain")
+	}
+
+	// Buffer must now be empty; runs accessible via linked path.
+	bysha := s.CheckRunsBySHA("sha_drain")
+	if len(bysha) != 2 {
+		t.Errorf("CheckRunsBySHA post-drain: expected 2, got %d", len(bysha))
+	}
+
+	// Verify the buffer was cleared (no pre-linkage entry remains).
+	s.mu.RLock()
+	_, stillPending := s.pendingCheckRuns["sha_drain"]
+	s.mu.RUnlock()
+	if stillPending {
+		t.Error("pendingCheckRuns entry should have been deleted after drain")
+	}
+}
