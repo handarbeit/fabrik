@@ -1570,6 +1570,26 @@ func (e *Engine) applyLayer1StatusRefresh(eventType string, payload []byte, cach
 	key := boardcache.ItemKey(ev.Repository.FullName, ev.Issue.Number)
 	itemID, ok := cache.GetItemID(key)
 	if !ok {
+		// Fallback: issue is in the cache but has no itemID yet (e.g., arrived via
+		// issues.opened before a projects_v2_item.created event). Perform a single
+		// GraphQL lookup to populate both itemID and Status in one call.
+		// If Bootstrap hasn't completed yet, projectID is empty — skip to avoid a
+		// useless API call with an empty project ID during the startup window.
+		projectID := cache.ProjectID()
+		if projectID == "" {
+			return
+		}
+		fetchedItemID, fetchedStatus, err := e.client.LookupIssueProjectItem(projectID, ev.Repository.FullName, ev.Issue.Number)
+		if err != nil {
+			e.logf(ev.Issue.Number, "warn", "layer1 fallback lookup failed for %s#%d: %v\n", ev.Repository.FullName, ev.Issue.Number, err)
+			return
+		}
+		if fetchedItemID == "" {
+			// Issue is not on the project fabrik manages — silently skip.
+			return
+		}
+		cache.RegisterItemID(key, fetchedItemID)
+		cache.UpdateItemStatus(key, fetchedStatus)
 		return
 	}
 	status, err := e.client.FetchProjectItemStatus(itemID)
