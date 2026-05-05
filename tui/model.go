@@ -368,6 +368,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case abtopFinishedMsg:
+		if ev.Err != nil {
+			m.header.SetStatusMsg(fmt.Sprintf("abtop error: %v", ev.Err))
+		}
 		return m, nil
 
 	case TickEvent:
