@@ -13,14 +13,19 @@ import (
 // wakeChFlags is the set of ChangeFlags that imply "this item may need work" and
 // should wake the poll loop immediately. Changes that don't include any of these
 // flags are suppressed — they represent internal bookkeeping that doesn't affect
-// dispatch eligibility (e.g. token usage, invocation outcomes, stale heartbeats).
+// dispatch eligibility (e.g. token usage, invocation outcomes, heartbeats, PID-sets).
+//
+// WorkerLifecycleChanged (not the broader WorkerChanged) is used here so that
+// WorkerHeartbeat and WorkerPIDSet — which fire every 30s for every active worker —
+// don't enqueue items into mayNeedWork or trigger wake signals. Only the transitions
+// that actually change dispatch eligibility (WorkerEntered, WorkerExited) do so.
 const wakeChFlags = itemstate.StatusChanged |
 	itemstate.LabelsChanged |
 	itemstate.CommentsChanged |
 	itemstate.LockChanged |
 	itemstate.LinkedPRChanged |
 	itemstate.AssigneesChanged |
-	itemstate.WorkerChanged
+	itemstate.WorkerLifecycleChanged
 
 // newWakeChObserver returns an Observer that sends a non-blocking wake signal on
 // wakeCh whenever a Change includes any of the wakeChFlags. This replaces the
