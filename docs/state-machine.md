@@ -1274,7 +1274,7 @@ There is exactly one `*itemstate.Store` instance. `Engine.New()` creates it and 
 
 Because both categories write to the same store, any `store.Get(...)` returns a Snapshot with all field groups populated. `CacheImpl.Subscribe` is a thin wrapper over `c.store.Subscribe`; since `c.store` is the shared store, engine code should call `e.store.Subscribe` directly rather than going through `cacheImpl.Subscribe` to avoid double-registration.
 
-**Boundary note**: `CacheImpl` also holds `linkedPRs map[string]*gh.PRDetails` and `checkRuns map[string][]gh.CheckRun` as private maps **outside** `itemstate.Store`. These serve the `ReadClient` interface (`GetLinkedPR`, `GetCheckRuns`) and are populated by CacheImpl's delta/reconcile logic. They are cache-layer storage, not engine state — `snap.LinkedPR()` returns `LinkedPRState` (head SHA, mergeable, reviews, HasHadChecks, etc.), not the full `gh.PRDetails` object from `linkedPRs`.
+**Boundary note**: `CacheImpl` holds `checkRuns map[string][]gh.CheckRun` as a private map **outside** `itemstate.Store` (F4, tracked separately). This serves the `ReadClient` interface and is populated by CacheImpl's delta/reconcile logic. The previously separate `linkedPRs` map was removed in Phase 5 F2 (issue #562) — PR detail fields (Title, State, Merged, Draft) are now in `LinkedPRState` via `PRDetailsUpdated`, and `FetchLinkedPR` reconstructs `*gh.PRDetails` from the Store snapshot.
 
 #### ChangeFlags and Their Trigger Mutations
 
@@ -1653,7 +1653,7 @@ All handlers hold the write lock for their mutation only. No lock is held during
 | `check_suite` | `completed`, `requested`, `rerequested` | No-op | — | Check suites are coarse aggregates; individual runs tracked via `check_run.completed` |
 | `projects_v2_item` | `created` | Call `FetchItemDetails` by `content_node_id`; apply as new item | `IssueOpened` | Item appears in board; triggers dispatch on next poll |
 | `projects_v2_item` | `edited` | Update `Status` via `itemIDToKey` reverse lookup | `ProjectV2ItemEdited` | `Status` updated; stage selection uses new column |
-| `projects_v2_item` | `deleted`, `archived` | Remove item; clean up `prNumToKey` | `store.Remove` + `prNumToKey`/`linkedPRs` cleanup | Item gone from next board fetch |
+| `projects_v2_item` | `deleted`, `archived` | Remove item | `store.RemoveByItemID` (cleans `prToKey` index automatically) | Item gone from next board fetch |
 | `projects_v2_item` | `restored` | No-op | — | Next Reconcile re-adds the item from the full board snapshot |
 | `projects_v2_item` | `reordered` | No-op | — | Column order not modeled in Fabrik's cache or engine |
 
@@ -1666,7 +1666,7 @@ All handlers hold the write lock for their mutation only. No lock is held during
 | `FetchProjectBoard` | Returns reconstructed board from `items` map; falls back to GitHub when cache is empty |
 | `FetchItemDetails` | Serves deep fields from cache when `deepFetched[key]` is true; falls back to GitHub and populates on miss; logs `[cache] miss for #N — fetching from GitHub` |
 | `FetchCheckRuns` | Serves from `checkRuns[sha]`; falls back and caches on miss |
-| `FetchLinkedPR` | Looks up `linkedPRs[prKey]` via `item.LinkedPRNumber`; falls back on miss |
+| `FetchLinkedPR` | Cache hit when `snap.LinkedPR().Title != ""` (set by `PRDetailsUpdated`); reconstructs `*gh.PRDetails` from Store snapshot; falls back to GitHub REST on miss and applies `PRDetailsUpdated` write-back |
 | `FetchPRMergeable` | Always delegates to fallback (mergeability changes without webhook events) |
 | `FetchPRMergeableState` | Always delegates to fallback |
 | `FetchLabels` | Serves from `item.Labels` when item is cached; falls back on miss |
