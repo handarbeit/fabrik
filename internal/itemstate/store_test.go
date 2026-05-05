@@ -666,3 +666,129 @@ func TestLinkedPRSnapshotImmutabilityAfterCIMerge(t *testing.T) {
 		t.Error("snapshot taken before CIMergePendingStarted should not reflect the mutation")
 	}
 }
+
+// ---- PRDetailsUpdated + prToKey index tests ----
+
+// TestPRDetailsUpdatedMutatesAndFiresObserver verifies that PRDetailsUpdated sets the
+// four new LinkedPRState fields (Title, State, Merged, Draft) and fires LinkedPRChanged.
+func TestPRDetailsUpdatedMutatesAndFiresObserver(t *testing.T) {
+	s := NewStore(nil)
+	s.Apply(IssueOpened{Item: testProjectItem(testRepo, 10)})
+
+	var lastChange Change
+	s.Subscribe(ObserverFunc(func(c Change, _ Snapshot) { lastChange = c }))
+
+	_, changes, err := s.Apply(PRDetailsUpdated{
+		Repo:     testRepo,
+		Number:   10,
+		PRNumber: 42,
+		Title:    "feat: add caching",
+		State:    "open",
+		Merged:   false,
+		Draft:    true,
+	})
+	if err != nil {
+		t.Fatalf("PRDetailsUpdated: %v", err)
+	}
+	if len(changes) == 0 {
+		t.Fatal("expected at least one change from PRDetailsUpdated")
+	}
+	if lastChange.Fields&LinkedPRChanged == 0 {
+		t.Errorf("Fields %b does not include LinkedPRChanged", lastChange.Fields)
+	}
+
+	snap, _ := s.Get(testRepo, 10)
+	lpr := snap.LinkedPR()
+	if lpr == nil {
+		t.Fatal("LinkedPR is nil after PRDetailsUpdated")
+	}
+	if lpr.Number != 42 {
+		t.Errorf("Number = %d; want 42", lpr.Number)
+	}
+	if lpr.Title != "feat: add caching" {
+		t.Errorf("Title = %q; want %q", lpr.Title, "feat: add caching")
+	}
+	if lpr.State != "open" {
+		t.Errorf("State = %q; want open", lpr.State)
+	}
+	if lpr.Merged {
+		t.Error("Merged should be false")
+	}
+	if !lpr.Draft {
+		t.Error("Draft should be true")
+	}
+}
+
+// TestPRDetailsUpdatedIsNoOpWhenFieldsUnchanged verifies that a duplicate PRDetailsUpdated
+// does not fire observers (invariant I6).
+func TestPRDetailsUpdatedIsNoOpWhenFieldsUnchanged(t *testing.T) {
+	s := NewStore(nil)
+	s.Apply(IssueOpened{Item: testProjectItem(testRepo, 11)})
+	s.Apply(PRDetailsUpdated{Repo: testRepo, Number: 11, PRNumber: 7, Title: "T", State: "open"})
+
+	var count int
+	s.Subscribe(ObserverFunc(func(c Change, _ Snapshot) { count++ }))
+
+	_, changes, _ := s.Apply(PRDetailsUpdated{Repo: testRepo, Number: 11, PRNumber: 7, Title: "T", State: "open"})
+	if len(changes) != 0 {
+		t.Error("second identical PRDetailsUpdated should be a no-op")
+	}
+	if count != 0 {
+		t.Errorf("observer fired %d times; want 0 for no-op", count)
+	}
+}
+
+// TestGetByPRKeyReturnsMappedItemKey verifies that the prToKey index is populated
+// by PRDetailsUpdated and that GetByPRKey returns the correct item key.
+func TestGetByPRKeyReturnsMappedItemKey(t *testing.T) {
+	s := NewStore(nil)
+	s.Apply(IssueOpened{Item: testProjectItem(testRepo, 12)})
+	s.Apply(PRDetailsUpdated{Repo: testRepo, Number: 12, PRNumber: 55, Title: "T", State: "open"})
+
+	key, ok := s.GetByPRKey(testRepo, 55)
+	if !ok {
+		t.Fatal("GetByPRKey returned false; expected true after PRDetailsUpdated")
+	}
+	want := itemKeyFor(testRepo, 12)
+	if key != want {
+		t.Errorf("key = %q; want %q", key, want)
+	}
+
+	// Unknown PR returns false.
+	if _, found := s.GetByPRKey(testRepo, 9999); found {
+		t.Error("GetByPRKey for unknown PR should return false")
+	}
+}
+
+// TestGetByPRKeyFalseAfterRemove verifies that Store.Remove clears the prToKey entry.
+func TestGetByPRKeyFalseAfterRemove(t *testing.T) {
+	s := NewStore(nil)
+	s.Apply(IssueOpened{Item: testProjectItem(testRepo, 13)})
+	s.Apply(PRDetailsUpdated{Repo: testRepo, Number: 13, PRNumber: 99, Title: "T", State: "open"})
+
+	if _, ok := s.GetByPRKey(testRepo, 99); !ok {
+		t.Fatal("GetByPRKey returned false before Remove")
+	}
+
+	s.Remove(testRepo, 13)
+
+	if _, ok := s.GetByPRKey(testRepo, 99); ok {
+		t.Error("GetByPRKey should return false after Store.Remove")
+	}
+}
+
+// TestPRToKeyPopulatedByPRHeadSHAUpdated verifies that the prToKey index is also
+// maintained when LinkedPR.Number is set via PRHeadSHAUpdated.
+func TestPRToKeyPopulatedByPRHeadSHAUpdated(t *testing.T) {
+	s := NewStore(nil)
+	s.Apply(IssueOpened{Item: testProjectItem(testRepo, 14)})
+	s.Apply(PRHeadSHAUpdated{Repo: testRepo, Number: 14, LinkedPRNum: 77, SHA: "abc123"})
+
+	key, ok := s.GetByPRKey(testRepo, 77)
+	if !ok {
+		t.Fatal("GetByPRKey returned false after PRHeadSHAUpdated with LinkedPRNum")
+	}
+	if want := itemKeyFor(testRepo, 14); key != want {
+		t.Errorf("key = %q; want %q", key, want)
+	}
+}
