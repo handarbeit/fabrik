@@ -752,7 +752,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			// Don't stamp cooldown when dispatch was skipped solely because a worker
 			// from a prior poll cycle is still running. The next poll re-evaluates
 			// without delay once the worker exits.
-			if _, inFlight := e.inFlight.Load(iKey); inFlight {
+			if snap, err := e.store.Get(itemOwnerRepoString(item, e.defaultRepo()), item.Number); err == nil && snap.Worker() != nil {
 				continue
 			}
 			if stage := stages.FindStage(e.cfg.Stages, item.Status); stage != nil && !stage.CleanupWorktree {
@@ -1143,22 +1143,25 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 
 	for _, item := range deepFetchCandidates {
 		item := item
-		iKeyDbg := issueKey(item, e.defaultRepo())
+		iKey := issueKey(item, e.defaultRepo())
+		itemRepo := itemOwnerRepoString(item, e.defaultRepo())
 		debugLog("dispatch-check", map[string]interface{}{
-			"number": item.Number, "key": iKeyDbg, "status": item.Status,
+			"number": item.Number, "key": iKey, "status": item.Status,
 		})
 		// Full check including comments (populated by deep fetch above).
 		if !e.itemNeedsWork(item) {
 			debugLog("dispatch-skip-no-work", map[string]interface{}{"number": item.Number})
 			continue
 		}
-		// Skip issues already being processed by a previous poll cycle's worker
-		if _, ok := e.inFlight.Load(iKeyDbg); ok {
+		// Skip issues already being processed by a previous poll cycle's worker.
+		// Use the Store-backed Worker field (set by WorkerEntered before goroutine launch)
+		// so this check is consistent with the observer pipeline.
+		if snap, err := e.store.Get(itemRepo, item.Number); err == nil && snap.Worker() != nil {
 			debugLog("dispatch-skip-inflight", map[string]interface{}{"number": item.Number})
 			continue
 		}
 		debugLog("dispatch-WILL-DISPATCH", map[string]interface{}{
-			"number": item.Number, "key": iKeyDbg,
+			"number": item.Number, "key": iKey,
 		})
 		// Acquire semaphore slot, but abort if the context is cancelled so we
 		// don't block indefinitely when all slots are taken at shutdown time.
@@ -1174,15 +1177,19 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		}
 		isComment := len(e.findNewComments(item)) > 0
 		startTime := time.Now()
-		iKey := issueKey(item, e.defaultRepo())
-		itemRepo := itemOwnerRepoString(item, e.defaultRepo())
-		e.inFlight.Store(iKey, item.IsPR)
+		// Apply WorkerEntered synchronously before the goroutine starts so that
+		// snap.Worker() != nil is immediately true for any concurrent dispatch check.
+		e.store.Apply(itemstate.WorkerEntered{
+			Repo:      itemRepo,
+			Number:    item.Number,
+			StageName: stageName,
+			StartedAt: startTime,
+		})
 		e.wg.Add(1)
 		dispatched++
 		go func() {
 			defer e.wg.Done()
 			defer func() { <-e.sem }()
-			defer e.inFlight.Delete(iKey)
 			e.emitStructural(tui.JobStartedEvent{
 				IssueNumber: item.Number,
 				Repo:        itemRepo,
