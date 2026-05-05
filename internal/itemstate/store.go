@@ -653,7 +653,7 @@ func (s *Store) applyCheckRunCompleted(v CheckRunCompleted) (Snapshot, []Change,
 	return snap, []Change{change}, nil
 }
 
-// updateIndexes keeps shaToKey and itemIDToKey consistent after a mutation.
+// updateIndexes keeps shaToKey, itemIDToKey, and prToKey consistent after a mutation.
 // Must be called with s.mu held for writing.
 func (s *Store) updateIndexes(before, after ItemState, key string) {
 	// ItemID index.
