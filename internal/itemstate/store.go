@@ -531,17 +531,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		// Drain any pre-linkage check runs buffered for this SHA.
 		if pending, ok := s.pendingCheckRuns[v.SHA]; ok && len(pending) > 0 {
 			for _, run := range pending {
-				found := false
-				for i, existing := range item.LinkedPR.CheckRuns {
-					if existing.ID == run.ID {
-						item.LinkedPR.CheckRuns[i] = run
-						found = true
-						break
-					}
-				}
-				if !found {
-					item.LinkedPR.CheckRuns = append(item.LinkedPR.CheckRuns, run)
-				}
+				item.LinkedPR.CheckRuns, _ = upsertCheckRunByID(item.LinkedPR.CheckRuns, run)
 			}
 			item.LinkedPR.HasHadChecks = true
 			delete(s.pendingCheckRuns, v.SHA)
@@ -646,17 +636,11 @@ func (s *Store) applyCheckRunCompleted(v CheckRunCompleted) (Snapshot, []Change,
 	key, ok := s.shaToKey[v.SHA]
 	if !ok {
 		// SHA not yet linked — buffer the run in pendingCheckRuns by ID (upsert).
-		runs := s.pendingCheckRuns[v.SHA]
-		updated := false
-		for i, existing := range runs {
-			if existing.ID == v.Run.ID {
-				runs[i] = v.Run
-				updated = true
-				break
-			}
-		}
-		if !updated {
-			runs = append(runs, v.Run)
+		runs, changed := upsertCheckRunByID(s.pendingCheckRuns[v.SHA], v.Run)
+		if !changed {
+			// Identical duplicate — no state change, no observer notification.
+			s.mu.Unlock()
+			return Snapshot{}, nil, nil
 		}
 		s.pendingCheckRuns[v.SHA] = runs
 		s.mu.Unlock()
@@ -672,17 +656,7 @@ func (s *Store) applyCheckRunCompleted(v CheckRunCompleted) (Snapshot, []Change,
 		item.LinkedPR = &LinkedPRState{}
 	}
 	// Update or append the check run by ID.
-	found := false
-	for i, cr := range item.LinkedPR.CheckRuns {
-		if cr.ID == v.Run.ID {
-			item.LinkedPR.CheckRuns[i] = v.Run
-			found = true
-			break
-		}
-	}
-	if !found {
-		item.LinkedPR.CheckRuns = append(item.LinkedPR.CheckRuns, v.Run)
-	}
+	item.LinkedPR.CheckRuns, _ = upsertCheckRunByID(item.LinkedPR.CheckRuns, v.Run)
 	item.LinkedPR.HasHadChecks = true
 
 	if reflect.DeepEqual(before, *item) {
@@ -698,6 +672,23 @@ func (s *Store) applyCheckRunCompleted(v CheckRunCompleted) (Snapshot, []Change,
 	obs := s.captureObservers()
 	s.notify(obs, change, snap)
 	return snap, []Change{change}, nil
+}
+
+// upsertCheckRunByID inserts or updates run in runs by ID.
+// Returns the updated slice and true if the slice was modified; returns the
+// original slice and false when the same-ID run was already present with
+// identical content (no-op), so callers can skip emitting a change.
+func upsertCheckRunByID(runs []gh.CheckRun, run gh.CheckRun) ([]gh.CheckRun, bool) {
+	for i, existing := range runs {
+		if existing.ID == run.ID {
+			if reflect.DeepEqual(existing, run) {
+				return runs, false
+			}
+			runs[i] = run
+			return runs, true
+		}
+	}
+	return append(runs, run), true
 }
 
 // updateIndexes keeps shaToKey, itemIDToKey, and prToKey consistent after a mutation.
