@@ -1184,6 +1184,14 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		go func() {
 			defer e.wg.Done()
 			defer func() { <-e.sem }()
+			// WorkerExited must be deferred at the goroutine top level so it fires on
+			// every exit path, including processItem early-returns (paused, blocked,
+			// awaiting-input, locked-by-other, stage-complete, etc.). The defer inside
+			// processItem at item.go:533 is reached only after ~14 early-return guards;
+			// any of them would leak the Worker entry and permanently block re-dispatch
+			// via the snap.Worker() != nil guard. Same pattern as the reinvoke
+			// dispatchers in reviews.go, ci.go, and merge_gate.go.
+			defer e.store.Apply(itemstate.WorkerExited{Repo: itemRepo, Number: item.Number})
 			e.emitStructural(tui.JobStartedEvent{
 				IssueNumber: item.Number,
 				Repo:        itemRepo,
