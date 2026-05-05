@@ -103,6 +103,7 @@ The migration PRs (Phase 3-A through 3-H) are tracked as separate fabrik issues,
 - Phase 3-A through 3-H: filed as fabrik issues; pipeline executing.
 - Phase 4 audit: complete (`docs/cache-refactor/04-phase4-audit.md`).
 - Phase 5 F3 (store unification): complete (issue #537, PR #538). See addendum below.
+- Phase 5 F4 (worker lifecycle migration): complete (issue #544). See addendum below.
 
 ## Addendum — Phase 5 F3: Store Unification (2026-05-05)
 
@@ -169,6 +170,40 @@ emit a semantically distinct signal (rather than reusing `StateChanged`, which m
 issue open/closed). The existing `mayNeedWorkObserver` and `wakeChObserver` both use
 flag-based filtering; `ItemRemoved` does not match either observer's mask, so removed
 items are safely ignored by the dispatch loop.
+
+## Addendum — Phase 5 F4: Worker Lifecycle Migration (2026-05-05)
+
+### Remaining bypass
+
+After Phase 5 F3 (store unification), one engine-side state structure still lived outside the Store: `e.inFlight sync.Map`. The dispatch loop used `e.inFlight.Load(iKey)` to detect whether a goroutine was already running for an item. Mutations to `e.inFlight` were invisible to the Store observer pipeline — `WorkerChanged` existed in `itemstate` but was NOT in `wakeChFlags`, and no mutation applied to the store before goroutine launch.
+
+The consequence (issue #544): after self-advance to the next stage, if the departing worker had not finished cleanup (PR push, label flips, semaphore release) before the post-advance dispatch loop ran, the new item would be stamped with `CooldownAt("periodic-re-eval")` and not re-dispatched for up to 150s (`PollSeconds × 10`).
+
+### Resolution
+
+Issue #544 completed the migration. Two changes landed:
+
+**Fix A (band-aid):** The end-of-poll deferred cooldown block now checks `snap.Worker() != nil` before stamping `CooldownAt("periodic-re-eval")`. Items skipped only because their prior worker is still running are excluded from the stamp; the next poll re-evaluates them without delay.
+
+**Fix B (architectural):** `e.inFlight sync.Map` has been removed from the Engine struct. Worker lifecycle is now entirely Store-backed:
+
+- `WorkerEntered{Repo, Number, StageName, StartedAt}` — new mutation type; applied synchronously at the 4 dispatch sites (main dispatch loop + 3 reinvoke dispatchers) before `wg.Add(1)` and before the goroutine starts.
+- `WorkerExited{Repo, Number}` — already existed; deferred at the top of each goroutine so it fires on any exit path (context cancel, `ensureRepoReady` failure, normal return).
+- Both mutations emit `WorkerChanged`; `WorkerChanged` has been added to `wakeChFlags`.
+- The dispatch guard changed from `e.inFlight.Load(iKey) != nil` to `snap.Worker() != nil` (Store-backed).
+
+**Effect:** `WorkerExited` deterministically wakes the dispatcher. The previous race window — where a departing worker's cleanup delayed next-stage dispatch by up to 150s — is eliminated. The Store is now the single source of truth for all engine state the dispatcher cares about.
+
+### Structural invariant restored
+
+After Fix B, every state transition that gates dispatch flows through `Store.Apply`. The single-owner reactive cache invariant this ADR was written to establish is now fully enforced:
+
+| State structure | Pre-F4 | Post-F4 |
+|----------------|--------|---------|
+| Item status / labels / comments | Store | Store |
+| Lock / worker PID | Store | Store |
+| Invocation outcomes, stage state | Store | Store |
+| **Worker lifecycle (in-flight guard)** | **sync.Map (bypass)** | **Store (WorkerEntered/WorkerExited)** |
 
 ## References
 
