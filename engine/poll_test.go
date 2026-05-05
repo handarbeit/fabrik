@@ -1804,7 +1804,12 @@ func TestPoll_LogItemFromCache(t *testing.T) {
 // NOT stamped for items whose dispatch was skipped solely because a worker from a
 // prior poll cycle is still in flight. Stamping the cooldown in this case delays
 // the next-stage dispatch by up to PollSeconds*10 (~150s at defaults).
-func TestNoCooldownForInFlightItem(t *testing.T) {
+func TestCooldownStampedForInFlightItem(t *testing.T) {
+	// In-flight items are still deep-fetched (to keep their Store state fresh)
+	// and receive a CooldownAt["periodic-re-eval"] stamp to prevent repeated
+	// deep-fetch churn while the worker is running. The WorkerExited → WorkerLifecycleChanged
+	// wake signal (not the cooldown expiry) is what ensures prompt re-dispatch
+	// after the worker finishes.
 	deepFetchCalled := false
 	client := &mockGitHubClient{
 		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
@@ -1825,7 +1830,7 @@ func TestNoCooldownForInFlightItem(t *testing.T) {
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
 
-	// Register the mayNeedWork observer so that WorkerEntered (which fires WorkerChanged,
+	// Register the mayNeedWork observer so that WorkerEntered (which fires WorkerLifecycleChanged,
 	// now in wakeChFlags) populates cycleSet for the upcoming poll. Without this,
 	// the pre-filter would skip the item because it's already in the store with no
 	// new activity, and the test's FetchItemDetails assertion would be vacuously wrong.
@@ -1833,7 +1838,7 @@ func TestNoCooldownForInFlightItem(t *testing.T) {
 	eng.store.Subscribe(mwnObs)
 
 	// Simulate a worker still running from a prior poll cycle via the Store.
-	// WorkerChanged (now in wakeChFlags) fires the observer, adding #77 to mayNeedWork.
+	// WorkerLifecycleChanged (now in wakeChFlags) fires the observer, adding #77 to mayNeedWork.
 	eng.store.Apply(itemstate.WorkerEntered{
 		Repo:      "owner/repo",
 		Number:    77,
@@ -1854,15 +1859,19 @@ func TestNoCooldownForInFlightItem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Get: %v", err)
 	}
-	if !snap.CooldownAt("periodic-re-eval").IsZero() {
-		t.Errorf("expected no CooldownAt(periodic-re-eval) for in-flight item, got %v",
-			snap.CooldownAt("periodic-re-eval"))
+	// Cooldown IS stamped for in-flight items to prevent repeated deep-fetch churn;
+	// prompt re-dispatch after the worker exits is driven by WorkerExited → WorkerLifecycleChanged
+	// adding the item to mayNeedWork (which bypasses cooldown).
+	if snap.CooldownAt("periodic-re-eval").IsZero() {
+		t.Error("expected CooldownAt(periodic-re-eval) to be set for in-flight item to prevent deep-fetch churn")
 	}
 }
 
 // TestWorkerExitedWakesObserver verifies the end-to-end wakeChFlags wiring for
-// WorkerChanged. Both WorkerEntered and WorkerExited must fire the wake channel
-// because WorkerChanged is in wakeChFlags (Fix B for #544).
+// WorkerLifecycleChanged. Both WorkerEntered and WorkerExited must fire the wake channel
+// because WorkerLifecycleChanged is in wakeChFlags (Fix B for #544).
+// WorkerHeartbeat and WorkerPIDSet do NOT fire the wake channel (they emit WorkerChanged
+// but not WorkerLifecycleChanged), preventing deep-fetch churn for active workers.
 func TestWorkerExitedWakesObserver(t *testing.T) {
 	store := itemstate.NewStore(nil)
 	wakeCh := make(chan struct{}, 4)
@@ -1870,7 +1879,7 @@ func TestWorkerExitedWakesObserver(t *testing.T) {
 	obs := newWakeChObserver(wakeCh)
 	store.Subscribe(obs)
 
-	// WorkerEntered must wake because WorkerChanged is in wakeChFlags.
+	// WorkerEntered must wake because WorkerLifecycleChanged is in wakeChFlags.
 	store.Apply(itemstate.WorkerEntered{
 		Repo:      "owner/repo",
 		Number:    99,
@@ -1891,5 +1900,17 @@ func TestWorkerExitedWakesObserver(t *testing.T) {
 		// expected
 	case <-time.After(100 * time.Millisecond):
 		t.Error("wake channel did not fire after WorkerExited")
+	}
+
+	// WorkerHeartbeat must NOT wake: it emits WorkerChanged but not WorkerLifecycleChanged.
+	// The wake channel must stay empty after a heartbeat to prevent deep-fetch churn.
+	store.Apply(itemstate.WorkerEntered{Repo: "owner/repo", Number: 99, StageName: "X", StartedAt: time.Now()})
+	<-wakeCh // drain the WorkerEntered wake
+	store.Apply(itemstate.WorkerHeartbeat{Repo: "owner/repo", Number: 99, At: time.Now()})
+	select {
+	case <-wakeCh:
+		t.Error("wake channel must not fire after WorkerHeartbeat (only WorkerLifecycleChanged is in wakeChFlags)")
+	case <-time.After(20 * time.Millisecond):
+		// expected: heartbeat does not wake
 	}
 }

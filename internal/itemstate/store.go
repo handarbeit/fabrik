@@ -426,7 +426,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 
 	case WorkerEntered:
 		item.Worker = &WorkerHandle{StageName: v.StageName, StartedAt: v.StartedAt, LastSignAt: v.StartedAt}
-		return WorkerChanged
+		return WorkerChanged | WorkerLifecycleChanged
 
 	case WorkerHeartbeat:
 		if item.Worker == nil {
@@ -444,7 +444,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 
 	case WorkerExited:
 		item.Worker = nil
-		return WorkerChanged
+		return WorkerChanged | WorkerLifecycleChanged
 
 	case InvocationRecorded:
 		item.LastInvocationCompleted = v.Completed

@@ -338,7 +338,7 @@ func TestApplyCooldownRecorded(t *testing.T) {
 func TestApplyWorkerEntered(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
 	now := time.Now()
-	applyExpect(t, s, WorkerEntered{Repo: testRepo, Number: 1, StageName: "Plan", StartedAt: now}, WorkerChanged)
+	applyExpect(t, s, WorkerEntered{Repo: testRepo, Number: 1, StageName: "Plan", StartedAt: now}, WorkerChanged|WorkerLifecycleChanged)
 	st := getItem(t, s, testRepo, 1)
 	if st.Worker == nil {
 		t.Fatal("Worker should be non-nil after WorkerEntered")
@@ -376,7 +376,7 @@ func TestWorkerEnteredThenExited(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
 	now := time.Now()
 	s.Apply(WorkerEntered{Repo: testRepo, Number: 1, StageName: "Research", StartedAt: now})
-	applyExpect(t, s, WorkerExited{Repo: testRepo, Number: 1}, WorkerChanged)
+	applyExpect(t, s, WorkerExited{Repo: testRepo, Number: 1}, WorkerChanged|WorkerLifecycleChanged)
 	if getItem(t, s, testRepo, 1).Worker != nil {
 		t.Error("Worker should be nil after WorkerExited")
 	}
@@ -398,7 +398,7 @@ func TestApplyWorkerExited(t *testing.T) {
 	s := newStoreWithItem(t, testRepo, 1)
 	now := time.Now()
 	s.Apply(LocalLockAcquired{Repo: testRepo, Number: 1, User: "u", AcquiredAt: now, Worker: &WorkerHandle{StageName: "X", StartedAt: now}})
-	applyExpect(t, s, WorkerExited{Repo: testRepo, Number: 1}, WorkerChanged)
+	applyExpect(t, s, WorkerExited{Repo: testRepo, Number: 1}, WorkerChanged|WorkerLifecycleChanged)
 	if getItem(t, s, testRepo, 1).Worker != nil {
 		t.Error("Worker not cleared")
 	}

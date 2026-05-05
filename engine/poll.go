@@ -749,12 +749,6 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			if advancedItems[iKey] {
 				continue
 			}
-			// Don't stamp cooldown when dispatch was skipped solely because a worker
-			// from a prior poll cycle is still running. The next poll re-evaluates
-			// without delay once the worker exits.
-			if snap, err := e.store.Get(itemOwnerRepoString(item, e.defaultRepo()), item.Number); err == nil && snap.Worker() != nil {
-				continue
-			}
 			if stage := stages.FindStage(e.cfg.Stages, item.Status); stage != nil && !stage.CleanupWorktree {
 				e.store.Apply(itemstate.CooldownRecorded{
 					Repo:   itemOwnerRepoString(item, e.defaultRepo()),
