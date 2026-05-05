@@ -394,23 +394,27 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 // This allows the catch-up loop to remain non-blocking while the Claude
 // invocation runs asynchronously.
 func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
-	iKey := issueKey(item, e.defaultRepo())
 	syntheticComments := e.buildReviewThreadComments(item)
 	if len(syntheticComments) == 0 {
 		e.logf(item.Number, "review-reinvoke", "no review bodies to process; skipping re-invocation\n")
 		return
 	}
 
-	// Mark in-flight to prevent the next poll cycle's dispatch loop from
-	// double-dispatching this item while the goroutine is running.
-	e.inFlight.Store(iKey, item.IsPR)
-	e.wg.Add(1)
-
+	// Mark in-flight via the Store so the dispatch guard (snap.Worker() != nil) blocks
+	// double-dispatch before the goroutine starts. WorkerExited is deferred inside the
+	// goroutine so any early exit (context cancel, ensureRepoReady failure) also clears it.
 	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
+	e.store.Apply(itemstate.WorkerEntered{
+		Repo:      itemRepo,
+		Number:    item.Number,
+		StageName: stage.Name,
+		StartedAt: time.Now(),
+	})
+	e.wg.Add(1)
 
 	go func() {
 		defer e.wg.Done()
-		defer e.inFlight.Delete(iKey)
+		defer e.store.Apply(itemstate.WorkerExited{Repo: itemRepo, Number: item.Number})
 
 		// Acquire semaphore slot (respects MaxConcurrent; blocks until available).
 		select {
@@ -448,7 +452,6 @@ func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBo
 		done := make(chan struct{})
 		defer close(done)
 		e.startHeartbeat(ctx, itemRepo, item.Number, done)
-		defer e.store.Apply(itemstate.WorkerExited{Repo: itemRepo, Number: item.Number})
 		onPIDReady := func(pid int) {
 			e.store.Apply(itemstate.WorkerPIDSet{Repo: itemRepo, Number: item.Number, PID: pid})
 		}
