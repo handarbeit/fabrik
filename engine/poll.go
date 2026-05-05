@@ -1542,9 +1542,15 @@ func (e *Engine) runReconciliationLoop(ctx context.Context, cache *boardcache.Ca
 
 // applyLayer1StatusRefresh handles the Layer 1 opportunistic per-event Status
 // refresh. Called from the deltaFn closure after ApplyDelta. For issue and
-// issue_comment events on a known cache item, it fetches the current Status
-// from GitHub and updates the cache immediately. All errors are best-effort:
-// logged as warnings and never returned.
+// issue_comment events, it fetches the current Status from GitHub and updates
+// the cache immediately. Two paths:
+//   - Fast path: cache has the item's itemID → calls FetchProjectItemStatus.
+//   - Fallback path: cache lacks itemID (brand-new issue, issues.opened before
+//     projects_v2_item.created) → calls LookupIssueProjectItem to populate
+//     both itemID and Status in one query. Skipped when cache.ProjectID() == ""
+//     (Bootstrap not yet complete).
+//
+// All errors are best-effort: logged as warnings and never returned.
 func (e *Engine) applyLayer1StatusRefresh(eventType string, payload []byte, cache *boardcache.CacheImpl) {
 	if cache.IsPaused() {
 		return
