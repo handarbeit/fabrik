@@ -1656,7 +1656,7 @@ Events are translated into immediate poll wakeups — the existing board-fetch a
   ```bash
   gh extension install cli/gh-webhook
   ```
-  Verify installation: `gh webhook --help` (should print usage, not `unknown command "webhook"`). No specific minimum version is pinned; any recent `gh` with extension support works.
+  Verify installation: `gh webhook --help` (should print usage, not `unknown command "webhook"`). Fabrik requires `gh` ≥ 2.32.0, enforced at startup with a clear error if the version is too old.
 - **`gh auth login`** with a token that has `admin:repo_hook` write scope (classic PAT) or equivalent repo admin access. Fine-grained tokens may lack this scope.
 - **`admin:org` scope** for org-level webhook subscription (see [Multi-Repo Boards](#multi-repo-boards)). If your token lacks this scope, Fabrik falls back to per-repo subscriptions automatically. To add it: `gh auth refresh -h github.com -s admin:org`. (`admin:org_hook` is a narrower alternative that grants only the webhook management permission.)
 - **Repo admin access** on each repository on your board, or org-admin access for org-level subscription.
@@ -1748,7 +1748,7 @@ Fabrik attempts to subscribe to `projects_v2_item` events, which fire when an is
 
 On multi-repo boards, Fabrik uses a single `gh webhook forward` subprocess:
 
-1. If your token has org-admin access, Fabrik uses `--org=<org>` to subscribe to all repos in the org with one subscription — no restarts needed when new repos appear.
+1. If your token has org-admin access, Fabrik uses `--org=<org>` to subscribe to all repos in the org with one subscription. New repos in that org are covered automatically — when a new repo appears, the subprocess is briefly restarted, but the org-level subscription covers all repos in the org so no events are missed.
 2. Otherwise, Fabrik subscribes per-repo. When a new repo appears on the board, the subprocess is briefly restarted with the updated repo list (the safety-net poll covers any events missed during the restart).
 
 **Mixed-owner boards disable org mode entirely.** Org-level subscription requires every managed repo on the board to share the same owner. If your board spans two orgs or users (for example, during a repo migration), Fabrik silently falls back to per-repo webhooks for *all* repos — even if your token has admin access to both orgs. As noted above, per-repo webhooks never deliver `projects_v2_item` events, so board-column changes in this configuration are caught only by the periodic status sweep. To avoid this: migrate all repos to the target org simultaneously, or run two separate Fabrik instances (one per org) during the transition.
@@ -1757,11 +1757,11 @@ On multi-repo boards, Fabrik uses a single `gh webhook forward` subprocess:
 
 ### Migration / Permission Changes
 
-Fabrik's org-mode detection runs once at startup. The result is held for the lifetime of the process — there is no in-session re-probe.
+Fabrik probes org mode each time the webhook subprocess starts or restarts. If the probe fails with a permission error (the subprocess exits within 10 seconds with an auth-shaped error), org mode is disabled for the rest of the session — Fabrik switches to per-repo subscriptions and does not retry. A Fabrik restart always clears this sticky state and re-probes org mode from scratch.
 
 - **You just gained org-admin access** (or migrated repos to a new org you own): no state needs clearing. Restart Fabrik and it will detect org-level subscription automatically on the next startup.
-- **You lost org-admin access mid-session**: the current session continues attempting org-level subscription until the first probe fails with an auth error, at which point it falls back to per-repo mode for the remainder of the session. Restart Fabrik to immediately settle into per-repo mode without waiting for the probe to fail.
-- **Per-repo mode confirmed at startup**: org-level subscription was probed and declined (auth error or token lacks `admin:org`). Fabrik will not retry org mode until restarted.
+- **You lost org-admin access mid-session**: the running subprocess continues in org mode until it exits or restarts. On the next restart cycle, the probe fails with a permission error and Fabrik falls back to per-repo mode for the remainder of the session. Restart Fabrik to immediately settle into per-repo mode.
+- **Per-repo mode after a permission failure**: a prior org-mode probe failed with an auth error (token lacks `admin:org` or org-admin access). Fabrik will not retry org mode until restarted.
 
 ### Troubleshooting Webhook Mode
 
