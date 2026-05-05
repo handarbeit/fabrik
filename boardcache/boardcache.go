@@ -167,9 +167,8 @@ func snapshotToProjectItem(snap itemstate.Snapshot) gh.ProjectItem {
 // fallback ReadClient on cache miss.
 //
 // Internal ownership split:
-//   - store owns: items, shaToKey, itemIDToKey, prToKey
-//   - CacheImpl owns: paused, recentMissCache, projectID/Title/OwnerType,
-//     checkRuns, localDeltaAt
+//   - store owns: items, shaToKey, itemIDToKey, prToKey, pendingCheckRuns
+//   - CacheImpl owns: paused, recentMissCache, projectID/Title/OwnerType, localDeltaAt
 //
 // Locking invariant: mu guards CacheImpl-local fields only. Store has its own
 // internal mutex. NEVER hold mu while calling any Store method — this prevents
@@ -197,18 +196,12 @@ type CacheImpl struct {
 	// Keys are "miss:owner/repo#prN" or "miss:sha:SHA".
 	recentMissCache map[string]time.Time
 
-	// checkRuns stores check runs keyed by commit SHA. Stays on CacheImpl because
-	// the Store silently drops CheckRunCompleted for SHAs not yet linked to any
-	// item. Pre-linkage runs are kept here and also forwarded to Store once linkage
-	// is resolved.
-	checkRuns map[string][]gh.CheckRun
-
 	// localDeltaAt records the last time a webhook bumped an item.
 	// FetchProjectBoard uses max(ItemState.UpdatedAt, localDeltaAt[key]) so that
 	// webhook-driven changes are visible to itemMayNeedWork before the next Reconcile.
 	localDeltaAt map[string]time.Time
 
-	// store owns per-item state (items, shaToKey, itemIDToKey, prToKey).
+	// store owns per-item state (items, shaToKey, itemIDToKey, prToKey, pendingCheckRuns).
 	store *itemstate.Store
 
 	fallback ReadClient
@@ -222,7 +215,6 @@ func NewCacheImpl(fallback ReadClient, store *itemstate.Store, logFn func(format
 		panic("boardcache.NewCacheImpl: store must not be nil")
 	}
 	return &CacheImpl{
-		checkRuns:       make(map[string][]gh.CheckRun),
 		localDeltaAt:    make(map[string]time.Time),
 		recentMissCache: make(map[string]time.Time),
 		store:           store,
@@ -242,10 +234,9 @@ func (c *CacheImpl) Bootstrap(board *gh.ProjectBoard) {
 	c.projectID = board.ProjectID
 	c.projectTitle = board.Title
 	c.projectOwnerType = board.OwnerType
-	// Reset CacheImpl-local maps. linkedPRs and prNumToKey have been migrated to the
-	// Store (PRDetailsUpdated + prToKey index), so Store.Reset above handles them.
+	// Reset CacheImpl-local maps. All check-run state (pendingCheckRuns) and
+	// per-item state have been migrated to the Store; Store.Reset above handles them.
 	c.localDeltaAt = make(map[string]time.Time)
-	c.checkRuns = make(map[string][]gh.CheckRun)
 	c.mu.Unlock()
 
 	c.logFn("[cache] bootstrap complete: %d items\n", len(board.Items))
@@ -534,29 +525,32 @@ func (c *CacheImpl) FetchItemDetails(item *gh.ProjectItem) error {
 }
 
 // FetchCheckRuns returns cached check runs for a SHA; falls back to GitHub on miss.
+// Reads from Store.CheckRunsBySHA, which covers both pre-linkage (pendingCheckRuns)
+// and post-linkage (LinkedPR.CheckRuns) runs. On total miss, fetches from GitHub and
+// populates the Store via CheckRunCompleted mutations so subsequent calls are served
+// from cache.
 func (c *CacheImpl) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, error) {
 	c.mu.RLock()
-	if c.paused {
-		c.mu.RUnlock()
-		return c.fallback.FetchCheckRuns(owner, repo, sha)
-	}
-	if runs, ok := c.checkRuns[sha]; ok {
-		result := make([]gh.CheckRun, len(runs))
-		copy(result, runs)
-		c.mu.RUnlock()
-		return result, nil
-	}
+	paused := c.paused
 	c.mu.RUnlock()
 
+	if paused {
+		return c.fallback.FetchCheckRuns(owner, repo, sha)
+	}
+
+	if runs := c.store.CheckRunsBySHA(sha); len(runs) > 0 {
+		return runs, nil
+	}
+
 	c.logFn("[cache] miss: FetchCheckRuns sha=%s — fetching from GitHub\n", sha)
+	fullRepo := owner + "/" + repo
 	runs, err := c.fallback.FetchCheckRuns(owner, repo, sha)
 	if err != nil {
 		return nil, err
 	}
-
-	c.mu.Lock()
-	c.checkRuns[sha] = runs
-	c.mu.Unlock()
+	for _, run := range runs {
+		c.store.Apply(itemstate.CheckRunCompleted{Repo: fullRepo, SHA: sha, Run: run})
+	}
 	return runs, nil
 }
 

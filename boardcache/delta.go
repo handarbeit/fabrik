@@ -861,33 +861,18 @@ func (c *CacheImpl) applyCheckRunDelta(payload []byte) {
 		Conclusion: p.CheckRun.Conclusion,
 	}
 
-	// Always upsert the check run by ID into CacheImpl's checkRuns map.
-	// This keeps pre-linkage runs available via FetchCheckRuns even before
-	// the SHA↔item linkage is established in the Store.
-	c.mu.Lock()
-	runs := c.checkRuns[sha]
-	updated := false
-	for i, existing := range runs {
-		if existing.ID == cr.ID {
-			runs[i] = cr
-			updated = true
-			break
-		}
-	}
-	if !updated {
-		runs = append(runs, cr)
-	}
-	c.checkRuns[sha] = runs
-	c.mu.Unlock()
-
-	// Also apply to the Store — only works if SHA is indexed in Store's shaToKey.
+	// Apply to Store. For known SHAs (shaToKey hit), the run is written directly to
+	// LinkedPR.CheckRuns and LinkedPRChanged is emitted. For unknown SHAs, the run
+	// is buffered in Store.pendingCheckRuns and CheckRunChanged is emitted; the
+	// auto-heal path below then resolves the SHA→PR→issue chain and PRHeadSHAUpdated
+	// drains the buffer — no explicit replay needed.
 	snap, changes, _ := c.store.Apply(itemstate.CheckRunCompleted{
 		Repo: repo,
 		SHA:  sha,
 		Run:  cr,
 	})
-	if len(changes) > 0 {
-		// SHA was known — bump localDeltaAt and return.
+	if len(changes) > 0 && changes[0].Fields&itemstate.LinkedPRChanged != 0 {
+		// SHA was linked — LinkedPR updated directly; bump localDeltaAt and return.
 		key := itemKey(snap.Repo(), snap.Number())
 		c.bumpLocalDeltaAt(key)
 		return
@@ -938,7 +923,9 @@ func (c *CacheImpl) applyCheckRunDelta(payload []byte) {
 	c.mu.Unlock()
 	// prToKey is populated by PRHeadSHAUpdated via updateIndexes — no explicit write needed.
 
-	// Update Store: set LinkedPRNum + SHA (updates shaToKey index), invalidate deep cache.
+	// Update Store: set LinkedPRNum + SHA (updates shaToKey index) and invalidate
+	// deep cache. PRHeadSHAUpdated drains any pendingCheckRuns[sha] into the item's
+	// LinkedPR.CheckRuns automatically — no explicit CheckRunCompleted replay needed.
 	c.store.Apply(itemstate.PRHeadSHAUpdated{
 		Repo:        repo,
 		Number:      resolvedIssNum,
@@ -946,9 +933,6 @@ func (c *CacheImpl) applyCheckRunDelta(payload []byte) {
 		SHA:         sha,
 	})
 	c.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: resolvedIssNum})
-
-	// Now that shaToKey is updated, replay the CheckRunCompleted on the Store.
-	c.store.Apply(itemstate.CheckRunCompleted{Repo: repo, SHA: sha, Run: cr})
 
 	c.bumpLocalDeltaAt(key)
 	c.logFn("[cache] auto-heal: check_run SHA %s → PR #%d → issue #%d; deep cache invalidated\n", sha, prNum, resolvedIssNum)
