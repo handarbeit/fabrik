@@ -39,7 +39,7 @@ The migration is staged across 8 incremental PRs (Phase 3-A through 3-H, documen
 - 3-G: Worker handle — heartbeat-based liveness; fixes stale-lock recovery gap.
 - 3-H: Reactive observer plumbing — wakeCh, TUI events become observers.
 
-Then Phase 4 audits all downstream readers and Phase 5 lands per-reader fixes.
+Then Phase 4 audits all downstream readers and Phase 5 lands per-reader fixes. Phase 5 F3 (issue #537) completed the single-Store intent by unifying `engine.store` and `cacheImpl.store` into one shared instance (see addendum below).
 
 ## Consequences
 
@@ -101,8 +101,53 @@ The migration PRs (Phase 3-A through 3-H) are tracked as separate fabrik issues,
 - Phase 1 inventory: complete (`docs/cache-refactor/01-state-inventory.md`).
 - Phase 2 design: complete (`docs/cache-refactor/02-design.md`).
 - Phase 3-A through 3-H: filed as fabrik issues; pipeline executing.
-- Phase 4 audit: scheduled after Phase 3 lands.
-- Phase 5 refactor of downstream readers: scheduled after Phase 4.
+- Phase 4 audit: complete (`docs/cache-refactor/04-phase4-audit.md`).
+- Phase 5 F3 (store unification): complete (issue #537, PR #538). See addendum below.
+
+## Addendum — Phase 5 F3: Store Unification (2026-05-05)
+
+### Deviation that landed in Phase 3
+
+The Phase 3 implementation deviated from this ADR's single-Store intent: both the
+Engine and the CacheImpl independently constructed their own `*itemstate.Store`
+instance via `itemstate.NewStore(nil)`. Engine mutations (lock acquire/release,
+CI gate, invocation outcomes) went to `engine.store`; webhook delta and reconcile
+mutations went to `cacheImpl.store`. Field reads from one store were invisible to
+the other.
+
+The Phase 4 audit documented this deviation in `docs/cache-refactor/04-phase4-audit.md`
+§1.3, and identified two concrete foot-guns in §3.5–§3.6:
+
+- `engine/worker_liveness.go`: `snap.Labels()` read from `engine.store` silently
+  returned an empty slice because webhook-delivered labels lived only in `cacheImpl.store`.
+- `engine/ci.go`: `snap.LinkedPR()` was available for `HasHadChecks` (engine-applied
+  mutation) but not for `Number`, `Mergeable`, or `Reviews` (webhook-applied mutations).
+
+Any future reader querying `e.store.Get(...).Item().Status` would silently receive
+`""` instead of the actual GitHub Status, with no compile-time or runtime warning.
+
+### Resolution
+
+Issue #537 completed the unification. `boardcache.NewCacheImpl` now accepts an
+`*itemstate.Store` parameter (panics on nil) rather than constructing its own.
+`engine/engine.go:New()` creates exactly one shared store, assigns it to `eng.store`,
+and passes it to `NewCacheImpl`. All mutations — engine-side and webhook/reconcile-side
+— flow through one `Apply` call on the shared instance.
+
+Observer registration in `engine/poll.go` was consolidated: `wakeObs` and `mwnObs`
+now register once on the shared store (the prior double-registration via both
+`e.store.Subscribe` and `cacheImpl.Subscribe` was a latent double-fire bug that the
+unification also resolves). `stageObs` migrated from `cacheImpl.Subscribe` to
+`e.store.Subscribe`.
+
+### Rationale
+
+A single source of truth per item was the core design goal of this ADR. The split
+created a class of silent-read-from-wrong-store bugs structurally identical to the
+mutation-path fragmentation that motivated the refactor in the first place. The
+foot-guns identified in Phase 4 make the split untenable: the `worker_liveness.go`
+label read was already silently broken on any board running in in-memory cache mode.
+Unification restores the structural guarantee the ADR intended.
 
 ## References
 
