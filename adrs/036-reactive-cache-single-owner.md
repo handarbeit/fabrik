@@ -102,6 +102,7 @@ The migration PRs (Phase 3-A through 3-H) are tracked as separate fabrik issues,
 - Phase 2 design: complete (`docs/cache-refactor/02-design.md`).
 - Phase 3-A through 3-H: filed as fabrik issues; pipeline executing.
 - Phase 4 audit: complete (`docs/cache-refactor/04-phase4-audit.md`).
+- Phase 5 F2 (linkedPRs / prNumToKey migration): complete (issue #562). See addendum below.
 - Phase 5 F3 (store unification): complete (issue #537, PR #538). See addendum below.
 - Phase 5 F4 (worker lifecycle migration): complete (issue #544). See addendum below.
 
@@ -204,6 +205,42 @@ After Fix B, every state transition that gates dispatch flows through `Store.App
 | Lock / worker PID | Store | Store |
 | Invocation outcomes, stage state | Store | Store |
 | **Worker lifecycle (in-flight guard)** | **sync.Map (bypass)** | **Store (WorkerEntered/WorkerExited)** |
+
+## Addendum — Phase 5 F2: linkedPRs / prNumToKey Migration (2026-05-05)
+
+### Remaining bypass
+
+After Phase 5 F4 (worker lifecycle migration), two `CacheImpl`-owned maps still lived outside the Store:
+
+- `linkedPRs map[string]*gh.PRDetails` — full PR detail objects (Title, State, Merged, Draft, HeadSHA, MergeableState) keyed by `prKey(repo, prNum)`. Mutations to this map (in `applyPullRequestDelta`, `FetchLinkedPR`, `ready_for_review`, `converted_to_draft`) fired no Store observers.
+- `prNumToKey map[string]string` — reverse-index from `prKey(repo, prNum)` to `itemKey`, used by delta handlers to route PR/review/check-run webhook events to the correct issue. Likewise invisible to the observer pipeline.
+
+The consequence: any future dispatch logic wanting to react to PR-detail changes (e.g., Draft toggled, PR closed) could not see those changes via the `wakeChFlags` pipeline. `FetchLinkedPR` reconstructed `*gh.PRDetails` from `c.linkedPRs`, a structure that had no Store-aware lifecycle.
+
+### Resolution
+
+Issue #562 completed the migration:
+
+1. **`LinkedPRState` extended** — four new fields (`Title string`, `State string`, `Merged bool`, `Draft bool`) added to `internal/itemstate/itemstate.go`, matching the fields in `gh.PRDetails` that were absent from the Store.
+
+2. **`PRDetailsUpdated` mutation added** — new type in `internal/itemstate/mutation.go` carrying `Repo`, `Number` (issue number), `PRNumber`, `Title`, `State`, `Merged`, `Draft`. Emits `LinkedPRChanged` (already in `wakeChFlags`). Every write site that previously mutated `c.linkedPRs` now calls `store.Apply(PRDetailsUpdated{...})`.
+
+3. **`prToKey` reverse-index in Store** — `internal/itemstate/store.go` gains a `prToKey map[string]string` field (keyed `"owner/repo#pr<N>"`) following the same lifecycle as `shaToKey` and `itemIDToKey`. Maintained by `updateIndexes` after every `Apply`; cleaned up by `Store.Remove`/`RemoveByItemID`. Exposed via `store.GetByPRKey(repo, prNum) (string, bool)`. All delta handlers that previously read `c.prNumToKey[pk]` now call `store.GetByPRKey`.
+
+4. **`CacheImpl` maps removed** — `linkedPRs` and `prNumToKey` fields deleted from the struct. `NewCacheImpl`, `Bootstrap`, `Reconcile`, `FetchItemDetails`, `FetchLinkedPR`, and all six delta-handler functions updated. `FetchLinkedPR` now uses `snap.LinkedPR().Title != ""` as the cache-hit sentinel and reconstructs `*gh.PRDetails` from the Store snapshot.
+
+### Structural invariant restored
+
+After F2, every per-item state mutation in both the engine and boardcache flows through `Store.Apply`. The `prToKey` index is an internal implementation detail of the Store (not engine state), consistent with `shaToKey` and `itemIDToKey`.
+
+| State structure | Pre-F2 | Post-F2 |
+|----------------|--------|---------|
+| Item status / labels / comments | Store | Store |
+| Lock / worker PID | Store | Store |
+| Invocation outcomes, stage state | Store | Store |
+| Worker lifecycle (in-flight guard) | Store (post-F4) | Store |
+| **PR detail fields (Title, State, Merged, Draft)** | **`CacheImpl.linkedPRs` (bypass)** | **Store (`PRDetailsUpdated`)** |
+| **PR→issue routing index** | **`CacheImpl.prNumToKey` (bypass)** | **`Store.prToKey` (index)** |
 
 ## References
 
