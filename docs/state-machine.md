@@ -112,6 +112,8 @@ Each active stage column has the same set of reachable sub-states:
 | **Cooldown** | (no label; in-memory `LastAttemptAt[stageName]` in `itemstate.StageState`) | Stage attempted but didn't complete; waiting for dispatch cooldown to expire |
 
 > **Note:** The Cooldown sub-state is purely in-memory — there is no label for it. The engine uses `LastAttemptAt[stageName]` from `itemstate.StageState` (written by `StageAttempted` mutation) to enforce dispatch cooldown. On restart, cooldown state is lost and the item is retried immediately.
+>
+> Distinct from Cooldown is **Deferred Dispatch**: an item whose dispatch was skipped in the current poll cycle solely because a worker from a prior cycle is still running. Deferred-Dispatch items do **not** receive a `CooldownAt("periodic-re-eval")` stamp (#544 fix); the next poll re-evaluates them immediately once the prior worker exits.
 
 #### Done (Cleanup Stage)
 
@@ -417,6 +419,8 @@ In the conjunctive gate design (ADR 032), `stage:X:complete` is **withheld** unt
 | Same column, Cooldown | Poll tick | Cooldown expired | Same column, Locked + In Progress (retry) | | `stage:<X>:failed` (if present from prior escalation) | Claude re-invoked with `resume=true` |
 | Same column, Cooldown | Retry count ≥ MaxRetries | `claudeRan && MaxRetries > 0` | Same column, Paused + Failed | `fabrik:paused`, `stage:<X>:failed` | `fabrik:locked:<user>`, `stage:<X>:in_progress` | `escalateFailedStage()` posts comment; lock released |
 | Same column, Paused + Failed | Human removes `fabrik:paused` | `stage:<X>:failed` present OR `snap.PausedByEngine(stageName)` | Same column, Idle | | `stage:<X>:failed` | `clearFailedStage()` applies `StageRetryCleared`, `EngineUnpaused`, `StageLastAttemptCleared`, `EngineCyclesCleared` |
+
+> **In-flight exclusion (#544):** `CooldownAt("periodic-re-eval")` is **not** stamped by the end-of-poll deferred block when dispatch was skipped solely because a worker from a prior poll cycle is still running (`e.inFlight.Load(iKey) == true` at defer time). Items in this state are not in Cooldown — they are in "Deferred Dispatch". The next poll re-evaluates without delay (the dispatch loop will see them and re-dispatch as soon as `inFlight` clears). Only items where `itemNeedsWork` returned false (genuinely no work needed) receive the cooldown stamp.
 
 #### Turn Limit Extension
 
@@ -1497,7 +1501,7 @@ The engine uses two distinct in-memory stores (both in `itemstate.Store`) for co
 
 **What writes `CooldownAt("periodic-re-eval")`:**
 - `processItem()` sets it when cleanup completes (cleanup-stage terminal path)
-- The deferred cache-write block in `Engine.poll()` (invoked by the `doPollCycle` closure) sets it for ALL non-advanced, non-cleanup `deepFetchCandidates` after each full poll cycle — a belt-and-suspenders refresh that caps deep-fetch frequency to once per cooldown period. The `stage:X:complete` terminal-only guard was removed in Phase 3-F: `LastAttemptAt[stageName]` (not `CooldownAt`) now carries dispatch suppression for incomplete stages, so refreshing `CooldownAt["periodic-re-eval"]` for all non-cleanup items is safe regardless of completion state (#504 structural fix).
+- The deferred cache-write block in `Engine.poll()` (invoked by the `doPollCycle` closure) sets it for non-advanced, non-cleanup, **non-in-flight** `deepFetchCandidates` after each full poll cycle — a belt-and-suspenders refresh that caps deep-fetch frequency to once per cooldown period. Items whose dispatch was skipped solely because a prior-cycle worker is still running (`e.inFlight.Load(iKey) == true`) are excluded from this stamp (#544 fix); they are re-evaluated on the next poll without delay. The `stage:X:complete` terminal-only guard was removed in Phase 3-F: `LastAttemptAt[stageName]` (not `CooldownAt`) now carries dispatch suppression for incomplete stages, so refreshing `CooldownAt["periodic-re-eval"]` for all non-cleanup, non-in-flight items is safe regardless of completion state (#504 structural fix).
 
 **What writes other `CooldownAt` reason keys:**
 - `CooldownAt("dep-blocked")`: `processItem()` sets it via `CooldownRecorded{Reason: "dep-blocked"}` each time `checkDependencies()` returns true — blocked on dependencies
