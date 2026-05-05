@@ -310,39 +310,32 @@ func (e *Engine) Run() error {
 			}
 		}()
 
-		// wakeChObserver fires on board-state changes from both stores.
-		// engine.store fires LockChanged; cacheImpl.store fires Status/Labels/Comments/LinkedPR.
-		// The same observer instance is registered on both stores. This is safe because
-		// newWakeChObserver returns a stateless closure (reads change.Fields, does a
-		// non-blocking channel send on wakeCh). Concurrent calls from two goroutines
-		// each do their own select/default, with the channel's built-in atomicity ensuring
-		// no more than one send lands per buffered slot.
+		// wakeChObserver fires on board-state changes. After store unification, the
+		// shared store receives both engine-side mutations (LockChanged) and webhook/
+		// reconcile-side mutations (Status/Labels/Comments/LinkedPR). Register once
+		// on the shared store — no cacheImpl registration needed or allowed.
 		if e.wakeCh != nil {
 			wakeObs := newWakeChObserver(e.wakeCh)
 			unsubs = append(unsubs, e.store.Subscribe(wakeObs))
-			if cacheImpl != nil {
-				unsubs = append(unsubs, cacheImpl.Subscribe(wakeObs))
-			}
 		}
 
-		// mayNeedWorkObserver populates e.mayNeedWork from both stores so the
-		// dispatch loop only evaluates items that have changed.
+		// mayNeedWorkObserver populates e.mayNeedWork when items change. Register
+		// once on the shared store; all mutation types flow through it post-unification.
 		mwnObs := newMayNeedWorkObserver(&e.mayNeedWorkMu, &e.mayNeedWork)
 		unsubs = append(unsubs, e.store.Subscribe(mwnObs))
-		if cacheImpl != nil {
-			unsubs = append(unsubs, cacheImpl.Subscribe(mwnObs))
-		}
 
-		// InvocationObserver fires on engine.store only (InvocationRecorded path).
+		// InvocationObserver fires on InvocationRecorded mutations (engine-side).
 		invObs := &InvocationObserver{Stages: e.cfg.Stages, Emit: e.emitStructural}
 		unsubs = append(unsubs, e.store.Subscribe(invObs))
 
-		// StageChangeObserver fires on cacheImpl.store (StatusChanged from reconcile/webhook).
-		if cacheImpl != nil {
-			stageObs := &StageChangeObserver{Emit: e.emitStructural}
-			unsubs = append(unsubs, cacheImpl.Subscribe(stageObs))
+		// StageChangeObserver fires on StatusChanged mutations. After store unification
+		// it registers on the shared store (not cacheImpl) so it sees all status changes.
+		stageObs := &StageChangeObserver{Emit: e.emitStructural}
+		unsubs = append(unsubs, e.store.Subscribe(stageObs))
 
+		if cacheImpl != nil {
 			// WebhookHealthObserver fires tui.WebhookStatusEvent on pause/resume transitions.
+			// SubscribePause is a CacheImpl-level signal (stream health), not a Store mutation.
 			unsubs = append(unsubs, cacheImpl.SubscribePause(func(paused bool) {
 				state := "healthy"
 				if paused {

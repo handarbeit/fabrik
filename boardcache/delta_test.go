@@ -21,7 +21,7 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestStoreDelegationBootstrap(t *testing.T) {
-	c := NewCacheImpl(&mockClient{}, nopLog)
+	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
 	board := &gh.ProjectBoard{
 		ProjectID: "PID", Title: "T", OwnerType: "organization",
 		Items: []gh.ProjectItem{
@@ -92,7 +92,7 @@ func TestStoreDelegationBootstrap(t *testing.T) {
 func TestStoreDelegationReconcile(t *testing.T) {
 	var logBuf []string
 	logFn := func(format string, args ...any) { logBuf = append(logBuf, format) }
-	c := NewCacheImpl(&mockClient{}, logFn)
+	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), logFn)
 	c.Bootstrap(&gh.ProjectBoard{
 		ProjectID: "PID", Title: "T", OwnerType: "organization",
 		Items: []gh.ProjectItem{
@@ -331,7 +331,7 @@ func TestFetchItemDetailsBackfillsPrNumToKey(t *testing.T) {
 			LinkedPRNumber: 42,
 		},
 	}
-	c := NewCacheImpl(mc, nopLog)
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
 	c.Bootstrap(&gh.ProjectBoard{
 		ProjectID: "PID", Title: "T", OwnerType: "organization",
 		Items: []gh.ProjectItem{
@@ -399,7 +399,7 @@ func TestReconcileRemoveCleansUpPrNumToKey(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIssuesOpened(t *testing.T) {
-	c := NewCacheImpl(&mockClient{}, nopLog)
+	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
 	c.Bootstrap(&gh.ProjectBoard{ProjectID: "P", Title: "T", OwnerType: "organization"})
 
 	payload := issuesOpenedPayloadJSON("owner/repo", 99, "I_99", "New Issue", "body text",
@@ -422,7 +422,7 @@ func TestIssuesOpened(t *testing.T) {
 }
 
 func TestIssuesOpenedIdempotent(t *testing.T) {
-	c := NewCacheImpl(&mockClient{}, nopLog)
+	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
 	c.Bootstrap(&gh.ProjectBoard{ProjectID: "P", Title: "T", OwnerType: "organization"})
 
 	payload := issuesOpenedPayloadJSON("owner/repo", 99, "I_99", "Issue", "", []string{"bug"}, nil)
@@ -550,7 +550,7 @@ func TestFabrikWentDeaf_IssuesLabeledBeforeOpened(t *testing.T) {
 		},
 	}
 	// Cache starts empty — issue #99 is NOT in the cache.
-	c := NewCacheImpl(mc, nopLog)
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
 	c.Bootstrap(&gh.ProjectBoard{ProjectID: "P", Title: "T", OwnerType: "organization"})
 
 	// Deliver labeled event BEFORE the item is in the cache (out-of-order delivery).
@@ -574,7 +574,7 @@ func TestOutOfOrderIssuesLabeledBeforeOpened(t *testing.T) {
 			Repo:   "owner/repo",
 		},
 	}
-	c := NewCacheImpl(mc, nopLog)
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
 	c.Bootstrap(&gh.ProjectBoard{ProjectID: "P", Title: "T", OwnerType: "organization"})
 
 	// labeled arrives first (out of order).
@@ -597,7 +597,7 @@ func TestIssuesClosedFallbackFetch(t *testing.T) {
 			Repo:   "owner/repo",
 		},
 	}
-	c := NewCacheImpl(mc, nopLog)
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
 	c.Bootstrap(&gh.ProjectBoard{ProjectID: "P", Title: "T", OwnerType: "organization"})
 
 	// closed arrives but issue not in cache — should trigger fetch then close.
@@ -781,7 +781,7 @@ func TestProjectsV2ItemCreated(t *testing.T) {
 			Title:  "Board Issue",
 		},
 	}
-	c := NewCacheImpl(mc, nopLog)
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
 	c.Bootstrap(&gh.ProjectBoard{ProjectID: "P", Title: "T", OwnerType: "organization"})
 
 	payload := projectsV2ItemCreatedPayloadJSON("I_88", "Issue", "PVTI_088")
@@ -803,7 +803,7 @@ func TestProjectsV2ItemCreated(t *testing.T) {
 
 func TestProjectsV2ItemCreatedNonIssueIgnored(t *testing.T) {
 	mc := &mockClient{}
-	c := NewCacheImpl(mc, nopLog)
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
 	c.Bootstrap(&gh.ProjectBoard{ProjectID: "P", Title: "T", OwnerType: "organization"})
 
 	// PullRequest content type must be ignored.
