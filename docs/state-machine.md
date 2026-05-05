@@ -149,7 +149,7 @@ Each active stage column has the same set of reachable sub-states:
 
 ## 2. Event Enumeration
 
-Eleven distinct event types drive state transitions (§2.1–2.11), plus one TUI display event (§2.12) that does not drive transitions:
+Twelve distinct event types drive state transitions (§2.1–2.11, §2.13), plus one TUI display event (§2.12) that does not drive transitions:
 
 ### 2.1 Poll Tick
 
@@ -296,6 +296,16 @@ Eleven distinct event types drive state transitions (§2.1–2.11), plus one TUI
 - First invocation without `fabrik:extend-turns`: `stage.MaxTurns`
 - First invocation with `fabrik:extend-turns`: `2 × stage.MaxTurns`
 - Extension loop second iteration: `stage.MaxTurns` (per-invocation limit, not cumulative)
+
+### 2.13 Manual Assignee Change
+
+**Webhook event:** `issues.assigned` / `issues.unassigned`
+
+**Detection:** `applyIssuesDelta` (boardcache/delta.go:382) applies `IssueAssigneesUpdated`, which emits the `AssigneesChanged` flag. The `mayNeedWorkObserver` and `wakeChObserver` (engine/observers.go) include `AssigneesChanged` in `wakeChFlags`, so the assignment fires both a wake signal and a `mayNeedWork` cycleSet entry.
+
+**Effect:** Dispatcher re-evaluates the item on the next poll cycle. The engine does not currently filter dispatch on assignee — assignee changes do not change what work happens, only that the item is re-considered. Future assignee-as-dispatch-filter work (planned, not yet filed) will give this event additional dispatch semantics.
+
+**Why:** Assignment is a strong "please look at this" signal from the user, and is the mechanical underpinning of multi-user shared boards (each fabrik instance picking up only items assigned to its `cfg.User`).
 
 ---
 
@@ -1232,10 +1242,10 @@ All ChangeFlags are produced by the single shared store. Field ownership is by m
 The `wakeChObserver` is registered once on the shared store. It fires a non-blocking send on `wakeCh` when `Change.Fields & wakeChFlags != 0`:
 
 ```
-wakeChFlags = StatusChanged | LabelsChanged | CommentsChanged | LockChanged | LinkedPRChanged
+wakeChFlags = StatusChanged | LabelsChanged | CommentsChanged | LockChanged | LinkedPRChanged | AssigneesChanged
 ```
 
-Changes that do NOT fire `wakeCh`: `InvocationChanged`, `StageStateChanged`, `WorkerChanged`, `CooldownChanged`, `AssigneesChanged`, `TitleBodyChanged`, `StateChanged`, `BlockedByChanged`, `DeepFetchChanged`, `BaseBranchChanged`, `ItemRemoved`.
+Changes that do NOT fire `wakeCh`: `InvocationChanged`, `StageStateChanged`, `WorkerChanged`, `CooldownChanged`, `TitleBodyChanged`, `StateChanged`, `BlockedByChanged`, `DeepFetchChanged`, `BaseBranchChanged`, `ItemRemoved`.
 
 The unconditional `wakeCh <- struct{}{}` send that previously lived in the webhook handler has been removed. The observer path is the sole mechanism. Because all mutation types flow through the single shared store, the single `wakeChObserver` registration is sufficient — no per-source registration is needed.
 
