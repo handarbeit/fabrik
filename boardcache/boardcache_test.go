@@ -640,9 +640,8 @@ func TestDeltaCheckRunCompleted(t *testing.T) {
 	payload := checkRunPayloadJSON("completed", "owner/repo", 9001, "build", "completed", "success", "sha_abc")
 	c.ApplyDelta("check_run", payload)
 
-	c.mu.RLock()
-	runs := c.checkRuns["sha_abc"]
-	c.mu.RUnlock()
+	// Runs are now held in Store.pendingCheckRuns (pre-linkage) — read via CheckRunsBySHA.
+	runs := c.store.CheckRunsBySHA("sha_abc")
 
 	if len(runs) != 1 || runs[0].ID != 9001 || runs[0].Conclusion != "success" {
 		t.Errorf("unexpected check runs: %+v", runs)
@@ -656,9 +655,8 @@ func TestDeltaCheckRunUpsertById(t *testing.T) {
 	// Same ID: success (re-run).
 	c.ApplyDelta("check_run", checkRunPayloadJSON("completed", "owner/repo", 9001, "build", "completed", "success", "sha_abc"))
 
-	c.mu.RLock()
-	runs := c.checkRuns["sha_abc"]
-	c.mu.RUnlock()
+	// Runs are now held in Store.pendingCheckRuns — read via CheckRunsBySHA.
+	runs := c.store.CheckRunsBySHA("sha_abc")
 
 	if len(runs) != 1 {
 		t.Errorf("upsert: expected 1 run after re-run, got %d", len(runs))
@@ -1020,11 +1018,10 @@ func TestFetchLabelsFallsThroughWhenPaused(t *testing.T) {
 
 func TestFetchCheckRunsFallsThroughWhenPaused(t *testing.T) {
 	mc := &mockClient{checkRunsResult: []gh.CheckRun{{ID: 99, Name: "live", Status: "completed", Conclusion: "success"}}}
-	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
-	// Pre-populate cache check runs so we can verify the paused path bypasses them.
-	c.mu.Lock()
-	c.checkRuns["sha_x"] = []gh.CheckRun{{ID: 1, Name: "cached"}}
-	c.mu.Unlock()
+	store := itemstate.NewStore(nil)
+	c := NewCacheImpl(mc, store, nopLog)
+	// Pre-populate Store's pendingCheckRuns so we can verify the paused path bypasses them.
+	store.Apply(itemstate.CheckRunCompleted{Repo: "owner/repo", SHA: "sha_x", Run: gh.CheckRun{ID: 1, Name: "cached"}})
 	c.Pause()
 
 	runs, err := c.FetchCheckRuns("owner", "repo", "sha_x")

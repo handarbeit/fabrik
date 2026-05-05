@@ -46,6 +46,11 @@ const (
 	// only by Store.Reset for items present in the old map but absent from the
 	// new items slice.
 	ItemRemoved
+	// CheckRunChanged indicates a check run was written to the pre-linkage
+	// pendingCheckRuns buffer (SHA not yet linked to any item). Not in wakeChFlags:
+	// the CI gate is catch-up-driven, not wake-driven. The flag exists for
+	// observability (e.g. future TUI consumers) without forcing a poll wake.
+	CheckRunChanged
 )
 
 // Change describes what fields a mutation altered. Delivered to every Observer
