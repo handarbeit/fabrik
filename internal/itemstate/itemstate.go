@@ -102,6 +102,12 @@ type ItemState struct {
 // LinkedPRState holds the state of the closing pull request for an issue.
 type LinkedPRState struct {
 	Number int
+	// Title, State ("open"/"closed"), Merged, and Draft mirror gh.PRDetails fields
+	// that were previously stored only in CacheImpl.linkedPRs. Populated by PRDetailsUpdated.
+	Title  string
+	State  string
+	Merged bool
+	Draft  bool
 	// Mergeable is nil when unknown; true/false once GitHub resolves mergeability.
 	Mergeable      *bool
 	MergeableState string // "clean", "unstable", "blocked", etc.
