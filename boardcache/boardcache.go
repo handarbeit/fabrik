@@ -439,11 +439,12 @@ func (c *CacheImpl) IsPaused() bool {
 	return c.paused
 }
 
-// IsBootstrapped returns true when the cache has been populated with at least
-// one item — i.e., Bootstrap has been called. Called outside c.mu per the
-// "NEVER hold mu while calling Store" invariant.
+// IsBootstrapped returns true when the Store contains at least one cached item.
+// Uses HasItems (O(1), non-allocating) rather than All to avoid a full snapshot
+// allocation that would otherwise duplicate the one inside FetchProjectBoard.
+// Called outside c.mu per the "NEVER hold mu while calling Store" invariant.
 func (c *CacheImpl) IsBootstrapped() bool {
-	return len(c.store.All()) > 0
+	return c.store.HasItems()
 }
 
 // IsItemDeepFetched returns true when the cache holds deep-fetched details for
