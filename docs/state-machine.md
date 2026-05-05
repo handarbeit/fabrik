@@ -151,7 +151,7 @@ Each active stage column has the same set of reachable sub-states:
 
 ## 2. Event Enumeration
 
-Twelve distinct event types drive state transitions (§2.1–2.11, §2.13), plus one TUI display event (§2.12) that does not drive transitions:
+Thirteen distinct event types drive state transitions (§2.1–2.11, §2.13, §2.14), plus one TUI display event (§2.12) that does not drive transitions:
 
 ### 2.1 Poll Tick
 
@@ -248,7 +248,7 @@ Twelve distinct event types drive state transitions (§2.1–2.11, §2.13), plus
 - Has cycle limits (`MaxReviewCycles`, default 5) — exceeding pauses the issue
 - Has timeout integration (review wait timeout can also trigger pause)
 - Dispatches asynchronously via goroutine with semaphore slot
-- The `inFlight` guard prevents double-dispatch across poll cycles
+- The worker guard (`snap.Worker() != nil`) prevents double-dispatch across poll cycles
 - Resolves review threads (marks them resolved on GitHub) after processing
 
 ### 2.10 CI Check Completed
@@ -309,6 +309,18 @@ Twelve distinct event types drive state transitions (§2.1–2.11, §2.13), plus
 
 **Why:** Assignment is a strong "please look at this" signal from the user, and is the mechanical underpinning of multi-user shared boards (each fabrik instance picking up only items assigned to its `cfg.User`).
 
+### 2.14 Worker Lifecycle
+
+**Source:** Engine-internal mutation, not a webhook.
+
+**Detection:** The dispatch loop (and each reinvoke dispatcher — `dispatchReviewReinvoke`, `dispatchCIFixReinvoke`, `dispatchRebaseReinvoke`) applies `WorkerEntered{Repo, Number, StageName, StartedAt}` synchronously before the goroutine is launched. `WorkerExited{Repo, Number}` is deferred at the top of each goroutine so it fires on any exit path (context cancel, `ensureRepoReady` failure, normal return). Both mutations emit `WorkerChanged`, which is in `wakeChFlags`.
+
+**Effect:** `WorkerExited` deterministically wakes the dispatcher and adds the item to `mayNeedWork`, so the next poll cycle re-evaluates without depending on cooldown expiry or external events. This eliminates the previous race where self-advance to the next stage would wait up to 150s (`PollSeconds × 10`) if the departing worker had not finished cleanup before the post-advance dispatch loop ran.
+
+**Dispatch guard:** The dispatch loop uses `snap.Worker() != nil` (Store-backed) instead of the former `e.inFlight.Load(iKey)` (sync.Map). Because `WorkerEntered` is applied before `wg.Add(1)` and before the goroutine starts, `snap.Worker() != nil` is true from the instant the goroutine is scheduled — there is no window where a new dispatch cycle could race in and double-dispatch the item.
+
+**Why:** Worker lifecycle is engine state the dispatcher must react to. Pre-Fix B (issue #544), it lived in `e.inFlight` (sync.Map) outside the Store — a known bypass that violated ADR 036's single-owner reactive cache invariant. `WorkerEntered`/`WorkerExited` complete the migration begun by the Phase 5 F3 store unification.
+
 ---
 
 ## 3. Transition Tables
@@ -334,6 +346,8 @@ This table shows the normal flow when an issue progresses through the pipeline w
 5. If `cruiseActive && stage.Name == "Validate"`: `shouldAdvance = false` — cruise stops at Validate
 
 **Catch-up loop `shouldAdvance` resolution (Path 2):** The catch-up loop first checks `cfg.Yolo || hasYoloLabel(item) || hasCruiseLabel(item)` — items without any of these are skipped entirely. Then: if neither yolo nor cruise LABEL is present and `stage.AutoAdvance` is explicitly false, the item is skipped. This produces the same behavior as Path 1.
+
+> **Self-advance wake guarantee (Fix B, #544):** When `advanceToNextStage` runs, two independent wake events fire: the new column status (`LocalStatusUpdated → StatusChanged`) and the worker exit (`WorkerExited → WorkerChanged`). Both flags are in `wakeChFlags`, so the dispatcher re-evaluates the item on the next poll cycle without waiting for cooldown expiry. This eliminates the previous race where the departing worker was still alive when the post-advance dispatch loop ran, causing the item to receive a 150s `CooldownAt("periodic-re-eval")` stamp.
 
 **Validate → Done special cases:**
 
@@ -420,7 +434,7 @@ In the conjunctive gate design (ADR 032), `stage:X:complete` is **withheld** unt
 | Same column, Cooldown | Retry count ≥ MaxRetries | `claudeRan && MaxRetries > 0` | Same column, Paused + Failed | `fabrik:paused`, `stage:<X>:failed` | `fabrik:locked:<user>`, `stage:<X>:in_progress` | `escalateFailedStage()` posts comment; lock released |
 | Same column, Paused + Failed | Human removes `fabrik:paused` | `stage:<X>:failed` present OR `snap.PausedByEngine(stageName)` | Same column, Idle | | `stage:<X>:failed` | `clearFailedStage()` applies `StageRetryCleared`, `EngineUnpaused`, `StageLastAttemptCleared`, `EngineCyclesCleared` |
 
-> **In-flight exclusion (#544):** `CooldownAt("periodic-re-eval")` is **not** stamped by the end-of-poll deferred block when dispatch was skipped solely because a worker from a prior poll cycle is still running (`e.inFlight.Load(iKey) == true` at defer time). Items in this state are not in Cooldown — they are in "Deferred Dispatch". The next poll re-evaluates without delay (the dispatch loop will see them and re-dispatch as soon as `inFlight` clears). Only items where `itemNeedsWork` returned false (genuinely no work needed) receive the cooldown stamp.
+> **In-flight exclusion (#544):** `CooldownAt("periodic-re-eval")` is **not** stamped by the end-of-poll deferred block when dispatch was skipped solely because a worker from a prior poll cycle is still running (`snap.Worker() != nil` at defer time). Items in this state are not in Cooldown — they are in "Deferred Dispatch". The next poll re-evaluates without delay: `WorkerExited` emits `WorkerChanged`, which wakes the poll loop immediately (see §2.13 and §9.8). Only items where `itemNeedsWork` returned false (genuinely no work needed) receive the cooldown stamp.
 
 #### Turn Limit Extension
 
@@ -471,25 +485,25 @@ The "baseline clean AND working tree dirty" guard for Implement prevents a pre-e
 
 | Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
 |--------------|-------|-------|-----------------|--------------|----------------|--------------|
-| Column `<X>`, Awaiting Review + Complete | Review gate clears + unresolved thread comments | Not in-flight, cycle count < MaxReviewCycles | Same column (comment processing via async goroutine) | `fabrik:editing` (during processing) | | `dispatchReviewReinvoke()` spawns goroutine; `ReviewCycleIncremented` applied; `inFlight` set; semaphore acquired |
+| Column `<X>`, Awaiting Review + Complete | Review gate clears + unresolved thread comments | `snap.Worker() == nil`, cycle count < MaxReviewCycles | Same column (comment processing via async goroutine) | `fabrik:editing` (during processing) | | `dispatchReviewReinvoke()` spawns goroutine; `ReviewCycleIncremented` applied; `WorkerEntered` applied; semaphore acquired |
 | Column `<X>`, Awaiting Review + Complete | Review gate clears + unresolved thread comments | Cycle count ≥ MaxReviewCycles | Same column, Awaiting Input | `fabrik:paused`, `fabrik:awaiting-input` | | `pauseForReviewCycleLimit()` posts comment |
-| Column `<X>`, Awaiting Review + Complete | Review gate clears + unresolved thread comments | Already in-flight | Same (skipped) | | | Previous reinvoke goroutine still running; skipped entirely (no cycle-limit check) |
+| Column `<X>`, Awaiting Review + Complete | Review gate clears + unresolved thread comments | `snap.Worker() != nil` | Same (skipped) | | | Previous reinvoke goroutine still running; skipped entirely (no cycle-limit check) |
 
 #### CI Fix Reinvoke
 
 | Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
 |--------------|-------|-------|-----------------|--------------|----------------|--------------|
-| Column `<X>`, Awaiting CI | Poll tick (catch-up) | CI failed; not in-flight; `snap.CIFixCycles(stageName)` < MaxCiFixCycles | Same column (CI-fix goroutine running) | `fabrik:editing` (during processing) | | `dispatchCIFixReinvoke()` spawns goroutine; `CIFixCycleIncremented` applied; `inFlight` set; semaphore acquired; synthetic CI-fix comment passed to `processComments()` |
+| Column `<X>`, Awaiting CI | Poll tick (catch-up) | CI failed; `snap.Worker() == nil`; `snap.CIFixCycles(stageName)` < MaxCiFixCycles | Same column (CI-fix goroutine running) | `fabrik:editing` (during processing) | | `dispatchCIFixReinvoke()` spawns goroutine; `CIFixCycleIncremented` applied; `WorkerEntered` applied; semaphore acquired; synthetic CI-fix comment passed to `processComments()` |
 | Column `<X>`, Awaiting CI | Poll tick (catch-up) | CI failed; `snap.CIFixCycles(stageName)` ≥ MaxCiFixCycles | Same column, Awaiting Input | `fabrik:paused`, `fabrik:awaiting-input` | | `pauseForCIFixCycleLimit()` posts explanatory comment |
-| Column `<X>`, Awaiting CI | Poll tick (catch-up) | CI failed; already in-flight | Same (skipped) | | | Previous CI-fix goroutine still running; skipped entirely |
+| Column `<X>`, Awaiting CI | Poll tick (catch-up) | CI failed; `snap.Worker() != nil` | Same (skipped) | | | Previous CI-fix goroutine still running; skipped entirely |
 
 #### Rebase Reinvoke
 
 | Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
 |--------------|-------|-------|-----------------|--------------|----------------|--------------|
-| Column `<X>`, Rebase Needed + Complete | Poll tick (catch-up) | `mergeable == false`; not in-flight; `snap.RebaseCycles(stageName)` < MaxRebaseCycles | Same column (rebase goroutine running) | `fabrik:editing` (during processing) | | `dispatchRebaseReinvoke()` spawns goroutine; `RebaseCycleIncremented` applied; `inFlight` set; semaphore acquired; synthetic rebase-required comment passed to `processComments()` |
+| Column `<X>`, Rebase Needed + Complete | Poll tick (catch-up) | `mergeable == false`; `snap.Worker() == nil`; `snap.RebaseCycles(stageName)` < MaxRebaseCycles | Same column (rebase goroutine running) | `fabrik:editing` (during processing) | | `dispatchRebaseReinvoke()` spawns goroutine; `RebaseCycleIncremented` applied; `WorkerEntered` applied; semaphore acquired; synthetic rebase-required comment passed to `processComments()` |
 | Column `<X>`, Rebase Needed + Complete | Poll tick (catch-up) | `mergeable == false`; `snap.RebaseCycles(stageName)` ≥ MaxRebaseCycles | Same column, Awaiting Input | `fabrik:paused`, `fabrik:awaiting-input` | | `pauseForRebaseCycleLimit()` posts explanatory comment (usually signals a semantic conflict needing human judgment) |
-| Column `<X>`, Rebase Needed + Complete | Poll tick (catch-up) | `mergeable == false`; already in-flight | Same (skipped) | | | Previous rebase goroutine still running; skipped entirely |
+| Column `<X>`, Rebase Needed + Complete | Poll tick (catch-up) | `mergeable == false`; `snap.Worker() != nil` | Same (skipped) | | | Previous rebase goroutine still running; skipped entirely |
 
 ---
 
@@ -585,7 +599,7 @@ Fabrik discovers PR comments through the `closedByPullRequestsReferences` GraphQ
 3. **Per-check classification (fallback)**: fetch check runs via `FetchCheckRuns()`. Apply R1–R6 rules (no checks → R5 clears; failed → R3 applies `fabrik:awaiting-ci` and returns error; pending → R2 returns error and tracks `LinkedPRState.CIMergePendingSince` for the timeout; all green → R4 clears).
 4. Attempt merge via `MergePR()`. `MergePR` first checks the PR's `merged` field — if the PR was already merged (e.g., by a human), it returns nil immediately (no-op success). Otherwise it checks `mergeable` and attempts the merge.
 5. On `ErrNotMergeable`: apply `fabrik:rebase-needed` idempotently. Then:
-   - **inFlight guard:** if a rebase goroutine is already running for this item, return a plain error (skip — prevents cycle-counter drift).
+   - **Worker guard (`snap.Worker() != nil`):** if a rebase goroutine is already running for this item, return a plain error (skip — prevents cycle-counter drift).
    - **Cycle limit check:** compare `snap.RebaseCycles(stage.Name)` against `MaxRebaseCycles` (default 3):
      - If at or above the limit: call `pauseForRebaseCycleLimit()` (`fabrik:paused` + `fabrik:awaiting-input` + explanatory comment); return a plain error.
      - If below the limit: apply `RebaseCycleIncremented`, call `dispatchRebaseReinvoke()`, return the `errRebaseDispatched` sentinel.
@@ -655,19 +669,19 @@ The catch-up loop in `poll()` is split into two phases for every non-paused non-
 1. `checkDependencies()` — if blocked, skip
 2. `checkReviewGate()` — if awaiting reviewers, skip; if timed out, pause
 3. `buildReviewThreadComments()` collects inline comments from unresolved review threads (no ROCKET reaction, not in `snap.CommentProcessed(c.ID)`)
-4. **inFlight guard:** If a reinvoke goroutine from a previous poll cycle is still running, the entire reinvoke path is skipped (including cycle-limit checks)
+4. **Worker guard (`snap.Worker() != nil`):** If a reinvoke goroutine from a previous poll cycle is still running, the entire reinvoke path is skipped (including cycle-limit checks)
 5. **Cycle limit check:** `snap.ReviewCycles(stage.Name)` is compared against `MaxReviewCycles` (default 5)
    - If exceeded: `pauseForReviewCycleLimit()` adds `fabrik:paused` + `fabrik:awaiting-input` and posts comment
    - If not exceeded: increment count, dispatch reinvoke via `dispatchReviewReinvoke()`:
-     - Marks item in `inFlight` (prevents double-dispatch)
+     - Applies `WorkerEntered` (prevents double-dispatch)
      - Acquires semaphore slot (respects `MaxConcurrent`)
      - Calls `processComments()` with the synthetic review comments asynchronously
-     - On exit: releases semaphore, clears `inFlight`
+     - On exit: releases semaphore, applies `WorkerExited`
    - Either way: `continue` — Phase 2 is skipped this cycle; item re-evaluated on next poll
 6. **Merge-conflict gate** (only reached if no review reinvoke was dispatched in step 5; only runs for stages with `wait_for_ci: true`, the same opt-in as the CI gate): `checkMergeabilityGate()` fetches GitHub's `mergeable` flag for the linked PR
    - `mergeable == true` (or no PR): clear any stale `fabrik:rebase-needed` label; fall through to the CI gate
    - `mergeable == null` (GitHub still computing) **or** transient API error on either REST call: block this item for the rest of Phase 1 (skip to next item) — re-evaluated on the next poll (**no label churn** — mirrors the CI gate's R10c rule and matches how the CI gate handles its own transient errors)
-   - `mergeable == false` (confirmed conflict): apply `fabrik:rebase-needed` idempotently, then **inFlight guard** + **cycle limit check** (`snap.RebaseCycles(stage.Name)` vs `MaxRebaseCycles`, default 3):
+   - `mergeable == false` (confirmed conflict): apply `fabrik:rebase-needed` idempotently, then **worker guard (`snap.Worker() != nil`)** + **cycle limit check** (`snap.RebaseCycles(stage.Name)` vs `MaxRebaseCycles`, default 3):
      - If exceeded: `pauseForRebaseCycleLimit()` pauses issue
      - If not exceeded: dispatch `dispatchRebaseReinvoke()`; `continue`. The catch-up loop never reaches the CI gate while a conflict is outstanding — there is no point spinning on CI-await when the branch cannot merge.
 7. **CI gate** (only reached if the merge-conflict gate cleared): `checkCIGate()` evaluates CI for stages with `wait_for_ci: true`
@@ -675,7 +689,7 @@ The catch-up loop in `poll()` is split into two phases for every non-paused non-
    - Per-check classification (fallback): fetches `FetchCheckRuns()` and applies R1–R6
    - Pending/API error: skip (blocked, not failed); item re-evaluated on next poll
    - Timed out: `pauseForCITimeout()` pauses issue
-   - CI failed: **inFlight guard** + **cycle limit check** (`snap.CIFixCycles(stage.Name)` vs `MaxCiFixCycles`):
+   - CI failed: **worker guard (`snap.Worker() != nil`)** + **cycle limit check** (`snap.CIFixCycles(stage.Name)` vs `MaxCiFixCycles`):
      - If exceeded: `pauseForCIFixCycleLimit()` pauses issue
      - If not exceeded: dispatch `dispatchCIFixReinvoke()`; `continue`
 
@@ -701,7 +715,7 @@ The catch-up loop in `poll()` is split into two phases for every non-paused non-
 | Timeout | None | Integrated with `ReviewWaitTimeout` |
 | Thread resolution | Yes — `processComments()` merges unresolved `LinkedPRReviewThreadComments` at entry, so a user nudge resolves threads in the same invocation | Yes — resolves review threads after processing |
 | PR summary posting | None | Posts `"<StageName> (review feedback addressed)"` on the linked PR with per-thread footer (one `path:line — resolved` bullet per unique `ReviewThreadID`); skipped when `output == ""` or no linked PR |
-| inFlight guard | Uses dispatch loop's `inFlight` check | Has its own `inFlight` check in catch-up loop |
+| Worker guard | Uses dispatch loop's `snap.Worker() != nil` | Has its own `snap.Worker() != nil` check in catch-up loop |
 
 ### 6.4 CI Gate and CI-Fix Reinvoke
 
@@ -737,15 +751,15 @@ The CI gate has two paths that handle different timing scenarios:
 
 The catch-up loop Phase 1 calls `checkCIGate()` after the review gate check. When CI has failed:
 
-1. **inFlight guard:** If a CI-fix goroutine from a previous poll is still running for this item, skip dispatch entirely (no cycle-limit check either)
+1. **Worker guard (`snap.Worker() != nil`):** If a CI-fix goroutine from a previous poll is still running for this item, skip dispatch entirely (no cycle-limit check either)
 2. **Cycle limit check:** `snap.CIFixCycles(stage.Name)` is compared against `MaxCiFixCycles` (default 5)
    - If exceeded: `pauseForCIFixCycleLimit()` adds `fabrik:paused` + `fabrik:awaiting-input` and posts comment
    - If not exceeded: increment count, dispatch reinvoke via `dispatchCIFixReinvoke()`:
-     - Marks item in `inFlight` (prevents double-dispatch)
+     - Applies `WorkerEntered` (prevents double-dispatch)
      - Acquires semaphore slot (respects `MaxConcurrent`)
      - Calls `buildCIFixComment()` to construct a synthetic `gh.Comment` (`DatabaseID: 0`) with a structured CI failure report — classifies each failed check as **NEW REGRESSION** (not failing on base branch) or **pre-existing** (also failing on base branch)
      - Calls `processComments()` with the synthetic comment and the `ci_fix_skill` (falls back to `comment_skill` if unset)
-     - On exit: releases semaphore, clears `inFlight`
+     - On exit: releases semaphore, applies `WorkerExited`
 
 **`DatabaseID: 0` guard:** Synthetic CI-fix comments have `DatabaseID: 0`, which skips the 👀 and 🚀 reaction steps in `processComments()` (reactions require a real GitHub comment ID).
 
@@ -763,7 +777,7 @@ The catch-up loop Phase 1 calls `checkCIGate()` after the review gate check. Whe
 | Max cycles | `MaxReviewCycles` (default 5) | `MaxCiFixCycles` (default 5) |
 | Skill | `comment_skill` | `ci_fix_skill` (falls back to `comment_skill`) |
 | Synthetic comment | PR review thread text | Structured CI failure report with NEW REGRESSION classification |
-| inFlight guard | Yes — shared `inFlight` sync.Map | Yes — same `inFlight` sync.Map |
+| Worker guard | Yes — `snap.Worker() != nil` | Yes — `snap.Worker() != nil` |
 | Thread resolution | Yes — `ResolveReviewThread()` after processing | No |
 | PR summary comment | Yes — `"<StageName> (review feedback addressed)"` on linked PR | No |
 | Stage gate config | `wait_for_reviews: true` | `wait_for_ci: true` |
@@ -794,15 +808,15 @@ When the merge gate clears (`mergeable == true`), Phase 1 falls through to the C
 
 When `checkMergeabilityGate` returns `conflict=true`:
 
-1. **inFlight guard:** if a rebase goroutine from a previous poll is still running for this item, skip dispatch entirely (no cycle-limit check).
+1. **Worker guard (`snap.Worker() != nil`):** if a rebase goroutine from a previous poll is still running for this item, skip dispatch entirely (no cycle-limit check).
 2. **Cycle limit check:** `snap.RebaseCycles(stage.Name)` is compared against `MaxRebaseCycles` (default 3 — lower than review/CI because rebase either works in one shot or needs human judgment):
    - If exceeded: `pauseForRebaseCycleLimit()` pauses the issue with `fabrik:paused` + `fabrik:awaiting-input`; `fabrik:rebase-needed` is intentionally left in place so the reason is visible.
    - If not exceeded: increment count, dispatch `dispatchRebaseReinvoke()`:
-     - Marks item in `inFlight` (prevents double-dispatch)
+     - Applies `WorkerEntered` (prevents double-dispatch)
      - Acquires semaphore slot (respects `MaxConcurrent`)
      - Calls `buildRebaseComment()` to construct a synthetic `gh.Comment` (`DatabaseID: 0`) instructing Claude to `git fetch origin <base> && git rebase origin/<base>`, resolve conflicts conservatively (never dropping code from base), watch for semantic collisions (duplicated ADR numbers, migration slots), run the project's build + tests, and force-push with `--force-with-lease`.
      - Calls `processComments()` with the synthetic comment and the `rebase_skill` (falls back to `comment_skill` if unset)
-     - On exit: releases semaphore, clears `inFlight`
+     - On exit: releases semaphore, applies `WorkerExited`
 
 **`DatabaseID: 0` guard:** like the CI-fix and review synthetic comments, the rebase synthetic comment uses `DatabaseID: 0` so `processComments()` skips the 👀 and 🚀 reaction steps (no real GitHub comment exists to react to).
 
@@ -1056,15 +1070,17 @@ No special handling. Each is independent. The engine only checks the in_progress
 
 `Engine.sem` is a buffered channel of size `MaxConcurrent` (default 5). The dispatch loop, `dispatchReviewReinvoke()`, and `dispatchCIFixReinvoke()` all acquire slots from this semaphore before invoking Claude.
 
-### 9.2 inFlight Map
+### 9.2 Worker In-Flight Guard (formerly inFlight Map)
 
-`Engine.inFlight` (`sync.Map`) prevents double-dispatch of goroutines. Key: `issueKey` string, Value: `bool` (isPR).
+**`Engine.inFlight` (`sync.Map`) has been removed (Fix B, issue #544).** The dispatch guard is now entirely Store-backed.
 
-- **Set by:** dispatch loop (before goroutine launch), `dispatchReviewReinvoke()` (inside goroutine, before semaphore acquire), and `dispatchCIFixReinvoke()` (inside goroutine, before semaphore acquire)
-- **Cleared by:** goroutine defer (after `processItem()` or `processComments()` returns)
-- **Used by:** dispatch loop only — to prevent launching a second goroutine for the same issue
+The dispatch loop uses `snap.Worker() != nil` to detect whether a goroutine is already running for an item. `WorkerEntered{Repo, Number, StageName, StartedAt}` is applied synchronously before `wg.Add(1)` and before the goroutine is launched, so the store guard is effective from the instant the goroutine is scheduled. The reinvoke dispatchers (`dispatchReviewReinvoke`, `dispatchCIFixReinvoke`, `dispatchRebaseReinvoke`) follow the same pattern. `WorkerExited` is deferred at the top of each goroutine.
 
-The semantic question "is a worker currently active for this issue?" is answered by `snap.Worker() != nil` (see §9.7), not by `inFlight`. The catch-up loop, CI-fix reinvoke guard, rebase reinvoke guard, and TUI idle display all use the store read. `inFlight` is retained solely as a goroutine-launch deduplication guard for the main dispatch loop.
+- **Set by:** dispatch loop applies `WorkerEntered` before goroutine launch; each reinvoke dispatcher applies `WorkerEntered` before goroutine launch
+- **Cleared by:** goroutine-top `defer store.Apply(WorkerExited{...})` — fires on any exit path including early return from context cancel or `ensureRepoReady` failure
+- **Read by:** `snap.Worker() != nil` — used by all dispatch guards (main loop, reinvoke catch-up guards), the idle display ("workers active" log), and auto-upgrade guard
+
+Both mutations emit `WorkerChanged` (§2.13), which is in `wakeChFlags`, so worker entry and exit deterministically wake the poll loop.
 
 ### 9.3 Worktree Mutex
 
@@ -1077,7 +1093,7 @@ Within a single `poll()` call:
 1. **Catch-up loop** runs first — processes items with `stage:<X>:complete` labels for yolo/cruise advancement, review gate evaluation, and review reinvoke dispatch
 2. **Dispatch loop** runs second — processes items that need stage invocations or comment processing
 
-The `advancedItems` map tracks items that the catch-up loop advanced during this poll cycle. Items in `advancedItems` are excluded from the deferred `CooldownAt["periodic-re-eval"]` refresh at the end of `poll()`, so they appear in the next poll cycle's cycleSet naturally (via the observer that fires when their status changes) rather than being suppressed by cooldown. The `inFlight` map prevents items dispatched by `dispatchReviewReinvoke()` in the catch-up loop from being double-dispatched by the dispatch loop.
+The `advancedItems` map tracks items that the catch-up loop advanced during this poll cycle. Items in `advancedItems` are excluded from the deferred `CooldownAt["periodic-re-eval"]` refresh at the end of `poll()`, so they appear in the next poll cycle's cycleSet naturally (via the observer that fires when their status changes) rather than being suppressed by cooldown. Items dispatched by `dispatchReviewReinvoke()` in the catch-up loop are guarded from double-dispatch by the dispatch loop via `snap.Worker() != nil` (see §9.2).
 
 ### 9.5 Engine.mu Mutex
 
@@ -1112,7 +1128,7 @@ The following fields are stored in `ItemState` / `LinkedPRState` and accessed ex
 | `StageState.CIFixCycles` | `CIFixCycleIncremented` (increment); `EngineCyclesCleared` (reset) | `snap.CIFixCycles(stageName)` | `e.ciFixCycleCount[stageKey]` |
 | `StageState.RebaseCycles` | `RebaseCycleIncremented` (increment); `EngineCyclesCleared` (reset) | `snap.RebaseCycles(stageName)` | `e.rebaseCycleCount[stageKey]` |
 | `StageState.ProcessedComments` | `CommentProcessed{CommentID, At}` | `snap.CommentProcessed(commentID)` | `e.processedSet["…comment-ID"]` |
-| `Worker` (`*WorkerHandle`) | `LocalLockAcquired{Worker: &WorkerHandle{...}}` (set); `WorkerPIDSet{PID}` (update PID); `WorkerHeartbeat{At}` (update `LastSignAt`); `WorkerExited` (clear) | `snap.Worker()` | N/A (new in Phase 3-G) |
+| `Worker` (`*WorkerHandle`) | `WorkerEntered{StageName, StartedAt}` (placeholder, before goroutine launch); `LocalLockAcquired{Worker: &WorkerHandle{...}}` (full details, after lock acquired); `WorkerPIDSet{PID}` (update PID); `WorkerHeartbeat{At}` (update `LastSignAt`); `WorkerExited` (clear) | `snap.Worker()` | N/A (new in Phase 3-G; `WorkerEntered` added in Fix B, #544) |
 
 **`mayNeedWork` (Phase 3-H):** The map `e.mayNeedWork map[string]bool` (protected by `e.mayNeedWorkMu`) is the Phase 3-H replacement for the removed `e.seenUpdatedAt` map. It is populated by the `mayNeedWorkObserver` registered once on the shared store whenever a Change includes any `wakeChFlag`. All mutation types — engine-side and webhook/reconcile-side — now fire through the same observer registration. Each poll cycle drains the map into a local `cycleSet` — only items in the set (or with bypass conditions) proceed to deep-fetch evaluation. See section 9.8 for the full observer pattern description.
 
@@ -1215,7 +1231,7 @@ There is exactly one `*itemstate.Store` instance. `Engine.New()` creates it and 
 
 | Mutation category | Mutation types | ChangeFlags produced |
 |-------------------|----------------|----------------------|
-| Engine-side | `LocalLockAcquired`, `LocalLockReleased`, `InvocationRecorded`, `StageAttempted`, `CooldownRecorded`, `WorkerPIDSet`, `WorkerHeartbeat`, `WorkerExited`, `PRChecksObserved`, … | `LockChanged`, `InvocationChanged`, `StageStateChanged`, `CooldownChanged`, `WorkerChanged`, `LinkedPRChanged` (partial) |
+| Engine-side | `LocalLockAcquired`, `LocalLockReleased`, `InvocationRecorded`, `StageAttempted`, `CooldownRecorded`, `WorkerEntered`, `WorkerPIDSet`, `WorkerHeartbeat`, `WorkerExited`, `PRChecksObserved`, … | `LockChanged`, `InvocationChanged`, `StageStateChanged`, `CooldownChanged`, `WorkerChanged`, `LinkedPRChanged` (partial) |
 | Webhook/reconcile-side | `IssueLabeled`, `IssueUnlabeled`, `IssueCommentCreated`, `PRReviewSubmitted`, `CheckRunCompleted`, … | `LabelsChanged`, `CommentsChanged`, `LinkedPRChanged`, `AssigneesChanged`, … |
 | Both | `LocalStatusUpdated` (reconcile/webhook delta path **and** engine write-through via `cacheImpl.UpdateItemStatus`) | `StatusChanged` |
 
@@ -1236,7 +1252,7 @@ All ChangeFlags are produced by the single shared store. Field ownership is by m
 | `CommentsChanged` | Webhook/reconcile | `IssueCommentCreated`, `LocalCommentAdded` |
 | `InvocationChanged` | Engine-side | `InvocationRecorded` (token usage, completed, blocked, IsComment) |
 | `StageStateChanged` | Engine-side | `StageAttempted`, `StageRetryIncremented`, `ReviewCycleIncremented`, etc. |
-| `WorkerChanged` | Engine-side | `LocalLockAcquired` (with Worker), `WorkerPIDSet`, `WorkerHeartbeat`, `WorkerExited` |
+| `WorkerChanged` | Engine-side | `WorkerEntered`, `LocalLockAcquired` (with Worker), `WorkerPIDSet`, `WorkerHeartbeat`, `WorkerExited` |
 | `CooldownChanged` | Engine-side | `CooldownRecorded` |
 | `DeepFetchChanged` | Engine-side | `DeepFetchFailed`, `ItemDeepFetched` |
 | `ItemRemoved` | Reset | `Store.Reset` for items present in the old map but absent from the new items slice |
@@ -1246,10 +1262,12 @@ All ChangeFlags are produced by the single shared store. Field ownership is by m
 The `wakeChObserver` is registered once on the shared store. It fires a non-blocking send on `wakeCh` when `Change.Fields & wakeChFlags != 0`:
 
 ```
-wakeChFlags = StatusChanged | LabelsChanged | CommentsChanged | LockChanged | LinkedPRChanged | AssigneesChanged
+wakeChFlags = StatusChanged | LabelsChanged | CommentsChanged | LockChanged | LinkedPRChanged | AssigneesChanged | WorkerChanged
 ```
 
-Changes that do NOT fire `wakeCh`: `InvocationChanged`, `StageStateChanged`, `WorkerChanged`, `CooldownChanged`, `TitleBodyChanged`, `StateChanged`, `BlockedByChanged`, `DeepFetchChanged`, `BaseBranchChanged`, `ItemRemoved`.
+`WorkerChanged` was added in Fix B (issue #544) so that `WorkerEntered` and `WorkerExited` mutations deterministically wake the poll loop. See §2.14.
+
+Changes that do NOT fire `wakeCh`: `InvocationChanged`, `StageStateChanged`, `CooldownChanged`, `TitleBodyChanged`, `StateChanged`, `BlockedByChanged`, `DeepFetchChanged`, `BaseBranchChanged`, `ItemRemoved`.
 
 The unconditional `wakeCh <- struct{}{}` send that previously lived in the webhook handler has been removed. The observer path is the sole mechanism. Because all mutation types flow through the single shared store, the single `wakeChObserver` registration is sufficient — no per-source registration is needed.
 
