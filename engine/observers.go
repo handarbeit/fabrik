@@ -19,7 +19,8 @@ const wakeChFlags = itemstate.StatusChanged |
 	itemstate.CommentsChanged |
 	itemstate.LockChanged |
 	itemstate.LinkedPRChanged |
-	itemstate.AssigneesChanged
+	itemstate.AssigneesChanged |
+	itemstate.WorkerChanged
 
 // newWakeChObserver returns an Observer that sends a non-blocking wake signal on
 // wakeCh whenever a Change includes any of the wakeChFlags. This replaces the
