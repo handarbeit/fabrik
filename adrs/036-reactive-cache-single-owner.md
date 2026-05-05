@@ -149,6 +149,27 @@ foot-guns identified in Phase 4 make the split untenable: the `worker_liveness.g
 label read was already silently broken on any board running in in-memory cache mode.
 Unification restores the structural guarantee the ADR intended.
 
+### Bootstrap gap fixed (Phase 5 / issue #542)
+
+After Phase 5 F3 unification (see above), `Store.Reset` — the only path through which
+`Bootstrap` populates the shared store — silently mutated the item map without emitting
+any observer Changes. Because `engine.store` and `cacheImpl.store` are now the same
+instance, `e.store.Get(...)` succeeds for bootstrapped items, causing the poll
+prefilter's `notInStore` bypass to return false. Items bootstrapped at startup were
+therefore invisible to the dispatch loop until an independent `Apply` fired an observer
+Change — effectively breaking restart-resume for every in-progress issue when running
+in in-memory cache mode with webhooks enabled.
+
+The fix (issue #542) rewrites `Store.Reset` to follow the same batch-notify pattern
+used by `Apply` and `applyBoardReconciled`: accumulate all `(Change, Snapshot)` pairs
+under a single `s.mu` hold, release the lock, capture observers, then call each
+observer outside all locks. A new `ItemRemoved` ChangeFlags constant was added to
+`change.go` so that items present in the old map but absent from the new items slice
+emit a semantically distinct signal (rather than reusing `StateChanged`, which means
+issue open/closed). The existing `mayNeedWorkObserver` and `wakeChObserver` both use
+flag-based filtering; `ItemRemoved` does not match either observer's mask, so removed
+items are safely ignored by the dispatch loop.
+
 ## References
 
 - `docs/cache-refactor/01-state-inventory.md` — inventory of every existing state structure with read/write sites and known bugs.

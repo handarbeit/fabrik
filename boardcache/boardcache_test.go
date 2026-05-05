@@ -226,6 +226,49 @@ func TestBootstrapPopulatesItems(t *testing.T) {
 	}
 }
 
+// TestBootstrapNotifiesObserver verifies that Bootstrap fires observer notifications
+// for every item in the board, matching production ordering in engine/poll.go where
+// observers are subscribed before Bootstrap is called.
+func TestBootstrapNotifiesObserver(t *testing.T) {
+	store := itemstate.NewStore(nil)
+
+	var mu sync.Mutex
+	var received []itemstate.Change
+	// Subscribe BEFORE Bootstrap — matching production ordering in engine/poll.go.
+	store.Subscribe(itemstate.ObserverFunc(func(c itemstate.Change, _ itemstate.Snapshot) {
+		mu.Lock()
+		received = append(received, c)
+		mu.Unlock()
+	}))
+
+	mc := &mockClient{}
+	c := NewCacheImpl(mc, store, nopLog)
+
+	board := &gh.ProjectBoard{
+		ProjectID: "PID",
+		Title:     "T",
+		OwnerType: "organization",
+		Items: []gh.ProjectItem{
+			{ID: "I_1", Repo: "owner/repo", Number: 1, Status: "Research", Title: "Issue 1"},
+			{ID: "I_2", Repo: "owner/repo", Number: 2, Status: "Implement", Title: "Issue 2"},
+		},
+	}
+	c.Bootstrap(board)
+
+	mu.Lock()
+	got := len(received)
+	mu.Unlock()
+
+	if got != 2 {
+		t.Fatalf("expected 2 observer Changes after Bootstrap, got %d", got)
+	}
+	for _, ch := range received {
+		if ch.Fields == 0 {
+			t.Errorf("Change for #%d has zero Fields; want non-zero", ch.Number)
+		}
+	}
+}
+
 func TestNewCacheImplNilStorePanic(t *testing.T) {
 	defer func() {
 		r := recover()

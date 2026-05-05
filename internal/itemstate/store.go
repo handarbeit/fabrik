@@ -841,23 +841,36 @@ func (s *Store) RemoveByItemID(itemID string) (repo string, number int, ok bool)
 	return repo, number, true
 }
 
+// resetNotification holds a Change and Snapshot for deferred observer dispatch.
+type resetNotification struct {
+	change Change
+	snap   Snapshot
+}
+
 // Reset atomically replaces all Store state with the items in the given slice.
 // Existing items, indexes, and deep-fetch state are cleared. This is used by
 // Bootstrap to ensure a clean slate (unlike Reconcile, which preserves deep state).
+// Observers are notified outside the write lock, following the same pattern as Apply.
 func (s *Store) Reset(items []gh.ProjectItem) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+
+	oldItems := s.items
 	s.items = make(map[string]*ItemState, len(items))
 	s.shaToKey = make(map[string]string, len(items))
 	s.itemIDToKey = make(map[string]string, len(items))
+
+	newKeys := make(map[string]bool, len(items))
+	var notifications []resetNotification
+
 	for i := range items {
 		pi := items[i]
 		key := itemKeyFor(pi.Repo, pi.Number)
 		if key == "" {
 			continue
 		}
+		newKeys[key] = true
 		item := &ItemState{Repo: pi.Repo, Number: pi.Number}
-		applyProjectItem(item, pi)
+		flags := applyProjectItem(item, pi)
 		s.items[key] = item
 		if item.ItemID != "" {
 			s.itemIDToKey[item.ItemID] = key
@@ -865,6 +878,31 @@ func (s *Store) Reset(items []gh.ProjectItem) {
 		if item.LinkedPR != nil && item.LinkedPR.HeadSHA != "" {
 			s.shaToKey[item.LinkedPR.HeadSHA] = key
 		}
+		notifications = append(notifications, resetNotification{
+			change: Change{Repo: item.Repo, Number: item.Number, Fields: flags},
+			snap:   newSnapshot(*item),
+		})
+	}
+
+	// Synthesize removal Changes for items present in the old map but absent from the new slice.
+	for key, old := range oldItems {
+		if newKeys[key] {
+			continue
+		}
+		notifications = append(notifications, resetNotification{
+			change: Change{Repo: old.Repo, Number: old.Number, Fields: ItemRemoved},
+			snap:   newSnapshot(*old),
+		})
+	}
+
+	s.mu.Unlock()
+
+	if len(notifications) == 0 {
+		return
+	}
+	obs := s.captureObservers()
+	for _, n := range notifications {
+		s.notify(obs, n.change, n.snap)
 	}
 }
 
