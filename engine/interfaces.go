@@ -46,6 +46,7 @@ type GitHubClient interface {
 	RateLimitStats() (rest, graphql gh.RateLimitStats)
 	FetchProjectItemStatus(itemID string) (string, error)
 	FetchProjectItemStatusBatch(projectID string) (map[string]string, error)
+	LookupIssueProjectItem(projectID, repo string, issueNumber int) (itemID string, status string, err error)
 }
 
 // InvokeOptions bundles per-issue override parameters for Claude invocations.

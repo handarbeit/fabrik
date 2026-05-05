@@ -45,11 +45,15 @@ type mockGitHubClient struct {
 	addReviewRequestFn              func(owner, repo string, prNumber int, reviewers []string) error
 	fetchProjectItemStatusFn        func(itemID string) (string, error)
 	fetchProjectItemStatusBatchFn   func(projectID string) (map[string]string, error)
+	lookupIssueProjectItemFn        func(projectID, repo string, issueNumber int) (string, string, error)
 	fetchPRClosingIssuesFn          func(owner, repo string, prNumber int) ([]int, error)
 	fetchPRsForSHAFn                func(owner, repo, sha string) ([]int, error)
 
 	// Track call counts for FetchProjectItemStatus
 	fetchProjectItemStatusCalls []string
+
+	// Track calls for LookupIssueProjectItem
+	lookupIssueProjectItemCalls []lookupIssueProjectItemCall
 
 	// Track calls for FetchLabelAppliedAt
 	fetchLabelAppliedAtCalls []fetchLabelAppliedAtCall
@@ -81,6 +85,12 @@ type reviewRequestCall struct {
 	owner, repo string
 	prNumber    int
 	reviewers   []string
+}
+
+type lookupIssueProjectItemCall struct {
+	projectID   string
+	repo        string
+	issueNumber int
 }
 
 type prReviewCommentReactionCall struct {
@@ -516,6 +526,17 @@ func (m *mockGitHubClient) FetchProjectItemStatusBatch(projectID string) (map[st
 		return fn(projectID)
 	}
 	return map[string]string{}, nil
+}
+
+func (m *mockGitHubClient) LookupIssueProjectItem(projectID, repo string, issueNumber int) (string, string, error) {
+	m.mu.Lock()
+	m.lookupIssueProjectItemCalls = append(m.lookupIssueProjectItemCalls, lookupIssueProjectItemCall{projectID, repo, issueNumber})
+	fn := m.lookupIssueProjectItemFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(projectID, repo, issueNumber)
+	}
+	return "", "", nil
 }
 
 // mockClaudeInvoker implements ClaudeInvoker for testing.
