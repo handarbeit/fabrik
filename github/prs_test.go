@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -458,5 +459,53 @@ func TestAddReviewRequest_Error(t *testing.T) {
 	c := NewClientWithBaseURL("token", srv.URL)
 	if err := c.AddReviewRequest("owner", "repo", 42, []string{"bot"}); err == nil {
 		t.Fatal("expected error for 422 response")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Regex unit tests for reClosingKeyword
+// ---------------------------------------------------------------------------
+
+func extractIssueNums(body string) []int {
+	matches := reClosingKeyword.FindAllStringSubmatch(body, -1)
+	var out []int
+	for _, m := range matches {
+		n, _ := strconv.Atoi(m[1])
+		out = append(out, n)
+	}
+	return out
+}
+
+func TestReClosingKeyword_LineEndCloses(t *testing.T) {
+	body := "This PR implements the feature.\n\nCloses #42"
+	nums := extractIssueNums(body)
+	if len(nums) != 1 || nums[0] != 42 {
+		t.Errorf("want [42], got %v", nums)
+	}
+}
+
+func TestReClosingKeyword_ProseRejected(t *testing.T) {
+	// Mid-sentence prose references must be rejected; only the line-start Closes wins.
+	body := "This PR relates to work before fixes #598 and #599 landed.\n\nCloses #42"
+	nums := extractIssueNums(body)
+	if len(nums) != 1 || nums[0] != 42 {
+		t.Errorf("want [42] only (prose refs rejected), got %v", nums)
+	}
+}
+
+func TestReClosingKeyword_ListForm(t *testing.T) {
+	// List items at line start must still match.
+	body := "- closes #1\n- fixes #2\n"
+	nums := extractIssueNums(body)
+	if len(nums) != 2 || nums[0] != 1 || nums[1] != 2 {
+		t.Errorf("want [1 2], got %v", nums)
+	}
+}
+
+func TestReClosingKeyword_MixedCase(t *testing.T) {
+	body := "CLOSES #5"
+	nums := extractIssueNums(body)
+	if len(nums) != 1 || nums[0] != 5 {
+		t.Errorf("want [5], got %v", nums)
 	}
 }
