@@ -410,6 +410,30 @@ func TestRemoveBlockedIfResolved_NonTransientNoRetry(t *testing.T) {
 	}
 }
 
+// TestRemoveBlockedIfResolved_TransientExhausted verifies that three consecutive
+// transient errors exhaust all retry attempts and produce no further calls.
+func TestRemoveBlockedIfResolved_TransientExhausted(t *testing.T) {
+	orig := blockedLabelRetryDelay
+	blockedLabelRetryDelay = 0
+	t.Cleanup(func() { blockedLabelRetryDelay = orig })
+
+	var calls int
+	client := &mockGitHubClient{
+		removeLabelFromIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			if labelName == "fabrik:blocked" {
+				calls++
+				return fmt.Errorf("executing request: %w", &net.OpError{Op: "read", Net: "tcp"})
+			}
+			return nil
+		},
+	}
+	eng := depTestEngine(client)
+	eng.removeBlockedIfResolved("owner", "repo", 10)
+	if calls != 3 {
+		t.Errorf("expected 3 calls (all transient, exhausted), got %d", calls)
+	}
+}
+
 // ---- PushUnblockObserver tests (Task 5) ----
 
 // openItemWithBlockedLabel creates a gh.ProjectItem in the given column with
