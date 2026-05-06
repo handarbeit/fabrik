@@ -90,7 +90,7 @@ func checkPluginSkillsWithReader(pluginDir string, isTTY bool, r io.Reader) erro
 		// silently so dev builds and auto-upgraded builds always have matching
 		// plugin skills without manual intervention.
 		for _, rel := range diffing {
-			embeddedPath := filepath.Join("fabrik-plugin", rel)
+			embeddedPath := filepath.Join("fabrik-workflows", rel)
 			data, readErr := fabrikplugin.FabrikPlugin.ReadFile(embeddedPath)
 			if readErr != nil {
 				return fmt.Errorf("reading embedded %s: %w", embeddedPath, readErr)
@@ -116,7 +116,7 @@ func checkPluginSkillsWithReader(pluginDir string, isTTY bool, r io.Reader) erro
 	}
 
 	for _, rel := range diffing {
-		embeddedPath := filepath.Join("fabrik-plugin", rel)
+		embeddedPath := filepath.Join("fabrik-workflows", rel)
 		data, readErr := fabrikplugin.FabrikPlugin.ReadFile(embeddedPath)
 		if readErr != nil {
 			return fmt.Errorf("reading embedded %s: %w", embeddedPath, readErr)
@@ -134,18 +134,18 @@ func checkPluginSkillsWithReader(pluginDir string, isTTY bool, r io.Reader) erro
 }
 
 // diffingPluginFiles walks the embedded FabrikPlugin FS and returns the relative
-// paths (from the fabrik-plugin/ root) of files whose SHA256 differs from the
+// paths (from the fabrik-workflows/ root) of files whose SHA256 differs from the
 // on-disk counterpart in pluginDir. Missing on-disk files count as differing.
 func diffingPluginFiles(pluginDir string) ([]string, error) {
 	var diffing []string
-	err := fs.WalkDir(fabrikplugin.FabrikPlugin, "fabrik-plugin", func(p string, d fs.DirEntry, walkErr error) error {
+	err := fs.WalkDir(fabrikplugin.FabrikPlugin, "fabrik-workflows", func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
 		if d.IsDir() {
 			return nil
 		}
-		rel, _ := filepath.Rel("fabrik-plugin", p)
+		rel, _ := filepath.Rel("fabrik-workflows", p)
 		embeddedData, readErr := fabrikplugin.FabrikPlugin.ReadFile(p)
 		if readErr != nil {
 			return fmt.Errorf("reading embedded %s: %w", p, readErr)

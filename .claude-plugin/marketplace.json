@@ -1,0 +1,27 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "fabrik",
+  "description": "The Fabrik plugin marketplace — ambient awareness of Fabrik (a GitHub-Project-driven SDLC pipeline orchestrator) for your interactive Claude Code session.",
+  "owner": {
+    "name": "Tenacious Ventures",
+    "url": "https://github.com/handarbeit/fabrik"
+  },
+  "plugins": [
+    {
+      "name": "fabrik",
+      "description": "Ambient awareness of Fabrik for the human's interactive Claude Code session. Turns Claude into a product-management buddy and supervisor for projects that use Fabrik to automate issue processing through a configurable SDLC pipeline (Specify, Research, Plan, Implement, Review, Validate).",
+      "category": "development",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/handarbeit/fabrik.git",
+        "path": "plugin/fabrik",
+        "ref": "main"
+      },
+      "homepage": "https://fabrik.handarbeit.io",
+      "author": {
+        "name": "Tenacious Ventures",
+        "url": "https://github.com/handarbeit/fabrik"
+      }
+    }
+  ]
+}
