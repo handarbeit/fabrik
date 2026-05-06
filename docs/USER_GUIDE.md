@@ -1358,7 +1358,7 @@ If no gaps are found, it reports: "No documentation gaps found — docs appear c
 
 For developing the plugin itself, use `--plugin-dir` to point at your working copy:
 ```bash
-./fabrik --plugin-dir ./plugin/fabrik-plugin ...
+./fabrik --plugin-dir ./plugin/fabrik-workflows ...
 ```
 
 ---
