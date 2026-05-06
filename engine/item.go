@@ -200,6 +200,14 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		return false
 	}
 
+	// Items with fabrik:blocked have an open dependency; suppress re-dispatch
+	// until the blocker closes. The first dispatch (before the label is set)
+	// still passes through so processItem → checkDependencies can apply the
+	// label. Subsequent dispatches are gated here — no goroutine, no wake-loop.
+	if hasLabel(item, "fabrik:blocked") {
+		return false
+	}
+
 	// Awaiting-input items: new comment = resume trigger; no comment = skip.
 	if awaitingInput {
 		return len(e.findNewComments(item)) > 0
@@ -221,11 +229,10 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		return true
 	}
 
-	// Dependency gate is handled by processItem via checkDependencies, which
-	// applies fabrik:blocked and sets CooldownAt["dep-blocked"] so itemMayNeedWork
-	// triggers periodic re-evaluation on expiry. A silent return here would skip
-	// the item without labelling it blocked, leaving it permanently stuck once
-	// its updatedAt is cached — even after blockers close.
+	// Dependency gate: on the first dispatch (fabrik:blocked not yet set),
+	// processItem → checkDependencies applies the label and CooldownAt["dep-blocked"].
+	// Subsequent dispatches are intercepted by the fabrik:blocked gate above,
+	// so this comment path is only reached when the item is not yet labelled blocked.
 
 	// PRs only support comment processing
 	if item.IsPR {
