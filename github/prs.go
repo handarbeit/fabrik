@@ -10,7 +10,9 @@ import (
 
 // reClosingKeyword matches GitHub closing keywords followed by a same-repo issue
 // reference (#N). Cross-repo references (owner/repo#N) are intentionally excluded.
-var reClosingKeyword = regexp.MustCompile(`(?i)(?:closes|fixes|resolves)\s+#(\d+)`)
+// Only matches at line-start (optionally preceded by whitespace or a list marker
+// like "- " or "* ") to reject mid-sentence prose references like "before fixes #N".
+var reClosingKeyword = regexp.MustCompile(`(?im)(?:^|\n)\s*(?:[-*]\s+)?(?:closes|fixes|resolves)\s+#(\d+)`)
 
 // FetchPRClosingIssues returns the issue numbers referenced by GitHub closing keywords
 // (Closes, Fixes, Resolves + #N) in the body of the given pull request. Only same-repo
