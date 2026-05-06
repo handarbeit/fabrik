@@ -453,6 +453,9 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return WorkerChanged
 
 	case WorkerExited:
+		if item.Worker == nil {
+			return 0 // no-op when Worker is already nil (e.g. duplicate WorkerExited from nested defers — the inner processItem defer fires first per Go's LIFO order, then the goroutine-level defer in poll.go finds Worker already cleared)
+		}
 		item.Worker = nil
 		return WorkerChanged | WorkerLifecycleChanged
 
