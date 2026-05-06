@@ -11,7 +11,6 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
-	"github.com/handarbeit/fabrik/tui"
 )
 
 // botRepromptedLabel is the idempotency guard for Phase 1 of the bot-reviewer
@@ -455,16 +454,6 @@ func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBo
 		onPIDReady := func(pid int) {
 			e.store.Apply(itemstate.WorkerPIDSet{Repo: itemRepo, Number: item.Number, PID: pid})
 		}
-
-		startTime := time.Now()
-		e.emitStructural(tui.JobStartedEvent{
-			IssueNumber: item.Number,
-			Repo:        itemRepo,
-			Title:       item.Title,
-			StageName:   stage.Name,
-			IsComment:   true,
-			StartedAt:   startTime,
-		})
 
 		e.logf(item.Number, "review-reinvoke", "re-invoking stage %q via comment processing with %d synthetic review comment(s)\n",
 			stage.Name, len(syntheticComments))

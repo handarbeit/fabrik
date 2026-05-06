@@ -10,6 +10,7 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 func (e *Engine) findNewComments(item gh.ProjectItem) []gh.Comment {
@@ -70,6 +71,25 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 
 	e.logf(item.Number, "comments", "processing %d new comment(s) — stage: %s\n",
 		len(comments), stage.Name)
+
+	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
+	startedAt := time.Now()
+	e.emitStructural(tui.JobStartedEvent{
+		IssueNumber: item.Number,
+		Repo:        itemRepo,
+		Title:       item.Title,
+		StageName:   stage.Name,
+		IsComment:   true,
+		StartedAt:   startedAt,
+	})
+	defer e.emitStructural(tui.JobCompletedEvent{
+		IssueNumber: item.Number,
+		Repo:        itemRepo,
+		Title:       item.Title,
+		StageName:   stage.Name,
+		IsComment:   true,
+		Skipped:     true,
+	})
 
 	// Step 1: React with 👀 to all new comments. PR review thread (inline)
 	// comments use a different REST endpoint than issue comments.
