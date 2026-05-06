@@ -1832,16 +1832,19 @@ func TestPoll_LogItemFromCache(t *testing.T) {
 	}
 }
 
-// TestCooldownStampedForInFlightItem verifies that CooldownAt("periodic-re-eval") IS
-// stamped for items whose dispatch was skipped because a worker from a prior poll cycle
-// is still in flight. Stamping is intentional — it prevents repeated deep-fetch churn
-// while the worker runs. Prompt re-dispatch is guaranteed by WorkerExited → WorkerLifecycleChanged.
-func TestCooldownStampedForInFlightItem(t *testing.T) {
-	// In-flight items are still deep-fetched (to keep their Store state fresh)
-	// and receive a CooldownAt["periodic-re-eval"] stamp to prevent repeated
-	// deep-fetch churn while the worker is running. The WorkerExited → WorkerLifecycleChanged
-	// wake signal (not the cooldown expiry) is what ensures prompt re-dispatch
-	// after the worker finishes.
+// TestInFlightItem_NotDeepFetchedByWorkerLifecycleChanged verifies that after Fix B
+// (cycleSetFlags excludes WorkerLifecycleChanged), an in-flight item whose WorkerEntered
+// event fires WorkerLifecycleChanged is NOT added to cycleSet and therefore NOT
+// deep-fetched in the subsequent poll. The wake channel still fires (wakeChFlags still
+// includes WorkerLifecycleChanged), but the cycleSet bypass no longer applies.
+func TestInFlightItem_NotDeepFetchedByWorkerLifecycleChanged(t *testing.T) {
+	// After Fix B: cycleSetFlags excludes WorkerLifecycleChanged. WorkerEntered fires
+	// WorkerLifecycleChanged → wake channel fires (poll wakes up) but the
+	// mayNeedWorkObserver does NOT add the item to cycleSet. Without cycleSet membership,
+	// an item already in the Store (no "notInStore") with no cooldown and no bypass
+	// labels is skipped by the prefilter (line 882 in poll.go). FetchItemDetails is not
+	// called and no cooldown is stamped. Re-dispatch is driven by StatusChanged or
+	// LabelsChanged events (which ARE in cycleSetFlags), not by WorkerLifecycleChanged.
 	deepFetchCalled := false
 	client := &mockGitHubClient{
 		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
@@ -1862,15 +1865,14 @@ func TestCooldownStampedForInFlightItem(t *testing.T) {
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
 
-	// Register the mayNeedWork observer so that WorkerEntered (which fires WorkerLifecycleChanged,
-	// now in wakeChFlags) populates cycleSet for the upcoming poll. Without this,
-	// the pre-filter would skip the item because it's already in the store with no
-	// new activity, and the test's FetchItemDetails assertion would be vacuously wrong.
+	// Register the mayNeedWork observer to demonstrate it does NOT fire for
+	// WorkerLifecycleChanged (Fix B: cycleSetFlags excludes WorkerLifecycleChanged).
 	mwnObs := newMayNeedWorkObserver(&eng.mayNeedWorkMu, &eng.mayNeedWork)
 	eng.store.Subscribe(mwnObs)
 
 	// Simulate a worker still running from a prior poll cycle via the Store.
-	// WorkerLifecycleChanged (now in wakeChFlags) fires the observer, adding #77 to mayNeedWork.
+	// WorkerEntered fires WorkerLifecycleChanged which is in wakeChFlags (wake channel)
+	// but NOT in cycleSetFlags (mayNeedWork/cycleSet). The observer does not add #77.
 	eng.store.Apply(itemstate.WorkerEntered{
 		Repo:      "owner/repo",
 		Number:    77,
@@ -1878,24 +1880,23 @@ func TestCooldownStampedForInFlightItem(t *testing.T) {
 		StartedAt: time.Now(),
 	})
 
+	// Verify that WorkerLifecycleChanged did NOT populate mayNeedWork (Fix B).
+	eng.mayNeedWorkMu.Lock()
+	inCycleSet := eng.mayNeedWork["owner/repo#77"]
+	eng.mayNeedWorkMu.Unlock()
+	if inCycleSet {
+		t.Error("Fix B: WorkerLifecycleChanged must not populate cycleSet; item #77 should not be in mayNeedWork after WorkerEntered")
+	}
+
 	if _, err := eng.poll(context.Background()); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 	eng.wg.Wait()
 
-	if !deepFetchCalled {
-		t.Error("expected FetchItemDetails to be called for the in-flight item")
-	}
-
-	snap, err := eng.store.Get("owner/repo", 77)
-	if err != nil {
-		t.Fatalf("store.Get: %v", err)
-	}
-	// Cooldown IS stamped for in-flight items to prevent repeated deep-fetch churn;
-	// prompt re-dispatch after the worker exits is driven by WorkerExited → WorkerLifecycleChanged
-	// adding the item to mayNeedWork (which bypasses cooldown).
-	if snap.CooldownAt("periodic-re-eval").IsZero() {
-		t.Error("expected CooldownAt(periodic-re-eval) to be set for in-flight item to prevent deep-fetch churn")
+	// FetchItemDetails must NOT be called: the item is in the Store (not notInStore),
+	// has no cooldown, no bypass labels, and is not in cycleSet. The prefilter skips it.
+	if deepFetchCalled {
+		t.Error("Fix B: FetchItemDetails must not be called for an in-flight item after WorkerEntered fires WorkerLifecycleChanged (cycleSetFlags excludes WorkerLifecycleChanged)")
 	}
 }
 
