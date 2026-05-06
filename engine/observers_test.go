@@ -181,6 +181,56 @@ func TestMayNeedWorkObserver_PopulatesKeyOnAssigneesChanged(t *testing.T) {
 	}
 }
 
+// TestMayNeedWorkObserver_SkipsWorkerLifecycleChanged verifies that
+// WorkerLifecycleChanged (WorkerExited) does NOT populate the cycleSet.
+// cycleSetFlags intentionally excludes WorkerLifecycleChanged so that
+// early-return goroutine exits do not bypass the cooldown gate (Fix B, issue #576).
+func TestMayNeedWorkObserver_SkipsWorkerLifecycleChanged(t *testing.T) {
+	var mu sync.Mutex
+	set := make(map[string]bool)
+	store := newTestStore()
+	unsub := store.Subscribe(newMayNeedWorkObserver(&mu, &set))
+	defer unsub()
+
+	// Seed WorkerEntered first so WorkerExited produces a real change
+	// (WorkerExited on a nil worker is a no-op and fires no observers).
+	store.Apply(itemstate.WorkerEntered{Repo: "owner/repo", Number: 10, StageName: "Research", StartedAt: time.Now()})
+	// Drain any entry the WorkerEntered may have added (WorkerChanged only, not WorkerLifecycleChanged)
+	mu.Lock()
+	delete(set, "owner/repo#10")
+	mu.Unlock()
+
+	store.Apply(itemstate.WorkerExited{Repo: "owner/repo", Number: 10})
+
+	mu.Lock()
+	ok := set["owner/repo#10"]
+	mu.Unlock()
+	if ok {
+		t.Fatal("mayNeedWorkObserver must NOT populate cycleSet on WorkerLifecycleChanged (Fix B)")
+	}
+}
+
+// TestWakeChObserver_FiresOnWorkerLifecycleChanged verifies that the wake channel
+// STILL fires on WorkerExited — wakeChFlags retains WorkerLifecycleChanged so
+// non-blocked items are re-evaluated promptly after a goroutine exits (Fix B, issue #576).
+func TestWakeChObserver_FiresOnWorkerLifecycleChanged(t *testing.T) {
+	wakeCh := make(chan struct{}, 1)
+	store := newTestStore()
+	unsub := store.Subscribe(newWakeChObserver(wakeCh))
+	defer unsub()
+
+	// Seed WorkerEntered so WorkerExited produces a real WorkerLifecycleChanged.
+	store.Apply(itemstate.WorkerEntered{Repo: "owner/repo", Number: 11, StageName: "Research", StartedAt: time.Now()})
+	drainWakeCh(wakeCh)
+
+	store.Apply(itemstate.WorkerExited{Repo: "owner/repo", Number: 11})
+	select {
+	case <-wakeCh:
+	default:
+		t.Fatal("wakeChObserver must fire on WorkerLifecycleChanged (WorkerExited) — wakeChFlags still includes it")
+	}
+}
+
 // --- InvocationObserver ---
 
 func TestInvocationObserver_FiresJobCompletedEventOnInvocationChanged(t *testing.T) {
