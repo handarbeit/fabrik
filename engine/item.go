@@ -811,6 +811,13 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		postOutput = strings.TrimSpace(postOutput)
 	}
 
+	// When completing a stage that posts output to a PR and creates a draft PR,
+	// ensure the PR exists before posting so postOutputToPR can find it.
+	var prNumber int
+	if completed && stage.CreateDraftPR && stage.PostToPR {
+		prNumber = e.ensureDraftPR(item, baseBranch)
+	}
+
 	// Post Claude's output
 	if postOutput != "" {
 		footer := formatStatsFooter(usage, completed)
@@ -930,10 +937,12 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		// Clear retry tracking for this stage — no longer needed after success.
 		e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 		e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
-		// Post-stage: create draft PR and/or mark ready now that commits exist
-		var prNumber int
+		// Post-stage: create draft PR and/or mark ready now that commits exist.
+		// prNumber may already be set if the early guard above ran (PostToPR + CreateDraftPR path).
 		if stage.CreateDraftPR {
-			prNumber = e.ensureDraftPR(item, baseBranch)
+			if prNumber == 0 {
+				prNumber = e.ensureDraftPR(item, baseBranch)
+			}
 			e.updatePRVerification(item, prNumber, extractSummary(output))
 		}
 		if stage.MarkPRReadyOnComplete {
