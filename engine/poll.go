@@ -1185,7 +1185,6 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		if s := stages.FindStage(e.cfg.Stages, item.Status); s != nil {
 			stageName = s.Name
 		}
-		isComment := len(e.findNewComments(item)) > 0
 		startTime := time.Now()
 		// Apply WorkerEntered synchronously before the goroutine starts so that
 		// snap.Worker() != nil is immediately true for any concurrent dispatch check.
@@ -1214,14 +1213,6 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			// against a freed slot.
 			defer e.store.Apply(itemstate.WorkerExited{Repo: itemRepo, Number: item.Number})
 			defer func() { <-e.sem }()
-			e.emitStructural(tui.JobStartedEvent{
-				IssueNumber: item.Number,
-				Repo:        itemRepo,
-				Title:       item.Title,
-				StageName:   stageName,
-				IsComment:   isComment,
-				StartedAt:   startTime,
-			})
 			err := e.processItem(ctx, board, item)
 			if err != nil {
 				e.logf(item.Number, "error", "%v\n", err)

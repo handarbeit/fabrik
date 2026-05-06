@@ -16,6 +16,7 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 // lockVerifyDelay is the time to wait after acquiring a lock before re-fetching
@@ -544,6 +545,23 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}
 	}()
 	defer e.store.Apply(itemstate.WorkerExited{Repo: repoStr, Number: item.Number})
+
+	e.emitStructural(tui.JobStartedEvent{
+		IssueNumber: item.Number,
+		Repo:        repoStr,
+		Title:       item.Title,
+		StageName:   stage.Name,
+		IsComment:   false,
+		StartedAt:   workerStartedAt,
+	})
+	defer e.emitStructural(tui.JobCompletedEvent{
+		IssueNumber: item.Number,
+		Repo:        repoStr,
+		Title:       item.Title,
+		StageName:   stage.Name,
+		IsComment:   false,
+		Skipped:     true,
+	})
 
 	inProgressLabel := fmt.Sprintf("stage:%s:in_progress", stage.Name)
 	inProgressAdded := false

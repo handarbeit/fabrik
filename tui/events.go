@@ -70,6 +70,7 @@ type JobCompletedEvent struct {
 	TurnsUsed      int
 	MaxTurns       int
 	CostUSD        float64
+	Skipped        bool // true when no Claude invocation occurred (early exit or context cancel)
 }
 
 func (JobCompletedEvent) tuiEvent() {}
