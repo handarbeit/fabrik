@@ -27,6 +27,15 @@ const wakeChFlags = itemstate.StatusChanged |
 	itemstate.AssigneesChanged |
 	itemstate.WorkerLifecycleChanged
 
+// cycleSetFlags is the subset of wakeChFlags used by newMayNeedWorkObserver to
+// populate the cycleSet (pre-filter bypass set). WorkerLifecycleChanged is
+// intentionally excluded: a WorkerExited from an early-return goroutine (e.g. a
+// dep-blocked item) carries no new information and must not bypass the cooldown
+// gate for items that did no useful work. The wake channel (newWakeChObserver) still
+// uses the full wakeChFlags — non-blocked items are re-evaluated promptly on any
+// worker exit. See ADR-039 and §9.9 in docs/state-machine.md.
+const cycleSetFlags = wakeChFlags &^ itemstate.WorkerLifecycleChanged
+
 // newWakeChObserver returns an Observer that sends a non-blocking wake signal on
 // wakeCh whenever a Change includes any of the wakeChFlags. This replaces the
 // unconditional wakeCh send in webhook.go, adding Change-flag-based filtering.
@@ -43,13 +52,16 @@ func newWakeChObserver(wakeCh chan struct{}) itemstate.Observer {
 }
 
 // newMayNeedWorkObserver returns an Observer that adds the item's issueKey to the
-// provided set whenever a Change includes any of the wakeChFlags. The set is
+// provided set whenever a Change includes any of the cycleSetFlags. The set is
 // protected by mu. This replaces the seenUpdatedAt-based early-exit in
 // itemMayNeedWork: items in the set are dispatched in the next poll cycle; items
 // absent from the set (and without a bypass label) are skipped.
+//
+// cycleSetFlags excludes WorkerLifecycleChanged (see its definition) so that
+// early-return goroutine exits do not bypass the cooldown gate.
 func newMayNeedWorkObserver(mu *sync.Mutex, set *map[string]bool) itemstate.Observer {
 	return itemstate.ObserverFunc(func(change itemstate.Change, _ itemstate.Snapshot) {
-		if change.Fields&wakeChFlags == 0 {
+		if change.Fields&cycleSetFlags == 0 {
 			return
 		}
 		key := fmt.Sprintf("%s#%d", change.Repo, change.Number)
