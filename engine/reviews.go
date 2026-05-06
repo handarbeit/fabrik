@@ -88,12 +88,18 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 			outstanding = append(outstanding, rr.Login)
 		}
 	}
-	hasReviews := len(item.LinkedPRReviews) > 0
+	hasReviews := false
+	for _, r := range item.LinkedPRReviews {
+		if r.State != "DISMISSED" {
+			hasReviews = true
+			break
+		}
+	}
 
 	// Gate clears when all outstanding requested reviewers have responded
-	// AND at least one review exists. This catches both human reviewers who
-	// submit formally and bot reviewers (Copilot, Gemini) who self-submit
-	// without ever appearing in reviewRequests.
+	// AND at least one non-DISMISSED review exists. This catches both human
+	// reviewers who submit formally and bot reviewers (Copilot, Gemini) who
+	// self-submit without ever appearing in reviewRequests.
 	if len(outstanding) == 0 && hasReviews {
 		e.removeAwaitingReviewLabel(owner, repo, item)
 		return false, false
