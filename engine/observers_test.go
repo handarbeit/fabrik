@@ -489,6 +489,50 @@ func TestPushUnblockObserver_BlockedByChanged_NoOpWhenBlockerStillOpen(t *testin
 	}
 }
 
+// TestPushUnblockObserver_BlockedByChanged_StorePreemptsDepState verifies that the
+// store's view of a blocker takes precedence over dep.State in the deep-fetch payload:
+// even if dep.State says "CLOSED", an open blocker in the store prevents unblocking.
+func TestPushUnblockObserver_BlockedByChanged_StorePreemptsDepState(t *testing.T) {
+	store := newTestStore()
+
+	// Seed A (open in store) and B (open + fabrik:blocked).
+	store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Number: 1, Repo: "owner/repo"}})
+	store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{
+		Number: 2,
+		Repo:   "owner/repo",
+		Labels: []string{"fabrik:blocked"},
+	}})
+
+	removeCh := make(chan int, 1)
+	obs := &PushUnblockObserver{
+		Store:  store,
+		Remove: func(owner, repo string, n int) { removeCh <- n },
+	}
+	store.Subscribe(obs)
+
+	// Deep-fetch says A is CLOSED in dep.State, but the store still has A open.
+	// The store view must win: no unblock should fire.
+	store.Apply(itemstate.ItemDeepFetched{
+		Repo:   "owner/repo",
+		Number: 2,
+		FreshState: gh.ProjectItem{
+			Number: 2,
+			Repo:   "owner/repo",
+			Labels: []string{"fabrik:blocked"},
+			BlockedBy: []gh.Dependency{
+				{Number: 1, Repo: "owner/repo", State: "CLOSED"},
+			},
+		},
+	})
+
+	select {
+	case n := <-removeCh:
+		t.Errorf("Remove unexpectedly called for issue %d: store open blocker should preempt dep.State=CLOSED", n)
+	case <-time.After(100 * time.Millisecond):
+		// expected: no removal; store's open view takes precedence
+	}
+}
+
 // TestPushUnblockObserver_BlockedByChanged_NoOpWhenBlockedByEmpty verifies that
 // the BlockedByChanged path is a no-op when BlockedBy is empty or nil — covers
 // the bootstrap scenario where ItemDeepFetched fires for an item with no blockers.
