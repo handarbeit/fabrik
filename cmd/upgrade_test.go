@@ -21,11 +21,11 @@ func buildPluginDir(t *testing.T) string {
 	if err := os.MkdirAll(pluginDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	err := fs.WalkDir(fabrikplugin.FabrikPlugin, "fabrik-plugin", func(p string, d fs.DirEntry, walkErr error) error {
+	err := fs.WalkDir(fabrikplugin.FabrikPlugin, "fabrik-workflows", func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		rel, _ := filepath.Rel("fabrik-plugin", p)
+		rel, _ := filepath.Rel("fabrik-workflows", p)
 		dest := filepath.Join(pluginDir, rel)
 		if d.IsDir() {
 			return os.MkdirAll(dest, 0755)
@@ -158,7 +158,7 @@ func TestCheckPluginSkillsWithReader_DifferTTYYes(t *testing.T) {
 
 	// The modified file must now match the embedded version.
 	rel, _ := filepath.Rel(pluginDir, modifiedFile)
-	embeddedData, _ := fabrikplugin.FabrikPlugin.ReadFile(filepath.Join("fabrik-plugin", rel))
+	embeddedData, _ := fabrikplugin.FabrikPlugin.ReadFile(filepath.Join("fabrik-workflows", rel))
 	diskData, _ := os.ReadFile(modifiedFile)
 	if !bytes.Equal(embeddedData, diskData) {
 		t.Fatal("expected modified file to be overwritten with embedded content")
