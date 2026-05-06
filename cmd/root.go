@@ -50,7 +50,7 @@ type Config struct {
 	WebhookPort       int
 	WebhookEvents     string // comma-separated; empty means default event set
 	BoardCacheMode       string // "in-memory" or "none"; empty = auto (in-memory when webhooks enabled)
-	StatusPollSeconds    int    // Layer 2 status-only sweep cadence in seconds; 0 = use default (600)
+	StatusPollSeconds    int    // Layer 2 status-only sweep cadence in seconds; 0 = use default (15)
 }
 
 func Execute() error {
@@ -407,11 +407,11 @@ func Execute() error {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				cfg.StatusPollSeconds = n
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_STATUS_POLL=%q is invalid (must be a positive integer); using default 600\n", v)
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_STATUS_POLL=%q is invalid (must be a positive integer); using default 15\n", v)
 			}
 		} else if pc.StatusPoll != nil {
 			if *pc.StatusPoll <= 0 {
-				fmt.Fprintf(os.Stderr, "[warn] config.yaml status_poll=%d is invalid (must be a positive integer); using default 600\n", *pc.StatusPoll)
+				fmt.Fprintf(os.Stderr, "[warn] config.yaml status_poll=%d is invalid (must be a positive integer); using default 15\n", *pc.StatusPoll)
 			} else {
 				cfg.StatusPollSeconds = *pc.StatusPoll
 			}
