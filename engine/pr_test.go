@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
@@ -768,8 +767,9 @@ func TestMarkPRReady_TransientThenSuccess(t *testing.T) {
 	repoDir := initBareRepo(t)
 	wm := NewWorktreeManagerWithRoot(repoDir, repoDir+"/.fabrik/worktrees")
 
+	orig := markPRReadyRetryDelay
 	markPRReadyRetryDelay = 0
-	t.Cleanup(func() { markPRReadyRetryDelay = 500 * time.Millisecond })
+	t.Cleanup(func() { markPRReadyRetryDelay = orig })
 
 	calls := 0
 	client := &mockGitHubClient{
@@ -799,8 +799,9 @@ func TestMarkPRReady_AllTransientExhausted(t *testing.T) {
 	repoDir := initBareRepo(t)
 	wm := NewWorktreeManagerWithRoot(repoDir, repoDir+"/.fabrik/worktrees")
 
+	orig := markPRReadyRetryDelay
 	markPRReadyRetryDelay = 0
-	t.Cleanup(func() { markPRReadyRetryDelay = 500 * time.Millisecond })
+	t.Cleanup(func() { markPRReadyRetryDelay = orig })
 
 	client := &mockGitHubClient{
 		markPRReadyFn: func(owner, repo string, prNumber int) error {
@@ -825,8 +826,9 @@ func TestMarkPRReady_NonTransientNoRetry(t *testing.T) {
 	repoDir := initBareRepo(t)
 	wm := NewWorktreeManagerWithRoot(repoDir, repoDir+"/.fabrik/worktrees")
 
+	orig := markPRReadyRetryDelay
 	markPRReadyRetryDelay = 0
-	t.Cleanup(func() { markPRReadyRetryDelay = 500 * time.Millisecond })
+	t.Cleanup(func() { markPRReadyRetryDelay = orig })
 
 	client := &mockGitHubClient{
 		markPRReadyFn: func(owner, repo string, prNumber int) error {
