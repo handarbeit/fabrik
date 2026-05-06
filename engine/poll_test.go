@@ -1437,85 +1437,80 @@ func TestLayer1StatusRefresh_SkipsNonIssueEvents(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Layer 2 — periodic status-field-only sweep
+// Layer 2 — updatedAt gate in poll loop
 // ---------------------------------------------------------------------------
 
-func TestRunReconciliationLoop_AppliesStatusDrift(t *testing.T) {
-	var batchCalls int32
+// TestPollGateMiss verifies that when project.updatedAt is unchanged between
+// two poll cycles, FetchProjectItemStatusBatch is called only once (on the
+// first cycle when timestamp advances from zero).
+func TestPollGateMiss(t *testing.T) {
+	t1 := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	client := &mockGitHubClient{
-		fetchProjectItemStatusBatchFn: func(projectID string) (map[string]string, error) {
-			atomic.AddInt32(&batchCalls, 1)
-			return map[string]string{"PVTI_001": "Implement"}, nil
+		fetchProjectUpdatedAtFn: func(projectID string) (time.Time, error) {
+			return t1, nil // same timestamp on every call
 		},
 	}
-	cache := seedTestCache(t, client)
 	eng := testEngine(client, &mockClaudeInvoker{})
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	cache.Bootstrap(&gh.ProjectBoard{ProjectID: "PVT_1", Items: nil})
+	eng.readClient = cache
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go eng.runReconciliationLoop(ctx, cache, 50*time.Millisecond)
-
-	// Wait up to 500ms for the cache to reflect the drifted status.
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		board, err := cache.FetchProjectBoard("owner", "repo", 1, "")
-		if err != nil {
-			time.Sleep(10 * time.Millisecond)
-			continue
-		}
-		for _, item := range board.Items {
-			if item.Number == 1 && item.Status == "Implement" {
-				cancel()
-				return
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
+	ctx := context.Background()
+	if _, err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll 1: %v", err)
 	}
-	cancel()
-	// Give the goroutine time to finish any in-flight ApplyStatusBatch.
-	time.Sleep(25 * time.Millisecond)
+	eng.wg.Wait()
+	if _, err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll 2: %v", err)
+	}
+	eng.wg.Wait()
 
-	if atomic.LoadInt32(&batchCalls) == 0 {
-		t.Fatal("FetchProjectItemStatusBatch was never called within 500ms")
-	}
-
-	// Verify the cache reflects the drifted status.
-	board, err := cache.FetchProjectBoard("owner", "repo", 1, "")
-	if err != nil {
-		t.Fatalf("FetchProjectBoard after layer2 sweep: %v", err)
-	}
-	var gotStatus string
-	for _, item := range board.Items {
-		if item.Number == 1 {
-			gotStatus = item.Status
-		}
-	}
-	if gotStatus != "Implement" {
-		t.Errorf("want cached Status %q after Layer 2 sweep, got %q", "Implement", gotStatus)
+	client.mu.Lock()
+	calls := client.fetchProjectItemStatusBatchCalls
+	client.mu.Unlock()
+	// Gate fires on cycle 1 (t1 after zero), skips on cycle 2 (t1 == t1).
+	if calls != 1 {
+		t.Errorf("FetchProjectItemStatusBatch: want 1 call, got %d", calls)
 	}
 }
 
-func TestRunReconciliationLoop_SkipsWhenProjectIDEmpty(t *testing.T) {
-	var batchCalls int32
+// TestPollGateFire verifies that when project.updatedAt advances between two
+// poll cycles, FetchProjectItemStatusBatch is called on each cycle.
+func TestPollGateFire(t *testing.T) {
+	t1 := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	t2 := t1.Add(time.Minute)
+	var callIdx int
+	timestamps := []time.Time{t1, t2}
 	client := &mockGitHubClient{
-		fetchProjectItemStatusBatchFn: func(projectID string) (map[string]string, error) {
-			atomic.AddInt32(&batchCalls, 1)
-			return map[string]string{}, nil
+		fetchProjectUpdatedAtFn: func(projectID string) (time.Time, error) {
+			ts := timestamps[callIdx]
+			if callIdx < len(timestamps)-1 {
+				callIdx++
+			}
+			return ts, nil
 		},
 	}
-	// Cache with no Bootstrap call — ProjectID() returns "".
-	cache := boardcache.NewCacheImpl(client, itemstate.NewStore(nil), func(format string, args ...any) {})
 	eng := testEngine(client, &mockClaudeInvoker{})
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	cache.Bootstrap(&gh.ProjectBoard{ProjectID: "PVT_1", Items: nil})
+	eng.readClient = cache
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx := context.Background()
+	if _, err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll 1: %v", err)
+	}
+	eng.wg.Wait()
+	if _, err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll 2: %v", err)
+	}
+	eng.wg.Wait()
 
-	go eng.runReconciliationLoop(ctx, cache, 50*time.Millisecond)
-	time.Sleep(150 * time.Millisecond)
-	cancel()
-
-	if n := atomic.LoadInt32(&batchCalls); n != 0 {
-		t.Errorf("FetchProjectItemStatusBatch should not be called when ProjectID is empty; got %d calls", n)
+	client.mu.Lock()
+	calls := client.fetchProjectItemStatusBatchCalls
+	client.mu.Unlock()
+	// Gate fires on cycle 1 (t1 after zero) and cycle 2 (t2 after t1).
+	if calls != 2 {
+		t.Errorf("FetchProjectItemStatusBatch: want 2 calls, got %d", calls)
 	}
 }
 
