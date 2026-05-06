@@ -96,3 +96,7 @@ The `ReadClient` interface (used by `GitHubAdapter` and `boardcache` tests) is n
 **Include PR events in Layer 1**: Rejected. Mapping a PR number to a cache key requires an O(N) scan of all cached items under read lock. The marginal coverage improvement (catching column moves that coincide only with PR events, not issue events) doesn't justify the complexity and latency. Layer 2's 10-minute sweep covers the gap.
 
 **Export `ItemKey` vs. inline format string**: Exporting chosen. The format `repo + "#" + strconv.Itoa(number)` is simple but must be consistent across packages. An exported helper prevents a silent divergence if the format ever changes and signals to callers that the format is stable and intentional.
+
+## Implementation Evolution
+
+**Issue #565 (2026-05-05)**: The Layer 2 mechanism was refactored from the `runReconciliationLoop` goroutine (a separate ticker at `ProjectStatusPollSeconds` cadence) to an in-poll `updatedAt` gate at the top of `Engine.poll()`. The gate calls `FetchProjectUpdatedAt` (~1 GraphQL point) every poll cycle (~15 s) and only fires `FetchProjectItemStatusBatch` + `ApplyStatusBatch` when the project's `updatedAt` timestamp has advanced. This eliminates the separate goroutine and reduces external-move detection latency from ≤10 min to ≤15 s. The four-layer architecture and the decision rationale above remain valid; only the Layer 2 mechanism changed. See `docs/state-machine.md §D.4` for the authoritative as-built description.
