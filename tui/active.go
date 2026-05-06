@@ -11,6 +11,16 @@ import (
 )
 
 // ActivePaneComponent manages the in-progress jobs pane.
+//
+// "In Progress (N)" reflects items where Claude is actively running — not
+// items whose dispatch goroutines have merely launched. JobStartedEvent is
+// emitted by processItem / processComments past all early-return guards
+// (lock acquired, all pre-work checks passed), never at goroutine launch.
+// The matching JobCompletedEvent is emitted by InvocationObserver on the
+// success path (Skipped: false) or deferred at the emission site on
+// cancel / failure paths (Skipped: true). Do NOT re-add JobStartedEvent
+// emission to dispatch goroutines — that causes indefinite ghost entries
+// whenever processItem early-returns without invoking Claude.
 type ActivePaneComponent struct {
 	active         map[string]*activeJob
 	activeNumToKey map[int]string

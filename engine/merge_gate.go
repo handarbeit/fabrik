@@ -10,7 +10,6 @@ import (
 	gh "github.com/verveguy/fabrik/github"
 	"github.com/verveguy/fabrik/internal/itemstate"
 	"github.com/verveguy/fabrik/stages"
-	"github.com/verveguy/fabrik/tui"
 )
 
 // checkMergeabilityGate inspects GitHub's mergeable flag on the linked PR to
@@ -208,16 +207,6 @@ func (e *Engine) dispatchRebaseReinvoke(ctx context.Context, board *gh.ProjectBo
 		onPIDReady := func(pid int) {
 			e.store.Apply(itemstate.WorkerPIDSet{Repo: itemRepo, Number: item.Number, PID: pid})
 		}
-
-		startTime := time.Now()
-		e.emitStructural(tui.JobStartedEvent{
-			IssueNumber: item.Number,
-			Repo:        itemRepo,
-			Title:       item.Title,
-			StageName:   stage.Name,
-			IsComment:   true,
-			StartedAt:   startTime,
-		})
 
 		e.logf(item.Number, "rebase-reinvoke", "re-invoking stage %q via comment processing with rebase context\n", stage.Name)
 		err := e.processComments(ctx, board, item, &rebaseStage, []gh.Comment{syntheticComment}, onPIDReady)

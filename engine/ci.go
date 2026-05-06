@@ -11,7 +11,6 @@ import (
 	gh "github.com/verveguy/fabrik/github"
 	"github.com/verveguy/fabrik/internal/itemstate"
 	"github.com/verveguy/fabrik/stages"
-	"github.com/verveguy/fabrik/tui"
 )
 
 // checkCIGate inspects CI check runs for the linked PR to determine whether the
@@ -370,16 +369,6 @@ func (e *Engine) dispatchCIFixReinvoke(ctx context.Context, board *gh.ProjectBoa
 		onPIDReady := func(pid int) {
 			e.store.Apply(itemstate.WorkerPIDSet{Repo: itemRepo, Number: item.Number, PID: pid})
 		}
-
-		startTime := time.Now()
-		e.emitStructural(tui.JobStartedEvent{
-			IssueNumber: item.Number,
-			Repo:        itemRepo,
-			Title:       item.Title,
-			StageName:   stage.Name,
-			IsComment:   true,
-			StartedAt:   startTime,
-		})
 
 		e.logf(item.Number, "ci-fix-reinvoke", "re-invoking stage %q via comment processing with CI failure context\n", stage.Name)
 		err := e.processComments(ctx, board, item, &ciFixStage, []gh.Comment{syntheticComment}, onPIDReady)
