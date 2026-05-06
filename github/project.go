@@ -951,6 +951,9 @@ query($id: ID!) {
 	if result.Data.Node == nil {
 		return time.Time{}, fmt.Errorf("fetching project updatedAt for %s: node not found or not a ProjectV2", projectID)
 	}
+	if result.Data.Node.UpdatedAt == "" {
+		return time.Time{}, fmt.Errorf("fetching project updatedAt for %s: node is not a ProjectV2 (updatedAt field absent)", projectID)
+	}
 	t, err := parseTime(result.Data.Node.UpdatedAt)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("parsing project updatedAt for %s: %w", projectID, err)
