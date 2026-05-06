@@ -1,4 +1,4 @@
-# ADR-040: Push-based unblock via engine-side scan (Variant B)
+# ADR-041: Push-based unblock via engine-side scan (Variant B)
 
 **Status:** Accepted  
 **Issue:** #580  
