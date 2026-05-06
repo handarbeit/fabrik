@@ -394,13 +394,6 @@ func (e *Engine) Run() error {
 		if err := wm.Start(ctx, e.cfg.WebhookPort); err == nil {
 			e.webhookMgr = wm
 			defer wm.Stop()
-			if cacheImpl != nil {
-				cadence := time.Duration(e.cfg.ProjectStatusPollSeconds) * time.Second
-				if cadence <= 0 {
-					cadence = 600 * time.Second
-				}
-				go e.runReconciliationLoop(ctx, cacheImpl, cadence)
-			}
 		}
 	}
 
@@ -684,6 +677,26 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		e.logf(0, "poll", "reading project board from cache: %s/%s#%d\n", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
 	} else {
 		e.logf(0, "poll", "fetching project board from GitHub: %s/%s#%d\n", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
+	}
+
+	// Layer 2 gate: check project.updatedAt before the board read so the cache
+	// holds fresh Status values when poll() processes items this cycle.
+	// Only active when the in-memory cache is bootstrapped (cacheImpl != nil and
+	// ProjectID is known); skipped on the very first cycle when cache is unset.
+	if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok && cacheImpl.ProjectID() != "" {
+		projectID := cacheImpl.ProjectID()
+		updatedAt, err := e.client.FetchProjectUpdatedAt(projectID)
+		if err != nil {
+			e.logf(0, "cache", "layer2 gate: FetchProjectUpdatedAt failed: %v\n", err)
+		} else if updatedAt.After(e.lastProjectUpdatedAt) {
+			updates, err := e.client.FetchProjectItemStatusBatch(projectID)
+			if err != nil {
+				e.logf(0, "cache", "layer2 status sweep failed: %v\n", err)
+			} else {
+				cacheImpl.ApplyStatusBatch(updates)
+				e.lastProjectUpdatedAt = updatedAt
+			}
+		}
 	}
 
 	board, err := e.readClient.FetchProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
@@ -1542,32 +1555,6 @@ func (e *Engine) reconcileCache(cache *boardcache.CacheImpl) {
 	cache.Reconcile(board)
 }
 
-// runReconciliationLoop periodically fetches only the Status field for every
-// project item and applies any drift to the in-memory cache (Layer 2).
-// This replaces the former 60-min full-board reconcile for the periodic path;
-// reconcileCache (full board fetch) is preserved for stream-recovery only.
-func (e *Engine) runReconciliationLoop(ctx context.Context, cache *boardcache.CacheImpl, cadence time.Duration) {
-	ticker := time.NewTicker(cadence)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			projectID := cache.ProjectID()
-			if projectID == "" {
-				e.logf(0, "cache", "layer2 status sweep skipped: cache not yet bootstrapped\n")
-				continue
-			}
-			updates, err := e.client.FetchProjectItemStatusBatch(projectID)
-			if err != nil {
-				e.logf(0, "cache", "layer2 status sweep failed: %v\n", err)
-				continue
-			}
-			cache.ApplyStatusBatch(updates)
-		}
-	}
-}
 
 // applyLayer1StatusRefresh handles the Layer 1 opportunistic per-event Status
 // refresh. Called from the deltaFn closure after ApplyDelta. For issue and
