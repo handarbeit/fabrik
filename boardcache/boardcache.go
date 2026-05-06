@@ -316,16 +316,48 @@ func (c *CacheImpl) Reconcile(board *gh.ProjectBoard) {
 	}
 }
 
-// resolvePRLinkage looks up which cached issue is closed by the given PR by
-// fetching the PR body via REST and parsing closing keywords. Must be called
-// without c.mu held (the REST call is a network operation). Returns the cache
-// key and issue number of the first closing issue found in the Store. On a
-// transient REST error the error is returned and callers should NOT record a
-// negative-miss entry (a retry on the next webhook may succeed). Returns
-// ("", 0, false, nil) when the PR body has no recognized closing reference or
-// none of the referenced issues are in this cache.
+// RecordPRLinkage records an authoritative PR→issue mapping in the Store index.
+// Called by the engine immediately after CreateDraftPR succeeds, so all subsequent
+// webhooks for this PR resolve to the correct issue without consulting the regex.
+// No-op when the mapping is already present (avoids clobbering real webhook data)
+// or when the issue is not yet in the Store (cold-cache bootstrap not yet complete).
+func (c *CacheImpl) RecordPRLinkage(repo string, prNumber, issueNumber int) {
+	// Skip if already indexed — avoids clobbering a real PRDetailsUpdated from a webhook.
+	if _, found := c.store.GetByPRKey(repo, prNumber); found {
+		return
+	}
+	// Guard: do not create a phantom Store entry for an issue that was never bootstrapped.
+	if _, err := c.store.Get(repo, issueNumber); err != nil {
+		return
+	}
+	c.store.Apply(itemstate.PRDetailsUpdated{
+		Repo:     repo,
+		Number:   issueNumber,
+		PRNumber: prNumber,
+	})
+}
+
+// resolvePRLinkage looks up which cached issue is closed by the given PR.
+// It first checks the authoritative Store index (prToKey), which is populated by
+// RecordPRLinkage at CreateDraftPR time. Only falls back to REST + regex when no
+// authoritative mapping is present. Must be called without c.mu held (the REST call
+// is a network operation). Returns the cache key and issue number of the first
+// closing issue found in the Store. On a transient REST error the error is returned
+// and callers should NOT record a negative-miss entry (a retry on the next webhook
+// may succeed). Returns ("", 0, false, nil) when the PR body has no recognized
+// closing reference or none of the referenced issues are in this cache.
 func (c *CacheImpl) resolvePRLinkage(owner, repo string, prNumber int) (key string, issueNumber int, found bool, err error) {
 	fullRepo := owner + "/" + repo
+
+	// Authoritative path: engine pre-recorded the mapping at CreateDraftPR time.
+	if k, ok := c.store.GetByPRKey(fullRepo, prNumber); ok {
+		_, issNum, parseOk := parseItemKey(k)
+		if parseOk {
+			return k, issNum, true, nil
+		}
+	}
+
+	// Fallback: fetch PR body via REST and scan for closing keywords.
 	issues, err := c.fallback.FetchPRClosingIssues(owner, repo, prNumber)
 	if err != nil {
 		c.logFn("[cache] resolvePRLinkage: fetch closing issues for PR #%d: %v\n", prNumber, err)
