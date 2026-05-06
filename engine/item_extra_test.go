@@ -138,17 +138,49 @@ func TestItemNeedsWork_Editing_Cleared_ReturnsTrue(t *testing.T) {
 	}
 }
 
-// TestItemNeedsWork_Blocked_ReturnsFalse verifies that items with fabrik:blocked
-// are filtered out in itemNeedsWork (pre-dispatch gate, parallel to fabrik:editing).
-func TestItemNeedsWork_Blocked_ReturnsFalse(t *testing.T) {
+// TestItemNeedsWork_Blocked_ActiveCooldown_ReturnsFalse verifies that items with
+// fabrik:blocked and an active dep-blocked cooldown are suppressed — #576 gate holds.
+func TestItemNeedsWork_Blocked_ActiveCooldown_ReturnsFalse(t *testing.T) {
 	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 45, Reason: "dep-blocked", Until: time.Now().Add(10 * time.Minute)})
 	item := gh.ProjectItem{
 		Number: 45,
 		Status: "Research",
 		Labels: []string{"fabrik:blocked"},
 	}
 	if eng.itemNeedsWork(item) {
-		t.Error("item with fabrik:blocked should not need work (itemNeedsWork pre-dispatch gate)")
+		t.Error("item with fabrik:blocked and active dep-blocked cooldown should not need work")
+	}
+}
+
+// TestItemNeedsWork_Blocked_ExpiredCooldown_ReturnsTrue verifies that a fabrik:blocked
+// item is admitted when the dep-blocked cooldown has expired, restoring the pull-based
+// safety net so processItem → checkDependencies can re-evaluate the dependency.
+func TestItemNeedsWork_Blocked_ExpiredCooldown_ReturnsTrue(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 45, Reason: "dep-blocked", Until: time.Now().Add(-time.Minute)})
+	item := gh.ProjectItem{
+		Number: 45,
+		Status: "Research",
+		Labels: []string{"fabrik:blocked"},
+	}
+	if !eng.itemNeedsWork(item) {
+		t.Error("item with fabrik:blocked and expired dep-blocked cooldown should need work (pull-path re-check)")
+	}
+}
+
+// TestItemNeedsWork_Blocked_NoStoreEntry_ReturnsTrue verifies that a fabrik:blocked
+// item with no store entry (cold-start or restart) is admitted — no cooldown means
+// no gate, so processItem → checkDependencies can run on the first poll.
+func TestItemNeedsWork_Blocked_NoStoreEntry_ReturnsTrue(t *testing.T) {
+	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	item := gh.ProjectItem{
+		Number: 45,
+		Status: "Research",
+		Labels: []string{"fabrik:blocked"},
+	}
+	if !eng.itemNeedsWork(item) {
+		t.Error("item with fabrik:blocked and no store entry should need work (no active cooldown)")
 	}
 }
 
