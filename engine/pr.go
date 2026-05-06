@@ -11,6 +11,10 @@ import (
 	gh "github.com/handarbeit/fabrik/github"
 )
 
+// markPRReadyRetryDelay is the base delay for markPRReady retry backoff.
+// Declared as a var so tests can set it to 0 to avoid sleeping.
+var markPRReadyRetryDelay = 500 * time.Millisecond
+
 // ensureDraftPR pushes the issue branch and creates a draft PR if one doesn't exist yet.
 // Idempotent: checks for an existing PR first; only pushes and creates if none found.
 func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) int {
@@ -202,11 +206,24 @@ func (e *Engine) markPRReady(item gh.ProjectItem, knownPR int) {
 	}
 
 	// no write-through: excluded — MarkPRReady affects PR state, not issue/label cache
-	if err := e.client.MarkPRReady(owner, repo, prNumber); err != nil {
-		e.logf(item.Number, "warn", "could not mark PR #%d ready: %v\n", prNumber, err)
-		return
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		err := e.client.MarkPRReady(owner, repo, prNumber)
+		if err == nil {
+			e.logf(item.Number, "pr", "marked PR #%d ready-for-review\n", prNumber)
+			return
+		}
+		if !isTransientError(err) {
+			e.logf(item.Number, "warn", "could not mark PR #%d ready: %v\n", prNumber, err)
+			return
+		}
+		lastErr = err
+		if attempt < maxAttempts-1 {
+			time.Sleep(markPRReadyRetryDelay << attempt)
+		}
 	}
-	e.logf(item.Number, "pr", "marked PR #%d ready-for-review\n", prNumber)
+	e.logf(item.Number, "warn", "could not mark PR #%d ready after %d attempts: %v\n", prNumber, maxAttempts, lastErr)
 }
 
 // postOutputToPR posts detailed output on the linked PR and a brief summary on the issue.
