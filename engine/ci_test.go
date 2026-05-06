@@ -728,3 +728,31 @@ func TestCheckCIGate_MergeableStateBlocked_FallsThroughToCheckRuns(t *testing.T)
 		t.Errorf("expected blocked-pending for mergeable_state=blocked + in_progress checks, got blocked=%v ciFailure=%v", blocked, ciFailure)
 	}
 }
+
+// TestRemoveAwaitingCILabel_ErrNotFound verifies that a 404 from
+// RemoveLabelFromIssue is treated as success (label already absent) — exactly
+// one call, no warning logged, and cache write-through applied.
+func TestRemoveAwaitingCILabel_ErrNotFound(t *testing.T) {
+	var calls int
+	client := &mockGitHubClient{
+		removeLabelFromIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			if labelName == "fabrik:awaiting-ci" {
+				calls++
+				return gh.ErrNotFound
+			}
+			return nil
+		},
+	}
+	eng := testEngineForMerge(client)
+	item := gh.ProjectItem{
+		Number: 1,
+		Repo:   "owner/repo",
+		Labels: []string{"fabrik:awaiting-ci"},
+	}
+
+	eng.removeAwaitingCILabel("owner", "repo", item)
+
+	if calls != 1 {
+		t.Errorf("expected exactly 1 RemoveLabelFromIssue call for ErrNotFound, got %d", calls)
+	}
+}

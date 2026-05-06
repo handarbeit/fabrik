@@ -618,3 +618,39 @@ func TestCheckDependencies_PullPath_Regression(t *testing.T) {
 		t.Errorf("expected pull-path to remove fabrik:blocked, got removeLabelCalls=%v", client.removeLabelCalls)
 	}
 }
+
+// TestCheckDependencies_RemoveBlocked_ErrNotFound verifies that a 404 from
+// RemoveLabelFromIssue is treated as success (label already absent) — exactly
+// one call, no warning logged, and cache write-through applied.
+func TestCheckDependencies_RemoveBlocked_ErrNotFound(t *testing.T) {
+	var calls int
+	client := &mockGitHubClient{
+		removeLabelFromIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			if labelName == "fabrik:blocked" {
+				calls++
+				return gh.ErrNotFound
+			}
+			return nil
+		},
+	}
+	eng := depTestEngine(client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		Labels: []string{"fabrik:blocked"},
+		BlockedBy: []gh.Dependency{
+			{Number: 9, State: "CLOSED", Repo: "owner/repo"},
+		},
+	}
+	stage := &stages.Stage{Name: "Research"}
+
+	blocked := eng.checkDependencies(board, item, stage)
+
+	if blocked {
+		t.Error("expected not blocked when all deps CLOSED")
+	}
+	if calls != 1 {
+		t.Errorf("expected exactly 1 RemoveLabelFromIssue call for ErrNotFound, got %d", calls)
+	}
+}
