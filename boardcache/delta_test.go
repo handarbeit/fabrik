@@ -695,17 +695,45 @@ func TestIssueCommentEditedNoOp(t *testing.T) {
 	}
 }
 
-func TestPRReviewEditedNoOp(t *testing.T) {
+func TestPRReviewEditedIdempotentUpsert(t *testing.T) {
 	c := seedCache(t)
 	testSetLinkedPR(c, "owner/repo", 1, 42)
-	// Submit a review.
+	// Submit a review then receive an edited event with the same DatabaseID —
+	// the upsert replaces in-place, keeping exactly 1 review.
 	c.ApplyDelta("pull_request_review", pullRequestReviewPayloadJSON("submitted", "owner/repo", 42, 1001, "approved", "alice"))
-	// Edit the review — must be a no-op.
 	c.ApplyDelta("pull_request_review", pullRequestReviewPayloadJSON("edited", "owner/repo", 42, 1001, "approved", "alice"))
 
 	s := testGetState(t, c, "owner/repo", 1)
 	if s.LinkedPR == nil || len(s.LinkedPR.Reviews) != 1 {
-		t.Errorf("want exactly 1 review after edit no-op; got %v", s.LinkedPR)
+		t.Errorf("want exactly 1 review after idempotent upsert; got %v", s.LinkedPR)
+	}
+}
+
+func TestPRReviewEditedStoresNewReview(t *testing.T) {
+	c := seedCache(t)
+	testSetLinkedPR(c, "owner/repo", 1, 42)
+	// No prior submitted event — edited alone must store the review.
+	c.ApplyDelta("pull_request_review", pullRequestReviewPayloadJSON("edited", "owner/repo", 42, 1001, "approved", "alice"))
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.LinkedPR == nil || len(s.LinkedPR.Reviews) != 1 {
+		t.Errorf("want 1 review after edited-only event; got %v", s.LinkedPR)
+	}
+}
+
+func TestPRReviewDismissedStoresDismissedState(t *testing.T) {
+	c := seedCache(t)
+	testSetLinkedPR(c, "owner/repo", 1, 42)
+	c.ApplyDelta("pull_request_review", pullRequestReviewPayloadJSON("submitted", "owner/repo", 42, 1001, "approved", "alice"))
+	// Dismiss the review — same DatabaseID, state becomes DISMISSED.
+	c.ApplyDelta("pull_request_review", pullRequestReviewPayloadJSON("dismissed", "owner/repo", 42, 1001, "dismissed", "alice"))
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.LinkedPR == nil || len(s.LinkedPR.Reviews) != 1 {
+		t.Errorf("want exactly 1 review after dismiss upsert; got %v", s.LinkedPR)
+	}
+	if s.LinkedPR.Reviews[0].State != "DISMISSED" {
+		t.Errorf("want state DISMISSED; got %q", s.LinkedPR.Reviews[0].State)
 	}
 }
 
