@@ -132,7 +132,7 @@ func Execute() error {
 	flag.IntVar(&cfg.WebhookPort, "webhook-port", 0, "Local port for the webhook HTTP listener (0 = OS-assigned; also FABRIK_WEBHOOK_PORT)")
 	flag.StringVar(&cfg.WebhookEvents, "webhook-events", "", "Comma-separated list of GitHub event types to subscribe to (default: all supported events; also FABRIK_WEBHOOK_EVENTS)")
 	flag.StringVar(&cfg.BoardCacheMode, "board-cache", "", `Board cache mode: "in-memory" (cache board state; requires --webhooks) or "none" (always fetch from GitHub). Default: "in-memory" when --webhooks is enabled, "none" otherwise. Also FABRIK_BOARD_CACHE.`)
-	flag.IntVar(&cfg.StatusPollSeconds, "status-poll", 0, "Cadence in seconds for the periodic status-only board sweep (Layer 2; 0 = use default of 15; also FABRIK_STATUS_POLL)")
+	flag.IntVar(&cfg.StatusPollSeconds, "status-poll", 0, "Retained for config compatibility; the Layer 2 updatedAt gate now runs every poll cycle (~15 s) regardless of this value. Also FABRIK_STATUS_POLL.")
 
 	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
 		return err
