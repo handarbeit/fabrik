@@ -192,13 +192,11 @@ func TestMayNeedWorkObserver_SkipsWorkerLifecycleChanged(t *testing.T) {
 	unsub := store.Subscribe(newMayNeedWorkObserver(&mu, &set))
 	defer unsub()
 
-	// Seed WorkerEntered first so WorkerExited produces a real change
-	// (WorkerExited on a nil worker is a no-op and fires no observers).
+	// Seed WorkerEntered so WorkerExited produces a real change
+	// (WorkerExited on a nil worker is a no-op). WorkerEntered emits
+	// WorkerChanged|WorkerLifecycleChanged — neither is in cycleSetFlags,
+	// so the observer does not fire and the set remains empty.
 	store.Apply(itemstate.WorkerEntered{Repo: "owner/repo", Number: 10, StageName: "Research", StartedAt: time.Now()})
-	// Drain any entry the WorkerEntered may have added (WorkerChanged only, not WorkerLifecycleChanged)
-	mu.Lock()
-	delete(set, "owner/repo#10")
-	mu.Unlock()
 
 	store.Apply(itemstate.WorkerExited{Repo: "owner/repo", Number: 10})
 
