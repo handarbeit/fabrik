@@ -19,7 +19,7 @@
 .fabrik/stage-*.md
 .fabrik-context/
 .env
-fabrik
+/fabrik
 *.exe
 .DS_Store
 tmp/
