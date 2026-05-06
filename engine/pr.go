@@ -30,6 +30,9 @@ func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) int {
 	if prNumber > 0 {
 		e.logf(item.Number, "pr", "PR #%d already exists, ensuring issue link\n", prNumber)
 		e.ensurePRLinksIssue(item, prNumber)
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.RecordPRLinkage(owner+"/"+repo, prNumber, item.Number)
+		}
 		return prNumber
 	}
 
@@ -52,6 +55,9 @@ func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) int {
 		return 0
 	}
 	e.logf(item.Number, "pr", "created draft PR #%d\n", prNum)
+	if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.RecordPRLinkage(owner+"/"+repo, prNum, item.Number)
+	}
 	return prNum
 }
 
