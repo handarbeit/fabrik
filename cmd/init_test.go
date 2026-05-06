@@ -100,7 +100,7 @@ func TestRunInit_WritesPluginFiles(t *testing.T) {
 
 	// Collect all embedded plugin file paths.
 	var embeddedPaths []string
-	if err := fs.WalkDir(fabrikplugin.FabrikPlugin, "fabrik-plugin", func(p string, d fs.DirEntry, walkErr error) error {
+	if err := fs.WalkDir(fabrikplugin.FabrikPlugin, "fabrik-workflows", func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -117,7 +117,7 @@ func TestRunInit_WritesPluginFiles(t *testing.T) {
 
 	// Verify each embedded file was written to .fabrik/plugin/ with matching content.
 	for _, p := range embeddedPaths {
-		rel, err := filepath.Rel("fabrik-plugin", p)
+		rel, err := filepath.Rel("fabrik-workflows", p)
 		if err != nil {
 			t.Fatalf("computing relative path for embedded plugin file %s: %v", p, err)
 		}
