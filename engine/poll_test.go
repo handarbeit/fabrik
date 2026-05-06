@@ -1514,6 +1514,43 @@ func TestPollGateFire(t *testing.T) {
 	}
 }
 
+// TestPollGateFire_AppliesStatusDrift verifies the behavioral contract: when the
+// gate fires, ApplyStatusBatch updates the cached item Status and the new Status
+// is visible to the subsequent board read in the same poll cycle.
+func TestPollGateFire_AppliesStatusDrift(t *testing.T) {
+	t1 := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	client := &mockGitHubClient{
+		fetchProjectUpdatedAtFn: func(projectID string) (time.Time, error) {
+			return t1, nil
+		},
+		fetchProjectItemStatusBatchFn: func(projectID string) (map[string]string, error) {
+			return map[string]string{"PVTI_001": "Implement"}, nil
+		},
+	}
+	eng, cache := testEngineWithCache(client, &mockClaudeInvoker{})
+
+	ctx := context.Background()
+	if _, err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	eng.wg.Wait()
+
+	// Gate fires (t1 > zero); batch returns drifted status; cache must reflect it.
+	board, err := cache.FetchProjectBoard("owner", "repo", 1, "")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
+	}
+	var got string
+	for _, item := range board.Items {
+		if item.Number == 1 {
+			got = item.Status
+		}
+	}
+	if got != "Implement" {
+		t.Errorf("want cached Status %q after gate-fired batch, got %q", "Implement", got)
+	}
+}
+
 // TestSeedLabels_multiRepo verifies that in multi-repo mode (cfg.Repo == ""),
 // SeedLabels is called exactly once per discovered repo across two poll cycles,
 // and never called with an empty repo argument.
