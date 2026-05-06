@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -10,6 +11,10 @@ import (
 	"github.com/verveguy/fabrik/stages"
 	"github.com/verveguy/fabrik/tui"
 )
+
+// blockedLabelRetryDelay is the base delay for removeBlockedIfResolved retry backoff.
+// Declared as a var so tests can set it to 0 to avoid sleeping.
+var blockedLabelRetryDelay = 500 * time.Millisecond
 
 // checkDependencies inspects item.BlockedBy and determines whether the issue
 // is gated by unresolved dependencies.
@@ -108,4 +113,42 @@ func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, 
 	})
 
 	return true
+}
+
+// removeBlockedIfResolved removes the fabrik:blocked label from the given issue
+// when the push-based unblock path determines all blockers are resolved. It
+// mirrors removeEditingLabel: 3 attempts, exponential backoff, ErrNotFound
+// treated as success (idempotent), and cacheImpl write-through on success.
+//
+// Unlike checkDependencies this helper does NOT require a *stages.Stage and does
+// NOT post a comment — it is a label-removal-only path for use from observers.
+func (e *Engine) removeBlockedIfResolved(owner, repo string, issueNumber int) {
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		err := e.client.RemoveLabelFromIssue(owner, repo, issueNumber, "fabrik:blocked")
+		if err == nil {
+			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, issueNumber), "fabrik:blocked")
+			}
+			return
+		}
+		if errors.Is(err, gh.ErrNotFound) {
+			// Label already absent — treat as success and sync cache.
+			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, issueNumber), "fabrik:blocked")
+			}
+			return
+		}
+		if !isTransientError(err) {
+			e.logf(issueNumber, "warn", "push-unblock: could not remove fabrik:blocked: %v\n", err)
+			return
+		}
+		lastErr = err
+		if attempt < maxAttempts-1 {
+			delay := blockedLabelRetryDelay << attempt
+			time.Sleep(delay)
+		}
+	}
+	e.logf(issueNumber, "warn", "push-unblock: could not remove fabrik:blocked after %d attempts: %v\n", maxAttempts, lastErr)
 }

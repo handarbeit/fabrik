@@ -333,6 +333,16 @@ func (e *Engine) Run() error {
 		stageObs := &StageChangeObserver{Emit: e.emitStructural}
 		unsubs = append(unsubs, e.store.Subscribe(stageObs))
 
+		// PushUnblockObserver fires on StateChanged (issue close) and removes
+		// fabrik:blocked from dependents whose all blockers are now resolved.
+		// StateChanged is not in wakeChFlags so this registration has no effect on
+		// poll-wake behaviour. Registered on e.store only (post store-unification).
+		pushUnblockObs := &PushUnblockObserver{
+			Store:  e.store,
+			Remove: func(owner, repo string, n int) { e.removeBlockedIfResolved(owner, repo, n) },
+		}
+		unsubs = append(unsubs, e.store.Subscribe(pushUnblockObs))
+
 		if cacheImpl != nil {
 			// WebhookHealthObserver fires tui.WebhookStatusEvent on pause/resume transitions.
 			// SubscribePause is a CacheImpl-level signal (stream health), not a Store mutation.
