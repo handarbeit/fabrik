@@ -1,0 +1,11 @@
+{
+  "name": "fabrik",
+  "version": "0.1.0",
+  "description": "Ambient awareness of Fabrik (the GitHub-Project-driven SDLC pipeline orchestrator) for the human's interactive Claude Code session. Turns Claude into a product-management buddy and supervisor for projects that use Fabrik to automate issue processing.",
+  "author": {
+    "name": "Tenacious Ventures",
+    "url": "https://github.com/tenaciousvc/fabrik"
+  },
+  "homepage": "https://fabrik.shadoworg.dev",
+  "repository": "https://github.com/tenaciousvc/fabrik"
+}
