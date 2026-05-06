@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	gh "github.com/verveguy/fabrik/github"
 	"github.com/verveguy/fabrik/stages"
@@ -759,5 +760,88 @@ func TestProcessItem_ImplementStage_UpdatesVerificationOnComplete(t *testing.T) 
 	}
 	if !strings.Contains(verificationUpdateBody, "Closes #50") {
 		t.Error("Closes #50 must be preserved in updated body")
+	}
+}
+
+func TestMarkPRReady_TransientThenSuccess(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManagerWithRoot(repoDir, repoDir+"/.fabrik/worktrees")
+
+	markPRReadyRetryDelay = 0
+	t.Cleanup(func() { markPRReadyRetryDelay = 500 * time.Millisecond })
+
+	calls := 0
+	client := &mockGitHubClient{
+		markPRReadyFn: func(owner, repo string, prNumber int) error {
+			calls++
+			if calls < 3 {
+				return errors.New("GitHub API returned 504: We couldn't respond to your request in time")
+			}
+			return nil
+		},
+	}
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", User: "u", Token: "t", Stages: testStages()},
+		client, &mockClaudeInvoker{}, wm,
+	)
+
+	item := gh.ProjectItem{Number: 7, Title: "test"}
+	eng.markPRReady(item, 77)
+
+	if len(client.markPRReadyCalls) != 3 {
+		t.Fatalf("expected 3 MarkPRReady calls (2 transient + 1 success), got %d", len(client.markPRReadyCalls))
+	}
+}
+
+func TestMarkPRReady_AllTransientExhausted(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManagerWithRoot(repoDir, repoDir+"/.fabrik/worktrees")
+
+	markPRReadyRetryDelay = 0
+	t.Cleanup(func() { markPRReadyRetryDelay = 500 * time.Millisecond })
+
+	client := &mockGitHubClient{
+		markPRReadyFn: func(owner, repo string, prNumber int) error {
+			return errors.New("GitHub API returned 504: We couldn't respond to your request in time")
+		},
+	}
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", User: "u", Token: "t", Stages: testStages()},
+		client, &mockClaudeInvoker{}, wm,
+	)
+
+	item := gh.ProjectItem{Number: 8, Title: "test"}
+	eng.markPRReady(item, 88)
+
+	if len(client.markPRReadyCalls) != 3 {
+		t.Fatalf("expected 3 MarkPRReady calls (all transient exhausted), got %d", len(client.markPRReadyCalls))
+	}
+}
+
+func TestMarkPRReady_NonTransientNoRetry(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManagerWithRoot(repoDir, repoDir+"/.fabrik/worktrees")
+
+	markPRReadyRetryDelay = 0
+	t.Cleanup(func() { markPRReadyRetryDelay = 500 * time.Millisecond })
+
+	client := &mockGitHubClient{
+		markPRReadyFn: func(owner, repo string, prNumber int) error {
+			return errors.New("GitHub API returned 422: Unprocessable Entity")
+		},
+	}
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", User: "u", Token: "t", Stages: testStages()},
+		client, &mockClaudeInvoker{}, wm,
+	)
+
+	item := gh.ProjectItem{Number: 9, Title: "test"}
+	eng.markPRReady(item, 99)
+
+	if len(client.markPRReadyCalls) != 1 {
+		t.Fatalf("expected 1 MarkPRReady call (non-transient, no retry), got %d", len(client.markPRReadyCalls))
 	}
 }
