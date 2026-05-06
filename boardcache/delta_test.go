@@ -929,6 +929,51 @@ func TestConcurrentDeltaSameIssue(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// pull_request_review side effect: removes reviewer from LinkedPRReviewRequests
+// ---------------------------------------------------------------------------
+
+// TestPullRequestReviewSideEffectRemovesReviewRequest_ReviewerPresent verifies
+// that applying a pull_request_review event removes the reviewer from
+// LinkedPRReviewRequests even when no review_request_removed webhook fires.
+// The implementation is action-agnostic, so testing "submitted" covers all three
+// variants (submitted, edited, dismissed).
+func TestPullRequestReviewSideEffectRemovesReviewRequest_ReviewerPresent(t *testing.T) {
+	c := seedCache(t)
+	testSetLinkedPR(c, "owner/repo", 1, 42)
+
+	// Seed LinkedPRReviewRequests with the reviewer.
+	c.ApplyDelta("pull_request", pullRequestReviewRequestedPayloadJSON("owner/repo", 42, []string{"alice"}, "alice"))
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.LinkedPR == nil || len(s.LinkedPR.ReviewRequests) != 1 {
+		t.Fatalf("pre-condition failed: want 1 review request, got LinkedPR=%v", s.LinkedPR)
+	}
+
+	// Apply a pull_request_review event — should remove alice from LinkedPRReviewRequests.
+	c.ApplyDelta("pull_request_review", pullRequestReviewPayloadJSON("submitted", "owner/repo", 42, 1001, "approved", "alice"))
+
+	s = testGetState(t, c, "owner/repo", 1)
+	if s.LinkedPR != nil && len(s.LinkedPR.ReviewRequests) != 0 {
+		t.Errorf("want 0 review requests after pull_request_review; got %v", s.LinkedPR.ReviewRequests)
+	}
+}
+
+// TestPullRequestReviewSideEffectRemovesReviewRequest_ReviewerAbsent verifies
+// that applying a pull_request_review event when the reviewer is NOT in
+// LinkedPRReviewRequests is a no-op (idempotent, no error).
+func TestPullRequestReviewSideEffectRemovesReviewRequest_ReviewerAbsent(t *testing.T) {
+	c := seedCache(t)
+	testSetLinkedPR(c, "owner/repo", 1, 42)
+
+	// Do NOT seed any review requests — LinkedPRReviewRequests is empty.
+	c.ApplyDelta("pull_request_review", pullRequestReviewPayloadJSON("submitted", "owner/repo", 42, 1001, "approved", "alice"))
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.LinkedPR != nil && len(s.LinkedPR.ReviewRequests) != 0 {
+		t.Errorf("want 0 review requests (no-op); got %v", s.LinkedPR.ReviewRequests)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
