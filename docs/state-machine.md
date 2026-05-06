@@ -643,7 +643,7 @@ After a stage invocation (not comment processing), `markCommentsSeenByStage()` a
 **Flow:**
 1. Push the issue branch
 2. Find PR number (uses `knownPR` from `ensureDraftPR` if available, else `FindPRForIssue()`)
-3. `MarkPRReady()` transitions draft → ready-for-review; retries up to 3 times on transient 5xx errors with exponential backoff (500ms / 1s / 2s); non-transient errors (4xx other than 429) are logged immediately without retry
+3. `MarkPRReady()` transitions draft → ready-for-review; retries up to 3 times on transient 5xx errors with exponential backoff (500ms / 1s / 2s); non-transient errors (4xx, including 429) are logged immediately without retry
 
 **Note:** This triggers external review bots and populates `LinkedPRReviewRequests`, which is why the review gate in `handleStageComplete()` (Path 1) is always optimistic — reviewer data is stale at that point.
 
