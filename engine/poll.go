@@ -1555,7 +1555,6 @@ func (e *Engine) reconcileCache(cache *boardcache.CacheImpl) {
 	cache.Reconcile(board)
 }
 
-
 // applyLayer1StatusRefresh handles the Layer 1 opportunistic per-event Status
 // refresh. Called from the deltaFn closure after ApplyDelta. For issue and
 // issue_comment events, it fetches the current Status from GitHub and updates
