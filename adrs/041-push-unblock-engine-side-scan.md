@@ -54,7 +54,7 @@ Two implementation variants were evaluated:
 
 - `StateChanged` events for issue closes will invoke `PushUnblockObserver.OnChange` for every close on the board. For each close, the observer scans all ~130 items typically held in the store (O(n) scan). This is cheap — the scan is a simple in-memory slice iteration with no I/O.
 
-- `BlockedByChanged` (already present in `change.go`) is not used by the push path. Variant B subscribes to `StateChanged` on the blocker; it does not rely on or emit `BlockedByChanged`.
+- `BlockedByChanged` (already present in `change.go`) is not used by the push path. Variant B subscribes to `StateChanged` on the blocker; it does not rely on or emit `BlockedByChanged`. **[Superseded by issue #588 — see Update section below.]**
 
 ## Cross-references
 
