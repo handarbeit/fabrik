@@ -202,11 +202,21 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	}
 
 	// Items with fabrik:blocked have an open dependency; suppress re-dispatch
-	// until the blocker closes. The first dispatch (before the label is set)
-	// still passes through so processItem → checkDependencies can apply the
-	// label. Subsequent dispatches are gated here — no goroutine, no wake-loop.
+	// unless the dep-blocked cooldown has expired. While the cooldown is active
+	// the pre-filter already skips deep-fetch (no wake-loop, no GraphQL burn —
+	// #576). When the cooldown expires, admit the item once so processItem →
+	// checkDependencies can re-evaluate: if still blocked it re-stamps the
+	// cooldown; if resolved it removes the label. No store entry (cold-start or
+	// restart) also admits, since no active cooldown exists yet.
 	if hasLabel(item, "fabrik:blocked") {
-		return false
+		repo := itemOwnerRepoString(item, e.defaultRepo())
+		if snap, err := e.store.Get(repo, item.Number); err == nil {
+			if cooldown := snap.CooldownAt("dep-blocked"); !cooldown.IsZero() && time.Now().Before(cooldown) {
+				return false // cooldown active — #576 short-circuit still holds
+			}
+			// Cooldown expired: fall through to admit for one re-check.
+		}
+		// No store entry (first dispatch or restart): admit.
 	}
 
 	// Awaiting-input items: new comment = resume trigger; no comment = skip.
