@@ -1183,7 +1183,6 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		dispatched++
 		go func() {
 			defer e.wg.Done()
-			defer func() { <-e.sem }()
 			// WorkerExited must be deferred at the goroutine top level so it fires on
 			// every exit path, including processItem early-returns (paused, blocked,
 			// awaiting-input, locked-by-other, stage-complete, etc.). The defer inside
@@ -1191,7 +1190,14 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			// any of them would leak the Worker entry and permanently block re-dispatch
 			// via the snap.Worker() != nil guard. Same pattern as the reinvoke
 			// dispatchers in reviews.go, ci.go, and merge_gate.go.
+			//
+			// Ordering: WorkerExited must fire AFTER the semaphore release so the wake
+			// it triggers does not race a fresh dispatch into a still-occupied slot.
+			// Defers run LIFO; declaring WorkerExited BEFORE the sem-release defer
+			// means sem-release runs first on exit, then WorkerExited fires its wake
+			// against a freed slot.
 			defer e.store.Apply(itemstate.WorkerExited{Repo: itemRepo, Number: item.Number})
+			defer func() { <-e.sem }()
 			e.emitStructural(tui.JobStartedEvent{
 				IssueNumber: item.Number,
 				Repo:        itemRepo,

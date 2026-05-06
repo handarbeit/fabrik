@@ -3075,7 +3075,9 @@ The dispatch loop uses `snap.Worker() != nil` to detect whether a goroutine is a
 - **Read by:** `snap.Worker() != nil` — used by all dispatch guards (main loop, reinvoke catch-up guards), the idle display ("workers active" log), and **auto-upgrade guard** (auto-upgrade refuses to fire while any worker is in-flight, to avoid `syscall.Exec` killing live workers)
 - **Idempotent:** the `WorkerExited` mutation handler (`internal/itemstate/store.go`) returns 0 changes when `item.Worker == nil`, so a redundant defer (e.g. an inner `defer WorkerExited` inside `processItem` firing in addition to the goroutine-top defer) does not produce spurious observer notifications.
 
-Both mutations emit `WorkerChanged | WorkerLifecycleChanged` (§2.14). Only `WorkerLifecycleChanged` is in `wakeChFlags`, so worker entry and exit deterministically wake the poll loop. `WorkerHeartbeat` and `WorkerPIDSet` emit only `WorkerChanged` and do not trigger a wake.
+Both mutations emit `WorkerChanged | WorkerLifecycleChanged` (§2.14). Only `WorkerLifecycleChanged` is in `wakeChFlags`, so worker entry and exit feed the wake pipeline. `WorkerHeartbeat` and `WorkerPIDSet` emit only `WorkerChanged` and do not feed the wake pipeline.
+
+> **Wake channel scope:** the wakeChObserver is registered only when a wake channel is configured (TUI mode or any other configuration that calls `SetWakeCh`). In headless / `--notui` runs, `WorkerLifecycleChanged` populates `mayNeedWork` for the next ticker-driven poll cycle but does not trigger an immediate wake. The dispatch re-evaluation guarantee is therefore "by the next scheduled poll" (≤ `PollSeconds`) when no wake channel is configured, and "within milliseconds" when one is.
 
 ### 9.3 Worktree Mutex
 
