@@ -923,6 +923,41 @@ func parseTime(s string) (time.Time, error) {
 	return time.Parse(time.RFC3339, s)
 }
 
+// FetchProjectUpdatedAt returns the updatedAt timestamp for the given project node ID.
+// Used as a cheap gate in the poll loop to skip the full status batch when the project
+// hasn't changed since the last cycle.
+func (c *Client) FetchProjectUpdatedAt(projectID string) (time.Time, error) {
+	query := `
+query($id: ID!) {
+  node(id: $id) {
+    ... on ProjectV2 {
+      updatedAt
+    }
+  }
+}`
+	vars := map[string]interface{}{"id": projectID}
+
+	var result struct {
+		Data struct {
+			Node *struct {
+				UpdatedAt string `json:"updatedAt"`
+			} `json:"node"`
+		} `json:"data"`
+	}
+
+	if err := c.graphqlRequest(query, vars, &result); err != nil {
+		return time.Time{}, fmt.Errorf("fetching project updatedAt for %s: %w", projectID, err)
+	}
+	if result.Data.Node == nil {
+		return time.Time{}, fmt.Errorf("fetching project updatedAt for %s: node not found or not a ProjectV2", projectID)
+	}
+	t, err := parseTime(result.Data.Node.UpdatedAt)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parsing project updatedAt for %s: %w", projectID, err)
+	}
+	return t, nil
+}
+
 // FetchProjectItemStatus fetches only the Status field value for a single project
 // item identified by its node ID (PVTI_...). Returns "" when no status is set.
 func (c *Client) FetchProjectItemStatus(itemID string) (string, error) {

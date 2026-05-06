@@ -73,8 +73,9 @@ type Engine struct {
 	mayNeedWork    map[string]bool // key: issueKey; items that have changed since the last poll cycle
 	mayNeedWorkMu  sync.Mutex      // guards mayNeedWork
 	seededRepos          map[string]bool       // key: "owner/repo"; in-memory guard to avoid re-seeding on every poll
-	idleCount            int                   // consecutive idle polls; triggers self-upgrade at threshold
-	idleStart            time.Time             // when consecutive idle polls began; zero value = not idle
+	idleCount              int       // consecutive idle polls; triggers self-upgrade at threshold
+	idleStart              time.Time // when consecutive idle polls began; zero value = not idle
+	lastProjectUpdatedAt   time.Time // last seen project.updatedAt from FetchProjectUpdatedAt gate; zero = not yet checked
 	wakeCh               chan struct{}         // TUI sends on this to wake the poll loop immediately; nil if no TUI
 	sem                  chan struct{}         // semaphore bounding concurrent workers across poll cycles
 	wg                   sync.WaitGroup        // tracks in-flight workers for graceful shutdown
