@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	gh "github.com/verveguy/fabrik/github"
 	"github.com/verveguy/fabrik/internal/itemstate"
 	"github.com/verveguy/fabrik/stages"
 	"github.com/verveguy/fabrik/tui"
@@ -138,18 +139,44 @@ func (o *StageChangeObserver) OnChange(change itemstate.Change, snap itemstate.S
 	})
 }
 
-// PushUnblockObserver fires whenever an issue transitions to CLOSED (StateChanged)
-// and scans the Store for items that (a) carry fabrik:blocked, (b) list the closing
-// issue in their BlockedBy slice, and (c) have all remaining blockers resolved.
-// For each such item it dispatches Remove on a goroutine — bypassing processItem
-// and itemMayNeedWork entirely. This is the push-based primary unblock path; the
-// existing pull-based checkDependencies cooldown-retry path remains as defense-in-depth.
+// PushUnblockObserver fires on two distinct events and removes fabrik:blocked when
+// all blockers are resolved:
 //
-// StateChanged is not in wakeChFlags or cycleSetFlags so this observer does not
-// trigger a poll wake — the label removal is a direct side effect only.
+//  1. StateChanged (blocker closes): scans Store.All() for items that carry
+//     fabrik:blocked and list the closing issue in their BlockedBy slice, then
+//     checks whether every remaining blocker is closed.
+//
+//  2. BlockedByChanged (dependent's BlockedBy first populated via deep-fetch):
+//     inspects only the changed item's own snapshot; if it carries fabrik:blocked
+//     and all listed blockers are already closed in the store, removes the label.
+//
+// This dual-trigger ensures the dependent unblocks within seconds regardless of
+// which event arrives first — the blocker's close or the dependent's first
+// deep-fetch. Neither StateChanged nor BlockedByChanged is in wakeChFlags or
+// cycleSetFlags, so this observer does not trigger a poll wake — label removal
+// is a direct side effect only.
 type PushUnblockObserver struct {
 	Store  *itemstate.Store
 	Remove func(owner, repo string, number int)
+}
+
+// allBlockersClosed checks whether every dep in blockedBy is closed, preferring
+// the store's view (fresher than dep.State from the last board fetch).
+func (o *PushUnblockObserver) allBlockersClosed(defaultRepo string, blockedBy []gh.Dependency) bool {
+	for _, dep := range blockedBy {
+		depRepo := dep.Repo
+		if depRepo == "" {
+			depRepo = defaultRepo
+		}
+		if depSnap, err := o.Store.Get(depRepo, dep.Number); err == nil {
+			if !depSnap.IsClosed() {
+				return false
+			}
+		} else if dep.State != "CLOSED" {
+			return false
+		}
+	}
+	return true
 }
 
 // OnChange implements itemstate.Observer.
@@ -157,20 +184,66 @@ func (o *PushUnblockObserver) OnChange(change itemstate.Change, snap itemstate.S
 	if o.Store == nil || o.Remove == nil {
 		return
 	}
-	if change.Fields&itemstate.StateChanged == 0 {
-		return
+
+	// Path 1: blocker closes → scan all items for dependents.
+	if change.Fields&itemstate.StateChanged != 0 && snap.IsClosed() {
+		closedRepo := change.Repo
+		closedNum := change.Number
+
+		for _, x := range o.Store.All() {
+			xState := x.State()
+
+			// Only consider items carrying fabrik:blocked.
+			hasBlocked := false
+			for _, l := range xState.Labels {
+				if l == "fabrik:blocked" {
+					hasBlocked = true
+					break
+				}
+			}
+			if !hasBlocked {
+				continue
+			}
+
+			// Skip if the closing issue is not in this item's BlockedBy list.
+			hasDep := false
+			for _, dep := range xState.BlockedBy {
+				depRepo := dep.Repo
+				if depRepo == "" {
+					depRepo = xState.Repo
+				}
+				if depRepo == closedRepo && dep.Number == closedNum {
+					hasDep = true
+					break
+				}
+			}
+			if !hasDep {
+				continue
+			}
+
+			if !o.allBlockersClosed(xState.Repo, xState.BlockedBy) {
+				continue
+			}
+
+			xOwner, xRepo := parseOwnerRepo(xState.Repo)
+			if xOwner == "" {
+				continue
+			}
+			xNum := xState.Number
+			go o.Remove(xOwner, xRepo, xNum)
+		}
 	}
-	if !snap.IsClosed() {
-		return
-	}
 
-	closedRepo := change.Repo
-	closedNum := change.Number
+	// Path 2: dependent's BlockedBy just populated via deep-fetch → check only this item.
+	if change.Fields&itemstate.BlockedByChanged != 0 {
+		xState := snap.State()
 
-	for _, x := range o.Store.All() {
-		xState := x.State()
+		// No-op if BlockedBy is empty (e.g., item has no blockers, or bootstrap nil→nil).
+		if len(xState.BlockedBy) == 0 {
+			return
+		}
 
-		// Only consider items carrying fabrik:blocked.
+		// Only act if the item carries fabrik:blocked.
 		hasBlocked := false
 		for _, l := range xState.Labels {
 			if l == "fabrik:blocked" {
@@ -179,51 +252,17 @@ func (o *PushUnblockObserver) OnChange(change itemstate.Change, snap itemstate.S
 			}
 		}
 		if !hasBlocked {
-			continue
+			return
 		}
 
-		// Skip if the closing issue is not in this item's BlockedBy list.
-		hasDep := false
-		for _, dep := range xState.BlockedBy {
-			depRepo := dep.Repo
-			if depRepo == "" {
-				depRepo = xState.Repo
-			}
-			if depRepo == closedRepo && dep.Number == closedNum {
-				hasDep = true
-				break
-			}
-		}
-		if !hasDep {
-			continue
-		}
-
-		// Check all blockers — prefer store's view (fresher than dep.State from last board fetch).
-		allClosed := true
-		for _, dep := range xState.BlockedBy {
-			depRepo := dep.Repo
-			if depRepo == "" {
-				depRepo = xState.Repo
-			}
-			if depSnap, err := o.Store.Get(depRepo, dep.Number); err == nil {
-				if !depSnap.IsClosed() {
-					allClosed = false
-					break
-				}
-			} else if dep.State != "CLOSED" {
-				allClosed = false
-				break
-			}
-		}
-		if !allClosed {
-			continue
+		if !o.allBlockersClosed(xState.Repo, xState.BlockedBy) {
+			return
 		}
 
 		xOwner, xRepo := parseOwnerRepo(xState.Repo)
 		if xOwner == "" {
-			continue
+			return
 		}
-		xNum := xState.Number
-		go o.Remove(xOwner, xRepo, xNum)
+		go o.Remove(xOwner, xRepo, xState.Number)
 	}
 }

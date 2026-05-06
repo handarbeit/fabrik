@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	gh "github.com/verveguy/fabrik/github"
 	"github.com/verveguy/fabrik/internal/itemstate"
 	"github.com/verveguy/fabrik/stages"
 	"github.com/verveguy/fabrik/tui"
@@ -395,4 +396,135 @@ func TestObservers_ConcurrentApplyIsRaceFree(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+// --- PushUnblockObserver BlockedByChanged path ---
+
+// TestPushUnblockObserver_BlockedByChanged_UnblocksWhenAllBlockersClosed verifies
+// the deep-fetch ordering fix: B's BlockedBy is nil at bootstrap; when a deep-fetch
+// populates it with a closed blocker A, PushUnblockObserver removes fabrik:blocked.
+func TestPushUnblockObserver_BlockedByChanged_UnblocksWhenAllBlockersClosed(t *testing.T) {
+	store := newTestStore()
+
+	// Seed A (closed) and B (open + fabrik:blocked, BlockedBy=nil at bootstrap).
+	store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Number: 1, Repo: "owner/repo"}})
+	store.Apply(itemstate.IssueClosed{Repo: "owner/repo", Number: 1})
+	store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{
+		Number: 2,
+		Repo:   "owner/repo",
+		Labels: []string{"fabrik:blocked"},
+		// BlockedBy intentionally nil — simulates bootstrap state.
+	}})
+
+	removeCh := make(chan int, 1)
+	obs := &PushUnblockObserver{
+		Store:  store,
+		Remove: func(owner, repo string, n int) { removeCh <- n },
+	}
+	store.Subscribe(obs)
+
+	// Simulate B's first deep-fetch populating BlockedBy with A (now CLOSED).
+	store.Apply(itemstate.ItemDeepFetched{
+		Repo:   "owner/repo",
+		Number: 2,
+		FreshState: gh.ProjectItem{
+			Number: 2,
+			Repo:   "owner/repo",
+			Labels: []string{"fabrik:blocked"},
+			BlockedBy: []gh.Dependency{
+				{Number: 1, Repo: "owner/repo", State: "CLOSED"},
+			},
+		},
+	})
+
+	n, ok := waitForRemove(t, removeCh)
+	if !ok {
+		t.Fatal("timeout: Remove was not called after BlockedByChanged with all blockers closed")
+	}
+	if n != 2 {
+		t.Errorf("expected Remove called for issue 2, got %d", n)
+	}
+}
+
+// TestPushUnblockObserver_BlockedByChanged_NoOpWhenBlockerStillOpen verifies that
+// the BlockedByChanged path does NOT remove fabrik:blocked when the listed blocker
+// is still open in the store.
+func TestPushUnblockObserver_BlockedByChanged_NoOpWhenBlockerStillOpen(t *testing.T) {
+	store := newTestStore()
+
+	// Seed A (open) and B (open + fabrik:blocked, BlockedBy=nil at bootstrap).
+	store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Number: 1, Repo: "owner/repo"}})
+	store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{
+		Number: 2,
+		Repo:   "owner/repo",
+		Labels: []string{"fabrik:blocked"},
+	}})
+
+	removeCh := make(chan int, 1)
+	obs := &PushUnblockObserver{
+		Store:  store,
+		Remove: func(owner, repo string, n int) { removeCh <- n },
+	}
+	store.Subscribe(obs)
+
+	// Deep-fetch populates B's BlockedBy with A (still OPEN in store).
+	store.Apply(itemstate.ItemDeepFetched{
+		Repo:   "owner/repo",
+		Number: 2,
+		FreshState: gh.ProjectItem{
+			Number: 2,
+			Repo:   "owner/repo",
+			Labels: []string{"fabrik:blocked"},
+			BlockedBy: []gh.Dependency{
+				{Number: 1, Repo: "owner/repo", State: "OPEN"},
+			},
+		},
+	})
+
+	select {
+	case n := <-removeCh:
+		t.Errorf("Remove unexpectedly called for issue %d when blocker still open", n)
+	case <-time.After(100 * time.Millisecond):
+		// expected: no removal
+	}
+}
+
+// TestPushUnblockObserver_BlockedByChanged_NoOpWhenBlockedByEmpty verifies that
+// the BlockedByChanged path is a no-op when BlockedBy is empty or nil — covers
+// the bootstrap scenario where ItemDeepFetched fires for an item with no blockers.
+func TestPushUnblockObserver_BlockedByChanged_NoOpWhenBlockedByEmpty(t *testing.T) {
+	store := newTestStore()
+
+	// Seed B (open + fabrik:blocked, no blockers listed).
+	store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{
+		Number: 2,
+		Repo:   "owner/repo",
+		Labels: []string{"fabrik:blocked"},
+	}})
+
+	removeCh := make(chan int, 1)
+	obs := &PushUnblockObserver{
+		Store:  store,
+		Remove: func(owner, repo string, n int) { removeCh <- n },
+	}
+	store.Subscribe(obs)
+
+	// Deep-fetch with empty BlockedBy — no dependencies.
+	store.Apply(itemstate.ItemDeepFetched{
+		Repo:   "owner/repo",
+		Number: 2,
+		FreshState: gh.ProjectItem{
+			Number:    2,
+			Repo:      "owner/repo",
+			Labels:    []string{"fabrik:blocked"},
+			BlockedBy: nil,
+		},
+	})
+
+	select {
+	case n := <-removeCh:
+		t.Errorf("Remove unexpectedly called for issue %d when BlockedBy is empty", n)
+	case <-time.After(100 * time.Millisecond):
+		// expected: no removal
+	}
 }
