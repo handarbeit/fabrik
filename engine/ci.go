@@ -182,7 +182,14 @@ func (e *Engine) removeAwaitingCILabel(owner, repo string, item gh.ProjectItem) 
 	for _, l := range item.Labels {
 		if l == "fabrik:awaiting-ci" {
 			if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:awaiting-ci"); err != nil {
-				e.logf(item.Number, "warn", "could not remove fabrik:awaiting-ci label: %v\n", err)
+				if errors.Is(err, gh.ErrNotFound) {
+					// Label already absent on GitHub — desired end state achieved; sync cache.
+					if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+						cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-ci")
+					}
+				} else {
+					e.logf(item.Number, "warn", "could not remove fabrik:awaiting-ci label: %v\n", err)
+				}
 			} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-ci")
 			}

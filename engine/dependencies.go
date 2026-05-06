@@ -51,7 +51,14 @@ func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, 
 		for _, l := range item.Labels {
 			if l == "fabrik:blocked" {
 				if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:blocked"); err != nil {
-					e.logf(item.Number, "warn", "could not remove fabrik:blocked label: %v\n", err)
+					if errors.Is(err, gh.ErrNotFound) {
+						// Label already absent on GitHub — desired end state achieved; sync cache.
+						if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+							cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:blocked")
+						}
+					} else {
+						e.logf(item.Number, "warn", "could not remove fabrik:blocked label: %v\n", err)
+					}
 				} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:blocked")
 				}
