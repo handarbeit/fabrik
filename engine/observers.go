@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -136,4 +137,91 @@ func (o *StageChangeObserver) OnChange(change itemstate.Change, snap itemstate.S
 		Title:    st.Title,
 		NewStage: st.Status,
 	})
+}
+
+// PushUnblockObserver fires whenever an issue transitions to CLOSED (StateChanged)
+// and scans the Store for items that (a) carry fabrik:blocked, (b) list the closing
+// issue in their BlockedBy slice, and (c) have all remaining blockers resolved.
+// For each such item it dispatches Remove on a goroutine — bypassing processItem
+// and itemMayNeedWork entirely. This is the push-based primary unblock path; the
+// existing pull-based checkDependencies cooldown-retry path remains as defense-in-depth.
+//
+// StateChanged is not in wakeChFlags or cycleSetFlags so this observer does not
+// trigger a poll wake — the label removal is a direct side effect only.
+type PushUnblockObserver struct {
+	Store  *itemstate.Store
+	Remove func(owner, repo string, number int)
+}
+
+// OnChange implements itemstate.Observer.
+func (o *PushUnblockObserver) OnChange(change itemstate.Change, snap itemstate.Snapshot) {
+	if change.Fields&itemstate.StateChanged == 0 {
+		return
+	}
+	if !snap.IsClosed() {
+		return
+	}
+
+	closedRepo := change.Repo
+	closedNum := change.Number
+
+	for _, x := range o.Store.All() {
+		xState := x.State()
+
+		// Only consider items carrying fabrik:blocked.
+		hasBlocked := false
+		for _, l := range xState.Labels {
+			if l == "fabrik:blocked" {
+				hasBlocked = true
+				break
+			}
+		}
+		if !hasBlocked {
+			continue
+		}
+
+		// Skip if the closing issue is not in this item's BlockedBy list.
+		hasDep := false
+		for _, dep := range xState.BlockedBy {
+			depRepo := dep.Repo
+			if depRepo == "" {
+				depRepo = xState.Repo
+			}
+			if depRepo == closedRepo && dep.Number == closedNum {
+				hasDep = true
+				break
+			}
+		}
+		if !hasDep {
+			continue
+		}
+
+		// Check all blockers — prefer store's view (fresher than dep.State from last board fetch).
+		allClosed := true
+		for _, dep := range xState.BlockedBy {
+			depRepo := dep.Repo
+			if depRepo == "" {
+				depRepo = xState.Repo
+			}
+			if depSnap, err := o.Store.Get(depRepo, dep.Number); err == nil {
+				if !depSnap.IsClosed() {
+					allClosed = false
+					break
+				}
+			} else if dep.State != "CLOSED" {
+				allClosed = false
+				break
+			}
+		}
+		if !allClosed {
+			continue
+		}
+
+		xOwner, xRepo, ok := strings.Cut(xState.Repo, "/")
+		if !ok {
+			continue
+		}
+		xNum := xState.Number
+		go o.Remove(xOwner, xRepo, xNum)
+	}
 }
