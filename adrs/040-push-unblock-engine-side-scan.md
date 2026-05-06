@@ -1,8 +1,8 @@
 # ADR-040: Push-based unblock via engine-side scan (Variant B)
 
-## Status
-
-Accepted — implemented in issue #580.
+**Status:** Accepted  
+**Issue:** #580  
+**Date:** 2026-05-06
 
 ## Context
 
