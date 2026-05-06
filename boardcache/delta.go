@@ -636,12 +636,9 @@ func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 		return
 	}
 	switch p.Action {
-	case "submitted":
-		// handled below
-	case "edited", "dismissed":
-		// Review edits and dismissals do not change the set of pending reviewers
-		// or the overall approval state tracked by the engine.
-		return
+	case "submitted", "edited", "dismissed":
+		// All three action variants carry the full review object and are routed
+		// through the same upsert path (keyed by DatabaseID).
 	default:
 		return
 	}
