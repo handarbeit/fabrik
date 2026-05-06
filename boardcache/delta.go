@@ -668,6 +668,14 @@ func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 				Number: issNum,
 				Review: review,
 			})
+			// Side effect: remove reviewer from LinkedPRReviewRequests. GitHub does not
+			// reliably fire review_request_removed for bot reviewers (e.g. Copilot edited
+			// reviews), so we treat the review event itself as authoritative (ADR 034).
+			c.store.Apply(itemstate.PRReviewRequestRemoved{
+				Repo:   issRepo,
+				Number: issNum,
+				Login:  p.Review.User.Login,
+			})
 			c.bumpLocalDeltaAt(issKey)
 		}
 		return
@@ -713,6 +721,12 @@ func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 		Repo:   repo,
 		Number: resolvedIssNum,
 		Review: review,
+	})
+	// Side effect: remove reviewer from LinkedPRReviewRequests (same rationale as normal path).
+	c.store.Apply(itemstate.PRReviewRequestRemoved{
+		Repo:   repo,
+		Number: resolvedIssNum,
+		Login:  p.Review.User.Login,
 	})
 	c.bumpLocalDeltaAt(key)
 	c.logFn("[cache] auto-heal: PR #%d → issue #%d; deep cache invalidated and delta re-applied\n", prNum, resolvedIssNum)
