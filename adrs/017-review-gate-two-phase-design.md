@@ -35,6 +35,8 @@ This approach trades one extra poll cycle of delay (when no reviewers are actual
 
 "Outstanding" is defined by presence in `reviewRequests` — GitHub removes a reviewer from this list when they submit any review (APPROVED, CHANGES_REQUESTED, or COMMENTED). If a review is dismissed and the reviewer is re-requested, they re-appear in `reviewRequests` and re-block the gate. This naturally implements the dismissed-reviewer requirement without special casing.
 
+**Addendum (issue #586):** The original gate logic also relied on `len(LinkedPRReviews) > 0` as the `hasReviews` condition. This assumed that `dismissed` webhook events were silently dropped (they were, prior to the fix in issue #586), so a DISMISSED review could never appear in the cache. With `pull_request_review.dismissed` events now processed and stored, a DISMISSED review would incorrectly satisfy `hasReviews` during the race window between the `dismissed` event and the follow-up `pull_request.review_requested` event. To close this window, `checkReviewGate` filters DISMISSED-state reviews from the `hasReviews` count: only reviews with `State != "DISMISSED"` contribute. The "natural re-blocking via `review_requested`" mechanism remains correct for the steady state after both events have been processed.
+
 ### Timeout Persistence via Issue Events API
 
 The timeout start time is fetched from `GET /repos/{owner}/{repo}/issues/{number}/events`, filtering for `event == "labeled"` with `event.label.name == "fabrik:awaiting-review"`. The implementation pages through all events to find the most recent application timestamp. If not found (fail-open), the timeout never fires — preferable to incorrectly timing out.
