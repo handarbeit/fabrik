@@ -13,6 +13,17 @@ go test -race ./...      # Run with race detector
 go vet ./...             # Lint
 ```
 
+## Documentation bundle (docs/llms-full.txt)
+
+When you modify any of the canonical doc pages — `docs/USER_GUIDE.md`, `docs/state-machine.md`, `docs/stage-lifecycle.md`, or `docs/positioning.md` — you MUST regenerate `docs/llms-full.txt` in the same commit:
+
+```bash
+bash scripts/generate-llms-full.sh
+git add docs/llms-full.txt
+```
+
+CI's `docs-drift` workflow (`.github/workflows/docs-drift.yml`) runs the regen and fails the PR if the committed bundle differs from the regen output. Forgetting the regen costs an extra round-trip; doing it consistently keeps PRs green on first push. This requirement applies to **every** stage (Specify, Research, Plan, Implement, Review, Validate) — wherever a doc edit happens, the bundle must follow.
+
 ## Architecture
 
 - `cmd/root.go` — CLI entry point, flag parsing, .env loading
