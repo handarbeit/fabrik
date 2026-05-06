@@ -1182,8 +1182,8 @@ After installing, your interactive Claude Code session gains:
 
 | Component | Description |
 |-----------|-------------|
-| `fabrik` skill | Auto-activates when `.fabrik/` is detected or Fabrik is mentioned. Provides ambient PM awareness — ask about board state, issue status, stuck items, etc. |
-| `fabrik-setup` skill | One-time onboarding walkthrough for setting up Fabrik from scratch in a new project. |
+| `fabrik` skill (qualified: `fabrik:fabrik`) | Auto-activates when `.fabrik/` is detected or Fabrik is mentioned. Provides ambient PM awareness — ask about board state, issue status, stuck items, etc. |
+| `fabrik-setup` skill (qualified: `fabrik:fabrik-setup`) | One-time onboarding walkthrough for setting up Fabrik from scratch in a new project. |
 | `/fabrik:status` command | Board snapshot: shows what's in each pipeline stage, which workers are running, and which worktrees have uncommitted changes. |
 
 #### Keeping the plugin up to date
