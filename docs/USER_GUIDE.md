@@ -1160,6 +1160,46 @@ the sequence.
 
 ## 5. Plugin & Skills
 
+### Install the Fabrik PM Plugin
+
+The **Fabrik PM plugin** is a Claude Code plugin for your interactive session — not for the workers. It gives Claude ambient awareness of your Fabrik-managed project so you can ask questions like "what's on the board?", "why is #42 stuck?", or "what's in progress?" without leaving Claude Code.
+
+> **Distinct from the worker plugin**: `fabrik-workflows` is embedded in the Fabrik binary and deployed automatically to `.fabrik/plugin/` by `fabrik init` and `fabrik upgrade`. You do **not** install `fabrik-workflows` manually.
+
+#### Install
+
+Run these three commands in your Claude Code interactive session:
+
+```
+/plugin marketplace add handarbeit/fabrik
+/plugin install fabrik@fabrik
+/reload-plugins
+```
+
+#### What you get
+
+After installing, your interactive Claude Code session gains:
+
+| Component | Description |
+|-----------|-------------|
+| `fabrik` skill | Auto-activates when `.fabrik/` is detected or Fabrik is mentioned. Provides ambient PM awareness — ask about board state, issue status, stuck items, etc. |
+| `fabrik-setup` skill | One-time onboarding walkthrough for setting up Fabrik from scratch in a new project. |
+| `/fabrik:status` command | Board snapshot: shows what's in each pipeline stage, which workers are running, and which worktrees have uncommitted changes. |
+
+#### Keeping the plugin up to date
+
+When the Fabrik repo ships a newer version of the plugin, refresh your local install:
+
+```
+/plugin marketplace update fabrik
+/plugin install fabrik@fabrik
+/reload-plugins
+```
+
+Alternatively, enable auto-update via the plugin UI: `/plugin` → Marketplaces tab → select `fabrik` → Enable auto-update. When enabled, Claude Code updates the marketplace and reinstalls the plugin automatically at startup.
+
+---
+
 ### How Skills Work
 
 Each stage references a **skill** -- a markdown file that contains detailed methodology
