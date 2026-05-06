@@ -2,10 +2,15 @@ package engine
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net"
 	"strings"
 	"testing"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -303,5 +308,289 @@ func TestProcessItem_SkipsBlockedFirstStage(t *testing.T) {
 	// fabrik:blocked label must be added.
 	if len(client.addLabelCalls) != 1 || client.addLabelCalls[0].labelName != "fabrik:blocked" {
 		t.Errorf("expected fabrik:blocked to be added, got addLabelCalls=%v", client.addLabelCalls)
+	}
+}
+
+// ---- removeBlockedIfResolved unit tests (Task 4) ----
+
+// TestRemoveBlockedIfResolved_Success verifies the happy path: label removed and
+// cache written on the first attempt.
+func TestRemoveBlockedIfResolved_Success(t *testing.T) {
+	orig := blockedLabelRetryDelay
+	blockedLabelRetryDelay = 0
+	t.Cleanup(func() { blockedLabelRetryDelay = orig })
+
+	var calls int
+	client := &mockGitHubClient{
+		removeLabelFromIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			if labelName == "fabrik:blocked" {
+				calls++
+			}
+			return nil
+		},
+	}
+	eng := depTestEngine(client)
+	eng.removeBlockedIfResolved("owner", "repo", 10)
+	if calls != 1 {
+		t.Errorf("expected 1 RemoveLabelFromIssue call, got %d", calls)
+	}
+}
+
+// TestRemoveBlockedIfResolved_ErrNotFound verifies that ErrNotFound is treated as
+// success (label already absent) — exactly one call, no further retries.
+func TestRemoveBlockedIfResolved_ErrNotFound(t *testing.T) {
+	orig := blockedLabelRetryDelay
+	blockedLabelRetryDelay = 0
+	t.Cleanup(func() { blockedLabelRetryDelay = orig })
+
+	var calls int
+	client := &mockGitHubClient{
+		removeLabelFromIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			if labelName == "fabrik:blocked" {
+				calls++
+				return gh.ErrNotFound
+			}
+			return nil
+		},
+	}
+	eng := depTestEngine(client)
+	eng.removeBlockedIfResolved("owner", "repo", 10)
+	if calls != 1 {
+		t.Errorf("expected exactly 1 call for ErrNotFound, got %d", calls)
+	}
+}
+
+// TestRemoveBlockedIfResolved_TransientRetrySucceeds verifies that a transient
+// error is retried and the call succeeds on the third attempt (3 total calls).
+func TestRemoveBlockedIfResolved_TransientRetrySucceeds(t *testing.T) {
+	orig := blockedLabelRetryDelay
+	blockedLabelRetryDelay = 0
+	t.Cleanup(func() { blockedLabelRetryDelay = orig })
+
+	var calls int
+	client := &mockGitHubClient{
+		removeLabelFromIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			if labelName == "fabrik:blocked" {
+				calls++
+				if calls < 3 {
+					return fmt.Errorf("executing request: %w", &net.OpError{Op: "read", Net: "tcp"})
+				}
+			}
+			return nil
+		},
+	}
+	eng := depTestEngine(client)
+	eng.removeBlockedIfResolved("owner", "repo", 10)
+	if calls != 3 {
+		t.Errorf("expected 3 calls (2 transient then success), got %d", calls)
+	}
+}
+
+// TestRemoveBlockedIfResolved_NonTransientNoRetry verifies that a non-transient
+// error produces exactly one attempt with no retries.
+func TestRemoveBlockedIfResolved_NonTransientNoRetry(t *testing.T) {
+	orig := blockedLabelRetryDelay
+	blockedLabelRetryDelay = 0
+	t.Cleanup(func() { blockedLabelRetryDelay = orig })
+
+	var calls int
+	client := &mockGitHubClient{
+		removeLabelFromIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			if labelName == "fabrik:blocked" {
+				calls++
+				return errors.New("GitHub API returned 422: validation failed")
+			}
+			return nil
+		},
+	}
+	eng := depTestEngine(client)
+	eng.removeBlockedIfResolved("owner", "repo", 10)
+	if calls != 1 {
+		t.Errorf("expected exactly 1 call for non-transient error, got %d", calls)
+	}
+}
+
+// ---- PushUnblockObserver tests (Task 5) ----
+
+// openItemWithBlockedLabel creates a gh.ProjectItem in the given column with
+// fabrik:blocked and the given blockers.
+func openItemWithBlockedLabel(number int, repo, column string, blockers []gh.Dependency) gh.ProjectItem {
+	return gh.ProjectItem{
+		Number:    number,
+		Repo:      repo,
+		Status:    column,
+		Labels:    []string{"fabrik:blocked"},
+		BlockedBy: blockers,
+	}
+}
+
+// waitForRemove waits up to 1 second for a value on ch; returns true if received.
+func waitForRemove(t *testing.T, ch <-chan int) (int, bool) {
+	t.Helper()
+	select {
+	case n := <-ch:
+		return n, true
+	case <-time.After(time.Second):
+		return 0, false
+	}
+}
+
+// TestPushUnblockObserver_SingleBlocker_NonStageColumn verifies that an item in a
+// non-stage column (Backlog) is unblocked when its single blocker closes.
+func TestPushUnblockObserver_SingleBlocker_NonStageColumn(t *testing.T) {
+	store := itemstate.NewStore(nil)
+
+	// Seed blocker Y (open) and dependent X (in Backlog, blocked).
+	store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Number: 9, Repo: "owner/repo"}})
+	store.Apply(itemstate.IssueOpened{Item: openItemWithBlockedLabel(10, "owner/repo", "Backlog", []gh.Dependency{
+		{Number: 9, Repo: "owner/repo", State: "OPEN"},
+	})})
+
+	removeCh := make(chan int, 1)
+	obs := &PushUnblockObserver{
+		Store:  store,
+		Remove: func(owner, repo string, n int) { removeCh <- n },
+	}
+	store.Subscribe(obs)
+
+	// Close Y.
+	store.Apply(itemstate.IssueClosed{Repo: "owner/repo", Number: 9})
+
+	n, ok := waitForRemove(t, removeCh)
+	if !ok {
+		t.Fatal("timeout: Remove was not called after blocker closed")
+	}
+	if n != 10 {
+		t.Errorf("expected Remove called for issue 10, got %d", n)
+	}
+}
+
+// TestPushUnblockObserver_TwoBlockers_OneCloses_NotRemoved verifies that closing
+// only one of two blockers does NOT trigger removal.
+func TestPushUnblockObserver_TwoBlockers_OneCloses_NotRemoved(t *testing.T) {
+	store := itemstate.NewStore(nil)
+
+	store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Number: 9, Repo: "owner/repo"}})
+	store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Number: 11, Repo: "owner/repo"}})
+	store.Apply(itemstate.IssueOpened{Item: openItemWithBlockedLabel(10, "owner/repo", "Backlog", []gh.Dependency{
+		{Number: 9, Repo: "owner/repo", State: "OPEN"},
+		{Number: 11, Repo: "owner/repo", State: "OPEN"},
+	})})
+
+	removeCh := make(chan int, 1)
+	obs := &PushUnblockObserver{
+		Store:  store,
+		Remove: func(owner, repo string, n int) { removeCh <- n },
+	}
+	store.Subscribe(obs)
+
+	// Close only Y (9); Z (11) is still open.
+	store.Apply(itemstate.IssueClosed{Repo: "owner/repo", Number: 9})
+
+	// Should NOT remove — Z is still open.
+	select {
+	case n := <-removeCh:
+		t.Errorf("Remove unexpectedly called for issue %d when one blocker still open", n)
+	case <-time.After(100 * time.Millisecond):
+		// expected: no removal
+	}
+}
+
+// TestPushUnblockObserver_TwoBlockers_BothClose_Removed verifies that closing
+// both blockers eventually triggers removal.
+func TestPushUnblockObserver_TwoBlockers_BothClose_Removed(t *testing.T) {
+	store := itemstate.NewStore(nil)
+
+	store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Number: 9, Repo: "owner/repo"}})
+	store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Number: 11, Repo: "owner/repo"}})
+	store.Apply(itemstate.IssueOpened{Item: openItemWithBlockedLabel(10, "owner/repo", "Backlog", []gh.Dependency{
+		{Number: 9, Repo: "owner/repo", State: "OPEN"},
+		{Number: 11, Repo: "owner/repo", State: "OPEN"},
+	})})
+
+	removeCh := make(chan int, 2)
+	obs := &PushUnblockObserver{
+		Store:  store,
+		Remove: func(owner, repo string, n int) { removeCh <- n },
+	}
+	store.Subscribe(obs)
+
+	// Close Y (9) — X remains blocked (Z still open).
+	store.Apply(itemstate.IssueClosed{Repo: "owner/repo", Number: 9})
+	select {
+	case n := <-removeCh:
+		t.Errorf("Remove unexpectedly called for issue %d after only first blocker closed", n)
+	case <-time.After(100 * time.Millisecond):
+		// expected: no removal yet
+	}
+
+	// Close Z (11) — now all blockers closed.
+	store.Apply(itemstate.IssueClosed{Repo: "owner/repo", Number: 11})
+
+	n, ok := waitForRemove(t, removeCh)
+	if !ok {
+		t.Fatal("timeout: Remove was not called after both blockers closed")
+	}
+	if n != 10 {
+		t.Errorf("expected Remove called for issue 10, got %d", n)
+	}
+}
+
+// TestPushUnblockObserver_NoBlockedLabel_NotRemoved verifies that items without
+// fabrik:blocked are ignored even if they have a BlockedBy entry.
+func TestPushUnblockObserver_NoBlockedLabel_NotRemoved(t *testing.T) {
+	store := itemstate.NewStore(nil)
+
+	store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Number: 9, Repo: "owner/repo"}})
+	// Item 10 has BlockedBy but NOT the fabrik:blocked label.
+	store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{
+		Number:    10,
+		Repo:      "owner/repo",
+		Status:    "Backlog",
+		BlockedBy: []gh.Dependency{{Number: 9, Repo: "owner/repo", State: "OPEN"}},
+	}})
+
+	removeCh := make(chan int, 1)
+	obs := &PushUnblockObserver{
+		Store:  store,
+		Remove: func(owner, repo string, n int) { removeCh <- n },
+	}
+	store.Subscribe(obs)
+
+	store.Apply(itemstate.IssueClosed{Repo: "owner/repo", Number: 9})
+
+	select {
+	case n := <-removeCh:
+		t.Errorf("Remove unexpectedly called for issue %d (no fabrik:blocked label)", n)
+	case <-time.After(100 * time.Millisecond):
+		// expected: no removal
+	}
+}
+
+// TestCheckDependencies_PullPath_Regression verifies that the existing
+// pull-based checkDependencies path (Task 5d) still removes fabrik:blocked
+// when invoked for items in stage columns.
+func TestCheckDependencies_PullPath_Regression(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := depTestEngine(client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		Status: "Research", // stage column
+		Labels: []string{"fabrik:blocked"},
+		BlockedBy: []gh.Dependency{
+			{Number: 9, State: "CLOSED", Repo: "owner/repo"},
+		},
+	}
+	stage := &stages.Stage{Name: "Research"}
+
+	blocked := eng.checkDependencies(board, item, stage)
+
+	if blocked {
+		t.Error("expected not blocked when all deps CLOSED")
+	}
+	if len(client.removeLabelCalls) != 1 || client.removeLabelCalls[0].labelName != "fabrik:blocked" {
+		t.Errorf("expected pull-path to remove fabrik:blocked, got removeLabelCalls=%v", client.removeLabelCalls)
 	}
 }
