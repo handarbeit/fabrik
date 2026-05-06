@@ -235,13 +235,10 @@ func (o *PushUnblockObserver) OnChange(change itemstate.Change, snap itemstate.S
 	}
 
 	// Path 2: dependent's BlockedBy just populated via deep-fetch → check only this item.
+	// Uses return (not continue) because there is nothing after this block; the two paths
+	// are independent and both idempotent if a single Change somehow carries both flags.
 	if change.Fields&itemstate.BlockedByChanged != 0 {
 		xState := snap.State()
-
-		// No-op if BlockedBy is empty (e.g., item has no blockers, or bootstrap nil→nil).
-		if len(xState.BlockedBy) == 0 {
-			return
-		}
 
 		// Only act if the item carries fabrik:blocked.
 		hasBlocked := false
@@ -252,6 +249,11 @@ func (o *PushUnblockObserver) OnChange(change itemstate.Change, snap itemstate.S
 			}
 		}
 		if !hasBlocked {
+			return
+		}
+
+		// No-op if BlockedBy is empty (e.g., item has no blockers, or bootstrap nil→nil).
+		if len(xState.BlockedBy) == 0 {
 			return
 		}
 
