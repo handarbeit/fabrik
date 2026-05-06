@@ -63,3 +63,13 @@ Two implementation variants were evaluated:
 - ADR-039 (`039-cycleset-excludes-worker-lifecycle.md`): `cycleSetFlags` excludes `WorkerLifecycleChanged`. `PushUnblockObserver` subscribes independently to `StateChanged` and never goes through `wakeChFlags` or `cycleSetFlags`.
 
 - Issue #540, #549, #569: prior push-based observer introductions (Layer 1 status fetch, worker exit, CI check runs). This ADR follows the same pattern.
+
+## Update (issue #588)
+
+The statement "BlockedByChanged is not used by the push path" in the Consequences section above is now superseded.
+
+`PushUnblockObserver.OnChange` was extended in issue #588 to also subscribe to `BlockedByChanged`. This fixes a deep-fetch ordering gap: after bootstrap every item has `BlockedBy = nil` (deep-fetch-only field, per ADR-017). If a blocker's `StateChanged` fires before the dependent's first `ItemDeepFetched`, the `store.All()` scan finds `BlockedBy = nil` and silently skips the dependent. When the dependent IS later deep-fetched and `BlockedBy` is populated, the store now emits `BlockedByChanged`, which triggers a second observer path that checks only the dependent item's blockers (O(k) rather than O(n)).
+
+Both triggers are idempotent — double-removal is handled by treating `ErrNotFound` as success. Neither `StateChanged` nor `BlockedByChanged` is in `wakeChFlags` or `cycleSetFlags`; the label removal remains a direct side effect only.
+
+See `docs/state-machine.md §2.5` for the current as-built description of both trigger paths.
