@@ -17,10 +17,12 @@ import (
 // emitted by processItem / processComments past all early-return guards
 // (lock acquired, all pre-work checks passed), never at goroutine launch.
 // The matching JobCompletedEvent is emitted by InvocationObserver on the
-// success path (Skipped: false) or deferred at the emission site on
-// cancel / failure paths (Skipped: true). Do NOT re-add JobStartedEvent
-// emission to dispatch goroutines — that causes indefinite ghost entries
-// whenever processItem early-returns without invoking Claude.
+// success path (Skipped: false). A synthetic JobCompletedEvent{Skipped: true}
+// is also deferred unconditionally at the emission site as a cleanup guard;
+// HistoryPaneComponent filters it out so only InvocationObserver events reach
+// history. Do NOT re-add JobStartedEvent emission to dispatch goroutines —
+// that causes indefinite ghost entries whenever processItem early-returns
+// without invoking Claude.
 type ActivePaneComponent struct {
 	active         map[string]*activeJob
 	activeNumToKey map[int]string
