@@ -678,6 +678,47 @@ func TestPRLinkage_opened(t *testing.T) {
 	}
 }
 
+// TestRecordPRLinkage_PreventsAutoHealMismap is a regression test for the
+// PR→issue mismapping bug (smoke test #4 Run G). When the engine pre-records
+// the authoritative PR→issue mapping via RecordPRLinkage, incoming webhooks
+// for that PR route to the correct issue even when FetchPRClosingIssues would
+// return the wrong issue number (e.g., prose references in the PR body).
+func TestRecordPRLinkage_PreventsAutoHealMismap(t *testing.T) {
+	mc := &mockClient{
+		// Simulates the buggy regex case: PR body has prose "fixes #598" before
+		// the real "Closes #602" — REST would return [598] (wrong) without the fix.
+		fetchPRClosingIssuesFn: func(owner, repo string, prNumber int) ([]int, error) {
+			return []int{598}, nil
+		},
+	}
+	// Seed cache with issue #602 (the correct target).
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+	board := &gh.ProjectBoard{
+		ProjectID: "PID", Title: "T", OwnerType: "organization",
+		Items: []gh.ProjectItem{
+			{ID: "I_602", ItemID: "PVTI_602", Number: 602, Repo: "owner/repo", Status: "Implement"},
+		},
+	}
+	c.Bootstrap(board)
+
+	// Engine pre-records the authoritative mapping at CreateDraftPR time.
+	c.RecordPRLinkage("owner/repo", 604, 602)
+
+	// Fire webhook for PR #604 — should route to issue #602, not #598.
+	c.ApplyDelta("pull_request", pullRequestPayloadJSON("opened", "owner/repo", 604, "sha-abc", "open", false, true))
+
+	// Issue #602 must have received the PR details.
+	s := testGetState(t, c, "owner/repo", 602)
+	if s.LinkedPR == nil || s.LinkedPR.Number != 604 {
+		t.Errorf("want LinkedPR.Number=604 on issue #602, got LinkedPR=%v", s.LinkedPR)
+	}
+
+	// FetchPRClosingIssues must NOT have been called (authoritative path taken).
+	if mc.fetchPRClosingIssuesCount != 0 {
+		t.Errorf("want 0 FetchPRClosingIssues calls (authoritative path), got %d", mc.fetchPRClosingIssuesCount)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Phase 3-D: documented no-ops — verify no crash and no state change
 // ---------------------------------------------------------------------------
