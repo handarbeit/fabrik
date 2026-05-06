@@ -2,7 +2,6 @@ package engine
 
 import (
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -155,6 +154,9 @@ type PushUnblockObserver struct {
 
 // OnChange implements itemstate.Observer.
 func (o *PushUnblockObserver) OnChange(change itemstate.Change, snap itemstate.Snapshot) {
+	if o.Store == nil || o.Remove == nil {
+		return
+	}
 	if change.Fields&itemstate.StateChanged == 0 {
 		return
 	}
@@ -217,8 +219,8 @@ func (o *PushUnblockObserver) OnChange(change itemstate.Change, snap itemstate.S
 			continue
 		}
 
-		xOwner, xRepo, ok := strings.Cut(xState.Repo, "/")
-		if !ok {
+		xOwner, xRepo := parseOwnerRepo(xState.Repo)
+		if xOwner == "" {
 			continue
 		}
 		xNum := xState.Number
