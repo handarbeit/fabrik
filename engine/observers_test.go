@@ -534,16 +534,20 @@ func TestPushUnblockObserver_BlockedByChanged_StorePreemptsDepState(t *testing.T
 }
 
 // TestPushUnblockObserver_BlockedByChanged_NoOpWhenBlockedByEmpty verifies that
-// the BlockedByChanged path is a no-op when BlockedBy is empty or nil — covers
-// the bootstrap scenario where ItemDeepFetched fires for an item with no blockers.
+// the BlockedByChanged path is a no-op when the post-mutation BlockedBy is empty.
+// The item is seeded with a non-nil BlockedBy so the nil→empty deep-fetch actually
+// emits BlockedByChanged; the observer must return without calling Remove.
 func TestPushUnblockObserver_BlockedByChanged_NoOpWhenBlockedByEmpty(t *testing.T) {
 	store := newTestStore()
 
-	// Seed B (open + fabrik:blocked, no blockers listed).
+	// Seed B with a non-nil BlockedBy so the subsequent deep-fetch triggers BlockedByChanged.
 	store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{
 		Number: 2,
 		Repo:   "owner/repo",
 		Labels: []string{"fabrik:blocked"},
+		BlockedBy: []gh.Dependency{
+			{Number: 1, Repo: "owner/repo", State: "OPEN"},
+		},
 	}})
 
 	removeCh := make(chan int, 1)
@@ -553,7 +557,8 @@ func TestPushUnblockObserver_BlockedByChanged_NoOpWhenBlockedByEmpty(t *testing.
 	}
 	store.Subscribe(obs)
 
-	// Deep-fetch with empty BlockedBy — no dependencies.
+	// Deep-fetch clears BlockedBy to an empty slice — triggers BlockedByChanged (non-nil→empty).
+	// The observer must return early because len(BlockedBy)==0.
 	store.Apply(itemstate.ItemDeepFetched{
 		Repo:   "owner/repo",
 		Number: 2,
@@ -561,7 +566,7 @@ func TestPushUnblockObserver_BlockedByChanged_NoOpWhenBlockedByEmpty(t *testing.
 			Number:    2,
 			Repo:      "owner/repo",
 			Labels:    []string{"fabrik:blocked"},
-			BlockedBy: nil,
+			BlockedBy: []gh.Dependency{},
 		},
 	})
 
