@@ -685,16 +685,19 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// ProjectID is known); skipped on the very first cycle when cache is unset.
 	if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok && cacheImpl.ProjectID() != "" {
 		projectID := cacheImpl.ProjectID()
-		updatedAt, err := e.client.FetchProjectUpdatedAt(projectID)
-		if err != nil {
-			e.logf(0, "cache", "layer2 gate: FetchProjectUpdatedAt failed: %v\n", err)
-		} else if updatedAt.After(e.lastProjectUpdatedAt) {
+		updatedAt, gateErr := e.client.FetchProjectUpdatedAt(projectID)
+		if gateErr != nil {
+			e.logf(0, "cache", "layer2 gate: FetchProjectUpdatedAt failed: %v; running batch as fallback\n", gateErr)
+		}
+		if gateErr != nil || updatedAt.After(e.lastProjectUpdatedAt) {
 			updates, err := e.client.FetchProjectItemStatusBatch(projectID)
 			if err != nil {
 				e.logf(0, "cache", "layer2 status sweep failed: %v\n", err)
 			} else {
 				cacheImpl.ApplyStatusBatch(updates)
-				e.lastProjectUpdatedAt = updatedAt
+				if gateErr == nil {
+					e.lastProjectUpdatedAt = updatedAt
+				}
 			}
 		}
 	}
