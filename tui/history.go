@@ -129,6 +129,9 @@ func NewHistoryPaneComponent(defaultRepo string) HistoryPaneComponent {
 func (h HistoryPaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 	switch ev := msg.(type) {
 	case JobCompletedEvent:
+		if ev.Skipped {
+			break // synthetic fallback emit; InvocationObserver is authoritative for history
+		}
 		entry := HistoryEntry{
 			IssueNumber:    ev.IssueNumber,
 			Repo:           ev.Repo,
