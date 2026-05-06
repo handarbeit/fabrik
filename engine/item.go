@@ -203,11 +203,12 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 
 	// Items with fabrik:blocked have an open dependency; suppress re-dispatch
 	// unless the dep-blocked cooldown has expired. While the cooldown is active
-	// the pre-filter already skips deep-fetch (no wake-loop, no GraphQL burn —
-	// #576). When the cooldown expires, admit the item once so processItem →
-	// checkDependencies can re-evaluate: if still blocked it re-stamps the
-	// cooldown; if resolved it removes the label. No store entry (cold-start or
-	// restart) also admits, since no active cooldown exists yet.
+	// the pre-filter skips deep-fetch in the normal case (no cycleSet entry, no
+	// bypass labels) — no wake-loop, no GraphQL burn (#576). When the cooldown
+	// expires, admit the item once so processItem → checkDependencies can
+	// re-evaluate: if still blocked it re-stamps the cooldown; if resolved it
+	// removes the label. No store entry (cold-start or restart) also admits,
+	// since no active cooldown exists yet.
 	if hasLabel(item, "fabrik:blocked") {
 		repo := itemOwnerRepoString(item, e.defaultRepo())
 		if snap, err := e.store.Get(repo, item.Number); err == nil {
