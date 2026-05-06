@@ -70,7 +70,7 @@ type JobCompletedEvent struct {
 	TurnsUsed      int
 	MaxTurns       int
 	CostUSD        float64
-	Skipped        bool // true when no Claude invocation occurred (early exit or context cancel)
+	Skipped        bool // synthetic fallback emit (deferred at emission site); InvocationObserver is authoritative (Skipped:false)
 }
 
 func (JobCompletedEvent) tuiEvent() {}
