@@ -252,7 +252,7 @@ func (o *PushUnblockObserver) OnChange(change itemstate.Change, snap itemstate.S
 			return
 		}
 
-		// No-op if BlockedBy is empty (e.g., item has no blockers, or bootstrap nil→nil).
+		// No-op if BlockedBy is empty after the mutation (e.g., blockers cleared on re-fetch).
 		if len(xState.BlockedBy) == 0 {
 			return
 		}
