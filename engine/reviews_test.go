@@ -296,6 +296,35 @@ func TestCheckReviewGate_DismissedReviewer_Reblocks(t *testing.T) {
 	}
 }
 
+func TestCheckReviewGate_DismissedReviewDoesNotClear(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := reviewTestEngine(client)
+	recentTime := time.Now().Add(-1 * time.Minute)
+	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+		return recentTime, nil
+	}
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	// No outstanding review requests, but the only review is DISMISSED.
+	// hasReviews must be false — the gate should stay blocked.
+	item := gh.ProjectItem{
+		Number:                 10,
+		Repo:                   "owner/repo",
+		Labels:                 []string{"fabrik:awaiting-review"},
+		LinkedPRReviewRequests: nil,
+		LinkedPRReviews:        []gh.PRReview{{Author: "alice", State: "DISMISSED"}},
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+
+	blocked, timedOut := eng.checkReviewGate(board, item, stage)
+
+	if !blocked {
+		t.Error("expected gate to stay blocked when only review is DISMISSED")
+	}
+	if timedOut {
+		t.Error("expected not timedOut")
+	}
+}
+
 // (f) buildReviewThreadComments returns inline thread comments with real DatabaseIDs.
 func TestBuildReviewThreadComments(t *testing.T) {
 	client := &mockGitHubClient{}
