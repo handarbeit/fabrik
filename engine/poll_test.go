@@ -1879,6 +1879,10 @@ func TestWorkerExitedWakesObserver(t *testing.T) {
 	obs := newWakeChObserver(wakeCh)
 	store.Subscribe(obs)
 
+	// Store.Apply + observer notification are synchronous, and the wakeChObserver's
+	// channel send is non-blocking. After Apply returns, the wake channel
+	// deterministically has a token or doesn't — no need for time.After timeouts.
+
 	// WorkerEntered must wake because WorkerLifecycleChanged is in wakeChFlags.
 	store.Apply(itemstate.WorkerEntered{
 		Repo:      "owner/repo",
@@ -1889,7 +1893,7 @@ func TestWorkerExitedWakesObserver(t *testing.T) {
 	select {
 	case <-wakeCh:
 		// expected
-	case <-time.After(100 * time.Millisecond):
+	default:
 		t.Error("wake channel did not fire after WorkerEntered")
 	}
 
@@ -1898,7 +1902,7 @@ func TestWorkerExitedWakesObserver(t *testing.T) {
 	select {
 	case <-wakeCh:
 		// expected
-	case <-time.After(100 * time.Millisecond):
+	default:
 		t.Error("wake channel did not fire after WorkerExited")
 	}
 
@@ -1910,7 +1914,104 @@ func TestWorkerExitedWakesObserver(t *testing.T) {
 	select {
 	case <-wakeCh:
 		t.Error("wake channel must not fire after WorkerHeartbeat (only WorkerLifecycleChanged is in wakeChFlags)")
-	case <-time.After(20 * time.Millisecond):
+	default:
 		// expected: heartbeat does not wake
+	}
+}
+
+// TestDispatchGoroutineWorkerExitedOnEarlyReturn verifies the fix for the
+// stuck-Worker bug observed on #559 / #563: the main dispatch goroutine in
+// poll.go must defer WorkerExited at the goroutine's top level, so that
+// processItem's early-return paths (paused, blocked, awaiting-input,
+// locked-by-other, stage-complete, etc.) all release the Worker entry.
+//
+// Pre-fix, the only WorkerExited defer lived inside processItem itself
+// (item.go:533), reached only after ~14 early-return guards. Any of those
+// returns would leak a Worker entry, blocking re-dispatch via the
+// snap.Worker() != nil guard and also blocking auto-upgrade (which gates
+// on snap.Worker() != nil for any item).
+//
+// This test simulates the goroutine pattern from poll.go: WorkerEntered is
+// applied before goroutine launch, the goroutine runs a body that returns
+// early (without calling processItem's internal defer), and the
+// goroutine-level defer fires WorkerExited. After the goroutine completes,
+// snap.Worker() must be nil.
+func TestDispatchGoroutineWorkerExitedOnEarlyReturn(t *testing.T) {
+	store := itemstate.NewStore(nil)
+
+	// Mirror the dispatch site in poll.go: apply WorkerEntered before goroutine.
+	store.Apply(itemstate.WorkerEntered{
+		Repo:      "owner/repo",
+		Number:    42,
+		StageName: "Implement",
+		StartedAt: time.Now(),
+	})
+
+	snap, err := store.Get("owner/repo", 42)
+	if err != nil {
+		t.Fatalf("store.Get after WorkerEntered: %v", err)
+	}
+	if snap.Worker() == nil {
+		t.Fatal("Worker should be set after WorkerEntered")
+	}
+
+	// Simulate the dispatch goroutine. The defer at the goroutine top must fire
+	// even when the inner work (processItem-equivalent) early-returns without
+	// running its own defer.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer store.Apply(itemstate.WorkerExited{Repo: "owner/repo", Number: 42})
+		// Simulate processItem early-return — no inner WorkerExited fires here.
+		return
+	}()
+	<-done
+
+	snap, err = store.Get("owner/repo", 42)
+	if err != nil {
+		t.Fatalf("store.Get after goroutine exit: %v", err)
+	}
+	if snap.Worker() != nil {
+		t.Errorf("Worker should be nil after goroutine exit; got %+v", snap.Worker())
+	}
+}
+
+// TestWorkerExitedIdempotent verifies that WorkerExited applied twice is a
+// no-op on the second call (returns 0 changes). This makes the redundant
+// defer at item.go:533 harmless — when processItem runs to completion and
+// fires its own WorkerExited, the goroutine-level defer in poll.go fires
+// WorkerExited again, but the second call should not produce spurious
+// observer notifications.
+func TestWorkerExitedIdempotent(t *testing.T) {
+	store := itemstate.NewStore(nil)
+	store.Apply(itemstate.WorkerEntered{
+		Repo: "owner/repo", Number: 1,
+		StageName: "X", StartedAt: time.Now(),
+	})
+
+	wakeCh := make(chan struct{}, 4)
+	store.Subscribe(newWakeChObserver(wakeCh))
+
+	// Store.Apply is synchronous and the wakeChObserver's channel send is non-blocking,
+	// so after Apply returns the wake channel deterministically either has a token or
+	// doesn't. Use non-blocking selects rather than time.After to keep the test
+	// deterministic and fast.
+
+	// First WorkerExited: should fire wake (Worker was non-nil → cleared → wake).
+	store.Apply(itemstate.WorkerExited{Repo: "owner/repo", Number: 1})
+	select {
+	case <-wakeCh:
+		// expected
+	default:
+		t.Fatal("first WorkerExited should fire wake")
+	}
+
+	// Second WorkerExited: must be a no-op (Worker already nil → no flags → no wake).
+	store.Apply(itemstate.WorkerExited{Repo: "owner/repo", Number: 1})
+	select {
+	case <-wakeCh:
+		t.Error("second WorkerExited should be a no-op (Worker already nil); spurious wake fired")
+	default:
+		// expected: no wake
 	}
 }
