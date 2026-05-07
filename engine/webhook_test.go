@@ -591,3 +591,180 @@ func assertContains(t *testing.T, slice []string, val string) {
 	}
 	t.Errorf("expected %q in %v", val, slice)
 }
+
+// TestIsProjectsV2ItemRejection covers all rejection phrases and negative cases.
+func TestIsProjectsV2ItemRejection(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want bool
+	}{
+		// Gate keyword must be present.
+		{"invalid phrase match", "error: projects_v2_item is invalid", true},
+		{"unknown phrase match", "projects_v2_item: unknown event", true},
+		{"not recognized phrase match", "projects_v2_item not recognized", true},
+		{"unsupported phrase match", "projects_v2_item unsupported", true},
+		{"bad request phrase match", "bad request: projects_v2_item", true},
+		// The actual GitHub error wording (the fix this issue targets).
+		{"not allowed phrase match", "These events are not allowed for this hook: projects_v2_item", true},
+		// Case insensitivity on the phrase.
+		{"not allowed uppercase", "These Events Are NOT ALLOWED for this hook: projects_v2_item", true},
+		// Negative: gate keyword absent.
+		{"no gate keyword", "These events are not allowed for this hook: issues", false},
+		{"phrase only no keyword", "error: invalid event", false},
+		{"empty", "", false},
+		// Negative: gate keyword present but no rejection phrase.
+		{"keyword only no phrase", "processing projects_v2_item event", false},
+		{"keyword success line", "projects_v2_item subscribed successfully", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isProjectsV2ItemRejection(tc.line)
+			if got != tc.want {
+				t.Errorf("isProjectsV2ItemRejection(%q) = %v, want %v", tc.line, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestApplyRepoAuthFailure_Quarantine verifies that three consecutive auth-shaped
+// quick exits quarantine all repos in the subscription set.
+func TestApplyRepoAuthFailure_Quarantine(t *testing.T) {
+	wm, _ := newTestWebhookManager(t)
+	wm.mu.Lock()
+	wm.repos = map[string]bool{"owner/a": true, "owner/b": true}
+	wm.mu.Unlock()
+
+	authStderr := "Error: HTTP 403 Forbidden"
+	quick := orgModeProbeTimeout / 2
+
+	for i := 0; i < webhookRepoFailureThreshold-1; i++ {
+		quarantined := wm.applyRepoAuthFailure(quick, authStderr)
+		if len(quarantined) != 0 {
+			t.Fatalf("iteration %d: expected no quarantine yet, got %v", i+1, quarantined)
+		}
+	}
+
+	// Third consecutive failure should quarantine both repos.
+	quarantined := wm.applyRepoAuthFailure(quick, authStderr)
+	if len(quarantined) != 2 {
+		t.Fatalf("expected 2 quarantined repos after threshold, got %v", quarantined)
+	}
+
+	wm.mu.Lock()
+	repos := copyRepoSet(wm.repos)
+	unsub := make(map[string]bool)
+	for k, v := range wm.unsubscribableRepos {
+		unsub[k] = v
+	}
+	wm.mu.Unlock()
+
+	if len(repos) != 0 {
+		t.Errorf("wm.repos should be empty after quarantine, got %v", repos)
+	}
+	if !unsub["owner/a"] || !unsub["owner/b"] {
+		t.Errorf("unsubscribableRepos = %v, want both owner/a and owner/b", unsub)
+	}
+}
+
+// TestApplyRepoAuthFailure_SlowExitResetsCounters verifies that a subprocess exit
+// beyond orgModeProbeTimeout resets failure counts, regardless of stderr content.
+func TestApplyRepoAuthFailure_SlowExitResetsCounters(t *testing.T) {
+	wm, _ := newTestWebhookManager(t)
+	wm.mu.Lock()
+	wm.repos = map[string]bool{"owner/a": true}
+	wm.repoFailureCounts = map[string]int{"owner/a": webhookRepoFailureThreshold - 1}
+	wm.mu.Unlock()
+
+	// A slow exit (elapsed > orgModeProbeTimeout) should reset counts.
+	slow := orgModeProbeTimeout + time.Second
+	quarantined := wm.applyRepoAuthFailure(slow, "Error: HTTP 403 Forbidden")
+	if len(quarantined) != 0 {
+		t.Fatalf("slow exit should not quarantine, got %v", quarantined)
+	}
+
+	wm.mu.Lock()
+	count := wm.repoFailureCounts["owner/a"]
+	wm.mu.Unlock()
+	if count != 0 {
+		t.Errorf("repoFailureCounts[owner/a] = %d after slow exit, want 0", count)
+	}
+}
+
+// TestApplyRepoAuthFailure_FastNonAuthNoIncrement verifies that a quick exit without
+// auth-shaped stderr does not increment failure counts.
+func TestApplyRepoAuthFailure_FastNonAuthNoIncrement(t *testing.T) {
+	wm, _ := newTestWebhookManager(t)
+	wm.mu.Lock()
+	wm.repos = map[string]bool{"owner/a": true}
+	wm.mu.Unlock()
+
+	quick := orgModeProbeTimeout / 2
+	quarantined := wm.applyRepoAuthFailure(quick, "connection reset by peer")
+	if len(quarantined) != 0 {
+		t.Fatalf("non-auth exit should not quarantine, got %v", quarantined)
+	}
+
+	wm.mu.Lock()
+	count := wm.repoFailureCounts["owner/a"]
+	wm.mu.Unlock()
+	if count != 0 {
+		t.Errorf("repoFailureCounts[owner/a] = %d after non-auth exit, want 0", count)
+	}
+}
+
+// TestUpdateRepos_QuarantinedRepoFiltered verifies that a quarantined repo is not
+// re-added to wm.repos and does not trigger a subprocess kill.
+func TestUpdateRepos_QuarantinedRepoFiltered(t *testing.T) {
+	wm, _ := newTestWebhookManager(t)
+	killCount := 0
+	wm.killFn = func(*exec.Cmd) { killCount++ }
+	wm.mu.Lock()
+	wm.repos = map[string]bool{"owner/a": true}
+	wm.unsubscribableRepos = map[string]bool{"owner/b": true} // pre-quarantined
+	wm.currentCmd = &exec.Cmd{}
+	wm.mu.Unlock()
+
+	wm.UpdateRepos(map[string]bool{"owner/a": true, "owner/b": true})
+
+	wm.mu.Lock()
+	repos := copyRepoSet(wm.repos)
+	wm.mu.Unlock()
+
+	if repos["owner/b"] {
+		t.Error("quarantined repo owner/b should not be in wm.repos after UpdateRepos")
+	}
+	if !repos["owner/a"] {
+		t.Error("non-quarantined repo owner/a should remain in wm.repos")
+	}
+	// owner/b was quarantined, not new — should not kill subprocess.
+	if killCount != 0 {
+		t.Errorf("killFn called %d times for quarantined repo update, want 0", killCount)
+	}
+}
+
+// TestUpdateRepos_NonQuarantinedRepoAdded verifies that new non-quarantined repos
+// are still added and trigger a subprocess restart.
+func TestUpdateRepos_NonQuarantinedRepoAdded(t *testing.T) {
+	wm, _ := newTestWebhookManager(t)
+	killCount := 0
+	wm.killFn = func(*exec.Cmd) { killCount++ }
+	wm.mu.Lock()
+	wm.repos = map[string]bool{"owner/a": true}
+	wm.unsubscribableRepos = map[string]bool{"owner/bad": true} // unrelated quarantine
+	wm.currentCmd = &exec.Cmd{}
+	wm.mu.Unlock()
+
+	wm.UpdateRepos(map[string]bool{"owner/a": true, "owner/c": true})
+
+	wm.mu.Lock()
+	repos := copyRepoSet(wm.repos)
+	wm.mu.Unlock()
+
+	if !repos["owner/c"] {
+		t.Error("new non-quarantined repo owner/c should be in wm.repos")
+	}
+	if killCount != 1 {
+		t.Errorf("killFn called %d times for new-repo update, want 1", killCount)
+	}
+}
