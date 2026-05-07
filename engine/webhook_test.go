@@ -1499,3 +1499,75 @@ func TestSupervise_CleanupCalledBeforeEachSubprocess(t *testing.T) {
 		}
 	}
 }
+
+// TestSupervise_CleanupSuccessResetsCounter verifies R9(a): when cleanupFn returns nil,
+// permanentFailureCount is reset to 0 before the next subprocess is launched.
+func TestSupervise_CleanupSuccessResetsCounter(t *testing.T) {
+	wm, _ := newTestWebhookManager(t)
+	wm.mu.Lock()
+	wm.orgModeFailed = true
+	wm.permanentFailureCount = 2 // pre-set to non-zero
+	wm.mu.Unlock()
+
+	counterAtStart := make(chan int, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	wm.cleanupFn = func(repos []string) error { return nil }
+
+	wm.startSubprocessFn = func(fctx context.Context, args []string) (*exec.Cmd, <-chan string, error) {
+		wm.mu.Lock()
+		count := wm.permanentFailureCount
+		wm.mu.Unlock()
+		counterAtStart <- count
+		cancel()
+		return nil, nil, fmt.Errorf("test stop")
+	}
+
+	go wm.supervise(ctx)
+
+	select {
+	case count := <-counterAtStart:
+		if count != 0 {
+			t.Errorf("permanentFailureCount = %d after successful cleanup, want 0", count)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for subprocess start")
+	}
+}
+
+// TestSupervise_CleanupFailurePreservesCounter verifies R9(b): when cleanupFn returns
+// an error, permanentFailureCount is not reset and retains its prior value.
+func TestSupervise_CleanupFailurePreservesCounter(t *testing.T) {
+	wm, _ := newTestWebhookManager(t)
+	wm.mu.Lock()
+	wm.orgModeFailed = true
+	wm.permanentFailureCount = 2
+	wm.mu.Unlock()
+
+	counterAtStart := make(chan int, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	wm.cleanupFn = func(repos []string) error { return fmt.Errorf("cleanup failed") }
+
+	wm.startSubprocessFn = func(fctx context.Context, args []string) (*exec.Cmd, <-chan string, error) {
+		wm.mu.Lock()
+		count := wm.permanentFailureCount
+		wm.mu.Unlock()
+		counterAtStart <- count
+		cancel()
+		return nil, nil, fmt.Errorf("test stop")
+	}
+
+	go wm.supervise(ctx)
+
+	select {
+	case count := <-counterAtStart:
+		if count != 2 {
+			t.Errorf("permanentFailureCount = %d after cleanup failure, want 2 (unchanged)", count)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for subprocess start")
+	}
+}
