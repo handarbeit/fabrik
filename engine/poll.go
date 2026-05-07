@@ -654,18 +654,24 @@ func (e *Engine) cleanupClosedIssueTransientLabels(board *gh.ProjectBoard) {
 			labelSet[l] = struct{}{}
 		}
 		owner, repo, num := parseIssueKey(issueKey(item, e.defaultRepo()), e.cfg.Owner, e.cfg.Repo)
+		repoKey := owner + "/" + repo // use computed repo for cache key; item.Repo may be empty in fallback paths
 		for _, label := range transientLifecycleLabels {
 			if _, has := labelSet[label]; !has {
 				continue
 			}
 			if err := e.client.RemoveLabelFromIssue(owner, repo, num, label); err != nil {
-				if !errors.Is(err, gh.ErrNotFound) {
+				if errors.Is(err, gh.ErrNotFound) {
+					// Label already absent on GitHub — desired state achieved; sync cache.
+					if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+						cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(repoKey, num), label)
+					}
+				} else {
 					e.logf(num, "warn", "could not remove transient label %q from closed issue: %v\n", label, err)
 				}
 			} else {
 				e.logf(num, "poll", "removed transient label %q from closed issue\n", label)
 				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), label)
+					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(repoKey, num), label)
 				}
 			}
 		}
