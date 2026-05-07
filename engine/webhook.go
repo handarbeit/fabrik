@@ -567,7 +567,9 @@ func (wm *webhookManager) UpdateRepos(repos map[string]bool) {
 		return
 	}
 
-	wm.repos = copyRepoSet(filtered)
+	for r := range filtered {
+		wm.repos[r] = true
+	}
 	cmd := wm.currentCmd
 	wm.signalRepoReady()
 	wm.mu.Unlock()

@@ -797,6 +797,37 @@ func TestUpdateRepos_NonQuarantinedRepoAdded(t *testing.T) {
 	}
 }
 
+// TestUpdateRepos_AdditiveOnly_NeverDropsExistingRepo verifies that calling UpdateRepos
+// with a subset of the currently-subscribed repos does not remove the missing repos from
+// wm.repos. This is the regression test for the spurious "new repo discovered" restart
+// that fired when a poll cycle's seenRepos omitted an already-subscribed repo.
+func TestUpdateRepos_AdditiveOnly_NeverDropsExistingRepo(t *testing.T) {
+	wm, _ := newTestWebhookManager(t)
+	killCount := 0
+	wm.killFn = func(*exec.Cmd) { killCount++ }
+	wm.mu.Lock()
+	wm.repos = map[string]bool{"owner/a": true, "owner/b": true}
+	wm.currentCmd = &exec.Cmd{}
+	wm.mu.Unlock()
+
+	// Call UpdateRepos with only owner/a — owner/b is absent from this poll cycle.
+	wm.UpdateRepos(map[string]bool{"owner/a": true})
+
+	wm.mu.Lock()
+	repos := copyRepoSet(wm.repos)
+	wm.mu.Unlock()
+
+	if !repos["owner/b"] {
+		t.Error("owner/b was dropped from wm.repos after UpdateRepos with subset — want additive-only behavior")
+	}
+	if !repos["owner/a"] {
+		t.Error("owner/a should remain in wm.repos")
+	}
+	if killCount != 0 {
+		t.Errorf("killFn called %d times when no new repos were added, want 0", killCount)
+	}
+}
+
 // TestIsDisabled verifies IsDisabled() reflects the disabled field correctly.
 func TestIsDisabled(t *testing.T) {
 	wm, _ := newTestWebhookManager(t)
