@@ -1,20 +1,42 @@
-# Fabrik v0.0.53
+# Fabrik v0.0.54
 
-This release adds stage-config drift detection at startup and bundles documentation updates that bring the as-built specs and the user-facing docs back in sync with v0.0.51 (project board indexer retry) and v0.0.52 (`mergeable_state` CI gate shortcut). The drift detection in particular would have caught the missing `wait_for_ci: true` flag on liminis's validate.yaml that contributed to verveguy/liminis#716 sitting stuck for hours during yesterday's GitHub outage.
+This release stabilizes the post-cache-refactor codebase: webhook reliability, gate latency, and observability are all substantially improved. The headline change is that webhook health is now derived from a periodic reality reconcile rather than from event-arrival timing, eliminating false-positive flapping during quiet periods.
 
 ## Features
 
-- **Stage YAML drift detection at startup (#464).** When Fabrik starts, it now compares each loaded stage in `.fabrik/stages/` against the corresponding embedded default and logs a `[startup] warning: ...` line for every field present in the embedded version but missing locally (e.g. `wait_for_ci: true`, `wait_for_reviews: true` on Validate). Local stage YAMLs are NOT auto-overwritten — users may have intentional customizations — but the drift surfaces loudly so silent feature degradation after `fabrik upgrade` is no longer possible. Useful in particular for users whose stage configs predate later v0.0.x releases.
+- **Reconcile-driven webhook health** (#641) — webhook health state is now derived from a periodic light reconcile against GitHub (default 3 min), not from "no events for N seconds" timing. Idle boards no longer trigger spurious `unhealthy` transitions; genuine cache drift is detected and reconciled within one cycle.
+- **Mutation echo-check** (#642) — fabrik now tracks each outgoing GitHub mutation and expects a matching webhook event within a short window. K consecutive echo misses across distinct mutations flag the webhook stream as unhealthy. Detects silent webhook stream failure within seconds during active periods.
+- **Push-wake on awaiting-review and awaiting-ci** (#616) — gate clearance now fires within ~2 seconds of the relevant webhook (Copilot review submission, CI completion) instead of waiting for the catch-up loop. Direct effect: end-to-end pipeline runs are minutes shorter.
+- **Webhook circuit breaker + cache fallback** (#628) — after 3 consecutive HTTP 422 errors creating a webhook subscription, fabrik switches to poll-only mode rather than thrashing indefinitely. Cache reads automatically fall through to GitHub when the webhook stream is unhealthy.
+- **Per-repo webhook failure isolation** (#631) — if one repo on a multi-repo board fails webhook subscription (auth scope, deleted repo), fabrik quarantines that repo and continues subscribing to the others rather than crashing the whole loop.
+- **Orphan webhook cleanup at startup** (#643) — fabrik now deletes its own previous-session webhook claims at startup, preventing the "Hook already exists" 422 trap when the gh subprocess crashed mid-session.
 
-## Documentation
+## Fixes
 
-- **ADR 033 — `mergeable_state` over raw `check_runs`.** Documents the v0.0.52 decision to consult GitHub's branch-protection-aware `mergeable_state` before classifying raw check_runs in both `checkCIGate` and `attemptMergeOnValidate`, including why "clean" and "unstable" are accepted but "has_hooks" is not.
-- **State machine spec updated for `mergeable_state` shortcut.** §1.4 (label semantics), §2.10 (CI Check Completed), §3.2 (Awaiting CI transitions), §5.4 (Auto-Merge on Validate), and §6.2 (catch-up loop Phase 1) all now reflect the new shortcut path and clarify that it sits *after* `stage:Validate:complete` is set, so it cannot skip Validate-Claude work.
-- **USER_GUIDE and README updated** for both v0.0.51 board-fetch retry and the v0.0.52 CI gate behavior. CLAUDE.md gained a short note about the new stage-drift warning so contributors know to update embedded defaults when adding stage fields.
+- **PR-to-issue mismapping from greedy closing-keyword regex** (#605) — PR bodies that mention prior issues in prose ("before fixes #598 and #599 landed") no longer cause fabrik to mismap the new PR to those mentioned issues. Authoritative mapping is now established at PR creation time and confirmed via tightened regex.
+- **PR creation before output posting in Implement** (#608) — `post_to_pr: true` stages now reliably post to the linked PR. Previously a race could land output on the issue if posting fired before PR creation completed.
+- **Spurious `fabrik:awaiting-review` at Validate-complete** (#617) — the review gate is no longer re-evaluated at Validate completion. Closed issues no longer carry stale `fabrik:awaiting-review` labels into Done.
+- **404 noise on label removal** (#607) — `RemoveLabel` calls for labels that aren't present no longer log spurious warnings; `ErrNotFound` is treated as success.
+- **`UpdateRepos` is now additive** (#637) — known repos are never dropped from the webhook subscription set based on a single poll's incoming view. Eliminates spurious "new repo discovered" subprocess restarts triggered by transient cache state.
+- **PR mergeable retry on transient 5xx** — `markPRReady` now retries with bounded backoff on transient GitHub errors instead of failing silently.
+- **Push-based dep-blocked unblock observer extended** — `PushUnblockObserver` now fires on `BlockedByChanged` in addition to `StateChanged`, closing a deep-fetch ordering gap that left some dependents stuck after their blocker closed.
+- **bot-reprompted review-gate corrections** — multiple fixes around how fabrik handles bot reviewers and the escalation ladder; review reinvoke is more robust under retry conditions.
+
+## Improvements
+
+- **Logs are quieter and more informative** — the misleading "auto-advance catch-up" prefix on routine stage transitions is dropped (#619); auto-heal logs are suppressed when the prToKey index already resolves the mapping (#618); webhook health transitions now include the elapsed-since-last-event duration for diagnosis.
+- **Push-unblock latency** is consistently ~10–25 seconds end-to-end on typical issue close → dependent dispatch.
+- **Health threshold tuning** (#638) — initial false-positive flapping was eliminated by raising the silence threshold from 60s to 5min; superseded entirely by #641's reconcile-driven design.
 
 ## Internal
 
-- Several Copilot-review-driven fixups across ADR 033, the USER_GUIDE board-fetch note, and the drift-detection PR.
+~400 commits since v0.0.53. Significant refactoring of the webhook manager, cache layer, and observer wiring. New ADRs for echo-check and reconcile-driven health. Extensive test coverage added across all the new mechanisms. Eight live smoke-test pair runs validated each layer of fixes in production.
+
+## Documentation
+
+- New `docs/design/multi-user-vs-bot-mode.md` design exploration draft (NOT an ADR — explicitly marked as in-progress thinking) covering the per-user vs bot-mode topology tradeoffs surfaced by GitHub's single-user webhook constraint.
+- `USER_GUIDE.md` updated with notes on the single-user webhook constraint and operator recovery procedures.
+- ADRs added covering recent architectural decisions (echo-check, reconcile-driven health, etc.).
 
 ## Upgrading
 
