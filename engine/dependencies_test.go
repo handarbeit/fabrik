@@ -9,9 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/verveguy/fabrik/boardcache"
 	gh "github.com/verveguy/fabrik/github"
 	"github.com/verveguy/fabrik/internal/itemstate"
 	"github.com/verveguy/fabrik/stages"
+	"github.com/verveguy/fabrik/tui"
 )
 
 // depTestStages returns a two-stage pipeline for dependency gate tests.
@@ -628,15 +630,20 @@ func TestCheckDependencies_RemoveBlocked_ErrNotFound(t *testing.T) {
 		removeLabelFromIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
 			if labelName == "fabrik:blocked" {
 				calls++
-				return gh.ErrNotFound
+				return fmt.Errorf("GitHub API returned 404: label not found: %w", gh.ErrNotFound)
 			}
 			return nil
 		},
 	}
-	eng := depTestEngine(client)
+	eng, cache := testEngineWithCache(client, &mockClaudeInvoker{})
+	cache.ApplyLabelAdded(boardcache.ItemKey("owner/repo", 1), "fabrik:blocked")
+
+	eventsCh := make(chan tui.Event, 16)
+	eng.events = eventsCh
+
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
-		Number: 10,
+		Number: 1,
 		Repo:   "owner/repo",
 		Labels: []string{"fabrik:blocked"},
 		BlockedBy: []gh.Dependency{
@@ -652,5 +659,24 @@ func TestCheckDependencies_RemoveBlocked_ErrNotFound(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("expected exactly 1 RemoveLabelFromIssue call for ErrNotFound, got %d", calls)
+	}
+
+	// No warn log should be emitted when ErrNotFound is returned.
+	close(eventsCh)
+	for ev := range eventsCh {
+		if le, ok := ev.(tui.LogEvent); ok && le.Tag == "warn" {
+			t.Errorf("unexpected warn log: %q", le.Message)
+		}
+	}
+
+	// Cache write-through applied: fabrik:blocked must be absent from cache.
+	labels, err := cache.FetchLabels("owner", "repo", 1)
+	if err != nil {
+		t.Fatalf("FetchLabels: %v", err)
+	}
+	for _, l := range labels {
+		if l == "fabrik:blocked" {
+			t.Error("expected fabrik:blocked to be removed from cache after ErrNotFound")
+		}
 	}
 }
