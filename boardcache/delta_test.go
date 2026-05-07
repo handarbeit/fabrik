@@ -1072,13 +1072,13 @@ func TestIndexHit_NoDeepcacheInvalidation_PullRequestReview(t *testing.T) {
 	}
 }
 
-// TestIndexHit_NoDeepcacheInvalidation_PullRequestReviewComment verifies that
-// when RecordPRLinkage has pre-populated the prToKey index, a
+// TestIndexHit_NoRESTCall_PullRequestReviewComment verifies that when
+// RecordPRLinkage has pre-populated the prToKey index, a
 // pull_request_review_comment webhook does not invoke FetchPRClosingIssues.
-// Note: the normal path intentionally applies DeepFetchInvalidated for new
-// review comments (ReviewThreadID is not available in the webhook payload), so
-// this test only asserts the absence of REST calls, not deep-fetch state.
-func TestIndexHit_NoDeepcacheInvalidation_PullRequestReviewComment(t *testing.T) {
+// The normal path applies DeepFetchInvalidated for new review comments
+// (ReviewThreadID not yet populated from the webhook), so deep-fetch state
+// is intentionally invalidated here and is not asserted.
+func TestIndexHit_NoRESTCall_PullRequestReviewComment(t *testing.T) {
 	mc := &mockClient{}
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
 	board := &gh.ProjectBoard{
@@ -1131,6 +1131,43 @@ func TestIndexHit_NoDeepcacheInvalidation_CheckRun(t *testing.T) {
 	}
 	if mc.fetchPRClosingIssuesCount != 0 {
 		t.Errorf("want 0 FetchPRClosingIssues calls (authoritative prToKey path taken), got %d", mc.fetchPRClosingIssuesCount)
+	}
+}
+
+// TestResolvePRLinkage_IndexHit_ReturnsFalseHealed directly tests the healed bool
+// return: when prToKey already contains the PR→issue mapping (from RecordPRLinkage),
+// resolvePRLinkage must return healed=false and must not call FetchPRClosingIssues.
+func TestResolvePRLinkage_IndexHit_ReturnsFalseHealed(t *testing.T) {
+	mc := &mockClient{}
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+	board := &gh.ProjectBoard{
+		ProjectID: "PID", Title: "T", OwnerType: "organization",
+		Items: []gh.ProjectItem{
+			{ID: "I_602", ItemID: "PVTI_602", Number: 602, Repo: "owner/repo", Status: "Implement"},
+		},
+	}
+	c.Bootstrap(board)
+	c.RecordPRLinkage("owner/repo", 604, 602)
+
+	key, issNum, found, healed, err := c.resolvePRLinkage("owner", "repo", 604)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !found {
+		t.Fatal("want found=true, got false")
+	}
+	if healed {
+		t.Error("want healed=false on authoritative index hit, got true")
+	}
+	if key == "" {
+		t.Error("want non-empty key on index hit")
+	}
+	if issNum != 602 {
+		t.Errorf("want issNum=602, got %d", issNum)
+	}
+	if mc.fetchPRClosingIssuesCount != 0 {
+		t.Errorf("want 0 FetchPRClosingIssues calls (authoritative path), got %d", mc.fetchPRClosingIssuesCount)
 	}
 }
 
