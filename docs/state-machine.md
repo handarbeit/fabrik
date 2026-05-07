@@ -1052,29 +1052,17 @@ When the webhook stream is healthy or starting up, steady-state polling is suppr
 
 | State | Meaning | Idle cap used | TUI indicator |
 |-------|---------|---------------|---------------|
-| `WebhookStreamStartingUp` | Subprocess launched; no verified event received yet. The state persists until the first event arrives or `webhookStartupGrace` (30s) + `webhookHealthWindow` (10 min) elapses with no event. | 60 min | Blue ○ |
-| `WebhookStreamHealthy` | At least one event received within the last health window (10 min) | 60 min | Green ● |
-| `WebhookStreamUnhealthy` | No first event received before `webhookStartupGrace` (30s) + `webhookHealthWindow` (10 min) after subprocess launch, or health window (10 min) elapsed since last event | 5 min | Yellow ◌ |
+| `WebhookStreamStartingUp` | Subprocess launched; no reconcile tick has completed yet. State persists until the first `reconcileTicker` tick confirms no drift. | 60 min | Blue ○ |
+| `WebhookStreamHealthy` | Most recent `reconcileTicker` tick found no drift between in-memory cache and GitHub | 60 min | Green ● |
+| `WebhookStreamUnhealthy` | Most recent `reconcileTicker` tick found drift; Pause/Reconcile/Resume in progress | 5 min | Yellow ◌ |
 
-**State transitions:**
-- `StartingUp → Healthy`: first verified webhook event received at any point after subprocess launch.
-- `StartingUp → Unhealthy`: no verified event received for `webhookStartupGrace` (30s) + `webhookHealthWindow` (10 min) after subprocess launch.
-- `Healthy → Unhealthy`: no event received for `webhookHealthWindow` (10 min).
-- `* → StartingUp`: subprocess restart (secret rotation, crash recovery) resets grace and waits for a new first event.
+**State transitions (reconcile-driven — webhooks no longer drive health state):**
+- `StartingUp → Healthy`: first `reconcileTicker` tick completes with no drift (or drift is reconciled).
+- `StartingUp/Healthy → Unhealthy`: `reconcileTicker` tick finds drift between cache and GitHub; triggers Pause → Reconcile(freshBoard) → Resume.
+- `Unhealthy → Healthy`: immediately after Reconcile+Resume completes successfully within the same tick.
+- `* → StartingUp`: subprocess restart (secret rotation, crash recovery) resets state; next tick re-evaluates.
 
-**Mutation echo-check (Plan B fast failure detection).** In addition to the time-based health transitions above, the engine detects silent webhook stream failures within seconds during active mutation periods via an echo-check mechanism (`pendingEchoes`, `missHistory`, and `doEchoSweep` in `engine/webhook.go`):
-
-- **Registration:** After each successful tracked mutation (`AddLabelToIssue`, `RemoveLabelFromIssue`, `AddComment`, `UpdateIssueBody`, `CreateDraftPR`, `MarkPRReady`, `MergePR`, `UpdateProjectItemStatus`), the engine records a `(eventType, action, discriminatingKey, timestamp)` entry in `pendingEchoes`. Registration is suppressed during `WebhookStreamStartingUp` and when the board cache is disabled (`healthChangeFn == nil`). `UpdateProjectItemStatus` is additionally suppressed when `projects_v2_item` is not in the current `wm.events` subscription set (R7 conditional).
-
-- **Matching:** `CacheImpl.ApplyDelta` calls `wm.MatchEcho(eventType, action, key)` for each incoming webhook event before applying the delta to the store. A match removes the corresponding `pendingEchoes` entry, preventing it from counting as a miss.
-
-- **Sweep:** A background goroutine (started alongside `runHealthMonitor` in `webhookManager.Start()`) calls `doEchoSweep()` every 5 seconds. Entries in `pendingEchoes` older than `webhookEchoTimeout` (15s) with no match are echo misses — removed from `pendingEchoes` and their timestamp appended to `missHistory`.
-
-- **Rolling-window threshold:** On each miss append, `missHistory` entries older than `webhookEchoWindow` (60s) are pruned. If `len(missHistory) >= webhookEchoMissThreshold` (3), `healthChangeFn(false)` is called and `missHistory` is cleared to prevent repeated firing. Named constants (overridable in tests): `webhookEchoTimeout = 15s`, `webhookEchoMissThreshold = 3`, `webhookEchoWindow = 60s`.
-
-- **Recovery:** Any verified inbound webhook event arriving at `handleWebhook` transitions the stream back to `Healthy` via the existing recovery path. `missHistory` is cleared in the same lock block to prevent stale miss counts from immediately re-triggering the threshold after recovery.
-
-- **Design rationale:** [ADR-042: Mutation Echo-Check for Webhook Health Detection](../adrs/042-mutation-echo-check.md)
+Webhooks continue to apply deltas to the cache via `ApplyDelta` but no longer drive health state. Event silence does not produce health transitions — only `LightReconcile` drift detection does.
 
 **Webhook mode is always non-fatal.** If the `gh webhook forward` subprocess fails to start, the stream state stays `Unhealthy` and the 5-minute idle cap applies. The poll loop continues normally.
 
@@ -1787,9 +1775,9 @@ After a successful batch step, `e.lastProjectUpdatedAt` is updated to the new ti
 
 **Gate inactive when**: `e.readClient` is not a `*boardcache.CacheImpl` (non-cache mode), or `cacheImpl.ProjectID()` is empty (bootstrap not yet complete).
 
-**Full reconcile — stream-recovery only**
+**Full reconcile — drift-recovery only**
 
-`reconcileCache` (which calls `e.client.FetchProjectBoard(...)` and `cacheImpl.Reconcile(board)`) is preserved but is **no longer called by the periodic loop**. It is called only on webhook stream recovery (see §D.5).
+`LightReconcile` returns the fresh board snapshot when drift is detected, which the `reconcileTicker` goroutine passes directly to `cacheImpl.Reconcile(board)` — avoiding a second API call. `reconcileCache` (the older full-fetch-and-reconcile helper) is retained but is no longer called by the engine.
 
 `Reconcile` performs a deep partial update:
 - For each item in the fresh board snapshot: update shallow fields (`Status`, shallow `Labels`, `UpdatedAt`, etc.) in-place. Deep fields (`Comments`, `LinkedPR*`, etc.) are **preserved** from the existing cache entry to avoid triggering a burst of FetchItemDetails calls after each reconciliation.
@@ -1799,18 +1787,23 @@ After a successful batch step, `e.lastProjectUpdatedAt` is updated to the new ti
 
 ### D.5 Stream-Health Failover
 
-The `healthChangeFn` callback injected into `webhookManager` is called on health state transitions:
+Health transitions are driven by the `reconcileTicker` goroutine (`engine/poll.go`), which calls `cacheImpl.LightReconcile(...)` on each tick (default: every 3 minutes, configurable via `--reconcile-interval` / `FABRIK_RECONCILE_INTERVAL`):
 
-| Transition | Action |
-|------------|--------|
-| Any → `WebhookStreamUnhealthy` (from `checkHealthTransitions`) | `cacheImpl.Pause()` |
-| Any → `WebhookStreamHealthy` (from `handleWebhook` on first recovery event) | `reconcileCache()` inline → `cacheImpl.Resume()` |
+| `LightReconcile` result | Action |
+|-------------------------|--------|
+| No drift | `wm.transitionHealthState(Healthy, "")` — no-op if already healthy; logs if recovering from unhealthy |
+| Drift detected | `wm.transitionHealthState(Unhealthy, reason)` → `cacheImpl.Pause()` → `cacheImpl.Reconcile(freshBoard)` → `cacheImpl.Resume()` → `wm.transitionHealthState(Healthy, "drift reconciled")` |
+| Network error | Log warning; no state change (treat as "unable to determine", not drift) |
 
 When `IsPaused()` is true:
 - `ApplyDelta` is a no-op (deltas are dropped rather than applied to a potentially stale cache).
 - All `CacheImpl` read methods fall through to the `fallback` ReadClient (live GitHub API), so correctness is preserved at the cost of increased GraphQL usage.
 
-On recovery, `reconcileCache()` fetches a fresh board snapshot before `Resume()` so the cache is coherent immediately when `IsPaused()` returns false.
+On drift recovery, `LightReconcile` returns the fresh board it already fetched; this is passed directly to `cacheImpl.Reconcile(freshBoard)` before `Resume()`, so the cache is coherent immediately when `IsPaused()` returns false.
+
+**API cost:** Each `LightReconcile` tick costs ~1 GraphQL call (`FetchProjectBoard`). At the default 3-minute cadence: ≤ 20 calls/hour — negligible against the 5000-point/hour budget.
+
+**`healthChangeFn` removed (issue #641):** The callback-based `healthChangeFn` pattern (ADR-034) has been replaced. The `reconcileTicker` goroutine owns the full Pause/Reconcile/Resume sequence directly; no indirection through a closure is required.
 
 ### D.6 Cache Mode Selection
 
@@ -1830,7 +1823,7 @@ In user mode (PAT-based, repo-level webhooks via `gh webhook forward`), GitHub d
 | **0** Write-through | After any successful mutation call in the engine (status, labels, comments), the corresponding `CacheImpl` method is called immediately | Zero | Zero |
 | **1** Per-event refresh | After `ApplyDelta` for an `issues` or `issue_comment` event, fetches the current Status: fast path (`FetchProjectItemStatus`) when the item's `itemID` is cached; fallback (`LookupIssueProjectItem`) when it isn't yet (e.g., brand-new issues arriving via `issues.opened` before `projects_v2_item.created`) | Seconds (best-effort) | ~1–5 pts/event |
 | **2** Periodic status sweep | In-poll `updatedAt` gate: `FetchProjectUpdatedAt` (~1 pt) every poll cycle (~15 s); fires `FetchProjectItemStatusBatch` + `ApplyStatusBatch` only when project timestamp advances | Up to 15 s | ~1 pt/cycle idle; O(⌈N/100⌉) pts when gate fires |
-| **Bootstrap / stream-recovery** | Full `FetchProjectBoard` + `Reconcile` on startup and on webhook stream recovery | Minutes | Full board cost |
+| **Bootstrap / drift-recovery** | Full `FetchProjectBoard` + `Reconcile` on startup and when `reconcileTicker` detects drift | Minutes | Full board cost |
 
 **Residual latency**: For external column moves (user moves issue on the board), the upper bound on detection latency is the main poll cadence (~15 s) — Layer 2 runs at the top of every `poll()` cycle. If the column move happens to coincide with any other issue activity (a comment, label change, etc.), Layer 1 may catch it sooner. Layer 0 applies only to Fabrik's own mutations.
 

@@ -30,7 +30,8 @@ type Config struct {
 	PollSeconds       int
 	MaxConcurrent     int
 	MaxRetries        int
-	ReviewWaitTimeout time.Duration // How long to wait for PR reviewers before auto-advancing anyway (default 15m)
+	ReviewWaitTimeout   time.Duration // How long to wait for PR reviewers before auto-advancing anyway (default 15m)
+	ReconcileInterval   time.Duration // Reconcile ticker cadence (0 = use lightReconcileInterval default of 3m)
 	MaxReviewCycles   int           // Max review re-invocation cycles per issue before pausing (default 5)
 	CIWaitTimeout     time.Duration // How long to wait for CI in the merge guard before pausing (default 30m)
 	MaxCiFixCycles    int           // Max CI-fix re-invocation cycles per issue before pausing (default 5)
