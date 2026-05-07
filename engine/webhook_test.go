@@ -869,6 +869,7 @@ func TestCircuitBreaker422(t *testing.T) {
 		wm.mu.Lock()
 		disabled := wm.disabled
 		count := wm.permanentFailureCount
+		state := wm.state
 		wm.mu.Unlock()
 
 		if !disabled {
@@ -876,6 +877,9 @@ func TestCircuitBreaker422(t *testing.T) {
 		}
 		if count != webhookPermanentFailureMax {
 			t.Errorf("permanentFailureCount = %d, want %d", count, webhookPermanentFailureMax)
+		}
+		if state != WebhookStreamUnhealthy {
+			t.Errorf("state = %q after circuit-breaker, want %q", state, WebhookStreamUnhealthy)
 		}
 		if healthChangeFalseCalls != 1 {
 			t.Errorf("healthChangeFn(false) called %d times, want 1", healthChangeFalseCalls)
@@ -1081,6 +1085,31 @@ func TestHealthTransition_StartingUp_UsesSessionFirstStartAt(t *testing.T) {
 	wm.mu.Unlock()
 	if state == WebhookStreamUnhealthy {
 		t.Error("state should NOT be Unhealthy when only startupTime is old but sessionFirstStartAt is recent — the fix uses sessionFirstStartAt")
+	}
+}
+
+// TestHealthTransition_StartingUp_SkipsGraceWindowWhenEventsReceived verifies that
+// the sessionFirstStartAt grace+window path (R-B3) does NOT fire when events have
+// been received (sessionLastEventAt != zero), even if sessionFirstStartAt is old.
+// Without the sessionLastEventAt.IsZero() guard, this would incorrectly transition
+// to Unhealthy after ~10m even on a healthy-then-restarting stream.
+func TestHealthTransition_StartingUp_SkipsGraceWindowWhenEventsReceived(t *testing.T) {
+	wm, _ := newTestWebhookManager(t)
+	wm.mu.Lock()
+	wm.state = WebhookStreamStartingUp
+	// sessionFirstStartAt is old enough to trigger the grace+window path.
+	wm.sessionFirstStartAt = time.Now().Add(-(webhookStartupGrace + webhookHealthWindow + time.Second))
+	// But we have received events recently (within the 60s stale threshold).
+	wm.sessionLastEventAt = time.Now().Add(-10 * time.Second)
+	wm.mu.Unlock()
+
+	wm.checkHealthTransitions()
+
+	wm.mu.Lock()
+	state := wm.state
+	wm.mu.Unlock()
+	if state == WebhookStreamUnhealthy {
+		t.Error("state should NOT be Unhealthy when sessionFirstStartAt is old but events were received (sessionLastEventAt != zero)")
 	}
 }
 
