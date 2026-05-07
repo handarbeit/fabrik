@@ -1597,19 +1597,26 @@ Stage advancement can occur through two code paths:
 
 Phase 1 ensures inline PR review thread comments (from Copilot, Gemini, or human reviewers) are addressed and CI failures are fixed on **all** issues, not just yolo/cruise ones. Phase 2 keeps stage advancement gated as before. Items that dispatch a reinvoke in Phase 1 (review reinvoke or CI-fix reinvoke) skip Phase 2 on that poll cycle and are re-evaluated on the next poll.
 
-## Appendix B: Guard Evaluation in `itemMayNeedWork()` (Shallow Pre-Filter)
+## Appendix B: Shallow Pre-Filter (`Engine.poll()` pre-filter + `itemMayNeedWork()`)
 
-`itemMayNeedWork()` runs on shallow board data (limited labels, no comments) and determines whether an item warrants the expensive `FetchItemDetails()` call.
+Shallow pre-filtering is a two-pass process that avoids the expensive `FetchItemDetails()` GraphQL call for items that clearly don't need work:
+
+**Pass 1 — `Engine.poll()` pre-filter** (runs first, on every item in the board snapshot):
+
+| Check | Passes If |
+|-------|-----------|
+| cycleSet / cooldown pre-filter | Item is in `cycleSet` (a Store observer fired for a relevant change), OR has a bypass label (`fabrik:awaiting-ci`, `fabrik:awaiting-review`, `fabrik:rebase-needed` — need per-poll evaluation because their unblocking events don't bump `updatedAt`), OR cleanup stage (checks local filesystem), OR `CooldownAt` has expired (periodic re-evaluation window), OR item is not yet in the engine store. Items with an active `CooldownAt` and no other signal are suppressed. See "Cooldown Cache-Key Strategy" section in Appendix B below. |
+
+**Pass 2 — `itemMayNeedWork()`** (runs after the pre-filter admits the item, on shallow board data):
 
 | Check | Passes If |
 |-------|-----------|
 | Stage exists | `FindStage(stages, item.Status) != nil` |
 | Closed issue | Not closed, OR cleanup stage, OR has `stage:<X>:complete` label |
 | Cleanup stage | Worktree exists on disk (local filesystem check only) |
-| updatedAt cache | `item.UpdatedAt` is newer than cached value, OR (cooldown expired AND `stage:X:complete` absent from shallow labels, OR `stage:X:complete` present but `fabrik:awaiting-review` also present), OR `fabrik:awaiting-ci` label present (CI check-run completions don't bump `updatedAt`), OR `fabrik:awaiting-review` label present (review-submission webhooks don't bump `updatedAt`), OR `fabrik:rebase-needed` label present (base-branch advances don't bump `updatedAt`). See "Cooldown Cache-Key Strategy" section in Appendix B below. |
 | Deep-fetch failure cooldown | No recent `FetchItemDetails` failure, OR failure cooldown expired |
 
-**Note:** `itemMayNeedWork()` intentionally does NOT check lock, editing, pause, or dependency labels — those require the full label set from deep fetch and are checked in `itemNeedsWork()`.
+**Note:** `itemMayNeedWork()` intentionally does NOT check `updatedAt`, the cycleSet/cooldown gate, lock, editing, pause, or dependency labels — those are either handled by the `poll.go` pre-filter (Pass 1) or require the full label set from deep fetch and are checked in `itemNeedsWork()`.
 
 ### Cooldown Cache-Key Strategy
 
