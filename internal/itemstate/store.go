@@ -53,8 +53,8 @@ type Store struct {
 }
 
 type observerEntry struct {
-	o    Observer
-	id   uint64
+	o  Observer
+	id uint64
 }
 
 // storeOptions holds optional Store configuration.

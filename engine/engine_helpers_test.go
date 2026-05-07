@@ -44,6 +44,7 @@ func testEngine(client *mockGitHubClient, claude *mockClaudeInvoker) *Engine {
 		NewWorktreeManager("/tmp/test-repo"),
 	)
 }
+
 // testEngineWithCache creates an Engine with a live CacheImpl wired as readClient.
 // Returns the engine and the cache so tests can query cached state directly.
 // The cache is bootstrapped with a single item: owner/repo issue #1 in "Research".

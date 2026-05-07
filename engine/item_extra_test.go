@@ -64,7 +64,7 @@ func TestPollPreFilter_StaleItemWithinCooldown_Skipped(t *testing.T) {
 		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{
 				ProjectID: "PVT_1",
-				Items: []gh.ProjectItem{{Number: 43, Status: "Research", ItemID: "PVTI_43", UpdatedAt: ts}},
+				Items:     []gh.ProjectItem{{Number: 43, Status: "Research", ItemID: "PVTI_43", UpdatedAt: ts}},
 			}, nil
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
@@ -637,7 +637,7 @@ func TestPollPreFilter_AwaitingInput_WithoutChange_Skipped(t *testing.T) {
 		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{
 				ProjectID: "PVT_1",
-				Items: []gh.ProjectItem{{Number: 50, Status: "Research", ItemID: "PVTI_50", UpdatedAt: ts, Labels: []string{"fabrik:awaiting-input", "fabrik:paused"}}},
+				Items:     []gh.ProjectItem{{Number: 50, Status: "Research", ItemID: "PVTI_50", UpdatedAt: ts, Labels: []string{"fabrik:awaiting-input", "fabrik:paused"}}},
 			}, nil
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
@@ -684,7 +684,6 @@ func TestItemMayNeedWork_DeepFetchFailureCooldown(t *testing.T) {
 	}
 }
 
-
 // TestItemMayNeedWork_AwaitingCI_BypassesUpdatedAtCache verifies that items with
 // fabrik:awaiting-ci bypass the updatedAt cache so the catch-up loop can
 // re-evaluate CI status on every poll even when the issue hasn't changed.
@@ -721,7 +720,7 @@ func TestPollPreFilter_AwaitingReview_WithinCooldown_Bypassed(t *testing.T) {
 		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{
 				ProjectID: "PVT_1",
-				Items: []gh.ProjectItem{{Number: 67, Status: "Research", ItemID: "PVTI_67", UpdatedAt: ts, Labels: []string{"fabrik:awaiting-review"}}},
+				Items:     []gh.ProjectItem{{Number: 67, Status: "Research", ItemID: "PVTI_67", UpdatedAt: ts, Labels: []string{"fabrik:awaiting-review"}}},
 			}, nil
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
@@ -746,7 +745,7 @@ func TestPollPreFilter_AwaitingReview_ExpiredCooldown_Admitted(t *testing.T) {
 		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{
 				ProjectID: "PVT_1",
-				Items: []gh.ProjectItem{{Number: 67, Status: "Research", ItemID: "PVTI_67", UpdatedAt: ts, Labels: []string{"fabrik:awaiting-review"}}},
+				Items:     []gh.ProjectItem{{Number: 67, Status: "Research", ItemID: "PVTI_67", UpdatedAt: ts, Labels: []string{"fabrik:awaiting-review"}}},
 			}, nil
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
@@ -773,7 +772,7 @@ func TestPollPreFilter_AwaitingReview_NoCooldown_Bypassed(t *testing.T) {
 		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{
 				ProjectID: "PVT_1",
-				Items: []gh.ProjectItem{{Number: 68, Status: "Research", ItemID: "PVTI_68", UpdatedAt: ts, Labels: []string{"fabrik:awaiting-review"}}},
+				Items:     []gh.ProjectItem{{Number: 68, Status: "Research", ItemID: "PVTI_68", UpdatedAt: ts, Labels: []string{"fabrik:awaiting-review"}}},
 			}, nil
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
@@ -801,7 +800,7 @@ func TestPollPreFilter_Blocked_WithinCooldown_Skipped(t *testing.T) {
 		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{
 				ProjectID: "PVT_1",
-				Items: []gh.ProjectItem{{Number: 63, Status: "Research", ItemID: "PVTI_63", UpdatedAt: ts, Labels: []string{"fabrik:blocked"}}},
+				Items:     []gh.ProjectItem{{Number: 63, Status: "Research", ItemID: "PVTI_63", UpdatedAt: ts, Labels: []string{"fabrik:blocked"}}},
 			}, nil
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
@@ -826,7 +825,7 @@ func TestPollPreFilter_NoSpecialLabel_WithinCooldown_Skipped(t *testing.T) {
 		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{
 				ProjectID: "PVT_1",
-				Items: []gh.ProjectItem{{Number: 62, Status: "Research", ItemID: "PVTI_62", UpdatedAt: ts, Labels: []string{"stage:Validate:complete"}}},
+				Items:     []gh.ProjectItem{{Number: 62, Status: "Research", ItemID: "PVTI_62", UpdatedAt: ts, Labels: []string{"stage:Validate:complete"}}},
 			}, nil
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
@@ -854,7 +853,7 @@ func TestPollPreFilter_CompleteStage_ExpiredCooldown_DeepFetched(t *testing.T) {
 		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{
 				ProjectID: "PVT_1",
-				Items: []gh.ProjectItem{{Number: 70, Status: "Research", ItemID: "PVTI_70", UpdatedAt: ts, Labels: []string{"stage:Research:complete"}}},
+				Items:     []gh.ProjectItem{{Number: 70, Status: "Research", ItemID: "PVTI_70", UpdatedAt: ts, Labels: []string{"stage:Research:complete"}}},
 			}, nil
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
@@ -880,7 +879,7 @@ func TestPollPreFilter_IncompleteStage_ExpiredCooldown_Admitted(t *testing.T) {
 		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{
 				ProjectID: "PVT_1",
-				Items: []gh.ProjectItem{{Number: 71, Status: "Research", ItemID: "PVTI_71", UpdatedAt: ts}},
+				Items:     []gh.ProjectItem{{Number: 71, Status: "Research", ItemID: "PVTI_71", UpdatedAt: ts}},
 			}, nil
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
@@ -908,7 +907,7 @@ func TestPollPreFilter_AwaitingReview_WithCompleteLabel_ExpiredCooldown_Admitted
 		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{
 				ProjectID: "PVT_1",
-				Items: []gh.ProjectItem{{Number: 69, Status: "Research", ItemID: "PVTI_69", UpdatedAt: ts, Labels: []string{"stage:Research:complete", "fabrik:awaiting-review"}}},
+				Items:     []gh.ProjectItem{{Number: 69, Status: "Research", ItemID: "PVTI_69", UpdatedAt: ts, Labels: []string{"stage:Research:complete", "fabrik:awaiting-review"}}},
 			}, nil
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
@@ -923,7 +922,6 @@ func TestPollPreFilter_AwaitingReview_WithCompleteLabel_ExpiredCooldown_Admitted
 		t.Error("item with stage:X:complete AND fabrik:awaiting-review and expired cooldown must be deep-fetched (awaiting-review exempts from stage-complete suppression)")
 	}
 }
-
 
 // ── fabrik:awaiting-ci conjunctive gate dispatch guards ──────────────────────
 

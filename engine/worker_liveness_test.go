@@ -18,7 +18,7 @@ import (
 func bootstrapItem(t *testing.T, e *Engine, number int, labels []string) {
 	t.Helper()
 	e.store.Apply(itemstate.ItemDeepFetched{
-		Repo: "owner/repo",
+		Repo:   "owner/repo",
 		Number: number,
 		FreshState: gh.ProjectItem{
 			ID:     "I_001",

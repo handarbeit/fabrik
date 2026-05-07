@@ -67,27 +67,27 @@ type PRReview struct {
 
 // ProjectItem represents an issue or pull request card on the project board.
 type ProjectItem struct {
-	ID                     string
-	ItemID                 string // The project item ID (needed for mutations)
-	Number                 int
-	Title                  string
-	Body                   string
-	Status                 string // The column/status on the board
-	URL                    string
-	Repo                   string // "owner/repo" (e.g., "verveguy/liminis")
-	IsPR                   bool   // True if this item is a Pull Request (vs an Issue)
-	IsClosed               bool   // True if the underlying GitHub Issue is closed (always false for PRs)
-	UpdatedAt              time.Time
-	Labels                 []string
-	Assignees              []string
-	Comments               []Comment
-	Author                 string
-	BlockedBy              []Dependency    // Issues that must be closed before this one can advance
-	LinkedPRNumber         int             // PR number of the first linked PR (0 if none); for REST re-request calls
+	ID             string
+	ItemID         string // The project item ID (needed for mutations)
+	Number         int
+	Title          string
+	Body           string
+	Status         string // The column/status on the board
+	URL            string
+	Repo           string // "owner/repo" (e.g., "verveguy/liminis")
+	IsPR           bool   // True if this item is a Pull Request (vs an Issue)
+	IsClosed       bool   // True if the underlying GitHub Issue is closed (always false for PRs)
+	UpdatedAt      time.Time
+	Labels         []string
+	Assignees      []string
+	Comments       []Comment
+	Author         string
+	BlockedBy      []Dependency // Issues that must be closed before this one can advance
+	LinkedPRNumber int          // PR number of the first linked PR (0 if none); for REST re-request calls
 	// LinkedPRNumberShallow is the PR number of the first linked PR from the shallow board query (0 if none).
 	// Populated only during shallow board parse and used only by Reconcile for linkage drift detection —
 	// do not use as a substitute for LinkedPRNumber at runtime.
-	LinkedPRNumberShallow int
+	LinkedPRNumberShallow  int
 	LinkedPRReviewRequests []ReviewRequest // Outstanding reviewer requests on the linked PR
 	LinkedPRReviews        []PRReview      // Reviews already submitted on the linked PR
 	// LinkedPRReviewThreadComments holds the inline (per-line) comments from

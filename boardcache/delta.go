@@ -69,12 +69,12 @@ type issuesPayload struct {
 		Name string `json:"name"`
 	} `json:"label"`
 	Issue struct {
-		Number    int    `json:"number"`
-		NodeID    string `json:"node_id"`
-		Title     string `json:"title"`
-		Body      string `json:"body"`
-		State     string `json:"state"`
-		Labels    []struct {
+		Number int    `json:"number"`
+		NodeID string `json:"node_id"`
+		Title  string `json:"title"`
+		Body   string `json:"body"`
+		State  string `json:"state"`
+		Labels []struct {
 			Name string `json:"name"`
 		} `json:"labels"`
 		Assignees []struct {
@@ -89,12 +89,12 @@ type issuesPayload struct {
 type pullRequestPayload struct {
 	Action      string `json:"action"`
 	PullRequest struct {
-		Number  int    `json:"number"`
-		Title   string `json:"title"`
-		State   string `json:"state"`
-		Merged  bool   `json:"merged"`
-		Draft   bool   `json:"draft"`
-		Head    struct {
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		State  string `json:"state"`
+		Merged bool   `json:"merged"`
+		Draft  bool   `json:"draft"`
+		Head   struct {
 			SHA string `json:"sha"`
 			Ref string `json:"ref"`
 		} `json:"head"`
@@ -433,8 +433,8 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 		}
 		c.bumpLocalDeltaAt(key)
 
-	// milestoned, demilestoned, locked, unlocked, pinned, unpinned:
-	// no state in the engine's pipeline depends on these fields.
+		// milestoned, demilestoned, locked, unlocked, pinned, unpinned:
+		// no state in the engine's pipeline depends on these fields.
 	}
 }
 
@@ -1042,7 +1042,7 @@ func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
 			return
 		}
 
-	// restored: item is back on the board; the next poll reconcile will re-add it.
-	// reordered: no position state in the engine.
+		// restored: item is back on the board; the next poll reconcile will re-add it.
+		// reordered: no position state in the engine.
 	}
 }
