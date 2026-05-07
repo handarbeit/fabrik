@@ -57,6 +57,26 @@ func TestWakeChObserver_SendsOnLabelsChanged(t *testing.T) {
 	}
 }
 
+func TestWakeChObserver_SendsOnPRReviewSubmitted(t *testing.T) {
+	wakeCh := make(chan struct{}, 1)
+	store := newTestStore()
+	unsub := store.Subscribe(newWakeChObserver(wakeCh))
+	defer unsub()
+
+	// PRReviewSubmitted emits LinkedPRChanged, which is in wakeChFlags.
+	// This test documents that invariant as regression coverage.
+	store.Apply(itemstate.PRReviewSubmitted{
+		Repo:   "owner/repo",
+		Number: 1,
+		Review: gh.PRReview{Author: "copilot", State: "APPROVED"},
+	})
+	select {
+	case <-wakeCh:
+	default:
+		t.Fatal("expected wake signal on PRReviewSubmitted (LinkedPRChanged must be in wakeChFlags)")
+	}
+}
+
 func TestWakeChObserver_SendsOnAssigneesChanged(t *testing.T) {
 	wakeCh := make(chan struct{}, 1)
 	store := newTestStore()
