@@ -8,3 +8,4 @@
 - 2026-05-06 Run H — smoke test #4, blockedBy chain tail (post-#598/#599 verification)
 - 2026-05-07 Run I — smoke test #5, blocker (post #605/#607/#608 verification)
 - 2026-05-07 Run J — smoke test #5, dependent (blockedBy Run I)
+- 2026-05-07 Run K — smoke test #6, blocker (post #616/#617/#618/#619 verification)
