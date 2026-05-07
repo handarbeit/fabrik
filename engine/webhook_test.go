@@ -798,9 +798,13 @@ func TestUpdateRepos_NonQuarantinedRepoAdded(t *testing.T) {
 }
 
 // TestUpdateRepos_AdditiveOnly_NeverDropsExistingRepo verifies that calling UpdateRepos
-// with a subset of the currently-subscribed repos does not remove the missing repos from
+// with a set that omits previously-subscribed repos does not drop those repos from
 // wm.repos. This is the regression test for the spurious "new repo discovered" restart
 // that fired when a poll cycle's seenRepos omitted an already-subscribed repo.
+//
+// The incoming set must contain at least one new repo (owner/c) so newRepos is
+// non-empty and the early-return guard doesn't fire — this is exactly the code
+// path the old wm.repos = copyRepoSet(filtered) assignment lived on.
 func TestUpdateRepos_AdditiveOnly_NeverDropsExistingRepo(t *testing.T) {
 	wm, _ := newTestWebhookManager(t)
 	killCount := 0
@@ -810,21 +814,26 @@ func TestUpdateRepos_AdditiveOnly_NeverDropsExistingRepo(t *testing.T) {
 	wm.currentCmd = &exec.Cmd{}
 	wm.mu.Unlock()
 
-	// Call UpdateRepos with only owner/a — owner/b is absent from this poll cycle.
-	wm.UpdateRepos(map[string]bool{"owner/a": true})
+	// owner/c is new (triggers the newRepos path); owner/a and owner/b are absent
+	// from this poll cycle. Old code would replace wm.repos with {owner/c},
+	// dropping owner/a and owner/b. New code merges additively.
+	wm.UpdateRepos(map[string]bool{"owner/c": true})
 
 	wm.mu.Lock()
 	repos := copyRepoSet(wm.repos)
 	wm.mu.Unlock()
 
-	if !repos["owner/b"] {
-		t.Error("owner/b was dropped from wm.repos after UpdateRepos with subset — want additive-only behavior")
-	}
 	if !repos["owner/a"] {
-		t.Error("owner/a should remain in wm.repos")
+		t.Error("owner/a was dropped from wm.repos — want additive-only behavior")
 	}
-	if killCount != 0 {
-		t.Errorf("killFn called %d times when no new repos were added, want 0", killCount)
+	if !repos["owner/b"] {
+		t.Error("owner/b was dropped from wm.repos — want additive-only behavior")
+	}
+	if !repos["owner/c"] {
+		t.Error("owner/c should be added to wm.repos as a new repo")
+	}
+	if killCount != 1 {
+		t.Errorf("killFn called %d times, want 1 (subprocess restart for new repo owner/c)", killCount)
 	}
 }
 
