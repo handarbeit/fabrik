@@ -17,7 +17,7 @@ type repoHook struct {
 
 // DeleteForwardingHooks deletes repo hooks matching webhookForwarderURL; 404 on DELETE is success.
 func (c *Client) DeleteForwardingHooks(owner, repo string) error {
-	url := fmt.Sprintf("%s/repos/%s/%s/hooks", c.baseURL, owner, repo)
+	url := fmt.Sprintf("%s/repos/%s/%s/hooks?per_page=100", c.baseURL, owner, repo)
 	var hooks []repoHook
 	if err := c.restGetJSON(url, &hooks); err != nil {
 		return fmt.Errorf("listing hooks for %s/%s: %w", owner, repo, err)
