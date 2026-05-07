@@ -205,91 +205,8 @@ func newTestWebhookManager(t *testing.T) (*webhookManager, chan tui.Event) {
 		nil,
 		deltaFn,
 		nil,
-		nil,
 	)
 	return wm, events
-}
-
-// TestHealthStateTransitions exercises the time-based health state machine.
-func TestHealthStateTransitions(t *testing.T) {
-	t.Run("startup grace → healthy on first verified event", func(t *testing.T) {
-		wm, _ := newTestWebhookManager(t)
-		wm.mu.Lock()
-		wm.state = WebhookStreamStartingUp
-		wm.startupTime = time.Now()
-		secret, _ := generateSecret()
-		wm.secret = secret
-		wm.mu.Unlock()
-
-		// Simulate a valid webhook POST.
-		body := []byte(`{"action":"created","repository":{"full_name":"myorg/myrepo"}}`)
-		req := signedRequest(t, body, secret)
-		rr := httptest.NewRecorder()
-		wm.handleWebhook(rr, req)
-
-		if rr.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d", rr.Code)
-		}
-		wm.mu.Lock()
-		state := wm.state
-		wm.mu.Unlock()
-		if state != WebhookStreamHealthy {
-			t.Errorf("state = %q, want %q", state, WebhookStreamHealthy)
-		}
-	})
-
-	t.Run("starting up → unhealthy after grace + health window", func(t *testing.T) {
-		wm, _ := newTestWebhookManager(t)
-		wm.mu.Lock()
-		wm.state = WebhookStreamStartingUp
-		// Set sessionFirstStartAt far in the past — the fix uses sessionFirstStartAt
-		// (not startupTime) so subprocess restarts don't reset the timer.
-		wm.sessionFirstStartAt = time.Now().Add(-(webhookStartupGrace + webhookHealthWindow + time.Second))
-		wm.mu.Unlock()
-
-		wm.checkHealthTransitions()
-
-		wm.mu.Lock()
-		state := wm.state
-		wm.mu.Unlock()
-		if state != WebhookStreamUnhealthy {
-			t.Errorf("state = %q, want %q", state, WebhookStreamUnhealthy)
-		}
-	})
-
-	t.Run("healthy → unhealthy after health window with no events", func(t *testing.T) {
-		wm, _ := newTestWebhookManager(t)
-		wm.mu.Lock()
-		wm.state = WebhookStreamHealthy
-		wm.lastEventTime = time.Now().Add(-(webhookHealthWindow + time.Second))
-		wm.mu.Unlock()
-
-		wm.checkHealthTransitions()
-
-		wm.mu.Lock()
-		state := wm.state
-		wm.mu.Unlock()
-		if state != WebhookStreamUnhealthy {
-			t.Errorf("state = %q, want %q", state, WebhookStreamUnhealthy)
-		}
-	})
-
-	t.Run("healthy stays healthy within health window", func(t *testing.T) {
-		wm, _ := newTestWebhookManager(t)
-		wm.mu.Lock()
-		wm.state = WebhookStreamHealthy
-		wm.lastEventTime = time.Now().Add(-1 * time.Minute) // within 10 min window
-		wm.mu.Unlock()
-
-		wm.checkHealthTransitions()
-
-		wm.mu.Lock()
-		state := wm.state
-		wm.mu.Unlock()
-		if state != WebhookStreamHealthy {
-			t.Errorf("state = %q, want %q (should stay healthy)", state, WebhookStreamHealthy)
-		}
-	})
 }
 
 // TestSecretRotationTrigger verifies that 5 consecutive HMAC failures within 2 min
@@ -396,7 +313,6 @@ func TestHandleWebhookIncrementsCounters(t *testing.T) {
 	secret, _ := generateSecret()
 	wm.mu.Lock()
 	wm.state = WebhookStreamStartingUp
-	wm.startupTime = time.Now()
 	wm.secret = secret
 	wm.mu.Unlock()
 
@@ -542,7 +458,6 @@ func TestHandleWebhookBurstCoalescence(t *testing.T) {
 	secret, _ := generateSecret()
 	wm.mu.Lock()
 	wm.state = WebhookStreamStartingUp
-	wm.startupTime = time.Now()
 	wm.secret = secret
 	wm.mu.Unlock()
 
@@ -880,13 +795,6 @@ func TestCircuitBreaker422(t *testing.T) {
 		wm.orgModeFailed = true
 		wm.mu.Unlock()
 
-		healthChangeFalseCalls := 0
-		wm.healthChangeFn = func(healthy bool) {
-			if !healthy {
-				healthChangeFalseCalls++
-			}
-		}
-
 		callCount := 0
 		wm.startSubprocessFn = func(ctx context.Context, args []string) (*exec.Cmd, <-chan string, error) {
 			callCount++
@@ -922,9 +830,6 @@ func TestCircuitBreaker422(t *testing.T) {
 		}
 		if state != WebhookStreamUnhealthy {
 			t.Errorf("state = %q after circuit-breaker, want %q", state, WebhookStreamUnhealthy)
-		}
-		if healthChangeFalseCalls != 1 {
-			t.Errorf("healthChangeFn(false) called %d times, want 1", healthChangeFalseCalls)
 		}
 		if callCount != webhookPermanentFailureMax {
 			t.Errorf("startSubprocessFn called %d times, want %d", callCount, webhookPermanentFailureMax)
@@ -1007,170 +912,16 @@ func TestCircuitBreaker422(t *testing.T) {
 	})
 }
 
-// TestSessionLastEventAt_NotResetOnRestart verifies that sessionLastEventAt persists
-// across subprocess restarts, while lastEventTime is cleared as supervise() does.
-func TestSessionLastEventAt_NotResetOnRestart(t *testing.T) {
-	wm, _ := newTestWebhookManager(t)
-	secret, _ := generateSecret()
-	wm.mu.Lock()
-	wm.state = WebhookStreamStartingUp
-	wm.startupTime = time.Now()
-	wm.secret = secret
-	wm.mu.Unlock()
-
-	// Send a valid webhook to set both lastEventTime and sessionLastEventAt.
-	body := []byte(`{"action":"created","repository":{"full_name":"myorg/myrepo"}}`)
-	req := signedRequest(t, body, secret)
-	rr := httptest.NewRecorder()
-	wm.handleWebhook(rr, req)
-
-	wm.mu.Lock()
-	sessionEventAt := wm.sessionLastEventAt
-	lastEventAt := wm.lastEventTime
-	wm.mu.Unlock()
-
-	if sessionEventAt.IsZero() {
-		t.Fatal("sessionLastEventAt should be set after verified event")
-	}
-	if lastEventAt.IsZero() {
-		t.Fatal("lastEventTime should be set after verified event")
-	}
-
-	// Simulate subprocess restart — supervise() resets lastEventTime but not sessionLastEventAt.
-	wm.mu.Lock()
-	wm.state = WebhookStreamStartingUp
-	wm.startupTime = time.Now()
-	wm.lastEventTime = time.Time{}
-	wm.mu.Unlock()
-
-	wm.mu.Lock()
-	sessionEventAfterRestart := wm.sessionLastEventAt
-	lastEventAfterRestart := wm.lastEventTime
-	wm.mu.Unlock()
-
-	if sessionEventAfterRestart.IsZero() {
-		t.Error("sessionLastEventAt was reset on subprocess restart — should persist across restarts")
-	}
-	if !sessionEventAfterRestart.Equal(sessionEventAt) {
-		t.Errorf("sessionLastEventAt changed on restart: was %v, now %v", sessionEventAt, sessionEventAfterRestart)
-	}
-	if !lastEventAfterRestart.IsZero() {
-		t.Error("lastEventTime should be zero after restart simulation")
-	}
-}
-
-// TestSessionFirstStartAt_SetOnce verifies sessionFirstStartAt is set on first subprocess
-// start and not overwritten on subsequent starts.
-func TestSessionFirstStartAt_SetOnce(t *testing.T) {
-	wm, _ := newTestWebhookManager(t)
-
-	wm.mu.Lock()
-	if !wm.sessionFirstStartAt.IsZero() {
-		t.Fatal("sessionFirstStartAt should start as zero")
-	}
-	wm.mu.Unlock()
-
-	// Simulate first subprocess start (mirrors supervise() logic).
-	firstStartTime := time.Now()
-	wm.mu.Lock()
-	wm.startupTime = firstStartTime
-	wm.lastEventTime = time.Time{}
-	if wm.sessionFirstStartAt.IsZero() {
-		wm.sessionFirstStartAt = wm.startupTime
-	}
-	wm.mu.Unlock()
-
-	wm.mu.Lock()
-	firstAt := wm.sessionFirstStartAt
-	wm.mu.Unlock()
-
-	if firstAt.IsZero() {
-		t.Fatal("sessionFirstStartAt should be set after first subprocess start")
-	}
-
-	// Simulate second subprocess start.
-	time.Sleep(time.Millisecond)
-	wm.mu.Lock()
-	wm.startupTime = time.Now()
-	wm.lastEventTime = time.Time{}
-	if wm.sessionFirstStartAt.IsZero() {
-		wm.sessionFirstStartAt = wm.startupTime
-	}
-	wm.mu.Unlock()
-
-	wm.mu.Lock()
-	secondAt := wm.sessionFirstStartAt
-	wm.mu.Unlock()
-
-	if !secondAt.Equal(firstAt) {
-		t.Errorf("sessionFirstStartAt changed on second subprocess start: was %v, now %v", firstAt, secondAt)
-	}
-}
-
-// TestHealthTransition_StartingUp_UsesSessionFirstStartAt verifies that the
-// StartingUp→Unhealthy transition uses sessionFirstStartAt (not startupTime),
-// confirming the Bug B fix: subprocess restarts no longer reset the health timer.
-func TestHealthTransition_StartingUp_UsesSessionFirstStartAt(t *testing.T) {
-	wm, _ := newTestWebhookManager(t)
-	wm.mu.Lock()
-	wm.state = WebhookStreamStartingUp
-	// Set startupTime far in the past — old code would have triggered Unhealthy.
-	wm.startupTime = time.Now().Add(-(webhookStartupGrace + webhookHealthWindow + time.Second))
-	// sessionFirstStartAt is recent — should NOT trigger Unhealthy.
-	wm.sessionFirstStartAt = time.Now()
-	wm.mu.Unlock()
-
-	wm.checkHealthTransitions()
-
-	wm.mu.Lock()
-	state := wm.state
-	wm.mu.Unlock()
-	if state == WebhookStreamUnhealthy {
-		t.Error("state should NOT be Unhealthy when only startupTime is old but sessionFirstStartAt is recent — the fix uses sessionFirstStartAt")
-	}
-}
-
-// TestHealthTransition_StartingUp_SkipsGraceWindowWhenEventsReceived verifies that
-// the sessionFirstStartAt grace+window path (R-B3) does NOT fire when events have
-// been received (sessionLastEventAt != zero), even if sessionFirstStartAt is old.
-// Without the sessionLastEventAt.IsZero() guard, this would incorrectly transition
-// to Unhealthy after ~10m even on a healthy-then-restarting stream.
-func TestHealthTransition_StartingUp_SkipsGraceWindowWhenEventsReceived(t *testing.T) {
-	wm, _ := newTestWebhookManager(t)
-	wm.mu.Lock()
-	wm.state = WebhookStreamStartingUp
-	// sessionFirstStartAt is old enough to trigger the grace+window path.
-	wm.sessionFirstStartAt = time.Now().Add(-(webhookStartupGrace + webhookHealthWindow + time.Second))
-	// But we have received events recently (within the webhookEventStaleTimeout threshold).
-	wm.sessionLastEventAt = time.Now().Add(-10 * time.Second)
-	wm.mu.Unlock()
-
-	wm.checkHealthTransitions()
-
-	wm.mu.Lock()
-	state := wm.state
-	wm.mu.Unlock()
-	if state == WebhookStreamUnhealthy {
-		t.Error("state should NOT be Unhealthy when sessionFirstStartAt is old but events were received (sessionLastEventAt != zero)")
-	}
-}
-
 // TestEchoCheck covers the mutation echo-check subsystem (R12a–R12g).
 // Tests call doEchoSweep() directly and backdate pendingEchoes timestamps
 // to simulate aging without real tickers.
 func TestEchoCheck(t *testing.T) {
 	// newEchoManager creates a webhookManager pre-wired for echo-check tests:
-	// state=Healthy, healthChangeFn recording false calls, events containing
-	// "projects_v2_item" so R7 conditional tests can remove it.
-	newEchoManager := func(t *testing.T) (*webhookManager, *int) {
+	// state=Healthy, events containing "projects_v2_item" so R7 conditional tests can remove it.
+	// Returns the manager; callers check wm.state directly to verify health transitions.
+	newEchoManager := func(t *testing.T) *webhookManager {
 		t.Helper()
 		wm, _ := newTestWebhookManager(t)
-		falseCalls := 0
-		wm.healthChangeFn = func(healthy bool) {
-			if !healthy {
-				falseCalls++
-			}
-		}
 		wm.mu.Lock()
 		wm.state = WebhookStreamHealthy
 		// Ensure "projects_v2_item" is in wm.events so R7 tests can remove it.
@@ -1185,11 +936,11 @@ func TestEchoCheck(t *testing.T) {
 			wm.events = append(wm.events, "projects_v2_item")
 		}
 		wm.mu.Unlock()
-		return wm, &falseCalls
+		return wm
 	}
 
 	t.Run("(a) register → match → no miss", func(t *testing.T) {
-		wm, falseCalls := newEchoManager(t)
+		wm := newEchoManager(t)
 		wm.RegisterEcho("issues", "labeled", "owner/repo#1+test-label")
 		wm.MatchEcho("issues", "labeled", "owner/repo#1+test-label")
 
@@ -1204,18 +955,19 @@ func TestEchoCheck(t *testing.T) {
 
 		wm.mu.Lock()
 		misses := len(wm.missHistory)
+		state := wm.state
 		wm.mu.Unlock()
 
 		if misses != 0 {
 			t.Errorf("missHistory len = %d after matched echo, want 0", misses)
 		}
-		if *falseCalls != 0 {
-			t.Errorf("healthChangeFn(false) called %d times, want 0", *falseCalls)
+		if state != WebhookStreamHealthy {
+			t.Errorf("state = %q after matched echo, want %q (no health transition)", state, WebhookStreamHealthy)
 		}
 	})
 
 	t.Run("(b) register → no match within timeout → miss appended", func(t *testing.T) {
-		wm, falseCalls := newEchoManager(t)
+		wm := newEchoManager(t)
 		wm.RegisterEcho("issues", "labeled", "owner/repo#2+another-label")
 
 		// Backdate the entry to simulate timeout elapsed.
@@ -1230,6 +982,7 @@ func TestEchoCheck(t *testing.T) {
 		wm.mu.Lock()
 		misses := len(wm.missHistory)
 		echoesRemaining := len(wm.pendingEchoes)
+		state := wm.state
 		wm.mu.Unlock()
 
 		if misses != 1 {
@@ -1238,13 +991,13 @@ func TestEchoCheck(t *testing.T) {
 		if echoesRemaining != 0 {
 			t.Errorf("pendingEchoes len = %d after sweep, want 0", echoesRemaining)
 		}
-		if *falseCalls != 0 {
-			t.Errorf("healthChangeFn(false) called %d times after 1 miss (threshold=3), want 0", *falseCalls)
+		if state != WebhookStreamHealthy {
+			t.Errorf("state = %q after 1 miss (threshold=3), want %q (no transition yet)", state, WebhookStreamHealthy)
 		}
 	})
 
-	t.Run("(c) 3 misses within window → healthChangeFn(false) called, missHistory cleared", func(t *testing.T) {
-		wm, falseCalls := newEchoManager(t)
+	t.Run("(c) 3 misses within window → Unhealthy transition, missHistory cleared", func(t *testing.T) {
+		wm := newEchoManager(t)
 		// Register 3 distinct echoes.
 		wm.RegisterEcho("issues", "labeled", "owner/repo#3+label-a")
 		wm.RegisterEcho("issues", "labeled", "owner/repo#3+label-b")
@@ -1260,19 +1013,20 @@ func TestEchoCheck(t *testing.T) {
 
 		wm.doEchoSweep()
 
-		if *falseCalls != 1 {
-			t.Errorf("healthChangeFn(false) called %d times after 3 misses, want 1", *falseCalls)
-		}
 		wm.mu.Lock()
+		state := wm.state
 		misses := len(wm.missHistory)
 		wm.mu.Unlock()
+		if state != WebhookStreamUnhealthy {
+			t.Errorf("state = %q after 3 misses, want %q (threshold fired)", state, WebhookStreamUnhealthy)
+		}
 		if misses != 0 {
 			t.Errorf("missHistory len = %d after threshold fire, want 0 (cleared)", misses)
 		}
 	})
 
 	t.Run("(d) 2 old misses age out + 1 new miss → threshold NOT reached", func(t *testing.T) {
-		wm, falseCalls := newEchoManager(t)
+		wm := newEchoManager(t)
 		// Pre-populate missHistory with 2 entries older than webhookEchoWindow.
 		oldTimestamp := time.Now().Add(-(webhookEchoWindow + 2*time.Second))
 		wm.mu.Lock()
@@ -1290,12 +1044,13 @@ func TestEchoCheck(t *testing.T) {
 
 		wm.doEchoSweep()
 
-		if *falseCalls != 0 {
-			t.Errorf("healthChangeFn(false) called %d times after old misses aged out + 1 new miss, want 0", *falseCalls)
-		}
 		wm.mu.Lock()
+		state := wm.state
 		misses := len(wm.missHistory)
 		wm.mu.Unlock()
+		if state != WebhookStreamHealthy {
+			t.Errorf("state = %q after old misses aged out + 1 new miss, want %q (threshold not reached)", state, WebhookStreamHealthy)
+		}
 		// Only the 1 new miss survives (the 2 old ones were pruned).
 		if misses != 1 {
 			t.Errorf("missHistory len = %d after pruning old misses, want 1", misses)
@@ -1303,7 +1058,7 @@ func TestEchoCheck(t *testing.T) {
 	})
 
 	t.Run("(e) registration suppressed during WebhookStreamStartingUp", func(t *testing.T) {
-		wm, _ := newEchoManager(t)
+		wm := newEchoManager(t)
 		wm.mu.Lock()
 		wm.state = WebhookStreamStartingUp
 		wm.mu.Unlock()
@@ -1321,7 +1076,7 @@ func TestEchoCheck(t *testing.T) {
 	})
 
 	t.Run("(f) projects_v2_item echo not registered when absent from wm.events", func(t *testing.T) {
-		wm, _ := newEchoManager(t)
+		wm := newEchoManager(t)
 		// Remove "projects_v2_item" from wm.events.
 		wm.mu.Lock()
 		filtered := wm.events[:0]
@@ -1345,7 +1100,7 @@ func TestEchoCheck(t *testing.T) {
 	})
 
 	t.Run("(g) MergePR and UpdateIssueBody echoes matched correctly", func(t *testing.T) {
-		wm, _ := newEchoManager(t)
+		wm := newEchoManager(t)
 
 		// MergePR echo: pull_request closed
 		wm.RegisterEcho("pull_request", "closed", "owner/repo#pr42")
@@ -1376,66 +1131,6 @@ func TestEchoCheck(t *testing.T) {
 		wm.mu.Unlock()
 		if misses != 0 {
 			t.Errorf("missHistory len = %d after matched echoes, want 0", misses)
-		}
-	})
-}
-
-// TestHealthTransition_SessionStale verifies that stale sessionLastEventAt
-// triggers Unhealthy faster than the 10-minute webhookHealthWindow — both from
-// StartingUp and Healthy states.
-func TestHealthTransition_SessionStale(t *testing.T) {
-	t.Run("stale sessionLastEventAt triggers unhealthy from StartingUp", func(t *testing.T) {
-		wm, _ := newTestWebhookManager(t)
-		wm.mu.Lock()
-		wm.state = WebhookStreamStartingUp
-		wm.startupTime = time.Now()
-		wm.sessionFirstStartAt = time.Now()
-		wm.sessionLastEventAt = time.Now().Add(-(webhookEventStaleTimeout + time.Second))
-		wm.mu.Unlock()
-
-		wm.checkHealthTransitions()
-
-		wm.mu.Lock()
-		state := wm.state
-		wm.mu.Unlock()
-		if state != WebhookStreamUnhealthy {
-			t.Errorf("state = %q, want %q when sessionLastEventAt is stale (StartingUp)", state, WebhookStreamUnhealthy)
-		}
-	})
-
-	t.Run("stale sessionLastEventAt triggers unhealthy from Healthy", func(t *testing.T) {
-		wm, _ := newTestWebhookManager(t)
-		wm.mu.Lock()
-		wm.state = WebhookStreamHealthy
-		wm.lastEventTime = time.Now().Add(-1 * time.Minute) // within 10-min window
-		wm.sessionLastEventAt = time.Now().Add(-(webhookEventStaleTimeout + time.Second))
-		wm.mu.Unlock()
-
-		wm.checkHealthTransitions()
-
-		wm.mu.Lock()
-		state := wm.state
-		wm.mu.Unlock()
-		if state != WebhookStreamUnhealthy {
-			t.Errorf("state = %q, want %q when sessionLastEventAt is stale (Healthy)", state, WebhookStreamUnhealthy)
-		}
-	})
-
-	t.Run("fresh sessionLastEventAt keeps Healthy state", func(t *testing.T) {
-		wm, _ := newTestWebhookManager(t)
-		wm.mu.Lock()
-		wm.state = WebhookStreamHealthy
-		wm.lastEventTime = time.Now().Add(-1 * time.Minute) // within 10-min window
-		wm.sessionLastEventAt = time.Now().Add(-10 * time.Second) // fresh (< webhookEventStaleTimeout)
-		wm.mu.Unlock()
-
-		wm.checkHealthTransitions()
-
-		wm.mu.Lock()
-		state := wm.state
-		wm.mu.Unlock()
-		if state != WebhookStreamHealthy {
-			t.Errorf("state = %q, want %q when sessionLastEventAt is fresh", state, WebhookStreamHealthy)
 		}
 	})
 }
