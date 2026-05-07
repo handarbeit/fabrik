@@ -391,6 +391,10 @@ func (e *Engine) Run() error {
 			deltaFn,
 			healthChangeFn,
 		)
+		// Inject MatchEcho so ApplyDelta can clear pending echo entries on incoming webhooks.
+		if cacheImpl != nil {
+			cacheImpl.SetMatchEchoFn(wm.MatchEcho)
+		}
 		// Bootstrap the cache before accepting webhook events so no delta is
 		// dropped into an empty cache during the startup window.
 		if cacheImpl != nil {
