@@ -123,24 +123,9 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 				cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-ci")
 			}
 		}
-		// Also seed fabrik:awaiting-review optimistically (Path 1 idempotent), so
-		// the catch-up loop's review gate runs before the CI gate when both apply.
-		if stage.WaitForReviews != nil && *stage.WaitForReviews {
-			alreadyAwaitingReview := false
-			for _, l := range item.Labels {
-				if l == "fabrik:awaiting-review" {
-					alreadyAwaitingReview = true
-					break
-				}
-			}
-			if !alreadyAwaitingReview {
-				if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-review"); err != nil {
-					e.logf(item.Number, "warn", "could not add fabrik:awaiting-review label: %v\n", err)
-				} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-					cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-review")
-				}
-			}
-		}
+		// fabrik:awaiting-review is NOT seeded here when wait_for_ci: true.
+		// Path 2 (checkReviewGate in the catch-up loop) handles the review gate
+		// after the CI gate clears and stage:X:complete is added (#617).
 		e.logf(item.Number, "awaiting-ci", "deferring stage:%s:complete until CI gate clears\n", stage.Name)
 		return // catch-up loop adds stage:X:complete when checkCIGate clears
 	}
