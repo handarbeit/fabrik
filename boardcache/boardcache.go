@@ -345,16 +345,21 @@ func (c *CacheImpl) RecordPRLinkage(fullRepo string, prNumber, issueNumber int) 
 // is a network operation). Returns the cache key and issue number of the first
 // closing issue found in the Store. On a transient REST error the error is returned
 // and callers should NOT record a negative-miss entry (a retry on the next webhook
-// may succeed). Returns ("", 0, false, nil) when the PR body has no recognized
+// may succeed). Returns ("", 0, false, false, nil) when the PR body has no recognized
 // closing reference or none of the referenced issues are in this cache.
-func (c *CacheImpl) resolvePRLinkage(owner, repo string, prNumber int) (key string, issueNumber int, found bool, err error) {
+//
+// healed is true only when the REST+regex fallback path was taken (a real auto-heal
+// occurred). It is false on an authoritative index hit; callers must NOT apply
+// DeepFetchInvalidated or log "auto-heal" when healed is false.
+func (c *CacheImpl) resolvePRLinkage(owner, repo string, prNumber int) (key string, issueNumber int, found bool, healed bool, err error) {
 	fullRepo := owner + "/" + repo
 
 	// Authoritative path: engine pre-recorded the mapping at CreateDraftPR time.
+	// No heal occurred — the index already had the correct answer.
 	if k, ok := c.store.GetByPRKey(fullRepo, prNumber); ok {
 		_, issNum, parseOk := parseItemKey(k)
 		if parseOk {
-			return k, issNum, true, nil
+			return k, issNum, true, false, nil
 		}
 	}
 
@@ -362,20 +367,20 @@ func (c *CacheImpl) resolvePRLinkage(owner, repo string, prNumber int) (key stri
 	issues, err := c.fallback.FetchPRClosingIssues(owner, repo, prNumber)
 	if err != nil {
 		c.logFn("[cache] resolvePRLinkage: fetch closing issues for PR #%d: %v\n", prNumber, err)
-		return "", 0, false, err
+		return "", 0, false, false, err
 	}
 	if len(issues) == 0 {
-		return "", 0, false, nil
+		return "", 0, false, false, nil
 	}
 
 	// Store has nil fallback — Get returns ErrNotFound on miss without calling GitHub.
 	for _, issNum := range issues {
 		k := itemKey(fullRepo, issNum)
 		if _, storeErr := c.store.Get(fullRepo, issNum); storeErr == nil {
-			return k, issNum, true, nil
+			return k, issNum, true, true, nil
 		}
 	}
-	return "", 0, false, nil
+	return "", 0, false, false, nil
 }
 
 // Pause stops delta application (called on WebhookStreamUnhealthy transition).
