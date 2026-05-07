@@ -266,12 +266,14 @@ If you have `url.<base>.insteadOf` configured in your global `~/.gitconfig` (a c
 
 ### Auto-upgrade
 
-The `--auto-upgrade` flag enables Fabrik to upgrade itself when idle. After 2
-consecutive idle polls, Fabrik checks the GitHub Releases API for a newer version.
-If one is found, it downloads the new binary, replaces the running executable,
-runs `fabrik upgrade` to refresh plugin skills, and re-execs itself.
+The `--auto-upgrade` flag enables Fabrik to upgrade itself automatically. It checks for a newer version in two places:
 
-**Dev builds (built from source)** follow the same 2 idle poll threshold but use a
+- **At startup** — once before the first poll, so boards that are always busy still receive upgrades promptly. The check fires after the exclusive file lock is acquired, so concurrent Fabrik instances never race on the upgrade check.
+- **After 2 consecutive idle polls** — as a belt-and-suspenders check for long-running instances.
+
+In both cases, Fabrik queries the GitHub Releases API. If a newer version is found, it downloads the new binary, replaces the running executable, runs `fabrik upgrade` to refresh plugin skills, and re-execs itself.
+
+**Dev builds (built from source)** follow the same two-check approach but use a
 different upgrade path. Fabrik detects that it is a dev build (version string starts
 with `dev`) and checks whether it is running from a `tenaciousvc/fabrik` or
 `verveguy/fabrik` source checkout. If so, it compares the running binary's embedded
@@ -397,9 +399,10 @@ user: your-github-username
 # Per-stage auto_advance: in stage YAML can override this setting per-stage.
 # yolo: false
 
-# When idle, check shadoworg/fabrik GitHub Releases for a newer version. After 2
-# consecutive idle polls, Fabrik downloads the new binary, runs fabrik upgrade,
-# and re-execs. Requires internet access to the GitHub Releases API.
+# Check shadoworg/fabrik GitHub Releases for a newer version. Fabrik checks once
+# at startup (before the first poll) and again after 2 consecutive idle polls.
+# On finding a newer release, it downloads the binary, runs fabrik upgrade, and
+# re-execs. Requires internet access to the GitHub Releases API.
 # auto_upgrade: false
 
 # Disable the interactive TUI dashboard (enabled by default when a real terminal is detected).

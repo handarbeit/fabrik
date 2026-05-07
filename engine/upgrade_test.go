@@ -10,7 +10,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	gh "github.com/verveguy/fabrik/github"
 )
@@ -416,5 +418,104 @@ func TestPerformReleaseUpgrade_FallsBackToBrowserURL(t *testing.T) {
 
 	if gotURL != "/browser-url" {
 		t.Errorf("expected fallback to /browser-url, got %q", gotURL)
+	}
+}
+
+// startupTestSetup creates a temp dir with a .fabrik/ subdirectory and sets
+// eng.fabrikDir to it, satisfying Run()'s lock-file and log-file creation.
+func startupTestSetup(t *testing.T, eng *Engine) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".fabrik"), 0755); err != nil {
+		t.Fatalf("creating .fabrik dir: %v", err)
+	}
+	eng.fabrikDir = tmpDir
+}
+
+// TestStartupUpgradeCheck_FiresWhenEnabled verifies that when AutoUpgrade=true,
+// the upgradeCheckFn is called during Run() startup, before the first poll cycle.
+func TestStartupUpgradeCheck_FiresWhenEnabled(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{}, nil
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	startupTestSetup(t, eng)
+	eng.cfg.AutoUpgrade = true
+	eng.cfg.PollSeconds = 300
+
+	called := make(chan struct{}, 1)
+	eng.upgradeCheckFn = func() { called <- struct{}{} }
+
+	readyCh := make(chan struct{})
+	eng.cfg.ReadyCh = readyCh
+
+	done := make(chan error, 1)
+	go func() { done <- eng.Run() }()
+
+	<-readyCh
+
+	// Block until the startup upgrade check fires (before first doPollCycle).
+	select {
+	case <-called:
+		// hook fired as expected
+	case <-time.After(5 * time.Second):
+		t.Fatal("upgradeCheckFn was not called within 5s (AutoUpgrade=true)")
+	}
+
+	p, _ := os.FindProcess(os.Getpid())
+	p.Signal(syscall.SIGINT) //nolint:errcheck
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not shut down in time")
+	}
+}
+
+// TestStartupUpgradeCheck_SkipsWhenDisabled verifies that when AutoUpgrade=false,
+// the upgradeCheckFn is never called during startup.
+func TestStartupUpgradeCheck_SkipsWhenDisabled(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{}, nil
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	startupTestSetup(t, eng)
+	eng.cfg.AutoUpgrade = false
+	eng.cfg.PollSeconds = 300
+
+	called := make(chan struct{}, 1)
+	eng.upgradeCheckFn = func() { called <- struct{}{} }
+
+	readyCh := make(chan struct{})
+	eng.cfg.ReadyCh = readyCh
+
+	done := make(chan error, 1)
+	go func() { done <- eng.Run() }()
+
+	<-readyCh
+	p, _ := os.FindProcess(os.Getpid())
+	p.Signal(syscall.SIGINT) //nolint:errcheck
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not shut down in time")
+	}
+
+	// Assert the hook was never called.
+	select {
+	case <-called:
+		t.Error("upgradeCheckFn was called but AutoUpgrade=false")
+	default:
 	}
 }
