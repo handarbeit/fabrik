@@ -864,7 +864,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		// An item is eligible for deep-fetch evaluation if:
 		//   (a) it is in cycleSet (an observer saw a relevant Store change), OR
 		//   (b) it is a cleanup stage (checks local filesystem, not board state), OR
-		//   (c) it has a bypass label (awaiting-ci or rebase-needed need per-poll eval), OR
+		//   (c) it has a bypass label (awaiting-ci, awaiting-review, or rebase-needed need per-poll eval), OR
 		//   (d) it has an expired CooldownAt (periodic re-evaluation gate has passed), OR
 		//   (e) it is not yet recorded in the engine store (first poll / fresh startup).
 		// Items with an active CooldownAt but no other signal are suppressed.
@@ -873,7 +873,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		if !cycleSet[iKey] {
 			stage := stages.FindStage(e.cfg.Stages, item.Status)
 			isCleanup := stage != nil && stage.CleanupWorktree
-			hasAwaitingLabel := hasLabel(item, "fabrik:awaiting-ci") || hasLabel(item, "fabrik:rebase-needed")
+			hasAwaitingLabel := hasLabel(item, "fabrik:awaiting-ci") || hasLabel(item, "fabrik:rebase-needed") || hasLabel(item, "fabrik:awaiting-review")
 			var hasExpiredCooldown, notInStore bool
 			if !isCleanup && !hasAwaitingLabel {
 				repo := itemOwnerRepoString(item, e.defaultRepo())
