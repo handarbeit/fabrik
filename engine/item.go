@@ -547,6 +547,9 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), lockLabel)
 		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+lockLabel)
+		}
 		workerDone = make(chan struct{})
 		e.startHeartbeat(ctx, repoStr, item.Number, workerDone)
 	}
@@ -630,6 +633,9 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		inProgressAdded = true
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), inProgressLabel)
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+inProgressLabel)
 		}
 	}
 
@@ -987,8 +993,13 @@ func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
 		e.logf(item.Number, "warn", "could not add paused label: %v\n", err)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:paused")
+		}
 	}
 
 	e.addFailedLabel(owner, repo, item.Number, stage.Name)
@@ -1049,13 +1060,23 @@ func (e *Engine) blockOnInput(item gh.ProjectItem, stage *stages.Stage) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
 		e.logf(item.Number, "warn", "could not add paused label: %v\n", err)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:paused")
+		}
 	}
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
 		e.logf(item.Number, "warn", "could not add awaiting-input label: %v\n", err)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-input")
+		}
 	}
 }
 
@@ -1073,6 +1094,9 @@ func (e *Engine) unblockAwaitingInput(item gh.ProjectItem, stage *stages.Stage) 
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
 		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:paused")
+		}
 	}
 	if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil &&
 		!errors.Is(err, gh.ErrNotFound) {
@@ -1080,6 +1104,9 @@ func (e *Engine) unblockAwaitingInput(item gh.ProjectItem, stage *stages.Stage) 
 	} else if err == nil {
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-input")
 		}
 	}
 
@@ -1275,6 +1302,9 @@ func (e *Engine) removeLockLabel(owner, repo string, issueNumber int, label stri
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, issueNumber), label)
 		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, issueNumber)+"+"+label)
+		}
 	}
 }
 
@@ -1287,6 +1317,9 @@ func (e *Engine) removeInProgressLabel(owner, repo string, issueNumber int, stag
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, issueNumber), label)
 		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, issueNumber)+"+"+label)
+		}
 	}
 }
 
@@ -1294,8 +1327,13 @@ func (e *Engine) addFailedLabel(owner, repo string, issueNumber int, stageName s
 	label := fmt.Sprintf("stage:%s:failed", stageName)
 	if err := e.client.AddLabelToIssue(owner, repo, issueNumber, label); err != nil {
 		e.logf(issueNumber, "warn", "could not add failed label: %v\n", err)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, issueNumber), label)
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, issueNumber), label)
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, issueNumber)+"+"+label)
+		}
 	}
 }
 
@@ -1307,6 +1345,9 @@ func (e *Engine) removeFailedLabel(owner, repo string, issueNumber int, stageNam
 	} else if err == nil {
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, issueNumber), label)
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, issueNumber)+"+"+label)
 		}
 	}
 }
