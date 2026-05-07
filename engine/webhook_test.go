@@ -1153,6 +1153,231 @@ func TestHealthTransition_StartingUp_SkipsGraceWindowWhenEventsReceived(t *testi
 	}
 }
 
+// TestEchoCheck covers the mutation echo-check subsystem (R12a–R12g).
+// Tests call doEchoSweep() directly and backdate pendingEchoes timestamps
+// to simulate aging without real tickers.
+func TestEchoCheck(t *testing.T) {
+	// newEchoManager creates a webhookManager pre-wired for echo-check tests:
+	// state=Healthy, healthChangeFn recording false calls, events containing
+	// "projects_v2_item" so R7 conditional tests can remove it.
+	newEchoManager := func(t *testing.T) (*webhookManager, *int) {
+		t.Helper()
+		wm, _ := newTestWebhookManager(t)
+		falseCalls := 0
+		wm.healthChangeFn = func(healthy bool) {
+			if !healthy {
+				falseCalls++
+			}
+		}
+		wm.mu.Lock()
+		wm.state = WebhookStreamHealthy
+		// Ensure "projects_v2_item" is in wm.events so R7 tests can remove it.
+		found := false
+		for _, ev := range wm.events {
+			if ev == "projects_v2_item" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			wm.events = append(wm.events, "projects_v2_item")
+		}
+		wm.mu.Unlock()
+		return wm, &falseCalls
+	}
+
+	t.Run("(a) register → match → no miss", func(t *testing.T) {
+		wm, falseCalls := newEchoManager(t)
+		wm.RegisterEcho("issues", "labeled", "owner/repo#1+test-label")
+		wm.MatchEcho("issues", "labeled", "owner/repo#1+test-label")
+
+		// Backdate any remaining entries past the timeout (there should be none).
+		wm.mu.Lock()
+		for k := range wm.pendingEchoes {
+			wm.pendingEchoes[k] = time.Now().Add(-(webhookEchoTimeout + time.Second))
+		}
+		wm.mu.Unlock()
+
+		wm.doEchoSweep()
+
+		wm.mu.Lock()
+		misses := len(wm.missHistory)
+		wm.mu.Unlock()
+
+		if misses != 0 {
+			t.Errorf("missHistory len = %d after matched echo, want 0", misses)
+		}
+		if *falseCalls != 0 {
+			t.Errorf("healthChangeFn(false) called %d times, want 0", *falseCalls)
+		}
+	})
+
+	t.Run("(b) register → no match within timeout → miss appended", func(t *testing.T) {
+		wm, falseCalls := newEchoManager(t)
+		wm.RegisterEcho("issues", "labeled", "owner/repo#2+another-label")
+
+		// Backdate the entry to simulate timeout elapsed.
+		wm.mu.Lock()
+		for k := range wm.pendingEchoes {
+			wm.pendingEchoes[k] = time.Now().Add(-(webhookEchoTimeout + time.Second))
+		}
+		wm.mu.Unlock()
+
+		wm.doEchoSweep()
+
+		wm.mu.Lock()
+		misses := len(wm.missHistory)
+		echoesRemaining := len(wm.pendingEchoes)
+		wm.mu.Unlock()
+
+		if misses != 1 {
+			t.Errorf("missHistory len = %d after timed-out echo, want 1", misses)
+		}
+		if echoesRemaining != 0 {
+			t.Errorf("pendingEchoes len = %d after sweep, want 0", echoesRemaining)
+		}
+		if *falseCalls != 0 {
+			t.Errorf("healthChangeFn(false) called %d times after 1 miss (threshold=3), want 0", *falseCalls)
+		}
+	})
+
+	t.Run("(c) 3 misses within window → healthChangeFn(false) called, missHistory cleared", func(t *testing.T) {
+		wm, falseCalls := newEchoManager(t)
+		// Register 3 distinct echoes.
+		wm.RegisterEcho("issues", "labeled", "owner/repo#3+label-a")
+		wm.RegisterEcho("issues", "labeled", "owner/repo#3+label-b")
+		wm.RegisterEcho("issues", "labeled", "owner/repo#3+label-c")
+
+		// Backdate all 3 past webhookEchoTimeout but within webhookEchoWindow.
+		staleAge := webhookEchoTimeout + time.Second
+		wm.mu.Lock()
+		for k := range wm.pendingEchoes {
+			wm.pendingEchoes[k] = time.Now().Add(-staleAge)
+		}
+		wm.mu.Unlock()
+
+		wm.doEchoSweep()
+
+		if *falseCalls != 1 {
+			t.Errorf("healthChangeFn(false) called %d times after 3 misses, want 1", *falseCalls)
+		}
+		wm.mu.Lock()
+		misses := len(wm.missHistory)
+		wm.mu.Unlock()
+		if misses != 0 {
+			t.Errorf("missHistory len = %d after threshold fire, want 0 (cleared)", misses)
+		}
+	})
+
+	t.Run("(d) 2 old misses age out + 1 new miss → threshold NOT reached", func(t *testing.T) {
+		wm, falseCalls := newEchoManager(t)
+		// Pre-populate missHistory with 2 entries older than webhookEchoWindow.
+		oldTimestamp := time.Now().Add(-(webhookEchoWindow + 2*time.Second))
+		wm.mu.Lock()
+		wm.missHistory = []time.Time{oldTimestamp, oldTimestamp}
+		wm.mu.Unlock()
+
+		// Register 1 echo and backdate it past webhookEchoTimeout but within window.
+		wm.RegisterEcho("issues", "edited", "owner/repo#4")
+		staleAge := webhookEchoTimeout + time.Second
+		wm.mu.Lock()
+		for k := range wm.pendingEchoes {
+			wm.pendingEchoes[k] = time.Now().Add(-staleAge)
+		}
+		wm.mu.Unlock()
+
+		wm.doEchoSweep()
+
+		if *falseCalls != 0 {
+			t.Errorf("healthChangeFn(false) called %d times after old misses aged out + 1 new miss, want 0", *falseCalls)
+		}
+		wm.mu.Lock()
+		misses := len(wm.missHistory)
+		wm.mu.Unlock()
+		// Only the 1 new miss survives (the 2 old ones were pruned).
+		if misses != 1 {
+			t.Errorf("missHistory len = %d after pruning old misses, want 1", misses)
+		}
+	})
+
+	t.Run("(e) registration suppressed during WebhookStreamStartingUp", func(t *testing.T) {
+		wm, _ := newEchoManager(t)
+		wm.mu.Lock()
+		wm.state = WebhookStreamStartingUp
+		wm.mu.Unlock()
+
+		wm.RegisterEcho("issues", "labeled", "owner/repo#5+startup-label")
+		wm.RegisterEchoIfSubscribed("projects_v2_item", "edited", "PVTI_startup")
+
+		wm.mu.Lock()
+		echoes := len(wm.pendingEchoes)
+		wm.mu.Unlock()
+
+		if echoes != 0 {
+			t.Errorf("pendingEchoes len = %d during StartingUp, want 0 (suppressed)", echoes)
+		}
+	})
+
+	t.Run("(f) projects_v2_item echo not registered when absent from wm.events", func(t *testing.T) {
+		wm, _ := newEchoManager(t)
+		// Remove "projects_v2_item" from wm.events.
+		wm.mu.Lock()
+		filtered := wm.events[:0]
+		for _, ev := range wm.events {
+			if ev != "projects_v2_item" {
+				filtered = append(filtered, ev)
+			}
+		}
+		wm.events = filtered
+		wm.mu.Unlock()
+
+		wm.RegisterEchoIfSubscribed("projects_v2_item", "edited", "PVTI_xyz")
+
+		wm.mu.Lock()
+		echoes := len(wm.pendingEchoes)
+		wm.mu.Unlock()
+
+		if echoes != 0 {
+			t.Errorf("pendingEchoes len = %d when projects_v2_item absent from events, want 0", echoes)
+		}
+	})
+
+	t.Run("(g) MergePR and UpdateIssueBody echoes matched correctly", func(t *testing.T) {
+		wm, _ := newEchoManager(t)
+
+		// MergePR echo: pull_request closed
+		wm.RegisterEcho("pull_request", "closed", "owner/repo#pr42")
+		wm.MatchEcho("pull_request", "closed", "owner/repo#pr42")
+
+		wm.mu.Lock()
+		echoesAfterMerge := len(wm.pendingEchoes)
+		wm.mu.Unlock()
+		if echoesAfterMerge != 0 {
+			t.Errorf("pendingEchoes len = %d after MergePR MatchEcho, want 0", echoesAfterMerge)
+		}
+
+		// UpdateIssueBody echo: issues edited
+		wm.RegisterEcho("issues", "edited", "owner/repo#7")
+		wm.MatchEcho("issues", "edited", "owner/repo#7")
+
+		wm.mu.Lock()
+		echoesAfterEdit := len(wm.pendingEchoes)
+		wm.mu.Unlock()
+		if echoesAfterEdit != 0 {
+			t.Errorf("pendingEchoes len = %d after UpdateIssueBody MatchEcho, want 0", echoesAfterEdit)
+		}
+
+		// Sweep should produce no misses.
+		wm.doEchoSweep()
+		wm.mu.Lock()
+		misses := len(wm.missHistory)
+		wm.mu.Unlock()
+		if misses != 0 {
+			t.Errorf("missHistory len = %d after matched echoes, want 0", misses)
+		}
+	})
+}
+
 // TestHealthTransition_SessionStale verifies that stale sessionLastEventAt
 // triggers Unhealthy faster than the 10-minute webhookHealthWindow — both from
 // StartingUp and Healthy states.
