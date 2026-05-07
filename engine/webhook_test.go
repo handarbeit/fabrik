@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
+	"sync"
 	"testing"
 	"time"
 
@@ -203,6 +204,7 @@ func newTestWebhookManager(t *testing.T) (*webhookManager, chan tui.Event) {
 		map[string]bool{"myorg/myrepo": true},
 		nil,
 		deltaFn,
+		nil,
 		nil,
 	)
 	return wm, events
@@ -1436,4 +1438,64 @@ func TestHealthTransition_SessionStale(t *testing.T) {
 			t.Errorf("state = %q, want %q when sessionLastEventAt is fresh", state, WebhookStreamHealthy)
 		}
 	})
+}
+
+// TestSupervise_CleanupCalledBeforeEachSubprocess verifies R8: the cleanupFn is
+// invoked before each gh webhook forward subprocess launch, including the initial
+// start and each subsequent restart. Call ordering is verified by recording
+// "cleanup" and "subprocess" events into a shared slice and checking that cleanup
+// always precedes its paired subprocess start.
+func TestSupervise_CleanupCalledBeforeEachSubprocess(t *testing.T) {
+	wm, _ := newTestWebhookManager(t)
+	wm.probeTimeout = 30 * time.Millisecond
+	wm.mu.Lock()
+	wm.orgModeFailed = true // force per-repo mode so cleanup runs
+	wm.mu.Unlock()
+
+	var mu sync.Mutex
+	var events []string
+
+	wm.cleanupFn = func(repos []string) error {
+		mu.Lock()
+		events = append(events, "cleanup")
+		mu.Unlock()
+		return nil
+	}
+
+	wm.startSubprocessFn = func(ctx context.Context, args []string) (*exec.Cmd, <-chan string, error) {
+		mu.Lock()
+		events = append(events, "subprocess")
+		mu.Unlock()
+		cmd := exec.CommandContext(ctx, "sh", "-c", "exit 1")
+		if err := cmd.Start(); err != nil {
+			return nil, nil, fmt.Errorf("starting fake subprocess: %w", err)
+		}
+		ch := make(chan string, 1)
+		ch <- "" // empty stderr — not a 422 error, so circuit-breaker does not fire
+		return cmd, ch, nil
+	}
+
+	// Run supervise for long enough to get at least 2 cleanup+subprocess pairs.
+	// First restart backoff is 1 s, so 3 s is enough for 2 iterations.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	go wm.supervise(ctx)
+	<-ctx.Done()
+
+	mu.Lock()
+	evts := make([]string, len(events))
+	copy(evts, events)
+	mu.Unlock()
+
+	if len(evts) < 4 {
+		t.Fatalf("got %d events, want at least 4 (2× cleanup+subprocess pairs): %v", len(evts), evts)
+	}
+
+	// Verify cleanup always immediately precedes its paired subprocess start.
+	for i := 0; i+1 < len(evts); i += 2 {
+		if evts[i] != "cleanup" || evts[i+1] != "subprocess" {
+			t.Errorf("events[%d:%d] = %v, want [cleanup subprocess]", i, i+2, evts[i:i+2])
+		}
+	}
 }
