@@ -504,6 +504,10 @@ func (m *mockGitHubClient) FetchProjectItem(owner, repo string, issueNumber int)
 	return nil, nil
 }
 
+func (m *mockGitHubClient) DeleteForwardingHooks(owner, repo string) error {
+	return nil
+}
+
 func (m *mockGitHubClient) RateLimitStats() (gh.RateLimitStats, gh.RateLimitStats) {
 	if m.rateLimitStatsFn != nil {
 		return m.rateLimitStatsFn()

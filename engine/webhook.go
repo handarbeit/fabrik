@@ -96,6 +96,11 @@ type webhookManager struct {
 	// startSubprocessFn overrides startSubprocessInternal when non-nil (tests only).
 	startSubprocessFn func(ctx context.Context, args []string) (*exec.Cmd, <-chan string, error)
 
+	// cleanupFn deletes orphaned gh webhook forward hooks registered at GitHub
+	// in prior sessions. Called before each subprocess launch. Non-fatal: if nil
+	// or if it returns an error, the supervisor proceeds without cleanup.
+	cleanupFn func(repos []string) error
+
 	// probeTimeout overrides orgModeProbeTimeout when non-zero (tests only).
 	probeTimeout time.Duration
 
@@ -156,6 +161,7 @@ func newWebhookManager(
 	events []string,
 	deltaFn func(string, []byte),
 	healthChangeFn func(bool),
+	cleanupFn func([]string) error,
 ) *webhookManager {
 	evts := events
 	if len(evts) == 0 {
@@ -168,6 +174,7 @@ func newWebhookManager(
 		emitFn:             emitFn,
 		deltaFn:            deltaFn,
 		healthChangeFn:     healthChangeFn,
+		cleanupFn:          cleanupFn,
 		repos:              copyRepoSet(repos),
 		events:             evts,
 		state:              WebhookStreamUnhealthy, // becomes StartingUp when subprocess launches
@@ -666,6 +673,22 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 			case <-time.After(webhookMaxRestartBackoff):
 			}
 			continue
+		}
+
+		// Orphan cleanup: delete any gh webhook forward hooks registered in prior
+		// sessions before starting a new subprocess. This prevents HTTP 422
+		// "Hook already exists" errors caused by orphaned hooks from crashed sessions.
+		// Non-fatal: if cleanup fails or cleanupFn is nil, the supervisor proceeds.
+		// On success, permanentFailureCount is reset — prior 422s were caused by the
+		// orphan and are no longer evidence of a permanent failure (R9).
+		if wm.cleanupFn != nil {
+			if err := wm.cleanupFn(repos); err != nil {
+				wm.logFn(0, "webhook", "WARNING: orphan webhook cleanup failed: %v — proceeding\n", err)
+			} else {
+				wm.mu.Lock()
+				wm.permanentFailureCount = 0
+				wm.mu.Unlock()
+			}
 		}
 
 		args := buildGhArgs(org, repos, port, secret, events)
