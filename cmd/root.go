@@ -341,10 +341,10 @@ func Execute() error {
 	}
 	if !explicitFlags["reconcile-interval"] {
 		if v := os.Getenv("FABRIK_RECONCILE_INTERVAL"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				cfg.ReconcileInterval = n
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				cfg.ReconcileInterval = n // 0 → use engine default (lightReconcileInterval = 3 min)
 			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_RECONCILE_INTERVAL=%q is invalid (must be a positive integer of seconds); using default 180\n", v)
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_RECONCILE_INTERVAL=%q is invalid (must be a non-negative integer of seconds; 0 = use default 180); using default 180\n", v)
 			}
 		}
 	}

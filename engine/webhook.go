@@ -946,7 +946,9 @@ func (wm *webhookManager) doEchoSweep() {
 	wm.mu.Unlock()
 
 	if shouldFire {
-		// Transition to Unhealthy; the reconcileTicker will restore Healthy on the next no-drift tick.
+		// Transition to Unhealthy — the idle cap drops to 5 min and the board is polled more aggressively.
+		// Intentionally no cacheImpl.Pause() here: the cache continues serving webhook deltas while the
+		// reconcileTicker confirms drift (≤ one interval, default 3 min) and triggers Pause/Reconcile/Resume.
 		wm.transitionHealthState(WebhookStreamUnhealthy, "echo-check miss threshold")
 	}
 }
