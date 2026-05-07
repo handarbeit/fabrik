@@ -5,9 +5,7 @@ import (
 	"fmt"
 )
 
-// webhookForwarderURL is the config.url value that gh webhook forward registers
-// at GitHub. Only webhooks with this URL are treated as orphaned forwarding hooks
-// eligible for cleanup.
+// webhookForwarderURL is the config.url that gh webhook forward registers at GitHub.
 const webhookForwarderURL = "https://webhook-forwarder.github.com/hook"
 
 type repoHook struct {
@@ -17,10 +15,7 @@ type repoHook struct {
 	} `json:"config"`
 }
 
-// DeleteForwardingHooks lists all webhooks for owner/repo and deletes any created
-// by gh webhook forward (identified by config.url matching webhookForwarderURL).
-// It is idempotent: if no matching hooks exist, it is a no-op. 404 on DELETE is
-// treated as success (hook already gone). Non-forwarding hooks are left untouched.
+// DeleteForwardingHooks deletes repo hooks matching webhookForwarderURL; 404 on DELETE is success.
 func (c *Client) DeleteForwardingHooks(owner, repo string) error {
 	url := fmt.Sprintf("%s/repos/%s/%s/hooks", c.baseURL, owner, repo)
 	var hooks []repoHook
