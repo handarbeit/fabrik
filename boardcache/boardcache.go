@@ -317,21 +317,22 @@ func (c *CacheImpl) Reconcile(board *gh.ProjectBoard) {
 }
 
 // RecordPRLinkage records an authoritative PR→issue mapping in the Store index.
-// Called by the engine immediately after CreateDraftPR succeeds, so all subsequent
-// webhooks for this PR resolve to the correct issue without consulting the regex.
+// fullRepo must be in "owner/repo" format. Called by the engine immediately after
+// CreateDraftPR succeeds, so all subsequent webhooks for this PR resolve to the
+// correct issue without consulting the regex.
 // No-op when the mapping is already present (avoids clobbering real webhook data)
 // or when the issue is not yet in the Store (cold-cache bootstrap not yet complete).
-func (c *CacheImpl) RecordPRLinkage(repo string, prNumber, issueNumber int) {
+func (c *CacheImpl) RecordPRLinkage(fullRepo string, prNumber, issueNumber int) {
 	// Skip if already indexed — avoids clobbering a real PRDetailsUpdated from a webhook.
-	if _, found := c.store.GetByPRKey(repo, prNumber); found {
+	if _, found := c.store.GetByPRKey(fullRepo, prNumber); found {
 		return
 	}
 	// Guard: do not create a phantom Store entry for an issue that was never bootstrapped.
-	if _, err := c.store.Get(repo, issueNumber); err != nil {
+	if _, err := c.store.Get(fullRepo, issueNumber); err != nil {
 		return
 	}
 	c.store.Apply(itemstate.PRDetailsUpdated{
-		Repo:     repo,
+		Repo:     fullRepo,
 		Number:   issueNumber,
 		PRNumber: prNumber,
 	})
