@@ -2046,12 +2046,15 @@ func TestLightReconcile_DriftDetected(t *testing.T) {
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
 	c.Bootstrap(seedBoard)
 
-	// Fresh board: item 1 has drifted status; item 2 has new label; item 3 is new.
+	// Fresh board: item 1 has drifted status+updatedAt; item 2 has only a label
+	// change (same updatedAt — GitHub always bumps updatedAt on label mutations, but
+	// label-count is no longer compared to avoid false positives from shallow queries);
+	// item 3 is new.
 	mc.projectBoardResult = &gh.ProjectBoard{
 		ProjectID: "PID",
 		Items: []gh.ProjectItem{
 			{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Plan", Labels: []string{"l1"}, UpdatedAt: t2},       // status + updatedAt drifted
-			{ID: "I_2", Number: 2, Repo: "owner/repo", Status: "Plan", Labels: []string{"new-label"}, UpdatedAt: t1}, // label count drifted
+			{ID: "I_2", Number: 2, Repo: "owner/repo", Status: "Plan", Labels: []string{"new-label"}, UpdatedAt: t1}, // label only, same updatedAt — NOT drift
 			{ID: "I_3", Number: 3, Repo: "owner/repo", Status: "Implement", Labels: nil, UpdatedAt: t1},              // new item
 		},
 	}
@@ -2060,21 +2063,26 @@ func TestLightReconcile_DriftDetected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LightReconcile returned unexpected error: %v", err)
 	}
-	if driftCount != 3 {
-		t.Errorf("driftCount = %d, want 3; drifted keys: %v", driftCount, driftedKeys)
+	// item 2's label change has the same updatedAt — not detected as drift (label-count
+	// comparison was dropped to avoid shallow-vs-deep representation false positives).
+	if driftCount != 2 {
+		t.Errorf("driftCount = %d, want 2; drifted keys: %v", driftCount, driftedKeys)
 	}
 	if freshBoard == nil {
 		t.Error("freshBoard should not be nil on success")
 	}
-	// Verify all three keys appear in driftedKeys.
+	// Verify items 1 and 3 appear in driftedKeys; item 2 should NOT.
 	seen := make(map[string]bool)
 	for _, k := range driftedKeys {
 		seen[k] = true
 	}
-	for _, want := range []string{"owner/repo#1", "owner/repo#2", "owner/repo#3"} {
+	for _, want := range []string{"owner/repo#1", "owner/repo#3"} {
 		if !seen[want] {
 			t.Errorf("driftedKeys missing %q; got %v", want, driftedKeys)
 		}
+	}
+	if seen["owner/repo#2"] {
+		t.Errorf("driftedKeys should not contain owner/repo#2 (same updatedAt); got %v", driftedKeys)
 	}
 }
 

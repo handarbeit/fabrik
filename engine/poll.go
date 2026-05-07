@@ -440,7 +440,11 @@ func (e *Engine) Run() error {
 							if driftCount == 0 {
 								wm.transitionHealthState(WebhookStreamHealthy, "")
 							} else {
-								e.logf(0, "reconcile", "light reconcile: %d item(s) drifted (%v) — reconciling cache\n", driftCount, driftedKeys)
+								keyStr := fmt.Sprintf("%v", driftedKeys)
+								if len(driftedKeys) > 5 {
+									keyStr = fmt.Sprintf("%v … %d more", driftedKeys[:5], len(driftedKeys)-5)
+								}
+								e.logf(0, "reconcile", "light reconcile: %d item(s) drifted (%s) — reconciling cache\n", driftCount, keyStr)
 								wm.transitionHealthState(WebhookStreamUnhealthy, fmt.Sprintf("%d item(s) drifted", driftCount))
 								cacheImpl.Pause()
 								cacheImpl.Reconcile(freshBoard)
