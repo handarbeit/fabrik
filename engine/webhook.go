@@ -46,8 +46,8 @@ const (
 	webhookRepoFailureThreshold = 3
 	// webhookEventStaleTimeout: if no verified event has arrived within this window
 	// (measured from sessionLastEventAt), the health monitor transitions to Unhealthy.
-	// Provides fast pausing during tight restart loops where startupTime resets
-	// would otherwise prevent the slower webhookHealthWindow check from firing.
+	// Provides fast pausing during tight restart loops where lastEventTime resets
+	// on each restart would otherwise prevent the slower webhookHealthWindow check from firing.
 	webhookEventStaleTimeout = 5 * time.Minute
 	// webhookPermanentFailureMax: consecutive HTTP 422 quick-exits before the
 	// circuit-breaker fires and switches to poll-only mode.
@@ -885,7 +885,7 @@ func (wm *webhookManager) checkHealthTransitions() {
 			// This is a no-op catch.
 		} else if !wm.sessionLastEventAt.IsZero() && now.Sub(wm.sessionLastEventAt) > webhookEventStaleTimeout {
 			// R-B4: cross-restart stale check — fires faster than the grace+window path
-			// when the subprocess is in a tight restart loop (each restart resets startupTime).
+			// when the subprocess is in a tight restart loop (each restart resets lastEventTime).
 			newState = WebhookStreamUnhealthy
 		} else if wm.sessionLastEventAt.IsZero() && !wm.sessionFirstStartAt.IsZero() && now.Sub(wm.sessionFirstStartAt) > webhookStartupGrace+webhookHealthWindow {
 			// R-B3: use sessionFirstStartAt (not startupTime) so subprocess restarts
