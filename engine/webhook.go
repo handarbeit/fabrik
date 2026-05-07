@@ -54,6 +54,16 @@ const (
 	webhookPermanentFailureMax = 3
 )
 
+// Echo-check constants — package-level vars (not const) so tests can override them.
+// webhookEchoTimeout: how long to wait for a matching inbound webhook after a mutation.
+// webhookEchoMissThreshold: how many misses within webhookEchoWindow triggers Unhealthy.
+// webhookEchoWindow: rolling time window for miss-history pruning.
+var (
+	webhookEchoTimeout       = 15 * time.Second
+	webhookEchoMissThreshold = 3
+	webhookEchoWindow        = 60 * time.Second
+)
+
 // defaultWebhookEvents is the canonical event list from the spec (R6).
 var defaultWebhookEvents = []string{
 	"issue_comment",
@@ -130,6 +140,12 @@ type webhookManager struct {
 
 	// per-type event counters (protected by mu)
 	eventCounts map[string]int
+
+	// echo-check state (protected by mu)
+	// pendingEchoes maps composite-key → registration timestamp.
+	// missHistory records timestamps of echo misses for rolling-window detection.
+	pendingEchoes map[string]time.Time
+	missHistory   []time.Time
 }
 
 func newWebhookManager(
@@ -160,6 +176,7 @@ func newWebhookManager(
 		unsubscribableRepos: make(map[string]bool),
 		stopCh:             make(chan struct{}),
 		repoReadyCh:        make(chan struct{}),
+		pendingEchoes:      make(map[string]time.Time),
 		killFn: func(cmd *exec.Cmd) {
 			if cmd != nil && cmd.Process != nil {
 				killProcGroup(cmd)
@@ -499,6 +516,7 @@ func (wm *webhookManager) Start(ctx context.Context, port int) error {
 
 	go wm.supervise(ctx)
 	go wm.runHealthMonitor(ctx)
+	go wm.runEchoSweep(ctx)
 
 	wm.logFn(0, "webhook", "webhook listener started on port %d\n", actualPort)
 	return nil
@@ -927,6 +945,97 @@ func (wm *webhookManager) checkHealthTransitions() {
 	wm.mu.Unlock()
 }
 
+// echoKey builds the composite key used in pendingEchoes: "eventType:action:discriminatingKey".
+func echoKey(eventType, action, key string) string {
+	return eventType + ":" + action + ":" + key
+}
+
+// RegisterEcho records a pending echo entry for a successful outgoing mutation.
+// No-op when the webhook stream is starting up, board cache is disabled (healthChangeFn == nil),
+// or for projects_v2_item when that event type is not currently subscribed.
+func (wm *webhookManager) RegisterEcho(eventType, action, key string) {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	if wm.state == WebhookStreamStartingUp || wm.healthChangeFn == nil {
+		return
+	}
+	wm.pendingEchoes[echoKey(eventType, action, key)] = time.Now()
+}
+
+// RegisterEchoIfSubscribed registers an echo entry only when eventType is in wm.events.
+// Used for projects_v2_item (R7) where the event may have been dynamically removed.
+func (wm *webhookManager) RegisterEchoIfSubscribed(eventType, action, key string) {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	if wm.state == WebhookStreamStartingUp || wm.healthChangeFn == nil {
+		return
+	}
+	if !containsEvent(wm.events, eventType) {
+		return
+	}
+	wm.pendingEchoes[echoKey(eventType, action, key)] = time.Now()
+}
+
+// MatchEcho removes the pending echo entry for an inbound webhook that matched a mutation.
+// Called from CacheImpl.ApplyDelta via the injected matchEchoFn.
+func (wm *webhookManager) MatchEcho(eventType, action, key string) {
+	wm.mu.Lock()
+	delete(wm.pendingEchoes, echoKey(eventType, action, key))
+	wm.mu.Unlock()
+}
+
+// doEchoSweep scans pendingEchoes for stale entries, records misses, and fires
+// healthChangeFn(false) when the rolling-window miss threshold is reached.
+// Safe to call from tests directly (no ticker dependency).
+func (wm *webhookManager) doEchoSweep() {
+	now := time.Now()
+	wm.mu.Lock()
+	var newMisses int
+	for k, registeredAt := range wm.pendingEchoes {
+		if now.Sub(registeredAt) >= webhookEchoTimeout {
+			delete(wm.pendingEchoes, k)
+			wm.missHistory = append(wm.missHistory, registeredAt)
+			newMisses++
+		}
+	}
+	if newMisses > 0 {
+		// Prune miss-history entries older than webhookEchoWindow.
+		cutoff := now.Add(-webhookEchoWindow)
+		live := wm.missHistory[:0]
+		for _, t := range wm.missHistory {
+			if t.After(cutoff) {
+				live = append(live, t)
+			}
+		}
+		wm.missHistory = live
+	}
+	shouldFire := newMisses > 0 && wm.healthChangeFn != nil && len(wm.missHistory) >= webhookEchoMissThreshold
+	if shouldFire {
+		wm.missHistory = wm.missHistory[:0]
+	}
+	wm.mu.Unlock()
+
+	if shouldFire {
+		wm.healthChangeFn(false)
+	}
+}
+
+// runEchoSweep is the goroutine that periodically calls doEchoSweep.
+func (wm *webhookManager) runEchoSweep(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-wm.stopCh:
+			return
+		case <-ticker.C:
+			wm.doEchoSweep()
+		}
+	}
+}
+
 // emitCurrentState emits a WebhookStatusEvent with the current state and event counts.
 func (wm *webhookManager) emitCurrentState() {
 	if wm.emitFn == nil {
@@ -1055,6 +1164,9 @@ func (wm *webhookManager) handleWebhook(w http.ResponseWriter, r *http.Request) 
 	prevState := wm.state
 	if prevState != WebhookStreamHealthy {
 		wm.state = WebhookStreamHealthy
+		// Clear stale miss history on recovery so old misses don't immediately
+		// re-trigger the echo-miss threshold after stream recovery (R10).
+		wm.missHistory = wm.missHistory[:0]
 	}
 	now := time.Now()
 	wm.lastEventTime = now
