@@ -858,6 +858,9 @@ func TestProcessItem_PostToPR_CreatesDraftPRBeforePosting(t *testing.T) {
 	// before the draft PR has been created — this is the bug: full stage output
 	// falls back to the issue instead of the PR.
 	var issueCommentBeforePR bool
+	// prCommentPosted is set when AddComment is called on the PR number,
+	// confirming output was actually routed to the PR.
+	var prCommentPosted bool
 
 	client := &mockGitHubClient{
 		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
@@ -875,6 +878,9 @@ func TestProcessItem_PostToPR_CreatesDraftPRBeforePosting(t *testing.T) {
 			if issueNumber == issueNum && !prExists {
 				// AddComment on the issue before the PR existed — this is the fallback bug.
 				issueCommentBeforePR = true
+			}
+			if issueNumber == prNum {
+				prCommentPosted = true
 			}
 			return issueNumber*10 + 1, nil
 		},
@@ -947,6 +953,9 @@ func TestProcessItem_PostToPR_CreatesDraftPRBeforePosting(t *testing.T) {
 	// by the time any AddComment on the issue number fires (summary, not fallback).
 	if issueCommentBeforePR {
 		t.Error("AddComment called on issue before draft PR was created — output fell back to issue instead of PR")
+	}
+	if !prCommentPosted {
+		t.Error("expected AddComment to be called on the PR — output was not posted to PR")
 	}
 }
 
