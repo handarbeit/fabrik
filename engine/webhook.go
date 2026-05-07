@@ -32,9 +32,9 @@ const (
 // Internal constants — not user-configurable in v1.
 const (
 	webhookIdleCap           = 60 * time.Minute
-	webhookHealthWindow      = 10 * time.Minute
-	webhookStartupGrace      = 30 * time.Second
 	webhookMaxRestartBackoff = 60 * time.Second
+	// lightReconcileInterval is the default cadence for the reconcileTicker goroutine in poll.go.
+	lightReconcileInterval = 3 * time.Minute
 	webhookRotationFailures  = 5
 	webhookRotationWindow    = 2 * time.Minute
 	webhookRotationMaxCycles = 2
@@ -44,11 +44,6 @@ const (
 	// webhookRepoFailureThreshold is the number of consecutive auth-shaped quick exits
 	// required before a repo is quarantined for the session.
 	webhookRepoFailureThreshold = 3
-	// webhookEventStaleTimeout: if no verified event has arrived within this window
-	// (measured from sessionLastEventAt), the health monitor transitions to Unhealthy.
-	// Provides fast pausing during tight restart loops where lastEventTime resets
-	// on each restart would otherwise prevent the slower webhookHealthWindow check from firing.
-	webhookEventStaleTimeout = 5 * time.Minute
 	// webhookPermanentFailureMax: consecutive HTTP 422 quick-exits before the
 	// circuit-breaker fires and switches to poll-only mode.
 	webhookPermanentFailureMax = 3
@@ -86,8 +81,7 @@ type webhookManager struct {
 	logFn         func(issueNumber int, tag, format string, args ...any)
 	wakeCh        chan struct{}
 	emitFn        func(tui.Event)
-	deltaFn       func(eventType string, payload []byte) // nil when board cache disabled
-	healthChangeFn func(healthy bool)                    // nil when board cache disabled
+	deltaFn func(eventType string, payload []byte) // nil when board cache disabled
 
 	// killFn terminates a subprocess. Defaults to killProcGroup; overridable in tests.
 	// The caller is responsible for the cmd != nil check; killFn handles nil Process.
@@ -124,13 +118,7 @@ type webhookManager struct {
 	repoReady   bool // whether repoReadyCh has been closed (protected by mu)
 
 	// health (protected by mu)
-	state         WebhookHealthState
-	startupTime   time.Time // when current subprocess started (resets on restart)
-	lastEventTime time.Time // zero until first verified event; resets on restart
-
-	// session-level health tracking — never reset on subprocess restart (protected by mu)
-	sessionFirstStartAt time.Time // set once when first subprocess starts
-	sessionLastEventAt  time.Time // set on every verified event; never cleared on restart
+	state WebhookHealthState
 
 	// secret rotation (protected by mu)
 	consecutiveFailures int
@@ -158,7 +146,6 @@ func newWebhookManager(
 	repos map[string]bool,
 	events []string,
 	deltaFn func(string, []byte),
-	healthChangeFn func(bool),
 	cleanupFn func([]string) error,
 ) *webhookManager {
 	evts := events
@@ -171,7 +158,6 @@ func newWebhookManager(
 		wakeCh:             wakeCh,
 		emitFn:             emitFn,
 		deltaFn:            deltaFn,
-		healthChangeFn:     healthChangeFn,
 		cleanupFn:          cleanupFn,
 		repos:              copyRepoSet(repos),
 		events:             evts,
@@ -520,7 +506,6 @@ func (wm *webhookManager) Start(ctx context.Context, port int) error {
 	wm.mu.Unlock()
 
 	go wm.supervise(ctx)
-	go wm.runHealthMonitor(ctx)
 	go wm.runEchoSweep(ctx)
 
 	wm.logFn(0, "webhook", "webhook listener started on port %d\n", actualPort)
@@ -708,11 +693,6 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 		wm.mu.Lock()
 		wm.currentCmd = cmd
 		wm.state = WebhookStreamStartingUp
-		wm.startupTime = time.Now()
-		wm.lastEventTime = time.Time{}
-		if wm.sessionFirstStartAt.IsZero() {
-			wm.sessionFirstStartAt = wm.startupTime
-		}
 		wm.mu.Unlock()
 		wm.emitCurrentState()
 
@@ -778,9 +758,6 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 					wm.logFn(0, "webhook", "WARNING: webhook subscription permanently failed after %d consecutive HTTP 422 errors — "+
 						"switching to poll-only mode. Check 'gh auth status' and repo webhook quota, then restart Fabrik.\n",
 						webhookPermanentFailureMax)
-					if wm.healthChangeFn != nil {
-						wm.healthChangeFn(false)
-					}
 					return
 				}
 				wm.mu.Unlock()
@@ -892,88 +869,18 @@ func (wm *webhookManager) startSubprocessInternal(ctx context.Context, args []st
 	return cmd, stderrCh, nil
 }
 
-// runHealthMonitor periodically checks time-based health state transitions.
-func (wm *webhookManager) runHealthMonitor(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-wm.stopCh:
-			return
-		case <-ticker.C:
-			wm.checkHealthTransitions()
-		}
-	}
-}
-
-func (wm *webhookManager) checkHealthTransitions() {
-	wm.mu.Lock()
-	now := time.Now()
-	state := wm.state
-	var newState WebhookHealthState
-
-	switch state {
-	case WebhookStreamStartingUp:
-		if !wm.lastEventTime.IsZero() {
-			// Event received; HTTP handler already set state to Healthy.
-			// This is a no-op catch.
-		} else if !wm.sessionLastEventAt.IsZero() && now.Sub(wm.sessionLastEventAt) > webhookEventStaleTimeout {
-			// R-B4: cross-restart stale check — fires faster than the grace+window path
-			// when the subprocess is in a tight restart loop (each restart resets lastEventTime).
-			newState = WebhookStreamUnhealthy
-		} else if wm.sessionLastEventAt.IsZero() && !wm.sessionFirstStartAt.IsZero() && now.Sub(wm.sessionFirstStartAt) > webhookStartupGrace+webhookHealthWindow {
-			// R-B3: use sessionFirstStartAt (not startupTime) so subprocess restarts
-			// don't reset the timer. Gate on sessionLastEventAt.IsZero() per spec:
-			// this path only fires when no event has ever been received in this session
-			// (if events were received but went stale, R-B4 above handles it).
-			newState = WebhookStreamUnhealthy
-		}
-	case WebhookStreamHealthy:
-		if !wm.sessionLastEventAt.IsZero() && now.Sub(wm.sessionLastEventAt) > webhookEventStaleTimeout {
-			// R-B4: stale check (webhookEventStaleTimeout) applies to Healthy state too, providing faster
-			// detection when the stream goes quiet during or after a restart loop.
-			newState = WebhookStreamUnhealthy
-		} else if !wm.lastEventTime.IsZero() && now.Sub(wm.lastEventTime) > webhookHealthWindow {
-			newState = WebhookStreamUnhealthy
-		}
-	}
-
-	if newState != "" && newState != state {
-		wm.state = newState
-		var elapsed time.Duration
-		if newState == WebhookStreamUnhealthy && !wm.sessionLastEventAt.IsZero() {
-			elapsed = now.Sub(wm.sessionLastEventAt)
-		}
-		wm.mu.Unlock()
-		if elapsed > 0 {
-			wm.logFn(0, "webhook", "health state: %s → %s (no events for %s)\n", state, newState, elapsed)
-		} else {
-			wm.logFn(0, "webhook", "health state: %s → %s\n", state, newState)
-		}
-		wm.emitCurrentState()
-		if newState == WebhookStreamUnhealthy && wm.healthChangeFn != nil {
-			wm.healthChangeFn(false)
-		}
-		return
-	}
-	wm.mu.Unlock()
-}
-
 // echoKey builds the composite key used in pendingEchoes: "eventType:action:discriminatingKey".
 func echoKey(eventType, action, key string) string {
 	return eventType + ":" + action + ":" + key
 }
 
 // RegisterEcho records a pending echo entry for a successful outgoing mutation.
-// No-op when the webhook stream is starting up or the board cache is disabled
-// (healthChangeFn == nil). For projects_v2_item conditional registration use
-// RegisterEchoIfSubscribed instead.
+// No-op when the webhook stream is starting up.
+// For projects_v2_item conditional registration use RegisterEchoIfSubscribed instead.
 func (wm *webhookManager) RegisterEcho(eventType, action, key string) {
 	wm.mu.Lock()
 	defer wm.mu.Unlock()
-	if wm.state == WebhookStreamStartingUp || wm.healthChangeFn == nil {
+	if wm.state == WebhookStreamStartingUp {
 		return
 	}
 	wm.pendingEchoes[echoKey(eventType, action, key)] = time.Now()
@@ -984,7 +891,7 @@ func (wm *webhookManager) RegisterEcho(eventType, action, key string) {
 func (wm *webhookManager) RegisterEchoIfSubscribed(eventType, action, key string) {
 	wm.mu.Lock()
 	defer wm.mu.Unlock()
-	if wm.state == WebhookStreamStartingUp || wm.healthChangeFn == nil {
+	if wm.state == WebhookStreamStartingUp {
 		return
 	}
 	if !containsEvent(wm.events, eventType) {
@@ -1001,8 +908,8 @@ func (wm *webhookManager) MatchEcho(eventType, action, key string) {
 	wm.mu.Unlock()
 }
 
-// doEchoSweep scans pendingEchoes for stale entries, records misses, and fires
-// healthChangeFn(false) when the rolling-window miss threshold is reached.
+// doEchoSweep scans pendingEchoes for stale entries, records misses, and
+// transitions to Unhealthy when the rolling-window miss threshold is reached.
 // Safe to call from tests directly (no ticker dependency).
 func (wm *webhookManager) doEchoSweep() {
 	now := time.Now()
@@ -1032,16 +939,15 @@ func (wm *webhookManager) doEchoSweep() {
 		}
 		wm.missHistory = live
 	}
-	shouldFire := newMisses > 0 && wm.healthChangeFn != nil && len(wm.missHistory) >= webhookEchoMissThreshold
+	shouldFire := newMisses > 0 && len(wm.missHistory) >= webhookEchoMissThreshold
 	if shouldFire {
 		wm.missHistory = wm.missHistory[:0]
-		// Transition to Unhealthy so handleWebhook's recovery path fires on the next event.
-		wm.state = WebhookStreamUnhealthy
 	}
 	wm.mu.Unlock()
 
 	if shouldFire {
-		wm.healthChangeFn(false)
+		// Transition to Unhealthy; the reconcileTicker will restore Healthy on the next no-drift tick.
+		wm.transitionHealthState(WebhookStreamUnhealthy, "echo-check miss threshold")
 	}
 }
 
@@ -1077,6 +983,25 @@ func (wm *webhookManager) emitCurrentState() {
 		State:       state,
 		EventCounts: counts,
 	})
+}
+
+// transitionHealthState updates wm.state to newState if it differs, logs the transition,
+// and calls emitCurrentState. No-op if state is unchanged.
+func (wm *webhookManager) transitionHealthState(newState WebhookHealthState, reason string) {
+	wm.mu.Lock()
+	prev := wm.state
+	if prev == newState {
+		wm.mu.Unlock()
+		return
+	}
+	wm.state = newState
+	wm.mu.Unlock()
+	if reason != "" {
+		wm.logFn(0, "webhook", "health state: %s → %s (%s)\n", prev, newState, reason)
+	} else {
+		wm.logFn(0, "webhook", "health state: %s → %s\n", prev, newState)
+	}
+	wm.emitCurrentState()
 }
 
 // minWebhookPayload is the minimal set of fields read from each incoming webhook payload.
@@ -1186,29 +1111,13 @@ func (wm *webhookManager) handleWebhook(w http.ResponseWriter, r *http.Request) 
 	// Update state and counters.
 	wm.mu.Lock()
 	wm.eventCounts[eventType]++
-	prevState := wm.state
-	if prevState != WebhookStreamHealthy {
-		wm.state = WebhookStreamHealthy
-		// Clear stale miss history on recovery so old misses don't immediately
-		// re-trigger the echo-miss threshold after stream recovery (R10).
+	// Clear stale miss history on incoming events to prevent echo-miss false positives (R10).
+	if len(wm.missHistory) > 0 {
 		wm.missHistory = wm.missHistory[:0]
 	}
-	now := time.Now()
-	wm.lastEventTime = now
-	wm.sessionLastEventAt = now // never reset on subprocess restart
 	wm.mu.Unlock()
-	if prevState != WebhookStreamHealthy {
-		wm.logFn(0, "webhook", "health state: %s → %s\n", prevState, WebhookStreamHealthy)
-	}
 
 	wm.emitCurrentState()
-
-	// On recovery from unhealthy/starting-up, reconcile and resume the cache first
-	// so the delta applied below lands on coherent state rather than being dropped
-	// because the cache is still paused.
-	if prevState != WebhookStreamHealthy && wm.healthChangeFn != nil {
-		wm.healthChangeFn(true)
-	}
 
 	// Apply cache delta after any recovery reconciliation, so the cache is fresh
 	// when the poll loop wakes. The wakeChObserver registered on the cache store

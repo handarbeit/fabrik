@@ -367,19 +367,10 @@ func (e *Engine) Run() error {
 			initialRepos = map[string]bool{e.cfg.Owner + "/" + e.cfg.Repo: true}
 		}
 		var deltaFn func(string, []byte)
-		var healthChangeFn func(bool)
 		if cacheImpl != nil {
 			deltaFn = func(eventType string, payload []byte) {
 				cacheImpl.ApplyDelta(eventType, payload)
 				e.applyLayer1StatusRefresh(eventType, payload, cacheImpl)
-			}
-			healthChangeFn = func(healthy bool) {
-				if healthy {
-					e.reconcileCache(cacheImpl)
-					cacheImpl.Resume()
-				} else {
-					cacheImpl.Pause()
-				}
 			}
 		}
 		cleanupFn := func(repos []string) error {
@@ -406,7 +397,6 @@ func (e *Engine) Run() error {
 			initialRepos,
 			e.cfg.WebhookEvents,
 			deltaFn,
-			healthChangeFn,
 			cleanupFn,
 		)
 		// Inject MatchEcho so ApplyDelta can clear pending echo entries on incoming webhooks.
@@ -426,6 +416,41 @@ func (e *Engine) Run() error {
 		if err := wm.Start(ctx, e.cfg.WebhookPort); err == nil {
 			e.webhookMgr = wm
 			defer wm.Stop()
+
+			if cacheImpl != nil {
+				reconcileInterval := e.cfg.ReconcileInterval
+				if reconcileInterval <= 0 {
+					reconcileInterval = lightReconcileInterval
+				}
+				go func() {
+					ticker := time.NewTicker(reconcileInterval)
+					defer ticker.Stop()
+					for {
+						select {
+						case <-ctx.Done():
+							return
+						case <-ticker.C:
+							driftCount, driftedKeys, freshBoard, err := cacheImpl.LightReconcile(
+								e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType,
+							)
+							if err != nil {
+								e.logf(0, "reconcile", "light reconcile failed (no health state change): %v\n", err)
+								continue
+							}
+							if driftCount == 0 {
+								wm.transitionHealthState(WebhookStreamHealthy, "")
+							} else {
+								e.logf(0, "reconcile", "light reconcile: %d item(s) drifted (%v) — reconciling cache\n", driftCount, driftedKeys)
+								wm.transitionHealthState(WebhookStreamUnhealthy, fmt.Sprintf("%d item(s) drifted", driftCount))
+								cacheImpl.Pause()
+								cacheImpl.Reconcile(freshBoard)
+								cacheImpl.Resume()
+								wm.transitionHealthState(WebhookStreamHealthy, "drift reconciled")
+							}
+						}
+					}
+				}()
+			}
 		}
 	}
 
