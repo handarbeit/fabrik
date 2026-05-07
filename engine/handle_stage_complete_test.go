@@ -422,9 +422,11 @@ func TestHandleStageComplete_WaitForCI_Idempotent(t *testing.T) {
 	}
 }
 
-// TestHandleStageComplete_WaitForCI_AlsoAddsAwaitingReview verifies that
-// when wait_for_ci: true AND wait_for_reviews: true, both labels are added.
-func TestHandleStageComplete_WaitForCI_AlsoAddsAwaitingReview(t *testing.T) {
+// TestHandleStageComplete_WaitForCI_DoesNotSeedAwaitingReview verifies that
+// when wait_for_ci: true AND wait_for_reviews: true, only fabrik:awaiting-ci
+// is added — fabrik:awaiting-review is NOT seeded here. Path 2 (checkReviewGate
+// in the catch-up loop) handles the review gate after CI clears (#617, Bug A).
+func TestHandleStageComplete_WaitForCI_DoesNotSeedAwaitingReview(t *testing.T) {
 	tr := true
 	client := &mockGitHubClient{}
 	stgs := testStagesWithValidate()
@@ -437,20 +439,16 @@ func TestHandleStageComplete_WaitForCI_AlsoAddsAwaitingReview(t *testing.T) {
 	eng.handleStageComplete(context.Background(), board, item, validateStage)
 
 	foundCI := false
-	foundReview := false
 	for _, c := range client.addLabelCalls {
 		if c.labelName == "fabrik:awaiting-ci" {
 			foundCI = true
 		}
 		if c.labelName == "fabrik:awaiting-review" {
-			foundReview = true
+			t.Errorf("handleStageComplete must not seed fabrik:awaiting-review when wait_for_ci: true (#617)")
 		}
 	}
 	if !foundCI {
 		t.Error("expected fabrik:awaiting-ci when wait_for_ci: true")
-	}
-	if !foundReview {
-		t.Error("expected fabrik:awaiting-review when wait_for_ci: true and wait_for_reviews: true")
 	}
 }
 
