@@ -3606,7 +3606,7 @@ Phase 1 ensures inline PR review thread comments (from Copilot, Gemini, or human
 | Stage exists | `FindStage(stages, item.Status) != nil` |
 | Closed issue | Not closed, OR cleanup stage, OR has `stage:<X>:complete` label |
 | Cleanup stage | Worktree exists on disk (local filesystem check only) |
-| updatedAt cache | `item.UpdatedAt` is newer than cached value, OR (cooldown expired AND `stage:X:complete` absent from shallow labels, OR `stage:X:complete` present but `fabrik:awaiting-review` also present), OR `fabrik:awaiting-ci` label present (CI check-run completions don't bump `updatedAt`), OR `fabrik:rebase-needed` label present (base-branch advances don't bump `updatedAt`). See "Cooldown Cache-Key Strategy" section in Appendix B below. |
+| updatedAt cache | `item.UpdatedAt` is newer than cached value, OR (cooldown expired AND `stage:X:complete` absent from shallow labels, OR `stage:X:complete` present but `fabrik:awaiting-review` also present), OR `fabrik:awaiting-ci` label present (CI check-run completions don't bump `updatedAt`), OR `fabrik:awaiting-review` label present (review-submission webhooks don't bump `updatedAt`), OR `fabrik:rebase-needed` label present (base-branch advances don't bump `updatedAt`). See "Cooldown Cache-Key Strategy" section in Appendix B below. |
 | Deep-fetch failure cooldown | No recent `FetchItemDetails` failure, OR failure cooldown expired |
 
 **Note:** `itemMayNeedWork()` intentionally does NOT check lock, editing, pause, or dependency labels — those require the full label set from deep fetch and are checked in `itemNeedsWork()`.
@@ -3628,6 +3628,7 @@ The engine uses two distinct in-memory stores (both in `itemstate.Store`) for co
 
 **What bypasses the cooldown gate (returns `true` regardless of cooldown):**
 - `fabrik:awaiting-ci` label: CI check-run completions don't bump `updatedAt`, so forced re-evaluation is necessary
+- `fabrik:awaiting-review` label: review-submission webhooks don't bump `updatedAt`; forced re-evaluation ensures gate clearance within one poll cycle of webhook receipt (issue #616)
 - `fabrik:rebase-needed` label: base-branch advances don't bump `updatedAt`
 - `stage:X:complete` label is ABSENT and cooldown has expired: retry for genuinely incomplete stages
 
