@@ -629,6 +629,49 @@ func (e *Engine) cleanupClosedIssueLocks(board *gh.ProjectBoard) {
 	}
 }
 
+// transientLifecycleLabels are the labels that must be swept from closed issues.
+// They are all applied transiently during pipeline execution and have no meaning
+// once an issue is closed; leaving them behind causes confusion and may trigger
+// unintended catch-up-loop evaluations on reopened issues.
+var transientLifecycleLabels = []string{
+	"fabrik:awaiting-review",
+	"fabrik:awaiting-ci",
+	"fabrik:awaiting-input",
+	"fabrik:rebase-needed",
+	"fabrik:bot-reprompted",
+}
+
+// cleanupClosedIssueTransientLabels removes transient lifecycle labels from any
+// closed issues on the board. It runs every poll cycle as a defensive sweep so
+// issues do not carry stale operational labels into terminal state (#617).
+func (e *Engine) cleanupClosedIssueTransientLabels(board *gh.ProjectBoard) {
+	for _, item := range board.Items {
+		if !item.IsClosed {
+			continue
+		}
+		labelSet := make(map[string]struct{}, len(item.Labels))
+		for _, l := range item.Labels {
+			labelSet[l] = struct{}{}
+		}
+		owner, repo, num := parseIssueKey(issueKey(item, e.defaultRepo()), e.cfg.Owner, e.cfg.Repo)
+		for _, label := range transientLifecycleLabels {
+			if _, has := labelSet[label]; !has {
+				continue
+			}
+			if err := e.client.RemoveLabelFromIssue(owner, repo, num, label); err != nil {
+				if !errors.Is(err, gh.ErrNotFound) {
+					e.logf(num, "warn", "could not remove transient label %q from closed issue: %v\n", label, err)
+				}
+			} else {
+				e.logf(num, "poll", "removed transient label %q from closed issue\n", label)
+				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), label)
+				}
+			}
+		}
+	}
+}
+
 // archiveDoneCompleteItems archives board items in a cleanup (Done) stage that
 // have the stage:<Name>:complete label. Handles both legacy items (pre-archive
 // feature) and ongoing cleanup. Uses shallow board data — labels(first:15) is
@@ -981,54 +1024,60 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		if e.checkDependencies(board, item, stage) {
 			continue // blocked; checkDependencies handled label + comment
 		}
-		blocked, timedOut := e.checkReviewGate(board, item, stage)
-		if blocked {
-			// Record CooldownAt["review-blocked"] so itemMayNeedWork's expiry path
-			// re-evaluates this item every 10 × PollSeconds even when nothing bumps
-			// updatedAt. This lets Phase 1/Phase 2 review-reprompt timers fire on a
-			// non-responsive bot reviewer (issue #495).
-			cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
-			e.store.Apply(itemstate.CooldownRecorded{
-				Repo:   itemOwnerRepoString(item, e.defaultRepo()),
-				Number: item.Number,
-				Reason: "review-blocked",
-				Until:  time.Now().Add(cooldown),
-			})
-			continue // awaiting reviewers; checkReviewGate handled label
-		}
-		if timedOut {
-			e.pauseForReviewTimeout(board, item, stage)
-			continue
-		}
-		// Gate cleared naturally — if reviews with actionable body text were
-		// submitted, re-invoke the stage agent to address the feedback before
-		// advancing. Reviews with empty bodies (e.g. APPROVED with no comment)
-		// have nothing to address; fall through to Phase 2.
-		if syntheticComments := e.buildReviewThreadComments(item); len(syntheticComments) > 0 {
-			iKey := issueKey(item, e.defaultRepo())
-			repoStr := itemOwnerRepoString(item, e.defaultRepo())
-			// Guard: if a goroutine from a previous poll cycle is still
-			// running dispatchReviewReinvoke for this item, skip the entire
-			// reinvoke path — including cycle-limit checks — to avoid
-			// pausing an item while valid work is still in progress. The
-			// store Worker field is the semantic source of truth for in-flight state.
-			if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil && snap.Worker() != nil {
-				e.logf(item.Number, "review-reinvoke", "skipping dispatch — review reinvoke already in-flight\n")
+		// Only run the review gate when the stage has genuinely completed
+		// (stage:X:complete present). During the CI-await window
+		// (hasAwaitingCI && !hasComplete), skip the review gate entirely to
+		// prevent spurious fabrik:awaiting-review re-application (#617).
+		if hasComplete {
+			blocked, timedOut := e.checkReviewGate(board, item, stage)
+			if blocked {
+				// Record CooldownAt["review-blocked"] so itemMayNeedWork's expiry path
+				// re-evaluates this item every 10 × PollSeconds even when nothing bumps
+				// updatedAt. This lets Phase 1/Phase 2 review-reprompt timers fire on a
+				// non-responsive bot reviewer (issue #495).
+				cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
+				e.store.Apply(itemstate.CooldownRecorded{
+					Repo:   itemOwnerRepoString(item, e.defaultRepo()),
+					Number: item.Number,
+					Reason: "review-blocked",
+					Until:  time.Now().Add(cooldown),
+				})
+				continue // awaiting reviewers; checkReviewGate handled label
+			}
+			if timedOut {
+				e.pauseForReviewTimeout(board, item, stage)
 				continue
 			}
-			var cycleCount int
-			if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
-				cycleCount = snap.ReviewCycles(stage.Name)
+			// Gate cleared naturally — if reviews with actionable body text were
+			// submitted, re-invoke the stage agent to address the feedback before
+			// advancing. Reviews with empty bodies (e.g. APPROVED with no comment)
+			// have nothing to address; fall through to Phase 2.
+			if syntheticComments := e.buildReviewThreadComments(item); len(syntheticComments) > 0 {
+				iKey := issueKey(item, e.defaultRepo())
+				repoStr := itemOwnerRepoString(item, e.defaultRepo())
+				// Guard: if a goroutine from a previous poll cycle is still
+				// running dispatchReviewReinvoke for this item, skip the entire
+				// reinvoke path — including cycle-limit checks — to avoid
+				// pausing an item while valid work is still in progress. The
+				// store Worker field is the semantic source of truth for in-flight state.
+				if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil && snap.Worker() != nil {
+					e.logf(item.Number, "review-reinvoke", "skipping dispatch — review reinvoke already in-flight\n")
+					continue
+				}
+				var cycleCount int
+				if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
+					cycleCount = snap.ReviewCycles(stage.Name)
+				}
+				maxCycles := e.cfg.MaxReviewCycles
+				if cycleCount >= maxCycles {
+					e.pauseForReviewCycleLimit(board, item, stage, cycleCount, maxCycles)
+				} else {
+					e.store.Apply(itemstate.ReviewCycleIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+					e.dispatchReviewReinvoke(ctx, board, item, stage)
+					advancedItems[iKey] = true
+				}
+				continue
 			}
-			maxCycles := e.cfg.MaxReviewCycles
-			if cycleCount >= maxCycles {
-				e.pauseForReviewCycleLimit(board, item, stage, cycleCount, maxCycles)
-			} else {
-				e.store.Apply(itemstate.ReviewCycleIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
-				e.dispatchReviewReinvoke(ctx, board, item, stage)
-				advancedItems[iKey] = true
-			}
-			continue
 		}
 
 		// Merge-conflict gate: runs before the CI gate so that a PR made
@@ -1235,6 +1284,8 @@ doneDispatching:
 	// where an issue was closed while a stage was in-flight, leaving the lock label
 	// behind. We do this every poll so it also catches locks from prior Fabrik runs.
 	e.cleanupClosedIssueLocks(board)
+	// Sweep transient lifecycle labels from closed issues every poll cycle (#617).
+	e.cleanupClosedIssueTransientLabels(board)
 
 	// Archive any Done+complete items (lazy migration + ongoing cleanup).
 	// Uses shallow board data — labels(first:15) is sufficient to see
