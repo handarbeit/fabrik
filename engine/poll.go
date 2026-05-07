@@ -554,7 +554,8 @@ func (e *Engine) Run() error {
 	}
 
 	// Startup upgrade check: no workers are in flight yet, making this the safest call site.
-	if e.cfg.AutoUpgrade {
+	// Skip if the context was already cancelled (e.g. SIGINT arrived during startup).
+	if e.cfg.AutoUpgrade && ctx.Err() == nil {
 		if e.upgradeCheckFn != nil {
 			e.upgradeCheckFn()
 		} else {
