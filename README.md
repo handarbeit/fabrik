@@ -88,6 +88,12 @@ GitHub Project Board (source of truth)
 5. **Complete** — When Claude signals completion, the issue is labeled `stage:<name>:complete`.
 6. **Advance** — In yolo mode, the issue auto-advances to the next stage. Otherwise, a human moves it.
 
+### Webhook Mode (Optional)
+
+Fabrik can receive GitHub events in near-real-time (within ~2 seconds) instead of waiting for the next poll tick by spawning `gh webhook forward` as a background subprocess. Enable with `--webhooks`. When healthy, the webhook stream also drives a reconcile-based health check (default every 3 minutes) that reduces full-board polling to at most once every 60 minutes.
+
+> **Single-user constraint:** GitHub allows only one active `gh webhook forward` subscription per repository or organization at a time. Coordinate across your team so only one Fabrik instance runs with `--webhooks`; other instances can run without it and will still process issues via polling. See [§10 of the User Guide](docs/USER_GUIDE.md#10-webhook-mode) for full setup, configuration, and troubleshooting details.
+
 ### Comment Processing
 
 When anyone comments on an issue in an active stage:
@@ -265,6 +271,8 @@ GITHUB_TOKEN=ghp_...    # Fallback
 | `--max-rebase-cycles` | Maximum rebase re-invocation cycles per issue before pausing (0 = default 3; also `FABRIK_MAX_REBASE_CYCLES`) | `0` (3 cycles) |
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` for debugging | `false` |
 | `--plugin-dir` | Path to Fabrik plugin directory (overrides installed plugin) | `""` |
+| `--webhooks` | Enable real-time webhook event delivery via `gh webhook forward` (requires `cli/gh-webhook` extension; also `FABRIK_WEBHOOKS`) | `false` |
+| `--reconcile-interval` | Seconds between periodic light-reconcile health checks when webhooks are enabled (0 = default 180; also `FABRIK_RECONCILE_INTERVAL`) | `0` (180 s) |
 
 > **Releases:** New releases are announced in the [handarbeit/fabrik Discussions "Announcements" category](https://github.com/handarbeit/fabrik/discussions/categories/announcements) after each successful release.
 
