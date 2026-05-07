@@ -589,8 +589,8 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 	}
 	c.mu.RUnlock()
 
-	// Auto-heal: resolve PR linkage via REST.
-	key, resolvedIssNum, found, healErr := c.resolvePRLinkage(owner, repoName, prNum)
+	// Auto-heal: resolve PR linkage via REST or authoritative index.
+	key, resolvedIssNum, found, healed, healErr := c.resolvePRLinkage(owner, repoName, prNum)
 
 	c.mu.Lock()
 	if !found {
@@ -625,9 +625,11 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 		LinkedPRNum: prNum,
 		SHA:         sha,
 	})
-	c.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: resolvedIssNum})
 	c.bumpLocalDeltaAt(key)
-	c.logFn("[cache] auto-heal: PR #%d → issue #%d; deep cache invalidated and delta re-applied\n", prNum, resolvedIssNum)
+	if healed {
+		c.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: resolvedIssNum})
+		c.logFn("[cache] auto-heal: PR #%d → issue #%d; deep cache invalidated and delta re-applied\n", prNum, resolvedIssNum)
+	}
 }
 
 func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
@@ -691,8 +693,8 @@ func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 	}
 	c.mu.RUnlock()
 
-	// Auto-heal: resolve PR linkage via REST.
-	key, resolvedIssNum, found, healErr := c.resolvePRLinkage(owner, repoName, prNum)
+	// Auto-heal: resolve PR linkage via REST or authoritative index.
+	key, resolvedIssNum, found, healed, healErr := c.resolvePRLinkage(owner, repoName, prNum)
 
 	c.mu.Lock()
 	if !found {
@@ -716,7 +718,6 @@ func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 		Number:      resolvedIssNum,
 		LinkedPRNum: prNum,
 	})
-	c.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: resolvedIssNum})
 	c.store.Apply(itemstate.PRReviewSubmitted{
 		Repo:   repo,
 		Number: resolvedIssNum,
@@ -729,7 +730,10 @@ func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 		Login:  p.Review.User.Login,
 	})
 	c.bumpLocalDeltaAt(key)
-	c.logFn("[cache] auto-heal: PR #%d → issue #%d; deep cache invalidated and delta re-applied\n", prNum, resolvedIssNum)
+	if healed {
+		c.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: resolvedIssNum})
+		c.logFn("[cache] auto-heal: PR #%d → issue #%d; deep cache invalidated and delta re-applied\n", prNum, resolvedIssNum)
+	}
 }
 
 func (c *CacheImpl) applyPullRequestReviewCommentDelta(payload []byte) {
@@ -803,8 +807,8 @@ func (c *CacheImpl) applyPullRequestReviewCommentDelta(payload []byte) {
 	}
 	c.mu.RUnlock()
 
-	// Auto-heal: resolve PR linkage via REST.
-	key, resolvedIssNum, found, healErr := c.resolvePRLinkage(owner, repoName, prNum)
+	// Auto-heal: resolve PR linkage via REST or authoritative index.
+	key, resolvedIssNum, found, healed, healErr := c.resolvePRLinkage(owner, repoName, prNum)
 
 	c.mu.Lock()
 	if !found {
@@ -828,14 +832,16 @@ func (c *CacheImpl) applyPullRequestReviewCommentDelta(payload []byte) {
 		Number:      resolvedIssNum,
 		LinkedPRNum: prNum,
 	})
-	c.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: resolvedIssNum})
 	c.store.Apply(itemstate.ReviewThreadCommentAdded{
 		Repo:        repo,
 		IssueNumber: resolvedIssNum,
 		Comment:     comment,
 	})
 	c.bumpLocalDeltaAt(key)
-	c.logFn("[cache] auto-heal: PR #%d → issue #%d; deep cache invalidated and delta re-applied\n", prNum, resolvedIssNum)
+	if healed {
+		c.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: resolvedIssNum})
+		c.logFn("[cache] auto-heal: PR #%d → issue #%d; deep cache invalidated and delta re-applied\n", prNum, resolvedIssNum)
+	}
 }
 
 func (c *CacheImpl) applyCheckRunDelta(payload []byte) {
@@ -915,7 +921,7 @@ func (c *CacheImpl) applyCheckRunDelta(payload []byte) {
 	prNum := prNums[0]
 
 	// Auto-heal step 2: resolve which issue the PR closes.
-	key, resolvedIssNum, found, healErr := c.resolvePRLinkage(owner, repoName, prNum)
+	key, resolvedIssNum, found, healed, healErr := c.resolvePRLinkage(owner, repoName, prNum)
 
 	c.mu.Lock()
 	if !found {
@@ -934,19 +940,20 @@ func (c *CacheImpl) applyCheckRunDelta(payload []byte) {
 	c.mu.Unlock()
 	// prToKey is populated by PRHeadSHAUpdated via updateIndexes — no explicit write needed.
 
-	// Update Store: set LinkedPRNum + SHA (updates shaToKey index) and invalidate
-	// deep cache. PRHeadSHAUpdated drains any pendingCheckRuns[sha] into the item's
-	// LinkedPR.CheckRuns automatically — no explicit CheckRunCompleted replay needed.
+	// Update Store: set LinkedPRNum + SHA (updates shaToKey index). PRHeadSHAUpdated
+	// drains any pendingCheckRuns[sha] into the item's LinkedPR.CheckRuns automatically
+	// — no explicit CheckRunCompleted replay needed.
 	c.store.Apply(itemstate.PRHeadSHAUpdated{
 		Repo:        repo,
 		Number:      resolvedIssNum,
 		LinkedPRNum: prNum,
 		SHA:         sha,
 	})
-	c.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: resolvedIssNum})
-
 	c.bumpLocalDeltaAt(key)
-	c.logFn("[cache] auto-heal: check_run SHA %s → PR #%d → issue #%d; deep cache invalidated\n", sha, prNum, resolvedIssNum)
+	if healed {
+		c.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: resolvedIssNum})
+		c.logFn("[cache] auto-heal: check_run SHA %s → PR #%d → issue #%d; deep cache invalidated\n", sha, prNum, resolvedIssNum)
+	}
 }
 
 // applyCheckSuite is a documented no-op. The comment in ApplyDelta's switch explains

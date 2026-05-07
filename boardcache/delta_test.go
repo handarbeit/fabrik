@@ -1015,6 +1015,126 @@ func TestPullRequestReviewSideEffectRemovesReviewRequest_ReviewerAbsent(t *testi
 }
 
 // ---------------------------------------------------------------------------
+// Index-hit: no deep-cache invalidation when mapping already known
+// ---------------------------------------------------------------------------
+
+// TestIndexHit_NoDeepcacheInvalidation_PullRequest verifies that when
+// RecordPRLinkage has pre-populated the prToKey index, a pull_request webhook
+// does not invalidate the deep cache and does not invoke FetchPRClosingIssues.
+func TestIndexHit_NoDeepcacheInvalidation_PullRequest(t *testing.T) {
+	mc := &mockClient{}
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+	board := &gh.ProjectBoard{
+		ProjectID: "PID", Title: "T", OwnerType: "organization",
+		Items: []gh.ProjectItem{
+			{ID: "I_602", ItemID: "PVTI_602", Number: 602, Repo: "owner/repo", Status: "Implement"},
+		},
+	}
+	c.Bootstrap(board)
+
+	c.RecordPRLinkage("owner/repo", 604, 602)
+	testSetDeepFetched(c, "owner/repo", 602)
+
+	c.ApplyDelta("pull_request", pullRequestPayloadJSON("synchronize", "owner/repo", 604, "sha-abc", "open", false, false))
+
+	if !testIsDeepFetched(c, "owner/repo", 602) {
+		t.Error("deep cache should not be invalidated when PR→issue mapping already known")
+	}
+	if mc.fetchPRClosingIssuesCount != 0 {
+		t.Errorf("want 0 FetchPRClosingIssues calls (authoritative path), got %d", mc.fetchPRClosingIssuesCount)
+	}
+}
+
+// TestIndexHit_NoDeepcacheInvalidation_PullRequestReview verifies that when
+// RecordPRLinkage has pre-populated the prToKey index, a pull_request_review
+// webhook does not invalidate the deep cache and does not invoke FetchPRClosingIssues.
+func TestIndexHit_NoDeepcacheInvalidation_PullRequestReview(t *testing.T) {
+	mc := &mockClient{}
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+	board := &gh.ProjectBoard{
+		ProjectID: "PID", Title: "T", OwnerType: "organization",
+		Items: []gh.ProjectItem{
+			{ID: "I_602", ItemID: "PVTI_602", Number: 602, Repo: "owner/repo", Status: "Implement"},
+		},
+	}
+	c.Bootstrap(board)
+
+	c.RecordPRLinkage("owner/repo", 604, 602)
+	testSetDeepFetched(c, "owner/repo", 602)
+
+	c.ApplyDelta("pull_request_review", pullRequestReviewPayloadJSON("submitted", "owner/repo", 604, 1001, "approved", "alice"))
+
+	if !testIsDeepFetched(c, "owner/repo", 602) {
+		t.Error("deep cache should not be invalidated when PR→issue mapping already known")
+	}
+	if mc.fetchPRClosingIssuesCount != 0 {
+		t.Errorf("want 0 FetchPRClosingIssues calls (authoritative path), got %d", mc.fetchPRClosingIssuesCount)
+	}
+}
+
+// TestIndexHit_NoDeepcacheInvalidation_PullRequestReviewComment verifies that
+// when RecordPRLinkage has pre-populated the prToKey index, a
+// pull_request_review_comment webhook does not invoke FetchPRClosingIssues.
+// Note: the normal path intentionally applies DeepFetchInvalidated for new
+// review comments (ReviewThreadID is not available in the webhook payload), so
+// this test only asserts the absence of REST calls, not deep-fetch state.
+func TestIndexHit_NoDeepcacheInvalidation_PullRequestReviewComment(t *testing.T) {
+	mc := &mockClient{}
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+	board := &gh.ProjectBoard{
+		ProjectID: "PID", Title: "T", OwnerType: "organization",
+		Items: []gh.ProjectItem{
+			{ID: "I_602", ItemID: "PVTI_602", Number: 602, Repo: "owner/repo", Status: "Implement"},
+		},
+	}
+	c.Bootstrap(board)
+
+	c.RecordPRLinkage("owner/repo", 604, 602)
+
+	c.ApplyDelta("pull_request_review_comment", pullRequestReviewCommentPayloadJSON("created", "owner/repo", 604, 9001, "RC_001", "looks good", "alice"))
+
+	if mc.fetchPRClosingIssuesCount != 0 {
+		t.Errorf("want 0 FetchPRClosingIssues calls (authoritative path), got %d", mc.fetchPRClosingIssuesCount)
+	}
+}
+
+// TestIndexHit_NoDeepcacheInvalidation_CheckRun is the direct regression test
+// for smoke test #5 (Run J). When RecordPRLinkage has recorded the PR→issue
+// mapping and a check_run webhook arrives for an unknown SHA, resolvePRLinkage
+// takes the authoritative prToKey path (healed=false) and must NOT apply
+// DeepFetchInvalidated. FetchPRClosingIssues must also not be called.
+func TestIndexHit_NoDeepcacheInvalidation_CheckRun(t *testing.T) {
+	mc := &mockClient{
+		fetchPRsForSHAFn: func(owner, repo, sha string) ([]int, error) {
+			return []int{604}, nil
+		},
+	}
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+	board := &gh.ProjectBoard{
+		ProjectID: "PID", Title: "T", OwnerType: "organization",
+		Items: []gh.ProjectItem{
+			{ID: "I_602", ItemID: "PVTI_602", Number: 602, Repo: "owner/repo", Status: "Implement"},
+		},
+	}
+	c.Bootstrap(board)
+
+	// Engine records authoritative PR→issue mapping at CreateDraftPR time.
+	c.RecordPRLinkage("owner/repo", 604, 602)
+	testSetDeepFetched(c, "owner/repo", 602)
+
+	// SHA "sha-xyz" is not yet in the shaToKey index — the handler must call
+	// FetchPRsForSHA, then resolvePRLinkage, which hits the prToKey index.
+	c.ApplyDelta("check_run", checkRunPayloadJSON("completed", "owner/repo", 7001, "ci/build", "completed", "success", "sha-xyz"))
+
+	if !testIsDeepFetched(c, "owner/repo", 602) {
+		t.Error("deep cache must not be invalidated when PR→issue mapping is already in the prToKey index (healed=false)")
+	}
+	if mc.fetchPRClosingIssuesCount != 0 {
+		t.Errorf("want 0 FetchPRClosingIssues calls (authoritative prToKey path taken), got %d", mc.fetchPRClosingIssuesCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
