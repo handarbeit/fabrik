@@ -1128,10 +1128,9 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			}
 		}
 		if newComments := e.findNewComments(item); len(newComments) > 0 {
-			e.logf(item.Number, "advance", "auto-advance catch-up: skipping advance for stage %q — %d unprocessed comment(s) pending\n", stage.Name, len(newComments))
+			e.logf(item.Number, "advance", "advance: skipping stage %q — %d unprocessed comment(s) pending\n", stage.Name, len(newComments))
 			continue
 		}
-		e.logf(item.Number, "advance", "auto-advance catch-up: stage %q already complete, advancing\n", stage.Name)
 		if err := e.advanceToNextStage(board, item, stage); err != nil {
 			e.logf(item.Number, "warn", "could not advance: %v\n", err)
 		}
