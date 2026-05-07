@@ -896,7 +896,7 @@ func (wm *webhookManager) checkHealthTransitions() {
 		}
 	case WebhookStreamHealthy:
 		if !wm.sessionLastEventAt.IsZero() && now.Sub(wm.sessionLastEventAt) > webhookEventStaleTimeout {
-			// R-B4: 60s stale check applies to Healthy state too, providing faster
+			// R-B4: stale check (webhookEventStaleTimeout) applies to Healthy state too, providing faster
 			// detection when the stream goes quiet during or after a restart loop.
 			newState = WebhookStreamUnhealthy
 		} else if !wm.lastEventTime.IsZero() && now.Sub(wm.lastEventTime) > webhookHealthWindow {
