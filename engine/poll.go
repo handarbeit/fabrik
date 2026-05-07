@@ -382,6 +382,18 @@ func (e *Engine) Run() error {
 				}
 			}
 		}
+		cleanupFn := func(repos []string) error {
+			for _, r := range repos {
+				owner, repo := parseOwnerRepo(r)
+				if owner == "" {
+					continue
+				}
+				if err := e.client.DeleteForwardingHooks(owner, repo); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
 		wm := newWebhookManager(
 			e.logf,
 			e.wakeCh,
@@ -390,6 +402,7 @@ func (e *Engine) Run() error {
 			e.cfg.WebhookEvents,
 			deltaFn,
 			healthChangeFn,
+			cleanupFn,
 		)
 		// Inject MatchEcho so ApplyDelta can clear pending echo entries on incoming webhooks.
 		if cacheImpl != nil {
