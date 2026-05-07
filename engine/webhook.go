@@ -46,9 +46,9 @@ const (
 	webhookRepoFailureThreshold = 3
 	// webhookEventStaleTimeout: if no verified event has arrived within this window
 	// (measured from sessionLastEventAt), the health monitor transitions to Unhealthy.
-	// Provides fast pausing (60s) during tight restart loops where startupTime resets
+	// Provides fast pausing during tight restart loops where startupTime resets
 	// would otherwise prevent the slower webhookHealthWindow check from firing.
-	webhookEventStaleTimeout = 60 * time.Second
+	webhookEventStaleTimeout = 5 * time.Minute
 	// webhookPermanentFailureMax: consecutive HTTP 422 quick-exits before the
 	// circuit-breaker fires and switches to poll-only mode.
 	webhookPermanentFailureMax = 3
@@ -906,8 +906,16 @@ func (wm *webhookManager) checkHealthTransitions() {
 
 	if newState != "" && newState != state {
 		wm.state = newState
+		var elapsed time.Duration
+		if newState == WebhookStreamUnhealthy && !wm.sessionLastEventAt.IsZero() {
+			elapsed = now.Sub(wm.sessionLastEventAt)
+		}
 		wm.mu.Unlock()
-		wm.logFn(0, "webhook", "health state: %s → %s\n", state, newState)
+		if elapsed > 0 {
+			wm.logFn(0, "webhook", "health state: %s → %s (no events for %s)\n", state, newState, elapsed)
+		} else {
+			wm.logFn(0, "webhook", "health state: %s → %s\n", state, newState)
+		}
 		wm.emitCurrentState()
 		if newState == WebhookStreamUnhealthy && wm.healthChangeFn != nil {
 			wm.healthChangeFn(false)
