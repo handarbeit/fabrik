@@ -41,6 +41,9 @@ const (
 	// orgModeProbeTimeout: if subprocess exits within this duration of starting
 	// in org mode, treat it as an org-permission failure and fall back to per-repo.
 	orgModeProbeTimeout = 10 * time.Second
+	// webhookRepoFailureThreshold is the number of consecutive auth-shaped quick exits
+	// required before a repo is quarantined for the session.
+	webhookRepoFailureThreshold = 3
 )
 
 // defaultWebhookEvents is the canonical event list from the spec (R6).
@@ -81,8 +84,10 @@ type webhookManager struct {
 	secret        string
 	repos         map[string]bool
 	events        []string
-	orgModeFailed bool // true after org-level probe fails; use per-repo thereafter
-	stopOnce      sync.Once
+	orgModeFailed      bool // true after org-level probe fails; use per-repo thereafter
+	repoFailureCounts  map[string]int  // consecutive auth-shaped quick exits per repo (protected by mu)
+	unsubscribableRepos map[string]bool // repos quarantined for this session (protected by mu)
+	stopOnce           sync.Once
 	stopCh        chan struct{}
 
 	// repoReadyCh is closed when the first non-empty repo set is known.
@@ -121,17 +126,19 @@ func newWebhookManager(
 		copy(evts, defaultWebhookEvents)
 	}
 	wm := &webhookManager{
-		logFn:          logFn,
-		wakeCh:         wakeCh,
-		emitFn:         emitFn,
-		deltaFn:        deltaFn,
-		healthChangeFn: healthChangeFn,
-		repos:          copyRepoSet(repos),
-		events:         evts,
-		state:          WebhookStreamUnhealthy, // becomes StartingUp when subprocess launches
-		eventCounts:    make(map[string]int),
-		stopCh:         make(chan struct{}),
-		repoReadyCh:    make(chan struct{}),
+		logFn:              logFn,
+		wakeCh:             wakeCh,
+		emitFn:             emitFn,
+		deltaFn:            deltaFn,
+		healthChangeFn:     healthChangeFn,
+		repos:              copyRepoSet(repos),
+		events:             evts,
+		state:              WebhookStreamUnhealthy, // becomes StartingUp when subprocess launches
+		eventCounts:        make(map[string]int),
+		repoFailureCounts:  make(map[string]int),
+		unsubscribableRepos: make(map[string]bool),
+		stopCh:             make(chan struct{}),
+		repoReadyCh:        make(chan struct{}),
 		killFn: func(cmd *exec.Cmd) {
 			if cmd != nil && cmd.Process != nil {
 				killProcGroup(cmd)
@@ -289,6 +296,66 @@ func isAuthShapedError(s string) bool {
 	return false
 }
 
+// isProjectsV2ItemRejection returns true when the stderr line indicates that
+// gh webhook forward rejected the projects_v2_item event. The gating keyword is
+// "projects_v2_item"; the phrase list covers current and plausible future gh CLI
+// wording, including the actual GitHub error ("These events are not allowed for
+// this hook: projects_v2_item").
+func isProjectsV2ItemRejection(line string) bool {
+	if !strings.Contains(line, "projects_v2_item") {
+		return false
+	}
+	lower := strings.ToLower(line)
+	return strings.Contains(lower, "invalid") ||
+		strings.Contains(lower, "unknown") ||
+		strings.Contains(lower, "not recognized") ||
+		strings.Contains(lower, "unsupported") ||
+		strings.Contains(lower, "bad request") ||
+		strings.Contains(lower, "not allowed")
+}
+
+// applyRepoAuthFailure processes a subprocess exit in per-repo mode.
+// If elapsed < orgModeProbeTimeout and stderr is auth-shaped, failure counts
+// for all repos in wm.repos are incremented; repos reaching the threshold are
+// quarantined (added to unsubscribableRepos, removed from wm.repos).
+// If elapsed >= orgModeProbeTimeout, all failure counts are reset (successful run).
+// Returns the list of newly-quarantined repos for the caller to log outside the lock.
+func (wm *webhookManager) applyRepoAuthFailure(elapsed time.Duration, stderrContent string) []string {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+
+	if elapsed >= orgModeProbeTimeout {
+		// Subprocess survived the probe window — not an auth failure; reset counts.
+		for r := range wm.repoFailureCounts {
+			wm.repoFailureCounts[r] = 0
+		}
+		return nil
+	}
+
+	if !isAuthShapedError(stderrContent) {
+		// Quick exit but not auth-shaped — transient crash; don't increment.
+		return nil
+	}
+
+	// Quick auth-shaped exit: attribute failure conservatively to all repos.
+	var quarantined []string
+	for r := range wm.repos {
+		wm.repoFailureCounts[r]++
+		if wm.repoFailureCounts[r] >= webhookRepoFailureThreshold {
+			quarantined = append(quarantined, r)
+		}
+	}
+
+	// Quarantine repos that reached the threshold.
+	for _, r := range quarantined {
+		wm.unsubscribableRepos[r] = true
+		delete(wm.repos, r)
+		delete(wm.repoFailureCounts, r)
+	}
+
+	return quarantined
+}
+
 // containsEvent reports whether name is in the events slice.
 func containsEvent(events []string, name string) bool {
 	for _, e := range events {
@@ -424,26 +491,44 @@ func (wm *webhookManager) UpdateRepos(repos map[string]bool) {
 		return
 	}
 
-	var newRepos []string
+	// Filter out quarantined repos before processing the incoming set.
+	var filteredOut []string
+	filtered := make(map[string]bool, len(repos))
 	for r := range repos {
+		if wm.unsubscribableRepos[r] {
+			filteredOut = append(filteredOut, r)
+		} else {
+			filtered[r] = true
+		}
+	}
+
+	var newRepos []string
+	for r := range filtered {
 		if !wm.repos[r] {
 			newRepos = append(newRepos, r)
 		}
 	}
 
-	firstInit := !wm.repoReady && len(repos) > 0
+	firstInit := !wm.repoReady && len(filtered) > 0
 
 	if len(newRepos) == 0 && !firstInit {
 		wm.mu.Unlock()
+		// Log filtered-out repos outside the lock.
+		for _, r := range filteredOut {
+			wm.logFn(0, "webhook", "repo %s is quarantined for this session — not re-adding to webhook subscription\n", r)
+		}
 		return
 	}
 
-	wm.repos = copyRepoSet(repos)
+	wm.repos = copyRepoSet(filtered)
 	cmd := wm.currentCmd
 	wm.signalRepoReady()
 	wm.mu.Unlock()
 
 	// Log outside the lock (logFn must not be called while holding wm.mu).
+	for _, r := range filteredOut {
+		wm.logFn(0, "webhook", "repo %s is quarantined for this session — not re-adding to webhook subscription\n", r)
+	}
 	for _, r := range newRepos {
 		wm.logFn(0, "webhook", "new repo discovered: %s — restarting webhook subscription\n", r)
 	}
@@ -502,6 +587,19 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 			}
 		}
 		wm.mu.Unlock()
+
+		// Zero-repo guard: all repos quarantined — skip subprocess launch.
+		if org == "" && len(repos) == 0 {
+			wm.logFn(0, "webhook", "all webhook-subscribed repos are quarantined — no subprocess launched; safety-net poll continues\n")
+			select {
+			case <-ctx.Done():
+				return
+			case <-wm.stopCh:
+				return
+			case <-time.After(webhookMaxRestartBackoff):
+			}
+			continue
+		}
 
 		args := buildGhArgs(org, repos, port, secret, events)
 		startedAt := time.Now()
@@ -581,6 +679,20 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 			wm.logFn(0, "webhook", "org-level webhook exited in %v without permission error — treating as transient, retrying\n", elapsed.Round(time.Millisecond))
 		}
 
+		// Per-repo failure isolation: attribute auth-shaped quick exits and quarantine
+		// repos that accumulate too many consecutive failures.
+		if org == "" {
+			if newlyQuarantined := wm.applyRepoAuthFailure(elapsed, stderrContent); len(newlyQuarantined) > 0 {
+				for _, r := range newlyQuarantined {
+					wm.logFn(0, "webhook", "WARNING: webhook subscription for repo %s failed %d times "+
+						"(consecutive permission-shaped exits) — dropping from subscription for this session. "+
+						"Issues from this repo will not be webhook-driven; safety-net poll continues.\n",
+						r, webhookRepoFailureThreshold)
+				}
+				continue // no backoff after quarantine; restart with pruned repo set
+			}
+		}
+
 		if waitErr != nil {
 			wm.logFn(0, "webhook", "gh webhook forward exited: %v — restarting in %v\n", waitErr, backoff)
 		} else {
@@ -618,10 +730,6 @@ func (wm *webhookManager) startSubprocessInternal(ctx context.Context, args []st
 
 	// Drain stderr to engine log and accumulate for caller inspection.
 	// The accumulated string is sent on stderrCh when the goroutine finishes.
-	//
-	// projects_v2_item rejection matcher: check for "projects_v2_item" as the gating
-	// keyword, plus any of the known rejection phrases from gh CLI. Update this list
-	// if future gh versions change their error wording.
 	go func() {
 		var accum strings.Builder
 		buf := make([]byte, 4096)
@@ -629,16 +737,8 @@ func (wm *webhookManager) startSubprocessInternal(ctx context.Context, args []st
 			n, readErr := stderr.Read(buf)
 			if n > 0 {
 				line := strings.TrimRight(string(buf[:n]), "\n\r")
-				lower := strings.ToLower(line)
-				// Detect projects_v2_item rejection. The gating keyword is always
-				// "projects_v2_item"; the rejection phrases cover current and plausible
-				// future gh CLI wording.
-				if strings.Contains(line, "projects_v2_item") &&
-					(strings.Contains(lower, "invalid") ||
-						strings.Contains(lower, "unknown") ||
-						strings.Contains(lower, "not recognized") ||
-						strings.Contains(lower, "unsupported") ||
-						strings.Contains(lower, "bad request")) {
+				// Detect projects_v2_item rejection using the shared helper.
+				if isProjectsV2ItemRejection(line) {
 					wm.logFn(0, "webhook", "WARNING: projects_v2_item event not supported by gh webhook forward — "+
 						"board-column changes caught by safety-net poll only (up to 60 min delay)\n")
 					wm.mu.Lock()
