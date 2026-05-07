@@ -916,8 +916,13 @@ func (c *CacheImpl) ProjectID() string {
 }
 
 // LightReconcile fetches a fresh shallow board snapshot from GitHub and compares
-// it against the current cache state on three fields: status, label count, and
-// updatedAt. Returns the number of drifted items, their keys, and the fresh board
+// it against the current cache state on two fields: status and updatedAt.
+// Label count is intentionally excluded: the board query returns at most 30 labels
+// (shallow), while the cache may hold the full deep-fetched set; comparing counts
+// would produce persistent false-positive drift for issues with >30 labels. Label
+// mutations are captured by updatedAt, so the two-field check is sufficient.
+//
+// Returns the number of drifted items, their keys, and the fresh board
 // (to avoid a double-fetch when the caller passes it to Reconcile on drift).
 //
 // On network error the method returns a non-nil err, nil freshBoard, and 0 drift.
@@ -928,7 +933,6 @@ func (c *CacheImpl) ProjectID() string {
 func (c *CacheImpl) LightReconcile(owner, repo string, projectNum int, ownerType string) (driftCount int, driftedKeys []string, freshBoard *gh.ProjectBoard, err error) {
 	type entry struct {
 		status    string
-		labelLen  int
 		updatedAt time.Time
 	}
 
@@ -939,7 +943,6 @@ func (c *CacheImpl) LightReconcile(owner, repo string, projectNum int, ownerType
 		s := snap.State()
 		cached[itemKey(snap.Repo(), snap.Number())] = entry{
 			status:    s.Status,
-			labelLen:  len(s.Labels),
 			updatedAt: s.UpdatedAt,
 		}
 	}
@@ -961,9 +964,7 @@ func (c *CacheImpl) LightReconcile(owner, repo string, projectNum int, ownerType
 			driftedKeys = append(driftedKeys, key)
 			continue
 		}
-		if e.status != pi.Status ||
-			e.labelLen != len(pi.Labels) ||
-			!e.updatedAt.Equal(pi.UpdatedAt) {
+		if e.status != pi.Status || !e.updatedAt.Equal(pi.UpdatedAt) {
 			driftCount++
 			driftedKeys = append(driftedKeys, key)
 		}
