@@ -6,3 +6,4 @@
 - 2026-05-06 Run F — smoke test #3, blockedBy chain tail
 - 2026-05-06 Run G — smoke test #4, blockedBy chain head (post-#598/#599 verification)
 - 2026-05-06 Run H — smoke test #4, blockedBy chain tail (post-#598/#599 verification)
+- 2026-05-07 Run I — smoke test #5, blocker (post #605/#607/#608 verification)
