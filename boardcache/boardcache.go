@@ -204,13 +204,12 @@ type CacheImpl struct {
 	// store owns per-item state (items, shaToKey, itemIDToKey, prToKey, pendingCheckRuns).
 	store *itemstate.Store
 
-	fallback     ReadClient
-	logFn        func(format string, args ...any)
-	matchEchoFn  func(eventType, action, key string) // injected by engine; nil when cache disabled
+	fallback    ReadClient
+	logFn       func(format string, args ...any)
+	matchEchoFn func(eventType, action, key string) // injected by engine; nil when cache disabled
 }
 
 // SetMatchEchoFn injects the MatchEcho function from the webhook manager.
-// Called once at startup in poll.go after the webhookManager is constructed.
 func (c *CacheImpl) SetMatchEchoFn(fn func(eventType, action, key string)) {
 	c.matchEchoFn = fn
 }
@@ -914,6 +913,71 @@ func (c *CacheImpl) ProjectID() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.projectID
+}
+
+// LightReconcile fetches a fresh shallow board snapshot from GitHub and compares
+// it against the current cache state on three fields: status, label count, and
+// updatedAt. Returns the number of drifted items, their keys, and the fresh board
+// (to avoid a double-fetch when the caller passes it to Reconcile on drift).
+//
+// On network error the method returns a non-nil err, nil freshBoard, and 0 drift.
+// The caller should log a warning and make no health state change.
+//
+// LightReconcile must not hold c.mu during the FetchProjectBoard call, following
+// the "NEVER hold mu while calling Store" invariant and avoiding slow I/O under lock.
+func (c *CacheImpl) LightReconcile(owner, repo string, projectNum int, ownerType string) (driftCount int, driftedKeys []string, freshBoard *gh.ProjectBoard, err error) {
+	type entry struct {
+		status    string
+		labelLen  int
+		updatedAt time.Time
+	}
+
+	// Snapshot current cache items. Store.All() handles its own locking.
+	snaps := c.store.All()
+	cached := make(map[string]entry, len(snaps))
+	for _, snap := range snaps {
+		s := snap.State()
+		cached[itemKey(snap.Repo(), snap.Number())] = entry{
+			status:    s.Status,
+			labelLen:  len(s.Labels),
+			updatedAt: s.UpdatedAt,
+		}
+	}
+
+	// Fetch fresh board from GitHub (no lock held).
+	freshBoard, err = c.fallback.FetchProjectBoard(owner, repo, projectNum, ownerType)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+
+	freshKeys := make(map[string]bool, len(freshBoard.Items))
+	for i := range freshBoard.Items {
+		pi := &freshBoard.Items[i]
+		key := itemKey(pi.Repo, pi.Number)
+		freshKeys[key] = true
+		e, inCache := cached[key]
+		if !inCache {
+			driftCount++
+			driftedKeys = append(driftedKeys, key)
+			continue
+		}
+		if e.status != pi.Status ||
+			e.labelLen != len(pi.Labels) ||
+			!e.updatedAt.Equal(pi.UpdatedAt) {
+			driftCount++
+			driftedKeys = append(driftedKeys, key)
+		}
+	}
+
+	// Items in the cache that are no longer on the fresh board are also drift.
+	for key := range cached {
+		if !freshKeys[key] {
+			driftCount++
+			driftedKeys = append(driftedKeys, key)
+		}
+	}
+
+	return driftCount, driftedKeys, freshBoard, nil
 }
 
 // copyDeepFieldsFromState overlays deep fields from an ItemState onto a *gh.ProjectItem.

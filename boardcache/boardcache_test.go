@@ -2,6 +2,7 @@ package boardcache
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -24,12 +25,13 @@ type mockClient struct {
 	fetchPRsForSHACount       int
 	fetchProjectItemCount     int
 
-	itemDetailsResult  *gh.ProjectItem
-	checkRunsResult    []gh.CheckRun
-	linkedPRResult     *gh.PRDetails
-	labelsResult       []string
-	projectBoardResult *gh.ProjectBoard
-	projectItemResult  *gh.ProjectItem
+	itemDetailsResult    *gh.ProjectItem
+	checkRunsResult      []gh.CheckRun
+	linkedPRResult       *gh.PRDetails
+	labelsResult         []string
+	projectBoardResult   *gh.ProjectBoard
+	projectBoardErr      error // returned by FetchProjectBoard when non-nil
+	projectItemResult    *gh.ProjectItem
 
 	fetchPRClosingIssuesFn func(owner, repo string, prNumber int) ([]int, error)
 	fetchPRsForSHAFn       func(owner, repo, sha string) ([]int, error)
@@ -37,6 +39,9 @@ type mockClient struct {
 }
 
 func (m *mockClient) FetchProjectBoard(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+	if m.projectBoardErr != nil {
+		return nil, m.projectBoardErr
+	}
 	if m.projectBoardResult != nil {
 		return m.projectBoardResult, nil
 	}
@@ -1990,4 +1995,136 @@ func pullRequestReviewRequestRemovedPayloadJSON(repo string, prNum int, removedL
 	p.RequestedReviewer.Type = "User"
 	b, _ := json.Marshal(p)
 	return b
+}
+
+// ---------------------------------------------------------------------------
+// LightReconcile tests
+// ---------------------------------------------------------------------------
+
+func TestLightReconcile_NoDrift(t *testing.T) {
+	t1 := time.Now().Truncate(time.Second)
+	mc := &mockClient{
+		projectBoardResult: &gh.ProjectBoard{
+			ProjectID: "PID",
+			Items: []gh.ProjectItem{
+				{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research", Labels: []string{"l1"}, UpdatedAt: t1},
+				{ID: "I_2", Number: 2, Repo: "owner/repo", Status: "Plan", Labels: nil, UpdatedAt: t1},
+			},
+		},
+	}
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+	c.Bootstrap(mc.projectBoardResult)
+
+	driftCount, driftedKeys, freshBoard, err := c.LightReconcile("owner", "repo", 1, "organization")
+	if err != nil {
+		t.Fatalf("LightReconcile returned unexpected error: %v", err)
+	}
+	if driftCount != 0 {
+		t.Errorf("driftCount = %d, want 0; drifted keys: %v", driftCount, driftedKeys)
+	}
+	if len(driftedKeys) != 0 {
+		t.Errorf("driftedKeys = %v, want empty", driftedKeys)
+	}
+	if freshBoard == nil {
+		t.Error("freshBoard should not be nil on success")
+	}
+}
+
+func TestLightReconcile_DriftDetected(t *testing.T) {
+	t1 := time.Now().Truncate(time.Second)
+	t2 := t1.Add(time.Second)
+
+	// Seed the cache with two items.
+	seedBoard := &gh.ProjectBoard{
+		ProjectID: "PID",
+		Items: []gh.ProjectItem{
+			{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research", Labels: []string{"l1"}, UpdatedAt: t1},
+			{ID: "I_2", Number: 2, Repo: "owner/repo", Status: "Plan", Labels: nil, UpdatedAt: t1},
+		},
+	}
+	mc := &mockClient{}
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+	c.Bootstrap(seedBoard)
+
+	// Fresh board: item 1 has drifted status; item 2 has new label; item 3 is new.
+	mc.projectBoardResult = &gh.ProjectBoard{
+		ProjectID: "PID",
+		Items: []gh.ProjectItem{
+			{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Plan", Labels: []string{"l1"}, UpdatedAt: t2},       // status + updatedAt drifted
+			{ID: "I_2", Number: 2, Repo: "owner/repo", Status: "Plan", Labels: []string{"new-label"}, UpdatedAt: t1}, // label count drifted
+			{ID: "I_3", Number: 3, Repo: "owner/repo", Status: "Implement", Labels: nil, UpdatedAt: t1},              // new item
+		},
+	}
+
+	driftCount, driftedKeys, freshBoard, err := c.LightReconcile("owner", "repo", 1, "organization")
+	if err != nil {
+		t.Fatalf("LightReconcile returned unexpected error: %v", err)
+	}
+	if driftCount != 3 {
+		t.Errorf("driftCount = %d, want 3; drifted keys: %v", driftCount, driftedKeys)
+	}
+	if freshBoard == nil {
+		t.Error("freshBoard should not be nil on success")
+	}
+	// Verify all three keys appear in driftedKeys.
+	seen := make(map[string]bool)
+	for _, k := range driftedKeys {
+		seen[k] = true
+	}
+	for _, want := range []string{"owner/repo#1", "owner/repo#2", "owner/repo#3"} {
+		if !seen[want] {
+			t.Errorf("driftedKeys missing %q; got %v", want, driftedKeys)
+		}
+	}
+}
+
+func TestLightReconcile_RemovedItemIsDrift(t *testing.T) {
+	t1 := time.Now().Truncate(time.Second)
+
+	// Seed cache with two items.
+	seedBoard := &gh.ProjectBoard{
+		ProjectID: "PID",
+		Items: []gh.ProjectItem{
+			{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research", UpdatedAt: t1},
+			{ID: "I_2", Number: 2, Repo: "owner/repo", Status: "Plan", UpdatedAt: t1},
+		},
+	}
+	mc := &mockClient{}
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+	c.Bootstrap(seedBoard)
+
+	// Fresh board: item 2 is gone.
+	mc.projectBoardResult = &gh.ProjectBoard{
+		ProjectID: "PID",
+		Items:     []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research", UpdatedAt: t1}},
+	}
+
+	driftCount, driftedKeys, _, err := c.LightReconcile("owner", "repo", 1, "organization")
+	if err != nil {
+		t.Fatalf("LightReconcile returned unexpected error: %v", err)
+	}
+	if driftCount != 1 {
+		t.Errorf("driftCount = %d, want 1; drifted keys: %v", driftCount, driftedKeys)
+	}
+}
+
+func TestLightReconcile_NetworkError(t *testing.T) {
+	mc := &mockClient{
+		projectBoardErr: errors.New("simulated network error"),
+	}
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+
+	driftCount, driftedKeys, freshBoard, err := c.LightReconcile("owner", "repo", 1, "organization")
+	if err == nil {
+		t.Fatal("LightReconcile should return an error on network failure")
+	}
+	if driftCount != 0 {
+		t.Errorf("driftCount = %d on error, want 0", driftCount)
+	}
+	if len(driftedKeys) != 0 {
+		t.Errorf("driftedKeys = %v on error, want nil", driftedKeys)
+	}
+	if freshBoard != nil {
+		t.Errorf("freshBoard = %v on error, want nil", freshBoard)
+	}
 }
