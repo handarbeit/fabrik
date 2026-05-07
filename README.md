@@ -90,7 +90,7 @@ GitHub Project Board (source of truth)
 
 ### Webhook Mode (Optional)
 
-Fabrik can receive GitHub events in near-real-time (within ~2 seconds) instead of waiting for the next poll tick by spawning `gh webhook forward` as a background subprocess. Enable with `--webhooks`. When healthy, the webhook stream also drives a reconcile-based health check (default every 3 minutes) that reduces full-board polling to at most once every 60 minutes.
+Fabrik can receive GitHub events in near-real-time (within ~2 seconds) instead of waiting for the next poll tick by spawning `gh webhook forward` as a background subprocess. Enable with `--webhooks`. With the default in-memory board cache active, the webhook stream also drives a reconcile-based health check (default every 3 minutes) that reduces full-board polling to at most once every 60 minutes.
 
 > **Single-user constraint:** GitHub allows only one active `gh webhook forward` subscription per repository or organization at a time. Coordinate across your team so only one Fabrik instance runs with `--webhooks`; other instances can run without it and will still process issues via polling. See [§10 of the User Guide](docs/USER_GUIDE.md#10-webhook-mode) for full setup, configuration, and troubleshooting details.
 
@@ -272,7 +272,7 @@ GITHUB_TOKEN=ghp_...    # Fallback
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` for debugging | `false` |
 | `--plugin-dir` | Path to Fabrik plugin directory (overrides installed plugin) | `""` |
 | `--webhooks` | Enable real-time webhook event delivery via `gh webhook forward` (requires `cli/gh-webhook` extension; also `FABRIK_WEBHOOKS`) | `false` |
-| `--reconcile-interval` | Seconds between periodic light-reconcile health checks when webhooks are enabled (0 = default 180; also `FABRIK_RECONCILE_INTERVAL`) | `0` (180 s) |
+| `--reconcile-interval` | Seconds between periodic light-reconcile health checks when webhooks and the in-memory board cache are both enabled (0 = default 180; also `FABRIK_RECONCILE_INTERVAL`) | `0` (180 s) |
 
 > **Releases:** New releases are announced in the [shadoworg/fabrik Discussions "Announcements" category](https://github.com/shadoworg/fabrik/discussions/categories/announcements) after each successful release.
 
