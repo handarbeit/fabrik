@@ -92,8 +92,13 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 				completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
 				if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); lerr != nil {
 					e.logf(item.Number, "warn", "could not add completion label: %v\n", lerr)
-				} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-					cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
+				} else {
+					if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+						cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
+					}
+					if e.webhookMgr != nil {
+						e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(item.Repo, item.Number)+"+"+completeLabel)
+					}
 				}
 				e.logf(item.Number, "rebase-reinvoke", "PR merge deferred — rebase dispatched\n")
 			} else {
@@ -133,8 +138,13 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
 		e.logf(item.Number, "warn", "could not add completion label: %v\n", err)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(item.Repo, item.Number)+"+"+completeLabel)
+		}
 	}
 
 	// fabrik:yolo or fabrik:cruise label overrides stage.AutoAdvance — if the user
@@ -385,6 +395,9 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 		return fmt.Errorf("auto-merge failed: %w", err)
 	}
 
+	if e.webhookMgr != nil {
+		e.webhookMgr.RegisterEcho("pull_request", "closed", fmt.Sprintf("%s/%s#pr%d", owner, repo, pr.Number))
+	}
 	e.removeRebaseNeededLabel(owner, repo, item)
 	e.logf(item.Number, "info", "auto-merged PR #%d\n", pr.Number)
 	return nil
@@ -403,8 +416,13 @@ func (e *Engine) handleDecomposed(board *gh.ProjectBoard, item gh.ProjectItem, s
 	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
 		e.logf(item.Number, "warn", "could not add completion label: %v\n", err)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(item.Repo, item.Number)+"+"+completeLabel)
+		}
 	}
 
 	if e.statusField == nil {
@@ -426,6 +444,9 @@ func (e *Engine) handleDecomposed(board *gh.ProjectBoard, item gh.ProjectItem, s
 	} else {
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 			cacheImpl.UpdateItemStatus(boardcache.ItemKey(item.Repo, item.Number), "Done")
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
 		}
 	}
 }
@@ -453,6 +474,9 @@ func (e *Engine) advanceToNextStage(board *gh.ProjectBoard, item gh.ProjectItem,
 	if err == nil {
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 			cacheImpl.UpdateItemStatus(boardcache.ItemKey(item.Repo, item.Number), next.Name)
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
 		}
 	}
 	return err

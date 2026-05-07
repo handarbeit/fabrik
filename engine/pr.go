@@ -58,6 +58,9 @@ func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) int {
 	if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 		cacheImpl.RecordPRLinkage(owner+"/"+repo, prNum, item.Number)
 	}
+	if e.webhookMgr != nil {
+		e.webhookMgr.RegisterEcho("pull_request", "opened", fmt.Sprintf("%s/%s#pr%d", owner, repo, prNum))
+	}
 	return prNum
 }
 
@@ -217,6 +220,9 @@ func (e *Engine) markPRReady(item gh.ProjectItem, knownPR int) {
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		err := e.client.MarkPRReady(owner, repo, prNumber)
 		if err == nil {
+			if e.webhookMgr != nil {
+				e.webhookMgr.RegisterEcho("pull_request", "ready_for_review", fmt.Sprintf("%s/%s#pr%d", owner, repo, prNumber))
+			}
 			e.logf(item.Number, "pr", "marked PR #%d ready-for-review\n", prNumber)
 			return
 		}
