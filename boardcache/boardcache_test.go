@@ -25,13 +25,13 @@ type mockClient struct {
 	fetchPRsForSHACount       int
 	fetchProjectItemCount     int
 
-	itemDetailsResult    *gh.ProjectItem
-	checkRunsResult      []gh.CheckRun
-	linkedPRResult       *gh.PRDetails
-	labelsResult         []string
-	projectBoardResult   *gh.ProjectBoard
-	projectBoardErr      error // returned by FetchProjectBoard when non-nil
-	projectItemResult    *gh.ProjectItem
+	itemDetailsResult  *gh.ProjectItem
+	checkRunsResult    []gh.CheckRun
+	linkedPRResult     *gh.PRDetails
+	labelsResult       []string
+	projectBoardResult *gh.ProjectBoard
+	projectBoardErr    error // returned by FetchProjectBoard when non-nil
+	projectItemResult  *gh.ProjectItem
 
 	fetchPRClosingIssuesFn func(owner, repo string, prNumber int) ([]int, error)
 	fetchPRsForSHAFn       func(owner, repo, sha string) ([]int, error)
@@ -2053,7 +2053,7 @@ func TestLightReconcile_DriftDetected(t *testing.T) {
 	mc.projectBoardResult = &gh.ProjectBoard{
 		ProjectID: "PID",
 		Items: []gh.ProjectItem{
-			{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Plan", Labels: []string{"l1"}, UpdatedAt: t2},       // status + updatedAt drifted
+			{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Plan", Labels: []string{"l1"}, UpdatedAt: t2},        // status + updatedAt drifted
 			{ID: "I_2", Number: 2, Repo: "owner/repo", Status: "Plan", Labels: []string{"new-label"}, UpdatedAt: t1}, // label only, same updatedAt — NOT drift
 			{ID: "I_3", Number: 3, Repo: "owner/repo", Status: "Implement", Labels: nil, UpdatedAt: t1},              // new item
 		},

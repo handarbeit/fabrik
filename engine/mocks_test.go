@@ -15,40 +15,40 @@ import (
 type mockGitHubClient struct {
 	mu sync.Mutex
 
-	fetchProjectBoardFn       func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error)
-	fetchLabelsFn             func(owner, repo string, issueNumber int) ([]string, error)
-	fetchItemDetailsFn        func(item *gh.ProjectItem) error
-	fetchStatusFieldFn        func(projectID string) (*gh.StatusField, error)
-	addLabelToIssueFn         func(owner, repo string, issueNumber int, labelName string) error
-	removeLabelFromIssueFn    func(owner, repo string, issueNumber int, labelName string) error
-	addCommentFn              func(owner, repo string, issueNumber int, body string) (int, error)
-	addCommentReactionFn      func(owner, repo string, commentDatabaseID int, content string) error
-	updateCommentFn           func(owner, repo string, commentDatabaseID int, body string) error
-	updateIssueBodyFn         func(owner, repo string, issueNumber int, body string) error
-	updateProjectItemStatusFn func(projectID, itemID, statusFieldID, statusOptionID string) error
-	findPRForIssueFn          func(owner, repo string, issueNumber int) (int, error)
-	fetchLinkedPRFn           func(owner, repo string, issueNumber int) (*gh.PRDetails, error)
-	fetchPRMergeableFn        func(owner, repo string, prNumber int) (*bool, error)
-	fetchPRMergeableStateFn   func(owner, repo string, prNumber int) (string, error)
-	fetchCheckRunsFn          func(owner, repo, sha string) ([]gh.CheckRun, error)
-	getPRBaseFn               func(owner, repo string, prNumber int) (string, error)
-	updatePRBaseFn            func(owner, repo string, prNumber int, newBase string) error
-	mergePRFn                 func(owner, repo string, prNumber int) error
-	rateLimitStatsFn          func() (gh.RateLimitStats, gh.RateLimitStats)
-	getIssueBodyFn            func(owner, repo string, issueNumber int) (string, error)
-	markPRReadyFn             func(owner, repo string, prNumber int) error
-	createDraftPRFn           func(owner, repo, title, head, base, body string, issueNumber int) (int, error)
-	fetchLatestReleaseFn      func(owner, repo string) (*gh.LatestRelease, error)
-	fetchLabelAppliedAtFn     func(owner, repo string, issueNumber int, labelName string) (time.Time, error)
-	archiveProjectItemFn      func(projectID, itemID string) error
-	deleteReviewRequestFn     func(owner, repo string, prNumber int, reviewers []string) error
-	addReviewRequestFn              func(owner, repo string, prNumber int, reviewers []string) error
-	fetchProjectItemStatusFn        func(itemID string) (string, error)
-	fetchProjectItemStatusBatchFn   func(projectID string) (map[string]string, error)
-	fetchProjectUpdatedAtFn         func(projectID string) (time.Time, error)
-	lookupIssueProjectItemFn        func(projectID, repo string, issueNumber int) (string, string, error)
-	fetchPRClosingIssuesFn          func(owner, repo string, prNumber int) ([]int, error)
-	fetchPRsForSHAFn                func(owner, repo, sha string) ([]int, error)
+	fetchProjectBoardFn           func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error)
+	fetchLabelsFn                 func(owner, repo string, issueNumber int) ([]string, error)
+	fetchItemDetailsFn            func(item *gh.ProjectItem) error
+	fetchStatusFieldFn            func(projectID string) (*gh.StatusField, error)
+	addLabelToIssueFn             func(owner, repo string, issueNumber int, labelName string) error
+	removeLabelFromIssueFn        func(owner, repo string, issueNumber int, labelName string) error
+	addCommentFn                  func(owner, repo string, issueNumber int, body string) (int, error)
+	addCommentReactionFn          func(owner, repo string, commentDatabaseID int, content string) error
+	updateCommentFn               func(owner, repo string, commentDatabaseID int, body string) error
+	updateIssueBodyFn             func(owner, repo string, issueNumber int, body string) error
+	updateProjectItemStatusFn     func(projectID, itemID, statusFieldID, statusOptionID string) error
+	findPRForIssueFn              func(owner, repo string, issueNumber int) (int, error)
+	fetchLinkedPRFn               func(owner, repo string, issueNumber int) (*gh.PRDetails, error)
+	fetchPRMergeableFn            func(owner, repo string, prNumber int) (*bool, error)
+	fetchPRMergeableStateFn       func(owner, repo string, prNumber int) (string, error)
+	fetchCheckRunsFn              func(owner, repo, sha string) ([]gh.CheckRun, error)
+	getPRBaseFn                   func(owner, repo string, prNumber int) (string, error)
+	updatePRBaseFn                func(owner, repo string, prNumber int, newBase string) error
+	mergePRFn                     func(owner, repo string, prNumber int) error
+	rateLimitStatsFn              func() (gh.RateLimitStats, gh.RateLimitStats)
+	getIssueBodyFn                func(owner, repo string, issueNumber int) (string, error)
+	markPRReadyFn                 func(owner, repo string, prNumber int) error
+	createDraftPRFn               func(owner, repo, title, head, base, body string, issueNumber int) (int, error)
+	fetchLatestReleaseFn          func(owner, repo string) (*gh.LatestRelease, error)
+	fetchLabelAppliedAtFn         func(owner, repo string, issueNumber int, labelName string) (time.Time, error)
+	archiveProjectItemFn          func(projectID, itemID string) error
+	deleteReviewRequestFn         func(owner, repo string, prNumber int, reviewers []string) error
+	addReviewRequestFn            func(owner, repo string, prNumber int, reviewers []string) error
+	fetchProjectItemStatusFn      func(itemID string) (string, error)
+	fetchProjectItemStatusBatchFn func(projectID string) (map[string]string, error)
+	fetchProjectUpdatedAtFn       func(projectID string) (time.Time, error)
+	lookupIssueProjectItemFn      func(projectID, repo string, issueNumber int) (string, string, error)
+	fetchPRClosingIssuesFn        func(owner, repo string, prNumber int) ([]int, error)
+	fetchPRsForSHAFn              func(owner, repo, sha string) ([]int, error)
 
 	// Track call counts for FetchProjectItemStatus
 	fetchProjectItemStatusCalls []string
