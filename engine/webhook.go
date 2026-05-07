@@ -732,7 +732,13 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 				count := wm.permanentFailureCount
 				if count >= webhookPermanentFailureMax {
 					wm.disabled = true
+					prevState := wm.state
+					wm.state = WebhookStreamUnhealthy
 					wm.mu.Unlock()
+					if prevState != WebhookStreamUnhealthy {
+						wm.logFn(0, "webhook", "health state: %s → %s\n", prevState, WebhookStreamUnhealthy)
+						wm.emitCurrentState()
+					}
 					wm.logFn(0, "webhook", "WARNING: webhook subscription permanently failed after %d consecutive HTTP 422 errors — "+
 						"switching to poll-only mode. Check 'gh auth status' and repo webhook quota, then restart Fabrik.\n",
 						webhookPermanentFailureMax)
@@ -881,9 +887,11 @@ func (wm *webhookManager) checkHealthTransitions() {
 			// R-B4: cross-restart stale check — fires faster than the grace+window path
 			// when the subprocess is in a tight restart loop (each restart resets startupTime).
 			newState = WebhookStreamUnhealthy
-		} else if !wm.sessionFirstStartAt.IsZero() && now.Sub(wm.sessionFirstStartAt) > webhookStartupGrace+webhookHealthWindow {
+		} else if wm.sessionLastEventAt.IsZero() && !wm.sessionFirstStartAt.IsZero() && now.Sub(wm.sessionFirstStartAt) > webhookStartupGrace+webhookHealthWindow {
 			// R-B3: use sessionFirstStartAt (not startupTime) so subprocess restarts
-			// don't reset the timer; this is the fix for the Bug B root cause.
+			// don't reset the timer. Gate on sessionLastEventAt.IsZero() per spec:
+			// this path only fires when no event has ever been received in this session
+			// (if events were received but went stale, R-B4 above handles it).
 			newState = WebhookStreamUnhealthy
 		}
 	case WebhookStreamHealthy:
