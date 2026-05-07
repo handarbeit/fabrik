@@ -124,8 +124,13 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 		if !alreadyAwaitingCI {
 			if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-ci"); err != nil {
 				e.logf(item.Number, "warn", "could not add fabrik:awaiting-ci label: %v\n", err)
-			} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-ci")
+			} else {
+				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+					cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-ci")
+				}
+				if e.webhookMgr != nil {
+					e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(item.Repo, item.Number)+"+"+"fabrik:awaiting-ci")
+				}
 			}
 		}
 		// fabrik:awaiting-review is NOT seeded here when wait_for_ci: true.
@@ -180,8 +185,13 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 			if !alreadyWaiting {
 				if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-review"); err != nil {
 					e.logf(item.Number, "warn", "could not add fabrik:awaiting-review label: %v\n", err)
-				} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-					cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-review")
+				} else {
+					if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+						cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-review")
+					}
+					if e.webhookMgr != nil {
+						e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(item.Repo, item.Number)+"+"+"fabrik:awaiting-review")
+					}
 				}
 				e.logf(item.Number, "awaiting-review", "waiting for PR reviewers before advancing\n")
 			}
@@ -278,8 +288,13 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 				e.logf(item.Number, "ci-gate", "merge blocked — CI failed: %s\n", strings.Join(names, ", "))
 				if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-ci"); lerr != nil {
 					e.logf(item.Number, "warn", "could not add fabrik:awaiting-ci: %v\n", lerr)
-				} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-					cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-ci")
+				} else {
+					if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+						cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-ci")
+					}
+					if e.webhookMgr != nil {
+						e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(item.Repo, item.Number)+"+"+"fabrik:awaiting-ci")
+					}
 				}
 				// Clean up pending timer since we now have a definitive failure state.
 				e.store.Apply(itemstate.CIMergePendingCleared{Repo: owner + "/" + repo, Number: item.Number})
@@ -325,6 +340,9 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 								DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
 							})
 						}
+						if e.webhookMgr != nil {
+							e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(item.Repo, item.Number))
+						}
 						// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
 						if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
 							e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
@@ -332,13 +350,23 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 					}
 					if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); lerr != nil {
 						e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", lerr)
-					} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-						cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
+					} else {
+						if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+							cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
+						}
+						if e.webhookMgr != nil {
+							e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(item.Repo, item.Number)+"+"+"fabrik:paused")
+						}
 					}
 					if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); lerr != nil {
 						e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", lerr)
-					} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-						cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
+					} else {
+						if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+							cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
+						}
+						if e.webhookMgr != nil {
+							e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(item.Repo, item.Number)+"+"+"fabrik:awaiting-input")
+						}
 					}
 					return fmt.Errorf("merge guard: CI wait timeout elapsed after %s", timeout)
 				}
@@ -366,8 +394,13 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 			if !alreadyLabeled {
 				if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:rebase-needed"); lerr != nil {
 					e.logf(item.Number, "warn", "could not add fabrik:rebase-needed label: %v\n", lerr)
-				} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-					cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:rebase-needed")
+				} else {
+					if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+						cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:rebase-needed")
+					}
+					if e.webhookMgr != nil {
+						e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(item.Repo, item.Number)+"+"+"fabrik:rebase-needed")
+					}
 				}
 			}
 			// Store Worker field is the semantic source of truth for in-flight state.
