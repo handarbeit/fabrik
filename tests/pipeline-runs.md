@@ -9,3 +9,4 @@
 - 2026-05-07 Run I — smoke test #5, blocker (post #605/#607/#608 verification)
 - 2026-05-07 Run J — smoke test #5, dependent (blockedBy Run I)
 - 2026-05-07 Run K — smoke test #6, blocker (post #616/#617/#618/#619 verification)
+- 2026-05-07 Run L — smoke test #6, dependent (blockedBy Run K)
