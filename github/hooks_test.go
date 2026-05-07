@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// hookWithURL builds a repoHook JSON object for the given id and config.url.
+// hookJSON builds a repoHook with the given id and config.url.
 func hookJSON(id int, configURL string) repoHook {
 	h := repoHook{ID: id}
 	h.Config.URL = configURL
