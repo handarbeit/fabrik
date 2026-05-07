@@ -1702,6 +1702,11 @@ Events are translated into immediate poll wakeups — the existing board-fetch a
 
 If any prerequisite is missing, Fabrik logs a clear warning and falls back to polling-only mode. Webhook mode failure is always non-fatal.
 
+> [!WARNING]
+> **Single-user constraint:** GitHub allows only one active `gh webhook forward` subscription per repository or organization at a time. If a second Fabrik instance (or any other tool) attempts to subscribe while one is already active, GitHub returns an HTTP 422 `Hook already exists` error. Fabrik logs this and falls back to poll-only mode for that instance — it will not receive real-time events.
+>
+> **Operator guidance:** Coordinate across your team so that only one Fabrik instance runs with `--webhooks` at a time. Other instances can run in poll-only mode (omit `--webhooks`) and will still process issues, just without real-time event delivery. For the longer-term solution that lets multiple operators share a board without conflicting webhook subscriptions, see issue #543 (planned per-user assignee filter).
+
 ### Enabling Webhook Mode
 
 Three equivalent ways to enable:
@@ -1989,6 +1994,22 @@ gh webhook --help   # verify: should print usage
 ```
 
 Then restart Fabrik. The extension is a one-time install and persists across `gh` upgrades.
+
+### `Hook already exists` (HTTP 422 from `gh webhook forward`)
+
+**Symptom:** Fabrik logs a line like:
+
+```
+[webhook] failed to subscribe repo <owner>/<repo>: HTTP 422 — {"message":"Hook already exists"}
+```
+
+Fabrik then continues in poll-only mode with no real-time events for that repo.
+
+**Cause:** GitHub enforces a single-user constraint on `gh webhook forward`: only one active subscription can exist per repository or organization at a time. A second Fabrik instance (or another tool) that tries to subscribe while one is already active receives this 422 error.
+
+**Fix:** Coordinate across your team so that only one Fabrik instance runs with `--webhooks` at a time. All other instances should run in poll-only mode (omit the `--webhooks` flag). They will still process issues on their normal poll interval — they just won't receive real-time event notifications.
+
+For a longer-term solution that allows multiple operators to share a board without conflicting over the webhook subscription, see issue #543 (planned per-user assignee filter).
 
 ### Plugin Not Loading
 
