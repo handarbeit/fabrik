@@ -1999,13 +1999,19 @@ Then restart Fabrik. The extension is a one-time install and persists across `gh
 
 ### `Hook already exists` (HTTP 422 from `gh webhook forward`)
 
-**Symptom:** Fabrik logs a line like:
+**Symptom:** After each restart attempt, Fabrik echoes the `gh` error to the log:
 
 ```
-[webhook] failed to subscribe repo <owner>/<repo>: HTTP 422 — {"message":"Hook already exists"}
+[webhook] [gh] Error: error creating webhook: HTTP 422: Hook already exists (https://api.github.com/repos/<owner>/<repo>/hooks)
 ```
 
-Fabrik then continues in poll-only mode with no real-time events for that repo.
+After three consecutive 422 failures, Fabrik emits:
+
+```
+[webhook] WARNING: webhook subscription permanently failed after 3 consecutive HTTP 422 errors — switching to poll-only mode. Check 'gh auth status' and repo webhook quota, then restart Fabrik.
+```
+
+Fabrik then continues in poll-only mode for the remainder of the session with no real-time events.
 
 **Cause:** GitHub enforces a single-user constraint on `gh webhook forward`: only one active subscription can exist per repository or organization at a time. A second Fabrik instance (or another tool) that tries to subscribe while one is already active receives this 422 error.
 
