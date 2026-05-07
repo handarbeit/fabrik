@@ -383,16 +383,21 @@ func (e *Engine) Run() error {
 			}
 		}
 		cleanupFn := func(repos []string) error {
+			var firstErr error
 			for _, r := range repos {
 				owner, repo := parseOwnerRepo(r)
 				if owner == "" {
+					e.logf(0, "webhook", "skipping malformed repo in cleanup: %q\n", r)
 					continue
 				}
 				if err := e.client.DeleteForwardingHooks(owner, repo); err != nil {
-					return err
+					e.logf(0, "webhook", "orphan hook cleanup failed for %s/%s: %v\n", owner, repo, err)
+					if firstErr == nil {
+						firstErr = err
+					}
 				}
 			}
-			return nil
+			return firstErr
 		}
 		wm := newWebhookManager(
 			e.logf,
