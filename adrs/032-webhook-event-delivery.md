@@ -145,3 +145,38 @@ This is tracked as a known gap, not a regression. The burst-coalescence guarante
 
 - `engine/poll.go`: two pre-poll backoff reset lines removed from `case <-e.wakeCh:`.
 - `engine/webhook_test.go`: `TestHandleWebhookBurstCoalescence` confirms burst coalescence is preserved.
+
+---
+
+## Amendment: Per-Repo Failure Isolation (Issue #631, 2026-05-07)
+
+### Problem
+
+The "Multi-Repo Subscription" section of this ADR explicitly deferred per-repo failure isolation: *"Per-repo subprocesses for finer-grained failure isolation were explicitly deferred. The single-subprocess restart approach is simpler; per-repo subprocesses are a follow-up if real users encounter problems."* This amendment records the design that fills that deferred gap.
+
+When `gh webhook forward` fails to subscribe to any repo in its argument list (e.g., the token lacks `admin:repo_hook` scope on one repo), the entire subprocess exits. Without isolation, the supervise loop retries indefinitely with the same bad repo in the argument list — a thrash loop that keeps the webhook stream down for all repos.
+
+### Design: All-or-Nothing Attribution with Threshold Quarantine
+
+Rather than per-repo subprocesses (high complexity), the fix attributes failures conservatively across the entire subscription set:
+
+1. **Attribution rule**: When the subprocess exits within `orgModeProbeTimeout` (10s) with auth-shaped stderr, increment failure counts for **all** repos in the current subscription set. This is conservative — it may penalize repos that were working fine alongside the bad repo. The N=3 threshold and "consecutive" requirement make false quarantine unlikely in practice (a genuine transient would not replicate auth-shaped exits 3× consecutively).
+
+2. **Quarantine threshold**: `webhookRepoFailureThreshold = 3`. A repo that accumulates 3 consecutive attributed failures is marked unsubscribable for the session and removed from `wm.repos`. This mirrors the `webhookRotationFailures = 5` constant for HMAC failures, but is more aggressive because auth failures are less likely to self-resolve.
+
+3. **Counter reset on healthy start**: If the subprocess exits at or after `orgModeProbeTimeout`, failure counts are reset to zero. This means a long-running-then-crashing subprocess does not accumulate toward quarantine — only consecutive quick auth-shaped exits count.
+
+4. **Zero-repo guard**: If quarantine reduces `wm.repos` to empty in per-repo mode, the supervise loop skips subprocess launch, logs a warning, and sleeps for `webhookMaxRestartBackoff` before retrying. This prevents infinite spinning when the entire subscription set is quarantined. Safety-net polling continues unaffected.
+
+5. **In-memory only**: The quarantine set (`unsubscribableRepos`) lives only in the `webhookManager` instance. A fabrik restart clears it, allowing the operator to retry after fixing the permission issue.
+
+6. **`UpdateRepos` interaction**: When `UpdateRepos` is called with a repo set that includes a quarantined repo, the quarantine persists — the repo is silently filtered out and a log note is emitted. The quarantined repo is not treated as "new" and does not trigger a subprocess restart.
+
+### Auxiliary Fix: `projects_v2_item` Stderr Detector
+
+The phrase list in the `projects_v2_item` rejection detector was extended to include `"not allowed"`, covering the actual GitHub error message: `"These events are not allowed for this hook: projects_v2_item"`. The phrase detection logic was also extracted into a standalone `isProjectsV2ItemRejection(line string) bool` helper to make it independently testable.
+
+### Implementation Files
+
+- `engine/webhook.go`: `webhookRepoFailureThreshold` constant; `repoFailureCounts` and `unsubscribableRepos` fields on `webhookManager`; `isProjectsV2ItemRejection` helper; `applyRepoAuthFailure` method; zero-repo guard and attribution call in `supervise`; quarantine filtering in `UpdateRepos`.
+- `engine/webhook_test.go`: `TestIsProjectsV2ItemRejection`, `TestApplyRepoAuthFailure_*`, `TestUpdateRepos_Quarantine*`.
