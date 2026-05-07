@@ -541,6 +541,250 @@ func TestArchiveDoneCompleteItems_ArchivesCompleteItems(t *testing.T) {
 	}
 }
 
+// ── Bug A: catch-up loop review-gate guard (#617) ────────────────────────────
+
+// TestCatchupLoop_SkipsReviewGate_WhenAwaitingCIWithoutComplete verifies that
+// checkReviewGate is NOT invoked when an item is in the CI-await window
+// (fabrik:awaiting-ci present, stage:X:complete absent). Without the guard,
+// stale board data could re-apply fabrik:awaiting-review even though Review
+// already cleared it (issue #617, Bug A).
+func TestCatchupLoop_SkipsReviewGate_WhenAwaitingCIWithoutComplete(t *testing.T) {
+	trueVal := true
+	stgs := []*stages.Stage{
+		{Name: "Validate", Order: 1, Prompt: "validate", WaitForCI: &trueVal, WaitForReviews: &trueVal},
+	}
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{
+						Number: 10,
+						ItemID: "PVTI_10",
+						Status: "Validate",
+						Repo:   "owner/repo",
+						Labels: []string{"fabrik:awaiting-ci"},
+					},
+				},
+			}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			// Simulate an outstanding review request. If checkReviewGate were
+			// called, it would add fabrik:awaiting-review (gate blocks with no
+			// reviews submitted). The guard must prevent this call.
+			item.LinkedPRReviewRequests = []gh.ReviewRequest{{Login: "copilot-pull-request-reviewer", IsBot: true}}
+			return nil
+		},
+		// No linked PR → CI gate clears immediately (R5, no CI configured).
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return nil, nil
+		},
+	}
+	eng := testEngineWithStages(client, stgs)
+
+	if _, err := eng.poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:awaiting-review" {
+			t.Errorf("checkReviewGate must not run during CI-await window: spuriously added fabrik:awaiting-review")
+		}
+	}
+}
+
+// TestCatchupLoop_RunsReviewGate_WhenHasComplete verifies that checkReviewGate
+// IS invoked when an item has stage:X:complete (i.e., after the CI gate has
+// already cleared). Outstanding reviewers must still block advancement in that
+// path, confirming the guard does not permanently disable the review gate.
+func TestCatchupLoop_RunsReviewGate_WhenHasComplete(t *testing.T) {
+	trueVal := true
+	stgs := []*stages.Stage{
+		{Name: "Validate", Order: 1, Prompt: "validate", WaitForCI: &trueVal, WaitForReviews: &trueVal},
+	}
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{
+						Number: 20,
+						ItemID: "PVTI_20",
+						Status: "Validate",
+						Repo:   "owner/repo",
+						Labels: []string{"stage:Validate:complete"},
+					},
+				},
+			}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			item.LinkedPRReviewRequests = []gh.ReviewRequest{{Login: "copilot-pull-request-reviewer", IsBot: true}}
+			return nil
+		},
+	}
+	eng := testEngineWithStages(client, stgs)
+
+	if _, err := eng.poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	found := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:awaiting-review" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected checkReviewGate to add fabrik:awaiting-review for item with stage:Validate:complete and outstanding reviewers")
+	}
+}
+
+// ── Bug B: transient label sweep on closed issues (#617) ─────────────────────
+
+// TestCleanupClosedIssueTransientLabels_RemovesAllTransientLabels verifies that
+// each of the five transient lifecycle labels is removed from a closed issue.
+func TestCleanupClosedIssueTransientLabels_RemovesAllTransientLabels(t *testing.T) {
+	for _, label := range transientLifecycleLabels {
+		label := label
+		t.Run(label, func(t *testing.T) {
+			client := &mockGitHubClient{}
+			eng := testEngine(client, &mockClaudeInvoker{})
+
+			board := &gh.ProjectBoard{
+				Items: []gh.ProjectItem{
+					{
+						Number:   99,
+						IsClosed: true,
+						Labels:   []string{label, "some-other-label"},
+					},
+				},
+			}
+
+			eng.cleanupClosedIssueTransientLabels(board)
+
+			if len(client.removeLabelCalls) != 1 {
+				t.Fatalf("expected 1 RemoveLabelFromIssue call for %q, got %d", label, len(client.removeLabelCalls))
+			}
+			if got := client.removeLabelCalls[0].labelName; got != label {
+				t.Errorf("labelName = %q, want %q", got, label)
+			}
+			if got := client.removeLabelCalls[0].issueNumber; got != 99 {
+				t.Errorf("issueNumber = %d, want 99", got)
+			}
+		})
+	}
+}
+
+// TestCleanupClosedIssueTransientLabels_SkipsOpenIssues verifies that open
+// issues with transient labels are left untouched.
+func TestCleanupClosedIssueTransientLabels_SkipsOpenIssues(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngine(client, &mockClaudeInvoker{})
+
+	board := &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				Number:   5,
+				IsClosed: false,
+				Labels:   []string{"fabrik:awaiting-review", "fabrik:awaiting-ci"},
+			},
+		},
+	}
+
+	eng.cleanupClosedIssueTransientLabels(board)
+
+	if len(client.removeLabelCalls) != 0 {
+		t.Errorf("expected no RemoveLabelFromIssue calls for open issue, got %d", len(client.removeLabelCalls))
+	}
+}
+
+// TestCleanupClosedIssueTransientLabels_SkipsCleanIssues verifies that closed
+// issues without any transient labels produce no API call.
+func TestCleanupClosedIssueTransientLabels_SkipsCleanIssues(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngine(client, &mockClaudeInvoker{})
+
+	board := &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				Number:   7,
+				IsClosed: true,
+				Labels:   []string{"bug", "stage:Validate:complete"},
+			},
+		},
+	}
+
+	eng.cleanupClosedIssueTransientLabels(board)
+
+	if len(client.removeLabelCalls) != 0 {
+		t.Errorf("expected no RemoveLabelFromIssue calls for clean closed issue, got %d", len(client.removeLabelCalls))
+	}
+}
+
+// TestCleanupClosedIssueTransientLabels_ErrNotFoundIsIdempotent verifies that
+// an ErrNotFound response from RemoveLabelFromIssue is treated as success
+// (idempotent — the label was already absent).
+func TestCleanupClosedIssueTransientLabels_ErrNotFoundIsIdempotent(t *testing.T) {
+	client := &mockGitHubClient{
+		removeLabelFromIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			return gh.ErrNotFound
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+
+	board := &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				Number:   11,
+				IsClosed: true,
+				Labels:   []string{"fabrik:awaiting-review"},
+			},
+		},
+	}
+
+	eng.cleanupClosedIssueTransientLabels(board)
+
+	// Should have attempted one removal call (ErrNotFound is OK, not a panic).
+	if len(client.removeLabelCalls) != 1 {
+		t.Errorf("expected 1 RemoveLabelFromIssue call, got %d", len(client.removeLabelCalls))
+	}
+}
+
+// TestCleanupClosedIssueTransientLabels_APIErrorContinues verifies that a
+// non-ErrNotFound API error is logged as a warning and processing continues
+// to the next label / issue without returning an error.
+func TestCleanupClosedIssueTransientLabels_APIErrorContinues(t *testing.T) {
+	var removeCallCount int
+	client := &mockGitHubClient{
+		removeLabelFromIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			removeCallCount++
+			return fmt.Errorf("simulated API error")
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+
+	board := &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{
+				Number:   22,
+				IsClosed: true,
+				Labels:   []string{"fabrik:awaiting-review", "fabrik:awaiting-ci"},
+			},
+		},
+	}
+
+	eng.cleanupClosedIssueTransientLabels(board)
+
+	// Both labels should have been attempted despite the API error on the first.
+	if removeCallCount != 2 {
+		t.Errorf("expected 2 RemoveLabelFromIssue calls (one per transient label present), got %d", removeCallCount)
+	}
+}
+
 // TestArchiveDoneCompleteItems_SkipsIncompleteItems verifies that Done items
 // without the stage:Done:complete label are not archived.
 func TestArchiveDoneCompleteItems_SkipsIncompleteItems(t *testing.T) {
