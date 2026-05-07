@@ -89,6 +89,9 @@ type Engine struct {
 	// heartbeatIntervalOverride overrides the package-level heartbeatInterval constant
 	// when non-zero. Used by tests to reduce the heartbeat period to sub-millisecond.
 	heartbeatIntervalOverride time.Duration
+	// upgradeCheckFn is called instead of checkAndUpgrade() when non-nil.
+	// Used by tests to observe the startup upgrade check without invoking the real upgrade path.
+	upgradeCheckFn func()
 }
 
 func New(cfg Config) (*Engine, error) {
