@@ -180,3 +180,47 @@ The phrase list in the `projects_v2_item` rejection detector was extended to inc
 
 - `engine/webhook.go`: `webhookRepoFailureThreshold` constant; `repoFailureCounts` and `unsubscribableRepos` fields on `webhookManager`; `isProjectsV2ItemRejection` helper; `applyRepoAuthFailure` method; zero-repo guard and attribution call in `supervise`; quarantine filtering in `UpdateRepos`.
 - `engine/webhook_test.go`: `TestIsProjectsV2ItemRejection`, `TestApplyRepoAuthFailure_*`, `TestUpdateRepos_Quarantine*`.
+
+---
+
+## Amendment: Orphan Hook Cleanup at Subprocess Launch (Issue #643, 2026-05-07)
+
+### Problem
+
+When `gh webhook forward` exits unexpectedly (WebSocket abnormal closure, 500 from GitHub's WS server, network blip), the hook it registered at GitHub remains active. The next restart attempt creates a new hook registration, which GitHub rejects with HTTP 422 ("Hook already exists") because only one forwarding hook per repo is allowed at a time. Three consecutive 422s trigger the existing circuit-breaker (see below), switching Fabrik to poll-only mode and requiring a manual restart.
+
+Observed sequence from production (smoke #7, 2026-05-07):
+
+```
+[webhook] [gh] Error: error receiving json event: websocket: close 1006 (abnormal closure)
+[webhook] gh webhook forward exited: exit status 1 — restarting in 1s
+[webhook] [gh] Error: error creating webhook: HTTP 422: Validation Failed   ← orphan hook collision
+[webhook] WARNING: webhook subscription permanently failed after 3 consecutive HTTP 422 errors
+```
+
+### Design: Cleanup Before Each Subprocess Launch
+
+Before launching (or relaunching) `gh webhook forward`, Fabrik deletes any orphaned forwarding hooks it previously created at GitHub. The cleanup is a REST LIST + DELETE sequence inserted at the top of each `supervise()` loop iteration, after the lock-protected repos snapshot and the zero-repo guard, but before `buildGhArgs` / `startFn`.
+
+**Discriminator**: `gh webhook forward` registers hooks with `config.url = "https://webhook-forwarder.github.com/hook"` (`webhookForwarderURL` constant). Only hooks matching this URL are eligible for deletion; all other hooks are left untouched.
+
+**Error handling (non-fatal)**: If the LIST request fails (403, network error, 404) or any DELETE fails with a non-404 status, `cleanupFn` returns an error. The supervisor logs a warning and proceeds with subprocess launch regardless — the circuit-breaker remains as defense-in-depth. A 404 on DELETE is treated as success (hook already gone; idempotent).
+
+**Counter reset (R9)**: After `cleanupFn` returns `nil` (orphans deleted or none found), `permanentFailureCount` is reset to zero under `wm.mu` before the subprocess starts. Prior 422s were caused by the orphan and are no longer evidence of a permanent failure. If cleanup itself fails, the counter is not reset.
+
+**Scope**: Per-repo mode only (`GET /repos/{owner}/{repo}/hooks`, `DELETE /repos/{owner}/{repo}/hooks/<id>`). Org-mode cleanup (`/orgs/{org}/hooks`) is deferred; most fabrik tokens lack `admin:org` scope, as evidenced by 404 responses on every `/orgs/…` attempt. The PR for this issue documents this non-coverage explicitly.
+
+### Injection Pattern
+
+The cleanup function is injected as `cleanupFn func(repos []string) error` — a new field on `webhookManager` and a new final parameter to `newWebhookManager`. This matches the existing injection pattern for `killFn`, `startSubprocessFn`, `deltaFn`, and `healthChangeFn`. Tests that don't need cleanup pass `nil`; production wires a closure over `e.client.DeleteForwardingHooks`.
+
+The `DeleteForwardingHooks(owner, repo string) error` method lives in a new `github/hooks.go` file. It uses the existing `restGetJSON` and `restDelete` helpers.
+
+### Implementation Files
+
+- `github/hooks.go`: `webhookForwarderURL` constant; `repoHook` unexported type; `DeleteForwardingHooks` method.
+- `github/hooks_test.go`: `TestDeleteForwardingHooks_*` — five cases covering no-match, one-match, multi-match, GET failure, and 404-on-DELETE.
+- `engine/webhook.go`: `cleanupFn` field on `webhookManager`; updated `newWebhookManager` signature; cleanup call in `supervise()` with logging and `permanentFailureCount` reset.
+- `engine/webhook_test.go`: `TestSupervise_CleanupCalledBeforeEachSubprocess` (R8) — verifies ordering via a shared event sequence.
+- `engine/interfaces.go`: `DeleteForwardingHooks` added to `GitHubClient` interface.
+- `engine/poll.go`: `cleanupFn` closure wired at the `newWebhookManager` call site.
