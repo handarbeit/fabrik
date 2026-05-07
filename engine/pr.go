@@ -283,7 +283,7 @@ func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output, footer, 
 				})
 			}
 			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(item.Repo, item.Number))
+				e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
 			}
 			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
 			if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
@@ -303,7 +303,7 @@ func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output, footer, 
 				})
 			}
 			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(item.Repo, item.Number))
+				e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
 			}
 			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
 			if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {

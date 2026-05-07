@@ -97,7 +97,7 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 						cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
 					}
 					if e.webhookMgr != nil {
-						e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(item.Repo, item.Number)+"+"+completeLabel)
+						e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+completeLabel)
 					}
 				}
 				e.logf(item.Number, "rebase-reinvoke", "PR merge deferred — rebase dispatched\n")
@@ -129,7 +129,7 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 					cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-ci")
 				}
 				if e.webhookMgr != nil {
-					e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(item.Repo, item.Number)+"+"+"fabrik:awaiting-ci")
+					e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-ci")
 				}
 			}
 		}
@@ -148,7 +148,7 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
 		}
 		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(item.Repo, item.Number)+"+"+completeLabel)
+			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+completeLabel)
 		}
 	}
 
@@ -190,7 +190,7 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 						cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-review")
 					}
 					if e.webhookMgr != nil {
-						e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(item.Repo, item.Number)+"+"+"fabrik:awaiting-review")
+						e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-review")
 					}
 				}
 				e.logf(item.Number, "awaiting-review", "waiting for PR reviewers before advancing\n")
@@ -293,7 +293,7 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 						cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-ci")
 					}
 					if e.webhookMgr != nil {
-						e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(item.Repo, item.Number)+"+"+"fabrik:awaiting-ci")
+						e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-ci")
 					}
 				}
 				// Clean up pending timer since we now have a definitive failure state.
@@ -341,7 +341,7 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 							})
 						}
 						if e.webhookMgr != nil {
-							e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(item.Repo, item.Number))
+							e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
 						}
 						// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
 						if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
@@ -355,7 +355,7 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 							cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
 						}
 						if e.webhookMgr != nil {
-							e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(item.Repo, item.Number)+"+"+"fabrik:paused")
+							e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:paused")
 						}
 					}
 					if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); lerr != nil {
@@ -365,7 +365,7 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 							cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
 						}
 						if e.webhookMgr != nil {
-							e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(item.Repo, item.Number)+"+"+"fabrik:awaiting-input")
+							e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-input")
 						}
 					}
 					return fmt.Errorf("merge guard: CI wait timeout elapsed after %s", timeout)
@@ -399,7 +399,7 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 						cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:rebase-needed")
 					}
 					if e.webhookMgr != nil {
-						e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(item.Repo, item.Number)+"+"+"fabrik:rebase-needed")
+						e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:rebase-needed")
 					}
 				}
 			}
@@ -454,7 +454,7 @@ func (e *Engine) handleDecomposed(board *gh.ProjectBoard, item gh.ProjectItem, s
 			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
 		}
 		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(item.Repo, item.Number)+"+"+completeLabel)
+			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+completeLabel)
 		}
 	}
 
