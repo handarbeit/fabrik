@@ -249,6 +249,8 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		// no write-through: excluded — issue body is not read from cache for dispatch decisions
 		if err := e.client.UpdateIssueBody(owner, repo, item.Number, updatedBody); err != nil {
 			e.logf(item.Number, "warn", "could not update issue body: %v\n", err)
+		} else if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "edited", boardcache.ItemKey(item.Repo, item.Number))
 		}
 		output = stripMarkers(output, "FABRIK_ISSUE_UPDATE_BEGIN", "FABRIK_ISSUE_UPDATE_END")
 	}
@@ -275,6 +277,9 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 						DatabaseID: dbID, Body: comment, Author: e.cfg.User, CreatedAt: time.Now(),
 					})
 				}
+				if e.webhookMgr != nil {
+					e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(item.Repo, item.Number))
+				}
 				// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
 				if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
 					e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
@@ -296,6 +301,9 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 						cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
 							DatabaseID: dbID, Body: stageComment, Author: e.cfg.User, CreatedAt: time.Now(),
 						})
+					}
+					if e.webhookMgr != nil {
+						e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(item.Repo, item.Number))
 					}
 					// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
 					if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
