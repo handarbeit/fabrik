@@ -146,6 +146,9 @@ func (e *Engine) updatePRVerification(item gh.ProjectItem, prNumber int, summary
 		e.logf(item.Number, "warn", "could not update PR #%d Verification section: %v\n", prNumber, err)
 		return
 	}
+	if e.webhookMgr != nil {
+		e.webhookMgr.RegisterEcho("issues", "edited", boardcache.ItemKey(owner+"/"+repo, prNumber))
+	}
 	e.logf(item.Number, "pr", "updated PR #%d Verification section\n", prNumber)
 }
 
@@ -171,6 +174,9 @@ func (e *Engine) ensurePRLinksIssue(item gh.ProjectItem, prNumber int) {
 			e.logf(item.Number, "warn", "could not update PR #%d body to close fence: %v\n", prNumber, err)
 			return
 		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "edited", boardcache.ItemKey(owner+"/"+repo, prNumber))
+		}
 		e.logf(item.Number, "pr", "balanced unclosed code fence in PR #%d body\n", prNumber)
 	}
 
@@ -184,6 +190,9 @@ func (e *Engine) ensurePRLinksIssue(item gh.ProjectItem, prNumber int) {
 	if err := e.client.UpdateIssueBody(owner, repo, prNumber, updatedBody); err != nil {
 		e.logf(item.Number, "warn", "could not update PR #%d body: %v\n", prNumber, err)
 		return
+	}
+	if e.webhookMgr != nil {
+		e.webhookMgr.RegisterEcho("issues", "edited", boardcache.ItemKey(owner+"/"+repo, prNumber))
 	}
 	e.logf(item.Number, "pr", "added '%s' to PR #%d body\n", closingKeyword, prNumber)
 }
@@ -253,6 +262,9 @@ func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output, footer, 
 		if dbID, err := e.client.AddComment(owner, repo, prNumber, comment); err != nil {
 			e.logf(item.Number, "warn", "could not post to PR #%d: %v\n", prNumber, err)
 		} else {
+			if e.webhookMgr != nil {
+				e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, prNumber))
+			}
 			e.logf(item.Number, "post", "detailed %s output posted to PR #%d\n", stageName, prNumber)
 			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
 			if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
@@ -270,6 +282,9 @@ func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output, footer, 
 					DatabaseID: dbID, Body: summary, Author: e.cfg.User, CreatedAt: time.Now(),
 				})
 			}
+			if e.webhookMgr != nil {
+				e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(item.Repo, item.Number))
+			}
 			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
 			if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
 				e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
@@ -286,6 +301,9 @@ func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output, footer, 
 				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
 					DatabaseID: dbID, Body: comment, Author: e.cfg.User, CreatedAt: time.Now(),
 				})
+			}
+			if e.webhookMgr != nil {
+				e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(item.Repo, item.Number))
 			}
 			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
 			if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
