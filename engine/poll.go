@@ -464,6 +464,9 @@ func (e *Engine) Run() error {
 			idleDuration = time.Since(e.idleStart)
 		}
 		webhookHealthy := e.webhookMgr != nil && e.webhookMgr.IsHealthyOrStartingUp()
+		if e.webhookMgr != nil && e.webhookMgr.IsDisabled() {
+			e.logf(0, "webhook", "poll-only mode active — webhook subscription disabled; restart Fabrik to retry\n")
+		}
 		effectiveInterval := computeEffectiveInterval(configuredInterval, idleDuration, rateLimitRatio, webhookHealthy)
 
 		// Notify webhook manager of any new repos discovered during this poll.

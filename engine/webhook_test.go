@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -239,8 +240,9 @@ func TestHealthStateTransitions(t *testing.T) {
 		wm, _ := newTestWebhookManager(t)
 		wm.mu.Lock()
 		wm.state = WebhookStreamStartingUp
-		// Set startup time far in the past so grace + health window have both elapsed.
-		wm.startupTime = time.Now().Add(-(webhookStartupGrace + webhookHealthWindow + time.Second))
+		// Set sessionFirstStartAt far in the past — the fix uses sessionFirstStartAt
+		// (not startupTime) so subprocess restarts don't reset the timer.
+		wm.sessionFirstStartAt = time.Now().Add(-(webhookStartupGrace + webhookHealthWindow + time.Second))
 		wm.mu.Unlock()
 
 		wm.checkHealthTransitions()
@@ -627,6 +629,32 @@ func TestIsProjectsV2ItemRejection(t *testing.T) {
 	}
 }
 
+// TestIs422ShapedError verifies 422 detection in stderr output (case-insensitive).
+func TestIs422ShapedError(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"full 422 error", "Error: error creating webhook: HTTP 422: Validation Failed (https://api.github.com/repos/tenaciousvc/fabrik/hooks)", true},
+		{"422 uppercase", "HTTP 422 ERROR", true},
+		{"422 mixed case", "Http 422 Failed", true},
+		{"403 not 422", "HTTP 403 Forbidden", false},
+		{"404 not 422", "HTTP 404 Not Found", false},
+		{"empty string", "", false},
+		{"unrelated error", "connection reset by peer", false},
+		{"rate limited", "HTTP 429 Too Many Requests", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := is422ShapedError(tc.in)
+			if got != tc.want {
+				t.Errorf("is422ShapedError(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestApplyRepoAuthFailure_Quarantine verifies that three consecutive auth-shaped
 // quick exits quarantine all repos in the subscription set.
 func TestApplyRepoAuthFailure_Quarantine(t *testing.T) {
@@ -767,4 +795,351 @@ func TestUpdateRepos_NonQuarantinedRepoAdded(t *testing.T) {
 	if killCount != 1 {
 		t.Errorf("killFn called %d times for new-repo update, want 1", killCount)
 	}
+}
+
+// TestIsDisabled verifies IsDisabled() reflects the disabled field correctly.
+func TestIsDisabled(t *testing.T) {
+	wm, _ := newTestWebhookManager(t)
+	if wm.IsDisabled() {
+		t.Error("IsDisabled() = true initially, want false")
+	}
+	wm.mu.Lock()
+	wm.disabled = true
+	wm.mu.Unlock()
+	if !wm.IsDisabled() {
+		t.Error("IsDisabled() = false after setting disabled=true, want true")
+	}
+}
+
+// fake422Subprocess returns a startSubprocessFn that exits immediately and sends
+// the given stderr string on the channel. Suitable for testing fast-exit scenarios.
+func fake422Subprocess(t *testing.T, stderrOutput string) func(context.Context, []string) (*exec.Cmd, <-chan string, error) {
+	t.Helper()
+	return func(ctx context.Context, args []string) (*exec.Cmd, <-chan string, error) {
+		cmd := exec.CommandContext(ctx, "sh", "-c", "exit 1")
+		if err := cmd.Start(); err != nil {
+			return nil, nil, fmt.Errorf("starting fake subprocess: %w", err)
+		}
+		ch := make(chan string, 1)
+		ch <- stderrOutput
+		return cmd, ch, nil
+	}
+}
+
+// TestCircuitBreaker422 verifies the HTTP 422 permanent-failure circuit-breaker.
+func TestCircuitBreaker422(t *testing.T) {
+	t.Run("three consecutive 422s disable the manager", func(t *testing.T) {
+		wm, _ := newTestWebhookManager(t)
+		// Use a short probe timeout so the fake fast-exiting subprocess counts as a quick exit.
+		wm.probeTimeout = 50 * time.Millisecond
+		// Force per-repo mode (orgModeFailed=true bypasses detectOrgMode so org=="").
+		// The 422 circuit-breaker only fires in per-repo mode (gated on org=="").
+		wm.mu.Lock()
+		wm.orgModeFailed = true
+		wm.mu.Unlock()
+
+		healthChangeFalseCalls := 0
+		wm.healthChangeFn = func(healthy bool) {
+			if !healthy {
+				healthChangeFalseCalls++
+			}
+		}
+
+		callCount := 0
+		wm.startSubprocessFn = func(ctx context.Context, args []string) (*exec.Cmd, <-chan string, error) {
+			callCount++
+			return fake422Subprocess(t, "Error: error creating webhook: HTTP 422: Validation Failed")(ctx, args)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		done := make(chan struct{})
+		go func() {
+			wm.supervise(ctx)
+			close(done)
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("supervise did not return after circuit-breaker fired")
+		}
+
+		wm.mu.Lock()
+		disabled := wm.disabled
+		count := wm.permanentFailureCount
+		wm.mu.Unlock()
+
+		if !disabled {
+			t.Error("manager should be disabled after 3 consecutive 422 failures")
+		}
+		if count != webhookPermanentFailureMax {
+			t.Errorf("permanentFailureCount = %d, want %d", count, webhookPermanentFailureMax)
+		}
+		if healthChangeFalseCalls != 1 {
+			t.Errorf("healthChangeFn(false) called %d times, want 1", healthChangeFalseCalls)
+		}
+		if callCount != webhookPermanentFailureMax {
+			t.Errorf("startSubprocessFn called %d times, want %d", callCount, webhookPermanentFailureMax)
+		}
+	})
+
+	t.Run("non-422 quick exits do not increment counter", func(t *testing.T) {
+		wm, _ := newTestWebhookManager(t)
+		wm.probeTimeout = 50 * time.Millisecond
+		wm.mu.Lock()
+		wm.orgModeFailed = true
+		wm.mu.Unlock()
+
+		wm.startSubprocessFn = fake422Subprocess(t, "connection reset by peer")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+
+		go wm.supervise(ctx)
+		<-ctx.Done()
+
+		wm.mu.Lock()
+		count := wm.permanentFailureCount
+		disabled := wm.disabled
+		wm.mu.Unlock()
+
+		if count != 0 {
+			t.Errorf("permanentFailureCount = %d after non-422 failures, want 0", count)
+		}
+		if disabled {
+			t.Error("manager should not be disabled by non-422 failures")
+		}
+	})
+
+	t.Run("durable run resets the counter", func(t *testing.T) {
+		wm, _ := newTestWebhookManager(t)
+		probeTimeout := 30 * time.Millisecond
+		wm.probeTimeout = probeTimeout
+
+		// Pre-seed counter to just below the threshold; force per-repo mode.
+		wm.mu.Lock()
+		wm.permanentFailureCount = webhookPermanentFailureMax - 1
+		wm.orgModeFailed = true
+		wm.mu.Unlock()
+
+		callCount := 0
+		wm.startSubprocessFn = func(ctx context.Context, args []string) (*exec.Cmd, <-chan string, error) {
+			callCount++
+			var cmd *exec.Cmd
+			if callCount == 1 {
+				// First call: sleep longer than probeTimeout to simulate a durable run.
+				sleepMs := (probeTimeout + 20*time.Millisecond).Milliseconds()
+				cmd = exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("sleep 0.%03d; exit 0", sleepMs))
+			} else {
+				// Subsequent calls: exit immediately.
+				cmd = exec.CommandContext(ctx, "sh", "-c", "exit 1")
+			}
+			if err := cmd.Start(); err != nil {
+				return nil, nil, err
+			}
+			ch := make(chan string, 1)
+			ch <- "Error: HTTP 422: Validation Failed"
+			return cmd, ch, nil
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		go wm.supervise(ctx)
+
+		// Wait for the durable subprocess to finish and counter to reset.
+		time.Sleep(probeTimeout + 100*time.Millisecond)
+
+		wm.mu.Lock()
+		disabled := wm.disabled
+		wm.mu.Unlock()
+
+		if disabled {
+			t.Error("manager should not be disabled: durable run should have reset the counter before the threshold was reached")
+		}
+	})
+}
+
+// TestSessionLastEventAt_NotResetOnRestart verifies that sessionLastEventAt persists
+// across subprocess restarts, while lastEventTime is cleared as supervise() does.
+func TestSessionLastEventAt_NotResetOnRestart(t *testing.T) {
+	wm, _ := newTestWebhookManager(t)
+	secret, _ := generateSecret()
+	wm.mu.Lock()
+	wm.state = WebhookStreamStartingUp
+	wm.startupTime = time.Now()
+	wm.secret = secret
+	wm.mu.Unlock()
+
+	// Send a valid webhook to set both lastEventTime and sessionLastEventAt.
+	body := []byte(`{"action":"created","repository":{"full_name":"myorg/myrepo"}}`)
+	req := signedRequest(t, body, secret)
+	rr := httptest.NewRecorder()
+	wm.handleWebhook(rr, req)
+
+	wm.mu.Lock()
+	sessionEventAt := wm.sessionLastEventAt
+	lastEventAt := wm.lastEventTime
+	wm.mu.Unlock()
+
+	if sessionEventAt.IsZero() {
+		t.Fatal("sessionLastEventAt should be set after verified event")
+	}
+	if lastEventAt.IsZero() {
+		t.Fatal("lastEventTime should be set after verified event")
+	}
+
+	// Simulate subprocess restart — supervise() resets lastEventTime but not sessionLastEventAt.
+	wm.mu.Lock()
+	wm.state = WebhookStreamStartingUp
+	wm.startupTime = time.Now()
+	wm.lastEventTime = time.Time{}
+	wm.mu.Unlock()
+
+	wm.mu.Lock()
+	sessionEventAfterRestart := wm.sessionLastEventAt
+	lastEventAfterRestart := wm.lastEventTime
+	wm.mu.Unlock()
+
+	if sessionEventAfterRestart.IsZero() {
+		t.Error("sessionLastEventAt was reset on subprocess restart — should persist across restarts")
+	}
+	if !sessionEventAfterRestart.Equal(sessionEventAt) {
+		t.Errorf("sessionLastEventAt changed on restart: was %v, now %v", sessionEventAt, sessionEventAfterRestart)
+	}
+	if !lastEventAfterRestart.IsZero() {
+		t.Error("lastEventTime should be zero after restart simulation")
+	}
+}
+
+// TestSessionFirstStartAt_SetOnce verifies sessionFirstStartAt is set on first subprocess
+// start and not overwritten on subsequent starts.
+func TestSessionFirstStartAt_SetOnce(t *testing.T) {
+	wm, _ := newTestWebhookManager(t)
+
+	wm.mu.Lock()
+	if !wm.sessionFirstStartAt.IsZero() {
+		t.Fatal("sessionFirstStartAt should start as zero")
+	}
+	wm.mu.Unlock()
+
+	// Simulate first subprocess start (mirrors supervise() logic).
+	firstStartTime := time.Now()
+	wm.mu.Lock()
+	wm.startupTime = firstStartTime
+	wm.lastEventTime = time.Time{}
+	if wm.sessionFirstStartAt.IsZero() {
+		wm.sessionFirstStartAt = wm.startupTime
+	}
+	wm.mu.Unlock()
+
+	wm.mu.Lock()
+	firstAt := wm.sessionFirstStartAt
+	wm.mu.Unlock()
+
+	if firstAt.IsZero() {
+		t.Fatal("sessionFirstStartAt should be set after first subprocess start")
+	}
+
+	// Simulate second subprocess start.
+	time.Sleep(time.Millisecond)
+	wm.mu.Lock()
+	wm.startupTime = time.Now()
+	wm.lastEventTime = time.Time{}
+	if wm.sessionFirstStartAt.IsZero() {
+		wm.sessionFirstStartAt = wm.startupTime
+	}
+	wm.mu.Unlock()
+
+	wm.mu.Lock()
+	secondAt := wm.sessionFirstStartAt
+	wm.mu.Unlock()
+
+	if !secondAt.Equal(firstAt) {
+		t.Errorf("sessionFirstStartAt changed on second subprocess start: was %v, now %v", firstAt, secondAt)
+	}
+}
+
+// TestHealthTransition_StartingUp_UsesSessionFirstStartAt verifies that the
+// StartingUp→Unhealthy transition uses sessionFirstStartAt (not startupTime),
+// confirming the Bug B fix: subprocess restarts no longer reset the health timer.
+func TestHealthTransition_StartingUp_UsesSessionFirstStartAt(t *testing.T) {
+	wm, _ := newTestWebhookManager(t)
+	wm.mu.Lock()
+	wm.state = WebhookStreamStartingUp
+	// Set startupTime far in the past — old code would have triggered Unhealthy.
+	wm.startupTime = time.Now().Add(-(webhookStartupGrace + webhookHealthWindow + time.Second))
+	// sessionFirstStartAt is recent — should NOT trigger Unhealthy.
+	wm.sessionFirstStartAt = time.Now()
+	wm.mu.Unlock()
+
+	wm.checkHealthTransitions()
+
+	wm.mu.Lock()
+	state := wm.state
+	wm.mu.Unlock()
+	if state == WebhookStreamUnhealthy {
+		t.Error("state should NOT be Unhealthy when only startupTime is old but sessionFirstStartAt is recent — the fix uses sessionFirstStartAt")
+	}
+}
+
+// TestHealthTransition_SessionStale60s verifies that stale sessionLastEventAt
+// triggers Unhealthy faster than the 10-minute webhookHealthWindow — both from
+// StartingUp and Healthy states.
+func TestHealthTransition_SessionStale60s(t *testing.T) {
+	t.Run("stale sessionLastEventAt triggers unhealthy from StartingUp", func(t *testing.T) {
+		wm, _ := newTestWebhookManager(t)
+		wm.mu.Lock()
+		wm.state = WebhookStreamStartingUp
+		wm.startupTime = time.Now()
+		wm.sessionFirstStartAt = time.Now()
+		wm.sessionLastEventAt = time.Now().Add(-(webhookEventStaleTimeout + time.Second))
+		wm.mu.Unlock()
+
+		wm.checkHealthTransitions()
+
+		wm.mu.Lock()
+		state := wm.state
+		wm.mu.Unlock()
+		if state != WebhookStreamUnhealthy {
+			t.Errorf("state = %q, want %q when sessionLastEventAt is stale (StartingUp)", state, WebhookStreamUnhealthy)
+		}
+	})
+
+	t.Run("stale sessionLastEventAt triggers unhealthy from Healthy", func(t *testing.T) {
+		wm, _ := newTestWebhookManager(t)
+		wm.mu.Lock()
+		wm.state = WebhookStreamHealthy
+		wm.lastEventTime = time.Now().Add(-1 * time.Minute) // within 10-min window
+		wm.sessionLastEventAt = time.Now().Add(-(webhookEventStaleTimeout + time.Second))
+		wm.mu.Unlock()
+
+		wm.checkHealthTransitions()
+
+		wm.mu.Lock()
+		state := wm.state
+		wm.mu.Unlock()
+		if state != WebhookStreamUnhealthy {
+			t.Errorf("state = %q, want %q when sessionLastEventAt is stale (Healthy)", state, WebhookStreamUnhealthy)
+		}
+	})
+
+	t.Run("fresh sessionLastEventAt keeps Healthy state", func(t *testing.T) {
+		wm, _ := newTestWebhookManager(t)
+		wm.mu.Lock()
+		wm.state = WebhookStreamHealthy
+		wm.lastEventTime = time.Now().Add(-1 * time.Minute) // within 10-min window
+		wm.sessionLastEventAt = time.Now().Add(-10 * time.Second) // fresh (< 60s)
+		wm.mu.Unlock()
+
+		wm.checkHealthTransitions()
+
+		wm.mu.Lock()
+		state := wm.state
+		wm.mu.Unlock()
+		if state != WebhookStreamHealthy {
+			t.Errorf("state = %q, want %q when sessionLastEventAt is fresh", state, WebhookStreamHealthy)
+		}
+	})
 }

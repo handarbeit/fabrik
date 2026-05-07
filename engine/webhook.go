@@ -44,6 +44,14 @@ const (
 	// webhookRepoFailureThreshold is the number of consecutive auth-shaped quick exits
 	// required before a repo is quarantined for the session.
 	webhookRepoFailureThreshold = 3
+	// webhookEventStaleTimeout: if no verified event has arrived within this window
+	// (measured from sessionLastEventAt), the health monitor transitions to Unhealthy.
+	// Provides fast pausing (60s) during tight restart loops where startupTime resets
+	// would otherwise prevent the slower webhookHealthWindow check from firing.
+	webhookEventStaleTimeout = 60 * time.Second
+	// webhookPermanentFailureMax: consecutive HTTP 422 quick-exits before the
+	// circuit-breaker fires and switches to poll-only mode.
+	webhookPermanentFailureMax = 3
 )
 
 // defaultWebhookEvents is the canonical event list from the spec (R6).
@@ -75,6 +83,12 @@ type webhookManager struct {
 	// The caller is responsible for the cmd != nil check; killFn handles nil Process.
 	killFn func(*exec.Cmd)
 
+	// startSubprocessFn overrides startSubprocessInternal when non-nil (tests only).
+	startSubprocessFn func(ctx context.Context, args []string) (*exec.Cmd, <-chan string, error)
+
+	// probeTimeout overrides orgModeProbeTimeout when non-zero (tests only).
+	probeTimeout time.Duration
+
 	// listener — bound once before first subprocess start, reused across restarts
 	listener net.Listener
 	port     int
@@ -98,14 +112,21 @@ type webhookManager struct {
 
 	// health (protected by mu)
 	state         WebhookHealthState
-	startupTime   time.Time // when current subprocess started
-	lastEventTime time.Time // zero until first verified event received
+	startupTime   time.Time // when current subprocess started (resets on restart)
+	lastEventTime time.Time // zero until first verified event; resets on restart
+
+	// session-level health tracking — never reset on subprocess restart (protected by mu)
+	sessionFirstStartAt time.Time // set once when first subprocess starts
+	sessionLastEventAt  time.Time // set on every verified event; never cleared on restart
 
 	// secret rotation (protected by mu)
 	consecutiveFailures int
 	firstFailureAt      time.Time
 	rotateCycleCount    int
 	disabled            bool
+
+	// 422 circuit-breaker (protected by mu)
+	permanentFailureCount int // consecutive quick-exit runs with HTTP 422 stderr
 
 	// per-type event counters (protected by mu)
 	eventCounts map[string]int
@@ -356,6 +377,32 @@ func (wm *webhookManager) applyRepoAuthFailure(elapsed time.Duration, stderrCont
 	return quarantined
 }
 
+// effectiveProbeTimeout returns the probe timeout for org-mode and 422 detection.
+// Uses probeTimeout when set (tests only); falls back to orgModeProbeTimeout.
+func (wm *webhookManager) effectiveProbeTimeout() time.Duration {
+	if wm.probeTimeout > 0 {
+		return wm.probeTimeout
+	}
+	return orgModeProbeTimeout
+}
+
+// is422ShapedError returns true when the stderr output indicates an HTTP 422
+// Validation Failed response — a permanent configuration error (quota exhausted,
+// stale token, conflicting webhook). Used by the circuit-breaker in supervise()
+// to stop the restart loop after repeated permanent failures in per-repo mode.
+func is422ShapedError(s string) bool {
+	return strings.Contains(strings.ToLower(s), "422")
+}
+
+// IsDisabled returns true when the webhook manager has been permanently disabled
+// (circuit-breaker fired or HMAC rotation max-cycles reached). While disabled,
+// the engine operates in poll-only mode.
+func (wm *webhookManager) IsDisabled() bool {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	return wm.disabled
+}
+
 // containsEvent reports whether name is in the events slice.
 func containsEvent(events []string, name string) bool {
 	for _, e := range events {
@@ -603,7 +650,11 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 
 		args := buildGhArgs(org, repos, port, secret, events)
 		startedAt := time.Now()
-		cmd, stderrCh, err := wm.startSubprocessInternal(ctx, args)
+		startFn := wm.startSubprocessInternal
+		if wm.startSubprocessFn != nil {
+			startFn = wm.startSubprocessFn
+		}
+		cmd, stderrCh, err := startFn(ctx, args)
 		if err != nil {
 			wm.logFn(0, "webhook", "failed to start gh webhook forward: %v\n", err)
 			select {
@@ -623,6 +674,9 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 		wm.state = WebhookStreamStartingUp
 		wm.startupTime = time.Now()
 		wm.lastEventTime = time.Time{}
+		if wm.sessionFirstStartAt.IsZero() {
+			wm.sessionFirstStartAt = wm.startupTime
+		}
 		wm.mu.Unlock()
 		wm.emitCurrentState()
 
@@ -648,11 +702,13 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 		default:
 		}
 
+		probeTimeout := wm.effectiveProbeTimeout()
+
 		// Time-based convergent fallback for projects_v2_item in per-repo mode.
 		// If the subprocess exits quickly and projects_v2_item is still in the event
 		// list (meaning the stderr-based detection did not fire), drop it for the next
 		// restart to break any infinite crash-restart cycle.
-		if org == "" && elapsed < orgModeProbeTimeout {
+		if org == "" && elapsed < probeTimeout {
 			wm.mu.Lock()
 			if containsEvent(wm.events, "projects_v2_item") {
 				wm.events = filterOutEvent(wm.events, "projects_v2_item")
@@ -664,10 +720,40 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 			}
 		}
 
+		// 422 circuit-breaker: per-repo mode only.
+		// Quick exit with HTTP 422 stderr → permanent configuration error (quota, auth, conflict).
+		// Three consecutive such exits disable the webhook manager and switch to poll-only mode.
+		// Quick exits with non-422 stderr are transient crashes; they neither increment nor reset
+		// the counter. A durable run (elapsed >= orgModeProbeTimeout) resets the counter.
+		if org == "" {
+			if elapsed < probeTimeout && is422ShapedError(stderrContent) {
+				wm.mu.Lock()
+				wm.permanentFailureCount++
+				count := wm.permanentFailureCount
+				if count >= webhookPermanentFailureMax {
+					wm.disabled = true
+					wm.mu.Unlock()
+					wm.logFn(0, "webhook", "WARNING: webhook subscription permanently failed after %d consecutive HTTP 422 errors — "+
+						"switching to poll-only mode. Check 'gh auth status' and repo webhook quota, then restart Fabrik.\n",
+						webhookPermanentFailureMax)
+					if wm.healthChangeFn != nil {
+						wm.healthChangeFn(false)
+					}
+					return
+				}
+				wm.mu.Unlock()
+			} else if elapsed >= probeTimeout {
+				// Subprocess ran durably — reset the 422 circuit-breaker counter.
+				wm.mu.Lock()
+				wm.permanentFailureCount = 0
+				wm.mu.Unlock()
+			}
+		}
+
 		// Detect org mode rejection: combine time-based and stderr content signals.
 		// A quick exit with an auth-shaped error → permanent per-repo fallback.
 		// A quick exit without an auth error → transient crash; retry org mode with backoff.
-		if org != "" && elapsed < orgModeProbeTimeout {
+		if org != "" && elapsed < probeTimeout {
 			if isAuthShapedError(stderrContent) {
 				wm.logFn(0, "webhook", "org-level webhook failed (permission error, %v) — falling back to per-repo subscription\n", elapsed.Round(time.Millisecond))
 				wm.mu.Lock()
@@ -791,11 +877,21 @@ func (wm *webhookManager) checkHealthTransitions() {
 		if !wm.lastEventTime.IsZero() {
 			// Event received; HTTP handler already set state to Healthy.
 			// This is a no-op catch.
-		} else if !wm.startupTime.IsZero() && now.Sub(wm.startupTime) > webhookStartupGrace+webhookHealthWindow {
+		} else if !wm.sessionLastEventAt.IsZero() && now.Sub(wm.sessionLastEventAt) > webhookEventStaleTimeout {
+			// R-B4: cross-restart stale check — fires faster than the grace+window path
+			// when the subprocess is in a tight restart loop (each restart resets startupTime).
+			newState = WebhookStreamUnhealthy
+		} else if !wm.sessionFirstStartAt.IsZero() && now.Sub(wm.sessionFirstStartAt) > webhookStartupGrace+webhookHealthWindow {
+			// R-B3: use sessionFirstStartAt (not startupTime) so subprocess restarts
+			// don't reset the timer; this is the fix for the Bug B root cause.
 			newState = WebhookStreamUnhealthy
 		}
 	case WebhookStreamHealthy:
-		if !wm.lastEventTime.IsZero() && now.Sub(wm.lastEventTime) > webhookHealthWindow {
+		if !wm.sessionLastEventAt.IsZero() && now.Sub(wm.sessionLastEventAt) > webhookEventStaleTimeout {
+			// R-B4: 60s stale check applies to Healthy state too, providing faster
+			// detection when the stream goes quiet during or after a restart loop.
+			newState = WebhookStreamUnhealthy
+		} else if !wm.lastEventTime.IsZero() && now.Sub(wm.lastEventTime) > webhookHealthWindow {
 			newState = WebhookStreamUnhealthy
 		}
 	}
@@ -942,7 +1038,9 @@ func (wm *webhookManager) handleWebhook(w http.ResponseWriter, r *http.Request) 
 	if prevState != WebhookStreamHealthy {
 		wm.state = WebhookStreamHealthy
 	}
-	wm.lastEventTime = time.Now()
+	now := time.Now()
+	wm.lastEventTime = now
+	wm.sessionLastEventAt = now // never reset on subprocess restart
 	wm.mu.Unlock()
 	if prevState != WebhookStreamHealthy {
 		wm.logFn(0, "webhook", "health state: %s → %s\n", prevState, WebhookStreamHealthy)
