@@ -34,7 +34,7 @@ const (
 	webhookIdleCap           = 60 * time.Minute
 	webhookMaxRestartBackoff = 60 * time.Second
 	// lightReconcileInterval is the default cadence for the reconcileTicker goroutine in poll.go.
-	lightReconcileInterval = 3 * time.Minute
+	lightReconcileInterval   = 3 * time.Minute
 	webhookRotationFailures  = 5
 	webhookRotationWindow    = 2 * time.Minute
 	webhookRotationMaxCycles = 2
@@ -78,9 +78,9 @@ type webhookManager struct {
 	mu sync.Mutex
 
 	// injected dependencies
-	logFn         func(issueNumber int, tag, format string, args ...any)
-	wakeCh        chan struct{}
-	emitFn        func(tui.Event)
+	logFn   func(issueNumber int, tag, format string, args ...any)
+	wakeCh  chan struct{}
+	emitFn  func(tui.Event)
 	deltaFn func(eventType string, payload []byte) // nil when board cache disabled
 
 	// killFn terminates a subprocess. Defaults to killProcGroup; overridable in tests.
@@ -101,15 +101,15 @@ type webhookManager struct {
 	port     int
 
 	// subprocess state (protected by mu)
-	currentCmd    *exec.Cmd
-	secret        string
-	repos         map[string]bool
-	events        []string
-	orgModeFailed      bool // true after org-level probe fails; use per-repo thereafter
-	repoFailureCounts  map[string]int  // consecutive auth-shaped quick exits per repo (protected by mu)
+	currentCmd          *exec.Cmd
+	secret              string
+	repos               map[string]bool
+	events              []string
+	orgModeFailed       bool            // true after org-level probe fails; use per-repo thereafter
+	repoFailureCounts   map[string]int  // consecutive auth-shaped quick exits per repo (protected by mu)
 	unsubscribableRepos map[string]bool // repos quarantined for this session (protected by mu)
-	stopOnce           sync.Once
-	stopCh        chan struct{}
+	stopOnce            sync.Once
+	stopCh              chan struct{}
 
 	// repoReadyCh is closed when the first non-empty repo set is known.
 	// supervise blocks on this before launching the subprocess so multi-repo
@@ -154,20 +154,20 @@ func newWebhookManager(
 		copy(evts, defaultWebhookEvents)
 	}
 	wm := &webhookManager{
-		logFn:              logFn,
-		wakeCh:             wakeCh,
-		emitFn:             emitFn,
-		deltaFn:            deltaFn,
-		cleanupFn:          cleanupFn,
-		repos:              copyRepoSet(repos),
-		events:             evts,
-		state:              WebhookStreamUnhealthy, // becomes StartingUp when subprocess launches
-		eventCounts:        make(map[string]int),
-		repoFailureCounts:  make(map[string]int),
+		logFn:               logFn,
+		wakeCh:              wakeCh,
+		emitFn:              emitFn,
+		deltaFn:             deltaFn,
+		cleanupFn:           cleanupFn,
+		repos:               copyRepoSet(repos),
+		events:              evts,
+		state:               WebhookStreamUnhealthy, // becomes StartingUp when subprocess launches
+		eventCounts:         make(map[string]int),
+		repoFailureCounts:   make(map[string]int),
 		unsubscribableRepos: make(map[string]bool),
-		stopCh:             make(chan struct{}),
-		repoReadyCh:        make(chan struct{}),
-		pendingEchoes:      make(map[string]time.Time),
+		stopCh:              make(chan struct{}),
+		repoReadyCh:         make(chan struct{}),
+		pendingEchoes:       make(map[string]time.Time),
 		killFn: func(cmd *exec.Cmd) {
 			if cmd != nil && cmd.Process != nil {
 				killProcGroup(cmd)

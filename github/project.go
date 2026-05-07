@@ -489,9 +489,9 @@ query($id: ID!) {
 	var result struct {
 		Data struct {
 			Node *struct {
-				Number int    `json:"number"`
-				Body   string `json:"body"`
-				URL    string `json:"url"`
+				Number     int    `json:"number"`
+				Body       string `json:"body"`
+				URL        string `json:"url"`
 				Repository *struct {
 					NameWithOwner string `json:"nameWithOwner"`
 				} `json:"repository"`
@@ -1090,13 +1090,13 @@ func (c *Client) FetchProjectItem(owner, repo string, issueNumber int) (*Project
 	url := c.baseURL + "/repos/" + owner + "/" + repo + "/issues/" + strconv.Itoa(issueNumber)
 
 	var raw struct {
-		Number    int    `json:"number"`
-		Title     string `json:"title"`
-		Body      string `json:"body"`
-		State     string `json:"state"`
-		HTMLURL   string `json:"html_url"`
-		NodeID    string `json:"node_id"`
-		Labels    []struct {
+		Number  int    `json:"number"`
+		Title   string `json:"title"`
+		Body    string `json:"body"`
+		State   string `json:"state"`
+		HTMLURL string `json:"html_url"`
+		NodeID  string `json:"node_id"`
+		Labels  []struct {
 			Name string `json:"name"`
 		} `json:"labels"`
 		Assignees []struct {

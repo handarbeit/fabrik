@@ -49,9 +49,9 @@ type Config struct {
 	Webhooks          bool
 	WebhookPort       int
 	WebhookEvents     string // comma-separated; empty means default event set
-	BoardCacheMode       string // "in-memory" or "none"; empty = auto (in-memory when webhooks enabled)
-	StatusPollSeconds    int    // Layer 2 status-only sweep cadence in seconds; 0 = use default (15)
-	ReconcileInterval    int    // seconds; 0 means use default (180 = 3 min); also FABRIK_RECONCILE_INTERVAL
+	BoardCacheMode    string // "in-memory" or "none"; empty = auto (in-memory when webhooks enabled)
+	StatusPollSeconds int    // Layer 2 status-only sweep cadence in seconds; 0 = use default (15)
+	ReconcileInterval int    // seconds; 0 means use default (180 = 3 min); also FABRIK_RECONCILE_INTERVAL
 }
 
 func Execute() error {
@@ -531,31 +531,31 @@ func Execute() error {
 	}
 
 	eng, err := engine.New(engine.Config{
-		Owner:             cfg.Owner,
-		Repo:              cfg.Repo,
-		ProjectNum:        cfg.ProjectNum,
-		OwnerType:         cfg.OwnerType,
-		User:              cfg.User,
-		Token:             cfg.Token,
-		Version:           Version,
-		Yolo:              cfg.Yolo,
-		AutoUpgrade:       cfg.AutoUpgrade,
-		GitSSH:            cfg.GitSSH,
-		PollSeconds:       cfg.PollSeconds,
-		MaxConcurrent:     cfg.MaxConcurrent,
-		MaxRetries:        cfg.MaxRetries,
-		ReviewWaitTimeout: reviewWaitTimeout(cfg.ReviewWaitTimeout),
-		MaxReviewCycles:   maxReviewCycles(cfg.MaxReviewCycles),
-		CIWaitTimeout:     ciWaitTimeout(cfg.CIWaitTimeout),
-		MaxCiFixCycles:    maxCiFixCycles(cfg.MaxCiFixCycles),
-		MaxRebaseCycles:   maxRebaseCycles(cfg.MaxRebaseCycles),
-		ClaudeWaitDelay:   claudeWaitDelay(cfg.ClaudeWaitDelay),
-		DebugOutput:       cfg.DebugOutput,
-		PluginDir:         cfg.PluginDir,
-		Stages:            stageCfgs,
-		Webhooks:          cfg.Webhooks,
-		WebhookPort:       cfg.WebhookPort,
-		WebhookEvents:     webhookEvents,
+		Owner:                    cfg.Owner,
+		Repo:                     cfg.Repo,
+		ProjectNum:               cfg.ProjectNum,
+		OwnerType:                cfg.OwnerType,
+		User:                     cfg.User,
+		Token:                    cfg.Token,
+		Version:                  Version,
+		Yolo:                     cfg.Yolo,
+		AutoUpgrade:              cfg.AutoUpgrade,
+		GitSSH:                   cfg.GitSSH,
+		PollSeconds:              cfg.PollSeconds,
+		MaxConcurrent:            cfg.MaxConcurrent,
+		MaxRetries:               cfg.MaxRetries,
+		ReviewWaitTimeout:        reviewWaitTimeout(cfg.ReviewWaitTimeout),
+		MaxReviewCycles:          maxReviewCycles(cfg.MaxReviewCycles),
+		CIWaitTimeout:            ciWaitTimeout(cfg.CIWaitTimeout),
+		MaxCiFixCycles:           maxCiFixCycles(cfg.MaxCiFixCycles),
+		MaxRebaseCycles:          maxRebaseCycles(cfg.MaxRebaseCycles),
+		ClaudeWaitDelay:          claudeWaitDelay(cfg.ClaudeWaitDelay),
+		DebugOutput:              cfg.DebugOutput,
+		PluginDir:                cfg.PluginDir,
+		Stages:                   stageCfgs,
+		Webhooks:                 cfg.Webhooks,
+		WebhookPort:              cfg.WebhookPort,
+		WebhookEvents:            webhookEvents,
 		BoardCacheMode:           cfg.BoardCacheMode,
 		ProjectStatusPollSeconds: statusPollSeconds(cfg.StatusPollSeconds),
 		ReconcileInterval:        reconcileIntervalDuration(cfg.ReconcileInterval),
