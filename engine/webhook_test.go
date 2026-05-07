@@ -1099,7 +1099,7 @@ func TestHealthTransition_StartingUp_SkipsGraceWindowWhenEventsReceived(t *testi
 	wm.state = WebhookStreamStartingUp
 	// sessionFirstStartAt is old enough to trigger the grace+window path.
 	wm.sessionFirstStartAt = time.Now().Add(-(webhookStartupGrace + webhookHealthWindow + time.Second))
-	// But we have received events recently (within the 60s stale threshold).
+	// But we have received events recently (within the webhookEventStaleTimeout threshold).
 	wm.sessionLastEventAt = time.Now().Add(-10 * time.Second)
 	wm.mu.Unlock()
 
@@ -1113,10 +1113,10 @@ func TestHealthTransition_StartingUp_SkipsGraceWindowWhenEventsReceived(t *testi
 	}
 }
 
-// TestHealthTransition_SessionStale60s verifies that stale sessionLastEventAt
+// TestHealthTransition_SessionStale verifies that stale sessionLastEventAt
 // triggers Unhealthy faster than the 10-minute webhookHealthWindow — both from
 // StartingUp and Healthy states.
-func TestHealthTransition_SessionStale60s(t *testing.T) {
+func TestHealthTransition_SessionStale(t *testing.T) {
 	t.Run("stale sessionLastEventAt triggers unhealthy from StartingUp", func(t *testing.T) {
 		wm, _ := newTestWebhookManager(t)
 		wm.mu.Lock()
@@ -1159,7 +1159,7 @@ func TestHealthTransition_SessionStale60s(t *testing.T) {
 		wm.mu.Lock()
 		wm.state = WebhookStreamHealthy
 		wm.lastEventTime = time.Now().Add(-1 * time.Minute) // within 10-min window
-		wm.sessionLastEventAt = time.Now().Add(-10 * time.Second) // fresh (< 60s)
+		wm.sessionLastEventAt = time.Now().Add(-10 * time.Second) // fresh (< webhookEventStaleTimeout)
 		wm.mu.Unlock()
 
 		wm.checkHealthTransitions()
