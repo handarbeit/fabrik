@@ -821,6 +821,135 @@ func TestMarkPRReady_AllTransientExhausted(t *testing.T) {
 	}
 }
 
+// TestProcessItem_PostToPR_CreatesDraftPRBeforePosting verifies that when a stage
+// completes with both create_draft_pr and post_to_pr true, the draft PR is created
+// before postOutputToPR runs — so output is posted to the PR, not the issue fallback.
+func TestProcessItem_PostToPR_CreatesDraftPRBeforePosting(t *testing.T) {
+	skipIfNoGit(t)
+
+	const issueNum = 60
+	const prNum = 300
+
+	// Set up a repo with a real remote so ensureDraftPR can push the branch.
+	// initBareRepo creates a plain local repo; we use it as the "remote" and
+	// clone it so the working repo has origin configured.
+	remoteDir := initBareRepo(t)
+	workingDir := t.TempDir()
+	runCmd := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("cmd %v: %s: %v", args, out, err)
+		}
+	}
+	runCmd("", "git", "clone", remoteDir, workingDir)
+	runCmd(workingDir, "git", "config", "user.email", "test@test.com")
+	runCmd(workingDir, "git", "config", "user.name", "Test")
+
+	wm := NewWorktreeManager(workingDir)
+
+	// prExists tracks whether the draft PR has been created yet.
+	// FindPRForIssue returns 0 until CreateDraftPR is called, simulating the bug
+	// scenario: no PR exists at stage start, PR is created by ensureDraftPR.
+	var prExists bool
+	var draftPRCreated bool
+	// issueCommentBeforePR is set when AddComment is called on the issue number
+	// before the draft PR has been created — this is the bug: full stage output
+	// falls back to the issue instead of the PR.
+	var issueCommentBeforePR bool
+
+	client := &mockGitHubClient{
+		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
+			if prExists {
+				return prNum, nil
+			}
+			return 0, nil
+		},
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			draftPRCreated = true
+			prExists = true
+			return prNum, nil
+		},
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			if issueNumber == issueNum && !prExists {
+				// AddComment on the issue before the PR existed — this is the fallback bug.
+				issueCommentBeforePR = true
+			}
+			return issueNumber*10 + 1, nil
+		},
+		getIssueBodyFn: func(owner, repo string, issueNumber int) (string, error) {
+			if issueNumber == prNum {
+				return "## Verification\n\n(Populated by Implement)\n\n---\n\nCloses #60", nil
+			}
+			return "issue body", nil
+		},
+		updateIssueBodyFn: func(owner, repo string, issueNumber int, body string) error {
+			return nil
+		},
+		fetchLabelsFn: func(owner, repo string, issueNumber int) ([]string, error) {
+			return nil, nil
+		},
+	}
+
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "Implementation done.\nFABRIK_STAGE_COMPLETE", true, TokenUsage{}, nil
+		},
+	}
+
+	stgs := []*stages.Stage{
+		{
+			Name:          "Implement",
+			Order:         1,
+			Prompt:        "implement it",
+			CreateDraftPR: true,
+			PostToPR:      true,
+			Completion:    stages.CompletionCriteria{Type: "claude"},
+		},
+	}
+	statusOpts := make(map[string]string)
+	for _, s := range stgs {
+		statusOpts[s.Name] = "OPT_" + s.Name
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        stgs,
+		},
+		client,
+		claude,
+		wm,
+	)
+	eng.statusField = &gh.StatusField{FieldID: "FIELD_1", Options: statusOpts}
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: issueNum,
+		Title:  "My feature",
+		Status: "Implement",
+		ItemID: "PVTI_60",
+	}
+
+	eng.processItem(t.Context(), board, item)
+
+	if !draftPRCreated {
+		t.Fatal("expected CreateDraftPR to be called")
+	}
+
+	// The bug: full stage output posted to the issue before the PR existed.
+	// With the fix, ensureDraftPR runs before postOutputToPR, so prExists is true
+	// by the time any AddComment on the issue number fires (summary, not fallback).
+	if issueCommentBeforePR {
+		t.Error("AddComment called on issue before draft PR was created — output fell back to issue instead of PR")
+	}
+}
+
 func TestMarkPRReady_NonTransientNoRetry(t *testing.T) {
 	skipIfNoGit(t)
 	repoDir := initBareRepo(t)
