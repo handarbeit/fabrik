@@ -114,8 +114,13 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// Step 2: Add editing label
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:editing"); err != nil {
 		return fmt.Errorf("adding editing label: %w", err)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:editing")
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:editing")
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(item.Repo, item.Number)+"+"+"fabrik:editing")
+		}
 	}
 
 	// Step 3: Ensure worktree
@@ -331,6 +336,9 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 			if _, err := e.client.AddComment(owner, repo, prNumber, prComment); err != nil {
 				e.logf(item.Number, "warn", "could not post review feedback summary to PR #%d: %v\n", prNumber, err)
 			} else {
+				if e.webhookMgr != nil {
+					e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, prNumber))
+				}
 				e.logf(item.Number, "post", "review feedback summary posted to PR #%d (%d thread(s))\n", prNumber, len(threads))
 			}
 		} else {
