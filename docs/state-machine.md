@@ -1054,7 +1054,7 @@ When the webhook stream is healthy or starting up, steady-state polling is suppr
 |-------|---------|---------------|---------------|
 | `WebhookStreamStartingUp` | Subprocess launched; no reconcile tick has completed yet. State persists until the first `reconcileTicker` tick confirms no drift. | 60 min | Blue ○ |
 | `WebhookStreamHealthy` | Most recent `reconcileTicker` tick found no drift between in-memory cache and GitHub | 60 min | Green ● |
-| `WebhookStreamUnhealthy` | Most recent `reconcileTicker` tick found drift; Pause/Reconcile/Resume in progress | 5 min | Yellow ◌ |
+| `WebhookStreamUnhealthy` | Cache is known to be out of sync (most recent `reconcileTicker` tick found drift, Pause/Reconcile/Resume in progress), OR subprocess failed to start / was permanently disabled by the 422 circuit-breaker | 5 min | Yellow ◌ |
 
 **State transitions (reconcile-driven — webhooks no longer drive health state):**
 - `StartingUp → Healthy`: first `reconcileTicker` tick completes with no drift (or drift is reconciled).

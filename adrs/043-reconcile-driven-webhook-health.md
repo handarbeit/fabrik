@@ -26,7 +26,7 @@ The `reconcileTicker` goroutine runs in `engine/poll.go:Run()` at a configurable
 
 1. Snapshots the current cache items (under lock).
 2. Calls `c.fallback.FetchProjectBoard(...)` to fetch a shallow live snapshot from GitHub (without holding the lock).
-3. Compares each item on `status`, `len(labels)`, and `updatedAt`.
+3. Compares each item on `status` and `updatedAt` (label count is excluded — the board query returns at most 30 labels while the cache may hold the full deep-fetched set; label mutations are captured by `updatedAt`).
 4. Returns `(driftCount int, driftedKeys []string, freshBoard *gh.ProjectBoard, err error)`.
 
 The `reconcileTicker` goroutine acts on the result:
@@ -74,7 +74,7 @@ Each `LightReconcile` tick costs one `FetchProjectBoard` GraphQL call. At the de
 - **Drift is detected within one reconcile interval** (≤ 3 minutes by default) regardless of whether a webhook event arrived.
 - **Network errors during reconcile are silent.** A transient GitHub API failure during `LightReconcile` logs a warning and makes no state change — it does not flip health to unhealthy, avoiding the false-positive regression introduced by a different mechanism.
 - **Drift window briefly sets state to `Unhealthy` then immediately back to `Healthy`** within the same tick. If `IsHealthyOrStartingUp()` is sampled in this window, the poll loop uses the 5-minute idle cap for one cycle. This is acceptable and mirrors the existing Pause/Reconcile/Resume window.
-- **Startup latency**: The engine operates with the shorter idle cap (5 minutes) for up to ~3 minutes at startup, until the first reconcile tick confirms no drift and transitions to `Healthy`. Previously, the first verified webhook event could trigger a `Healthy` transition within seconds. This is a minor startup regression accepted as a tradeoff for correctness.
+- **Startup latency**: The 5-minute idle cap applies only in the brief window before the subprocess launches (state = `Unhealthy`). Once the subprocess starts and state becomes `StartingUp`, `IsHealthyOrStartingUp()` returns `true` and the 60-minute idle cap applies immediately. The engine stays in `StartingUp` (60-minute cap) until the first reconcile tick (~3 minutes), at which point it transitions to `Healthy`. Previously, the first verified webhook event could instantly transition from `StartingUp` to `Healthy`; under the new model this takes up to one reconcile interval. This is a minor startup regression accepted as a tradeoff for correctness.
 - **422 circuit-breaker no longer immediately pauses the cache.** The circuit-breaker in `supervise()` still sets `wm.disabled = true` and `wm.state = WebhookStreamUnhealthy`, but no longer calls `cacheImpl.Pause()` directly. The cache continues serving from its in-memory state until the next reconcile tick; if the board is truly unchanged (as expected when webhooks are merely disabled), the tick finds no drift and health remains or recovers to `Healthy`.
 
 ## Cross-references
