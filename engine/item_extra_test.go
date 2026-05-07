@@ -707,13 +707,14 @@ func TestItemMayNeedWork_AwaitingCI_BypassesUpdatedAtCache(t *testing.T) {
 	}
 }
 
-// TestPollPreFilter_AwaitingReview_WithinCooldown_Skipped verifies that items with
-// fabrik:awaiting-review use the CooldownAt["review-blocked"] path and are skipped
-// when the cooldown is still active (not in cycleSet, no bypass).
-//
-// Real-world repro: issue #467 — fabrik filed this regression after observing an
-// issue stuck for hours waiting on Copilot when Phase 1 should have re-fired.
-func TestPollPreFilter_AwaitingReview_WithinCooldown_Skipped(t *testing.T) {
+// TestPollPreFilter_AwaitingReview_WithinCooldown_Bypassed verifies that items with
+// fabrik:awaiting-review are deep-fetched even when CooldownAt["review-blocked"] is
+// active. fabrik:awaiting-review is in the unconditional bypass list (hasAwaitingLabel)
+// alongside fabrik:awaiting-ci and fabrik:rebase-needed. This ensures that when a
+// review-submission webhook fires and adds the item to cycleSet, the catch-up loop
+// evaluates checkReviewGate on the very next poll cycle — not delayed by cooldown.
+// Fix: issue #616.
+func TestPollPreFilter_AwaitingReview_WithinCooldown_Bypassed(t *testing.T) {
 	ts := time.Now().Add(-time.Minute)
 	var deepFetched bool
 	client := &mockGitHubClient{
@@ -731,8 +732,8 @@ func TestPollPreFilter_AwaitingReview_WithinCooldown_Skipped(t *testing.T) {
 	if _, err := eng.poll(t.Context()); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
-	if deepFetched {
-		t.Error("fabrik:awaiting-review item within cooldown should not be deep-fetched")
+	if !deepFetched {
+		t.Error("fabrik:awaiting-review item should bypass the cooldown gate and be deep-fetched every poll cycle (issue #616)")
 	}
 }
 
@@ -760,11 +761,12 @@ func TestPollPreFilter_AwaitingReview_ExpiredCooldown_Admitted(t *testing.T) {
 	}
 }
 
-// TestPollPreFilter_AwaitingReview_NoCooldown_NotBypassed verifies that
-// fabrik:awaiting-review is NOT in the unconditional bypass list (unlike
-// fabrik:awaiting-ci and fabrik:rebase-needed). Without a CooldownAt entry and
-// without being in cycleSet, the item is filtered by the pre-filter.
-func TestPollPreFilter_AwaitingReview_NoCooldown_NotBypassed(t *testing.T) {
+// TestPollPreFilter_AwaitingReview_NoCooldown_Bypassed verifies that
+// fabrik:awaiting-review is in the unconditional bypass list (same as
+// fabrik:awaiting-ci and fabrik:rebase-needed). Items with this label are
+// deep-fetched on every poll cycle regardless of CooldownAt state.
+// Fix: issue #616.
+func TestPollPreFilter_AwaitingReview_NoCooldown_Bypassed(t *testing.T) {
 	ts := time.Now().Add(-time.Minute)
 	var deepFetched bool
 	client := &mockGitHubClient{
@@ -779,14 +781,13 @@ func TestPollPreFilter_AwaitingReview_NoCooldown_NotBypassed(t *testing.T) {
 	eng := testEngine(client, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 60
 	// Seed the store so the pre-filter sees this as a known (previously-processed) item.
-	// Item is in store but has no CooldownAt → not bypassed by the active-cooldown path.
 	eng.store.Apply(itemstate.InvocationRecorded{Repo: "owner/repo", Number: 68, Completed: true})
-	// Not in cycleSet, no awaiting-ci/rebase-needed, no CooldownAt → should be skipped.
+	// fabrik:awaiting-review unconditionally bypasses the cooldown gate (issue #616).
 	if _, err := eng.poll(t.Context()); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
-	if deepFetched {
-		t.Error("fabrik:awaiting-review without CooldownAt entry should be filtered (no per-poll bypass)")
+	if !deepFetched {
+		t.Error("fabrik:awaiting-review should unconditionally bypass the pre-filter and be deep-fetched every poll cycle (issue #616)")
 	}
 }
 
