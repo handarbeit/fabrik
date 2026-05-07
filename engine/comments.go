@@ -119,7 +119,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:editing")
 		}
 		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(item.Repo, item.Number)+"+"+"fabrik:editing")
+			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:editing")
 		}
 	}
 
@@ -255,7 +255,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		if err := e.client.UpdateIssueBody(owner, repo, item.Number, updatedBody); err != nil {
 			e.logf(item.Number, "warn", "could not update issue body: %v\n", err)
 		} else if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "edited", boardcache.ItemKey(item.Repo, item.Number))
+			e.webhookMgr.RegisterEcho("issues", "edited", boardcache.ItemKey(owner+"/"+repo, item.Number))
 		}
 		output = stripMarkers(output, "FABRIK_ISSUE_UPDATE_BEGIN", "FABRIK_ISSUE_UPDATE_END")
 	}
@@ -283,7 +283,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 					})
 				}
 				if e.webhookMgr != nil {
-					e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(item.Repo, item.Number))
+					e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
 				}
 				// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
 				if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
@@ -308,7 +308,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 						})
 					}
 					if e.webhookMgr != nil {
-						e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(item.Repo, item.Number))
+						e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
 					}
 					// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
 					if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {

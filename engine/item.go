@@ -425,7 +425,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 				cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
 			}
 			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(item.Repo, item.Number)+"+"+completeLabel)
+				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+completeLabel)
 			}
 		}
 
@@ -443,7 +443,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:extend-turns")
 			}
 			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(item.Repo, item.Number)+"+"+"fabrik:extend-turns")
+				e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:extend-turns")
 			}
 		}
 
@@ -853,7 +853,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 					})
 				}
 				if e.webhookMgr != nil {
-					e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(item.Repo, item.Number))
+					e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
 				}
 				// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
 				if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
@@ -908,7 +908,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 				})
 			}
 			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(item.Repo, item.Number))
+				e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
 			}
 			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
 			if reactErr := e.client.AddCommentReaction(e.cfg.Owner, e.cfg.Repo, dbID, "rocket"); reactErr != nil {
@@ -1036,7 +1036,7 @@ func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 			})
 		}
 		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(item.Repo, item.Number))
+			e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
 		}
 		// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
 		if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
@@ -1064,7 +1064,7 @@ func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), failedLabel)
 		}
 		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(item.Repo, item.Number)+"+"+failedLabel)
+			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+failedLabel)
 		}
 	}
 
@@ -1256,7 +1256,7 @@ func (e *Engine) baseBranchForItem(item gh.ProjectItem, wm *WorktreeManager) (st
 				})
 			}
 			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(item.Repo, item.Number))
+				e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
 			}
 			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
 			if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {

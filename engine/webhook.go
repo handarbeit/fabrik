@@ -951,8 +951,9 @@ func echoKey(eventType, action, key string) string {
 }
 
 // RegisterEcho records a pending echo entry for a successful outgoing mutation.
-// No-op when the webhook stream is starting up, board cache is disabled (healthChangeFn == nil),
-// or for projects_v2_item when that event type is not currently subscribed.
+// No-op when the webhook stream is starting up or the board cache is disabled
+// (healthChangeFn == nil). For projects_v2_item conditional registration use
+// RegisterEchoIfSubscribed instead.
 func (wm *webhookManager) RegisterEcho(eventType, action, key string) {
 	wm.mu.Lock()
 	defer wm.mu.Unlock()
@@ -990,6 +991,12 @@ func (wm *webhookManager) MatchEcho(eventType, action, key string) {
 func (wm *webhookManager) doEchoSweep() {
 	now := time.Now()
 	wm.mu.Lock()
+	// Suppress sweeping during startup: entries registered just before a restart
+	// would fire as false misses during the grace period.
+	if wm.state == WebhookStreamStartingUp {
+		wm.mu.Unlock()
+		return
+	}
 	var newMisses int
 	for k, registeredAt := range wm.pendingEchoes {
 		if now.Sub(registeredAt) >= webhookEchoTimeout {
@@ -1012,6 +1019,8 @@ func (wm *webhookManager) doEchoSweep() {
 	shouldFire := newMisses > 0 && wm.healthChangeFn != nil && len(wm.missHistory) >= webhookEchoMissThreshold
 	if shouldFire {
 		wm.missHistory = wm.missHistory[:0]
+		// Transition to Unhealthy so handleWebhook's recovery path fires on the next event.
+		wm.state = WebhookStreamUnhealthy
 	}
 	wm.mu.Unlock()
 
