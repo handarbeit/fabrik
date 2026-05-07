@@ -832,15 +832,18 @@ func (c *CacheImpl) applyPullRequestReviewCommentDelta(payload []byte) {
 		Number:      resolvedIssNum,
 		LinkedPRNum: prNum,
 	})
-	c.store.Apply(itemstate.ReviewThreadCommentAdded{
+	_, commentChanges, _ := c.store.Apply(itemstate.ReviewThreadCommentAdded{
 		Repo:        repo,
 		IssueNumber: resolvedIssNum,
 		Comment:     comment,
 	})
+	if len(commentChanges) > 0 {
+		// New comment: invalidate deep cache (ReviewThreadID not yet populated).
+		c.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: resolvedIssNum})
+	}
 	c.bumpLocalDeltaAt(key)
 	if healed {
-		c.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: resolvedIssNum})
-		c.logFn("[cache] auto-heal: PR #%d → issue #%d; deep cache invalidated and delta re-applied\n", prNum, resolvedIssNum)
+		c.logFn("[cache] auto-heal: PR #%d → issue #%d; delta re-applied\n", prNum, resolvedIssNum)
 	}
 }
 
