@@ -204,8 +204,15 @@ type CacheImpl struct {
 	// store owns per-item state (items, shaToKey, itemIDToKey, prToKey, pendingCheckRuns).
 	store *itemstate.Store
 
-	fallback ReadClient
-	logFn    func(format string, args ...any)
+	fallback     ReadClient
+	logFn        func(format string, args ...any)
+	matchEchoFn  func(eventType, action, key string) // injected by engine; nil when cache disabled
+}
+
+// SetMatchEchoFn injects the MatchEcho function from the webhook manager.
+// Called once at startup in poll.go after the webhookManager is constructed.
+func (c *CacheImpl) SetMatchEchoFn(fn func(eventType, action, key string)) {
+	c.matchEchoFn = fn
 }
 
 // NewCacheImpl creates an empty cache backed by fallback for misses.

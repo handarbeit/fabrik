@@ -263,6 +263,10 @@ func (c *CacheImpl) applyIssueCommentDelta(payload []byte) {
 	issNum := p.Issue.Number
 	key := itemKey(fullRepo, issNum)
 
+	if c.matchEchoFn != nil {
+		c.matchEchoFn("issue_comment", "created", key)
+	}
+
 	createdAt, _ := time.Parse(time.RFC3339, p.Comment.CreatedAt)
 	comment := gh.Comment{
 		ID:         p.Comment.NodeID,
@@ -356,6 +360,9 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 		c.store.Remove(fullRepo, issNum)
 
 	case "edited":
+		if c.matchEchoFn != nil {
+			c.matchEchoFn("issues", "edited", key)
+		}
 		if err := c.ensureIssueInStore(owner, fullRepo, issNum); err != nil {
 			c.logFn("[cache] applyIssuesDelta(edited): ensure #%d: %v\n", issNum, err)
 			return
@@ -391,6 +398,9 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 		c.bumpLocalDeltaAt(key)
 
 	case "labeled":
+		if c.matchEchoFn != nil {
+			c.matchEchoFn("issues", "labeled", key+"+"+p.Label.Name)
+		}
 		if err := c.ensureIssueInStore(owner, fullRepo, issNum); err != nil {
 			c.logFn("[cache] applyIssuesDelta(labeled): ensure #%d: %v\n", issNum, err)
 			return
@@ -406,6 +416,9 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 		c.bumpLocalDeltaAt(key)
 
 	case "unlabeled":
+		if c.matchEchoFn != nil {
+			c.matchEchoFn("issues", "unlabeled", key+"+"+p.Label.Name)
+		}
 		if err := c.ensureIssueInStore(owner, fullRepo, issNum); err != nil {
 			c.logFn("[cache] applyIssuesDelta(unlabeled): ensure #%d: %v\n", issNum, err)
 			return
@@ -439,6 +452,9 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 		// SHA-tracking path — handled after this switch.
 
 	case "ready_for_review":
+		if c.matchEchoFn != nil {
+			c.matchEchoFn("pull_request", "ready_for_review", prKey(repo, prNum))
+		}
 		// Look up linked issue via Store's prToKey index (no c.mu held).
 		// Requires PR linkage to be established first via PRHeadSHAUpdated.
 		issKey, issFound := c.store.GetByPRKey(repo, prNum)
@@ -547,6 +563,10 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 	}
 
 	// --- SHA-tracking path (opened, closed, synchronize, reopened) ---
+	// Echo-match for opened and closed PR mutations (synchronize/reopened are not tracked).
+	if c.matchEchoFn != nil && (p.Action == "opened" || p.Action == "closed") {
+		c.matchEchoFn("pull_request", p.Action, prKey(repo, prNum))
+	}
 	sha := p.PullRequest.Head.SHA
 
 	owner, repoName, ok := splitRepo(repo)
@@ -996,6 +1016,9 @@ func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
 		c.bumpLocalDeltaAt(itemKey(pi.Repo, pi.Number))
 
 	case "edited":
+		if c.matchEchoFn != nil {
+			c.matchEchoFn("projects_v2_item", "edited", p.ProjectsV2Item.ID)
+		}
 		if p.Changes.FieldValue.FieldType != "single_select" {
 			return
 		}
