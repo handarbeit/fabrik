@@ -1702,6 +1702,9 @@ Events are translated into immediate poll wakeups — the existing board-fetch a
 
 If any prerequisite is missing, Fabrik logs a clear warning and falls back to polling-only mode. Webhook mode failure is always non-fatal.
 
+> [!NOTE]
+> **Orphan webhook cleanup:** At startup, Fabrik automatically deletes any previous-session webhook subscriptions it created (identified by a Fabrik-specific description prefix). This prevents the `Hook already exists` HTTP 422 error that occurs when the `gh` subprocess crashed mid-session and the old subscription was never torn down. Operators do not need to manually delete stale webhooks between restarts.
+
 > [!WARNING]
 > **Single-user constraint:** GitHub allows only one active `gh webhook forward` subscription per repository or organization at a time. If a second Fabrik instance (or any other tool) attempts to subscribe while one is already active, GitHub returns an HTTP 422 `Hook already exists` error. Fabrik retries the subscription a few times and, after repeated 422 failures, permanently falls back to poll-only mode for that instance — it will not receive real-time events.
 >
@@ -1734,6 +1737,7 @@ webhooks: true
 | Listener port | `--webhook-port=<N>` | `FABRIK_WEBHOOK_PORT` | `webhook_port: <N>` | 0 (OS-assigned) |
 | Event filter | `--webhook-events=<csv>` | `FABRIK_WEBHOOK_EVENTS` | `webhook_events: [...]` | all supported events |
 | Board cache | `--board-cache=<mode>` | `FABRIK_BOARD_CACHE` | `board_cache: <mode>` | `in-memory` when `--webhooks`, else `none` |
+| Reconcile interval | `--reconcile-interval=<N>` | `FABRIK_RECONCILE_INTERVAL` | — | 0 (180 seconds) |
 
 By default, Fabrik subscribes to: `issue_comment`, `issues`, `pull_request`, `pull_request_review`, `pull_request_review_comment`, `check_run`, `check_suite`, and `projects_v2_item` (board column changes — see note below).
 
@@ -1743,11 +1747,28 @@ The TUI footer shows a webhook health indicator when webhook mode is enabled:
 
 | Indicator | State | Meaning |
 |-----------|-------|---------|
-| `● webhook (N)` (green) | Healthy | At least one event received in the last 10 minutes. Full-board idle cap: 60 min; status sweep: 10 min. |
-| `○ webhook (N)` (blue) | Starting Up | Subprocess launched; waiting for first event (up to 30s grace). Full-board idle cap: 60 min; status sweep: 10 min. |
-| `◌ webhook (N)` (yellow) | Unhealthy | No event received in 10+ minutes or startup grace expired. Idle cap: 5 min (same as polling-only). |
+| `● webhook (N)` (green) | Healthy | Last light reconcile found no drift. Full-board idle cap: 60 min; status sweep: 10 min. |
+| `○ webhook (N)` (blue) | Starting Up | Subprocess launched; persists until first reconcile tick (default ~3 minutes). Full-board idle cap: 60 min; status sweep: 10 min. |
+| `◌ webhook (N)` (yellow) | Unhealthy | Reconcile detected drift, or echo-check miss threshold reached. Idle cap: 5 min (same as polling-only). |
 
 `N` is the total number of webhook events received since startup. You can also verify the stream by checking `fabrik.log` for `[webhook]` tag lines.
+
+### Mutation Echo-Check
+
+During active pipeline runs, Fabrik tracks outgoing mutations (issue comments, label changes, PR updates) and expects a matching inbound webhook event within 15 seconds. If three consecutive mutation echoes are missed within a 60-second rolling window, the stream is marked Unhealthy — even if the reconcile loop has not yet fired.
+
+This complements the reconcile loop: the reconcile loop detects drift on a ~3-minute cadence during quiet periods; the echo-check detects silent stream failures within seconds during active periods when mutations are occurring. No user action is required — the echo-check is automatic.
+
+Health transition log lines show the trigger reason:
+
+- `health state: starting_up → healthy` — first reconcile found no drift
+- `health state: healthy → unhealthy (N item(s) drifted)` — reconcile detected drift
+- `health state: unhealthy → healthy (drift reconciled)` — reconcile recovery
+- `health state: healthy → unhealthy (echo-check miss threshold)` — echo-check triggered
+
+### Push-Wake Gate Latency
+
+When `--webhooks` is enabled, gate clearance events (Copilot/Gemini review submission, CI check completion) wake the poll loop within ~2 seconds of the webhook arriving — rather than waiting for the next poll tick, which can be up to 60 minutes when the stream is healthy. This near-instant response is the expected behavior, not a symptom to troubleshoot. If gate clearance feels slow when webhooks are enabled, check that the stream is in a Healthy state (green indicator).
 
 ### Expected GraphQL Load Reduction
 
@@ -1769,9 +1790,9 @@ When webhook mode is active, Fabrik maintains an in-memory board cache (`--board
 fabrik --webhooks --board-cache=none
 ```
 
-**Stream-health failover:** If the webhook stream goes unhealthy (no events for 10 minutes), the cache pauses and all reads fall back to the live GitHub API. When the stream recovers, the cache reconciles from GitHub before resuming. This ensures correctness is never compromised by a degraded webhook stream.
+**Stream-health failover:** If the webhook stream goes unhealthy (reconcile detected drift or echo-check miss threshold triggered), the cache pauses and all reads fall back to the live GitHub API. When the stream recovers, the cache reconciles from GitHub before resuming. This ensures correctness is never compromised by a degraded webhook stream.
 
-**Reconciliation:** Fabrik uses a two-level reconciliation strategy. A lightweight status-only sweep runs every `--status-poll` seconds (default 10 minutes), fetching only the Status field for every board item at very low GraphQL cost — this is the primary mechanism for catching board-column changes. A full board snapshot is fetched only on stream recovery (webhook stream goes unhealthy then recovers), ensuring all cached fields are coherent after a gap in event delivery.
+**Reconciliation:** Fabrik uses a two-level reconciliation strategy. The light reconcile loop (default every 3 minutes, configurable via `--reconcile-interval` / `FABRIK_RECONCILE_INTERVAL`) is the primary health driver: each tick fetches the full item list and compares it against the cached state. When no drift is found, the stream transitions to Healthy; when drift is detected, the stream transitions to Unhealthy and the cache is reconciled from GitHub. A lightweight status-only sweep also runs every `--status-poll` seconds (default 10 minutes), fetching only the Status field at very low GraphQL cost — this is the primary mechanism for catching board-column changes. A full board snapshot is fetched on stream recovery (webhook stream goes unhealthy then recovers), ensuring all cached fields are coherent after a gap in event delivery.
 
 > **Note:** `--board-cache=in-memory` requires `--webhooks`. Without a webhook stream, there is no delta source and the cache relies solely on the periodic status sweep — worse than the default polling behavior.
 
@@ -1797,6 +1818,8 @@ On multi-repo boards, Fabrik uses a single `gh webhook forward` subprocess:
 
 **Mixed-owner boards disable org mode entirely.** Org-level subscription requires every managed repo on the board to share the same owner. If your board spans two orgs or users (for example, during a repo migration), Fabrik silently falls back to per-repo webhooks for *all* repos — even if your token has admin access to both orgs. As noted above, per-repo webhooks never deliver `projects_v2_item` events, so board-column changes in this configuration are caught only by the periodic status sweep. To avoid this: migrate all repos to the target org simultaneously, or run two separate Fabrik instances (one per org) during the transition.
 
+**Per-repo failure isolation.** When Fabrik is in per-repo subscription mode, a subscription failure for one repo (missing `admin:repo_hook` scope, deleted repo, etc.) quarantines only that repo for the session — the remaining repos continue receiving real-time webhook events normally. The quarantined repo falls back to the safety-net poll (same cadence as polling-only mode). To recover: fix the underlying issue (re-add token scopes, restore repo access) and restart Fabrik. The next startup re-attempts subscription for all repos, including any previously quarantined ones.
+
 > **Startup delay on multi-repo boards**: Webhook subscriptions are established after the first board poll completes (up to one poll interval, typically 30 seconds). During this window the TUI shows the blue "starting up" indicator and the safety-net poll is in effect. This is expected — the webhook manager waits until the repo list is known before subscribing.
 
 ### Migration / Permission Changes
@@ -1813,9 +1836,16 @@ Fabrik probes org mode each time the webhook subprocess starts or restarts. If t
 
 **Stream shows yellow "unhealthy"** — The subprocess may have exited or GitHub isn't delivering events. Check `fabrik.log` for `[webhook]` error lines. Run `gh auth status` to verify your token has `admin:repo_hook` scope.
 
+**`poll-only mode active — webhook subscription disabled; restart Fabrik to retry`** — This log line (visible in the TUI or `fabrik.log`) appears when the 422 circuit-breaker has permanently disabled the webhook manager after 3 consecutive HTTP 422 errors. Common causes: another Fabrik instance already holds the webhook subscription (`Hook already exists`), your token lacks `admin:repo_hook` scope, or the repo has reached GitHub's webhook quota. Fix the underlying issue, then restart Fabrik — the next startup clears the circuit-breaker and re-attempts subscription. The 422 circuit-breaker is preceded in the log by: `WARNING: webhook subscription permanently failed after N consecutive HTTP 422 errors — switching to poll-only mode. Check 'gh auth status' and repo webhook quota, then restart Fabrik.`
+
 **HMAC failures logged** — Usually caused by a `gh auth refresh` that invalidated the webhook secret. Fabrik auto-rotates; if failures persist after 2 cycles, restart Fabrik.
 
 **`projects_v2_item` warning** — Board column changes are caught by the periodic status sweep (default every 10 minutes). Not a problem for most workflows.
+
+**Log format changes (v0.0.54)** — Operators with grep/alert rules on log patterns should update for these changes:
+
+- **New reconcile log format:** `[reconcile] light reconcile: N item(s) drifted (...) — reconciling cache` — emitted when the periodic reconcile tick detects cache drift and triggers a full cache refresh.
+- **Removed `auto-advance catch-up:` prefix** — Routine stage-transition log lines no longer carry this prefix. If you have monitoring rules or scripts that grep for `auto-advance catch-up:`, update them — that string no longer appears in Fabrik logs.
 
 ---
 
