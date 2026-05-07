@@ -269,7 +269,7 @@ The `--auto-upgrade` flag enables Fabrik to upgrade itself automatically. It che
 - **At startup** — once before the first poll, so boards that are always busy still receive upgrades promptly. The check fires after the exclusive file lock is acquired, so concurrent Fabrik instances never race on the upgrade check.
 - **After 2 consecutive idle polls** — as a belt-and-suspenders check for long-running instances.
 
-In both cases, Fabrik queries the GitHub Releases API. If a newer version is found, it downloads the new binary, replaces the running executable, runs `fabrik upgrade` to refresh plugin skills, and re-execs itself.
+For release builds, Fabrik queries the GitHub Releases API at each check point. If a newer version is found, it downloads the new binary, replaces the running executable, runs `fabrik upgrade` to refresh plugin skills, and re-execs itself.
 
 **Dev builds (built from source)** follow the same two-check approach but use a
 different upgrade path. Fabrik detects that it is a dev build (version string starts
