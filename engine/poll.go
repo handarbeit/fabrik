@@ -553,6 +553,15 @@ func (e *Engine) Run() error {
 		return nil
 	}
 
+	// Startup upgrade check: no workers are in flight yet, making this the safest call site.
+	if e.cfg.AutoUpgrade {
+		if e.upgradeCheckFn != nil {
+			e.upgradeCheckFn()
+		} else {
+			e.checkAndUpgrade()
+		}
+	}
+
 	// Run immediately on start, then on tick
 	firstPollErr := doPollCycle()
 	if firstPollErr != nil && ctx.Err() == nil {
