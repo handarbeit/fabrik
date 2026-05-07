@@ -115,9 +115,9 @@ type LinkedPRState struct {
 	Reviews        []gh.PRReview
 	ReviewRequests []gh.ReviewRequest
 	// ThreadComments holds unresolved review-thread comments.
-	ThreadComments       []gh.Comment
-	ResolvedThreadCount  int
-	CheckRuns            []gh.CheckRun
+	ThreadComments      []gh.Comment
+	ResolvedThreadCount int
+	CheckRuns           []gh.CheckRun
 
 	// HasHadChecks records whether this PR has ever had CI check runs reported.
 	// Replaces engine.prHasHadChecks[iKey].

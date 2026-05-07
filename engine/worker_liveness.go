@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	heartbeatInterval      = 30 * time.Second
-	staleWorkerThreshold   = 2 * time.Minute
+	heartbeatInterval       = 30 * time.Second
+	staleWorkerThreshold    = 2 * time.Minute
 	staleWorkerScanInterval = 30 * time.Second
 )
 

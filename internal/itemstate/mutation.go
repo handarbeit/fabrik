@@ -40,7 +40,7 @@ type IssueLabeled struct {
 	Label  string
 }
 
-func (IssueLabeled) isMutation() {}
+func (IssueLabeled) isMutation()       {}
 func (m IssueLabeled) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // IssueUnlabeled is emitted when a label is removed from an issue.
@@ -50,7 +50,7 @@ type IssueUnlabeled struct {
 	Label  string
 }
 
-func (IssueUnlabeled) isMutation() {}
+func (IssueUnlabeled) isMutation()       {}
 func (m IssueUnlabeled) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // IssueClosed is emitted when an issue is closed.
@@ -59,7 +59,7 @@ type IssueClosed struct {
 	Number int
 }
 
-func (IssueClosed) isMutation() {}
+func (IssueClosed) isMutation()       {}
 func (m IssueClosed) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // IssueReopened is emitted when a previously closed issue is reopened.
@@ -68,7 +68,7 @@ type IssueReopened struct {
 	Number int
 }
 
-func (IssueReopened) isMutation() {}
+func (IssueReopened) isMutation()       {}
 func (m IssueReopened) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // IssueEdited is emitted when an issue's title or body is changed.
@@ -79,7 +79,7 @@ type IssueEdited struct {
 	Body   string
 }
 
-func (IssueEdited) isMutation() {}
+func (IssueEdited) isMutation()       {}
 func (m IssueEdited) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // IssueAssigneesUpdated is emitted when the assignee list changes (assigned or unassigned).
@@ -90,7 +90,7 @@ type IssueAssigneesUpdated struct {
 	Assignees []string
 }
 
-func (IssueAssigneesUpdated) isMutation() {}
+func (IssueAssigneesUpdated) isMutation()       {}
 func (m IssueAssigneesUpdated) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // PRReviewRequested is emitted when reviewers are added to the linked PR.
@@ -101,7 +101,7 @@ type PRReviewRequested struct {
 	Reviewers []gh.ReviewRequest
 }
 
-func (PRReviewRequested) isMutation() {}
+func (PRReviewRequested) isMutation()       {}
 func (m PRReviewRequested) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // PRReviewRequestRemoved is emitted when one reviewer is removed from the linked PR.
@@ -111,7 +111,7 @@ type PRReviewRequestRemoved struct {
 	Login  string
 }
 
-func (PRReviewRequestRemoved) isMutation() {}
+func (PRReviewRequestRemoved) isMutation()       {}
 func (m PRReviewRequestRemoved) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // IssueCommentCreated is emitted when a new comment is added to an issue.
@@ -121,7 +121,7 @@ type IssueCommentCreated struct {
 	Comment gh.Comment
 }
 
-func (IssueCommentCreated) isMutation() {}
+func (IssueCommentCreated) isMutation()       {}
 func (m IssueCommentCreated) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // ProjectV2ItemEdited is emitted when the project board status field is changed.
@@ -144,7 +144,7 @@ type PRReviewSubmitted struct {
 	Review gh.PRReview
 }
 
-func (PRReviewSubmitted) isMutation() {}
+func (PRReviewSubmitted) isMutation()       {}
 func (m PRReviewSubmitted) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // PRReviewCommentCreated is emitted when a new inline review comment is added.
@@ -154,7 +154,7 @@ type PRReviewCommentCreated struct {
 	Comment  gh.Comment
 }
 
-func (PRReviewCommentCreated) isMutation() {}
+func (PRReviewCommentCreated) isMutation()       {}
 func (m PRReviewCommentCreated) itemKey() string { return itemKeyFor(m.Repo, m.PRNumber) }
 
 // CheckRunCompleted is emitted when a CI check run reaches a terminal state.
@@ -185,7 +185,7 @@ type ItemIDRegistered struct {
 	ItemID string
 }
 
-func (ItemIDRegistered) isMutation() {}
+func (ItemIDRegistered) isMutation()       {}
 func (m ItemIDRegistered) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // ---- Self-mutations (write-through from fabrik's own GitHub mutations) ----
@@ -197,7 +197,7 @@ type LocalStatusUpdated struct {
 	NewStatus string
 }
 
-func (LocalStatusUpdated) isMutation() {}
+func (LocalStatusUpdated) isMutation()       {}
 func (m LocalStatusUpdated) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // LocalLabelAdded is applied after fabrik adds a label to an issue.
@@ -207,7 +207,7 @@ type LocalLabelAdded struct {
 	Label  string
 }
 
-func (LocalLabelAdded) isMutation() {}
+func (LocalLabelAdded) isMutation()       {}
 func (m LocalLabelAdded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // LocalLabelRemoved is applied after fabrik removes a label from an issue.
@@ -217,7 +217,7 @@ type LocalLabelRemoved struct {
 	Label  string
 }
 
-func (LocalLabelRemoved) isMutation() {}
+func (LocalLabelRemoved) isMutation()       {}
 func (m LocalLabelRemoved) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // LocalCommentAdded is applied after fabrik posts a comment on an issue.
@@ -227,7 +227,7 @@ type LocalCommentAdded struct {
 	Comment gh.Comment
 }
 
-func (LocalCommentAdded) isMutation() {}
+func (LocalCommentAdded) isMutation()       {}
 func (m LocalCommentAdded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // LocalLockAcquired is applied after fabrik adds the fabrik:locked:<user> label.
@@ -239,7 +239,7 @@ type LocalLockAcquired struct {
 	AcquiredAt time.Time // caller-provided time; enables idempotent/no-op detection
 }
 
-func (LocalLockAcquired) isMutation() {}
+func (LocalLockAcquired) isMutation()       {}
 func (m LocalLockAcquired) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // LocalLockReleased is applied after fabrik removes the fabrik:locked:<user> label.
@@ -248,7 +248,7 @@ type LocalLockReleased struct {
 	Number int
 }
 
-func (LocalLockReleased) isMutation() {}
+func (LocalLockReleased) isMutation()       {}
 func (m LocalLockReleased) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // ---- Periodic reconciliation ----
@@ -260,7 +260,7 @@ type BoardReconciled struct {
 	Items []gh.ProjectItem
 }
 
-func (BoardReconciled) isMutation() {}
+func (BoardReconciled) isMutation()       {}
 func (m BoardReconciled) itemKey() string { return "" }
 
 // ItemDeepFetched is applied after a single-item deep fetch from the GitHub API.
@@ -270,7 +270,7 @@ type ItemDeepFetched struct {
 	FreshState gh.ProjectItem
 }
 
-func (ItemDeepFetched) isMutation() {}
+func (ItemDeepFetched) isMutation()       {}
 func (m ItemDeepFetched) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // DeepFetchInvalidated clears LastDeepFetchAt so the next FetchItemDetails call
@@ -281,7 +281,7 @@ type DeepFetchInvalidated struct {
 	Number int
 }
 
-func (DeepFetchInvalidated) isMutation() {}
+func (DeepFetchInvalidated) isMutation()       {}
 func (m DeepFetchInvalidated) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // PRHeadSHAUpdated sets LinkedPR.HeadSHA for the given item and triggers the
@@ -296,7 +296,7 @@ type PRHeadSHAUpdated struct {
 	SHA         string
 }
 
-func (PRHeadSHAUpdated) isMutation() {}
+func (PRHeadSHAUpdated) isMutation()       {}
 func (m PRHeadSHAUpdated) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // PRDetailsUpdated sets LinkedPR.Title, State, Merged, and Draft for the given item.
@@ -313,7 +313,7 @@ type PRDetailsUpdated struct {
 	Draft    bool
 }
 
-func (PRDetailsUpdated) isMutation() {}
+func (PRDetailsUpdated) isMutation()       {}
 func (m PRDetailsUpdated) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // ReviewThreadCommentAdded appends an inline review-thread comment to an item's
@@ -325,7 +325,7 @@ type ReviewThreadCommentAdded struct {
 	Comment     gh.Comment
 }
 
-func (ReviewThreadCommentAdded) isMutation() {}
+func (ReviewThreadCommentAdded) isMutation()       {}
 func (m ReviewThreadCommentAdded) itemKey() string { return itemKeyFor(m.Repo, m.IssueNumber) }
 
 // ShallowBoardItemUpdated updates only the shallow fields of an existing item
@@ -338,7 +338,7 @@ type ShallowBoardItemUpdated struct {
 	Item   gh.ProjectItem
 }
 
-func (ShallowBoardItemUpdated) isMutation() {}
+func (ShallowBoardItemUpdated) isMutation()       {}
 func (m ShallowBoardItemUpdated) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // ---- Engine internals ----
@@ -351,7 +351,7 @@ type StageAttempted struct {
 	At        time.Time
 }
 
-func (StageAttempted) isMutation() {}
+func (StageAttempted) isMutation()       {}
 func (m StageAttempted) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // StageRetryIncremented increments the attempt counter for a stage.
@@ -361,7 +361,7 @@ type StageRetryIncremented struct {
 	StageName string
 }
 
-func (StageRetryIncremented) isMutation() {}
+func (StageRetryIncremented) isMutation()       {}
 func (m StageRetryIncremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // StageRetryCleared resets the attempt counter for a stage.
@@ -371,7 +371,7 @@ type StageRetryCleared struct {
 	StageName string
 }
 
-func (StageRetryCleared) isMutation() {}
+func (StageRetryCleared) isMutation()       {}
 func (m StageRetryCleared) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // ReviewCycleIncremented increments the review cycle counter for a stage.
@@ -381,7 +381,7 @@ type ReviewCycleIncremented struct {
 	StageName string
 }
 
-func (ReviewCycleIncremented) isMutation() {}
+func (ReviewCycleIncremented) isMutation()       {}
 func (m ReviewCycleIncremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // CIFixCycleIncremented increments the CI-fix cycle counter for a stage.
@@ -391,7 +391,7 @@ type CIFixCycleIncremented struct {
 	StageName string
 }
 
-func (CIFixCycleIncremented) isMutation() {}
+func (CIFixCycleIncremented) isMutation()       {}
 func (m CIFixCycleIncremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // RebaseCycleIncremented increments the rebase cycle counter for a stage.
@@ -401,7 +401,7 @@ type RebaseCycleIncremented struct {
 	StageName string
 }
 
-func (RebaseCycleIncremented) isMutation() {}
+func (RebaseCycleIncremented) isMutation()       {}
 func (m RebaseCycleIncremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // EnginePaused records that the engine has paused work on a stage due to
@@ -412,7 +412,7 @@ type EnginePaused struct {
 	StageName string
 }
 
-func (EnginePaused) isMutation() {}
+func (EnginePaused) isMutation()       {}
 func (m EnginePaused) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // CooldownRecorded sets a cooldown expiry for a given reason key.
@@ -423,7 +423,7 @@ type CooldownRecorded struct {
 	Until  time.Time
 }
 
-func (CooldownRecorded) isMutation() {}
+func (CooldownRecorded) isMutation()       {}
 func (m CooldownRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // WorkerHeartbeat updates the LastSignAt timestamp for the active worker.
@@ -433,7 +433,7 @@ type WorkerHeartbeat struct {
 	At     time.Time
 }
 
-func (WorkerHeartbeat) isMutation() {}
+func (WorkerHeartbeat) isMutation()       {}
 func (m WorkerHeartbeat) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // WorkerPIDSet records the Claude subprocess PID once cmd.Start() returns.
@@ -444,7 +444,7 @@ type WorkerPIDSet struct {
 	PID    int
 }
 
-func (WorkerPIDSet) isMutation() {}
+func (WorkerPIDSet) isMutation()       {}
 func (m WorkerPIDSet) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // WorkerEntered sets a non-nil Worker placeholder immediately before the goroutine is
@@ -459,7 +459,7 @@ type WorkerEntered struct {
 	StartedAt time.Time
 }
 
-func (WorkerEntered) isMutation() {}
+func (WorkerEntered) isMutation()       {}
 func (m WorkerEntered) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // WorkerExited clears the Worker handle when a Claude invocation finishes.
@@ -468,7 +468,7 @@ type WorkerExited struct {
 	Number int
 }
 
-func (WorkerExited) isMutation() {}
+func (WorkerExited) isMutation()       {}
 func (m WorkerExited) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // InvocationRecorded captures the outcome of a completed Claude invocation for TUI display.
@@ -487,7 +487,7 @@ type InvocationRecorded struct {
 	Duration time.Duration
 }
 
-func (InvocationRecorded) isMutation() {}
+func (InvocationRecorded) isMutation()       {}
 func (m InvocationRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // DeepFetchFailed records that a deep-fetch attempt for this item failed.
@@ -497,7 +497,7 @@ type DeepFetchFailed struct {
 	At     time.Time
 }
 
-func (DeepFetchFailed) isMutation() {}
+func (DeepFetchFailed) isMutation()       {}
 func (m DeepFetchFailed) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // BaseBranchWarnRecorded marks a base-branch override as having been warned about.
@@ -507,7 +507,7 @@ type BaseBranchWarnRecorded struct {
 	Branch string
 }
 
-func (BaseBranchWarnRecorded) isMutation() {}
+func (BaseBranchWarnRecorded) isMutation()       {}
 func (m BaseBranchWarnRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // CIMergePendingStarted records that CI-gate merge polling has begun for the item's
@@ -519,7 +519,7 @@ type CIMergePendingStarted struct {
 	At     time.Time
 }
 
-func (CIMergePendingStarted) isMutation() {}
+func (CIMergePendingStarted) isMutation()       {}
 func (m CIMergePendingStarted) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // CIMergePendingCleared records that CI-gate merge polling has ended for the item's
@@ -530,7 +530,7 @@ type CIMergePendingCleared struct {
 	Number int
 }
 
-func (CIMergePendingCleared) isMutation() {}
+func (CIMergePendingCleared) isMutation()       {}
 func (m CIMergePendingCleared) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // PRChecksObserved records that the linked PR has had at least one CI check run
@@ -541,7 +541,7 @@ type PRChecksObserved struct {
 	Number int
 }
 
-func (PRChecksObserved) isMutation() {}
+func (PRChecksObserved) isMutation()       {}
 func (m PRChecksObserved) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // CommentProcessed records that a comment has been processed by the engine.
@@ -554,7 +554,7 @@ type CommentProcessed struct {
 	At        time.Time
 }
 
-func (CommentProcessed) isMutation() {}
+func (CommentProcessed) isMutation()       {}
 func (m CommentProcessed) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // StageLastAttemptCleared zeroes LastAttemptAt for a stage so it re-runs promptly.
@@ -565,7 +565,7 @@ type StageLastAttemptCleared struct {
 	StageName string
 }
 
-func (StageLastAttemptCleared) isMutation() {}
+func (StageLastAttemptCleared) isMutation()       {}
 func (m StageLastAttemptCleared) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // EngineUnpaused clears PausedByEngine for a stage, used when a user comment
@@ -576,7 +576,7 @@ type EngineUnpaused struct {
 	StageName string
 }
 
-func (EngineUnpaused) isMutation() {}
+func (EngineUnpaused) isMutation()       {}
 func (m EngineUnpaused) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // EngineCyclesCleared zeroes ReviewCycles, CIFixCycles, and RebaseCycles for a
@@ -588,7 +588,7 @@ type EngineCyclesCleared struct {
 	StageName string
 }
 
-func (EngineCyclesCleared) isMutation() {}
+func (EngineCyclesCleared) isMutation()       {}
 func (m EngineCyclesCleared) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // itemKeyFor constructs the canonical "owner/repo#N" item key used throughout the Store.
