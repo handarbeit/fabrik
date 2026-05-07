@@ -51,6 +51,7 @@ type Config struct {
 	WebhookEvents     string // comma-separated; empty means default event set
 	BoardCacheMode       string // "in-memory" or "none"; empty = auto (in-memory when webhooks enabled)
 	StatusPollSeconds    int    // Layer 2 status-only sweep cadence in seconds; 0 = use default (15)
+	ReconcileInterval    int    // seconds; 0 means use default (180 = 3 min); also FABRIK_RECONCILE_INTERVAL
 }
 
 func Execute() error {
@@ -133,6 +134,7 @@ func Execute() error {
 	flag.StringVar(&cfg.WebhookEvents, "webhook-events", "", "Comma-separated list of GitHub event types to subscribe to (default: all supported events; also FABRIK_WEBHOOK_EVENTS)")
 	flag.StringVar(&cfg.BoardCacheMode, "board-cache", "", `Board cache mode: "in-memory" (cache board state; requires --webhooks) or "none" (always fetch from GitHub). Default: "in-memory" when --webhooks is enabled, "none" otherwise. Also FABRIK_BOARD_CACHE.`)
 	flag.IntVar(&cfg.StatusPollSeconds, "status-poll", 0, "Retained for config compatibility; the Layer 2 updatedAt gate now runs every poll cycle (~15 s) regardless of this value. Also FABRIK_STATUS_POLL.")
+	flag.IntVar(&cfg.ReconcileInterval, "reconcile-interval", 0, "Seconds between periodic light-reconcile health checks when webhooks and board cache are enabled (0 = use default of 180; also FABRIK_RECONCILE_INTERVAL)")
 
 	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
 		return err
@@ -334,6 +336,15 @@ func Execute() error {
 				// n == 0: silently use default (same semantics as --claude-wait-delay 0)
 			} else {
 				fmt.Fprintf(os.Stderr, "[warn] FABRIK_CLAUDE_WAIT_DELAY=%q is invalid (must be 0 or a positive integer of seconds); using default 30\n", v)
+			}
+		}
+	}
+	if !explicitFlags["reconcile-interval"] {
+		if v := os.Getenv("FABRIK_RECONCILE_INTERVAL"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				cfg.ReconcileInterval = n
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_RECONCILE_INTERVAL=%q is invalid (must be a positive integer of seconds); using default 180\n", v)
 			}
 		}
 	}
@@ -547,6 +558,7 @@ func Execute() error {
 		WebhookEvents:     webhookEvents,
 		BoardCacheMode:           cfg.BoardCacheMode,
 		ProjectStatusPollSeconds: statusPollSeconds(cfg.StatusPollSeconds),
+		ReconcileInterval:        reconcileIntervalDuration(cfg.ReconcileInterval),
 		ReadyCh:                  testReadyCh,
 	})
 	if err != nil {
@@ -626,6 +638,16 @@ func statusPollSeconds(n int) int {
 		return 15
 	}
 	return n
+}
+
+// reconcileIntervalDuration converts a ReconcileInterval config value (seconds)
+// to a time.Duration. When seconds is 0 (unset), returns 0 so the engine falls
+// back to its lightReconcileInterval default (3 minutes).
+func reconcileIntervalDuration(seconds int) time.Duration {
+	if seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 // buildProjectInfo assembles the TUI footer metadata from the active config.
