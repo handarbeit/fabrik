@@ -3089,6 +3089,20 @@ When the webhook stream is healthy or starting up, steady-state polling is suppr
 - `Healthy → Unhealthy`: no event received for `webhookHealthWindow` (10 min).
 - `* → StartingUp`: subprocess restart (secret rotation, crash recovery) resets grace and waits for a new first event.
 
+**Mutation echo-check (Plan B fast failure detection).** In addition to the time-based health transitions above, the engine detects silent webhook stream failures within seconds during active mutation periods via an echo-check mechanism (`pendingEchoes`, `missHistory`, and `doEchoSweep` in `engine/webhook.go`):
+
+- **Registration:** After each successful tracked mutation (`AddLabelToIssue`, `RemoveLabelFromIssue`, `AddComment`, `UpdateIssueBody`, `CreateDraftPR`, `MarkPRReady`, `MergePR`, `UpdateProjectItemStatus`), the engine records a `(eventType, action, discriminatingKey, timestamp)` entry in `pendingEchoes`. Registration is suppressed during `WebhookStreamStartingUp` and when the board cache is disabled (`healthChangeFn == nil`). `UpdateProjectItemStatus` is additionally suppressed when `projects_v2_item` is not in the current `wm.events` subscription set (R7 conditional).
+
+- **Matching:** `CacheImpl.ApplyDelta` calls `wm.MatchEcho(eventType, action, key)` for each incoming webhook event before applying the delta to the store. A match removes the corresponding `pendingEchoes` entry, preventing it from counting as a miss.
+
+- **Sweep:** A background goroutine (started alongside `runHealthMonitor` in `webhookManager.Start()`) calls `doEchoSweep()` every 5 seconds. Entries in `pendingEchoes` older than `webhookEchoTimeout` (15s) with no match are echo misses — removed from `pendingEchoes` and their timestamp appended to `missHistory`.
+
+- **Rolling-window threshold:** On each miss append, `missHistory` entries older than `webhookEchoWindow` (60s) are pruned. If `len(missHistory) >= webhookEchoMissThreshold` (3), `healthChangeFn(false)` is called and `missHistory` is cleared to prevent repeated firing. Named constants (overridable in tests): `webhookEchoTimeout = 15s`, `webhookEchoMissThreshold = 3`, `webhookEchoWindow = 60s`.
+
+- **Recovery:** Any verified inbound webhook event arriving at `handleWebhook` transitions the stream back to `Healthy` via the existing recovery path. `missHistory` is cleared in the same lock block to prevent stale miss counts from immediately re-triggering the threshold after recovery.
+
+- **Design rationale:** [ADR-042: Mutation Echo-Check for Webhook Health Detection](../adrs/042-mutation-echo-check.md)
+
 **Webhook mode is always non-fatal.** If the `gh webhook forward` subprocess fails to start, the stream state stays `Unhealthy` and the 5-minute idle cap applies. The poll loop continues normally.
 
 **References:** [ADR-032: Webhook-Driven Event Delivery](../adrs/032-webhook-event-delivery.md)
