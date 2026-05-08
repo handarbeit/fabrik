@@ -1410,7 +1410,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 
 ### Fabrik-Managed Labels
 
-> Fabrik auto-seeds all managed labels on the configured repository at startup — creating them with their descriptions and colors if they do not already exist, so the GitHub UI shows meaningful hover text.
+> Fabrik auto-seeds all managed labels on the configured repository at startup — creating them if missing, and enforcing the correct color on existing labels, so the GitHub UI shows meaningful hover text and the board color scheme stays consistent.
 
 | Label | Purpose |
 |-------|---------|
