@@ -55,13 +55,13 @@ echo '.env' >> .gitignore
 
 ### Auto-upgrade
 
-Use `--auto-upgrade` to have Fabrik self-upgrade when idle:
+Use `--auto-upgrade` to have Fabrik self-upgrade at startup and when idle:
 
 ```bash
 ./fabrik --auto-upgrade ...
 ```
 
-After 2 idle polls, Fabrik upgrades itself automatically and re-execs:
+At startup and after 2 idle polls, Fabrik upgrades itself automatically and re-execs:
 
 - **Release binaries**: checks GitHub Releases for a newer version and downloads it.
 - **Dev builds** (built from source via `go build`): detects local or remote commits
@@ -260,7 +260,7 @@ GITHUB_TOKEN=ghp_...    # Fallback
 | `--token` | GitHub token | `$GITHUB_TOKEN` |
 | `--stages` | Stage configs directory | `./.fabrik/stages` |
 | `--yolo` | Auto-advance through stages | `false` |
-| `--auto-upgrade` | Self-upgrade from shadoworg/fabrik GitHub Releases when idle | `false` |
+| `--auto-upgrade` | Self-upgrade from shadoworg/fabrik GitHub Releases at startup and when idle (after 2 idle polls) | `false` |
 | `--poll` | Poll interval in seconds | `30` |
 | `--notui` | Disable the interactive TUI dashboard | TUI on by default |
 | `--max-concurrent` | Maximum number of concurrent issue workers | `5` |
@@ -272,7 +272,7 @@ GITHUB_TOKEN=ghp_...    # Fallback
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` for debugging | `false` |
 | `--plugin-dir` | Path to Fabrik plugin directory (overrides installed plugin) | `""` |
 | `--webhooks` | Enable real-time webhook event delivery via `gh webhook forward` (requires `cli/gh-webhook` extension; also `FABRIK_WEBHOOKS`) | `false` |
-| `--reconcile-interval` | Seconds between periodic light-reconcile health checks when webhooks and the in-memory board cache are both enabled (0 = default 180; also `FABRIK_RECONCILE_INTERVAL`) | `0` (180 s) |
+| `--reconcile-interval` | Seconds between periodic light-reconcile health checks when webhooks are enabled (0 = default 180; also `FABRIK_RECONCILE_INTERVAL`) | `0` (180 s) |
 
 > **Releases:** New releases are announced in the [shadoworg/fabrik Discussions "Announcements" category](https://github.com/shadoworg/fabrik/discussions/categories/announcements) after each successful release.
 
