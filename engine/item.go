@@ -982,7 +982,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		e.handleDecomposed(board, item, stage)
 	} else if blockedOnInput {
 		releaseLock()
-		e.blockOnInput(item, stage)
+		e.blockOnInput(item, stage, output)
 	} else {
 		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
 		e.logf(item.Number, "wait", "stage %q did not complete — will retry after %v\n", stage.Name, cooldown)
@@ -1075,11 +1075,34 @@ func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 	e.store.Apply(itemstate.EngineCyclesCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 }
 
+// buildAwaitingInputComment builds the notification comment body for a
+// blocked-on-input event. If user is non-empty the comment starts with an
+// @mention so GitHub delivers a mobile push notification. If summary is
+// non-empty it is embedded as a blockquote (the specific question Claude needs
+// answered); otherwise a generic message is used.
+func buildAwaitingInputComment(user, stageName, summary string) string {
+	var b strings.Builder
+	if user != "" {
+		fmt.Fprintf(&b, "@%s — Fabrik is awaiting your input on **%s**.\n\n", user, stageName)
+	} else {
+		fmt.Fprintf(&b, "Fabrik is awaiting your input on **%s**.\n\n", stageName)
+	}
+	if summary != "" {
+		for _, line := range strings.Split(strings.TrimSpace(summary), "\n") {
+			b.WriteString("> " + line + "\n")
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("Reply on this issue to resume.")
+	return b.String()
+}
+
 // blockOnInput is called when Claude outputs FABRIK_BLOCKED_ON_INPUT. It pauses
 // the issue with fabrik:paused + fabrik:awaiting-input labels so the engine
-// knows to auto-unblock when the user responds with a comment.
+// knows to auto-unblock when the user responds with a comment. It also posts a
+// dedicated @mention notification comment so GitHub delivers a mobile push.
 // It does NOT add a stage:<name>:failed label and does NOT touch Attempts.
-func (e *Engine) blockOnInput(item gh.ProjectItem, stage *stages.Stage) {
+func (e *Engine) blockOnInput(item gh.ProjectItem, stage *stages.Stage, output string) {
 	e.logf(item.Number, "block", "stage %q needs user input — pausing with awaiting-input\n", stage.Name)
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
@@ -1101,6 +1124,24 @@ func (e *Engine) blockOnInput(item gh.ProjectItem, stage *stages.Stage) {
 		}
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-input")
+		}
+	}
+
+	// Post a dedicated @mention notification comment so GitHub delivers a mobile
+	// push to the operator. No rocket reaction — this is engine-generated, not
+	// Claude output, so the reaction-based reprocessing guard should not apply.
+	summary := extractSummary(output)
+	comment := buildAwaitingInputComment(e.cfg.User, stage.Name, summary)
+	if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
+		e.logf(item.Number, "warn", "could not post awaiting-input notification comment: %v\n", err)
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+				DatabaseID: dbID, Body: comment, Author: e.cfg.User, CreatedAt: time.Now(),
+			})
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
 		}
 	}
 }
