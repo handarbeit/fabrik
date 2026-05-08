@@ -1741,8 +1741,7 @@ webhooks: true
 | Enable webhooks | `--webhooks` | `FABRIK_WEBHOOKS` | `webhooks: true` | off |
 | Listener port | `--webhook-port=<N>` | `FABRIK_WEBHOOK_PORT` | `webhook_port: <N>` | 0 (OS-assigned) |
 | Event filter | `--webhook-events=<csv>` | `FABRIK_WEBHOOK_EVENTS` | `webhook_events: [...]` | all supported events |
-| Board cache | `--board-cache=<mode>` | `FABRIK_BOARD_CACHE` | `board_cache: <mode>` | `in-memory` when `--webhooks`, else `none` |
-| Reconcile interval | `--reconcile-interval=<N>` | `FABRIK_RECONCILE_INTERVAL` | — | 0 (180 s; only active with `--board-cache=in-memory`) |
+| Reconcile interval | `--reconcile-interval=<N>` | `FABRIK_RECONCILE_INTERVAL` | — | 0 (180 s) |
 
 By default, Fabrik subscribes to: `issue_comment`, `issues`, `pull_request`, `pull_request_review`, `pull_request_review_comment`, `check_run`, `check_suite`, and `projects_v2_item` (board column changes — see note below).
 
@@ -1779,27 +1778,20 @@ When `--webhooks` is enabled, gate clearance events (Copilot/Gemini review submi
 
 On an active board that would poll every 30 seconds without webhooks, enabling webhook mode reduces steady-state full-board GraphQL polling to at most once every 60 minutes — roughly a 120× reduction in GraphQL points consumed while idle. A lightweight Layer 2 status gate checks the project `updatedAt` timestamp each poll cycle at very low GraphQL cost to catch board-column changes. During active periods, polls are triggered immediately by webhook events instead of waiting for the tick.
 
-### In-Memory Board Cache (`--board-cache`)
+### In-Memory Board Cache
 
-When webhook mode is active, Fabrik maintains an in-memory board cache (`--board-cache=in-memory`, the default). Incoming webhook payloads are applied as typed state deltas to the cache before the poll loop wakes, so most reads are served from memory rather than GitHub's API.
+Fabrik always maintains an in-memory cache of board state — the cache is the unified source of truth for downstream engine logic and reactive observers (push-unblock, stage-change, etc.) regardless of whether webhooks are configured.
 
-**Cache modes:**
+**How the cache stays fresh:**
 
-| Mode | When | Behavior |
-|------|------|----------|
-| `in-memory` | `--webhooks` enabled (default) | Cache populated at startup; deltas from webhooks; Layer 2 status gate each poll cycle (~30 s); full reconcile on stream recovery; falls back to GitHub when stream is unhealthy |
-| `none` | `--webhooks` disabled (default), or explicit override | All reads go directly to GitHub API (original behavior) |
+| Mode | Refresh paths |
+|------|---------------|
+| Webhooks disabled | Every poll cycle: shallow board fetch from GitHub → `Reconcile` into the cache. Layer 2 status gate also runs each poll for project Status changes (which never flow over webhooks). |
+| Webhooks enabled | Webhook deltas (`issues`, `pull_request`, `issue_comment`, etc.) update the cache between polls. Every poll still does a shallow Reconcile as the drift-detection safety net for missed events. The light-reconcile loop (~3 min) drives stream-health classification. |
 
-**To disable the cache while keeping webhooks:**
-```bash
-fabrik --webhooks --board-cache=none
-```
+**Project Status note:** GitHub webhooks do not deliver project-board Status (column) changes for repo-level project subscriptions, and only conditionally for org-level subscriptions with the right permissions. The Layer 2 status gate (`updatedAt` check + lightweight status batch) runs each poll cycle regardless of webhook health and is the only authoritative delivery path for Status drift.
 
-**Stream-health failover:** If the webhook stream goes unhealthy (reconcile detected drift or echo-check miss threshold triggered), the cache pauses and all reads fall back to the live GitHub API. When the stream recovers, the cache reconciles from GitHub before resuming. This ensures correctness is never compromised by a degraded webhook stream.
-
-**Reconciliation:** Fabrik uses a two-level reconciliation strategy. The light reconcile loop (default every 3 minutes, configurable via `--reconcile-interval` / `FABRIK_RECONCILE_INTERVAL`) is the primary health driver: each tick fetches the full item list and compares it against the cached state. When no drift is found, the stream transitions to Healthy; when drift is detected, the stream transitions to Unhealthy and the cache is reconciled from GitHub. A Layer 2 status gate also runs each poll cycle (~30 s default): it fetches the project's `updatedAt` timestamp and, if it changed, applies a lightweight status batch (Stage/column field only) at very low GraphQL cost — this is the primary mechanism for catching board-column changes. A full board snapshot is fetched on stream recovery (webhook stream goes unhealthy then recovers), ensuring all cached fields are coherent after a gap in event delivery.
-
-> **Note:** `--board-cache=in-memory` requires `--webhooks`. Without a webhook stream, there is no delta source and the cache relies solely on the periodic status sweep — worse than the default polling behavior.
+**Stream-health failover (webhook mode):** If the webhook stream goes unhealthy (reconcile detected drift or echo-check miss threshold triggered), the cache pauses and reads fall back to the live GitHub API. When the stream recovers, the cache reconciles from GitHub before resuming. The per-poll Reconcile remains active throughout and continues to keep state correct.
 
 ### `projects_v2_item` (Board Column Changes)
 

@@ -43,8 +43,7 @@ type Config struct {
 	Webhooks                 bool
 	WebhookPort              int
 	WebhookEvents            []string
-	BoardCacheMode           string // "in-memory" or "none"; default "none" when webhooks off, "in-memory" when on
-	ProjectStatusPollSeconds int    // Layer 2 status-only sweep cadence in seconds; default 15 s (gate runs every poll cycle; field retained for config compatibility)
+	ProjectStatusPollSeconds int // Layer 2 status-only sweep cadence in seconds; default 15 s (gate runs every poll cycle; field retained for config compatibility)
 	// ReadyCh is closed once Run() has registered signal handlers. Tests use
 	// this to avoid sending SIGINT before signal.Notify is installed.
 	ReadyCh chan struct{}
@@ -155,17 +154,13 @@ func New(cfg Config) (*Engine, error) {
 	// fabrik.log in both TUI and plain-text modes.
 	gh.Logf = eng.logf
 
-	// Initialize the read client: GitHubAdapter (pass-through) unless the in-memory
-	// board cache is enabled, in which case CacheImpl is created (bootstrap happens in Run()).
-	// The shared store is passed to CacheImpl so all mutations — engine-side and
-	// webhook-delta-side — flow through one Store instance.
+	// Initialize the read client. CacheImpl is the unified source of truth: the
+	// shared store is passed so all mutations — poll-driven Reconcile, engine-side,
+	// and (when enabled) webhook-delta-side — flow through one Store instance and
+	// reach the same observers (PushUnblockObserver, etc.).
 	adapter := boardcache.NewGitHubAdapter(eng.client)
-	if cfg.BoardCacheMode == "in-memory" {
-		cacheLogFn := func(format string, args ...any) { eng.logf(0, "cache", format, args...) }
-		eng.readClient = boardcache.NewCacheImpl(adapter, sharedStore, cacheLogFn)
-	} else {
-		eng.readClient = adapter
-	}
+	cacheLogFn := func(format string, args ...any) { eng.logf(0, "cache", format, args...) }
+	eng.readClient = boardcache.NewCacheImpl(adapter, sharedStore, cacheLogFn)
 
 	return eng, nil
 }
@@ -197,7 +192,10 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		}
 		wms[key] = worktrees
 	}
-	// Tests always use pass-through adapter (--board-cache=none behavior).
+	// Tests use the pass-through GitHub adapter directly so they exercise engine
+	// logic without going through CacheImpl's Reconcile/observer machinery — those
+	// are covered by boardcache's own tests. Production wiring (in New) always uses
+	// CacheImpl as the unified source of truth.
 	eng.readClient = boardcache.NewGitHubAdapter(client)
 	return eng
 }
