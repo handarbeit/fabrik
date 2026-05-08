@@ -72,6 +72,52 @@ func TestCheckDependencies_AllDepsClosed_ReturnsFalse(t *testing.T) {
 	}
 }
 
+// TestCheckDependencies_StorePreemptsStaleDepState verifies the indexer-lag fix:
+// when item.BlockedBy carries a stale dep.State="OPEN" but the engine Store has
+// the blocker recorded as IsClosed=true (from a fresh per-poll Reconcile that
+// reflects GitHub's authoritative shallow-board state), checkDependencies must
+// treat the dep as resolved and clear fabrik:blocked rather than re-applying it.
+//
+// Without this preference, the pull-path can re-block an issue that the
+// PushUnblockObserver has just unblocked, in the seconds-long window where
+// GitHub's GraphQL blockedBy.nodes.state is still catching up after the
+// blocker actually closed.
+func TestCheckDependencies_StorePreemptsStaleDepState(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := depTestEngine(client)
+
+	// Seed the Store with the blocker as closed — this is what a fresh Reconcile
+	// would have written before checkDependencies runs.
+	eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{
+		Number: 9, Repo: "owner/repo",
+	}})
+	eng.store.Apply(itemstate.IssueClosed{Repo: "owner/repo", Number: 9})
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	// item.BlockedBy carries the stale view: dep.State still OPEN.
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		Labels: []string{"fabrik:blocked"},
+		BlockedBy: []gh.Dependency{
+			{Number: 9, State: "OPEN", Repo: "owner/repo"},
+		},
+	}
+	stage := &stages.Stage{Name: "Research"}
+
+	blocked := eng.checkDependencies(board, item, stage)
+
+	if blocked {
+		t.Error("expected not blocked: Store says blocker IsClosed=true even though dep.State is stale OPEN")
+	}
+	if len(client.removeLabelCalls) != 1 {
+		t.Fatalf("expected 1 remove label call (fabrik:blocked cleanup), got %d", len(client.removeLabelCalls))
+	}
+	if client.removeLabelCalls[0].labelName != "fabrik:blocked" {
+		t.Errorf("expected removal of fabrik:blocked, got %q", client.removeLabelCalls[0].labelName)
+	}
+}
+
 func TestCheckDependencies_AllDepsClosed_RemovesBlockedLabel(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := depTestEngine(client)

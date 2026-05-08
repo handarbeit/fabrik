@@ -158,6 +158,15 @@ func (o *StageChangeObserver) OnChange(change itemstate.Change, snap itemstate.S
 type PushUnblockObserver struct {
 	Store  *itemstate.Store
 	Remove func(owner, repo string, number int)
+	// Logf is an optional diagnostic hook. When non-nil, it is called at key
+	// branch points so push-unblock decisions are traceable in fabrik.log.
+	Logf func(format string, args ...any)
+}
+
+func (o *PushUnblockObserver) logf(format string, args ...any) {
+	if o.Logf != nil {
+		o.Logf(format, args...)
+	}
 }
 
 // allBlockersClosed checks whether every dep in blockedBy is closed, preferring
@@ -190,6 +199,7 @@ func (o *PushUnblockObserver) OnChange(change itemstate.Change, snap itemstate.S
 		closedRepo := change.Repo
 		closedNum := change.Number
 
+		matched := 0
 		for _, x := range o.Store.All() {
 			xState := x.State()
 
@@ -222,6 +232,8 @@ func (o *PushUnblockObserver) OnChange(change itemstate.Change, snap itemstate.S
 			}
 
 			if !o.allBlockersClosed(xState.Repo, xState.BlockedBy) {
+				o.logf("dependent %s#%d listed blocker %s#%d but other blockers still open — skip\n",
+					xState.Repo, xState.Number, closedRepo, closedNum)
 				continue
 			}
 
@@ -230,8 +242,13 @@ func (o *PushUnblockObserver) OnChange(change itemstate.Change, snap itemstate.S
 				continue
 			}
 			xNum := xState.Number
+			matched++
+			o.logf("blocker %s#%d closed → removing fabrik:blocked from dependent %s#%d\n",
+				closedRepo, closedNum, xState.Repo, xNum)
 			go o.Remove(xOwner, xRepo, xNum)
 		}
+		// Silent when no dependents match — common case for closes of unrelated issues.
+		_ = matched
 	}
 
 	// Path 2: dependent's BlockedBy just populated via deep-fetch → check only this item.

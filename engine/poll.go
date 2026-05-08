@@ -342,6 +342,7 @@ func (e *Engine) Run() error {
 		pushUnblockObs := &PushUnblockObserver{
 			Store:  e.store,
 			Remove: func(owner, repo string, n int) { e.removeBlockedIfResolved(owner, repo, n) },
+			Logf:   func(format string, args ...any) { e.logf(0, "push-unblock", format, args...) },
 		}
 		unsubs = append(unsubs, e.store.Subscribe(pushUnblockObs))
 
