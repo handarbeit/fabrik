@@ -60,6 +60,11 @@ func TestLockLabelWriteThrough(t *testing.T) {
 		t.Errorf("add write-through: expected fabrik:paused in cache after blockOnInput, got %v", labels)
 	}
 
+	// blockOnInput should also post exactly one notification comment.
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 AddComment call from blockOnInput, got %d", len(client.addCommentCalls))
+	}
+
 	// Removal path: seed the lock label, then verify removeLockLabel updates the cache.
 	lockLabel := "fabrik:locked:testuser"
 	cache.ApplyLabelAdded(boardcache.ItemKey("owner/repo", 1), lockLabel)
