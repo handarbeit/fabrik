@@ -39,8 +39,30 @@ func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, 
 	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
 
 	// Collect open (non-CLOSED) blocking dependencies.
+	//
+	// Prefer the engine Store's view of each blocker's IsClosed over dep.State
+	// from the BlockedBy edge. The dep.State field comes from GitHub's GraphQL
+	// blockedBy.nodes.state response and lags the actual issue close by seconds
+	// (GitHub indexer lag). The Store's IsClosed flips immediately when the
+	// per-poll Reconcile picks up the shallow board's updated state. Using the
+	// Store as the source of truth here matches PushUnblockObserver.allBlockersClosed
+	// and prevents the pull-path from re-blocking an issue that the push-path
+	// has already correctly unblocked, just because the dep edge state is stale.
 	var openDeps []gh.Dependency
 	for _, dep := range item.BlockedBy {
+		depRepo := dep.Repo
+		if depRepo == "" {
+			depRepo = itemRepo
+		}
+		// Store-preferred path: cache is authoritative for blocker IsClosed.
+		if depSnap, snapErr := e.store.Get(depRepo, dep.Number); snapErr == nil {
+			if depSnap.IsClosed() {
+				continue // resolved per Store
+			}
+			openDeps = append(openDeps, dep)
+			continue
+		}
+		// Fallback: no Store entry for this blocker — fall back to dep.State.
 		if dep.State != "CLOSED" {
 			openDeps = append(openDeps, dep)
 		}
