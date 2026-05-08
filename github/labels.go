@@ -17,27 +17,27 @@ type labelDef struct {
 }
 
 // staticLabelDefs lists every static and enumerated Fabrik label with its
-// description (≤100 chars) and a sensible default color for first creation.
-// Colors are never changed after a label is created.
+// description (≤100 chars) and color. Colors are enforced on existing labels
+// at startup via SeedLabels.
 var staticLabelDefs = []labelDef{
-	// --- behaviour labels (blue) ---
-	{"fabrik:yolo", "Auto-advance all stages and auto-merge the PR at Validate", "0075ca"},
-	{"fabrik:cruise", "Auto-advance all stages; stop at Validate without merging", "0075ca"},
-	{"fabrik:extend-turns", "Override: pre-grant 2× turn budget; auto-removed on stage success", "0075ca"},
+	// --- behaviour override labels (grey) ---
+	{"fabrik:yolo", "Auto-advance all stages and auto-merge the PR at Validate", "cfd3d7"},
+	{"fabrik:cruise", "Auto-advance all stages; stop at Validate without merging", "cfd3d7"},
+	{"fabrik:extend-turns", "Override: pre-grant 2× turn budget; auto-removed on stage success", "cfd3d7"},
 
-	// --- warning / waiting labels (yellow) ---
-	{"fabrik:paused", "Stage failed or needs intervention; remove to resume", "e4e669"},
+	// --- error / intervention needed labels (red) ---
+	{"fabrik:paused", "Stage failed or needs intervention; remove to resume", "d73a4a"},
+	{"fabrik:blocked", "Blocked by one or more open dependency issues", "d73a4a"},
+	{"fabrik:unrestricted", "Claude runs with --dangerously-skip-permissions for this issue", "d73a4a"},
+
+	// --- waiting labels (yellow) ---
 	{"fabrik:awaiting-input", "Stage blocked on FABRIK_BLOCKED_ON_INPUT; comment to unblock", "e4e669"},
 	{"fabrik:awaiting-review", "Validate complete; waiting for requested PR reviewers", "e4e669"},
 	{"fabrik:awaiting-ci", "CI gate active; waiting for CI checks to pass (checks may be running or have failed)", "e4e669"},
 	{"fabrik:rebase-needed", "Base branch advanced and PR no longer merges; engine is retrying a rebase invocation", "e4e669"},
 	{"fabrik:bot-reprompted", "Bot re-prompt sent; waiting for bot to respond (transient; removed at gate-cycle end)", "e4e669"},
 
-	// --- danger labels (red) ---
-	{"fabrik:blocked", "Blocked by one or more open dependency issues", "d73a4a"},
-	{"fabrik:unrestricted", "Claude runs with --dangerously-skip-permissions for this issue", "d73a4a"},
-
-	// --- neutral labels (grey) ---
+	// --- neutral / transient labels (grey) ---
 	{"fabrik:editing", "Issue is being edited by the user; processing deferred", "cfd3d7"},
 
 	// --- model override labels (purple) ---
@@ -71,7 +71,7 @@ func labelDefFor(name string) (description, color string) {
 			stageName := parts[1]
 			switch parts[2] {
 			case "in_progress":
-				return fmt.Sprintf("Fabrik is currently running the %s stage", stageName), "0e8a16"
+				return fmt.Sprintf("Fabrik is currently running the %s stage", stageName), "6f42c1"
 			case "complete":
 				return fmt.Sprintf("%s stage completed successfully", stageName), "0e8a16"
 			case "failed":
@@ -185,12 +185,12 @@ func (c *Client) ensureLabel(owner, repo, name, description, color string) error
 // ErrNoRepoConfigured is returned by SeedLabels when repo is empty.
 var ErrNoRepoConfigured = errors.New("repo must not be empty")
 
-// SeedLabels ensures all known Fabrik labels exist on the given repo and that
-// any label with an empty description is backfilled. It never changes an
-// existing label's color or non-empty description. stageNames is the list of
-// stage names from the loaded config; lockedUser is the current Fabrik user.
-// Returns ErrNoRepoConfigured when repo is empty. Per-label failures are logged
-// internally and do not cause an early return.
+// SeedLabels ensures all known Fabrik labels exist on the given repo. It
+// enforces the correct color on existing labels and backfills empty
+// descriptions. Non-empty descriptions are never overwritten. stageNames is the
+// list of stage names from the loaded config; lockedUser is the current Fabrik
+// user. Returns ErrNoRepoConfigured when repo is empty. Per-label failures are
+// logged internally and do not cause an early return.
 func (c *Client) SeedLabels(owner, repo string, stageNames []string, lockedUser string) error {
 	if repo == "" {
 		return ErrNoRepoConfigured
@@ -210,7 +210,7 @@ func (c *Client) SeedLabels(owner, repo string, stageNames []string, lockedUser 
 			labelDef{
 				fmt.Sprintf("stage:%s:in_progress", s),
 				fmt.Sprintf("Fabrik is currently running the %s stage", s),
-				"0e8a16",
+				"6f42c1",
 			},
 			labelDef{
 				fmt.Sprintf("stage:%s:complete", s),
@@ -233,14 +233,16 @@ func (c *Client) SeedLabels(owner, repo string, stageNames []string, lockedUser 
 	return nil
 }
 
-// seedOneLabel creates a label if it does not exist, or backfills its
-// description if it exists with an empty description. Color is never changed.
+// seedOneLabel creates a label if it does not exist, or enforces the correct
+// color on existing labels and backfills empty descriptions. Color is enforced
+// on existing labels; description is only backfilled when empty.
 func (c *Client) seedOneLabel(owner, repo string, d labelDef) error {
 	getURL := fmt.Sprintf("%s/repos/%s/%s/labels/%s", c.baseURL, owner, repo, url.PathEscape(d.name))
 
 	var existing struct {
 		Name        string `json:"name"`
 		Description string `json:"description"`
+		Color       string `json:"color"`
 	}
 	err := c.restGetJSON(getURL, &existing)
 	if err != nil {
@@ -260,11 +262,19 @@ func (c *Client) seedOneLabel(owner, repo string, d labelDef) error {
 		return err
 	}
 
-	// Label exists. Backfill description only if currently empty.
-	if existing.Description != "" {
+	// Label exists. Enforce color; backfill description only if currently empty.
+	needDesc := existing.Description == ""
+	needColor := existing.Color != d.color
+	if !needDesc && !needColor {
 		return nil
 	}
+	patch := map[string]string{}
+	if needDesc {
+		patch["description"] = d.description
+	}
+	if needColor {
+		patch["color"] = d.color
+	}
 	patchURL := fmt.Sprintf("%s/repos/%s/%s/labels/%s", c.baseURL, owner, repo, url.PathEscape(d.name))
-	patch := map[string]string{"description": d.description}
 	return c.restPatch(patchURL, patch)
 }
