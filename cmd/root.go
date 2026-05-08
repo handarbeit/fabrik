@@ -49,7 +49,6 @@ type Config struct {
 	Webhooks          bool
 	WebhookPort       int
 	WebhookEvents     string // comma-separated; empty means default event set
-	BoardCacheMode    string // "in-memory" or "none"; empty = auto (in-memory when webhooks enabled)
 	StatusPollSeconds int    // Layer 2 status-only sweep cadence in seconds; 0 = use default (15)
 	ReconcileInterval int    // seconds; 0 means use default (180 = 3 min); also FABRIK_RECONCILE_INTERVAL
 }
@@ -132,7 +131,6 @@ func Execute() error {
 	flag.BoolVar(&cfg.Webhooks, "webhooks", false, "Enable webhook-driven event delivery via gh webhook forward (requires gh ≥ 2.32.0; also FABRIK_WEBHOOKS)")
 	flag.IntVar(&cfg.WebhookPort, "webhook-port", 0, "Local port for the webhook HTTP listener (0 = OS-assigned; also FABRIK_WEBHOOK_PORT)")
 	flag.StringVar(&cfg.WebhookEvents, "webhook-events", "", "Comma-separated list of GitHub event types to subscribe to (default: all supported events; also FABRIK_WEBHOOK_EVENTS)")
-	flag.StringVar(&cfg.BoardCacheMode, "board-cache", "", `Board cache mode: "in-memory" (cache board state; requires --webhooks) or "none" (always fetch from GitHub). Default: "in-memory" when --webhooks is enabled, "none" otherwise. Also FABRIK_BOARD_CACHE.`)
 	flag.IntVar(&cfg.StatusPollSeconds, "status-poll", 0, "Retained for config compatibility; the Layer 2 updatedAt gate now runs every poll cycle (~15 s) regardless of this value. Also FABRIK_STATUS_POLL.")
 	flag.IntVar(&cfg.ReconcileInterval, "reconcile-interval", 0, "Seconds between periodic light-reconcile health checks when webhooks and board cache are enabled (0 = use default of 180; also FABRIK_RECONCILE_INTERVAL)")
 
@@ -408,11 +406,6 @@ func Execute() error {
 			cfg.WebhookEvents = v
 		}
 	}
-	if !explicitFlags["board-cache"] {
-		if v := os.Getenv("FABRIK_BOARD_CACHE"); v != "" {
-			cfg.BoardCacheMode = v
-		}
-	}
 	if !explicitFlags["status-poll"] {
 		if v := os.Getenv("FABRIK_STATUS_POLL"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -427,22 +420,6 @@ func Execute() error {
 				cfg.StatusPollSeconds = *pc.StatusPoll
 			}
 		}
-	}
-
-	// Apply board-cache default: "in-memory" when webhooks are enabled; "none" otherwise.
-	// Explicit --board-cache=in-memory without --webhooks is a configuration error.
-	if cfg.BoardCacheMode == "" {
-		if cfg.Webhooks {
-			cfg.BoardCacheMode = "in-memory"
-		} else {
-			cfg.BoardCacheMode = "none"
-		}
-	}
-	if cfg.BoardCacheMode == "in-memory" && !cfg.Webhooks {
-		return fmt.Errorf("--board-cache=in-memory requires --webhooks (no delta source without webhook events)")
-	}
-	if cfg.BoardCacheMode != "in-memory" && cfg.BoardCacheMode != "none" {
-		return fmt.Errorf("invalid --board-cache value %q: must be \"in-memory\" or \"none\"", cfg.BoardCacheMode)
 	}
 
 	if cfg.Owner == "" || cfg.ProjectNum == 0 {
@@ -556,7 +533,6 @@ func Execute() error {
 		Webhooks:                 cfg.Webhooks,
 		WebhookPort:              cfg.WebhookPort,
 		WebhookEvents:            webhookEvents,
-		BoardCacheMode:           cfg.BoardCacheMode,
 		ProjectStatusPollSeconds: statusPollSeconds(cfg.StatusPollSeconds),
 		ReconcileInterval:        reconcileIntervalDuration(cfg.ReconcileInterval),
 		ReadyCh:                  testReadyCh,

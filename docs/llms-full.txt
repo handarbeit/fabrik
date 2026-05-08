@@ -1739,8 +1739,7 @@ webhooks: true
 | Enable webhooks | `--webhooks` | `FABRIK_WEBHOOKS` | `webhooks: true` | off |
 | Listener port | `--webhook-port=<N>` | `FABRIK_WEBHOOK_PORT` | `webhook_port: <N>` | 0 (OS-assigned) |
 | Event filter | `--webhook-events=<csv>` | `FABRIK_WEBHOOK_EVENTS` | `webhook_events: [...]` | all supported events |
-| Board cache | `--board-cache=<mode>` | `FABRIK_BOARD_CACHE` | `board_cache: <mode>` | `in-memory` when `--webhooks`, else `none` |
-| Reconcile interval | `--reconcile-interval=<N>` | `FABRIK_RECONCILE_INTERVAL` | — | 0 (180 s; only active with `--board-cache=in-memory`) |
+| Reconcile interval | `--reconcile-interval=<N>` | `FABRIK_RECONCILE_INTERVAL` | — | 0 (180 s) |
 
 By default, Fabrik subscribes to: `issue_comment`, `issues`, `pull_request`, `pull_request_review`, `pull_request_review_comment`, `check_run`, `check_suite`, and `projects_v2_item` (board column changes — see note below).
 
@@ -1777,27 +1776,20 @@ When `--webhooks` is enabled, gate clearance events (Copilot/Gemini review submi
 
 On an active board that would poll every 30 seconds without webhooks, enabling webhook mode reduces steady-state full-board GraphQL polling to at most once every 60 minutes — roughly a 120× reduction in GraphQL points consumed while idle. A lightweight Layer 2 status gate checks the project `updatedAt` timestamp each poll cycle at very low GraphQL cost to catch board-column changes. During active periods, polls are triggered immediately by webhook events instead of waiting for the tick.
 
-### In-Memory Board Cache (`--board-cache`)
+### In-Memory Board Cache
 
-When webhook mode is active, Fabrik maintains an in-memory board cache (`--board-cache=in-memory`, the default). Incoming webhook payloads are applied as typed state deltas to the cache before the poll loop wakes, so most reads are served from memory rather than GitHub's API.
+Fabrik always maintains an in-memory cache of board state — the cache is the unified source of truth for downstream engine logic and reactive observers (push-unblock, stage-change, etc.) regardless of whether webhooks are configured.
 
-**Cache modes:**
+**How the cache stays fresh:**
 
-| Mode | When | Behavior |
-|------|------|----------|
-| `in-memory` | `--webhooks` enabled (default) | Cache populated at startup; deltas from webhooks; Layer 2 status gate each poll cycle (~30 s); full reconcile on stream recovery; falls back to GitHub when stream is unhealthy |
-| `none` | `--webhooks` disabled (default), or explicit override | All reads go directly to GitHub API (original behavior) |
+| Mode | Refresh paths |
+|------|---------------|
+| Webhooks disabled | Every poll cycle: shallow board fetch from GitHub → `Reconcile` into the cache. Layer 2 status gate also runs each poll for project Status changes (which never flow over webhooks). |
+| Webhooks enabled | Webhook deltas (`issues`, `pull_request`, `issue_comment`, etc.) update the cache between polls. Every poll still does a shallow Reconcile as the drift-detection safety net for missed events. The light-reconcile loop (~3 min) drives stream-health classification. |
 
-**To disable the cache while keeping webhooks:**
-```bash
-fabrik --webhooks --board-cache=none
-```
+**Project Status note:** GitHub webhooks do not deliver project-board Status (column) changes for repo-level project subscriptions, and only conditionally for org-level subscriptions with the right permissions. The Layer 2 status gate (`updatedAt` check + lightweight status batch) runs each poll cycle regardless of webhook health and is the only authoritative delivery path for Status drift.
 
-**Stream-health failover:** If the webhook stream goes unhealthy (reconcile detected drift or echo-check miss threshold triggered), the cache pauses and all reads fall back to the live GitHub API. When the stream recovers, the cache reconciles from GitHub before resuming. This ensures correctness is never compromised by a degraded webhook stream.
-
-**Reconciliation:** Fabrik uses a two-level reconciliation strategy. The light reconcile loop (default every 3 minutes, configurable via `--reconcile-interval` / `FABRIK_RECONCILE_INTERVAL`) is the primary health driver: each tick fetches the full item list and compares it against the cached state. When no drift is found, the stream transitions to Healthy; when drift is detected, the stream transitions to Unhealthy and the cache is reconciled from GitHub. A Layer 2 status gate also runs each poll cycle (~30 s default): it fetches the project's `updatedAt` timestamp and, if it changed, applies a lightweight status batch (Stage/column field only) at very low GraphQL cost — this is the primary mechanism for catching board-column changes. A full board snapshot is fetched on stream recovery (webhook stream goes unhealthy then recovers), ensuring all cached fields are coherent after a gap in event delivery.
-
-> **Note:** `--board-cache=in-memory` requires `--webhooks`. Without a webhook stream, there is no delta source and the cache relies solely on the periodic status sweep — worse than the default polling behavior.
+**Stream-health failover (webhook mode):** If the webhook stream goes unhealthy (reconcile detected drift or echo-check miss threshold triggered), the cache pauses and reads fall back to the live GitHub API. When the stream recovers, the cache reconciles from GitHub before resuming. The per-poll Reconcile remains active throughout and continues to keep state correct.
 
 ### `projects_v2_item` (Board Column Changes)
 
@@ -3729,15 +3721,21 @@ The engine uses two distinct in-memory stores (both in `itemstate.Store`) for co
 
 ## Appendix D: In-Memory Board Cache Lifecycle
 
-When `--webhooks` and `--board-cache=in-memory` are both active (the default when webhooks are enabled), the engine maintains an in-memory cache of board state in `boardcache.CacheImpl`. This appendix describes the cache lifecycle, delta semantics, reconciliation, and stream-health failover.
+The engine always maintains an in-memory cache of board state in `boardcache.CacheImpl`, wired as `e.readClient` for production runs (tests using `engine.NewWithDeps` bypass the cache and use `boardcache.GitHubAdapter` directly). The cache is the unified source of truth for downstream engine logic and reactive observers (`PushUnblockObserver`, `StageChangeObserver`, etc.) regardless of whether webhooks are configured. This appendix describes the cache lifecycle, delta semantics, reconciliation, and stream-health failover.
 
 ### D.1 Bootstrap
 
-Immediately after `wm.Start()` succeeds (webhook manager listener bound and subprocess launched), the engine calls `e.client.FetchProjectBoard(...)` directly — bypassing the cache — and passes the result to `cacheImpl.Bootstrap(board)`. Bootstrap populates `items`, `shaToKey`, and `itemIDToKey` from the full board snapshot. Deep fields (comments, linked PR data) are not populated at bootstrap; they are fetched lazily on first `FetchItemDetails` call.
+The cache is bootstrapped from a fresh GitHub `FetchProjectBoard` call. Two paths can perform Bootstrap:
+
+1. **Webhook startup path** — when `--webhooks` is enabled, immediately after `wm.Start()` succeeds (listener bound and subprocess launched), the engine calls `e.client.FetchProjectBoard(...)` and passes the result to `cacheImpl.Bootstrap(board)`. This pre-bootstrap closes the gap between webhook subprocess start and the first poll cycle, so deltas don't land in an empty cache.
+
+2. **First-poll path** — every `poll()` cycle starts with a shallow `e.client.FetchProjectBoard(...)` call. If `cacheImpl.ProjectID() == ""` (cache not yet bootstrapped — e.g., webhooks disabled, or webhook-startup bootstrap failed), the result is passed to `cacheImpl.Bootstrap(board)`. On subsequent polls (cache already bootstrapped), the same fetch is passed to `cacheImpl.Reconcile(board)` instead — see D.4.
+
+Bootstrap populates `items`, `shaToKey`, and `itemIDToKey` from the full board snapshot. Deep fields (comments, linked PR data) are not populated at bootstrap; they are fetched lazily on first `FetchItemDetails` call.
 
 Bootstrap calls `Store.Reset`, which fires observer notifications for every item (one `Change` per item, with non-zero `Fields`). `mayNeedWorkObserver` is always registered in `Engine.Run()` **before** Bootstrap is called and is the mechanism that makes bootstrapped items visible to the dispatch loop via the next ticker poll — no external webhook event is needed to unblock them. `wakeChObserver` is also registered before Bootstrap, but only when `wakeCh != nil`; in headless runs there is no wake channel and `wakeChObserver` is not registered, so visibility of bootstrapped items relies solely on `mayNeedWorkObserver` and the next ticker-driven poll (within `PollSeconds`).
 
-If the bootstrap fetch fails (e.g., transient network error), the cache starts empty and populates through fallback on the first cache miss. No data is lost; latency for the first deep-fetch is slightly higher.
+If a bootstrap fetch fails (e.g., transient network error), the cache stays unbootstrapped and the next poll cycle retries via the first-poll path. No data is lost.
 
 ### D.2 Delta Application
 
@@ -3835,7 +3833,13 @@ After a successful batch step, `e.lastProjectUpdatedAt` is updated to the new ti
 
 **Gate inactive when**: `e.readClient` is not a `*boardcache.CacheImpl` (non-cache mode), or `cacheImpl.ProjectID()` is empty (bootstrap not yet complete).
 
-**Full reconcile — drift-recovery only**
+**Per-poll baseline reconcile**
+
+After the Layer 2 status gate above, every `poll()` cycle calls `e.client.FetchProjectBoard(...)` directly (bypassing the cache) and passes the result to `cacheImpl.Reconcile(board)` — or `cacheImpl.Bootstrap(board)` on the first poll when the cache hasn't been bootstrapped yet (see D.1). This is the universal baseline freshener: it flows shallow board state (notably `IsClosed`, `Status`, `Labels`, `UpdatedAt`) into the Store on every poll regardless of webhook configuration, firing observer notifications (`StateChanged`, `LabelsChanged`, `BlockedByChanged`, etc.) so reactive observers like `PushUnblockObserver` operate identically with or without webhooks.
+
+The per-poll Reconcile is what makes the cache the unified source of truth: without it, `PushUnblockObserver` and other Store-mutation observers were structurally dormant when webhooks were disabled, because no path in the polling-only loop wrote shallow board state into the Store.
+
+**Full reconcile — drift-recovery (webhook mode)**
 
 `LightReconcile` returns the fresh board snapshot when drift is detected, which the `reconcileTicker` goroutine passes directly to `cacheImpl.Reconcile(board)` — avoiding a second API call. `reconcileCache` (the older full-fetch-and-reconcile helper) is retained but is no longer called by the engine.
 
@@ -3865,14 +3869,16 @@ On drift recovery, `LightReconcile` returns the fresh board it already fetched; 
 
 **`healthChangeFn` removed (issue #641):** The callback-based `healthChangeFn` pattern (ADR-034) has been replaced. The `reconcileTicker` goroutine owns the full Pause/Reconcile/Resume sequence directly; no indirection through a closure is required.
 
-### D.6 Cache Mode Selection
+### D.6 Cache Mode
 
-| `--board-cache` | `--webhooks` | Behavior |
-|-----------------|--------------|----------|
-| `in-memory` (default when webhooks on) | required | `CacheImpl` with delta/failover |
-| `none` | any | `GitHubAdapter` pass-through (no caching) |
+The `--board-cache` flag has been removed. `CacheImpl` is now wired unconditionally for production runs. The cache is freshened by:
 
-Specifying `--board-cache=in-memory` without `--webhooks` is a configuration error: without a webhook stream there is no delta source and the cache relies solely on the periodic status sweep — worse than direct polling.
+1. **Per-poll baseline Reconcile** (always active) — see D.4
+2. **Layer 2 status sweep** (always active) — see D.4 and D.7
+3. **Webhook deltas** (when `--webhooks` is enabled) — see D.2
+4. **Light-reconcile drift recovery** (when `--webhooks` is enabled) — see D.5
+
+Tests that need to bypass the cache use `engine.NewWithDeps`, which wires `boardcache.GitHubAdapter` directly. This bypasses the Store-mutation pipeline and silently disables observers, so it is intended only for unit tests that don't exercise Store-driven behavior.
 
 ### D.7 Status field reconciliation in user mode
 

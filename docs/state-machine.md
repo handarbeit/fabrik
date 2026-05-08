@@ -1669,15 +1669,21 @@ The engine uses two distinct in-memory stores (both in `itemstate.Store`) for co
 
 ## Appendix D: In-Memory Board Cache Lifecycle
 
-When `--webhooks` and `--board-cache=in-memory` are both active (the default when webhooks are enabled), the engine maintains an in-memory cache of board state in `boardcache.CacheImpl`. This appendix describes the cache lifecycle, delta semantics, reconciliation, and stream-health failover.
+The engine always maintains an in-memory cache of board state in `boardcache.CacheImpl`, wired as `e.readClient` for production runs (tests using `engine.NewWithDeps` bypass the cache and use `boardcache.GitHubAdapter` directly). The cache is the unified source of truth for downstream engine logic and reactive observers (`PushUnblockObserver`, `StageChangeObserver`, etc.) regardless of whether webhooks are configured. This appendix describes the cache lifecycle, delta semantics, reconciliation, and stream-health failover.
 
 ### D.1 Bootstrap
 
-Immediately after `wm.Start()` succeeds (webhook manager listener bound and subprocess launched), the engine calls `e.client.FetchProjectBoard(...)` directly — bypassing the cache — and passes the result to `cacheImpl.Bootstrap(board)`. Bootstrap populates `items`, `shaToKey`, and `itemIDToKey` from the full board snapshot. Deep fields (comments, linked PR data) are not populated at bootstrap; they are fetched lazily on first `FetchItemDetails` call.
+The cache is bootstrapped from a fresh GitHub `FetchProjectBoard` call. Two paths can perform Bootstrap:
+
+1. **Webhook startup path** — when `--webhooks` is enabled, immediately after `wm.Start()` succeeds (listener bound and subprocess launched), the engine calls `e.client.FetchProjectBoard(...)` and passes the result to `cacheImpl.Bootstrap(board)`. This pre-bootstrap closes the gap between webhook subprocess start and the first poll cycle, so deltas don't land in an empty cache.
+
+2. **First-poll path** — every `poll()` cycle starts with a shallow `e.client.FetchProjectBoard(...)` call. If `cacheImpl.ProjectID() == ""` (cache not yet bootstrapped — e.g., webhooks disabled, or webhook-startup bootstrap failed), the result is passed to `cacheImpl.Bootstrap(board)`. On subsequent polls (cache already bootstrapped), the same fetch is passed to `cacheImpl.Reconcile(board)` instead — see D.4.
+
+Bootstrap populates `items`, `shaToKey`, and `itemIDToKey` from the full board snapshot. Deep fields (comments, linked PR data) are not populated at bootstrap; they are fetched lazily on first `FetchItemDetails` call.
 
 Bootstrap calls `Store.Reset`, which fires observer notifications for every item (one `Change` per item, with non-zero `Fields`). `mayNeedWorkObserver` is always registered in `Engine.Run()` **before** Bootstrap is called and is the mechanism that makes bootstrapped items visible to the dispatch loop via the next ticker poll — no external webhook event is needed to unblock them. `wakeChObserver` is also registered before Bootstrap, but only when `wakeCh != nil`; in headless runs there is no wake channel and `wakeChObserver` is not registered, so visibility of bootstrapped items relies solely on `mayNeedWorkObserver` and the next ticker-driven poll (within `PollSeconds`).
 
-If the bootstrap fetch fails (e.g., transient network error), the cache starts empty and populates through fallback on the first cache miss. No data is lost; latency for the first deep-fetch is slightly higher.
+If a bootstrap fetch fails (e.g., transient network error), the cache stays unbootstrapped and the next poll cycle retries via the first-poll path. No data is lost.
 
 ### D.2 Delta Application
 
@@ -1775,7 +1781,13 @@ After a successful batch step, `e.lastProjectUpdatedAt` is updated to the new ti
 
 **Gate inactive when**: `e.readClient` is not a `*boardcache.CacheImpl` (non-cache mode), or `cacheImpl.ProjectID()` is empty (bootstrap not yet complete).
 
-**Full reconcile — drift-recovery only**
+**Per-poll baseline reconcile**
+
+After the Layer 2 status gate above, every `poll()` cycle calls `e.client.FetchProjectBoard(...)` directly (bypassing the cache) and passes the result to `cacheImpl.Reconcile(board)` — or `cacheImpl.Bootstrap(board)` on the first poll when the cache hasn't been bootstrapped yet (see D.1). This is the universal baseline freshener: it flows shallow board state (notably `IsClosed`, `Status`, `Labels`, `UpdatedAt`) into the Store on every poll regardless of webhook configuration, firing observer notifications (`StateChanged`, `LabelsChanged`, `BlockedByChanged`, etc.) so reactive observers like `PushUnblockObserver` operate identically with or without webhooks.
+
+The per-poll Reconcile is what makes the cache the unified source of truth: without it, `PushUnblockObserver` and other Store-mutation observers were structurally dormant when webhooks were disabled, because no path in the polling-only loop wrote shallow board state into the Store.
+
+**Full reconcile — drift-recovery (webhook mode)**
 
 `LightReconcile` returns the fresh board snapshot when drift is detected, which the `reconcileTicker` goroutine passes directly to `cacheImpl.Reconcile(board)` — avoiding a second API call. `reconcileCache` (the older full-fetch-and-reconcile helper) is retained but is no longer called by the engine.
 
@@ -1805,14 +1817,16 @@ On drift recovery, `LightReconcile` returns the fresh board it already fetched; 
 
 **`healthChangeFn` removed (issue #641):** The callback-based `healthChangeFn` pattern (ADR-034) has been replaced. The `reconcileTicker` goroutine owns the full Pause/Reconcile/Resume sequence directly; no indirection through a closure is required.
 
-### D.6 Cache Mode Selection
+### D.6 Cache Mode
 
-| `--board-cache` | `--webhooks` | Behavior |
-|-----------------|--------------|----------|
-| `in-memory` (default when webhooks on) | required | `CacheImpl` with delta/failover |
-| `none` | any | `GitHubAdapter` pass-through (no caching) |
+The `--board-cache` flag has been removed. `CacheImpl` is now wired unconditionally for production runs. The cache is freshened by:
 
-Specifying `--board-cache=in-memory` without `--webhooks` is a configuration error: without a webhook stream there is no delta source and the cache relies solely on the periodic status sweep — worse than direct polling.
+1. **Per-poll baseline Reconcile** (always active) — see D.4
+2. **Layer 2 status sweep** (always active) — see D.4 and D.7
+3. **Webhook deltas** (when `--webhooks` is enabled) — see D.2
+4. **Light-reconcile drift recovery** (when `--webhooks` is enabled) — see D.5
+
+Tests that need to bypass the cache use `engine.NewWithDeps`, which wires `boardcache.GitHubAdapter` directly. This bypasses the Store-mutation pipeline and silently disables observers, so it is intended only for unit tests that don't exercise Store-driven behavior.
 
 ### D.7 Status field reconciliation in user mode
 
