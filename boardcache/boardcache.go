@@ -28,7 +28,8 @@ type ReadClient interface {
 }
 
 // GitHubAdapter wraps a ReadClient with pass-through implementations.
-// When --board-cache=none, the engine sets e.readClient = NewGitHubAdapter(e.client).
+// Used as the fallback inside CacheImpl (cache miss → forward to GitHub) and
+// directly in NewWithDeps test wiring (engine tests bypass CacheImpl).
 type GitHubAdapter struct {
 	client ReadClient
 }
