@@ -296,7 +296,9 @@ func (e *Engine) Run() error {
 		e.mu.Unlock()
 	}
 
-	// Extract in-memory cache if configured (nil when board-cache=none).
+	// In production wiring readClient is always *CacheImpl; the cast may return
+	// (nil, false) when called from tests that use the pass-through GitHub adapter
+	// directly via NewWithDeps. Code paths that depend on cacheImpl must check nil.
 	cacheImpl, _ := e.readClient.(*boardcache.CacheImpl)
 
 	// Register reactive observers. All returned unsubscribe funcs are collected
@@ -822,6 +824,39 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 					e.lastProjectUpdatedAt = updatedAt
 				}
 			}
+		}
+	}
+
+	// Universal baseline freshener: every poll, fetch the shallow board directly
+	// from GitHub and sync the cache via Bootstrap (first poll) or Reconcile
+	// (subsequent polls). This is what makes the cache the unified source of truth
+	// regardless of webhook state — without webhooks, this is the only path that
+	// flows IsClosed / Status / Label changes into the Store and fires Store
+	// observers (e.g., PushUnblockObserver). With webhooks, this remains as the
+	// drift-detection safety net for missed events.
+	//
+	// Future work (separate PR): track webhook health per-repo. Webhooks are either
+	// working for a repo or they are not — when healthy, the cache is authoritative
+	// for issue/PR/comment/review events in that repo, and the per-poll deep-fetch
+	// admit pass can be skipped entirely for items in that repo. Repos with
+	// disabled or unhealthy webhooks continue through the deep-fetch path.
+	//
+	// Important caveat: project Status changes do NOT flow over webhooks for
+	// repo-level projects (and only sometimes for org-level projects with the
+	// right permissions). The Layer 2 status sweep above must continue running
+	// regardless of webhook health — it is the only delivery path for Status.
+	if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		freshBoard, refreshErr := e.client.FetchProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
+		switch {
+		case refreshErr != nil:
+			e.logf(0, "cache", "shallow refresh failed (using prior cache state): %v\n", refreshErr)
+		case freshBoard == nil || freshBoard.ProjectID == "":
+			// Empty/uninitialised fetch — treat as no-op rather than clobbering the
+			// cache's prior projectID and item set with an empty board.
+		case cacheImpl.ProjectID() == "":
+			cacheImpl.Bootstrap(freshBoard)
+		default:
+			cacheImpl.Reconcile(freshBoard)
 		}
 	}
 
