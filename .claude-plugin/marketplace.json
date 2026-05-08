@@ -4,7 +4,7 @@
   "description": "The Fabrik plugin marketplace — ambient awareness of Fabrik (a GitHub-Project-driven SDLC pipeline orchestrator) for your interactive Claude Code session.",
   "owner": {
     "name": "Tenacious Ventures",
-    "url": "https://github.com/tenaciousvc/fabrik"
+    "url": "https://github.com/shadoworg/fabrik"
   },
   "plugins": [
     {
@@ -13,14 +13,14 @@
       "category": "development",
       "source": {
         "source": "git-subdir",
-        "url": "https://github.com/tenaciousvc/fabrik.git",
+        "url": "https://github.com/shadoworg/fabrik.git",
         "path": "plugin/fabrik",
         "ref": "main"
       },
       "homepage": "https://fabrik.shadoworg.dev",
       "author": {
         "name": "Tenacious Ventures",
-        "url": "https://github.com/tenaciousvc/fabrik"
+        "url": "https://github.com/shadoworg/fabrik"
       }
     }
   ]

@@ -50,6 +50,46 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.PUBLIC_REPO_RELEASE_TOKEN }}
 
+      - name: Publish plugin to shadoworg/fabrik
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_REPO_RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ github.ref_name }}"
+          SRC="${{ github.workspace }}"
+
+          if [ ! -f "$SRC/.claude-plugin/marketplace.json" ]; then
+            echo "Error: .claude-plugin/marketplace.json missing in source — nothing to publish."
+            exit 1
+          fi
+          if [ ! -d "$SRC/plugin/fabrik" ]; then
+            echo "Error: plugin/fabrik/ missing in source — nothing to publish."
+            exit 1
+          fi
+
+          WORK="$(mktemp -d)"
+          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/shadoworg/fabrik.git" "$WORK/shadoworg-fabrik"
+          cd "$WORK/shadoworg-fabrik"
+
+          git config user.name "fabrik-release-bot"
+          git config user.email "fabrik-release-bot@users.noreply.github.com"
+
+          mkdir -p .claude-plugin
+          cp "$SRC/.claude-plugin/marketplace.json" .claude-plugin/marketplace.json
+
+          rm -rf plugin/fabrik
+          mkdir -p plugin
+          cp -R "$SRC/plugin/fabrik" plugin/fabrik
+
+          git add .claude-plugin/marketplace.json plugin/fabrik
+          if git diff --cached --quiet; then
+            echo "No plugin changes to publish for ${VERSION}."
+          else
+            git commit -m "chore: publish fabrik plugin ${VERSION}"
+            git push origin main
+            echo "Plugin published to shadoworg/fabrik for ${VERSION}."
+          fi
+
       - name: Announce release on Discussions
         env:
           GH_TOKEN: ${{ secrets.PUBLIC_REPO_RELEASE_TOKEN }}
