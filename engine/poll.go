@@ -851,12 +851,25 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		case refreshErr != nil:
 			e.logf(0, "cache", "shallow refresh failed (using prior cache state): %v\n", refreshErr)
 		case freshBoard == nil || freshBoard.ProjectID == "":
-			// Empty/uninitialised fetch — treat as no-op rather than clobbering the
-			// cache's prior projectID and item set with an empty board.
-		case cacheImpl.ProjectID() == "":
-			cacheImpl.Bootstrap(freshBoard)
-		default:
+			// Empty/uninitialised fetch — no-op rather than clobbering prior cache state.
+		case len(freshBoard.Items) == 0 && cacheImpl.IsBootstrapped():
+			// Suspicious: fresh fetch came back with 0 items but cache has data.
+			// fetchProjectBoardOnce already retries on totalCount=0/nodes=0 indexer
+			// hiccups (see github/project.go projectBoardFetchAttempts), but a
+			// degraded response can still slip through. Reconciling a 0-item board
+			// against a populated cache would remove every cached item; skip this
+			// cycle and retry on the next poll instead.
+			e.logf(0, "cache", "shallow refresh returned 0 items while cache has data — skipping reconcile (treating as transient indexer hiccup)\n")
+		case cacheImpl.IsBootstrapped() || cacheImpl.ProjectID() != "":
+			// Already bootstrapped (or partially: projectID set without items).
+			// Reconcile is a partial update that preserves engine-side Store fields
+			// (locks, worker state, stage state, deep-fetched data). Bootstrap is
+			// strictly stronger — it calls Store.Reset which wipes those fields —
+			// and must only be used when the cache is truly virgin.
 			cacheImpl.Reconcile(freshBoard)
+		default:
+			// Truly virgin: no projectID and no items. Safe to Bootstrap.
+			cacheImpl.Bootstrap(freshBoard)
 		}
 	}
 
