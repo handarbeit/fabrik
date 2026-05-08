@@ -1,6 +1,6 @@
 # Fabrik Plugin for Claude Code
 
-Stage workflow skills for the [Fabrik](https://github.com/tenaciousvc/fabrik) SDLC pipeline orchestrator.
+Stage workflow skills for the [Fabrik](https://github.com/handarbeit/fabrik) SDLC pipeline orchestrator.
 
 ## What This Plugin Provides
 
@@ -49,5 +49,5 @@ Skills reference these markers that the Fabrik engine processes:
 
 ## More Information
 
-- [Stage Lifecycle](https://github.com/tenaciousvc/fabrik/blob/main/docs/stage-lifecycle.md) — full engine lifecycle documentation
-- [User Guide](https://github.com/tenaciousvc/fabrik/blob/main/docs/USER_GUIDE.md) — Fabrik setup and usage
+- [Stage Lifecycle](https://github.com/handarbeit/fabrik/blob/main/docs/stage-lifecycle.md) — full engine lifecycle documentation
+- [User Guide](https://github.com/handarbeit/fabrik/blob/main/docs/USER_GUIDE.md) — Fabrik setup and usage

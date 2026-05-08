@@ -89,17 +89,17 @@ Do NOT ask for confirmation before pushing. If builds and tests passed in step 1
 
 ```bash
 # Get the run ID for the v<version> tag push
-RUN_ID=$(gh run list --workflow release.yml --limit 1 -R tenaciousvc/fabrik \
+RUN_ID=$(gh run list --workflow release.yml --limit 1 -R handarbeit/fabrik \
   --json databaseId,headBranch --jq ".[] | select(.headBranch==\"v<version>\") | .databaseId")
 
 # Wait for it to finish
-gh run watch $RUN_ID -R tenaciousvc/fabrik
+gh run watch $RUN_ID -R handarbeit/fabrik
 
 # CRITICAL: check the conclusion (not just the status)
-CONCLUSION=$(gh run view $RUN_ID -R tenaciousvc/fabrik --json conclusion --jq .conclusion)
+CONCLUSION=$(gh run view $RUN_ID -R handarbeit/fabrik --json conclusion --jq .conclusion)
 if [ "$CONCLUSION" != "success" ]; then
   echo "Release workflow FAILED with conclusion: $CONCLUSION"
-  gh run view $RUN_ID -R tenaciousvc/fabrik --log-failed | tail -50
+  gh run view $RUN_ID -R handarbeit/fabrik --log-failed | tail -50
   # STOP — do not proceed. Tell the user the release failed and show the failing step.
 fi
 ```
@@ -121,7 +121,7 @@ After a successful push, create a GitHub issue to update user documentation and 
 
 ```bash
 # Create the issue
-gh issue create -R tenaciousvc/fabrik \
+gh issue create -R handarbeit/fabrik \
   --title "Update docs for v<version>" \
   --label "documentation" \
   --label "fabrik:yolo" \

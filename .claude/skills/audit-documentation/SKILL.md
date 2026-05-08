@@ -58,7 +58,7 @@ git log "$TAG..HEAD" --format="%s%n%b" | grep -oE '#[0-9]+' | grep -oE '[0-9]+' 
 Pass 2 — get the tag's commit date, then find merged PRs since that date and extract `Closes #NNN` references:
 ```bash
 TAG_DATE=$(git log -1 --format="%ci" "refs/tags/$TAG" | cut -d' ' -f1)
-gh pr list -R tenaciousvc/fabrik --state merged \
+gh pr list -R handarbeit/fabrik --state merged \
   --search "merged:>=$TAG_DATE" \
   --json number,body \
   --limit 500 \
@@ -73,7 +73,7 @@ Combine and deduplicate the issue numbers from both passes into a list (e.g. `20
 Then fetch their full details for use in subsequent steps:
 ```bash
 for NUM in $ISSUE_NUMBERS; do
-  gh issue view "$NUM" -R tenaciousvc/fabrik --json number,title,labels,body
+  gh issue view "$NUM" -R handarbeit/fabrik --json number,title,labels,body
 done
 ```
 
@@ -81,7 +81,7 @@ done
 
 Fetch closed issues with their full bodies in one call to avoid rate-limit issues from per-issue view calls:
 ```bash
-gh issue list -R tenaciousvc/fabrik \
+gh issue list -R handarbeit/fabrik \
   --state closed \
   --search "closed:>$CUTOFF_DATE" \
   --json number,title,labels,body \
@@ -116,7 +116,7 @@ As you read, note which sections are most likely to be affected by recently ship
 Fetch all currently open issues labeled `documentation`:
 
 ```bash
-gh issue list -R tenaciousvc/fabrik \
+gh issue list -R handarbeit/fabrik \
   --state open \
   --label documentation \
   --json number,title,body
@@ -147,7 +147,7 @@ For each gap, record:
 For each existing open `documentation` issue from Step 5 where the current docs **clearly and completely** address the described gap:
 
 ```bash
-gh issue close -R tenaciousvc/fabrik <number> \
+gh issue close -R handarbeit/fabrik <number> \
   --comment "Closed by /audit-documentation: gap is now covered in current documentation."
 ```
 
@@ -159,7 +159,7 @@ For each gap from Step 6 that does NOT already have a matching open documentatio
 
 ```bash
 # 1. Create the issue, capture the URL
-ISSUE_URL=$(gh issue create -R tenaciousvc/fabrik \
+ISSUE_URL=$(gh issue create -R handarbeit/fabrik \
   --title "<gap title>" \
   --label "documentation" \
   --label "fabrik:yolo" \
@@ -167,7 +167,7 @@ ISSUE_URL=$(gh issue create -R tenaciousvc/fabrik \
   --json url --jq '.url')
 
 # 2. Add to the Fabrik PM project board (org project #1), capture item ID
-ITEM_ID=$(gh project item-add 1 --owner tenaciousvc \
+ITEM_ID=$(gh project item-add 1 --owner handarbeit \
   --url "$ISSUE_URL" \
   --format json --jq '.id')
 

@@ -81,4 +81,4 @@ Each `LightReconcile` tick costs one `FetchProjectBoard` GraphQL call. At the de
 
 - [ADR-032: Webhook-Driven Event Delivery](032-webhook-event-delivery.md) — established the three-state health model; this ADR supersedes its health-detection and state-transition sections while retaining the three states (`StartingUp`/`Healthy`/`Unhealthy`) and their idle-cap semantics.
 - [ADR-034: Board-Cache Event-Sourced Delta](034-boardcache-event-sourced-delta.md) — established `healthChangeFn` as the bridge from webhook health to cache Pause/Resume; the `healthChangeFn` callback is removed by this ADR.
-- [Issue #638](https://github.com/tenaciousvc/fabrik/issues/638) — raised `webhookEventStaleTimeout` from 60 s to 5 min (treated the symptom; this ADR fixes the root cause).
+- [Issue #638](https://github.com/handarbeit/fabrik/issues/638) — raised `webhookEventStaleTimeout` from 60 s to 5 min (treated the symptom; this ADR fixes the root cause).
