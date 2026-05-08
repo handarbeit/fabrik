@@ -204,7 +204,7 @@ func TestBlockOnInput_Success(t *testing.T) {
 	eng := testEngine(client, &mockClaudeInvoker{})
 	stage := &stages.Stage{Name: "Research", Order: 1}
 	item := gh.ProjectItem{Number: 5}
-	eng.blockOnInput(item, stage)
+	eng.blockOnInput(item, stage, "")
 
 	// Both fabrik:paused and fabrik:awaiting-input should have been added
 	if len(client.addLabelCalls) < 2 {
@@ -223,7 +223,7 @@ func TestBlockOnInput_LabelErrors_LogsWarning(t *testing.T) {
 	stage := &stages.Stage{Name: "Research", Order: 1}
 	item := gh.ProjectItem{Number: 6}
 	// Should not panic when labels fail
-	eng.blockOnInput(item, stage)
+	eng.blockOnInput(item, stage, "")
 }
 
 // TestCommitWIP_ExcludesContextFiles verifies that commitWIP does not include
