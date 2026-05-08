@@ -198,7 +198,7 @@ func TestItemNeedsWork_Blocked_Cleared_ReturnsTrue(t *testing.T) {
 	}
 }
 
-// TestBlockOnInput_Success covers both AddLabel calls.
+// TestBlockOnInput_Success covers both AddLabel calls and the notification comment.
 func TestBlockOnInput_Success(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := testEngine(client, &mockClaudeInvoker{})
@@ -210,6 +210,73 @@ func TestBlockOnInput_Success(t *testing.T) {
 	if len(client.addLabelCalls) < 2 {
 		t.Errorf("expected 2 AddLabel calls, got %d", len(client.addLabelCalls))
 	}
+
+	// Notification comment should have been posted
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 AddComment call, got %d", len(client.addCommentCalls))
+	}
+	body := client.addCommentCalls[0].body
+	if !strings.HasPrefix(body, "🏭 **Fabrik") {
+		t.Errorf("notification comment must start with engine header prefix, got: %q", body)
+	}
+	if !strings.Contains(body, "@testuser") {
+		t.Errorf("notification comment should contain @mention, got: %q", body)
+	}
+	if !strings.Contains(body, "Research") {
+		t.Errorf("notification comment should contain stage name, got: %q", body)
+	}
+}
+
+// TestBuildAwaitingInputComment verifies the comment format for both
+// with-summary and without-summary cases.
+func TestBuildAwaitingInputComment(t *testing.T) {
+	t.Run("with summary", func(t *testing.T) {
+		got := buildAwaitingInputComment("alice", "Plan", "What should the timeout be?")
+		if !strings.HasPrefix(got, "🏭 **Fabrik") {
+			t.Errorf("expected Fabrik header prefix, got: %q", got)
+		}
+		if !strings.Contains(got, "@alice") {
+			t.Errorf("expected @mention, got: %q", got)
+		}
+		if !strings.Contains(got, "**Plan**") {
+			t.Errorf("expected stage name in bold, got: %q", got)
+		}
+		if !strings.Contains(got, "> What should the timeout be?") {
+			t.Errorf("expected blockquote summary, got: %q", got)
+		}
+		if !strings.Contains(got, "Reply on this issue to resume.") {
+			t.Errorf("expected resume prompt, got: %q", got)
+		}
+	})
+
+	t.Run("without summary", func(t *testing.T) {
+		got := buildAwaitingInputComment("alice", "Research", "")
+		if !strings.HasPrefix(got, "🏭 **Fabrik") {
+			t.Errorf("expected Fabrik header prefix, got: %q", got)
+		}
+		if !strings.Contains(got, "@alice") {
+			t.Errorf("expected @mention, got: %q", got)
+		}
+		if strings.Contains(got, "> ") {
+			t.Errorf("expected no blockquote when summary absent, got: %q", got)
+		}
+		if !strings.Contains(got, "Reply on this issue to resume.") {
+			t.Errorf("expected resume prompt, got: %q", got)
+		}
+	})
+
+	t.Run("empty user", func(t *testing.T) {
+		got := buildAwaitingInputComment("", "Implement", "")
+		if !strings.HasPrefix(got, "🏭 **Fabrik") {
+			t.Errorf("expected Fabrik header prefix, got: %q", got)
+		}
+		if strings.Contains(got, "@") {
+			t.Errorf("expected no @mention when user is empty, got: %q", got)
+		}
+		if !strings.Contains(got, "awaiting your input on **Implement**") {
+			t.Errorf("expected generic message, got: %q", got)
+		}
+	})
 }
 
 // TestBlockOnInput_LabelErrors_LogsWarning covers the warning log branches.
