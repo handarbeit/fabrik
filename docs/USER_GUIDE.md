@@ -275,7 +275,7 @@ For release builds, Fabrik queries the GitHub Releases API at each check point. 
 
 **Dev builds (built from source)** follow the same two-check approach but use a
 different upgrade path. Fabrik detects that it is a dev build (version string starts
-with `dev`) and checks whether it is running from a `tenaciousvc/fabrik` or
+with `dev`) and checks whether it is running from a `handarbeit/fabrik` or
 `handarbeit/fabrik` source checkout. If so, it compares the running binary's embedded
 commit SHA against the local `HEAD`:
 
@@ -302,7 +302,7 @@ experience as release binaries.
 ```
 
 > **Upgrading from v0.0.28 or earlier?** Before v0.0.29, `--auto-upgrade` fetched
-> from the private `tenaciousvc/fabrik` repo. The v0.0.29 release switched the
+> from the private `handarbeit/fabrik` repo. The v0.0.29 release switched the
 > upgrade source to the public `shadoworg/fabrik` repo â€” but this change cannot
 > self-apply: a binary built before v0.0.29 will never auto-receive it. If you are
 > running an older binary, upgrade once manually:
@@ -1174,7 +1174,7 @@ The **Fabrik PM plugin** is a Claude Code plugin for your interactive session â€
 Run these three commands in your Claude Code interactive session:
 
 ```
-/plugin marketplace add tenaciousvc/fabrik
+/plugin marketplace add handarbeit/fabrik
 /plugin install fabrik@fabrik
 /reload-plugins
 ```

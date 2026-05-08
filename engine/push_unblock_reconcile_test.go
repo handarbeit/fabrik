@@ -15,13 +15,13 @@ func TestPushUnblockObserver_BlockerClosesViaReconcile(t *testing.T) {
 	store := itemstate.NewStore(nil)
 
 	// Seed blocker Q (open) and dependent R (blocked, with Q in BlockedBy as OPEN).
-	store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Number: 662, Repo: "tenaciousvc/fabrik"}})
+	store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Number: 662, Repo: "handarbeit/fabrik"}})
 	store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{
 		Number:    663,
-		Repo:      "tenaciousvc/fabrik",
+		Repo:      "handarbeit/fabrik",
 		Status:    "Specify",
 		Labels:    []string{"fabrik:blocked", "fabrik:yolo"},
-		BlockedBy: []gh.Dependency{{Number: 662, Repo: "tenaciousvc/fabrik", State: "OPEN"}},
+		BlockedBy: []gh.Dependency{{Number: 662, Repo: "handarbeit/fabrik", State: "OPEN"}},
 	}})
 
 	removeCh := make(chan int, 1)
@@ -33,11 +33,11 @@ func TestPushUnblockObserver_BlockerClosesViaReconcile(t *testing.T) {
 
 	// Close Q via the Reconcile path: ShallowBoardItemUpdated with IsClosed=true.
 	store.Apply(itemstate.ShallowBoardItemUpdated{
-		Repo:   "tenaciousvc/fabrik",
+		Repo:   "handarbeit/fabrik",
 		Number: 662,
 		Item: gh.ProjectItem{
 			Number:   662,
-			Repo:     "tenaciousvc/fabrik",
+			Repo:     "handarbeit/fabrik",
 			IsClosed: true,
 		},
 	})

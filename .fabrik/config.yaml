@@ -5,7 +5,7 @@
 # Precedence: CLI flag > shell env var > .env > .fabrik/config.yaml > built-in default
 
 # Required: GitHub repository owner (org or username)
-owner: tenaciousvc
+owner: handarbeit
 
 # Required: GitHub repository name (leave empty for multi-repo mode)
 # repo: fabrik

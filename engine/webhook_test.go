@@ -142,9 +142,9 @@ func TestIsAuthShapedError(t *testing.T) {
 		{"requires admin", "this action requires admin access", true},
 		{"not allowed", "operation not allowed for this user", true},
 		// 404 on org hooks endpoint — the bug this test guards against.
-		{"404 on /orgs/.../hooks", "Error: error creating webhook: HTTP 404: Not Found (https://api.github.com/orgs/tenaciousvc/hooks)", true},
+		{"404 on /orgs/.../hooks", "Error: error creating webhook: HTTP 404: Not Found (https://api.github.com/orgs/handarbeit/hooks)", true},
 		// 404 on repo hooks endpoint — symmetric per-repo case.
-		{"404 on /repos/.../hooks", "Error: error creating webhook: HTTP 404: Not Found (https://api.github.com/repos/tenaciousvc/fabrik/hooks)", true},
+		{"404 on /repos/.../hooks", "Error: error creating webhook: HTTP 404: Not Found (https://api.github.com/repos/handarbeit/fabrik/hooks)", true},
 		// Negative cases — bare 404s on other paths must not be treated as auth-shaped
 		// (false positives would cause permanent fallback on legitimate not-found errors).
 		{"404 unrelated path", "Error: HTTP 404: Not Found (https://api.github.com/users/missing)", false},
@@ -553,7 +553,7 @@ func TestIs422ShapedError(t *testing.T) {
 		in   string
 		want bool
 	}{
-		{"full 422 error", "Error: error creating webhook: HTTP 422: Validation Failed (https://api.github.com/repos/tenaciousvc/fabrik/hooks)", true},
+		{"full 422 error", "Error: error creating webhook: HTTP 422: Validation Failed (https://api.github.com/repos/handarbeit/fabrik/hooks)", true},
 		{"422 uppercase", "HTTP 422 ERROR", true},
 		{"422 mixed case", "Http 422 Failed", true},
 		{"403 not 422", "HTTP 403 Forbidden", false},

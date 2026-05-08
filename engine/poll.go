@@ -1597,7 +1597,7 @@ func extractBinarySHA(version string) string {
 }
 
 // isFabrikSourceCheckout reports whether dir is a git checkout of the fabrik
-// source repo (tenaciousvc/fabrik or handarbeit/fabrik). Returns false on any
+// source repo (handarbeit/fabrik or handarbeit/fabrik). Returns false on any
 // error (no git, no remote, wrong remote, etc.).
 func isFabrikSourceCheckout(dir string) bool {
 	cmd := exec.Command("git", "remote", "get-url", "origin")
@@ -1607,7 +1607,7 @@ func isFabrikSourceCheckout(dir string) bool {
 		return false
 	}
 	url := strings.TrimSuffix(strings.TrimSpace(string(out)), ".git")
-	for _, pattern := range []string{"tenaciousvc/fabrik", "handarbeit/fabrik"} {
+	for _, pattern := range []string{"handarbeit/fabrik", "handarbeit/fabrik"} {
 		if strings.Contains(url, pattern) {
 			return true
 		}
