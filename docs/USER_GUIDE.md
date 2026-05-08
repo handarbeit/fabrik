@@ -447,7 +447,7 @@ FABRIK_USER=my-personal-username
 | `--owner` | GitHub repo owner (org or user) | required |
 | `--repo` | GitHub repo name; omit to enable multi-repo mode (processes all repos on the board) | optional |
 | `--project` | GitHub Project (v2) number | required |
-| `--user` | Your GitHub username -- only processes comments by this user | required |
+| `--user` | Your GitHub username — only processes comments by this user; also @mentioned in awaiting-input notification comments to trigger a GitHub Mobile push when an issue blocks on your input | required |
 | `--token` | GitHub API token | `$GITHUB_TOKEN` |
 | `--stages` | Directory containing stage YAML configs | `./.fabrik/stages` |
 | `--yolo` | Auto-advance issues through stages without human approval; also auto-merges the linked PR when Validate completes | `false` |
@@ -474,7 +474,7 @@ FABRIK_USER=my-personal-username
 | `FABRIK_OWNER` | `owner` | GitHub repo owner | -- |
 | `FABRIK_REPO` | `repo` | GitHub repo name; optional — omitting enables multi-repo mode (all repos on the board) | -- |
 | `FABRIK_PROJECT_NUMBER` | `project` | GitHub Project (v2) number | -- |
-| `FABRIK_USER` | `user` | Your GitHub username | -- |
+| `FABRIK_USER` | `user` | Your GitHub username; @mentioned in awaiting-input notification comments for mobile push | -- |
 | `FABRIK_STAGES` | `stages` | Stage configs directory | `./.fabrik/stages` |
 | `FABRIK_YOLO` | `yolo` | Auto-advance (`true`/`1`/`yes`) | `false` |
 | `FABRIK_POLL` | `poll` | Poll interval in seconds | `30` |
