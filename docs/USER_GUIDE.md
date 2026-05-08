@@ -451,7 +451,7 @@ FABRIK_USER=my-personal-username
 | `--token` | GitHub API token | `$GITHUB_TOKEN` |
 | `--stages` | Directory containing stage YAML configs | `./.fabrik/stages` |
 | `--yolo` | Auto-advance issues through stages without human approval; also auto-merges the linked PR when Validate completes | `false` |
-| `--auto-upgrade` | When idle, check GitHub Releases for a newer version and self-upgrade; dev builds (built from source) rebuild from `origin/main` instead | `false` |
+| `--auto-upgrade` | At startup and when idle, check GitHub Releases for a newer version and self-upgrade; dev builds (built from source) rebuild from `origin/main` instead | `false` |
 | `--notui` | Disable the interactive TUI dashboard | TUI on by default |
 | `--plugin-dir` | Path to Fabrik plugin directory (overrides `.fabrik/plugin/`) | auto-detected |
 | `--poll` | Poll interval in seconds | `30` |
