@@ -50,7 +50,7 @@ func TestLockLabelWriteThrough(t *testing.T) {
 	// Acquisition path: blockOnInput calls AddLabelToIssue for fabrik:paused and
 	// fabrik:awaiting-input using the same write-through pattern as processItem's
 	// lock acquire (direct AddLabelToIssue → cache.ApplyLabelAdded on success).
-	eng.blockOnInput(item, stage)
+	eng.blockOnInput(item, stage, "")
 
 	labels, err := cache.FetchLabels("owner", "repo", 1)
 	if err != nil {
