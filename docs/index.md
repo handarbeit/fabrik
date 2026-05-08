@@ -189,7 +189,7 @@ description: >-
         <span class="feature-icon">🔄</span>
         <div class="feature-title">Self-Upgrade</div>
         <div class="feature-desc">
-          Detects and installs the latest release automatically when idle.
+          Detects and installs the latest release automatically at startup and when idle.
         </div>
       </a>
       <a class="feature-card" href="{{ '/state-machine' | relative_url }}#5-pr-lifecycle-integration" aria-label="PR Lifecycle Management — open documentation">
@@ -352,7 +352,7 @@ echo '.env' >> .gitignore
 <span style="color:#56d364"># Optional: yolo mode (auto-advance all stages)</span>
 ./fabrik --yolo
 
-<span style="color:#56d364"># Optional: self-upgrade from handarbeit/fabrik GitHub Releases when idle</span>
+<span style="color:#56d364"># Optional: self-upgrade from handarbeit/fabrik GitHub Releases at startup and when idle</span>
 ./fabrik --auto-upgrade</pre>
       </div>
     </div>
