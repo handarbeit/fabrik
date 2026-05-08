@@ -1995,9 +1995,11 @@ func TestPoll_LogBoardBootstrapThenCache(t *testing.T) {
 }
 
 // TestPoll_LogItemFromGitHub verifies the item deep-fetch log says "from GitHub"
-// when the item is not yet in the cache (falls through to GitHub on cache miss).
-// Uses an unbootstrapped CacheImpl so the item is "notInStore" on first poll,
-// which bypasses the cycleSet requirement.
+// when the item's deep cache entry is empty, even though the shallow Bootstrap
+// has already populated the Store. The first poll's Bootstrap-or-Reconcile fires
+// StatusChanged through mayNeedWorkObserver → cycleSet, so the item passes the
+// pre-filter; IsItemDeepFetched is still false (deep state never populated), so
+// the deep-fetch falls through to GitHub.
 func TestPoll_LogItemFromGitHub(t *testing.T) {
 	board := &gh.ProjectBoard{
 		ProjectID: "PVT_test",
@@ -2009,9 +2011,12 @@ func TestPoll_LogItemFromGitHub(t *testing.T) {
 		},
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
-	// Wire an unbootstrapped CacheImpl so FetchProjectBoard falls through to GitHub
-	// and the item is "notInStore" (passes the poll pre-filter on first poll).
 	eng.readClient = boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+
+	// Register mayNeedWorkObserver before poll(): the per-poll Bootstrap fires
+	// StatusChanged which must populate mayNeedWork → cycleSet for the item to
+	// reach the deep-fetch section (matching production wiring in Run()).
+	eng.store.Subscribe(newMayNeedWorkObserver(&eng.mayNeedWorkMu, &eng.mayNeedWork))
 
 	logs := collectPollLogs(t, eng)
 
