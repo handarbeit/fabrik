@@ -343,6 +343,19 @@ func TestProcessItem_BlockedOnInput_AddsLabels(t *testing.T) {
 	if !lockRemoved {
 		t.Error("expected lock to be released on blocked-on-input")
 	}
+
+	// Notification comment should have been posted (there may also be a comment
+	// with Claude's full output, so assert at least 1 comment contains the
+	// awaiting-input notification body).
+	var foundNotification bool
+	for _, c := range client.addCommentCalls {
+		if strings.Contains(c.body, "@testuser") && strings.Contains(c.body, "awaiting") {
+			foundNotification = true
+		}
+	}
+	if !foundNotification {
+		t.Errorf("expected notification comment containing @mention and 'awaiting', got: %v", client.addCommentCalls)
+	}
 }
 
 func TestProcessItem_BlockedOnInput_LastAttemptAtSet(t *testing.T) {
@@ -376,6 +389,14 @@ func TestProcessItem_BlockedOnInput_LastAttemptAtSet(t *testing.T) {
 	}
 	if snap.LastAttemptAt("Research").IsZero() {
 		t.Error("LastAttemptAt[Research] should be set after blocked-on-input (Claude ran)")
+	}
+
+	// Notification comment should have been posted
+	if len(client.addCommentCalls) != 1 {
+		t.Fatalf("expected 1 notification comment, got %d", len(client.addCommentCalls))
+	}
+	if !strings.Contains(client.addCommentCalls[0].body, "testuser") {
+		t.Errorf("notification comment should mention operator, got: %q", client.addCommentCalls[0].body)
 	}
 
 	// Now simulate user comment arriving — unblockAwaitingInput should clear it

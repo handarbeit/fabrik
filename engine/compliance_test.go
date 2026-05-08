@@ -7,7 +7,8 @@ package engine
 // output on the next poll.
 //
 // A body argument is compliant if and only if:
-//   - It is a call to formatOutputComment or formatPRSummaryComment, OR
+//   - It is a call to formatOutputComment, formatPRSummaryComment,
+//     formatReviewFeedbackComment, or buildAwaitingInputComment, OR
 //   - It is a string literal whose value starts with "🏭 **Fabrik", OR
 //   - It is a local variable where any assignment in the same function scope
 //     is compliant (i.e. a fmt.Sprintf whose format string starts with
@@ -88,7 +89,7 @@ func checkAddCommentBody(t *testing.T, fset *token.FileSet, body *ast.BlockStmt)
 			if !isCompliantAddCommentArg(bodyArg, assigns) {
 				pos := fset.Position(v.Pos())
 				t.Errorf(
-					"non-compliant AddComment body at %s:%d — body must start with %q or go through formatOutputComment/formatPRSummaryComment/formatReviewFeedbackComment",
+					"non-compliant AddComment body at %s:%d — body must start with %q or go through formatOutputComment/formatPRSummaryComment/formatReviewFeedbackComment/buildAwaitingInputComment",
 					pos.Filename, pos.Line, "🏭 **Fabrik",
 				)
 			}
@@ -171,7 +172,7 @@ func isCompliantRHS(expr ast.Expr) bool {
 func isCompliantCallExpr(call *ast.CallExpr) bool {
 	switch fn := call.Fun.(type) {
 	case *ast.Ident:
-		return fn.Name == "formatOutputComment" || fn.Name == "formatPRSummaryComment" || fn.Name == "formatReviewFeedbackComment"
+		return fn.Name == "formatOutputComment" || fn.Name == "formatPRSummaryComment" || fn.Name == "formatReviewFeedbackComment" || fn.Name == "buildAwaitingInputComment"
 	case *ast.SelectorExpr:
 		// fmt.Sprintf("🏭 **Fabrik...", ...) — the first arg may be a plain literal
 		// or a binary string concatenation expression ("..." + "...").

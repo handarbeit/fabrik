@@ -1076,16 +1076,18 @@ func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 }
 
 // buildAwaitingInputComment builds the notification comment body for a
-// blocked-on-input event. If user is non-empty the comment starts with an
-// @mention so GitHub delivers a mobile push notification. If summary is
-// non-empty it is embedded as a blockquote (the specific question Claude needs
-// answered); otherwise a generic message is used.
+// blocked-on-input event. The body starts with the canonical "🏭 **Fabrik"
+// prefix so findNewComments skips it and Fabrik does not treat it as user input.
+// If user is non-empty the comment includes an @mention so GitHub delivers a
+// mobile push notification. If summary is non-empty it is embedded as a
+// blockquote (the specific question Claude needs answered); otherwise a generic
+// message is used.
 func buildAwaitingInputComment(user, stageName, summary string) string {
 	var b strings.Builder
 	if user != "" {
-		fmt.Fprintf(&b, "@%s — Fabrik is awaiting your input on **%s**.\n\n", user, stageName)
+		fmt.Fprintf(&b, "🏭 **Fabrik** — @%s: awaiting your input on **%s**.\n\n", user, stageName)
 	} else {
-		fmt.Fprintf(&b, "Fabrik is awaiting your input on **%s**.\n\n", stageName)
+		fmt.Fprintf(&b, "🏭 **Fabrik** — awaiting your input on **%s**.\n\n", stageName)
 	}
 	if summary != "" {
 		for _, line := range strings.Split(strings.TrimSpace(summary), "\n") {
