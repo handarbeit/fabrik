@@ -367,6 +367,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 	case ItemDeepFetched:
 		flags := applyProjectItem(item, v.FreshState)
 		item.LastDeepFetchAt = time.Now()
+		item.LastSeenSourceUpdatedAt = v.FreshState.UpdatedAt
 		item.LastDeepFetchFailureAt = time.Time{} // clear failure on success
 		return flags | DeepFetchChanged
 
@@ -522,6 +523,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 
 	case DeepFetchInvalidated:
 		item.LastDeepFetchAt = time.Time{}
+		item.LastSeenSourceUpdatedAt = time.Time{}
 		return DeepFetchChanged
 
 	case PRHeadSHAUpdated:

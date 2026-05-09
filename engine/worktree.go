@@ -49,22 +49,49 @@ func NewWorktreeManagerForRepo(baseDir, worktreeRoot, rName string) *WorktreeMan
 	}
 }
 
+// buildCloneURL returns the git clone URL for a GitHub repo. Pure helper so
+// the URL-construction logic can be unit-tested without shelling out to git.
+func buildCloneURL(owner, repo string, useSSH bool) string {
+	if useSSH {
+		return fmt.Sprintf("git@github.com:%s/%s.git", owner, repo)
+	}
+	return fmt.Sprintf("https://github.com/%s/%s.git", owner, repo)
+}
+
+// nonInteractiveGitEnv returns os.Environ() with GIT_TERMINAL_PROMPT and
+// GIT_SSH_COMMAND overrides that force git/ssh to fail fast instead of
+// blocking on interactive prompts (passphrase, host-key acceptance,
+// keyboard-interactive fallback). Fabrik runs as a daemon with no TTY, so an
+// interactive prompt would hang the engine indefinitely; this is also what
+// caused TestEnsureBareClone_SSHMode_UsesSSHURL to hang on dev machines with
+// an ssh-agent that prompts for a YubiKey/Touch ID tap.
+func nonInteractiveGitEnv() []string {
+	return append(os.Environ(),
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_SSH_COMMAND=ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10",
+	)
+}
+
 // ensureBareClone creates a bare clone of the target repo at
 // .fabrik/repos/<owner>-<repo>.git if it doesn't already exist.
 // Returns the path to the bare clone directory on success.
 // This is used for all repos — Fabrik always bare-clones managed repos.
 func ensureBareClone(baseDir, owner, repo string, useSSH bool) (string, error) {
 	bareDir := filepath.Join(baseDir, ".fabrik", "repos", owner+"-"+repo+".git")
+	env := nonInteractiveGitEnv()
+
 	if _, err := os.Stat(bareDir); err == nil {
 		// Repair: bare clones created before v0.0.22 are missing the fetch
 		// refspec. Add it idempotently so plain `git fetch origin` works.
 		repairCmd := exec.Command("git", "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
 		repairCmd.Dir = bareDir
+		repairCmd.Env = env
 		repairCmd.CombinedOutput() // best-effort
 
 		// Fetch latest with explicit refspec (belt-and-suspenders).
 		cmd := exec.Command("git", "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*")
 		cmd.Dir = bareDir
+		cmd.Env = env
 		cmd.CombinedOutput() // best-effort
 
 		// Sync refs/remotes/origin/HEAD with the remote's current default
@@ -74,6 +101,7 @@ func ensureBareClone(baseDir, owner, repo string, useSSH bool) (string, error) {
 		// the wrong base and Closes #N auto-close to not fire.
 		refreshCmd := exec.Command("git", "remote", "set-head", "origin", "--auto")
 		refreshCmd.Dir = bareDir
+		refreshCmd.Env = env
 		refreshCmd.CombinedOutput() // best-effort
 		return bareDir, nil
 	}
@@ -82,13 +110,9 @@ func ensureBareClone(baseDir, owner, repo string, useSSH bool) (string, error) {
 		return "", fmt.Errorf("creating .fabrik/repos dir: %w", err)
 	}
 
-	var cloneURL string
-	if useSSH {
-		cloneURL = fmt.Sprintf("git@github.com:%s/%s.git", owner, repo)
-	} else {
-		cloneURL = fmt.Sprintf("https://github.com/%s/%s.git", owner, repo)
-	}
+	cloneURL := buildCloneURL(owner, repo, useSSH)
 	cmd := exec.Command("git", "clone", "--bare", cloneURL, bareDir)
+	cmd.Env = env
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("cloning %s: %s: %w", cloneURL, strings.TrimSpace(string(out)), err)
 	}
@@ -97,11 +121,13 @@ func ensureBareClone(baseDir, owner, repo string, useSSH bool) (string, error) {
 	// subsequent `git fetch origin` updates refs/remotes/origin/*.
 	cfgCmd := exec.Command("git", "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
 	cfgCmd.Dir = bareDir
+	cfgCmd.Env = env
 	cfgCmd.CombinedOutput() // best-effort
 
 	// Initial fetch so refs/remotes/origin/* is populated before we set HEAD.
 	fetchCmd := exec.Command("git", "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*")
 	fetchCmd.Dir = bareDir
+	fetchCmd.Env = env
 	fetchCmd.CombinedOutput() // best-effort
 
 	// Set refs/remotes/origin/HEAD to the remote's current default branch.
@@ -112,6 +138,7 @@ func ensureBareClone(baseDir, owner, repo string, useSSH bool) (string, error) {
 	// becomes stale if the remote's default branch changes later.
 	refreshCmd := exec.Command("git", "remote", "set-head", "origin", "--auto")
 	refreshCmd.Dir = bareDir
+	refreshCmd.Env = env
 	refreshCmd.CombinedOutput() // best-effort
 
 	return bareDir, nil
