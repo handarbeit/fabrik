@@ -745,6 +745,18 @@ When the configured user posts a new comment:
 This is the intended mechanism for Q&A in stages like Specify — Claude asks a question,
 the configured user answers it in a comment, and the stage resumes automatically.
 
+When Fabrik adds `fabrik:awaiting-input`, it also posts a notification comment beginning
+with `🏭 **Fabrik** — @<user>:` so GitHub delivers a mobile push notification to the
+configured operator (set via `--user` / `FABRIK_USER`). This ensures you're alerted even
+if you're not actively watching the issue.
+
+> **Note:** GitHub does not deliver push notifications for activity an account performs on
+> itself. If Fabrik runs as the same GitHub account as the user being @mentioned, no push
+> arrives. To receive mobile pushes, run Fabrik as a dedicated bot account (a different
+> identity than the operator account you configure with `--user`). The `--filter-user`
+> flag ([#671](https://github.com/handarbeit/fabrik/issues/671)) will make this separation
+> easier once implemented.
+
 ### Dependency-Based Sequencing (Formations)
 
 Fabrik supports dependency-based sequencing of issues using GitHub's native "Blocked by" relationships. This enables **formations** — coordinated sets of issues that execute in parallel where possible and respect ordering constraints automatically.
