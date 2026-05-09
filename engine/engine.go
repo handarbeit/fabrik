@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/handarbeit/fabrik/boardcache"
@@ -91,6 +92,12 @@ type Engine struct {
 	// upgradeCheckFn is called instead of checkAndUpgrade() when non-nil.
 	// Used by tests to observe the startup upgrade check without invoking the real upgrade path.
 	upgradeCheckFn func()
+	// sighupRequested is set by the SIGHUP handler goroutine to signal that the
+	// main loop should re-exec after draining workers (Unix only).
+	sighupRequested atomic.Bool
+	// sighupExecFn overrides syscall.Exec in tests to prevent the test process
+	// from actually being replaced. Production code leaves this nil.
+	sighupExecFn func(argv0 string, argv []string, envv []string) error
 }
 
 func New(cfg Config) (*Engine, error) {
