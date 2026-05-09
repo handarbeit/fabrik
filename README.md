@@ -168,6 +168,23 @@ Fabrik responds to natural language. Comment on an issue to steer the work:
 Each stage sees the full conversation history — previous stage outputs, user
 comments, and all — so context carries forward through the pipeline.
 
+### Awaiting Input Notifications
+
+When a stage needs user input (`FABRIK_BLOCKED_ON_INPUT`), Fabrik posts a
+`🏭 **Fabrik** — @<user>:` comment so GitHub delivers a mobile push notification
+to the configured operator. For pushes to arrive, Fabrik must run as a different
+account than the user being @mentioned — see
+[USER_GUIDE.md §Stages Waiting for Input](docs/USER_GUIDE.md#stages-waiting-for-input)
+for setup details and the self-mention caveat.
+
+### In-Place Restart
+
+Sending `SIGHUP` to the Fabrik process drains in-flight Claude runs, then
+re-execs the binary in place — no terminal disruption, no lost state. Use it
+to pick up a new binary after `go install` without restarting the session. See
+[USER_GUIDE.md §Recovering from Wedged State](docs/USER_GUIDE.md#recovering-from-wedged-state)
+for the full escape-hatch procedure.
+
 ## Default Pipeline
 
 The example stages implement a full SDLC pipeline:
