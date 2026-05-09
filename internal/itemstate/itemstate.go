@@ -70,6 +70,15 @@ type ItemState struct {
 	// A zero value means no deep fetch has occurred. Replaces boardcache.deepFetched[key].
 	LastDeepFetchAt time.Time
 
+	// LastSeenSourceUpdatedAt is the value of pi.UpdatedAt observed at the moment
+	// of the last successful deep fetch. The cache compares this against the fresh
+	// pi.UpdatedAt from each board read to decide whether the cached deep fields
+	// are still authoritative; a later board updatedAt forces a deep re-fetch.
+	// This is the "GraphQL fetching is primary; updatedAt makes the staleness check
+	// cheap" contract — webhooks remain an optimization that keeps the cache fresh
+	// between polls but never replace the polling refresh path.
+	LastSeenSourceUpdatedAt time.Time
+
 	// LastDeepFetchFailureAt is the time the most recent deep fetch attempt failed.
 	// Replaces engine.deepFetchFailureTime[iKey].
 	LastDeepFetchFailureAt time.Time
