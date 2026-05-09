@@ -355,18 +355,19 @@ func TestCommitWIP_ExcludesContextFiles(t *testing.T) {
 	eng.commitWIP(workDir, 42, "Research")
 
 	// Verify the partial-progress commit was created.
-	logCmd := exec.Command("git", "log", "--oneline", "-1")
+	logCmd := exec.Command("git", "log", "-1", "--pretty=%s")
 	logCmd.Dir = workDir
 	logOut, err := logCmd.Output()
 	if err != nil {
 		t.Fatalf("git log: %v", err)
 	}
-	if !strings.Contains(string(logOut), "chore: partial") {
-		t.Errorf("expected partial-progress commit, got: %s", string(logOut))
+	subject := strings.TrimSpace(string(logOut))
+	if !strings.Contains(subject, "chore: partial") {
+		t.Errorf("expected partial-progress commit, got: %s", subject)
 	}
-	ccPattern := regexp.MustCompile(`(feat|fix|refactor|test|docs|chore|style|perf)(\([^)]+\))?: .+`)
-	if !ccPattern.MatchString(string(logOut)) {
-		t.Errorf("commit message does not match Conventional Commits format, got: %s", string(logOut))
+	ccPattern := regexp.MustCompile(`^(feat|fix|refactor|test|docs|chore|style|perf)(\([^)]+\))?: .+$`)
+	if !ccPattern.MatchString(subject) {
+		t.Errorf("commit message does not match Conventional Commits format, got: %s", subject)
 	}
 
 	// Verify the context file is NOT in the partial-progress commit.
