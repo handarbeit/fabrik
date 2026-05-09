@@ -1,10 +1,10 @@
 package engine
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -181,19 +181,32 @@ func TestEnsureBareClone_NewDir_ClonesFromLocal(t *testing.T) {
 	_ = srcDir
 }
 
-func TestEnsureBareClone_SSHMode_UsesSSHURL(t *testing.T) {
-	skipIfNoGit(t)
-	tmpDir := t.TempDir()
-
-	// With useSSH=true the clone URL should be git@github.com:owner/repo.git.
-	// The clone will fail (no network / no SSH key in CI), but the error message
-	// must reference the SSH URL, proving the correct URL was constructed.
-	_, err := ensureBareClone(tmpDir, "owner", "repo", true)
-	if err == nil {
-		t.Log("clone unexpectedly succeeded (real SSH access?)")
-		return
+// Test the URL-construction helper directly. The previous form of this test
+// shelled out to `git clone git@github.com:owner/repo.git` and grepped the
+// resulting error for the SSH URL. That worked in CI (no SSH credentials, so
+// git failed fast) but hung indefinitely on developer machines with an
+// ssh-agent that prompts for a YubiKey/Touch ID tap or passphrase: there's no
+// TTY under `go test`, so the SSH process blocks forever waiting for input
+// that will never arrive. Testing the pure helper avoids the network call
+// entirely. The non-interactive env vars set by ensureBareClone now also
+// prevent the hang in production code paths.
+func TestBuildCloneURL(t *testing.T) {
+	cases := []struct {
+		owner, repo string
+		useSSH      bool
+		want        string
+	}{
+		{"owner", "repo", true, "git@github.com:owner/repo.git"},
+		{"owner", "repo", false, "https://github.com/owner/repo.git"},
+		{"verveguy", "fantasy", true, "git@github.com:verveguy/fantasy.git"},
+		{"verveguy", "fantasy", false, "https://github.com/verveguy/fantasy.git"},
 	}
-	if !strings.Contains(err.Error(), "git@github.com:") {
-		t.Errorf("expected SSH clone URL in error, got: %v", err)
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("%s/%s ssh=%v", tc.owner, tc.repo, tc.useSSH), func(t *testing.T) {
+			if got := buildCloneURL(tc.owner, tc.repo, tc.useSSH); got != tc.want {
+				t.Errorf("buildCloneURL(%q, %q, %v) = %q, want %q",
+					tc.owner, tc.repo, tc.useSSH, got, tc.want)
+			}
+		})
 	}
 }
