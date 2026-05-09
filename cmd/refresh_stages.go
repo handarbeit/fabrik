@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	"github.com/mattn/go-isatty"
-	"github.com/verveguy/fabrik/stages"
+	"github.com/handarbeit/fabrik/stages"
 	"gopkg.in/yaml.v3"
 )
 

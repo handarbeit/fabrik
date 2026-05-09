@@ -11,7 +11,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/verveguy/fabrik/streamfilter"
+	"github.com/handarbeit/fabrik/streamfilter"
 )
 
 // stageTab represents a single tab in the stage tab bar.

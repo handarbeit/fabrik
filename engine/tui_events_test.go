@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	gh "github.com/verveguy/fabrik/github"
-	"github.com/verveguy/fabrik/stages"
-	"github.com/verveguy/fabrik/tui"
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/stages"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 // collectEvents drains ch until no new event arrives within idle.

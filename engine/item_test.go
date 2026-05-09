@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	gh "github.com/verveguy/fabrik/github"
-	"github.com/verveguy/fabrik/stages"
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 // implementStages returns a minimal stage list with a single Implement stage

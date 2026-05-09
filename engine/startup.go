@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/verveguy/fabrik/tui"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 // checkStageColumnAlignment validates that every configured non-cleanup stage

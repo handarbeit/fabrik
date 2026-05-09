@@ -60,7 +60,7 @@ jobs:
           # Fetch repo ID and Announcements category ID in a single GraphQL call
           QUERY_RESULT=$(gh api graphql -f query='
             query {
-              repository(owner: "shadoworg", name: "fabrik") {
+              repository(owner: "handarbeit", name: "fabrik") {
                 id
                 discussionCategories(first: 100) {
                   nodes {
@@ -76,11 +76,11 @@ jobs:
           CATEGORY_ID=$(echo "$QUERY_RESULT" | jq -r '.data.repository.discussionCategories.nodes[] | select(.name == "Announcements") | .id')
 
           if [ -z "$REPO_ID" ] || [ "$REPO_ID" = "null" ]; then
-            echo "Error: could not fetch shadoworg/fabrik repository ID"
+            echo "Error: could not fetch handarbeit/fabrik repository ID"
             exit 1
           fi
           if [ -z "$CATEGORY_ID" ] || [ "$CATEGORY_ID" = "null" ]; then
-            echo "Error: could not find Announcements category in shadoworg/fabrik"
+            echo "Error: could not find Announcements category in handarbeit/fabrik"
             exit 1
           fi
 
@@ -94,9 +94,9 @@ jobs:
 
           BODY="${BODY_CONTENT}
 
-          See the [full release notes and downloads](https://github.com/shadoworg/fabrik/releases/tag/${VERSION}) for binaries and complete changelog."
+          See the [full release notes and downloads](https://github.com/handarbeit/fabrik/releases/tag/${VERSION}) for binaries and complete changelog."
 
-          # Post the Discussion to shadoworg/fabrik Announcements
+          # Post the Discussion to handarbeit/fabrik Announcements
           RESULT=$(gh api graphql \
             -f query='
               mutation($repositoryId: ID!, $categoryId: ID!, $title: String!, $body: String!) {

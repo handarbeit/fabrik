@@ -3,7 +3,7 @@ package cmd
 import (
 	"os"
 
-	"github.com/verveguy/fabrik/streamfilter"
+	"github.com/handarbeit/fabrik/streamfilter"
 )
 
 // RunStreamFilter reads stream-json (NDJSON) or a JSON array from stdin

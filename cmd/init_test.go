@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	fabrikplugin "github.com/verveguy/fabrik/plugin"
-	"github.com/verveguy/fabrik/stages"
+	fabrikplugin "github.com/handarbeit/fabrik/plugin"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 func skipIfNoGit(t *testing.T) {

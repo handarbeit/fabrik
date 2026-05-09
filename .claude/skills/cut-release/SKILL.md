@@ -66,7 +66,7 @@ Write `release-notes.md` in the repo root with this structure:
 # Fabrik checks for new releases each poll cycle and upgrades automatically with --auto-upgrade
 
 # Or download directly (auto-detects OS and architecture)
-gh release download --repo shadoworg/fabrik \
+gh release download --repo handarbeit/fabrik \
   --pattern "fabrik_*_$(uname -s | tr A-Z a-z)_$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/').tar.gz" \
   -O - | tar xz
 \```
@@ -85,7 +85,7 @@ Do NOT ask for confirmation before pushing. If builds and tests passed in step 1
 
 ### 6. Verify the release workflow succeeded
 
-**This step is not optional.** The release workflow does multiple things (build binaries, publish to shadoworg/fabrik, post Discussion announcement). Any of these can fail silently. A workflow that shows `completed` is NOT the same as `success` — only the **conclusion** tells you whether it actually worked.
+**This step is not optional.** The release workflow does multiple things (build binaries, publish to handarbeit/fabrik, post Discussion announcement). Any of these can fail silently. A workflow that shows `completed` is NOT the same as `success` — only the **conclusion** tells you whether it actually worked.
 
 ```bash
 # Get the run ID for the v<version> tag push
@@ -106,14 +106,14 @@ fi
 
 Also verify the release actually exists on the public repo:
 ```bash
-gh release view v<version> --repo shadoworg/fabrik --json tagName
+gh release view v<version> --repo handarbeit/fabrik --json tagName
 ```
 
 Report the result explicitly:
-- ✅ "Release v<version> published to shadoworg/fabrik (run #<id>) — all steps green"
+- ✅ "Release v<version> published to handarbeit/fabrik (run #<id>) — all steps green"
 - ❌ "Release v<version> workflow FAILED at step X — <reason>" (and show the failing log lines)
 
-Never report a release as successful unless `conclusion == "success"` AND the release exists on shadoworg/fabrik.
+Never report a release as successful unless `conclusion == "success"` AND the release exists on handarbeit/fabrik.
 
 ### 7. File documentation update issue
 

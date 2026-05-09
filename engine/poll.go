@@ -14,11 +14,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/verveguy/fabrik/boardcache"
-	gh "github.com/verveguy/fabrik/github"
-	"github.com/verveguy/fabrik/internal/itemstate"
-	"github.com/verveguy/fabrik/stages"
-	"github.com/verveguy/fabrik/tui"
+	"github.com/handarbeit/fabrik/boardcache"
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/stages"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 const idleUpgradeThreshold = 2 // consecutive idle polls before checking for upgrades
@@ -1597,8 +1597,8 @@ func extractBinarySHA(version string) string {
 }
 
 // isFabrikSourceCheckout reports whether dir is a git checkout of the fabrik
-// source repo (handarbeit/fabrik or verveguy/fabrik). Returns false on any
-// error (no git, no remote, wrong remote, etc.).
+// source repo (handarbeit/fabrik). Returns false on any error (no git, no
+// remote, wrong remote, etc.).
 func isFabrikSourceCheckout(dir string) bool {
 	cmd := exec.Command("git", "remote", "get-url", "origin")
 	cmd.Dir = dir
@@ -1607,12 +1607,7 @@ func isFabrikSourceCheckout(dir string) bool {
 		return false
 	}
 	url := strings.TrimSuffix(strings.TrimSpace(string(out)), ".git")
-	for _, pattern := range []string{"handarbeit/fabrik", "verveguy/fabrik"} {
-		if strings.Contains(url, pattern) {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(url, "handarbeit/fabrik")
 }
 
 // checkReleaseUpgrade is the release-based upgrade path. It checks the GitHub

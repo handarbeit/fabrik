@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	fabrikplugin "github.com/verveguy/fabrik/plugin"
+	fabrikplugin "github.com/handarbeit/fabrik/plugin"
 )
 
 // buildPluginDir creates a temp dir with the full set of embedded plugin files

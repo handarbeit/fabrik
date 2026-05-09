@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/verveguy/fabrik/boardcache"
-	gh "github.com/verveguy/fabrik/github"
+	"github.com/handarbeit/fabrik/boardcache"
+	gh "github.com/handarbeit/fabrik/github"
 )
 
 // TestLabelWriteThrough verifies that successful label mutations are immediately

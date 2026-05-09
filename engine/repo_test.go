@@ -3,7 +3,7 @@ package engine
 import (
 	"testing"
 
-	gh "github.com/verveguy/fabrik/github"
+	gh "github.com/handarbeit/fabrik/github"
 )
 
 func TestParseOwnerRepo(t *testing.T) {

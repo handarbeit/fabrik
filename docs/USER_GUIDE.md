@@ -48,9 +48,9 @@ For the authoritative engine state-machine spec (label semantics, review gate tr
 **Option A: Install binary (requires `gh`)**
 
 ```bash
-# Requires: gh auth login (with access to shadoworg/fabrik)
+# Requires: gh auth login (with access to handarbeit/fabrik)
 cd ~/bin  # or any directory on your PATH
-gh release download --repo shadoworg/fabrik \
+gh release download --repo handarbeit/fabrik \
   --pattern "fabrik_*_$(uname -s | tr A-Z a-z)_$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/').tar.gz" \
   -O - | tar xz
 # Platform-specific alternatives:
@@ -275,9 +275,9 @@ For release builds, Fabrik queries the GitHub Releases API at each check point. 
 
 **Dev builds (built from source)** follow the same two-check approach but use a
 different upgrade path. Fabrik detects that it is a dev build (version string starts
-with `dev`) and checks whether it is running from a `handarbeit/fabrik` or
-`verveguy/fabrik` source checkout. If so, it compares the running binary's embedded
-commit SHA against the local `HEAD`:
+with `dev`) and checks whether it is running from a `handarbeit/fabrik` source
+checkout. If so, it compares the running binary's embedded commit SHA against the
+local `HEAD`:
 
 - **Local commits ahead of the binary**: rebuild immediately from the current working
   tree (`go build -o fabrik .`) without pulling — useful when you have local changes
@@ -303,11 +303,11 @@ experience as release binaries.
 
 > **Upgrading from v0.0.28 or earlier?** Before v0.0.29, `--auto-upgrade` fetched
 > from the private `handarbeit/fabrik` repo. The v0.0.29 release switched the
-> upgrade source to the public `shadoworg/fabrik` repo — but this change cannot
+> upgrade source to the public `handarbeit/fabrik` repo — but this change cannot
 > self-apply: a binary built before v0.0.29 will never auto-receive it. If you are
 > running an older binary, upgrade once manually:
 > ```bash
-> gh release download --repo shadoworg/fabrik \
+> gh release download --repo handarbeit/fabrik \
 >   --pattern "fabrik_*_$(uname -s | tr A-Z a-z)_$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/').tar.gz" \
 >   -O - | tar xz
 > ```
@@ -399,7 +399,7 @@ user: your-github-username
 # Per-stage auto_advance: in stage YAML can override this setting per-stage.
 # yolo: false
 
-# Check shadoworg/fabrik GitHub Releases for a newer version. Fabrik checks once
+# Check handarbeit/fabrik GitHub Releases for a newer version. Fabrik checks once
 # at startup (before the first poll) and again after 2 consecutive idle polls.
 # On finding a newer release, it downloads the binary, runs fabrik upgrade, and
 # re-execs. Requires internet access to the GitHub Releases API.
@@ -1311,7 +1311,7 @@ Writes `release-notes.md` in the repo root:
 # Fabrik checks for new releases each poll cycle and upgrades automatically with --auto-upgrade
 
 # Or download directly
-gh release download --repo shadoworg/fabrik --pattern '*<os>_<arch>*' -O - | tar xz
+gh release download --repo handarbeit/fabrik --pattern '*<os>_<arch>*' -O - | tar xz
 \```
 ```
 

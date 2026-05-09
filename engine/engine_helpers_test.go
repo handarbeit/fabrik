@@ -1,9 +1,9 @@
 package engine
 
 import (
-	"github.com/verveguy/fabrik/boardcache"
-	gh "github.com/verveguy/fabrik/github"
-	"github.com/verveguy/fabrik/stages"
+	"github.com/handarbeit/fabrik/boardcache"
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 func testStages() []*stages.Stage {

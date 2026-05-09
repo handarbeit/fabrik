@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/verveguy/fabrik/config"
-	gh "github.com/verveguy/fabrik/github"
-	"github.com/verveguy/fabrik/watch"
+	"github.com/handarbeit/fabrik/config"
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/watch"
 )
 
 // runWatch is the entry point for the `fabrik watch <issue-number>` subcommand.

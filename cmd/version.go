@@ -6,7 +6,7 @@ import "runtime/debug"
 // defaults to "dev" and is enriched with the short VCS revision at startup.
 // Release builds inject the git tag via ldflags:
 //
-//	-X github.com/verveguy/fabrik/cmd.Version={{.Version}}
+//	-X github.com/handarbeit/fabrik/cmd.Version={{.Version}}
 var Version = "dev"
 
 func init() {

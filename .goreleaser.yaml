@@ -12,7 +12,7 @@ builds:
     env:
       - CGO_ENABLED=0
     ldflags:
-      - -s -w -X github.com/verveguy/fabrik/cmd.Version={{.Version}}
+      - -s -w -X github.com/handarbeit/fabrik/cmd.Version={{.Version}}
 
 archives:
   - id: fabrik
@@ -33,7 +33,7 @@ changelog:
 
 release:
   github:
-    owner: shadoworg
+    owner: handarbeit
     name: fabrik
   draft: false
   prerelease: auto

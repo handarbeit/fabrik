@@ -3,7 +3,7 @@ package engine
 import (
 	"testing"
 
-	"github.com/verveguy/fabrik/stages"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 func TestCheckCompletion_Claude(t *testing.T) {

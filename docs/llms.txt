@@ -7,16 +7,16 @@
 
 ## User Guide
 
-- [User Guide](https://fabrik.shadoworg.dev/USER_GUIDE): Installation, configuration, pipeline walkthrough, and operational reference for running Fabrik.
+- [User Guide](https://fabrik.handarbeit.io/USER_GUIDE): Installation, configuration, pipeline walkthrough, and operational reference for running Fabrik.
 
 ## State Machine
 
-- [Issue State Machine](https://fabrik.shadoworg.dev/state-machine): As-built specification of engine state transitions, label semantics, FABRIK_* marker handling, and guard/filter behavior.
+- [Issue State Machine](https://fabrik.handarbeit.io/state-machine): As-built specification of engine state transitions, label semantics, FABRIK_* marker handling, and guard/filter behavior.
 
 ## Stage Lifecycle
 
-- [Stage Lifecycle](https://fabrik.shadoworg.dev/stage-lifecycle): Per-invocation lifecycle — context files, worktree setup, Claude invocation, progress baseline, extension loop, and output handling.
+- [Stage Lifecycle](https://fabrik.handarbeit.io/stage-lifecycle): Per-invocation lifecycle — context files, worktree setup, Claude invocation, progress baseline, extension loop, and output handling.
 
 ## Positioning
 
-- [Fabrik Positioning](https://fabrik.shadoworg.dev/positioning): Landscape overview comparing Fabrik to similar agentic development tools.
+- [Fabrik Positioning](https://fabrik.handarbeit.io/positioning): Landscape overview comparing Fabrik to similar agentic development tools.

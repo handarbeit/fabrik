@@ -14,8 +14,8 @@ import (
 	"strings"
 
 	"github.com/mattn/go-isatty"
-	fabrikplugin "github.com/verveguy/fabrik/plugin"
-	"github.com/verveguy/fabrik/stages"
+	fabrikplugin "github.com/handarbeit/fabrik/plugin"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 // advanceWorkflowTemplate is the GitHub Actions workflow template written to

@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	gh "github.com/verveguy/fabrik/github"
-	"github.com/verveguy/fabrik/stages"
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 // GitHubClient defines the GitHub operations needed by the engine.

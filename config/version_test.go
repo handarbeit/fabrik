@@ -22,9 +22,9 @@ func TestInferVersion(t *testing.T) {
 		{
 			name: "go.mod module name (no version)",
 			files: map[string]string{
-				"go.mod": "module github.com/verveguy/fabrik\n\ngo 1.21\n",
+				"go.mod": "module github.com/handarbeit/fabrik\n\ngo 1.21\n",
 			},
-			want: "github.com/verveguy/fabrik",
+			want: "github.com/handarbeit/fabrik",
 		},
 		{
 			name: "go.mod returns module name not a semver",

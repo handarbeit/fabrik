@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	gh "github.com/verveguy/fabrik/github"
+	gh "github.com/handarbeit/fabrik/github"
 )
 
 // TestPoll_MultiRepoFilter_SkipsOtherRepos verifies that items belonging to

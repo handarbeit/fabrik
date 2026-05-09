@@ -129,11 +129,11 @@ If the user asks "what's going on?" or similar, suggest `/fabrik:status` (this p
 
 These are the canonical sources. Link them; the docs evolve.
 
-- **Setup** — https://fabrik.shadoworg.dev/USER_GUIDE
-- **State machine (label semantics, marker handling, comment lifecycle)** — https://fabrik.shadoworg.dev/state-machine
-- **Stage lifecycle (per-invocation: context files, worktree, output handling)** — https://fabrik.shadoworg.dev/stage-lifecycle
-- **Troubleshooting** — https://fabrik.shadoworg.dev/troubleshooting
-- **Labels reference** — https://fabrik.shadoworg.dev/USER_GUIDE#6-labels-reference
+- **Setup** — https://fabrik.handarbeit.io/USER_GUIDE
+- **State machine (label semantics, marker handling, comment lifecycle)** — https://fabrik.handarbeit.io/state-machine
+- **Stage lifecycle (per-invocation: context files, worktree, output handling)** — https://fabrik.handarbeit.io/stage-lifecycle
+- **Troubleshooting** — https://fabrik.handarbeit.io/troubleshooting
+- **Labels reference** — https://fabrik.handarbeit.io/USER_GUIDE#6-labels-reference
 
 ## Things to avoid saying or doing
 

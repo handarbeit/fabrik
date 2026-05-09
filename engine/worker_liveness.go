@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/verveguy/fabrik/boardcache"
-	"github.com/verveguy/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/boardcache"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 )
 
 const (

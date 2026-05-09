@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	gh "github.com/verveguy/fabrik/github"
-	"github.com/verveguy/fabrik/internal/itemstate"
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 )
 
 // ReadClient is the subset of engine.GitHubClient covering read-only board/item/PR/check-run state.

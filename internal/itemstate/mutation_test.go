@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	gh "github.com/verveguy/fabrik/github"
+	gh "github.com/handarbeit/fabrik/github"
 )
 
 const testRepo = "owner/repo"

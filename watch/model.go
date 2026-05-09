@@ -13,9 +13,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
-	gh "github.com/verveguy/fabrik/github"
-	"github.com/verveguy/fabrik/stages"
-	"github.com/verveguy/fabrik/tui"
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/stages"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 // GitHubOptions holds the GitHub API configuration for the watch TUI.

@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	gh "github.com/verveguy/fabrik/github"
+	gh "github.com/handarbeit/fabrik/github"
 )
 
 // ErrNotFound is returned by Store.Get when an item does not exist in the cache

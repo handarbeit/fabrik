@@ -1,6 +1,6 @@
 # Fabrik — Claude Code Plugin
 
-A Claude Code plugin that gives your interactive Claude session ambient awareness of [Fabrik](https://fabrik.shadoworg.dev), the GitHub-Project-driven SDLC pipeline orchestrator. With this plugin installed, Claude becomes a **product-management buddy** for projects that use Fabrik to automate issue processing — helping you author specs Fabrik can act on, read board state, decide when to intervene, and bootstrap Fabrik in new projects.
+A Claude Code plugin that gives your interactive Claude session ambient awareness of [Fabrik](https://fabrik.handarbeit.io), the GitHub-Project-driven SDLC pipeline orchestrator. With this plugin installed, Claude becomes a **product-management buddy** for projects that use Fabrik to automate issue processing — helping you author specs Fabrik can act on, read board state, decide when to intervene, and bootstrap Fabrik in new projects.
 
 ## What this plugin is *not*
 
@@ -38,7 +38,7 @@ claude --plugin-dir /path/to/fabrik/plugin/fabrik
 
 ## More information
 
-- [Fabrik docs site](https://fabrik.shadoworg.dev)
-- [User Guide](https://fabrik.shadoworg.dev/USER_GUIDE) — installation, configuration, labels
-- [State Machine](https://fabrik.shadoworg.dev/state-machine) — authoritative engine spec
-- [Stage Lifecycle](https://fabrik.shadoworg.dev/stage-lifecycle) — per-invocation lifecycle
+- [Fabrik docs site](https://fabrik.handarbeit.io)
+- [User Guide](https://fabrik.handarbeit.io/USER_GUIDE) — installation, configuration, labels
+- [State Machine](https://fabrik.handarbeit.io/state-machine) — authoritative engine spec
+- [Stage Lifecycle](https://fabrik.handarbeit.io/stage-lifecycle) — per-invocation lifecycle

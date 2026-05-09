@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	gh "github.com/verveguy/fabrik/github"
-	"github.com/verveguy/fabrik/stages"
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 // mockGitHubClient implements GitHubClient for testing.

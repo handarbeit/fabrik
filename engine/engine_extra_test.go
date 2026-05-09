@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	gh "github.com/verveguy/fabrik/github"
-	"github.com/verveguy/fabrik/internal/itemstate"
-	"github.com/verveguy/fabrik/tui"
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 func TestSetEvents_ConfiguresChannel(t *testing.T) {

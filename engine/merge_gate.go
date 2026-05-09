@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/verveguy/fabrik/boardcache"
-	gh "github.com/verveguy/fabrik/github"
-	"github.com/verveguy/fabrik/internal/itemstate"
-	"github.com/verveguy/fabrik/stages"
+	"github.com/handarbeit/fabrik/boardcache"
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 // checkMergeabilityGate inspects GitHub's mergeable flag on the linked PR to

@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	gh "github.com/verveguy/fabrik/github"
-	"github.com/verveguy/fabrik/stages"
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 // TestCatchUpLoop_NonYolo_ReviewReinvoke_Fires verifies that Phase 1 of the

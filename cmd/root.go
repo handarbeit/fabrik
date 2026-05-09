@@ -11,11 +11,11 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mattn/go-isatty"
-	"github.com/verveguy/fabrik/config"
-	"github.com/verveguy/fabrik/engine"
-	fabrikplugin "github.com/verveguy/fabrik/plugin"
-	"github.com/verveguy/fabrik/stages"
-	"github.com/verveguy/fabrik/tui"
+	"github.com/handarbeit/fabrik/config"
+	"github.com/handarbeit/fabrik/engine"
+	fabrikplugin "github.com/handarbeit/fabrik/plugin"
+	"github.com/handarbeit/fabrik/stages"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 // testReadyCh is set by tests to receive a signal once engine.Run has

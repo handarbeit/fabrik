@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/verveguy/fabrik/tui"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 // WebhookHealthState indicates the health of the gh webhook forward stream.

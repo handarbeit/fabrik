@@ -10,8 +10,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/verveguy/fabrik/engine"
-	"github.com/verveguy/fabrik/stages"
+	"github.com/handarbeit/fabrik/engine"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 // execFn is the exec implementation used by runResume. Replaced in tests.

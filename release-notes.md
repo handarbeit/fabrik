@@ -30,7 +30,7 @@ This release makes the in-memory board cache the unified source of truth regardl
 # Fabrik checks for new releases each poll cycle and upgrades automatically with --auto-upgrade
 
 # Or download directly (auto-detects OS and architecture)
-gh release download --repo shadoworg/fabrik \
+gh release download --repo handarbeit/fabrik \
   --pattern "fabrik_*_$(uname -s | tr A-Z a-z)_$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/').tar.gz" \
   -O - | tar xz
 ```

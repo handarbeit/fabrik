@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	gh "github.com/verveguy/fabrik/github"
-	"github.com/verveguy/fabrik/internal/itemstate"
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 )
 
 // TestPushUnblockObserver_BlockerClosesViaReconcile is the production scenario:

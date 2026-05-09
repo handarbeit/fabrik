@@ -31,10 +31,10 @@ strip_front_matter_to_tmp() {
 # Pages in fixed order — do not reorder; CI drift checks require bitwise-identical output.
 # Format: "filename:canonical-url"
 ORDERED=(
-  "USER_GUIDE.md:https://fabrik.shadoworg.dev/USER_GUIDE"
-  "state-machine.md:https://fabrik.shadoworg.dev/state-machine"
-  "stage-lifecycle.md:https://fabrik.shadoworg.dev/stage-lifecycle"
-  "positioning.md:https://fabrik.shadoworg.dev/positioning"
+  "USER_GUIDE.md:https://fabrik.handarbeit.io/USER_GUIDE"
+  "state-machine.md:https://fabrik.handarbeit.io/state-machine"
+  "stage-lifecycle.md:https://fabrik.handarbeit.io/stage-lifecycle"
+  "positioning.md:https://fabrik.handarbeit.io/positioning"
 )
 
 > "$OUT"

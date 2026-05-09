@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/verveguy/fabrik/config"
-	gh "github.com/verveguy/fabrik/github"
-	fabrikplugin "github.com/verveguy/fabrik/plugin"
+	"github.com/handarbeit/fabrik/config"
+	gh "github.com/handarbeit/fabrik/github"
+	fabrikplugin "github.com/handarbeit/fabrik/plugin"
 )
 
 // ── upgrade mock ──────────────────────────────────────────────────────────────

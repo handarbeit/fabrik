@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/verveguy/fabrik/cmd"
+	"github.com/handarbeit/fabrik/cmd"
 )
 
 func main() {

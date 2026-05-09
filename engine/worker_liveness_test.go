@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	gh "github.com/verveguy/fabrik/github"
-	"github.com/verveguy/fabrik/internal/itemstate"
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 )
 
 // bootstrapItem seeds the engine's store with a single issue so detector/cleanup

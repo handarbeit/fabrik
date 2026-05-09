@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"time"
 
-	gh "github.com/verveguy/fabrik/github"
+	gh "github.com/handarbeit/fabrik/github"
 )
 
 // Mutation is a discriminated union of every possible state change.

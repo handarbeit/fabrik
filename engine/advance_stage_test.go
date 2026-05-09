@@ -3,8 +3,8 @@ package engine
 import (
 	"testing"
 
-	gh "github.com/verveguy/fabrik/github"
-	"github.com/verveguy/fabrik/stages"
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 func TestAdvanceToNextStage_Success(t *testing.T) {

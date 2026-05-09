@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	gh "github.com/verveguy/fabrik/github"
+	gh "github.com/handarbeit/fabrik/github"
 )
 
 // Tests for the lock-then-verify protocol in processItem.

@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	gh "github.com/verveguy/fabrik/github"
+	gh "github.com/handarbeit/fabrik/github"
 )
 
 // TestSemverGreater covers the basic semver comparison logic including the

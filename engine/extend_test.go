@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	gh "github.com/verveguy/fabrik/github"
-	"github.com/verveguy/fabrik/stages"
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 // nopLogf is a no-op logfFn for tests that don't assert log output.

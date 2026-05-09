@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	gh "github.com/verveguy/fabrik/github"
-	"github.com/verveguy/fabrik/stages"
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 func TestInvokeClaude_JSONOutput(t *testing.T) {

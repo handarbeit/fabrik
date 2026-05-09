@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	gh "github.com/verveguy/fabrik/github"
+	gh "github.com/handarbeit/fabrik/github"
 )
 
 func TestSaveSessionIDDirect(t *testing.T) {

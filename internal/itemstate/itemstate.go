@@ -3,7 +3,7 @@ package itemstate
 import (
 	"time"
 
-	gh "github.com/verveguy/fabrik/github"
+	gh "github.com/handarbeit/fabrik/github"
 )
 
 // ItemState is the canonical per-item state. All mutations flow through Store.Apply;

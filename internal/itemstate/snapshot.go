@@ -3,7 +3,7 @@ package itemstate
 import (
 	"time"
 
-	gh "github.com/verveguy/fabrik/github"
+	gh "github.com/handarbeit/fabrik/github"
 )
 
 // Snapshot is an immutable copy of an ItemState returned by Store.Get and Store.Apply.

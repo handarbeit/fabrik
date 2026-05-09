@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/verveguy/fabrik/internal/itemstate"
-	"github.com/verveguy/fabrik/tui"
+	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 // TestVerifySignature validates HMAC-SHA256 webhook signature checking.

@@ -11,9 +11,9 @@ are user input, and the board columns define the workflow.
 **Option A: Install binary (requires `gh`)**
 
 ```bash
-# Requires: gh auth login (with access to shadoworg/fabrik)
+# Requires: gh auth login (with access to handarbeit/fabrik)
 cd ~/bin  # or any directory on your PATH
-gh release download --repo shadoworg/fabrik \
+gh release download --repo handarbeit/fabrik \
   --pattern "fabrik_*_$(uname -s | tr A-Z a-z)_$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/').tar.gz" \
   -O - | tar xz
 # Platform-specific alternatives:
@@ -260,7 +260,7 @@ GITHUB_TOKEN=ghp_...    # Fallback
 | `--token` | GitHub token | `$GITHUB_TOKEN` |
 | `--stages` | Stage configs directory | `./.fabrik/stages` |
 | `--yolo` | Auto-advance through stages | `false` |
-| `--auto-upgrade` | Self-upgrade from shadoworg/fabrik GitHub Releases at startup and when idle (after 2 idle polls) | `false` |
+| `--auto-upgrade` | Self-upgrade from handarbeit/fabrik GitHub Releases at startup and when idle (after 2 idle polls) | `false` |
 | `--poll` | Poll interval in seconds | `30` |
 | `--notui` | Disable the interactive TUI dashboard | TUI on by default |
 | `--max-concurrent` | Maximum number of concurrent issue workers | `5` |
@@ -274,7 +274,7 @@ GITHUB_TOKEN=ghp_...    # Fallback
 | `--webhooks` | Enable real-time webhook event delivery via `gh webhook forward` (requires `cli/gh-webhook` extension; also `FABRIK_WEBHOOKS`) | `false` |
 | `--reconcile-interval` | Seconds between periodic light-reconcile health checks when webhooks are enabled (0 = default 180; also `FABRIK_RECONCILE_INTERVAL`) | `0` (180 s) |
 
-> **Releases:** New releases are announced in the [shadoworg/fabrik Discussions "Announcements" category](https://github.com/shadoworg/fabrik/discussions/categories/announcements) after each successful release.
+> **Releases:** New releases are announced in the [handarbeit/fabrik Discussions "Announcements" category](https://github.com/handarbeit/fabrik/discussions/categories/announcements) after each successful release.
 
 ## Subcommands
 

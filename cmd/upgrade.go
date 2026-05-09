@@ -12,10 +12,10 @@ import (
 	"strings"
 
 	"github.com/mattn/go-isatty"
-	"github.com/verveguy/fabrik/config"
-	"github.com/verveguy/fabrik/engine"
-	gh "github.com/verveguy/fabrik/github"
-	fabrikplugin "github.com/verveguy/fabrik/plugin"
+	"github.com/handarbeit/fabrik/config"
+	"github.com/handarbeit/fabrik/engine"
+	gh "github.com/handarbeit/fabrik/github"
+	fabrikplugin "github.com/handarbeit/fabrik/plugin"
 )
 
 // upgradeGitHubClient is the GitHub client used by runUpgrade. It can be

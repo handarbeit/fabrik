@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	gh "github.com/verveguy/fabrik/github"
+	gh "github.com/handarbeit/fabrik/github"
 )
 
 // parseOwnerRepo splits a "owner/repo" string into its two components.

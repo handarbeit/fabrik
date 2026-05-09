@@ -1,4 +1,4 @@
-module github.com/verveguy/fabrik
+module github.com/handarbeit/fabrik
 
 go 1.26.1
 

@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	gh "github.com/verveguy/fabrik/github"
-	"github.com/verveguy/fabrik/stages"
+	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 // findStageComment returns the most recent comment in item.Comments whose body
