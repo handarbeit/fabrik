@@ -51,22 +51,30 @@ Work through tasks in the order listed. For each task:
 5. Push to remote
 6. Check off the task in the Plan stage comment (see below)
 
-### Commit frequently
+### Commit frequently — one commit per Task, using Conventional Commits
 
-Commit after each logical unit of work — typically after each task or sub-task. Do not accumulate a large diff and commit at the end. Frequent commits:
+Commit after each Task in the plan — at minimum one commit per Task. Do not accumulate a large diff and commit at the end. Frequent commits:
 - Preserve progress if the session is interrupted
 - Make review easier
 - Enable bisecting if something breaks
 
+**Use Conventional Commits format** for every commit. The pattern is:
+`(feat|fix|refactor|test|docs|chore|style|perf)[optional scope]: <description>`
+
 Good commit messages:
-- `Add FetchItemDetails method for deep-fetching item comments`
-- `Update poll loop to use two-phase fetch`
-- `Fix race condition in worktree mutex handling`
+- `feat(auth): add JWT token validation`
+- `fix(worktree): handle missing remote branch gracefully`
+- `refactor(engine): extract progress detection into helper`
+- `test(item): add coverage for commitWIP exclusion of context files`
+- `docs: update stage-lifecycle to reflect new commit format`
+- `chore: update default stage YAML with new completion field`
 
 Bad commit messages:
+- `WIP: Implement stage incomplete (partial progress)` — **explicitly prohibited**; this string is reserved for the engine's partial-progress fallback and must never appear in hand-written commits
 - `WIP`
 - `Updates`
 - `Fix stuff`
+- Any message without a Conventional Commits type prefix
 
 ### Push regularly
 
@@ -161,7 +169,7 @@ Before signaling completion:
 
 **If you can't complete**: Don't output the completion marker. Describe what's blocking you. The engine will retry after a cooldown, and you'll resume your session.
 
-**If you hit max turns**: The engine will create a WIP commit of any uncommitted changes and push them. Your progress is preserved for the next attempt.
+**If you hit max turns**: The engine will create a partial-progress commit (`chore: partial <StageName> stage progress (incomplete)`) of any uncommitted changes and push them. Your progress is preserved for the next attempt.
 
 **Draft PR**: If the stage config has `create_draft_pr: true`, the engine creates a draft PR after you signal completion. Make sure your branch is pushed before completing.
 
