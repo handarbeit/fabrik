@@ -72,9 +72,7 @@ func TestRun_SighupRestart(t *testing.T) {
 	if len(capturedArgs) == 0 {
 		t.Error("exec called with empty args")
 	}
-	// The flag should be set after the restart.
 	if !eng.sighupRequested.Load() {
 		t.Error("sighupRequested flag not set")
 	}
-	_ = capturedArgs
 }
