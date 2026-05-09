@@ -1066,7 +1066,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			deepFetchCandidates = append(deepFetchCandidates, board.Items[i])
 			continue
 		}
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok && !cacheImpl.IsPaused() && cacheImpl.IsItemDeepFetched(board.Items[i].Repo, board.Items[i].Number) {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok && !cacheImpl.IsPaused() && cacheImpl.IsItemCacheFresh(board.Items[i].Repo, board.Items[i].Number, board.Items[i].UpdatedAt) {
 			e.logf(0, "poll", "reading details for #%d from cache\n", board.Items[i].Number)
 		} else {
 			e.logf(0, "poll", "deep-fetching details for #%d from GitHub\n", board.Items[i].Number)

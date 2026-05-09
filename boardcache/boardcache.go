@@ -468,12 +468,54 @@ func (c *CacheImpl) IsBootstrapped() bool {
 
 // IsItemDeepFetched returns true when the cache holds deep-fetched details for
 // the given item (LastDeepFetchAt is non-zero). Called outside c.mu.
+//
+// Note: this only reports whether a deep fetch ever happened; it does not check
+// freshness. Callers that need to know whether the cache is currently
+// authoritative should use IsItemCacheFresh.
 func (c *CacheImpl) IsItemDeepFetched(repo string, number int) bool {
 	snap, err := c.store.Get(repo, number)
 	if err != nil {
 		return false
 	}
 	return !snap.State().LastDeepFetchAt.IsZero()
+}
+
+// IsItemCacheFresh returns true when the cache has deep-fetched details for the
+// given item AND those details are not stale relative to the supplied
+// sourceUpdatedAt (typically pi.UpdatedAt from a fresh board read). When the
+// cache is stale, FetchItemDetails will fall through to a GraphQL deep-fetch.
+// Called outside c.mu.
+func (c *CacheImpl) IsItemCacheFresh(repo string, number int, sourceUpdatedAt time.Time) bool {
+	snap, err := c.store.Get(repo, number)
+	if err != nil {
+		return false
+	}
+	s := snap.State()
+	if s.LastDeepFetchAt.IsZero() {
+		return false
+	}
+	return !cacheIsStale(sourceUpdatedAt, s.LastSeenSourceUpdatedAt)
+}
+
+// cacheIsStale reports whether the cached deep state is stale relative to the
+// fresh board's source updatedAt. Returns true when sourceUpdatedAt is strictly
+// after lastSeen — i.e., something on GitHub has bumped updatedAt since we last
+// captured a deep fetch.
+//
+// Edge cases:
+//   - lastSeen is zero (legacy cache entries written before this field existed):
+//     treat as stale so the next FetchItemDetails refreshes once and populates
+//     LastSeenSourceUpdatedAt going forward.
+//   - sourceUpdatedAt is zero (board read did not populate it): treat as fresh
+//     to avoid a hot-loop refetch when no signal is available.
+func cacheIsStale(sourceUpdatedAt, lastSeen time.Time) bool {
+	if sourceUpdatedAt.IsZero() {
+		return false
+	}
+	if lastSeen.IsZero() {
+		return true
+	}
+	return sourceUpdatedAt.After(lastSeen)
 }
 
 // Subscribe registers an observer on the underlying Store. The returned func
@@ -532,7 +574,19 @@ func (c *CacheImpl) FetchProjectBoard(owner, repo string, projectNum int, ownerT
 // FetchItemDetails copies cached deep fields into the passed item pointer.
 // Deep fields: Body, URL, Author, Assignees, BlockedBy, Comments, LinkedPRNumber,
 // LinkedPRReviewRequests, LinkedPRReviews, LinkedPRReviewThreadComments, LinkedPRResolvedThreadCount.
-// Falls back to GitHub on cache miss and populates the cache with the result.
+//
+// Cache freshness contract: the cache is treated as authoritative only while the
+// fresh board's pi.UpdatedAt has not advanced past LastSeenSourceUpdatedAt (the
+// pi.UpdatedAt observed at the moment of the last successful deep fetch). When
+// the board's updatedAt is newer, the cache is stale and we fall through to a
+// real GraphQL fetch. pi.UpdatedAt is computed by FetchProjectBoard as
+// max(issue.updatedAt, projectItem.updatedAt, linkedPR.updatedAt), so PR-side
+// changes (new reviews, comments, draft toggles) bump it. Webhooks remain a
+// pure optimization that mutate the cache between polls; in their absence (or
+// when they're unhealthy), the board's updatedAt correctly forces a re-fetch.
+//
+// Falls back to GitHub on cache miss or when the cache is stale, and populates
+// the cache with the result.
 func (c *CacheImpl) FetchItemDetails(item *gh.ProjectItem) error {
 	c.mu.RLock()
 	paused := c.paused
@@ -546,13 +600,19 @@ func (c *CacheImpl) FetchItemDetails(item *gh.ProjectItem) error {
 	if err == nil {
 		s := snap.State()
 		if !s.LastDeepFetchAt.IsZero() {
-			// Cache hit — copy deep fields into item.
-			copyDeepFieldsFromState(item, s)
-			return nil
+			if !cacheIsStale(item.UpdatedAt, s.LastSeenSourceUpdatedAt) {
+				// Cache hit — copy deep fields into item.
+				copyDeepFieldsFromState(item, s)
+				return nil
+			}
+			c.logFn("[cache] stale for #%d (board updatedAt %s > last-seen %s) — refetching from GitHub\n",
+				item.Number, item.UpdatedAt.Format(time.RFC3339), s.LastSeenSourceUpdatedAt.Format(time.RFC3339))
+		} else {
+			c.logFn("[cache] miss for #%d — fetching from GitHub\n", item.Number)
 		}
+	} else {
+		c.logFn("[cache] miss for #%d — fetching from GitHub\n", item.Number)
 	}
-
-	c.logFn("[cache] miss for #%d — fetching from GitHub\n", item.Number)
 	if err := c.fallback.FetchItemDetails(item); err != nil {
 		return err
 	}

@@ -350,6 +350,140 @@ func TestFetchItemDetailsFallbackPopulatesCache(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// FetchItemDetails — staleness gate (item.UpdatedAt vs LastSeenSourceUpdatedAt)
+// ---------------------------------------------------------------------------
+
+// When the board's pi.UpdatedAt advances past LastSeenSourceUpdatedAt, the
+// cache must fall through to a real GraphQL fetch instead of serving frozen
+// deep state. This is the bug behind acme/fantasy#12: bot reviews landed
+// on the linked PR after the first deep-fetch and the cache served the empty
+// LinkedPRReviews slice forever, leaving the review gate permanently unmet.
+func TestFetchItemDetailsCacheStaleRefetches(t *testing.T) {
+	t0 := time.Date(2026, 5, 9, 2, 47, 0, 0, time.UTC)
+	t1 := t0.Add(7 * time.Minute) // simulates a PR review submitted later
+	mc := &mockClient{
+		itemDetailsResult: &gh.ProjectItem{
+			Number: 12, Repo: "owner/repo",
+			Body:           "body v1",
+			LinkedPRNumber: 33,
+		},
+	}
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+	board := &gh.ProjectBoard{
+		ProjectID: "PID", Title: "T", OwnerType: "user",
+		Items: []gh.ProjectItem{{
+			ID: "I_12", Number: 12, Repo: "owner/repo", Status: "Review",
+			UpdatedAt: t0,
+		}},
+	}
+	c.Bootstrap(board)
+
+	// First call: cache miss → fallback populates and records LastSeen=t0.
+	item := gh.ProjectItem{ID: "I_12", Number: 12, Repo: "owner/repo", Status: "Review", UpdatedAt: t0}
+	if err := c.FetchItemDetails(&item); err != nil {
+		t.Fatalf("FetchItemDetails(first): %v", err)
+	}
+	if mc.fetchItemDetailsCount != 1 {
+		t.Fatalf("first call: want 1 fallback, got %d", mc.fetchItemDetailsCount)
+	}
+
+	// Second call with same UpdatedAt: cache hit, no extra fallback.
+	item2 := gh.ProjectItem{ID: "I_12", Number: 12, Repo: "owner/repo", Status: "Review", UpdatedAt: t0}
+	if err := c.FetchItemDetails(&item2); err != nil {
+		t.Fatalf("FetchItemDetails(second): %v", err)
+	}
+	if mc.fetchItemDetailsCount != 1 {
+		t.Fatalf("second call (fresh): want 1 fallback, got %d", mc.fetchItemDetailsCount)
+	}
+
+	// Third call with bumped UpdatedAt: cache stale, fallback must be re-invoked.
+	mc.itemDetailsResult.Body = "body v2"
+	mc.itemDetailsResult.LinkedPRReviews = []gh.PRReview{{Author: "copilot", State: "COMMENTED"}}
+	item3 := gh.ProjectItem{ID: "I_12", Number: 12, Repo: "owner/repo", Status: "Review", UpdatedAt: t1}
+	if err := c.FetchItemDetails(&item3); err != nil {
+		t.Fatalf("FetchItemDetails(third): %v", err)
+	}
+	if mc.fetchItemDetailsCount != 2 {
+		t.Fatalf("third call (stale): want 2 fallback, got %d", mc.fetchItemDetailsCount)
+	}
+	if item3.Body != "body v2" {
+		t.Errorf("third call: stale data served, want body 'body v2', got %q", item3.Body)
+	}
+	if len(item3.LinkedPRReviews) != 1 || item3.LinkedPRReviews[0].State != "COMMENTED" {
+		t.Errorf("third call: stale reviews served, got %+v", item3.LinkedPRReviews)
+	}
+
+	// Fourth call with same UpdatedAt as third: now fresh again, no extra fallback.
+	item4 := gh.ProjectItem{ID: "I_12", Number: 12, Repo: "owner/repo", Status: "Review", UpdatedAt: t1}
+	if err := c.FetchItemDetails(&item4); err != nil {
+		t.Fatalf("FetchItemDetails(fourth): %v", err)
+	}
+	if mc.fetchItemDetailsCount != 2 {
+		t.Errorf("fourth call (re-fresh): want 2 fallback, got %d", mc.fetchItemDetailsCount)
+	}
+}
+
+// IsItemCacheFresh is the public probe used by the poll loop's log line. It
+// must agree with FetchItemDetails on what counts as a cache hit.
+func TestIsItemCacheFreshAgreesWithFetch(t *testing.T) {
+	t0 := time.Date(2026, 5, 9, 2, 47, 0, 0, time.UTC)
+	t1 := t0.Add(time.Hour)
+	mc := &mockClient{itemDetailsResult: &gh.ProjectItem{Number: 5, Repo: "owner/repo"}}
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+	c.Bootstrap(&gh.ProjectBoard{ProjectID: "PID", OwnerType: "user", Items: []gh.ProjectItem{{
+		ID: "I_5", Number: 5, Repo: "owner/repo", Status: "Plan", UpdatedAt: t0,
+	}}})
+
+	// Pre-deep-fetch: never deep-fetched → not fresh.
+	if c.IsItemCacheFresh("owner/repo", 5, t0) {
+		t.Error("pre-fetch: want stale, got fresh")
+	}
+
+	// Populate cache.
+	item := gh.ProjectItem{ID: "I_5", Number: 5, Repo: "owner/repo", Status: "Plan", UpdatedAt: t0}
+	if err := c.FetchItemDetails(&item); err != nil {
+		t.Fatalf("FetchItemDetails: %v", err)
+	}
+
+	// Same UpdatedAt → fresh.
+	if !c.IsItemCacheFresh("owner/repo", 5, t0) {
+		t.Error("post-fetch same updatedAt: want fresh, got stale")
+	}
+	// Bumped UpdatedAt → stale.
+	if c.IsItemCacheFresh("owner/repo", 5, t1) {
+		t.Error("post-fetch bumped updatedAt: want stale, got fresh")
+	}
+	// Zero source updatedAt → fresh (no signal to invalidate).
+	if !c.IsItemCacheFresh("owner/repo", 5, time.Time{}) {
+		t.Error("zero source updatedAt: want fresh (no signal), got stale")
+	}
+}
+
+func TestCacheIsStale(t *testing.T) {
+	t0 := time.Date(2026, 5, 9, 2, 47, 0, 0, time.UTC)
+	t1 := t0.Add(time.Minute)
+	cases := []struct {
+		name             string
+		source, lastSeen time.Time
+		wantStale        bool
+	}{
+		{"both zero", time.Time{}, time.Time{}, false},
+		{"source zero, lastSeen set", time.Time{}, t0, false},
+		{"source set, lastSeen zero (legacy)", t0, time.Time{}, true},
+		{"source equals lastSeen", t0, t0, false},
+		{"source before lastSeen", t0, t1, false},
+		{"source after lastSeen", t1, t0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cacheIsStale(tc.source, tc.lastSeen); got != tc.wantStale {
+				t.Errorf("cacheIsStale(%v, %v) = %v, want %v", tc.source, tc.lastSeen, got, tc.wantStale)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Delta: issue_comment.created — idempotent by DatabaseID
 // ---------------------------------------------------------------------------
 
