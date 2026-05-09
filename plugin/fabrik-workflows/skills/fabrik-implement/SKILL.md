@@ -58,8 +58,9 @@ Commit after each Task in the plan — at minimum one commit per Task. Do not ac
 - Make review easier
 - Enable bisecting if something breaks
 
-**Use Conventional Commits format** for every commit. The pattern is:
-`(feat|fix|refactor|test|docs|chore|style|perf)[optional scope]: <description>`
+**Use Conventional Commits format** for every commit. The format is:
+`<type>: <description>` or `<type>(<scope>): <description>`
+where `<type>` is one of: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`, `style`, `perf`
 
 Good commit messages:
 - `feat(auth): add JWT token validation`
@@ -70,7 +71,7 @@ Good commit messages:
 - `chore: update default stage YAML with new completion field`
 
 Bad commit messages:
-- `WIP: Implement stage incomplete (partial progress)` — **explicitly prohibited**; this string is reserved for the engine's partial-progress fallback and must never appear in hand-written commits
+- `WIP: Implement stage incomplete (partial progress)` — **explicitly prohibited**; this is a legacy boilerplate string that must never appear in any commit
 - `WIP`
 - `Updates`
 - `Fix stuff`
