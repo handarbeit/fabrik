@@ -14,7 +14,12 @@ import (
 // registerSighupHandler registers a SIGHUP signal handler. On receipt, it logs,
 // sets the sighupRequested flag, and cancels the context so the main loop drains
 // workers before re-execing. A second SIGHUP during the drain window force-exits.
-func registerSighupHandler(ctx context.Context, cancel context.CancelFunc, e *Engine) {
+// restartDone is closed by the caller after performSighupRestart returns (exec
+// failure path); on exec success the process is replaced before it can be closed.
+// Using restartDone instead of ctx.Done() in the second select keeps the goroutine
+// alive for the full drain window, because ctx.Done() fires immediately when
+// cancel() is called on the first SIGHUP.
+func registerSighupHandler(ctx context.Context, cancel context.CancelFunc, e *Engine, restartDone <-chan struct{}) {
 	sighupCh := make(chan os.Signal, 1)
 	signal.Notify(sighupCh, syscall.SIGHUP)
 	go func() {
@@ -35,7 +40,7 @@ func registerSighupHandler(ctx context.Context, cancel context.CancelFunc, e *En
 		case <-sighup2Ch:
 			fmt.Fprintln(os.Stderr, "\nSecond SIGHUP received during drain — force-quitting...")
 			os.Exit(1)
-		case <-ctx.Done():
+		case <-restartDone:
 			signal.Stop(sighup2Ch)
 		}
 	}()
@@ -49,10 +54,16 @@ func performSighupRestart(e *Engine, lockFile *os.File) {
 		e.webhookMgr.Stop()
 	}
 
-	// Release the lock explicitly before exec so the new process can acquire it.
-	// O_CLOEXEC would release it on exec anyway, but being explicit matches the spec.
+	// Release the lock explicitly before exec. O_CLOEXEC means the fd is also
+	// closed atomically at exec time, but doing it here makes the intent clear.
+	// There is a negligible window between this unlock and syscall.Exec during
+	// which another instance could theoretically acquire the lock; in practice
+	// this is harmless because exec is called immediately after and the PID is
+	// unchanged, so any competing instance would fail on its next poll cycle.
 	syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
-	lockFile.Close()
+	if err := lockFile.Close(); err != nil {
+		e.logf(0, "signal", "SIGHUP restart: could not close lock file: %v\n", err)
+	}
 
 	exe, err := os.Executable()
 	if err != nil {

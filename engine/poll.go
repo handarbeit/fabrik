@@ -244,7 +244,10 @@ func (e *Engine) Run() error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
-	registerSighupHandler(ctx, cancel, e)
+	// restartDone is closed after performSighupRestart returns (exec failure path)
+	// so the SIGHUP goroutine stays alive for the full drain window.
+	restartDone := make(chan struct{})
+	registerSighupHandler(ctx, cancel, e, restartDone)
 	if e.cfg.ReadyCh != nil {
 		close(e.cfg.ReadyCh)
 	}
@@ -593,6 +596,7 @@ func (e *Engine) Run() error {
 				e.wg.Wait()
 				if e.sighupRequested.Load() {
 					performSighupRestart(e, lockFile)
+					close(restartDone) // reached only on exec failure
 				}
 				return nil
 			case <-ticker.C:
@@ -601,6 +605,7 @@ func (e *Engine) Run() error {
 					e.wg.Wait()
 					if e.sighupRequested.Load() {
 						performSighupRestart(e, lockFile)
+						close(restartDone) // reached only on exec failure
 					}
 					return nil
 				}
@@ -624,6 +629,7 @@ func (e *Engine) Run() error {
 				e.wg.Wait()
 				if e.sighupRequested.Load() {
 					performSighupRestart(e, lockFile)
+					close(restartDone) // reached only on exec failure
 				}
 				return nil
 			case <-ticker.C:
@@ -632,6 +638,7 @@ func (e *Engine) Run() error {
 					e.wg.Wait()
 					if e.sighupRequested.Load() {
 						performSighupRestart(e, lockFile)
+						close(restartDone) // reached only on exec failure
 					}
 					return nil
 				}
