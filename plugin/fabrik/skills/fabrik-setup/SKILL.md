@@ -5,7 +5,7 @@ description: Bootstrap a project to use Fabrik (the GitHub-Project-driven SDLC p
 
 # Bootstrapping Fabrik
 
-This skill guides a user through installing Fabrik and standing it up for the first time in their project. Don't run any of these steps yourself unsolicited — walk the user through them, confirm their environment, and let them execute. Authoritative docs live at https://fabrik.shadoworg.dev — link the user there rather than reproducing details that may drift.
+This skill guides a user through installing Fabrik and standing it up for the first time in their project. Don't run any of these steps yourself unsolicited — walk the user through them, confirm their environment, and let them execute. Authoritative docs live at https://fabrik.handarbeit.io — link the user there rather than reproducing details that may drift.
 
 ## Before you start
 
@@ -27,7 +27,7 @@ Two paths. **Strongly prefer the release binary** unless the user has a reason t
 
 ```bash
 cd ~/bin  # or any directory on PATH
-gh release download --repo shadoworg/fabrik \
+gh release download --repo handarbeit/fabrik \
   --pattern "fabrik_*_$(uname -s | tr A-Z a-z)_$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/').tar.gz" \
   -O - | tar xz
 ```
@@ -35,7 +35,7 @@ gh release download --repo shadoworg/fabrik \
 **Option B — build from source:**
 
 ```bash
-git clone https://github.com/shadoworg/fabrik.git
+git clone https://github.com/handarbeit/fabrik.git
 cd fabrik
 go build -o fabrik .
 ```
@@ -109,9 +109,9 @@ If `superpowers` appears, recommend removing it. This *only* matters on machines
 Once they're up:
 
 - **Authoring an issue Fabrik can act on** — switch to the `fabrik:fabrik` supervisor skill (ambient, will load itself once `.fabrik/` exists).
-- **What labels do** — https://fabrik.shadoworg.dev/USER_GUIDE#6-labels-reference
-- **State machine** (engine behaviour) — https://fabrik.shadoworg.dev/state-machine
-- **Troubleshooting** — https://fabrik.shadoworg.dev/troubleshooting
+- **What labels do** — https://fabrik.handarbeit.io/USER_GUIDE#6-labels-reference
+- **State machine** (engine behaviour) — https://fabrik.handarbeit.io/state-machine
+- **Troubleshooting** — https://fabrik.handarbeit.io/troubleshooting
 
 ## What this skill is not
 
