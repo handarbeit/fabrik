@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -294,8 +295,8 @@ func TestBlockOnInput_LabelErrors_LogsWarning(t *testing.T) {
 }
 
 // TestCommitWIP_ExcludesContextFiles verifies that commitWIP does not include
-// files under .fabrik-context/ in the WIP commit, even when they were previously
-// committed (making them tracked by git).
+// files under .fabrik-context/ in the partial-progress commit, even when they
+// were previously committed (making them tracked by git).
 func TestCommitWIP_ExcludesContextFiles(t *testing.T) {
 	skipIfNoGit(t)
 
@@ -353,18 +354,22 @@ func TestCommitWIP_ExcludesContextFiles(t *testing.T) {
 	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
 	eng.commitWIP(workDir, 42, "Research")
 
-	// Verify the WIP commit was created.
+	// Verify the partial-progress commit was created.
 	logCmd := exec.Command("git", "log", "--oneline", "-1")
 	logCmd.Dir = workDir
 	logOut, err := logCmd.Output()
 	if err != nil {
 		t.Fatalf("git log: %v", err)
 	}
-	if !strings.Contains(string(logOut), "WIP") {
-		t.Errorf("expected WIP commit, got: %s", string(logOut))
+	if !strings.Contains(string(logOut), "chore: partial") {
+		t.Errorf("expected partial-progress commit, got: %s", string(logOut))
+	}
+	ccPattern := regexp.MustCompile(`(feat|fix|refactor|test|docs|chore|style|perf)(\([^)]+\))?: .+`)
+	if !ccPattern.MatchString(string(logOut)) {
+		t.Errorf("commit message does not match Conventional Commits format, got: %s", string(logOut))
 	}
 
-	// Verify the context file is NOT in the WIP commit.
+	// Verify the context file is NOT in the partial-progress commit.
 	showCmd := exec.Command("git", "show", "--name-only", "--format=", "HEAD")
 	showCmd.Dir = workDir
 	showOut, err := showCmd.Output()
@@ -373,10 +378,10 @@ func TestCommitWIP_ExcludesContextFiles(t *testing.T) {
 	}
 	filesInCommit := string(showOut)
 	if strings.Contains(filesInCommit, ".fabrik-context") {
-		t.Errorf(".fabrik-context files should not appear in WIP commit, got:\n%s", filesInCommit)
+		t.Errorf(".fabrik-context files should not appear in partial-progress commit, got:\n%s", filesInCommit)
 	}
 	if !strings.Contains(filesInCommit, "app.go") {
-		t.Errorf("app.go should appear in WIP commit, got:\n%s", filesInCommit)
+		t.Errorf("app.go should appear in partial-progress commit, got:\n%s", filesInCommit)
 	}
 
 	// Verify the context file change is preserved on disk (not lost).
