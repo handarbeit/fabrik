@@ -12,7 +12,12 @@ import "embed"
 // This is distinct from the user-facing `fabrik` plugin (plugin/fabrik/) which
 // is installed via Claude Code's plugin marketplace, not embedded.
 //
+// Only files Claude Code actually loads at runtime are embedded: the plugin
+// manifest and the SKILL.md files. The plugin's own README.md is developer
+// documentation that lives at plugin/fabrik-workflows/README.md in this repo
+// for source readers — it is not bundled into the binary and not extracted
+// into user projects, where it would just be clutter.
+//
 //go:embed fabrik-workflows/.claude-plugin/plugin.json
-//go:embed fabrik-workflows/README.md
 //go:embed fabrik-workflows/skills/*/SKILL.md
 var FabrikPlugin embed.FS
