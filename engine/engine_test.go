@@ -149,6 +149,13 @@ func TestRun_ShutdownOnSignal(t *testing.T) {
 	eng := testEngine(client, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 300 // long poll so we don't hit a second tick
 
+	// Provide a temp fabrikDir so Run() can create the lock file.
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	eng.fabrikDir = dir
+
 	// Use ReadyCh so we only send SIGINT after signal.Notify is registered.
 	readyCh := make(chan struct{})
 	eng.cfg.ReadyCh = readyCh
