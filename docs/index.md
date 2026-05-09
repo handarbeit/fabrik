@@ -241,6 +241,20 @@ description: >-
           Blocks merge until CI passes and auto-fixes failing checks each cycle.
         </div>
       </a>
+      <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#stages-waiting-for-input" aria-label="Awaiting Input Notifications — open documentation">
+        <span class="feature-icon">🔔</span>
+        <div class="feature-title">Awaiting Input Notifications</div>
+        <div class="feature-desc">
+          Mentions the configured operator via @mention comment for mobile push when a stage needs user input.
+        </div>
+      </a>
+      <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#recovering-from-wedged-state" aria-label="In-Place Restart — open documentation">
+        <span class="feature-icon">🔃</span>
+        <div class="feature-title">In-Place Restart</div>
+        <div class="feature-desc">
+          SIGHUP drains in-flight runs and re-execs the binary in place — pick up a new build without terminal disruption.
+        </div>
+      </a>
     </div>
 
     <div class="factory-callout">
