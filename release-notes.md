@@ -1,27 +1,25 @@
-# Fabrik v0.0.55
+# Fabrik v0.0.56
 
-This release makes the in-memory board cache the unified source of truth regardless of whether webhooks are configured, and fixes a dependency-resolution race that could re-block issues immediately after they were correctly unblocked.
+This release adds two operator-facing features — `@mention` notifications when fabrik blocks on input, and a SIGHUP-driven in-place self-restart — plus a cache-staleness fix that complements the v0.0.55 always-on cache work, and the completion of the org migration to `handarbeit`.
 
 ## Features
 
-- `--auto-upgrade` now checks for new releases at startup, not only after the first idle window. Busy boards that never enter the idle state will still self-upgrade (#655).
+- Awaiting-input comments now `@mention` the assigned user, so GitHub's existing notification pipeline delivers the alert to the user's GitHub Mobile inbox / push notifications. When the Implement stage emits `FABRIK_BLOCKED_ON_INPUT`, the comment fabrik posts begins with `@<user>` followed by the question Claude is asking. (#668)
+  - Note: GitHub does not deliver push notifications for activity an account performs on itself. To get mobile push working, fabrik must run as a different identity (bot account) than the user being mentioned. The `--filter-user` decoupling that enables this is being tracked in #671.
+- New SIGHUP signal handler restarts fabrik in place. `kill -HUP <fabrik-pid>` (or `pkill -HUP fabrik`) causes fabrik to gracefully drain in-flight workers, release the lockfile, and `syscall.Exec` itself with a fresh process image — dropping the in-memory cache and Store without disrupting the TUI terminal session. Useful for clearing wedged state-machine bugs without losing the operator's terminal context. (#672)
 
 ## Fixes
 
-- `checkDependencies` now prefers the cache's view of a blocker's `IsClosed` over the GraphQL deep-fetch `blockedBy.nodes.state` field. GitHub's indexer lags on the dep edge by seconds-to-minutes after an issue closes, so the previous code could re-apply `fabrik:blocked` to a dependent that the `PushUnblockObserver` had just correctly unblocked. The cache is now consistently the source of truth for blocker state in both the push-path observer and the pull-path dependency gate (#664).
-
-## Improvements
-
-- The in-memory board cache is wired unconditionally as the unified source of truth. Every poll cycle now performs a shallow `FetchProjectBoard` from GitHub and applies the result via `Bootstrap` (first poll) or `Reconcile` (subsequent polls). Observer notifications — `StateChanged`, `LabelsChanged`, `BlockedByChanged`, etc. — fire on every relevant transition regardless of whether webhooks are configured. As a result, `PushUnblockObserver` and other reactive observers operate correctly in polling-only mode, where they were previously structurally dormant. Webhooks remain an optional acceleration that update the cache between polls; the per-poll Reconcile is the universal baseline freshener (#660).
-- `PushUnblockObserver` decisions are now logged to `fabrik.log` under the `[push-unblock]` tag — visible signals for "blocker X#N closed → removing fabrik:blocked from dependent Y#M". Push-path activity was previously completely silent, making dep-unblock issues hard to diagnose (#664).
-
-## Breaking changes
-
-- The `--board-cache` flag and `FABRIK_BOARD_CACHE` environment variable are removed. The cache is now always wired in production. Existing configs that referenced `--board-cache=in-memory` should drop the flag (that behavior is the default); references to `--board-cache=none` are no longer supported.
+- The deep cache now detects staleness against `updatedAt` and refetches when the source has bumped. Previously deep-cache entries (comments, BlockedBy state, PR review state) could persist past the corresponding shallow `updatedAt` change, leaving downstream stages reading stale data. (#673)
+- Worktree creation no longer hangs on interactive git/ssh prompts. Forces non-interactive mode for git operations and replaces a network-dependent SSH URL test with a deterministic alternative.
+- Label color scheme refreshed and applied retroactively to existing labels, so a fabrik-managed board has a consistent visual taxonomy across all labels (not just newly created ones).
+- Documentation fixes: `--auto-upgrade` row in `USER_GUIDE.md` now reflects the v0.0.55 startup-check behavior in addition to idle-poll behavior; `FABRIK_AUTO_UPGRADE` env var table entry matches the flag description.
 
 ## Internal
 
-- gofmt alignment fixes; documentation updates for the cache lifecycle (`docs/state-machine.md` Appendix D, `docs/USER_GUIDE.md` "In-Memory Board Cache" section); follow-up review fixes for #653 and #655.
+- Org migration from `tenaciousvc/fabrik` (dev) + `shadoworg/fabrik` (release) to a single consolidated `handarbeit/fabrik` repo. Go module path is now `github.com/handarbeit/fabrik`. Marketplace, release workflow, goreleaser config, auto-upgrade target, and README install line all updated.
+- Test improvements: SeedLabels tests extended for color enforcement; notification comment tests added for the @mention feature.
+- Documentation: USER_GUIDE updated for v0.0.55 behavioral changes; @mention notification behavior documented; retroactive label color enforcement documented.
 
 ## Upgrading
 
