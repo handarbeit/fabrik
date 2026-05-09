@@ -1426,8 +1426,8 @@ func (e *Engine) removeFailedLabel(owner, repo string, issueNumber int, stageNam
 	}
 }
 
-// commitWIP commits any uncommitted changes in the worktree as a WIP commit.
-// This preserves partial work when Claude hits max_turns or errors out.
+// commitWIP commits any uncommitted changes in the worktree as a partial-progress
+// commit. This preserves partial work when Claude hits max_turns or errors out.
 func (e *Engine) commitWIP(workDir string, issueNumber int, stageName string) {
 	dirty, err := isWorkingTreeDirty(workDir)
 	if err != nil || !dirty {
@@ -1438,7 +1438,7 @@ func (e *Engine) commitWIP(workDir string, issueNumber int, stageName string) {
 	addCmd := exec.Command("git", "add", "-A")
 	addCmd.Dir = workDir
 	if _, err := addCmd.CombinedOutput(); err != nil {
-		e.logf(issueNumber, "warn", "could not stage WIP changes: %v\n", err)
+		e.logf(issueNumber, "warn", "could not stage partial changes: %v\n", err)
 		return
 	}
 
@@ -1454,15 +1454,15 @@ func (e *Engine) commitWIP(workDir string, issueNumber int, stageName string) {
 	}
 
 	// Commit
-	msg := fmt.Sprintf("WIP: %s stage incomplete (partial progress)", stageName)
+	msg := fmt.Sprintf("chore: partial %s stage progress (incomplete)", stageName)
 	commitCmd := exec.Command("git", "commit", "-m", msg)
 	commitCmd.Dir = workDir
 	if _, err := commitCmd.CombinedOutput(); err != nil {
-		e.logf(issueNumber, "warn", "could not commit WIP: %v\n", err)
+		e.logf(issueNumber, "warn", "could not commit partial progress: %v\n", err)
 		return
 	}
 
-	e.logf(issueNumber, "info", "committed WIP changes for incomplete %s stage\n", stageName)
+	e.logf(issueNumber, "info", "committed partial progress for incomplete %s stage\n", stageName)
 }
 
 // progressBaseline captures observable progress signals at the start of a stage
