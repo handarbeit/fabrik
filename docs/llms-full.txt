@@ -4314,7 +4314,7 @@ When `FABRIK_BLOCKED_ON_INPUT` is detected (and Claude ran without error):
 
 ### Incomplete Path (No Marker)
 
-1. WIP commit (unless read-only): `git add -A && git commit -m "WIP: ..."`
+1. Partial-progress commit (unless read-only): `git add -A && git commit -m "chore: partial <StageName> stage progress (incomplete)"`
 2. Branch pushed
 3. Cooldown timer: `pollSeconds * 10` seconds
 4. Lock held through cooldown
