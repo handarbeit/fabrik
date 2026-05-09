@@ -244,6 +244,7 @@ func (e *Engine) Run() error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
+	registerSighupHandler(ctx, cancel, e)
 	if e.cfg.ReadyCh != nil {
 		close(e.cfg.ReadyCh)
 	}
@@ -590,11 +591,17 @@ func (e *Engine) Run() error {
 			case <-ctx.Done():
 				e.cleanupLockedIssues()
 				e.wg.Wait()
+				if e.sighupRequested.Load() {
+					performSighupRestart(e, lockFile)
+				}
 				return nil
 			case <-ticker.C:
 				if ctx.Err() != nil {
 					e.cleanupLockedIssues()
 					e.wg.Wait()
+					if e.sighupRequested.Load() {
+						performSighupRestart(e, lockFile)
+					}
 					return nil
 				}
 				if err := doPollCycle(); err != nil {
@@ -615,11 +622,17 @@ func (e *Engine) Run() error {
 			case <-ctx.Done():
 				e.cleanupLockedIssues()
 				e.wg.Wait()
+				if e.sighupRequested.Load() {
+					performSighupRestart(e, lockFile)
+				}
 				return nil
 			case <-ticker.C:
 				if ctx.Err() != nil {
 					e.cleanupLockedIssues()
 					e.wg.Wait()
+					if e.sighupRequested.Load() {
+						performSighupRestart(e, lockFile)
+					}
 					return nil
 				}
 				if err := doPollCycle(); err != nil {

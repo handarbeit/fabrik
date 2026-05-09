@@ -2050,6 +2050,52 @@ If Claude doesn't seem to follow the skill instructions:
 - For development, use `--plugin-dir` to point at your working copy
 - Verify Claude Code version supports `--plugin-dir`
 
+### Recovering from Wedged State
+
+Cache-stale bugs can occasionally leave Fabrik's in-memory state stuck — an issue that should advance doesn't, or a label that should clear doesn't. The safest escape hatch is a SIGHUP restart, which drops all in-memory state and re-execs the same binary in place, without tearing down the terminal session or TUI.
+
+**How to trigger:**
+
+```bash
+# Find the PID (shown at startup: "[startup] fabrik PID: <N>")
+kill -HUP <fabrik-pid>
+
+# Or by name if only one instance is running
+pkill -HUP fabrik
+```
+
+**What happens:**
+
+1. Fabrik logs `[signal] received SIGHUP — restarting in place to clear in-memory state` to `fabrik.log`.
+2. In-flight Claude workers are cancelled (same drain as Ctrl-C).
+3. `fabrik:locked:<user>` labels are removed from any issues that were mid-run.
+4. The lockfile (`.fabrik/fabrik.lock`) is released.
+5. `syscall.Exec` replaces the process image in place — the PID stays the same, the parent shell and TUI remain attached, and a brief TUI redraw may occur.
+6. The new process starts with a clean in-memory cache, Store, observers, and `mayNeedWork` set.
+
+**What is cleared:**
+
+- In-memory board cache and item Store
+- Registered observers (wake-channel, mayNeedWork, invocation, stage-change, push-unblock)
+- `mayNeedWork` map
+
+**What is preserved:**
+
+- All GitHub-side state: labels, comments, PR status, stage history — these live on GitHub, not in memory
+- Rocket-reaction durability: comments that were fully processed before the SIGHUP already carry a 🚀 reaction; the new process skips them
+- Worktrees and uncommitted work in `.fabrik/worktrees/`
+
+**In-flight Claude runs:** Any Claude session interrupted by the SIGHUP drain did not emit `FABRIK_STAGE_COMPLETE`, so the new process will re-dispatch those stages. The rocket-reaction guard prevents double-posting of already-processed comments. Expect the interrupted stage to restart from its session file.
+
+**Log truncation:** `fabrik.log` is opened with `O_TRUNC` on each startup, so the pre-restart log is cleared. If you need the pre-restart log for diagnostics, copy it first:
+
+```bash
+cp .fabrik/fabrik.log .fabrik/fabrik-pre-restart.log
+kill -HUP <fabrik-pid>
+```
+
+**Windows:** SIGHUP is a Unix signal. This feature is silently absent on Windows.
+
 ---
 
 # Fabrik Issue State Machine
