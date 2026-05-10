@@ -1805,6 +1805,27 @@ The probe loop:
 
 `FetchItemDetails` writes `ItemDeepFetched` to the Store, updating `LastSeenSourceUpdatedAt` to the new `effectiveUpdatedAt`. The candidates loop that runs later in the same poll cycle sees these items as fresh (via `IsItemCacheFresh`) and skips duplicate fetches.
 
+**Terminal-item skip**
+
+An item is **terminal** once Fabrik has confirmed it has nothing left to do: its status is a cleanup stage (e.g. `Done`), its labels include `stage:<StageName>:complete`, and no transient lifecycle label (`fabrik:awaiting-review`, `fabrik:awaiting-ci`, `fabrik:awaiting-input`, `fabrik:rebase-needed`, `fabrik:bot-reprompted`) or lock label (`fabrik:locked:*`) is present.
+
+Terminal state is stored as a `Terminal bool` field in `ItemState` and set/cleared via the `TerminalFlagSet` mutation.
+
+**When the flag is set**: after a successful `FetchItemDetails` call in either `runProbeAndDeepFetch` or the admit pass, if `isTerminalPredicate(labels, status, stages)` returns true. Logged once (first-time only) at `[poll] terminal flag set`.
+
+**When the flag is cleared**:
+- `applyProbeItem` clears `Terminal` whenever the item's `Status` changes (probe shows the item left the cleanup column).
+- `applyShallowItem` clears it on any status change during reconciliation.
+- `applyProjectV2ItemEdited` (Layer 2 status sweep) clears it when the board status changes.
+- `LocalStatusUpdated` clears it when the engine itself changes the item's status.
+- The probe loop's terminal gate and the admit pass terminal gate each clear the flag explicitly and log `[poll] terminal flag cleared (status drifted to ...)` when the probe shows the item in a non-cleanup stage.
+
+**Probe-loop skip**: the terminal gate in `runProbeAndDeepFetch` runs **before** `ProbeBoardItemUpdated` is applied (ordering constraint: the cached `Terminal` flag must be read before `applyProbeItem` would clear it on a status change). If `Terminal == true` and the probe's status is still a cleanup stage, the item is skipped without any deep-fetch. If `Terminal == true` but the probe shows a non-cleanup status, the flag is cleared and the item falls through to normal probe processing.
+
+**Admit-pass skip**: the same gate in the per-poll admit pass (before the `cycleSet` check) unconditionally skips items that are terminal and still in the cleanup stage. This guard is redundant for the normal probe path (where `runProbeAndDeepFetch` already handled the item) but covers non-cache and paused-cache modes.
+
+**Cold-start (startup scan)**: after `runStartupTransientLabelScan` removes stale transient labels, `runStartupTerminalScan` iterates all items in the Store and applies `TerminalFlagSet{Terminal: true}` to any that pass the terminal predicate. This uses bootstrap label data already present in the Store — no GitHub API call is needed. On a 362-item board with 340 terminal Done items, this eliminates ~340 deep-fetches on the first poll cycle.
+
 **`Reconcile` is now Bootstrap-path only**: `cacheImpl.Reconcile(board)` is only called during Bootstrap (first poll, unbootstrapped cache) and during drift-recovery in webhook mode (see below). It is no longer called on every poll cycle.
 
 **Full reconcile — drift-recovery (webhook mode)**
