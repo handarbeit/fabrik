@@ -586,6 +586,19 @@ type CommentProcessed struct {
 func (CommentProcessed) isMutation()       {}
 func (m CommentProcessed) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// DoneCompletedRecorded sets DoneCompletedAt for an item to record when the
+// stage:Done:complete label was applied. Set-once: applying this mutation when
+// DoneCompletedAt is already non-zero is a no-op. At is caller-supplied so
+// tests can inject deterministic timestamps.
+type DoneCompletedRecorded struct {
+	Repo   string
+	Number int
+	At     time.Time
+}
+
+func (DoneCompletedRecorded) isMutation()       {}
+func (m DoneCompletedRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // StageLastAttemptCleared zeroes LastAttemptAt for a stage so it re-runs promptly.
 // Used by unblockAwaitingInput to reset the dispatch cooldown after user input.
 type StageLastAttemptCleared struct {

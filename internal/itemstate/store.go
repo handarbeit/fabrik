@@ -435,6 +435,12 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.StageState.ProcessedComments[v.CommentID] = v.At
 		return StageStateChanged
 
+	case DoneCompletedRecorded:
+		if item.DoneCompletedAt.IsZero() {
+			item.DoneCompletedAt = v.At
+		}
+		return DoneCompletionChanged
+
 	case CooldownRecorded:
 		if item.CooldownAt == nil {
 			item.CooldownAt = make(map[string]time.Time)

@@ -55,6 +55,10 @@ const (
 	// TerminalFlagSet. Store-internal clears (when status changes) piggyback on
 	// StatusChanged and do not emit TerminalChanged.
 	TerminalChanged
+	// DoneCompletionChanged indicates DoneCompletedAt was set for the first time
+	// (set-once semantics). The archive path is poll-driven, so this flag is not
+	// in wakeChFlags; it exists for observability.
+	DoneCompletionChanged
 )
 
 // Change describes what fields a mutation altered. Delivered to every Observer

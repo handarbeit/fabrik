@@ -618,6 +618,9 @@ func TestChangeFlagsCoverage(t *testing.T) {
 		{BaseBranchChanged, "BaseBranchChanged", func(s *Store, n int) Mutation {
 			return BaseBranchWarnRecorded{Repo: testRepo, Number: n, Branch: "b"}
 		}},
+		{DoneCompletionChanged, "DoneCompletionChanged", func(s *Store, n int) Mutation {
+			return DoneCompletedRecorded{Repo: testRepo, Number: n, At: time.Unix(9000, 0)}
+		}},
 	}
 
 	for i, c := range cases {
@@ -852,6 +855,45 @@ func TestProbeBoardItemUpdatedNoChangeFlagsWhenSame(t *testing.T) {
 		if c.Fields&(StateChanged|StatusChanged|LabelsChanged) != 0 {
 			t.Errorf("unexpected change flags %b when probe matches existing state", c.Fields)
 		}
+	}
+}
+
+// ---- DoneCompletedRecorded ----
+
+func TestDoneCompletedRecorded_SetsTimestamp(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	at := time.Unix(10000, 0)
+	applyExpect(t, s, DoneCompletedRecorded{Repo: testRepo, Number: 1, At: at}, DoneCompletionChanged)
+	st := getItem(t, s, testRepo, 1)
+	if !st.DoneCompletedAt.Equal(at) {
+		t.Errorf("DoneCompletedAt = %v; want %v", st.DoneCompletedAt, at)
+	}
+}
+
+func TestDoneCompletedRecorded_SetOnce(t *testing.T) {
+	// Second apply with a different At must be a no-op (set-once semantics).
+	s := newStoreWithItem(t, testRepo, 1)
+	first := time.Unix(10000, 0)
+	s.Apply(DoneCompletedRecorded{Repo: testRepo, Number: 1, At: first})
+
+	var fired int
+	s.Subscribe(ObserverFunc(func(c Change, snap Snapshot) { fired++ }))
+
+	second := time.Unix(99999, 0)
+	_, changes, err := s.Apply(DoneCompletedRecorded{Repo: testRepo, Number: 1, At: second})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Errorf("second DoneCompletedRecorded returned %d changes; want 0 (set-once)", len(changes))
+	}
+	if fired != 0 {
+		t.Errorf("observer fired %d times for set-once no-op; want 0", fired)
+	}
+	// Verify the original timestamp was preserved.
+	st := getItem(t, s, testRepo, 1)
+	if !st.DoneCompletedAt.Equal(first) {
+		t.Errorf("DoneCompletedAt changed to %v; want original %v", st.DoneCompletedAt, first)
 	}
 }
 

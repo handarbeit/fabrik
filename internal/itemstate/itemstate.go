@@ -61,6 +61,11 @@ type ItemState struct {
 	StageState StageState
 	// CooldownAt maps reason → expiry time (e.g. "retry", "review-blocked", "ci-await").
 	CooldownAt map[string]time.Time
+	// DoneCompletedAt is the time when the stage:Done:complete label was successfully
+	// applied. Set once; subsequent mutations are no-ops (set-once semantics).
+	// Zero until the Done stage completes. On restart, backfilled from item.UpdatedAt
+	// by archiveDoneCompleteItems.
+	DoneCompletedAt time.Time
 	// Worker is present when a worker is in-flight for this item.
 	Worker *WorkerHandle
 

@@ -194,6 +194,12 @@ func (s Snapshot) CommentProcessed(commentID string) time.Time {
 	return s.state.StageState.ProcessedComments[commentID]
 }
 
+// DoneCompletedAt returns the time when the stage:Done:complete label was applied,
+// or zero if not yet recorded.
+func (s Snapshot) DoneCompletedAt() time.Time {
+	return s.state.DoneCompletedAt
+}
+
 // ---- deep-copy helpers ----
 
 func copyStrings(src []string) []string {
