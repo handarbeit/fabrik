@@ -438,8 +438,9 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 	case DoneCompletedRecorded:
 		if item.DoneCompletedAt.IsZero() {
 			item.DoneCompletedAt = v.At
+			return DoneCompletionChanged
 		}
-		return DoneCompletionChanged
+		return 0
 
 	case CooldownRecorded:
 		if item.CooldownAt == nil {
