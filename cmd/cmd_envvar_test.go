@@ -139,6 +139,25 @@ func TestExecute_EnvTUIFalse(t *testing.T) {
 	executeAndStop(t)
 }
 
+func TestExecute_EnvSymlinkEnv(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	resetFlags()
+	t.Setenv("FABRIK_SYMLINK_ENV", "true")
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+	executeAndStop(t)
+}
+
+func TestExecute_FlagSymlinkEnv(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir, "--symlink-env"}
+	executeAndStop(t)
+}
+
 func TestExecute_StreamFilterSubcommand(t *testing.T) {
 	resetFlags()
 	r, w, _ := os.Pipe()
