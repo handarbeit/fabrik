@@ -133,6 +133,9 @@ func (m *testGitHubUpgradeClient) FetchProjectUpdatedAt(projectID string) (time.
 func (m *testGitHubUpgradeClient) LookupIssueProjectItem(projectID, repo string, issueNumber int) (string, string, error) {
 	return "", "", nil
 }
+func (m *testGitHubUpgradeClient) ProbeProjectBoard(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+	return nil, "", nil
+}
 func (m *testGitHubUpgradeClient) DeleteForwardingHooks(owner, repo string) error { return nil }
 
 // ── upgrade ───────────────────────────────────────────────────────────────────
