@@ -93,6 +93,10 @@ func (s Snapshot) Labels() []string { return copyStrings(s.state.Labels) }
 // IsClosed reports whether the issue is closed.
 func (s Snapshot) IsClosed() bool { return s.state.IsClosed }
 
+// IsTerminal reports whether the terminal flag is set for this item.
+// When true, the poll loop skips deep-fetch as long as status remains in Done.
+func (s Snapshot) IsTerminal() bool { return s.state.Terminal }
+
 // Worker returns the active WorkerHandle, or nil if no worker is in-flight.
 func (s Snapshot) Worker() *WorkerHandle {
 	if s.state.Worker == nil {

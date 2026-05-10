@@ -526,6 +526,19 @@ type BaseBranchWarnRecorded struct {
 func (BaseBranchWarnRecorded) isMutation()       {}
 func (m BaseBranchWarnRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// TerminalFlagSet sets or clears the Terminal flag on an item. When Terminal is
+// true, the poll loop skips deep-fetch for this item as long as its status
+// remains in a cleanup (Done) stage. When Terminal is false, normal deep-fetch
+// evaluation resumes.
+type TerminalFlagSet struct {
+	Repo     string
+	Number   int
+	Terminal bool
+}
+
+func (TerminalFlagSet) isMutation()       {}
+func (m TerminalFlagSet) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // CIMergePendingStarted records that CI-gate merge polling has begun for the item's
 // linked PR. Sets LinkedPRState.CIMergePendingSince to At.
 // Replaces engine.ciMergePendingSince[iKey] = time.Now().
