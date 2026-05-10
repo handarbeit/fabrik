@@ -1037,6 +1037,72 @@ func TestArchiveDoneCompleteItems_SkipsNonCleanupStages(t *testing.T) {
 	}
 }
 
+// TestArchiveDoneCompleteItems_SkipsZeroUpdatedAt verifies that Done+complete items
+// with a zero UpdatedAt are not archived because there is no timestamp anchor for
+// the backfill path.
+func TestArchiveDoneCompleteItems_SkipsZeroUpdatedAt(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	eng.cfg.Stages = testStagesWithCleanup()
+
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_test",
+		Items: []gh.ProjectItem{
+			{
+				Number: 40,
+				ItemID: "PVTI_40",
+				Status: "Done",
+				Labels: []string{"stage:Done:complete"},
+				// UpdatedAt is zero — no anchor for backfill; must be skipped
+			},
+		},
+	}
+
+	eng.archiveDoneCompleteItems(board.ProjectID, board.Items)
+
+	if len(client.archiveProjectItemCalls) != 0 {
+		t.Errorf("expected no ArchiveProjectItem calls for zero UpdatedAt, got %d", len(client.archiveProjectItemCalls))
+	}
+}
+
+// TestArchiveDoneCompleteItems_StorePrimedTimestampTakesPrecedence verifies that
+// when DoneCompletedAt is already in the store (set by item.go at label-application
+// time), the stored timestamp governs the grace period rather than item.UpdatedAt.
+// An item with an old UpdatedAt but a recent store-primed DoneCompletedAt must NOT
+// be archived.
+func TestArchiveDoneCompleteItems_StorePrimedTimestampTakesPrecedence(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	eng.cfg.Stages = testStagesWithCleanup()
+
+	// Simulate item.go having set DoneCompletedAt recently (< 24h).
+	recentAt := time.Now().Add(-1 * time.Hour)
+	eng.store.Apply(itemstate.DoneCompletedRecorded{
+		Repo:   "owner/repo",
+		Number: 50,
+		At:     recentAt,
+	})
+
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_test",
+		Items: []gh.ProjectItem{
+			{
+				Number:    50,
+				ItemID:    "PVTI_50",
+				Status:    "Done",
+				Labels:    []string{"stage:Done:complete"},
+				UpdatedAt: time.Now().Add(-48 * time.Hour), // old, but store has recent DoneCompletedAt
+			},
+		},
+	}
+
+	eng.archiveDoneCompleteItems(board.ProjectID, board.Items)
+
+	if len(client.archiveProjectItemCalls) != 0 {
+		t.Errorf("expected no ArchiveProjectItem calls when store DoneCompletedAt is within grace period, got %d", len(client.archiveProjectItemCalls))
+	}
+}
+
 // TestCruiseCatchUp_NonValidate_Advances verifies that an item with fabrik:cruise
 // sitting in a completed non-Validate stage is advanced by the catch-up loop.
 func TestCruiseCatchUp_NonValidate_Advances(t *testing.T) {

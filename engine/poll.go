@@ -1461,15 +1461,11 @@ doneDispatching:
 	// Sweep transient lifecycle labels from closed issues every poll cycle (#617).
 	e.cleanupClosedIssueTransientLabels(board)
 
-	// Archive any Done+complete items (lazy migration + ongoing cleanup).
-	// Uses shallow board data — labels(first:15) is sufficient to see
-	// stage:Done:complete. Idempotent: archived items disappear from board
-	// results, so this converges to a no-op after legacy items are cleaned up.
-	// Auto-archive disabled — too aggressive in practice, removing items
-	// before users can see what completed. Re-enable once the timing logic
-	// is reworked to track when the Done stage actually completed rather
-	// than relying on UpdatedAt.
-	// e.archiveDoneCompleteItems(board.ProjectID, board.Items)
+	// Archive Done+complete items after the 24h grace period. Grace period is
+	// anchored on DoneCompletedAt (set when the stage:Done:complete label is
+	// applied), not item.UpdatedAt. Legacy items without a stored timestamp are
+	// backfilled from item.UpdatedAt on first observation.
+	e.archiveDoneCompleteItems(board.ProjectID, board.Items)
 
 	// Report cumulative token consumption only when new cost has accrued since
 	// the last print, to avoid repeated log noise on idle polls.
