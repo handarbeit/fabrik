@@ -695,6 +695,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// Write context files after any stash so they are present for Claude but
 	// not captured in the stash. Errors are non-fatal.
 	e.writeContextFiles(item, stage, workDir, false)
+	e.symlinkEnvIfEnabled(item.Number, workDir)
 
 	// Invoke Claude Code in the issue's worktree
 	modelOverride := e.extractModelOverride(item.Number, item.Labels)
