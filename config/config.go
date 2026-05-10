@@ -27,6 +27,7 @@ type ProjectConfig struct {
 	GitSSH        bool     `yaml:"git_ssh"`
 	TUI           *bool    `yaml:"tui"`
 	DebugOutput   bool     `yaml:"debug_output"`
+	SymlinkEnv    bool     `yaml:"symlink_env"`
 	Version       string   `yaml:"version"`
 	Webhooks      bool     `yaml:"webhooks"`
 	WebhookPort   *int     `yaml:"webhook_port"`
