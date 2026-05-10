@@ -3,6 +3,7 @@ package engine
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -103,4 +104,62 @@ func TestSymlinkEnvIfEnabled_Disabled(t *testing.T) {
 	if _, err := os.Lstat(dst); !os.IsNotExist(err) {
 		t.Errorf("expected no .env when SymlinkEnv disabled, got: %v", err)
 	}
+}
+
+func TestEnsureEnvExcluded_WritesEntry(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+
+	eng := NewWithDeps(Config{SymlinkEnv: true}, nil, nil, nil)
+	eng.fabrikDir = repoDir
+	eng.ensureEnvExcluded(1, repoDir)
+
+	// Verify .env appears in the exclude file.
+	out, err := readGitExclude(t, repoDir)
+	if err != nil {
+		t.Fatalf("reading exclude: %v", err)
+	}
+	if !strings.Contains(out, ".env") {
+		t.Errorf("expected .env in git exclude, got:\n%s", out)
+	}
+}
+
+func TestEnsureEnvExcluded_Idempotent(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+
+	eng := NewWithDeps(Config{SymlinkEnv: true}, nil, nil, nil)
+	eng.fabrikDir = repoDir
+	eng.ensureEnvExcluded(1, repoDir)
+	eng.ensureEnvExcluded(1, repoDir)
+
+	out, err := readGitExclude(t, repoDir)
+	if err != nil {
+		t.Fatalf("reading exclude: %v", err)
+	}
+	count := strings.Count(out, ".env\n")
+	if count != 1 {
+		t.Errorf("expected exactly one .env entry, got %d:\n%s", count, out)
+	}
+}
+
+func TestEnsureEnvExcluded_Disabled(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+
+	eng := NewWithDeps(Config{SymlinkEnv: false}, nil, nil, nil)
+	eng.fabrikDir = repoDir
+	eng.ensureEnvExcluded(1, repoDir)
+
+	out, _ := readGitExclude(t, repoDir)
+	if strings.Contains(out, ".env") {
+		t.Errorf("expected no .env in exclude when disabled, got:\n%s", out)
+	}
+}
+
+// readGitExclude returns the contents of the per-repo git exclude file.
+func readGitExclude(t *testing.T, repoDir string) (string, error) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(repoDir, ".git", "info", "exclude"))
+	return string(data), err
 }
