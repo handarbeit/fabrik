@@ -427,6 +427,9 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			if e.webhookMgr != nil {
 				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+completeLabel)
 			}
+			if _, _, applyErr := e.store.Apply(itemstate.DoneCompletedRecorded{Repo: repoStr, Number: item.Number, At: time.Now()}); applyErr != nil {
+				e.logf(item.Number, "warn", "could not record DoneCompletedAt: %v\n", applyErr)
+			}
 		}
 
 		// Remove fabrik:extend-turns at cleanup (Done) stage — this is the designated
