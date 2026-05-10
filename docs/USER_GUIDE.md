@@ -412,6 +412,12 @@ user: your-github-username
 # or prompt issues. Files are named by issue number and stage.
 # debug_output: false
 
+# When true, creates a relative symlink at <worktree>/.env pointing to the
+# fabrikDir .env file whenever a worktree is set up. Lets stage code read
+# credentials (e.g. ANTHROPIC_API_KEY) without copying secrets. No-op when
+# the source .env is absent; never overwrites an existing .env in the worktree.
+# symlink_env: false
+
 # Project version shown in the TUI footer. Auto-inferred from package.json,
 # go.mod (returns module path, not semver), Cargo.toml, or pyproject.toml.
 # Set explicitly to override auto-inference (e.g., version: "1.2.0").
@@ -464,6 +470,7 @@ FABRIK_USER=my-personal-username
 | `--max-rebase-cycles` | Maximum number of rebase re-invocation cycles per issue before pausing (0 = use default of 3; also `FABRIK_MAX_REBASE_CYCLES`) | `0` (3 cycles) |
 | `--claude-wait-delay` | Seconds to wait after Claude exits before recovering buffered output; prevents worker goroutines from blocking when Claude uses `run_in_background` or the Monitor tool, which can hold stdout open after the main Claude process exits (0 = use built-in default of 30 sec; also `FABRIK_CLAUDE_WAIT_DELAY`) | `0` (30 sec) |
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` | `false` |
+| `--symlink-env` | Create a relative symlink at `<worktree>/.env` pointing to the fabrikDir `.env` file at worktree setup time. Enables stage code to read credentials (e.g. `ANTHROPIC_API_KEY`) from `.env` without copying secrets. No-op when source `.env` is absent; never overwrites an existing `.env` in the worktree. Also `FABRIK_SYMLINK_ENV` | `false` |
 
 ### Environment Variables
 
@@ -484,6 +491,7 @@ FABRIK_USER=my-personal-username
 | `FABRIK_TUI` | `tui` | Disable TUI dashboard (`false`/`0`/`no`) | `true` |
 | `FABRIK_PLUGIN_DIR` | *(no config.yaml key)* | Override plugin directory | `.fabrik/plugin/` |
 | `FABRIK_DEBUG_OUTPUT` | `debug_output` | Save raw Claude output for debugging | `false` |
+| `FABRIK_SYMLINK_ENV` | `symlink_env` | Symlink fabrikDir `.env` into each worktree at setup time (`true`/`1`/`yes`) — see `--symlink-env` | `false` |
 | `FABRIK_REVIEW_WAIT_TIMEOUT` | *(no config.yaml key)* | Minutes to wait per review cycle at the review gate (whether waiting for requested reviewers to submit or for at least one review to exist) before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 15) | `15` |
 | `FABRIK_MAX_REVIEW_CYCLES` | *(no config.yaml key)* | Maximum number of review re-invocation cycles per issue before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 5) | `5` |
 | `FABRIK_CI_WAIT_TIMEOUT` | *(no config.yaml key)* | Minutes to wait for CI checks to pass before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 30) | `30` |
