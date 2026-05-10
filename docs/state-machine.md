@@ -979,7 +979,7 @@ Closed issues are normally skipped by `itemMayNeedWork()` and `itemNeedsWork()`.
 
 **Stale lock cleanup:** `cleanupClosedIssueLocks()` runs every poll cycle and removes `fabrik:locked:<user>` labels from any closed issues on the board. This handles stale locks left when an issue was closed while a stage was in-flight.
 
-**Transient label sweep:** `cleanupClosedIssueTransientLabels()` runs every poll cycle (immediately after `cleanupClosedIssueLocks`) and removes the following transient lifecycle labels from any closed issues: `fabrik:awaiting-review`, `fabrik:awaiting-ci`, `fabrik:awaiting-input`, `fabrik:rebase-needed`, `fabrik:bot-reprompted`. These labels have no meaning once an issue is closed and leaving them behind can cause confusion. The sweep is idempotent (treats `ErrNotFound` as success) and non-fatal (API errors are logged as warnings and processing continues). Operates on shallow board data — labels beyond position 30 in the GraphQL `labels(first:30)` fetch may be missed, but this is acceptable under ADR 021's housekeeping-on-shallow-data exemption (#617).
+**Transient label sweep:** `cleanupClosedIssueTransientLabels()` runs every poll cycle (immediately after `cleanupClosedIssueLocks`) and removes the following transient lifecycle labels from any closed issues: `fabrik:awaiting-review`, `fabrik:awaiting-ci`, `fabrik:awaiting-input`, `fabrik:rebase-needed`, `fabrik:bot-reprompted`. These labels have no meaning once an issue is closed and leaving them behind can cause confusion. The sweep is idempotent (treats `ErrNotFound` as success) and non-fatal (API errors are logged as warnings and processing continues). Operates on cache data from `e.readClient.FetchProjectBoard(...)` — labels come from deep-fetched store state (populated by `FetchItemDetails`) rather than the shallow board query's `labels(first:30)` limit, so all labels are visible to the sweep. A one-shot startup scan (`runStartupTransientLabelScan`) runs after the first successful poll to handle stale labels on closed issues that may have been missed during a prior crash — it scans the Store directly, no extra GitHub call needed (Bootstrap already populated label data).
 
 ### 7.5 In-Memory vs Durable State
 
@@ -1679,7 +1679,7 @@ The cache is bootstrapped from a fresh GitHub `FetchProjectBoard` call. Two path
 
 1. **Webhook startup path** — when `--webhooks` is enabled, immediately after `wm.Start()` succeeds (listener bound and subprocess launched), the engine calls `e.client.FetchProjectBoard(...)` and passes the result to `cacheImpl.Bootstrap(board)`. This pre-bootstrap closes the gap between webhook subprocess start and the first poll cycle, so deltas don't land in an empty cache.
 
-2. **First-poll path** — every `poll()` cycle starts with a shallow `e.client.FetchProjectBoard(...)` call. If `cacheImpl.ProjectID() == ""` (cache not yet bootstrapped — e.g., webhooks disabled, or webhook-startup bootstrap failed), the result is passed to `cacheImpl.Bootstrap(board)`. On subsequent polls (cache already bootstrapped), the same fetch is passed to `cacheImpl.Reconcile(board)` instead — see D.4.
+2. **First-poll path** — every `poll()` cycle starts with a shallow `e.client.FetchProjectBoard(...)` call. If `cacheImpl.ProjectID() == ""` (cache not yet bootstrapped — e.g., webhooks disabled, or webhook-startup bootstrap failed), the result is passed to `cacheImpl.Bootstrap(board)`. On subsequent polls (cache already bootstrapped), the shallow full-board fetch is not repeated — the cheaper `runProbeAndDeepFetch` probe path replaces it; see D.4.
 
 Bootstrap populates `items`, `shaToKey`, and `itemIDToKey` from the full board snapshot. Deep fields (comments, linked PR data) are not populated at bootstrap; they are fetched lazily on first `FetchItemDetails` call.
 
@@ -1783,11 +1783,29 @@ After a successful batch step, `e.lastProjectUpdatedAt` is updated to the new ti
 
 **Gate inactive when**: `e.readClient` is not a `*boardcache.CacheImpl` (non-cache mode), or `cacheImpl.ProjectID()` is empty (bootstrap not yet complete).
 
-**Per-poll baseline reconcile**
+**Per-poll probe (`runProbeAndDeepFetch`)**
 
-After the Layer 2 status gate above, every `poll()` cycle calls `e.client.FetchProjectBoard(...)` directly (bypassing the cache) and passes the result to `cacheImpl.Reconcile(board)` — or `cacheImpl.Bootstrap(board)` on the first poll when the cache hasn't been bootstrapped yet (see D.1). This is the universal baseline freshener: it flows shallow board state (notably `IsClosed`, `Status`, `Labels`, `UpdatedAt`) into the Store on every poll regardless of webhook configuration, firing observer notifications (`StateChanged`, `LabelsChanged`, `BlockedByChanged`, etc.) so reactive observers like `PushUnblockObserver` operate identically with or without webhooks.
+After the Layer 2 status gate above, every `poll()` cycle on a bootstrapped cache calls `runProbeAndDeepFetch(cacheImpl)`. This replaces the previous unconditional full-shallow `FetchProjectBoard` + `Reconcile` call, reducing per-poll GraphQL cost ~5–10× on idle boards by eliminating the `labels(first:30)` and `closedByPullRequestsReferences(first:5)` nested connections.
 
-The per-poll Reconcile is what makes the cache the unified source of truth: without it, `PushUnblockObserver` and other Store-mutation observers were structurally dormant when webhooks were disabled, because no path in the polling-only loop wrote shallow board state into the Store.
+The probe loop:
+
+1. Calls `e.client.ProbeProjectBoard(...)` — fetches only scalar fields per item plus `closedByPullRequestsReferences(first:1)` for linked-PR drift detection. No `labels` connection at any nesting level.
+
+2. For each probe item, computes `effectiveUpdatedAt = max(issue.updatedAt, projectItem.updatedAt, linkedPR.updatedAt)`.
+
+3. **New item** (not in store): seeds minimal state via `IssueOpened`, then calls `FetchItemDetails` unconditionally to populate labels and deep fields.
+
+4. **Linkage drift** (`probe.linkedPRNumber ≠ cached LinkedPR.Number`): applies `DeepFetchInvalidated` to reset `LastSeenSourceUpdatedAt`, then falls through to the staleness check.
+
+5. Applies `ProbeBoardItemUpdated` (updates `IsClosed`, `State`, `IsPR`, `Status`, `UpdatedAt`; **explicitly skips `Labels`** to preserve the cached label set populated by prior deep-fetches or webhook deltas).
+
+6. **Staleness check**: calls `cacheImpl.IsItemCacheFresh(repo, number, effectiveUpdatedAt)`. If the cache is fresh (cached `LastSeenSourceUpdatedAt >= effectiveUpdatedAt`), continues without GitHub traffic. If stale, calls `FetchItemDetails` to refresh.
+
+7. After the item loop, removes from the store any items no longer present in the probe result (they left the board). A guard skips removal when the probe returns 0 items and the cache is non-empty (transient indexer hiccup).
+
+`FetchItemDetails` writes `ItemDeepFetched` to the Store, updating `LastSeenSourceUpdatedAt` to the new `effectiveUpdatedAt`. The candidates loop that runs later in the same poll cycle sees these items as fresh (via `IsItemCacheFresh`) and skips duplicate fetches.
+
+**`Reconcile` is now Bootstrap-path only**: `cacheImpl.Reconcile(board)` is only called during Bootstrap (first poll, unbootstrapped cache) and during drift-recovery in webhook mode (see below). It is no longer called on every poll cycle.
 
 **Full reconcile — drift-recovery (webhook mode)**
 
@@ -1823,7 +1841,7 @@ On drift recovery, `LightReconcile` returns the fresh board it already fetched; 
 
 The `--board-cache` flag has been removed. `CacheImpl` is now wired unconditionally for production runs. The cache is freshened by:
 
-1. **Per-poll baseline Reconcile** (always active) — see D.4
+1. **Per-poll probe (`runProbeAndDeepFetch`)** (always active on bootstrapped cache) — see D.4
 2. **Layer 2 status sweep** (always active) — see D.4 and D.7
 3. **Webhook deltas** (when `--webhooks` is enabled) — see D.2
 4. **Light-reconcile drift recovery** (when `--webhooks` is enabled) — see D.5
