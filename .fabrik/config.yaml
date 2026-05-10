@@ -30,3 +30,7 @@ board_cache_mode: in-memory
 tui: true
 terminal: ghostty
 # debug_output: false
+# symlink_env: false    # When true, creates a relative symlink at <worktree>/.env pointing to the fabrikDir .env.
+#                       # Enables worktree-based stages to pick up credentials (e.g. ANTHROPIC_API_KEY) from .env.
+#                       # No-op when source .env is absent; never overwrites an existing .env in the worktree.
+#                       # Also: --symlink-env flag / FABRIK_SYMLINK_ENV env var.
