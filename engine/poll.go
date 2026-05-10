@@ -795,10 +795,28 @@ func (e *Engine) archiveDoneCompleteItems(projectID string, items []gh.ProjectIt
 		if !hasComplete {
 			continue
 		}
-		// Let completed items stay visible for 24 hours so users can see
-		// what finished while they were away. If UpdatedAt is unknown (zero),
-		// don't archive — we can't tell how old it is.
-		if item.UpdatedAt.IsZero() || time.Since(item.UpdatedAt) < archiveGracePeriod {
+		// If UpdatedAt is zero we have no timestamp anchor for the backfill path;
+		// defer to the next poll cycle when it can be re-evaluated.
+		if item.UpdatedAt.IsZero() {
+			continue
+		}
+		// Apply-backfill pattern: apply DoneCompletedRecorded with item.UpdatedAt as
+		// the fallback anchor. For items already in the store with DoneCompletedAt set
+		// (applied in item.go at label-application time), the set-once guard makes this
+		// a no-op and the returned snapshot carries the already-correct timestamp. For
+		// legacy items and restarts, this sets DoneCompletedAt = item.UpdatedAt on first
+		// observation, establishing the grace-period anchor without a separate store.Get.
+		repoStr := itemOwnerRepoString(item, e.defaultRepo())
+		snap, _, applyErr := e.store.Apply(itemstate.DoneCompletedRecorded{
+			Repo:   repoStr,
+			Number: item.Number,
+			At:     item.UpdatedAt,
+		})
+		if applyErr != nil {
+			e.logf(item.Number, "warn", "could not record DoneCompletedAt for archive check: %v\n", applyErr)
+			continue
+		}
+		if snap.DoneCompletedAt().IsZero() || time.Since(snap.DoneCompletedAt()) < archiveGracePeriod {
 			continue
 		}
 		if err := e.client.ArchiveProjectItem(projectID, item.ItemID); err != nil {
