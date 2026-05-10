@@ -135,6 +135,22 @@ func TestLoadProjectConfig_MissingFile(t *testing.T) {
 	}
 }
 
+func TestLoadProjectConfig_SymlinkEnvDefaultFalse(t *testing.T) {
+	dir := t.TempDir()
+	chdir(t, dir)
+	if err := os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("owner: org\n"), 0644)
+	pc, err := LoadProjectConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pc.SymlinkEnv {
+		t.Error("symlink_env: want false by default")
+	}
+}
+
 func TestLoadProjectConfig_ValidYAML(t *testing.T) {
 	dir := t.TempDir()
 	chdir(t, dir)
@@ -154,6 +170,7 @@ yolo: true
 auto_upgrade: true
 tui: true
 debug_output: true
+symlink_env: true
 version: "2.0.0"
 `
 	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte(yaml), 0644)
@@ -194,6 +211,9 @@ version: "2.0.0"
 	}
 	if !pc.DebugOutput {
 		t.Error("debug_output: want true")
+	}
+	if !pc.SymlinkEnv {
+		t.Error("symlink_env: want true")
 	}
 	if pc.Version != "2.0.0" {
 		t.Errorf("version: want 2.0.0, got %q", pc.Version)
