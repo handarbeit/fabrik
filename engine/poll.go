@@ -1552,7 +1552,7 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 		if s.LinkedPR != nil {
 			cachedPRNum = s.LinkedPR.Number
 		}
-		if pi.LinkedPRNumber != 0 && pi.LinkedPRNumber != cachedPRNum {
+		if pi.LinkedPRNumber != cachedPRNum {
 			e.logf(pi.Number, "cache", "probe: linkage drift (was PR #%d, now PR #%d) — invalidating deep cache\n",
 				cachedPRNum, pi.LinkedPRNumber)
 			e.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: pi.Number})
@@ -1576,6 +1576,7 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 			Status:    pi.Status,
 			Repo:      repo,
 			UpdatedAt: pi.EffectiveUpdatedAt,
+			Title:     s.Title, // FetchItemDetails doesn't fetch title; preserve cached value
 		}
 		if fetchErr := e.readClient.FetchItemDetails(&minimal); fetchErr != nil {
 			e.logf(pi.Number, "warn", "probe: deep-fetch for stale item failed: %v\n", fetchErr)
