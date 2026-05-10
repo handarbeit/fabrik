@@ -146,6 +146,24 @@ type ReleaseAsset struct {
 	Size               int64  `json:"size"`
 }
 
+// BoardProbeItem is the per-item result from ProbeProjectBoard. It contains
+// only scalar identity fields — no labels or full comment history — to minimise
+// GraphQL cost on idle polls. effectiveUpdatedAt is max(content.updatedAt,
+// projectItem.updatedAt, linkedPR.updatedAt); used for cache staleness checks.
+type BoardProbeItem struct {
+	ItemID             string
+	ContentID          string
+	Number             int
+	IsPR               bool
+	IsClosed           bool
+	State              string
+	Repo               string
+	EffectiveUpdatedAt time.Time
+	LinkedPRNumber     int
+	LinkedPRUpdatedAt  time.Time
+	Status             string
+}
+
 // HasReaction returns true if the comment has at least one reaction of the given type.
 func (c Comment) HasReaction(content string) bool {
 	for _, r := range c.Reactions {
