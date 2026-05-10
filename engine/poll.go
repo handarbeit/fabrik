@@ -582,6 +582,7 @@ func (e *Engine) Run() error {
 	// Skipped on poll failure to avoid scanning an empty/partial store.
 	if firstPollErr == nil {
 		e.runStartupCleanup()
+		e.runStartupTransientLabelScan()
 	}
 
 	// Start background stale-worker detector. Scans for workers whose heartbeat
@@ -1596,6 +1597,59 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 	if deepFetched > 0 {
 		e.logf(0, "cache", "probe: deep-fetched %d item(s)\n", deepFetched)
 	}
+}
+
+// runStartupTransientLabelScan is a one-shot recovery pass that runs after the
+// first successful poll. It scans the Store for closed issues that still carry
+// transient lifecycle labels — a condition that can occur when an issue closes
+// mid-stage during a prior crash. Bootstrap populates the Store with full label
+// data from the shallow board fetch, so this scan is accurate without any extra
+// GitHub API call.
+func (e *Engine) runStartupTransientLabelScan() {
+	snaps := e.store.All()
+	if len(snaps) == 0 {
+		return
+	}
+
+	// Build a synthetic board containing only closed items that carry at least
+	// one transient lifecycle label or a lock label. The cleanup helpers operate
+	// on *gh.ProjectBoard items so we pass only the relevant subset.
+	transientSet := make(map[string]bool, len(transientLifecycleLabels))
+	for _, l := range transientLifecycleLabels {
+		transientSet[l] = true
+	}
+	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
+
+	var items []gh.ProjectItem
+	for _, snap := range snaps {
+		if !snap.IsClosed() {
+			continue
+		}
+		labels := snap.Labels()
+		hasStale := false
+		for _, l := range labels {
+			if transientSet[l] || l == lockLabel {
+				hasStale = true
+				break
+			}
+		}
+		if !hasStale {
+			continue
+		}
+		items = append(items, gh.ProjectItem{
+			Number:   snap.Number(),
+			Repo:     snap.Repo(),
+			IsClosed: true,
+			Labels:   labels,
+		})
+	}
+	if len(items) == 0 {
+		return
+	}
+	e.logf(0, "startup", "transient-label scan: %d closed item(s) with stale labels\n", len(items))
+	board := &gh.ProjectBoard{Items: items}
+	e.cleanupClosedIssueLocks(board)
+	e.cleanupClosedIssueTransientLabels(board)
 }
 
 // checkAndUpgrade selects the upgrade path based on the running version:
