@@ -848,49 +848,35 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		}
 	}
 
-	// Universal baseline freshener: every poll, fetch the shallow board directly
-	// from GitHub and sync the cache via Bootstrap (first poll) or Reconcile
-	// (subsequent polls). This is what makes the cache the unified source of truth
-	// regardless of webhook state — without webhooks, this is the only path that
-	// flows IsClosed / Status / Label changes into the Store and fires Store
-	// observers (e.g., PushUnblockObserver). With webhooks, this remains as the
-	// drift-detection safety net for missed events.
+	// Per-poll cache refresh: for a bootstrapped cache use the cheap probe query
+	// (no labels, closedByPullRequestsReferences(first:1)) to detect which items
+	// changed since the last deep-fetch, and fire FetchItemDetails only for those
+	// items. This replaces the previous FetchProjectBoard + Reconcile path and
+	// reduces GraphQL cost ~5-10x on idle boards.
 	//
-	// Future work (separate PR): track webhook health per-repo. Webhooks are either
-	// working for a repo or they are not — when healthy, the cache is authoritative
-	// for issue/PR/comment/review events in that repo, and the per-poll deep-fetch
-	// admit pass can be skipped entirely for items in that repo. Repos with
-	// disabled or unhealthy webhooks continue through the deep-fetch path.
+	// Virgin caches fall back to a full FetchProjectBoard + Bootstrap so the initial
+	// board load is complete. Paused caches are skipped; FetchProjectBoard below
+	// falls through to GitHub directly for paused caches.
 	//
 	// Important caveat: project Status changes do NOT flow over webhooks for
 	// repo-level projects (and only sometimes for org-level projects with the
 	// right permissions). The Layer 2 status sweep above must continue running
-	// regardless of webhook health — it is the only delivery path for Status.
+	// regardless of webhook state — it is the only delivery path for Status.
 	if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		freshBoard, refreshErr := e.client.FetchProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
 		switch {
-		case refreshErr != nil:
-			e.logf(0, "cache", "shallow refresh failed (using prior cache state): %v\n", refreshErr)
-		case freshBoard == nil || freshBoard.ProjectID == "":
-			// Empty/uninitialised fetch — no-op rather than clobbering prior cache state.
-		case len(freshBoard.Items) == 0 && cacheImpl.IsBootstrapped():
-			// Suspicious: fresh fetch came back with 0 items but cache has data.
-			// fetchProjectBoardOnce already retries on totalCount=0/nodes=0 indexer
-			// hiccups (see github/project.go projectBoardFetchAttempts), but a
-			// degraded response can still slip through. Reconciling a 0-item board
-			// against a populated cache would remove every cached item; skip this
-			// cycle and retry on the next poll instead.
-			e.logf(0, "cache", "shallow refresh returned 0 items while cache has data — skipping reconcile (treating as transient indexer hiccup)\n")
+		case cacheImpl.IsPaused():
+			// Paused: FetchProjectBoard below falls through to GitHub directly.
 		case cacheImpl.IsBootstrapped() || cacheImpl.ProjectID() != "":
-			// Already bootstrapped (or partially: projectID set without items).
-			// Reconcile is a partial update that preserves engine-side Store fields
-			// (locks, worker state, stage state, deep-fetched data). Bootstrap is
-			// strictly stronger — it calls Store.Reset which wipes those fields —
-			// and must only be used when the cache is truly virgin.
-			cacheImpl.Reconcile(freshBoard)
+			// Bootstrapped: use probe-driven refresh (avoids full shallow fetch cost).
+			e.runProbeAndDeepFetch(cacheImpl)
 		default:
-			// Truly virgin: no projectID and no items. Safe to Bootstrap.
-			cacheImpl.Bootstrap(freshBoard)
+			// Virgin: full board fetch + bootstrap required.
+			freshBoard, refreshErr := e.client.FetchProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
+			if refreshErr != nil {
+				e.logf(0, "cache", "initial board fetch failed (using empty cache): %v\n", refreshErr)
+			} else if freshBoard != nil && freshBoard.ProjectID != "" {
+				cacheImpl.Bootstrap(freshBoard)
+			}
 		}
 	}
 
@@ -1497,6 +1483,119 @@ func gitRevParse(dir, ref string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// runProbeAndDeepFetch performs the per-poll probe-driven cache refresh for a
+// bootstrapped CacheImpl. It calls ProbeProjectBoard to get a minimal per-item
+// snapshot (no labels; single linked-PR node) and uses effectiveUpdatedAt to
+// detect which items need a full FetchItemDetails call. Items that haven't
+// changed since the last deep-fetch skip all GitHub traffic. This replaces the
+// previous Reconcile(shallowBoard) path and reduces GraphQL cost ~5-10x on
+// idle boards.
+//
+// Probe mutations must NOT touch the Labels field; use ProbeBoardItemUpdated,
+// not ShallowBoardItemUpdated, to preserve webhook-driven label state.
+func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
+	probeItems, _, err := e.client.ProbeProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
+	if err != nil {
+		e.logf(0, "cache", "probe refresh failed (using prior cache state): %v\n", err)
+		return
+	}
+
+	// Guard: 0 probe items with a populated cache indicates a transient indexer
+	// hiccup rather than a genuine board wipe. Skip this cycle; retry on the next
+	// poll. (probeProjectBoardOnce already retries 3x, but a degraded response can
+	// still slip through.)
+	if len(probeItems) == 0 && cacheImpl.IsBootstrapped() {
+		e.logf(0, "cache", "probe returned 0 items while cache has data — skipping (transient indexer hiccup)\n")
+		return
+	}
+
+	newKeys := make(map[string]bool, len(probeItems))
+	var deepFetched int
+
+	for _, pi := range probeItems {
+		repo := pi.Repo
+		if repo == "" {
+			repo = e.defaultRepo()
+		}
+		newKeys[fmt.Sprintf("%s#%d", repo, pi.Number)] = true
+
+		snap, snapErr := e.store.Get(repo, pi.Number)
+		if snapErr != nil {
+			// New item on board — seed minimal state, then deep-fetch for labels.
+			e.logf(pi.Number, "cache", "probe: new item discovered — deep-fetching\n")
+			minimal := gh.ProjectItem{
+				ID:        pi.ContentID,
+				ItemID:    pi.ItemID,
+				Number:    pi.Number,
+				IsPR:      pi.IsPR,
+				IsClosed:  pi.IsClosed,
+				Status:    pi.Status,
+				Repo:      repo,
+				UpdatedAt: pi.EffectiveUpdatedAt,
+			}
+			e.store.Apply(itemstate.IssueOpened{Item: minimal})
+			if fetchErr := e.readClient.FetchItemDetails(&minimal); fetchErr != nil {
+				e.logf(pi.Number, "warn", "probe: deep-fetch for new item failed: %v\n", fetchErr)
+				e.store.Apply(itemstate.DeepFetchFailed{Repo: repo, Number: pi.Number, At: time.Now()})
+			} else {
+				deepFetched++
+			}
+			continue
+		}
+
+		// Detect linkage drift: probe found a different linked PR than the cache holds.
+		s := snap.State()
+		cachedPRNum := 0
+		if s.LinkedPR != nil {
+			cachedPRNum = s.LinkedPR.Number
+		}
+		if pi.LinkedPRNumber != 0 && pi.LinkedPRNumber != cachedPRNum {
+			e.logf(pi.Number, "cache", "probe: linkage drift (was PR #%d, now PR #%d) — invalidating deep cache\n",
+				cachedPRNum, pi.LinkedPRNumber)
+			e.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: pi.Number})
+		}
+
+		// Apply probe state (updates IsClosed, State, IsPR, Status, UpdatedAt;
+		// intentionally skips Labels to preserve webhook-driven label state).
+		e.store.Apply(itemstate.ProbeBoardItemUpdated{Repo: repo, Number: pi.Number, Item: pi})
+
+		// Deep-fetch when cache is stale relative to effectiveUpdatedAt.
+		if cacheImpl.IsItemCacheFresh(repo, pi.Number, pi.EffectiveUpdatedAt) {
+			continue
+		}
+		e.logf(pi.Number, "cache", "probe: stale — deep-fetching\n")
+		minimal := gh.ProjectItem{
+			ID:        pi.ContentID,
+			ItemID:    pi.ItemID,
+			Number:    pi.Number,
+			IsPR:      pi.IsPR,
+			IsClosed:  pi.IsClosed,
+			Status:    pi.Status,
+			Repo:      repo,
+			UpdatedAt: pi.EffectiveUpdatedAt,
+		}
+		if fetchErr := e.readClient.FetchItemDetails(&minimal); fetchErr != nil {
+			e.logf(pi.Number, "warn", "probe: deep-fetch for stale item failed: %v\n", fetchErr)
+			e.store.Apply(itemstate.DeepFetchFailed{Repo: repo, Number: pi.Number, At: time.Now()})
+			continue
+		}
+		deepFetched++
+	}
+
+	// Remove items no longer on the board.
+	for _, snap := range e.store.All() {
+		key := fmt.Sprintf("%s#%d", snap.Repo(), snap.Number())
+		if !newKeys[key] {
+			e.logf(snap.Number(), "cache", "probe: item gone from board — removing from store\n")
+			e.store.Remove(snap.Repo(), snap.Number())
+		}
+	}
+
+	if deepFetched > 0 {
+		e.logf(0, "cache", "probe: deep-fetched %d item(s)\n", deepFetched)
+	}
 }
 
 // checkAndUpgrade selects the upgrade path based on the running version:
