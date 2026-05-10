@@ -583,6 +583,7 @@ func (e *Engine) Run() error {
 	if firstPollErr == nil {
 		e.runStartupCleanup()
 		e.runStartupTransientLabelScan()
+		e.runStartupTerminalScan()
 	}
 
 	// Start background stale-worker detector. Scans for workers whose heartbeat
@@ -1039,6 +1040,23 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		// Items with an active CooldownAt but no other signal are suppressed.
 		item := board.Items[i]
 		iKey := issueKey(item, e.defaultRepo())
+		// Terminal skip: unconditionally skip items flagged terminal while still in
+		// a cleanup stage — external board activity (label-bot, PR comments, GitHub
+		// bookkeeping) bumps updatedAt but Fabrik has nothing left to do for them.
+		if admitSnap, admitErr := e.store.Get(itemOwnerRepoString(item, e.defaultRepo()), item.Number); admitErr == nil {
+			if admitSnap.IsTerminal() {
+				if pst := stages.FindStage(e.cfg.Stages, item.Status); pst != nil && pst.CleanupWorktree {
+					continue // terminal + still in cleanup stage: skip entirely
+				}
+				// Status drifted out of the cleanup stage — clear the flag and fall through.
+				e.store.Apply(itemstate.TerminalFlagSet{
+					Repo:     itemOwnerRepoString(item, e.defaultRepo()),
+					Number:   item.Number,
+					Terminal: false,
+				})
+				e.logf(item.Number, "poll", "terminal flag cleared (status drifted to %q)\n", item.Status)
+			}
+		}
 		if !cycleSet[iKey] {
 			stage := stages.FindStage(e.cfg.Stages, item.Status)
 			isCleanup := stage != nil && stage.CleanupWorktree
@@ -1089,11 +1107,20 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			// The next poll will retry the deep-fetch for this item.
 			continue
 		}
+		admitRepo := itemOwnerRepoString(board.Items[i], e.defaultRepo())
+		admitPreSnap, admitPreErr := e.store.Get(admitRepo, board.Items[i].Number)
 		e.store.Apply(itemstate.ItemDeepFetched{
-			Repo:       itemOwnerRepoString(board.Items[i], e.defaultRepo()),
+			Repo:       admitRepo,
 			Number:     board.Items[i].Number,
 			FreshState: board.Items[i],
 		})
+		// After a successful deep-fetch, check if this item just became terminal.
+		if isTerminalPredicate(board.Items[i].Labels, board.Items[i].Status, e.cfg.Stages) {
+			if admitPreErr != nil || !admitPreSnap.IsTerminal() {
+				e.logf(board.Items[i].Number, "poll", "terminal flag set\n")
+			}
+			e.store.Apply(itemstate.TerminalFlagSet{Repo: admitRepo, Number: board.Items[i].Number, Terminal: true})
+		}
 		deepFetchCandidates = append(deepFetchCandidates, board.Items[i])
 		deepFetched++
 	}
@@ -1558,6 +1585,20 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 			e.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: pi.Number})
 		}
 
+		// Terminal skip: if this item was previously identified as terminal and the
+		// probe still shows it in a cleanup stage, skip deep-fetch entirely — external
+		// activity on a closed Done item has no bearing on Fabrik's work. Must run
+		// BEFORE ProbeBoardItemUpdated so we read the cached Terminal flag; applyProbeItem
+		// would clear it on status change before we could react to pi.Status.
+		if s.Terminal {
+			if pst := stages.FindStage(e.cfg.Stages, pi.Status); pst != nil && pst.CleanupWorktree {
+				continue // still terminal — no deep-fetch needed
+			}
+			// Status has left the cleanup stage — clear the flag and fall through.
+			e.store.Apply(itemstate.TerminalFlagSet{Repo: repo, Number: pi.Number, Terminal: false})
+			e.logf(pi.Number, "poll", "terminal flag cleared (status drifted to %q)\n", pi.Status)
+		}
+
 		// Apply probe state (updates IsClosed, State, IsPR, Status, UpdatedAt;
 		// intentionally skips Labels to preserve webhook-driven label state).
 		e.store.Apply(itemstate.ProbeBoardItemUpdated{Repo: repo, Number: pi.Number, Item: pi})
@@ -1584,6 +1625,13 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 			continue
 		}
 		deepFetched++
+		// After a successful deep-fetch, check if this item is now terminal.
+		if isTerminalPredicate(minimal.Labels, minimal.Status, e.cfg.Stages) {
+			if !s.Terminal {
+				e.logf(pi.Number, "poll", "terminal flag set\n")
+			}
+			e.store.Apply(itemstate.TerminalFlagSet{Repo: repo, Number: pi.Number, Terminal: true})
+		}
 	}
 
 	// Remove items no longer on the board.
@@ -1598,6 +1646,39 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 	if deepFetched > 0 {
 		e.logf(0, "cache", "probe: deep-fetched %d item(s)\n", deepFetched)
 	}
+}
+
+// isTerminalPredicate reports whether an item with the given labels and board
+// status qualifies as terminal: it must be in a cleanup (Done) stage, carry the
+// stage:Name:complete label, and have no transient lifecycle or lock labels.
+// Terminal items have no remaining Fabrik work and may safely skip deep-fetch.
+func isTerminalPredicate(labels []string, status string, stagesCfg []*stages.Stage) bool {
+	st := stages.FindStage(stagesCfg, status)
+	if st == nil || !st.CleanupWorktree {
+		return false
+	}
+	completeLabel := "stage:" + st.Name + ":complete"
+	hasComplete := false
+	for _, l := range labels {
+		if l == completeLabel {
+			hasComplete = true
+			break
+		}
+	}
+	if !hasComplete {
+		return false
+	}
+	for _, l := range labels {
+		for _, tl := range transientLifecycleLabels {
+			if l == tl {
+				return false
+			}
+		}
+		if strings.HasPrefix(l, "fabrik:locked:") {
+			return false
+		}
+	}
+	return true
 }
 
 // runStartupTransientLabelScan is a one-shot recovery pass that runs after the
@@ -1651,6 +1732,32 @@ func (e *Engine) runStartupTransientLabelScan() {
 	board := &gh.ProjectBoard{Items: items}
 	e.cleanupClosedIssueLocks(board)
 	e.cleanupClosedIssueTransientLabels(board)
+}
+
+// runStartupTerminalScan marks terminal items in the Store after the first
+// successful poll. It uses bootstrap label data already present in the Store
+// (populated by FetchProjectBoard + Reset) so no GitHub API call is needed.
+// Must run after runStartupTransientLabelScan so stale transient labels have
+// been removed before the predicate is evaluated.
+func (e *Engine) runStartupTerminalScan() {
+	snaps := e.store.All()
+	var marked int
+	for _, snap := range snaps {
+		if snap.IsTerminal() {
+			continue // already set — no-op path
+		}
+		if isTerminalPredicate(snap.Labels(), snap.Status(), e.cfg.Stages) {
+			e.store.Apply(itemstate.TerminalFlagSet{
+				Repo:     snap.Repo(),
+				Number:   snap.Number(),
+				Terminal: true,
+			})
+			marked++
+		}
+	}
+	if marked > 0 {
+		e.logf(0, "startup", "terminal scan: marked %d item(s) as terminal\n", marked)
+	}
 }
 
 // checkAndUpgrade selects the upgrade path based on the running version:
