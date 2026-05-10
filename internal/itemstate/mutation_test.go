@@ -773,6 +773,88 @@ func TestItemDeepFetchedClearsFailureAt(t *testing.T) {
 	}
 }
 
+// ---- ProbeBoardItemUpdated ----
+
+func TestProbeBoardItemUpdatedPreservesLabels(t *testing.T) {
+	// IssueOpened seeds the item with Labels: ["bug"].
+	s := newStoreWithItem(t, testRepo, 1)
+
+	probe := gh.BoardProbeItem{
+		ContentID:          "node1",
+		ItemID:             "pvti1",
+		Number:             1,
+		IsClosed:           false,
+		IsPR:               false,
+		Status:             "Research",
+		EffectiveUpdatedAt: time.Unix(2000, 0),
+	}
+	s.Apply(ProbeBoardItemUpdated{Repo: testRepo, Number: 1, Item: probe})
+
+	st := getItem(t, s, testRepo, 1)
+	// Labels must not be wiped by the probe mutation.
+	if len(st.Labels) == 0 {
+		t.Fatal("labels were wiped by ProbeBoardItemUpdated; expected Labels to be preserved")
+	}
+	if !containsString(st.Labels, "bug") {
+		t.Errorf("expected label 'bug' to be preserved, got %v", st.Labels)
+	}
+}
+
+func TestProbeBoardItemUpdatedPropagatesIsClosed(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+
+	probe := gh.BoardProbeItem{
+		ContentID: "node1",
+		Number:    1,
+		IsClosed:  true,
+		State:     "CLOSED",
+	}
+	snap := applyExpect(t, s, ProbeBoardItemUpdated{Repo: testRepo, Number: 1, Item: probe}, StateChanged)
+	st := snap.State()
+	if !st.IsClosed {
+		t.Error("IsClosed not set to true by ProbeBoardItemUpdated")
+	}
+	if st.State != "closed" {
+		t.Errorf("State = %q; want %q", st.State, "closed")
+	}
+}
+
+func TestProbeBoardItemUpdatedUpdatesStatus(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+
+	probe := gh.BoardProbeItem{
+		ContentID: "node1",
+		Number:    1,
+		Status:    "Review",
+	}
+	snap := applyExpect(t, s, ProbeBoardItemUpdated{Repo: testRepo, Number: 1, Item: probe}, StatusChanged)
+	st := snap.State()
+	if st.Status != "Review" {
+		t.Errorf("Status = %q; want %q", st.Status, "Review")
+	}
+}
+
+func TestProbeBoardItemUpdatedNoChangeFlagsWhenSame(t *testing.T) {
+	// Seed with IsClosed=false, Status="Implement".
+	s := newStoreWithItem(t, testRepo, 1)
+
+	probe := gh.BoardProbeItem{
+		ContentID: "node1",
+		Number:    1,
+		IsClosed:  false,
+		Status:    "Implement", // same as seeded
+	}
+	_, changes, err := s.Apply(ProbeBoardItemUpdated{Repo: testRepo, Number: 1, Item: probe})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	for _, c := range changes {
+		if c.Fields&(StateChanged|StatusChanged|LabelsChanged) != 0 {
+			t.Errorf("unexpected change flags %b when probe matches existing state", c.Fields)
+		}
+	}
+}
+
 // ---- Snapshot immutability for LinkedPR fields ----
 
 func TestHeldSnapshotLinkedPRFieldsUnchanged(t *testing.T) {
