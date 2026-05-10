@@ -911,3 +911,91 @@ func TestCheckRunDrainOnPRHeadSHAUpdated(t *testing.T) {
 		t.Error("pendingCheckRuns entry should have been deleted after drain")
 	}
 }
+
+// ---- TerminalFlagSet mutation ----
+
+func TestTerminalFlagSet_SetsFlag(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	snap := applyExpect(t, s, TerminalFlagSet{Repo: testRepo, Number: 1, Terminal: true}, TerminalChanged)
+	if !snap.IsTerminal() {
+		t.Error("IsTerminal() = false after TerminalFlagSet{Terminal:true}; want true")
+	}
+	if !getItem(t, s, testRepo, 1).Terminal {
+		t.Error("store item Terminal = false after TerminalFlagSet{Terminal:true}; want true")
+	}
+}
+
+func TestTerminalFlagSet_IdempotentNoOp(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	s.Apply(TerminalFlagSet{Repo: testRepo, Number: 1, Terminal: true})
+
+	var observedChanges int
+	s.Subscribe(ObserverFunc(func(c Change, _ Snapshot) { observedChanges++ }))
+
+	// Applying the same value again must produce no observer notification.
+	_, changes, err := s.Apply(TerminalFlagSet{Repo: testRepo, Number: 1, Terminal: true})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Errorf("idempotent TerminalFlagSet returned %d changes; want 0", len(changes))
+	}
+	if observedChanges != 0 {
+		t.Errorf("observer notified %d times; want 0", observedChanges)
+	}
+}
+
+func TestTerminalFlagSet_ClearsFlag(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	s.Apply(TerminalFlagSet{Repo: testRepo, Number: 1, Terminal: true})
+	applyExpect(t, s, TerminalFlagSet{Repo: testRepo, Number: 1, Terminal: false}, TerminalChanged)
+	if getItem(t, s, testRepo, 1).Terminal {
+		t.Error("store item Terminal = true after TerminalFlagSet{Terminal:false}; want false")
+	}
+}
+
+func TestTerminalFlagClearedByLocalStatusUpdated(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	s.Apply(TerminalFlagSet{Repo: testRepo, Number: 1, Terminal: true})
+
+	// Changing status must clear the terminal flag.
+	s.Apply(LocalStatusUpdated{Repo: testRepo, Number: 1, NewStatus: "Validate"})
+	if getItem(t, s, testRepo, 1).Terminal {
+		t.Error("Terminal flag not cleared by LocalStatusUpdated to different status")
+	}
+
+	// Same status → flag must remain (no-op path must not clear Terminal).
+	s.Apply(TerminalFlagSet{Repo: testRepo, Number: 1, Terminal: true})
+	s.Apply(LocalStatusUpdated{Repo: testRepo, Number: 1, NewStatus: "Validate"})
+	if !getItem(t, s, testRepo, 1).Terminal {
+		t.Error("Terminal flag unexpectedly cleared by LocalStatusUpdated with unchanged status")
+	}
+}
+
+func TestTerminalFlagClearedByProbeBoardItemUpdated(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	s.Apply(TerminalFlagSet{Repo: testRepo, Number: 1, Terminal: true})
+
+	probe := gh.BoardProbeItem{
+		Repo:   testRepo,
+		Number: 1,
+		Status: "Review",
+	}
+	s.Apply(ProbeBoardItemUpdated{Repo: testRepo, Number: 1, Item: probe})
+	if getItem(t, s, testRepo, 1).Terminal {
+		t.Error("Terminal flag not cleared by ProbeBoardItemUpdated with new status")
+	}
+}
+
+func TestTerminalFlagClearedByProjectV2ItemEdited(t *testing.T) {
+	s := NewStore(nil)
+	pi := testProjectItem(testRepo, 1)
+	pi.ItemID = "PVTI_terminal_test"
+	s.Apply(IssueOpened{Item: pi})
+	s.Apply(TerminalFlagSet{Repo: testRepo, Number: 1, Terminal: true})
+
+	s.Apply(ProjectV2ItemEdited{ItemID: "PVTI_terminal_test", NewStatus: "Review"})
+	if getItem(t, s, testRepo, 1).Terminal {
+		t.Error("Terminal flag not cleared by ProjectV2ItemEdited with new status")
+	}
+}
