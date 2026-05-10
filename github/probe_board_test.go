@@ -320,10 +320,9 @@ func TestProbeProjectBoard_Pagination(t *testing.T) {
 	if items[0].Number != 1 || items[1].Number != 2 {
 		t.Errorf("items numbers = %d, %d; want 1, 2", items[0].Number, items[1].Number)
 	}
-	if callCount != 1 {
-		// probeProjectBoardOnce handles pagination in a single call with a cursor loop.
-		// Each page is a separate HTTP request, so callCount should be 2.
-		t.Logf("note: callCount = %d (expected 2 HTTP calls for 2 pages)", callCount)
+	// probeProjectBoardOnce loops via cursor — each page is a separate HTTP request.
+	if callCount != 2 {
+		t.Errorf("expected 2 HTTP calls for 2-page board, got %d", callCount)
 	}
 }
 
