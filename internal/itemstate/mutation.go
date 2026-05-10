@@ -332,6 +332,9 @@ func (m ReviewThreadCommentAdded) itemKey() string { return itemKeyFor(m.Repo, m
 // during a Reconcile pass. Unlike ItemDeepFetched or IssueOpened, it does NOT
 // overwrite deep fields (Comments, Body, Assignees, BlockedBy, LinkedPRReviews,
 // etc.). Used exclusively by CacheImpl.Reconcile.
+//
+// WARNING: do not use with probe data — the Labels field will be set to empty,
+// wiping the cached label set. Use ProbeBoardItemUpdated for probe-loop updates.
 type ShallowBoardItemUpdated struct {
 	Repo   string
 	Number int
@@ -340,6 +343,19 @@ type ShallowBoardItemUpdated struct {
 
 func (ShallowBoardItemUpdated) isMutation()       {}
 func (m ShallowBoardItemUpdated) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// ProbeBoardItemUpdated updates only the probe-visible fields of an existing item
+// from a ProbeProjectBoard result. Unlike ShallowBoardItemUpdated, it does NOT
+// touch Labels (the probe query fetches no labels). Updates ID, ItemID, State,
+// IsClosed, IsPR, Status, and UpdatedAt only.
+type ProbeBoardItemUpdated struct {
+	Repo   string
+	Number int
+	Item   gh.BoardProbeItem
+}
+
+func (ProbeBoardItemUpdated) isMutation()       {}
+func (m ProbeBoardItemUpdated) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // ---- Engine internals ----
 
