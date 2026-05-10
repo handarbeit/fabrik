@@ -954,13 +954,11 @@ func TestReconcilePreservesDeepFields(t *testing.T) {
 	}
 }
 
-func TestReconcileLinkageDriftInvalidatesDeepCache(t *testing.T) {
-	mc := &mockClient{
-		itemDetailsResult: &gh.ProjectItem{
-			LinkedPRNumber: 502,
-		},
-	}
-	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+func TestReconcilePreservesDeepCacheOnLinkageChange(t *testing.T) {
+	// Linkage drift detection (LinkedPRNumberShallow ≠ cached LinkedPR.Number)
+	// was removed from Reconcile and moved to the probe loop (runProbeAndDeepFetch).
+	// Reconcile must now preserve the deep cache even when LinkedPRNumberShallow changes.
+	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
 	c.Bootstrap(&gh.ProjectBoard{
 		ProjectID: "PID", Title: "T", OwnerType: "organization",
 		Items: []gh.ProjectItem{
@@ -969,10 +967,9 @@ func TestReconcileLinkageDriftInvalidatesDeepCache(t *testing.T) {
 		},
 	})
 
-	// Mark as deep-fetched with LinkedPRNumber=0 (linkage not yet visible on GitHub).
 	testSetDeepFetched(c, "owner/repo", 1)
 
-	// Board now shows LinkedPRNumberShallow=502 — linkage has materialized.
+	// Reconcile with new LinkedPRNumberShallow value — should NOT invalidate deep cache.
 	c.Reconcile(&gh.ProjectBoard{
 		ProjectID: "PID", Title: "T", OwnerType: "organization",
 		Items: []gh.ProjectItem{
@@ -981,23 +978,9 @@ func TestReconcileLinkageDriftInvalidatesDeepCache(t *testing.T) {
 		},
 	})
 
-	// LastDeepFetchAt must be zeroed so next FetchItemDetails hits GitHub.
-	if testIsDeepFetched(c, "owner/repo", 1) {
-		t.Error("expected deep cache to be invalidated when linkage drift is detected")
-	}
-
-	// Next FetchItemDetails call must fall through to the mock (cache miss).
-	beforeCount := mc.fetchItemDetailsCount
-	item := &gh.ProjectItem{Number: 1, Repo: "owner/repo", ID: "I_001"}
-	if err := c.FetchItemDetails(item); err != nil {
-		t.Fatalf("FetchItemDetails returned error: %v", err)
-	}
-	if mc.fetchItemDetailsCount <= beforeCount {
-		t.Error("expected FetchItemDetails to call fallback after deep cache was invalidated")
-	}
-	// The mock should have populated LinkedPRNumber=502 into item.
-	if item.LinkedPRNumber != 502 {
-		t.Errorf("expected LinkedPRNumber=502 after re-fetch, got %d", item.LinkedPRNumber)
+	// Deep cache must still be considered fresh — linkage drift is probe loop's responsibility.
+	if !testIsDeepFetched(c, "owner/repo", 1) {
+		t.Error("Reconcile must not invalidate deep cache on LinkedPRNumberShallow change; linkage drift detection moved to probe loop")
 	}
 }
 
