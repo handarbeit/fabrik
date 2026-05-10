@@ -51,6 +51,10 @@ const (
 	// the CI gate is catch-up-driven, not wake-driven. The flag exists for
 	// observability (e.g. future TUI consumers) without forcing a poll wake.
 	CheckRunChanged
+	// TerminalChanged indicates the Terminal flag was explicitly set or cleared via
+	// TerminalFlagSet. Store-internal clears (when status changes) piggyback on
+	// StatusChanged and do not emit TerminalChanged.
+	TerminalChanged
 )
 
 // Change describes what fields a mutation altered. Delivered to every Observer

@@ -64,6 +64,12 @@ type ItemState struct {
 	// Worker is present when a worker is in-flight for this item.
 	Worker *WorkerHandle
 
+	// Terminal is set by the engine after a deep-fetch confirms the item satisfies
+	// the terminal predicate (Done status + stage:Done:complete label + no transient
+	// lifecycle labels). While set, the poll loop skips deep-fetch entirely for this
+	// item. Cleared automatically when the item's status leaves Done.
+	Terminal bool
+
 	// -------- TUI / invocation mirror state --------
 
 	// LastDeepFetchAt is the time of the last successful deep fetch for this item.
