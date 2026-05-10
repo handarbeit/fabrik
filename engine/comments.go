@@ -138,6 +138,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 
 	// If a PR exists and its base branch doesn't match the resolved base, update it.
 	e.syncPRBase(item, baseBranch)
+	e.ensureEnvExcluded(item.Number, workDir)
 	e.symlinkEnvIfEnabled(item.Number, workDir)
 
 	// Write context files (all stages including current) before Claude runs.
