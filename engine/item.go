@@ -670,6 +670,9 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 
 	// If a PR exists and its base branch doesn't match the resolved base, update it.
 	e.syncPRBase(item, baseBranch)
+	// Ensure .env is excluded from git stash before any stash runs, so the symlink
+	// created by symlinkEnvIfEnabled is never captured and never causes stash-pop conflicts.
+	e.ensureEnvExcluded(item.Number, workDir)
 
 	// If this is a read-only stage, stash any unexpected dirty state (including
 	// untracked files) before invocation so the stage sees a clean worktree, and
