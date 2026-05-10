@@ -16,6 +16,7 @@ type mockGitHubClient struct {
 	mu sync.Mutex
 
 	fetchProjectBoardFn           func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error)
+	probeProjectBoardFn           func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error)
 	fetchLabelsFn                 func(owner, repo string, issueNumber int) ([]string, error)
 	fetchItemDetailsFn            func(item *gh.ProjectItem) error
 	fetchStatusFieldFn            func(projectID string) (*gh.StatusField, error)
@@ -192,6 +193,13 @@ func (m *mockGitHubClient) FetchProjectBoard(owner, repo string, projectNum int,
 		return m.fetchProjectBoardFn(owner, repo, projectNum, ownerType)
 	}
 	return &gh.ProjectBoard{}, nil
+}
+
+func (m *mockGitHubClient) ProbeProjectBoard(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+	if m.probeProjectBoardFn != nil {
+		return m.probeProjectBoardFn(owner, repo, projectNum, ownerType)
+	}
+	return nil, "", nil
 }
 
 func (m *mockGitHubClient) FetchItemDetails(item *gh.ProjectItem) error {
