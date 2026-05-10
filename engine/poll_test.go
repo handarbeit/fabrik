@@ -2297,3 +2297,169 @@ func TestWorkerExitedIdempotent(t *testing.T) {
 		// expected: no wake
 	}
 }
+
+// ---------------------------------------------------------------------------
+// runProbeAndDeepFetch integration tests
+// ---------------------------------------------------------------------------
+
+// TestRunProbeAndDeepFetch_StaleItem_TriggersDeepFetch verifies that an item
+// with no prior deep-fetch (LastSeenSourceUpdatedAt == zero) triggers
+// FetchItemDetails when the probe returns a nonzero EffectiveUpdatedAt.
+func TestRunProbeAndDeepFetch_StaleItem_TriggersDeepFetch(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	var deepFetchCalls int
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return []gh.BoardProbeItem{
+				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo", EffectiveUpdatedAt: now},
+			}, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalls++
+			return nil
+		},
+	}
+	eng, cache := testEngineWithCache(client, &mockClaudeInvoker{})
+	eng.runProbeAndDeepFetch(cache)
+	if deepFetchCalls == 0 {
+		t.Error("expected FetchItemDetails called for stale item (zero LastSeenSourceUpdatedAt); got 0 calls")
+	}
+}
+
+// TestRunProbeAndDeepFetch_FreshItem_SkipsDeepFetch verifies that an item
+// whose LastSeenSourceUpdatedAt matches the probe's EffectiveUpdatedAt does
+// not trigger a FetchItemDetails call.
+func TestRunProbeAndDeepFetch_FreshItem_SkipsDeepFetch(t *testing.T) {
+	T1 := time.Now().Add(-time.Hour).Truncate(time.Second)
+	var deepFetchCalls int
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return []gh.BoardProbeItem{
+				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo", EffectiveUpdatedAt: T1},
+			}, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalls++
+			return nil
+		},
+	}
+	eng, cache := testEngineWithCache(client, &mockClaudeInvoker{})
+	// Simulate a prior deep-fetch that set LastSeenSourceUpdatedAt = T1.
+	eng.store.Apply(itemstate.ItemDeepFetched{
+		Repo:   "owner/repo",
+		Number: 1,
+		FreshState: gh.ProjectItem{
+			ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", UpdatedAt: T1,
+		},
+	})
+	eng.runProbeAndDeepFetch(cache)
+	if deepFetchCalls != 0 {
+		t.Errorf("expected 0 FetchItemDetails calls for fresh item; got %d", deepFetchCalls)
+	}
+}
+
+// TestRunProbeAndDeepFetch_LinkageDrift_InvalidatesAndDeepFetches verifies
+// that when the probe detects a linked PR number different from the cached
+// value, the cache is invalidated (DeepFetchInvalidated) and FetchItemDetails
+// is triggered even though EffectiveUpdatedAt has not advanced.
+func TestRunProbeAndDeepFetch_LinkageDrift_InvalidatesAndDeepFetches(t *testing.T) {
+	T1 := time.Now().Add(-time.Hour).Truncate(time.Second)
+	var deepFetchCalls int
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return []gh.BoardProbeItem{
+				// Same EffectiveUpdatedAt as last deep-fetch (would be fresh) but LinkedPRNumber changed.
+				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo", EffectiveUpdatedAt: T1, LinkedPRNumber: 99},
+			}, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalls++
+			return nil
+		},
+	}
+	eng, cache := testEngineWithCache(client, &mockClaudeInvoker{})
+	// Simulate fresh state at T1 with no linked PR (cached LinkedPRNumber = 0).
+	eng.store.Apply(itemstate.ItemDeepFetched{
+		Repo:   "owner/repo",
+		Number: 1,
+		FreshState: gh.ProjectItem{
+			ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", UpdatedAt: T1,
+		},
+	})
+	eng.runProbeAndDeepFetch(cache)
+	if deepFetchCalls == 0 {
+		t.Error("expected FetchItemDetails called after linkage drift (PR# 0 → 99); got 0 calls")
+	}
+}
+
+// TestRunProbeAndDeepFetch_ItemGone_RemovedFromStore verifies that an item
+// present in the store but absent from probe results is removed from the store.
+func TestRunProbeAndDeepFetch_ItemGone_RemovedFromStore(t *testing.T) {
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			// Only item #1; item #2 has left the board.
+			return []gh.BoardProbeItem{
+				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo"},
+			}, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error { return nil },
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	cache.Bootstrap(&gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo"},
+			{ID: "I_002", ItemID: "PVTI_002", Number: 2, Repo: "owner/repo"},
+		},
+	})
+	eng.readClient = cache
+
+	eng.runProbeAndDeepFetch(cache)
+
+	if _, err := eng.store.Get("owner/repo", 2); err == nil {
+		t.Error("item #2 should be removed from store after probe omits it")
+	}
+	if _, err := eng.store.Get("owner/repo", 1); err != nil {
+		t.Errorf("item #1 should still be in store after probe includes it: %v", err)
+	}
+}
+
+// TestRunProbeAndDeepFetch_IsClosedPropagates_WithoutDeepFetch verifies that
+// IsClosed=true is written to the store via ProbeBoardItemUpdated even when
+// the item is cache-fresh (EffectiveUpdatedAt unchanged → no deep-fetch).
+func TestRunProbeAndDeepFetch_IsClosedPropagates_WithoutDeepFetch(t *testing.T) {
+	T1 := time.Now().Add(-time.Hour).Truncate(time.Second)
+	var deepFetchCalls int
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return []gh.BoardProbeItem{
+				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo", IsClosed: true, EffectiveUpdatedAt: T1},
+			}, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalls++
+			return nil
+		},
+	}
+	eng, cache := testEngineWithCache(client, &mockClaudeInvoker{})
+	// Fresh at T1 — deep-fetch should not be triggered.
+	eng.store.Apply(itemstate.ItemDeepFetched{
+		Repo:   "owner/repo",
+		Number: 1,
+		FreshState: gh.ProjectItem{
+			ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", UpdatedAt: T1,
+		},
+	})
+	eng.runProbeAndDeepFetch(cache)
+	if deepFetchCalls != 0 {
+		t.Errorf("expected 0 deep-fetch calls for fresh item; got %d", deepFetchCalls)
+	}
+	snap, err := eng.store.Get("owner/repo", 1)
+	if err != nil {
+		t.Fatalf("store.Get after probe: %v", err)
+	}
+	if !snap.IsClosed() {
+		t.Error("expected IsClosed=true after ProbeBoardItemUpdated; got false")
+	}
+}
