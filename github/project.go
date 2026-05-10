@@ -344,6 +344,233 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 	return board, len(allNodes), maxTotalCount, nil
 }
 
+// probeItemNode mirrors one element of items.nodes in the ProbeProjectBoard query.
+// No labels are included; only scalar identity fields and one linked-PR node,
+// which is sufficient to detect updatedAt drift without the per-item label cost.
+type probeItemNode struct {
+	ID               string `json:"id"`
+	UpdatedAt        string `json:"updatedAt"` // Project item updatedAt (bumped by column moves)
+	FieldValueByName *struct {
+		Name string `json:"name"`
+	} `json:"fieldValueByName"`
+	Content struct {
+		Typename   string `json:"__typename"`
+		ID         string `json:"id"`
+		Number     int    `json:"number"`
+		State      string `json:"state"`
+		UpdatedAt  string `json:"updatedAt"`
+		Repository *struct {
+			NameWithOwner string `json:"nameWithOwner"`
+		} `json:"repository"`
+		// first: 1 is sufficient — each issue has at most one Fabrik-managed PR.
+		LinkedPRs *struct {
+			Nodes []struct {
+				Number    int    `json:"number"`
+				UpdatedAt string `json:"updatedAt"`
+			} `json:"nodes"`
+		} `json:"closedByPullRequestsReferences"`
+	} `json:"content"`
+}
+
+// ProbeProjectBoard fetches a minimal probe of the project board — only scalar
+// identity fields and one linked-PR node per item, no labels. Used by the
+// per-poll refresh path to detect updatedAt drift without the GraphQL cost of
+// labels(first:30) and closedByPullRequestsReferences(first:5).
+//
+// Returns []BoardProbeItem (one per non-draft item), the projectID string, and
+// any error. Items whose content node ID is empty (draft issues) are skipped.
+//
+// When ownerType is non-empty ("user" or "organization"), the board is fetched
+// directly using that type, skipping the try-org-then-user fallback.
+func (c *Client) ProbeProjectBoard(owner, repo string, projectNum int, ownerType string) ([]BoardProbeItem, string, error) {
+	if ownerType != "" {
+		return c.probeProjectBoard(owner, repo, projectNum, ownerType)
+	}
+	items, projectID, err := c.probeProjectBoard(owner, repo, projectNum, "organization")
+	if err != nil {
+		items, projectID, err = c.probeProjectBoard(owner, repo, projectNum, "user")
+	}
+	return items, projectID, err
+}
+
+func (c *Client) probeProjectBoard(owner, repo string, projectNum int, ownerType string) ([]BoardProbeItem, string, error) {
+	var lastItems []BoardProbeItem
+	var lastProjectID string
+	for attempt := 1; attempt <= projectBoardFetchAttempts; attempt++ {
+		if d := projectBoardFetchBackoff(attempt); d > 0 {
+			time.Sleep(d)
+		}
+		items, projectID, rawNodeCount, totalCount, err := c.probeProjectBoardOnce(owner, repo, projectNum, ownerType)
+		if err != nil {
+			return nil, "", err
+		}
+		lastItems = items
+		lastProjectID = projectID
+		if (totalCount > 0 && rawNodeCount >= totalCount) || rawNodeCount > 0 {
+			return items, projectID, nil
+		}
+		if attempt < projectBoardFetchAttempts {
+			logf(0, "warn",
+				"project board probe returned %d items, totalCount=%d (attempt %d/%d) — retrying in case of indexer hiccup\n",
+				rawNodeCount, totalCount, attempt, projectBoardFetchAttempts)
+		}
+	}
+	return lastItems, lastProjectID, nil
+}
+
+func (c *Client) probeProjectBoardOnce(owner, repo string, projectNum int, ownerType string) ([]BoardProbeItem, string, int, int, error) {
+	query := fmt.Sprintf(`
+query($owner: String!, $projectNum: Int!, $cursor: String) {
+  %s(login: $owner) {
+    projectV2(number: $projectNum) {
+      id
+      items(first: 100, after: $cursor) {
+        totalCount
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        nodes {
+          id
+          updatedAt
+          fieldValueByName(name: "Status") {
+            ... on ProjectV2ItemFieldSingleSelectValue {
+              name
+            }
+          }
+          content {
+            __typename
+            ... on Issue {
+              id
+              number
+              state
+              updatedAt
+              repository {
+                nameWithOwner
+              }
+              closedByPullRequestsReferences(first: 1) {
+                nodes {
+                  number
+                  updatedAt
+                }
+              }
+            }
+            ... on PullRequest {
+              id
+              number
+              updatedAt
+              repository {
+                nameWithOwner
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}`, ownerType)
+
+	var projectID string
+	var allNodes []probeItemNode
+	maxTotalCount := 0
+
+	cursor := ""
+	for {
+		vars := map[string]interface{}{
+			"owner":      owner,
+			"projectNum": projectNum,
+		}
+		if cursor != "" {
+			vars["cursor"] = cursor
+		}
+
+		var result struct {
+			Data map[string]struct {
+				ProjectV2 struct {
+					ID    string `json:"id"`
+					Items struct {
+						TotalCount int `json:"totalCount"`
+						PageInfo   struct {
+							HasNextPage bool   `json:"hasNextPage"`
+							EndCursor   string `json:"endCursor"`
+						} `json:"pageInfo"`
+						Nodes []probeItemNode `json:"nodes"`
+					} `json:"items"`
+				} `json:"projectV2"`
+			} `json:"data"`
+		}
+
+		if err := c.graphqlRequest(query, vars, &result); err != nil {
+			return nil, "", 0, 0, fmt.Errorf("probing project board: %w", err)
+		}
+
+		ownerData, ok := result.Data[ownerType]
+		if !ok {
+			return nil, "", 0, 0, fmt.Errorf("probing project board: no %s data in response", ownerType)
+		}
+		proj := ownerData.ProjectV2
+		if projectID == "" {
+			projectID = proj.ID
+		}
+		if proj.Items.TotalCount > maxTotalCount {
+			maxTotalCount = proj.Items.TotalCount
+		}
+		allNodes = append(allNodes, proj.Items.Nodes...)
+
+		if !proj.Items.PageInfo.HasNextPage {
+			break
+		}
+		if proj.Items.PageInfo.EndCursor == "" {
+			return nil, "", 0, 0, fmt.Errorf("probing project board: hasNextPage=true but endCursor is empty")
+		}
+		cursor = proj.Items.PageInfo.EndCursor
+	}
+
+	var items []BoardProbeItem
+	for _, node := range allNodes {
+		if node.Content.ID == "" {
+			continue
+		}
+
+		item := BoardProbeItem{
+			ItemID:    node.ID,
+			ContentID: node.Content.ID,
+			Number:    node.Content.Number,
+			IsPR:      node.Content.Typename == "PullRequest",
+			IsClosed:  node.Content.Typename != "PullRequest" && node.Content.State == "CLOSED",
+			State:     node.Content.State,
+		}
+		if node.Content.Repository != nil {
+			item.Repo = node.Content.Repository.NameWithOwner
+		}
+		if node.FieldValueByName != nil {
+			item.Status = node.FieldValueByName.Name
+		}
+
+		// effectiveUpdatedAt = max(content.updatedAt, projectItem.updatedAt, linkedPR.updatedAt)
+		if t, err := parseTime(node.Content.UpdatedAt); err == nil {
+			item.EffectiveUpdatedAt = t
+		}
+		if t, err := parseTime(node.UpdatedAt); err == nil && t.After(item.EffectiveUpdatedAt) {
+			item.EffectiveUpdatedAt = t
+		}
+		if node.Content.LinkedPRs != nil && len(node.Content.LinkedPRs.Nodes) > 0 {
+			pr := node.Content.LinkedPRs.Nodes[0]
+			item.LinkedPRNumber = pr.Number
+			if t, err := parseTime(pr.UpdatedAt); err == nil {
+				item.LinkedPRUpdatedAt = t
+				if t.After(item.EffectiveUpdatedAt) {
+					item.EffectiveUpdatedAt = t
+				}
+			}
+		}
+
+		items = append(items, item)
+	}
+
+	return items, projectID, len(allNodes), maxTotalCount, nil
+}
+
 // FetchItemDetails populates the Comments, Labels, Body, URL, Author, Assignees,
 // and BlockedBy fields of a ProjectItem by fetching full item data via individual
 // node queries. This is the "deep" phase of the two-phase fetch approach.
