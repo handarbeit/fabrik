@@ -321,8 +321,15 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return CommentsChanged
 
 	case LocalStatusUpdated:
-		item.Status = v.NewStatus
+		if item.Status != v.NewStatus {
+			item.Status = v.NewStatus
+			item.Terminal = false
+		}
 		return StatusChanged
+
+	case TerminalFlagSet:
+		item.Terminal = v.Terminal
+		return TerminalChanged
 
 	case LocalLabelAdded:
 		if !containsString(item.Labels, v.Label) {
@@ -619,7 +626,10 @@ func (s *Store) applyProjectV2ItemEdited(v ProjectV2ItemEdited) (Snapshot, []Cha
 	}
 	item := s.items[key]
 	before := newSnapshot(*item).state
-	item.Status = v.NewStatus
+	if item.Status != v.NewStatus {
+		item.Status = v.NewStatus
+		item.Terminal = false
+	}
 	if reflect.DeepEqual(before, *item) {
 		snap := newSnapshot(*item)
 		s.mu.Unlock()
@@ -1084,6 +1094,7 @@ func applyShallowItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 
 	if item.Status != pi.Status {
 		item.Status = pi.Status
+		item.Terminal = false
 		flags |= StatusChanged
 	}
 
@@ -1120,6 +1131,7 @@ func applyProbeItem(item *ItemState, pi gh.BoardProbeItem) ChangeFlags {
 
 	if item.Status != pi.Status {
 		item.Status = pi.Status
+		item.Terminal = false
 		flags |= StatusChanged
 	}
 
