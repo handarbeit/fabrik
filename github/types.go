@@ -85,8 +85,10 @@ type ProjectItem struct {
 	BlockedBy      []Dependency // Issues that must be closed before this one can advance
 	LinkedPRNumber int          // PR number of the first linked PR (0 if none); for REST re-request calls
 	// LinkedPRNumberShallow is the PR number of the first linked PR from the shallow board query (0 if none).
-	// Populated only during shallow board parse and used only by Reconcile for linkage drift detection —
-	// do not use as a substitute for LinkedPRNumber at runtime.
+	// Populated only during shallow board parse. Linkage drift detection was previously performed
+	// by Reconcile using this field; that responsibility has moved to the probe loop
+	// (runProbeAndDeepFetch via BoardProbeItem.LinkedPRNumber). Retained for compatibility; no longer
+	// read by Reconcile.
 	LinkedPRNumberShallow  int
 	LinkedPRReviewRequests []ReviewRequest // Outstanding reviewer requests on the linked PR
 	LinkedPRReviews        []PRReview      // Reviews already submitted on the linked PR

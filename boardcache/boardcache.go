@@ -287,19 +287,10 @@ func (c *CacheImpl) Reconcile(board *gh.ProjectBoard) {
 			Item:   *pi,
 		})
 
-		// Detect linkage drift: deep cache's LinkedPRNumber ≠ fresh shallow board value.
-		if !s.LastDeepFetchAt.IsZero() {
-			var deepPRNum int
-			if s.LinkedPR != nil {
-				deepPRNum = s.LinkedPR.Number
-			}
-			shallowPRNum := pi.LinkedPRNumberShallow
-			if deepPRNum != shallowPRNum {
-				c.store.Apply(itemstate.DeepFetchInvalidated{Repo: pi.Repo, Number: pi.Number})
-				c.logFn("[cache] linkage drift detected for issue #%d: stale linked PR=%d, fresh=%d — invalidating deep cache\n",
-					pi.Number, deepPRNum, shallowPRNum)
-			}
-		}
+		// Note: linkage drift detection (LinkedPRNumber changes) was previously
+		// performed here using LinkedPRNumberShallow. It has moved to the probe
+		// loop in engine/poll.go (runProbeAndDeepFetch), which compares the probe's
+		// closedByPullRequestsReferences[0].number against the cache's LinkedPR.Number.
 	}
 
 	// Remove items no longer on the board.
@@ -982,6 +973,11 @@ func (c *CacheImpl) ProjectID() string {
 // (shallow), while the cache may hold the full deep-fetched set; comparing counts
 // would produce persistent false-positive drift for issues with >30 labels. Label
 // mutations are captured by updatedAt, so the two-field check is sufficient.
+//
+// Note: LightReconcile still calls FetchProjectBoard (full shallow with labels).
+// The per-poll probe path (engine/poll.go runProbeAndDeepFetch) is the primary
+// cost-reduction mechanism; LightReconcile fires at most 20×/hour in webhook
+// mode only, making it a lower-priority optimization target.
 //
 // Returns the number of drifted items, their keys, and the fresh board
 // (to avoid a double-fetch when the caller passes it to Reconcile on drift).
