@@ -566,6 +566,9 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 
 	case ShallowBoardItemUpdated:
 		return applyShallowItem(item, v.Item)
+
+	case ProbeBoardItemUpdated:
+		return applyProbeItem(item, v.Item)
 	}
 
 	return 0
@@ -1087,6 +1090,46 @@ func applyShallowItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 	if !item.UpdatedAt.Equal(pi.UpdatedAt) {
 		item.UpdatedAt = pi.UpdatedAt
 	}
+
+	return flags
+}
+
+// applyProbeItem updates only the probe-visible fields of item from pi.
+// Labels are explicitly NOT updated — the probe query fetches no label data.
+// Wiping Labels here would silently discard the cached label set.
+func applyProbeItem(item *ItemState, pi gh.BoardProbeItem) ChangeFlags {
+	var flags ChangeFlags
+
+	if item.ID != pi.ContentID && pi.ContentID != "" {
+		item.ID = pi.ContentID
+	}
+	if item.ItemID != pi.ItemID && pi.ItemID != "" {
+		item.ItemID = pi.ItemID
+	}
+
+	probeState := "open"
+	if pi.IsClosed {
+		probeState = "closed"
+	}
+	if item.State != probeState || item.IsClosed != pi.IsClosed || item.IsPR != pi.IsPR {
+		item.State = probeState
+		item.IsClosed = pi.IsClosed
+		item.IsPR = pi.IsPR
+		flags |= StateChanged
+	}
+
+	if item.Status != pi.Status {
+		item.Status = pi.Status
+		flags |= StatusChanged
+	}
+
+	if !item.UpdatedAt.Equal(pi.EffectiveUpdatedAt) {
+		item.UpdatedAt = pi.EffectiveUpdatedAt
+	}
+
+	// Labels are intentionally not touched here. The probe query contains no
+	// label data; setting item.Labels from an empty probe would wipe the
+	// cached label set populated by FetchItemDetails or the bootstrap query.
 
 	return flags
 }
