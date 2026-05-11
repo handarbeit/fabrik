@@ -108,6 +108,7 @@ type Model struct {
 
 	// components
 	header  HeaderComponent
+	alert   AlertBannerComponent
 	active  ActivePaneComponent
 	history HistoryPaneComponent
 	detail  DetailPanelComponent
@@ -150,6 +151,7 @@ func New(pollSeconds int, info ProjectInfo, pluginDir string, wakeCh chan struct
 			fabrikVersion:    info.FabrikVersion,
 			skillsStaleCount: skillsStaleCount,
 		},
+		alert:   AlertBannerComponent{now: now},
 		active:  active,
 		history: NewHistoryPaneComponent(info.Repo),
 		footer: FooterComponent{
@@ -426,6 +428,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		comp, _ = m.active.Update(msg)
 		m.active = comp.(ActivePaneComponent)
+		comp, _ = m.alert.Update(msg)
+		m.alert = comp.(AlertBannerComponent)
 		comp, _ = m.footer.Update(msg)
 		m.footer = comp.(FooterComponent)
 		return m, tickCmd()
@@ -448,8 +452,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case PollCompletedEvent:
 		comp, _ := m.header.Update(msg)
 		m.header = comp.(HeaderComponent)
+		comp, _ = m.alert.Update(msg)
+		m.alert = comp.(AlertBannerComponent)
+		m.updateLayout(false)
 		comp, _ = m.footer.Update(msg)
 		m.footer = comp.(FooterComponent)
+		return m, nil
+
+	case RateLimitAlertEvent:
+		comp, _ := m.alert.Update(msg)
+		m.alert = comp.(AlertBannerComponent)
+		m.updateLayout(false)
 		return m, nil
 
 	case JobStartedEvent:
@@ -526,7 +539,7 @@ func (m *Model) updateLayout(scrollToTop bool) {
 		m.prepareDetailItem()
 		detailH = m.detail.Height()
 	}
-	totalAvail := m.height - m.header.Height() - activeH - detailH - m.footer.Height()
+	totalAvail := m.height - m.header.Height() - m.alert.Height() - activeH - detailH - m.footer.Height()
 
 	helpH := 0
 	if m.helpPanel {
@@ -594,6 +607,9 @@ func (m Model) View() string {
 	var sections []string
 
 	sections = append(sections, m.header.View(m.width))
+	if alertView := m.alert.View(m.width); alertView != "" {
+		sections = append(sections, alertView)
+	}
 	sections = append(sections, m.active.View(m.width))
 
 	if m.detailPanel {
