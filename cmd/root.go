@@ -679,7 +679,7 @@ func runTUI(eng *engine.Engine, pollSeconds int, info tui.ProjectInfo, pluginDir
 	// Register terminal cleanup so force-quit paths (SIGHUP re-exec, second
 	// SIGTERM/SIGHUP) release alt-screen before replacing or exiting the process.
 	// Must be registered before eng.Run() starts the signal handlers.
-	eng.SetCleanupHook(func() { p.ReleaseTerminal() }) //nolint:errcheck
+	eng.SetCleanupHook(func() { _ = p.ReleaseTerminal() })
 
 	// Forward events from the engine's channel into bubbletea.
 	go func() {
