@@ -80,6 +80,29 @@ func fmtRateLimitCountdown(reset time.Time, now time.Time) string {
 	return fmt.Sprintf("%ds", secs)
 }
 
+// fmtBannerCountdown formats the rate-limit reset time for the alert banner.
+// Returns "" when reset is zero (header was absent), "Resumes soon." when reset
+// is in the past, or "Resumes in Nm (HH:MM local time)." for a future reset.
+func fmtBannerCountdown(reset time.Time, now time.Time) string {
+	if reset.IsZero() {
+		return ""
+	}
+	remaining := reset.Sub(now)
+	if remaining <= 0 {
+		return "Resumes soon."
+	}
+	secs := int(remaining.Seconds())
+	var countdown string
+	if secs >= 3600 {
+		countdown = fmt.Sprintf("%dh", secs/3600)
+	} else if secs >= 60 {
+		countdown = fmt.Sprintf("%dm", secs/60)
+	} else {
+		countdown = fmt.Sprintf("%ds", secs)
+	}
+	return fmt.Sprintf("Resumes in %s (%s local time).", countdown, reset.Local().Format("15:04"))
+}
+
 // openWatchInlineCmd returns a tea.Cmd that suspends the TUI and launches
 // "fabrik watch <issueNumber>" in the current terminal via tea.ExecProcess.
 // The TUI is restored automatically when the user exits watch with q.
