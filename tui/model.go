@@ -94,10 +94,11 @@ type Model struct {
 	height int
 
 	// focus and confirmation state
-	focusPane   pane
-	confirmQuit bool
-	detailPanel bool
-	helpPanel   bool
+	focusPane      pane
+	confirmQuit    bool
+	confirmUpgrade bool
+	detailPanel    bool
+	helpPanel      bool
 
 	// plugin directory
 	pluginDir string
@@ -219,6 +220,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "n", "N":
+			if m.confirmUpgrade {
+				m.confirmUpgrade = false
+				m.header.SetStatusMsg("")
+				return m, nil
+			}
 			if m.history.ConfirmClear() {
 				m.history.SetConfirmClear(false)
 				m.updateLayout(false)
@@ -236,6 +242,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "esc":
+			if m.confirmUpgrade {
+				m.confirmUpgrade = false
+				m.header.SetStatusMsg("")
+				return m, nil
+			}
 			if m.history.ConfirmClear() {
 				m.history.SetConfirmClear(false)
 				m.updateLayout(false)
@@ -312,6 +323,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+r":
 			m.header.SetStatusMsg("refreshing…")
 			return m, sendSighupCmd()
+
+		case "u":
+			if m.header.skillsStaleCount > 0 {
+				m.confirmUpgrade = true
+				m.header.SetStatusMsg(fmt.Sprintf(
+					"Upgrade %d plugin file(s)? Active invocations pick up changes on next run. [y/N]",
+					m.header.skillsStaleCount,
+				))
+			} else {
+				m.header.SetStatusMsg("plugin skills up to date")
+			}
+			return m, nil
+
+		case "y", "Y":
+			if m.confirmUpgrade {
+				m.confirmUpgrade = false
+				return m, upgradePluginCmd()
+			}
+			// Not confirming — forward to history viewport for scrolling.
+			var cmd tea.Cmd
+			m.history.historyVP, cmd = m.history.historyVP.Update(msg)
+			return m, cmd
 
 		case "a":
 			if _, err := exec.LookPath("abtop"); err != nil {
