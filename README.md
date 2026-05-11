@@ -187,7 +187,7 @@ Sending `SIGHUP` to the Fabrik process drains in-flight Claude runs, then
 re-execs the binary in place — no terminal disruption, no lost state. Use it
 to pick up a new binary after `go install` without restarting the session.
 The terminal alt-screen is properly restored on signal-driven exit, so no
-`reset` is needed after a kill or SIGHUP. Plugin-skills are checked and
+`reset` is needed after a SIGINT, SIGTERM, or SIGHUP. Plugin-skills are checked and
 refreshed non-interactively during restart — the process never hangs waiting
 for a prompt. See
 [USER_GUIDE.md §Recovering from Wedged State](docs/USER_GUIDE.md#recovering-from-wedged-state)

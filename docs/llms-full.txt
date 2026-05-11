@@ -1489,7 +1489,7 @@ operator to press `u` to upgrade.
 | `c` | Delete selected history entry |
 | `C` | Clear all history (with confirmation) |
 | `a` | Open abtop AI session monitor (shows token usage, context window, rate limits for all Claude sessions) |
-| `u` | Upgrade plugin skills (when plugin skills are out of date, a `[u] skills out of date` badge appears in the header; pressing `u` upgrades and clears the badge; active stage invocations pick up new files on next run) |
+| `u` | Upgrade plugin skills (when plugin skills are out of date, a `[u] skills out of date` badge appears in the header; pressing `u` shows a confirmation prompt — press `y` to upgrade and clear the badge; active stage invocations pick up new files on next run) |
 | `w` | Wake: reset idle backoff and poll immediately |
 | `ctrl+r` | Force refresh: drain in-flight workers and restart in place (same as SIGHUP — see [Recovering from Wedged State](#recovering-from-wedged-state)) |
 | `?` | Toggle help panel (keybindings and labels reference) |
@@ -2079,12 +2079,14 @@ pkill -HUP fabrik
 6. The new process starts with a clean in-memory cache, Store, observers, and `mayNeedWork` set.
 
 **Terminal restore:** The terminal alt-screen is properly released before the process
-is replaced or exits — no `reset` command is needed after a kill or SIGHUP. This
-applies to all signal-driven exit paths including SIGHUP re-exec and forced kills.
+is replaced or exits — no `reset` command is needed after a SIGINT, SIGTERM, or SIGHUP.
+This applies to all signal-driven exit paths that go through Fabrik's signal handlers,
+including SIGHUP re-exec.
 
 **Plugin-skills upgrade:** SIGHUP restart proceeds non-interactively through the
-plugin-skills upgrade check — skills are inspected and refreshed silently without
-prompting, so the restart never hangs waiting for user confirmation.
+plugin-skills upgrade check — skills are refreshed automatically without prompting
+(a brief status line is written to stderr), so the restart never hangs waiting for
+user confirmation.
 
 **What is cleared:**
 
