@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -336,5 +337,36 @@ func TestUpdate_TurnProgressEvent_ResetOnJobStarted(t *testing.T) {
 	}
 	if job.MaxTurns != 0 {
 		t.Errorf("MaxTurns = %d after new JobStartedEvent, want 0", job.MaxTurns)
+	}
+}
+
+// TestUpdate_CtrlR_ActivePane_ReturnsSighupCmd verifies that ctrl+r from the
+// active pane returns a non-nil cmd (the SIGHUP-sending command). The cmd is
+// not called to avoid sending a real SIGHUP to the test process.
+func TestUpdate_CtrlR_ActivePane_ReturnsSighupCmd(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sendSighupCmd is a no-op on Windows")
+	}
+	m := New(30, ProjectInfo{}, "", nil)
+	m.focusPane = paneActive
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	if cmd == nil {
+		t.Error("expected non-nil cmd from ctrl+r in active pane")
+	}
+}
+
+// TestUpdate_CtrlR_HistoryPane_ReturnsSighupCmd verifies that ctrl+r from the
+// history pane returns a non-nil cmd (the SIGHUP-sending command).
+func TestUpdate_CtrlR_HistoryPane_ReturnsSighupCmd(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sendSighupCmd is a no-op on Windows")
+	}
+	m := New(30, ProjectInfo{}, "", nil)
+	m.focusPane = paneHistory
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	if cmd == nil {
+		t.Error("expected non-nil cmd from ctrl+r in history pane")
 	}
 }

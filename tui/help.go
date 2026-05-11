@@ -35,6 +35,7 @@ KEYBOARD SHORTCUTS
   Global
     a          Open abtop AI session monitor
     w          Wake: reset idle backoff and poll immediately
+    ctrl+r     Force refresh (same as SIGHUP)
     ?          Toggle this help panel
     q          Quit
     ctrl+c     Force quit

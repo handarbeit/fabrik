@@ -1487,6 +1487,7 @@ Claude sessions, a scrollable History pane with completed jobs, and a status bar
 | `C` | Clear all history (with confirmation) |
 | `a` | Open abtop AI session monitor (shows token usage, context window, rate limits for all Claude sessions) |
 | `w` | Wake: reset idle backoff and poll immediately |
+| `ctrl+r` | Force refresh: drain in-flight workers and restart in place (same as SIGHUP — see [Recovering from Wedged State](#recovering-from-wedged-state)) |
 | `?` | Toggle help panel (keybindings and labels reference) |
 | `q` | Quit |
 
@@ -2025,6 +2026,10 @@ If Claude doesn't seem to follow the skill instructions:
 Cache-stale bugs can occasionally leave Fabrik's in-memory state stuck — an issue that should advance doesn't, or a label that should clear doesn't. The safest escape hatch is a SIGHUP restart, which drops all in-memory state and re-execs the same binary in place, without tearing down the terminal session or TUI.
 
 **How to trigger:**
+
+If you are using the TUI dashboard, press **`ctrl+r`** — this sends SIGHUP to the Fabrik process and triggers the same restart without leaving the TUI to open another terminal window.
+
+From the command line:
 
 ```bash
 # Find the PID (shown at startup: "[startup] fabrik PID: <N>")
