@@ -99,6 +99,11 @@ type Engine struct {
 	// sighupExecFn overrides syscall.Exec in tests to prevent the test process
 	// from actually being replaced. Production code leaves this nil.
 	sighupExecFn func(argv0 string, argv []string, envv []string) error
+	// cleanupHook is called before any syscall.Exec or os.Exit(1) on force-quit
+	// paths to release the terminal (e.g. p.ReleaseTerminal() in TUI mode).
+	// Nil in non-TUI mode. Set via SetCleanupHook; wrapped in sync.Once so
+	// concurrent force-quit goroutines can't call it simultaneously.
+	cleanupHook func()
 }
 
 func New(cfg Config) (*Engine, error) {
@@ -279,6 +284,18 @@ func (e *Engine) SetEvents(ch chan tui.Event) {
 		wm.logfFn = e.logf
 	}
 	e.mu.Unlock()
+}
+
+// SetCleanupHook registers fn to be called exactly once before any force-quit
+// path (SIGHUP re-exec, second SIGTERM, second SIGHUP). Wraps fn in sync.Once
+// so concurrent force-quit goroutines can't invoke it simultaneously. Must be
+// called before Run(). No-op when fn is nil.
+func (e *Engine) SetCleanupHook(fn func()) {
+	if fn == nil {
+		return
+	}
+	var once sync.Once
+	e.cleanupHook = func() { once.Do(fn) }
 }
 
 // emit sends an event to the channel without blocking. Dropped if the channel is full.
