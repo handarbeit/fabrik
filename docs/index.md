@@ -259,7 +259,7 @@ description: >-
         <span class="feature-icon">🚀</span>
         <div class="feature-title">Big-Board Efficiency</div>
         <div class="feature-desc">
-          Probe-driven polling cuts per-poll GraphQL cost ~5–10× on large boards; terminal Done items are skipped entirely.
+          Probe-driven polling cuts per-poll GraphQL cost ~5–10× on large boards; cold-start bootstrap seeds Done items from probe data, cutting startup cost ~80–90% — making two Fabrik instances on a single token budget viable.
         </div>
       </a>
     </div>
