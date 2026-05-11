@@ -268,6 +268,11 @@ func (e *Engine) Run() error {
 		select {
 		case <-sigCh:
 			fmt.Fprintln(os.Stderr, "\nForce-quitting...")
+			// Release the terminal before exiting so the shell is not left in
+			// alt-screen mode.
+			if fn := e.cleanupHook; fn != nil {
+				fn()
+			}
 			os.Exit(1)
 		case <-ctx.Done():
 		}
