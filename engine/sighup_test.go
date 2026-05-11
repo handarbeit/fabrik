@@ -33,12 +33,21 @@ func TestRun_SighupRestart(t *testing.T) {
 	readyCh := make(chan struct{})
 	eng.cfg.ReadyCh = readyCh
 
+	// seq is a monotonic counter; each hook records the value at call time so we
+	// can assert cleanup happened strictly before exec.
+	var seq atomic.Int32
+	var cleanupSeq, execSeq int32
+
+	// Set cleanupHook directly (bypassing SetCleanupHook) to capture order.
+	eng.cleanupHook = func() {
+		cleanupSeq = seq.Add(1)
+	}
+
 	// Override exec so the test process is not actually replaced.
-	var execCalled atomic.Bool
 	var capturedBin string
 	var capturedArgs []string
 	eng.sighupExecFn = func(argv0 string, argv []string, envv []string) error {
-		execCalled.Store(true)
+		execSeq = seq.Add(1)
 		capturedBin = argv0
 		capturedArgs = argv
 		return nil
@@ -63,7 +72,7 @@ func TestRun_SighupRestart(t *testing.T) {
 		t.Fatal("Run did not shut down after SIGHUP in time")
 	}
 
-	if !execCalled.Load() {
+	if execSeq == 0 {
 		t.Fatal("sighupExecFn was not called")
 	}
 	if capturedBin == "" {
@@ -74,5 +83,11 @@ func TestRun_SighupRestart(t *testing.T) {
 	}
 	if !eng.sighupRequested.Load() {
 		t.Error("sighupRequested flag not set")
+	}
+	if cleanupSeq == 0 {
+		t.Fatal("cleanupHook was not called before exec")
+	}
+	if cleanupSeq >= execSeq {
+		t.Errorf("cleanupHook must be called before exec: cleanupSeq=%d execSeq=%d", cleanupSeq, execSeq)
 	}
 }
