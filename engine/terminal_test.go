@@ -503,3 +503,50 @@ func TestRunProbeAndDeepFetch_LinkageDrift_WarmCache_FiresDeepFetchInvalidated(t
 		}())
 	}
 }
+
+// TestRunProbeAndDeepFetch_LinkageDrift_ColdStart_ClearsStalePR verifies that
+// when a never-deep-fetched item has a cached PR number but the probe reports
+// LinkedPRNumber=0 (PR delinked), PRDetailsUpdated{PRNumber:0} is applied to
+// clear the stale LinkedPR.Number and remove the stale prToKey reverse index entry.
+func TestRunProbeAndDeepFetch_LinkageDrift_ColdStart_ClearsStalePR(t *testing.T) {
+	bootstrapTime := time.Now().Add(-2 * time.Hour)
+	probeTime := time.Now().Add(-time.Hour)
+
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return []gh.BoardProbeItem{
+				// Same item, now probe reports no linked PR (LinkedPRNumber=0).
+				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo",
+					Status: "Research", EffectiveUpdatedAt: probeTime, LinkedPRNumber: 0},
+			}, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error { return nil },
+	}
+	eng := testEngineWithCleanup(client, &mockClaudeInvoker{})
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	// Bootstrap with LinkedPRNumber=42 so the cache has a stale prToKey entry.
+	cache.BootstrapFromProbe([]gh.BoardProbeItem{
+		{ContentID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo",
+			Status: "Research", EffectiveUpdatedAt: bootstrapTime, LinkedPRNumber: 42},
+	}, "PVT_1", testStagesWithCleanup())
+	eng.readClient = cache
+
+	// Verify prToKey entry for PR 42 exists after bootstrap.
+	if _, found := eng.store.GetByPRKey("owner/repo", 42); !found {
+		t.Fatal("prToKey should have entry for PR #42 after bootstrap")
+	}
+
+	eng.runProbeAndDeepFetch(cache)
+
+	// After probe reports LinkedPRNumber=0, the stale entry must be cleared.
+	snap, err := eng.store.Get("owner/repo", 1)
+	if err != nil {
+		t.Fatalf("item not found: %v", err)
+	}
+	if s := snap.State(); s.LinkedPR != nil && s.LinkedPR.Number != 0 {
+		t.Errorf("LinkedPR.Number = %d after delink, want 0", s.LinkedPR.Number)
+	}
+	if _, found := eng.store.GetByPRKey("owner/repo", 42); found {
+		t.Error("prToKey should NOT have entry for PR #42 after probe reports delink")
+	}
+}
