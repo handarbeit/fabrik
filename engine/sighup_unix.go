@@ -91,12 +91,16 @@ func performSighupRestart(e *Engine, lockFile *os.File) {
 
 	// Release the terminal before replacing the process so the shell is not left
 	// in alt-screen mode. The new process re-enters alt-screen normally.
-	// NOTE: any new syscall.Exec added by issue #692 must also invoke this hook.
 	if fn := e.cleanupHook; fn != nil {
 		fn()
 	}
 
-	if err := execFn(exe, os.Args, os.Environ()); err != nil {
+	// FABRIK_SIGHUP_RESTART=1 mirrors FABRIK_AUTO_UPGRADED: detected at
+	// cmd/root.go startup to force non-interactive plugin skills refresh
+	// without prompting. Must be unset there before engine.New() so Claude
+	// child processes do not inherit it.
+	env := append(os.Environ(), "FABRIK_SIGHUP_RESTART=1")
+	if err := execFn(exe, os.Args, env); err != nil {
 		e.logf(0, "signal", "SIGHUP restart: exec failed: %v\n", err)
 	}
 }
