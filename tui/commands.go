@@ -10,7 +10,24 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	fabrikplugin "github.com/handarbeit/fabrik/plugin"
 )
+
+// pluginUpgradeResultMsg is returned by upgradePluginCmd when RefreshPlugin completes.
+type pluginUpgradeResultMsg struct {
+	Wrote int
+	Err   error
+}
+
+// upgradePluginCmd returns a tea.Cmd that calls fabrikplugin.RefreshPlugin() in
+// a background goroutine and delivers the result as a pluginUpgradeResultMsg.
+// It does not block the TUI event loop.
+func upgradePluginCmd() tea.Cmd {
+	return func() tea.Msg {
+		n, err := fabrikplugin.RefreshPlugin()
+		return pluginUpgradeResultMsg{Wrote: n, Err: err}
+	}
+}
 
 // tuiReadSessionID reads the Claude session ID for a given repo, issue and stage.
 // The path logic mirrors engine.ReadSessionID — keep in sync if either changes.
