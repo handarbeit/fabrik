@@ -1603,8 +1603,7 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 
 		snap, snapErr := e.store.Get(repo, pi.Number)
 		if snapErr != nil {
-			// New item on board — seed minimal state, then deep-fetch for labels.
-			e.logf(pi.Number, "cache", "probe: new item discovered — deep-fetching\n")
+			// New item on board — seed minimal state into the store.
 			minimal := gh.ProjectItem{
 				ID:        pi.ContentID,
 				ItemID:    pi.ItemID,
@@ -1616,6 +1615,15 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 				UpdatedAt: pi.EffectiveUpdatedAt,
 			}
 			e.store.Apply(itemstate.IssueOpened{Item: minimal})
+			// Probe-only terminal short-circuit: closed items in a cleanup stage have
+			// no remaining Fabrik work; skip the deep-fetch and seed the terminal flag.
+			// This mirrors what BootstrapFromProbe does for cold-start items.
+			if isProbeOnlyTerminal(pi.IsClosed, pi.Status, e.cfg.Stages) {
+				e.store.Apply(itemstate.TerminalFlagSet{Repo: repo, Number: pi.Number, Terminal: true})
+				e.logf(pi.Number, "cache", "probe: new item is closed terminal — skipping deep-fetch\n")
+				continue
+			}
+			e.logf(pi.Number, "cache", "probe: new item discovered — deep-fetching\n")
 			if fetchErr := e.readClient.FetchItemDetails(&minimal); fetchErr != nil {
 				e.logf(pi.Number, "warn", "probe: deep-fetch for new item failed: %v\n", fetchErr)
 				e.store.Apply(itemstate.DeepFetchFailed{Repo: repo, Number: pi.Number, At: time.Now()})
@@ -1751,6 +1759,17 @@ func isTerminalPredicate(labels []string, status string, stagesCfg []*stages.Sta
 		}
 	}
 	return true
+}
+
+// isProbeOnlyTerminal reports whether an item is terminal based solely on probe
+// data (IsClosed + CleanupWorktree stage), without requiring label data. Use
+// this predicate in the new-item branch of runProbeAndDeepFetch, where labels
+// have not yet been fetched. Unlike isTerminalPredicate, it cannot verify the
+// stage:Name:complete label or the absence of transient lifecycle labels; it is
+// safe only for newly-discovered items that have never been in the store.
+func isProbeOnlyTerminal(isClosed bool, status string, stagesCfg []*stages.Stage) bool {
+	st := stages.FindStage(stagesCfg, status)
+	return isClosed && st != nil && st.CleanupWorktree
 }
 
 // runStartupTransientLabelScan is a one-shot recovery pass that runs after the
