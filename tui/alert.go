@@ -70,9 +70,14 @@ func (a AlertBannerComponent) View(width int) string {
 	if countdown != "" {
 		text += " " + countdown
 	}
-	style := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("196")).
-		Bold(true).
-		Width(width)
-	return style.Render(text)
+	// Truncate to a single line so Height() == 1 is always accurate on
+	// narrow terminals where the text would otherwise wrap.
+	if width > 0 && lipgloss.Width(text) > width {
+		runes := []rune(text)
+		for len(runes) > 0 && lipgloss.Width(string(runes)+"…") > width {
+			runes = runes[:len(runes)-1]
+		}
+		text = string(runes) + "…"
+	}
+	return failStyle.Bold(true).Width(width).Render(text)
 }
