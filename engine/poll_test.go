@@ -2508,6 +2508,99 @@ func TestRunStartupTransientLabelScan_RemovesStaleLabelsFromClosedItems(t *testi
 	}
 }
 
+// TestColdStart_ProbeBootstrap_TerminalItemsSkipDeepFetch verifies the cold-start cost
+// reduction: 10 closed Done items are seeded terminal by BootstrapFromProbe and
+// are never deep-fetched, while 3 open active items are deep-fetched normally.
+// Expected deep-fetch count after the first probe cycle: ≤ 3.
+func TestColdStart_ProbeBootstrap_TerminalItemsSkipDeepFetch(t *testing.T) {
+	var deepFetchCalls int
+	probeTime := time.Now().Add(-time.Minute)
+
+	// Build 10 closed Done items + 3 open Research items for the probe response.
+	var probeItems []gh.BoardProbeItem
+	for i := 1; i <= 10; i++ {
+		probeItems = append(probeItems, gh.BoardProbeItem{
+			ContentID: fmt.Sprintf("I_%03d", i), ItemID: fmt.Sprintf("PVTI_%03d", i),
+			Number: i, Repo: "owner/repo",
+			Status:             "Done",
+			IsClosed:           true,
+			EffectiveUpdatedAt: probeTime,
+		})
+	}
+	for i := 11; i <= 13; i++ {
+		probeItems = append(probeItems, gh.BoardProbeItem{
+			ContentID: fmt.Sprintf("I_%03d", i), ItemID: fmt.Sprintf("PVTI_%03d", i),
+			Number: i, Repo: "owner/repo",
+			Status:             "Research",
+			IsClosed:           false,
+			EffectiveUpdatedAt: probeTime,
+		})
+	}
+
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return probeItems, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalls++
+			return nil
+		},
+	}
+	eng := NewWithDeps(
+		Config{
+			Owner: "owner", Repo: "repo", ProjectNum: 1,
+			User: "testuser", Token: "token", MaxConcurrent: 5,
+			Stages: testStagesWithCleanup(),
+		},
+		client, &mockClaudeInvoker{}, NewWorktreeManager("/tmp/test-repo"),
+	)
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	eng.readClient = cache
+
+	// Simulate the virgin-cache branch: probe bootstrap seeds the store.
+	items, projectID, err := client.ProbeProjectBoard("owner", "repo", 1, "organization")
+	if err != nil {
+		t.Fatalf("ProbeProjectBoard: %v", err)
+	}
+	cache.BootstrapFromProbe(items, projectID, eng.cfg.Stages)
+
+	// Now simulate the next poll cycle — probe-driven deep-fetch pass.
+	eng.runProbeAndDeepFetch(cache)
+
+	// The 10 closed Done items are seeded terminal and must NOT be deep-fetched.
+	// The 3 open Research items have no prior deep-fetch and MUST be deep-fetched.
+	if deepFetchCalls > 3 {
+		t.Errorf("cold-start deep-fetch count = %d, want ≤ 3 (only active items)", deepFetchCalls)
+	}
+	if deepFetchCalls == 0 {
+		t.Error("expected ≥ 1 deep-fetch for active items; got 0")
+	}
+
+	// Terminal flag must be set on all closed Done items.
+	for i := 1; i <= 10; i++ {
+		snap, snapErr := eng.store.Get("owner/repo", i)
+		if snapErr != nil {
+			t.Errorf("item #%d not found in store", i)
+			continue
+		}
+		if !snap.IsTerminal() {
+			t.Errorf("item #%d (closed Done): expected IsTerminal()=true", i)
+		}
+	}
+
+	// Active Research items must NOT be terminal.
+	for i := 11; i <= 13; i++ {
+		snap, snapErr := eng.store.Get("owner/repo", i)
+		if snapErr != nil {
+			t.Errorf("item #%d not found in store", i)
+			continue
+		}
+		if snap.IsTerminal() {
+			t.Errorf("item #%d (open Research): expected IsTerminal()=false", i)
+		}
+	}
+}
+
 // TestRunProbeAndDeepFetch_IsClosedPropagates_WithoutDeepFetch verifies that
 // IsClosed=true is written to the store via ProbeBoardItemUpdated even when
 // the item is cache-fresh (EffectiveUpdatedAt unchanged → no deep-fetch).
