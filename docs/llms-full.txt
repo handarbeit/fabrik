@@ -1468,7 +1468,9 @@ The interactive terminal dashboard is enabled by default when running in a real 
 
 The TUI shows a compact header with poll status, an In Progress pane showing active
 Claude sessions, a scrollable History pane with completed jobs, and a status bar
-(footer) displaying REST and GraphQL rate limit stats.
+(footer) displaying REST and GraphQL rate limit stats. When the GraphQL budget is
+exhausted or rate-limit-induced probe failures are detected, a prominent red alert
+banner appears immediately below the header with a countdown to when polling resumes.
 
 ### Keyboard Shortcuts
 
@@ -1649,6 +1651,20 @@ The GraphQL query uses a two-phase fetch to minimize rate limit consumption:
 
 Typical cost is ~5–30 points per poll depending on active items, well within the
 5,000 points/hour limit.
+
+#### Rate-Limit Exhaustion Alert Banner
+
+When the GraphQL budget hits zero or drops below 20% and probe failures begin,
+Fabrik suspends polling and displays a red alert banner immediately below the TUI
+header:
+
+```
+⚠ GraphQL rate limit exhausted — polling suspended. Resumes in 12m (14:30 local time).
+```
+
+The countdown ticks every second and shows the local time when the quota resets.
+Once the GraphQL budget recovers above 50%, the banner disappears automatically and
+polling resumes. You do not need to restart Fabrik — it recovers on its own.
 
 ---
 
