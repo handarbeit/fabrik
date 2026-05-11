@@ -416,6 +416,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Fan out to all components
 		comp, _ := m.header.Update(msg)
 		m.header = comp.(HeaderComponent)
+		// TickEvent clears statusMsg; re-show the upgrade confirmation prompt so
+		// it remains visible until the user responds with y/n/esc.
+		if m.confirmUpgrade {
+			m.header.SetStatusMsg(fmt.Sprintf(
+				"Upgrade %d plugin file(s)? Active invocations pick up changes on next run. [y/N]",
+				m.header.skillsStaleCount,
+			))
+		}
 		comp, _ = m.active.Update(msg)
 		m.active = comp.(ActivePaneComponent)
 		comp, _ = m.footer.Update(msg)
