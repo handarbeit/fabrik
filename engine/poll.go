@@ -37,6 +37,13 @@ const rateLimitHealthyThreshold = 0.50
 // configured poll interval (e.g. 10× = 10 * PollSeconds).
 const rateLimitMaxBackoffMultiplier = 10
 
+// rateLimitNearZeroPercent is the threshold (as a percentage of Limit) below
+// which the previous remaining count is considered "near zero" for the
+// recovery wake signal. Budget transitions from near-zero to healthy happen
+// at the hourly reset boundary — not via gradual organic replenishment — so
+// this guard prevents spurious wakes from ordinary hysteresis crossings.
+const rateLimitNearZeroPercent = 1
+
 // maxIdleBackoff is the absolute maximum poll interval during idle backoff,
 // regardless of the configured poll interval.
 const maxIdleBackoff = 5 * time.Minute
@@ -68,6 +75,12 @@ func nextRateLimitLow(current bool, ratio float64) bool {
 		return false
 	}
 	return current
+}
+
+// isRateLimitNearZero reports whether remaining is at or near zero relative to
+// limit (within rateLimitNearZeroPercent). Returns false when limit is 0.
+func isRateLimitNearZero(remaining, limit int) bool {
+	return limit > 0 && remaining*100 <= limit*rateLimitNearZeroPercent
 }
 
 // effectiveIdleCap returns the idle backoff cap based on webhook stream health.
@@ -482,6 +495,7 @@ func (e *Engine) Run() error {
 	prevMultiplier := 1
 	rateLimitLow := false
 	rateLimitRatio := 1.0
+	lastRemainingCount := 0
 
 	// doPollCycle runs poll(), updates idle/backoff state, emits PollCompletedEvent,
 	// and resets the ticker to the effective interval. Returns the error from poll().
@@ -511,7 +525,17 @@ func (e *Engine) Run() error {
 			if newRateLimitLow && !rateLimitLow {
 				e.logf(0, "warn", "GraphQL rate limit low (%.0f%% remaining) — activating rate-limit backoff\n", ratio*100)
 			} else if !newRateLimitLow && rateLimitLow {
-				e.logf(0, "poll", "GraphQL rate limit recovered (%.0f%% remaining)\n", ratio*100)
+				if isRateLimitNearZero(lastRemainingCount, graphqlStats.Limit) {
+					e.logf(0, "info", "GraphQL rate limit recovered (%d/%d remaining) — triggering immediate probe\n", graphqlStats.Remaining, graphqlStats.Limit)
+					if e.wakeCh != nil {
+						select {
+						case e.wakeCh <- struct{}{}:
+						default:
+						}
+					}
+				} else {
+					e.logf(0, "poll", "GraphQL rate limit recovered (%.0f%% remaining)\n", ratio*100)
+				}
 			}
 			rateLimitLow = newRateLimitLow
 			if rateLimitLow {
@@ -519,6 +543,7 @@ func (e *Engine) Run() error {
 			} else {
 				rateLimitRatio = 1.0
 			}
+			lastRemainingCount = graphqlStats.Remaining
 		}
 
 		// Compute and apply effective interval.
