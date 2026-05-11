@@ -373,3 +373,133 @@ func TestRunStartupTerminalScan_UsesCleanupStageNotHardcodedDone(t *testing.T) {
 		t.Error("expected IsTerminal()=true for cleanup stage named 'Archived'")
 	}
 }
+
+// ---- linkage-drift gate tests (Task 5) ----
+
+// TestRunProbeAndDeepFetch_LinkageDrift_ColdStart_AuthoritativeWrite verifies that
+// when an item has never been deep-fetched and the probe finds a different LinkedPRNumber
+// than the cache holds, the probe's value is written authoritatively via PRDetailsUpdated
+// (not DeepFetchInvalidated). The prToKey reverse index must be updated.
+func TestRunProbeAndDeepFetch_LinkageDrift_ColdStart_AuthoritativeWrite(t *testing.T) {
+	// Track deep-fetch calls — we allow one (the item has no LastDeepFetchAt,
+	// so IsItemCacheFresh returns false and a normal deep-fetch will fire).
+	var deepFetchCalls int
+	staleTime := time.Now().Add(-2 * time.Hour)
+	probeTime := time.Now().Add(-time.Hour)
+
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return []gh.BoardProbeItem{
+				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo",
+					Status: "Research", EffectiveUpdatedAt: probeTime, LinkedPRNumber: 42},
+			}, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalls++
+			item.LinkedPRNumber = 42 // deep-fetch confirms the PR
+			return nil
+		},
+	}
+	eng := testEngineWithCleanup(client, &mockClaudeInvoker{})
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	// Bootstrap with LinkedPRNumber=0 (old-style bootstrap that did not populate PR number).
+	cache.Bootstrap(&gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo",
+				Status: "Research", UpdatedAt: staleTime, LinkedPRNumber: 0},
+		},
+	})
+	eng.readClient = cache
+
+	eng.runProbeAndDeepFetch(cache)
+
+	// LinkedPR.Number must be set to 42 (either by PRDetailsUpdated before or by deep-fetch after).
+	snap, err := eng.store.Get("owner/repo", 1)
+	if err != nil {
+		t.Fatalf("item not found: %v", err)
+	}
+	s := snap.State()
+	if s.LinkedPR == nil || s.LinkedPR.Number != 42 {
+		t.Errorf("LinkedPR.Number = %d, want 42", func() int {
+			if s.LinkedPR != nil {
+				return s.LinkedPR.Number
+			}
+			return 0
+		}())
+	}
+
+	// prToKey reverse index must be populated so LinkedPRByNumber lookup works.
+	_, found := eng.store.GetByPRKey("owner/repo", 42)
+	if !found {
+		t.Error("prToKey index should have entry for PR #42 after authoritative write")
+	}
+}
+
+// TestRunProbeAndDeepFetch_LinkageDrift_WarmCache_FiresDeepFetchInvalidated verifies
+// that when an item HAS been deep-fetched and the probe finds a different LinkedPRNumber,
+// DeepFetchInvalidated fires and the item is re-deep-fetched.
+func TestRunProbeAndDeepFetch_LinkageDrift_WarmCache_FiresDeepFetchInvalidated(t *testing.T) {
+	var deepFetchCalls int
+	warmTime := time.Now().Add(-30 * time.Minute)
+	probeTime := warmTime // same time so staleness check does NOT trigger deep-fetch on its own
+
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return []gh.BoardProbeItem{
+				// Same timestamp as warm state — staleness alone would NOT trigger a re-fetch.
+				// Only the changed LinkedPRNumber (0→99) should cause a re-fetch.
+				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo",
+					Status: "Research", EffectiveUpdatedAt: probeTime, LinkedPRNumber: 99},
+			}, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalls++
+			item.LinkedPRNumber = 99
+			return nil
+		},
+	}
+	eng := testEngineWithCleanup(client, &mockClaudeInvoker{})
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	// Bootstrap with LinkedPRNumber=0.
+	cache.Bootstrap(&gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo",
+				Status: "Research", UpdatedAt: warmTime, LinkedPRNumber: 0},
+		},
+	})
+	eng.readClient = cache
+
+	// Simulate a prior deep-fetch so LastDeepFetchAt is non-zero and
+	// IsItemCacheFresh would normally return true for warmTime.
+	eng.store.Apply(itemstate.ItemDeepFetched{
+		Repo:   "owner/repo",
+		Number: 1,
+		FreshState: gh.ProjectItem{
+			ID: "I_001", Number: 1, Repo: "owner/repo",
+			Status:    "Research",
+			UpdatedAt: warmTime,
+		},
+	})
+
+	eng.runProbeAndDeepFetch(cache)
+
+	// DeepFetchInvalidated should have fired for the warm-cache drift, causing
+	// a re-deep-fetch. Without DeepFetchInvalidated, the same-timestamp probe
+	// would have been a cache hit (IsItemCacheFresh = true → skip).
+	if deepFetchCalls == 0 {
+		t.Error("expected FetchItemDetails call after warm-cache linkage drift; got 0 calls")
+	}
+	// LinkedPR.Number must be updated to 99.
+	snap, _ := eng.store.Get("owner/repo", 1)
+	s := snap.State()
+	if s.LinkedPR == nil || s.LinkedPR.Number != 99 {
+		t.Errorf("LinkedPR.Number = %d after warm-cache drift re-fetch, want 99", func() int {
+			if s.LinkedPR != nil {
+				return s.LinkedPR.Number
+			}
+			return 0
+		}())
+	}
+}
