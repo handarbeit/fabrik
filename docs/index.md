@@ -255,6 +255,13 @@ description: >-
           SIGHUP drains in-flight runs and re-execs the binary in place — pick up a new build without terminal disruption.
         </div>
       </a>
+      <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#command-line-flags" aria-label="Big-Board Efficiency — open documentation">
+        <span class="feature-icon">🚀</span>
+        <div class="feature-title">Big-Board Efficiency</div>
+        <div class="feature-desc">
+          Probe-driven polling cuts per-poll GraphQL cost ~5–10× on large boards; terminal Done items are skipped entirely.
+        </div>
+      </a>
     </div>
 
     <div class="factory-callout">
