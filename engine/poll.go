@@ -1559,7 +1559,17 @@ func gitRevParse(dir, ref string) (string, error) {
 func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 	probeItems, _, err := e.client.ProbeProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
 	if err != nil {
-		e.logf(0, "cache", "probe refresh failed (using prior cache state): %v\n", err)
+		_, graphqlStats := e.client.RateLimitStats()
+		if graphqlStats.Limit > 0 && (graphqlStats.Remaining == 0 || float64(graphqlStats.Remaining)/float64(graphqlStats.Limit) < rateLimitBackoffThreshold) {
+			retryStr := "retrying soon"
+			if !graphqlStats.Reset.IsZero() && graphqlStats.Reset.After(time.Now()) {
+				retryStr = fmt.Sprintf("retrying after %s (local)", graphqlStats.Reset.Local().Format("15:04"))
+			}
+			e.logf(0, "warn", "rate limited — polling suspended, %s\n", retryStr)
+			e.emitStructural(tui.RateLimitAlertEvent{Exhausted: true, Reset: graphqlStats.Reset})
+		} else {
+			e.logf(0, "cache", "probe refresh failed (using prior cache state): %v\n", err)
+		}
 		return
 	}
 
