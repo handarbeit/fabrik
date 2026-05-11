@@ -461,6 +461,77 @@ func TestTuiEventMethods(t *testing.T) {
 	JobCompletedEvent{}.tuiEvent()
 	TickEvent{}.tuiEvent()
 	SkillsStaleEvent{}.tuiEvent()
+	RateLimitAlertEvent{}.tuiEvent()
+}
+
+// TestUpdate_RateLimitAlertEvent_Exhausted verifies that after receiving a
+// RateLimitAlertEvent{Exhausted: true}, the alert banner becomes visible when
+// graphqlStats show low remaining quota.
+func TestUpdate_RateLimitAlertEvent_Exhausted(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, 0)
+	// First deliver stats that put ratio at 10% (below 20% threshold).
+	next, _ := m.Update(PollCompletedEvent{
+		GraphQLStats: RateLimitStats{Limit: 100, Remaining: 10},
+	})
+	m = next.(Model)
+
+	// Trigger alert — probe failure while rate limited.
+	next, _ = m.Update(RateLimitAlertEvent{Exhausted: true})
+	m = next.(Model)
+
+	if !m.alert.bannerActive {
+		t.Error("expected alert.bannerActive=true after RateLimitAlertEvent{Exhausted: true}")
+	}
+	if !m.alert.isVisible() {
+		t.Error("expected alert banner to be visible after Exhausted=true event with low quota")
+	}
+}
+
+// TestUpdate_RateLimitAlertEvent_Recovered verifies that after receiving a
+// RateLimitAlertEvent{Exhausted: false}, the banner's bannerActive flag is cleared.
+func TestUpdate_RateLimitAlertEvent_Recovered(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, 0)
+	// Manually set banner active with stats still low.
+	m.alert.bannerActive = true
+	m.alert.graphqlStats = RateLimitStats{Limit: 100, Remaining: 10}
+
+	// Recovery event.
+	next, _ := m.Update(RateLimitAlertEvent{Exhausted: false})
+	m = next.(Model)
+
+	if m.alert.bannerActive {
+		t.Error("expected alert.bannerActive=false after RateLimitAlertEvent{Exhausted: false}")
+	}
+}
+
+// TestUpdateLayout_AlertBannerHeightBudget verifies that the layout height
+// invariant holds when the alert banner is visible (banner takes 1 row).
+func TestUpdateLayout_AlertBannerHeightBudget(t *testing.T) {
+	redirectHistory(t)
+
+	const termWidth = 80
+	const termHeight = 24
+
+	m := New(30, ProjectInfo{}, "", nil, 0)
+	// Set stats so banner is visible (Remaining == 0).
+	m.alert.graphqlStats = RateLimitStats{Limit: 100, Remaining: 0}
+	m.alert.now = time.Now()
+
+	if !m.alert.isVisible() {
+		t.Fatal("precondition: alert banner should be visible with Remaining==0")
+	}
+	if m.alert.Height() != 1 {
+		t.Fatalf("precondition: alert Height() = %d, want 1", m.alert.Height())
+	}
+
+	// Apply window size — triggers updateLayout.
+	next, _ := m.Update(tea.WindowSizeMsg{Width: termWidth, Height: termHeight})
+	m = next.(Model)
+
+	got := lipgloss.Height(m.View())
+	if got != termHeight {
+		t.Errorf("with banner visible: View() height = %d, want %d (height budget not accounting for banner)", got, termHeight)
+	}
 }
 
 // TestHelpPanelToggle verifies that pressing ? opens the help panel, pressing ?
