@@ -1040,15 +1040,18 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		// Items with an active CooldownAt but no other signal are suppressed.
 		item := board.Items[i]
 		iKey := issueKey(item, e.defaultRepo())
-		// Terminal skip: unconditionally skip items flagged terminal while still in
-		// a cleanup stage — external board activity (label-bot, PR comments, GitHub
-		// bookkeeping) bumps updatedAt but Fabrik has nothing left to do for them.
+		// Terminal skip: skip items flagged terminal while still in the same cleanup
+		// stage — external board activity (label-bot, PR comments, GitHub bookkeeping)
+		// bumps updatedAt but Fabrik has nothing left to do for them.
+		// item.Status == admitSnap.Status() guards against items that moved between two
+		// cleanup stages: in that case we must process normally to update the store.
 		if admitSnap, admitErr := e.store.Get(itemOwnerRepoString(item, e.defaultRepo()), item.Number); admitErr == nil {
 			if admitSnap.IsTerminal() {
-				if pst := stages.FindStage(e.cfg.Stages, item.Status); pst != nil && pst.CleanupWorktree {
-					continue // terminal + still in cleanup stage: skip entirely
+				if pst := stages.FindStage(e.cfg.Stages, item.Status); pst != nil && pst.CleanupWorktree && item.Status == admitSnap.Status() {
+					continue // terminal + still in same cleanup stage: skip entirely
 				}
-				// Status drifted out of the cleanup stage — clear the flag and fall through.
+				// Status changed (left cleanup or moved to a different cleanup stage) —
+				// clear the flag and fall through.
 				e.store.Apply(itemstate.TerminalFlagSet{
 					Repo:     itemOwnerRepoString(item, e.defaultRepo()),
 					Number:   item.Number,
@@ -1586,15 +1589,18 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 		}
 
 		// Terminal skip: if this item was previously identified as terminal and the
-		// probe still shows it in a cleanup stage, skip deep-fetch entirely — external
-		// activity on a closed Done item has no bearing on Fabrik's work. Must run
-		// BEFORE ProbeBoardItemUpdated so we read the cached Terminal flag; applyProbeItem
-		// would clear it on status change before we could react to pi.Status.
+		// probe still shows it in the same cleanup stage, skip deep-fetch entirely —
+		// external activity on a closed Done item has no bearing on Fabrik's work.
+		// Must run BEFORE ProbeBoardItemUpdated so we read the cached Terminal flag;
+		// applyProbeItem would clear it on status change before we could react to pi.Status.
+		// pi.Status == s.Status guards against items that moved between two cleanup stages:
+		// in that case we must apply the probe update so the store reflects the new status.
 		if s.Terminal {
-			if pst := stages.FindStage(e.cfg.Stages, pi.Status); pst != nil && pst.CleanupWorktree {
-				continue // still terminal — no deep-fetch needed
+			if pst := stages.FindStage(e.cfg.Stages, pi.Status); pst != nil && pst.CleanupWorktree && pi.Status == s.Status {
+				continue // still terminal in the same cleanup stage — no deep-fetch needed
 			}
-			// Status has left the cleanup stage — clear the flag and fall through.
+			// Status changed (left the cleanup stage or moved to a different one) — clear
+			// the flag and fall through to normal probe processing.
 			e.store.Apply(itemstate.TerminalFlagSet{Repo: repo, Number: pi.Number, Terminal: false})
 			e.logf(pi.Number, "poll", "terminal flag cleared (status drifted to %q)\n", pi.Status)
 		}
