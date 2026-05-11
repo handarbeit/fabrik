@@ -271,6 +271,71 @@ func TestIsTerminalPredicate_LockLabelPrefix(t *testing.T) {
 	}
 }
 
+// TestRunProbeAndDeepFetch_TerminalItem_MovedBetweenCleanupStages ensures that
+// when a terminal item's probe shows a different cleanup stage (not just
+// non-cleanup), the terminal flag is cleared and the probe update is applied.
+func TestRunProbeAndDeepFetch_TerminalItem_MovedBetweenCleanupStages(t *testing.T) {
+	var deepFetchCalls int
+
+	twoCleanupStages := []*stages.Stage{
+		{Name: "Research", Order: 1, Prompt: "p", Completion: stages.CompletionCriteria{Type: "claude"}},
+		{Name: "Done", Order: 90, CleanupWorktree: true},
+		{Name: "Archive", Order: 99, CleanupWorktree: true},
+	}
+
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return []gh.BoardProbeItem{
+				// Item moved from "Done" to "Archive" — both are cleanup stages.
+				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo",
+					Status: "Archive", EffectiveUpdatedAt: time.Now()},
+			}, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalls++
+			// Return labels that do NOT satisfy the terminal predicate for "Archive"
+			// (no stage:Archive:complete) so the item is not re-terminalized after fetch.
+			item.Labels = []string{"stage:Archive:in_progress"}
+			item.Status = "Archive"
+			return nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner: "owner", Repo: "repo", ProjectNum: 1,
+			User: "testuser", Token: "token", MaxConcurrent: 5,
+			Stages: twoCleanupStages,
+		},
+		client, &mockClaudeInvoker{}, NewWorktreeManager("/tmp/test-repo"),
+	)
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	cache.Bootstrap(&gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo",
+				Status: "Done", IsClosed: true, Labels: []string{"stage:Done:complete"},
+				UpdatedAt: time.Now().Add(-time.Hour)},
+		},
+	})
+	eng.readClient = cache
+
+	// Mark terminal in "Done".
+	eng.store.Apply(itemstate.TerminalFlagSet{Repo: "owner/repo", Number: 1, Terminal: true})
+
+	eng.runProbeAndDeepFetch(cache)
+
+	// Terminal flag must have been cleared (status moved to different cleanup stage).
+	snap, _ := eng.store.Get("owner/repo", 1)
+	if snap.IsTerminal() {
+		t.Error("terminal flag should be cleared when item moves to a different cleanup stage")
+	}
+	// Deep-fetch must have fired.
+	if deepFetchCalls == 0 {
+		t.Error("expected FetchItemDetails called after terminal cleared on cleanup-stage move; got 0")
+	}
+}
+
 // TestRunStartupTerminalScan_UsesCleanupStageNotHardcodedDone ensures that
 // the terminal scan works for any cleanup stage name, not just "Done".
 func TestRunStartupTerminalScan_UsesCleanupStageNotHardcodedDone(t *testing.T) {
