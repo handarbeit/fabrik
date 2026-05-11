@@ -144,3 +144,14 @@ type SkillsStaleEvent struct {
 }
 
 func (SkillsStaleEvent) tuiEvent() {}
+
+// RateLimitAlertEvent is emitted by the engine when the GraphQL rate-limit state
+// transitions: Exhausted=true when a probe failure occurs while quota is low or
+// zero; Exhausted=false when quota recovers above rateLimitHealthyThreshold.
+// Reset is the time at which the quota is expected to reset (zero if unknown).
+type RateLimitAlertEvent struct {
+	Exhausted bool
+	Reset     time.Time
+}
+
+func (RateLimitAlertEvent) tuiEvent() {}
