@@ -1,25 +1,32 @@
-# Fabrik v0.0.56
+# Fabrik v0.0.57
 
-This release adds two operator-facing features — `@mention` notifications when fabrik blocks on input, and a SIGHUP-driven in-place self-restart — plus a cache-staleness fix that complements the v0.0.55 always-on cache work, and the completion of the org migration to `handarbeit`.
+This release is a major efficiency win for big project boards. The two headline changes — the truly-shallow `updatedAt` probe (#685) and the terminal-item skip (#689) — together drop idle-poll GraphQL cost by roughly an order of magnitude on boards with many Done items. Webhooks can finally be treated as a pure optimization on top of efficient polling.
 
 ## Features
 
-- Awaiting-input comments now `@mention` the assigned user, so GitHub's existing notification pipeline delivers the alert to the user's GitHub Mobile inbox / push notifications. When the Implement stage emits `FABRIK_BLOCKED_ON_INPUT`, the comment fabrik posts begins with `@<user>` followed by the question Claude is asking. (#668)
-  - Note: GitHub does not deliver push notifications for activity an account performs on itself. To get mobile push working, fabrik must run as a different identity (bot account) than the user being mentioned. The `--filter-user` decoupling that enables this is being tracked in #671.
-- New SIGHUP signal handler restarts fabrik in place. `kill -HUP <fabrik-pid>` (or `pkill -HUP fabrik`) causes fabrik to gracefully drain in-flight workers, release the lockfile, and `syscall.Exec` itself with a fresh process image — dropping the in-memory cache and Store without disrupting the TUI terminal session. Useful for clearing wedged state-machine bugs without losing the operator's terminal context. (#672)
+- **Truly-shallow `updatedAt`-only board probe** (#685) replaces the per-poll shallow board fetch. Drops `labels(first: 30)` and `closedByPullRequestsReferences(first: 5)` from the per-item GraphQL cost; deep-fetch is gated by per-item `updatedAt` drift on both issue and linked PR. Expected ~5–10x reduction in idle-poll cost on big boards.
+- **Terminal-item skip in the probe loop** (#689). Items in cleanup stages carrying the `stage:<Cleanup>:complete` label and no transient lifecycle labels are flagged terminal and skipped entirely from deep-fetch evaluation — even when their `updatedAt` drifts from external activity (PR comments, label-bot bookkeeping, etc.). Massive cost reduction on boards with many archived-but-still-visible Done items.
+- **Startup transient-label scan** recovers stale `fabrik:locked:*` / `fabrik:awaiting-*` labels from prior crashed runs via a single targeted query — no full deep-fetch pass required.
+- **`--symlink-env` flag** (plus `FABRIK_SYMLINK_ENV` env var and `symlink_env` config option) symlinks the project `.env` into each worktree after context files are written, so stage commands can access project secrets without bespoke wiring.
+- **Conventional Commits format** for `commitWIP` in the implement skill keeps WIP commits consistent with release tooling.
 
 ## Fixes
 
-- The deep cache now detects staleness against `updatedAt` and refetches when the source has bumped. Previously deep-cache entries (comments, BlockedBy state, PR review state) could persist past the corresponding shallow `updatedAt` change, leaving downstream stages reading stale data. (#673)
-- Worktree creation no longer hangs on interactive git/ssh prompts. Forces non-interactive mode for git operations and replaces a network-dependent SSH URL test with a deterministic alternative.
-- Label color scheme refreshed and applied retroactively to existing labels, so a fabrik-managed board has a consistent visual taxonomy across all labels (not just newly created ones).
-- Documentation fixes: `--auto-upgrade` row in `USER_GUIDE.md` now reflects the v0.0.55 startup-check behavior in addition to idle-poll behavior; `FABRIK_AUTO_UPGRADE` env var table entry matches the flag description.
+- `fabrik init` no longer writes the legacy `advanceWorkflowTemplate` / `writeWorkflowTemplate` paths.
+- Probe `Reconcile` path: terminal-skip gate properly guards against same-status moves across multiple cleanup stages.
+- Various Copilot review findings addressed across probe and `symlink_env` patches.
+
+## Improvements
+
+- ADR-044 documents the probe-driven poll loop architecture.
+- `docs/state-machine.md` §D.4 updated for both the probe and terminal-skip behaviors.
+- `docs/USER_GUIDE.md` adds SIGHUP in-place restart and `@mention` notification sections.
+- Comments and field docs for `Terminal` / `IsTerminal()` updated to say "cleanup stage" rather than "Done" — accurate for multi-cleanup-stage configurations.
 
 ## Internal
 
-- Org migration from `handarbeit/fabrik` (dev) + `handarbeit/fabrik` (release) to a single consolidated `handarbeit/fabrik` repo. Go module path is now `github.com/handarbeit/fabrik`. Marketplace, release workflow, goreleaser config, auto-upgrade target, and README install line all updated.
-- Test improvements: SeedLabels tests extended for color enforcement; notification comment tests added for the @mention feature.
-- Documentation: USER_GUIDE updated for v0.0.55 behavioral changes; @mention notification behavior documented; retroactive label color enforcement documented.
+- Comprehensive test coverage for the new code paths: `ProbeProjectBoard`, `runProbeAndDeepFetch`, `runStartupTransientLabelScan`, `Terminal` flag transitions, `TerminalFlagSet` mutation, `applyProbeItem` handler, `symlinkEnvIfEnabled`, and `commitWIP` Conventional Commits format.
+- `llms-full.txt` regenerated against current canonical docs.
 
 ## Upgrading
 
