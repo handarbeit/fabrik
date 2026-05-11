@@ -1471,6 +1471,9 @@ Claude sessions, a scrollable History pane with completed jobs, and a status bar
 (footer) displaying REST and GraphQL rate limit stats. When the GraphQL budget is
 exhausted or rate-limit-induced probe failures are detected, a prominent red alert
 banner appears immediately below the header with a countdown to when polling resumes.
+When plugin skills in `.fabrik/plugin/` are outdated relative to the embedded
+defaults, a `[u] skills out of date` badge appears in the header, reminding the
+operator to press `u` to upgrade.
 
 ### Keyboard Shortcuts
 
@@ -1486,7 +1489,7 @@ banner appears immediately below the header with a countdown to when polling res
 | `c` | Delete selected history entry |
 | `C` | Clear all history (with confirmation) |
 | `a` | Open abtop AI session monitor (shows token usage, context window, rate limits for all Claude sessions) |
-| `u` | Upgrade plugin skills (shows confirmation prompt when out of date; active stage invocations pick up new files on next run) |
+| `u` | Upgrade plugin skills (when plugin skills are out of date, a `[u] skills out of date` badge appears in the header; pressing `u` upgrades and clears the badge; active stage invocations pick up new files on next run) |
 | `w` | Wake: reset idle backoff and poll immediately |
 | `ctrl+r` | Force refresh: drain in-flight workers and restart in place (same as SIGHUP — see [Recovering from Wedged State](#recovering-from-wedged-state)) |
 | `?` | Toggle help panel (keybindings and labels reference) |
@@ -1652,6 +1655,15 @@ The GraphQL query uses a two-phase fetch to minimize rate limit consumption:
 Typical cost is ~5–30 points per poll depending on active items, well within the
 5,000 points/hour limit.
 
+#### Cold-Start Cache Population
+
+On first startup, Fabrik bootstraps the board cache from the same lightweight probe
+data used for polling — closed Done items are seeded as terminal without a full
+deep-fetch, eliminating the cold-start spike where each item would otherwise require
+an individual deep-fetch to determine its state. This reduces cold-start GraphQL cost
+by ~80–90%. The bootstrap runs once before the first poll and is invisible to the
+operator beyond the faster startup time.
+
 #### Rate-Limit Exhaustion Alert Banner
 
 When the GraphQL budget hits zero or drops below 20% and probe failures begin,
@@ -1664,7 +1676,10 @@ header:
 
 The countdown ticks every second and shows the local time when the quota resets.
 Once the GraphQL budget recovers above 50%, the banner disappears automatically and
-polling resumes. You do not need to restart Fabrik — it recovers on its own.
+polling resumes. You do not need to restart Fabrik — it recovers on its own. On
+recovery from near-zero exhaustion, Fabrik fires an immediate probe rather than
+waiting for the next scheduled poll tick, so processing resumes as soon as the
+budget is restored.
 
 ---
 
@@ -2062,6 +2077,14 @@ pkill -HUP fabrik
 4. The lockfile (`.fabrik/fabrik.lock`) is released.
 5. `syscall.Exec` replaces the process image in place — the PID stays the same, the parent shell and TUI remain attached, and a brief TUI redraw may occur.
 6. The new process starts with a clean in-memory cache, Store, observers, and `mayNeedWork` set.
+
+**Terminal restore:** The terminal alt-screen is properly released before the process
+is replaced or exits — no `reset` command is needed after a kill or SIGHUP. This
+applies to all signal-driven exit paths including SIGHUP re-exec and forced kills.
+
+**Plugin-skills upgrade:** SIGHUP restart proceeds non-interactively through the
+plugin-skills upgrade check — skills are inspected and refreshed silently without
+prompting, so the restart never hangs waiting for user confirmation.
 
 **What is cleared:**
 

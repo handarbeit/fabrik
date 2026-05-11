@@ -89,6 +89,8 @@ GitHub Project Board (source of truth)
 6. **Advance** — In yolo mode, the issue auto-advances to the next stage. Otherwise, a human moves it.
 
 > **Big-board efficiency (v0.0.57):** On large project boards, the per-poll GraphQL cost drops ~5–10× via a lightweight `updatedAt`-only probe that gates the full deep-fetch — only items that changed since the last poll trigger a full query. Terminal items (issues in a cleanup/Done column with `stage:<name>:complete` and no active lifecycle labels) are skipped entirely from both the probe and deep-fetch evaluation.
+>
+> **Cold-start optimization (v0.0.58):** On startup, closed Done items are seeded from probe data as terminal without a deep-fetch, reducing cold-start GraphQL cost by ~80–90%. Combined with probe-driven polling, this makes running two Fabrik instances on a single token budget practical.
 
 ### Webhook Mode (Optional)
 
@@ -183,7 +185,11 @@ for setup details and the self-mention caveat.
 
 Sending `SIGHUP` to the Fabrik process drains in-flight Claude runs, then
 re-execs the binary in place — no terminal disruption, no lost state. Use it
-to pick up a new binary after `go install` without restarting the session. See
+to pick up a new binary after `go install` without restarting the session.
+The terminal alt-screen is properly restored on signal-driven exit, so no
+`reset` is needed after a kill or SIGHUP. Plugin-skills are checked and
+refreshed non-interactively during restart — the process never hangs waiting
+for a prompt. See
 [USER_GUIDE.md §Recovering from Wedged State](docs/USER_GUIDE.md#recovering-from-wedged-state)
 for the full escape-hatch procedure.
 
