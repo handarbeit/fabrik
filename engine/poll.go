@@ -1605,14 +1605,15 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 		if snapErr != nil {
 			// New item on board — seed minimal state into the store.
 			minimal := gh.ProjectItem{
-				ID:        pi.ContentID,
-				ItemID:    pi.ItemID,
-				Number:    pi.Number,
-				IsPR:      pi.IsPR,
-				IsClosed:  pi.IsClosed,
-				Status:    pi.Status,
-				Repo:      repo,
-				UpdatedAt: pi.EffectiveUpdatedAt,
+				ID:             pi.ContentID,
+				ItemID:         pi.ItemID,
+				Number:         pi.Number,
+				IsPR:           pi.IsPR,
+				IsClosed:       pi.IsClosed,
+				Status:         pi.Status,
+				Repo:           repo,
+				UpdatedAt:      pi.EffectiveUpdatedAt,
+				LinkedPRNumber: pi.LinkedPRNumber,
 			}
 			e.store.Apply(itemstate.IssueOpened{Item: minimal})
 			// Probe-only terminal short-circuit: closed items in a cleanup stage have
