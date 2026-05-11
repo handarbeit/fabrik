@@ -74,12 +74,21 @@ func (h HeaderComponent) View(width int) string {
 		status = "  " + dimStyle.Render(displayStatus)
 	}
 
+	// Pre-compute badge so its width is factored into the truncation budget.
+	// Without this the badge can push the rendered line past the terminal width.
+	badge := ""
+	badgeWidth := 0
+	if h.skillsStaleCount > 0 {
+		badge = dimStyle.Render("  [u] skills out of date")
+		badgeWidth = lipgloss.Width(badge)
+	}
+
 	left := title + status
 	leftWidth := lipgloss.Width(left)
 	timerWidth := lipgloss.Width(timerStr)
 	available := width - 4
-	if leftWidth+timerWidth > available {
-		maxStatus := max(available-lipgloss.Width(title)-timerWidth-3, 0)
+	if leftWidth+timerWidth+badgeWidth > available {
+		maxStatus := max(available-lipgloss.Width(title)-timerWidth-badgeWidth-3, 0)
 		if maxStatus > 0 && displayStatus != "" {
 			s := displayStatus
 			for lipgloss.Width(s) > maxStatus {
@@ -97,10 +106,9 @@ func (h HeaderComponent) View(width int) string {
 		left = title + status
 		leftWidth = lipgloss.Width(left)
 	}
-	if h.skillsStaleCount > 0 {
-		badge := dimStyle.Render("  [u] skills out of date")
+	if badge != "" {
 		left = left + badge
-		leftWidth = lipgloss.Width(left)
+		leftWidth += badgeWidth
 	}
 	gap := max(width-4-leftWidth-timerWidth, 0)
 	return " " + left + strings.Repeat(" ", gap) + timerStr

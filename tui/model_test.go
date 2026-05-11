@@ -814,6 +814,27 @@ func TestUpdate_UKey_WhenStale_SetsConfirmUpgrade(t *testing.T) {
 	}
 }
 
+// TestUpdate_TickEvent_ConfirmUpgrade_PromptPersists verifies that the upgrade
+// confirmation prompt is re-shown after a TickEvent clears statusMsg.
+func TestUpdate_TickEvent_ConfirmUpgrade_PromptPersists(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, 2)
+	m.confirmUpgrade = true
+	m.header.SetStatusMsg("Upgrade 2 plugin file(s)? Active invocations pick up changes on next run. [y/N]")
+
+	next, _ := m.Update(TickEvent{At: time.Now()})
+	nm := next.(Model)
+
+	if !nm.confirmUpgrade {
+		t.Error("expected confirmUpgrade still true after tick")
+	}
+	if nm.header.statusMsg == "" {
+		t.Error("expected prompt to be re-shown after tick cleared statusMsg")
+	}
+	if !strings.Contains(nm.header.statusMsg, "2") {
+		t.Errorf("re-shown prompt should mention file count, got %q", nm.header.statusMsg)
+	}
+}
+
 // TestUpdate_UKey_WhenUpToDate_ShowsStatusMsg verifies that pressing u when
 // skillsStaleCount == 0 shows "up to date" message without setting confirmUpgrade.
 func TestUpdate_UKey_WhenUpToDate_ShowsStatusMsg(t *testing.T) {
