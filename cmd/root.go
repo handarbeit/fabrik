@@ -497,11 +497,15 @@ func Execute() error {
 		}
 	}
 
-	// Check whether on-disk plugin files match the embedded versions. This runs
-	// only in the main daemon path (all subcommands returned early above).
-	// If .fabrik/plugin/ does not exist (no fabrik init), the check is a no-op.
-	if err := checkPluginSkills(".fabrik/plugin"); err != nil {
-		fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skill check failed: %v\n", err)
+	// If the process was re-exec'd by a SIGHUP restart, force non-interactive
+	// plugin skills refresh. The env var is unset immediately so Claude child
+	// processes do not inherit it. This mirrors the FABRIK_AUTO_UPGRADED pattern
+	// and must happen before engine.New() to close the inheritance window.
+	if os.Getenv("FABRIK_SIGHUP_RESTART") == "1" {
+		os.Unsetenv("FABRIK_SIGHUP_RESTART")
+		if err := checkPluginSkillsWithReader(".fabrik/plugin", false, nil); err != nil {
+			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skill check failed after SIGHUP restart: %v\n", err)
+		}
 	}
 
 	// Parse webhook events from comma-separated string.
