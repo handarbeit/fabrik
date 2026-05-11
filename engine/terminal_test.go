@@ -550,3 +550,33 @@ func TestRunProbeAndDeepFetch_LinkageDrift_ColdStart_ClearsStalePR(t *testing.T)
 		t.Error("prToKey should NOT have entry for PR #42 after probe reports delink")
 	}
 }
+
+// ---- isProbeOnlyTerminal unit tests ----
+
+func TestIsProbeOnlyTerminal_ClosedCleanup_True(t *testing.T) {
+	stagesCfg := testStagesWithCleanup()
+	if !isProbeOnlyTerminal(true, "Done", stagesCfg) {
+		t.Error("expected true for closed item in cleanup stage")
+	}
+}
+
+func TestIsProbeOnlyTerminal_OpenCleanup_False(t *testing.T) {
+	stagesCfg := testStagesWithCleanup()
+	if isProbeOnlyTerminal(false, "Done", stagesCfg) {
+		t.Error("expected false for open item in cleanup stage")
+	}
+}
+
+func TestIsProbeOnlyTerminal_ClosedNonCleanup_False(t *testing.T) {
+	stagesCfg := testStagesWithCleanup()
+	if isProbeOnlyTerminal(true, "Research", stagesCfg) {
+		t.Error("expected false for closed item in non-cleanup stage")
+	}
+}
+
+func TestIsProbeOnlyTerminal_OpenNonCleanup_False(t *testing.T) {
+	stagesCfg := testStagesWithCleanup()
+	if isProbeOnlyTerminal(false, "Research", stagesCfg) {
+		t.Error("expected false for open item in non-cleanup stage")
+	}
+}

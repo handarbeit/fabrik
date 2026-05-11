@@ -2639,3 +2639,90 @@ func TestRunProbeAndDeepFetch_IsClosedPropagates_WithoutDeepFetch(t *testing.T) 
 		t.Error("expected IsClosed=true after ProbeBoardItemUpdated; got false")
 	}
 }
+
+// TestProbeNewItem_ClosedDone_SkipsDeepFetch is a regression test for the
+// new-item branch of runProbeAndDeepFetch. It verifies that closed Done items
+// discovered by the probe (not yet in store, no prior bootstrap) are seeded as
+// terminal and never deep-fetched, while open active items are deep-fetched
+// normally. This covers the gap where BootstrapFromProbe cannot help: items
+// that appear in the probe for the first time during a mid-run cycle.
+func TestProbeNewItem_ClosedDone_SkipsDeepFetch(t *testing.T) {
+	const numClosed = 3  // closed Done items
+	const numOpen = 2    // open Research items
+	var deepFetchCalls int
+	probeTime := time.Now().Add(-time.Minute)
+
+	var probeItems []gh.BoardProbeItem
+	for i := 1; i <= numClosed; i++ {
+		probeItems = append(probeItems, gh.BoardProbeItem{
+			ContentID: fmt.Sprintf("I_%03d", i), ItemID: fmt.Sprintf("PVTI_%03d", i),
+			Number:             i,
+			Repo:               "owner/repo",
+			Status:             "Done",
+			IsClosed:           true,
+			EffectiveUpdatedAt: probeTime,
+		})
+	}
+	for i := numClosed + 1; i <= numClosed+numOpen; i++ {
+		probeItems = append(probeItems, gh.BoardProbeItem{
+			ContentID: fmt.Sprintf("I_%03d", i), ItemID: fmt.Sprintf("PVTI_%03d", i),
+			Number:             i,
+			Repo:               "owner/repo",
+			Status:             "Research",
+			IsClosed:           false,
+			EffectiveUpdatedAt: probeTime,
+		})
+	}
+
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return probeItems, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalls++
+			return nil
+		},
+	}
+	eng := NewWithDeps(
+		Config{
+			Owner: "owner", Repo: "repo", ProjectNum: 1,
+			User: "testuser", Token: "token", MaxConcurrent: 5,
+			Stages: testStagesWithCleanup(),
+		},
+		client, &mockClaudeInvoker{}, NewWorktreeManager("/tmp/test-repo"),
+	)
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	eng.readClient = cache
+
+	// No prior bootstrap — store is empty. All items are new-item discoveries.
+	eng.runProbeAndDeepFetch(cache)
+
+	// Only the open Research items should have been deep-fetched.
+	if deepFetchCalls != numOpen {
+		t.Errorf("deep-fetch count = %d, want %d (open items only)", deepFetchCalls, numOpen)
+	}
+
+	// Closed Done items must be terminal in the store.
+	for i := 1; i <= numClosed; i++ {
+		snap, snapErr := eng.store.Get("owner/repo", i)
+		if snapErr != nil {
+			t.Errorf("closed Done item #%d not found in store", i)
+			continue
+		}
+		if !snap.IsTerminal() {
+			t.Errorf("item #%d (closed Done): expected IsTerminal()=true", i)
+		}
+	}
+
+	// Open Research items must NOT be terminal.
+	for i := numClosed + 1; i <= numClosed+numOpen; i++ {
+		snap, snapErr := eng.store.Get("owner/repo", i)
+		if snapErr != nil {
+			t.Errorf("open Research item #%d not found in store", i)
+			continue
+		}
+		if snap.IsTerminal() {
+			t.Errorf("item #%d (open Research): expected IsTerminal()=false", i)
+		}
+	}
+}
