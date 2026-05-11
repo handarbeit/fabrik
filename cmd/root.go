@@ -556,12 +556,25 @@ func Execute() error {
 		return err
 	}
 
+	// Evaluate plugin skill staleness after engine.New() (so env vars are unset
+	// and the inheritance window is closed). For non-TUI, refresh silently. For
+	// TUI, the count is passed to tui.New() to drive the header badge.
+	var skillsStaleCount int
+	if diffing, diffErr := diffingPluginFiles(".fabrik/plugin"); diffErr == nil {
+		skillsStaleCount = len(diffing)
+	}
+
 	// When TUI is enabled (and we have a real terminal), run the bubbletea
 	// TUI. Otherwise fall through to plain-text mode.
 	if useTUI {
 		wakeCh := make(chan struct{}, 1)
 		eng.SetWakeCh(wakeCh)
-		return runTUI(eng, cfg.PollSeconds, buildProjectInfo(cfg, pc), cfg.PluginDir, wakeCh)
+		return runTUI(eng, cfg.PollSeconds, buildProjectInfo(cfg, pc), cfg.PluginDir, wakeCh, skillsStaleCount)
+	}
+	if skillsStaleCount > 0 {
+		if refreshErr := checkPluginSkillsWithReader(".fabrik/plugin", false, nil); refreshErr != nil {
+			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skill refresh failed: %v\n", refreshErr)
+		}
 	}
 	return eng.Run()
 }
@@ -674,11 +687,11 @@ func buildProjectInfo(cfg *Config, pc config.ProjectConfig) tui.ProjectInfo {
 // runTUI wires the event channel, starts the bubbletea program, and runs the
 // engine. The engine handles SIGINT itself; bubbletea uses WithoutSignalHandler
 // so it doesn't interfere. When the engine exits, the TUI is quit.
-func runTUI(eng *engine.Engine, pollSeconds int, info tui.ProjectInfo, pluginDir string, wakeCh chan struct{}) error {
+func runTUI(eng *engine.Engine, pollSeconds int, info tui.ProjectInfo, pluginDir string, wakeCh chan struct{}, skillsStaleCount int) error {
 	events := make(chan tui.Event, 256)
 	eng.SetEvents(events)
 
-	tuiModel := tui.New(pollSeconds, info, pluginDir, wakeCh)
+	tuiModel := tui.New(pollSeconds, info, pluginDir, wakeCh, skillsStaleCount)
 	p := tea.NewProgram(tuiModel, tea.WithAltScreen(), tea.WithoutSignalHandler())
 	// Register terminal cleanup so force-quit paths (SIGHUP re-exec, second
 	// SIGTERM/SIGHUP) release alt-screen before replacing or exiting the process.
