@@ -65,9 +65,9 @@ type ItemState struct {
 	Worker *WorkerHandle
 
 	// Terminal is set by the engine after a deep-fetch confirms the item satisfies
-	// the terminal predicate (Done status + stage:Done:complete label + no transient
-	// lifecycle labels). While set, the poll loop skips deep-fetch entirely for this
-	// item. Cleared automatically when the item's status leaves Done.
+	// the terminal predicate (cleanup-stage status + stage:<Name>:complete label + no
+	// transient lifecycle labels). While set, the poll loop skips deep-fetch entirely
+	// for this item. Cleared automatically when the item's status changes.
 	Terminal bool
 
 	// -------- TUI / invocation mirror state --------
