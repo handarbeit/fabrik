@@ -59,6 +59,41 @@ func TestFmtRateLimitCountdown(t *testing.T) {
 	}
 }
 
+// TestFmtBannerCountdown verifies the banner countdown formatting helper.
+func TestFmtBannerCountdown(t *testing.T) {
+	now := time.Date(2026, 5, 11, 14, 0, 0, 0, time.UTC)
+
+	// Helper to build expected string: countdown + HH:MM derived from the reset's local time.
+	withTime := func(countdown string, reset time.Time) string {
+		return fmt.Sprintf("Resumes in %s (%s local time).", countdown, reset.Local().Format("15:04"))
+	}
+
+	resetSecs := now.Add(45 * time.Second)
+	resetMins := now.Add(3*time.Minute + 30*time.Second)
+	resetHours := now.Add(2*time.Hour + 30*time.Minute)
+
+	cases := []struct {
+		name  string
+		reset time.Time
+		want  string
+	}{
+		{"zero reset", time.Time{}, ""},
+		{"past reset", now.Add(-5 * time.Second), "Resumes soon."},
+		{"past reset zero delta", now, "Resumes soon."},
+		{"seconds", resetSecs, withTime("45s", resetSecs)},
+		{"minutes", resetMins, withTime("3m", resetMins)},
+		{"hours", resetHours, withTime("2h", resetHours)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := fmtBannerCountdown(tc.reset, now)
+			if got != tc.want {
+				t.Errorf("fmtBannerCountdown(%v): got %q, want %q", tc.reset, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestTuiReadSessionID_NotFound verifies empty string for a missing session file.
 func TestTuiReadSessionID_NotFound(t *testing.T) {
 	id := tuiReadSessionID("", 99999, "SomeStageThatDoesNotExist")
