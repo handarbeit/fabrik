@@ -18,7 +18,7 @@ func TestHeaderHeight(t *testing.T) {
 // TestViewHeader_TimerAlwaysVisible verifies that when the status message is
 // long enough to trigger truncation, the timer string still appears in the output.
 func TestViewHeader_TimerAlwaysVisible(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", nil)
+	m := New(30, ProjectInfo{}, "", nil, 0)
 	m.width = 60
 	m.header.nextPollAt = time.Now().Add(90 * time.Second)
 
@@ -51,7 +51,7 @@ func TestViewHeader_WidthNeverExceedsTerminal(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m := New(30, ProjectInfo{}, "", nil)
+			m := New(30, ProjectInfo{}, "", nil, 0)
 			m.width = tc.width
 			m.header.nextPollAt = time.Now().Add(90 * time.Second)
 			m.header.statusLine = tc.statusLine
@@ -68,7 +68,7 @@ func TestViewHeader_WidthNeverExceedsTerminal(t *testing.T) {
 
 // TestViewHeader_WithStatusLine verifies statusLine content appears in the header.
 func TestViewHeader_WithStatusLine(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", nil)
+	m := New(30, ProjectInfo{}, "", nil, 0)
 	m.width = 80
 	m.header.statusLine = "some status"
 	header := m.header.View(m.width)
@@ -79,7 +79,7 @@ func TestViewHeader_WithStatusLine(t *testing.T) {
 
 // TestViewHeader_StatusLineTruncation verifies narrow headers truncate statusLine without panic.
 func TestViewHeader_StatusLineTruncation(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", nil)
+	m := New(30, ProjectInfo{}, "", nil, 0)
 	m.width = 25
 	m.header.statusLine = "a very very very very very very long status message"
 	header := m.header.View(m.width)
@@ -92,7 +92,7 @@ func TestViewHeader_StatusLineTruncation(t *testing.T) {
 // TestViewHeader_EffectiveInterval verifies that PollCompletedEvent with
 // EffectiveInterval updates the header timer to show the effective interval.
 func TestViewHeader_EffectiveInterval(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", nil)
+	m := New(30, ProjectInfo{}, "", nil, 0)
 	m.width = 80
 
 	// Send a PollCompletedEvent with 2-minute effective interval.
@@ -117,7 +117,7 @@ func TestViewHeader_EffectiveInterval(t *testing.T) {
 // PollCompletedEvent sets the effective interval, a subsequent PollStartedEvent
 // uses that effective interval (not the configured one).
 func TestViewHeader_PollStartedUsesEffectiveInterval(t *testing.T) {
-	m := New(30, ProjectInfo{}, "", nil)
+	m := New(30, ProjectInfo{}, "", nil, 0)
 	m.width = 80
 
 	// Set effective interval via PollCompletedEvent.
