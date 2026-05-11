@@ -34,6 +34,7 @@ KEYBOARD SHORTCUTS
 
   Global
     a          Open abtop AI session monitor
+    u          Upgrade plugin skills (when out of date; confirms first)
     w          Wake: reset idle backoff and poll immediately
     ctrl+r     Force refresh (same as SIGHUP)
     ?          Toggle this help panel
