@@ -676,6 +676,10 @@ func runTUI(eng *engine.Engine, pollSeconds int, info tui.ProjectInfo, pluginDir
 
 	tuiModel := tui.New(pollSeconds, info, pluginDir, wakeCh)
 	p := tea.NewProgram(tuiModel, tea.WithAltScreen(), tea.WithoutSignalHandler())
+	// Register terminal cleanup so force-quit paths (SIGHUP re-exec, second
+	// SIGTERM/SIGHUP) release alt-screen before replacing or exiting the process.
+	// Must be registered before eng.Run() starts the signal handlers.
+	eng.SetCleanupHook(func() { p.ReleaseTerminal() }) //nolint:errcheck
 
 	// Forward events from the engine's channel into bubbletea.
 	go func() {
