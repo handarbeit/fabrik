@@ -347,7 +347,7 @@ func TestUpdate_CtrlR_ActivePane_ReturnsSighupCmd(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("sendSighupCmd is a no-op on Windows")
 	}
-	m := New(30, ProjectInfo{}, "", nil)
+	m := New(30, ProjectInfo{}, "", nil, 0)
 	m.focusPane = paneActive
 
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
@@ -362,7 +362,7 @@ func TestUpdate_CtrlR_HistoryPane_ReturnsSighupCmd(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("sendSighupCmd is a no-op on Windows")
 	}
-	m := New(30, ProjectInfo{}, "", nil)
+	m := New(30, ProjectInfo{}, "", nil, 0)
 	m.focusPane = paneHistory
 
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
