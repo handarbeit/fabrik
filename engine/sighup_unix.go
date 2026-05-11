@@ -39,6 +39,12 @@ func registerSighupHandler(ctx context.Context, cancel context.CancelFunc, e *En
 		select {
 		case <-sighup2Ch:
 			fmt.Fprintln(os.Stderr, "\nSecond SIGHUP received during drain — force-quitting...")
+			// Release the terminal before exiting so the shell is not left in
+			// alt-screen mode. See also: #692 — any new os.Exit added there must
+			// invoke this hook too.
+			if fn := e.cleanupHook; fn != nil {
+				fn()
+			}
 			os.Exit(1)
 		case <-restartDone:
 			signal.Stop(sighup2Ch)
@@ -81,6 +87,13 @@ func performSighupRestart(e *Engine, lockFile *os.File) {
 	}
 	if e.sighupExecFn != nil {
 		execFn = e.sighupExecFn
+	}
+
+	// Release the terminal before replacing the process so the shell is not left
+	// in alt-screen mode. The new process re-enters alt-screen normally.
+	// NOTE: any new syscall.Exec added by issue #692 must also invoke this hook.
+	if fn := e.cleanupHook; fn != nil {
+		fn()
 	}
 
 	if err := execFn(exe, os.Args, os.Environ()); err != nil {
