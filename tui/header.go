@@ -18,6 +18,7 @@ type HeaderComponent struct {
 	fabrikVersion     string
 	statusLine        string
 	statusMsg         string
+	skillsStaleCount  int // number of plugin skill files differing from embedded; 0 = up to date
 }
 
 func (h HeaderComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
@@ -42,6 +43,8 @@ func (h HeaderComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 		if ev.IssueNumber == 0 {
 			h.statusLine = fmt.Sprintf("[%s] %s", ev.Tag, strings.TrimRight(ev.Message, "\n"))
 		}
+	case SkillsStaleEvent:
+		h.skillsStaleCount = ev.Count
 	}
 	return h, nil
 }
@@ -94,6 +97,11 @@ func (h HeaderComponent) View(width int) string {
 		left = title + status
 		leftWidth = lipgloss.Width(left)
 	}
+	if h.skillsStaleCount > 0 {
+		badge := dimStyle.Render("  [u] skills out of date")
+		left = left + badge
+		leftWidth = lipgloss.Width(left)
+	}
 	gap := max(width-4-leftWidth-timerWidth, 0)
 	return " " + left + strings.Repeat(" ", gap) + timerStr
 }
@@ -109,4 +117,10 @@ func (h HeaderComponent) HandleClick(x, y int) bool {
 // SetStatusMsg sets a transient status message shown in the header.
 func (h *HeaderComponent) SetStatusMsg(msg string) {
 	h.statusMsg = msg
+}
+
+// SetSkillsStaleCount sets the number of plugin skill files that differ from
+// the embedded versions. When n > 0, a persistent badge is shown in the header.
+func (h *HeaderComponent) SetSkillsStaleCount(n int) {
+	h.skillsStaleCount = n
 }
