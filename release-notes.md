@@ -1,32 +1,33 @@
-# Fabrik v0.0.57
+# Fabrik v0.0.58
 
-This release is a major efficiency win for big project boards. The two headline changes — the truly-shallow `updatedAt` probe (#685) and the terminal-item skip (#689) — together drop idle-poll GraphQL cost by roughly an order of magnitude on boards with many Done items. Webhooks can finally be treated as a pure optimization on top of efficient polling.
+This release closes the loop on the v0.0.57 efficiency push and adds operator-facing visibility for the cases where things still tighten up. The biggest change under the hood is the cold-start cache population — fabrik restarts (auto-upgrade or SIGHUP) used to deep-fetch every closed Done item before classifying it; now they're seeded as terminal directly from probe data, with no per-item GraphQL on the warm-up path. Above the engine, the TUI gains a prominent rate-limit-exhaustion alert (with countdown to reset), a ctrl+r force-refresh keybinding, a plugin-skills upgrade prompt via the `u` key, and clean terminal restoration on signal-driven exits.
 
 ## Features
 
-- **Truly-shallow `updatedAt`-only board probe** (#685) replaces the per-poll shallow board fetch. Drops `labels(first: 30)` and `closedByPullRequestsReferences(first: 5)` from the per-item GraphQL cost; deep-fetch is gated by per-item `updatedAt` drift on both issue and linked PR. Expected ~5–10x reduction in idle-poll cost on big boards.
-- **Terminal-item skip in the probe loop** (#689). Items in cleanup stages carrying the `stage:<Cleanup>:complete` label and no transient lifecycle labels are flagged terminal and skipped entirely from deep-fetch evaluation — even when their `updatedAt` drifts from external activity (PR comments, label-bot bookkeeping, etc.). Massive cost reduction on boards with many archived-but-still-visible Done items.
-- **Startup transient-label scan** recovers stale `fabrik:locked:*` / `fabrik:awaiting-*` labels from prior crashed runs via a single targeted query — no full deep-fetch pass required.
-- **`--symlink-env` flag** (plus `FABRIK_SYMLINK_ENV` env var and `symlink_env` config option) symlinks the project `.env` into each worktree after context files are written, so stage commands can access project secrets without bespoke wiring.
-- **Conventional Commits format** for `commitWIP` in the implement skill keeps WIP commits consistent with release tooling.
+- **Cold-start cache population is now cheap** (#710). `BootstrapFromProbe` seeds the cache from the truly-shallow probe instead of the heavy shallow board fetch. Closed items in cleanup stages are seeded as terminal directly from probe data — no deep-fetch needed. Linkage-drift detection is suppressed on never-deep-fetched items so the first probe after bootstrap doesn't trigger a cascade. ~80–90% reduction in cold-start GraphQL cost on boards with many Done items.
+- **`isProbeOnlyTerminal` predicate** (#716). Factored the probe-only terminal-seeding logic out for reuse in `runProbeAndDeepFetch`'s new-item branch, so items appearing on the board after startup get the same cheap classification.
+- **TUI rate-limit exhaustion alert banner** (#705). When the GraphQL budget is at zero, the TUI now renders a prominent banner with time-to-reset countdown. Auto-clears on recovery. Operators can finally tell when fabrik is rate-limited vs. broken.
+- **Force immediate probe on rate-limit recovery** (#706). When the GraphQL budget transitions from near-zero back to healthy, fabrik fires a wake immediately rather than waiting for the next poll cycle. Shortens the "deaf" window after reset by up to a full poll interval.
+- **TUI `ctrl+r` keybinding** (#690) — triggers SIGHUP-equivalent in-place restart from inside the TUI session.
+- **TUI `u` keybinding for plugin-skills upgrade** (#692). The blocking startup prompt is gone; instead, a persistent `[skills out of date]` badge appears in the header when on-disk plugin files differ from the embedded version, and pressing `u` runs the upgrade in the background.
+- **SIGHUP restart no longer prompts on plugin-skills mismatch** (#692). The re-exec path now sets `FABRIK_SIGHUP_RESTART=1` so the child process treats the skills check as non-interactive (silent auto-refresh).
 
 ## Fixes
 
-- `fabrik init` no longer writes the legacy `advanceWorkflowTemplate` / `writeWorkflowTemplate` paths.
-- Probe `Reconcile` path: terminal-skip gate properly guards against same-status moves across multiple cleanup stages.
-- Various Copilot review findings addressed across probe and `symlink_env` patches.
+- **Terminal restoration on signal-driven exit** (#693). SIGINT/SIGTERM/SIGHUP now invoke a registered cleanup hook that releases the TUI's alternate-screen mode before exec/exit. Eliminates the "have to run `reset` after fabrik exits" wart.
+- Various Copilot review findings addressed across the rate-limit banner, cold-start linkage-drift gate, plugin upgrade prompt persistence, and badge overflow.
 
 ## Improvements
 
-- ADR-044 documents the probe-driven poll loop architecture.
-- `docs/state-machine.md` §D.4 updated for both the probe and terminal-skip behaviors.
-- `docs/USER_GUIDE.md` adds SIGHUP in-place restart and `@mention` notification sections.
-- Comments and field docs for `Terminal` / `IsTerminal()` updated to say "cleanup stage" rather than "Done" — accurate for multi-cleanup-stage configurations.
+- ADR-044 addendum documents the probe-driven bootstrap path.
+- USER_GUIDE.md adds `ctrl+r` and `u` keybinding sections.
+- Rate-limit log now includes probe error context and suppresses per-cycle backoff log noise.
 
 ## Internal
 
-- Comprehensive test coverage for the new code paths: `ProbeProjectBoard`, `runProbeAndDeepFetch`, `runStartupTransientLabelScan`, `Terminal` flag transitions, `TerminalFlagSet` mutation, `applyProbeItem` handler, `symlinkEnvIfEnabled`, and `commitWIP` Conventional Commits format.
-- `llms-full.txt` regenerated against current canonical docs.
+- Comprehensive unit and regression tests for `BootstrapFromProbe`, `isProbeOnlyTerminal`, the alert banner / countdown helper, the SIGHUP cleanup hook, `ctrl+r` handling, and `FABRIK_SIGHUP_RESTART` env var injection.
+- Cold-start cost regression test asserts probe-only bootstrap on a virgin cache.
+- v0.0.57 docs update landed via #695 (auto-merged in the v0.0.57 cycle).
 
 ## Upgrading
 
