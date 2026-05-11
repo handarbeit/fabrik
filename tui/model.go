@@ -124,7 +124,8 @@ const minHistoryRows = 5
 // info provides project metadata displayed in the footer.
 // pluginDir is the Fabrik plugin directory passed to claude --plugin-dir (may be empty).
 // wakeCh is an optional channel the TUI sends on to wake the engine poll loop (may be nil).
-func New(pollSeconds int, info ProjectInfo, pluginDir string, wakeCh chan struct{}) Model {
+// skillsStaleCount is the number of plugin skill files that differ from embedded; 0 means up to date.
+func New(pollSeconds int, info ProjectInfo, pluginDir string, wakeCh chan struct{}, skillsStaleCount int) Model {
 	interval := time.Duration(pollSeconds) * time.Second
 	now := time.Now()
 	spinnerFrames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -144,9 +145,10 @@ func New(pollSeconds int, info ProjectInfo, pluginDir string, wakeCh chan struct
 		pluginDir: pluginDir,
 		wakeCh:    wakeCh,
 		header: HeaderComponent{
-			pollInterval:  interval,
-			now:           now,
-			fabrikVersion: info.FabrikVersion,
+			pollInterval:     interval,
+			now:              now,
+			fabrikVersion:    info.FabrikVersion,
+			skillsStaleCount: skillsStaleCount,
 		},
 		active:  active,
 		history: NewHistoryPaneComponent(info.Repo),
