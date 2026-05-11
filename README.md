@@ -88,6 +88,8 @@ GitHub Project Board (source of truth)
 5. **Complete** — When Claude signals completion, the issue is labeled `stage:<name>:complete`.
 6. **Advance** — In yolo mode, the issue auto-advances to the next stage. Otherwise, a human moves it.
 
+> **Big-board efficiency (v0.0.57):** On large project boards, the per-poll GraphQL cost drops ~5–10× via a lightweight `updatedAt`-only probe that gates the full deep-fetch — only items that changed since the last poll trigger a full query. Terminal items (issues in a cleanup/Done column with `stage:<name>:complete` and no active lifecycle labels) are skipped entirely from both the probe and deep-fetch evaluation.
+
 ### Webhook Mode (Optional)
 
 Fabrik can receive GitHub events in near-real-time (within ~2 seconds) instead of waiting for the next poll tick by spawning `gh webhook forward` as a background subprocess. Enable with `--webhooks`. With the default in-memory board cache active, the webhook stream also drives a reconcile-based health check (default every 3 minutes) that reduces full-board polling to at most once every 60 minutes.
@@ -287,6 +289,7 @@ GITHUB_TOKEN=ghp_...    # Fallback
 | `--max-review-cycles` | Max re-invocation cycles per reviewer-gate session. Explicitly passing `0` uses the built-in default of `5` and bypasses `FABRIK_MAX_REVIEW_CYCLES`. When absent, `FABRIK_MAX_REVIEW_CYCLES` is consulted first; falls back to `5` if unset. | `0` |
 | `--max-rebase-cycles` | Maximum rebase re-invocation cycles per issue before pausing (0 = default 3; also `FABRIK_MAX_REBASE_CYCLES`) | `0` (3 cycles) |
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` for debugging | `false` |
+| `--symlink-env` | Create a relative symlink at `<worktree>/.env` pointing to the fabrikDir `.env` at worktree setup time. Enables stage code to read project secrets without copying them. Also `FABRIK_SYMLINK_ENV`. | `false` |
 | `--plugin-dir` | Path to Fabrik plugin directory (overrides installed plugin) | `""` |
 | `--webhooks` | Enable real-time webhook event delivery via `gh webhook forward` (requires `cli/gh-webhook` extension; also `FABRIK_WEBHOOKS`) | `false` |
 | `--reconcile-interval` | Seconds between periodic light-reconcile health checks when webhooks are enabled (0 = default 180; also `FABRIK_RECONCILE_INTERVAL`) | `0` (180 s) |
