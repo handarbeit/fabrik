@@ -518,10 +518,12 @@ func (e *Engine) Run() error {
 		// Update rate-limit state using two-threshold hysteresis:
 		// activate when ratio drops below 20%; clear only when ratio rises above 50%.
 		// Activity detection does NOT reset rate-limit backoff — it is a separate concern.
+		var enteredRateLimitLow bool
 		_, graphqlStats := e.client.RateLimitStats()
 		if graphqlStats.Limit > 0 {
 			ratio := float64(graphqlStats.Remaining) / float64(graphqlStats.Limit)
 			newRateLimitLow := nextRateLimitLow(rateLimitLow, ratio)
+			enteredRateLimitLow = newRateLimitLow && !rateLimitLow
 			if newRateLimitLow && !rateLimitLow {
 				e.logf(0, "warn", "GraphQL rate limit low (%.0f%% remaining) — activating rate-limit backoff\n", ratio*100)
 			} else if !newRateLimitLow && rateLimitLow {
@@ -536,6 +538,7 @@ func (e *Engine) Run() error {
 				} else {
 					e.logf(0, "poll", "GraphQL rate limit recovered (%.0f%% remaining)\n", ratio*100)
 				}
+				e.emitStructural(tui.RateLimitAlertEvent{Exhausted: false})
 			}
 			rateLimitLow = newRateLimitLow
 			if rateLimitLow {
@@ -577,7 +580,7 @@ func (e *Engine) Run() error {
 		}
 
 		ticker.Reset(effectiveInterval)
-		if rateLimitLow {
+		if enteredRateLimitLow {
 			e.logf(0, "poll", "rate-limit backoff active — effective poll interval: %v\n", effectiveInterval)
 		}
 
