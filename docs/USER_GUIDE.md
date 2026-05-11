@@ -1486,6 +1486,7 @@ Claude sessions, a scrollable History pane with completed jobs, and a status bar
 | `c` | Delete selected history entry |
 | `C` | Clear all history (with confirmation) |
 | `a` | Open abtop AI session monitor (shows token usage, context window, rate limits for all Claude sessions) |
+| `u` | Upgrade plugin skills (shows confirmation prompt when out of date; active stage invocations pick up new files on next run) |
 | `w` | Wake: reset idle backoff and poll immediately |
 | `ctrl+r` | Force refresh: drain in-flight workers and restart in place (same as SIGHUP — see [Recovering from Wedged State](#recovering-from-wedged-state)) |
 | `?` | Toggle help panel (keybindings and labels reference) |
