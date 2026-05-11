@@ -46,10 +46,12 @@ func TestRun_SighupRestart(t *testing.T) {
 	// Override exec so the test process is not actually replaced.
 	var capturedBin string
 	var capturedArgs []string
+	var capturedEnv []string
 	eng.sighupExecFn = func(argv0 string, argv []string, envv []string) error {
 		execSeq = seq.Add(1)
 		capturedBin = argv0
 		capturedArgs = argv
+		capturedEnv = envv
 		return nil
 	}
 
@@ -89,5 +91,18 @@ func TestRun_SighupRestart(t *testing.T) {
 	}
 	if cleanupSeq >= execSeq {
 		t.Errorf("cleanupHook must be called before exec: cleanupSeq=%d execSeq=%d", cleanupSeq, execSeq)
+	}
+
+	// Verify FABRIK_SIGHUP_RESTART=1 is injected so cmd/root.go can detect
+	// a re-exec'd process and skip the interactive plugin skills prompt.
+	found := false
+	for _, kv := range capturedEnv {
+		if kv == "FABRIK_SIGHUP_RESTART=1" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("exec env did not contain FABRIK_SIGHUP_RESTART=1")
 	}
 }
