@@ -518,12 +518,10 @@ func (e *Engine) Run() error {
 		// Update rate-limit state using two-threshold hysteresis:
 		// activate when ratio drops below 20%; clear only when ratio rises above 50%.
 		// Activity detection does NOT reset rate-limit backoff — it is a separate concern.
-		var enteredRateLimitLow bool
 		_, graphqlStats := e.client.RateLimitStats()
 		if graphqlStats.Limit > 0 {
 			ratio := float64(graphqlStats.Remaining) / float64(graphqlStats.Limit)
 			newRateLimitLow := nextRateLimitLow(rateLimitLow, ratio)
-			enteredRateLimitLow = newRateLimitLow && !rateLimitLow
 			if newRateLimitLow && !rateLimitLow {
 				e.logf(0, "warn", "GraphQL rate limit low (%.0f%% remaining) — activating rate-limit backoff\n", ratio*100)
 			} else if !newRateLimitLow && rateLimitLow {
@@ -580,9 +578,6 @@ func (e *Engine) Run() error {
 		}
 
 		ticker.Reset(effectiveInterval)
-		if enteredRateLimitLow {
-			e.logf(0, "poll", "rate-limit backoff active — effective poll interval: %v\n", effectiveInterval)
-		}
 
 		e.emitStructural(tui.PollCompletedEvent{
 			ItemCount:         result.ItemCount,
@@ -1568,7 +1563,7 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 			if !graphqlStats.Reset.IsZero() && graphqlStats.Reset.After(time.Now()) {
 				retryStr = fmt.Sprintf("retrying after %s (local)", graphqlStats.Reset.Local().Format("15:04"))
 			}
-			e.logf(0, "warn", "rate limited — polling suspended, %s\n", retryStr)
+			e.logf(0, "warn", "rate limited — polling suspended, %s: %v\n", retryStr, err)
 			e.emitStructural(tui.RateLimitAlertEvent{Exhausted: true, Reset: graphqlStats.Reset})
 		} else {
 			e.logf(0, "cache", "probe refresh failed (using prior cache state): %v\n", err)
