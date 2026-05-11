@@ -1750,9 +1750,17 @@ func isTerminalPredicate(labels []string, status string, stagesCfg []*stages.Sta
 // runStartupTransientLabelScan is a one-shot recovery pass that runs after the
 // first successful poll. It scans the Store for closed issues that still carry
 // transient lifecycle labels — a condition that can occur when an issue closes
-// mid-stage during a prior crash. Bootstrap populates the Store with full label
-// data from the shallow board fetch, so this scan is accurate without any extra
-// GitHub API call.
+// mid-stage during a prior crash.
+//
+// Label availability note: when the cache was bootstrapped via BootstrapFromProbe
+// (the default cold-start path), labels are absent from the Store and this scan
+// is a no-op. The accepted gap: stale transient labels on closed terminal items
+// will not be cleaned up at startup (very low probability — requires a crash
+// between issue close and label removal in the Done stage). Active items are
+// deep-fetched on the first probe cycle, which populates their labels normally,
+// so those items are covered by the steady-state cleanup path.
+// When bootstrapped via the full FetchProjectBoard path (webhook-paused / reconcile),
+// the Store contains full label data and this scan is fully effective.
 func (e *Engine) runStartupTransientLabelScan() {
 	snaps := e.store.All()
 	if len(snaps) == 0 {
@@ -1801,10 +1809,17 @@ func (e *Engine) runStartupTransientLabelScan() {
 }
 
 // runStartupTerminalScan marks terminal items in the Store after the first
-// successful poll. It uses bootstrap label data already present in the Store
-// (populated by FetchProjectBoard + Reset) so no GitHub API call is needed.
+// successful poll using the full label-aware predicate (isTerminalPredicate).
 // Must run after runStartupTransientLabelScan so stale transient labels have
 // been removed before the predicate is evaluated.
+//
+// Label availability note: when the cache was bootstrapped via BootstrapFromProbe
+// (the default cold-start path), labels are absent from the Store. In that case
+// this scan is a no-op — isTerminalPredicate returns false for every item.
+// Cold-start terminal seeding is instead handled by BootstrapFromProbe itself
+// using the simpler IsClosed+CleanupWorktree predicate (no labels required).
+// When bootstrapped via the full FetchProjectBoard path, labels are present
+// and this scan applies the full predicate correctly.
 func (e *Engine) runStartupTerminalScan() {
 	snaps := e.store.All()
 	var marked int
