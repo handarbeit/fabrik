@@ -1430,7 +1430,7 @@ func TestIsRateLimitNearZero_HealthyQuota(t *testing.T) {
 	}
 }
 
-// TestIsRateLimitNearZero_ZeroLimit verifies that limit=0 returns false (guards divide-by-zero).
+// TestIsRateLimitNearZero_ZeroLimit verifies that limit=0 returns false (guards invalid/unknown limit).
 func TestIsRateLimitNearZero_ZeroLimit(t *testing.T) {
 	if isRateLimitNearZero(0, 0) {
 		t.Error("expected false: limit=0 must always return false")
