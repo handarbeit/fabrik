@@ -460,6 +460,7 @@ func TestTuiEventMethods(t *testing.T) {
 	JobStartedEvent{}.tuiEvent()
 	JobCompletedEvent{}.tuiEvent()
 	TickEvent{}.tuiEvent()
+	SkillsStaleEvent{}.tuiEvent()
 }
 
 // TestHelpPanelToggle verifies that pressing ? opens the help panel, pressing ?
@@ -791,5 +792,166 @@ func TestUpdate_WKey_NilWakeCh_NoOp(t *testing.T) {
 
 	if nm.header.statusMsg != "" {
 		t.Errorf("expected empty statusMsg with nil wakeCh, got %q", nm.header.statusMsg)
+	}
+}
+
+// TestUpdate_UKey_WhenStale_SetsConfirmUpgrade verifies that pressing u when
+// skillsStaleCount > 0 sets confirmUpgrade and shows a confirmation prompt.
+func TestUpdate_UKey_WhenStale_SetsConfirmUpgrade(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, 3)
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("u")})
+	nm := next.(Model)
+
+	if cmd != nil {
+		t.Error("expected nil cmd from u key (just shows prompt)")
+	}
+	if !nm.confirmUpgrade {
+		t.Error("expected confirmUpgrade=true after pressing u with stale skills")
+	}
+	if !strings.Contains(nm.header.statusMsg, "3") {
+		t.Errorf("statusMsg should mention file count, got %q", nm.header.statusMsg)
+	}
+}
+
+// TestUpdate_UKey_WhenUpToDate_ShowsStatusMsg verifies that pressing u when
+// skillsStaleCount == 0 shows "up to date" message without setting confirmUpgrade.
+func TestUpdate_UKey_WhenUpToDate_ShowsStatusMsg(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, 0)
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("u")})
+	nm := next.(Model)
+
+	if cmd != nil {
+		t.Error("expected nil cmd from u key when up to date")
+	}
+	if nm.confirmUpgrade {
+		t.Error("expected confirmUpgrade=false when skills are up to date")
+	}
+	if nm.header.statusMsg != "plugin skills up to date" {
+		t.Errorf("statusMsg = %q, want %q", nm.header.statusMsg, "plugin skills up to date")
+	}
+}
+
+// TestUpdate_YKey_WhenConfirmUpgrade_DispatchesCmd verifies that pressing y
+// when confirmUpgrade is true clears the flag and returns the upgrade cmd.
+func TestUpdate_YKey_WhenConfirmUpgrade_DispatchesCmd(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, 2)
+	m.confirmUpgrade = true
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	nm := next.(Model)
+
+	if cmd == nil {
+		t.Error("expected non-nil cmd (upgradePluginCmd) after pressing y")
+	}
+	if nm.confirmUpgrade {
+		t.Error("expected confirmUpgrade=false after pressing y")
+	}
+}
+
+// TestUpdate_NKey_CancelsConfirmUpgrade verifies that pressing n when
+// confirmUpgrade is true clears the flag and status message.
+func TestUpdate_NKey_CancelsConfirmUpgrade(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, 2)
+	m.confirmUpgrade = true
+	m.header.statusMsg = "Upgrade 2 plugin file(s)? [y/N]"
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	nm := next.(Model)
+
+	if cmd != nil {
+		t.Error("expected nil cmd from n key canceling upgrade")
+	}
+	if nm.confirmUpgrade {
+		t.Error("expected confirmUpgrade=false after pressing n")
+	}
+	if nm.header.statusMsg != "" {
+		t.Errorf("expected empty statusMsg after cancel, got %q", nm.header.statusMsg)
+	}
+}
+
+// TestUpdate_EscKey_CancelsConfirmUpgrade verifies that pressing esc when
+// confirmUpgrade is true clears the flag and status message.
+func TestUpdate_EscKey_CancelsConfirmUpgrade(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, 2)
+	m.confirmUpgrade = true
+	m.header.statusMsg = "Upgrade 2 plugin file(s)? [y/N]"
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	nm := next.(Model)
+
+	if cmd != nil {
+		t.Error("expected nil cmd from esc key canceling upgrade")
+	}
+	if nm.confirmUpgrade {
+		t.Error("expected confirmUpgrade=false after pressing esc")
+	}
+	if nm.header.statusMsg != "" {
+		t.Errorf("expected empty statusMsg after cancel, got %q", nm.header.statusMsg)
+	}
+}
+
+// TestUpdate_New_WithSkillsStaleCount initializes with a stale count and
+// verifies the header badge field is set.
+func TestUpdate_New_WithSkillsStaleCount(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, 5)
+	if m.header.skillsStaleCount != 5 {
+		t.Errorf("skillsStaleCount = %d, want 5", m.header.skillsStaleCount)
+	}
+}
+
+// TestUpdate_SkillsStaleEvent updates the header badge count.
+func TestUpdate_SkillsStaleEvent(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, 0)
+
+	next, cmd := m.Update(SkillsStaleEvent{Count: 4})
+	nm := next.(Model)
+
+	if cmd != nil {
+		t.Error("expected nil cmd from SkillsStaleEvent")
+	}
+	if nm.header.skillsStaleCount != 4 {
+		t.Errorf("skillsStaleCount = %d, want 4", nm.header.skillsStaleCount)
+	}
+}
+
+// TestUpdate_PluginUpgradeResultMsg_Success verifies a successful upgrade clears
+// the badge and shows a success message.
+func TestUpdate_PluginUpgradeResultMsg_Success(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, 3)
+	m.confirmUpgrade = true
+
+	next, _ := m.Update(pluginUpgradeResultMsg{Wrote: 3, Err: nil})
+	nm := next.(Model)
+
+	if nm.confirmUpgrade {
+		t.Error("expected confirmUpgrade=false after successful upgrade")
+	}
+	if nm.header.skillsStaleCount != 0 {
+		t.Errorf("skillsStaleCount = %d, want 0 after upgrade", nm.header.skillsStaleCount)
+	}
+	if !strings.Contains(nm.header.statusMsg, "3") {
+		t.Errorf("statusMsg should mention count, got %q", nm.header.statusMsg)
+	}
+}
+
+// TestUpdate_PluginUpgradeResultMsg_Error verifies a failed upgrade retains the
+// badge and shows an error message.
+func TestUpdate_PluginUpgradeResultMsg_Error(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, 2)
+	m.confirmUpgrade = true
+
+	next, _ := m.Update(pluginUpgradeResultMsg{Wrote: 0, Err: fmt.Errorf("disk full")})
+	nm := next.(Model)
+
+	if nm.confirmUpgrade {
+		t.Error("expected confirmUpgrade=false after upgrade attempt")
+	}
+	if nm.header.skillsStaleCount != 2 {
+		t.Errorf("skillsStaleCount = %d, want 2 (badge retained on error)", nm.header.skillsStaleCount)
+	}
+	if !strings.Contains(nm.header.statusMsg, "disk full") {
+		t.Errorf("statusMsg should contain error, got %q", nm.header.statusMsg)
 	}
 }
