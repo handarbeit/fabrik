@@ -1402,6 +1402,41 @@ func TestNextRateLimitLow_NoActivationAboveThreshold(t *testing.T) {
 	}
 }
 
+// TestIsRateLimitNearZero_AtZero verifies that remaining=0 is always near zero.
+func TestIsRateLimitNearZero_AtZero(t *testing.T) {
+	if !isRateLimitNearZero(0, 5000) {
+		t.Error("expected true: remaining=0 must be near zero")
+	}
+}
+
+// TestIsRateLimitNearZero_AtBoundary verifies that remaining=50 with limit=5000 (exactly 1%) is near zero.
+func TestIsRateLimitNearZero_AtBoundary(t *testing.T) {
+	if !isRateLimitNearZero(50, 5000) {
+		t.Error("expected true: remaining=50 (1% of 5000) is at the near-zero boundary")
+	}
+}
+
+// TestIsRateLimitNearZero_JustAboveBoundary verifies that remaining=51 with limit=5000 (>1%) is not near zero.
+func TestIsRateLimitNearZero_JustAboveBoundary(t *testing.T) {
+	if isRateLimitNearZero(51, 5000) {
+		t.Error("expected false: remaining=51 (>1% of 5000) is just above the near-zero boundary")
+	}
+}
+
+// TestIsRateLimitNearZero_HealthyQuota verifies that a healthy remaining count is not near zero.
+func TestIsRateLimitNearZero_HealthyQuota(t *testing.T) {
+	if isRateLimitNearZero(1000, 5000) {
+		t.Error("expected false: remaining=1000 is well above the near-zero threshold")
+	}
+}
+
+// TestIsRateLimitNearZero_ZeroLimit verifies that limit=0 returns false (guards divide-by-zero).
+func TestIsRateLimitNearZero_ZeroLimit(t *testing.T) {
+	if isRateLimitNearZero(0, 0) {
+		t.Error("expected false: limit=0 must always return false")
+	}
+}
+
 // TestPollPreFilter_WaitForCI_CompleteLabelOnly_Skipped verifies that an item with
 // wait_for_ci: true and ONLY stage:X:complete (no fabrik:awaiting-ci) is filtered by
 // the poll pre-filter when not in cycleSet and no expired CooldownAt. In the
