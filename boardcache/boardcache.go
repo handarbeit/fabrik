@@ -8,6 +8,7 @@ import (
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 // ReadClient is the subset of engine.GitHubClient covering read-only board/item/PR/check-run state.
@@ -247,6 +248,74 @@ func (c *CacheImpl) Bootstrap(board *gh.ProjectBoard) {
 	c.mu.Unlock()
 
 	c.logFn("[cache] bootstrap complete: %d items\n", len(board.Items))
+}
+
+// BootstrapFromProbe populates the cache from a ProbeProjectBoard result instead
+// of a full FetchProjectBoard. This is the preferred cold-start path: probe costs
+// ~250 nodes vs ~2350 for a full shallow fetch on a 47-item board.
+//
+// Labels are absent from probe results; startup scans that rely on label data
+// (runStartupTransientLabelScan, runStartupTerminalScan) will see empty label sets
+// and silently become no-ops after this bootstrap path. This is an accepted
+// trade-off: stale transient labels on closed terminal items will not be detected
+// at startup (very low probability; requires a crash mid-Done-stage). Active items
+// are deep-fetched on the first probe cycle, populating their labels normally.
+//
+// Sets LinkedPR.Number from each probe item's LinkedPRNumber so the subsequent
+// probe cycle does not see spurious linkage-drift on items that already have a PR.
+//
+// Must be called before any engine mutations flow through the shared store.
+func (c *CacheImpl) BootstrapFromProbe(items []gh.BoardProbeItem, projectID string, stagesCfg []*stages.Stage) {
+	// Construct synthetic ProjectItems from probe data.
+	// applyProjectItem (called by Reset) populates LinkedPR.Number from LinkedPRNumber,
+	// which prevents the subsequent probe from seeing spurious "linkage drift".
+	syntheticItems := make([]gh.ProjectItem, 0, len(items))
+	for _, pi := range items {
+		syntheticItems = append(syntheticItems, gh.ProjectItem{
+			ID:             pi.ContentID,
+			ItemID:         pi.ItemID,
+			Number:         pi.Number,
+			IsPR:           pi.IsPR,
+			IsClosed:       pi.IsClosed,
+			Status:         pi.Status,
+			Repo:           pi.Repo,
+			UpdatedAt:      pi.EffectiveUpdatedAt,
+			LinkedPRNumber: pi.LinkedPRNumber,
+		})
+	}
+
+	// Reset Store atomically — clears all prior item state and indexes.
+	c.store.Reset(syntheticItems)
+
+	c.mu.Lock()
+	c.projectID = projectID
+	// projectTitle and projectOwnerType are not available from probe results;
+	// they remain empty until the next Reconcile. The engine reads OwnerType
+	// from e.cfg.OwnerType directly, not from cache, so this is safe.
+	c.localDeltaAt = make(map[string]time.Time)
+	c.mu.Unlock()
+
+	// Seed terminal flag for closed items in cleanup stages using a simpler
+	// predicate (IsClosed + CleanupWorktree) since labels are absent.
+	// This prevents the probe loop from deep-fetching closed Done items.
+	var terminal int
+	for _, pi := range items {
+		if !pi.IsClosed {
+			continue
+		}
+		st := stages.FindStage(stagesCfg, pi.Status)
+		if st == nil || !st.CleanupWorktree {
+			continue
+		}
+		c.store.Apply(itemstate.TerminalFlagSet{
+			Repo:     pi.Repo,
+			Number:   pi.Number,
+			Terminal: true,
+		})
+		terminal++
+	}
+
+	c.logFn("[cache] probe bootstrap complete: %d items (%d terminal)\n", len(items), terminal)
 }
 
 // Reconcile replaces shallow board state from a fresh board fetch.
