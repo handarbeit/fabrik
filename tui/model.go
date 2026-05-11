@@ -309,6 +309,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
+		case "ctrl+r":
+			m.header.SetStatusMsg("refreshing…")
+			return m, sendSighupCmd()
+
 		case "a":
 			if _, err := exec.LookPath("abtop"); err != nil {
 				m.header.SetStatusMsg("abtop not found in PATH — install from github.com/graykode/abtop")
