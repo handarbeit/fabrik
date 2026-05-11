@@ -69,3 +69,46 @@ A one-shot `runStartupTransientLabelScan` runs after the first successful poll. 
 - **Label visibility during steady-state**: unchanged — labels come from `FetchItemDetails` (full label set), now written on first access and refreshed on any `updatedAt` drift.
 - **Constraint for future contributors**: mutations applied from probe data MUST use `ProbeBoardItemUpdated`, not `ShallowBoardItemUpdated`. Adding labels or other deep fields to the probe query without a corresponding mutation-type update would silently corrupt the cache.
 - **`LightReconcile` residual cost**: ≤ 20 full shallow board fetches/hour in webhook mode. Acceptable; a follow-up could add `ProbeProjectBoard` to `ReadClient` to eliminate this cost.
+
+---
+
+## Addendum — Probe bootstrap (issue #710, 2026-05-11)
+
+The Bootstrap section above stated: *"Bootstrap (first poll, unbootstrapped cache): `FetchProjectBoard` → `Bootstrap`."* This has been superseded.
+
+### New cold-start path
+
+The virgin-cache branch now uses `ProbeProjectBoard → BootstrapFromProbe` instead of `FetchProjectBoard → Bootstrap`.
+
+**Why**: `FetchProjectBoard` carries `labels(first:30)` and `closedByPullRequestsReferences(first:5)` per item, costing ~2 350 nodes on a 47-item board just to warm a cold cache. `ProbeProjectBoard` costs ~250 nodes for the same board. An overnight test revealed the old path was causing Fabrik to go deaf for ~1 hour after restart when the shared GraphQL budget was already depleted.
+
+### `BootstrapFromProbe(items []BoardProbeItem, projectID string, stagesCfg []*stages.Stage)`
+
+New method on `boardcache.CacheImpl`. Constructs synthetic `[]gh.ProjectItem` from probe items and calls `store.Reset`, which populates `LinkedPR.Number` from `LinkedPRNumber` via `applyProjectItem`. This prevents the subsequent probe cycle from seeing spurious linkage-drift on items that already have a PR.
+
+After `store.Reset`, `BootstrapFromProbe` applies `TerminalFlagSet` for items that are both closed and in a cleanup stage (`CleanupWorktree: true`). The simplified predicate (no label check) means these items are never deep-fetched — not by the first probe cycle, and not by subsequent cycles unless their status changes.
+
+### Label absence and its consequences
+
+Probe results carry no labels. After `BootstrapFromProbe`:
+
+- `runStartupTransientLabelScan` is a no-op (empty label sets; stale transient labels on closed terminal items will not be detected at startup).
+- `runStartupTerminalScan` is a no-op (label-aware predicate requires labels; cold-start seeding was done by `BootstrapFromProbe` instead).
+
+The accepted gap: an item with stale transient labels that closed mid-Done-stage in a prior crash will not be cleaned up at startup. Probability is very low. The steady-state deep-fetch path cleans up non-terminal items naturally on the first probe cycle.
+
+### Linkage-drift gate
+
+`runProbeAndDeepFetch` now gates the linkage-drift check on `s.LastDeepFetchAt.IsZero()`:
+
+- **Never deep-fetched** (`LastDeepFetchAt == zero`): probe's `LinkedPRNumber` is written authoritatively via `PRDetailsUpdated` (updates `LinkedPR.Number` and `prToKey` reverse index) without firing `DeepFetchInvalidated`. There is no prior deep cache to invalidate.
+- **Warm cache** (`LastDeepFetchAt != zero`): existing `DeepFetchInvalidated` path unchanged — real linkage drift forces an immediate re-deep-fetch.
+
+This is a correctness fix as well as an optimization: the old code fired `DeepFetchInvalidated` on every cold start for every item with a PR (because the old `Bootstrap` from `FetchProjectBoard` wrote `LinkedPR.Number=0`, and the first probe found the actual PR number — interpreted as drift). With `BootstrapFromProbe` correctly seeding `LinkedPR.Number`, this spurious case no longer arises; the gate also eliminates it for any remaining edge cases.
+
+### Bootstrap path summary (updated)
+
+| Trigger | Path | Labels in store? | Terminal seeding |
+|---|---|---|---|
+| Virgin cache (default) | `ProbeProjectBoard → BootstrapFromProbe` | No | `IsClosed + CleanupWorktree` |
+| Drift recovery / reconcile | `LightReconcile → Reconcile(freshBoard)` | Yes (from `FetchProjectBoard`) | `runStartupTerminalScan` |
