@@ -10,6 +10,7 @@ import (
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 // ---------------------------------------------------------------------------
@@ -2251,5 +2252,127 @@ func TestLightReconcile_NetworkError(t *testing.T) {
 	}
 	if freshBoard != nil {
 		t.Errorf("freshBoard = %v on error, want nil", freshBoard)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// BootstrapFromProbe tests
+// ---------------------------------------------------------------------------
+
+// testStages returns a minimal []*stages.Stage for testing: one non-cleanup stage
+// ("Research") and one cleanup stage ("Done").
+func testStages() []*stages.Stage {
+	return []*stages.Stage{
+		{Name: "Research", Order: 1, CleanupWorktree: false},
+		{Name: "Done", Order: 10, CleanupWorktree: true},
+	}
+}
+
+// TestBootstrapFromProbe_ProjectIDSet verifies that BootstrapFromProbe stores
+// the projectID returned by ProbeProjectBoard.
+func TestBootstrapFromProbe_ProjectIDSet(t *testing.T) {
+	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
+	items := []gh.BoardProbeItem{
+		{ContentID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"},
+	}
+	c.BootstrapFromProbe(items, "PROJ_XYZ", testStages())
+
+	if got := c.ProjectID(); got != "PROJ_XYZ" {
+		t.Errorf("ProjectID = %q, want %q", got, "PROJ_XYZ")
+	}
+}
+
+// TestBootstrapFromProbe_LinkedPRNumberPopulated verifies that LinkedPR.Number is
+// populated from probe item's LinkedPRNumber so the subsequent probe cycle does not
+// see spurious linkage-drift.
+func TestBootstrapFromProbe_LinkedPRNumberPopulated(t *testing.T) {
+	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
+	items := []gh.BoardProbeItem{
+		{ContentID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research", LinkedPRNumber: 42},
+	}
+	c.BootstrapFromProbe(items, "PID", testStages())
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.LinkedPR == nil {
+		t.Fatal("LinkedPR is nil; want non-nil")
+	}
+	if s.LinkedPR.Number != 42 {
+		t.Errorf("LinkedPR.Number = %d, want 42", s.LinkedPR.Number)
+	}
+}
+
+// TestBootstrapFromProbe_NonCleanupStageNotTerminal verifies that a closed item
+// in a non-cleanup stage is NOT seeded as terminal.
+func TestBootstrapFromProbe_NonCleanupStageNotTerminal(t *testing.T) {
+	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
+	items := []gh.BoardProbeItem{
+		{ContentID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research", IsClosed: true},
+	}
+	c.BootstrapFromProbe(items, "PID", testStages())
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.Terminal {
+		t.Error("Terminal = true for closed non-cleanup-stage item; want false")
+	}
+}
+
+// TestBootstrapFromProbe_ClosedCleanupStageTerminal verifies that a closed item
+// in a cleanup stage IS seeded as terminal, preventing a deep-fetch on first probe.
+func TestBootstrapFromProbe_ClosedCleanupStageTerminal(t *testing.T) {
+	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
+	items := []gh.BoardProbeItem{
+		{ContentID: "I_1", Number: 1, Repo: "owner/repo", Status: "Done", IsClosed: true},
+	}
+	c.BootstrapFromProbe(items, "PID", testStages())
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if !s.Terminal {
+		t.Error("Terminal = false for closed cleanup-stage item; want true")
+	}
+}
+
+// TestBootstrapFromProbe_OpenCleanupStageNotTerminal verifies that an open item
+// in a cleanup stage is NOT seeded as terminal (must be closed to qualify).
+func TestBootstrapFromProbe_OpenCleanupStageNotTerminal(t *testing.T) {
+	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
+	items := []gh.BoardProbeItem{
+		{ContentID: "I_1", Number: 1, Repo: "owner/repo", Status: "Done", IsClosed: false},
+	}
+	c.BootstrapFromProbe(items, "PID", testStages())
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.Terminal {
+		t.Error("Terminal = true for open cleanup-stage item; want false")
+	}
+}
+
+// TestBootstrapFromProbe_IsBootstrapped verifies that IsBootstrapped returns true
+// after BootstrapFromProbe is called with at least one item.
+func TestBootstrapFromProbe_IsBootstrapped(t *testing.T) {
+	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
+	if c.IsBootstrapped() {
+		t.Fatal("IsBootstrapped should be false before bootstrap")
+	}
+	items := []gh.BoardProbeItem{
+		{ContentID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"},
+	}
+	c.BootstrapFromProbe(items, "PID", testStages())
+	if !c.IsBootstrapped() {
+		t.Error("IsBootstrapped should be true after BootstrapFromProbe")
+	}
+}
+
+// TestBootstrapFromProbe_PRInStoreByPRKey verifies that the prToKey reverse index
+// is populated when LinkedPRNumber is set, so LinkedPRByNumber lookups work.
+func TestBootstrapFromProbe_PRInStoreByPRKey(t *testing.T) {
+	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
+	items := []gh.BoardProbeItem{
+		{ContentID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research", LinkedPRNumber: 99},
+	}
+	c.BootstrapFromProbe(items, "PID", testStages())
+
+	_, found := c.store.GetByPRKey("owner/repo", 99)
+	if !found {
+		t.Error("prToKey index should have an entry for PR #99 after BootstrapFromProbe")
 	}
 }
