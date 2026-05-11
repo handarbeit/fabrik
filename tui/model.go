@@ -483,6 +483,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.active = comp.(ActivePaneComponent)
 		return m, nil
 
+	case SkillsStaleEvent:
+		m.header.SetSkillsStaleCount(ev.Count)
+		return m, nil
+
+	case pluginUpgradeResultMsg:
+		m.confirmUpgrade = false
+		if ev.Err != nil {
+			m.header.SetStatusMsg(fmt.Sprintf("plugin upgrade failed: %v", ev.Err))
+		} else {
+			m.header.SetSkillsStaleCount(0)
+			m.header.SetStatusMsg(fmt.Sprintf("Plugin skills upgraded: %d file(s)", ev.Wrote))
+		}
+		return m, nil
+
 	}
 
 	return m, nil
