@@ -909,8 +909,14 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			probeItems, projectID, refreshErr := e.client.ProbeProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
 			if refreshErr != nil {
 				e.logf(0, "cache", "initial board probe failed (using empty cache): %v\n", refreshErr)
-			} else if projectID != "" {
+			} else if projectID != "" && len(probeItems) > 0 {
 				cacheImpl.BootstrapFromProbe(probeItems, projectID, e.cfg.Stages)
+			} else if projectID != "" {
+				// Probe succeeded but returned 0 items — possible transient indexer hiccup.
+				// Leave cache virgin and retry on the next poll rather than bootstrapping
+				// with an empty store (which would cause every real item to be treated as
+				// "new" and deep-fetched on the next cycle).
+				e.logf(0, "cache", "initial board probe returned 0 items — deferring bootstrap to next poll\n")
 			}
 		}
 	}
@@ -1633,13 +1639,13 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 				// This suppresses spurious invalidations that occur when the bootstrapped
 				// LinkedPR.Number differs from the probe's value (e.g., cold-start with
 				// the old FetchProjectBoard path that did not populate LinkedPR.Number).
-				if pi.LinkedPRNumber != 0 {
-					e.store.Apply(itemstate.PRDetailsUpdated{
-						Repo:     repo,
-						Number:   pi.Number,
-						PRNumber: pi.LinkedPRNumber,
-					})
-				}
+				// Apply even when pi.LinkedPRNumber==0 to clear a stale prToKey entry
+				// if the PR was delinked between bootstrap and the first probe cycle.
+				e.store.Apply(itemstate.PRDetailsUpdated{
+					Repo:     repo,
+					Number:   pi.Number,
+					PRNumber: pi.LinkedPRNumber,
+				})
 			} else {
 				// Warm cache (has been deep-fetched): real linkage drift — invalidate.
 				e.logf(pi.Number, "cache", "probe: linkage drift (was PR #%d, now PR #%d) — invalidating deep cache\n",
