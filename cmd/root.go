@@ -559,9 +559,17 @@ func Execute() error {
 	// Evaluate plugin skill staleness after engine.New() (so env vars are unset
 	// and the inheritance window is closed). For non-TUI, refresh silently. For
 	// TUI, the count is passed to tui.New() to drive the header badge.
+	// Guard with os.Stat so projects that haven't run `fabrik init` (no
+	// .fabrik/plugin/ dir) always report stale count 0 — diffingPluginFiles
+	// treats every missing on-disk file as diffing, which would produce a
+	// spuriously large count when the directory doesn't exist yet.
 	var skillsStaleCount int
-	if diffing, diffErr := diffingPluginFiles(".fabrik/plugin"); diffErr == nil {
-		skillsStaleCount = len(diffing)
+	if _, statErr := os.Stat(".fabrik/plugin"); statErr == nil {
+		if diffing, diffErr := diffingPluginFiles(".fabrik/plugin"); diffErr != nil {
+			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skill check failed: %v\n", diffErr)
+		} else {
+			skillsStaleCount = len(diffing)
+		}
 	}
 
 	// When TUI is enabled (and we have a real terminal), run the bubbletea
