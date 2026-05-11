@@ -135,3 +135,12 @@ type StageChangedEvent struct {
 }
 
 func (StageChangedEvent) tuiEvent() {}
+
+// SkillsStaleEvent is emitted once after startup when the on-disk plugin skill
+// files differ from the embedded versions. Count is the number of diffing files;
+// zero means skills are up to date (used to clear the header badge after upgrade).
+type SkillsStaleEvent struct {
+	Count int
+}
+
+func (SkillsStaleEvent) tuiEvent() {}
