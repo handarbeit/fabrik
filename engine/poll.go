@@ -1626,9 +1626,26 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 			cachedPRNum = s.LinkedPR.Number
 		}
 		if pi.LinkedPRNumber != cachedPRNum {
-			e.logf(pi.Number, "cache", "probe: linkage drift (was PR #%d, now PR #%d) — invalidating deep cache\n",
-				cachedPRNum, pi.LinkedPRNumber)
-			e.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: pi.Number})
+			if s.LastDeepFetchAt.IsZero() {
+				// Never deep-fetched: no prior deep cache to invalidate.
+				// Treat the probe's value as authoritative — write it into LinkedPR.Number
+				// and update the prToKey reverse index without firing DeepFetchInvalidated.
+				// This suppresses spurious invalidations that occur when the bootstrapped
+				// LinkedPR.Number differs from the probe's value (e.g., cold-start with
+				// the old FetchProjectBoard path that did not populate LinkedPR.Number).
+				if pi.LinkedPRNumber != 0 {
+					e.store.Apply(itemstate.PRDetailsUpdated{
+						Repo:     repo,
+						Number:   pi.Number,
+						PRNumber: pi.LinkedPRNumber,
+					})
+				}
+			} else {
+				// Warm cache (has been deep-fetched): real linkage drift — invalidate.
+				e.logf(pi.Number, "cache", "probe: linkage drift (was PR #%d, now PR #%d) — invalidating deep cache\n",
+					cachedPRNum, pi.LinkedPRNumber)
+				e.store.Apply(itemstate.DeepFetchInvalidated{Repo: repo, Number: pi.Number})
+			}
 		}
 
 		// Terminal skip: if this item was previously identified as terminal and the
