@@ -884,9 +884,14 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// items. This replaces the previous FetchProjectBoard + Reconcile path and
 	// reduces GraphQL cost ~5-10x on idle boards.
 	//
-	// Virgin caches fall back to a full FetchProjectBoard + Bootstrap so the initial
-	// board load is complete. Paused caches are skipped; FetchProjectBoard below
-	// falls through to GitHub directly for paused caches.
+	// Virgin caches use ProbeProjectBoard + BootstrapFromProbe (~250 nodes) instead
+	// of FetchProjectBoard + Bootstrap (~2350 nodes on a 47-item board). The probe
+	// result carries LinkedPRNumber so the subsequent probe cycle does not see
+	// spurious linkage-drift. Closed cleanup-stage items are seeded terminal so
+	// they are never deep-fetched.
+	//
+	// Paused caches are skipped; FetchProjectBoard below falls through to GitHub
+	// directly for paused caches.
 	//
 	// Important caveat: project Status changes do NOT flow over webhooks for
 	// repo-level projects (and only sometimes for org-level projects with the
@@ -900,12 +905,12 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			// Bootstrapped: use probe-driven refresh (avoids full shallow fetch cost).
 			e.runProbeAndDeepFetch(cacheImpl)
 		default:
-			// Virgin: full board fetch + bootstrap required.
-			freshBoard, refreshErr := e.client.FetchProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
+			// Virgin: probe bootstrap (~250 nodes vs ~2350 for full shallow fetch).
+			probeItems, projectID, refreshErr := e.client.ProbeProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
 			if refreshErr != nil {
-				e.logf(0, "cache", "initial board fetch failed (using empty cache): %v\n", refreshErr)
-			} else if freshBoard != nil && freshBoard.ProjectID != "" {
-				cacheImpl.Bootstrap(freshBoard)
+				e.logf(0, "cache", "initial board probe failed (using empty cache): %v\n", refreshErr)
+			} else if projectID != "" {
+				cacheImpl.BootstrapFromProbe(probeItems, projectID, e.cfg.Stages)
 			}
 		}
 	}
