@@ -61,6 +61,7 @@ func (m *mockClient) FetchItemDetails(item *gh.ProjectItem) error {
 		if item.Repo == "" && m.itemDetailsResult.Repo != "" {
 			item.Repo = m.itemDetailsResult.Repo
 		}
+		item.Title = m.itemDetailsResult.Title
 		item.Body = m.itemDetailsResult.Body
 		item.Comments = cloneComments(m.itemDetailsResult.Comments)
 		item.LinkedPRNumber = m.itemDetailsResult.LinkedPRNumber
@@ -2374,5 +2375,54 @@ func TestBootstrapFromProbe_PRInStoreByPRKey(t *testing.T) {
 	_, found := c.store.GetByPRKey("owner/repo", 99)
 	if !found {
 		t.Error("prToKey index should have an entry for PR #99 after BootstrapFromProbe")
+	}
+}
+
+// TestBootstrapFromProbe_TitlePopulatedAfterDeepFetch verifies the cold-start
+// title propagation path: probe seeds an item with no title, then
+// FetchItemDetails populates title from the network, and FetchProjectBoard
+// returns the item with the correct title.
+func TestBootstrapFromProbe_TitlePopulatedAfterDeepFetch(t *testing.T) {
+	mc := &mockClient{
+		itemDetailsResult: &gh.ProjectItem{
+			Number: 5,
+			Repo:   "owner/repo",
+			Title:  "Issue Title",
+		},
+	}
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+	items := []gh.BoardProbeItem{
+		{ContentID: "I_5", ItemID: "PVTI_5", Number: 5, Repo: "owner/repo", Status: "Implement"},
+	}
+	c.BootstrapFromProbe(items, "PID", testStages())
+
+	// Confirm that the bootstrapped item has no title (probe never carries title).
+	s := testGetState(t, c, "owner/repo", 5)
+	if s.Title != "" {
+		t.Errorf("before deep-fetch: Title = %q, want empty", s.Title)
+	}
+
+	// Simulate the deep-fetch that runProbeAndDeepFetch triggers on probe drift.
+	deepItem := gh.ProjectItem{ID: "I_5", Number: 5, Repo: "owner/repo"}
+	if err := c.FetchItemDetails(&deepItem); err != nil {
+		t.Fatalf("FetchItemDetails: %v", err)
+	}
+
+	// FetchProjectBoard should now return the item with the populated title.
+	board, err := c.FetchProjectBoard("owner", "repo", 1, "organization")
+	if err != nil {
+		t.Fatalf("FetchProjectBoard: %v", err)
+	}
+	var itemFound bool
+	for _, bi := range board.Items {
+		if bi.Number == 5 {
+			itemFound = true
+			if bi.Title != "Issue Title" {
+				t.Errorf("board item Title = %q, want %q", bi.Title, "Issue Title")
+			}
+		}
+	}
+	if !itemFound {
+		t.Error("item #5 not found in board after deep-fetch")
 	}
 }
