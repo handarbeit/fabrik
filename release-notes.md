@@ -1,20 +1,14 @@
-# Fabrik v0.0.59
+# Fabrik v0.0.60
 
-A small but important bugfix release. The headline fix: the Implement stage will no longer silently mark itself complete when draft PR creation fails — a long-standing flake that occasionally left the pipeline waiting on reviewers for a PR that didn't exist. v0.0.58's user-facing documentation also lands here.
+Targeted bugfix release: closes a latent regression from the v0.0.57 GraphQL-cost-reduction work. v0.0.59 made PR-creation failures visible; this release fixes the underlying cause of the most common one.
 
 ## Fixes
 
-- **Implement stage no longer silently succeeds when draft PR creation fails** (#725). The engine now validates that the PR was actually created (and `prNum > 0`) before advancing. Logs include the head SHA so failures are diagnosable. Closes a ~15–20% flake rate observed on busy boards where Implement reached `stage:Implement:complete` (and sometimes `stage:Review:complete`) without a PR ever existing, leaving Review/Validate waiting on reviewers that couldn't be assigned.
-- **R5 skip-Claude path** now correctly calls `markPRReady` when the stage has `mark_pr_ready_on_complete: true` set. Without this, draft PRs created by Implement could remain in draft state after Review completion, blocking auto-merge.
-
-## Improvements
-
-- USER_GUIDE.md, README.md, and the marketing site updated to document the v0.0.58 feature set (cold-start optimization, persistent stale-skills badge in the TUI, SIGHUP fixes, rate-limit alert banner) — #723.
-- `state-machine.md` documents the PR creation failure sub-path for future reference.
+- **Issue/PR title now populated in cache after probe-driven cold-start** (#729). The truly-shallow probe (#685) and `BootstrapFromProbe` (#710) deliberately omit `title` from the per-poll path for cost reasons. `FetchItemDetails` was never updated to fetch it during deep-fetch — a vestige from when title arrived via the heavy shallow board fetch. Items first seen via the probe ended up with `Title == ""` permanently, causing `ensureDraftPR` to send empty titles to GitHub and trigger HTTP 422 `Validation Failed — missing_field: title` during the Implement stage. Fix adds `title` to the `FetchItemDetails` GraphQL query for both `Issue` and `PullRequest` content types and removes the title-preservation workaround. Collateral degradation (empty title in Claude context files, TUI display, log lines) is also resolved.
 
 ## Internal
 
-- Engine tests added for PR creation failure handling and the R5 skip-Claude path.
+- New tests assert `CreateDraftPR` receives a populated title after `FetchItemDetails`, and that the GraphQL response correctly populates `item.Title` for both Issue and PR nodes.
 
 ## Upgrading
 
