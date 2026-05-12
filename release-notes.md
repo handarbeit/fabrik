@@ -1,33 +1,20 @@
-# Fabrik v0.0.58
+# Fabrik v0.0.59
 
-This release closes the loop on the v0.0.57 efficiency push and adds operator-facing visibility for the cases where things still tighten up. The biggest change under the hood is the cold-start cache population — fabrik restarts (auto-upgrade or SIGHUP) used to deep-fetch every closed Done item before classifying it; now they're seeded as terminal directly from probe data, with no per-item GraphQL on the warm-up path. Above the engine, the TUI gains a prominent rate-limit-exhaustion alert (with countdown to reset), a ctrl+r force-refresh keybinding, a plugin-skills upgrade prompt via the `u` key, and clean terminal restoration on signal-driven exits.
-
-## Features
-
-- **Cold-start cache population is now cheap** (#710). `BootstrapFromProbe` seeds the cache from the truly-shallow probe instead of the heavy shallow board fetch. Closed items in cleanup stages are seeded as terminal directly from probe data — no deep-fetch needed. Linkage-drift detection is suppressed on never-deep-fetched items so the first probe after bootstrap doesn't trigger a cascade. ~80–90% reduction in cold-start GraphQL cost on boards with many Done items.
-- **`isProbeOnlyTerminal` predicate** (#716). Factored the probe-only terminal-seeding logic out for reuse in `runProbeAndDeepFetch`'s new-item branch, so items appearing on the board after startup get the same cheap classification.
-- **TUI rate-limit exhaustion alert banner** (#705). When the GraphQL budget is at zero, the TUI now renders a prominent banner with time-to-reset countdown. Auto-clears on recovery. Operators can finally tell when fabrik is rate-limited vs. broken.
-- **Force immediate probe on rate-limit recovery** (#706). When the GraphQL budget transitions from near-zero back to healthy, fabrik fires a wake immediately rather than waiting for the next poll cycle. Shortens the "deaf" window after reset by up to a full poll interval.
-- **TUI `ctrl+r` keybinding** (#690) — triggers SIGHUP-equivalent in-place restart from inside the TUI session.
-- **TUI `u` keybinding for plugin-skills upgrade** (#692). The blocking startup prompt is gone; instead, a persistent `[skills out of date]` badge appears in the header when on-disk plugin files differ from the embedded version, and pressing `u` runs the upgrade in the background.
-- **SIGHUP restart no longer prompts on plugin-skills mismatch** (#692). The re-exec path now sets `FABRIK_SIGHUP_RESTART=1` so the child process treats the skills check as non-interactive (silent auto-refresh).
+A small but important bugfix release. The headline fix: the Implement stage will no longer silently mark itself complete when draft PR creation fails — a long-standing flake that occasionally left the pipeline waiting on reviewers for a PR that didn't exist. v0.0.58's user-facing documentation also lands here.
 
 ## Fixes
 
-- **Terminal restoration on signal-driven exit** (#693). SIGINT/SIGTERM/SIGHUP now invoke a registered cleanup hook that releases the TUI's alternate-screen mode before exec/exit. Eliminates the "have to run `reset` after fabrik exits" wart.
-- Various Copilot review findings addressed across the rate-limit banner, cold-start linkage-drift gate, plugin upgrade prompt persistence, and badge overflow.
+- **Implement stage no longer silently succeeds when draft PR creation fails** (#725). The engine now validates that the PR was actually created (and `prNum > 0`) before advancing. Logs include the head SHA so failures are diagnosable. Closes a ~15–20% flake rate observed on busy boards where Implement reached `stage:Implement:complete` (and sometimes `stage:Review:complete`) without a PR ever existing, leaving Review/Validate waiting on reviewers that couldn't be assigned.
+- **R5 skip-Claude path** now correctly calls `markPRReady` when the stage has `mark_pr_ready_on_complete: true` set. Without this, draft PRs created by Implement could remain in draft state after Review completion, blocking auto-merge.
 
 ## Improvements
 
-- ADR-044 addendum documents the probe-driven bootstrap path.
-- USER_GUIDE.md adds `ctrl+r` and `u` keybinding sections.
-- Rate-limit log now includes probe error context and suppresses per-cycle backoff log noise.
+- USER_GUIDE.md, README.md, and the marketing site updated to document the v0.0.58 feature set (cold-start optimization, persistent stale-skills badge in the TUI, SIGHUP fixes, rate-limit alert banner) — #723.
+- `state-machine.md` documents the PR creation failure sub-path for future reference.
 
 ## Internal
 
-- Comprehensive unit and regression tests for `BootstrapFromProbe`, `isProbeOnlyTerminal`, the alert banner / countdown helper, the SIGHUP cleanup hook, `ctrl+r` handling, and `FABRIK_SIGHUP_RESTART` env var injection.
-- Cold-start cost regression test asserts probe-only bootstrap on a virgin cache.
-- v0.0.57 docs update landed via #695 (auto-merged in the v0.0.57 cycle).
+- Engine tests added for PR creation failure handling and the R5 skip-Claude path.
 
 ## Upgrading
 
