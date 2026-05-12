@@ -780,3 +780,55 @@ func TestProcessItem_PRCreationFailed_SkipsClaudeOnRetry(t *testing.T) {
 		t.Error("expected stage:Implement:complete label added when R5 path advances stage")
 	}
 }
+
+// TestProcessItem_PRCreationFailed_R5_CallsMarkPRReady verifies that the R5
+// skip-Claude path calls markPRReady when mark_pr_ready_on_complete: true.
+// The Implement stage uses both create_draft_pr and mark_pr_ready_on_complete,
+// so without this the PR would remain a draft after R5 fires.
+func TestProcessItem_PRCreationFailed_R5_CallsMarkPRReady(t *testing.T) {
+	skipIfNoGit(t)
+
+	origLock := lockVerifyDelay
+	lockVerifyDelay = 0
+	t.Cleanup(func() { lockVerifyDelay = origLock })
+	origPR := ensureDraftPRRetryDelay
+	ensureDraftPRRetryDelay = 0
+	t.Cleanup(func() { ensureDraftPRRetryDelay = origPR })
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 88, State: "open"}, nil
+		},
+	}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "FABRIK_STAGE_COMPLETE\n", true, TokenUsage{}, nil
+		},
+	}
+	eng := testEngineWithRepo(t, client, claude)
+	eng.cfg.Stages = []*stages.Stage{
+		{
+			Name:                "Implement",
+			Order:               1,
+			Prompt:              "implement it",
+			CreateDraftPR:       true,
+			MarkPRReadyOnComplete: true,
+			Completion:          stages.CompletionCriteria{Type: "claude"},
+		},
+	}
+
+	// Pre-set PRCreationFailed flag so R5 fires immediately on the first call.
+	eng.store.Apply(itemstate.PRCreationFailedRecorded{Repo: "owner/repo", Number: 74, StageName: "Implement"})
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 74, Title: "T", Status: "Implement", ItemID: "PVTI_74"}
+
+	if err := eng.processItem(t.Context(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	// MarkPRReady must have been called.
+	if len(client.markPRReadyCalls) == 0 {
+		t.Error("expected MarkPRReady called in R5 path when mark_pr_ready_on_complete: true")
+	}
+}

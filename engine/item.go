@@ -685,6 +685,9 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 				releaseLock()
 				e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 				e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+				if stage.MarkPRReadyOnComplete {
+					e.markPRReady(item, r5PRNum)
+				}
 				e.handleStageComplete(ctx, board, item, stage)
 				return nil
 			}
