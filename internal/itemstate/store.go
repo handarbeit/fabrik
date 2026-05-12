@@ -391,6 +391,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 	case StageRetryCleared:
 		ensureStageStateMaps(item)
 		item.StageState.Attempts[v.StageName] = 0
+		delete(item.StageState.PRCreationFailed, v.StageName)
 		return StageStateChanged
 
 	case ReviewCycleIncremented:
@@ -406,6 +407,11 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 	case RebaseCycleIncremented:
 		ensureStageStateMaps(item)
 		item.StageState.RebaseCycles[v.StageName]++
+		return StageStateChanged
+
+	case PRCreationFailedRecorded:
+		ensureStageStateMaps(item)
+		item.StageState.PRCreationFailed[v.StageName] = true
 		return StageStateChanged
 
 	case EnginePaused:
@@ -1169,6 +1175,9 @@ func ensureStageStateMaps(item *ItemState) {
 	}
 	if ss.PausedByEngine == nil {
 		ss.PausedByEngine = make(map[string]bool)
+	}
+	if ss.PRCreationFailed == nil {
+		ss.PRCreationFailed = make(map[string]bool)
 	}
 	if ss.ReviewCycles == nil {
 		ss.ReviewCycles = make(map[string]int)

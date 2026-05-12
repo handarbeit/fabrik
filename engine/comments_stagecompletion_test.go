@@ -106,6 +106,9 @@ func TestProcessComments_SummaryBeforeStrip_VerificationUpdated(t *testing.T) {
 		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
 			return prNum, nil
 		},
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNum, State: "open"}, nil
+		},
 		getIssueBodyFn: func(owner, repo string, issueNumber int) (string, error) {
 			if issueNumber == prNum {
 				return "## Verification\n\n(Populated by Implement on completion)\n\n---\n\nCloses #30", nil

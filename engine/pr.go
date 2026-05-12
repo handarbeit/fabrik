@@ -15,53 +15,87 @@ import (
 // Declared as a var so tests can set it to 0 to avoid sleeping.
 var markPRReadyRetryDelay = 500 * time.Millisecond
 
+// ensureDraftPRRetryDelay is the base delay for ensureDraftPR retry backoff.
+// Declared as a var so tests can set it to 0 to avoid sleeping.
+var ensureDraftPRRetryDelay = 500 * time.Millisecond
+
 // ensureDraftPR pushes the issue branch and creates a draft PR if one doesn't exist yet.
-// Idempotent: checks for an existing PR first; only pushes and creates if none found.
-func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) int {
+// Idempotent: checks for an existing open PR first; only pushes and creates if none found.
+// Returns (prNumber, nil) on success, (0, err) on failure after retries.
+func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) (int, error) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-
-	// Check for an existing PR first — avoids pushing on retries and handles
-	// the case where a push fails but a PR already exists from a prior run.
-	prNumber, err := e.client.FindPRForIssue(owner, repo, item.Number)
-	if err != nil {
-		e.logf(item.Number, "warn", "could not check for existing PR: %v\n", err)
-		return 0
-	}
-	if prNumber > 0 {
-		e.logf(item.Number, "pr", "PR #%d already exists, ensuring issue link\n", prNumber)
-		e.ensurePRLinksIssue(item, prNumber)
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.RecordPRLinkage(owner+"/"+repo, prNumber, item.Number)
-		}
-		return prNumber
-	}
-
-	// No PR exists — push the branch so GitHub can create a PR against it
-	wm := e.worktreesFor(item.Repo)
-	if err := wm.PushBranch(item.Number); err != nil {
-		e.logf(item.Number, "warn", "could not push branch: %v\n", err)
-		return 0
-	}
-
-	// Build seed body from context files; fall back to minimal body on read errors
-	workDir := wm.WorktreeDir(item.Number)
-	seedBody := e.buildSeedBody(item, workDir)
-
 	head := fmt.Sprintf("fabrik/issue-%d", item.Number)
-	// no write-through: excluded — CreateDraftPR affects PR state, not issue/label cache
-	prNum, err := e.client.CreateDraftPR(owner, repo, item.Title, head, baseBranch, seedBody, item.Number)
-	if err != nil {
-		e.logf(item.Number, "warn", "could not create draft PR: %v\n", err)
-		return 0
+	wm := e.worktreesFor(item.Repo)
+
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		// Check for an existing open PR on each attempt — handles the race where
+		// GitHub auto-created a PR between retries, or a prior attempt succeeded
+		// but the response was lost.
+		pr, err := e.client.FetchLinkedPR(owner, repo, item.Number)
+		if err != nil {
+			if !isTransientError(err) {
+				e.logf(item.Number, "pr", "failed to create draft PR for branch %s: %v\n", head, err)
+				return 0, fmt.Errorf("checking for existing PR: %w", err)
+			}
+			lastErr = err
+			if attempt < maxAttempts-1 {
+				time.Sleep(ensureDraftPRRetryDelay << attempt)
+			}
+			continue
+		}
+		if pr != nil && pr.State == "open" && !pr.Merged {
+			// An open PR already exists — use it.
+			e.logf(item.Number, "pr", "PR #%d already exists (branch: %s), ensuring issue link\n", pr.Number, head)
+			e.ensurePRLinksIssue(item, pr.Number)
+			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.RecordPRLinkage(owner+"/"+repo, pr.Number, item.Number)
+			}
+			return pr.Number, nil
+		}
+		// No open PR (or closed/merged) — push and create.
+
+		if err := wm.PushBranch(item.Number); err != nil {
+			if !isTransientError(err) {
+				e.logf(item.Number, "pr", "failed to create draft PR for branch %s: %v\n", head, err)
+				return 0, fmt.Errorf("pushing branch: %w", err)
+			}
+			lastErr = err
+			if attempt < maxAttempts-1 {
+				time.Sleep(ensureDraftPRRetryDelay << attempt)
+			}
+			continue
+		}
+
+		// Build seed body from context files; fall back to minimal body on read errors
+		workDir := wm.WorktreeDir(item.Number)
+		seedBody := e.buildSeedBody(item, workDir)
+
+		// no write-through: excluded — CreateDraftPR affects PR state, not issue/label cache
+		prNum, err := e.client.CreateDraftPR(owner, repo, item.Title, head, baseBranch, seedBody, item.Number)
+		if err != nil {
+			if !isTransientError(err) {
+				e.logf(item.Number, "pr", "failed to create draft PR for branch %s: %v\n", head, err)
+				return 0, fmt.Errorf("creating draft PR: %w", err)
+			}
+			lastErr = err
+			if attempt < maxAttempts-1 {
+				time.Sleep(ensureDraftPRRetryDelay << attempt)
+			}
+			continue
+		}
+		e.logf(item.Number, "pr", "created draft PR #%d (branch: %s)\n", prNum, head)
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.RecordPRLinkage(owner+"/"+repo, prNum, item.Number)
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("pull_request", "opened", fmt.Sprintf("%s/%s#pr%d", owner, repo, prNum))
+		}
+		return prNum, nil
 	}
-	e.logf(item.Number, "pr", "created draft PR #%d\n", prNum)
-	if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.RecordPRLinkage(owner+"/"+repo, prNum, item.Number)
-	}
-	if e.webhookMgr != nil {
-		e.webhookMgr.RegisterEcho("pull_request", "opened", fmt.Sprintf("%s/%s#pr%d", owner, repo, prNum))
-	}
-	return prNum
+	e.logf(item.Number, "pr", "failed to create draft PR for branch %s: %v\n", head, lastErr)
+	return 0, fmt.Errorf("creating draft PR after %d attempts: %w", maxAttempts, lastErr)
 }
 
 // syncPRBase checks whether the open PR for this issue has the expected base branch and
