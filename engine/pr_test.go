@@ -1147,3 +1147,42 @@ func TestEnsureDraftPR_AllRetriesExhausted_ReturnsError(t *testing.T) {
 		t.Errorf("expected exactly 3 FetchLinkedPR calls (maxAttempts), got %d", fetchCalls)
 	}
 }
+
+// TestEnsureDraftPR_CreateDraftPR_ReturnsZeroWithNilErr verifies Copilot finding:
+// when CreateDraftPR returns (0, nil), ensureDraftPR treats it as a non-transient
+// error rather than silently returning (0, nil) to the caller.
+func TestEnsureDraftPR_CreateDraftPR_ReturnsZeroWithNilErr(t *testing.T) {
+	skipIfNoGit(t)
+
+	orig := ensureDraftPRRetryDelay
+	ensureDraftPRRetryDelay = 0
+	t.Cleanup(func() { ensureDraftPRRetryDelay = orig })
+
+	sourceDir := initRepoWithRemote(t)
+	wm := NewWorktreeManager(sourceDir)
+	if _, err := wm.EnsureWorktree(54, "main", false); err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return nil, nil // no existing PR
+		},
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			return 0, nil // unexpected: 0 with no error
+		},
+	}
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", MaxConcurrent: 1, Stages: testStages()},
+		client, &mockClaudeInvoker{}, wm,
+	)
+
+	item := gh.ProjectItem{Number: 54, Title: "Feature"}
+	prNum, err := eng.ensureDraftPR(item, "main")
+	if err == nil {
+		t.Fatal("expected error when CreateDraftPR returns (0, nil), got nil")
+	}
+	if prNum != 0 {
+		t.Errorf("expected 0 on zero-PR-number failure, got %d", prNum)
+	}
+}
