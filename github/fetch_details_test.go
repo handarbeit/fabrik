@@ -226,8 +226,9 @@ func TestFetchItemDetails_PopulatesFullMetadata(t *testing.T) {
 		resp := map[string]interface{}{
 			"data": map[string]interface{}{
 				"node": map[string]interface{}{
-					"body": "This is the issue body.",
-					"url":  "https://github.com/owner/repo/issues/42",
+					"title": "My Issue Title",
+					"body":  "This is the issue body.",
+					"url":   "https://github.com/owner/repo/issues/42",
 					"author": map[string]interface{}{
 						"login": "authoruser",
 					},
@@ -275,6 +276,9 @@ func TestFetchItemDetails_PopulatesFullMetadata(t *testing.T) {
 		t.Fatalf("FetchItemDetails: %v", err)
 	}
 
+	if item.Title != "My Issue Title" {
+		t.Errorf("Title = %q, want %q", item.Title, "My Issue Title")
+	}
 	if item.Body != "This is the issue body." {
 		t.Errorf("Body = %q, want %q", item.Body, "This is the issue body.")
 	}
@@ -616,5 +620,50 @@ func TestFetchItemDetails_LinkedPRNumber_ResetOnRepeat(t *testing.T) {
 	}
 	if item.LinkedPRNumber != 0 {
 		t.Errorf("after second call: LinkedPRNumber = %d, want 0 (should be reset)", item.LinkedPRNumber)
+	}
+}
+
+// TestFetchItemDetails_TitlePopulatedForPRItem verifies that the title field is
+// correctly populated when the node is a PullRequest-type item.
+func TestFetchItemDetails_TitlePopulatedForPRItem(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"data": map[string]interface{}{
+				"node": map[string]interface{}{
+					"title": "My PR Title",
+					"body":  "PR body text",
+					"url":   "https://github.com/owner/repo/pull/99",
+					"author": map[string]interface{}{
+						"login": "prauthor",
+					},
+					"labels": map[string]interface{}{
+						"nodes":    []interface{}{},
+						"pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""},
+					},
+					"assignees": map[string]interface{}{
+						"nodes": []interface{}{},
+					},
+					"comments": map[string]interface{}{
+						"nodes":    []interface{}{},
+						"pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""},
+					},
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	item := &ProjectItem{ID: "PR_99", Number: 99, IsPR: true}
+	if err := c.FetchItemDetails(item); err != nil {
+		t.Fatalf("FetchItemDetails: %v", err)
+	}
+
+	if item.Title != "My PR Title" {
+		t.Errorf("Title = %q, want %q", item.Title, "My PR Title")
+	}
+	if item.Body != "PR body text" {
+		t.Errorf("Body = %q, want %q", item.Body, "PR body text")
 	}
 }
