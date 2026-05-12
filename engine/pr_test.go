@@ -14,15 +14,18 @@ import (
 
 func TestEnsureDraftPR_ExistingPR_SkipsCreate(t *testing.T) {
 	client := &mockGitHubClient{
-		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
-			return 42, nil
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 42, State: "open"}, nil
 		},
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
 
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Title: "Test Issue"}
-	prNum := eng.ensureDraftPR(item, "main")
+	prNum, err := eng.ensureDraftPR(item, "main")
 
+	if err != nil {
+		t.Fatalf("ensureDraftPR returned unexpected error: %v", err)
+	}
 	if prNum != 42 {
 		t.Errorf("ensureDraftPR returned %d, want 42", prNum)
 	}
@@ -372,8 +375,8 @@ func TestEnsureDraftPR_NewPR_SeedsBodyFromContextFiles(t *testing.T) {
 
 	var createdBody string
 	client := &mockGitHubClient{
-		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
-			return 0, nil
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return nil, nil
 		},
 		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
 			createdBody = body
@@ -389,7 +392,10 @@ func TestEnsureDraftPR_NewPR_SeedsBodyFromContextFiles(t *testing.T) {
 	)
 
 	item := gh.ProjectItem{Number: 42, Title: "My issue"}
-	result := eng.ensureDraftPR(item, "main")
+	result, err := eng.ensureDraftPR(item, "main")
+	if err != nil {
+		t.Fatalf("ensureDraftPR returned unexpected error: %v", err)
+	}
 	if result != 77 {
 		t.Fatalf("ensureDraftPR returned %d, want 77", result)
 	}
@@ -436,8 +442,8 @@ func TestEnsureDraftPR_NewPR_MissingContextFiles_UsesPlaceholders(t *testing.T) 
 
 	var createdBody string
 	client := &mockGitHubClient{
-		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
-			return 0, nil
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return nil, nil
 		},
 		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
 			createdBody = body
@@ -453,7 +459,10 @@ func TestEnsureDraftPR_NewPR_MissingContextFiles_UsesPlaceholders(t *testing.T) 
 	)
 
 	item := gh.ProjectItem{Number: 43, Title: "My issue"}
-	result := eng.ensureDraftPR(item, "main")
+	result, err := eng.ensureDraftPR(item, "main")
+	if err != nil {
+		t.Fatalf("ensureDraftPR returned unexpected error: %v", err)
+	}
 	if result != 78 {
 		t.Fatalf("ensureDraftPR returned %d, want 78", result)
 	}

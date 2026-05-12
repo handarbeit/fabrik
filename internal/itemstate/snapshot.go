@@ -30,6 +30,7 @@ type Snapshot struct {
 //   - ItemState.StageState.Attempts
 //   - ItemState.StageState.LastAttemptAt
 //   - ItemState.StageState.PausedByEngine
+//   - ItemState.StageState.PRCreationFailed
 //   - ItemState.StageState.ReviewCycles
 //   - ItemState.StageState.CIFixCycles
 //   - ItemState.StageState.RebaseCycles
@@ -173,6 +174,12 @@ func (s Snapshot) PausedByEngine(stageName string) bool {
 	return s.state.StageState.PausedByEngine[stageName]
 }
 
+// PRCreationFailed reports whether Claude completed a stage but the draft PR
+// could not be created. In-memory only — does not survive restart.
+func (s Snapshot) PRCreationFailed(stageName string) bool {
+	return s.state.StageState.PRCreationFailed[stageName]
+}
+
 // ReviewCycles returns the review re-invocation cycle count for a given stage.
 func (s Snapshot) ReviewCycles(stageName string) int {
 	return s.state.StageState.ReviewCycles[stageName]
@@ -295,6 +302,7 @@ func copyStageState(s StageState) StageState {
 		Attempts:          copyIntMap(s.Attempts),
 		LastAttemptAt:     copyTimeMap(s.LastAttemptAt),
 		PausedByEngine:    copyBoolMap(s.PausedByEngine),
+		PRCreationFailed:  copyBoolMap(s.PRCreationFailed),
 		ReviewCycles:      copyIntMap(s.ReviewCycles),
 		CIFixCycles:       copyIntMap(s.CIFixCycles),
 		RebaseCycles:      copyIntMap(s.RebaseCycles),

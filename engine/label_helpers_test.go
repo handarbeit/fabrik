@@ -200,17 +200,20 @@ func TestRemoveLockLabel_ErrNotFound_Ignored(t *testing.T) {
 	eng.removeLockLabel("owner", "repo", 5, "fabrik:locked:testuser")
 }
 
-func TestEnsureDraftPR_FindPRError_ReturnsZero(t *testing.T) {
+func TestEnsureDraftPR_FetchLinkedPRError_ReturnsError(t *testing.T) {
 	client := &mockGitHubClient{
-		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
-			return 0, errors.New("api error")
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return nil, errors.New("api error")
 		},
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
 	item := gh.ProjectItem{Number: 1, Title: "Test"}
-	prNum := eng.ensureDraftPR(item, "main")
+	prNum, err := eng.ensureDraftPR(item, "main")
 	if prNum != 0 {
-		t.Errorf("expected 0 on FindPRForIssue error, got %d", prNum)
+		t.Errorf("expected 0 on FetchLinkedPR error, got %d", prNum)
+	}
+	if err == nil {
+		t.Error("expected error on FetchLinkedPR failure, got nil")
 	}
 }
 
