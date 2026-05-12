@@ -2,6 +2,8 @@ package engine
 
 import (
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -706,6 +708,9 @@ func TestProcessItem_ImplementStage_UpdatesVerificationOnComplete(t *testing.T) 
 		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
 			return prNum, nil
 		},
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: prNum, State: "open"}, nil
+		},
 		getIssueBodyFn: func(owner, repo string, issueNumber int) (string, error) {
 			if issueNumber == prNum {
 				return "## Verification\n\n(Populated by Implement on completion)\n\n---\n\nCloses #50", nil
@@ -992,5 +997,153 @@ func TestMarkPRReady_NonTransientNoRetry(t *testing.T) {
 
 	if len(client.markPRReadyCalls) != 1 {
 		t.Fatalf("expected 1 MarkPRReady call (non-transient, no retry), got %d", len(client.markPRReadyCalls))
+	}
+}
+
+// ── ensureDraftPR — R2/R6 retry and closed-PR coverage ───────────────────────
+
+// TestEnsureDraftPR_ExistingClosedPR_CreatesNew verifies R6: when FetchLinkedPR
+// returns a closed PR, ensureDraftPR ignores it and creates a new draft PR.
+func TestEnsureDraftPR_ExistingClosedPR_CreatesNew(t *testing.T) {
+	skipIfNoGit(t)
+
+	orig := ensureDraftPRRetryDelay
+	ensureDraftPRRetryDelay = 0
+	t.Cleanup(func() { ensureDraftPRRetryDelay = orig })
+
+	sourceDir := initRepoWithRemote(t)
+	wm := NewWorktreeManager(sourceDir)
+	if _, err := wm.EnsureWorktree(50, "main", false); err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, State: "closed"}, nil
+		},
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			return 99, nil
+		},
+	}
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", MaxConcurrent: 1, Stages: testStages()},
+		client, &mockClaudeInvoker{}, wm,
+	)
+
+	item := gh.ProjectItem{Number: 50, Title: "Feature"}
+	prNum, err := eng.ensureDraftPR(item, "main")
+	if err != nil {
+		t.Fatalf("ensureDraftPR returned unexpected error: %v", err)
+	}
+	if prNum != 99 {
+		t.Errorf("expected new PR #99, got %d", prNum)
+	}
+	if len(client.createDraftPRCalls) != 1 {
+		t.Errorf("expected 1 CreateDraftPR call, got %d", len(client.createDraftPRCalls))
+	}
+}
+
+// TestEnsureDraftPR_TransientError_Retries verifies R2: a transient FetchLinkedPR
+// error is retried; on the second attempt the call succeeds (returns nil, nil)
+// and ensureDraftPR proceeds to push + create the PR.
+func TestEnsureDraftPR_TransientError_Retries(t *testing.T) {
+	skipIfNoGit(t)
+
+	orig := ensureDraftPRRetryDelay
+	ensureDraftPRRetryDelay = 0
+	t.Cleanup(func() { ensureDraftPRRetryDelay = orig })
+
+	sourceDir := initRepoWithRemote(t)
+	wm := NewWorktreeManager(sourceDir)
+	if _, err := wm.EnsureWorktree(51, "main", false); err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	var fetchCalls int
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			fetchCalls++
+			if fetchCalls == 1 {
+				return nil, fmt.Errorf("executing request: %w", &net.OpError{Op: "read", Net: "tcp"})
+			}
+			return nil, nil // no existing PR on second call
+		},
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			return 77, nil
+		},
+	}
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", MaxConcurrent: 1, Stages: testStages()},
+		client, &mockClaudeInvoker{}, wm,
+	)
+
+	item := gh.ProjectItem{Number: 51, Title: "Feature"}
+	prNum, err := eng.ensureDraftPR(item, "main")
+	if err != nil {
+		t.Fatalf("ensureDraftPR returned unexpected error: %v", err)
+	}
+	if prNum != 77 {
+		t.Errorf("expected PR #77, got %d", prNum)
+	}
+	if fetchCalls < 2 {
+		t.Errorf("expected at least 2 FetchLinkedPR calls (retry), got %d", fetchCalls)
+	}
+}
+
+// TestEnsureDraftPR_NonTransientError_ImmediateFailure verifies that a non-transient
+// error from FetchLinkedPR (e.g. 422) returns (0, err) after exactly 1 attempt.
+func TestEnsureDraftPR_NonTransientError_ImmediateFailure(t *testing.T) {
+	orig := ensureDraftPRRetryDelay
+	ensureDraftPRRetryDelay = 0
+	t.Cleanup(func() { ensureDraftPRRetryDelay = orig })
+
+	var fetchCalls int
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			fetchCalls++
+			return nil, errors.New("GitHub API returned 422: validation failed")
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+
+	item := gh.ProjectItem{Number: 52, Title: "Feature"}
+	prNum, err := eng.ensureDraftPR(item, "main")
+	if err == nil {
+		t.Fatal("expected error from non-transient FetchLinkedPR failure, got nil")
+	}
+	if prNum != 0 {
+		t.Errorf("expected 0 on failure, got %d", prNum)
+	}
+	if fetchCalls != 1 {
+		t.Errorf("expected exactly 1 FetchLinkedPR call (no retry on non-transient), got %d", fetchCalls)
+	}
+}
+
+// TestEnsureDraftPR_AllRetriesExhausted_ReturnsError verifies R2: when all 3
+// FetchLinkedPR attempts return transient errors, ensureDraftPR returns (0, err).
+func TestEnsureDraftPR_AllRetriesExhausted_ReturnsError(t *testing.T) {
+	orig := ensureDraftPRRetryDelay
+	ensureDraftPRRetryDelay = 0
+	t.Cleanup(func() { ensureDraftPRRetryDelay = orig })
+
+	var fetchCalls int
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			fetchCalls++
+			return nil, fmt.Errorf("executing request: %w", &net.OpError{Op: "read", Net: "tcp"})
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+
+	item := gh.ProjectItem{Number: 53, Title: "Feature"}
+	prNum, err := eng.ensureDraftPR(item, "main")
+	if err == nil {
+		t.Fatal("expected error after all retries exhausted, got nil")
+	}
+	if prNum != 0 {
+		t.Errorf("expected 0 on exhausted retries, got %d", prNum)
+	}
+	if fetchCalls != 3 {
+		t.Errorf("expected exactly 3 FetchLinkedPR calls (maxAttempts), got %d", fetchCalls)
 	}
 }
