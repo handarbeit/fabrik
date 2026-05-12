@@ -246,20 +246,20 @@ func TestEnsureRepoReady_ConcurrentSameRepo_OnlyOneCloneAttempt(t *testing.T) {
 	}
 }
 
-func TestEnsureDraftPR_NoPR_FailedPush_ReturnsZero(t *testing.T) {
+func TestEnsureDraftPR_NoPR_FailedPush_ReturnsError(t *testing.T) {
 	// No existing PR; push will fail because base dir is not a real repo.
-	client := &mockGitHubClient{
-		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) {
-			return 0, nil
-		},
-	}
+	// fetchLinkedPRFn not set → mock returns nil, nil (no PR found).
+	client := &mockGitHubClient{}
 	eng := testEngine(client, &mockClaudeInvoker{})
 	// WorktreeManager points to /tmp/test-repo which doesn't exist
 	item := gh.ProjectItem{Number: 99, Title: "Test"}
-	prNum := eng.ensureDraftPR(item, "main")
+	prNum, err := eng.ensureDraftPR(item, "main")
 
-	// Push fails → returns 0
+	// Push fails → returns (0, err)
 	if prNum != 0 {
 		t.Errorf("expected 0 when push fails, got %d", prNum)
+	}
+	if err == nil {
+		t.Error("expected error when push fails, got nil")
 	}
 }

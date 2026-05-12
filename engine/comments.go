@@ -399,7 +399,9 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		})
 		var prNumber int
 		if stage.CreateDraftPR {
-			prNumber = e.ensureDraftPR(item, baseBranch)
+			// Error is intentionally ignored here — comment processing implies the stage
+			// already advanced; a PR creation failure here is non-fatal for this path.
+			prNumber, _ = e.ensureDraftPR(item, baseBranch)
 			e.updatePRVerification(item, prNumber, summary)
 		}
 		if stage.MarkPRReadyOnComplete {

@@ -674,6 +674,39 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// created by symlinkEnvIfEnabled is never captured and never causes stash-pop conflicts.
 	e.ensureEnvExcluded(item.Number, workDir)
 
+	// R5: If Claude already completed (commits exist) but PR creation failed in the
+	// previous invocation, attempt PR creation before re-invoking Claude. This avoids
+	// running Claude redundantly when the worktree already has the necessary commits.
+	if stage.CreateDraftPR {
+		if r5Snap, r5Err := e.store.Get(repoStr, item.Number); r5Err == nil && r5Snap.PRCreationFailed(stage.Name) {
+			r5PRNum, r5PRErr := e.ensureDraftPR(item, baseBranch)
+			if r5PRErr == nil && r5PRNum > 0 {
+				// PR created successfully — advance without re-running Claude.
+				releaseLock()
+				e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+				e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+				e.handleStageComplete(ctx, board, item, stage)
+				return nil
+			}
+			// PR still failing — count against MaxRetries and potentially escalate.
+			if e.cfg.MaxRetries > 0 {
+				e.store.Apply(itemstate.StageRetryIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+				var count int
+				if r5CountSnap, r5CountErr := e.store.Get(repoStr, item.Number); r5CountErr == nil {
+					count = r5CountSnap.Attempts(stage.Name)
+				}
+				if count >= e.cfg.MaxRetries {
+					e.escalatePRCreationFailure(item, stage, baseBranch)
+					releaseLock()
+					return nil
+				}
+			}
+			// Below threshold — release lock and let cooldown expire before next retry.
+			releaseLock()
+			return nil
+		}
+	}
+
 	// If this is a read-only stage, stash any unexpected dirty state (including
 	// untracked files) before invocation so the stage sees a clean worktree, and
 	// restore it afterward.
@@ -836,9 +869,11 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 
 	// When completing a stage that posts output to a PR and creates a draft PR,
 	// ensure the PR exists before posting so postOutputToPR can find it.
+	// Error is intentionally ignored here — failure is caught and escalated in
+	// the completion block below, which also retries with the full retry/backoff logic.
 	var prNumber int
 	if completed && stage.CreateDraftPR && stage.PostToPR {
-		prNumber = e.ensureDraftPR(item, baseBranch)
+		prNumber, _ = e.ensureDraftPR(item, baseBranch)
 	}
 
 	// Post Claude's output
@@ -962,18 +997,40 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	})
 
 	if completed {
-		releaseLock()
-		// Clear retry tracking for this stage — no longer needed after success.
-		e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
-		e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 		// Post-stage: create draft PR and/or mark ready now that commits exist.
 		// prNumber may already be set if the early guard above ran (PostToPR + CreateDraftPR path).
 		if stage.CreateDraftPR {
 			if prNumber == 0 {
-				prNumber = e.ensureDraftPR(item, baseBranch)
+				var prErr error
+				prNumber, prErr = e.ensureDraftPR(item, baseBranch)
+				if prErr != nil {
+					// PR creation failed — route through retry/escalation machinery.
+					// StageRetryCleared must NOT fire so retries count against MaxRetries.
+					if e.cfg.MaxRetries > 0 {
+						e.store.Apply(itemstate.StageRetryIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+						var count int
+						if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
+							count = snap.Attempts(stage.Name)
+						}
+						if count >= e.cfg.MaxRetries {
+							e.escalatePRCreationFailure(item, stage, baseBranch)
+							releaseLock()
+							return nil
+						}
+					}
+					// Below MaxRetries threshold — record flag so next poll retries PR creation
+					// before re-invoking Claude, then release lock and let cooldown expire.
+					e.store.Apply(itemstate.PRCreationFailedRecorded{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+					releaseLock()
+					return nil
+				}
 			}
 			e.updatePRVerification(item, prNumber, extractSummary(output))
 		}
+		// PR creation succeeded (or not required) — advance the stage.
+		releaseLock()
+		e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+		e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 		if stage.MarkPRReadyOnComplete {
 			e.markPRReady(item, prNumber)
 		}
@@ -1004,6 +1061,53 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	}
 
 	return nil
+}
+
+// escalatePRCreationFailure is called when create_draft_pr: true and ensureDraftPR
+// fails after MaxRetries attempts. It adds fabrik:paused and stage:<name>:failed labels,
+// posts an explanatory comment naming PR creation as the cause (not Claude), and
+// records the escalation.
+func (e *Engine) escalatePRCreationFailure(item gh.ProjectItem, stage *stages.Stage, baseBranch string) {
+	e.logf(item.Number, "escalate", "PR creation for stage %q failed %d time(s) — pausing issue\n", stage.Name, e.cfg.MaxRetries)
+
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
+		e.logf(item.Number, "warn", "could not add paused label: %v\n", err)
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:paused")
+		}
+	}
+
+	e.addFailedLabel(owner, repo, item.Number, stage.Name)
+
+	comment := fmt.Sprintf(
+		"🏭 **Fabrik — PR creation failed**\n\nStage **%s** completed successfully but the draft PR could not be created after %d attempt(s). The issue has been paused.\n\nManual fix:\n```\ngh pr create --head fabrik/issue-%d --base %s --body \"Closes #%d\"\n```\n\nThen remove the `fabrik:paused` label to resume.",
+		stage.Name, e.cfg.MaxRetries, item.Number, baseBranch, item.Number,
+	)
+	if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
+		e.logf(item.Number, "warn", "could not post PR escalation comment: %v\n", err)
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+				DatabaseID: dbID, Body: comment, Author: e.cfg.User, CreatedAt: time.Now(),
+			})
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
+		}
+		// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
+		if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+		}
+	}
+
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 }
 
 // escalateFailedStage is called when a stage has failed MaxRetries times. It adds
