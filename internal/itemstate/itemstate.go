@@ -156,6 +156,10 @@ type StageState struct {
 	// PausedByEngine records engine-initiated pauses (vs user-initiated).
 	// Replaces engine.pausedDueToRetries[stageKey].
 	PausedByEngine map[string]bool
+	// PRCreationFailed records that Claude completed but the draft PR could not
+	// be created. In-memory only — does not survive restart. When set, the next
+	// retry first attempts PR creation before re-invoking Claude.
+	PRCreationFailed map[string]bool
 	// ReviewCycles counts how many review iterations each stage has completed.
 	// Replaces engine.reviewCycleCount[stageKey].
 	ReviewCycles map[string]int

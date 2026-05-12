@@ -420,6 +420,18 @@ type RebaseCycleIncremented struct {
 func (RebaseCycleIncremented) isMutation()       {}
 func (m RebaseCycleIncremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// PRCreationFailedRecorded records that Claude completed a stage but the draft PR
+// could not be created. In-memory only — does not survive restart. Cleared by
+// StageRetryCleared when the PR is eventually created or the stage succeeds.
+type PRCreationFailedRecorded struct {
+	Repo      string
+	Number    int
+	StageName string
+}
+
+func (PRCreationFailedRecorded) isMutation()       {}
+func (m PRCreationFailedRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // EnginePaused records that the engine has paused work on a stage due to
 // repeated failures. (The design doc listed this as "EngineEnginePaused" — typo.)
 type EnginePaused struct {
