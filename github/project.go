@@ -582,6 +582,7 @@ query($id: ID!) {
   node(id: $id) {
     ... on Issue {
       number
+      title
       body
       url
       repository { nameWithOwner }
@@ -681,6 +682,7 @@ query($id: ID!) {
       }
     }
     ... on PullRequest {
+      title
       body
       url
       author { login }
@@ -717,6 +719,7 @@ query($id: ID!) {
 		Data struct {
 			Node *struct {
 				Number     int    `json:"number"`
+				Title      string `json:"title"`
 				Body       string `json:"body"`
 				URL        string `json:"url"`
 				Repository *struct {
@@ -822,6 +825,7 @@ query($id: ID!) {
 	}
 
 	// Populate scalar fields
+	item.Title = node.Title
 	item.Body = node.Body
 	item.URL = node.URL
 	if node.Author != nil {

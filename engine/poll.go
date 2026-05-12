@@ -1698,7 +1698,6 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 			Status:    pi.Status,
 			Repo:      repo,
 			UpdatedAt: pi.EffectiveUpdatedAt,
-			Title:     s.Title, // FetchItemDetails doesn't fetch title; preserve cached value
 		}
 		if fetchErr := e.readClient.FetchItemDetails(&minimal); fetchErr != nil {
 			e.logf(pi.Number, "warn", "probe: deep-fetch for stale item failed: %v\n", fetchErr)
