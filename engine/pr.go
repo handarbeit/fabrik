@@ -47,7 +47,7 @@ func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) (int, err
 		}
 		if pr != nil && pr.State == "open" && !pr.Merged {
 			// An open PR already exists — use it.
-			e.logf(item.Number, "pr", "PR #%d already exists (branch: %s), ensuring issue link\n", pr.Number, head)
+			e.logf(item.Number, "pr", "PR #%d already exists (branch: %s, sha: %s), ensuring issue link\n", pr.Number, head, pr.HeadSHA)
 			e.ensurePRLinksIssue(item, pr.Number)
 			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 				cacheImpl.RecordPRLinkage(owner+"/"+repo, pr.Number, item.Number)
@@ -85,7 +85,14 @@ func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) (int, err
 			}
 			continue
 		}
-		e.logf(item.Number, "pr", "created draft PR #%d (branch: %s)\n", prNum, head)
+		if prNum == 0 {
+			// A nil error with PR number 0 indicates an unexpected API/decoding issue.
+			// Treat as non-transient so the caller enters the escalation path.
+			e.logf(item.Number, "pr", "failed to create draft PR for branch %s: API returned 0\n", head)
+			return 0, fmt.Errorf("creating draft PR: API returned PR number 0")
+		}
+		headSHA, _ := gitHeadSHA(workDir)
+		e.logf(item.Number, "pr", "created draft PR #%d (branch: %s, sha: %s)\n", prNum, head, headSHA)
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 			cacheImpl.RecordPRLinkage(owner+"/"+repo, prNum, item.Number)
 		}
