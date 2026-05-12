@@ -1186,3 +1186,65 @@ func TestEnsureDraftPR_CreateDraftPR_ReturnsZeroWithNilErr(t *testing.T) {
 		t.Errorf("expected 0 on zero-PR-number failure, got %d", prNum)
 	}
 }
+
+// TestEnsureDraftPR_TitleFromDeepFetch verifies that when FetchItemDetails
+// populates item.Title (the deep-fetch path, triggered after a cold-start probe),
+// ensureDraftPR forwards that title to CreateDraftPR rather than passing "".
+// This is the end-to-end regression test for the empty-title 422 bug.
+func TestEnsureDraftPR_TitleFromDeepFetch(t *testing.T) {
+	skipIfNoGit(t)
+
+	orig := ensureDraftPRRetryDelay
+	ensureDraftPRRetryDelay = 0
+	t.Cleanup(func() { ensureDraftPRRetryDelay = orig })
+
+	sourceDir := initRepoWithRemote(t)
+	wm := NewWorktreeManager(sourceDir)
+	if _, err := wm.EnsureWorktree(60, "main", false); err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	var capturedTitle string
+	client := &mockGitHubClient{
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			// Simulate what github.Client.FetchItemDetails now does after the fix:
+			// populate item.Title from the GraphQL response.
+			item.Title = "My Issue"
+			return nil
+		},
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return nil, nil // no existing PR
+		},
+		createDraftPRFn: func(owner, repo, title, head, base, body string, issueNumber int) (int, error) {
+			capturedTitle = title
+			return 60, nil
+		},
+	}
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", MaxConcurrent: 1, Stages: testStages()},
+		client, &mockClaudeInvoker{}, wm,
+	)
+
+	// Simulate the cold-start path: item starts with empty title (probe never carries it).
+	item := gh.ProjectItem{Number: 60, Title: "", Status: "Implement", ItemID: "PVTI_60"}
+
+	// Simulate what the poll loop does before calling processItem: deep-fetch the item.
+	if err := eng.readClient.FetchItemDetails(&item); err != nil {
+		t.Fatalf("FetchItemDetails: %v", err)
+	}
+	if item.Title != "My Issue" {
+		t.Fatalf("FetchItemDetails did not populate title: got %q, want %q", item.Title, "My Issue")
+	}
+
+	// Now ensureDraftPR should receive and forward the populated title.
+	prNum, err := eng.ensureDraftPR(item, "main")
+	if err != nil {
+		t.Fatalf("ensureDraftPR: %v", err)
+	}
+	if prNum != 60 {
+		t.Errorf("expected prNum=60, got %d", prNum)
+	}
+	if capturedTitle != "My Issue" {
+		t.Errorf("CreateDraftPR called with title=%q, want %q", capturedTitle, "My Issue")
+	}
+}
