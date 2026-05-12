@@ -2,11 +2,13 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"os/exec"
 	"strings"
 	"testing"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -532,5 +534,249 @@ func TestExtendTurns_MaxTurnsZero_NoOp(t *testing.T) {
 	// With MaxTurns == 0, budget must remain 0 regardless of extend-turns label.
 	if gotOverride != 0 {
 		t.Errorf("expected MaxTurnsOverride = 0 for unlimited stage, got %d", gotOverride)
+	}
+}
+
+// ── PR creation failure tests (Tasks 7 & 8) ──────────────────────────────────
+
+// implementDraftPRStages returns a single Implement stage with create_draft_pr true.
+func implementDraftPRStages() []*stages.Stage {
+	return []*stages.Stage{
+		{
+			Name:          "Implement",
+			Order:         1,
+			Prompt:        "implement it",
+			CreateDraftPR: true,
+			Completion:    stages.CompletionCriteria{Type: "claude"},
+		},
+	}
+}
+
+// TestRunStage_CreateDraftPR_Fails_StageNotComplete verifies R1: when Claude
+// completes (FABRIK_STAGE_COMPLETE) but ensureDraftPR fails, handleStageComplete
+// is NOT called and the PRCreationFailed flag is set in the store.
+func TestRunStage_CreateDraftPR_Fails_StageNotComplete(t *testing.T) {
+	skipIfNoGit(t)
+
+	origLock := lockVerifyDelay
+	lockVerifyDelay = 0
+	t.Cleanup(func() { lockVerifyDelay = origLock })
+	origPR := ensureDraftPRRetryDelay
+	ensureDraftPRRetryDelay = 0
+	t.Cleanup(func() { ensureDraftPRRetryDelay = origPR })
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return nil, errors.New("GitHub API returned 422: validation failed")
+		},
+	}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "FABRIK_STAGE_COMPLETE\n", true, TokenUsage{}, nil
+		},
+	}
+	eng := testEngineWithRepo(t, client, claude)
+	stgs := implementDraftPRStages()
+	eng.cfg.Stages = stgs
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 70, Title: "T", Status: "Implement", ItemID: "PVTI_70"}
+
+	if err := eng.processItem(t.Context(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	// handleStageComplete must NOT have been called — no stage:Implement:complete label.
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Implement:complete" {
+			t.Errorf("expected no stage:Implement:complete label when PR creation fails")
+			break
+		}
+	}
+
+	// PRCreationFailed flag must be set in the store.
+	snap, err := eng.store.Get("owner/repo", 70)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if !snap.PRCreationFailed("Implement") {
+		t.Error("expected PRCreationFailed flag to be set for Implement stage")
+	}
+}
+
+// TestRunStage_CreateDraftPR_FailsAtMaxRetries_Escalates verifies R3: when PR
+// creation fails and the retry count hits MaxRetries, escalatePRCreationFailure
+// adds fabrik:paused and the stage is not marked complete.
+func TestRunStage_CreateDraftPR_FailsAtMaxRetries_Escalates(t *testing.T) {
+	skipIfNoGit(t)
+
+	origLock := lockVerifyDelay
+	lockVerifyDelay = 0
+	t.Cleanup(func() { lockVerifyDelay = origLock })
+	origPR := ensureDraftPRRetryDelay
+	ensureDraftPRRetryDelay = 0
+	t.Cleanup(func() { ensureDraftPRRetryDelay = origPR })
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return nil, errors.New("GitHub API returned 422: validation failed")
+		},
+	}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "FABRIK_STAGE_COMPLETE\n", true, TokenUsage{}, nil
+		},
+	}
+	eng := testEngineWithRepo(t, client, claude)
+	eng.cfg.MaxRetries = 1
+	eng.cfg.Stages = implementDraftPRStages()
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 71, Title: "T", Status: "Implement", ItemID: "PVTI_71"}
+
+	if err := eng.processItem(t.Context(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	// fabrik:paused must have been added (escalation path).
+	var pausedAdded bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedAdded = true
+		}
+	}
+	if !pausedAdded {
+		t.Error("expected fabrik:paused label added on PR creation escalation")
+	}
+
+	// stage:Implement:complete must NOT be present.
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Implement:complete" {
+			t.Errorf("expected no stage:Implement:complete label on escalation path")
+			break
+		}
+	}
+}
+
+// TestRunStage_LockReleasedExactlyOnce_OnPRFailure verifies that releaseLock is
+// called exactly once when PR creation fails — no double-release.
+func TestRunStage_LockReleasedExactlyOnce_OnPRFailure(t *testing.T) {
+	skipIfNoGit(t)
+
+	origLock := lockVerifyDelay
+	lockVerifyDelay = 0
+	t.Cleanup(func() { lockVerifyDelay = origLock })
+	origPR := ensureDraftPRRetryDelay
+	ensureDraftPRRetryDelay = 0
+	t.Cleanup(func() { ensureDraftPRRetryDelay = origPR })
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return nil, errors.New("GitHub API returned 422: validation failed")
+		},
+	}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "FABRIK_STAGE_COMPLETE\n", true, TokenUsage{}, nil
+		},
+	}
+	eng := testEngineWithRepo(t, client, claude)
+	eng.cfg.Stages = implementDraftPRStages()
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 72, Title: "T", Status: "Implement", ItemID: "PVTI_72"}
+
+	if err := eng.processItem(t.Context(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	// Count removals of the lock label — must be exactly 1.
+	lockLabel := "fabrik:locked:" + eng.cfg.User
+	var lockRemovals int
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == lockLabel {
+			lockRemovals++
+		}
+	}
+	if lockRemovals != 1 {
+		t.Errorf("expected lock label removed exactly once, got %d removals", lockRemovals)
+	}
+}
+
+// TestProcessItem_PRCreationFailed_SkipsClaudeOnRetry verifies R5: when the
+// PRCreationFailed flag is set (from a prior run where Claude succeeded but the
+// PR could not be created), a subsequent processItem call skips Claude and
+// advances the stage directly once ensureDraftPR succeeds.
+func TestProcessItem_PRCreationFailed_SkipsClaudeOnRetry(t *testing.T) {
+	skipIfNoGit(t)
+
+	origLock := lockVerifyDelay
+	lockVerifyDelay = 0
+	t.Cleanup(func() { lockVerifyDelay = origLock })
+	origPR := ensureDraftPRRetryDelay
+	ensureDraftPRRetryDelay = 0
+	t.Cleanup(func() { ensureDraftPRRetryDelay = origPR })
+
+	// FetchLinkedPR fails on first processItem, succeeds on second.
+	var fetchCalls int
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			fetchCalls++
+			if fetchCalls == 1 {
+				return nil, errors.New("GitHub API returned 422: validation failed")
+			}
+			return &gh.PRDetails{Number: 77, State: "open"}, nil
+		},
+	}
+
+	var invokeCount int
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			invokeCount++
+			return "FABRIK_STAGE_COMPLETE\n", true, TokenUsage{}, nil
+		},
+	}
+	eng := testEngineWithRepo(t, client, claude)
+	eng.cfg.Stages = implementDraftPRStages()
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 73, Title: "T", Status: "Implement", ItemID: "PVTI_73"}
+
+	// First call: Claude runs, PR creation fails → PRCreationFailed flag set.
+	if err := eng.processItem(t.Context(), board, item); err != nil {
+		t.Fatalf("first processItem: %v", err)
+	}
+	if invokeCount != 1 {
+		t.Fatalf("expected Claude invoked once on first processItem, got %d", invokeCount)
+	}
+	snap, err := eng.store.Get("owner/repo", 73)
+	if err != nil {
+		t.Fatalf("store.Get after first call: %v", err)
+	}
+	if !snap.PRCreationFailed("Implement") {
+		t.Fatal("expected PRCreationFailed flag set after first call")
+	}
+
+	// Second call: R5 fires → ensureDraftPR succeeds → Claude NOT invoked.
+	// Apply PRCreationFailed flag via the store mutation to simulate the R5 state.
+	eng.store.Apply(itemstate.PRCreationFailedRecorded{Repo: "owner/repo", Number: 73, StageName: "Implement"})
+	if err := eng.processItem(t.Context(), board, item); err != nil {
+		t.Fatalf("second processItem: %v", err)
+	}
+
+	// Claude must not have been invoked again.
+	if invokeCount != 1 {
+		t.Errorf("expected Claude invoked only once total (R5 skip), got %d invocations", invokeCount)
+	}
+
+	// Stage must have advanced — stage:Implement:complete label added.
+	var completeAdded bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Implement:complete" {
+			completeAdded = true
+		}
+	}
+	if !completeAdded {
+		t.Error("expected stage:Implement:complete label added when R5 path advances stage")
 	}
 }
