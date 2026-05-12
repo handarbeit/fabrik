@@ -2740,14 +2740,64 @@ After a stage invocation (not comment processing), `markCommentsSeenByStage()` a
 
 ### 5.1 Draft PR Creation
 
-**When:** After a stage signals FABRIK_STAGE_COMPLETE, if the stage has `create_draft_pr: true`.
+**When:** After a stage signals FABRIK_STAGE_COMPLETE, if the stage has `create_draft_pr: true`. An early-guard path also runs before output is posted when both `create_draft_pr: true` and `post_to_pr: true` are set, so the PR exists before `postOutputToPR` runs.
 
 **Code path:** `processItem()` → `ensureDraftPR()`
 
-**Flow:**
-1. Check for existing PR via `FindPRForIssue()` — if found, ensure body contains `Closes #N` and return
+**Flow (idempotent, up to 3 attempts with exponential backoff):**
+1. Check for an existing open PR via `FetchLinkedPR()` — if found open and not merged, ensure body contains `Closes #N` and return its number. Closed or merged PRs are ignored; a new PR will be created.
 2. Push the issue branch via `PushBranch()`
-3. Create draft PR via `CreateDraftPR()` with title from issue, targeting `baseBranch`, body containing `Closes #N`
+3. Build a seed body from `.fabrik-context/` files (issue summary, plan approach, verification placeholder)
+4. Create draft PR via `CreateDraftPR()` with title from issue, targeting `baseBranch`, body ending with `Closes #N`
+
+Transient errors (network errors, 5xx) are retried with backoff (base delay 500ms, doubled each attempt). Non-transient errors (4xx including 422) return immediately without retry. Returns `(prNumber, nil)` on success, `(0, error)` on failure.
+
+**Success logging:** `[#N pr] created draft PR #<num> (branch: fabrik/issue-N)`
+
+**Failure logging:** `[#N pr] failed to create draft PR for branch fabrik/issue-N: <error>`
+
+### 5.5 PR Creation Failure Path
+
+**Trigger:** Stage with `create_draft_pr: true` emits `FABRIK_STAGE_COMPLETE`, but `ensureDraftPR` returns `(0, error)` after exhausting its in-process retry loop.
+
+**Critical invariant:** `handleStageComplete` is NOT called when PR creation fails. The stage does not advance. `stage:<X>:complete` is not added.
+
+**Retry counting:** Each PR creation failure increments the same per-stage `Attempts` counter used by `StageRetryIncremented`. The `StageRetryCleared` mutation (which resets the counter) fires only on PR creation success, not on failure. This means PR creation failures count against `MaxRetries` just like Claude failures.
+
+**Code path (completion block in `processItem`):**
+
+```
+FABRIK_STAGE_COMPLETE received
+  → if stage.CreateDraftPR and prNumber == 0:
+      prErr = ensureDraftPR(item, baseBranch)
+      if prErr != nil:
+          if MaxRetries > 0:
+              StageRetryIncremented
+              if Attempts >= MaxRetries:
+                  escalatePRCreationFailure()  → fabrik:paused, stage:<X>:failed, comment
+                  releaseLock()
+                  return
+          PRCreationFailedRecorded            → sets in-memory flag for R5
+          releaseLock()
+          return                               → NO handleStageComplete
+      else:
+          updatePRVerification(prNumber, summary)
+  releaseLock()
+  StageRetryCleared, EngineUnpaused
+  handleStageComplete()                        → stage:X:complete, optional advance
+```
+
+**Escalation comment** (posted by `escalatePRCreationFailure`): Names PR creation as the failure cause (not Claude), includes the manual workaround command using the actual base branch: `` `gh pr create --head fabrik/issue-N --base <baseBranch> --body "Closes #N"` ``, and instructs the user to remove `fabrik:paused` to resume.
+
+**`PRCreationFailed` in-memory flag (R5):** `StageState.PRCreationFailed map[string]bool` records that Claude completed a stage but the draft PR could not be created. This flag does not survive engine restarts. It is cleared by `StageRetryCleared` (on PR creation success). On restart, the item re-runs Claude, which is safe and conservative — Claude's commits are idempotent.
+
+**R5 skip-Claude retry path:** On the next poll cycle for an item with `PRCreationFailed[stageName] == true`, the engine checks this flag early in `runStage` (before the Claude invocation). If `ensureDraftPR` now succeeds, the engine calls `handleStageComplete` directly — no Claude re-invocation needed, since the worktree already has the commits from the prior run. If `ensureDraftPR` still fails, the retry counter is incremented and the escalation path applies when `MaxRetries` is reached.
+
+| State | Trigger | Action | Outcome |
+|-------|---------|--------|---------|
+| Locked + In Progress | `FABRIK_STAGE_COMPLETE` + `create_draft_pr` + PR creation fails | `PRCreationFailedRecorded`; lock released; NO `handleStageComplete` | Item waits for next poll |
+| Locked + In Progress | `FABRIK_STAGE_COMPLETE` + `create_draft_pr` + PR creation fails + `Attempts >= MaxRetries` | `escalatePRCreationFailure`: `fabrik:paused`, `stage:<X>:failed`, comment | Issue paused for human intervention |
+| Locked + In Progress | `PRCreationFailed` flag set; `ensureDraftPR` succeeds on retry (R5) | `StageRetryCleared`, `handleStageComplete` — no Claude run | Stage advances normally |
 
 ### 5.2 Mark PR Ready
 
