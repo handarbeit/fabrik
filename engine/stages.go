@@ -518,7 +518,9 @@ func (e *Engine) handleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 	}
 
 	// Add dummy completion labels and "skipped" comments for all subsequent non-cleanup stages.
-	skippedComment := fmt.Sprintf("_Skipped: no work needed (FABRIK_NO_WORK_NEEDED emitted by %s)._", stage.Name)
+	// The comment body must start with the canonical "🏭 **Fabrik" prefix so findNewComments
+	// dedup prevents Fabrik from processing its own output on the next poll.
+	skippedComment := fmt.Sprintf("🏭 **Fabrik — skipped: no work needed**\n\n_Skipped: no work needed (FABRIK_NO_WORK_NEEDED emitted by %s)._", stage.Name)
 	for _, s := range e.cfg.Stages {
 		if s.Order <= stage.Order || s.Order >= doneOrder {
 			continue
