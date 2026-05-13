@@ -169,6 +169,56 @@ Then:
 
 `FABRIK_DECOMPOSED` is mutually exclusive with `FABRIK_STAGE_COMPLETE` and `FABRIK_BLOCKED_ON_INPUT`. Output exactly one terminal marker. If you decompose, do not also signal completion.
 
+## No Work Needed
+
+When Research findings conclusively show that no code or documentation changes are required — the issue is already resolved, the filed problem doesn't exist in this codebase, or the change is provably moot (e.g., a docs audit for a pure-internal release with no user-visible changes) — Plan should short-circuit the pipeline rather than writing an implementation plan.
+
+### When to Use
+
+Emit `FABRIK_NO_WORK_NEEDED` when **all** of the following are true:
+
+1. Research found no code, test, or doc changes needed
+2. The issue is genuinely complete with no action required
+3. Creating a PR would fail (nothing to commit) or be misleading
+
+Do **not** use this marker if there is any uncertainty. If you're unsure whether work is needed, write a plan. Wrong emissions are reviewable post-hoc; a missed emission just causes a PR-creation failure downstream (the original problem this marker solves).
+
+### How to Signal No Work Needed
+
+In your plan output, enumerate clearly why no work is needed. Then emit **both** markers, each on its own line:
+
+```
+FABRIK_STAGE_COMPLETE
+FABRIK_NO_WORK_NEEDED
+```
+
+Both markers are required. `FABRIK_NO_WORK_NEEDED` alone has no effect — it requires `FABRIK_STAGE_COMPLETE` to co-occur. Order does not matter; both must appear somewhere in your output.
+
+The engine will:
+1. Mark this stage complete
+2. Add `stage:<name>:complete` labels for all subsequent non-cleanup stages
+3. Post a one-line "Skipped: no work needed" comment per skipped stage
+4. Move the issue directly to Done — **no PR is created**
+
+### What to Include in Output
+
+Before emitting the markers, write a short explanation of why no work is needed. Include:
+- What the Research stage found (or didn't find)
+- Why that means no code/doc change is required
+- Confirmation that the issue is complete as-is
+
+Example:
+
+> Research found that the `validateToken()` function already handles the described edge case as of commit abc123 (merged in #456). No code changes are needed. The issue was filed against behavior that no longer exists.
+
+### Mutual Exclusivity
+
+`FABRIK_NO_WORK_NEEDED` is mutually exclusive with `FABRIK_DECOMPOSED` and `FABRIK_BLOCKED_ON_INPUT`.
+- If the issue needs to be split: use `FABRIK_DECOMPOSED` (without `FABRIK_STAGE_COMPLETE`)
+- If you need user input: use `FABRIK_BLOCKED_ON_INPUT` (without `FABRIK_STAGE_COMPLETE`)
+- If no work is needed: use `FABRIK_STAGE_COMPLETE` + `FABRIK_NO_WORK_NEEDED`
+- If work is needed: use `FABRIK_STAGE_COMPLETE` alone
+
 ## Interaction Pattern
 
 1. Read the spec and research findings thoroughly
@@ -188,7 +238,9 @@ Plans typically complete in a single pass. If the spec and research are solid, t
 
 **Decomposing an oversized issue**: If the issue is too broad for a single Implement cycle, output `FABRIK_DECOMPOSED` on its own line after creating the sub-issues (see the Decomposition section above). The engine adds `stage:Plan:complete` and moves the parent to Done. Sub-issues flow through the pipeline independently as a formation.
 
-These three markers are mutually exclusive — output exactly one.
+**No work needed**: If Research shows no code or doc changes are required, output both `FABRIK_STAGE_COMPLETE` and `FABRIK_NO_WORK_NEEDED` (each on its own line). The engine skips all remaining pipeline stages and moves the issue to Done without creating a PR. See the No Work Needed section above.
+
+These four markers (`FABRIK_STAGE_COMPLETE`, `FABRIK_NO_WORK_NEEDED`, `FABRIK_DECOMPOSED`, `FABRIK_BLOCKED_ON_INPUT`) are mutually exclusive as terminal signals — output exactly one terminal outcome per invocation.
 
 **Do NOT update the issue body.** The issue body is the spec, owned by Specify. Your plan is posted as a stage comment by the engine automatically. Do not use `FABRIK_ISSUE_UPDATE` markers — they would overwrite the spec.
 
