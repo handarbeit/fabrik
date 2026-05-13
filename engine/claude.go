@@ -25,6 +25,7 @@ import (
 var stageCompleteRE = regexp.MustCompile(`(?m)^FABRIK_STAGE_COMPLETE\r?$`)
 var blockedOnInputRE = regexp.MustCompile(`(?m)^FABRIK_BLOCKED_ON_INPUT\r?$`)
 var decomposedRE = regexp.MustCompile(`(?m)^FABRIK_DECOMPOSED\r?$`)
+var noWorkNeededRE = regexp.MustCompile(`(?m)^FABRIK_NO_WORK_NEEDED\r?$`)
 
 // defaultAllowedTools is the comprehensive set of tools Fabrik permits by default
 // when a stage does not specify allowed_tools. This ensures headless Claude Code
@@ -47,6 +48,15 @@ func CheckBlockedOnInput(output string) bool {
 // the parent should be moved directly to Done, bypassing remaining pipeline stages.
 func CheckDecomposed(output string) bool {
 	return decomposedRE.MatchString(output)
+}
+
+// CheckNoWorkNeeded reports whether output contains the FABRIK_NO_WORK_NEEDED marker.
+// This marker signals that the emitting stage determined no code or documentation
+// changes are required. It must co-occur with FABRIK_STAGE_COMPLETE; when both are
+// present the engine skips all remaining non-cleanup stages (adding dummy completion
+// labels and "skipped" comments) and moves the issue directly to Done without a PR.
+func CheckNoWorkNeeded(output string) bool {
+	return noWorkNeededRE.MatchString(output)
 }
 
 // claudeLogf is the logging function used by runClaude. Set by the Engine
