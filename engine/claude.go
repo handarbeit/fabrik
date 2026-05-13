@@ -759,7 +759,7 @@ func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Com
 	b.WriteString("Once you emit this marker, do not generate any further output. Continuing after the marker risks leaving the issue in a stuck state if the session ends with an error.\n\n")
 	b.WriteString("If you have unresolved questions that must be answered before the stage can proceed, output instead:\n")
 	b.WriteString("FABRIK_BLOCKED_ON_INPUT\n")
-	b.WriteString("These three markers are mutually exclusive — output exactly one or neither.\n")
+	b.WriteString("These two markers are mutually exclusive — output exactly one or neither.\n")
 	b.WriteString("\nWhen outputting FABRIK_BLOCKED_ON_INPUT, you MUST also emit a summary block containing the specific question you need answered (this is distinct from the stage-completion summary above, if any — here the block must describe the required input, not summarize completed work):\n\n")
 	b.WriteString("FABRIK_SUMMARY_BEGIN\n")
 	b.WriteString("(1–3 sentences stating exactly what input you need — direct and specific, no preamble; the user reads this on a small screen)\n")
