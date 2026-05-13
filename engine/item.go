@@ -984,11 +984,12 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		// the next poll cycle. No explicit eviction is needed.
 	}
 
-	// Only honor the blocked-on-input and decomposed markers if Claude ran without error.
-	// If there was an error, treat the run as a retry/failure rather than
-	// silently pausing the issue.
+	// Only honor the blocked-on-input, decomposed, and no-work-needed markers if Claude
+	// ran without error. If there was an error, treat the run as a retry/failure rather
+	// than silently pausing the issue.
 	blockedOnInput := err == nil && CheckBlockedOnInput(output)
 	decomposed := err == nil && CheckDecomposed(output)
+	noWorkNeeded := err == nil && CheckNoWorkNeeded(output)
 
 	// Store completion/blocked/usage state for TUI event emission in poll.go.
 	e.store.Apply(itemstate.InvocationRecorded{
@@ -1000,7 +1001,14 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		Duration:  time.Since(workerStartedAt),
 	})
 
-	if completed {
+	if completed && noWorkNeeded {
+		// No-work path: stage declared itself complete AND signaled no code/doc changes
+		// are needed. Skip all remaining pipeline stages, move directly to Done, no PR.
+		releaseLock()
+		e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+		e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+		e.handleNoWorkNeeded(board, item, stage)
+	} else if completed {
 		// Post-stage: create draft PR and/or mark ready now that commits exist.
 		// prNumber may already be set if the early guard above ran (PostToPR + CreateDraftPR path).
 		if stage.CreateDraftPR {
