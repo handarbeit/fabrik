@@ -266,6 +266,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	output = stripLine(output, "FABRIK_STAGE_COMPLETE")
 	output = stripLine(output, "FABRIK_BLOCKED_ON_INPUT")
 	output = stripLine(output, "FABRIK_DECOMPOSED")
+	output = stripLine(output, "FABRIK_NO_WORK_NEEDED")
 	output = stripLine(output, "FABRIK_SUMMARY_BEGIN")
 	output = stripLine(output, "FABRIK_SUMMARY_END")
 	output = strings.TrimSpace(output)
