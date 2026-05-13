@@ -34,9 +34,9 @@ func TestCheckNoWorkNeeded(t *testing.T) {
 	}
 }
 
-// testStagesWithCleanup returns stages with the Done stage marked as CleanupWorktree,
-// for use in handleNoWorkNeeded tests.
-func testStagesWithCleanup() []*stages.Stage {
+// testStagesWithValidateAndCleanup returns a stage set including Validate and a
+// CleanupWorktree Done stage, suitable for SkipsIntermediateStages tests.
+func testStagesWithValidateAndCleanup() []*stages.Stage {
 	return []*stages.Stage{
 		{Name: "Research", Order: 1, Prompt: "research"},
 		{Name: "Plan", Order: 2, Prompt: "plan"},
@@ -50,6 +50,7 @@ func testStagesWithCleanup() []*stages.Stage {
 // emitting stage's completion label and moves the item to Done.
 func TestHandleNoWorkNeeded_MovesToDone(t *testing.T) {
 	client := &mockGitHubClient{}
+	// testStagesWithCleanup: Research(1), Plan(2), Implement(3), Done(99, cleanup)
 	eng := testEngineWithStages(client, testStagesWithCleanup())
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
@@ -135,7 +136,8 @@ func TestHandleNoWorkNeeded_NoDoneOption(t *testing.T) {
 // while the cleanup (Done) stage does not.
 func TestHandleNoWorkNeeded_SkipsIntermediateStages(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngineWithStages(client, testStagesWithCleanup())
+	// Stages: Research(1), Plan(2), Implement(3), Validate(4), Done(5, cleanup)
+	eng := testEngineWithStages(client, testStagesWithValidateAndCleanup())
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 7, ItemID: "PVTI_7"}
