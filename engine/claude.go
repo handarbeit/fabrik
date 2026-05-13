@@ -759,11 +759,17 @@ func buildPrompt(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Com
 	b.WriteString("Once you emit this marker, do not generate any further output. Continuing after the marker risks leaving the issue in a stuck state if the session ends with an error.\n\n")
 	b.WriteString("If you have unresolved questions that must be answered before the stage can proceed, output instead:\n")
 	b.WriteString("FABRIK_BLOCKED_ON_INPUT\n")
-	b.WriteString("These two markers are mutually exclusive — output exactly one or neither.\n")
+	b.WriteString("These three markers are mutually exclusive — output exactly one or neither.\n")
 	b.WriteString("\nWhen outputting FABRIK_BLOCKED_ON_INPUT, you MUST also emit a summary block containing the specific question you need answered (this is distinct from the stage-completion summary above, if any — here the block must describe the required input, not summarize completed work):\n\n")
 	b.WriteString("FABRIK_SUMMARY_BEGIN\n")
 	b.WriteString("(1–3 sentences stating exactly what input you need — direct and specific, no preamble; the user reads this on a small screen)\n")
 	b.WriteString("FABRIK_SUMMARY_END\n")
+	b.WriteString("\nIf your stage determines that no code or documentation changes are required — the issue\n")
+	b.WriteString("is already resolved or the work is genuinely moot — you may signal this by emitting:\n")
+	b.WriteString("FABRIK_NO_WORK_NEEDED\n")
+	b.WriteString("This marker MUST co-occur with FABRIK_STAGE_COMPLETE on its own line. The engine will\n")
+	b.WriteString("mark all remaining pipeline stages complete (with \"skipped\" comments) and move the issue\n")
+	b.WriteString("directly to Done without creating a PR. It is mutually exclusive with FABRIK_BLOCKED_ON_INPUT.\n")
 
 	return b.String()
 }
