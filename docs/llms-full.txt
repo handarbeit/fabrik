@@ -766,6 +766,34 @@ if you're not actively watching the issue.
 > flag ([#671](https://github.com/handarbeit/fabrik/issues/671)) will make this separation
 > easier once implemented.
 
+### No-Work Short-Circuit
+
+A stage can signal that all remaining pipeline work can be skipped by outputting both
+`FABRIK_STAGE_COMPLETE` and `FABRIK_NO_WORK_NEEDED`. This is the short-circuit path for
+issues where Research conclusively shows that no code, test, or documentation changes are
+needed.
+
+**`FABRIK_NO_WORK_NEEDED` alone has no effect.** Both markers must co-occur in the same
+stage output. The emitting stage must declare itself complete before the bypass fires.
+
+When both markers are present, the engine:
+1. Marks the emitting stage complete
+2. Adds `stage:<name>:complete` labels for all subsequent non-cleanup stages (audit trail)
+3. Posts a one-line `_Skipped: no work needed_` comment per skipped stage
+4. Moves the issue directly to Done — **no PR is created**
+
+The primary use case is the **Plan stage**: after Research finds the issue is already
+resolved or that no changes are required, Plan emits both markers instead of writing an
+implementation plan. This avoids the HTTP 422 failure that would occur when Implement tried
+to create a PR from a branch with nothing to commit.
+
+Any stage can emit `FABRIK_NO_WORK_NEEDED`, not just Plan. Skill authors should only use it
+when they are **certain** no downstream work is needed.
+
+**Mutual exclusivity:** `FABRIK_NO_WORK_NEEDED` cannot be combined with `FABRIK_DECOMPOSED`
+or `FABRIK_BLOCKED_ON_INPUT`. If the issue needs to be split, use `FABRIK_DECOMPOSED`. If
+a question needs answering first, use `FABRIK_BLOCKED_ON_INPUT`.
+
 ### Dependency-Based Sequencing (Formations)
 
 Fabrik supports dependency-based sequencing of issues using GitHub's native "Blocked by" relationships. This enables **formations** — coordinated sets of issues that execute in parallel where possible and respect ordering constraints automatically.
