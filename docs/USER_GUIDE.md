@@ -771,12 +771,13 @@ if you're not actively watching the issue.
 ### No-Work Short-Circuit
 
 A stage can signal that all remaining pipeline work can be skipped by outputting both
-`FABRIK_STAGE_COMPLETE` and `FABRIK_NO_WORK_NEEDED`. This is the short-circuit path for
-issues where Research conclusively shows that no code, test, or documentation changes are
-needed.
+`FABRIK_STAGE_COMPLETE` and `FABRIK_NO_WORK_NEEDED`, each on its own standalone line. This
+is the short-circuit path for issues where Research conclusively shows that no code, test,
+or documentation changes are needed.
 
-**`FABRIK_NO_WORK_NEEDED` alone has no effect.** Both markers must co-occur in the same
-stage output. The emitting stage must declare itself complete before the bypass fires.
+**`FABRIK_NO_WORK_NEEDED` alone has no effect.** Both markers must appear as standalone
+lines in the same stage output — the engine matches each token exactly (the line must
+contain only the marker and nothing else).
 
 When both markers are present, the engine:
 1. Marks the emitting stage complete
