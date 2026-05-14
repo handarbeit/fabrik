@@ -1,14 +1,20 @@
-# Fabrik v0.0.60
+# Fabrik v0.0.61
 
-Targeted bugfix release: closes a latent regression from the v0.0.57 GraphQL-cost-reduction work. v0.0.59 made PR-creation failures visible; this release fixes the underlying cause of the most common one.
+Targeted release adding the `FABRIK_NO_WORK_NEEDED` marker. Plan (or any earlier stage) can now signal that the issue requires no implementation and the engine cleanly short-circuits the pipeline to Done — instead of advancing to Implement, finding no commits, and failing PR creation with `HTTP 422: No commits between main and <branch>`.
+
+## Features
+
+- **`FABRIK_NO_WORK_NEEDED` marker** (#733). Any stage that determines the issue is complete-with-no-action (e.g., a docs audit on a pure-internal release, or an issue filed against an already-resolved problem) can emit `FABRIK_NO_WORK_NEEDED` on a line of its own alongside `FABRIK_STAGE_COMPLETE`. The engine marks the current stage complete, marks all subsequent non-cleanup stages as `:complete` with a "skipped: no work needed" comment, and advances directly to Done. PR creation is skipped entirely, so empty-commit branches no longer fail with HTTP 422. The fabrik-plan skill is updated with explicit guidance on when to emit the marker. Documented in `docs/state-machine.md` §5.6 and ADR-045.
 
 ## Fixes
 
-- **Issue/PR title now populated in cache after probe-driven cold-start** (#729). The truly-shallow probe (#685) and `BootstrapFromProbe` (#710) deliberately omit `title` from the per-poll path for cost reasons. `FetchItemDetails` was never updated to fetch it during deep-fetch — a vestige from when title arrived via the heavy shallow board fetch. Items first seen via the probe ended up with `Title == ""` permanently, causing `ensureDraftPR` to send empty titles to GitHub and trigger HTTP 422 `Validation Failed — missing_field: title` during the Implement stage. Fix adds `title` to the `FetchItemDetails` GraphQL query for both `Issue` and `PullRequest` content types and removes the title-preservation workaround. Collateral degradation (empty title in Claude context files, TUI display, log lines) is also resolved.
+- The skipped-stage comment posted when `FABRIK_NO_WORK_NEEDED` short-circuits a stage is now prefixed with the canonical Fabrik header line (matching other engine-posted comments).
+- Internal documentation correction for `buildPrompt()`'s mutual-exclusivity description of the new marker.
 
 ## Internal
 
-- New tests assert `CreateDraftPR` receives a populated title after `FetchItemDetails`, and that the GraphQL response correctly populates `item.Title` for both Issue and PR nodes.
+- New tests for `CheckNoWorkNeeded` (marker detection) and `handleNoWorkNeeded` (pipeline short-circuit dispatch).
+- `docs/llms-full.txt` regenerated after `state-machine.md` update.
 
 ## Upgrading
 
