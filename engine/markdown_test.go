@@ -387,6 +387,31 @@ func TestBalanceFences_NoSeparatorNoClosesLine_AppendsAtEnd(t *testing.T) {
 	}
 }
 
+func TestBalanceFences_IndentedOpenerUnindentedCloser(t *testing.T) {
+	// Mirrors PR #187 body shape: list item with indented fence opener at column 2,
+	// followed by an unindented "closer" at column 0, then --- and Closes #184.
+	// GitHub's CommonMark parser treats the column-0 line as content inside the indented
+	// fence, so Closes #184 is absorbed into the code block unless we fix it.
+	body := "- [ ] **Task 2**: implement stuff. When non-empty:\n  ```\nsome code\n\n```\n\n---\n\nCloses #184"
+	result := balanceFences(body)
+
+	if result == body {
+		t.Error("expected balanceFences to modify the body (insert synthetic closer)")
+	}
+	// Synthetic closer must be indented to match the opener (2 spaces) and appear before ---
+	if !strings.Contains(result, "  ```\n---") {
+		t.Errorf("indented synthetic closer must appear before ---, got: %q", result)
+	}
+	// Closes #184 must be present outside any code fence context (after the last fence delimiter)
+	lastFence := strings.LastIndex(result, "```")
+	if lastFence < 0 {
+		t.Fatal("no fence delimiter found in result")
+	}
+	if !strings.Contains(result[lastFence:], "Closes #184") {
+		t.Errorf("Closes #184 must appear after the last fence delimiter, got tail: %q", result[lastFence:])
+	}
+}
+
 func TestBalanceFences_MultipleSeparators_UsesLastOne(t *testing.T) {
 	// A manually-edited PR body may have an earlier --- that appears before the unclosed
 	// fence opener. The closer must go before the LAST --- (the one preceding Closes #N),
