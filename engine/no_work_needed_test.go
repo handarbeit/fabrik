@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -185,6 +186,56 @@ func TestHandleNoWorkNeeded_SkipsIntermediateStages(t *testing.T) {
 	}
 	if client.updateStatusCalls[0].optionID != "OPT_Done" {
 		t.Errorf("expected Done option, got %q", client.updateStatusCalls[0].optionID)
+	}
+}
+
+// TestHandleNoWorkNeeded_ClosesIssue verifies that handleNoWorkNeeded calls
+// CloseIssue after successfully moving the item to Done.
+func TestHandleNoWorkNeeded_ClosesIssue(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineWithStages(client, testStagesWithCleanup())
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 5, ItemID: "PVTI_5", Repo: "owner/repo"}
+	stage := &stages.Stage{Name: "Plan", Order: 2}
+
+	eng.handleNoWorkNeeded(board, item, stage)
+
+	// CloseIssue must be called exactly once.
+	if len(client.closeIssueCalls) != 1 {
+		t.Fatalf("expected 1 CloseIssue call, got %d", len(client.closeIssueCalls))
+	}
+	call := client.closeIssueCalls[0]
+	if call.owner != "owner" {
+		t.Errorf("CloseIssue owner = %q, want %q", call.owner, "owner")
+	}
+	if call.repo != "repo" {
+		t.Errorf("CloseIssue repo = %q, want %q", call.repo, "repo")
+	}
+	if call.issueNumber != 5 {
+		t.Errorf("CloseIssue issueNumber = %d, want 5", call.issueNumber)
+	}
+}
+
+// TestHandleNoWorkNeeded_CloseIssueNotCalledOnStatusFailure verifies that
+// CloseIssue is NOT called when UpdateProjectItemStatus fails — the issue
+// has not reached Done and should not be closed.
+func TestHandleNoWorkNeeded_CloseIssueNotCalledOnStatusFailure(t *testing.T) {
+	client := &mockGitHubClient{
+		updateProjectItemStatusFn: func(_, _, _, _ string) error {
+			return fmt.Errorf("status update failed")
+		},
+	}
+	eng := testEngineWithStages(client, testStagesWithCleanup())
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 5, ItemID: "PVTI_5", Repo: "owner/repo"}
+	stage := &stages.Stage{Name: "Plan", Order: 2}
+
+	eng.handleNoWorkNeeded(board, item, stage)
+
+	if len(client.closeIssueCalls) != 0 {
+		t.Errorf("expected no CloseIssue calls when status update fails, got %d", len(client.closeIssueCalls))
 	}
 }
 
