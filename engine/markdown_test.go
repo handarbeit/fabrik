@@ -419,6 +419,26 @@ func TestBalanceFences_NoSeparatorNoClosesLine_AppendsAtEnd(t *testing.T) {
 	}
 }
 
+func TestBalanceFences_NoSeparatorTopAndFooterClosesN(t *testing.T) {
+	// Regression: when the body has both a top-of-body "Closes #N" (as produced by
+	// buildPRSeedBody) and a footer "Closes #N" but no "---" separator, the synthetic
+	// closer must be inserted before the LAST "Closes #" line (the footer), not the first
+	// (which would place a fence delimiter at the top of the body and be parsed as a new
+	// fence opener by GitHub).
+	body := "Closes #42\n\nSome text\n\n```\nunclosed code\n\nCloses #42"
+	result := balanceFences(body)
+	// Synthetic closer must appear before the footer Closes #42, not the top-of-body one.
+	if strings.HasPrefix(strings.TrimSpace(result), "```") {
+		t.Errorf("synthetic closer must not be inserted before top-of-body Closes #42, got: %q", result)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(result), "Closes #42") {
+		t.Errorf("top-of-body Closes #42 must remain first, got: %q", result)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(result), "Closes #42") {
+		t.Errorf("footer Closes #42 must remain at end, got: %q", result)
+	}
+}
+
 func TestBalanceFences_IndentedOpenerUnindentedCloser(t *testing.T) {
 	// Mirrors PR #187 body shape: list item with indented fence opener at column 2,
 	// followed by an unindented "closer" at column 0, then --- and Closes #184.
