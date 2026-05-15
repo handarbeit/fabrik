@@ -573,6 +573,18 @@ func (e *Engine) handleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
 		}
+		// Close the GitHub issue so it mirrors the normal pipeline close-on-merge path.
+		// No webhook echo registered: applyIssuesDelta's "closed" case never calls
+		// matchEchoFn, so any registered echo would expire unused. The ApplyIssueClosed
+		// write-through handles cache coherence immediately.
+		if err := e.client.CloseIssue(owner, repo, item.Number); err != nil {
+			e.logf(item.Number, "warn", "could not close issue (no work needed): %v\n", err)
+		} else {
+			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyIssueClosed(boardcache.ItemKey(item.Repo, item.Number))
+			}
+			e.logf(item.Number, "done", "closed issue (no work needed)\n")
+		}
 	}
 }
 
