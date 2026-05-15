@@ -927,6 +927,31 @@ func (c *CacheImpl) ApplyLabelRemoved(key, label string) {
 	c.mu.Unlock()
 }
 
+// ApplyIssueClosed marks the item identified by key as closed in the store.
+// No-op when the key is not in the cache. Safe for concurrent use.
+func (c *CacheImpl) ApplyIssueClosed(key string) {
+	repo, number, ok := parseItemKey(key)
+	if !ok {
+		c.logFn("[cache] ApplyIssueClosed: key %q invalid — no-op\n", key)
+		return
+	}
+	// Guard: do not create a phantom Store entry for a key that was never bootstrapped.
+	if _, err := c.store.Get(repo, number); err != nil {
+		return
+	}
+	_, changes, _ := c.store.Apply(itemstate.IssueClosed{
+		Repo:   repo,
+		Number: number,
+	})
+	if len(changes) == 0 {
+		return
+	}
+	now := time.Now()
+	c.mu.Lock()
+	c.localDeltaAt[key] = now
+	c.mu.Unlock()
+}
+
 // ApplyCommentAdded appends comment to the cached comment list for the item
 // identified by key. No-op when the key is not in the cache.
 // Safe for concurrent use.
