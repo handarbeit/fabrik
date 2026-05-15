@@ -56,9 +56,10 @@ func firstParagraph(content string) string {
 // content inside the fence, matching CommonMark §4.5 semantics. If the final state is an
 // unclosed fence, a synthetic ``` closer (indented to match the opener) is inserted
 // immediately before the last "---" line (the separator before Closes #N). If no "---" is
-// present, it inserts before the first "Closes #" line. If neither is present, it appends
-// at the end. This ensures that interpolated content with unclosed fences cannot hide
-// trailing lines from GitHub's parser.
+// present, it inserts before the last "Closes #" line (using the last occurrence avoids
+// placing the synthetic closer before a top-of-body "Closes #N" header). If neither is
+// present, it appends at the end. This ensures that interpolated content with unclosed
+// fences cannot hide trailing lines from GitHub's parser.
 func balanceFences(body string) string {
 	lines := strings.Split(body, "\n")
 	var fenceActive bool
@@ -91,11 +92,11 @@ func balanceFences(body string) string {
 		}
 	}
 	if insertIdx < 0 {
-		// Fallback: before first "Closes #" line.
+		// Fallback: before last "Closes #" line. Using the last occurrence avoids inserting
+		// before a top-of-body "Closes #N" header (which would create a new fence opener).
 		for i, line := range lines {
 			if strings.HasPrefix(strings.TrimSpace(line), "Closes #") {
 				insertIdx = i
-				break
 			}
 		}
 	}
@@ -113,7 +114,9 @@ func balanceFences(body string) string {
 // buildPRSeedBody constructs the structured PR body template from issue and plan context.
 // issueContent is the contents of .fabrik-context/issue.md.
 // planContent is the contents of .fabrik-context/stage-Plan.md (may be empty if missing).
-// issueNumber is used to add the closing reference at the bottom.
+// issueNumber is used for both the top-of-body "Closes #N" (before ## Summary, ensuring
+// GitHub's link extractor sees it regardless of code fence issues in the body) and the
+// redundant footer "Closes #N" (after ---, for defense-in-depth).
 func buildPRSeedBody(issueContent, planContent string, issueNumber int) string {
 	// Extract Summary from issue; fall back to first paragraph
 	summary := extractMarkdownSection(issueContent, "Summary")
