@@ -2,6 +2,16 @@ package github
 
 import "fmt"
 
+// CloseIssue closes a GitHub issue via the REST API.
+func (c *Client) CloseIssue(owner, repo string, issueNumber int) error {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/issues/%d", c.baseURL, owner, repo, issueNumber)
+	payload := map[string]interface{}{
+		"state":        "closed",
+		"state_reason": "completed",
+	}
+	return c.restPatch(apiURL, payload)
+}
+
 // IssueData holds the fields from a GitHub issue needed by fabrik watch.
 type IssueData struct {
 	Number   int
