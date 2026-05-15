@@ -1659,6 +1659,40 @@ func TestApplyLabelRemovedNoopWhenAbsent(t *testing.T) {
 	}
 }
 
+func TestApplyIssueClosed(t *testing.T) {
+	c := seedCache(t)
+	key := ItemKey("owner/repo", 1)
+
+	c.ApplyIssueClosed(key)
+
+	s := testGetState(t, c, "owner/repo", 1)
+	if !s.IsClosed {
+		t.Error("want IsClosed=true after ApplyIssueClosed")
+	}
+
+	// localDeltaAt must be bumped.
+	c.mu.RLock()
+	deltaAt := c.localDeltaAt[key]
+	c.mu.RUnlock()
+	if deltaAt.IsZero() {
+		t.Error("want localDeltaAt bumped after ApplyIssueClosed")
+	}
+}
+
+func TestApplyIssueClosedNoopOnUnknownKey(t *testing.T) {
+	c := seedCache(t)
+	key := ItemKey("owner/repo", 99) // never bootstrapped
+
+	c.ApplyIssueClosed(key) // must not panic or create phantom entry
+
+	c.mu.RLock()
+	deltaAt := c.localDeltaAt[key]
+	c.mu.RUnlock()
+	if !deltaAt.IsZero() {
+		t.Error("want localDeltaAt NOT bumped for unknown key")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Subscribe tests
 // ---------------------------------------------------------------------------
