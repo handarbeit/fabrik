@@ -145,7 +145,9 @@ func buildPRSeedBody(issueContent, planContent string, issueNumber int) string {
 		approach = "(Populated by Implement)"
 	}
 
-	body := fmt.Sprintf(`## Summary
+	body := fmt.Sprintf(`Closes #%d
+
+## Summary
 
 %s
 
@@ -163,7 +165,7 @@ func buildPRSeedBody(issueContent, planContent string, issueNumber int) string {
 
 ---
 
-Closes #%d`, summary, problem, approach, issueNumber)
+Closes #%d`, issueNumber, summary, problem, approach, issueNumber)
 	return balanceFences(body)
 }
 

@@ -130,6 +130,9 @@ PR bodies were bare.
 	if !strings.Contains(body, "Closes #42") {
 		t.Error("body missing Closes #42")
 	}
+	if !strings.HasPrefix(strings.TrimSpace(body), "Closes #42") {
+		t.Errorf("Closes #42 must be at the top")
+	}
 	if !strings.HasSuffix(strings.TrimSpace(body), "Closes #42") {
 		t.Errorf("Closes #42 must be at the end, got: %q", body[len(body)-30:])
 	}
@@ -144,6 +147,9 @@ Brief summary.
 
 	if !strings.Contains(body, "(Populated by Implement)") {
 		t.Error("body should contain Approach placeholder when plan is missing")
+	}
+	if !strings.HasPrefix(strings.TrimSpace(body), "Closes #7") {
+		t.Errorf("Closes #7 must be at the top")
 	}
 	if !strings.HasSuffix(strings.TrimSpace(body), "Closes #7") {
 		t.Errorf("Closes #7 must be at the end")
@@ -179,6 +185,9 @@ func TestBuildPRSeedBody_PlanWithPlanHeading(t *testing.T) {
 func TestBuildPRSeedBody_ClosesAtEnd(t *testing.T) {
 	body := buildPRSeedBody("## Summary\n\nS.\n## Problem\n\nP.\n", "## Approach\n\nA.\n", 99)
 	trimmed := strings.TrimSpace(body)
+	if !strings.HasPrefix(trimmed, "Closes #99") {
+		t.Errorf("Closes #99 must be at top")
+	}
 	if !strings.HasSuffix(trimmed, "Closes #99") {
 		t.Errorf("Closes #99 must be at end, body tail: %q", trimmed[max(0, len(trimmed)-50):])
 	}
@@ -434,6 +443,9 @@ func TestBuildPRSeedBody_UnclosedBacktickInPlan(t *testing.T) {
 	planContent := "## Approach\n\nSee below:\n\n```\nsome example that was never closed\n"
 	body := buildPRSeedBody("## Summary\n\nS.\n", planContent, 10)
 	trimmed := strings.TrimSpace(body)
+	if !strings.HasPrefix(trimmed, "Closes #10") {
+		t.Errorf("Closes #10 must be at top")
+	}
 	if !strings.HasSuffix(trimmed, "Closes #10") {
 		t.Errorf("Closes #10 must be at end, got tail: %q", trimmed[max(0, len(trimmed)-60):])
 	}
@@ -443,6 +455,9 @@ func TestBuildPRSeedBody_UnclosedTildeInPlan(t *testing.T) {
 	planContent := "## Approach\n\nSee below:\n\n~~~\nsome example that was never closed\n"
 	body := buildPRSeedBody("## Summary\n\nS.\n", planContent, 11)
 	trimmed := strings.TrimSpace(body)
+	if !strings.HasPrefix(trimmed, "Closes #11") {
+		t.Errorf("Closes #11 must be at top")
+	}
 	if !strings.HasSuffix(trimmed, "Closes #11") {
 		t.Errorf("Closes #11 must be at end, got tail: %q", trimmed[max(0, len(trimmed)-60):])
 	}
@@ -452,6 +467,9 @@ func TestBuildPRSeedBody_UnclosedHintedFenceInPlan(t *testing.T) {
 	planContent := "## Approach\n\nSee below:\n\n```yaml\nfoo: bar\n"
 	body := buildPRSeedBody("## Summary\n\nS.\n", planContent, 12)
 	trimmed := strings.TrimSpace(body)
+	if !strings.HasPrefix(trimmed, "Closes #12") {
+		t.Errorf("Closes #12 must be at top")
+	}
 	if !strings.HasSuffix(trimmed, "Closes #12") {
 		t.Errorf("Closes #12 must be at end, got tail: %q", trimmed[max(0, len(trimmed)-60):])
 	}
@@ -461,6 +479,9 @@ func TestBuildPRSeedBody_BalancedFencesInPlan(t *testing.T) {
 	planContent := "## Approach\n\nSee below:\n\n```bash\necho hi\n```\n\nDone.\n"
 	body := buildPRSeedBody("## Summary\n\nS.\n", planContent, 13)
 	trimmed := strings.TrimSpace(body)
+	if !strings.HasPrefix(trimmed, "Closes #13") {
+		t.Errorf("Closes #13 must be at top")
+	}
 	if !strings.HasSuffix(trimmed, "Closes #13") {
 		t.Errorf("Closes #13 must be at end, got tail: %q", trimmed[max(0, len(trimmed)-60):])
 	}
