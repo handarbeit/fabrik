@@ -91,7 +91,8 @@ func (m *testGitHubUpgradeClient) CreateDraftPR(owner, repo, title, head, base, 
 	return 0, nil
 }
 func (m *testGitHubUpgradeClient) MarkPRReady(owner, repo string, prNumber int) error { return nil }
-func (m *testGitHubUpgradeClient) MergePR(owner, repo string, prNumber int) error     { return nil }
+func (m *testGitHubUpgradeClient) MergePR(owner, repo string, prNumber int) error      { return nil }
+func (m *testGitHubUpgradeClient) CloseIssue(owner, repo string, issueNumber int) error { return nil }
 func (m *testGitHubUpgradeClient) AddPRReviewCommentReaction(owner, repo string, commentDatabaseID int, content string) error {
 	return nil
 }
