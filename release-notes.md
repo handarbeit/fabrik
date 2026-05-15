@@ -1,16 +1,16 @@
-# Fabrik v0.0.62
+# Fabrik v0.0.63
 
-Bugfix release. Closes a latent linkage bug that bit fantasy issues more than once: when a PR body contained a list-item with a nested code fence (typical for implementation plans with code examples), the `Closes #N` line at the body's bottom could be absorbed into an unparseable code-block region and GitHub's link extractor failed to recognize it. PRs ended up linked to no issue, and the engine looped `linkage drift (was PR #N, now PR #0)` indefinitely until an operator manually edited the body.
+Targeted bugfix release. Completes the `FABRIK_NO_WORK_NEEDED` short-circuit path: issues that take the no-work path now close cleanly instead of staying open in the Done column.
 
 ## Fixes
 
-- **`Closes #N` is now placed at the TOP of the PR seed body in addition to the bottom** (#738). Top-of-body position is structurally impossible to absorb into any later code fence regardless of Markdown indentation games, so the linkage is robust against any downstream body manipulation by Implement / Verification updates. Duplicate at the bottom is retained for human-readability.
-- **`balanceFences()` is now indentation-aware** (#738). Indented fence openers (e.g., `  \`\`\`` inside a list item) are tracked separately from top-level fences. A mismatched-indent fence pair is now correctly treated as un-paired and a synthetic same-indent closer is inserted, preventing the body-tail content from being swallowed.
-- **No-separator fallback fix** (#738). When the PR body has no `---` divider, `balanceFences` now inserts its closing fence before the **last** `Closes #` line (previously the first), correctly handling the new top+bottom `Closes #N` layout.
+- **`handleNoWorkNeeded` now closes the GitHub issue** (#742). Previously, the no-work short-circuit (#733) correctly moved the issue to Done and marked all pipeline stages complete, but never closed the issue itself — because the close in the normal pipeline path is driven by the PR merge's `Closes #N` keyword, and the no-work path skips PR creation entirely. Issues ended up Done-but-open with all `stage:*:complete` labels set, requiring manual `gh issue close`. The fix adds an explicit `CloseIssue` REST call at the end of `handleNoWorkNeeded`, with cache write-through via the new `boardcache.ApplyIssueClosed` so the Store reflects `IsClosed=true` immediately.
 
-## Improvements
+## Internal
 
-- USER_GUIDE.md §3 now documents the `FABRIK_NO_WORK_NEEDED` marker introduced in v0.0.61 — including the requirement that it must appear on its own standalone line.
+- New `Client.CloseIssue` REST method and `GitHubClient` interface entry (powers the fix above).
+- New `boardcache.ApplyIssueClosed` write-through method.
+- Tests for `CloseIssue` success/error paths and `handleNoWorkNeeded`'s cache write-through.
 
 ## Upgrading
 
