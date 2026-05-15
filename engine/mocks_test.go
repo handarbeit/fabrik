@@ -35,6 +35,7 @@ type mockGitHubClient struct {
 	getPRBaseFn                   func(owner, repo string, prNumber int) (string, error)
 	updatePRBaseFn                func(owner, repo string, prNumber int, newBase string) error
 	mergePRFn                     func(owner, repo string, prNumber int) error
+	closeIssueFn                  func(owner, repo string, issueNumber int) error
 	rateLimitStatsFn              func() (gh.RateLimitStats, gh.RateLimitStats)
 	getIssueBodyFn                func(owner, repo string, issueNumber int) (string, error)
 	markPRReadyFn                 func(owner, repo string, prNumber int) error
@@ -76,6 +77,7 @@ type mockGitHubClient struct {
 	updateCommentCalls              []updateCommentCall
 	updateStatusCalls               []updateStatusCall
 	mergePRCalls                    []mergePRCall
+	closeIssueCalls                 []closeIssueCall
 	markPRReadyCalls                []markPRReadyCall
 	createDraftPRCalls              []createDraftPRCall
 	resolveReviewThreadCalls        []string
@@ -145,6 +147,11 @@ type updatePRBaseCall struct {
 type mergePRCall struct {
 	owner, repo string
 	prNumber    int
+}
+
+type closeIssueCall struct {
+	owner, repo string
+	issueNumber int
 }
 
 type addLabelCall struct {
@@ -387,6 +394,17 @@ func (m *mockGitHubClient) MergePR(owner, repo string, prNumber int) error {
 	m.mu.Unlock()
 	if fn != nil {
 		return fn(owner, repo, prNumber)
+	}
+	return nil
+}
+
+func (m *mockGitHubClient) CloseIssue(owner, repo string, issueNumber int) error {
+	m.mu.Lock()
+	m.closeIssueCalls = append(m.closeIssueCalls, closeIssueCall{owner, repo, issueNumber})
+	fn := m.closeIssueFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, issueNumber)
 	}
 	return nil
 }
