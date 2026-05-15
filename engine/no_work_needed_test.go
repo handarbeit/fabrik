@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
 )
@@ -190,10 +191,21 @@ func TestHandleNoWorkNeeded_SkipsIntermediateStages(t *testing.T) {
 }
 
 // TestHandleNoWorkNeeded_ClosesIssue verifies that handleNoWorkNeeded calls
-// CloseIssue after successfully moving the item to Done.
+// CloseIssue after successfully moving the item to Done, and that the
+// ApplyIssueClosed write-through sets IsClosed in the cache.
 func TestHandleNoWorkNeeded_ClosesIssue(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := testEngineWithStages(client, testStagesWithCleanup())
+
+	// Wire up a live CacheImpl so the ApplyIssueClosed write-through is exercised.
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	cache.Bootstrap(&gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{ID: "I_5", ItemID: "PVTI_5", Number: 5, Repo: "owner/repo", Status: "Plan"},
+		},
+	})
+	eng.readClient = cache
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 5, ItemID: "PVTI_5", Repo: "owner/repo"}
@@ -201,7 +213,7 @@ func TestHandleNoWorkNeeded_ClosesIssue(t *testing.T) {
 
 	eng.handleNoWorkNeeded(board, item, stage)
 
-	// CloseIssue must be called exactly once.
+	// CloseIssue must be called exactly once with the correct args.
 	if len(client.closeIssueCalls) != 1 {
 		t.Fatalf("expected 1 CloseIssue call, got %d", len(client.closeIssueCalls))
 	}
@@ -214,6 +226,15 @@ func TestHandleNoWorkNeeded_ClosesIssue(t *testing.T) {
 	}
 	if call.issueNumber != 5 {
 		t.Errorf("CloseIssue issueNumber = %d, want 5", call.issueNumber)
+	}
+
+	// ApplyIssueClosed write-through must have set IsClosed=true in the store.
+	snap, err := eng.store.Get("owner/repo", 5)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if !snap.IsClosed() {
+		t.Error("want IsClosed=true in store after handleNoWorkNeeded")
 	}
 }
 
