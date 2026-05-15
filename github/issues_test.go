@@ -7,6 +7,45 @@ import (
 	"testing"
 )
 
+func TestCloseIssue_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			t.Errorf("method = %s, want PATCH", r.Method)
+		}
+		if r.URL.Path != "/repos/owner/repo/issues/42" {
+			t.Errorf("path = %s, want /repos/owner/repo/issues/42", r.URL.Path)
+		}
+		var body map[string]interface{}
+		json.NewDecoder(r.Body).Decode(&body)
+		if body["state"] != "closed" {
+			t.Errorf("state = %v, want closed", body["state"])
+		}
+		if body["state_reason"] != "completed" {
+			t.Errorf("state_reason = %v, want completed", body["state_reason"])
+		}
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	if err := c.CloseIssue("owner", "repo", 42); err != nil {
+		t.Fatalf("CloseIssue: %v", err)
+	}
+}
+
+func TestCloseIssue_Error(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404)
+		w.Write([]byte(`{"message":"Not Found"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	if err := c.CloseIssue("owner", "repo", 999); err == nil {
+		t.Fatal("expected error for 404 response")
+	}
+}
+
 func TestFetchIssue_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" {
