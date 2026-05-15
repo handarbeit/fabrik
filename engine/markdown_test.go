@@ -312,6 +312,29 @@ func TestReplaceVerificationSection_CaseInsensitive(t *testing.T) {
 	}
 }
 
+func TestReplaceVerificationSection_PreservesTopOfBodyClosesN(t *testing.T) {
+	// Regression test: the top-of-body Closes #42 (R1) must not be consumed by
+	// replaceVerificationSection's forward scan, which starts after ## Verification.
+	prBody := "Closes #42\n\n## Summary\n\nSome summary.\n\n## Verification\n\n(Populated by Implement on completion)\n\n---\n\nCloses #42"
+
+	updated, ok := replaceVerificationSection(prBody, "All green.")
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if !strings.HasPrefix(strings.TrimSpace(updated), "Closes #42") {
+		t.Errorf("top-of-body Closes #42 must be preserved")
+	}
+	if !strings.HasSuffix(strings.TrimSpace(updated), "Closes #42") {
+		t.Errorf("bottom Closes #42 must be preserved")
+	}
+	if strings.Contains(updated, "(Populated by Implement on completion)") {
+		t.Error("placeholder should have been replaced")
+	}
+	if !strings.Contains(updated, "All green.") {
+		t.Error("new verification content must be present")
+	}
+}
+
 func TestReplaceVerificationSection_UnclosedFenceInSummary(t *testing.T) {
 	prBody := "## Verification\n\n(placeholder)\n\n---\n\nCloses #3"
 	// summary contains an unclosed fence — would hide --- and Closes #3
