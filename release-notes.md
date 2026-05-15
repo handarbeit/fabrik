@@ -1,20 +1,16 @@
-# Fabrik v0.0.61
+# Fabrik v0.0.62
 
-Targeted release adding the `FABRIK_NO_WORK_NEEDED` marker. Plan (or any earlier stage) can now signal that the issue requires no implementation and the engine cleanly short-circuits the pipeline to Done — instead of advancing to Implement, finding no commits, and failing PR creation with `HTTP 422: No commits between main and <branch>`.
-
-## Features
-
-- **`FABRIK_NO_WORK_NEEDED` marker** (#733). Any stage that determines the issue is complete-with-no-action (e.g., a docs audit on a pure-internal release, or an issue filed against an already-resolved problem) can emit `FABRIK_NO_WORK_NEEDED` on a line of its own alongside `FABRIK_STAGE_COMPLETE`. The engine marks the current stage complete, marks all subsequent non-cleanup stages as `:complete` with a "skipped: no work needed" comment, and advances directly to Done. PR creation is skipped entirely, so empty-commit branches no longer fail with HTTP 422. The fabrik-plan skill is updated with explicit guidance on when to emit the marker. Documented in `docs/state-machine.md` §5.6 and ADR-045.
+Bugfix release. Closes a latent linkage bug that bit fantasy issues more than once: when a PR body contained a list-item with a nested code fence (typical for implementation plans with code examples), the `Closes #N` line at the body's bottom could be absorbed into an unparseable code-block region and GitHub's link extractor failed to recognize it. PRs ended up linked to no issue, and the engine looped `linkage drift (was PR #N, now PR #0)` indefinitely until an operator manually edited the body.
 
 ## Fixes
 
-- The skipped-stage comment posted when `FABRIK_NO_WORK_NEEDED` short-circuits a stage is now prefixed with the canonical Fabrik header line (matching other engine-posted comments).
-- Internal documentation correction for `buildPrompt()`'s mutual-exclusivity description of the new marker.
+- **`Closes #N` is now placed at the TOP of the PR seed body in addition to the bottom** (#738). Top-of-body position is structurally impossible to absorb into any later code fence regardless of Markdown indentation games, so the linkage is robust against any downstream body manipulation by Implement / Verification updates. Duplicate at the bottom is retained for human-readability.
+- **`balanceFences()` is now indentation-aware** (#738). Indented fence openers (e.g., `  \`\`\`` inside a list item) are tracked separately from top-level fences. A mismatched-indent fence pair is now correctly treated as un-paired and a synthetic same-indent closer is inserted, preventing the body-tail content from being swallowed.
+- **No-separator fallback fix** (#738). When the PR body has no `---` divider, `balanceFences` now inserts its closing fence before the **last** `Closes #` line (previously the first), correctly handling the new top+bottom `Closes #N` layout.
 
-## Internal
+## Improvements
 
-- New tests for `CheckNoWorkNeeded` (marker detection) and `handleNoWorkNeeded` (pipeline short-circuit dispatch).
-- `docs/llms-full.txt` regenerated after `state-machine.md` update.
+- USER_GUIDE.md §3 now documents the `FABRIK_NO_WORK_NEEDED` marker introduced in v0.0.61 — including the requirement that it must appear on its own standalone line.
 
 ## Upgrading
 
