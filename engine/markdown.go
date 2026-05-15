@@ -50,24 +50,37 @@ func firstParagraph(content string) string {
 }
 
 // balanceFences scans body for fence delimiter lines (any line whose trimmed content starts
-// with ``` or ~~~, including language hints such as ```bash) and toggles a parity bit for
-// each. If the final parity is odd (unclosed fence), a closing ``` line is inserted
+// with ``` or ~~~, including language hints such as ```bash) using an indentation-aware
+// state machine. A closer is valid only when its leading-space count is >= the opener's.
+// An unindented closer (column 0) against an indented opener (column >= 1) is treated as
+// content inside the fence, matching CommonMark §4.5 semantics. If the final state is an
+// unclosed fence, a synthetic ``` closer (indented to match the opener) is inserted
 // immediately before the last "---" line (the separator before Closes #N). If no "---" is
 // present, it inserts before the first "Closes #" line. If neither is present, it appends
 // at the end. This ensures that interpolated content with unclosed fences cannot hide
 // trailing lines from GitHub's parser.
 func balanceFences(body string) string {
 	lines := strings.Split(body, "\n")
-	odd := false
+	var fenceActive bool
+	var fenceIndent int
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
-			odd = !odd
+			indent := len(line) - len(strings.TrimLeft(line, " "))
+			if !fenceActive {
+				fenceActive = true
+				fenceIndent = indent
+			} else if indent >= fenceIndent {
+				fenceActive = false
+			}
+			// else: closer is less-indented than opener → content inside fence, ignore
 		}
 	}
-	if !odd {
+	if !fenceActive {
 		return body
 	}
+	// Synthetic closer matches the opener's indentation; always uses backticks.
+	syntheticCloser := strings.Repeat(" ", fenceIndent) + "```"
 	// Insert closing fence before the last "---" line (the separator before Closes #N).
 	// Using the last "---" rather than the first prevents inserting before an unclosed fence
 	// opener when earlier "---" dividers appear in manually-edited PR bodies.
@@ -88,11 +101,11 @@ func balanceFences(body string) string {
 	}
 	if insertIdx < 0 {
 		// Fallback: append at end.
-		return body + "\n```"
+		return body + "\n" + syntheticCloser
 	}
 	newLines := make([]string, 0, len(lines)+1)
 	newLines = append(newLines, lines[:insertIdx]...)
-	newLines = append(newLines, "```")
+	newLines = append(newLines, syntheticCloser)
 	newLines = append(newLines, lines[insertIdx:]...)
 	return strings.Join(newLines, "\n")
 }
