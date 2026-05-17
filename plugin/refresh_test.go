@@ -136,30 +136,10 @@ func TestCheckPluginState_NoOp(t *testing.T) {
 }
 
 func TestCheckPluginState_AutoRefresh(t *testing.T) {
-	dir := t.TempDir()
-	if err := populatePluginDir(dir); err != nil {
-		t.Fatal(err)
-	}
-	// Compute current disk version, then set installed == disk so disk==installed.
-	diskVer, _ := ComputeDiskVersion(dir)
-	if err := WriteVersionHash(dir, diskVer); err != nil {
-		t.Fatal(err)
-	}
-	// Now embedded differs from installedVer (diskVer is the real embedded hash but we
-	// faked installed to be a different value to simulate a stale record).
-	// The above already set installed == disk == embedded, so we can't simulate this
-	// without modifying disk. Instead, write a custom installed hash that differs from embedded.
-	embeddedVer := ComputeEmbeddedVersion()
-	if err := WriteVersionHash(dir, "oldversion"); err != nil {
-		t.Fatal(err)
-	}
-	// Now installed="oldversion", disk==embedded, so disk != installed → customWorkflow!
-	// We need disk == "oldversion" too. Let's use a fresh empty plugin dir so embedded
-	// will differ from an empty disk.
+	// Use an empty dir so disk == installed (both "empty") while embedded differs.
 	dir2 := t.TempDir()
-	// dir2 has no files — diskVer2 will be empty hash of empty set.
+	embeddedVer := ComputeEmbeddedVersion()
 	diskVer2, _ := ComputeDiskVersion(dir2)
-	// seed installed == disk (both are "empty" state).
 	if err := WriteVersionHash(dir2, diskVer2); err != nil {
 		t.Fatal(err)
 	}

@@ -503,6 +503,8 @@ func Execute() error {
 			} else if err := fabrikplugin.WriteInstalledVersion(".fabrik/plugin"); err != nil {
 				fmt.Fprintf(os.Stderr, "[upgrade] warning: writing installed version failed: %v\n", err)
 			}
+		} else {
+			fmt.Fprintf(os.Stderr, "[upgrade] info: plugin baseline seeded; skill refresh deferred to next startup\n")
 		}
 	}
 
@@ -522,6 +524,8 @@ func Execute() error {
 			} else if err := fabrikplugin.WriteInstalledVersion(".fabrik/plugin"); err != nil {
 				fmt.Fprintf(os.Stderr, "[upgrade] warning: writing installed version failed after SIGHUP restart: %v\n", err)
 			}
+		} else {
+			fmt.Fprintf(os.Stderr, "[upgrade] info: plugin baseline seeded; skill refresh deferred to next startup\n")
 		}
 	}
 
@@ -580,16 +584,18 @@ func Execute() error {
 	var skillsStaleCount int
 	var customWorkflow bool
 	if _, statErr := os.Stat(".fabrik/plugin"); statErr == nil {
-		if diffing, diffErr := diffingPluginFiles(".fabrik/plugin"); diffErr != nil {
-			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skill check failed: %v\n", diffErr)
-		} else {
-			skillsStaleCount = len(diffing)
-		}
-		cw, _, cwErr := fabrikplugin.CheckPluginState(".fabrik/plugin")
+		cw, upgradeNeeded, cwErr := fabrikplugin.CheckPluginState(".fabrik/plugin")
 		if cwErr != nil {
 			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin state check failed: %v\n", cwErr)
 		} else {
 			customWorkflow = cw
+			if upgradeNeeded {
+				if diffing, diffErr := diffingPluginFiles(".fabrik/plugin"); diffErr != nil {
+					fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skill check failed: %v\n", diffErr)
+				} else {
+					skillsStaleCount = len(diffing)
+				}
+			}
 		}
 	}
 
