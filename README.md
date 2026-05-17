@@ -188,8 +188,11 @@ re-execs the binary in place — no terminal disruption, no lost state. Use it
 to pick up a new binary after `go install` without restarting the session.
 The terminal alt-screen is properly restored on signal-driven exit, so no
 `reset` is needed after a SIGINT, SIGTERM, or SIGHUP. Plugin-skills are checked and
-refreshed non-interactively during restart — the process never hangs waiting
-for a prompt. See
+refreshed non-interactively during restart when no local customizations are detected —
+the process never hangs waiting for a prompt. When local customizations are present,
+the refresh is skipped to preserve your edits and the `[u] custom workflow` badge
+appears on next TUI startup instead, so operator customizations are never silently
+overwritten. See
 [USER_GUIDE.md §Recovering from Wedged State](docs/USER_GUIDE.md#recovering-from-wedged-state)
 for the full escape-hatch procedure.
 
@@ -310,7 +313,7 @@ GITHUB_TOKEN=ghp_...    # Fallback
 | `fabrik watch <issue-number>` | Open a real-time TUI for a single issue — live Claude output, stage history, PR/CI status |
 | `fabrik stream-filter` | Read NDJSON Claude output from stdin and render it as human-readable text |
 | `fabrik resume <issue-number>` | Resume an interrupted Claude session for an issue |
-| `fabrik upgrade` | Self-update the Fabrik binary (release builds) and refresh plugin skills in `.fabrik/plugin/` from embedded defaults |
+| `fabrik upgrade` | Self-update the Fabrik binary (release builds) and refresh plugin skills in `.fabrik/plugin/` from embedded defaults. Plain `fabrik upgrade` errors when local customizations are detected; use `--force` to overwrite unconditionally or `--reconcile` for a guided merge prompt. See the [User Guide](docs/USER_GUIDE.md#upgrade-protection-for-customized-skills) for details. |
 
 ## Built-in Skills
 
@@ -320,6 +323,8 @@ Fabrik ships two user-invocable Claude Code skills (type `/skill-name` in any Cl
 |-------|-------------|
 | `/cut-release` | Pre-flight checks, curated release notes, commit/tag/push, and auto-files a doc-update issue — see [§5 of the User Guide](docs/USER_GUIDE.md#built-in-skill-cut-release) |
 | `/audit-documentation` | Scans recently shipped issues, identifies documentation gaps, closes covered issues, and files new gap issues — see [§5 of the User Guide](docs/USER_GUIDE.md#built-in-skill-audit-documentation) |
+
+Operator customizations to built-in skills are protected — upgrades detect local edits and offer guided reconciliation rather than silently overwriting. See [Upgrade protection for customized skills](docs/USER_GUIDE.md#upgrade-protection-for-customized-skills).
 
 The main Fabrik dashboard (enabled by default; disable with `--notui`) shows a live turn counter (`[N/M turns]`) for each active job in the In Progress pane.
 
