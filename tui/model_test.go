@@ -1047,3 +1047,245 @@ func TestUpdate_PluginUpgradeResultMsg_Error(t *testing.T) {
 		t.Errorf("statusMsg should contain error, got %q", nm.header.statusMsg)
 	}
 }
+
+// TestUpdate_CustomWorkflowEvent verifies that CustomWorkflowEvent sets the
+// customWorkflow badge and clears skillsStaleCount.
+func TestUpdate_CustomWorkflowEvent(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, 4, false)
+
+	next, cmd := m.Update(CustomWorkflowEvent{})
+	nm := next.(Model)
+
+	if cmd != nil {
+		t.Error("expected nil cmd from CustomWorkflowEvent")
+	}
+	if !nm.header.customWorkflow {
+		t.Error("expected customWorkflow=true after CustomWorkflowEvent")
+	}
+	if nm.header.skillsStaleCount != 0 {
+		t.Errorf("skillsStaleCount = %d, want 0 after CustomWorkflowEvent", nm.header.skillsStaleCount)
+	}
+}
+
+// TestUpdate_New_WithCustomWorkflow verifies customWorkflow=true is wired from New.
+func TestUpdate_New_WithCustomWorkflow(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, 0, true)
+	if !m.header.customWorkflow {
+		t.Error("expected customWorkflow=true when New called with true")
+	}
+}
+
+// TestUKey_CustomWorkflow verifies pressing u when customWorkflow=true enters
+// confirmReconcile and shows the 3-option status message.
+func TestUKey_CustomWorkflow(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, 0, true)
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("u")})
+	nm := next.(Model)
+
+	if cmd != nil {
+		t.Error("expected nil cmd from u key entering confirmReconcile")
+	}
+	if !nm.confirmReconcile {
+		t.Error("expected confirmReconcile=true after u key with customWorkflow")
+	}
+	if !strings.Contains(nm.header.statusMsg, "[1]") {
+		t.Errorf("statusMsg should show 3-option dialog, got %q", nm.header.statusMsg)
+	}
+	if !strings.Contains(nm.header.statusMsg, "[2]") {
+		t.Errorf("statusMsg should show overwrite option, got %q", nm.header.statusMsg)
+	}
+	if !strings.Contains(nm.header.statusMsg, "[3]") {
+		t.Errorf("statusMsg should show cancel option, got %q", nm.header.statusMsg)
+	}
+}
+
+// TestUKey_CustomWorkflow_Key3_Cancels verifies [3] cancels confirmReconcile.
+func TestUKey_CustomWorkflow_Key3_Cancels(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, 0, true)
+	m.confirmReconcile = true
+	m.header.SetStatusMsg("[1] Reconcile  [2] Overwrite  [3] Cancel")
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	nm := next.(Model)
+
+	if cmd != nil {
+		t.Error("expected nil cmd from [3] cancel")
+	}
+	if nm.confirmReconcile {
+		t.Error("expected confirmReconcile=false after [3]")
+	}
+	if nm.header.statusMsg != "" {
+		t.Errorf("expected empty statusMsg after cancel, got %q", nm.header.statusMsg)
+	}
+}
+
+// TestUKey_CustomWorkflow_Key2_EntersConfirmOverwrite verifies [2] transitions
+// to confirmOverwrite state with the OVERWRITE prompt.
+func TestUKey_CustomWorkflow_Key2_EntersConfirmOverwrite(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, 0, true)
+	m.confirmReconcile = true
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	nm := next.(Model)
+
+	if cmd != nil {
+		t.Error("expected nil cmd from [2]")
+	}
+	if nm.confirmReconcile {
+		t.Error("expected confirmReconcile=false after [2]")
+	}
+	if !nm.confirmOverwrite {
+		t.Error("expected confirmOverwrite=true after [2]")
+	}
+	if !strings.Contains(nm.header.statusMsg, "OVERWRITE") {
+		t.Errorf("statusMsg should prompt for OVERWRITE, got %q", nm.header.statusMsg)
+	}
+}
+
+// TestUKey_OverwriteConfirm verifies that typing OVERWRITE one character at a
+// time triggers the upgrade cmd.
+func TestUKey_OverwriteConfirm(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, 0, true)
+	m.confirmOverwrite = true
+
+	word := "OVERWRITE"
+	var lastModel Model
+	var lastCmd tea.Cmd
+	for i, ch := range word {
+		var next tea.Model
+		next, lastCmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
+		m = next.(Model)
+		if i < len(word)-1 {
+			if lastCmd != nil {
+				t.Errorf("expected nil cmd after char %d (%c), got non-nil", i, ch)
+			}
+			if !m.confirmOverwrite {
+				t.Errorf("expected confirmOverwrite still true after char %d (%c)", i, ch)
+			}
+		}
+	}
+	lastModel = m
+
+	// After typing full OVERWRITE: confirmOverwrite cleared, cmd returned.
+	if lastModel.confirmOverwrite {
+		t.Error("expected confirmOverwrite=false after full OVERWRITE typed")
+	}
+	if lastCmd == nil {
+		t.Error("expected non-nil cmd (upgrade) after OVERWRITE typed correctly")
+	}
+}
+
+// TestUKey_OverwriteConfirm_WrongWord verifies a wrong word clears confirmOverwrite.
+func TestUKey_OverwriteConfirm_WrongWord(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, 0, true)
+	m.confirmOverwrite = true
+
+	// Type a different 9-char word.
+	wrong := "OVERWRITE" // length 9; let's type OVERWRITX (wrong last char)
+	word := []rune("OVERWRITX")
+	for _, ch := range word {
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
+		m = next.(Model)
+	}
+
+	_ = wrong
+	if m.confirmOverwrite {
+		t.Error("expected confirmOverwrite=false after wrong full word")
+	}
+	if m.overwriteTyped != "" {
+		t.Errorf("expected overwriteTyped cleared, got %q", m.overwriteTyped)
+	}
+}
+
+// TestUKey_OverwriteConfirm_Backspace verifies backspace removes last character.
+func TestUKey_OverwriteConfirm_Backspace(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, 0, true)
+	m.confirmOverwrite = true
+
+	// Type "OVE" then backspace.
+	for _, ch := range "OVE" {
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
+		m = next.(Model)
+	}
+	if m.overwriteTyped != "OVE" {
+		t.Fatalf("expected overwriteTyped=OVE, got %q", m.overwriteTyped)
+	}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	m = next.(Model)
+	if m.overwriteTyped != "OV" {
+		t.Errorf("expected overwriteTyped=OV after backspace, got %q", m.overwriteTyped)
+	}
+	if !m.confirmOverwrite {
+		t.Error("expected confirmOverwrite=true after backspace")
+	}
+}
+
+// TestUKey_OverwriteConfirm_Esc verifies esc cancels confirmOverwrite.
+func TestUKey_OverwriteConfirm_Esc(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, 0, true)
+	m.confirmOverwrite = true
+	m.overwriteTyped = "OVER"
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	nm := next.(Model)
+
+	if cmd != nil {
+		t.Error("expected nil cmd from esc cancel of overwrite")
+	}
+	if nm.confirmOverwrite {
+		t.Error("expected confirmOverwrite=false after esc")
+	}
+	if nm.overwriteTyped != "" {
+		t.Errorf("expected overwriteTyped cleared, got %q", nm.overwriteTyped)
+	}
+}
+
+// TestUpdate_SkillsStaleEvent_Zero_ClearsCustomWorkflow verifies that
+// SkillsStaleEvent{Count:0} clears the customWorkflow badge.
+func TestUpdate_SkillsStaleEvent_Zero_ClearsCustomWorkflow(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, 0, true) // customWorkflow=true
+
+	next, _ := m.Update(SkillsStaleEvent{Count: 0})
+	nm := next.(Model)
+
+	if nm.header.customWorkflow {
+		t.Error("expected customWorkflow=false after SkillsStaleEvent{Count:0}")
+	}
+}
+
+// TestUpdate_TickEvent_ConfirmReconcile_PromptPersists verifies the reconcile
+// dialog prompt is re-shown after a TickEvent clears statusMsg.
+func TestUpdate_TickEvent_ConfirmReconcile_PromptPersists(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, 0, true)
+	m.confirmReconcile = true
+	m.header.SetStatusMsg("[1] Reconcile  [2] Overwrite  [3] Cancel")
+
+	next, _ := m.Update(TickEvent{At: time.Now()})
+	nm := next.(Model)
+
+	if !nm.confirmReconcile {
+		t.Error("expected confirmReconcile still true after tick")
+	}
+	if nm.header.statusMsg == "" {
+		t.Error("expected dialog prompt to be re-shown after tick")
+	}
+}
+
+// TestUpdate_PluginUpgradeResultMsg_ClearsCustomWorkflow verifies a successful
+// upgrade also clears the customWorkflow badge.
+func TestUpdate_PluginUpgradeResultMsg_ClearsCustomWorkflow(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, 0, true) // customWorkflow=true
+	m.confirmOverwrite = true
+
+	next, _ := m.Update(pluginUpgradeResultMsg{Wrote: 5, Err: nil})
+	nm := next.(Model)
+
+	if nm.header.customWorkflow {
+		t.Error("expected customWorkflow=false after successful upgrade")
+	}
+	if nm.confirmOverwrite {
+		t.Error("expected confirmOverwrite=false after successful upgrade")
+	}
+}
