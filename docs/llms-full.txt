@@ -293,16 +293,24 @@ After rebuilding, Fabrik runs `fabrik upgrade` (non-interactive, silent — see 
 and re-execs the new binary. This keeps dev builds current with the same hands-off
 experience as release binaries.
 
-> **`fabrik upgrade` in non-interactive mode**: Whether called automatically during
-> auto-upgrade or run standalone, `fabrik upgrade` behaves differently depending on
-> whether a TTY is attached. With no TTY (non-interactive), it auto-refreshes plugin
-> skills silently — no prompt, no confirmation required — *when no local customizations
-> are detected*. With a TTY (interactive), it prompts once before applying any skill
-> updates. When local customizations are present (disk version differs from the installed
-> fingerprint), non-interactive refresh is skipped to preserve your edits; the
-> `[u] custom workflow` badge appears on next TUI startup instead. See
-> [Upgrade protection for customized skills](#upgrade-protection-for-customized-skills)
-> for details on `--force` and `--reconcile`.
+> **Plugin-skills upgrade: automatic vs. standalone behavior**: The plugin-skills check
+> runs in two contexts with different behavior.
+>
+> **Automatic check** (during `--auto-upgrade` re-exec or dev-build restart): TTY-sensitive.
+> With no TTY, skills are refreshed silently when no local customizations are detected;
+> when customizations are present, the refresh is skipped and a warning is printed to stderr.
+> With a TTY, you are prompted once to confirm before any refresh is applied; when
+> customizations are present, `--force`/`--reconcile` options are shown instead of a prompt.
+>
+> **Standalone `fabrik upgrade` subcommand**: Not TTY-sensitive — the command never prompts
+> interactively. When no local customizations are detected, skills are refreshed
+> unconditionally. When customizations are detected, the command exits with an error
+> directing you to `--force` (destructive overwrite) or `--reconcile` (guided merge
+> prompt). See [Upgrade protection for customized skills](#upgrade-protection-for-customized-skills)
+> for details.
+>
+> In both contexts, when customizations are present and the refresh is skipped, the
+> `[u] custom workflow` badge appears on next TUI startup.
 
 ```bash
 ./fabrik --auto-upgrade --owner your-org --repo your-repo --project 1 --user you
