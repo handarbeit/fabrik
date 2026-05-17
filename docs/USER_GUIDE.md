@@ -101,6 +101,12 @@ To refresh plugin skills without touching stages or config (e.g., after upgradin
 ./fabrik upgrade
 ```
 
+> **Note:** Plain `fabrik upgrade` errors when local customizations are detected (i.e.,
+> you have edited files under `.fabrik/plugin/`). Use `--force` to overwrite them
+> unconditionally, or `--reconcile` to get a guided merge prompt. See
+> [Upgrade protection for customized skills](#upgrade-protection-for-customized-skills)
+> for details.
+
 Edit `.fabrik/config.yaml` with your project settings and commit it to git. Add your
 GitHub token to a gitignored `.env` file:
 
@@ -292,10 +298,13 @@ experience as release binaries.
 > **`fabrik upgrade` in non-interactive mode**: Whether called automatically during
 > auto-upgrade or run standalone, `fabrik upgrade` behaves differently depending on
 > whether a TTY is attached. With no TTY (non-interactive), it auto-refreshes plugin
-> skills silently — no prompt, no confirmation required. With a TTY (interactive), it
-> prompts once before applying any skill updates. This means automated environments
-> (CI, background processes, auto-upgrade re-exec) always get a clean, unattended
-> skill refresh.
+> skills silently — no prompt, no confirmation required — *when no local customizations
+> are detected*. With a TTY (interactive), it prompts once before applying any skill
+> updates. When local customizations are present (disk version differs from the installed
+> fingerprint), non-interactive refresh is skipped to preserve your edits; the
+> `[u] custom workflow` badge appears on next TUI startup instead. See
+> [Upgrade protection for customized skills](#upgrade-protection-for-customized-skills)
+> for details on `--force` and `--reconcile`.
 
 ```bash
 ./fabrik --auto-upgrade --owner your-org --repo your-repo --project 1 --user you
@@ -2145,9 +2154,11 @@ This applies to all signal-driven exit paths that go through Fabrik's signal han
 including SIGHUP re-exec.
 
 **Plugin-skills upgrade:** SIGHUP restart proceeds non-interactively through the
-plugin-skills upgrade check — skills are refreshed automatically without prompting
-(a brief status line is written to stderr), so the restart never hangs waiting for
-user confirmation.
+plugin-skills upgrade check — when no local customizations are detected, skills are
+refreshed automatically without prompting (a brief status line is written to stderr),
+so the restart never hangs waiting for user confirmation. When local customizations are
+present, the refresh is skipped entirely to preserve your edits; the `[u] custom workflow`
+badge appears on next TUI startup instead of silently overwriting your changes.
 
 **What is cleared:**
 
