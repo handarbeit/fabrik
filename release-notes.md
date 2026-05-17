@@ -1,16 +1,27 @@
-# Fabrik v0.0.63
+# Fabrik v0.0.64
 
-Targeted bugfix release. Completes the `FABRIK_NO_WORK_NEEDED` short-circuit path: issues that take the no-work path now close cleanly instead of staying open in the Done column.
+Auto-upgrade no longer wipes operator customizations to `.fabrik/plugin/` skills. Fabrik now tracks the last-installed embedded version and distinguishes "embedded advanced" (safe to auto-refresh) from "operator customized" (do not touch — surface a persistent warning and require manual reconciliation).
+
+## Features
+
+- **Customization-aware plugin upgrade** (#746). Fabrik now tracks the embedded plugin hash that was last successfully installed in `.fabrik/plugin/.installed-version`. The auto-upgrade re-exec path and the SIGHUP-restart path no longer unconditionally overwrite `.fabrik/plugin/` — they refresh only when the on-disk files match the recorded installed version (i.e., the operator hasn't customized). When local customizations are detected, the refresh is skipped and a persistent `[custom workflow]` indicator appears in the TUI header.
+- **`fabrik upgrade --force` and `--reconcile` flags**. Plain `fabrik upgrade` now errors out (non-zero exit) when local customizations are present, telling the operator their options instead of silently overwriting. `--force` performs the destructive overwrite and updates the recorded version; `--reconcile` prints a Claude Code reconciliation prompt that the operator can paste into a separate Claude Code session to diff and merge customizations against the new embedded version.
+- **TUI `[custom workflow]` badge and reconciliation dialog**. When customizations are detected, the TUI shows a persistent `[custom workflow]` badge alongside the existing `[skills out of date]` indicator. Pressing `u` opens a three-option dialog: **Reconcile via Claude Code** (prints the reconciliation prompt), **Overwrite (destructive)** (requires typing `OVERWRITE` to confirm), or **Cancel**.
 
 ## Fixes
 
-- **`handleNoWorkNeeded` now closes the GitHub issue** (#742). Previously, the no-work short-circuit (#733) correctly moved the issue to Done and marked all pipeline stages complete, but never closed the issue itself — because the close in the normal pipeline path is driven by the PR merge's `Closes #N` keyword, and the no-work path skips PR creation entirely. Issues ended up Done-but-open with all `stage:*:complete` labels set, requiring manual `gh issue close`. The fix adds an explicit `CloseIssue` REST call at the end of `handleNoWorkNeeded`, with cache write-through via the new `boardcache.ApplyIssueClosed` so the Store reflects `IsClosed=true` immediately.
+- Various Copilot review findings addressed in the installed-version tracking code.
+- The TUI OVERWRITE confirm flow correctly handles the `delete` key for spec compliance.
 
 ## Internal
 
-- New `Client.CloseIssue` REST method and `GitHubClient` interface entry (powers the fix above).
-- New `boardcache.ApplyIssueClosed` write-through method.
-- Tests for `CloseIssue` success/error paths and `handleNoWorkNeeded`'s cache write-through.
+- New `plugin.CheckPluginState` API and hash primitives for tracking installed version.
+- TUI extended with `CustomWorkflowEvent`, header `customWorkflow` badge, and confirmReconcile state machine.
+- Tests for plugin refresh hash primitives, TUI custom-workflow event routing, dialog state transitions, and OVERWRITE input handling.
+
+## Migration note
+
+Existing customized installs (e.g., fantasy with its spec-kit customizations) will see `.installed-version` populated from current disk hashes on first run after this upgrade — preserving customizations silently. Subsequent embedded changes will surface the `[custom workflow]` badge correctly. If you've been wrestling with auto-upgrade clobbering your changes, this is the release that ends that.
 
 ## Upgrading
 
