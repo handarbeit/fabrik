@@ -1182,14 +1182,12 @@ func TestUKey_OverwriteConfirm_WrongWord(t *testing.T) {
 	m.confirmOverwrite = true
 
 	// Type a different 9-char word.
-	wrong := "OVERWRITE" // length 9; let's type OVERWRITX (wrong last char)
 	word := []rune("OVERWRITX")
 	for _, ch := range word {
 		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
 		m = next.(Model)
 	}
 
-	_ = wrong
 	if m.confirmOverwrite {
 		t.Error("expected confirmOverwrite=false after wrong full word")
 	}
