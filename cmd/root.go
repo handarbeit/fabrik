@@ -487,24 +487,41 @@ func Execute() error {
 	}
 	fmt.Printf("  debug-output: %v\n", cfg.DebugOutput)
 
-	// If the process was re-exec'd after an auto-upgrade, refresh embedded plugin
-	// skills before entering the poll loop. The env var is unset immediately so
-	// the re-exec'd process doesn't loop.
+	// If the process was re-exec'd after an auto-upgrade, conditionally refresh
+	// embedded plugin skills. Three-way comparison: skip refresh when operator
+	// has local customizations (disk ≠ installed-version).
 	if os.Getenv("FABRIK_AUTO_UPGRADED") == "1" {
 		os.Unsetenv("FABRIK_AUTO_UPGRADED")
-		if _, err := fabrikplugin.RefreshPlugin(); err != nil {
-			fmt.Fprintf(os.Stderr, "[upgrade] warning: RefreshPlugin failed: %v\n", err)
+		customWorkflowOnReexec, upgradeNeededOnReexec, stateErr := fabrikplugin.CheckPluginState(".fabrik/plugin")
+		if stateErr != nil {
+			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin state check failed: %v\n", stateErr)
+		} else if customWorkflowOnReexec {
+			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skills have local customizations — skipping auto-refresh; run 'fabrik upgrade --force' to overwrite\n")
+		} else if upgradeNeededOnReexec {
+			if _, err := fabrikplugin.RefreshPlugin(); err != nil {
+				fmt.Fprintf(os.Stderr, "[upgrade] warning: RefreshPlugin failed: %v\n", err)
+			} else if err := fabrikplugin.WriteInstalledVersion(".fabrik/plugin"); err != nil {
+				fmt.Fprintf(os.Stderr, "[upgrade] warning: writing installed version failed: %v\n", err)
+			}
 		}
 	}
 
-	// If the process was re-exec'd by a SIGHUP restart, force non-interactive
-	// plugin skills refresh. The env var is unset immediately so Claude child
-	// processes do not inherit it. This mirrors the FABRIK_AUTO_UPGRADED pattern
-	// and must happen before engine.New() to close the inheritance window.
+	// If the process was re-exec'd by a SIGHUP restart, conditionally refresh
+	// plugin skills using the same three-way comparison. The env var is unset
+	// immediately so Claude child processes do not inherit it.
 	if os.Getenv("FABRIK_SIGHUP_RESTART") == "1" {
 		os.Unsetenv("FABRIK_SIGHUP_RESTART")
-		if err := checkPluginSkillsWithReader(".fabrik/plugin", false, nil); err != nil {
-			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skill check failed after SIGHUP restart: %v\n", err)
+		customWorkflowOnSighup, upgradeNeededOnSighup, stateErr := fabrikplugin.CheckPluginState(".fabrik/plugin")
+		if stateErr != nil {
+			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin state check failed after SIGHUP restart: %v\n", stateErr)
+		} else if customWorkflowOnSighup {
+			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skills have local customizations — skipping auto-refresh; run 'fabrik upgrade --force' to overwrite\n")
+		} else if upgradeNeededOnSighup {
+			if _, err := fabrikplugin.RefreshPlugin(); err != nil {
+				fmt.Fprintf(os.Stderr, "[upgrade] warning: RefreshPlugin failed after SIGHUP restart: %v\n", err)
+			} else if err := fabrikplugin.WriteInstalledVersion(".fabrik/plugin"); err != nil {
+				fmt.Fprintf(os.Stderr, "[upgrade] warning: writing installed version failed after SIGHUP restart: %v\n", err)
+			}
 		}
 	}
 
@@ -556,19 +573,23 @@ func Execute() error {
 		return err
 	}
 
-	// Evaluate plugin skill staleness after engine.New() (so env vars are unset
-	// and the inheritance window is closed). For non-TUI, refresh silently. For
-	// TUI, the count is passed to tui.New() to drive the header badge.
+	// Evaluate plugin skill staleness and customization state after engine.New()
+	// (so env vars are unset and the inheritance window is closed).
 	// Guard with os.Stat so projects that haven't run `fabrik init` (no
-	// .fabrik/plugin/ dir) always report stale count 0 — diffingPluginFiles
-	// treats every missing on-disk file as diffing, which would produce a
-	// spuriously large count when the directory doesn't exist yet.
+	// .fabrik/plugin/ dir) always report stale count 0.
 	var skillsStaleCount int
+	var customWorkflow bool
 	if _, statErr := os.Stat(".fabrik/plugin"); statErr == nil {
 		if diffing, diffErr := diffingPluginFiles(".fabrik/plugin"); diffErr != nil {
 			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skill check failed: %v\n", diffErr)
 		} else {
 			skillsStaleCount = len(diffing)
+		}
+		cw, _, cwErr := fabrikplugin.CheckPluginState(".fabrik/plugin")
+		if cwErr != nil {
+			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin state check failed: %v\n", cwErr)
+		} else {
+			customWorkflow = cw
 		}
 	}
 
@@ -577,9 +598,11 @@ func Execute() error {
 	if useTUI {
 		wakeCh := make(chan struct{}, 1)
 		eng.SetWakeCh(wakeCh)
-		return runTUI(eng, cfg.PollSeconds, buildProjectInfo(cfg, pc), cfg.PluginDir, wakeCh, skillsStaleCount)
+		return runTUI(eng, cfg.PollSeconds, buildProjectInfo(cfg, pc), cfg.PluginDir, wakeCh, skillsStaleCount, customWorkflow)
 	}
-	if skillsStaleCount > 0 {
+	if customWorkflow {
+		fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skills have local customizations — skipping auto-refresh; run 'fabrik upgrade --force' to overwrite\n")
+	} else if skillsStaleCount > 0 {
 		if refreshErr := checkPluginSkillsWithReader(".fabrik/plugin", false, nil); refreshErr != nil {
 			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skill refresh failed: %v\n", refreshErr)
 		}
@@ -695,11 +718,12 @@ func buildProjectInfo(cfg *Config, pc config.ProjectConfig) tui.ProjectInfo {
 // runTUI wires the event channel, starts the bubbletea program, and runs the
 // engine. The engine handles SIGINT itself; bubbletea uses WithoutSignalHandler
 // so it doesn't interfere. When the engine exits, the TUI is quit.
-func runTUI(eng *engine.Engine, pollSeconds int, info tui.ProjectInfo, pluginDir string, wakeCh chan struct{}, skillsStaleCount int) error {
+// customWorkflow is true when operator customizations are detected in .fabrik/plugin/.
+func runTUI(eng *engine.Engine, pollSeconds int, info tui.ProjectInfo, pluginDir string, wakeCh chan struct{}, skillsStaleCount int, customWorkflow bool) error {
 	events := make(chan tui.Event, 256)
 	eng.SetEvents(events)
 
-	tuiModel := tui.New(pollSeconds, info, pluginDir, wakeCh, skillsStaleCount)
+	tuiModel := tui.New(pollSeconds, info, pluginDir, wakeCh, skillsStaleCount, customWorkflow)
 	p := tea.NewProgram(tuiModel, tea.WithAltScreen(), tea.WithoutSignalHandler())
 	// Register terminal cleanup so force-quit paths (SIGHUP re-exec, second
 	// SIGTERM/SIGHUP) release alt-screen before replacing or exiting the process.
@@ -723,7 +747,8 @@ func runTUI(eng *engine.Engine, pollSeconds int, info tui.ProjectInfo, pluginDir
 		p.Quit()
 	}()
 
-	if _, err := p.Run(); err != nil {
+	finalModel, err := p.Run()
+	if err != nil {
 		p.ReleaseTerminal()
 		// TUI failed — signal the engine to stop so its goroutine and the
 		// forwarding goroutine both exit cleanly.
@@ -732,6 +757,14 @@ func runTUI(eng *engine.Engine, pollSeconds int, info tui.ProjectInfo, pluginDir
 		return err
 	}
 	p.ReleaseTerminal()
+
+	// Print any pending reconcile prompt the user requested before quitting.
+	if fm, ok := finalModel.(tui.Model); ok {
+		if prompt := fm.PendingReconcilePrompt(); prompt != "" {
+			fmt.Fprintf(os.Stderr, "\nReconciliation prompt (paste into Claude Code):\n\n%s\n", prompt)
+		}
+	}
+
 	// TUI exited (user pressed q or ctrl+c). If the engine is still running
 	// (q doesn't send SIGINT), signal it to stop gracefully.
 	select {
