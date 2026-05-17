@@ -141,7 +141,8 @@ func checkPluginSkillsWithReader(pluginDir string, isTTY bool, r io.Reader) erro
 			return nil
 		}
 		if !upgradeNeeded {
-			// Migration ran (or no-op): no refresh this cycle. Next run will evaluate correctly.
+			// Migration ran: .installed-version seeded from current disk; refresh deferred to next startup.
+			fmt.Fprintf(os.Stderr, "[upgrade] info: plugin baseline seeded; skill refresh deferred to next startup\n")
 			return nil
 		}
 		// Non-interactive (headless daemon, auto-upgrade re-exec, CI): refresh
@@ -174,7 +175,8 @@ func checkPluginSkillsWithReader(pluginDir string, isTTY bool, r io.Reader) erro
 		return nil
 	}
 	if !upgradeNeeded {
-		// Migration ran (or no-op): no prompt this cycle.
+		// Migration ran: .installed-version seeded from current disk; refresh deferred to next startup.
+		fmt.Printf("fabrik: plugin baseline seeded; skill refresh will apply on next startup.\n")
 		return nil
 	}
 
