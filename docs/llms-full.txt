@@ -1225,6 +1225,33 @@ The stage YAML references the skill by name:
 skill: fabrik-research    # loads .fabrik/plugin/skills/fabrik-research/SKILL.md
 ```
 
+#### Upgrade protection for customized skills
+
+Fabrik tracks what it last installed using a `.fabrik/plugin/.installed-version`
+fingerprint file (SHA256 of all embedded skill files). This enables a three-way
+comparison on every upgrade:
+
+| State | Condition | Behavior |
+|-------|-----------|----------|
+| Up to date | disk == installed == embedded | No-op |
+| Upgrade available | disk == installed, embedded changed | Auto-refresh (non-TTY) or `y/N` prompt (TTY) |
+| Custom workflow | disk != installed | Block refresh; show `[u] custom workflow` badge |
+| First run (migration) | `.installed-version` absent | Seeds fingerprint from current disk; no refresh this cycle |
+
+When customizations are detected, Fabrik refuses to overwrite them silently.
+Use one of:
+
+```bash
+fabrik upgrade --force      # Overwrite all customizations (destructive)
+fabrik upgrade --reconcile  # Print a Claude Code prompt for guided reconciliation
+```
+
+The `--reconcile` output is a prompt you can paste into Claude Code to diff your
+customizations against the new embedded version and preserve non-conflicting changes.
+
+In the TUI, pressing `u` when the `[u] custom workflow` badge is shown opens the
+same three options interactively.
+
 ### Skill vs Prompt
 
 - **`skill:`** references a plugin skill file (recommended). The skill contains rich
@@ -1502,7 +1529,10 @@ exhausted or rate-limit-induced probe failures are detected, a prominent red ale
 banner appears immediately below the header with a countdown to when polling resumes.
 When plugin skills in `.fabrik/plugin/` are outdated relative to the embedded
 defaults, a `[u] skills out of date` badge appears in the header, reminding the
-operator to press `u` to upgrade.
+operator to press `u` to upgrade. When Fabrik detects that the on-disk skills
+differ from the last installed version (indicating operator customizations), the
+badge changes to `[u] custom workflow` and pressing `u` opens a three-option
+dialog instead of a simple y/N prompt (see [Customizing Skills](#customizing-skills)).
 
 ### Keyboard Shortcuts
 
@@ -1518,7 +1548,7 @@ operator to press `u` to upgrade.
 | `c` | Delete selected history entry |
 | `C` | Clear all history (with confirmation) |
 | `a` | Open abtop AI session monitor (shows token usage, context window, rate limits for all Claude sessions) |
-| `u` | Upgrade plugin skills (when plugin skills are out of date, a `[u] skills out of date` badge appears in the header; pressing `u` shows a confirmation prompt — press `y` to upgrade and clear the badge; active stage invocations pick up new files on next run) |
+| `u` | Upgrade plugin skills. When the `[u] skills out of date` badge is shown (embedded changed, no local edits), pressing `u` shows a `y/N` confirmation and applies the upgrade. When the `[u] custom workflow` badge is shown (local edits detected), pressing `u` opens a three-option dialog: **[1] Reconcile** — quits the TUI and prints a Claude Code prompt to stderr for merging customizations; **[2] Overwrite** — prompts you to type `OVERWRITE` to confirm destructive reset; **[3] Cancel** — dismisses the dialog. Active stage invocations pick up new files on next run. |
 | `w` | Wake: reset idle backoff and poll immediately |
 | `ctrl+r` | Force refresh: drain in-flight workers and restart in place (same as SIGHUP — see [Recovering from Wedged State](#recovering-from-wedged-state)) |
 | `?` | Toggle help panel (keybindings and labels reference) |
