@@ -145,6 +145,14 @@ type SkillsStaleEvent struct {
 
 func (SkillsStaleEvent) tuiEvent() {}
 
+// CustomWorkflowEvent is emitted when the three-way plugin comparison determines
+// that the operator has local customizations in .fabrik/plugin/ that differ from
+// the last recorded installed-version. This state is mutually exclusive with
+// SkillsStaleEvent (customWorkflow takes priority over skillsStaleCount).
+type CustomWorkflowEvent struct{}
+
+func (CustomWorkflowEvent) tuiEvent() {}
+
 // RateLimitAlertEvent is emitted by the engine when the GraphQL rate-limit state
 // transitions: Exhausted=true when a probe failure occurs while quota is low or
 // zero; Exhausted=false when quota recovers above rateLimitHealthyThreshold.
