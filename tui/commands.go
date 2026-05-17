@@ -19,13 +19,23 @@ type pluginUpgradeResultMsg struct {
 	Err   error
 }
 
-// upgradePluginCmd returns a tea.Cmd that calls fabrikplugin.RefreshPlugin() in
-// a background goroutine and delivers the result as a pluginUpgradeResultMsg.
-// It does not block the TUI event loop.
-func upgradePluginCmd() tea.Cmd {
+// upgradePluginCmd returns a tea.Cmd that calls fabrikplugin.RefreshPlugin() and
+// fabrikplugin.WriteInstalledVersion() in a background goroutine and delivers
+// the result as a pluginUpgradeResultMsg. It does not block the TUI event loop.
+// pluginDir defaults to ".fabrik/plugin" when empty, matching RefreshPlugin's convention.
+func upgradePluginCmd(pluginDir string) tea.Cmd {
+	if pluginDir == "" {
+		pluginDir = ".fabrik/plugin"
+	}
 	return func() tea.Msg {
 		n, err := fabrikplugin.RefreshPlugin()
-		return pluginUpgradeResultMsg{Wrote: n, Err: err}
+		if err != nil {
+			return pluginUpgradeResultMsg{Wrote: n, Err: err}
+		}
+		if werr := fabrikplugin.WriteInstalledVersion(pluginDir); werr != nil {
+			return pluginUpgradeResultMsg{Wrote: n, Err: werr}
+		}
+		return pluginUpgradeResultMsg{Wrote: n, Err: nil}
 	}
 }
 

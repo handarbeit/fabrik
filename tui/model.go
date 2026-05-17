@@ -94,11 +94,15 @@ type Model struct {
 	height int
 
 	// focus and confirmation state
-	focusPane      pane
-	confirmQuit    bool
-	confirmUpgrade bool
-	detailPanel    bool
-	helpPanel      bool
+	focusPane              pane
+	confirmQuit            bool
+	confirmUpgrade         bool
+	confirmReconcile       bool
+	confirmOverwrite       bool
+	overwriteTyped         string
+	pendingReconcilePrompt string
+	detailPanel            bool
+	helpPanel              bool
 
 	// plugin directory
 	pluginDir string
@@ -120,13 +124,21 @@ type Model struct {
 // when the help panel is open, ensuring history always renders.
 const minHistoryRows = 5
 
+// reconcilePromptText is the operator-facing Claude Code reconciliation prompt
+// printed when the user selects [1] from the custom-workflow dialog.
+const reconcilePromptText = "In .fabrik/plugin/, compare the on-disk plugin files against the embedded source at plugin/fabrik-workflows/ in the fabrik repo. Help me reconcile my local customizations with the new embedded version. Preserve my customizations where they don't conflict with the new behavior; flag conflicts for review."
+
+// overwriteConfirmWord is the exact text the operator must type to confirm destructive overwrite.
+const overwriteConfirmWord = "OVERWRITE"
+
 // New creates an initial TUI model.
 // pollSeconds is the configured polling interval.
 // info provides project metadata displayed in the footer.
 // pluginDir is the Fabrik plugin directory passed to claude --plugin-dir (may be empty).
 // wakeCh is an optional channel the TUI sends on to wake the engine poll loop (may be nil).
 // skillsStaleCount is the number of plugin skill files that differ from embedded; 0 means up to date.
-func New(pollSeconds int, info ProjectInfo, pluginDir string, wakeCh chan struct{}, skillsStaleCount int) Model {
+// customWorkflow is true when the three-way plugin comparison detects operator customizations.
+func New(pollSeconds int, info ProjectInfo, pluginDir string, wakeCh chan struct{}, skillsStaleCount int, customWorkflow bool) Model {
 	interval := time.Duration(pollSeconds) * time.Second
 	now := time.Now()
 	spinnerFrames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -150,6 +162,7 @@ func New(pollSeconds int, info ProjectInfo, pluginDir string, wakeCh chan struct
 			now:              now,
 			fabrikVersion:    info.FabrikVersion,
 			skillsStaleCount: skillsStaleCount,
+			customWorkflow:   customWorkflow,
 		},
 		alert:   AlertBannerComponent{now: now},
 		active:  active,
@@ -195,6 +208,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// When confirmOverwrite is active, collect OVERWRITE typed characters.
+		if m.confirmOverwrite {
+			switch ev.String() {
+			case "ctrl+c":
+				return m, tea.Quit
+			case "esc":
+				m.confirmOverwrite = false
+				m.overwriteTyped = ""
+				m.header.SetStatusMsg("")
+				return m, nil
+			case "backspace", "ctrl+h":
+				if len(m.overwriteTyped) > 0 {
+					runes := []rune(m.overwriteTyped)
+					m.overwriteTyped = string(runes[:len(runes)-1])
+				}
+				return m, nil
+			default:
+				ch := ev.String()
+				if len([]rune(ch)) == 1 && len([]rune(m.overwriteTyped)) < len(overwriteConfirmWord) {
+					m.overwriteTyped += ch
+				}
+				if m.overwriteTyped == overwriteConfirmWord {
+					m.confirmOverwrite = false
+					m.overwriteTyped = ""
+					return m, upgradePluginCmd(m.pluginDir)
+				}
+				if len([]rune(m.overwriteTyped)) == len(overwriteConfirmWord) && m.overwriteTyped != overwriteConfirmWord {
+					// Full word typed but wrong — clear and cancel.
+					m.confirmOverwrite = false
+					m.overwriteTyped = ""
+					m.header.SetStatusMsg("")
+				}
+				return m, nil
+			}
+		}
+
 		switch ev.String() {
 		case "ctrl+c":
 			return m, tea.Quit
@@ -224,6 +273,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "n", "N":
+			if m.confirmReconcile {
+				m.confirmReconcile = false
+				m.header.SetStatusMsg("")
+				return m, nil
+			}
+			if m.confirmOverwrite {
+				m.confirmOverwrite = false
+				m.overwriteTyped = ""
+				m.header.SetStatusMsg("")
+				return m, nil
+			}
 			if m.confirmUpgrade {
 				m.confirmUpgrade = false
 				m.header.SetStatusMsg("")
@@ -246,6 +306,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "esc":
+			if m.confirmReconcile {
+				m.confirmReconcile = false
+				m.header.SetStatusMsg("")
+				return m, nil
+			}
+			if m.confirmOverwrite {
+				m.confirmOverwrite = false
+				m.overwriteTyped = ""
+				m.header.SetStatusMsg("")
+				return m, nil
+			}
 			if m.confirmUpgrade {
 				m.confirmUpgrade = false
 				m.header.SetStatusMsg("")
@@ -329,7 +400,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, sendSighupCmd()
 
 		case "u":
-			if m.header.skillsStaleCount > 0 {
+			if m.header.customWorkflow {
+				m.confirmReconcile = true
+				m.header.SetStatusMsg("[1] Reconcile via Claude Code  [2] Overwrite (destructive)  [3] Cancel")
+			} else if m.header.skillsStaleCount > 0 {
 				m.confirmUpgrade = true
 				m.header.SetStatusMsg(fmt.Sprintf(
 					"Upgrade %d plugin file(s)? Active invocations pick up changes on next run. [y/N]",
@@ -340,10 +414,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
+		case "1":
+			if m.confirmReconcile {
+				m.confirmReconcile = false
+				m.pendingReconcilePrompt = reconcilePromptText
+				return m, tea.Quit
+			}
+			return m, nil
+
+		case "2":
+			if m.confirmReconcile {
+				m.confirmReconcile = false
+				m.confirmOverwrite = true
+				m.overwriteTyped = ""
+				m.header.SetStatusMsg("This will discard your customizations. Type 'OVERWRITE' to confirm.")
+				return m, nil
+			}
+			return m, nil
+
+		case "3":
+			if m.confirmReconcile {
+				m.confirmReconcile = false
+				m.header.SetStatusMsg("")
+				return m, nil
+			}
+			return m, nil
+
 		case "y", "Y":
 			if m.confirmUpgrade {
 				m.confirmUpgrade = false
-				return m, upgradePluginCmd()
+				return m, upgradePluginCmd(m.pluginDir)
 			}
 			// Not confirming — forward to history viewport for scrolling.
 			var cmd tea.Cmd
@@ -418,9 +518,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Fan out to all components
 		comp, _ := m.header.Update(msg)
 		m.header = comp.(HeaderComponent)
-		// TickEvent clears statusMsg; re-show the upgrade confirmation prompt so
-		// it remains visible until the user responds with y/n/esc.
-		if m.confirmUpgrade {
+		// TickEvent clears statusMsg; re-show active confirmation prompts so
+		// they remain visible until the user responds.
+		if m.confirmReconcile {
+			m.header.SetStatusMsg("[1] Reconcile via Claude Code  [2] Overwrite (destructive)  [3] Cancel")
+		} else if m.confirmOverwrite {
+			m.header.SetStatusMsg("This will discard your customizations. Type 'OVERWRITE' to confirm.")
+		} else if m.confirmUpgrade {
 			m.header.SetStatusMsg(fmt.Sprintf(
 				"Upgrade %d plugin file(s)? Active invocations pick up changes on next run. [y/N]",
 				m.header.skillsStaleCount,
@@ -508,14 +612,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case SkillsStaleEvent:
 		m.header.SetSkillsStaleCount(ev.Count)
+		if ev.Count == 0 {
+			m.header.SetCustomWorkflow(false)
+		}
+		return m, nil
+
+	case CustomWorkflowEvent:
+		m.header.SetCustomWorkflow(true)
+		m.header.SetSkillsStaleCount(0)
 		return m, nil
 
 	case pluginUpgradeResultMsg:
 		m.confirmUpgrade = false
+		m.confirmOverwrite = false
+		m.overwriteTyped = ""
 		if ev.Err != nil {
 			m.header.SetStatusMsg(fmt.Sprintf("plugin upgrade failed: %v", ev.Err))
 		} else {
 			m.header.SetSkillsStaleCount(0)
+			m.header.SetCustomWorkflow(false)
 			m.header.SetStatusMsg(fmt.Sprintf("Plugin skills upgraded: %d file(s)", ev.Wrote))
 		}
 		return m, nil
@@ -635,3 +750,10 @@ func (m Model) View() string {
 
 // viewHeader, viewActive, viewHistory, viewFooter, viewDetail are in their
 // respective component files (header.go, active.go, history.go, footer.go, detail.go).
+
+// PendingReconcilePrompt returns the reconciliation prompt text set when the
+// user selects [1] from the custom-workflow dialog, or an empty string if none.
+// The caller (runTUI) should print this to stderr after p.Run() returns.
+func (m Model) PendingReconcilePrompt() string {
+	return m.pendingReconcilePrompt
+}
