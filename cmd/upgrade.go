@@ -22,6 +22,9 @@ import (
 // replaced in tests to avoid real network calls.
 var upgradeGitHubClient engine.GitHubClient
 
+// upgradeReconcilePrompt is the text printed by --reconcile or the TUI [1] option.
+const upgradeReconcilePrompt = "In .fabrik/plugin/, compare the on-disk plugin files against the embedded source at plugin/fabrik-workflows/ in the fabrik repo. Help me reconcile my local customizations with the new embedded version. Preserve my customizations where they don't conflict with the new behavior; flag conflicts for review."
+
 // runUpgrade implements the `fabrik upgrade` subcommand.
 // For release builds it first checks for a newer binary, downloads and
 // atomically replaces it if found, then re-execs so the new binary's embedded
@@ -29,17 +32,28 @@ var upgradeGitHubClient engine.GitHubClient
 // plugin skills from the current binary's embedded defaults.
 func runUpgrade(args []string) error {
 	fset := flag.NewFlagSet("upgrade", flag.ContinueOnError)
+	var force, reconcile bool
+	fset.BoolVar(&force, "force", false, "Overwrite local plugin customizations (destructive)")
+	fset.BoolVar(&reconcile, "reconcile", false, "Print a Claude Code reconciliation prompt and exit")
 	fset.Usage = func() {
-		fmt.Fprintf(fset.Output(), "Usage: fabrik upgrade\n\n")
+		fmt.Fprintf(fset.Output(), "Usage: fabrik upgrade [--force] [--reconcile]\n\n")
 		fmt.Fprintf(fset.Output(), "Upgrade the Fabrik binary and refresh embedded plugin skills.\n\n")
 		fmt.Fprintf(fset.Output(), "For release builds: downloads the latest binary from GitHub Releases and\n")
 		fmt.Fprintf(fset.Output(), "re-execs with the updated binary. For dev builds (built from source):\n")
 		fmt.Fprintf(fset.Output(), "rebuilds from origin/main rather than downloading a release binary.\n")
 		fmt.Fprintf(fset.Output(), "In both cases, embedded plugin skills are refreshed on disk.\n")
+		fmt.Fprintf(fset.Output(), "\nFlags:\n")
+		fmt.Fprintf(fset.Output(), "  --force      Overwrite local plugin customizations (destructive)\n")
+		fmt.Fprintf(fset.Output(), "  --reconcile  Print a Claude Code reconciliation prompt and exit\n")
 		fmt.Fprintf(fset.Output(), "\nTo update stage YAML files with missing keys, run: fabrik refresh-stages --apply\n")
 	}
 	if err := fset.Parse(args); err != nil {
 		return err
+	}
+
+	if reconcile {
+		fmt.Println(upgradeReconcilePrompt)
+		return nil
 	}
 
 	if !strings.HasPrefix(Version, "dev") {
@@ -53,9 +67,37 @@ func runUpgrade(args []string) error {
 		})
 	}
 
+	if force {
+		wrote, err := fabrikplugin.RefreshPlugin()
+		if err != nil {
+			return err
+		}
+		if err := fabrikplugin.WriteInstalledVersion(".fabrik/plugin"); err != nil {
+			return fmt.Errorf("writing installed version: %w", err)
+		}
+		fmt.Printf("fabrik upgrade --force: overwrote %d plugin file(s) (customizations discarded)\n", wrote)
+		return nil
+	}
+
+	// Default path: check three-way state before refreshing.
+	customWorkflow, _, stateErr := fabrikplugin.CheckPluginState(".fabrik/plugin")
+	if stateErr != nil {
+		return fmt.Errorf("checking plugin state: %w", stateErr)
+	}
+	if customWorkflow {
+		return fmt.Errorf("fabrik: local customizations detected in .fabrik/plugin/ — refusing to overwrite.\n" +
+			"  Options:\n" +
+			"    fabrik upgrade --force       Overwrite customizations (destructive)\n" +
+			"    fabrik upgrade --reconcile   Print a Claude Code reconciliation prompt\n" +
+			"    (or use the TUI 'u' key for an interactive dialog)")
+	}
+
 	wrote, err := fabrikplugin.RefreshPlugin()
 	if err != nil {
 		return err
+	}
+	if err := fabrikplugin.WriteInstalledVersion(".fabrik/plugin"); err != nil {
+		return fmt.Errorf("writing installed version: %w", err)
 	}
 	fmt.Printf("fabrik upgrade: refreshed %d plugin file(s)\n", wrote)
 	return nil
@@ -85,7 +127,23 @@ func checkPluginSkillsWithReader(pluginDir string, isTTY bool, r io.Reader) erro
 		return nil
 	}
 
+	// Three-way check: detect operator customizations before refreshing.
+	// upgradeNeeded=true only when disk==installed and embedded differs (safe to refresh).
+	// Migration path (installedVer absent) returns (false,false): do nothing until next cycle.
+	customWorkflow, upgradeNeeded, stateErr := fabrikplugin.CheckPluginState(pluginDir)
+	if stateErr != nil {
+		return fmt.Errorf("checking plugin state: %w", stateErr)
+	}
+
 	if !isTTY {
+		if customWorkflow {
+			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skills have local customizations — skipping auto-refresh; run 'fabrik upgrade --force' to overwrite\n")
+			return nil
+		}
+		if !upgradeNeeded {
+			// Migration ran (or no-op): no refresh this cycle. Next run will evaluate correctly.
+			return nil
+		}
 		// Non-interactive (headless daemon, auto-upgrade re-exec, CI): refresh
 		// silently so dev builds and auto-upgraded builds always have matching
 		// plugin skills without manual intervention.
@@ -103,7 +161,20 @@ func checkPluginSkillsWithReader(pluginDir string, isTTY bool, r io.Reader) erro
 				return fmt.Errorf("writing %s: %w", destPath, writeErr)
 			}
 		}
+		if werr := fabrikplugin.WriteInstalledVersion(pluginDir); werr != nil {
+			fmt.Fprintf(os.Stderr, "[upgrade] warning: writing installed version failed: %v\n", werr)
+		}
 		fmt.Fprintf(os.Stderr, "fabrik: auto-refreshed %d plugin file(s)\n", len(diffing))
+		return nil
+	}
+
+	if customWorkflow {
+		fmt.Printf("Local customizations detected in %s.\n", pluginDir)
+		fmt.Printf("Use 'fabrik upgrade --force' to overwrite, or 'fabrik upgrade --reconcile' for a reconciliation prompt.\n")
+		return nil
+	}
+	if !upgradeNeeded {
+		// Migration ran (or no-op): no prompt this cycle.
 		return nil
 	}
 
@@ -128,6 +199,9 @@ func checkPluginSkillsWithReader(pluginDir string, isTTY bool, r io.Reader) erro
 		if writeErr := os.WriteFile(destPath, data, 0644); writeErr != nil {
 			return fmt.Errorf("writing %s: %w", destPath, writeErr)
 		}
+	}
+	if werr := fabrikplugin.WriteInstalledVersion(pluginDir); werr != nil {
+		fmt.Fprintf(os.Stderr, "[upgrade] warning: writing installed version failed: %v\n", werr)
 	}
 	fmt.Printf("fabrik: upgraded %d plugin file(s)\n", len(diffing))
 	return nil
