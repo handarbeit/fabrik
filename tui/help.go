@@ -35,6 +35,12 @@ KEYBOARD SHORTCUTS
   Global
     a          Open abtop AI session monitor
     u          Upgrade plugin skills (when out of date; confirms first)
+               When [custom workflow] badge is shown: opens a 3-option dialog:
+               [1] Reconcile — quits TUI and prints a Claude Code prompt to
+                   stderr that walks through merging local customizations
+               [2] Overwrite — prompts you to type OVERWRITE to confirm
+                   (destructive: discards all local changes in .fabrik/plugin/)
+               [3] Cancel — dismisses the dialog
     w          Wake: reset idle backoff and poll immediately
     ctrl+r     Force refresh (same as SIGHUP)
     ?          Toggle this help panel
