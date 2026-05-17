@@ -218,7 +218,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.overwriteTyped = ""
 				m.header.SetStatusMsg("")
 				return m, nil
-			case "backspace", "ctrl+h":
+			case "backspace", "ctrl+h", "delete":
 				if len(m.overwriteTyped) > 0 {
 					runes := []rune(m.overwriteTyped)
 					m.overwriteTyped = string(runes[:len(runes)-1])
