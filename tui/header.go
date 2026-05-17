@@ -18,7 +18,8 @@ type HeaderComponent struct {
 	fabrikVersion     string
 	statusLine        string
 	statusMsg         string
-	skillsStaleCount  int // number of plugin skill files differing from embedded; 0 = up to date
+	skillsStaleCount  int  // number of plugin skill files differing from embedded; 0 = up to date
+	customWorkflow    bool // operator has local customizations in .fabrik/plugin/
 }
 
 func (h HeaderComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
@@ -45,6 +46,9 @@ func (h HeaderComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 		}
 	case SkillsStaleEvent:
 		h.skillsStaleCount = ev.Count
+	case CustomWorkflowEvent:
+		h.customWorkflow = true
+		h.skillsStaleCount = 0
 	}
 	return h, nil
 }
@@ -75,10 +79,13 @@ func (h HeaderComponent) View(width int) string {
 	}
 
 	// Pre-compute badge so its width is factored into the truncation budget.
-	// Without this the badge can push the rendered line past the terminal width.
+	// customWorkflow takes priority over skillsStaleCount — they are mutually exclusive.
 	badge := ""
 	badgeWidth := 0
-	if h.skillsStaleCount > 0 {
+	if h.customWorkflow {
+		badge = dimStyle.Render("  [u] custom workflow")
+		badgeWidth = lipgloss.Width(badge)
+	} else if h.skillsStaleCount > 0 {
 		badge = dimStyle.Render("  [u] skills out of date")
 		badgeWidth = lipgloss.Width(badge)
 	}
@@ -131,4 +138,10 @@ func (h *HeaderComponent) SetStatusMsg(msg string) {
 // the embedded versions. When n > 0, a persistent badge is shown in the header.
 func (h *HeaderComponent) SetSkillsStaleCount(n int) {
 	h.skillsStaleCount = n
+}
+
+// SetCustomWorkflow sets the custom workflow state. When true, a persistent
+// [u] custom workflow badge is shown (with priority over skillsStaleCount).
+func (h *HeaderComponent) SetCustomWorkflow(v bool) {
+	h.customWorkflow = v
 }
