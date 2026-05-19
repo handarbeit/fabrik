@@ -22,14 +22,13 @@ import (
 
 func TestStoreDelegationBootstrap(t *testing.T) {
 	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
-	board := &gh.ProjectBoard{
-		ProjectID: "PID", Title: "T", OwnerType: "organization",
+	testBootstrapFromBoard(c, &gh.ProjectBoard{
+		ProjectID: "PID",
 		Items: []gh.ProjectItem{
 			{ID: "I_1", ItemID: "PVTI_1", Number: 1, Repo: "owner/repo", Status: "Research", Labels: []string{"a"}},
 			{ID: "I_2", ItemID: "PVTI_2", Number: 2, Repo: "owner/repo", Status: "Plan"},
 		},
-	}
-	c.Bootstrap(board)
+	})
 
 	// All items accessible via store.Get.
 	snap1, err := c.store.Get("owner/repo", 1)
@@ -93,8 +92,8 @@ func TestStoreDelegationReconcile(t *testing.T) {
 	var logBuf []string
 	logFn := func(format string, args ...any) { logBuf = append(logBuf, format) }
 	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), logFn)
-	c.Bootstrap(&gh.ProjectBoard{
-		ProjectID: "PID", Title: "T", OwnerType: "organization",
+	testBootstrapFromBoard(c, &gh.ProjectBoard{
+		ProjectID: "PID",
 		Items: []gh.ProjectItem{
 			{ID: "I_1", ItemID: "PVTI_1", Number: 1, Repo: "owner/repo", Status: "Research"},
 			{ID: "I_2", ItemID: "PVTI_2", Number: 2, Repo: "owner/repo", Status: "Plan"},
@@ -332,8 +331,8 @@ func TestFetchItemDetailsBackfillsPrToKey(t *testing.T) {
 		},
 	}
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
-	c.Bootstrap(&gh.ProjectBoard{
-		ProjectID: "PID", Title: "T", OwnerType: "organization",
+	testBootstrapFromBoard(c, &gh.ProjectBoard{
+		ProjectID: "PID",
 		Items: []gh.ProjectItem{
 			{ID: "I_1", ItemID: "PVTI_1", Number: 1, Repo: "owner/repo", Status: "Research"},
 		},
@@ -390,7 +389,7 @@ func TestReconcileRemoveCleansUpPrToKey(t *testing.T) {
 
 func TestIssuesOpened(t *testing.T) {
 	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
-	c.Bootstrap(&gh.ProjectBoard{ProjectID: "P", Title: "T", OwnerType: "organization"})
+	testBootstrapFromBoard(c, &gh.ProjectBoard{ProjectID: "P"})
 
 	payload := issuesOpenedPayloadJSON("owner/repo", 99, "I_99", "New Issue", "body text",
 		[]string{"enhancement"}, []string{"alice"})
@@ -413,7 +412,7 @@ func TestIssuesOpened(t *testing.T) {
 
 func TestIssuesOpenedIdempotent(t *testing.T) {
 	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
-	c.Bootstrap(&gh.ProjectBoard{ProjectID: "P", Title: "T", OwnerType: "organization"})
+	testBootstrapFromBoard(c, &gh.ProjectBoard{ProjectID: "P"})
 
 	payload := issuesOpenedPayloadJSON("owner/repo", 99, "I_99", "Issue", "", []string{"bug"}, nil)
 	c.ApplyDelta("issues", payload)
@@ -538,7 +537,7 @@ func TestFabrikWentDeaf_IssuesLabeledBeforeOpened(t *testing.T) {
 	}
 	// Cache starts empty — issue #99 is NOT in the cache.
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
-	c.Bootstrap(&gh.ProjectBoard{ProjectID: "P", Title: "T", OwnerType: "organization"})
+	testBootstrapFromBoard(c, &gh.ProjectBoard{ProjectID: "P"})
 
 	// Deliver labeled event BEFORE the item is in the cache (out-of-order delivery).
 	c.ApplyDelta("issues", issuesLabeledPayloadJSON("labeled", "owner/repo", 99, "fabrik:yolo"))
@@ -562,7 +561,7 @@ func TestOutOfOrderIssuesLabeledBeforeOpened(t *testing.T) {
 		},
 	}
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
-	c.Bootstrap(&gh.ProjectBoard{ProjectID: "P", Title: "T", OwnerType: "organization"})
+	testBootstrapFromBoard(c, &gh.ProjectBoard{ProjectID: "P"})
 
 	// labeled arrives first (out of order).
 	c.ApplyDelta("issues", issuesLabeledPayloadJSON("labeled", "owner/repo", 77, "stage:Research"))
@@ -585,7 +584,7 @@ func TestIssuesClosedFallbackFetch(t *testing.T) {
 		},
 	}
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
-	c.Bootstrap(&gh.ProjectBoard{ProjectID: "P", Title: "T", OwnerType: "organization"})
+	testBootstrapFromBoard(c, &gh.ProjectBoard{ProjectID: "P"})
 
 	// closed arrives but issue not in cache — should trigger fetch then close.
 	c.ApplyDelta("issues", issuesActionPayloadJSON("closed", "owner/repo", 55))
@@ -693,13 +692,12 @@ func TestRecordPRLinkage_PreventsAutoHealMismap(t *testing.T) {
 	}
 	// Seed cache with issue #602 (the correct target).
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
-	board := &gh.ProjectBoard{
-		ProjectID: "PID", Title: "T", OwnerType: "organization",
+	testBootstrapFromBoard(c, &gh.ProjectBoard{
+		ProjectID: "PID",
 		Items: []gh.ProjectItem{
 			{ID: "I_602", ItemID: "PVTI_602", Number: 602, Repo: "owner/repo", Status: "Implement"},
 		},
-	}
-	c.Bootstrap(board)
+	})
 
 	// Engine pre-records the authoritative mapping at CreateDraftPR time.
 	c.RecordPRLinkage("owner/repo", 604, 602)
@@ -834,7 +832,7 @@ func TestProjectsV2ItemCreated(t *testing.T) {
 		},
 	}
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
-	c.Bootstrap(&gh.ProjectBoard{ProjectID: "P", Title: "T", OwnerType: "organization"})
+	testBootstrapFromBoard(c, &gh.ProjectBoard{ProjectID: "P"})
 
 	payload := projectsV2ItemCreatedPayloadJSON("I_88", "Issue", "PVTI_088")
 	c.ApplyDelta("projects_v2_item", payload)
@@ -856,7 +854,7 @@ func TestProjectsV2ItemCreated(t *testing.T) {
 func TestProjectsV2ItemCreatedNonIssueIgnored(t *testing.T) {
 	mc := &mockClient{}
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
-	c.Bootstrap(&gh.ProjectBoard{ProjectID: "P", Title: "T", OwnerType: "organization"})
+	testBootstrapFromBoard(c, &gh.ProjectBoard{ProjectID: "P"})
 
 	// PullRequest content type must be ignored.
 	c.ApplyDelta("projects_v2_item", projectsV2ItemCreatedPayloadJSON("PR_123", "PullRequest", "PVTI_PR"))
@@ -1024,13 +1022,12 @@ func TestPullRequestReviewSideEffectRemovesReviewRequest_ReviewerAbsent(t *testi
 func TestIndexHit_NoDeepcacheInvalidation_PullRequest(t *testing.T) {
 	mc := &mockClient{}
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
-	board := &gh.ProjectBoard{
-		ProjectID: "PID", Title: "T", OwnerType: "organization",
+	testBootstrapFromBoard(c, &gh.ProjectBoard{
+		ProjectID: "PID",
 		Items: []gh.ProjectItem{
 			{ID: "I_602", ItemID: "PVTI_602", Number: 602, Repo: "owner/repo", Status: "Implement"},
 		},
-	}
-	c.Bootstrap(board)
+	})
 
 	c.RecordPRLinkage("owner/repo", 604, 602)
 	testSetDeepFetched(c, "owner/repo", 602)
@@ -1051,13 +1048,12 @@ func TestIndexHit_NoDeepcacheInvalidation_PullRequest(t *testing.T) {
 func TestIndexHit_NoDeepcacheInvalidation_PullRequestReview(t *testing.T) {
 	mc := &mockClient{}
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
-	board := &gh.ProjectBoard{
-		ProjectID: "PID", Title: "T", OwnerType: "organization",
+	testBootstrapFromBoard(c, &gh.ProjectBoard{
+		ProjectID: "PID",
 		Items: []gh.ProjectItem{
 			{ID: "I_602", ItemID: "PVTI_602", Number: 602, Repo: "owner/repo", Status: "Implement"},
 		},
-	}
-	c.Bootstrap(board)
+	})
 
 	c.RecordPRLinkage("owner/repo", 604, 602)
 	testSetDeepFetched(c, "owner/repo", 602)
@@ -1081,13 +1077,12 @@ func TestIndexHit_NoDeepcacheInvalidation_PullRequestReview(t *testing.T) {
 func TestIndexHit_NoRESTCall_PullRequestReviewComment(t *testing.T) {
 	mc := &mockClient{}
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
-	board := &gh.ProjectBoard{
-		ProjectID: "PID", Title: "T", OwnerType: "organization",
+	testBootstrapFromBoard(c, &gh.ProjectBoard{
+		ProjectID: "PID",
 		Items: []gh.ProjectItem{
 			{ID: "I_602", ItemID: "PVTI_602", Number: 602, Repo: "owner/repo", Status: "Implement"},
 		},
-	}
-	c.Bootstrap(board)
+	})
 
 	c.RecordPRLinkage("owner/repo", 604, 602)
 
@@ -1110,13 +1105,12 @@ func TestIndexHit_NoDeepcacheInvalidation_CheckRun(t *testing.T) {
 		},
 	}
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
-	board := &gh.ProjectBoard{
-		ProjectID: "PID", Title: "T", OwnerType: "organization",
+	testBootstrapFromBoard(c, &gh.ProjectBoard{
+		ProjectID: "PID",
 		Items: []gh.ProjectItem{
 			{ID: "I_602", ItemID: "PVTI_602", Number: 602, Repo: "owner/repo", Status: "Implement"},
 		},
-	}
-	c.Bootstrap(board)
+	})
 
 	// Engine records authoritative PR→issue mapping at CreateDraftPR time.
 	c.RecordPRLinkage("owner/repo", 604, 602)
@@ -1140,13 +1134,12 @@ func TestIndexHit_NoDeepcacheInvalidation_CheckRun(t *testing.T) {
 func TestResolvePRLinkage_IndexHit_ReturnsFalseHealed(t *testing.T) {
 	mc := &mockClient{}
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
-	board := &gh.ProjectBoard{
-		ProjectID: "PID", Title: "T", OwnerType: "organization",
+	testBootstrapFromBoard(c, &gh.ProjectBoard{
+		ProjectID: "PID",
 		Items: []gh.ProjectItem{
 			{ID: "I_602", ItemID: "PVTI_602", Number: 602, Repo: "owner/repo", Status: "Implement"},
 		},
-	}
-	c.Bootstrap(board)
+	})
 	c.RecordPRLinkage("owner/repo", 604, 602)
 
 	key, issNum, found, healed, err := c.resolvePRLinkage("owner", "repo", 604)
