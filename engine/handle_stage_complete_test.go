@@ -516,3 +516,50 @@ func TestHandleStageComplete_BothCruiseAndYolo_YoloWins(t *testing.T) {
 		t.Fatalf("expected advance when yolo wins over cruise, got %d status updates", len(client.updateStatusCalls))
 	}
 }
+
+// TestHandleStageComplete_ClearsAwaitingInput verifies that fabrik:awaiting-input is
+// removed when a stage completes, covering the orphaned-label scenario where the user
+// manually removed fabrik:paused after FABRIK_BLOCKED_ON_INPUT was emitted.
+func TestHandleStageComplete_ClearsAwaitingInput(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineWithStages(client, testStagesWithValidate())
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:awaiting-input"}}
+	stage := &stages.Stage{Name: "Research"}
+
+	eng.handleStageComplete(context.Background(), board, item, stage)
+
+	found := false
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-input" {
+			found = true
+			if c.issueNumber != 1 {
+				t.Errorf("RemoveLabelFromIssue called with issueNumber %d, want 1", c.issueNumber)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected RemoveLabelFromIssue call for fabrik:awaiting-input, got none")
+	}
+}
+
+// TestHandleStageComplete_NoAwaitingInput_NoSpuriousRemove verifies that when
+// fabrik:awaiting-input is absent, no spurious RemoveLabelFromIssue call is made
+// for that label name.
+func TestHandleStageComplete_NoAwaitingInput_NoSpuriousRemove(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineWithStages(client, testStagesWithValidate())
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+	stage := &stages.Stage{Name: "Research"}
+
+	eng.handleStageComplete(context.Background(), board, item, stage)
+
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-input" {
+			t.Error("unexpected RemoveLabelFromIssue call for fabrik:awaiting-input when label was not present")
+		}
+	}
+}
