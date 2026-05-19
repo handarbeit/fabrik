@@ -165,7 +165,7 @@ func TestRunStartupTerminalScan_IdempotentOnAlreadyTerminal(t *testing.T) {
 func testEngineWithCleanupCache(client *mockGitHubClient, claude *mockClaudeInvoker) (*Engine, *boardcache.CacheImpl) {
 	eng := testEngineWithCleanup(client, claude)
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
-	cache.Bootstrap(&gh.ProjectBoard{
+	testBootstrapFromBoard(cache, &gh.ProjectBoard{
 		ProjectID: "PVT_1",
 		Items: []gh.ProjectItem{
 			{
@@ -310,7 +310,7 @@ func TestRunProbeAndDeepFetch_TerminalItem_MovedBetweenCleanupStages(t *testing.
 		client, &mockClaudeInvoker{}, NewWorktreeManager("/tmp/test-repo"),
 	)
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
-	cache.Bootstrap(&gh.ProjectBoard{
+	testBootstrapFromBoard(cache, &gh.ProjectBoard{
 		ProjectID: "PVT_1",
 		Items: []gh.ProjectItem{
 			{ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo",
@@ -403,7 +403,7 @@ func TestRunProbeAndDeepFetch_LinkageDrift_ColdStart_AuthoritativeWrite(t *testi
 	eng := testEngineWithCleanup(client, &mockClaudeInvoker{})
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
 	// Bootstrap with LinkedPRNumber=0 (old-style bootstrap that did not populate PR number).
-	cache.Bootstrap(&gh.ProjectBoard{
+	testBootstrapFromBoard(cache, &gh.ProjectBoard{
 		ProjectID: "PVT_1",
 		Items: []gh.ProjectItem{
 			{ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo",
@@ -462,7 +462,7 @@ func TestRunProbeAndDeepFetch_LinkageDrift_WarmCache_FiresDeepFetchInvalidated(t
 	eng := testEngineWithCleanup(client, &mockClaudeInvoker{})
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
 	// Bootstrap with LinkedPRNumber=0.
-	cache.Bootstrap(&gh.ProjectBoard{
+	testBootstrapFromBoard(cache, &gh.ProjectBoard{
 		ProjectID: "PVT_1",
 		Items: []gh.ProjectItem{
 			{ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo",
