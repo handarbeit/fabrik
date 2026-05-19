@@ -231,25 +231,6 @@ func NewCacheImpl(fallback ReadClient, store *itemstate.Store, logFn func(format
 	}
 }
 
-// Bootstrap populates the cache wholesale from a freshly-fetched board.
-// Must be called before any engine mutations flow through the shared store —
-// Reset wipes all state including engine-side fields (Lock, Worker, StageState).
-func (c *CacheImpl) Bootstrap(board *gh.ProjectBoard) {
-	// Reset Store atomically — clears all prior item state and indexes.
-	c.store.Reset(board.Items)
-
-	c.mu.Lock()
-	c.projectID = board.ProjectID
-	c.projectTitle = board.Title
-	c.projectOwnerType = board.OwnerType
-	// Reset CacheImpl-local maps. All check-run state (pendingCheckRuns) and
-	// per-item state have been migrated to the Store; Store.Reset above handles them.
-	c.localDeltaAt = make(map[string]time.Time)
-	c.mu.Unlock()
-
-	c.logFn("[cache] bootstrap complete: %d items\n", len(board.Items))
-}
-
 // BootstrapFromProbe populates the cache from a ProbeProjectBoard result instead
 // of a full FetchProjectBoard. This is the preferred cold-start path: probe costs
 // ~250 nodes vs ~2350 for a full shallow fetch on a 47-item board.
