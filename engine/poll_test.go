@@ -2601,6 +2601,72 @@ func TestColdStart_ProbeBootstrap_TerminalItemsSkipDeepFetch(t *testing.T) {
 	}
 }
 
+// TestWebhookModeStartup_ClosedDoneItemsNotDeepFetched is the regression test
+// for issue #751. It verifies that after the fixed webhook-mode startup path
+// (BootstrapFromProbe instead of Bootstrap), the first probe cycle does NOT
+// call FetchItemDetails for closed Done items. Only active items are fetched.
+func TestWebhookModeStartup_ClosedDoneItemsNotDeepFetched(t *testing.T) {
+	var deepFetchCalls int
+	probeTime := time.Now().Add(-time.Minute)
+
+	// 3 closed Done items + 1 open Research item returned by the probe.
+	allProbeItems := []gh.BoardProbeItem{
+		{ContentID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo",
+			Status: "Done", IsClosed: true, EffectiveUpdatedAt: probeTime},
+		{ContentID: "I_002", ItemID: "PVTI_002", Number: 2, Repo: "owner/repo",
+			Status: "Done", IsClosed: true, EffectiveUpdatedAt: probeTime},
+		{ContentID: "I_003", ItemID: "PVTI_003", Number: 3, Repo: "owner/repo",
+			Status: "Done", IsClosed: true, EffectiveUpdatedAt: probeTime},
+		{ContentID: "I_004", ItemID: "PVTI_004", Number: 4, Repo: "owner/repo",
+			Status: "Research", IsClosed: false, EffectiveUpdatedAt: probeTime},
+	}
+
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return allProbeItems, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalls++
+			return nil
+		},
+	}
+	eng := NewWithDeps(
+		Config{
+			Owner: "owner", Repo: "repo", ProjectNum: 1,
+			User: "testuser", Token: "token", MaxConcurrent: 5,
+			Stages: testStagesWithCleanup(),
+		},
+		client, &mockClaudeInvoker{}, NewWorktreeManager("/tmp/test-repo"),
+	)
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+
+	// Simulate the fixed webhook startup path: BootstrapFromProbe seeds Terminal
+	// for closed Done items before the first poll cycle runs.
+	cache.BootstrapFromProbe(allProbeItems, "PVT_1", eng.cfg.Stages)
+	eng.readClient = cache
+
+	// Run one probe cycle — this is what the first poll does after startup.
+	eng.runProbeAndDeepFetch(cache)
+
+	// The 3 closed Done items are seeded terminal and must NOT be deep-fetched.
+	// Only the 1 open Research item should trigger FetchItemDetails.
+	if deepFetchCalls != 1 {
+		t.Errorf("webhook startup deep-fetch count = %d, want 1 (only active Research item)", deepFetchCalls)
+	}
+
+	// Verify terminal flag is set for closed Done items.
+	for i := 1; i <= 3; i++ {
+		snap, err := eng.store.Get("owner/repo", i)
+		if err != nil {
+			t.Errorf("item #%d not in store: %v", i, err)
+			continue
+		}
+		if !snap.IsTerminal() {
+			t.Errorf("item #%d (closed Done): expected IsTerminal()=true after webhook startup", i)
+		}
+	}
+}
+
 // TestRunProbeAndDeepFetch_IsClosedPropagates_WithoutDeepFetch verifies that
 // IsClosed=true is written to the store via ProbeBoardItemUpdated even when
 // the item is cache-fresh (EffectiveUpdatedAt unchanged → no deep-fetch).
