@@ -111,4 +111,34 @@ This is a correctness fix as well as an optimization: the old code fired `DeepFe
 | Trigger | Path | Labels in store? | Terminal seeding |
 |---|---|---|---|
 | Virgin cache (default) | `ProbeProjectBoard → BootstrapFromProbe` | No | `IsClosed + CleanupWorktree` |
+| Webhook startup (before `wm.Start()`) | `ProbeProjectBoard → BootstrapFromProbe` | No | `IsClosed + CleanupWorktree` |
 | Drift recovery / reconcile | `LightReconcile → Reconcile(freshBoard)` | Yes (from `FetchProjectBoard`) | `runStartupTerminalScan` |
+
+---
+
+## Addendum 2 — Webhook startup path converged (issue #751, 2026-05-19)
+
+### Problem
+
+The webhook-mode startup block at `engine/poll.go` called `FetchProjectBoard` (~2 350 GraphQL nodes) and fed the result to `CacheImpl.Bootstrap()`. `Bootstrap()` populated the store via `store.Reset()` but never set `LastDeepFetchAt`, `LastSeenSourceUpdatedAt`, or the `Terminal` flag. On the next poll, `runProbeAndDeepFetch` found `s.Terminal == false` for every closed Done item (the terminal-skip short-circuit did not fire) and `IsItemCacheFresh() == false` because `LastDeepFetchAt.IsZero()` — triggering `FetchItemDetails` for every item on the board. On a 47-item board this burned ~2 350 nodes at restart with no useful result.
+
+The polling-only startup path was not affected: it fell into the virgin-cache branch that already used `ProbeProjectBoard → BootstrapFromProbe`. The asymmetry was the bug.
+
+### Fix
+
+The webhook startup block was replaced with the same `ProbeProjectBoard → BootstrapFromProbe` pattern used by the virgin-cache branch:
+
+1. `ProbeProjectBoard` (~250 nodes) fetches the board probe.
+2. If the probe returns zero items (transient indexer hiccup), the cache is left virgin and the first poll retries.
+3. Otherwise, `BootstrapFromProbe` seeds `Terminal=true` for closed cleanup-stage items — these are then skipped by `runProbeAndDeepFetch` on the first poll.
+
+The replacement block runs synchronously before `wm.Start()`, preserving the no-delta-in-empty-cache ordering guarantee.
+
+`CacheImpl.Bootstrap()` was removed — it had no remaining callers after this change. `FetchProjectBoard()` itself is retained; the light-reconcile loop still uses it legitimately.
+
+### Cost impact
+
+| Scenario | Before | After |
+|---|---|---|
+| Webhook restart, N=47 items, k=5 active | ~2 350 nodes (probe) + 47 × deep-fetch | ~250 nodes (probe) + 5 × deep-fetch |
+| Virgin-cache (polling-only) | Already using BootstrapFromProbe (no change) | Same |
