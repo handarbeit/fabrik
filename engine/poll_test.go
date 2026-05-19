@@ -1627,7 +1627,7 @@ func seedTestCache(t *testing.T, client *mockGitHubClient) *boardcache.CacheImpl
 			{Number: 1, ItemID: "PVTI_001", Status: "Research", Repo: "owner/repo"},
 		},
 	}
-	cache.Bootstrap(board)
+	testBootstrapFromBoard(cache, board)
 	return cache
 }
 
@@ -1731,7 +1731,7 @@ func TestPollGateMiss(t *testing.T) {
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
-	cache.Bootstrap(&gh.ProjectBoard{ProjectID: "PVT_1", Items: nil})
+	testBootstrapFromBoard(cache, &gh.ProjectBoard{ProjectID: "PVT_1", Items: nil})
 	eng.readClient = cache
 
 	ctx := context.Background()

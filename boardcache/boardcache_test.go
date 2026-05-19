@@ -1126,8 +1126,8 @@ func TestFetchProjectBoardFallsThroughWhenPaused(t *testing.T) {
 func TestFetchLabelsFallsThroughWhenPaused(t *testing.T) {
 	mc := &mockClient{labelsResult: []string{"live-label"}}
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
-	c.Bootstrap(&gh.ProjectBoard{
-		ProjectID: "PID", Title: "T", OwnerType: "organization",
+	testBootstrapFromBoard(c, &gh.ProjectBoard{
+		ProjectID: "PID",
 		Items: []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Labels: []string{"cached-label"}}},
 	})
 	c.Pause()
@@ -1295,14 +1295,13 @@ func TestProjectIDReturnsEmptyBeforeBootstrap(t *testing.T) {
 func seedCacheWithStalePRLink(t *testing.T, mc *mockClient) *CacheImpl {
 	t.Helper()
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
-	board := &gh.ProjectBoard{
-		ProjectID: "PID", Title: "T", OwnerType: "organization",
+	testBootstrapFromBoard(c, &gh.ProjectBoard{
+		ProjectID: "PID",
 		Items: []gh.ProjectItem{
 			{ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo",
 				Status: "Implement", LinkedPRNumber: 0},
 		},
-	}
-	c.Bootstrap(board)
+	})
 	// Mark as deep-fetched so we can verify deep cache is cleared by heal.
 	testSetDeepFetched(c, "owner/repo", 1)
 	return c
@@ -1551,14 +1550,13 @@ func TestAutoHealPullRequestDelta(t *testing.T) {
 func seedCacheWithStalePRLink2(t *testing.T, logFn func(string, ...any)) *CacheImpl {
 	t.Helper()
 	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), logFn)
-	board := &gh.ProjectBoard{
-		ProjectID: "PID", Title: "T", OwnerType: "organization",
+	testBootstrapFromBoard(c, &gh.ProjectBoard{
+		ProjectID: "PID",
 		Items: []gh.ProjectItem{
 			{ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo",
 				Status: "Implement", LinkedPRNumber: 0},
 		},
-	}
-	c.Bootstrap(board)
+	})
 	testSetDeepFetched(c, "owner/repo", 1)
 	return c
 }
@@ -1945,11 +1943,10 @@ func TestRegisterItemID(t *testing.T) {
 	t.Run("populates itemID and GetItemID returns it", func(t *testing.T) {
 		// Bootstrap an item without an itemID (simulates issues.opened path).
 		c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
-		board := &gh.ProjectBoard{
-			ProjectID: "PID", OwnerType: "organization",
+		testBootstrapFromBoard(c, &gh.ProjectBoard{
+			ProjectID: "PID",
 			Items: []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"}},
-		}
-		c.Bootstrap(board)
+		})
 
 		key := ItemKey("owner/repo", 1)
 		// Item exists but has no itemID.
@@ -1970,13 +1967,12 @@ func TestRegisterItemID(t *testing.T) {
 
 	t.Run("other fields remain intact after RegisterItemID", func(t *testing.T) {
 		c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
-		board := &gh.ProjectBoard{
-			ProjectID: "PID", OwnerType: "organization",
+		testBootstrapFromBoard(c, &gh.ProjectBoard{
+			ProjectID: "PID",
 			Items: []gh.ProjectItem{
 				{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research", Labels: []string{"bug"}},
 			},
-		}
-		c.Bootstrap(board)
+		})
 
 		key := ItemKey("owner/repo", 1)
 		c.RegisterItemID(key, "PVTI_xyz")
@@ -2005,11 +2001,10 @@ func TestRegisterItemID(t *testing.T) {
 
 	t.Run("idempotent when called twice with same value", func(t *testing.T) {
 		c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
-		board := &gh.ProjectBoard{
-			ProjectID: "PID", OwnerType: "organization",
+		testBootstrapFromBoard(c, &gh.ProjectBoard{
+			ProjectID: "PID",
 			Items: []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"}},
-		}
-		c.Bootstrap(board)
+		})
 		key := ItemKey("owner/repo", 1)
 
 		c.RegisterItemID(key, "PVTI_same")
@@ -2023,11 +2018,10 @@ func TestRegisterItemID(t *testing.T) {
 
 	t.Run("no-op when itemID is empty", func(t *testing.T) {
 		c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
-		board := &gh.ProjectBoard{
-			ProjectID: "PID", OwnerType: "organization",
+		testBootstrapFromBoard(c, &gh.ProjectBoard{
+			ProjectID: "PID",
 			Items: []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"}},
-		}
-		c.Bootstrap(board)
+		})
 		key := ItemKey("owner/repo", 1)
 
 		c.RegisterItemID(key, "") // empty — must be ignored
@@ -2172,7 +2166,7 @@ func TestLightReconcile_NoDrift(t *testing.T) {
 		},
 	}
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
-	c.Bootstrap(mc.projectBoardResult)
+	testBootstrapFromBoard(c, mc.projectBoardResult)
 
 	driftCount, driftedKeys, freshBoard, err := c.LightReconcile("owner", "repo", 1, "organization")
 	if err != nil {
@@ -2203,7 +2197,7 @@ func TestLightReconcile_DriftDetected(t *testing.T) {
 	}
 	mc := &mockClient{}
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
-	c.Bootstrap(seedBoard)
+	testBootstrapFromBoard(c, seedBoard)
 
 	// Fresh board: item 1 has drifted status+updatedAt; item 2 has only a label
 	// change (same updatedAt — GitHub always bumps updatedAt on label mutations, but
@@ -2258,7 +2252,7 @@ func TestLightReconcile_RemovedItemIsDrift(t *testing.T) {
 	}
 	mc := &mockClient{}
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
-	c.Bootstrap(seedBoard)
+	testBootstrapFromBoard(c, seedBoard)
 
 	// Fresh board: item 2 is gone.
 	mc.projectBoardResult = &gh.ProjectBoard{
