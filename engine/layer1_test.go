@@ -25,15 +25,13 @@ func layer1Cache(eng *Engine, client *mockGitHubClient, projectID string, withIt
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
 	if !withItem {
 		// Bootstrap with projectID only — no items.
-		cache.Bootstrap(&gh.ProjectBoard{
-			ProjectID: projectID, OwnerType: "organization",
-		})
+		testBootstrapFromBoard(cache, &gh.ProjectBoard{ProjectID: projectID})
 		return cache
 	}
 	// Bootstrap with one item that has no itemID — simulates issues.opened path
 	// where the payload carries no project board info.
-	cache.Bootstrap(&gh.ProjectBoard{
-		ProjectID: projectID, OwnerType: "organization",
+	testBootstrapFromBoard(cache, &gh.ProjectBoard{
+		ProjectID: projectID,
 		Items: []gh.ProjectItem{
 			{ID: "I_001", ItemID: "", Number: 1, Repo: "owner/repo", Status: ""},
 		},
@@ -132,8 +130,8 @@ func TestLayer1StatusRefreshFastPath(t *testing.T) {
 
 	// Bootstrap with an item that already has an itemID (normal post-Bootstrap state).
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
-	cache.Bootstrap(&gh.ProjectBoard{
-		ProjectID: "PVT_test", OwnerType: "organization",
+	testBootstrapFromBoard(cache, &gh.ProjectBoard{
+		ProjectID: "PVT_test",
 		Items: []gh.ProjectItem{
 			{ID: "I_001", ItemID: existingItemID, Number: 1, Repo: "owner/repo", Status: "Research"},
 		},
