@@ -69,6 +69,24 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 		item.Labels = freshLabels
 	}
 
+	// Clear any orphaned fabrik:awaiting-input label. It is added by blockOnInput
+	// when Claude emits FABRIK_BLOCKED_ON_INPUT; if the user manually removes
+	// fabrik:paused (bypassing unblockAwaitingInput), the label can survive through
+	// subsequent stage runs. Clean it up on every completion path.
+	if hasLabel(item, "fabrik:awaiting-input") {
+		if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil &&
+			!errors.Is(err, gh.ErrNotFound) {
+			e.logf(item.Number, "warn", "could not remove awaiting-input label: %v\n", err)
+		} else if err == nil {
+			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
+			}
+			if e.webhookMgr != nil {
+				e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-input")
+			}
+		}
+	}
+
 	// yoloActive gates both PR merge and is the base for stage advancement.
 	// stage.AutoAdvance overrides advancement only — not the merge decision.
 	yoloActive := e.cfg.Yolo || hasYoloLabel(item)
@@ -495,6 +513,21 @@ func (e *Engine) handleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 	e.logf(item.Number, "done", "stage %q signaled no work needed — skipping remaining stages and moving to Done\n", stage.Name)
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+
+	// Clear any orphaned fabrik:awaiting-input label (same rationale as handleStageComplete).
+	if hasLabel(item, "fabrik:awaiting-input") {
+		if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil &&
+			!errors.Is(err, gh.ErrNotFound) {
+			e.logf(item.Number, "warn", "could not remove awaiting-input label: %v\n", err)
+		} else if err == nil {
+			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
+			}
+			if e.webhookMgr != nil {
+				e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-input")
+			}
+		}
+	}
 
 	// Mark the emitting stage complete so the engine doesn't re-run it on restart.
 	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
