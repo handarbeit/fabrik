@@ -264,7 +264,7 @@ func TestStoreUnification_CacheImplUsesProvidedStore(t *testing.T) {
 	cache := boardcache.NewCacheImpl(&mockGitHubClient{}, sharedStore, func(string, ...any) {})
 
 	// Bootstrap writes item state into the shared store.
-	cache.Bootstrap(&gh.ProjectBoard{
+	testBootstrapFromBoard(cache, &gh.ProjectBoard{
 		ProjectID: "PVT_1",
 		Items: []gh.ProjectItem{
 			{Repo: "owner/repo", Number: 1, Status: "Research"},

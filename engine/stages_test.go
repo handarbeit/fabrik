@@ -443,7 +443,7 @@ func TestAdvanceToNextStage_WritesThrough_Cache(t *testing.T) {
 
 	// Replace readClient with a CacheImpl bootstrapped with the test item in Research.
 	cache := boardcache.NewCacheImpl(boardcache.NewGitHubAdapter(client), eng.store, func(format string, args ...any) {})
-	cache.Bootstrap(&gh.ProjectBoard{
+	testBootstrapFromBoard(cache, &gh.ProjectBoard{
 		ProjectID: projectID,
 		Items: []gh.ProjectItem{
 			{
