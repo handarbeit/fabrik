@@ -260,6 +260,32 @@ func TestHandleNoWorkNeeded_CloseIssueNotCalledOnStatusFailure(t *testing.T) {
 	}
 }
 
+// TestHandleNoWorkNeeded_ClearsAwaitingInput verifies that fabrik:awaiting-input is
+// removed when handleNoWorkNeeded runs, covering the orphaned-label scenario.
+func TestHandleNoWorkNeeded_ClearsAwaitingInput(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineWithStages(client, testStagesWithCleanup())
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 5, ItemID: "PVTI_5", Labels: []string{"fabrik:awaiting-input"}}
+	stage := &stages.Stage{Name: "Plan", Order: 2}
+
+	eng.handleNoWorkNeeded(board, item, stage)
+
+	found := false
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-input" {
+			found = true
+			if c.issueNumber != 5 {
+				t.Errorf("RemoveLabelFromIssue called with issueNumber %d, want 5", c.issueNumber)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected RemoveLabelFromIssue call for fabrik:awaiting-input, got none")
+	}
+}
+
 // TestHandleNoWorkNeeded_DirectlyDoneNotNextStage verifies that the issue advances
 // directly to Done, not to the next sequential stage.
 func TestHandleNoWorkNeeded_DirectlyDoneNotNextStage(t *testing.T) {
