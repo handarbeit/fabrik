@@ -430,12 +430,17 @@ func (e *Engine) Run() error {
 		}
 		// Bootstrap the cache before accepting webhook events so no delta is
 		// dropped into an empty cache during the startup window.
+		// Probe-based bootstrap costs ~250 GraphQL nodes (vs ~2350 for a full
+		// shallow fetch) and seeds Terminal=true for closed cleanup-stage items,
+		// preventing the first poll from re-deep-fetching every closed Done item.
 		if cacheImpl != nil {
-			board, err := e.client.FetchProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
-			if err != nil {
-				e.logf(0, "cache", "bootstrap fetch failed — cache will be populated on first miss: %v\n", err)
-			} else {
-				cacheImpl.Bootstrap(board)
+			probeItems, projectID, probeErr := e.client.ProbeProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
+			if probeErr != nil {
+				e.logf(0, "cache", "startup probe failed — cache will be populated on first poll: %v\n", probeErr)
+			} else if projectID != "" && len(probeItems) > 0 {
+				cacheImpl.BootstrapFromProbe(probeItems, projectID, e.cfg.Stages)
+			} else if projectID != "" {
+				e.logf(0, "cache", "startup probe returned 0 items — deferring to first poll\n")
 			}
 		}
 		if err := wm.Start(ctx, e.cfg.WebhookPort); err == nil {

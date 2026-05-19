@@ -1771,7 +1771,7 @@ func TestPollGateFire(t *testing.T) {
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
-	cache.Bootstrap(&gh.ProjectBoard{ProjectID: "PVT_1", Items: nil})
+	testBootstrapFromBoard(cache, &gh.ProjectBoard{ProjectID: "PVT_1", Items: nil})
 	eng.readClient = cache
 
 	ctx := context.Background()
@@ -2012,8 +2012,8 @@ func TestPoll_LogBoardBootstrapThenCache(t *testing.T) {
 		t.Errorf("poll 1 board log = %q; want \"from GitHub\"", boardLog1)
 	}
 
-	// Simulate a webhook-triggered Bootstrap.
-	cache.Bootstrap(board)
+	// Simulate a webhook-triggered bootstrap.
+	testBootstrapFromBoard(cache, board)
 
 	// Poll 2: cache is now bootstrapped — must serve from cache.
 	logs2 := collectPollLogs(t, eng)
@@ -2088,7 +2088,7 @@ func TestPoll_LogItemFromCache(t *testing.T) {
 	eng.store.Subscribe(newMayNeedWorkObserver(&eng.mayNeedWorkMu, &eng.mayNeedWork))
 
 	// Bootstrap → store has item #1; StatusChanged fires → "owner/repo#1" in mayNeedWork.
-	cache.Bootstrap(board)
+	testBootstrapFromBoard(cache, board)
 
 	// Pre-populate LastDeepFetchAt so IsItemDeepFetched returns true.
 	eng.store.Apply(itemstate.ItemDeepFetched{
@@ -2441,7 +2441,7 @@ func TestRunProbeAndDeepFetch_ItemGone_RemovedFromStore(t *testing.T) {
 	}
 	eng := testEngine(client, &mockClaudeInvoker{})
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
-	cache.Bootstrap(&gh.ProjectBoard{
+	testBootstrapFromBoard(cache, &gh.ProjectBoard{
 		ProjectID: "PVT_1",
 		Items: []gh.ProjectItem{
 			{ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo"},
