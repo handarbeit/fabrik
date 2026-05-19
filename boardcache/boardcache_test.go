@@ -152,6 +152,45 @@ func testGetState(t *testing.T, c *CacheImpl, repo string, number int) itemstate
 	return snap.State()
 }
 
+// testBootstrapFromBoard adapts a *gh.ProjectBoard to BootstrapFromProbe format,
+// seeding labels separately via ApplyLabelAdded. Used to migrate tests from the
+// removed Bootstrap method without rewriting every individual test call site.
+func testBootstrapFromBoard(c *CacheImpl, board *gh.ProjectBoard) {
+	probeItems := make([]gh.BoardProbeItem, 0, len(board.Items))
+	for _, item := range board.Items {
+		probeItems = append(probeItems, gh.BoardProbeItem{
+			ContentID:          item.ID,
+			ItemID:             item.ItemID,
+			Number:             item.Number,
+			IsPR:               item.IsPR,
+			IsClosed:           item.IsClosed,
+			Status:             item.Status,
+			Repo:               item.Repo,
+			EffectiveUpdatedAt: item.UpdatedAt,
+			LinkedPRNumber:     item.LinkedPRNumber,
+		})
+	}
+	c.BootstrapFromProbe(probeItems, board.ProjectID, nil)
+	// Apply labels separately — probe results carry no labels.
+	for _, item := range board.Items {
+		key := ItemKey(item.Repo, item.Number)
+		for _, l := range item.Labels {
+			c.ApplyLabelAdded(key, l)
+		}
+	}
+}
+
+// testGetSnap returns the Snapshot for (repo, number), exposing Snapshot methods
+// like IsTerminal(). Fails the test immediately if not found.
+func testGetSnap(t *testing.T, c *CacheImpl, repo string, number int) itemstate.Snapshot {
+	t.Helper()
+	snap, err := c.store.Get(repo, number)
+	if err != nil {
+		t.Fatalf("testGetSnap: %s#%d: %v", repo, number, err)
+	}
+	return snap
+}
+
 // testSetDeepFetched marks an item as deep-fetched in the Store by applying
 // an ItemDeepFetched mutation with the item's current shallow state.
 func testSetDeepFetched(c *CacheImpl, repo string, number int) {
@@ -185,31 +224,11 @@ func testSetLinkedPR(c *CacheImpl, repo string, issNum, prNum int) {
 func seedCache(t *testing.T) *CacheImpl {
 	t.Helper()
 	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
-	board := &gh.ProjectBoard{
-		ProjectID: "PID",
-		Title:     "Test Board",
-		OwnerType: "organization",
-		Items: []gh.ProjectItem{
-			{
-				ID:     "I_001",
-				ItemID: "PVTI_001",
-				Number: 1,
-				Title:  "Issue One",
-				Repo:   "owner/repo",
-				Status: "Research",
-				Labels: []string{"enhancement"},
-			},
-			{
-				ID:     "I_002",
-				ItemID: "PVTI_002",
-				Number: 2,
-				Title:  "Issue Two",
-				Repo:   "owner/repo",
-				Status: "Plan",
-			},
-		},
+	probeItems := []gh.BoardProbeItem{
+		{ContentID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", Status: "Research"},
+		{ContentID: "I_002", ItemID: "PVTI_002", Number: 2, Repo: "owner/repo", Status: "Plan"},
 	}
-	c.Bootstrap(board)
+	c.BootstrapFromProbe(probeItems, "PID", testStages())
 	return c
 }
 
@@ -217,26 +236,15 @@ func seedCache(t *testing.T) *CacheImpl {
 // Bootstrap / FetchProjectBoard tests
 // ---------------------------------------------------------------------------
 
-func TestBootstrapPopulatesItems(t *testing.T) {
-	c := seedCache(t)
-	board, err := c.FetchProjectBoard("owner", "repo", 1, "organization")
-	if err != nil {
-		t.Fatalf("FetchProjectBoard: %v", err)
-	}
-	if len(board.Items) != 2 {
-		t.Errorf("want 2 items, got %d", len(board.Items))
-	}
-}
-
-// TestBootstrapNotifiesObserver verifies that Bootstrap fires observer notifications
-// for every item in the board, matching production ordering in engine/poll.go where
-// observers are subscribed before Bootstrap is called.
+// TestBootstrapNotifiesObserver verifies that BootstrapFromProbe fires observer
+// notifications for every item, matching production ordering in engine/poll.go
+// where observers are subscribed before bootstrap is called.
 func TestBootstrapNotifiesObserver(t *testing.T) {
 	store := itemstate.NewStore(nil)
 
 	var mu sync.Mutex
 	var received []itemstate.Change
-	// Subscribe BEFORE Bootstrap — matching production ordering in engine/poll.go.
+	// Subscribe BEFORE bootstrap — matching production ordering in engine/poll.go.
 	store.Subscribe(itemstate.ObserverFunc(func(c itemstate.Change, _ itemstate.Snapshot) {
 		mu.Lock()
 		received = append(received, c)
@@ -246,23 +254,20 @@ func TestBootstrapNotifiesObserver(t *testing.T) {
 	mc := &mockClient{}
 	c := NewCacheImpl(mc, store, nopLog)
 
-	board := &gh.ProjectBoard{
-		ProjectID: "PID",
-		Title:     "T",
-		OwnerType: "organization",
-		Items: []gh.ProjectItem{
-			{ID: "I_1", Repo: "owner/repo", Number: 1, Status: "Research", Title: "Issue 1"},
-			{ID: "I_2", Repo: "owner/repo", Number: 2, Status: "Implement", Title: "Issue 2"},
-		},
+	// Use non-closed items so no TerminalFlagSet mutations fire (which would add
+	// extra notifications and complicate the count assertion).
+	probeItems := []gh.BoardProbeItem{
+		{ContentID: "I_1", ItemID: "PVTI_1", Number: 1, Repo: "owner/repo", Status: "Research"},
+		{ContentID: "I_2", ItemID: "PVTI_2", Number: 2, Repo: "owner/repo", Status: "Implement"},
 	}
-	c.Bootstrap(board)
+	c.BootstrapFromProbe(probeItems, "PID", testStages())
 
 	mu.Lock()
 	got := len(received)
 	mu.Unlock()
 
 	if got != 2 {
-		t.Fatalf("expected 2 observer Changes after Bootstrap, got %d", got)
+		t.Fatalf("expected 2 observer Changes after BootstrapFromProbe, got %d", got)
 	}
 	for _, ch := range received {
 		if ch.Fields == 0 {
@@ -315,11 +320,10 @@ func TestFetchItemDetailsFallbackPopulatesCache(t *testing.T) {
 		},
 	}
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
-	board := &gh.ProjectBoard{
-		ProjectID: "PID", Title: "T", OwnerType: "organization",
-		Items: []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"}},
-	}
-	c.Bootstrap(board)
+	testBootstrapFromBoard(c, &gh.ProjectBoard{
+		ProjectID: "PID",
+		Items:     []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"}},
+	})
 
 	item := gh.ProjectItem{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"}
 	if err := c.FetchItemDetails(&item); err != nil {
@@ -371,14 +375,13 @@ func TestFetchItemDetailsCacheStaleRefetches(t *testing.T) {
 		},
 	}
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
-	board := &gh.ProjectBoard{
-		ProjectID: "PID", Title: "T", OwnerType: "user",
+	testBootstrapFromBoard(c, &gh.ProjectBoard{
+		ProjectID: "PID",
 		Items: []gh.ProjectItem{{
 			ID: "I_12", Number: 12, Repo: "owner/repo", Status: "Review",
 			UpdatedAt: t0,
 		}},
-	}
-	c.Bootstrap(board)
+	})
 
 	// First call: cache miss → fallback populates and records LastSeen=t0.
 	item := gh.ProjectItem{ID: "I_12", Number: 12, Repo: "owner/repo", Status: "Review", UpdatedAt: t0}
@@ -432,7 +435,7 @@ func TestIsItemCacheFreshAgreesWithFetch(t *testing.T) {
 	t1 := t0.Add(time.Hour)
 	mc := &mockClient{itemDetailsResult: &gh.ProjectItem{Number: 5, Repo: "owner/repo"}}
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
-	c.Bootstrap(&gh.ProjectBoard{ProjectID: "PID", OwnerType: "user", Items: []gh.ProjectItem{{
+	testBootstrapFromBoard(c, &gh.ProjectBoard{ProjectID: "PID", Items: []gh.ProjectItem{{
 		ID: "I_5", Number: 5, Repo: "owner/repo", Status: "Plan", UpdatedAt: t0,
 	}}})
 
@@ -580,7 +583,7 @@ func TestDeltaIssuesLabeledIdempotent(t *testing.T) {
 
 func TestDeltaIssuesUnlabeled(t *testing.T) {
 	c := seedCache(t)
-	// Seed has "enhancement" on item #1.
+	c.ApplyLabelAdded(ItemKey("owner/repo", 1), "enhancement")
 	payload := issuesLabeledPayloadJSON("unlabeled", "owner/repo", 1, "enhancement")
 	c.ApplyDelta("issues", payload)
 
@@ -870,6 +873,7 @@ func TestFetchCheckRunsFallback(t *testing.T) {
 
 func TestFetchLabelsFromCache(t *testing.T) {
 	c := seedCache(t)
+	c.ApplyLabelAdded(ItemKey("owner/repo", 1), "enhancement")
 	labels, err := c.FetchLabels("owner", "repo", 1)
 	if err != nil {
 		t.Fatalf("FetchLabels: %v", err)
@@ -905,8 +909,8 @@ func TestReconcileReplacesShallowData(t *testing.T) {
 		logBuf.WriteString(format)
 	}
 	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), logFn)
-	c.Bootstrap(&gh.ProjectBoard{
-		ProjectID: "PID", Title: "T", OwnerType: "organization",
+	testBootstrapFromBoard(c, &gh.ProjectBoard{
+		ProjectID: "PID",
 		Items: []gh.ProjectItem{
 			{ID: "I_1", ItemID: "PVTI_1", Number: 1, Repo: "owner/repo", Status: "Research"},
 		},
@@ -961,8 +965,8 @@ func TestReconcilePreservesDeepCacheOnLinkageChange(t *testing.T) {
 	// was removed from Reconcile and moved to the probe loop (runProbeAndDeepFetch).
 	// Reconcile must now preserve the deep cache even when LinkedPRNumberShallow changes.
 	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
-	c.Bootstrap(&gh.ProjectBoard{
-		ProjectID: "PID", Title: "T", OwnerType: "organization",
+	testBootstrapFromBoard(c, &gh.ProjectBoard{
+		ProjectID: "PID",
 		Items: []gh.ProjectItem{
 			{ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", Status: "Research",
 				LinkedPRNumber: 0, LinkedPRNumberShallow: 0},
@@ -1103,8 +1107,8 @@ func TestFetchProjectBoardFallsThroughWhenPaused(t *testing.T) {
 		ProjectID: "PID2", Items: []gh.ProjectItem{{Number: 42, Repo: "o/r"}},
 	}}
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
-	c.Bootstrap(&gh.ProjectBoard{
-		ProjectID: "PID", Title: "T", OwnerType: "organization",
+	testBootstrapFromBoard(c, &gh.ProjectBoard{
+		ProjectID: "PID",
 		Items: []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"}},
 	})
 	c.Pause()
@@ -1564,7 +1568,7 @@ func seedCacheWithStalePRLink2(t *testing.T, logFn func(string, ...any)) *CacheI
 // ---------------------------------------------------------------------------
 
 func TestApplyLabelAdded(t *testing.T) {
-	c := seedCache(t) // item #1 has labels: ["enhancement"]
+	c := seedCache(t)
 	key := ItemKey("owner/repo", 1)
 
 	before := time.Now()
@@ -1597,7 +1601,8 @@ func TestApplyLabelAddedIdempotent(t *testing.T) {
 	c := seedCache(t)
 	key := ItemKey("owner/repo", 1)
 
-	c.ApplyLabelAdded(key, "enhancement") // already present
+	c.ApplyLabelAdded(key, "enhancement") // seed the label first
+	c.ApplyLabelAdded(key, "enhancement") // re-apply to test idempotency
 
 	labels, err := c.FetchLabels("owner", "repo", 1)
 	if err != nil {
@@ -1619,9 +1624,10 @@ func TestApplyLabelAddedIdempotent(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestApplyLabelRemoved(t *testing.T) {
-	c := seedCache(t) // item #1 has labels: ["enhancement"]
+	c := seedCache(t)
 	key := ItemKey("owner/repo", 1)
 
+	c.ApplyLabelAdded(key, "enhancement") // seed the label before removing
 	before := time.Now()
 	c.ApplyLabelRemoved(key, "enhancement")
 
@@ -2363,6 +2369,10 @@ func TestBootstrapFromProbe_ClosedCleanupStageTerminal(t *testing.T) {
 	s := testGetState(t, c, "owner/repo", 1)
 	if !s.Terminal {
 		t.Error("Terminal = false for closed cleanup-stage item; want true")
+	}
+	snap := testGetSnap(t, c, "owner/repo", 1)
+	if !snap.IsTerminal() {
+		t.Error("IsTerminal() = false for closed cleanup-stage item; want true")
 	}
 }
 
