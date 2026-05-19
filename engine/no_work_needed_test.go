@@ -199,7 +199,7 @@ func TestHandleNoWorkNeeded_ClosesIssue(t *testing.T) {
 
 	// Wire up a live CacheImpl so the ApplyIssueClosed write-through is exercised.
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
-	cache.Bootstrap(&gh.ProjectBoard{
+	testBootstrapFromBoard(cache, &gh.ProjectBoard{
 		ProjectID: "PVT_1",
 		Items: []gh.ProjectItem{
 			{ID: "I_5", ItemID: "PVTI_5", Number: 5, Repo: "owner/repo", Status: "Plan"},

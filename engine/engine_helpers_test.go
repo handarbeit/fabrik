@@ -52,24 +52,38 @@ func testEngineWithCache(client *mockGitHubClient, claude *mockClaudeInvoker) (*
 	eng := testEngine(client, claude)
 
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
-	cache.Bootstrap(&gh.ProjectBoard{
-		ProjectID: "PVT_1",
-		Title:     "Test Board",
-		OwnerType: "organization",
-		Items: []gh.ProjectItem{
-			{
-				ID:     "I_001",
-				ItemID: "PVTI_001",
-				Number: 1,
-				Title:  "Test Issue",
-				Repo:   "owner/repo",
-				Status: "Research",
-				Labels: []string{},
-			},
-		},
-	})
+	cache.BootstrapFromProbe([]gh.BoardProbeItem{
+		{ContentID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", Status: "Research"},
+	}, "PVT_1", testStages())
 	eng.readClient = cache
 	return eng, cache
+}
+
+// testBootstrapFromBoard adapts a *gh.ProjectBoard to BootstrapFromProbe format,
+// seeding labels separately via ApplyLabelAdded. Used to migrate tests off the
+// removed Bootstrap method.
+func testBootstrapFromBoard(cache *boardcache.CacheImpl, board *gh.ProjectBoard) {
+	probeItems := make([]gh.BoardProbeItem, 0, len(board.Items))
+	for _, item := range board.Items {
+		probeItems = append(probeItems, gh.BoardProbeItem{
+			ContentID:          item.ID,
+			ItemID:             item.ItemID,
+			Number:             item.Number,
+			IsPR:               item.IsPR,
+			IsClosed:           item.IsClosed,
+			Status:             item.Status,
+			Repo:               item.Repo,
+			EffectiveUpdatedAt: item.UpdatedAt,
+			LinkedPRNumber:     item.LinkedPRNumber,
+		})
+	}
+	cache.BootstrapFromProbe(probeItems, board.ProjectID, nil)
+	for _, item := range board.Items {
+		key := boardcache.ItemKey(item.Repo, item.Number)
+		for _, l := range item.Labels {
+			cache.ApplyLabelAdded(key, l)
+		}
+	}
 }
 
 func testStagesWithCleanup() []*stages.Stage {
