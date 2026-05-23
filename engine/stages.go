@@ -455,54 +455,6 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 	return nil
 }
 
-// handleDecomposed is called when a stage outputs the FABRIK_DECOMPOSED marker.
-// It adds the stage completion label and moves the parent issue directly to Done
-// on the project board, bypassing all remaining pipeline stages.
-// This is only expected from the Plan stage when it splits an issue into sub-issues.
-func (e *Engine) handleDecomposed(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
-	e.logf(item.Number, "done", "stage %q decomposed issue into sub-issues — moving to Done\n", stage.Name)
-
-	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-
-	// Add the stage completion label so the engine won't re-run this stage on restart.
-	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
-		e.logf(item.Number, "warn", "could not add completion label: %v\n", err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+completeLabel)
-		}
-	}
-
-	if e.statusField == nil {
-		e.logf(item.Number, "warn", "status field metadata not available; cannot move to Done\n")
-		return
-	}
-
-	optionID, ok := e.statusField.Options["Done"]
-	if !ok {
-		e.logf(item.Number, "warn", "no status option %q found on project board (available: %v); cannot move to Done\n",
-			"Done", mapKeys(e.statusField.Options))
-		return
-	}
-
-	e.logf(item.Number, "advance", "moving decomposed issue to Done\n")
-	// write-through: already covered by cacheImpl.UpdateItemStatus call in the else block below
-	if err := e.client.UpdateProjectItemStatus(board.ProjectID, item.ItemID, e.statusField.FieldID, optionID); err != nil {
-		e.logf(item.Number, "warn", "could not move issue to Done: %v\n", err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.UpdateItemStatus(boardcache.ItemKey(item.Repo, item.Number), "Done")
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
-		}
-	}
-}
-
 // handleNoWorkNeeded is called when a stage outputs both FABRIK_STAGE_COMPLETE and
 // FABRIK_NO_WORK_NEEDED. It marks the emitting stage complete, adds dummy
 // stage:<name>:complete labels for all subsequent non-cleanup stages (with a one-line
