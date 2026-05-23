@@ -88,10 +88,10 @@ Each axis: a compact table, a short narrative, and an honest verdict.
 | Process model | Electron main + renderer over IPC; no HTTP server | Single Go process; poll loop drives all work |
 | Persistence | SQLite at `.kanbots/db.sqlite` | No local DB; durable state lives on github.com |
 | Config | `.kanbots/config.json` + SQLite personas | `.fabrik/stages/*.yaml` + stage YAML defaults baked in binary |
-| Restart recovery | SQLite survives; decision state on the card; `--resume <sessionId>` for sessions | GitHub labels + rocket reactions (ADR 009); no session resume |
+| Restart recovery | SQLite survives; decision state on the card; `--resume <sessionId>` for any re-dispatch | GitHub labels + rocket reactions (ADR 009); session ID persisted per-stage in `.fabrik/sessions/`; `--resume` passed on same-stage retry and turn extension |
 | Install footprint | Electron runtime (~300 MB), local SQLite | Single Go binary; no runtime dependency beyond `git` and `claude` |
 
-**Where KanBots is better**: Electron delivers a real GUI (React 19 + Vite 6) with a zero-config install for individual developers. Decision state and cost totals survive restarts natively. Session resume via `--resume` eliminates full-context resend on retry.
+**Where KanBots is better**: Electron delivers a real GUI (React 19 + Vite 6) with a zero-config install for individual developers. Decision state and cost totals survive restarts natively. KanBots resumes the Claude session for any re-dispatch on the same card (session ID in SQLite), so cross-dispatch context is preserved without resending history.
 
 **Where Fabrik is better**: zero GUI footprint, purpose-built for shared team boards. The daemon model scales to N concurrent issues without per-user app instances. Durable state on github.com is inspectable by any team member without running the daemon.
 
@@ -140,11 +140,11 @@ Each axis: a compact table, a short narrative, and an honest verdict.
 | Stage failure / retry | Dispatcher retries the same `agent_run`; new run on explicit re-dispatch | Engine re-invokes the failed stage on next poll tick if `stage:*:complete` not set |
 | Mid-stage interruption | Decision Prompt pauses stdin; state on SQLite card survives restart | `FABRIK_BLOCKED_ON_INPUT` marker → engine sets `fabrik:awaiting-input`; engine resumes on next comment |
 
-**Where KanBots is better**: `--resume <sessionId>` is a material cost-reduction win — Fabrik re-sends full context on every invocation. `splitIssue` enabling child cards for QA loops is a creative mechanism for self-spawning work decomposition.
+**Where KanBots is better**: KanBots uses `--resume <sessionId>` for any re-dispatch on the same card, eliminating full-context resend across all retries and continuations. Fabrik also uses `--resume` but scoped to same-stage retries and turn extension (`engine/claude.go:423-426`); fresh stage starts still send full context via `.fabrik-context/` files. `splitIssue` enabling child cards for QA loops is a creative mechanism for self-spawning work decomposition.
 
 **Where Fabrik is better**: per-stage context-file handoff is explicit and human-readable. The Research output is a committed artifact that the Plan stage reads; Plan output is committed and Implement reads it. KanBots' single-session model has no equivalent for structured inter-agent handoff.
 
-**Different**: session resume (KanBots) vs. context-file handoff (Fabrik) are two valid approaches to continuity. They solve different problems: resume minimizes token cost on retry; context files enable structured handoff across stage boundaries.
+**Different**: both tools use `--resume` for within-invocation continuity; the gap is scope. KanBots resumes across any re-dispatch (SQLite persists session ID per card); Fabrik resumes same-stage retries and turn extension (files at `.fabrik/sessions/issue-N/<stage>.session`) but starts fresh at each stage boundary. Context-file handoff (Fabrik's `.fabrik-context/`) handles cross-stage continuity differently — explicit and human-readable, but re-sends content on each new stage.
 
 ### 5. Worktree & git management
 
@@ -294,7 +294,7 @@ Triage tags: `adopt` / `consider` / `reject` / `watch`. One or two sentences; de
 
 ### Consider
 
-2. **Session resume via `--resume <sessionId>`.** `consider`, with depth — KanBots persists the `sessionId` from the `session` event on the `agent_runs` row and passes `claude --resume <sessionId>` on retry, eliminating full-context resend. Fabrik re-sends full context (issue body + prior stage outputs) on every invocation, which grows proportionally with pipeline depth. The engineering question: does `--resume` survive a worktree switch? Claude Code's session context is server-side (keyed on session ID), not filesystem-bound. If `--resume` works across worktrees, adding it to Fabrik's retry path would reduce token cost on failed-stage retries. Investigate before committing.
+2. **Cross-stage session resume.** `consider`, revised — Fabrik already uses `--resume <sessionId>` for same-stage retries and turn extension (session file at `.fabrik/sessions/issue-N/<stage>.session`; `engine/claude.go:423-426`). The open question is whether to pass the session ID across stage boundaries — e.g., carry the Implement session into Review's first invocation — to reduce token cost for deep pipelines. KanBots achieves cross-dispatch resume by storing session IDs in SQLite per card. The engineering question remains: does Claude's session context stay coherent across worktree fetches and rebases between stages? If yes, cross-stage session reuse would materially reduce context-resend cost as pipeline depth grows. Investigate before committing.
 
 3. **Pre-push hook in every worktree.** `consider` — KanBots installs a pre-push hook at worktree creation time. This is a defense-in-depth layer orthogonal to Fabrik's `--permission-mode dontAsk`: even if the agent somehow bypasses the permission mode (e.g., via `fabrik:unrestricted`), the hook prevents autonomous publishing. Adding a standard pre-push hook during `engine/worktree.go`'s worktree creation step is low-friction and composable with existing posture. It does not conflict with `fabrik:unrestricted` — `unrestricted` widens what the agent can do locally; the hook prevents publishing regardless. Consider a hook that blocks direct pushes and prints a message directing the operator to review and manually push or promote.
 
@@ -318,7 +318,7 @@ Triage tags: `adopt` / `consider` / `reject` / `watch`. One or two sentences; de
 
 KanBots and Fabrik converge on the **outer shape** — kanban board as source of truth, per-task git worktrees, AI coding agent runner, local execution — and diverge on **almost every internal contract**: local-first vs. daemon; SQLite vs. GitHub-native state; single-dispatch vs. multi-stage pipeline; `bypassPermissions` vs. `dontAsk`; MCP surface vs. no MCP surface (Fabrik trails here). The divergences are deliberate on both sides; neither architecture is wrong.
 
-Where KanBots is materially ahead today: **cost management** (budget caps, live cost meter, explicit `stopReason`), **session resume** (eliminates full-context resend on retry), **MCP surface** (board as IDE integration point), **multi-provider** (Claude Code + Codex via `AgentCliAdapter`), **pre-push safety hook**, and **path-scope containment**.
+Where KanBots is materially ahead today: **cost management** (budget caps, live cost meter, explicit `stopReason`), **cross-dispatch session resume** (KanBots resumes for any re-dispatch; Fabrik resumes only within same-stage retry and turn extension), **MCP surface** (board as IDE integration point), **multi-provider** (Claude Code + Codex via `AgentCliAdapter`), **pre-push safety hook**, and **path-scope containment**.
 
 Where Fabrik is materially ahead today: **multi-stage pipeline** (per-stage model, tool allowlist, skill, comment prompt, inter-stage context handoff), **GitHub-native durable state** (inspectable by any team member, no local DB), **comment-driven revision at stage granularity** (reaction-based idempotency, per-stage `comment_prompt`), **safer default trust posture** (`dontAsk` vs. `bypassPermissions`), and **shared team board** (no per-user app instance).
 
