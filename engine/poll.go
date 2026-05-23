@@ -1606,6 +1606,15 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 		}
 		newKeys[fmt.Sprintf("%s#%d", repo, pi.Number)] = true
 
+		// Stage-membership guard: skip deep-fetch for items in columns that have no
+		// matching Fabrik stage. Unconfigured items (Backlog, Triage, etc.) are never
+		// dispatched by itemMayNeedWork; freshening their cache entries is wasted work.
+		// The guard must come after newKeys[key]=true so these items are not falsely
+		// evicted from the store by the post-loop tombstoning pass (lines below).
+		if stages.FindStage(e.cfg.Stages, pi.Status) == nil {
+			continue
+		}
+
 		snap, snapErr := e.store.Get(repo, pi.Number)
 		if snapErr != nil {
 			// New item on board — seed minimal state into the store.
