@@ -47,10 +47,18 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 		e.logf(item.Number, "ci-gate", "could not fetch linked PR: %v — blocking until API recovers\n", err)
 		return true, false, false // transient error; retry on next poll
 	}
-	if pr == nil || pr.HeadSHA == "" {
+	if pr == nil {
 		e.logf(item.Number, "ci-gate", "no linked PR found; CI gate clears (no PR to check)\n")
 		e.addCompleteLabelAndRemoveCI(owner, repo, item, stage)
 		return false, false, false
+	}
+	if pr.HeadSHA == "" {
+		// PR exists but HeadSHA is not yet populated in the cache (transient state
+		// between PRDetailsUpdated and PRHeadSHAUpdated, or a stale cache record that
+		// Fix C in boardcache.FetchLinkedPR should prevent). Block until SHA is
+		// available rather than silently disarming the CI gate.
+		e.logf(item.Number, "ci-gate", "linked PR #%d has no HeadSHA — blocking until SHA is populated\n", pr.Number)
+		return true, false, false
 	}
 
 	// Trust GitHub's branch-protection-aware mergeable_state when positive:
