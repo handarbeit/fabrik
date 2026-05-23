@@ -1,0 +1,280 @@
+package engine
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/handarbeit/fabrik/boardcache"
+	gh "github.com/handarbeit/fabrik/github"
+)
+
+// SpawnBlock represents one child issue declared in a Plan's FABRIK_SPAWN_CHILD_BEGIN/END block.
+type SpawnBlock struct {
+	Repo  string // "owner/repo"
+	Title string
+	Body  string
+}
+
+// ParseSpawnBlocks scans body for all FABRIK_SPAWN_CHILD_BEGIN/END pairs and
+// returns the parsed spawn blocks in order. Malformed or incomplete pairs are
+// silently skipped. The BEGIN marker must be followed by the target repo on
+// the same line: "FABRIK_SPAWN_CHILD_BEGIN owner/repo". The first non-empty
+// line after BEGIN is the TITLE: line; the body starts after the blank line
+// following the title.
+func ParseSpawnBlocks(body string) []SpawnBlock {
+	const beginPrefix = "FABRIK_SPAWN_CHILD_BEGIN"
+	const endMarker = "FABRIK_SPAWN_CHILD_END"
+
+	var blocks []SpawnBlock
+	remaining := body
+	for {
+		beginIdx := strings.Index(remaining, beginPrefix)
+		if beginIdx == -1 {
+			break
+		}
+
+		// Extract the rest of the BEGIN line to get the repo argument.
+		lineEnd := strings.IndexByte(remaining[beginIdx:], '\n')
+		var beginLine, afterBegin string
+		if lineEnd == -1 {
+			beginLine = remaining[beginIdx:]
+			afterBegin = ""
+		} else {
+			beginLine = remaining[beginIdx : beginIdx+lineEnd]
+			afterBegin = remaining[beginIdx+lineEnd+1:]
+		}
+
+		// BEGIN line must be exactly "FABRIK_SPAWN_CHILD_BEGIN owner/repo".
+		// Strip trailing \r if present (CRLF files).
+		beginLine = strings.TrimRight(beginLine, "\r")
+		parts := strings.SplitN(strings.TrimPrefix(beginLine, beginPrefix), " ", -1)
+		repo := ""
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				repo = p
+				break
+			}
+		}
+
+		if repo == "" || !strings.Contains(repo, "/") {
+			// Malformed — advance past this BEGIN and keep scanning.
+			remaining = remaining[beginIdx+len(beginPrefix):]
+			continue
+		}
+
+		endIdx := strings.Index(afterBegin, endMarker)
+		if endIdx == -1 {
+			// No matching END — stop scanning.
+			break
+		}
+
+		blockContent := afterBegin[:endIdx]
+
+		// Advance remaining past this full block.
+		remaining = afterBegin[endIdx+len(endMarker):]
+
+		// Parse TITLE: from the first non-empty line.
+		title, blockBody := parseTitleAndBody(blockContent)
+		if title == "" {
+			continue // malformed block
+		}
+
+		blocks = append(blocks, SpawnBlock{
+			Repo:  repo,
+			Title: title,
+			Body:  blockBody,
+		})
+	}
+	return blocks
+}
+
+// parseTitleAndBody extracts the title (from the "TITLE: ..." line) and the
+// remaining body content from the inside of a FABRIK_SPAWN_CHILD_BEGIN/END block.
+func parseTitleAndBody(content string) (title, body string) {
+	lines := strings.Split(content, "\n")
+	titleIdx := -1
+	for i, l := range lines {
+		l = strings.TrimRight(l, "\r")
+		trimmed := strings.TrimSpace(l)
+		if trimmed == "" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "TITLE:") {
+			title = strings.TrimSpace(strings.TrimPrefix(trimmed, "TITLE:"))
+			titleIdx = i
+			break
+		}
+		// First non-empty line that isn't a TITLE: prefix — malformed.
+		return "", ""
+	}
+	if title == "" || titleIdx == -1 {
+		return "", ""
+	}
+
+	// Body is everything after the TITLE: line, trimmed.
+	bodyLines := lines[titleIdx+1:]
+	body = strings.TrimSpace(strings.Join(bodyLines, "\n"))
+	return title, body
+}
+
+// childFooter returns the engine-appended back-reference footer for a spawned
+// child issue per FR-011.
+func childFooter(parentOwner, parentRepo string, parentNumber int) string {
+	return fmt.Sprintf("\n---\n\n*Spawned by Fabrik from parent issue %s/%s#%d as a multi-issue decomposition. The parent's plan is at the link above.*",
+		parentOwner, parentRepo, parentNumber)
+}
+
+// preImplement runs the pre-Implement step for stage "Implement". It parses
+// the parent's Plan comment for FABRIK_SPAWN_CHILD_BEGIN/END blocks and, when
+// found, creates the child issues on GitHub, adds them to the project board,
+// links them as blockedBy dependencies of the parent, and marks the parent
+// with fabrik:children-spawned.
+//
+// Returns (true, nil) when children were spawned — the Implement Claude
+// invocation must be skipped in this case; checkDependencies will block the
+// parent on its next evaluation cycle.
+// Returns (false, nil) when there is nothing to do (no blocks, or already spawned).
+// Returns (false, err) on any fatal error; the parent is paused before returning.
+func (e *Engine) preImplement(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem) (bool, error) {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+
+	// Idempotency guard: if children have already been spawned, skip.
+	if hasLabel(item, "fabrik:children-spawned") {
+		return false, nil
+	}
+
+	// Find the most recent Plan stage comment.
+	planComment := findStageComment(item.Comments, "Plan")
+	if planComment == nil {
+		return false, nil
+	}
+
+	blocks := ParseSpawnBlocks(planComment.Body)
+	if len(blocks) == 0 {
+		return false, nil
+	}
+
+	e.logf(item.Number, "spawn", "pre-Implement: found %d child(ren) to spawn\n", len(blocks))
+
+	// Validate all target repos before any mutation.
+	uniqueRepos := make(map[string]struct{})
+	for _, b := range blocks {
+		uniqueRepos[b.Repo] = struct{}{}
+	}
+	var unmanaged []string
+	for repo := range uniqueRepos {
+		e.mu.Lock()
+		_, ok := e.worktreeManagers[repo]
+		e.mu.Unlock()
+		if !ok {
+			unmanaged = append(unmanaged, repo)
+		}
+	}
+	if len(unmanaged) > 0 {
+		msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nThe following repos are not in Fabrik's managed-repo set. Add them to your configuration, then remove `fabrik:paused` to retry:\n\n%s",
+			"- "+strings.Join(unmanaged, "\n- "))
+		e.postSpawnComment(owner, repo, item, msg)
+		e.addPausedLabelToItem(owner, repo, item)
+		return false, fmt.Errorf("pre-implement: unmanaged repos: %s", strings.Join(unmanaged, ", "))
+	}
+
+	// Spawn children in order.
+	var spawned []string
+	for i, block := range blocks {
+		childOwner, childRepo, ok := parseOwnerRepoStr(block.Repo)
+		if !ok {
+			msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nInvalid repo in spawn block #%d: `%s`. Created so far: %s\n\nRemove `fabrik:paused` after fixing the Plan output to retry.",
+				i+1, block.Repo, formatSpawnedList(spawned))
+			e.postSpawnComment(owner, repo, item, msg)
+			e.addPausedLabelToItem(owner, repo, item)
+			return false, fmt.Errorf("pre-implement: invalid repo %q in block %d", block.Repo, i+1)
+		}
+
+		fullBody := block.Body + childFooter(owner, repo, item.Number)
+		childNumber, childNodeID, err := e.client.CreateIssue(childOwner, childRepo, block.Title, fullBody)
+		if err != nil {
+			msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nFailed to create child issue %d/%d in `%s`: `%v`\n\nCreated so far: %s\n\nManually close any orphaned children, remove `fabrik:paused`, then re-advance to retry.",
+				i+1, len(blocks), block.Repo, err, formatSpawnedList(spawned))
+			e.postSpawnComment(owner, repo, item, msg)
+			e.addPausedLabelToItem(owner, repo, item)
+			return false, fmt.Errorf("pre-implement: creating child %d: %w", i+1, err)
+		}
+		e.logf(item.Number, "spawn", "created child %s/%s#%d\n", childOwner, childRepo, childNumber)
+		spawned = append(spawned, fmt.Sprintf("%s#%d", block.Repo, childNumber))
+
+		// Add child to the project board.
+		if _, err := e.client.AddProjectV2ItemById(board.ProjectID, childNodeID); err != nil {
+			msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nFailed to add child %s/%s#%d to project board: `%v`\n\nCreated so far: %s\n\nManually close any orphaned children, remove `fabrik:paused`, then re-advance to retry.",
+				childOwner, childRepo, childNumber, err, formatSpawnedList(spawned))
+			e.postSpawnComment(owner, repo, item, msg)
+			e.addPausedLabelToItem(owner, repo, item)
+			return false, fmt.Errorf("pre-implement: adding child %s#%d to project: %w", block.Repo, childNumber, err)
+		}
+
+		// Link child as a blockedBy dependency of the parent.
+		// item.ID is the parent issue's GraphQL node ID.
+		if err := e.client.AddBlockedByIssue(item.ID, childNodeID); err != nil {
+			msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nFailed to link child %s/%s#%d as blocked-by of parent: `%v`\n\nCreated so far: %s\n\nManually close any orphaned children, remove `fabrik:paused`, then re-advance to retry.",
+				childOwner, childRepo, childNumber, err, formatSpawnedList(spawned))
+			e.postSpawnComment(owner, repo, item, msg)
+			e.addPausedLabelToItem(owner, repo, item)
+			return false, fmt.Errorf("pre-implement: linking child %s#%d as blocked-by: %w", block.Repo, childNumber, err)
+		}
+
+		// Apply fabrik:sub-issue label to child (for human-visible filtering; no engine semantics).
+		if err := e.client.AddLabelToIssue(childOwner, childRepo, childNumber, "fabrik:sub-issue"); err != nil {
+			e.logf(item.Number, "warn", "could not add fabrik:sub-issue to %s#%d: %v\n", block.Repo, childNumber, err)
+		}
+	}
+
+	// All children spawned successfully — mark parent with idempotency guard.
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:children-spawned"); err != nil {
+		e.logf(item.Number, "warn", "could not add fabrik:children-spawned: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:children-spawned")
+	}
+
+	e.logf(item.Number, "spawn", "pre-Implement: spawned %d child(ren); parent will be gated until all close\n", len(blocks))
+	return true, nil
+}
+
+// postSpawnComment posts an error comment on the parent issue during a spawn failure.
+func (e *Engine) postSpawnComment(owner, repo string, item gh.ProjectItem, msg string) {
+	if dbID, err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
+		e.logf(item.Number, "warn", "could not post spawn error comment: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+			DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
+		})
+	}
+}
+
+// addPausedLabelToItem adds fabrik:paused to the given item, with cache write-through.
+func (e *Engine) addPausedLabelToItem(owner, repo string, item gh.ProjectItem) {
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
+		e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
+	}
+}
+
+// parseOwnerRepoStr splits "owner/repo" into owner and repo. Returns false if
+// the string does not contain exactly one "/" with non-empty parts on each side.
+func parseOwnerRepoStr(s string) (owner, repo string, ok bool) {
+	idx := strings.Index(s, "/")
+	if idx <= 0 || idx == len(s)-1 {
+		return "", "", false
+	}
+	return s[:idx], s[idx+1:], true
+}
+
+// formatSpawnedList formats the list of already-spawned children for error messages.
+func formatSpawnedList(spawned []string) string {
+	if len(spawned) == 0 {
+		return "none"
+	}
+	return strings.Join(spawned, ", ")
+}
