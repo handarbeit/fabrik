@@ -30,6 +30,7 @@ Map out everything relevant to the specified feature:
 - **Test coverage** of the affected areas
 - **Patterns and conventions** used in similar parts of the codebase
 - **Existing ADRs** in the `adrs/` directory — read these at the start of research. Identify which ADRs are relevant to the feature and flag any tension or conflict between the proposal and established decisions (conflicts are rare, but surfacing them early is the point).
+- **Cross-repo signals** — file paths or explicit references to other repositories in the spec, code that clearly belongs in a sibling repo, or library/service boundaries that imply multiple repos must change. Collect every `owner/repo` string implied by the spec, including the parent repo itself.
 
 Be thorough. Read the actual code, don't guess from file names. Follow call chains to understand how components connect.
 
@@ -92,7 +93,13 @@ Technical risks identified during research.
 
 ### Documentation Impact
 _No documentation impact._
+
+### Repositories
+owner/repo
+other-owner/other-repo
 ```
+
+The `### Repositories` section is **mandatory** in every Research output. It lists every repo the Plan stage may need to spawn sub-issues into — one `owner/repo` per line, including the parent's own repo. When no cross-repo signals exist, list only the parent repo. Plan uses this as its authoritative set of valid spawn targets and will not spawn into any repo not listed here.
 
 ## What You Do NOT Do
 
@@ -146,4 +153,5 @@ Before signaling completion, verify:
 - [ ] Architecture and data flow documented
 - [ ] Technical constraints surfaced
 - [ ] No unresolved technical questions
+- [ ] `### Repositories` section present listing all participating repos (at minimum the parent's own repo)
 - [ ] A planner could design the implementation from your findings alone

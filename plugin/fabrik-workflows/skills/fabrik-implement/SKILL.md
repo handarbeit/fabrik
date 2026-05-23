@@ -160,6 +160,24 @@ Before signaling completion:
 
   **Exception — review thread resolution**: Resolving a PR review thread via `gh api GraphQL` (e.g., the `resolveReviewThread` mutation) is permitted. Only *comment creation* is prohibited, not *thread resolution*.
 
+## Worktree Boundary
+
+Your assigned worktree is your entire operating boundary. You MUST NOT cross it.
+
+**Prohibited actions**:
+- Writing, editing, or deleting files outside the worktree working directory — regardless of absolute path
+- Running `gh pr create`, `git push`, or branch creation commands targeting any repo other than the worktree's own repo
+- `cd`-ing into, or referencing via absolute path, any working copy in the user's local environment outside `.fabrik/worktrees/`
+
+**When the spec references out-of-scope work**: If your Plan or spec describes changes in another repo (files, APIs, or logic that lives outside the worktree's repo), do NOT reach outside. Instead:
+
+1. Emit `FABRIK_BLOCKED_ON_INPUT` with an explanatory comment explaining what was found and why it can't be done in this worktree.
+2. The user or the engine will create a separate issue for the out-of-scope repo and link it as a dependency.
+
+Out-of-scope work in the same Fabrik run belongs to a sibling issue's worktree, not this one. Implement does its part; sibling issues do theirs.
+
+> Note: Hard tool-restriction enforcement of these guardrails is tracked in [handarbeit/fabrik#761](https://github.com/handarbeit/fabrik/issues/761). Until that ships, this section is the authoritative behavioral requirement. Follow it exactly.
+
 ## Engine Context
 
 **Before you run**: The engine has created a worktree on branch `fabrik/issue-<N>`, rebased onto main (on first run) or left as-is (on retry to preserve your context). A draft PR may have been created.
