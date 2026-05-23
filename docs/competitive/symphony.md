@@ -96,11 +96,11 @@ This document is a frank, side-by-side comparison based on Symphony's `SPEC.md` 
 |---|---|---|
 | Concurrency limit | Global `max_concurrent_agents` (default 10) + per-state overrides | Global `MaxConcurrent` (default 5), no per-stage override |
 | Retry model | Exponential backoff: `min(10000 × 2^(attempt−1), max_retry_backoff_ms)`; continuation retries (1s after normal exit) | Fixed `max_retries` count per stage, no backoff |
-| Restart recovery | Fresh poll + reuse workspaces; no retry queue restored | Labels + reactions are durable; `processedSet` is ephemeral but rocket reactions prevent re-processing |
-| Idempotency | `claimed` set prevents duplicate dispatch | `stage:X:in_progress` + rocket reactions; `processedSet` for same-session deduplication |
+| Restart recovery | Fresh poll + reuse workspaces; no retry queue restored | Labels + reactions are durable; `itemstate.Store` is in-memory but rocket reactions provide cross-restart idempotency |
+| Idempotency | `claimed` set prevents duplicate dispatch | `stage:X:in_progress` + rocket reactions; `itemstate.Store` (`ProcessedComments`, `LastAttemptAt`) for within-session deduplication |
 | Stall detection | Yes — kills stalled sessions after `stall_timeout_ms`, schedules retry | Yes — 15-minute inactivity timeout kills inactive sessions |
 
-**Fabrik is better here:** Durable state via labels means an accurate picture of in-flight work after restart — not "re-poll and hope." Rocket reactions prevent re-processing comments across restarts even when `processedSet` is lost. An operator can read the issue labels on github.com and understand exactly what state the pipeline left it in.
+**Fabrik is better here:** Durable state via labels means an accurate picture of in-flight work after restart — not "re-poll and hope." Rocket reactions prevent re-processing comments across restarts even when the in-memory `itemstate.Store` is rebuilt. An operator can read the issue labels on github.com and understand exactly what state the pipeline left it in.
 
 **Symphony is better here:** Exponential backoff is more sophisticated than Fabrik's fixed retry count. Symphony's formula is well-calibrated for transient failures; Fabrik's fixed count can thrash when the failure is persistent. Per-state concurrency controls are operationally useful. The continuation retry (1-second re-poll after normal worker exit) ensures issues don't stall waiting for the next full poll tick.
 
@@ -113,7 +113,7 @@ This document is a frank, side-by-side comparison based on Symphony's `SPEC.md` 
 | Dimension | Symphony | Fabrik |
 |---|---|---|
 | Authoritative state | Tracker (Linear state field) | GitHub labels + board column |
-| Runtime state | In-memory orchestrator only | In-memory `processedSet` + durable GitHub labels/reactions |
+| Runtime state | In-memory orchestrator only | In-memory `itemstate.Store` (per-item invocation tracking, processed comments) + durable GitHub labels/reactions |
 | State visibility | Tracker state field + optional HTTP API | GitHub issue labels visible to all collaborators |
 | Recovery state | None (fresh poll on restart) | Labels + reactions survive restart |
 | State granularity | Active / terminal / non-active (3 categories) | 20+ labels encoding per-stage, per-gate state |
@@ -131,14 +131,14 @@ This document is a frank, side-by-side comparison based on Symphony's `SPEC.md` 
 | Dimension | Symphony | Fabrik |
 |---|---|---|
 | Runtime status | Optional HTTP server (`/api/v1/state`, `/api/v1/<id>`, `POST /api/v1/refresh`) | TUI in terminal; no HTTP API |
-| Token accounting | Per-session + aggregate input/output/total tokens, runtime seconds | None |
-| Rate limit tracking | Yes — latest rate-limit payload from agent | None |
+| Token accounting | Per-session + aggregate input/output/total tokens, runtime seconds | Per-invocation cost (USD) + aggregate session totals; surfaced in TUI and stdout logs |
+| Rate limit tracking | Yes — latest Codex/Claude rate-limit payload from agent | GitHub REST + GraphQL limits tracked and logged each poll; TUI shows GraphQL rate stats |
 | Log format | Structured, required: `issue_id`, `issue_identifier`, `session_id` | Structured with `[#N tag]` prefix |
 | Config reload | Dynamic, no restart required | Requires restart |
 
-**Symphony is better here:** The HTTP observability API is substantially better than a TUI for scripting, CI monitoring, and dashboards. The per-issue debug endpoint (`/api/v1/<id>`) is particularly useful for diagnosing stuck issues without tailing logs. Token accounting is essential for cost visibility at scale and helps operators calibrate `max_turns` settings. Rate-limit tracking closes the gap between "why is this slow?" and a concrete answer.
+**Symphony is better here:** The HTTP observability API is substantially better than a TUI for scripting, CI monitoring, and dashboards. The per-issue debug endpoint (`/api/v1/<id>`) is particularly useful for diagnosing stuck issues without tailing logs. Symphony tracks Codex/Claude API rate limits from the agent side; Fabrik tracks only GitHub API rate limits, leaving Claude rate-limit pressure invisible.
 
-**Fabrik is better here:** The TUI is on by default and shows contextual, per-issue status with stage names and issue numbers. It's immediately useful without configuration.
+**Fabrik is better here:** The TUI is on by default with contextual per-issue status, stage names, cost (USD), and turn counts. Token accounting (per-stage invocation and aggregate session totals) and GitHub rate limit stats are surfaced in the TUI and logs without any configuration. Fabrik's GitHub rate-limit backoff system (two-threshold hysteresis) is more sophisticated than Symphony's spec describes.
 
 ---
 
@@ -202,7 +202,7 @@ These are candidate follow-up engineering items. Triage and file separately.
 |---|---|---|---|
 | 1 | **Dynamic config reload** — detect stage YAML changes and re-apply without restart | `adopt` | Reduces operator friction significantly. Symphony makes this a hard requirement. Fabrik restarts are disruptive to in-flight sessions and create an unnecessary operational hazard for prompt iteration. |
 | 2 | **HTTP observability API** — `/api/v1/state` endpoint with running sessions, retry queue, token totals | `adopt` | Much better than TUI for scripting, CI monitoring, and dashboards. The per-issue debug endpoint is particularly useful for diagnosing stuck issues remotely. |
-| 3 | **Token accounting** — per-session + aggregate input/output/total tokens, runtime seconds | `adopt` | Cost visibility at scale. Helps operators identify expensive stages and calibrate `max_turns`. Essentially free to implement if Claude Code session events are parsed. |
+| 3 | **Claude API rate-limit visibility** — surface Claude API rate-limit stats from the agent side (analogous to Symphony's per-session rate-limit payload) | `consider` | Fabrik already tracks per-invocation token cost and GitHub API rate limits. The gap is Claude-side rate-limit pressure: when sessions slow down due to Claude throttling, Fabrik logs nothing. Filling this gap would require parsing rate-limit events from Claude Code output. |
 | 4 | **Exponential backoff retries** — `min(10000 × 2^n, max_retry_backoff_ms)` replacing fixed retry count | `consider` | More graceful under transient failures. Fabrik's fixed retry count can thrash when the underlying failure is persistent (e.g., a flapping remote). |
 | 5 | **Continuation retry** — short re-poll (1s) after normal worker exit | `consider` | Symphony re-checks issue state immediately after a clean exit instead of waiting for the next full poll tick. Less critical for Fabrik since stage completion is explicit, but would help for faster comment detection. |
 | 6 | **Per-stage concurrency controls** — `max_concurrent_agents_by_state` analog | `consider` | Lets operators cap expensive stages (e.g., Implement) without throttling cheap ones (Research). Value scales with the number of concurrent issues being processed. |
