@@ -22,6 +22,10 @@ title: Fabrik Positioning
 - **alessiocol/claude-kanban** — `ACTIVE.md` as shared kanban state across multiple agent sessions; addresses context amnesia between sessions; WIP limits per agent.
 - **The Claude Protocol** (github.com/AvivK5498/The-Claude-Protocol) — 13 Claude Code hooks enforce workflow; integrates with Beads (git-native tickets) as kanban; immutable closed issues; git worktree per task.
 
+### Kanban-first, local agent runners
+
+- **KanBots** (github.com/leodavinci1/kanbots, MIT) — local-first Electron app; SQLite state at `.kanbots/db.sqlite`; up to 4 parallel agent slots in Autopilot; integrates with GitHub **Issues** via Octokit PAT (not GitHub Projects); supports Claude Code and OpenAI Codex via an `AgentCliAdapter` abstraction; Decision Points for human-in-the-loop oversight; MCP server exposing the board to Cursor and Claude Desktop; cost analytics with configurable per-run/per-session USD budget caps; pre-push hook safety layer; OSS free / Pro $19/seat / Enterprise custom. (Detailed comparison: [`docs/competitive/kanbots.md`](competitive/kanbots.md))
+
 ### Platform-level
 
 - **Linear AI Agents** — first-class agent delegation from issues; Copilot integration opens draft PRs from Linear issues.
@@ -33,6 +37,7 @@ title: Fabrik Positioning
 - Split between *observer* tools (watch Claude, reflect state) vs *driver* tools (kanban is source of truth that triggers agent work).
 - Multi-agent coordination (alessiocol, The Claude Protocol) is a distinct and less crowded sub-pattern.
 - GitHub Agentic Workflows is the primary path toward using native GitHub Projects as the driver.
+- **Local-first agent runners** (KanBots) are emerging as a distinct sub-pattern: local Electron app, proprietary SQLite board with optional GitHub Issues sync, parallel agent slots, cost analytics, and MCP surface — optimized for individual developer workflow rather than shared team SDLC.
 
 ## Where Fabrik sits uniquely
 
@@ -53,6 +58,7 @@ title: Fabrik Positioning
 - Git worktree per task — shared with Vibe Kanban and The Claude Protocol.
 - Draft PR → mark-ready lifecycle — shared with most driver tools.
 - Multi-agent support — Fabrik is Claude Code only; Vibe Kanban supports 10+ agents. Conscious scope choice, but worth naming when comparing.
+- Multi-provider agent support — KanBots supports Claude Code and OpenAI Codex via an `AgentCliAdapter` abstraction; Fabrik is Claude Code only. See [`docs/competitive/kanbots.md`](competitive/kanbots.md) for detailed analysis.
 
 ## Candidate positioning lines
 
