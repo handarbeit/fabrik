@@ -1,0 +1,60 @@
+name: Bug report
+description: Something in Fabrik isn't working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Please include as much detail as you can — the more concrete the reproduction, the faster we can fix it.
+  - type: input
+    id: version
+    attributes:
+      label: Fabrik version
+      description: Output of `fabrik --version`
+      placeholder: v0.0.65
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS + arch (e.g. macOS 14.5 / arm64, Linux Ubuntu 22.04 / amd64)
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear, concrete description of the unexpected behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: what-expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Minimal steps to reproduce. If a specific issue triggered it, share the issue number / board column where it stalled.
+      placeholder: |
+        1. Configure Fabrik with ...
+        2. Open issue #N with body ...
+        3. Run `fabrik`
+        4. See ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log excerpts
+      description: |
+        Paste the relevant section of `.fabrik/logs/fabrik.log`. **Redact any tokens before pasting.**
+      render: text
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else — stage YAML overrides, labels on the issue, network conditions, etc.

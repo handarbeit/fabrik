@@ -1,0 +1,27 @@
+name: Feature request
+description: Suggest a new capability or workflow for Fabrik
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the situation that motivates this request — not the proposed solution yet.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What you'd like Fabrik to do. Don't worry about getting the design exactly right — rough is fine.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you've considered
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Links to related issues, prior discussions, or upstream behavior in tools that solve the same problem.
