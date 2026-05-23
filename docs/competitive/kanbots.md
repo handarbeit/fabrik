@@ -99,9 +99,9 @@ KanBots is a local-first Electron desktop app for kanban-board-driven AI agent o
 
 **KanBots:** Per-run, per-card, and per-project cost rollups; a live cost meter; and configurable budget caps that halt execution when the limit is reached.
 
-**Fabrik:** No built-in cost tracking. There is no mechanism to see what a run cost, set a budget, or be alerted when spending exceeds a threshold.
+**Fabrik:** Parses Claude's `total_cost_usd` field from every invocation and logs per-invocation cost (`claudeLog` output, visible in daemon logs) plus aggregate cost stats in the poll loop (format: `[stats] cost: $X.XXXX | in: N | out: N | cache_read: N | cache_write: N`). What is missing: per-issue and per-stage cost is not surfaced in GitHub comments, there are no per-project or per-user rollups, no budget caps or automatic halts, and no alerting when spending exceeds a threshold.
 
-**Assessment:** KanBots leads clearly. This is a meaningful gap for Fabrik — teams using Fabrik at scale have no visibility into Claude API spend until they check their Anthropic billing dashboard. Budget caps would be especially useful for `fabrik:unrestricted` runs, where tool restrictions are lifted.
+**Assessment:** KanBots leads on cost UX. Fabrik has the raw data (cost is logged to daemon stdout per invocation) but no mechanism to surface it where teams actually look — the GitHub issue — or to act on it automatically. The gap is attribution and action, not instrumentation. Budget caps would be especially useful for `fabrik:unrestricted` runs, where tool restrictions are lifted.
 
 ---
 
@@ -139,7 +139,7 @@ KanBots is a local-first Electron desktop app for kanban-board-driven AI agent o
 
 **KanBots:** Ships five Autopilot personas — PM, Senior Engineer, UX Designer, Growth Lead, Reliability Engineer. In Autopilot mode, a persona can autonomously spawn subtasks from a card, creating a self-evolving roadmap. Up to 4 agents run in parallel in Autopilot.
 
-**Fabrik:** No equivalent. Fabrik's pipeline is scoped to a single issue at a time. Cross-issue subtask spawning requires manual issue creation. Sub-issue decomposition is a planned feature (issue #762 area) but is not the same as autonomous persona-driven roadmap generation.
+**Fabrik:** The Plan stage can autonomously decompose an oversized issue into sub-issues by emitting the `FABRIK_DECOMPOSED` marker — the engine then creates the labeled child issues, adds dependency edges, and moves the parent to Done. This decomposition happens once, at Plan time, scoped to a single parent issue. A cross-repo sub-issue decomposition spec (issue #762 area) is in progress but not yet shipped. There are no multi-persona agents, no ongoing autonomous spawning across stages, and no notion of a self-evolving roadmap.
 
 **Assessment:** KanBots leads significantly on autonomous roadmap generation. This is a genuinely differentiated feature that has no Fabrik analog today. Whether this is a gap worth closing depends on how teams use Fabrik — if the issue backlog is human-curated, autonomous persona spawning is noise; if teams want to point an agent at a goal and have it decompose the work, KanBots is well ahead.
 
@@ -161,13 +161,13 @@ KanBots is a local-first Electron desktop app for kanban-board-driven AI agent o
 
 **Consider** — MCP server surface. Exposing the Fabrik board state as an MCP server for Cursor/Claude Desktop is architecturally tractable — the GitHub GraphQL API already provides the data, and a lightweight MCP adapter could surface it without changing the state model. Low risk, new interaction mode.
 
-**Consider** — Per-run cost analytics. Track Claude API spend per issue/stage and surface it in the GitHub comment output. No budget-cap functionality needed to start — visibility alone is high value for teams watching API costs. Fabrik already logs per-stage output; adding a cost field is incremental.
+**Consider** — Per-issue cost surfacing. Fabrik already tracks `total_cost_usd` per invocation and logs it to daemon stdout — the data exists. The incremental work is surfacing per-issue and per-stage cost in the GitHub comment output so teams see it without reading daemon logs. No budget-cap functionality needed to start; visibility alone is high value.
 
 **Consider** — Pre-push safety hook. A git hook that prevents `git push` without explicit engine confirmation would be a meaningful hardening option, especially for `fabrik:unrestricted` runs. Low implementation effort; reduces the blast radius of a runaway agent.
 
 **Consider** — Issue templates / creation helpers. Lightweight `fabrik init --template=feature` (or equivalent) would reduce spec quality variance across teams and lower the barrier for first-time users. Could be as simple as populating `.github/ISSUE_TEMPLATE/` during `fabrik init`.
 
-**Watch** — Autopilot personas / subtask spawning. KanBots' self-evolving roadmap feature is genuinely differentiated and has no Fabrik equivalent. Sub-issue decomposition (issue #762 area) is in progress but targets a different use case — human-defined decomposition, not autonomous persona-driven spawning. Monitor KanBots' user adoption here before deciding whether to close the gap.
+**Watch** — Autopilot personas / subtask spawning. KanBots' self-evolving roadmap feature is genuinely differentiated. Fabrik has Plan-driven decomposition (`FABRIK_DECOMPOSED`) and a cross-repo sub-issue spec in progress (issue #762 area), but neither is the same as continuous persona-driven spawning — autonomous agents that grow the backlog from a high-level goal with no Plan stage boundary. Monitor KanBots' user adoption here before deciding whether to close the gap.
 
 **Watch** — Multi-provider support via AgentCliAdapter. Fabrik is Claude Code only by design; widening this would require significant engine changes. Watch KanBots' adapter abstraction pattern — if it matures and Codex or another provider proves compelling for teams, the adapter interface is worth studying before designing Fabrik's equivalent.
 
