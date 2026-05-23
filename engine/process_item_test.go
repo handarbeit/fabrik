@@ -15,6 +15,14 @@ import (
 	"github.com/handarbeit/fabrik/stages"
 )
 
+// TestMain zeros lockVerifyDelay for the entire package so processItem-calling
+// tests don't incur the 2 s production sleep. Each test that cares can set it
+// explicitly; existing callers that do orig/restore remain correct (orig = 0).
+func TestMain(m *testing.M) {
+	lockVerifyDelay = 0
+	os.Exit(m.Run())
+}
+
 func TestProcessItem_SkipsUnknownStage(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}

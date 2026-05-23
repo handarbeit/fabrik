@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
@@ -311,6 +312,10 @@ func multiStageList(maxTurns int) []*stages.Stage {
 // removed after any of the non-cleanup stages in the Specify→Research→Plan→Implement sequence.
 func TestExtendTurns_PersistsAcrossMultipleStages(t *testing.T) {
 	skipIfNoGit(t)
+	origLock := lockVerifyDelay
+	lockVerifyDelay = 0
+	t.Cleanup(func() { lockVerifyDelay = origLock })
+
 	repoDir := initBareRepo(t)
 	wm := NewWorktreeManager(repoDir)
 
@@ -328,6 +333,7 @@ func TestExtendTurns_PersistsAcrossMultipleStages(t *testing.T) {
 		},
 		client, claude, wm,
 	)
+	eng.heartbeatIntervalOverride = 1 * time.Millisecond
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 
 	for _, stageName := range []string{"Specify", "Research", "Plan", "Implement"} {
