@@ -1,27 +1,22 @@
-# Fabrik v0.0.64
+# Fabrik v0.0.65
 
-Auto-upgrade no longer wipes operator customizations to `.fabrik/plugin/` skills. Fabrik now tracks the last-installed embedded version and distinguishes "embedded advanced" (safe to auto-refresh) from "operator customized" (do not touch — surface a persistent warning and require manual reconciliation).
-
-## Features
-
-- **Customization-aware plugin upgrade** (#746). Fabrik now tracks the embedded plugin hash that was last successfully installed in `.fabrik/plugin/.installed-version`. The auto-upgrade re-exec path and the SIGHUP-restart path no longer unconditionally overwrite `.fabrik/plugin/` — they refresh only when the on-disk files match the recorded installed version (i.e., the operator hasn't customized). When local customizations are detected, the refresh is skipped and a persistent `[custom workflow]` indicator appears in the TUI header.
-- **`fabrik upgrade --force` and `--reconcile` flags**. Plain `fabrik upgrade` now errors out (non-zero exit) when local customizations are present, telling the operator their options instead of silently overwriting. `--force` performs the destructive overwrite and updates the recorded version; `--reconcile` prints a Claude Code reconciliation prompt that the operator can paste into a separate Claude Code session to diff and merge customizations against the new embedded version.
-- **TUI `[custom workflow]` badge and reconciliation dialog**. When customizations are detected, the TUI shows a persistent `[custom workflow]` badge alongside the existing `[skills out of date]` indicator. Pressing `u` opens a three-option dialog: **Reconcile via Claude Code** (prints the reconciliation prompt), **Overwrite (destructive)** (requires typing `OVERWRITE` to confirm), or **Cancel**.
+Finishes the BootstrapFromProbe migration started in #710/#685: the legacy `Bootstrap()` path is gone and all cold-start callers now go through the probe-driven path. Also fixes a stuck-label bug where `fabrik:awaiting-input` was not cleared when a stage emitted `FABRIK_STAGE_COMPLETE`.
 
 ## Fixes
 
-- Various Copilot review findings addressed in the installed-version tracking code.
-- The TUI OVERWRITE confirm flow correctly handles the `delete` key for spec compliance.
+- Clear `fabrik:awaiting-input` on `FABRIK_STAGE_COMPLETE`. Previously, if a stage was paused awaiting user input and the comment-driven resume then completed the stage, the label could remain set and keep the issue visibly "awaiting input" even though work had advanced.
+- Separate `--auto-upgrade` and standalone `fabrik upgrade` plugin-check descriptions so the log output accurately describes which path is running.
+
+## Improvements
+
+- Migrate remaining `Bootstrap` callers to `BootstrapFromProbe` and delete the legacy method. Cold-start now uniformly uses the truly-shallow probe path, completing the architecture introduced in #710.
 
 ## Internal
 
-- New `plugin.CheckPluginState` API and hash primitives for tracking installed version.
-- TUI extended with `CustomWorkflowEvent`, header `customWorkflow` badge, and confirmReconcile state machine.
-- Tests for plugin refresh hash primitives, TUI custom-workflow event routing, dialog state transitions, and OVERWRITE input handling.
-
-## Migration note
-
-Existing customized installs (e.g., fantasy with its spec-kit customizations) will see `.installed-version` populated from current disk hashes on first run after this upgrade — preserving customizations silently. Subsequent embedded changes will surface the `[custom workflow]` badge correctly. If you've been wrestling with auto-upgrade clobbering your changes, this is the release that ends that.
+- New regression test `TestWebhookModeStartup_ClosedDoneItemsNotDeepFetched` covering the terminal-skip path on webhook-mode startup.
+- ADR-044 and `docs/state-machine.md` updated to record probe-based webhook startup and the `awaiting-input` clearance sites.
+- README updates correcting stale non-interactive and SIGHUP upgrade descriptions, plus the customization-protection note.
+- Test-suite cleanup across `boardcache` and `engine` for the Bootstrap removal.
 
 ## Upgrading
 
