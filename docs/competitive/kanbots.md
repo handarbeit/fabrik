@@ -70,7 +70,7 @@ Same outer shape — long-running daemon, per-issue workspaces, AI coding agent,
 6. **Durable state** — GitHub labels (`stage:*:complete`, `fabrik:paused`, `fabrik:awaiting-input`, `fabrik:awaiting-review`, `fabrik:awaiting-ci`, `model:*`, `effort:*`, `fabrik:yolo`, `fabrik:cruise`, `base:*`, etc.) and comment reactions (👀/🚀, ADR 009). No SQLite, no proprietary store. Everything inspectable on github.com without tooling.
 7. **Inter-stage context handoff** — `.fabrik-context/` files injected before each stage invocation: `issue.md` (spec), `stage-<Name>.md` (prior stage output), `pr-description.md`, `codebase-changes.md` (files changed on base branch since last stage). No KanBots analog.
 8. **Comment-driven revision** — per-stage `comment_prompt` / `comment_skill` / `comment_max_turns`; reaction-based durable processed-state (ADR 009); living-document stage comments (ADR 012).
-9. **Cost / observability** — `[#N tag] ...` stdout prefix. No token accounting. No cost budget caps. No rate-limit surfacing beyond hysteresis logic in the engine.
+9. **Cost / observability** — `[#N tag] ...` stdout prefix. Per-invocation `total_cost_usd` and model token counts captured from Claude output; accumulated totals reported in the poll loop (`engine/poll.go`). No configurable budget caps. No live UI cost meter. No rate-limit surfacing beyond hysteresis logic in the engine.
 10. **No MCP surface** — Fabrik does not expose the board as an MCP server.
 11. **Pricing** — OSS (MIT, free), self-hosted. No cloud tier.
 
@@ -217,18 +217,18 @@ Each axis: a compact table, a short narrative, and an honest verdict.
 
 | | KanBots | Fabrik |
 |---|---|---|
-| Cost tracking | **Per-run + per-session USD totals** from `result` event; live cost meter in UI | **None** |
+| Cost tracking | **Per-run + per-session USD totals** from `result` event; live cost meter in UI | Per-invocation `total_cost_usd` + model token counts captured from Claude output; accumulated totals logged in poll loop; no live meter |
 | Budget caps | `runCostBudgetUsd`, `sessionCostBudgetUsd` in `config.json`; terminates with `stopReason: 'cost-budget'` | **None** |
 | Rate-limit handling | `rate_limit` event → `cooldown:changed` broadcast; queued dispatches delayed | Internal hysteresis (ADR 028) but not surfaced |
 | Structured logging | Not documented | `[#N tag] ...` stdout prefix; not key=value |
 | HTTP API / dashboard | None | None |
-| Token accounting | Per-run accumulation in `agent_runs` | None |
+| Token accounting | Per-run accumulation in `agent_runs` | Per-invocation capture (`total_cost_usd` + input/output/cache token counts); no cross-invocation budget enforcement |
 
-This is the axis where Fabrik most clearly trails. KanBots' cost management story is complete and immediate: USD cost per run, configurable caps, explicit termination reason. Fabrik has no equivalent. For operators running many concurrent issues, unbounded cost is a real production risk.
+This is the axis where Fabrik most clearly trails. KanBots' cost management story is complete: USD cost per run, configurable caps, explicit termination reason, live UI meter. Fabrik captures `total_cost_usd` and token counts per invocation and logs cumulative totals in the poll loop, but exposes no configurable budget caps and no UI cost meter. For operators running many concurrent issues, unbounded cost is a real production risk.
 
-**Where KanBots is better**: cost budget caps with `stopReason: 'cost-budget'` is production-essential. Live cost meter in the UI makes cost visible without external tooling. Rate-limit event surfacing is more explicit than Fabrik's hysteresis.
+**Where KanBots is better**: configurable budget caps (`runCostBudgetUsd`, `sessionCostBudgetUsd`) with explicit `stopReason: 'cost-budget'` is production-essential. Live cost meter in the UI makes cost visible without grepping logs. Rate-limit event surfacing is more explicit than Fabrik's hysteresis.
 
-**Where Fabrik is better**: nothing on this axis. Fabrik is behind.
+**Where Fabrik is better**: Fabrik captures and logs per-invocation cost and token counts (`engine/poll.go`); the data is present in operator logs. No budget cap enforcement, but the signal exists to build on.
 
 **Verdict — Adopt cost budget caps.** See Ideas section.
 
