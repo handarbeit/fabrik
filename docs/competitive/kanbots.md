@@ -311,7 +311,7 @@ Triage tags: `adopt` / `consider` / `reject` / `watch`. One or two sentences; de
 
 ## Closing
 
-KanBots and Fabrik converge on the **outer shape** — kanban board as source of truth, per-task git worktrees, AI coding agent runner, local execution — and diverge on **almost every internal contract**: local-first vs. daemon; SQLite vs. GitHub-native state; single-dispatch vs. multi-stage pipeline; `bypassPermissions` vs. `dontAsk`; no MCP vs. no MCP surface (Fabrik trails here). The divergences are deliberate on both sides; neither architecture is wrong.
+KanBots and Fabrik converge on the **outer shape** — kanban board as source of truth, per-task git worktrees, AI coding agent runner, local execution — and diverge on **almost every internal contract**: local-first vs. daemon; SQLite vs. GitHub-native state; single-dispatch vs. multi-stage pipeline; `bypassPermissions` vs. `dontAsk`; MCP surface vs. no MCP surface (Fabrik trails here). The divergences are deliberate on both sides; neither architecture is wrong.
 
 Where KanBots is materially ahead today: **cost management** (budget caps, live cost meter, explicit `stopReason`), **session resume** (eliminates full-context resend on retry), **MCP surface** (board as IDE integration point), **multi-provider** (Claude Code + Codex via `AgentCliAdapter`), **pre-push safety hook**, and **path-scope containment**.
 
