@@ -90,6 +90,7 @@ type ProjectItem struct {
 	// (runProbeAndDeepFetch via BoardProbeItem.LinkedPRNumber). Retained for compatibility; no longer
 	// read by Reconcile.
 	LinkedPRNumberShallow  int
+	LinkedPRHeadSHA        string          // HeadSHA from headRefOid in the GraphQL query (empty if not fetched)
 	LinkedPRReviewRequests []ReviewRequest // Outstanding reviewer requests on the linked PR
 	LinkedPRReviews        []PRReview      // Reviews already submitted on the linked PR
 	// LinkedPRReviewThreadComments holds the inline (per-line) comments from
@@ -163,6 +164,7 @@ type BoardProbeItem struct {
 	EffectiveUpdatedAt time.Time
 	LinkedPRNumber     int
 	LinkedPRUpdatedAt  time.Time
+	LinkedPRHeadSHA    string // headRefOid from GraphQL probe query; empty if no linked PR
 	Status             string
 }
 
