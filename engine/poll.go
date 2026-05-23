@@ -1606,18 +1606,18 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 		}
 		newKeys[fmt.Sprintf("%s#%d", repo, pi.Number)] = true
 
-		// Stage-membership guard: skip deep-fetch for items in columns that have no
-		// matching Fabrik stage. Unconfigured items (Backlog, Triage, etc.) are never
-		// dispatched by itemMayNeedWork; freshening their cache entries is wasted work.
-		// The guard must come after newKeys[key]=true so these items are not falsely
-		// evicted from the store by the post-loop tombstoning pass (lines below).
-		if stages.FindStage(e.cfg.Stages, pi.Status) == nil {
-			continue
-		}
+		// Stage-membership guard: whether the item's column has a matching Fabrik stage.
+		// The guard must come after newKeys[key]=true so unconfigured items are not
+		// falsely evicted from the store by the post-loop tombstoning pass (lines below).
+		configuredStage := stages.FindStage(e.cfg.Stages, pi.Status) != nil
 
 		snap, snapErr := e.store.Get(repo, pi.Number)
 		if snapErr != nil {
-			// New item on board — seed minimal state into the store.
+			// New item on board — skip entirely if not in a configured stage.
+			if !configuredStage {
+				continue
+			}
+			// Seed minimal state into the store.
 			minimal := gh.ProjectItem{
 				ID:             pi.ContentID,
 				ItemID:         pi.ItemID,
@@ -1709,6 +1709,12 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 				LinkedPRNum: pi.LinkedPRNumber,
 				SHA:         pi.LinkedPRHeadSHA,
 			})
+		}
+
+		// Existing item in unconfigured column: probe state updated above (keeps
+		// Status current for TUI and itemMayNeedWork), but deep-fetch is wasted work.
+		if !configuredStage {
+			continue
 		}
 
 		// Deep-fetch when cache is stale relative to effectiveUpdatedAt.

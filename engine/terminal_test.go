@@ -666,3 +666,49 @@ func TestRunProbeAndDeepFetch_UnconfiguredColumn_WarmCache_SkipsDeepFetch(t *tes
 		t.Error("Backlog item should remain in the store after the probe cycle (newKeys guard prevents tombstoning)")
 	}
 }
+
+// TestRunProbeAndDeepFetch_UnconfiguredColumn_StatusDrift_UpdatesStore verifies
+// that when a probe item moves from a configured stage to an unconfigured column
+// (e.g. Research → Backlog), ProbeBoardItemUpdated is still applied so the store
+// reflects the new status — while deep-fetch is still skipped.
+func TestRunProbeAndDeepFetch_UnconfiguredColumn_StatusDrift_UpdatesStore(t *testing.T) {
+	var deepFetchCalls int
+
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return []gh.BoardProbeItem{
+				// Item that was in Research is now in Backlog (unconfigured column).
+				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo",
+					Status: "Backlog", EffectiveUpdatedAt: time.Now()},
+			}, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalls++
+			return nil
+		},
+	}
+
+	eng := testEngine(client, &mockClaudeInvoker{})
+	// Seed the item into the store as if it was previously in a configured stage.
+	eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{
+		ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", Status: "Research",
+	}})
+
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	eng.readClient = cache
+
+	eng.runProbeAndDeepFetch(cache)
+
+	if deepFetchCalls != 0 {
+		t.Errorf("item in unconfigured column: expected 0 FetchItemDetails calls; got %d", deepFetchCalls)
+	}
+
+	// Status must be updated to "Backlog" so TUI and itemMayNeedWork see the correct column.
+	snap, err := eng.store.Get("owner/repo", 1)
+	if err != nil {
+		t.Fatalf("item should remain in store: %v", err)
+	}
+	if got := snap.Status(); got != "Backlog" {
+		t.Errorf("store Status = %q, want %q (ProbeBoardItemUpdated must apply even for unconfigured columns)", got, "Backlog")
+	}
+}
