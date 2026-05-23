@@ -298,12 +298,10 @@ func (wm *WorktreeManager) updateWorktreeFromMain(wtDir, baseBranch string, issu
 		return
 	}
 
-	// Fetch latest from origin. Disable interactive prompts so the subprocess
-	// fails fast when no remote is configured or credentials are required —
-	// Fabrik is a background daemon that cannot handle interactive git prompts.
+	// Fetch latest from origin.
 	cmd := exec.Command("git", "fetch", "origin", baseBranch)
 	cmd.Dir = wtDir
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND=ssh -oBatchMode=yes")
+	cmd.Env = nonInteractiveGitEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		wm.logf(issueNumber, "worktree", "warn: could not fetch origin: %s\n", strings.TrimSpace(string(out)))
 		return
