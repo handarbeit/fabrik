@@ -736,6 +736,22 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	e.writeContextFiles(item, stage, workDir, false)
 	e.symlinkEnvIfEnabled(item.Number, workDir)
 
+	// Pre-Implement step: spawn child issues declared in the Plan output before
+	// invoking Claude. Only runs for the Implement stage.
+	if stage.Name == "Implement" {
+		spawned, spawnErr := e.preImplement(ctx, board, item)
+		if spawnErr != nil {
+			releaseLock()
+			return nil // preImplement already added fabrik:paused; wait for user to re-advance
+		}
+		if spawned {
+			// Children just created. checkDependencies will apply fabrik:blocked
+			// on the next poll cycle; skip the Claude invocation for now.
+			releaseLock()
+			return nil
+		}
+	}
+
 	// Invoke Claude Code in the issue's worktree
 	modelOverride := e.extractModelOverride(item.Number, item.Labels)
 	if modelOverride != "" {
