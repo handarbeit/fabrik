@@ -2370,7 +2370,7 @@ func TestRunProbeAndDeepFetch_FreshItem_SkipsDeepFetch(t *testing.T) {
 	client := &mockGitHubClient{
 		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
 			return []gh.BoardProbeItem{
-				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo", EffectiveUpdatedAt: T1},
+				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo", Status: "Research", EffectiveUpdatedAt: T1},
 			}, "PVT_1", nil
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
@@ -2434,7 +2434,7 @@ func TestRunProbeAndDeepFetch_ItemGone_RemovedFromStore(t *testing.T) {
 		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
 			// Only item #1; item #2 has left the board.
 			return []gh.BoardProbeItem{
-				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo"},
+				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo", Status: "Research"},
 			}, "PVT_1", nil
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error { return nil },
