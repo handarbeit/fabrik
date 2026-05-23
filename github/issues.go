@@ -2,6 +2,25 @@ package github
 
 import "fmt"
 
+// CreateIssue creates a new GitHub issue via the REST API and returns the issue
+// number and GraphQL node ID. The node ID is required for project board and
+// blockedBy mutations.
+func (c *Client) CreateIssue(owner, repo, title, body string) (number int, nodeID string, err error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/issues", c.baseURL, owner, repo)
+	payload := map[string]interface{}{
+		"title": title,
+		"body":  body,
+	}
+	var raw struct {
+		Number int    `json:"number"`
+		NodeID string `json:"node_id"`
+	}
+	if err := c.restPostWithResponse(apiURL, payload, &raw); err != nil {
+		return 0, "", fmt.Errorf("creating issue in %s/%s: %w", owner, repo, err)
+	}
+	return raw.Number, raw.NodeID, nil
+}
+
 // CloseIssue closes a GitHub issue via the REST API.
 func (c *Client) CloseIssue(owner, repo string, issueNumber int) error {
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/issues/%d", c.baseURL, owner, repo, issueNumber)

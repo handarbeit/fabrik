@@ -1446,3 +1446,58 @@ query($owner: String!, $repo: String!, $number: Int!) {
 	}
 	return "", "", nil
 }
+
+// AddProjectV2ItemById adds an issue or PR (identified by its GraphQL node ID)
+// to a GitHub Projects v2 board. Returns the new project item's node ID.
+func (c *Client) AddProjectV2ItemById(projectID, contentNodeID string) (string, error) {
+	query := `
+mutation($projectId: ID!, $contentId: ID!) {
+  addProjectV2ItemById(input: {projectId: $projectId, contentId: $contentId}) {
+    item {
+      id
+    }
+  }
+}`
+	vars := map[string]interface{}{
+		"projectId": projectID,
+		"contentId": contentNodeID,
+	}
+
+	var result struct {
+		Data struct {
+			AddProjectV2ItemById struct {
+				Item struct {
+					ID string `json:"id"`
+				} `json:"item"`
+			} `json:"addProjectV2ItemById"`
+		} `json:"data"`
+	}
+	if err := c.graphqlRequest(query, vars, &result); err != nil {
+		return "", fmt.Errorf("adding item to project %s: %w", projectID, err)
+	}
+	return result.Data.AddProjectV2ItemById.Item.ID, nil
+}
+
+// AddBlockedByIssue creates a "blocked by" dependency edge: issueNodeID is
+// blocked by blockerNodeID. After this call, blockerNodeID will appear in
+// issueNodeID's blockedBy(first: N) GraphQL field.
+//
+// NOTE: The mutation name "addBlockedByIssue" matches GitHub's GraphQL API
+// as of the empirical verification documented in the sub-issue decomposition
+// spec (handarbeit/fabrik#769). Verify against the GitHub GraphQL explorer if
+// this mutation ever stops working.
+func (c *Client) AddBlockedByIssue(issueNodeID, blockerNodeID string) error {
+	query := `
+mutation($issueId: ID!, $blockedById: ID!) {
+  addBlockedByIssue(input: {issueId: $issueId, blockedById: $blockedById}) {
+    issue { id }
+  }
+}`
+	vars := map[string]interface{}{
+		"issueId":    issueNodeID,
+		"blockedById": blockerNodeID,
+	}
+
+	var result struct{}
+	return c.graphqlRequest(query, vars, &result)
+}
