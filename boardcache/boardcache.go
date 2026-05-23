@@ -744,9 +744,11 @@ func (c *CacheImpl) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDe
 	}
 
 	// Cache-hit: PR details are in the Store (Title is non-empty once PRDetailsUpdated fires,
-	// HeadSHA is non-empty once PRHeadSHAUpdated fires). Require both to prevent serving a
-	// record where Title is set but HeadSHA is missing — checkCIGate treats empty HeadSHA
-	// as "no PR to gate" and would silently disarm the CI gate.
+	// HeadSHA is non-empty once PRHeadSHAUpdated fires). Require both to prevent serving an
+	// incomplete record — a non-empty Title with empty HeadSHA would force checkCIGate to
+	// block indefinitely (empty HeadSHA → blocked, not cleared) and trigger a REST fallback
+	// on every poll until the SHA is populated. Requiring HeadSHA here ensures the cache only
+	// serves fully-populated records, keeping the REST fallback path rare.
 	if linkedPRNum != 0 && snapErr == nil {
 		if lpr := snap.LinkedPR(); lpr != nil && lpr.Title != "" && lpr.HeadSHA != "" {
 			return &gh.PRDetails{
