@@ -880,7 +880,6 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	if postOutput != "" {
 		postOutput = stripLine(postOutput, "FABRIK_STAGE_COMPLETE")
 		postOutput = stripLine(postOutput, "FABRIK_BLOCKED_ON_INPUT")
-		postOutput = stripLine(postOutput, "FABRIK_DECOMPOSED")
 		postOutput = stripLine(postOutput, "FABRIK_NO_WORK_NEEDED")
 		postOutput = stripLine(postOutput, "FABRIK_SUMMARY_BEGIN")
 		postOutput = stripLine(postOutput, "FABRIK_SUMMARY_END")
