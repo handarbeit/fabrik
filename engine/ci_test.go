@@ -731,6 +731,44 @@ func TestCheckCIGate_MergeableStateBlocked_FallsThroughToCheckRuns(t *testing.T)
 	}
 }
 
+// TestCheckCIGate_EmptyHeadSHA_StaysBlocked is a regression test for the
+// original symptom of issue #779: when the boardcache layer returned a non-nil
+// PRDetails with HeadSHA=="" (due to Bugs 1/2/3 in the cache layer), checkCIGate
+// was clearing the CI gate as if no PR existed, silently disarming the safety
+// mechanism. After the fix, a non-nil PR with an empty HeadSHA is treated as
+// "data incomplete — block until SHA is populated" rather than "no PR — gate clears."
+func TestCheckCIGate_EmptyHeadSHA_StaysBlocked(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			// Simulate the stale-cache scenario: PR is known but HeadSHA is empty.
+			return &gh.PRDetails{Number: 5, Title: "My PR", HeadSHA: ""}, nil
+		},
+	}
+	eng := testEngineForMerge(client)
+	tr := true
+	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	if !blocked {
+		t.Error("expected blocked=true when PR exists but HeadSHA is empty")
+	}
+	if ciFailure || timedOut {
+		t.Errorf("expected ciFailure=false timedOut=false for incomplete HeadSHA, got ciFailure=%v timedOut=%v", ciFailure, timedOut)
+	}
+	// addCompleteLabelAndRemoveCI must NOT have been called.
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Validate:complete" {
+			t.Error("stage:Validate:complete must NOT be added when HeadSHA is empty (CI gate must stay armed)")
+		}
+	}
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-ci" {
+			t.Error("fabrik:awaiting-ci must NOT be removed when HeadSHA is empty")
+		}
+	}
+}
+
 // TestRemoveAwaitingCILabel_ErrNotFound verifies that a 404 from
 // RemoveLabelFromIssue is treated as success (label already absent) — exactly
 // one call, no warning logged, and cache write-through applied.
