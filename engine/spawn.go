@@ -176,7 +176,13 @@ func (e *Engine) preImplement(ctx context.Context, board *gh.ProjectBoard, item 
 	if len(unmanaged) > 0 {
 		msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nThe following repos are not in Fabrik's managed-repo set. Add them to your configuration, then remove `fabrik:paused` to retry:\n\n%s",
 			"- "+strings.Join(unmanaged, "\n- "))
-		e.postSpawnComment(owner, repo, item, msg)
+		if dbID, commentErr := e.client.AddComment(owner, repo, item.Number, msg); commentErr != nil {
+			e.logf(item.Number, "warn", "could not post spawn error comment: %v\n", commentErr)
+		} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+				DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
+			})
+		}
 		e.addPausedLabelToItem(owner, repo, item)
 		return false, fmt.Errorf("pre-implement: unmanaged repos: %s", strings.Join(unmanaged, ", "))
 	}
@@ -188,7 +194,13 @@ func (e *Engine) preImplement(ctx context.Context, board *gh.ProjectBoard, item 
 		if !ok {
 			msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nInvalid repo in spawn block #%d: `%s`. Created so far: %s\n\nRemove `fabrik:paused` after fixing the Plan output to retry.",
 				i+1, block.Repo, formatSpawnedList(spawned))
-			e.postSpawnComment(owner, repo, item, msg)
+			if dbID, commentErr := e.client.AddComment(owner, repo, item.Number, msg); commentErr != nil {
+				e.logf(item.Number, "warn", "could not post spawn error comment: %v\n", commentErr)
+			} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+					DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
+				})
+			}
 			e.addPausedLabelToItem(owner, repo, item)
 			return false, fmt.Errorf("pre-implement: invalid repo %q in block %d", block.Repo, i+1)
 		}
@@ -198,7 +210,13 @@ func (e *Engine) preImplement(ctx context.Context, board *gh.ProjectBoard, item 
 		if err != nil {
 			msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nFailed to create child issue %d/%d in `%s`: `%v`\n\nCreated so far: %s\n\nManually close any orphaned children, remove `fabrik:paused`, then re-advance to retry.",
 				i+1, len(blocks), block.Repo, err, formatSpawnedList(spawned))
-			e.postSpawnComment(owner, repo, item, msg)
+			if dbID, commentErr := e.client.AddComment(owner, repo, item.Number, msg); commentErr != nil {
+				e.logf(item.Number, "warn", "could not post spawn error comment: %v\n", commentErr)
+			} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+					DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
+				})
+			}
 			e.addPausedLabelToItem(owner, repo, item)
 			return false, fmt.Errorf("pre-implement: creating child %d: %w", i+1, err)
 		}
@@ -209,7 +227,13 @@ func (e *Engine) preImplement(ctx context.Context, board *gh.ProjectBoard, item 
 		if _, err := e.client.AddProjectV2ItemById(board.ProjectID, childNodeID); err != nil {
 			msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nFailed to add child %s/%s#%d to project board: `%v`\n\nCreated so far: %s\n\nManually close any orphaned children, remove `fabrik:paused`, then re-advance to retry.",
 				childOwner, childRepo, childNumber, err, formatSpawnedList(spawned))
-			e.postSpawnComment(owner, repo, item, msg)
+			if dbID, commentErr := e.client.AddComment(owner, repo, item.Number, msg); commentErr != nil {
+				e.logf(item.Number, "warn", "could not post spawn error comment: %v\n", commentErr)
+			} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+					DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
+				})
+			}
 			e.addPausedLabelToItem(owner, repo, item)
 			return false, fmt.Errorf("pre-implement: adding child %s#%d to project: %w", block.Repo, childNumber, err)
 		}
@@ -219,7 +243,13 @@ func (e *Engine) preImplement(ctx context.Context, board *gh.ProjectBoard, item 
 		if err := e.client.AddBlockedByIssue(item.ID, childNodeID); err != nil {
 			msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nFailed to link child %s/%s#%d as blocked-by of parent: `%v`\n\nCreated so far: %s\n\nManually close any orphaned children, remove `fabrik:paused`, then re-advance to retry.",
 				childOwner, childRepo, childNumber, err, formatSpawnedList(spawned))
-			e.postSpawnComment(owner, repo, item, msg)
+			if dbID, commentErr := e.client.AddComment(owner, repo, item.Number, msg); commentErr != nil {
+				e.logf(item.Number, "warn", "could not post spawn error comment: %v\n", commentErr)
+			} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+					DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
+				})
+			}
 			e.addPausedLabelToItem(owner, repo, item)
 			return false, fmt.Errorf("pre-implement: linking child %s#%d as blocked-by: %w", block.Repo, childNumber, err)
 		}
@@ -239,17 +269,6 @@ func (e *Engine) preImplement(ctx context.Context, board *gh.ProjectBoard, item 
 
 	e.logf(item.Number, "spawn", "pre-Implement: spawned %d child(ren); parent will be gated until all close\n", len(blocks))
 	return true, nil
-}
-
-// postSpawnComment posts an error comment on the parent issue during a spawn failure.
-func (e *Engine) postSpawnComment(owner, repo string, item gh.ProjectItem, msg string) {
-	if dbID, err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
-		e.logf(item.Number, "warn", "could not post spawn error comment: %v\n", err)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-			DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
-		})
-	}
 }
 
 // addPausedLabelToItem adds fabrik:paused to the given item, with cache write-through.
