@@ -4704,6 +4704,10 @@ Source: https://fabrik.handarbeit.io/positioning
 - **alessiocol/claude-kanban** — `ACTIVE.md` as shared kanban state across multiple agent sessions; addresses context amnesia between sessions; WIP limits per agent.
 - **The Claude Protocol** (github.com/AvivK5498/The-Claude-Protocol) — 13 Claude Code hooks enforce workflow; integrates with Beads (git-native tickets) as kanban; immutable closed issues; git worktree per task.
 
+### Kanban-first, local agent runners
+
+- **KanBots** (leodavinci1, github.com/leodavinci1/kanbots) — local Electron app; SQLite board with optional GitHub Issues sync; single agent per card; Autopilot personas (PM/Eng/UX/Growth/SRE) spawn subtasks autonomously; Claude Code + Codex via AgentCliAdapter; Decision Points for HITL; pre-push safety hook; per-run cost analytics; MCP server surface. OSS (MIT) + $19/seat Pro. See [competitive analysis](competitive/kanbots.md).
+
 ### Platform-level
 
 - **Linear AI Agents** — first-class agent delegation from issues; Copilot integration opens draft PRs from Linear issues.
@@ -4711,10 +4715,11 @@ Source: https://fabrik.handarbeit.io/positioning
 
 ### Patterns observed
 
-- Most tools build their own proprietary kanban rather than integrating with GitHub Projects.
+- Most tools build their own proprietary kanban rather than integrating with GitHub Projects (Vibe Kanban, Kanban Code, KanBots all maintain local or proprietary boards; GitHub Issues sync is a secondary integration, not the source of truth).
 - Split between *observer* tools (watch Claude, reflect state) vs *driver* tools (kanban is source of truth that triggers agent work).
 - Multi-agent coordination (alessiocol, The Claude Protocol) is a distinct and less crowded sub-pattern.
 - GitHub Agentic Workflows is the primary path toward using native GitHub Projects as the driver.
+- Local-first desktop apps (KanBots) are emerging as an alternative to server daemon CLIs — optimizing for individual developer UX over team automation.
 
 ## Where Fabrik sits uniquely
 
@@ -4739,7 +4744,7 @@ Source: https://fabrik.handarbeit.io/positioning
 ## Candidate positioning lines
 
 - *GitHub Agentic Workflows without GitHub Actions — your existing Project board becomes an SDLC pipeline, with YAML-configurable stages and per-stage Claude Code skills, state encoded entirely in issues, labels, and reactions.*
-- *Closest competitor by philosophy: GitHub Agentic Workflows (platform-native, Projects-compatible). Closest by feature set: The Claude Protocol (hooks + worktrees + tickets). Fabrik's niche is the intersection — platform-native and feature-rich, without requiring GHA or a separate ticket system like Beads.*
+- *Closest competitor by philosophy: GitHub Agentic Workflows (platform-native, Projects-compatible). Closest by feature set: The Claude Protocol (hooks + worktrees + tickets). Closest direct competitor by niche: KanBots (kanban-driven agent orchestration, per-issue worktrees, same target user) — differentiated by local-first vs. server-daemon architecture and proprietary SQLite state vs. GitHub-native state. Fabrik's niche is the intersection — platform-native and feature-rich, without requiring GHA, a separate ticket system like Beads, or a proprietary local state store.*
 
 ---
 
