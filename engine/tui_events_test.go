@@ -71,8 +71,9 @@ func TestJobStartedEvent_EarlyReturn(t *testing.T) {
 func TestJobStartedEvent_SuccessPath(t *testing.T) {
 	skipIfNoGit(t)
 	repoDir := initBareRepo(t)
+	origLock := lockVerifyDelay
 	lockVerifyDelay = 0
-	t.Cleanup(func() { lockVerifyDelay = 2 * time.Second })
+	t.Cleanup(func() { lockVerifyDelay = origLock })
 
 	wm := NewWorktreeManager(repoDir)
 	client := &mockGitHubClient{}
@@ -133,8 +134,9 @@ func TestJobStartedEvent_SuccessPath(t *testing.T) {
 func TestJobCompletedEvent_CancelledPath(t *testing.T) {
 	skipIfNoGit(t)
 	repoDir := initBareRepo(t)
+	origLock := lockVerifyDelay
 	lockVerifyDelay = 0
-	t.Cleanup(func() { lockVerifyDelay = 2 * time.Second })
+	t.Cleanup(func() { lockVerifyDelay = origLock })
 
 	wm := NewWorktreeManager(repoDir)
 	client := &mockGitHubClient{}
