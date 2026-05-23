@@ -116,58 +116,60 @@ Description of the chosen approach and key design decisions.
 - **Do not ignore the research findings** — your plan must be grounded in what was discovered
 - **Do not over-engineer** — plan for what's needed now, not hypothetical future requirements
 
-## Decomposition
+## Sub-issue Decomposition
 
-When an issue is too broad for a single Implement cycle — the signal is that Implement would need to make major design decisions, touch too many unrelated concerns, or span more than one coherent unit of work — decompose it into focused sub-issues instead of writing a plan.
+When an issue spans work in multiple repos, or contains independently shippable chunks that are better tracked separately, Plan declares sub-issues using `FABRIK_SPAWN_CHILD_BEGIN/END` blocks. **Plan does not create any GitHub issues.** The engine's pre-Implement step reads Plan's output and performs all mutations — creating issues, adding them to the project board, and linking each as a `blockedBy` dependency of the parent. This keeps Plan freely revisable by comment without side effects.
 
-### Depth Gate (Check First)
+### When to Decompose
 
-Before considering decomposition, check whether the current issue has the `fabrik:sub-issue` label. If it does, **skip decomposition entirely** and produce a normal implementation plan. Sub-issues are never decomposed further — maximum depth is 1.
+Decompose when:
+- The work genuinely belongs in a different repository (e.g., a client library and a server must both change)
+- The work can be meaningfully parallelized across independent units
+- Each unit is large enough to warrant its own Research→Plan→Implement pipeline
 
-### Idempotency Check
+Do NOT decompose when:
+- The work is naturally sequential in one repo (write a normal single plan)
+- Decomposition would produce sub-issues so small they're not worth independent tracking
 
-Before creating sub-issues, search existing issues for ones already labeled `fabrik:sub-issue` that reference this parent (check their body for `#N` where N is the parent issue number). If such issues already exist, skip creating new ones — you may have been retried after a partial run.
+There is no depth limit. A sub-issue's own Plan may emit `FABRIK_SPAWN_CHILD_BEGIN/END` blocks, producing grandchildren through the same mechanism.
 
-### How to Decompose
+### Choosing Target Repos
 
-Read `.fabrik-context/project.md` for the values you need:
-- `Owner` — the GitHub organization or user
-- `Repo` — the repository name
-- `ProjectNum` — the project board number
+Use Research's `## Repositories` section as the authoritative list of repos you MAY spawn into. **Do not spawn into any repo not listed there.** If Research missed a repo, the user must re-run Research; Plan does not re-infer repos.
 
-Then:
+### Block Format
 
-1. **Create each sub-issue:**
-   ```bash
-   gh issue create --repo OWNER/REPO \
-     --title "Sub-issue title" \
-     --body "Sub-issue body referencing parent #N" \
-     --label "fabrik:sub-issue"
-   ```
-   Capture the URL of each created issue.
+For each unit of work to track as an independent sub-issue, emit one block with this exact format:
 
-2. **Add each sub-issue to the project board:**
-   ```bash
-   gh project item-add PROJECTNUM --owner OWNER --url ISSUE_URL
-   ```
+```
+FABRIK_SPAWN_CHILD_BEGIN owner/repo
+TITLE: Single-line title for the new issue
 
-3. **Set blocking edges where sub-issues have sequential dependencies:**
-   ```bash
-   # To express "SUB_B is blocked by SUB_A" (A must complete before B):
-   gh issue link SUB_B --repo OWNER/REPO --type "blocks" SUB_A
-   # This marks SUB_A as blocking SUB_B (i.e., SUB_B depends on SUB_A)
-   # Verify direction with: gh issue link --help
-   ```
-   Only add edges where ordering is genuinely required. Parallel sub-issues need no edges.
+Full scoped spec body — markdown, multiple paragraphs OK, no nested FABRIK_* markers.
+The body becomes the child issue's body verbatim. Include enough context for the child
+to run autonomously through its own Research and Plan stages without consulting the parent.
 
-4. **Output the terminal marker on its own line and stop:**
-   ```
-   FABRIK_DECOMPOSED
-   ```
+FABRIK_SPAWN_CHILD_END
+```
 
-### Mutual Exclusivity
+Rules:
+- `FABRIK_SPAWN_CHILD_BEGIN` and `FABRIK_SPAWN_CHILD_END` must each be on their own line
+- The `owner/repo` follows `BEGIN` on the same line, separated by a space
+- `TITLE:` must be the first non-empty line after `BEGIN`
+- Body starts after a blank line following the title, and continues until `END`
+- Scope each block to only the work belonging to that repo/unit; provide enough context for autonomous operation
 
-`FABRIK_DECOMPOSED` is mutually exclusive with `FABRIK_STAGE_COMPLETE` and `FABRIK_BLOCKED_ON_INPUT`. Output exactly one terminal marker. If you decompose, do not also signal completion.
+**These blocks are preserved in the Plan comment** — they are not stripped. The engine reads them at Implement time.
+
+### Signaling
+
+After including spawn blocks, signal completion normally:
+
+```
+FABRIK_STAGE_COMPLETE
+```
+
+Do NOT emit `FABRIK_DECOMPOSED` — that marker has been removed. The engine detects the spawn blocks from the Plan comment and handles sub-issue creation, board admission, and blockedBy linking automatically before the parent's first Implement invocation.
 
 ## No Work Needed
 
@@ -213,11 +215,10 @@ Example:
 
 ### Mutual Exclusivity
 
-`FABRIK_NO_WORK_NEEDED` is mutually exclusive with `FABRIK_DECOMPOSED` and `FABRIK_BLOCKED_ON_INPUT`.
-- If the issue needs to be split: use `FABRIK_DECOMPOSED` (without `FABRIK_STAGE_COMPLETE`)
+`FABRIK_NO_WORK_NEEDED` is mutually exclusive with `FABRIK_BLOCKED_ON_INPUT`.
 - If you need user input: use `FABRIK_BLOCKED_ON_INPUT` (without `FABRIK_STAGE_COMPLETE`)
 - If no work is needed: use `FABRIK_STAGE_COMPLETE` + `FABRIK_NO_WORK_NEEDED`
-- If work is needed: use `FABRIK_STAGE_COMPLETE` alone
+- If work is needed (with or without spawn blocks): use `FABRIK_STAGE_COMPLETE` alone
 
 ## Interaction Pattern
 
@@ -236,11 +237,11 @@ Plans typically complete in a single pass. If the spec and research are solid, t
 
 **Blocking on input**: If there are unresolved questions that must be answered before a concrete plan can be produced, output `FABRIK_BLOCKED_ON_INPUT` on its own line instead of `FABRIK_STAGE_COMPLETE`. The engine will pause with both `fabrik:paused` and `fabrik:awaiting-input` labels and auto-resume when the user comments. Do not remove these labels manually. When outputting `FABRIK_BLOCKED_ON_INPUT`, you MUST also emit a `FABRIK_SUMMARY_BEGIN`…`FABRIK_SUMMARY_END` block containing a direct, concise (1–3 sentence) statement of exactly what input is needed — no preamble; the user reads this on a small screen.
 
-**Decomposing an oversized issue**: If the issue is too broad for a single Implement cycle, output `FABRIK_DECOMPOSED` on its own line after creating the sub-issues (see the Decomposition section above). The engine adds `stage:Plan:complete` and moves the parent to Done. Sub-issues flow through the pipeline independently as a formation.
+**Sub-issue decomposition**: If the plan decomposes work into sub-issues, include `FABRIK_SPAWN_CHILD_BEGIN/END` blocks in your output (see Sub-issue Decomposition above) and then emit `FABRIK_STAGE_COMPLETE` as normal. The engine reads the blocks at Implement time and creates the sub-issues, adds them to the project board, and links them as blockers of the parent — no `gh` calls from Plan.
 
 **No work needed**: If Research shows no code or doc changes are required, output both `FABRIK_STAGE_COMPLETE` and `FABRIK_NO_WORK_NEEDED` (each on its own line). The engine skips all remaining pipeline stages and moves the issue to Done without creating a PR. See the No Work Needed section above.
 
-These four markers (`FABRIK_STAGE_COMPLETE`, `FABRIK_NO_WORK_NEEDED`, `FABRIK_DECOMPOSED`, `FABRIK_BLOCKED_ON_INPUT`) are mutually exclusive as terminal signals — output exactly one terminal outcome per invocation.
+These three markers (`FABRIK_STAGE_COMPLETE`, `FABRIK_NO_WORK_NEEDED`, `FABRIK_BLOCKED_ON_INPUT`) are mutually exclusive as terminal signals — output exactly one terminal outcome per invocation.
 
 **Do NOT update the issue body.** The issue body is the spec, owned by Specify. Your plan is posted as a stage comment by the engine automatically. Do not use `FABRIK_ISSUE_UPDATE` markers — they would overwrite the spec.
 
