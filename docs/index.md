@@ -12,7 +12,7 @@ description: >-
 <!-- ============================================================ -->
 <section class="hero">
   <div class="container">
-    <div class="hero-eyebrow">🏭 Free CLI Tool</div>
+    <div class="hero-eyebrow">🏭 Open Source · Apache-2.0</div>
     <h1>Your SDLC,<br>on <span class="accent">autopilot</span></h1>
     <p class="hero-tagline">
       Fabrik watches your GitHub Project board and drives Claude Code through
@@ -340,7 +340,7 @@ description: >-
         </div>
         <pre>
 <span style="color:#56d364"># Option A: Install binary (requires gh)</span>
-<span style="color:#8b949e"># Requires: gh auth login with access to handarbeit/fabrik</span>
+<span style="color:#8b949e"># Requires: gh auth login (any GitHub account)</span>
 <span style="color:#8b949e"># Extracts to current directory — cd to ~/bin first, or move binary afterwards</span>
 cd ~/bin
 gh release download --repo handarbeit/fabrik \
@@ -424,11 +424,32 @@ echo '.env' >> .gitignore
           <div class="link-desc">Common issues and how to resolve them</div>
         </div>
       </a>
-      <a href="https://github.com/handarbeit/fabrik/issues/new" class="link-card" target="_blank" rel="noopener">
+      <a href="https://github.com/handarbeit/fabrik/issues/new/choose" class="link-card" target="_blank" rel="noopener">
         <span class="link-icon">🐛</span>
         <div>
           <div class="link-title">File an Issue</div>
-          <div class="link-desc">Bug reports, feature requests, questions</div>
+          <div class="link-desc">Bug reports and feature requests</div>
+        </div>
+      </a>
+      <a href="https://github.com/handarbeit/fabrik/discussions" class="link-card" target="_blank" rel="noopener">
+        <span class="link-icon">💬</span>
+        <div>
+          <div class="link-title">Discussions</div>
+          <div class="link-desc">Questions, ideas, release announcements</div>
+        </div>
+      </a>
+      <a href="https://github.com/handarbeit/fabrik/blob/main/CONTRIBUTING.md" class="link-card" target="_blank" rel="noopener">
+        <span class="link-icon">🤝</span>
+        <div>
+          <div class="link-title">Contributing</div>
+          <div class="link-desc">How to build, test, and submit a PR</div>
+        </div>
+      </a>
+      <a href="https://github.com/handarbeit/fabrik/blob/main/LICENSE" class="link-card" target="_blank" rel="noopener">
+        <span class="link-icon">⚖️</span>
+        <div>
+          <div class="link-title">License</div>
+          <div class="link-desc">Apache 2.0 — free for commercial and personal use</div>
         </div>
       </a>
     </div>
