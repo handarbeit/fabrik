@@ -1,3 +1,8 @@
+---
+layout: docs
+title: KanBots Competitive Comparison
+---
+
 # KanBots — Competitive Comparison
 
 | Field | Value |
