@@ -4687,7 +4687,7 @@ Either `skill` or `prompt` is required (unless `cleanup_worktree` is true). When
 Source: https://fabrik.handarbeit.io/positioning
 
 
-> Working notes for future marketing use. Not finished copy. Landscape snapshot as of 2026-04.
+> Working notes for future marketing use. Not finished copy. Landscape snapshot as of 2026-05.
 
 ## Landscape
 

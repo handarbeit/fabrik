@@ -5,7 +5,7 @@ title: Fabrik Positioning
 
 # Fabrik Positioning
 
-> Working notes for future marketing use. Not finished copy. Landscape snapshot as of 2026-04.
+> Working notes for future marketing use. Not finished copy. Landscape snapshot as of 2026-05.
 
 ## Landscape
 
