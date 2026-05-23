@@ -580,3 +580,89 @@ func TestIsProbeOnlyTerminal_OpenNonCleanup_False(t *testing.T) {
 		t.Error("expected false for open item in non-cleanup stage")
 	}
 }
+
+// ---- stage-membership guard tests ----
+
+// TestRunProbeAndDeepFetch_UnconfiguredColumn_ColdCache_SkipsDeepFetch verifies
+// that a probe item in an unconfigured board column (e.g. "Backlog") does not
+// trigger FetchItemDetails when the item is not yet in the store (cold cache /
+// new-item path). The item must still appear in newKeys so it is not tombstoned.
+func TestRunProbeAndDeepFetch_UnconfiguredColumn_ColdCache_SkipsDeepFetch(t *testing.T) {
+	var deepFetchCalls int
+
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return []gh.BoardProbeItem{
+				// Configured stage item (should be deep-fetched normally).
+				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo",
+					Status: "Research", EffectiveUpdatedAt: time.Now()},
+				// Unconfigured column item (must NOT be deep-fetched).
+				{ItemID: "PVTI_002", ContentID: "I_002", Number: 2, Repo: "owner/repo",
+					Status: "Backlog", EffectiveUpdatedAt: time.Now()},
+			}, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalls++
+			item.Labels = []string{"stage:Research:in_progress"}
+			return nil
+		},
+	}
+
+	eng := testEngine(client, &mockClaudeInvoker{})
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	eng.readClient = cache
+
+	eng.runProbeAndDeepFetch(cache)
+
+	// Only the configured-stage item should have been deep-fetched.
+	if deepFetchCalls != 1 {
+		t.Errorf("expected exactly 1 FetchItemDetails call (for Research item); got %d", deepFetchCalls)
+	}
+
+	// The Backlog item must NOT be in the store (guard fired before IssueOpened).
+	if _, err := eng.store.Get("owner/repo", 2); err == nil {
+		t.Error("Backlog item should not be seeded into the store (guard must fire before IssueOpened)")
+	}
+}
+
+// TestRunProbeAndDeepFetch_UnconfiguredColumn_WarmCache_SkipsDeepFetch verifies
+// that a probe item in an unconfigured board column does not trigger FetchItemDetails
+// when the item is already in the store (warm cache / existing-item path). The item
+// must remain in the store after the cycle (guard must not cause tombstoning).
+func TestRunProbeAndDeepFetch_UnconfiguredColumn_WarmCache_SkipsDeepFetch(t *testing.T) {
+	var deepFetchCalls int
+
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return []gh.BoardProbeItem{
+				// Unconfigured column item already in the store — must not be deep-fetched.
+				{ItemID: "PVTI_002", ContentID: "I_002", Number: 2, Repo: "owner/repo",
+					Status: "Backlog", EffectiveUpdatedAt: time.Now()},
+			}, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalls++
+			return nil
+		},
+	}
+
+	eng := testEngine(client, &mockClaudeInvoker{})
+	// Seed the Backlog item into the store directly (simulating a prior bootstrap).
+	eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{
+		ID: "I_002", ItemID: "PVTI_002", Number: 2, Repo: "owner/repo", Status: "Backlog",
+	}})
+
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	eng.readClient = cache
+
+	eng.runProbeAndDeepFetch(cache)
+
+	if deepFetchCalls != 0 {
+		t.Errorf("Backlog item (warm cache): expected 0 FetchItemDetails calls; got %d", deepFetchCalls)
+	}
+
+	// Item must still be in the store — the guard must not cause tombstoning.
+	if _, err := eng.store.Get("owner/repo", 2); err != nil {
+		t.Error("Backlog item should remain in the store after the probe cycle (newKeys guard prevents tombstoning)")
+	}
+}
