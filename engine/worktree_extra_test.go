@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -147,7 +148,7 @@ func TestEnsureBareClone_ExistingDir_FetchesOnly(t *testing.T) {
 
 	// ensureBareClone should see the existing directory and attempt a git fetch (best-effort).
 	// Since this is not a real git repo, fetch will fail silently.
-	_, err := ensureBareClone(tmpDir, "owner", "repo", false)
+	_, err := ensureBareClone(tmpDir, "owner", "repo", "", false)
 	if err != nil {
 		t.Errorf("ensureBareClone with existing dir returned error: %v", err)
 	}
@@ -165,7 +166,7 @@ func TestEnsureBareClone_NewDir_ClonesFromLocal(t *testing.T) {
 	// but we can test the error path: clone of a non-existent github URL fails.
 	// Instead we test that the function creates the .fabrik directory and returns an error
 	// when git clone fails (no real network in CI).
-	_, err := ensureBareClone(tmpDir, "nonexistent-owner-xyz", "nonexistent-repo-xyz-abc", false)
+	_, err := ensureBareClone(tmpDir, "nonexistent-owner-xyz", "nonexistent-repo-xyz-abc", "", false)
 	// We expect an error because the github URL doesn't exist. The key check is that
 	// the function attempts the clone and returns a wrapped error.
 	if err == nil {
@@ -179,6 +180,81 @@ func TestEnsureBareClone_NewDir_ClonesFromLocal(t *testing.T) {
 
 	// Suppress unused variable warning from srcDir
 	_ = srcDir
+}
+
+func TestSetCommitterIdentity_SetsWhenUnset(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	env := nonInteractiveGitEnv()
+
+	// initBareRepo seeds user.name/email; unset to simulate a fresh clone.
+	for _, key := range []string{"user.name", "user.email"} {
+		cmd := exec.Command("git", "config", "--unset", key)
+		cmd.Dir = repoDir
+		cmd.Env = env
+		cmd.CombinedOutput()
+	}
+
+	setCommitterIdentity(repoDir, "arbeithand", env)
+
+	if got := readGitConfig(t, repoDir, "user.name"); got != "arbeithand" {
+		t.Errorf("user.name = %q, want %q", got, "arbeithand")
+	}
+	if got := readGitConfig(t, repoDir, "user.email"); got != "arbeithand@users.noreply.github.com" {
+		t.Errorf("user.email = %q, want %q", got, "arbeithand@users.noreply.github.com")
+	}
+}
+
+func TestSetCommitterIdentity_PreservesExisting(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	env := nonInteractiveGitEnv()
+
+	// User manually set a custom email
+	for _, kv := range [][]string{{"user.name", "preset-name"}, {"user.email", "custom@example.com"}} {
+		cmd := exec.Command("git", "config", kv[0], kv[1])
+		cmd.Dir = repoDir
+		cmd.Env = env
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("setup: %s: %v", out, err)
+		}
+	}
+
+	setCommitterIdentity(repoDir, "arbeithand", env)
+
+	if got := readGitConfig(t, repoDir, "user.name"); got != "preset-name" {
+		t.Errorf("user.name = %q, want preserved %q", got, "preset-name")
+	}
+	if got := readGitConfig(t, repoDir, "user.email"); got != "custom@example.com" {
+		t.Errorf("user.email = %q, want preserved %q", got, "custom@example.com")
+	}
+}
+
+func TestSetCommitterIdentity_EmptyUserIsNoOp(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	env := nonInteractiveGitEnv()
+
+	// initBareRepo seeds known values; passing "" must leave them untouched.
+	before := readGitConfig(t, repoDir, "user.name")
+	beforeEmail := readGitConfig(t, repoDir, "user.email")
+
+	setCommitterIdentity(repoDir, "", env)
+
+	if got := readGitConfig(t, repoDir, "user.name"); got != before {
+		t.Errorf("user.name = %q, want unchanged %q", got, before)
+	}
+	if got := readGitConfig(t, repoDir, "user.email"); got != beforeEmail {
+		t.Errorf("user.email = %q, want unchanged %q", got, beforeEmail)
+	}
+}
+
+func readGitConfig(t *testing.T, repoDir, key string) string {
+	t.Helper()
+	cmd := exec.Command("git", "config", "--local", "--get", key)
+	cmd.Dir = repoDir
+	out, _ := cmd.Output()
+	return strings.TrimSpace(string(out))
 }
 
 // Test the URL-construction helper directly. The previous form of this test

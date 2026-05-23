@@ -76,7 +76,13 @@ func nonInteractiveGitEnv() []string {
 // .fabrik/repos/<owner>-<repo>.git if it doesn't already exist.
 // Returns the path to the bare clone directory on success.
 // This is used for all repos — Fabrik always bare-clones managed repos.
-func ensureBareClone(baseDir, owner, repo string, useSSH bool) (string, error) {
+//
+// When user is non-empty, ensureBareClone also sets local user.name and
+// user.email on the bare repo (if not already configured), so commits made
+// in worktrees of this clone are attributed to FABRIK_USER rather than
+// whatever the system-global git identity happens to be. Existing values
+// are preserved.
+func ensureBareClone(baseDir, owner, repo, user string, useSSH bool) (string, error) {
 	bareDir := filepath.Join(baseDir, ".fabrik", "repos", owner+"-"+repo+".git")
 	env := nonInteractiveGitEnv()
 
@@ -103,6 +109,8 @@ func ensureBareClone(baseDir, owner, repo string, useSSH bool) (string, error) {
 		refreshCmd.Dir = bareDir
 		refreshCmd.Env = env
 		refreshCmd.CombinedOutput() // best-effort
+
+		setCommitterIdentity(bareDir, user, env)
 		return bareDir, nil
 	}
 
@@ -141,7 +149,40 @@ func ensureBareClone(baseDir, owner, repo string, useSSH bool) (string, error) {
 	refreshCmd.Env = env
 	refreshCmd.CombinedOutput() // best-effort
 
+	setCommitterIdentity(bareDir, user, env)
 	return bareDir, nil
+}
+
+// setCommitterIdentity sets local user.name and user.email on the given
+// git repo (typically a bare clone) so that commits made in worktrees of
+// that repo are attributed to FABRIK_USER rather than the system-global
+// git identity. Existing values are preserved — this only fills in
+// missing config so users who set a specific identity manually keep it.
+//
+// The default email uses GitHub's noreply format
+// (<user>@users.noreply.github.com), which attributes commits to the
+// GitHub account without exposing a real email address.
+//
+// A non-empty user is required; when empty, this is a no-op (legacy /
+// test callers).
+func setCommitterIdentity(repoDir, user string, env []string) {
+	if user == "" {
+		return
+	}
+	setIfUnset := func(key, value string) {
+		check := exec.Command("git", "config", "--local", "--get", key)
+		check.Dir = repoDir
+		check.Env = env
+		if err := check.Run(); err == nil {
+			return // already set locally; preserve user's choice
+		}
+		set := exec.Command("git", "config", key, value)
+		set.Dir = repoDir
+		set.Env = env
+		set.CombinedOutput() // best-effort
+	}
+	setIfUnset("user.name", user)
+	setIfUnset("user.email", user+"@users.noreply.github.com")
 }
 
 // BaseDir returns the main repository directory.
