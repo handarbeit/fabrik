@@ -2346,7 +2346,7 @@ func TestRunProbeAndDeepFetch_StaleItem_TriggersDeepFetch(t *testing.T) {
 	client := &mockGitHubClient{
 		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
 			return []gh.BoardProbeItem{
-				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo", EffectiveUpdatedAt: now},
+				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo", Status: "Research", EffectiveUpdatedAt: now},
 			}, "PVT_1", nil
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
@@ -2404,7 +2404,7 @@ func TestRunProbeAndDeepFetch_LinkageDrift_InvalidatesAndDeepFetches(t *testing.
 		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
 			return []gh.BoardProbeItem{
 				// Same EffectiveUpdatedAt as last deep-fetch (would be fresh) but LinkedPRNumber changed.
-				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo", EffectiveUpdatedAt: T1, LinkedPRNumber: 99},
+				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo", Status: "Research", EffectiveUpdatedAt: T1, LinkedPRNumber: 99},
 			}, "PVT_1", nil
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
@@ -2676,7 +2676,7 @@ func TestRunProbeAndDeepFetch_IsClosedPropagates_WithoutDeepFetch(t *testing.T) 
 	client := &mockGitHubClient{
 		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
 			return []gh.BoardProbeItem{
-				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo", IsClosed: true, EffectiveUpdatedAt: T1},
+				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo", Status: "Research", IsClosed: true, EffectiveUpdatedAt: T1},
 			}, "PVT_1", nil
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
