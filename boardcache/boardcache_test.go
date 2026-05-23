@@ -361,8 +361,8 @@ func TestFetchItemDetailsFallbackPopulatesCache(t *testing.T) {
 
 // When the board's pi.UpdatedAt advances past LastSeenSourceUpdatedAt, the
 // cache must fall through to a real GraphQL fetch instead of serving frozen
-// deep state. This is the bug behind acme/fantasy#12: bot reviews landed
-// on the linked PR after the first deep-fetch and the cache served the empty
+// deep state. This guards against the regression where bot reviews land on
+// the linked PR after the first deep-fetch and the cache serves the empty
 // LinkedPRReviews slice forever, leaving the review gate permanently unmet.
 func TestFetchItemDetailsCacheStaleRefetches(t *testing.T) {
 	t0 := time.Date(2026, 5, 9, 2, 47, 0, 0, time.UTC)

@@ -466,7 +466,7 @@ func TestRunInit_UserFlag(t *testing.T) {
 	}
 	defer os.Chdir(orig) //nolint
 
-	err = runInit([]string{"--user", "arbeithand", "https://github.com/users/handarbeit/projects/5"})
+	err = runInit([]string{"--user", "acme", "https://github.com/users/acme/projects/5"})
 	if err != nil {
 		t.Fatalf("runInit: %v", err)
 	}
@@ -477,8 +477,8 @@ func TestRunInit_UserFlag(t *testing.T) {
 	}
 	content := string(data)
 
-	if !strings.Contains(content, "owner: arbeithand") {
-		t.Errorf("expected 'owner: arbeithand', got:\n%s", content)
+	if !strings.Contains(content, "owner: acme") {
+		t.Errorf("expected 'owner: acme', got:\n%s", content)
 	}
 	if !strings.Contains(content, "project: 5") {
 		t.Errorf("expected 'project: 5', got:\n%s", content)
@@ -486,8 +486,8 @@ func TestRunInit_UserFlag(t *testing.T) {
 	if !strings.Contains(content, "owner_type: user") {
 		t.Errorf("expected 'owner_type: user', got:\n%s", content)
 	}
-	if !strings.Contains(content, "user: arbeithand") {
-		t.Errorf("expected 'user: arbeithand', got:\n%s", content)
+	if !strings.Contains(content, "user: acme") {
+		t.Errorf("expected 'user: acme', got:\n%s", content)
 	}
 }
 

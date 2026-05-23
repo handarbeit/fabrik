@@ -14,7 +14,7 @@ type WorktreeManager struct {
 	mu       sync.Mutex                        // serializes worktree/branch creation (git config isn't concurrent-safe)
 	baseDir  string                            // directory containing the main repo
 	rootDir  string                            // where worktrees are stored (e.g., .fabrik/worktrees)
-	repoName string                            // repo name used to namespace worktree paths (e.g., "develop"); empty = legacy flat layout
+	repoName string                            // repo name used to namespace worktree paths (e.g., "widgets"); empty = legacy flat layout
 	logfFn   func(int, string, string, ...any) // optional; set by Engine after construction
 }
 

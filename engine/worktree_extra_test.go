@@ -198,8 +198,8 @@ func TestBuildCloneURL(t *testing.T) {
 	}{
 		{"owner", "repo", true, "git@github.com:owner/repo.git"},
 		{"owner", "repo", false, "https://github.com/owner/repo.git"},
-		{"arbeithand", "fantasy", true, "git@github.com:acme/fantasy.git"},
-		{"arbeithand", "fantasy", false, "https://github.com/acme/fantasy.git"},
+		{"acme", "widgets", true, "git@github.com:acme/widgets.git"},
+		{"acme", "widgets", false, "https://github.com/acme/widgets.git"},
 	}
 	for _, tc := range cases {
 		t.Run(fmt.Sprintf("%s/%s ssh=%v", tc.owner, tc.repo, tc.useSSH), func(t *testing.T) {

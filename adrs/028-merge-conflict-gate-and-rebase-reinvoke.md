@@ -11,7 +11,7 @@ The CI gate (ADR 027) introduced a post-completion catch-up window in which the 
 - The review gate only reacts to new inline review thread comments.
 - The merge guard (`attemptMergeOnValidate`) has the right check (GitHub's `mergeable` field) but only fires in catch-up Phase 2, after CI has already passed — which can take 10+ minutes if CI is pending.
 
-The observed failure mode (issue #654 on the develop project): after Validate completed, a different PR merged an `ADR-054.md` on `main`. Our branch had also added `ADR-054.md`. The branch now conflicted with main, but CI on the branch head still passed. For 30+ minutes the engine spun through re-invokes (CI-await polls and review-nit responses) that posted near-empty Fabrik comments while the real blocker — an unmergeable branch — went undetected. The stage eventually paused on a retry limit; the rebase only happened after human unpause triggered the comment-review path in Validate.
+The observed failure mode (issue #654 on a managed project): after Validate completed, a different PR merged an `ADR-054.md` on `main`. Our branch had also added `ADR-054.md`. The branch now conflicted with main, but CI on the branch head still passed. For 30+ minutes the engine spun through re-invokes (CI-await polls and review-nit responses) that posted near-empty Fabrik comments while the real blocker — an unmergeable branch — went undetected. The stage eventually paused on a retry limit; the rebase only happened after human unpause triggered the comment-review path in Validate.
 
 The gap is structural: Phase 1 of the catch-up loop has no sense of mergeability. Adding one before the CI gate preempts the wasteful polling.
 
