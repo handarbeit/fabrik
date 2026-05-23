@@ -999,11 +999,10 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		// the next poll cycle. No explicit eviction is needed.
 	}
 
-	// Only honor the blocked-on-input, decomposed, and no-work-needed markers if Claude
-	// ran without error. If there was an error, treat the run as a retry/failure rather
-	// than silently pausing the issue.
+	// Only honor the blocked-on-input and no-work-needed markers if Claude ran without
+	// error. If there was an error, treat the run as a retry/failure rather than
+	// silently pausing the issue.
 	blockedOnInput := err == nil && CheckBlockedOnInput(output)
-	decomposed := err == nil && CheckDecomposed(output)
 	noWorkNeeded := err == nil && CheckNoWorkNeeded(output)
 
 	// Store completion/blocked/usage state for TUI event emission in poll.go.
@@ -1062,12 +1061,6 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			e.markPRReady(item, prNumber)
 		}
 		e.handleStageComplete(ctx, board, item, stage)
-	} else if decomposed {
-		releaseLock()
-		// Clear retry tracking for this stage — issue is decomposed, no retry needed.
-		e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
-		e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
-		e.handleDecomposed(board, item, stage)
 	} else if blockedOnInput {
 		releaseLock()
 		e.blockOnInput(item, stage, output)
