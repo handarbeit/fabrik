@@ -51,6 +51,9 @@ type mockGitHubClient struct {
 	lookupIssueProjectItemFn      func(projectID, repo string, issueNumber int) (string, string, error)
 	fetchPRClosingIssuesFn        func(owner, repo string, prNumber int) ([]int, error)
 	fetchPRsForSHAFn              func(owner, repo, sha string) ([]int, error)
+	createIssueFn                 func(owner, repo, title, body string) (int, string, error)
+	addProjectV2ItemByIdFn        func(projectID, contentNodeID string) (string, error)
+	addBlockedByIssueFn           func(issueNodeID, blockerNodeID string) error
 
 	// Track call counts for FetchProjectItemStatus
 	fetchProjectItemStatusCalls []string
@@ -86,6 +89,9 @@ type mockGitHubClient struct {
 	addReviewRequestCalls           []reviewRequestCall
 	seedLabelsCalls                 []seedLabelsCall
 	seedLabelsFn                    func(owner, repo string, stageNames []string, lockedUser string) error
+	createIssueCalls                []createIssueCall
+	addProjectV2ItemCalls           []addProjectV2ItemCall
+	addBlockedByIssueCalls          []addBlockedByIssueCall
 }
 
 type reviewRequestCall struct {
@@ -582,6 +588,53 @@ func (m *mockGitHubClient) LookupIssueProjectItem(projectID, repo string, issueN
 		return fn(projectID, repo, issueNumber)
 	}
 	return "", "", nil
+}
+
+// Track calls for CreateIssue / AddProjectV2ItemById / AddBlockedByIssue
+
+type createIssueCall struct {
+	owner, repo, title, body string
+}
+
+type addProjectV2ItemCall struct {
+	projectID, contentNodeID string
+}
+
+type addBlockedByIssueCall struct {
+	issueNodeID, blockerNodeID string
+}
+
+func (m *mockGitHubClient) CreateIssue(owner, repo, title, body string) (int, string, error) {
+	m.mu.Lock()
+	m.createIssueCalls = append(m.createIssueCalls, createIssueCall{owner, repo, title, body})
+	fn := m.createIssueFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, title, body)
+	}
+	return 0, "NODE_ID_" + title, nil
+}
+
+func (m *mockGitHubClient) AddProjectV2ItemById(projectID, contentNodeID string) (string, error) {
+	m.mu.Lock()
+	m.addProjectV2ItemCalls = append(m.addProjectV2ItemCalls, addProjectV2ItemCall{projectID, contentNodeID})
+	fn := m.addProjectV2ItemByIdFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(projectID, contentNodeID)
+	}
+	return "PVTI_" + contentNodeID, nil
+}
+
+func (m *mockGitHubClient) AddBlockedByIssue(issueNodeID, blockerNodeID string) error {
+	m.mu.Lock()
+	m.addBlockedByIssueCalls = append(m.addBlockedByIssueCalls, addBlockedByIssueCall{issueNodeID, blockerNodeID})
+	fn := m.addBlockedByIssueFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(issueNodeID, blockerNodeID)
+	}
+	return nil
 }
 
 // mockClaudeInvoker implements ClaudeInvoker for testing.

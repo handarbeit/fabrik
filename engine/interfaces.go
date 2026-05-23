@@ -40,6 +40,9 @@ type GitHubClient interface {
 	MarkPRReady(owner, repo string, prNumber int) error
 	MergePR(owner, repo string, prNumber int) error
 	CloseIssue(owner, repo string, issueNumber int) error
+	CreateIssue(owner, repo, title, body string) (number int, nodeID string, err error)
+	AddProjectV2ItemById(projectID, contentNodeID string) (string, error)
+	AddBlockedByIssue(issueNodeID, blockerNodeID string) error
 	DeleteReviewRequest(owner, repo string, prNumber int, reviewers []string) error
 	AddReviewRequest(owner, repo string, prNumber int, reviewers []string) error
 	FetchLatestRelease(owner, repo string) (*gh.LatestRelease, error)
