@@ -58,8 +58,9 @@ type itemNode struct {
 		} `json:"labels"`
 		LinkedPRs *struct {
 			Nodes []struct {
-				UpdatedAt string `json:"updatedAt"`
-				Number    int    `json:"number"`
+				UpdatedAt  string `json:"updatedAt"`
+				Number     int    `json:"number"`
+				HeadRefOid string `json:"headRefOid"`
 			} `json:"nodes"`
 		} `json:"closedByPullRequestsReferences"`
 	} `json:"content"`
@@ -199,6 +200,7 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
                 nodes {
                   updatedAt
                   number
+                  headRefOid
                 }
               }
             }
@@ -324,6 +326,7 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 			}
 			if len(node.Content.LinkedPRs.Nodes) > 0 {
 				item.LinkedPRNumberShallow = node.Content.LinkedPRs.Nodes[0].Number
+				item.LinkedPRHeadSHA = node.Content.LinkedPRs.Nodes[0].HeadRefOid
 			}
 		}
 
@@ -365,8 +368,9 @@ type probeItemNode struct {
 		// first: 1 is sufficient — each issue has at most one Fabrik-managed PR.
 		LinkedPRs *struct {
 			Nodes []struct {
-				Number    int    `json:"number"`
-				UpdatedAt string `json:"updatedAt"`
+				Number     int    `json:"number"`
+				UpdatedAt  string `json:"updatedAt"`
+				HeadRefOid string `json:"headRefOid"`
 			} `json:"nodes"`
 		} `json:"closedByPullRequestsReferences"`
 	} `json:"content"`
@@ -452,6 +456,7 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
                 nodes {
                   number
                   updatedAt
+                  headRefOid
                 }
               }
             }
@@ -557,6 +562,7 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 		if node.Content.LinkedPRs != nil && len(node.Content.LinkedPRs.Nodes) > 0 {
 			pr := node.Content.LinkedPRs.Nodes[0]
 			item.LinkedPRNumber = pr.Number
+			item.LinkedPRHeadSHA = pr.HeadRefOid
 			if t, err := parseTime(pr.UpdatedAt); err == nil {
 				item.LinkedPRUpdatedAt = t
 				if t.After(item.EffectiveUpdatedAt) {
@@ -620,6 +626,7 @@ query($id: ID!) {
         nodes {
           id
           number
+          headRefOid
           comments(first: 100) {
             nodes {
               id
@@ -757,9 +764,10 @@ query($id: ID!) {
 				} `json:"comments"`
 				LinkedPRs *struct {
 					Nodes []struct {
-						ID       string `json:"id"`
-						Number   int    `json:"number"`
-						Comments struct {
+						ID         string `json:"id"`
+						Number     int    `json:"number"`
+						HeadRefOid string `json:"headRefOid"`
+						Comments   struct {
 							Nodes    []commentNodeData `json:"nodes"`
 							PageInfo struct {
 								HasNextPage bool   `json:"hasNextPage"`
@@ -894,9 +902,10 @@ query($id: ID!) {
 	// Merge comments, review requests, and reviews from linked PRs
 	if node.LinkedPRs != nil {
 		for i, pr := range node.LinkedPRs.Nodes {
-			// Record the first linked PR's number for REST re-request and @mention calls.
+			// Record the first linked PR's number and head SHA for REST re-request and CI gate calls.
 			if i == 0 {
 				item.LinkedPRNumber = pr.Number
+				item.LinkedPRHeadSHA = pr.HeadRefOid
 			}
 			prCommentNodes := pr.Comments.Nodes
 			if pr.Comments.PageInfo.HasNextPage {
