@@ -1689,6 +1689,19 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 		// intentionally skips Labels to preserve webhook-driven label state).
 		e.store.Apply(itemstate.ProbeBoardItemUpdated{Repo: repo, Number: pi.Number, Item: pi})
 
+		// Unconditionally write the probe's head SHA whenever present — the probe
+		// response is always authoritative, including for cache-fresh items that
+		// skip the deep-fetch below. This is the primary poll-mode path for keeping
+		// HeadSHA populated without relying solely on the REST FetchLinkedPR fallback.
+		if pi.LinkedPRHeadSHA != "" && pi.LinkedPRNumber != 0 {
+			e.store.Apply(itemstate.PRHeadSHAUpdated{
+				Repo:        repo,
+				Number:      pi.Number,
+				LinkedPRNum: pi.LinkedPRNumber,
+				SHA:         pi.LinkedPRHeadSHA,
+			})
+		}
+
 		// Deep-fetch when cache is stale relative to effectiveUpdatedAt.
 		if cacheImpl.IsItemCacheFresh(repo, pi.Number, pi.EffectiveUpdatedAt) {
 			continue
