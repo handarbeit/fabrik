@@ -26,3 +26,6 @@ tmp/
 *.out
 engine/.fabrik/
 .fabrik/debug-footer.bin
+
+# Old release-notes input file — superseded by release-notes/<version>.md
+release-notes.md

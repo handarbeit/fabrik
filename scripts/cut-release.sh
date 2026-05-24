@@ -74,10 +74,9 @@ BRANCH="$(git branch --show-current)"
 [ "$BRANCH" = "main" ] || die "must be on main (currently on '$BRANCH')"
 ok "on main"
 
-# Allow uncommitted release-notes.md (we overwrite it) and an uncommitted
-# release-notes/<version>.md (the source-of-truth authored just before running
-# this script). Anything else must be cleared first.
-DIRTY=$(git status --porcelain | grep -Ev "^\?\? release-notes\.md$|^\?\? release-notes/${VERSION}\.md$| M release-notes\.md$| M release-notes/${VERSION}\.md$" || true)
+# Allow uncommitted release-notes/<version>.md (the source-of-truth, authored
+# just before running this script). Anything else must be cleared first.
+DIRTY=$(git status --porcelain | grep -Ev "^\?\? release-notes/${VERSION}\.md$| M release-notes/${VERSION}\.md$" || true)
 [ -z "$DIRTY" ] || die "working tree dirty:
 $DIRTY"
 ok "working tree acceptable"
@@ -116,12 +115,6 @@ if ! grep -Eq '^## Summary[[:space:]]*$' "$NOTES_FILE"; then
 fi
 ok "$NOTES_FILE heading + ## Summary present"
 
-# Copy to repo-root release-notes.md so goreleaser (release.yml) reads the right
-# file without workflow changes. This file is regenerated every release and is
-# git-ignored / committed as a stub — it is NOT the source of truth.
-cp "$NOTES_FILE" release-notes.md
-ok "copied $NOTES_FILE → release-notes.md (for goreleaser input)"
-
 # ─── 2. PAT identity check ────────────────────────────────────────────────────
 step "PAT identity check"
 
@@ -152,9 +145,9 @@ fi
 
 # ─── 4. commit release notes as arbeithand ────────────────────────────────────
 step "Commit release notes"
-# Stage both: the archived per-version file (source of truth) and the regenerated
-# repo-root release-notes.md (the goreleaser input).
-git add "$NOTES_FILE" release-notes.md
+# Stage the per-version source-of-truth file. The workflow reads it directly
+# from release-notes/<version>.md — no copy step needed.
+git add "$NOTES_FILE"
 if git diff --cached --quiet; then
   warn "no release-notes changes to commit — skipping commit step"
 else
