@@ -161,7 +161,7 @@ description: >-
         <span class="feature-icon">🌿</span>
         <div class="feature-title">Isolated Git Worktrees</div>
         <div class="feature-desc">
-          Every issue gets a dedicated branch and worktree with zero cross-contamination.
+          Every issue gets a dedicated branch and worktree with zero cross-contamination. Edit and Write tool calls are path-scoped to the issue's worktree; cross-repo writes are audited and blocked.
         </div>
       </a>
       <a class="feature-card" href="{{ '/state-machine' | relative_url }}#4-comment-processing-lifecycle" aria-label="Comment-Driven Steering — open documentation">
@@ -239,6 +239,13 @@ description: >-
         <div class="feature-title">Formations</div>
         <div class="feature-desc">
           Chain issues with GitHub's blocked-by relationships for automatic parallel execution.
+        </div>
+      </a>
+      <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#sub-issue-decomposition" aria-label="Sub-Issue Decomposition — open documentation">
+        <span class="feature-icon">🌱</span>
+        <div class="feature-title">Sub-Issue Decomposition</div>
+        <div class="feature-desc">
+          Plan declares sub-issues to spawn; the engine creates them, links blockedBy edges, and the children run as a formation.
         </div>
       </a>
       <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#pending-reviewer-gate" aria-label="Pending Reviewer Gate — open documentation">
