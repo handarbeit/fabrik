@@ -35,9 +35,11 @@ jobs:
 
       - name: Verify release notes exist
         run: |
-          if [ ! -f release-notes.md ]; then
-            echo "Error: release-notes.md not found."
-            echo "Run scripts/draft-release-notes.sh, review the output, and commit it before tagging."
+          NOTES="release-notes/${{ github.ref_name }}.md"
+          if [ ! -f "$NOTES" ]; then
+            echo "Error: $NOTES not found."
+            echo "Release notes are authored per-version under release-notes/<tag>.md."
+            echo "See /cut-release skill or scripts/cut-release.sh for the publication flow."
             exit 1
           fi
 
@@ -46,7 +48,7 @@ jobs:
         with:
           distribution: goreleaser
           version: latest
-          args: release --clean --release-notes release-notes.md
+          args: release --clean --release-notes release-notes/${{ github.ref_name }}.md
         env:
           GITHUB_TOKEN: ${{ secrets.PUBLIC_REPO_RELEASE_TOKEN }}
 
@@ -84,7 +86,7 @@ jobs:
             exit 1
           fi
 
-          # Build announcement body from release-notes.md.
+          # Build announcement body from release-notes/<version>.md.
           #
           # If the notes have a "## Summary" section, post just that body — the
           # rest of the release detail lives on the GitHub Release page. If no
@@ -94,7 +96,7 @@ jobs:
             /^## Summary[[:space:]]*$/ { in_summary = 1; next }
             in_summary && /^## / { in_summary = 0 }
             in_summary { print }
-          ' release-notes.md | awk 'NF { p = 1 } p')
+          ' "release-notes/${VERSION}.md" | awk 'NF { p = 1 } p')
 
           if [ -z "$BODY_CONTENT" ]; then
             BODY_CONTENT="See the release notes for details."

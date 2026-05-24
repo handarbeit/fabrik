@@ -28,7 +28,7 @@ This is the part requiring judgment — do not delegate it.
 - Group user-facing changes by category: **Features**, **Fixes**, **Improvements**, **Internal**. Omit empty sections.
 - Ignore merge commits and `Co-Authored-By` lines.
 - Collapse internal churn into a single line under **Internal**. Don't enumerate refactors / test additions.
-- Write the notes to `release-notes/<version>.md` (one file per release, archived in-tree). The script copies this to the repo-root `release-notes.md` automatically for goreleaser's input.
+- Write the notes to `release-notes/<version>.md` (one file per release, archived in-tree). The release workflow reads this path directly via `${{ github.ref_name }}` — there is no repo-root `release-notes.md` and you should not create one (it is `.gitignore`d).
 
 Use this schema:
 
@@ -87,15 +87,14 @@ scripts/cut-release.sh v0.0.67
 ```
 
 The script handles, in order:
-1. **Pre-flight** — on main; ff'd to origin/main; tag `<version>` not already taken locally or on origin; `release-notes/<version>.md` exists, heading is exactly `# Fabrik <version>`, and contains a `## Summary` section. Working tree must be clean except for `release-notes.md` and `release-notes/<version>.md` (either untracked or modified) — any other dirty file aborts.
+1. **Pre-flight** — on main; ff'd to origin/main; tag `<version>` not already taken locally or on origin; `release-notes/<version>.md` exists, heading is exactly `# Fabrik <version>`, and contains a `## Summary` section. Working tree must be clean except for `release-notes/<version>.md` (either untracked or modified) — any other dirty file aborts.
 2. **PAT identity check** — reads `FABRIK_TOKEN` from `.env`; aborts unless `gh api user` resolves to `@arbeithand`.
 3. `go build ./...` and `go test -race ./...`. Skippable only via `--skip-tests` (last resort).
-4. Copies `release-notes/<version>.md` → `release-notes.md` (the goreleaser input — not the source of truth).
-5. Stages both files and commits them with `GIT_AUTHOR_*` + `GIT_COMMITTER_*` env vars so the commit is `arbeithand <handarbeit@handarbeit.io>`. Verifies the resulting `%an <%ae>` matches; aborts otherwise.
-6. Pushes the release-notes commit, then tags and pushes the tag — both with `credential.helper=` and `credential.https://github.com.helper=` nuked, plus PAT-in-URL. This is the exact incantation needed on this machine to push as the bot rather than the default `gh auth` identity.
-7. Polls for the release workflow run, watches it, and **explicitly re-checks** `conclusion == "success"` via `gh run view` (the `--exit-status` flag alone is not trusted).
-8. **Hard identity verification** — fetches `release.author.login` and the latest Discussion's `author.login`. **Aborts loudly** if either is not `arbeithand`, with a pointer to rotate the `PUBLIC_REPO_RELEASE_TOKEN` repo secret (root cause of every wrong-identity recurrence so far).
-9. Files the doc-update issue and adds it to project #1 at Status=Specify with `fabrik:yolo` — all authored by `arbeithand` via the PAT.
+4. Stages `release-notes/<version>.md` and commits it with `GIT_AUTHOR_*` + `GIT_COMMITTER_*` env vars so the commit is `arbeithand <handarbeit@handarbeit.io>`. Verifies the resulting `%an <%ae>` matches; aborts otherwise.
+5. Pushes the release-notes commit, then tags and pushes the tag — both with `credential.helper=` and `credential.https://github.com.helper=` nuked, plus PAT-in-URL. This is the exact incantation needed on this machine to push as the bot rather than the default `gh auth` identity.
+6. Polls for the release workflow run, watches it, and **explicitly re-checks** `conclusion == "success"` via `gh run view` (the `--exit-status` flag alone is not trusted).
+7. **Hard identity verification** — fetches `release.author.login` and the latest Discussion's `author.login`. **Aborts loudly** if either is not `arbeithand`, with a pointer to rotate the `PUBLIC_REPO_RELEASE_TOKEN` repo secret (root cause of every wrong-identity recurrence so far).
+8. Files the doc-update issue and adds it to project #1 at Status=Specify with `fabrik:yolo` — all authored by `arbeithand` via the PAT.
 
 Flags:
 - `--skip-tests` — skip the race-tested suite (use only if it's already known-green from a recent run).
