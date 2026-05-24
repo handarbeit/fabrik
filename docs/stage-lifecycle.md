@@ -131,10 +131,12 @@ Before the Claude invocation on every Implement dispatch, the engine calls `preI
 1. **Repo validation**: Call `ensureRepoReady(owner, repo)` for each unique target repo across all blocks. If any repo is not in Fabrik's managed set (clone fails), post an error comment listing the unmanaged repos, add `fabrik:paused`, and stop — no children are created.
 2. **Per-child mutations** (for each block in document order):
    - `CreateIssue(owner, repo, title, body)` — REST `POST /repos/{owner}/{repo}/issues`; body = block body + engine-appended back-reference footer
-   - `AddProjectV2ItemById(board.ProjectID, childNodeID)` — adds child to the same project board
+   - `AddProjectV2ItemById(board.ProjectID, childNodeID)` — adds child to the same project board; returns `childItemID`
    - `AddBlockedByIssue(parent.NodeID, childNodeID)` — links child as a `blockedBy` dependency of the parent
    - `AddLabelToIssue(childNodeID, "fabrik:sub-issue")` — informational; no engine semantics
-   - On any failure: post error comment naming completed and failed children, add `fabrik:paused` to parent, stop; `fabrik:children-spawned` is NOT added
+   - `UpdateProjectItemStatus(board.ProjectID, childItemID, sf.FieldID, specifyOptionID)` — moves child to the `Specify` column (or first non-Backlog, non-terminal column as fallback). **Non-fatal**: if `e.statusField` is nil or no viable column exists, child lands in Backlog and a warning is logged.
+   - Conditional `AddLabelToIssue` for `fabrik:yolo` if the parent has `fabrik:yolo`; conditional `AddLabelToIssue` for `fabrik:cruise` if the parent has `fabrik:cruise`. Both are **non-fatal**. `base:<branch>` labels are **not** inherited.
+   - On any failure in the fatal steps (CreateIssue, AddProjectV2ItemById, AddBlockedByIssue): post error comment naming completed and failed children, add `fabrik:paused` to parent, stop; `fabrik:children-spawned` is NOT added
 3. **After all children succeed**: Add `fabrik:children-spawned` label to the parent.
 
 ### After spawn

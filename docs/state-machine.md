@@ -991,10 +991,12 @@ These blocks persist in the Plan stage comment — they are data, not consumed-a
 1. Validate all target repos: call `ensureRepoReady` for each unique target repo in the spawn blocks. If any repo is not in Fabrik's managed set, post an error comment listing the gaps, add `fabrik:paused`, and stop — no children are created.
 2. For each `FABRIK_SPAWN_CHILD_BEGIN/END` block in document order:
    - `CreateIssue(owner, repo, title, body+footer)` via REST — returns `(number, nodeID)`
-   - `AddProjectV2ItemById(board.ProjectID, nodeID)` — adds child to the same project board
+   - `AddProjectV2ItemById(board.ProjectID, nodeID)` — adds child to the same project board; returns `childItemID`
    - `AddBlockedByIssue(parent.NodeID, nodeID)` — links child as a `blockedBy` dependency of the parent
    - `AddLabelToIssue` for `fabrik:sub-issue` on the child (informational)
-   - On any failure: post error comment naming completed and failed children, add `fabrik:paused` to parent, stop without adding `fabrik:children-spawned`
+   - `UpdateProjectItemStatus(board.ProjectID, childItemID, sf.FieldID, specifyOptionID)` — moves child to the `Specify` column (or first non-Backlog, non-terminal column as fallback). **Non-fatal**: if `e.statusField` is nil (startup fetch failed) or no viable column exists, the child lands in Backlog and a warning is logged; spawn continues.
+   - Conditional `AddLabelToIssue` for `fabrik:yolo` on the child if the parent has `fabrik:yolo`; conditional `AddLabelToIssue` for `fabrik:cruise` if the parent has `fabrik:cruise`. Both are **non-fatal** (failure logs a warning, spawn continues). `base:<branch>` labels are **not** inherited.
+   - On any failure in the fatal steps (CreateIssue, AddProjectV2ItemById, AddBlockedByIssue): post error comment naming completed and failed children, add `fabrik:paused` to parent, stop without adding `fabrik:children-spawned`
 3. After all children are created and linked, add `fabrik:children-spawned` to the parent.
 
 **After spawn:** `preImplement` returns `(true, nil)` (spawned=true). `processItem` returns without invoking Claude. On the next poll cycle, `checkDependencies` sees the new `blockedBy` edges and adds `fabrik:blocked`, gating the parent until all children close.
