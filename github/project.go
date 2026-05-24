@@ -1482,20 +1482,21 @@ mutation($projectId: ID!, $contentId: ID!) {
 // blocked by blockerNodeID. After this call, blockerNodeID will appear in
 // issueNodeID's blockedBy(first: N) GraphQL field.
 //
-// NOTE: The mutation name "addBlockedByIssue" matches GitHub's GraphQL API
-// as of the empirical verification documented in the sub-issue decomposition
-// spec (handarbeit/fabrik#769). Verify against the GitHub GraphQL explorer if
-// this mutation ever stops working.
+// GitHub's GraphQL mutation is asymmetrically named relative to its read
+// field: the read is `Issue.blockedBy(first: N)`, but the write is
+// `addBlockedBy` (no "Issue" suffix), with input shape
+// `{ issueId: ID!, blockingIssueId: ID! }`. Verified via schema
+// introspection against `api.github.com/graphql` on 2026-05-24.
 func (c *Client) AddBlockedByIssue(issueNodeID, blockerNodeID string) error {
 	query := `
-mutation($issueId: ID!, $blockedById: ID!) {
-  addBlockedByIssue(input: {issueId: $issueId, blockedById: $blockedById}) {
+mutation($issueId: ID!, $blockingIssueId: ID!) {
+  addBlockedBy(input: {issueId: $issueId, blockingIssueId: $blockingIssueId}) {
     issue { id }
   }
 }`
 	vars := map[string]interface{}{
-		"issueId":    issueNodeID,
-		"blockedById": blockerNodeID,
+		"issueId":         issueNodeID,
+		"blockingIssueId": blockerNodeID,
 	}
 
 	var result struct{}
