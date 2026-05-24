@@ -174,7 +174,7 @@ func (e *Engine) preImplement(ctx context.Context, board *gh.ProjectBoard, item 
 		}
 	}
 	if len(unmanaged) > 0 {
-		msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nThe following repos are not in Fabrik's managed-repo set. Add them to your configuration, then remove `fabrik:paused` to retry:\n\n%s",
+		msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nThe following repos have not yet been initialized by Fabrik (not in worktreeManagers). Fabrik discovers repos lazily — ensure Fabrik can clone each repo (SSH key, webhook config) and that at least one issue from each repo has been processed through the pipeline, then remove `fabrik:paused` to retry:\n\n%s",
 			"- "+strings.Join(unmanaged, "\n- "))
 		if dbID, commentErr := e.client.AddComment(owner, repo, item.Number, msg); commentErr != nil {
 			e.logf(item.Number, "warn", "could not post spawn error comment: %v\n", commentErr)
