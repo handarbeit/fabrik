@@ -145,6 +145,69 @@ FABRIK_SPAWN_CHILD_END`
 	}
 }
 
+// ---- resolveSpecifyOptionID unit tests ----
+
+func TestResolveSpecifyOptionID_Nil(t *testing.T) {
+	if got := resolveSpecifyOptionID(nil); got != "" {
+		t.Errorf("got %q, want empty", got)
+	}
+}
+
+func TestResolveSpecifyOptionID_ExactMatch(t *testing.T) {
+	sf := &gh.StatusField{
+		Options:            map[string]string{"Backlog": "OPT_0", "Specify": "OPT_1", "Done": "OPT_3"},
+		OrderedOptionNames: []string{"Backlog", "Specify", "Done"},
+	}
+	if got := resolveSpecifyOptionID(sf); got != "OPT_1" {
+		t.Errorf("got %q, want OPT_1", got)
+	}
+}
+
+func TestResolveSpecifyOptionID_Fallback(t *testing.T) {
+	// No "Specify" column — fallback to first non-Backlog, non-terminal.
+	sf := &gh.StatusField{
+		Options:            map[string]string{"Backlog": "OPT_0", "Research": "OPT_1", "Done": "OPT_3"},
+		OrderedOptionNames: []string{"Backlog", "Research", "Done"},
+	}
+	if got := resolveSpecifyOptionID(sf); got != "OPT_1" {
+		t.Errorf("got %q, want OPT_1 (Research)", got)
+	}
+}
+
+func TestResolveSpecifyOptionID_BacklogAndDoneOnly(t *testing.T) {
+	// Only two columns — fallback skips Backlog and the last; nothing qualifies.
+	sf := &gh.StatusField{
+		Options:            map[string]string{"Backlog": "OPT_0", "Done": "OPT_1"},
+		OrderedOptionNames: []string{"Backlog", "Done"},
+	}
+	if got := resolveSpecifyOptionID(sf); got != "" {
+		t.Errorf("got %q, want empty (no viable column)", got)
+	}
+}
+
+func TestResolveSpecifyOptionID_EmptyOrderedNames(t *testing.T) {
+	sf := &gh.StatusField{
+		Options:            map[string]string{"Research": "OPT_1"},
+		OrderedOptionNames: nil,
+	}
+	if got := resolveSpecifyOptionID(sf); got != "" {
+		t.Errorf("got %q, want empty when OrderedOptionNames is nil", got)
+	}
+}
+
+func TestResolveSpecifyOptionID_SingleColumn(t *testing.T) {
+	// Only one column — len(names) < 2, returns "".
+	sf := &gh.StatusField{
+		Options:            map[string]string{"Specify": "OPT_1"},
+		OrderedOptionNames: []string{"Specify"},
+	}
+	// Even though "Specify" is in Options, len(names) == 1 so fallback returns "".
+	// But we check exact match first, so it should return OPT_1.
+	if got := resolveSpecifyOptionID(sf); got != "OPT_1" {
+		t.Errorf("got %q, want OPT_1 (exact match wins)", got)
+	}
+}
+
 // ---- preImplement integration tests ----
 
 func spawnTestEngine(client *mockGitHubClient) *Engine {
