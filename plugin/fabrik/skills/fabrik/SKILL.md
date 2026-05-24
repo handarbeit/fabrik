@@ -81,6 +81,35 @@ Fabrik **uses labels as durable state**. The user **also** uses some labels to s
 
 When the user asks "how do I make Fabrik do X," your first move is usually to suggest the right label, not to suggest editing config.
 
+### Filing issue chains with `blocked_by` dependencies
+
+When the user wants to create a group of related issues where B is blocked by A, the ordering of operations matters. **Wire the `blocked_by` dependency before moving the blocked issue into Specify** — or disaster follows.
+
+**Why the order matters**: Once an issue lands in Specify with `fabrik:yolo`, the engine picks it up within seconds (poll cadence is 30 s; webhooks fire immediately). `fabrik:blocked` is engine-managed: Fabrik adds it only when it detects an open `blocked_by` link at poll time. If that link isn't present when Fabrik fetches the issue's deep state, `checkDependencies` sees no open dependencies, adds no block label, and dispatches a Claude worker immediately — even if the user intends to wire the dependency a moment later.
+
+**Safe sequence:**
+
+1. **Create all issues in Backlog** (or no column) — not in Specify. This prevents Fabrik from picking them up before you're ready.
+2. **Wire each `blocked_by` dependency via the GitHub API** — before adding labels or moving columns.
+3. **Add labels** (`fabrik:yolo`, `model:opus`, etc.) to all issues.
+4. **Move all issues to Specify** — only now, once the dependency graph is complete.
+
+**Wiring the dependency:**
+
+```bash
+# Get the node ID of the blocking issue (A):
+gh api repos/{owner}/{repo}/issues/{A} --jq '.node_id'
+
+# Wire B as blocked by A:
+gh api repos/{owner}/{repo}/issues/{B}/dependencies/blocked_by \
+  --method POST \
+  -F blocked_by_id=<node-id-of-A>
+```
+
+**The `-F` vs `-f` gotcha**: Use `-F` (uppercase), not `-f` (lowercase). `-F` sends a typed integer/ID field; `-f` sends a plain string. The GitHub dependencies API rejects string IDs and returns a confusing 422 error.
+
+Once the dependency is wired, Fabrik's engine will apply `fabrik:blocked` to B automatically on the next poll, and B will remain blocked until A's linked PR is merged.
+
 ### Comments are the interactive channel
 
 The user can comment on an in-flight issue to redirect the worker. Fabrik picks up comments on the next poll and re-invokes the stage with the comment as additional context. Comments on PRs work the same way (Review and Validate stages read PR comments).
