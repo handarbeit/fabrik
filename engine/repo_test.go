@@ -13,7 +13,7 @@ func TestParseOwnerRepo(t *testing.T) {
 		wantRepo  string
 	}{
 		{"owner/repo", "owner", "repo"},
-		{"acme/widgets", "arbeithand", "develop"},
+		{"acme/widgets", "acme", "widgets"},
 		{"org/my-repo", "org", "my-repo"},
 		// Edge cases
 		{"", "", ""},
@@ -37,7 +37,7 @@ func TestRepoName(t *testing.T) {
 		want  string
 	}{
 		{"owner/repo", "repo"},
-		{"acme/widgets", "develop"},
+		{"acme/widgets", "widgets"},
 		{"", ""},
 		{"noslash", ""},
 		{"/nooowner", ""},

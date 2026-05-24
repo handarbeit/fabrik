@@ -222,7 +222,7 @@ The same map serves both behaviours, with the same cooldown duration. Reads are 
 
 **Implicit invariants:** *fabrik:locked:<self> on GitHub == lockedIssues[key] == true.* Violated by crash, kill -9, or `pkill`. The label persists on the issue but the in-memory set is gone after restart. Stale labels become a manual-cleanup task forever.
 
-**Known bugs:** **stale-lock recovery has no automated path.** Dispatcher's `itemNeedsWork` correctly admits items locked by *self* (so retry can lock again), but the user-visible "fabrik:locked:arbeithand" label persisting confuses the operator. We hit this on #501 today — manual label deletion was required.
+**Known bugs:** **stale-lock recovery has no automated path.** Dispatcher's `itemNeedsWork` correctly admits items locked by *self* (so retry can lock again), but the user-visible `fabrik:locked:<user>` label persisting confuses the operator. We hit this on #501 — manual label deletion was required.
 
 ### 2.6 `engine.retryCount` + `pausedDueToRetries`
 

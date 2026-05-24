@@ -119,7 +119,7 @@ A single stage advance typically performs 3–6 API mutations, each generating a
 
 An initial approach added a sender-login filter: parse `sender.login` from the webhook payload and suppress the `wakeCh` signal when the sender matches `cfg.User`. This was implemented and then reverted for a fundamental reason:
 
-**Fabrik runs authenticated as the user's own GitHub account.** `cfg.User` is the human operator's login (e.g., `arbeithand`), not a dedicated bot account. Filtering by `cfg.User` would suppress not only Fabrik's own API actions but also every event the human user generates — label changes, comments, PR reviews — silencing the webhook stream for the most important input class.
+**Fabrik runs authenticated as the user's own GitHub account.** `cfg.User` is the human operator's login (e.g., `octocat`), not a dedicated bot account. Filtering by `cfg.User` would suppress not only Fabrik's own API actions but also every event the human user generates — label changes, comments, PR reviews — silencing the webhook stream for the most important input class.
 
 The sender-filter design is only viable when Fabrik runs as a dedicated bot account distinct from any human user. That is a future change; this PR does not implement it.
 

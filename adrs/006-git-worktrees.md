@@ -54,9 +54,9 @@ repos have issues with the same number:
 .fabrik/worktrees/<owner>-<repo>/issue-N/
 ```
 
-For example, issues in `develop` and `widgets-framework` use:
+For example, issues in `widgets` and `widgets-framework` use:
 ```
-.fabrik/worktrees/org-develop/issue-42/
+.fabrik/worktrees/org-widgets/issue-42/
 .fabrik/worktrees/org-widgets-framework/issue-42/
 ```
 

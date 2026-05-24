@@ -19,7 +19,7 @@ In practice, the combination of `fabrik:yolo` + CI-fix reinvoke + repeated commi
 5. Next poll: `stage:Validate:complete` absent → `itemNeedsWork` returns true → dispatcher re-invokes the full Validate stage.
 6. New Validate invocation emits `FABRIK_STAGE_COMPLETE` → cycle repeats.
 
-Observed in `acme/widgets #705`: **27 full Validate stage invocations** during a single CI-await window (~80 minutes), costing ~$10–20 for work that should have been free REST polls.
+Observed in a managed repo on issue #705: **27 full Validate stage invocations** during a single CI-await window (~80 minutes), costing ~$10–20 for work that should have been free REST polls.
 
 The root cause is a semantic layering problem: `stage:Validate:complete` claims "Validate is done" when in fact only the Claude verdict condition has been met. The remaining conditions (CI green, PR mergeable) are still being evaluated by the catch-up loop.
 
