@@ -1568,6 +1568,20 @@ Fabrik passes `--permission-mode dontAsk` to every Claude Code invocation. In th
 
 **Note on personal `~/.claude/settings.json`:** Under `dontAsk` mode, tools the user has explicitly allowed in their own `permissions.allow` remain allowed in addition to Fabrik's list — this does not break the isolation goal, it just means personal extras carry through. If your organization deploys managed settings (MDM/enterprise level), a `deny` rule in managed settings cannot be overridden by `--allowedTools` — that is outside Fabrik's control.
 
+### Worktree Boundary Enforcement
+
+Fabrik enforces two independent layers of worktree isolation on every Claude invocation (implemented in `engine/boundary.go`):
+
+**Layer 1 — Tool-permission scoping**: At invocation time, bare `Edit` and `Write` entries in the allowed-tools list are replaced with `Edit(<workDir>/**)` and `Write(<workDir>/**)`. If Claude attempts to edit or write a file outside the issue's worktree, the tool call receives a permission error — but the stage continues running; only the specific tool call is rejected.
+
+**Layer 2 — Cross-repo ref audit**: Before the extension loop begins, Fabrik snapshots the git refs of every registered bare repo except the active issue's own repo. After the loop completes, a second snapshot is compared. If any ref in a non-active repo has changed, a boundary violation is raised: `fabrik:paused` and `stage:<name>:failed` are applied, a comment is posted listing the specific refs that were mutated, and no automatic cleanup occurs.
+
+**What to do when a stage fails with a boundary violation:** Check whether the stage's prompt or skill is attempting to write files outside the issue's worktree — for example, writing to `fabrikDir` (the Fabrik config directory) or a sibling worktree. The comment posted on violation lists the specific bare-repo refs that changed, which identifies which repo was touched.
+
+**`fabrik:unrestricted` bypasses both layers.** When this label is present, `applyWorktreeBoundary` is skipped (tool-path restrictions are not applied) and the cross-repo ref snapshot is not taken (the audit does not run). Use with caution — this removes all path-level isolation guarantees, not just tool-permission restrictions.
+
+For the authoritative engine-level spec, see [Stage Lifecycle — Worktree Boundary Enforcement](stage-lifecycle.md#worktree-boundary-enforcement).
+
 ---
 
 ## 8. TUI Dashboard
@@ -1768,6 +1782,12 @@ The GraphQL query uses a two-phase fetch to minimize rate limit consumption:
    deep-fetch. New user comments bump the issue's `updatedAt`; PR review submissions
    bump the linked PR's `updatedAt` — both are captured by the shallow scan, so the
    targeted detail fetch fires naturally when there is actually something new to see.
+
+   Items in board columns that have no corresponding stage config (e.g. Backlog, Triage,
+   or custom parking-lot columns) are skipped from `FetchItemDetails` entirely — their
+   probe state is updated (keeping `Status` current for `itemMayNeedWork`) but no
+   deep-fetch is triggered. This reduces per-poll GraphQL cost on boards with large
+   unconfigured column populations.
 
 Typical cost is ~5–30 points per poll depending on active items, well within the
 5,000 points/hour limit.
