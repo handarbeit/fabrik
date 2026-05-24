@@ -482,7 +482,11 @@ func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error
 // same new target repo.
 func (e *Engine) ensureSpawnTargetReady(ctx context.Context, targetOwner, targetRepo string, parentItem gh.ProjectItem) error {
 	parentOwner, parentRepo := itemOwnerRepo(parentItem, e.defaultRepo())
+	if parentOwner == "" || parentRepo == "" {
+		return fmt.Errorf("ensureSpawnTargetReady: cannot determine parent repo for item %d", parentItem.Number)
+	}
 	nameWithOwner := targetOwner + "/" + targetRepo
+	worktreeRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
 
 	// Fast path: already registered.
 	e.mu.Lock()
@@ -501,18 +505,20 @@ func (e *Engine) ensureSpawnTargetReady(ctx context.Context, targetOwner, target
 		// clone failure must post its own error comment — unlike ensureRepoReady
 		// waiters, which silently skip because the same item owns all call sites.
 		existing := actual.(*cloneCall)
-		<-existing.done
+		select {
+		case <-existing.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 		if existing.err != nil {
 			e.postSpawnCloneError(parentOwner, parentRepo, parentItem, targetOwner, targetRepo, existing.err)
 			return fmt.Errorf("ensureSpawnTargetReady: clone of %s/%s failed: %w", targetOwner, targetRepo, existing.err)
 		}
-		worktreeRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
 		e.registerWorktrees(nameWithOwner, existing.dir, worktreeRoot)
 		return nil
 	}
 
 	// This goroutine is the owner: perform the clone.
-	worktreeRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
 	bareDir, err := ensureBareClone(e.fabrikDir, targetOwner, targetRepo, e.cfg.User, e.cfg.GitSSH)
 	call.dir = bareDir
 	call.err = err
