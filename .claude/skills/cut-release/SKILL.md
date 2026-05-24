@@ -1,63 +1,51 @@
 ---
 name: cut-release
-description: Cut a new Fabrik release — gathers changes since last tag, writes release notes, commits, tags, and pushes
+description: Cut a new Fabrik release — gathers changes since last tag, writes release notes, delegates publication to scripts/cut-release.sh
 user_invocable: true
 ---
 
 # Cut Release
 
-Cut a new Fabrik release with curated release notes.
+Cut a new Fabrik release. Your job is to **author the release notes**; `scripts/cut-release.sh` does everything else (commit, tag, push as @arbeithand, watch workflow, verify identity, file doc-update issue).
 
 ## Usage
 
-Invoked as `/cut-release` or `/cut-release v0.0.12`. If no version is provided, suggest the next patch bump from the current latest tag.
+Invoked as `/cut-release` or `/cut-release v0.0.67`. If no version is provided, suggest the next patch bump from the current latest tag.
 
 ## Steps
 
-### 1. Pre-flight checks
-
-- **Verify on main branch.** Run `git branch --show-current`. If the output is anything other than `main` (including empty output, which indicates a detached HEAD), check out main with `git checkout main` before proceeding. **Do NOT skip this** — this skill has caused off-branch tag pushes (v0.0.46) and detached-HEAD near-misses (v0.0.49) when assumed-on-main turned out to be wrong.
-- Ensure working tree is clean (`git status --porcelain`). If dirty, stop and tell the user.
-- Pull latest main: `git pull origin main`.
-- Run `go build ./...` and `go test -race ./...`. If either fails, stop.
-
-### 2. Determine version
+### 1. Determine version
 
 - Find the latest tag: `git describe --tags --abbrev=0`
-- If a version argument was provided, validate it:
-  - Must be valid semver with `v` prefix (e.g. `v0.0.12`)
-  - Must be greater than the current latest tag
-- If no version provided, suggest next patch bump (e.g. `v0.0.11` → `v0.0.12`) and confirm with user
+- If a version arg was provided, validate semver with `v` prefix and that it's greater than the latest tag.
+- If no version arg, suggest the next patch bump and proceed.
 
-### 3. Gather changes
+### 2. Author release notes
 
-- Run `git log <last-tag>..HEAD --oneline` to get all commits since the last release
-- Group changes into categories:
-  - **Features** — new capabilities
-  - **Fixes** — bug fixes
-  - **Improvements** — enhancements to existing features
-  - **Internal** — refactoring, test improvements, CI changes (summarize briefly, don't enumerate)
-- Ignore merge commits and `Co-Authored-By` lines
-- Focus on user-facing changes; collapse internal churn into a single line
+This is the part requiring judgment — do not delegate it.
 
-### 4. Write release notes
-
-Write `release-notes.md` in the repo root with this structure:
+- `git log <last-tag>..HEAD --oneline` to enumerate commits since the last release.
+- Group user-facing changes by category: **Features**, **Fixes**, **Improvements**, **Internal**. Omit empty sections.
+- Ignore merge commits and `Co-Authored-By` lines.
+- Collapse internal churn into a single line under **Internal**. Don't enumerate refactors / test additions.
+- Write `release-notes.md` in the repo root with this structure:
 
 ```markdown
 # Fabrik <version>
 
+<optional 1-2 sentence summary of the headline theme(s)>
+
 ## Features
-- Description of feature (#issue)
+- Description (#issue)
 
 ## Fixes
-- Description of fix (#issue)
+- Description (#issue)
 
 ## Improvements
-- Description of improvement (#issue)
+- Description (#issue)
 
 ## Internal
-- Summary of internal changes
+- One-line summary of internal churn
 
 ## Upgrading
 
@@ -72,81 +60,37 @@ gh release download --repo handarbeit/fabrik \
 \```
 ```
 
-Omit any empty category sections. Keep descriptions concise — one line each.
+**Heading must be exactly `# Fabrik <version>`** — the script validates this and refuses to proceed on mismatch.
 
-### 5. Commit, tag, and push
-
-- `git add release-notes.md`
-- Commit with message: `Release notes for <version>`
-- Create tag: `git tag <version>`
-- Push immediately: `git push origin main <version>`
-
-Do NOT ask for confirmation before pushing. If builds and tests passed in step 1, proceed.
-
-### 6. Verify the release workflow succeeded
-
-**This step is not optional.** The release workflow does multiple things (build binaries, publish to handarbeit/fabrik, post Discussion announcement). Any of these can fail silently. A workflow that shows `completed` is NOT the same as `success` — only the **conclusion** tells you whether it actually worked.
+### 3. Run the publish script
 
 ```bash
-# Get the run ID for the v<version> tag push
-RUN_ID=$(gh run list --workflow release.yml --limit 1 -R handarbeit/fabrik \
-  --json databaseId,headBranch --jq ".[] | select(.headBranch==\"v<version>\") | .databaseId")
-
-# Wait for it to finish
-gh run watch $RUN_ID -R handarbeit/fabrik
-
-# CRITICAL: check the conclusion (not just the status)
-CONCLUSION=$(gh run view $RUN_ID -R handarbeit/fabrik --json conclusion --jq .conclusion)
-if [ "$CONCLUSION" != "success" ]; then
-  echo "Release workflow FAILED with conclusion: $CONCLUSION"
-  gh run view $RUN_ID -R handarbeit/fabrik --log-failed | tail -50
-  # STOP — do not proceed. Tell the user the release failed and show the failing step.
-fi
+scripts/cut-release.sh v0.0.67
 ```
 
-Also verify the release actually exists on the public repo:
-```bash
-gh release view v<version> --repo handarbeit/fabrik --json tagName
-```
+The script handles, in order:
+1. **Pre-flight** — must be on main, working tree clean (uncommitted `release-notes.md` allowed), ff'd to origin, tag not already taken locally or on origin.
+2. **PAT identity check** — reads `FABRIK_TOKEN` from `.env`; aborts unless it belongs to `@arbeithand`.
+3. `go build ./...` and `go test -race ./...`. Skippable only via `--skip-tests` (last resort).
+4. Commits `release-notes.md` with `GIT_AUTHOR_*` env vars so the commit is attributed to `arbeithand <handarbeit@handarbeit.io>`.
+5. Pushes the release-notes commit and the tag with `credential.helper=` and `credential.https://github.com.helper=` both nuked, plus PAT-in-URL — the exact incantation needed on this machine to push as the bot rather than the default `gh auth` identity.
+6. Watches the release workflow and verifies `conclusion == "success"`.
+7. **Hard identity verification** — fetches `release.author.login` and the latest Discussion's author. **Aborts loudly** if either is not `arbeithand`, with a pointer to rotate the `PUBLIC_REPO_RELEASE_TOKEN` repo secret.
+8. Files the doc-update issue and adds it to project #1 at Status=Specify with `fabrik:yolo` — all authored by `arbeithand` via the PAT.
 
-Report the result explicitly:
-- ✅ "Release v<version> published to handarbeit/fabrik (run #<id>) — all steps green"
-- ❌ "Release v<version> workflow FAILED at step X — <reason>" (and show the failing log lines)
+Flags:
+- `--skip-tests` — skip the race-tested suite (use only if it's already known-green from a recent run).
+- `--no-doc-issue` — skip the doc-update issue creation.
 
-Never report a release as successful unless `conclusion == "success"` AND the release exists on handarbeit/fabrik.
+### 4. Report back
 
-### 7. File documentation update issue
+If the script exits 0, the release is live and verified. Report:
+- "✅ Release v0.0.67 published to handarbeit/fabrik — release + announcement authored by @arbeithand. Doc-update issue #<n> filed at Specify."
 
-After a successful push, create a GitHub issue to update user documentation and move it to Specify:
-
-```bash
-# Create the issue
-gh issue create -R handarbeit/fabrik \
-  --title "Update docs for v<version>" \
-  --label "documentation" \
-  --label "fabrik:yolo" \
-  --body "Update USER_GUIDE.md, README.md, and the marketing site to reflect changes in v<version>.
-
-## Changes to document
-
-<paste the release notes summary here>
-
-## Scope
-
-- USER_GUIDE.md — update any sections affected by new features or changed behavior
-- README.md — update feature list if new user-facing capabilities were added
-- docs/index.md — update marketing page if warranted
-- Ensure code examples and configuration references are current"
-
-# Move the issue to Specify on the Fabrik PM board (org project #1)
-# First, get the issue's project item ID, then update its status
-```
-
-Use `gh project item-add` and `gh project item-edit` to place the issue in the Specify column on the Fabrik PM project board. The `fabrik:yolo` label ensures it flows through the pipeline automatically.
+If the script exits non-zero, surface the script's last error message verbatim. Do NOT attempt to repair the half-published state automatically — the script intentionally avoids destructive cleanup. The cleanup commands are commented at the bottom of the script for reference; relay them to the user and ask how they want to proceed.
 
 ## Important
 
-- Never skip the build/test step — broken releases are worse than delayed releases
-- Never force-push tags — if a tag exists, stop and ask the user
-- The GitHub Actions workflow (`.github/workflows/release.yml`) uses `--release-notes release-notes.md` so the file must be committed before the tag push triggers the build
-- Always file the doc update issue — documentation drift is how users get confused
+- **Never edit `scripts/cut-release.sh` to bypass a check** — every guard exists because something failed once. The bot-identity guards in particular took three deletion-and-republish cycles to diagnose (the workflow secret `PUBLIC_REPO_RELEASE_TOKEN` is the root cause when the arbeithand-attribution bug recurs).
+- **The script is bot-only** — only someone with the `arbeithand` PAT (i.e., the handarbeit/fabrik publisher) can use it. Fork maintainers cutting their own fork releases would need to parameterize the constants at the top.
+- **Authoring release notes is the AI's job; everything else is the script's.** Don't reinvent the publication mechanics inline — past attempts at that produced wrong-identity releases that had to be cleaned up.
