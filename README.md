@@ -8,32 +8,17 @@ are user input, and the board columns define the workflow.
 
 ## Quick Start
 
-**Option A: Install binary (requires `gh`)**
+Requires Go 1.26.1+, the [Claude Code CLI](https://docs.claude.com/en/docs/agents-and-tools/claude-code/overview), and a GitHub token with `repo` and `project` scopes.
 
 ```bash
-# Requires the `gh` CLI authenticated (gh auth login)
-cd ~/bin  # or any directory on your PATH
-gh release download --repo handarbeit/fabrik \
-  --pattern "fabrik_*_$(uname -s | tr A-Z a-z)_$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/').tar.gz" \
-  -O - | tar xz
-# Platform-specific alternatives:
-#   darwin/arm64:  --pattern "fabrik_*_darwin_arm64.tar.gz"
-#   darwin/amd64:  --pattern "fabrik_*_darwin_amd64.tar.gz"
-#   linux/amd64:   --pattern "fabrik_*_linux_amd64.tar.gz"
-#   linux/arm64:   --pattern "fabrik_*_linux_arm64.tar.gz"
-```
-
-**Option B: Build from source (requires Go)**
-
-```bash
-# Build
-go build -o fabrik .
+# Install
+go install github.com/handarbeit/fabrik@latest
 
 # Initialize stage configs, plugin, and project config template
 # Pass your GitHub Project URL to auto-populate owner, project, and owner_type:
-./fabrik init --user you https://github.com/orgs/your-org/projects/5
+fabrik init --user you https://github.com/orgs/your-org/projects/5
 # Or run without a URL for full interactive prompts (TTY) / blank template (non-TTY)
-./fabrik init
+fabrik init
 # Creates .fabrik/stages/, .fabrik/plugin/, and .fabrik/config.yaml
 
 # Edit .fabrik/config.yaml with your project settings (commit this file)
@@ -42,10 +27,10 @@ echo 'FABRIK_TOKEN=ghp_...' >> .env
 echo '.env' >> .gitignore
 
 # Run (settings come from .fabrik/config.yaml)
-./fabrik
+fabrik
 
 # Or override specific values with flags
-./fabrik --stages ./.fabrik/stages --yolo
+fabrik --stages ./.fabrik/stages --yolo
 ```
 
 **Configuration summary:**
@@ -58,7 +43,7 @@ echo '.env' >> .gitignore
 Use `--auto-upgrade` to have Fabrik self-upgrade at startup and when idle:
 
 ```bash
-./fabrik --auto-upgrade ...
+fabrik --auto-upgrade ...
 ```
 
 At startup and after 2 idle polls, Fabrik upgrades itself automatically and re-execs:
@@ -391,7 +376,7 @@ This means:
 ```bash
 mkdir my-fabrik-dir && cd my-fabrik-dir
 fabrik init
-./fabrik --owner myorg --project 5 --user me
+fabrik --owner myorg --project 5 --user me
 # Fabrik bare-clones each repo as needed into .fabrik/repos/
 ```
 
@@ -432,10 +417,10 @@ researched its own codebase, planned the GraphQL changes, and will eventually
 implement the feature that lets it read PR comments — gaining a capability it
 needs by building it for itself. Ouroboros-as-a-service.
 
-The human's role is product manager: file issues, answer questions when the
-Research stage surfaces them, drag cards across the board, and occasionally
-comment "please process PR feedback" when Copilot has opinions. The factory
-does the rest.
+The human's role is product manager, architect, and UX designer all in one:
+file issues, answer questions when the Research stage surfaces them, drag cards
+across the board, and occasionally comment "please process PR feedback" when
+Copilot has opinions. The factory does the rest.
 
 ## Migration from `./stages`
 
