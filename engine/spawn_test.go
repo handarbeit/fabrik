@@ -196,13 +196,12 @@ func TestResolveSpecifyOptionID_EmptyOrderedNames(t *testing.T) {
 }
 
 func TestResolveSpecifyOptionID_SingleColumn(t *testing.T) {
-	// Only one column — len(names) < 2, returns "".
+	// Exact match on "Specify" fires before the fallback len(names) < 2 guard,
+	// so a single-column board named "Specify" still returns its option ID.
 	sf := &gh.StatusField{
 		Options:            map[string]string{"Specify": "OPT_1"},
 		OrderedOptionNames: []string{"Specify"},
 	}
-	// Even though "Specify" is in Options, len(names) == 1 so fallback returns "".
-	// But we check exact match first, so it should return OPT_1.
 	if got := resolveSpecifyOptionID(sf); got != "OPT_1" {
 		t.Errorf("got %q, want OPT_1 (exact match wins)", got)
 	}
