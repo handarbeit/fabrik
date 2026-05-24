@@ -282,7 +282,9 @@ func (e *Engine) preImplement(ctx context.Context, board *gh.ProjectBoard, item 
 			if err := e.client.UpdateProjectItemStatus(board.ProjectID, childItemID, sf.FieldID, optionID); err != nil {
 				e.logf(item.Number, "warn", "could not set project status on %s#%d: %v\n", block.Repo, childNumber, err)
 			}
-		} else if sf != nil {
+		} else if sf == nil {
+			e.logf(item.Number, "warn", "project status field unavailable for %s#%d; child lands in Backlog\n", block.Repo, childNumber)
+		} else {
 			e.logf(item.Number, "warn", "no Specify/processing status option found for %s#%d; child lands in Backlog\n", block.Repo, childNumber)
 		}
 
