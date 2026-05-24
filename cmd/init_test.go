@@ -466,11 +466,7 @@ func TestRunInit_UserFlag(t *testing.T) {
 	}
 	defer os.Chdir(orig) //nolint
 
-<<<<<<< HEAD
 	err = runInit([]string{"--user", "acme", "https://github.com/users/acme/projects/5"})
-=======
-	err = runInit([]string{"--user", "arbeithand", "https://github.com/users/arbeithand/projects/5"})
->>>>>>> origin/main
 	if err != nil {
 		t.Fatalf("runInit: %v", err)
 	}
