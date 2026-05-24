@@ -337,6 +337,17 @@ func (c *CacheImpl) Reconcile(board *gh.ProjectBoard) {
 			Item:   *pi,
 		})
 
+		// Propagate HeadSHA from the shallow board query when present. The reconcile
+		// path runs every 60 min and acts as a backstop repair path for stale-SHA state.
+		if pi.LinkedPRHeadSHA != "" && pi.LinkedPRNumberShallow != 0 {
+			c.store.Apply(itemstate.PRHeadSHAUpdated{
+				Repo:        pi.Repo,
+				Number:      pi.Number,
+				LinkedPRNum: pi.LinkedPRNumberShallow,
+				SHA:         pi.LinkedPRHeadSHA,
+			})
+		}
+
 		// Note: linkage drift detection (LinkedPRNumber changes) was previously
 		// performed here using LinkedPRNumberShallow. It has moved to the probe
 		// loop in engine/poll.go (runProbeAndDeepFetch), which compares the probe's
@@ -667,6 +678,17 @@ func (c *CacheImpl) FetchItemDetails(item *gh.ProjectItem) error {
 		Number:     item.Number,
 		FreshState: *item,
 	})
+	// Apply the head SHA separately: applyProjectItem deliberately skips HeadSHA to avoid
+	// clobbering a webhook-populated SHA with an empty value from the shallow path.
+	// The deep fetch always carries an authoritative headRefOid from the GraphQL query.
+	if item.LinkedPRHeadSHA != "" && item.LinkedPRNumber != 0 {
+		c.store.Apply(itemstate.PRHeadSHAUpdated{
+			Repo:        item.Repo,
+			Number:      item.Number,
+			LinkedPRNum: item.LinkedPRNumber,
+			SHA:         item.LinkedPRHeadSHA,
+		})
+	}
 	return nil
 }
 
@@ -721,9 +743,14 @@ func (c *CacheImpl) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDe
 		}
 	}
 
-	// Cache-hit: PR details are in the Store (Title is non-empty once PRDetailsUpdated fires).
+	// Cache-hit: PR details are in the Store (Title is non-empty once PRDetailsUpdated fires,
+	// HeadSHA is non-empty once PRHeadSHAUpdated fires). Require both to prevent serving an
+	// incomplete record — a non-empty Title with empty HeadSHA would force checkCIGate to
+	// block indefinitely (empty HeadSHA → blocked, not cleared) and trigger a REST fallback
+	// on every poll until the SHA is populated. Requiring HeadSHA here ensures the cache only
+	// serves fully-populated records, keeping the REST fallback path rare.
 	if linkedPRNum != 0 && snapErr == nil {
-		if lpr := snap.LinkedPR(); lpr != nil && lpr.Title != "" {
+		if lpr := snap.LinkedPR(); lpr != nil && lpr.Title != "" && lpr.HeadSHA != "" {
 			return &gh.PRDetails{
 				Number:         lpr.Number,
 				Title:          lpr.Title,
@@ -753,20 +780,16 @@ func (c *CacheImpl) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDe
 			Merged:   pr.Merged,
 			Draft:    pr.Draft,
 		})
-		// If the item had no LinkedPRNumber in Store, also register the PR linkage
-		// without touching deep-fetch state. prToKey is maintained by PRDetailsUpdated above.
-		if linkedPRNum == 0 && snapErr == nil {
-			existingSHA := ""
-			if s := snap.State(); s.LinkedPR != nil {
-				existingSHA = s.LinkedPR.HeadSHA
-			}
-			c.store.Apply(itemstate.PRHeadSHAUpdated{
-				Repo:        fullRepo,
-				Number:      issueNumber,
-				LinkedPRNum: pr.Number,
-				SHA:         existingSHA,
-			})
-		}
+		// Always write the fresh HeadSHA from the REST response. This fires on every
+		// fallback (not just at link-establishment) so any prior empty-SHA state is
+		// repaired immediately. PRHeadSHAUpdated is idempotent; the REST-fresh SHA is
+		// always authoritative. prToKey is maintained by PRDetailsUpdated above.
+		c.store.Apply(itemstate.PRHeadSHAUpdated{
+			Repo:        fullRepo,
+			Number:      issueNumber,
+			LinkedPRNum: pr.Number,
+			SHA:         pr.HeadSHA,
+		})
 	}
 	return pr, nil
 }

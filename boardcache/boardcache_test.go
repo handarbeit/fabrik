@@ -2464,3 +2464,115 @@ func TestBootstrapFromProbe_TitlePopulatedAfterDeepFetch(t *testing.T) {
 		t.Error("item #5 not found in board after deep-fetch")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// FetchLinkedPR — HeadSHA regression tests (issues #779)
+// ---------------------------------------------------------------------------
+
+// TestFetchLinkedPR_SecondCallUsesStoredSHA is a regression test for Bug 2:
+// the FetchLinkedPR fallback path previously wrote a stale (or zero) SHA into
+// the store and was gated on linkedPRNum==0 so it only fired once at
+// link-establishment. After the fix, the fresh HeadSHA from the REST response
+// is written unconditionally on every fallback. The second call must be served
+// from cache and must return the same non-empty SHA.
+func TestFetchLinkedPR_SecondCallUsesStoredSHA(t *testing.T) {
+	mc := &mockClient{
+		linkedPRResult: &gh.PRDetails{
+			Number:  99,
+			Title:   "My PR",
+			State:   "OPEN",
+			HeadSHA: "abc123def",
+		},
+	}
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+	// Bootstrap item #1 — no LinkedPR yet.
+	c.BootstrapFromProbe([]gh.BoardProbeItem{
+		{ContentID: "I_1", Number: 1, Repo: "owner/repo", Status: "Validate"},
+	}, "PID", nil)
+
+	// First call falls through to GitHub — item has no LinkedPR in the store.
+	pr1, err := c.FetchLinkedPR("owner", "repo", 1)
+	if err != nil {
+		t.Fatalf("first FetchLinkedPR: %v", err)
+	}
+	if pr1 == nil || pr1.HeadSHA != "abc123def" {
+		t.Fatalf("first call: want HeadSHA=abc123def, got %v", pr1)
+	}
+	if mc.fetchLinkedPRCount != 1 {
+		t.Errorf("expected 1 GitHub call, got %d", mc.fetchLinkedPRCount)
+	}
+
+	// Verify the store persisted the HeadSHA from the fallback.
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.LinkedPR == nil || s.LinkedPR.HeadSHA != "abc123def" {
+		t.Fatalf("store: want HeadSHA=abc123def, got %v", s.LinkedPR)
+	}
+
+	// Second call must be served from cache (no additional GitHub call).
+	pr2, err := c.FetchLinkedPR("owner", "repo", 1)
+	if err != nil {
+		t.Fatalf("second FetchLinkedPR: %v", err)
+	}
+	if mc.fetchLinkedPRCount != 1 {
+		t.Errorf("second call triggered a GitHub fetch; want cache hit (count=1, got %d)", mc.fetchLinkedPRCount)
+	}
+	if pr2 == nil || pr2.HeadSHA != "abc123def" {
+		t.Fatalf("second call: want HeadSHA=abc123def, got %v", pr2)
+	}
+}
+
+// TestFetchLinkedPR_EmptyHeadSHAForcesRefetch is a regression test for Bug 3:
+// the cache-hit eligibility check previously required only lpr.Title != "". A
+// record with a populated Title but empty HeadSHA was served as a cache hit,
+// making checkCIGate silently disarm the CI gate. After the fix, the guard
+// also requires lpr.HeadSHA != "", forcing a GitHub fallback for any stale
+// record that lacks a HeadSHA.
+func TestFetchLinkedPR_EmptyHeadSHAForcesRefetch(t *testing.T) {
+	mc := &mockClient{
+		linkedPRResult: &gh.PRDetails{
+			Number:  99,
+			Title:   "My PR",
+			State:   "OPEN",
+			HeadSHA: "fresh_sha",
+		},
+	}
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+	c.BootstrapFromProbe([]gh.BoardProbeItem{
+		{ContentID: "I_1", Number: 1, Repo: "owner/repo", Status: "Validate"},
+	}, "PID", nil)
+
+	// Simulate the pre-fix state: PRDetailsUpdated populates Title/Number but not HeadSHA.
+	c.store.Apply(itemstate.PRDetailsUpdated{
+		Repo:     "owner/repo",
+		Number:   1,
+		PRNumber: 99,
+		Title:    "My PR",
+		State:    "OPEN",
+	})
+	// Verify the store has Title but no HeadSHA.
+	s := testGetState(t, c, "owner/repo", 1)
+	if s.LinkedPR == nil || s.LinkedPR.Title == "" {
+		t.Fatal("pre-condition: expected LinkedPR.Title to be set")
+	}
+	if s.LinkedPR.HeadSHA != "" {
+		t.Fatalf("pre-condition: expected LinkedPR.HeadSHA to be empty, got %q", s.LinkedPR.HeadSHA)
+	}
+
+	// Call FetchLinkedPR — must NOT return the stale cache hit; must fall back to GitHub.
+	pr, err := c.FetchLinkedPR("owner", "repo", 1)
+	if err != nil {
+		t.Fatalf("FetchLinkedPR: %v", err)
+	}
+	if mc.fetchLinkedPRCount != 1 {
+		t.Errorf("want 1 GitHub fallback call (cache miss due to empty HeadSHA), got %d", mc.fetchLinkedPRCount)
+	}
+	if pr == nil || pr.HeadSHA != "fresh_sha" {
+		t.Fatalf("want HeadSHA=fresh_sha from fallback, got %v", pr)
+	}
+
+	// The fallback must also have written the fresh HeadSHA into the store.
+	s2 := testGetState(t, c, "owner/repo", 1)
+	if s2.LinkedPR == nil || s2.LinkedPR.HeadSHA != "fresh_sha" {
+		t.Fatalf("store after fallback: want HeadSHA=fresh_sha, got %v", s2.LinkedPR)
+	}
+}

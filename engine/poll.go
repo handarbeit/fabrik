@@ -1606,9 +1606,18 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 		}
 		newKeys[fmt.Sprintf("%s#%d", repo, pi.Number)] = true
 
+		// Stage-membership guard: whether the item's column has a matching Fabrik stage.
+		// The guard must come after newKeys[key]=true so unconfigured items are not
+		// falsely evicted from the store by the post-loop tombstoning pass (lines below).
+		configuredStage := stages.FindStage(e.cfg.Stages, pi.Status) != nil
+
 		snap, snapErr := e.store.Get(repo, pi.Number)
 		if snapErr != nil {
-			// New item on board — seed minimal state into the store.
+			// New item on board — skip entirely if not in a configured stage.
+			if !configuredStage {
+				continue
+			}
+			// Seed minimal state into the store.
 			minimal := gh.ProjectItem{
 				ID:             pi.ContentID,
 				ItemID:         pi.ItemID,
@@ -1688,6 +1697,25 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 		// Apply probe state (updates IsClosed, State, IsPR, Status, UpdatedAt;
 		// intentionally skips Labels to preserve webhook-driven label state).
 		e.store.Apply(itemstate.ProbeBoardItemUpdated{Repo: repo, Number: pi.Number, Item: pi})
+
+		// Unconditionally write the probe's head SHA whenever present — the probe
+		// response is always authoritative, including for cache-fresh items that
+		// skip the deep-fetch below. This is the primary poll-mode path for keeping
+		// HeadSHA populated without relying solely on the REST FetchLinkedPR fallback.
+		if pi.LinkedPRHeadSHA != "" && pi.LinkedPRNumber != 0 {
+			e.store.Apply(itemstate.PRHeadSHAUpdated{
+				Repo:        repo,
+				Number:      pi.Number,
+				LinkedPRNum: pi.LinkedPRNumber,
+				SHA:         pi.LinkedPRHeadSHA,
+			})
+		}
+
+		// Existing item in unconfigured column: probe state updated above (keeps
+		// Status current for TUI and itemMayNeedWork), but deep-fetch is wasted work.
+		if !configuredStage {
+			continue
+		}
 
 		// Deep-fetch when cache is stale relative to effectiveUpdatedAt.
 		if cacheImpl.IsItemCacheFresh(repo, pi.Number, pi.EffectiveUpdatedAt) {

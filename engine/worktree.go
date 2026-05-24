@@ -339,9 +339,10 @@ func (wm *WorktreeManager) updateWorktreeFromMain(wtDir, baseBranch string, issu
 		return
 	}
 
-	// Fetch latest from origin
+	// Fetch latest from origin.
 	cmd := exec.Command("git", "fetch", "origin", baseBranch)
 	cmd.Dir = wtDir
+	cmd.Env = nonInteractiveGitEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		wm.logf(issueNumber, "worktree", "warn: could not fetch origin: %s\n", strings.TrimSpace(string(out)))
 		return
