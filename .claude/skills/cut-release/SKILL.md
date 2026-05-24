@@ -74,14 +74,15 @@ scripts/cut-release.sh v0.0.67
 ```
 
 The script handles, in order:
-1. **Pre-flight** — must be on main, working tree clean (uncommitted `release-notes.md` allowed), ff'd to origin, tag not already taken locally or on origin.
-2. **PAT identity check** — reads `FABRIK_TOKEN` from `.env`; aborts unless it belongs to `@arbeithand`.
+1. **Pre-flight** — on main; ff'd to origin/main; tag `<version>` not already taken locally or on origin; `release-notes/<version>.md` exists, heading is exactly `# Fabrik <version>`, and contains a `## Summary` section. Working tree must be clean except for `release-notes.md` and `release-notes/<version>.md` (either untracked or modified) — any other dirty file aborts.
+2. **PAT identity check** — reads `FABRIK_TOKEN` from `.env`; aborts unless `gh api user` resolves to `@arbeithand`.
 3. `go build ./...` and `go test -race ./...`. Skippable only via `--skip-tests` (last resort).
-4. Commits `release-notes.md` with `GIT_AUTHOR_*` env vars so the commit is attributed to `arbeithand <handarbeit@handarbeit.io>`.
-5. Pushes the release-notes commit and the tag with `credential.helper=` and `credential.https://github.com.helper=` both nuked, plus PAT-in-URL — the exact incantation needed on this machine to push as the bot rather than the default `gh auth` identity.
-6. Watches the release workflow and verifies `conclusion == "success"`.
-7. **Hard identity verification** — fetches `release.author.login` and the latest Discussion's author. **Aborts loudly** if either is not `arbeithand`, with a pointer to rotate the `PUBLIC_REPO_RELEASE_TOKEN` repo secret.
-8. Files the doc-update issue and adds it to project #1 at Status=Specify with `fabrik:yolo` — all authored by `arbeithand` via the PAT.
+4. Copies `release-notes/<version>.md` → `release-notes.md` (the goreleaser input — not the source of truth).
+5. Stages both files and commits them with `GIT_AUTHOR_*` + `GIT_COMMITTER_*` env vars so the commit is `arbeithand <handarbeit@handarbeit.io>`. Verifies the resulting `%an <%ae>` matches; aborts otherwise.
+6. Pushes the release-notes commit, then tags and pushes the tag — both with `credential.helper=` and `credential.https://github.com.helper=` nuked, plus PAT-in-URL. This is the exact incantation needed on this machine to push as the bot rather than the default `gh auth` identity.
+7. Polls for the release workflow run, watches it, and **explicitly re-checks** `conclusion == "success"` via `gh run view` (the `--exit-status` flag alone is not trusted).
+8. **Hard identity verification** — fetches `release.author.login` and the latest Discussion's `author.login`. **Aborts loudly** if either is not `arbeithand`, with a pointer to rotate the `PUBLIC_REPO_RELEASE_TOKEN` repo secret (root cause of every wrong-identity recurrence so far).
+9. Files the doc-update issue and adds it to project #1 at Status=Specify with `fabrik:yolo` — all authored by `arbeithand` via the PAT.
 
 Flags:
 - `--skip-tests` — skip the race-tested suite (use only if it's already known-green from a recent run).
