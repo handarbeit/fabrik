@@ -291,9 +291,9 @@ description: >-
           streaming and CI check UI — building the observatory it now uses to watch itself
           build features. This page was written by Fabrik too.
           <br><br>
-          The human's role is product manager: file issues, answer clarifying
-          questions, drag cards, and occasionally comment to redirect the work.
-          The factory does the rest.
+          The human's role is product manager, architect, and UX designer all in
+          one: file issues, answer clarifying questions, drag cards, and
+          occasionally comment to redirect the work. The factory does the rest.
         </div>
       </div>
     </div>
