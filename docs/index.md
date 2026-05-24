@@ -105,6 +105,21 @@ description: >-
 
     <div class="demo-videos">
       <div class="video-container">
+        <video
+          src="{{ '/assets/videos/fabrik-demo.mp4' | relative_url }}"
+          controls
+          muted
+          playsinline
+          preload="metadata"
+          style="width:100%; border-radius:8px; display:block;">
+          Your browser does not support the video tag.
+        </video>
+        <div class="video-caption">
+          <div class="caption-title">Fabrik in Action</div>
+          <div class="caption-desc">A look at the pipeline driving real work end-to-end</div>
+        </div>
+      </div>
+      <div class="video-container">
         <img src="{{ '/assets/images/fabrik-tui.png' | relative_url }}" alt="Fabrik TUI showing active pipeline jobs" style="width:100%; border-radius:8px;">
         <div class="video-caption">
           <div class="caption-title">The Fabrik TUI Control Panel</div>
