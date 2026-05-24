@@ -784,6 +784,15 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	}
 	baseline := snapshotBaseline(stage, item, workDir)
 
+	// Pre-audit snapshot: capture refs in all registered repos before Claude runs.
+	// Only taken for non-read-only, non-unrestricted stages (write-capable stages).
+	// In single-repo projects this produces a one-entry map; crossRepoViolations
+	// filters out the active repo, so no false positives are generated.
+	var preAuditSnapshot map[string]map[string]string
+	if !stage.ReadOnly && !hasUnrestrictedLabel(item) {
+		preAuditSnapshot = e.snapshotAllRepoRefs(item.Number)
+	}
+
 	// Extension loop: re-invoke with --resume when max_turns is hit and progress is detected.
 	// Hard cap is 3× stage.MaxTurns total across all invocations.
 	var output string
@@ -817,6 +826,16 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		currentBudget = stage.MaxTurns
 		e.logf(item.Number, "extend-turns", "extending to %d× budget (%d turns used)\n", totalMultiple, usage.TurnsUsed)
 		resume = true
+	}
+
+	// Post-audit: compare ref snapshot taken before Claude ran against current state.
+	// Any new or changed ref in a non-active repo is a boundary violation.
+	if preAuditSnapshot != nil {
+		postAuditSnapshot := e.snapshotAllRepoRefs(item.Number)
+		if violations := crossRepoViolations(preAuditSnapshot, postAuditSnapshot, repoStr); len(violations) > 0 {
+			e.handleBoundaryViolation(owner, repo, repoStr, item, stage, violations, releaseLock)
+			return nil
+		}
 	}
 	// Report cumulative budget across all extensions in stats footer.
 	usage.MaxTurns = totalMultiple * stage.MaxTurns
@@ -1739,4 +1758,73 @@ func detectProgress(_ context.Context, stage *stages.Stage, item *gh.ProjectItem
 	}
 	logfFn("extend-turns", "progress check: stage %s has no progress signal, has_progress=false\n", stage.Name)
 	return false, nil
+}
+
+// snapshotAllRepoRefs snapshots branch refs in every registered bare-clone repository.
+// It reads the worktreeManagers map under e.mu, then runs git for-each-ref outside the
+// lock. Returns a map of "owner/repo" → (refname → SHA). Errors for individual repos
+// are logged and silently skipped so a transient git failure in one repo does not block
+// the audit for others.
+func (e *Engine) snapshotAllRepoRefs(issueNumber int) map[string]map[string]string {
+	// Collect repo→baseDir pairs under lock.
+	e.mu.Lock()
+	type repoDirPair struct {
+		repo    string
+		baseDir string
+	}
+	pairs := make([]repoDirPair, 0, len(e.worktreeManagers))
+	for repo, wm := range e.worktreeManagers {
+		pairs = append(pairs, repoDirPair{repo: repo, baseDir: wm.baseDir})
+	}
+	e.mu.Unlock()
+
+	result := make(map[string]map[string]string, len(pairs))
+	for _, p := range pairs {
+		refs, err := snapshotRepoRefs(p.baseDir)
+		if err != nil {
+			e.logf(issueNumber, "audit", "warn: could not snapshot refs for %s: %v\n", p.repo, err)
+			result[p.repo] = map[string]string{}
+			continue
+		}
+		result[p.repo] = refs
+	}
+	return result
+}
+
+// handleBoundaryViolation posts a comment describing cross-repo ref mutations,
+// marks the stage as failed (with cooldown), and releases the lock.
+// Called after detecting violations from the post-run audit.
+func (e *Engine) handleBoundaryViolation(owner, repo string, repoStr string, item gh.ProjectItem, stage *stages.Stage, violations []string, releaseLock func()) {
+	e.logf(item.Number, "audit", "worktree boundary violation detected in stage %q: %d unauthorized ref mutation(s)\n", stage.Name, len(violations))
+
+	violationList := strings.Join(violations, "\n- ")
+	comment := fmt.Sprintf(
+		"🏭 **Fabrik — worktree boundary violation**\n\nStage **%s** mutated refs in repositories outside its assigned worktree. The stage has been failed. No automatic cleanup was performed — human review is required.\n\n**Detected violations:**\n- %s\n\nTo retry after investigating: remove the `stage:%s:failed` label.",
+		stage.Name, violationList, stage.Name,
+	)
+
+	if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
+		e.logf(item.Number, "warn", "could not post boundary violation comment: %v\n", err)
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+				DatabaseID: dbID, Body: comment, Author: e.cfg.User, CreatedAt: time.Now(),
+			})
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
+		}
+	}
+
+	e.addFailedLabel(owner, repo, item.Number, stage.Name)
+
+	// Record StageAttempted so cooldown applies; do NOT call StageRetryIncremented.
+	e.store.Apply(itemstate.StageAttempted{
+		Repo:      repoStr,
+		Number:    item.Number,
+		StageName: stage.Name,
+		At:        time.Now(),
+	})
+
+	releaseLock()
 }
