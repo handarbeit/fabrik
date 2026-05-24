@@ -49,14 +49,9 @@ func ParseSpawnBlocks(body string) []SpawnBlock {
 		// BEGIN line must be exactly "FABRIK_SPAWN_CHILD_BEGIN owner/repo".
 		// Strip trailing \r if present (CRLF files).
 		beginLine = strings.TrimRight(beginLine, "\r")
-		parts := strings.SplitN(strings.TrimPrefix(beginLine, beginPrefix), " ", -1)
 		repo := ""
-		for _, p := range parts {
-			p = strings.TrimSpace(p)
-			if p != "" {
-				repo = p
-				break
-			}
+		if parts := strings.Fields(strings.TrimPrefix(beginLine, beginPrefix)); len(parts) > 0 {
+			repo = parts[0]
 		}
 
 		if repo == "" || !strings.Contains(repo, "/") {
