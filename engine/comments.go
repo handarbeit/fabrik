@@ -230,6 +230,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		Number:    item.Number,
 		Usage:     usage,
 		IsComment: true,
+		Duration:  time.Since(startedAt),
 	})
 	if err != nil {
 		e.removeEditingLabel(owner, repo, item.Number)
@@ -396,6 +397,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 			Completed: true,
 			Usage:     usage,
 			IsComment: true,
+			Duration:  time.Since(startedAt),
 		})
 		var prNumber int
 		if stage.CreateDraftPR {
