@@ -28,12 +28,17 @@ This is the part requiring judgment — do not delegate it.
 - Group user-facing changes by category: **Features**, **Fixes**, **Improvements**, **Internal**. Omit empty sections.
 - Ignore merge commits and `Co-Authored-By` lines.
 - Collapse internal churn into a single line under **Internal**. Don't enumerate refactors / test additions.
-- Write `release-notes.md` in the repo root with this structure:
+- Write the notes to `release-notes/<version>.md` (one file per release, archived in-tree). The script copies this to the repo-root `release-notes.md` automatically for goreleaser's input.
+
+Use this schema:
 
 ```markdown
 # Fabrik <version>
 
-<optional 1-2 sentence summary of the headline theme(s)>
+## Summary
+
+<1-3 sentences. Punchy headline themes only. This block is what the Discussions
+announcement post will contain — everything else lives on the GitHub Release page.>
 
 ## Features
 - Description (#issue)
@@ -60,7 +65,7 @@ gh release download --repo handarbeit/fabrik \
 \```
 ```
 
-**Heading must be exactly `# Fabrik <version>`** — the script validates this and refuses to proceed on mismatch.
+**Both the `# Fabrik <version>` heading and the `## Summary` section are required.** The script validates both and refuses to proceed on either failure. The Summary should be tight (1–3 sentences) — that's literally the announcement post body, so don't pad it with detail that already lives below in Features/Fixes.
 
 ### 3. Run the publish script
 

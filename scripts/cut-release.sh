@@ -74,8 +74,12 @@ BRANCH="$(git branch --show-current)"
 [ "$BRANCH" = "main" ] || die "must be on main (currently on '$BRANCH')"
 ok "on main"
 
-[ -z "$(git status --porcelain | grep -v '^?? release-notes\.md$' || true)" ] \
-  || die "working tree dirty (run: git status). Uncommitted release-notes.md is fine; anything else must be cleared first."
+# Allow uncommitted release-notes.md (we overwrite it) and an uncommitted
+# release-notes/<version>.md (the source-of-truth authored just before running
+# this script). Anything else must be cleared first.
+DIRTY=$(git status --porcelain | grep -Ev "^\?\? release-notes\.md$|^\?\? release-notes/${VERSION}\.md$| M release-notes\.md$| M release-notes/${VERSION}\.md$" || true)
+[ -z "$DIRTY" ] || die "working tree dirty:
+$DIRTY"
 ok "working tree acceptable"
 
 git fetch origin main --tags --quiet
@@ -99,14 +103,24 @@ if git ls-remote --tags origin "$VERSION" | grep -q "$VERSION"; then
 fi
 ok "tag $VERSION free locally and remotely"
 
-[ -f release-notes.md ] || die "release-notes.md not found in repo root"
-HEAD_LINE="$(head -1 release-notes.md)"
+NOTES_FILE="release-notes/${VERSION}.md"
+[ -f "$NOTES_FILE" ] || die "$NOTES_FILE not found — author the release notes there before running this script"
+HEAD_LINE="$(head -1 "$NOTES_FILE")"
 if ! printf '%s' "$HEAD_LINE" | grep -Eq "^# Fabrik ${VERSION}( |$)"; then
-  die "release-notes.md heading mismatch:
+  die "$NOTES_FILE heading mismatch:
   expected: '# Fabrik $VERSION'
   found:    '$HEAD_LINE'"
 fi
-ok "release-notes.md heading matches $VERSION"
+if ! grep -Eq '^## Summary[[:space:]]*$' "$NOTES_FILE"; then
+  die "$NOTES_FILE is missing a '## Summary' section — required for the Discussions announcement"
+fi
+ok "$NOTES_FILE heading + ## Summary present"
+
+# Copy to repo-root release-notes.md so goreleaser (release.yml) reads the right
+# file without workflow changes. This file is regenerated every release and is
+# git-ignored / committed as a stub — it is NOT the source of truth.
+cp "$NOTES_FILE" release-notes.md
+ok "copied $NOTES_FILE → release-notes.md (for goreleaser input)"
 
 # ─── 2. PAT identity check ────────────────────────────────────────────────────
 step "PAT identity check"
@@ -138,10 +152,12 @@ fi
 
 # ─── 4. commit release notes as arbeithand ────────────────────────────────────
 step "Commit release notes"
-if git diff --quiet -- release-notes.md && [ -z "$(git status --porcelain release-notes.md)" ]; then
-  warn "release-notes.md already committed — skipping commit step"
+# Stage both: the archived per-version file (source of truth) and the regenerated
+# repo-root release-notes.md (the goreleaser input).
+git add "$NOTES_FILE" release-notes.md
+if git diff --cached --quiet; then
+  warn "no release-notes changes to commit — skipping commit step"
 else
-  git add release-notes.md
   GIT_AUTHOR_NAME="$BOT_LOGIN" \
   GIT_AUTHOR_EMAIL="$BOT_EMAIL" \
   GIT_COMMITTER_NAME="$BOT_LOGIN" \

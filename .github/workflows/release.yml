@@ -84,13 +84,21 @@ jobs:
             exit 1
           fi
 
-          # Build announcement body from release-notes.md:
-          # skip line 1 (title), stop at ## Internal or ## Upgrading
+          # Build announcement body from release-notes.md.
+          #
+          # If the notes have a "## Summary" section, post just that body — the
+          # rest of the release detail lives on the GitHub Release page. If no
+          # Summary section is present (older release-notes files), fall back to
+          # a link-only announcement.
           BODY_CONTENT=$(awk '
-            NR == 1 { next }
-            /^## Internal/ || /^## Upgrading/ { exit }
-            { print }
-          ' release-notes.md)
+            /^## Summary[[:space:]]*$/ { in_summary = 1; next }
+            in_summary && /^## / { in_summary = 0 }
+            in_summary { print }
+          ' release-notes.md | awk 'NF { p = 1 } p')
+
+          if [ -z "$BODY_CONTENT" ]; then
+            BODY_CONTENT="See the release notes for details."
+          fi
 
           BODY="${BODY_CONTENT}
 
