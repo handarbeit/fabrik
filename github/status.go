@@ -4,8 +4,9 @@ import "fmt"
 
 // StatusField holds the Status field metadata for a project.
 type StatusField struct {
-	FieldID string
-	Options map[string]string // status name -> option ID
+	FieldID            string
+	Options            map[string]string // status name -> option ID
+	OrderedOptionNames []string          // option names in API-returned order (first = leftmost column)
 }
 
 // UpdateProjectItemStatus moves an item to a different status column on the project board.
@@ -102,6 +103,7 @@ query($projectId: ID!) {
 	}
 	for _, opt := range result.Data.Node.Field.Options {
 		sf.Options[opt.Name] = opt.ID
+		sf.OrderedOptionNames = append(sf.OrderedOptionNames, opt.Name)
 	}
 
 	return sf, nil
