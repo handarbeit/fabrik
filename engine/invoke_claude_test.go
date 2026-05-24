@@ -1131,6 +1131,150 @@ printf '%%s\n' '{"result":"ok","session_id":"sess_sr","num_turns":1,"total_cost_
 	}
 }
 
+// TestBuildClaudeArgs_WorktreeBoundary verifies path-restricted Edit/Write entries
+// appear in --allowedTools for a non-readonly, non-unrestricted stage.
+func TestBuildClaudeArgs_WorktreeBoundary(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	argsFile := filepath.Join(binDir, "args.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+echo "$@" > %s
+printf '%%s\n' '{"result":"ok","session_id":"sess_wb","num_turns":1,"total_cost_usd":0.001}'
+`, argsFile)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	os.Setenv("PATH", binDir+":"+origPath)
+	defer os.Setenv("PATH", origPath)
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "Implement",
+		Prompt:     "implement",
+		ReadOnly:   false,
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 400, Title: "T"}
+
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+	args, _ := os.ReadFile(argsFile)
+	argsStr := string(args)
+
+	// Path-scoped Edit and Write must appear.
+	wantEdit := fmt.Sprintf("Edit(%s/**)", workDir)
+	wantWrite := fmt.Sprintf("Write(%s/**)", workDir)
+	if !strings.Contains(argsStr, wantEdit) {
+		t.Errorf("expected %q in args, got: %s", wantEdit, argsStr)
+	}
+	if !strings.Contains(argsStr, wantWrite) {
+		t.Errorf("expected %q in args, got: %s", wantWrite, argsStr)
+	}
+	// Bare Edit/Write must NOT appear as standalone entries.
+	if strings.Contains(argsStr, " Edit ") || strings.HasSuffix(argsStr, " Edit") {
+		t.Error("bare 'Edit' found in args — expected scoped variant only")
+	}
+}
+
+// TestBuildClaudeArgs_WorktreeBoundary_ReadOnly verifies that read-only stages
+// do NOT get path-restricted Edit/Write in their --allowedTools.
+func TestBuildClaudeArgs_WorktreeBoundary_ReadOnly(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	argsFile := filepath.Join(binDir, "args.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+echo "$@" > %s
+printf '%%s\n' '{"result":"ok","session_id":"sess_ro","num_turns":1,"total_cost_usd":0.001}'
+`, argsFile)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	os.Setenv("PATH", binDir+":"+origPath)
+	defer os.Setenv("PATH", origPath)
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "Research",
+		Prompt:     "research",
+		ReadOnly:   true,
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 401, Title: "T"}
+
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+	args, _ := os.ReadFile(argsFile)
+	argsStr := string(args)
+
+	// Path-scoped variants must NOT appear for read-only stages.
+	if strings.Contains(argsStr, "Edit(") {
+		t.Errorf("unexpected scoped Edit in args for read-only stage: %s", argsStr)
+	}
+	if strings.Contains(argsStr, "Write(") {
+		t.Errorf("unexpected scoped Write in args for read-only stage: %s", argsStr)
+	}
+}
+
+// TestBuildClaudeArgs_WorktreeBoundary_Unrestricted verifies that the unrestricted
+// label bypasses worktree boundary enforcement entirely.
+func TestBuildClaudeArgs_WorktreeBoundary_Unrestricted(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	argsFile := filepath.Join(binDir, "args.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+echo "$@" > %s
+printf '%%s\n' '{"result":"ok","session_id":"sess_unr","num_turns":1,"total_cost_usd":0.001}'
+`, argsFile)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	os.Setenv("PATH", binDir+":"+origPath)
+	defer os.Setenv("PATH", origPath)
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "Implement",
+		Prompt:     "implement",
+		ReadOnly:   false,
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 402, Title: "T", Labels: []string{"fabrik:unrestricted"}}
+
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+	args, _ := os.ReadFile(argsFile)
+	argsStr := string(args)
+
+	// --dangerously-skip-permissions must appear, no path-scoped tools.
+	if !strings.Contains(argsStr, "--dangerously-skip-permissions") {
+		t.Error("expected --dangerously-skip-permissions for unrestricted issue")
+	}
+	if strings.Contains(argsStr, "Edit(") {
+		t.Errorf("unexpected scoped Edit in args for unrestricted stage: %s", argsStr)
+	}
+	if strings.Contains(argsStr, "Write(") {
+		t.Errorf("unexpected scoped Write in args for unrestricted stage: %s", argsStr)
+	}
+}
+
 // TestBuildClaudeArgs_UnrestrictedSkipsPermissionMode verifies that --dangerously-skip-permissions
 // is used (not --permission-mode dontAsk) when the issue has the fabrik:unrestricted label.
 func TestBuildClaudeArgs_UnrestrictedSkipsPermissionMode(t *testing.T) {
