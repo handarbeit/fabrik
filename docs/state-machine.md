@@ -85,7 +85,7 @@ These labels do not define distinct states but influence transition behavior:
 | `model:<name>` | Selects a specific model for this issue (e.g., `model:opus`) |
 | `effort:<level>` | Overrides stage effort level (`low`, `medium`, `high`, `max`); highest wins |
 | `base:<branch>` | Overrides worktree base branch; falls back to default if not on remote; updates PR base if PR exists |
-| `fabrik:sub-issue` | Informational; marks issue as created by decomposition |
+| `fabrik:sub-issue` | Informational; marks issue as created by Fabrik's sub-issue spawn mechanism |
 
 ### 1.3 Reachable States by Board Column
 
@@ -127,7 +127,7 @@ Each active stage column has the same set of reachable sub-states:
 
 | Label | Added By | When Added | Removed By | When Removed | Gates |
 |-------|----------|------------|------------|--------------|-------|
-| `fabrik:locked:<user>` | `processItem` | Before stage invocation (lock-then-verify protocol) | `releaseLock` | On stage completion, permanent failure, blocked-on-input, decomposed, or lock conflict loss | Prevents other instances from processing the item |
+| `fabrik:locked:<user>` | `processItem` | Before stage invocation (lock-then-verify protocol) | `releaseLock` | On stage completion, permanent failure, blocked-on-input, or lock conflict loss | Prevents other instances from processing the item |
 | `fabrik:editing` | `processComments` | Step 2 of comment processing | `processComments` | Step 9 of comment processing (also on error paths). Removal uses bounded retry (≤3 attempts, 500ms/1s/2s backoff) for transient network errors; `ErrNotFound` is a silent no-op. Stale labels with no active Worker are cleaned up at startup by `runStartupCleanup()`. | Pre-dispatch gate in `itemNeedsWork` (prevents goroutine launch); defense-in-depth check retained in `processItem` for the race window. Symmetric with `fabrik:locked:<other-user>`. Note: `JobStartedEvent` is emitted at `processComments` entry (step 0) — *before* `fabrik:editing` is added at step 2. The pre-dispatch gate only blocks *new* dispatches; the active session's `JobStartedEvent` fires before the label exists. |
 | `fabrik:paused` | `escalateFailedStage`, `blockOnInput`, `pauseForReviewTimeout`, `pauseForReviewCycleLimit`, `pauseForCITimeout`, `pauseForCIFixCycleLimit`, `pauseForRebaseCycleLimit`, `attemptMergeOnValidate` (on ErrNotMergeable rebase cycle limit reached, or CI wait timeout) | After MaxRetries, FABRIK_BLOCKED_ON_INPUT, review/CI/rebase timeout or cycle limit | User (manual removal), or `processItem` (on new comment that triggers unpause) | When user removes it manually, or user comments on a paused issue | Blocks all processing; user comment is an implicit resume |
 | `fabrik:awaiting-input` | `blockOnInput`, `pauseForReviewTimeout`, `pauseForReviewCycleLimit`, `pauseForCITimeout`, `pauseForCIFixCycleLimit` | After FABRIK_BLOCKED_ON_INPUT or review/CI timeout/cycle limit | `unblockAwaitingInput`; `handleStageComplete` (on FABRIK_STAGE_COMPLETE, to clear any orphaned label); `handleNoWorkNeeded` (on FABRIK_NO_WORK_NEEDED); `cleanupClosedIssueTransientLabels` (defensive sweep) | When user comment arrives; when a stage completes (removes any orphaned label that survived a manual `fabrik:paused` removal); or when issue is closed (defensive sweep — label has no meaning on a closed issue) | Combined with `fabrik:paused`, identifies the "awaiting user input" pause variant |
@@ -136,7 +136,7 @@ Each active stage column has the same set of reachable sub-states:
 | `fabrik:rebase-needed` | `checkMergeabilityGate` (catch-up loop, `wait_for_ci: true` stages); `attemptMergeOnValidate` (legacy auto-merge path, yolo+Validate without `wait_for_ci`) | When GitHub reports `mergeable == false` on the linked PR — a confirmed base-branch conflict. Applied idempotently in both paths. NOT added when `mergeable == null` (GitHub still computing). | `checkMergeabilityGate` (when mergeable flips back to true); `attemptMergeOnValidate` (on successful merge, via `removeRebaseNeededLabel` — no-op when absent); `cleanupClosedIssueTransientLabels` (defensive sweep) | When GitHub reports `mergeable == true` (after Claude's rebase push lands), or when `MergePR` succeeds; or when issue is closed (defensive sweep) | Signals confirmed merge conflict; triggers `itemMayNeedWork` updatedAt cache bypass (base-branch advances don't bump the item's `updatedAt`); blocks CI gate and auto-advance until rebase resolves the conflict |
 | `fabrik:blocked` | `checkDependencies` | When open blocking issues exist (first transition only — idempotent) | `PushUnblockObserver` (primary — fires immediately on blocker close, any column); `checkDependencies` (defense-in-depth — fires via `dep-blocked` cooldown-retry for items in stage columns) | When all blocking issues close | Pre-dispatch gate in `itemNeedsWork` prevents re-dispatch after the label is set (parallel to `fabrik:editing` post-#550 and `fabrik:locked:<other>` always); **exception**: when the `dep-blocked` cooldown has expired (or no store entry exists), `itemNeedsWork` admits the item for one dependency re-check per `10 × PollSeconds` — `checkDependencies` either re-stamps the cooldown (still blocked) or removes the label (resolved). Initial detection (first dispatch, label not yet set) still reaches `checkDependencies` normally. Blocks stage start. Push path removes the label even for items in non-stage columns (Backlog, Done, custom columns) that would otherwise never be re-evaluated by `processItem`. |
 | `stage:<X>:in_progress` | `processItem` | After lock acquired and verified | `releaseLock` | Same as `fabrik:locked:<user>` | Informational — shows which stage is active on GitHub |
-| `stage:<X>:complete` | `handleStageComplete` (for non-`wait_for_ci` stages), `checkCIGate` (for `wait_for_ci: true` stages — added only after CI passes), `handleDecomposed`, `handleNoWorkNeeded` (emitting stage + all skipped stages), cleanup stage handler | `handleStageComplete`: after Claude signals FABRIK_STAGE_COMPLETE on stages without `wait_for_ci: true`. `checkCIGate`: when all CI checks pass (R5) — this is the conjunctive gate (ADR 032): `stage:X:complete` is deferred until the CI gate actually clears, not applied on FABRIK_STAGE_COMPLETE. After FABRIK_DECOMPOSED or FABRIK_NO_WORK_NEEDED (emitting stage + all subsequent non-cleanup stages) or worktree cleanup. | Never removed | Permanent | Prevents re-invocation of the stage; triggers catch-up advancement |
+| `stage:<X>:complete` | `handleStageComplete` (for non-`wait_for_ci` stages), `checkCIGate` (for `wait_for_ci: true` stages — added only after CI passes), `handleNoWorkNeeded` (emitting stage + all skipped stages), cleanup stage handler | `handleStageComplete`: after Claude signals FABRIK_STAGE_COMPLETE on stages without `wait_for_ci: true`. `checkCIGate`: when all CI checks pass (R5) — this is the conjunctive gate (ADR 032): `stage:X:complete` is deferred until the CI gate actually clears, not applied on FABRIK_STAGE_COMPLETE. After FABRIK_NO_WORK_NEEDED (emitting stage + all subsequent non-cleanup stages) or worktree cleanup. | Never removed | Permanent | Prevents re-invocation of the stage; triggers catch-up advancement |
 | `stage:<X>:failed` | `escalateFailedStage` | After MaxRetries exhausted | `clearFailedStage` | When user removes `fabrik:paused` (manual unpause) | Indicates permanent failure; paired with `fabrik:paused` |
 | `fabrik:yolo` | User (manual) | Any time | User (manual) | Any time | Forces auto-advance; triggers auto-merge at Validate; overrides `auto_advance: false` per stage |
 | `fabrik:cruise` | User (manual) | Any time | User (manual) | Any time | Forces auto-advance without merge; stops at Validate; suppressed when yolo is also present |
@@ -145,7 +145,8 @@ Each active stage column has the same set of reachable sub-states:
 | `model:<name>` | User (manual) | Any time | User (manual) | Any time | Selects Claude model; first label wins if multiple present |
 | `effort:<level>` | User (manual) | Any time | User (manual) | Any time | Overrides stage effort level; highest-ranked wins if multiple present |
 | `base:<branch>` | User (manual) | Before Research (recommended) | User (manual) | Any time | Overrides worktree base branch; falls back to default if branch not found on remote; if a PR exists, its base branch is updated to match on each stage invocation |
-| `fabrik:sub-issue` | Plan stage (via Claude) | During decomposition | N/A | N/A | Informational — marks sub-issues created by decomposition |
+| `fabrik:sub-issue` | `preImplement` (engine-side) | Applied to each spawned child issue during pre-Implement spawn step | N/A | N/A | Informational — marks issues created by Fabrik's sub-issue spawn mechanism; no engine-side gate semantics |
+| `fabrik:children-spawned` | `preImplement` (engine-side) | After all `FABRIK_SPAWN_CHILD_*` children are successfully created and linked as blockedBy of parent | User (manual, to re-trigger spawn) | If user wants fresh spawn (must also close orphan children) | Idempotency guard — prevents `preImplement` from re-spawning children on retry; while present, `preImplement` is a no-op |
 
 ---
 
@@ -231,8 +232,7 @@ Note: within `checkDependencies()`, for each blocker the engine first consults `
 **Markers and priority order** (enforced by the `if/else if` dispatch chain in `processItem()`):
 1. `FABRIK_STAGE_COMPLETE` + `FABRIK_NO_WORK_NEEDED` (both present) — highest priority among `completed == true` paths; `completed && noWorkNeeded` branch fires before the plain `completed` branch
 2. `FABRIK_STAGE_COMPLETE` (alone) — next; handled by the plain `completed` branch
-3. `FABRIK_DECOMPOSED` — checked next; only honored if `completed` is false and `err == nil`
-4. `FABRIK_BLOCKED_ON_INPUT` — checked last; only honored if `completed` and `decomposed` are both false and `err == nil`
+3. `FABRIK_BLOCKED_ON_INPUT` — checked last; only honored if `completed` is false and `err == nil`
 
 `FABRIK_NO_WORK_NEEDED` is ignored unless `FABRIK_STAGE_COMPLETE` also appears in the same output — the no-work path requires the emitting stage to explicitly declare itself complete. The timeout/kill recovery path that scans buffered output for `FABRIK_STAGE_COMPLETE` does not trigger the no-work path (only `FABRIK_STAGE_COMPLETE` is scanned in that recovery path, not `FABRIK_NO_WORK_NEEDED`).
 
@@ -241,9 +241,10 @@ Note: within `checkDependencies()`, for each blocker the engine first consults `
 **Effect:**
 - **FABRIK_STAGE_COMPLETE** + **FABRIK_NO_WORK_NEEDED:** `handleNoWorkNeeded()` — adds completion label for emitting stage; adds dummy `stage:<name>:complete` labels and one-line "skipped" comments for each subsequent non-cleanup stage; moves issue directly to Done; no PR created (see §6.7)
 - **FABRIK_STAGE_COMPLETE:** `handleStageComplete()` — adds completion label, potentially advances to next stage
-- **FABRIK_DECOMPOSED:** `handleDecomposed()` — adds completion label, moves issue directly to Done
 - **FABRIK_BLOCKED_ON_INPUT:** `blockOnInput()` — adds `fabrik:paused` + `fabrik:awaiting-input`
 - **None of the above:** cooldown retry path; eventually `escalateFailedStage()` if MaxRetries exceeded
+
+**`FABRIK_SPAWN_CHILD_BEGIN/END` blocks** are not processed inline — they are structured data emitted by the Plan stage and preserved in the Plan stage comment. The engine's `preImplement` step reads them at Implement dispatch time to create child issues. See §6.6.
 
 **Invocation-level kill paths:** The `max_wall_time` and inactivity timeout mechanisms (see §7.6) can terminate the Claude process before it writes a clean `{"type":"result"}` line. After such a kill, `runClaude()` retroactively scans the already-buffered output for `FABRIK_STAGE_COMPLETE` in intermediate `{"type":"assistant"}` NDJSON lines via `extractTextFromAssistantTurns()`. If found, `completed=true` is returned and the invocation is treated identically to a live `FABRIK_STAGE_COMPLETE`. If not found, `completed=false` is returned and the invocation routes to the cooldown/retry path. These kills are distinguished from engine-shutdown cancellation by the `wasTimedOut` flag, so they do not trigger the hard-error path.
 
@@ -422,7 +423,7 @@ This table shows the normal flow when an issue progresses through the pipeline w
 
 | Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
 |--------------|-------|-------|-----------------|--------------|----------------|--------------|
-| Column `<X>`, Locked + In Progress | FABRIK_BLOCKED_ON_INPUT | `completed` and `decomposed` both false, no error | Same column, Awaiting Input | `fabrik:paused`, `fabrik:awaiting-input` | `fabrik:locked:<user>`, `stage:<X>:in_progress` | Lock released |
+| Column `<X>`, Locked + In Progress | FABRIK_BLOCKED_ON_INPUT | `completed` false, no error | Same column, Awaiting Input | `fabrik:paused`, `fabrik:awaiting-input` | `fabrik:locked:<user>`, `stage:<X>:in_progress` | Lock released |
 | Same column, Awaiting Input | New user comment | — | Same column → comment processing | | `fabrik:paused`, `fabrik:awaiting-input` | `unblockAwaitingInput()` clears `LastAttemptAt` for the stage; routes to `processComments()` |
 
 #### Awaiting Review (wait_for_reviews gate)
@@ -573,7 +574,7 @@ Any single signal catching the comment is sufficient to skip it. The three signa
 | 4 | Invoke Claude with comment review prompt | `InvokeForComments()` | Uses `comment_prompt` / `comment_skill` and `comment_max_turns` |
 | 5 | Check for FABRIK_STAGE_COMPLETE in output | `checkCompletion()` | Determines if comment processing resolved the stage |
 | 6 | Extract and apply FABRIK_ISSUE_UPDATE if present | `extractUpdatedBody()` | Applied unconditionally when markers are present; stripped from output regardless |
-| 7 | Strip all Fabrik markers from output | `stripLine()` calls | Removes FABRIK_STAGE_COMPLETE, FABRIK_BLOCKED_ON_INPUT, FABRIK_DECOMPOSED, FABRIK_NO_WORK_NEEDED, FABRIK_SUMMARY_BEGIN/END |
+| 7 | Strip all Fabrik markers from output | `stripLine()` calls | Removes FABRIK_STAGE_COMPLETE, FABRIK_BLOCKED_ON_INPUT, FABRIK_NO_WORK_NEEDED, FABRIK_SUMMARY_BEGIN/END |
 | 8 | Post or update stage comment | `AddComment()` / `UpdateComment()` | For `post_to_pr` stages: always posts new comment on issue (labeled as "comment review"); for other stages: rewrites existing stage comment or creates new one. **Review-reinvoke branch (Step 8b):** when the input batch is all-`ReviewThreadID` comments (`isReviewReinvoke` == true) and `output != ""`, also posts a Fabrik-marked `"<StageName> (review feedback addressed)"` comment on the linked PR (via `FindPRForIssue`); includes per-thread footer with path:line for each addressed thread; skipped if no linked PR is found (logs warning). The issue comment is always posted first; the PR comment is additive. |
 | 9 | Remove `fabrik:editing` label | `RemoveLabelFromIssue("fabrik:editing")` | Releases the editing mutex |
 | 10 | React with 🚀 to all processed comments + resolve review threads | `AddCommentReaction("rocket")` / `AddPRReviewCommentReaction("rocket")` + `ResolveReviewThread()` | Marks comments as processed (durable); resolves addressed review threads |
@@ -966,20 +967,43 @@ The cost is a re-invocation rather than an inline `exec.Cmd`. This is why `MaxRe
 
 **References:** [ADR-028: Merge-Conflict Gate and Rebase Reinvoke](../adrs/028-merge-conflict-gate-and-rebase-reinvoke.md)
 
-### 6.6 Decompose Path
+### 6.6 Pre-Implement Spawn Path
 
-**Trigger:** Claude outputs `FABRIK_DECOMPOSED` marker (expected only from Plan stage).
+**Trigger:** The Implement stage dispatcher calls `preImplement()` before the Claude invocation on every Implement dispatch. `preImplement` is a no-op unless the Plan stage comment contains `FABRIK_SPAWN_CHILD_BEGIN/END` blocks AND the parent issue does not yet have `fabrik:children-spawned`.
 
-**Marker priority:** (`FABRIK_STAGE_COMPLETE` + `FABRIK_NO_WORK_NEEDED`) > `FABRIK_STAGE_COMPLETE` > `FABRIK_DECOMPOSED` > `FABRIK_BLOCKED_ON_INPUT`. If `completed` is true (FABRIK_STAGE_COMPLETE present), `decomposed` is not checked. Both `decomposed` and `blockedOnInput` require `err == nil`.
+**`FABRIK_SPAWN_CHILD_*` marker convention:** Plan emits structured blocks in its output to declare sub-issues to spawn:
 
-**Code path:** `processItem()` → `handleDecomposed()`
+```
+FABRIK_SPAWN_CHILD_BEGIN owner/repo
+TITLE: <single-line title for the new issue>
 
-**Flow:**
-1. Add `stage:<X>:complete` label (prevents re-invocation on restart)
-2. Look up "Done" column on the project board
-3. Move the issue directly to Done, bypassing all remaining pipeline stages
+<full scoped spec body — multiple paragraphs OK>
+FABRIK_SPAWN_CHILD_END
+```
 
-**References:** [ADR-017: Decomposed Marker State Machine](../adrs/017-decomposed-marker-state-machine.md)
+These blocks persist in the Plan stage comment — they are data, not consumed-and-stripped signals. The `preImplement` engine step reads them from the most-recent Plan comment body at Implement dispatch time.
+
+**Code path:** `processItem()` → Implement stage dispatch → `preImplement()` (in `engine/spawn.go`)
+
+**Idempotency guard:** If the parent issue has `fabrik:children-spawned`, `preImplement` returns immediately (no-op). Manual removal of this label (and closing of orphaned children) is required to trigger a fresh spawn.
+
+**Flow (when spawn blocks are present and not yet spawned):**
+1. Validate all target repos: call `ensureRepoReady` for each unique target repo in the spawn blocks. If any repo is not in Fabrik's managed set, post an error comment listing the gaps, add `fabrik:paused`, and stop — no children are created.
+2. For each `FABRIK_SPAWN_CHILD_BEGIN/END` block in document order:
+   - `CreateIssue(owner, repo, title, body+footer)` via REST — returns `(number, nodeID)`
+   - `AddProjectV2ItemById(board.ProjectID, nodeID)` — adds child to the same project board
+   - `AddBlockedByIssue(parent.NodeID, nodeID)` — links child as a `blockedBy` dependency of the parent
+   - `AddLabelToIssue` for `fabrik:sub-issue` on the child (informational)
+   - On any failure: post error comment naming completed and failed children, add `fabrik:paused` to parent, stop without adding `fabrik:children-spawned`
+3. After all children are created and linked, add `fabrik:children-spawned` to the parent.
+
+**After spawn:** `preImplement` returns `(true, nil)` (spawned=true). `processItem` returns without invoking Claude. On the next poll cycle, `checkDependencies` sees the new `blockedBy` edges and adds `fabrik:blocked`, gating the parent until all children close.
+
+**Partial spawn failure:** `fabrik:children-spawned` is NOT applied if any step fails. On retry (after user removes `fabrik:paused`), `preImplement` re-runs all steps from the beginning — v1 does not skip already-created children. Users must manually close orphaned children before re-advancing.
+
+**Recursive decomposition:** A child issue created by `preImplement` runs the full Fabrik pipeline. If the child's own Plan emits `FABRIK_SPAWN_CHILD_*` blocks, the child's Implement dispatch triggers another `preImplement` — grandchildren are created identically. There is no depth limit.
+
+**References:** [ADR-047: Engine-Side Pre-Implement Spawn](../adrs/047-spawn-child-engine-side.md)
 
 ### 6.7 No Work Needed Path
 
@@ -989,7 +1013,7 @@ The cost is a re-invocation rather than an inline `exec.Cmd`. This is why `MaxRe
 
 **Marker priority:** This path fires in the `completed && noWorkNeeded` branch, which precedes the plain `completed` branch in `processItem()`'s dispatch chain. This ensures PR creation (`ensureDraftPR`) and `markPRReady` — both in the plain `completed` branch — are not called.
 
-**Mutual exclusivity:** `FABRIK_NO_WORK_NEEDED` is mutually exclusive with `FABRIK_DECOMPOSED` (structurally: if `completed` is true, the `decomposed` branch is never reached) and with `FABRIK_BLOCKED_ON_INPUT` (structurally: `blockedOnInput` is only reached when `completed` is false).
+**Mutual exclusivity:** `FABRIK_NO_WORK_NEEDED` is mutually exclusive with `FABRIK_BLOCKED_ON_INPUT` (structurally: `blockedOnInput` is only reached when `completed` is false).
 
 **Code path:** `processItem()` → `handleNoWorkNeeded()`
 
@@ -1000,18 +1024,8 @@ The cost is a re-invocation rather than an inline `exec.Cmd`. This is why `MaxRe
 4. For each stage with `Order > current.Order && Order < doneOrder`:
    - Add `stage:<name>:complete` label (with cache write-through)
    - Post one-line comment: `_Skipped: no work needed (FABRIK_NO_WORK_NEEDED emitted by <stage>)._` (no rocket reaction — engine-generated metadata)
-5. Move the issue to Done via `UpdateProjectItemStatus` (same nil/ok guards as `handleDecomposed`)
+5. Move the issue to Done via `UpdateProjectItemStatus` (nil/ok guards: looks up Done column, skips if not found)
 6. **No PR is created** — `ensureDraftPR` and `markPRReady` are not called
-
-**Differences from `FABRIK_DECOMPOSED`:**
-
-| | `FABRIK_NO_WORK_NEEDED` | `FABRIK_DECOMPOSED` |
-|---|---|---|
-| Requires `FABRIK_STAGE_COMPLETE` to co-occur | Yes | No (standalone marker) |
-| Adds dummy `stage:<name>:complete` labels for skipped stages | Yes (audit trail) | No |
-| Posts "skipped" comments per stage | Yes | No |
-| Moves to Done | Yes | Yes |
-| Creates PR | No | No |
 
 **State transitions:**
 
@@ -1062,7 +1076,7 @@ Per [ADR-007](../adrs/007-label-based-locking.md):
 **Edge cases:**
 - Identical usernames: both proceed (unsupported configuration)
 - API error on re-fetch: winner proceeds (optimistic; logs warning)
-- Lock is released on: completion, permanent failure (MaxRetries), blocked-on-input, decomposed, or lock conflict loss. NOT released on cooldown retry.
+- Lock is released on: completion, permanent failure (MaxRetries), blocked-on-input, or lock conflict loss. NOT released on cooldown retry.
 
 ### 7.4 Closed-Issue Catch-Up
 
@@ -1577,7 +1591,6 @@ stateDiagram-v2
         Running --> Complete : FABRIK_STAGE_COMPLETE
         Running --> AwaitingInput : FABRIK_BLOCKED_ON_INPUT
         Running --> Cooldown : No marker (incomplete)
-        Running --> Decomposed : FABRIK_DECOMPOSED (Plan only)
 
         Cooldown --> Running : Cooldown expired (retry)
         Cooldown --> PausedFailed : MaxRetries exceeded
@@ -1610,8 +1623,6 @@ stateDiagram-v2
         CommentProcessing --> Complete : FABRIK_STAGE_COMPLETE in comment output
         CommentProcessing --> Idle : Comment processed (no completion)
     }
-
-    Decomposed --> Done : Direct move to Done
 
     state "Next Stage" as NextStage
     NextStage --> Active : Board column updated

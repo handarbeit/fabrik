@@ -91,6 +91,53 @@ Labels matching `model:<name>` on the issue override the stage's configured mode
 
 ---
 
+## Phase 2.5: Pre-Implement Step (Implement Stage Only)
+
+Before the Claude invocation on every Implement dispatch, the engine calls `preImplement()` (`engine/spawn.go`). For most issues this is an instant no-op; for issues whose Plan stage output contains `FABRIK_SPAWN_CHILD_BEGIN/END` blocks, it performs the GitHub mutations that create child issues and link them as `blockedBy` dependencies of the parent.
+
+### Inputs
+
+- **Plan stage comment body** — read via `findStageComment(item.Comments, "Plan")`. If no Plan comment exists, `preImplement` returns immediately (no-op).
+- **`FABRIK_SPAWN_CHILD_BEGIN/END` blocks** in the Plan comment — structured declarations of child issues to create:
+  ```
+  FABRIK_SPAWN_CHILD_BEGIN owner/repo
+  TITLE: <single-line title>
+
+  <scoped spec body>
+  FABRIK_SPAWN_CHILD_END
+  ```
+  Parsed by `ParseSpawnBlocks()`. If no blocks are found, `preImplement` returns immediately.
+- **`fabrik:children-spawned` label** — idempotency guard. If present on the parent issue, `preImplement` returns immediately without making any mutations.
+
+### Flow (when spawn blocks are present and guard label is absent)
+
+1. **Repo validation**: Call `ensureRepoReady(owner, repo)` for each unique target repo across all blocks. If any repo is not in Fabrik's managed set (clone fails), post an error comment listing the unmanaged repos, add `fabrik:paused`, and stop — no children are created.
+2. **Per-child mutations** (for each block in document order):
+   - `CreateIssue(owner, repo, title, body)` — REST `POST /repos/{owner}/{repo}/issues`; body = block body + engine-appended back-reference footer
+   - `AddProjectV2ItemById(board.ProjectID, childNodeID)` — adds child to the same project board
+   - `AddBlockedByIssue(parent.NodeID, childNodeID)` — links child as a `blockedBy` dependency of the parent
+   - `AddLabelToIssue(childNodeID, "fabrik:sub-issue")` — informational; no engine semantics
+   - On any failure: post error comment naming completed and failed children, add `fabrik:paused` to parent, stop; `fabrik:children-spawned` is NOT added
+3. **After all children succeed**: Add `fabrik:children-spawned` label to the parent.
+
+### After spawn
+
+`preImplement` returns `(spawned=true, nil)`. `processItem` returns without invoking Claude. On the next poll cycle, `checkDependencies` sees the new `blockedBy` edges and adds `fabrik:blocked`, gating the parent's Implement until all children close.
+
+### Idempotency and retry
+
+`fabrik:children-spawned` is the durable idempotency guard. If pre-Implement fails after creating some but not all children (partial spawn), it pauses the parent without adding `fabrik:children-spawned`. On retry (after user removes `fabrik:paused`), `preImplement` re-runs all steps from the start — v1 does not skip already-created children. The error comment names the orphaned children so the user knows what to close before re-advancing.
+
+To trigger a fresh spawn (e.g., after Plan is revised), the user must manually remove `fabrik:children-spawned` and close any orphaned children.
+
+### Recursive decomposition
+
+A child issue created by `preImplement` runs the full Fabrik pipeline. If the child's own Plan emits `FABRIK_SPAWN_CHILD_*` blocks, the child's Implement dispatch triggers another `preImplement` — grandchildren are created by the same mechanism. There is no depth limit.
+
+**References:** [ADR-047: Engine-Side Pre-Implement Spawn](../adrs/047-spawn-child-engine-side.md), [State Machine §6.6](state-machine.md#66-pre-implement-spawn-path)
+
+---
+
 ## Phase 3: Claude Invocation
 
 ### Prompt Construction
