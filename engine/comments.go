@@ -38,6 +38,7 @@ func (e *Engine) findNewComments(item gh.ProjectItem) []gh.Comment {
 // processComments handles new user comments on an issue.
 // Flow: 👀 reactions → editing label → invoke Claude → perform actions / update issue body → remove editing label → 🚀 reactions
 func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, comments []gh.Comment, onPIDReady ...func(int)) error {
+	commentStartedAt := time.Now()
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
 	// Merge any unresolved PR review thread comments into the working slice.
@@ -230,6 +231,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		Number:    item.Number,
 		Usage:     usage,
 		IsComment: true,
+		Duration:  time.Since(commentStartedAt),
 	})
 	if err != nil {
 		e.removeEditingLabel(owner, repo, item.Number)
@@ -396,6 +398,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 			Completed: true,
 			Usage:     usage,
 			IsComment: true,
+			Duration:  time.Since(commentStartedAt),
 		})
 		var prNumber int
 		if stage.CreateDraftPR {
