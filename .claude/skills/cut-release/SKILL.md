@@ -65,7 +65,20 @@ gh release download --repo handarbeit/fabrik \
 \```
 ```
 
-**Both the `# Fabrik <version>` heading and the `## Summary` section are required.** The script validates both and refuses to proceed on either failure. The Summary should be tight (1–3 sentences) — that's literally the announcement post body, so don't pad it with detail that already lives below in Features/Fixes.
+**Both the `# Fabrik <version>` heading and the `## Summary` section are required.** The script validates both and refuses to proceed on either failure.
+
+**Sizing the Summary.** This block IS the Discussions announcement body. Aim for somewhere between a short paragraph (50–80 words for a patch release) and a few themed bullets (~150–250 words for a release with multiple headline features). It should read as a standalone announcement — someone scanning the Discussions feed should immediately understand what shipped and roughly what it does.
+
+What to include:
+- The headline theme(s) — what this release is *about*. For a multi-feature release, list 2–4 themed bullets.
+- Enough context that each theme is meaningful on its own (one sentence of "what" + one of "why it matters" is usually right per theme).
+
+What NOT to include:
+- The full Features/Fixes/Improvements bullets that already live below — the announcement links to the full release page for that.
+- Internal/test/refactor details.
+- Implementation specifics (issue numbers belong in the body sections, not the Summary).
+
+A one-line tagline is too terse. A duplicate of the body sections is too long. Aim for "the elevator pitch."
 
 ### 3. Run the publish script
 

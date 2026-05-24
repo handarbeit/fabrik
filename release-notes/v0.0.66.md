@@ -2,7 +2,11 @@
 
 ## Summary
 
-Cross-repo sub-issue spawn from Implement; worktree-boundary enforcement audits Edit/Write tool calls; probe deep-fetch now skips items in unconfigured board columns (cold-start GraphQL cost drops materially for boards with large Backlog/Triage).
+Major release. Three big themes:
+
+1. **Cross-repo sub-issue spawn** — Implement can now create blocking sub-issues (in the same or a different repo), wire them into the project board, and pause the parent until they complete. Pre-Implement spawn step runs the new dependency check and gates advancement on resolution.
+2. **Worktree boundary enforcement** — A new audit layer scopes Edit/Write tool calls to the issue's worktree and snapshots cross-repo refs around each Claude invocation. Stages fail loudly when an invocation tries to mutate state outside its worktree; the human is surfaced rather than the engine attempting to auto-clean.
+3. **Backlog/Triage burn fix** — Probe deep-fetch now skips items in board columns that don't correspond to a configured Fabrik stage. Cold-start GraphQL cost on projects with large Backlog/Triage columns drops materially.
 
 ## Features
 
