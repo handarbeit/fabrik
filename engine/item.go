@@ -1782,8 +1782,10 @@ func (e *Engine) snapshotAllRepoRefs(issueNumber int) map[string]map[string]stri
 	for _, p := range pairs {
 		refs, err := snapshotRepoRefs(p.baseDir)
 		if err != nil {
+			// Skip rather than store an empty map: an empty baseline would cause all
+			// refs found in the post-audit snapshot to be flagged as "new ref" violations.
+			// crossRepoViolations skips repos absent from the before snapshot.
 			e.logf(issueNumber, "audit", "warn: could not snapshot refs for %s: %v\n", p.repo, err)
-			result[p.repo] = map[string]string{}
 			continue
 		}
 		result[p.repo] = refs
@@ -1792,15 +1794,16 @@ func (e *Engine) snapshotAllRepoRefs(issueNumber int) map[string]map[string]stri
 }
 
 // handleBoundaryViolation posts a comment describing cross-repo ref mutations,
-// marks the stage as failed (with cooldown), and releases the lock.
-// Called after detecting violations from the post-run audit.
+// pauses the issue (fabrik:paused + stage:<name>:failed), records the failure
+// state, and releases the lock. Called after detecting violations from the
+// post-run audit.
 func (e *Engine) handleBoundaryViolation(owner, repo string, repoStr string, item gh.ProjectItem, stage *stages.Stage, violations []string, releaseLock func()) {
 	e.logf(item.Number, "audit", "worktree boundary violation detected in stage %q: %d unauthorized ref mutation(s)\n", stage.Name, len(violations))
 
 	violationList := strings.Join(violations, "\n- ")
 	comment := fmt.Sprintf(
-		"🏭 **Fabrik — worktree boundary violation**\n\nStage **%s** mutated refs in repositories outside its assigned worktree. The stage has been failed. No automatic cleanup was performed — human review is required.\n\n**Detected violations:**\n- %s\n\nTo retry after investigating: remove the `stage:%s:failed` label.",
-		stage.Name, violationList, stage.Name,
+		"🏭 **Fabrik — worktree boundary violation**\n\nStage **%s** mutated refs in repositories outside its assigned worktree. The stage has been failed and the issue has been paused. No automatic cleanup was performed — human review is required.\n\n**Detected violations:**\n- %s\n\nTo retry after investigating: remove the `fabrik:paused` label.",
+		stage.Name, violationList,
 	)
 
 	if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
@@ -1816,14 +1819,35 @@ func (e *Engine) handleBoundaryViolation(owner, repo string, repoStr string, ite
 		}
 	}
 
+	// Add fabrik:paused so itemNeedsWork skips this issue until the user
+	// removes it. Without fabrik:paused the clearFailedStage path in
+	// processItem would auto-clear the failed label on the next poll cycle.
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
+		e.logf(item.Number, "warn", "could not add paused label: %v\n", err)
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:paused")
+		}
+	}
+
 	e.addFailedLabel(owner, repo, item.Number, stage.Name)
 
 	// Record StageAttempted so cooldown applies; do NOT call StageRetryIncremented.
+	// Record EnginePaused so clearFailedStage fires (and removes the failed label)
+	// when the user removes fabrik:paused.
 	e.store.Apply(itemstate.StageAttempted{
 		Repo:      repoStr,
 		Number:    item.Number,
 		StageName: stage.Name,
 		At:        time.Now(),
+	})
+	e.store.Apply(itemstate.EnginePaused{
+		Repo:      repoStr,
+		Number:    item.Number,
+		StageName: stage.Name,
 	})
 
 	releaseLock()

@@ -4606,8 +4606,11 @@ After the extension loop completes, a cross-repo ref audit runs for non-read-onl
 **On violation:**
 - `[#N audit]` log line names the stage and count of mutations.
 - A comment is posted on the issue listing the specific refs mutated (names and SHAs). No automatic cleanup.
+- `fabrik:paused` is added so `itemNeedsWork` skips the issue until the user investigates.
 - `stage:<name>:failed` label is added. `StageAttempted` is recorded (cooldown applies). `MaxRetries` is NOT consumed — violations require human investigation, not auto-retry.
+- `EnginePaused` is recorded in the store so that `clearFailedStage` fires (removing the failed label and resetting state) when the user removes `fabrik:paused`.
 - The stage returns without posting output or advancing to the next stage.
+- **To retry**: remove `fabrik:paused`. The engine will clear `stage:<name>:failed` and re-run the stage on the next poll.
 
 **No violation:** The audit is silent. Stage proceeds to normal output posting and completion.
 

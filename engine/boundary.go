@@ -60,21 +60,30 @@ func snapshotRepoRefs(bareDir string) (map[string]string, error) {
 
 // crossRepoViolations compares before and after ref snapshots (maps of repo →
 // map[refname]SHA) and returns a sorted slice of human-readable violation strings
-// for every ref that is new or changed in any repo other than activeRepo.
-// Each entry has the form "repo: ref (new)" or "repo: ref (oldSHA → newSHA)".
+// for every ref that is new, changed, or deleted in any repo other than activeRepo.
+// Only repos present in both before and after are checked; repos absent from before
+// (lazily registered or snapshot-failed) are skipped to avoid false positives.
 func crossRepoViolations(before, after map[string]map[string]string, activeRepo string) []string {
 	var violations []string
 	for repo, afterRefs := range after {
 		if repo == activeRepo {
 			continue
 		}
-		beforeRefs := before[repo]
+		beforeRefs, ok := before[repo]
+		if !ok {
+			continue
+		}
 		for ref, newSHA := range afterRefs {
 			oldSHA, existed := beforeRefs[ref]
 			if !existed {
 				violations = append(violations, fmt.Sprintf("%s: %s (new ref %s)", repo, ref, newSHA))
 			} else if oldSHA != newSHA {
 				violations = append(violations, fmt.Sprintf("%s: %s (%s → %s)", repo, ref, oldSHA, newSHA))
+			}
+		}
+		for ref, oldSHA := range beforeRefs {
+			if _, existed := afterRefs[ref]; !existed {
+				violations = append(violations, fmt.Sprintf("%s: %s (deleted, was %s)", repo, ref, oldSHA))
 			}
 		}
 	}

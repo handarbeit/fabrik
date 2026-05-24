@@ -28,11 +28,13 @@ This is implemented in `applyWorktreeBoundary` (`engine/boundary.go`) — a pure
 
 ### Layer 2: Reactive Post-Run Audit
 
-Before the extension loop in `processItem` (`engine/item.go`), snapshot branch refs across all registered bare-clone repositories via `snapshotAllRepoRefs`. After the loop, compare via `crossRepoViolations`. Any ref that is new or has changed SHA in a repo *other than* the active issue's repo is a boundary violation.
+Before the extension loop in `processItem` (`engine/item.go`), snapshot branch refs across all registered bare-clone repositories via `snapshotAllRepoRefs`. After the loop, compare via `crossRepoViolations`. Any ref that is new, changed, or deleted in a repo *other than* the active issue's repo is a boundary violation. Repos not present in the before-snapshot (lazy-registered during the run or whose pre-audit snapshot failed) are excluded from comparison to prevent false positives.
 
 On violation:
 - A comment is posted on the issue naming the specific refs mutated.
+- `fabrik:paused` is added so `itemNeedsWork` skips the issue until the user investigates. Without `fabrik:paused`, the `clearFailedStage` path in `processItem` would auto-clear the failed label on the next poll cycle.
 - `stage:<name>:failed` is added. `StageAttempted` is recorded (cooldown applies). `MaxRetries` is NOT consumed — violations require human investigation, not auto-retry.
+- `EnginePaused` is recorded in the store so that `clearFailedStage` fires (removing the failed label) when the user removes `fabrik:paused`.
 - No automatic cleanup of unauthorized external state (branches created, PRs opened in wrong repos) — surface to human.
 
 The audit is implemented in `snapshotRepoRefs` and `crossRepoViolations` (`engine/boundary.go`), with orchestration in `snapshotAllRepoRefs` and `handleBoundaryViolation` (`engine/item.go`).
@@ -69,7 +71,7 @@ The `Bash(cmd:*)` pattern restricts by command name, not by argument path. `Bash
 
 ### Why not increment MaxRetries on violation?
 
-Boundary violations are not transient errors (network blips, rate limits) that benefit from automatic retry. They indicate a structural problem — a confused Claude session, a misconfigured spec, or a potential prompt-injection attack. Retrying without human review could repeat the violation. Recording `StageAttempted` (for cooldown) but not `StageRetryIncremented` (MaxRetries) gives the stage a cooldown period while leaving the retry counter available for legitimate transient failures after the human clears `stage:<name>:failed`.
+Boundary violations are not transient errors (network blips, rate limits) that benefit from automatic retry. They indicate a structural problem — a confused Claude session, a misconfigured spec, or a potential prompt-injection attack. Retrying without human review could repeat the violation. `fabrik:paused` and `stage:<name>:failed` are both added, matching the pattern of `escalateFailedStage`. `StageAttempted` is recorded (cooldown applies) but `StageRetryIncremented` is not called (MaxRetries is preserved). When the user removes `fabrik:paused`, `clearFailedStage` removes the failed label and the stage can be retried cleanly.
 
 ## Known Limitations
 
