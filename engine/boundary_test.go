@@ -237,6 +237,38 @@ func TestCrossRepoViolations_SortedOutput(t *testing.T) {
 	}
 }
 
+func TestCrossRepoViolations_DetectsDeletedRef(t *testing.T) {
+	before := map[string]map[string]string{
+		"owner/repo-b": {"refs/heads/main": "aaa", "refs/heads/old-branch": "bbb"},
+	}
+	after := map[string]map[string]string{
+		"owner/repo-b": {"refs/heads/main": "aaa"},
+	}
+	got := crossRepoViolations(before, after, "owner/repo-a")
+	if len(got) != 1 {
+		t.Fatalf("expected 1 violation for deleted ref, got %v", got)
+	}
+	if !containsSubstring(got[0], "old-branch") || !containsSubstring(got[0], "deleted") {
+		t.Errorf("deletion violation should mention branch name and 'deleted': %q", got[0])
+	}
+}
+
+func TestCrossRepoViolations_SkipsRepoAbsentFromBefore(t *testing.T) {
+	// A repo that appears in after but not in before (lazy registration or
+	// snapshot failure during pre-audit) must not generate false positives.
+	before := map[string]map[string]string{
+		"owner/repo-a": {"refs/heads/main": "aaa"},
+	}
+	after := map[string]map[string]string{
+		"owner/repo-a": {"refs/heads/main": "aaa"},
+		"owner/repo-b": {"refs/heads/main": "bbb"}, // new repo, not in before
+	}
+	got := crossRepoViolations(before, after, "owner/repo-a")
+	if len(got) != 0 {
+		t.Errorf("repos absent from before snapshot should not generate violations, got %v", got)
+	}
+}
+
 func containsSubstring(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || len(sub) == 0 ||
 		strings.Contains(s, sub))
