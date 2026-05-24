@@ -181,6 +181,15 @@ func TestFetchStatusField_Success(t *testing.T) {
 	if sf.Options["Done"] != "OPT_3" {
 		t.Errorf("Options[Done] = %q", sf.Options["Done"])
 	}
+	want := []string{"Todo", "In Progress", "Done"}
+	if len(sf.OrderedOptionNames) != len(want) {
+		t.Fatalf("OrderedOptionNames len = %d, want %d", len(sf.OrderedOptionNames), len(want))
+	}
+	for i, name := range want {
+		if sf.OrderedOptionNames[i] != name {
+			t.Errorf("OrderedOptionNames[%d] = %q, want %q", i, sf.OrderedOptionNames[i], name)
+		}
+	}
 }
 
 func TestFetchStatusField_Error(t *testing.T) {
