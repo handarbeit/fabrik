@@ -433,6 +433,9 @@ func buildClaudeArgs(stage *stages.Stage, sessFilePath string, resume bool, mode
 	if !unrestricted && len(tools) == 0 {
 		tools = defaultAllowedTools
 	}
+	if !unrestricted && !stage.ReadOnly && workDir != "" {
+		tools = applyWorktreeBoundary(tools, workDir)
+	}
 	for _, tool := range tools {
 		args = append(args, "--allowedTools", tool)
 	}
