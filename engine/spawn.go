@@ -154,32 +154,23 @@ func (e *Engine) preImplement(ctx context.Context, board *gh.ProjectBoard, item 
 
 	e.logf(item.Number, "spawn", "pre-Implement: found %d child(ren) to spawn\n", len(blocks))
 
-	// Validate all target repos before any mutation.
+	// Ensure all target repos are initialized (bare-cloned) before any mutation.
+	// On-demand clone via singleflight — no prior processing of an issue from the
+	// target repo is required. Error comment and labels are posted by
+	// ensureSpawnTargetReady on failure.
 	uniqueRepos := make(map[string]struct{})
 	for _, b := range blocks {
 		uniqueRepos[b.Repo] = struct{}{}
 	}
-	var unmanaged []string
-	for repo := range uniqueRepos {
-		e.mu.Lock()
-		_, ok := e.worktreeManagers[repo]
-		e.mu.Unlock()
+	for targetRepo := range uniqueRepos {
+		targetOwner, targetRepoName, ok := parseOwnerRepoStr(targetRepo)
 		if !ok {
-			unmanaged = append(unmanaged, repo)
+			// Malformed repo string — the per-block loop below will catch and report it.
+			continue
 		}
-	}
-	if len(unmanaged) > 0 {
-		msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nThe following repos have not yet been initialized by Fabrik (not in worktreeManagers). Fabrik discovers repos lazily — ensure Fabrik can clone each repo (SSH key, webhook config) and that at least one issue from each repo has been processed through the pipeline, then remove `fabrik:paused` to retry:\n\n%s",
-			"- "+strings.Join(unmanaged, "\n- "))
-		if dbID, commentErr := e.client.AddComment(owner, repo, item.Number, msg); commentErr != nil {
-			e.logf(item.Number, "warn", "could not post spawn error comment: %v\n", commentErr)
-		} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-				DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
-			})
+		if err := e.ensureSpawnTargetReady(ctx, targetOwner, targetRepoName, item); err != nil {
+			return false, fmt.Errorf("pre-implement: initializing spawn target %s: %w", targetRepo, err)
 		}
-		e.addPausedLabelToItem(owner, repo, item)
-		return false, fmt.Errorf("pre-implement: unmanaged repos: %s", strings.Join(unmanaged, ", "))
 	}
 
 	// Spawn children in order.

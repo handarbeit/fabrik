@@ -3,6 +3,9 @@ package engine
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -323,14 +326,20 @@ FABRIK_SPAWN_CHILD_END
 	}
 }
 
-func TestPreImplement_UnmanagedRepo(t *testing.T) {
+// TestPreImplement_CloneFailure replaces the old TestPreImplement_UnmanagedRepo.
+// With on-demand initialization, an unregistered target repo triggers a clone
+// attempt. This test verifies the failure path when the clone cannot succeed.
+func TestPreImplement_CloneFailure(t *testing.T) {
+	skipIfNoGit(t)
 	client := &mockGitHubClient{}
 	eng := spawnTestEngine(client)
-	// "owner/other" is NOT in worktreeManagers.
+	// Point fabrikDir at a tempdir — ensureBareClone will fail to clone the nonexistent repo.
+	eng.fabrikDir = t.TempDir()
 
+	// "owner/newrepo" is NOT in worktreeManagers, and the clone will fail.
 	item := planItemWithBlocks(`
-FABRIK_SPAWN_CHILD_BEGIN owner/other
-TITLE: Child in unmanaged repo
+FABRIK_SPAWN_CHILD_BEGIN owner/newrepo
+TITLE: Child in uncloneable repo
 Body.
 FABRIK_SPAWN_CHILD_END
 `)
@@ -338,29 +347,106 @@ FABRIK_SPAWN_CHILD_END
 
 	spawned, err := eng.preImplement(context.Background(), board, item)
 	if err == nil {
-		t.Fatal("expected error for unmanaged repo")
+		t.Fatal("expected error when clone fails")
 	}
 	if spawned {
-		t.Error("expected spawned=false on error")
+		t.Error("expected spawned=false on clone failure")
 	}
 	if len(client.createIssueCalls) != 0 {
-		t.Error("CreateIssue should not be called for unmanaged repo")
+		t.Error("CreateIssue should not be called when clone fails")
 	}
 
-	// fabrik:paused should have been added.
-	var pausedAdded bool
+	// fabrik:paused and fabrik:awaiting-input must both be added.
+	var pausedAdded, awaitingInputAdded bool
 	for _, c := range client.addLabelCalls {
-		if c.labelName == "fabrik:paused" {
+		switch c.labelName {
+		case "fabrik:paused":
 			pausedAdded = true
+		case "fabrik:awaiting-input":
+			awaitingInputAdded = true
 		}
 	}
 	if !pausedAdded {
-		t.Error("fabrik:paused label not added on unmanaged repo error")
+		t.Error("fabrik:paused label not added on clone failure")
+	}
+	if !awaitingInputAdded {
+		t.Error("fabrik:awaiting-input label not added on clone failure")
 	}
 
-	// Error comment should have been posted.
+	// Error comment must be posted and must not mention the old "not in worktreeManagers" message.
 	if len(client.addCommentCalls) == 0 {
-		t.Error("expected error comment to be posted")
+		t.Error("expected error comment on clone failure")
+	}
+	for _, c := range client.addCommentCalls {
+		if strings.Contains(c.body, "not in worktreeManagers") {
+			t.Errorf("error comment must not mention 'not in worktreeManagers': %q", c.body)
+		}
+	}
+}
+
+// TestPreImplement_OnDemandClone_Success verifies that a spawn into a repo not
+// yet in worktreeManagers succeeds when the bare clone directory already exists
+// on disk (so ensureBareClone returns nil without hitting the network).
+func TestPreImplement_OnDemandClone_Success(t *testing.T) {
+	skipIfNoGit(t)
+
+	// Create a tempdir to serve as fabrikDir.
+	fabrikDir := t.TempDir()
+
+	// Pre-create the bare clone directory that ensureBareClone will find.
+	// When the directory exists, ensureBareClone skips the `git clone` step and
+	// returns nil (best-effort fetch errors are silently ignored).
+	targetOwner, targetRepoName := "testowner", "testrepo"
+	bareDir := filepath.Join(fabrikDir, ".fabrik", "repos", targetOwner+"-"+targetRepoName+".git")
+	if err := os.MkdirAll(bareDir, 0755); err != nil {
+		t.Fatalf("creating bare dir: %v", err)
+	}
+	initCmd := exec.Command("git", "init", "--bare", bareDir)
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %s: %v", out, err)
+	}
+
+	childCounter := 0
+	client := &mockGitHubClient{
+		createIssueFn: func(owner, repo, title, body string) (int, string, error) {
+			childCounter++
+			return 200 + childCounter, fmt.Sprintf("I_newchild%d", childCounter), nil
+		},
+		addProjectV2ItemByIdFn: func(projectID, contentNodeID string) (string, error) {
+			return "PVTI_" + contentNodeID, nil
+		},
+	}
+	eng := spawnTestEngine(client)
+	eng.fabrikDir = fabrikDir
+
+	// "testowner/testrepo" is NOT in worktreeManagers initially.
+	item := planItemWithBlocks(fmt.Sprintf(`
+FABRIK_SPAWN_CHILD_BEGIN %s/%s
+TITLE: Child in on-demand-cloned repo
+Body of the child issue.
+FABRIK_SPAWN_CHILD_END
+`, targetOwner, targetRepoName))
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !spawned {
+		t.Fatal("expected spawned=true after on-demand clone")
+	}
+
+	// WorktreeManager must now be registered for the target repo.
+	eng.mu.Lock()
+	_, registered := eng.worktreeManagers[targetOwner+"/"+targetRepoName]
+	eng.mu.Unlock()
+	if !registered {
+		t.Error("worktreeManagers should contain the on-demand-cloned target repo")
+	}
+
+	// CreateIssue must have been called for the child.
+	if len(client.createIssueCalls) != 1 {
+		t.Errorf("expected 1 CreateIssue call, got %d", len(client.createIssueCalls))
 	}
 }
 
