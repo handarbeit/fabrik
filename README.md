@@ -400,7 +400,7 @@ When all blocking issues are closed, Fabrik guarantees re-evaluation of a blocke
 
 **Recipe:** file issues → add blocked-by edges in GitHub → label all `fabrik:yolo` → move to Specify → watch it run.
 
-Plan can also decompose an oversized issue autonomously — creating labeled sub-issues, setting up dependency edges, and signaling `FABRIK_DECOMPOSED`; the sub-issues then flow as a formation automatically.
+Plan can also decompose an oversized issue autonomously. It emits `FABRIK_SPAWN_CHILD_BEGIN/END` blocks in its output declaring each sub-issue to create; when the parent advances to Implement, the engine's `preImplement` step creates each child issue in its target repo, adds it to the board, and links it as a `blockedBy` dependency of the parent. The sub-issues then flow as a formation automatically.
 
 **Validated on the Ambient project:** 9 issues, 4 parallel starts, 7 dependency edges — all pipeline constraints respected automatically, ~88 minutes wall-clock, $31 total cost.
 
