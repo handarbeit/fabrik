@@ -1003,7 +1003,7 @@ These blocks persist in the Plan stage comment — they are data, not consumed-a
 
 **Recursive decomposition:** A child issue created by `preImplement` runs the full Fabrik pipeline. If the child's own Plan emits `FABRIK_SPAWN_CHILD_*` blocks, the child's Implement dispatch triggers another `preImplement` — grandchildren are created identically. There is no depth limit.
 
-**References:** [ADR-047: Engine-Side Pre-Implement Spawn](../adrs/047-spawn-child-engine-side.md)
+**References:** [ADR-048: Engine-Side Pre-Implement Spawn](../adrs/048-spawn-child-engine-side.md)
 
 ### 6.7 No Work Needed Path
 

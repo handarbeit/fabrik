@@ -134,7 +134,7 @@ To trigger a fresh spawn (e.g., after Plan is revised), the user must manually r
 
 A child issue created by `preImplement` runs the full Fabrik pipeline. If the child's own Plan emits `FABRIK_SPAWN_CHILD_*` blocks, the child's Implement dispatch triggers another `preImplement` — grandchildren are created by the same mechanism. There is no depth limit.
 
-**References:** [ADR-047: Engine-Side Pre-Implement Spawn](../adrs/047-spawn-child-engine-side.md), [State Machine §6.6](state-machine.md#66-pre-implement-spawn-path)
+**References:** [ADR-048: Engine-Side Pre-Implement Spawn](../adrs/048-spawn-child-engine-side.md), [State Machine §6.6](state-machine.md#66-pre-implement-spawn-path)
 
 ---
 
