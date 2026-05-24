@@ -11,7 +11,7 @@ are user input, and the board columns define the workflow.
 **Option A: Install binary (requires `gh`)**
 
 ```bash
-# Requires: gh auth login (with access to handarbeit/fabrik)
+# Requires the `gh` CLI authenticated (gh auth login)
 cd ~/bin  # or any directory on your PATH
 gh release download --repo handarbeit/fabrik \
   --pattern "fabrik_*_$(uname -s | tr A-Z a-z)_$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/').tar.gz" \

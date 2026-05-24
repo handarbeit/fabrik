@@ -14,7 +14,7 @@ On a busy 92-item board, something changes frequently enough (bot comments, labe
 3. Some item's `updatedAt` changes → "activity detected — idle backoff reset, poll interval restored to 15s"
 4. 15s polling burns through the fresh quota → back to step 1
 
-This produced three backoff/reset cycles per hour on the widgets-project board (92 items), with the backoff providing only ~20 minutes of relief per hour while 15s polling dominated the remaining 40 minutes.
+This produced three backoff/reset cycles per hour on a managed project board (92 items), with the backoff providing only ~20 minutes of relief per hour while 15s polling dominated the remaining 40 minutes.
 
 The root cause was conflating two independent backoff concerns:
 - **Idle backoff**: increases poll interval when nothing to do; should reset on activity.

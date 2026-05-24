@@ -409,7 +409,7 @@ func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error
 
 	// This goroutine is the owner: perform the clone.
 	worktreeRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
-	bareDir, err := ensureBareClone(e.fabrikDir, owner, repo, e.cfg.GitSSH)
+	bareDir, err := ensureBareClone(e.fabrikDir, owner, repo, e.cfg.User, e.cfg.GitSSH)
 	call.dir = bareDir
 	call.err = err
 
