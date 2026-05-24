@@ -1,7 +1,7 @@
 # ADR 017: FABRIK_DECOMPOSED Marker and Decomposition State Machine
 
 **Date**: 2026-04-07  
-**Status**: Superseded by [ADR 047](047-spawn-child-engine-side.md) (handarbeit/fabrik#769)
+**Status**: Superseded by [ADR 048](048-spawn-child-engine-side.md) (handarbeit/fabrik#769)
 
 ## Context
 
