@@ -1,4 +1,4 @@
-# ADR 047: Engine-Side Sub-Issue Spawning via blockedBy
+# ADR 048: Engine-Side Sub-Issue Spawning via blockedBy
 
 **Date**: 2026-05-23  
 **Status**: Accepted  
@@ -48,7 +48,7 @@ GitHub now has a native `addSubIssue` API. We use `addBlockedByIssue` instead be
 
 ### fabrik:children-spawned idempotency guard
 
-If `preImplement` is interrupted after creating child 1 of 3 and the user re-advances, re-running without a guard would create duplicates. The label prevents re-spawning without user intent. Manual removal of the label (and cleanup of orphaned orphaned children) is the explicit recovery path.
+If `preImplement` is interrupted after creating child 1 of 3 and the user re-advances, re-running without a guard would create duplicates. The label prevents re-spawning without user intent. Manual removal of the label (and cleanup of orphaned children) is the explicit recovery path.
 
 ### Coordinator-only parents via FABRIK_NO_WORK_NEEDED composition
 
