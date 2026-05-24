@@ -39,6 +39,8 @@ var staticLabelDefs = []labelDef{
 
 	// --- neutral / transient labels (grey) ---
 	{"fabrik:editing", "Issue is being edited by the user; processing deferred", "cfd3d7"},
+	{"fabrik:children-spawned", "Pre-Implement spawned sub-issues; idempotency guard — remove to re-trigger spawn", "cfd3d7"},
+	{"fabrik:sub-issue", "Created by Fabrik's pre-Implement spawn step; no engine-gate semantics", "cfd3d7"},
 
 	// --- model override labels (purple) ---
 	{"model:opus", "Override the stage's configured Claude model", "6f42c1"},
