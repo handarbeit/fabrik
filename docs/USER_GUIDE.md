@@ -812,9 +812,7 @@ to create a PR from a branch with nothing to commit.
 Any stage can emit `FABRIK_NO_WORK_NEEDED`, not just Plan. Skill authors should only use it
 when they are **certain** no downstream work is needed.
 
-**Mutual exclusivity:** `FABRIK_NO_WORK_NEEDED` cannot be combined with `FABRIK_DECOMPOSED`
-or `FABRIK_BLOCKED_ON_INPUT`. If the issue needs to be split, use `FABRIK_DECOMPOSED`. If
-a question needs answering first, use `FABRIK_BLOCKED_ON_INPUT`.
+**Mutual exclusivity:** `FABRIK_NO_WORK_NEEDED` cannot be combined with `FABRIK_BLOCKED_ON_INPUT`. If a question needs answering first, use `FABRIK_BLOCKED_ON_INPUT`.
 
 ### Dependency-Based Sequencing (Formations)
 
@@ -872,31 +870,70 @@ In this 5-issue formation:
 
 **Real-world validation:** A 9-issue formation with 7 dependency edges was run on the Ambient project — 4 issues started in parallel, all pipeline constraints were respected automatically, completing in ~88 minutes wall-clock time at $31 total cost.
 
-### Issue Decomposition
+### Sub-issue Decomposition
 
-When Plan determines that an issue is too broad for a single Implement cycle, it can autonomously split it into focused sub-issues — each small enough to implement cleanly and independently.
+When Plan determines that an issue is too broad for a single Implement cycle — or that work needs to happen in more than one repository — it can fan out the work into focused sub-issues, each of which runs through the full Fabrik pipeline independently.
 
-**No user configuration required.** Decomposition is Plan's judgment call. If the issue is well-scoped, Plan produces a normal implementation plan. If it's too broad, Plan decomposes it.
+**No user configuration required.** Decomposition is Plan's judgment call based on Research findings. If the issue is well-scoped and single-repo, Plan produces a normal implementation plan. If it requires parallel work or spans multiple repos, Plan declares sub-issues to spawn.
 
-#### What Happens
+#### How It Works
 
-1. **Plan creates sub-issues** via `gh` CLI, labels them `fabrik:sub-issue`, and adds them to the project board.
-2. **Plan sets up "blocked by" edges** between sub-issues where sequential ordering is required.
-3. **Plan outputs `FABRIK_DECOMPOSED`** and stops — no `FABRIK_STAGE_COMPLETE` is emitted.
-4. **The engine adds `stage:Plan:complete`** to the parent issue and moves it to Done.
-5. **Sub-issues appear in Research** and flow through the full pipeline independently.
+The Plan stage emits structured `FABRIK_SPAWN_CHILD_BEGIN/END` blocks in its output to declare each sub-issue:
 
-Sub-issues form a [formation](#dependency-based-sequencing-formations) automatically — dependency edges set by Plan are enforced during execution.
+```
+FABRIK_SPAWN_CHILD_BEGIN owner/repo
+TITLE: Short descriptive title for the child issue
+
+Full scoped spec body for the child — enough context for it to run
+its own Specify/Research/Plan stages autonomously.
+FABRIK_SPAWN_CHILD_END
+```
+
+These blocks are **declarative data**, not immediate actions. They persist in the Plan comment and are read by the engine at Implement time — Plan can be revised via comment as many times as needed before the user advances to Implement.
+
+When the parent advances to Implement, the engine's `preImplement` step fires **before** Claude is invoked:
+
+1. Creates each child issue in its target repo (same repo or cross-repo)
+2. Adds each child to the same project board
+3. Links each child as a `blockedBy` dependency of the parent
+4. Applies `fabrik:sub-issue` label to each child (informational)
+5. Applies `fabrik:children-spawned` to the parent (idempotency guard)
+
+After spawning, the parent waits at Implement with `fabrik:blocked` until all children close. When the last child closes, the parent's Implement Claude invocation fires — for coordinator-only parents (no own implementation work), Claude emits `FABRIK_STAGE_COMPLETE` + `FABRIK_NO_WORK_NEEDED` and the parent moves directly to Done.
 
 #### What You Observe
 
-- The parent issue moves to Done on the project board (its label set shows `stage:Plan:complete`).
-- New issues appear in Research, each labeled `fabrik:sub-issue`.
-- If Plan set up blocking edges, sub-issues that depend on each other will wait as a formation.
+- During Plan: no sub-issues exist. Plan can be revised freely.
+- After advancing to Implement: child issues appear on the project board in Research, each labeled `fabrik:sub-issue`.
+- The parent shows `fabrik:blocked` + `fabrik:children-spawned`; a dependency comment lists all open children.
+- As children complete, the dependency comment updates in-place (no duplicate comments).
+- When all children close: `fabrik:blocked` clears, and the parent's own Implement runs.
 
-#### Depth Limit
+#### Same-Repo and Cross-Repo
 
-Sub-issues (those labeled `fabrik:sub-issue`) are **never decomposed further**. If Plan encounters an issue with that label, it produces a normal implementation plan regardless of scope. Maximum decomposition depth is 1.
+Spawn blocks work identically whether the target is the parent's own repo or a different repo. Research is responsible for identifying which repos are in scope — it emits a `## Repositories` section listing all potentially-relevant repos. Plan is constrained to spawn only into repos Research named.
+
+#### Recursive Decomposition
+
+There is no depth limit. A child issue's own Plan can emit spawn blocks, creating grandchildren — they gate the child's Implement exactly as the parent's children gate the parent's Implement.
+
+#### Pure-Coordinator Pattern
+
+When the parent issue has no implementation work of its own (it exists only to coordinate children), the parent's Implement runs after children close, finds nothing to do, and emits both `FABRIK_STAGE_COMPLETE` and `FABRIK_NO_WORK_NEEDED`. The engine then moves the parent directly to Done without creating a PR. No special configuration is needed — this composes naturally with the existing no-work-needed path.
+
+#### Re-triggering a Fresh Spawn
+
+The `fabrik:children-spawned` label is the idempotency guard. If you need to re-trigger spawning (e.g., after Plan was revised and the old children should be replaced):
+
+1. Remove `fabrik:children-spawned` from the parent
+2. Close the obsolete child issues manually
+3. Re-advance the parent to Implement
+
+The engine will then read the latest Plan output and spawn fresh children.
+
+#### Gotcha: Closed = Resolved
+
+When a child is closed — regardless of whether its PR was merged — the parent treats it as resolved. Closing a child issue without merging its PR unblocks the parent. Do this deliberately; Fabrik has no way to distinguish a clean close from an abandoned one.
 
 ### Pending Reviewer Gate
 
