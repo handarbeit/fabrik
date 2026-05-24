@@ -465,3 +465,95 @@ func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error
 	close(call.done)
 	return nil
 }
+
+// ensureSpawnTargetReady guarantees that a WorktreeManager exists for
+// targetOwner/targetRepo so the pre-Implement spawn step can create child
+// issues there. On first access it bare-clones the repo to
+// .fabrik/repos/<targetOwner>-<targetRepo>.git via the same singleflight
+// coordination used by ensureRepoReady (cloneInFlight key:
+// "targetOwner/targetRepo").
+//
+// Error reporting and label mutations always target parentItem (the spawning
+// parent issue), not the target repo — the two repos are different in the
+// cross-repo spawn path. Unlike ensureRepoReady's waiters (which silently
+// return ErrSkipItem because the reporting item is the same), waiters here
+// post their own error comment and labels on parentItem so no parent issue
+// silently loses its failure notification when concurrent workers race on the
+// same new target repo.
+func (e *Engine) ensureSpawnTargetReady(ctx context.Context, targetOwner, targetRepo string, parentItem gh.ProjectItem) error {
+	parentOwner, parentRepo := itemOwnerRepo(parentItem, e.defaultRepo())
+	nameWithOwner := targetOwner + "/" + targetRepo
+
+	// Fast path: already registered.
+	e.mu.Lock()
+	_, registered := e.worktreeManagers[nameWithOwner]
+	e.mu.Unlock()
+	if registered {
+		return nil
+	}
+
+	// Singleflight coordination: elect one goroutine to perform the clone.
+	call := &cloneCall{done: make(chan struct{})}
+	actual, loaded := e.cloneInFlight.LoadOrStore(nameWithOwner, call)
+	if loaded {
+		// Another goroutine is already cloning (or has just cloned) this repo.
+		// Each parent item is independent here, so every waiter that observes a
+		// clone failure must post its own error comment — unlike ensureRepoReady
+		// waiters, which silently skip because the same item owns all call sites.
+		existing := actual.(*cloneCall)
+		<-existing.done
+		if existing.err != nil {
+			e.postSpawnCloneError(parentOwner, parentRepo, parentItem, targetOwner, targetRepo, existing.err)
+			return fmt.Errorf("ensureSpawnTargetReady: clone of %s/%s failed: %w", targetOwner, targetRepo, existing.err)
+		}
+		worktreeRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
+		e.registerWorktrees(nameWithOwner, existing.dir, worktreeRoot)
+		return nil
+	}
+
+	// This goroutine is the owner: perform the clone.
+	worktreeRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
+	bareDir, err := ensureBareClone(e.fabrikDir, targetOwner, targetRepo, e.cfg.User, e.cfg.GitSSH)
+	call.dir = bareDir
+	call.err = err
+
+	if err != nil {
+		// Signal waiters before cleanup so they can read call.err.
+		close(call.done)
+		// Delete so future retries (after user removes fabrik:paused) can re-attempt.
+		e.cloneInFlight.Delete(nameWithOwner)
+		e.postSpawnCloneError(parentOwner, parentRepo, parentItem, targetOwner, targetRepo, err)
+		return fmt.Errorf("ensureSpawnTargetReady: clone of %s/%s: %w", targetOwner, targetRepo, err)
+	}
+
+	// Success: register WM, then signal waiters.
+	e.registerWorktrees(nameWithOwner, bareDir, worktreeRoot)
+	close(call.done)
+	return nil
+}
+
+// postSpawnCloneError posts an error comment and adds fabrik:paused +
+// fabrik:awaiting-input to parentItem when an on-demand clone of a spawn
+// target repo fails.
+func (e *Engine) postSpawnCloneError(parentOwner, parentRepo string, parentItem gh.ProjectItem, targetOwner, targetRepo string, cloneErr error) {
+	msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nFailed to clone spawn target `%s/%s`:\n```\n%v\n```\nFix the clone issue (SSH key, PAT access) and remove `fabrik:paused` to retry.",
+		targetOwner, targetRepo, cloneErr)
+	if dbID, commentErr := e.client.AddComment(parentOwner, parentRepo, parentItem.Number, msg); commentErr != nil {
+		e.logf(parentItem.Number, "warn", "could not post spawn clone-failure comment: %v\n", commentErr)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyCommentAdded(boardcache.ItemKey(parentItem.Repo, parentItem.Number), gh.Comment{
+			DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
+		})
+	}
+	if labelErr := e.client.AddLabelToIssue(parentOwner, parentRepo, parentItem.Number, "fabrik:paused"); labelErr != nil {
+		e.logf(parentItem.Number, "warn", "could not add fabrik:paused: %v\n", labelErr)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(parentItem.Repo, parentItem.Number), "fabrik:paused")
+	}
+	if labelErr := e.client.AddLabelToIssue(parentOwner, parentRepo, parentItem.Number, "fabrik:awaiting-input"); labelErr != nil {
+		e.logf(parentItem.Number, "warn", "could not add fabrik:awaiting-input: %v\n", labelErr)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(parentItem.Repo, parentItem.Number), "fabrik:awaiting-input")
+	}
+	e.logf(parentItem.Number, "error", "cannot clone spawn target %s/%s: %v — pausing parent\n", targetOwner, targetRepo, cloneErr)
+}
