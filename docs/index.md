@@ -19,6 +19,19 @@ description: >-
       a full software development pipeline — Specify, Research, Plan, Implement,
       Review, Validate — automatically. File an issue. Drag a card. Ship.
     </p>
+
+    <div class="hero-video">
+      <video
+        src="{{ '/assets/videos/fabrik-demo.mp4' | relative_url }}"
+        controls
+        muted
+        playsinline
+        preload="metadata"
+        style="width:100%; max-width:900px; border-radius:12px; display:block; margin:2rem auto; box-shadow:0 12px 40px rgba(0,0,0,0.4);">
+        Your browser does not support the video tag.
+      </video>
+    </div>
+
     <div class="hero-actions">
       <a href="https://github.com/handarbeit/fabrik" class="btn btn-primary" target="_blank" rel="noopener">
         ★ View on GitHub
@@ -104,21 +117,6 @@ description: >-
     </div>
 
     <div class="demo-videos">
-      <div class="video-container">
-        <video
-          src="{{ '/assets/videos/fabrik-demo.mp4' | relative_url }}"
-          controls
-          muted
-          playsinline
-          preload="metadata"
-          style="width:100%; border-radius:8px; display:block;">
-          Your browser does not support the video tag.
-        </video>
-        <div class="video-caption">
-          <div class="caption-title">Fabrik in Action</div>
-          <div class="caption-desc">A look at the pipeline driving real work end-to-end</div>
-        </div>
-      </div>
       <div class="video-container">
         <img src="{{ '/assets/images/fabrik-tui.png' | relative_url }}" alt="Fabrik TUI showing active pipeline jobs" style="width:100%; border-radius:8px;">
         <div class="video-caption">
