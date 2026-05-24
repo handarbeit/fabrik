@@ -89,6 +89,23 @@ Session file: `~/.fabrik/sessions/issue-<N>/<stageName>.session`. On retry, load
 
 Labels matching `model:<name>` on the issue override the stage's configured model.
 
+### Worktree Boundary Enforcement
+
+For non-read-only, non-unrestricted stages (Implement, Review, Validate, and any custom stage with `read_only: false`), the engine replaces the bare `Edit` and `Write` entries in `--allowedTools` with path-scoped variants:
+
+```
+--allowedTools Edit(<workDir>/**)
+--allowedTools Write(<workDir>/**)
+```
+
+This proactively restricts Claude Code's file-editing tools to the assigned worktree directory. If Claude attempts to edit or write a file outside the worktree, it receives an error from Claude Code and the stage continues running (the attempt is blocked, not the whole stage).
+
+**Scope:** Enforced for all stages where `read_only: false`. Skipped for read-only stages (Specify, Research, Plan by default) — they do not write files and receive bare `Edit`/`Write` entries (or none, if `allowed_tools:` is overridden in stage YAML).
+
+**Bypass:** When `fabrik:unrestricted` is present on the issue, `--dangerously-skip-permissions` is passed instead of `--allowedTools`, bypassing this restriction entirely (consistent with the existing semantics of that label).
+
+**Known gap:** `Bash` shell commands that write files (e.g., `cat > /other/path`) cannot be path-restricted at the tool-permission layer — `Bash(cmd:*)` restricts command name, not argument paths. The post-run boundary audit (Phase 3) covers the primary remaining attack surface.
+
 ---
 
 ## Phase 2.5: Pre-Implement Step (Implement Stage Only)
@@ -269,6 +286,30 @@ The `e.claude.Invoke()` call runs inside an extension loop. On each iteration:
 **Deferred WIP commit and push:** The `commitWIP` and `PushBranch` calls happen AFTER the extension loop completes, not between invocations. This preserves worktree state across extensions.
 
 **Stats footer:** After the loop, `usage.MaxTurns` is set to `totalMultiple × stage.MaxTurns`, so the stats line reflects the total budget (e.g., `used 130/150 turns`).
+
+### Post-Run Boundary Audit
+
+After the extension loop completes, a cross-repo ref audit runs for non-read-only, non-unrestricted stages. The audit detects git-layer mutations in any repository other than the active worktree's own repo.
+
+**How it works:**
+
+1. **Pre-audit snapshot** (taken immediately before the extension loop): For each registered `WorktreeManager` in the engine, run `git for-each-ref --format=%(refname) %(objectname)` in its bare-clone directory. Capture `repo → (refname → SHA)` for all known repos.
+2. **Post-audit snapshot** (taken immediately after the extension loop): Same operation.
+3. **Violation check** (`crossRepoViolations`): Compare before/after for every repo key *except* the active issue's repo. Any ref that is new or has a changed SHA is a violation.
+
+**On violation:**
+- `[#N audit]` log line names the stage and count of mutations.
+- A comment is posted on the issue listing the specific refs mutated (names and SHAs). No automatic cleanup.
+- `stage:<name>:failed` label is added. `StageAttempted` is recorded (cooldown applies). `MaxRetries` is NOT consumed — violations require human investigation, not auto-retry.
+- The stage returns without posting output or advancing to the next stage.
+
+**No violation:** The audit is silent. Stage proceeds to normal output posting and completion.
+
+**Bypass:** Skipped when `stage.ReadOnly == true` or `fabrik:unrestricted` is present on the issue.
+
+**Limitation — Bash shell writes:** The audit checks git refs, not the filesystem. A Claude session that writes files outside the worktree via raw shell commands (e.g., `cat > /other/path`) would not be caught unless those files were also committed and pushed to another repo. The `Edit`/`Write` path restriction (Phase 2) is the primary mitigation for direct file writes.
+
+**Limitation — unregistered repos:** Only repos in `worktreeManagers` at the time of the snapshot are audited. Repos that Claude navigated into but that are not registered in Fabrik's managed set are not detected.
 
 ---
 
