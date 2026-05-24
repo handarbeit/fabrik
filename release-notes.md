@@ -1,22 +1,39 @@
-# Fabrik v0.0.65
+# Fabrik v0.0.66
 
-Finishes the BootstrapFromProbe migration started in #710/#685: the legacy `Bootstrap()` path is gone and all cold-start callers now go through the probe-driven path. Also fixes a stuck-label bug where `fabrik:awaiting-input` was not cleared when a stage emitted `FABRIK_STAGE_COMPLETE`.
+Major release. Three big themes:
+
+1. **Cross-repo sub-issue spawn** — Implement can now create blocking sub-issues (in the same or a different repo), wire them into the project board, and pause the parent until they complete. Pre-Implement spawn step runs the new dependency check and gates advancement on resolution.
+2. **Worktree boundary enforcement** — A new audit layer scopes Edit/Write tool calls to the issue's worktree and snapshots cross-repo refs around each Claude invocation. Stages fail loudly when an invocation tries to mutate state outside its worktree; the human is surfaced rather than the engine attempting to auto-clean.
+3. **Backlog/Triage burn fix** — Probe deep-fetch now skips items in board columns that don't correspond to a configured Fabrik stage. Cold-start GraphQL cost on projects with large Backlog/Triage columns drops materially.
+
+## Features
+
+- **Cross-repo sub-issue decomposition** (#762, #780). New `feat(engine): add pre-Implement spawn step and wire into item processing`, `feat(github): add CreateIssue, AddProjectV2ItemById, AddBlockedByIssue methods`, and `feat(engine): add checkDependencies edit-in-place, cycle detection, and spawn tests`. Stages can decompose work into linked, cross-repo blocking issues, wired via `addBlockedBy` GraphQL mutations and the org project board. Replaces the legacy `FABRIK_DECOMPOSED` mechanism (removed). ADR-047 documents the engine-side spawn design and supersedes ADR-017.
+- **Worktree boundary enforcement** (#776). New `engine/boundary.go` adds `applyWorktreeBoundary` and ref-snapshot functions wrapping the extension loop. Edit/Write tool calls are restricted to the issue's worktree; cross-repo refs are snapshotted before and after each Claude invocation and any drift outside the worktree fails the stage. ADR-049 documents the design.
+- **headRefOid in probe + deep-fetch** (#779). `BoardProbeItem` and `ProjectItem` now carry `headRefOid`; the CI gate uses this in poll-only mode where the prior path was reading a stale field.
 
 ## Fixes
 
-- Clear `fabrik:awaiting-input` on `FABRIK_STAGE_COMPLETE`. Previously, if a stage was paused awaiting user input and the comment-driven resume then completed the stage, the label could remain set and keep the issue visibly "awaiting input" even though work had advanced.
-- Separate `--auto-upgrade` and standalone `fabrik upgrade` plugin-check descriptions so the log output accurately describes which path is running.
+- **Probe deep-fetch skips unconfigured columns** (#778). `runProbeAndDeepFetch` now guards on `stages.FindStage(...) != nil` before incurring deep-fetch cost. Items sitting in Backlog, Triage, or any other column not configured as a Fabrik stage no longer trigger `FetchItemDetails`. Companion fix in `boardcache`: apply `ProbeBoardItemUpdated` for existing items in unconfigured columns so the cache stays consistent without a deep-fetch.
+- **CI gate `headRefOid` repair in poll-only mode** (#779). The CI gate was reading the wrong source for `HeadSHA` when webhooks were unavailable; gate now correctly resolves to the head OID and fires the check-run lookup against the right SHA.
+- **Comment-run duration recorded** (#788). `InvocationRecorded` for comment-driven runs now carries `Duration` (previously zero), restoring TUI/observability accuracy for comment-stage timings.
+- **Non-interactive git in `updateWorktreeFromMain`**. Use `nonInteractiveGitEnv()` so a hung git prompt can't stall worktree updates.
+- **Spawn ADR numbering**. Renumbered the spawn ADR from 047 → 048 to avoid clash with the `headRefOid` ADR.
+- **Review-stage labels and CLAUDE.md fixes**. Missing label definitions added; CLAUDE.md improvements and clearer error messages in the review skill.
 
 ## Improvements
 
-- Migrate remaining `Bootstrap` callers to `BootstrapFromProbe` and delete the legacy method. Cold-start now uniformly uses the truly-shallow probe path, completing the architecture introduced in #710.
+- `refactor(spawn): use strings.Fields to extract repo from BEGIN line` — simpler and safer than the prior tokeniser.
+- Skill updates: Research skill grew a Repositories section; Implement skill grew worktree guardrails.
 
 ## Internal
 
-- New regression test `TestWebhookModeStartup_ClosedDoneItemsNotDeepFetched` covering the terminal-skip path on webhook-mode startup.
-- ADR-044 and `docs/state-machine.md` updated to record probe-based webhook startup and the `awaiting-input` clearance sites.
-- README updates correcting stale non-interactive and SIGHUP upgrade descriptions, plus the customization-protection note.
-- Test-suite cleanup across `boardcache` and `engine` for the Bootstrap removal.
+- New integration tests for cross-repo boundary audit, spawn flow, and probe skip of unconfigured columns. Regression tests for the CI gate `HeadSHA` bugs (#779).
+- Test-suite hardening: fixed `TestExtendTurns_PersistsAcrossMultipleStages` hang, restored `lockVerifyDelay` in `tui_events` tests, removed redundant `containsSubstring` helper.
+- OSS-readiness pass (#780): community files, identity scrub (final pass), marketing page polish, committer-identity fix.
+- Marketing site: brand orange `#ea782e`, hero video, expanded human-role copy, simplified `go install` one-liner.
+- Docs: `docs/state-machine.md`, `docs/stage-lifecycle.md`, `USER_GUIDE.md` updated for spawn mechanism, worktree boundary enforcement, stage-membership guard, and `fabrik:awaiting-input` orphan-label cleanup. `docs/llms-full.txt` regenerated. New ADRs: 047 (spawn supersedes 017), 048 (headRefOid), 049 (worktree boundary).
+- Competitive analysis: KanBots and Symphony comparisons added under `docs/competitive/` (excluded from Jekyll publication).
 
 ## Upgrading
 
