@@ -185,7 +185,7 @@ func TestCrossRepoViolations_DetectsNewRef(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected 1 violation, got %v", got)
 	}
-	if !containsSubstring(got[0], "repo-b") || !containsSubstring(got[0], "evil") {
+	if !strings.Contains(got[0], "repo-b") || !strings.Contains(got[0], "evil") {
 		t.Errorf("unexpected violation string: %q", got[0])
 	}
 }
@@ -201,7 +201,7 @@ func TestCrossRepoViolations_DetectsChangedRef(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected 1 violation, got %v", got)
 	}
-	if !containsSubstring(got[0], "aaa") || !containsSubstring(got[0], "bbb") {
+	if !strings.Contains(got[0], "aaa") || !strings.Contains(got[0], "bbb") {
 		t.Errorf("unexpected violation string: %q", got[0])
 	}
 }
@@ -248,7 +248,7 @@ func TestCrossRepoViolations_DetectsDeletedRef(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected 1 violation for deleted ref, got %v", got)
 	}
-	if !containsSubstring(got[0], "old-branch") || !containsSubstring(got[0], "deleted") {
+	if !strings.Contains(got[0], "old-branch") || !strings.Contains(got[0], "deleted") {
 		t.Errorf("deletion violation should mention branch name and 'deleted': %q", got[0])
 	}
 }
@@ -267,9 +267,4 @@ func TestCrossRepoViolations_SkipsRepoAbsentFromBefore(t *testing.T) {
 	if len(got) != 0 {
 		t.Errorf("repos absent from before snapshot should not generate violations, got %v", got)
 	}
-}
-
-func containsSubstring(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || len(sub) == 0 ||
-		strings.Contains(s, sub))
 }
