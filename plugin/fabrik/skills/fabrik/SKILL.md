@@ -97,13 +97,13 @@ When the user wants to create a group of related issues where B is blocked by A,
 **Wiring the dependency:**
 
 ```bash
-# Get the node ID of the blocking issue (A):
-gh api repos/{owner}/{repo}/issues/{A} --jq '.node_id'
+# Get the database ID of the blocking issue (A):
+gh api repos/{owner}/{repo}/issues/{A} --jq '.id'
 
 # Wire B as blocked by A:
 gh api repos/{owner}/{repo}/issues/{B}/dependencies/blocked_by \
   --method POST \
-  -F blocked_by_id=<node-id-of-A>
+  -F blocked_by_id=<id-of-A>
 ```
 
 **The `-F` vs `-f` gotcha**: Use `-F` (uppercase), not `-f` (lowercase). `-F` sends a typed integer/ID field; `-f` sends a plain string. The GitHub dependencies API rejects string IDs and returns a confusing 422 error.
