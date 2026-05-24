@@ -122,6 +122,32 @@ func childFooter(parentOwner, parentRepo string, parentNumber int) string {
 		parentOwner, parentRepo, parentNumber)
 }
 
+// resolveSpecifyOptionID returns the project Status option ID for the "Specify"
+// column, or the first non-Backlog, non-terminal column as a fallback. Returns
+// "" when no suitable option exists or sf is nil (caller skips the status-set).
+func resolveSpecifyOptionID(sf *gh.StatusField) string {
+	if sf == nil {
+		return ""
+	}
+	// Exact match on "Specify".
+	if id, ok := sf.Options["Specify"]; ok {
+		return id
+	}
+	// Fallback: first option that is not "Backlog" and not the last column.
+	names := sf.OrderedOptionNames
+	if len(names) < 2 {
+		return ""
+	}
+	last := names[len(names)-1]
+	for _, name := range names {
+		if name == "Backlog" || name == last {
+			continue
+		}
+		return sf.Options[name]
+	}
+	return ""
+}
+
 // preImplement runs the pre-Implement step for stage "Implement". It parses
 // the parent's Plan comment for FABRIK_SPAWN_CHILD_BEGIN/END blocks and, when
 // found, creates the child issues on GitHub, adds them to the project board,
