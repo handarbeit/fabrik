@@ -26,7 +26,6 @@ description: >-
         controls
         muted
         autoplay
-        loop
         playsinline
         preload="auto"
         style="width:100%; max-width:900px; border-radius:12px; display:block; margin:2rem auto; box-shadow:0 12px 40px rgba(0,0,0,0.4);">
@@ -309,7 +308,7 @@ description: >-
     <p class="section-label">Quickstart</p>
     <h2 class="section-title">From zero to pipeline in minutes</h2>
     <p class="section-subtitle">
-      Fabrik runs as a local CLI. You need Claude Code, a GitHub token, and either <code>gh</code> CLI or Go.
+      Fabrik runs as a local CLI. You need Go 1.26+, Claude Code, and a GitHub token.
     </p>
 
     <div class="quickstart-steps">
@@ -318,14 +317,14 @@ description: >-
           <div class="step-num">1</div>
           <div class="step-content">
             <div class="step-title">Prerequisites</div>
-            <div class="step-desc">For binary install: <code>gh</code> CLI with <code>gh auth login</code> (repo access required). For source build: Go 1.26.1+. Both paths need Claude Code CLI and a GitHub token with <code>repo</code> and <code>project</code> scopes.</div>
+            <div class="step-desc">Go 1.26.1+, Claude Code CLI, and a GitHub token with <code>repo</code> and <code>project</code> scopes.</div>
           </div>
         </div>
         <div class="step">
           <div class="step-num">2</div>
           <div class="step-content">
             <div class="step-title">Install &amp; initialize</div>
-            <div class="step-desc">Download a pre-built binary via <code>gh</code>, or clone and build from source. Then run <code>fabrik init</code> to scaffold stage configs into your project.</div>
+            <div class="step-desc">One <code>go install</code> command. Then run <code>fabrik init</code> to scaffold stage configs into your project.</div>
           </div>
         </div>
         <div class="step">
@@ -354,42 +353,25 @@ description: >-
           <span>terminal</span>
         </div>
         <pre>
-<span style="color:#56d364"># Option A: Install binary (requires gh)</span>
-<span style="color:#8b949e"># Requires: gh auth login (any GitHub account)</span>
-<span style="color:#8b949e"># Extracts to current directory — cd to ~/bin first, or move binary afterwards</span>
-cd ~/bin
-gh release download --repo handarbeit/fabrik \
-  --pattern "fabrik_*_$(uname -s | tr A-Z a-z)_$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/').tar.gz" \
-  -O - | tar xz
-<span style="color:#8b949e"># Platform-specific alternatives:</span>
-<span style="color:#8b949e"># darwin/arm64:  --pattern "fabrik_*_darwin_arm64.tar.gz"</span>
-<span style="color:#8b949e"># darwin/amd64:  --pattern "fabrik_*_darwin_amd64.tar.gz"</span>
-<span style="color:#8b949e"># linux/amd64:   --pattern "fabrik_*_linux_amd64.tar.gz"</span>
-<span style="color:#8b949e"># linux/arm64:   --pattern "fabrik_*_linux_arm64.tar.gz"</span>
-
-<span style="color:#56d364"># Option B: Build from source (requires Go)</span>
-git clone https://github.com/handarbeit/fabrik
-cd fabrik
-go build -o fabrik .
+<span style="color:#56d364"># 1. Install</span>
+go install github.com/handarbeit/fabrik@latest
 
 <span style="color:#56d364"># 2. Initialize your project (pass your GitHub Project URL to skip manual config)</span>
-./fabrik init --user you https://github.com/orgs/your-org/projects/5
+fabrik init --user you https://github.com/orgs/your-org/projects/5
 <span style="color:#8b949e"># Creates .fabrik/stages/, .fabrik/config.yaml</span>
-<span style="color:#8b949e"># URL auto-populates owner, project, and owner_type; --user sets your username</span>
-<span style="color:#8b949e"># Without a URL: prompts interactively (TTY) or writes a blank template (non-TTY)</span>
 
 <span style="color:#56d364"># 3. Add your GitHub token</span>
 echo 'FABRIK_TOKEN=ghp_...' >> .env
 echo '.env' >> .gitignore
 
 <span style="color:#56d364"># 4. Run</span>
-./fabrik
+fabrik
 
 <span style="color:#56d364"># Optional: yolo mode (auto-advance all stages)</span>
-./fabrik --yolo
+fabrik --yolo
 
-<span style="color:#56d364"># Optional: self-upgrade from handarbeit/fabrik GitHub Releases at startup and when idle</span>
-./fabrik --auto-upgrade</pre>
+<span style="color:#56d364"># Optional: self-upgrade from GitHub Releases at startup and when idle</span>
+fabrik --auto-upgrade</pre>
       </div>
     </div>
   </div>
