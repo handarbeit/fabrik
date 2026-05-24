@@ -573,3 +573,228 @@ FABRIK_SPAWN_CHILD_END
 		t.Error("fabrik:paused not added on partial failure")
 	}
 }
+
+// ---- status-set and label-inheritance tests ----
+
+func spawnTestEngineWithSpecify(client *mockGitHubClient) *Engine {
+	eng := spawnTestEngine(client)
+	eng.statusField = &gh.StatusField{
+		FieldID: "FIELD_STATUS",
+		Options: map[string]string{
+			"Backlog": "OPT_0",
+			"Specify": "OPT_1",
+			"Done":    "OPT_9",
+		},
+		OrderedOptionNames: []string{"Backlog", "Specify", "Done"},
+	}
+	return eng
+}
+
+func TestPreImplement_SetsSpecifyStatus(t *testing.T) {
+	client := &mockGitHubClient{
+		createIssueFn: func(owner, repo, title, body string) (int, string, error) {
+			return 101, "I_child101", nil
+		},
+		addProjectV2ItemByIdFn: func(projectID, contentNodeID string) (string, error) {
+			return "PVTI_child101", nil
+		},
+	}
+	eng := spawnTestEngineWithSpecify(client)
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Test child
+Body.
+FABRIK_SPAWN_CHILD_END
+`)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !spawned {
+		t.Fatal("expected spawned=true")
+	}
+
+	// UpdateProjectItemStatus must be called with correct args.
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected 1 UpdateProjectItemStatus call, got %d", len(client.updateStatusCalls))
+	}
+	call := client.updateStatusCalls[0]
+	if call.projectID != "PVT_1" {
+		t.Errorf("projectID = %q, want PVT_1", call.projectID)
+	}
+	if call.itemID != "PVTI_child101" {
+		t.Errorf("itemID = %q, want PVTI_child101", call.itemID)
+	}
+	if call.fieldID != "FIELD_STATUS" {
+		t.Errorf("fieldID = %q, want FIELD_STATUS", call.fieldID)
+	}
+	if call.optionID != "OPT_1" {
+		t.Errorf("optionID = %q, want OPT_1 (Specify)", call.optionID)
+	}
+}
+
+func TestPreImplement_StatusSetNilField(t *testing.T) {
+	client := &mockGitHubClient{
+		createIssueFn: func(owner, repo, title, body string) (int, string, error) {
+			return 102, "I_child102", nil
+		},
+		addProjectV2ItemByIdFn: func(projectID, contentNodeID string) (string, error) {
+			return "PVTI_child102", nil
+		},
+	}
+	eng := spawnTestEngine(client)
+	// statusField is nil by default in spawnTestEngine
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Test child no status
+Body.
+FABRIK_SPAWN_CHILD_END
+`)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !spawned {
+		t.Fatal("expected spawned=true even when statusField is nil")
+	}
+
+	// No UpdateProjectItemStatus call should happen.
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("expected 0 UpdateProjectItemStatus calls, got %d", len(client.updateStatusCalls))
+	}
+}
+
+func TestPreImplement_YoloInheritance(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := spawnTestEngineWithSpecify(client)
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Child for yolo
+Body.
+FABRIK_SPAWN_CHILD_END
+`)
+	item.Labels = append(item.Labels, "fabrik:yolo")
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	if _, err := eng.preImplement(context.Background(), board, item); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var yoloAdded, cruiseAdded bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:yolo" {
+			yoloAdded = true
+		}
+		if c.labelName == "fabrik:cruise" {
+			cruiseAdded = true
+		}
+	}
+	if !yoloAdded {
+		t.Error("fabrik:yolo not added to child when parent has it")
+	}
+	if cruiseAdded {
+		t.Error("fabrik:cruise must not be added when parent does not have it")
+	}
+}
+
+func TestPreImplement_CruiseInheritance(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := spawnTestEngineWithSpecify(client)
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Child for cruise
+Body.
+FABRIK_SPAWN_CHILD_END
+`)
+	item.Labels = append(item.Labels, "fabrik:cruise")
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	if _, err := eng.preImplement(context.Background(), board, item); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var yoloAdded, cruiseAdded bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:yolo" {
+			yoloAdded = true
+		}
+		if c.labelName == "fabrik:cruise" {
+			cruiseAdded = true
+		}
+	}
+	if yoloAdded {
+		t.Error("fabrik:yolo must not be added when parent does not have it")
+	}
+	if !cruiseAdded {
+		t.Error("fabrik:cruise not added to child when parent has it")
+	}
+}
+
+func TestPreImplement_BothLabelsInherited(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := spawnTestEngineWithSpecify(client)
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Child for both
+Body.
+FABRIK_SPAWN_CHILD_END
+`)
+	item.Labels = append(item.Labels, "fabrik:yolo", "fabrik:cruise")
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	if _, err := eng.preImplement(context.Background(), board, item); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var yoloAdded, cruiseAdded bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:yolo" {
+			yoloAdded = true
+		}
+		if c.labelName == "fabrik:cruise" {
+			cruiseAdded = true
+		}
+	}
+	if !yoloAdded {
+		t.Error("fabrik:yolo not added to child when parent has both labels")
+	}
+	if !cruiseAdded {
+		t.Error("fabrik:cruise not added to child when parent has both labels")
+	}
+}
+
+func TestPreImplement_NoAutonomyLabels(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := spawnTestEngineWithSpecify(client)
+
+	item := planItemWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Child without autonomy labels
+Body.
+FABRIK_SPAWN_CHILD_END
+`)
+	// item.Labels has only "stage:Plan:complete" — no yolo or cruise
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	if _, err := eng.preImplement(context.Background(), board, item); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:yolo" {
+			t.Error("fabrik:yolo must not be added when parent does not have it")
+		}
+		if c.labelName == "fabrik:cruise" {
+			t.Error("fabrik:cruise must not be added when parent does not have it")
+		}
+	}
+}

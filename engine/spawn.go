@@ -199,6 +199,11 @@ func (e *Engine) preImplement(ctx context.Context, board *gh.ProjectBoard, item 
 		}
 	}
 
+	// Snapshot statusField once before the loop (stable once set; avoids holding the mutex during network calls).
+	e.mu.Lock()
+	sf := e.statusField
+	e.mu.Unlock()
+
 	// Spawn children in order.
 	var spawned []string
 	for i, block := range blocks {
@@ -236,7 +241,8 @@ func (e *Engine) preImplement(ctx context.Context, board *gh.ProjectBoard, item 
 		spawned = append(spawned, fmt.Sprintf("%s#%d", block.Repo, childNumber))
 
 		// Add child to the project board.
-		if _, err := e.client.AddProjectV2ItemById(board.ProjectID, childNodeID); err != nil {
+		childItemID, err := e.client.AddProjectV2ItemById(board.ProjectID, childNodeID)
+		if err != nil {
 			msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nFailed to add child %s/%s#%d to project board: `%v`\n\nCreated so far: %s\n\nManually close any orphaned children, remove `fabrik:paused`, then re-advance to retry.",
 				childOwner, childRepo, childNumber, err, formatSpawnedList(spawned))
 			if dbID, commentErr := e.client.AddComment(owner, repo, item.Number, msg); commentErr != nil {
@@ -269,6 +275,27 @@ func (e *Engine) preImplement(ctx context.Context, board *gh.ProjectBoard, item 
 		// Apply fabrik:sub-issue label to child (for human-visible filtering; no engine semantics).
 		if err := e.client.AddLabelToIssue(childOwner, childRepo, childNumber, "fabrik:sub-issue"); err != nil {
 			e.logf(item.Number, "warn", "could not add fabrik:sub-issue to %s#%d: %v\n", block.Repo, childNumber, err)
+		}
+
+		// Set child's project Status to Specify (or first processing stage) when statusField is available.
+		if optionID := resolveSpecifyOptionID(sf); optionID != "" {
+			if err := e.client.UpdateProjectItemStatus(board.ProjectID, childItemID, sf.FieldID, optionID); err != nil {
+				e.logf(item.Number, "warn", "could not set project status on %s#%d: %v\n", block.Repo, childNumber, err)
+			}
+		} else if sf != nil {
+			e.logf(item.Number, "warn", "no Specify/processing status option found for %s#%d; child lands in Backlog\n", block.Repo, childNumber)
+		}
+
+		// Inherit fabrik:yolo and fabrik:cruise from parent (enables autonomous child pipeline).
+		if hasLabel(item, "fabrik:yolo") {
+			if err := e.client.AddLabelToIssue(childOwner, childRepo, childNumber, "fabrik:yolo"); err != nil {
+				e.logf(item.Number, "warn", "could not add fabrik:yolo to %s#%d: %v\n", block.Repo, childNumber, err)
+			}
+		}
+		if hasLabel(item, "fabrik:cruise") {
+			if err := e.client.AddLabelToIssue(childOwner, childRepo, childNumber, "fabrik:cruise"); err != nil {
+				e.logf(item.Number, "warn", "could not add fabrik:cruise to %s#%d: %v\n", block.Repo, childNumber, err)
+			}
 		}
 	}
 
