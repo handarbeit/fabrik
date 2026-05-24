@@ -92,18 +92,24 @@ func TestBoundaryAudit_ViolationDetected(t *testing.T) {
 		t.Errorf("violation comment should mention the mutated branch, got: %q", violationComment)
 	}
 
-	// stage:Implement:failed must be added.
+	// stage:Implement:failed and fabrik:paused must both be added.
 	client.mu.Lock()
-	var failedAdded bool
+	var failedAdded, pausedAdded bool
 	for _, c := range client.addLabelCalls {
-		if c.labelName == "stage:Implement:failed" {
+		switch c.labelName {
+		case "stage:Implement:failed":
 			failedAdded = true
+		case "fabrik:paused":
+			pausedAdded = true
 		}
 	}
 	client.mu.Unlock()
 
 	if !failedAdded {
 		t.Error("expected stage:Implement:failed label to be added after violation")
+	}
+	if !pausedAdded {
+		t.Error("expected fabrik:paused label to be added after violation (prevents auto-retry)")
 	}
 
 	// No stage:Implement:complete label should have been added.
