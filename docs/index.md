@@ -25,8 +25,10 @@ description: >-
         src="{{ '/assets/videos/fabrik-demo.mp4' | relative_url }}"
         controls
         muted
+        autoplay
+        loop
         playsinline
-        preload="metadata"
+        preload="auto"
         style="width:100%; max-width:900px; border-radius:12px; display:block; margin:2rem auto; box-shadow:0 12px 40px rgba(0,0,0,0.4);">
         Your browser does not support the video tag.
       </video>
