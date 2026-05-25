@@ -5,21 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"strings"
 	"time"
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
-	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
-
-// errRebaseDispatched is returned by attemptMergeOnValidate when a rebase
-// reinvoke has been dispatched instead of immediately pausing. handleStageComplete
-// detects this sentinel and adds stage:Validate:complete so the catch-up loop's
-// Phase 2 drives the merge retry rather than itemNeedsWork triggering a full
-// Validate re-invocation.
-var errRebaseDispatched = errors.New("rebase reinvoke dispatched")
 
 // hasYoloLabel reports whether item has the "fabrik:yolo" label.
 func hasYoloLabel(item gh.ProjectItem) bool {
@@ -96,34 +87,22 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	// cruise is suppressed so yolo always takes precedence.
 	cruiseActive := !yoloActive && hasCruiseLabel(item)
 
-	// Attempt PR merge after Validate when yolo is active and wait_for_ci is false.
-	// When wait_for_ci: true the merge happens in the catch-up loop's Phase 2 after
-	// the CI gate clears (see ADR 032). This runs BEFORE adding the completion label
-	// so that on merge failure the engine can retry Validate (itemNeedsWork skips
-	// stages with a complete label).
+	// autoMergeEnabled is true when attemptMergeOnValidate successfully called
+	// EnablePullRequestAutoMerge. Done advancement is deferred to the convergence
+	// monitor (checkAutoMergeConvergence in the catch-up loop) in that case.
+	autoMergeEnabled := false
+
+	// Enable GitHub native auto-merge after Validate when yolo is active and
+	// wait_for_ci is false. When wait_for_ci: true the merge path is handled by
+	// checkCIGate in the catch-up loop (see ADR 032). This runs BEFORE adding the
+	// completion label so that on failure the engine retries Validate (itemNeedsWork
+	// skips stages with a complete label).
 	waitForCI := stage.WaitForCI != nil && *stage.WaitForCI
 	if yoloActive && stage.Name == "Validate" && !waitForCI {
-		if err := e.attemptMergeOnValidate(ctx, board, item, stage); err != nil {
-			if errors.Is(err, errRebaseDispatched) {
-				// Rebase reinvoke dispatched — add completion label so the catch-up
-				// loop retries the merge rather than itemNeedsWork triggering a full
-				// Validate re-invocation.
-				completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
-				if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); lerr != nil {
-					e.logf(item.Number, "warn", "could not add completion label: %v\n", lerr)
-				} else {
-					if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-						cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
-					}
-					if e.webhookMgr != nil {
-						e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+completeLabel)
-					}
-				}
-				e.logf(item.Number, "rebase-reinvoke", "PR merge deferred — rebase dispatched\n")
-			} else {
-				// Merge failed: post/pause already handled inside attemptMergeOnValidate.
-				e.logf(item.Number, "warn", "PR not merged: %v\n", err)
-			}
+		var mergeErr error
+		autoMergeEnabled, mergeErr = e.attemptMergeOnValidate(ctx, board, item, stage)
+		if mergeErr != nil {
+			e.logf(item.Number, "warn", "PR not merged: %v\n", mergeErr)
 			return
 		}
 	}
@@ -184,6 +163,13 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 		shouldAdvance = false
 	}
 
+	// If GitHub auto-merge was just enabled, defer Done advancement to
+	// checkAutoMergeConvergence in the catch-up loop. Done cleanup must not
+	// run until the PR is actually merged by GitHub.
+	if autoMergeEnabled {
+		shouldAdvance = false
+	}
+
 	if shouldAdvance {
 		if e.checkDependencies(board, item, stage) {
 			return // blocked; checkDependencies handled label + comment
@@ -224,235 +210,56 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	}
 }
 
-// attemptMergeOnValidate finds the linked PR for item, gates on CI status,
-// and merges it. Returns nil on success or when no PR exists.
-// On CI timeout, returns a handled error (pause already applied).
-// On ErrNotMergeable (base-branch conflict): applies fabrik:rebase-needed
-// idempotently, then dispatches dispatchRebaseReinvoke and returns the
-// errRebaseDispatched sentinel (caller must add stage:Validate:complete so
-// the catch-up loop retries the merge). At MaxRebaseCycles, falls back to
-// pauseForRebaseCycleLimit (handled error, pause applied).
-// Returns a retriable error (caller should retry) when CI is pending or a
-// transient API error occurs.
-//
-// CI gate logic (R1–R6):
-//   - No check runs → gate clears (R5: repo has no CI)
-//   - Any pending/queued → block; track ciMergePendingSince; pause after CIWaitTimeout
-//   - Any failed → add fabrik:awaiting-ci; return error
-//   - All green → clear ciMergePendingSince; clear fabrik:awaiting-ci; proceed to merge
-func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) error {
+// attemptMergeOnValidate enables GitHub native auto-merge for the linked PR
+// of a yolo issue at Validate completion. Returns (true, nil) when auto-merge
+// was enabled (or is already enabled as an idempotency guard), (false, nil)
+// when no action is needed (cruise label, no linked PR), and (false, err) on
+// failure. The fabrik:auto-merge-enabled label serves as both the idempotency
+// guard and the budget-start anchor read by checkAutoMergeConvergence.
+func (e *Engine) attemptMergeOnValidate(_ context.Context, _ *gh.ProjectBoard, item gh.ProjectItem, _ *stages.Stage) (bool, error) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
-	// Use FetchLinkedPR (REST) to get both the PR number and head SHA in one call.
+	// Idempotency: auto-merge was already enabled on a prior run.
+	if hasLabel(item, "fabrik:auto-merge-enabled") {
+		return true, nil
+	}
+
 	pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number)
 	if err != nil {
-		e.logf(item.Number, "warn", "could not fetch linked PR for merge: %v — will retry\n", err)
-		return fmt.Errorf("fetch linked PR: %w", err)
+		e.logf(item.Number, "warn", "could not fetch linked PR for auto-merge: %v — will retry\n", err)
+		return false, fmt.Errorf("fetch linked PR: %w", err)
 	}
 	if pr == nil {
 		e.logf(item.Number, "warn", "no linked PR found at Validate completion; skipping auto-merge\n")
-		return nil
+		return false, nil
 	}
 
-	// Trust GitHub's branch-protection-aware mergeable_state when it's
-	// positive: "clean" = ready to merge per branch protection; "unstable" =
-	// non-required checks failing but still mergeable. In both cases, skip
-	// the raw check_runs gate below — that gate is over-aggressive, treating
-	// any check_run failure (including non-required workflow jobs like
-	// "Cleanup artifacts") as blocking, which contradicts GitHub's own
-	// merge decision. mergeable_state is only available from the single-PR
-	// endpoint, so this requires an extra REST call.
-	bypassCheckRunsGate := false
-	if pr.HeadSHA != "" {
-		mergeableState, msErr := e.readClient.FetchPRMergeableState(owner, repo, pr.Number)
-		if msErr != nil {
-			e.logf(item.Number, "warn", "could not fetch mergeable_state: %v — falling back to check-runs gate\n", msErr)
-		} else if gh.MergeableStateAccepted(mergeableState) {
-			e.logf(item.Number, "ci-gate", "mergeable_state=%q — skipping check_runs gate, proceeding to merge\n", mergeableState)
-			// Clear stale CI-await state so a stuck fabrik:awaiting-ci from
-			// the prior over-aggressive gate doesn't survive past the merge.
-			e.removeAwaitingCILabel(owner, repo, item)
-			e.store.Apply(itemstate.CIMergePendingCleared{Repo: owner + "/" + repo, Number: item.Number})
-			bypassCheckRunsGate = true
+	strategy := e.cfg.AutoMergeStrategy
+	if strategy == "" {
+		strategy = "MERGE"
+	}
+	if err := e.client.EnablePullRequestAutoMerge(owner, repo, pr.Number, strategy); err != nil {
+		if errors.Is(err, gh.ErrAutoMergeNotEnabled) {
+			e.logf(item.Number, "warn", "auto-merge is not enabled for this repository — "+
+				"enable it in Settings → General → Allow auto-merge; Fabrik will retry on the next poll\n")
+		}
+		return false, fmt.Errorf("enabling auto-merge on PR #%d: %w", pr.Number, err)
+	}
+
+	// Apply fabrik:auto-merge-enabled as idempotency guard and budget-start anchor.
+	if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); lerr != nil {
+		e.logf(item.Number, "warn", "could not add fabrik:auto-merge-enabled label: %v\n", lerr)
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:auto-merge-enabled")
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:auto-merge-enabled")
 		}
 	}
 
-	// CI gate: fetch check runs and evaluate (R1-R6). Skipped when GitHub's
-	// mergeable_state already says the PR is mergeable (above).
-	if !bypassCheckRunsGate && pr.HeadSHA != "" {
-		checkRuns, err := e.readClient.FetchCheckRuns(owner, repo, pr.HeadSHA)
-		if err != nil {
-			e.logf(item.Number, "warn", "could not fetch check runs for merge guard: %v — skipping merge until CI status can be fetched\n", err)
-			return fmt.Errorf("merge guard: fetch check runs: %w", err)
-		} else if len(checkRuns) > 0 {
-			var pending, failed []gh.CheckRun
-			for _, cr := range checkRuns {
-				switch cr.Status {
-				case "queued", "in_progress":
-					pending = append(pending, cr)
-				case "completed":
-					switch cr.Conclusion {
-					case "failure", "timed_out", "action_required":
-						failed = append(failed, cr)
-					}
-				}
-			}
-
-			if len(failed) > 0 {
-				// R3: CI failed — apply label and block merge.
-				names := make([]string, 0, len(failed))
-				for _, cr := range failed {
-					names = append(names, fmt.Sprintf("%s (%s)", cr.Name, cr.Conclusion))
-				}
-				e.logf(item.Number, "ci-gate", "merge blocked — CI failed: %s\n", strings.Join(names, ", "))
-				if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-ci"); lerr != nil {
-					e.logf(item.Number, "warn", "could not add fabrik:awaiting-ci: %v\n", lerr)
-				} else {
-					if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-						cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-ci")
-					}
-					if e.webhookMgr != nil {
-						e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-ci")
-					}
-				}
-				// Clean up pending timer since we now have a definitive failure state.
-				e.store.Apply(itemstate.CIMergePendingCleared{Repo: owner + "/" + repo, Number: item.Number})
-				return fmt.Errorf("merge blocked: CI checks failed")
-			}
-
-			if len(pending) > 0 {
-				// R2: CI still running — check timeout (R6).
-				names := make([]string, 0, len(pending))
-				for _, cr := range pending {
-					names = append(names, cr.Name)
-				}
-				e.logf(item.Number, "ci-gate", "merge blocked — CI still running: %s\n", strings.Join(names, ", "))
-
-				timeout := e.cfg.CIWaitTimeout
-				if timeout <= 0 {
-					timeout = 30 * time.Minute
-				}
-				snap, _ := e.store.Get(owner+"/"+repo, item.Number)
-				var since time.Time
-				if lpr := snap.LinkedPR(); lpr != nil {
-					since = lpr.CIMergePendingSince
-				}
-				if since.IsZero() {
-					now := time.Now()
-					e.store.Apply(itemstate.CIMergePendingStarted{Repo: owner + "/" + repo, Number: item.Number, At: now})
-					since = now
-				}
-
-				if time.Since(since) >= timeout {
-					// R6: timeout elapsed — pause issue.
-					e.store.Apply(itemstate.CIMergePendingCleared{Repo: owner + "/" + repo, Number: item.Number})
-					msg := fmt.Sprintf("🏭 **Fabrik — CI wait timeout (merge guard)**\n\n"+
-						"Auto-merge blocked: CI checks for PR #%d have been in progress for longer than "+
-						"the configured timeout (%s). Fabrik has paused this issue for human review.\n\n"+
-						"Pending checks: %s\n\nOnce CI resolves, remove `fabrik:paused` to resume.",
-						pr.Number, timeout, strings.Join(names, ", "))
-					if dbID, cerr := e.client.AddComment(owner, repo, item.Number, msg); cerr != nil {
-						e.logf(item.Number, "warn", "could not post CI timeout comment: %v\n", cerr)
-					} else {
-						if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-							cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-								DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
-							})
-						}
-						if e.webhookMgr != nil {
-							e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
-						}
-						// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
-						if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-							e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
-						}
-					}
-					if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); lerr != nil {
-						e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", lerr)
-					} else {
-						if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-							cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
-						}
-						if e.webhookMgr != nil {
-							e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:paused")
-						}
-					}
-					if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); lerr != nil {
-						e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", lerr)
-					} else {
-						if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-							cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
-						}
-						if e.webhookMgr != nil {
-							e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-input")
-						}
-					}
-					return fmt.Errorf("merge guard: CI wait timeout elapsed after %s", timeout)
-				}
-				return fmt.Errorf("merge blocked: CI checks still running")
-			}
-
-			// R4: All checks green — clear pending timer and awaiting-ci label.
-			e.store.Apply(itemstate.CIMergePendingCleared{Repo: owner + "/" + repo, Number: item.Number})
-			e.removeAwaitingCILabel(owner, repo, item)
-		}
-		// R5: len(checkRuns) == 0 — no CI configured; gate clears.
-	}
-
-	// no write-through: excluded — MergePR affects PR state, not issue/label cache
-	if err := e.client.MergePR(owner, repo, pr.Number); err != nil {
-		if errors.Is(err, gh.ErrNotMergeable) {
-			// Apply fabrik:rebase-needed idempotently.
-			alreadyLabeled := false
-			for _, l := range item.Labels {
-				if l == "fabrik:rebase-needed" {
-					alreadyLabeled = true
-					break
-				}
-			}
-			if !alreadyLabeled {
-				if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:rebase-needed"); lerr != nil {
-					e.logf(item.Number, "warn", "could not add fabrik:rebase-needed label: %v\n", lerr)
-				} else {
-					if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-						cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:rebase-needed")
-					}
-					if e.webhookMgr != nil {
-						e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:rebase-needed")
-					}
-				}
-			}
-			// Store Worker field is the semantic source of truth for in-flight state.
-			repoStr := itemOwnerRepoString(item, e.defaultRepo())
-			if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil && snap.Worker() != nil {
-				e.logf(item.Number, "rebase-reinvoke", "skipping dispatch — rebase reinvoke already in-flight\n")
-				return fmt.Errorf("PR #%d not mergeable (rebase in-flight)", pr.Number)
-			}
-			var cycleCount int
-			if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
-				cycleCount = snap.RebaseCycles(stage.Name)
-			}
-			maxCycles := e.cfg.MaxRebaseCycles
-			if cycleCount >= maxCycles {
-				e.pauseForRebaseCycleLimit(board, item, stage, cycleCount, maxCycles)
-				return fmt.Errorf("PR #%d not mergeable — rebase cycle limit reached", pr.Number)
-			}
-			e.store.Apply(itemstate.RebaseCycleIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
-			e.dispatchRebaseReinvoke(ctx, board, item, stage)
-			return errRebaseDispatched
-		}
-		// Other API errors (transient 5xx, permissions, etc.): log and return an
-		// error so the caller retries on the next cooldown cycle.
-		e.logf(item.Number, "warn", "auto-merge of PR #%d failed: %v\n", pr.Number, err)
-		return fmt.Errorf("auto-merge failed: %w", err)
-	}
-
-	if e.webhookMgr != nil {
-		e.webhookMgr.RegisterEcho("pull_request", "closed", fmt.Sprintf("%s/%s#pr%d", owner, repo, pr.Number))
-	}
-	e.removeRebaseNeededLabel(owner, repo, item)
-	e.logf(item.Number, "info", "auto-merged PR #%d\n", pr.Number)
-	return nil
+	e.logf(item.Number, "info", "GitHub auto-merge enabled on PR #%d (%s) — awaiting GitHub atomic merge\n", pr.Number, strategy)
+	return true, nil
 }
 
 // handleNoWorkNeeded is called when a stage outputs both FABRIK_STAGE_COMPLETE and

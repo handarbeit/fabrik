@@ -117,63 +117,57 @@ func TestHandleStageComplete_YoloLabel_ValidateMergeableAdvances(t *testing.T) {
 
 	eng.handleStageComplete(context.Background(), board, item, validateStage)
 
-	// MergePR should have been called once
-	if len(client.mergePRCalls) != 1 {
-		t.Fatalf("expected 1 MergePR call, got %d", len(client.mergePRCalls))
+	// EnablePullRequestAutoMerge (not MergePR) should have been called once.
+	if len(client.enablePullRequestAutoMergeCalls) != 1 {
+		t.Fatalf("expected 1 EnablePullRequestAutoMerge call, got %d", len(client.enablePullRequestAutoMergeCalls))
 	}
-	if client.mergePRCalls[0].prNumber != 99 {
-		t.Errorf("MergePR called with prNumber %d, want 99", client.mergePRCalls[0].prNumber)
+	if client.enablePullRequestAutoMergeCalls[0].prNumber != 99 {
+		t.Errorf("EnablePullRequestAutoMerge called with prNumber %d, want 99", client.enablePullRequestAutoMergeCalls[0].prNumber)
 	}
-	// Should advance to Done
-	if len(client.updateStatusCalls) != 1 {
-		t.Fatalf("expected advance after merge, got %d status updates", len(client.updateStatusCalls))
+	if len(client.mergePRCalls) != 0 {
+		t.Errorf("MergePR must not be called in the new auto-merge path, got %d call(s)", len(client.mergePRCalls))
+	}
+	// Done advancement is deferred to checkAutoMergeConvergence; no immediate advance.
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("expected no immediate advance (deferred to convergence monitor), got %d status updates", len(client.updateStatusCalls))
 	}
 }
 
-func TestHandleStageComplete_YoloLabel_ValidateUnmergeable_RebaseDispatched(t *testing.T) {
+// TestHandleStageComplete_YoloLabel_ValidateAutoMergeNotEnabled_NoAdvance verifies
+// that when EnablePullRequestAutoMerge returns ErrAutoMergeNotEnabled (the repository
+// has not enabled auto-merge in its settings), handleStageComplete logs a warning,
+// does NOT add stage:Validate:complete, and does NOT advance to Done — so the engine
+// can retry on the next poll cycle.
+func TestHandleStageComplete_YoloLabel_ValidateAutoMergeNotEnabled_NoAdvance(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 			return &gh.PRDetails{Number: 99, HeadSHA: "abc123"}, nil
 		},
-		mergePRFn: func(owner, repo string, prNumber int) error {
-			return gh.ErrNotMergeable
+		enablePullRequestAutoMergeFn: func(owner, repo string, prNumber int, strategy string) error {
+			return gh.ErrAutoMergeNotEnabled
 		},
 	}
 	stgs := testStagesWithValidate()
 	eng := testEngineWithStages(client, stgs)
-	eng.cfg.MaxRebaseCycles = 3
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:yolo"}}
 	validateStage := &stages.Stage{Name: "Validate"}
 
 	eng.handleStageComplete(context.Background(), board, item, validateStage)
-	// Wait for the dispatched rebase goroutine (exits early via ErrSkipItem in tests).
-	eng.wg.Wait()
 
-	// stage:Validate:complete must be added so catch-up loop retries the merge.
-	foundComplete := false
+	// No pause, no completion label — engine retries on next poll.
 	for _, c := range client.addLabelCalls {
-		if c.labelName == "stage:Validate:complete" {
-			foundComplete = true
-		}
 		if c.labelName == "fabrik:paused" {
-			t.Error("fabrik:paused must NOT be added when dispatching rebase")
+			t.Error("fabrik:paused must NOT be added when auto-merge is not enabled on the repo")
+		}
+		if c.labelName == "stage:Validate:complete" {
+			t.Error("stage:Validate:complete must NOT be added when auto-merge enablement failed")
 		}
 	}
-	if !foundComplete {
-		t.Error("expected stage:Validate:complete to be added when rebase dispatched (Path 1 ordering)")
-	}
-	// Should NOT advance to the next stage — rebase is in progress.
+	// No advance.
 	if len(client.updateStatusCalls) != 0 {
-		t.Errorf("expected no advance when rebase dispatched, got %d status updates", len(client.updateStatusCalls))
-	}
-	snap, snapErr := eng.store.Get("owner/repo", 1)
-	if snapErr != nil {
-		t.Fatalf("store.Get: %v", snapErr)
-	}
-	if snap.RebaseCycles("Validate") != 1 {
-		t.Errorf("expected RebaseCycles[Validate] == 1, got %d", snap.RebaseCycles("Validate"))
+		t.Errorf("expected no advance when auto-merge enablement failed, got %d status updates", len(client.updateStatusCalls))
 	}
 }
 
@@ -225,9 +219,9 @@ func TestHandleStageComplete_YoloLabel_NonValidate_NoMergeAttempt(t *testing.T) 
 }
 
 func TestHandleStageComplete_AutoAdvanceFalse_OverridesAdvanceButMergeStillFires(t *testing.T) {
-	// auto_advance: false on Validate should suppress advancement but NOT suppress merge.
-	// Global cfg.Yolo=true activates merge; item has no fabrik:yolo label so
-	// auto_advance:false is respected (item-level yolo would override it).
+	// auto_advance: false on Validate should suppress advancement but NOT suppress
+	// auto-merge enablement. Global cfg.Yolo=true activates auto-merge; item has no
+	// fabrik:yolo label so auto_advance:false is respected (item-level yolo would override it).
 	f := false
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
@@ -236,7 +230,7 @@ func TestHandleStageComplete_AutoAdvanceFalse_OverridesAdvanceButMergeStillFires
 	}
 	stgs := testStagesWithValidate()
 	eng := testEngineWithStages(client, stgs)
-	eng.cfg.Yolo = true // global yolo triggers merge
+	eng.cfg.Yolo = true // global yolo triggers auto-merge
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"} // no fabrik:yolo label
@@ -244,25 +238,29 @@ func TestHandleStageComplete_AutoAdvanceFalse_OverridesAdvanceButMergeStillFires
 
 	eng.handleStageComplete(context.Background(), board, item, validateStage)
 
-	// Merge should still fire (global yolo active)
-	if len(client.mergePRCalls) != 1 {
-		t.Fatalf("expected MergePR to fire even with auto_advance:false, got %d", len(client.mergePRCalls))
+	// EnablePullRequestAutoMerge should fire (global yolo active).
+	if len(client.enablePullRequestAutoMergeCalls) != 1 {
+		t.Fatalf("expected EnablePullRequestAutoMerge to fire even with auto_advance:false, got %d", len(client.enablePullRequestAutoMergeCalls))
 	}
-	// But advancement should be suppressed (auto_advance:false, no item-level yolo to override)
+	if len(client.mergePRCalls) != 0 {
+		t.Errorf("MergePR must not be called in new auto-merge path, got %d", len(client.mergePRCalls))
+	}
+	// Advancement suppressed: auto_advance:false AND autoMergeEnabled defers Done.
 	if len(client.updateStatusCalls) != 0 {
 		t.Errorf("expected no advance when auto_advance:false, got %d", len(client.updateStatusCalls))
 	}
 }
 
 func TestHandleStageComplete_MergeAPIError_LogsAndDoesNotAdvance(t *testing.T) {
-	// Non-ErrNotMergeable error from MergePR: log the error and do NOT advance.
-	// This prevents silently moving to Done when the PR merge failed (e.g. transient
-	// 5xx, permissions). The engine will retry Validate on the next cooldown cycle.
+	// Transient API error from EnablePullRequestAutoMerge: log the error and do NOT
+	// advance. This prevents silently moving to Done when auto-merge enablement failed
+	// (e.g. transient 5xx, permissions). The engine will retry Validate on the next
+	// cooldown cycle.
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 			return &gh.PRDetails{Number: 88, HeadSHA: "abc123"}, nil
 		},
-		mergePRFn: func(owner, repo string, prNumber int) error {
+		enablePullRequestAutoMergeFn: func(owner, repo string, prNumber int, strategy string) error {
 			return errors.New("network error")
 		},
 	}
@@ -275,20 +273,20 @@ func TestHandleStageComplete_MergeAPIError_LogsAndDoesNotAdvance(t *testing.T) {
 
 	eng.handleStageComplete(context.Background(), board, item, validateStage)
 
-	// Should NOT post unmergeable comment or fabrik:paused (not ErrNotMergeable)
+	// Should NOT add fabrik:paused (not a terminal failure, just a retriable error).
 	for _, c := range client.addLabelCalls {
 		if c.labelName == "fabrik:paused" {
-			t.Error("should not add fabrik:paused for non-ErrNotMergeable error")
+			t.Error("should not add fabrik:paused for transient auto-merge API error")
 		}
 	}
-	// Should NOT advance — merge failed, no completion label was added, engine retries
+	// Should NOT advance — enablement failed, no completion label added, engine retries.
 	if len(client.updateStatusCalls) != 0 {
-		t.Errorf("expected no advance when merge API error, got %d status updates", len(client.updateStatusCalls))
+		t.Errorf("expected no advance when auto-merge enablement fails, got %d status updates", len(client.updateStatusCalls))
 	}
-	// Should NOT add completion label — engine must be able to retry Validate
+	// Should NOT add completion label — engine must be able to retry Validate.
 	for _, c := range client.addLabelCalls {
 		if c.labelName == "stage:Validate:complete" {
-			t.Error("should not add stage:Validate:complete when merge failed")
+			t.Error("should not add stage:Validate:complete when auto-merge enablement failed")
 		}
 	}
 }
@@ -491,7 +489,8 @@ func TestHandleStageComplete_WaitForCI_AppliesRegardlessOfYolo(t *testing.T) {
 
 // TestHandleStageComplete_BothCruiseAndYolo_YoloWins verifies that when both
 // fabrik:cruise and fabrik:yolo labels are present, yolo takes precedence:
-// the PR is merged and the stage advances past Validate.
+// EnablePullRequestAutoMerge is called (cruise alone would skip it). Done
+// advancement is deferred to checkAutoMergeConvergence (same as yolo-only).
 func TestHandleStageComplete_BothCruiseAndYolo_YoloWins(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
@@ -507,13 +506,16 @@ func TestHandleStageComplete_BothCruiseAndYolo_YoloWins(t *testing.T) {
 
 	eng.handleStageComplete(context.Background(), board, item, validateStage)
 
-	// yolo wins: merge should fire
-	if len(client.mergePRCalls) != 1 {
-		t.Fatalf("expected MergePR to fire when both yolo and cruise present, got %d", len(client.mergePRCalls))
+	// yolo wins: auto-merge should be enabled (cruise alone would suppress it).
+	if len(client.enablePullRequestAutoMergeCalls) != 1 {
+		t.Fatalf("expected EnablePullRequestAutoMerge when yolo wins over cruise, got %d", len(client.enablePullRequestAutoMergeCalls))
 	}
-	// yolo wins: advance to Done should happen
-	if len(client.updateStatusCalls) != 1 {
-		t.Fatalf("expected advance when yolo wins over cruise, got %d status updates", len(client.updateStatusCalls))
+	if len(client.mergePRCalls) != 0 {
+		t.Errorf("MergePR must not be called in new auto-merge path, got %d", len(client.mergePRCalls))
+	}
+	// Done advancement deferred to convergence monitor — no immediate advance.
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("expected no immediate advance (deferred to convergence monitor), got %d status updates", len(client.updateStatusCalls))
 	}
 }
 

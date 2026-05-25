@@ -1357,24 +1357,23 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		}
 
 		if stage.Name == "Validate" {
-			// auto-merge is yolo-only — matches handleStageComplete gating.
-			// cruise and auto_advance:true both stop here without merging.
+			// auto-merge is yolo-only — cruise and auto_advance:true stop here.
 			yoloActive := e.cfg.Yolo || hasYoloLabel(item)
 			if !yoloActive {
 				continue
 			}
-			if err := e.attemptMergeOnValidate(ctx, board, item, stage); err != nil {
-				if errors.Is(err, errRebaseDispatched) {
-					e.logf(item.Number, "rebase-reinvoke", "PR merge deferred — rebase dispatched during catch-up\n")
-					// Mark as advanced so CooldownAt["periodic-re-eval"] is NOT stamped —
-					// the column move fires StatusChanged → mayNeedWork observer already
-					// queues re-evaluation for the next poll cycle.
-					advancedItems[issueKey(item, e.defaultRepo())] = true
-				} else {
-					e.logf(item.Number, "warn", "PR not merged during catch-up: %v\n", err)
-				}
+			// Items with fabrik:auto-merge-enabled are already in the GitHub
+			// auto-merge convergence flow; checkAutoMergeConvergence (Phase 1)
+			// monitors them and advances to Done when the PR merges.
+			if hasLabel(item, "fabrik:auto-merge-enabled") {
 				continue
 			}
+			if _, mergeErr := e.attemptMergeOnValidate(ctx, board, item, stage); mergeErr != nil {
+				e.logf(item.Number, "warn", "auto-merge enablement failed during catch-up: %v\n", mergeErr)
+			}
+			// Auto-merge enabled (or failed); Done advancement deferred to
+			// checkAutoMergeConvergence in Phase 1 — do not advance immediately.
+			continue
 		}
 		if newComments := e.findNewComments(item); len(newComments) > 0 {
 			e.logf(item.Number, "advance", "skipping stage %q — %d unprocessed comment(s) pending\n", stage.Name, len(newComments))
