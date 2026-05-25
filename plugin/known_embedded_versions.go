@@ -4,7 +4,9 @@ package plugin
 // written to .installed-version by a release binary. A fingerprint appears here
 // only when it was computed from embedded content at release time.
 //
-// The list grows by one entry per release (via scripts/cut-release.sh). It is
+// The list grows by one entry when the embedded plugin fingerprint changes between
+// releases (via scripts/cut-release.sh; releases without plugin changes reuse the
+// same hash and add no new entry). It is
 // used by CheckPluginState to distinguish a legitimate installedVer (always an
 // embedded hash) from one written by the buggy v0.0.64 migration (a customised
 // disk hash that is not any known embedded hash).

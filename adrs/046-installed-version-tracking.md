@@ -33,7 +33,7 @@ sorted concatenation of all embedded file hashes.
 |---|---|---|---|---|
 | absent | == embeddedVer | any | Migration — pristine install | Seed installedVer=diskVer; no refresh this cycle |
 | absent | != embeddedVer, != "" | any | Migration — pre-existing customizations | Do NOT seed; return customWorkflow=true |
-| absent | "" | any | Migration — empty plugin dir | No-op; no seed |
+| absent | "" | any | Migration — no plugin files on disk | No-op; no seed |
 | present | == installedVer | == installedVer | Up to date | No-op |
 | present | == installedVer | != installedVer | installedVer in KnownEmbeddedVersions | Upgrade available — auto-refresh (non-TTY) or y/N prompt (TTY) |
 | present | == installedVer | != installedVer | installedVer NOT in KnownEmbeddedVersions | Corrupted migration — treat as custom workflow; warn operator |
@@ -50,8 +50,10 @@ On first encounter (no `.installed-version`), the engine compares `diskVer` to
   `installedVer`. Returns `customWorkflow=true` so the operator is warned and
   `RefreshPlugin` is not called. Seeding would record the customised hash as the
   baseline, causing the next embedded-version change to auto-overwrite it.
-- **Empty plugin dir** (`diskVer == ""`): returns no-op without seeding. An
-  empty directory is not a customization.
+- **No plugin files on disk** (`diskVer == ""`): returns no-op without seeding.
+  A plugin directory with no skill files is not a customization. Note:
+  `ComputeDiskVersion` returns `""` for both a non-existent directory and an
+  existing directory that contains only `.installed-version` (no skill files).
 
 ### Known-embedded-versions list
 
@@ -65,10 +67,11 @@ If it does not, the value was written by the buggy pre-fix migration (which
 recorded the customised disk hash, not an embedded hash) and the state is treated
 as a custom workflow instead of an upgrade.
 
-The list grows by one entry per release, appended automatically by
-`scripts/cut-release.sh` after the build step. The initial list bootstraps hashes
-for all releases from v0.0.64 (when `.installed-version` was first introduced)
-through the current release.
+The list grows by one entry when the embedded plugin fingerprint changes between
+releases, appended automatically by `scripts/cut-release.sh` after the build
+step (releases without plugin changes reuse the same hash and add no new entry).
+The initial list bootstraps hashes for all releases from v0.0.64 (when
+`.installed-version` was first introduced) through the current release.
 
 ### Upgrade paths for custom workflow
 
@@ -108,7 +111,7 @@ whether the release version was bumped.
 
 The original migration seeded `installedVer = diskVer` unconditionally. That
 assumption — "whatever is on disk was intentionally put there" — is wrong for
-pristine installs: it records the customised disk hash as the baseline, after
+customised installs: it records the customised disk hash as the baseline, after
 which any embedded-version change silently auto-overwrites those files.
 
 The corrected approach distinguishes pristine from customised:
