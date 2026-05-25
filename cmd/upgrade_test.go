@@ -90,8 +90,12 @@ func TestCheckPluginSkillsWithReader_AllMatchNoOp(t *testing.T) {
 	}
 }
 
-// writeInstalledForDir writes an .installed-version seeded from the current disk state.
-// Equivalent to the migration path in CheckPluginState.
+// writeInstalledForDir writes an .installed-version seeded from the current disk state
+// and temporarily registers the disk hash as a known embedded version so that
+// CheckPluginState treats it as a legitimate installed version (upgradeNeeded=true)
+// rather than a corrupted migration (customWorkflow=true).
+//
+// Note: not parallel-safe due to KnownEmbeddedVersions mutation.
 func writeInstalledForDir(t *testing.T, pluginDir string) {
 	t.Helper()
 	diskVer, err := fabrikplugin.ComputeDiskVersion(pluginDir)
@@ -101,6 +105,11 @@ func writeInstalledForDir(t *testing.T, pluginDir string) {
 	if err := fabrikplugin.WriteVersionHash(pluginDir, diskVer); err != nil {
 		t.Fatalf("WriteVersionHash: %v", err)
 	}
+	// Register diskVer as a known embedded version so CheckPluginState treats
+	// disk==installed as a legitimate auto-refresh case, not a corrupted migration.
+	orig := fabrikplugin.KnownEmbeddedVersions
+	fabrikplugin.KnownEmbeddedVersions = append(fabrikplugin.KnownEmbeddedVersions, diskVer)
+	t.Cleanup(func() { fabrikplugin.KnownEmbeddedVersions = orig })
 }
 
 // TestCheckPluginSkillsWithReader_CustomWorkflow_NonTTYWarning verifies that

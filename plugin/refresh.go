@@ -109,19 +109,33 @@ func ReadInstalledVersion(pluginDir string) (string, error) {
 
 // CheckPluginState performs a three-way comparison (embedded vs installedVer vs
 // disk) and determines whether the operator has local customizations or whether
-// an auto-refresh is needed.
+// an auto-refresh is needed. It delegates to checkPluginState with the global
+// KnownEmbeddedVersions list.
+func CheckPluginState(pluginDir string) (customWorkflow, upgradeNeeded bool, err error) {
+	return checkPluginState(pluginDir, KnownEmbeddedVersions)
+}
+
+// checkPluginState is the testable implementation of CheckPluginState.
+// knownVersions is the list of all plugin fingerprints ever legitimately written
+// by a release binary; it is injected so tests can supply custom lists.
 //
-// Migration side-effect: when .installed-version is absent, this function seeds
-// it from the current disk state (not the embedded state). This preserves
-// existing customizations silently on first run of a binary that includes this
-// feature. Subsequent embedded changes are detected correctly.
+// Migration path (installedVer absent):
+//   - diskVer == ""            → no-op (empty dir is not a customization)
+//   - diskVer == embeddedVer   → seed installedVer=diskVer, return (false,false)
+//   - diskVer != embeddedVer   → customized pre-v0.0.64 install; do NOT seed,
+//     return (customWorkflow=true, upgradeNeeded=false)
+//
+// Corrupted-state guard (installedVer present, disk==installed, embedded differs):
+//   - installedVer in knownVersions → legitimate upgrade; return (false,true)
+//   - installedVer not in knownVersions → buggy v0.0.64 migration wrote a
+//     customized disk hash as installedVer; treat as custom workflow; return (true,false)
 //
 // Return values:
 //
 //	customWorkflow=true  — disk differs from installedVer; skip auto-refresh.
 //	upgradeNeeded=true   — disk matches installedVer but embedded differs; auto-refresh safe.
 //	both false           — no action needed.
-func CheckPluginState(pluginDir string) (customWorkflow, upgradeNeeded bool, err error) {
+func checkPluginState(pluginDir string, knownVersions []string) (customWorkflow, upgradeNeeded bool, err error) {
 	installedVer, err := ReadInstalledVersion(pluginDir)
 	if err != nil {
 		return false, false, err
@@ -135,27 +149,52 @@ func CheckPluginState(pluginDir string) (customWorkflow, upgradeNeeded bool, err
 	embeddedVer := ComputeEmbeddedVersion()
 
 	if installedVer == "" {
-		// Migration: seed from disk state, no refresh.
-		if diskVer != "" {
+		// Migration path: .installed-version absent (pre-v0.0.64 or first run).
+		if diskVer == "" {
+			// Empty plugin dir — not a customization, nothing to seed.
+			return false, false, nil
+		}
+		if diskVer == embeddedVer {
+			// Pristine install: disk matches embedded. Seed normally.
 			if wErr := WriteVersionHash(pluginDir, diskVer); wErr != nil {
 				return false, false, fmt.Errorf("writing installed version (migration): %w", wErr)
 			}
+			return false, false, nil
 		}
-		return false, false, nil
+		// Disk differs from embedded: operator has pre-existing customizations.
+		// Do NOT seed installedVer — doing so would corrupt it with a custom hash.
+		return true, false, nil
 	}
 
 	if diskVer != installedVer {
-		// Operator has customized the plugin directory.
+		// Operator has customized the plugin directory since last install.
 		return true, false, nil
 	}
 
 	if embeddedVer != installedVer {
-		// Embedded changed since last install; disk is clean — safe to auto-refresh.
-		return false, true, nil
+		// Disk matches installedVer but embedded has changed. Before treating this
+		// as a safe auto-refresh, verify that installedVer was written by a
+		// legitimate release binary (i.e., it is a known embedded hash).
+		// If it is not in the known list, the buggy v0.0.64 migration wrote a
+		// customized disk hash as installedVer — treat as custom workflow.
+		if isKnownEmbedded(installedVer, knownVersions) {
+			return false, true, nil
+		}
+		return true, false, nil
 	}
 
 	// No-op: everything matches.
 	return false, false, nil
+}
+
+// isKnownEmbedded reports whether hash appears in the known embedded versions list.
+func isKnownEmbedded(hash string, knownVersions []string) bool {
+	for _, v := range knownVersions {
+		if v == hash {
+			return true
+		}
+	}
+	return false
 }
 
 // RefreshPlugin overwrites .fabrik/plugin/ with the embedded plugin files.
