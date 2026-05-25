@@ -1281,6 +1281,15 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			}
 		}
 
+		// Convergence monitor: items with fabrik:auto-merge-enabled are in the
+		// GitHub native auto-merge flow. checkAutoMergeConvergence handles PR
+		// state changes, budget exhaustion, and rebase dispatch. All other
+		// merge/CI gates are bypassed — GitHub owns the merge decision.
+		if hasLabel(item, "fabrik:auto-merge-enabled") {
+			e.checkAutoMergeConvergence(ctx, board, item, stage)
+			continue
+		}
+
 		// Merge-conflict gate: runs before the CI gate so that a PR made
 		// unmergeable by a base-branch advance is rebased immediately instead
 		// of the engine spinning on CI-await polls while the underlying
