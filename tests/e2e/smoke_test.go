@@ -15,6 +15,7 @@ import (
 //
 // Wall-clock: ~3-5 min. Cost: ~$0.10-0.20.
 func TestSmokeSingleRepoDispatch(t *testing.T) {
+	t.Parallel()
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
 
@@ -52,6 +53,7 @@ If you (the Specify agent) are reading this, the simplest spec is: "This is a sm
 //
 // Wall-clock: ~20-40 min. Cost: ~$0.50-1.50.
 func TestSmokeSingleRepoFullPipeline(t *testing.T) {
+	t.Parallel()
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
 
