@@ -360,10 +360,34 @@ func splitRepo(repo string) (owner, name string, ok bool) {
 	return parts[0], parts[1], true
 }
 
-// WaitForLogLine tails the test bed's fabrik.log and returns the first line
-// matching the substring (or all of the substrings). Use sparingly — prefer
-// observable GitHub state over log scraping where possible.
-func WaitForLogLine(t *testing.T, env *Env, substring string, timeout time.Duration) string {
+// LogOffset captures the size of the test bed's fabrik.log at this moment.
+// Pass it to WaitForLogLine to scan starting from this offset — call this
+// BEFORE the triggering action (filing an issue, posting a comment, etc.) so
+// the scan doesn't miss lines emitted between the trigger and the wait.
+//
+// Returns 0 if the log file does not yet exist (Fabrik will create it).
+func LogOffset(t *testing.T, env *Env) int64 {
+	t.Helper()
+	info, err := os.Stat(env.LogPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0
+		}
+		t.Fatalf("stat %s: %v", env.LogPath, err)
+	}
+	return info.Size()
+}
+
+// WaitForLogLine scans the test bed's fabrik.log starting at startOffset
+// (typically the value returned by LogOffset before the trigger action) and
+// returns the first line matching the substring, or fails after timeout.
+//
+// Avoids the seek-to-EOF race that would otherwise miss lines emitted
+// between the trigger and the start of the wait.
+//
+// Prefer observable GitHub state over log scraping where possible — log
+// formats are less stable than label/state transitions.
+func WaitForLogLine(t *testing.T, env *Env, substring string, startOffset int64, timeout time.Duration) string {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -375,9 +399,8 @@ func WaitForLogLine(t *testing.T, env *Env, substring string, timeout time.Durat
 	}
 	defer f.Close()
 
-	// Start from end of file; we only care about lines appearing after this call.
-	if _, err := f.Seek(0, 2); err != nil {
-		t.Fatalf("seek %s: %v", env.LogPath, err)
+	if _, err := f.Seek(startOffset, 0); err != nil {
+		t.Fatalf("seek %s to %d: %v", env.LogPath, startOffset, err)
 	}
 	r := bufio.NewReader(f)
 
@@ -391,7 +414,7 @@ func WaitForLogLine(t *testing.T, env *Env, substring string, timeout time.Durat
 			return line
 		}
 	}
-	t.Fatalf("timed out waiting for log line containing %q", substring)
+	t.Fatalf("timed out waiting for log line containing %q (scanned from offset %d)", substring, startOffset)
 	return ""
 }
 
@@ -413,6 +436,10 @@ func expandHome(p string) string {
 	return p
 }
 
+// readEnvFileValue returns the value of `key` from a .env-style file.
+// Tolerates leading/trailing whitespace, surrounding quotes on the value,
+// and blank/comment lines. Does not (yet) handle escapes or line
+// continuations — keep secrets on single lines.
 func readEnvFileValue(path, key string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -420,12 +447,24 @@ func readEnvFileValue(path, key string) (string, error) {
 	}
 	defer f.Close()
 	s := bufio.NewScanner(f)
-	prefix := key + "="
 	for s.Scan() {
-		line := s.Text()
-		if strings.HasPrefix(line, prefix) {
-			return strings.TrimSpace(strings.TrimPrefix(line, prefix)), nil
+		line := strings.TrimSpace(s.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
 		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 || strings.TrimSpace(parts[0]) != key {
+			continue
+		}
+		val := strings.TrimSpace(parts[1])
+		// Strip a single matched pair of surrounding double or single quotes.
+		if len(val) >= 2 {
+			first, last := val[0], val[len(val)-1]
+			if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
+				val = val[1 : len(val)-1]
+			}
+		}
+		return val, nil
 	}
 	return "", fmt.Errorf("%s not found in %s", key, path)
 }
@@ -448,8 +487,11 @@ func lastNonEmpty(s string) string {
 	return ""
 }
 
+// parseIssueNumberFromURL extracts the trailing integer from an issue URL,
+// tolerating optional trailing slash and trailing whitespace.
+// URL form: https://github.com/owner/repo/issues/NUM[/]
 func parseIssueNumberFromURL(url string) int {
-	// URL form: https://github.com/owner/repo/issues/NUM
+	url = strings.TrimRight(strings.TrimSpace(url), "/")
 	parts := strings.Split(url, "/")
 	if len(parts) < 2 {
 		return 0
