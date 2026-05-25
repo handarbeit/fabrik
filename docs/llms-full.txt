@@ -4623,7 +4623,7 @@ After the extension loop completes, a cross-repo ref audit runs for non-read-onl
 
 **How it works:**
 
-1. **Pre-audit snapshot** (taken immediately before the extension loop): For each registered `WorktreeManager` in the engine, run `git for-each-ref --format=%(refname) %(objectname)` in its bare-clone directory. Capture `repo → (refname → SHA)` for all known repos.
+1. **Pre-audit snapshot** (taken immediately before the extension loop): For each registered `WorktreeManager` in the engine, run `git for-each-ref --format=%(refname) %(objectname) refs/heads/ refs/tags/` in its bare-clone directory. Capture `repo → (refname → SHA)` for locally-authored refs only. `refs/remotes/` is intentionally excluded — remote-tracking refs are passively-observed upstream state updated by `git fetch` for reasons unrelated to Claude's activity; including them would cause false-positive violations when a concurrent fetch updates a sibling bare clone.
 2. **Post-audit snapshot** (taken immediately after the extension loop): Same operation.
 3. **Violation check** (`crossRepoViolations`): Compare before/after for every repo key *except* the active issue's repo. Any ref that is new or has a changed SHA is a violation.
 
