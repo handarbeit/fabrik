@@ -41,7 +41,7 @@ All GitHub mutations go through `GitHubClient` in `engine/spawn.go`. This makes 
 
 ### blockedBy over native sub-issues
 
-GitHub now has a native `addSubIssue` API. We use `addBlockedByIssue` instead because:
+GitHub now has a native `addSubIssue` API. We use the `addBlockedBy` GraphQL mutation (Go: `AddBlockedByIssue`) instead because:
 - Fabrik's existing `checkDependencies` and `PushUnblockObserver` already read and act on `blockedBy` cross-repo, including Store-keyed lookup by `(depRepo, depNumber)`.
 - `blockedBy` carries the parent-waits semantics we need: the parent is gated until every blocker closes.
 - Native sub-issues are a UI affordance; `blockedBy` is a machine-readable dependency edge. We want the latter.
