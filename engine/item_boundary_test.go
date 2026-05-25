@@ -210,11 +210,12 @@ func TestBoundaryAudit_ReadOnlyStageSkipped(t *testing.T) {
 		},
 	}
 	eng := NewWithDeps(Config{
-		Owner:  "owner",
-		Repo:   "repo",
-		User:   "testuser",
-		Token:  "token",
-		Stages: readOnlyStages,
+		Owner:                 "owner",
+		Repo:                  "repo",
+		User:                  "testuser",
+		Token:                 "token",
+		Stages:                readOnlyStages,
+		WorktreeBoundaryAudit: true,
 	}, client, claude, wm)
 
 	// Register secondary repo so it would be audited if audit ran.

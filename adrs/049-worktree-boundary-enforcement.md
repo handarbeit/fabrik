@@ -28,7 +28,7 @@ This is implemented in `applyWorktreeBoundary` (`engine/boundary.go`) — a pure
 
 ### Layer 2: Reactive Post-Run Audit (opt-in — default off)
 
-> **Amendment (PR #810):** The Layer 2 audit is now **opt-in via the `WorktreeBoundaryAudit` config flag** (default `false`). It was made opt-in because routine `git fetch origin` calls in sibling bare clones were triggering false-positive violations; the root-cause fix is tracked in #808. To enable the audit, set `worktree_boundary_audit: true` in `.fabrik/config.yaml`, use `--worktree-boundary-audit` on the CLI, or set `FABRIK_WORKTREE_BOUNDARY_AUDIT=true`. Layer 1 is unaffected — it runs unconditionally regardless of this flag.
+> **Amendment (Issue #810 / PR #812):** The Layer 2 audit is now **opt-in via the `WorktreeBoundaryAudit` config flag** (default `false`). It was made opt-in because routine `git fetch origin` calls in sibling bare clones were triggering false-positive violations; the root-cause fix is tracked in #808. To enable the audit, set `worktree_boundary_audit: true` in `.fabrik/config.yaml`, use `--worktree-boundary-audit` on the CLI, or set `FABRIK_WORKTREE_BOUNDARY_AUDIT=true`. Layer 1 is unaffected — it runs unconditionally regardless of this flag.
 
 Before the extension loop in `processItem` (`engine/item.go`), snapshot branch refs across all registered bare-clone repositories via `snapshotAllRepoRefs`. After the loop, compare via `crossRepoViolations`. Any ref that is new, changed, or deleted in a repo *other than* the active issue's repo is a boundary violation. Repos not present in the before-snapshot (lazy-registered during the run or whose pre-audit snapshot failed) are excluded from comparison to prevent false positives.
 
