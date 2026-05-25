@@ -79,10 +79,11 @@ func crossRepoViolations(before, after map[string]map[string]string, activeRepo 
 			continue
 		}
 		for ref, newSHA := range afterRefs {
-			// Defense-in-depth: skip remote-tracking refs even if the caller passes
-			// unfiltered maps. snapshotRepoRefs already excludes refs/remotes/, but
-			// this guard preserves correctness if that invariant is ever broken.
-			if strings.HasPrefix(ref, "refs/remotes/") {
+			// Defense-in-depth: only consider refs/heads/ and refs/tags/ even if the
+			// caller passes unfiltered maps. snapshotRepoRefs already restricts to these
+			// namespaces, but this guard preserves correctness if that invariant is ever
+			// broken and also covers other non-standard namespaces (refs/notes/, etc.).
+			if !strings.HasPrefix(ref, "refs/heads/") && !strings.HasPrefix(ref, "refs/tags/") {
 				continue
 			}
 			oldSHA, existed := beforeRefs[ref]
@@ -93,7 +94,7 @@ func crossRepoViolations(before, after map[string]map[string]string, activeRepo 
 			}
 		}
 		for ref, oldSHA := range beforeRefs {
-			if strings.HasPrefix(ref, "refs/remotes/") {
+			if !strings.HasPrefix(ref, "refs/heads/") && !strings.HasPrefix(ref, "refs/tags/") {
 				continue
 			}
 			if _, existed := afterRefs[ref]; !existed {
