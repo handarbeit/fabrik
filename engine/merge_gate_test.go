@@ -217,7 +217,7 @@ func (e *stubError) Error() string { return e.msg }
 
 // ── checkAutoMergeConvergence tests ──────────────────────────────────────────
 
-func TestCheckAutoMergeConvergence_PRMerged_RemovesLabel(t *testing.T) {
+func TestCheckAutoMergeConvergence_PRMerged_RemovesLabelAndAdvances(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 			return &gh.PRDetails{Number: 10, State: "closed", Merged: true, AutoMergeEnabled: true}, nil
@@ -227,21 +227,28 @@ func TestCheckAutoMergeConvergence_PRMerged_RemovesLabel(t *testing.T) {
 	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
 	stage := &stages.Stage{Name: "Validate"}
 
-	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{}, item, stage)
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage)
 
-	found := false
+	foundRemove := false
 	for _, c := range client.removeLabelCalls {
 		if c.labelName == "fabrik:auto-merge-enabled" {
-			found = true
+			foundRemove = true
 		}
 	}
-	if !found {
+	if !foundRemove {
 		t.Error("expected fabrik:auto-merge-enabled to be removed when PR merges")
 	}
 	for _, c := range client.addLabelCalls {
 		if c.labelName == "fabrik:paused" {
 			t.Error("should not pause when PR merges normally")
 		}
+	}
+	// Verify Done advancement was attempted: advanceToNextStage calls UpdateProjectItemStatus.
+	client.mu.Lock()
+	advanceCalls := len(client.updateStatusCalls)
+	client.mu.Unlock()
+	if advanceCalls == 0 {
+		t.Error("expected UpdateProjectItemStatus to be called to advance to Done when PR merges")
 	}
 }
 
