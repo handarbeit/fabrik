@@ -23,6 +23,7 @@ import (
 // Will fail-via-timeout on earlier versions because the spawn aborts with
 // fabrik:paused and the child is never created.
 func TestCrossRepoSpawn(t *testing.T) {
+	t.Parallel()
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
 

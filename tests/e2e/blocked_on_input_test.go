@@ -21,6 +21,7 @@ import (
 //
 // Wall-clock: ~10-15 min. Cost: ~$0.30-0.50.
 func TestBlockedOnInput(t *testing.T) {
+	t.Parallel()
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
 
