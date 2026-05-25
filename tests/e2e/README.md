@@ -58,18 +58,58 @@ the canonical setup.
 
 ## Running
 
+The recommended entrypoint is the runner script, which sets sensible defaults:
+
 ```bash
-# Run the whole suite (slow — minutes per scenario)
-go test -tags=e2e -timeout 60m ./tests/e2e/...
+# Full suite (slow — multiple scenarios × minutes each)
+scripts/e2e/run.sh
 
-# Run one scenario
-go test -tags=e2e -timeout 30m -run TestSmokeSingleRepo ./tests/e2e/
+# Single scenario
+scripts/e2e/run.sh -run TestSmokeSingleRepoDispatch
 
-# Verbose log streaming (recommended — these are long-running)
-go test -tags=e2e -v -timeout 60m ./tests/e2e/...
+# Subset by name pattern
+scripts/e2e/run.sh -run 'Smoke|NoWork'
 ```
 
-The `e2e` build tag keeps these out of the default `go test ./...` run.
+Anything after the script name is passed through to `go test`. Override the
+overall test timeout with `E2E_TIMEOUT` (default `90m`).
+
+The `e2e` build tag keeps all of this out of the default `go test ./...` run.
+
+### Reset between runs
+
+```bash
+scripts/e2e/reset.sh             # closes open issues in alpha + beta
+scripts/e2e/reset.sh --worktrees # also wipes Fabrik's worktrees + bare clones (destructive)
+```
+
+Use the plain form between test runs to clean issues. The `--worktrees` form
+is for when the test bed itself is wedged (stop Fabrik first, it will refuse
+otherwise).
+
+## Scenarios
+
+| Test | What it verifies | Approx wall-clock | Cost |
+|---|---|---|---|
+| `TestSmokeSingleRepoDispatch` | Worker dispatches on a trivial issue; Specify completes | 3–5 min | $0.10–0.20 |
+| `TestSmokeSingleRepoFullPipeline` | Full single-repo pipeline (Specify → … → Done with merged PR) | 20–40 min | $0.50–1.50 |
+| `TestNoWorkNeeded` | `FABRIK_NO_WORK_NEEDED` short-circuit closes issue without PR | 10–15 min | $0.30–0.50 |
+| `TestBlockedOnInput` | `FABRIK_BLOCKED_ON_INPUT` pause + comment-driven resume | 10–15 min | $0.30–0.50 |
+| `TestCrossRepoSpawn` | Cross-repo decomposition (spawn child in beta, gate parent, resume on close) | 45–60 min | $1.00–2.00 |
+
+Approximate suite total: 90 min wall-clock, $2–5 in Claude tokens.
+
+### Regression coverage map
+
+| Scenario | Issues / fixes it protects |
+|---|---|
+| `TestSmokeSingleRepoDispatch` | General pipeline breakage |
+| `TestSmokeSingleRepoFullPipeline` | Full pipeline regression |
+| `TestNoWorkNeeded` | #733 (marker), #742 (close-on-no-work) |
+| `TestBlockedOnInput` | `FABRIK_BLOCKED_ON_INPUT` marker, ed46b7fc (awaiting-input label clear) |
+| `TestCrossRepoSpawn` | #797 / #803 (on-demand spawn-target init), v0.0.66 spawn machinery, #800 (addBlockedBy mutation name) |
+
+Every escape-from-release regression earns a new scenario in this table.
 
 ## Adding a scenario
 

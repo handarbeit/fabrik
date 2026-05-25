@@ -175,6 +175,174 @@ func IssueLabels(t *testing.T, env *Env, repo string, issueNumber int) []string 
 	return labels
 }
 
+// AddLabel adds a label to the issue. Fails the test if gh refuses (e.g. label not seeded).
+func AddLabel(t *testing.T, env *Env, repo string, issueNumber int, label string) {
+	t.Helper()
+	if _, err := ghOutput(env, "issue", "edit", fmt.Sprint(issueNumber), "-R", repo, "--add-label", label); err != nil {
+		t.Fatalf("add label %q on %s#%d: %v", label, repo, issueNumber, err)
+	}
+}
+
+// RemoveLabel removes a label from the issue.
+func RemoveLabel(t *testing.T, env *Env, repo string, issueNumber int, label string) {
+	t.Helper()
+	if _, err := ghOutput(env, "issue", "edit", fmt.Sprint(issueNumber), "-R", repo, "--remove-label", label); err != nil {
+		t.Fatalf("remove label %q on %s#%d: %v", label, repo, issueNumber, err)
+	}
+}
+
+// CommentOnIssue posts a comment as the test bed's PAT identity. Used to simulate
+// user input (e.g. resuming a FABRIK_BLOCKED_ON_INPUT pause).
+func CommentOnIssue(t *testing.T, env *Env, repo string, issueNumber int, body string) {
+	t.Helper()
+	if _, err := ghOutput(env, "issue", "comment", fmt.Sprint(issueNumber), "-R", repo, "--body", body); err != nil {
+		t.Fatalf("post comment on %s#%d: %v", repo, issueNumber, err)
+	}
+}
+
+// WaitForIssueClosed polls until the issue is CLOSED or timeout expires.
+func WaitForIssueClosed(t *testing.T, env *Env, repo string, issueNumber int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if IssueState(t, env, repo, issueNumber) == "CLOSED" {
+			return
+		}
+		time.Sleep(15 * time.Second)
+	}
+	t.Fatalf("timed out waiting for %s#%d to close (still %s)", repo, issueNumber, IssueState(t, env, repo, issueNumber))
+}
+
+// WaitForLabelAbsent polls until the named label is no longer on the issue.
+func WaitForLabelAbsent(t *testing.T, env *Env, repo string, issueNumber int, label string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		labels := IssueLabels(t, env, repo, issueNumber)
+		present := false
+		for _, l := range labels {
+			if l == label {
+				present = true
+				break
+			}
+		}
+		if !present {
+			return
+		}
+		time.Sleep(15 * time.Second)
+	}
+	t.Fatalf("timed out waiting for label %q to disappear from %s#%d", label, repo, issueNumber)
+}
+
+// IssueState returns "OPEN" or "CLOSED".
+func IssueState(t *testing.T, env *Env, repo string, issueNumber int) string {
+	t.Helper()
+	out, err := ghOutput(env, "issue", "view", fmt.Sprint(issueNumber), "-R", repo, "--json", "state", "--jq", ".state")
+	if err != nil {
+		t.Fatalf("read state for %s#%d: %v", repo, issueNumber, err)
+	}
+	return strings.TrimSpace(out)
+}
+
+// WaitForChildIssueInRepo polls the named child repo for the first issue
+// authored by the bot during this test run. Returns the child issue number.
+// Used to detect cross-repo spawn outcomes.
+//
+// Filter: state=OPEN, labels include "fabrik:sub-issue", createdAt >= since.
+func WaitForChildIssueInRepo(t *testing.T, env *Env, childRepo string, since time.Time, timeout time.Duration) int {
+	t.Helper()
+	sinceStr := since.UTC().Format(time.RFC3339)
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		out, err := ghOutput(env, "issue", "list", "-R", childRepo,
+			"--label", "fabrik:sub-issue", "--state", "open",
+			"--search", "created:>="+sinceStr,
+			"--json", "number,createdAt", "--jq", "[.[] | .number]")
+		if err == nil {
+			var nums []int
+			if json.Unmarshal([]byte(strings.TrimSpace(out)), &nums) == nil && len(nums) > 0 {
+				return nums[0]
+			}
+		}
+		time.Sleep(15 * time.Second)
+	}
+	t.Fatalf("timed out waiting for a child sub-issue in %s (since %s)", childRepo, sinceStr)
+	return 0
+}
+
+// AssertBlockedBy verifies that `issueRepo#issueNumber` is recorded as
+// blocked-by `blockerRepo#blockerNumber` via the Issue Dependencies API.
+func AssertBlockedBy(t *testing.T, env *Env, issueRepo string, issueNumber int, blockerRepo string, blockerNumber int) {
+	t.Helper()
+	owner, name, ok := splitRepo(issueRepo)
+	if !ok {
+		t.Fatalf("bad repo: %q", issueRepo)
+	}
+	q := fmt.Sprintf(`
+query {
+  repository(owner: "%s", name: "%s") {
+    issue(number: %d) {
+      blockedBy(first: 10) { nodes { number repository { nameWithOwner } } }
+    }
+  }
+}`, owner, name, issueNumber)
+	out, err := ghOutput(env, "api", "graphql", "-f", "query="+q,
+		"--jq", ".data.repository.issue.blockedBy.nodes")
+	if err != nil {
+		t.Fatalf("query blockedBy for %s#%d: %v\n%s", issueRepo, issueNumber, err, out)
+	}
+	type node struct {
+		Number     int `json:"number"`
+		Repository struct {
+			NameWithOwner string `json:"nameWithOwner"`
+		} `json:"repository"`
+	}
+	var nodes []node
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &nodes); err != nil {
+		t.Fatalf("parse blockedBy response: %v\n%s", err, out)
+	}
+	for _, n := range nodes {
+		if n.Number == blockerNumber && n.Repository.NameWithOwner == blockerRepo {
+			return
+		}
+	}
+	t.Fatalf("%s#%d not blocked by %s#%d (blockedBy was: %+v)", issueRepo, issueNumber, blockerRepo, blockerNumber, nodes)
+}
+
+// CloseIssue best-effort closes the named issue (used in t.Cleanup).
+func CloseIssue(env *Env, repo string, issueNumber int) {
+	_, _ = ghOutput(env, "issue", "close", fmt.Sprint(issueNumber), "-R", repo,
+		"--reason", "completed", "--comment", "Closing: e2e test teardown")
+}
+
+// ResetOpenIssues closes every OPEN issue on the test repos. Useful at session
+// start to wipe state from prior runs.
+func ResetOpenIssues(t *testing.T, env *Env) {
+	t.Helper()
+	for _, repo := range []string{env.RepoAlpha, env.RepoBeta} {
+		out, err := ghOutput(env, "issue", "list", "-R", repo, "--state", "open",
+			"--json", "number", "--jq", "[.[] | .number]")
+		if err != nil {
+			t.Logf("ResetOpenIssues: could not list issues in %s: %v", repo, err)
+			continue
+		}
+		var nums []int
+		_ = json.Unmarshal([]byte(strings.TrimSpace(out)), &nums)
+		for _, n := range nums {
+			CloseIssue(env, repo, n)
+			t.Logf("ResetOpenIssues: closed %s#%d", repo, n)
+		}
+	}
+}
+
+func splitRepo(repo string) (owner, name string, ok bool) {
+	parts := strings.SplitN(repo, "/", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
 // WaitForLogLine tails the test bed's fabrik.log and returns the first line
 // matching the substring (or all of the substrings). Use sparingly — prefer
 // observable GitHub state over log scraping where possible.
