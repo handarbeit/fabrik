@@ -487,11 +487,11 @@ func TestHandleStageComplete_WaitForCI_AppliesRegardlessOfYolo(t *testing.T) {
 	}
 }
 
-// TestHandleStageComplete_BothCruiseAndYolo_YoloWins verifies that when both
-// fabrik:cruise and fabrik:yolo labels are present, yolo takes precedence:
-// EnablePullRequestAutoMerge is called (cruise alone would skip it). Done
-// advancement is deferred to checkAutoMergeConvergence (same as yolo-only).
-func TestHandleStageComplete_BothCruiseAndYolo_YoloWins(t *testing.T) {
+// TestHandleStageComplete_BothCruiseAndYolo_CruiseWins verifies that when both
+// fabrik:cruise and fabrik:yolo labels are present, cruise takes precedence at
+// Validate: EnablePullRequestAutoMerge is NOT called and the item is NOT advanced
+// to Done. This implements FR-003 / FR-015: cruise leaves the PR for human merge.
+func TestHandleStageComplete_BothCruiseAndYolo_CruiseWins(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 			return &gh.PRDetails{Number: 99, HeadSHA: "abc123"}, nil
@@ -506,16 +506,16 @@ func TestHandleStageComplete_BothCruiseAndYolo_YoloWins(t *testing.T) {
 
 	eng.handleStageComplete(context.Background(), board, item, validateStage)
 
-	// yolo wins: auto-merge should be enabled (cruise alone would suppress it).
-	if len(client.enablePullRequestAutoMergeCalls) != 1 {
-		t.Fatalf("expected EnablePullRequestAutoMerge when yolo wins over cruise, got %d", len(client.enablePullRequestAutoMergeCalls))
+	// cruise wins: auto-merge must NOT be enabled.
+	if len(client.enablePullRequestAutoMergeCalls) != 0 {
+		t.Fatalf("expected no EnablePullRequestAutoMerge when cruise wins over yolo, got %d", len(client.enablePullRequestAutoMergeCalls))
 	}
 	if len(client.mergePRCalls) != 0 {
-		t.Errorf("MergePR must not be called in new auto-merge path, got %d", len(client.mergePRCalls))
+		t.Errorf("MergePR must not be called, got %d", len(client.mergePRCalls))
 	}
-	// Done advancement deferred to convergence monitor — no immediate advance.
+	// No advancement — cruise stops at Validate.
 	if len(client.updateStatusCalls) != 0 {
-		t.Errorf("expected no immediate advance (deferred to convergence monitor), got %d status updates", len(client.updateStatusCalls))
+		t.Errorf("expected no advance when cruise wins at Validate, got %d status updates", len(client.updateStatusCalls))
 	}
 }
 

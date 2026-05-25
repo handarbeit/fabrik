@@ -158,8 +158,9 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	}
 
 	// cruise stops at Validate: do not advance to Done or trigger any further
-	// stage movement. The PR merge was already skipped (yoloActive is false).
-	if cruiseActive && stage.Name == "Validate" {
+	// stage movement. cruise wins over yolo — when both labels are present,
+	// the PR is left for human merge (FR-003, FR-015).
+	if hasCruiseLabel(item) && stage.Name == "Validate" {
 		shouldAdvance = false
 	}
 
@@ -218,6 +219,12 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 // guard and the budget-start anchor read by checkAutoMergeConvergence.
 func (e *Engine) attemptMergeOnValidate(_ context.Context, _ *gh.ProjectBoard, item gh.ProjectItem, _ *stages.Stage) (bool, error) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+
+	// cruise > yolo: when cruise is present, auto-merge is suppressed regardless of yolo.
+	// cruise auto-advances through stages but leaves the PR for human merge at Validate.
+	if hasCruiseLabel(item) {
+		return false, nil
+	}
 
 	// Idempotency: auto-merge was already enabled on a prior run.
 	if hasLabel(item, "fabrik:auto-merge-enabled") {
