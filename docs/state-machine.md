@@ -78,8 +78,9 @@ These labels do not define distinct states but influence transition behavior:
 
 | Label | Effect |
 |-------|--------|
-| `fabrik:yolo` | Forces auto-advance; triggers auto-merge at Validate; overrides `auto_advance: false` |
+| `fabrik:yolo` | Forces auto-advance; triggers GitHub native auto-merge at Validate; overrides `auto_advance: false` |
 | `fabrik:cruise` | Forces auto-advance without auto-merge; stops at Validate completion; suppressed by yolo |
+| `fabrik:auto-merge-enabled` | Engine-internal; marks that GitHub's native auto-merge has been enabled on the linked PR; anchors the convergence budget start time; bypasses legacy merge/CI gates |
 | `fabrik:unrestricted` | Passes `--dangerously-skip-permissions` to Claude Code |
 | `fabrik:extend-turns` | Pre-grants a 2× turn budget for every stage invocation and comment processing invocation while present; persists across stages; removed only at the Done cleanup stage or manually; no-op when `max_turns == 0` (stage) or always applies for comments since `commentMaxTurns` is never 0 |
 | `model:<name>` | Selects a specific model for this issue (e.g., `model:opus`) |
@@ -133,7 +134,8 @@ Each active stage column has the same set of reachable sub-states:
 | `fabrik:awaiting-input` | `blockOnInput`, `pauseForReviewTimeout`, `pauseForReviewCycleLimit`, `pauseForCITimeout`, `pauseForCIFixCycleLimit` | After FABRIK_BLOCKED_ON_INPUT or review/CI timeout/cycle limit | `unblockAwaitingInput`; `handleStageComplete` (on FABRIK_STAGE_COMPLETE, to clear any orphaned label); `handleNoWorkNeeded` (on FABRIK_NO_WORK_NEEDED); `cleanupClosedIssueTransientLabels` (defensive sweep) | When user comment arrives; when a stage completes (removes any orphaned label that survived a manual `fabrik:paused` removal); or when issue is closed (defensive sweep — label has no meaning on a closed issue) | Combined with `fabrik:paused`, identifies the "awaiting user input" pause variant |
 | `fabrik:awaiting-review` | `handleStageComplete` (Path 1 — only when `wait_for_ci: false`), `checkReviewGate` (Path 2) | Path 1: optimistically after stage completion when `wait_for_reviews: true` **and `wait_for_ci: false`** (does not check reviewer state — data is stale; omitted for `wait_for_ci: true` stages because Path 2 handles the gate after CI clears). Path 2: when `LinkedPRReviewRequests` is non-empty OR when `len(outstanding)==0 && !hasReviews` (the bot self-submission case — covers Copilot/Gemini-style reviewers that don't appear in the formal requested-reviewer list but still need to submit a review) | `checkReviewGate` (both natural clear and timeout paths); `cleanupClosedIssueTransientLabels` (defensive sweep) | When all reviewers submit, or when timeout elapses (removed by `checkReviewGate` before `pauseForReviewTimeout` is called); or when issue is closed (defensive sweep) | Phase 1 / Phase 2 reprompt timers in `checkReviewGate` fire on label-applied-at age (not on `updatedAt` movement). A non-responsive bot reviewer produces no comment / no review / no PR activity, so `updatedAt` never moves — without periodic re-evaluation the timers would never get a chance to fire. The catch-up loop's blocked-path records `CooldownAt("review-blocked")` (via `CooldownRecorded{Reason: "review-blocked"}` mutation) so `itemMayNeedWork`'s cooldown retry path re-admits the item every 10 × `PollSeconds` (same pattern as `fabrik:blocked`); a per-poll cache bypass is intentionally avoided because long-lived review-waiting items would otherwise become a permanent GraphQL hot path. Blocks auto-advance until review gate clears |
 | `fabrik:awaiting-ci` | `handleStageComplete` (on FABRIK_STAGE_COMPLETE for `wait_for_ci: true` stages; idempotent); `checkCIGate` (on confirmed CI failure; idempotent) | `handleStageComplete`: immediately on FABRIK_STAGE_COMPLETE — replaces premature `stage:X:complete` and keeps the item in the CI-await window (ADR 032). `checkCIGate`: when CI check runs for the PR head SHA have `conclusion: failure/timed_out/action_required`. | `checkCIGate` (when `mergeable_state ∈ {clean, unstable}`, when CI check classification reports all-green, or when gate times out); `attemptMergeOnValidate` (when `mergeable_state ∈ {clean, unstable}` shortcut fires); `cleanupClosedIssueTransientLabels` (defensive sweep) | When GitHub's `mergeable_state` indicates the PR is mergeable (v0.0.52 shortcut — the `MergeableStateAccepted` allowlist); when all CI checks pass (green) under the per-check classification fallback; when timeout elapses (removed before `pauseForCITimeout` is called); or when issue is closed (defensive sweep) | Signals CI gate is active (pending or failed); triggers `itemMayNeedWork` updatedAt cache bypass; suppresses dispatcher re-invocation (`itemNeedsWork` returns false); blocks auto-advance until CI gate clears. **`stage:X:complete` is absent while this label is present — it is added by `checkCIGate` when CI clears (R5) or when `mergeable_state` shortcut clears the gate (v0.0.52).** |
-| `fabrik:rebase-needed` | `checkMergeabilityGate` (catch-up loop, `wait_for_ci: true` stages); `attemptMergeOnValidate` (legacy auto-merge path, yolo+Validate without `wait_for_ci`) | When GitHub reports `mergeable == false` on the linked PR — a confirmed base-branch conflict. Applied idempotently in both paths. NOT added when `mergeable == null` (GitHub still computing). | `checkMergeabilityGate` (when mergeable flips back to true); `attemptMergeOnValidate` (on successful merge, via `removeRebaseNeededLabel` — no-op when absent); `cleanupClosedIssueTransientLabels` (defensive sweep) | When GitHub reports `mergeable == true` (after Claude's rebase push lands), or when `MergePR` succeeds; or when issue is closed (defensive sweep) | Signals confirmed merge conflict; triggers `itemMayNeedWork` updatedAt cache bypass (base-branch advances don't bump the item's `updatedAt`); blocks CI gate and auto-advance until rebase resolves the conflict |
+| `fabrik:rebase-needed` | `checkMergeabilityGate` (catch-up loop, `wait_for_ci: true` stages); `checkAutoMergeConvergence` (convergence flow, yolo+Validate with `fabrik:auto-merge-enabled`) | When GitHub reports `mergeable == false` on the linked PR — a confirmed base-branch conflict. Applied idempotently in both paths. NOT added when `mergeable == null` (GitHub still computing). | `checkMergeabilityGate` (when mergeable flips back to true); `checkAutoMergeConvergence` (when PR merges or closes); `cleanupClosedIssueTransientLabels` (defensive sweep) | When GitHub reports `mergeable == true` (after Claude's rebase push lands), or when PR merges/closes; or when issue is closed (defensive sweep) | Signals confirmed merge conflict; triggers `itemMayNeedWork` updatedAt cache bypass (base-branch advances don't bump the item's `updatedAt`); blocks CI gate and auto-advance until rebase resolves the conflict |
+| `fabrik:auto-merge-enabled` | `attemptMergeOnValidate` (yolo, non-cruise, Validate completion) | After successful `enablePullRequestAutoMerge` GraphQL call — signals GitHub is handling the merge atomically. Also serves as the idempotency guard (prevents re-calling the mutation) and the budget-start anchor (timestamp read by `FetchLabelAppliedAt` to compute convergence budget elapsed time). | `checkAutoMergeConvergence` (when PR merges, PR closes, user disables auto-merge, or budget exhausts); `cleanupClosedIssueTransientLabels` (defensive sweep) | When GitHub merges the PR; when PR is closed without merging; when user disables auto-merge in GitHub UI; or when convergence budget exhausts (→ `pauseForConvergenceFailed`); or when issue is closed (defensive sweep) | Engine-internal label. Bypasses legacy merge/CI gate dispatch — `checkAutoMergeConvergence` is the sole Phase 1 handler while present. Triggers `itemMayNeedWork` updatedAt cache bypass (convergence state changes independently of issue `updatedAt`). `stage:Validate:complete` remains in place while this label is present; `checkAutoMergeConvergence` removes it when the PR merges and the item advances to Done. NOT applied when `fabrik:cruise` is also present (cruise wins). |
 | `fabrik:blocked` | `checkDependencies` | When open blocking issues exist (first transition only — idempotent) | `PushUnblockObserver` (primary — fires immediately on blocker close, any column); `checkDependencies` (defense-in-depth — fires via `dep-blocked` cooldown-retry for items in stage columns) | When all blocking issues close | Pre-dispatch gate in `itemNeedsWork` prevents re-dispatch after the label is set (parallel to `fabrik:editing` post-#550 and `fabrik:locked:<other>` always); **exception**: when the `dep-blocked` cooldown has expired (or no store entry exists), `itemNeedsWork` admits the item for one dependency re-check per `10 × PollSeconds` — `checkDependencies` either re-stamps the cooldown (still blocked) or removes the label (resolved). Initial detection (first dispatch, label not yet set) still reaches `checkDependencies` normally. Blocks stage start. Push path removes the label even for items in non-stage columns (Backlog, Done, custom columns) that would otherwise never be re-evaluated by `processItem`. |
 | `stage:<X>:in_progress` | `processItem` | After lock acquired and verified | `releaseLock` | Same as `fabrik:locked:<user>` | Informational — shows which stage is active on GitHub |
 | `stage:<X>:complete` | `handleStageComplete` (for non-`wait_for_ci` stages), `checkCIGate` (for `wait_for_ci: true` stages — added only after CI passes), `handleNoWorkNeeded` (emitting stage + all skipped stages), cleanup stage handler | `handleStageComplete`: after Claude signals FABRIK_STAGE_COMPLETE on stages without `wait_for_ci: true`. `checkCIGate`: when all CI checks pass (R5) — this is the conjunctive gate (ADR 032): `stage:X:complete` is deferred until the CI gate actually clears, not applied on FABRIK_STAGE_COMPLETE. After FABRIK_NO_WORK_NEEDED (emitting stage + all subsequent non-cleanup stages) or worktree cleanup. | Never removed | Permanent | Prevents re-invocation of the stage; triggers catch-up advancement |
@@ -708,30 +710,73 @@ FABRIK_STAGE_COMPLETE received
 
 Fabrik discovers PR comments through the `closedByPullRequestsReferences` GraphQL field, which traverses issue → linked PRs → PR comments. The `Closes #N` keyword in the PR body creates this linkage.
 
-### 5.4 Auto-Merge on Validate
+### 5.4 Auto-Merge on Validate (yolo issues)
 
-**When:** Validate stage completes and yolo is active (either `cfg.Yolo` or `fabrik:yolo` label).
+**When:** Validate stage completes and the issue has `fabrik:yolo` (or global `cfg.Yolo`) and does NOT have `fabrik:cruise`.
 
-**Code path:** `handleStageComplete()` → `attemptMergeOnValidate()` (Path 1); or catch-up loop → `attemptMergeOnValidate()` (Path 2)
+**Code path:** `handleStageComplete()` → `attemptMergeOnValidate()` (Path 1); or catch-up loop Phase 2 → `attemptMergeOnValidate()` (Path 2 — when `fabrik:auto-merge-enabled` is absent)
 
 **Flow:**
-1. Find linked PR via `FindPRForIssue()` / `FetchLinkedPR()` (the latter also returns the head SHA needed for the per-check classification fallback).
-2. Query `FetchPRMergeableState()` (REST single-PR endpoint). If the result is `clean` or `unstable` (per `github.MergeableStateAccepted`), **skip the raw check_runs gate**: clear any stale `fabrik:awaiting-ci` label, clear the `LinkedPRState.CIMergePendingSince` entry in the store, and proceed directly to step 4. Other states fall through to the per-check classification in step 3.
-3. **Per-check classification (fallback)**: fetch check runs via `FetchCheckRuns()`. Apply R1–R6 rules (no checks → R5 clears; failed → R3 applies `fabrik:awaiting-ci` and returns error; pending → R2 returns error and tracks `LinkedPRState.CIMergePendingSince` for the timeout; all green → R4 clears).
-4. Attempt merge via `MergePR()`. `MergePR` first checks the PR's `merged` field — if the PR was already merged (e.g., by a human), it returns nil immediately (no-op success). Otherwise it checks `mergeable` and attempts the merge.
-5. On `ErrNotMergeable`: apply `fabrik:rebase-needed` idempotently. Then:
-   - **Worker guard (`snap.Worker() != nil`):** if a rebase goroutine is already running for this item, return a plain error (skip — prevents cycle-counter drift).
-   - **Cycle limit check:** compare `snap.RebaseCycles(stage.Name)` against `MaxRebaseCycles` (default 3):
-     - If at or above the limit: call `pauseForRebaseCycleLimit()` (`fabrik:paused` + `fabrik:awaiting-input` + explanatory comment); return a plain error.
-     - If below the limit: apply `RebaseCycleIncremented`, call `dispatchRebaseReinvoke()`, return the `errRebaseDispatched` sentinel.
-6. On other API errors: return error (same retry behavior)
-7. On success (including already-merged): call `removeRebaseNeededLabel()` (no-op when absent), log and return nil — advancement proceeds
+1. If `fabrik:auto-merge-enabled` is already present on the issue: return nil (idempotent — auto-merge was already enabled in a previous invocation).
+2. Fetch linked PR via `FetchLinkedPR()`.
+3. Call `EnablePullRequestAutoMerge(owner, repo, pr.Number, AutoMergeStrategy)`. The strategy defaults to `MERGE` and is configurable via `FABRIK_AUTO_MERGE_STRATEGY`. On failure: log a guidance message and return a retriable error (next poll retries).
+4. On success: apply `fabrik:auto-merge-enabled` label. GitHub now owns the merge decision atomically — no Fabrik-side `MergePR` call. Done advancement is deferred to `checkAutoMergeConvergence` in Phase 1 of the catch-up loop.
 
-**Why the `mergeable_state` shortcut (v0.0.52):** the per-check classification at step 3 was over-aggressive — any check_run with `conclusion ∈ {failure, timed_out, action_required}` blocked the merge, including non-required workflow jobs (e.g. `Cleanup artifacts`) that GitHub itself does not treat as merge blockers per branch protection. When `mergeable_state` says the PR is mergeable, Fabrik now trusts that and bypasses the per-check gate. The shortcut sits *after* `stage:Validate:complete` is already on the issue (the catch-up loop's entry condition), so it cannot cause Validate-Claude work to be skipped — it only changes the behavior of the post-completion CI wait.
+**`cruise > yolo` precedence:** If `fabrik:cruise` is present on the issue, `attemptMergeOnValidate` returns immediately without calling `EnablePullRequestAutoMerge`. Cruise items keep the current `stage:Validate:complete` behavior: the branch is maintained (rebase reinvoke, CI-fix reinvoke) but merging is left to the user.
 
-**Unified rebase-reinvoke recovery (Path 1 and Path 2):** Both code paths now use the same `snap.RebaseCycles(stage.Name)` + `RebaseCycleIncremented` mutation, `dispatchRebaseReinvoke()`, and `pauseForRebaseCycleLimit()`. The `MaxRebaseCycles` and `--max-rebase-cycles` / `FABRIK_MAX_REBASE_CYCLES` controls apply to both paths. Previously, Path 1 immediately paused on `ErrNotMergeable`; it now dispatches the rebase reinvoke autopilot instead, falling back to the pause only when the cycle limit is reached.
+See **section 5.5** for how Fabrik monitors the convergence flow after auto-merge is enabled.
 
-**Important — Path 1 vs Path 2 distinction:** In Path 1 (`handleStageComplete`), the merge runs BEFORE adding `stage:Validate:complete`. On a plain merge failure (non-`ErrNotMergeable`), no completion label is added, so `itemNeedsWork` can retry the full Validate invocation after cooldown. On `ErrNotMergeable`, `handleStageComplete` detects the `errRebaseDispatched` sentinel and **adds `stage:Validate:complete` before returning** — ensuring the catch-up loop's Phase 2 drives the merge retry rather than `itemNeedsWork` triggering a new full Validate invocation. In Path 2 (catch-up loop), `stage:Validate:complete` already exists when `attemptMergeOnValidate()` runs; on `ErrNotMergeable` the rebase is dispatched and the catch-up loop retries on the next poll.
+**Non-yolo issues:** Items without `fabrik:yolo` and without `fabrik:cruise` follow the same behavior as cruise for purposes of merge tracking — `checkMergeabilityGate` and `checkCIGate` continue to operate using `MaxRebaseCycles` / `MaxCiFixCycles` per-gate cycle limits. `EnablePullRequestAutoMerge` is never called for these issues. This is unchanged from pre-5.4 behavior.
+
+---
+
+### 5.5 Post-Validate Convergence Monitor (yolo issues)
+
+After `fabrik:auto-merge-enabled` is applied (section 5.4), every Phase 1 iteration of the catch-up loop calls `checkAutoMergeConvergence()` instead of the legacy `checkMergeabilityGate` / `checkCIGate` path. All merge decisions for the issue are delegated to GitHub's server-side auto-merge logic.
+
+**Convergence budget:**
+
+- The budget starts when `fabrik:auto-merge-enabled` is applied. The start timestamp is stored durably in GitHub's issue event log (`FetchLabelAppliedAt("fabrik:auto-merge-enabled")`), so it survives engine restarts.
+- The budget is configured via `FABRIK_CONVERGENCE_BUDGET` (Go duration syntax, e.g., `30m`). Default: 30 minutes. Set to `0` to disable the budget (falls back to `MaxRebaseCycles` / `MaxCiFixCycles` cycle-count gates — legacy behavior).
+- On each Phase 1 iteration: `elapsed = time.Since(budgetStart)`. If `elapsed > budget`, `pauseForConvergenceFailed()` fires.
+
+**`checkAutoMergeConvergence()` decision tree:**
+
+| Observed state | Action |
+|---|---|
+| PR merged or closed | Remove `fabrik:auto-merge-enabled` + `fabrik:rebase-needed` (if present); existing machinery advances to Done |
+| `AutoMergeEnabled == false` (user disabled) | Remove `fabrik:auto-merge-enabled`; post one-liner comment; treat as cruise from this point |
+| Budget exhausted | Call `pauseForConvergenceFailed()` (see below) |
+| `mergeable_state == "unknown"` | Wait — GitHub still computing after a push; re-evaluate next poll |
+| `mergeable_state == "dirty"` (conflict) | Dispatch rebase reinvoke (one per conflict transition); increment `RebaseCycles` for observability only (not a gate); skip if worker in-flight |
+| Any other state (`clean`, `blocked`, `behind`, `unstable`, `has_hooks`) | Wait — GitHub is handling it |
+
+**Rebase reinvoke + auto-merge re-enable:**
+GitHub disables auto-merge on every push. After `dispatchRebaseReinvoke()` completes successfully (Claude resolved conflicts, pushed), `EnablePullRequestAutoMerge` is called again to re-arm auto-merge. This is the only scenario where auto-merge is re-enabled without going through `attemptMergeOnValidate`.
+
+**`pauseForConvergenceFailed()` — convergence budget exhausted:**
+Fetches fresh PR state (`FetchLinkedPR`), `FetchCommitsBehind`, `FetchCheckRuns`, and current rebase cycle count. Posts a structured pause comment containing:
+- Total wall-clock elapsed time and configured budget
+- Number of rebase reinvokes dispatched
+- Commits-behind-base count
+- Current `mergeable_state`
+- Latest CI check run summary (passed / failed / pending)
+- Three named user options: (1) manual rebase + re-yolo, (2) switch to cruise, (3) leave as-is
+
+Then: applies `fabrik:paused` + `fabrik:awaiting-input`; removes `fabrik:auto-merge-enabled`. Does NOT add `fabrik:awaiting-ci` (CI may be healthy; the convergence failure is about the merge window, not CI).
+
+**`RebaseCycles` vs. budget:** Under the convergence flow, `RebaseCycles` is incremented on every rebase dispatch for observability and for inclusion in the pause comment. It is NOT consulted as a gate. `MaxRebaseCycles` has no effect while `fabrik:auto-merge-enabled` is present. When `FABRIK_CONVERGENCE_BUDGET=0`, yolo issues fall back to using `MaxRebaseCycles` and `MaxCiFixCycles` as gates — legacy behavior.
+
+**State transitions for yolo Validate convergence:**
+
+| State | Trigger | New state | Labels added | Labels removed |
+|---|---|---|---|---|
+| Validate, Complete | Poll tick (Phase 2) | Validate, Convergence | `fabrik:auto-merge-enabled` | |
+| Validate, Convergence | PR merged (GitHub) | Done, Pending Cleanup | | `fabrik:auto-merge-enabled`, `fabrik:rebase-needed` |
+| Validate, Convergence | `mergeable_state=dirty` (conflict) | Validate, Convergence + Rebase in-flight | `fabrik:rebase-needed` | |
+| Validate, Convergence + Rebase in-flight | Rebase push succeeds | Validate, Convergence | | |
+| Validate, Convergence | Budget exhausted | Validate, Paused | `fabrik:paused`, `fabrik:awaiting-input` | `fabrik:auto-merge-enabled` |
+| Validate, Convergence | User disables auto-merge in GitHub UI | Validate, Complete (cruise behavior) | | `fabrik:auto-merge-enabled` |
 
 ---
 
