@@ -671,11 +671,50 @@ refines it into a clear, unambiguous spec:
 - Surfaces missing requirements, ambiguities, and edge cases as questions
 - Checks consistency with existing project features and documentation
 - Researches prior art and established patterns on the web
-- Rewrites the issue body with a structured spec
+- Rewrites the issue body in **Spec Kit format** — a structured template with
+  mandatory `## User Scenarios & Testing`, `## Requirements`, and
+  `## Success Criteria` sections
+
+When all questions are resolved, Claude commits the finalized spec to
+`specs/<issue_number>-<slug>/spec.md` on the issue branch before completing
+the stage. The slug is a 4-word kebab-case identifier derived from the issue
+title and locked at first commit. The `## Open Questions` section is stripped
+before the file is committed.
+
+The spec template that guides the format lives at
+`.specify/templates/spec-template.md` in your project root. `fabrik init`
+seeds this file automatically. If it is absent, the skill falls back to its
+inline template structure.
 
 The user answers questions via comments. Claude incorporates the answers and updates
 the issue body. Once all questions are resolved, the stage completes and the issue is
 ready for Research.
+
+> **Existing operators upgrading from a version before this feature was
+> introduced**: Your `.fabrik/stages/specify.yaml` may still have
+> `read_only: true` and `allowed_tools` without `Write`, `Bash(git:*)`,
+> `Bash(gh:*)`, or `Bash(find:*)`. The stage drift warning will not fire for
+> these fields because they already exist in your file (just with old values).
+> You must update them manually:
+>
+> ```yaml
+> read_only: false
+> allowed_tools:
+>   - Read
+>   - Write
+>   - Grep
+>   - Glob
+>   - TodoWrite
+>   - WebSearch
+>   - WebFetch
+>   - Bash(git:*)
+>   - Bash(gh:*)
+>   - Bash(find:*)
+> ```
+>
+> Without this change, the new skill will write the spec file but the engine
+> will stash and discard it at stage end — the spec file will silently
+> disappear.
 
 ### Steering with Comments
 
@@ -1274,7 +1313,7 @@ The default skills are:
 
 | Skill | Purpose |
 |-------|---------|
-| `fabrik-specify` | Requirements clarification, consistency checks, prior art research; preserves the Problem section verbatim (never compressed) and places it first in the spec |
+| `fabrik-specify` | Requirements clarification, consistency checks, prior art research; rewrites the issue body in Spec Kit format and commits `specs/<N>-<slug>/spec.md` to the branch before completing |
 | `fabrik-research` | Codebase exploration, technical analysis, constraint discovery; includes a Documentation Impact section for user-facing features |
 | `fabrik-plan` | Implementation design, task checklist, decision documentation; includes explicit doc update tasks in the checklist for user-facing features |
 | `fabrik-implement` | Code writing, testing, committing, pushing; updates `USER_GUIDE.md` and/or `README.md` in the same PR for user-facing features — never defers documentation to a follow-up issue |
@@ -1570,7 +1609,7 @@ Fabrik passes `--permission-mode dontAsk` to every Claude Code invocation. In th
 | Python | `Bash(python:*)`, `Bash(pip:*)`, `Bash(uv:*)`, `Bash(pytest:*)` |
 | Shell utilities | `Bash(ls:*)`, `Bash(cat:*)`, `Bash(rm:*)`, `Bash(cp:*)`, `Bash(mv:*)`, `Bash(mkdir:*)`, `Bash(find:*)` |
 
-**`allowed_tools` replaces the defaults — it is not additive.** When a stage sets `allowed_tools`, only those tools are permitted; the default list above is not merged in. This is intentional: Research, Plan, and Specify stages set `allowed_tools` to a read-only subset to prevent Claude from writing files during those stages.
+**`allowed_tools` replaces the defaults — it is not additive.** When a stage sets `allowed_tools`, only those tools are permitted; the default list above is not merged in. This is intentional: Research and Plan stages set `allowed_tools` to a read-only subset to prevent Claude from writing files during those stages. The Specify stage is write-enabled so it can commit the spec file to the branch.
 
 **`fabrik:unrestricted` bypasses everything** — passes `--dangerously-skip-permissions` instead, granting Claude full tool access. Use this label only when a stage requires tools outside the default set (e.g. `deno`, `bun`, or other non-standard toolchains).
 

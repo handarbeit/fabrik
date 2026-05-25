@@ -73,6 +73,12 @@ GitHub Project Board (source of truth)
 5. **Complete** — When Claude signals completion, the issue is labeled `stage:<name>:complete`.
 6. **Advance** — In yolo mode, the issue auto-advances to the next stage. Otherwise, a human moves it.
 
+The **Specify** stage uses **Spec Kit format** for specifications. The issue body is rewritten
+with a structured template (`## User Scenarios & Testing`, `## Requirements`,
+`## Success Criteria`) and the finalized spec is committed to `specs/<N>-<slug>/spec.md`
+on the issue branch. Run `fabrik init` to seed the spec template
+(`.specify/templates/spec-template.md`) into your project.
+
 > **Big-board efficiency (v0.0.57):** On large project boards, the per-poll GraphQL cost drops ~5–10× via a lightweight `updatedAt`-only probe that gates the full deep-fetch — only items that changed since the last poll trigger a full query. Terminal items (issues in a cleanup/Done column with `stage:<name>:complete` and no active lifecycle labels) are skipped entirely from both the probe and deep-fetch evaluation.
 >
 > **Cold-start optimization (v0.0.58):** On startup, closed Done items are seeded from probe data as terminal without a deep-fetch, reducing cold-start GraphQL cost by ~80–90%. Combined with probe-driven polling, this makes running two Fabrik instances on a single token budget practical.
@@ -188,7 +194,7 @@ The example stages implement a full SDLC pipeline:
 | Stage | Purpose |
 |-------|---------|
 | **Backlog** | Parking lot (no processing) |
-| **Specify** | Refine rough issues into clear, unambiguous specs (Q&A with user) |
+| **Specify** | Refine rough issues into structured Spec Kit specs (Q&A with user); commits `specs/<N>-<slug>/spec.md` to the branch |
 | **Research** | Explore codebase, identify scope, surface questions |
 | **Plan** | Design approach, break into tasks, document decisions |
 | **Implement** | Write code, tests, commit to issue branch |
