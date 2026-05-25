@@ -1574,7 +1574,22 @@ Fabrik enforces two independent layers of worktree isolation on every Claude inv
 
 **Layer 1 — Tool-permission scoping**: At invocation time, bare `Edit` and `Write` entries in the allowed-tools list are replaced with `Edit(<workDir>/**)` and `Write(<workDir>/**)`. If Claude attempts to edit or write a file outside the issue's worktree, the tool call receives a permission error — but the stage continues running; only the specific tool call is rejected.
 
-**Layer 2 — Cross-repo ref audit**: Before the extension loop begins, Fabrik snapshots the git refs of every registered bare repo except the active issue's own repo. After the loop completes, a second snapshot is compared. If any ref in a non-active repo has changed, a boundary violation is raised: `fabrik:paused` and `stage:<name>:failed` are applied, a comment is posted listing the specific refs that were mutated, and no automatic cleanup occurs.
+**Layer 2 — Cross-repo ref audit (opt-in, default off)**: Before the extension loop begins, Fabrik can snapshot the git refs of every registered bare repo except the active issue's own repo. After the loop completes, a second snapshot is compared. If any ref in a non-active repo has changed, a boundary violation is raised: `fabrik:paused` and `stage:<name>:failed` are applied, a comment is posted listing the specific refs that were mutated, and no automatic cleanup occurs.
+
+> **Note:** The Layer 2 audit is off by default (pending root-cause fix in #808 — routine `git fetch origin` in sibling bare clones was triggering false-positive violations). To enable it, use one of:
+>
+> ```yaml
+> # .fabrik/config.yaml
+> worktree_boundary_audit: true
+> ```
+>
+> ```bash
+> # CLI flag
+> ./fabrik --worktree-boundary-audit ...
+>
+> # Environment variable
+> FABRIK_WORKTREE_BOUNDARY_AUDIT=true ./fabrik ...
+> ```
 
 **What to do when a stage fails with a boundary violation:** Check whether the stage's prompt or skill is attempting to write files outside the issue's worktree — for example, writing to `fabrikDir` (the Fabrik config directory) or a sibling worktree. The comment posted on violation lists the specific bare-repo refs that changed, which identifies which repo was touched.
 
