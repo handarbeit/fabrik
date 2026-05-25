@@ -512,3 +512,87 @@ func TestUpdateComment_Error(t *testing.T) {
 		t.Fatal("expected error for 404 response")
 	}
 }
+
+// TestAddBlockedByIssue_QueryShape verifies that the request body uses the
+// correct mutation name (addBlockedBy) and input field name (blockingIssueId).
+// This is a regression guard: the original bug shipped addBlockedByIssue
+// (nonexistent) and blockedById (nonexistent) — a test checking only variables
+// would not have caught the divergence.
+func TestAddBlockedByIssue_QueryShape(t *testing.T) {
+	var capturedQuery string
+	var capturedVars map[string]interface{}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		json.NewDecoder(r.Body).Decode(&body)
+		capturedQuery, _ = body["query"].(string)
+		if v, ok := body["variables"].(map[string]interface{}); ok {
+			capturedVars = v
+		}
+		w.WriteHeader(200)
+		w.Write([]byte(`{"data":{"addBlockedBy":{"issue":{"id":"I_1"}}}}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	_ = c.AddBlockedByIssue("I_issue", "I_blocker")
+
+	// Correct mutation name — the original bug used "addBlockedByIssue" which does not exist.
+	if !strings.Contains(capturedQuery, "addBlockedBy") {
+		t.Errorf("query does not contain addBlockedBy; got: %s", capturedQuery)
+	}
+	if strings.Contains(capturedQuery, "addBlockedByIssue") {
+		t.Errorf("query contains nonexistent mutation addBlockedByIssue; got: %s", capturedQuery)
+	}
+
+	// Correct input field name — the original bug used "blockedById" which does not exist.
+	if !strings.Contains(capturedQuery, "blockingIssueId") {
+		t.Errorf("query does not contain blockingIssueId; got: %s", capturedQuery)
+	}
+	if strings.Contains(capturedQuery, "blockedById") {
+		t.Errorf("query contains nonexistent field blockedById; got: %s", capturedQuery)
+	}
+
+	// Variables must use the correct names.
+	if capturedVars["issueId"] != "I_issue" {
+		t.Errorf("issueId = %v, want I_issue", capturedVars["issueId"])
+	}
+	if capturedVars["blockingIssueId"] != "I_blocker" {
+		t.Errorf("blockingIssueId = %v, want I_blocker", capturedVars["blockingIssueId"])
+	}
+}
+
+func TestAddBlockedByIssue_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		json.NewDecoder(r.Body).Decode(&body)
+		vars := body["variables"].(map[string]interface{})
+		if vars["issueId"] != "I_child" {
+			t.Errorf("issueId = %v, want I_child", vars["issueId"])
+		}
+		if vars["blockingIssueId"] != "I_parent" {
+			t.Errorf("blockingIssueId = %v, want I_parent", vars["blockingIssueId"])
+		}
+		w.WriteHeader(200)
+		w.Write([]byte(`{"data":{"addBlockedBy":{"issue":{"id":"I_child"}}}}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	if err := c.AddBlockedByIssue("I_child", "I_parent"); err != nil {
+		t.Fatalf("AddBlockedByIssue: %v", err)
+	}
+}
+
+func TestAddBlockedByIssue_Error(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte(`{"errors":[{"message":"Could not resolve to an Issue"}]}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	if err := c.AddBlockedByIssue("I_bad", "I_blocker"); err == nil {
+		t.Fatal("expected error for GraphQL error response")
+	}
+}
