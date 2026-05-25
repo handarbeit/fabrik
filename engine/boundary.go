@@ -33,15 +33,20 @@ func applyWorktreeBoundary(tools []string, workDir string) []string {
 	return result
 }
 
-// snapshotRepoRefs runs "git for-each-ref --format=%(refname) %(objectname)" in
-// bareDir and returns a map of refname → SHA. Returns an empty map when bareDir is
-// empty or the command fails (non-fatal: single-repo projects have no other repos to
-// audit and the caller skips the audit when the map is empty).
+// snapshotRepoRefs runs "git for-each-ref" in bareDir and returns a map of
+// refname → SHA filtered to refs/heads/ and refs/tags/ only. Returns an empty map
+// when bareDir is empty or the command fails (non-fatal: single-repo projects have no
+// other repos to audit and the caller skips the audit when the map is empty).
+//
+// refs/remotes/ is intentionally excluded: remote-tracking refs are passively-observed
+// upstream state updated by git fetch for reasons unrelated to Claude's activity.
+// Including them would cause false-positive boundary violations whenever a concurrent
+// Fabrik worker or webhook-driven fetch updates a sibling bare clone's remote refs.
 func snapshotRepoRefs(bareDir string) (map[string]string, error) {
 	if bareDir == "" {
 		return map[string]string{}, nil
 	}
-	cmd := exec.Command("git", "for-each-ref", "--format=%(refname) %(objectname)")
+	cmd := exec.Command("git", "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/", "refs/tags/")
 	cmd.Dir = bareDir
 	out, err := cmd.Output()
 	if err != nil {
@@ -74,6 +79,12 @@ func crossRepoViolations(before, after map[string]map[string]string, activeRepo 
 			continue
 		}
 		for ref, newSHA := range afterRefs {
+			// Defense-in-depth: skip remote-tracking refs even if the caller passes
+			// unfiltered maps. snapshotRepoRefs already excludes refs/remotes/, but
+			// this guard preserves correctness if that invariant is ever broken.
+			if strings.HasPrefix(ref, "refs/remotes/") {
+				continue
+			}
 			oldSHA, existed := beforeRefs[ref]
 			if !existed {
 				violations = append(violations, fmt.Sprintf("%s: %s (new ref %s)", repo, ref, newSHA))
@@ -82,6 +93,9 @@ func crossRepoViolations(before, after map[string]map[string]string, activeRepo 
 			}
 		}
 		for ref, oldSHA := range beforeRefs {
+			if strings.HasPrefix(ref, "refs/remotes/") {
+				continue
+			}
 			if _, existed := afterRefs[ref]; !existed {
 				violations = append(violations, fmt.Sprintf("%s: %s (deleted, was %s)", repo, ref, oldSHA))
 			}

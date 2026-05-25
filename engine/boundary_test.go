@@ -268,3 +268,39 @@ func TestCrossRepoViolations_SkipsRepoAbsentFromBefore(t *testing.T) {
 		t.Errorf("repos absent from before snapshot should not generate violations, got %v", got)
 	}
 }
+
+func TestCrossRepoViolations_RemoteTrackingRefNotFlagged(t *testing.T) {
+	// Reproduces the real-world false-positive: a refs/remotes/origin/* ref appearing
+	// in a sibling bare clone (updated by a concurrent git fetch) must not be reported
+	// as a boundary violation. Remote-tracking refs are passively-observed upstream
+	// state, not locally-authored mutations.
+	before := map[string]map[string]string{
+		"owner/repo-b": {},
+	}
+	after := map[string]map[string]string{
+		"owner/repo-b": {"refs/remotes/origin/fabrik/issue-64": "dbe2a1c917e2e9f1b7d784724c60717045e7e4dc"},
+	}
+	got := crossRepoViolations(before, after, "owner/repo-a")
+	if len(got) != 0 {
+		t.Errorf("remote-tracking ref change must not be flagged as a violation, got %v", got)
+	}
+}
+
+func TestCrossRepoViolations_LocalBranchInSiblingFlagged(t *testing.T) {
+	// A new refs/heads/ ref in a sibling repo IS a genuine boundary violation and
+	// must be detected. This confirms the refs/remotes/ filter does not suppress
+	// legitimate violations.
+	before := map[string]map[string]string{
+		"owner/repo-b": {},
+	}
+	after := map[string]map[string]string{
+		"owner/repo-b": {"refs/heads/feature": "deadbeef"},
+	}
+	got := crossRepoViolations(before, after, "owner/repo-a")
+	if len(got) != 1 {
+		t.Fatalf("expected 1 violation for new local branch in sibling repo, got %v", got)
+	}
+	if !strings.Contains(got[0], "repo-b") || !strings.Contains(got[0], "feature") {
+		t.Errorf("violation should name sibling repo and branch: %q", got[0])
+	}
+}
