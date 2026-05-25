@@ -510,3 +510,107 @@ func TestRunInit_IdempotentDestDir(t *testing.T) {
 		t.Fatalf("second runInit: %v", err)
 	}
 }
+
+func TestRunInit_WritesSpecTemplate(t *testing.T) {
+	specTemplatePath := filepath.Join(".specify", "templates", "spec-template.md")
+
+	t.Run("writes template to clean dir", func(t *testing.T) {
+		dir := t.TempDir()
+		orig, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chdir(dir); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chdir(orig) }) //nolint
+
+		if err := runInit([]string{}); err != nil {
+			t.Fatalf("runInit: %v", err)
+		}
+
+		got, err := os.ReadFile(filepath.Join(dir, specTemplatePath))
+		if err != nil {
+			t.Fatalf("spec-template.md not written: %v", err)
+		}
+		if len(got) == 0 {
+			t.Fatal("spec-template.md is empty")
+		}
+		if !strings.Contains(string(got), "Feature Specification") {
+			t.Error("spec-template.md missing expected content")
+		}
+	})
+
+	t.Run("skips existing file without --force", func(t *testing.T) {
+		dir := t.TempDir()
+		orig, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chdir(dir); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chdir(orig) }) //nolint
+
+		// First init — writes the template.
+		if err := runInit([]string{}); err != nil {
+			t.Fatalf("first runInit: %v", err)
+		}
+
+		// Overwrite with sentinel.
+		sentinel := []byte("sentinel content")
+		if err := os.WriteFile(filepath.Join(dir, specTemplatePath), sentinel, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		// Second init without --force — must skip.
+		if err := runInit([]string{}); err != nil {
+			t.Fatalf("second runInit: %v", err)
+		}
+
+		got, err := os.ReadFile(filepath.Join(dir, specTemplatePath))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != string(sentinel) {
+			t.Errorf("existing spec-template.md was overwritten without --force")
+		}
+	})
+
+	t.Run("overwrites existing file with --force", func(t *testing.T) {
+		dir := t.TempDir()
+		orig, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chdir(dir); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chdir(orig) }) //nolint
+
+		// Write sentinel directly.
+		if err := os.MkdirAll(filepath.Join(dir, ".specify", "templates"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		sentinel := []byte("sentinel content")
+		if err := os.WriteFile(filepath.Join(dir, specTemplatePath), sentinel, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		// Init with --force — must overwrite.
+		if err := runInit([]string{"--force"}); err != nil {
+			t.Fatalf("force runInit: %v", err)
+		}
+
+		got, err := os.ReadFile(filepath.Join(dir, specTemplatePath))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) == string(sentinel) {
+			t.Error("--force did not overwrite spec-template.md")
+		}
+		if !strings.Contains(string(got), "Feature Specification") {
+			t.Error("overwritten spec-template.md missing expected content")
+		}
+	})
+}

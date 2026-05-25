@@ -340,6 +340,11 @@ func runInit(args []string) error {
 		fmt.Printf("  plugin: %d skill files written\n", pluginWrote)
 	}
 
+	// Extract spec-kit template to .specify/templates/spec-template.md
+	if err := writeSpecTemplate(*force); err != nil {
+		return err
+	}
+
 	// Generate .fabrik/config.yaml template
 	if err := writeConfigTemplate(owner, project, ownerType, *userFlag, *force); err != nil {
 		return err
@@ -352,6 +357,33 @@ func runInit(args []string) error {
 
 	fmt.Println("\nFabrik is ready. Stage configs and plugin skills are in .fabrik/")
 	fmt.Println("Edit .fabrik/config.yaml with your project settings, then run fabrik.")
+	return nil
+}
+
+// writeSpecTemplate extracts the embedded Spec Kit spec template to
+// .specify/templates/spec-template.md in the current project directory.
+// Skips the write if the file already exists and force is false.
+func writeSpecTemplate(force bool) error {
+	destPath := filepath.Join(".specify", "templates", "spec-template.md")
+
+	if !force {
+		if _, err := os.Stat(destPath); err == nil {
+			fmt.Printf("  skip   %s (already exists; use --force to overwrite)\n", destPath)
+			return nil
+		}
+	}
+
+	data, err := fabrikplugin.FabrikPlugin.ReadFile("fabrik-workflows/specify-templates/spec-template.md")
+	if err != nil {
+		return fmt.Errorf("reading embedded spec template: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+		return fmt.Errorf("creating %s: %w", filepath.Dir(destPath), err)
+	}
+	if err := os.WriteFile(destPath, data, 0644); err != nil {
+		return fmt.Errorf("writing %s: %w", destPath, err)
+	}
+	fmt.Printf("  spec template: %s\n", destPath)
 	return nil
 }
 
