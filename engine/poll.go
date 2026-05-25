@@ -758,6 +758,7 @@ func (e *Engine) cleanupClosedIssueLocks(board *gh.ProjectBoard) {
 var transientLifecycleLabels = []string{
 	"fabrik:awaiting-review",
 	"fabrik:awaiting-ci",
+	"fabrik:auto-merge-enabled",
 	"fabrik:awaiting-input",
 	"fabrik:rebase-needed",
 	"fabrik:bot-reprompted",
@@ -1107,7 +1108,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		if !cycleSet[iKey] {
 			stage := stages.FindStage(e.cfg.Stages, item.Status)
 			isCleanup := stage != nil && stage.CleanupWorktree
-			hasAwaitingLabel := hasLabel(item, "fabrik:awaiting-ci") || hasLabel(item, "fabrik:rebase-needed") || hasLabel(item, "fabrik:awaiting-review")
+			hasAwaitingLabel := hasLabel(item, "fabrik:awaiting-ci") || hasLabel(item, "fabrik:rebase-needed") || hasLabel(item, "fabrik:awaiting-review") || hasLabel(item, "fabrik:auto-merge-enabled")
 			var hasExpiredCooldown, notInStore bool
 			if !isCleanup && !hasAwaitingLabel {
 				repo := itemOwnerRepoString(item, e.defaultRepo())

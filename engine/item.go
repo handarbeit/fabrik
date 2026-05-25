@@ -105,7 +105,10 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 		}
 		// Also admit closed items with fabrik:awaiting-ci so the catch-up loop
 		// can complete the CI gate after a PR merge closes the issue.
-		if !stage.CleanupWorktree && !hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) && !hasLabel(item, "fabrik:awaiting-ci") {
+		// Admit fabrik:auto-merge-enabled for the same reason: when GitHub merges
+		// the PR the issue is closed; checkAutoMergeConvergence needs to run to
+		// detect the merged state and advance to Done.
+		if !stage.CleanupWorktree && !hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) && !hasLabel(item, "fabrik:awaiting-ci") && !hasLabel(item, "fabrik:auto-merge-enabled") {
 			return false
 		}
 	}
@@ -155,12 +158,14 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	// Closed issues are skipped unless the current stage is a cleanup stage
 	// (so cleanup can remove the worktree) OR the current stage is already
 	// marked complete (so the catch-up loop can advance to the next stage) OR
-	// fabrik:awaiting-ci is present (so the catch-up loop can finish the CI gate).
+	// fabrik:awaiting-ci is present (so the catch-up loop can finish the CI gate) OR
+	// fabrik:auto-merge-enabled is present (so checkAutoMergeConvergence can detect
+	// the merged PR and advance to Done after GitHub closes the issue).
 	if item.IsClosed {
 		if stage == nil {
 			return false
 		}
-		if !stage.CleanupWorktree && !hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) && !hasLabel(item, "fabrik:awaiting-ci") {
+		if !stage.CleanupWorktree && !hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) && !hasLabel(item, "fabrik:awaiting-ci") && !hasLabel(item, "fabrik:auto-merge-enabled") {
 			return false
 		}
 	}
