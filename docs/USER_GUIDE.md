@@ -440,6 +440,13 @@ user: your-github-username
 # go.mod (returns module path, not semver), Cargo.toml, or pyproject.toml.
 # Set explicitly to override auto-inference (e.g., version: "1.2.0").
 # version: ""
+
+# When true, enables the Layer 2 cross-repo ref audit: Fabrik snapshots git refs
+# of all registered bare repos before and after each Claude invocation; if any ref
+# in a repo other than the active issue's own repo changes, the stage is failed and
+# paused for inspection. Off by default; the snapshot filters to refs/heads/* and
+# refs/tags/* only to avoid false positives from routine fetches.
+# worktree_boundary_audit: false
 ```
 
 **Multi-repo mode:** When `repo:` is commented out or omitted, Fabrik processes issues from *all* repositories on the project board. Use this when your project board spans multiple repos (cross-org collaborations, monorepos with independent sub-repos, or a single board managing several distinct services). To restrict Fabrik to one repository, uncomment and set `repo:`.
@@ -904,7 +911,8 @@ After spawning, the parent waits at Implement with `fabrik:blocked` until all ch
 #### What You Observe
 
 - During Plan: no sub-issues exist. Plan can be revised freely.
-- After advancing to Implement: child issues appear on the project board in Research, each labeled `fabrik:sub-issue`.
+- After advancing to Implement: child issues appear on the project board in Specify, each labeled `fabrik:sub-issue`.
+- If the parent carries `fabrik:yolo` or `fabrik:cruise`, each child inherits those labels on creation — a yolo'd cross-repo parent spawns children that flow autonomously through all stages without operator intervention.
 - The parent shows `fabrik:blocked` + `fabrik:children-spawned`; a dependency comment lists all open children.
 - As children complete, the dependency comment updates in-place (no duplicate comments).
 - When all children close: `fabrik:blocked` clears, and the parent's own Implement runs.
@@ -1576,7 +1584,7 @@ Fabrik enforces two independent layers of worktree isolation on every Claude inv
 
 **Layer 2 — Cross-repo ref audit (opt-in, default off)**: Before the extension loop begins, Fabrik snapshots the git refs of all registered bare repos. After the loop completes, a second snapshot is taken and compared. If any ref in a repo other than the active issue's own repo has changed, a boundary violation is raised: `fabrik:paused` and `stage:<name>:failed` are applied, a comment is posted listing the specific refs that were mutated, and no automatic cleanup occurs.
 
-> **Note:** The Layer 2 audit is off by default (pending root-cause fix in #808 — routine `git fetch origin` in sibling bare clones was triggering false-positive violations). To enable it, use one of:
+> **Note:** The Layer 2 audit is off by default. The snapshot filters to `refs/heads/*` and `refs/tags/*` only, so routine `git fetch` against sibling bare clones does not trigger false-positive violations. To enable it, use one of:
 >
 > ```yaml
 > # .fabrik/config.yaml
