@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -811,10 +812,11 @@ func TestArchiveDoneCompleteItems_SkipsIncompleteItems(t *testing.T) {
 	}
 }
 
-// TestYoloCatchUpMergesBeforeAdvance verifies that when an item sits in the
+// TestYoloCatchUpEnablesAutoMerge verifies that when an item sits in the
 // Validate column with stage:Validate:complete + fabrik:yolo, the catch-up loop
-// calls MergePR before calling UpdateProjectItemStatus (advancing to Done).
-func TestYoloCatchUpMergesBeforeAdvance(t *testing.T) {
+// calls EnablePullRequestAutoMerge (not MergePR) and does NOT immediately advance
+// to Done (advancement is deferred to checkAutoMergeConvergence).
+func TestYoloCatchUpEnablesAutoMerge(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{
@@ -845,17 +847,6 @@ func TestYoloCatchUpMergesBeforeAdvance(t *testing.T) {
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 			return &gh.PRDetails{Number: 99, HeadSHA: "sha1"}, nil
 		},
-	}
-	// Set after construction so the closure can reference client.
-	client.updateProjectItemStatusFn = func(projectID, itemID, statusFieldID, statusOptionID string) error {
-		// Ordering assertion: MergePR must have been called before UpdateProjectItemStatus.
-		client.mu.Lock()
-		mergedBefore := len(client.mergePRCalls) > 0
-		client.mu.Unlock()
-		if !mergedBefore {
-			t.Error("UpdateProjectItemStatus called before MergePR — ordering violated")
-		}
-		return nil
 	}
 	eng := testEngineWithStages(client, testStagesWithValidate())
 	// Seed item into cycleSet so the pre-filter admits it (simulates observer firing).
@@ -869,25 +860,31 @@ func TestYoloCatchUpMergesBeforeAdvance(t *testing.T) {
 	}
 
 	client.mu.Lock()
+	autoMergeCalls := len(client.enablePullRequestAutoMergeCalls)
 	merges := len(client.mergePRCalls)
 	advances := len(client.updateStatusCalls)
 	client.mu.Unlock()
 
-	if merges == 0 {
-		t.Fatal("expected MergePR to be called")
+	if autoMergeCalls == 0 {
+		t.Fatal("expected EnablePullRequestAutoMerge to be called")
 	}
-	if advances == 0 {
-		t.Fatal("expected UpdateProjectItemStatus to be called after merge")
+	if merges != 0 {
+		t.Errorf("MergePR must not be called in the new auto-merge path, got %d", merges)
 	}
-	if client.mergePRCalls[0].prNumber != 99 {
-		t.Errorf("MergePR called with prNumber %d, want 99", client.mergePRCalls[0].prNumber)
+	// Done advancement is deferred to checkAutoMergeConvergence, not immediate.
+	if advances != 0 {
+		t.Errorf("expected no immediate advance (deferred to convergence monitor), got %d", advances)
+	}
+	if client.enablePullRequestAutoMergeCalls[0].prNumber != 99 {
+		t.Errorf("EnablePullRequestAutoMerge called with prNumber %d, want 99", client.enablePullRequestAutoMergeCalls[0].prNumber)
 	}
 }
 
-// TestYoloCatchUpSkipsAdvanceOnMergeError verifies that when MergePR returns an
-// error in the catch-up loop, UpdateProjectItemStatus is NOT called (advance is
-// skipped).
-func TestYoloCatchUpSkipsAdvanceOnMergeError(t *testing.T) {
+// TestYoloCatchUpSkipsAdvanceOnAutoMergeError verifies that when
+// EnablePullRequestAutoMerge returns an error in the catch-up loop,
+// UpdateProjectItemStatus is NOT called (advance is skipped) and the engine
+// does not dispatch a rebase or pause the issue — it simply retries next poll.
+func TestYoloCatchUpSkipsAdvanceOnAutoMergeError(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{
@@ -918,12 +915,11 @@ func TestYoloCatchUpSkipsAdvanceOnMergeError(t *testing.T) {
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 			return &gh.PRDetails{Number: 99, HeadSHA: "sha1"}, nil
 		},
-		mergePRFn: func(owner, repo string, prNumber int) error {
-			return gh.ErrNotMergeable
+		enablePullRequestAutoMergeFn: func(owner, repo string, prNumber int, strategy string) error {
+			return errors.New("transient API error")
 		},
 	}
 	eng := testEngineWithStages(client, testStagesWithValidate())
-	eng.cfg.MaxRebaseCycles = 3
 	// Seed item into cycleSet so the pre-filter admits it (simulates observer firing).
 	eng.mayNeedWorkMu.Lock()
 	eng.mayNeedWork["owner/repo#42"] = true
@@ -933,24 +929,21 @@ func TestYoloCatchUpSkipsAdvanceOnMergeError(t *testing.T) {
 	if _, err := eng.poll(ctx); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
-	// Wait for the dispatched rebase goroutine to exit (exits early via ErrSkipItem in tests).
-	eng.wg.Wait()
 
 	client.mu.Lock()
 	advances := len(client.updateStatusCalls)
 	client.mu.Unlock()
 
 	if advances != 0 {
-		t.Errorf("expected no UpdateProjectItemStatus when merge fails, got %d", advances)
+		t.Errorf("expected no UpdateProjectItemStatus when auto-merge enablement fails, got %d", advances)
 	}
-	// Rebase dispatch should have fired, not immediate pause.
-	snap42, _ := eng.store.Get("owner/repo", 42)
-	if snap42.RebaseCycles("Validate") != 1 {
-		t.Errorf("expected rebaseCycles(Validate) == 1, got %d", snap42.RebaseCycles("Validate"))
-	}
+	// No rebase dispatch — error path in new auto-merge flow just logs and retries.
 	for _, c := range client.addLabelCalls {
 		if c.labelName == "fabrik:paused" {
-			t.Error("fabrik:paused must NOT be added when dispatching rebase reinvoke")
+			t.Error("fabrik:paused must NOT be added for transient auto-merge enablement error")
+		}
+		if c.labelName == "fabrik:rebase-needed" {
+			t.Error("fabrik:rebase-needed must NOT be added for auto-merge enablement error")
 		}
 	}
 }
@@ -1146,10 +1139,11 @@ func TestCruiseCatchUp_Validate_NoMergeNoAdvance(t *testing.T) {
 	}
 }
 
-// TestCruiseCatchUp_BothCruiseAndYolo_YoloWins verifies that when both fabrik:cruise
-// and fabrik:yolo are present, yolo takes precedence: the PR is merged and the item
-// advances past Validate in the catch-up loop.
-func TestCruiseCatchUp_BothCruiseAndYolo_YoloWins(t *testing.T) {
+// TestCruiseCatchUp_BothCruiseAndYolo_CruiseWins verifies that when both fabrik:cruise
+// and fabrik:yolo are present, cruise takes precedence at Validate: neither
+// EnablePullRequestAutoMerge nor MergePR is called and the item is not advanced
+// (FR-003, FR-015: cruise leaves the PR for human merge).
+func TestCruiseCatchUp_BothCruiseAndYolo_CruiseWins(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 			return &gh.ProjectBoard{
@@ -1195,13 +1189,17 @@ func TestCruiseCatchUp_BothCruiseAndYolo_YoloWins(t *testing.T) {
 	client.mu.Lock()
 	advances := len(client.updateStatusCalls)
 	merges := len(client.mergePRCalls)
+	autoMergeCalls := len(client.enablePullRequestAutoMergeCalls)
 	client.mu.Unlock()
 
-	if merges != 1 {
-		t.Errorf("expected MergePR to fire when yolo wins over cruise, got %d", merges)
+	if merges != 0 {
+		t.Errorf("expected no MergePR when cruise wins over yolo, got %d", merges)
 	}
-	if advances != 1 {
-		t.Errorf("expected advance when yolo wins over cruise, got %d", advances)
+	if autoMergeCalls != 0 {
+		t.Errorf("expected no EnablePullRequestAutoMerge when cruise wins over yolo, got %d", autoMergeCalls)
+	}
+	if advances != 0 {
+		t.Errorf("expected no advance when cruise wins at Validate, got %d", advances)
 	}
 }
 
