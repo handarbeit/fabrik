@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -68,20 +69,36 @@ func LoadEnv(t *testing.T) *Env {
 
 // AssertFabrikRunning verifies the test-bed Fabrik instance is alive.
 // Skips the test if not — we don't auto-start it (yet).
+//
+// Detection strategy: check the lock file. Fabrik atomically writes its PID
+// to .fabrik/fabrik.lock on startup and unlinks it on shutdown. If the file
+// exists and the named PID is still alive, Fabrik is running.
 func AssertFabrikRunning(t *testing.T, env *Env) {
 	t.Helper()
-
-	// Look for a process whose command line includes the fabrik-test directory
-	// and ends in "/fabrik" (the binary, not a subprocess).
-	out, _ := exec.Command("ps", "ax", "-o", "pid,command").CombinedOutput()
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.Contains(line, env.FabrikTestDir+"/fabrik") &&
-			!strings.Contains(line, "grep") &&
-			!strings.Contains(line, "claude") {
-			return
-		}
+	lockPath := filepath.Join(env.FabrikTestDir, ".fabrik", "fabrik.lock")
+	contents, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Skipf("Fabrik instance not running at %s — no lock file (start it: cd %s && ./fabrik -notui --auto-upgrade &)",
+			env.FabrikTestDir, env.FabrikTestDir)
 	}
-	t.Skipf("Fabrik instance not running at %s — start it (cd %s && ./fabrik -notui &)", env.FabrikTestDir, env.FabrikTestDir)
+	var pid int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(contents)), "%d", &pid); err != nil || pid <= 0 {
+		t.Skipf("Fabrik lock file at %s is malformed (%q)", lockPath, contents)
+	}
+	if err := syscallSignalZero(pid); err != nil {
+		t.Skipf("Fabrik lock file claims pid %d but process is dead (%v) — stale lock at %s; remove and restart",
+			pid, err, lockPath)
+	}
+}
+
+// syscallSignalZero sends signal 0 to a pid — a no-op signal that returns an
+// error if the process doesn't exist. POSIX-portable liveness check.
+func syscallSignalZero(pid int) error {
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return p.Signal(syscall.Signal(0))
 }
 
 // FileIssue creates an issue in the named repo with the given title, body, and
