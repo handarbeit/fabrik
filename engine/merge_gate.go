@@ -209,6 +209,7 @@ func (e *Engine) dispatchRebaseReinvoke(ctx context.Context, board *gh.ProjectBo
 		}
 
 		e.logf(item.Number, "rebase-reinvoke", "re-invoking stage %q via comment processing with rebase context\n", stage.Name)
+		owner, repo := itemOwnerRepo(item, e.defaultRepo())
 		err := e.processComments(ctx, board, item, &rebaseStage, []gh.Comment{syntheticComment}, onPIDReady)
 
 		if err != nil {
@@ -216,8 +217,224 @@ func (e *Engine) dispatchRebaseReinvoke(ctx context.Context, board *gh.ProjectBo
 				return
 			}
 			e.logf(item.Number, "warn", "rebase re-invocation failed: %v\n", err)
+			return
+		}
+
+		// GitHub disables auto-merge on every push. Re-enable it if this issue is in
+		// the convergence flow (fabrik:auto-merge-enabled present at dispatch time).
+		if hasLabel(item, "fabrik:auto-merge-enabled") {
+			pr, prErr := e.client.FetchLinkedPR(owner, repo, item.Number)
+			if prErr != nil || pr == nil || pr.Number == 0 {
+				e.logf(item.Number, "warn", "rebase reinvoke: could not fetch linked PR for auto-merge re-enable: %v\n", prErr)
+			} else if rerr := e.client.EnablePullRequestAutoMerge(owner, repo, pr.Number, e.cfg.AutoMergeStrategy); rerr != nil {
+				e.logf(item.Number, "warn", "auto-merge re-enable after rebase failed: %v\n", rerr)
+			} else {
+				e.logf(item.Number, "auto-merge", "re-enabled auto-merge on PR #%d after rebase push\n", pr.Number)
+			}
 		}
 	}()
+}
+
+// checkAutoMergeConvergence monitors a yolo issue that has entered the GitHub
+// native auto-merge convergence flow (fabrik:auto-merge-enabled is present).
+// Called from Phase 1 of the catch-up loop; replaces checkMergeabilityGate and
+// checkCIGate for these items. Returns after completing any dispatch or pause.
+func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+
+	pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number)
+	if err != nil {
+		e.logf(item.Number, "auto-merge", "could not fetch linked PR: %v — skipping convergence check\n", err)
+		return
+	}
+	if pr == nil || pr.Number == 0 {
+		return
+	}
+
+	// PR merged or closed: remove label and let existing machinery advance to Done.
+	if pr.Merged || pr.State == "closed" {
+		e.logf(item.Number, "auto-merge", "PR #%d merged or closed — removing fabrik:auto-merge-enabled\n", pr.Number)
+		if rerr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); rerr != nil {
+			e.logf(item.Number, "warn", "could not remove fabrik:auto-merge-enabled: %v\n", rerr)
+		} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:auto-merge-enabled")
+		}
+		e.removeRebaseNeededLabel(owner, repo, item)
+		return
+	}
+
+	// User manually disabled auto-merge: back off, treat as cruise from this point.
+	if !pr.AutoMergeEnabled {
+		e.logf(item.Number, "auto-merge", "PR #%d auto-merge disabled by user — treating as cruise\n", pr.Number)
+		msg := fmt.Sprintf("🏭 **Fabrik — auto-merge disabled**\n\n" +
+			"Fabrik detected that GitHub auto-merge was disabled on the linked PR. " +
+			"Fabrik will no longer attempt to merge this PR automatically — treating as `fabrik:cruise` from this point. " +
+			"To re-enable, add `fabrik:yolo` and remove `fabrik:auto-merge-enabled` after the branch is ready.")
+		if dbID, cerr := e.client.AddComment(owner, repo, item.Number, msg); cerr != nil {
+			e.logf(item.Number, "warn", "could not post auto-merge disabled comment: %v\n", cerr)
+		} else {
+			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+					DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
+				})
+			}
+		}
+		if rerr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); rerr != nil {
+			e.logf(item.Number, "warn", "could not remove fabrik:auto-merge-enabled: %v\n", rerr)
+		} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:auto-merge-enabled")
+		}
+		return
+	}
+
+	// Check convergence budget.
+	if e.cfg.ConvergenceBudget > 0 {
+		budgetStart, berr := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:auto-merge-enabled")
+		if berr != nil {
+			e.logf(item.Number, "auto-merge", "could not fetch fabrik:auto-merge-enabled applied-at: %v\n", berr)
+		} else if !budgetStart.IsZero() {
+			elapsed := time.Since(budgetStart)
+			if elapsed > e.cfg.ConvergenceBudget {
+				e.logf(item.Number, "auto-merge", "convergence budget exhausted (%.0fs / %.0fs) — pausing\n",
+					elapsed.Seconds(), e.cfg.ConvergenceBudget.Seconds())
+				e.pauseForConvergenceFailed(ctx, board, item, stage, elapsed)
+				return
+			}
+		}
+	}
+
+	// GitHub transiently returns "unknown" mergeability after a push. Wait.
+	if pr.MergeableState == "unknown" {
+		e.logf(item.Number, "auto-merge", "PR #%d mergeable_state=unknown — waiting for GitHub to compute\n", pr.Number)
+		return
+	}
+
+	// Confirmed conflict (dirty): dispatch one rebase reinvoke if none is in-flight.
+	// Cycle count is incremented for observability but not consulted as a gate.
+	if pr.MergeableState == "dirty" {
+		if snap, serr := e.store.Get(repoStr, item.Number); serr == nil && snap.Worker() != nil {
+			e.logf(item.Number, "auto-merge", "rebase already in-flight — skipping dispatch\n")
+			return
+		}
+		e.logf(item.Number, "auto-merge", "PR #%d merge conflict — dispatching rebase reinvoke\n", pr.Number)
+		e.store.Apply(itemstate.RebaseCycleIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+		e.dispatchRebaseReinvoke(ctx, board, item, stage)
+		return
+	}
+
+	// All other states (clean, blocked, behind, unstable, has_hooks): GitHub is handling it.
+	e.logf(item.Number, "auto-merge", "PR #%d mergeable_state=%q — waiting for GitHub auto-merge\n", pr.Number, pr.MergeableState)
+}
+
+// pauseForConvergenceFailed is called when the convergence budget exhausts before
+// the yolo PR merges. Posts a structured comment naming the actual current state,
+// applies fabrik:paused + fabrik:awaiting-input, and removes fabrik:auto-merge-enabled.
+func (e *Engine) pauseForConvergenceFailed(_ context.Context, _ *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, elapsed time.Duration) {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+
+	// Fetch fresh state for the comment.
+	pr, _ := e.client.FetchLinkedPR(owner, repo, item.Number)
+	var mergeableState, headSHA, latestCI string
+	var commitsBehind int
+	if pr != nil && pr.Number != 0 {
+		mergeableState = pr.MergeableState
+		headSHA = pr.HeadSHA
+		// Determine base branch for commits-behind count.
+		wm := e.worktreesFor(item.Repo)
+		baseBranch, _ := e.baseBranchForItem(item, wm)
+		if baseBranch == "" {
+			baseBranch = "main"
+		}
+		commitsBehind, _ = e.client.FetchCommitsBehind(owner, repo, baseBranch, headSHA)
+		if headSHA != "" {
+			runs, _ := e.readClient.FetchCheckRuns(owner, repo, headSHA)
+			latestCI = summarizeCIRuns(runs)
+		}
+	}
+
+	var rebaseCycles int
+	if snap, serr := e.store.Get(repoStr, item.Number); serr == nil {
+		rebaseCycles = snap.RebaseCycles(stage.Name)
+	}
+
+	budgetStr := e.cfg.ConvergenceBudget.String()
+	elapsedStr := elapsed.Round(time.Second).String()
+
+	msg := fmt.Sprintf(
+		"🏭 **Fabrik — convergence budget exhausted**\n\n"+
+			"Fabrik attempted to merge the linked PR via GitHub native auto-merge for **%s** "+
+			"(budget: %s) without converging. Current state:\n\n"+
+			"| | |\n"+
+			"|---|---|\n"+
+			"| Elapsed | %s |\n"+
+			"| Rebase reinvokes dispatched | %d |\n"+
+			"| Commits behind base | %d |\n"+
+			"| PR `mergeable_state` | `%s` |\n"+
+			"| Latest CI (SHA `%s`) | %s |\n\n"+
+			"**Next steps — choose one:**\n"+
+			"1. **Manual rebase + re-yolo**: Resolve conflicts manually, push, then remove `fabrik:paused` and ensure `fabrik:yolo` is present. Fabrik will re-enable auto-merge and restart the convergence budget.\n"+
+			"2. **Switch to cruise**: Remove `fabrik:paused` + `fabrik:yolo`, add `fabrik:cruise`. Fabrik will keep the branch rebased against main but leave merging to you.\n"+
+			"3. **Leave as-is**: Remove `fabrik:paused` when ready. Fabrik will retry auto-merge from the current state.",
+		elapsedStr, budgetStr,
+		elapsedStr, rebaseCycles, commitsBehind,
+		mergeableState, headSHA, latestCI,
+	)
+
+	if dbID, err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
+		e.logf(item.Number, "warn", "could not post convergence-failed pause comment: %v\n", err)
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+				DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
+			})
+		}
+		if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+			e.logf(item.Number, "warn", "could not add 🚀 to convergence-failed comment: %v\n", reactErr)
+		}
+	}
+
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
+		e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
+	}
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
+		e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
+	}
+	if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); err != nil {
+		e.logf(item.Number, "warn", "could not remove fabrik:auto-merge-enabled: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:auto-merge-enabled")
+	}
+}
+
+// summarizeCIRuns produces a brief human-readable summary of check run results.
+func summarizeCIRuns(runs []gh.CheckRun) string {
+	if len(runs) == 0 {
+		return "none"
+	}
+	var failed, pending, passed int
+	for _, r := range runs {
+		switch {
+		case r.Status != "completed":
+			pending++
+		case r.Conclusion == "success" || r.Conclusion == "neutral" || r.Conclusion == "skipped":
+			passed++
+		default:
+			failed++
+		}
+	}
+	if failed > 0 {
+		return fmt.Sprintf("❌ %d failed, %d passed, %d pending", failed, passed, pending)
+	}
+	if pending > 0 {
+		return fmt.Sprintf("⏳ %d pending, %d passed", pending, passed)
+	}
+	return fmt.Sprintf("✅ %d passed", passed)
 }
 
 // pauseForRebaseCycleLimit pauses the issue when rebase re-invocations have
