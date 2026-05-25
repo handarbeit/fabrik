@@ -385,7 +385,7 @@ func Execute() error {
 			cfg.SymlinkEnv = true
 		}
 	}
-	if !cfg.WorktreeBoundaryAudit {
+	if !explicitFlags["worktree-boundary-audit"] {
 		if v := os.Getenv("FABRIK_WORKTREE_BOUNDARY_AUDIT"); v != "" {
 			lv := strings.ToLower(v)
 			cfg.WorktreeBoundaryAudit = lv == "true" || lv == "1" || lv == "yes"
