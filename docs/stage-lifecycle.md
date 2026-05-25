@@ -291,12 +291,14 @@ The `e.claude.Invoke()` call runs inside an extension loop. On each iteration:
 
 ### Post-Run Boundary Audit
 
-After the extension loop completes, a cross-repo ref audit runs for non-read-only, non-unrestricted stages. The audit detects git-layer mutations in any repository other than the active worktree's own repo.
+After the extension loop completes, a cross-repo ref audit runs for non-read-only, non-unrestricted stages **when `e.cfg.WorktreeBoundaryAudit` is `true`** (default: `false`). The audit detects git-layer mutations in any repository other than the active worktree's own repo.
+
+> **Default off (pending #808):** The audit is disabled by default because routine `git fetch origin` in sibling bare clones produces false-positive violations. Enable it with `worktree_boundary_audit: true` in `.fabrik/config.yaml`, `--worktree-boundary-audit` on the CLI, or `FABRIK_WORKTREE_BOUNDARY_AUDIT=true`.
 
 **How it works:**
 
-1. **Pre-audit snapshot** (taken immediately before the extension loop): For each registered `WorktreeManager` in the engine, run `git for-each-ref --format=%(refname) %(objectname) refs/heads/ refs/tags/` in its bare-clone directory. Capture `repo → (refname → SHA)` for locally-authored refs only. `refs/remotes/` is intentionally excluded — remote-tracking refs are passively-observed upstream state updated by `git fetch` for reasons unrelated to Claude's activity; including them would cause false-positive violations when a concurrent fetch updates a sibling bare clone.
-2. **Post-audit snapshot** (taken immediately after the extension loop): Same operation.
+1. **Pre-audit snapshot** (taken immediately before the extension loop): For each registered `WorktreeManager` in the engine, run `git for-each-ref --format=%(refname) %(objectname) refs/heads/ refs/tags/` in its bare-clone directory. Capture `repo → (refname → SHA)` for locally-authored refs only. `refs/remotes/` is intentionally excluded — remote-tracking refs are passively-observed upstream state updated by `git fetch` for reasons unrelated to Claude's activity; including them would cause false-positive violations when a concurrent fetch updates a sibling bare clone. **Skipped entirely when `WorktreeBoundaryAudit` is `false`.**
+2. **Post-audit snapshot** (taken immediately after the extension loop): Same operation. Skipped when the pre-audit snapshot was not taken (i.e., `WorktreeBoundaryAudit` is `false`).
 3. **Violation check** (`crossRepoViolations`): Compare before/after for every repo key *except* the active issue's repo. Any ref that is new or has a changed SHA is a violation.
 
 **On violation:**
@@ -310,7 +312,7 @@ After the extension loop completes, a cross-repo ref audit runs for non-read-onl
 
 **No violation:** The audit is silent. Stage proceeds to normal output posting and completion.
 
-**Bypass:** Skipped when `stage.ReadOnly == true` or `fabrik:unrestricted` is present on the issue.
+**Bypass:** Skipped when `WorktreeBoundaryAudit` is `false` (default), `stage.ReadOnly == true`, or `fabrik:unrestricted` is present on the issue.
 
 **Limitation — Bash shell writes:** The audit checks git refs, not the filesystem. A Claude session that writes files outside the worktree via raw shell commands (e.g., `cat > /other/path`) would not be caught unless those files were also committed and pushed to another repo. The `Edit`/`Write` path restriction (Phase 2) is the primary mitigation for direct file writes.
 
