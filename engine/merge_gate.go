@@ -243,7 +243,11 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 
-	pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number)
+	// Use e.client (direct GitHub API) rather than e.readClient (boardcache) so
+	// that pr.AutoMergeEnabled reflects the live GitHub state. The boardcache
+	// LinkedPRState does not persist AutoMergeEnabled; a cache hit would return
+	// false and incorrectly trigger the "user disabled auto-merge" path on every poll.
+	pr, err := e.client.FetchLinkedPR(owner, repo, item.Number)
 	if err != nil {
 		e.logf(item.Number, "auto-merge", "could not fetch linked PR: %v — skipping convergence check\n", err)
 		return
