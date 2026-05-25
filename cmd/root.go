@@ -731,6 +731,10 @@ func convergenceBudget(s string) time.Duration {
 		fmt.Fprintf(os.Stderr, "[warn] FABRIK_CONVERGENCE_BUDGET=%q is invalid (Go duration syntax required, e.g. 30m, 1h); using default 30m\n", s)
 		return 30 * time.Minute
 	}
+	if d < 0 {
+		fmt.Fprintf(os.Stderr, "[warn] FABRIK_CONVERGENCE_BUDGET=%q is negative; using default 30m\n", s)
+		return 30 * time.Minute
+	}
 	return d
 }
 

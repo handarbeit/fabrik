@@ -226,10 +226,16 @@ func (e *Engine) dispatchRebaseReinvoke(ctx context.Context, board *gh.ProjectBo
 			pr, prErr := e.client.FetchLinkedPR(owner, repo, item.Number)
 			if prErr != nil || pr == nil || pr.Number == 0 {
 				e.logf(item.Number, "warn", "rebase reinvoke: could not fetch linked PR for auto-merge re-enable: %v\n", prErr)
-			} else if rerr := e.client.EnablePullRequestAutoMerge(owner, repo, pr.Number, e.cfg.AutoMergeStrategy); rerr != nil {
-				e.logf(item.Number, "warn", "auto-merge re-enable after rebase failed: %v\n", rerr)
 			} else {
-				e.logf(item.Number, "auto-merge", "re-enabled auto-merge on PR #%d after rebase push\n", pr.Number)
+				strategy := e.cfg.AutoMergeStrategy
+				if strategy == "" {
+					strategy = "MERGE"
+				}
+				if rerr := e.client.EnablePullRequestAutoMerge(owner, repo, pr.Number, strategy); rerr != nil {
+					e.logf(item.Number, "warn", "auto-merge re-enable after rebase failed: %v\n", rerr)
+				} else {
+					e.logf(item.Number, "auto-merge", "re-enabled auto-merge on PR #%d after rebase push\n", pr.Number)
+				}
 			}
 		}
 	}()
@@ -273,13 +279,17 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 		return
 	}
 
-	// User manually disabled auto-merge: back off, treat as cruise from this point.
+	// User manually disabled auto-merge: pause the issue to prevent the next poll
+	// from re-enabling auto-merge via Phase 2 (yoloActive=true + no label → attemptMergeOnValidate).
 	if !pr.AutoMergeEnabled {
-		e.logf(item.Number, "auto-merge", "PR #%d auto-merge disabled by user — treating as cruise\n", pr.Number)
+		e.logf(item.Number, "auto-merge", "PR #%d auto-merge disabled by user — pausing\n", pr.Number)
 		msg := fmt.Sprintf("🏭 **Fabrik — auto-merge disabled**\n\n" +
 			"Fabrik detected that GitHub auto-merge was disabled on the linked PR. " +
-			"Fabrik will no longer attempt to merge this PR automatically — treating as `fabrik:cruise` from this point. " +
-			"To re-enable, add `fabrik:yolo` and remove `fabrik:auto-merge-enabled` after the branch is ready.")
+			"This issue has been paused (`fabrik:paused` + `fabrik:awaiting-input`) to prevent Fabrik from re-enabling auto-merge on the next poll cycle.\n\n" +
+			"To resume:\n" +
+			"- **Keep cruise behavior**: Remove `fabrik:paused` and `fabrik:yolo`. Fabrik will keep the branch up-to-date but leave merging to you.\n" +
+			"- **Re-enable auto-merge**: Remove `fabrik:paused`. Fabrik will re-enable auto-merge on the next poll cycle.\n" +
+			"- **Leave as-is**: Take no action. The PR remains open and unmerged until you act.")
 		if dbID, cerr := e.client.AddComment(owner, repo, item.Number, msg); cerr != nil {
 			e.logf(item.Number, "warn", "could not post auto-merge disabled comment: %v\n", cerr)
 		} else {
@@ -288,6 +298,16 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 					DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
 				})
 			}
+		}
+		if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
+			e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", err)
+		} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
+		}
+		if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
+			e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", err)
+		} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
 		}
 		if rerr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); rerr != nil {
 			e.logf(item.Number, "warn", "could not remove fabrik:auto-merge-enabled: %v\n", rerr)

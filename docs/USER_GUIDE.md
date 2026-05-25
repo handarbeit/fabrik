@@ -729,7 +729,7 @@ Pass `--yolo` to enable global auto-advance: Fabrik moves issues through every s
 
 When Validate completes on a yolo issue, Fabrik calls GitHub's `enablePullRequestAutoMerge` API (the same merge-when-ready mechanism available in the GitHub UI) rather than attempting to merge immediately. GitHub holds the merge until all branch-protection requirements are satisfied — required CI checks, required reviews, up-to-date branch — then merges atomically. Fabrik monitors convergence in the background and pauses the issue if the PR does not reach a terminal state within the convergence budget (default 30 min; see `FABRIK_CONVERGENCE_BUDGET`). See [Post-Validate Convergence Monitor (yolo)](#post-validate-convergence-monitor-yolo) for full details.
 
-For lighter automation without auto-merge, use `fabrik:cruise`: it auto-advances through all stages but stops at Validate, leaving the merge decision to you. If both `fabrik:cruise` and `fabrik:yolo` are present, yolo takes precedence.
+For lighter automation without auto-merge, use `fabrik:cruise`: it auto-advances through all stages but stops at Validate, leaving the merge decision to you. If both `fabrik:cruise` and `fabrik:yolo` are present, cruise takes precedence for the merge decision — the PR is not auto-merged — but the issue still advances to Done.
 
 See [Stage YAML Reference](#stage-yaml-reference) for the `auto_advance` field, which controls auto-advance behavior per stage independent of the global `--yolo` flag.
 
@@ -1190,7 +1190,7 @@ When Validate completes on a yolo issue, Fabrik enables GitHub's native auto-mer
 - `fabrik:yolo` — full automation, including auto-merge. Best for low-contention repos or issues where merge timing doesn't matter. GitHub's native auto-merge queues the PR and merges it as soon as branch-protection requirements are met.
 - `fabrik:cruise` — automation through all stages, human merge decision. Use in repos with strict merge policies, main-branch freezes, or where you want to review the final diff before merge regardless of CI status.
 
-If both labels are present, yolo takes precedence.
+If both labels are present, cruise takes precedence for the merge decision — the PR is not auto-merged — but the issue still advances to Done (as yolo would).
 
 **Convergence budget**
 
@@ -1603,7 +1603,7 @@ For developing the plugin itself, use `--plugin-dir` to point at your working co
 | `effort:max` | Override thinking effort to max for this issue |
 | `fabrik:paused` | Manually pause processing (add to pause, remove to resume) |
 | `fabrik:yolo` | Force auto-advance for this issue even when `auto_advance: false`; also triggers auto-merge of the linked PR when Validate completes. If the linked PR was already manually merged when auto-merge runs, Fabrik treats it as a success and advances the issue to Done normally. |
-| `fabrik:cruise` | Auto-advances through all stages like `fabrik:yolo` but stops at Validate — no auto-merge, no move to Done. If both `fabrik:cruise` and `fabrik:yolo` are present, `fabrik:yolo` takes precedence. |
+| `fabrik:cruise` | Auto-advances through all stages like `fabrik:yolo` but stops at Validate — no auto-merge, no move to Done. If both `fabrik:cruise` and `fabrik:yolo` are present, cruise takes precedence for the merge decision (PR is not auto-merged), but the issue still advances to Done. |
 | `fabrik:unrestricted` | Pass `--dangerously-skip-permissions` instead of `--permission-mode dontAsk` for this issue; bypasses the default tool allowlist entirely. Use only when a stage needs tools outside the default set or when the default posture prevents required work. **Caution:** removes all tool restrictions. |
 | `fabrik:extend-turns` | Pre-grant 2× `max_turns` for every stage invocation while the label is present. Auto-extends to 3× when actual progress is detected during an invocation (Implement: new git commit (HEAD SHA changed) OR (baseline was clean AND working tree is now dirty — uncommitted file edits by Claude); Review: new git commit or resolved reviewer thread count; Validate: new comment; other stages: no progress signal). The label **persists across all stages** — apply it once and every stage from the current one through Done will benefit. It is removed automatically when the Done stage cleanup runs. No-op when `max_turns` is 0 (unlimited). The displayed turn counter denominator always reflects the effective budget. |
 | `base:<branch>` | Override the base branch for this issue (e.g. `base:develop`). Fabrik will fork from, rebase onto, and target PRs at `<branch>` instead of the repository default. Apply before Research; adding mid-pipeline is unsupported and may produce unexpected results. Branch names containing `/` are supported (e.g. `base:release/1.x`). If the named branch does not exist on the remote, Fabrik falls back to the default branch and posts a comment on the issue. |
