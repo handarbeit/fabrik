@@ -42,8 +42,10 @@ type Config struct {
 	MaxReviewCycles   int // 0 means use default (5)
 	CIWaitTimeout     int // minutes; 0 means use default (30)
 	MaxCiFixCycles    int // 0 means use default (5)
-	MaxRebaseCycles   int // 0 means use default (3)
-	ClaudeWaitDelay   int // seconds; 0 means use default (30)
+	MaxRebaseCycles      int    // 0 means use default (3)
+	ConvergenceBudget    string // Go duration string; "" means use default (30m); "0" means disabled
+	AutoMergeStrategy    string // MERGE, SQUASH, or REBASE; "" means use default (MERGE)
+	ClaudeWaitDelay      int    // seconds; 0 means use default (30)
 	DebugOutput              bool
 	SymlinkEnv               bool
 	WorktreeBoundaryAudit    bool
@@ -127,6 +129,8 @@ func Execute() error {
 	flag.IntVar(&cfg.CIWaitTimeout, "ci-wait-timeout", 0, "Maximum time in minutes to wait for CI in the merge guard before pausing (0 = use default of 30; also FABRIK_CI_WAIT_TIMEOUT)")
 	flag.IntVar(&cfg.MaxCiFixCycles, "max-ci-fix-cycles", 0, "Maximum number of CI-fix cycles per issue before pausing (0 = use default of 5; also FABRIK_MAX_CI_FIX_CYCLES)")
 	flag.IntVar(&cfg.MaxRebaseCycles, "max-rebase-cycles", 0, "Maximum number of rebase-reinvoke cycles per issue before pausing (0 = use default of 3; also FABRIK_MAX_REBASE_CYCLES)")
+	flag.StringVar(&cfg.ConvergenceBudget, "convergence-budget", "", "Wall-clock budget for post-Validate yolo convergence (Go duration: 30m, 1h; \"0\" disables; also FABRIK_CONVERGENCE_BUDGET)")
+	flag.StringVar(&cfg.AutoMergeStrategy, "auto-merge-strategy", "", "Merge method for GitHub auto-merge: MERGE, SQUASH, or REBASE (also FABRIK_AUTO_MERGE_STRATEGY; default MERGE)")
 	flag.IntVar(&cfg.ClaudeWaitDelay, "claude-wait-delay", 0, "Seconds to wait after Claude exits before recovering buffered output when grandchildren hold stdout pipe open (0 = use default of 30; also FABRIK_CLAUDE_WAIT_DELAY)")
 	flag.BoolVar(&cfg.DebugOutput, "debug-output", false, "Save Claude stage output to .fabrik/debug/ for debugging")
 	flag.BoolVar(&cfg.SymlinkEnv, "symlink-env", false, "Symlink the fabrik-dir .env file into each issue worktree at creation time (also FABRIK_SYMLINK_ENV)")
@@ -325,6 +329,16 @@ func Execute() error {
 			} else {
 				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_REBASE_CYCLES=%q is invalid (must be a positive integer); using default 3\n", v)
 			}
+		}
+	}
+	if !explicitFlags["convergence-budget"] {
+		if v := os.Getenv("FABRIK_CONVERGENCE_BUDGET"); v != "" {
+			cfg.ConvergenceBudget = v // validated in convergenceBudget() helper
+		}
+	}
+	if !explicitFlags["auto-merge-strategy"] {
+		if v := os.Getenv("FABRIK_AUTO_MERGE_STRATEGY"); v != "" {
+			cfg.AutoMergeStrategy = v // validated in autoMergeStrategy() helper
 		}
 	}
 	if !explicitFlags["claude-wait-delay"] {
@@ -571,6 +585,8 @@ func Execute() error {
 		CIWaitTimeout:            ciWaitTimeout(cfg.CIWaitTimeout),
 		MaxCiFixCycles:           maxCiFixCycles(cfg.MaxCiFixCycles),
 		MaxRebaseCycles:          maxRebaseCycles(cfg.MaxRebaseCycles),
+		ConvergenceBudget:        convergenceBudget(cfg.ConvergenceBudget),
+		AutoMergeStrategy:        autoMergeStrategy(cfg.AutoMergeStrategy),
 		ClaudeWaitDelay:          claudeWaitDelay(cfg.ClaudeWaitDelay),
 		DebugOutput:              cfg.DebugOutput,
 		SymlinkEnv:               cfg.SymlinkEnv,
@@ -700,6 +716,40 @@ func reconcileIntervalDuration(seconds int) time.Duration {
 		return 0
 	}
 	return time.Duration(seconds) * time.Second
+}
+
+// convergenceBudget parses a convergence budget string (Go duration syntax) into
+// a time.Duration. An empty string returns the default of 30 minutes. "0" or "0s"
+// disables the bounded budget (returns 0). Invalid values log a warning and return
+// the default.
+func convergenceBudget(s string) time.Duration {
+	if s == "" {
+		return 30 * time.Minute
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[warn] FABRIK_CONVERGENCE_BUDGET=%q is invalid (Go duration syntax required, e.g. 30m, 1h); using default 30m\n", s)
+		return 30 * time.Minute
+	}
+	return d
+}
+
+// autoMergeStrategy validates and returns the merge strategy string for
+// enablePullRequestAutoMerge. Accepts "MERGE", "SQUASH", or "REBASE" (case
+// insensitive). Returns "MERGE" for empty input or unrecognised values (with a
+// warning).
+func autoMergeStrategy(s string) string {
+	if s == "" {
+		return "MERGE"
+	}
+	upper := strings.ToUpper(s)
+	switch upper {
+	case "MERGE", "SQUASH", "REBASE":
+		return upper
+	default:
+		fmt.Fprintf(os.Stderr, "[warn] FABRIK_AUTO_MERGE_STRATEGY=%q is invalid (must be MERGE, SQUASH, or REBASE); using default MERGE\n", s)
+		return "MERGE"
+	}
 }
 
 // buildProjectInfo assembles the TUI footer metadata from the active config.

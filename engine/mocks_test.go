@@ -52,8 +52,10 @@ type mockGitHubClient struct {
 	fetchPRClosingIssuesFn        func(owner, repo string, prNumber int) ([]int, error)
 	fetchPRsForSHAFn              func(owner, repo, sha string) ([]int, error)
 	createIssueFn                 func(owner, repo, title, body string) (int, string, error)
-	addProjectV2ItemByIdFn        func(projectID, contentNodeID string) (string, error)
-	addBlockedByIssueFn           func(issueNodeID, blockerNodeID string) error
+	addProjectV2ItemByIdFn              func(projectID, contentNodeID string) (string, error)
+	addBlockedByIssueFn                 func(issueNodeID, blockerNodeID string) error
+	enablePullRequestAutoMergeFn        func(owner, repo string, prNumber int, strategy string) error
+	fetchCommitsBehindFn                func(owner, repo, base, head string) (int, error)
 
 	// Track call counts for FetchProjectItemStatus
 	fetchProjectItemStatusCalls []string
@@ -89,9 +91,11 @@ type mockGitHubClient struct {
 	addReviewRequestCalls           []reviewRequestCall
 	seedLabelsCalls                 []seedLabelsCall
 	seedLabelsFn                    func(owner, repo string, stageNames []string, lockedUser string) error
-	createIssueCalls                []createIssueCall
-	addProjectV2ItemCalls           []addProjectV2ItemCall
-	addBlockedByIssueCalls          []addBlockedByIssueCall
+	createIssueCalls                    []createIssueCall
+	addProjectV2ItemCalls               []addProjectV2ItemCall
+	addBlockedByIssueCalls              []addBlockedByIssueCall
+	enablePullRequestAutoMergeCalls     []enablePullRequestAutoMergeCall
+	fetchCommitsBehindCalls             []fetchCommitsBehindCall
 }
 
 type reviewRequestCall struct {
