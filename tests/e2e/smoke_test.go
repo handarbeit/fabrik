@@ -3,7 +3,9 @@
 package e2e
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -41,6 +43,93 @@ If you (the Specify agent) are reading this, the simplest spec is: "This is a sm
 	t.Logf("Specify complete on %s#%d — dispatch path verified", env.RepoAlpha, num)
 
 	// Don't wait for full pipeline; the t.Cleanup from FileIssue will close it.
+}
+
+// TestSpecKitSpecWritten verifies that when the Specify stage completes,
+// a spec file exists at specs/<N>-<slug>/spec.md on the issue branch, contains
+// a "# Feature Specification:" H1, and includes all mandatory Spec Kit sections.
+// It also verifies that "## Open Questions" is stripped before the file is committed.
+//
+// Wall-clock: ~5-10 min. Cost: ~$0.15-0.30.
+func TestSpecKitSpecWritten(t *testing.T) {
+	t.Parallel()
+	env := LoadEnv(t)
+	AssertFabrikRunning(t, env)
+
+	stamp := time.Now().UTC().Format("15:04:05")
+	num := FileIssue(t, env, env.RepoAlpha,
+		fmt.Sprintf("e2e spec-kit spec file verify (%s)", stamp),
+		`feat: add a hello world utility function
+
+Write a simple Go helper function that returns "hello world".
+This is a minimal e2e verification issue for the Spec Kit spec-file commit feature.
+
+Scope: Single file change, no cross-repo work needed.`,
+		"fabrik:yolo",
+	)
+	itemID := AddIssueToProject(t, env, env.RepoAlpha, num)
+	SetIssueStatus(t, env, itemID, "Specify")
+	t.Logf("filed %s#%d at Status=Specify", env.RepoAlpha, num)
+
+	// Wait up to 10 minutes for Specify to complete.
+	WaitForIssueLabel(t, env, env.RepoAlpha, num, "stage:Specify:complete", 10*time.Minute)
+	t.Logf("Specify complete on %s#%d — verifying spec file on branch", env.RepoAlpha, num)
+
+	branchRef := fmt.Sprintf("fabrik/issue-%d", num)
+
+	// List specs/ directory on the issue branch.
+	specsOut, err := ghOutput(env, "api",
+		fmt.Sprintf("repos/%s/contents/specs", env.RepoAlpha),
+		"-f", fmt.Sprintf("ref=%s", branchRef),
+		"--jq", "[.[] | .name]")
+	if err != nil {
+		t.Fatalf("specs/ directory not found on branch %s: %v\n%s", branchRef, err, specsOut)
+	}
+	var dirs []string
+	if parseErr := json.Unmarshal([]byte(strings.TrimSpace(specsOut)), &dirs); parseErr != nil {
+		t.Fatalf("parse specs dir listing: %v\n%s", parseErr, specsOut)
+	}
+
+	prefix := fmt.Sprintf("%d-", num)
+	var specDir string
+	for _, d := range dirs {
+		if strings.HasPrefix(d, prefix) {
+			specDir = d
+			break
+		}
+	}
+	if specDir == "" {
+		t.Fatalf("no specs/%d-* directory on branch %s (dirs: %v)", num, branchRef, dirs)
+	}
+
+	// Fetch the spec file content, decoding the GitHub base64 encoding.
+	specPath := fmt.Sprintf("specs/%s/spec.md", specDir)
+	specContent, err := ghOutput(env, "api",
+		fmt.Sprintf("repos/%s/contents/%s", env.RepoAlpha, specPath),
+		"-f", fmt.Sprintf("ref=%s", branchRef),
+		"--jq", `.content | gsub("\n"; "") | @base64d`)
+	if err != nil {
+		t.Fatalf("read %s on branch %s: %v\n%s", specPath, branchRef, err, specContent)
+	}
+
+	// Verify mandatory Spec Kit sections are present.
+	for _, section := range []string{
+		"# Feature Specification:",
+		"## User Scenarios & Testing",
+		"## Requirements",
+		"## Success Criteria",
+	} {
+		if !strings.Contains(specContent, section) {
+			t.Errorf("spec file %s missing required section %q", specPath, section)
+		}
+	}
+
+	// Verify Open Questions is not committed to the spec file.
+	if strings.Contains(specContent, "## Open Questions") {
+		t.Errorf("spec file %s must not contain '## Open Questions'", specPath)
+	}
+
+	t.Logf("spec file %s verified on branch %s", specPath, branchRef)
 }
 
 // TestSmokeSingleRepoFullPipeline runs the full single-repo end-to-end flow:
