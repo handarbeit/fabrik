@@ -260,7 +260,7 @@ func TestCheckAutoMergeConvergence_UserDisabledAutoMerge_PostsCommentRemovesLabe
 		},
 	}
 	eng := testEngineForMerge(client)
-	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
+	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled", "fabrik:yolo"}}
 	stage := &stages.Stage{Name: "Validate"}
 
 	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{}, item, stage)
@@ -282,9 +282,15 @@ func TestCheckAutoMergeConvergence_UserDisabledAutoMerge_PostsCommentRemovesLabe
 			t.Errorf("comment body should start with 🏭 **Fabrik, got: %q", c.body)
 		}
 	}
+	// fabrik:paused + fabrik:awaiting-input must be applied to prevent Phase 2 from
+	// re-enabling auto-merge on the next poll cycle.
+	wantAdded := map[string]bool{"fabrik:paused": false, "fabrik:awaiting-input": false}
 	for _, c := range client.addLabelCalls {
-		if c.labelName == "fabrik:paused" {
-			t.Error("should not pause when user takes over by disabling auto-merge")
+		wantAdded[c.labelName] = true
+	}
+	for label, found := range wantAdded {
+		if !found {
+			t.Errorf("expected label %q to be added when user disables auto-merge", label)
 		}
 	}
 }
