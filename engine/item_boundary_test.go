@@ -29,11 +29,12 @@ func boundaryEngine(t *testing.T, client *mockGitHubClient, claude *mockClaudeIn
 	t.Helper()
 	wm := NewWorktreeManager(primaryDir)
 	eng := NewWithDeps(Config{
-		Owner:  "owner",
-		Repo:   "repo",
-		User:   "testuser",
-		Token:  "token",
-		Stages: boundaryStages(),
+		Owner:                 "owner",
+		Repo:                  "repo",
+		User:                  "testuser",
+		Token:                 "token",
+		Stages:                boundaryStages(),
+		WorktreeBoundaryAudit: true,
 	}, client, claude, wm)
 
 	// Register the secondary repo so it participates in the cross-repo audit.
@@ -282,4 +283,71 @@ func TestBoundaryAudit_UnrestrictedLabelSkipped(t *testing.T) {
 		}
 	}
 	client.mu.Unlock()
+}
+
+// TestBoundaryAudit_FlagDisabled verifies that when WorktreeBoundaryAudit is false
+// (the default), cross-repo ref mutations are not detected and the stage completes
+// normally without posting a boundary violation comment.
+func TestBoundaryAudit_FlagDisabled(t *testing.T) {
+	skipIfNoGit(t)
+
+	primaryDir := initBareRepo(t)
+	secondaryDir := initBareRepo(t)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			// Simulate cross-repo mutation — would trigger a violation when audit is on.
+			cmd := exec.Command("git", "branch", "cross-repo-branch")
+			cmd.Dir = secondaryDir
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git branch in secondary repo failed: %s: %v", out, err)
+			}
+			return "FABRIK_STAGE_COMPLETE\n", true, TokenUsage{}, nil
+		},
+	}
+
+	// Build engine with WorktreeBoundaryAudit: false (the default — audit is off).
+	wm := NewWorktreeManager(primaryDir)
+	eng := NewWithDeps(Config{
+		Owner:                 "owner",
+		Repo:                  "repo",
+		User:                  "testuser",
+		Token:                 "token",
+		Stages:                boundaryStages(),
+		WorktreeBoundaryAudit: false,
+	}, client, claude, wm)
+	eng.mu.Lock()
+	eng.worktreeManagers["other/repo"] = NewWorktreeManager(secondaryDir)
+	eng.mu.Unlock()
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 1, Title: "Test", Status: "Implement", ItemID: "PVTI_1"}
+
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem returned unexpected error: %v", err)
+	}
+
+	// No boundary violation comment should be posted — audit is disabled.
+	client.mu.Lock()
+	for _, c := range client.addCommentCalls {
+		if strings.Contains(c.body, "boundary violation") {
+			t.Errorf("audit-disabled engine must not post boundary violation, got: %q", c.body)
+		}
+	}
+	client.mu.Unlock()
+
+	// Stage should complete normally.
+	client.mu.Lock()
+	var completionAdded bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Implement:complete" {
+			completionAdded = true
+		}
+	}
+	client.mu.Unlock()
+
+	if !completionAdded {
+		t.Error("expected stage:Implement:complete to be added when audit is disabled and stage signals completion")
+	}
 }

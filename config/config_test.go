@@ -151,6 +151,38 @@ func TestLoadProjectConfig_SymlinkEnvDefaultFalse(t *testing.T) {
 	}
 }
 
+func TestLoadProjectConfig_WorktreeBoundaryAuditDefaultFalse(t *testing.T) {
+	dir := t.TempDir()
+	chdir(t, dir)
+	if err := os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("owner: org\n"), 0644)
+	pc, err := LoadProjectConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pc.WorktreeBoundaryAudit {
+		t.Error("worktree_boundary_audit: want false by default")
+	}
+}
+
+func TestLoadProjectConfig_WorktreeBoundaryAuditYAML(t *testing.T) {
+	dir := t.TempDir()
+	chdir(t, dir)
+	if err := os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("owner: org\nworktree_boundary_audit: true\n"), 0644)
+	pc, err := LoadProjectConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !pc.WorktreeBoundaryAudit {
+		t.Error("worktree_boundary_audit: want true when set in config.yaml")
+	}
+}
+
 func TestLoadProjectConfig_ValidYAML(t *testing.T) {
 	dir := t.TempDir()
 	chdir(t, dir)

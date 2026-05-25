@@ -158,6 +158,25 @@ func TestExecute_FlagSymlinkEnv(t *testing.T) {
 	executeAndStop(t)
 }
 
+func TestExecute_EnvWorktreeBoundaryAudit(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	resetFlags()
+	t.Setenv("FABRIK_WORKTREE_BOUNDARY_AUDIT", "true")
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+	executeAndStop(t)
+}
+
+func TestExecute_FlagWorktreeBoundaryAudit(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir, "--worktree-boundary-audit"}
+	executeAndStop(t)
+}
+
 func TestExecute_StreamFilterSubcommand(t *testing.T) {
 	resetFlags()
 	r, w, _ := os.Pipe()
