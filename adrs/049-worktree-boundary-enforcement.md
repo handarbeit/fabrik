@@ -26,7 +26,9 @@ Claude Code's `--allowedTools` flag accepts the same `Tool(pattern)` syntax as `
 
 This is implemented in `applyWorktreeBoundary` (`engine/boundary.go`) — a pure function that takes the tool list and workDir and returns a new list with bare `Edit`/`Write` replaced. Called from `buildClaudeArgs` when `!unrestricted && !stage.ReadOnly && workDir != ""`.
 
-### Layer 2: Reactive Post-Run Audit
+### Layer 2: Reactive Post-Run Audit (opt-in — default off)
+
+> **Amendment (PR #810):** The Layer 2 audit is now **opt-in via the `WorktreeBoundaryAudit` config flag** (default `false`). It was made opt-in because routine `git fetch origin` calls in sibling bare clones were triggering false-positive violations; the root-cause fix is tracked in #808. To enable the audit, set `worktree_boundary_audit: true` in `.fabrik/config.yaml`, use `--worktree-boundary-audit` on the CLI, or set `FABRIK_WORKTREE_BOUNDARY_AUDIT=true`. Layer 1 is unaffected — it runs unconditionally regardless of this flag.
 
 Before the extension loop in `processItem` (`engine/item.go`), snapshot branch refs across all registered bare-clone repositories via `snapshotAllRepoRefs`. After the loop, compare via `crossRepoViolations`. Any ref that is new, changed, or deleted in a repo *other than* the active issue's repo is a boundary violation. Repos not present in the before-snapshot (lazy-registered during the run or whose pre-audit snapshot failed) are excluded from comparison to prevent false positives.
 
@@ -41,10 +43,11 @@ The audit is implemented in `snapshotRepoRefs` and `crossRepoViolations` (`engin
 
 ### Gating Conditions
 
-Both layers gate on `!unrestricted && !stage.ReadOnly`:
+Layer 1 gates on `!unrestricted && !stage.ReadOnly`. Layer 2 additionally gates on `e.cfg.WorktreeBoundaryAudit`:
 
-- **`fabrik:unrestricted`**: passes `--dangerously-skip-permissions` instead of `--allowedTools`, bypassing all tool restrictions. Worktree-boundary enforcement is also bypassed — consistent with the existing semantics of that label.
+- **`fabrik:unrestricted`**: passes `--dangerously-skip-permissions` instead of `--allowedTools`, bypassing all tool restrictions. Both worktree-boundary layers are also bypassed — consistent with the existing semantics of that label.
 - **Read-only stages** (Specify, Research, Plan): stash/restore worktree changes and do not produce commits or file writes. Neither layer applies.
+- **`WorktreeBoundaryAudit: false` (default)**: Layer 2 pre-audit snapshot is not taken, and `crossRepoViolations` is never called. Layer 1 is unaffected. See the amendment note above for context.
 - **Single-repo projects**: the path restriction still applies (preventing out-of-worktree file writes). The cross-repo audit produces no violations — the active repo is excluded, and there are no other registered repos.
 
 ## Rationale
