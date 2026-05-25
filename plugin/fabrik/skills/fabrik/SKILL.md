@@ -87,6 +87,8 @@ When the user wants to create a group of related issues where B is blocked by A,
 
 **Why the order matters**: Once an issue lands in Specify with `fabrik:yolo`, the engine picks it up within seconds (poll cadence is 30 s; webhooks fire immediately). `fabrik:blocked` is engine-managed: Fabrik adds it only when it detects an open `blocked_by` link at poll time. If that link isn't present when Fabrik fetches the issue's deep state, `checkDependencies` sees no open dependencies, adds no block label, and dispatches a Claude worker immediately — even if the user intends to wire the dependency a moment later.
 
+> **Warning — prose in the body is invisible to Fabrik.** Writing `**BlockedBy**: #N` or any similar free-text marker in the issue description does nothing. Fabrik's `checkDependencies` reads dependency state exclusively from GitHub's Issue Dependencies API (surfaced via GraphQL `blockedBy` nodes) — it never parses the issue body. The only way to create a dependency that Fabrik will respect is the API call below.
+
 **Safe sequence:**
 
 1. **Create all issues in Backlog** (or no column) — not in Specify. This prevents Fabrik from picking them up before you're ready.
@@ -97,13 +99,19 @@ When the user wants to create a group of related issues where B is blocked by A,
 **Wiring the dependency:**
 
 ```bash
-# Get the database ID of the blocking issue (A):
+# Get the database ID of the blocking issue (A).
+# This returns the global numeric database ID — NOT the per-repo #N issue number.
+# Use this ID (e.g. 1234567890) in the next command, not the human-readable issue number.
 gh api repos/{owner}/{repo}/issues/{A} --jq '.id'
 
-# Wire B as blocked by A:
+# Wire B as blocked by A (replace <blocker_global_id> with the database ID from above):
 gh api repos/{owner}/{repo}/issues/{B}/dependencies/blocked_by \
   --method POST \
-  -F blocked_by_id=<id-of-A>
+  -F issue_id=<blocker_global_id>
+
+# Verify the link was created before proceeding:
+gh api repos/{owner}/{repo}/issues/{B}/dependencies/blocked_by \
+  --jq '.[] | {number, state}'
 ```
 
 **The `-F` vs `-f` gotcha**: Use `-F` (uppercase), not `-f` (lowercase). `-F` sends a typed integer/ID field; `-f` sends a plain string. The GitHub dependencies API rejects string IDs and returns a confusing 422 error.
