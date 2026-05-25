@@ -98,7 +98,7 @@ Why this change is needed. What pain point, gap, or opportunity does it address?
 - [Reference]
 ```
 
-**Important**: The `## Open Questions` section appears in the issue body during clarification rounds and is removed when all questions are resolved. It MUST NOT appear in the committed `specs/<issue_number>-<slug>/spec.md` file — the Specify skill strips it before committing. Your job here is to maintain the issue body only; the spec file is written by the Specify skill at final completion.
+**Important**: The `## Open Questions` section appears in the issue body during clarification rounds and is removed when all questions are resolved. It MUST NOT appear in the committed `specs/<issue_number>-<slug>/spec.md` file — strip it before committing. If your update resolves all questions and you are about to complete the stage, you must also commit the spec file as described in the next section.
 
 ### Update the issue body
 
@@ -117,7 +117,7 @@ Include the ENTIRE body — not just changed sections.
 If all questions are now resolved and you are about to emit `FABRIK_STAGE_COMPLETE`, you MUST first commit the spec file — the same step the main Specify skill runs. This ensures the committed spec is produced regardless of which invocation finalizes the stage:
 
 1. Parse `ISSUE_NUM` from the branch name: `git rev-parse --abbrev-ref HEAD` must match `^fabrik/issue-(\d+)(?:-.*)?$`.
-2. Check for a locked slug: `find specs -maxdepth 1 -name "${ISSUE_NUM}-*" -type d | head -1`. Extract the slug from the basename by stripping the `${ISSUE_NUM}-` prefix. If none found, derive from `gh issue view ${ISSUE_NUM} --json title --jq .title` using the algorithm in the main Specify skill.
+2. Check for a locked slug: `find specs -maxdepth 1 -name "${ISSUE_NUM}-*" -type d | head -1`. Extract the slug from the basename by stripping the `${ISSUE_NUM}-` prefix. If none found, derive from `gh issue view ${ISSUE_NUM} --json title --jq .title` (or fall back to the H1 in `.fabrik-context/issue.md` if `gh` fails). Slug derivation algorithm: strip any conventional-commit prefix (`feat:`, `fix:`, `chore:`, etc. — regex: `^[a-z]+(\([^)]+\))?!?:\s*`), lowercase the remainder, replace every non-alphanumeric character with a hyphen, collapse consecutive hyphens into one, split on hyphens, take the first four words, and rejoin with hyphens. If the result is empty, use `untitled`.
 3. Write the spec to `specs/${ISSUE_NUM}-${SLUG}/spec.md` (Spec Kit format, no `## Open Questions` section).
 4. `git add specs/${ISSUE_NUM}-${SLUG}/spec.md` — then check `git diff --cached --quiet`. If exit 0, skip the commit. If exit non-zero, run `git commit -m "docs(spec): add specification for #${ISSUE_NUM}"`.
 
