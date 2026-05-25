@@ -71,6 +71,83 @@ description: >-
 </section>
 
 <!-- ============================================================ -->
+<!-- QUICKSTART -->
+<!-- ============================================================ -->
+<section class="quickstart" id="quickstart">
+  <div class="container">
+    <p class="section-label">Quickstart</p>
+    <h2 class="section-title">From zero to pipeline in minutes</h2>
+    <p class="section-subtitle">
+      Fabrik runs as a local CLI. You need Go 1.26+, Claude Code, and a GitHub token.
+    </p>
+
+    <div class="quickstart-steps">
+      <div>
+        <div class="step">
+          <div class="step-num">1</div>
+          <div class="step-content">
+            <div class="step-title">Prerequisites</div>
+            <div class="step-desc">Go 1.26.1+, Claude Code CLI, and a GitHub token with <code>repo</code> and <code>project</code> scopes.</div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">2</div>
+          <div class="step-content">
+            <div class="step-title">Install &amp; initialize</div>
+            <div class="step-desc">One <code>go install</code> command. Then run <code>fabrik init</code> to scaffold stage configs into your project.</div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">3</div>
+          <div class="step-content">
+            <div class="step-title">Configure &amp; run</div>
+            <div class="step-desc">Edit <code>.fabrik/config.yaml</code> with your project settings, add your token to <code>.env</code>, and run <code>./fabrik</code>.</div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">4</div>
+          <div class="step-content">
+            <div class="step-title">File an issue, drag a card</div>
+            <div class="step-desc">Add an issue to your GitHub Project board. Drag it to the first stage column. Watch the factory run.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="code-block">
+        <div class="code-header">
+          <div class="dots">
+            <span class="dot red"></span>
+            <span class="dot yellow"></span>
+            <span class="dot green"></span>
+          </div>
+          <span>terminal</span>
+        </div>
+        <pre>
+<span style="color:#56d364"># 1. Install</span>
+go install github.com/handarbeit/fabrik@latest
+
+<span style="color:#56d364"># 2. Initialize your project (pass your GitHub Project URL to skip manual config)</span>
+fabrik init --user you https://github.com/orgs/your-org/projects/5
+<span style="color:#8b949e"># Creates .fabrik/stages/, .fabrik/config.yaml</span>
+
+<span style="color:#56d364"># 3. Add your GitHub token</span>
+echo 'FABRIK_TOKEN=ghp_...' >> .env
+echo '.env' >> .gitignore
+
+<span style="color:#56d364"># 4. Run</span>
+fabrik
+
+<span style="color:#56d364"># Optional: yolo mode (auto-advance all stages)</span>
+fabrik --yolo
+
+<span style="color:#56d364"># Optional: self-upgrade from GitHub Releases at startup and when idle</span>
+fabrik --auto-upgrade</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
 <!-- HOW IT WORKS + DEMO VIDEOS -->
 <!-- ============================================================ -->
 <section class="how-it-works" id="how-it-works">
@@ -302,83 +379,6 @@ description: >-
           one: file issues, answer clarifying questions, drag cards, and
           occasionally comment to redirect the work. The factory does the rest.
         </div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ============================================================ -->
-<!-- QUICKSTART -->
-<!-- ============================================================ -->
-<section class="quickstart" id="quickstart">
-  <div class="container">
-    <p class="section-label">Quickstart</p>
-    <h2 class="section-title">From zero to pipeline in minutes</h2>
-    <p class="section-subtitle">
-      Fabrik runs as a local CLI. You need Go 1.26+, Claude Code, and a GitHub token.
-    </p>
-
-    <div class="quickstart-steps">
-      <div>
-        <div class="step">
-          <div class="step-num">1</div>
-          <div class="step-content">
-            <div class="step-title">Prerequisites</div>
-            <div class="step-desc">Go 1.26.1+, Claude Code CLI, and a GitHub token with <code>repo</code> and <code>project</code> scopes.</div>
-          </div>
-        </div>
-        <div class="step">
-          <div class="step-num">2</div>
-          <div class="step-content">
-            <div class="step-title">Install &amp; initialize</div>
-            <div class="step-desc">One <code>go install</code> command. Then run <code>fabrik init</code> to scaffold stage configs into your project.</div>
-          </div>
-        </div>
-        <div class="step">
-          <div class="step-num">3</div>
-          <div class="step-content">
-            <div class="step-title">Configure &amp; run</div>
-            <div class="step-desc">Edit <code>.fabrik/config.yaml</code> with your project settings, add your token to <code>.env</code>, and run <code>./fabrik</code>.</div>
-          </div>
-        </div>
-        <div class="step">
-          <div class="step-num">4</div>
-          <div class="step-content">
-            <div class="step-title">File an issue, drag a card</div>
-            <div class="step-desc">Add an issue to your GitHub Project board. Drag it to the first stage column. Watch the factory run.</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="code-block">
-        <div class="code-header">
-          <div class="dots">
-            <span class="dot red"></span>
-            <span class="dot yellow"></span>
-            <span class="dot green"></span>
-          </div>
-          <span>terminal</span>
-        </div>
-        <pre>
-<span style="color:#56d364"># 1. Install</span>
-go install github.com/handarbeit/fabrik@latest
-
-<span style="color:#56d364"># 2. Initialize your project (pass your GitHub Project URL to skip manual config)</span>
-fabrik init --user you https://github.com/orgs/your-org/projects/5
-<span style="color:#8b949e"># Creates .fabrik/stages/, .fabrik/config.yaml</span>
-
-<span style="color:#56d364"># 3. Add your GitHub token</span>
-echo 'FABRIK_TOKEN=ghp_...' >> .env
-echo '.env' >> .gitignore
-
-<span style="color:#56d364"># 4. Run</span>
-fabrik
-
-<span style="color:#56d364"># Optional: yolo mode (auto-advance all stages)</span>
-fabrik --yolo
-
-<span style="color:#56d364"># Optional: self-upgrade from GitHub Releases at startup and when idle</span>
-fabrik --auto-upgrade</pre>
       </div>
     </div>
   </div>
