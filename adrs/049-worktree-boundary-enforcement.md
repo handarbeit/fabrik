@@ -83,6 +83,8 @@ Boundary violations are not transient errors (network blips, rate limits) that b
 
 4. **Snapshot window**: The snapshot is taken before the extension loop and compared after. Concurrent Fabrik workers can mutate refs in other repos during the window. The design scopes the exclusion to the *active repo* rather than a time window, so Worker A's legitimate push to repo-X does not trigger a violation in Worker B (whose active repo is Y and thus audits repo-X). False positives from concurrent workers are therefore limited to: Worker B actively pushing to repo-Y (already excluded) while Worker A's active repo is also Y (prevented by the in-flight guard).
 
+5. **Remote-tracking refs are excluded from the snapshot**: `snapshotRepoRefs` passes `refs/heads/` and `refs/tags/` as positional pattern arguments to `git for-each-ref`, so `refs/remotes/origin/*` refs are never captured. Remote-tracking refs are passively-observed upstream state — they are updated by `git fetch` operations that can be triggered by concurrent Fabrik workers, webhook-driven fetches, or routine internal fetches entirely unrelated to Claude's activity. Including them would cause false-positive boundary violations whenever a sibling bare clone's remote-tracking refs changed during the audit window. The audit therefore covers only locally-authored mutations (branches and tags), which are the refs Claude could genuinely create or modify in another repo. `crossRepoViolations` also includes a defense-in-depth `strings.HasPrefix(ref, "refs/remotes/")` guard that preserves this invariant even if a future caller passes unfiltered maps.
+
 ## References
 
 - [ADR 005](005-claude-cli-invocation.md): Claude CLI shell-out and `--allowedTools`
