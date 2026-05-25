@@ -45,7 +45,7 @@ func ComputeEmbeddedVersion() string {
 
 // ComputeDiskVersion computes the same fingerprint over on-disk files in
 // pluginDir, skipping .installed-version. Returns ("", nil) if pluginDir does
-// not exist.
+// not exist or contains no plugin files.
 func ComputeDiskVersion(pluginDir string) (string, error) {
 	if _, err := os.Stat(pluginDir); os.IsNotExist(err) {
 		return "", nil
@@ -73,6 +73,11 @@ func ComputeDiskVersion(pluginDir string) (string, error) {
 	})
 	if err != nil {
 		return "", err
+	}
+	// Return "" (no plugin files) rather than sha256("") so that a dir containing
+	// only .installed-version is treated the same as a non-existent dir.
+	if len(entries) == 0 {
+		return "", nil
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].path < entries[j].path })
 	return computePluginFingerprint(entries), nil
