@@ -524,7 +524,10 @@ func TestAddBlockedByIssue_QueryShape(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]interface{}
-		json.NewDecoder(r.Body).Decode(&body)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode body: %v", err)
+			return
+		}
 		capturedQuery, _ = body["query"].(string)
 		if v, ok := body["variables"].(map[string]interface{}); ok {
 			capturedVars = v
@@ -535,7 +538,9 @@ func TestAddBlockedByIssue_QueryShape(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClientWithBaseURL("token", srv.URL)
-	_ = c.AddBlockedByIssue("I_issue", "I_blocker")
+	if err := c.AddBlockedByIssue("I_issue", "I_blocker"); err != nil {
+		t.Fatalf("AddBlockedByIssue: %v", err)
+	}
 
 	// Correct mutation name — the original bug used "addBlockedByIssue" which does not exist.
 	if !strings.Contains(capturedQuery, "addBlockedBy") {
@@ -565,8 +570,15 @@ func TestAddBlockedByIssue_QueryShape(t *testing.T) {
 func TestAddBlockedByIssue_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]interface{}
-		json.NewDecoder(r.Body).Decode(&body)
-		vars := body["variables"].(map[string]interface{})
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode body: %v", err)
+			return
+		}
+		vars, ok := body["variables"].(map[string]interface{})
+		if !ok {
+			t.Error("request body missing variables map")
+			return
+		}
 		if vars["issueId"] != "I_child" {
 			t.Errorf("issueId = %v, want I_child", vars["issueId"])
 		}
