@@ -20,6 +20,7 @@
 .fabrik-context/
 .env
 /fabrik
+/print-plugin-hash
 *.exe
 .DS_Store
 tmp/
