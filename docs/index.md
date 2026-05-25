@@ -161,7 +161,7 @@ description: >-
         <span class="feature-icon">🌿</span>
         <div class="feature-title">Isolated Git Worktrees</div>
         <div class="feature-desc">
-          Every issue gets a dedicated branch and worktree with zero cross-contamination. Edit and Write tool calls are path-scoped to the issue's worktree; cross-repo writes are audited and blocked.
+          Every issue gets a dedicated branch and worktree with zero cross-contamination. Edit and Write tool calls are path-scoped to the issue's worktree; cross-repo ref changes are detectable via the opt-in Layer 2 audit (worktree_boundary_audit: true).
         </div>
       </a>
       <a class="feature-card" href="{{ '/state-machine' | relative_url }}#4-comment-processing-lifecycle" aria-label="Comment-Driven Steering — open documentation">
