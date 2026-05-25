@@ -79,7 +79,7 @@ These labels do not define distinct states but influence transition behavior:
 | Label | Effect |
 |-------|--------|
 | `fabrik:yolo` | Forces auto-advance; triggers GitHub native auto-merge at Validate; overrides `auto_advance: false` |
-| `fabrik:cruise` | Forces auto-advance without auto-merge; stops at Validate completion; suppressed by yolo |
+| `fabrik:cruise` | Forces auto-advance without auto-merge; stops at Validate completion; cruise wins over yolo for auto-merge (PR is not auto-merged even when yolo is also present), but the stop-at-Validate behaviour is overridden by yolo (issue advances to Done) |
 | `fabrik:auto-merge-enabled` | Engine-internal; marks that GitHub's native auto-merge has been enabled on the linked PR; anchors the convergence budget start time; bypasses legacy merge/CI gates |
 | `fabrik:unrestricted` | Passes `--dangerously-skip-permissions` to Claude Code |
 | `fabrik:extend-turns` | Pre-grants a 2× turn budget for every stage invocation and comment processing invocation while present; persists across stages; removed only at the Done cleanup stage or manually; no-op when `max_turns == 0` (stage) or always applies for comments since `commentMaxTurns` is never 0 |
@@ -141,7 +141,7 @@ Each active stage column has the same set of reachable sub-states:
 | `stage:<X>:complete` | `handleStageComplete` (for non-`wait_for_ci` stages), `checkCIGate` (for `wait_for_ci: true` stages — added only after CI passes), `handleNoWorkNeeded` (emitting stage + all skipped stages), cleanup stage handler | `handleStageComplete`: after Claude signals FABRIK_STAGE_COMPLETE on stages without `wait_for_ci: true`. `checkCIGate`: when all CI checks pass (R5) — this is the conjunctive gate (ADR 032): `stage:X:complete` is deferred until the CI gate actually clears, not applied on FABRIK_STAGE_COMPLETE. After FABRIK_NO_WORK_NEEDED (emitting stage + all subsequent non-cleanup stages) or worktree cleanup. | Never removed | Permanent | Prevents re-invocation of the stage; triggers catch-up advancement |
 | `stage:<X>:failed` | `escalateFailedStage` | After MaxRetries exhausted | `clearFailedStage` | When user removes `fabrik:paused` (manual unpause) | Indicates permanent failure; paired with `fabrik:paused` |
 | `fabrik:yolo` | User (manual) | Any time | User (manual) | Any time | Forces auto-advance; triggers auto-merge at Validate; overrides `auto_advance: false` per stage |
-| `fabrik:cruise` | User (manual) | Any time | User (manual) | Any time | Forces auto-advance without merge; stops at Validate; suppressed when yolo is also present |
+| `fabrik:cruise` | User (manual) | Any time | User (manual) | Any time | Forces auto-advance without merge; stops at Validate; cruise wins over yolo for auto-merge (auto-merge suppressed even when yolo present); stop-at-Validate is overridden when yolo is also present (issue advances to Done, but PR is not auto-merged) |
 | `fabrik:unrestricted` | User (manual) | Any time | User (manual) | Any time | Passes `--dangerously-skip-permissions` instead of `--permission-mode dontAsk` |
 | `fabrik:extend-turns` | User (manual) | Any time | `processItem` cleanup branch or User (manual) | At Done cleanup stage completion; or manual removal | Pre-grants 2× `stage.MaxTurns` budget for every stage invocation while present; no-op for stage path when `max_turns == 0` (unlimited); also pre-grants 2× `commentMaxTurns(stage)` budget for every comment processing invocation (comment budget is never 0); subsequent extensions beyond 2× require progress detection for both paths; persists across all intermediate stages |
 | `model:<name>` | User (manual) | Any time | User (manual) | Any time | Selects Claude model; first label wins if multiple present |
@@ -737,7 +737,7 @@ After `fabrik:auto-merge-enabled` is applied (section 5.4), every Phase 1 iterat
 **Convergence budget:**
 
 - The budget starts when `fabrik:auto-merge-enabled` is applied. The start timestamp is stored durably in GitHub's issue event log (`FetchLabelAppliedAt("fabrik:auto-merge-enabled")`), so it survives engine restarts.
-- The budget is configured via `FABRIK_CONVERGENCE_BUDGET` (Go duration syntax, e.g., `30m`). Default: 30 minutes. Set to `0` to disable the budget (falls back to `MaxRebaseCycles` / `MaxCiFixCycles` cycle-count gates — legacy behavior).
+- The budget is configured via `FABRIK_CONVERGENCE_BUDGET` (Go duration syntax, e.g., `30m`). Default: 30 minutes. Set to `0` to disable the budget — Fabrik waits indefinitely for auto-merge to complete (or for the user to disable auto-merge in the GitHub UI). `MaxRebaseCycles` / `MaxCiFixCycles` cycle-count gates are NOT consulted while `fabrik:auto-merge-enabled` is present.
 - On each Phase 1 iteration: `elapsed = time.Since(budgetStart)`. If `elapsed > budget`, `pauseForConvergenceFailed()` fires.
 
 **`checkAutoMergeConvergence()` decision tree:**
@@ -745,7 +745,7 @@ After `fabrik:auto-merge-enabled` is applied (section 5.4), every Phase 1 iterat
 | Observed state | Action |
 |---|---|
 | PR merged or closed | Remove `fabrik:auto-merge-enabled` + `fabrik:rebase-needed` (if present); existing machinery advances to Done |
-| `AutoMergeEnabled == false` (user disabled) | Remove `fabrik:auto-merge-enabled`; post one-liner comment; treat as cruise from this point |
+| `AutoMergeEnabled == false` (user disabled) | Apply `fabrik:paused` + `fabrik:awaiting-input`; remove `fabrik:auto-merge-enabled`; post comment with resume options (prevents Phase 2 from re-enabling auto-merge on the next poll) |
 | Budget exhausted | Call `pauseForConvergenceFailed()` (see below) |
 | `mergeable_state == "unknown"` | Wait — GitHub still computing after a push; re-evaluate next poll |
 | `mergeable_state == "dirty"` (conflict) | Dispatch rebase reinvoke (one per conflict transition); increment `RebaseCycles` for observability only (not a gate); skip if worker in-flight |
@@ -765,7 +765,7 @@ Fetches fresh PR state (`FetchLinkedPR`), `FetchCommitsBehind`, `FetchCheckRuns`
 
 Then: applies `fabrik:paused` + `fabrik:awaiting-input`; removes `fabrik:auto-merge-enabled`. Does NOT add `fabrik:awaiting-ci` (CI may be healthy; the convergence failure is about the merge window, not CI).
 
-**`RebaseCycles` vs. budget:** Under the convergence flow, `RebaseCycles` is incremented on every rebase dispatch for observability and for inclusion in the pause comment. It is NOT consulted as a gate. `MaxRebaseCycles` has no effect while `fabrik:auto-merge-enabled` is present. When `FABRIK_CONVERGENCE_BUDGET=0`, yolo issues fall back to using `MaxRebaseCycles` and `MaxCiFixCycles` as gates — legacy behavior.
+**`RebaseCycles` vs. budget:** Under the convergence flow, `RebaseCycles` is incremented on every rebase dispatch for observability and for inclusion in the pause comment. It is NOT consulted as a gate. `MaxRebaseCycles` has no effect while `fabrik:auto-merge-enabled` is present. When `FABRIK_CONVERGENCE_BUDGET=0`, the budget check is skipped entirely — Fabrik waits indefinitely for the PR to be merged or closed.
 
 **State transitions for yolo Validate convergence:**
 
@@ -776,7 +776,7 @@ Then: applies `fabrik:paused` + `fabrik:awaiting-input`; removes `fabrik:auto-me
 | Validate, Convergence | `mergeable_state=dirty` (conflict) | Validate, Convergence + Rebase in-flight | `fabrik:rebase-needed` | |
 | Validate, Convergence + Rebase in-flight | Rebase push succeeds | Validate, Convergence | | |
 | Validate, Convergence | Budget exhausted | Validate, Paused | `fabrik:paused`, `fabrik:awaiting-input` | `fabrik:auto-merge-enabled` |
-| Validate, Convergence | User disables auto-merge in GitHub UI | Validate, Complete (cruise behavior) | | `fabrik:auto-merge-enabled` |
+| Validate, Convergence | User disables auto-merge in GitHub UI | Validate, Paused | `fabrik:paused`, `fabrik:awaiting-input` | `fabrik:auto-merge-enabled` |
 
 ---
 
