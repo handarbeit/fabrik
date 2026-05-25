@@ -31,18 +31,44 @@ sorted concatenation of all embedded file hashes.
 
 | installedVer | diskVer | embeddedVer | State | Action |
 |---|---|---|---|---|
-| absent | any | any | Migration (first run) | Seed installedVer=diskVer; no refresh this cycle |
+| absent | == embeddedVer | any | Migration — pristine install | Seed installedVer=diskVer; no refresh this cycle |
+| absent | != embeddedVer, != "" | any | Migration — pre-existing customizations | Do NOT seed; return customWorkflow=true |
+| absent | "" | any | Migration — empty plugin dir | No-op; no seed |
 | present | == installedVer | == installedVer | Up to date | No-op |
-| present | == installedVer | != installedVer | Upgrade available | Auto-refresh (non-TTY) or y/N prompt (TTY) |
+| present | == installedVer | != installedVer | installedVer in KnownEmbeddedVersions | Upgrade available — auto-refresh (non-TTY) or y/N prompt (TTY) |
+| present | == installedVer | != installedVer | installedVer NOT in KnownEmbeddedVersions | Corrupted migration — treat as custom workflow; warn operator |
 | present | != installedVer | any | Custom workflow | Block refresh; warn operator |
 
 ### Migration baseline
 
-On first encounter (no `.installed-version`), the engine seeds the fingerprint
-from the *current disk state*, not from the embedded version. This preserves
-existing customizations on day one without false-positive "custom workflow"
-detections. Seeding from embedded would immediately flag all existing customized
-installs, which is unacceptable for a migration.
+On first encounter (no `.installed-version`), the engine compares `diskVer` to
+`embeddedVer` before deciding what to do:
+
+- **Pristine install** (`diskVer == embeddedVer`): seeds `installedVer = diskVer`
+  and returns no-op. Subsequent embedded changes are detected correctly.
+- **Pre-existing customizations** (`diskVer != embeddedVer`): does NOT seed
+  `installedVer`. Returns `customWorkflow=true` so the operator is warned and
+  `RefreshPlugin` is not called. Seeding would record the customised hash as the
+  baseline, causing the next embedded-version change to auto-overwrite it.
+- **Empty plugin dir** (`diskVer == ""`): returns no-op without seeding. An
+  empty directory is not a customization.
+
+### Known-embedded-versions list
+
+`plugin.KnownEmbeddedVersions` is a Go slice baked into the binary containing
+every plugin fingerprint ever legitimately written to `.installed-version` by a
+release binary. It serves as a secondary guard against a corrupted `installedVer`:
+
+When `disk == installed != embedded`, before treating this as a safe auto-refresh,
+`checkPluginState` checks whether `installedVer` appears in `KnownEmbeddedVersions`.
+If it does not, the value was written by the buggy pre-fix migration (which
+recorded the customised disk hash, not an embedded hash) and the state is treated
+as a custom workflow instead of an upgrade.
+
+The list grows by one entry per release, appended automatically by
+`scripts/cut-release.sh` after the build step. The initial list bootstraps hashes
+for all releases from v0.0.64 (when `.installed-version` was first introduced)
+through the current release.
 
 ### Upgrade paths for custom workflow
 
@@ -78,15 +104,22 @@ is computed automatically — no coordination, no manual steps, no version drift
 The embedded fingerprint changes whenever any skill file changes, regardless of
 whether the release version was bumped.
 
-### Why seed from disk on migration, not from embedded?
+### Why compare diskVer to embeddedVer during migration?
 
-The alternative — seeding from embedded — would set `installedVer = embeddedVer`.
-If any disk file differs from embedded (i.e., the operator already customized),
-`diskVer != installedVer` immediately, flagging every existing installation as
-"custom workflow" on the first binary upgrade. That's a false positive for every
-user who ever edited a skill file. Seeding from disk treats the current state as
-the baseline, which is the right assumption: "whatever is on disk was intentionally
-put there."
+The original migration seeded `installedVer = diskVer` unconditionally. That
+assumption — "whatever is on disk was intentionally put there" — is wrong for
+pristine installs: it records the customised disk hash as the baseline, after
+which any embedded-version change silently auto-overwrites those files.
+
+The corrected approach distinguishes pristine from customised:
+- **Pristine** (`diskVer == embeddedVer`): seeding `installedVer = diskVer` is
+  equivalent to seeding from embedded. Future embedded changes are detected
+  correctly, and no false-positive "custom workflow" is raised.
+- **Customised** (`diskVer != embeddedVer`): do not seed. Return
+  `customWorkflow=true` immediately so the operator is warned. Recording the
+  customised hash would corrupt the baseline; the next embedded change would then
+  see `disk == installed != embedded` and conclude "safe to auto-refresh" —
+  silently destroying the customisation.
 
 ### Why require typed `OVERWRITE` for the destructive TUI path?
 

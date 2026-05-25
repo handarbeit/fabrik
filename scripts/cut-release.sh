@@ -74,9 +74,9 @@ BRANCH="$(git branch --show-current)"
 [ "$BRANCH" = "main" ] || die "must be on main (currently on '$BRANCH')"
 ok "on main"
 
-# Allow uncommitted release-notes/<version>.md (the source-of-truth, authored
-# just before running this script). Anything else must be cleared first.
-DIRTY=$(git status --porcelain | grep -Ev "^\?\? release-notes/${VERSION}\.md$| M release-notes/${VERSION}\.md$" || true)
+# Allow uncommitted release-notes/<version>.md and plugin/known_embedded_versions.go
+# (the latter is updated by this script itself after the build step).
+DIRTY=$(git status --porcelain | grep -Ev "^\?\? release-notes/${VERSION}\.md$| M release-notes/${VERSION}\.md$| M plugin/known_embedded_versions\.go$|^M  plugin/known_embedded_versions\.go$" || true)
 [ -z "$DIRTY" ] || die "working tree dirty:
 $DIRTY"
 ok "working tree acceptable"
@@ -132,6 +132,22 @@ step "Build"
 go build ./... >/dev/null || die "go build failed"
 ok "go build clean"
 
+step "Record embedded plugin hash for $VERSION"
+PLUGIN_HASH="$(go run ./tools/print-plugin-hash/)"
+[ -n "$PLUGIN_HASH" ] || die "print-plugin-hash produced empty output"
+KNOWN_VERSIONS_FILE="plugin/known_embedded_versions.go"
+if grep -qF "\"${PLUGIN_HASH}\"" "$KNOWN_VERSIONS_FILE"; then
+  ok "hash already recorded in $KNOWN_VERSIONS_FILE (no change needed)"
+else
+  # Insert the new hash before the closing } of the KnownEmbeddedVersions slice.
+  awk -v hash="$PLUGIN_HASH" -v version="$VERSION" '
+    /^\}$/ { print "\t\"" hash "\", // " version }
+    { print }
+  ' "$KNOWN_VERSIONS_FILE" > "${KNOWN_VERSIONS_FILE}.tmp"
+  mv "${KNOWN_VERSIONS_FILE}.tmp" "$KNOWN_VERSIONS_FILE"
+  ok "appended $PLUGIN_HASH to $KNOWN_VERSIONS_FILE"
+fi
+
 if [ "$SKIP_TESTS" -eq 1 ]; then
   warn "--skip-tests was passed; race-tested suite was NOT run"
 else
@@ -145,9 +161,10 @@ fi
 
 # ─── 4. commit release notes as arbeithand ────────────────────────────────────
 step "Commit release notes"
-# Stage the per-version source-of-truth file. The workflow reads it directly
-# from release-notes/<version>.md — no copy step needed.
+# Stage the per-version source-of-truth file and the updated known-versions list.
+# The workflow reads release-notes/<version>.md directly — no copy step needed.
 git add "$NOTES_FILE"
+git add "$KNOWN_VERSIONS_FILE"
 if git diff --cached --quiet; then
   warn "no release-notes changes to commit — skipping commit step"
 else
