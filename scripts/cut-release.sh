@@ -64,6 +64,7 @@ cd "$REPO_ROOT"
 
 step() { printf '\n\033[1;34m▶ %s\033[0m\n' "$*"; }
 ok()   { printf '  \033[1;32m✓\033[0m %s\n' "$*"; }
+info() { printf '  \033[1;36m·\033[0m %s\n' "$*"; }
 warn() { printf '  \033[1;33m!\033[0m %s\n' "$*"; }
 die()  { printf '\n\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
@@ -169,6 +170,61 @@ else
     || die "release-notes push failed"
   ok "release-notes commit pushed"
 fi
+
+# ─── 4b. bump plugin versions when source changed since last release ──────────
+#
+# Claude Code's `/plugin update` detects new plugin releases by reading the
+# `version` field in each plugin's .claude-plugin/plugin.json from
+# `ref: main` in marketplace.json. If we ship a plugin source change without
+# bumping the manifest version, users keep seeing the cached older content.
+#
+# Strategy: for each tracked plugin, compare its directory against the most
+# recent release tag (the one we are about to supersede). If any file under
+# the plugin changed — other than plugin.json itself — bump the patch version
+# and commit + push as the release bot. The commit lands BEFORE the tag is
+# created, so the version-bump is captured in this release.
+bump_plugin_if_changed() {
+  local plugin_dir="$1"
+  local manifest="${plugin_dir}/.claude-plugin/plugin.json"
+  if [ ! -f "$manifest" ]; then
+    return 0
+  fi
+  local prev_tag
+  prev_tag="$(git describe --tags --abbrev=0 --match='v*' 2>/dev/null || true)"
+  if [ -z "$prev_tag" ]; then
+    info "no prior release tag found — skipping ${plugin_dir} version-bump check"
+    return 0
+  fi
+  local changed
+  changed="$(git diff --name-only "${prev_tag}..HEAD" -- "$plugin_dir" ":(exclude)$manifest" | head -1)"
+  if [ -z "$changed" ]; then
+    info "${plugin_dir}: no source changes since ${prev_tag} — version stays"
+    return 0
+  fi
+  local current new
+  current="$(jq -r .version "$manifest")"
+  new="$(printf '%s' "$current" | awk -F. -v OFS=. '{$NF=$NF+1; print}')"
+  step "Bump ${plugin_dir} version ${current} → ${new} (saw change: ${changed})"
+  jq --arg v "$new" '.version = $v' "$manifest" > "${manifest}.tmp"
+  mv "${manifest}.tmp" "$manifest"
+  git add "$manifest"
+  GIT_AUTHOR_NAME="$BOT_LOGIN" \
+  GIT_AUTHOR_EMAIL="$BOT_EMAIL" \
+  GIT_COMMITTER_NAME="$BOT_LOGIN" \
+  GIT_COMMITTER_EMAIL="$BOT_EMAIL" \
+  git commit -m "chore(${plugin_dir}): bump version ${current} → ${new} for ${VERSION}" --quiet
+  ok "committed ${plugin_dir} bump as $BOT_LOGIN"
+  git \
+    -c credential.helper= \
+    -c credential.https://github.com.helper= \
+    push "https://x-access-token:${FABRIK_TOKEN}@github.com/${REPO}.git" main >/dev/null 2>&1 \
+    || die "${plugin_dir} bump push failed"
+  ok "pushed ${plugin_dir} bump commit"
+}
+
+step "Check plugin source for version-bump need"
+bump_plugin_if_changed "plugin/fabrik"
+bump_plugin_if_changed "plugin/fabrik-workflows"
 
 # ─── 5. tag + push ────────────────────────────────────────────────────────────
 step "Tag and push as @$BOT_LOGIN"
