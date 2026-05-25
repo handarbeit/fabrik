@@ -136,21 +136,34 @@ func TestCheckPluginState_NoOp(t *testing.T) {
 }
 
 func TestCheckPluginState_AutoRefresh(t *testing.T) {
-	// Use an empty dir so disk == installed (both "empty") while embedded differs.
-	// We must inject the fake diskVer into the known list so the corrupted-state
-	// guard treats it as a legitimate installedVer (and returns upgradeNeeded=true).
+	// Simulate a previous embedded version on disk: populate with embedded files,
+	// modify one to get a hash distinct from the current embedded. Then seed
+	// installedVer = diskVer (disk == installed != embedded) with the old hash in
+	// the known list — verifies the auto-refresh path returns upgradeNeeded=true.
 	dir2 := t.TempDir()
-	embeddedVer := ComputeEmbeddedVersion()
-	diskVer2, _ := ComputeDiskVersion(dir2)
+	if err := populatePluginDir(dir2); err != nil {
+		t.Fatal(err)
+	}
+	entries, _ := filepath.Glob(filepath.Join(dir2, "skills", "*", "SKILL.md"))
+	if len(entries) == 0 {
+		t.Fatal("no SKILL.md files found")
+	}
+	if err := os.WriteFile(entries[0], []byte("old plugin content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	diskVer2, err := ComputeDiskVersion(dir2)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := WriteVersionHash(dir2, diskVer2); err != nil {
 		t.Fatal(err)
 	}
-	// embedded != diskVer2, disk == installed → auto-refresh.
+	embeddedVer := ComputeEmbeddedVersion()
 	if embeddedVer == diskVer2 {
-		t.Skip("embedded matches empty disk — cannot test auto-refresh")
+		t.Skip("embedded matches modified disk — cannot test auto-refresh")
 	}
 
-	// Inject diskVer2 as a "known" version so the guard passes.
+	// Inject diskVer2 as a "known" version so the corrupted-state guard passes.
 	cw, up, err := checkPluginState(dir2, []string{diskVer2})
 	if err != nil {
 		t.Fatalf("checkPluginState error: %v", err)
