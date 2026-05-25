@@ -73,6 +73,7 @@ git diff origin/main..HEAD
 
 **Correctness**:
 - Does the code do what the spec requires?
+- If a `specs/` document exists for this feature, explicitly compare external API call names against the implementation: GraphQL mutation names, REST endpoint paths, input field names, and variable names. The spec name is authoritative — flag any divergence even if the code compiles and tests pass. (This check exists because a mutation can be syntactically valid Go but call a nonexistent GitHub API mutation; mocked tests won't catch it.)
 - Are edge cases handled?
 - Are error paths correct (not swallowed, properly wrapped)?
 - Are concurrent access patterns safe (mutexes, atomics)?
