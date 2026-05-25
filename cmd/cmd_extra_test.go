@@ -147,6 +147,12 @@ func (m *testGitHubUpgradeClient) ProbeProjectBoard(owner, repo string, projectN
 	return nil, "", nil
 }
 func (m *testGitHubUpgradeClient) DeleteForwardingHooks(owner, repo string) error { return nil }
+func (m *testGitHubUpgradeClient) EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy string) error {
+	return nil
+}
+func (m *testGitHubUpgradeClient) FetchCommitsBehind(owner, repo, base, head string) (int, error) {
+	return 0, nil
+}
 
 // ── upgrade ───────────────────────────────────────────────────────────────────
 
