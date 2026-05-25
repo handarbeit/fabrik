@@ -37,6 +37,8 @@ type Config struct {
 	CIWaitTimeout            time.Duration // How long to wait for CI in the merge guard before pausing (default 30m)
 	MaxCiFixCycles           int           // Max CI-fix re-invocation cycles per issue before pausing (default 5)
 	MaxRebaseCycles          int           // Max rebase re-invocation cycles per issue before pausing (default 3)
+	ConvergenceBudget        time.Duration // Wall-clock budget for post-Validate yolo convergence (default 30m; 0 = disabled, fall back to cycle limits)
+	AutoMergeStrategy        string        // Merge method for enablePullRequestAutoMerge: MERGE, SQUASH, or REBASE (default MERGE)
 	ClaudeWaitDelay          time.Duration // How long to wait after Claude exits before giving up on pipe drain and recovering output (default 30s)
 	DebugOutput              bool
 	SymlinkEnv               bool

@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
+	"strings"
 )
 
 // reClosingKeyword matches GitHub closing keywords followed by a same-repo issue
@@ -84,6 +85,10 @@ type PRDetails struct {
 	// CI gate as the authoritative signal — non-required check_run
 	// failures (e.g., workflow cleanup jobs) do not block "clean"/"unstable".
 	MergeableState string
+	// AutoMergeEnabled is true when GitHub's native auto-merge is enabled on
+	// the PR (auto_merge field is non-null). False when the user or engine
+	// has disabled it, or when it was never enabled.
+	AutoMergeEnabled bool
 }
 
 // FetchPRMergeable returns GitHub's mergeable flag for a single PR.
@@ -130,12 +135,13 @@ func (c *Client) FetchPRMergeableState(owner, repo string, prNumber int) (string
 func (c *Client) FetchPRDetails(owner, repo string, prNumber int) (*PRDetails, error) {
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", c.baseURL, owner, repo, prNumber)
 	var raw struct {
-		Number         int    `json:"number"`
-		Title          string `json:"title"`
-		State          string `json:"state"`
-		Merged         bool   `json:"merged"`
-		Draft          bool   `json:"draft"`
-		MergeableState string `json:"mergeable_state"`
+		Number         int         `json:"number"`
+		Title          string      `json:"title"`
+		State          string      `json:"state"`
+		Merged         bool        `json:"merged"`
+		Draft          bool        `json:"draft"`
+		MergeableState string      `json:"mergeable_state"`
+		AutoMerge      interface{} `json:"auto_merge"` // non-null object = enabled, null = disabled
 		Head           struct {
 			SHA string `json:"sha"`
 		} `json:"head"`
@@ -144,13 +150,14 @@ func (c *Client) FetchPRDetails(owner, repo string, prNumber int) (*PRDetails, e
 		return nil, fmt.Errorf("fetching PR #%d: %w", prNumber, err)
 	}
 	return &PRDetails{
-		Number:         raw.Number,
-		Title:          raw.Title,
-		State:          raw.State,
-		Merged:         raw.Merged,
-		Draft:          raw.Draft,
-		HeadSHA:        raw.Head.SHA,
-		MergeableState: raw.MergeableState,
+		Number:           raw.Number,
+		Title:            raw.Title,
+		State:            raw.State,
+		Merged:           raw.Merged,
+		Draft:            raw.Draft,
+		HeadSHA:          raw.Head.SHA,
+		MergeableState:   raw.MergeableState,
+		AutoMergeEnabled: raw.AutoMerge != nil,
 	}, nil
 }
 
@@ -191,12 +198,13 @@ func (c *Client) FetchLinkedPR(owner, repo string, issueNumber int) (*PRDetails,
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls?head=%s:%s&state=all&per_page=1",
 		c.baseURL, owner, repo, url.PathEscape(owner), url.PathEscape(branch))
 	var raw []struct {
-		Number         int    `json:"number"`
-		Title          string `json:"title"`
-		State          string `json:"state"`
-		Merged         bool   `json:"merged"`
-		Draft          bool   `json:"draft"`
-		MergeableState string `json:"mergeable_state"`
+		Number         int         `json:"number"`
+		Title          string      `json:"title"`
+		State          string      `json:"state"`
+		Merged         bool        `json:"merged"`
+		Draft          bool        `json:"draft"`
+		MergeableState string      `json:"mergeable_state"`
+		AutoMerge      interface{} `json:"auto_merge"` // non-null object = enabled, null = disabled
 		Head           struct {
 			SHA string `json:"sha"`
 		} `json:"head"`
@@ -208,13 +216,14 @@ func (c *Client) FetchLinkedPR(owner, repo string, issueNumber int) (*PRDetails,
 		return nil, nil
 	}
 	return &PRDetails{
-		Number:         raw[0].Number,
-		Title:          raw[0].Title,
-		State:          raw[0].State,
-		Merged:         raw[0].Merged,
-		Draft:          raw[0].Draft,
-		HeadSHA:        raw[0].Head.SHA,
-		MergeableState: raw[0].MergeableState,
+		Number:           raw[0].Number,
+		Title:            raw[0].Title,
+		State:            raw[0].State,
+		Merged:           raw[0].Merged,
+		Draft:            raw[0].Draft,
+		HeadSHA:          raw[0].Head.SHA,
+		MergeableState:   raw[0].MergeableState,
+		AutoMergeEnabled: raw[0].AutoMerge != nil,
 	}, nil
 }
 
@@ -373,6 +382,96 @@ func (c *Client) AddReviewRequest(owner, repo string, prNumber int, reviewers []
 		return fmt.Errorf("adding review request on PR #%d: %w", prNumber, err)
 	}
 	return nil
+}
+
+// ErrAutoMergeNotEnabled is returned by EnablePullRequestAutoMerge when the
+// repository has not enabled the auto-merge feature in its settings.
+var ErrAutoMergeNotEnabled = errors.New("repository has not enabled auto-merge")
+
+// EnablePullRequestAutoMerge enables GitHub's native auto-merge on a pull request.
+// strategy must be one of "MERGE", "SQUASH", or "REBASE". GitHub merges the PR
+// atomically when all branch-protection requirements are satisfied.
+//
+// Returns ErrAutoMergeNotEnabled when the repository setting is disabled.
+func (c *Client) EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy string) error {
+	// Fetch the PR node ID (required for the GraphQL mutation).
+	fetchQuery := `
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      id
+    }
+  }
+}`
+	fetchVars := map[string]interface{}{
+		"owner":  owner,
+		"repo":   repo,
+		"number": prNumber,
+	}
+	var fetchResult struct {
+		Data struct {
+			Repository struct {
+				PullRequest struct {
+					ID string `json:"id"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+	if err := c.graphqlRequest(fetchQuery, fetchVars, &fetchResult); err != nil {
+		return fmt.Errorf("fetching PR node ID: %w", err)
+	}
+	nodeID := fetchResult.Data.Repository.PullRequest.ID
+	if nodeID == "" {
+		return fmt.Errorf("PR #%d not found in repository %s/%s", prNumber, owner, repo)
+	}
+
+	mutation := `
+mutation($prId: ID!, $method: PullRequestMergeMethod!) {
+  enablePullRequestAutoMerge(input: { pullRequestId: $prId, mergeMethod: $method }) {
+    pullRequest {
+      id
+    }
+  }
+}`
+	mutVars := map[string]interface{}{
+		"prId":   nodeID,
+		"method": strategy,
+	}
+	var mutResult struct{}
+	if err := c.graphqlRequest(mutation, mutVars, &mutResult); err != nil {
+		// Surface a recognizable sentinel when the repo setting is disabled.
+		if isAutoMergeNotEnabledError(err) {
+			return fmt.Errorf("%w: %v", ErrAutoMergeNotEnabled, err)
+		}
+		return fmt.Errorf("enabling auto-merge on PR #%d: %w", prNumber, err)
+	}
+	return nil
+}
+
+// isAutoMergeNotEnabledError reports whether a GraphQL error indicates the
+// repository has not enabled the auto-merge feature.
+func isAutoMergeNotEnabledError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Pull requests cannot be merged using the auto-merge feature") ||
+		strings.Contains(msg, "auto merge is not allowed")
+}
+
+// FetchCommitsBehind returns how many commits base is ahead of head using the
+// GitHub compare API. A positive result means head is that many commits behind
+// base. Returns 0, nil when head is up to date.
+func (c *Client) FetchCommitsBehind(owner, repo, base, head string) (int, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/compare/%s...%s", c.baseURL, owner, repo,
+		url.PathEscape(base), url.PathEscape(head))
+	var raw struct {
+		BehindBy int `json:"behind_by"`
+	}
+	if err := c.restGetJSON(apiURL, &raw); err != nil {
+		return 0, fmt.Errorf("comparing %s...%s: %w", base, head, err)
+	}
+	return raw.BehindBy, nil
 }
 
 // MergePR merges the pull request identified by prNumber. It first checks
