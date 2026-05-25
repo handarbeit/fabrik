@@ -256,15 +256,20 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 		return
 	}
 
-	// PR merged or closed: remove label and let existing machinery advance to Done.
+	// PR merged or closed: remove label and advance to the next stage (Done).
+	// There is no passive machinery that would advance the board column after the
+	// label is removed; advanceToNextStage must be called explicitly here.
 	if pr.Merged || pr.State == "closed" {
-		e.logf(item.Number, "auto-merge", "PR #%d merged or closed — removing fabrik:auto-merge-enabled\n", pr.Number)
+		e.logf(item.Number, "auto-merge", "PR #%d merged or closed — advancing to Done\n", pr.Number)
 		if rerr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); rerr != nil {
 			e.logf(item.Number, "warn", "could not remove fabrik:auto-merge-enabled: %v\n", rerr)
 		} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:auto-merge-enabled")
 		}
 		e.removeRebaseNeededLabel(owner, repo, item)
+		if err := e.advanceToNextStage(board, item, stage); err != nil {
+			e.logf(item.Number, "warn", "could not advance to Done after PR merge: %v\n", err)
+		}
 		return
 	}
 
