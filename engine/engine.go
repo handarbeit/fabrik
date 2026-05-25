@@ -40,6 +40,7 @@ type Config struct {
 	ClaudeWaitDelay          time.Duration // How long to wait after Claude exits before giving up on pipe drain and recovering output (default 30s)
 	DebugOutput              bool
 	SymlinkEnv               bool
+	WorktreeBoundaryAudit    bool
 	PluginDir                string
 	Stages                   []*stages.Stage
 	Webhooks                 bool
