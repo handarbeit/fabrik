@@ -493,6 +493,8 @@ FABRIK_USER=my-personal-username
 | `--ci-wait-timeout` | Minutes to wait for CI checks to pass before pausing (0 = use default of 30; also `FABRIK_CI_WAIT_TIMEOUT`) | `0` (30 min) |
 | `--max-ci-fix-cycles` | Maximum number of CI-fix re-invocation cycles per issue (0 = use default of 5; also `FABRIK_MAX_CI_FIX_CYCLES`) | `0` (5 cycles) |
 | `--max-rebase-cycles` | Maximum number of rebase re-invocation cycles per issue before pausing (0 = use default of 3; also `FABRIK_MAX_REBASE_CYCLES`) | `0` (3 cycles) |
+| `--convergence-budget` | Wall-clock budget for post-Validate yolo PR convergence (Go duration: `30m`, `1h`; `0` disables the budget entirely; also `FABRIK_CONVERGENCE_BUDGET`) | `30m` |
+| `--auto-merge-strategy` | Merge method for GitHub native auto-merge on yolo PRs: `MERGE`, `SQUASH`, or `REBASE` (also `FABRIK_AUTO_MERGE_STRATEGY`) | `MERGE` |
 | `--claude-wait-delay` | Seconds to wait after Claude exits before recovering buffered output; prevents worker goroutines from blocking when Claude uses `run_in_background` or the Monitor tool, which can hold stdout open after the main Claude process exits (0 = use built-in default of 30 sec; also `FABRIK_CLAUDE_WAIT_DELAY`) | `0` (30 sec) |
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` | `false` |
 | `--symlink-env` | Create a relative symlink at `<worktree>/.env` pointing to the fabrikDir `.env` file at worktree setup time. Enables stage code to read credentials (e.g. `ANTHROPIC_API_KEY`) from `.env` without copying secrets. No-op when source `.env` is absent; never overwrites an existing `.env` in the worktree; also excluded from git stash via the worktree's git exclude file. Also `FABRIK_SYMLINK_ENV` | `false` |
@@ -522,6 +524,8 @@ FABRIK_USER=my-personal-username
 | `FABRIK_CI_WAIT_TIMEOUT` | *(no config.yaml key)* | Minutes to wait for CI checks to pass before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 30) | `30` |
 | `FABRIK_MAX_CI_FIX_CYCLES` | *(no config.yaml key)* | Maximum number of CI-fix re-invocation cycles per issue before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 5) | `5` |
 | `FABRIK_MAX_REBASE_CYCLES` | *(no config.yaml key)* | Maximum number of rebase re-invocation cycles per issue before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 3). Lower than CI/review because rebase either succeeds in one shot or needs human judgment for a semantic conflict. | `3` |
+| `FABRIK_CONVERGENCE_BUDGET` | *(no config.yaml key)* | Wall-clock budget for post-Validate yolo PR convergence (Go duration syntax: `30m`, `1h`, `2h30m`; `0` disables; invalid values default to 30 min). When the budget expires and the PR has not merged, Fabrik pauses the issue with `fabrik:awaiting-input`. | `30m` |
+| `FABRIK_AUTO_MERGE_STRATEGY` | *(no config.yaml key)* | Merge method used when calling GitHub's `enablePullRequestAutoMerge` for yolo PRs. Accepted values: `MERGE`, `SQUASH`, `REBASE`. Invalid or unset values default to `MERGE`. | `MERGE` |
 | `FABRIK_CLAUDE_WAIT_DELAY` | *(no config.yaml key)* | Seconds to wait after Claude exits before recovering buffered output (non-negative integer; `0` or unset uses the default of 30; invalid values default to 30). Prevents worker goroutines from blocking indefinitely when Claude uses `run_in_background` or the Monitor tool, which can hold stdout open after the main Claude process exits. | `30` |
 
 Token precedence: `--token` flag > `FABRIK_TOKEN` > `GITHUB_TOKEN`
@@ -721,9 +725,11 @@ You do not need to babysit the pipeline. The intended human role is:
 
 ### Yolo Mode and Auto-Merge
 
-Pass `--yolo` to enable global auto-advance: Fabrik moves issues through every stage automatically without waiting for human approval, and auto-merges the linked PR once Validate completes. To scope the same behavior to a single issue, apply the `fabrik:yolo` label — Fabrik auto-advances and auto-merges that issue only.
+Pass `--yolo` to enable global auto-advance: Fabrik moves issues through every stage automatically without waiting for human approval, and enables GitHub's native auto-merge on the linked PR once Validate completes. To scope the same behavior to a single issue, apply the `fabrik:yolo` label — Fabrik auto-advances and auto-merges that issue only.
 
-For lighter automation without auto-merge, use `fabrik:cruise`: it auto-advances through all stages but stops at Validate, leaving the merge decision to you.
+When Validate completes on a yolo issue, Fabrik calls GitHub's `enablePullRequestAutoMerge` API (the same merge-when-ready mechanism available in the GitHub UI) rather than attempting to merge immediately. GitHub holds the merge until all branch-protection requirements are satisfied — required CI checks, required reviews, up-to-date branch — then merges atomically. Fabrik monitors convergence in the background and pauses the issue if the PR does not reach a terminal state within the convergence budget (default 30 min; see `FABRIK_CONVERGENCE_BUDGET`). See [Post-Validate Convergence Monitor (yolo)](#post-validate-convergence-monitor-yolo) for full details.
+
+For lighter automation without auto-merge, use `fabrik:cruise`: it auto-advances through all stages but stops at Validate, leaving the merge decision to you. If both `fabrik:cruise` and `fabrik:yolo` are present, yolo takes precedence.
 
 See [Stage YAML Reference](#stage-yaml-reference) for the `auto_advance` field, which controls auto-advance behavior per stage independent of the global `--yolo` flag.
 
@@ -1174,6 +1180,75 @@ the canonical CI-gate path (see the section above).
 If your repo has a `.github/workflows/fabrik-advance.yml` installed by an earlier
 `fabrik init`, delete it and ensure `wait_for_ci: true` is set in your Validate
 stage YAML. The Validate stage ships with `wait_for_ci: true` by default.
+
+### Post-Validate Convergence Monitor (yolo)
+
+When Validate completes on a yolo issue, Fabrik enables GitHub's native auto-merge on the linked PR and applies the `fabrik:auto-merge-enabled` label. GitHub then handles the merge atomically once all branch-protection requirements are met. Fabrik monitors the PR's convergence in the background until it reaches a terminal state (merged or closed).
+
+**Yolo vs. cruise in high-contention repos**
+
+- `fabrik:yolo` — full automation, including auto-merge. Best for low-contention repos or issues where merge timing doesn't matter. GitHub's native auto-merge queues the PR and merges it as soon as branch-protection requirements are met.
+- `fabrik:cruise` — automation through all stages, human merge decision. Use in repos with strict merge policies, main-branch freezes, or where you want to review the final diff before merge regardless of CI status.
+
+If both labels are present, yolo takes precedence.
+
+**Convergence budget**
+
+Fabrik gives the PR a wall-clock window (default: 30 minutes) to reach a terminal state after auto-merge is enabled. The budget starts when the `fabrik:auto-merge-enabled` label is applied and is durable across engine restarts (the label's creation timestamp is fetched from the GitHub events API).
+
+```bash
+FABRIK_CONVERGENCE_BUDGET=1h    # Wait up to 1 hour (default: 30m)
+FABRIK_CONVERGENCE_BUDGET=0     # Disable the budget — wait indefinitely
+```
+
+**During the convergence window, Fabrik:**
+
+| PR state | Action |
+|----------|--------|
+| Merged or closed | Removes `fabrik:auto-merge-enabled`; advances to Done |
+| Auto-merge was user-disabled | Posts comment; removes `fabrik:auto-merge-enabled`; pauses for input |
+| Mergeability unknown (GitHub computing) | Waits (no action) |
+| Merge conflict detected | Dispatches rebase re-invocation; re-enables auto-merge after successful push |
+| Budget expired | Calls `pauseForConvergenceFailed` (see below) |
+
+**When the budget expires**
+
+Fabrik posts a structured comment with the current PR state, then pauses the issue:
+
+```
+🏭 Fabrik — convergence budget exhausted
+
+The linked PR did not merge within the convergence budget.
+
+| Field | Value |
+|-------|-------|
+| PR | #123 |
+| mergeable_state | blocked |
+| commits behind base | 2 |
+| elapsed | 32m14s / 30m budget |
+| CI | ✅ Build passed · ❌ Tests failed |
+
+To resume, resolve the blocking condition, then remove fabrik:paused and
+fabrik:awaiting-input. Fabrik will re-enable auto-merge and start a new
+convergence window.
+```
+
+**What to do when the issue is paused:**
+
+1. **CI failure**: Fix the failing check. Push to the PR branch. Remove `fabrik:paused` and `fabrik:awaiting-input`. Fabrik re-enables auto-merge on the next poll and starts a fresh 30-minute window.
+2. **Merge conflict**: Resolve the conflict, force-push the branch (Fabrik will have attempted an automated rebase; check if it already succeeded). Remove the pause labels.
+3. **Review required**: Request and obtain reviewer approval. Remove the pause labels once approved.
+
+**Merge strategy**
+
+By default, Fabrik uses a merge commit (`MERGE`). To use squash or rebase instead:
+
+```bash
+FABRIK_AUTO_MERGE_STRATEGY=SQUASH  # Squash commits into one
+FABRIK_AUTO_MERGE_STRATEGY=REBASE  # Rebase commits onto base branch
+```
+
+Accepted values: `MERGE`, `SQUASH`, `REBASE`. The repository must have the corresponding merge method enabled in its settings.
 
 ---
 

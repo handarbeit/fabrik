@@ -372,6 +372,8 @@ When `FABRIK_STAGE_COMPLETE` is detected (regardless of Claude's exit code — a
 5. `stage:<name>:complete` label added
 6. Auto-advance to next stage (if `auto_advance: true` or global `yolo`)
 
+**Validate + yolo**: At Validate completion, if the issue carries `fabrik:yolo` (and not `fabrik:cruise`), Fabrik calls `enablePullRequestAutoMerge` on the linked PR and applies `fabrik:auto-merge-enabled` rather than calling `MergePR` directly. GitHub then merges the PR atomically once branch-protection requirements are satisfied. The post-Validate convergence monitor (`checkAutoMergeConvergence`) tracks the PR in subsequent poll cycles until it reaches a terminal state or the convergence budget expires. See `docs/state-machine.md` §5.4–5.5 for full details.
+
 Note: `fabrik:extend-turns` is **not** removed here. It persists across all intermediate stages and is removed only during the Done stage's cleanup path (see Cleanup Stage below).
 
 ### Blocked-on-Input Path
