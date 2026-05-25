@@ -910,7 +910,7 @@ After spawning, the parent waits at Implement with `fabrik:blocked` until all ch
 
 - During Plan: no sub-issues exist. Plan can be revised freely.
 - After advancing to Implement: child issues appear on the project board in Specify, each labeled `fabrik:sub-issue`.
-- If the parent carries `fabrik:yolo` or `fabrik:cruise`, each child inherits those labels on creation — a yolo'd cross-repo parent spawns children that flow autonomously through all stages without operator intervention.
+- If the parent carries `fabrik:yolo` or `fabrik:cruise`, each child inherits those labels on creation — a yolo'd cross-repo parent spawns children that flow autonomously through all stages, while cruise children stop at Validate for manual merge.
 - The parent shows `fabrik:blocked` + `fabrik:children-spawned`; a dependency comment lists all open children.
 - As children complete, the dependency comment updates in-place (no duplicate comments).
 - When all children close: `fabrik:blocked` clears, and the parent's own Implement runs.
