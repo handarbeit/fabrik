@@ -27,9 +27,10 @@ type ProjectConfig struct {
 	GitSSH        bool     `yaml:"git_ssh"`
 	TUI           *bool    `yaml:"tui"`
 	DebugOutput   bool     `yaml:"debug_output"`
-	SymlinkEnv    bool     `yaml:"symlink_env"`
-	Version       string   `yaml:"version"`
-	Webhooks      bool     `yaml:"webhooks"`
+	SymlinkEnv              bool     `yaml:"symlink_env"`
+	WorktreeBoundaryAudit   bool     `yaml:"worktree_boundary_audit"`
+	Version                 string   `yaml:"version"`
+	Webhooks                bool     `yaml:"webhooks"`
 	WebhookPort   *int     `yaml:"webhook_port"`
 	WebhookEvents []string `yaml:"webhook_events"`
 	StatusPoll    *int     `yaml:"status_poll"`

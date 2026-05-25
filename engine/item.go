@@ -789,7 +789,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// In single-repo projects this produces a one-entry map; crossRepoViolations
 	// filters out the active repo, so no false positives are generated.
 	var preAuditSnapshot map[string]map[string]string
-	if !stage.ReadOnly && !hasUnrestrictedLabel(item) {
+	if !stage.ReadOnly && !hasUnrestrictedLabel(item) && e.cfg.WorktreeBoundaryAudit {
 		preAuditSnapshot = e.snapshotAllRepoRefs(item.Number)
 	}
 

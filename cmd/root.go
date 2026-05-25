@@ -44,9 +44,10 @@ type Config struct {
 	MaxCiFixCycles    int // 0 means use default (5)
 	MaxRebaseCycles   int // 0 means use default (3)
 	ClaudeWaitDelay   int // seconds; 0 means use default (30)
-	DebugOutput       bool
-	SymlinkEnv        bool
-	PluginDir         string
+	DebugOutput              bool
+	SymlinkEnv               bool
+	WorktreeBoundaryAudit    bool
+	PluginDir                string
 	Webhooks          bool
 	WebhookPort       int
 	WebhookEvents     string // comma-separated; empty means default event set
@@ -129,6 +130,7 @@ func Execute() error {
 	flag.IntVar(&cfg.ClaudeWaitDelay, "claude-wait-delay", 0, "Seconds to wait after Claude exits before recovering buffered output when grandchildren hold stdout pipe open (0 = use default of 30; also FABRIK_CLAUDE_WAIT_DELAY)")
 	flag.BoolVar(&cfg.DebugOutput, "debug-output", false, "Save Claude stage output to .fabrik/debug/ for debugging")
 	flag.BoolVar(&cfg.SymlinkEnv, "symlink-env", false, "Symlink the fabrik-dir .env file into each issue worktree at creation time (also FABRIK_SYMLINK_ENV)")
+	flag.BoolVar(&cfg.WorktreeBoundaryAudit, "worktree-boundary-audit", false, "Enable Layer 2 cross-repo ref-mutation audit (default off pending #808 root-cause fix; also FABRIK_WORKTREE_BOUNDARY_AUDIT)")
 	flag.StringVar(&cfg.PluginDir, "plugin-dir", "", "Path to Fabrik plugin directory (for development; overrides installed plugin)")
 	flag.BoolVar(&cfg.Webhooks, "webhooks", false, "Enable webhook-driven event delivery via gh webhook forward (requires gh ≥ 2.32.0; also FABRIK_WEBHOOKS)")
 	flag.IntVar(&cfg.WebhookPort, "webhook-port", 0, "Local port for the webhook HTTP listener (0 = OS-assigned; also FABRIK_WEBHOOK_PORT)")
@@ -383,6 +385,14 @@ func Execute() error {
 			cfg.SymlinkEnv = true
 		}
 	}
+	if !cfg.WorktreeBoundaryAudit {
+		if v := os.Getenv("FABRIK_WORKTREE_BOUNDARY_AUDIT"); v != "" {
+			lv := strings.ToLower(v)
+			cfg.WorktreeBoundaryAudit = lv == "true" || lv == "1" || lv == "yes"
+		} else if pc.WorktreeBoundaryAudit {
+			cfg.WorktreeBoundaryAudit = true
+		}
+	}
 	if cfg.PluginDir == "" {
 		if v := os.Getenv("FABRIK_PLUGIN_DIR"); v != "" {
 			cfg.PluginDir = v
@@ -564,6 +574,7 @@ func Execute() error {
 		ClaudeWaitDelay:          claudeWaitDelay(cfg.ClaudeWaitDelay),
 		DebugOutput:              cfg.DebugOutput,
 		SymlinkEnv:               cfg.SymlinkEnv,
+		WorktreeBoundaryAudit:    cfg.WorktreeBoundaryAudit,
 		PluginDir:                cfg.PluginDir,
 		Stages:                   stageCfgs,
 		Webhooks:                 cfg.Webhooks,
