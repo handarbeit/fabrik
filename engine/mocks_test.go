@@ -608,6 +608,38 @@ type addBlockedByIssueCall struct {
 	issueNodeID, blockerNodeID string
 }
 
+type enablePullRequestAutoMergeCall struct {
+	owner, repo string
+	prNumber    int
+	strategy    string
+}
+
+type fetchCommitsBehindCall struct {
+	owner, repo, base, head string
+}
+
+func (m *mockGitHubClient) EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy string) error {
+	m.mu.Lock()
+	m.enablePullRequestAutoMergeCalls = append(m.enablePullRequestAutoMergeCalls, enablePullRequestAutoMergeCall{owner, repo, prNumber, strategy})
+	fn := m.enablePullRequestAutoMergeFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, prNumber, strategy)
+	}
+	return nil
+}
+
+func (m *mockGitHubClient) FetchCommitsBehind(owner, repo, base, head string) (int, error) {
+	m.mu.Lock()
+	m.fetchCommitsBehindCalls = append(m.fetchCommitsBehindCalls, fetchCommitsBehindCall{owner, repo, base, head})
+	fn := m.fetchCommitsBehindFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, base, head)
+	}
+	return 0, nil
+}
+
 func (m *mockGitHubClient) CreateIssue(owner, repo, title, body string) (int, string, error) {
 	m.mu.Lock()
 	m.createIssueCalls = append(m.createIssueCalls, createIssueCall{owner, repo, title, body})

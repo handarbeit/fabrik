@@ -4,11 +4,9 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
-	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -18,210 +16,87 @@ func testEngineForMerge(client *mockGitHubClient) *Engine {
 	return testEngineWithStages(client, stgs)
 }
 
-// TestAttemptMergeOnValidate_NoCheckRuns_MergeProceeds verifies R5: when there are
-// no CI check runs at all the gate clears and MergePR is called.
-func TestAttemptMergeOnValidate_NoCheckRuns_MergeProceeds(t *testing.T) {
+// TestAttemptMergeOnValidate_YoloEnablesAutoMerge verifies that for a yolo item
+// at Validate completion, EnablePullRequestAutoMerge is called (not MergePR),
+// fabrik:auto-merge-enabled is applied, and (true, nil) is returned.
+func TestAttemptMergeOnValidate_YoloEnablesAutoMerge(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 			return &gh.PRDetails{Number: 10, HeadSHA: "sha1"}, nil
 		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return nil, nil // R5: no CI
-		},
 	}
 	eng := testEngineForMerge(client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 
-	if err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"}); err != nil {
+	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(client.mergePRCalls) != 1 {
-		t.Fatalf("expected MergePR called once, got %d", len(client.mergePRCalls))
-	}
-	if client.mergePRCalls[0].prNumber != 10 {
-		t.Errorf("MergePR called with pr %d, want 10", client.mergePRCalls[0].prNumber)
-	}
-}
-
-// TestAttemptMergeOnValidate_AllGreen_MergeProceeds verifies R4: all checks green clears
-// the pending timer, removes fabrik:awaiting-ci, and proceeds to merge.
-func TestAttemptMergeOnValidate_AllGreen_MergeProceeds(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 11, HeadSHA: "sha2"}, nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return []gh.CheckRun{
-				{Name: "build", Status: "completed", Conclusion: "success"},
-				{Name: "test", Status: "completed", Conclusion: "success"},
-			}, nil
-		},
-	}
-	eng := testEngineForMerge(client)
-	// Seed a stale pending timer to confirm it gets cleared on green.
-	eng.store.Apply(itemstate.CIMergePendingStarted{Repo: "owner/repo", Number: 1, At: time.Now().Add(-1 * time.Minute)})
-
-	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
-	if err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"}); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(client.mergePRCalls) != 1 {
-		t.Fatalf("expected MergePR called once, got %d", len(client.mergePRCalls))
-	}
-	snap, _ := eng.store.Get("owner/repo", 1)
-	if lpr := snap.LinkedPR(); lpr != nil && !lpr.CIMergePendingSince.IsZero() {
-		t.Error("ciMergePendingSince should be cleared on all-green")
-	}
-}
-
-// TestAttemptMergeOnValidate_CIFailed_BlocksMerge verifies R3: when any check fails,
-// merge is blocked, fabrik:awaiting-ci is added, and error is returned.
-func TestAttemptMergeOnValidate_CIFailed_BlocksMerge(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 12, HeadSHA: "sha3"}, nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return []gh.CheckRun{
-				{Name: "build", Status: "completed", Conclusion: "success"},
-				{Name: "lint", Status: "completed", Conclusion: "failure"},
-			}, nil
-		},
-	}
-	eng := testEngineForMerge(client)
-	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
-
-	err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
-	if err == nil {
-		t.Fatal("expected error when CI failed, got nil")
+	if !enabled {
+		t.Fatal("expected autoMergeEnabled=true, got false")
 	}
 	if len(client.mergePRCalls) != 0 {
-		t.Errorf("expected no MergePR on CI failure, got %d", len(client.mergePRCalls))
+		t.Errorf("MergePR must not be called in yolo auto-merge path, got %d call(s)", len(client.mergePRCalls))
 	}
-	found := false
+	if len(client.enablePullRequestAutoMergeCalls) != 1 {
+		t.Fatalf("expected EnablePullRequestAutoMerge called once, got %d", len(client.enablePullRequestAutoMergeCalls))
+	}
+	if client.enablePullRequestAutoMergeCalls[0].prNumber != 10 {
+		t.Errorf("EnablePullRequestAutoMerge called with PR %d, want 10", client.enablePullRequestAutoMergeCalls[0].prNumber)
+	}
+	foundLabel := false
 	for _, c := range client.addLabelCalls {
-		if c.labelName == "fabrik:awaiting-ci" {
-			found = true
+		if c.labelName == "fabrik:auto-merge-enabled" {
+			foundLabel = true
 		}
 	}
-	if !found {
-		t.Error("expected fabrik:awaiting-ci to be added on CI failure")
+	if !foundLabel {
+		t.Error("expected fabrik:auto-merge-enabled label to be applied")
 	}
 }
 
-// TestAttemptMergeOnValidate_CIPending_BlocksMergeNoLabel verifies R2 + R10c: when
-// checks are still running, merge is blocked but fabrik:awaiting-ci is NOT applied.
-func TestAttemptMergeOnValidate_CIPending_BlocksMergeNoLabel(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 13, HeadSHA: "sha4"}, nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return []gh.CheckRun{
-				{Name: "build", Status: "in_progress", Conclusion: ""},
-			}, nil
-		},
-	}
+// TestAttemptMergeOnValidate_CruiseSkipsAutoMerge verifies that cruise > yolo:
+// a cruise-labelled item returns (false, nil) without calling EnablePullRequestAutoMerge.
+func TestAttemptMergeOnValidate_CruiseSkipsAutoMerge(t *testing.T) {
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(client)
-	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:cruise"}}
 
-	err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
-	if err == nil {
-		t.Fatal("expected error when CI pending, got nil")
+	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	if err != nil {
+		t.Fatalf("unexpected error for cruise item: %v", err)
 	}
-	if len(client.mergePRCalls) != 0 {
-		t.Errorf("expected no MergePR on pending CI, got %d", len(client.mergePRCalls))
+	if enabled {
+		t.Error("expected autoMergeEnabled=false for cruise item")
 	}
-	for _, c := range client.addLabelCalls {
-		if c.labelName == "fabrik:awaiting-ci" {
-			t.Error("fabrik:awaiting-ci must NOT be added when CI is only pending (R10c)")
-		}
+	if len(client.enablePullRequestAutoMergeCalls) != 0 {
+		t.Errorf("EnablePullRequestAutoMerge must not be called for cruise items, got %d call(s)", len(client.enablePullRequestAutoMergeCalls))
 	}
 }
 
-// TestAttemptMergeOnValidate_CIPending_TracksTimer verifies R2: on first pending observation
-// ciMergePendingSince is populated so the timeout clock starts.
-func TestAttemptMergeOnValidate_CIPending_TracksTimer(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 14, HeadSHA: "sha5"}, nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return []gh.CheckRun{
-				{Name: "ci", Status: "queued", Conclusion: ""},
-			}, nil
-		},
-	}
+// TestAttemptMergeOnValidate_AlreadyLabeled_Idempotent verifies that when
+// fabrik:auto-merge-enabled is already present, the function returns (true, nil)
+// without calling EnablePullRequestAutoMerge a second time.
+func TestAttemptMergeOnValidate_AlreadyLabeled_Idempotent(t *testing.T) {
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(client)
-	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:auto-merge-enabled"}}
 
-	snapBefore, _ := eng.store.Get("owner/repo", 1)
-	if lpr := snapBefore.LinkedPR(); lpr != nil && !lpr.CIMergePendingSince.IsZero() {
-		t.Fatal("expected no pending entry before first call")
+	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	if err != nil {
+		t.Fatalf("unexpected error for already-labeled item: %v", err)
 	}
-
-	_ = eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
-
-	snapAfter, _ := eng.store.Get("owner/repo", 1)
-	var afterSince time.Time
-	if lpr := snapAfter.LinkedPR(); lpr != nil {
-		afterSince = lpr.CIMergePendingSince
+	if !enabled {
+		t.Error("expected autoMergeEnabled=true for already-labeled item")
 	}
-	if afterSince.IsZero() {
-		t.Error("expected ciMergePendingSince to be set after first pending observation")
+	if len(client.enablePullRequestAutoMergeCalls) != 0 {
+		t.Errorf("EnablePullRequestAutoMerge must not be called again for idempotency, got %d call(s)", len(client.enablePullRequestAutoMergeCalls))
 	}
 }
 
-// TestAttemptMergeOnValidate_CIPendingTimeout_PausesIssue verifies R6: when CI has
-// been pending longer than CIWaitTimeout the issue is paused with a comment.
-func TestAttemptMergeOnValidate_CIPendingTimeout_PausesIssue(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 15, HeadSHA: "sha6"}, nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return []gh.CheckRun{
-				{Name: "slow-ci", Status: "in_progress", Conclusion: ""},
-			}, nil
-		},
-	}
-	stgs := testStagesWithValidate()
-	eng := testEngineWithStages(client, stgs)
-	eng.cfg.CIWaitTimeout = 1 * time.Millisecond // tiny timeout for test
-
-	// Pre-seed as if first observed 1 second ago (well past 1ms timeout).
-	eng.store.Apply(itemstate.CIMergePendingStarted{Repo: "owner/repo", Number: 1, At: time.Now().Add(-1 * time.Second)})
-
-	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
-	err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
-	if err == nil {
-		t.Fatal("expected error on CI timeout, got nil")
-	}
-	if len(client.mergePRCalls) != 0 {
-		t.Errorf("expected no MergePR on timeout, got %d", len(client.mergePRCalls))
-	}
-	if len(client.addCommentCalls) == 0 {
-		t.Error("expected timeout comment to be posted")
-	}
-	foundPaused := false
-	for _, c := range client.addLabelCalls {
-		if c.labelName == "fabrik:paused" {
-			foundPaused = true
-		}
-	}
-	if !foundPaused {
-		t.Error("expected fabrik:paused label on CI timeout")
-	}
-	// CIMergePendingSince should be cleared after timeout.
-	snapTimeout, _ := eng.store.Get("owner/repo", 1)
-	if lpr := snapTimeout.LinkedPR(); lpr != nil && !lpr.CIMergePendingSince.IsZero() {
-		t.Error("ciMergePendingSince should be deleted after timeout fires")
-	}
-}
-
-// TestAttemptMergeOnValidate_NoPR_ReturnsNil verifies that when FetchLinkedPR finds
-// no PR, attemptMergeOnValidate returns nil (no error, no merge).
-func TestAttemptMergeOnValidate_NoPR_ReturnsNil(t *testing.T) {
+// TestAttemptMergeOnValidate_NoPR_SkipsAutoMerge verifies that when no linked PR
+// exists, the function returns (false, nil) without error.
+func TestAttemptMergeOnValidate_NoPR_SkipsAutoMerge(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 			return nil, nil
@@ -230,100 +105,36 @@ func TestAttemptMergeOnValidate_NoPR_ReturnsNil(t *testing.T) {
 	eng := testEngineForMerge(client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 
-	if err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"}); err != nil {
+	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	if err != nil {
 		t.Fatalf("expected nil when no PR, got %v", err)
 	}
-	if len(client.mergePRCalls) != 0 {
-		t.Errorf("expected no MergePR when no PR, got %d", len(client.mergePRCalls))
+	if enabled {
+		t.Error("expected autoMergeEnabled=false when no linked PR")
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 0 {
+		t.Errorf("EnablePullRequestAutoMerge must not be called when no PR, got %d call(s)", len(client.enablePullRequestAutoMergeCalls))
 	}
 }
 
-// TestAttemptMergeOnValidate_ErrNotMergeable_DispatchesRebase verifies that
-// ErrNotMergeable dispatches a rebase reinvoke (not immediate pause) and returns
-// errRebaseDispatched, adding fabrik:rebase-needed but NOT fabrik:paused.
-func TestAttemptMergeOnValidate_ErrNotMergeable_DispatchesRebase(t *testing.T) {
+// TestAttemptMergeOnValidate_FetchLinkedPRError_ReturnsError verifies that a
+// transient FetchLinkedPR API error returns (false, err) rather than (false, nil),
+// preventing advancement past Validate without enabling auto-merge.
+func TestAttemptMergeOnValidate_FetchLinkedPRError_ReturnsError(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 20, HeadSHA: "sha7"}, nil
-		},
-		mergePRFn: func(owner, repo string, prNumber int) error {
-			return gh.ErrNotMergeable
+			return nil, errors.New("network error")
 		},
 	}
 	eng := testEngineForMerge(client)
-	eng.cfg.MaxRebaseCycles = 3
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
-	stage := &stages.Stage{Name: "Validate"}
 
-	err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, stage)
-	// Wait for the dispatched goroutine to exit (exits early via ErrSkipItem in tests).
-	eng.wg.Wait()
-
-	if !errors.Is(err, errRebaseDispatched) {
-		t.Fatalf("expected errRebaseDispatched, got %v", err)
-	}
-	foundRebaseNeeded := false
-	for _, c := range client.addLabelCalls {
-		if c.labelName == "fabrik:rebase-needed" {
-			foundRebaseNeeded = true
-		}
-		if c.labelName == "fabrik:paused" {
-			t.Error("fabrik:paused must NOT be added when dispatching rebase")
-		}
-	}
-	if !foundRebaseNeeded {
-		t.Error("expected fabrik:rebase-needed to be added on ErrNotMergeable")
-	}
-	snap1, _ := eng.store.Get("owner/repo", 1)
-	if snap1.RebaseCycles("Validate") != 1 {
-		t.Errorf("expected RebaseCycles(Validate) == 1, got %d", snap1.RebaseCycles("Validate"))
-	}
-}
-
-// TestAttemptMergeOnValidate_ErrNotMergeable_CycleLimitPause verifies that
-// when the rebase cycle limit is already reached, ErrNotMergeable falls through
-// to the existing pause path: fabrik:paused + fabrik:awaiting-input.
-func TestAttemptMergeOnValidate_ErrNotMergeable_CycleLimitPause(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 21, HeadSHA: "sha8"}, nil
-		},
-		mergePRFn: func(owner, repo string, prNumber int) error {
-			return gh.ErrNotMergeable
-		},
-	}
-	eng := testEngineForMerge(client)
-	eng.cfg.MaxRebaseCycles = 3
-	// Pre-seed 3 rebase cycles to simulate hitting the limit
-	for i := 0; i < 3; i++ {
-		eng.store.Apply(itemstate.RebaseCycleIncremented{Repo: "owner/repo", Number: 1, StageName: "Validate"})
-	}
-
-	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
-	stage := &stages.Stage{Name: "Validate"}
-
-	err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, stage)
+	_, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
 	if err == nil {
-		t.Fatal("expected error at cycle limit")
+		t.Fatal("expected error when FetchLinkedPR fails, got nil (would incorrectly allow advancement)")
 	}
-	if errors.Is(err, errRebaseDispatched) {
-		t.Fatal("expected plain error at cycle limit, not errRebaseDispatched")
-	}
-	foundPaused := false
-	foundRebaseNeeded := false
-	for _, c := range client.addLabelCalls {
-		if c.labelName == "fabrik:paused" {
-			foundPaused = true
-		}
-		if c.labelName == "fabrik:rebase-needed" {
-			foundRebaseNeeded = true
-		}
-	}
-	if !foundPaused {
-		t.Error("expected fabrik:paused when rebase cycle limit reached")
-	}
-	if !foundRebaseNeeded {
-		t.Error("expected fabrik:rebase-needed to be added on ErrNotMergeable")
+	if len(client.enablePullRequestAutoMergeCalls) != 0 {
+		t.Errorf("EnablePullRequestAutoMerge must not be called on FetchLinkedPR error, got %d call(s)", len(client.enablePullRequestAutoMergeCalls))
 	}
 }
 
@@ -332,13 +143,13 @@ func TestAttemptMergeOnValidate_ErrNotMergeable_CycleLimitPause(t *testing.T) {
 // stage:Validate:complete, and does NOT call attemptMergeOnValidate.
 // The completion label is deferred to checkCIGate in the catch-up loop (ADR 032).
 func TestHandleStageComplete_WaitForCI_SkipsMergeAndReturns(t *testing.T) {
-	merged := false
+	autoMergeCalled := false
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 			return &gh.PRDetails{Number: 99, HeadSHA: "sha8"}, nil
 		},
-		mergePRFn: func(owner, repo string, prNumber int) error {
-			merged = true
+		enablePullRequestAutoMergeFn: func(owner, repo string, prNumber int, strategy string) error {
+			autoMergeCalled = true
 			return nil
 		},
 	}
@@ -352,8 +163,8 @@ func TestHandleStageComplete_WaitForCI_SkipsMergeAndReturns(t *testing.T) {
 
 	eng.handleStageComplete(context.Background(), board, item, validateStage)
 
-	if merged {
-		t.Error("MergePR must not be called when wait_for_ci is true")
+	if autoMergeCalled {
+		t.Error("EnablePullRequestAutoMerge must not be called when wait_for_ci is true")
 	}
 	// Completion label must NOT be added — deferred to checkCIGate (ADR 032).
 	for _, c := range client.addLabelCalls {
@@ -370,51 +181,6 @@ func TestHandleStageComplete_WaitForCI_SkipsMergeAndReturns(t *testing.T) {
 	}
 	if !foundCI {
 		t.Error("fabrik:awaiting-ci must be added when wait_for_ci: true")
-	}
-}
-
-// TestAttemptMergeOnValidate_FetchLinkedPRError_ReturnsError verifies that a
-// transient FetchLinkedPR API error returns an error (retriable) rather than nil
-// (which would allow the caller to advance past Validate without merging the PR).
-func TestAttemptMergeOnValidate_FetchLinkedPRError_ReturnsError(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return nil, errors.New("network error")
-		},
-	}
-	eng := testEngineForMerge(client)
-	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
-
-	err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
-	if err == nil {
-		t.Fatal("expected error when FetchLinkedPR fails, got nil (would incorrectly allow advancement)")
-	}
-	if len(client.mergePRCalls) != 0 {
-		t.Errorf("expected no MergePR on FetchLinkedPR error, got %d", len(client.mergePRCalls))
-	}
-}
-
-// TestAttemptMergeOnValidate_FetchCheckRunsError_ReturnsError verifies that a
-// transient FetchCheckRuns API error returns an error (retriable) rather than
-// proceeding to merge with unknown CI status.
-func TestAttemptMergeOnValidate_FetchCheckRunsError_ReturnsError(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 10, HeadSHA: "sha1"}, nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return nil, errors.New("GitHub API 503")
-		},
-	}
-	eng := testEngineForMerge(client)
-	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
-
-	err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
-	if err == nil {
-		t.Fatal("expected error when FetchCheckRuns fails, got nil (would proceed to merge with unknown CI status)")
-	}
-	if len(client.mergePRCalls) != 0 {
-		t.Errorf("expected no MergePR on FetchCheckRuns error, got %d", len(client.mergePRCalls))
 	}
 }
 
