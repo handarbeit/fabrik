@@ -15,4 +15,5 @@ import "embed"
 //go:embed fabrik-workflows/.claude-plugin/plugin.json
 //go:embed fabrik-workflows/README.md
 //go:embed fabrik-workflows/skills/*/SKILL.md
+//go:embed fabrik-workflows/specify-templates/spec-template.md
 var FabrikPlugin embed.FS

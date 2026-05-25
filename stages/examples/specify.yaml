@@ -5,13 +5,17 @@ comment_skill: fabrik-specify-comment
 auto_advance: false
 model: sonnet
 max_turns: 50
-read_only: true
+read_only: false
 allowed_tools:
   - Read
+  - Write
   - Grep
   - Glob
   - TodoWrite
   - WebSearch
   - WebFetch
+  - Bash(git:*)
+  - Bash(gh:*)
+  - Bash(find:*)
 completion:
   type: claude

@@ -31,29 +31,74 @@ If an answer raises new ambiguities or reveals additional gaps:
 
 ### Maintain spec structure
 
-The issue body should always follow this structure after your update:
+The issue body must follow **Spec Kit format** after your update. This is the same format the Specify skill writes on its first pass. Use this structure:
 
 ```
-## Summary
-One-paragraph description of what this feature does and why.
+# Feature Specification: [Feature Title]
 
-## Requirements
-Bulleted list of specific, testable requirements.
+**Feature Branch**: `fabrik/issue-<N>`
+**Created**: [YYYY-MM-DD]
+**Status**: Draft
+**Input**: User description: "[original request]"
 
-## Scope
-What's in and what's out.
+## Background
 
-## Open Questions
-- [ ] Question (only if unresolved questions remain)
+Why this change is needed. What pain point, gap, or opportunity does it address?
 
-## Prior Art / Context
-Relevant findings from web research or codebase analysis.
+## User Scenarios & Testing *(mandatory)*
 
-## Risks / Dependencies
-Anything that could complicate or block this work.
+### User Story 1 - [Brief Title] (Priority: P1)
+
+[User journey description]
+
+**Why this priority**: [Rationale]
+
+**Independent Test**: [How to test independently]
+
+**Acceptance Scenarios**:
+
+1. **Given** [state], **When** [action], **Then** [outcome]
+
+---
+
+### Edge Cases
+
+- [Edge case]
+
+## Requirements *(mandatory)*
+
+### Functional Requirements
+
+- **FR-001**: [Specific, testable requirement]
+
+### Key Entities *(if applicable)*
+
+- **[Entity]**: [Description]
+
+## Success Criteria *(mandatory)*
+
+### Measurable Outcomes
+
+- **SC-001**: [Measurable, technology-agnostic outcome]
+
+## Assumptions
+
+- [Assumption]
+
+## Out of Scope *(optional)*
+
+- [Excluded work]
+
+## Open Questions *(only if unresolved questions remain)*
+
+- [ ] [Question]
+
+## Source References *(optional)*
+
+- [Reference]
 ```
 
-Remove the Open Questions section entirely when all questions are resolved.
+**Important**: The `## Open Questions` section appears in the issue body during clarification rounds and is removed when all questions are resolved. It MUST NOT appear in the committed `specs/<issue_number>-<slug>/spec.md` file — the Specify skill strips it before committing. Your job here is to maintain the issue body only; the spec file is written by the Specify skill at final completion.
 
 ### Update the issue body
 
@@ -67,9 +112,20 @@ FABRIK_ISSUE_UPDATE_END
 
 Include the ENTIRE body — not just changed sections.
 
+## Commit the spec file before completion
+
+If all questions are now resolved and you are about to emit `FABRIK_STAGE_COMPLETE`, you MUST first commit the spec file — the same step the main Specify skill runs. This ensures the committed spec is produced regardless of which invocation finalizes the stage:
+
+1. Parse `ISSUE_NUM` from the branch name: `git rev-parse --abbrev-ref HEAD` must match `^fabrik/issue-(\d+)(?:-.*)?$`.
+2. Check for a locked slug: `find specs -maxdepth 1 -name "${ISSUE_NUM}-*" -type d | head -1`. Extract the slug from the basename by stripping the `${ISSUE_NUM}-` prefix. If none found, derive from `gh issue view ${ISSUE_NUM} --json title --jq .title` using the algorithm in the main Specify skill.
+3. Write the spec to `specs/${ISSUE_NUM}-${SLUG}/spec.md` (Spec Kit format, no `## Open Questions` section).
+4. `git add specs/${ISSUE_NUM}-${SLUG}/spec.md` — then check `git diff --cached --quiet`. If exit 0, skip the commit. If exit non-zero, run `git commit -m "docs(spec): add specification for #${ISSUE_NUM}"`.
+
+If the branch does not match the expected pattern, surface an error and do not emit `FABRIK_STAGE_COMPLETE`.
+
 ## Completion
 
-When all questions are resolved and the spec is clear and complete, signal completion:
+When all questions are resolved, the spec is clear and complete, and the spec file has been committed:
 - Output `FABRIK_STAGE_COMPLETE` on its own line
 - Once you emit this marker, stop immediately. Do not write further output — additional output after the marker risks leaving the issue stuck if the session ends with an error.
 - The user will review and manually advance to Research
