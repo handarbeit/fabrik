@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -519,6 +520,7 @@ func TestUpdateComment_Error(t *testing.T) {
 // (nonexistent) and blockedById (nonexistent) — a test checking only variables
 // would not have caught the divergence.
 func TestAddBlockedByIssue_QueryShape(t *testing.T) {
+	var mu sync.Mutex
 	var capturedQuery string
 	var capturedVars map[string]interface{}
 
@@ -528,10 +530,12 @@ func TestAddBlockedByIssue_QueryShape(t *testing.T) {
 			t.Errorf("decode body: %v", err)
 			return
 		}
+		mu.Lock()
 		capturedQuery, _ = body["query"].(string)
 		if v, ok := body["variables"].(map[string]interface{}); ok {
 			capturedVars = v
 		}
+		mu.Unlock()
 		w.WriteHeader(200)
 		w.Write([]byte(`{"data":{"addBlockedBy":{"issue":{"id":"I_1"}}}}`))
 	}))
@@ -541,6 +545,9 @@ func TestAddBlockedByIssue_QueryShape(t *testing.T) {
 	if err := c.AddBlockedByIssue("I_issue", "I_blocker"); err != nil {
 		t.Fatalf("AddBlockedByIssue: %v", err)
 	}
+
+	mu.Lock()
+	defer mu.Unlock()
 
 	// Correct mutation name — the original bug used "addBlockedByIssue" which does not exist.
 	if !strings.Contains(capturedQuery, "addBlockedBy") {
