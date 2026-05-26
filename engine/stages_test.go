@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/handarbeit/fabrik/boardcache"
@@ -135,6 +136,51 @@ func TestAttemptMergeOnValidate_FetchLinkedPRError_ReturnsError(t *testing.T) {
 	}
 	if len(client.enablePullRequestAutoMergeCalls) != 0 {
 		t.Errorf("EnablePullRequestAutoMerge must not be called on FetchLinkedPR error, got %d call(s)", len(client.enablePullRequestAutoMergeCalls))
+	}
+}
+
+// TestAttemptMergeOnValidate_FallsBackToDirectMergeWhenClean verifies that when
+// EnablePullRequestAutoMerge returns ErrAutoMergeAlreadyClean, the function falls
+// back to a direct MergePR call, applies fabrik:auto-merge-enabled, and returns (true, nil).
+func TestAttemptMergeOnValidate_FallsBackToDirectMergeWhenClean(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 42, HeadSHA: "sha42"}, nil
+		},
+		enablePullRequestAutoMergeFn: func(owner, repo string, prNumber int, strategy string) error {
+			return fmt.Errorf("%w: GraphQL error: Pull request is in clean status", gh.ErrAutoMergeAlreadyClean)
+		},
+		mergePRFn: func(owner, repo string, prNumber int) error {
+			return nil
+		},
+	}
+	eng := testEngineForMerge(client)
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+
+	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !enabled {
+		t.Fatal("expected autoMergeEnabled=true for already-clean fallback")
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 1 {
+		t.Fatalf("expected EnablePullRequestAutoMerge called once, got %d", len(client.enablePullRequestAutoMergeCalls))
+	}
+	if len(client.mergePRCalls) != 1 {
+		t.Fatalf("expected MergePR called once as fallback, got %d", len(client.mergePRCalls))
+	}
+	if client.mergePRCalls[0].prNumber != 42 {
+		t.Errorf("MergePR called with PR %d, want 42", client.mergePRCalls[0].prNumber)
+	}
+	foundLabel := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:auto-merge-enabled" {
+			foundLabel = true
+		}
+	}
+	if !foundLabel {
+		t.Error("expected fabrik:auto-merge-enabled label to be applied after direct merge fallback")
 	}
 }
 
