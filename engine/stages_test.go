@@ -184,6 +184,88 @@ func TestAttemptMergeOnValidate_FallsBackToDirectMergeWhenClean(t *testing.T) {
 	}
 }
 
+// TestAttemptMergeOnValidate_FallsBackToDirectMergeWhenUnstable verifies that when
+// EnablePullRequestAutoMerge returns a non-sentinel error (e.g. UNSTABLE status),
+// the function falls back to a direct MergePR call, applies fabrik:auto-merge-enabled,
+// and returns (true, nil). This is AC#2.
+func TestAttemptMergeOnValidate_FallsBackToDirectMergeWhenUnstable(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 42, HeadSHA: "sha42"}, nil
+		},
+		enablePullRequestAutoMergeFn: func(owner, repo string, prNumber int, strategy string) error {
+			return errors.New("GraphQL error: Pull request is in unstable status")
+		},
+		mergePRFn: func(owner, repo string, prNumber int) error {
+			return nil
+		},
+	}
+	eng := testEngineForMerge(client)
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+
+	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !enabled {
+		t.Fatal("expected autoMergeEnabled=true for unstable-status fallback")
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 1 {
+		t.Fatalf("expected EnablePullRequestAutoMerge called once, got %d", len(client.enablePullRequestAutoMergeCalls))
+	}
+	if len(client.mergePRCalls) != 1 {
+		t.Fatalf("expected MergePR called once as fallback, got %d", len(client.mergePRCalls))
+	}
+	if client.mergePRCalls[0].prNumber != 42 {
+		t.Errorf("MergePR called with PR %d, want 42", client.mergePRCalls[0].prNumber)
+	}
+	foundLabel := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:auto-merge-enabled" {
+			foundLabel = true
+		}
+	}
+	if !foundLabel {
+		t.Error("expected fabrik:auto-merge-enabled label to be applied after direct merge fallback")
+	}
+}
+
+// TestAttemptMergeOnValidate_DirectMergeAlsoFails verifies that when
+// EnablePullRequestAutoMerge returns an arbitrary error AND MergePR also fails
+// (e.g. ErrNotMergeable from a DIRTY PR), the function returns (false, err) and
+// does NOT apply the fabrik:auto-merge-enabled label. This is AC#3.
+func TestAttemptMergeOnValidate_DirectMergeAlsoFails(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 42, HeadSHA: "sha42"}, nil
+		},
+		enablePullRequestAutoMergeFn: func(owner, repo string, prNumber int, strategy string) error {
+			return errors.New("GraphQL error: Pull request is in unstable status")
+		},
+		mergePRFn: func(owner, repo string, prNumber int) error {
+			return gh.ErrNotMergeable
+		},
+	}
+	eng := testEngineForMerge(client)
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+
+	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	if err == nil {
+		t.Fatal("expected error when MergePR also fails, got nil")
+	}
+	if enabled {
+		t.Fatal("expected autoMergeEnabled=false when both auto-merge and direct merge fail")
+	}
+	if len(client.mergePRCalls) != 1 {
+		t.Fatalf("expected MergePR called once as fallback, got %d", len(client.mergePRCalls))
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:auto-merge-enabled" {
+			t.Error("fabrik:auto-merge-enabled label must NOT be applied when direct merge fails")
+		}
+	}
+}
+
 // TestHandleStageComplete_WaitForCI_SkipsMergeAndReturns verifies Approach A': when
 // wait_for_ci is true, handleStageComplete adds fabrik:awaiting-ci, does NOT add
 // stage:Validate:complete, and does NOT call attemptMergeOnValidate.
