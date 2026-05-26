@@ -3073,8 +3073,10 @@ Fabrik discovers PR comments through the `closedByPullRequestsReferences` GraphQ
 **Flow:**
 1. If `fabrik:auto-merge-enabled` is already present on the issue: return nil (idempotent — auto-merge was already enabled in a previous invocation).
 2. Fetch linked PR via `FetchLinkedPR()`.
-3. Call `EnablePullRequestAutoMerge(owner, repo, pr.Number, AutoMergeStrategy)`. The strategy defaults to `MERGE` and is configurable via `FABRIK_AUTO_MERGE_STRATEGY`. On failure: log a guidance message and return a retriable error (next poll retries).
-4. On success: apply `fabrik:auto-merge-enabled` label. GitHub now owns the merge decision atomically — no Fabrik-side `MergePR` call. Done advancement is deferred to `checkAutoMergeConvergence` in Phase 1 of the catch-up loop.
+3. Call `EnablePullRequestAutoMerge(owner, repo, pr.Number, AutoMergeStrategy)`. The strategy defaults to `MERGE` and is configurable via `FABRIK_AUTO_MERGE_STRATEGY`. On failure, two branches apply:
+   - **`ErrAutoMergeNotEnabled`** (repo-level setting disabled): log a guidance message pointing to Settings → General → Allow auto-merge; return a retriable error (next poll retries). No direct-merge attempt.
+   - **Any other error** (PR in a terminal GitHub state — e.g. CLEAN, UNSTABLE, or future variants where GitHub refuses to queue auto-merge): log the specific error, then attempt a direct `MergePR` call as a fallback. If `MergePR` succeeds: apply `fabrik:auto-merge-enabled` and return `(true, nil)`. If `MergePR` also fails (e.g. `ErrNotMergeable` for a DIRTY PR): return `(false, err)` so existing rebase/CI-fix gates can act on it.
+4. On `EnablePullRequestAutoMerge` success: apply `fabrik:auto-merge-enabled` label. GitHub now owns the merge decision atomically — no Fabrik-side `MergePR` call. Done advancement is deferred to `checkAutoMergeConvergence` in Phase 1 of the catch-up loop.
 
 **`cruise > yolo` precedence:** If `fabrik:cruise` is present on the issue, `attemptMergeOnValidate` returns immediately without calling `EnablePullRequestAutoMerge`. Cruise items keep the current `stage:Validate:complete` behavior: the branch is maintained (rebase reinvoke, CI-fix reinvoke) but merging is left to the user.
 
