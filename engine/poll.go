@@ -301,6 +301,9 @@ func (e *Engine) Run() error {
 	// rewritten to SSH by the user's git config.
 	httpsToSSH := e.checkURLRewrite()
 	e.checkHTTPSCredentials(httpsToSSH)
+	if e.cfg.Repo != "" {
+		e.checkAllowAutoMerge(e.cfg.Owner, e.cfg.Repo)
+	}
 
 	// Seed all known Fabrik labels with descriptions and sensible default colors.
 	// Non-fatal: a seeding failure must not prevent the engine from polling.
@@ -1049,6 +1052,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 				e.mu.Unlock()
 				continue
 			}
+			e.checkAllowAutoMerge(owner, repo)
 			if err := e.client.SeedLabels(owner, repo, sn, e.cfg.User); err != nil {
 				e.logf(0, "warn", "label seeding for %s failed (non-fatal): %v\n", ownerRepo, err)
 			}
@@ -2108,6 +2112,31 @@ func (e *Engine) checkHTTPSCredentials(hasSSHRewrite bool) {
 		fmt.Printf("[startup] warn: no git credential helper configured; HTTPS cloning may prompt for credentials.\n")
 		fmt.Printf("[startup] warn: configure one (e.g. git-credential-osxkeychain) or use --ssh / git_ssh: true in .fabrik/config.yaml.\n")
 		fmt.Printf("[startup] note: existing bare clones retain their original remote URL and are not affected by this setting.\n")
+	}
+}
+
+// checkAllowAutoMerge queries the GitHub API for the allow_auto_merge setting on
+// owner/repo and prints a WARNING if it is disabled. Non-fatal: API errors are
+// logged at warn level and processing continues. The check fires at most once per
+// repo per process run (guarded by checkedAutoMergeRepos).
+func (e *Engine) checkAllowAutoMerge(owner, repo string) {
+	key := owner + "/" + repo
+	e.mu.Lock()
+	already := e.checkedAutoMergeRepos[key]
+	e.checkedAutoMergeRepos[key] = true
+	e.mu.Unlock()
+	if already {
+		return
+	}
+	enabled, err := e.client.FetchAllowAutoMerge(owner, repo)
+	if err != nil {
+		e.logf(0, "warn", "could not check allow_auto_merge for %s: %v\n", key, err)
+		return
+	}
+	if !enabled {
+		fmt.Printf("[startup] WARNING: %s has allow_auto_merge disabled.\n", key)
+		fmt.Printf("[startup] WARNING: yolo issues on this repo will reach Validate complete but their PRs will not merge.\n")
+		fmt.Printf("[startup] WARNING: Fix: gh api -X PATCH repos/%s -f allow_auto_merge=true\n", key)
 	}
 }
 
