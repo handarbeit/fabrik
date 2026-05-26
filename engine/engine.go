@@ -77,7 +77,8 @@ type Engine struct {
 	lastReportedCost     float64          // cost at last [stats] report; skip repeat prints when unchanged
 	mayNeedWork          map[string]bool  // key: issueKey; items that have changed since the last poll cycle
 	mayNeedWorkMu        sync.Mutex       // guards mayNeedWork
-	seededRepos          map[string]bool  // key: "owner/repo"; in-memory guard to avoid re-seeding on every poll
+	seededRepos              map[string]bool  // key: "owner/repo"; in-memory guard to avoid re-seeding on every poll
+	checkedAutoMergeRepos    map[string]bool  // key: "owner/repo"; guard to emit allow_auto_merge warning at most once per run
 	idleCount            int              // consecutive idle polls; triggers self-upgrade at threshold
 	idleStart            time.Time        // when consecutive idle polls began; zero value = not idle
 	lastProjectUpdatedAt time.Time        // last seen project.updatedAt from FetchProjectUpdatedAt gate; zero = not yet checked
@@ -144,9 +145,10 @@ func New(cfg Config) (*Engine, error) {
 		worktreeManagers: make(map[string]*WorktreeManager),
 		fabrikDir:        fabrikDir,
 		store:            sharedStore,
-		mayNeedWork:      make(map[string]bool),
-		seededRepos:      make(map[string]bool),
-		sem:              make(chan struct{}, cfg.MaxConcurrent),
+		mayNeedWork:           make(map[string]bool),
+		seededRepos:           make(map[string]bool),
+		checkedAutoMergeRepos: make(map[string]bool),
+		sem:                   make(chan struct{}, cfg.MaxConcurrent),
 	}
 
 	// Migrate any old-style worktrees (issue-N/) to the new per-repo layout.
@@ -191,14 +193,15 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 	}
 	wms := make(map[string]*WorktreeManager)
 	eng := &Engine{
-		cfg:              cfg,
-		client:           client,
-		claude:           claude,
-		worktreeManagers: wms,
-		store:            itemstate.NewStore(nil),
-		mayNeedWork:      make(map[string]bool),
-		seededRepos:      make(map[string]bool),
-		sem:              make(chan struct{}, maxConcurrent),
+		cfg:                   cfg,
+		client:                client,
+		claude:                claude,
+		worktreeManagers:      wms,
+		store:                 itemstate.NewStore(nil),
+		mayNeedWork:           make(map[string]bool),
+		seededRepos:           make(map[string]bool),
+		checkedAutoMergeRepos: make(map[string]bool),
+		sem:                   make(chan struct{}, maxConcurrent),
 	}
 	if worktrees != nil {
 		worktrees.logfFn = eng.logf

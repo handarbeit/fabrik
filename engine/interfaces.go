@@ -48,6 +48,7 @@ type GitHubClient interface {
 	DeleteReviewRequest(owner, repo string, prNumber int, reviewers []string) error
 	AddReviewRequest(owner, repo string, prNumber int, reviewers []string) error
 	FetchLatestRelease(owner, repo string) (*gh.LatestRelease, error)
+	FetchAllowAutoMerge(owner, repo string) (bool, error)
 	FetchLabelAppliedAt(owner, repo string, issueNumber int, labelName string) (time.Time, error)
 	SeedLabels(owner, repo string, stageNames []string, lockedUser string) error
 	RateLimitStats() (rest, graphql gh.RateLimitStats)

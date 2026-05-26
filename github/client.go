@@ -151,3 +151,16 @@ func (c *Client) FetchLatestRelease(owner, repo string) (*LatestRelease, error) 
 	}
 	return &release, nil
 }
+
+// FetchAllowAutoMerge calls GET /repos/{owner}/{repo} and returns the value of
+// the allow_auto_merge field. Returns an error if the request fails.
+func (c *Client) FetchAllowAutoMerge(owner, repo string) (bool, error) {
+	url := c.baseURL + "/repos/" + owner + "/" + repo
+	var result struct {
+		AllowAutoMerge bool `json:"allow_auto_merge"`
+	}
+	if err := c.restGetJSON(url, &result); err != nil {
+		return false, fmt.Errorf("fetching allow_auto_merge for %s/%s: %w", owner, repo, err)
+	}
+	return result.AllowAutoMerge, nil
+}
