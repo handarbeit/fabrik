@@ -252,15 +252,19 @@ func TestHandleStageComplete_AutoAdvanceFalse_OverridesAdvanceButMergeStillFires
 }
 
 func TestHandleStageComplete_MergeAPIError_LogsAndDoesNotAdvance(t *testing.T) {
-	// Transient API error from EnablePullRequestAutoMerge: log the error and do NOT
-	// advance. This prevents silently moving to Done when auto-merge enablement failed
-	// (e.g. transient 5xx, permissions). The engine will retry Validate on the next
-	// cooldown cycle.
+	// Transient API error from both EnablePullRequestAutoMerge and the MergePR fallback:
+	// log the error and do NOT advance. Under the generalised fallback, any
+	// non-ErrAutoMergeNotEnabled error triggers a direct MergePR attempt. When that
+	// also fails (e.g. PR not yet mergeable), the engine must not advance — it will
+	// retry Validate on the next cooldown cycle.
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 			return &gh.PRDetails{Number: 88, HeadSHA: "abc123"}, nil
 		},
 		enablePullRequestAutoMergeFn: func(owner, repo string, prNumber int, strategy string) error {
+			return errors.New("network error")
+		},
+		mergePRFn: func(owner, repo string, prNumber int) error {
 			return errors.New("network error")
 		},
 	}
