@@ -232,7 +232,19 @@ func (e *Engine) dispatchRebaseReinvoke(ctx context.Context, board *gh.ProjectBo
 					strategy = "MERGE"
 				}
 				if rerr := e.client.EnablePullRequestAutoMerge(owner, repo, pr.Number, strategy); rerr != nil {
-					e.logf(item.Number, "warn", "auto-merge re-enable after rebase failed: %v\n", rerr)
+					if errors.Is(rerr, gh.ErrAutoMergeAlreadyClean) {
+						// PR is already CLEAN after the rebase push — merge directly.
+						// Without this, checkAutoMergeConvergence sees AutoMergeEnabled=false
+						// and incorrectly pauses the issue as "user disabled auto-merge".
+						e.logf(item.Number, "info", "PR #%d is already in clean status after rebase — falling back to direct merge\n", pr.Number)
+						if mergeErr := e.client.MergePR(owner, repo, pr.Number); mergeErr != nil {
+							e.logf(item.Number, "warn", "direct merge fallback after rebase failed: %v\n", mergeErr)
+						} else {
+							e.logf(item.Number, "info", "PR #%d merged directly after rebase push (already-clean fallback)\n", pr.Number)
+						}
+					} else {
+						e.logf(item.Number, "warn", "auto-merge re-enable after rebase failed: %v\n", rerr)
+					}
 				} else {
 					e.logf(item.Number, "auto-merge", "re-enabled auto-merge on PR #%d after rebase push\n", pr.Number)
 				}
