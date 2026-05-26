@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -2788,5 +2789,109 @@ func TestProbeNewItem_ClosedDone_SkipsDeepFetch(t *testing.T) {
 		if snap.IsTerminal() {
 			t.Errorf("item #%d (open Research): expected IsTerminal()=false", i)
 		}
+	}
+}
+
+// captureStdout redirects os.Stdout to a pipe for the duration of fn,
+// then returns everything written to stdout. The original os.Stdout is
+// restored before returning.
+func captureStdout(fn func()) string {
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	fn()
+	w.Close()
+	os.Stdout = old
+	var buf strings.Builder
+	io.Copy(&buf, r)
+	return buf.String()
+}
+
+func TestCheckAllowAutoMerge_DisabledEmitsWarning(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchAllowAutoMergeFn: func(owner, repo string) (bool, error) {
+			return false, nil
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+
+	out := captureStdout(func() {
+		eng.checkAllowAutoMerge("owner", "repo")
+	})
+
+	if !strings.Contains(out, "WARNING") {
+		t.Errorf("expected WARNING in output; got: %q", out)
+	}
+	if !strings.Contains(out, "allow_auto_merge") {
+		t.Errorf("expected allow_auto_merge mention in output; got: %q", out)
+	}
+	if !strings.Contains(out, "gh api -X PATCH repos/owner/repo") {
+		t.Errorf("expected fix command in output; got: %q", out)
+	}
+}
+
+func TestCheckAllowAutoMerge_EnabledIsSilent(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchAllowAutoMergeFn: func(owner, repo string) (bool, error) {
+			return true, nil
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+
+	out := captureStdout(func() {
+		eng.checkAllowAutoMerge("owner", "repo")
+	})
+
+	if out != "" {
+		t.Errorf("expected no output for enabled repo; got: %q", out)
+	}
+}
+
+func TestCheckAllowAutoMerge_APIErrorIsNonFatal(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchAllowAutoMergeFn: func(owner, repo string) (bool, error) {
+			return false, errors.New("network error")
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+
+	// Should not panic; engine should log the error at warn level and continue.
+	out := captureStdout(func() {
+		eng.checkAllowAutoMerge("owner", "repo")
+	})
+
+	// No WARNING block should be emitted for an API error.
+	if strings.Contains(out, "WARNING") {
+		t.Errorf("should not print WARNING on API error; got: %q", out)
+	}
+}
+
+func TestCheckAllowAutoMerge_DedupSuppressesSecondCall(t *testing.T) {
+	var callCount int
+	client := &mockGitHubClient{
+		fetchAllowAutoMergeFn: func(owner, repo string) (bool, error) {
+			callCount++
+			return false, nil
+		},
+	}
+	eng := testEngine(client, &mockClaudeInvoker{})
+
+	// First call should emit warning.
+	out1 := captureStdout(func() {
+		eng.checkAllowAutoMerge("owner", "repo")
+	})
+	if !strings.Contains(out1, "WARNING") {
+		t.Errorf("first call: expected WARNING; got: %q", out1)
+	}
+
+	// Second call for the same repo should be a no-op.
+	out2 := captureStdout(func() {
+		eng.checkAllowAutoMerge("owner", "repo")
+	})
+	if out2 != "" {
+		t.Errorf("second call: expected no output (dedup); got: %q", out2)
+	}
+	if callCount != 1 {
+		t.Errorf("expected API to be called exactly once; got %d", callCount)
 	}
 }
