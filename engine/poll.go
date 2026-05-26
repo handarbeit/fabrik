@@ -2134,9 +2134,9 @@ func (e *Engine) checkAllowAutoMerge(owner, repo string) {
 		return
 	}
 	if !enabled {
-		fmt.Printf("[startup] WARNING: %s has allow_auto_merge disabled.\n", key)
-		fmt.Printf("[startup] WARNING: yolo issues on this repo will reach Validate complete but their PRs will not merge.\n")
-		fmt.Printf("[startup] WARNING: Fix: gh api -X PATCH repos/%s -f allow_auto_merge=true\n", key)
+		e.logf(0, "startup", "WARNING: %s has allow_auto_merge disabled.\n", key)
+		e.logf(0, "startup", "WARNING: yolo issues on this repo will reach Validate complete but their PRs will not merge.\n")
+		e.logf(0, "startup", "WARNING: Fix: gh api -X PATCH repos/%s -f allow_auto_merge=true\n", key)
 	}
 }
 
