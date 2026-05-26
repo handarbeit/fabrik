@@ -32,6 +32,9 @@ func (m *testGitHubUpgradeClient) FetchLatestRelease(owner, repo string) (*gh.La
 	}
 	return nil, nil
 }
+func (m *testGitHubUpgradeClient) FetchAllowAutoMerge(owner, repo string) (bool, error) {
+	return true, nil
+}
 func (m *testGitHubUpgradeClient) FetchProjectBoard(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
 	return &gh.ProjectBoard{}, nil
 }
