@@ -251,28 +251,27 @@ func (e *Engine) attemptMergeOnValidate(_ context.Context, _ *gh.ProjectBoard, i
 				"enable it in Settings → General → Allow auto-merge; Fabrik will retry on the next poll\n")
 			return false, fmt.Errorf("enabling auto-merge on PR #%d: %w", pr.Number, err)
 		}
-		if errors.Is(err, gh.ErrAutoMergeAlreadyClean) {
-			// PR is already CLEAN (all checks passed) — GitHub won't queue auto-merge.
-			// Fall back to a direct merge call instead.
-			e.logf(item.Number, "info", "PR #%d is already in clean status — falling back to direct merge\n", pr.Number)
-			if mergeErr := e.client.MergePR(owner, repo, pr.Number); mergeErr != nil {
-				return false, fmt.Errorf("direct merge fallback on PR #%d: %w", pr.Number, mergeErr)
-			}
-			// Apply idempotency guard and convergence anchor after successful direct merge.
-			if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); lerr != nil {
-				e.logf(item.Number, "warn", "could not add fabrik:auto-merge-enabled label: %v\n", lerr)
-			} else {
-				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-					cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:auto-merge-enabled")
-				}
-				if e.webhookMgr != nil {
-					e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:auto-merge-enabled")
-				}
-			}
-			e.logf(item.Number, "info", "PR #%d merged directly (already-clean fallback)\n", pr.Number)
-			return true, nil
+		// Any error other than ErrAutoMergeNotEnabled means the PR is in a terminal
+		// GitHub state (CLEAN, UNSTABLE, or any future variant) where auto-merge cannot
+		// be queued. Fall back to a direct merge call. If that also fails (e.g. DIRTY),
+		// surface the MergePR error so existing rebase/CI-fix gates can act on it.
+		e.logf(item.Number, "info", "PR #%d: enable auto-merge failed (%v) — falling back to direct merge\n", pr.Number, err)
+		if mergeErr := e.client.MergePR(owner, repo, pr.Number); mergeErr != nil {
+			return false, fmt.Errorf("direct merge fallback on PR #%d: %w", pr.Number, mergeErr)
 		}
-		return false, fmt.Errorf("enabling auto-merge on PR #%d: %w", pr.Number, err)
+		// Apply idempotency guard and convergence anchor after successful direct merge.
+		if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); lerr != nil {
+			e.logf(item.Number, "warn", "could not add fabrik:auto-merge-enabled label: %v\n", lerr)
+		} else {
+			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:auto-merge-enabled")
+			}
+			if e.webhookMgr != nil {
+				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:auto-merge-enabled")
+			}
+		}
+		e.logf(item.Number, "info", "PR #%d merged directly (auto-merge unavailable fallback)\n", pr.Number)
+		return true, nil
 	}
 
 	// Apply fabrik:auto-merge-enabled as idempotency guard and budget-start anchor.
