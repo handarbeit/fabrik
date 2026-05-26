@@ -727,6 +727,12 @@ You do not need to babysit the pipeline. The intended human role is:
 
 Pass `--yolo` to enable global auto-advance: Fabrik moves issues through every stage automatically without waiting for human approval, and enables GitHub's native auto-merge on the linked PR once Validate completes. To scope the same behavior to a single issue, apply the `fabrik:yolo` label — Fabrik auto-advances and auto-merges that issue only.
 
+> **Prerequisite — Allow auto-merge:** GitHub's native auto-merge must be enabled at the repository level before yolo mode can merge PRs. Enable it under **Settings → General → Pull Requests → "Allow auto-merge"**, or run:
+> ```
+> gh api -X PATCH repos/{owner}/{repo} -f allow_auto_merge=true
+> ```
+> Without this setting, Fabrik will reach Validate complete and attempt auto-merge, but GitHub will reject it. The Fabrik engine emits a `[startup] WARNING` at startup if this setting is disabled on any managed repo.
+
 When Validate completes on a yolo issue, Fabrik calls GitHub's `enablePullRequestAutoMerge` API (the same merge-when-ready mechanism available in the GitHub UI) rather than attempting to merge immediately. GitHub holds the merge until all branch-protection requirements are satisfied — required CI checks, required reviews, up-to-date branch — then merges atomically. Fabrik monitors convergence in the background and pauses the issue if the PR does not reach a terminal state within the convergence budget (default 30 min; see `FABRIK_CONVERGENCE_BUDGET`). See [Post-Validate Convergence Monitor (yolo)](#post-validate-convergence-monitor-yolo) for full details.
 
 For lighter automation without auto-merge, use `fabrik:cruise`: it auto-advances through all stages but stops at Validate, leaving the merge decision to you. If both `fabrik:cruise` and `fabrik:yolo` are present, cruise takes precedence for the merge decision — the PR is not auto-merged — but the issue still advances to Done.
