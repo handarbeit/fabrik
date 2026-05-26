@@ -388,6 +388,13 @@ func (c *Client) AddReviewRequest(owner, repo string, prNumber int, reviewers []
 // repository has not enabled the auto-merge feature in its settings.
 var ErrAutoMergeNotEnabled = errors.New("repository has not enabled auto-merge")
 
+// ErrAutoMergeAlreadyClean is returned by EnablePullRequestAutoMerge when the
+// PR is already in CLEAN status (all checks passed, immediately mergeable).
+// GitHub rejects auto-merge enablement in this state — the caller must merge
+// directly instead. Matched on the string "Pull request is in clean status"
+// from the GitHub GraphQL API (confirmed from production logs).
+var ErrAutoMergeAlreadyClean = errors.New("PR is already in clean status — merge directly")
+
 // EnablePullRequestAutoMerge enables GitHub's native auto-merge on a pull request.
 // strategy must be one of "MERGE", "SQUASH", or "REBASE". GitHub merges the PR
 // atomically when all branch-protection requirements are satisfied.
@@ -443,6 +450,11 @@ mutation($prId: ID!, $method: PullRequestMergeMethod!) {
 		if isAutoMergeNotEnabledError(err) {
 			return fmt.Errorf("%w: %v", ErrAutoMergeNotEnabled, err)
 		}
+		// Surface a recognizable sentinel when the PR is already CLEAN.
+		// GitHub refuses auto-merge on a PR that is immediately mergeable.
+		if isAutoMergeAlreadyCleanError(err) {
+			return fmt.Errorf("%w: %v", ErrAutoMergeAlreadyClean, err)
+		}
 		return fmt.Errorf("enabling auto-merge on PR #%d: %w", prNumber, err)
 	}
 	return nil
@@ -457,6 +469,16 @@ func isAutoMergeNotEnabledError(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "Pull requests cannot be merged using the auto-merge feature") ||
 		strings.Contains(msg, "auto merge is not allowed")
+}
+
+// isAutoMergeAlreadyCleanError reports whether a GraphQL error indicates the
+// PR is already in CLEAN status (all checks passed, immediately mergeable).
+// GitHub refuses auto-merge on such PRs — the caller must merge directly.
+func isAutoMergeAlreadyCleanError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "Pull request is in clean status")
 }
 
 // FetchCommitsBehind returns how many commits base is ahead of head using the
