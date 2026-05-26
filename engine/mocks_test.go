@@ -56,6 +56,7 @@ type mockGitHubClient struct {
 	addBlockedByIssueFn                 func(issueNodeID, blockerNodeID string) error
 	enablePullRequestAutoMergeFn        func(owner, repo string, prNumber int, strategy string) error
 	fetchCommitsBehindFn                func(owner, repo, base, head string) (int, error)
+	fetchAllowAutoMergeFn               func(owner, repo string) (bool, error)
 
 	// Track call counts for FetchProjectItemStatus
 	fetchProjectItemStatusCalls []string
@@ -459,6 +460,16 @@ func (m *mockGitHubClient) FetchLatestRelease(owner, repo string) (*gh.LatestRel
 		return fn(owner, repo)
 	}
 	return nil, nil
+}
+
+func (m *mockGitHubClient) FetchAllowAutoMerge(owner, repo string) (bool, error) {
+	m.mu.Lock()
+	fn := m.fetchAllowAutoMergeFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo)
+	}
+	return true, nil
 }
 
 func (m *mockGitHubClient) FetchLabelAppliedAt(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
