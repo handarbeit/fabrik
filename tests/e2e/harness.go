@@ -167,7 +167,12 @@ func WaitForIssueLabel(t *testing.T, env *Env, repo string, issueNumber int, lab
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		labels := IssueLabels(t, env, repo, issueNumber)
+		labels, err := tryIssueLabels(env, repo, issueNumber)
+		if err != nil {
+			t.Logf("WaitForIssueLabel: transient gh error on %s#%d: %v (will retry)", repo, issueNumber, err)
+			time.Sleep(15 * time.Second)
+			continue
+		}
 		for _, l := range labels {
 			if l == label {
 				return
@@ -175,8 +180,8 @@ func WaitForIssueLabel(t *testing.T, env *Env, repo string, issueNumber int, lab
 		}
 		time.Sleep(15 * time.Second)
 	}
-	t.Fatalf("timed out waiting for label %q on %s#%d (had: %v)",
-		label, repo, issueNumber, IssueLabels(t, env, repo, issueNumber))
+	last, _ := tryIssueLabels(env, repo, issueNumber)
+	t.Fatalf("timed out waiting for label %q on %s#%d (had: %v)", label, repo, issueNumber, last)
 }
 
 // IssueLabels returns the current labels on the issue.
@@ -218,24 +223,37 @@ func CommentOnIssue(t *testing.T, env *Env, repo string, issueNumber int, body s
 }
 
 // WaitForIssueClosed polls until the issue is CLOSED or timeout expires.
+// Transient gh errors (rate-limit blips, network hiccups) are logged and the
+// poll continues — only the timeout itself fails the test, since over a 45-min
+// wait one stray exit-1 from `gh` would otherwise kill an otherwise-healthy run.
 func WaitForIssueClosed(t *testing.T, env *Env, repo string, issueNumber int, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if IssueState(t, env, repo, issueNumber) == "CLOSED" {
+		state, err := tryIssueState(env, repo, issueNumber)
+		if err != nil {
+			t.Logf("WaitForIssueClosed: transient gh error on %s#%d: %v (will retry)", repo, issueNumber, err)
+		} else if state == "CLOSED" {
 			return
 		}
 		time.Sleep(15 * time.Second)
 	}
-	t.Fatalf("timed out waiting for %s#%d to close (still %s)", repo, issueNumber, IssueState(t, env, repo, issueNumber))
+	state, _ := tryIssueState(env, repo, issueNumber)
+	t.Fatalf("timed out waiting for %s#%d to close (last observed: %q)", repo, issueNumber, state)
 }
 
 // WaitForLabelAbsent polls until the named label is no longer on the issue.
+// Tolerant of transient gh errors — see WaitForIssueClosed for rationale.
 func WaitForLabelAbsent(t *testing.T, env *Env, repo string, issueNumber int, label string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		labels := IssueLabels(t, env, repo, issueNumber)
+		labels, err := tryIssueLabels(env, repo, issueNumber)
+		if err != nil {
+			t.Logf("WaitForLabelAbsent: transient gh error on %s#%d: %v (will retry)", repo, issueNumber, err)
+			time.Sleep(15 * time.Second)
+			continue
+		}
 		present := false
 		for _, l := range labels {
 			if l == label {
@@ -249,6 +267,78 @@ func WaitForLabelAbsent(t *testing.T, env *Env, repo string, issueNumber int, la
 		time.Sleep(15 * time.Second)
 	}
 	t.Fatalf("timed out waiting for label %q to disappear from %s#%d", label, repo, issueNumber)
+}
+
+// tryIssueState is the non-fatal counterpart to IssueState — returns (state, err)
+// instead of t.Fatalf'ing. Used by long-running pollers so a single transient
+// gh failure doesn't kill an otherwise-healthy multi-minute wait.
+func tryIssueState(env *Env, repo string, issueNumber int) (string, error) {
+	out, err := ghOutput(env, "issue", "view", fmt.Sprint(issueNumber), "-R", repo, "--json", "state", "--jq", ".state")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// tryIssueLabels is the non-fatal counterpart to IssueLabels.
+func tryIssueLabels(env *Env, repo string, issueNumber int) ([]string, error) {
+	out, err := ghOutput(env, "issue", "view", fmt.Sprint(issueNumber), "-R", repo,
+		"--json", "labels", "--jq", "[.labels[].name]")
+	if err != nil {
+		return nil, err
+	}
+	var labels []string
+	if uerr := json.Unmarshal([]byte(strings.TrimSpace(out)), &labels); uerr != nil {
+		return nil, fmt.Errorf("parse labels: %w", uerr)
+	}
+	return labels, nil
+}
+
+// AssertLabelWasApplied queries the issue's timeline events and asserts the
+// named label was applied at some point during the issue's lifetime. Survives
+// the case where Fabrik adds-and-removes a label faster than a polling
+// interval can observe (e.g. fabrik:auto-merge-enabled on a PR that merges
+// instantly because CI is trivial and there's no branch protection).
+func AssertLabelWasApplied(t *testing.T, env *Env, repo string, issueNumber int, label string) {
+	t.Helper()
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		t.Fatalf("bad repo: %q", repo)
+	}
+	out, err := ghOutput(env, "api", "--paginate",
+		fmt.Sprintf("repos/%s/%s/issues/%d/timeline", owner, name, issueNumber),
+		"--jq", `[.[] | select(.event == "labeled") | .label.name]`)
+	if err != nil {
+		t.Fatalf("query timeline for %s#%d: %v\n%s", repo, issueNumber, err, out)
+	}
+	// --paginate concatenates one JSON array per page. Split, parse each, union.
+	seen := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var names []string
+		if err := json.Unmarshal([]byte(line), &names); err != nil {
+			continue
+		}
+		for _, n := range names {
+			seen[n] = true
+		}
+	}
+	if seen[label] {
+		return
+	}
+	t.Fatalf("label %q was never applied to %s#%d (labels ever applied: %v)",
+		label, repo, issueNumber, mapKeys(seen))
+}
+
+func mapKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 // IssueState returns "OPEN" or "CLOSED".
