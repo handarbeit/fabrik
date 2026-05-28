@@ -896,6 +896,37 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}
 	}
 
+	// Process FABRIK_PR_CREATE marker — the Implement skill emits this block to signal
+	// that the engine should create the draft PR (with "Closes #N" prepended mechanically).
+	// Fires unconditionally (not gated on completed) when CreateDraftPR is enabled.
+	var prNumber int
+	if stage.CreateDraftPR && output != "" {
+		prBlock, prBlockErr := ParsePRCreateBlock(output)
+		if prBlockErr != nil {
+			msg := fmt.Sprintf("🏭 **Fabrik — malformed FABRIK_PR_CREATE marker**\n\n%v\n\nRemove `fabrik:paused` after fixing the skill output to retry.", prBlockErr)
+			if dbID, commentErr := e.client.AddComment(owner, repo, item.Number, msg); commentErr != nil {
+				e.logf(item.Number, "warn", "could not post FABRIK_PR_CREATE error comment: %v\n", commentErr)
+			} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+					DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
+				})
+			}
+			e.addPausedLabelToItem(owner, repo, item)
+			releaseLock()
+			return nil
+		} else if prBlock != nil {
+			createdPRNum, createErr := e.processPRCreateMarker(ctx, item, prBlock, owner, repo, baseBranch, repoStr)
+			if createErr != nil {
+				// processPRCreateMarker already paused the issue and posted a comment.
+				releaseLock()
+				return nil
+			}
+			prNumber = createdPRNum
+			// Strip the marker block from output so it is not posted as a comment.
+			output = stripMarkers(output, "FABRIK_PR_CREATE_BEGIN", "FABRIK_PR_CREATE_END")
+		}
+	}
+
 	// Strip all Fabrik markers from output before posting as a comment.
 	// This must happen after extractUpdatedBody (above) but the raw output is
 	// still needed for CheckBlockedOnInput (below), so we strip into a separate
@@ -914,8 +945,8 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// ensure the PR exists before posting so postOutputToPR can find it.
 	// Error is intentionally ignored here — failure is caught and escalated in
 	// the completion block below, which also retries with the full retry/backoff logic.
-	var prNumber int
-	if completed && stage.CreateDraftPR && stage.PostToPR {
+	// prNumber may already be set if the FABRIK_PR_CREATE marker path ran above.
+	if prNumber == 0 && completed && stage.CreateDraftPR && stage.PostToPR {
 		prNumber, _ = e.ensureDraftPR(item, baseBranch)
 	}
 
@@ -1076,6 +1107,13 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 				}
 			}
 			e.updatePRVerification(item, prNumber, extractSummary(output))
+			// Verify that the PR's closingIssuesReferences includes this issue.
+			// If missing, attempt one auto-heal before advancing to handleStageComplete.
+			// Returns false only when linkage cannot be established — issue is already paused.
+			if !e.verifyAndHealLinkage(ctx, item, prNumber, stage, owner, repo, repoStr) {
+				releaseLock()
+				return nil
+			}
 		}
 		// PR creation succeeded (or not required) — advance the stage.
 		releaseLock()
