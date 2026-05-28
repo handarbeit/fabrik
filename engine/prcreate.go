@@ -59,8 +59,9 @@ func ParsePRCreateBlock(s string) (*PRCreateBlock, error) {
 	targetRepo := ""
 	if parts := strings.Fields(strings.TrimPrefix(beginLine, beginPrefix)); len(parts) > 0 {
 		targetRepo = parts[0]
-		// Validate that it looks like owner/repo (contains exactly one slash with content on each side).
-		if !strings.Contains(targetRepo, "/") || strings.HasPrefix(targetRepo, "/") || strings.HasSuffix(targetRepo, "/") {
+		// Validate exactly "owner/repo": two non-empty parts separated by a single slash.
+		repoParts := strings.Split(targetRepo, "/")
+		if len(repoParts) != 2 || repoParts[0] == "" || repoParts[1] == "" {
 			return nil, fmt.Errorf("FABRIK_PR_CREATE_BEGIN: invalid repo %q — expected owner/repo format", targetRepo)
 		}
 	}
@@ -254,9 +255,9 @@ func (e *Engine) verifyAndHealLinkage(ctx context.Context, item gh.ProjectItem, 
 
 	// LinkedPRNumber == 0 despite a known prNumber. Try to find the PR by branch name.
 	pr, err := e.client.FetchLinkedPR(owner, repo, item.Number)
-	if err != nil || pr == nil || pr.Number == 0 {
-		// No PR found via branch lookup either — user has diverged from the naming convention.
-		e.logf(item.Number, "warn", "verifyAndHealLinkage: no PR found for branch fabrik/issue-%d — skipping heal (user-diverged branch)\n", item.Number)
+	if err != nil || pr == nil || pr.Number == 0 || pr.State != "open" || pr.Merged {
+		// No active PR found via branch lookup — user has diverged, or PR is closed/merged.
+		e.logf(item.Number, "warn", "verifyAndHealLinkage: no active PR found for branch fabrik/issue-%d — skipping heal\n", item.Number)
 		return true
 	}
 
