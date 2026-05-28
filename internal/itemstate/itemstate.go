@@ -171,6 +171,10 @@ type StageState struct {
 	RebaseCycles map[string]int
 	// ProcessedComments maps comment ID to the time Fabrik finished processing it.
 	ProcessedComments map[string]time.Time
+	// LinkageHealAttempted maps stage name to the PR head SHA for which a linkage
+	// auto-heal was attempted. In-memory only — does not survive restart. Keyed by
+	// stage name so force-push (new SHA) clears the guard naturally.
+	LinkageHealAttempted map[string]string
 }
 
 // LockState describes who holds the fabrik:locked:<user> label on this issue.

@@ -632,6 +632,20 @@ type EngineCyclesCleared struct {
 func (EngineCyclesCleared) isMutation()       {}
 func (m EngineCyclesCleared) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// LinkageHealAttempted records that the engine attempted to auto-heal missing
+// PR↔issue linkage for the given stage. Keyed by stage name → PR head SHA.
+// In-memory only — does not survive restart. A force-push (new SHA) clears the
+// guard naturally by virtue of the SHA not matching the stored value.
+type LinkageHealAttempted struct {
+	Repo      string
+	Number    int
+	StageName string
+	PRSHA     string
+}
+
+func (LinkageHealAttempted) isMutation()       {}
+func (m LinkageHealAttempted) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // itemKeyFor constructs the canonical "owner/repo#N" item key used throughout the Store.
 // Returns "" when repo is empty (indicating an invalid or unroutable mutation).
 func itemKeyFor(repo string, number int) string {
