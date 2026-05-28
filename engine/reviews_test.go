@@ -1031,3 +1031,94 @@ func TestCheckReviewGate_BotPhase1_NonCopilot_MentionsLogin(t *testing.T) {
 		t.Errorf("expected @dependabot[bot] in reprompt comment body, got: %q", body)
 	}
 }
+
+// Broken-linkage guard: PR exists on branch but LinkedPRNumber == 0 → pause instead of loop.
+func TestCheckReviewGate_BrokenLinkage_PRFound_Pauses(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 77, State: "open"}, nil
+		},
+	}
+	eng := reviewTestEngine(client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 0, // no linkage via closingIssuesReferences
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+
+	blocked, timedOut := eng.checkReviewGate(board, item, stage)
+
+	// Gate returns (false, false) — not blocked-for-reviews, not timed out.
+	if blocked {
+		t.Error("gate should not report blocked when broken linkage detected")
+	}
+	if timedOut {
+		t.Error("gate should not report timedOut for broken linkage")
+	}
+
+	// Issue MUST be paused.
+	client.mu.Lock()
+	labels := client.addLabelCalls
+	client.mu.Unlock()
+	hasPaused := false
+	for _, l := range labels {
+		if l.labelName == "fabrik:paused" {
+			hasPaused = true
+		}
+	}
+	if !hasPaused {
+		t.Error("issue should have fabrik:paused label applied")
+	}
+
+	// fabrik:awaiting-review must NOT be applied.
+	for _, l := range labels {
+		if l.labelName == "fabrik:awaiting-review" {
+			t.Error("fabrik:awaiting-review must not be applied for broken linkage")
+		}
+	}
+
+	// Comment should mention the closing keyword and PR number.
+	if len(client.addCommentCalls) == 0 {
+		t.Fatal("expected a broken-linkage comment to be posted")
+	}
+	body := client.addCommentCalls[0].body
+	if !strings.Contains(body, "Closes #10") {
+		t.Errorf("comment should contain recovery closing keyword, got: %q", body)
+	}
+}
+
+// Broken-linkage guard: LinkedPRNumber == 0 and no PR found on branch → falls through to normal logic.
+func TestCheckReviewGate_BrokenLinkage_NoPRFound_FallsThrough(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return nil, nil // no PR on branch
+		},
+	}
+	eng := reviewTestEngine(client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		LinkedPRNumber: 0,
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+
+	blocked, _ := eng.checkReviewGate(board, item, stage)
+
+	// No PR found → falls through to normal reviewer logic. With no reviews, gate blocks.
+	if !blocked {
+		t.Error("gate should still block when no PR is found (normal logic applies)")
+	}
+
+	// Issue must NOT be paused for broken linkage.
+	client.mu.Lock()
+	labels := client.addLabelCalls
+	client.mu.Unlock()
+	for _, l := range labels {
+		if l.labelName == "fabrik:paused" {
+			t.Error("should not pause when no PR exists on branch")
+		}
+	}
+}
