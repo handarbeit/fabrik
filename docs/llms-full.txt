@@ -750,7 +750,23 @@ The Implement stage creates a **draft PR** linked to the issue when `create_draf
 | `## Approach` | Extracted from the Plan stage output (`.fabrik-context/stage-Plan.md`); falls back to a placeholder if absent |
 | `## Verification` | Placeholder text, auto-replaced by an extracted stage summary when available |
 
-The `Closes #N` footer in the PR body links the PR to the issue so Fabrik can discover PR comments via GraphQL.
+**`Closes #N` — engine-generated, always first:** Fabrik generates the `Closes #N` closing keyword as the **first line** of every PR body it creates. The Implement skill emits a `FABRIK_PR_CREATE_BEGIN/END` marker block (not a direct `gh pr create` call), and the engine prepends `Closes #N\n\n` before calling `gh pr create`. This guarantees the keyword is always present and always at the top — the first thing a reviewer sees. The skill is explicitly prohibited from writing this line, so it cannot silently drop it.
+
+Example PR body shape:
+```
+Closes #841
+
+## Summary
+...
+
+## Approach
+...
+
+## Verification
+...
+```
+
+The `Closes #N` first line links the PR to the issue so Fabrik can discover PR comments via GraphQL. Every downstream gate (review gate, CI gate, auto-merge) depends on this linkage. If the closing keyword is ever missing from an existing PR body, Fabrik detects it post-Implement and auto-heals by prepending `Closes #N` to the body.
 
 **Verification auto-update**: For draft PRs created with `create_draft_pr: true`, Fabrik updates the `## Verification` section only when it can extract a summary block delimited by `FABRIK_SUMMARY_BEGIN` and `FABRIK_SUMMARY_END` from stage output. This keeps the PR description current when a stage provides a structured summary for PR-body updates.
 
@@ -2602,6 +2618,8 @@ Note: within `checkDependencies()`, for each blocker the engine first consults `
 
 **`FABRIK_SPAWN_CHILD_BEGIN/END` blocks** are not processed inline — they are structured data emitted by the Plan stage and preserved in the Plan stage comment. The engine's `preImplement` step reads them at Implement dispatch time to create child issues. See §6.6.
 
+**`FABRIK_PR_CREATE_BEGIN/END` blocks** are processed inline — the engine parses the block during `processItem()`, creates the draft PR with `Closes #N` prepended as the first line, and records the PR number before posting output. See §5.6.
+
 **Invocation-level kill paths:** The `max_wall_time` and inactivity timeout mechanisms (see §7.6) can terminate the Claude process before it writes a clean `{"type":"result"}` line. After such a kill, `runClaude()` retroactively scans the already-buffered output for `FABRIK_STAGE_COMPLETE` in intermediate `{"type":"assistant"}` NDJSON lines via `extractTextFromAssistantTurns()`. If found, `completed=true` is returned and the invocation is treated identically to a live `FABRIK_STAGE_COMPLETE`. If not found, `completed=false` is returned and the invocation routes to the cooldown/retry path. These kills are distinguished from engine-shutdown cancellation by the `wasTimedOut` flag, so they do not trigger the hard-error path.
 
 ### 2.7 Manual Label Change
@@ -3134,6 +3152,89 @@ Then: applies `fabrik:paused` + `fabrik:awaiting-input`; removes `fabrik:auto-me
 | Validate, Convergence | Budget exhausted | Validate, Paused | `fabrik:paused`, `fabrik:awaiting-input` | `fabrik:auto-merge-enabled` |
 | Validate, Convergence | User disables auto-merge in GitHub UI | Validate, Paused | `fabrik:paused`, `fabrik:awaiting-input` | `fabrik:auto-merge-enabled` |
 
+### 5.6 Engine-Mechanized PR Creation (`FABRIK_PR_CREATE` Marker)
+
+**Motivation:** If the Implement skill creates the draft PR directly via `gh pr create`, it can silently omit the `Closes #N` closing keyword. Without that keyword, GitHub's `closingIssuesReferences` / `closedByPullRequestsReferences` fields return empty, breaking every downstream gate (review gate, CI gate, auto-merge). To eliminate this failure class, PR creation is mechanized: the skill emits a structured marker block, the engine creates the PR with `Closes #N` guaranteed as the first line.
+
+**Marker format:**
+
+```
+FABRIK_PR_CREATE_BEGIN [owner/repo]
+TITLE: <single-line PR title>
+
+<PR body content — no closing keyword>
+FABRIK_PR_CREATE_END
+```
+
+- `BEGIN` and `END` must each be on their own line.
+- Optional `owner/repo` on the `BEGIN` line (cross-repo target; v1: only same-repo supported).
+- First non-empty line inside the block must be `TITLE: <title>`.
+- Body is everything after the title line. Must be non-empty.
+- The skill MUST NOT write any closing keyword (`Closes`, `Fixes`, `Resolves` + `#N`); the engine prepends one.
+
+**Code path:** `processItem()` → `ParsePRCreateBlock()` → `processPRCreateMarker()`
+
+**Processing** (runs when `stage.CreateDraftPR` and a `FABRIK_PR_CREATE_BEGIN/END` block is found in output, before output is posted):
+
+1. **Cross-repo guard:** If the `BEGIN` line specifies a different `owner/repo`, the engine pauses the issue with `fabrik:paused` and a "cross-repo PR creation not supported in v1" comment. Does not create a PR.
+2. **Idempotency:** Call `FetchLinkedPR()` — if an open PR already exists on `fabrik/issue-N`, use it (record in Store, skip create).
+3. **Push branch:** Call `PushBranch()` (non-fatal warning if push fails — mirrors `ensureDraftPR`).
+4. **Compose body:** `finalBody = "Closes #N\n\n" + block.Body`. This is the mechanized guarantee.
+5. **Create PR:** Call `CreateDraftPR()` with the composed body and verbatim title. Up to 3 attempts with exponential backoff for transient errors.
+6. **On success:** Cache write-through (`RecordPRLinkage`), `RegisterEcho("pull_request", "opened")`, post acknowledgement comment `"🏭 **Fabrik** — opened PR #M"` on the issue.
+7. **On failure:** Apply `fabrik:paused`, post error comment, return error. `handleStageComplete` is NOT called — the stage does not advance.
+
+After the marker block is processed, the `FABRIK_PR_CREATE_BEGIN/END` content is stripped from the output string before posting the stage comment.
+
+**Malformed marker** (missing TITLE, empty body, missing END, invalid `owner/repo` format): `ParsePRCreateBlock` returns an error. The engine pauses the issue with `fabrik:paused` and a comment naming the malformation. Does not create a PR.
+
+**Fallback to `ensureDraftPR`:** If no `FABRIK_PR_CREATE` marker is found and `stage.CreateDraftPR` is true, the engine falls back to the legacy `ensureDraftPR` path (§5.1). The post-Implement linkage backstop (§5.7) runs in either case.
+
+**`PRCreationFailed` in-memory flag and retry path:** When the marker path fails to create a PR, the same `PRCreationFailed` and R5 retry path as §5.5 applies.
+
+| State | Trigger | Action | Outcome |
+|-------|---------|--------|---------|
+| Locked + In Progress | `FABRIK_PR_CREATE` block found + valid | `processPRCreateMarker` → `CreateDraftPR` + acknowledgement comment | PR created with `Closes #N` as first line |
+| Locked + In Progress | `FABRIK_PR_CREATE` block malformed | `fabrik:paused` + comment naming malformation | Issue paused; no PR created |
+| Locked + In Progress | `FABRIK_PR_CREATE` block → cross-repo target | `fabrik:paused` + "cross-repo not supported" comment | Issue paused; no PR created |
+| Locked + In Progress | `FABRIK_PR_CREATE` block → `CreateDraftPR` fails | `fabrik:paused` + error comment | Issue paused; no PR created |
+
+### 5.7 Post-Implement Linkage Backstop
+
+**Motivation:** Belt-and-braces for the case where a PR exists but lacks the `Closes #N` keyword — either because a legacy skill called `gh pr create` directly, because a `gh pr edit` overwrote the body, or because the engine-mechanized path (§5.6) failed and a fallback PR was opened manually.
+
+**Trigger:** After the Implement stage signals `FABRIK_STAGE_COMPLETE` (via either the marker path or the `ensureDraftPR` fallback), before `handleStageComplete()` is called. Only runs when `stage.CreateDraftPR` is true.
+
+**Code path:** `processItem()` → `verifyAndHealLinkage()`
+
+**Flow:**
+
+1. If `prNumber == 0` (no PR exists): skip, return true (no linkage to verify).
+2. Call `FetchItemDetails(&item)` (GraphQL `closedByPullRequestsReferences`) to get fresh `item.LinkedPRNumber`.
+3. If `item.LinkedPRNumber != 0`: linkage confirmed — return true.
+4. If `item.LinkedPRNumber == 0`: call `FetchLinkedPR()` to find the PR by branch name (`fabrik/issue-N`).
+   - If no PR found: user has diverged from the `fabrik/issue-N` naming convention; log warning and return true (skip heal — do not pause).
+5. **Body-length guard (FR-015):** If `len(currentBody) + len("Closes #N\n\n") > 65,300`, pause with `fabrik:paused` + "body too long for auto-heal" comment. Return false.
+6. **Idempotency guard:** Check `Snapshot.LinkageHealAttempted(stage.Name, prSHA)`. If true (heal already attempted once for this PR head SHA): pause with `fabrik:paused` + copy-paste `gh pr edit` recovery command. Return false.
+7. Record `LinkageHealAttempted{Repo, Number, StageName, PRSHA}` mutation in Store (in-memory only).
+8. **Heal:** call `balanceFences(currentBody)`, prepend `"Closes #N\n\n"`, call `UpdateIssueBody()`.
+9. **Re-verify:** call `FetchItemDetails` again.
+   - If `item.LinkedPRNumber != 0`: post `"🏭 **Fabrik** — PR body auto-corrected: Closes #N prepended"` comment, return true.
+   - If still 0: call `pauseForBrokenLinkage()` — `fabrik:paused` + copy-paste recovery command. Return false.
+10. If heal returns false: `handleStageComplete` is NOT called — `stage:Implement:complete` is NOT applied.
+
+**`LinkageHealAttempted` in-memory flag:** `StageState.LinkageHealAttempted map[string]string` maps stage name to PR head SHA. In-memory only — does not survive engine restart. On restart, one more heal attempt is permitted (conservative / safe). Keyed by SHA so a force-push clears the guard naturally.
+
+**`pauseForBrokenLinkage` comment:** Names PR number, issue number, failure reason, and provides a copy-paste `gh pr edit ... --body-file ...` command the user can run to manually add the closing keyword. After running the command, the user removes `fabrik:paused` to resume.
+
+| State | Trigger | Action | Outcome |
+|-------|---------|--------|---------|
+| Locked + FABRIK_STAGE_COMPLETE | `FetchItemDetails` confirms linkage | Return true | `handleStageComplete` proceeds normally |
+| Locked + FABRIK_STAGE_COMPLETE | No linkage; PR found on branch; body short; no prior heal | Auto-heal: prepend `Closes #N`, re-verify | If verified: comment + advance; if still missing: pause |
+| Locked + FABRIK_STAGE_COMPLETE | No linkage; body too long (> 65,300 chars) | `fabrik:paused` + "body too long" comment | Issue paused for manual recovery |
+| Locked + FABRIK_STAGE_COMPLETE | No linkage; heal already attempted for this SHA | `fabrik:paused` + copy-paste recovery comment | Issue paused for manual recovery |
+| Locked + FABRIK_STAGE_COMPLETE | No PR found by branch name | Log warning; return true (user-diverged) | Stage advances normally |
+
 ---
 
 ## 6. Review Gate and Review Reinvoke
@@ -3155,6 +3256,7 @@ The review gate has two paths that handle different timing scenarios:
 - Calls `checkReviewGate()` for the real gate evaluation
 - **Gate clears only when `len(LinkedPRReviewRequests) == 0` AND at least one non-DISMISSED review exists in `LinkedPRReviews`.** This means: no requested reviewers are outstanding AND at least one review with `State != "DISMISSED"` has been submitted. Waiting on `LinkedPRReviews` (not just `LinkedPRReviewRequests`) is what catches bot reviewers like Copilot and Gemini that self-trigger via webhooks without ever appearing in the formal requested-reviewer list. DISMISSED reviews are excluded from this check because a dismissed review indicates the reviewer's prior response was revoked — the gate must re-block until a new non-dismissed review arrives or the reviewer re-submits. This filter is necessary because the `dismissed` webhook action is now processed (not silently dropped), and there is a race window between a `pull_request_review.dismissed` event and the subsequent `pull_request.review_requested` event that re-adds the reviewer to outstanding.
 - `ReviewRequest.IsBot` is populated from `requestedReviewer.__typename == "Bot"` in the GraphQL query, with a login-pattern fallback (`*[bot]`, `*-bot`, `copilot-*`, `dependabot`, `gemini-code-assist`). This drives the bot-aware escalation ladder.
+- **Broken-linkage guard (FR-013/FR-014):** Before evaluating reviewers, `checkReviewGate()` checks whether `item.LinkedPRNumber == 0`. If so, it calls `FetchLinkedPR()` to look for a PR on the `fabrik/issue-N` branch. If a PR is found open and unmerged: the issue is paused with `fabrik:paused` and a comment — `"🏭 **Fabrik** — PR #M exists on branch fabrik/issue-N but is not linked to this issue via a closing keyword. Add Closes #N to the PR body and remove fabrik:paused to resume."` — and `(false, false)` is returned. `fabrik:awaiting-review` is NOT applied (FR-014). If no PR is found on the branch: gate falls through to the normal reviewer evaluation path.
 - Four outcomes from `checkReviewGate()`:
   - `(blocked=true, timedOut=false)` — still waiting; `fabrik:awaiting-review` maintained. Either outstanding requested reviewers remain, or no reviews submitted yet (bots may still be processing). Also returned after Phase 1 (bot re-prompt fired, waiting for Phase 2 window).
   - `(blocked=false, timedOut=false)` — gate cleared naturally; `fabrik:awaiting-review` removed; `fabrik:bot-reprompted` label cleaned if present; advance or reinvoke.
