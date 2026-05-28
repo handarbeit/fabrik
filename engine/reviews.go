@@ -79,6 +79,42 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
+	// Broken-linkage guard (FR-013): if the item has no linked PR via
+	// closingIssuesReferences (LinkedPRNumber == 0) but a PR exists on the
+	// fabrik/issue-N branch, the gate would silently loop forever applying
+	// fabrik:awaiting-review. Detect this, pause with a clear message, and
+	// do NOT apply fabrik:awaiting-review.
+	if item.LinkedPRNumber == 0 {
+		pr, prErr := e.readClient.FetchLinkedPR(owner, repo, item.Number)
+		if prErr == nil && pr != nil && pr.Number > 0 && pr.State == "open" && !pr.Merged {
+			e.logf(item.Number, "review-gate", "broken linkage: PR #%d exists on branch fabrik/issue-%d but is not linked via closing keyword\n", pr.Number, item.Number)
+			msg := fmt.Sprintf(
+				"🏭 **Fabrik — broken PR↔issue linkage**\n\n"+
+					"PR #%d exists on branch `fabrik/issue-%d` but is not linked to this issue via a closing keyword "+
+					"(`closingIssuesReferences` is empty). The review gate cannot proceed without this linkage.\n\n"+
+					"Add `Closes #%d` as the first line of the PR body and remove `fabrik:paused` to resume:\n\n"+
+					"```bash\n"+
+					"gh pr view %d --json body --jq '.body' > /tmp/pr_body.txt && "+
+					"printf 'Closes #%d\\n\\n' | cat - /tmp/pr_body.txt | "+
+					"gh pr edit %d --body-file -\n"+
+					"```",
+				pr.Number, item.Number, item.Number,
+				pr.Number, item.Number, pr.Number,
+			)
+			e.addPausedLabelToItem(owner, repo, item)
+			if dbID, commentErr := e.client.AddComment(owner, repo, item.Number, msg); commentErr != nil {
+				e.logf(item.Number, "warn", "could not post broken-linkage comment: %v\n", commentErr)
+			} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+					DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
+				})
+			}
+			// Return (false, false): the gate did not time out — it paused for a different reason.
+			// The catch-up loop will not reapply fabrik:awaiting-review.
+			return false, false
+		}
+	}
+
 	// Outstanding requested reviewers (humans or bots using the formal
 	// request mechanism). A dismissed review puts the reviewer back here;
 	// if they're not here, they've finished.
