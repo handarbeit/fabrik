@@ -35,6 +35,7 @@ type Snapshot struct {
 //   - ItemState.StageState.CIFixCycles
 //   - ItemState.StageState.RebaseCycles
 //   - ItemState.StageState.ProcessedComments
+//   - ItemState.StageState.LinkageHealAttempted
 //   - LinkedPRState.Reviews
 //   - LinkedPRState.ReviewRequests
 //   - LinkedPRState.ThreadComments
@@ -201,6 +202,13 @@ func (s Snapshot) CommentProcessed(commentID string) time.Time {
 	return s.state.StageState.ProcessedComments[commentID]
 }
 
+// LinkageHealAttempted returns true when a linkage auto-heal has already been
+// attempted for the given stage and PR head SHA. Returns false if either is unknown.
+func (s Snapshot) LinkageHealAttempted(stageName, prSHA string) bool {
+	recorded := s.state.StageState.LinkageHealAttempted[stageName]
+	return recorded != "" && recorded == prSHA
+}
+
 // ---- deep-copy helpers ----
 
 func copyStrings(src []string) []string {
@@ -299,13 +307,25 @@ func copyIntMap(src map[string]int) map[string]int {
 
 func copyStageState(s StageState) StageState {
 	return StageState{
-		Attempts:          copyIntMap(s.Attempts),
-		LastAttemptAt:     copyTimeMap(s.LastAttemptAt),
-		PausedByEngine:    copyBoolMap(s.PausedByEngine),
-		PRCreationFailed:  copyBoolMap(s.PRCreationFailed),
-		ReviewCycles:      copyIntMap(s.ReviewCycles),
-		CIFixCycles:       copyIntMap(s.CIFixCycles),
-		RebaseCycles:      copyIntMap(s.RebaseCycles),
-		ProcessedComments: copyTimeMap(s.ProcessedComments),
+		Attempts:             copyIntMap(s.Attempts),
+		LastAttemptAt:        copyTimeMap(s.LastAttemptAt),
+		PausedByEngine:       copyBoolMap(s.PausedByEngine),
+		PRCreationFailed:     copyBoolMap(s.PRCreationFailed),
+		ReviewCycles:         copyIntMap(s.ReviewCycles),
+		CIFixCycles:          copyIntMap(s.CIFixCycles),
+		RebaseCycles:         copyIntMap(s.RebaseCycles),
+		ProcessedComments:    copyTimeMap(s.ProcessedComments),
+		LinkageHealAttempted: copyStringMap(s.LinkageHealAttempted),
 	}
+}
+
+func copyStringMap(src map[string]string) map[string]string {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]string, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
 }

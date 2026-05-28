@@ -431,6 +431,11 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		delete(item.StageState.RebaseCycles, v.StageName)
 		return StageStateChanged
 
+	case LinkageHealAttempted:
+		ensureStageStateMaps(item)
+		item.StageState.LinkageHealAttempted[v.StageName] = v.PRSHA
+		return StageStateChanged
+
 	case StageLastAttemptCleared:
 		ensureStageStateMaps(item)
 		delete(item.StageState.LastAttemptAt, v.StageName)
@@ -1190,6 +1195,9 @@ func ensureStageStateMaps(item *ItemState) {
 	}
 	if ss.ProcessedComments == nil {
 		ss.ProcessedComments = make(map[string]time.Time)
+	}
+	if ss.LinkageHealAttempted == nil {
+		ss.LinkageHealAttempted = make(map[string]string)
 	}
 }
 
