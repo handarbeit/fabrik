@@ -104,15 +104,27 @@ gh api -X PATCH /repos/{owner}/{repo}/issues/comments/$COMMENT_ID \
 
 If no Plan stage comment exists (Plan was never run or comment was deleted), skip task tracking gracefully — don't fail.
 
-### Write a reviewer-oriented PR description
+### Signal PR creation via the FABRIK_PR_CREATE marker
 
-When creating the draft PR, write a PR description for a human reviewer — not a copy of the plan. The description should cover:
-1. **What the PR does** — a concise summary of the feature or fix
-2. **Key changes** — the most significant code changes (files, interfaces, behaviors)
-3. **How to test** — steps a reviewer can take to verify the change works
-4. **Closing reference**: `Closes #N`
+**Do NOT call `gh pr create` directly.** The engine creates the PR. To signal PR creation, emit a `FABRIK_PR_CREATE_BEGIN/END` marker block in your output:
 
-This is not a task checklist. It is not the plan. It is a summary for someone reviewing the diff who may not have read the issue.
+```
+FABRIK_PR_CREATE_BEGIN
+TITLE: <single-line PR title>
+
+<PR body content for a human reviewer>
+FABRIK_PR_CREATE_END
+```
+
+The engine reads this block, prepends `Closes #N` as the first line of the PR body, and calls `gh pr create` itself. You never write the closing keyword — the engine owns it.
+
+**Rules for the block**:
+- `FABRIK_PR_CREATE_BEGIN` and `FABRIK_PR_CREATE_END` must each be on their own line.
+- The first non-empty line after `BEGIN` must be `TITLE: <title>`.
+- The body (after the title line) should be a reviewer-oriented description — not a copy of the plan. Cover: what the PR does, key changes, and how to test.
+- **Do NOT write `Closes #N`, `Fixes #N`, `Resolves #N`, or any form of closing keyword referencing the issue number in the body.** The engine generates this line. If you write one, it will be duplicated.
+- You MAY reference internal identifiers in prose (e.g., `Implements FR-007`, `Addresses the auth flow described in the spec`) — just not the literal `Closes`/`Fixes`/`Resolves` + `#issue-number` form.
+- Emit exactly one `FABRIK_PR_CREATE` block per run. Multiple blocks are an error.
 
 ### Write tests
 
@@ -154,6 +166,8 @@ Before signaling completion:
 - **Do not add features not in the plan** — no scope creep
 - **Do not leave the branch in a broken state** — every push should compile and pass tests
 - **Do not defer documentation** — if the change is user-facing, update the docs in the same PR. A doc update that gets "tracked as a follow-up" is a doc update that never happens.
+- **Never call `gh pr create` directly.** Use the `FABRIK_PR_CREATE_BEGIN/END` marker instead. The engine creates the PR and guarantees the `Closes #N` closing line. A direct `gh pr create` bypasses this guarantee and will break downstream gates.
+- **Never write `Closes #N`, `Fixes #N`, `Resolves #N`, or any closing keyword referencing the issue number in a PR body.** The engine generates this line as the first line of the PR body. Writing one yourself either duplicates it (harmless but messy) or, if you called `gh pr create` directly and omitted it, breaks every downstream gate. The engine owns this line — you don't.
 - **Never post stage output directly to GitHub using `gh pr comment`, `gh issue comment`, `gh pr review`, or any equivalent tool that creates a comment on the issue or linked PR.** Doing so bypasses Fabrik's engine-side comment formatting, produces duplicate comments, and triggers a self-review loop on the next poll (the engine treats your directly-posted comment as new user input).
 
   Write all stage output to stdout only. The Fabrik engine captures stdout and posts it as a properly formatted `🏭 **Fabrik — stage: <Name>**` comment.
@@ -166,7 +180,7 @@ Your assigned worktree is your entire operating boundary. You MUST NOT cross it.
 
 **Prohibited actions**:
 - Writing, editing, or deleting files outside the worktree working directory — regardless of absolute path
-- Running `gh pr create`, `git push`, or branch creation commands targeting any repo other than the worktree's own repo
+- Running `gh pr create` (use the `FABRIK_PR_CREATE_BEGIN/END` marker instead — see above), `git push`, or branch creation commands targeting any repo other than the worktree's own repo
 - `cd`-ing into, or referencing via absolute path, any working copy in the user's local environment outside `.fabrik/worktrees/`
 
 **When the spec references out-of-scope work**: If your Plan or spec describes changes in another repo (files, APIs, or logic that lives outside the worktree's repo), do NOT reach outside. Instead:
@@ -190,7 +204,7 @@ Out-of-scope work in the same Fabrik run belongs to a sibling issue's worktree, 
 
 **If you hit max turns**: The engine will create a partial-progress commit (`chore: partial <StageName> stage progress (incomplete)`) of any uncommitted changes and push them. Your progress is preserved for the next attempt.
 
-**Draft PR**: If the stage config has `create_draft_pr: true`, the engine creates a draft PR after you signal completion. Make sure your branch is pushed before completing.
+**Draft PR**: When `create_draft_pr: true` (Implement's default), the engine creates the draft PR by processing the `FABRIK_PR_CREATE_BEGIN/END` marker you emit. The engine prepends `Closes #N` as the first line of the PR body, then calls `gh pr create`. Push your branch before emitting `FABRIK_STAGE_COMPLETE`.
 
 **Comment processing**: If the user comments during implementation, you'll be invoked to process their comment. Read what they're asking, make the change, and continue with the task list.
 
