@@ -133,6 +133,19 @@ FABRIK_PR_CREATE_END`
 	}
 }
 
+func TestParsePRCreateBlock_InvalidRepoFormatExtraSegment(t *testing.T) {
+	// "owner/repo/extra" has two slashes — old validation passed it, new validation rejects it.
+	input := `FABRIK_PR_CREATE_BEGIN owner/repo/extra
+TITLE: Bad repo
+
+Body.
+FABRIK_PR_CREATE_END`
+	_, err := ParsePRCreateBlock(input)
+	if err == nil {
+		t.Fatal("expected error for owner/repo/extra format, got nil")
+	}
+}
+
 // ---- processPRCreateMarker tests ----
 
 func TestProcessPRCreateMarker_Success(t *testing.T) {
