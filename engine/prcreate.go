@@ -156,21 +156,9 @@ func (e *Engine) processPRCreateMarker(ctx context.Context, item gh.ProjectItem,
 		return existingPR.Number, nil
 	}
 
-	// Push the branch before creating the PR.
+	// Push the branch before creating the PR (non-fatal: mirrors ensureDraftPR behavior).
 	if err := wm.PushBranch(item.Number); err != nil {
-		msg := fmt.Sprintf(
-			"🏭 **Fabrik — PR creation failed**\n\nFailed to push branch for issue #%d: `%v`\n\nRemove `fabrik:paused` to retry.",
-			item.Number, err,
-		)
-		e.addPausedLabelToItem(owner, repo, item)
-		if dbID, commentErr := e.client.AddComment(owner, repo, item.Number, msg); commentErr != nil {
-			e.logf(item.Number, "warn", "could not post push error comment: %v\n", commentErr)
-		} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-				DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
-			})
-		}
-		return 0, fmt.Errorf("pushing branch for FABRIK_PR_CREATE: %w", err)
+		e.logf(item.Number, "warn", "could not push branch: pushing branch fabrik/issue-%d: %v\n", item.Number, err)
 	}
 
 	// Compose body: engine prepends "Closes #N\n\n" — this is the mechanized guarantee.
@@ -225,7 +213,7 @@ func (e *Engine) processPRCreateMarker(ctx context.Context, item gh.ProjectItem,
 	}
 
 	// Acknowledgement comment on the issue.
-	ackMsg := fmt.Sprintf("🏭 Fabrik — opened PR #%d", prNum)
+	ackMsg := fmt.Sprintf("🏭 **Fabrik** — opened PR #%d", prNum)
 	if dbID, commentErr := e.client.AddComment(owner, repo, item.Number, ackMsg); commentErr != nil {
 		e.logf(item.Number, "warn", "could not post PR-opened acknowledgement: %v\n", commentErr)
 	} else {
@@ -327,15 +315,32 @@ func (e *Engine) verifyAndHealLinkage(ctx context.Context, item gh.ProjectItem, 
 	if err := e.client.FetchItemDetails(&item); err != nil {
 		e.logf(item.Number, "warn", "verifyAndHealLinkage: re-verification FetchItemDetails failed: %v\n", err)
 		// Can't confirm — treat as success (heal likely took effect; GitHub may lag).
-		healMsg := fmt.Sprintf("🏭 Fabrik — PR body auto-corrected: `%s` prepended (PR was opened without the closing reference). Re-verification fetch failed; please confirm linkage.", closingLine)
-		e.postHealComment(owner, repo, item, healMsg)
+		healMsg := fmt.Sprintf("🏭 **Fabrik** — PR body auto-corrected: `%s` prepended (PR was opened without the closing reference). Re-verification fetch failed; please confirm linkage.", closingLine)
+		if dbID, commentErr := e.client.AddComment(owner, repo, item.Number, healMsg); commentErr != nil {
+			e.logf(item.Number, "warn", "could not post heal confirmation comment: %v\n", commentErr)
+		} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+				DatabaseID: dbID, Body: healMsg, Author: e.cfg.User, CreatedAt: time.Now(),
+			})
+		}
 		return true
 	}
 
 	if item.LinkedPRNumber != 0 {
 		e.logf(item.Number, "pr", "verifyAndHealLinkage: linkage confirmed for PR #%d\n", pr.Number)
-		healMsg := fmt.Sprintf("🏭 Fabrik — PR body auto-corrected: `%s` prepended (PR was opened without the closing reference).", closingLine)
-		e.postHealComment(owner, repo, item, healMsg)
+		healMsg := fmt.Sprintf("🏭 **Fabrik** — PR body auto-corrected: `%s` prepended (PR was opened without the closing reference).", closingLine)
+		if dbID, commentErr := e.client.AddComment(owner, repo, item.Number, healMsg); commentErr != nil {
+			e.logf(item.Number, "warn", "could not post heal confirmation comment: %v\n", commentErr)
+		} else {
+			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+					DatabaseID: dbID, Body: healMsg, Author: e.cfg.User, CreatedAt: time.Now(),
+				})
+			}
+			if e.webhookMgr != nil {
+				e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
+			}
+		}
 		return true
 	}
 
@@ -371,18 +376,3 @@ func (e *Engine) pauseForBrokenLinkage(owner, repo string, item gh.ProjectItem, 
 	}
 }
 
-// postHealComment posts the heal confirmation comment on the issue.
-func (e *Engine) postHealComment(owner, repo string, item gh.ProjectItem, msg string) {
-	if dbID, err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
-		e.logf(item.Number, "warn", "could not post heal confirmation comment: %v\n", err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-				DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
-			})
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
-		}
-	}
-}
