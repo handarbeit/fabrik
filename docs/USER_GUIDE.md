@@ -729,7 +729,7 @@ Pass `--yolo` to enable global auto-advance: Fabrik moves issues through every s
 
 > **Prerequisite — Allow auto-merge:** GitHub's native auto-merge must be enabled at the repository level before yolo mode can merge PRs. Enable it under **Settings → General → Pull Requests → "Allow auto-merge"**, or run:
 > ```
-> gh api -X PATCH repos/{owner}/{repo} -f allow_auto_merge=true
+> gh api -X PATCH repos/{owner}/{repo} -F allow_auto_merge=true
 > ```
 > Without this setting, Fabrik will reach Validate complete and attempt auto-merge, but GitHub will reject it. The Fabrik engine emits a `[startup] WARNING` at startup if this setting is disabled on any managed repo.
 
