@@ -752,7 +752,23 @@ The Implement stage creates a **draft PR** linked to the issue when `create_draf
 | `## Approach` | Extracted from the Plan stage output (`.fabrik-context/stage-Plan.md`); falls back to a placeholder if absent |
 | `## Verification` | Placeholder text, auto-replaced by an extracted stage summary when available |
 
-The `Closes #N` footer in the PR body links the PR to the issue so Fabrik can discover PR comments via GraphQL.
+**`Closes #N` — engine-generated, always first:** Fabrik generates the `Closes #N` closing keyword as the **first line** of every PR body it creates. The Implement skill emits a `FABRIK_PR_CREATE_BEGIN/END` marker block (not a direct `gh pr create` call), and the engine prepends `Closes #N\n\n` before calling `gh pr create`. This guarantees the keyword is always present and always at the top — the first thing a reviewer sees. The skill is explicitly prohibited from writing this line, so it cannot silently drop it.
+
+Example PR body shape:
+```
+Closes #841
+
+## Summary
+...
+
+## Approach
+...
+
+## Verification
+...
+```
+
+The `Closes #N` first line links the PR to the issue so Fabrik can discover PR comments via GraphQL. Every downstream gate (review gate, CI gate, auto-merge) depends on this linkage. If the closing keyword is ever missing from an existing PR body, Fabrik detects it post-Implement and auto-heals by prepending `Closes #N` to the body.
 
 **Verification auto-update**: For draft PRs created with `create_draft_pr: true`, Fabrik updates the `## Verification` section only when it can extract a summary block delimited by `FABRIK_SUMMARY_BEGIN` and `FABRIK_SUMMARY_END` from stage output. This keeps the PR description current when a stage provides a structured summary for PR-body updates.
 
