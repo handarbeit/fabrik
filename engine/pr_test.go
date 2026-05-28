@@ -711,6 +711,10 @@ func TestProcessItem_ImplementStage_UpdatesVerificationOnComplete(t *testing.T) 
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 			return &gh.PRDetails{Number: prNum, State: "open"}, nil
 		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			item.LinkedPRNumber = prNum
+			return nil
+		},
 		getIssueBodyFn: func(owner, repo string, issueNumber int) (string, error) {
 			if issueNumber == prNum {
 				return "## Verification\n\n(Populated by Implement on completion)\n\n---\n\nCloses #50", nil
