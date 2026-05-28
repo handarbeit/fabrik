@@ -272,7 +272,9 @@ GITHUB_TOKEN=ghp_...    # Fallback
 | `--user` | Your GitHub username | required |
 | `--token` | GitHub token | `$GITHUB_TOKEN` |
 | `--stages` | Stage configs directory | `./.fabrik/stages` |
-| `--yolo` | Auto-advance through stages | `false` |
+| `--yolo` | Auto-advance issues through stages without human approval; also auto-merges the linked PR when Validate completes | `false` |
+| `--convergence-budget` | Wall-clock budget for post-Validate yolo PR convergence (Go duration: `30m`, `1h`; `0` disables the budget entirely; also `FABRIK_CONVERGENCE_BUDGET`) | `30m` |
+| `--auto-merge-strategy` | Merge method for GitHub native auto-merge on yolo PRs: `MERGE`, `SQUASH`, or `REBASE` (also `FABRIK_AUTO_MERGE_STRATEGY`) | `MERGE` |
 | `--auto-upgrade` | Self-upgrade from handarbeit/fabrik GitHub Releases at startup and when idle (after 2 idle polls) | `false` |
 | `--poll` | Poll interval in seconds | `30` |
 | `--notui` | Disable the interactive TUI dashboard | TUI on by default |
@@ -287,6 +289,12 @@ GITHUB_TOKEN=ghp_...    # Fallback
 | `--plugin-dir` | Path to Fabrik plugin directory (overrides installed plugin) | `""` |
 | `--webhooks` | Enable real-time webhook event delivery via `gh webhook forward` (requires `cli/gh-webhook` extension; also `FABRIK_WEBHOOKS`) | `false` |
 | `--reconcile-interval` | Seconds between periodic light-reconcile health checks when webhooks are enabled (0 = default 180; also `FABRIK_RECONCILE_INTERVAL`) | `0` (180 s) |
+
+> **Prerequisite for yolo auto-merge:** GitHub's `allow_auto_merge` setting must be enabled on the repository before Fabrik can enable native auto-merge on yolo PRs. Enable it under **Settings → General → Pull Requests → "Allow auto-merge"**, or run:
+> ```
+> gh api -X PATCH repos/{owner}/{repo} -f allow_auto_merge=true
+> ```
+> Fabrik emits a `[startup] WARNING` if this setting is disabled on any managed repo.
 
 > **Releases:** New releases are announced in the [handarbeit/fabrik Discussions "Announcements" category](https://github.com/handarbeit/fabrik/discussions/categories/announcements) after each successful release.
 
@@ -345,6 +353,7 @@ Fabrik uses labels to track state:
 | `model:<name>` | Use this model for the issue (e.g. `model:opus` overrides the stage YAML default) |
 | `effort:<level>` | Override thinking effort for this issue only — valid values: `low`, `medium`, `high`, `max`; precedence: `max > high > medium > low`. Complements `model:` label. |
 | `fabrik:yolo` | Force auto-advance even when `auto_advance: false`; also triggers auto-merge of the linked PR when Validate completes |
+| `fabrik:auto-merge-enabled` | Applied when Fabrik enables GitHub's native auto-merge on a yolo PR after Validate completes; serves as the idempotency guard and convergence-budget start anchor; removed when the PR merges or is closed |
 | `fabrik:cruise` | Auto-advances through all stages like `fabrik:yolo` but stops at Validate — no auto-merge, no move to Done. If both `fabrik:cruise` and `fabrik:yolo` are present, `fabrik:yolo` takes precedence. |
 | `fabrik:unrestricted` | Pass `--dangerously-skip-permissions` to Claude Code for this issue only, bypassing the default `--permission-mode dontAsk` posture and the entire tool allowlist. Use only when a stage needs tools outside the default set (e.g. `deno`, `bun`, or other non-standard toolchains). **Caution:** removes all tool restrictions. |
 | `fabrik:extend-turns` | Pre-grant 2× `max_turns` budget for the next invocation; auto-extends to 3× when stage progress is detected; auto-removed on successful stage completion. |
