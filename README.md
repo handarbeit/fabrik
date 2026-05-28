@@ -292,7 +292,7 @@ GITHUB_TOKEN=ghp_...    # Fallback
 
 > **Prerequisite for yolo auto-merge:** GitHub's `allow_auto_merge` setting must be enabled on the repository before Fabrik can enable native auto-merge on yolo PRs. Enable it under **Settings → General → Pull Requests → "Allow auto-merge"**, or run:
 > ```
-> gh api -X PATCH repos/{owner}/{repo} -f allow_auto_merge=true
+> gh api -X PATCH repos/{owner}/{repo} -F allow_auto_merge=true
 > ```
 > Fabrik emits a `[startup] WARNING` if this setting is disabled on any managed repo.
 
