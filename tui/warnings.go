@@ -50,11 +50,13 @@ func (c WarningsPaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 	case TickEvent:
 		info, err := os.Stat(warnings.Path())
 		if err != nil {
-			// File disappeared — treat as empty.
+			// File disappeared — treat as empty and reset mtime so a
+			// recreated file with any timestamp is detected on next tick.
 			if len(c.entries) > 0 {
 				c.entries = nil
 				c.curIdx = 0
 			}
+			c.lastMtime = time.Time{}
 			break
 		}
 		if info.ModTime().After(c.lastMtime) {
@@ -299,5 +301,12 @@ func (c WarningsPaneComponent) View(width int) string {
 	}
 
 	content := strings.Join(lines, "\n")
-	return borderStyle.Width(width - 4).Render(content)
+	rendered := borderStyle.Width(width - 4).Render(content)
+	if c.availableH > 0 {
+		rLines := strings.Split(rendered, "\n")
+		if len(rLines) > c.availableH {
+			return strings.Join(rLines[:c.availableH], "\n")
+		}
+	}
+	return rendered
 }
