@@ -75,6 +75,7 @@ type pane int
 const (
 	paneActive pane = iota
 	paneHistory
+	paneWarnings
 )
 
 // ProjectInfo holds display metadata about the monitored project shown in the footer.
@@ -111,13 +112,14 @@ type Model struct {
 	wakeCh chan<- struct{}
 
 	// components
-	header  HeaderComponent
-	alert   AlertBannerComponent
-	active  ActivePaneComponent
-	history HistoryPaneComponent
-	detail  DetailPanelComponent
-	help    HelpPanelComponent
-	footer  FooterComponent
+	header   HeaderComponent
+	alert    AlertBannerComponent
+	active   ActivePaneComponent
+	history  HistoryPaneComponent
+	warnings WarningsPaneComponent
+	detail   DetailPanelComponent
+	help     HelpPanelComponent
+	footer   FooterComponent
 }
 
 // minHistoryRows is the minimum number of rows reserved for the history pane
@@ -165,8 +167,9 @@ func New(pollSeconds int, info ProjectInfo, pluginDir string, wakeCh chan struct
 			customWorkflow:   customWorkflow,
 		},
 		alert:   AlertBannerComponent{now: now},
-		active:  active,
-		history: NewHistoryPaneComponent(info.Repo),
+		active:   active,
+		history:  NewHistoryPaneComponent(info.Repo),
+		warnings: NewWarningsPaneComponent(),
 		footer: FooterComponent{
 			projectInfo: info,
 			now:         now,
