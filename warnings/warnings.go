@@ -42,6 +42,11 @@ func warningsPath() string {
 	return filepath.Join(".fabrik", "warnings.json")
 }
 
+// Path returns the resolved warnings file path. Used by the TUI for mtime polling.
+func Path() string {
+	return warningsPath()
+}
+
 // load reads and parses the warnings file. Missing file returns empty file, nil.
 // Corrupt or version-mismatch returns empty file, err.
 func load() (warningsFile, error) {
