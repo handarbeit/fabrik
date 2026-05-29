@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	fabrikplugin "github.com/handarbeit/fabrik/plugin"
+	"github.com/handarbeit/fabrik/warnings"
 )
 
 // pluginUpgradeResultMsg is returned by upgradePluginCmd when RefreshPlugin completes.
@@ -170,6 +171,53 @@ func openAbtopInlineCmd() tea.Cmd {
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return abtopFinishedMsg{Err: err}
 	})
+}
+
+// warningsFixFinishedMsg is returned by tea.ExecProcess when a Warnings-panel fix command exits.
+type warningsFixFinishedMsg struct {
+	Key     string
+	ExitErr error
+}
+
+// runWarningsFixCmd builds a tea.Cmd that tears down the TUI, runs the fix
+// command for the given warnings entry, and delivers warningsFixFinishedMsg
+// when the subprocess exits.
+func runWarningsFixCmd(entry warnings.Entry) tea.Cmd {
+	key := entry.Key
+	switch entry.FixAction {
+	case "shell_command":
+		cmd := exec.Command("sh", "-c", entry.FixParams["cmd"])
+		return tea.ExecProcess(cmd, func(err error) tea.Msg {
+			return warningsFixFinishedMsg{Key: key, ExitErr: err}
+		})
+	case "fabrik_command":
+		fabrikBin, err := os.Executable()
+		if err != nil {
+			fabrikBin = "fabrik"
+		}
+		args := strings.Fields(entry.FixParams["args"])
+		cmd := exec.Command(fabrikBin, args...)
+		return tea.ExecProcess(cmd, func(err error) tea.Msg {
+			return warningsFixFinishedMsg{Key: key, ExitErr: err}
+		})
+	case "claude_code_session":
+		if _, err := exec.LookPath("claude"); err != nil {
+			return func() tea.Msg {
+				return warningsFixFinishedMsg{Key: key, ExitErr: fmt.Errorf("claude not found in PATH: install Claude Code to use this fix")}
+			}
+		}
+		cmd := exec.Command("claude", "--system-prompt", entry.FixParams["system_prompt"])
+		if cwd := entry.FixParams["cwd"]; cwd != "" {
+			cmd.Dir = cwd
+		}
+		return tea.ExecProcess(cmd, func(err error) tea.Msg {
+			return warningsFixFinishedMsg{Key: key, ExitErr: err}
+		})
+	default:
+		return func() tea.Msg {
+			return warningsFixFinishedMsg{Key: key, ExitErr: fmt.Errorf("unknown fix_action: %q", entry.FixAction)}
+		}
+	}
 }
 
 // worktreePathForIssue returns the absolute path to the issue's git worktree.
