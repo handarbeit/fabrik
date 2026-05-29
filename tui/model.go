@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/handarbeit/fabrik/warnings"
 )
 
 // HistoryEntry records a completed job for the history pane.
@@ -348,9 +349,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "tab":
-			if m.focusPane == paneActive {
+			switch m.focusPane {
+			case paneActive:
 				m.focusPane = paneHistory
-			} else {
+			case paneHistory:
+				m.focusPane = paneWarnings
+			default:
 				m.focusPane = paneActive
 			}
 			m.syncFocus()
@@ -358,8 +362,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "enter":
+			if m.focusPane == paneWarnings {
+				comp, cmd := m.warnings.Update(msg)
+				m.warnings = comp.(WarningsPaneComponent)
+				m.updateLayout(false)
+				return m, cmd
+			}
 			m.detailPanel = !m.detailPanel
 			m.updateLayout(false)
+			return m, nil
+
+		case "f", "F":
+			if m.focusPane == paneWarnings {
+				if entry := m.warnings.SelectedEntry(); entry != nil {
+					return m, runWarningsFixCmd(*entry)
+				}
+			}
+			return m, nil
+
+		case "d", "D":
+			if m.focusPane == paneWarnings {
+				comp, cmd := m.warnings.Update(msg)
+				m.warnings = comp.(WarningsPaneComponent)
+				m.updateLayout(false)
+				return m, cmd
+			}
+			return m, nil
+
+		case "s", "S":
+			if m.focusPane == paneWarnings {
+				comp, cmd := m.warnings.Update(msg)
+				m.warnings = comp.(WarningsPaneComponent)
+				m.updateLayout(false)
+				return m, cmd
+			}
 			return m, nil
 
 		case "r":
@@ -475,6 +511,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.active = comp.(ActivePaneComponent)
 				return m, cmd
 			}
+			if m.focusPane == paneWarnings {
+				comp, cmd := m.warnings.Update(msg)
+				m.warnings = comp.(WarningsPaneComponent)
+				m.updateLayout(false)
+				return m, cmd
+			}
 			comp, cmd := m.history.Update(msg)
 			m.history = comp.(HistoryPaneComponent)
 			m.updateLayout(false)
@@ -539,6 +581,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.alert = comp.(AlertBannerComponent)
 		comp, _ = m.footer.Update(msg)
 		m.footer = comp.(FooterComponent)
+		wcomp, _ := m.warnings.Update(msg)
+		m.warnings = wcomp.(WarningsPaneComponent)
+		m.updateLayout(false)
 		return m, tickCmd()
 
 	case ProjectMetaEvent:
@@ -638,6 +683,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case warningsFixFinishedMsg:
+		if ev.ExitErr != nil {
+			// Append error excerpt to entry detail so operator can see what failed.
+			if entries, err := warnings.Load(); err == nil {
+				for _, e := range entries {
+					if e.Key == ev.Key {
+						e.Detail += "\n\n[Fix failed]: " + ev.ExitErr.Error()
+						_ = warnings.Record(e)
+						break
+					}
+				}
+			}
+			m.header.SetStatusMsg("fix failed: " + ev.ExitErr.Error())
+		} else {
+			_ = warnings.Clear(ev.Key)
+			m.header.SetStatusMsg("fix applied")
+		}
+		m.updateLayout(false)
+		return m, nil
+
 	}
 
 	return m, nil
@@ -647,6 +712,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) syncFocus() {
 	m.active.SetFocused(m.focusPane == paneActive)
 	m.history.SetFocused(m.focusPane == paneHistory)
+	m.warnings.SetFocused(m.focusPane == paneWarnings)
 }
 
 // updateLayout recomputes the history and help viewport dimensions and content.
@@ -669,7 +735,9 @@ func (m *Model) updateLayout(scrollToTop bool) {
 		helpH = m.help.Height()
 	}
 
-	availableHistoryH := max(totalAvail-helpH, 0)
+	warningsH := m.warnings.Height()
+	m.warnings.SetLayout(m.width, warningsH)
+	availableHistoryH := max(totalAvail-helpH-warningsH, 0)
 	m.history.SetLayout(m.width, availableHistoryH, m.confirmQuit, m.active.ActiveCount())
 	if scrollToTop {
 		m.history.ScrollToTop()
@@ -745,6 +813,9 @@ func (m Model) View() string {
 
 	if histView := m.history.View(m.width); histView != "" {
 		sections = append(sections, histView)
+	}
+	if warningsView := m.warnings.View(m.width); warningsView != "" {
+		sections = append(sections, warningsView)
 	}
 	sections = append(sections, m.footer.View(m.width))
 
