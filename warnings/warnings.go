@@ -120,10 +120,10 @@ func Record(entry Entry) error {
 	found := false
 	for i, e := range wf.Entries {
 		if e.Key == entry.Key {
-			wf.Entries[i].Title = entry.Title
-			wf.Entries[i].Detail = entry.Detail
-			wf.Entries[i].LastSeen = now
-			// Preserve first_seen and dismissed.
+			entry.FirstSeen = e.FirstSeen
+			entry.Dismissed = e.Dismissed
+			entry.LastSeen = now
+			wf.Entries[i] = entry
 			found = true
 			break
 		}
