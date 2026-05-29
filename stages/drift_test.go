@@ -6,7 +6,16 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"github.com/handarbeit/fabrik/warnings"
 )
+
+// setWarningsOverride redirects warnings I/O to a temp file for test isolation.
+func setWarningsOverride(t *testing.T) {
+	t.Helper()
+	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
+	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
+}
 
 // syntheticFS builds an in-memory fs.FS with a single default stage YAML under
 // examples/<name>.yaml for use in drift tests.
@@ -48,6 +57,7 @@ func extractName(t *testing.T, yaml string) string {
 }
 
 func TestWarnStageDrift_MissingKey(t *testing.T) {
+	setWarningsOverride(t)
 	dir := t.TempDir()
 	// User stage is missing "wait_for_ci" which the embedded default has.
 	userStage := makeUserStage(t, dir, "validate.yaml", "name: Validate\nprompt: do stuff\n")
@@ -73,6 +83,7 @@ func TestWarnStageDrift_MissingKey(t *testing.T) {
 }
 
 func TestWarnStageDrift_AllKeysPresent(t *testing.T) {
+	setWarningsOverride(t)
 	dir := t.TempDir()
 	// User stage has all keys that the embedded default has.
 	userStage := makeUserStage(t, dir, "validate.yaml", "name: Validate\nprompt: do stuff\nwait_for_ci: true\n")
@@ -88,6 +99,7 @@ func TestWarnStageDrift_AllKeysPresent(t *testing.T) {
 }
 
 func TestWarnStageDrift_KeyPresentWithNonDefaultValue(t *testing.T) {
+	setWarningsOverride(t)
 	dir := t.TempDir()
 	// User stage has wait_for_ci explicitly set to false — key is present, no warning.
 	userStage := makeUserStage(t, dir, "validate.yaml", "name: Validate\nprompt: do stuff\nwait_for_ci: false\n")
@@ -103,6 +115,7 @@ func TestWarnStageDrift_KeyPresentWithNonDefaultValue(t *testing.T) {
 }
 
 func TestWarnStageDrift_CustomStageSkipped(t *testing.T) {
+	setWarningsOverride(t)
 	dir := t.TempDir()
 	// "Custom" does not appear in the synthetic defaults — should be silently skipped.
 	userStage := makeUserStage(t, dir, "custom.yaml", "name: Custom\nprompt: do custom stuff\n")
@@ -118,6 +131,7 @@ func TestWarnStageDrift_CustomStageSkipped(t *testing.T) {
 }
 
 func TestWarnStageDrift_EmptyUserStages(t *testing.T) {
+	setWarningsOverride(t)
 	defaults := syntheticFS(t, "Validate", "prompt", "wait_for_ci")
 
 	var out strings.Builder
@@ -129,6 +143,7 @@ func TestWarnStageDrift_EmptyUserStages(t *testing.T) {
 }
 
 func TestWarnStageDrift_MultipleMissingKeysSorted(t *testing.T) {
+	setWarningsOverride(t)
 	dir := t.TempDir()
 	// User stage is missing both wait_for_ci and wait_for_reviews.
 	userStage := makeUserStage(t, dir, "validate.yaml", "name: Validate\nprompt: do stuff\n")
