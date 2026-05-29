@@ -18,6 +18,7 @@ import (
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
+	"github.com/handarbeit/fabrik/warnings"
 )
 
 func TestPoll_FetchesBoardAndProcessesItems(t *testing.T) {
@@ -2808,6 +2809,8 @@ func captureStdout(fn func()) string {
 }
 
 func TestCheckAllowAutoMerge_DisabledEmitsWarning(t *testing.T) {
+	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
+	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
 	client := &mockGitHubClient{
 		fetchAllowAutoMergeFn: func(owner, repo string) (bool, error) {
 			return false, nil
@@ -2831,6 +2834,8 @@ func TestCheckAllowAutoMerge_DisabledEmitsWarning(t *testing.T) {
 }
 
 func TestCheckAllowAutoMerge_EnabledIsSilent(t *testing.T) {
+	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
+	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
 	client := &mockGitHubClient{
 		fetchAllowAutoMergeFn: func(owner, repo string) (bool, error) {
 			return true, nil
@@ -2848,6 +2853,8 @@ func TestCheckAllowAutoMerge_EnabledIsSilent(t *testing.T) {
 }
 
 func TestCheckAllowAutoMerge_APIErrorIsNonFatal(t *testing.T) {
+	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
+	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
 	client := &mockGitHubClient{
 		fetchAllowAutoMergeFn: func(owner, repo string) (bool, error) {
 			return false, errors.New("network error")
@@ -2867,6 +2874,8 @@ func TestCheckAllowAutoMerge_APIErrorIsNonFatal(t *testing.T) {
 }
 
 func TestCheckAllowAutoMerge_DedupSuppressesSecondCall(t *testing.T) {
+	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
+	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
 	var callCount int
 	client := &mockGitHubClient{
 		fetchAllowAutoMergeFn: func(owner, repo string) (bool, error) {
