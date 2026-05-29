@@ -19,6 +19,7 @@ import (
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
+	"github.com/handarbeit/fabrik/warnings"
 )
 
 const idleUpgradeThreshold = 2 // consecutive idle polls before checking for upgrades
@@ -2137,6 +2138,16 @@ func (e *Engine) checkAllowAutoMerge(owner, repo string) {
 		e.logf(0, "startup", "WARNING: %s has allow_auto_merge disabled.\n", key)
 		e.logf(0, "startup", "WARNING: yolo issues on this repo will reach Validate complete but their PRs will not merge.\n")
 		e.logf(0, "startup", "WARNING: Fix: gh api -X PATCH repos/%s -f allow_auto_merge=true\n", key)
+		_ = warnings.Record(warnings.Entry{
+			Key:       "allow_auto_merge:" + key,
+			Type:      "allow_auto_merge",
+			Title:     "allow_auto_merge disabled on " + key,
+			Detail:    fmt.Sprintf("yolo issues on this repo will reach Validate complete but their PRs will not merge.\n\nFix: gh api -X PATCH repos/%s -f allow_auto_merge=true", key),
+			FixAction: "shell_command",
+			FixParams: map[string]string{"cmd": fmt.Sprintf("gh api -X PATCH repos/%s -f allow_auto_merge=true", key)},
+		})
+	} else {
+		_ = warnings.Clear("allow_auto_merge:" + key)
 	}
 }
 
