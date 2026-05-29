@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/handarbeit/fabrik/warnings"
 	"gopkg.in/yaml.v3"
 )
 
@@ -82,12 +83,24 @@ func warnDriftFrom(userStages []*Stage, version string, w io.Writer, defaults fs
 		}
 
 		missing, err := MissingTopLevelKeys(userStage.FilePath, defaultKeys)
-		if err != nil || len(missing) == 0 {
+		if err != nil {
+			return nil
+		}
+		if len(missing) == 0 {
+			_ = warnings.Clear("stage_drift:" + name)
 			return nil
 		}
 
 		fmt.Fprintf(w, "[startup] warning: %s is missing fields present in %s defaults: %s. Run `fabrik refresh-stages --apply` to add the missing keys.\n",
 			userStage.FilePath, version, strings.Join(missing, ", "))
+		_ = warnings.Record(warnings.Entry{
+			Key:       "stage_drift:" + name,
+			Type:      "stage_drift",
+			Title:     fmt.Sprintf("%s has %d missing field(s)", userStage.FilePath, len(missing)),
+			Detail:    fmt.Sprintf("%s is missing fields present in %s defaults: %s\n\nFix: fabrik refresh-stages --apply", userStage.FilePath, version, strings.Join(missing, ", ")),
+			FixAction: "fabrik_command",
+			FixParams: map[string]string{"args": "refresh-stages --apply"},
+		})
 		return nil
 	})
 }
