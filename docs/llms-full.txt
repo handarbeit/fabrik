@@ -1713,10 +1713,11 @@ The interactive terminal dashboard is enabled by default when running in a real 
 ### Layout
 
 The TUI shows a compact header with poll status, an In Progress pane showing active
-Claude sessions, a scrollable History pane with completed jobs, and a status bar
-(footer) displaying REST and GraphQL rate limit stats. When the GraphQL budget is
-exhausted or rate-limit-induced probe failures are detected, a prominent red alert
-banner appears immediately below the header with a countdown to when polling resumes.
+Claude sessions, a scrollable History pane with completed jobs, a Warnings panel
+surfacing actionable pre-flight issues (below History), and a status bar (footer)
+displaying REST and GraphQL rate limit stats. When the GraphQL budget is exhausted
+or rate-limit-induced probe failures are detected, a prominent red alert banner
+appears immediately below the header with a countdown to when polling resumes.
 When plugin skills in `.fabrik/plugin/` are outdated relative to the embedded
 defaults, a `[u] skills out of date` badge appears in the header, reminding the
 operator to press `u` to upgrade. When Fabrik detects that the on-disk skills
@@ -1728,15 +1729,18 @@ dialog instead of a simple y/N prompt (see [Customizing Skills](#customizing-ski
 
 | Key | Action |
 |-----|--------|
-| `Tab` | Switch focus between In Progress and History panes |
+| `Tab` | Cycle focus: In Progress → History → Warnings → (repeat) |
 | `Up/Down` or `j/k` | Navigate items within the focused pane |
 | `l` | Open `fabrik watch` for selected issue (live Claude output, stage tabs, PR/CI status) |
-| `enter` | Toggle inline detail panel for the selected item |
+| `enter` | Toggle inline detail panel (History pane); toggle expanded detail (Warnings pane) |
 | `r` | Resume Claude session for selected history item (history pane only, item must not be active) |
 | `Escape` | Close open dialogs; with no dialog open, triggers quit confirmation |
 | `n` / `N` | Cancel quit or clear-all confirmation dialogs |
 | `c` | Delete selected history entry |
 | `C` | Clear all history (with confirmation) |
+| `F` | **Fix** selected warning (Warnings pane only) — tears down TUI, runs the fix command in the foreground, re-renders on exit |
+| `D` | **Dismiss / undismiss** selected warning (Warnings pane only) — sticky across restarts; dismissed entries are hidden by default |
+| `S` | **Show / hide dismissed** warnings (Warnings pane only) |
 | `a` | Open abtop AI session monitor (shows token usage, context window, rate limits for all Claude sessions) |
 | `u` | Upgrade plugin skills. When the `[u] skills out of date` badge is shown (embedded changed, no local edits), pressing `u` shows a `y/N` confirmation and applies the upgrade. When the `[u] custom workflow` badge is shown (local edits detected), pressing `u` opens a three-option dialog: **[1] Reconcile** — quits the TUI and prints a Claude Code prompt to stderr for merging customizations; **[2] Overwrite** — prompts you to type `OVERWRITE` to confirm destructive reset; **[3] Cancel** — dismisses the dialog. Active stage invocations pick up new files on next run. |
 | `w` | Wake: reset idle backoff and poll immediately |
@@ -1785,6 +1789,16 @@ cost, and issue title. Status icons:
 | `?` | Stage blocked / awaiting user input |
 | `↻` | Stage retrying |
 | `💬` | Issue has unprocessed comments |
+
+**Warnings panel**: Sits below History and surfaces actionable pre-flight issues that Fabrik detected at startup (e.g. `allow_auto_merge` disabled on a managed repo, stage-config drift). The panel header is colour-coded: dim grey for zero outstanding warnings, yellow for 1–2, red for 3+. When there are no non-dismissed entries, the panel collapses to a single `Warnings: none` line so History retains maximum vertical space.
+
+Tab into the Warnings panel to take action:
+- **F** — run the fix command in the foreground (tears down the TUI, executes, re-renders)
+- **D** — dismiss the selected entry (sticky: survives restarts; dismissed entries are hidden by default)
+- **S** — show/hide dismissed entries
+- **Enter** — expand/collapse the full detail text for the selected entry
+
+Warning entries persist to `.fabrik/warnings.json` and survive auto-upgrade restarts. Dismissed entries are preserved in the file until the underlying condition clears, at which point they are removed entirely.
 
 ### History Persistence
 

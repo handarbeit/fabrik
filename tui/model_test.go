@@ -97,7 +97,7 @@ func TestUpdate_QuitKey(t *testing.T) {
 	}
 }
 
-// TestUpdate_TabKey_SwitchesPanes verifies tab toggles focus between panes.
+// TestUpdate_TabKey_SwitchesPanes verifies tab cycles through all three panes.
 func TestUpdate_TabKey_SwitchesPanes(t *testing.T) {
 	m := New(30, ProjectInfo{}, "", nil, 0, false)
 	m.width = 80
@@ -108,15 +108,20 @@ func TestUpdate_TabKey_SwitchesPanes(t *testing.T) {
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	nm := next.(Model)
 	if nm.focusPane != paneHistory {
-		t.Error("expected pane to switch to history after tab")
+		t.Error("expected pane to switch to history after first tab")
 	}
 	if cmd != nil {
 		t.Error("expected nil cmd from tab")
 	}
 	next2, _ := nm.Update(tea.KeyMsg{Type: tea.KeyTab})
 	nm2 := next2.(Model)
-	if nm2.focusPane != paneActive {
-		t.Error("expected pane to switch back to active after second tab")
+	if nm2.focusPane != paneWarnings {
+		t.Error("expected pane to switch to warnings after second tab")
+	}
+	next3, _ := nm2.Update(tea.KeyMsg{Type: tea.KeyTab})
+	nm3 := next3.(Model)
+	if nm3.focusPane != paneActive {
+		t.Error("expected pane to switch back to active after third tab")
 	}
 }
 

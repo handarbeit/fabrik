@@ -369,6 +369,7 @@ func writeGitExclude() {
 		".fabrik/worktrees/",
 		".fabrik/debug/",
 		".fabrik/history.json",
+		".fabrik/warnings.json",
 	}
 
 	existing, _ := os.ReadFile(excludePath)
