@@ -23,11 +23,15 @@ type WarningsPaneComponent struct {
 	focused        bool
 	lastMtime      time.Time
 	width          int
+	// availableH is the vertical space allocated by updateLayout.
+	// -1 means SetLayout has not been called yet.
+	// 0 means no space available (View returns "", Height returns 0).
+	availableH int
 }
 
 // NewWarningsPaneComponent creates a WarningsPaneComponent loaded from disk.
 func NewWarningsPaneComponent() WarningsPaneComponent {
-	c := WarningsPaneComponent{}
+	c := WarningsPaneComponent{availableH: -1}
 	entries, err := warnings.Load()
 	if err != nil {
 		// Corrupt file — treat as empty, errors are logged by Load's caller.
@@ -146,13 +150,17 @@ func (c *WarningsPaneComponent) SetFocused(f bool) {
 	c.focused = f
 }
 
-// SetLayout updates the available width.
+// SetLayout updates the available width and height.
 func (c *WarningsPaneComponent) SetLayout(width, availableH int) {
 	c.width = width
+	c.availableH = availableH
 }
 
 // Height returns the rendered height of the warnings panel.
 func (c WarningsPaneComponent) Height() int {
+	if c.availableH == 0 {
+		return 0
+	}
 	visible := c.visibleEntries()
 	if len(visible) == 0 {
 		return 1
@@ -174,6 +182,9 @@ func (c WarningsPaneComponent) Height() int {
 
 // View renders the warnings panel.
 func (c WarningsPaneComponent) View(width int) string {
+	if c.availableH == 0 {
+		return ""
+	}
 	if width == 0 {
 		width = c.width
 	}
