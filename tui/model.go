@@ -735,9 +735,10 @@ func (m *Model) updateLayout(scrollToTop bool) {
 		helpH = m.help.Height()
 	}
 
-	warningsH := m.warnings.Height()
+	available := max(totalAvail-helpH, 0)
+	warningsH := min(m.warnings.Height(), available)
 	m.warnings.SetLayout(m.width, warningsH)
-	availableHistoryH := max(totalAvail-helpH-warningsH, 0)
+	availableHistoryH := max(available-warningsH, 0)
 	m.history.SetLayout(m.width, availableHistoryH, m.confirmQuit, m.active.ActiveCount())
 	if scrollToTop {
 		m.history.ScrollToTop()

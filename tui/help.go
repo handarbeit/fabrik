@@ -16,9 +16,9 @@ var helpContent = strings.TrimSpace(`
 KEYBOARD SHORTCUTS
 
   Navigation
-    tab        Switch focus: In Progress <-> History
+    tab        Switch focus: In Progress → History → Warnings → (repeat)
     ↑/↓  k/j  Navigate items in the focused pane
-    enter      Toggle inline detail panel
+    enter      Toggle inline detail panel (History); toggle detail (Warnings)
     esc        Close open panels; with none open, triggers quit confirmation
     n / N      Cancel quit or clear-all confirmation
 
@@ -31,6 +31,12 @@ KEYBOARD SHORTCUTS
     r          Resume Claude session for selected history entry
     c          Delete selected history entry
     C          Clear all history (with confirmation)
+
+  Warnings pane
+    F          Fix selected warning (runs fix command in foreground)
+    D          Dismiss / undismiss selected warning (sticky across restarts)
+    S          Show / hide dismissed warnings
+    enter      Toggle expanded detail for selected warning
 
   Global
     a          Open abtop AI session monitor
