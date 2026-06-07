@@ -588,6 +588,236 @@ func TestCheckCIGate_FetchLinkedPRError_BlocksGate(t *testing.T) {
 	}
 }
 
+// ── R1/R2/R3 — merged/closed PR and required-never-running check ──────────────
+
+// TestCheckCIGate_MergedPR_ClearsGate verifies R1: when the linked PR is
+// merged, checkCIGate clears the CI gate and adds stage:X:complete without
+// requiring check runs.
+func TestCheckCIGate_MergedPR_ClearsGate(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, HeadSHA: "sha-merged", Merged: true, State: "closed"}, nil
+		},
+	}
+	eng := testEngineForMerge(client)
+	tr := true
+	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	if blocked || ciFailure || timedOut {
+		t.Errorf("expected (false,false,false) for merged PR, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
+	}
+	foundComplete := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Validate:complete" {
+			foundComplete = true
+		}
+	}
+	if !foundComplete {
+		t.Error("expected stage:Validate:complete to be added when PR is merged")
+	}
+	foundRemove := false
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-ci" {
+			foundRemove = true
+		}
+	}
+	if !foundRemove {
+		t.Error("expected fabrik:awaiting-ci to be removed when PR is merged")
+	}
+}
+
+// TestCheckCIGate_ClosedNotMergedPR_Pauses verifies R2: when the linked PR is
+// closed without merging, checkCIGate pauses the issue with fabrik:paused +
+// fabrik:awaiting-input and removes fabrik:awaiting-ci. stage:X:complete must
+// NOT be added.
+func TestCheckCIGate_ClosedNotMergedPR_Pauses(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, HeadSHA: "sha-closed", Merged: false, State: "closed"}, nil
+		},
+	}
+	eng := testEngineForMerge(client)
+	tr := true
+	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	if blocked || ciFailure || timedOut {
+		t.Errorf("expected (false,false,false) for closed-not-merged PR, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
+	}
+	foundPaused := false
+	foundAwaitingInput := false
+	for _, c := range client.addLabelCalls {
+		switch c.labelName {
+		case "fabrik:paused":
+			foundPaused = true
+		case "fabrik:awaiting-input":
+			foundAwaitingInput = true
+		case "stage:Validate:complete":
+			t.Error("stage:Validate:complete must NOT be added for closed-not-merged PR")
+		}
+	}
+	if !foundPaused {
+		t.Error("expected fabrik:paused to be added for closed-not-merged PR")
+	}
+	if !foundAwaitingInput {
+		t.Error("expected fabrik:awaiting-input to be added for closed-not-merged PR")
+	}
+	foundRemove := false
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-ci" {
+			foundRemove = true
+		}
+	}
+	if !foundRemove {
+		t.Error("expected fabrik:awaiting-ci to be removed for closed-not-merged PR")
+	}
+}
+
+// TestCheckCIGate_OpenBlockedNoChecks_DwellNotElapsed_StaysBlocked verifies
+// the false-positive guard for R3: when the PR is OPEN+BLOCKED with no check
+// runs ever observed but fabrik:awaiting-ci was applied recently (< CIWaitTimeout),
+// checkCIGate must return (true, false, false) without pausing. This prevents
+// spurious R3 pauses on first push before checks have registered.
+func TestCheckCIGate_OpenBlockedNoChecks_DwellNotElapsed_StaysBlocked(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, HeadSHA: "sha-blocked", Merged: false, State: "open"}, nil
+		},
+		fetchPRMergeableStateFn: func(owner, repo string, prNumber int) (string, error) {
+			return "blocked", nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return nil, nil
+		},
+		fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+			return time.Now().Add(-1 * time.Minute), nil // well within the 30-min default timeout
+		},
+	}
+	eng := testEngineForMerge(client)
+	tr := true
+	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	if !blocked {
+		t.Error("expected blocked=true when OPEN+BLOCKED with no check runs and dwell not elapsed (R3 false-positive guard)")
+	}
+	if ciFailure || timedOut {
+		t.Errorf("expected ciFailure=false timedOut=false, got ciFailure=%v timedOut=%v", ciFailure, timedOut)
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			t.Error("fabrik:paused must NOT be added when dwell has not elapsed (R3 false-positive guard)")
+		}
+	}
+}
+
+// TestCheckCIGate_OpenBlockedNoChecks_DwellElapsed_Pauses verifies R3: when
+// the PR is OPEN+BLOCKED with no check runs ever observed and fabrik:awaiting-ci
+// has been present for ≥ CIWaitTimeout, checkCIGate pauses with a distinct
+// "required check never runs on PR" message.
+func TestCheckCIGate_OpenBlockedNoChecks_DwellElapsed_Pauses(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, HeadSHA: "sha-blocked-old", Merged: false, State: "open"}, nil
+		},
+		fetchPRMergeableStateFn: func(owner, repo string, prNumber int) (string, error) {
+			return "blocked", nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return nil, nil
+		},
+		fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+			return time.Now().Add(-2 * time.Hour), nil // well past the 30-min default timeout
+		},
+	}
+	eng := testEngineForMerge(client)
+	eng.cfg.CIWaitTimeout = 30 * time.Minute
+	tr := true
+	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	if blocked || ciFailure || timedOut {
+		t.Errorf("expected (false,false,false) for R3 dwell-elapsed pause, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
+	}
+	foundPaused := false
+	foundAwaitingInput := false
+	for _, c := range client.addLabelCalls {
+		switch c.labelName {
+		case "fabrik:paused":
+			foundPaused = true
+		case "fabrik:awaiting-input":
+			foundAwaitingInput = true
+		}
+	}
+	if !foundPaused {
+		t.Error("expected fabrik:paused to be added for R3 required-never-running pause")
+	}
+	if !foundAwaitingInput {
+		t.Error("expected fabrik:awaiting-input to be added for R3 required-never-running pause")
+	}
+	foundRemove := false
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-ci" {
+			foundRemove = true
+		}
+	}
+	if !foundRemove {
+		t.Error("expected fabrik:awaiting-ci to be removed for R3 required-never-running pause")
+	}
+	if len(client.addCommentCalls) == 0 {
+		t.Fatal("expected a comment to be posted for R3 required-never-running pause")
+	}
+	if !strings.Contains(client.addCommentCalls[0].body, "PR #5") {
+		t.Errorf("expected R3 comment to mention PR #5, got: %q", client.addCommentCalls[0].body[:min(200, len(client.addCommentCalls[0].body))])
+	}
+	if !strings.Contains(client.addCommentCalls[0].body, "required check") {
+		t.Errorf("expected R3 comment to mention 'required check', got: %q", client.addCommentCalls[0].body[:min(200, len(client.addCommentCalls[0].body))])
+	}
+}
+
+// TestCheckCIGate_OpenBlockedNoChecks_HadChecks_Waits verifies that R5 is
+// preserved when mergeableState is "blocked" but hadChecks is true: the engine
+// must treat this as a post-push registration delay and return (true, false, false)
+// without triggering R3's "required check never runs" pause.
+func TestCheckCIGate_OpenBlockedNoChecks_HadChecks_Waits(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, HeadSHA: "sha-blocked-hadchecks", Merged: false, State: "open"}, nil
+		},
+		fetchPRMergeableStateFn: func(owner, repo string, prNumber int) (string, error) {
+			return "blocked", nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return nil, nil
+		},
+	}
+	eng := testEngineForMerge(client)
+	// Pre-seed: this issue has previously had check runs registered.
+	eng.store.Apply(itemstate.PRChecksObserved{Repo: "owner/repo", Number: 1})
+	tr := true
+	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	if !blocked {
+		t.Error("expected blocked=true when OPEN+BLOCKED with no check runs but hadChecks=true (R5 preserved)")
+	}
+	if ciFailure || timedOut {
+		t.Errorf("expected ciFailure=false timedOut=false, got ciFailure=%v timedOut=%v", ciFailure, timedOut)
+	}
+	// R3 must not fire when hadChecks=true
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			t.Error("fabrik:paused must NOT be added when hadChecks=true (R5 preserved — post-push registration delay, not R3)")
+		}
+	}
+}
+
 // TestCheckCIGate_FetchCheckRunsError_BlocksGate verifies that a transient
 // FetchCheckRuns API error returns blocked=true rather than clearing the gate.
 func TestCheckCIGate_FetchCheckRunsError_BlocksGate(t *testing.T) {
