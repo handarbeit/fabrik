@@ -61,6 +61,21 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 		return true, false, false
 	}
 
+	// R1: PR merged externally while Fabrik was waiting — CI gate clears and the
+	// issue advances to Done. Mirrors checkAutoMergeConvergence's merged-PR detection.
+	if pr.Merged {
+		e.logf(item.Number, "ci-gate", "linked PR #%d is merged — CI gate clears; advancing to Done\n", pr.Number)
+		e.addCompleteLabelAndRemoveCI(owner, repo, item, stage)
+		return false, false, false
+	}
+	// R2: PR closed without merging — pause with a clear actionable message so the
+	// human knows what happened. fabrik:awaiting-ci is removed (no longer relevant).
+	if pr.State == "closed" {
+		e.logf(item.Number, "ci-gate", "linked PR #%d closed without merging — pausing\n", pr.Number)
+		e.pauseForPRClosedNotMerged(board, item, stage, pr.Number)
+		return false, false, false
+	}
+
 	// Trust GitHub's branch-protection-aware mergeable_state when positive:
 	// "clean" = ready to merge per branch protection; "unstable" = non-required
 	// checks failing but still mergeable. Skip the raw check_runs gate in
@@ -69,12 +84,19 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 	// workflow jobs like "Cleanup artifacts" that GitHub itself does not treat
 	// as merge blockers). Falls through to per-check classification when
 	// mergeable_state is empty/unknown/blocked/etc.
-	if mergeableState, msErr := e.readClient.FetchPRMergeableState(owner, repo, pr.Number); msErr != nil {
+	//
+	// mergeableState is declared in outer scope so the R3 branch (len(checkRuns)==0
+	// + BLOCKED + !hadChecks) can discriminate without re-fetching.
+	var mergeableState string
+	if ms, msErr := e.readClient.FetchPRMergeableState(owner, repo, pr.Number); msErr != nil {
 		e.logf(item.Number, "warn", "could not fetch mergeable_state: %v — falling back to check-runs gate\n", msErr)
-	} else if gh.MergeableStateAccepted(mergeableState) {
-		e.logf(item.Number, "ci-gate", "mergeable_state=%q — gate clears (skipping check_runs classification)\n", mergeableState)
-		e.addCompleteLabelAndRemoveCI(owner, repo, item, stage)
-		return false, false, false
+	} else {
+		mergeableState = ms
+		if gh.MergeableStateAccepted(ms) {
+			e.logf(item.Number, "ci-gate", "mergeable_state=%q — gate clears (skipping check_runs classification)\n", ms)
+			e.addCompleteLabelAndRemoveCI(owner, repo, item, stage)
+			return false, false, false
+		}
 	}
 
 	checkRuns, err := e.readClient.FetchCheckRuns(owner, repo, pr.HeadSHA)
@@ -101,6 +123,30 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 		}
 		if hadChecks {
 			e.logf(item.Number, "ci-gate", "no check runs for SHA %s — likely post-push registration delay; waiting\n", pr.HeadSHA[:min(8, len(pr.HeadSHA))])
+			return true, false, false
+		}
+		// R3: OPEN + BLOCKED + no check runs ever observed — a required check is
+		// configured but never triggered by PR events (e.g. converted to
+		// workflow_dispatch while still required by branch protection). Use the
+		// CIWaitTimeout dwell as a false-positive guard: on first PR push, checks
+		// may not have registered yet even though hadChecks is false. Only after the
+		// full timeout window do we treat this as "never-running" and pause distinctly.
+		if mergeableState == "blocked" {
+			timeout := e.cfg.CIWaitTimeout
+			if timeout <= 0 {
+				timeout = 30 * time.Minute
+			}
+			if hasLabel(item, "fabrik:awaiting-ci") {
+				appliedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:awaiting-ci")
+				if err != nil {
+					e.logf(item.Number, "warn", "R3: could not fetch awaiting-ci label timestamp: %v\n", err)
+				} else if !appliedAt.IsZero() && time.Since(appliedAt) >= timeout {
+					e.logf(item.Number, "ci-gate", "R3: PR #%d OPEN+BLOCKED with no check runs ever — required check likely never triggers on PRs; pausing\n", pr.Number)
+					e.pauseForRequiredNeverRunningCheck(board, item, stage, pr.Number)
+					return false, false, false
+				}
+			}
+			e.logf(item.Number, "ci-gate", "R3: PR #%d OPEN+BLOCKED with no check runs — dwell not yet elapsed; waiting\n", pr.Number)
 			return true, false, false
 		}
 		e.logf(item.Number, "ci-gate", "no check runs found for SHA %s; CI gate clears (no CI configured)\n", pr.HeadSHA[:min(8, len(pr.HeadSHA))])
@@ -471,4 +517,89 @@ func (e *Engine) pauseForCIFixCycleLimit(board *gh.ProjectBoard, item gh.Project
 	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
 	}
+}
+
+// pauseForPRClosedNotMerged pauses the issue when the linked PR was closed
+// without merging (R2). Posts an explanatory comment naming the PR, applies
+// fabrik:paused + fabrik:awaiting-input, and removes fabrik:awaiting-ci.
+func (e *Engine) pauseForPRClosedNotMerged(_ *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, prNumber int) {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	e.logf(item.Number, "ci-gate", "PR #%d closed without merging — pausing for human intervention\n", prNumber)
+
+	msg := fmt.Sprintf(
+		"🏭 **Fabrik — PR closed without merging**\n\n"+
+			"The linked PR #%d was closed without being merged while Fabrik was waiting for CI to pass on stage **%s**.\n\n"+
+			"Fabrik has paused this issue. To resume:\n"+
+			"- Reopen the PR (or create a new one) and remove the `fabrik:paused` label, or\n"+
+			"- Close this issue if the work is no longer needed.",
+		prNumber, stage.Name,
+	)
+	if dbID, err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
+		e.logf(item.Number, "warn", "could not post PR-closed comment: %v\n", err)
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+				DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
+			})
+		}
+		if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+		}
+	}
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
+		e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
+	}
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
+		e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
+	}
+	e.removeAwaitingCILabel(owner, repo, item)
+}
+
+// pauseForRequiredNeverRunningCheck pauses the issue when the linked PR is
+// OPEN with mergeable_state=blocked and no check runs have ever been observed
+// for it (R3). This indicates a required check that is configured in branch
+// protection but never triggered by PR events (e.g. converted to workflow_dispatch).
+// Posts a distinct comment naming the PR, applies fabrik:paused +
+// fabrik:awaiting-input, and removes fabrik:awaiting-ci.
+func (e *Engine) pauseForRequiredNeverRunningCheck(_ *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, prNumber int) {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	e.logf(item.Number, "ci-gate", "R3: required check never triggers on PR #%d — pausing for human intervention\n", prNumber)
+
+	msg := fmt.Sprintf(
+		"🏭 **Fabrik — required check never runs on PR**\n\n"+
+			"PR #%d is blocked (`mergeable_state: BLOCKED`) but no CI check runs have ever been observed for this PR's HEAD SHA. "+
+			"This typically means a required check is configured in branch protection but is not triggered by pull request events "+
+			"(for example, it may have been converted to a `workflow_dispatch` trigger).\n\n"+
+			"Fabrik has paused this issue after waiting for stage **%s** to complete. To resume:\n"+
+			"- Run the required check manually (e.g. via `workflow_dispatch`) and remove the `fabrik:paused` label once CI passes, or\n"+
+			"- Remove the check from the branch protection required-status list if it should no longer be required.",
+		prNumber, stage.Name,
+	)
+	if dbID, err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
+		e.logf(item.Number, "warn", "could not post required-never-running comment: %v\n", err)
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+				DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
+			})
+		}
+		if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+		}
+	}
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
+		e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
+	}
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
+		e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
+	}
+	e.removeAwaitingCILabel(owner, repo, item)
 }
