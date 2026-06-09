@@ -1,9 +1,12 @@
 package watch
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -224,6 +227,134 @@ func TestActiveStageFromLabels(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestWorktreeDir verifies that worktreeDir builds the correct path for multi-repo
+// and legacy single-repo layouts.
+func TestWorktreeDir(t *testing.T) {
+	cwd, _ := os.Getwd()
+	tests := []struct {
+		name        string
+		owner, repo string
+		issueNumber int
+		wantSuffix  string
+	}{
+		{
+			"multi-repo",
+			"myowner", "myrepo", 42,
+			filepath.Join(cwd, ".fabrik", "worktrees", "myowner-myrepo", "issue-42"),
+		},
+		{
+			"empty owner falls back to bare",
+			"", "myrepo", 42,
+			filepath.Join(cwd, ".fabrik", "worktrees", "issue-42"),
+		},
+		{
+			"empty repo falls back to bare",
+			"myowner", "", 42,
+			filepath.Join(cwd, ".fabrik", "worktrees", "issue-42"),
+		},
+		{
+			"both empty falls back to bare",
+			"", "", 99,
+			filepath.Join(cwd, ".fabrik", "worktrees", "issue-99"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := worktreeDir(tt.owner, tt.repo, tt.issueNumber)
+			if got != tt.wantSuffix {
+				t.Errorf("worktreeDir(%q, %q, %d) = %q, want %q",
+					tt.owner, tt.repo, tt.issueNumber, got, tt.wantSuffix)
+			}
+		})
+	}
+}
+
+// TestTopKeyHints verifies that topKeyHints returns all expected key labels
+// and does not end with a newline.
+func TestTopKeyHints(t *testing.T) {
+	got := topKeyHints()
+
+	for _, want := range []string{"q quit", "↑↓ scroll", "←→ tabs", "G bottom", "g top", "i resume claude"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("topKeyHints() missing %q; got %q", want, got)
+		}
+	}
+	if strings.HasSuffix(got, "\n") {
+		t.Errorf("topKeyHints() must not end with a newline; got %q", got)
+	}
+}
+
+// TestBottomStatusLine covers the four key behaviors of the bottom info line.
+func TestBottomStatusLine(t *testing.T) {
+	// (a) statusMsg set → transient message replaces session/poll content.
+	t.Run("statusMsg", func(t *testing.T) {
+		m := newTestModel()
+		m.statusMsg = "stage is active"
+		got := m.bottomStatusLine(200)
+		if !strings.Contains(got, "stage is active") {
+			t.Errorf("expected statusMsg text, got %q", got)
+		}
+		if strings.Contains(got, "session") {
+			t.Errorf("statusMsg should replace session info, got %q", got)
+		}
+	})
+
+	// (d) no session file → "no session yet".
+	t.Run("no session", func(t *testing.T) {
+		m := newTestModel()
+		// logDir is empty → currentStageFromLog("") returns "" → readSessionID returns "".
+		got := m.bottomStatusLine(200)
+		if !strings.Contains(got, "no session yet") {
+			t.Errorf("expected 'no session yet', got %q", got)
+		}
+	})
+
+	// (b) session present + wide terminal → UUID and poll suffix both visible.
+	// (c) session present + narrow terminal → UUID present, poll suffix dropped.
+	t.Run("session present width handling", func(t *testing.T) {
+		// Create a fake log file so currentStageFromLog returns a stage name.
+		logDir := t.TempDir()
+		writeLog(t, logDir, "Validate-20260101-120000-000000000.log")
+
+		// Write the session file at the cwd-relative path that readSessionID expects.
+		uuid := "dd9fe2fd-132f-44ed-9c3a-6b7c2b46cc30"
+		cwd, _ := os.Getwd()
+		sessDir := filepath.Join(cwd, ".fabrik", "sessions", "issue-88888")
+		if err := os.MkdirAll(sessDir, 0o755); err != nil {
+			t.Fatalf("mkdir session dir: %v", err)
+		}
+		t.Cleanup(func() { os.RemoveAll(sessDir) })
+		sessionFile := filepath.Join(sessDir, "Validate.session")
+		if err := os.WriteFile(sessionFile, []byte(uuid+"\n"), 0o644); err != nil {
+			t.Fatalf("write session file: %v", err)
+		}
+
+		m := newTestModel()
+		m.issueNumber = 88888
+		m.logDir = logDir
+		m.lastPollAt = time.Now()
+
+		// (b) wide terminal — full UUID and poll suffix should both appear.
+		gotWide := m.bottomStatusLine(200)
+		if !strings.Contains(gotWide, uuid) {
+			t.Errorf("wide: expected UUID in output, got %q", gotWide)
+		}
+		if !strings.Contains(gotWide, "polled") {
+			t.Errorf("wide: expected poll suffix, got %q", gotWide)
+		}
+
+		// (c) narrow terminal (50 cols): "session: "+UUID = 45 visible chars;
+		// any poll suffix pushes past 50, so it must be dropped.
+		gotNarrow := m.bottomStatusLine(50)
+		if !strings.Contains(gotNarrow, uuid) {
+			t.Errorf("narrow: expected UUID preserved, got %q", gotNarrow)
+		}
+		if strings.Contains(gotNarrow, "polled") {
+			t.Errorf("narrow: expected poll suffix to be dropped, got %q", gotNarrow)
+		}
+	})
 }
 
 // TestUpdate_NewLogFileMsg_LabelOverride is the primary regression test: when an
