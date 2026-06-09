@@ -314,18 +314,34 @@ func TestBottomStatusLine(t *testing.T) {
 	// (b) session present + wide terminal → UUID and poll suffix both visible.
 	// (c) session present + narrow terminal → UUID present, poll suffix dropped.
 	t.Run("session present width handling", func(t *testing.T) {
+		// Use a temporary directory as CWD so session files don't pollute the repo.
+		tmpDir := t.TempDir()
+		oldCwd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("getwd: %v", err)
+		}
+		if err := os.Chdir(tmpDir); err != nil {
+			t.Fatalf("chdir tmpDir: %v", err)
+		}
+		t.Cleanup(func() {
+			if err := os.Chdir(oldCwd); err != nil {
+				t.Errorf("restore cwd: %v", err)
+			}
+		})
+
 		// Create a fake log file so currentStageFromLog returns a stage name.
-		logDir := t.TempDir()
+		logDir := filepath.Join(tmpDir, "logs")
+		if err := os.MkdirAll(logDir, 0o755); err != nil {
+			t.Fatalf("mkdir log dir: %v", err)
+		}
 		writeLog(t, logDir, "Validate-20260101-120000-000000000.log")
 
 		// Write the session file at the cwd-relative path that readSessionID expects.
 		uuid := "dd9fe2fd-132f-44ed-9c3a-6b7c2b46cc30"
-		cwd, _ := os.Getwd()
-		sessDir := filepath.Join(cwd, ".fabrik", "sessions", "issue-88888")
+		sessDir := filepath.Join(tmpDir, ".fabrik", "sessions", "issue-88888")
 		if err := os.MkdirAll(sessDir, 0o755); err != nil {
 			t.Fatalf("mkdir session dir: %v", err)
 		}
-		t.Cleanup(func() { os.RemoveAll(sessDir) })
 		sessionFile := filepath.Join(sessDir, "Validate.session")
 		if err := os.WriteFile(sessionFile, []byte(uuid+"\n"), 0o644); err != nil {
 			t.Fatalf("write session file: %v", err)
