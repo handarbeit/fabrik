@@ -269,10 +269,16 @@ func sessionDir(owner, repo string, issueNumber int) string {
 	return filepath.Join(cwd, ".fabrik", "sessions", owner+"-"+repo, issuePart)
 }
 
-// worktreeDir returns .fabrik/worktrees/issue-N relative to CWD.
-func worktreeDir(issueNumber int) string {
+// worktreeDir returns .fabrik/worktrees/[<owner>-<repo>/]issue-N relative to CWD.
+// When owner and repo are both non-empty it produces the multi-repo-qualified path;
+// when either is empty it falls back to the legacy bare path.
+func worktreeDir(owner, repo string, issueNumber int) string {
 	cwd, _ := os.Getwd()
-	return filepath.Join(cwd, ".fabrik", "worktrees", fmt.Sprintf("issue-%d", issueNumber))
+	issuePart := fmt.Sprintf("issue-%d", issueNumber)
+	if owner == "" || repo == "" {
+		return filepath.Join(cwd, ".fabrik", "worktrees", issuePart)
+	}
+	return filepath.Join(cwd, ".fabrik", "worktrees", owner+"-"+repo, issuePart)
 }
 
 // currentStageFromLog returns the stage name derived from the newest .log filename
@@ -564,8 +570,8 @@ func issueHistory(issueNumber int) []tui.HistoryEntry {
 func (m WatchModel) viewportHeight() int {
 	// Overhead when labels row and tab bar are both shown (common runtime case):
 	//   header + \n: 2, labels + \n: 2, prLine + \n: 2, tabBar + \n: 2,
-	//   \n after viewport: 1, statusBar: 1 → 10 total.
-	reserved := 10
+	//   hintStrip + \n: 2, \n after viewport: 1, bottomInfoLine: 1 → 12 total.
+	reserved := 12
 	if m.height > reserved+5 {
 		return m.height - reserved
 	}
@@ -612,12 +618,16 @@ func (m WatchModel) View() string {
 		b.WriteString("\n")
 	}
 
+	// ── Keyboard hint strip ──
+	b.WriteString(topKeyHints())
+	b.WriteString("\n")
+
 	// ── Viewport ──
 	b.WriteString(m.vp.View())
 	b.WriteString("\n")
 
-	// ── Status bar ──
-	b.WriteString(m.statusBar())
+	// ── Bottom info line (session UUID + poll info) ──
+	b.WriteString(m.bottomStatusLine(m.width))
 
 	return b.String()
 }
@@ -708,39 +718,92 @@ func (m WatchModel) checkRunSummary() string {
 	return strings.Join(parts, " ")
 }
 
-// statusBar renders the bottom status bar.
-func (m WatchModel) statusBar() string {
-	keys := dimStyle.Render("q quit  ↑↓ scroll  ←→ tabs  G bottom  g top  i resume claude")
+// topKeyHints returns the static keyboard-hint strip rendered in dim style.
+func topKeyHints() string {
+	return dimStyle.Render("q quit  ↑↓ scroll  ←→ tabs  G bottom  g top  i resume claude")
+}
 
-	// Session ID for current stage.
-	sessionID := readSessionID(m.opts.Owner, m.opts.Repo, m.issueNumber, currentStageFromLog(m.logDir))
-	if sessionID != "" {
-		keys += dimStyle.Render("  |  session: " + sessionID)
-	}
-
-	// Transient status message takes precedence over poll info.
+// bottomStatusLine renders the dedicated bottom info line: session UUID + poll info.
+// Width-aware: the poll suffix is dropped when it would not fit.
+// If a transient status message is set it is shown instead.
+func (m WatchModel) bottomStatusLine(width int) string {
 	if m.statusMsg != "" {
-		return keys + "  " + failStyle.Render(m.statusMsg)
+		return failStyle.Render(m.statusMsg)
 	}
 
-	var pollInfo string
-	if !m.lastPollAt.IsZero() {
-		ago := time.Since(m.lastPollAt).Round(time.Second)
-		pollInfo = dimStyle.Render(fmt.Sprintf("  polled %s ago", ago))
+	sessionID := readSessionID(m.opts.Owner, m.opts.Repo, m.issueNumber, currentStageFromLog(m.logDir))
+	prefix := "no session yet"
+	if sessionID != "" {
+		prefix = "session: " + sessionID
 	}
+
+	// Build poll suffix before styling so widths can be measured accurately.
+	var pollSuffix string
+	isPollErr := false
 	if m.pollErr != "" {
-		pollInfo = failStyle.Render("  " + m.pollErr)
+		pollSuffix = "  " + m.pollErr
+		isPollErr = true
+	} else if !m.lastPollAt.IsZero() {
+		ago := time.Since(m.lastPollAt).Round(time.Second)
+		pollSuffix = fmt.Sprintf("  polled %s ago", ago)
 	}
-	return keys + pollInfo
+
+	// Drop the poll suffix when it would overflow the terminal width.
+	if width > 0 && ansi.StringWidth(prefix)+ansi.StringWidth(pollSuffix) > width {
+		pollSuffix = ""
+	}
+
+	// Apply styles after width comparison to avoid ANSI-escape inflation.
+	result := dimStyle.Render(prefix)
+	if pollSuffix != "" {
+		if isPollErr {
+			result += failStyle.Render(pollSuffix)
+		} else {
+			result += dimStyle.Render(pollSuffix)
+		}
+	}
+	return result
 }
 
 // openClaudeInlineCmd returns a tea.Cmd that suspends the TUI and launches
-// claude --resume <session-id> inline in the current terminal via tea.ExecProcess.
-// When Claude exits, the TUI resumes and ClaudeFinishedMsg is sent.
+// claude (optionally --resume <session-id>) inline in the current terminal via
+// tea.ExecProcess. When Claude exits, the TUI resumes and ClaudeFinishedMsg is sent.
+//
+// Worktree resolution order:
+//  1. Multi-repo path: .fabrik/worktrees/<owner>-<repo>/issue-N/
+//  2. Legacy bare path: .fabrik/worktrees/issue-N/  (when owner/repo are set but multi-repo path is absent)
+//  3. Fallback to cwd when worktree is gone but a session file exists (closed-issue resume).
+//
+// If neither a worktree nor a session file exists, a StatusMsgMsg is emitted and
+// tea.ExecProcess is NOT called.
 func (m WatchModel) openClaudeInlineCmd() tea.Cmd {
 	stageName := currentStageFromLog(m.logDir)
 	sessionID := readSessionID(m.opts.Owner, m.opts.Repo, m.issueNumber, stageName)
-	wt := worktreeDir(m.issueNumber)
+
+	// Resolve worktree directory: try multi-repo path first, then legacy bare path.
+	wt := ""
+	multiPath := worktreeDir(m.opts.Owner, m.opts.Repo, m.issueNumber)
+	if _, err := os.Stat(multiPath); err == nil {
+		wt = multiPath
+	} else if m.opts.Owner != "" && m.opts.Repo != "" {
+		barePath := worktreeDir("", "", m.issueNumber)
+		if _, err := os.Stat(barePath); err == nil {
+			wt = barePath
+		}
+	}
+
+	if wt == "" && sessionID == "" {
+		return func() tea.Msg {
+			return StatusMsgMsg{Text: "no session for this stage — nothing to resume"}
+		}
+	}
+
+	// When the worktree has been cleaned up (closed issue) but the session file
+	// persists, fall back to cwd so Claude can still resume the conversation.
+	workDir := wt
+	if workDir == "" {
+		workDir, _ = os.Getwd()
+	}
 
 	var args []string
 	if sessionID != "" {
@@ -751,7 +814,7 @@ func (m WatchModel) openClaudeInlineCmd() tea.Cmd {
 	}
 
 	cmd := exec.Command("claude", args...)
-	cmd.Dir = wt
+	cmd.Dir = workDir
 
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return ClaudeFinishedMsg{Err: err}
