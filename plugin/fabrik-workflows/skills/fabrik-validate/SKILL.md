@@ -95,6 +95,20 @@ Verify existing functionality isn't broken:
 - All commits pushed to remote
 - PR is up to date
 
+### Behavioral verification
+
+Green CI is **necessary but not sufficient**. CI-green ≠ behavior-correct: a change can compile, pass every unit test, and still leave the feature broken because the tests bypassed the one line that actually mattered. For a **behavioral change** (anything altering runtime behavior — not a pure docs change or a refactor already covered by existing tests), CI-green alone is never enough to close.
+
+- **Confirm a test drives the real entry point.** At least one test must exercise the actual production seam the change flows through — reader, route handler, loader, schema validator, CLI entry — with a realistic artifact, not a hand-built stand-in fed straight to the next layer. If no test crosses the real boundary, the behavioral claim is unverified.
+- **Run `.fabrik/verify.yaml` if it exists.** Run the default `command` (supplying any `needs:` values from the environment), plus any `checks.<name>` the issue's acceptance criteria reference by name. See the `fabrik-setup` skill for the contract. Three outcomes:
+  - **PASS** (exit 0) → record the exact command and its result in the validation report.
+  - **FAIL** (non-zero exit) → the PR is not ready. Describe the failure in the report and do **not** signal completion.
+  - **`needs:` unavailable** (a required secret or tool is unset/absent, so the command cannot run) → take the *honest-unverified* path: write the line `⚠️ BEHAVIORAL VERIFICATION NOT RUN — needs <X>; requires human live-check` into the report (with `<X>` naming the missing `needs:` entries) and do **not** emit the completion marker for a behavioral change. Never fabricate a pass.
+- If `command` is absent but `fallback_prose` is present, execute the prose steps with available tools; if that's impossible, take the honest-unverified path.
+- Absent `.fabrik/verify.yaml` → there is no project-declared behavioral gate, but the real-entry-point doctrine above still applies (confirm a test crosses the real seam).
+
+**Anti-rubber-stamp:** never close a behavioral change on green CI alone. **Scope guard:** this gate applies only to behavioral changes — pure documentation changes and refactors already covered by existing tests are **not** subject to it and must not be blocked by it.
+
 ## How You Report
 
 Structure your output clearly:
@@ -157,6 +171,7 @@ The marker must be the *only* content on its line. Treat it as a control signal,
 - Tests fail
 - Regressions detected
 - Merge conflicts unresolved
+- A behavioral change could not be behaviorally verified — the `.fabrik/verify.yaml` `command` failed, or its `needs:` were unavailable, or no test drives the real entry point. In the unavailable/unverifiable case, write the `⚠️ BEHAVIORAL VERIFICATION NOT RUN — needs <X>` line into the report and withhold the marker so the change surfaces at the human gate instead of advancing on green CI. (Pure docs/refactors with existing coverage are exempt — do not block them.)
 
 If blocked, describe exactly what's wrong. Be specific enough that someone can act on it without re-investigating.
 
