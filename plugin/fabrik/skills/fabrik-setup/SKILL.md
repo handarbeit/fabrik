@@ -116,7 +116,7 @@ It is opt-in. If the file is absent, there is no project-declared behavioral gat
 # Behavioral verification for this project — "does it actually work end-to-end?",
 # beyond compile + unit tests. Read and run by the Fabrik Implement/Validate workers.
 command: <shell command; exits non-zero on wrong behavior>   # the default behavioral gate
-needs: []                 # env var names required to run `command`; if any is unset → UNVERIFIED
+needs: [<ENV>, ...]       # env var names required to run `command`; if any is unset → UNVERIFIED
 description: <one line: what this proves>
 fallback_prose: |         # optional: human-interpretable steps when no runnable command exists
   <steps + expected observables>

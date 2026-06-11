@@ -171,7 +171,7 @@ The marker must be the *only* content on its line. Treat it as a control signal,
 - Tests fail
 - Regressions detected
 - Merge conflicts unresolved
-- A behavioral change could not be behaviorally verified — the `.fabrik/verify.yaml` `command` failed, or its `needs:` were unavailable, or no test drives the real entry point. In the unavailable/unverifiable case, write the `⚠️ BEHAVIORAL VERIFICATION NOT RUN — needs <X>` line into the report and withhold the marker so the change surfaces at the human gate instead of advancing on green CI. (Pure docs/refactors with existing coverage are exempt — do not block them.)
+- A behavioral change could not be behaviorally verified — the `.fabrik/verify.yaml` `command` failed, or its `needs:` were unavailable, or no test drives the real entry point. In the unavailable/unverifiable case, write the `⚠️ BEHAVIORAL VERIFICATION NOT RUN — needs <X>; requires human live-check` line into the report and withhold the marker so the change surfaces at the human gate instead of advancing on green CI. (Pure docs/refactors with existing coverage are exempt — do not block them.)
 
 If blocked, describe exactly what's wrong. Be specific enough that someone can act on it without re-investigating.
 
