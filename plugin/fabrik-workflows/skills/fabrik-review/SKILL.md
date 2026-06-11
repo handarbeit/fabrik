@@ -101,6 +101,13 @@ git diff origin/main..HEAD
 - No TODO comments that should have been resolved
 - Documentation updated if public API changed
 
+**Verification-integrity** (does the change *actually* work, beyond green CI?):
+- **Bypassed entry point.** Do the tests drive the real production seam (reader, route handler, loader, schema validator, CLI entry), or do they hand-build the inputs that seam *would have produced* and feed a stand-in? A test that bypasses the code that can break gives false confidence — flag it and require at least one test that crosses the real boundary with a realistic artifact.
+- **Silent-success drops.** Any `if (!ok) return` / `continue` / `break` (or equivalent) that drops data or skips work without logging is a candidate bug — the failure is invisible. Flag it and require a log line so the drop is observable.
+- **Unbacked behavioral claims.** Any claim that the feature "works" that is not backed by a behavioral test crossing the real entry point or by a `.fabrik/verify.yaml` run. CI-green ≠ behavior-correct; treat an unbacked behavioral claim as a finding.
+
+  Scope this lens to **behavioral changes** — pure docs/refactors already covered by existing tests don't warrant a behavioral test.
+
 ### Fix what you find
 
 You are not just a reviewer — you are a fixer. For each issue:
