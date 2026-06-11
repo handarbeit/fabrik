@@ -104,6 +104,59 @@ ls ~/.claude/plugins/cache/claude-plugins-official/
 
 If `superpowers` appears, recommend removing it. This *only* matters on machines that run Fabrik as a worker host — installing other Claude Code plugins (like this `fabrik` plugin) for the *user's* interactive session is fine.
 
+## The `.fabrik/verify.yaml` contract
+
+`.fabrik/verify.yaml` is an **optional**, per-project, language-agnostic contract that declares how to behaviorally verify a change — "does it actually work end-to-end?", beyond compile + unit tests. The Implement and Validate workers read and run it. It exists because **CI-green ≠ behavior-correct**: a change can pass every unit test while leaving the feature broken, when the tests bypassed the real production seam. This file gives the workers a concrete, project-authored behavioral gate to run.
+
+It is opt-in. If the file is absent, there is no project-declared behavioral gate — the workers' real-entry-point doctrine still applies, but nothing here hard-blocks.
+
+### Schema
+
+```yaml
+# Behavioral verification for this project — "does it actually work end-to-end?",
+# beyond compile + unit tests. Read and run by the Fabrik Implement/Validate workers.
+command: <shell command; exits non-zero on wrong behavior>   # the default behavioral gate
+needs: []                 # env var names required to run `command`; if any is unset → UNVERIFIED
+description: <one line: what this proves>
+fallback_prose: |         # optional: human-interpretable steps when no runnable command exists
+  <steps + expected observables>
+checks:                   # optional named recipes a spec/issue can reference by name
+  <name>:
+    command: <shell command>
+    needs: [<ENV>, ...]
+    description: <one line>
+```
+
+### Rules
+
+- **Behavioral changes** — anything altering runtime behavior, as opposed to pure docs or refactors already covered by existing tests — MUST run the default `command`, plus any `checks.<name>` the issue's acceptance criteria reference by name.
+- **Non-zero exit = failing verification.** Treat it like a failing test, not a warning.
+- **Any `needs:` var unset** → the command cannot run → take the honest-unverified path: report it explicitly and do not fabricate a pass.
+- **`command` absent but `fallback_prose` present** → execute the prose steps with available tools; if that's impossible, honest-unverified.
+- **Absent file** → no project-declared behavioral gate; the real-artifact-testing doctrine still applies.
+
+Keep the default `command` **CI-runnable** wherever possible, so it guards every PR automatically. Checks that need live secrets or external services belong under `checks.<name>` with their `needs:` declared — they run only when those secrets are present, and degrade to honest-unverified otherwise.
+
+### Example
+
+```yaml
+command: npm run test:verify
+needs: []
+description: Drives discoverSidecars on real sidecar fixtures and asserts the
+  ESVCLP form data reaches the generated workbook end-to-end.
+fallback_prose: |
+  Run the report generator against the ESVCLP sample sidecar. Open the
+  generated workbook and confirm the portfolio-company cells are populated
+  (not blank) — a blank cell means the sidecar was silently dropped.
+checks:
+  cir-live:
+    command: npm run test:cir-live
+    needs: [CIR_API_TOKEN, CIR_BASE_URL]
+    description: Exercises the live CIR endpoint end-to-end against a real token.
+```
+
+Here `command` is CI-runnable (no `needs:`), so it guards every PR. The `cir-live` check needs live secrets, so it lives under `checks.<name>` and runs only when `CIR_API_TOKEN` and `CIR_BASE_URL` are set — otherwise the worker reports it unverified rather than claiming a pass.
+
 ## Where to point the user next
 
 Once they're up:
