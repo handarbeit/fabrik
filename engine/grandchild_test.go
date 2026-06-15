@@ -4,8 +4,11 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -174,6 +177,146 @@ func TestInvokeClaude_MaxWallTimeKillsWithoutComplete(t *testing.T) {
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("InvokeClaude did not return within 15s after max_wall_time kill")
+	}
+}
+
+// TestKillProcGroupGraceful_StructuredLog (SC-1) verifies that the kill escalation
+// sequence emits structured log lines for each signal sent to the process group,
+// with the correct signal name and reason code (max_wall_time in this case).
+func TestKillProcGroupGraceful_StructuredLog(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	fakeClaude := filepath.Join(binDir, "claude")
+	// Script ignores SIGINT and SIGTERM so all three signals are sent before SIGKILL
+	// terminates the loop. This ensures we get log lines for the full escalation.
+	script := "#!/bin/sh\n" +
+		"trap '' INT TERM\n" +
+		"cat >/dev/null\n" +
+		"while true; do sleep 1; done\n"
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	os.Setenv("PATH", binDir+":"+origPath)
+	defer os.Setenv("PATH", origPath)
+
+	origDelay := claudeWaitDelay
+	claudeWaitDelay = 500 * time.Millisecond
+	defer func() { claudeWaitDelay = origDelay }()
+
+	origSigInt := claudeKillGraceSigInt
+	origSigTerm := claudeKillGraceSigTerm
+	claudeKillGraceSigInt = 200 * time.Millisecond
+	claudeKillGraceSigTerm = 200 * time.Millisecond
+	defer func() {
+		claudeKillGraceSigInt = origSigInt
+		claudeKillGraceSigTerm = origSigTerm
+	}()
+
+	var logLines []string
+	var logMu sync.Mutex
+	origLogf := claudeLogf
+	claudeLogf = func(issueNumber int, tag, format string, args ...any) {
+		msg := fmt.Sprintf(format, args...)
+		logMu.Lock()
+		logLines = append(logLines, fmt.Sprintf("[#%d %s] %s", issueNumber, tag, msg))
+		logMu.Unlock()
+	}
+	defer func() { claudeLogf = origLogf }()
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:        "Validate",
+		Prompt:      "Do validate",
+		MaxWallTime: 300 * time.Millisecond,
+	}
+	issue := gh.ProjectItem{Number: 42, Title: "KillStructuredLog"}
+
+	InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+
+	logMu.Lock()
+	captured := append([]string(nil), logLines...)
+	logMu.Unlock()
+
+	var hasSIGINT, hasSIGTERM, hasSIGKILL bool
+	for _, line := range captured {
+		if strings.Contains(line, "kill]") && strings.Contains(line, "SIGINT") && strings.Contains(line, "reason=max_wall_time") {
+			hasSIGINT = true
+		}
+		if strings.Contains(line, "kill]") && strings.Contains(line, "SIGTERM") && strings.Contains(line, "reason=max_wall_time") {
+			hasSIGTERM = true
+		}
+		if strings.Contains(line, "kill]") && strings.Contains(line, "SIGKILL") && strings.Contains(line, "reason=max_wall_time") {
+			hasSIGKILL = true
+		}
+	}
+	t.Logf("kill log lines: SIGINT=%v SIGTERM=%v SIGKILL=%v; all captured: %v", hasSIGINT, hasSIGTERM, hasSIGKILL, captured)
+	if !hasSIGINT {
+		t.Error("expected SIGINT log line with reason=max_wall_time")
+	}
+	if !hasSIGTERM {
+		t.Error("expected SIGTERM log line with reason=max_wall_time")
+	}
+	if !hasSIGKILL {
+		t.Error("expected SIGKILL log line with reason=max_wall_time")
+	}
+}
+
+// TestKillProcGroupGraceful_SIGINTGraceWindow (SC-2) verifies that a child process
+// that handles SIGINT can write a sentinel file within the SIGINT grace window before
+// SIGTERM arrives. This simulates a test-runner wrapper that catches SIGINT to post
+// a final Commit Status before being terminated.
+func TestKillProcGroupGraceful_SIGINTGraceWindow(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	fakeClaude := filepath.Join(binDir, "claude")
+
+	sentinelFile := filepath.Join(t.TempDir(), "sentinel")
+
+	// Fake claude forks a subshell that traps SIGINT, writes a sentinel file,
+	// then exits. The parent shell ignores SIGINT so it stays alive while the
+	// child trap runs — simulating a test-runner wrapper posting a final Commit
+	// Status on SIGINT before SIGTERM/SIGKILL arrives.
+	script := "#!/bin/sh\n" +
+		"trap '' INT\n" +
+		"cat >/dev/null\n" +
+		"(trap 'touch " + sentinelFile + "; exit 0' INT; sleep 60) &\n" +
+		"wait $!\n"
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origPath := os.Getenv("PATH")
+	os.Setenv("PATH", binDir+":"+origPath)
+	defer os.Setenv("PATH", origPath)
+
+	origDelay := claudeWaitDelay
+	claudeWaitDelay = 500 * time.Millisecond
+	defer func() { claudeWaitDelay = origDelay }()
+
+	// 3s SIGINT grace gives the child ample time to write the sentinel.
+	origSigInt := claudeKillGraceSigInt
+	origSigTerm := claudeKillGraceSigTerm
+	claudeKillGraceSigInt = 3 * time.Second
+	claudeKillGraceSigTerm = 200 * time.Millisecond
+	defer func() {
+		claudeKillGraceSigInt = origSigInt
+		claudeKillGraceSigTerm = origSigTerm
+	}()
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:        "Validate",
+		Prompt:      "Do validate",
+		MaxWallTime: 100 * time.Millisecond,
+	}
+	issue := gh.ProjectItem{Number: 43, Title: "SIGINTGraceWindow"}
+
+	InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+
+	if _, err := os.Stat(sentinelFile); err != nil {
+		t.Errorf("sentinel file not created: child SIGINT handler did not run before SIGTERM landed; path=%q", sentinelFile)
 	}
 }
 
