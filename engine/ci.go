@@ -153,8 +153,23 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 		// fallback, per EC-2) and not "unknown" (GitHub not yet computed, per EC-1)
 		// signals that branch protection is blocking the merge via a signal Fabrik
 		// cannot see via check_runs (e.g. a Commit Status / legacy Statuses API).
-		// Block and re-evaluate on next poll; CIWaitTimeout handles eventual escalation.
+		// Block and re-evaluate on next poll; fall through to CIWaitTimeout escalation
+		// inline so that perpetually-blocking states eventually pause the issue.
 		if mergeableState != "" && mergeableState != "unknown" {
+			timeout := e.cfg.CIWaitTimeout
+			if timeout <= 0 {
+				timeout = 30 * time.Minute
+			}
+			if hasLabel(item, "fabrik:awaiting-ci") {
+				appliedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:awaiting-ci")
+				if err != nil {
+					e.logf(item.Number, "warn", "could not fetch awaiting-ci label timestamp: %v\n", err)
+				} else if !appliedAt.IsZero() && time.Since(appliedAt) >= timeout {
+					e.logf(item.Number, "warn", "CI wait timeout elapsed for mergeable_state=%q with no check_runs — pausing issue\n", mergeableState)
+					e.removeAwaitingCILabel(owner, repo, item)
+					return false, false, true
+				}
+			}
 			e.logf(item.Number, "ci-gate", "mergeable_state=%q blocks merge but no check_runs visible — branch protection likely requires a Commit Status or external signal; blocking\n", mergeableState)
 			return true, false, false
 		}
