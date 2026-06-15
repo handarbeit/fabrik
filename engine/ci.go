@@ -149,6 +149,15 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 			e.logf(item.Number, "ci-gate", "R3: PR #%d OPEN+BLOCKED with no check runs — dwell not yet elapsed; waiting\n", pr.Number)
 			return true, false, false
 		}
+		// New guard: any actively-blocking mergeable_state that is not "" (API error
+		// fallback, per EC-2) and not "unknown" (GitHub not yet computed, per EC-1)
+		// signals that branch protection is blocking the merge via a signal Fabrik
+		// cannot see via check_runs (e.g. a Commit Status / legacy Statuses API).
+		// Block and re-evaluate on next poll; CIWaitTimeout handles eventual escalation.
+		if mergeableState != "" && mergeableState != "unknown" {
+			e.logf(item.Number, "ci-gate", "mergeable_state=%q blocks merge but no check_runs visible — branch protection likely requires a Commit Status or external signal; blocking\n", mergeableState)
+			return true, false, false
+		}
 		e.logf(item.Number, "ci-gate", "no check runs found for SHA %s; CI gate clears (no CI configured)\n", pr.HeadSHA[:min(8, len(pr.HeadSHA))])
 		e.addCompleteLabelAndRemoveCI(owner, repo, item, stage)
 		return false, false, false

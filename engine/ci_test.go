@@ -1050,3 +1050,75 @@ func TestRemoveAwaitingCILabel_ErrNotFound(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckCIGate_BehindNoChecks_Blocks verifies SC-2: when mergeable_state="behind"
+// (branch is behind the base) and check_runs=[] and hadChecks=false, the new guard
+// must return (true, false, false) without clearing the gate or adding
+// stage:Validate:complete. The "behind" state signals that branch protection is
+// blocking via a signal Fabrik cannot see via check_runs (e.g. up-to-date policy).
+func TestCheckCIGate_BehindNoChecks_Blocks(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, HeadSHA: "sha-behind", Merged: false, State: "open"}, nil
+		},
+		fetchPRMergeableStateFn: func(owner, repo string, prNumber int) (string, error) {
+			return "behind", nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return nil, nil
+		},
+	}
+	eng := testEngineForMerge(client)
+	tr := true
+	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	if !blocked {
+		t.Error("expected blocked=true when mergeable_state=behind with no check_runs and hadChecks=false (new guard)")
+	}
+	if ciFailure || timedOut {
+		t.Errorf("expected ciFailure=false timedOut=false, got ciFailure=%v timedOut=%v", ciFailure, timedOut)
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Validate:complete" {
+			t.Error("stage:Validate:complete must NOT be added when new guard blocks (mergeable_state=behind, no check_runs)")
+		}
+	}
+}
+
+// TestCheckCIGate_DirtyNoChecks_Blocks verifies SC-2: when mergeable_state="dirty"
+// (merge conflict) and check_runs=[] and hadChecks=false, the new guard must
+// return (true, false, false) without clearing the gate or adding
+// stage:Validate:complete. The "dirty" state signals that branch protection is
+// blocking due to a merge conflict — a signal Fabrik cannot see via check_runs.
+func TestCheckCIGate_DirtyNoChecks_Blocks(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, HeadSHA: "sha-dirty", Merged: false, State: "open"}, nil
+		},
+		fetchPRMergeableStateFn: func(owner, repo string, prNumber int) (string, error) {
+			return "dirty", nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return nil, nil
+		},
+	}
+	eng := testEngineForMerge(client)
+	tr := true
+	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	if !blocked {
+		t.Error("expected blocked=true when mergeable_state=dirty with no check_runs and hadChecks=false (new guard)")
+	}
+	if ciFailure || timedOut {
+		t.Errorf("expected ciFailure=false timedOut=false, got ciFailure=%v timedOut=%v", ciFailure, timedOut)
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Validate:complete" {
+			t.Error("stage:Validate:complete must NOT be added when new guard blocks (mergeable_state=dirty, no check_runs)")
+		}
+	}
+}
