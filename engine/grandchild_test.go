@@ -274,15 +274,19 @@ func TestKillProcGroupGraceful_SIGINTGraceWindow(t *testing.T) {
 
 	sentinelFile := filepath.Join(t.TempDir(), "sentinel")
 
-	// Fake claude forks a subshell that traps SIGINT, writes a sentinel file,
-	// then exits. The parent shell ignores SIGINT so it stays alive while the
-	// child trap runs — simulating a test-runner wrapper posting a final Commit
-	// Status on SIGINT before SIGTERM/SIGKILL arrives.
+	// Use the test binary itself as the fake claude subprocess: shell traps are
+	// unreliable on macOS (bash re-raises SIGINT after a foreground command exits
+	// rather than running the trap). Go's signal.Notify is reliable. TestMain
+	// detects FABRIK_TEST_SIGINT_SENTINEL and enters subprocess mode: drains stdin,
+	// waits for SIGINT, writes the sentinel, exits 0.
+	testBin, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	// Shell wrapper: exec replaces the shell with the test binary so the test binary
+	// IS the process in the Claude process group and receives SIGINT directly.
 	script := "#!/bin/sh\n" +
-		"trap '' INT\n" +
-		"cat >/dev/null\n" +
-		"(trap 'touch " + sentinelFile + "; exit 0' INT; sleep 60) &\n" +
-		"wait $!\n"
+		"FABRIK_TEST_SIGINT_SENTINEL='" + sentinelFile + "' exec '" + testBin + "' -test.run='^$'\n"
 	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -307,9 +311,12 @@ func TestKillProcGroupGraceful_SIGINTGraceWindow(t *testing.T) {
 
 	workDir := t.TempDir()
 	stage := &stages.Stage{
-		Name:        "Validate",
-		Prompt:      "Do validate",
-		MaxWallTime: 100 * time.Millisecond,
+		Name:   "Validate",
+		Prompt: "Do validate",
+		// 2s gives the Go test-binary subprocess enough time to start up and install
+		// signal.Notify before SIGINT arrives. 100ms was too short: SIGINT landed
+		// before the runtime reached signal.Notify, triggering the default handler.
+		MaxWallTime: 2 * time.Second,
 	}
 	issue := gh.ProjectItem{Number: 43, Title: "SIGINTGraceWindow"}
 
