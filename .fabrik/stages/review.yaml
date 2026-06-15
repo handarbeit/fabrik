@@ -7,5 +7,8 @@ max_turns: 50
 post_to_pr: true
 mark_pr_ready_on_complete: true
 wait_for_reviews: true
+kill_grace:
+  sigint: 10s
+  sigterm: 10s
 completion:
   type: claude
