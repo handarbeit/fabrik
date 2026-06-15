@@ -4862,7 +4862,25 @@ This is a purely additive display mechanism — it does not affect Claude's exec
 
 After `cmd.Run()` returns, two cleanup steps run unconditionally:
 
-1. **Process group kill**: Claude is started in its own process group (`Setpgid: true` on Unix). After `cmd.Run()` returns, `SIGKILL` is sent to the entire process group to clean up grandchild processes (e.g. `tail -f` from the Monitor tool, polling loops spawned via `run_in_background: true`). This is scoped to the specific Claude invocation and does not affect worktree file state — grandchild monitoring processes have no side effects on the filesystem.
+1. **Kill escalation and the wrapper contract**: When the engine needs to stop a Claude invocation (max_wall_time, inactivity timeout, daemon shutdown, or supplant-by-new-invocation), it uses a three-signal escalation sequence rather than an immediate SIGKILL:
+
+   ```
+   SIGINT  → sleep(sigintGrace)  → liveness probe
+   SIGTERM → sleep(sigtermGrace) → liveness probe
+   SIGKILL
+   ```
+
+   Claude is started in its own process group (`Setpgid: true` on Unix). All three signals are sent to the entire process group via `syscall.Kill(-pgid, sig)`.
+
+   Each step is logged as `[#N kill] sending SIG<X> to PGID <pid> (reason=<reason>)`. Reason codes: `max_wall_time`, `inactivity_timeout`, `daemon_shutdown`, `supplant_by_new_invocation`, `context_cancel`.
+
+   A step is skipped if the grace duration is zero (via per-stage `kill_grace:` with `"0s"`). The liveness probe (`kill -0`) short-circuits the remaining sequence if the process group is already empty.
+
+   **Wrapper contract**: The SIGINT grace window exists specifically so that shell wrappers spawned by stage skills (e.g. a CI test runner that posts a final Commit Status on interrupt) can catch SIGINT, complete their cleanup, and exit normally before SIGTERM arrives. The default SIGINT grace is 10 seconds. Wrappers must be designed to finish their cleanup within this window.
+
+   **Grace window configuration**: Engine-wide defaults are set via `--kill-grace-sigint` / `--kill-grace-sigterm` flags (or `FABRIK_KILL_GRACE_SIGINT` / `FABRIK_KILL_GRACE_SIGTERM` env vars, default 10s each). Per-stage overrides are expressed in stage YAML (`kill_grace:`); an omitted field inherits the engine default; `"0s"` skips that signal step entirely.
+
+   After `cmd.Wait()` returns, a second unconditional `SIGKILL` is sent to the process group to clean up any grandchildren (e.g. `tail -f` from the Monitor tool) that survived the Claude subprocess exit. This grandchild cleanup fires regardless of how the main subprocess exited.
 
 2. **WaitDelay bound**: `cmd.WaitDelay` is set to 30s (configurable via `--claude-wait-delay` / `FABRIK_CLAUDE_WAIT_DELAY`). When grandchild processes hold the stdout pipe open after Claude exits, Go's `cmd.Wait()` would otherwise block indefinitely. With `WaitDelay`, Go forcibly closes its end of the pipe after the deadline and returns `exec.ErrWaitDelay`. The engine detects this error, logs a diagnostic warning, clears the error, and processes the buffered output normally — including any `FABRIK_STAGE_COMPLETE` marker. This prevents the worker goroutine from being permanently stuck when Claude uses `run_in_background` or the Monitor tool.
 
@@ -5131,6 +5149,9 @@ create_draft_pr: false      # Create draft PR on completion
 mark_pr_ready_on_complete: false  # Mark PR ready on completion
 auto_advance: null          # Override global yolo (true/false/null)
 cleanup_worktree: false     # Terminal stage — remove worktree
+kill_grace:
+  sigint: 10s               # Grace window after SIGINT before SIGTERM (empty = engine default; "0s" = skip SIGINT)
+  sigterm: 10s              # Grace window after SIGTERM before SIGKILL (empty = engine default; "0s" = skip SIGTERM)
 completion:
   type: claude              # Only supported type
 ```
