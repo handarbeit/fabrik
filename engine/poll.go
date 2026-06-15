@@ -274,6 +274,12 @@ func (e *Engine) Run() error {
 		select {
 		case sig := <-sigCh:
 			fmt.Fprintf(os.Stderr, "\nReceived %v — shutting down gracefully (Ctrl-C again to force-quit)...\n", sig)
+			// Annotate all in-flight per-issue contexts with the shutdown reason so
+			// the kill log emits "daemon_shutdown" rather than "context_cancel".
+			e.issueCtxs.Range(func(_, val any) bool {
+				val.(issueCtxEntry).holder.val.Store("daemon_shutdown")
+				return true
+			})
 			cancel()
 		case <-ctx.Done():
 			return
@@ -1487,8 +1493,15 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		// Skip issues already being processed by a previous poll cycle's worker.
 		// Use the Store-backed Worker field (set by WorkerEntered before goroutine launch)
 		// so this check is consistent with the observer pipeline.
+		// When a new poll detects a comment or reinvoke for an in-flight issue,
+		// annotate the in-flight context with "supplant_by_new_invocation" so the
+		// kill log emits the correct reason code when it is eventually cancelled.
 		if snap, err := e.store.Get(itemRepo, item.Number); err == nil && snap.Worker() != nil {
 			debugLog("dispatch-skip-inflight", map[string]interface{}{"number": item.Number})
+			if entry, ok := e.issueCtxs.Load(iKey); ok {
+				entry.(issueCtxEntry).holder.val.Store("supplant_by_new_invocation")
+				entry.(issueCtxEntry).cancel()
+			}
 			continue
 		}
 		debugLog("dispatch-WILL-DISPATCH", map[string]interface{}{
@@ -1515,10 +1528,23 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			StageName: stageName,
 			StartedAt: startTime,
 		})
+		// Create a per-issue context so kill-reason annotation can propagate from
+		// the cancellation path (daemon shutdown, supplant) to the kill log.
+		// The holder is read in cmd.Cancel to derive the reason string.
+		issueHolder := &killReasonHolder{}
+		issueCtx, issueCancel := context.WithCancel(context.WithValue(ctx, killReasonCtxKey{}, issueHolder))
+		e.issueCtxs.Store(iKey, issueCtxEntry{cancel: issueCancel, holder: issueHolder})
 		e.wg.Add(1)
 		dispatched++
-		go func() {
+		go func(issueCtx context.Context, issueCancel context.CancelFunc, iKey string) {
 			defer e.wg.Done()
+			// Remove per-issue context entry on any exit path (success, panic, cancel).
+			// issueCancel must also be called to release context resources even if the
+			// parent ctx already cancelled (Go context semantics require explicit cancel call).
+			defer func() {
+				e.issueCtxs.Delete(iKey)
+				issueCancel()
+			}()
 			// WorkerExited must be deferred at the goroutine top level so it fires on
 			// every exit path, including processItem early-returns (paused, blocked,
 			// awaiting-input, locked-by-other, stage-complete, etc.). The defer inside
@@ -1535,11 +1561,11 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			// against a freed slot.
 			defer e.store.Apply(itemstate.WorkerExited{Repo: itemRepo, Number: item.Number})
 			defer func() { <-e.sem }()
-			err := e.processItem(ctx, board, item)
+			err := e.processItem(issueCtx, board, item)
 			if err != nil {
 				e.logf(item.Number, "error", "%v\n", err)
 			}
-		}()
+		}(issueCtx, issueCancel, iKey)
 	}
 doneDispatching:
 

@@ -170,7 +170,7 @@ func newWebhookManager(
 		pendingEchoes:       make(map[string]time.Time),
 		killFn: func(cmd *exec.Cmd) {
 			if cmd != nil && cmd.Process != nil {
-				killProcGroup(cmd)
+				killProcGroup(cmd, 0, "webhook")
 			}
 		},
 	}

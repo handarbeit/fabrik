@@ -67,6 +67,14 @@ type InvokeOptions struct {
 	EffortOverride   string // from "effort:<level>" label, overrides stage.EffortLevel
 	BaseBranch       string // actual default base branch for the managed repo (e.g. "develop", not always "main")
 	MaxTurnsOverride int    // when > 0, overrides stage.MaxTurns for this invocation; 0 means use stage.MaxTurns
+	// SigIntGrace is the grace window after SIGINT before SIGTERM.
+	// 0 = use engine default (claudeKillGraceSigInt, typically 10s).
+	// -1 = skip the SIGINT step entirely (skip sentinel, used by item.go for stage kill_grace.sigint: 0s).
+	// >0 = use this explicit value.
+	SigIntGrace time.Duration
+	// SigTermGrace is the grace window after SIGTERM before SIGKILL.
+	// Same sentinel semantics as SigIntGrace.
+	SigTermGrace time.Duration
 	// OnPIDReady, if non-nil, is called once after cmd.Start() with the Claude subprocess PID.
 	// Used by the heartbeat/liveness system to record the PID in the store.
 	OnPIDReady func(pid int)
