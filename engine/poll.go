@@ -1536,13 +1536,18 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		e.issueCtxs.Store(iKey, issueCtxEntry{cancel: issueCancel, holder: issueHolder})
 		e.wg.Add(1)
 		dispatched++
-		go func(issueCtx context.Context, issueCancel context.CancelFunc, iKey string) {
+		go func(issueCtx context.Context, issueCancel context.CancelFunc, iKey string, holder *killReasonHolder) {
 			defer e.wg.Done()
 			// Remove per-issue context entry on any exit path (success, panic, cancel).
+			// Guard with holder pointer equality: if a supplant-cancel raced a new dispatch
+			// between WorkerExited (which clears snap.Worker) and this delete, the new entry
+			// would have a different holder and must not be removed.
 			// issueCancel must also be called to release context resources even if the
 			// parent ctx already cancelled (Go context semantics require explicit cancel call).
 			defer func() {
-				e.issueCtxs.Delete(iKey)
+				if current, ok := e.issueCtxs.Load(iKey); ok && current.(issueCtxEntry).holder == holder {
+					e.issueCtxs.Delete(iKey)
+				}
 				issueCancel()
 			}()
 			// WorkerExited must be deferred at the goroutine top level so it fires on
@@ -1565,7 +1570,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			if err != nil {
 				e.logf(item.Number, "error", "%v\n", err)
 			}
-		}(issueCtx, issueCancel, iKey)
+		}(issueCtx, issueCancel, iKey, issueHolder)
 	}
 doneDispatching:
 
