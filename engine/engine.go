@@ -139,12 +139,15 @@ func New(cfg Config) (*Engine, error) {
 		claudePluginDir = pluginDir
 	}
 	claudeWaitDelay = cfg.ClaudeWaitDelay
-	if cfg.KillGraceSigInt > 0 {
+	// KillGraceSigInt >= 0: 0 = skip SIGINT step, positive = use that duration.
+	// Execute() maps "" → 10s, so 0 only arrives when user explicitly passed 0s.
+	// Negative is guarded defensively (killGraceSigInt() never returns negative).
+	if cfg.KillGraceSigInt >= 0 {
 		claudeKillGraceSigInt = cfg.KillGraceSigInt
 	} else {
 		claudeKillGraceSigInt = 10 * time.Second
 	}
-	if cfg.KillGraceSigTerm > 0 {
+	if cfg.KillGraceSigTerm >= 0 {
 		claudeKillGraceSigTerm = cfg.KillGraceSigTerm
 	} else {
 		claudeKillGraceSigTerm = 10 * time.Second
