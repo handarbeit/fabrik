@@ -25,6 +25,9 @@ func killProcGroup(cmd *exec.Cmd, issueNumber int, label string) {
 		return
 	}
 	pid := cmd.Process.Pid
+	if pid <= 0 {
+		return
+	}
 	claudeLog(issueNumber, "kill", "sending SIGKILL to PGID %d (grandchild cleanup)\n", pid)
 	// Negative PID targets the process group (PGID == Claude's PID when Setpgid is set).
 	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
@@ -49,6 +52,9 @@ func isProcessAlive(pid int) bool {
 // This gives well-behaved child processes (e.g. test runners posting Commit Statuses)
 // a chance to flush and exit cleanly before the heavier signals land.
 func killProcGroupGraceful(pid, issueNumber int, label, reason string, sigintGrace, sigtermGrace time.Duration) {
+	if pid <= 0 {
+		return
+	}
 	if sigintGrace > 0 {
 		claudeLog(issueNumber, "kill", "sending SIGINT to PGID %d (reason=%s)\n", pid, reason)
 		if err := syscall.Kill(-pid, syscall.SIGINT); err != nil {
