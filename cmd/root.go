@@ -46,6 +46,8 @@ type Config struct {
 	ConvergenceBudget    string // Go duration string; "" means use default (30m); "0" means disabled
 	AutoMergeStrategy    string // MERGE, SQUASH, or REBASE; "" means use default (MERGE)
 	ClaudeWaitDelay      int    // seconds; 0 means use default (30)
+	KillGraceSigInt      string // Go duration string; "" means use default (10s); "0s" skips SIGINT step
+	KillGraceSigTerm     string // Go duration string; "" means use default (10s)
 	DebugOutput              bool
 	SymlinkEnv               bool
 	WorktreeBoundaryAudit    bool
@@ -141,6 +143,8 @@ func Execute() error {
 	flag.StringVar(&cfg.WebhookEvents, "webhook-events", "", "Comma-separated list of GitHub event types to subscribe to (default: all supported events; also FABRIK_WEBHOOK_EVENTS)")
 	flag.IntVar(&cfg.StatusPollSeconds, "status-poll", 0, "Retained for config compatibility; the Layer 2 updatedAt gate now runs every poll cycle (~15 s) regardless of this value. Also FABRIK_STATUS_POLL.")
 	flag.IntVar(&cfg.ReconcileInterval, "reconcile-interval", 0, "Seconds between periodic light-reconcile webhook-stream-health checks when --webhooks is enabled (0 = use default of 180; also FABRIK_RECONCILE_INTERVAL). Inactive without --webhooks — the per-poll Reconcile is the only freshener in that mode.")
+	flag.StringVar(&cfg.KillGraceSigInt, "kill-grace-sigint", "", "Grace window after SIGINT before SIGTERM in the kill escalation sequence (Go duration: 10s, 0s to skip SIGINT entirely; also FABRIK_KILL_GRACE_SIGINT; default 10s)")
+	flag.StringVar(&cfg.KillGraceSigTerm, "kill-grace-sigterm", "", "Grace window after SIGTERM before SIGKILL in the kill escalation sequence (Go duration: 10s; also FABRIK_KILL_GRACE_SIGTERM; default 10s)")
 
 	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
 		return err
@@ -362,6 +366,16 @@ func Execute() error {
 			} else {
 				fmt.Fprintf(os.Stderr, "[warn] FABRIK_RECONCILE_INTERVAL=%q is invalid (must be a non-negative integer of seconds; 0 = use default 180); using default 180\n", v)
 			}
+		}
+	}
+	if !explicitFlags["kill-grace-sigint"] {
+		if v := os.Getenv("FABRIK_KILL_GRACE_SIGINT"); v != "" {
+			cfg.KillGraceSigInt = v // validated in killGraceSigInt() helper
+		}
+	}
+	if !explicitFlags["kill-grace-sigterm"] {
+		if v := os.Getenv("FABRIK_KILL_GRACE_SIGTERM"); v != "" {
+			cfg.KillGraceSigTerm = v // validated in killGraceSigTerm() helper
 		}
 	}
 	if !cfg.AutoUpgrade {
@@ -588,6 +602,8 @@ func Execute() error {
 		ConvergenceBudget:        convergenceBudget(cfg.ConvergenceBudget),
 		AutoMergeStrategy:        autoMergeStrategy(cfg.AutoMergeStrategy),
 		ClaudeWaitDelay:          claudeWaitDelay(cfg.ClaudeWaitDelay),
+		KillGraceSigInt:          killGraceSigInt(cfg.KillGraceSigInt),
+		KillGraceSigTerm:         killGraceSigTerm(cfg.KillGraceSigTerm),
 		DebugOutput:              cfg.DebugOutput,
 		SymlinkEnv:               cfg.SymlinkEnv,
 		WorktreeBoundaryAudit:    cfg.WorktreeBoundaryAudit,
@@ -716,6 +732,45 @@ func reconcileIntervalDuration(seconds int) time.Duration {
 		return 0
 	}
 	return time.Duration(seconds) * time.Second
+}
+
+// killGraceSigInt parses a kill-grace-sigint string (Go duration syntax) into a
+// time.Duration. An empty string returns the default of 10 seconds. "0s" returns
+// zero (meaning: skip the SIGINT step in the kill escalation sequence). Negative
+// values and invalid syntax log a warning and return the default.
+func killGraceSigInt(s string) time.Duration {
+	if s == "" {
+		return 10 * time.Second
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[warn] FABRIK_KILL_GRACE_SIGINT=%q is invalid (Go duration syntax required, e.g. 10s, 0s); using default 10s\n", s)
+		return 10 * time.Second
+	}
+	if d < 0 {
+		fmt.Fprintf(os.Stderr, "[warn] FABRIK_KILL_GRACE_SIGINT=%q is negative; using default 10s\n", s)
+		return 10 * time.Second
+	}
+	return d
+}
+
+// killGraceSigTerm parses a kill-grace-sigterm string (Go duration syntax) into a
+// time.Duration. An empty string returns the default of 10 seconds. Negative values
+// and invalid syntax log a warning and return the default.
+func killGraceSigTerm(s string) time.Duration {
+	if s == "" {
+		return 10 * time.Second
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[warn] FABRIK_KILL_GRACE_SIGTERM=%q is invalid (Go duration syntax required, e.g. 10s); using default 10s\n", s)
+		return 10 * time.Second
+	}
+	if d < 0 {
+		fmt.Fprintf(os.Stderr, "[warn] FABRIK_KILL_GRACE_SIGTERM=%q is negative; using default 10s\n", s)
+		return 10 * time.Second
+	}
+	return d
 }
 
 // convergenceBudget parses a convergence budget string (Go duration syntax) into
