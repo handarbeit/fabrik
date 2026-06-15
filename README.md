@@ -54,6 +54,28 @@ At startup and after 2 idle polls, Fabrik upgrades itself automatically and re-e
 
 When Fabrik is upgraded, it also compares your `.fabrik/stages/*.yaml` files against the embedded defaults and prints a startup warning for any stage file that is missing fields added in the newer binary. Run `fabrik refresh-stages --apply` to add the missing keys, then review with `git diff` and commit. See [Stage YAML Drift Warning](docs/USER_GUIDE.md#stage-yaml-drift-warning) in the User Guide for details.
 
+## Fabrik PM Plugin (Claude Code Companion)
+
+Don't want to install the binary yet? You can still get value from Fabrik by installing the **Fabrik PM plugin** in your interactive Claude Code session. It gives Claude ambient awareness of your Fabrik-managed project so you can ask things like *"what's on the board?"*, *"why is #42 stuck?"*, or *"what's in progress?"* without leaving your editor.
+
+Run these in any Claude Code session:
+
+```
+/plugin marketplace add handarbeit/fabrik
+/plugin install fabrik@fabrik
+/reload-plugins
+```
+
+After install you get:
+
+- **`fabrik:fabrik` skill** — auto-activates when `.fabrik/` is detected or Fabrik is mentioned. Provides ambient PM awareness of the board, stages, and stuck items.
+- **`fabrik:fabrik-setup` skill** — one-time onboarding walkthrough for setting up Fabrik from scratch.
+- **`/fabrik:status` command** — board snapshot: what's in each pipeline stage, which workers are running, which worktrees have uncommitted changes.
+
+The PM plugin is independent of the engine — install it on its own to chat about a Fabrik-managed repo, or pair it with the binary for the full experience. See [Install the Fabrik PM Plugin](docs/USER_GUIDE.md#install-the-fabrik-pm-plugin) in the User Guide for details and upgrade instructions.
+
+> **Distinct from `fabrik-workflows`**: the engine's stage skills are embedded in the binary and deployed automatically to `.fabrik/plugin/` by `fabrik init`. You do not — and should not — install `fabrik-workflows` manually.
+
 ## How It Works
 
 ```

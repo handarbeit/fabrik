@@ -42,6 +42,12 @@ description: >-
       </a>
     </div>
 
+    <p style="margin-top: 24px; font-size: 0.95rem; color: var(--color-text-muted, #8b949e); max-width: 640px; margin-left: auto; margin-right: auto;">
+      Or — just want Claude to know about your Fabrik board? <strong>No binary install needed.</strong>
+      Install the <a href="{{ '/USER_GUIDE' | relative_url }}#install-the-fabrik-pm-plugin">companion Claude Code plugin</a>
+      in three commands and start asking "what's on the board?", "why is #42 stuck?" right in your interactive session.
+    </p>
+
     <div class="hero-diagram">
       <div class="diagram-line">
         <span class="dl-icon">📋</span>
