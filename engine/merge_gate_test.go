@@ -521,3 +521,52 @@ func TestPauseForConvergenceFailed_PostsComment_AppliesLabels(t *testing.T) {
 		t.Error("expected fabrik:auto-merge-enabled to be removed on convergence failure")
 	}
 }
+
+// TestCheckAutoMergeConvergence_UnregisteredRepo_NoPanic is a regression test for
+// the case where Phase 1 of the catch-up loop hits a fabrik:auto-merge-enabled
+// item before processItem has had a chance to register the WorktreeManager for
+// item.Repo. Before the ensureRepoReady guard at the top of
+// checkAutoMergeConvergence, pauseForConvergenceFailed → worktreesFor would
+// panic. With the guard, the issue is paused via the standard clone-failure
+// path instead.
+func TestCheckAutoMergeConvergence_UnregisteredRepo_NoPanic(t *testing.T) {
+	skipIfNoGit(t)
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, State: "open", AutoMergeEnabled: true, MergeableState: "blocked"}, nil
+		},
+		fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+			return time.Now().Add(-2 * time.Hour), nil // budget exhausted
+		},
+	}
+	eng := testEngineForMerge(client)
+	eng.cfg.ConvergenceBudget = 30 * time.Minute
+	eng.fabrikDir = t.TempDir() // forces ensureBareClone to fail (no network for fake repo)
+
+	// item.Repo points at a repo with no registered WorktreeManager. The pre-fix
+	// behavior would be: convergence budget exhausted → pauseForConvergenceFailed
+	// → worktreesFor("nonexistent-xyz/nonexistent-repo") → panic.
+	item := gh.ProjectItem{
+		Number: 42,
+		Repo:   "nonexistent-xyz/nonexistent-repo-convergence",
+		Labels: []string{"fabrik:auto-merge-enabled"},
+	}
+	stage := &stages.Stage{Name: "Validate"}
+
+	// Should not panic. Should pause via the clone-failure path.
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage)
+
+	// Verify the clone-failure path ran: a comment was posted and fabrik:paused applied.
+	if len(client.addCommentCalls) == 0 {
+		t.Error("expected clone-failure comment to be posted on unregistered repo")
+	}
+	var pausedAdded bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedAdded = true
+		}
+	}
+	if !pausedAdded {
+		t.Error("expected fabrik:paused label to be added when clone fails")
+	}
+}
