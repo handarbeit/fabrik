@@ -80,6 +80,31 @@ var claudeWaitDelay time.Duration
 // at 15 minutes; overridable in tests.
 var claudeInactivityTimeout = 15 * time.Minute
 
+// claudeKillGraceSigInt is the grace window between SIGINT and SIGTERM in the
+// kill escalation sequence. Default 10s; set from Config.KillGraceSigInt in New().
+// Zero means skip the SIGINT step (SIGTERM → SIGKILL only).
+var claudeKillGraceSigInt = 10 * time.Second
+
+// claudeKillGraceSigTerm is the grace window between SIGTERM and SIGKILL.
+// Default 10s; set from Config.KillGraceSigTerm in New().
+var claudeKillGraceSigTerm = 10 * time.Second
+
+// killReasonCtxKey is the context key for kill reason annotation.
+type killReasonCtxKey struct{}
+
+// killReasonHolder stores a mutable kill reason string via atomic.Value.
+// Stored in the per-issue context via context.WithValue(ctx, killReasonCtxKey{}, holder)
+// so that kill sites can read the reason set by the cancellation path.
+type killReasonHolder struct {
+	val atomic.Value
+}
+
+// issueCtxEntry holds the cancel function and reason holder for a per-issue context.
+type issueCtxEntry struct {
+	cancel context.CancelFunc
+	holder *killReasonHolder
+}
+
 // activityWriter wraps an io.Writer and updates a shared atomic timestamp on
 // every Write call. Used by the inactivity watchdog to detect stuck sessions.
 type activityWriter struct {
@@ -291,7 +316,8 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 	args := buildClaudeArgs(stage, sessFilePath, resume, opts.ModelOverride, effectiveBudget, hasUnrestrictedLabel(issue), workDir)
 
 	extraEnv := buildClaudeEnv(stage, opts.EffortOverride)
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, sessFilePath, ld, extraEnv, stage.MaxWallTime, effectiveBudget, opts.OnPIDReady)
+	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name, sessFilePath, ld, extraEnv, stage.MaxWallTime, effectiveBudget, opts.OnPIDReady, sigIntGrace, sigTermGrace)
 	usage.MaxTurns = effectiveBudget
 	if err != nil {
 		return output, completed, usage, err
@@ -323,9 +349,35 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 	args := buildClaudeArgs(stage, sessFilePath, true, opts.ModelOverride, limit, hasUnrestrictedLabel(issue), workDir) // resume existing session
 
 	extraEnv := buildClaudeEnv(stage, opts.EffortOverride)
-	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", sessFilePath, ld, extraEnv, stage.MaxWallTime, limit, opts.OnPIDReady)
+	sigIntGrace, sigTermGrace := effectiveKillGrace(opts.SigIntGrace, opts.SigTermGrace)
+	output, completed, usage, err := runClaude(ctx, args, prompt, workDir, issue.Number, stage.Name+"-comment-review", sessFilePath, ld, extraEnv, stage.MaxWallTime, limit, opts.OnPIDReady, sigIntGrace, sigTermGrace)
 	usage.MaxTurns = limit
 	return output, completed, usage, err
+}
+
+// effectiveKillGrace resolves the effective SIGINT and SIGTERM grace windows.
+//
+// Sentinel semantics:
+//   - 0  → inherit engine default (claudeKillGraceSigInt / claudeKillGraceSigTerm)
+//   - -1 → skip this signal step (convert to 0 which killProcGroupGraceful treats as skip)
+//   - >0 → use this explicit value (stage-level override)
+//
+// This lets item.go convey three distinct states via a single Duration field without
+// requiring a separate "was-set" boolean.
+func effectiveKillGrace(sigInt, sigTerm time.Duration) (time.Duration, time.Duration) {
+	switch {
+	case sigInt == 0:
+		sigInt = claudeKillGraceSigInt
+	case sigInt < 0:
+		sigInt = 0 // convert skip sentinel to actual zero (killProcGroupGraceful checks > 0)
+	}
+	switch {
+	case sigTerm == 0:
+		sigTerm = claudeKillGraceSigTerm
+	case sigTerm < 0:
+		sigTerm = 0
+	}
+	return sigInt, sigTerm
 }
 
 // commentMaxTurns returns the effective max-turns limit for comment processing.
@@ -467,7 +519,7 @@ type claudeResponse struct {
 	} `json:"usage"`
 }
 
-func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, sessFilePath string, logDir string, extraEnv []string, maxWallTime time.Duration, maxTurns int, onPIDReady func(int)) (string, bool, TokenUsage, error) {
+func runClaude(ctx context.Context, args []string, prompt string, workDir string, issueNumber int, label string, sessFilePath string, logDir string, extraEnv []string, maxWallTime time.Duration, maxTurns int, onPIDReady func(int), sigIntGrace, sigTermGrace time.Duration) (string, bool, TokenUsage, error) {
 	claudeLog(issueNumber, "claude", "invoking (%s) in %s\n", label, workDir)
 
 	// Set up stderr: in TUI mode discard; in plain mode forward to os.Stderr.
@@ -536,18 +588,29 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	watchdogCtx, watchdogCancel := context.WithCancel(context.Background())
 	defer watchdogCancel() // ensures goroutine is cleaned up even on panic
 
-	// Override cmd.Cancel to use a graceful SIGTERM → 10s → SIGKILL sequence
+	// Override cmd.Cancel to use a graceful SIGINT → SIGTERM → SIGKILL sequence
 	// (targeting the process group) when stageCtx is cancelled. cmd.Cancel is only
 	// invoked by Go's exec cancel goroutine, started inside cmd.Start() after
 	// cmd.Process is set — so cmd.Process.Pid is safe to read here.
 	cmd.Cancel = func() error {
 		if cmd.Process != nil {
-			if maxWallTime > 0 {
+			// Determine kill reason: wall-time deadline > context-annotated reason > fallback.
+			var reason string
+			if maxWallTime > 0 && stageCtx.Err() == context.DeadlineExceeded {
+				reason = "max_wall_time"
 				claudeLog(issueNumber, "warn", "stage %q exceeded max_wall_time (%s) — killing Claude process\n", label, maxWallTime)
 			} else {
-				claudeLog(issueNumber, "warn", "stage %q context cancelled — killing Claude process gracefully\n", label)
+				if h, ok := ctx.Value(killReasonCtxKey{}).(*killReasonHolder); ok && h != nil {
+					if v, ok := h.val.Load().(string); ok && v != "" {
+						reason = v
+					}
+				}
+				if reason == "" {
+					reason = "context_cancel"
+				}
+				claudeLog(issueNumber, "warn", "stage %q context cancelled (reason=%s) — killing Claude process\n", label, reason)
 			}
-			killProcGroupGraceful(cmd.Process.Pid, issueNumber, label)
+			killProcGroupGraceful(cmd.Process.Pid, issueNumber, label, reason, sigIntGrace, sigTermGrace)
 		}
 		return nil
 	}
@@ -580,7 +643,7 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 				if since >= claudeInactivityTimeout {
 					claudeLog(issueNumber, "warn", "stage %q idle for %s with no output — killing Claude process\n", label, claudeInactivityTimeout)
 					inactivityFired.Store(true)
-					killProcGroupGraceful(pid, issueNumber, label)
+					killProcGroupGraceful(pid, issueNumber, label, "inactivity_timeout", sigIntGrace, sigTermGrace)
 					return
 				}
 				timer.Reset(claudeInactivityTimeout - since)
@@ -592,7 +655,7 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 
 	runErr := cmd.Wait()
 	watchdogCancel() // stop the watchdog goroutine promptly
-	killProcGroup(cmd)
+	killProcGroup(cmd, issueNumber, label)
 	rawOutput := stdout.Bytes()
 
 	// wasTimedOut is true when this process was terminated by our own timeout
