@@ -20,13 +20,15 @@ func setCmdProcAttr(cmd *exec.Cmd) {
 // grandchild processes that outlived the Claude process. ESRCH (no such process)
 // is silently ignored — the group may already be gone. Unexpected errors are
 // logged to stderr so cleanup failures are diagnosable.
-func killProcGroup(cmd *exec.Cmd) {
+func killProcGroup(cmd *exec.Cmd, issueNumber int, label string) {
 	if cmd.Process == nil {
 		return
 	}
+	pid := cmd.Process.Pid
+	claudeLog(issueNumber, "kill", "sending SIGKILL to PGID %d (grandchild cleanup)\n", pid)
 	// Negative PID targets the process group (PGID == Claude's PID when Setpgid is set).
-	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
-		fmt.Fprintf(os.Stderr, "[engine] killProcGroup: unexpected error killing process group %d: %v\n", cmd.Process.Pid, err)
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+		fmt.Fprintf(os.Stderr, "[#%d engine] killProcGroup %q: unexpected error killing process group %d: %v\n", issueNumber, label, pid, err)
 	}
 }
 
@@ -39,25 +41,43 @@ func isProcessAlive(pid int) bool {
 	return err == nil || err == syscall.EPERM
 }
 
-// killProcGroupGraceful sends SIGTERM to the process group, waits 10 seconds for
-// a graceful shutdown, then sends SIGKILL. This reaps hung background children
-// (dangling pytest, tail -f, polling loops) in addition to the Claude CLI itself.
-// Returns immediately if the process group is already gone (ESRCH) — avoids the
-// PID-reuse hazard where sleeping 10s then SIGKILLing could hit an unrelated group
-// that recycled the same PGID.
-func killProcGroupGraceful(pid, issueNumber int, label string) {
-	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
-		if err == syscall.ESRCH {
-			return // group already gone; nothing to clean up
+// killProcGroupGraceful sends signals in escalating order to the process group:
+// SIGINT → (sigintGrace) → SIGTERM → (sigtermGrace) → SIGKILL.
+// A zero sigintGrace skips the SIGINT step entirely (e.g. when stage yaml has sigint: 0s).
+// A zero sigtermGrace skips the SIGTERM step (falls straight to SIGKILL).
+// Liveness is re-probed before each subsequent signal; ESRCH stops escalation.
+// This gives well-behaved child processes (e.g. test runners posting Commit Statuses)
+// a chance to flush and exit cleanly before the heavier signals land.
+func killProcGroupGraceful(pid, issueNumber int, label, reason string, sigintGrace, sigtermGrace time.Duration) {
+	if sigintGrace > 0 {
+		claudeLog(issueNumber, "kill", "sending SIGINT to PGID %d (reason=%s)\n", pid, reason)
+		if err := syscall.Kill(-pid, syscall.SIGINT); err != nil {
+			if err == syscall.ESRCH {
+				return // group already gone
+			}
+			fmt.Fprintf(os.Stderr, "[#%d engine] killProcGroupGraceful %q: SIGINT error on pgid %d: %v\n", issueNumber, label, pid, err)
 		}
-		fmt.Fprintf(os.Stderr, "[#%d engine] killProcGroupGraceful %q: SIGTERM error on pgid %d: %v\n", issueNumber, label, pid, err)
+		time.Sleep(sigintGrace)
+		if err := syscall.Kill(-pid, 0); err == syscall.ESRCH {
+			return // group exited during SIGINT grace window
+		}
 	}
-	time.Sleep(10 * time.Second)
-	// Re-probe before SIGKILL: if the group exited during the grace period, return
-	// rather than risk hitting a recycled PGID.
-	if err := syscall.Kill(-pid, 0); err == syscall.ESRCH {
-		return
+
+	if sigtermGrace > 0 {
+		claudeLog(issueNumber, "kill", "sending SIGTERM to PGID %d (reason=%s)\n", pid, reason)
+		if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
+			if err == syscall.ESRCH {
+				return
+			}
+			fmt.Fprintf(os.Stderr, "[#%d engine] killProcGroupGraceful %q: SIGTERM error on pgid %d: %v\n", issueNumber, label, pid, err)
+		}
+		time.Sleep(sigtermGrace)
+		if err := syscall.Kill(-pid, 0); err == syscall.ESRCH {
+			return // group exited during SIGTERM grace window
+		}
 	}
+
+	claudeLog(issueNumber, "kill", "sending SIGKILL to PGID %d (reason=%s)\n", pid, reason)
 	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
 		fmt.Fprintf(os.Stderr, "[#%d engine] killProcGroupGraceful %q: SIGKILL error on pgid %d: %v\n", issueNumber, label, pid, err)
 	}

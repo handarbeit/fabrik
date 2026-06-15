@@ -767,10 +767,26 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		e.logf(item.Number, "effort", "using effort override %q\n", effortOverride)
 	}
 	resume := !lastAttempt.IsZero() // resume session if we've processed this before
+	// Resolve effective kill-grace windows for this stage. Stage-level values override
+	// engine defaults; -1 is the sentinel for "skip this signal step" (sigint: 0s in YAML).
+	sigIntGrace := stage.KillGrace.SigInt
+	if stage.KillGrace.SigIntRaw == "" {
+		sigIntGrace = 0 // let effectiveKillGrace apply engine default
+	} else if sigIntGrace == 0 {
+		sigIntGrace = -1 // "0s" explicit → skip SIGINT (sentinel)
+	}
+	sigTermGrace := stage.KillGrace.SigTerm
+	if stage.KillGrace.SigTermRaw == "" {
+		sigTermGrace = 0 // let effectiveKillGrace apply engine default
+	} else if sigTermGrace == 0 {
+		sigTermGrace = -1 // "0s" explicit → skip SIGTERM (sentinel)
+	}
 	opts := InvokeOptions{
 		ModelOverride:  modelOverride,
 		EffortOverride: effortOverride,
 		BaseBranch:     baseBranch,
+		SigIntGrace:    sigIntGrace,
+		SigTermGrace:   sigTermGrace,
 		OnPIDReady:     func(pid int) { e.store.Apply(itemstate.WorkerPIDSet{Repo: repoStr, Number: item.Number, PID: pid}) },
 	}
 

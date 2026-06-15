@@ -124,9 +124,34 @@ type Stage struct {
 	// Zero means no wall-clock timeout (the default). Set from MaxWallTimeRaw by loadOne.
 	MaxWallTime time.Duration `yaml:"-"`
 
+	// KillGrace configures the signal escalation grace windows for this stage.
+	// Unset fields inherit the engine-level default (10s each).
+	KillGrace KillGrace `yaml:"kill_grace,omitempty"`
+
 	// FilePath is the path to the YAML file this stage was loaded from, as provided to loadOne.
 	// Not parsed from YAML — set by loadOne. Used by drift detection.
 	FilePath string `yaml:"-"`
+}
+
+// KillGrace holds per-stage signal escalation grace windows.
+// The engine sends SIGINT → (SigInt grace) → SIGTERM → (SigTerm grace) → SIGKILL.
+// A zero SigInt (set via sigint: 0s) skips the SIGINT step entirely.
+// Empty raw strings mean "inherit the engine default".
+type KillGrace struct {
+	// SigIntRaw is the YAML string for the SIGINT → SIGTERM grace window (e.g. "10s").
+	// Empty means inherit the engine default. "0s" means skip the SIGINT step.
+	SigIntRaw string `yaml:"sigint,omitempty"`
+
+	// SigTermRaw is the YAML string for the SIGTERM → SIGKILL grace window (e.g. "10s").
+	// Empty means inherit the engine default.
+	SigTermRaw string `yaml:"sigterm,omitempty"`
+
+	// SigInt is the parsed SIGINT grace window. Zero with SigIntRaw == "" means inherit engine default.
+	// Zero with SigIntRaw == "0s" means skip the SIGINT step.
+	SigInt time.Duration `yaml:"-"`
+
+	// SigTerm is the parsed SIGTERM grace window. Zero with SigTermRaw == "" means inherit engine default.
+	SigTerm time.Duration `yaml:"-"`
 }
 
 // CompletionCriteria defines how to determine if a stage is complete.
@@ -212,6 +237,27 @@ func loadOne(path string) (*Stage, error) {
 			return nil, fmt.Errorf("stage %q: max_wall_time must not be negative, got %q", s.Name, s.MaxWallTimeRaw)
 		}
 		s.MaxWallTime = d
+	}
+
+	if s.KillGrace.SigIntRaw != "" {
+		d, err := time.ParseDuration(s.KillGrace.SigIntRaw)
+		if err != nil {
+			return nil, fmt.Errorf("stage %q: invalid kill_grace.sigint %q: %w", s.Name, s.KillGrace.SigIntRaw, err)
+		}
+		if d < 0 {
+			return nil, fmt.Errorf("stage %q: kill_grace.sigint must not be negative, got %q", s.Name, s.KillGrace.SigIntRaw)
+		}
+		s.KillGrace.SigInt = d
+	}
+	if s.KillGrace.SigTermRaw != "" {
+		d, err := time.ParseDuration(s.KillGrace.SigTermRaw)
+		if err != nil {
+			return nil, fmt.Errorf("stage %q: invalid kill_grace.sigterm %q: %w", s.Name, s.KillGrace.SigTermRaw, err)
+		}
+		if d < 0 {
+			return nil, fmt.Errorf("stage %q: kill_grace.sigterm must not be negative, got %q", s.Name, s.KillGrace.SigTermRaw)
+		}
+		s.KillGrace.SigTerm = d
 	}
 
 	s.FilePath = path
