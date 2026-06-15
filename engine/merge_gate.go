@@ -258,6 +258,20 @@ func (e *Engine) dispatchRebaseReinvoke(ctx context.Context, board *gh.ProjectBo
 // Called from Phase 1 of the catch-up loop; replaces checkMergeabilityGate and
 // checkCIGate for these items. Returns after completing any dispatch or pause.
 func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
+	// Phase 1 of the catch-up loop calls this before processItem has had a chance
+	// to register the WorktreeManager for item.Repo. Without this guard,
+	// pauseForConvergenceFailed → worktreesFor would panic on the first poll
+	// cycle after restart whenever fabrik:auto-merge-enabled is present and the
+	// convergence budget has already elapsed. Mirrors the guard used by the
+	// other reinvoke dispatchers (ci-fix, rebase, review).
+	if err := e.ensureRepoReady(ctx, item); err != nil {
+		if errors.Is(err, ErrSkipItem) {
+			return
+		}
+		e.logf(item.Number, "warn", "auto-merge convergence: ensureRepoReady failed: %v\n", err)
+		return
+	}
+
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 
