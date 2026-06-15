@@ -3,8 +3,10 @@ package engine
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,7 +20,19 @@ import (
 // TestMain zeros lockVerifyDelay for the entire package so processItem-calling
 // tests don't incur the 2 s production sleep. Each test that cares can set it
 // explicitly; existing callers that do orig/restore remain correct (orig = 0).
+//
+// It also handles subprocess mode: when invoked by TestKillProcGroupGraceful_SIGINTGraceWindow
+// as the fake claude binary, it drains stdin, waits for SIGINT, writes the sentinel file, and
+// exits — verifying that a process can complete cleanup within the SIGINT grace window.
 func TestMain(m *testing.M) {
+	if sentinel := os.Getenv("FABRIK_TEST_SIGINT_SENTINEL"); sentinel != "" {
+		go io.Copy(io.Discard, os.Stdin)
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, os.Interrupt)
+		<-ch
+		os.WriteFile(sentinel, []byte{}, 0644) //nolint:errcheck
+		os.Exit(0)
+	}
 	lockVerifyDelay = 0
 	os.Exit(m.Run())
 }
