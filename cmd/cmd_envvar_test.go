@@ -123,7 +123,7 @@ func TestExecute_EnvPluginDir(t *testing.T) {
 	dir, stagesDir := setupValidStages(t)
 	chdirTest(t, dir)
 	resetFlags()
-	t.Setenv("FABRIK_PLUGIN_DIR", "/tmp/plugin")
+	t.Setenv("FABRIK_PLUGIN_DIR", t.TempDir())
 	t.Setenv("GITHUB_TOKEN", "tok")
 	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
 	executeAndStop(t)
