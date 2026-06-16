@@ -93,5 +93,7 @@ If stale or invalid, it's removed and recreated.
   This is a one-time cost.
 - **Disk space**: Each worktree is a full checkout. For large repos this
   adds up, though the object store is shared with the bare clone.
-- **Cleanup**: Worktrees accumulate. Currently no automatic cleanup when
-  issues reach Done (planned feature).
+- **Cleanup**: Worktrees accumulate beyond the Done stage for issues that
+  are removed from the board, archived, or otherwise exit the pipeline without
+  the Done stage running. The periodic worktree janitor (ADR 055) addresses
+  this by scanning for and reaping orphaned worktrees on a configurable cadence.

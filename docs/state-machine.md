@@ -1866,6 +1866,90 @@ stateDiagram-v2
 
 ---
 
+## 11. Worktree Janitor
+
+### 11.1 Purpose
+
+The worktree janitor reaps orphaned git worktrees left behind when issues exit the
+managed lifecycle without triggering the normal `cleanup_worktree: true` Done-stage path.
+Three scenarios produce stranded worktrees:
+
+1. **Off-board items** — issues removed from the project board (archived, deleted, or
+   removed by `archiveDoneCompleteItems`) are no longer iterated by the poll loop; their
+   worktrees persist indefinitely.
+2. **Narrow restart window** — Fabrik dies after `attemptMergeOnValidate` advances the
+   board to Done but before the next poll dispatches the Done stage.
+3. **Stage YAML drift** — an operator who renames or removes the Done stage from their
+   config orphans worktrees that will never again be visited by the dispatch loop.
+
+### 11.2 Schedule
+
+- **Startup scan**: runs once after the first successful poll cycle (so the Store is
+  hydrated) immediately after `runStartupTerminalScan`. Gated on `JanitorIntervalHours != 0`.
+- **Hourly recurring scan**: a ticker goroutine started from `Engine.Run()` fires at
+  `JanitorIntervalHours`-hour intervals (default 1 hour). First tick is one interval after
+  startup; the startup scan covers the "now" tick.
+- **EC-3 (cycle overrun)**: the goroutine blocks inside `runWorktreeJanitor` during a
+  long cycle; the ticker fires are dropped naturally. No special handling required.
+
+### 11.3 Reaping Gate (FR-4)
+
+A worktree is reaped only when **all four** conditions hold:
+
+| Condition | Rationale |
+|-----------|-----------|
+| **(a) Issue is closed** | Open issues are never safe to reap — the issue may still be in progress, even if no worker is currently dispatched. |
+| **(b) Off-board OR cleanup-complete** | If the issue is still on the board at an active (non-cleanup) stage, the dispatch loop may still visit it. A worktree at a `cleanup_worktree: true` stage with `stage:<Name>:complete` is safe to reap: `CleanupWorktree` runs *before* the label is applied, so the directory can only persist if `CleanupWorktree` errored. |
+| **(c) Clean worktree** | `git status --porcelain` returns no non-engine-managed paths. Engine-managed files (`.fabrik-context/`, `.fabrik/issue.md`) are excluded by `isEngineManagedPath`. A dirty worktree may contain uncommitted work from an interrupted Claude session. |
+| **(d) No in-flight worker** | `snap.Worker() == nil` from the Store. Concurrent reads are safe — Store uses `RWMutex`. |
+
+All four conditions are evaluated in order (cheapest first). A worktree that fails any
+condition is left in place and counted toward the `skipped` total.
+
+**Closed-status resolution (FR-5):**
+1. Primary: `Store.Get(repo, number)` → `snap.IsClosed()` (free; no API call).
+2. Fallback (item not in Store): `GitHubClient.FetchIssue(owner, repo, number)` — one REST call per stranded worktree per cycle; result cached in-memory for the cycle duration.
+3. Error: skip with warning; treat as not-closed to avoid false positives.
+
+**Cleanup path (FR-6):**  
+`WorktreeManager.CleanupWorktree(number, false)` — the same path used by the Done stage.
+If the bare repo is absent (manually deleted), falls back to `os.RemoveAll` with a warning.
+
+### 11.4 Owner/Repo Resolution
+
+The on-disk directory is named `owner-repo` (dash-separated), which is ambiguous for
+hyphenated owner or repo names.
+
+- **Registered repos**: looked up from the reverse map built from `e.worktreeManagers`
+  (copied under `e.mu` at the start of each cycle; lock held only for the copy).
+- **Unregistered repos** (EC-2 — repo no longer on the board): `git remote get-url origin`
+  is run from the first issue subdirectory found. If the git command fails (corrupt or
+  missing `.git`), the entire `owner-repo` directory is skipped with a warning.
+
+### 11.5 Configuration
+
+```yaml
+# .fabrik/config.yaml
+janitor_interval_hours: 1   # default; set to 0 to disable the janitor entirely
+```
+
+Also settable via flag (`--janitor-interval`) or environment variable
+(`FABRIK_JANITOR_INTERVAL`). **EC-6**: changing this value at runtime has no effect; Fabrik
+must be restarted for a new cadence to take effect.
+
+### 11.6 Summary Log (FR-7)
+
+At the end of each cycle the janitor emits an INFO-level log line:
+
+```
+[janitor] cycle complete: scanned N worktrees, reaped K, skipped M (reasons: ...)
+```
+
+The `reasons` field tallies distinct skip reasons (e.g. `issue open ×3`, `dirty worktree`,
+`in-flight worker`). Each reaped worktree is also logged individually at reap time.
+
+---
+
 ## Appendix A: Two Paths to Stage Advancement
 
 Stage advancement can occur through two code paths:

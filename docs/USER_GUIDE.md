@@ -367,6 +367,38 @@ Custom stages (names not present in any embedded default) are silently skipped �
 >
 > See [§11 Troubleshooting → Multiple Fabrik Instances](#11-troubleshooting) if you encounter a stale lock or need to run multiple instances against different projects.
 
+### Worktree Janitor
+
+Fabrik's normal worktree cleanup runs only when the Done stage (`cleanup_worktree: true`) is dispatched for an issue. Several situations strand worktrees outside that path:
+
+- Issues removed from the project board (manually archived, deleted, or cleared by the auto-archive pass) are no longer iterated by the poll loop.
+- A narrow restart window between Validate completing and Done being dispatched.
+- Stage YAML drift — if the Done stage is renamed or removed, its worktrees are never cleaned up.
+
+The **worktree janitor** scans `.fabrik/worktrees/<owner>-<repo>/issue-N/` directories and reaps orphaned worktrees automatically. It runs:
+
+1. **Once at startup**, after the first successful poll (so board state is hydrated).
+2. **Hourly** thereafter (configurable; 0 disables).
+
+A worktree is only reaped when **all four** conditions hold: the issue is closed; the issue is not on the board at an active stage (or it's at a cleanup stage that already completed); the worktree is clean (no uncommitted changes); and no worker is currently dispatched for the issue. This conservative gate prevents false positives.
+
+At the end of each scan Fabrik logs:
+
+```
+[janitor] cycle complete: scanned N worktrees, reaped K, skipped M (reasons: ...)
+```
+
+**Configuration:**
+
+```yaml
+# .fabrik/config.yaml
+janitor_interval_hours: 1   # default — set to 0 to disable the janitor entirely
+```
+
+Also controllable via `--janitor-interval` flag or `FABRIK_JANITOR_INTERVAL` environment variable.
+
+> **Note (EC-6):** Changing `janitor_interval_hours` at runtime has no effect. Restart Fabrik for a new cadence to take effect.
+
 ---
 
 ## 2. Configuration Reference
@@ -447,6 +479,11 @@ user: your-github-username
 # paused for inspection. Off by default; the snapshot filters to refs/heads/* and
 # refs/tags/* only to avoid false positives from routine fetches.
 # worktree_boundary_audit: false
+
+# Worktree janitor scan interval in hours (default 1). The janitor runs once after
+# startup and then on this cadence, reaping clean worktrees for closed, off-board
+# issues. Set to 0 to disable the janitor entirely.
+# janitor_interval_hours: 1
 ```
 
 **Multi-repo mode:** When `repo:` is commented out or omitted, Fabrik processes issues from *all* repositories on the project board. Use this when your project board spans multiple repos (cross-org collaborations, monorepos with independent sub-repos, or a single board managing several distinct services). To restrict Fabrik to one repository, uncomment and set `repo:`.
