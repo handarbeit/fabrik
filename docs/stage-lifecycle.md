@@ -388,7 +388,8 @@ When `FABRIK_STAGE_COMPLETE` is detected (regardless of Claude's exit code — a
 3. Draft PR created (if `create_draft_pr: true`)
 4. PR marked ready (if `mark_pr_ready_on_complete: true`)
 5. `stage:<name>:complete` label added
-6. Auto-advance to next stage (if `auto_advance: true` or global `yolo`)
+6. **Validate only:** `ValidateCompletedAtSHA` mutation applied with the worktree's current `HEAD` SHA (`git rev-parse HEAD`). This records the exact post-commit SHA so the SHA-invalidation scan (`docs/state-machine.md` §2.16) can detect future SHA changes (force-push, external commits) and automatically re-enter Validate. On error (e.g. bare git call fails), the SHA is left empty — the SHA-invalidation scan's FR-5 guard treats empty completion SHA as "do nothing," preserving safe degraded behavior.
+7. Auto-advance to next stage (if `auto_advance: true` or global `yolo`)
 
 **Validate + yolo**: At Validate completion, if the issue carries `fabrik:yolo` (and not `fabrik:cruise`), Fabrik calls `enablePullRequestAutoMerge` on the linked PR and applies `fabrik:auto-merge-enabled` rather than calling `MergePR` directly. GitHub then merges the PR atomically once branch-protection requirements are satisfied. The post-Validate convergence monitor (`checkAutoMergeConvergence`) tracks the PR in subsequent poll cycles until it reaches a terminal state or the convergence budget expires. See `docs/state-machine.md` §5.4–5.5 for full details.
 
