@@ -774,6 +774,7 @@ var transientLifecycleLabels = []string{
 	"fabrik:awaiting-input",
 	"fabrik:rebase-needed",
 	"fabrik:bot-reprompted",
+	"fabrik:revalidate",
 }
 
 // cleanupClosedIssueTransientLabels removes transient lifecycle labels from any
@@ -1122,7 +1123,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		if !cycleSet[iKey] {
 			stage := stages.FindStage(e.cfg.Stages, item.Status)
 			isCleanup := stage != nil && stage.CleanupWorktree
-			hasAwaitingLabel := hasLabel(item, "fabrik:awaiting-ci") || hasLabel(item, "fabrik:rebase-needed") || hasLabel(item, "fabrik:awaiting-review") || hasLabel(item, "fabrik:auto-merge-enabled")
+			hasAwaitingLabel := hasLabel(item, "fabrik:awaiting-ci") || hasLabel(item, "fabrik:rebase-needed") || hasLabel(item, "fabrik:awaiting-review") || hasLabel(item, "fabrik:auto-merge-enabled") || hasLabel(item, "fabrik:revalidate")
 			var hasExpiredCooldown, notInStore bool
 			if !isCleanup && !hasAwaitingLabel {
 				repo := itemOwnerRepoString(item, e.defaultRepo())
