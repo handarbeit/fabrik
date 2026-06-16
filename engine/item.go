@@ -1353,6 +1353,56 @@ func (e *Engine) handleRevalidateLabel(item gh.ProjectItem, owner, repo string) 
 	e.logf(item.Number, "revalidate", "store reset complete; Validate will dispatch on next poll\n")
 }
 
+// handleValidateSHAInvalidation clears stale Validate completion labels when the
+// linked PR's HEAD SHA changed after stage:Validate:complete was recorded. Called
+// from the SHA-invalidation scan in poll.go after the in-flight worker guard passes.
+// Mirrors handleRevalidateLabel's deferral-on-error pattern: on partial failure
+// the scan retries on the next poll without leaving a partially-cleared state.
+func (e *Engine) handleValidateSHAInvalidation(item gh.ProjectItem, owner, repo string) {
+	e.logf(item.Number, "validate-sha", "SHA changed after Validate completion — clearing stale completion labels\n")
+
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	labelsToRemove := []string{
+		"stage:Validate:complete",
+		"fabrik:auto-merge-enabled",
+		"fabrik:awaiting-ci",
+		"fabrik:awaiting-review",
+	}
+	hasError := false
+	for _, lbl := range labelsToRemove {
+		if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, lbl); err != nil {
+			if errors.Is(err, gh.ErrNotFound) {
+				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(repoStr, item.Number), lbl)
+				}
+				continue
+			}
+			e.logf(item.Number, "warn", "validate-sha: could not remove %s: %v\n", lbl, err)
+			hasError = true
+			continue
+		}
+		e.logf(item.Number, "validate-sha", "removed label %s\n", lbl)
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(repoStr, item.Number), lbl)
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(repoStr, item.Number)+"+"+lbl)
+		}
+	}
+
+	if hasError {
+		e.logf(item.Number, "warn", "validate-sha: some labels failed to remove; deferring store reset to next poll\n")
+		return
+	}
+
+	e.store.Apply(itemstate.ValidateCompletedAtSHACleared{Repo: repoStr, Number: item.Number})
+	e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: "Validate"})
+	e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: "Validate"})
+	e.store.Apply(itemstate.StageLastAttemptCleared{Repo: repoStr, Number: item.Number, StageName: "Validate"})
+	e.store.Apply(itemstate.EngineCyclesCleared{Repo: repoStr, Number: item.Number, StageName: "Validate"})
+	e.logf(item.Number, "validate-sha", "store reset complete; Validate will dispatch on next poll\n")
+}
+
 // buildAwaitingInputComment builds the notification comment body for a
 // blocked-on-input event. The body starts with the canonical "🏭 **Fabrik"
 // prefix so findNewComments skips it and Fabrik does not treat it as user input.

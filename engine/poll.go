@@ -1524,6 +1524,36 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		e.handleRevalidateLabel(item, owner, repo)
 	}
 
+	// SHA-invalidation scan: detect force-pushes or external commits that change
+	// the linked PR's HEAD SHA after stage:Validate:complete was recorded.
+	// Runs on ALL deepFetchCandidates where stage:Validate:complete is present.
+	for _, item := range deepFetchCandidates {
+		if !hasLabel(item, "stage:Validate:complete") {
+			continue
+		}
+		owner, repo := itemOwnerRepo(item, e.defaultRepo())
+		repoStr := itemOwnerRepoString(item, e.defaultRepo())
+		snap, snapErr := e.store.Get(repoStr, item.Number)
+		if snapErr != nil {
+			continue
+		}
+		completedSHA := snap.ValidateCompletedSHA()
+		if completedSHA == "" {
+			// FR-5: no recorded SHA (pre-feature item or worktree HEAD unavailable) — do nothing.
+			continue
+		}
+		lpr := snap.LinkedPR()
+		if lpr == nil || lpr.HeadSHA == "" || lpr.HeadSHA == completedSHA {
+			continue
+		}
+		// FR-6: in-flight guard — let the active Validate worker finish.
+		if snap.Worker() != nil {
+			e.logf(item.Number, "validate-sha", "Validate worker in-flight — deferring SHA invalidation to next poll\n")
+			continue
+		}
+		e.handleValidateSHAInvalidation(item, owner, repo)
+	}
+
 	var dispatched int
 	// Dispatch only items from deepFetchCandidates — items that passed
 	// itemMayNeedWork and (for non-cleanup stages) had FetchItemDetails called to
