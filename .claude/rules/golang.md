@@ -13,6 +13,8 @@
 ## Testing
 - Use stdlib `testing` only — no testify or external test frameworks.
 - Use `t.TempDir()` for temp files, `httptest.NewServer` for HTTP mocks.
+- Use `t.Setenv()` for environment variables in tests — auto-restores on exit, survives panics.
+- Do not depend on external network for failure injection — use ENAMETOOLONG (`strings.Repeat("a", 10000)` as baseDir) or local path tricks instead.
 - Real `git` binary is acceptable in tests (use `skipIfNoGit` guard).
 - Mock Claude via the `ClaudeInvoker` interface, not a fake binary.
 - Always run `go test -race ./...` to catch data races.
