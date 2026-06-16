@@ -50,9 +50,7 @@ func TestExecute_MissingToken(t *testing.T) {
 	resetFlags()
 	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u"}
 	// Clear GITHUB_TOKEN env var
-	prev := os.Getenv("GITHUB_TOKEN")
-	os.Unsetenv("GITHUB_TOKEN")
-	defer os.Setenv("GITHUB_TOKEN", prev)
+	t.Setenv("GITHUB_TOKEN", "")
 
 	err := Execute()
 	if err == nil {
@@ -75,8 +73,7 @@ func TestExecute_TokenFromEnv(t *testing.T) {
 	stagesDir := t.TempDir()
 	// No stage files — should fail with "no stage configurations"
 	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
-	os.Setenv("GITHUB_TOKEN", "env-token")
-	defer os.Unsetenv("GITHUB_TOKEN")
+	t.Setenv("GITHUB_TOKEN", "env-token")
 
 	err := Execute()
 	if err == nil {

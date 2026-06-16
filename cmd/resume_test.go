@@ -123,9 +123,7 @@ func TestRunResume_ClaudeNotInPath(t *testing.T) {
 	t.Cleanup(func() { os.Chdir(orig) })
 
 	// Hide claude from PATH
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", tmp) // tmp has no claude binary
-	t.Cleanup(func() { os.Setenv("PATH", origPath) })
+	t.Setenv("PATH", tmp) // tmp has no claude binary
 
 	err := runResume([]string{"10", "--stage", "Research", "--stages", stagesDir})
 	if err == nil {
@@ -158,9 +156,7 @@ func TestRunResume_SuccessfulExecConstruction(t *testing.T) {
 	}
 	t.Cleanup(func() { os.Chdir(orig) })
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", tmp)
-	t.Cleanup(func() { os.Setenv("PATH", origPath) })
+	t.Setenv("PATH", tmp)
 
 	captured := withExecCapture(t)
 
@@ -221,9 +217,7 @@ func TestRunResume_SuccessfulExecWithSession(t *testing.T) {
 	}
 	t.Cleanup(func() { os.Chdir(orig) })
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", tmp)
-	t.Cleanup(func() { os.Setenv("PATH", origPath) })
+	t.Setenv("PATH", tmp)
 
 	captured := withExecCapture(t)
 
