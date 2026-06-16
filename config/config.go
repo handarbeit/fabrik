@@ -31,9 +31,10 @@ type ProjectConfig struct {
 	WorktreeBoundaryAudit   bool     `yaml:"worktree_boundary_audit"`
 	Version                 string   `yaml:"version"`
 	Webhooks                bool     `yaml:"webhooks"`
-	WebhookPort   *int     `yaml:"webhook_port"`
-	WebhookEvents []string `yaml:"webhook_events"`
-	StatusPoll    *int     `yaml:"status_poll"`
+	WebhookPort             *int     `yaml:"webhook_port"`
+	WebhookEvents           []string `yaml:"webhook_events"`
+	StatusPoll              *int     `yaml:"status_poll"`
+	JanitorIntervalHours    *int     `yaml:"janitor_interval_hours"`
 }
 
 // LoadProjectConfig reads .fabrik/config.yaml from CWD.
