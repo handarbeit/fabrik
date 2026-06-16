@@ -1481,17 +1481,17 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			if rerr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:revalidate"); rerr != nil {
 				if errors.Is(rerr, gh.ErrNotFound) {
 					if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-						cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:revalidate")
+						cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(repoStr, item.Number), "fabrik:revalidate")
 					}
 				} else {
 					e.logf(item.Number, "warn", "revalidate: could not remove label from non-Validate issue: %v\n", rerr)
 				}
 			} else {
 				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:revalidate")
+					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(repoStr, item.Number), "fabrik:revalidate")
 				}
 				if e.webhookMgr != nil {
-					e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:revalidate")
+					e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(repoStr, item.Number)+"+"+"fabrik:revalidate")
 				}
 			}
 			continue
