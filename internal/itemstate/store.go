@@ -501,6 +501,17 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		}
 		return LinkedPRChanged
 
+	case ValidateCompletedAtSHA:
+		ensureLinkedPR(item, 0)
+		item.LinkedPR.ValidateCompletedSHA = v.SHA
+		return LinkedPRChanged
+
+	case ValidateCompletedAtSHACleared:
+		if item.LinkedPR != nil {
+			item.LinkedPR.ValidateCompletedSHA = ""
+		}
+		return LinkedPRChanged
+
 	case PRChecksObserved:
 		ensureLinkedPR(item, 0)
 		if item.LinkedPR.HasHadChecks {

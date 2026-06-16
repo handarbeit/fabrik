@@ -574,6 +574,28 @@ type CIMergePendingCleared struct {
 func (CIMergePendingCleared) isMutation()       {}
 func (m CIMergePendingCleared) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// ValidateCompletedAtSHA records the HEAD SHA of the linked PR at the moment
+// stage:Validate:complete was applied. The SHA-invalidation scan uses this to
+// detect force-pushes or external commits after Validate finished.
+type ValidateCompletedAtSHA struct {
+	Repo   string
+	Number int
+	SHA    string
+}
+
+func (ValidateCompletedAtSHA) isMutation()       {}
+func (m ValidateCompletedAtSHA) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// ValidateCompletedAtSHACleared zeroes LinkedPRState.ValidateCompletedSHA after
+// the SHA-invalidation scan fires and removes the stale completion labels.
+type ValidateCompletedAtSHACleared struct {
+	Repo   string
+	Number int
+}
+
+func (ValidateCompletedAtSHACleared) isMutation()       {}
+func (m ValidateCompletedAtSHACleared) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // PRChecksObserved records that the linked PR has had at least one CI check run
 // returned by FetchCheckRuns (REST path). Sets LinkedPRState.HasHadChecks = true.
 // Replaces engine.prHasHadChecks[iKey] = true.
