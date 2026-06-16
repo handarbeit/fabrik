@@ -441,14 +441,16 @@ func (e *Engine) Run() error {
 		// Bootstrap the cache before accepting webhook events so no delta is
 		// dropped into an empty cache during the startup window.
 		// Probe-based bootstrap costs ~250 GraphQL nodes (vs ~2350 for a full
-		// shallow fetch) and seeds Terminal=true for closed cleanup-stage items,
-		// preventing the first poll from re-deep-fetching every closed Done item.
+		// shallow fetch). Terminal seeding for closed cleanup-stage items happens
+		// via seedTerminalFromProbeItems after bootstrap, preventing the first
+		// poll from re-deep-fetching every closed Done item.
 		if cacheImpl != nil {
 			probeItems, projectID, probeErr := e.client.ProbeProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
 			if probeErr != nil {
 				e.logf(0, "cache", "startup probe failed — cache will be populated on first poll: %v\n", probeErr)
 			} else if projectID != "" && len(probeItems) > 0 {
-				cacheImpl.BootstrapFromProbe(probeItems, projectID, e.cfg.Stages)
+				cacheImpl.BootstrapFromProbe(probeItems, projectID)
+				e.seedTerminalFromProbeItems(probeItems)
 			} else if projectID != "" {
 				e.logf(0, "cache", "startup probe returned 0 items — deferring to first poll\n")
 			}
@@ -926,7 +928,8 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			if refreshErr != nil {
 				e.logf(0, "cache", "initial board probe failed (using empty cache): %v\n", refreshErr)
 			} else if projectID != "" && len(probeItems) > 0 {
-				cacheImpl.BootstrapFromProbe(probeItems, projectID, e.cfg.Stages)
+				cacheImpl.BootstrapFromProbe(probeItems, projectID)
+				e.seedTerminalFromProbeItems(probeItems)
 			} else if projectID != "" {
 				// Probe succeeded but returned 0 items — possible transient indexer hiccup.
 				// Leave cache virgin and retry on the next poll rather than bootstrapping
@@ -1725,12 +1728,12 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 				LinkedPRNumber: pi.LinkedPRNumber,
 			}
 			e.store.Apply(itemstate.IssueOpened{Item: minimal})
-			// Probe-only terminal short-circuit: closed items in a cleanup stage have
-			// no remaining Fabrik work; skip the deep-fetch and seed the terminal flag.
-			// This mirrors what BootstrapFromProbe does for cold-start items.
-			if isProbeOnlyTerminal(pi.IsClosed, pi.Status, e.cfg.Stages) {
+			// Probe-only terminal short-circuit: closed items in a cleanup stage whose
+			// worktree is absent have no remaining Fabrik work; skip the deep-fetch.
+			// isProbeOnlyTerminal logs the worktree-presence decision internally (FR-6).
+			if e.isProbeOnlyTerminal(minimal) {
 				e.store.Apply(itemstate.TerminalFlagSet{Repo: repo, Number: pi.Number, Terminal: true})
-				e.logf(pi.Number, "cache", "probe: new item is closed terminal — skipping deep-fetch\n")
+				e.logf(pi.Number, "cache", "probe: new item seeded terminal — skipping deep-fetch\n")
 				continue
 			}
 			e.logf(pi.Number, "cache", "probe: new item discovered — deep-fetching\n")
@@ -1889,15 +1892,54 @@ func isTerminalPredicate(labels []string, status string, stagesCfg []*stages.Sta
 	return true
 }
 
-// isProbeOnlyTerminal reports whether an item is terminal based solely on probe
-// data (IsClosed + CleanupWorktree stage), without requiring label data. Use
-// this predicate in the new-item branch of runProbeAndDeepFetch, where labels
-// have not yet been fetched. Unlike isTerminalPredicate, it cannot verify the
-// stage:Name:complete label or the absence of transient lifecycle labels; it is
-// safe only for newly-discovered items that have never been in the store.
-func isProbeOnlyTerminal(isClosed bool, status string, stagesCfg []*stages.Stage) bool {
-	st := stages.FindStage(stagesCfg, status)
-	return isClosed && st != nil && st.CleanupWorktree
+// isProbeOnlyTerminal reports whether an item is terminal based on probe data
+// (IsClosed + CleanupWorktree stage) and confirms the on-disk worktree is absent.
+// Use this predicate in the new-item branch of runProbeAndDeepFetch and in
+// seedTerminalFromProbeItems, where labels have not yet been fetched.
+//
+// The worktree check prevents stranding cleanup work: if the worktree still
+// exists on disk (cleanup_worktree stage not yet run), the item must proceed
+// through processItem so the Done stage cleanup can execute.
+func (e *Engine) isProbeOnlyTerminal(item gh.ProjectItem) bool {
+	if !item.IsClosed {
+		return false
+	}
+	st := stages.FindStage(e.cfg.Stages, item.Status)
+	if st == nil || !st.CleanupWorktree {
+		return false
+	}
+	if e.worktreeExistsForItem(item) {
+		e.logf(item.Number, "cache", "probe: worktree present — not treating as terminal yet\n")
+		return false
+	}
+	e.logf(item.Number, "cache", "probe: no worktree on disk — treating as terminal\n")
+	return true
+}
+
+// seedTerminalFromProbeItems applies TerminalFlagSet for probe items that
+// qualify as terminal: closed, in a cleanup stage, and worktree absent on disk.
+// Must be called after BootstrapFromProbe so items are in the store.
+func (e *Engine) seedTerminalFromProbeItems(items []gh.BoardProbeItem) {
+	var seeded int
+	for _, pi := range items {
+		stub := gh.ProjectItem{
+			Number:   pi.Number,
+			IsClosed: pi.IsClosed,
+			Status:   pi.Status,
+			Repo:     pi.Repo,
+		}
+		if e.isProbeOnlyTerminal(stub) {
+			e.store.Apply(itemstate.TerminalFlagSet{
+				Repo:     pi.Repo,
+				Number:   pi.Number,
+				Terminal: true,
+			})
+			seeded++
+		}
+	}
+	if seeded > 0 {
+		e.logf(0, "cache", "probe bootstrap: seeded %d terminal items (worktree absent, closed cleanup stage)\n", seeded)
+	}
 }
 
 // runStartupTransientLabelScan is a one-shot recovery pass that runs after the
