@@ -8,7 +8,6 @@ import (
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
-	"github.com/handarbeit/fabrik/stages"
 )
 
 // ReadClient is the subset of engine.GitHubClient covering read-only board/item/PR/check-run state.
@@ -246,7 +245,7 @@ func NewCacheImpl(fallback ReadClient, store *itemstate.Store, logFn func(format
 // probe cycle does not see spurious linkage-drift on items that already have a PR.
 //
 // Must be called before any engine mutations flow through the shared store.
-func (c *CacheImpl) BootstrapFromProbe(items []gh.BoardProbeItem, projectID string, stagesCfg []*stages.Stage) {
+func (c *CacheImpl) BootstrapFromProbe(items []gh.BoardProbeItem, projectID string) {
 	// Construct synthetic ProjectItems from probe data.
 	// applyProjectItem (called by Reset) populates LinkedPR.Number from LinkedPRNumber,
 	// which prevents the subsequent probe from seeing spurious "linkage drift".
@@ -276,27 +275,7 @@ func (c *CacheImpl) BootstrapFromProbe(items []gh.BoardProbeItem, projectID stri
 	c.localDeltaAt = make(map[string]time.Time)
 	c.mu.Unlock()
 
-	// Seed terminal flag for closed items in cleanup stages using a simpler
-	// predicate (IsClosed + CleanupWorktree) since labels are absent.
-	// This prevents the probe loop from deep-fetching closed Done items.
-	var terminal int
-	for _, pi := range items {
-		if !pi.IsClosed {
-			continue
-		}
-		st := stages.FindStage(stagesCfg, pi.Status)
-		if st == nil || !st.CleanupWorktree {
-			continue
-		}
-		c.store.Apply(itemstate.TerminalFlagSet{
-			Repo:     pi.Repo,
-			Number:   pi.Number,
-			Terminal: true,
-		})
-		terminal++
-	}
-
-	c.logFn("[cache] probe bootstrap complete: %d items (%d terminal)\n", len(items), terminal)
+	c.logFn("[cache] probe bootstrap complete: %d items\n", len(items))
 }
 
 // Reconcile replaces shallow board state from a fresh board fetch.
