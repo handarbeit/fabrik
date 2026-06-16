@@ -28,9 +28,7 @@ printf '%s\n' '{"result":"stage output\nFABRIK_STAGE_COMPLETE\n","session_id":"s
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	workDir := t.TempDir()
 	stage := &stages.Stage{
@@ -91,9 +89,7 @@ printf '%s\n' '{"result":"real invoker output","session_id":"sess_ri","num_turns
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	invoker := &RealClaudeInvoker{}
 	stage := &stages.Stage{
@@ -126,9 +122,7 @@ printf '%s\n' '{"result":"Claude output for test\nFABRIK_STAGE_COMPLETE\n","sess
 	}
 
 	// Prepend fake binary dir to PATH
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	workDir := t.TempDir()
 	stage := &stages.Stage{
@@ -179,9 +173,7 @@ printf '%%s\n' '{"result":"resume output","session_id":"sess_resume","num_turns"
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	workDir := t.TempDir()
 	stage := &stages.Stage{
@@ -226,9 +218,7 @@ printf '%%s\n' '{"result":"ok","session_id":"sess_mt","num_turns":1,"total_cost_
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	workDir := t.TempDir()
 	stage := &stages.Stage{
@@ -275,9 +265,7 @@ printf '%%s\n' '{"result":"ok","session_id":"sess_mo","num_turns":1,"total_cost_
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	workDir := t.TempDir()
 	stage := &stages.Stage{
@@ -312,9 +300,7 @@ exit 1
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	workDir := t.TempDir()
 	stage := &stages.Stage{
@@ -348,9 +334,7 @@ exit 1
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	workDir := t.TempDir()
 	stage := &stages.Stage{
@@ -384,9 +368,7 @@ exit 1
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	workDir := t.TempDir()
 	stage := &stages.Stage{
@@ -421,9 +403,7 @@ printf '%%s\n' '{"result":"comment output","session_id":"sess_c","num_turns":1,"
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	workDir := t.TempDir()
 	stage := &stages.Stage{
@@ -459,9 +439,7 @@ printf '%s\n' '{"result":"fallback output\nFABRIK_STAGE_COMPLETE\n","session_id"
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	workDir := t.TempDir()
 	stage := &stages.Stage{
@@ -505,9 +483,7 @@ func TestRunClaude_StdoutTeeToLogFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	workDir := t.TempDir()
 	stage := &stages.Stage{
@@ -589,9 +565,7 @@ func TestRunClaude_IssueUpdateInIntermediateTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	workDir := t.TempDir()
 	stage := &stages.Stage{
@@ -911,9 +885,7 @@ printf '%%s\n' '{"result":"env test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	workDir := t.TempDir()
 
@@ -1010,9 +982,7 @@ printf '%%s\n' '{"result":"ok","session_id":"sess_pm","num_turns":1,"total_cost_
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	workDir := t.TempDir()
 	stage := &stages.Stage{
@@ -1055,9 +1025,7 @@ printf '%%s\n' '{"result":"ok","session_id":"sess_dt","num_turns":1,"total_cost_
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	workDir := t.TempDir()
 	stage := &stages.Stage{
@@ -1098,9 +1066,7 @@ printf '%%s\n' '{"result":"ok","session_id":"sess_sr","num_turns":1,"total_cost_
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	workDir := t.TempDir()
 	stage := &stages.Stage{
@@ -1147,9 +1113,7 @@ printf '%%s\n' '{"result":"ok","session_id":"sess_wb","num_turns":1,"total_cost_
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	workDir := t.TempDir()
 	stage := &stages.Stage{
@@ -1198,9 +1162,7 @@ printf '%%s\n' '{"result":"ok","session_id":"sess_ro","num_turns":1,"total_cost_
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	workDir := t.TempDir()
 	stage := &stages.Stage{
@@ -1243,9 +1205,7 @@ printf '%%s\n' '{"result":"ok","session_id":"sess_unr","num_turns":1,"total_cost
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	workDir := t.TempDir()
 	stage := &stages.Stage{
@@ -1291,9 +1251,7 @@ printf '%%s\n' '{"result":"ok","session_id":"sess_ur","num_turns":1,"total_cost_
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	workDir := t.TempDir()
 	stage := &stages.Stage{
