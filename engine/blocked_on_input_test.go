@@ -64,7 +64,7 @@ func TestIsAwaitingInput(t *testing.T) {
 // --- (c) itemMayNeedWork with awaiting-input ---
 
 func TestItemMayNeedWork_AwaitingInput_PassesThrough(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 
 	item := gh.ProjectItem{
 		Number:    1,
@@ -79,7 +79,7 @@ func TestItemMayNeedWork_AwaitingInput_PassesThrough(t *testing.T) {
 }
 
 func TestItemMayNeedWork_AwaitingInput_LockedByOther(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 
 	item := gh.ProjectItem{
 		Number: 1,
@@ -94,7 +94,7 @@ func TestItemMayNeedWork_AwaitingInput_LockedByOther(t *testing.T) {
 }
 
 func TestItemNeedsWork_AwaitingInput_LockedByOther(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 
 	item := gh.ProjectItem{
 		Number: 1,
@@ -112,7 +112,7 @@ func TestItemNeedsWork_AwaitingInput_LockedByOther(t *testing.T) {
 }
 
 func TestItemMayNeedWork_PausedOnly_Blocked(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 
 	item := gh.ProjectItem{
 		Number:    1,
@@ -130,7 +130,7 @@ func TestItemMayNeedWork_PausedOnly_Blocked(t *testing.T) {
 // --- (d) itemNeedsWork with awaiting-input ---
 
 func TestItemNeedsWork_AwaitingInput_WithNewComments(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 
 	item := gh.ProjectItem{
 		Number: 1,
@@ -147,7 +147,7 @@ func TestItemNeedsWork_AwaitingInput_WithNewComments(t *testing.T) {
 }
 
 func TestItemNeedsWork_AwaitingInput_NoComments(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 
 	item := gh.ProjectItem{
 		Number:   1,
@@ -236,7 +236,7 @@ func TestProcessItem_AwaitingInput_UnblocksOnComment(t *testing.T) {
 func TestProcessItem_AwaitingInput_NoComment_Skips(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
-	eng := testEngine(client, claude)
+	eng := testEngine(t, client, claude)
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{

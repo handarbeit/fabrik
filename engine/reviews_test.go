@@ -20,8 +20,9 @@ func reviewTestStages() []*stages.Stage {
 	}
 }
 
-func reviewTestEngine(client *mockGitHubClient) *Engine {
-	return testEngineWithStages(client, reviewTestStages())
+func reviewTestEngine(t *testing.T, client *mockGitHubClient) *Engine {
+	t.Helper()
+	return testEngineWithStages(t, client, reviewTestStages())
 }
 
 // (a) No requested reviewers AND no reviews submitted → gate STAYS BLOCKED,
@@ -31,7 +32,7 @@ func reviewTestEngine(client *mockGitHubClient) *Engine {
 // so we wait.
 func TestCheckReviewGate_NoReviewersNoReviews_Blocks(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := reviewTestEngine(client)
+	eng := reviewTestEngine(t, client)
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
 		Number:                 10,
@@ -59,7 +60,7 @@ func TestCheckReviewGate_NoReviewersNoReviews_Blocks(t *testing.T) {
 // without ever appearing in reviewRequests.
 func TestCheckReviewGate_NoReviewersWithReview_Clears(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := reviewTestEngine(client)
+	eng := reviewTestEngine(t, client)
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
 		Number:                 10,
@@ -87,7 +88,7 @@ func TestCheckReviewGate_NoReviewersWithReview_Clears(t *testing.T) {
 // (a2) Gate disabled (nil WaitForReviews) → always returns false.
 func TestCheckReviewGate_GateDisabled_ReturnsFalse(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := reviewTestEngine(client)
+	eng := reviewTestEngine(t, client)
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
 		Number: 10,
@@ -112,7 +113,7 @@ func TestCheckReviewGate_GateDisabled_ReturnsFalse(t *testing.T) {
 // (b) Reviewer requested but no review submitted → block and apply label.
 func TestCheckReviewGate_ReviewerRequested_NoReview_Blocks(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := reviewTestEngine(client)
+	eng := reviewTestEngine(t, client)
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
 		Number: 10,
@@ -146,7 +147,7 @@ func TestCheckReviewGate_ReviewerRequested_NoReview_Blocks(t *testing.T) {
 // (b2) Already has awaiting-review label → still blocked but no duplicate label add.
 func TestCheckReviewGate_AlreadyWaiting_NoLabelAdd(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := reviewTestEngine(client)
+	eng := reviewTestEngine(t, client)
 	// FetchLabelAppliedAt returns recent time (no timeout)
 	recentTime := time.Now().Add(-1 * time.Minute)
 	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
@@ -180,7 +181,7 @@ func TestCheckReviewGate_AlreadyWaiting_NoLabelAdd(t *testing.T) {
 // (c) All requested reviewers have submitted → advance (no reviewers in reviewRequests).
 func TestCheckReviewGate_AllReviewersSubmitted_ReturnsFalse(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := reviewTestEngine(client)
+	eng := reviewTestEngine(t, client)
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	// copilot no longer in reviewRequests (they submitted) and awaiting-review label present
 	item := gh.ProjectItem{
@@ -215,7 +216,7 @@ func TestCheckReviewGate_AllReviewersSubmitted_ReturnsFalse(t *testing.T) {
 // (d) Timeout elapsed → advance with warning, label removed.
 func TestCheckReviewGate_TimeoutElapsed_ReturnsFalse(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := reviewTestEngine(client)
+	eng := reviewTestEngine(t, client)
 	// Override timeout to 5 minutes; label was applied 10 minutes ago → timed out
 	eng.cfg.ReviewWaitTimeout = 5 * time.Minute
 	appliedAt := time.Now().Add(-10 * time.Minute)
@@ -258,7 +259,7 @@ func TestCheckReviewGate_TimeoutElapsed_ReturnsFalse(t *testing.T) {
 // (e) Dismissed reviewer re-blocks gate: reviewer re-appears in reviewRequests.
 func TestCheckReviewGate_DismissedReviewer_Reblocks(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := reviewTestEngine(client)
+	eng := reviewTestEngine(t, client)
 	// Label was applied recently — not timed out
 	recentTime := time.Now().Add(-1 * time.Minute)
 	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
@@ -298,7 +299,7 @@ func TestCheckReviewGate_DismissedReviewer_Reblocks(t *testing.T) {
 
 func TestCheckReviewGate_DismissedReviewDoesNotClear(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := reviewTestEngine(client)
+	eng := reviewTestEngine(t, client)
 	recentTime := time.Now().Add(-1 * time.Minute)
 	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
 		return recentTime, nil
@@ -328,7 +329,7 @@ func TestCheckReviewGate_DismissedReviewDoesNotClear(t *testing.T) {
 // (f) buildReviewThreadComments returns inline thread comments with real DatabaseIDs.
 func TestBuildReviewThreadComments(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := reviewTestEngine(client)
+	eng := reviewTestEngine(t, client)
 	item := gh.ProjectItem{
 		Number: 10,
 		Repo:   "owner/repo",
@@ -354,7 +355,7 @@ func TestBuildReviewThreadComments(t *testing.T) {
 // (f2) buildReviewThreadComments skips comments already present in ProcessedComments.
 func TestBuildReviewThreadComments_ProcessedCommentsSkip(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := reviewTestEngine(client)
+	eng := reviewTestEngine(t, client)
 	item := gh.ProjectItem{
 		Number: 10,
 		Repo:   "owner/repo",
@@ -414,7 +415,7 @@ func TestCatchUpLoop_InFlightGuard(t *testing.T) {
 		{Name: "Implement", Order: 1, Prompt: "implement"},
 		{Name: "Review", Order: 2, Prompt: "review"},
 	}
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 	eng.cfg.MaxReviewCycles = 5
 
 	// Pre-populate the store Worker to simulate a goroutine already running.
@@ -445,7 +446,7 @@ func TestCatchUpLoop_InFlightGuard(t *testing.T) {
 // (g) pauseForReviewTimeout applies labels and posts a comment.
 func TestPauseForReviewTimeout(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := reviewTestEngine(client)
+	eng := reviewTestEngine(t, client)
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
 		Number: 10,
@@ -477,7 +478,7 @@ func TestPauseForReviewTimeout(t *testing.T) {
 // (h) pauseForReviewCycleLimit applies labels, posts a comment with cycle count.
 func TestPauseForReviewCycleLimit(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := reviewTestEngine(client)
+	eng := reviewTestEngine(t, client)
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
 		Number: 10,
@@ -513,7 +514,7 @@ func TestReviewCycleCount_PerStageNotPerIssue(t *testing.T) {
 		{Name: "Review", Order: 1, Prompt: "review"},
 		{Name: "Validate", Order: 2, Prompt: "validate"},
 	}
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 
 	// Simulate Review consuming 3 cycles out of 5.
 	for i := 0; i < 3; i++ {
@@ -550,7 +551,7 @@ func TestClearFailedStage_ReviewCycleCount_ResetsOnlyCurrentStage(t *testing.T) 
 		{Name: "Review", Order: 1, Prompt: "review", WaitForReviews: boolPtr(true)},
 		{Name: "Validate", Order: 2, Prompt: "validate", WaitForReviews: boolPtr(true)},
 	}
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 	item := gh.ProjectItem{
 		Number: 10,
 		Repo:   "owner/repo",
@@ -590,7 +591,7 @@ func TestClearFailedStage_ReviewCycleCount_ResetsOnlyCurrentStage(t *testing.T) 
 // Gate returns (true, false) — still blocked.
 func TestCheckReviewGate_BotPhase1_Reprompts(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := reviewTestEngine(client)
+	eng := reviewTestEngine(t, client)
 	eng.cfg.ReviewWaitTimeout = 5 * time.Minute
 
 	// awaiting-review label was applied 10 minutes ago — 1× timeout elapsed.
@@ -663,7 +664,7 @@ func TestCheckReviewGate_BotPhase1_Reprompts(t *testing.T) {
 // When the reprompted label is present but not yet timed out, the gate stays blocked silently.
 func TestCheckReviewGate_BotPhase1_Idempotent_StillBlocked(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := reviewTestEngine(client)
+	eng := reviewTestEngine(t, client)
 	eng.cfg.ReviewWaitTimeout = 5 * time.Minute
 
 	awaitingApplied := time.Now().Add(-10 * time.Minute)
@@ -712,7 +713,7 @@ func TestCheckReviewGate_BotPhase1_Idempotent_StillBlocked(t *testing.T) {
 // pauseForReviewTimeout then detects Phase 2 context and posts a contextual message.
 func TestCheckReviewGate_BotPhase2_PausesForHuman(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := reviewTestEngine(client)
+	eng := reviewTestEngine(t, client)
 	eng.cfg.ReviewWaitTimeout = 5 * time.Minute
 
 	awaitingApplied := time.Now().Add(-15 * time.Minute)
@@ -762,7 +763,7 @@ func TestCheckReviewGate_BotPhase2_PausesForHuman(t *testing.T) {
 	}
 
 	// Verify pauseForReviewTimeout posts a Phase 2 contextual message.
-	eng2 := reviewTestEngine(client)
+	eng2 := reviewTestEngine(t, client)
 	eng2.pauseForReviewTimeout(board, item, stage) // item still has pre-cleanup labels
 
 	var foundPhase2Comment bool
@@ -779,7 +780,7 @@ func TestCheckReviewGate_BotPhase2_PausesForHuman(t *testing.T) {
 // Pure-bot stuck then bot responds before Phase 2 — gate clears naturally.
 func TestCheckReviewGate_BotRespondsBeforePhase2_Clears(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := reviewTestEngine(client)
+	eng := reviewTestEngine(t, client)
 	eng.cfg.ReviewWaitTimeout = 5 * time.Minute
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
@@ -813,7 +814,7 @@ func TestCheckReviewGate_BotRespondsBeforePhase2_Clears(t *testing.T) {
 // Mixed bot+human outstanding at 1× timeout — existing pause path fires, no re-prompt.
 func TestCheckReviewGate_MixedBotHuman_PausesWithoutReprompt(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := reviewTestEngine(client)
+	eng := reviewTestEngine(t, client)
 	eng.cfg.ReviewWaitTimeout = 5 * time.Minute
 
 	awaitingApplied := time.Now().Add(-10 * time.Minute) // 1× elapsed
@@ -864,7 +865,7 @@ func TestCheckReviewGate_MixedBotHuman_PausesWithoutReprompt(t *testing.T) {
 // Pure-human outstanding at 1× timeout — existing pause path fires.
 func TestCheckReviewGate_PureHuman_PausesWithoutReprompt(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := reviewTestEngine(client)
+	eng := reviewTestEngine(t, client)
 	eng.cfg.ReviewWaitTimeout = 5 * time.Minute
 
 	awaitingApplied := time.Now().Add(-10 * time.Minute)
@@ -904,7 +905,7 @@ func TestCheckReviewGate_PureHuman_PausesWithoutReprompt(t *testing.T) {
 // pauseForReviewTimeout enhanced comment lists reviewers with bot/human tags.
 func TestPauseForReviewTimeout_ListsReviewerTypes(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := reviewTestEngine(client)
+	eng := reviewTestEngine(t, client)
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
 		Number: 10,
@@ -931,7 +932,7 @@ func TestPauseForReviewTimeout_ListsReviewerTypes(t *testing.T) {
 // removeAwaitingReviewLabel also removes the fabrik:bot-reprompted label.
 func TestRemoveAwaitingReviewLabel_CleansRepromptedLabels(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := reviewTestEngine(client)
+	eng := reviewTestEngine(t, client)
 	item := gh.ProjectItem{
 		Number: 10,
 		Repo:   "owner/repo",
@@ -997,7 +998,7 @@ func TestBotMentionHandle(t *testing.T) {
 // Phase 1: non-Copilot bot reviewer — reprompt comment must mention @<login> directly.
 func TestCheckReviewGate_BotPhase1_NonCopilot_MentionsLogin(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := reviewTestEngine(client)
+	eng := reviewTestEngine(t, client)
 	eng.cfg.ReviewWaitTimeout = 5 * time.Minute
 
 	awaitingApplied := time.Now().Add(-10 * time.Minute)
@@ -1039,7 +1040,7 @@ func TestCheckReviewGate_BrokenLinkage_PRFound_Pauses(t *testing.T) {
 			return &gh.PRDetails{Number: 77, State: "open"}, nil
 		},
 	}
-	eng := reviewTestEngine(client)
+	eng := reviewTestEngine(t, client)
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
 		Number:         10,
@@ -1096,7 +1097,7 @@ func TestCheckReviewGate_BrokenLinkage_NoPRFound_FallsThrough(t *testing.T) {
 			return nil, nil // no PR on branch
 		},
 	}
-	eng := reviewTestEngine(client)
+	eng := reviewTestEngine(t, client)
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
 		Number:         10,

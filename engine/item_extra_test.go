@@ -18,7 +18,7 @@ import (
 
 // TestEmitStructural_WithChannel sends a structural event and verifies it's received.
 func TestEmitStructural_WithChannel(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	ch := make(chan tui.Event, 4)
 	eng.events = ch
 
@@ -37,7 +37,7 @@ func TestEmitStructural_WithChannel(t *testing.T) {
 // TestItemMayNeedWork_StaleButCooldownExpired verifies that a stale item is
 // retried after the cooldown period expires.
 func TestItemMayNeedWork_StaleButCooldownExpired(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 1 // short cooldown
 
 	ts := time.Now().Add(-time.Minute)
@@ -70,7 +70,7 @@ func TestPollPreFilter_StaleItemWithinCooldown_Skipped(t *testing.T) {
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 60
 	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 43, Reason: "periodic-re-eval", Until: time.Now().Add(10 * time.Minute)})
 	// item not in cycleSet (eng.mayNeedWork is empty), active CooldownAt → must be skipped
@@ -85,7 +85,7 @@ func TestPollPreFilter_StaleItemWithinCooldown_Skipped(t *testing.T) {
 // TestItemMayNeedWork_LockedByOtherUser verifies that itemMayNeedWork no longer
 // filters locked items — that check moved to itemNeedsWork after deep fetch.
 func TestItemMayNeedWork_LockedByOtherUser(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	item := gh.ProjectItem{
 		Number: 44,
 		Status: "Research",
@@ -100,7 +100,7 @@ func TestItemMayNeedWork_LockedByOtherUser(t *testing.T) {
 // TestItemNeedsWork_LockedByOtherUser verifies that items locked by another user
 // are filtered out in itemNeedsWork (which runs after deep fetch).
 func TestItemNeedsWork_LockedByOtherUser(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	item := gh.ProjectItem{
 		Number: 44,
 		Status: "Research",
@@ -114,7 +114,7 @@ func TestItemNeedsWork_LockedByOtherUser(t *testing.T) {
 // TestItemNeedsWork_Editing_ReturnsFalse verifies that items with fabrik:editing
 // are filtered out in itemNeedsWork (pre-dispatch gate).
 func TestItemNeedsWork_Editing_ReturnsFalse(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	item := gh.ProjectItem{
 		Number: 44,
 		Status: "Research",
@@ -128,7 +128,7 @@ func TestItemNeedsWork_Editing_ReturnsFalse(t *testing.T) {
 // TestItemNeedsWork_Editing_Cleared_ReturnsTrue confirms the gate clears when
 // fabrik:editing is absent.
 func TestItemNeedsWork_Editing_Cleared_ReturnsTrue(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	item := gh.ProjectItem{
 		Number: 44,
 		Status: "Research",
@@ -142,7 +142,7 @@ func TestItemNeedsWork_Editing_Cleared_ReturnsTrue(t *testing.T) {
 // TestItemNeedsWork_Blocked_ActiveCooldown_ReturnsFalse verifies that items with
 // fabrik:blocked and an active dep-blocked cooldown are suppressed — #576 gate holds.
 func TestItemNeedsWork_Blocked_ActiveCooldown_ReturnsFalse(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 45, Reason: "dep-blocked", Until: time.Now().Add(10 * time.Minute)})
 	item := gh.ProjectItem{
 		Number: 45,
@@ -158,7 +158,7 @@ func TestItemNeedsWork_Blocked_ActiveCooldown_ReturnsFalse(t *testing.T) {
 // item is admitted when the dep-blocked cooldown has expired, restoring the pull-based
 // safety net so processItem → checkDependencies can re-evaluate the dependency.
 func TestItemNeedsWork_Blocked_ExpiredCooldown_ReturnsTrue(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 45, Reason: "dep-blocked", Until: time.Now().Add(-time.Minute)})
 	item := gh.ProjectItem{
 		Number: 45,
@@ -174,7 +174,7 @@ func TestItemNeedsWork_Blocked_ExpiredCooldown_ReturnsTrue(t *testing.T) {
 // item with no store entry (cold-start or restart) is admitted — no cooldown means
 // no gate, so processItem → checkDependencies can run on the first poll.
 func TestItemNeedsWork_Blocked_NoStoreEntry_ReturnsTrue(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	item := gh.ProjectItem{
 		Number: 45,
 		Status: "Research",
@@ -188,7 +188,7 @@ func TestItemNeedsWork_Blocked_NoStoreEntry_ReturnsTrue(t *testing.T) {
 // TestItemNeedsWork_Blocked_Cleared_ReturnsTrue confirms the gate clears when
 // fabrik:blocked is absent.
 func TestItemNeedsWork_Blocked_Cleared_ReturnsTrue(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	item := gh.ProjectItem{
 		Number: 45,
 		Status: "Research",
@@ -202,7 +202,7 @@ func TestItemNeedsWork_Blocked_Cleared_ReturnsTrue(t *testing.T) {
 // TestBlockOnInput_Success covers both AddLabel calls and the notification comment.
 func TestBlockOnInput_Success(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	stage := &stages.Stage{Name: "Research", Order: 1}
 	item := gh.ProjectItem{Number: 5}
 	eng.blockOnInput(item, stage, "")
@@ -287,7 +287,7 @@ func TestBlockOnInput_LabelErrors_LogsWarning(t *testing.T) {
 			return errors.New("label error")
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	stage := &stages.Stage{Name: "Research", Order: 1}
 	item := gh.ProjectItem{Number: 6}
 	// Should not panic when labels fail
@@ -351,7 +351,7 @@ func TestCommitWIP_ExcludesContextFiles(t *testing.T) {
 		t.Fatalf("modify context file: %v", err)
 	}
 
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	eng.commitWIP(workDir, 42, "Research")
 
 	// Verify the partial-progress commit was created.
@@ -399,7 +399,7 @@ func TestCommitWIP_ExcludesContextFiles(t *testing.T) {
 // itemMayNeedWork no longer filters items with open blockers — that check moved
 // to itemNeedsWork after deep fetch.
 func TestItemMayNeedWork_DependencyGate_OpenBlocker_PastFirstStage(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	// testEngine uses testStages(): Research(1), Plan(2), Implement(3)
 	// "Research" is the first stage; "Plan" is past the first.
 	item := gh.ProjectItem{
@@ -423,7 +423,7 @@ func TestItemMayNeedWork_DependencyGate_OpenBlocker_PastFirstStage(t *testing.T)
 // cache-bypass logic in itemMayNeedWork never re-evaluated them after
 // blockers closed (since blocker closure doesn't bump the item's updatedAt).
 func TestItemNeedsWork_DependencyGate_PassesThrough(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	item := gh.ProjectItem{
 		Number: 5,
 		Status: "Plan",
@@ -442,7 +442,7 @@ func TestItemNeedsWork_DependencyGate_PassesThrough(t *testing.T) {
 // itemMayNeedWork does not filter first-stage items with open blockers.
 // The dep gate runs in processItem (via checkDependencies), not in itemMayNeedWork.
 func TestItemMayNeedWork_DependencyGate_FirstStage_NotFiltered(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	// "Research" is the first stage in testStages()
 	item := gh.ProjectItem{
 		Number: 5,
@@ -461,7 +461,7 @@ func TestItemMayNeedWork_DependencyGate_FirstStage_NotFiltered(t *testing.T) {
 // an item past the first stage with all blockers closed is not filtered.
 // (Dependency gate check is in itemNeedsWork; all-closed items pass through.)
 func TestItemMayNeedWork_DependencyGate_AllClosed_NotFiltered(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	item := gh.ProjectItem{
 		Number: 5,
 		Status: "Plan",
@@ -478,7 +478,7 @@ func TestItemMayNeedWork_DependencyGate_AllClosed_NotFiltered(t *testing.T) {
 // TestItemMayNeedWork_ClosedIssue verifies that a closed issue in a non-cleanup
 // stage is skipped, regardless of yolo or labels.
 func TestItemMayNeedWork_ClosedIssue(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	item := gh.ProjectItem{
 		Number:   99,
 		Status:   "Research",
@@ -492,7 +492,7 @@ func TestItemMayNeedWork_ClosedIssue(t *testing.T) {
 // TestItemNeedsWork_ClosedIssue verifies that itemNeedsWork returns false for
 // a closed issue in a non-cleanup stage.
 func TestItemNeedsWork_ClosedIssue(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	item := gh.ProjectItem{
 		Number:   99,
 		Status:   "Research",
@@ -646,7 +646,7 @@ func TestPoll_DeepFetchFailureExcludesFromLastUpdatedAt(t *testing.T) {
 			return errors.New("simulated rate limit error")
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 999 // very long cooldown so we don't accidentally bypass
 	// Seed item into cycleSet so the pre-filter admits it for deep-fetch.
 	eng.mayNeedWorkMu.Lock()
@@ -680,7 +680,7 @@ func TestPoll_DeepFetchSuccessClearsFailureTime(t *testing.T) {
 		},
 		// fetchItemDetailsFn nil = success (mock returns nil by default)
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	// Pre-seed a failure time via the store.
 	eng.store.Apply(itemstate.DeepFetchFailed{Repo: "owner/repo", Number: 11, At: now.Add(-time.Minute)})
 	// Seed item into cycleSet so the pre-filter admits it for deep-fetch.
@@ -715,7 +715,7 @@ func TestPollPreFilter_AwaitingInput_WithoutChange_Skipped(t *testing.T) {
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	// Seed the store so the pre-filter sees this as a known (previously-processed) item.
 	// InvocationRecorded fires InvocationChanged (not wakeChFlags) so no observer side-effect.
 	eng.store.Apply(itemstate.InvocationRecorded{Repo: "owner/repo", Number: 50, Completed: true})
@@ -732,7 +732,7 @@ func TestPollPreFilter_AwaitingInput_WithoutChange_Skipped(t *testing.T) {
 // recorded in deepFetchFailureTime, itemMayNeedWork returns false within the
 // cooldown window and true after the cooldown has expired.
 func TestItemMayNeedWork_DeepFetchFailureCooldown(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 1 // 10-second cooldown
 
 	item := gh.ProjectItem{
@@ -761,7 +761,7 @@ func TestItemMayNeedWork_DeepFetchFailureCooldown(t *testing.T) {
 // fabrik:awaiting-ci bypass the updatedAt cache so the catch-up loop can
 // re-evaluate CI status on every poll even when the issue hasn't changed.
 func TestItemMayNeedWork_AwaitingCI_BypassesUpdatedAtCache(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 60 // long cooldown that would normally suppress
 
 	ts := time.Now().Add(-time.Minute)
@@ -798,7 +798,7 @@ func TestPollPreFilter_AwaitingReview_WithinCooldown_Bypassed(t *testing.T) {
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 60
 	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 67, Reason: "review-blocked", Until: time.Now().Add(10 * time.Minute)})
 	if _, err := eng.poll(t.Context()); err != nil {
@@ -823,7 +823,7 @@ func TestPollPreFilter_AwaitingReview_ExpiredCooldown_Admitted(t *testing.T) {
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 67, Reason: "review-blocked", Until: time.Now().Add(-15 * time.Minute)})
 	if _, err := eng.poll(t.Context()); err != nil {
 		t.Fatalf("poll: %v", err)
@@ -850,7 +850,7 @@ func TestPollPreFilter_AwaitingReview_NoCooldown_Bypassed(t *testing.T) {
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 60
 	// Seed the store so the pre-filter sees this as a known (previously-processed) item.
 	eng.store.Apply(itemstate.InvocationRecorded{Repo: "owner/repo", Number: 68, Completed: true})
@@ -878,7 +878,7 @@ func TestPollPreFilter_Blocked_WithinCooldown_Skipped(t *testing.T) {
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 60
 	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 63, Reason: "dep-blocked", Until: time.Now().Add(10 * time.Minute)})
 	if _, err := eng.poll(t.Context()); err != nil {
@@ -903,7 +903,7 @@ func TestPollPreFilter_NoSpecialLabel_WithinCooldown_Skipped(t *testing.T) {
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 60
 	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 62, Reason: "periodic-re-eval", Until: time.Now().Add(10 * time.Minute)})
 	if _, err := eng.poll(t.Context()); err != nil {
@@ -931,7 +931,7 @@ func TestPollPreFilter_CompleteStage_ExpiredCooldown_DeepFetched(t *testing.T) {
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 1
 	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 70, Reason: "periodic-re-eval", Until: time.Now().Add(-2 * time.Minute)})
 	if _, err := eng.poll(t.Context()); err != nil {
@@ -957,7 +957,7 @@ func TestPollPreFilter_IncompleteStage_ExpiredCooldown_Admitted(t *testing.T) {
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 1
 	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 71, Reason: "periodic-re-eval", Until: time.Now().Add(-2 * time.Minute)})
 	if _, err := eng.poll(t.Context()); err != nil {
@@ -985,7 +985,7 @@ func TestPollPreFilter_AwaitingReview_WithCompleteLabel_ExpiredCooldown_Admitted
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error { deepFetched = true; return nil },
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 1
 	eng.store.Apply(itemstate.CooldownRecorded{Repo: "owner/repo", Number: 69, Reason: "review-blocked", Until: time.Now().Add(-2 * time.Minute)})
 	if _, err := eng.poll(t.Context()); err != nil {
@@ -1004,7 +1004,7 @@ func TestPollPreFilter_AwaitingReview_WithCompleteLabel_ExpiredCooldown_Admitted
 func TestItemNeedsWork_AwaitingCI_NoDispatch(t *testing.T) {
 	tr := true
 	stgs := []*stages.Stage{{Name: "Validate", Order: 3, WaitForCI: &tr}}
-	eng := testEngineWithStages(&mockGitHubClient{}, stgs)
+	eng := testEngineWithStages(t, &mockGitHubClient{}, stgs)
 	item := gh.ProjectItem{
 		Number: 64,
 		Status: "Validate",
@@ -1020,7 +1020,7 @@ func TestItemNeedsWork_AwaitingCI_NoDispatch(t *testing.T) {
 // A stale label from a prior CI-gated invocation must not permanently block
 // a stage that was moved to a different (non-CI-gated) column.
 func TestItemNeedsWork_AwaitingCI_NonCIGatedStage_Dispatches(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	item := gh.ProjectItem{
 		Number: 67,
 		Status: "Research", // no wait_for_ci
@@ -1037,7 +1037,7 @@ func TestItemNeedsWork_AwaitingCI_NonCIGatedStage_Dispatches(t *testing.T) {
 func TestItemMayNeedWork_ClosedIssue_AwaitingCI_Passes(t *testing.T) {
 	tr := true
 	stgs := []*stages.Stage{{Name: "Validate", Order: 3, WaitForCI: &tr}}
-	eng := testEngineWithStages(&mockGitHubClient{}, stgs)
+	eng := testEngineWithStages(t, &mockGitHubClient{}, stgs)
 	item := gh.ProjectItem{
 		Number:   65,
 		Status:   "Validate",
@@ -1056,7 +1056,7 @@ func TestItemMayNeedWork_ClosedIssue_AwaitingCI_Passes(t *testing.T) {
 func TestItemNeedsWork_ClosedIssue_AwaitingCI_Passes(t *testing.T) {
 	tr := true
 	stgs := []*stages.Stage{{Name: "Validate", Order: 3, WaitForCI: &tr}}
-	eng := testEngineWithStages(&mockGitHubClient{}, stgs)
+	eng := testEngineWithStages(t, &mockGitHubClient{}, stgs)
 	item := gh.ProjectItem{
 		Number:   66,
 		Status:   "Validate",
@@ -1091,7 +1091,7 @@ func TestPoll_DeferredRefresh_DoesNotRefreshIncompleteItem(t *testing.T) {
 			return nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 1 // cooldown = 10s
 
 	initial := time.Now().Add(-2 * time.Minute) // expired timestamp
@@ -1141,7 +1141,7 @@ func TestPoll_DeferredRefresh_RefreshesTerminalItem(t *testing.T) {
 			return nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 1 // cooldown = 10s
 
 	// Seed expired CooldownAt so the pre-filter admits the item for deep-fetch

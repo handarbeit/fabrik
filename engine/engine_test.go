@@ -17,7 +17,7 @@ import (
 )
 
 func TestItemNeedsWork_SkipsPaused(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 
 	item := gh.ProjectItem{
 		Number: 1,
@@ -31,7 +31,7 @@ func TestItemNeedsWork_SkipsPaused(t *testing.T) {
 }
 
 func TestItemNeedsWork_SkipsPausedWithNewComments(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 
 	item := gh.ProjectItem{
 		Number: 1,
@@ -49,7 +49,7 @@ func TestItemNeedsWork_SkipsPausedWithNewComments(t *testing.T) {
 }
 
 func TestFindNewComments(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 
 	item := gh.ProjectItem{
 		Number: 1,
@@ -146,7 +146,7 @@ func TestRun_ShutdownOnSignal(t *testing.T) {
 			return &gh.ProjectBoard{}, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 300 // long poll so we don't hit a second tick
 
 	// Provide a temp fabrikDir so Run() can create the lock file.
@@ -468,7 +468,7 @@ func TestIdleCountNotIncrementedWhileWorkersInFlight(t *testing.T) {
 }
 
 func TestExtractModelOverride(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	tests := []struct {
 		name   string
 		labels []string
@@ -494,7 +494,7 @@ func TestExtractModelOverride(t *testing.T) {
 func TestExtractModelOverrideWarnsOnMultiple(t *testing.T) {
 	// Verify no panic and correct return value when multiple model labels are present.
 	// The warning goes to eng.logf (stdout in test mode) and is tested behaviorally above.
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	result := eng.extractModelOverride(0, []string{"model:opus", "model:sonnet", "model:haiku"})
 	if result != "opus" {
 		t.Errorf("expected %q, got %q", "opus", result)
@@ -502,7 +502,7 @@ func TestExtractModelOverrideWarnsOnMultiple(t *testing.T) {
 }
 
 func TestExtractEffortOverride(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	tests := []struct {
 		name   string
 		labels []string
@@ -531,7 +531,7 @@ func TestExtractEffortOverride(t *testing.T) {
 func TestExtractEffortOverrideMultipleLabelsPrecedence(t *testing.T) {
 	// When multiple effort: labels are present, the highest-ranked wins (max > high > medium > low).
 	// This differs from model: override which uses first-found.
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 
 	tests := []struct {
 		name   string
@@ -623,7 +623,7 @@ func TestBaseBranchForItem(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			client := &mockGitHubClient{}
-			eng := testEngine(client, &mockClaudeInvoker{})
+			eng := testEngine(t, client, &mockClaudeInvoker{})
 			wm := NewWorktreeManager(repoDir)
 			item := gh.ProjectItem{Number: 42, Labels: tc.labels}
 
@@ -680,7 +680,7 @@ func TestItemNeedsWork_CleanupStage_NeedsWork(t *testing.T) {
 }
 
 func TestItemNeedsWork_CleanupStage_AlreadyComplete(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	eng.cfg.Stages = testStagesWithCleanup()
 
 	item := gh.ProjectItem{
@@ -694,7 +694,7 @@ func TestItemNeedsWork_CleanupStage_AlreadyComplete(t *testing.T) {
 }
 
 func TestItemNeedsWork_CleanupStage_PausedItem(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	eng.cfg.Stages = testStagesWithCleanup()
 
 	item := gh.ProjectItem{

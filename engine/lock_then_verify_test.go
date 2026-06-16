@@ -115,7 +115,7 @@ func TestLockThenVerify_CompetingLockLowerUser_YieldsAndReturnsNil(t *testing.T)
 			return []string{"fabrik:locked:testuser", "fabrik:locked:aardvark"}, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	orig := lockVerifyDelay
 	lockVerifyDelay = 0
@@ -123,7 +123,7 @@ func TestLockThenVerify_CompetingLockLowerUser_YieldsAndReturnsNil(t *testing.T)
 
 	// Pre-register the worktree manager so ensureRepoReady returns nil.
 	eng.mu.Lock()
-	eng.worktreeManagers["owner/repo"] = NewWorktreeManager("/tmp/fake-repo")
+	eng.worktreeManagers["owner/repo"] = NewWorktreeManager(t.TempDir())
 	eng.mu.Unlock()
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}

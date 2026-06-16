@@ -76,7 +76,8 @@ func TestIsTerminalPredicate_AllTransientLabels(t *testing.T) {
 
 // ---- runStartupTerminalScan tests (Task 12) ----
 
-func testEngineWithCleanup(client *mockGitHubClient, claude *mockClaudeInvoker) *Engine {
+func testEngineWithCleanup(t *testing.T, client *mockGitHubClient, claude *mockClaudeInvoker) *Engine {
+	t.Helper()
 	return NewWithDeps(
 		Config{
 			Owner:         "owner",
@@ -89,12 +90,12 @@ func testEngineWithCleanup(client *mockGitHubClient, claude *mockClaudeInvoker) 
 		},
 		client,
 		claude,
-		NewWorktreeManager("/tmp/test-repo"),
+		NewWorktreeManager(t.TempDir()),
 	)
 }
 
 func TestRunStartupTerminalScan_MarksTerminalItems(t *testing.T) {
-	eng := testEngineWithCleanup(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngineWithCleanup(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 
 	// Item 1: terminal — Done + stage:Done:complete + no transient labels.
 	eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{
@@ -142,7 +143,7 @@ func TestRunStartupTerminalScan_MarksTerminalItems(t *testing.T) {
 }
 
 func TestRunStartupTerminalScan_IdempotentOnAlreadyTerminal(t *testing.T) {
-	eng := testEngineWithCleanup(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngineWithCleanup(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 
 	eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{
 		Repo:     "owner/repo",
@@ -166,8 +167,9 @@ func TestRunStartupTerminalScan_IdempotentOnAlreadyTerminal(t *testing.T) {
 
 // testEngineWithCleanupCache creates an Engine with testStagesWithCleanup and a
 // live CacheImpl seeded with one item already in "Done" with stage:Done:complete.
-func testEngineWithCleanupCache(client *mockGitHubClient, claude *mockClaudeInvoker) (*Engine, *boardcache.CacheImpl) {
-	eng := testEngineWithCleanup(client, claude)
+func testEngineWithCleanupCache(t *testing.T, client *mockGitHubClient, claude *mockClaudeInvoker) (*Engine, *boardcache.CacheImpl) {
+	t.Helper()
+	eng := testEngineWithCleanup(t, client, claude)
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
 	testBootstrapFromBoard(cache, &gh.ProjectBoard{
 		ProjectID: "PVT_1",
@@ -204,7 +206,7 @@ func TestRunProbeAndDeepFetch_TerminalItem_SkipsDeepFetch(t *testing.T) {
 			return nil
 		},
 	}
-	eng, cache := testEngineWithCleanupCache(client, &mockClaudeInvoker{})
+	eng, cache := testEngineWithCleanupCache(t, client, &mockClaudeInvoker{})
 
 	// Mark item 1 as terminal (simulate prior deep-fetch that found it terminal).
 	eng.store.Apply(itemstate.TerminalFlagSet{Repo: "owner/repo", Number: 1, Terminal: true})
@@ -239,7 +241,7 @@ func TestRunProbeAndDeepFetch_TerminalItem_StatusDrift_ClearsFlagAndDeepFetches(
 			return nil
 		},
 	}
-	eng, cache := testEngineWithCleanupCache(client, &mockClaudeInvoker{})
+	eng, cache := testEngineWithCleanupCache(t, client, &mockClaudeInvoker{})
 
 	// Pre-set terminal flag.
 	eng.store.Apply(itemstate.TerminalFlagSet{Repo: "owner/repo", Number: 1, Terminal: true})
@@ -311,7 +313,7 @@ func TestRunProbeAndDeepFetch_TerminalItem_MovedBetweenCleanupStages(t *testing.
 			User: "testuser", Token: "token", MaxConcurrent: 5,
 			Stages: twoCleanupStages,
 		},
-		client, &mockClaudeInvoker{}, NewWorktreeManager("/tmp/test-repo"),
+		client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()),
 	)
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
 	testBootstrapFromBoard(cache, &gh.ProjectBoard{
@@ -359,7 +361,7 @@ func TestRunStartupTerminalScan_UsesCleanupStageNotHardcodedDone(t *testing.T) {
 		},
 		&mockGitHubClient{},
 		&mockClaudeInvoker{},
-		NewWorktreeManager("/tmp/test-repo"),
+		NewWorktreeManager(t.TempDir()),
 	)
 
 	eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{
@@ -404,7 +406,7 @@ func TestRunProbeAndDeepFetch_LinkageDrift_ColdStart_AuthoritativeWrite(t *testi
 			return nil
 		},
 	}
-	eng := testEngineWithCleanup(client, &mockClaudeInvoker{})
+	eng := testEngineWithCleanup(t, client, &mockClaudeInvoker{})
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
 	// Bootstrap with LinkedPRNumber=0 (old-style bootstrap that did not populate PR number).
 	testBootstrapFromBoard(cache, &gh.ProjectBoard{
@@ -463,7 +465,7 @@ func TestRunProbeAndDeepFetch_LinkageDrift_WarmCache_FiresDeepFetchInvalidated(t
 			return nil
 		},
 	}
-	eng := testEngineWithCleanup(client, &mockClaudeInvoker{})
+	eng := testEngineWithCleanup(t, client, &mockClaudeInvoker{})
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
 	// Bootstrap with LinkedPRNumber=0.
 	testBootstrapFromBoard(cache, &gh.ProjectBoard{
@@ -526,7 +528,7 @@ func TestRunProbeAndDeepFetch_LinkageDrift_ColdStart_ClearsStalePR(t *testing.T)
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error { return nil },
 	}
-	eng := testEngineWithCleanup(client, &mockClaudeInvoker{})
+	eng := testEngineWithCleanup(t, client, &mockClaudeInvoker{})
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
 	// Bootstrap with LinkedPRNumber=42 so the cache has a stale prToKey entry.
 	cache.BootstrapFromProbe([]gh.BoardProbeItem{
@@ -719,7 +721,7 @@ func TestRunProbeAndDeepFetch_UnconfiguredColumn_ColdCache_SkipsDeepFetch(t *tes
 		},
 	}
 
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
 	eng.readClient = cache
 
@@ -757,7 +759,7 @@ func TestRunProbeAndDeepFetch_UnconfiguredColumn_WarmCache_SkipsDeepFetch(t *tes
 		},
 	}
 
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	// Seed the Backlog item into the store directly (simulating a prior bootstrap).
 	eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{
 		ID: "I_002", ItemID: "PVTI_002", Number: 2, Repo: "owner/repo", Status: "Backlog",
@@ -799,7 +801,7 @@ func TestRunProbeAndDeepFetch_UnconfiguredColumn_StatusDrift_UpdatesStore(t *tes
 		},
 	}
 
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	// Seed the item into the store as if it was previously in a configured stage.
 	eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{
 		ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", Status: "Research",

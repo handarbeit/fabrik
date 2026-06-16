@@ -88,7 +88,7 @@ func TestFindStageComment_MatchesAmongMixed(t *testing.T) {
 func TestWriteContextFiles_IssueAlwaysWritten(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
-	eng := testEngine(client, claude)
+	eng := testEngine(t, client, claude)
 	eng.cfg.Stages = []*stages.Stage{
 		{Name: "Research", Order: 1},
 		{Name: "Plan", Order: 2},
@@ -115,7 +115,7 @@ func TestWriteContextFiles_IssueAlwaysWritten(t *testing.T) {
 func TestWriteContextFiles_PriorStagesOnly(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
-	eng := testEngine(client, claude)
+	eng := testEngine(t, client, claude)
 	eng.cfg.Stages = []*stages.Stage{
 		{Name: "Research", Order: 1},
 		{Name: "Plan", Order: 2},
@@ -150,7 +150,7 @@ func TestWriteContextFiles_PriorStagesOnly(t *testing.T) {
 func TestWriteContextFiles_CommentProcessingIncludesCurrent(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
-	eng := testEngine(client, claude)
+	eng := testEngine(t, client, claude)
 	eng.cfg.Stages = []*stages.Stage{
 		{Name: "Research", Order: 1},
 		{Name: "Plan", Order: 2},
@@ -180,7 +180,7 @@ func TestWriteContextFiles_CommentProcessingIncludesCurrent(t *testing.T) {
 func TestWriteContextFiles_SkipsStagesWithNoComment(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
-	eng := testEngine(client, claude)
+	eng := testEngine(t, client, claude)
 	eng.cfg.Stages = []*stages.Stage{
 		{Name: "Research", Order: 1},
 		{Name: "Plan", Order: 2},
@@ -281,7 +281,7 @@ func initTestRepo(t *testing.T) string {
 func TestWriteCodebaseChanges_NopriorSHA(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
-	eng := testEngine(client, claude)
+	eng := testEngine(t, client, claude)
 
 	workDir := t.TempDir()
 	fabrikDir := filepath.Join(workDir, ".fabrik-context")
@@ -308,7 +308,7 @@ func TestWriteCodebaseChanges_SHAsMatch(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
-	eng := testEngine(client, claude)
+	eng := testEngine(t, client, claude)
 	eng.worktreeManagers["owner/repo"] = NewWorktreeManager(repoDir)
 
 	// Get the current HEAD SHA (there's only one commit, so origin doesn't exist;
@@ -383,7 +383,7 @@ func TestWriteCodebaseChanges_DiffWritten(t *testing.T) {
 
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
-	eng := testEngine(client, claude)
+	eng := testEngine(t, client, claude)
 	eng.worktreeManagers["owner/repo"] = NewWorktreeManager(repoDir)
 
 	fabrikDir := filepath.Join(repoDir, ".fabrik-context")
@@ -424,7 +424,7 @@ func TestWriteCodebaseChanges_DiffWritten(t *testing.T) {
 func TestWriteContextFiles_CreatesGitignore(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
-	eng := testEngine(client, claude)
+	eng := testEngine(t, client, claude)
 	eng.cfg.Stages = []*stages.Stage{
 		{Name: "Research", Order: 1},
 	}

@@ -19,7 +19,7 @@ func TestRun_SighupRestart(t *testing.T) {
 			return &gh.ProjectBoard{}, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 300 // long poll so we don't hit a second tick
 
 	// Set up a temp fabrikDir so Run() can create the lock file.

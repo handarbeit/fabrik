@@ -13,7 +13,7 @@ import (
 // reflected in the in-memory cache without waiting for webhook echo or Reconcile.
 func TestLabelWriteThrough(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng, cache := testEngineWithCache(client, &mockClaudeInvoker{})
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
 
 	// addFailedLabel → cache should immediately contain "stage:Research:failed"
 	eng.addFailedLabel("owner", "repo", 1, "Research")
@@ -42,7 +42,7 @@ func TestLabelWriteThrough(t *testing.T) {
 // for lock-style labels.
 func TestLockLabelWriteThrough(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng, cache := testEngineWithCache(client, &mockClaudeInvoker{})
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
 
 	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
 	stage := testStages()[0]
@@ -97,7 +97,7 @@ func TestCommentWriteThrough(t *testing.T) {
 			return 9001, nil
 		},
 	}
-	eng, cache := testEngineWithCache(client, &mockClaudeInvoker{})
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
 
 	// Warm up the deep-fetch cache so FetchItemDetails returns from cache (not fallback).
 	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
@@ -136,7 +136,7 @@ func TestWriteThroughOnFailure(t *testing.T) {
 			return apiErr
 		},
 	}
-	eng, cache := testEngineWithCache(client, &mockClaudeInvoker{})
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
 
 	// addFailedLabel will call AddLabelToIssue which returns an error.
 	eng.addFailedLabel("owner", "repo", 1, "Implement")
@@ -158,7 +158,7 @@ func TestWriteThroughOnFailure(t *testing.T) {
 // old Status and the catch-up loop would fire again every 15 seconds.
 func TestAdvanceLoopRegression(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng, cache := testEngineWithCache(client, &mockClaudeInvoker{})
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
 	eng.statusField = &gh.StatusField{
 		FieldID: "FIELD_1",
 		Options: map[string]string{

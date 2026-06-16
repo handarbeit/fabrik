@@ -160,7 +160,7 @@ func TestProcessPRCreateMarker_Success(t *testing.T) {
 			return 42, nil
 		},
 	}
-	eng := testEngine(client, nil)
+	eng := testEngine(t, client, nil)
 
 	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
 	block := &PRCreateBlock{
@@ -191,7 +191,7 @@ func TestProcessPRCreateMarker_IdempotencyExistingPR(t *testing.T) {
 			return &gh.PRDetails{Number: 99, State: "open"}, nil
 		},
 	}
-	eng := testEngine(client, nil)
+	eng := testEngine(t, client, nil)
 
 	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
 	block := &PRCreateBlock{Title: "T", Body: "B"}
@@ -214,7 +214,7 @@ func TestProcessPRCreateMarker_IdempotencyExistingPR(t *testing.T) {
 
 func TestProcessPRCreateMarker_CrossRepoNotSupported(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngine(client, nil)
+	eng := testEngine(t, client, nil)
 
 	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
 	block := &PRCreateBlock{
@@ -255,7 +255,7 @@ func TestProcessPRCreateMarker_CreateFailurePauses(t *testing.T) {
 			return 0, fmt.Errorf("API rate limit exceeded")
 		},
 	}
-	eng := testEngine(client, nil)
+	eng := testEngine(t, client, nil)
 
 	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
 	block := &PRCreateBlock{Title: "T", Body: "Body content here."}
@@ -284,7 +284,7 @@ func TestProcessPRCreateMarker_CreateFailurePauses(t *testing.T) {
 // ---- verifyAndHealLinkage tests ----
 
 func TestVerifyAndHealLinkage_NoPR(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, nil)
+	eng := testEngine(t, &mockGitHubClient{}, nil)
 	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
 	stage := &stages.Stage{Name: "Implement"}
 	ok := eng.verifyAndHealLinkage(context.Background(), item, 0, stage, "owner", "repo", "owner/repo")
@@ -300,7 +300,7 @@ func TestVerifyAndHealLinkage_AlreadyLinked(t *testing.T) {
 			return nil
 		},
 	}
-	eng := testEngine(client, nil)
+	eng := testEngine(t, client, nil)
 	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
 	stage := &stages.Stage{Name: "Implement"}
 	ok := eng.verifyAndHealLinkage(context.Background(), item, 42, stage, "owner", "repo", "owner/repo")
@@ -320,7 +320,7 @@ func TestVerifyAndHealLinkage_BranchMismatch_NoLinkedPR(t *testing.T) {
 			return nil, nil // no PR on branch
 		},
 	}
-	eng := testEngine(client, nil)
+	eng := testEngine(t, client, nil)
 	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
 	stage := &stages.Stage{Name: "Implement"}
 	ok := eng.verifyAndHealLinkage(context.Background(), item, 42, stage, "owner", "repo", "owner/repo")
@@ -362,7 +362,7 @@ func TestVerifyAndHealLinkage_HealSuccess(t *testing.T) {
 			return nil
 		},
 	}
-	eng := testEngine(client, nil)
+	eng := testEngine(t, client, nil)
 	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
 	stage := &stages.Stage{Name: "Implement"}
 
@@ -400,7 +400,7 @@ func TestVerifyAndHealLinkage_HealAlreadyAttempted(t *testing.T) {
 			return "PR body.", nil
 		},
 	}
-	eng := testEngine(client, nil)
+	eng := testEngine(t, client, nil)
 
 	// Record that we've already attempted healing for this SHA.
 	eng.store.Apply(itemstate.LinkageHealAttempted{
@@ -447,7 +447,7 @@ func TestVerifyAndHealLinkage_BodyTooLong(t *testing.T) {
 			return longBody, nil
 		},
 	}
-	eng := testEngine(client, nil)
+	eng := testEngine(t, client, nil)
 	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
 	stage := &stages.Stage{Name: "Implement"}
 

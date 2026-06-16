@@ -53,7 +53,7 @@ func testStagesWithValidateAndCleanup() []*stages.Stage {
 func TestHandleNoWorkNeeded_MovesToDone(t *testing.T) {
 	client := &mockGitHubClient{}
 	// testStagesWithCleanup: Research(1), Plan(2), Implement(3), Done(99, cleanup)
-	eng := testEngineWithStages(client, testStagesWithCleanup())
+	eng := testEngineWithStages(t, client, testStagesWithCleanup())
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 5, ItemID: "PVTI_5"}
@@ -87,7 +87,7 @@ func TestHandleNoWorkNeeded_MovesToDone(t *testing.T) {
 // TestHandleNoWorkNeeded_NilStatusField logs warning and does not panic.
 func TestHandleNoWorkNeeded_NilStatusField(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngineWithStages(client, testStagesWithCleanup())
+	eng := testEngineWithStages(t, client, testStagesWithCleanup())
 	eng.statusField = nil
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
@@ -117,7 +117,7 @@ func TestHandleNoWorkNeeded_NilStatusField(t *testing.T) {
 // TestHandleNoWorkNeeded_NoDoneOption logs warning and does not panic.
 func TestHandleNoWorkNeeded_NoDoneOption(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngineWithStages(client, testStagesWithCleanup())
+	eng := testEngineWithStages(t, client, testStagesWithCleanup())
 	delete(eng.statusField.Options, "Done")
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
@@ -139,7 +139,7 @@ func TestHandleNoWorkNeeded_NoDoneOption(t *testing.T) {
 func TestHandleNoWorkNeeded_SkipsIntermediateStages(t *testing.T) {
 	client := &mockGitHubClient{}
 	// Stages: Research(1), Plan(2), Implement(3), Validate(4), Done(5, cleanup)
-	eng := testEngineWithStages(client, testStagesWithValidateAndCleanup())
+	eng := testEngineWithStages(t, client, testStagesWithValidateAndCleanup())
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 7, ItemID: "PVTI_7"}
@@ -195,7 +195,7 @@ func TestHandleNoWorkNeeded_SkipsIntermediateStages(t *testing.T) {
 // ApplyIssueClosed write-through sets IsClosed in the cache.
 func TestHandleNoWorkNeeded_ClosesIssue(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngineWithStages(client, testStagesWithCleanup())
+	eng := testEngineWithStages(t, client, testStagesWithCleanup())
 
 	// Wire up a live CacheImpl so the ApplyIssueClosed write-through is exercised.
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
@@ -247,7 +247,7 @@ func TestHandleNoWorkNeeded_CloseIssueNotCalledOnStatusFailure(t *testing.T) {
 			return fmt.Errorf("status update failed")
 		},
 	}
-	eng := testEngineWithStages(client, testStagesWithCleanup())
+	eng := testEngineWithStages(t, client, testStagesWithCleanup())
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 5, ItemID: "PVTI_5", Repo: "owner/repo"}
@@ -264,7 +264,7 @@ func TestHandleNoWorkNeeded_CloseIssueNotCalledOnStatusFailure(t *testing.T) {
 // removed when handleNoWorkNeeded runs, covering the orphaned-label scenario.
 func TestHandleNoWorkNeeded_ClearsAwaitingInput(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngineWithStages(client, testStagesWithCleanup())
+	eng := testEngineWithStages(t, client, testStagesWithCleanup())
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 5, ItemID: "PVTI_5", Labels: []string{"fabrik:awaiting-input"}}
@@ -290,7 +290,7 @@ func TestHandleNoWorkNeeded_ClearsAwaitingInput(t *testing.T) {
 // directly to Done, not to the next sequential stage.
 func TestHandleNoWorkNeeded_DirectlyDoneNotNextStage(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngineWithStages(client, testStagesWithCleanup())
+	eng := testEngineWithStages(t, client, testStagesWithCleanup())
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 9, ItemID: "PVTI_9"}

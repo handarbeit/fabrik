@@ -48,7 +48,7 @@ func TestCatchUpLoop_NonYolo_ReviewReinvoke_Fires(t *testing.T) {
 		{Name: "Implement", Order: 1, Prompt: "implement"},
 		{Name: "Review", Order: 2, Prompt: "review"},
 	}
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 	eng.cfg.MaxReviewCycles = 5
 	eng.mayNeedWorkMu.Lock()
 	eng.mayNeedWork["owner/repo#55"] = true
@@ -106,7 +106,7 @@ func TestCatchUpLoop_NonYolo_NoThreads_NoAdvance(t *testing.T) {
 		{Name: "Implement", Order: 1, Prompt: "implement"},
 		{Name: "Review", Order: 2, Prompt: "review"},
 	}
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 	eng.mayNeedWorkMu.Lock()
 	eng.mayNeedWork["owner/repo#56"] = true
 	eng.mayNeedWorkMu.Unlock()
@@ -250,7 +250,7 @@ func TestCatchUpLoop_YoloIssue_ReviewReinvoke_StillFires(t *testing.T) {
 		{Name: "Implement", Order: 1, Prompt: "implement"},
 		{Name: "Review", Order: 2, Prompt: "review"},
 	}
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 	eng.cfg.MaxReviewCycles = 5
 	eng.mayNeedWorkMu.Lock()
 	eng.mayNeedWork["owner/repo#57"] = true
