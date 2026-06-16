@@ -156,6 +156,9 @@ func (m *testGitHubUpgradeClient) EnablePullRequestAutoMerge(owner, repo string,
 func (m *testGitHubUpgradeClient) FetchCommitsBehind(owner, repo, base, head string) (int, error) {
 	return 0, nil
 }
+func (m *testGitHubUpgradeClient) FetchIssue(owner, repo string, issueNumber int) (*gh.IssueData, error) {
+	return nil, nil
+}
 
 // ── upgrade ───────────────────────────────────────────────────────────────────
 
