@@ -629,11 +629,31 @@ func (e *Engine) Run() error {
 		e.runStartupCleanup()
 		e.runStartupTransientLabelScan()
 		e.runStartupTerminalScan()
+		if e.cfg.JanitorIntervalHours != 0 {
+			e.runWorktreeJanitor(ctx)
+		}
 	}
 
 	// Start background stale-worker detector. Scans for workers whose heartbeat
 	// has gone stale and cleans up if the process is confirmed dead via signal 0.
 	e.startWorkerDetector(ctx)
+
+	// Start periodic worktree janitor. Scans .fabrik/worktrees/ and reaps
+	// orphaned worktrees for closed, off-board issues. Disabled when JanitorIntervalHours == 0.
+	if e.cfg.JanitorIntervalHours != 0 {
+		go func() {
+			ticker := time.NewTicker(time.Duration(e.cfg.JanitorIntervalHours) * time.Hour)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					e.runWorktreeJanitor(ctx)
+				}
+			}
+		}()
+	}
 
 	for {
 		if e.wakeCh != nil {
