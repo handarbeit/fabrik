@@ -51,7 +51,7 @@ func TestLayer1StatusRefreshRegression(t *testing.T) {
 			return newItemID, newStatus, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	// Wire mayNeedWork observer so we can assert StatusChanged fires.
 	mwnObs := newMayNeedWorkObserver(&eng.mayNeedWorkMu, &eng.mayNeedWork)
@@ -126,7 +126,7 @@ func TestLayer1StatusRefreshFastPath(t *testing.T) {
 			return newStatus, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	// Bootstrap with an item that already has an itemID (normal post-Bootstrap state).
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
@@ -164,7 +164,7 @@ func TestLayer1StatusRefreshSkipWhenNotOnBoard(t *testing.T) {
 			return "", "", nil // issue not on the project
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	cache := layer1Cache(eng, client, "PVT_test", true)
 
 	key := boardcache.ItemKey("owner/repo", 1)
@@ -191,7 +191,7 @@ func TestLayer1StatusRefreshSkipWhenNotOnBoard(t *testing.T) {
 // entirely. This guards against useless API calls during the startup window.
 func TestLayer1StatusRefreshEmptyProjectID(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	// Bootstrap with empty projectID — simulates pre-Bootstrap or mid-startup state.
 	cache := layer1Cache(eng, client, "" /* empty projectID */, true)

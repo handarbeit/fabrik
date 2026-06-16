@@ -25,13 +25,14 @@ func depTestStages() []*stages.Stage {
 	}
 }
 
-func depTestEngine(client *mockGitHubClient) *Engine {
-	return testEngineWithStages(client, depTestStages())
+func depTestEngine(t *testing.T, client *mockGitHubClient) *Engine {
+	t.Helper()
+	return testEngineWithStages(t, client, depTestStages())
 }
 
 func TestCheckDependencies_NoDeps_ReturnsFalse(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := depTestEngine(client)
+	eng := depTestEngine(t, client)
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 10, Repo: "owner/repo"}
 	stage := &stages.Stage{Name: "Research"}
@@ -51,7 +52,7 @@ func TestCheckDependencies_NoDeps_ReturnsFalse(t *testing.T) {
 
 func TestCheckDependencies_AllDepsClosed_ReturnsFalse(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := depTestEngine(client)
+	eng := depTestEngine(t, client)
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
 		Number: 10,
@@ -84,7 +85,7 @@ func TestCheckDependencies_AllDepsClosed_ReturnsFalse(t *testing.T) {
 // blocker actually closed.
 func TestCheckDependencies_StorePreemptsStaleDepState(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := depTestEngine(client)
+	eng := depTestEngine(t, client)
 
 	// Seed the Store with the blocker as closed — this is what a fresh Reconcile
 	// would have written before checkDependencies runs.
@@ -120,7 +121,7 @@ func TestCheckDependencies_StorePreemptsStaleDepState(t *testing.T) {
 
 func TestCheckDependencies_AllDepsClosed_RemovesBlockedLabel(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := depTestEngine(client)
+	eng := depTestEngine(t, client)
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
 		Number: 10,
@@ -147,7 +148,7 @@ func TestCheckDependencies_AllDepsClosed_RemovesBlockedLabel(t *testing.T) {
 
 func TestCheckDependencies_OpenDeps_ReturnsTrue_FirstTime(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := depTestEngine(client)
+	eng := depTestEngine(t, client)
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
 		Number: 10,
@@ -182,7 +183,7 @@ func TestCheckDependencies_OpenDeps_ReturnsTrue_FirstTime(t *testing.T) {
 
 func TestCheckDependencies_OpenDeps_AlreadyBlocked_NoComment(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := depTestEngine(client)
+	eng := depTestEngine(t, client)
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
 		Number: 10,
@@ -210,7 +211,7 @@ func TestCheckDependencies_OpenDeps_AlreadyBlocked_NoComment(t *testing.T) {
 
 func TestCheckDependencies_FirstStage_BlockedWithOpenDeps(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := depTestEngine(client)
+	eng := depTestEngine(t, client)
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
 		Number: 10,
@@ -241,7 +242,7 @@ func TestCheckDependencies_FirstStage_BlockedWithOpenDeps(t *testing.T) {
 
 func TestCheckDependencies_CrossRepoDep_FormattedCorrectly(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := depTestEngine(client)
+	eng := depTestEngine(t, client)
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
 		Number: 10,
@@ -286,7 +287,7 @@ func TestProcessItem_SkipsBlockedNonFirstStage(t *testing.T) {
 		},
 		client,
 		claude,
-		NewWorktreeManager("/tmp/test-repo"),
+		NewWorktreeManager(t.TempDir()),
 	)
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
@@ -331,7 +332,7 @@ func TestProcessItem_SkipsBlockedFirstStage(t *testing.T) {
 		},
 		client,
 		claude,
-		NewWorktreeManager("/tmp/test-repo"),
+		NewWorktreeManager(t.TempDir()),
 	)
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
@@ -377,7 +378,7 @@ func TestRemoveBlockedIfResolved_Success(t *testing.T) {
 			return nil
 		},
 	}
-	eng := depTestEngine(client)
+	eng := depTestEngine(t, client)
 	eng.removeBlockedIfResolved("owner", "repo", 10)
 	if calls != 1 {
 		t.Errorf("expected 1 RemoveLabelFromIssue call, got %d", calls)
@@ -401,7 +402,7 @@ func TestRemoveBlockedIfResolved_ErrNotFound(t *testing.T) {
 			return nil
 		},
 	}
-	eng := depTestEngine(client)
+	eng := depTestEngine(t, client)
 	eng.removeBlockedIfResolved("owner", "repo", 10)
 	if calls != 1 {
 		t.Errorf("expected exactly 1 call for ErrNotFound, got %d", calls)
@@ -427,7 +428,7 @@ func TestRemoveBlockedIfResolved_TransientRetrySucceeds(t *testing.T) {
 			return nil
 		},
 	}
-	eng := depTestEngine(client)
+	eng := depTestEngine(t, client)
 	eng.removeBlockedIfResolved("owner", "repo", 10)
 	if calls != 3 {
 		t.Errorf("expected 3 calls (2 transient then success), got %d", calls)
@@ -451,7 +452,7 @@ func TestRemoveBlockedIfResolved_NonTransientNoRetry(t *testing.T) {
 			return nil
 		},
 	}
-	eng := depTestEngine(client)
+	eng := depTestEngine(t, client)
 	eng.removeBlockedIfResolved("owner", "repo", 10)
 	if calls != 1 {
 		t.Errorf("expected exactly 1 call for non-transient error, got %d", calls)
@@ -475,7 +476,7 @@ func TestRemoveBlockedIfResolved_TransientExhausted(t *testing.T) {
 			return nil
 		},
 	}
-	eng := depTestEngine(client)
+	eng := depTestEngine(t, client)
 	eng.removeBlockedIfResolved("owner", "repo", 10)
 	if calls != 3 {
 		t.Errorf("expected 3 calls (all transient, exhausted), got %d", calls)
@@ -644,7 +645,7 @@ func TestPushUnblockObserver_NoBlockedLabel_NotRemoved(t *testing.T) {
 // when invoked for items in stage columns.
 func TestCheckDependencies_PullPath_Regression(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := depTestEngine(client)
+	eng := depTestEngine(t, client)
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
 		Number: 10,
@@ -681,7 +682,7 @@ func TestCheckDependencies_RemoveBlocked_ErrNotFound(t *testing.T) {
 			return nil
 		},
 	}
-	eng, cache := testEngineWithCache(client, &mockClaudeInvoker{})
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
 	cache.ApplyLabelAdded(boardcache.ItemKey("owner/repo", 1), "fabrik:blocked")
 
 	eventsCh := make(chan tui.Event, 16)

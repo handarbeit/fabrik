@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"testing"
+
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
@@ -28,7 +30,8 @@ func testStages() []*stages.Stage {
 		},
 	}
 }
-func testEngine(client *mockGitHubClient, claude *mockClaudeInvoker) *Engine {
+func testEngine(t *testing.T, client *mockGitHubClient, claude *mockClaudeInvoker) *Engine {
+	t.Helper()
 	return NewWithDeps(
 		Config{
 			Owner:         "owner",
@@ -41,15 +44,16 @@ func testEngine(client *mockGitHubClient, claude *mockClaudeInvoker) *Engine {
 		},
 		client,
 		claude,
-		NewWorktreeManager("/tmp/test-repo"),
+		NewWorktreeManager(t.TempDir()),
 	)
 }
 
 // testEngineWithCache creates an Engine with a live CacheImpl wired as readClient.
 // Returns the engine and the cache so tests can query cached state directly.
 // The cache is bootstrapped with a single item: owner/repo issue #1 in "Research".
-func testEngineWithCache(client *mockGitHubClient, claude *mockClaudeInvoker) (*Engine, *boardcache.CacheImpl) {
-	eng := testEngine(client, claude)
+func testEngineWithCache(t *testing.T, client *mockGitHubClient, claude *mockClaudeInvoker) (*Engine, *boardcache.CacheImpl) {
+	t.Helper()
+	eng := testEngine(t, client, claude)
 
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
 	cache.BootstrapFromProbe([]gh.BoardProbeItem{

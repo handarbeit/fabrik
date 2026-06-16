@@ -222,7 +222,7 @@ func min(a, b int) int {
 // skips a comment that has a 🚀 reaction even if the body lacks the Fabrik header.
 // This is the defense-in-depth dedup signal for engine-authored comments.
 func TestFindNewComments_SkipsRocketReactedComment(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	item := gh.ProjectItem{
 		Number: 20,
 		Comments: []gh.Comment{

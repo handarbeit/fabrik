@@ -42,7 +42,7 @@ func TestPoll_MultiRepoFilter_SkipsOtherRepos(t *testing.T) {
 			return nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	if _, err := eng.poll(context.Background()); err != nil {
 		t.Fatalf("poll: %v", err)
@@ -87,7 +87,7 @@ func TestPoll_MultiRepoFilter_YoloCatchup_SkipsOtherRepos(t *testing.T) {
 		advancedItems = append(advancedItems, itemID)
 		return nil
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.statusField = &gh.StatusField{
 		FieldID: "F1",
 		Options: map[string]string{"Research": "OPT_1", "Plan": "OPT_2"},

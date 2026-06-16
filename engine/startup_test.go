@@ -35,7 +35,7 @@ func TestCheckStageColumnAlignment_AllMatch(t *testing.T) {
 		fetchProjectBoardFn: boardWithColumns("proj-1"),
 		fetchStatusFieldFn:  statusFieldWithOptions("Research", "Plan", "Implement"),
 	}
-	e := testEngine(client, &mockClaudeInvoker{})
+	e := testEngine(t, client, &mockClaudeInvoker{})
 	err := e.checkStageColumnAlignment(context.Background())
 	if err != nil {
 		t.Fatalf("expected nil error, got: %v", err)
@@ -48,7 +48,7 @@ func TestCheckStageColumnAlignment_MissingStage(t *testing.T) {
 		fetchProjectBoardFn: boardWithColumns("proj-1"),
 		fetchStatusFieldFn:  statusFieldWithOptions("Research", "Plan"),
 	}
-	e := testEngine(client, &mockClaudeInvoker{})
+	e := testEngine(t, client, &mockClaudeInvoker{})
 	err := e.checkStageColumnAlignment(context.Background())
 	if err == nil {
 		t.Fatal("expected error for missing stage, got nil")
@@ -65,7 +65,7 @@ func TestCheckStageColumnAlignment_ExtraColumns(t *testing.T) {
 		fetchStatusFieldFn:  statusFieldWithOptions("Research", "Plan", "Implement", "Triage", "Backlog"),
 	}
 	var logged []string
-	e := testEngine(client, &mockClaudeInvoker{})
+	e := testEngine(t, client, &mockClaudeInvoker{})
 	// Capture logf output by overriding the events channel (nil = direct print).
 	// We can't easily intercept logf in plain-text mode, so just verify no error.
 	err := e.checkStageColumnAlignment(context.Background())
@@ -81,7 +81,7 @@ func TestCheckStageColumnAlignment_FetchBoardError(t *testing.T) {
 			return nil, fmt.Errorf("network timeout")
 		},
 	}
-	e := testEngine(client, &mockClaudeInvoker{})
+	e := testEngine(t, client, &mockClaudeInvoker{})
 	err := e.checkStageColumnAlignment(context.Background())
 	if err != nil {
 		t.Fatalf("FetchProjectBoard error should be non-fatal, got: %v", err)
@@ -95,7 +95,7 @@ func TestCheckStageColumnAlignment_FetchStatusFieldError(t *testing.T) {
 			return nil, fmt.Errorf("project %q has no Status field", projectID)
 		},
 	}
-	e := testEngine(client, &mockClaudeInvoker{})
+	e := testEngine(t, client, &mockClaudeInvoker{})
 	err := e.checkStageColumnAlignment(context.Background())
 	if err != nil {
 		t.Fatalf("FetchStatusField error should be non-fatal, got: %v", err)
@@ -120,7 +120,7 @@ func TestCheckStageColumnAlignment_CleanupStageExcluded(t *testing.T) {
 		},
 		client,
 		&mockClaudeInvoker{},
-		NewWorktreeManager("/tmp/test-repo"),
+		NewWorktreeManager(t.TempDir()),
 	)
 	err := e.checkStageColumnAlignment(context.Background())
 	if err != nil {
@@ -133,7 +133,7 @@ func TestCheckStageColumnAlignment_PopulatesStatusField(t *testing.T) {
 		fetchProjectBoardFn: boardWithColumns("proj-1"),
 		fetchStatusFieldFn:  statusFieldWithOptions("Research", "Plan", "Implement"),
 	}
-	e := testEngine(client, &mockClaudeInvoker{})
+	e := testEngine(t, client, &mockClaudeInvoker{})
 
 	if e.statusField != nil {
 		t.Fatal("statusField should be nil before check")
@@ -158,7 +158,7 @@ func TestCheckStageColumnAlignment_CaseSensitive(t *testing.T) {
 		fetchProjectBoardFn: boardWithColumns("proj-1"),
 		fetchStatusFieldFn:  statusFieldWithOptions("research", "plan", "implement"),
 	}
-	e := testEngine(client, &mockClaudeInvoker{})
+	e := testEngine(t, client, &mockClaudeInvoker{})
 	err := e.checkStageColumnAlignment(context.Background())
 	if err == nil {
 		t.Fatal("case-sensitive mismatch should be fatal, got nil")
@@ -172,7 +172,7 @@ func TestCheckStageColumnAlignment_EmptyProjectID(t *testing.T) {
 			return &gh.ProjectBoard{ProjectID: ""}, nil
 		},
 	}
-	e := testEngine(client, &mockClaudeInvoker{})
+	e := testEngine(t, client, &mockClaudeInvoker{})
 	err := e.checkStageColumnAlignment(context.Background())
 	if err != nil {
 		t.Fatalf("empty ProjectID should be non-fatal, got: %v", err)
@@ -214,7 +214,7 @@ func TestCheckStageColumnAlignment_OnlyCleanupStages(t *testing.T) {
 		},
 		client,
 		&mockClaudeInvoker{},
-		NewWorktreeManager("/tmp/test-repo"),
+		NewWorktreeManager(t.TempDir()),
 	)
 	err := e.checkStageColumnAlignment(context.Background())
 	if err != nil {

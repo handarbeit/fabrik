@@ -12,9 +12,10 @@ import (
 )
 
 // testEngineForMerge returns a minimal engine wired for attemptMergeOnValidate tests.
-func testEngineForMerge(client *mockGitHubClient) *Engine {
+func testEngineForMerge(t *testing.T, client *mockGitHubClient) *Engine {
+	t.Helper()
 	stgs := testStagesWithValidate()
-	return testEngineWithStages(client, stgs)
+	return testEngineWithStages(t, client, stgs)
 }
 
 // TestAttemptMergeOnValidate_YoloEnablesAutoMerge verifies that for a yolo item
@@ -26,7 +27,7 @@ func TestAttemptMergeOnValidate_YoloEnablesAutoMerge(t *testing.T) {
 			return &gh.PRDetails{Number: 10, HeadSHA: "sha1"}, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 
 	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
@@ -60,7 +61,7 @@ func TestAttemptMergeOnValidate_YoloEnablesAutoMerge(t *testing.T) {
 // a cruise-labelled item returns (false, nil) without calling EnablePullRequestAutoMerge.
 func TestAttemptMergeOnValidate_CruiseSkipsAutoMerge(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:cruise"}}
 
 	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
@@ -80,7 +81,7 @@ func TestAttemptMergeOnValidate_CruiseSkipsAutoMerge(t *testing.T) {
 // without calling EnablePullRequestAutoMerge a second time.
 func TestAttemptMergeOnValidate_AlreadyLabeled_Idempotent(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:auto-merge-enabled"}}
 
 	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
@@ -103,7 +104,7 @@ func TestAttemptMergeOnValidate_NoPR_SkipsAutoMerge(t *testing.T) {
 			return nil, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 
 	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
@@ -127,7 +128,7 @@ func TestAttemptMergeOnValidate_FetchLinkedPRError_ReturnsError(t *testing.T) {
 			return nil, errors.New("network error")
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 
 	_, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
@@ -154,7 +155,7 @@ func TestAttemptMergeOnValidate_FallsBackToDirectMergeWhenClean(t *testing.T) {
 			return nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 
 	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
@@ -200,7 +201,7 @@ func TestAttemptMergeOnValidate_FallsBackToDirectMergeWhenUnstable(t *testing.T)
 			return nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 
 	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
@@ -246,7 +247,7 @@ func TestAttemptMergeOnValidate_DirectMergeAlsoFails(t *testing.T) {
 			return gh.ErrNotMergeable
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
 
 	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
@@ -282,7 +283,7 @@ func TestHandleStageComplete_WaitForCI_SkipsMergeAndReturns(t *testing.T) {
 		},
 	}
 	stgs := testStagesWithValidate()
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 
 	tr := true
 	validateStage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
@@ -333,7 +334,7 @@ func TestAdvanceToNextStage_WritesThrough_Cache(t *testing.T) {
 		},
 	}
 	stgs := testStagesWithValidate()
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 
 	// Replace readClient with a CacheImpl bootstrapped with the test item in Research.
 	cache := boardcache.NewCacheImpl(boardcache.NewGitHubAdapter(client), eng.store, func(format string, args ...any) {})

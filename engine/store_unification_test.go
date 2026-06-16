@@ -91,7 +91,7 @@ func TestStoreUnification_CrossMutationVisibility(t *testing.T) {
 
 func TestStoreUnification_WorkerLivenessLabelRead(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng, cache := testEngineWithCache(client, &mockClaudeInvoker{})
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
 
 	// Simulate a webhook delivering "fabrik:locked:testuser" to the cache's delta path.
 	// cacheImpl.ApplyLabelAdded applies LocalLabelAdded on c.store, which after unification

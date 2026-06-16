@@ -18,7 +18,7 @@ import (
 // TestMigration_LockAcquireReleaseRoundtrip verifies the lock acquire → read → release
 // cycle via the store: acquire sets HeldByThis=true, release clears it (Lock==nil).
 func TestMigration_LockAcquireReleaseRoundtrip(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 
 	// Before acquire: item may not exist yet; if it does, no lock.
 	if snap0, err := eng.store.Get("owner/repo", 42); err == nil {
@@ -65,7 +65,7 @@ func TestMigration_LockAcquireReleaseRoundtrip(t *testing.T) {
 // nil → set by self (HeldByThis=true) → released (Lock==nil).
 // (Other-user locks arrive via webhook IssueLabeled and are not emitted by LocalLockAcquired.)
 func TestMigration_LockDerivedField(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 
 	// nil state.
 	snap, _ := eng.store.Get("owner/repo", 5)
@@ -91,7 +91,7 @@ func TestMigration_LockDerivedField(t *testing.T) {
 // TestMigration_TokenUsageUpdate verifies that InvocationRecorded stores
 // LastTokenUsage, LastInvocationCompleted, and LastInvocationBlocked atomically.
 func TestMigration_TokenUsageUpdate(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 
 	usage := itemstate.TokenUsage{InputTokens: 100, OutputTokens: 200, CacheReadTokens: 50}
 	eng.store.Apply(itemstate.InvocationRecorded{
@@ -117,7 +117,7 @@ func TestMigration_TokenUsageUpdate(t *testing.T) {
 
 // TestMigration_CompletionFlags verifies completed=true, blocked=false → correct snapshot.
 func TestMigration_CompletionFlags(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 
 	eng.store.Apply(itemstate.InvocationRecorded{
 		Repo:      "owner/repo",
@@ -155,7 +155,7 @@ func TestMigration_CompletionFlags(t *testing.T) {
 // TestMigration_DeepFetchCooldown verifies the 10×PollSeconds cooldown semantics:
 // recent failure → itemMayNeedWork returns false; expired failure → returns true.
 func TestMigration_DeepFetchCooldown(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	eng.cfg.PollSeconds = 1 // 10-second cooldown
 
 	item := gh.ProjectItem{Number: 51, Status: "Research", ItemID: "PVTI_51"}
@@ -175,7 +175,7 @@ func TestMigration_DeepFetchCooldown(t *testing.T) {
 
 // TestMigration_DeepFetchSuccessClears verifies that ItemDeepFetched zeros LastDeepFetchFailureAt.
 func TestMigration_DeepFetchSuccessClears(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 
 	eng.store.Apply(itemstate.DeepFetchFailed{Repo: "owner/repo", Number: 20, At: time.Now().Add(-time.Minute)})
 
@@ -199,7 +199,7 @@ func TestMigration_DeepFetchSuccessClears(t *testing.T) {
 // TestMigration_PRChecksObservedMonotonic verifies HasHadChecks transitions false→true
 // when PRChecksObserved is applied and remains true on subsequent applications.
 func TestMigration_PRChecksObservedMonotonic(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 
 	// Initially false.
 	snap0, _ := eng.store.Get("owner/repo", 30)
@@ -226,7 +226,7 @@ func TestMigration_PRChecksObservedMonotonic(t *testing.T) {
 
 // TestMigration_CIMergePendingSetAndClear verifies CIMergePendingSince set/clear transitions.
 func TestMigration_CIMergePendingSetAndClear(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 
 	// Initially zero.
 	snap0, _ := eng.store.Get("owner/repo", 40)
@@ -260,7 +260,7 @@ func TestMigration_CIMergePendingSetAndClear(t *testing.T) {
 // TestMigration_SnapshotImmutability verifies that a snapshot taken before an Apply
 // is not affected by the subsequent mutation.
 func TestMigration_SnapshotImmutability(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 
 	eng.store.Apply(itemstate.PRChecksObserved{Repo: "owner/repo", Number: 50})
 	snapBefore, _ := eng.store.Get("owner/repo", 50)
@@ -277,7 +277,7 @@ func TestMigration_SnapshotImmutability(t *testing.T) {
 // TestMigration_ConcurrentCompletions verifies that concurrent InvocationRecorded
 // applications for different issues are race-detector clean.
 func TestMigration_ConcurrentCompletions(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 
 	const n = 50
 	var wg sync.WaitGroup
