@@ -35,9 +35,7 @@ func TestInvokeClaude_GrandchildHoldsPipe(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	// Short WaitDelay so the test completes quickly (1s vs the production default of 30s).
 	origDelay := claudeWaitDelay
@@ -91,9 +89,7 @@ func TestInvokeClaude_MaxWallTimeKillsWithComplete(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	origDelay := claudeWaitDelay
 	claudeWaitDelay = 1 * time.Second
@@ -143,9 +139,7 @@ func TestInvokeClaude_MaxWallTimeKillsWithoutComplete(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	origDelay := claudeWaitDelay
 	claudeWaitDelay = 1 * time.Second
@@ -197,9 +191,7 @@ func TestKillProcGroupGraceful_StructuredLog(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	origDelay := claudeWaitDelay
 	claudeWaitDelay = 500 * time.Millisecond
@@ -291,9 +283,7 @@ func TestKillProcGroupGraceful_SIGINTGraceWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	origDelay := claudeWaitDelay
 	claudeWaitDelay = 500 * time.Millisecond
@@ -341,9 +331,7 @@ func TestInvokeClaude_InactivityTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	origPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+origPath)
-	defer os.Setenv("PATH", origPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	origDelay := claudeWaitDelay
 	claudeWaitDelay = 1 * time.Second
