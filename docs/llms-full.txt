@@ -1347,7 +1347,7 @@ When a PR receives a new push **after** `stage:Validate:complete` has been appli
 
 Validate then runs on the new HEAD SHA, with the full CI gate and convergence-monitor flow.
 
-**Legacy items (empty completion SHA):** Issues that completed Validate before v0.0.69 was deployed do not have a recorded completion SHA. The SHA-change scan is a no-op for these — Fabrik cannot distinguish a pre-feature item from an item whose SHA was intentionally cleared. Use `fabrik:revalidate` as the manual fallback: applying the label clears the same set of gate labels and re-runs Validate on the current HEAD SHA. See [fabrik:revalidate](#user-set-labels) in the labels reference.
+**Legacy items (empty completion SHA):** Issues that completed Validate before v0.0.69 was deployed do not have a recorded completion SHA. The SHA-change scan is a no-op for these — Fabrik cannot distinguish a pre-feature item from an item whose SHA was intentionally cleared. Use `fabrik:revalidate` as the manual fallback: applying the label clears `stage:Validate:complete`, `stage:Validate:failed`, `fabrik:paused`, `fabrik:awaiting-input`, `fabrik:awaiting-ci`, and `fabrik:auto-merge-enabled`, then re-runs Validate on the current HEAD SHA. See [fabrik:revalidate](#user-set-labels) in the labels reference.
 
 ---
 
