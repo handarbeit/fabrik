@@ -20,9 +20,6 @@ import (
 func TestEnsureBareClone_NewDir_ClonesFromLocal(t *testing.T) {
 	skipIfNoGit(t)
 
-	// Create a local "source" git repo to clone from via file:// URL
-	srcDir := initBareRepo(t)
-
 	tmpDir := t.TempDir()
 
 	// Override cloneURL construction by temporarily monkey-patching isn't possible in Go,
@@ -40,7 +37,4 @@ func TestEnsureBareClone_NewDir_ClonesFromLocal(t *testing.T) {
 	if _, statErr := os.Stat(fabrikDir); os.IsNotExist(statErr) {
 		t.Error(".fabrik directory should be created before clone attempt")
 	}
-
-	// Suppress unused variable warning from srcDir
-	_ = srcDir
 }
