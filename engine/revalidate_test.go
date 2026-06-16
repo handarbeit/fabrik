@@ -47,7 +47,7 @@ func TestRevalidate_ClearsLabelsOnValidateStage(t *testing.T) {
 			}, nil
 		},
 	}
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 
 	if _, err := eng.poll(context.Background()); err != nil {
 		t.Fatalf("poll: %v", err)
@@ -179,7 +179,7 @@ func TestRevalidate_InFlightWorkerDefersProcessing(t *testing.T) {
 			}, nil
 		},
 	}
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 
 	// Simulate an in-flight Validate worker.
 	eng.store.Apply(itemstate.LocalLockAcquired{
@@ -253,7 +253,7 @@ func TestRevalidate_ItemNeedsWorkAfterLabelClear(t *testing.T) {
 			}, nil
 		},
 	}
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 
 	// First poll: revalidate scan fires and removes all blocking labels.
 	if _, err := eng.poll(context.Background()); err != nil {
