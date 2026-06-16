@@ -9,6 +9,7 @@ import (
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -147,6 +148,16 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 		}
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+completeLabel)
+		}
+		if stage.Name == "Validate" {
+			repoStr := itemOwnerRepoString(item, e.defaultRepo())
+			wm := e.worktreesFor(item.Repo)
+			if sha, shaErr := gitRevParse(wm.WorktreeDir(item.Number), "HEAD"); shaErr == nil && sha != "" {
+				e.store.Apply(itemstate.ValidateCompletedAtSHA{Repo: repoStr, Number: item.Number, SHA: sha})
+				e.logf(item.Number, "validate-sha", "recorded completion SHA %s\n", sha)
+			} else {
+				e.logf(item.Number, "warn", "could not record completion SHA: %v\n", shaErr)
+			}
 		}
 	}
 
@@ -326,6 +337,16 @@ func (e *Engine) handleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 		}
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+completeLabel)
+		}
+		if stage.Name == "Validate" {
+			repoStr := itemOwnerRepoString(item, e.defaultRepo())
+			wm := e.worktreesFor(item.Repo)
+			if sha, shaErr := gitRevParse(wm.WorktreeDir(item.Number), "HEAD"); shaErr == nil && sha != "" {
+				e.store.Apply(itemstate.ValidateCompletedAtSHA{Repo: repoStr, Number: item.Number, SHA: sha})
+				e.logf(item.Number, "validate-sha", "recorded completion SHA %s\n", sha)
+			} else {
+				e.logf(item.Number, "warn", "could not record completion SHA: %v\n", shaErr)
+			}
 		}
 	}
 
