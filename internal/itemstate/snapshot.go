@@ -130,6 +130,15 @@ func (s Snapshot) LinkedPR() *LinkedPRState {
 	return &lpr
 }
 
+// ValidateCompletedSHA returns the HEAD SHA recorded when stage:Validate:complete
+// was last applied, or "" if not recorded (LinkedPR is nil or field not set).
+func (s Snapshot) ValidateCompletedSHA() string {
+	if s.state.LinkedPR == nil {
+		return ""
+	}
+	return s.state.LinkedPR.ValidateCompletedSHA
+}
+
 // CooldownAt returns the expiry time for a given cooldown reason, or zero if none.
 func (s Snapshot) CooldownAt(reason string) time.Time {
 	return s.state.CooldownAt[reason]

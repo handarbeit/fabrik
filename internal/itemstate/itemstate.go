@@ -142,6 +142,13 @@ type LinkedPRState struct {
 	// to complete after CI passed. Zero if not currently pending.
 	// Replaces engine.ciMergePendingSince[iKey].
 	CIMergePendingSince time.Time
+
+	// ValidateCompletedSHA records the HEAD SHA of the linked PR at the moment
+	// stage:Validate:complete was last applied. The SHA-invalidation scan in
+	// engine/poll.go compares this against the current HeadSHA to detect force-pushes
+	// or external commits after Validate finished. Empty string means "not recorded"
+	// (pre-feature or no Validate completion in this session).
+	ValidateCompletedSHA string
 }
 
 // StageState holds per-stage attempt counters and cycle counts.
