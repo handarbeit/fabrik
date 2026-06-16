@@ -1362,11 +1362,14 @@ func (e *Engine) handleValidateSHAInvalidation(item gh.ProjectItem, owner, repo 
 	e.logf(item.Number, "validate-sha", "SHA changed after Validate completion — clearing stale completion labels\n")
 
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	// stage:Validate:complete is last: it's the scan sentinel. If any prior removal
+	// fails we break early, keeping stage:Validate:complete on GitHub so the next
+	// poll re-runs the scan and retries — no permanently-stuck partial state.
 	labelsToRemove := []string{
-		"stage:Validate:complete",
 		"fabrik:auto-merge-enabled",
 		"fabrik:awaiting-ci",
 		"fabrik:awaiting-review",
+		"stage:Validate:complete",
 	}
 	hasError := false
 	for _, lbl := range labelsToRemove {
@@ -1379,7 +1382,7 @@ func (e *Engine) handleValidateSHAInvalidation(item gh.ProjectItem, owner, repo 
 			}
 			e.logf(item.Number, "warn", "validate-sha: could not remove %s: %v\n", lbl, err)
 			hasError = true
-			continue
+			break
 		}
 		e.logf(item.Number, "validate-sha", "removed label %s\n", lbl)
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
