@@ -71,6 +71,7 @@ These labels define distinct states (their presence changes what the engine does
 | `stage:<X>:in_progress` | Progress | Yes — a stage invocation is active |
 | `stage:<X>:complete` | Completion | Yes — stage finished successfully |
 | `stage:<X>:failed` | Failure | Yes — stage exhausted retry limit |
+| `fabrik:revalidate` | Operator trigger | Transient — consumed by the revalidate-scan loop; triggers Validate re-entry then removes itself |
 
 ### 1.2 Modifier Labels (Guard Conditions)
 
@@ -149,6 +150,7 @@ Each active stage column has the same set of reachable sub-states:
 | `base:<branch>` | User (manual) | Before Research (recommended) | User (manual) | Any time | Overrides worktree base branch; falls back to default if branch not found on remote; if a PR exists, its base branch is updated to match on each stage invocation |
 | `fabrik:sub-issue` | `preImplement` (engine-side) | Applied to each spawned child issue during pre-Implement spawn step | N/A | N/A | Informational — marks issues created by Fabrik's sub-issue spawn mechanism; no engine-side gate semantics |
 | `fabrik:children-spawned` | `preImplement` (engine-side) | After all `FABRIK_SPAWN_CHILD_*` children are successfully created and linked as blockedBy of parent | User (manual, to re-trigger spawn) | If user wants fresh spawn (must also close orphan children) | Idempotency guard — prevents `preImplement` from re-spawning children on retry; while present, `preImplement` is a no-op |
+| `fabrik:revalidate` | User (manual) | Applied to any issue to request Validate re-entry | Revalidate-scan loop (`handleRevalidateLabel`), plus `cleanupClosedIssueTransientLabels` (defensive sweep) | On Validate-stage items: immediately after removing all gate/completion labels; on non-Validate items: after logging a warning; on closed issues: defensive sweep | Triggers removal of `stage:Validate:complete`, `stage:Validate:failed`, `fabrik:paused`, `fabrik:awaiting-input`, `fabrik:awaiting-ci`, `fabrik:auto-merge-enabled`, then itself; resets `PausedByEngine`, `StageRetryCount`, `LastAttemptAt`, `EngineCycles` for Validate; Validate dispatches on the next poll cycle. Applied to non-Validate issues: only the trigger label is removed, no other action. Applied while a Validate worker is in-flight: held in place until the worker exits (FR-4). Bypasses the `updatedAt` cooldown cache via `hasAwaitingLabel` so stuck-Validate items with settled `updatedAt` are still deep-fetched. |
 
 ---
 
@@ -367,6 +369,29 @@ Note: within `checkDependencies()`, for each blocker the engine first consults `
 **Dispatch guard:** The dispatch loop uses `snap.Worker() != nil` (Store-backed) instead of the former `e.inFlight.Load(iKey)` (sync.Map). Because `WorkerEntered` is applied before `wg.Add(1)` and before the goroutine starts, `snap.Worker() != nil` is true from the instant the goroutine is scheduled — there is no window where a new dispatch cycle could race in and double-dispatch the item.
 
 **Why:** Worker lifecycle is engine state the dispatcher must react to. Pre-Fix B (issue #544), it lived in `e.inFlight` (sync.Map) outside the Store — a known bypass that violated ADR 036's single-owner reactive cache invariant. `WorkerEntered`/`WorkerExited` complete the migration begun by the Phase 5 F3 store unification.
+
+### 2.15 Revalidate Label (`fabrik:revalidate`)
+
+**Source:** Operator-applied GitHub label.
+
+**Detection:** A dedicated revalidate-scan loop runs after the paused-item recovery loop and before the dispatch loop in `engine/poll.go`. It iterates all `deepFetchCandidates` unconditionally (paused items included — FR-5). Items that don't carry `fabrik:revalidate` are skipped immediately. The loop is reached by stuck-Validate items because `fabrik:revalidate` is included in the `hasAwaitingLabel` pre-filter bypass at `poll.go:1123`, ensuring items with settled `updatedAt` are still deep-fetched on every poll.
+
+**Effect (Validate-stage item, no in-flight worker):**
+1. Removes `stage:Validate:complete`, `stage:Validate:failed`, `fabrik:paused`, `fabrik:awaiting-input`, `fabrik:awaiting-ci`, `fabrik:auto-merge-enabled` from GitHub (best-effort sequential REST calls; 404 responses are treated as already-absent and are not errors).
+2. Removes `fabrik:revalidate` itself from GitHub.
+3. For each successful removal: `cacheImpl.ApplyLabelRemoved` + `webhookMgr.RegisterEcho` (cache write-through and echo registration, same pattern as all other label mutations in the engine).
+4. Applies four store resets: `StageRetryCleared`, `EngineUnpaused`, `StageLastAttemptCleared`, `EngineCyclesCleared` — all for `StageName: "Validate"`. This is the same full-reset sequence used by `clearFailedStage`.
+5. Validate dispatches on the **next poll cycle**: the revalidate scan does not update `deepFetchCandidates` in place. After label removal, the item re-enters the board on the next poll with no blocking labels and no `LastAttemptAt` cooldown, so `itemNeedsWork` returns true and the dispatch loop invokes `processItem`.
+
+**Effect (non-Validate item):** Logs a warning, removes only `fabrik:revalidate`, takes no other action.
+
+**In-flight worker guard (FR-4):** If `snap.Worker() != nil` (a Validate invocation is still active), the label is left in place and the revalidate scan defers to the next poll cycle. When the worker exits, `WorkerExited` populates `mayNeedWork` and the next poll processes the label normally.
+
+**Partial label-removal failure:** Each REST call is independent. If a removal fails (non-404 error), the engine logs a warning and continues. On the next poll, the item is still deep-fetched (if `fabrik:revalidate` was not yet removed), and the revalidate scan retries the remaining removals idempotently.
+
+**Closed-issue cleanup:** `fabrik:revalidate` is in `transientLifecycleLabels`, so `cleanupClosedIssueTransientLabels` sweeps it from closed issues defensively (FR-7).
+
+**Why:** Recovery from a stuck-Validate state previously required knowing and clearing 4–5 individual labels. `fabrik:revalidate` collapses recovery to one action. It stays useful even after structural CI-gate fixes (#855) for operator-initiated re-runs when CI infrastructure has recovered out-of-band, a flaky test was resolved manually, or other non-engine causes.
 
 ---
 
