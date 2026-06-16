@@ -288,6 +288,15 @@ func (e *Engine) addCompleteLabelAndRemoveCI(owner, repo string, item gh.Project
 	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
 	}
+	if stage.Name == "Validate" {
+		repoStr := owner + "/" + repo
+		if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
+			if lpr := snap.LinkedPR(); lpr != nil && lpr.HeadSHA != "" {
+				e.store.Apply(itemstate.ValidateCompletedAtSHA{Repo: repoStr, Number: item.Number, SHA: lpr.HeadSHA})
+				e.logf(item.Number, "validate-sha", "recorded CI-completion SHA %s\n", lpr.HeadSHA)
+			}
+		}
+	}
 	e.removeAwaitingCILabel(owner, repo, item)
 }
 
