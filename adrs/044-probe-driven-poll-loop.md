@@ -82,11 +82,11 @@ The virgin-cache branch now uses `ProbeProjectBoard → BootstrapFromProbe` inst
 
 **Why**: `FetchProjectBoard` carries `labels(first:30)` and `closedByPullRequestsReferences(first:5)` per item, costing ~2 350 nodes on a 47-item board just to warm a cold cache. `ProbeProjectBoard` costs ~250 nodes for the same board. An overnight test revealed the old path was causing Fabrik to go deaf for ~1 hour after restart when the shared GraphQL budget was already depleted.
 
-### `BootstrapFromProbe(items []BoardProbeItem, projectID string, stagesCfg []*stages.Stage)`
+### `BootstrapFromProbe(items []BoardProbeItem, projectID string)`
 
 New method on `boardcache.CacheImpl`. Constructs synthetic `[]gh.ProjectItem` from probe items and calls `store.Reset`, which populates `LinkedPR.Number` from `LinkedPRNumber` via `applyProjectItem`. This prevents the subsequent probe cycle from seeing spurious linkage-drift on items that already have a PR.
 
-After `store.Reset`, `BootstrapFromProbe` applies `TerminalFlagSet` for items that are both closed and in a cleanup stage (`CleanupWorktree: true`). The simplified predicate (no label check) means these items are never deep-fetched — not by the first probe cycle, and not by subsequent cycles unless their status changes.
+After `store.Reset`, the engine calls `seedTerminalFromProbeItems` (see Addendum 3) to apply `TerminalFlagSet` for items that are both closed, in a cleanup stage, and have no on-disk worktree. The simplified predicate (no label check, but with worktree check) means these items are never deep-fetched — not by the first probe cycle, and not by subsequent cycles unless their status changes.
 
 ### Label absence and its consequences
 
@@ -110,8 +110,8 @@ This is a correctness fix as well as an optimization: the old code fired `DeepFe
 
 | Trigger | Path | Labels in store? | Terminal seeding |
 |---|---|---|---|
-| Virgin cache (default) | `ProbeProjectBoard → BootstrapFromProbe` | No | `IsClosed + CleanupWorktree` |
-| Webhook startup (before `wm.Start()`) | `ProbeProjectBoard → BootstrapFromProbe` | No | `IsClosed + CleanupWorktree` |
+| Virgin cache (default) | `ProbeProjectBoard → BootstrapFromProbe` | No | `IsClosed + CleanupWorktree + worktree absent` (engine-side, see Addendum 3) |
+| Webhook startup (before `wm.Start()`) | `ProbeProjectBoard → BootstrapFromProbe` | No | `IsClosed + CleanupWorktree + worktree absent` (engine-side, see Addendum 3) |
 | Drift recovery / reconcile | `LightReconcile → Reconcile(freshBoard)` | Yes (from `FetchProjectBoard`) | `runStartupTerminalScan` |
 
 ---
@@ -130,7 +130,7 @@ The webhook startup block was replaced with the same `ProbeProjectBoard → Boot
 
 1. `ProbeProjectBoard` (~250 nodes) fetches the board probe.
 2. If the probe returns zero items (transient indexer hiccup), the cache is left virgin and the first poll retries.
-3. Otherwise, `BootstrapFromProbe` seeds `Terminal=true` for closed cleanup-stage items — these are then skipped by `runProbeAndDeepFetch` on the first poll.
+3. Otherwise, `BootstrapFromProbe` seeds the store with synthetic items; the engine's `seedTerminalFromProbeItems` then seeds `Terminal=true` for closed cleanup-stage items whose worktrees are absent on disk — these are skipped by `runProbeAndDeepFetch` on the first poll. See Addendum 3 for the worktree-presence check.
 
 The replacement block runs synchronously before `wm.Start()`, preserving the no-delta-in-empty-cache ordering guarantee.
 
@@ -142,3 +142,31 @@ The replacement block runs synchronously before `wm.Start()`, preserving the no-
 |---|---|---|
 | Webhook restart, N=47 items, k=5 active | ~2 350 nodes (probe) + 47 × deep-fetch | ~250 nodes (probe) + 5 × deep-fetch |
 | Virgin-cache (polling-only) | Already using BootstrapFromProbe (no change) | Same |
+
+---
+
+## Addendum 3 — Terminal seeding moved to engine with worktree-presence check (issue #858, 2026-06-16)
+
+### Problem
+
+The probe-only terminal predicate (`IsClosed + CleanupWorktree`) in `BootstrapFromProbe` and `isProbeOnlyTerminal` both seeded `Terminal=true` without verifying that the on-disk worktree was absent. This meant items that were closed and in the Done stage — but whose worktrees had never been cleaned up — were incorrectly marked terminal at bootstrap, permanently preventing `processItem` from running the `cleanup_worktree` action.
+
+The common trigger was an auto-upgrade restart between a PR merge (which closes the issue and advances the board to Done) and the next `processItem` invocation. The engine restarted, observed the closed Done item in the probe, seeded `Terminal=true`, and never touched the issue again. Worktrees accumulated silently on disk.
+
+### Fix
+
+**Terminal seeding responsibility moved from `boardcache` to `engine`** (consistent with ADR-036's directive that lifecycle decisions belong in the engine).
+
+`BootstrapFromProbe` signature changed: `stagesCfg []*stages.Stage` parameter removed. The method now only populates the store from probe data; it no longer applies `TerminalFlagSet`.
+
+Two new engine methods handle terminal seeding:
+
+- **`(e *Engine) isProbeOnlyTerminal(item gh.ProjectItem) bool`** — replaces the package-level function. Checks `IsClosed`, `CleanupWorktree`, and (new) `e.worktreeExistsForItem(item)`. Returns true only when all three conditions hold: closed, cleanup stage, AND worktree absent on disk. Logs the outcome at the decision point (FR-6).
+
+- **`(e *Engine) seedTerminalFromProbeItems(items []gh.BoardProbeItem)`** — called by the engine immediately after each `BootstrapFromProbe` invocation (both the webhook startup path at `poll.go:451` and the virgin-cache path at `poll.go:929`). Iterates probe items, calls `isProbeOnlyTerminal`, and applies `TerminalFlagSet` only for items whose worktrees are confirmed absent.
+
+The single production call to the old `isProbeOnlyTerminal` in `runProbeAndDeepFetch`'s new-item branch was updated to call the new `*Engine` method with the in-scope `minimal` `gh.ProjectItem`.
+
+### Consequence
+
+Items that are closed and in a Done/cleanup stage but whose worktrees still exist on disk proceed through the normal dispatch path: deep-fetch → `processItem` → `cleanup_worktree` → worktree removed → `isTerminalPredicate` (label-aware) confirms terminal on the next poll. The existing cost-saving short-circuit is preserved for items whose worktrees have already been cleaned up.
