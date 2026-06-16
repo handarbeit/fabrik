@@ -629,7 +629,7 @@ func (e *Engine) Run() error {
 		e.runStartupCleanup()
 		e.runStartupTransientLabelScan()
 		e.runStartupTerminalScan()
-		if e.cfg.JanitorIntervalHours != 0 {
+		if e.cfg.JanitorIntervalHours > 0 {
 			e.runWorktreeJanitor(ctx)
 		}
 	}
@@ -640,7 +640,7 @@ func (e *Engine) Run() error {
 
 	// Start periodic worktree janitor. Scans .fabrik/worktrees/ and reaps
 	// orphaned worktrees for closed, off-board issues. Disabled when JanitorIntervalHours == 0.
-	if e.cfg.JanitorIntervalHours != 0 {
+	if e.cfg.JanitorIntervalHours > 0 {
 		go func() {
 			ticker := time.NewTicker(time.Duration(e.cfg.JanitorIntervalHours) * time.Hour)
 			defer ticker.Stop()
