@@ -148,7 +148,7 @@ func TestUpdate_TurnCountMsg_UpdatesTurnsUsed(t *testing.T) {
 func TestUpdate_NewLogFileMsg_ResetsTurnsUsed(t *testing.T) {
 	m := newTestModel()
 	m.turnsUsed = 23
-	model, _ := m.Update(NewLogFileMsg{Path: filepath.Join(t.TempDir(), "fake-Research-20260101-100000-000000000.log")})
+	model, _ := m.Update(NewLogFileMsg{Path: "fake-Research-20260101-100000-000000000.log"})
 	wm := model.(WatchModel)
 	if wm.turnsUsed != 0 {
 		t.Errorf("turnsUsed = %d after NewLogFileMsg, want 0", wm.turnsUsed)
