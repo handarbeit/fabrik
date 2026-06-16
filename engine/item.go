@@ -1285,37 +1285,64 @@ func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 // all gate and completion labels that would block Validate re-entry, then removing
 // the trigger label itself. Called from the revalidate-scan loop in poll.go after
 // the in-flight worker guard passes. Mirrors clearFailedStage's pattern.
+// If any blocking label removal fails (non-404), defers trigger removal and store
+// resets to the next poll cycle so the operator label remains and retries automatically.
 func (e *Engine) handleRevalidateLabel(item gh.ProjectItem, owner, repo string) {
 	e.logf(item.Number, "revalidate", "clearing gate/completion labels for Validate re-entry\n")
 
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
-	labelsToRemove := []string{
+	blockingLabels := []string{
 		"stage:Validate:complete",
 		"stage:Validate:failed",
 		"fabrik:paused",
 		"fabrik:awaiting-input",
 		"fabrik:awaiting-ci",
 		"fabrik:auto-merge-enabled",
-		"fabrik:revalidate",
 	}
-	for _, lbl := range labelsToRemove {
+	hasError := false
+	for _, lbl := range blockingLabels {
 		if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, lbl); err != nil {
 			if errors.Is(err, gh.ErrNotFound) {
 				// Label already absent — desired state achieved; sync cache.
 				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), lbl)
+					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(repoStr, item.Number), lbl)
 				}
 				continue
 			}
 			e.logf(item.Number, "warn", "revalidate: could not remove %s: %v\n", lbl, err)
+			hasError = true
 			continue
 		}
 		e.logf(item.Number, "revalidate", "removed label %s\n", lbl)
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), lbl)
+			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(repoStr, item.Number), lbl)
 		}
 		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+lbl)
+			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(repoStr, item.Number)+"+"+lbl)
+		}
+	}
+
+	if hasError {
+		e.logf(item.Number, "warn", "revalidate: some labels failed to remove; deferring trigger removal and store reset to next poll\n")
+		return
+	}
+
+	if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:revalidate"); err != nil {
+		if errors.Is(err, gh.ErrNotFound) {
+			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(repoStr, item.Number), "fabrik:revalidate")
+			}
+		} else {
+			e.logf(item.Number, "warn", "revalidate: could not remove trigger label: %v\n", err)
+			return
+		}
+	} else {
+		e.logf(item.Number, "revalidate", "removed trigger label fabrik:revalidate\n")
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(repoStr, item.Number), "fabrik:revalidate")
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(repoStr, item.Number)+"+"+"fabrik:revalidate")
 		}
 	}
 
