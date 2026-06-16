@@ -2011,8 +2011,8 @@ func (e *Engine) runStartupTransientLabelScan() {
 // Label availability note: when the cache was bootstrapped via BootstrapFromProbe
 // (the default cold-start path), labels are absent from the Store. In that case
 // this scan is a no-op — isTerminalPredicate returns false for every item.
-// Cold-start terminal seeding is instead handled by BootstrapFromProbe itself
-// using the simpler IsClosed+CleanupWorktree predicate (no labels required).
+// Cold-start terminal seeding is instead handled by seedTerminalFromProbeItems
+// (called after BootstrapFromProbe) using IsClosed+CleanupWorktree+worktree-absent.
 // When bootstrapped via the full FetchProjectBoard path, labels are present
 // and this scan applies the full predicate correctly.
 func (e *Engine) runStartupTerminalScan() {
