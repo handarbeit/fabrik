@@ -774,6 +774,7 @@ var transientLifecycleLabels = []string{
 	"fabrik:awaiting-input",
 	"fabrik:rebase-needed",
 	"fabrik:bot-reprompted",
+	"fabrik:revalidate",
 }
 
 // cleanupClosedIssueTransientLabels removes transient lifecycle labels from any
@@ -1122,7 +1123,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		if !cycleSet[iKey] {
 			stage := stages.FindStage(e.cfg.Stages, item.Status)
 			isCleanup := stage != nil && stage.CleanupWorktree
-			hasAwaitingLabel := hasLabel(item, "fabrik:awaiting-ci") || hasLabel(item, "fabrik:rebase-needed") || hasLabel(item, "fabrik:awaiting-review") || hasLabel(item, "fabrik:auto-merge-enabled")
+			hasAwaitingLabel := hasLabel(item, "fabrik:awaiting-ci") || hasLabel(item, "fabrik:rebase-needed") || hasLabel(item, "fabrik:awaiting-review") || hasLabel(item, "fabrik:auto-merge-enabled") || hasLabel(item, "fabrik:revalidate")
 			var hasExpiredCooldown, notInStore bool
 			if !isCleanup && !hasAwaitingLabel {
 				repo := itemOwnerRepoString(item, e.defaultRepo())
@@ -1459,6 +1460,48 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			e.logf(item.Number, "warn", "ci-paused-recovery: could not advance to Done: %v\n", aerr)
 		}
 		advancedItems[issueKey(item, e.defaultRepo())] = true
+	}
+
+	// Revalidate scan: operator-facing fabrik:revalidate label re-entry.
+	// Runs on ALL deepFetchCandidates unconditionally (paused items included — FR-5).
+	// Uses next-poll dispatch: does not mutate deepFetchCandidates in place.
+	for _, item := range deepFetchCandidates {
+		if !hasLabel(item, "fabrik:revalidate") {
+			continue
+		}
+		owner, repo := itemOwnerRepo(item, e.defaultRepo())
+		repoStr := itemOwnerRepoString(item, e.defaultRepo())
+		stage := stages.FindStage(e.cfg.Stages, item.Status)
+		if stage == nil || stage.Name != "Validate" {
+			stageName := item.Status
+			if stage != nil {
+				stageName = stage.Name
+			}
+			e.logf(item.Number, "warn", "fabrik:revalidate applied to non-Validate stage %q — removing label, no action\n", stageName)
+			if rerr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:revalidate"); rerr != nil {
+				if errors.Is(rerr, gh.ErrNotFound) {
+					if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+						cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(repoStr, item.Number), "fabrik:revalidate")
+					}
+				} else {
+					e.logf(item.Number, "warn", "revalidate: could not remove label from non-Validate issue: %v\n", rerr)
+				}
+			} else {
+				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(repoStr, item.Number), "fabrik:revalidate")
+				}
+				if e.webhookMgr != nil {
+					e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(repoStr, item.Number)+"+"+"fabrik:revalidate")
+				}
+			}
+			continue
+		}
+		// In-flight guard: do not interrupt an active Validate worker (FR-4).
+		if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil && snap.Worker() != nil {
+			e.logf(item.Number, "revalidate", "Validate worker in-flight — deferring revalidate to next poll\n")
+			continue
+		}
+		e.handleRevalidateLabel(item, owner, repo)
 	}
 
 	var dispatched int

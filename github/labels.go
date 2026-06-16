@@ -36,6 +36,7 @@ var staticLabelDefs = []labelDef{
 	{"fabrik:awaiting-ci", "CI gate active; waiting for CI checks to pass (checks may be running or have failed)", "e4e669"},
 	{"fabrik:rebase-needed", "Base branch advanced and PR no longer merges; engine is retrying a rebase invocation", "e4e669"},
 	{"fabrik:bot-reprompted", "Bot re-prompt sent; waiting for bot to respond (transient; removed at gate-cycle end)", "e4e669"},
+	{"fabrik:revalidate", "Force re-entry of Validate; clears gate/pause/CI labels; auto-removes; non-Validate: removed", "e4e669"},
 
 	// --- neutral / transient labels (grey) ---
 	{"fabrik:auto-merge-enabled", "GitHub auto-merge enabled on linked PR; engine awaiting GitHub atomic merge", "cfd3d7"},
