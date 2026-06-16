@@ -25,6 +25,17 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      - name: Test hygiene lint
+        run: |
+          if grep -rn '"/tmp/' --include="*_test.go" .; then
+            echo "ERROR: hardcoded /tmp/ paths found in test files. Use t.TempDir() instead."
+            exit 1
+          fi
+          if grep -rn 'nonexistent-xyz' --include="*_test.go" .; then
+            echo "ERROR: network-dependent failure injection found. Use ENAMETOOLONG instead."
+            exit 1
+          fi
+
       - name: go test
         # TestExecute_ConfigYAMLApplied is a timing-sensitive SIGINT integration
         # test that fails intermittently on CI; it is tracked separately.
