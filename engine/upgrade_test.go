@@ -79,7 +79,7 @@ func TestCheckReleaseUpgrade_UpToDate(t *testing.T) {
 			return &gh.LatestRelease{TagName: "v0.0.1"}, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.cfg.AutoUpgrade = true
 	eng.cfg.Version = "v0.0.1"
 
@@ -102,7 +102,7 @@ func TestCheckReleaseUpgrade_NoMatchingAsset(t *testing.T) {
 			}, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.cfg.AutoUpgrade = true
 	eng.cfg.Version = "v0.0.1"
 
@@ -137,7 +137,7 @@ func TestCheckReleaseUpgrade_DownloadAttempted(t *testing.T) {
 			}, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.cfg.AutoUpgrade = true
 	eng.cfg.Version = "v0.0.1"
 
@@ -440,7 +440,7 @@ func TestStartupUpgradeCheck_FiresWhenEnabled(t *testing.T) {
 			return &gh.ProjectBoard{}, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	startupTestSetup(t, eng)
 	eng.cfg.AutoUpgrade = true
 	eng.cfg.PollSeconds = 300
@@ -485,7 +485,7 @@ func TestStartupUpgradeCheck_SkipsWhenDisabled(t *testing.T) {
 			return &gh.ProjectBoard{}, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	startupTestSetup(t, eng)
 	eng.cfg.AutoUpgrade = false
 	eng.cfg.PollSeconds = 300

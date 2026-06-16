@@ -19,7 +19,7 @@ func TestCheckMergeabilityGate_WaitForCIFalse_ClearsImmediately(t *testing.T) {
 			return nil, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate"} // WaitForCI is nil
 
@@ -38,7 +38,7 @@ func TestCheckMergeabilityGate_NoPR_ClearsGate(t *testing.T) {
 			return nil, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
@@ -59,7 +59,7 @@ func TestCheckMergeabilityGate_Mergeable_ClearsGate_RemovesStaleLabel(t *testing
 			return &tr, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:rebase-needed"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
@@ -88,7 +88,7 @@ func TestCheckMergeabilityGate_NilMergeable_BlockedNoConflict(t *testing.T) {
 			return nil, nil // GitHub hasn't computed yet
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
@@ -114,7 +114,7 @@ func TestCheckMergeabilityGate_FalseMergeable_AppliesLabelAndSignalsConflict(t *
 			return &fa, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
@@ -144,7 +144,7 @@ func TestCheckMergeabilityGate_FalseMergeable_LabelIdempotent(t *testing.T) {
 			return &fa, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	// Label already present — should not be re-added.
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:rebase-needed"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
@@ -167,7 +167,7 @@ func TestCheckMergeabilityGate_FetchPRError_BlocksForRetry(t *testing.T) {
 			return nil, errStubTransient
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
@@ -192,7 +192,7 @@ func TestCheckMergeabilityGate_FetchMergeableError_BlocksForRetry(t *testing.T) 
 			return nil, errStubTransient
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
@@ -223,7 +223,7 @@ func TestCheckAutoMergeConvergence_PRMerged_RemovesLabelAndAdvances(t *testing.T
 			return &gh.PRDetails{Number: 10, State: "closed", Merged: true, AutoMergeEnabled: true}, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
 	stage := &stages.Stage{Name: "Validate"}
 
@@ -259,7 +259,7 @@ func TestCheckAutoMergeConvergence_UserDisabledAutoMerge_PostsCommentRemovesLabe
 			return &gh.PRDetails{Number: 10, State: "open", AutoMergeEnabled: false}, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled", "fabrik:yolo"}}
 	stage := &stages.Stage{Name: "Validate"}
 
@@ -305,7 +305,7 @@ func TestCheckAutoMergeConvergence_BudgetExhausted_PausesIssue(t *testing.T) {
 			return time.Now().Add(-2 * time.Hour), nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	eng.cfg.ConvergenceBudget = 30 * time.Minute
 	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
 	stage := &stages.Stage{Name: "Validate"}
@@ -349,7 +349,7 @@ func TestCheckAutoMergeConvergence_BudgetDisabled_NoPause(t *testing.T) {
 			return &gh.PRDetails{Number: 10, State: "open", AutoMergeEnabled: true, MergeableState: "blocked"}, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	eng.cfg.ConvergenceBudget = 0 // disabled
 	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
 	stage := &stages.Stage{Name: "Validate"}
@@ -369,7 +369,7 @@ func TestCheckAutoMergeConvergence_UnknownMergeability_Waits(t *testing.T) {
 			return &gh.PRDetails{Number: 10, State: "open", AutoMergeEnabled: true, MergeableState: "unknown"}, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
 	stage := &stages.Stage{Name: "Validate"}
 
@@ -390,7 +390,7 @@ func TestCheckAutoMergeConvergence_DirtyConflict_IncrementsCycleCount(t *testing
 			return &gh.PRDetails{Number: 10, State: "open", AutoMergeEnabled: true, MergeableState: "dirty"}, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
 	stage := &stages.Stage{Name: "Validate"}
 
@@ -420,7 +420,7 @@ func TestCheckAutoMergeConvergence_DirtyConflict_InFlight_SkipsDispatch(t *testi
 			return &gh.PRDetails{Number: 10, State: "open", AutoMergeEnabled: true, MergeableState: "dirty"}, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	// Simulate in-flight worker.
 	eng.store.Apply(itemstate.LocalLockAcquired{
 		Repo: "owner/repo", Number: 42, User: "testuser", AcquiredAt: time.Now(),
@@ -450,7 +450,7 @@ func TestCheckAutoMergeConvergence_SecondConflict_DispatchesAgain(t *testing.T) 
 			return &gh.PRDetails{Number: 10, State: "open", AutoMergeEnabled: true, MergeableState: "dirty"}, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	// Simulate prior rebase cycle having completed (no in-flight worker).
 	eng.store.Apply(itemstate.RebaseCycleIncremented{Repo: "owner/repo", Number: 42, StageName: "Validate"})
 
@@ -481,7 +481,7 @@ func TestPauseForConvergenceFailed_PostsComment_AppliesLabels(t *testing.T) {
 			return 3, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	eng.cfg.ConvergenceBudget = 30 * time.Minute
 	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
 	stage := &stages.Stage{Name: "Validate"}
@@ -539,7 +539,7 @@ func TestCheckAutoMergeConvergence_UnregisteredRepo_NoPanic(t *testing.T) {
 			return time.Now().Add(-2 * time.Hour), nil // budget exhausted
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	eng.cfg.ConvergenceBudget = 30 * time.Minute
 	eng.fabrikDir = t.TempDir() // forces ensureBareClone to fail (no network for fake repo)
 

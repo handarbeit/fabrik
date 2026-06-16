@@ -23,7 +23,7 @@ func TestCheckCIGate_WaitForCIFalse_ClearsImmediately(t *testing.T) {
 			return nil, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate"} // WaitForCI is nil
 
@@ -42,7 +42,7 @@ func TestCheckCIGate_NoPR_ClearsGate(t *testing.T) {
 			return nil, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
@@ -62,7 +62,7 @@ func TestCheckCIGate_NoCheckRuns_ClearsGate(t *testing.T) {
 			return nil, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
@@ -82,7 +82,7 @@ func TestCheckCIGate_PostPushDelay_BlocksGate(t *testing.T) {
 			return nil, nil // no checks yet for the new SHA
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	// Pre-seed: this issue has previously had check runs registered.
 	eng.store.Apply(itemstate.PRChecksObserved{Repo: "owner/repo", Number: 1})
 
@@ -116,7 +116,7 @@ func TestCheckCIGate_AllGreen_ClearsGate(t *testing.T) {
 			}, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
@@ -138,7 +138,7 @@ func TestCheckCIGate_Pending_BlocksNoLabel(t *testing.T) {
 			}, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
@@ -184,7 +184,7 @@ func TestCheckCIGate_Pending_TimedOut(t *testing.T) {
 			return time.Now().Add(-2 * time.Hour), nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	eng.cfg.CIWaitTimeout = 30 * time.Minute
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
@@ -220,7 +220,7 @@ func TestCheckCIGate_Failed_BlocksAndAddsLabel(t *testing.T) {
 			}, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
@@ -259,7 +259,7 @@ func TestCheckCIGate_Failed_AlreadyLabeledWithTimeout_TimesOut(t *testing.T) {
 		},
 	}
 	stgs := testStagesWithValidate()
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 	eng.cfg.CIWaitTimeout = 1 * time.Millisecond // tiny timeout
 
 	tr := true
@@ -301,7 +301,7 @@ func TestCheckCIGate_Failed_AlreadyLabeledNotYetTimedOut_Blocked(t *testing.T) {
 			return appliedAt, nil
 		},
 	}
-	eng := testEngineForMerge(client) // CIWaitTimeout = 0 → defaults to 30 min
+	eng := testEngineForMerge(t, client) // CIWaitTimeout = 0 → defaults to 30 min
 
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
@@ -331,7 +331,7 @@ func TestCheckCIGate_AllGreen_AddsCompleteLabel(t *testing.T) {
 			}, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
@@ -372,7 +372,7 @@ func TestCheckCIGate_NoCheckRuns_AddsCompleteLabel(t *testing.T) {
 			return nil, nil // no check runs (R5)
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
@@ -402,7 +402,7 @@ func TestCheckCIGate_NoPR_AddsCompleteLabel(t *testing.T) {
 			return nil, nil // no linked PR
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
@@ -444,7 +444,7 @@ func TestCheckCIGate_Failed_DoesNotAddCompleteLabel(t *testing.T) {
 			}, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
@@ -474,7 +474,7 @@ func TestCheckCIGate_NonValidateStage_AddsCorrectCompleteLabel(t *testing.T) {
 			}, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	// Use a non-Validate stage name
@@ -520,7 +520,7 @@ func TestAddCompleteLabelAndRemoveCI_AddLabelFails_PreservesAwaitingCI(t *testin
 			return nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
@@ -548,7 +548,7 @@ func TestBuildCIFixComment_IncludesFailedChecks(t *testing.T) {
 			}, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1}
 	tr := true
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
@@ -574,7 +574,7 @@ func TestCheckCIGate_FetchLinkedPRError_BlocksGate(t *testing.T) {
 			return nil, fmt.Errorf("transient network error")
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
@@ -599,7 +599,7 @@ func TestCheckCIGate_MergedPR_ClearsGate(t *testing.T) {
 			return &gh.PRDetails{Number: 5, HeadSHA: "sha-merged", Merged: true, State: "closed"}, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
@@ -638,7 +638,7 @@ func TestCheckCIGate_ClosedNotMergedPR_Pauses(t *testing.T) {
 			return &gh.PRDetails{Number: 5, HeadSHA: "sha-closed", Merged: false, State: "closed"}, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
@@ -696,7 +696,7 @@ func TestCheckCIGate_OpenBlockedNoChecks_DwellNotElapsed_StaysBlocked(t *testing
 			return time.Now().Add(-1 * time.Minute), nil // well within the 30-min default timeout
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
@@ -734,7 +734,7 @@ func TestCheckCIGate_OpenBlockedNoChecks_DwellElapsed_Pauses(t *testing.T) {
 			return time.Now().Add(-2 * time.Hour), nil // well past the 30-min default timeout
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	eng.cfg.CIWaitTimeout = 30 * time.Minute
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
@@ -796,7 +796,7 @@ func TestCheckCIGate_OpenBlockedNoChecks_HadChecks_Waits(t *testing.T) {
 			return nil, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	// Pre-seed: this issue has previously had check runs registered.
 	eng.store.Apply(itemstate.PRChecksObserved{Repo: "owner/repo", Number: 1})
 	tr := true
@@ -829,7 +829,7 @@ func TestCheckCIGate_FetchCheckRunsError_BlocksGate(t *testing.T) {
 			return nil, fmt.Errorf("GitHub API 503")
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
@@ -845,7 +845,7 @@ func TestCheckCIGate_FetchCheckRunsError_BlocksGate(t *testing.T) {
 
 func TestBuildCIFixComment_SyntheticHasDatabaseIDZero(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 42}
 	stage := &stages.Stage{Name: "Validate"}
 
@@ -881,7 +881,7 @@ func TestCheckCIGate_MergeableStateClean_ClearsGate(t *testing.T) {
 			return nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
@@ -918,7 +918,7 @@ func TestCheckCIGate_MergeableStateUnstable_ClearsGate(t *testing.T) {
 			return nil, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
@@ -947,7 +947,7 @@ func TestCheckCIGate_MergeableStateBlocked_FallsThroughToCheckRuns(t *testing.T)
 			return []gh.CheckRun{{Name: "ci", Status: "in_progress"}}, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
@@ -974,7 +974,7 @@ func TestCheckCIGate_EmptyHeadSHA_StaysBlocked(t *testing.T) {
 			return &gh.PRDetails{Number: 5, Title: "My PR", HeadSHA: ""}, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
@@ -1013,7 +1013,7 @@ func TestRemoveAwaitingCILabel_ErrNotFound(t *testing.T) {
 			return nil
 		},
 	}
-	eng, cache := testEngineWithCache(client, &mockClaudeInvoker{})
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
 	cache.ApplyLabelAdded(boardcache.ItemKey("owner/repo", 1), "fabrik:awaiting-ci")
 
 	eventsCh := make(chan tui.Event, 16)
@@ -1068,7 +1068,7 @@ func TestCheckCIGate_BehindNoChecks_Blocks(t *testing.T) {
 			return nil, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
@@ -1104,7 +1104,7 @@ func TestCheckCIGate_DirtyNoChecks_Blocks(t *testing.T) {
 			return nil, nil
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
@@ -1143,7 +1143,7 @@ func TestCheckCIGate_BehindNoChecks_TimeoutElapsed_TimesOut(t *testing.T) {
 			return time.Now().Add(-2 * time.Hour), nil // well past the 30-min default timeout
 		},
 	}
-	eng := testEngineForMerge(client)
+	eng := testEngineForMerge(t, client)
 	eng.cfg.CIWaitTimeout = 30 * time.Minute
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}

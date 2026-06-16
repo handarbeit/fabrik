@@ -92,7 +92,7 @@ func TestCrashRecoveryRegression501(t *testing.T) {
 	}
 
 	client := &mockGitHubClient{}
-	e := testEngine(client, &mockClaudeInvoker{})
+	e := testEngine(t, client, &mockClaudeInvoker{})
 
 	// Start a real subprocess and kill it so we have a confirmed-dead PID.
 	cmd := exec.Command("sleep", "1000")
@@ -137,7 +137,7 @@ func TestCrashRecoveryRegression501(t *testing.T) {
 // advance the LastSignAt timestamp in the store.
 func TestWorkerHeartbeatUpdatesLastSignAt(t *testing.T) {
 	client := &mockGitHubClient{}
-	e := testEngine(client, &mockClaudeInvoker{})
+	e := testEngine(t, client, &mockClaudeInvoker{})
 
 	bootstrapItem(t, e, 2, nil)
 	t0 := time.Now().Add(-1 * time.Minute)
@@ -168,7 +168,7 @@ func TestWorkerHeartbeatUpdatesLastSignAt(t *testing.T) {
 // cleanly when the done channel is closed, producing no goroutine leak.
 func TestHeartbeatGoroutineCleanup(t *testing.T) {
 	client := &mockGitHubClient{}
-	e := testEngine(client, &mockClaudeInvoker{})
+	e := testEngine(t, client, &mockClaudeInvoker{})
 	e.heartbeatIntervalOverride = 5 * time.Millisecond
 
 	bootstrapItem(t, e, 3, nil)
@@ -220,7 +220,7 @@ func TestDetectorFalsePositivePrevention(t *testing.T) {
 	}
 
 	client := &mockGitHubClient{}
-	e := testEngine(client, &mockClaudeInvoker{})
+	e := testEngine(t, client, &mockClaudeInvoker{})
 
 	bootstrapItem(t, e, 4, []string{"fabrik:locked:testuser", "stage:Research:in_progress"})
 	// Use current process PID — always alive.
@@ -245,7 +245,7 @@ func TestDetectorFalsePositivePrevention(t *testing.T) {
 // applying it twice leaves Worker nil without panicking or corrupting state.
 func TestDetectorRace_WorkerExitIdempotent(t *testing.T) {
 	client := &mockGitHubClient{}
-	e := testEngine(client, &mockClaudeInvoker{})
+	e := testEngine(t, client, &mockClaudeInvoker{})
 
 	bootstrapItem(t, e, 5, nil)
 	setWorker(e, 5, 12345, "Implement", time.Now())
@@ -263,7 +263,7 @@ func TestDetectorRace_WorkerExitIdempotent(t *testing.T) {
 // apply Worker mutations for different issues. The race detector must see no races.
 func TestConcurrentWorkerSpawnExit(t *testing.T) {
 	client := &mockGitHubClient{}
-	e := testEngine(client, &mockClaudeInvoker{})
+	e := testEngine(t, client, &mockClaudeInvoker{})
 
 	const n = 20
 	for i := 1; i <= n; i++ {
@@ -315,7 +315,7 @@ func TestConcurrentWorkerSpawnExit(t *testing.T) {
 // nil in the store (the restart-after-crash case).
 func TestStartupCleanupRemovesStaleLabels(t *testing.T) {
 	client := &mockGitHubClient{}
-	e := testEngine(client, &mockClaudeInvoker{})
+	e := testEngine(t, client, &mockClaudeInvoker{})
 
 	// Bootstrap item with stale lock label and in_progress label; no Worker applied.
 	bootstrapItem(t, e, 6, []string{
@@ -345,7 +345,7 @@ func TestStartupCleanupRemovesStaleLabels(t *testing.T) {
 // cleaned up by runStartupCleanup.
 func TestStartupCleanupSkipsActiveWorkers(t *testing.T) {
 	client := &mockGitHubClient{}
-	e := testEngine(client, &mockClaudeInvoker{})
+	e := testEngine(t, client, &mockClaudeInvoker{})
 
 	bootstrapItem(t, e, 7, []string{
 		"fabrik:locked:testuser",
@@ -372,7 +372,7 @@ func TestStartupCleanupSkipsActiveWorkers(t *testing.T) {
 // when Worker is nil — it must not create a new WorkerHandle.
 func TestWorkerHeartbeatNoOpWhenWorkerNil(t *testing.T) {
 	client := &mockGitHubClient{}
-	e := testEngine(client, &mockClaudeInvoker{})
+	e := testEngine(t, client, &mockClaudeInvoker{})
 
 	bootstrapItem(t, e, 8, nil)
 	// No Worker applied — store has Worker == nil.
@@ -392,7 +392,7 @@ func TestWorkerHeartbeatNoOpWhenWorkerNil(t *testing.T) {
 // when Worker is nil — it must not create a new WorkerHandle.
 func TestWorkerPIDSetNoOpWhenWorkerNil(t *testing.T) {
 	client := &mockGitHubClient{}
-	e := testEngine(client, &mockClaudeInvoker{})
+	e := testEngine(t, client, &mockClaudeInvoker{})
 
 	bootstrapItem(t, e, 9, nil)
 
@@ -411,7 +411,7 @@ func TestWorkerPIDSetNoOpWhenWorkerNil(t *testing.T) {
 // PID is 0 (not yet set by OnPIDReady), even if the heartbeat is stale.
 func TestDetectorSkipsPIDZeroWorker(t *testing.T) {
 	client := &mockGitHubClient{}
-	e := testEngine(client, &mockClaudeInvoker{})
+	e := testEngine(t, client, &mockClaudeInvoker{})
 
 	bootstrapItem(t, e, 10, []string{"fabrik:locked:testuser"})
 	staleTime := time.Now().Add(-10 * time.Minute)
@@ -435,7 +435,7 @@ func TestDetectorSkipsPIDZeroWorker(t *testing.T) {
 // WorkerExited. This is the inFlight replacement semantic test (test #10 from spec).
 func TestWorkerStoreReflectsDispatchPaths(t *testing.T) {
 	client := &mockGitHubClient{}
-	e := testEngine(client, &mockClaudeInvoker{})
+	e := testEngine(t, client, &mockClaudeInvoker{})
 
 	bootstrapItem(t, e, 11, nil)
 
@@ -488,7 +488,7 @@ func TestRunStartupCleanup_StaleEditingLabel(t *testing.T) {
 	editingLabelRetryDelay = 0
 	t.Cleanup(func() { editingLabelRetryDelay = orig })
 	client := &mockGitHubClient{}
-	e := testEngine(client, &mockClaudeInvoker{})
+	e := testEngine(t, client, &mockClaudeInvoker{})
 
 	bootstrapItem(t, e, 20, []string{"fabrik:editing"})
 
@@ -512,7 +512,7 @@ func TestRunStartupCleanup_ActiveWorkerSkipsEditing(t *testing.T) {
 	editingLabelRetryDelay = 0
 	t.Cleanup(func() { editingLabelRetryDelay = orig })
 	client := &mockGitHubClient{}
-	e := testEngine(client, &mockClaudeInvoker{})
+	e := testEngine(t, client, &mockClaudeInvoker{})
 
 	bootstrapItem(t, e, 21, []string{"fabrik:editing"})
 	setWorker(e, 21, os.Getpid(), "Implement", time.Now())
@@ -539,7 +539,7 @@ func TestRunStartupCleanup_EditingLabelErrNotFound_Silent(t *testing.T) {
 			return nil
 		},
 	}
-	e := testEngine(client, &mockClaudeInvoker{})
+	e := testEngine(t, client, &mockClaudeInvoker{})
 
 	bootstrapItem(t, e, 22, []string{"fabrik:editing"})
 

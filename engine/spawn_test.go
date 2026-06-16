@@ -209,11 +209,12 @@ func TestResolveSpecifyOptionID_SingleColumn(t *testing.T) {
 
 // ---- preImplement integration tests ----
 
-func spawnTestEngine(client *mockGitHubClient) *Engine {
-	eng := testEngine(client, &mockClaudeInvoker{})
+func spawnTestEngine(t *testing.T, client *mockGitHubClient) *Engine {
+	t.Helper()
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	// Register "owner/repo" and "owner/child" as managed repos.
-	eng.worktreeManagers["owner/repo"] = NewWorktreeManager("/tmp/fake-parent")
-	eng.worktreeManagers["owner/child"] = NewWorktreeManager("/tmp/fake-child")
+	eng.worktreeManagers["owner/repo"] = NewWorktreeManager(t.TempDir())
+	eng.worktreeManagers["owner/child"] = NewWorktreeManager(t.TempDir())
 	return eng
 }
 
@@ -237,7 +238,7 @@ func planItemWithBlocks(blocksRaw string) gh.ProjectItem {
 
 func TestPreImplement_NoOp_ChildrenAlreadySpawned(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := spawnTestEngine(client)
+	eng := spawnTestEngine(t, client)
 
 	item := planItemWithBlocks(`
 FABRIK_SPAWN_CHILD_BEGIN owner/child
@@ -262,7 +263,7 @@ FABRIK_SPAWN_CHILD_END
 
 func TestPreImplement_NoOp_NoPlanComment(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := spawnTestEngine(client)
+	eng := spawnTestEngine(t, client)
 
 	item := gh.ProjectItem{
 		ID:     "I_parent",
@@ -284,7 +285,7 @@ func TestPreImplement_NoOp_NoPlanComment(t *testing.T) {
 
 func TestPreImplement_NoOp_NoBlocks(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := spawnTestEngine(client)
+	eng := spawnTestEngine(t, client)
 
 	item := planItemWithBlocks("No spawn blocks in here.")
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
@@ -309,7 +310,7 @@ func TestPreImplement_HappyPath(t *testing.T) {
 			return "PVTI_" + contentNodeID, nil
 		},
 	}
-	eng := spawnTestEngine(client)
+	eng := spawnTestEngine(t, client)
 
 	item := planItemWithBlocks(`
 FABRIK_SPAWN_CHILD_BEGIN owner/child
@@ -394,7 +395,7 @@ FABRIK_SPAWN_CHILD_END
 func TestPreImplement_CloneFailure(t *testing.T) {
 	skipIfNoGit(t)
 	client := &mockGitHubClient{}
-	eng := spawnTestEngine(client)
+	eng := spawnTestEngine(t, client)
 	// Point fabrikDir at a tempdir — ensureBareClone will fail to clone the nonexistent repo.
 	eng.fabrikDir = t.TempDir()
 
@@ -478,7 +479,7 @@ func TestPreImplement_OnDemandClone_Success(t *testing.T) {
 			return "PVTI_" + contentNodeID, nil
 		},
 	}
-	eng := spawnTestEngine(client)
+	eng := spawnTestEngine(t, client)
 	eng.fabrikDir = fabrikDir
 
 	// "testowner/testrepo" is NOT in worktreeManagers initially.
@@ -523,7 +524,7 @@ func TestPreImplement_PartialFailure(t *testing.T) {
 			return 100 + callCount, fmt.Sprintf("I_child%d", callCount), nil
 		},
 	}
-	eng := spawnTestEngine(client)
+	eng := spawnTestEngine(t, client)
 
 	item := planItemWithBlocks(`
 FABRIK_SPAWN_CHILD_BEGIN owner/child
@@ -575,8 +576,9 @@ FABRIK_SPAWN_CHILD_END
 
 // ---- status-set and label-inheritance tests ----
 
-func spawnTestEngineWithSpecify(client *mockGitHubClient) *Engine {
-	eng := spawnTestEngine(client)
+func spawnTestEngineWithSpecify(t *testing.T, client *mockGitHubClient) *Engine {
+	t.Helper()
+	eng := spawnTestEngine(t, client)
 	eng.statusField = &gh.StatusField{
 		FieldID: "FIELD_STATUS",
 		Options: map[string]string{
@@ -598,7 +600,7 @@ func TestPreImplement_SetsSpecifyStatus(t *testing.T) {
 			return "PVTI_child101", nil
 		},
 	}
-	eng := spawnTestEngineWithSpecify(client)
+	eng := spawnTestEngineWithSpecify(t, client)
 
 	item := planItemWithBlocks(`
 FABRIK_SPAWN_CHILD_BEGIN owner/child
@@ -644,7 +646,7 @@ func TestPreImplement_StatusSetNilField(t *testing.T) {
 			return "PVTI_child102", nil
 		},
 	}
-	eng := spawnTestEngine(client)
+	eng := spawnTestEngine(t, client)
 	// statusField is nil by default in spawnTestEngine
 
 	item := planItemWithBlocks(`
@@ -671,7 +673,7 @@ FABRIK_SPAWN_CHILD_END
 
 func TestPreImplement_YoloInheritance(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := spawnTestEngineWithSpecify(client)
+	eng := spawnTestEngineWithSpecify(t, client)
 
 	item := planItemWithBlocks(`
 FABRIK_SPAWN_CHILD_BEGIN owner/child
@@ -705,7 +707,7 @@ FABRIK_SPAWN_CHILD_END
 
 func TestPreImplement_CruiseInheritance(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := spawnTestEngineWithSpecify(client)
+	eng := spawnTestEngineWithSpecify(t, client)
 
 	item := planItemWithBlocks(`
 FABRIK_SPAWN_CHILD_BEGIN owner/child
@@ -739,7 +741,7 @@ FABRIK_SPAWN_CHILD_END
 
 func TestPreImplement_BothLabelsInherited(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := spawnTestEngineWithSpecify(client)
+	eng := spawnTestEngineWithSpecify(t, client)
 
 	item := planItemWithBlocks(`
 FABRIK_SPAWN_CHILD_BEGIN owner/child
@@ -773,7 +775,7 @@ FABRIK_SPAWN_CHILD_END
 
 func TestPreImplement_NoAutonomyLabels(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := spawnTestEngineWithSpecify(client)
+	eng := spawnTestEngineWithSpecify(t, client)
 
 	item := planItemWithBlocks(`
 FABRIK_SPAWN_CHILD_BEGIN owner/child

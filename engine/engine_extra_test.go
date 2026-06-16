@@ -13,7 +13,7 @@ import (
 )
 
 func TestSetEvents_ConfiguresChannel(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	ch := make(chan tui.Event, 4)
 	eng.SetEvents(ch)
 
@@ -23,13 +23,13 @@ func TestSetEvents_ConfiguresChannel(t *testing.T) {
 }
 
 func TestEmit_NilChannel_NoOp(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	// No channel set — emit should not panic
 	eng.emit(tui.LogEvent{IssueNumber: 1, Tag: "test", Message: "hello"})
 }
 
 func TestEmit_WithChannel_SendsEvent(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	ch := make(chan tui.Event, 4)
 	eng.events = ch
 
@@ -51,7 +51,7 @@ func TestEmit_WithChannel_SendsEvent(t *testing.T) {
 
 func TestCleanupLockedIssues_RemovesLabels(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	// Seed locks in the store via LocalLockAcquired mutations.
 	now := time.Now()
@@ -81,7 +81,7 @@ func TestCleanupLockedIssues_RemovesLabels(t *testing.T) {
 
 func TestCleanupLockedIssues_Empty_NoOp(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	// No locked issues
 	eng.cleanupLockedIssues()
 	if len(client.removeLabelCalls) != 0 {
@@ -130,23 +130,23 @@ func TestChangeType(t *testing.T) {
 }
 
 func TestRegisterWorktrees_Idempotent(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	// Use a new repo key (not "owner/repo" which testEngine already registers).
-	wm1 := eng.registerWorktrees("other/repo", "/tmp/base", "/tmp/worktrees")
+	wm1 := eng.registerWorktrees("other/repo", t.TempDir(), t.TempDir())
 	if wm1 == nil {
 		t.Fatal("registerWorktrees returned nil on first registration")
 	}
 	// Second call with same key should return the existing WM.
-	wm2 := eng.registerWorktrees("other/repo", "/tmp/base", "/tmp/worktrees")
+	wm2 := eng.registerWorktrees("other/repo", t.TempDir(), t.TempDir())
 	if wm1 != wm2 {
 		t.Error("registerWorktrees should return the same WM on repeated calls")
 	}
 }
 
 func TestEnsureRepoReady_AlreadyRegistered_ReturnsNil(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	// Pre-register a new repo so ensureRepoReady returns immediately for it.
-	eng.registerWorktrees("newowner/newrepo", "/tmp/base", "/tmp/worktrees")
+	eng.registerWorktrees("newowner/newrepo", t.TempDir(), t.TempDir())
 	item := gh.ProjectItem{Number: 1, Repo: "newowner/newrepo"}
 	if err := eng.ensureRepoReady(context.Background(), item); err != nil {
 		t.Errorf("expected nil when repo already registered, got %v", err)
@@ -169,7 +169,7 @@ func TestEnsureRepoReady_EmptyOwner_ReturnsNil(t *testing.T) {
 func TestEnsureRepoReady_CloneFailure_PostsCommentAndPauses(t *testing.T) {
 	skipIfNoGit(t)
 	client := &mockGitHubClient{}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	// Set fabrikDir to a tempdir so ensureBareClone tries (and fails) to clone.
 	eng.fabrikDir = t.TempDir()
 
@@ -206,7 +206,7 @@ func TestEnsureRepoReady_ConcurrentSameRepo_OnlyOneCloneAttempt(t *testing.T) {
 
 	const numWorkers = 8
 	client := &mockGitHubClient{}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.fabrikDir = t.TempDir() // causes ensureBareClone to fail (no network)
 
 	item := gh.ProjectItem{Number: 42, Repo: "nonexistent-xyz/nonexistent-repo-concurrent-test"}
@@ -250,7 +250,7 @@ func TestEnsureDraftPR_NoPR_FailedPush_ReturnsError(t *testing.T) {
 	// No existing PR; push will fail because base dir is not a real repo.
 	// fetchLinkedPRFn not set → mock returns nil, nil (no PR found).
 	client := &mockGitHubClient{}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	// WorktreeManager points to /tmp/test-repo which doesn't exist
 	item := gh.ProjectItem{Number: 99, Title: "Test"}
 	prNum, err := eng.ensureDraftPR(item, "main")

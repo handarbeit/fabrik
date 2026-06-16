@@ -40,7 +40,7 @@ func collectEvents(ch chan tui.Event, idle time.Duration) []tui.Event {
 func TestJobStartedEvent_EarlyReturn(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
-	eng := testEngine(client, claude)
+	eng := testEngine(t, client, claude)
 
 	ch := make(chan tui.Event, 64)
 	eng.events = ch

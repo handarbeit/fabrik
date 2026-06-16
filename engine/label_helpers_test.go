@@ -28,7 +28,7 @@ func TestRemoveEditingLabel_NonTransientNoRetry(t *testing.T) {
 			return nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.removeEditingLabel("owner", "repo", 5)
 	if calls != 1 {
 		t.Errorf("expected exactly 1 call for non-transient error, got %d", calls)
@@ -54,7 +54,7 @@ func TestRemoveEditingLabel_TransientRetrySucceeds(t *testing.T) {
 			return nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.removeEditingLabel("owner", "repo", 5)
 	if calls != 3 {
 		t.Errorf("expected 3 calls (2 transient then success), got %d", calls)
@@ -77,7 +77,7 @@ func TestRemoveEditingLabel_TransientExhausted(t *testing.T) {
 			return nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.removeEditingLabel("owner", "repo", 5)
 	if calls != 3 {
 		t.Errorf("expected 3 calls on transient exhaustion, got %d", calls)
@@ -100,7 +100,7 @@ func TestRemoveEditingLabel_ErrNotFoundSilent(t *testing.T) {
 			return nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.removeEditingLabel("owner", "repo", 5)
 	if calls != 1 {
 		t.Errorf("expected exactly 1 call for ErrNotFound, got %d", calls)
@@ -184,7 +184,7 @@ func TestRemoveLockLabel_NonNotFoundError_LogsWarning(t *testing.T) {
 			return errors.New("network error")
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	// non-ErrNotFound error should log a warning without panicking
 	eng.removeLockLabel("owner", "repo", 5, "fabrik:locked:testuser")
 }
@@ -195,7 +195,7 @@ func TestRemoveLockLabel_ErrNotFound_Ignored(t *testing.T) {
 			return gh.ErrNotFound
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	// ErrNotFound should be silently ignored
 	eng.removeLockLabel("owner", "repo", 5, "fabrik:locked:testuser")
 }
@@ -206,7 +206,7 @@ func TestEnsureDraftPR_FetchLinkedPRError_ReturnsError(t *testing.T) {
 			return nil, errors.New("api error")
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	item := gh.ProjectItem{Number: 1, Title: "Test"}
 	prNum, err := eng.ensureDraftPR(item, "main")
 	if prNum != 0 {
@@ -223,7 +223,7 @@ func TestEnsurePRLinksIssue_GetIssueBodyError_Logs(t *testing.T) {
 			return "", errors.New("not found")
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	// Should not panic when GetIssueBody fails
 	eng.ensurePRLinksIssue(gh.ProjectItem{Number: 5}, 10)
 }
@@ -250,7 +250,7 @@ func TestMarkPRReady_MarkReadyError_LogsWarning(t *testing.T) {
 
 func TestAddFailedLabel_Success(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.addFailedLabel("owner", "repo", 9, "Research")
 
 	if len(client.addLabelCalls) != 1 {
@@ -267,7 +267,7 @@ func TestAddFailedLabel_ErrorLogsWarning(t *testing.T) {
 			return errors.New("api error")
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	// Should not panic
 	eng.addFailedLabel("owner", "repo", 10, "Plan")
 }
@@ -278,7 +278,7 @@ func TestRemoveFailedLabel_ErrorLogsWarning(t *testing.T) {
 			return errors.New("api error")
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	// Should not panic
 	eng.removeFailedLabel("owner", "repo", 10, "Plan")
 }
@@ -289,7 +289,7 @@ func TestRemoveInProgressLabel_ErrorLogsWarning(t *testing.T) {
 			return errors.New("api error")
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	// Should not panic
 	eng.removeInProgressLabel("owner", "repo", 10, "Plan")
 }

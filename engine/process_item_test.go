@@ -40,7 +40,7 @@ func TestMain(m *testing.M) {
 func TestProcessItem_SkipsUnknownStage(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
-	eng := testEngine(client, claude)
+	eng := testEngine(t, client, claude)
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
@@ -61,7 +61,7 @@ func TestProcessItem_SkipsUnknownStage(t *testing.T) {
 func TestProcessItem_SkipsLockedByOther(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
-	eng := testEngine(client, claude)
+	eng := testEngine(t, client, claude)
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
@@ -83,7 +83,7 @@ func TestProcessItem_SkipsLockedByOther(t *testing.T) {
 func TestProcessItem_SkipsEditing(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
-	eng := testEngine(client, claude)
+	eng := testEngine(t, client, claude)
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
@@ -105,7 +105,7 @@ func TestProcessItem_SkipsEditing(t *testing.T) {
 func TestProcessItem_SkipsPaused(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
-	eng := testEngine(client, claude)
+	eng := testEngine(t, client, claude)
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
@@ -131,7 +131,7 @@ func TestProcessItem_AllowsOwnLock(t *testing.T) {
 			return "output", false, TokenUsage{}, nil
 		},
 	}
-	eng := testEngine(client, claude)
+	eng := testEngine(t, client, claude)
 	// Need a real worktree manager for processItem — register a mock WM for the test repo
 	eng.worktreeManagers["owner/repo"] = &WorktreeManager{baseDir: t.TempDir(), rootDir: t.TempDir()}
 
@@ -157,7 +157,7 @@ func TestProcessItem_AllowsOwnLock(t *testing.T) {
 func TestProcessItem_SkipsCompleted(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
-	eng := testEngine(client, claude)
+	eng := testEngine(t, client, claude)
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
@@ -179,7 +179,7 @@ func TestProcessItem_SkipsCompleted(t *testing.T) {
 func TestProcessItem_SkipsAlreadyProcessedNoNewComments(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
-	eng := testEngine(client, claude)
+	eng := testEngine(t, client, claude)
 	eng.cfg.PollSeconds = 100 // cooldown = 1000s — ensures recently-processed item stays in cooldown
 
 	// Mark as already processed (sets LastAttemptAt so dispatch cooldown applies)
@@ -937,7 +937,7 @@ func TestProcessItem_ClearsAttemptsOnCompletion(t *testing.T) {
 func TestProcessItem_CleanupStage_SkipsAlreadyComplete(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
-	eng := testEngine(client, claude)
+	eng := testEngine(t, client, claude)
 	eng.cfg.Stages = testStagesWithCleanup()
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
@@ -1105,7 +1105,7 @@ func TestProcessItem_CleanupStage_PRItem(t *testing.T) {
 	// PR items on the board don't have worktrees — cleanup should just apply the label.
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
-	eng := testEngine(client, claude)
+	eng := testEngine(t, client, claude)
 	eng.cfg.Stages = testStagesWithCleanup()
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}

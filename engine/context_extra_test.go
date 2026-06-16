@@ -16,7 +16,7 @@ import (
 // with owner, repo, project number, and owner type from engine config.
 func TestWriteContextFiles_WritesProjectMD(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.cfg.Owner = "myorg"
 	eng.cfg.Repo = "myrepo"
 	eng.cfg.ProjectNum = 42
@@ -56,7 +56,7 @@ func TestWriteContextFiles_PostToPR_WritesPRDescription(t *testing.T) {
 			return "This PR implements the feature.\n\nCloses #1", nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	workDir := t.TempDir()
 	reviewStage := &stages.Stage{Name: "Review", Order: 4, PostToPR: true}
@@ -82,7 +82,7 @@ func TestWriteContextFiles_PostToPR_NoPR_SkipsPRDescription(t *testing.T) {
 			return 0, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	workDir := t.TempDir()
 	reviewStage := &stages.Stage{Name: "Review", Order: 4, PostToPR: true}
@@ -101,7 +101,7 @@ func TestWriteContextFiles_PostToPR_NoPR_SkipsPRDescription(t *testing.T) {
 // rocket reaction (excluding bot comments and already-seen comments).
 func TestMarkCommentsSeenByStage_AddsRocketToUnseenUserComments(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	item := gh.ProjectItem{
 		Number: 30,
@@ -139,7 +139,7 @@ func TestMarkCommentsSeenByStage_AddsRocketToUnseenUserComments(t *testing.T) {
 // TestItemMayNeedWork_CooldownRetry verifies that an unchanged item is retried
 // after the cooldown period expires.
 func TestItemMayNeedWork_CooldownRetry(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 
 	item := gh.ProjectItem{
 		Number: 40,

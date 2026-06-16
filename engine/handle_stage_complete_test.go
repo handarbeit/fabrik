@@ -23,7 +23,8 @@ func testStagesWithValidate() []*stages.Stage {
 
 // testEngineWithStages creates an engine with the given stages and a status field
 // configured for all of them.
-func testEngineWithStages(client *mockGitHubClient, stgs []*stages.Stage) *Engine {
+func testEngineWithStages(t *testing.T, client *mockGitHubClient, stgs []*stages.Stage) *Engine {
+	t.Helper()
 	eng := NewWithDeps(
 		Config{
 			Owner:         "owner",
@@ -36,7 +37,7 @@ func testEngineWithStages(client *mockGitHubClient, stgs []*stages.Stage) *Engin
 		},
 		client,
 		&mockClaudeInvoker{},
-		NewWorktreeManager("/tmp/test-repo"),
+		NewWorktreeManager(t.TempDir()),
 	)
 	opts := make(map[string]string)
 	for _, s := range stgs {
@@ -48,7 +49,7 @@ func testEngineWithStages(client *mockGitHubClient, stgs []*stages.Stage) *Engin
 
 func TestHandleStageComplete_NoYolo_NoAdvance(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngineWithStages(client, testStagesWithValidate())
+	eng := testEngineWithStages(t, client, testStagesWithValidate())
 	// Yolo is false (default), no label
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
@@ -65,7 +66,7 @@ func TestHandleStageComplete_NoYolo_NoAdvance(t *testing.T) {
 func TestHandleStageComplete_CfgYolo_Advances(t *testing.T) {
 	client := &mockGitHubClient{}
 	stgs := testStagesWithValidate()
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 	eng.cfg.Yolo = true
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
@@ -85,7 +86,7 @@ func TestHandleStageComplete_CfgYolo_Advances(t *testing.T) {
 func TestHandleStageComplete_YoloLabel_Advances(t *testing.T) {
 	client := &mockGitHubClient{}
 	stgs := testStagesWithValidate()
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 	// cfg.Yolo stays false; label provides yolo
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
@@ -109,7 +110,7 @@ func TestHandleStageComplete_YoloLabel_ValidateMergeableAdvances(t *testing.T) {
 		},
 	}
 	stgs := testStagesWithValidate()
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:yolo"}}
@@ -148,7 +149,7 @@ func TestHandleStageComplete_YoloLabel_ValidateAutoMergeNotEnabled_NoAdvance(t *
 		},
 	}
 	stgs := testStagesWithValidate()
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:yolo"}}
@@ -179,7 +180,7 @@ func TestHandleStageComplete_YoloLabel_ValidateNoPR_AdvancesAnyway(t *testing.T)
 		},
 	}
 	stgs := testStagesWithValidate()
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:yolo"}}
@@ -200,7 +201,7 @@ func TestHandleStageComplete_YoloLabel_ValidateNoPR_AdvancesAnyway(t *testing.T)
 func TestHandleStageComplete_YoloLabel_NonValidate_NoMergeAttempt(t *testing.T) {
 	client := &mockGitHubClient{}
 	stgs := testStagesWithValidate()
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:yolo"}}
@@ -229,7 +230,7 @@ func TestHandleStageComplete_AutoAdvanceFalse_OverridesAdvanceButMergeStillFires
 		},
 	}
 	stgs := testStagesWithValidate()
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 	eng.cfg.Yolo = true // global yolo triggers auto-merge
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
@@ -269,7 +270,7 @@ func TestHandleStageComplete_MergeAPIError_LogsAndDoesNotAdvance(t *testing.T) {
 		},
 	}
 	stgs := testStagesWithValidate()
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:yolo"}}
@@ -300,7 +301,7 @@ func TestHandleStageComplete_MergeAPIError_LogsAndDoesNotAdvance(t *testing.T) {
 func TestHandleStageComplete_CruiseLabel_NonValidate_Advances(t *testing.T) {
 	client := &mockGitHubClient{}
 	stgs := testStagesWithValidate()
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:cruise"}}
@@ -321,7 +322,7 @@ func TestHandleStageComplete_CruiseLabel_NonValidate_Advances(t *testing.T) {
 func TestHandleStageComplete_CruiseLabel_Validate_NoMergeNoAdvance(t *testing.T) {
 	client := &mockGitHubClient{}
 	stgs := testStagesWithValidate()
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:cruise"}}
@@ -345,7 +346,7 @@ func TestHandleStageComplete_CruiseLabel_OverridesAutoAdvanceFalse(t *testing.T)
 	f := false
 	client := &mockGitHubClient{}
 	stgs := testStagesWithValidate()
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:cruise"}}
@@ -367,7 +368,7 @@ func TestHandleStageComplete_WaitForCI_AddsAwaitingCINotComplete(t *testing.T) {
 	tr := true
 	client := &mockGitHubClient{}
 	stgs := testStagesWithValidate()
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 	eng.cfg.Yolo = true // ensure yolo doesn't bypass the new gate
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
@@ -404,7 +405,7 @@ func TestHandleStageComplete_WaitForCI_Idempotent(t *testing.T) {
 	tr := true
 	client := &mockGitHubClient{}
 	stgs := testStagesWithValidate()
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	// Item already has the awaiting-ci label
@@ -432,7 +433,7 @@ func TestHandleStageComplete_WaitForCI_DoesNotSeedAwaitingReview(t *testing.T) {
 	tr := true
 	client := &mockGitHubClient{}
 	stgs := testStagesWithValidate()
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
@@ -462,7 +463,7 @@ func TestHandleStageComplete_WaitForCI_AppliesRegardlessOfYolo(t *testing.T) {
 		t.Run(fmt.Sprintf("yolo=%v", yolo), func(t *testing.T) {
 			client := &mockGitHubClient{}
 			stgs := testStagesWithValidate()
-			eng := testEngineWithStages(client, stgs)
+			eng := testEngineWithStages(t, client, stgs)
 			eng.cfg.Yolo = yolo
 
 			board := &gh.ProjectBoard{ProjectID: "PVT_1"}
@@ -502,7 +503,7 @@ func TestHandleStageComplete_BothCruiseAndYolo_CruiseWins(t *testing.T) {
 		},
 	}
 	stgs := testStagesWithValidate()
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:yolo", "fabrik:cruise"}}
@@ -528,7 +529,7 @@ func TestHandleStageComplete_BothCruiseAndYolo_CruiseWins(t *testing.T) {
 // manually removed fabrik:paused after FABRIK_BLOCKED_ON_INPUT was emitted.
 func TestHandleStageComplete_ClearsAwaitingInput(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngineWithStages(client, testStagesWithValidate())
+	eng := testEngineWithStages(t, client, testStagesWithValidate())
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:awaiting-input"}}
@@ -555,7 +556,7 @@ func TestHandleStageComplete_ClearsAwaitingInput(t *testing.T) {
 // for that label name.
 func TestHandleStageComplete_NoAwaitingInput_NoSpuriousRemove(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngineWithStages(client, testStagesWithValidate())
+	eng := testEngineWithStages(t, client, testStagesWithValidate())
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}

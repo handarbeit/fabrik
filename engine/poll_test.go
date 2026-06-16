@@ -38,7 +38,7 @@ func TestPoll_FetchesBoardAndProcessesItems(t *testing.T) {
 			}, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	_, err := eng.poll(context.Background())
 	if err != nil {
@@ -56,7 +56,7 @@ func TestPoll_Error(t *testing.T) {
 			return nil, fmt.Errorf("network error")
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	_, err := eng.poll(context.Background())
 	if err == nil {
@@ -73,7 +73,7 @@ func TestPoll_StatusFieldFetchError(t *testing.T) {
 			return nil, fmt.Errorf("status field error")
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	// Should not error — status field failure is a warning
 	_, err := eng.poll(context.Background())
@@ -95,7 +95,7 @@ func TestPoll_StatusFieldAlreadySet(t *testing.T) {
 			return nil, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.statusField = &gh.StatusField{FieldID: "already-set"}
 
 	_, _ = eng.poll(context.Background())
@@ -111,7 +111,7 @@ func TestPoll_EmptyProjectID(t *testing.T) {
 			return nil, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	_, _ = eng.poll(context.Background())
 }
@@ -128,7 +128,7 @@ func TestPoll_RateLimitLogging(t *testing.T) {
 			return rest, gql
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	// poll() must succeed and not panic when rate limit stats are non-zero.
 	if _, err := eng.poll(context.Background()); err != nil {
@@ -147,7 +147,7 @@ func TestPoll_RateLimitLogging_ZeroReset(t *testing.T) {
 			return rest, gh.RateLimitStats{}
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	if _, err := eng.poll(context.Background()); err != nil {
 		t.Fatalf("poll: %v", err)
@@ -280,7 +280,7 @@ func TestItemNeedsWork_CleanupStage_NoWorktree(t *testing.T) {
 // closed issue with fabrik:locked:<user> gets the lock label removed.
 func TestCleanupClosedIssueLocks_RemovesLockFromClosedIssue(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	board := &gh.ProjectBoard{
 		Items: []gh.ProjectItem{
@@ -310,7 +310,7 @@ func TestCleanupClosedIssueLocks_RemovesLockFromClosedIssue(t *testing.T) {
 // with a lock label are left untouched.
 func TestCleanupClosedIssueLocks_IgnoresOpenIssues(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	board := &gh.ProjectBoard{
 		Items: []gh.ProjectItem{
@@ -333,7 +333,7 @@ func TestCleanupClosedIssueLocks_IgnoresOpenIssues(t *testing.T) {
 // belonging to other users are not removed.
 func TestCleanupClosedIssueLocks_IgnoresOtherUsersLocks(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	board := &gh.ProjectBoard{
 		Items: []gh.ProjectItem{
@@ -356,7 +356,7 @@ func TestCleanupClosedIssueLocks_IgnoresOtherUsersLocks(t *testing.T) {
 // any lock label produces no API call.
 func TestCleanupClosedIssueLocks_NoLock(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	board := &gh.ProjectBoard{
 		Items: []gh.ProjectItem{
@@ -402,7 +402,7 @@ func TestYoloCatchup_AdvancesClosedIssue(t *testing.T) {
 			}, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.cfg.Yolo = true
 	// Seed item into cycleSet so the pre-filter admits it (simulates observer firing).
 	eng.mayNeedWorkMu.Lock()
@@ -451,7 +451,7 @@ func TestYoloCatchup_SkipsNotDeepFetched(t *testing.T) {
 			}, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.cfg.Yolo = true
 	// Seed the store so the pre-filter sees this as a known (previously-processed) item.
 	eng.store.Apply(itemstate.InvocationRecorded{Repo: "owner/repo", Number: 55, Completed: true})
@@ -487,7 +487,7 @@ func TestPoll_RateLimitWarning(t *testing.T) {
 			return gh.RateLimitStats{}, gql
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	// Use events channel to capture log output without hitting stdout.
 	events := make(chan tui.Event, 64)
@@ -517,7 +517,7 @@ func TestPoll_RateLimitWarning(t *testing.T) {
 // CleanupWorktree stage with the stage:<Name>:complete label are archived.
 func TestArchiveDoneCompleteItems_ArchivesCompleteItems(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.cfg.Stages = testStagesWithCleanup()
 
 	board := &gh.ProjectBoard{
@@ -583,7 +583,7 @@ func TestCatchupLoop_SkipsReviewGate_WhenAwaitingCIWithoutComplete(t *testing.T)
 			return nil, nil
 		},
 	}
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 
 	if _, err := eng.poll(context.Background()); err != nil {
 		t.Fatalf("poll: %v", err)
@@ -627,7 +627,7 @@ func TestCatchupLoop_RunsReviewGate_WhenHasComplete(t *testing.T) {
 			return nil
 		},
 	}
-	eng := testEngineWithStages(client, stgs)
+	eng := testEngineWithStages(t, client, stgs)
 
 	if _, err := eng.poll(context.Background()); err != nil {
 		t.Fatalf("poll: %v", err)
@@ -655,7 +655,7 @@ func TestCleanupClosedIssueTransientLabels_RemovesAllTransientLabels(t *testing.
 		label := label
 		t.Run(label, func(t *testing.T) {
 			client := &mockGitHubClient{}
-			eng := testEngine(client, &mockClaudeInvoker{})
+			eng := testEngine(t, client, &mockClaudeInvoker{})
 
 			board := &gh.ProjectBoard{
 				Items: []gh.ProjectItem{
@@ -686,7 +686,7 @@ func TestCleanupClosedIssueTransientLabels_RemovesAllTransientLabels(t *testing.
 // issues with transient labels are left untouched.
 func TestCleanupClosedIssueTransientLabels_SkipsOpenIssues(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	board := &gh.ProjectBoard{
 		Items: []gh.ProjectItem{
@@ -709,7 +709,7 @@ func TestCleanupClosedIssueTransientLabels_SkipsOpenIssues(t *testing.T) {
 // issues without any transient labels produce no API call.
 func TestCleanupClosedIssueTransientLabels_SkipsCleanIssues(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	board := &gh.ProjectBoard{
 		Items: []gh.ProjectItem{
@@ -737,7 +737,7 @@ func TestCleanupClosedIssueTransientLabels_ErrNotFoundIsIdempotent(t *testing.T)
 			return gh.ErrNotFound
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	board := &gh.ProjectBoard{
 		Items: []gh.ProjectItem{
@@ -768,7 +768,7 @@ func TestCleanupClosedIssueTransientLabels_APIErrorContinues(t *testing.T) {
 			return fmt.Errorf("simulated API error")
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	board := &gh.ProjectBoard{
 		Items: []gh.ProjectItem{
@@ -792,7 +792,7 @@ func TestCleanupClosedIssueTransientLabels_APIErrorContinues(t *testing.T) {
 // without the stage:Done:complete label are not archived.
 func TestArchiveDoneCompleteItems_SkipsIncompleteItems(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.cfg.Stages = testStagesWithCleanup()
 
 	board := &gh.ProjectBoard{
@@ -850,7 +850,7 @@ func TestYoloCatchUpEnablesAutoMerge(t *testing.T) {
 			return &gh.PRDetails{Number: 99, HeadSHA: "sha1"}, nil
 		},
 	}
-	eng := testEngineWithStages(client, testStagesWithValidate())
+	eng := testEngineWithStages(t, client, testStagesWithValidate())
 	// Seed item into cycleSet so the pre-filter admits it (simulates observer firing).
 	eng.mayNeedWorkMu.Lock()
 	eng.mayNeedWork["owner/repo#42"] = true
@@ -921,7 +921,7 @@ func TestYoloCatchUpSkipsAdvanceOnAutoMergeError(t *testing.T) {
 			return errors.New("transient API error")
 		},
 	}
-	eng := testEngineWithStages(client, testStagesWithValidate())
+	eng := testEngineWithStages(t, client, testStagesWithValidate())
 	// Seed item into cycleSet so the pre-filter admits it (simulates observer firing).
 	eng.mayNeedWorkMu.Lock()
 	eng.mayNeedWork["owner/repo#42"] = true
@@ -990,7 +990,7 @@ func TestYoloCatchUpSkipsAdvanceOnUnprocessedComment(t *testing.T) {
 			return nil
 		},
 	}
-	eng := testEngineWithStages(client, testStagesWithValidate())
+	eng := testEngineWithStages(t, client, testStagesWithValidate())
 
 	ctx := context.Background()
 	if _, err := eng.poll(ctx); err != nil {
@@ -1010,7 +1010,7 @@ func TestYoloCatchUpSkipsAdvanceOnUnprocessedComment(t *testing.T) {
 // non-cleanup stages are not archived even if they have complete labels.
 func TestArchiveDoneCompleteItems_SkipsNonCleanupStages(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.cfg.Stages = testStagesWithCleanup()
 
 	board := &gh.ProjectBoard{
@@ -1063,7 +1063,7 @@ func TestCruiseCatchUp_NonValidate_Advances(t *testing.T) {
 			}, nil
 		},
 	}
-	eng := testEngineWithStages(client, testStagesWithValidate())
+	eng := testEngineWithStages(t, client, testStagesWithValidate())
 	// Seed item into cycleSet so the pre-filter admits it (simulates observer firing).
 	eng.mayNeedWorkMu.Lock()
 	eng.mayNeedWork["owner/repo#10"] = true
@@ -1121,7 +1121,7 @@ func TestCruiseCatchUp_Validate_NoMergeNoAdvance(t *testing.T) {
 			return 55, nil
 		},
 	}
-	eng := testEngineWithStages(client, testStagesWithValidate())
+	eng := testEngineWithStages(t, client, testStagesWithValidate())
 
 	ctx := context.Background()
 	if _, err := eng.poll(ctx); err != nil {
@@ -1177,7 +1177,7 @@ func TestCruiseCatchUp_BothCruiseAndYolo_CruiseWins(t *testing.T) {
 			return &gh.PRDetails{Number: 66, HeadSHA: "sha1"}, nil
 		},
 	}
-	eng := testEngineWithStages(client, testStagesWithValidate())
+	eng := testEngineWithStages(t, client, testStagesWithValidate())
 	// Seed item into cycleSet so the pre-filter admits it (simulates observer firing).
 	eng.mayNeedWorkMu.Lock()
 	eng.mayNeedWork["owner/repo#12"] = true
@@ -1480,7 +1480,7 @@ func TestPollPreFilter_WaitForCI_CompleteLabelOnly_Skipped(t *testing.T) {
 		Token:         "token",
 		MaxConcurrent: 5,
 		Stages:        stgs,
-	}, client, &mockClaudeInvoker{}, NewWorktreeManager("/tmp/test-repo"))
+	}, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
 	// Seed the store so the pre-filter sees this as a known (previously-processed) item.
 	eng.store.Apply(itemstate.InvocationRecorded{Repo: "owner/repo", Number: 99, Completed: true})
 
@@ -1531,7 +1531,7 @@ func TestPollPreFilter_NoWaitForCI_CompleteLabel_Skipped(t *testing.T) {
 		Token:         "token",
 		MaxConcurrent: 5,
 		Stages:        stgs,
-	}, client, &mockClaudeInvoker{}, NewWorktreeManager("/tmp/test-repo"))
+	}, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
 	// Seed the store so the pre-filter sees this as a known (previously-processed) item.
 	eng.store.Apply(itemstate.InvocationRecorded{Repo: "owner/repo", Number: 99, Completed: true})
 
@@ -1586,7 +1586,7 @@ func TestPoll_CruiseValidateComplete_NoRepeatDeepFetch(t *testing.T) {
 		MaxConcurrent: 5,
 		PollSeconds:   1, // 10s cooldown
 		Stages:        stgs,
-	}, client, &mockClaudeInvoker{}, NewWorktreeManager("/tmp/test-repo"))
+	}, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
 
 	// Simulate the perpetual-loop trigger: CooldownAt["periodic-re-eval"] expired.
 	eng.store.Apply(itemstate.CooldownRecorded{
@@ -1638,7 +1638,7 @@ func TestLayer1StatusRefresh_UpdatesCacheOnIssueCommentEvent(t *testing.T) {
 		},
 	}
 	cache := seedTestCache(t, client)
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	payload, _ := json.Marshal(map[string]any{
 		"issue":      map[string]any{"number": 1},
@@ -1680,7 +1680,7 @@ func TestLayer1StatusRefresh_SkipsWhenCachePaused(t *testing.T) {
 	}
 	cache := seedTestCache(t, client)
 	cache.Pause()
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	payload, _ := json.Marshal(map[string]any{
 		"issue":      map[string]any{"number": 1},
@@ -1702,7 +1702,7 @@ func TestLayer1StatusRefresh_SkipsNonIssueEvents(t *testing.T) {
 		},
 	}
 	cache := seedTestCache(t, client)
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	payload, _ := json.Marshal(map[string]any{
 		"pull_request": map[string]any{"number": 1},
@@ -1729,7 +1729,7 @@ func TestPollGateMiss(t *testing.T) {
 			return t1, nil // same timestamp on every call
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
 	testBootstrapFromBoard(cache, &gh.ProjectBoard{ProjectID: "PVT_1", Items: nil})
 	eng.readClient = cache
@@ -1769,7 +1769,7 @@ func TestPollGateFire(t *testing.T) {
 			return ts, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
 	testBootstrapFromBoard(cache, &gh.ProjectBoard{ProjectID: "PVT_1", Items: nil})
 	eng.readClient = cache
@@ -1806,7 +1806,7 @@ func TestPollGateFire_AppliesStatusDrift(t *testing.T) {
 			return map[string]string{"PVTI_001": "Implement"}, nil
 		},
 	}
-	eng, cache := testEngineWithCache(client, &mockClaudeInvoker{})
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
 
 	ctx := context.Background()
 	if _, err := eng.poll(ctx); err != nil {
@@ -1939,7 +1939,7 @@ func TestPoll_LogBoardFromGitHub(t *testing.T) {
 			return &gh.ProjectBoard{ProjectID: "PVT_1", Items: nil}, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	logs := collectPollLogs(t, eng)
 
@@ -1962,7 +1962,7 @@ func TestPoll_LogBoardFromGitHub(t *testing.T) {
 // when readClient is a bootstrapped, unpaused CacheImpl.
 func TestPoll_LogBoardFromCache(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng, _ := testEngineWithCache(client, &mockClaudeInvoker{})
+	eng, _ := testEngineWithCache(t, client, &mockClaudeInvoker{})
 
 	logs := collectPollLogs(t, eng)
 
@@ -1995,7 +1995,7 @@ func TestPoll_LogBoardBootstrapThenCache(t *testing.T) {
 			return board, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
 	eng.readClient = cache
 
@@ -2045,7 +2045,7 @@ func TestPoll_LogItemFromGitHub(t *testing.T) {
 			return board, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.readClient = boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
 
 	// Register mayNeedWorkObserver before poll(): the per-poll Bootstrap fires
@@ -2080,7 +2080,7 @@ func TestPoll_LogItemFromCache(t *testing.T) {
 		Items:     []gh.ProjectItem{{Number: 1, ItemID: "PVTI_001", Status: "Research", Repo: "owner/repo"}},
 	}
 	client := &mockGitHubClient{}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
 
 	// Register the mayNeedWorkObserver before Bootstrap so the StatusChanged
@@ -2147,7 +2147,7 @@ func TestInFlightItem_NotDeepFetchedByWorkerLifecycleChanged(t *testing.T) {
 			return nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	// Register the mayNeedWork observer to demonstrate it does NOT fire for
 	// WorkerLifecycleChanged (Fix B: cycleSetFlags excludes WorkerLifecycleChanged).
@@ -2354,7 +2354,7 @@ func TestRunProbeAndDeepFetch_StaleItem_TriggersDeepFetch(t *testing.T) {
 			return nil
 		},
 	}
-	eng, cache := testEngineWithCache(client, &mockClaudeInvoker{})
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
 	eng.runProbeAndDeepFetch(cache)
 	if deepFetchCalls == 0 {
 		t.Error("expected FetchItemDetails called for stale item (zero LastSeenSourceUpdatedAt); got 0 calls")
@@ -2378,7 +2378,7 @@ func TestRunProbeAndDeepFetch_FreshItem_SkipsDeepFetch(t *testing.T) {
 			return nil
 		},
 	}
-	eng, cache := testEngineWithCache(client, &mockClaudeInvoker{})
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
 	// Simulate a prior deep-fetch that set LastSeenSourceUpdatedAt = T1.
 	eng.store.Apply(itemstate.ItemDeepFetched{
 		Repo:   "owner/repo",
@@ -2412,7 +2412,7 @@ func TestRunProbeAndDeepFetch_LinkageDrift_InvalidatesAndDeepFetches(t *testing.
 			return nil
 		},
 	}
-	eng, cache := testEngineWithCache(client, &mockClaudeInvoker{})
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
 	// Simulate fresh state at T1 with no linked PR (cached LinkedPRNumber = 0).
 	eng.store.Apply(itemstate.ItemDeepFetched{
 		Repo:   "owner/repo",
@@ -2439,7 +2439,7 @@ func TestRunProbeAndDeepFetch_ItemGone_RemovedFromStore(t *testing.T) {
 		},
 		fetchItemDetailsFn: func(item *gh.ProjectItem) error { return nil },
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
 	testBootstrapFromBoard(cache, &gh.ProjectBoard{
 		ProjectID: "PVT_1",
@@ -2472,7 +2472,7 @@ func TestRunStartupTransientLabelScan_RemovesStaleLabelsFromClosedItems(t *testi
 			return nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	// Seed three items into the store:
 	//   #1 — closed, carries a transient label → should be cleaned
@@ -2552,7 +2552,7 @@ func TestColdStart_ProbeBootstrap_TerminalItemsSkipDeepFetch(t *testing.T) {
 			User: "testuser", Token: "token", MaxConcurrent: 5,
 			Stages: testStagesWithCleanup(),
 		},
-		client, &mockClaudeInvoker{}, NewWorktreeManager("/tmp/test-repo"),
+		client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()),
 	)
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
 	eng.readClient = cache
@@ -2637,7 +2637,7 @@ func TestWebhookModeStartup_ClosedDoneItemsNotDeepFetched(t *testing.T) {
 			User: "testuser", Token: "token", MaxConcurrent: 5,
 			Stages: testStagesWithCleanup(),
 		},
-		client, &mockClaudeInvoker{}, NewWorktreeManager("/tmp/test-repo"),
+		client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()),
 	)
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
 
@@ -2686,7 +2686,7 @@ func TestRunProbeAndDeepFetch_IsClosedPropagates_WithoutDeepFetch(t *testing.T) 
 			return nil
 		},
 	}
-	eng, cache := testEngineWithCache(client, &mockClaudeInvoker{})
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
 	// Fresh at T1 — deep-fetch should not be triggered.
 	eng.store.Apply(itemstate.ItemDeepFetched{
 		Repo:   "owner/repo",
@@ -2757,7 +2757,7 @@ func TestProbeNewItem_ClosedDone_SkipsDeepFetch(t *testing.T) {
 			User: "testuser", Token: "token", MaxConcurrent: 5,
 			Stages: testStagesWithCleanup(),
 		},
-		client, &mockClaudeInvoker{}, NewWorktreeManager("/tmp/test-repo"),
+		client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()),
 	)
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
 	eng.readClient = cache
@@ -2818,7 +2818,7 @@ func TestCheckAllowAutoMerge_DisabledEmitsWarning(t *testing.T) {
 			return false, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	out := captureStdout(func() {
 		eng.checkAllowAutoMerge("owner", "repo")
@@ -2843,7 +2843,7 @@ func TestCheckAllowAutoMerge_EnabledIsSilent(t *testing.T) {
 			return true, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	out := captureStdout(func() {
 		eng.checkAllowAutoMerge("owner", "repo")
@@ -2862,7 +2862,7 @@ func TestCheckAllowAutoMerge_APIErrorIsNonFatal(t *testing.T) {
 			return false, errors.New("network error")
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	// Should not panic; engine should log the error at warn level and continue.
 	out := captureStdout(func() {
@@ -2885,7 +2885,7 @@ func TestCheckAllowAutoMerge_DedupSuppressesSecondCall(t *testing.T) {
 			return false, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	// First call should emit warning.
 	out1 := captureStdout(func() {
@@ -2946,7 +2946,7 @@ func TestPoll_InFlightWorker_NotSupplanted(t *testing.T) {
 		MaxConcurrent: 5,
 		PollSeconds:   1,
 		Stages:        testStagesWithValidate(),
-	}, client, &mockClaudeInvoker{}, NewWorktreeManager("/tmp/test-repo"))
+	}, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
 
 	// Simulate an in-flight worker: WorkerEntered in the Store + a live
 	// issueCtxs entry with a cancellable context. This is the exact state poll()

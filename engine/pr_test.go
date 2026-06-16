@@ -20,7 +20,7 @@ func TestEnsureDraftPR_ExistingPR_SkipsCreate(t *testing.T) {
 			return &gh.PRDetails{Number: 42, State: "open"}, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Title: "Test Issue"}
 	prNum, err := eng.ensureDraftPR(item, "main")
@@ -43,7 +43,7 @@ func TestEnsurePRLinksIssue_AlreadyLinked_NoUpdate(t *testing.T) {
 			return "This PR closes Closes #5", nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	eng.ensurePRLinksIssue(gh.ProjectItem{Number: 5}, 10)
 
@@ -66,7 +66,7 @@ func TestEnsurePRLinksIssue_Missing_AddsKeyword(t *testing.T) {
 			return nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	eng.ensurePRLinksIssue(gh.ProjectItem{Number: 7}, 10)
 
@@ -90,7 +90,7 @@ func TestEnsurePRLinksIssue_FencedClosesN_SelfHeals(t *testing.T) {
 			return nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	eng.ensurePRLinksIssue(gh.ProjectItem{Number: 7}, 10)
 
@@ -163,7 +163,7 @@ func TestPostOutputToPR_WithPR_PostsToPRAndIssue(t *testing.T) {
 			return 0, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	item := gh.ProjectItem{Number: 3, Title: "Issue"}
 
 	eng.postOutputToPR(item, "Implement", "detailed output", "", "main-branch", "abc123", "", "2024-01-01")
@@ -200,7 +200,7 @@ func TestPostOutputToPR_FindPRError_FallsBackToIssue(t *testing.T) {
 			return 0, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	item := gh.ProjectItem{Number: 5, Title: "Issue"}
 
 	eng.postOutputToPR(item, "Review", "output", "", "", "", "", "")
@@ -220,7 +220,7 @@ func TestPostOutputToPR_AddCommentErrors_LogsWarnings(t *testing.T) {
 			return 0, errors.New("post error") // all AddComment calls fail
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	item := gh.ProjectItem{Number: 6, Title: "Issue"}
 
 	// Should not panic when AddComment fails
@@ -238,7 +238,7 @@ func TestPostOutputToPR_NoPR_FallsBackToIssue(t *testing.T) {
 			return 0, nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	item := gh.ProjectItem{Number: 4, Title: "Issue"}
 
 	eng.postOutputToPR(item, "Review", "output", "", "", "", "", "")
@@ -267,7 +267,7 @@ func TestUpdatePRVerification_ReplacesSectionAndCallsUpdateIssueBody(t *testing.
 			return nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	item := gh.ProjectItem{Number: 10, Title: "My issue"}
 	eng.updatePRVerification(item, 99, "All tests pass.")
@@ -294,7 +294,7 @@ func TestUpdatePRVerification_EmptySummaryIsNoop(t *testing.T) {
 			return "## Verification\n\nplaceholder.\n\n---\n\nCloses #1", nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.updatePRVerification(gh.ProjectItem{Number: 1}, 55, "")
 
 	if called {
@@ -313,7 +313,7 @@ func TestUpdatePRVerification_SectionNotFound_WarnsAndSkips(t *testing.T) {
 			return nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.updatePRVerification(gh.ProjectItem{Number: 2}, 88, "my summary")
 
 	if updateCalled {
@@ -614,7 +614,7 @@ func TestSyncPRBase_NoPR_NoUpdateAttempted(t *testing.T) {
 			return 0, nil // no PR
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	item := gh.ProjectItem{Number: 1}
 
 	eng.syncPRBase(item, "main") // must not panic or call UpdatePRBase
@@ -636,7 +636,7 @@ func TestSyncPRBase_MatchingBase_NoUpdateAttempted(t *testing.T) {
 			return "main", nil
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	item := gh.ProjectItem{Number: 1}
 
 	eng.syncPRBase(item, "main") // base matches — no update
@@ -655,7 +655,7 @@ func TestSyncPRBase_MismatchedBase_UpdatesExactlyOnce(t *testing.T) {
 			return "main", nil // current base
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	item := gh.ProjectItem{Number: 1}
 
 	eng.syncPRBase(item, "feature/foo") // desired base differs
@@ -684,7 +684,7 @@ func TestSyncPRBase_UpdateError_StageContinues(t *testing.T) {
 			return errors.New("github: unprocessable entity")
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	item := gh.ProjectItem{Number: 1}
 
 	// syncPRBase must not propagate the error — caller sees no return value
@@ -1108,7 +1108,7 @@ func TestEnsureDraftPR_NonTransientError_ImmediateFailure(t *testing.T) {
 			return nil, errors.New("GitHub API returned 422: validation failed")
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	item := gh.ProjectItem{Number: 52, Title: "Feature"}
 	prNum, err := eng.ensureDraftPR(item, "main")
@@ -1137,7 +1137,7 @@ func TestEnsureDraftPR_AllRetriesExhausted_ReturnsError(t *testing.T) {
 			return nil, fmt.Errorf("executing request: %w", &net.OpError{Op: "read", Net: "tcp"})
 		},
 	}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 
 	item := gh.ProjectItem{Number: 53, Title: "Feature"}
 	prNum, err := eng.ensureDraftPR(item, "main")

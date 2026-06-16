@@ -9,7 +9,7 @@ import (
 
 func TestAdvanceToNextStage_Success(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.statusField = &gh.StatusField{
 		FieldID: "FIELD_1",
 		Options: map[string]string{
@@ -37,7 +37,7 @@ func TestAdvanceToNextStage_Success(t *testing.T) {
 
 func TestAdvanceToNextStage_LastStage(t *testing.T) {
 	client := &mockGitHubClient{}
-	eng := testEngine(client, &mockClaudeInvoker{})
+	eng := testEngine(t, client, &mockClaudeInvoker{})
 	eng.statusField = &gh.StatusField{
 		FieldID: "FIELD_1",
 		Options: map[string]string{},
@@ -57,7 +57,7 @@ func TestAdvanceToNextStage_LastStage(t *testing.T) {
 }
 
 func TestAdvanceToNextStage_NoStatusField(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	// statusField is nil
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
@@ -71,7 +71,7 @@ func TestAdvanceToNextStage_NoStatusField(t *testing.T) {
 }
 
 func TestAdvanceToNextStage_MissingOption(t *testing.T) {
-	eng := testEngine(&mockGitHubClient{}, &mockClaudeInvoker{})
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	eng.statusField = &gh.StatusField{
 		FieldID: "FIELD_1",
 		Options: map[string]string{
