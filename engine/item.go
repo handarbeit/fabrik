@@ -1281,6 +1281,51 @@ func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 	e.store.Apply(itemstate.EngineCyclesCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 }
 
+// handleRevalidateLabel processes the fabrik:revalidate operator label by removing
+// all gate and completion labels that would block Validate re-entry, then removing
+// the trigger label itself. Called from the revalidate-scan loop in poll.go after
+// the in-flight worker guard passes. Mirrors clearFailedStage's pattern.
+func (e *Engine) handleRevalidateLabel(item gh.ProjectItem, owner, repo string) {
+	e.logf(item.Number, "revalidate", "clearing gate/completion labels for Validate re-entry\n")
+
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+	labelsToRemove := []string{
+		"stage:Validate:complete",
+		"stage:Validate:failed",
+		"fabrik:paused",
+		"fabrik:awaiting-input",
+		"fabrik:awaiting-ci",
+		"fabrik:auto-merge-enabled",
+		"fabrik:revalidate",
+	}
+	for _, lbl := range labelsToRemove {
+		if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, lbl); err != nil {
+			if errors.Is(err, gh.ErrNotFound) {
+				// Label already absent — desired state achieved; sync cache.
+				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), lbl)
+				}
+				continue
+			}
+			e.logf(item.Number, "warn", "revalidate: could not remove %s: %v\n", lbl, err)
+			continue
+		}
+		e.logf(item.Number, "revalidate", "removed label %s\n", lbl)
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), lbl)
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+lbl)
+		}
+	}
+
+	e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: "Validate"})
+	e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: "Validate"})
+	e.store.Apply(itemstate.StageLastAttemptCleared{Repo: repoStr, Number: item.Number, StageName: "Validate"})
+	e.store.Apply(itemstate.EngineCyclesCleared{Repo: repoStr, Number: item.Number, StageName: "Validate"})
+	e.logf(item.Number, "revalidate", "store reset complete; Validate will dispatch on next poll\n")
+}
+
 // buildAwaitingInputComment builds the notification comment body for a
 // blocked-on-input event. The body starts with the canonical "🏭 **Fabrik"
 // prefix so findNewComments skips it and Fabrik does not treat it as user input.
