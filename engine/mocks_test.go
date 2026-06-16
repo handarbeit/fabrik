@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -57,6 +58,7 @@ type mockGitHubClient struct {
 	enablePullRequestAutoMergeFn        func(owner, repo string, prNumber int, strategy string) error
 	fetchCommitsBehindFn                func(owner, repo, base, head string) (int, error)
 	fetchAllowAutoMergeFn               func(owner, repo string) (bool, error)
+	fetchIssueFn                        func(owner, repo string, issueNumber int) (*gh.IssueData, error)
 
 	// Track call counts for FetchProjectItemStatus
 	fetchProjectItemStatusCalls []string
@@ -470,6 +472,16 @@ func (m *mockGitHubClient) FetchAllowAutoMerge(owner, repo string) (bool, error)
 		return fn(owner, repo)
 	}
 	return true, nil
+}
+
+func (m *mockGitHubClient) FetchIssue(owner, repo string, issueNumber int) (*gh.IssueData, error) {
+	m.mu.Lock()
+	fn := m.fetchIssueFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, issueNumber)
+	}
+	return nil, errors.New("issue not found")
 }
 
 func (m *mockGitHubClient) FetchLabelAppliedAt(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
