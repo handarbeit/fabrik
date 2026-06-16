@@ -55,8 +55,9 @@ type Config struct {
 	Webhooks          bool
 	WebhookPort       int
 	WebhookEvents     string // comma-separated; empty means default event set
-	StatusPollSeconds int    // Layer 2 status-only sweep cadence in seconds; 0 = use default (15)
-	ReconcileInterval int    // seconds; 0 means use default (180 = 3 min); also FABRIK_RECONCILE_INTERVAL
+	StatusPollSeconds    int // Layer 2 status-only sweep cadence in seconds; 0 = use default (15)
+	ReconcileInterval    int // seconds; 0 means use default (180 = 3 min); also FABRIK_RECONCILE_INTERVAL
+	JanitorIntervalHours int // hours; 1 = default; 0 disables the janitor
 }
 
 func Execute() error {
@@ -143,6 +144,7 @@ func Execute() error {
 	flag.StringVar(&cfg.WebhookEvents, "webhook-events", "", "Comma-separated list of GitHub event types to subscribe to (default: all supported events; also FABRIK_WEBHOOK_EVENTS)")
 	flag.IntVar(&cfg.StatusPollSeconds, "status-poll", 0, "Retained for config compatibility; the Layer 2 updatedAt gate now runs every poll cycle (~15 s) regardless of this value. Also FABRIK_STATUS_POLL.")
 	flag.IntVar(&cfg.ReconcileInterval, "reconcile-interval", 0, "Seconds between periodic light-reconcile webhook-stream-health checks when --webhooks is enabled (0 = use default of 180; also FABRIK_RECONCILE_INTERVAL). Inactive without --webhooks — the per-poll Reconcile is the only freshener in that mode.")
+	flag.IntVar(&cfg.JanitorIntervalHours, "janitor-interval", 1, "Worktree janitor scan interval in hours; 0 disables the janitor (also FABRIK_JANITOR_INTERVAL)")
 	flag.StringVar(&cfg.KillGraceSigInt, "kill-grace-sigint", "", "Grace window after SIGINT before SIGTERM in the kill escalation sequence (Go duration: 10s, 0s to skip SIGINT entirely; also FABRIK_KILL_GRACE_SIGINT; default 10s)")
 	flag.StringVar(&cfg.KillGraceSigTerm, "kill-grace-sigterm", "", "Grace window after SIGTERM before SIGKILL in the kill escalation sequence (Go duration: 10s; also FABRIK_KILL_GRACE_SIGTERM; default 10s)")
 
@@ -365,6 +367,21 @@ func Execute() error {
 				cfg.ReconcileInterval = n // 0 → use engine default (lightReconcileInterval = 3 min)
 			} else {
 				fmt.Fprintf(os.Stderr, "[warn] FABRIK_RECONCILE_INTERVAL=%q is invalid (must be a non-negative integer of seconds; 0 = use default 180); using default 180\n", v)
+			}
+		}
+	}
+	if !explicitFlags["janitor-interval"] {
+		if v := os.Getenv("FABRIK_JANITOR_INTERVAL"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				cfg.JanitorIntervalHours = n
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_JANITOR_INTERVAL=%q is invalid (must be a non-negative integer of hours; 0 = disable); using default 1\n", v)
+			}
+		} else if pc.JanitorIntervalHours != nil {
+			if *pc.JanitorIntervalHours < 0 {
+				fmt.Fprintf(os.Stderr, "[warn] config.yaml janitor_interval_hours=%d is invalid (must be a non-negative integer; 0 = disable); using default 1\n", *pc.JanitorIntervalHours)
+			} else {
+				cfg.JanitorIntervalHours = *pc.JanitorIntervalHours
 			}
 		}
 	}
@@ -614,6 +631,7 @@ func Execute() error {
 		WebhookEvents:            webhookEvents,
 		ProjectStatusPollSeconds: statusPollSeconds(cfg.StatusPollSeconds),
 		ReconcileInterval:        reconcileIntervalDuration(cfg.ReconcileInterval),
+		JanitorIntervalHours:     cfg.JanitorIntervalHours,
 		ReadyCh:                  testReadyCh,
 	})
 	if err != nil {
