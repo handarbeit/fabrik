@@ -1,0 +1,302 @@
+package engine
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+
+	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/stages"
+)
+
+// janitorWMEntry maps a "owner-repo" directory name to its resolved state.
+type janitorWMEntry struct {
+	ownerRepo string
+	wm        *WorktreeManager
+}
+
+// runWorktreeJanitor scans .fabrik/worktrees/<owner-repo>/issue-N/ directories
+// and reaps worktrees whose issues are provably terminal and whose directories
+// are clean. Conservative: when in doubt, leaves the worktree and logs the reason.
+//
+// Reaping criteria (all must hold):
+//   (a) issue is closed
+//   (b) issue is NOT on the configured project board — OR is on the board at a
+//       cleanup_worktree:true stage AND carries stage:<Name>:complete AND has no
+//       in-flight worker per the store
+//   (c) worktree is clean (git status --porcelain returns no non-engine-managed paths)
+//   (d) no in-flight dispatch is registered for (repo, number) in the store
+func (e *Engine) runWorktreeJanitor(ctx context.Context) {
+	worktreesRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
+
+	// Build reverse map: "owner-repo" dir name → ownerRepo string + WorktreeManager.
+	// Held only long enough to copy; the rest of the cycle is lock-free.
+	e.mu.Lock()
+	wmByDirName := make(map[string]janitorWMEntry, len(e.worktreeManagers))
+	for ownerRepo, wm := range e.worktreeManagers {
+		owner, repo := parseOwnerRepo(ownerRepo)
+		dirName := owner + "-" + repo
+		wmByDirName[dirName] = janitorWMEntry{ownerRepo: ownerRepo, wm: wm}
+	}
+	e.mu.Unlock()
+
+	closedCache := make(map[string]bool) // "owner/repo#N" → isClosed; reset each cycle
+	var scanned, reaped int
+	var skipReasons []string
+
+	ownerRepoDirs, err := os.ReadDir(worktreesRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			e.logf(0, "janitor", "cycle complete: scanned 0 worktrees, reaped 0, skipped 0\n")
+			return
+		}
+		e.logf(0, "janitor", "warn: cannot read worktrees root %s: %v\n", worktreesRoot, err)
+		return
+	}
+
+	for _, orDir := range ownerRepoDirs {
+		if !orDir.IsDir() {
+			continue
+		}
+		dirName := orDir.Name()
+
+		ownerRepo, wm := e.janitorResolveOwnerRepo(dirName, wmByDirName, worktreesRoot)
+		if ownerRepo == "" {
+			e.logf(0, "janitor", "warn: cannot resolve owner/repo for dir %s — skipping\n", dirName)
+			continue
+		}
+		owner, repo := parseOwnerRepo(ownerRepo)
+
+		issueDirs, err := os.ReadDir(filepath.Join(worktreesRoot, dirName))
+		if err != nil {
+			e.logf(0, "janitor", "warn: cannot read dir %s: %v — skipping\n", dirName, err)
+			continue
+		}
+
+		for _, issueDir := range issueDirs {
+			if !issueDir.IsDir() {
+				continue
+			}
+			issueNumber := janitorParseIssueN(issueDir.Name())
+			if issueNumber == 0 {
+				continue
+			}
+			scanned++
+			wtPath := filepath.Join(worktreesRoot, dirName, issueDir.Name())
+
+			// FR-4(d): no in-flight worker — cheapest check, no I/O
+			snap, snapErr := e.store.Get(ownerRepo, issueNumber)
+			if snapErr == nil && snap.Worker() != nil {
+				skipReasons = append(skipReasons, "in-flight worker")
+				e.logf(0, "janitor", "skip #%d in %s: in-flight worker\n", issueNumber, ownerRepo)
+				continue
+			}
+
+			// FR-4(a): issue is closed
+			if !e.janitorIsClosed(ctx, owner, repo, issueNumber, snap, snapErr, closedCache) {
+				skipReasons = append(skipReasons, "issue open")
+				continue
+			}
+
+			// FR-4(b): off-board OR cleanup-complete
+			if !e.janitorIsOffBoardOrCleanupComplete(snap, snapErr) {
+				skipReasons = append(skipReasons, "on active board")
+				continue
+			}
+
+			// FR-4(c): clean worktree
+			dirty, err := isWorkingTreeDirty(wtPath)
+			if err != nil {
+				reason := fmt.Sprintf("cannot check dirty state: %v", err)
+				skipReasons = append(skipReasons, reason)
+				e.logf(0, "janitor", "skip #%d in %s: %s\n", issueNumber, ownerRepo, reason)
+				continue
+			}
+			if dirty {
+				skipReasons = append(skipReasons, "dirty worktree")
+				e.logf(0, "janitor", "skip #%d in %s: dirty worktree\n", issueNumber, ownerRepo)
+				continue
+			}
+
+			// All conditions met — reap via CleanupWorktree or os.RemoveAll fallback.
+			cleanupWM := wm
+			if cleanupWM == nil {
+				// Unregistered repo: construct a temporary WM.
+				bareDir := filepath.Join(e.fabrikDir, ".fabrik", "repos", dirName+".git")
+				if fi, statErr := os.Stat(bareDir); statErr == nil && fi.IsDir() {
+					cleanupWM = NewWorktreeManagerForRepo(bareDir, worktreesRoot, dirName)
+					cleanupWM.logfFn = e.logf
+				}
+			}
+
+			if cleanupWM != nil {
+				if err := cleanupWM.CleanupWorktree(issueNumber, false); err != nil {
+					reason := fmt.Sprintf("cleanup error: %v", err)
+					skipReasons = append(skipReasons, reason)
+					e.logf(0, "janitor", "warn: could not clean up worktree for #%d in %s: %v\n", issueNumber, ownerRepo, err)
+					continue
+				}
+			} else {
+				// Bare repo absent — fall back to direct removal.
+				e.logf(0, "janitor", "warn: bare repo not found for %s — using os.RemoveAll for #%d\n", dirName, issueNumber)
+				if err := os.RemoveAll(wtPath); err != nil {
+					reason := fmt.Sprintf("removeall error: %v", err)
+					skipReasons = append(skipReasons, reason)
+					e.logf(0, "janitor", "warn: os.RemoveAll %s: %v\n", wtPath, err)
+					continue
+				}
+			}
+			reaped++
+			e.logf(0, "janitor", "reaped worktree for #%d in %s\n", issueNumber, ownerRepo)
+		}
+	}
+
+	skipped := scanned - reaped
+	reasonStr := ""
+	if len(skipReasons) > 0 {
+		counts := make(map[string]int)
+		for _, r := range skipReasons {
+			counts[r]++
+		}
+		var parts []string
+		for r, n := range counts {
+			if n == 1 {
+				parts = append(parts, r)
+			} else {
+				parts = append(parts, fmt.Sprintf("%s ×%d", r, n))
+			}
+		}
+		reasonStr = " (reasons: " + strings.Join(parts, ", ") + ")"
+	}
+	e.logf(0, "janitor", "cycle complete: scanned %d worktrees, reaped %d, skipped %d%s\n",
+		scanned, reaped, skipped, reasonStr)
+}
+
+// janitorParseIssueN parses "issue-N" → N; returns 0 for non-matching inputs.
+func janitorParseIssueN(name string) int {
+	if !strings.HasPrefix(name, "issue-") {
+		return 0
+	}
+	n, err := strconv.Atoi(name[len("issue-"):])
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
+// janitorResolveOwnerRepo maps a "owner-repo" directory name to "owner/repo".
+// For registered repos it uses the reverse map directly. For unregistered repos
+// it runs `git remote get-url origin` from the first issue subdirectory found.
+// Returns ("", nil) when the repo cannot be identified.
+func (e *Engine) janitorResolveOwnerRepo(dirName string, wmByDirName map[string]janitorWMEntry, worktreesRoot string) (ownerRepo string, wm *WorktreeManager) {
+	if entry, ok := wmByDirName[dirName]; ok {
+		return entry.ownerRepo, entry.wm
+	}
+
+	// Unregistered: try to read git remote from first issue subdirectory.
+	issueDirs, err := os.ReadDir(filepath.Join(worktreesRoot, dirName))
+	if err != nil || len(issueDirs) == 0 {
+		return "", nil
+	}
+	for _, d := range issueDirs {
+		if !d.IsDir() || !strings.HasPrefix(d.Name(), "issue-") {
+			continue
+		}
+		wtPath := filepath.Join(worktreesRoot, dirName, d.Name())
+		cmd := exec.Command("git", "remote", "get-url", "origin")
+		cmd.Dir = wtPath
+		out, err := cmd.Output()
+		if err != nil {
+			continue
+		}
+		remoteURL := strings.TrimSpace(string(out))
+		resolvedDirName := ownerRepoDirFromURL(remoteURL)
+		if resolvedDirName == "" {
+			continue
+		}
+		// Reconstruct "owner/repo" from the dirName (or the resolved one).
+		// ownerRepoDirFromURL gives "owner-repo"; we need "owner/repo".
+		// Parse from the URL directly.
+		u := strings.TrimSuffix(remoteURL, ".git")
+		if colonIdx := strings.LastIndex(u, ":"); colonIdx >= 0 {
+			if slashIdx := strings.Index(u, "/"); slashIdx < 0 || slashIdx > colonIdx {
+				u = u[colonIdx+1:]
+			}
+		}
+		parts := strings.Split(u, "/")
+		if len(parts) < 2 {
+			continue
+		}
+		owner := parts[len(parts)-2]
+		repo := parts[len(parts)-1]
+		if owner == "" || repo == "" {
+			continue
+		}
+		return owner + "/" + repo, nil
+	}
+	return "", nil
+}
+
+// janitorIsClosed reports whether the issue is closed.
+// Uses snap when available; falls back to a REST lookup when not in the store.
+// Results are cached in closedCache (keyed by "owner/repo#N") for the cycle.
+func (e *Engine) janitorIsClosed(ctx context.Context, owner, repo string, issueNumber int, snap itemstate.Snapshot, snapErr error, closedCache map[string]bool) bool {
+	key := fmt.Sprintf("%s/%s#%d", owner, repo, issueNumber)
+	if cached, ok := closedCache[key]; ok {
+		return cached
+	}
+	if snapErr == nil {
+		result := snap.IsClosed()
+		closedCache[key] = result
+		return result
+	}
+	// REST fallback for items not in the store (off-board / never seen).
+	issue, err := e.client.FetchIssue(owner, repo, issueNumber)
+	if err != nil {
+		e.logf(0, "janitor", "warn: cannot determine closed state for #%d in %s/%s: %v — skipping\n", issueNumber, owner, repo, err)
+		closedCache[key] = false
+		return false
+	}
+	result := issue.State == "closed"
+	closedCache[key] = result
+	return result
+}
+
+// janitorIsOffBoardOrCleanupComplete reports whether the worktree is eligible
+// for reaping based on its board state:
+//   - Item not in store (off-board) → true
+//   - Item at a cleanup_worktree:true stage with stage:<Name>:complete label → true
+//   - Otherwise → false (on an active board stage or cleanup incomplete)
+func (e *Engine) janitorIsOffBoardOrCleanupComplete(snap itemstate.Snapshot, snapErr error) bool {
+	if errors.Is(snapErr, itemstate.ErrNotFound) || snapErr != nil {
+		return true
+	}
+	status := snap.Status()
+	if status == "" {
+		return true
+	}
+	// Find the stage matching the current board column.
+	var matchedStage *stages.Stage
+	for _, s := range e.cfg.Stages {
+		if s.Name == status {
+			matchedStage = s
+			break
+		}
+	}
+	if matchedStage == nil || !matchedStage.CleanupWorktree {
+		return false
+	}
+	// Cleanup stage found; check that it carries the completion label.
+	completeLabel := "stage:" + status + ":complete"
+	for _, label := range snap.Labels() {
+		if label == completeLabel {
+			return true
+		}
+	}
+	return false
+}
