@@ -1493,15 +1493,16 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		// Skip issues already being processed by a previous poll cycle's worker.
 		// Use the Store-backed Worker field (set by WorkerEntered before goroutine launch)
 		// so this check is consistent with the observer pipeline.
-		// When a new poll detects a comment or reinvoke for an in-flight issue,
-		// annotate the in-flight context with "supplant_by_new_invocation" so the
-		// kill log emits the correct reason code when it is eventually cancelled.
+		//
+		// Do NOT cancel the in-flight context here. Every stage adds
+		// stage:X:in_progress when it starts, which fires a webhook, marks the cache
+		// stale, and triggers a new poll while the worker is still running. Cancelling
+		// on every re-encounter creates a tight dispatch → label → webhook → poll →
+		// cancel → respawn feedback loop that prevents any stage from completing a
+		// turn. Genuine "supplant on new event" semantics need to distinguish
+		// self-generated label changes from external ones — left as future work.
 		if snap, err := e.store.Get(itemRepo, item.Number); err == nil && snap.Worker() != nil {
 			debugLog("dispatch-skip-inflight", map[string]interface{}{"number": item.Number})
-			if entry, ok := e.issueCtxs.Load(iKey); ok {
-				entry.(issueCtxEntry).holder.val.Store("supplant_by_new_invocation")
-				entry.(issueCtxEntry).cancel()
-			}
 			continue
 		}
 		debugLog("dispatch-WILL-DISPATCH", map[string]interface{}{

@@ -2904,3 +2904,79 @@ func TestCheckAllowAutoMerge_DedupSuppressesSecondCall(t *testing.T) {
 		t.Errorf("expected API to be called exactly once; got %d", callCount)
 	}
 }
+
+// TestPoll_InFlightWorker_NotSupplanted is a regression test for the
+// dispatch → label → webhook → poll → cancel feedback loop introduced by the
+// kill-reason propagation work and observed on 2026-06-15: every stage that
+// adds stage:X:in_progress fires a webhook, marks the cache stale, and triggers
+// a re-poll while the worker is still running. If the dispatch loop cancels the
+// in-flight context on every re-encounter, no stage can complete a turn.
+//
+// This test asserts: when poll() encounters an item whose Store has a
+// registered Worker AND whose issueCtxs entry is live, the entry's context is
+// NOT cancelled by the poll cycle.
+func TestPoll_InFlightWorker_NotSupplanted(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{
+						Number:    42,
+						ItemID:    "PVTI_42",
+						Status:    "Validate",
+						Repo:      "owner/repo",
+						UpdatedAt: time.Now(),
+						Labels:    []string{"stage:Validate:in_progress", "fabrik:yolo"},
+					},
+				},
+			}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error { return nil },
+	}
+
+	eng := NewWithDeps(Config{
+		Owner:         "owner",
+		Repo:          "repo",
+		ProjectNum:    1,
+		User:          "testuser",
+		Token:         "token",
+		MaxConcurrent: 5,
+		PollSeconds:   1,
+		Stages:        testStagesWithValidate(),
+	}, client, &mockClaudeInvoker{}, NewWorktreeManager("/tmp/test-repo"))
+
+	// Simulate an in-flight worker: WorkerEntered in the Store + a live
+	// issueCtxs entry with a cancellable context. This is the exact state poll()
+	// will see during a stage's mid-flight on the next poll cycle.
+	eng.store.Apply(itemstate.WorkerEntered{
+		Repo:      "owner/repo",
+		Number:    42,
+		StageName: "Validate",
+		StartedAt: time.Now(),
+	})
+	holder := &killReasonHolder{}
+	iCtx, iCancel := context.WithCancel(context.Background())
+	defer iCancel()
+	eng.issueCtxs.Store("owner/repo#42", issueCtxEntry{cancel: iCancel, holder: holder})
+
+	// Run one poll.
+	if _, err := eng.poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	// The in-flight context must NOT have been cancelled by the dispatch loop.
+	select {
+	case <-iCtx.Done():
+		t.Fatal("poll cancelled the in-flight context — supplant feedback loop regression")
+	default:
+		// expected: context still live
+	}
+
+	// The kill-reason holder must also NOT have been annotated with
+	// supplant_by_new_invocation; this prevents an unrelated later cancel
+	// (e.g. daemon shutdown) from being mislabeled.
+	if v, ok := holder.val.Load().(string); ok && v == "supplant_by_new_invocation" {
+		t.Errorf("holder reason annotated to %q by poll — should be untouched while in-flight worker still running", v)
+	}
+}
