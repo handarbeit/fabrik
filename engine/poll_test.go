@@ -2982,3 +2982,84 @@ func TestPoll_InFlightWorker_NotSupplanted(t *testing.T) {
 		t.Errorf("holder reason annotated to %q by poll — should be untouched while in-flight worker still running", v)
 	}
 }
+
+// TestSHAInvalidation_ReDispatchesValidateOnForcePush verifies SC-5: a force-push
+// simulation (PRHeadSHAUpdated with a new SHA on an item that has
+// stage:Validate:complete + a recorded completion SHA) triggers the
+// SHA-invalidation scan, clears all FR-3 labels, and leaves the item in a
+// state where itemNeedsWork returns true on the next poll.
+func TestSHAInvalidation_ReDispatchesValidateOnForcePush(t *testing.T) {
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 3, Prompt: "implement"},
+		{Name: "Validate", Order: 4, Prompt: "validate"},
+	}
+	allLabels := []string{
+		"stage:Validate:complete",
+		"fabrik:auto-merge-enabled",
+		"fabrik:awaiting-ci",
+		"fabrik:awaiting-review",
+	}
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{
+						Number: 99,
+						ItemID: "PVTI_99",
+						Status: "Validate",
+						Repo:   "owner/repo",
+						Labels: allLabels,
+					},
+				},
+			}, nil
+		},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+
+	// Simulate Validate completing at "sha-N", then a force-push arriving at "sha-M".
+	eng.store.Apply(itemstate.PRHeadSHAUpdated{
+		Repo:        "owner/repo",
+		Number:      99,
+		LinkedPRNum: 200,
+		SHA:         "sha-M",
+	})
+	eng.store.Apply(itemstate.ValidateCompletedAtSHA{
+		Repo:   "owner/repo",
+		Number: 99,
+		SHA:    "sha-N",
+	})
+
+	// Poll: SHA-invalidation scan fires and clears all FR-3 labels.
+	if _, err := eng.poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	// Assert all four FR-3 labels were removed from GitHub.
+	client.mu.Lock()
+	removed := make(map[string]bool)
+	for _, c := range client.removeLabelCalls {
+		if c.issueNumber == 99 {
+			removed[c.labelName] = true
+		}
+	}
+	client.mu.Unlock()
+	for _, lbl := range allLabels {
+		if !removed[lbl] {
+			t.Errorf("force-push: expected label %q to be removed, but it was not", lbl)
+		}
+	}
+
+	// After label clearance, itemNeedsWork must return true for the cleaned item
+	// so the next poll dispatches Validate.
+	cleanedItem := gh.ProjectItem{
+		Number: 99,
+		ItemID: "PVTI_99",
+		Status: "Validate",
+		Repo:   "owner/repo",
+		Labels: []string{}, // all blocking labels cleared
+	}
+	if !eng.itemNeedsWork(cleanedItem) {
+		t.Error("expected itemNeedsWork to return true after SHA-invalidation scan cleared labels")
+	}
+}
