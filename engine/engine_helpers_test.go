@@ -54,7 +54,7 @@ func testEngineWithCache(client *mockGitHubClient, claude *mockClaudeInvoker) (*
 	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
 	cache.BootstrapFromProbe([]gh.BoardProbeItem{
 		{ContentID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", Status: "Research"},
-	}, "PVT_1", testStages())
+	}, "PVT_1")
 	eng.readClient = cache
 	return eng, cache
 }
@@ -77,7 +77,7 @@ func testBootstrapFromBoard(cache *boardcache.CacheImpl, board *gh.ProjectBoard)
 			LinkedPRNumber:     item.LinkedPRNumber,
 		})
 	}
-	cache.BootstrapFromProbe(probeItems, board.ProjectID, nil)
+	cache.BootstrapFromProbe(probeItems, board.ProjectID)
 	for _, item := range board.Items {
 		key := boardcache.ItemKey(item.Repo, item.Number)
 		for _, l := range item.Labels {

@@ -528,7 +528,7 @@ func TestRunProbeAndDeepFetch_LinkageDrift_ColdStart_ClearsStalePR(t *testing.T)
 	cache.BootstrapFromProbe([]gh.BoardProbeItem{
 		{ContentID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo",
 			Status: "Research", EffectiveUpdatedAt: bootstrapTime, LinkedPRNumber: 42},
-	}, "PVT_1", testStagesWithCleanup())
+	}, "PVT_1")
 	eng.readClient = cache
 
 	// Verify prToKey entry for PR 42 exists after bootstrap.

@@ -2562,7 +2562,8 @@ func TestColdStart_ProbeBootstrap_TerminalItemsSkipDeepFetch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProbeProjectBoard: %v", err)
 	}
-	cache.BootstrapFromProbe(items, projectID, eng.cfg.Stages)
+	cache.BootstrapFromProbe(items, projectID)
+	eng.seedTerminalFromProbeItems(items)
 
 	// Now simulate the next poll cycle — probe-driven deep-fetch pass.
 	eng.runProbeAndDeepFetch(cache)
@@ -2642,7 +2643,8 @@ func TestWebhookModeStartup_ClosedDoneItemsNotDeepFetched(t *testing.T) {
 
 	// Simulate the fixed webhook startup path: BootstrapFromProbe seeds Terminal
 	// for closed Done items before the first poll cycle runs.
-	cache.BootstrapFromProbe(allProbeItems, "PVT_1", eng.cfg.Stages)
+	cache.BootstrapFromProbe(allProbeItems, "PVT_1")
+	eng.seedTerminalFromProbeItems(allProbeItems)
 	eng.readClient = cache
 
 	// Run one probe cycle — this is what the first poll does after startup.
