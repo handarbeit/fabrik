@@ -65,7 +65,7 @@ func (e *Engine) runWorktreeJanitor(ctx context.Context) {
 		}
 		dirName := orDir.Name()
 
-		ownerRepo, wm := e.janitorResolveOwnerRepo(dirName, wmByDirName, worktreesRoot)
+		ownerRepo, wm := e.janitorResolveOwnerRepo(ctx, dirName, wmByDirName, worktreesRoot)
 		if ownerRepo == "" {
 			e.logf(0, "janitor", "warn: cannot resolve owner/repo for dir %s — skipping\n", dirName)
 			continue
@@ -193,7 +193,7 @@ func janitorParseIssueN(name string) int {
 // For registered repos it uses the reverse map directly. For unregistered repos
 // it runs `git remote get-url origin` from the first issue subdirectory found.
 // Returns ("", nil) when the repo cannot be identified.
-func (e *Engine) janitorResolveOwnerRepo(dirName string, wmByDirName map[string]janitorWMEntry, worktreesRoot string) (ownerRepo string, wm *WorktreeManager) {
+func (e *Engine) janitorResolveOwnerRepo(ctx context.Context, dirName string, wmByDirName map[string]janitorWMEntry, worktreesRoot string) (ownerRepo string, wm *WorktreeManager) {
 	if entry, ok := wmByDirName[dirName]; ok {
 		return entry.ownerRepo, entry.wm
 	}
@@ -208,7 +208,7 @@ func (e *Engine) janitorResolveOwnerRepo(dirName string, wmByDirName map[string]
 			continue
 		}
 		wtPath := filepath.Join(worktreesRoot, dirName, d.Name())
-		cmd := exec.Command("git", "remote", "get-url", "origin")
+		cmd := exec.CommandContext(ctx, "git", "remote", "get-url", "origin")
 		cmd.Dir = wtPath
 		out, err := cmd.Output()
 		if err != nil {
@@ -259,6 +259,11 @@ func (e *Engine) janitorIsClosed(ctx context.Context, owner, repo string, issueN
 	issue, err := e.client.FetchIssue(owner, repo, issueNumber)
 	if err != nil {
 		e.logf(0, "janitor", "warn: cannot determine closed state for #%d in %s/%s: %v — skipping\n", issueNumber, owner, repo, err)
+		closedCache[key] = false
+		return false
+	}
+	if issue == nil {
+		e.logf(0, "janitor", "warn: cannot determine closed state for #%d in %s/%s: received nil issue — skipping\n", issueNumber, owner, repo)
 		closedCache[key] = false
 		return false
 	}
