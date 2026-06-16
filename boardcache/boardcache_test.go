@@ -10,7 +10,6 @@ import (
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
-	"github.com/handarbeit/fabrik/stages"
 )
 
 // ---------------------------------------------------------------------------
@@ -170,7 +169,7 @@ func testBootstrapFromBoard(c *CacheImpl, board *gh.ProjectBoard) {
 			LinkedPRNumber:     item.LinkedPRNumber,
 		})
 	}
-	c.BootstrapFromProbe(probeItems, board.ProjectID, nil)
+	c.BootstrapFromProbe(probeItems, board.ProjectID)
 	// Apply labels separately — probe results carry no labels.
 	for _, item := range board.Items {
 		key := ItemKey(item.Repo, item.Number)
@@ -228,7 +227,7 @@ func seedCache(t *testing.T) *CacheImpl {
 		{ContentID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", Status: "Research"},
 		{ContentID: "I_002", ItemID: "PVTI_002", Number: 2, Repo: "owner/repo", Status: "Plan"},
 	}
-	c.BootstrapFromProbe(probeItems, "PID", testStages())
+	c.BootstrapFromProbe(probeItems, "PID")
 	return c
 }
 
@@ -260,7 +259,7 @@ func TestBootstrapNotifiesObserver(t *testing.T) {
 		{ContentID: "I_1", ItemID: "PVTI_1", Number: 1, Repo: "owner/repo", Status: "Research"},
 		{ContentID: "I_2", ItemID: "PVTI_2", Number: 2, Repo: "owner/repo", Status: "Implement"},
 	}
-	c.BootstrapFromProbe(probeItems, "PID", testStages())
+	c.BootstrapFromProbe(probeItems, "PID")
 
 	mu.Lock()
 	got := len(received)
@@ -2294,15 +2293,6 @@ func TestLightReconcile_NetworkError(t *testing.T) {
 // BootstrapFromProbe tests
 // ---------------------------------------------------------------------------
 
-// testStages returns a minimal []*stages.Stage for testing: one non-cleanup stage
-// ("Research") and one cleanup stage ("Done").
-func testStages() []*stages.Stage {
-	return []*stages.Stage{
-		{Name: "Research", Order: 1, CleanupWorktree: false},
-		{Name: "Done", Order: 10, CleanupWorktree: true},
-	}
-}
-
 // TestBootstrapFromProbe_ProjectIDSet verifies that BootstrapFromProbe stores
 // the projectID returned by ProbeProjectBoard.
 func TestBootstrapFromProbe_ProjectIDSet(t *testing.T) {
@@ -2310,7 +2300,7 @@ func TestBootstrapFromProbe_ProjectIDSet(t *testing.T) {
 	items := []gh.BoardProbeItem{
 		{ContentID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"},
 	}
-	c.BootstrapFromProbe(items, "PROJ_XYZ", testStages())
+	c.BootstrapFromProbe(items, "PROJ_XYZ")
 
 	if got := c.ProjectID(); got != "PROJ_XYZ" {
 		t.Errorf("ProjectID = %q, want %q", got, "PROJ_XYZ")
@@ -2325,7 +2315,7 @@ func TestBootstrapFromProbe_LinkedPRNumberPopulated(t *testing.T) {
 	items := []gh.BoardProbeItem{
 		{ContentID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research", LinkedPRNumber: 42},
 	}
-	c.BootstrapFromProbe(items, "PID", testStages())
+	c.BootstrapFromProbe(items, "PID")
 
 	s := testGetState(t, c, "owner/repo", 1)
 	if s.LinkedPR == nil {
@@ -2333,55 +2323,6 @@ func TestBootstrapFromProbe_LinkedPRNumberPopulated(t *testing.T) {
 	}
 	if s.LinkedPR.Number != 42 {
 		t.Errorf("LinkedPR.Number = %d, want 42", s.LinkedPR.Number)
-	}
-}
-
-// TestBootstrapFromProbe_NonCleanupStageNotTerminal verifies that a closed item
-// in a non-cleanup stage is NOT seeded as terminal.
-func TestBootstrapFromProbe_NonCleanupStageNotTerminal(t *testing.T) {
-	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
-	items := []gh.BoardProbeItem{
-		{ContentID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research", IsClosed: true},
-	}
-	c.BootstrapFromProbe(items, "PID", testStages())
-
-	s := testGetState(t, c, "owner/repo", 1)
-	if s.Terminal {
-		t.Error("Terminal = true for closed non-cleanup-stage item; want false")
-	}
-}
-
-// TestBootstrapFromProbe_ClosedCleanupStageTerminal verifies that a closed item
-// in a cleanup stage IS seeded as terminal, preventing a deep-fetch on first probe.
-func TestBootstrapFromProbe_ClosedCleanupStageTerminal(t *testing.T) {
-	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
-	items := []gh.BoardProbeItem{
-		{ContentID: "I_1", Number: 1, Repo: "owner/repo", Status: "Done", IsClosed: true},
-	}
-	c.BootstrapFromProbe(items, "PID", testStages())
-
-	s := testGetState(t, c, "owner/repo", 1)
-	if !s.Terminal {
-		t.Error("Terminal = false for closed cleanup-stage item; want true")
-	}
-	snap := testGetSnap(t, c, "owner/repo", 1)
-	if !snap.IsTerminal() {
-		t.Error("IsTerminal() = false for closed cleanup-stage item; want true")
-	}
-}
-
-// TestBootstrapFromProbe_OpenCleanupStageNotTerminal verifies that an open item
-// in a cleanup stage is NOT seeded as terminal (must be closed to qualify).
-func TestBootstrapFromProbe_OpenCleanupStageNotTerminal(t *testing.T) {
-	c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
-	items := []gh.BoardProbeItem{
-		{ContentID: "I_1", Number: 1, Repo: "owner/repo", Status: "Done", IsClosed: false},
-	}
-	c.BootstrapFromProbe(items, "PID", testStages())
-
-	s := testGetState(t, c, "owner/repo", 1)
-	if s.Terminal {
-		t.Error("Terminal = true for open cleanup-stage item; want false")
 	}
 }
 
@@ -2395,7 +2336,7 @@ func TestBootstrapFromProbe_IsBootstrapped(t *testing.T) {
 	items := []gh.BoardProbeItem{
 		{ContentID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"},
 	}
-	c.BootstrapFromProbe(items, "PID", testStages())
+	c.BootstrapFromProbe(items, "PID")
 	if !c.IsBootstrapped() {
 		t.Error("IsBootstrapped should be true after BootstrapFromProbe")
 	}
@@ -2408,7 +2349,7 @@ func TestBootstrapFromProbe_PRInStoreByPRKey(t *testing.T) {
 	items := []gh.BoardProbeItem{
 		{ContentID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research", LinkedPRNumber: 99},
 	}
-	c.BootstrapFromProbe(items, "PID", testStages())
+	c.BootstrapFromProbe(items, "PID")
 
 	_, found := c.store.GetByPRKey("owner/repo", 99)
 	if !found {
@@ -2432,7 +2373,7 @@ func TestBootstrapFromProbe_TitlePopulatedAfterDeepFetch(t *testing.T) {
 	items := []gh.BoardProbeItem{
 		{ContentID: "I_5", ItemID: "PVTI_5", Number: 5, Repo: "owner/repo", Status: "Implement"},
 	}
-	c.BootstrapFromProbe(items, "PID", testStages())
+	c.BootstrapFromProbe(items, "PID")
 
 	// Confirm that the bootstrapped item has no title (probe never carries title).
 	s := testGetState(t, c, "owner/repo", 5)
@@ -2488,7 +2429,7 @@ func TestFetchLinkedPR_SecondCallUsesStoredSHA(t *testing.T) {
 	// Bootstrap item #1 — no LinkedPR yet.
 	c.BootstrapFromProbe([]gh.BoardProbeItem{
 		{ContentID: "I_1", Number: 1, Repo: "owner/repo", Status: "Validate"},
-	}, "PID", nil)
+	}, "PID")
 
 	// First call falls through to GitHub — item has no LinkedPR in the store.
 	pr1, err := c.FetchLinkedPR("owner", "repo", 1)
@@ -2539,7 +2480,7 @@ func TestFetchLinkedPR_EmptyHeadSHAForcesRefetch(t *testing.T) {
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
 	c.BootstrapFromProbe([]gh.BoardProbeItem{
 		{ContentID: "I_1", Number: 1, Repo: "owner/repo", Status: "Validate"},
-	}, "PID", nil)
+	}, "PID")
 
 	// Simulate the pre-fix state: PRDetailsUpdated populates Title/Number but not HeadSHA.
 	c.store.Apply(itemstate.PRDetailsUpdated{
