@@ -541,14 +541,15 @@ func TestCheckAutoMergeConvergence_UnregisteredRepo_NoPanic(t *testing.T) {
 	}
 	eng := testEngineForMerge(t, client)
 	eng.cfg.ConvergenceBudget = 30 * time.Minute
-	eng.fabrikDir = t.TempDir() // forces ensureBareClone to fail (no network for fake repo)
+	// ENAMETOOLONG: fails os.MkdirAll before any network call — deterministic, no git subprocess.
+	eng.fabrikDir = strings.Repeat("a", 10000)
 
 	// item.Repo points at a repo with no registered WorktreeManager. The pre-fix
 	// behavior would be: convergence budget exhausted → pauseForConvergenceFailed
-	// → worktreesFor("nonexistent-xyz/nonexistent-repo") → panic.
+	// → worktreesFor("fail-test/unregistered") → panic.
 	item := gh.ProjectItem{
 		Number: 42,
-		Repo:   "nonexistent-xyz/nonexistent-repo-convergence",
+		Repo:   "fail-test/unregistered",
 		Labels: []string{"fabrik:auto-merge-enabled"},
 	}
 	stage := &stages.Stage{Name: "Validate"}
