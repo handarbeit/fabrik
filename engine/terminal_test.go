@@ -1,6 +1,10 @@
 package engine
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -553,31 +557,138 @@ func TestRunProbeAndDeepFetch_LinkageDrift_ColdStart_ClearsStalePR(t *testing.T)
 
 // ---- isProbeOnlyTerminal unit tests ----
 
-func TestIsProbeOnlyTerminal_ClosedCleanup_True(t *testing.T) {
-	stagesCfg := testStagesWithCleanup()
-	if !isProbeOnlyTerminal(true, "Done", stagesCfg) {
-		t.Error("expected true for closed item in cleanup stage")
+// probeOnlyTerminalEngine returns a minimal *Engine for isProbeOnlyTerminal tests.
+// It registers NO WorktreeManager so worktreeExistsForItem uses the fabrikDir
+// fallback path, which is set to a fresh temp dir for deterministic path checks.
+func probeOnlyTerminalEngine(t *testing.T) (*Engine, string) {
+	t.Helper()
+	fabrikDir := t.TempDir()
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithCleanup(),
+		},
+		&mockGitHubClient{},
+		&mockClaudeInvoker{},
+		nil, // no WM → worktreeExistsForItem uses the fabrikDir fallback path
+	)
+	eng.fabrikDir = fabrikDir
+	return eng, fabrikDir
+}
+
+// worktreeDirForItem returns the conventional worktree path used by worktreeExistsForItem's
+// fallback (no WM registered): <fabrikDir>/.fabrik/worktrees/<owner>-<repo>/issue-<N>.
+// repo must be "owner/repo" form.
+func worktreeDirForItem(fabrikDir, repo string, number int) string {
+	parts := strings.SplitN(repo, "/", 2)
+	dirName := parts[0] + "-" + parts[1]
+	return filepath.Join(fabrikDir, ".fabrik", "worktrees", dirName, fmt.Sprintf("issue-%d", number))
+}
+
+// TestIsProbeOnlyTerminal_ClosedCleanup_NoWorktree_True (SC-2): closed item in
+// a cleanup stage with no on-disk worktree → predicate returns true.
+func TestIsProbeOnlyTerminal_ClosedCleanup_NoWorktree_True(t *testing.T) {
+	eng, _ := probeOnlyTerminalEngine(t)
+	item := gh.ProjectItem{Number: 1, IsClosed: true, Status: "Done", Repo: "owner/repo"}
+	if !eng.isProbeOnlyTerminal(item) {
+		t.Error("expected true for closed item in cleanup stage with no worktree")
 	}
 }
 
+// TestIsProbeOnlyTerminal_ClosedCleanup_WorktreePresent_False (SC-1): closed item
+// in a cleanup stage WITH an on-disk worktree → predicate returns false so cleanup runs.
+func TestIsProbeOnlyTerminal_ClosedCleanup_WorktreePresent_False(t *testing.T) {
+	eng, fabrikDir := probeOnlyTerminalEngine(t)
+	wtDir := worktreeDirForItem(fabrikDir, "owner/repo", 1)
+	if err := os.MkdirAll(wtDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	item := gh.ProjectItem{Number: 1, IsClosed: true, Status: "Done", Repo: "owner/repo"}
+	if eng.isProbeOnlyTerminal(item) {
+		t.Error("expected false for closed item in cleanup stage when worktree exists on disk")
+	}
+}
+
+// TestIsProbeOnlyTerminal_OpenCleanup_False (SC-3): open item in a cleanup stage
+// → predicate returns false regardless of worktree presence.
 func TestIsProbeOnlyTerminal_OpenCleanup_False(t *testing.T) {
-	stagesCfg := testStagesWithCleanup()
-	if isProbeOnlyTerminal(false, "Done", stagesCfg) {
+	eng, fabrikDir := probeOnlyTerminalEngine(t)
+	// Create a worktree to confirm worktree presence doesn't affect the result for open items.
+	wtDir := worktreeDirForItem(fabrikDir, "owner/repo", 1)
+	if err := os.MkdirAll(wtDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	item := gh.ProjectItem{Number: 1, IsClosed: false, Status: "Done", Repo: "owner/repo"}
+	if eng.isProbeOnlyTerminal(item) {
 		t.Error("expected false for open item in cleanup stage")
 	}
 }
 
+// TestIsProbeOnlyTerminal_ClosedNonCleanup_False: closed item in a non-cleanup
+// stage → predicate returns false.
 func TestIsProbeOnlyTerminal_ClosedNonCleanup_False(t *testing.T) {
-	stagesCfg := testStagesWithCleanup()
-	if isProbeOnlyTerminal(true, "Research", stagesCfg) {
+	eng, _ := probeOnlyTerminalEngine(t)
+	item := gh.ProjectItem{Number: 1, IsClosed: true, Status: "Research", Repo: "owner/repo"}
+	if eng.isProbeOnlyTerminal(item) {
 		t.Error("expected false for closed item in non-cleanup stage")
 	}
 }
 
+// TestIsProbeOnlyTerminal_OpenNonCleanup_False: open item in a non-cleanup stage
+// → predicate returns false.
 func TestIsProbeOnlyTerminal_OpenNonCleanup_False(t *testing.T) {
-	stagesCfg := testStagesWithCleanup()
-	if isProbeOnlyTerminal(false, "Research", stagesCfg) {
+	eng, _ := probeOnlyTerminalEngine(t)
+	item := gh.ProjectItem{Number: 1, IsClosed: false, Status: "Research", Repo: "owner/repo"}
+	if eng.isProbeOnlyTerminal(item) {
 		t.Error("expected false for open item in non-cleanup stage")
+	}
+}
+
+// TestSeedTerminalFromProbeItems_SC5 covers SC-5: the bootstrap path must NOT
+// seed terminal for a closed Done item when its worktree exists on disk. A
+// same-call item without a worktree MUST be seeded terminal.
+func TestSeedTerminalFromProbeItems_SC5(t *testing.T) {
+	eng, fabrikDir := probeOnlyTerminalEngine(t)
+
+	// Issue #1: closed + Done + worktree EXISTS → must NOT be terminal after seed.
+	wtDir := worktreeDirForItem(fabrikDir, "owner/repo", 1)
+	if err := os.MkdirAll(wtDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	// Issue #2: closed + Done + NO worktree → MUST be terminal after seed.
+	// (worktree directory deliberately not created)
+
+	probeItems := []gh.BoardProbeItem{
+		{ContentID: "I_1", ItemID: "PVTI_1", Number: 1, Repo: "owner/repo", Status: "Done", IsClosed: true},
+		{ContentID: "I_2", ItemID: "PVTI_2", Number: 2, Repo: "owner/repo", Status: "Done", IsClosed: true},
+	}
+
+	// Populate the store so Apply calls have a valid target.
+	eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Number: 1, Repo: "owner/repo", Status: "Done", IsClosed: true}})
+	eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{Number: 2, Repo: "owner/repo", Status: "Done", IsClosed: true}})
+
+	eng.seedTerminalFromProbeItems(probeItems)
+
+	snap1, err := eng.store.Get("owner/repo", 1)
+	if err != nil {
+		t.Fatalf("store.Get issue #1: %v", err)
+	}
+	if snap1.IsTerminal() {
+		t.Error("SC-5: issue #1 (worktree present) must NOT be seeded terminal — cleanup would be skipped")
+	}
+
+	snap2, err := eng.store.Get("owner/repo", 2)
+	if err != nil {
+		t.Fatalf("store.Get issue #2: %v", err)
+	}
+	if !snap2.IsTerminal() {
+		t.Error("SC-5: issue #2 (no worktree) MUST be seeded terminal to skip unnecessary deep-fetch")
 	}
 }
 
