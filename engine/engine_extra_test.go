@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -158,7 +159,7 @@ func TestEnsureRepoReady_EmptyOwner_ReturnsNil(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := NewWithDeps(
 		Config{Owner: "", Repo: "", User: "u", Token: "t", Stages: testStages()},
-		client, &mockClaudeInvoker{}, NewWorktreeManager("/tmp"),
+		client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()),
 	)
 	item := gh.ProjectItem{Number: 1}
 	if err := eng.ensureRepoReady(context.Background(), item); err != nil {
@@ -170,11 +171,11 @@ func TestEnsureRepoReady_CloneFailure_PostsCommentAndPauses(t *testing.T) {
 	skipIfNoGit(t)
 	client := &mockGitHubClient{}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
-	// Set fabrikDir to a tempdir so ensureBareClone tries (and fails) to clone.
-	eng.fabrikDir = t.TempDir()
+	// ENAMETOOLONG: fails os.MkdirAll before any network call — deterministic, no git subprocess.
+	eng.fabrikDir = strings.Repeat("a", 10000)
 
-	// Item with a new (unregistered) repo — ensureBareClone will fail (no network to nonexistent).
-	item := gh.ProjectItem{Number: 77, Repo: "nonexistent-xyz/nonexistent-repo-abc123"}
+	// Item with a new (unregistered) repo — ensureBareClone will fail at os.MkdirAll.
+	item := gh.ProjectItem{Number: 77, Repo: "fail-test/unregistered"}
 	err := eng.ensureRepoReady(context.Background(), item)
 	if err != ErrSkipItem {
 		t.Errorf("expected ErrSkipItem on clone failure, got %v", err)
@@ -207,9 +208,10 @@ func TestEnsureRepoReady_ConcurrentSameRepo_OnlyOneCloneAttempt(t *testing.T) {
 	const numWorkers = 8
 	client := &mockGitHubClient{}
 	eng := testEngine(t, client, &mockClaudeInvoker{})
-	eng.fabrikDir = t.TempDir() // causes ensureBareClone to fail (no network)
+	// ENAMETOOLONG: fails os.MkdirAll before any network call — deterministic, no git subprocess.
+	eng.fabrikDir = strings.Repeat("a", 10000)
 
-	item := gh.ProjectItem{Number: 42, Repo: "nonexistent-xyz/nonexistent-repo-concurrent-test"}
+	item := gh.ProjectItem{Number: 42, Repo: "fail-test/concurrent"}
 
 	// Use a barrier so all goroutines start at the same moment.
 	var barrier sync.WaitGroup
