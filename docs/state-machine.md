@@ -1579,20 +1579,41 @@ This is the *engine-state lifecycle* (goroutine boundary). A parallel *TUI-prese
 
 #### Stale-Worker Detector (Runtime Crash Case)
 
-`startWorkerDetector(ctx)` launches a background goroutine in `Run()` that scans for stale workers every 30 seconds.
+`startWorkerDetector(ctx)` launches a background goroutine in `Run()` that scans for stale workers every **60 seconds**.
 
-**Detection criteria:** `Worker != nil` AND `time.Since(Worker.LastSignAt) > 2 minutes`.
+**Detection requires BOTH conditions** (implemented by `isWorkerStale(w, threshold)`):
+
+1. `time.Since(Worker.LastSignAt) > WorkerStaleTimeout` (heartbeat is stale), AND
+2. Signal-0 confirms the process is dead (`kill -0 PID` returns `ESRCH`)
+
+The "both conditions" requirement prevents spurious clearing of live workers whose heartbeat goroutine is delayed under system load. If the heartbeat is stale but the PID is alive, the engine logs a warning and re-checks on the next scan cycle.
+
+**`WorkerStaleTimeout`** (default **5 minutes**) is configurable via `--worker-stale-timeout <N>` (minutes) or `FABRIK_WORKER_STALE_TIMEOUT=N`. Must be longer than `heartbeatInterval × 2` (currently > 60 s).
 
 **PID=0 skip:** Workers with `PID == 0` (PID not yet set) are skipped regardless of heartbeat age — they are in the narrow window between `LocalLockAcquired` and `cmd.Start()`.
 
-**Signal-0 liveness check** (`os.FindProcess(pid)` + `process.Signal(syscall.Signal(0))`):
+**Signal-0 liveness check** (`syscall.Kill(pid, 0)`):
 
 | Outcome | Action |
 |---------|--------|
-| Signal-0 fails (PID dead) | `store.Apply(WorkerExited{})` + `RemoveLabel(fabrik:locked:<user>)` + `RemoveLabel(stage:<StageName>:in_progress)` + log cleanup message |
-| Signal-0 succeeds (PID alive) | Log warning only; do not remove labels or kill the process; re-check on next scan |
+| Signal-0 fails with ESRCH (PID dead) AND heartbeat stale | `store.Apply(WorkerExited{})` + `RemoveLabel(fabrik:locked:<user>)` + `RemoveLabel(stage:<StageName>:in_progress)` + log `[#N worker-liveness] stale worker handle (pid=P last_sign=T) — clearing` |
+| Signal-0 succeeds (PID alive) with stale heartbeat | Log `[#N worker-detector] stale heartbeat for PID P — process alive, waiting for natural exit`; do not remove labels or kill the process; re-check on next scan |
+| Heartbeat fresh (within `WorkerStaleTimeout`) | Skip regardless of PID state |
 
 `StageName` for label construction is taken from `Worker.StageName`, which was set at dispatch time.
+
+**Windows note:** `isProcessAlive` always returns `true` on Windows (signal-0 is unsupported). The detector never clears stale workers on Windows; the startup cleanup pass handles the restart case instead.
+
+#### Janitor Integration (Stale-Worker Awareness)
+
+The worktree janitor's in-flight-worker check (reaping criterion FR-4(d)) uses the same `isWorkerStale()` helper as the detector. A worker that the detector would clear is not permitted to block the janitor.
+
+**Effective guard:** `snap.Worker() != nil && !isWorkerStale(snap.Worker(), e.workerStaleTimeout())`
+
+- Worker with fresh heartbeat OR alive PID → treated as in-flight; janitor skips the worktree.
+- Worker with stale heartbeat AND dead PID → treated as absent; janitor proceeds to reap if all other criteria hold.
+
+This prevents the multi-hour stall scenario where a Claude process dies without the engine's context-cancel path firing, leaving a permanent `WorkerEntered` block that the janitor would otherwise honour indefinitely.
 
 #### Startup Cleanup Pass (Restart Case)
 
