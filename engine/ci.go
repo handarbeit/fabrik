@@ -116,8 +116,10 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 	// the post-push registration window — block and wait rather than clearing.
 	if len(checkRuns) == 0 {
 		var hadChecks bool
+		var lpr *itemstate.LinkedPRState
 		if snap, snapErr := e.store.Get(itemRepo, item.Number); snapErr == nil {
-			if lpr := snap.LinkedPR(); lpr != nil {
+			lpr = snap.LinkedPR()
+			if lpr != nil {
 				hadChecks = lpr.HasHadChecks
 			}
 		}
@@ -172,6 +174,23 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 			}
 			e.logf(item.Number, "ci-gate", "mergeable_state=%q blocks merge but no check_runs visible — branch protection likely requires a Commit Status or external signal; blocking\n", mergeableState)
 			return true, false, false
+		}
+		// Post-push dwell guard: when mergeable_state is "" or "unknown" and
+		// check_runs is empty, GitHub may not have computed mergeability or started
+		// CI yet for a recently-pushed SHA. Block the gate-clear until the dwell
+		// window has elapsed. Zero LastHeadSHAUpdate (cold start / pre-restart)
+		// falls through to preserve existing behavior (EC-1).
+		if lpr != nil && !lpr.LastHeadSHAUpdate.IsZero() {
+			dwell := e.cfg.PostPushDwell
+			if dwell <= 0 {
+				dwell = 90 * time.Second
+			}
+			if time.Since(lpr.LastHeadSHAUpdate) < dwell {
+				e.logf(item.Number, "ci-gate", "no check runs for SHA %s — post-push dwell window active (%.0fs remaining); waiting\n",
+					pr.HeadSHA[:min(8, len(pr.HeadSHA))],
+					(dwell - time.Since(lpr.LastHeadSHAUpdate)).Seconds())
+				return true, false, false
+			}
 		}
 		e.logf(item.Number, "ci-gate", "no check runs found for SHA %s; CI gate clears (no CI configured)\n", pr.HeadSHA[:min(8, len(pr.HeadSHA))])
 		e.addCompleteLabelAndRemoveCI(owner, repo, item, stage)
