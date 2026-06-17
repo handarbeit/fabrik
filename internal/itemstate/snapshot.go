@@ -139,6 +139,10 @@ func (s Snapshot) ValidateCompletedSHA() string {
 	return s.state.LinkedPR.ValidateCompletedSHA
 }
 
+// LastStatusUpdateAt returns the last time UpdateProjectItemStatus succeeded for
+// this item, or zero if never recorded.
+func (s Snapshot) LastStatusUpdateAt() time.Time { return s.state.LastStatusUpdateAt }
+
 // CooldownAt returns the expiry time for a given cooldown reason, or zero if none.
 func (s Snapshot) CooldownAt(reason string) time.Time {
 	return s.state.CooldownAt[reason]

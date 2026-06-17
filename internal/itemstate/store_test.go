@@ -999,3 +999,92 @@ func TestTerminalFlagClearedByProjectV2ItemEdited(t *testing.T) {
 		t.Error("Terminal flag not cleared by ProjectV2ItemEdited with new status")
 	}
 }
+
+// ---- TryLocalLockAcquired CAS tests ----
+
+func TestTryLocalLockAcquired_ReturnsTrueWhenNoWorker(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+
+	worker := &WorkerHandle{StageName: "drift-repair", StartedAt: time.Now()}
+	acquired := s.TryLocalLockAcquired(testRepo, 1, "testuser", worker, time.Now())
+	if !acquired {
+		t.Fatal("TryLocalLockAcquired returned false; expected true when no worker registered")
+	}
+
+	snap, err := s.Get(testRepo, 1)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if snap.Worker() == nil {
+		t.Error("Worker not set after successful TryLocalLockAcquired")
+	}
+	if snap.Lock() == nil {
+		t.Error("Lock not set after successful TryLocalLockAcquired")
+	}
+}
+
+func TestTryLocalLockAcquired_ReturnsFalseWhenWorkerPresent(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+
+	// Register a worker first.
+	s.Apply(WorkerEntered{Repo: testRepo, Number: 1, StageName: "Implement", StartedAt: time.Now()})
+
+	worker := &WorkerHandle{StageName: "drift-repair", StartedAt: time.Now()}
+	acquired := s.TryLocalLockAcquired(testRepo, 1, "testuser", worker, time.Now())
+	if acquired {
+		t.Fatal("TryLocalLockAcquired returned true; expected false when worker already registered")
+	}
+
+	// Worker should still be the original one, not overwritten.
+	snap, err := s.Get(testRepo, 1)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if snap.Worker() == nil || snap.Worker().StageName != "Implement" {
+		t.Error("Existing worker overwritten by failed TryLocalLockAcquired")
+	}
+}
+
+func TestTryLocalLockAcquired_RaceSafe(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+
+	// Concurrent goroutines each attempt to acquire; at most one should succeed.
+	const goroutines = 50
+	var acquireCount atomic.Int32
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			w := &WorkerHandle{StageName: "drift-repair", StartedAt: time.Now()}
+			if s.TryLocalLockAcquired(testRepo, 1, "testuser", w, time.Now()) {
+				acquireCount.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if n := acquireCount.Load(); n != 1 {
+		t.Errorf("expected exactly 1 successful acquire; got %d", n)
+	}
+}
+
+func TestStatusUpdateRecorded_SetsLastStatusUpdateAt(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+
+	snap, _ := s.Get(testRepo, 1)
+	if !snap.LastStatusUpdateAt().IsZero() {
+		t.Fatal("LastStatusUpdateAt should be zero before any StatusUpdateRecorded")
+	}
+
+	now := time.Now()
+	s.Apply(StatusUpdateRecorded{Repo: testRepo, Number: 1, At: now})
+
+	snap, err := s.Get(testRepo, 1)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !snap.LastStatusUpdateAt().Equal(now) {
+		t.Errorf("LastStatusUpdateAt = %v; want %v", snap.LastStatusUpdateAt(), now)
+	}
+}

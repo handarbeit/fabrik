@@ -70,6 +70,11 @@ type ItemState struct {
 	// for this item. Cleared automatically when the item's status changes.
 	Terminal bool
 
+	// LastStatusUpdateAt records the last time any code path successfully called
+	// UpdateProjectItemStatus for this item. Used by the drift repair dwell gate
+	// (Invariant 5) to suppress repair when a status update landed recently.
+	LastStatusUpdateAt time.Time
+
 	// -------- TUI / invocation mirror state --------
 
 	// LastDeepFetchAt is the time of the last successful deep fetch for this item.

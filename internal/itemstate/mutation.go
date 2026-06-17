@@ -654,6 +654,18 @@ type EngineCyclesCleared struct {
 func (EngineCyclesCleared) isMutation()       {}
 func (m EngineCyclesCleared) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// StatusUpdateRecorded records a successful call to UpdateProjectItemStatus.
+// Applied by every site that calls UpdateProjectItemStatus so that the drift
+// repair dwell gate (Invariant 5) can observe when the board status was last changed.
+type StatusUpdateRecorded struct {
+	Repo   string
+	Number int
+	At     time.Time
+}
+
+func (StatusUpdateRecorded) isMutation()       {}
+func (m StatusUpdateRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // LinkageHealAttempted records that the engine attempted to auto-heal missing
 // PR↔issue linkage for the given stage. Keyed by stage name → PR head SHA.
 // In-memory only — does not survive restart. A force-push (new SHA) clears the

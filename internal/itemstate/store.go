@@ -431,6 +431,10 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		delete(item.StageState.RebaseCycles, v.StageName)
 		return StageStateChanged
 
+	case StatusUpdateRecorded:
+		item.LastStatusUpdateAt = v.At
+		return StageStateChanged
+
 	case LinkageHealAttempted:
 		ensureStageStateMaps(item)
 		item.StageState.LinkageHealAttempted[v.StageName] = v.PRSHA
@@ -918,6 +922,63 @@ func (s *Store) All() []Snapshot {
 		snaps = append(snaps, newSnapshot(*item))
 	}
 	return snaps
+}
+
+// TryLocalLockAcquired is a compare-and-set variant of the LocalLockAcquired mutation.
+// It holds s.mu for the entire check-and-set, eliminating any TOCTOU window.
+//
+//   - Returns true and applies the lock when item.Worker == nil (lock acquired).
+//   - Returns false without mutating state when item.Worker != nil (another path holds
+//     the lock or is in-flight; caller must not proceed with the protected operation).
+//
+// On success, observers are notified outside the write lock, following the same
+// pattern as Apply.
+func (s *Store) TryLocalLockAcquired(repo string, number int, user string, worker *WorkerHandle, acquiredAt time.Time) bool {
+	key := itemKeyFor(repo, number)
+	if key == "" {
+		return false
+	}
+
+	s.mu.Lock()
+
+	item := s.getOrCreate(key, LocalLockAcquired{Repo: repo, Number: number, User: user, Worker: worker, AcquiredAt: acquiredAt})
+
+	// CAS: another path already holds a worker handle — do not acquire.
+	if item.Worker != nil {
+		s.mu.Unlock()
+		return false
+	}
+
+	// Apply inline — mirrors applyToItem's LocalLockAcquired case.
+	before := newSnapshot(*item).state
+	item.Lock = &LockState{
+		HolderUser: user,
+		HeldByThis: true,
+		AcquiredAt: acquiredAt,
+	}
+	flags := ChangeFlags(LockChanged)
+	if worker != nil {
+		w := *worker
+		item.Worker = &w
+		flags |= WorkerChanged
+	}
+
+	if reflect.DeepEqual(before, *item) {
+		s.mu.Unlock()
+		// Treat as acquired even when no state changed (e.g. lock already pointed at us).
+		return true
+	}
+
+	s.updateIndexes(before, *item, key)
+	snap := newSnapshot(*item)
+	irepo, inumber := item.Repo, item.Number
+	s.mu.Unlock()
+
+	change := Change{Repo: irepo, Number: inumber, Fields: flags}
+	obs := s.captureObservers()
+	s.notify(obs, change, snap)
+
+	return true
 }
 
 // Remove deletes the item identified by (repo, number) from the Store and
