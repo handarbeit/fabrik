@@ -46,6 +46,7 @@ type Config struct {
 	ConvergenceBudget    string // Go duration string; "" means use default (30m); "0" means disabled
 	AutoMergeStrategy    string // MERGE, SQUASH, or REBASE; "" means use default (MERGE)
 	ClaudeWaitDelay      int    // seconds; 0 means use default (30)
+	PostPushDwell        int    // seconds; 0 means use default (90)
 	KillGraceSigInt      string // Go duration string; "" means use default (10s); "0s" skips SIGINT step
 	KillGraceSigTerm     string // Go duration string; "" means use default (10s)
 	DebugOutput              bool
@@ -135,6 +136,7 @@ func Execute() error {
 	flag.StringVar(&cfg.ConvergenceBudget, "convergence-budget", "", "Wall-clock budget for post-Validate yolo convergence (Go duration: 30m, 1h; \"0\" disables; also FABRIK_CONVERGENCE_BUDGET)")
 	flag.StringVar(&cfg.AutoMergeStrategy, "auto-merge-strategy", "", "Merge method for GitHub auto-merge: MERGE, SQUASH, or REBASE (also FABRIK_AUTO_MERGE_STRATEGY; default MERGE)")
 	flag.IntVar(&cfg.ClaudeWaitDelay, "claude-wait-delay", 0, "Seconds to wait after Claude exits before recovering buffered output when grandchildren hold stdout pipe open (0 = use default of 30; also FABRIK_CLAUDE_WAIT_DELAY)")
+	flag.IntVar(&cfg.PostPushDwell, "post-push-dwell", 0, "Seconds to wait after a PR force-push before clearing the CI gate as 'no CI configured' (0 = use default of 90; also FABRIK_POST_PUSH_DWELL)")
 	flag.BoolVar(&cfg.DebugOutput, "debug-output", false, "Save Claude stage output to .fabrik/debug/ for debugging")
 	flag.BoolVar(&cfg.SymlinkEnv, "symlink-env", false, "Symlink the fabrik-dir .env file into each issue worktree at creation time (also FABRIK_SYMLINK_ENV)")
 	flag.BoolVar(&cfg.WorktreeBoundaryAudit, "worktree-boundary-audit", false, "Enable Layer 2 cross-repo ref-mutation audit (default off pending #808 root-cause fix; also FABRIK_WORKTREE_BOUNDARY_AUDIT)")
@@ -358,6 +360,20 @@ func Execute() error {
 				// n == 0: silently use default (same semantics as --claude-wait-delay 0)
 			} else {
 				fmt.Fprintf(os.Stderr, "[warn] FABRIK_CLAUDE_WAIT_DELAY=%q is invalid (must be 0 or a positive integer of seconds); using default 30\n", v)
+			}
+		}
+	}
+	if !explicitFlags["post-push-dwell"] {
+		if v := os.Getenv("FABRIK_POST_PUSH_DWELL"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				if n > 0 {
+					cfg.PostPushDwell = n
+				} else if n < 0 {
+					fmt.Fprintf(os.Stderr, "[warn] FABRIK_POST_PUSH_DWELL=%q is invalid (must be 0 or a positive integer of seconds); using default 90\n", v)
+				}
+				// n == 0: silently use default (same semantics as --post-push-dwell 0)
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_POST_PUSH_DWELL=%q is invalid (must be 0 or a positive integer of seconds); using default 90\n", v)
 			}
 		}
 	}
@@ -614,6 +630,7 @@ func Execute() error {
 		ReviewWaitTimeout:        reviewWaitTimeout(cfg.ReviewWaitTimeout),
 		MaxReviewCycles:          maxReviewCycles(cfg.MaxReviewCycles),
 		CIWaitTimeout:            ciWaitTimeout(cfg.CIWaitTimeout),
+		PostPushDwell:            postPushDwell(cfg.PostPushDwell),
 		MaxCiFixCycles:           maxCiFixCycles(cfg.MaxCiFixCycles),
 		MaxRebaseCycles:          maxRebaseCycles(cfg.MaxRebaseCycles),
 		ConvergenceBudget:        convergenceBudget(cfg.ConvergenceBudget),
@@ -728,6 +745,15 @@ func maxRebaseCycles(n int) int {
 func claudeWaitDelay(seconds int) time.Duration {
 	if seconds <= 0 {
 		return 30 * time.Second
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// postPushDwell converts a PostPushDwell config value (seconds) to a
+// time.Duration. When seconds is 0 (unset), the default of 90 seconds is used.
+func postPushDwell(seconds int) time.Duration {
+	if seconds <= 0 {
+		return 90 * time.Second
 	}
 	return time.Duration(seconds) * time.Second
 }

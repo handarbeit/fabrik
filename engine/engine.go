@@ -35,6 +35,7 @@ type Config struct {
 	ReconcileInterval        time.Duration // Reconcile ticker cadence (0 = use lightReconcileInterval default of 3m)
 	MaxReviewCycles          int           // Max review re-invocation cycles per issue before pausing (default 5)
 	CIWaitTimeout            time.Duration // How long to wait for CI in the merge guard before pausing (default 30m)
+	PostPushDwell            time.Duration // How long to wait after a PR push before clearing CI gate as 'no CI configured' (default 90s)
 	MaxCiFixCycles           int           // Max CI-fix re-invocation cycles per issue before pausing (default 5)
 	MaxRebaseCycles          int           // Max rebase re-invocation cycles per issue before pausing (default 3)
 	ConvergenceBudget        time.Duration // Wall-clock budget for post-Validate yolo convergence (default 30m; 0 = disabled, waits indefinitely)
