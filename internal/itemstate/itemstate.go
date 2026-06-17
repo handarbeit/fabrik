@@ -149,6 +149,13 @@ type LinkedPRState struct {
 	// or external commits after Validate finished. Empty string means "not recorded"
 	// (pre-feature or no Validate completion in this session).
 	ValidateCompletedSHA string
+
+	// LastHeadSHAUpdate records when the linked PR's HeadSHA was last observed to
+	// change via a PRHeadSHAUpdated mutation. Zero means the SHA has never changed
+	// (cold start or post-restart). Used by the post-push dwell guard in checkCIGate
+	// to block gate-clearance during the brief window after a force-push when GitHub
+	// has not yet computed mergeability or started CI for the new SHA.
+	LastHeadSHAUpdate time.Time
 }
 
 // StageState holds per-stage attempt counters and cycle counts.
