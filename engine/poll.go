@@ -1496,7 +1496,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 				if rerr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, lbl); rerr != nil {
 					e.logf(item.Number, "warn", "convergence-paused-recovery: could not remove %s: %v\n", lbl, rerr)
 				} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), lbl)
+					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), lbl)
 				}
 			}
 		}
