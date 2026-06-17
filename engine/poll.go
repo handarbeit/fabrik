@@ -1470,8 +1470,8 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		if !hasLabel(item, "fabrik:paused") {
 			continue
 		}
-		if hasLabel(item, "fabrik:awaiting-ci") {
-			continue // handled by the CI-paused recovery loop above
+		if hasLabel(item, "fabrik:awaiting-ci") || hasLabel(item, "fabrik:awaiting-review") {
+			continue // handled by runPausedItemMergedPRRecovery above
 		}
 		stage := stages.FindStage(e.cfg.Stages, item.Status)
 		if stage == nil || stage.CleanupWorktree {
