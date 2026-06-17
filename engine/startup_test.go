@@ -8,6 +8,7 @@ import (
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
+	"github.com/handarbeit/fabrik/tui"
 )
 
 // boardWithColumns returns a mock FetchProjectBoard func that returns a board
@@ -219,5 +220,163 @@ func TestCheckStageColumnAlignment_OnlyCleanupStages(t *testing.T) {
 	err := e.checkStageColumnAlignment(context.Background())
 	if err != nil {
 		t.Fatalf("all-cleanup config should not be fatal, got: %v", err)
+	}
+}
+
+// drainLogEvents drains up to n events from ch, returning all LogEvent messages.
+// Used by drift scan tests to capture log output without blocking.
+func drainLogEvents(ch chan tui.Event, n int) []string {
+	var msgs []string
+	for i := 0; i < n; i++ {
+		select {
+		case ev := <-ch:
+			if le, ok := ev.(tui.LogEvent); ok {
+				msgs = append(msgs, le.Message)
+			}
+		default:
+			return msgs
+		}
+	}
+	return msgs
+}
+
+// boardWithItems returns a mock FetchProjectBoard func that returns a board with
+// the given items.
+func boardWithItems(projectID string, items ...gh.ProjectItem) func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+	return func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+		return &gh.ProjectBoard{ProjectID: projectID, Items: items}, nil
+	}
+}
+
+// TestDriftScan_DriftedItem_WarnsOnce verifies that an item with a cleanup-stage
+// complete label (stage:Done:complete) whose board column is NOT the cleanup column
+// triggers exactly one "board drift detected" warning.
+func TestDriftScan_DriftedItem_WarnsOnce(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: boardWithItems("proj-1",
+			gh.ProjectItem{
+				Number: 1,
+				ItemID: "PVTI_1",
+				Status: "Validate", // drifted: has stage:Done:complete but stuck at Validate
+				Labels: []string{"stage:Done:complete"},
+			},
+		),
+		fetchStatusFieldFn: statusFieldWithOptions("Research", "Plan", "Implement"),
+	}
+	e := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			MaxConcurrent: 1,
+			Stages:        testStagesWithCleanup(),
+		},
+		client,
+		&mockClaudeInvoker{},
+		NewWorktreeManager(t.TempDir()),
+	)
+	// Wire a buffered events channel to capture logf output.
+	ch := make(chan tui.Event, 64)
+	e.events = ch
+
+	err := e.checkStageColumnAlignment(context.Background())
+	if err != nil {
+		t.Fatalf("drift scan should be non-fatal, got: %v", err)
+	}
+
+	msgs := drainLogEvents(ch, 64)
+	var driftWarnings int
+	for _, m := range msgs {
+		if strings.Contains(m, "board drift detected") {
+			driftWarnings++
+		}
+	}
+	if driftWarnings != 1 {
+		t.Errorf("expected exactly 1 'board drift detected' warning, got %d; messages: %v", driftWarnings, msgs)
+	}
+}
+
+// TestDriftScan_CleanBoard_NoWarning verifies that an item with stage:Done:complete
+// already at the Done column does NOT trigger a drift warning.
+func TestDriftScan_CleanBoard_NoWarning(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: boardWithItems("proj-1",
+			gh.ProjectItem{
+				Number: 2,
+				ItemID: "PVTI_2",
+				Status: "Done", // correctly at the cleanup column
+				Labels: []string{"stage:Done:complete"},
+			},
+		),
+		fetchStatusFieldFn: statusFieldWithOptions("Research", "Plan", "Implement"),
+	}
+	e := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			MaxConcurrent: 1,
+			Stages:        testStagesWithCleanup(),
+		},
+		client,
+		&mockClaudeInvoker{},
+		NewWorktreeManager(t.TempDir()),
+	)
+	ch := make(chan tui.Event, 64)
+	e.events = ch
+
+	err := e.checkStageColumnAlignment(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	msgs := drainLogEvents(ch, 64)
+	for _, m := range msgs {
+		if strings.Contains(m, "board drift detected") {
+			t.Errorf("unexpected drift warning for clean board: %q", m)
+		}
+	}
+}
+
+// TestDriftScan_NonCleanupStage_NoWarning verifies that an item with a
+// non-cleanup stage complete label (stage:Implement:complete) does NOT trigger
+// a drift warning — only cleanup stages are scanned.
+func TestDriftScan_NonCleanupStage_NoWarning(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: boardWithItems("proj-1",
+			gh.ProjectItem{
+				Number: 3,
+				ItemID: "PVTI_3",
+				Status: "Implement",
+				Labels: []string{"stage:Implement:complete"},
+			},
+		),
+		fetchStatusFieldFn: statusFieldWithOptions("Research", "Plan", "Implement"),
+	}
+	e := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			MaxConcurrent: 1,
+			Stages:        testStagesWithCleanup(),
+		},
+		client,
+		&mockClaudeInvoker{},
+		NewWorktreeManager(t.TempDir()),
+	)
+	ch := make(chan tui.Event, 64)
+	e.events = ch
+
+	err := e.checkStageColumnAlignment(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	msgs := drainLogEvents(ch, 64)
+	for _, m := range msgs {
+		if strings.Contains(m, "board drift detected") {
+			t.Errorf("unexpected drift warning for non-cleanup stage: %q", m)
+		}
 	}
 }
