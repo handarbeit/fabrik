@@ -3,7 +3,9 @@ package engine
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -237,5 +239,65 @@ func TestJanitorSC6_Integration(t *testing.T) {
 	// In-flight worker's worktree should remain.
 	if _, err := os.Stat(wtDir13); os.IsNotExist(err) {
 		t.Errorf("SC-6: worktree for issue #13 (in-flight worker) should NOT be reaped")
+	}
+}
+
+// TestJanitorStaleDeadWorkerReaped (SC-5) verifies that a worktree whose
+// in-store worker handle has a stale heartbeat AND a confirmed-dead PID is
+// reaped by the janitor rather than skipped. This is the fix for the
+// multi-hour stall described in the incident report: a Claude process that died
+// without the engine's context-cancel path firing left a permanent
+// WorkerEntered block that the janitor honoured forever.
+func TestJanitorStaleDeadWorkerReaped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stale-worker reaping requires signal-0 support; not available on Windows")
+	}
+	eng, wm, _ := janitorTestSetup(t)
+	const issueNumber = 14
+	const repo = "testowner/testrepo"
+
+	// Start a real subprocess and kill it so we have a confirmed-dead PID.
+	cmd := exec.Command("sleep", "1000")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("could not start subprocess: %v", err)
+	}
+	deadPID := cmd.Process.Pid
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatalf("could not kill subprocess: %v", err)
+	}
+	// Wait reaps the zombie so signal-0 returns ESRCH (not ECHILD).
+	_ = cmd.Wait()
+
+	// Use a 1ms stale timeout so the 10-minute-old LastSignAt is definitely stale.
+	eng.cfg.WorkerStaleTimeout = 1 * time.Millisecond
+
+	// Issue is closed and off-board.
+	seedClosed(eng, repo, issueNumber)
+
+	// Inject a worker handle with the dead PID and a stale heartbeat.
+	staleTime := time.Now().Add(-10 * time.Minute)
+	eng.store.Apply(itemstate.LocalLockAcquired{
+		Repo:       repo,
+		Number:     issueNumber,
+		User:       "testuser",
+		AcquiredAt: staleTime,
+		Worker: &itemstate.WorkerHandle{
+			PID:        deadPID,
+			StageName:  "Validate",
+			StartedAt:  staleTime,
+			LastSignAt: staleTime,
+		},
+	})
+
+	wtDir := createCleanWorktree(t, wm, issueNumber)
+	if _, err := os.Stat(wtDir); err != nil {
+		t.Fatalf("worktree should exist before janitor: %v", err)
+	}
+
+	eng.runWorktreeJanitor(context.Background())
+
+	// The stale+dead worker must NOT block reaping.
+	if _, err := os.Stat(wtDir); !os.IsNotExist(err) {
+		t.Errorf("SC-5: expected worktree for issue #%d (stale+dead worker) to be reaped, but it still exists", issueNumber)
 	}
 }
