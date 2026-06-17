@@ -43,6 +43,7 @@ type Config struct {
 	KillGraceSigInt          time.Duration // Grace window after SIGINT before SIGTERM (default 10s; 0 = skip SIGINT step)
 	KillGraceSigTerm         time.Duration // Grace window after SIGTERM before SIGKILL (default 10s)
 	ClaudeWaitDelay          time.Duration // How long to wait after Claude exits before giving up on pipe drain and recovering output (default 30s)
+	WorkerStaleTimeout       time.Duration // How long a worker heartbeat can be stale before PID-liveness is checked (default 5m; must be > HeartbeatInterval×2)
 	DebugOutput              bool
 	SymlinkEnv               bool
 	WorktreeBoundaryAudit    bool

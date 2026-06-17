@@ -41,6 +41,7 @@ type Config struct {
 	ReviewWaitTimeout int // minutes; 0 means use default (15)
 	MaxReviewCycles   int // 0 means use default (5)
 	CIWaitTimeout     int // minutes; 0 means use default (30)
+	WorkerStaleMins   int // minutes; 0 means use default (5)
 	MaxCiFixCycles    int // 0 means use default (5)
 	MaxRebaseCycles      int    // 0 means use default (3)
 	ConvergenceBudget    string // Go duration string; "" means use default (30m); "0" means disabled
@@ -131,6 +132,7 @@ func Execute() error {
 	flag.IntVar(&cfg.ReviewWaitTimeout, "review-wait-timeout", 0, "Maximum time in minutes to wait for PR reviewers before advancing (0 = use default of 15; also FABRIK_REVIEW_WAIT_TIMEOUT)")
 	flag.IntVar(&cfg.MaxReviewCycles, "max-review-cycles", 0, "Maximum number of review-and-fix cycles per issue (0 = use default of 5; also FABRIK_MAX_REVIEW_CYCLES)")
 	flag.IntVar(&cfg.CIWaitTimeout, "ci-wait-timeout", 0, "Maximum time in minutes to wait for CI in the merge guard before pausing (0 = use default of 30; also FABRIK_CI_WAIT_TIMEOUT)")
+	flag.IntVar(&cfg.WorkerStaleMins, "worker-stale-timeout", 0, "Minutes before a stale worker heartbeat triggers PID-liveness check (0 = use default of 5; also FABRIK_WORKER_STALE_TIMEOUT)")
 	flag.IntVar(&cfg.MaxCiFixCycles, "max-ci-fix-cycles", 0, "Maximum number of CI-fix cycles per issue before pausing (0 = use default of 5; also FABRIK_MAX_CI_FIX_CYCLES)")
 	flag.IntVar(&cfg.MaxRebaseCycles, "max-rebase-cycles", 0, "Maximum number of rebase-reinvoke cycles per issue before pausing (0 = use default of 3; also FABRIK_MAX_REBASE_CYCLES)")
 	flag.StringVar(&cfg.ConvergenceBudget, "convergence-budget", "", "Wall-clock budget for post-Validate yolo convergence (Go duration: 30m, 1h; \"0\" disables; also FABRIK_CONVERGENCE_BUDGET)")
@@ -318,6 +320,15 @@ func Execute() error {
 				cfg.CIWaitTimeout = n
 			} else {
 				fmt.Fprintf(os.Stderr, "[warn] FABRIK_CI_WAIT_TIMEOUT=%q is invalid (must be a positive integer of minutes); using default 30\n", v)
+			}
+		}
+	}
+	if !explicitFlags["worker-stale-timeout"] {
+		if v := os.Getenv("FABRIK_WORKER_STALE_TIMEOUT"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				cfg.WorkerStaleMins = n
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_WORKER_STALE_TIMEOUT=%q is invalid (must be a positive integer of minutes); using default 5\n", v)
 			}
 		}
 	}
@@ -629,6 +640,7 @@ func Execute() error {
 		MaxReviewCycles:          maxReviewCycles(cfg.MaxReviewCycles),
 		CIWaitTimeout:            ciWaitTimeout(cfg.CIWaitTimeout),
 		PostPushDwell:            postPushDwell(cfg.PostPushDwell),
+		WorkerStaleTimeout:       workerStaleTimeout(cfg.WorkerStaleMins),
 		MaxCiFixCycles:           maxCiFixCycles(cfg.MaxCiFixCycles),
 		MaxRebaseCycles:          maxRebaseCycles(cfg.MaxRebaseCycles),
 		ConvergenceBudget:        convergenceBudget(cfg.ConvergenceBudget),
@@ -715,6 +727,15 @@ func maxReviewCycles(n int) int {
 func ciWaitTimeout(minutes int) time.Duration {
 	if minutes <= 0 {
 		return 30 * time.Minute
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+// workerStaleTimeout converts a WorkerStaleMins config value (minutes) to a
+// time.Duration. When minutes is 0 (unset), the default of 5 minutes is used.
+func workerStaleTimeout(minutes int) time.Duration {
+	if minutes <= 0 {
+		return 5 * time.Minute
 	}
 	return time.Duration(minutes) * time.Minute
 }
