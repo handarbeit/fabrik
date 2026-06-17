@@ -8,6 +8,7 @@ import (
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 )
 
 // SpawnBlock represents one child issue declared in a Plan's FABRIK_SPAWN_CHILD_BEGIN/END block.
@@ -281,6 +282,8 @@ func (e *Engine) preImplement(ctx context.Context, board *gh.ProjectBoard, item 
 		if optionID := resolveSpecifyOptionID(sf); optionID != "" {
 			if err := e.client.UpdateProjectItemStatus(board.ProjectID, childItemID, sf.FieldID, optionID); err != nil {
 				e.logf(item.Number, "warn", "could not set project status on %s#%d: %v\n", block.Repo, childNumber, err)
+			} else {
+				e.store.Apply(itemstate.StatusUpdateRecorded{Repo: block.Repo, Number: childNumber, At: time.Now()})
 			}
 		} else if sf == nil {
 			e.logf(item.Number, "warn", "project status field unavailable for %s#%d; child lands in Backlog\n", block.Repo, childNumber)

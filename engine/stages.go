@@ -408,6 +408,7 @@ func (e *Engine) handleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 	if err := e.client.UpdateProjectItemStatus(board.ProjectID, item.ItemID, e.statusField.FieldID, optionID); err != nil {
 		e.logf(item.Number, "warn", "could not move issue to Done: %v\n", err)
 	} else {
+		e.store.Apply(itemstate.StatusUpdateRecorded{Repo: item.Repo, Number: item.Number, At: time.Now()})
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 			cacheImpl.UpdateItemStatus(boardcache.ItemKey(item.Repo, item.Number), "Done")
 		}
@@ -450,6 +451,7 @@ func (e *Engine) advanceToNextStage(board *gh.ProjectBoard, item gh.ProjectItem,
 	// write-through: already covered by cacheImpl.UpdateItemStatus call in the else block below
 	err := e.client.UpdateProjectItemStatus(board.ProjectID, item.ItemID, e.statusField.FieldID, optionID)
 	if err == nil {
+		e.store.Apply(itemstate.StatusUpdateRecorded{Repo: item.Repo, Number: item.Number, At: time.Now()})
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 			cacheImpl.UpdateItemStatus(boardcache.ItemKey(item.Repo, item.Number), next.Name)
 		}

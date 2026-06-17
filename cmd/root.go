@@ -60,6 +60,8 @@ type Config struct {
 	StatusPollSeconds    int // Layer 2 status-only sweep cadence in seconds; 0 = use default (15)
 	ReconcileInterval    int // seconds; 0 means use default (180 = 3 min); also FABRIK_RECONCILE_INTERVAL
 	JanitorIntervalHours int // hours; 1 = default; 0 disables the janitor
+	AutoRepairDrift      bool   // auto-repair board drift (default true); set false via --auto-repair-drift=false or FABRIK_AUTO_REPAIR_DRIFT=false
+	RepairDwell          string // Go duration string; "" means use default (30s); also FABRIK_REPAIR_DWELL
 }
 
 func Execute() error {
@@ -151,6 +153,9 @@ func Execute() error {
 	flag.IntVar(&cfg.JanitorIntervalHours, "janitor-interval", 1, "Worktree janitor scan interval in hours; 0 disables the janitor (also FABRIK_JANITOR_INTERVAL)")
 	flag.StringVar(&cfg.KillGraceSigInt, "kill-grace-sigint", "", "Grace window after SIGINT before SIGTERM in the kill escalation sequence (Go duration: 10s, 0s to skip SIGINT entirely; also FABRIK_KILL_GRACE_SIGINT; default 10s)")
 	flag.StringVar(&cfg.KillGraceSigTerm, "kill-grace-sigterm", "", "Grace window after SIGTERM before SIGKILL in the kill escalation sequence (Go duration: 10s; also FABRIK_KILL_GRACE_SIGTERM; default 10s)")
+	cfg.AutoRepairDrift = true // default on
+	flag.BoolVar(&cfg.AutoRepairDrift, "auto-repair-drift", true, "Auto-advance board column when drift is detected and all safety guards pass; set false to revert to warn-only mode (also FABRIK_AUTO_REPAIR_DRIFT; default true)")
+	flag.StringVar(&cfg.RepairDwell, "repair-dwell", "", "Minimum time between a successful board status update and a drift repair advance (Go duration: 30s; also FABRIK_REPAIR_DWELL; default 30s)")
 
 	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
 		return err
@@ -463,6 +468,19 @@ func Execute() error {
 			cfg.WorktreeBoundaryAudit = true
 		}
 	}
+	if !explicitFlags["auto-repair-drift"] {
+		if v := os.Getenv("FABRIK_AUTO_REPAIR_DRIFT"); v != "" {
+			lv := strings.ToLower(v)
+			if lv == "false" || lv == "0" || lv == "no" {
+				cfg.AutoRepairDrift = false
+			}
+		}
+	}
+	if !explicitFlags["repair-dwell"] {
+		if v := os.Getenv("FABRIK_REPAIR_DWELL"); v != "" {
+			cfg.RepairDwell = v
+		}
+	}
 	if cfg.PluginDir == "" {
 		if v := os.Getenv("FABRIK_PLUGIN_DIR"); v != "" {
 			cfg.PluginDir = v
@@ -659,6 +677,8 @@ func Execute() error {
 		ProjectStatusPollSeconds: statusPollSeconds(cfg.StatusPollSeconds),
 		ReconcileInterval:        reconcileIntervalDuration(cfg.ReconcileInterval),
 		JanitorIntervalHours:     cfg.JanitorIntervalHours,
+		AutoRepairDrift:          cfg.AutoRepairDrift,
+		RepairDwell:              repairDwell(cfg.RepairDwell),
 		ReadyCh:                  testReadyCh,
 	})
 	if err != nil {
@@ -852,6 +872,22 @@ func convergenceBudget(s string) time.Duration {
 	if d < 0 {
 		fmt.Fprintf(os.Stderr, "[warn] FABRIK_CONVERGENCE_BUDGET=%q is negative; using default 30m\n", s)
 		return 30 * time.Minute
+	}
+	return d
+}
+
+func repairDwell(s string) time.Duration {
+	if s == "" {
+		return 30 * time.Second
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[warn] FABRIK_REPAIR_DWELL=%q is invalid (Go duration syntax required, e.g. 30s, 1m); using default 30s\n", s)
+		return 30 * time.Second
+	}
+	if d < 0 {
+		fmt.Fprintf(os.Stderr, "[warn] FABRIK_REPAIR_DWELL=%q is negative; using default 30s\n", s)
+		return 30 * time.Second
 	}
 	return d
 }

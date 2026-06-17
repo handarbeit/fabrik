@@ -54,6 +54,15 @@ type Config struct {
 	WebhookEvents            []string
 	ProjectStatusPollSeconds int // Layer 2 status-only sweep cadence in seconds; default 15 s (gate runs every poll cycle; field retained for config compatibility)
 	JanitorIntervalHours     int // Periodic worktree janitor cadence in hours; 0 disables the janitor (default 1)
+	// AutoRepairDrift controls whether the drift scan auto-advances board columns
+	// when all seven invariants pass. When false, the scan emits warnings only
+	// (identical to PR #880 warn-only behavior). Default true.
+	AutoRepairDrift bool
+	// RepairDwell is the minimum time between a successful board status update and
+	// a drift repair advance for the same item. Prevents anti-flap when GitHub's
+	// project-v2 read-after-write consistency lags briefly (Invariant 5).
+	// Default 30s. Must be set explicitly — zero value disables the dwell gate.
+	RepairDwell time.Duration
 	// ReadyCh is closed once Run() has registered signal handlers. Tests use
 	// this to avoid sending SIGINT before signal.Notify is installed.
 	ReadyCh chan struct{}
