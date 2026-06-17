@@ -225,8 +225,8 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		defer e.mu.Unlock()
 		e.totalTokens = addTokenUsage(e.totalTokens, usage)
 	}()
-	// Moved before InvocationRecorded so Completed is accurate even for turn-capped retries.
-	completed := checkCompletion(stage, output)
+	// err == nil guards against marking errored invocations as completed in history.
+	completed := err == nil && checkCompletion(stage, output)
 	e.store.Apply(itemstate.InvocationRecorded{
 		Repo:      itemOwnerRepoString(item, e.defaultRepo()),
 		Number:    item.Number,
