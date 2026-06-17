@@ -27,14 +27,14 @@ func (e *Engine) workerStaleTimeout() time.Duration {
 // isWorkerStale reports whether a WorkerHandle should be treated as dead.
 // Returns true only when ALL of the following hold:
 //   - w is non-nil
-//   - w.PID != 0 (PID has been set; skip freshly-entered workers)
+//   - w.PID > 0 (PID has been set; skip freshly-entered workers)
 //   - time.Since(w.LastSignAt) > threshold (heartbeat is stale)
 //   - !isProcessAlive(w.PID) (signal-0 confirms the process is dead)
 //
 // The "both conditions" requirement prevents spurious clearing of live workers
 // whose heartbeat goroutine is merely delayed under system load (EC-2).
 func isWorkerStale(w *itemstate.WorkerHandle, threshold time.Duration) bool {
-	if w == nil || w.PID == 0 {
+	if w == nil || w.PID <= 0 {
 		return false
 	}
 	if time.Since(w.LastSignAt) <= threshold {
@@ -99,8 +99,8 @@ func (e *Engine) runWorkerDetectorScan() {
 		if w == nil {
 			continue
 		}
-		if w.PID == 0 {
-			// PID not yet set — worker just started; skip this cycle.
+		if w.PID <= 0 {
+			// PID not yet set (or invalid) — worker just started; skip this cycle.
 			continue
 		}
 		if time.Since(w.LastSignAt) <= threshold {
