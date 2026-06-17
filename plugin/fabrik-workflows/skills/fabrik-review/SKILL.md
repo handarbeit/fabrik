@@ -52,6 +52,15 @@ When resolving merge conflicts during rebase, you MUST be conservative:
 
 Common mistake: a feature branch that doesn't have a function added on main will "resolve" the conflict by keeping its version (without the function). This silently deletes working code. Always check `git diff origin/main..HEAD` after rebase to verify you haven't lost anything from main.
 
+### Install dependencies per CLAUDE.md
+
+Main may have introduced dependency changes (version bumps, new packages) since this branch last ran tests. Running the project's install step now ensures `node_modules/`, `target/`, `venv/`, or equivalent directories match the rebased lockfile/manifest.
+
+1. Read `CLAUDE.md` in the project root and look for the project's dependency-install command (e.g. a `## Build`, `## Dependencies`, or `## Development Setup` section).
+2. If a command is specified, run it.
+3. If `CLAUDE.md` is absent, unreadable, or does not specify a dependency-install command, log `no dependency-install command found in CLAUDE.md; skipping install step` and proceed. Do NOT guess or try multiple commands.
+4. **If the install command fails**, stop immediately — do NOT proceed to testing against stale dependencies. Emit `FABRIK_BLOCKED_ON_INPUT` and report the exact failure output so the operator can investigate.
+
 ### Check for external review feedback
 
 If a PR exists, check for comments from review bots and humans:
