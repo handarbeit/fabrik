@@ -26,45 +26,11 @@ func historyPath() string {
 	return filepath.Join(".fabrik", "history.json")
 }
 
-// historyDedupKey is the composite key used to identify duplicate history entries.
-type historyDedupKey struct {
-	IssueNumber int
-	Repo        string
-	StageName   string
-	IsComment   bool
-}
-
-// deduplicateHistory collapses duplicate entries by (IssueNumber, Repo, StageName, IsComment),
-// keeping the most recent entry by CompletedAt. Entries for different stages on the same
-// issue are preserved — that is expected multi-stage pipeline behavior.
-// The returned slice is sorted by CompletedAt ascending (oldest first).
-func deduplicateHistory(entries []HistoryEntry) []HistoryEntry {
-	best := make(map[historyDedupKey]HistoryEntry, len(entries))
-	for _, e := range entries {
-		k := historyDedupKey{
-			IssueNumber: e.IssueNumber,
-			Repo:        e.Repo,
-			StageName:   e.StageName,
-			IsComment:   e.IsComment,
-		}
-		if prev, exists := best[k]; !exists || e.CompletedAt.After(prev.CompletedAt) {
-			best[k] = e
-		}
-	}
-	seen := make(map[historyDedupKey]bool, len(best))
-	out := make([]HistoryEntry, 0, len(best))
-	for _, e := range entries {
-		k := historyDedupKey{
-			IssueNumber: e.IssueNumber,
-			Repo:        e.Repo,
-			StageName:   e.StageName,
-			IsComment:   e.IsComment,
-		}
-		if !seen[k] && best[k].CompletedAt.Equal(e.CompletedAt) {
-			out = append(out, e)
-			seen[k] = true
-		}
-	}
+// sortHistoryByTime returns entries sorted by CompletedAt ascending (oldest first).
+// All entries are preserved — no deduplication occurs.
+func sortHistoryByTime(entries []HistoryEntry) []HistoryEntry {
+	out := make([]HistoryEntry, len(entries))
+	copy(out, entries)
 	sort.SliceStable(out, func(i, j int) bool {
 		return out[i].CompletedAt.Before(out[j].CompletedAt)
 	})
@@ -81,7 +47,7 @@ func LoadHistory() []HistoryEntry {
 	if err := json.Unmarshal(data, &entries); err != nil {
 		return nil
 	}
-	return deduplicateHistory(entries)
+	return sortHistoryByTime(entries)
 }
 
 // SaveHistory writes history entries to disk.
@@ -148,25 +114,7 @@ func (h HistoryPaneComponent) Update(msg tea.Msg) (Component, tea.Cmd) {
 			MaxTurns:       ev.MaxTurns,
 			CostUSD:        ev.CostUSD,
 		}
-		dupKey := historyDedupKey{
-			IssueNumber: entry.IssueNumber,
-			Repo:        entry.Repo,
-			StageName:   entry.StageName,
-			IsComment:   entry.IsComment,
-		}
-		filtered := make([]HistoryEntry, 0, len(h.history))
-		for _, he := range h.history {
-			k := historyDedupKey{
-				IssueNumber: he.IssueNumber,
-				Repo:        he.Repo,
-				StageName:   he.StageName,
-				IsComment:   he.IsComment,
-			}
-			if k != dupKey {
-				filtered = append(filtered, he)
-			}
-		}
-		h.history = append(filtered, entry)
+		h.history = append(h.history, entry)
 		SaveHistory(h.history)
 
 	case tea.KeyMsg:
