@@ -1171,3 +1171,155 @@ func TestCheckCIGate_BehindNoChecks_TimeoutElapsed_TimesOut(t *testing.T) {
 		}
 	}
 }
+
+// ── Post-push dwell guard (SC-1 through SC-4) ────────────────────────────────
+
+// TestCheckCIGate_PostPushDwell_WithinDwell_Blocks covers SC-1:
+// mergeable_state="" + check_runs=[] + hadChecks=false + LastHeadSHAUpdate
+// within dwell → gate must NOT clear (returns true, false, false).
+func TestCheckCIGate_PostPushDwell_WithinDwell_Blocks(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, HeadSHA: "sha-fresh", State: "open"}, nil
+		},
+		// fetchPRMergeableStateFn not set → returns ("", nil) — GitHub cache miss
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return nil, nil // no check runs yet for new SHA
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	// Simulate a force-push: apply PRHeadSHAUpdated to set LastHeadSHAUpdate.
+	eng.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 1, SHA: "sha-fresh"})
+	// Large dwell so the window has not elapsed.
+	eng.cfg.PostPushDwell = 30 * time.Second
+
+	tr := true
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	if !blocked {
+		t.Error("SC-1: expected blocked=true when check_runs=[] and LastHeadSHAUpdate is within PostPushDwell")
+	}
+	if ciFailure || timedOut {
+		t.Errorf("SC-1: expected ciFailure=false timedOut=false, got ciFailure=%v timedOut=%v", ciFailure, timedOut)
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Validate:complete" {
+			t.Error("SC-1: stage:Validate:complete must NOT be added during post-push dwell window")
+		}
+	}
+}
+
+// TestCheckCIGate_PostPushDwell_DwellElapsed_Clears covers SC-2:
+// mergeable_state="unknown" + check_runs=[] + hadChecks=false + dwell elapsed
+// → gate clears as "no CI configured" (existing fallthrough preserved).
+func TestCheckCIGate_PostPushDwell_DwellElapsed_Clears(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, HeadSHA: "sha-old", State: "open"}, nil
+		},
+		fetchPRMergeableStateFn: func(owner, repo string, prNumber int) (string, error) {
+			return "unknown", nil // GitHub still computing
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return nil, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	// Apply PRHeadSHAUpdated to set LastHeadSHAUpdate, then use 1ns dwell so it
+	// immediately elapses — no sleep required.
+	eng.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 1, SHA: "sha-old"})
+	eng.cfg.PostPushDwell = 1 * time.Nanosecond
+
+	tr := true
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	if blocked || ciFailure || timedOut {
+		t.Errorf("SC-2: expected gate to clear (false,false,false) when dwell elapsed, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
+	}
+	foundComplete := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Validate:complete" {
+			foundComplete = true
+		}
+	}
+	if !foundComplete {
+		t.Error("SC-2: expected stage:Validate:complete to be added when dwell has elapsed (no CI configured)")
+	}
+}
+
+// TestCheckCIGate_PostPushDwell_ZeroTimestamp_Clears covers SC-3:
+// mergeable_state="" + LastHeadSHAUpdate zero (PRHeadSHAUpdated never fired)
+// → gate clears (cold-start / post-restart behavior preserved).
+func TestCheckCIGate_PostPushDwell_ZeroTimestamp_Clears(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, HeadSHA: "sha-cold", State: "open"}, nil
+		},
+		// fetchPRMergeableStateFn not set → returns ("", nil)
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return nil, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	// Do NOT apply PRHeadSHAUpdated — LastHeadSHAUpdate stays zero.
+	eng.cfg.PostPushDwell = 30 * time.Second // large dwell, but guard must be inactive
+
+	tr := true
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	if blocked || ciFailure || timedOut {
+		t.Errorf("SC-3: expected gate to clear (false,false,false) when LastHeadSHAUpdate is zero, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
+	}
+}
+
+// TestCheckCIGate_PostPushDwell_Integration covers SC-4:
+// simulate a force-push (PRHeadSHAUpdated applied to the store) followed
+// immediately by checkCIGate — gate must not clear within the dwell window.
+func TestCheckCIGate_PostPushDwell_Integration(t *testing.T) {
+	const newSHA = "sha-force-pushed"
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 7, HeadSHA: newSHA, State: "open"}, nil
+		},
+		// mergeable_state="" (GitHub hasn't computed mergeability for the new SHA yet)
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return nil, nil // CI hasn't started yet
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.PostPushDwell = 30 * time.Second
+
+	// The push event fires PRHeadSHAUpdated; the store stamps LastHeadSHAUpdate.
+	eng.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 1, SHA: newSHA})
+
+	// checkCIGate runs immediately (catch-up loop cadence), well within the dwell.
+	tr := true
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	if !blocked {
+		t.Error("SC-4: gate must not clear immediately after PRHeadSHAUpdated while within PostPushDwell")
+	}
+	if ciFailure || timedOut {
+		t.Errorf("SC-4: expected ciFailure=false timedOut=false, got ciFailure=%v timedOut=%v", ciFailure, timedOut)
+	}
+	// Verify the store did record the timestamp (i.e., PRHeadSHAUpdated caused the stamp).
+	snap, err := eng.store.Get("owner/repo", 1)
+	if err != nil {
+		t.Fatalf("SC-4: store.Get failed: %v", err)
+	}
+	lpr := snap.LinkedPR()
+	if lpr == nil {
+		t.Fatal("SC-4: LinkedPR is nil after PRHeadSHAUpdated")
+	}
+	if lpr.LastHeadSHAUpdate.IsZero() {
+		t.Error("SC-4: LastHeadSHAUpdate must be non-zero after PRHeadSHAUpdated with a new SHA")
+	}
+}
