@@ -89,6 +89,31 @@ func (e *Engine) checkStageColumnAlignment(ctx context.Context) error {
 		e.logf(0, "startup", "warning: board has columns with no matching stage: %s\n", strings.Join(extra, ", "))
 	}
 
+	// Drift scan: warn about items whose board column doesn't match their
+	// cleanup-stage complete label. Cleanup stages are terminal — board drift
+	// for them cannot self-heal and each mismatch is a regression signal.
+	// Non-cleanup stage mismatches are still in-flight and are ignored here.
+	cleanupStageNames := make(map[string]bool, len(e.cfg.Stages))
+	for _, s := range e.cfg.Stages {
+		if s.CleanupWorktree {
+			cleanupStageNames[s.Name] = true
+		}
+	}
+	for _, item := range board.Items {
+		for _, label := range item.Labels {
+			if !strings.HasPrefix(label, "stage:") || !strings.HasSuffix(label, ":complete") {
+				continue
+			}
+			stageName := strings.TrimSuffix(strings.TrimPrefix(label, "stage:"), ":complete")
+			if !cleanupStageNames[stageName] {
+				continue
+			}
+			if item.Status != stageName {
+				e.logf(item.Number, "startup", "warning: item #%d has label stage:%s:complete but board column is %q — board drift detected\n", item.Number, stageName, item.Status)
+			}
+		}
+	}
+
 	if len(missing) == 0 {
 		return nil
 	}
