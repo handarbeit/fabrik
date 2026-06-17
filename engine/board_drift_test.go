@@ -424,6 +424,29 @@ func TestBoardDrift_SC1_ConcurrentDriftAndR4b(t *testing.T) {
 	}
 }
 
+// TestBoardDrift_WorkerClearedAfterRepair verifies that after a successful drift repair,
+// the Store's Worker field is cleared (WorkerExited applied). Without this, the stale
+// WorkerHandle from TryLocalLockAcquired would block the dispatch loop and other
+// snap.Worker()!=nil guards from processing the item on subsequent poll cycles.
+func TestBoardDrift_WorkerClearedAfterRepair(t *testing.T) {
+	client := &mockGitHubClient{fetchLinkedPRFn: mergedPRFn()}
+	eng := testDriftEngine(t, client)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	res := eng.detectAndRepairBoardDrift(board, []gh.ProjectItem{driftedItem()}, nil)
+	if res.repaired != 1 {
+		t.Fatalf("expected repaired=1, got %d", res.repaired)
+	}
+
+	snap, err := eng.store.Get("owner/repo", 42)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.Worker() != nil {
+		t.Errorf("expected Worker==nil after repair (WorkerExited must be applied), got %+v", snap.Worker())
+	}
+}
+
 // TestLabelIndicatesDrift_NoDrift verifies that an item already at the correct column
 // returns (nil, false).
 func TestLabelIndicatesDrift_NoDrift(t *testing.T) {

@@ -185,7 +185,13 @@ func (e *Engine) detectAndRepairBoardDrift(board *gh.ProjectBoard, items []gh.Pr
 
 		// Explicit lock release — no defer inside for-loop (would defer until
 		// function return, holding all locks simultaneously).
+		// WorkerExited must follow LocalLockReleased: TryLocalLockAcquired sets
+		// item.Worker for the CAS, but LocalLockReleased only clears item.Lock.
+		// Without WorkerExited, the stale WorkerHandle would cause all downstream
+		// snap.Worker()!=nil guards (dispatch loop, revalidate, R4b) to skip this
+		// item permanently until the engine restarts.
 		e.store.Apply(itemstate.LocalLockReleased{Repo: repoStr, Number: item.Number})
+		e.store.Apply(itemstate.WorkerExited{Repo: repoStr, Number: item.Number})
 	}
 
 	if res.scanned > 0 {
