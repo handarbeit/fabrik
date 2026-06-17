@@ -60,7 +60,7 @@ Each issue gets `.fabrik/worktrees/issue-<N>` on branch `fabrik/issue-<N>`:
 
 #### Dependency Install Responsibility Split
 
-The engine's `updateWorktreeFromMain` rebases the worktree onto main but does not run any dependency install. The Review and Validate skills are responsible for prompting Claude to run the project's install step after the rebase step completes. The project's `CLAUDE.md` is the authoritative source for the install command. This split keeps Fabrik package-manager-agnostic. See `plugin/fabrik-workflows/skills/fabrik-validate/SKILL.md` and `plugin/fabrik-workflows/skills/fabrik-review/SKILL.md` for the skill-side instruction.
+The engine's `updateWorktreeFromMain` rebases the worktree onto main but does not run any dependency install. The Review and Validate skills are responsible for prompting Claude to run the project's install step after the rebase step completes. The project's `CLAUDE.md` is the authoritative source for the install command. This split keeps Fabrik package-manager-agnostic. See `.fabrik/plugin/skills/fabrik-validate/SKILL.md` and `.fabrik/plugin/skills/fabrik-review/SKILL.md` for the skill-side instruction.
 
 ### Read-Only Stage Stashing
 
