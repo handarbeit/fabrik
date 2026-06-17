@@ -317,10 +317,10 @@ func TestLoadHistory_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestLoadHistory_Dedup verifies that LoadHistory collapses duplicate entries
-// (same issue, repo, stage, IsComment) to the most recent by CompletedAt, while
-// preserving entries for different stages on the same issue.
-func TestLoadHistory_Dedup(t *testing.T) {
+// TestLoadHistory_AllEntriesPreserved verifies that LoadHistory preserves all entries,
+// including multiple entries for the same (issue, stage) combination. Each invocation
+// of the same stage must survive as a distinct row — no collapse.
+func TestLoadHistory_AllEntriesPreserved(t *testing.T) {
 	redirectHistory(t)
 
 	t1 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -328,69 +328,44 @@ func TestLoadHistory_Dedup(t *testing.T) {
 	t3 := t2.Add(time.Hour)
 
 	entries := []HistoryEntry{
-		// Two duplicates for issue 42, Research — t2 is more recent than t1.
-		{IssueNumber: 42, Repo: "", StageName: "Research", IsComment: false, Success: false, CompletedAt: t1},
-		{IssueNumber: 42, Repo: "", StageName: "Research", IsComment: false, Success: true, CompletedAt: t2},
-		// Different stage on the same issue — must be preserved.
-		{IssueNumber: 42, Repo: "", StageName: "Plan", IsComment: false, Success: true, CompletedAt: t3},
-		// Comment run on the same stage — different IsComment, must be preserved.
-		{IssueNumber: 42, Repo: "", StageName: "Research", IsComment: true, Success: true, CompletedAt: t1},
+		// Three attempts for the same (issue=42, stage=Research, IsComment=false).
+		{IssueNumber: 42, StageName: "Research", IsComment: false, Success: false, Completed: false, CostUSD: 14.11, CompletedAt: t1},
+		{IssueNumber: 42, StageName: "Research", IsComment: false, Success: false, Completed: false, CostUSD: 9.17, CompletedAt: t2},
+		{IssueNumber: 42, StageName: "Research", IsComment: false, Success: true, Completed: true, CostUSD: 44.10, CompletedAt: t3},
+		// Different stage on the same issue — must also be preserved.
+		{IssueNumber: 42, StageName: "Plan", IsComment: false, Success: true, Completed: true, CompletedAt: t3},
 	}
 	SaveHistory(entries)
 
 	got := LoadHistory()
 
-	if len(got) != 3 {
-		t.Fatalf("LoadHistory returned %d entries, want 3 (dedup should collapse 2 Research entries to 1)", len(got))
+	if len(got) != 4 {
+		t.Fatalf("LoadHistory returned %d entries, want 4 (all entries must be preserved, no collapse)", len(got))
 	}
 
-	// Find the Research (non-comment) entry — must be the most recent one (Success: true).
-	var researchEntry *HistoryEntry
-	for i := range got {
-		if got[i].StageName == "Research" && !got[i].IsComment {
-			researchEntry = &got[i]
-			break
-		}
-	}
-	if researchEntry == nil {
-		t.Fatal("Research (non-comment) entry not found in result")
-	}
-	if !researchEntry.Success {
-		t.Error("LoadHistory kept the older Research entry instead of the most recent one")
-	}
-	if !researchEntry.CompletedAt.Equal(t2) {
-		t.Errorf("Research entry CompletedAt = %v, want %v", researchEntry.CompletedAt, t2)
-	}
-
-	// Plan entry must be present.
-	var planFound bool
+	// All 3 Research entries must be present with distinct costs.
+	var researchEntries []HistoryEntry
 	for _, h := range got {
-		if h.StageName == "Plan" {
-			planFound = true
-			break
+		if h.StageName == "Research" && !h.IsComment {
+			researchEntries = append(researchEntries, h)
 		}
 	}
-	if !planFound {
-		t.Error("Plan entry was removed by deduplication, but should be preserved (different stage)")
+	if len(researchEntries) != 3 {
+		t.Errorf("found %d Research entries, want 3 (all retries must be preserved)", len(researchEntries))
 	}
 
-	// Research IsComment=true entry must be present.
-	var commentFound bool
-	for _, h := range got {
-		if h.StageName == "Research" && h.IsComment {
-			commentFound = true
-			break
+	// Entries must be sorted ascending by CompletedAt.
+	for i := 1; i < len(got); i++ {
+		if got[i].CompletedAt.Before(got[i-1].CompletedAt) {
+			t.Errorf("entries not sorted ascending: got[%d].CompletedAt (%v) < got[%d].CompletedAt (%v)",
+				i, got[i].CompletedAt, i-1, got[i-1].CompletedAt)
 		}
-	}
-	if !commentFound {
-		t.Error("Research IsComment=true entry was removed, but should be preserved (different dedup key)")
 	}
 }
 
-// TestJobCompletedEvent_Dedup verifies that receiving a JobCompletedEvent for
-// the same (issue, stage) replaces the existing history entry rather than
-// appending a duplicate.
-func TestJobCompletedEvent_Dedup(t *testing.T) {
+// TestJobCompletedEvent_MultiAttempt verifies that each JobCompletedEvent for the same
+// (issue, stage) appends a distinct history entry — no collapse or replacement occurs.
+func TestJobCompletedEvent_MultiAttempt(t *testing.T) {
 	redirectHistory(t)
 
 	m := New(30, ProjectInfo{}, "", nil, 0, false)
@@ -399,12 +374,15 @@ func TestJobCompletedEvent_Dedup(t *testing.T) {
 
 	t1 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	t2 := t1.Add(time.Hour)
+	t3 := t2.Add(time.Hour)
 
-	// First completion.
+	// First attempt (turn-capped).
 	next, _ := m.Update(JobCompletedEvent{
 		IssueNumber: 10,
 		StageName:   "Research",
 		Success:     false,
+		Completed:   false,
+		CostUSD:     14.11,
 		CompletedAt: t1,
 	})
 	m = next.(Model)
@@ -412,34 +390,115 @@ func TestJobCompletedEvent_Dedup(t *testing.T) {
 		t.Fatalf("after first event: history len = %d, want 1", len(m.history.History()))
 	}
 
-	// Second completion for the same (issue, stage) — should replace, not append.
+	// Second attempt for the same (issue, stage) — must append, not replace.
 	next, _ = m.Update(JobCompletedEvent{
 		IssueNumber: 10,
 		StageName:   "Research",
 		Success:     true,
-		CompletedAt: t2,
-	})
-	m = next.(Model)
-
-	if len(m.history.History()) != 1 {
-		t.Fatalf("after duplicate event: history len = %d, want 1 (duplicate should replace)", len(m.history.History()))
-	}
-	if !m.history.History()[0].Success {
-		t.Error("history entry should be the most recent (Success: true), but got the older one")
-	}
-	if !m.history.History()[0].CompletedAt.Equal(t2) {
-		t.Errorf("history entry CompletedAt = %v, want %v", m.history.History()[0].CompletedAt, t2)
-	}
-
-	// A different stage on the same issue must still be appended independently.
-	next, _ = m.Update(JobCompletedEvent{
-		IssueNumber: 10,
-		StageName:   "Plan",
-		Success:     true,
+		Completed:   true,
+		CostUSD:     9.17,
 		CompletedAt: t2,
 	})
 	m = next.(Model)
 	if len(m.history.History()) != 2 {
-		t.Fatalf("after Plan event: history len = %d, want 2 (different stage, not a duplicate)", len(m.history.History()))
+		t.Fatalf("after second event: history len = %d, want 2 (each attempt must produce its own entry)", len(m.history.History()))
+	}
+	// Verify both costs are distinct and present.
+	costs := map[float64]bool{}
+	for _, h := range m.history.History() {
+		costs[h.CostUSD] = true
+	}
+	if !costs[14.11] || !costs[9.17] {
+		t.Errorf("expected both costs 14.11 and 9.17 in history; got: %v", m.history.History())
+	}
+
+	// A different stage on the same issue produces a third independent entry.
+	next, _ = m.Update(JobCompletedEvent{
+		IssueNumber: 10,
+		StageName:   "Plan",
+		Success:     true,
+		Completed:   true,
+		CompletedAt: t3,
+	})
+	m = next.(Model)
+	if len(m.history.History()) != 3 {
+		t.Fatalf("after Plan event: history len = %d, want 3 (different stage produces own entry)", len(m.history.History()))
+	}
+}
+
+// TestHistory_TurnCappedRetries is the regression test for issue #847. It simulates
+// a stage that hits max_turns twice (capped, Completed: false) and then completes on
+// the third attempt, asserting all three invocations appear in history with distinct
+// costs and that only the final entry is marked Completed: true.
+func TestHistory_TurnCappedRetries(t *testing.T) {
+	redirectHistory(t)
+
+	h := NewHistoryPaneComponent("")
+
+	t1 := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	t2 := t1.Add(95 * time.Minute)
+	t3 := t2.Add(30 * time.Minute)
+
+	sendEvent := func(cost float64, completed bool, ts time.Time) {
+		comp, _ := h.Update(JobCompletedEvent{
+			IssueNumber: 1128,
+			Repo:        "verveguy/fantasy",
+			StageName:   "Implement",
+			Success:     completed,
+			Completed:   completed,
+			CostUSD:     cost,
+			TurnsUsed:   101,
+			MaxTurns:    100,
+			CompletedAt: ts,
+			Duration:    30 * time.Minute,
+		})
+		h = comp.(HistoryPaneComponent)
+	}
+
+	// Two capped attempts followed by a completing attempt.
+	sendEvent(14.11, false, t1)
+	sendEvent(9.17, false, t2)
+	sendEvent(44.10, true, t3)
+
+	entries := h.History()
+
+	// (a) All three entries must be present.
+	if len(entries) != 3 {
+		t.Fatalf("history has %d entries, want 3 (all attempts must be recorded)", len(entries))
+	}
+
+	// (b) Total cost must equal the sum of all three attempts.
+	var totalCost float64
+	for _, e := range entries {
+		totalCost += e.CostUSD
+	}
+	const wantTotal = 14.11 + 9.17 + 44.10
+	if totalCost < wantTotal-0.001 || totalCost > wantTotal+0.001 {
+		t.Errorf("total cost = %.2f, want %.2f", totalCost, wantTotal)
+	}
+
+	// (c) First two entries must be Completed: false; last must be Completed: true.
+	if entries[0].Completed {
+		t.Errorf("entries[0].Completed = true, want false (capped attempt)")
+	}
+	if entries[1].Completed {
+		t.Errorf("entries[1].Completed = true, want false (capped attempt)")
+	}
+	if !entries[2].Completed {
+		t.Errorf("entries[2].Completed = false, want true (completing attempt)")
+	}
+
+	// (d) SaveHistory/LoadHistory round-trip must preserve all three entries.
+	SaveHistory(entries)
+	loaded := LoadHistory()
+	if len(loaded) != 3 {
+		t.Fatalf("after round-trip: LoadHistory returned %d entries, want 3", len(loaded))
+	}
+	var loadedTotal float64
+	for _, e := range loaded {
+		loadedTotal += e.CostUSD
+	}
+	if loadedTotal < wantTotal-0.001 || loadedTotal > wantTotal+0.001 {
+		t.Errorf("round-trip total cost = %.2f, want %.2f", loadedTotal, wantTotal)
 	}
 }
