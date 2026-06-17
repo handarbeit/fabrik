@@ -1641,7 +1641,7 @@ The lock label is now removed by four paths (previously two):
 |------|---------|----------|
 | Normal completion | Stage completes (any outcome) | `releaseLock()` |
 | Graceful shutdown | Engine receives SIGINT/SIGTERM | `cleanupLockedIssues()` |
-| **Stale-worker detector** | Worker PID dead + heartbeat stale > 2min | `cleanupStaleWorker()` |
+| **Stale-worker detector** | Worker PID dead + heartbeat stale > `WorkerStaleTimeout` (default 5 min) | `cleanupStaleWorker()` |
 | **Startup cleanup** | Engine restart; Worker nil + lock label present | `runStartupCleanup()` |
 
 ### 9.8 Change-feed / Observer Pattern (Phase 3-H)

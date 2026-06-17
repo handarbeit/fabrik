@@ -527,6 +527,7 @@ FABRIK_USER=my-personal-username
 | `--max-review-cycles` | Maximum number of review-and-fix cycles per issue (0 = use default of 5; also `FABRIK_MAX_REVIEW_CYCLES`) | `0` (5 cycles) |
 | `--ci-wait-timeout` | Minutes to wait for CI checks to pass before pausing (0 = use default of 30; also `FABRIK_CI_WAIT_TIMEOUT`) | `0` (30 min) |
 | `--post-push-dwell` | Seconds to wait after a PR force-push before clearing the CI gate as "no CI configured" (0 = use default of 90; also `FABRIK_POST_PUSH_DWELL`). Prevents premature gate-clear in the brief post-push window when GitHub has not yet computed mergeability or started CI for the new SHA. | `0` (90 sec) |
+| `--worker-stale-timeout` | Minutes before a stale worker heartbeat triggers PID-liveness check and handle clearing (0 = use default of 5; must be > `heartbeatInterval×2`; also `FABRIK_WORKER_STALE_TIMEOUT`) | `0` (5 min) |
 | `--max-ci-fix-cycles` | Maximum number of CI-fix re-invocation cycles per issue (0 = use default of 5; also `FABRIK_MAX_CI_FIX_CYCLES`) | `0` (5 cycles) |
 | `--max-rebase-cycles` | Maximum number of rebase re-invocation cycles per issue before pausing (0 = use default of 3; also `FABRIK_MAX_REBASE_CYCLES`) | `0` (3 cycles) |
 | `--convergence-budget` | Wall-clock budget for post-Validate yolo PR convergence (Go duration: `30m`, `1h`; `0` disables the budget entirely; also `FABRIK_CONVERGENCE_BUDGET`) | `30m` |
@@ -562,6 +563,7 @@ FABRIK_USER=my-personal-username
 | `FABRIK_MAX_REVIEW_CYCLES` | *(no config.yaml key)* | Maximum number of review re-invocation cycles per issue before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 5) | `5` |
 | `FABRIK_CI_WAIT_TIMEOUT` | *(no config.yaml key)* | Minutes to wait for CI checks to pass before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 30) | `30` |
 | `FABRIK_POST_PUSH_DWELL` | *(no config.yaml key)* | Seconds to wait after a PR force-push before clearing the CI gate as "no CI configured" (non-negative integer; `0` or unset uses the default of 90; negative values default to 90). Prevents premature gate-clear during the post-push window when GitHub has not yet computed mergeability or started CI for the new SHA. | `90` |
+| `FABRIK_WORKER_STALE_TIMEOUT` | *(no config.yaml key)* | Minutes before a stale worker heartbeat triggers PID-liveness check; if the PID is dead the handle is cleared so the item can be re-dispatched (positive integer; invalid or unset values default to 5; must be > `heartbeatInterval×2`, i.e., > 1 min) | `5` |
 | `FABRIK_MAX_CI_FIX_CYCLES` | *(no config.yaml key)* | Maximum number of CI-fix re-invocation cycles per issue before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 5) | `5` |
 | `FABRIK_MAX_REBASE_CYCLES` | *(no config.yaml key)* | Maximum number of rebase re-invocation cycles per issue before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 3). Lower than CI/review because rebase either succeeds in one shot or needs human judgment for a semantic conflict. | `3` |
 | `FABRIK_CONVERGENCE_BUDGET` | *(no config.yaml key)* | Wall-clock budget for post-Validate yolo PR convergence (Go duration syntax: `30m`, `1h`, `2h30m`; `0` disables; invalid values default to 30 min). When the budget expires and the PR has not merged, Fabrik pauses the issue with `fabrik:awaiting-input`. | `30m` |
@@ -4045,20 +4047,41 @@ This is the *engine-state lifecycle* (goroutine boundary). A parallel *TUI-prese
 
 #### Stale-Worker Detector (Runtime Crash Case)
 
-`startWorkerDetector(ctx)` launches a background goroutine in `Run()` that scans for stale workers every 30 seconds.
+`startWorkerDetector(ctx)` launches a background goroutine in `Run()` that scans for stale workers every **60 seconds**.
 
-**Detection criteria:** `Worker != nil` AND `time.Since(Worker.LastSignAt) > 2 minutes`.
+**Detection requires BOTH conditions** (implemented by `isWorkerStale(w, threshold)`):
+
+1. `time.Since(Worker.LastSignAt) > WorkerStaleTimeout` (heartbeat is stale), AND
+2. Signal-0 confirms the process is dead (`kill -0 PID` returns `ESRCH`)
+
+The "both conditions" requirement prevents spurious clearing of live workers whose heartbeat goroutine is delayed under system load. If the heartbeat is stale but the PID is alive, the engine logs a warning and re-checks on the next scan cycle.
+
+**`WorkerStaleTimeout`** (default **5 minutes**) is configurable via `--worker-stale-timeout <N>` (minutes) or `FABRIK_WORKER_STALE_TIMEOUT=N`. Must be longer than `heartbeatInterval × 2` (currently > 60 s).
 
 **PID=0 skip:** Workers with `PID == 0` (PID not yet set) are skipped regardless of heartbeat age — they are in the narrow window between `LocalLockAcquired` and `cmd.Start()`.
 
-**Signal-0 liveness check** (`os.FindProcess(pid)` + `process.Signal(syscall.Signal(0))`):
+**Signal-0 liveness check** (`syscall.Kill(pid, 0)`):
 
 | Outcome | Action |
 |---------|--------|
-| Signal-0 fails (PID dead) | `store.Apply(WorkerExited{})` + `RemoveLabel(fabrik:locked:<user>)` + `RemoveLabel(stage:<StageName>:in_progress)` + log cleanup message |
-| Signal-0 succeeds (PID alive) | Log warning only; do not remove labels or kill the process; re-check on next scan |
+| Signal-0 fails with ESRCH (PID dead) AND heartbeat stale | `store.Apply(WorkerExited{})` + `RemoveLabel(fabrik:locked:<user>)` + `RemoveLabel(stage:<StageName>:in_progress)` + log `[#N worker-liveness] stale worker handle (pid=P last_sign=T) — clearing` |
+| Signal-0 succeeds (PID alive) with stale heartbeat | Log `[#N worker-detector] stale heartbeat for PID P — process alive, waiting for natural exit`; do not remove labels or kill the process; re-check on next scan |
+| Heartbeat fresh (within `WorkerStaleTimeout`) | Skip regardless of PID state |
 
 `StageName` for label construction is taken from `Worker.StageName`, which was set at dispatch time.
+
+**Windows note:** `isProcessAlive` always returns `true` on Windows (signal-0 is unsupported). The detector never clears stale workers on Windows; the startup cleanup pass handles the restart case instead.
+
+#### Janitor Integration (Stale-Worker Awareness)
+
+The worktree janitor's in-flight-worker check (reaping criterion FR-4(d)) uses the same `isWorkerStale()` helper as the detector. A worker that the detector would clear is not permitted to block the janitor.
+
+**Effective guard:** `snap.Worker() != nil && !isWorkerStale(snap.Worker(), e.workerStaleTimeout())`
+
+- Worker with fresh heartbeat OR alive PID → treated as in-flight; janitor skips the worktree.
+- Worker with stale heartbeat AND dead PID → treated as absent; janitor proceeds to reap if all other criteria hold.
+
+This prevents the multi-hour stall scenario where a Claude process dies without the engine's context-cancel path firing, leaving a permanent `WorkerEntered` block that the janitor would otherwise honour indefinitely.
 
 #### Startup Cleanup Pass (Restart Case)
 
@@ -4086,7 +4109,7 @@ The lock label is now removed by four paths (previously two):
 |------|---------|----------|
 | Normal completion | Stage completes (any outcome) | `releaseLock()` |
 | Graceful shutdown | Engine receives SIGINT/SIGTERM | `cleanupLockedIssues()` |
-| **Stale-worker detector** | Worker PID dead + heartbeat stale > 2min | `cleanupStaleWorker()` |
+| **Stale-worker detector** | Worker PID dead + heartbeat stale > `WorkerStaleTimeout` (default 5 min) | `cleanupStaleWorker()` |
 | **Startup cleanup** | Engine restart; Worker nil + lock label present | `runStartupCleanup()` |
 
 ### 9.8 Change-feed / Observer Pattern (Phase 3-H)
