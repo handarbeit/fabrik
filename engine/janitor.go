@@ -89,9 +89,11 @@ func (e *Engine) runWorktreeJanitor(ctx context.Context) {
 			scanned++
 			wtPath := filepath.Join(worktreesRoot, dirName, issueDir.Name())
 
-			// FR-4(d): no in-flight worker — cheapest check, no I/O
+			// FR-4(d): no in-flight worker — cheapest check, no I/O.
+			// A worker whose heartbeat is stale AND whose PID is dead is treated as
+			// absent so the janitor does not block indefinitely on crashed workers.
 			snap, snapErr := e.store.Get(ownerRepo, issueNumber)
-			if snapErr == nil && snap.Worker() != nil {
+			if snapErr == nil && snap.Worker() != nil && !isWorkerStale(snap.Worker(), e.workerStaleTimeout()) {
 				skipReasons = append(skipReasons, "in-flight worker")
 				e.logf(0, "janitor", "skip #%d in %s: in-flight worker\n", issueNumber, ownerRepo)
 				continue

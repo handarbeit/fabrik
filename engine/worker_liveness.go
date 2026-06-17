@@ -12,9 +12,36 @@ import (
 
 const (
 	heartbeatInterval       = 30 * time.Second
-	staleWorkerThreshold    = 2 * time.Minute
-	staleWorkerScanInterval = 30 * time.Second
+	staleWorkerScanInterval = 60 * time.Second
 )
+
+// workerStaleTimeout returns the configured WorkerStaleTimeout, defaulting to
+// 5 minutes when zero. Must be longer than heartbeatInterval×2.
+func (e *Engine) workerStaleTimeout() time.Duration {
+	if e.cfg.WorkerStaleTimeout > 0 {
+		return e.cfg.WorkerStaleTimeout
+	}
+	return 5 * time.Minute
+}
+
+// isWorkerStale reports whether a WorkerHandle should be treated as dead.
+// Returns true only when ALL of the following hold:
+//   - w is non-nil
+//   - w.PID != 0 (PID has been set; skip freshly-entered workers)
+//   - time.Since(w.LastSignAt) > threshold (heartbeat is stale)
+//   - !isProcessAlive(w.PID) (signal-0 confirms the process is dead)
+//
+// The "both conditions" requirement prevents spurious clearing of live workers
+// whose heartbeat goroutine is merely delayed under system load (EC-2).
+func isWorkerStale(w *itemstate.WorkerHandle, threshold time.Duration) bool {
+	if w == nil || w.PID == 0 {
+		return false
+	}
+	if time.Since(w.LastSignAt) <= threshold {
+		return false
+	}
+	return !isProcessAlive(w.PID)
+}
 
 // startHeartbeat runs a goroutine that sends WorkerHeartbeat mutations every
 // heartbeatInterval until done is closed or ctx is cancelled. The goroutine
@@ -66,7 +93,7 @@ func (e *Engine) startWorkerDetector(ctx context.Context) {
 
 func (e *Engine) runWorkerDetectorScan() {
 	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
-	now := time.Now()
+	threshold := e.workerStaleTimeout()
 	for _, snap := range e.store.All() {
 		w := snap.Worker()
 		if w == nil {
@@ -76,7 +103,7 @@ func (e *Engine) runWorkerDetectorScan() {
 			// PID not yet set — worker just started; skip this cycle.
 			continue
 		}
-		if now.Sub(w.LastSignAt) <= staleWorkerThreshold {
+		if time.Since(w.LastSignAt) <= threshold {
 			continue
 		}
 		// Stale heartbeat detected. Verify liveness via signal 0.
@@ -86,8 +113,8 @@ func (e *Engine) runWorkerDetectorScan() {
 			// Process is alive but heartbeat is stale. Log warning; do not kill.
 			e.logf(number, "worker-detector", "stale heartbeat for PID %d (stage %q) — process alive, waiting for natural exit\n", w.PID, w.StageName)
 		} else {
-			// Signal 0 failed — process is dead. Clean up.
-			e.logf(number, "worker-detector", "stale worker PID %d (stage %q) — process dead, cleaning up\n", w.PID, w.StageName)
+			// Signal 0 failed — process is dead. Clear so the item can be re-dispatched.
+			e.logf(number, "worker-liveness", "stale worker handle (pid=%d last_sign=%v) — clearing\n", w.PID, w.LastSignAt)
 			e.cleanupStaleWorker(repo, number, lockLabel, w.StageName)
 		}
 	}
