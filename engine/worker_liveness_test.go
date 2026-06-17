@@ -546,3 +546,46 @@ func TestRunStartupCleanup_EditingLabelErrNotFound_Silent(t *testing.T) {
 	// Should not panic and should not produce a warning.
 	e.runStartupCleanup()
 }
+
+// TestDetectorSkipsFreshWorker (SC-3) verifies that the detector does NOT clear
+// a worker whose heartbeat is fresh (within WorkerStaleTimeout), regardless of
+// the PID's liveness. A long-running stage with a healthy heartbeat must never
+// be interrupted by the detector.
+func TestDetectorSkipsFreshWorker(t *testing.T) {
+	client := &mockGitHubClient{}
+	e := testEngine(t, client, &mockClaudeInvoker{})
+	// Use the current process PID so isProcessAlive returns true, but even if the
+	// PID were dead, a fresh heartbeat alone must prevent clearing.
+	pid := os.Getpid()
+
+	bootstrapItem(t, e, 23, []string{"fabrik:locked:testuser", "stage:Plan:in_progress"})
+	// LastSignAt is time.Now() — well within any reasonable stale threshold.
+	setWorker(e, 23, pid, "Plan", time.Now())
+
+	e.runWorkerDetectorScan()
+
+	// Worker must remain non-nil — heartbeat is fresh.
+	if w := getWorker(t, e, 23); w == nil {
+		t.Error("SC-3: detector incorrectly cleared Worker with a fresh heartbeat")
+	}
+	removed := removeLabelsCalled(client, 23)
+	if len(removed) > 0 {
+		t.Errorf("SC-3: detector removed labels for a fresh-heartbeat worker: %v", removed)
+	}
+}
+
+// TestWorkerStaleTimeoutDefault verifies that workerStaleTimeout() returns 5 minutes
+// when Config.WorkerStaleTimeout is zero, and the configured value otherwise.
+func TestWorkerStaleTimeoutDefault(t *testing.T) {
+	client := &mockGitHubClient{}
+	e := testEngine(t, client, &mockClaudeInvoker{})
+
+	if got := e.workerStaleTimeout(); got != 5*time.Minute {
+		t.Errorf("default workerStaleTimeout = %v, want 5m", got)
+	}
+
+	e.cfg.WorkerStaleTimeout = 10 * time.Minute
+	if got := e.workerStaleTimeout(); got != 10*time.Minute {
+		t.Errorf("configured workerStaleTimeout = %v, want 10m", got)
+	}
+}
