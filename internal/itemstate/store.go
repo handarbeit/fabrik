@@ -560,7 +560,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		if v.LinkedPRNum != 0 {
 			item.LinkedPR.Number = v.LinkedPRNum
 		}
-		if v.SHA != item.LinkedPR.HeadSHA {
+		if v.SHA != item.LinkedPR.HeadSHA && item.LinkedPR.HeadSHA != "" {
 			item.LinkedPR.LastHeadSHAUpdate = time.Now()
 		}
 		item.LinkedPR.HeadSHA = v.SHA
