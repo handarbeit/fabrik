@@ -1433,54 +1433,9 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		advancedItems[issueKey(item, e.defaultRepo())] = true
 	}
 
-	// Paused-item recovery: a lightweight scan for issues that are paused with
-	// fabrik:awaiting-ci but whose linked PR has since been merged externally
-	// (Case A). The main catch-up loop skips all paused items unconditionally,
-	// so without this scan a merged-while-paused issue would remain stranded
-	// in Fabrik's bookkeeping until the user manually unpauses it.
-	//
-	// Uses e.client (direct GitHub API) — not e.readClient — because the
-	// boardcache may have stale Merged/State from before the PR was merged.
-	// Mirrors the same choice in checkAutoMergeConvergence (see ADR 053).
-	//
-	// Must NEVER dispatch workers or acquire e.sem. This loop is read-only
-	// aside from label mutations and advanceToNextStage.
-	for _, item := range deepFetchCandidates {
-		if !hasLabel(item, "fabrik:paused") {
-			continue
-		}
-		if !hasLabel(item, "fabrik:awaiting-ci") {
-			continue
-		}
-		stage := stages.FindStage(e.cfg.Stages, item.Status)
-		if stage == nil || stage.WaitForCI == nil || !*stage.WaitForCI {
-			continue
-		}
-		owner, repo := itemOwnerRepo(item, e.defaultRepo())
-		pr, err := e.client.FetchLinkedPR(owner, repo, item.Number)
-		if err != nil {
-			e.logf(item.Number, "ci-paused-recovery", "could not fetch linked PR: %v — skipping\n", err)
-			continue
-		}
-		if pr == nil || !pr.Merged {
-			continue
-		}
-		e.logf(item.Number, "ci-paused-recovery", "PR #%d merged while issue was paused — clearing CI gate and advancing to Done\n", pr.Number)
-		e.addCompleteLabelAndRemoveCI(owner, repo, item, stage)
-		for _, lbl := range []string{"fabrik:paused", "fabrik:awaiting-input"} {
-			if hasLabel(item, lbl) {
-				if rerr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, lbl); rerr != nil {
-					e.logf(item.Number, "warn", "ci-paused-recovery: could not remove %s: %v\n", lbl, rerr)
-				} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), lbl)
-				}
-			}
-		}
-		if aerr := e.advanceToNextStage(board, item, stage); aerr != nil {
-			e.logf(item.Number, "warn", "ci-paused-recovery: could not advance to Done: %v\n", aerr)
-		}
-		advancedItems[issueKey(item, e.defaultRepo())] = true
-	}
+	// Paused-item merged-PR recovery: see runPausedItemMergedPRRecovery for details.
+	// Covers both wait_for_ci and wait_for_reviews gates (see ADR 053).
+	e.runPausedItemMergedPRRecovery(board, deepFetchCandidates, advancedItems)
 
 	// Revalidate scan: operator-facing fabrik:revalidate label re-entry.
 	// Runs on ALL deepFetchCandidates unconditionally (paused items included — FR-5).
