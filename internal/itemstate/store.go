@@ -560,6 +560,9 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		if v.LinkedPRNum != 0 {
 			item.LinkedPR.Number = v.LinkedPRNum
 		}
+		if v.SHA != item.LinkedPR.HeadSHA {
+			item.LinkedPR.LastHeadSHAUpdate = time.Now()
+		}
 		item.LinkedPR.HeadSHA = v.SHA
 		flags := ChangeFlags(LinkedPRChanged)
 		// Drain any pre-linkage check runs buffered for this SHA.
