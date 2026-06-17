@@ -103,7 +103,7 @@ func TestRevalidate_NonValidateStageWarnsAndRemovesLabel(t *testing.T) {
 		},
 		client,
 		claude,
-		NewWorktreeManager("/tmp/test-revalidate-sc2"),
+		NewWorktreeManager(t.TempDir()),
 	)
 	opts := make(map[string]string)
 	for _, s := range stgs {
