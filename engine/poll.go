@@ -1413,11 +1413,28 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			if hasLabel(item, "fabrik:auto-merge-enabled") {
 				continue
 			}
-			if _, mergeErr := e.attemptMergeOnValidate(ctx, board, item, stage); mergeErr != nil {
+			_, mergeErr := e.attemptMergeOnValidate(ctx, board, item, stage)
+			if mergeErr != nil {
 				e.logf(item.Number, "warn", "auto-merge enablement failed during catch-up: %v\n", mergeErr)
+				// auto-merge could not be enabled (e.g. repo setting disabled). Check
+				// whether the PR has already merged through another path. Uses e.client
+				// (not e.readClient) for live merged state — boardcache may be stale.
+				iKey := issueKey(item, e.defaultRepo())
+				if !advancedItems[iKey] {
+					owner, repo := itemOwnerRepo(item, e.defaultRepo())
+					if pr, prErr := e.client.FetchLinkedPR(owner, repo, item.Number); prErr == nil && pr != nil && pr.Merged {
+						e.logf(item.Number, "advance", "PR #%d already merged — advancing to Done inline (auto-merge unavailable)\n", pr.Number)
+						if aerr := e.advanceToNextStage(board, item, stage); aerr != nil {
+							e.logf(item.Number, "warn", "could not advance to Done: %v\n", aerr)
+						} else {
+							advancedItems[iKey] = true
+						}
+					}
+				}
 			}
 			// Auto-merge enabled (or failed); Done advancement deferred to
-			// checkAutoMergeConvergence in Phase 1 — do not advance immediately.
+			// checkAutoMergeConvergence in Phase 1 — do not advance immediately
+			// (unless the PR was already merged, handled above).
 			continue
 		}
 		if newComments := e.findNewComments(item); len(newComments) > 0 {
@@ -1436,6 +1453,58 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// Paused-item merged-PR recovery: see runPausedItemMergedPRRecovery for details.
 	// Covers both wait_for_ci and wait_for_reviews gates (see ADR 053).
 	e.runPausedItemMergedPRRecovery(board, deepFetchCandidates, advancedItems)
+
+	// Convergence-paused recovery: a lightweight scan for issues that are paused
+	// without fabrik:awaiting-ci but with a stage complete label and a merged
+	// linked PR. These items were paused by pauseForConvergenceFailed (which strips
+	// fabrik:auto-merge-enabled) and have no fabrik:awaiting-ci, so they fall
+	// through both the main catch-up loop (paused guard) and the CI-paused recovery
+	// loop above. When the linked PR is confirmed merged, we remove the pause and
+	// advance directly.
+	//
+	// Uses e.client (direct GitHub API) — not e.readClient — for the same reason
+	// as the CI-paused recovery loop: boardcache may have stale Merged state.
+	//
+	// Must NEVER dispatch workers or acquire e.sem.
+	for _, item := range deepFetchCandidates {
+		if !hasLabel(item, "fabrik:paused") {
+			continue
+		}
+		if hasLabel(item, "fabrik:awaiting-ci") {
+			continue // handled by the CI-paused recovery loop above
+		}
+		stage := stages.FindStage(e.cfg.Stages, item.Status)
+		if stage == nil || stage.CleanupWorktree {
+			continue
+		}
+		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
+		if !hasLabel(item, completeLabel) {
+			continue
+		}
+		owner, repo := itemOwnerRepo(item, e.defaultRepo())
+		pr, err := e.client.FetchLinkedPR(owner, repo, item.Number)
+		if err != nil {
+			e.logf(item.Number, "convergence-paused-recovery", "could not fetch linked PR: %v — skipping\n", err)
+			continue
+		}
+		if pr == nil || !pr.Merged {
+			continue
+		}
+		e.logf(item.Number, "convergence-paused-recovery", "PR #%d merged while issue was convergence-paused — removing pause and advancing to Done\n", pr.Number)
+		for _, lbl := range []string{"fabrik:paused", "fabrik:awaiting-input"} {
+			if hasLabel(item, lbl) {
+				if rerr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, lbl); rerr != nil {
+					e.logf(item.Number, "warn", "convergence-paused-recovery: could not remove %s: %v\n", lbl, rerr)
+				} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), lbl)
+				}
+			}
+		}
+		if aerr := e.advanceToNextStage(board, item, stage); aerr != nil {
+			e.logf(item.Number, "warn", "convergence-paused-recovery: could not advance to Done: %v\n", aerr)
+		}
+		advancedItems[issueKey(item, e.defaultRepo())] = true
+	}
 
 	// Revalidate scan: operator-facing fabrik:revalidate label re-entry.
 	// Runs on ALL deepFetchCandidates unconditionally (paused items included — FR-5).
