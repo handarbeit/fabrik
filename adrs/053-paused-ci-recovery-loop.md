@@ -55,3 +55,40 @@ The recovery loop adds one `FetchLinkedPR` REST call per paused+awaiting-ci item
 - The loop never dispatches workers, acquires semaphores, or invokes stages — it is safe to run unconditionally on every poll.
 - The constraint "this loop must never dispatch workers" is enforced by code structure: the loop body contains no calls to `dispatchCIFixReinvoke`, `dispatchRebaseReinvoke`, `dispatchReviewReinvoke`, or `processComments`.
 - Non-yolo issues whose PRs are merged while paused will auto-advance to Done. This is intentional and mirrors `checkAutoMergeConvergence`.
+
+## Amendment (issue #874)
+
+**Date**: 2026-06-16  
+**Status**: Accepted
+
+### Context
+
+Production incidents #1336 and #1337 (2026-06-14) exposed a symmetric gap: the recovery loop only handled `fabrik:awaiting-ci`. Items paused while waiting on reviewers (`wait_for_reviews: true`) had their PRs merged externally, but `stage:Review:complete` was never added. The board column never advanced, and the issue remained stranded with an inconsistent label set.
+
+### Changes
+
+**Function rename**: The inline loop body was extracted from `poll.go` into a named method `runPausedItemMergedPRRecovery` on `*Engine` (in `engine/paused_recovery.go`). The previous name implied CI-only scope; the new name reflects the broader coverage.
+
+**Expanded trigger condition**: The entry condition is now `fabrik:paused` AND (`fabrik:awaiting-ci` OR `fabrik:awaiting-review`). Items paused on the review gate are now eligible for recovery, not just CI-gated items.
+
+**Multi-stage gap-fill**: Instead of calling `addCompleteLabelAndRemoveCI` for a single stage (the item's current board column), the function now:
+
+1. Finds the highest-order stage already carrying `stage:<Name>:complete` in the item's labels.
+2. Iterates `e.cfg.Stages` in ascending `Order` from the next stage onward, stopping before the first `CleanupWorktree: true` stage.
+3. For each stage where `WaitForCI || WaitForReviews` is true and `stage:<Name>:complete` is absent, calls `e.client.AddLabelToIssue` with cache write-through (mirrors `addCompleteLabelAndRemoveCI` pattern).
+4. Fails fast per item on any label-add error — no gate labels are cleared and `advanceToNextStage` is not called, preserving idempotent retry on the next poll cycle.
+
+This handles the case where multiple gate-checked stages are missing their completion labels (e.g., an item paused at Review with both Review and Validate yet to be marked complete).
+
+**Reviews gate cleanup**: After all completion labels are added, `removeAwaitingReviewLabel` is called when `fabrik:awaiting-review` is present. This removes `fabrik:awaiting-review` and `fabrik:bot-reprompted` with cache write-through, consistent with how `removeAwaitingCILabel` handles the CI gate.
+
+**`addCompleteLabelAndRemoveCI` bypassed**: The new function calls `e.client.AddLabelToIssue` directly rather than going through `addCompleteLabelAndRemoveCI`. This is intentional — `addCompleteLabelAndRemoveCI` couples label-add and CI-gate-removal into one call, which does not compose with the multi-stage iteration. The Validate SHA-recording side-effect in `addCompleteLabelAndRemoveCI` is intentionally skipped: the PR is already merged when this code path runs, so the SHA-invalidation guard has no work to do.
+
+### Preserved constraints
+
+All original constraints from the initial ADR remain in force:
+- The function runs in the main poll goroutine, never spawns goroutines, and never acquires `e.sem`.
+- No calls to `dispatchCIFixReinvoke`, `dispatchRebaseReinvoke`, `dispatchReviewReinvoke`, or `processComments`.
+- `e.client` (direct REST) is used for `FetchLinkedPR` — not `e.readClient` — for freshness.
+- `advancedItems` is updated so the cooldown defer skips the healed item.
+- `advanceToNextStage` is unconditional (no yolo/cruise gate), for the same reasons as before.
