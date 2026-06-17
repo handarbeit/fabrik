@@ -225,8 +225,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		defer e.mu.Unlock()
 		e.totalTokens = addTokenUsage(e.totalTokens, usage)
 	}()
-	// Check completion before recording the invocation so the Completed field is accurate
-	// for every invocation, including turn-capped retries that never emit FABRIK_STAGE_COMPLETE.
+	// Moved before InvocationRecorded so Completed is accurate even for turn-capped retries.
 	completed := checkCompletion(stage, output)
 	e.store.Apply(itemstate.InvocationRecorded{
 		Repo:      itemOwnerRepoString(item, e.defaultRepo()),
