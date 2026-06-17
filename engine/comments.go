@@ -225,9 +225,13 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		defer e.mu.Unlock()
 		e.totalTokens = addTokenUsage(e.totalTokens, usage)
 	}()
+	// Check completion before recording the invocation so the Completed field is accurate
+	// for every invocation, including turn-capped retries that never emit FABRIK_STAGE_COMPLETE.
+	completed := checkCompletion(stage, output)
 	e.store.Apply(itemstate.InvocationRecorded{
 		Repo:      itemOwnerRepoString(item, e.defaultRepo()),
 		Number:    item.Number,
+		Completed: completed,
 		Usage:     usage,
 		IsComment: true,
 		Duration:  time.Since(startedAt),
@@ -245,10 +249,8 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// Capture git metadata for the comment header
 	branch, commit, mainSHA, timestamp := captureGitMeta(workDir, baseBranch)
 
-	// Step 5: Check for stage completion marker before stripping.
-	// Capture summary before markers are stripped in-place below — once stripped,
+	// Step 5: Capture summary before markers are stripped in-place below — once stripped,
 	// extractSummary(output) returns "" and the Verification update is silently lost.
-	completed := checkCompletion(stage, output)
 	summary := extractSummary(output)
 
 	// Step 6: Strip FABRIK_ISSUE_UPDATE block from output, then update issue body.
@@ -391,14 +393,6 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		repoStr := itemOwnerRepoString(item, e.defaultRepo())
 		e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 		e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
-		e.store.Apply(itemstate.InvocationRecorded{
-			Repo:      itemOwnerRepoString(item, e.defaultRepo()),
-			Number:    item.Number,
-			Completed: true,
-			Usage:     usage,
-			IsComment: true,
-			Duration:  time.Since(startedAt),
-		})
 		var prNumber int
 		if stage.CreateDraftPR {
 			// Error is intentionally ignored here — comment processing implies the stage
