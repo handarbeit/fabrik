@@ -90,7 +90,7 @@ func (e *Engine) runPausedItemMergedPRRecovery(board *gh.ProjectBoard, items []g
 				fillFailed = true
 				break
 			} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
+				cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), completeLabel)
 			}
 			e.logf(item.Number, "paused-recovery", "added %s\n", completeLabel)
 		}
@@ -110,7 +110,7 @@ func (e *Engine) runPausedItemMergedPRRecovery(board *gh.ProjectBoard, items []g
 				if rerr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, lbl); rerr != nil {
 					e.logf(item.Number, "warn", "paused-recovery: could not remove %s: %v\n", lbl, rerr)
 				} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), lbl)
+					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), lbl)
 				}
 			}
 		}
