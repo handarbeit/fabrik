@@ -4871,6 +4871,73 @@ Two parallel lifecycle mechanisms track active work in Fabrik. They exist at dif
 
 ---
 
+## F. Drift Detection and Repair
+
+**Board drift** occurs when an item's project board column does not match its `stage:<X>:complete` label for a `cleanup_worktree=true` stage. For example: a `stage:Done:complete` label is present but the item is still in the `Validate` column. This typically happens when a bug in a recovery path advances labels without advancing the board column, or when the board update API call succeeds but is not observed by the engine before restart.
+
+The engine detects and repairs board drift by calling `detectAndRepairBoardDrift` at two sites:
+
+1. **Startup** (`engine/startup.go`, inside `checkStageColumnAlignment`): scans `board.Items` once after the status-field fetch, before the first poll cycle begins.
+2. **Per-poll** (`engine/poll.go`): scans `deepFetchCandidates` once per poll cycle, **after** the R4 paused-item merged-PR recovery loop and the R4b convergence-paused recovery loop have run, and **before** the worker dispatch loop begins. This ordering ensures dedicated recovery paths always take priority.
+
+### F.1 Seven Non-Negotiable Invariants
+
+Drift repair is conservative by design. ALL of the following guards must pass before `advanceToNextStage` is called:
+
+**Invariant 1 — Single-writer:** At most one `advanceToNextStage` call ever lands per (item, target-column) transition. Enforced by `TryLocalLockAcquired` on `itemstate.Store` — a compare-and-set that holds `s.mu.Lock()` for the entire check-and-set, eliminating any TOCTOU race. Drift repair acquires the lock for the duration of the advance and releases it explicitly after `advanceToNextStage` returns (no `defer` inside the loop — that would hold all locks until function return).
+
+**Invariant 2 — In-flight worker is sacrosanct:** If a worker goroutine is registered in the Store (`WorkerEntered` without a matching `WorkerExited`) for this item, repair is a no-op for this poll cycle regardless of label state. Checked via `snap.Worker() != nil` in `shouldSkipDriftRepair`.
+
+**Invariant 3 — Lock-holder is sacrosanct:** If ANY `fabrik:locked:<user>` label exists on the item (including `fabrik:locked:<self>`), repair is a no-op for this poll cycle. Checked by scanning `item.Labels` for the `fabrik:locked:` prefix in `shouldSkipDriftRepair`.
+
+**Invariant 4 — Operator-pause is sacrosanct:** If `fabrik:paused` is present on the item, repair is a no-op even if all other guards pass. Checked by scanning `item.Labels` in `shouldSkipDriftRepair`.
+
+**Invariant 5 — Recent advance must settle (dwell gate):** If the item's board status was updated by ANY code path within the last `RepairDwell` duration (default 30 seconds), repair is a no-op. This prevents anti-flap when GitHub's project-v2 read-after-write consistency lags briefly. Enforced by `snap.LastStatusUpdateAt()` in `shouldSkipDriftRepair` — zero time (bootstrap window, EC-5) is treated as "never updated" and does NOT trigger the skip.
+
+**Invariant 6 — PR must be terminally merged:** Repair verifies `linked PR exists AND pr.Merged == true` via `e.client.FetchLinkedPR` (direct GitHub, not cached) before advancing. If `pr.State == "closed" && !pr.Merged`, the issue closed unmerged — not a drift case; repair skips. If `FetchLinkedPR` returns nil (no linked PR), repair skips (EC-4).
+
+**Invariant 7 — Idempotent under retry:** Repair calls the same `advanceToNextStage` function used by the regular pipeline path. No parallel implementation. `advanceToNextStage`'s existing label-already-present idempotency handles double-detection without double-write.
+
+### F.2 Configuration
+
+| Field | Flag | Env Var | Default | Effect |
+|-------|------|---------|---------|--------|
+| `Config.AutoRepairDrift` | `--auto-repair-drift` | `FABRIK_AUTO_REPAIR_DRIFT` | `true` | When `false`, reverts to warn-only behavior (same log line as PR #880) |
+| `Config.RepairDwell` | `--repair-dwell` | `FABRIK_REPAIR_DWELL` | `30s` | Minimum quiet period after any board status update before repair fires |
+
+When `AutoRepairDrift: false`, the scan emits `warning: item #N has label stage:X:complete but board column is "Y" — board drift detected` and makes no board mutations.
+
+### F.3 LastStatusUpdateAt Tracking
+
+Every code path that calls `e.client.UpdateProjectItemStatus` also applies `itemstate.StatusUpdateRecorded{Repo, Number, At: time.Now()}` to the store in the same logical transaction. The three engine sites are:
+
+- `engine/stages.go: advanceToNextStage` — success path
+- `engine/stages.go: handleNoWorkNeeded` — success path
+- `engine/spawn.go: preImplement` — child status-set success path
+
+This feeds Invariant 5's dwell gate for all future drift scans on that item.
+
+### F.4 Edge Cases
+
+- **EC-2 (multiple cleanup stages):** The target column is determined by the highest-order `stage:X:complete` label that matches a `cleanup_worktree=true` stage. If multiple match, the stage with the highest `Order` field wins.
+- **EC-3 (closed unmerged):** `pr.State == "closed" && pr.Merged == false` triggers Invariant 6 no-op. This is the legitimate operator-closed-without-merging case.
+- **EC-4 (no linked PR):** `FetchLinkedPR` returns nil — Invariant 6 fires, no repair.
+- **EC-5 (bootstrap window):** At startup, the store has no `LastStatusUpdateAt` records. Zero time is treated as "never updated" — Invariant 5 does NOT skip these items.
+- **EC-6 (CAS lost to concurrent path):** `TryLocalLockAcquired` returns false because another path (e.g., R4b) currently holds the lock. Drift scan logs the skip and moves on; the next poll cycle re-evaluates after the lock is released.
+
+### F.5 Relationship to R4 and R4b
+
+Drift repair is structurally parallel to R4 (`runPausedItemMergedPRRecovery`) and R4b (convergence-paused recovery, inline loop in `engine/poll.go`), as documented in ADR 053. Key shared properties:
+
+- Runs in the main poll goroutine (not a worker goroutine).
+- Never dispatches workers or acquires `e.sem`.
+- Uses `e.client` (not `e.readClient`/boardcache) for `FetchLinkedPR` to avoid stale cached Merged/State.
+- Runs AFTER R4 and R4b, so dedicated recovery paths have first-mover priority.
+
+Source: `engine/board_drift.go` (PR #883 / issue #883).
+
+---
+
 # Fabrik Stage Lifecycle
 
 Source: https://fabrik.handarbeit.io/stage-lifecycle

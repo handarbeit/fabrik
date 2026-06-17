@@ -56,12 +56,15 @@ func labelIndicatesDrift(item gh.ProjectItem, stgs []*stages.Stage) (*stages.Sta
 // for this item. Makes a single store.Get call to read both Worker and
 // LastStatusUpdateAt, minimising lock acquisitions.
 //
+// repoStr must be the normalized "owner/repo" string (not item.Repo, which may
+// be empty for items in the default repo).
+//
 // Invariant 2: in-flight worker registered in the Store.
 // Invariant 3: any fabrik:locked:<user> label (including self-lock).
 // Invariant 4: fabrik:paused label present.
 // Invariant 5: LastStatusUpdateAt is within cfg.RepairDwell (dwell gate).
-func shouldSkipDriftRepair(item gh.ProjectItem, store *itemstate.Store, cfg Config) bool {
-	snap, err := store.Get(item.Repo, item.Number)
+func shouldSkipDriftRepair(item gh.ProjectItem, repoStr string, store *itemstate.Store, cfg Config) bool {
+	snap, err := store.Get(repoStr, item.Number)
 	hasSnap := err == nil
 
 	// Invariant 2: in-flight worker is sacrosanct.
@@ -117,6 +120,9 @@ func (e *Engine) detectAndRepairBoardDrift(board *gh.ProjectBoard, items []gh.Pr
 		}
 		res.scanned++
 
+		// Pre-compute normalized repo string; used by store lookups, CAS, and lock release.
+		repoStr := itemOwnerRepoString(item, e.defaultRepo())
+
 		if !e.cfg.AutoRepairDrift {
 			// Warn-only mode: emit identical log line to PR #880 startup scan.
 			e.logf(item.Number, "startup", "warning: item #%d has label stage:%s:complete but board column is %q — board drift detected\n",
@@ -125,7 +131,7 @@ func (e *Engine) detectAndRepairBoardDrift(board *gh.ProjectBoard, items []gh.Pr
 		}
 
 		// Invariants 2–5: guard checks.
-		if shouldSkipDriftRepair(item, e.store, e.cfg) {
+		if shouldSkipDriftRepair(item, repoStr, e.store, e.cfg) {
 			e.logf(item.Number, "board-drift", "skipping repair (invariant 2-5 guard fired)\n")
 			res.skipped++
 			continue
@@ -158,7 +164,6 @@ func (e *Engine) detectAndRepairBoardDrift(board *gh.ProjectBoard, items []gh.Pr
 		// Invariant 1: single-writer guarantee via CAS.
 		// TryLocalLockAcquired holds the Store mutex for check-and-set; returns
 		// false if another path already holds a WorkerHandle for this item.
-		repoStr := itemOwnerRepoString(item, e.defaultRepo())
 		worker := &itemstate.WorkerHandle{StageName: "drift-repair", StartedAt: time.Now(), LastSignAt: time.Now()}
 		if !e.store.TryLocalLockAcquired(repoStr, item.Number, e.cfg.User, worker, time.Now()) {
 			e.logf(item.Number, "board-drift", "skipping repair (invariant-1: CAS lock lost to concurrent path)\n")

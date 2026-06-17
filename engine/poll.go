@@ -1506,6 +1506,11 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		advancedItems[issueKey(item, e.defaultRepo())] = true
 	}
 
+	// Board drift repair: detect and repair cleanup-stage label vs column drift.
+	// Runs after R4 and R4b so dedicated recovery paths have first priority.
+	// Respects all seven race-safety invariants (see engine/board_drift.go).
+	e.detectAndRepairBoardDrift(board, deepFetchCandidates, advancedItems)
+
 	// Revalidate scan: operator-facing fabrik:revalidate label re-entry.
 	// Runs on ALL deepFetchCandidates unconditionally (paused items included — FR-5).
 	// Uses next-poll dispatch: does not mutate deepFetchCandidates in place.
