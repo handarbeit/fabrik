@@ -26,3 +26,4 @@ contributors and future maintainers.
 | [028](028-rate-limit-backoff-hysteresis.md) | Two-Threshold Hysteresis for Rate-Limit Backoff | Accepted |
 | [030](030-progress-based-turn-extension.md) | Progress-Based Turn Extension | Accepted |
 | [039](039-cycleset-excludes-worker-lifecycle.md) | cycleSetFlags excludes WorkerLifecycleChanged | Accepted |
+| [056](056-consolidate-convergence-gate-recovery.md) | Consolidate the convergence / gate / recovery architecture | Accepted |
