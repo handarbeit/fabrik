@@ -1188,6 +1188,10 @@ func TestCheckCIGate_PostPushDwell_WithinDwell_Blocks(t *testing.T) {
 		},
 	}
 	eng := testEngineForMerge(t, client)
+	// Seed the prior SHA so the transition to "sha-fresh" is from a non-empty
+	// value — matching real engine behavior (PRHeadSHAUpdated only stamps
+	// LastHeadSHAUpdate when HeadSHA is non-empty, to avoid cold-start false triggers).
+	eng.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 1, SHA: "sha-initial"})
 	// Simulate a force-push: apply PRHeadSHAUpdated to set LastHeadSHAUpdate.
 	eng.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 1, SHA: "sha-fresh"})
 	// Large dwell so the window has not elapsed.
@@ -1227,10 +1231,14 @@ func TestCheckCIGate_PostPushDwell_DwellElapsed_Clears(t *testing.T) {
 		},
 	}
 	eng := testEngineForMerge(t, client)
-	// Apply PRHeadSHAUpdated to set LastHeadSHAUpdate, then use 1ns dwell so it
-	// immediately elapses — no sleep required.
+	// Seed the prior SHA first so the transition to "sha-old" stamps LastHeadSHAUpdate.
+	eng.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 1, SHA: "sha-initial"})
+	// Apply PRHeadSHAUpdated to set LastHeadSHAUpdate.
 	eng.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 1, SHA: "sha-old"})
+	// Use a sub-millisecond dwell and sleep briefly to guarantee it elapses even
+	// on low-resolution clocks (e.g. Windows virtualised CI runners).
 	eng.cfg.PostPushDwell = 1 * time.Nanosecond
+	time.Sleep(20 * time.Millisecond)
 
 	tr := true
 	item := gh.ProjectItem{Number: 1}
@@ -1295,6 +1303,8 @@ func TestCheckCIGate_PostPushDwell_Integration(t *testing.T) {
 	eng := testEngineForMerge(t, client)
 	eng.cfg.PostPushDwell = 30 * time.Second
 
+	// Seed the prior SHA first so the push transition stamps LastHeadSHAUpdate.
+	eng.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 1, SHA: "sha-previous"})
 	// The push event fires PRHeadSHAUpdated; the store stamps LastHeadSHAUpdate.
 	eng.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 1, SHA: newSHA})
 

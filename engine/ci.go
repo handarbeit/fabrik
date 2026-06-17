@@ -185,10 +185,10 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 			if dwell <= 0 {
 				dwell = 90 * time.Second
 			}
-			if time.Since(lpr.LastHeadSHAUpdate) < dwell {
+			if elapsed := time.Since(lpr.LastHeadSHAUpdate); elapsed < dwell {
 				e.logf(item.Number, "ci-gate", "no check runs for SHA %s — post-push dwell window active (%.0fs remaining); waiting\n",
 					pr.HeadSHA[:min(8, len(pr.HeadSHA))],
-					(dwell - time.Since(lpr.LastHeadSHAUpdate)).Seconds())
+					(dwell - elapsed).Seconds())
 				return true, false, false
 			}
 		}

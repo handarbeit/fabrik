@@ -365,11 +365,9 @@ func Execute() error {
 	}
 	if !explicitFlags["post-push-dwell"] {
 		if v := os.Getenv("FABRIK_POST_PUSH_DWELL"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 				if n > 0 {
 					cfg.PostPushDwell = n
-				} else if n < 0 {
-					fmt.Fprintf(os.Stderr, "[warn] FABRIK_POST_PUSH_DWELL=%q is invalid (must be 0 or a positive integer of seconds); using default 90\n", v)
 				}
 				// n == 0: silently use default (same semantics as --post-push-dwell 0)
 			} else {
