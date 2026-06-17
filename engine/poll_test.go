@@ -3063,3 +3063,153 @@ func TestSHAInvalidation_ReDispatchesValidateOnForcePush(t *testing.T) {
 		t.Error("expected itemNeedsWork to return true after SHA-invalidation scan cleared labels")
 	}
 }
+
+// TestPhase2ValidateCatchup_PRAlreadyMerged_AdvancesToDone verifies that when
+// EnablePullRequestAutoMerge returns ErrAutoMergeNotEnabled in the Phase 2
+// Validate catch-up, the engine detects the PR is already merged and calls
+// advanceToNextStage inline — board advances to Done without waiting for
+// checkAutoMergeConvergence (which would never fire, as fabrik:auto-merge-enabled
+// is never added in this path).
+func TestPhase2ValidateCatchup_PRAlreadyMerged_AdvancesToDone(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{
+						Number: 42,
+						ItemID: "PVTI_42",
+						Status: "Validate",
+						Repo:   "owner/repo",
+						Labels: []string{"stage:Validate:complete", "fabrik:yolo"},
+					},
+				},
+			}, nil
+		},
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 99, HeadSHA: "sha1", Merged: true}, nil
+		},
+		enablePullRequestAutoMergeFn: func(owner, repo string, prNumber int, strategy string) error {
+			return gh.ErrAutoMergeNotEnabled
+		},
+	}
+	eng := testEngineWithStages(t, client, testStagesWithValidate())
+	// Seed item into mayNeedWork so the pre-filter admits it.
+	eng.mayNeedWorkMu.Lock()
+	eng.mayNeedWork["owner/repo#42"] = true
+	eng.mayNeedWorkMu.Unlock()
+
+	ctx := context.Background()
+	if _, err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	client.mu.Lock()
+	advances := len(client.updateStatusCalls)
+	client.mu.Unlock()
+
+	if advances != 1 {
+		t.Errorf("expected 1 UpdateProjectItemStatus call (advance to Done), got %d", advances)
+	}
+}
+
+// TestConvergencePausedRecovery_PRMerged_AdvancesToDone verifies that an item
+// with fabrik:paused + stage:Validate:complete (no fabrik:awaiting-ci) is
+// advanced to Done and unparsed when the linked PR is confirmed merged.
+func TestConvergencePausedRecovery_PRMerged_AdvancesToDone(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{
+						Number: 55,
+						ItemID: "PVTI_55",
+						Status: "Validate",
+						Repo:   "owner/repo",
+						Labels: []string{"stage:Validate:complete", "fabrik:paused"},
+					},
+				},
+			}, nil
+		},
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 99, HeadSHA: "sha1", Merged: true}, nil
+		},
+	}
+	eng := testEngineWithStages(t, client, testStagesWithValidate())
+	eng.mayNeedWorkMu.Lock()
+	eng.mayNeedWork["owner/repo#55"] = true
+	eng.mayNeedWorkMu.Unlock()
+
+	ctx := context.Background()
+	if _, err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	client.mu.Lock()
+	advances := len(client.updateStatusCalls)
+	var removedPaused bool
+	for _, c := range client.removeLabelCalls {
+		if c.issueNumber == 55 && c.labelName == "fabrik:paused" {
+			removedPaused = true
+		}
+	}
+	client.mu.Unlock()
+
+	if advances != 1 {
+		t.Errorf("expected 1 UpdateProjectItemStatus call (advance to Done), got %d", advances)
+	}
+	if !removedPaused {
+		t.Error("expected fabrik:paused to be removed from issue #55")
+	}
+}
+
+// TestConvergencePausedRecovery_PRNotMerged_NoAdvance verifies that a
+// convergence-paused item is NOT advanced when the linked PR is not yet merged.
+func TestConvergencePausedRecovery_PRNotMerged_NoAdvance(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{
+						Number: 55,
+						ItemID: "PVTI_55",
+						Status: "Validate",
+						Repo:   "owner/repo",
+						Labels: []string{"stage:Validate:complete", "fabrik:paused"},
+					},
+				},
+			}, nil
+		},
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 99, HeadSHA: "sha1", Merged: false}, nil
+		},
+	}
+	eng := testEngineWithStages(t, client, testStagesWithValidate())
+	eng.mayNeedWorkMu.Lock()
+	eng.mayNeedWork["owner/repo#55"] = true
+	eng.mayNeedWorkMu.Unlock()
+
+	ctx := context.Background()
+	if _, err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	client.mu.Lock()
+	advances := len(client.updateStatusCalls)
+	var removedPaused bool
+	for _, c := range client.removeLabelCalls {
+		if c.issueNumber == 55 && c.labelName == "fabrik:paused" {
+			removedPaused = true
+		}
+	}
+	client.mu.Unlock()
+
+	if advances != 0 {
+		t.Errorf("expected no UpdateProjectItemStatus when PR is not merged, got %d", advances)
+	}
+	if removedPaused {
+		t.Error("fabrik:paused must NOT be removed when PR is not merged")
+	}
+}
