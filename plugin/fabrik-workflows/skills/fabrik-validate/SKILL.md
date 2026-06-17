@@ -40,6 +40,15 @@ If the rebase produces conflicts, resolve them conservatively:
 - **Check for missing files.** Run `git diff origin/main..HEAD --name-only` and verify no files from main were accidentally deleted. New files added to main (source, tests, subcommands) should all be present.
 - **If unsure about a conflict, abort the rebase** (`git rebase --abort`) and do NOT signal completion. Describe the conflict and let the human resolve it.
 
+### Install dependencies per CLAUDE.md
+
+Main may have introduced dependency changes (version bumps, new packages) since this branch last ran tests. Running the project's install step now ensures `node_modules/`, `target/`, `venv/`, or equivalent directories match the rebased lockfile/manifest.
+
+1. Read `CLAUDE.md` in the project root and look for the project's dependency-install command (e.g. a `## Build`, `## Dependencies`, or `## Development Setup` section).
+2. If a command is specified, run it.
+3. If `CLAUDE.md` is absent, unreadable, or does not specify a dependency-install command, log `no dependency-install command found in CLAUDE.md; skipping install step` and proceed. Do NOT guess or try multiple commands.
+4. **If the install command fails**, stop immediately — do NOT proceed to testing against stale dependencies. Emit `FABRIK_BLOCKED_ON_INPUT` and report the exact failure output so the operator can investigate.
+
 ## What You Validate
 
 ### Requirements verification
