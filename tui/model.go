@@ -98,6 +98,8 @@ type Model struct {
 	// focus and confirmation state
 	focusPane              pane
 	confirmQuit            bool
+	confirmStop            bool
+	pendingStopRequest     *StopRequest
 	confirmUpgrade         bool
 	confirmReconcile       bool
 	confirmOverwrite       bool
@@ -292,6 +294,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.header.SetStatusMsg("")
 				return m, nil
 			}
+			if m.confirmStop {
+				m.confirmStop = false
+				m.pendingStopRequest = nil
+				m.header.SetStatusMsg("")
+				return m, nil
+			}
 			if m.confirmUpgrade {
 				m.confirmUpgrade = false
 				m.header.SetStatusMsg("")
@@ -322,6 +330,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.confirmOverwrite {
 				m.confirmOverwrite = false
 				m.overwriteTyped = ""
+				m.header.SetStatusMsg("")
+				return m, nil
+			}
+			if m.confirmStop {
+				m.confirmStop = false
+				m.pendingStopRequest = nil
 				m.header.SetStatusMsg("")
 				return m, nil
 			}
@@ -399,6 +413,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.warnings = comp.(WarningsPaneComponent)
 				m.updateLayout(false)
 				return m, cmd
+			} else if m.focusPane == paneActive {
+				if job := m.active.SelectedJob(); job != nil {
+					req := &StopRequest{
+						IssueNumber: job.IssueNumber,
+						Repo:        job.Repo,
+						StageName:   job.StageName,
+					}
+					m.pendingStopRequest = req
+					m.confirmStop = true
+					m.header.SetStatusMsg(fmt.Sprintf("Stop #%d and pause? [y/N]", job.IssueNumber))
+				}
 			}
 			return m, nil
 
@@ -484,6 +509,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "y", "Y":
+			if m.confirmStop && m.pendingStopRequest != nil {
+				req := *m.pendingStopRequest
+				m.confirmStop = false
+				m.pendingStopRequest = nil
+				if m.stopCh != nil {
+					select {
+					case m.stopCh <- req:
+					default:
+					}
+				}
+				m.header.SetStatusMsg(fmt.Sprintf("stopped #%d — paused", req.IssueNumber))
+				return m, nil
+			}
 			if m.confirmUpgrade {
 				m.confirmUpgrade = false
 				return m, upgradePluginCmd(m.pluginDir)
@@ -573,6 +611,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.header.SetStatusMsg("[1] Reconcile via Claude Code  [2] Overwrite (destructive)  [3] Cancel")
 		} else if m.confirmOverwrite {
 			m.header.SetStatusMsg("This will discard your customizations. Type 'OVERWRITE' to confirm.")
+		} else if m.confirmStop && m.pendingStopRequest != nil {
+			m.header.SetStatusMsg(fmt.Sprintf("Stop #%d and pause? [y/N]", m.pendingStopRequest.IssueNumber))
 		} else if m.confirmUpgrade {
 			m.header.SetStatusMsg(fmt.Sprintf(
 				"Upgrade %d plugin file(s)? Active invocations pick up changes on next run. [y/N]",
