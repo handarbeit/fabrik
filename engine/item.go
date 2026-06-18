@@ -2036,3 +2036,69 @@ func (e *Engine) handleBoundaryViolation(owner, repo string, repoStr string, ite
 
 	releaseLock()
 }
+
+// handleStopRequest is called by the stop handler goroutine when the TUI sends a
+// StopRequest. It cancels the in-flight per-issue context (if any), then applies
+// fabrik:paused + fabrik:awaiting-input labels and posts a stop comment so there
+// is a durable audit trail. All errors are logged and do not prevent subsequent
+// steps from running.
+func (e *Engine) handleStopRequest(ctx context.Context, req tui.StopRequest) {
+	repoStr := req.Repo
+	if repoStr == "" {
+		repoStr = e.defaultRepo()
+	}
+	iKey := fmt.Sprintf("%s#%d", repoStr, req.IssueNumber)
+
+	// Cancel the per-issue context if the worker is still in flight.
+	if v, ok := e.issueCtxs.Load(iKey); ok {
+		entry := v.(issueCtxEntry)
+		entry.holder.val.Store("user_stop")
+		entry.cancel()
+	} else {
+		e.logf(req.IssueNumber, "stop", "no in-flight worker for %s — applying labels only\n", iKey)
+	}
+
+	owner, repo, _ := strings.Cut(repoStr, "/")
+
+	// Apply fabrik:paused with cache write-through + webhook echo.
+	if err := e.client.AddLabelToIssue(owner, repo, req.IssueNumber, "fabrik:paused"); err != nil {
+		e.logf(req.IssueNumber, "warn", "stop: could not add paused label: %v\n", err)
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(repoStr, req.IssueNumber), "fabrik:paused")
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(repoStr, req.IssueNumber)+"+"+"fabrik:paused")
+		}
+	}
+
+	// Apply fabrik:awaiting-input with cache write-through + webhook echo.
+	if err := e.client.AddLabelToIssue(owner, repo, req.IssueNumber, "fabrik:awaiting-input"); err != nil {
+		e.logf(req.IssueNumber, "warn", "stop: could not add awaiting-input label: %v\n", err)
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(repoStr, req.IssueNumber), "fabrik:awaiting-input")
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(repoStr, req.IssueNumber)+"+"+"fabrik:awaiting-input")
+		}
+	}
+
+	// Post explanatory comment so there is a durable audit trail.
+	comment := fmt.Sprintf(
+		"🏭 **Fabrik — stopped from TUI by %s**\n\nStage **%s** was stopped manually from the TUI. Remove `fabrik:paused` to resume.",
+		e.cfg.User, req.StageName,
+	)
+	if dbID, err := e.client.AddComment(owner, repo, req.IssueNumber, comment); err != nil {
+		e.logf(req.IssueNumber, "warn", "stop: could not post stop comment: %v\n", err)
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(repoStr, req.IssueNumber), gh.Comment{
+				DatabaseID: dbID, Body: comment, Author: e.cfg.User, CreatedAt: time.Now(),
+			})
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(repoStr, req.IssueNumber))
+		}
+	}
+}
