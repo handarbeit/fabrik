@@ -717,3 +717,62 @@ func resolveStatusOption(t *testing.T, env *Env, columnName string) (projectID, 
 	t.Fatalf("could not resolve Status option %q", columnName)
 	return "", "", ""
 }
+
+// assertSentinelCheckRequired skips the test if "ci-fix-sentinel" is not a
+// required status check on the repo's main branch. Skips (never fatals) so
+// the test suite remains green before the sentinel CI job is enrolled.
+func assertSentinelCheckRequired(t *testing.T, env *Env, repo string) {
+	t.Helper()
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		t.Fatalf("bad repo: %q", repo)
+	}
+	out, err := ghOutput(env, "api",
+		fmt.Sprintf("repos/%s/%s/branches/main/protection", owner, name),
+		"--jq", ".required_status_checks.contexts[]")
+	if err != nil {
+		t.Skipf("ci-fix-sentinel not enrolled as required check on %s/main (branch protection API error: %v)", repo, err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if strings.TrimSpace(line) == "ci-fix-sentinel" {
+			return
+		}
+	}
+	t.Skipf("ci-fix-sentinel not in required status checks for %s/main — enroll it before running this test", repo)
+}
+
+// tryLinkedPRNumber returns the PR number for the given issue's feature branch,
+// or (0, err) if not yet created or on transient error.
+func tryLinkedPRNumber(env *Env, repo string, issueNumber int) (int, error) {
+	branch := fmt.Sprintf("fabrik/issue-%d", issueNumber)
+	out, err := ghOutput(env, "pr", "list", "-R", repo, "-H", branch,
+		"--json", "number", "--jq", ".[0].number")
+	if err != nil {
+		return 0, err
+	}
+	out = strings.TrimSpace(out)
+	if out == "" || out == "null" {
+		return 0, fmt.Errorf("no PR for branch %s", branch)
+	}
+	n, err := strconv.Atoi(out)
+	if err != nil {
+		return 0, fmt.Errorf("parse PR number %q: %w", out, err)
+	}
+	return n, nil
+}
+
+// LinkedPRNumber polls until the linked PR for the issue is created, then
+// returns its PR number. Fails the test if no PR appears within 5 minutes.
+func LinkedPRNumber(t *testing.T, env *Env, repo string, issueNumber int) int {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Minute)
+	for time.Now().Before(deadline) {
+		n, err := tryLinkedPRNumber(env, repo, issueNumber)
+		if err == nil && n > 0 {
+			return n
+		}
+		time.Sleep(15 * time.Second)
+	}
+	t.Fatalf("timed out waiting for linked PR on %s#%d", repo, issueNumber)
+	return 0
+}
