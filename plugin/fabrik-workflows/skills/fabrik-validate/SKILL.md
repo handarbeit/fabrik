@@ -166,8 +166,67 @@ The marker must be the *only* content on its line. Treat it as a control signal,
 - Tests fail
 - Regressions detected
 - Merge conflicts unresolved
+- You aborted a rebase during this invocation without subsequently completing a clean rebase
+- The PR's `mergeable=CONFLICTING` or `mergeStateStatus=DIRTY` (verified in the Pre-Completion Gate)
 
 If blocked, describe exactly what's wrong. Be specific enough that someone can act on it without re-investigating.
+
+## Pre-Completion Gate — MANDATORY before emitting FABRIK_STAGE_COMPLETE
+
+Before you emit `FABRIK_STAGE_COMPLETE`, you MUST complete this checklist. Do not skip it even if validation passed and tests are green.
+
+### Step 1 — Final rebase verification
+
+Get the PR's actual target base branch, then rebase against it:
+
+```bash
+base_branch=$(gh pr view --json baseRefName --jq .baseRefName)
+git fetch origin "$base_branch"
+git rebase "origin/$base_branch"
+```
+
+If the rebase succeeds cleanly, continue to Step 2.
+
+If the rebase produces conflicts:
+- Resolve them (see "Merge conflict resolution" above for guidance)
+- Run the project's build and test commands (as specified in `CLAUDE.md`) to verify the resolution is correct
+- If you cannot confidently resolve the conflicts, run `git rebase --abort` and emit `FABRIK_BLOCKED_ON_INPUT` with a list of the conflicting files
+
+**Why a final rebase re-run, not reflog inspection**: If you attempted and aborted a rebase earlier in this invocation, the prior abort left the branch behind `origin/<base_branch>`. Re-running the rebase catches that state directly — either it succeeds (clearing the conflict) or it fails again (caught here, emit blocked). This is more reliable than parsing reflog history for abort markers.
+
+### Step 2 — PR mergeability check
+
+```bash
+gh pr view --json mergeable,mergeStateStatus
+```
+
+Inspect both fields:
+- `mergeable`: `"MERGEABLE"`, `"CONFLICTING"`, or `"UNKNOWN"`
+- `mergeStateStatus`: `"CLEAN"`, `"DIRTY"`, `"BLOCKED"`, `"BEHIND"`, `"UNKNOWN"`, `"DRAFT"`, or `"HAS_HOOKS"`
+
+**Block (emit `FABRIK_BLOCKED_ON_INPUT`) if**:
+- `mergeable` is `"CONFLICTING"`, OR
+- `mergeStateStatus` is `"DIRTY"`
+
+Both signals mean the PR has merge conflicts that must be resolved before merge.
+
+`"UNKNOWN"` on either field means GitHub hasn't finished computing merge state. Wait 10 seconds and re-query once. If still `"UNKNOWN"`, treat it as `"MERGEABLE"`/`"CLEAN"` and proceed — GitHub sometimes takes extra time on large repos.
+
+**Proceed (emit `FABRIK_STAGE_COMPLETE`) if** `mergeable` is `"MERGEABLE"` (or `"UNKNOWN"` after the wait) and `mergeStateStatus` is anything except `"DIRTY"`.
+
+### Step 3 — Include merge state in the summary
+
+When writing the `FABRIK_SUMMARY_BEGIN`/`FABRIK_SUMMARY_END` block, always include the PR merge state:
+
+```
+FABRIK_SUMMARY_BEGIN
+Validation passed. PR mergeable: MERGEABLE, mergeStateStatus: CLEAN. All N requirements verified, tests pass (M packages), no regressions.
+FABRIK_SUMMARY_END
+```
+
+If no linked PR exists, say so: `"No linked PR found."`.
+
+This gives operators reading the issue comment a fast signal about merge readiness without opening the PR.
 
 ## Fixing Issues
 
@@ -204,6 +263,7 @@ If you find major issues (wrong architecture, missing feature, design flaw):
 - The base branch CI status for comparison
 
 When you receive this comment:
+0. **Fetch the target base branch** — run `git fetch origin "$(gh pr view --json baseRefName --jq .baseRefName)"` to refresh local refs before comparing branch state to the base. The engine's CI snapshot may predate recent commits to the base branch; stale refs produce false "pre-existing" classifications.
 1. Run `gh run list --branch fabrik/issue-<N> --limit 5` then `gh run view <run-id> --log-failed` to inspect logs
 2. Fix only **NEW REGRESSION** failures — do not attempt to fix pre-existing base-branch failures
 3. Commit and push your fixes

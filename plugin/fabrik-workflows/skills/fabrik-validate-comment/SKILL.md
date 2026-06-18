@@ -23,6 +23,7 @@ Also run `git status` and `git log --oneline -5` to understand the current state
 Read the user's comment carefully to understand what they're requesting:
 
 **Re-run checks**: The user wants validation checks re-executed (e.g., after a recent fix).
+- **Fetch the target base branch first** — run `git fetch origin "$(gh pr view --json baseRefName --jq .baseRefName)"` before any comparison of branch CI failures to base-branch state. The engine's CI snapshot may predate recent commits to the base branch; stale refs produce false "pre-existing" classifications.
 - Run the relevant checks (tests, linting, build)
 - Update the validation report with the new results
 
