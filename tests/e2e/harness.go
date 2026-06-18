@@ -321,7 +321,7 @@ func AssertLabelWasApplied(t *testing.T, env *Env, repo string, issueNumber int,
 		}
 		var names []string
 		if err := json.Unmarshal([]byte(line), &names); err != nil {
-			continue
+			t.Fatalf("failed to unmarshal timeline labels JSON: %v (line: %q)", err, line)
 		}
 		for _, n := range names {
 			seen[n] = true
@@ -359,7 +359,7 @@ func AssertLabelWasNeverApplied(t *testing.T, env *Env, repo string, issueNumber
 		}
 		var names []string
 		if err := json.Unmarshal([]byte(line), &names); err != nil {
-			continue
+			t.Fatalf("failed to unmarshal timeline labels JSON: %v (line: %q)", err, line)
 		}
 		for _, n := range names {
 			seen[n] = true
