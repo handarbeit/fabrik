@@ -692,7 +692,9 @@ func Execute() error {
 	if useTUI {
 		wakeCh := make(chan struct{}, 1)
 		eng.SetWakeCh(wakeCh)
-		return runTUI(eng, cfg.PollSeconds, buildProjectInfo(cfg, pc), cfg.PluginDir, wakeCh, skillsStaleCount, customWorkflow)
+		stopCh := make(chan tui.StopRequest, 1)
+		eng.SetStopCh(stopCh)
+		return runTUI(eng, cfg.PollSeconds, buildProjectInfo(cfg, pc), cfg.PluginDir, wakeCh, stopCh, skillsStaleCount, customWorkflow)
 	}
 	if customWorkflow {
 		fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skills have local customizations — skipping auto-refresh; run 'fabrik upgrade --force' to overwrite\n")
@@ -908,11 +910,11 @@ func buildProjectInfo(cfg *Config, pc config.ProjectConfig) tui.ProjectInfo {
 // engine. The engine handles SIGINT itself; bubbletea uses WithoutSignalHandler
 // so it doesn't interfere. When the engine exits, the TUI is quit.
 // customWorkflow is true when operator customizations are detected in .fabrik/plugin/.
-func runTUI(eng *engine.Engine, pollSeconds int, info tui.ProjectInfo, pluginDir string, wakeCh chan struct{}, skillsStaleCount int, customWorkflow bool) error {
+func runTUI(eng *engine.Engine, pollSeconds int, info tui.ProjectInfo, pluginDir string, wakeCh chan struct{}, stopCh chan tui.StopRequest, skillsStaleCount int, customWorkflow bool) error {
 	events := make(chan tui.Event, 256)
 	eng.SetEvents(events)
 
-	tuiModel := tui.New(pollSeconds, info, pluginDir, wakeCh, skillsStaleCount, customWorkflow)
+	tuiModel := tui.New(pollSeconds, info, pluginDir, wakeCh, stopCh, skillsStaleCount, customWorkflow)
 	p := tea.NewProgram(tuiModel, tea.WithAltScreen(), tea.WithoutSignalHandler())
 	// Register terminal cleanup so force-quit paths (SIGHUP re-exec, second
 	// SIGTERM/SIGHUP) release alt-screen before replacing or exiting the process.

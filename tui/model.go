@@ -111,6 +111,8 @@ type Model struct {
 
 	// wake channel — TUI sends to wake the engine poll loop
 	wakeCh chan<- struct{}
+	// stop channel — TUI sends to cancel a specific in-flight issue and apply fabrik:paused
+	stopCh chan<- StopRequest
 
 	// components
 	header   HeaderComponent
@@ -139,9 +141,10 @@ const overwriteConfirmWord = "OVERWRITE"
 // info provides project metadata displayed in the footer.
 // pluginDir is the Fabrik plugin directory passed to claude --plugin-dir (may be empty).
 // wakeCh is an optional channel the TUI sends on to wake the engine poll loop (may be nil).
+// stopCh is an optional channel the TUI sends on to stop a specific in-flight issue (may be nil).
 // skillsStaleCount is the number of plugin skill files that differ from embedded; 0 means up to date.
 // customWorkflow is true when the three-way plugin comparison detects operator customizations.
-func New(pollSeconds int, info ProjectInfo, pluginDir string, wakeCh chan struct{}, skillsStaleCount int, customWorkflow bool) Model {
+func New(pollSeconds int, info ProjectInfo, pluginDir string, wakeCh chan struct{}, stopCh chan StopRequest, skillsStaleCount int, customWorkflow bool) Model {
 	interval := time.Duration(pollSeconds) * time.Second
 	now := time.Now()
 	spinnerFrames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -160,6 +163,7 @@ func New(pollSeconds int, info ProjectInfo, pluginDir string, wakeCh chan struct
 		focusPane: paneActive,
 		pluginDir: pluginDir,
 		wakeCh:    wakeCh,
+		stopCh:    stopCh,
 		header: HeaderComponent{
 			pollInterval:     interval,
 			now:              now,
