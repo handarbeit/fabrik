@@ -94,7 +94,7 @@ func (e *Engine) settlePRMergeState(item gh.ProjectItem, _ *stages.Stage) PRSett
 
 	if pr.HeadSHA == "" {
 		e.logf(item.Number, "settle", "PR #%d HeadSHA empty — treating as unsettled\n", pr.Number)
-		return PRSettleResult{Status: PRMergeUnsettled, Reason: "HeadSHA empty", MergeableState: mergeableState, PR: pr}
+		return PRSettleResult{Status: PRMergeUnsettled, Reason: "HeadSHA empty", PR: pr}
 	}
 
 	checkRuns, err := e.readClient.FetchCheckRuns(owner, repo, pr.HeadSHA)
@@ -124,7 +124,10 @@ func (e *Engine) settlePRMergeState(item gh.ProjectItem, _ *stages.Stage) PRSett
 		if hadChecks {
 			e.logf(item.Number, "settle", "no check runs for SHA %s — post-push registration delay\n",
 				pr.HeadSHA[:min(8, len(pr.HeadSHA))])
-			return PRSettleResult{Status: PRMergeUnsettled, Reason: "post-push registration delay (hadChecks)", MergeableState: mergeableState, PR: pr}
+			// MergeableState intentionally omitted: checkCIGate uses MergeableState to
+			// detect R3 (OPEN+BLOCKED+never-had-checks). This case is hadChecks=true,
+			// so R3 must NOT fire regardless of the raw mergeable_state value.
+			return PRSettleResult{Status: PRMergeUnsettled, Reason: "post-push registration delay (hadChecks)", PR: pr}
 		}
 
 		if lpr != nil && !lpr.LastHeadSHAUpdate.IsZero() {
@@ -135,7 +138,8 @@ func (e *Engine) settlePRMergeState(item gh.ProjectItem, _ *stages.Stage) PRSett
 			if elapsed := time.Since(lpr.LastHeadSHAUpdate); elapsed < dwell {
 				e.logf(item.Number, "settle", "no check runs for SHA %s — post-push dwell active (%.0fs remaining)\n",
 					pr.HeadSHA[:min(8, len(pr.HeadSHA))], (dwell-elapsed).Seconds())
-				return PRSettleResult{Status: PRMergeUnsettled, Reason: "post-push dwell active", MergeableState: mergeableState, PR: pr}
+				// MergeableState intentionally omitted: post-push dwell is not an R3 case.
+				return PRSettleResult{Status: PRMergeUnsettled, Reason: "post-push dwell active", PR: pr}
 			}
 		}
 
