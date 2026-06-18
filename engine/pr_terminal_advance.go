@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/handarbeit/fabrik/boardcache"
@@ -23,7 +24,7 @@ import (
 //
 // Uses e.client (direct GitHub API) — not e.readClient — because the boardcache
 // may have stale Merged/State from before the PR reached its terminal state.
-// Mirrors the same choice in runPausedItemMergedPRRecovery (ADR-053).
+// Mirrors the same choice in checkAutoMergeConvergence (ADR-053 carried constraint).
 //
 // Must NEVER dispatch workers or acquire e.sem. Runs in the main poll goroutine.
 func (e *Engine) runValidatePRTerminalAdvance(board *gh.ProjectBoard, items []gh.ProjectItem, advancedItems map[string]bool) {
@@ -109,11 +110,20 @@ func (e *Engine) runValidatePRTerminalAdvance(board *gh.ProjectBoard, items []gh
 			if hasLabel(item, "fabrik:awaiting-review") {
 				e.removeAwaitingReviewLabel(owner, repo, item)
 			}
-			e.removeRebaseNeededLabel(owner, repo, item)
+			if hasLabel(item, "fabrik:rebase-needed") {
+				e.removeRebaseNeededLabel(owner, repo, item)
+			}
 			for _, lbl := range []string{"fabrik:paused", "fabrik:awaiting-input"} {
 				if hasLabel(item, lbl) {
 					if rerr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, lbl); rerr != nil {
-						e.logf(item.Number, "warn", "pr-terminal: could not remove %s: %v\n", lbl, rerr)
+						if errors.Is(rerr, gh.ErrNotFound) {
+							// Label already absent on GitHub — desired end state achieved; sync cache.
+							if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+								cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), lbl)
+							}
+						} else {
+							e.logf(item.Number, "warn", "pr-terminal: could not remove %s: %v\n", lbl, rerr)
+						}
 					} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 						cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), lbl)
 					}
