@@ -93,6 +93,10 @@ func (m *mockClient) FetchPRMergeableState(owner, repo string, prNumber int) (st
 	return "", nil
 }
 
+func (m *mockClient) FetchPRMergeableFields(owner, repo string, prNumber int) (*bool, string, error) {
+	return nil, "", nil
+}
+
 func (m *mockClient) FetchLabels(owner, repo string, issueNumber int) ([]string, error) {
 	m.fetchLabelsCount++
 	return m.labelsResult, nil

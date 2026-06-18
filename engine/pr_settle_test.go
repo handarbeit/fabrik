@@ -229,9 +229,8 @@ func TestSettle_PostPushHadChecks_ReturnsUnsettled(t *testing.T) {
 }
 
 func TestSettle_PostPushDwellActive_ReturnsUnsettled(t *testing.T) {
-	// SHA updated 5 seconds ago; dwell = 30s → still within window.
-	shaUpdateTime := time.Now().Add(-5 * time.Second)
-
+	// Apply two PRHeadSHAUpdated events to stamp LastHeadSHAUpdate (store only stamps
+	// when SHA actually changes from a non-empty value).
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 			return &gh.PRDetails{Number: 5, State: "open", HeadSHA: "sha-new"}, nil
@@ -246,14 +245,11 @@ func TestSettle_PostPushDwellActive_ReturnsUnsettled(t *testing.T) {
 	eng := testEngineForMerge(t, client)
 	eng.cfg.PostPushDwell = 30 * time.Second
 
-	// Seed LastHeadSHAUpdate via a PRHeadSHAUpdated mutation.
-	eng.store.Apply(itemstate.PRHeadSHAUpdated{
-		Repo:    "owner/repo",
-		Number:  1,
-		HeadSHA: "sha-new",
-		At:      shaUpdateTime,
-	})
+	// Seed initial SHA, then the new SHA — the second apply stamps LastHeadSHAUpdate.
+	eng.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 1, SHA: "sha-initial"})
+	eng.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 1, SHA: "sha-new"})
 
+	// Call immediately — well within the 30s dwell.
 	r := eng.settlePRMergeState(settleItem(1), &stages.Stage{Name: "Validate"})
 	if r.Status != PRMergeUnsettled {
 		t.Errorf("expected PRMergeUnsettled during post-push dwell window, got %v", r.Status)
@@ -261,9 +257,6 @@ func TestSettle_PostPushDwellActive_ReturnsUnsettled(t *testing.T) {
 }
 
 func TestSettle_PostPushDwellElapsed_ReturnsReady(t *testing.T) {
-	// SHA updated 120 seconds ago; dwell = 30s → window elapsed.
-	shaUpdateTime := time.Now().Add(-120 * time.Second)
-
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 			return &gh.PRDetails{Number: 5, State: "open", HeadSHA: "sha-new"}, nil
@@ -276,14 +269,13 @@ func TestSettle_PostPushDwellElapsed_ReturnsReady(t *testing.T) {
 		},
 	}
 	eng := testEngineForMerge(t, client)
-	eng.cfg.PostPushDwell = 30 * time.Second
+	// Sub-nanosecond dwell so it elapses immediately after stamping.
+	eng.cfg.PostPushDwell = 1 * time.Nanosecond
 
-	eng.store.Apply(itemstate.PRHeadSHAUpdated{
-		Repo:    "owner/repo",
-		Number:  1,
-		HeadSHA: "sha-new",
-		At:      shaUpdateTime,
-	})
+	eng.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 1, SHA: "sha-initial"})
+	eng.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 1, SHA: "sha-new"})
+	// Brief sleep so even low-resolution clocks see the dwell elapsed.
+	time.Sleep(20 * time.Millisecond)
 
 	r := eng.settlePRMergeState(settleItem(1), &stages.Stage{Name: "Validate"})
 	if r.Status != PRMergeReady {

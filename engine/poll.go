@@ -1325,12 +1325,18 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			continue
 		}
 
+		// Fetch all PR merge/CI state in a single pass. Both gates below
+		// consume this result, ensuring they see identical GitHub state within
+		// one poll cycle and eliminating the mergeable vs mergeable_state
+		// split-brain that separate REST calls could produce.
+		settle := e.settlePRMergeState(item, stage)
+
 		// Merge-conflict gate: runs before the CI gate so that a PR made
 		// unmergeable by a base-branch advance is rebased immediately instead
 		// of the engine spinning on CI-await polls while the underlying
 		// blocker is a conflict. Gated by the same wait_for_ci flag — the only
 		// stages that participate in the post-complete catch-up loop.
-		mergeBlocked, mergeConflict := e.checkMergeabilityGate(item, stage)
+		mergeBlocked, mergeConflict := e.checkMergeabilityGate(item, stage, settle)
 		if mergeConflict {
 			iKey := issueKey(item, e.defaultRepo())
 			repoStr := itemOwnerRepoString(item, e.defaultRepo())
@@ -1359,7 +1365,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		// CI gate: evaluate CI status for stages configured with wait_for_ci: true.
 		// This runs in Phase 1 (unconditional) so CI failures are fixed regardless
 		// of auto-advance setting. checkCIGate returns (blocked, ciFailure, timedOut).
-		ciBlocked, ciFailure, ciTimedOut := e.checkCIGate(board, item, stage)
+		ciBlocked, ciFailure, ciTimedOut := e.checkCIGate(board, item, stage, settle)
 		if ciTimedOut {
 			e.pauseForCITimeout(board, item, stage)
 			continue
@@ -1380,7 +1386,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 				e.pauseForCIFixCycleLimit(board, item, stage, cycleCount, maxCycles)
 			} else {
 				e.store.Apply(itemstate.CIFixCycleIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
-				e.dispatchCIFixReinvoke(ctx, board, item, stage)
+				e.dispatchCIFixReinvoke(ctx, board, item, stage, settle)
 				advancedItems[iKey] = true
 			}
 			continue
