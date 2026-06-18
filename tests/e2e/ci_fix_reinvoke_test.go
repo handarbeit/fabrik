@@ -3,7 +3,9 @@
 package e2e
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -112,6 +114,84 @@ func TestCIFixReinvoke(t *testing.T) {
 	t.Logf("commit count guard passed: %d commits (base=%d + 1 CI-fix)", finalCommits, baseCommits)
 }
 
+// TestCIFixReinvokeCycleLimit is the negative-path regression test for the
+// CI-fix reinvoke cycle limit (engine/ci.go: pauseForCIFixCycleLimit).
+// The sentinel CI job is permanently failing for this issue — Claude cannot fix
+// it — so the engine must exhaust MaxCiFixCycles and pause the issue.
+//
+// Pass criteria:
+//   - fabrik:awaiting-ci appears (CI gate fires).
+//   - fabrik:paused and fabrik:awaiting-input appear (cycle limit reached).
+//   - Issue remains OPEN.
+//   - A "🏭 **Fabrik — CI fix cycle limit reached**" comment appears on the issue.
+//
+// Prerequisite: "ci-fix-sentinel" must be enrolled as a required status check
+// AND FABRIK_MAX_CI_FIX_CYCLES must be ≤ 3 (ideally 2) in the test bed .env.
+// The test skips with an instructional message if either condition is not met.
+//
+// Wall-clock: ~30–60 min. Cost: ~$0.50–1.50.
+func TestCIFixReinvokeCycleLimit(t *testing.T) {
+	t.Parallel()
+	env := LoadEnv(t)
+	AssertFabrikRunning(t, env)
+	assertSentinelCheckRequired(t, env, env.RepoAlpha)
+
+	maxCycles := readEnvFileMaxCiFixCycles(t, env)
+	if maxCycles > 3 {
+		t.Skipf("FABRIK_MAX_CI_FIX_CYCLES=%d in test bed .env (must be ≤3 for this test — set to 2 and restart Fabrik)", maxCycles)
+	}
+	t.Logf("FABRIK_MAX_CI_FIX_CYCLES=%d — cycle limit test will fire after %d failed attempts", maxCycles, maxCycles)
+
+	stamp := time.Now().UTC().Format("20060102-150405")
+	title := fmt.Sprintf("e2e ci-fix-cycle-limit (%s)", stamp)
+
+	num := FileIssue(t, env, env.RepoAlpha, title, ciFixCycleLimitBody, "fabrik:yolo")
+	itemID := AddIssueToProject(t, env, env.RepoAlpha, num)
+	SetIssueStatus(t, env, itemID, "Specify")
+	t.Logf("filed %s#%d", env.RepoAlpha, num)
+
+	// CI gate fires, then engine exhausts reinvoke cycles and pauses.
+	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-ci", 90*time.Minute)
+	t.Logf("fabrik:awaiting-ci appeared on %s#%d", env.RepoAlpha, num)
+
+	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:paused", 90*time.Minute)
+	t.Logf("fabrik:paused appeared on %s#%d (cycle limit reached)", env.RepoAlpha, num)
+
+	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-input", 5*time.Minute)
+	t.Logf("fabrik:awaiting-input appeared on %s#%d", env.RepoAlpha, num)
+
+	if state := IssueState(t, env, env.RepoAlpha, num); state != "OPEN" {
+		t.Fatalf("expected issue OPEN after cycle limit, got %s", state)
+	}
+
+	// The engine posts the cycle-limit message directly to the issue (not the PR).
+	cycleDeadline := time.Now().Add(5 * time.Minute)
+	found := false
+	for time.Now().Before(cycleDeadline) {
+		out, err := ghOutput(env, "issue", "view", fmt.Sprint(num), "-R", env.RepoAlpha,
+			"--json", "comments", "--jq", "[.comments[].body]")
+		if err == nil {
+			var bodies []string
+			if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(out)), &bodies); jsonErr == nil {
+				for _, b := range bodies {
+					if strings.Contains(b, "🏭 **Fabrik — CI fix cycle limit reached**") {
+						found = true
+						break
+					}
+				}
+			}
+		}
+		if found {
+			break
+		}
+		time.Sleep(15 * time.Second)
+	}
+	if !found {
+		t.Fatalf("cycle limit comment not found on %s#%d after 5 minutes", env.RepoAlpha, num)
+	}
+	t.Logf("cycle limit comment confirmed on %s#%d — CI-fix cycle limit regression guard passed", env.RepoAlpha, num)
+}
+
 // ciFixReinvokeBody is the issue body for TestCIFixReinvoke. The PR body must
 // contain "ci-fix-sentinel-required" so the test-alpha CI workflow triggers the
 // sentinel check (which fails on the first push, requiring a fix commit).
@@ -153,4 +233,38 @@ ci-fix-sentinel-required
 
 Single file (README.md). No other changes. No decomposition. Plan and Implement
 should be minimal — one commit on the initial push, one CI-fix commit.
+`
+
+// ciFixCycleLimitBody is the issue body for TestCIFixReinvokeCycleLimit. The
+// PR body must contain "ci-fix-sentinel-unfixable" so the test-alpha CI
+// workflow runs a permanently-failing sentinel check regardless of content.
+// Claude will attempt to fix CI on each reinvoke but cannot succeed.
+const ciFixCycleLimitBody = `## Goal
+
+End-to-end regression test for the Fabrik CI-fix cycle limit
+(handarbeit/fabrik#900). This issue is designed to exhaust MaxCiFixCycles
+by running an unfixable CI check.
+
+## The change
+
+Add exactly one new HTML comment to README.md, on its own line, immediately
+after the line containing "# fabrik-test-alpha". The comment must be:
+
+    <!-- ci-fix-cycle-limit-test -->
+
+This is the only change needed. Do NOT attempt to remove or alter the CI
+sentinel marker in the PR body — the sentinel is intentionally unfixable
+at the code level. Make your best effort on each CI-fix reinvoke, but the
+test expects the cycle limit to be reached.
+
+## CI behaviour required
+
+The PR body MUST carry the literal marker below so the test repo's CI
+permanently-failing sentinel fires:
+
+ci-fix-sentinel-unfixable
+
+## Scope
+
+Single file (README.md). Minimal change. No decomposition.
 `
