@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -331,6 +332,81 @@ func AssertLabelWasApplied(t *testing.T, env *Env, repo string, issueNumber int,
 	}
 	t.Fatalf("label %q was never applied to %s#%d (labels ever applied: %v)",
 		label, repo, issueNumber, mapKeys(seen))
+}
+
+// AssertLabelWasNeverApplied is the inverse of AssertLabelWasApplied. It
+// queries the issue timeline and fails if the named label was applied at any
+// point during the issue's lifetime. Useful for asserting that the engine
+// never took a path it should have suppressed (e.g. fabrik:auto-merge-enabled
+// must never appear for cruise items).
+func AssertLabelWasNeverApplied(t *testing.T, env *Env, repo string, issueNumber int, label string) {
+	t.Helper()
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		t.Fatalf("bad repo: %q", repo)
+	}
+	out, err := ghOutput(env, "api", "--paginate",
+		fmt.Sprintf("repos/%s/%s/issues/%d/timeline", owner, name, issueNumber),
+		"--jq", `[.[] | select(.event == "labeled") | .label.name]`)
+	if err != nil {
+		t.Fatalf("query timeline for %s#%d: %v\n%s", repo, issueNumber, err, out)
+	}
+	seen := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var names []string
+		if err := json.Unmarshal([]byte(line), &names); err != nil {
+			continue
+		}
+		for _, n := range names {
+			seen[n] = true
+		}
+	}
+	if !seen[label] {
+		return
+	}
+	t.Fatalf("label %q was applied to %s#%d (must never have been applied; labels ever applied: %v)",
+		label, repo, issueNumber, mapKeys(seen))
+}
+
+// WaitForLinkedPR polls until a PR linked to the issue's branch
+// (fabrik/issue-<N>) appears with state=open, then returns its PR number.
+// Fails after timeout. Call this before MergePR to obtain the PR number.
+func WaitForLinkedPR(t *testing.T, env *Env, repo string, issueNum int, timeout time.Duration) int {
+	t.Helper()
+	branch := "fabrik/issue-" + strconv.Itoa(issueNum)
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		out, err := ghOutput(env, "pr", "list", "-R", repo,
+			"--head", branch, "--state", "open",
+			"--json", "number", "--jq", ".[0].number")
+		if err == nil {
+			s := strings.TrimSpace(out)
+			if s != "" && s != "null" {
+				var num int
+				if _, scanErr := fmt.Sscanf(s, "%d", &num); scanErr == nil && num > 0 {
+					return num
+				}
+			}
+		}
+		time.Sleep(15 * time.Second)
+	}
+	t.Fatalf("timed out waiting for an open PR with head=%s in %s", branch, repo)
+	return 0
+}
+
+// MergePR merges the numbered PR in repo using a standard merge commit.
+// Use this in tests where a human merge is required (e.g. cruise mode, which
+// suppresses auto-merge and waits for a human to approve and merge the PR).
+func MergePR(t *testing.T, env *Env, repo string, prNumber int) {
+	t.Helper()
+	out, err := ghOutput(env, "pr", "merge", fmt.Sprint(prNumber), "-R", repo, "--merge")
+	if err != nil {
+		t.Fatalf("merge PR #%d in %s: %v\n%s", prNumber, repo, err, out)
+	}
 }
 
 func mapKeys(m map[string]bool) []string {
