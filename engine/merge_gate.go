@@ -12,80 +12,68 @@ import (
 	"github.com/handarbeit/fabrik/stages"
 )
 
-// checkMergeabilityGate inspects GitHub's mergeable flag on the linked PR to
-// detect a base-branch conflict before the CI gate polls checks. Runs only
-// when stage.WaitForCI is true — the same opt-in signal used by the CI gate,
-// since a PR that cannot merge has no reason to proceed to CI-await.
+// checkMergeabilityGate interprets the pre-fetched settle result to detect a
+// base-branch conflict before the CI gate acts. Runs only when stage.WaitForCI
+// is true — the same opt-in signal used by the CI gate, since a PR that cannot
+// merge has no reason to proceed to CI-await.
 //
 // Returns (blocked, conflict):
 //
-//   - (false, false) — gate clears. No PR, mergeable==true, or wait_for_ci
-//     disabled. Caller falls through to the CI gate on the same poll.
+//   - (false, false) — gate clears. No PR, mergeable==true, CI failed (deferred
+//     to checkCIGate), or wait_for_ci disabled. Caller falls through to the CI gate.
 //
-//   - (true, false)  — blocked but no confirmed conflict. Mergeable is nil
-//     (GitHub has not yet computed it), or a transient API error was seen
-//     while fetching. Caller should skip to next item; the next poll
-//     re-evaluates. The fabrik:rebase-needed label is not touched.
+//   - (true, false)  — blocked but no confirmed conflict. GitHub has not yet
+//     computed mergeability (PRMergeUnsettled). The fabrik:rebase-needed label
+//     is not touched.
 //
 //   - (true, true)   — confirmed conflict. fabrik:rebase-needed applied
 //     (idempotent). Caller should dispatch a rebase reinvoke.
-func (e *Engine) checkMergeabilityGate(item gh.ProjectItem, stage *stages.Stage) (blocked, conflict bool) {
+func (e *Engine) checkMergeabilityGate(item gh.ProjectItem, stage *stages.Stage, settle PRSettleResult) (blocked, conflict bool) {
 	if stage.WaitForCI == nil || !*stage.WaitForCI {
 		return false, false
 	}
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
-	pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number)
-	if err != nil {
-		// Transient API error. Block this item for the rest of Phase 1 so we
-		// don't run the CI gate on stale data (it would make its own REST
-		// call against an unknown mergeability state). Mirrors checkCIGate's
-		// transient-error handling.
-		e.logf(item.Number, "merge-gate", "could not fetch linked PR: %v — blocking until API recovers\n", err)
-		return true, false
-	}
-	if pr == nil || pr.Number == 0 {
+	switch settle.Status {
+	case PRMergeNoPR, PRMergeTerminal:
 		return false, false
-	}
-
-	mergeable, err := e.readClient.FetchPRMergeable(owner, repo, pr.Number)
-	if err != nil {
-		e.logf(item.Number, "merge-gate", "could not fetch mergeable: %v — blocking until API recovers\n", err)
+	case PRMergeUnsettled:
 		return true, false
-	}
-
-	if mergeable == nil {
-		// GitHub has not yet computed mergeability (null). Asking again triggers
-		// the computation; the next poll will see a definite answer.
-		e.logf(item.Number, "merge-gate", "PR #%d mergeable=null — GitHub still computing, re-checking next poll\n", pr.Number)
-		return true, false
-	}
-
-	if *mergeable {
+	case PRMergeBlocked:
+		// CI has failed but there is no base-branch conflict. Clear the merge
+		// gate so checkCIGate can classify the failure and dispatch CI-fix.
+		e.removeRebaseNeededLabel(owner, repo, item)
+		return false, false
+	case PRMergeReady:
 		// Clear a stale label if one is present from an earlier conflict that
 		// has since been resolved.
 		e.removeRebaseNeededLabel(owner, repo, item)
 		return false, false
-	}
-
-	// Confirmed conflict. Apply fabrik:rebase-needed (idempotent).
-	e.logf(item.Number, "merge-gate", "PR #%d is not mergeable (base conflict) — rebase required\n", pr.Number)
-	alreadyLabeled := false
-	for _, l := range item.Labels {
-		if l == "fabrik:rebase-needed" {
-			alreadyLabeled = true
-			break
+	case PRMergeConflicting:
+		prNum := 0
+		if settle.PR != nil {
+			prNum = settle.PR.Number
 		}
-	}
-	if !alreadyLabeled {
-		if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:rebase-needed"); err != nil {
-			e.logf(item.Number, "warn", "could not add fabrik:rebase-needed label: %v\n", err)
-		} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:rebase-needed")
+		// Confirmed conflict. Apply fabrik:rebase-needed (idempotent).
+		e.logf(item.Number, "merge-gate", "PR #%d is not mergeable (base conflict) — rebase required\n", prNum)
+		alreadyLabeled := false
+		for _, l := range item.Labels {
+			if l == "fabrik:rebase-needed" {
+				alreadyLabeled = true
+				break
+			}
 		}
+		if !alreadyLabeled {
+			if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:rebase-needed"); err != nil {
+				e.logf(item.Number, "warn", "could not add fabrik:rebase-needed label: %v\n", err)
+			} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:rebase-needed")
+			}
+		}
+		return true, true
 	}
-	return true, true
+	return false, false
 }
 
 // removeRebaseNeededLabel clears fabrik:rebase-needed if present.

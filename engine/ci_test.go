@@ -16,81 +16,60 @@ import (
 // ── checkCIGate ──────────────────────────────────────────────────────────────
 
 func TestCheckCIGate_WaitForCIFalse_ClearsImmediately(t *testing.T) {
-	called := false
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			called = true
-			return nil, nil
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate"} // WaitForCI is nil
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, PRSettleResult{})
 	if blocked || ciFailure || timedOut {
 		t.Errorf("expected all false when wait_for_ci not set, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
-	}
-	if called {
-		t.Error("should not call FetchLinkedPR when wait_for_ci is not set")
 	}
 }
 
 func TestCheckCIGate_NoPR_ClearsGate(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return nil, nil
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	settle := PRSettleResult{Status: PRMergeNoPR}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure || timedOut {
 		t.Errorf("expected clear when no PR, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
 	}
 }
 
 func TestCheckCIGate_NoCheckRuns_ClearsGate(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "sha1"}, nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return nil, nil
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	settle := PRSettleResult{Status: PRMergeReady, Reason: "no CI configured", PR: &gh.PRDetails{Number: 5, HeadSHA: "sha1"}}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure || timedOut {
 		t.Errorf("expected clear for no check runs (R5), got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
 	}
 }
 
 func TestCheckCIGate_PostPushDelay_BlocksGate(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "sha-new"}, nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return nil, nil // no checks yet for the new SHA
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
-	// Pre-seed: this issue has previously had check runs registered.
-	eng.store.Apply(itemstate.PRChecksObserved{Repo: "owner/repo", Number: 1})
 
 	tr := true
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	// hadChecks=true: settle returns "post-push registration delay (hadChecks)"
+	settle := PRSettleResult{
+		Status: PRMergeUnsettled,
+		Reason: "post-push registration delay (hadChecks)",
+		PR:     &gh.PRDetails{Number: 5, HeadSHA: "sha-new"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked {
 		t.Error("expected blocked=true when zero check runs after previously seeing checks (post-push delay)")
 	}
@@ -105,45 +84,43 @@ func TestCheckCIGate_PostPushDelay_BlocksGate(t *testing.T) {
 }
 
 func TestCheckCIGate_AllGreen_ClearsGate(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "sha2"}, nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return []gh.CheckRun{
-				{Name: "build", Status: "completed", Conclusion: "success"},
-				{Name: "test", Status: "completed", Conclusion: "success"},
-			}, nil
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	settle := PRSettleResult{
+		Status: PRMergeReady,
+		Reason: "all CI checks passed",
+		CheckRuns: []gh.CheckRun{
+			{Name: "build", Status: "completed", Conclusion: "success"},
+			{Name: "test", Status: "completed", Conclusion: "success"},
+		},
+		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha2"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure || timedOut {
 		t.Errorf("expected clear for all-green CI, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
 	}
 }
 
 func TestCheckCIGate_Pending_BlocksNoLabel(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "sha3"}, nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return []gh.CheckRun{
-				{Name: "ci", Status: "in_progress"},
-			}, nil
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	settle := PRSettleResult{
+		Status: PRMergeUnsettled,
+		Reason: "CI checks pending",
+		CheckRuns: []gh.CheckRun{
+			{Name: "ci", Status: "in_progress"},
+		},
+		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha3"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked {
 		t.Error("expected blocked=true for pending CI")
 	}
@@ -171,14 +148,6 @@ func TestCheckCIGate_Pending_BlocksNoLabel(t *testing.T) {
 // timeout tracks the whole pending window, not just confirmed-failure windows.
 func TestCheckCIGate_Pending_TimedOut(t *testing.T) {
 	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "sha_pending_timeout"}, nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return []gh.CheckRun{
-				{Name: "slow-ci", Status: "in_progress"},
-			}, nil
-		},
 		fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
 			// Simulate fabrik:awaiting-ci applied over 1 hour ago — well past any timeout.
 			return time.Now().Add(-2 * time.Hour), nil
@@ -190,7 +159,15 @@ func TestCheckCIGate_Pending_TimedOut(t *testing.T) {
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	settle := PRSettleResult{
+		Status: PRMergeUnsettled,
+		Reason: "CI checks pending",
+		CheckRuns: []gh.CheckRun{
+			{Name: "slow-ci", Status: "in_progress"},
+		},
+		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha_pending_timeout"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if !timedOut {
 		t.Error("expected timedOut=true when CI is pending and CIWaitTimeout elapsed")
 	}
@@ -210,22 +187,21 @@ func TestCheckCIGate_Pending_TimedOut(t *testing.T) {
 }
 
 func TestCheckCIGate_Failed_BlocksAndAddsLabel(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "sha4"}, nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return []gh.CheckRun{
-				{Name: "lint", Status: "completed", Conclusion: "failure"},
-			}, nil
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	settle := PRSettleResult{
+		Status: PRMergeBlocked,
+		Reason: "CI checks failed",
+		CheckRuns: []gh.CheckRun{
+			{Name: "lint", Status: "completed", Conclusion: "failure"},
+		},
+		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha4"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked || !ciFailure {
 		t.Errorf("expected blocked=true ciFailure=true for failed CI, got blocked=%v ciFailure=%v", blocked, ciFailure)
 	}
@@ -246,14 +222,6 @@ func TestCheckCIGate_Failed_BlocksAndAddsLabel(t *testing.T) {
 func TestCheckCIGate_Failed_AlreadyLabeledWithTimeout_TimesOut(t *testing.T) {
 	appliedAt := time.Now().Add(-2 * time.Hour) // well past any timeout
 	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "sha5"}, nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return []gh.CheckRun{
-				{Name: "lint", Status: "completed", Conclusion: "failure"},
-			}, nil
-		},
 		fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
 			return appliedAt, nil
 		},
@@ -267,7 +235,15 @@ func TestCheckCIGate_Failed_AlreadyLabeledWithTimeout_TimesOut(t *testing.T) {
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	settle := PRSettleResult{
+		Status: PRMergeBlocked,
+		Reason: "CI checks failed",
+		CheckRuns: []gh.CheckRun{
+			{Name: "lint", Status: "completed", Conclusion: "failure"},
+		},
+		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha5"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure {
 		t.Errorf("expected blocked=false ciFailure=false on timeout, got blocked=%v ciFailure=%v", blocked, ciFailure)
 	}
@@ -289,14 +265,6 @@ func TestCheckCIGate_Failed_AlreadyLabeledWithTimeout_TimesOut(t *testing.T) {
 func TestCheckCIGate_Failed_AlreadyLabeledNotYetTimedOut_Blocked(t *testing.T) {
 	appliedAt := time.Now().Add(-1 * time.Minute) // within a 30-min window
 	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "sha6"}, nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return []gh.CheckRun{
-				{Name: "lint", Status: "completed", Conclusion: "failure"},
-			}, nil
-		},
 		fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
 			return appliedAt, nil
 		},
@@ -307,7 +275,15 @@ func TestCheckCIGate_Failed_AlreadyLabeledNotYetTimedOut_Blocked(t *testing.T) {
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	settle := PRSettleResult{
+		Status: PRMergeBlocked,
+		Reason: "CI checks failed",
+		CheckRuns: []gh.CheckRun{
+			{Name: "lint", Status: "completed", Conclusion: "failure"},
+		},
+		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha6"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked || !ciFailure {
 		t.Errorf("expected blocked=true ciFailure=true when not yet timed out, got blocked=%v ciFailure=%v", blocked, ciFailure)
 	}
@@ -321,22 +297,21 @@ func TestCheckCIGate_Failed_AlreadyLabeledNotYetTimedOut_Blocked(t *testing.T) {
 // TestCheckCIGate_AllGreen_AddsCompleteLabel verifies that checkCIGate adds
 // stage:X:complete when all CI checks pass (R5 — gate cleared).
 func TestCheckCIGate_AllGreen_AddsCompleteLabel(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "sha10"}, nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return []gh.CheckRun{
-				{Name: "build", Status: "completed", Conclusion: "success"},
-			}, nil
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	settle := PRSettleResult{
+		Status: PRMergeReady,
+		Reason: "all CI checks passed",
+		CheckRuns: []gh.CheckRun{
+			{Name: "build", Status: "completed", Conclusion: "success"},
+		},
+		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha10"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure || timedOut {
 		t.Errorf("expected gate cleared, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
 	}
@@ -364,20 +339,18 @@ func TestCheckCIGate_AllGreen_AddsCompleteLabel(t *testing.T) {
 // TestCheckCIGate_NoCheckRuns_AddsCompleteLabel verifies that checkCIGate adds
 // stage:X:complete when no check runs exist (no CI configured).
 func TestCheckCIGate_NoCheckRuns_AddsCompleteLabel(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "sha11"}, nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return nil, nil // no check runs (R5)
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, _, _ := eng.checkCIGate(nil, item, stage)
+	settle := PRSettleResult{
+		Status: PRMergeReady,
+		Reason: "no CI configured",
+		PR:     &gh.PRDetails{Number: 5, HeadSHA: "sha11"},
+	}
+	blocked, _, _ := eng.checkCIGate(nil, item, stage, settle)
 	if blocked {
 		t.Error("expected gate cleared for no check runs (R5)")
 	}
@@ -397,17 +370,14 @@ func TestCheckCIGate_NoCheckRuns_AddsCompleteLabel(t *testing.T) {
 // Regression test: before the fix, fabrik:awaiting-ci was never removed and
 // stage:X:complete was never added when FetchLinkedPR returns nil.
 func TestCheckCIGate_NoPR_AddsCompleteLabel(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return nil, nil // no linked PR
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	settle := PRSettleResult{Status: PRMergeNoPR}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure || timedOut {
 		t.Errorf("expected gate cleared for no PR, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
 	}
@@ -434,22 +404,21 @@ func TestCheckCIGate_NoPR_AddsCompleteLabel(t *testing.T) {
 // TestCheckCIGate_Failed_DoesNotAddCompleteLabel verifies that checkCIGate does
 // NOT add stage:X:complete when CI checks have failed.
 func TestCheckCIGate_Failed_DoesNotAddCompleteLabel(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "sha12"}, nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return []gh.CheckRun{
-				{Name: "lint", Status: "completed", Conclusion: "failure"},
-			}, nil
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	_, ciFailure, _ := eng.checkCIGate(nil, item, stage)
+	settle := PRSettleResult{
+		Status: PRMergeBlocked,
+		Reason: "CI checks failed",
+		CheckRuns: []gh.CheckRun{
+			{Name: "lint", Status: "completed", Conclusion: "failure"},
+		},
+		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha12"},
+	}
+	_, ciFailure, _ := eng.checkCIGate(nil, item, stage, settle)
 	if !ciFailure {
 		t.Error("expected ciFailure=true for failed CI")
 	}
@@ -464,23 +433,22 @@ func TestCheckCIGate_Failed_DoesNotAddCompleteLabel(t *testing.T) {
 // checkCIGate uses the correct stage name when adding the completion label
 // (not hard-coded to "Validate").
 func TestCheckCIGate_NonValidateStage_AddsCorrectCompleteLabel(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "sha13"}, nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return []gh.CheckRun{
-				{Name: "build", Status: "completed", Conclusion: "success"},
-			}, nil
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	// Use a non-Validate stage name
 	stage := &stages.Stage{Name: "Review", WaitForCI: &tr}
 
-	blocked, _, _ := eng.checkCIGate(nil, item, stage)
+	settle := PRSettleResult{
+		Status: PRMergeReady,
+		Reason: "all CI checks passed",
+		CheckRuns: []gh.CheckRun{
+			{Name: "build", Status: "completed", Conclusion: "success"},
+		},
+		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha13"},
+	}
+	blocked, _, _ := eng.checkCIGate(nil, item, stage, settle)
 	if blocked {
 		t.Error("expected gate cleared")
 	}
@@ -538,22 +506,21 @@ func TestAddCompleteLabelAndRemoveCI_AddLabelFails_PreservesAwaitingCI(t *testin
 // ── buildCIFixComment ─────────────────────────────────────────────────────────
 
 func TestBuildCIFixComment_IncludesFailedChecks(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "sha7"}, nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return []gh.CheckRun{
-				{Name: "build", Status: "completed", Conclusion: "failure"},
-			}, nil
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 1}
 	tr := true
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	comment := eng.buildCIFixComment(item, stage, "/tmp")
+	settle := PRSettleResult{
+		Status: PRMergeBlocked,
+		Reason: "CI checks failed",
+		CheckRuns: []gh.CheckRun{
+			{Name: "build", Status: "completed", Conclusion: "failure"},
+		},
+		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha7"},
+	}
+	comment := eng.buildCIFixComment(item, stage, "/tmp", settle)
 	if comment.DatabaseID != 0 {
 		t.Error("synthetic comment should have DatabaseID=0")
 	}
@@ -569,17 +536,17 @@ func TestBuildCIFixComment_IncludesFailedChecks(t *testing.T) {
 // FetchLinkedPR API error returns blocked=true rather than clearing the gate,
 // preventing auto-advance when CI status is unknown.
 func TestCheckCIGate_FetchLinkedPRError_BlocksGate(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return nil, fmt.Errorf("transient network error")
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	settle := PRSettleResult{
+		Status: PRMergeUnsettled,
+		Reason: "FetchLinkedPR error: transient network error",
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked {
 		t.Error("expected blocked=true when FetchLinkedPR returns an error")
 	}
@@ -594,17 +561,17 @@ func TestCheckCIGate_FetchLinkedPRError_BlocksGate(t *testing.T) {
 // merged, checkCIGate clears the CI gate and adds stage:X:complete without
 // requiring check runs.
 func TestCheckCIGate_MergedPR_ClearsGate(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "sha-merged", Merged: true, State: "closed"}, nil
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	settle := PRSettleResult{
+		Status: PRMergeTerminal,
+		PR:     &gh.PRDetails{Number: 5, HeadSHA: "sha-merged", Merged: true, State: "closed"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure || timedOut {
 		t.Errorf("expected (false,false,false) for merged PR, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
 	}
@@ -633,17 +600,17 @@ func TestCheckCIGate_MergedPR_ClearsGate(t *testing.T) {
 // fabrik:awaiting-input and removes fabrik:awaiting-ci. stage:X:complete must
 // NOT be added.
 func TestCheckCIGate_ClosedNotMergedPR_Pauses(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "sha-closed", Merged: false, State: "closed"}, nil
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	settle := PRSettleResult{
+		Status: PRMergeTerminal,
+		PR:     &gh.PRDetails{Number: 5, HeadSHA: "sha-closed", Merged: false, State: "closed"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure || timedOut {
 		t.Errorf("expected (false,false,false) for closed-not-merged PR, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
 	}
@@ -683,15 +650,6 @@ func TestCheckCIGate_ClosedNotMergedPR_Pauses(t *testing.T) {
 // spurious R3 pauses on first push before checks have registered.
 func TestCheckCIGate_OpenBlockedNoChecks_DwellNotElapsed_StaysBlocked(t *testing.T) {
 	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "sha-blocked", Merged: false, State: "open"}, nil
-		},
-		fetchPRMergeableStateFn: func(owner, repo string, prNumber int) (string, error) {
-			return "blocked", nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return nil, nil
-		},
 		fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
 			return time.Now().Add(-1 * time.Minute), nil // well within the 30-min default timeout
 		},
@@ -701,7 +659,13 @@ func TestCheckCIGate_OpenBlockedNoChecks_DwellNotElapsed_StaysBlocked(t *testing
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	// mergeable_state="blocked" + no check runs: settle returns Unsettled with MergeableState="blocked"
+	settle := PRSettleResult{
+		Status:         PRMergeUnsettled,
+		MergeableState: "blocked",
+		PR:             &gh.PRDetails{Number: 5, HeadSHA: "sha-blocked", Merged: false, State: "open"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked {
 		t.Error("expected blocked=true when OPEN+BLOCKED with no check runs and dwell not elapsed (R3 false-positive guard)")
 	}
@@ -721,15 +685,6 @@ func TestCheckCIGate_OpenBlockedNoChecks_DwellNotElapsed_StaysBlocked(t *testing
 // "required check never runs on PR" message.
 func TestCheckCIGate_OpenBlockedNoChecks_DwellElapsed_Pauses(t *testing.T) {
 	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "sha-blocked-old", Merged: false, State: "open"}, nil
-		},
-		fetchPRMergeableStateFn: func(owner, repo string, prNumber int) (string, error) {
-			return "blocked", nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return nil, nil
-		},
 		fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
 			return time.Now().Add(-2 * time.Hour), nil // well past the 30-min default timeout
 		},
@@ -740,7 +695,12 @@ func TestCheckCIGate_OpenBlockedNoChecks_DwellElapsed_Pauses(t *testing.T) {
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	settle := PRSettleResult{
+		Status:         PRMergeUnsettled,
+		MergeableState: "blocked",
+		PR:             &gh.PRDetails{Number: 5, HeadSHA: "sha-blocked-old", Merged: false, State: "open"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure || timedOut {
 		t.Errorf("expected (false,false,false) for R3 dwell-elapsed pause, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
 	}
@@ -785,25 +745,20 @@ func TestCheckCIGate_OpenBlockedNoChecks_DwellElapsed_Pauses(t *testing.T) {
 // must treat this as a post-push registration delay and return (true, false, false)
 // without triggering R3's "required check never runs" pause.
 func TestCheckCIGate_OpenBlockedNoChecks_HadChecks_Waits(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "sha-blocked-hadchecks", Merged: false, State: "open"}, nil
-		},
-		fetchPRMergeableStateFn: func(owner, repo string, prNumber int) (string, error) {
-			return "blocked", nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return nil, nil
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
-	// Pre-seed: this issue has previously had check runs registered.
-	eng.store.Apply(itemstate.PRChecksObserved{Repo: "owner/repo", Number: 1})
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	// hadChecks=true: settle returns "post-push registration delay (hadChecks)"
+	// with empty MergeableState so R3 path does not fire.
+	settle := PRSettleResult{
+		Status: PRMergeUnsettled,
+		Reason: "post-push registration delay (hadChecks)",
+		PR:     &gh.PRDetails{Number: 5, HeadSHA: "sha-blocked-hadchecks", Merged: false, State: "open"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked {
 		t.Error("expected blocked=true when OPEN+BLOCKED with no check runs but hadChecks=true (R5 preserved)")
 	}
@@ -821,20 +776,18 @@ func TestCheckCIGate_OpenBlockedNoChecks_HadChecks_Waits(t *testing.T) {
 // TestCheckCIGate_FetchCheckRunsError_BlocksGate verifies that a transient
 // FetchCheckRuns API error returns blocked=true rather than clearing the gate.
 func TestCheckCIGate_FetchCheckRunsError_BlocksGate(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "sha1"}, nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return nil, fmt.Errorf("GitHub API 503")
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	settle := PRSettleResult{
+		Status: PRMergeUnsettled,
+		Reason: "FetchCheckRuns error: GitHub API 503",
+		PR:     &gh.PRDetails{Number: 5, HeadSHA: "sha1"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked {
 		t.Error("expected blocked=true when FetchCheckRuns returns an error")
 	}
@@ -849,7 +802,7 @@ func TestBuildCIFixComment_SyntheticHasDatabaseIDZero(t *testing.T) {
 	item := gh.ProjectItem{Number: 42}
 	stage := &stages.Stage{Name: "Validate"}
 
-	comment := eng.buildCIFixComment(item, stage, "/tmp")
+	comment := eng.buildCIFixComment(item, stage, "/tmp", PRSettleResult{})
 	if comment.DatabaseID != 0 {
 		t.Errorf("DatabaseID = %d, want 0 (synthetic)", comment.DatabaseID)
 	}
@@ -866,16 +819,6 @@ func TestBuildCIFixComment_SyntheticHasDatabaseIDZero(t *testing.T) {
 func TestCheckCIGate_MergeableStateClean_ClearsGate(t *testing.T) {
 	addCalls := []string{}
 	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "shaA"}, nil
-		},
-		fetchPRMergeableStateFn: func(owner, repo string, prNumber int) (string, error) {
-			return "clean", nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			t.Error("FetchCheckRuns must NOT be called when mergeable_state=clean")
-			return nil, nil
-		},
 		addLabelToIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
 			addCalls = append(addCalls, labelName)
 			return nil
@@ -886,7 +829,13 @@ func TestCheckCIGate_MergeableStateClean_ClearsGate(t *testing.T) {
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	// mergeable_state=clean → PRMergeReady shortcut (no FetchCheckRuns needed)
+	settle := PRSettleResult{
+		Status:         PRMergeReady,
+		MergeableState: "clean",
+		PR:             &gh.PRDetails{Number: 5, HeadSHA: "shaA"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure || timedOut {
 		t.Errorf("expected gate clear, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
 	}
@@ -906,24 +855,19 @@ func TestCheckCIGate_MergeableStateClean_ClearsGate(t *testing.T) {
 // mergeable_state=unstable (non-required checks failing) also clears the gate.
 // This is the "Cleanup artifacts failed but PR is otherwise mergeable" case.
 func TestCheckCIGate_MergeableStateUnstable_ClearsGate(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "shaB"}, nil
-		},
-		fetchPRMergeableStateFn: func(owner, repo string, prNumber int) (string, error) {
-			return "unstable", nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			t.Error("FetchCheckRuns must NOT be called when mergeable_state=unstable")
-			return nil, nil
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	// mergeable_state=unstable → PRMergeReady shortcut
+	settle := PRSettleResult{
+		Status:         PRMergeReady,
+		MergeableState: "unstable",
+		PR:             &gh.PRDetails{Number: 5, HeadSHA: "shaB"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure || timedOut {
 		t.Errorf("expected gate clear for unstable, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
 	}
@@ -934,28 +878,20 @@ func TestCheckCIGate_MergeableStateUnstable_ClearsGate(t *testing.T) {
 // classification runs to distinguish failure vs pending and apply the right
 // label/dispatch.
 func TestCheckCIGate_MergeableStateBlocked_FallsThroughToCheckRuns(t *testing.T) {
-	checkRunsCalled := false
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "shaC"}, nil
-		},
-		fetchPRMergeableStateFn: func(owner, repo string, prNumber int) (string, error) {
-			return "blocked", nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			checkRunsCalled = true
-			return []gh.CheckRun{{Name: "ci", Status: "in_progress"}}, nil
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, _ := eng.checkCIGate(nil, item, stage)
-	if !checkRunsCalled {
-		t.Error("FetchCheckRuns must be called when mergeable_state=blocked (fall through)")
+	// mergeable_state=blocked + pending check runs → PRMergeUnsettled with CheckRuns
+	settle := PRSettleResult{
+		Status:         PRMergeUnsettled,
+		MergeableState: "blocked",
+		CheckRuns:      []gh.CheckRun{{Name: "ci", Status: "in_progress"}},
+		PR:             &gh.PRDetails{Number: 5, HeadSHA: "shaC"},
 	}
+	blocked, ciFailure, _ := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked || ciFailure {
 		t.Errorf("expected blocked-pending for mergeable_state=blocked + in_progress checks, got blocked=%v ciFailure=%v", blocked, ciFailure)
 	}
@@ -968,18 +904,18 @@ func TestCheckCIGate_MergeableStateBlocked_FallsThroughToCheckRuns(t *testing.T)
 // mechanism. After the fix, a non-nil PR with an empty HeadSHA is treated as
 // "data incomplete — block until SHA is populated" rather than "no PR — gate clears."
 func TestCheckCIGate_EmptyHeadSHA_StaysBlocked(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			// Simulate the stale-cache scenario: PR is known but HeadSHA is empty.
-			return &gh.PRDetails{Number: 5, Title: "My PR", HeadSHA: ""}, nil
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	settle := PRSettleResult{
+		Status: PRMergeUnsettled,
+		Reason: "HeadSHA empty",
+		PR:     &gh.PRDetails{Number: 5, HeadSHA: ""},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked {
 		t.Error("expected blocked=true when PR exists but HeadSHA is empty")
 	}
@@ -1057,23 +993,18 @@ func TestRemoveAwaitingCILabel_ErrNotFound(t *testing.T) {
 // stage:Validate:complete. The "behind" state signals that branch protection is
 // blocking via a signal Fabrik cannot see via check_runs (e.g. up-to-date policy).
 func TestCheckCIGate_BehindNoChecks_Blocks(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "sha-behind", Merged: false, State: "open"}, nil
-		},
-		fetchPRMergeableStateFn: func(owner, repo string, prNumber int) (string, error) {
-			return "behind", nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return nil, nil
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	settle := PRSettleResult{
+		Status:         PRMergeUnsettled,
+		MergeableState: "behind",
+		PR:             &gh.PRDetails{Number: 5, HeadSHA: "sha-behind", Merged: false, State: "open"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked {
 		t.Error("expected blocked=true when mergeable_state=behind with no check_runs and hadChecks=false (new guard)")
 	}
@@ -1093,23 +1024,18 @@ func TestCheckCIGate_BehindNoChecks_Blocks(t *testing.T) {
 // stage:Validate:complete. The "dirty" state signals that branch protection is
 // blocking due to a merge conflict — a signal Fabrik cannot see via check_runs.
 func TestCheckCIGate_DirtyNoChecks_Blocks(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "sha-dirty", Merged: false, State: "open"}, nil
-		},
-		fetchPRMergeableStateFn: func(owner, repo string, prNumber int) (string, error) {
-			return "dirty", nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return nil, nil
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
 	tr := true
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	settle := PRSettleResult{
+		Status:         PRMergeUnsettled,
+		MergeableState: "dirty",
+		PR:             &gh.PRDetails{Number: 5, HeadSHA: "sha-dirty", Merged: false, State: "open"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked {
 		t.Error("expected blocked=true when mergeable_state=dirty with no check_runs and hadChecks=false (new guard)")
 	}
@@ -1130,15 +1056,6 @@ func TestCheckCIGate_DirtyNoChecks_Blocks(t *testing.T) {
 // signal Fabrik cannot see via check_runs.
 func TestCheckCIGate_BehindNoChecks_TimeoutElapsed_TimesOut(t *testing.T) {
 	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "sha-behind-timeout", Merged: false, State: "open"}, nil
-		},
-		fetchPRMergeableStateFn: func(owner, repo string, prNumber int) (string, error) {
-			return "behind", nil
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return nil, nil
-		},
 		fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
 			return time.Now().Add(-2 * time.Hour), nil // well past the 30-min default timeout
 		},
@@ -1149,7 +1066,12 @@ func TestCheckCIGate_BehindNoChecks_TimeoutElapsed_TimesOut(t *testing.T) {
 	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	settle := PRSettleResult{
+		Status:         PRMergeUnsettled,
+		MergeableState: "behind",
+		PR:             &gh.PRDetails{Number: 5, HeadSHA: "sha-behind-timeout", Merged: false, State: "open"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure {
 		t.Errorf("expected blocked=false ciFailure=false for timed-out new guard, got blocked=%v ciFailure=%v", blocked, ciFailure)
 	}
@@ -1178,30 +1100,20 @@ func TestCheckCIGate_BehindNoChecks_TimeoutElapsed_TimesOut(t *testing.T) {
 // mergeable_state="" + check_runs=[] + hadChecks=false + LastHeadSHAUpdate
 // within dwell → gate must NOT clear (returns true, false, false).
 func TestCheckCIGate_PostPushDwell_WithinDwell_Blocks(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "sha-fresh", State: "open"}, nil
-		},
-		// fetchPRMergeableStateFn not set → returns ("", nil) — GitHub cache miss
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return nil, nil // no check runs yet for new SHA
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
-	// Seed the prior SHA so the transition to "sha-fresh" is from a non-empty
-	// value — matching real engine behavior (PRHeadSHAUpdated only stamps
-	// LastHeadSHAUpdate when HeadSHA is non-empty, to avoid cold-start false triggers).
-	eng.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 1, SHA: "sha-initial"})
-	// Simulate a force-push: apply PRHeadSHAUpdated to set LastHeadSHAUpdate.
-	eng.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 1, SHA: "sha-fresh"})
-	// Large dwell so the window has not elapsed.
-	eng.cfg.PostPushDwell = 30 * time.Second
 
 	tr := true
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	// Post-push dwell active: settlePRMergeState returns Unsettled with "post-push dwell active"
+	settle := PRSettleResult{
+		Status: PRMergeUnsettled,
+		Reason: "post-push dwell active",
+		PR:     &gh.PRDetails{Number: 5, HeadSHA: "sha-fresh", State: "open"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked {
 		t.Error("SC-1: expected blocked=true when check_runs=[] and LastHeadSHAUpdate is within PostPushDwell")
 	}
@@ -1219,32 +1131,20 @@ func TestCheckCIGate_PostPushDwell_WithinDwell_Blocks(t *testing.T) {
 // mergeable_state="unknown" + check_runs=[] + hadChecks=false + dwell elapsed
 // → gate clears as "no CI configured" (existing fallthrough preserved).
 func TestCheckCIGate_PostPushDwell_DwellElapsed_Clears(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "sha-old", State: "open"}, nil
-		},
-		fetchPRMergeableStateFn: func(owner, repo string, prNumber int) (string, error) {
-			return "unknown", nil // GitHub still computing
-		},
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return nil, nil
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
-	// Seed the prior SHA first so the transition to "sha-old" stamps LastHeadSHAUpdate.
-	eng.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 1, SHA: "sha-initial"})
-	// Apply PRHeadSHAUpdated to set LastHeadSHAUpdate.
-	eng.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 1, SHA: "sha-old"})
-	// Use a sub-millisecond dwell and sleep briefly to guarantee it elapses even
-	// on low-resolution clocks (e.g. Windows virtualised CI runners).
-	eng.cfg.PostPushDwell = 1 * time.Nanosecond
-	time.Sleep(20 * time.Millisecond)
 
 	tr := true
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	// Dwell elapsed: settlePRMergeState returns Ready with "no CI configured"
+	settle := PRSettleResult{
+		Status: PRMergeReady,
+		Reason: "no CI configured",
+		PR:     &gh.PRDetails{Number: 5, HeadSHA: "sha-old", State: "open"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure || timedOut {
 		t.Errorf("SC-2: expected gate to clear (false,false,false) when dwell elapsed, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
 	}
@@ -1263,24 +1163,20 @@ func TestCheckCIGate_PostPushDwell_DwellElapsed_Clears(t *testing.T) {
 // mergeable_state="" + LastHeadSHAUpdate zero (PRHeadSHAUpdated never fired)
 // → gate clears (cold-start / post-restart behavior preserved).
 func TestCheckCIGate_PostPushDwell_ZeroTimestamp_Clears(t *testing.T) {
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 5, HeadSHA: "sha-cold", State: "open"}, nil
-		},
-		// fetchPRMergeableStateFn not set → returns ("", nil)
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return nil, nil
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
-	// Do NOT apply PRHeadSHAUpdated — LastHeadSHAUpdate stays zero.
-	eng.cfg.PostPushDwell = 30 * time.Second // large dwell, but guard must be inactive
 
 	tr := true
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	// Zero timestamp: settlePRMergeState returns Ready with "no CI configured"
+	settle := PRSettleResult{
+		Status: PRMergeReady,
+		Reason: "no CI configured",
+		PR:     &gh.PRDetails{Number: 5, HeadSHA: "sha-cold", State: "open"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if blocked || ciFailure || timedOut {
 		t.Errorf("SC-3: expected gate to clear (false,false,false) when LastHeadSHAUpdate is zero, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
 	}
@@ -1291,15 +1187,7 @@ func TestCheckCIGate_PostPushDwell_ZeroTimestamp_Clears(t *testing.T) {
 // immediately by checkCIGate — gate must not clear within the dwell window.
 func TestCheckCIGate_PostPushDwell_Integration(t *testing.T) {
 	const newSHA = "sha-force-pushed"
-	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 7, HeadSHA: newSHA, State: "open"}, nil
-		},
-		// mergeable_state="" (GitHub hasn't computed mergeability for the new SHA yet)
-		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
-			return nil, nil // CI hasn't started yet
-		},
-	}
+	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)
 	eng.cfg.PostPushDwell = 30 * time.Second
 
@@ -1309,11 +1197,17 @@ func TestCheckCIGate_PostPushDwell_Integration(t *testing.T) {
 	eng.store.Apply(itemstate.PRHeadSHAUpdated{Repo: "owner/repo", Number: 1, SHA: newSHA})
 
 	// checkCIGate runs immediately (catch-up loop cadence), well within the dwell.
+	// The settle result reflects what settlePRMergeState would return: dwell active.
 	tr := true
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
 
-	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage)
+	settle := PRSettleResult{
+		Status: PRMergeUnsettled,
+		Reason: "post-push dwell active",
+		PR:     &gh.PRDetails{Number: 7, HeadSHA: newSHA, State: "open"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
 	if !blocked {
 		t.Error("SC-4: gate must not clear immediately after PRHeadSHAUpdated while within PostPushDwell")
 	}

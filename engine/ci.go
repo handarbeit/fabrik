@@ -13,265 +13,192 @@ import (
 	"github.com/handarbeit/fabrik/stages"
 )
 
-// checkCIGate inspects CI check runs for the linked PR to determine whether the
+// checkCIGate interprets the pre-fetched settle result to determine whether the
 // CI gate is blocking stage advancement or merge.
 //
-// The gate is only active when stage.WaitForCI is true. It fetches the PR's
-// head SHA via FetchLinkedPR (REST), then fetches check runs via FetchCheckRuns.
+// The gate is only active when stage.WaitForCI is true. All PR state (mergeable
+// fields, check runs) is consumed from the settle parameter — no additional
+// GitHub API calls are made by this function.
 //
 // Returns (blocked, ciFailure, timedOut):
 //
 //   - (false, false, false) — gate cleared; stage:X:complete added, fabrik:awaiting-ci removed.
-//     This includes: no PR found, no check runs when prHasHadChecks is false (R5 — no CI configured), all checks green.
+//     This includes: no PR, PR merged, all checks green, ADR-033 shortcut (clean/unstable).
 //
 //   - (true, false, false)  — gate blocked but no confirmed failure; re-evaluate on next poll.
-//     Covers: checks still pending (in_progress/queued) and not yet timed out;
-//     transient API errors (FetchLinkedPR or FetchCheckRuns fail);
-//     and post-push registration delay — no check runs for new SHA but prHasHadChecks is true (R5).
+//     Covers: checks still pending, transient/unsettled state, R3 dwell not elapsed.
 //     fabrik:awaiting-ci is NOT modified.
 //
 //   - (true, true, false)   — CI failed; fabrik:awaiting-ci applied; caller should dispatch CI-fix.
 //
 //   - (false, false, true)  — CI wait timeout elapsed; caller should pause the issue.
 //     fabrik:awaiting-ci is removed before returning.
-func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) (blocked, ciFailure, timedOut bool) {
+func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, settle PRSettleResult) (blocked, ciFailure, timedOut bool) {
 	if stage.WaitForCI == nil || !*stage.WaitForCI {
 		return false, false, false
 	}
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
+	pr := settle.PR
 
-	pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number)
-	if err != nil {
-		e.logf(item.Number, "ci-gate", "could not fetch linked PR: %v — blocking until API recovers\n", err)
-		return true, false, false // transient error; retry on next poll
+	prNum := 0
+	if pr != nil {
+		prNum = pr.Number
 	}
-	if pr == nil {
+
+	switch settle.Status {
+	case PRMergeNoPR:
 		e.logf(item.Number, "ci-gate", "no linked PR found; CI gate clears (no PR to check)\n")
 		e.addCompleteLabelAndRemoveCI(owner, repo, item, stage)
 		return false, false, false
-	}
-	if pr.HeadSHA == "" {
-		// PR exists but HeadSHA is not yet populated in the cache (transient state
-		// between PRDetailsUpdated and PRHeadSHAUpdated, or a stale cache record that
-		// Fix C in boardcache.FetchLinkedPR should prevent). Block until SHA is
-		// available rather than silently disarming the CI gate.
-		e.logf(item.Number, "ci-gate", "linked PR #%d has no HeadSHA — blocking until SHA is populated\n", pr.Number)
+
+	case PRMergeTerminal:
+		// R1: merged; R2: closed without merging.
+		if pr != nil && pr.Merged {
+			e.logf(item.Number, "ci-gate", "linked PR #%d is merged — CI gate clears; advancing to Done\n", prNum)
+			e.addCompleteLabelAndRemoveCI(owner, repo, item, stage)
+		} else {
+			e.logf(item.Number, "ci-gate", "linked PR #%d closed without merging — pausing\n", prNum)
+			e.pauseForPRClosedNotMerged(board, item, stage, prNum)
+		}
+		return false, false, false
+
+	case PRMergeReady:
+		// ADR-033 shortcut (clean/unstable) or all CI checks green — gate clears.
+		e.logf(item.Number, "ci-gate", "CI gate clears (%s)\n", settle.Reason)
+		e.addCompleteLabelAndRemoveCI(owner, repo, item, stage)
+		return false, false, false
+
+	case PRMergeConflicting:
+		// Merge gate already applied fabrik:rebase-needed; CI gate just blocks.
 		return true, false, false
 	}
 
-	// R1: PR merged externally while Fabrik was waiting — CI gate clears and the
-	// issue advances to Done. Mirrors checkAutoMergeConvergence's merged-PR detection.
-	if pr.Merged {
-		e.logf(item.Number, "ci-gate", "linked PR #%d is merged — CI gate clears; advancing to Done\n", pr.Number)
-		e.addCompleteLabelAndRemoveCI(owner, repo, item, stage)
-		return false, false, false
-	}
-	// R2: PR closed without merging — pause with a clear actionable message so the
-	// human knows what happened. fabrik:awaiting-ci is removed (no longer relevant).
-	if pr.State == "closed" {
-		e.logf(item.Number, "ci-gate", "linked PR #%d closed without merging — pausing\n", pr.Number)
-		e.pauseForPRClosedNotMerged(board, item, stage, pr.Number)
-		return false, false, false
-	}
-
-	// Trust GitHub's branch-protection-aware mergeable_state when positive:
-	// "clean" = ready to merge per branch protection; "unstable" = non-required
-	// checks failing but still mergeable. Skip the raw check_runs gate in
-	// those cases — that gate is over-aggressive (any check_run conclusion
-	// in {failure, timed_out, action_required} blocks, including non-required
-	// workflow jobs like "Cleanup artifacts" that GitHub itself does not treat
-	// as merge blockers). Falls through to per-check classification when
-	// mergeable_state is empty/unknown/blocked/etc.
-	//
-	// mergeableState is declared in outer scope so the R3 branch (len(checkRuns)==0
-	// + BLOCKED + !hadChecks) can discriminate without re-fetching.
-	var mergeableState string
-	if ms, msErr := e.readClient.FetchPRMergeableState(owner, repo, pr.Number); msErr != nil {
-		e.logf(item.Number, "warn", "could not fetch mergeable_state: %v — falling back to check-runs gate\n", msErr)
-	} else {
-		mergeableState = ms
-		if gh.MergeableStateAccepted(ms) {
-			e.logf(item.Number, "ci-gate", "mergeable_state=%q — gate clears (skipping check_runs classification)\n", ms)
-			e.addCompleteLabelAndRemoveCI(owner, repo, item, stage)
-			return false, false, false
-		}
-	}
-
-	checkRuns, err := e.readClient.FetchCheckRuns(owner, repo, pr.HeadSHA)
-	if err != nil {
-		e.logf(item.Number, "ci-gate", "could not fetch check runs: %v — blocking until API recovers\n", err)
-		return true, false, false // transient error; retry on next poll
-	}
+	// PRMergeUnsettled or PRMergeBlocked: detailed classification using settle.CheckRuns
+	// and settle.MergeableState.
+	checkRuns := settle.CheckRuns
+	mergeableState := settle.MergeableState
 
 	if len(checkRuns) > 0 {
-		e.store.Apply(itemstate.PRChecksObserved{
-			Repo:   itemRepo,
-			Number: item.Number,
-		})
-	}
-
-	// R5: no check runs found. If this PR has had checks before, we're likely in
-	// the post-push registration window — block and wait rather than clearing.
-	if len(checkRuns) == 0 {
-		var hadChecks bool
-		var lpr *itemstate.LinkedPRState
-		if snap, snapErr := e.store.Get(itemRepo, item.Number); snapErr == nil {
-			lpr = snap.LinkedPR()
-			if lpr != nil {
-				hadChecks = lpr.HasHadChecks
+		// Check runs are available: classify pending vs failed, then apply R7 timeout.
+		var pending, failed []gh.CheckRun
+		for _, cr := range checkRuns {
+			switch cr.Status {
+			case "queued", "in_progress":
+				pending = append(pending, cr)
+			case "completed":
+				switch cr.Conclusion {
+				case "failure", "timed_out", "action_required":
+					failed = append(failed, cr)
+				}
 			}
 		}
-		if hadChecks {
-			e.logf(item.Number, "ci-gate", "no check runs for SHA %s — likely post-push registration delay; waiting\n", pr.HeadSHA[:min(8, len(pr.HeadSHA))])
-			return true, false, false
-		}
-		// R3: OPEN + BLOCKED + no check runs ever observed — a required check is
-		// configured but never triggered by PR events (e.g. converted to
-		// workflow_dispatch while still required by branch protection). Use the
-		// CIWaitTimeout dwell as a false-positive guard: on first PR push, checks
-		// may not have registered yet even though hadChecks is false. Only after the
-		// full timeout window do we treat this as "never-running" and pause distinctly.
-		if mergeableState == "blocked" {
+
+		// R7: CIWaitTimeout applies to the full CI-await window — both pending and
+		// failed checks. Under ADR-032, fabrik:awaiting-ci is present from the moment
+		// handleStageComplete fires, so timeout tracking covers "checks still running"
+		// as well as "checks failed".
+		if hasLabel(item, "fabrik:awaiting-ci") {
 			timeout := e.cfg.CIWaitTimeout
 			if timeout <= 0 {
 				timeout = 30 * time.Minute
 			}
-			if hasLabel(item, "fabrik:awaiting-ci") {
-				appliedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:awaiting-ci")
-				if err != nil {
-					e.logf(item.Number, "warn", "R3: could not fetch awaiting-ci label timestamp: %v\n", err)
-				} else if !appliedAt.IsZero() && time.Since(appliedAt) >= timeout {
-					e.logf(item.Number, "ci-gate", "R3: PR #%d OPEN+BLOCKED with no check runs ever — required check likely never triggers on PRs; pausing\n", pr.Number)
-					e.pauseForRequiredNeverRunningCheck(board, item, stage, pr.Number)
-					return false, false, false
+			appliedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:awaiting-ci")
+			if err != nil {
+				e.logf(item.Number, "warn", "could not fetch awaiting-ci label timestamp: %v\n", err)
+			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= timeout {
+				allNames := make([]string, 0, len(pending)+len(failed))
+				for _, cr := range pending {
+					allNames = append(allNames, cr.Name+" (pending)")
 				}
+				for _, cr := range failed {
+					allNames = append(allNames, fmt.Sprintf("%s (%s)", cr.Name, cr.Conclusion))
+				}
+				e.logf(item.Number, "warn", "CI wait timeout elapsed; pausing issue — checks: %s\n", strings.Join(allNames, ", "))
+				e.removeAwaitingCILabel(owner, repo, item)
+				return false, false, true
 			}
-			e.logf(item.Number, "ci-gate", "R3: PR #%d OPEN+BLOCKED with no check runs — dwell not yet elapsed; waiting\n", pr.Number)
+		}
+
+		if len(failed) == 0 {
+			// Checks still running.
+			names := make([]string, 0, len(pending))
+			for _, cr := range pending {
+				names = append(names, cr.Name)
+			}
+			e.logf(item.Number, "ci-gate", "CI still running — pending: %s\n", strings.Join(names, ", "))
 			return true, false, false
 		}
-		// New guard: any actively-blocking mergeable_state that is not "" (API error
-		// fallback, per EC-2) and not "unknown" (GitHub not yet computed, per EC-1)
-		// signals that branch protection is blocking the merge via a signal Fabrik
-		// cannot see via check_runs (e.g. a Commit Status / legacy Statuses API).
-		// Block and re-evaluate on next poll; fall through to CIWaitTimeout escalation
-		// inline so that perpetually-blocking states eventually pause the issue.
-		if mergeableState != "" && mergeableState != "unknown" {
-			timeout := e.cfg.CIWaitTimeout
-			if timeout <= 0 {
-				timeout = 30 * time.Minute
-			}
-			if hasLabel(item, "fabrik:awaiting-ci") {
-				appliedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:awaiting-ci")
-				if err != nil {
-					e.logf(item.Number, "warn", "could not fetch awaiting-ci label timestamp: %v\n", err)
-				} else if !appliedAt.IsZero() && time.Since(appliedAt) >= timeout {
-					e.logf(item.Number, "warn", "CI wait timeout elapsed for mergeable_state=%q with no check_runs — pausing issue\n", mergeableState)
-					e.removeAwaitingCILabel(owner, repo, item)
-					return false, false, true
-				}
-			}
-			e.logf(item.Number, "ci-gate", "mergeable_state=%q blocks merge but no check_runs visible — branch protection likely requires a Commit Status or external signal; blocking\n", mergeableState)
-			return true, false, false
+
+		// CI failed — apply fabrik:awaiting-ci idempotently.
+		failedNames := make([]string, 0, len(failed))
+		for _, cr := range failed {
+			failedNames = append(failedNames, fmt.Sprintf("%s (%s)", cr.Name, cr.Conclusion))
 		}
-		// Post-push dwell guard: when mergeable_state is "" or "unknown" and
-		// check_runs is empty, GitHub may not have computed mergeability or started
-		// CI yet for a recently-pushed SHA. Block the gate-clear until the dwell
-		// window has elapsed. Zero LastHeadSHAUpdate (cold start / pre-restart)
-		// falls through to preserve existing behavior (EC-1).
-		if lpr != nil && !lpr.LastHeadSHAUpdate.IsZero() {
-			dwell := e.cfg.PostPushDwell
-			if dwell <= 0 {
-				dwell = 90 * time.Second
-			}
-			if elapsed := time.Since(lpr.LastHeadSHAUpdate); elapsed < dwell {
-				e.logf(item.Number, "ci-gate", "no check runs for SHA %s — post-push dwell window active (%.0fs remaining); waiting\n",
-					pr.HeadSHA[:min(8, len(pr.HeadSHA))],
-					(dwell - elapsed).Seconds())
-				return true, false, false
+		e.logf(item.Number, "ci-gate", "CI check(s) failed: %s\n", strings.Join(failedNames, ", "))
+
+		if !hasLabel(item, "fabrik:awaiting-ci") {
+			if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-ci"); err != nil {
+				e.logf(item.Number, "warn", "could not add fabrik:awaiting-ci label: %v\n", err)
+			} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-ci")
 			}
 		}
-		e.logf(item.Number, "ci-gate", "no check runs found for SHA %s; CI gate clears (no CI configured)\n", pr.HeadSHA[:min(8, len(pr.HeadSHA))])
-		e.addCompleteLabelAndRemoveCI(owner, repo, item, stage)
-		return false, false, false
+
+		return true, true, false
 	}
 
-	// Classify check runs.
-	var pending, failed []gh.CheckRun
-	for _, cr := range checkRuns {
-		switch cr.Status {
-		case "queued", "in_progress":
-			pending = append(pending, cr)
-		case "completed":
-			switch cr.Conclusion {
-			case "failure", "timed_out", "action_required":
-				failed = append(failed, cr)
-			}
-		}
-	}
+	// No check runs. Use settle.MergeableState to discriminate R3 and
+	// branch-protection signals. settle.MergeableState is intentionally empty
+	// for hadChecks/dwell/HeadSHA-empty cases so those always reach the generic
+	// Unsettled fallback below without triggering R3 or timeout paths.
 
-	// All checks green (no pending, no failed) — gate clears.
-	if len(pending) == 0 && len(failed) == 0 {
-		e.logf(item.Number, "ci-gate", "all CI checks passed for SHA %s\n", pr.HeadSHA[:min(8, len(pr.HeadSHA))])
-		e.addCompleteLabelAndRemoveCI(owner, repo, item, stage)
-		return false, false, false
-	}
-
-	// CIWaitTimeout applies to the full CI-await window — both pending and failed
-	// checks (R7). Under ADR 032, fabrik:awaiting-ci is present from the moment
-	// handleStageComplete fires, so timeout tracking covers "checks still running"
-	// as well as "checks failed". Without this, CI stuck in queued/in_progress
-	// indefinitely would never time out and pause the issue.
-	if hasLabel(item, "fabrik:awaiting-ci") {
+	if mergeableState == "blocked" {
+		// R3: OPEN+BLOCKED+no check runs ever observed — a required check is
+		// configured but never triggered by PR events. Use CIWaitTimeout as a
+		// false-positive guard.
 		timeout := e.cfg.CIWaitTimeout
 		if timeout <= 0 {
 			timeout = 30 * time.Minute
 		}
-		appliedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:awaiting-ci")
-		if err != nil {
-			e.logf(item.Number, "warn", "could not fetch awaiting-ci label timestamp: %v\n", err)
-		} else if !appliedAt.IsZero() && time.Since(appliedAt) >= timeout {
-			allNames := make([]string, 0, len(pending)+len(failed))
-			for _, cr := range pending {
-				allNames = append(allNames, cr.Name+" (pending)")
+		if hasLabel(item, "fabrik:awaiting-ci") {
+			appliedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:awaiting-ci")
+			if err != nil {
+				e.logf(item.Number, "warn", "R3: could not fetch awaiting-ci label timestamp: %v\n", err)
+			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= timeout {
+				e.logf(item.Number, "ci-gate", "R3: PR #%d OPEN+BLOCKED with no check runs ever — required check likely never triggers on PRs; pausing\n", prNum)
+				e.pauseForRequiredNeverRunningCheck(board, item, stage, prNum)
+				return false, false, false
 			}
-			for _, cr := range failed {
-				allNames = append(allNames, fmt.Sprintf("%s (%s)", cr.Name, cr.Conclusion))
-			}
-			e.logf(item.Number, "warn", "CI wait timeout elapsed; pausing issue — checks: %s\n", strings.Join(allNames, ", "))
-			e.removeAwaitingCILabel(owner, repo, item)
-			return false, false, true
 		}
-	}
-
-	// Checks still running — gate blocked; fabrik:awaiting-ci already present
-	// from handleStageComplete.
-	if len(failed) == 0 {
-		names := make([]string, 0, len(pending))
-		for _, cr := range pending {
-			names = append(names, cr.Name)
-		}
-		e.logf(item.Number, "ci-gate", "CI still running — pending: %s\n", strings.Join(names, ", "))
+		e.logf(item.Number, "ci-gate", "R3: PR #%d OPEN+BLOCKED with no check runs — dwell not yet elapsed; waiting\n", prNum)
 		return true, false, false
 	}
 
-	// CI failed — apply fabrik:awaiting-ci idempotently and return blocked.
-	failedNames := make([]string, 0, len(failed))
-	for _, cr := range failed {
-		failedNames = append(failedNames, fmt.Sprintf("%s (%s)", cr.Name, cr.Conclusion))
-	}
-	e.logf(item.Number, "ci-gate", "CI check(s) failed: %s\n", strings.Join(failedNames, ", "))
-
-	if !hasLabel(item, "fabrik:awaiting-ci") {
-		if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-ci"); err != nil {
-			e.logf(item.Number, "warn", "could not add fabrik:awaiting-ci label: %v\n", err)
-		} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-ci")
+	if mergeableState != "" && mergeableState != "unknown" {
+		// Branch-protection blocking via a signal Fabrik cannot see via check_runs
+		// (e.g. Commit Status / legacy Statuses API). Apply CIWaitTimeout.
+		timeout := e.cfg.CIWaitTimeout
+		if timeout <= 0 {
+			timeout = 30 * time.Minute
 		}
+		if hasLabel(item, "fabrik:awaiting-ci") {
+			appliedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:awaiting-ci")
+			if err != nil {
+				e.logf(item.Number, "warn", "could not fetch awaiting-ci label timestamp: %v\n", err)
+			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= timeout {
+				e.logf(item.Number, "warn", "CI wait timeout elapsed for mergeable_state=%q with no check_runs — pausing issue\n", mergeableState)
+				e.removeAwaitingCILabel(owner, repo, item)
+				return false, false, true
+			}
+		}
+		e.logf(item.Number, "ci-gate", "mergeable_state=%q blocks merge but no check_runs visible — branch protection likely requires a Commit Status or external signal; blocking\n", mergeableState)
+		return true, false, false
 	}
 
-	return true, true, false
+	// Generic Unsettled: hadChecks/dwell/HeadSHA-empty/mergeable=nil/unknown.
+	// Block and re-evaluate on next poll.
+	return true, false, false
 }
 
 // removeAwaitingCILabel removes fabrik:awaiting-ci if present on the item.
@@ -320,21 +247,17 @@ func (e *Engine) addCompleteLabelAndRemoveCI(owner, repo string, item gh.Project
 }
 
 // buildCIFixComment constructs the synthetic comment body for a CI-fix reinvocation.
-// It fetches current PR CI status, fetches base branch CI status for comparison,
-// and formats both into a structured message Claude can use to diagnose failures.
-func (e *Engine) buildCIFixComment(item gh.ProjectItem, stage *stages.Stage, workDir string) gh.Comment {
+// It uses PR check runs from the settle result and fetches base branch CI status for
+// comparison. The base-branch fetch (different SHA) remains a direct API call.
+func (e *Engine) buildCIFixComment(item gh.ProjectItem, stage *stages.Stage, workDir string, settle PRSettleResult) gh.Comment {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
-	var prFailures, baseRuns []gh.CheckRun
+	// Use PR-head check runs already fetched by settlePRMergeState.
+	prFailures := settle.CheckRuns
+	var baseRuns []gh.CheckRun
 	var baseBranch string
 
-	// Fetch PR check runs.
-	pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number)
-	if err == nil && pr != nil && pr.HeadSHA != "" {
-		prFailures, _ = e.readClient.FetchCheckRuns(owner, repo, pr.HeadSHA)
-	}
-
-	// Fetch base branch check runs for comparison.
+	// Fetch base branch check runs for comparison (different SHA — not covered by settle).
 	wm := e.worktreesFor(item.Repo)
 	bb, err := e.baseBranchForItem(item, wm)
 	if err == nil {
@@ -418,7 +341,7 @@ func (e *Engine) buildCIFixComment(item gh.ProjectItem, stage *stages.Stage, wor
 // processComments with a synthetic CI-failure context comment. It mirrors
 // dispatchReviewReinvoke exactly: marks the item in-flight via WorkerEntered,
 // acquires semaphore, calls processComments, then releases both.
-func (e *Engine) dispatchCIFixReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
+func (e *Engine) dispatchCIFixReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, settle PRSettleResult) {
 	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
 
 	// Mark in-flight via the Store so the dispatch guard (snap.Worker() != nil) blocks
@@ -458,7 +381,7 @@ func (e *Engine) dispatchCIFixReinvoke(ctx context.Context, board *gh.ProjectBoa
 		workDir := wm.WorktreeDir(item.Number)
 
 		// Build the synthetic comment with CI failure context.
-		syntheticComment := e.buildCIFixComment(item, stage, workDir)
+		syntheticComment := e.buildCIFixComment(item, stage, workDir, settle)
 
 		// Use ci_fix_skill if configured; fall back to comment_skill.
 		ciFixStage := *stage

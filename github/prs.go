@@ -91,6 +91,23 @@ type PRDetails struct {
 	AutoMergeEnabled bool
 }
 
+// FetchPRMergeableFields fetches both the mergeable flag and mergeable_state for
+// a single PR in one REST call, eliminating the read-after-write window that
+// existed when the two fields were fetched separately by different gate functions.
+//
+// Returns (nil, "", nil) when mergeable is null (GitHub still computing).
+func (c *Client) FetchPRMergeableFields(owner, repo string, prNumber int) (mergeable *bool, mergeableState string, err error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", c.baseURL, owner, repo, prNumber)
+	var raw struct {
+		Mergeable      *bool  `json:"mergeable"`
+		MergeableState string `json:"mergeable_state"`
+	}
+	if err := c.restGetJSON(apiURL, &raw); err != nil {
+		return nil, "", fmt.Errorf("fetching PR #%d mergeable fields: %w", prNumber, err)
+	}
+	return raw.Mergeable, raw.MergeableState, nil
+}
+
 // FetchPRMergeable returns GitHub's mergeable flag for a single PR.
 //
 // The returned pointer is nil when GitHub has not yet computed mergeability
