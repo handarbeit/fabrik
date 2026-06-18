@@ -17,6 +17,7 @@ type ReadClient interface {
 	FetchItemDetails(item *gh.ProjectItem) error
 	FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, error)
 	FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDetails, error)
+	FetchPRMergeableFields(owner, repo string, prNumber int) (mergeable *bool, mergeableState string, err error)
 	FetchPRMergeable(owner, repo string, prNumber int) (*bool, error)
 	FetchPRMergeableState(owner, repo string, prNumber int) (string, error)
 	FetchLabels(owner, repo string, issueNumber int) ([]string, error)
@@ -53,6 +54,10 @@ func (a *GitHubAdapter) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, 
 
 func (a *GitHubAdapter) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
 	return a.client.FetchLinkedPR(owner, repo, issueNumber)
+}
+
+func (a *GitHubAdapter) FetchPRMergeableFields(owner, repo string, prNumber int) (*bool, string, error) {
+	return a.client.FetchPRMergeableFields(owner, repo, prNumber)
 }
 
 func (a *GitHubAdapter) FetchPRMergeable(owner, repo string, prNumber int) (*bool, error) {
@@ -771,6 +776,11 @@ func (c *CacheImpl) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDe
 		})
 	}
 	return pr, nil
+}
+
+// FetchPRMergeableFields always delegates to GitHub — mergeability changes without webhooks.
+func (c *CacheImpl) FetchPRMergeableFields(owner, repo string, prNumber int) (*bool, string, error) {
+	return c.fallback.FetchPRMergeableFields(owner, repo, prNumber)
 }
 
 // FetchPRMergeable always delegates to GitHub — mergeability changes without webhooks.
