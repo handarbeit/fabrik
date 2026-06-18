@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"context"
 	"strings"
 	"testing"
 
@@ -50,7 +49,7 @@ func TestValidate_BlockedOnInput_NonMergeableScenario(t *testing.T) {
 		ItemID: "PVTI_42",
 	}
 
-	err := eng.processItem(context.Background(), board, item)
+	err := eng.processItem(t.Context(), board, item)
 	if err != nil {
 		t.Fatalf("processItem: %v", err)
 	}
