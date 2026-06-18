@@ -177,19 +177,22 @@ Before you emit `FABRIK_STAGE_COMPLETE`, you MUST complete this checklist. Do no
 
 ### Step 1 — Final rebase verification
 
+Get the PR's actual target base branch, then rebase against it:
+
 ```bash
-git fetch origin main
-git rebase origin/main
+base_branch=$(gh pr view --json baseRefName --jq .baseRefName)
+git fetch origin "$base_branch"
+git rebase "origin/$base_branch"
 ```
 
 If the rebase succeeds cleanly, continue to Step 2.
 
 If the rebase produces conflicts:
 - Resolve them (see "Merge conflict resolution" above for guidance)
-- Run `go build ./...` and `go test ./...` to verify the resolution is correct
+- Run the project's build and test commands (as specified in `CLAUDE.md`) to verify the resolution is correct
 - If you cannot confidently resolve the conflicts, run `git rebase --abort` and emit `FABRIK_BLOCKED_ON_INPUT` with a list of the conflicting files
 
-**Why a final rebase re-run, not reflog inspection**: If you attempted and aborted a rebase earlier in this invocation, the prior abort left the branch behind `origin/main`. Re-running the rebase catches that state directly — either it succeeds (clearing the conflict) or it fails again (caught here, emit blocked). This is more reliable than parsing reflog history for abort markers.
+**Why a final rebase re-run, not reflog inspection**: If you attempted and aborted a rebase earlier in this invocation, the prior abort left the branch behind `origin/<base_branch>`. Re-running the rebase catches that state directly — either it succeeds (clearing the conflict) or it fails again (caught here, emit blocked). This is more reliable than parsing reflog history for abort markers.
 
 ### Step 2 — PR mergeability check
 
@@ -260,7 +263,7 @@ If you find major issues (wrong architecture, missing feature, design flaw):
 - The base branch CI status for comparison
 
 When you receive this comment:
-0. **Run `git fetch origin main`** — refresh local refs before comparing branch state to the base branch. The engine's CI snapshot may predate recent commits to main; comparing against a stale `origin/main` tip produces false "pre-existing" classifications.
+0. **Fetch the target base branch** — run `git fetch origin "$(gh pr view --json baseRefName --jq .baseRefName)"` to refresh local refs before comparing branch state to the base. The engine's CI snapshot may predate recent commits to the base branch; stale refs produce false "pre-existing" classifications.
 1. Run `gh run list --branch fabrik/issue-<N> --limit 5` then `gh run view <run-id> --log-failed` to inspect logs
 2. Fix only **NEW REGRESSION** failures — do not attempt to fix pre-existing base-branch failures
 3. Commit and push your fixes
