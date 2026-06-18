@@ -19,12 +19,12 @@ import (
 //
 // Returns (blocked, conflict):
 //
-//   - (false, false) — gate clears. No PR, mergeable==true, or wait_for_ci
-//     disabled. Caller falls through to the CI gate on the same poll.
+//   - (false, false) — gate clears. No PR, mergeable==true, CI failed (deferred
+//     to checkCIGate), or wait_for_ci disabled. Caller falls through to the CI gate.
 //
 //   - (true, false)  — blocked but no confirmed conflict. GitHub has not yet
-//     computed mergeability (Unsettled), or the PR is already blocked by CI.
-//     The fabrik:rebase-needed label is not touched.
+//     computed mergeability (PRMergeUnsettled). The fabrik:rebase-needed label
+//     is not touched.
 //
 //   - (true, true)   — confirmed conflict. fabrik:rebase-needed applied
 //     (idempotent). Caller should dispatch a rebase reinvoke.
@@ -38,8 +38,13 @@ func (e *Engine) checkMergeabilityGate(item gh.ProjectItem, stage *stages.Stage,
 	switch settle.Status {
 	case PRMergeNoPR, PRMergeTerminal:
 		return false, false
-	case PRMergeUnsettled, PRMergeBlocked:
+	case PRMergeUnsettled:
 		return true, false
+	case PRMergeBlocked:
+		// CI has failed but there is no base-branch conflict. Clear the merge
+		// gate so checkCIGate can classify the failure and dispatch CI-fix.
+		e.removeRebaseNeededLabel(owner, repo, item)
+		return false, false
 	case PRMergeReady:
 		// Clear a stale label if one is present from an earlier conflict that
 		// has since been resolved.

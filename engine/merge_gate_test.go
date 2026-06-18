@@ -127,6 +127,61 @@ func TestCheckMergeabilityGate_FalseMergeable_LabelIdempotent(t *testing.T) {
 	}
 }
 
+func TestCheckMergeabilityGate_CIFailed_ClearsGate(t *testing.T) {
+	// PRMergeBlocked (CI failed) must NOT block the merge gate — it must clear so
+	// checkCIGate can classify the failure and dispatch the CI-fix reinvoke. If the
+	// merge gate returned (true, false) here, poll.go would skip the CI gate and the
+	// issue would get stuck with no CI-fix dispatch.
+	tr := true
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+	settle := PRSettleResult{
+		Status: PRMergeBlocked,
+		Reason: "CI checks failed",
+		PR:     &gh.PRDetails{Number: 42},
+		CheckRuns: []gh.CheckRun{
+			{Name: "test", Status: "completed", Conclusion: "failure"},
+		},
+	}
+
+	blocked, conflict := eng.checkMergeabilityGate(item, stage, settle)
+	if blocked || conflict {
+		t.Errorf("expected clear when PRMergeBlocked (CI failed), got blocked=%v conflict=%v", blocked, conflict)
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:rebase-needed" {
+			t.Error("should not add fabrik:rebase-needed on CI failure (no base conflict)")
+		}
+	}
+}
+
+func TestCheckMergeabilityGate_CIFailed_RemovesStaleRebaseLabel(t *testing.T) {
+	// When CI has failed (PRMergeBlocked) but a stale fabrik:rebase-needed label
+	// exists from a prior rebase cycle that was resolved, the label should be cleared.
+	tr := true
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:rebase-needed"}}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+	settle := PRSettleResult{Status: PRMergeBlocked, PR: &gh.PRDetails{Number: 42}}
+
+	blocked, conflict := eng.checkMergeabilityGate(item, stage, settle)
+	if blocked || conflict {
+		t.Errorf("expected clear for PRMergeBlocked, got blocked=%v conflict=%v", blocked, conflict)
+	}
+	found := false
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:rebase-needed" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected stale fabrik:rebase-needed label to be removed when PRMergeBlocked (CI failure, no conflict)")
+	}
+}
+
 func TestCheckMergeabilityGate_FetchPRError_BlocksForRetry(t *testing.T) {
 	tr := true
 	client := &mockGitHubClient{}
