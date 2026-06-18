@@ -55,7 +55,13 @@ func TestCIFixReinvoke(t *testing.T) {
 	// 2-minute withheld window: Validate must NOT complete while CI is failing.
 	withheldDeadline := time.Now().Add(2 * time.Minute)
 	for time.Now().Before(withheldDeadline) {
-		for _, l := range IssueLabels(t, env, env.RepoAlpha, num) {
+		labels, err := tryIssueLabels(env, env.RepoAlpha, num)
+		if err != nil {
+			t.Logf("transient error fetching labels during withheld window: %v (retrying)", err)
+			time.Sleep(15 * time.Second)
+			continue
+		}
+		for _, l := range labels {
 			if l == "stage:Validate:complete" {
 				t.Fatalf("stage:Validate:complete appeared during withheld window — CI gate did not hold on %s#%d",
 					env.RepoAlpha, num)
@@ -72,8 +78,9 @@ func TestCIFixReinvoke(t *testing.T) {
 		"🏭 **Fabrik — stage: Validate**", 10*time.Minute)
 	t.Logf("CI-fix reinvoke confirmed via second Validate PR comment on #%d", prNumber)
 
-	// Poll until all non-null CI check conclusions are "success".
+	// Poll until all CI check conclusions are "success" (pending = still running).
 	ciDeadline := time.Now().Add(20 * time.Minute)
+	ciPassed := false
 	for time.Now().Before(ciDeadline) {
 		conclusions, err := tryPRCheckRunConclusions(env, env.RepoAlpha, prNumber)
 		if err != nil {
@@ -90,10 +97,14 @@ func TestCIFixReinvoke(t *testing.T) {
 			}
 			if allSuccess {
 				t.Logf("all CI checks passed on PR #%d: %v", prNumber, conclusions)
+				ciPassed = true
 				break
 			}
 		}
 		time.Sleep(30 * time.Second)
+	}
+	if !ciPassed {
+		t.Fatalf("timed out waiting for all CI checks to pass on PR #%d", prNumber)
 	}
 
 	// Issue must close (Validate completes and yolo auto-merges the PR).
