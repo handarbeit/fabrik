@@ -24,6 +24,7 @@ KEYBOARD SHORTCUTS
 
   Active Jobs (In Progress pane)
     l          Open fabrik watch for selected issue (live output)
+    s          Stop selected job and apply fabrik:paused (confirms first)
     r          (disabled) Stage in progress — use l to watch
 
   History pane
