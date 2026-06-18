@@ -232,7 +232,7 @@ func (a ActivePaneComponent) View(width int) string {
 
 	hint := ""
 	if a.focused && len(a.active) > 0 {
-		hintPlain := "  [l] watch  [enter] details  [tab] history"
+		hintPlain := "  [l] watch  [s] stop/pause  [enter] details  [tab] history"
 		hintMax := max(maxWidth-lipgloss.Width(title), 0)
 		hintRunes := []rune(hintPlain)
 		for len(hintRunes) > 0 && lipgloss.Width(dimStyle.Render(string(hintRunes)+"…")) > hintMax {
