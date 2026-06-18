@@ -125,6 +125,10 @@ close #883/#885 here) → `#889` + `#890` (lock in structure and docs).
   regression test that introduces a synthetic third gate label to prove the #874 class is closed.
 - Until the consolidation lands, treat **any** newly-proposed recovery scanner as a regression of
   this decision. The answer to a stranded-item bug is "extend the owner," not "add loop N+1."
+- **Cruise items never enter `checkAutoMergeConvergence`** because cruise suppresses auto-merge at
+  Validate (`engine/poll.go`: `if !yoloActive { continue }`). The `fabrik:auto-merge-enabled` label
+  is therefore never applied to cruise items; the engine stops at `stage:Validate:complete` and waits
+  for a human merge. This is verified end-to-end by `TestCruiseFullPipeline` (`tests/e2e/cruise_test.go`).
 
 ## Non-goals
 
