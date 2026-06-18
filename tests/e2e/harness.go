@@ -776,3 +776,135 @@ func LinkedPRNumber(t *testing.T, env *Env, repo string, issueNumber int) int {
 	t.Fatalf("timed out waiting for linked PR on %s#%d", repo, issueNumber)
 	return 0
 }
+
+// tryPRComments returns the bodies of all comments on the given PR (using the
+// issues comments API, which covers both issues and PRs).
+func tryPRComments(env *Env, repo string, prNumber int) ([]string, error) {
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		return nil, fmt.Errorf("bad repo: %q", repo)
+	}
+	out, err := ghOutput(env, "api",
+		fmt.Sprintf("repos/%s/%s/issues/%d/comments", owner, name, prNumber),
+		"--jq", "[.[].body]")
+	if err != nil {
+		return nil, err
+	}
+	var bodies []string
+	if uerr := json.Unmarshal([]byte(strings.TrimSpace(out)), &bodies); uerr != nil {
+		return nil, fmt.Errorf("parse PR comments: %w", uerr)
+	}
+	return bodies, nil
+}
+
+// WaitForPRCommentContaining polls PR comments every 15s until one contains
+// the given substring, or timeout expires.
+func WaitForPRCommentContaining(t *testing.T, env *Env, repo string, prNumber int, substring string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		bodies, err := tryPRComments(env, repo, prNumber)
+		if err != nil {
+			t.Logf("WaitForPRCommentContaining: transient error on %s#%d: %v (will retry)", repo, prNumber, err)
+			time.Sleep(15 * time.Second)
+			continue
+		}
+		for _, b := range bodies {
+			if strings.Contains(b, substring) {
+				return
+			}
+		}
+		time.Sleep(15 * time.Second)
+	}
+	t.Fatalf("timed out waiting for PR comment containing %q on %s#%d", substring, repo, prNumber)
+}
+
+// tryPRCheckRunConclusions resolves the head SHA of the PR and returns the
+// conclusions for all completed check runs on that SHA. Returns (nil, err) on
+// any failure.
+func tryPRCheckRunConclusions(env *Env, repo string, prNumber int) ([]string, error) {
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		return nil, fmt.Errorf("bad repo: %q", repo)
+	}
+	shaOut, err := ghOutput(env, "api",
+		fmt.Sprintf("repos/%s/%s/pulls/%d", owner, name, prNumber),
+		"--jq", ".head.sha")
+	if err != nil {
+		return nil, fmt.Errorf("resolve head SHA: %w", err)
+	}
+	sha := strings.TrimSpace(shaOut)
+	if sha == "" {
+		return nil, fmt.Errorf("empty head SHA for %s#%d", repo, prNumber)
+	}
+	checkOut, err := ghOutput(env, "api",
+		fmt.Sprintf("repos/%s/%s/commits/%s/check-runs", owner, name, sha),
+		"--jq", "[.check_runs[] | select(.conclusion != null) | .conclusion]")
+	if err != nil {
+		return nil, fmt.Errorf("check runs: %w", err)
+	}
+	var conclusions []string
+	if uerr := json.Unmarshal([]byte(strings.TrimSpace(checkOut)), &conclusions); uerr != nil {
+		return nil, fmt.Errorf("parse check runs: %w", uerr)
+	}
+	return conclusions, nil
+}
+
+// PRCheckRunConclusions returns the non-null check-run conclusions for the PR's
+// head SHA. Fails the test on error.
+func PRCheckRunConclusions(t *testing.T, env *Env, repo string, prNumber int) []string {
+	t.Helper()
+	conclusions, err := tryPRCheckRunConclusions(env, repo, prNumber)
+	if err != nil {
+		t.Fatalf("PRCheckRunConclusions %s#%d: %v", repo, prNumber, err)
+	}
+	return conclusions
+}
+
+// tryPRCommitCount returns the number of commits on the PR, or (0, err) on
+// failure.
+func tryPRCommitCount(env *Env, repo string, prNumber int) (int, error) {
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		return 0, fmt.Errorf("bad repo: %q", repo)
+	}
+	out, err := ghOutput(env, "api",
+		fmt.Sprintf("repos/%s/%s/pulls/%d/commits", owner, name, prNumber),
+		"--jq", "length")
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		return 0, fmt.Errorf("parse commit count %q: %w", out, err)
+	}
+	return n, nil
+}
+
+// PRCommitCount returns the number of commits on the PR. Fails the test on error.
+func PRCommitCount(t *testing.T, env *Env, repo string, prNumber int) int {
+	t.Helper()
+	n, err := tryPRCommitCount(env, repo, prNumber)
+	if err != nil {
+		t.Fatalf("PRCommitCount %s#%d: %v", repo, prNumber, err)
+	}
+	return n
+}
+
+// readEnvFileMaxCiFixCycles reads FABRIK_MAX_CI_FIX_CYCLES from the test bed's
+// .env file. Returns 5 (the engine default) if the key is absent. Fails the
+// test if the key is present but not a valid integer.
+func readEnvFileMaxCiFixCycles(t *testing.T, env *Env) int {
+	t.Helper()
+	envFile := filepath.Join(env.FabrikTestDir, ".env")
+	val, err := readEnvFileValue(envFile, "FABRIK_MAX_CI_FIX_CYCLES")
+	if err != nil {
+		// Key absent — return engine default.
+		return 5
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(val))
+	if err != nil {
+		t.Fatalf("FABRIK_MAX_CI_FIX_CYCLES in %s is not an integer: %q", envFile, val)
+	}
+	return n
+}
