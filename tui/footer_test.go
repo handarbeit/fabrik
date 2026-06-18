@@ -52,7 +52,7 @@ func TestViewFooter_Truncation(t *testing.T) {
 		CWD:        "~/very/long/path/to/a/deeply/nested/project/directory",
 		BoardTitle: "Some Long Board Name For Truncation Test",
 		Version:    "99.99.99",
-	}, "", nil, 0, false)
+	}, "", nil, nil, 0, false)
 	m.width = 30
 	footer := m.footer.View(m.width)
 
@@ -154,7 +154,7 @@ func TestViewFooter_TruncationWithRateLimit(t *testing.T) {
 		CWD:        "~/very/long/path/to/a/deeply/nested/project/directory",
 		BoardTitle: "Some Long Board Name For Truncation Test",
 		Version:    "99.99.99",
-	}, "", nil, 0, false)
+	}, "", nil, nil, 0, false)
 	m.width = 40
 	m.footer.now = now
 	m.footer.graphqlStats = RateLimitStats{
@@ -188,7 +188,7 @@ func TestViewFooter_OSC8Hyperlink(t *testing.T) {
 		CWD:        "~",
 		BoardTitle: "My Board",
 		BoardURL:   "https://github.com/orgs/acme/projects/1",
-	}, "", nil, 0, false)
+	}, "", nil, nil, 0, false)
 	m.width = 120
 	footer := m.footer.View(m.width)
 
@@ -209,7 +209,7 @@ func TestViewFooter_PlainTextNoOSC8(t *testing.T) {
 		CWD:        "~",
 		BoardTitle: "My Board",
 		BoardURL:   "https://github.com/orgs/acme/projects/1",
-	}, "", nil, 0, false)
+	}, "", nil, nil, 0, false)
 	m.width = 120
 	footer := m.footer.View(m.width)
 
