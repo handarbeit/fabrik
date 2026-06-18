@@ -820,8 +820,9 @@ func WaitForPRCommentContaining(t *testing.T, env *Env, repo string, prNumber in
 }
 
 // tryPRCheckRunConclusions resolves the head SHA of the PR and returns the
-// conclusions for all completed check runs on that SHA. Returns (nil, err) on
-// any failure.
+// conclusion for every check run on that SHA. In-progress or queued runs map
+// to "pending" so callers can detect that checks are not yet settled.
+// Returns (nil, err) on any failure.
 func tryPRCheckRunConclusions(env *Env, repo string, prNumber int) ([]string, error) {
 	owner, name, ok := splitRepo(repo)
 	if !ok {
@@ -834,12 +835,12 @@ func tryPRCheckRunConclusions(env *Env, repo string, prNumber int) ([]string, er
 		return nil, fmt.Errorf("resolve head SHA: %w", err)
 	}
 	sha := strings.TrimSpace(shaOut)
-	if sha == "" {
+	if sha == "" || sha == "null" {
 		return nil, fmt.Errorf("empty head SHA for %s#%d", repo, prNumber)
 	}
 	checkOut, err := ghOutput(env, "api",
 		fmt.Sprintf("repos/%s/%s/commits/%s/check-runs", owner, name, sha),
-		"--jq", "[.check_runs[] | select(.conclusion != null) | .conclusion]")
+		"--jq", "[.check_runs[] | .conclusion // \"pending\"]")
 	if err != nil {
 		return nil, fmt.Errorf("check runs: %w", err)
 	}
@@ -850,8 +851,8 @@ func tryPRCheckRunConclusions(env *Env, repo string, prNumber int) ([]string, er
 	return conclusions, nil
 }
 
-// PRCheckRunConclusions returns the non-null check-run conclusions for the PR's
-// head SHA. Fails the test on error.
+// PRCheckRunConclusions returns the check-run conclusions for the PR's head SHA
+// (in-progress runs appear as "pending"). Fails the test on error.
 func PRCheckRunConclusions(t *testing.T, env *Env, repo string, prNumber int) []string {
 	t.Helper()
 	conclusions, err := tryPRCheckRunConclusions(env, repo, prNumber)
