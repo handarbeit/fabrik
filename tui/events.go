@@ -163,3 +163,11 @@ type RateLimitAlertEvent struct {
 }
 
 func (RateLimitAlertEvent) tuiEvent() {}
+
+// StopRequest is sent by the TUI on the stopCh channel to ask the engine to
+// cancel a specific in-flight issue and apply fabrik:paused.
+type StopRequest struct {
+	IssueNumber int
+	Repo        string // "owner/repo" — empty for single-repo projects
+	StageName   string // stage name at time of stop, for the posted comment
+}
