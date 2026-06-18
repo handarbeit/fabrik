@@ -2764,7 +2764,7 @@ Note: within `checkDependencies()`, for each blocker the engine first consults `
 
 **Code path:** `poll()` catch-up loop Phase 1 → `settlePRMergeState()` (one combined REST pass for `mergeable`, `mergeable_state`, and check runs) → `checkCIGate()` interprets the `PRSettleResult`:
 - **`PRMergeTerminal` (`pr.Merged == true`):** `addCompleteLabelAndRemoveCI` → gate clears, advance to Done.
-- **`PRMergeBlocked` (closed, not merged):** `pauseForPRClosedNotMerged()` posts comment naming the PR, adds `fabrik:paused` + `fabrik:awaiting-input`, removes `fabrik:awaiting-ci`. Returns `(false, false, false)`.
+- **`PRMergeTerminal` (closed, not merged):** `pauseForPRClosedNotMerged()` posts comment naming the PR, adds `fabrik:paused` + `fabrik:awaiting-input`, removes `fabrik:awaiting-ci`. Returns `(false, false, false)`.
 - **`PRMergeReady` (`mergeable_state ∈ {clean, unstable}`):** gate clears immediately (`addCompleteLabelAndRemoveCI`); per-check classification is skipped.
 - **`PRMergeUnsettled` with `CheckRuns` populated:** evaluates check run statuses; optionally dispatches `dispatchCIFixReinvoke()` → async goroutine → `processComments()` with synthetic CI failure comment
   - **R3 (empty `CheckRuns` arm, `MergeableState == "blocked"`):** `hadChecks == false`; check `FetchLabelAppliedAt` dwell; if < CIWaitTimeout → return `(true, false, false)` (dwell guard, not yet paused); if ≥ CIWaitTimeout → `pauseForRequiredNeverRunningCheck()` posts distinct comment, adds `fabrik:paused` + `fabrik:awaiting-input`, removes `fabrik:awaiting-ci`
@@ -3478,15 +3478,16 @@ The catch-up loop in `poll()` is split into two phases for every non-paused non-
 6. **Merge-conflict gate** (only reached if no review reinvoke was dispatched in step 5; only runs for stages with `wait_for_ci: true`): `checkMergeabilityGate()` interprets the `PRSettleResult` from the settle call
    - `PRMergeNoPR` or `PRMergeTerminal`: no-op; fall through to the CI gate
    - `PRMergeReady`: clear any stale `fabrik:rebase-needed` label; fall through to the CI gate
-   - `PRMergeUnsettled` or `PRMergeBlocked`: block this item for the rest of Phase 1 (**no label churn** — mirrors the CI gate's R10c rule)
+   - `PRMergeBlocked` (CI checks failed): clear any stale `fabrik:rebase-needed` label; fall through to the CI gate so `checkCIGate` can classify and dispatch the CI-fix reinvoke
+   - `PRMergeUnsettled`: block this item for the rest of Phase 1 (**no label churn** — ADR-032 R10c)
    - `PRMergeConflicting` (`mergeable == false`): apply `fabrik:rebase-needed` idempotently, then **worker guard (`snap.Worker() != nil`)** + **cycle limit check** (`snap.RebaseCycles(stage.Name)` vs `MaxRebaseCycles`, default 3):
      - If exceeded: `pauseForRebaseCycleLimit()` pauses issue
      - If not exceeded: dispatch `dispatchRebaseReinvoke()`; `continue`. The catch-up loop never reaches the CI gate while a conflict is outstanding — there is no point spinning on CI-await when the branch cannot merge.
 7. **CI gate** (only reached if the merge-conflict gate cleared): `checkCIGate()` interprets the `PRSettleResult` from the settle call for stages with `wait_for_ci: true`
    - **`PRMergeTerminal` (merged):** gate clears immediately (`addCompleteLabelAndRemoveCI`); advance to Done
-   - **`PRMergeBlocked` (closed, not merged):** `pauseForPRClosedNotMerged()` adds `fabrik:paused` + `fabrik:awaiting-input`, removes `fabrik:awaiting-ci`; returns `(false, false, false)` — poll.go does NOT call `pauseForCITimeout`
-   - **`PRMergeReady` (`mergeable_state ∈ {clean, unstable}`):** gate clears immediately via `addCompleteLabelAndRemoveCI()`; per-check classification is skipped. Rationale: GitHub's branch protection is the source of truth for "is this mergeable" — non-required check_run failures (e.g., workflow cleanup jobs) do not block merges per branch protection, so Fabrik must not block on them either.
-   - **`PRMergeUnsettled` with `CheckRuns` populated:** per-check classification applies R1–R6; pending → skip (blocked, not failed); CI failed → dispatch `dispatchCIFixReinvoke()` or pause on cycle limit
+   - **`PRMergeTerminal` (closed, not merged):** `pauseForPRClosedNotMerged()` adds `fabrik:paused` + `fabrik:awaiting-input`, removes `fabrik:awaiting-ci`; returns `(false, false, false)` — poll.go does NOT call `pauseForCITimeout`
+   - **`PRMergeReady` (`mergeable_state ∈ {clean, unstable}`, or all checks green):** gate clears immediately via `addCompleteLabelAndRemoveCI()`; per-check classification is skipped. Rationale: GitHub's branch protection is the source of truth for "is this mergeable" — non-required check_run failures (e.g., workflow cleanup jobs) do not block merges per branch protection, so Fabrik must not block on them either.
+   - **`PRMergeBlocked` or `PRMergeUnsettled` with `CheckRuns` populated:** per-check classification applies; pending → skip (blocked, not failed); CI failed → dispatch `dispatchCIFixReinvoke()` or pause on cycle limit
    - **`PRMergeUnsettled` with empty `CheckRuns` and `MergeableState == "blocked"`:** R3 — check `FetchLabelAppliedAt` dwell; if < CIWaitTimeout → dwell guard, not yet paused; if ≥ CIWaitTimeout → `pauseForRequiredNeverRunningCheck()`
    - **`PRMergeUnsettled` with empty `CheckRuns` and `MergeableState ∉ {"", "unknown"}`:** non-empty branch-protection signal (e.g. `behind`, `dirty`, `has_hooks`) with no visible check_runs — checks `FetchLabelAppliedAt` inline; if ≥ CIWaitTimeout, removes `fabrik:awaiting-ci` and returns `(false, false, true)` (caller calls `pauseForCITimeout`); otherwise returns `(true, false, false)`, re-evaluates next poll
    - **`PRMergeUnsettled` with empty `CheckRuns` and empty `MergeableState`:** hadChecks/dwell/post-push window — re-evaluates next poll; no label churn
@@ -3538,24 +3539,29 @@ The catch-up loop in `poll()` is split into two phases for every non-paused non-
 |---|---|
 | `PRMergeNoPR` | No linked PR on this item; both gates are no-ops |
 | `PRMergeUnsettled` | GitHub has not yet computed a definitive merge state; gates block without label churn |
-| `PRMergeReady` | `mergeable_state ∈ {clean, unstable}` — PR is ready to merge per branch protection |
+| `PRMergeReady` | PR is ready to merge (all checks green, or `mergeable_state ∈ {clean, unstable}`) |
 | `PRMergeConflicting` | `mergeable == false` — confirmed base-branch conflict |
-| `PRMergeBlocked` | PR is closed (not merged); `checkCIGate` dispatches `pauseForPRClosedNotMerged()` |
-| `PRMergeTerminal` | PR is merged; both gates clear immediately |
+| `PRMergeBlocked` | CI checks have failed; `checkCIGate` dispatches `dispatchCIFixReinvoke()` |
+| `PRMergeTerminal` | PR is merged or closed without merging; both gates handle terminal state |
 
 **Settling rules (applied in order):**
 
 1. `FetchLinkedPR()` — if no linked PR: return `PRMergeNoPR`.
 2. PR merged (`pr.Merged == true`): return `PRMergeTerminal`.
-3. PR closed, not merged (`pr.State == "closed"`): return `PRMergeBlocked`.
-4. HeadSHA empty: return `PRMergeUnsettled` (`MergeableState` omitted — see invariant).
-5. `FetchPRMergeableFields()` — fetches `mergeable` (bool ptr) and `mergeable_state` (string) in one REST call (single-PR endpoint; the list endpoint used by `FetchLinkedPR` does not return `mergeable`).
-6. `mergeable_state ∈ {clean, unstable}` (per `MergeableStateAccepted` allowlist): return `PRMergeReady` with `CheckRuns` populated from `FetchCheckRuns()`.
-7. `hadChecks` (store: `LinkedPRState.HasHadChecks`) is true: return `PRMergeUnsettled` with `CheckRuns` populated — `MergeableState` **intentionally omitted** (see invariant).
-8. Post-push dwell active (`LastHeadSHAUpdate` non-zero and `time.Since(LastHeadSHAUpdate) < PostPushDwell`, default 90 s): return `PRMergeUnsettled` — `MergeableState` **intentionally omitted** (see invariant). Zero `LastHeadSHAUpdate` (cold start / post-restart) falls through.
-9. `mergeable == false`: return `PRMergeConflicting`.
-10. `mergeable == nil` or API error: return `PRMergeUnsettled` with `MergeableState` populated.
-11. Fallback with check runs: return `PRMergeUnsettled` with `MergeableState` and `CheckRuns` populated.
+3. PR closed, not merged (`pr.State == "closed"`): return `PRMergeTerminal`.
+4. `FetchPRMergeableFields()` — fetches `mergeable` (bool ptr) and `mergeable_state` (string) in one REST call (single-PR endpoint; the list endpoint used by `FetchLinkedPR` does not return `mergeable`). API error → return `PRMergeUnsettled`.
+5. `mergeable == nil` (GitHub still computing): return `PRMergeUnsettled` (`MergeableState` set).
+6. `mergeable_state == "unknown"` (transient): return `PRMergeUnsettled` (`MergeableState` set).
+7. `mergeable == false`: return `PRMergeConflicting` (`MergeableState` set).
+8. `mergeable_state ∈ {clean, unstable}` (per `MergeableStateAccepted` allowlist): return `PRMergeReady` — per ADR-033, GitHub's branch-protection signal is authoritative; `FetchCheckRuns` is not called.
+9. HeadSHA empty: return `PRMergeUnsettled` (`MergeableState` **intentionally omitted** — see invariant).
+10. `FetchCheckRuns()` — API error → return `PRMergeUnsettled`.
+11. Check runs non-empty: apply `PRChecksObserved` store event (sets `HasHadChecks`).
+12. Check runs empty + `hadChecks` (store: `LinkedPRState.HasHadChecks`): return `PRMergeUnsettled` (`MergeableState` **intentionally omitted** — see invariant).
+13. Check runs empty + post-push dwell active (`LastHeadSHAUpdate` non-zero and `time.Since < PostPushDwell`, default 90 s): return `PRMergeUnsettled` (`MergeableState` **intentionally omitted** — see invariant). Zero `LastHeadSHAUpdate` (cold start / post-restart) falls through.
+14. Check runs empty + `mergeable_state ∉ {"", "unknown"}`: return `PRMergeUnsettled` (`MergeableState` set — R3/branch-protection signal for `checkCIGate`).
+15. Check runs empty + `mergeable_state ∈ {"", "unknown"}`: return `PRMergeReady` (no CI configured).
+16. Check runs non-empty: any failed (`failure`/`timed_out`/`action_required`) → return `PRMergeBlocked` (`CheckRuns` set); any pending (`queued`/`in_progress`) → return `PRMergeUnsettled` (`CheckRuns` set); all green → return `PRMergeReady` (`CheckRuns` set).
 
 **`MergeableState` omission invariant:** `checkCIGate` uses `settle.MergeableState` to detect R3 (OPEN+BLOCKED+no-check-runs+`fabrik:awaiting-ci` elapsed → `pauseForRequiredNeverRunningCheck`). The primitive omits `MergeableState` from the `PRSettleResult` in the hadChecks, post-push dwell, and HeadSHA-empty cases. This prevents R3 from misfiring on cases where `hadChecks == true` (checks have been observed) or where GitHub simply hasn't computed mergeability yet (post-push window). Only a non-empty `MergeableState` in the settle result is genuinely relevant for R3/branch-protection timeout checking.
 
@@ -3636,8 +3642,8 @@ The merge-conflict gate is a third prong of the catch-up loop Phase 1, sitting b
 
 `checkMergeabilityGate()` runs only when `stage.WaitForCI` is true (the same opt-in that admits items to the catch-up window via `fabrik:awaiting-ci`). It returns `(blocked, conflict)`:
 
-- `(false, false)` — clear: `PRMergeNoPR`, `PRMergeTerminal`, or `PRMergeReady` (`mergeable == true` / `mergeable_state ∈ {clean, unstable}`). Any stale `fabrik:rebase-needed` label is removed. Caller falls through to the CI gate.
-- `(true, false)` — `PRMergeUnsettled` (`mergeable == null`, still computing) or `PRMergeBlocked` (PR closed), or transient API error. The gate blocks but **no label is applied** — unknown states must not produce label churn (same principle as the CI gate's R10c). Caller skips to the next item; the next poll re-evaluates.
+- `(false, false)` — clear: `PRMergeNoPR`, `PRMergeTerminal`, `PRMergeReady`, or `PRMergeBlocked` (CI failed — no base conflict; deferred to the CI gate). Any stale `fabrik:rebase-needed` label is removed. Caller falls through to the CI gate.
+- `(true, false)` — `PRMergeUnsettled` (`mergeable == null`, still computing, or transient API error). The gate blocks but **no label is applied** — unknown states must not produce label churn (ADR-032 R10c). Caller skips to the next item; the next poll re-evaluates.
 - `(true, true)` — `PRMergeConflicting` (`mergeable == false`, confirmed conflict). `fabrik:rebase-needed` is applied idempotently. The caller in `poll()` dispatches a rebase reinvoke or pauses on the cycle limit.
 
 The gate's inputs come from `settlePRMergeState()` (§6.4), called once per Phase 1 iteration before both gates. `FetchPRMergeableFields()` (single-PR endpoint, not the list endpoint used by `FetchLinkedPR`) provides both `mergeable` and `mergeable_state` in one request — the list endpoint does not return `mergeable`.
@@ -3646,7 +3652,7 @@ The gate's inputs come from `settlePRMergeState()` (§6.4), called once per Phas
 
 The merge-conflict gate runs **before** the CI gate so that a confirmed conflict preempts CI-await polling. The rationale: a PR that cannot merge has no reason to wait for CI, and Claude on CI-fix reinvoke cannot productively act on a branch that must first be rebased. When the merge gate emits `conflict`, Phase 1 `continue`s without reaching the CI gate.
 
-When the merge gate clears (`mergeable == true`), Phase 1 falls through to the CI gate on the same poll. When the merge gate is blocked with no confirmed conflict (`mergeable == null` or a transient API error), Phase 1 skips to the next item — the next poll re-evaluates once GitHub has a definite answer or the API recovers.
+When the merge gate clears (`mergeable == true`, CI failed, or no conflict), Phase 1 falls through to the CI gate on the same poll. When the merge gate is blocked (`PRMergeUnsettled` — `mergeable == null` or a transient API error), Phase 1 skips to the next item — the next poll re-evaluates once GitHub has a definite answer or the API recovers.
 
 #### 6.6.3 Rebase Reinvoke Mechanics
 
