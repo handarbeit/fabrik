@@ -56,6 +56,23 @@ These tests assume:
 See `~/fabrik-oss-launch-notes.md` (under "Files and where they live") for
 the canonical setup.
 
+### Additional prerequisites for `TestCIFixReinvoke` and `TestCIFixReinvokeCycleLimit`
+
+5. **`ci-fix-sentinel` enrolled as a required status check** on
+   `handarbeit/fabrik-test-alpha/main`. Both tests skip gracefully (via
+   `t.Skip`) if this check is not enrolled — safe to merge before the sibling
+   sub-issue adds the sentinel CI job.
+6. **`FABRIK_MAX_CI_FIX_CYCLES=2` in the test bed `.env`** (for
+   `TestCIFixReinvokeCycleLimit` only). The test skips with an instructional
+   message if the value is `> 3`. After editing `.env`, restart the test-bed
+   Fabrik instance so the new value takes effect.
+7. **`E2E_TIMEOUT=3h`** when running `TestCIFixReinvoke` in isolation — the
+   inner waits alone total ~75–90 min, which exceeds the default `90m` budget
+   once pipeline setup overhead is included:
+   ```bash
+   E2E_TIMEOUT=3h scripts/e2e/run.sh -run TestCIFixReinvoke
+   ```
+
 ## Running
 
 The recommended entrypoint is the runner script, which sets sensible defaults:
@@ -98,8 +115,10 @@ otherwise).
 | `TestCrossRepoSpawn` | Cross-repo decomposition (spawn child in beta, gate parent, resume on close) | 45–60 min | $1.00–2.00 |
 | `TestYoloAutoMergeLabel` | `fabrik:yolo` auto-advance to Done via GitHub native auto-merge; timeline-verifies `fabrik:auto-merge-enabled` was applied | 20–40 min | $0.50–1.50 |
 | `TestCruiseFullPipeline` | `fabrik:cruise` auto-advances to Validate-complete without auto-merge; PR merged by human closes issue | 30–50 min | $0.80–2.00 |
+| `TestCIFixReinvoke` | CI-fix reinvoke positive path: sentinel fails on first push, Claude fixes, CI passes, issue closes | 75–90 min | $1.00–3.00 |
+| `TestCIFixReinvokeCycleLimit` | CI-fix reinvoke negative path: unfixable sentinel exhausts MaxCiFixCycles, issue pauses | 30–60 min | $0.50–1.50 |
 
-Approximate suite total: ~150 min wall-clock, $4–12 in Claude tokens.
+Approximate suite total: ~250 min wall-clock, $5–17 in Claude tokens (CI-fix tests should be run separately with `E2E_TIMEOUT=3h`).
 
 ### Regression coverage map
 
@@ -112,6 +131,8 @@ Approximate suite total: ~150 min wall-clock, $4–12 in Claude tokens.
 | `TestCrossRepoSpawn` | #797 / #803 (on-demand spawn-target init), v0.0.66 spawn machinery, #800 (addBlockedBy mutation name) |
 | `TestYoloAutoMergeLabel` | #829 (GitHub native auto-merge for yolo), #831/#835/#871 (convergence regression cascade) |
 | `TestCruiseFullPipeline` | #898 (cruise/yolo gate at Validate, `engine/poll.go`); ensures cruise never triggers `checkAutoMergeConvergence` |
+| `TestCIFixReinvoke` | #888 ADR-056 D1 (settling primitive reinterprets CI-gate signals); CI-fix reinvoke loop (engine/ci.go) |
+| `TestCIFixReinvokeCycleLimit` | CI-fix cycle limit (`pauseForCIFixCycleLimit`), `MaxCiFixCycles` exhaustion path |
 
 Every escape-from-release regression earns a new scenario in this table.
 
