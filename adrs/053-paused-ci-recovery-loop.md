@@ -1,7 +1,7 @@
 # ADR 053: Paused-Item CI Recovery Loop
 
 **Date**: 2026-06-07  
-**Status**: Accepted  
+**Status**: Superseded by ADR-057 (in structure — the separate-loop pattern is replaced by a single owner; ADR-053's operational constraints carry forward into ADR-057)  
 **Issue**: #845 — CI gate: handle merged/closed PRs and required-never-running checks
 
 ## Context
