@@ -7,6 +7,24 @@ import (
 	"github.com/handarbeit/fabrik/stages"
 )
 
+// addedLabelNames returns all label names passed to AddLabelToIssue.
+func addedLabelNames(calls []addLabelCall) []string {
+	out := make([]string, 0, len(calls))
+	for _, c := range calls {
+		out = append(out, c.labelName)
+	}
+	return out
+}
+
+// removedLabelNames returns all label names passed to RemoveLabelFromIssue.
+func removedLabelNames(calls []removeLabelCall) []string {
+	out := make([]string, 0, len(calls))
+	for _, c := range calls {
+		out = append(out, c.labelName)
+	}
+	return out
+}
+
 // terminalAdvanceStages returns a pipeline with Review (wait_for_reviews),
 // Validate (wait_for_ci), and Done (cleanup), matching the standard Fabrik pipeline.
 func terminalAdvanceStages() []*stages.Stage {
