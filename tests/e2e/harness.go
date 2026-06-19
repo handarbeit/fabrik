@@ -909,3 +909,128 @@ func readEnvFileMaxCiFixCycles(t *testing.T, env *Env) int {
 	}
 	return n
 }
+
+// assertSlowGateRequired skips the test if "slow-gate" is not a required
+// status check on the repo's main branch. Skips (never fatals) so the test
+// suite remains green before the slow-gate CI job is enrolled.
+func assertSlowGateRequired(t *testing.T, env *Env, repo string) {
+	t.Helper()
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		t.Fatalf("bad repo: %q", repo)
+	}
+	out, err := ghOutput(env, "api",
+		fmt.Sprintf("repos/%s/%s/branches/main/protection", owner, name),
+		"--jq", ".required_status_checks.contexts[]")
+	if err != nil {
+		t.Skipf("slow-gate not enrolled as required check on %s/main (branch protection API error: %v)", repo, err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if strings.TrimSpace(line) == "slow-gate" {
+			return
+		}
+	}
+	t.Skipf("slow-gate not in required status checks for %s/main — enroll it before running this test", repo)
+}
+
+// CommentOnPR posts a comment on the PR using the test bed's PAT identity.
+// PR numbers differ from issue numbers; use this helper (not CommentOnIssue)
+// when targeting a PR's comment thread.
+func CommentOnPR(t *testing.T, env *Env, repo string, prNumber int, body string) {
+	t.Helper()
+	if _, err := ghOutput(env, "pr", "comment", fmt.Sprint(prNumber), "-R", repo, "--body", body); err != nil {
+		t.Fatalf("post comment on %s PR #%d: %v", repo, prNumber, err)
+	}
+}
+
+// readEnvFileReviewerToken reads FABRIK_REVIEWER_TOKEN from the test bed's
+// .env file. Returns "" if absent — callers branch on the empty string to
+// decide whether to run the approval path or the review-timeout fallback.
+func readEnvFileReviewerToken(t *testing.T, env *Env) string {
+	t.Helper()
+	envFile := filepath.Join(env.FabrikTestDir, ".env")
+	val, err := readEnvFileValue(envFile, "FABRIK_REVIEWER_TOKEN")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(val)
+}
+
+// readEnvFileReviewWaitTimeout reads FABRIK_REVIEW_WAIT_TIMEOUT (minutes)
+// from the test bed's .env file. Returns 15 (the engine default) if absent.
+// Fails the test if the key is present but not a valid integer.
+func readEnvFileReviewWaitTimeout(t *testing.T, env *Env) int {
+	t.Helper()
+	envFile := filepath.Join(env.FabrikTestDir, ".env")
+	val, err := readEnvFileValue(envFile, "FABRIK_REVIEW_WAIT_TIMEOUT")
+	if err != nil {
+		return 15
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(val))
+	if err != nil {
+		t.Fatalf("FABRIK_REVIEW_WAIT_TIMEOUT in %s is not an integer: %q", envFile, val)
+	}
+	return n
+}
+
+// ghOutputWithToken runs gh with a caller-supplied token (overrides GH_TOKEN).
+// Used by SubmitPRReview where the reviewer identity differs from the bot's
+// main PAT stored in *Env.
+func ghOutputWithToken(token string, args ...string) (string, error) {
+	cmd := exec.Command("gh", args...)
+	cmd.Env = append(os.Environ(), "GH_TOKEN="+token)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// SubmitPRReview submits a review on the PR using reviewerToken (a PAT for a
+// non-author identity — GitHub forbids the PR author from approving their own
+// PR). action must be "APPROVE" or "REQUEST_CHANGES" (GitHub API event values).
+// Fails the test on API error (e.g. 422 if reviewerToken == env.GHToken).
+func SubmitPRReview(t *testing.T, env *Env, reviewerToken string, repo string, prNumber int, action string) {
+	t.Helper()
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		t.Fatalf("bad repo: %q", repo)
+	}
+	path := fmt.Sprintf("repos/%s/%s/pulls/%d/reviews", owner, name, prNumber)
+	out, err := ghOutputWithToken(reviewerToken, "api", "-X", "POST", path,
+		"-f", "event="+action)
+	if err != nil {
+		t.Fatalf("SubmitPRReview %s on %s PR #%d: %v\n%s", action, repo, prNumber, err, out)
+	}
+}
+
+// WaitForPRCommentReaction polls PR comments (via the issues comments API)
+// every 15s until a comment containing commentSubstring has at least one
+// reaction of type reactionContent (e.g. "eyes" for 👀, "rocket" for 🚀).
+// Returns as soon as the count is > 0; fails the test on timeout.
+func WaitForPRCommentReaction(t *testing.T, env *Env, repo string, prNumber int, commentSubstring string, reactionContent string, timeout time.Duration) {
+	t.Helper()
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		t.Fatalf("bad repo: %q", repo)
+	}
+	// jq: sum the named reaction count across all comments whose body contains
+	// the substring; default 0 when no match.
+	filter := fmt.Sprintf(`[.[] | select(.body | contains("%s")) | .reactions.%s] | add // 0`,
+		strings.ReplaceAll(commentSubstring, `"`, `\"`), reactionContent)
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		out, err := ghOutput(env, "api",
+			fmt.Sprintf("repos/%s/%s/issues/%d/comments", owner, name, prNumber),
+			"--jq", filter)
+		if err != nil {
+			t.Logf("WaitForPRCommentReaction: transient error on %s PR #%d: %v (will retry)", repo, prNumber, err)
+			time.Sleep(15 * time.Second)
+			continue
+		}
+		count, parseErr := strconv.Atoi(strings.TrimSpace(out))
+		if parseErr == nil && count > 0 {
+			return
+		}
+		time.Sleep(15 * time.Second)
+	}
+	t.Fatalf("timed out waiting for %q reaction on comment containing %q on %s PR #%d",
+		reactionContent, commentSubstring, repo, prNumber)
+}
