@@ -2,12 +2,66 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
 )
+
+// TestProcessComments_HonorsCompletionOnNonZeroExit verifies that when a comment
+// invocation emits FABRIK_STAGE_COMPLETE but the Claude process exits non-zero (e.g.
+// a timeout kill after the stage finished), comment processing still completes the
+// stage — consistent with stage runs — and records the error separately rather than
+// vetoing completion. Regression guard for the comment/stage asymmetry (#890 Req 2).
+func TestProcessComments_HonorsCompletionOnNonZeroExit(t *testing.T) {
+	skipIfNoGit(t)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeForCommentsFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			// Marker emitted (completed=true) AND a non-zero process exit (err != nil).
+			return "done.\nFABRIK_STAGE_COMPLETE\n", true, TokenUsage{}, errors.New("claude exited with status 1")
+		},
+	}
+
+	eng := testEngineWithRepo(t, client, claude)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	stage := &stages.Stage{Name: "Research", Order: 1, Completion: stages.CompletionCriteria{Type: "claude"}}
+	item := gh.ProjectItem{Number: 10, Body: "spec"}
+	userComments := []gh.Comment{
+		{ID: "C_1", DatabaseID: 101, Author: "testuser", Body: "finish it"},
+	}
+
+	if err := eng.processComments(context.Background(), board, item, stage, userComments); err != nil {
+		t.Fatalf("processComments returned error despite completion: %v", err)
+	}
+
+	// The stage must have completed (handleStageComplete ran → stage:Research:complete added).
+	var sawComplete bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Research:complete" {
+			sawComplete = true
+		}
+	}
+	if !sawComplete {
+		t.Errorf("expected stage:Research:complete to be added (completion honored on non-zero exit); addLabelCalls=%v", client.addLabelCalls)
+	}
+
+	// History must record BOTH facts: Completed (marker) AND Errored (non-zero exit).
+	snap, err := eng.store.Get("owner/repo", 10)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	st := snap.State()
+	if !st.LastInvocationCompleted {
+		t.Error("LastInvocationCompleted = false, want true (marker honored despite error)")
+	}
+	if !st.LastInvocationErrored {
+		t.Error("LastInvocationErrored = false, want true (non-zero exit recorded)")
+	}
+}
 
 // testEngineWithRepo creates an engine using a real git repo for worktree operations.
 func testEngineWithRepo(t *testing.T, client *mockGitHubClient, claude *mockClaudeInvoker) *Engine {

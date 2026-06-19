@@ -103,7 +103,7 @@ func (o *InvocationObserver) OnChange(change itemstate.Change, snap itemstate.Sn
 		StageName:      st.Status,
 		StageModel:     model,
 		IsComment:      st.LastInvocationIsComment,
-		Success:        true, // InvocationRecorded is only applied after Claude returns
+		Success:        !st.LastInvocationErrored, // false when the Claude process exited non-zero
 		Completed:      st.LastInvocationCompleted,
 		BlockedOnInput: st.LastInvocationBlocked,
 		Duration:       st.LastInvocationDuration,
