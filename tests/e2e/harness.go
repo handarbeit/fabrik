@@ -1013,8 +1013,10 @@ func WaitForPRCommentReaction(t *testing.T, env *Env, repo string, prNumber int,
 	}
 	// jq: sum the named reaction count across all comments whose body contains
 	// the substring; default 0 when no match.
+	escaped := strings.ReplaceAll(commentSubstring, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
 	filter := fmt.Sprintf(`[.[] | select(.body | contains("%s")) | .reactions.%s] | add // 0`,
-		strings.ReplaceAll(commentSubstring, `"`, `\"`), reactionContent)
+		escaped, reactionContent)
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		out, err := ghOutput(env, "api",

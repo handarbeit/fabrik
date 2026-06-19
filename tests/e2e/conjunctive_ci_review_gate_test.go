@@ -75,6 +75,7 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 	// R1 withheld window (2 min): stage:Validate:complete must NOT appear while
 	// fabrik:awaiting-ci is present — CI has not yet passed (slow-gate ~6 min).
 	withheldDeadline := time.Now().Add(2 * time.Minute)
+	r1Checked := false
 	for time.Now().Before(withheldDeadline) {
 		labels, err := tryIssueLabels(env, env.RepoAlpha, num)
 		if err != nil {
@@ -82,6 +83,7 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 			time.Sleep(15 * time.Second)
 			continue
 		}
+		r1Checked = true
 		for _, l := range labels {
 			if l == "stage:Validate:complete" {
 				t.Fatalf("stage:Validate:complete appeared during CI-await window — CI gate did not hold on %s#%d",
@@ -89,6 +91,9 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 			}
 		}
 		time.Sleep(15 * time.Second)
+	}
+	if !r1Checked {
+		t.Fatalf("failed to fetch labels at least once during the R1 withheld window on %s#%d", env.RepoAlpha, num)
 	}
 	t.Logf("R1 withheld window passed: CI gate held for 2 minutes on %s#%d", env.RepoAlpha, num)
 
@@ -122,6 +127,7 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 	// (current engine behavior: stage:Validate:complete IS added when CI clears, before
 	// the review gate runs — asserting it absent here would be wrong; see #890).
 	noteCompleteLogged := false
+	r4Checked := false
 	reviewWithheldDeadline := time.Now().Add(2 * time.Minute)
 	for time.Now().Before(reviewWithheldDeadline) {
 		state, err := tryIssueState(env, env.RepoAlpha, num)
@@ -130,6 +136,7 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 			time.Sleep(15 * time.Second)
 			continue
 		}
+		r4Checked = true
 		if state == "CLOSED" {
 			t.Fatalf("issue %s#%d closed during review-await window — review gate did not hold",
 				env.RepoAlpha, num)
@@ -148,6 +155,9 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 			}
 		}
 		time.Sleep(15 * time.Second)
+	}
+	if !r4Checked {
+		t.Fatalf("failed to fetch issue state at least once during the R4 withheld window on %s#%d", env.RepoAlpha, num)
 	}
 	t.Logf("R4 withheld window passed: review gate held for 2 minutes on %s#%d", env.RepoAlpha, num)
 
