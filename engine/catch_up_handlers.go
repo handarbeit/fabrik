@@ -91,12 +91,12 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 		// including cycle-limit checks — to avoid pausing an item while valid
 		// work is still in progress. The store Worker field is the semantic
 		// source of truth for in-flight state.
-		if snap, snapErr := e.store.Get(repoStr, pctx.item.Number); snapErr == nil && snap.Worker() != nil {
-			e.logf(pctx.item.Number, "review-reinvoke", "skipping dispatch — review reinvoke already in-flight\n")
-			return true
-		}
 		var cycleCount int
 		if snap, snapErr := e.store.Get(repoStr, pctx.item.Number); snapErr == nil {
+			if snap.Worker() != nil {
+				e.logf(pctx.item.Number, "review-reinvoke", "skipping dispatch — review reinvoke already in-flight\n")
+				return true
+			}
 			cycleCount = snap.ReviewCycles(pctx.stage.Name)
 		}
 		maxCycles := e.cfg.MaxReviewCycles
@@ -138,12 +138,12 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 	if mergeConflict {
 		iKey := issueKey(pctx.item, e.defaultRepo())
 		repoStr := itemOwnerRepoString(pctx.item, e.defaultRepo())
-		if snap, snapErr := e.store.Get(repoStr, pctx.item.Number); snapErr == nil && snap.Worker() != nil {
-			e.logf(pctx.item.Number, "rebase-reinvoke", "skipping dispatch — rebase reinvoke already in-flight\n")
-			return true
-		}
 		var cycleCount int
 		if snap, snapErr := e.store.Get(repoStr, pctx.item.Number); snapErr == nil {
+			if snap.Worker() != nil {
+				e.logf(pctx.item.Number, "rebase-reinvoke", "skipping dispatch — rebase reinvoke already in-flight\n")
+				return true
+			}
 			cycleCount = snap.RebaseCycles(pctx.stage.Name)
 		}
 		maxCycles := e.cfg.MaxRebaseCycles
@@ -171,12 +171,12 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 	if ciFailure {
 		iKey := issueKey(pctx.item, e.defaultRepo())
 		repoStr := itemOwnerRepoString(pctx.item, e.defaultRepo())
-		if snap, snapErr := e.store.Get(repoStr, pctx.item.Number); snapErr == nil && snap.Worker() != nil {
-			e.logf(pctx.item.Number, "ci-fix-reinvoke", "skipping dispatch — CI-fix reinvoke already in-flight\n")
-			return true
-		}
 		var cycleCount int
 		if snap, snapErr := e.store.Get(repoStr, pctx.item.Number); snapErr == nil {
+			if snap.Worker() != nil {
+				e.logf(pctx.item.Number, "ci-fix-reinvoke", "skipping dispatch — CI-fix reinvoke already in-flight\n")
+				return true
+			}
 			cycleCount = snap.CIFixCycles(pctx.stage.Name)
 		}
 		maxCycles := e.cfg.MaxCiFixCycles
