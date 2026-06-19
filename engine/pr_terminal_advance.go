@@ -55,6 +55,19 @@ func (e *Engine) runValidatePRTerminalAdvance(board *gh.ProjectBoard, items []gh
 		if !pr.Merged && pr.State != "closed" {
 			continue // PR is still open; not terminal
 		}
+		// FetchLinkedPR reads the PR list endpoint, whose `merged` flag is unreliable
+		// (false for seconds after a merge). For a closed PR, confirm against the
+		// authoritative single-PR endpoint before deciding advance-vs-pause — otherwise
+		// a PR the engine just merged (e.g. the direct-merge fallback) gets misread as
+		// "closed without merging" and the issue is wrongly paused.
+		if !pr.Merged && pr.State == "closed" {
+			if merged, mErr := e.client.FetchPRMerged(owner, repo, pr.Number); mErr != nil {
+				e.logf(item.Number, "pr-terminal", "PR #%d closed; could not confirm merged state: %v — skipping (re-check next poll)\n", pr.Number, mErr)
+				continue
+			} else if merged {
+				pr.Merged = true
+			}
+		}
 
 		if pr.Merged {
 			e.logf(item.Number, "pr-terminal", "PR #%d merged — filling gate-checked completion labels and advancing to Done\n", pr.Number)

@@ -128,6 +128,25 @@ func (c *Client) FetchPRMergeable(owner, repo string, prNumber int) (*bool, erro
 	return raw.Mergeable, nil
 }
 
+// FetchPRMerged returns GitHub's authoritative `merged` flag for a single PR.
+//
+// Only the single-PR endpoint (/pulls/{number}) reports `merged` reliably. The
+// list endpoint used by FetchLinkedPR returns merged=false for several seconds
+// after a merge (and is generally unreliable for this field), so a PR the engine
+// just merged briefly looks like state=closed, merged=false there. Use this to
+// confirm whether a PR observed as closed was actually merged before treating it
+// as "closed without merging".
+func (c *Client) FetchPRMerged(owner, repo string, prNumber int) (bool, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", c.baseURL, owner, repo, prNumber)
+	var raw struct {
+		Merged bool `json:"merged"`
+	}
+	if err := c.restGetJSON(apiURL, &raw); err != nil {
+		return false, fmt.Errorf("fetching PR #%d merged state: %w", prNumber, err)
+	}
+	return raw.Merged, nil
+}
+
 // FetchPRMergeableState returns GitHub's branch-protection-aware mergeable_state
 // for a single PR (e.g. "clean", "unstable", "blocked", "behind", "dirty",
 // "draft", "has_hooks", "unknown"). Used by Fabrik's CI gate as the

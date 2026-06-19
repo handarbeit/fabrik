@@ -2,6 +2,7 @@ package engine
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -84,6 +85,75 @@ func TestSettle_PRClosedNotMerged_ReturnsTerminal(t *testing.T) {
 	r := eng.settlePRMergeState(settleItem(1), &stages.Stage{Name: "Validate"})
 	if r.Status != PRMergeTerminal {
 		t.Errorf("expected PRMergeTerminal for closed PR, got %v", r.Status)
+	}
+}
+
+// ── Stale list-endpoint merged flag (ConvergenceRace regression) ──────────────
+//
+// FetchLinkedPR reads the PR *list* endpoint, whose `merged` flag reports false
+// for several seconds after a merge. A PR the engine just merged (e.g. the
+// direct-merge fallback) arrives here as {State:"closed", Merged:false}. settle
+// must re-confirm against the authoritative single-PR endpoint before classifying
+// "closed without merging" — otherwise the issue is wrongly paused.
+
+func TestSettle_ClosedButMerged_ConfirmedViaSinglePR(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			// List endpoint lies: merged=false right after a merge.
+			return &gh.PRDetails{Number: 42, Merged: false, State: "closed"}, nil
+		},
+		fetchPRMergedFn: func(owner, repo string, prNumber int) (bool, error) {
+			// Single-PR endpoint is authoritative: the PR was in fact merged.
+			return true, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	r := eng.settlePRMergeState(settleItem(1), &stages.Stage{Name: "Validate"})
+	if r.Status != PRMergeTerminal {
+		t.Errorf("expected PRMergeTerminal for stale-list/merged-single PR, got %v", r.Status)
+	}
+	if r.PR == nil || !r.PR.Merged {
+		t.Error("expected r.PR.Merged=true after single-PR re-confirmation")
+	}
+	if strings.Contains(r.Reason, "closed without merging") {
+		t.Errorf("merged PR must NOT be classified as closed-without-merging; got reason %q", r.Reason)
+	}
+}
+
+func TestSettle_ClosedNotMerged_StillTerminal(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 42, Merged: false, State: "closed"}, nil
+		},
+		fetchPRMergedFn: func(owner, repo string, prNumber int) (bool, error) {
+			// Single-PR endpoint confirms it really was closed without merging.
+			return false, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	r := eng.settlePRMergeState(settleItem(1), &stages.Stage{Name: "Validate"})
+	if r.Status != PRMergeTerminal {
+		t.Errorf("expected PRMergeTerminal for genuinely-closed PR, got %v", r.Status)
+	}
+	if !strings.Contains(r.Reason, "closed without merging") {
+		t.Errorf("expected closed-without-merging reason, got %q", r.Reason)
+	}
+}
+
+func TestSettle_ClosedMergedUnconfirmable_ReturnsUnsettled(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 42, Merged: false, State: "closed"}, nil
+		},
+		fetchPRMergedFn: func(owner, repo string, prNumber int) (bool, error) {
+			// Single-PR endpoint unreachable — must not pause on an unconfirmable state.
+			return false, errors.New("api timeout")
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	r := eng.settlePRMergeState(settleItem(1), &stages.Stage{Name: "Validate"})
+	if r.Status != PRMergeUnsettled {
+		t.Errorf("expected PRMergeUnsettled when merged-state unconfirmable, got %v", r.Status)
 	}
 }
 

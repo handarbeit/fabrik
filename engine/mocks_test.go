@@ -32,6 +32,7 @@ type mockGitHubClient struct {
 	fetchLinkedPRFn               func(owner, repo string, issueNumber int) (*gh.PRDetails, error)
 	fetchPRMergeableFieldsFn      func(owner, repo string, prNumber int) (*bool, string, error)
 	fetchPRMergeableFn            func(owner, repo string, prNumber int) (*bool, error)
+	fetchPRMergedFn               func(owner, repo string, prNumber int) (bool, error)
 	fetchPRMergeableStateFn       func(owner, repo string, prNumber int) (string, error)
 	fetchCheckRunsFn              func(owner, repo, sha string) ([]gh.CheckRun, error)
 	getPRBaseFn                   func(owner, repo string, prNumber int) (string, error)
@@ -377,6 +378,16 @@ func (m *mockGitHubClient) FetchPRMergeable(owner, repo string, prNumber int) (*
 		return fn(owner, repo, prNumber)
 	}
 	return nil, nil
+}
+
+func (m *mockGitHubClient) FetchPRMerged(owner, repo string, prNumber int) (bool, error) {
+	m.mu.Lock()
+	fn := m.fetchPRMergedFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, prNumber)
+	}
+	return false, nil
 }
 
 func (m *mockGitHubClient) FetchPRMergeableState(owner, repo string, prNumber int) (string, error) {
