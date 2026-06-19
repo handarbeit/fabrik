@@ -805,12 +805,12 @@ See **section 5.5** for how Fabrik monitors the convergence flow after auto-merg
 
 ### 5.5 Post-Validate Convergence Monitor (yolo issues)
 
-After `fabrik:auto-merge-enabled` is applied (section 5.4), every Phase 1 iteration of the catch-up loop calls `checkAutoMergeConvergence()` instead of the legacy `checkMergeabilityGate` / `checkCIGate` path. All merge decisions for the issue are delegated to GitHub's server-side auto-merge logic.
+After `fabrik:auto-merge-enabled` is applied (section 5.4), every Phase 1 iteration of the catch-up loop calls `checkAutoMergeConvergence()` instead of the legacy `checkMergeabilityGate` / `checkCIGate` path. All merge decisions for the issue are delegated to GitHub's server-side auto-merge logic. `handleAutoMergeConvergence` calls `settlePRMergeState()` before forwarding to `checkAutoMergeConvergence()`; the settle result is consumed for merge/CI state interpretation (eliminating the split-brain), though the merge/CI gates remain bypassed — see §6.4.
 
 **Convergence budget:**
 
 - The budget starts when `fabrik:auto-merge-enabled` is applied. The start timestamp is stored durably in GitHub's issue event log (`FetchLabelAppliedAt("fabrik:auto-merge-enabled")`), so it survives engine restarts.
-- The budget is configured via `FABRIK_CONVERGENCE_BUDGET` (Go duration syntax, e.g., `30m`). Default: 30 minutes. Set to `0` to disable the budget — Fabrik waits indefinitely for auto-merge to complete (or for the user to disable auto-merge in the GitHub UI). `MaxRebaseCycles` / `MaxCiFixCycles` cycle-count gates are NOT consulted while `fabrik:auto-merge-enabled` is present.
+- The budget is configured via `FABRIK_CONVERGENCE_BUDGET` (Go duration syntax, e.g., `30m`). Default: 30 minutes. Set to `0` to disable the budget — Fabrik waits indefinitely for auto-merge to complete (or for the user to disable auto-merge in the GitHub UI). `MaxCiFixCycles` is not consulted while `fabrik:auto-merge-enabled` is present. `MaxRebaseCycles` IS consulted: the convergence path's rebase dispatch is bounded by the same `MaxRebaseCycles` gate used by `handleMergeAndCIGates`, preventing an unbounded rebase loop when a conflict is unresolvable (see `RebaseCycles vs. budget` below).
 - On each Phase 1 iteration: `elapsed = time.Since(budgetStart)`. If `elapsed > budget`, `pauseForConvergenceFailed()` fires.
 
 **`checkAutoMergeConvergence()` decision tree:**
@@ -820,15 +820,15 @@ After `fabrik:auto-merge-enabled` is applied (section 5.4), every Phase 1 iterat
 | PR merged or closed | Remove `fabrik:auto-merge-enabled` + `fabrik:rebase-needed` (if present); existing machinery advances to Done |
 | `AutoMergeEnabled == false` (user disabled) | Apply `fabrik:paused` + `fabrik:awaiting-input`; remove `fabrik:auto-merge-enabled`; post comment with resume options (prevents Phase 2 from re-enabling auto-merge on the next poll) |
 | Budget exhausted | Call `pauseForConvergenceFailed()` (see below) |
-| `mergeable_state == "unknown"` | Wait — GitHub still computing after a push; re-evaluate next poll |
-| `mergeable_state == "dirty"` (conflict) | Dispatch rebase reinvoke (one per conflict transition); increment `RebaseCycles` for observability only (not a gate); skip if worker in-flight |
-| Any other state (`clean`, `blocked`, `behind`, `unstable`, `has_hooks`) | Wait — GitHub is handling it |
+| `settle.Status == PRMergeUnsettled` | Wait — GitHub still computing after a push (replaces `mergeable_state == "unknown"`); re-evaluate next poll |
+| `settle.Status == PRMergeConflicting` | Worker guard (`snap.Worker() != nil`) → skip if in-flight; cycle-limit check (`snap.RebaseCycles(stage) >= MaxRebaseCycles`) → `pauseForRebaseCycleLimit()`; otherwise increment `RebaseCycles` and dispatch rebase reinvoke |
+| Any other settle status (`PRMergeReady`, `PRMergeBlocked`, `PRMergeTerminal`, `PRMergeNoPR`) | Wait — GitHub is handling it |
 
 **Rebase reinvoke + auto-merge re-enable:**
 GitHub disables auto-merge on every push. After `dispatchRebaseReinvoke()` completes successfully (Claude resolved conflicts, pushed), `EnablePullRequestAutoMerge` is called again to re-arm auto-merge. This is the only scenario where auto-merge is re-enabled without going through `attemptMergeOnValidate`.
 
 **`pauseForConvergenceFailed()` — convergence budget exhausted:**
-Fetches fresh PR state (`FetchLinkedPR`), `FetchCommitsBehind`, `FetchCheckRuns`, and current rebase cycle count. Posts a structured pause comment containing:
+Uses `settle.PR` (from the pre-fetched `PRSettleResult`) for PR diagnostic fields, `FetchCommitsBehind` for the commits-behind count, `settle.CheckRuns` for the CI summary, and the store for the current rebase cycle count — no independent `FetchLinkedPR` or `FetchCheckRuns` calls. Posts a structured pause comment containing:
 - Total wall-clock elapsed time and configured budget
 - Number of rebase reinvokes dispatched
 - Commits-behind-base count
@@ -838,7 +838,7 @@ Fetches fresh PR state (`FetchLinkedPR`), `FetchCommitsBehind`, `FetchCheckRuns`
 
 Then: applies `fabrik:paused` + `fabrik:awaiting-input`; removes `fabrik:auto-merge-enabled`. Does NOT add `fabrik:awaiting-ci` (CI may be healthy; the convergence failure is about the merge window, not CI).
 
-**`RebaseCycles` vs. budget:** Under the convergence flow, `RebaseCycles` is incremented on every rebase dispatch for observability and for inclusion in the pause comment. It is NOT consulted as a gate. `MaxRebaseCycles` has no effect while `fabrik:auto-merge-enabled` is present. When `FABRIK_CONVERGENCE_BUDGET=0`, the budget check is skipped entirely — Fabrik waits indefinitely for the PR to be merged or closed.
+**`RebaseCycles` vs. budget:** Under the convergence flow, `RebaseCycles` is incremented on every rebase dispatch. `MaxRebaseCycles` IS consulted as a gate — the same three-step guard used by `handleMergeAndCIGates` (in-flight guard → cycle-limit check → dispatch or `pauseForRebaseCycleLimit`) applies here. When `FABRIK_CONVERGENCE_BUDGET=0`, the time-based budget check is skipped, but `MaxRebaseCycles` still bounds rebase reinvokes — so an unresolvable conflict never produces an unbounded rebase loop.
 
 **State transitions for yolo Validate convergence:**
 
@@ -846,7 +846,8 @@ Then: applies `fabrik:paused` + `fabrik:awaiting-input`; removes `fabrik:auto-me
 |---|---|---|---|---|
 | Validate, Complete | Poll tick (Phase 2) | Validate, Convergence | `fabrik:auto-merge-enabled` | |
 | Validate, Convergence | PR merged (GitHub) | Done, Pending Cleanup | | `fabrik:auto-merge-enabled`, `fabrik:rebase-needed` |
-| Validate, Convergence | `mergeable_state=dirty` (conflict) | Validate, Convergence + Rebase in-flight | `fabrik:rebase-needed` | |
+| Validate, Convergence | `settle.Status=PRMergeConflicting` (conflict, below `MaxRebaseCycles`) | Validate, Convergence + Rebase in-flight | `fabrik:rebase-needed` | |
+| Validate, Convergence | `settle.Status=PRMergeConflicting` (conflict, at `MaxRebaseCycles` limit) | Validate, Paused | `fabrik:paused`, `fabrik:awaiting-input` | |
 | Validate, Convergence + Rebase in-flight | Rebase push succeeds | Validate, Convergence | | |
 | Validate, Convergence | Budget exhausted | Validate, Paused | `fabrik:paused`, `fabrik:awaiting-input` | `fabrik:auto-merge-enabled` |
 | Validate, Convergence | User disables auto-merge in GitHub UI | Validate, Paused | `fabrik:paused`, `fabrik:awaiting-input` | `fabrik:auto-merge-enabled` |
@@ -1001,7 +1002,7 @@ Phase 1 is implemented as an explicit ordered slice of named handler methods (`c
 - **Worker guard (`snap.Worker() != nil`):** if a reinvoke goroutine from a previous poll cycle is still running, claims the item without dispatching or incrementing the cycle count.
 - **Cycle limit check** (`snap.ReviewCycles(stage.Name)` vs `MaxReviewCycles`, default 5): if exceeded, `pauseForReviewCycleLimit()` adds `fabrik:paused` + `fabrik:awaiting-input` and claims. If not exceeded: increment count via `ReviewCycleIncremented`, dispatch `dispatchReviewReinvoke()` (applies `WorkerEntered`, acquires semaphore, calls `processComments()` asynchronously), set `advancedItems[key] = true`, claim.
 
-**Handler 3: `handleAutoMergeConvergence`** — if the item does not have `fabrik:auto-merge-enabled`, passes through. If it does: calls `checkAutoMergeConvergence()` and claims the item (returns true). All merge/CI gates are bypassed — GitHub owns the merge decision for these items. This handler sits immediately before `handleMergeAndCIGates` to ensure `settlePRMergeState()` is never called for auto-merge items (they return true here before the settle call executes).
+**Handler 3: `handleAutoMergeConvergence`** — if the item does not have `fabrik:auto-merge-enabled`, passes through. If it does: calls `settlePRMergeState()` to build a `PRSettleResult`, then forwards to `checkAutoMergeConvergence()` which consumes the settle result for `PRMergeUnsettled`/`PRMergeConflicting` branch decisions. Claims the item (returns true). The merge/CI gates remain bypassed — GitHub owns the merge decision for these items — but `checkAutoMergeConvergence()` no longer independently interprets `mergeable_state` or calls `FetchPRMergeableFields`/`FetchCheckRuns`.
 
 **Handler 4: `handleMergeAndCIGates`** — calls `settlePRMergeState()` once (the settle call shared by both gates), then the merge-conflict gate, then the CI gate. Merge runs before CI per ADR-028: a PR made unmergeable by a base-branch advance must be rebased before the engine spins on CI-await polls. See §6.4 for the full settling primitive specification.
 
@@ -1054,7 +1055,12 @@ Phase 1 is implemented as an explicit ordered slice of named handler methods (`c
 
 ### 6.4 PR Merge State Settling Primitive
 
-`settlePRMergeState()` is called **once per catch-up loop Phase 1 iteration — before both the merge-conflict gate and the CI gate** — to read `mergeable`, `mergeable_state`, and check runs in a single pass. Both gates receive this `PRSettleResult` and do not make their own REST calls for these fields; this eliminates the split-brain where two separate REST calls within one poll cycle could observe different GitHub state.
+`settlePRMergeState()` is called **once per catch-up loop Phase 1 iteration** to read `mergeable`, `mergeable_state`, and check runs in a single pass. It is called from two handlers:
+
+- **`handleAutoMergeConvergence`** (Handler 3): for items with `fabrik:auto-merge-enabled`; `checkAutoMergeConvergence()` consumes the result for unsettled/conflict branch decisions, replacing direct `mergeable_state` interpretation and `FetchCheckRuns` calls. The merge/CI gates remain bypassed.
+- **`handleMergeAndCIGates`** (Handler 4): for all other items; both `checkMergeabilityGate()` and `checkCIGate()` receive the result and do not make their own REST calls for these fields.
+
+In both cases, this eliminates the split-brain where two separate REST calls within one poll cycle could observe different GitHub state.
 
 **Return type:** `PRSettleResult` carries:
 - `Status PRMergeStatus` — one of six typed constants (see below)
