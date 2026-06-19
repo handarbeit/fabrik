@@ -18,8 +18,8 @@ func TestProcessComments_StageCompleteMarker_TriggersAdvance(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{
 		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
-			// Output includes the stage complete marker
-			return "All looks good!\nFABRIK_STAGE_COMPLETE", false, TokenUsage{}, nil
+			// Output includes the stage complete marker → InvokeForComments returns completed=true.
+			return "All looks good!\nFABRIK_STAGE_COMPLETE", true, TokenUsage{}, nil
 		},
 	}
 
@@ -127,7 +127,8 @@ func TestProcessComments_SummaryBeforeStrip_VerificationUpdated(t *testing.T) {
 		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
 			// Output includes both FABRIK_STAGE_COMPLETE and FABRIK_SUMMARY_BEGIN...END
 			output := "Changes applied.\nFABRIK_SUMMARY_BEGIN\n" + summaryText + "\nFABRIK_SUMMARY_END\nFABRIK_STAGE_COMPLETE"
-			return output, false, TokenUsage{}, nil
+			// Marker emitted → InvokeForComments returns completed=true (marker-based).
+			return output, true, TokenUsage{}, nil
 		},
 	}
 

@@ -105,6 +105,13 @@ type ItemState struct {
 	// Zero when not recorded (comment-processing paths that don't track start time).
 	LastInvocationDuration time.Duration
 
+	// LastInvocationErrored records whether the most recent Claude invocation exited
+	// with a non-zero status (process error, timeout kill, etc.). This is recorded
+	// independently of LastInvocationCompleted: a stage can complete (FABRIK_STAGE_COMPLETE
+	// emitted) even when the process exits non-zero — e.g. a timeout kill after the stage
+	// finished. The error is surfaced as JobCompletedEvent.Success=false in history.
+	LastInvocationErrored bool
+
 	// LastTokenUsage holds token consumption from the most recent Claude invocation.
 	// Replaces engine.lastUsage[iKey].
 	LastTokenUsage TokenUsage

@@ -176,11 +176,11 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// Hard cap is 3× commentMaxTurns across all invocations.
 	var output string
 	var usage TokenUsage
+	var invCompleted bool
 	currentBudget := firstBudget
 	for {
 		invokeOpts.MaxTurnsOverride = currentBudget
 		var invOutput string
-		var invCompleted bool
 		var invUsage TokenUsage
 		invOutput, invCompleted, invUsage, err = e.claude.InvokeForComments(ctx, stage, item, comments, workDir, invokeOpts)
 		output += invOutput
@@ -225,17 +225,29 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		defer e.mu.Unlock()
 		e.totalTokens = addTokenUsage(e.totalTokens, usage)
 	}()
-	// err == nil guards against marking errored invocations as completed in history.
-	completed := err == nil && checkCompletion(stage, output)
+	// Honor FABRIK_STAGE_COMPLETE consistently with stage runs: invCompleted is the
+	// invoke layer's marker-based completion (engine/claude.go), which already treats
+	// the marker as authoritative even when the process exits non-zero (e.g. a timeout
+	// kill after the stage finished) and withholds completion on engine shutdown. A
+	// non-zero exit does NOT veto completion; it is recorded separately via Errored so
+	// the error is still visible in history (JobCompletedEvent.Success=false).
+	completed := invCompleted
 	e.store.Apply(itemstate.InvocationRecorded{
 		Repo:      itemOwnerRepoString(item, e.defaultRepo()),
 		Number:    item.Number,
 		Completed: completed,
+		Errored:   err != nil,
 		Usage:     usage,
 		IsComment: true,
 		Duration:  time.Since(startedAt),
 	})
-	if err != nil {
+	// Bail early ONLY if the stage did not complete. If FABRIK_STAGE_COMPLETE was
+	// emitted before the process exited non-zero (e.g. a timeout kill after the stage
+	// finished, or trailing work that ended non-zero), proceed with the completion path
+	// exactly like a stage run — a non-zero exit must not silently swallow a real
+	// completion. The error is already recorded via Errored above. On engine shutdown,
+	// invCompleted is false (see engine/claude.go), so that case still bails here.
+	if err != nil && !completed {
 		e.removeEditingLabel(owner, repo, item.Number)
 		if ctx.Err() != nil {
 			e.logf(item.Number, "skip", "cancelled during claude comment review\n")
@@ -243,6 +255,9 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		}
 		e.logf(item.Number, "warn", "claude comment review issue: %v\n", err)
 		return err
+	}
+	if err != nil {
+		e.logf(item.Number, "warn", "claude comment review exited with error but stage completed (marker found) — proceeding: %v\n", err)
 	}
 
 	// Capture git metadata for the comment header
