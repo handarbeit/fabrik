@@ -85,6 +85,27 @@ the canonical setup.
    E2E_TIMEOUT=3h scripts/e2e/run.sh -run TestPausedMergedPRRecovery
    ```
 
+### Additional prerequisites for `TestConjunctiveCIReviewGate`
+
+10. **`slow-gate` enrolled as a required status check** on
+    `handarbeit/fabrik-test-alpha/main`. The test skips gracefully (via
+    `t.Skip`) if not enrolled — safe to merge before enrollment.
+11. **One of the following for R5 (joint-clear verification)**:
+    - **`FABRIK_REVIEWER_TOKEN` in the test bed `.env`** — a GitHub PAT for a
+      non-`@arbeithand` account with write access to `fabrik-test-alpha`. The
+      test uses this token to submit an approving PR review from a second
+      identity (GitHub forbids self-approval). This exercises the full
+      approval-path joint-clear (R5).
+    - **`FABRIK_REVIEW_WAIT_TIMEOUT=2` in the test bed `.env`** — sets the
+      review gate timeout to 2 minutes so the review-timeout fallback path
+      (R5 reduced scope) completes in a reasonable wall-clock budget. If this
+      value exceeds 5 and no reviewer token is present, the test skips with
+      an instructional message. After editing `.env`, restart Fabrik.
+12. **`E2E_TIMEOUT=2h`** when running this test in isolation:
+    ```bash
+    E2E_TIMEOUT=2h scripts/e2e/run.sh -run TestConjunctiveCIReviewGate
+    ```
+
 ## Running
 
 The recommended entrypoint is the runner script, which sets sensible defaults:
@@ -130,8 +151,9 @@ otherwise).
 | `TestCIFixReinvoke` | CI-fix reinvoke positive path: sentinel fails on first push, Claude fixes, CI passes, issue closes | 75–90 min | $1.00–3.00 |
 | `TestCIFixReinvokeCycleLimit` | CI-fix reinvoke negative path: unfixable sentinel exhausts MaxCiFixCycles, issue pauses | 30–60 min | $0.50–1.50 |
 | `TestPausedMergedPRRecovery` | paused + gate-label at Validate with merged PR heals to CLOSED (3 sequential sub-tests: awaiting-ci, awaiting-review, no-gate-label); regression guard for #874 class | 60–90 min (3 sequential sub-tests, ~20–30 min each); run with `E2E_TIMEOUT=3h` | $1.50–4.50 |
+| `TestConjunctiveCIReviewGate` | Conjunctive CI∧review gate: fabrik:awaiting-ci holds before CI, PR comment during CI-await not dropped, fabrik:awaiting-review holds before approval, advance suppressed until both gates clear | 60–90 min (approval path) / 30–50 min (timeout path) | $1.00–2.50 |
 
-Approximate suite total: ~310 min wall-clock, $6.50–21.50 in Claude tokens (CI-fix tests and `TestPausedMergedPRRecovery` should be run separately with `E2E_TIMEOUT=3h`).
+Approximate suite total: ~470 min wall-clock, $7.50–24 in Claude tokens (CI-fix, `TestPausedMergedPRRecovery`, and conjunctive-gate tests should be run separately with `E2E_TIMEOUT=3h` or `E2E_TIMEOUT=2h` as noted above).
 
 ### Regression coverage map
 
@@ -147,6 +169,7 @@ Approximate suite total: ~310 min wall-clock, $6.50–21.50 in Claude tokens (CI
 | `TestCIFixReinvoke` | #888 ADR-056 D1 (settling primitive reinterprets CI-gate signals); CI-fix reinvoke loop (engine/ci.go) |
 | `TestCIFixReinvokeCycleLimit` | CI-fix cycle limit (`pauseForCIFixCycleLimit`), `MaxCiFixCycles` exhaustion path |
 | `TestPausedMergedPRRecovery` | #874 (paused+merged PR recovery class), #887 (settle-owner structural fix, `runValidatePRTerminalAdvance`), ADR-056 D2 (single-owner for PR-terminal → Done) |
+| `TestConjunctiveCIReviewGate` | ADR-056 D2 (conjunctive gate joint-clear), #887 (settle-owner), #895 (this scenario) |
 
 Every escape-from-release regression earns a new scenario in this table.
 
