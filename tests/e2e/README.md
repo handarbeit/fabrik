@@ -56,14 +56,6 @@ These tests assume:
 See `~/fabrik-oss-launch-notes.md` (under "Files and where they live") for
 the canonical setup.
 
-### Additional prerequisites for `TestPausedMergedPRRecovery`
-
-5. **`fabrik:paused`, `fabrik:awaiting-input`, `fabrik:awaiting-ci`, and `fabrik:awaiting-review` labels seeded** in `handarbeit/fabrik-test-alpha`. These are production labels and should always exist; `AddLabel` will fatal with a clear error if not.
-6. **`E2E_TIMEOUT=3h`** when running `TestPausedMergedPRRecovery` in isolation — three sequential cruise pipelines through Implement total ~60–90 min:
-   ```bash
-   E2E_TIMEOUT=3h scripts/e2e/run.sh -run TestPausedMergedPRRecovery
-   ```
-
 ### Additional prerequisites for `TestCIFixReinvoke` and `TestCIFixReinvokeCycleLimit`
 
 5. **`ci-fix-sentinel` enrolled as a required status check** on
@@ -79,6 +71,18 @@ the canonical setup.
    once pipeline setup overhead is included:
    ```bash
    E2E_TIMEOUT=3h scripts/e2e/run.sh -run TestCIFixReinvoke
+   ```
+
+### Additional prerequisites for `TestPausedMergedPRRecovery`
+
+8. **Gate labels seeded** in `handarbeit/fabrik-test-alpha`: `fabrik:awaiting-ci`,
+   `fabrik:awaiting-review`, `fabrik:paused`, and `fabrik:awaiting-input` are
+   production labels that must exist. `AddLabel` fatals immediately if a label is
+   absent — create them manually in the repo if needed.
+9. **`E2E_TIMEOUT=3h`** when running `TestPausedMergedPRRecovery` in isolation —
+   three sequential cruise pipelines (Specify → Implement each) total ~60–90 min:
+   ```bash
+   E2E_TIMEOUT=3h scripts/e2e/run.sh -run TestPausedMergedPRRecovery
    ```
 
 ## Running
