@@ -989,45 +989,47 @@ When all outstanding requested reviewers are bots (detected via `ReviewRequest.I
 
 The catch-up loop in `poll()` is split into two phases for every non-paused non-cleanup item that has either `stage:<X>:complete` OR `fabrik:awaiting-ci` (on a `wait_for_ci: true` stage):
 
-**Phase 1 — unconditional (all items, regardless of yolo/cruise/auto_advance):**
-1. `checkDependencies()` — if blocked, skip
-2. `checkReviewGate()` — **only when `stage:<X>:complete` is present** (skipped during the CI-await window when `fabrik:awaiting-ci` is present but `stage:X:complete` is absent — prevents spurious `fabrik:awaiting-review` re-application from stale board data; #617). When run: if awaiting reviewers, skip; if timed out, pause
-3. `buildReviewThreadComments()` collects inline comments from unresolved review threads (no ROCKET reaction, not in `snap.CommentProcessed(c.ID)`)
-4. **Worker guard (`snap.Worker() != nil`):** If a reinvoke goroutine from a previous poll cycle is still running, the entire reinvoke path is skipped (including cycle-limit checks)
-5. **Cycle limit check:** `snap.ReviewCycles(stage.Name)` is compared against `MaxReviewCycles` (default 5)
-   - If exceeded: `pauseForReviewCycleLimit()` adds `fabrik:paused` + `fabrik:awaiting-input` and posts comment
-   - If not exceeded: increment count, dispatch reinvoke via `dispatchReviewReinvoke()`:
-     - Applies `WorkerEntered` (prevents double-dispatch)
-     - Acquires semaphore slot (respects `MaxConcurrent`)
-     - Calls `processComments()` with the synthetic review comments asynchronously
-     - On exit: releases semaphore, applies `WorkerExited`
-   - Either way: `continue` — Phase 2 is skipped this cycle; item re-evaluated on next poll
-5.5. **Settle call** (runs immediately before the merge-conflict gate and CI gate; only for stages with `wait_for_ci: true`): `settlePRMergeState()` fetches `mergeable`, `mergeable_state`, and check runs in a single pass, returning a typed `PRSettleResult`. Both gates below receive this result and do not make their own REST calls for these fields — eliminating the split-brain where two separate REST calls within one poll cycle could observe different GitHub state. See §6.4 for the full settling primitive specification.
-6. **Merge-conflict gate** (only reached if no review reinvoke was dispatched in step 5; only runs for stages with `wait_for_ci: true`): `checkMergeabilityGate()` interprets the `PRSettleResult` from the settle call
-   - `PRMergeNoPR` or `PRMergeTerminal`: no-op; fall through to the CI gate
-   - `PRMergeReady`: clear any stale `fabrik:rebase-needed` label; fall through to the CI gate
-   - `PRMergeBlocked` (CI checks failed): clear any stale `fabrik:rebase-needed` label; fall through to the CI gate so `checkCIGate` can classify and dispatch the CI-fix reinvoke
-   - `PRMergeUnsettled`: block this item for the rest of Phase 1 (**no label churn** — ADR-032 R10c)
-   - `PRMergeConflicting` (`mergeable == false`): apply `fabrik:rebase-needed` idempotently, then **worker guard (`snap.Worker() != nil`)** + **cycle limit check** (`snap.RebaseCycles(stage.Name)` vs `MaxRebaseCycles`, default 3):
-     - If exceeded: `pauseForRebaseCycleLimit()` pauses issue
-     - If not exceeded: dispatch `dispatchRebaseReinvoke()`; `continue`. The catch-up loop never reaches the CI gate while a conflict is outstanding — there is no point spinning on CI-await when the branch cannot merge.
-7. **CI gate** (only reached if the merge-conflict gate cleared): `checkCIGate()` interprets the `PRSettleResult` from the settle call for stages with `wait_for_ci: true`
-   - **`PRMergeTerminal` (merged):** gate clears immediately (`addCompleteLabelAndRemoveCI`); advance to Done
-   - **`PRMergeTerminal` (closed, not merged):** `pauseForPRClosedNotMerged()` adds `fabrik:paused` + `fabrik:awaiting-input`, removes `fabrik:awaiting-ci`; returns `(false, false, false)` — poll.go does NOT call `pauseForCITimeout`
-   - **`PRMergeReady` (`mergeable_state ∈ {clean, unstable}`, or all checks green):** gate clears immediately via `addCompleteLabelAndRemoveCI()`; per-check classification is skipped. Rationale: GitHub's branch protection is the source of truth for "is this mergeable" — non-required check_run failures (e.g., workflow cleanup jobs) do not block merges per branch protection, so Fabrik must not block on them either.
-   - **`PRMergeBlocked` or `PRMergeUnsettled` with `CheckRuns` populated:** per-check classification applies; pending → skip (blocked, not failed); CI failed → dispatch `dispatchCIFixReinvoke()` or pause on cycle limit
-   - **`PRMergeUnsettled` with empty `CheckRuns` and `MergeableState == "blocked"`:** R3 — check `FetchLabelAppliedAt` dwell; if < CIWaitTimeout → dwell guard, not yet paused; if ≥ CIWaitTimeout → `pauseForRequiredNeverRunningCheck()`
-   - **`PRMergeUnsettled` with empty `CheckRuns` and `MergeableState ∉ {"", "unknown"}`:** non-empty branch-protection signal (e.g. `behind`, `dirty`, `has_hooks`) with no visible check_runs — checks `FetchLabelAppliedAt` inline; if ≥ CIWaitTimeout, removes `fabrik:awaiting-ci` and returns `(false, false, true)` (caller calls `pauseForCITimeout`); otherwise returns `(true, false, false)`, re-evaluates next poll
-   - **`PRMergeUnsettled` with empty `CheckRuns` and empty `MergeableState`:** hadChecks/dwell/post-push window — re-evaluates next poll; no label churn
-   - Timed out (generic path): `pauseForCITimeout()` pauses issue
-   - CI failed: **worker guard (`snap.Worker() != nil`)** + **cycle limit check** (`snap.CIFixCycles(stage.Name)` vs `MaxCiFixCycles`):
-     - If exceeded: `pauseForCIFixCycleLimit()` pauses issue
-     - If not exceeded: dispatch `dispatchCIFixReinvoke()`; `continue`
+**Phase 1 — unconditional, ordered handler list (`catchUpPhase1Handlers`):**
+
+Phase 1 is implemented as an explicit ordered slice of named handler methods (`catchUpPhase1Handlers` in `engine/catch_up_handlers.go`). Each handler returns `true` to claim the item — Phase 2 is skipped for this item this cycle — or `false` to pass through to the next handler. **Ordering is structurally enforced by slice position** (ADR-056 D3); a future reorder requires a deliberate code change and triggers a test failure, rather than occurring as an accidental side effect of a `continue` insertion.
+
+**Handler 1: `handleDependencies`** — thin wrapper around `checkDependencies()`. If the item has unresolved blocking dependencies, claims the item (returns true); otherwise passes through.
+
+**Handler 2: `handleReviewGate`** — only active when `stage:<X>:complete` is present (`pctx.hasComplete == true`; skipped during the CI-await window when `fabrik:awaiting-ci` is present but `stage:X:complete` is absent — prevents spurious `fabrik:awaiting-review` re-application from stale board data; #617):
+- `checkReviewGate()`: if awaiting reviewers, records `CooldownRecorded{Reason: "review-blocked"}` so `itemMayNeedWork`'s expiry path re-evaluates the item every 10 × PollSeconds, then claims the item; if timed out, calls `pauseForReviewTimeout()` and claims.
+- If gate cleared, `buildReviewThreadComments()` collects inline comments from unresolved review threads (no ROCKET reaction, not in `snap.CommentProcessed(c.ID)`). If no comments: passes through (returns false).
+- **Worker guard (`snap.Worker() != nil`):** if a reinvoke goroutine from a previous poll cycle is still running, claims the item without dispatching or incrementing the cycle count.
+- **Cycle limit check** (`snap.ReviewCycles(stage.Name)` vs `MaxReviewCycles`, default 5): if exceeded, `pauseForReviewCycleLimit()` adds `fabrik:paused` + `fabrik:awaiting-input` and claims. If not exceeded: increment count via `ReviewCycleIncremented`, dispatch `dispatchReviewReinvoke()` (applies `WorkerEntered`, acquires semaphore, calls `processComments()` asynchronously), set `advancedItems[key] = true`, claim.
+
+**Handler 3: `handleAutoMergeConvergence`** — if the item does not have `fabrik:auto-merge-enabled`, passes through. If it does: calls `checkAutoMergeConvergence()` and claims the item (returns true). All merge/CI gates are bypassed — GitHub owns the merge decision for these items. This handler sits immediately before `handleMergeAndCIGates` to ensure `settlePRMergeState()` is never called for auto-merge items (they return true here before the settle call executes).
+
+**Handler 4: `handleMergeAndCIGates`** — calls `settlePRMergeState()` once (the settle call shared by both gates), then the merge-conflict gate, then the CI gate. Merge runs before CI per ADR-028: a PR made unmergeable by a base-branch advance must be rebased before the engine spins on CI-await polls. See §6.4 for the full settling primitive specification.
+
+- **Settle call:** `settlePRMergeState()` fetches `mergeable`, `mergeable_state`, and check runs in a single pass, returning a typed `PRSettleResult`. Both gates below consume this result and do not make additional REST calls — eliminating the split-brain where two separate REST calls within one poll cycle could observe different GitHub state.
+
+- **Merge-conflict gate** (`checkMergeabilityGate()` interprets `PRSettleResult`):
+  - `PRMergeNoPR` or `PRMergeTerminal`: no-op; fall through to the CI gate
+  - `PRMergeReady`: clear any stale `fabrik:rebase-needed` label; fall through to the CI gate
+  - `PRMergeBlocked` (CI checks failed): clear any stale `fabrik:rebase-needed` label; fall through to the CI gate so `checkCIGate` can classify and dispatch the CI-fix reinvoke
+  - `PRMergeUnsettled`: claims the item, blocking it for the rest of Phase 1 (**no label churn** — ADR-032 R10c)
+  - `PRMergeConflicting` (`mergeable == false`): apply `fabrik:rebase-needed` idempotently, then **worker guard (`snap.Worker() != nil`)** + **cycle limit check** (`snap.RebaseCycles(stage.Name)` vs `MaxRebaseCycles`, default 3):
+    - If exceeded: `pauseForRebaseCycleLimit()` pauses issue and claims
+    - If not exceeded: increment count via `RebaseCycleIncremented`, dispatch `dispatchRebaseReinvoke()`, set `advancedItems[key] = true`, claim. The CI gate is never reached while a conflict is outstanding — there is no point spinning on CI-await when the branch cannot merge.
+
+- **CI gate** (`checkCIGate()` interprets `PRSettleResult`; only active when `stage.WaitForCI == true`):
+  - **`PRMergeTerminal` (merged):** gate clears immediately (`addCompleteLabelAndRemoveCI`); handler returns false (advance falls through to Phase 2)
+  - **`PRMergeTerminal` (closed, not merged):** `pauseForPRClosedNotMerged()` adds `fabrik:paused` + `fabrik:awaiting-input`, removes `fabrik:awaiting-ci`; handler returns false
+  - **`PRMergeReady` (`mergeable_state ∈ {clean, unstable}`, or all checks green):** gate clears immediately via `addCompleteLabelAndRemoveCI()`; per-check classification is skipped. Rationale: GitHub's branch protection is the source of truth for "is this mergeable" — non-required check_run failures (e.g., workflow cleanup jobs) do not block merges per branch protection, so Fabrik must not block on them either.
+  - **`PRMergeBlocked` or `PRMergeUnsettled` with `CheckRuns` populated:** per-check classification applies; pending → blocked (not failed); CI failed → **worker guard (`snap.Worker() != nil`)** + **cycle limit check** (`snap.CIFixCycles(stage.Name)` vs `MaxCiFixCycles`): if exceeded, `pauseForCIFixCycleLimit()` claims; if not exceeded, increment count via `CIFixCycleIncremented`, dispatch `dispatchCIFixReinvoke()`, set `advancedItems[key] = true`, claim
+  - **`PRMergeUnsettled` with empty `CheckRuns` and `MergeableState == "blocked"`:** R3 — check `FetchLabelAppliedAt` dwell; if < CIWaitTimeout → dwell guard, not yet paused; if ≥ CIWaitTimeout → `pauseForRequiredNeverRunningCheck()`
+  - **`PRMergeUnsettled` with empty `CheckRuns` and `MergeableState ∉ {"", "unknown"}`:** non-empty branch-protection signal (e.g. `behind`, `dirty`, `has_hooks`) with no visible check_runs — checks `FetchLabelAppliedAt` inline; if ≥ CIWaitTimeout, removes `fabrik:awaiting-ci` and returns `(false, false, true)` (caller calls `pauseForCITimeout`); otherwise returns `(true, false, false)`, re-evaluates next poll
+  - **`PRMergeUnsettled` with empty `CheckRuns` and empty `MergeableState`:** hadChecks/dwell/post-push window — re-evaluates next poll; no label churn
+  - Timed out (generic path): `pauseForCITimeout()` pauses issue
 
 **After Phase 1 + Phase 2 — single-owner Validate advance (`runValidatePRTerminalAdvance`, R4 — ADR-056 D2, ADR-057):** A single authoritative scan iterates `deepFetchCandidates` for all Validate-stage items not in the `fabrik:auto-merge-enabled` convergence flow, regardless of which gate label (`fabrik:awaiting-ci`, `fabrik:awaiting-review`, `fabrik:rebase-needed`, or any future label) is present. For each, `e.client.FetchLinkedPR` is called directly (not `e.readClient` — boardcache may have stale state). When `pr.Merged == true`: iterates all pipeline stages in ascending Order from the stage after the highest already-complete stage up to (but not including) the cleanup-terminal stage, adding `stage:<N>:complete` for every `WaitForCI` or `WaitForReviews` gate-checked stage whose label is absent (with cache write-through; fail-fast on error for idempotent retry). After all labels are added, `removeAwaitingCILabel`, `removeAwaitingReviewLabel`, and `removeRebaseNeededLabel` are called as applicable, `fabrik:paused` + `fabrik:awaiting-input` are removed, and `advanceToNextStage()` is called. Items already in `advancedItems` are skipped (prevents double-advance). This self-heals Validate-stage items merged externally regardless of which gate was active, without requiring a manual unpause. The function never dispatches workers or acquires `e.sem` — label-mutation-only path (see ADR-053 constraints; superseded in structure by ADR-057).
 
 **Phase 2 — gated (yolo/cruise/auto_advance only):**
-- Only runs when no reinvoke was dispatched in Phase 1 (review, rebase, and CI-fix reinvoke all `continue`)
+- Only runs when no Phase 1 handler claimed the item (i.e., all handlers returned false)
 - Gated on: `e.cfg.Yolo` OR `fabrik:yolo` label OR `fabrik:cruise` label OR stage `auto_advance: true`
 - Runs `attemptMergeOnValidate()` (yolo only), skips if unprocessed comments exist, then calls `advanceToNextStage()`
 
