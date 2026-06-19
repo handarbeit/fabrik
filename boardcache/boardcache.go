@@ -19,6 +19,7 @@ type ReadClient interface {
 	FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDetails, error)
 	FetchPRMergeableFields(owner, repo string, prNumber int) (mergeable *bool, mergeableState string, err error)
 	FetchPRMergeable(owner, repo string, prNumber int) (*bool, error)
+	FetchPRMerged(owner, repo string, prNumber int) (bool, error)
 	FetchPRMergeableState(owner, repo string, prNumber int) (string, error)
 	FetchLabels(owner, repo string, issueNumber int) ([]string, error)
 	FetchStatusField(projectID string) (*gh.StatusField, error)
@@ -62,6 +63,10 @@ func (a *GitHubAdapter) FetchPRMergeableFields(owner, repo string, prNumber int)
 
 func (a *GitHubAdapter) FetchPRMergeable(owner, repo string, prNumber int) (*bool, error) {
 	return a.client.FetchPRMergeable(owner, repo, prNumber)
+}
+
+func (a *GitHubAdapter) FetchPRMerged(owner, repo string, prNumber int) (bool, error) {
+	return a.client.FetchPRMerged(owner, repo, prNumber)
 }
 
 func (a *GitHubAdapter) FetchPRMergeableState(owner, repo string, prNumber int) (string, error) {
@@ -786,6 +791,12 @@ func (c *CacheImpl) FetchPRMergeableFields(owner, repo string, prNumber int) (*b
 // FetchPRMergeable always delegates to GitHub — mergeability changes without webhooks.
 func (c *CacheImpl) FetchPRMergeable(owner, repo string, prNumber int) (*bool, error) {
 	return c.fallback.FetchPRMergeable(owner, repo, prNumber)
+}
+
+// FetchPRMerged always delegates to GitHub — the authoritative merged flag must be
+// fresh (the cache/list-endpoint copy lags right after a merge).
+func (c *CacheImpl) FetchPRMerged(owner, repo string, prNumber int) (bool, error) {
+	return c.fallback.FetchPRMerged(owner, repo, prNumber)
 }
 
 // FetchPRMergeableState always delegates to GitHub — mergeability changes without webhooks.
