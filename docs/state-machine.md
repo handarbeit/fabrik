@@ -1101,7 +1101,11 @@ In both cases, this eliminates the split-brain where two separate REST calls wit
 
 **`MergeableState` omission invariant:** `checkCIGate` uses `settle.MergeableState` to detect R3 (OPEN+BLOCKED+no-check-runs+`fabrik:awaiting-ci` elapsed → `pauseForRequiredNeverRunningCheck`). The primitive omits `MergeableState` from the `PRSettleResult` in the hadChecks, post-push dwell, and HeadSHA-empty cases. This prevents R3 from misfiring on cases where `hadChecks == true` (checks have been observed) or where GitHub simply hasn't computed mergeability yet (post-push window). Only a non-empty `MergeableState` in the settle result is genuinely relevant for R3/branch-protection timeout checking.
 
-**`FetchCheckRuns` consolidation:** `buildCIFixComment()` (called inside `dispatchCIFixReinvoke()`) uses `settle.CheckRuns` for the PR-head check runs, eliminating the separate `FetchCheckRuns()` call that previously lived in the CI-fix path. The base-branch `FetchCheckRuns(baseSHA)` inside `buildCIFixComment()` is a **non-gate diagnostic read** — it fetches check runs for the base branch's HEAD SHA for regression-vs-pre-existing classification only, and is structurally independent (different SHA; result is not used by either gate).
+**`FetchCheckRuns` consolidation:** Two callers consume `settle.CheckRuns` from the `PRSettleResult` instead of making independent `FetchCheckRuns` calls:
+- `buildCIFixComment()` (called inside `dispatchCIFixReinvoke()`) uses `settle.CheckRuns` for the PR-head check runs — eliminating the separate `FetchCheckRuns()` call that previously lived in the CI-fix path.
+- `pauseForConvergenceFailed()` uses `settle.CheckRuns` for the CI summary in the convergence-budget-exhausted pause comment — no independent `FetchCheckRuns` call for the convergence path.
+
+The base-branch `FetchCheckRuns(baseSHA)` inside `buildCIFixComment()` is a **non-gate diagnostic read** — it fetches check runs for the base branch's HEAD SHA for regression-vs-pre-existing classification only, and is structurally independent (different SHA; result is not used by either gate).
 
 ### 6.5 CI Gate and CI-Fix Reinvoke
 
