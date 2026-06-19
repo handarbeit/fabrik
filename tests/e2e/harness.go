@@ -162,6 +162,45 @@ func SetIssueStatus(t *testing.T, env *Env, itemID, columnName string) {
 	}
 }
 
+// WaitForProjectStatus polls the project board until the item for issueNumber
+// reports Status == columnName, or fails after timeout. Use this after
+// SetIssueStatus when a subsequent action (e.g. an external PR merge that
+// closes the issue) would otherwise race the engine's next board poll: it
+// confirms GitHub has propagated the new column before the action lands.
+func WaitForProjectStatus(t *testing.T, env *Env, repo string, issueNumber int, columnName string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last string
+	for time.Now().Before(deadline) {
+		out, err := ghOutput(env, "project", "item-list", fmt.Sprint(env.ProjectNumber),
+			"--owner", env.ProjectOwner, "--format", "json", "--limit", "200")
+		if err == nil {
+			var wrapped struct {
+				Items []struct {
+					Status  string `json:"status"`
+					Content struct {
+						Number     int    `json:"number"`
+						Repository string `json:"repository"`
+					} `json:"content"`
+				} `json:"items"`
+			}
+			if json.Unmarshal([]byte(out), &wrapped) == nil {
+				for _, it := range wrapped.Items {
+					if it.Content.Number == issueNumber && strings.EqualFold(it.Content.Repository, repo) {
+						last = it.Status
+						if it.Status == columnName {
+							return
+						}
+					}
+				}
+			}
+		}
+		time.Sleep(10 * time.Second)
+	}
+	t.Fatalf("timed out waiting for project status %q on %s#%d (last observed %q)",
+		columnName, repo, issueNumber, last)
+}
+
 // WaitForIssueLabel polls the issue until it has all of the named labels, or
 // timeout expires.
 func WaitForIssueLabel(t *testing.T, env *Env, repo string, issueNumber int, label string, timeout time.Duration) {
@@ -403,7 +442,13 @@ func WaitForLinkedPR(t *testing.T, env *Env, repo string, issueNum int, timeout 
 // suppresses auto-merge and waits for a human to approve and merge the PR).
 func MergePR(t *testing.T, env *Env, repo string, prNumber int) {
 	t.Helper()
-	out, err := ghOutput(env, "pr", "merge", fmt.Sprint(prNumber), "-R", repo, "--merge")
+	// --admin bypasses not-yet-green required checks. The test repo has
+	// enforce_admins:false, so an admin merge is permitted, and it faithfully
+	// models the scenario these tests simulate: an external human merging the PR.
+	// Without it, a merge issued before the ~6-min slow-gate (and other required
+	// checks) go green is rejected with "the base branch policy prohibits the
+	// merge" — a non-deterministic failure that depends on CI timing.
+	out, err := ghOutput(env, "pr", "merge", fmt.Sprint(prNumber), "-R", repo, "--merge", "--admin")
 	if err != nil {
 		t.Fatalf("merge PR #%d in %s: %v\n%s", prNumber, repo, err, out)
 	}
@@ -860,6 +905,78 @@ func PRCheckRunConclusions(t *testing.T, env *Env, repo string, prNumber int) []
 		t.Fatalf("PRCheckRunConclusions %s#%d: %v", repo, prNumber, err)
 	}
 	return conclusions
+}
+
+// tryNamedCheckConclusion returns the latest conclusion of the named check run
+// on the PR's head SHA ("pending" if the run exists but has not completed, ""
+// if no such check is present yet). Errors are transient (callers retry).
+func tryNamedCheckConclusion(env *Env, repo string, prNumber int, checkName string) (string, error) {
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		return "", fmt.Errorf("bad repo: %q", repo)
+	}
+	shaOut, err := ghOutput(env, "api",
+		fmt.Sprintf("repos/%s/%s/pulls/%d", owner, name, prNumber),
+		"--jq", ".head.sha")
+	if err != nil {
+		return "", fmt.Errorf("resolve head SHA: %w", err)
+	}
+	sha := strings.TrimSpace(shaOut)
+	if sha == "" || sha == "null" {
+		return "", fmt.Errorf("empty head SHA for %s#%d", repo, prNumber)
+	}
+	out, err := ghOutput(env, "api",
+		fmt.Sprintf("repos/%s/%s/commits/%s/check-runs", owner, name, sha),
+		"--jq", fmt.Sprintf("[.check_runs[] | select(.name==%q) | .conclusion // \"pending\"] | last // \"\"", checkName))
+	if err != nil {
+		return "", fmt.Errorf("check runs: %w", err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// WaitForCheckConclusion polls until the named check run on the PR reaches the
+// wanted conclusion, or fails after timeout. Use it to establish a precondition
+// (e.g. confirm ci-fix-sentinel has genuinely FAILED) before asserting on gate
+// behavior — fabrik:awaiting-ci alone does not prove CI is failing.
+func WaitForCheckConclusion(t *testing.T, env *Env, repo string, prNumber int, checkName, want string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last string
+	for time.Now().Before(deadline) {
+		c, err := tryNamedCheckConclusion(env, repo, prNumber, checkName)
+		if err == nil {
+			last = c
+			if c == want {
+				return
+			}
+		}
+		time.Sleep(15 * time.Second)
+	}
+	t.Fatalf("timed out waiting for check %q to reach conclusion %q on %s#%d (last observed %q)",
+		checkName, want, repo, prNumber, last)
+}
+
+// AssertPRDidNotTouchWorkflows fails if the PR modifies any file under .github/.
+// The CI workflow (including the ci-fix-sentinel job) is immutable test
+// infrastructure; an agent editing it invalidates CI-gating scenarios.
+func AssertPRDidNotTouchWorkflows(t *testing.T, env *Env, repo string, prNumber int) {
+	t.Helper()
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		t.Fatalf("bad repo: %q", repo)
+	}
+	out, err := ghOutput(env, "api", "--paginate",
+		fmt.Sprintf("repos/%s/%s/pulls/%d/files", owner, name, prNumber),
+		"--jq", ".[].filename")
+	if err != nil {
+		t.Fatalf("list PR files for %s#%d: %v", repo, prNumber, err)
+	}
+	for _, f := range strings.Split(strings.TrimSpace(out), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(f), ".github/") {
+			t.Fatalf("PR #%d modified protected path %q — the CI workflow is immutable test infrastructure and must not be edited by the agent",
+				prNumber, strings.TrimSpace(f))
+		}
+	}
 }
 
 // tryPRCommitCount returns the number of commits on the PR, or (0, err) on

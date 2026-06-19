@@ -47,10 +47,24 @@ func TestCIFixReinvoke(t *testing.T) {
 	baseCommits := PRCommitCount(t, env, env.RepoAlpha, prNumber)
 	t.Logf("PR #%d has %d commits at baseline (before Validate)", prNumber, baseCommits)
 
+	// Guard: the agent must NOT have modified the CI workflow. The ci-fix-sentinel
+	// job is immutable test infrastructure; if the agent edited it (e.g. to relax
+	// the failing condition) the whole CI-fix scenario is invalid.
+	AssertPRDidNotTouchWorkflows(t, env, env.RepoAlpha, prNumber)
+
 	// Validate fires, CI fails, engine adds fabrik:awaiting-ci.
 	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-ci", 30*time.Minute)
 	AssertLabelWasApplied(t, env, env.RepoAlpha, num, "fabrik:awaiting-ci")
 	t.Logf("fabrik:awaiting-ci confirmed on %s#%d", env.RepoAlpha, num)
+
+	// Establish the precondition for the withheld-window assertion: confirm the
+	// sentinel check has GENUINELY FAILED. fabrik:awaiting-ci is applied
+	// unconditionally on every wait_for_ci Validate completion (engine/stages.go)
+	// — it is NOT proof that CI is failing. Without this guard, a sentinel that
+	// passed (e.g. because the agent satisfied it prematurely) would let
+	// stage:Validate:complete appear and be misread as a CI-gate leak.
+	WaitForCheckConclusion(t, env, env.RepoAlpha, prNumber, "ci-fix-sentinel", "failure", 10*time.Minute)
+	t.Logf("ci-fix-sentinel confirmed FAILED on PR #%d — withheld window is now meaningful", prNumber)
 
 	// 2-minute withheld window: Validate must NOT complete while CI is failing.
 	withheldDeadline := time.Now().Add(2 * time.Minute)
@@ -205,33 +219,50 @@ func TestCIFixReinvokeCycleLimit(t *testing.T) {
 
 // ciFixReinvokeBody is the issue body for TestCIFixReinvoke. The PR body must
 // contain "ci-fix-sentinel-required" so the test-alpha CI workflow triggers the
-// sentinel check (which fails on the first push, requiring a fix commit).
+// ci-fix-sentinel check. That check FAILS until a file named SENTINEL_FIX
+// (at the repo root) contains the line "ci-fix-satisfied" — the only sanctioned
+// way to satisfy it. Claude must create that file ONLY on the CI-fix reinvoke,
+// producing the failure → reinvoke → recovery sequence the test exercises.
 //
-// Claude is instructed to make a deterministic, reversible change to README.md
-// on the initial push (which will fail the sentinel), then push a second commit
-// that satisfies the sentinel condition when reinvoked.
+// The SENTINEL_FIX mechanism is deliberately the sole satisfaction path and the
+// workflow is off-limits (see hard constraints) so the agent cannot satisfy or
+// weaken the sentinel prematurely — the historical failure mode that made the
+// sentinel pass before the CI-fix loop ever ran.
 const ciFixReinvokeBody = `## Goal
 
 End-to-end regression test for the Fabrik CI-fix reinvoke loop (handarbeit/fabrik#900).
 
 ## The change
 
-Add exactly one new HTML comment to README.md, on its own line, immediately
-after the line containing "# fabrik-test-alpha". The comment must be:
+On the **initial Implement commit**, add exactly one new HTML comment to
+README.md, on its own line, immediately after the line containing
+"# fabrik-test-alpha":
 
     <!-- ci-fix-reinvoke-initial -->
 
-**On the initial Implement commit**: add only the HTML comment above. Do NOT
-make any other changes. The CI sentinel will fail on this commit.
+Make NO other changes on this commit. In particular do NOT create the
+SENTINEL_FIX file yet. The ci-fix-sentinel check WILL fail on this first push —
+that failure is expected and required.
 
 **When the CI-fix reinvoke fires** (you will be prompted with a message about
-CI failure): push a second commit that adds exactly one more line immediately
-below the first comment:
+the CI failure), and ONLY then, push a second commit that creates a new file
+named exactly ` + "`SENTINEL_FIX`" + ` at the repository root, containing exactly this
+single line:
 
-    <!-- ci-fix-sentinel-satisfied -->
+    ci-fix-satisfied
 
-This second commit makes the sentinel pass. Do not rebase or squash — the
-two commits must remain distinct so the e2e test can verify the commit count.
+That second commit makes the sentinel pass. Do not rebase or squash — the two
+commits must remain distinct so the e2e test can verify the commit count.
+
+## Hard constraints (do NOT violate)
+
+- NEVER modify any file under ` + "`.github/`" + `. The CI workflow — including the
+  ci-fix-sentinel job — is immutable test infrastructure. Editing it invalidates
+  the test and will fail the run.
+- Do NOT create the SENTINEL_FIX file on the initial commit; create it ONLY on
+  the CI-fix reinvoke.
+- The PR body MUST contain the literal marker ` + "`ci-fix-sentinel-required`" + ` so the
+  sentinel fires.
 
 ## CI behaviour required
 
@@ -242,8 +273,9 @@ ci-fix-sentinel-required
 
 ## Scope
 
-Single file (README.md). No other changes. No decomposition. Plan and Implement
-should be minimal — one commit on the initial push, one CI-fix commit.
+README.md on the initial commit; a new SENTINEL_FIX file on the CI-fix reinvoke.
+No other files. No decomposition. One commit on the initial push, one CI-fix
+commit.
 `
 
 // ciFixCycleLimitBody is the issue body for TestCIFixReinvokeCycleLimit. The
@@ -267,6 +299,12 @@ This is the only change needed. Do NOT attempt to remove or alter the CI
 sentinel marker in the PR body — the sentinel is intentionally unfixable
 at the code level. Make your best effort on each CI-fix reinvoke, but the
 test expects the cycle limit to be reached.
+
+## Hard constraints (do NOT violate)
+
+- NEVER modify any file under ` + "`.github/`" + `. The CI workflow — including the
+  ci-fix-sentinel job — is immutable test infrastructure. It is intentionally
+  unfixable here; editing it invalidates the test.
 
 ## CI behaviour required
 
