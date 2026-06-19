@@ -481,6 +481,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 	case InvocationRecorded:
 		item.LastInvocationCompleted = v.Completed
 		item.LastInvocationBlocked = v.Blocked
+		item.LastInvocationErrored = v.Errored
 		item.LastInvocationIsComment = v.IsComment
 		item.LastInvocationDuration = v.Duration
 		item.LastTokenUsage = v.Usage

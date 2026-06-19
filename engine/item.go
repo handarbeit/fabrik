@@ -1082,6 +1082,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		Number:    item.Number,
 		Completed: completed,
 		Blocked:   blockedOnInput,
+		Errored:   err != nil,
 		Usage:     usage,
 		Duration:  time.Since(workerStartedAt),
 	})

@@ -505,7 +505,11 @@ type InvocationRecorded struct {
 	Number    int
 	Completed bool
 	Blocked   bool
-	Usage     TokenUsage
+	// Errored is true when the Claude process exited non-zero. Recorded independently
+	// of Completed — the completion marker is authoritative for whether the stage
+	// completed; Errored only records that the process didn't exit cleanly.
+	Errored bool
+	Usage   TokenUsage
 	// IsComment is true when the invocation processed a user comment rather than
 	// running a stage. Stored in ItemState.LastInvocationIsComment so that the
 	// InvocationObserver can forward the correct flag to the TUI.
