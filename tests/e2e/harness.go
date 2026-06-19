@@ -1118,6 +1118,34 @@ func SubmitPRReview(t *testing.T, env *Env, reviewerToken string, repo string, p
 	}
 }
 
+// TokenLogin returns the GitHub login that owns the given token. Used to resolve
+// the reviewer identity so it can be requested as a PR reviewer.
+func TokenLogin(t *testing.T, token string) string {
+	t.Helper()
+	out, err := ghOutputWithToken(token, "api", "user", "--jq", ".login")
+	if err != nil {
+		t.Fatalf("resolve token login: %v\n%s", err, out)
+	}
+	login := strings.TrimSpace(out)
+	if login == "" {
+		t.Fatalf("empty login for token")
+	}
+	return login
+}
+
+// RequestPRReviewer requests reviewerLogin as a reviewer on the PR, using the
+// harness's primary token (the PR-author identity). The engine's review gate
+// (fabrik:awaiting-review) only engages when an outstanding reviewer request
+// exists on the PR, so review-gate tests must establish one before the gated
+// stage completes.
+func RequestPRReviewer(t *testing.T, env *Env, repo string, prNumber int, reviewerLogin string) {
+	t.Helper()
+	out, err := ghOutput(env, "pr", "edit", fmt.Sprint(prNumber), "-R", repo, "--add-reviewer", reviewerLogin)
+	if err != nil {
+		t.Fatalf("RequestPRReviewer %s on %s PR #%d: %v\n%s", reviewerLogin, repo, prNumber, err, out)
+	}
+}
+
 // WaitForPRCommentReaction polls PR comments (via the issues comments API)
 // every 15s until a comment containing commentSubstring has at least one
 // reaction of type reactionContent (e.g. "eyes" for 👀, "rocket" for 🚀).

@@ -67,6 +67,19 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 	prNumber := LinkedPRNumber(t, env, env.RepoAlpha, num)
 	t.Logf("Implement complete; PR #%d created for %s#%d", prNumber, env.RepoAlpha, num)
 
+	// Establish an outstanding reviewer request so the review gate has something
+	// to hold on. The engine's checkReviewGate only applies fabrik:awaiting-review
+	// when the PR has outstanding requested reviewers; nothing requests one
+	// automatically (validate.yaml has wait_for_reviews:true but no reviewers
+	// list). Request the reviewer-token identity (a non-author account) now, well
+	// before Validate completes. (Approval path only; the timeout-fallback path
+	// has no token to resolve a reviewer login.)
+	if reviewerToken != "" {
+		reviewerLogin := TokenLogin(t, reviewerToken)
+		RequestPRReviewer(t, env, env.RepoAlpha, prNumber, reviewerLogin)
+		t.Logf("requested reviewer %q on PR #%d so the review gate engages", reviewerLogin, prNumber)
+	}
+
 	// R1: fabrik:awaiting-ci must appear after Validate fires (CI gate holds).
 	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-ci", 30*time.Minute)
 	AssertLabelWasApplied(t, env, env.RepoAlpha, num, "fabrik:awaiting-ci")
