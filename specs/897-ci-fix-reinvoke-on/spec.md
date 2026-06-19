@@ -26,7 +26,7 @@ A developer files a `wait_for_ci` issue whose implementation produces a PR that 
 
 **Why this priority**: This is the primary regression guard for ADR-056 root cause 2 and the #888 settling primitive consolidation. Without it, a bug in the CI-fix loop would not be caught until a production incident.
 
-**Independent Test**: `TestCIFixReinvokeHappyPath` — files a single issue, waits for the CI failure observation, waits for the fix commit, waits for CI pass, asserts label transitions and stage completion.
+**Independent Test**: `TestCIFixReinvoke` — files a single issue, waits for the CI failure observation, waits for the fix commit, waits for CI pass, asserts label transitions and stage completion.
 
 **Acceptance Scenarios**:
 
@@ -79,14 +79,14 @@ The Research stage must design the exact sentinel mechanism before any coding be
 ### Functional Requirements
 
 - **FR-001**: A new required CI job in `handarbeit/fabrik-test-alpha` implements the CI failure sentinel. The job's name must be unique enough to be unambiguous in harness assertions.
-- **FR-002**: A new `TestCIFixReinvokeHappyPath` e2e test covers the positive scenario (failure → fix → recover).
+- **FR-002**: A new `TestCIFixReinvoke` e2e test covers the positive scenario (failure → fix → recover).
 - **FR-003**: A new `TestCIFixReinvokeCycleLimit` e2e test covers the negative scenario (unfixable failure → cycle limit → pause). This test is marked as optional-but-recommended in the issue; the spec treats it as required for complete regression coverage.
 - **FR-004**: New harness helpers are added to `tests/e2e/harness.go`:
-  - `PRCheckRunConclusions(t, env, repo, prNumber)` — returns a map of check run name → conclusion for the current HEAD of the PR.
-  - `PRCommitCount(t, env, repo, prBranch, baseBranch)` — returns the number of commits on the PR branch ahead of the base branch.
+  - `PRCheckRunConclusions(t, env, repo, prNumber)` — returns a slice of check run conclusions for the current HEAD of the PR.
+  - `PRCommitCount(t, env, repo, prNumber)` — returns the number of commits on the PR.
   - (Or equivalent helpers sufficient to assert "exactly one fix-cycle commit" and "CI check passed".)
 - **FR-005**: The e2e README is updated with new rows in the Scenarios table and Regression coverage map, referencing #855, #871, and ADR-056.
-- **FR-006**: The test issue body used by `TestCIFixReinvokeHappyPath` must not contain `slow-ci-required` (the fix cycle must complete without the 6-minute slow gate, keeping wall-clock reasonable).
+- **FR-006**: The test issue body used by `TestCIFixReinvoke` must not contain `slow-ci-required` (the fix cycle must complete without the 6-minute slow gate, keeping wall-clock reasonable).
 - **FR-007**: Assertions on label ordering: `fabrik:awaiting-ci` must be observed present before `stage:<X>:complete` appears. `stage:<X>:complete` must never be observed simultaneously with `fabrik:awaiting-ci`.
 
 ### Key Entities
@@ -99,7 +99,7 @@ The Research stage must design the exact sentinel mechanism before any coding be
 
 ### Measurable Outcomes
 
-- **SC-001**: `TestCIFixReinvokeHappyPath` passes: the issue closes (or advances to the next stage) within the wall-clock budget, with `fabrik:awaiting-ci` having been applied and cleared exactly once, and `stage:<X>:complete` appearing only after `fabrik:awaiting-ci` is cleared.
+- **SC-001**: `TestCIFixReinvoke` passes: the issue closes (or advances to the next stage) within the wall-clock budget, with `fabrik:awaiting-ci` having been applied and cleared exactly once, and `stage:<X>:complete` appearing only after `fabrik:awaiting-ci` is cleared.
 - **SC-002**: `TestCIFixReinvokeCycleLimit` passes: the issue reaches `fabrik:paused` + `fabrik:awaiting-input` within the wall-clock budget, with the number of fix-cycle commits on the PR branch equal to `MaxCiFixCycles` (no infinite loop).
 - **SC-003**: The new required CI job in `handarbeit/fabrik-test-alpha` does not break the existing test suite. All other e2e tests continue to pass with the new CI job present.
 - **SC-004**: The harness additions compile without errors under `go build -tags e2e ./tests/e2e/...`.
@@ -109,7 +109,7 @@ The Research stage must design the exact sentinel mechanism before any coding be
 - `handarbeit/fabrik-test-alpha` CI workflow files are writable and the test bed has permissions to add new required jobs.
 - The test bed's `fabrik:yolo` label is used in tests where auto-advance is needed; the CI-fix reinvoke path applies regardless of yolo (Phase 1 runs unconditionally per the state-machine spec).
 - The `wait_for_ci` setting is applied via the stage YAML in the test-bed's `.fabrik/stages/` config, not per-issue. The test must be designed to work with however `wait_for_ci` is configured in the test bed — or the test must set the label on the issue to trigger the CI gate path.
-- `MaxCiFixCycles` defaults to 5. The negative test should hardcode the expected commit count as `5` (or read it from the harness if exposed) rather than guessing.
+- `MaxCiFixCycles` defaults to 5. The negative test should read the expected cycle limit dynamically from the test bed's `.env` file (using `readEnvFileMaxCiFixCycles`) rather than hardcoding or guessing.
 - The settling primitive (#888) is merged before this test lands. The test asserts post-#888 behavior (specifically, that `settle.CheckRuns` is correctly populated and drives the CI-fix classification).
 
 ## Out of Scope
