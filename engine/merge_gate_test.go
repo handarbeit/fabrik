@@ -241,8 +241,9 @@ func TestCheckAutoMergeConvergence_PRMerged_RemovesLabelAndAdvances(t *testing.T
 	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
 	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{Status: PRMergeTerminal, PR: &gh.PRDetails{Number: 10}}
 
-	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage)
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, settle)
 
 	foundRemove := false
 	for _, c := range client.removeLabelCalls {
@@ -277,8 +278,9 @@ func TestCheckAutoMergeConvergence_UserDisabledAutoMerge_PostsCommentRemovesLabe
 	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled", "fabrik:yolo"}}
 	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{Status: PRMergeReady, PR: &gh.PRDetails{Number: 10}}
 
-	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{}, item, stage)
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{}, item, stage, settle)
 
 	foundRemove := false
 	for _, c := range client.removeLabelCalls {
@@ -324,8 +326,9 @@ func TestCheckAutoMergeConvergence_BudgetExhausted_PausesIssue(t *testing.T) {
 	eng.cfg.ConvergenceBudget = 30 * time.Minute
 	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
 	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{Status: PRMergeBlocked, PR: &gh.PRDetails{Number: 10, MergeableState: "blocked"}}
 
-	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{}, item, stage)
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{}, item, stage, settle)
 
 	foundPaused := false
 	for _, c := range client.addLabelCalls {
@@ -368,8 +371,10 @@ func TestCheckAutoMergeConvergence_BudgetDisabled_NoPause(t *testing.T) {
 	eng.cfg.ConvergenceBudget = 0 // disabled
 	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
 	stage := &stages.Stage{Name: "Validate"}
+	// PRMergeBlocked (CI failure, no conflict): falls through to "waiting for GitHub" log.
+	settle := PRSettleResult{Status: PRMergeBlocked, PR: &gh.PRDetails{Number: 10, MergeableState: "blocked"}}
 
-	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{}, item, stage)
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{}, item, stage, settle)
 
 	for _, c := range client.addLabelCalls {
 		if c.labelName == "fabrik:paused" {
@@ -387,8 +392,10 @@ func TestCheckAutoMergeConvergence_UnknownMergeability_Waits(t *testing.T) {
 	eng := testEngineForMerge(t, client)
 	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
 	stage := &stages.Stage{Name: "Validate"}
+	// PRMergeUnsettled drives the "wait" branch, replacing pr.MergeableState=="unknown".
+	settle := PRSettleResult{Status: PRMergeUnsettled, Reason: "mergeable_state=unknown"}
 
-	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{}, item, stage)
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{}, item, stage, settle)
 
 	// No labels changed, no comments posted — just waiting.
 	for _, c := range client.addLabelCalls {
@@ -406,10 +413,13 @@ func TestCheckAutoMergeConvergence_DirtyConflict_IncrementsCycleCount(t *testing
 		},
 	}
 	eng := testEngineForMerge(t, client)
+	eng.cfg.MaxRebaseCycles = 3 // allow dispatch (default testEngine sets 0, which would immediately pause)
 	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
 	stage := &stages.Stage{Name: "Validate"}
+	// PRMergeConflicting drives the rebase reinvoke path, replacing pr.MergeableState=="dirty".
+	settle := PRSettleResult{Status: PRMergeConflicting, PR: &gh.PRDetails{Number: 10}}
 
-	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage)
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, settle)
 
 	snap, err := eng.store.Get("owner/repo", 42)
 	if err != nil {
@@ -443,8 +453,9 @@ func TestCheckAutoMergeConvergence_DirtyConflict_InFlight_SkipsDispatch(t *testi
 	})
 	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
 	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{Status: PRMergeConflicting, PR: &gh.PRDetails{Number: 10}}
 
-	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage)
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, settle)
 
 	snap, err := eng.store.Get("owner/repo", 42)
 	if err != nil {
@@ -458,7 +469,8 @@ func TestCheckAutoMergeConvergence_DirtyConflict_InFlight_SkipsDispatch(t *testi
 
 // TestCheckAutoMergeConvergence_SecondConflict_DispatchesAgain verifies SC-008:
 // after a first rebase reinvoke, if main moves again causing another conflict,
-// a second rebase reinvoke is dispatched. Cycle count is not a gate.
+// a second rebase reinvoke is dispatched. MaxRebaseCycles is set to 3 so the
+// second cycle (count=1) is below the limit and dispatch proceeds.
 func TestCheckAutoMergeConvergence_SecondConflict_DispatchesAgain(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
@@ -466,19 +478,21 @@ func TestCheckAutoMergeConvergence_SecondConflict_DispatchesAgain(t *testing.T) 
 		},
 	}
 	eng := testEngineForMerge(t, client)
+	eng.cfg.MaxRebaseCycles = 3 // allow second dispatch (count=1 < limit=3)
 	// Simulate prior rebase cycle having completed (no in-flight worker).
 	eng.store.Apply(itemstate.RebaseCycleIncremented{Repo: "owner/repo", Number: 42, StageName: "Validate"})
 
 	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
 	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{Status: PRMergeConflicting, PR: &gh.PRDetails{Number: 10}}
 
-	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage)
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, settle)
 
 	snap, err := eng.store.Get("owner/repo", 42)
 	if err != nil {
 		t.Fatalf("store.Get: %v", err)
 	}
-	// Cycle count should now be 2; dispatch was not gated by MaxRebaseCycles.
+	// Cycle count should now be 2; dispatch fires because count(1) < MaxRebaseCycles(3).
 	if snap.RebaseCycles("Validate") != 2 {
 		t.Errorf("expected RebaseCycles=2 after second dispatch, got %d", snap.RebaseCycles("Validate"))
 	}
@@ -487,11 +501,10 @@ func TestCheckAutoMergeConvergence_SecondConflict_DispatchesAgain(t *testing.T) 
 // TestPauseForConvergenceFailed_PostsComment_AppliesLabels verifies that the
 // convergence-failed pause comment contains the expected fields and that
 // fabrik:paused, fabrik:awaiting-input are applied and fabrik:auto-merge-enabled removed.
+// PR diagnostic state (mergeableState, headSHA) now comes from settle.PR rather
+// than a separate FetchLinkedPR call.
 func TestPauseForConvergenceFailed_PostsComment_AppliesLabels(t *testing.T) {
 	client := &mockGitHubClient{
-		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
-			return &gh.PRDetails{Number: 10, State: "open", MergeableState: "dirty", HeadSHA: "abc123"}, nil
-		},
 		fetchCommitsBehindFn: func(owner, repo, base, head string) (int, error) {
 			return 3, nil
 		},
@@ -501,8 +514,12 @@ func TestPauseForConvergenceFailed_PostsComment_AppliesLabels(t *testing.T) {
 	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
 	stage := &stages.Stage{Name: "Validate"}
 	elapsed := 45 * time.Minute
+	settle := PRSettleResult{
+		Status: PRMergeConflicting,
+		PR:     &gh.PRDetails{Number: 10, State: "open", MergeableState: "dirty", HeadSHA: "abc123"},
+	}
 
-	eng.pauseForConvergenceFailed(context.Background(), &gh.ProjectBoard{}, item, stage, elapsed)
+	eng.pauseForConvergenceFailed(context.Background(), &gh.ProjectBoard{}, item, stage, settle, elapsed)
 
 	// Verify pause comment posted.
 	if len(client.addCommentCalls) == 0 {
@@ -534,6 +551,86 @@ func TestPauseForConvergenceFailed_PostsComment_AppliesLabels(t *testing.T) {
 	}
 	if !foundRemove {
 		t.Error("expected fabrik:auto-merge-enabled to be removed on convergence failure")
+	}
+}
+
+// TestCheckAutoMergeConvergence_ConflictAtCycleLimit_PausesInsteadOfDispatch
+// verifies that when RebaseCycles reaches MaxRebaseCycles in the convergence path,
+// pauseForRebaseCycleLimit is called instead of dispatching a new rebase reinvoke.
+// This closes the previously unbounded livelock on unresolvable conflicts.
+func TestCheckAutoMergeConvergence_ConflictAtCycleLimit_PausesInsteadOfDispatch(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, State: "open", AutoMergeEnabled: true, MergeableState: "dirty"}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MaxRebaseCycles = 2
+	// Pre-fill RebaseCycles to the limit.
+	for i := 0; i < eng.cfg.MaxRebaseCycles; i++ {
+		eng.store.Apply(itemstate.RebaseCycleIncremented{Repo: "owner/repo", Number: 42, StageName: "Validate"})
+	}
+
+	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{Status: PRMergeConflicting, PR: &gh.PRDetails{Number: 10}}
+
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, settle)
+
+	eng.wg.Wait()
+	foundPaused := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			foundPaused = true
+		}
+	}
+	if !foundPaused {
+		t.Error("expected fabrik:paused when convergence rebase cycle limit reached")
+	}
+	if len(client.addCommentCalls) == 0 {
+		t.Error("expected a cycle-limit comment to be posted")
+	}
+	// Verify cycle count was not incremented beyond the limit.
+	snap, err := eng.store.Get("owner/repo", 42)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.RebaseCycles("Validate") != 2 {
+		t.Errorf("expected RebaseCycles=2 (unchanged at limit), got %d", snap.RebaseCycles("Validate"))
+	}
+}
+
+// TestCheckAutoMergeConvergence_BudgetZero_ConflictAtCycleLimit_Pauses verifies
+// that MaxRebaseCycles bounds rebase reinvokes even when FABRIK_CONVERGENCE_BUDGET=0
+// (budget disabled). This resolves the unbounded rebase-loop livelock flagged for
+// the BUDGET=0 + unresolvable-conflict case.
+func TestCheckAutoMergeConvergence_BudgetZero_ConflictAtCycleLimit_Pauses(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, State: "open", AutoMergeEnabled: true, MergeableState: "dirty"}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.ConvergenceBudget = 0 // disabled — no time-based pause
+	eng.cfg.MaxRebaseCycles = 1
+	// Pre-fill RebaseCycles to the limit.
+	eng.store.Apply(itemstate.RebaseCycleIncremented{Repo: "owner/repo", Number: 42, StageName: "Validate"})
+
+	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{Status: PRMergeConflicting, PR: &gh.PRDetails{Number: 10}}
+
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, settle)
+
+	eng.wg.Wait()
+	foundPaused := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			foundPaused = true
+		}
+	}
+	if !foundPaused {
+		t.Error("expected fabrik:paused when convergence rebase cycle limit reached (BUDGET=0 case)")
 	}
 }
 
@@ -570,7 +667,8 @@ func TestCheckAutoMergeConvergence_UnregisteredRepo_NoPanic(t *testing.T) {
 	stage := &stages.Stage{Name: "Validate"}
 
 	// Should not panic. Should pause via the clone-failure path.
-	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage)
+	// settle is not reached (ensureRepoReady fails first); pass zero value.
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, PRSettleResult{})
 
 	// Verify the clone-failure path ran: a comment was posted and fabrik:paused applied.
 	if len(client.addCommentCalls) == 0 {
