@@ -3213,3 +3213,116 @@ func TestConvergencePausedRecovery_PRNotMerged_NoAdvance(t *testing.T) {
 		t.Error("fabrik:paused must NOT be removed when PR is not merged")
 	}
 }
+
+// TestCIAndReviewGate_JointClearingHandoff verifies the two-poll CI→review
+// handoff sequence for stages with both wait_for_ci: true and
+// wait_for_reviews: true.
+//
+// Poll 1: item has fabrik:awaiting-ci (no stage:X:complete). fetchLinkedPRFn
+// returns nil → R5 (no CI configured) → checkCIGate calls
+// addCompleteLabelAndRemoveCI: stage:Validate:complete added,
+// fabrik:awaiting-ci removed.
+//
+// Poll 2: board returns stage:Validate:complete (no fabrik:awaiting-ci).
+// fetchItemDetailsFn returns an outstanding reviewer. handleReviewGate guard
+// (pctx.hasComplete == true) passes → checkReviewGate adds
+// fabrik:awaiting-review.
+func TestCIAndReviewGate_JointClearingHandoff(t *testing.T) {
+	trueVal := true
+	stgs := []*stages.Stage{
+		{Name: "Validate", Order: 1, Prompt: "validate", WaitForCI: &trueVal, WaitForReviews: &trueVal},
+	}
+
+	var pollCount int32
+
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			n := atomic.AddInt32(&pollCount, 1)
+			var labels []string
+			if n == 1 {
+				// Poll 1: CI-await window; stage:X:complete absent.
+				labels = []string{"fabrik:awaiting-ci"}
+			} else {
+				// Poll 2: CI gate already cleared; stage:X:complete present.
+				labels = []string{"stage:Validate:complete"}
+			}
+			return &gh.ProjectBoard{
+				ProjectID: "PVT_1",
+				Items: []gh.ProjectItem{
+					{
+						Number: 30,
+						ItemID: "PVTI_30",
+						Status: "Validate",
+						Repo:   "owner/repo",
+						Labels: labels,
+					},
+				},
+			}, nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			// Simulate one outstanding reviewer on every deep-fetch. On Poll 1
+			// handleReviewGate is skipped entirely (guard blocks it); on Poll 2
+			// handleReviewGate fires and reads this reviewer.
+			item.LinkedPRReviewRequests = []gh.ReviewRequest{{Login: "reviewer-bot", IsBot: true}}
+			return nil
+		},
+		// No linked PR → CI gate clears immediately (R5: no CI configured).
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return nil, nil
+		},
+	}
+
+	eng := testEngineWithStages(t, client, stgs)
+
+	ctx := context.Background()
+
+	// ── Poll 1 ──────────────────────────────────────────────────────────────
+	if _, err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll 1: %v", err)
+	}
+
+	client.mu.Lock()
+	var poll1AddedComplete, poll1RemovedCI bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Validate:complete" {
+			poll1AddedComplete = true
+		}
+		if c.labelName == "fabrik:awaiting-review" {
+			t.Errorf("poll 1: handleReviewGate must not run during CI-await window — spuriously added fabrik:awaiting-review")
+		}
+	}
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-ci" {
+			poll1RemovedCI = true
+		}
+	}
+	// Reset accumulators before poll 2.
+	client.addLabelCalls = nil
+	client.removeLabelCalls = nil
+	client.mu.Unlock()
+
+	if !poll1AddedComplete {
+		t.Error("poll 1: expected checkCIGate to add stage:Validate:complete when CI clears (R5)")
+	}
+	if !poll1RemovedCI {
+		t.Error("poll 1: expected checkCIGate to remove fabrik:awaiting-ci when CI clears (R5)")
+	}
+
+	// ── Poll 2 ──────────────────────────────────────────────────────────────
+	if _, err := eng.poll(ctx); err != nil {
+		t.Fatalf("poll 2: %v", err)
+	}
+
+	client.mu.Lock()
+	var poll2AddedReview bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:awaiting-review" {
+			poll2AddedReview = true
+		}
+	}
+	client.mu.Unlock()
+
+	if !poll2AddedReview {
+		t.Error("poll 2: expected handleReviewGate to add fabrik:awaiting-review for outstanding reviewer after CI clears")
+	}
+}
