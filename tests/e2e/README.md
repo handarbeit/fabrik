@@ -56,6 +56,14 @@ These tests assume:
 See `~/fabrik-oss-launch-notes.md` (under "Files and where they live") for
 the canonical setup.
 
+### Additional prerequisites for `TestPausedMergedPRRecovery`
+
+5. **`fabrik:paused`, `fabrik:awaiting-input`, `fabrik:awaiting-ci`, and `fabrik:awaiting-review` labels seeded** in `handarbeit/fabrik-test-alpha`. These are production labels and should always exist; `AddLabel` will fatal with a clear error if not.
+6. **`E2E_TIMEOUT=3h`** when running `TestPausedMergedPRRecovery` in isolation — three sequential cruise pipelines through Implement total ~60–90 min:
+   ```bash
+   E2E_TIMEOUT=3h scripts/e2e/run.sh -run TestPausedMergedPRRecovery
+   ```
+
 ### Additional prerequisites for `TestCIFixReinvoke` and `TestCIFixReinvokeCycleLimit`
 
 5. **`ci-fix-sentinel` enrolled as a required status check** on
@@ -71,18 +79,6 @@ the canonical setup.
    once pipeline setup overhead is included:
    ```bash
    E2E_TIMEOUT=3h scripts/e2e/run.sh -run TestCIFixReinvoke
-   ```
-
-### Additional prerequisites for `TestPausedMergedPRRecovery`
-
-8. **Gate labels seeded** in `handarbeit/fabrik-test-alpha`: `fabrik:awaiting-ci`,
-   `fabrik:awaiting-review`, `fabrik:paused`, and `fabrik:awaiting-input` are
-   production labels that must exist. `AddLabel` fatals immediately if a label is
-   absent — create them manually in the repo if needed.
-9. **`E2E_TIMEOUT=3h`** when running `TestPausedMergedPRRecovery` in isolation —
-   three sequential cruise pipelines (Specify → Implement each) total ~60–90 min:
-   ```bash
-   E2E_TIMEOUT=3h scripts/e2e/run.sh -run TestPausedMergedPRRecovery
    ```
 
 ## Running
@@ -129,9 +125,9 @@ otherwise).
 | `TestCruiseFullPipeline` | `fabrik:cruise` auto-advances to Validate-complete without auto-merge; PR merged by human closes issue | 30–50 min | $0.80–2.00 |
 | `TestCIFixReinvoke` | CI-fix reinvoke positive path: sentinel fails on first push, Claude fixes, CI passes, issue closes | 75–90 min | $1.00–3.00 |
 | `TestCIFixReinvokeCycleLimit` | CI-fix reinvoke negative path: unfixable sentinel exhausts MaxCiFixCycles, issue pauses | 30–60 min | $0.50–1.50 |
-| `TestPausedMergedPRRecovery` | #874-class regression guard: paused item + gate label at Validate with externally-merged PR heals to CLOSED (3 sequential sub-tests: awaiting-ci, awaiting-review, no-gate-label) | 60–90 min (use `E2E_TIMEOUT=3h`) | $1.50–4.50 |
+| `TestPausedMergedPRRecovery` | paused + gate-label at Validate with merged PR heals to CLOSED (3 sequential sub-tests: awaiting-ci, awaiting-review, no-gate-label); regression guard for #874 class | 60–90 min (3 sequential sub-tests, ~20–30 min each); run with `E2E_TIMEOUT=3h` | $1.50–4.50 |
 
-Approximate suite total: ~325 min wall-clock, $6.50–21.50 in Claude tokens (CI-fix and paused-merged-PR tests should be run separately with `E2E_TIMEOUT=3h`).
+Approximate suite total: ~310 min wall-clock, $6.50–21.50 in Claude tokens (CI-fix tests and `TestPausedMergedPRRecovery` should be run separately with `E2E_TIMEOUT=3h`).
 
 ### Regression coverage map
 
@@ -146,7 +142,7 @@ Approximate suite total: ~325 min wall-clock, $6.50–21.50 in Claude tokens (CI
 | `TestCruiseFullPipeline` | #898 (cruise/yolo gate at Validate, `engine/poll.go`); ensures cruise never triggers `checkAutoMergeConvergence` |
 | `TestCIFixReinvoke` | #888 ADR-056 D1 (settling primitive reinterprets CI-gate signals); CI-fix reinvoke loop (engine/ci.go) |
 | `TestCIFixReinvokeCycleLimit` | CI-fix cycle limit (`pauseForCIFixCycleLimit`), `MaxCiFixCycles` exhaustion path |
-| `TestPausedMergedPRRecovery` | #874 (paused+merged-PR recovery class stays closed), #887 (settle-owner `runValidatePRTerminalAdvance`), ADR-056 D2 (gate-label-agnostic single-owner PR-terminal advance) |
+| `TestPausedMergedPRRecovery` | #874 (paused+merged PR recovery class), #887 (settle-owner structural fix, `runValidatePRTerminalAdvance`), ADR-056 D2 (single-owner for PR-terminal → Done) |
 
 Every escape-from-release regression earns a new scenario in this table.
 
