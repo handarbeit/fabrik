@@ -84,6 +84,9 @@ func (m *testGitHubUpgradeClient) FetchPRMergeable(owner, repo string, prNumber 
 func (m *testGitHubUpgradeClient) FetchPRMergeableState(owner, repo string, prNumber int) (string, error) {
 	return "", nil
 }
+func (m *testGitHubUpgradeClient) FetchPRMerged(owner, repo string, prNumber int) (bool, error) {
+	return false, nil
+}
 func (m *testGitHubUpgradeClient) FetchPRMergeableFields(owner, repo string, prNumber int) (*bool, string, error) {
 	return nil, "", nil
 }

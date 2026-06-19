@@ -63,6 +63,20 @@ func (e *Engine) settlePRMergeState(item gh.ProjectItem, _ *stages.Stage) PRSett
 		return PRSettleResult{Status: PRMergeTerminal, Reason: fmt.Sprintf("PR #%d already merged", pr.Number), PR: pr}
 	}
 	if pr.State == "closed" {
+		// FetchLinkedPR reads the PR *list* endpoint, whose `merged` flag is unreliable
+		// (reports false for several seconds after a merge). Confirm against the
+		// authoritative single-PR endpoint before treating a closed PR as never-merged —
+		// a PR the engine just merged (e.g. the direct-merge fallback) must never be
+		// misclassified as "closed without merging" and used to pause the issue.
+		merged, mErr := e.readClient.FetchPRMerged(owner, repo, pr.Number)
+		if mErr != nil {
+			// Don't pause on an unconfirmable closed state — re-evaluate next poll.
+			return PRSettleResult{Status: PRMergeUnsettled, Reason: fmt.Sprintf("PR #%d closed; merged-state unconfirmed: %v", pr.Number, mErr), PR: pr}
+		}
+		if merged {
+			pr.Merged = true
+			return PRSettleResult{Status: PRMergeTerminal, Reason: fmt.Sprintf("PR #%d merged (confirmed via single-PR endpoint)", pr.Number), PR: pr}
+		}
 		return PRSettleResult{Status: PRMergeTerminal, Reason: fmt.Sprintf("PR #%d closed without merging", pr.Number), PR: pr}
 	}
 
