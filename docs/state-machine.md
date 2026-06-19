@@ -453,8 +453,8 @@ This table shows the normal flow when an issue progresses through the pipeline w
 
 | Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
 |--------------|-------|-------|-----------------|--------------|----------------|--------------|
-| Validate, Locked + In Progress | FABRIK_STAGE_COMPLETE | yolo active | Done, Pending Cleanup | `stage:Validate:complete` | `fabrik:locked:<user>`, `stage:Validate:in_progress` | PR merged; board column updated to Done |
-| Validate, Complete | Poll tick (catch-up) | yolo active | Done, Pending Cleanup | | | PR merged; board column updated to Done |
+| Validate, Locked + In Progress | FABRIK_STAGE_COMPLETE | yolo active | Validate, Complete + Awaiting Merge | `stage:Validate:complete`, `fabrik:auto-merge-enabled` | `fabrik:locked:<user>`, `stage:Validate:in_progress` | GitHub auto-merge enabled via `enablePullRequestAutoMerge`; board advanced to Done only after GitHub merges the PR (deferred convergence monitor, §5.5). For `wait_for_ci: true` stages, `fabrik:awaiting-ci` is added instead and `stage:Validate:complete` is deferred to `checkCIGate` (ADR 032). |
+| Validate, Complete | Poll tick (catch-up) | yolo active | Done, Pending Cleanup | | | Convergence monitor (`checkAutoMergeConvergence`) detects GitHub has merged the PR; board column updated to Done (§5.5) |
 | Validate, Locked + In Progress | FABRIK_STAGE_COMPLETE | cruise active (no yolo) | Validate, Complete | `stage:Validate:complete` | `fabrik:locked:<user>`, `stage:Validate:in_progress` | Cruise stops here — no merge, no advancement to Done |
 | Validate, Complete | Poll tick (catch-up) | cruise active (no yolo) | Validate, Complete | | | Cruise catch-up skips Validate — no merge, no advancement |
 | Done, Pending Cleanup | Poll tick | Worktree exists on disk | Done, Complete | `stage:Done:complete` | | Worktree removed from disk |
@@ -613,6 +613,33 @@ The "baseline clean AND working tree dirty" guard for Implement prevents a pre-e
 | Column `<X>`, Rebase Needed + Complete | Poll tick (catch-up) | `mergeable == false`; `snap.Worker() == nil`; `snap.RebaseCycles(stageName)` < MaxRebaseCycles | Same column (rebase goroutine running) | `fabrik:editing` (during processing) | | `dispatchRebaseReinvoke()` spawns goroutine; `RebaseCycleIncremented` applied; `WorkerEntered` applied; semaphore acquired; synthetic rebase-required comment passed to `processComments()` |
 | Column `<X>`, Rebase Needed + Complete | Poll tick (catch-up) | `mergeable == false`; `snap.RebaseCycles(stageName)` ≥ MaxRebaseCycles | Same column, Awaiting Input | `fabrik:paused`, `fabrik:awaiting-input` | | `pauseForRebaseCycleLimit()` posts explanatory comment (usually signals a semantic conflict needing human judgment) |
 | Column `<X>`, Rebase Needed + Complete | Poll tick (catch-up) | `mergeable == false`; `snap.Worker() != nil` | Same (skipped) | | | Previous rebase goroutine still running; skipped entirely |
+
+### 3.3 Comment Processing During Non-Pause Gate States
+
+When a new user comment arrives while a non-pause gate label (`fabrik:awaiting-ci`, `fabrik:awaiting-review`, `fabrik:rebase-needed`, or `fabrik:auto-merge-enabled`) is active, the engine dispatches comment processing before evaluating the gate. This behavior is intentional: `item.go` checks for new comments (`len(newComments) > 0 → processComments()`) before reaching any gate check, and `itemNeedsWork` guard 7 admits any item with new comments regardless of gate labels.
+
+| Current State | Event | Race Resolution | Resulting State | Notes |
+|--------------|-------|-----------------|-----------------|-------|
+| Column `<X>`, Awaiting CI | New user comment arrives | `snap.Worker() != nil` guard in catch-up loop reinvoke dispatch: if a comment worker is in-flight when the catch-up loop runs, the reinvoke (CI-fix, rebase, etc.) is skipped for that poll cycle | Comment processing runs; catch-up loop reinvoke skipped until worker exits | Intended: user may need to override CI behavior mid-gate. The next poll after the comment worker exits will re-evaluate the CI gate. |
+| Column `<X>`, Awaiting Review | New user comment arrives | Same worker guard: review reinvoke skipped while comment worker is in-flight | Comment processing runs; review gate re-evaluated next poll | Intended: user may need to provide direction to Claude while awaiting review. |
+| Column `<X>`, Rebase Needed | New user comment arrives | Same worker guard: rebase reinvoke skipped while comment worker is in-flight | Comment processing runs; rebase gate re-evaluated next poll | Intended: user may provide rebase guidance while gate is active. |
+| Column `<X>`, Auto-Merge Enabled | New user comment arrives | Same worker guard | Comment processing runs; convergence monitor re-evaluated next poll | Intended: user may need to intervene while convergence is in progress. |
+
+**Known limitation:** If both the catch-up loop and a comment arrive at the same poll cycle before any worker is recorded, both dispatches can fire in the same cycle. The `advancedItems` map prevents double-advancement within a single poll cycle; the `fabrik:editing` label added by the comment goroutine at entry prevents a second goroutine from launching immediately. This is not structurally exclusive — it is a best-effort guard.
+
+### 3.4 Operator-Level and System-Level Transitions
+
+These transitions are driven by operator actions or background engine scans rather than stage-lifecycle events. They do not fit the "stage-running → stage-complete" grammar of §3.1/§3.2.
+
+| Event Source | Event | Current State | Effect | Labels Added | Labels Removed | Notes |
+|-------------|-------|--------------|--------|--------------|----------------|-------|
+| User (manual) | Assignee change | Any column | Re-evaluated on next poll; `AssigneesChanged` fires `wakeChObserver` | (none) | (none) | No label mutation. Assignee is read by `logf` for display only; it does not gate dispatch. See §2.13. |
+| User (manual) | `fabrik:revalidate` applied | Validate-column, any state | Removes gate/completion labels; re-dispatches Validate on next poll | (none) | `stage:Validate:complete`, `stage:Validate:failed`, `fabrik:paused`, `fabrik:awaiting-input`, `fabrik:awaiting-ci`, `fabrik:auto-merge-enabled`, `fabrik:revalidate` (trigger removed last) | Back-edge into Validate. Resets `PausedByEngine`, `StageRetryCount`, `LastAttemptAt`, `EngineCycles` for Validate. See §2.15. |
+| User (manual) | `fabrik:revalidate` applied | Non-Validate column | Only the trigger label is removed; no other action | (none) | `fabrik:revalidate` | Warning logged. See §2.15. |
+| Engine scan | SHA-invalidation detected | Validate, Complete | Removes Validate completion; re-dispatches Validate on next poll | (none) | `stage:Validate:complete`, `fabrik:awaiting-ci`, `fabrik:awaiting-review`, `fabrik:rebase-needed`, `fabrik:auto-merge-enabled` | Back-edge into Validate. Triggered when `snap.ValidateCompletedSHA()` ≠ `LinkedPR.HeadSHA` — Claude pushed a new commit after Validate ran. See §2.16. |
+| Engine (convergence monitor) | PR merged by GitHub auto-merge | Validate, Complete + `fabrik:auto-merge-enabled` | Removes convergence label; advances to Done | (none) | `fabrik:auto-merge-enabled` | `checkAutoMergeConvergence` detects `pr.Merged == true`; calls `advanceToNextStage`. The `stage:Validate:complete` label remains. See §5.5. |
+| Engine (Implement dispatch) | `FABRIK_PR_CREATE_BEGIN/END` marker | Implement, Locked + In Progress | Draft PR created on GitHub; no stage advance | (none) | (none) | Engine reads marker from Claude output, calls `gh pr create --draft`; posts PR URL as a comment on the issue. Stage advance requires a separate `FABRIK_STAGE_COMPLETE`. See §5.6. |
+| Engine / Claude | `FABRIK_STAGE_COMPLETE` + `FABRIK_NO_WORK_NEEDED` | Any stage, Locked + In Progress | All subsequent non-cleanup stages marked complete; issue moved to Done | `stage:<X>:complete`, `stage:<Y>:complete` … (all subsequent non-cleanup stages) | `fabrik:locked:<user>`, `stage:<X>:in_progress` | No PR created. Validate re-entry back-edge from `fabrik:revalidate` and SHA-invalidation are visible in §10.4. See §6.8. |
 
 ---
 
@@ -1131,7 +1158,13 @@ The CI gate has two paths that handle different timing scenarios:
   - `(ciBlocked=true, ciFailure=false, ciTimedOut=false)` — checks still pending; skip to next item (`fabrik:awaiting-ci` already present — no additional label needed)
   - `(ciBlocked=true, ciFailure=true, ciTimedOut=false)` — failure confirmed; `fabrik:awaiting-ci` applied idempotently; dispatch `dispatchCIFixReinvoke()` or pause on cycle limit
   - `(ciBlocked=false, ciFailure=false, ciTimedOut=true)` — `fabrik:awaiting-ci` has been present ≥ `CIWaitTimeout`; pause via `pauseForCITimeout()`
-- **Gate cleared outcome:** When all checks pass (or no check runs exist — R5), `checkCIGate` calls `addCompleteLabelAndRemoveCI`: adds `stage:X:complete` and removes `fabrik:awaiting-ci`. This is the only place `stage:X:complete` is added for `wait_for_ci: true` stages (conjunctive gate invariant, ADR 032).
+- **Gate cleared outcome:** When all checks pass (or no check runs exist — R5), `checkCIGate` calls `addCompleteLabelAndRemoveCI`: adds `stage:X:complete` and removes `fabrik:awaiting-ci`.
+
+**Clearing-owner invariant for `wait_for_ci: true` stages:** Exactly two code paths may add `stage:X:complete` for these stages; they are mutually exclusive by PR state at the time of evaluation:
+1. **Normal path** (`addCompleteLabelAndRemoveCI`, called from `checkCIGate`): PR is still open; CI checks clear (or R5 — no CI configured). Runs inside `handleMergeAndCIGates` in the catch-up Phase 1 loop.
+2. **PR-merged recovery path** (`runValidatePRTerminalAdvance`, ADR-056 D2): PR is already merged. Adds `stage:X:complete` for every gate-checked stage (`WaitForCI` or `WaitForReviews`) missing its completion label. Runs only for Validate-stage items without `fabrik:auto-merge-enabled`. See §3.2 ("Awaiting CI" table, R4 row).
+
+Both paths call `EnsureLabel`, which is idempotent. The `advancedItems` map (keyed by issue number, populated by `advanceToNextStage`) prevents double-advancement within a single poll cycle even if both paths fire in the same poll. This supersedes the original ADR 032 single-owner claim; the two-path structure is captured by ADR-056 D2.
 
 **Two different timeout strategies:**
 - **Path 1** (merge guard): `itemstate.Store` → `LinkedPRState.CIMergePendingSince`. Acceptable because merge-guard state is transient — engine restarts simply re-evaluate CI on the next poll (store is in-memory only; not persisted across restarts).
@@ -1188,6 +1221,13 @@ The merge-conflict gate is a third prong of the catch-up loop Phase 1, sitting b
 
 The gate's inputs come from `settlePRMergeState()` (§6.4), called once per Phase 1 iteration before both gates. `FetchPRMergeableFields()` (single-PR endpoint, not the list endpoint used by `FetchLinkedPR`) provides both `mergeable` and `mergeable_state` in one request — the list endpoint does not return `mergeable`.
 
+**Clearing-owner invariant for `fabrik:rebase-needed`:** Three code paths may remove this label; all call `RemoveLabelFromIssue`, which is idempotent:
+1. **Primary clearing owner** (`checkMergeabilityGate`): when `settle.Status == PRMergeReady` or `PRMergeBlocked` (i.e., `mergeable == true` — Claude's rebase push landed and GitHub confirms no conflict). The gate falls through to the CI gate on the same poll.
+2. **PR-merged recovery path** (`runValidatePRTerminalAdvance`): when the PR is already merged; removes all gate labels including `fabrik:rebase-needed` as part of terminal advance. Runs only for Validate-stage items without `fabrik:auto-merge-enabled`.
+3. **Convergence success path** (`checkAutoMergeConvergence`): when the PR merges under GitHub's auto-merge after a conflict was resolved; removes `fabrik:rebase-needed` as part of convergence cleanup.
+
+Additionally, `cleanupClosedIssueTransientLabels` performs a defensive sweep when the issue is closed.
+
 #### 6.6.2 Ordering Against the CI Gate
 
 The merge-conflict gate runs **before** the CI gate so that a confirmed conflict preempts CI-await polling. The rationale: a PR that cannot merge has no reason to wait for CI, and Claude on CI-fix reinvoke cannot productively act on a branch that must first be rebased. When the merge gate emits `conflict`, Phase 1 `continue`s without reaching the CI gate.
@@ -1234,6 +1274,25 @@ The cost is a re-invocation rather than an inline `exec.Cmd`. This is why `MaxRe
 | Label left on pause | `fabrik:awaiting-ci` removed before pause | `fabrik:rebase-needed` **retained** on pause so the human sees the reason |
 
 **References:** [ADR-028: Merge-Conflict Gate and Rebase Reinvoke](../adrs/028-merge-conflict-gate-and-rebase-reinvoke.md)
+
+### 6.6.6 CI ∧ Review Gate Joint-Clearing Sequence
+
+When a stage has both `wait_for_ci: true` and `wait_for_reviews: true`, the two gates clear in a two-poll handoff. The sequence is structurally enforced by `catchUpPhase1Handlers` — `handleReviewGate` guards on `pctx.hasComplete` and skips entirely while `fabrik:awaiting-ci` is present (because `stage:X:complete` is absent during CI-await).
+
+**Poll N — CI clears:**
+1. `handleReviewGate` runs first (handler ordering, `catch_up_handlers.go`). Guard: `if !pctx.hasComplete { return false }`. `stage:X:complete` is absent → `handleReviewGate` returns false; review gate evaluation skipped.
+2. `handleMergeAndCIGates` runs. CI clears (all checks green or R5 — no CI configured). `checkCIGate` calls `addCompleteLabelAndRemoveCI`: adds `stage:X:complete`, removes `fabrik:awaiting-ci`.
+
+**Poll N+1 — Review gate evaluates:**
+1. `handleReviewGate` runs. Guard: `pctx.hasComplete == true` (set from `stage:X:complete`). Guard passes.
+2. `checkReviewGate` reads the outstanding reviewer list from `LinkedPRReviewRequests`.
+   - Outstanding reviewers remain → `fabrik:awaiting-review` applied; gate blocks.
+   - No outstanding reviewers → gate clears; Phase 2 advances the issue.
+
+**Reviewer comment submitted during CI-await:**
+A reviewer submitting a review between Poll N−1 and Poll N fires a `pull_request_review` webhook. The webhook applies `PRReviewSubmitted` to the board cache store (`LinkedPRReviews` updated). However, `handleReviewGate` is NOT evaluated on Poll N (CI-await window, `!hasComplete` guard). On Poll N+1, `checkReviewGate` reads the submitted review from the store — the reviewer's decision IS captured and IS applied on the next poll after CI clears. This one-poll delay is intentional (issue #617): seeding `fabrik:awaiting-review` during CI-await would race with the CI gate's `addCompleteLabelAndRemoveCI` call.
+
+**Unit test:** `TestCIAndReviewGate_JointClearingHandoff` in `engine/poll_test.go` exercises this two-poll sequence: Poll 1 verifies CI clears and `stage:X:complete` is added with `fabrik:awaiting-ci` removed; Poll 2 verifies `handleReviewGate` evaluates and adds `fabrik:awaiting-review` for an outstanding reviewer.
 
 ### 6.7 Pre-Implement Spawn Path
 
@@ -1784,15 +1843,18 @@ cycleSet := func() map[string]bool {
 }()
 ```
 
-Each item in `board.Items` passes the pre-filter if **any** of these bypass conditions apply:
+Each item in `board.Items` passes the pre-filter if **any** of these bypass conditions apply (authoritative source: `poll.go:1143–1164`, `hasAwaitingLabel` function):
 
-| Bypass condition | Rationale |
-|-----------------|-----------|
-| Item is in `cycleSet` | Observer saw a relevant change since last poll |
-| Stage has `CleanupWorktree: true` | Cleanup triggers on local filesystem state, not board changes |
-| Item has `fabrik:awaiting-ci` label | CI gate must be evaluated every poll |
-| Item has `fabrik:rebase-needed` label | Rebase gate must be evaluated every poll |
-| `snap.HasExpiredCooldown(now)` is true | Periodic re-evaluation window has passed |
+| Bypass condition | Label / Condition | Rationale |
+|-----------------|-------------------|-----------|
+| Item is in `cycleSet` | (observer-driven) | Observer saw a relevant change since last poll |
+| Stage has `CleanupWorktree: true` | (stage config) | Cleanup triggers on local filesystem state, not board changes |
+| Item has `fabrik:awaiting-ci` label | `fabrik:awaiting-ci` | CI check-run completions don't bump the issue's `updatedAt`; CI gate must be evaluated every poll |
+| Item has `fabrik:rebase-needed` label | `fabrik:rebase-needed` | Base-branch advances don't bump `updatedAt`; rebase gate must be evaluated every poll |
+| Item has `fabrik:awaiting-review` label | `fabrik:awaiting-review` | Review-submission webhooks don't bump `updatedAt`; gate clearance and Phase 1/Phase 2 reprompt timers require per-poll evaluation (issue #616) |
+| Item has `fabrik:auto-merge-enabled` label | `fabrik:auto-merge-enabled` | GitHub auto-merge state changes (e.g., PR merges) don't bump the issue's `updatedAt`; convergence monitor must be evaluated every poll |
+| Item has `fabrik:revalidate` label | `fabrik:revalidate` | Stuck-Validate items may have settled `updatedAt` long ago; the revalidate scan must still be reached on every poll |
+| `snap.HasExpiredCooldown(now)` is true | (cooldown timer) | Periodic re-evaluation window has passed |
 
 Items not meeting any bypass condition are skipped for that poll cycle (no deep-fetch, no dispatch). Items with an **active** CooldownAt (not yet expired) are also skipped — the CooldownAt["periodic-re-eval"] entry gates time-based re-evaluation.
 
@@ -1974,6 +2036,48 @@ stateDiagram-v2
     end note
 ```
 
+### 10.4 Additional Flows
+
+These flows are absent from 10.1–10.3 but represent reachable states documented in §2, §3.4, §5, and §6.8.
+
+```mermaid
+stateDiagram-v2
+    direction TB
+
+    %% Validate re-entry back-edges
+    ValidateComplete --> ValidateIdle : fabrik:revalidate applied (§2.15)\nRemoves stage:Validate:complete, gate labels, paused labels;\nresets retry counters; dispatches Validate on next poll
+
+    ValidateComplete --> ValidateIdle : SHA-invalidation scan (§2.16)\nPR HEAD SHA ≠ ValidateCompletedSHA;\nremoves stage:Validate:complete + gate labels
+
+    note right of ValidateIdle
+        ValidateIdle = Validate column,
+        Idle (no completion label)
+    end note
+
+    %% Convergence monitor deferred Done advance
+    ValidateAwaitingMerge --> Done : GitHub merges PR (§5.5)\ncheckAutoMergeConvergence detects pr.Merged == true;\nremoves fabrik:auto-merge-enabled; advanceToNextStage
+
+    note right of ValidateAwaitingMerge
+        ValidateAwaitingMerge =
+        stage:Validate:complete present
+        + fabrik:auto-merge-enabled present
+        (yolo flow after handleStageComplete)
+    end note
+
+    %% FABRIK_PR_CREATE marker (Implement)
+    ImplementInProgress --> ImplementInProgress : FABRIK_PR_CREATE_BEGIN/END (§5.6)\nEngine creates draft PR; no stage advance\nPR URL posted as issue comment
+
+    %% FABRIK_NO_WORK_NEEDED skip-to-Done (§6.8)
+    AnyStageInProgress --> Done : FABRIK_STAGE_COMPLETE + FABRIK_NO_WORK_NEEDED\nAll subsequent non-cleanup stages marked complete;\nno PR created; issue moved to Done column
+
+    note right of Done
+        Done = Pending Cleanup
+        (worktree removal by janitor)
+    end note
+```
+
+**Assignee transitions (§2.13):** Assignee changes fire `AssigneesChanged → wakeChObserver`, re-evaluating the item on the next poll. No label is mutated. No separate diagram node is warranted.
+
 ---
 
 ## 11. Worktree Janitor
@@ -2100,7 +2204,7 @@ Shallow pre-filtering is a two-pass process that avoids the expensive `FetchItem
 
 | Check | Passes If |
 |-------|-----------|
-| cycleSet / cooldown pre-filter | Item is in `cycleSet` (a Store observer fired for a relevant change), OR has a bypass label (`fabrik:awaiting-ci`, `fabrik:awaiting-review`, `fabrik:rebase-needed` — need per-poll evaluation because their unblocking events don't bump `updatedAt`), OR cleanup stage (checks local filesystem), OR `CooldownAt` has expired (periodic re-evaluation window), OR item is not yet in the engine store. Items with an active `CooldownAt` and no other signal are suppressed. See "Cooldown Cache-Key Strategy" section in Appendix B below. |
+| cycleSet / cooldown pre-filter | Item is in `cycleSet` (a Store observer fired for a relevant change), OR has a bypass label (`fabrik:awaiting-ci`, `fabrik:awaiting-review`, `fabrik:rebase-needed`, `fabrik:auto-merge-enabled`, `fabrik:revalidate` — need per-poll evaluation because their unblocking events don't bump `updatedAt`; see §9.8 for per-label rationale), OR cleanup stage (checks local filesystem), OR `CooldownAt` has expired (periodic re-evaluation window), OR item is not yet in the engine store. Items with an active `CooldownAt` and no other signal are suppressed. See "Cooldown Cache-Key Strategy" section in Appendix B below. |
 
 **Pass 2 — `itemMayNeedWork()`** (runs after the pre-filter admits the item, on shallow board data):
 
