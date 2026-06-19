@@ -36,8 +36,9 @@ type catchUpHandler struct {
 // Ordering is structurally enforced by slice position:
 //   - dependencies: blocked items bypass all gates
 //   - reviewGate: review threads addressed before any merge/CI gate evaluation
-//   - autoMergeConvergence: items in GitHub native auto-merge bypass
-//     settlePRMergeState and merge/CI gates (GitHub owns the merge decision)
+//   - autoMergeConvergence: items in GitHub native auto-merge call settlePRMergeState
+//     for merge/CI state (eliminating split-brain) but bypass the merge/CI gates
+//     (GitHub owns the merge decision)
 //   - mergeAndCIGates: merge-conflict gate runs before the CI gate (ADR-028)
 var catchUpPhase1Handlers = []catchUpHandler{
 	{name: "dependencies", run: (*Engine).handleDependencies},
@@ -113,13 +114,16 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 }
 
 // handleAutoMergeConvergence claims items with fabrik:auto-merge-enabled,
-// delegating all PR state monitoring to checkAutoMergeConvergence. All
-// merge/CI gates are bypassed — GitHub owns the merge decision for these items.
+// delegating all PR state monitoring to checkAutoMergeConvergence.
+// settlePRMergeState is called so the convergence path shares a single settle
+// read per poll cycle with no independent mergeable_state interpretation; the
+// merge/CI gates remain bypassed — GitHub owns the merge decision for these items.
 func (e *Engine) handleAutoMergeConvergence(pctx *phase1Ctx) bool {
 	if !hasLabel(pctx.item, "fabrik:auto-merge-enabled") {
 		return false
 	}
-	e.checkAutoMergeConvergence(pctx.ctx, pctx.board, pctx.item, pctx.stage)
+	settle := e.settlePRMergeState(pctx.item, pctx.stage)
+	e.checkAutoMergeConvergence(pctx.ctx, pctx.board, pctx.item, pctx.stage, settle)
 	return true
 }
 

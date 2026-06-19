@@ -244,8 +244,11 @@ func (e *Engine) dispatchRebaseReinvoke(ctx context.Context, board *gh.ProjectBo
 // checkAutoMergeConvergence monitors a yolo issue that has entered the GitHub
 // native auto-merge convergence flow (fabrik:auto-merge-enabled is present).
 // Called from Phase 1 of the catch-up loop; replaces checkMergeabilityGate and
-// checkCIGate for these items. Returns after completing any dispatch or pause.
-func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
+// checkCIGate for these items. settle carries the pre-fetched PR/CI state from
+// settlePRMergeState; it drives the unsettled/conflict branch decisions so that
+// the convergence path no longer independently interprets mergeable_state.
+// Returns after completing any dispatch or pause.
+func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, settle PRSettleResult) {
 	// Phase 1 of the catch-up loop calls this before processItem has had a chance
 	// to register the WorktreeManager for item.Repo. Without this guard,
 	// pauseForConvergenceFailed → worktreesFor would panic on the first poll
@@ -341,44 +344,57 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 			if elapsed > e.cfg.ConvergenceBudget {
 				e.logf(item.Number, "auto-merge", "convergence budget exhausted (%.0fs / %.0fs) — pausing\n",
 					elapsed.Seconds(), e.cfg.ConvergenceBudget.Seconds())
-				e.pauseForConvergenceFailed(ctx, board, item, stage, elapsed)
+				e.pauseForConvergenceFailed(ctx, board, item, stage, settle, elapsed)
 				return
 			}
 		}
 	}
 
-	// GitHub transiently returns "unknown" mergeability after a push. Wait.
-	if pr.MergeableState == "unknown" {
-		e.logf(item.Number, "auto-merge", "PR #%d mergeable_state=unknown — waiting for GitHub to compute\n", pr.Number)
+	// GitHub has not yet computed mergeability: wait.
+	if settle.Status == PRMergeUnsettled {
+		e.logf(item.Number, "auto-merge", "PR #%d settle=unsettled (%s) — waiting for GitHub to compute\n", pr.Number, settle.Reason)
 		return
 	}
 
-	// Confirmed conflict (dirty): dispatch one rebase reinvoke if none is in-flight.
-	// Cycle count is incremented for observability but not consulted as a gate.
-	if pr.MergeableState == "dirty" {
-		if snap, serr := e.store.Get(repoStr, item.Number); serr == nil && snap.Worker() != nil {
-			e.logf(item.Number, "auto-merge", "rebase already in-flight — skipping dispatch\n")
-			return
+	// Confirmed conflict: dispatch rebase reinvoke, bounded by MaxRebaseCycles.
+	// Mirrors the three-step pattern in handleMergeAndCIGates: in-flight guard →
+	// cycle-limit check → dispatch or pauseForRebaseCycleLimit.
+	if settle.Status == PRMergeConflicting {
+		var cycleCount int
+		if snap, serr := e.store.Get(repoStr, item.Number); serr == nil {
+			if snap.Worker() != nil {
+				e.logf(item.Number, "auto-merge", "rebase already in-flight — skipping dispatch\n")
+				return
+			}
+			cycleCount = snap.RebaseCycles(stage.Name)
 		}
-		e.logf(item.Number, "auto-merge", "PR #%d merge conflict — dispatching rebase reinvoke\n", pr.Number)
-		e.store.Apply(itemstate.RebaseCycleIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
-		e.dispatchRebaseReinvoke(ctx, board, item, stage)
+		maxCycles := e.cfg.MaxRebaseCycles
+		if cycleCount >= maxCycles {
+			e.pauseForRebaseCycleLimit(board, item, stage, cycleCount, maxCycles)
+		} else {
+			e.logf(item.Number, "auto-merge", "PR #%d merge conflict — dispatching rebase reinvoke\n", pr.Number)
+			e.store.Apply(itemstate.RebaseCycleIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+			e.dispatchRebaseReinvoke(ctx, board, item, stage)
+		}
 		return
 	}
 
-	// All other states (clean, blocked, behind, unstable, has_hooks): GitHub is handling it.
-	e.logf(item.Number, "auto-merge", "PR #%d mergeable_state=%q — waiting for GitHub auto-merge\n", pr.Number, pr.MergeableState)
+	// All other settle statuses (PRMergeReady, PRMergeBlocked, PRMergeTerminal, PRMergeNoPR):
+	// GitHub is handling it — auto-merge will fire when conditions are met.
+	e.logf(item.Number, "auto-merge", "PR #%d settle=%s — waiting for GitHub auto-merge\n", pr.Number, settle.Reason)
 }
 
 // pauseForConvergenceFailed is called when the convergence budget exhausts before
 // the yolo PR merges. Posts a structured comment naming the actual current state,
 // applies fabrik:paused + fabrik:awaiting-input, and removes fabrik:auto-merge-enabled.
-func (e *Engine) pauseForConvergenceFailed(_ context.Context, _ *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, elapsed time.Duration) {
+// settle carries the pre-fetched PR/CI state from settlePRMergeState; PR diagnostic
+// fields (mergeableState, headSHA) and check run summary come from settle rather
+// than a fresh FetchLinkedPR / FetchCheckRuns call, eliminating the split-brain.
+func (e *Engine) pauseForConvergenceFailed(_ context.Context, _ *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, settle PRSettleResult, elapsed time.Duration) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 
-	// Fetch fresh state for the comment.
-	pr, _ := e.client.FetchLinkedPR(owner, repo, item.Number)
+	pr := settle.PR
 	var mergeableState, headSHA, latestCI string
 	var commitsBehind int
 	if pr != nil && pr.Number != 0 {
@@ -391,10 +407,7 @@ func (e *Engine) pauseForConvergenceFailed(_ context.Context, _ *gh.ProjectBoard
 			baseBranch = "main"
 		}
 		commitsBehind, _ = e.client.FetchCommitsBehind(owner, repo, baseBranch, headSHA)
-		if headSHA != "" {
-			runs, _ := e.readClient.FetchCheckRuns(owner, repo, headSHA)
-			latestCI = summarizeCIRuns(runs)
-		}
+		latestCI = summarizeCIRuns(settle.CheckRuns)
 	}
 
 	var rebaseCycles int
