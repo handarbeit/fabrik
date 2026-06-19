@@ -304,7 +304,10 @@ func (e *Engine) Run() error {
 		go func() {
 			for {
 				select {
-				case req := <-e.stopCh:
+				case req, ok := <-e.stopCh:
+					if !ok {
+						return
+					}
 					go e.handleStopRequest(ctx, req)
 				case <-ctx.Done():
 					return
