@@ -1256,143 +1256,28 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			continue
 		}
 
-		// Phase 1: unconditional dependency check, review gate, and review reinvoke.
-		if e.checkDependencies(board, item, stage) {
-			continue // blocked; checkDependencies handled label + comment
+		// Phase 1: run the ordered handler list. Each handler returns true to
+		// claim the item (no further handlers run for this item, Phase 2 is
+		// skipped) or false to pass through to the next handler. Ordering is
+		// structurally enforced by slice position in catchUpPhase1Handlers
+		// (ADR-056 D3).
+		pctx := &phase1Ctx{
+			ctx:           ctx,
+			board:         board,
+			item:          item,
+			stage:         stage,
+			hasComplete:   hasComplete,
+			advancedItems: advancedItems,
 		}
-		// Only run the review gate when the stage has genuinely completed
-		// (stage:X:complete present). During the CI-await window
-		// (hasAwaitingCI && !hasComplete), skip the review gate entirely to
-		// prevent spurious fabrik:awaiting-review re-application (#617).
-		if hasComplete {
-			blocked, timedOut := e.checkReviewGate(board, item, stage)
-			if blocked {
-				// Record CooldownAt["review-blocked"] so itemMayNeedWork's expiry path
-				// re-evaluates this item every 10 × PollSeconds even when nothing bumps
-				// updatedAt. This lets Phase 1/Phase 2 review-reprompt timers fire on a
-				// non-responsive bot reviewer (issue #495).
-				cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
-				e.store.Apply(itemstate.CooldownRecorded{
-					Repo:   itemOwnerRepoString(item, e.defaultRepo()),
-					Number: item.Number,
-					Reason: "review-blocked",
-					Until:  time.Now().Add(cooldown),
-				})
-				continue // awaiting reviewers; checkReviewGate handled label
-			}
-			if timedOut {
-				e.pauseForReviewTimeout(board, item, stage)
-				continue
-			}
-			// Gate cleared naturally — if reviews with actionable body text were
-			// submitted, re-invoke the stage agent to address the feedback before
-			// advancing. Reviews with empty bodies (e.g. APPROVED with no comment)
-			// have nothing to address; fall through to Phase 2.
-			if syntheticComments := e.buildReviewThreadComments(item); len(syntheticComments) > 0 {
-				iKey := issueKey(item, e.defaultRepo())
-				repoStr := itemOwnerRepoString(item, e.defaultRepo())
-				// Guard: if a goroutine from a previous poll cycle is still
-				// running dispatchReviewReinvoke for this item, skip the entire
-				// reinvoke path — including cycle-limit checks — to avoid
-				// pausing an item while valid work is still in progress. The
-				// store Worker field is the semantic source of truth for in-flight state.
-				if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil && snap.Worker() != nil {
-					e.logf(item.Number, "review-reinvoke", "skipping dispatch — review reinvoke already in-flight\n")
-					continue
-				}
-				var cycleCount int
-				if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
-					cycleCount = snap.ReviewCycles(stage.Name)
-				}
-				maxCycles := e.cfg.MaxReviewCycles
-				if cycleCount >= maxCycles {
-					e.pauseForReviewCycleLimit(board, item, stage, cycleCount, maxCycles)
-				} else {
-					e.store.Apply(itemstate.ReviewCycleIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
-					e.dispatchReviewReinvoke(ctx, board, item, stage)
-					advancedItems[iKey] = true
-				}
-				continue
+		claimed := false
+		for _, h := range catchUpPhase1Handlers {
+			if h.run(e, pctx) {
+				claimed = true
+				break
 			}
 		}
-
-		// Convergence monitor: items with fabrik:auto-merge-enabled are in the
-		// GitHub native auto-merge flow. checkAutoMergeConvergence handles PR
-		// state changes, budget exhaustion, and rebase dispatch. All other
-		// merge/CI gates are bypassed — GitHub owns the merge decision.
-		if hasLabel(item, "fabrik:auto-merge-enabled") {
-			e.checkAutoMergeConvergence(ctx, board, item, stage)
+		if claimed {
 			continue
-		}
-
-		// Fetch all PR merge/CI state in a single pass. Both gates below
-		// consume this result, ensuring they see identical GitHub state within
-		// one poll cycle and eliminating the mergeable vs mergeable_state
-		// split-brain that separate REST calls could produce.
-		settle := e.settlePRMergeState(item, stage)
-
-		// Merge-conflict gate: runs before the CI gate so that a PR made
-		// unmergeable by a base-branch advance is rebased immediately instead
-		// of the engine spinning on CI-await polls while the underlying
-		// blocker is a conflict. Gated by the same wait_for_ci flag — the only
-		// stages that participate in the post-complete catch-up loop.
-		mergeBlocked, mergeConflict := e.checkMergeabilityGate(item, stage, settle)
-		if mergeConflict {
-			iKey := issueKey(item, e.defaultRepo())
-			repoStr := itemOwnerRepoString(item, e.defaultRepo())
-			if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil && snap.Worker() != nil {
-				e.logf(item.Number, "rebase-reinvoke", "skipping dispatch — rebase reinvoke already in-flight\n")
-				continue
-			}
-			var cycleCount int
-			if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
-				cycleCount = snap.RebaseCycles(stage.Name)
-			}
-			maxCycles := e.cfg.MaxRebaseCycles
-			if cycleCount >= maxCycles {
-				e.pauseForRebaseCycleLimit(board, item, stage, cycleCount, maxCycles)
-			} else {
-				e.store.Apply(itemstate.RebaseCycleIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
-				e.dispatchRebaseReinvoke(ctx, board, item, stage)
-				advancedItems[iKey] = true
-			}
-			continue
-		}
-		if mergeBlocked {
-			continue // mergeability not yet computed; re-evaluate on next poll
-		}
-
-		// CI gate: evaluate CI status for stages configured with wait_for_ci: true.
-		// This runs in Phase 1 (unconditional) so CI failures are fixed regardless
-		// of auto-advance setting. checkCIGate returns (blocked, ciFailure, timedOut).
-		ciBlocked, ciFailure, ciTimedOut := e.checkCIGate(board, item, stage, settle)
-		if ciTimedOut {
-			e.pauseForCITimeout(board, item, stage)
-			continue
-		}
-		if ciFailure {
-			iKey := issueKey(item, e.defaultRepo())
-			repoStr := itemOwnerRepoString(item, e.defaultRepo())
-			if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil && snap.Worker() != nil {
-				e.logf(item.Number, "ci-fix-reinvoke", "skipping dispatch — CI-fix reinvoke already in-flight\n")
-				continue
-			}
-			var cycleCount int
-			if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
-				cycleCount = snap.CIFixCycles(stage.Name)
-			}
-			maxCycles := e.cfg.MaxCiFixCycles
-			if cycleCount >= maxCycles {
-				e.pauseForCIFixCycleLimit(board, item, stage, cycleCount, maxCycles)
-			} else {
-				e.store.Apply(itemstate.CIFixCycleIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
-				e.dispatchCIFixReinvoke(ctx, board, item, stage, settle)
-				advancedItems[iKey] = true
-			}
-			continue
-		}
-		if ciBlocked {
-			continue // CI still pending; re-evaluate on next poll
 		}
 
 		// Phase 2: gated stage advancement.
