@@ -46,6 +46,18 @@ func hasUnrestrictedLabel(item gh.ProjectItem) bool {
 	return false
 }
 
+// stageIsGateChecked reports whether a stage gates completion on CI or reviews
+// (wait_for_ci / wait_for_reviews). The Validate stage is the gate-checked stage
+// in the default pipeline; the settle-owner (runValidatePRTerminalAdvance) and
+// the closed-issue admit gates key on this property so a merged PR at a
+// gate-checked stage is advanced/healed regardless of which gate label is set.
+func stageIsGateChecked(stage *stages.Stage) bool {
+	if stage == nil {
+		return false
+	}
+	return (stage.WaitForCI != nil && *stage.WaitForCI) || (stage.WaitForReviews != nil && *stage.WaitForReviews)
+}
+
 func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
 	e.logf(item.Number, "done", "stage %q complete\n", stage.Name)
 
