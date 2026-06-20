@@ -103,12 +103,19 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 		if stage == nil {
 			return false
 		}
-		// Also admit closed items with fabrik:awaiting-ci so the catch-up loop
-		// can complete the CI gate after a PR merge closes the issue.
-		// Admit fabrik:auto-merge-enabled for the same reason: when GitHub merges
-		// the PR the issue is closed; checkAutoMergeConvergence needs to run to
-		// detect the merged state and advance to Done.
-		if !stage.CleanupWorktree && !hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) && !hasLabel(item, "fabrik:awaiting-ci") && !hasLabel(item, "fabrik:auto-merge-enabled") {
+		// Admit closed items so the catch-up loop / settle-owner can advance or
+		// heal them after a PR merge closes the issue. Beyond stage:<stage>:complete
+		// (already past the gate) and fabrik:awaiting-ci / fabrik:auto-merge-enabled
+		// (the CI-gate catch-up and checkAutoMergeConvergence), admit any item at a
+		// gate-checked stage (wait_for_ci / wait_for_reviews — i.e. Validate) that
+		// is not yet complete. A merge can close the issue while it sits at Validate
+		// carrying ANY gate label (fabrik:awaiting-review, fabrik:paused, …) or none;
+		// the gate-label-agnostic settle-owner (runValidatePRTerminalAdvance,
+		// ADR-056 D2) must still observe the terminal PR and advance/heal it. Keying
+		// the admit on the gate-checked stage rather than a fixed label allowlist
+		// removes the label coupling that previously stranded paused / awaiting-review
+		// merges (the #874 class) one layer upstream of the settle-owner.
+		if !stage.CleanupWorktree && !hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) && !hasLabel(item, "fabrik:awaiting-ci") && !hasLabel(item, "fabrik:auto-merge-enabled") && !stageIsGateChecked(stage) {
 			return false
 		}
 	}
@@ -165,7 +172,11 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		if stage == nil {
 			return false
 		}
-		if !stage.CleanupWorktree && !hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) && !hasLabel(item, "fabrik:awaiting-ci") && !hasLabel(item, "fabrik:auto-merge-enabled") {
+		// Mirror of the itemMayNeedWork closed-issue gate: admit closed items at a
+		// gate-checked stage (Validate) lacking stage:complete so the gate-label-
+		// agnostic settle-owner can heal paused / awaiting-review merges (ADR-056 D2,
+		// #874 class) — not only fabrik:awaiting-ci / fabrik:auto-merge-enabled.
+		if !stage.CleanupWorktree && !hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) && !hasLabel(item, "fabrik:awaiting-ci") && !hasLabel(item, "fabrik:auto-merge-enabled") && !stageIsGateChecked(stage) {
 			return false
 		}
 	}
