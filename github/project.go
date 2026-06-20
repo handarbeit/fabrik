@@ -58,9 +58,18 @@ type itemNode struct {
 		} `json:"labels"`
 		LinkedPRs *struct {
 			Nodes []struct {
-				UpdatedAt  string `json:"updatedAt"`
-				Number     int    `json:"number"`
-				HeadRefOid string `json:"headRefOid"`
+				UpdatedAt           string `json:"updatedAt"`
+				Number              int    `json:"number"`
+				HeadRefOid          string `json:"headRefOid"`
+				IsMergeQueueEnabled bool   `json:"isMergeQueueEnabled"`
+				IsInMergeQueue      bool   `json:"isInMergeQueue"`
+				MergeQueueEntry     *struct {
+					State         string `json:"state"`
+					Position      int    `json:"position"`
+					Enqueuer      *struct {
+						Login string `json:"login"`
+					} `json:"enqueuer"`
+				} `json:"mergeQueueEntry"`
 			} `json:"nodes"`
 		} `json:"closedByPullRequestsReferences"`
 	} `json:"content"`
@@ -201,6 +210,13 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
                   updatedAt
                   number
                   headRefOid
+                  isMergeQueueEnabled
+                  isInMergeQueue
+                  mergeQueueEntry {
+                    state
+                    position
+                    enqueuer { login }
+                  }
                 }
               }
             }
@@ -325,8 +341,21 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 				}
 			}
 			if len(node.Content.LinkedPRs.Nodes) > 0 {
-				item.LinkedPRNumberShallow = node.Content.LinkedPRs.Nodes[0].Number
-				item.LinkedPRHeadSHA = node.Content.LinkedPRs.Nodes[0].HeadRefOid
+				pr0 := node.Content.LinkedPRs.Nodes[0]
+				item.LinkedPRNumberShallow = pr0.Number
+				item.LinkedPRHeadSHA = pr0.HeadRefOid
+				item.LinkedPRIsMergeQueueEnabled = pr0.IsMergeQueueEnabled
+				item.LinkedPRIsInMergeQueue = pr0.IsInMergeQueue
+				if pr0.MergeQueueEntry != nil {
+					entry := &MergeQueueEntry{
+						State:    pr0.MergeQueueEntry.State,
+						Position: pr0.MergeQueueEntry.Position,
+					}
+					if pr0.MergeQueueEntry.Enqueuer != nil {
+						entry.EnqueuerLogin = pr0.MergeQueueEntry.Enqueuer.Login
+					}
+					item.LinkedPRMergeQueueEntry = entry
+				}
 			}
 		}
 
@@ -457,6 +486,13 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
                   number
                   updatedAt
                   headRefOid
+                  isMergeQueueEnabled
+                  isInMergeQueue
+                  mergeQueueEntry {
+                    state
+                    position
+                    enqueuer { login }
+                  }
                 }
               }
             }
@@ -627,6 +663,13 @@ query($id: ID!) {
           id
           number
           headRefOid
+          isMergeQueueEnabled
+          isInMergeQueue
+          mergeQueueEntry {
+            state
+            position
+            enqueuer { login }
+          }
           comments(first: 100) {
             nodes {
               id
@@ -764,10 +807,19 @@ query($id: ID!) {
 				} `json:"comments"`
 				LinkedPRs *struct {
 					Nodes []struct {
-						ID         string `json:"id"`
-						Number     int    `json:"number"`
-						HeadRefOid string `json:"headRefOid"`
-						Comments   struct {
+						ID                  string `json:"id"`
+						Number              int    `json:"number"`
+						HeadRefOid          string `json:"headRefOid"`
+						IsMergeQueueEnabled bool   `json:"isMergeQueueEnabled"`
+						IsInMergeQueue      bool   `json:"isInMergeQueue"`
+						MergeQueueEntry     *struct {
+							State    string `json:"state"`
+							Position int    `json:"position"`
+							Enqueuer *struct {
+								Login string `json:"login"`
+							} `json:"enqueuer"`
+						} `json:"mergeQueueEntry"`
+						Comments struct {
 							Nodes    []commentNodeData `json:"nodes"`
 							PageInfo struct {
 								HasNextPage bool   `json:"hasNextPage"`
@@ -885,6 +937,9 @@ query($id: ID!) {
 	item.LinkedPRReviews = nil
 	item.LinkedPRReviewThreadComments = nil
 	item.LinkedPRResolvedThreadCount = 0
+	item.LinkedPRIsMergeQueueEnabled = false
+	item.LinkedPRIsInMergeQueue = false
+	item.LinkedPRMergeQueueEntry = nil
 
 	// Process issue/PR comments
 	commentNodes := node.Comments.Nodes
@@ -902,10 +957,24 @@ query($id: ID!) {
 	// Merge comments, review requests, and reviews from linked PRs
 	if node.LinkedPRs != nil {
 		for i, pr := range node.LinkedPRs.Nodes {
-			// Record the first linked PR's number and head SHA for REST re-request and CI gate calls.
+			// Record the first linked PR's number, head SHA, and queue state for
+			// REST re-request, CI gate calls, and merge-queue integration.
 			if i == 0 {
 				item.LinkedPRNumber = pr.Number
 				item.LinkedPRHeadSHA = pr.HeadRefOid
+				item.LinkedPRIsMergeQueueEnabled = pr.IsMergeQueueEnabled
+				item.LinkedPRIsInMergeQueue = pr.IsInMergeQueue
+				item.LinkedPRMergeQueueEntry = nil
+				if pr.MergeQueueEntry != nil {
+					entry := &MergeQueueEntry{
+						State:    pr.MergeQueueEntry.State,
+						Position: pr.MergeQueueEntry.Position,
+					}
+					if pr.MergeQueueEntry.Enqueuer != nil {
+						entry.EnqueuerLogin = pr.MergeQueueEntry.Enqueuer.Login
+					}
+					item.LinkedPRMergeQueueEntry = entry
+				}
 			}
 			prCommentNodes := pr.Comments.Nodes
 			if pr.Comments.PageInfo.HasNextPage {
