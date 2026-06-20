@@ -298,6 +298,24 @@ func (e *Engine) Run() error {
 		}
 	}()
 
+	// Handle TUI stop requests in a dedicated goroutine. Each stop request runs
+	// handleStopRequest in its own goroutine so API calls don't block the listener.
+	if e.stopCh != nil {
+		go func() {
+			for {
+				select {
+				case req, ok := <-e.stopCh:
+					if !ok {
+						return
+					}
+					go e.handleStopRequest(ctx, req)
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
 	// Validate stage names against project board columns before first poll.
 	if err := e.checkStageColumnAlignment(ctx); err != nil {
 		return err

@@ -66,7 +66,7 @@ type issueCtxEntry   struct{ cancel context.CancelFunc; holder *killReasonHolder
 
 A `killReasonHolder` is created per-issue at dispatch time and stored in the issue context via `context.WithValue`. Writers call `holder.val.Store("reason_string")` before cancelling the context. `cmd.Cancel` reads the stored value and passes it to `killProcGroupGraceful`.
 
-Reason codes: `max_wall_time`, `inactivity_timeout`, `supplant_by_new_invocation`, `daemon_shutdown`, `context_cancel` (fallback).
+Reason codes: `max_wall_time`, `inactivity_timeout`, `supplant_by_new_invocation`, `daemon_shutdown`, `user_stop`, `context_cancel` (fallback).
 
 ### 5. Per-issue context map (`issueCtxs sync.Map`)
 
@@ -74,6 +74,7 @@ The engine maintains `issueCtxs sync.Map` (keyed by `issueKey`) holding `issueCt
 
 - **Daemon shutdown**: the poll loop iterates `issueCtxs` and stores `"daemon_shutdown"` in every holder before cancelling the root context.
 - **Supplant-by-new-invocation**: when the board shows a different worker has claimed an issue, the dispatcher stores `"supplant_by_new_invocation"` in the holder and cancels the per-issue context, cleanly stopping the in-flight Claude session.
+- **TUI manual stop**: `handleStopRequest` stores `"user_stop"` in the targeted issue's holder and cancels its per-issue context; the worker exits via the normal SIGTERM→SIGKILL escalation path; `fabrik:paused` + `fabrik:awaiting-input` labels are applied and a stop comment is posted on the issue.
 
 Entries are deleted from the map with a `defer` immediately after the per-issue goroutine returns, so the map never accumulates stale entries.
 

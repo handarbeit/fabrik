@@ -1887,6 +1887,7 @@ dialog instead of a simple y/N prompt (see [Customizing Skills](#customizing-ski
 | `Tab` | Cycle focus: In Progress → History → Warnings → (repeat) |
 | `Up/Down` or `j/k` | Navigate items within the focused pane |
 | `l` | Open `fabrik watch` for selected issue (live Claude output, stage tabs, PR/CI status) |
+| `s` | Stop selected active job and apply `fabrik:paused` (In Progress pane only; shows `[y/N]` confirmation first; posts an audit comment on the issue) |
 | `enter` | Toggle inline detail panel (History pane); toggle expanded detail (Warnings pane) |
 | `r` | Resume Claude session for selected history item (history pane only, item must not be active) |
 | `Escape` | Close open dialogs; with no dialog open, triggers quit confirmation |
