@@ -29,14 +29,6 @@ import (
 // Cost: ~$1–3.
 func TestCIFixReinvoke(t *testing.T) {
 	t.Parallel()
-	// Skipped pending handarbeit/fabrik#916. A capable Implement-stage agent makes
-	// CI green on the first push (it satisfies the sentinel during Implement), so
-	// the sentinel never fails and the reinvoke loop never fires. Forcing a
-	// deterministic first failure needs the engine change (surface failing-check
-	// output in buildCIFixComment) + a per-run-nonce sentinel the agent cannot
-	// pre-satisfy. The harness hardening below (SENTINEL_FIX body, no-workflow-edit
-	// guard, sentinel-failure precondition) is retained for when #916 unblocks this.
-	t.Skip("blocked on #916: agent satisfies ci-fix-sentinel during Implement; first failure not yet deterministically forceable")
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
 	assertSentinelCheckRequired(t, env, env.RepoAlpha)
@@ -227,15 +219,13 @@ func TestCIFixReinvokeCycleLimit(t *testing.T) {
 
 // ciFixReinvokeBody is the issue body for TestCIFixReinvoke. The PR body must
 // contain "ci-fix-sentinel-required" so the test-alpha CI workflow triggers the
-// ci-fix-sentinel check. That check FAILS until a file named SENTINEL_FIX
-// (at the repo root) contains the line "ci-fix-satisfied" — the only sanctioned
-// way to satisfy it. Claude must create that file ONLY on the CI-fix reinvoke,
-// producing the failure → reinvoke → recovery sequence the test exercises.
+// ci-fix-sentinel check.
 //
-// The SENTINEL_FIX mechanism is deliberately the sole satisfaction path and the
-// workflow is off-limits (see hard constraints) so the agent cannot satisfy or
-// weaken the sentinel prematurely — the historical failure mode that made the
-// sentinel pass before the CI-fix loop ever ran.
+// The sentinel uses a per-run nonce (derived from $GITHUB_RUN_ID) as its pass
+// condition. The nonce is not known until CI runs, so the agent cannot
+// pre-satisfy it during Implement. On the CI-fix reinvoke, the engine embeds
+// the nonce in the reinvoke comment (from the check run's output.summary), and
+// the agent reads it from there to create SENTINEL_FIX with the correct nonce.
 const ciFixReinvokeBody = `## Goal
 
 End-to-end regression test for the Fabrik CI-fix reinvoke loop (handarbeit/fabrik#900).
@@ -248,29 +238,35 @@ README.md, on its own line, immediately after the line containing
 
     <!-- ci-fix-reinvoke-initial -->
 
-Make NO other changes on this commit. In particular do NOT create the
-SENTINEL_FIX file yet. The ci-fix-sentinel check WILL fail on this first push —
-that failure is expected and required.
+Make NO other changes on this commit. In particular do **NOT** create the
+` + "`SENTINEL_FIX`" + ` file. The ci-fix-sentinel check WILL fail on this first push
+because it requires a per-run nonce you cannot know in advance. That failure
+is expected and required.
 
-**When the CI-fix reinvoke fires** (you will be prompted with a message about
-the CI failure), and ONLY then, push a second commit that creates a new file
-named exactly ` + "`SENTINEL_FIX`" + ` at the repository root, containing exactly this
-single line:
+**When the CI-fix reinvoke fires** (you will be prompted with a "🏭 Fabrik — CI
+Fix Required" comment), and ONLY then, push a second commit. Read the nonce
+from the reinvoke comment: look for the blockquote under the
+` + "`ci-fix-sentinel`" + ` check failure. It contains a line like:
 
-    ci-fix-satisfied
+    To satisfy CI, create SENTINEL_FIX containing: <nonce>
 
-That second commit makes the sentinel pass. Do not rebase or squash — the two
-commits must remain distinct so the e2e test can verify the commit count.
+Create a new file named exactly ` + "`SENTINEL_FIX`" + ` at the repository root whose
+contents are **only** that nonce string (no extra text, no trailing newline
+beyond what is necessary). That second commit makes the sentinel pass.
+
+Do not rebase or squash — the two commits must remain distinct so the e2e test
+can verify the commit count.
 
 ## Hard constraints (do NOT violate)
 
 - NEVER modify any file under ` + "`.github/`" + `. The CI workflow — including the
   ci-fix-sentinel job — is immutable test infrastructure. Editing it invalidates
   the test and will fail the run.
-- Do NOT create the SENTINEL_FIX file on the initial commit; create it ONLY on
-  the CI-fix reinvoke.
+- Do NOT create ` + "`SENTINEL_FIX`" + ` on the initial commit; create it ONLY on the
+  CI-fix reinvoke, after reading the nonce from the reinvoke comment.
 - The PR body MUST contain the literal marker ` + "`ci-fix-sentinel-required`" + ` so the
   sentinel fires.
+- Do NOT guess or fabricate the nonce — it must come from the reinvoke comment.
 
 ## CI behaviour required
 
@@ -281,9 +277,9 @@ ci-fix-sentinel-required
 
 ## Scope
 
-README.md on the initial commit; a new SENTINEL_FIX file on the CI-fix reinvoke.
-No other files. No decomposition. One commit on the initial push, one CI-fix
-commit.
+README.md on the initial commit; a new SENTINEL_FIX file (containing the nonce
+from the reinvoke comment) on the CI-fix reinvoke. No other files. No
+decomposition. One commit on the initial push, one CI-fix commit.
 `
 
 // ciFixCycleLimitBody is the issue body for TestCIFixReinvokeCycleLimit. The
