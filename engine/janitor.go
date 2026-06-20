@@ -318,6 +318,9 @@ type logFileEntry struct {
 func pruneLogs(root string, retentionDays int, maxBytes int64, now time.Time) (
 	filesScanned, filesRemoved int, bytesRemoved int64, ageRemoved, sizeRemoved int, err error,
 ) {
+	if retentionDays <= 0 && maxBytes <= 0 {
+		return 0, 0, 0, 0, 0, nil
+	}
 	// Resolve and guard the prune root once.
 	// Use filepath.Abs (not EvalSymlinks) so the same resolution strategy applies
 	// to both root and individual paths — avoiding false-positive mismatches when
@@ -337,16 +340,14 @@ func pruneLogs(root string, retentionDays int, maxBytes int64, now time.Time) (
 	var files []logFileEntry
 	var dirs []string
 
-	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkerr error) error {
+	// Walk absRoot (not root) so callback paths are already absolute — no
+	// per-file filepath.Abs system call needed inside the callback.
+	walkErr := filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, walkerr error) error {
 		if walkerr != nil {
 			return nil // skip unreadable entries; continue walk
 		}
 		// Scope guard: every path must be under absRoot.
-		absPath, absErr := filepath.Abs(path)
-		if absErr != nil {
-			absPath = filepath.Clean(path)
-		}
-		if absPath != absRoot && !strings.HasPrefix(absPath, rootPrefix) {
+		if path != absRoot && !strings.HasPrefix(path, rootPrefix) {
 			// Path is outside the prune root (e.g. a symlink escape); skip it.
 			if d.IsDir() {
 				return filepath.SkipDir
@@ -354,7 +355,7 @@ func pruneLogs(root string, retentionDays int, maxBytes int64, now time.Time) (
 			return nil
 		}
 		if d.IsDir() {
-			if absPath != absRoot {
+			if path != absRoot {
 				dirs = append(dirs, path)
 			}
 			return nil
@@ -368,13 +369,13 @@ func pruneLogs(root string, retentionDays int, maxBytes int64, now time.Time) (
 		return nil
 	})
 	if walkErr != nil {
-		err = fmt.Errorf("walking %s: %w", root, walkErr)
+		err = fmt.Errorf("walking %s: %w", absRoot, walkErr)
 		return
 	}
 
 	// Phase 1: Age prune — delete files older than the retention window.
 	if retentionDays > 0 {
-		cutoff := now.Add(-time.Duration(retentionDays) * 24 * time.Hour)
+		cutoff := now.AddDate(0, 0, -retentionDays)
 		var remaining []logFileEntry
 		for _, f := range files {
 			if f.mtime.Before(cutoff) {
