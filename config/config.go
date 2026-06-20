@@ -35,6 +35,8 @@ type ProjectConfig struct {
 	WebhookEvents           []string `yaml:"webhook_events"`
 	StatusPoll              *int     `yaml:"status_poll"`
 	JanitorIntervalHours    *int     `yaml:"janitor_interval_hours"`
+	LogRetentionDays        *int     `yaml:"log_retention_days"`
+	LogMaxBytes             *int64   `yaml:"log_max_bytes"`
 }
 
 // LoadProjectConfig reads .fabrik/config.yaml from CWD.

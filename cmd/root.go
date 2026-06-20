@@ -59,7 +59,9 @@ type Config struct {
 	WebhookEvents     string // comma-separated; empty means default event set
 	StatusPollSeconds    int // Layer 2 status-only sweep cadence in seconds; 0 = use default (15)
 	ReconcileInterval    int // seconds; 0 means use default (180 = 3 min); also FABRIK_RECONCILE_INTERVAL
-	JanitorIntervalHours int // hours; 1 = default; 0 disables the janitor
+	JanitorIntervalHours int   // hours; 1 = default; 0 disables the janitor
+	LogRetentionDays     int   // days; 14 = default; 0 disables age-based log pruning
+	LogMaxBytes          int64 // bytes; 2147483648 = default; 0 disables size-cap pruning
 }
 
 func Execute() error {
@@ -149,6 +151,8 @@ func Execute() error {
 	flag.IntVar(&cfg.StatusPollSeconds, "status-poll", 0, "Retained for config compatibility; the Layer 2 updatedAt gate now runs every poll cycle (~15 s) regardless of this value. Also FABRIK_STATUS_POLL.")
 	flag.IntVar(&cfg.ReconcileInterval, "reconcile-interval", 0, "Seconds between periodic light-reconcile webhook-stream-health checks when --webhooks is enabled (0 = use default of 180; also FABRIK_RECONCILE_INTERVAL). Inactive without --webhooks — the per-poll Reconcile is the only freshener in that mode.")
 	flag.IntVar(&cfg.JanitorIntervalHours, "janitor-interval", 1, "Worktree janitor scan interval in hours; 0 disables the janitor (also FABRIK_JANITOR_INTERVAL)")
+	flag.IntVar(&cfg.LogRetentionDays, "log-retention-days", 14, "Delete log files older than this many days; 0 disables age-based pruning (also FABRIK_LOG_RETENTION_DAYS)")
+	flag.Int64Var(&cfg.LogMaxBytes, "log-max-bytes", 2147483648, "Total size cap for .fabrik/logs/ in bytes; oldest files deleted first after age prune; 0 disables size cap (also FABRIK_LOG_MAX_BYTES)")
 	flag.StringVar(&cfg.KillGraceSigInt, "kill-grace-sigint", "", "Grace window after SIGINT before SIGTERM in the kill escalation sequence (Go duration: 10s, 0s to skip SIGINT entirely; also FABRIK_KILL_GRACE_SIGINT; default 10s)")
 	flag.StringVar(&cfg.KillGraceSigTerm, "kill-grace-sigterm", "", "Grace window after SIGTERM before SIGKILL in the kill escalation sequence (Go duration: 10s; also FABRIK_KILL_GRACE_SIGTERM; default 10s)")
 
@@ -410,6 +414,36 @@ func Execute() error {
 			}
 		}
 	}
+	if !explicitFlags["log-retention-days"] {
+		if v := os.Getenv("FABRIK_LOG_RETENTION_DAYS"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				cfg.LogRetentionDays = n
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_LOG_RETENTION_DAYS=%q is invalid (must be a non-negative integer of days; 0 = disable); using default 14\n", v)
+			}
+		} else if pc.LogRetentionDays != nil {
+			if *pc.LogRetentionDays < 0 {
+				fmt.Fprintf(os.Stderr, "[warn] config.yaml log_retention_days=%d is invalid (must be a non-negative integer; 0 = disable); using default 14\n", *pc.LogRetentionDays)
+			} else {
+				cfg.LogRetentionDays = *pc.LogRetentionDays
+			}
+		}
+	}
+	if !explicitFlags["log-max-bytes"] {
+		if v := os.Getenv("FABRIK_LOG_MAX_BYTES"); v != "" {
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+				cfg.LogMaxBytes = n
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_LOG_MAX_BYTES=%q is invalid (must be a non-negative integer of bytes; 0 = disable); using default 2147483648\n", v)
+			}
+		} else if pc.LogMaxBytes != nil {
+			if *pc.LogMaxBytes < 0 {
+				fmt.Fprintf(os.Stderr, "[warn] config.yaml log_max_bytes=%d is invalid (must be a non-negative integer; 0 = disable); using default 2147483648\n", *pc.LogMaxBytes)
+			} else {
+				cfg.LogMaxBytes = *pc.LogMaxBytes
+			}
+		}
+	}
 	if !explicitFlags["kill-grace-sigint"] {
 		if v := os.Getenv("FABRIK_KILL_GRACE_SIGINT"); v != "" {
 			cfg.KillGraceSigInt = v // validated in killGraceSigInt() helper
@@ -659,6 +693,8 @@ func Execute() error {
 		ProjectStatusPollSeconds: statusPollSeconds(cfg.StatusPollSeconds),
 		ReconcileInterval:        reconcileIntervalDuration(cfg.ReconcileInterval),
 		JanitorIntervalHours:     cfg.JanitorIntervalHours,
+		LogRetentionDays:         cfg.LogRetentionDays,
+		LogMaxBytes:              cfg.LogMaxBytes,
 		ReadyCh:                  testReadyCh,
 	})
 	if err != nil {
