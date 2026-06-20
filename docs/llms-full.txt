@@ -3651,7 +3651,7 @@ The catch-up loop Phase 1 calls `checkCIGate()` after the review gate check. Whe
    - If not exceeded: increment count, dispatch reinvoke via `dispatchCIFixReinvoke()`:
      - Applies `WorkerEntered` (prevents double-dispatch)
      - Acquires semaphore slot (respects `MaxConcurrent`)
-     - Calls `buildCIFixComment()` to construct a synthetic `gh.Comment` (`DatabaseID: 0`) with a structured CI failure report — uses `settle.CheckRuns` for the PR-head check runs (no separate `FetchCheckRuns` call); classifies each failed check as **NEW REGRESSION** (not failing on base branch) or **pre-existing** (also failing on base branch) by calling `FetchCheckRuns(baseSHA)` for the base-branch HEAD SHA (a **non-gate diagnostic read** — different SHA, independent of the settle result)
+     - Calls `buildCIFixComment()` to construct a synthetic `gh.Comment` (`DatabaseID: 0`) with a structured CI failure report — uses `settle.CheckRuns` for the PR-head check runs (no separate `FetchCheckRuns` call); classifies each failed check as **NEW REGRESSION** (not failing on base branch) or **pre-existing** (also failing on base branch) by calling `FetchCheckRuns(baseSHA)` for the base-branch HEAD SHA (a **non-gate diagnostic read** — different SHA, independent of the settle result); embeds each failing check's `Output.Summary` and `Output.Text` (when non-empty) as a markdown blockquote, with each field independently truncated to 2000 chars — this is the channel through which a per-run nonce from `$GITHUB_STEP_SUMMARY` reaches the agent
      - Calls `processComments()` with the synthetic comment and the `ci_fix_skill` (falls back to `comment_skill` if unset)
      - On exit: releases semaphore, applies `WorkerExited`
 
@@ -3670,7 +3670,7 @@ The catch-up loop Phase 1 calls `checkCIGate()` after the review gate check. Whe
 | Cycle counter | `snap.ReviewCycles(stageName)` / `ReviewCycleIncremented` | `snap.CIFixCycles(stageName)` / `CIFixCycleIncremented` |
 | Max cycles | `MaxReviewCycles` (default 5) | `MaxCiFixCycles` (default 5) |
 | Skill | `comment_skill` | `ci_fix_skill` (falls back to `comment_skill`) |
-| Synthetic comment | PR review thread text | Structured CI failure report with NEW REGRESSION classification |
+| Synthetic comment | PR review thread text | Structured CI failure report with NEW REGRESSION classification; failing check `output.summary` / `output.text` embedded as blockquote (≤2000 chars each) |
 | Worker guard | Yes — `snap.Worker() != nil` | Yes — `snap.Worker() != nil` |
 | Thread resolution | Yes — `ResolveReviewThread()` after processing | No |
 | PR summary comment | Yes — `"<StageName> (review feedback addressed)"` on linked PR | No |
