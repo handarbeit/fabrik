@@ -1528,7 +1528,7 @@ After each rebase onto the base branch, both the `fabrik-review` and `fabrik-val
 
 #### Validate: pre-completion mergeability gate
 
-Before emitting `FABRIK_STAGE_COMPLETE`, the `fabrik-validate` skill checks the linked PR's `mergeable_state` via `gh pr view --json mergeable,mergeStateStatus`. When the result is `dirty` or `conflicting` — indicating a merge conflict or a rebased-away branch — the skill emits `FABRIK_BLOCKED_ON_INPUT` instead of `FABRIK_STAGE_COMPLETE`. The issue pauses with `fabrik:awaiting-input` rather than marking Validate complete on a non-mergeable PR. To resume: resolve the conflict, push the fixed branch, then remove `fabrik:paused` and `fabrik:awaiting-input`.
+Before emitting `FABRIK_STAGE_COMPLETE`, the `fabrik-validate` skill checks the linked PR's mergeability via `gh pr view --json mergeable,mergeStateStatus`. When the `mergeable` value is `CONFLICTING` or `mergeStateStatus` is `DIRTY` — indicating a merge conflict or a rebased-away branch — the skill emits `FABRIK_BLOCKED_ON_INPUT` instead of `FABRIK_STAGE_COMPLETE`. The issue pauses with `fabrik:awaiting-input` rather than marking Validate complete on a non-mergeable PR. To resume: resolve the conflict, push the fixed branch, then remove `fabrik:paused` and `fabrik:awaiting-input`.
 
 ### Customizing Skills
 
