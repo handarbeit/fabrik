@@ -14,7 +14,7 @@ import (
 // SC-002).
 //
 // The test bed's CI workflow has a required "slow-gate" job that sleeps for
-// ~6 minutes when the PR body contains the literal string "slow-ci-required".
+// ~10 minutes when the PR body contains the literal string "slow-ci-required".
 // We file two yolo issues that BOTH target the same anchor in the same file
 // (the first line of README.md) and BOTH carry the marker. The arrangement
 // makes the race deterministic:
@@ -23,7 +23,7 @@ import (
 //  2. Both PRs open against main from the same base SHA.
 //  3. Validate completes on both; engine enables GitHub native auto-merge on
 //     both PRs (fabrik:auto-merge-enabled is applied).
-//  4. Both PRs wait on the 6-minute slow-gate check.
+//  4. Both PRs wait on the 10-minute slow-gate check.
 //  5. Whichever finishes first merges atomically via GitHub auto-merge. Main
 //     now has a new HTML comment line immediately after the first line.
 //  6. The OTHER PR is now "behind main" AND has a true textual conflict at
@@ -46,7 +46,7 @@ import (
 // its CI run). Before #829, this test would fail with the second PR stuck
 // in fabrik:paused.
 //
-// Wall-clock: ~75-90 min. Cost: ~$2-4.
+// Wall-clock: ~80-100 min. Cost: ~$2-4.
 func TestConvergenceRace(t *testing.T) {
 	t.Parallel()
 	env := LoadEnv(t)
@@ -131,7 +131,7 @@ func TestConvergenceRace(t *testing.T) {
 // freedom in where to put the line, the conflict may not materialise.
 //
 // The PR body MUST also contain the literal string "slow-ci-required". The
-// test repo's CI workflow keys on that string to enable the 6-minute
+// test repo's CI workflow keys on that string to enable the 10-minute
 // slow-gate that widens the merge-race window enough for #829's bug to
 // manifest reliably.
 const convergenceBodyTemplate = `## Goal
@@ -164,7 +164,7 @@ slow-gate fires:
 
 slow-ci-required
 
-This is what gives the auto-merge race a deterministic 6-minute window
+This is what gives the auto-merge race a deterministic 10-minute window
 during which main can move under us.
 
 ## Scope
