@@ -90,6 +90,7 @@ type Engine struct {
 	idleStart            time.Time        // when consecutive idle polls began; zero value = not idle
 	lastProjectUpdatedAt time.Time        // last seen project.updatedAt from FetchProjectUpdatedAt gate; zero = not yet checked
 	wakeCh               chan struct{}    // TUI sends on this to wake the poll loop immediately; nil if no TUI
+	stopCh               chan tui.StopRequest // TUI sends on this to stop a specific in-flight issue; nil if no TUI
 	sem                  chan struct{}    // semaphore bounding concurrent workers across poll cycles
 	wg                   sync.WaitGroup   // tracks in-flight workers for graceful shutdown
 	cloneInFlight        sync.Map         // key: "owner/repo" string, value: *cloneCall; per-repo bare-clone coordination
@@ -284,6 +285,12 @@ func (e *Engine) registerWorktrees(nameWithOwner, baseDir, worktreeRoot string) 
 // reset idle backoff and trigger an immediate poll. Must be called before Run().
 func (e *Engine) SetWakeCh(ch chan struct{}) {
 	e.wakeCh = ch
+}
+
+// SetStopCh configures the stop channel. The TUI sends on this channel to
+// cancel a specific in-flight issue and apply fabrik:paused. Must be called before Run().
+func (e *Engine) SetStopCh(ch chan tui.StopRequest) {
+	e.stopCh = ch
 }
 
 // SetEvents configures the event channel. Must be called before Run().
