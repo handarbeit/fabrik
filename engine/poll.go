@@ -631,6 +631,7 @@ func (e *Engine) Run() error {
 		e.runStartupTerminalScan()
 		if e.cfg.JanitorIntervalHours > 0 {
 			e.runWorktreeJanitor(ctx)
+			e.runLogJanitor(ctx)
 		}
 	}
 
@@ -638,8 +639,9 @@ func (e *Engine) Run() error {
 	// has gone stale and cleans up if the process is confirmed dead via signal 0.
 	e.startWorkerDetector(ctx)
 
-	// Start periodic worktree janitor. Scans .fabrik/worktrees/ and reaps
-	// orphaned worktrees for closed, off-board issues. Disabled when JanitorIntervalHours == 0.
+	// Start periodic janitor goroutine. On each tick: reaps orphaned worktrees for
+	// closed, off-board issues and prunes .fabrik/logs/ by age and total size.
+	// Disabled when JanitorIntervalHours == 0.
 	if e.cfg.JanitorIntervalHours > 0 {
 		go func() {
 			ticker := time.NewTicker(time.Duration(e.cfg.JanitorIntervalHours) * time.Hour)
@@ -650,6 +652,7 @@ func (e *Engine) Run() error {
 					return
 				case <-ticker.C:
 					e.runWorktreeJanitor(ctx)
+					e.runLogJanitor(ctx)
 				}
 			}
 		}()

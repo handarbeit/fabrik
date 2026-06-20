@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
@@ -272,6 +275,148 @@ func (e *Engine) janitorIsClosed(ctx context.Context, owner, repo string, issueN
 	result := issue.State == "closed"
 	closedCache[key] = result
 	return result
+}
+
+// runLogJanitor prunes .fabrik/logs/ by age and total size, then removes
+// empty issue/repo directories. Disabled when JanitorIntervalHours == 0
+// (same gate as the worktree janitor). Called from poll.go at startup and
+// on every periodic janitor tick — the tick is the primary mechanism for
+// long-running instances that never restart.
+func (e *Engine) runLogJanitor(ctx context.Context) {
+	_ = ctx // reserved for future use (graceful cancellation on long walks)
+	logsRoot := filepath.Join(e.fabrikDir, ".fabrik", "logs")
+	scanned, removed, bytes, ageRemoved, sizeRemoved, err := pruneLogs(
+		logsRoot, e.cfg.LogRetentionDays, e.cfg.LogMaxBytes, time.Now(),
+	)
+	if err != nil {
+		e.logf(0, "log-janitor", "warn: prune error: %v\n", err)
+		return
+	}
+	e.logf(0, "log-janitor",
+		"cycle complete: scanned %d files, removed %d (%d bytes), age=%d size=%d\n",
+		scanned, removed, bytes, ageRemoved, sizeRemoved,
+	)
+}
+
+// logFileEntry holds metadata for a single file under .fabrik/logs/.
+type logFileEntry struct {
+	path  string
+	mtime time.Time
+	size  int64
+}
+
+// pruneLogs walks root, deletes files older than retentionDays (when > 0),
+// then deletes oldest files until total size is under maxBytes (when > 0),
+// and finally removes any now-empty subdirectories. The now parameter
+// enables deterministic testing via os.Chtimes. Returns counts of files
+// scanned, files removed, bytes freed, and counts per pruning phase.
+//
+// Scope guard: root is resolved with filepath.Clean before any deletion; every
+// candidate path is asserted to start with resolvedRoot+sep. Paths outside the
+// prune root are silently skipped. If root does not exist, returns zero counts
+// without error (normal first-run case).
+func pruneLogs(root string, retentionDays int, maxBytes int64, now time.Time) (
+	filesScanned, filesRemoved int, bytesRemoved int64, ageRemoved, sizeRemoved int, err error,
+) {
+	// Resolve and guard the prune root once.
+	absRoot, resolveErr := filepath.EvalSymlinks(root)
+	if resolveErr != nil {
+		if os.IsNotExist(resolveErr) {
+			return 0, 0, 0, 0, 0, nil
+		}
+		absRoot = filepath.Clean(root) // fall back: Clean without resolving symlinks
+	} else {
+		absRoot = filepath.Clean(absRoot)
+	}
+	rootPrefix := absRoot + string(filepath.Separator)
+
+	var files []logFileEntry
+	var dirs []string
+
+	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkerr error) error {
+		if walkerr != nil {
+			return nil // skip unreadable entries; continue walk
+		}
+		// Scope guard: every path must be under absRoot.
+		cleanPath := filepath.Clean(path)
+		if cleanPath != absRoot && !strings.HasPrefix(cleanPath, rootPrefix) {
+			// Path is outside the prune root (e.g. a symlink escape); skip it.
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			if cleanPath != absRoot {
+				dirs = append(dirs, path)
+			}
+			return nil
+		}
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			return nil // skip unreadable file metadata
+		}
+		files = append(files, logFileEntry{path: path, mtime: info.ModTime(), size: info.Size()})
+		filesScanned++
+		return nil
+	})
+	if walkErr != nil {
+		err = fmt.Errorf("walking %s: %w", root, walkErr)
+		return
+	}
+
+	// Phase 1: Age prune — delete files older than the retention window.
+	if retentionDays > 0 {
+		cutoff := now.Add(-time.Duration(retentionDays) * 24 * time.Hour)
+		var remaining []logFileEntry
+		for _, f := range files {
+			if f.mtime.Before(cutoff) {
+				if removeErr := os.Remove(f.path); removeErr == nil {
+					filesRemoved++
+					bytesRemoved += f.size
+					ageRemoved++
+				} else {
+					remaining = append(remaining, f) // deletion failed; treat as still present
+				}
+			} else {
+				remaining = append(remaining, f)
+			}
+		}
+		files = remaining
+	}
+
+	// Phase 2: Size-cap prune — delete oldest files first until under the cap.
+	if maxBytes > 0 {
+		var totalSize int64
+		for _, f := range files {
+			totalSize += f.size
+		}
+		if totalSize > maxBytes {
+			// Sort ascending by mtime so we delete the oldest files first.
+			sort.Slice(files, func(i, j int) bool {
+				return files[i].mtime.Before(files[j].mtime)
+			})
+			for _, f := range files {
+				if totalSize <= maxBytes {
+					break
+				}
+				if removeErr := os.Remove(f.path); removeErr == nil {
+					filesRemoved++
+					bytesRemoved += f.size
+					sizeRemoved++
+					totalSize -= f.size
+				}
+			}
+		}
+	}
+
+	// Phase 3: Empty-dir cleanup — walk dirs bottom-up (reverse order from WalkDir).
+	// os.Remove on a non-empty directory returns an error, so only empty dirs are removed.
+	for i := len(dirs) - 1; i >= 0; i-- {
+		_ = os.Remove(dirs[i])
+	}
+
+	return
 }
 
 // janitorIsOffBoardOrCleanupComplete reports whether the worktree is eligible
