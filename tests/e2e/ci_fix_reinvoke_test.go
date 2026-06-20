@@ -29,6 +29,14 @@ import (
 // Cost: ~$1–3.
 func TestCIFixReinvoke(t *testing.T) {
 	t.Parallel()
+	// Skipped pending handarbeit/fabrik#916. A capable Implement-stage agent makes
+	// CI green on the first push (it satisfies the sentinel during Implement), so
+	// the sentinel never fails and the reinvoke loop never fires. Forcing a
+	// deterministic first failure needs the engine change (surface failing-check
+	// output in buildCIFixComment) + a per-run-nonce sentinel the agent cannot
+	// pre-satisfy. The harness hardening below (SENTINEL_FIX body, no-workflow-edit
+	// guard, sentinel-failure precondition) is retained for when #916 unblocks this.
+	t.Skip("blocked on #916: agent satisfies ci-fix-sentinel during Implement; first failure not yet deterministically forceable")
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
 	assertSentinelCheckRequired(t, env, env.RepoAlpha)
