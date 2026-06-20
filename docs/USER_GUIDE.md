@@ -1988,7 +1988,7 @@ Session logs are saved to `.fabrik/logs/<owner>-<repo>/issue-<N>/` (relative to 
 ls -lt .fabrik/logs/<owner>-<repo>/issue-42/
 
 # Render a completed log as human-readable text
-cat .fabrik/logs/<owner>-<repo>/issue-42/<stage>-output-<timestamp>.json | fabrik stream-filter | less -R
+cat .fabrik/logs/<owner>-<repo>/issue-42/<stage>-<timestamp>-<nanos>.log | fabrik stream-filter | less -R
 ```
 
 Logs are namespaced by repository: `.fabrik/logs/<owner>-<repo>/issue-<N>/`.

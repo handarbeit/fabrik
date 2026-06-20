@@ -1986,7 +1986,7 @@ Session logs are saved to `.fabrik/logs/<owner>-<repo>/issue-<N>/` (relative to 
 ls -lt .fabrik/logs/<owner>-<repo>/issue-42/
 
 # Render a completed log as human-readable text
-cat .fabrik/logs/<owner>-<repo>/issue-42/<stage>-output-<timestamp>.json | fabrik stream-filter | less -R
+cat .fabrik/logs/<owner>-<repo>/issue-42/<stage>-<timestamp>-<nanos>.log | fabrik stream-filter | less -R
 ```
 
 Logs are namespaced by repository: `.fabrik/logs/<owner>-<repo>/issue-<N>/`.
@@ -5320,7 +5320,7 @@ Context files are available in .fabrik-context/
 
 ### Output Logging
 
-Raw Claude output saved to `~/.fabrik/logs/issue-<N>/<stage>-output-<timestamp>.json` after every invocation. Viewable through the TUI's `l` key (piped through `fabrik _stream-filter` for human-readable display).
+Each invocation writes one NDJSON stream file to `.fabrik/logs/<owner>-<repo>/issue-<N>/` as `<stage>-<timestamp>-<nanos>.log`. This file is written live during execution (tee'd from Claude's stdout) and is the sole on-disk copy of the stream. Viewable via `cat <file> | fabrik stream-filter | less -R` or through the TUI's `l` key.
 
 ### Turn Progress Emission
 

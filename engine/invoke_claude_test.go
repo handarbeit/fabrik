@@ -543,6 +543,60 @@ func TestRunClaude_StdoutTeeToLogFile(t *testing.T) {
 	}
 }
 
+// TestRunClaude_NoOutputJsonFile verifies that a standard invocation writes exactly
+// one stream file (.log) to LogDir and does not produce a redundant -output-*.json
+// file. The .log live-tee is the sole on-disk copy of the NDJSON stream.
+func TestRunClaude_NoOutputJsonFile(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	fakeClaude := filepath.Join(binDir, "claude")
+	ndjson := `{"type":"assistant","message":{"content":[{"type":"text","text":"no dup test"}]}}
+{"type":"result","subtype":"success","result":"done\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_nodup","num_turns":1,"total_cost_usd":0.001}
+`
+	ndjsonFile := filepath.Join(binDir, "output.ndjson")
+	if err := os.WriteFile(ndjsonFile, []byte(ndjson), 0600); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\ncat >/dev/null\ncat " + ndjsonFile + "\n"
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "NoDup",
+		Prompt:     "no dup test",
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 210, Title: "No dup test"}
+
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+
+	logDir := LogDir(210)
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		t.Fatalf("reading log dir %s: %v", logDir, err)
+	}
+
+	// Exactly one file should exist and it must have the .log suffix.
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 file in LogDir, got %d: %v", len(entries), entries)
+	}
+	name := entries[0].Name()
+	if !strings.HasSuffix(name, ".log") {
+		t.Errorf("expected .log file, got %q", name)
+	}
+	// No file with an "output" infix or .json suffix.
+	if strings.Contains(name, "output") || strings.HasSuffix(name, ".json") {
+		t.Errorf("redundant -output-*.json file found: %q", name)
+	}
+}
+
 // TestRunClaude_IssueUpdateInIntermediateTurn verifies that when a fake claude binary
 // emits FABRIK_ISSUE_UPDATE_BEGIN/END in an intermediate assistant turn (not in the
 // result field), runClaude still returns text containing the update block.

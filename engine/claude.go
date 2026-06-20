@@ -669,15 +669,6 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 		runErr = nil
 	}
 
-	// Save the raw NDJSON output to an -output-*.json file for backward compatibility
-	// (e.g., the existing TUI log viewer and stream-filter tooling).
-	if len(rawOutput) > 0 {
-		outputLogPath := filepath.Join(logDir, fmt.Sprintf("%s-output-%s.json", safeLabel, time.Now().UTC().Format("20060102-150405")))
-		if err := os.WriteFile(outputLogPath, rawOutput, 0600); err != nil {
-			claudeLog(issueNumber, "warn", "could not save output log: %v\n", err)
-		}
-	}
-
 	resp, ok := parseClaudeJSON(bytes.TrimSpace(rawOutput))
 	var text string
 	var usage TokenUsage
