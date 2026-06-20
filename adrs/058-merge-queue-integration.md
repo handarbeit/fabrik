@@ -103,34 +103,61 @@ repo:
 ### D4 — Settle composition (the ADR-056 care-area)
 Extend the **single** settle-owner / convergence path — do **not** add a parallel scanner (ADR-056's
 governing rule: "extend the owner, not add loop N+1").
-- `settlePRMergeState` gains a `PRMergeQueued` transient status (entry `QUEUED`/`AWAITING_CHECKS` →
-  hands off, re-evaluate next poll).
-- `checkAutoMergeConvergence` (already the yolo convergence monitor) gains a queue-aware branch keyed
-  on `mergeQueueEntry.state` and the `dequeued.reason`:
-  - dequeued **and PR merged** → **Done** (existing path). *The `dequeued`-fires-on-success trap is
-    the #913-class state-misread risk; the classifier MUST check merged-state, never treat dequeue
-    as failure.*
-  - dequeued, reason = conflict/branch-protection → **rebase-reinvoke** (Claude) → re-enqueue.
-  - dequeued, reason = CI failure → **ci-fix-reinvoke** → re-enqueue.
-  - dequeued, reason = manual/unknown → pause for human (do not loop).
-- Re-enqueue (not re-enqueue-in-place livelock): a conflicting member is resolved off the queue, then
-  re-enqueued fresh — avoiding the starvation where conflict-heavy PRs never land.
+
+**Hard constraint: classification MUST be poll-native and webhook-independent.** Fabrik's boardcache
+is correct via poll + reconcile alone; webhook deltas (`boardcache/delta.go`) are a pure latency
+optimization layered on top (cache refactor v0.0.54). The merge-queue classifier obeys the same rule
+— it derives **correctness entirely from poll-observable state**, never from a webhook payload. This
+is load-bearing because, once a PR is dequeued, `pullRequest.mergeQueueEntry` becomes `null` and the
+`dequeued.reason` exists *only* in the webhook event — so a design keyed on `reason` would silently
+break in poll-only deployments. We do not key on it.
+
+- `settlePRMergeState` gains a `PRMergeQueued` transient status (entry `QUEUED`/`AWAITING_CHECKS`, or
+  `isInMergeQueue == true` → hands off, re-evaluate next poll). The PR query gains
+  `isInMergeQueue`/`mergeQueueEntry{state}`; reconcile populates them from polling like every other
+  field — no webhook required.
+- `checkAutoMergeConvergence` (already the yolo convergence monitor) gains a queue-aware branch.
+  On a poll where the item left the queue (`isInMergeQueue` was true, now false), classify from
+  **poll-observable state only**:
+  - **PR merged** → **Done** (existing path). *Guard: leaving the queue also happens on success — the
+    monitor MUST check merged-state first and never treat dequeue as failure. This is the #913-class
+    state-misread trap and gets the heaviest test coverage.*
+  - **PR open + conflicting** (`mergeable_state == "dirty"` → `PRMergeConflicting`) → **rebase-reinvoke**
+    (Claude resolves) → re-enqueue.
+  - **PR open + not conflicting** → **re-run Fabrik's own Validate against current `origin/<base>`**
+    (rebase + gate). This is the poll-native source of truth: a merge-group ejection means "this PR is
+    not good against the main it would land on" (a semantic break its head-SHA checks missed), which
+    Fabrik's own Validate re-derives without GitHub's reason. Validate fails → existing
+    `ci-fix-reinvoke`/pause; Validate passes → re-enqueue.
+  - A re-enqueue cap (reuse the `MaxCiFixCycles`-style bound) prevents loops; exhaustion → pause for
+    human. Re-enqueue fresh after off-queue resolution (not re-enqueue-in-place) so conflict-heavy
+    PRs don't starve.
+- **Webhook `dequeued.reason` is a pure optimization, never a dependency.** When webhooks are present,
+  a new `boardcache/delta.go` `pull_request`/`dequeued` function persists `reason` to `e.store`, which
+  lets the monitor *skip the redundant re-Validate* (go straight to `ci-fix` on a CI-failure reason).
+  Absent webhooks, the re-Validate path above is fully correct on its own — mirroring the existing
+  delta-optimizes-poll split exactly.
 
 ### D5 — Detect-and-warn on the `merge_group` prerequisite
 If `isMergeQueueEnabled` but merge-group checks never report (queue stalls), Fabrik surfaces a clear
 operator error ("enable `on: merge_group` in CI") rather than hanging silently. This makes the one
 unavoidable per-repo prerequisite a loud, actionable failure.
 
-## The one empirical unknown
+## The one empirical unknown (now off the correctness path)
 
-The `dequeued.reason` enum string values are undocumented. The D4 classifier keys on them. **Resolve
-via a live test** (the first implementation issue stands up a queue-enabled repo, runs success /
-CI-fail / conflict / push-while-queued scenarios, and logs the raw `reason` payloads + the
-post-ejection poll signals). Until then, the classifier falls back to poll-observable state
-(`mergeStateStatus = DIRTY` ⇒ conflict; failed check-runs ⇒ CI-fail). *Spike note: standing up the
-live env hit a GitHub rulesets-API quirk (the `merge_queue` rule returned an opaque 422 despite the
-org's Team plan supporting private merge queue); not pursued further in-spike since the architecture
-is determined — the impl issue will own the live env.*
+The `dequeued.reason` enum string values are undocumented — but per D4 they are needed **only for the
+webhook optimization** (skipping a redundant re-Validate), not for correctness. Poll-native
+classification (`PRMergeConflicting` for conflict; Fabrik's own re-Validate against current base for
+everything else) is fully correct without them. So this unknown no longer blocks or gates the design.
+
+A live test still **confirms** the poll-side assumptions the classifier relies on — chiefly that
+`mergeQueueEntry` goes `null` (not a lingering `UNMERGEABLE` state) on dequeue, and that pushing to a
+queued PR ejects it — plus captures the `reason` values for the optimization. The first
+implementation step (operator-led, **not** a boarded code issue) owns the live env: stand up a
+queue-enabled repo, run success / CI-fail / conflict / push-while-queued scenarios, log the raw
+payloads + post-ejection poll signals. *Spike note: standing up the live env hit a GitHub
+rulesets-API quirk (the `merge_queue` rule returned an opaque 422 despite the org's Team plan
+supporting private merge queue); not pursued further in-spike since the architecture is determined.*
 
 ## Consequences
 
@@ -156,16 +183,25 @@ is determined — the impl issue will own the live env.*
   D3 only removes Fabrik's rebase-thrash for them.
 - No change to cruise/yolo semantics, the ADR-008 pause model, or the convergence budget (ADR-050).
 
-## Proposed implementation chain (spec-kit issues, blockedBy-chained off this ADR)
+## Proposed implementation plan
 
-1. **Live-env + ejection telemetry** — stand up a queue-enabled repo, capture `dequeued.reason`
-   values + post-ejection poll signals; produce the classifier map. (Unblocks the rest.)
-2. **PR-fetch + client surface** — add `isMergeQueueEnabled`/`isInMergeQueue`/`mergeQueueEntry` to
-   the GraphQL PR query and `PRDetails`; add `EnqueuePullRequest`/`DequeuePullRequest`.
-3. **Enqueue on yolo** — `attemptMergeOnValidate` queue branch; `merge_queue: auto|off` config; D1.
-4. **Queue-aware all paths** — `isInMergeQueue` guards on every rebase/mutation site; stop preemptive
-   cruise rebase on queue repos (D3).
-5. **Settle composition** — `PRMergeQueued` in `settlePRMergeState`; `checkAutoMergeConvergence`
-   queue branch with the D4 classifier; the `dequeued`-on-success guard; unit tests across
-   `{reason} × {merged/open}`. (D4 — the care-area.)
-6. **Detect-and-warn** on missing `merge_group` checks (D5); `docs/state-machine.md` update.
+**Step 0 — Live-env + ejection telemetry (operator-led, NOT a boarded code issue).** Stand up a
+queue-enabled repo, run success / CI-fail / conflict / push-while-queued scenarios, confirm the
+poll-side assumptions (`mergeQueueEntry` → null on dequeue; push ejects) and capture the
+`dequeued.reason` values for the optimization. Feeds Step 5; does not gate correctness (D4 is
+poll-native).
+
+**Boarded spec-kit issues (blockedBy-chained off this ADR):**
+
+1. **PR-fetch + client surface** — add `isMergeQueueEnabled`/`isInMergeQueue`/`mergeQueueEntry` to
+   the GraphQL PR query and `PRDetails`; add `EnqueuePullRequest`/`DequeuePullRequest`. *(default model)*
+2. **Enqueue on yolo** — `attemptMergeOnValidate` queue branch; `merge_queue: auto|off` config; D1.
+   *(default model)*
+3. **Queue-aware all paths** — `isInMergeQueue` guards on every rebase/mutation site; stop preemptive
+   cruise rebase on queue repos (D3). *(`model:opus` — cross-cutting "find every site")*
+4. **Settle composition** — `PRMergeQueued` in `settlePRMergeState`; `checkAutoMergeConvergence`
+   poll-native queue branch (D4 classifier); the leaving-the-queue-on-success guard; optional
+   `delta.go` `dequeued` enrichment; unit tests across `{poll-state} × {merged/open/conflict}`. (D4 —
+   the care-area.) *(`model:opus` + `effort:max`)*
+5. **Detect-and-warn** on missing `merge_group` checks (D5); `docs/state-machine.md` update.
+   *(default model)*
