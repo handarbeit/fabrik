@@ -445,7 +445,7 @@ func MergePR(t *testing.T, env *Env, repo string, prNumber int) {
 	// --admin bypasses not-yet-green required checks. The test repo has
 	// enforce_admins:false, so an admin merge is permitted, and it faithfully
 	// models the scenario these tests simulate: an external human merging the PR.
-	// Without it, a merge issued before the ~6-min slow-gate (and other required
+	// Without it, a merge issued before the ~10-min slow-gate (and other required
 	// checks) go green is rejected with "the base branch policy prohibits the
 	// merge" — a non-deterministic failure that depends on CI timing.
 	out, err := ghOutput(env, "pr", "merge", fmt.Sprint(prNumber), "-R", repo, "--merge", "--admin")
