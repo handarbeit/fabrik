@@ -509,3 +509,87 @@ func TestReClosingKeyword_MixedCase(t *testing.T) {
 		t.Errorf("want [5], got %v", nums)
 	}
 }
+
+// makeTwoStepGraphQLServer creates an httptest server that handles two sequential
+// POST /graphql calls. The first call returns the PR node ID; the second call
+// invokes checkFn to verify the mutation variables and returns a success response.
+func makeTwoStepGraphQLServer(t *testing.T, prNodeID string, checkFn func(t *testing.T, vars map[string]interface{})) (*httptest.Server, *Client) {
+	t.Helper()
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/graphql" || r.Method != "POST" {
+			http.NotFound(w, r)
+			return
+		}
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		switch callCount {
+		case 1:
+			// First call: return the PR node ID
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"repository": map[string]interface{}{
+						"pullRequest": map[string]interface{}{
+							"id": prNodeID,
+						},
+					},
+				},
+			})
+		case 2:
+			// Second call: verify mutation variables and return success
+			vars := readVars(r)
+			checkFn(t, vars)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{},
+			})
+		default:
+			t.Errorf("unexpected call #%d to /graphql", callCount)
+			http.Error(w, "unexpected call", http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(func() {
+		srv.Close()
+		if callCount != 2 {
+			t.Errorf("expected 2 GraphQL calls, got %d", callCount)
+		}
+	})
+	return srv, NewClientWithBaseURL("test-token", srv.URL)
+}
+
+func TestEnqueuePullRequest(t *testing.T) {
+	const prNodeID = "PR_testnode"
+	const expectedHeadOID = "deadbeef1234"
+
+	_, c := makeTwoStepGraphQLServer(t, prNodeID, func(t *testing.T, vars map[string]interface{}) {
+		t.Helper()
+		if got, ok := vars["prId"].(string); !ok || got != prNodeID {
+			t.Errorf("mutation vars[prId] = %v, want %q", vars["prId"], prNodeID)
+		}
+		if got, ok := vars["expectedHeadOid"].(string); !ok || got != expectedHeadOID {
+			t.Errorf("mutation vars[expectedHeadOid] = %v, want %q", vars["expectedHeadOid"], expectedHeadOID)
+		}
+	})
+
+	if err := c.EnqueuePullRequest("owner", "repo", 42, expectedHeadOID); err != nil {
+		t.Fatalf("EnqueuePullRequest: %v", err)
+	}
+}
+
+func TestDequeuePullRequest(t *testing.T) {
+	const prNodeID = "PR_testnode2"
+
+	_, c := makeTwoStepGraphQLServer(t, prNodeID, func(t *testing.T, vars map[string]interface{}) {
+		t.Helper()
+		if got, ok := vars["prId"].(string); !ok || got != prNodeID {
+			t.Errorf("mutation vars[prId] = %v, want %q", vars["prId"], prNodeID)
+		}
+		// DequeuePullRequest must NOT send expectedHeadOid.
+		if _, present := vars["expectedHeadOid"]; present {
+			t.Errorf("DequeuePullRequest sent unexpected expectedHeadOid: %v", vars["expectedHeadOid"])
+		}
+	})
+
+	if err := c.DequeuePullRequest("owner", "repo", 42); err != nil {
+		t.Fatalf("DequeuePullRequest: %v", err)
+	}
+}
