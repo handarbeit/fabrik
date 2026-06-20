@@ -310,9 +310,15 @@ section {
 }
 
 .pipeline-stage {
+  display: block;
   background: $color-surface;
   padding: 20px 16px;
   text-align: center;
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+  position: relative;
+  transition: background-color 0.2s;
 
   .stage-num {
     font-family: $font-mono;
@@ -333,6 +339,31 @@ section {
     line-height: 1.4;
   }
 
+  .stage-more {
+    display: block;
+    margin-top: 10px;
+    font-family: $font-mono;
+    font-size: 0.65rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: $color-accent;
+    opacity: 0;
+    transition: opacity 0.2s;
+  }
+
+  &:hover,
+  &:focus-visible {
+    background: $color-surface-2;
+    text-decoration: none;
+    .stage-name { color: $color-accent; }
+    .stage-more { opacity: 1; }
+  }
+
+  &:focus-visible {
+    outline: 2px solid $color-accent-2;
+    outline-offset: -2px;
+  }
+
   &.stage-active {
     background: $color-surface-2;
     .stage-name { color: $color-accent; }
@@ -346,6 +377,98 @@ section {
   color: $color-text-subtle;
   font-size: 1.2rem;
   padding: 0 4px;
+}
+
+// ============================================================
+// Pipeline stage detail sections
+// ============================================================
+.stage-details {
+  .stage-detail {
+    background: $color-surface;
+    border: 1px solid $color-border;
+    border-left: 3px solid $color-accent;
+    border-radius: $radius-lg;
+    padding: 28px 32px;
+    margin-bottom: 20px;
+    scroll-margin-top: 90px;
+
+    &:last-child { margin-bottom: 0; }
+  }
+
+  .stage-detail-head {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 14px;
+  }
+
+  .stage-detail-num {
+    font-family: $font-mono;
+    font-size: 0.85rem;
+    color: $color-text-subtle;
+  }
+
+  .stage-detail-title {
+    margin: 0;
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: $color-text;
+  }
+
+  .stage-detail-badge {
+    font-family: $font-mono;
+    font-size: 0.65rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: $color-text-muted;
+    background: $color-surface-2;
+    border: 1px solid $color-border;
+    border-radius: 999px;
+    padding: 3px 10px;
+
+    &.badge-write {
+      color: $color-accent;
+      border-color: $color-accent;
+    }
+  }
+
+  .stage-detail-lead {
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: $color-text;
+    margin: 0 0 10px;
+  }
+
+  .stage-detail p {
+    color: $color-text-muted;
+    line-height: 1.7;
+    margin: 0 0 14px;
+  }
+
+  .stage-detail-facts {
+    margin: 0 0 16px;
+    padding-left: 20px;
+
+    li {
+      color: $color-text-muted;
+      line-height: 1.6;
+      margin-bottom: 8px;
+    }
+
+    code {
+      font-family: $font-mono;
+      font-size: 0.85em;
+    }
+  }
+
+  .stage-detail-link {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: $color-accent;
+    text-decoration: none;
+
+    &:hover { text-decoration: underline; }
+  }
 }
 
 // Demo videos grid
