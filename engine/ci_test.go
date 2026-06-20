@@ -532,6 +532,70 @@ func TestBuildCIFixComment_IncludesFailedChecks(t *testing.T) {
 	}
 }
 
+// TestBuildCIFixComment_EmbedsSummaryOutput verifies that when a failing check
+// has a non-empty Output.Summary (e.g. from $GITHUB_STEP_SUMMARY), its content
+// is embedded in the CI-fix comment body as a blockquote. This is the channel
+// through which the per-run nonce reaches the agent on reinvoke.
+func TestBuildCIFixComment_EmbedsSummaryOutput(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1}
+	tr := true
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	settle := PRSettleResult{
+		Status: PRMergeBlocked,
+		Reason: "CI checks failed",
+		CheckRuns: []gh.CheckRun{
+			{
+				Name:       "ci-fix-sentinel",
+				Status:     "completed",
+				Conclusion: "failure",
+				Output:     gh.CheckRunOutput{Summary: "To satisfy CI, create SENTINEL_FIX containing: 12345678"},
+			},
+		},
+		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha9"},
+	}
+	comment := eng.buildCIFixComment(item, stage, "/tmp", settle)
+	if !strings.Contains(comment.Body, "ci-fix-sentinel") {
+		t.Error("expected check name 'ci-fix-sentinel' in comment body")
+	}
+	if !strings.Contains(comment.Body, "To satisfy CI, create SENTINEL_FIX containing: 12345678") {
+		t.Error("expected Output.Summary content embedded in comment body")
+	}
+	// Content must be formatted as a markdown blockquote.
+	if !strings.Contains(comment.Body, "> To satisfy CI") {
+		t.Error("expected Output.Summary rendered as blockquote (> prefix) in comment body")
+	}
+}
+
+// TestBuildCIFixComment_TruncatesLongOutput verifies that Output.Summary longer
+// than 2000 chars is truncated (with a "(truncated)" marker) in the CI-fix comment.
+func TestBuildCIFixComment_TruncatesLongOutput(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1}
+	tr := true
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	longSummary := strings.Repeat("x", 3000)
+	settle := PRSettleResult{
+		Status: PRMergeBlocked,
+		CheckRuns: []gh.CheckRun{
+			{Name: "build", Status: "completed", Conclusion: "failure",
+				Output: gh.CheckRunOutput{Summary: longSummary}},
+		},
+		PR: &gh.PRDetails{Number: 5, HeadSHA: "shaX"},
+	}
+	comment := eng.buildCIFixComment(item, stage, "/tmp", settle)
+	if strings.Contains(comment.Body, longSummary) {
+		t.Error("expected long Output.Summary to be truncated in comment body")
+	}
+	if !strings.Contains(comment.Body, "*(truncated)*") {
+		t.Error("expected truncation marker in comment body when Output.Summary exceeds 2000 chars")
+	}
+}
+
 // TestCheckCIGate_FetchLinkedPRError_BlocksGate verifies that a transient
 // FetchLinkedPR API error returns blocked=true rather than clearing the gate,
 // preventing auto-advance when CI status is unknown.
