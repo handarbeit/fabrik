@@ -319,14 +319,18 @@ func pruneLogs(root string, retentionDays int, maxBytes int64, now time.Time) (
 	filesScanned, filesRemoved int, bytesRemoved int64, ageRemoved, sizeRemoved int, err error,
 ) {
 	// Resolve and guard the prune root once.
-	absRoot, resolveErr := filepath.EvalSymlinks(root)
+	// Use filepath.Abs (not EvalSymlinks) so the same resolution strategy applies
+	// to both root and individual paths — avoiding false-positive mismatches when
+	// root itself is under a symlinked prefix (e.g. /tmp → /private/tmp on macOS).
+	absRoot, resolveErr := filepath.Abs(root)
 	if resolveErr != nil {
-		if os.IsNotExist(resolveErr) {
+		absRoot = filepath.Clean(root)
+	}
+	// Check existence after resolving the path.
+	if _, statErr := os.Stat(absRoot); statErr != nil {
+		if os.IsNotExist(statErr) {
 			return 0, 0, 0, 0, 0, nil
 		}
-		absRoot = filepath.Clean(root) // fall back: Clean without resolving symlinks
-	} else {
-		absRoot = filepath.Clean(absRoot)
 	}
 	rootPrefix := absRoot + string(filepath.Separator)
 
@@ -338,8 +342,11 @@ func pruneLogs(root string, retentionDays int, maxBytes int64, now time.Time) (
 			return nil // skip unreadable entries; continue walk
 		}
 		// Scope guard: every path must be under absRoot.
-		cleanPath := filepath.Clean(path)
-		if cleanPath != absRoot && !strings.HasPrefix(cleanPath, rootPrefix) {
+		absPath, absErr := filepath.Abs(path)
+		if absErr != nil {
+			absPath = filepath.Clean(path)
+		}
+		if absPath != absRoot && !strings.HasPrefix(absPath, rootPrefix) {
 			// Path is outside the prune root (e.g. a symlink escape); skip it.
 			if d.IsDir() {
 				return filepath.SkipDir
@@ -347,7 +354,7 @@ func pruneLogs(root string, retentionDays int, maxBytes int64, now time.Time) (
 			return nil
 		}
 		if d.IsDir() {
-			if cleanPath != absRoot {
+			if absPath != absRoot {
 				dirs = append(dirs, path)
 			}
 			return nil
