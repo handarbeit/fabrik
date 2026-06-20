@@ -397,6 +397,41 @@ Also controllable via `--janitor-interval` flag or `FABRIK_JANITOR_INTERVAL` env
 
 > **Note (EC-6):** Changing `janitor_interval_hours` at runtime has no effect. Restart Fabrik for a new cadence to take effect.
 
+### Log Retention
+
+`.fabrik/logs/` grows unbounded by default — each Claude invocation writes uniquely-named log files that are never overwritten. On a busy instance running for weeks, this can reach hundreds of megabytes or more.
+
+The **log retention janitor** prunes `.fabrik/logs/` by age and total size. It runs on the **same cadence as the worktree janitor** (disabled when `janitor_interval_hours: 0`):
+
+1. **Once at startup**, after the first successful poll.
+2. **Hourly** thereafter (same `janitor_interval_hours` cadence).
+
+Pruning runs in three phases per cycle:
+
+1. **Age prune**: delete any file whose mtime is older than `log_retention_days` × 24 h (default **14 days**). `0` disables age-based pruning.
+2. **Size-cap backstop**: after age-pruning, if the total size of `.fabrik/logs/` still exceeds `log_max_bytes`, delete the oldest files (by mtime) until the tree is under the cap. Default **2 GiB**. `0` disables the size cap.
+3. **Empty-dir cleanup**: remove any now-empty `issue-N/` and `<owner>-<repo>/` directories.
+
+The janitor only ever touches `.fabrik/logs/`. It never modifies `sessions/`, `worktrees/`, `repos/`, or `debug/`.
+
+At the end of each scan Fabrik logs:
+
+```
+[log-janitor] cycle complete: scanned N files, removed M (P bytes), age=K size=J
+```
+
+**Configuration:**
+
+```yaml
+# .fabrik/config.yaml
+log_retention_days: 14      # default — set to 0 to disable age-based pruning
+log_max_bytes: 2147483648   # default (2 GiB) — set to 0 to disable size-cap pruning
+```
+
+Also controllable via `--log-retention-days` / `--log-max-bytes` flags or `FABRIK_LOG_RETENTION_DAYS` / `FABRIK_LOG_MAX_BYTES` environment variables.
+
+> **Note:** Because the prune runs on every tick (not only at startup), the size-cap backstop only has to absorb at most one tick-interval of log growth. An instance producing more than `log_max_bytes` within a single `janitor_interval_hours` window can transiently exceed the cap until the next tick — the hourly default makes this a non-issue in practice.
+
 ---
 
 ## 2. Configuration Reference
@@ -482,6 +517,16 @@ user: your-github-username
 # startup and then on this cadence, reaping clean worktrees for closed, off-board
 # issues. Set to 0 to disable the janitor entirely.
 # janitor_interval_hours: 1
+
+# Log retention janitor settings. Runs on the same cadence as janitor_interval_hours.
+# Delete log files older than this many days (default 14). Set to 0 to disable
+# age-based pruning.
+# log_retention_days: 14
+
+# Total size cap for .fabrik/logs/ in bytes (default 2 GiB). After age-pruning,
+# oldest files are deleted first until total size is under this cap. Set to 0
+# to disable size-cap pruning.
+# log_max_bytes: 2147483648
 ```
 
 **Multi-repo mode:** When `repo:` is commented out or omitted, Fabrik processes issues from *all* repositories on the project board. Use this when your project board spans multiple repos (cross-org collaborations, monorepos with independent sub-repos, or a single board managing several distinct services). To restrict Fabrik to one repository, uncomment and set `repo:`.
@@ -534,6 +579,8 @@ FABRIK_USER=my-personal-username
 | `--auto-merge-strategy` | Merge method for GitHub native auto-merge on yolo PRs: `MERGE`, `SQUASH`, or `REBASE` (also `FABRIK_AUTO_MERGE_STRATEGY`) | `MERGE` |
 | `--claude-wait-delay` | Seconds to wait after Claude exits before recovering buffered output; prevents worker goroutines from blocking when Claude uses `run_in_background` or the Monitor tool, which can hold stdout open after the main Claude process exits (0 = use built-in default of 30 sec; also `FABRIK_CLAUDE_WAIT_DELAY`) | `0` (30 sec) |
 | `--janitor-interval` | Hours between janitor runs (closed-issue cleanup, stale-label eviction); 0 disables the janitor; also `FABRIK_JANITOR_INTERVAL` | `1` |
+| `--log-retention-days` | Delete `.fabrik/logs/` files older than this many days; 0 disables age-based pruning; also `FABRIK_LOG_RETENTION_DAYS` | `14` |
+| `--log-max-bytes` | Total size cap for `.fabrik/logs/` in bytes; oldest files deleted first after age prune; 0 disables size-cap pruning; also `FABRIK_LOG_MAX_BYTES` | `2147483648` (2 GiB) |
 | `--kill-grace-sigint` | Grace window between SIGINT and SIGTERM when killing the Claude process group (Go duration: `5s`, `10s`; empty string = use default of 10s; `"0s"` = skip SIGINT entirely; also `FABRIK_KILL_GRACE_SIGINT`) | `""` (10s) |
 | `--kill-grace-sigterm` | Grace window between SIGTERM and SIGKILL when killing the Claude process group (Go duration: `5s`, `10s`; empty string = use default of 10s; `"0s"` = skip SIGTERM entirely; also `FABRIK_KILL_GRACE_SIGTERM`) | `""` (10s) |
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` | `false` |
