@@ -89,6 +89,17 @@ type PRDetails struct {
 	// the PR (auto_merge field is non-null). False when the user or engine
 	// has disabled it, or when it was never enabled.
 	AutoMergeEnabled bool
+
+	// IsMergeQueueEnabled is true when the repository has the merge queue feature
+	// enabled. Always false when populated via REST (GraphQL-only field).
+	IsMergeQueueEnabled bool
+	// IsInMergeQueue is true when the PR is currently in the merge queue.
+	// Always false when populated via REST (GraphQL-only field).
+	IsInMergeQueue bool
+	// MergeQueueEntry holds the queue position and state when the PR is enqueued.
+	// Nil when not in queue or populated via REST. Pointer because GitHub returns
+	// null after dequeueing and Go's json decoder maps null to nil only on pointers.
+	MergeQueueEntry *MergeQueueEntry
 }
 
 // FetchPRMergeableFields fetches both the mergeable flag and mergeable_state for
