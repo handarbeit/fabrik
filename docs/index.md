@@ -168,36 +168,42 @@ fabrik --auto-upgrade</pre>
     </p>
 
     <div class="pipeline">
-      <div class="pipeline-stage">
+      <a class="pipeline-stage" href="#specify" aria-label="Specify stage — read more">
         <div class="stage-num">01</div>
         <div class="stage-name">Specify</div>
         <div class="stage-desc">Refines rough issues into clear specs via Q&amp;A</div>
-      </div>
-      <div class="pipeline-stage">
+        <span class="stage-more">Details ↓</span>
+      </a>
+      <a class="pipeline-stage" href="#research" aria-label="Research stage — read more">
         <div class="stage-num">02</div>
         <div class="stage-name">Research</div>
         <div class="stage-desc">Explores codebase, identifies scope</div>
-      </div>
-      <div class="pipeline-stage">
+        <span class="stage-more">Details ↓</span>
+      </a>
+      <a class="pipeline-stage" href="#plan" aria-label="Plan stage — read more">
         <div class="stage-num">03</div>
         <div class="stage-name">Plan</div>
         <div class="stage-desc">Designs approach, breaks into tasks</div>
-      </div>
-      <div class="pipeline-stage stage-active">
+        <span class="stage-more">Details ↓</span>
+      </a>
+      <a class="pipeline-stage stage-active" href="#implement" aria-label="Implement stage — read more">
         <div class="stage-num">04</div>
         <div class="stage-name">Implement</div>
         <div class="stage-desc">Writes code, tests, and commits to branch</div>
-      </div>
-      <div class="pipeline-stage">
+        <span class="stage-more">Details ↓</span>
+      </a>
+      <a class="pipeline-stage" href="#review" aria-label="Review stage — read more">
         <div class="stage-num">05</div>
         <div class="stage-name">Review</div>
         <div class="stage-desc">Rebases, reviews, and fixes the PR</div>
-      </div>
-      <div class="pipeline-stage">
+        <span class="stage-more">Details ↓</span>
+      </a>
+      <a class="pipeline-stage" href="#validate" aria-label="Validate stage — read more">
         <div class="stage-num">06</div>
         <div class="stage-name">Validate</div>
         <div class="stage-desc">Runs tests, verifies requirements</div>
-      </div>
+        <span class="stage-more">Details ↓</span>
+      </a>
     </div>
 
     <div class="demo-videos">
@@ -215,6 +221,139 @@ fabrik --auto-upgrade</pre>
           <div class="caption-desc">Drag issues across columns to control the pipeline; comment to steer Claude</div>
         </div>
       </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- PIPELINE STAGE DETAILS -->
+<!-- ============================================================ -->
+<section class="stage-details" id="pipeline-detail">
+  <div class="container">
+    <p class="section-label">The Pipeline, Stage by Stage</p>
+    <h2 class="section-title">What happens in each column</h2>
+    <p class="section-subtitle">
+      Every stage is a Claude Code invocation with its own prompt, tools, and
+      rules — driven by the issue's position on the board. Here's what each one
+      does, what it produces, and how the engine moves work forward.
+    </p>
+
+    <div class="stage-detail" id="specify">
+      <div class="stage-detail-head">
+        <span class="stage-detail-num">01</span>
+        <h3 class="stage-detail-title">Specify</h3>
+        <span class="stage-detail-badge">read-only</span>
+      </div>
+      <p class="stage-detail-lead">Turns a rough idea into a crisp, buildable spec.</p>
+      <p>
+        Specify reads the raw issue and works it into a clear specification, asking
+        clarifying questions when the request is ambiguous. It runs read-only — the
+        worktree is stashed clean and no code is written.
+      </p>
+      <ul class="stage-detail-facts">
+        <li>The only stage that rewrites the issue body itself, via <code>FABRIK_ISSUE_UPDATE</code> markers.</li>
+        <li>Can pause with <code>FABRIK_BLOCKED_ON_INPUT</code> to ask you a question, then resumes automatically the moment you comment.</li>
+        <li>Output is posted as a stage comment on the issue — no PR exists yet.</li>
+      </ul>
+      <a class="stage-detail-link" href="{{ '/state-machine' | relative_url }}#pipeline-overview">Pipeline overview in the State Machine spec →</a>
+    </div>
+
+    <div class="stage-detail" id="research">
+      <div class="stage-detail-head">
+        <span class="stage-detail-num">02</span>
+        <h3 class="stage-detail-title">Research</h3>
+        <span class="stage-detail-badge">read-only</span>
+      </div>
+      <p class="stage-detail-lead">Maps the codebase before a line is changed.</p>
+      <p>
+        Research explores the repository, locates the files the change will touch,
+        and pins down the scope and constraints. Like Specify it reads and greps but
+        writes nothing.
+      </p>
+      <ul class="stage-detail-facts">
+        <li>Its findings are saved to <code>.fabrik-context/stage-Research.md</code> and handed to every later stage as context.</li>
+        <li>Surfaces unknowns early, so Plan and Implement aren't guessing.</li>
+        <li>Output is posted on the issue.</li>
+      </ul>
+      <a class="stage-detail-link" href="{{ '/stage-lifecycle' | relative_url }}#context-files">How context files flow between stages →</a>
+    </div>
+
+    <div class="stage-detail" id="plan">
+      <div class="stage-detail-head">
+        <span class="stage-detail-num">03</span>
+        <h3 class="stage-detail-title">Plan</h3>
+        <span class="stage-detail-badge">read-only</span>
+      </div>
+      <p class="stage-detail-lead">Designs the approach and breaks it into tasks.</p>
+      <p>
+        Plan decides <em>how</em> the work will be done — the approach, the sequence,
+        the tasks — and produces the contract that Implement builds against. Still
+        read-only.
+      </p>
+      <ul class="stage-detail-facts">
+        <li>Can declare child issues with <code>FABRIK_SPAWN_CHILD</code> blocks; the engine creates them, links <code>blockedBy</code> edges, and runs them as a parallel formation.</li>
+        <li>Decomposition is recursive — a child's own Plan can spawn grandchildren, with no depth limit.</li>
+        <li>Output is posted on the issue.</li>
+      </ul>
+      <a class="stage-detail-link" href="{{ '/USER_GUIDE' | relative_url }}#sub-issue-decomposition">Sub-issue decomposition →</a>
+    </div>
+
+    <div class="stage-detail" id="implement">
+      <div class="stage-detail-head">
+        <span class="stage-detail-num">04</span>
+        <h3 class="stage-detail-title">Implement</h3>
+        <span class="stage-detail-badge badge-write">writes code</span>
+      </div>
+      <p class="stage-detail-lead">Writes the code, the tests, and opens the PR.</p>
+      <p>
+        Implement is the first stage to write files. It implements the plan, adds
+        tests, and commits to the issue's branch — with edits path-scoped to that
+        issue's isolated worktree so nothing leaks across issues.
+      </p>
+      <ul class="stage-detail-facts">
+        <li>Opens a draft PR with <code>Closes #N</code>, linking the PR back to the issue.</li>
+        <li>Marks the PR ready on completion, which triggers external review bots.</li>
+        <li>Commits frequently so progress survives an interrupted session; detailed output goes to the PR, a short summary to the issue.</li>
+      </ul>
+      <a class="stage-detail-link" href="{{ '/state-machine' | relative_url }}#5-pr-lifecycle-integration">PR lifecycle integration →</a>
+    </div>
+
+    <div class="stage-detail" id="review">
+      <div class="stage-detail-head">
+        <span class="stage-detail-num">05</span>
+        <h3 class="stage-detail-title">Review</h3>
+        <span class="stage-detail-badge badge-write">writes code</span>
+      </div>
+      <p class="stage-detail-lead">Rebases, self-reviews, and resolves the PR.</p>
+      <p>
+        Review rebases the branch onto its base, reviews its own diff, and fixes
+        what it finds — resolving PR review threads as it goes.
+      </p>
+      <ul class="stage-detail-facts">
+        <li>The engine tracks the PR's resolved-thread count to detect real progress and grant extra turns when needed.</li>
+        <li>The pending-reviewer gate waits for every requested reviewer, then re-invokes the stage to address their comments.</li>
+        <li>Output is posted on the PR.</li>
+      </ul>
+      <a class="stage-detail-link" href="{{ '/USER_GUIDE' | relative_url }}#pending-reviewer-gate">Pending reviewer gate →</a>
+    </div>
+
+    <div class="stage-detail" id="validate">
+      <div class="stage-detail-head">
+        <span class="stage-detail-num">06</span>
+        <h3 class="stage-detail-title">Validate</h3>
+        <span class="stage-detail-badge badge-write">writes code</span>
+      </div>
+      <p class="stage-detail-lead">Proves it works, then clears the PR to merge.</p>
+      <p>
+        Validate runs the test suite and verifies the issue's requirements are
+        actually met — the last gate before merge.
+      </p>
+      <ul class="stage-detail-facts">
+        <li>The CI gate blocks merge until checks pass, auto-fixing failing checks each cycle.</li>
+        <li>With <code>fabrik:yolo</code>, completion enables auto-merge; the PR merges once branch protection is satisfied.</li>
+        <li>Records the validated SHA, so a later force-push or external commit automatically re-enters Validate.</li>
+      </ul>
+      <a class="stage-detail-link" href="{{ '/state-machine' | relative_url }}#64-ci-gate-and-ci-fix-reinvoke">CI gate and CI-fix reinvoke →</a>
     </div>
   </div>
 </section>
