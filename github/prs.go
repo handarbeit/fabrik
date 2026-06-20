@@ -536,6 +536,9 @@ func isAutoMergeAlreadyCleanError(err error) bool {
 // Uses the same two-step pattern as MarkPRReady: fetch the PR node ID via
 // GraphQL, then call the enqueuePullRequest mutation.
 func (c *Client) EnqueuePullRequest(owner, repo string, prNumber int, expectedHeadOID string) error {
+	if expectedHeadOID == "" {
+		return fmt.Errorf("expectedHeadOID cannot be empty")
+	}
 	fetchQuery := `
 query($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
