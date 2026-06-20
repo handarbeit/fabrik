@@ -860,7 +860,10 @@ func applyProjectItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 			!reflect.DeepEqual(lpr.Reviews, pi.LinkedPRReviews) ||
 			!reflect.DeepEqual(lpr.ReviewRequests, pi.LinkedPRReviewRequests) ||
 			!reflect.DeepEqual(lpr.ThreadComments, pi.LinkedPRReviewThreadComments) ||
-			lpr.ResolvedThreadCount != pi.LinkedPRResolvedThreadCount {
+			lpr.ResolvedThreadCount != pi.LinkedPRResolvedThreadCount ||
+			lpr.IsMergeQueueEnabled != pi.LinkedPRIsMergeQueueEnabled ||
+			lpr.IsInMergeQueue != pi.LinkedPRIsInMergeQueue ||
+			!reflect.DeepEqual(lpr.MergeQueueEntry, pi.LinkedPRMergeQueueEntry) {
 			if lpr.Number != pi.LinkedPRNumber {
 				lpr.Number = pi.LinkedPRNumber
 				flags |= LinkedPRChanged
@@ -879,6 +882,18 @@ func applyProjectItem(item *ItemState, pi gh.ProjectItem) ChangeFlags {
 			}
 			if lpr.ResolvedThreadCount != pi.LinkedPRResolvedThreadCount {
 				lpr.ResolvedThreadCount = pi.LinkedPRResolvedThreadCount
+				flags |= LinkedPRChanged
+			}
+			if lpr.IsMergeQueueEnabled != pi.LinkedPRIsMergeQueueEnabled {
+				lpr.IsMergeQueueEnabled = pi.LinkedPRIsMergeQueueEnabled
+				flags |= LinkedPRChanged
+			}
+			if lpr.IsInMergeQueue != pi.LinkedPRIsInMergeQueue {
+				lpr.IsInMergeQueue = pi.LinkedPRIsInMergeQueue
+				flags |= LinkedPRChanged
+			}
+			if !reflect.DeepEqual(lpr.MergeQueueEntry, pi.LinkedPRMergeQueueEntry) {
+				lpr.MergeQueueEntry = pi.LinkedPRMergeQueueEntry
 				flags |= LinkedPRChanged
 			}
 		}
