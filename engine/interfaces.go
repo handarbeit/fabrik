@@ -50,6 +50,8 @@ type GitHubClient interface {
 	DeleteReviewRequest(owner, repo string, prNumber int, reviewers []string) error
 	AddReviewRequest(owner, repo string, prNumber int, reviewers []string) error
 	FetchLatestRelease(owner, repo string) (*gh.LatestRelease, error)
+	EnqueuePullRequest(owner, repo string, prNumber int, expectedHeadOID string) error
+	DequeuePullRequest(owner, repo string, prNumber int) error
 	FetchIssue(owner, repo string, issueNumber int) (*gh.IssueData, error)
 	FetchAllowAutoMerge(owner, repo string) (bool, error)
 	FetchLabelAppliedAt(owner, repo string, issueNumber int, labelName string) (time.Time, error)
