@@ -197,12 +197,21 @@ func (c *Client) FetchPRDetails(owner, repo string, prNumber int) (*PRDetails, e
 	}, nil
 }
 
+// CheckRunOutput holds the output fields from a GitHub Check Run.
+// Summary corresponds to the job step summary written to $GITHUB_STEP_SUMMARY;
+// Text holds additional long-form output (may be very large in some integrations).
+type CheckRunOutput struct {
+	Summary string
+	Text    string
+}
+
 // CheckRun holds the result of a single CI check run.
 type CheckRun struct {
 	ID         int64 // GitHub check run ID
 	Name       string
 	Status     string // "queued", "in_progress", "completed"
 	Conclusion string // "success", "failure", "neutral", "cancelled", "skipped", "timed_out", "action_required", or ""
+	Output     CheckRunOutput
 }
 
 // FetchCheckRuns retrieves check runs for a given commit SHA via the REST API.
@@ -214,6 +223,10 @@ func (c *Client) FetchCheckRuns(owner, repo, sha string) ([]CheckRun, error) {
 			Name       string `json:"name"`
 			Status     string `json:"status"`
 			Conclusion string `json:"conclusion"`
+			Output     struct {
+				Summary string `json:"summary"`
+				Text    string `json:"text"`
+			} `json:"output"`
 		} `json:"check_runs"`
 	}
 	if err := c.restGetJSON(apiURL, &raw); err != nil {
@@ -221,7 +234,13 @@ func (c *Client) FetchCheckRuns(owner, repo, sha string) ([]CheckRun, error) {
 	}
 	out := make([]CheckRun, len(raw.CheckRuns))
 	for i, cr := range raw.CheckRuns {
-		out[i] = CheckRun{ID: cr.ID, Name: cr.Name, Status: cr.Status, Conclusion: cr.Conclusion}
+		out[i] = CheckRun{
+			ID:         cr.ID,
+			Name:       cr.Name,
+			Status:     cr.Status,
+			Conclusion: cr.Conclusion,
+			Output:     CheckRunOutput{Summary: cr.Output.Summary, Text: cr.Output.Text},
+		}
 	}
 	return out, nil
 }

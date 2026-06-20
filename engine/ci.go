@@ -286,7 +286,14 @@ func (e *Engine) buildCIFixComment(item gh.ProjectItem, stage *stages.Stage, wor
 				if baseFailedNames[cr.Name] {
 					note = "pre-existing (also fails on base branch)"
 				}
-				failedLines = append(failedLines, fmt.Sprintf("- **%s**: %s [%s]", cr.Name, cr.Conclusion, note))
+				line := fmt.Sprintf("- **%s**: %s [%s]", cr.Name, cr.Conclusion, note)
+				if s := strings.TrimSpace(cr.Output.Summary); s != "" {
+					line += "\n" + truncateOutputField(s, 2000)
+				}
+				if txt := strings.TrimSpace(cr.Output.Text); txt != "" {
+					line += "\n" + truncateOutputField(txt, 2000)
+				}
+				failedLines = append(failedLines, line)
 			}
 		}
 	}
@@ -416,6 +423,27 @@ func (e *Engine) dispatchCIFixReinvoke(ctx context.Context, board *gh.ProjectBoa
 			e.logf(item.Number, "warn", "CI-fix re-invocation failed: %v\n", err)
 		}
 	}()
+}
+
+// truncateOutputField truncates s to at most maxChars characters, appending an
+// ellipsis indicator when truncated, and formats it as a markdown blockquote.
+func truncateOutputField(s string, maxChars int) string {
+	truncated := false
+	if len(s) > maxChars {
+		s = s[:maxChars]
+		truncated = true
+	}
+	// Prefix each line with "> " so it renders as a blockquote in GitHub comments.
+	lines := strings.Split(s, "\n")
+	var quoted []string
+	for _, l := range lines {
+		quoted = append(quoted, "> "+l)
+	}
+	result := strings.Join(quoted, "\n")
+	if truncated {
+		result += "\n> *(truncated)*"
+	}
+	return result
 }
 
 // pauseForCITimeout pauses the issue when the CI wait timeout in the catch-up
