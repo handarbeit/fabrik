@@ -425,13 +425,24 @@ func (e *Engine) dispatchCIFixReinvoke(ctx context.Context, board *gh.ProjectBoa
 	}()
 }
 
-// truncateOutputField truncates s to at most maxChars characters, appending an
-// ellipsis indicator when truncated, and formats it as a markdown blockquote.
+// truncateOutputField truncates s to at most maxChars Unicode characters,
+// appending an ellipsis indicator when truncated, and formats it as a markdown
+// blockquote. Truncation is rune-based to avoid splitting multi-byte UTF-8
+// sequences; a byte pre-trim (maxChars*4) avoids the cost of converting very
+// large strings to []rune before truncating.
 func truncateOutputField(s string, maxChars int) string {
 	truncated := false
 	if len(s) > maxChars {
-		s = s[:maxChars]
-		truncated = true
+		byteLimit := maxChars * 4
+		if len(s) > byteLimit {
+			s = s[:byteLimit]
+			truncated = true
+		}
+		runes := []rune(s)
+		if len(runes) > maxChars {
+			s = string(runes[:maxChars])
+			truncated = true
+		}
 	}
 	// Prefix each line with "> " so it renders as a blockquote in GitHub comments.
 	lines := strings.Split(s, "\n")
