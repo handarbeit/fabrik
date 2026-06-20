@@ -53,7 +53,9 @@ type Config struct {
 	WebhookPort              int
 	WebhookEvents            []string
 	ProjectStatusPollSeconds int // Layer 2 status-only sweep cadence in seconds; default 15 s (gate runs every poll cycle; field retained for config compatibility)
-	JanitorIntervalHours     int // Periodic worktree janitor cadence in hours; 0 disables the janitor (default 1)
+	JanitorIntervalHours     int   // Periodic worktree janitor cadence in hours; 0 disables the janitor (default 1)
+	LogRetentionDays         int   // Log files older than this many days are pruned; 0 disables age-based pruning (default 14)
+	LogMaxBytes              int64 // Total size cap for .fabrik/logs/; oldest files deleted first after age prune; 0 disables (default 2 GiB)
 	// ReadyCh is closed once Run() has registered signal handlers. Tests use
 	// this to avoid sending SIGINT before signal.Notify is installed.
 	ReadyCh chan struct{}
