@@ -272,9 +272,12 @@ Note: within `checkDependencies()`, for each blocker the engine first consults `
 
 **Code path:** `itemMayNeedWork()` and `itemNeedsWork()` check `item.IsClosed`
 
-**Effect:** Closed issues are skipped unless:
+**Effect:** Closed issues are skipped unless one of the following holds (any one admits the item):
 1. The current stage is a cleanup stage (`CleanupWorktree: true`) — cleanup can remove the worktree
 2. The current stage has a `stage:<X>:complete` label — the catch-up loop can advance to the next stage (e.g., a PR merge closes an issue sitting in Validate with `stage:Validate:complete`; it needs to move to Done)
+3. `fabrik:awaiting-ci` is present — the CI-gate catch-up can finish the gate after a merge closes the issue
+4. `fabrik:auto-merge-enabled` is present — `checkAutoMergeConvergence` can detect the merged PR and advance to Done
+5. The current stage is **gate-checked** (`wait_for_ci` or `wait_for_reviews` — i.e. Validate) and lacks its `stage:<X>:complete` label — a merge can close the issue while it sits at Validate carrying any gate label (`fabrik:awaiting-review`, `fabrik:paused`) or none; the gate-label-agnostic settle-owner (`runValidatePRTerminalAdvance`, ADR-056 D2) must still observe the terminal PR and advance/heal it. Keying this admit on the gate-checked stage (via `stageIsGateChecked`) rather than a fixed label allowlist removes the label coupling that previously stranded paused / awaiting-review merges one layer upstream of the settle-owner (the #874 class).
 
 ### 2.9 Review Reinvoke
 

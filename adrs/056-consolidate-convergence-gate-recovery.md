@@ -135,3 +135,23 @@ close #883/#885 here) → `#889` + `#890` (lock in structure and docs).
 This ADR does not change the human-in-the-loop pause semantics (ADR-008), the rebase-by-Claude
 decision (ADR-028 §6.5.4), the convergence budget concept (ADR-050) — only *where* and *how many
 times* PR-state is interpreted and the board is advanced.
+
+## Addendum (2026-06-19): closed-issue admit gate — the strand lived one layer up
+
+The single settle-owner `runValidatePRTerminalAdvance` is gate-label-agnostic, but it only ever
+iterates items that survive the closed-issue admit gate in `itemMayNeedWork` / `itemNeedsWork`
+(`engine/item.go`). That gate admitted closed items only for `stage:<X>:complete`,
+`fabrik:awaiting-ci`, or `fabrik:auto-merge-enabled`. A PR merged externally while the issue was
+paused at Validate with **`fabrik:awaiting-review`** (or bare `fabrik:paused`, or no gate label)
+closed the issue via `Closes #N`; on the next poll the closed item was dropped at this gate, so the
+settle-owner never saw it and the item stranded (closed, paused, no `stage:Validate:complete`). The
+`awaiting-ci` variant only worked because that one label was already on the allowlist.
+
+This is the same #874 strand the consolidation set out to kill — the label coupling simply survived
+one layer **upstream** of the owner. Consistent with this ADR ("extend the owner, not add a
+scanner"), the fix widens the admit gate rather than adding a recovery loop: a closed item at a
+**gate-checked stage** (`wait_for_ci` / `wait_for_reviews`, via `stageIsGateChecked`) lacking its
+`stage:<X>:complete` label is admitted regardless of gate label, so the owner can observe the
+terminal PR and advance/heal it. Surfaced by `TestPausedMergedPRRecovery` (the awaiting-review and
+no-gate-label variants) once its harness race was removed; guarded by unit tests in
+`engine/closed_admit_settle_test.go`.
