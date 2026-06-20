@@ -336,6 +336,14 @@ On startup, Fabrik attempts to fetch the project board and status field so it ca
 
 See [§11 Troubleshooting → Startup Board Validation Failure](#startup-board-validation-failure) if validation succeeds and reports a mismatch.
 
+**Board-drift warning scan:** In addition to name-matching, Fabrik scans all board items on startup and checks for cards that carry a cleanup-stage complete label (e.g. `stage:Done:complete`) but whose current board column does not yet reflect the completed stage. For each such item, Fabrik emits a warning log line:
+
+```
+[#N startup] warning: item #N has label stage:Done:complete but board column is "Validate" — board drift detected
+```
+
+This scan is **informational only** — no auto-advance occurs. Move the card to the correct column manually on the GitHub Project board.
+
 ### Stage YAML Drift Warning
 
 After loading your stage YAMLs from `.fabrik/stages/`, Fabrik compares each stage against the embedded default with the same `name:` field. If the embedded default contains top-level YAML keys that your file does not, Fabrik prints a warning to stderr at startup:
@@ -1260,7 +1268,9 @@ Beyond the normal pending→failure→fix→pass loop, the CI gate handles four 
 
 **R3 — Required check that never starts:** If a required check is expected but never produces a check run (e.g., converted to `workflow_dispatch` after the PR was created), the gate would wait indefinitely. After CIWaitTimeout elapses with the PR in an `OPEN+BLOCKED` state and no check runs ever having run, Fabrik pauses the issue via `pauseForRequiredNeverRunningCheck`. Apply `fabrik:revalidate` after fixing the CI configuration to re-run Validate.
 
-**R4 — Paused-item auto-recovery:** Items paused with both `fabrik:paused` and `fabrik:awaiting-ci` are monitored by a separate recovery loop that bypasses the boardcache (which may have stale PR state). When the linked PR merges, the recovery loop automatically clears the gate, removes the pause labels, and advances the issue to Done — **no manual unpause is required**. This handles the case where a PR is merged externally (e.g., by a human or GitHub auto-merge) while the issue sits paused.
+**R4 — Paused-item auto-recovery:** Items paused with `fabrik:paused` and either `fabrik:awaiting-ci` or `fabrik:awaiting-review` are monitored by a separate recovery loop (`runValidatePRTerminalAdvance`) that bypasses the boardcache (which may have stale PR state). When the linked PR merges, the recovery loop automatically clears the gate, removes the pause labels, and advances the issue to Done — **no manual unpause is required**. This handles the case where a PR is merged externally (e.g., by a human or GitHub auto-merge) while the issue sits paused under either gate.
+
+**R4b — Convergence-paused auto-recovery:** Items paused by convergence budget exhaustion carry `fabrik:paused + stage:Validate:complete` but no gate label (`fabrik:awaiting-ci` or `fabrik:awaiting-review`). When their linked PR is subsequently merged externally, the same `runValidatePRTerminalAdvance` pass detects the merge, removes `fabrik:paused` and `fabrik:awaiting-input`, and advances the issue to Done — **no manual intervention required**. See [Post-Validate Convergence Monitor (yolo)](#post-validate-convergence-monitor-yolo) for how items reach this paused state.
 
 #### Merge-Conflict Gate
 
@@ -1390,6 +1400,8 @@ FABRIK_AUTO_MERGE_STRATEGY=REBASE  # Rebase commits onto base branch
 
 Accepted values: `MERGE`, `SQUASH`, `REBASE`. The repository must have the corresponding merge method enabled in its settings.
 
+> **Single-owner PR terminal advance (`runValidatePRTerminalAdvance` — ADR-056 D2):** All Validate-stage PR terminal transitions — PR merged, PR closed-without-merge, convergence-paused recovery (R4b), gate-labelled (`fabrik:awaiting-ci`, `fabrik:awaiting-review`) or unlabelled — are handled by a single authoritative dispatcher. This eliminates the family of bugs where one code path advanced correctly but a sibling path didn't. Items carrying `fabrik:auto-merge-enabled` are the sole exclusion: they are handled exclusively by the convergence monitor above while that label is present.
+
 ### SHA-change Auto-Revalidation
 
 When a PR receives a new push **after** `stage:Validate:complete` has been applied, Fabrik automatically detects the SHA change on the next poll and re-dispatches Validate — no operator action required.
@@ -1509,6 +1521,14 @@ The default skills are:
 | `fabrik-implement` | Code writing, testing, committing, pushing; updates `USER_GUIDE.md` and/or `README.md` in the same PR for user-facing features — never defers documentation to a follow-up issue |
 | `fabrik-review` | Code review, fix issues, rebase, prepare PR |
 | `fabrik-validate` | Final verification, test suite, requirements check |
+
+#### Review and Validate: post-rebase dependency install
+
+After each rebase onto the base branch, both the `fabrik-review` and `fabrik-validate` skills read the project's `CLAUDE.md` for a dependency-install command (e.g. `pnpm install`, `cargo build`, `go mod download`) and run it before executing the test suite. On failure, the skill emits `FABRIK_BLOCKED_ON_INPUT` and the issue pauses — a dependency-install failure requires human attention before the stage can complete. If no install command is found in `CLAUDE.md`, the step is silently skipped. This closes a class of stale-dependencies test failures that occurred when `main` advanced past a dependency bump between the time the branch was created and the time Review or Validate ran.
+
+#### Validate: pre-completion mergeability gate
+
+Before emitting `FABRIK_STAGE_COMPLETE`, the `fabrik-validate` skill checks the linked PR's `mergeable_state` via `gh pr view --json mergeable,mergeStateStatus`. When the result is `dirty` or `conflicting` — indicating a merge conflict or a rebased-away branch — the skill emits `FABRIK_BLOCKED_ON_INPUT` instead of `FABRIK_STAGE_COMPLETE`. The issue pauses with `fabrik:awaiting-input` rather than marking Validate complete on a non-mergeable PR. To resume: resolve the conflict, push the fixed branch, then remove `fabrik:paused` and `fabrik:awaiting-input`.
 
 ### Customizing Skills
 
