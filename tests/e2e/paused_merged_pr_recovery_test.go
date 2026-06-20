@@ -57,28 +57,39 @@ func TestPausedMergedPRRecovery(t *testing.T) {
 			marker := fmt.Sprintf("paused-merged-pr-%s-%s", tc.name, stamp)
 			body := fmt.Sprintf(pausedMergedPRBodyTemplate, "`", "`", "```", marker, "```")
 
+			// File WITHOUT an auto-advance label. With global yolo off and
+			// auto_advance unset (nil, not true) on Research..Validate, the engine
+			// advances NOTHING on its own (poll.go:1286) — it runs only the stage
+			// whose column we set. This gives the test total control of the board
+			// position and removes the cruise race that previously let the issue
+			// reach Review before we could pin it at Validate.
 			num := FileIssue(t, env, env.RepoAlpha,
 				fmt.Sprintf("e2e paused merged-PR recovery (%s %s)", tc.name, stamp),
-				body, "fabrik:cruise")
+				body)
 			itemID := AddIssueToProject(t, env, env.RepoAlpha, num)
-			SetIssueStatus(t, env, itemID, "Specify")
-			t.Logf("filed %s#%d at Status=Specify with fabrik:cruise, variant=%s marker=%s",
+			t.Logf("filed %s#%d (no auto-advance label), variant=%s marker=%s",
 				env.RepoAlpha, num, tc.name, marker)
 
-			// Step 1: Wait for stage:Implement:complete — PR is created and open by now.
-			WaitForIssueLabel(t, env, env.RepoAlpha, num, "stage:Implement:complete", 60*time.Minute)
-			t.Logf("%s#%d reached stage:Implement:complete", env.RepoAlpha, num)
+			// Step 1: Drive Specify→Implement one stage at a time. Because nothing
+			// auto-advances, the engine stops after each stage's :complete, so it
+			// never runs past where we intend to pin the item. The draft PR is
+			// created during Implement and is open once Implement completes.
+			for _, st := range []string{"Specify", "Research", "Plan", "Implement"} {
+				SetIssueStatus(t, env, itemID, st)
+				WaitForIssueLabel(t, env, env.RepoAlpha, num, "stage:"+st+":complete", 30*time.Minute)
+			}
+			t.Logf("%s#%d reached stage:Implement:complete (manual drive)", env.RepoAlpha, num)
 
 			// Step 2: Discover the linked PR. The PR is created during Implement;
 			// 5 minutes is generous for the GraphQL query to surface it.
 			prNum := WaitForLinkedPR(t, env, env.RepoAlpha, num, 5*time.Minute)
 			t.Logf("linked PR: #%d", prNum)
 
-			// Step 3–5: Force the stuck state.
-			//
-			// fabrik:paused is added first — the Phase 1/2 dispatch loop in
-			// poll.go skips all paused items, closing the race window before
-			// Review fires. Only then do we add the other stuck-state labels.
+			// Step 3–5: Force the stuck state. Nothing is auto-advancing (no
+			// cruise/yolo label), so the item sits at Implement until we move it —
+			// there is no race with stage advancement. Apply fabrik:paused first
+			// (it also halts any dispatch as a belt-and-suspenders), then the
+			// remaining stuck-state labels.
 			AddLabel(t, env, env.RepoAlpha, num, "fabrik:paused")
 			AddLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-input")
 			if tc.gateLabel != "" {
@@ -88,12 +99,20 @@ func TestPausedMergedPRRecovery(t *testing.T) {
 
 			// Step 6: Move the board to Validate. The settle-owner
 			// (runValidatePRTerminalAdvance) only processes items with
-			// item.Status == "Validate". After Implement, cruise mode advances
-			// the board to Review; we override it here manually. The pause
-			// guard set above prevents any dispatch from acting on the column
-			// change before we merge the PR.
+			// item.Status == "Validate". The item is cleanly parked at Implement,
+			// so this is an uncontended move.
 			SetIssueStatus(t, env, itemID, "Validate")
 			t.Logf("moved board to Validate column")
+
+			// Sync barrier: confirm GitHub has propagated the Validate column, then
+			// dwell ~1.5 poll cycles so the engine's board cache refetches the OPEN
+			// item at Validate BEFORE the external merge closes it. Without this the
+			// merge can close the issue while the engine still sees the prior column,
+			// so the Validate-scoped settle-owner never observes it at Validate and
+			// the heal is missed (the failure mode this test previously exhibited).
+			WaitForProjectStatus(t, env, env.RepoAlpha, num, "Validate", 3*time.Minute)
+			time.Sleep(45 * time.Second)
+			t.Logf("engine had a poll window to observe %s#%d at Validate before merge", env.RepoAlpha, num)
 
 			// Step 7: Merge the PR externally, simulating a human merge.
 			MergePR(t, env, env.RepoAlpha, prNum)
