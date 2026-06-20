@@ -12,7 +12,7 @@ import (
 // CI∧review gate (ADR-056 D2). The Validate stage in the test bed is already
 // configured with both wait_for_ci: true and wait_for_reviews: true.
 //
-// The slow-gate CI check (~6 minutes, enrolled as required on
+// The slow-gate CI check (~10 minutes, enrolled as required on
 // handarbeit/fabrik-test-alpha/main) is triggered by placing "slow-ci-required"
 // in the PR body. This creates a wide CI-await window without triggering the
 // CI-fix reinvoke machinery.
@@ -37,18 +37,10 @@ import (
 //   - FABRIK_REVIEW_WAIT_TIMEOUT=2 (minutes) in the test bed .env when using the
 //     timeout fallback path (otherwise the default 15-minute wait is impractical).
 //
-// Wall-clock: ~60–90 min (approval path); ~30–50 min (timeout path). Use E2E_TIMEOUT=2h.
+// Wall-clock: ~65–100 min (approval path); ~35–60 min (timeout path). Use E2E_TIMEOUT=2h.
 // Cost: ~$1.00–2.50.
 func TestConjunctiveCIReviewGate(t *testing.T) {
 	t.Parallel()
-	// Skipped pending handarbeit/fabrik#917. R1 is a timing race: the slow-gate
-	// sleeps SLOW_CI_SECONDS=360 (6 min), but the agent pipeline to Validate can
-	// exceed that, so Validate completes after CI is already green and the
-	// fabrik:awaiting-ci window is too brief to observe. The engine is correct
-	// (applies and clears the gate properly); widening the slow-gate (#917) gives
-	// the margin to make R1 deterministic. The reviewer-request fix below (R2) is
-	// correct and retained.
-	t.Skip("blocked on #917: slow-gate (360s) timing race makes the fabrik:awaiting-ci window non-deterministic")
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
 	assertSlowGateRequired(t, env, env.RepoAlpha)
@@ -94,7 +86,7 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 	t.Logf("fabrik:awaiting-ci confirmed on %s#%d (CI gate is holding)", env.RepoAlpha, num)
 
 	// R1 withheld window (2 min): stage:Validate:complete must NOT appear while
-	// fabrik:awaiting-ci is present — CI has not yet passed (slow-gate ~6 min).
+	// fabrik:awaiting-ci is present — CI has not yet passed (~10 min).
 	withheldDeadline := time.Now().Add(2 * time.Minute)
 	r1Checked := false
 	for time.Now().Before(withheldDeadline) {
@@ -125,7 +117,7 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 	CommentOnPR(t, env, env.RepoAlpha, prNumber, commentBody)
 	t.Logf("posted PR comment %q on #%d during CI-await (R3)", commentBody, prNumber)
 
-	// Wait for CI (slow-gate, ~6 min) to pass — fabrik:awaiting-ci clears when
+	// Wait for CI (~10 min) to pass — fabrik:awaiting-ci clears when
 	// addCompleteLabelAndRemoveCI runs after checkCIGate returns cleared.
 	WaitForLabelAbsent(t, env, env.RepoAlpha, num, "fabrik:awaiting-ci", 20*time.Minute)
 	t.Logf("fabrik:awaiting-ci cleared on %s#%d (CI gate passed)", env.RepoAlpha, num)
@@ -218,7 +210,7 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 
 // conjunctiveCIReviewGateBody is the issue body for TestConjunctiveCIReviewGate.
 // Claude makes a minimal change to README.md and includes "slow-ci-required"
-// in the PR body to trigger the ~6-minute slow-gate required CI check, creating
+// in the PR body to trigger the ~10-minute slow-gate required CI check, creating
 // a wide CI-await window for the conjunctive gate test.
 const conjunctiveCIReviewGateBody = `## Goal
 
@@ -240,7 +232,7 @@ to this test.
 ## CI behaviour required
 
 The PR body MUST carry the literal marker below so the test repo's CI
-slow-gate check fires (~6 minutes, enrolled as a required check):
+slow-gate check fires (~10 minutes, enrolled as a required check):
 
 slow-ci-required
 
