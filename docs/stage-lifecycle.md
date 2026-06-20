@@ -236,7 +236,7 @@ Context files are available in .fabrik-context/
 
 ### Output Logging
 
-Raw Claude output saved to `~/.fabrik/logs/issue-<N>/<stage>-output-<timestamp>.json` after every invocation. Viewable through the TUI's `l` key (piped through `fabrik _stream-filter` for human-readable display).
+Each invocation writes one NDJSON stream file to `.fabrik/logs/<owner>-<repo>/issue-<N>/` as `<stage>-<timestamp>-<nanos>.log`. This file is written live during execution (tee'd from Claude's stdout) and is the sole on-disk copy of the stream. Viewable via `cat <file> | fabrik stream-filter | less -R` or through the TUI's `l` key.
 
 ### Turn Progress Emission
 
