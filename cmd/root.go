@@ -46,6 +46,7 @@ type Config struct {
 	MaxRebaseCycles      int    // 0 means use default (3)
 	ConvergenceBudget    string // Go duration string; "" means use default (30m); "0" means disabled
 	AutoMergeStrategy    string // MERGE, SQUASH, or REBASE; "" means use default (MERGE)
+	MergeQueue           string // auto or off; "" means use default (auto)
 	ClaudeWaitDelay      int    // seconds; 0 means use default (30)
 	PostPushDwell        int    // seconds; 0 means use default (90)
 	KillGraceSigInt      string // Go duration string; "" means use default (10s); "0s" skips SIGINT step
@@ -139,6 +140,7 @@ func Execute() error {
 	flag.IntVar(&cfg.MaxRebaseCycles, "max-rebase-cycles", 0, "Maximum number of rebase-reinvoke cycles per issue before pausing (0 = use default of 3; also FABRIK_MAX_REBASE_CYCLES)")
 	flag.StringVar(&cfg.ConvergenceBudget, "convergence-budget", "", "Wall-clock budget for post-Validate yolo convergence (Go duration: 30m, 1h; \"0\" disables; also FABRIK_CONVERGENCE_BUDGET)")
 	flag.StringVar(&cfg.AutoMergeStrategy, "auto-merge-strategy", "", "Merge method for GitHub auto-merge: MERGE, SQUASH, or REBASE (also FABRIK_AUTO_MERGE_STRATEGY; default MERGE)")
+	flag.StringVar(&cfg.MergeQueue, "merge-queue", "", "Merge queue routing for yolo path: auto (enqueue when repo uses merge queue) or off (skip enqueue; direct merge may fail on queue-required repos; also FABRIK_MERGE_QUEUE; default auto)")
 	flag.IntVar(&cfg.ClaudeWaitDelay, "claude-wait-delay", 0, "Seconds to wait after Claude exits before recovering buffered output when grandchildren hold stdout pipe open (0 = use default of 30; also FABRIK_CLAUDE_WAIT_DELAY)")
 	flag.IntVar(&cfg.PostPushDwell, "post-push-dwell", 0, "Seconds to wait after a PR force-push before clearing the CI gate as 'no CI configured' (0 = use default of 90; also FABRIK_POST_PUSH_DWELL)")
 	flag.BoolVar(&cfg.DebugOutput, "debug-output", false, "Save Claude stage output to .fabrik/debug/ for debugging")
@@ -362,6 +364,11 @@ func Execute() error {
 	if !explicitFlags["auto-merge-strategy"] {
 		if v := os.Getenv("FABRIK_AUTO_MERGE_STRATEGY"); v != "" {
 			cfg.AutoMergeStrategy = v // validated in autoMergeStrategy() helper
+		}
+	}
+	if !explicitFlags["merge-queue"] {
+		if v := os.Getenv("FABRIK_MERGE_QUEUE"); v != "" {
+			cfg.MergeQueue = v // validated in mergeQueueMode() helper
 		}
 	}
 	if !explicitFlags["claude-wait-delay"] {
@@ -679,6 +686,7 @@ func Execute() error {
 		MaxRebaseCycles:          maxRebaseCycles(cfg.MaxRebaseCycles),
 		ConvergenceBudget:        convergenceBudget(cfg.ConvergenceBudget),
 		AutoMergeStrategy:        autoMergeStrategy(cfg.AutoMergeStrategy),
+		MergeQueue:               mergeQueueMode(cfg.MergeQueue),
 		ClaudeWaitDelay:          claudeWaitDelay(cfg.ClaudeWaitDelay),
 		KillGraceSigInt:          killGraceSigInt(cfg.KillGraceSigInt),
 		KillGraceSigTerm:         killGraceSigTerm(cfg.KillGraceSigTerm),
@@ -909,6 +917,23 @@ func autoMergeStrategy(s string) string {
 	default:
 		fmt.Fprintf(os.Stderr, "[warn] FABRIK_AUTO_MERGE_STRATEGY=%q is invalid (must be MERGE, SQUASH, or REBASE); using default MERGE\n", s)
 		return "MERGE"
+	}
+}
+
+// mergeQueueMode normalizes the --merge-queue / FABRIK_MERGE_QUEUE value.
+// Valid values are "auto" and "off" (case-insensitive). An empty string defaults to "auto".
+// Unrecognized values produce a warning and fall back to "auto".
+func mergeQueueMode(s string) string {
+	if s == "" {
+		return "auto"
+	}
+	lower := strings.ToLower(s)
+	switch lower {
+	case "auto", "off":
+		return lower
+	default:
+		fmt.Fprintf(os.Stderr, "[warn] FABRIK_MERGE_QUEUE=%q is invalid (must be auto or off); using default auto\n", s)
+		return "auto"
 	}
 }
 
