@@ -265,11 +265,11 @@ func TestBoundaryAudit_UnrestrictedLabelSkipped(t *testing.T) {
 
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
-		Number:  1,
-		Title:   "Test",
-		Status:  "Implement",
-		ItemID:  "PVTI_1",
-		Labels:  []string{"fabrik:unrestricted"},
+		Number: 1,
+		Title:  "Test",
+		Status: "Implement",
+		ItemID: "PVTI_1",
+		Labels: []string{"fabrik:unrestricted"},
 	}
 
 	if err := eng.processItem(context.Background(), board, item); err != nil {

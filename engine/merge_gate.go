@@ -368,6 +368,15 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 	// Mirrors the three-step pattern in handleMergeAndCIGates: in-flight guard →
 	// cycle-limit check → dispatch or pauseForRebaseCycleLimit.
 	if settle.Status == PRMergeConflicting {
+		// Merge-queue awareness (ADR-058 D3 FR-1): never dispatch a rebase reinvoke
+		// for a PR the queue currently owns — the synthetic rebase+force-push ejects
+		// it. Guard at dispatch (not in the function body) so D4's ejection→resolve
+		// path can still invoke it after the PR leaves the queue. Signal from GraphQL
+		// via settle.PR; non-queue repos are unchanged (FR-3).
+		if settle.PR != nil && settle.PR.IsInMergeQueue {
+			e.logf(item.Number, "merge-queue", "PR #%d in merge queue — deferring rebase to queue\n", pr.Number)
+			return
+		}
 		var cycleCount int
 		if snap, serr := e.store.Get(repoStr, item.Number); serr == nil {
 			if snap.Worker() != nil {

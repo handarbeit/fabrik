@@ -28,12 +28,13 @@ type janitorWMEntry struct {
 // are clean. Conservative: when in doubt, leaves the worktree and logs the reason.
 //
 // Reaping criteria (all must hold):
-//   (a) issue is closed
-//   (b) issue is NOT on the configured project board — OR is on the board at a
-//       cleanup_worktree:true stage AND carries stage:<Name>:complete AND has no
-//       in-flight worker per the store
-//   (c) worktree is clean (git status --porcelain returns no non-engine-managed paths)
-//   (d) no in-flight dispatch is registered for (repo, number) in the store
+//
+//	(a) issue is closed
+//	(b) issue is NOT on the configured project board — OR is on the board at a
+//	    cleanup_worktree:true stage AND carries stage:<Name>:complete AND has no
+//	    in-flight worker per the store
+//	(c) worktree is clean (git status --porcelain returns no non-engine-managed paths)
+//	(d) no in-flight dispatch is registered for (repo, number) in the store
 func (e *Engine) runWorktreeJanitor(ctx context.Context) {
 	worktreesRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
 

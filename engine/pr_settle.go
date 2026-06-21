@@ -151,7 +151,7 @@ func (e *Engine) settlePRMergeState(item gh.ProjectItem, _ *stages.Stage) PRSett
 			}
 			if elapsed := time.Since(lpr.LastHeadSHAUpdate); elapsed < dwell {
 				e.logf(item.Number, "settle", "no check runs for SHA %s — post-push dwell active (%.0fs remaining)\n",
-					pr.HeadSHA[:min(8, len(pr.HeadSHA))], (dwell-elapsed).Seconds())
+					pr.HeadSHA[:min(8, len(pr.HeadSHA))], (dwell - elapsed).Seconds())
 				// MergeableState intentionally omitted: post-push dwell is not an R3 case.
 				return PRSettleResult{Status: PRMergeUnsettled, Reason: "post-push dwell active", PR: pr}
 			}
