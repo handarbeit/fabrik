@@ -312,6 +312,41 @@ func TestCheckAutoMergeConvergence_UserDisabledAutoMerge_PostsCommentRemovesLabe
 	}
 }
 
+// TestCheckAutoMergeConvergence_IsInMergeQueue_NoPause verifies that when the PR is
+// actively in the merge queue (IsInMergeQueue=true in settle), checkAutoMergeConvergence
+// does not trigger the "user disabled auto-merge" pause even though AutoMergeEnabled
+// is false (EnqueuePullRequest does not set auto_merge on the PR).
+func TestCheckAutoMergeConvergence_IsInMergeQueue_NoPause(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			// AutoMergeEnabled=false because EnqueuePullRequest was used (not EnablePullRequestAutoMerge).
+			return &gh.PRDetails{Number: 10, State: "open", AutoMergeEnabled: false}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled", "fabrik:yolo"}}
+	stage := &stages.Stage{Name: "Validate"}
+	// settle.PR.IsInMergeQueue=true indicates the PR is waiting in the merge queue.
+	settle := PRSettleResult{Status: PRMergeReady, PR: &gh.PRDetails{Number: 10, IsInMergeQueue: true}}
+
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{}, item, stage, settle)
+
+	// The pause path must NOT fire.
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" || c.labelName == "fabrik:awaiting-input" {
+			t.Errorf("expected no pause when IsInMergeQueue=true, but label %q was added", c.labelName)
+		}
+	}
+	if len(client.addCommentCalls) != 0 {
+		t.Errorf("expected no comment when IsInMergeQueue=true, got %d comment(s)", len(client.addCommentCalls))
+	}
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:auto-merge-enabled" {
+			t.Error("expected fabrik:auto-merge-enabled NOT to be removed when PR is in merge queue")
+		}
+	}
+}
+
 func TestCheckAutoMergeConvergence_BudgetExhausted_PausesIssue(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
