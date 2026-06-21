@@ -3515,6 +3515,43 @@ After the marker block is processed, the `FABRIK_PR_CREATE_BEGIN/END` content is
 
 ---
 
+### 5.8 Merge-Queue Awareness (ADR-058 D3)
+
+When the linked PR's repository has GitHub's **merge queue** enabled, Fabrik's preemptive rebasing and branch mutations fight the queue: the queue already enforces "up-to-date at merge time," and **any push, rebase, or base-branch change to a PR currently in the queue ejects it**. Two guards make every engine-initiated git/PR mutation queue-aware, across **all** paths (yolo, cruise, manual). Both guards source their signal exclusively from the GraphQL-populated `ProjectItem` fields — never from `e.client.FetchLinkedPR` (the REST `pulls` endpoint does not carry these flags, so it always reports false). Conflict-dispatch sites read the same flag via `settle.PR.IsInMergeQueue` (the settle primitive reads through `readClient`, §6.4).
+
+**Signal fields:**
+
+- `ProjectItem.LinkedPRIsInMergeQueue` — the linked PR is currently *in* the merge queue (per-PR).
+- `ProjectItem.LinkedPRIsMergeQueueEnabled` — the repository *requires* a merge queue (per-repo).
+
+**Guard 1 — per-PR in-queue skip (FR-1).** When `LinkedPRIsInMergeQueue` is true, every branch/PR mutation is skipped. Fires on the in-queue signal **alone**, regardless of the `merge_queue` config kill-switch — a PR physically in the queue is queued no matter the config (it may have been queued before the operator flipped the switch). Helper: `prInMergeQueue(item)`.
+
+**Guard 2 — per-repo stop-preemptive-rebase (FR-2).** When `LinkedPRIsMergeQueueEnabled` is true **and** `cfg.MergeQueue != "off"`, the *preemptive* rebase (behind-but-clean) in `updateWorktreeFromMain` is suppressed — the queue enforces up-to-date at merge time, so it is redundant. The `merge_queue: off` kill-switch restores legacy preemptive rebasing (mirrors the D2 enqueue kill-switch). Helper: `(*Engine).suppressPreemptiveRebase(item)`.
+
+**FR-2 boundary — preemptive rebase vs. conflict resolution.** Preemptive rebasing (behind-but-clean) lives *exclusively* in `updateWorktreeFromMain`, which `git rebase --abort`s on any conflict and never resolves it. Genuine conflict resolution lives *exclusively* in `dispatchRebaseReinvoke`, gated on `settle.Status == PRMergeConflicting` (⟺ `mergeable_state == "dirty"`). A behind-but-clean PR is `"behind"`, never `PRMergeConflicting`, so suppressing the former (Guard 2) never suppresses the latter. Conflict resolution is therefore preserved and still runs when a PR is actually conflicting **and not** in the queue; it is skipped (via Guard 1) only when the PR is in the queue.
+
+**Guarded mutation sites (completeness — FR-1):**
+
+| Site | Mutation | Guard | FR |
+|------|----------|-------|----|
+| `engine/worktree.go` `updateWorktreeFromMain` (via `EnsureWorktree` `skipUpdate`) | per-stage `git rebase origin/<base>` | `item.go` / `comments.go` OR `prInMergeQueue \|\| suppressPreemptiveRebase` into `skipUpdate` | FR-1, FR-2 |
+| `engine/pr.go` `ensureDraftPR`; `markPRReady` | `git push --force-with-lease` | `pushBranchUnlessQueued` | FR-1 |
+| `engine/prcreate.go` `processPRCreateMarker` | `git push --force-with-lease` | `pushBranchUnlessQueued` | FR-1 |
+| `engine/item.go` post-stage WIP push | `git push --force-with-lease` | `pushBranchUnlessQueued` | FR-1 |
+| `engine/pr.go` `syncPRBase` | `UpdatePRBase` (PR base change) | early-return `if prInMergeQueue(item)` | FR-1 |
+| `engine/catch_up_handlers.go` `handleMergeAndCIGates`; `engine/merge_gate.go` `checkAutoMergeConvergence` | `dispatchRebaseReinvoke` (synthetic rebase + force-push) | skip dispatch when `settle.PR.IsInMergeQueue` (guard at dispatch, **not** in the function body — preserves the path for the D4 ejection→resolve composition) | FR-1 |
+| `engine/stages.go` `attemptMergeOnValidate` `MergePR` fallback | direct merge | **no new guard** — the D2 enqueue early-return (`cfg.MergeQueue != "off" && pr.IsMergeQueueEnabled`) returns before `MergePR` is reached on a queue repo; a queued PR is never directly merged | FR-1 (audit) |
+
+**Non-mutating (no guard needed):** `engine/pr_terminal_advance.go` rebase-needed handling is `removeRebaseNeededLabel` only (label cleanup, no git/PR mutation) and runs only after a PR is already merged/closed.
+
+**Scope boundary.** These guards cover **engine-initiated** mutations. Claude-driven `git push`/`rebase` inside a stage (the default tool allowlist includes `Bash(git:*)`) is outside engine control. Stages rarely run while a PR is in the queue (queue entry happens at Validate completion), so the realistic exposure is the rebase-reinvoke synthetic comment — which is guarded at dispatch.
+
+**WIP-preservation trade-off.** Skipping the post-stage push (`item.go`) when the PR is in the queue means in-flight WIP is not pushed for that cycle. This is acceptable: queue entry happens at Validate completion, so a stage rarely runs while the PR is queued.
+
+**Backward-compat (FR-3).** Both signal fields are false-by-default, so on a non-queue repo (`LinkedPRIsMergeQueueEnabled == false`, `LinkedPRIsInMergeQueue == false`) every guard is a no-op and all rebase/mutation behavior is byte-for-byte unchanged (the ADR-058 D1 guarantee).
+
+---
+
 ## 6. Review Gate and Review Reinvoke
 
 ### 6.1 Two-Phase Review Gate
