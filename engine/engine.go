@@ -40,6 +40,7 @@ type Config struct {
 	MaxRebaseCycles          int           // Max rebase re-invocation cycles per issue before pausing (default 3)
 	ConvergenceBudget        time.Duration // Wall-clock budget for post-Validate yolo convergence (default 30m; 0 = disabled, waits indefinitely)
 	AutoMergeStrategy        string        // Merge method for enablePullRequestAutoMerge: MERGE, SQUASH, or REBASE (default MERGE)
+	MergeQueue               string        // Merge queue routing for yolo path: "auto" (enqueue when repo uses merge queue) or "off" (skip enqueue)
 	KillGraceSigInt          time.Duration // Grace window after SIGINT before SIGTERM (default 10s; 0 = skip SIGINT step)
 	KillGraceSigTerm         time.Duration // Grace window after SIGTERM before SIGKILL (default 10s)
 	ClaudeWaitDelay          time.Duration // How long to wait after Claude exits before giving up on pipe drain and recovering output (default 30s)
