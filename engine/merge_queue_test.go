@@ -1,11 +1,13 @@
 package engine
 
 import (
+	"context"
 	"os/exec"
 	"strings"
 	"testing"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 // TestPRInMergeQueue covers the FR-1 per-PR guard signal: it fires on
@@ -112,5 +114,116 @@ func TestPushBranchUnlessQueued_SkipsWhenQueued(t *testing.T) {
 	}
 	if ref := remoteRef(wtDir, branch); ref == "" {
 		t.Errorf("origin should have %s after push, got empty", branch)
+	}
+}
+
+// ── FR-1: syncPRBase (UpdatePRBase) in-queue guard (Task 5) ──────────────────
+
+// TestSyncPRBase_InMergeQueue_SkipsUpdate verifies the FR-1 guard at syncPRBase:
+// when the linked PR is in the merge queue, the base sync is skipped entirely
+// (no FindPRForIssue/UpdatePRBase calls), because a base change ejects the PR.
+// The not-in-queue case (FR-3 boundary) still updates when the base differs.
+func TestSyncPRBase_InMergeQueue_SkipsUpdate(t *testing.T) {
+	newClient := func() *mockGitHubClient {
+		return &mockGitHubClient{
+			findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) { return 42, nil },
+			getPRBaseFn:      func(owner, repo string, prNumber int) (string, error) { return "main", nil },
+		}
+	}
+
+	// In queue: must not call UpdatePRBase.
+	queuedClient := newClient()
+	engQueued := testEngine(t, queuedClient, &mockClaudeInvoker{})
+	engQueued.syncPRBase(gh.ProjectItem{Number: 1, LinkedPRIsInMergeQueue: true}, "feature/foo")
+	if len(queuedClient.updatePRBaseCalls) != 0 {
+		t.Errorf("queued PR: expected 0 UpdatePRBase calls, got %d", len(queuedClient.updatePRBaseCalls))
+	}
+
+	// Not in queue, base differs: must call UpdatePRBase (FR-3 unchanged).
+	openClient := newClient()
+	engOpen := testEngine(t, openClient, &mockClaudeInvoker{})
+	engOpen.syncPRBase(gh.ProjectItem{Number: 1, LinkedPRIsInMergeQueue: false}, "feature/foo")
+	if len(openClient.updatePRBaseCalls) != 1 {
+		t.Errorf("non-queued PR: expected 1 UpdatePRBase call, got %d", len(openClient.updatePRBaseCalls))
+	}
+}
+
+// ── FR-1/FR-2 boundary: dispatchRebaseReinvoke dispatch guards (Tasks 6, 7) ───
+
+// TestCheckAutoMergeConvergence_InMergeQueue_SkipsRebaseDispatch drives the
+// merge_gate.go dispatch site (checkAutoMergeConvergence). A PRMergeConflicting
+// PR that is in the queue must NOT dispatch a rebase reinvoke (FR-1: it would
+// eject the PR); the same PR not in the queue still dispatches (FR-2 boundary —
+// genuine conflict resolution is preserved when the PR is not queued).
+func TestCheckAutoMergeConvergence_InMergeQueue_SkipsRebaseDispatch(t *testing.T) {
+	run := func(inQueue bool) int {
+		client := &mockGitHubClient{
+			fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+				return &gh.PRDetails{Number: 10, State: "open", AutoMergeEnabled: true, MergeableState: "dirty"}, nil
+			},
+		}
+		eng := testEngineForMerge(t, client)
+		eng.cfg.MaxRebaseCycles = 3
+		item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
+		stage := &stages.Stage{Name: "Validate"}
+		settle := PRSettleResult{Status: PRMergeConflicting, PR: &gh.PRDetails{Number: 10, IsInMergeQueue: inQueue}}
+
+		eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, settle)
+		eng.wg.Wait()
+		snap, err := eng.store.Get("owner/repo", 42)
+		if err != nil {
+			// No store entry means no dispatch occurred (the increment is what
+			// creates it) — treat as zero cycles.
+			return 0
+		}
+		return snap.RebaseCycles("Validate")
+	}
+
+	if got := run(true); got != 0 {
+		t.Errorf("in-queue conflict: expected RebaseCycles=0 (dispatch skipped), got %d", got)
+	}
+	if got := run(false); got != 1 {
+		t.Errorf("not-in-queue conflict: expected RebaseCycles=1 (dispatch fired), got %d", got)
+	}
+}
+
+// TestHandleMergeGate_InMergeQueue_SkipsRebaseDispatch drives the
+// catch_up_handlers.go dispatch site (handleMergeAndCIGates). settle.PR is built
+// from the mock FetchLinkedPR; when it reports IsInMergeQueue the conflict
+// dispatch is skipped and advancedItems is not set (FR-1). The not-in-queue case
+// still dispatches (FR-2 boundary).
+func TestHandleMergeGate_InMergeQueue_SkipsRebaseDispatch(t *testing.T) {
+	run := func(inQueue bool) (int, bool) {
+		client := &mockGitHubClient{
+			fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+				return &gh.PRDetails{Number: 42, HeadSHA: "deadbeef", State: "open", Merged: false, IsInMergeQueue: inQueue}, nil
+			},
+			fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+				f := false
+				return &f, "dirty", nil
+			},
+			addCommentFn: func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+		}
+		stgs := []*stages.Stage{
+			{Name: "Implement", Order: 1, Prompt: "implement"},
+			{Name: "Review", Order: 2, Prompt: "review"},
+		}
+		eng := testEngineWithStages(t, client, stgs)
+		eng.cfg.MaxRebaseCycles = 3
+		board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+		advancedItems := make(map[string]bool)
+		pctx := makeMergeGatePctx(board, advancedItems)
+
+		eng.handleMergeAndCIGates(pctx)
+		eng.wg.Wait()
+		snap, _ := eng.store.Get("owner/repo", 20)
+		return snap.RebaseCycles("Implement"), advancedItems["owner/repo#20"]
+	}
+
+	if cycles, advanced := run(true); cycles != 0 || advanced {
+		t.Errorf("in-queue conflict: expected RebaseCycles=0 & not advanced, got cycles=%d advanced=%v", cycles, advanced)
+	}
+	if cycles, advanced := run(false); cycles != 1 || !advanced {
+		t.Errorf("not-in-queue conflict: expected RebaseCycles=1 & advanced, got cycles=%d advanced=%v", cycles, advanced)
 	}
 }
