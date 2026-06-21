@@ -227,3 +227,65 @@ func TestHandleMergeGate_InMergeQueue_SkipsRebaseDispatch(t *testing.T) {
 		t.Errorf("not-in-queue conflict: expected RebaseCycles=1 & advanced, got cycles=%d advanced=%v", cycles, advanced)
 	}
 }
+
+// TestRebaseDispatchGuards_PollNativeSignal_CacheMiss verifies the dispatch guards
+// fire from the poll-native ProjectItem field (LinkedPRIsInMergeQueue) even when
+// settle.PR does NOT carry the flag. This simulates a boardcache miss: readClient
+// falls back to REST, whose FetchLinkedPR never decodes isInMergeQueue (GraphQL-only),
+// so settle.PR.IsInMergeQueue is false. The ProjectItem field — always GraphQL-
+// populated each poll cycle — must still suppress the dispatch (FR-1 completeness:
+// a guard that fails on cache miss is partial coverage).
+func TestRebaseDispatchGuards_PollNativeSignal_CacheMiss(t *testing.T) {
+	// catch_up_handlers.go: handleMergeAndCIGates. settle.PR reports not-in-queue
+	// (cache-miss REST fallback), but the item carries the poll-native flag.
+	t.Run("handleMergeAndCIGates", func(t *testing.T) {
+		client := &mockGitHubClient{
+			fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+				return &gh.PRDetails{Number: 42, HeadSHA: "deadbeef", State: "open", Merged: false, IsInMergeQueue: false}, nil
+			},
+			fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+				f := false
+				return &f, "dirty", nil
+			},
+			addCommentFn: func(_, _ string, _ int, _ string) (int, error) { return 1, nil },
+		}
+		stgs := []*stages.Stage{
+			{Name: "Implement", Order: 1, Prompt: "implement"},
+			{Name: "Review", Order: 2, Prompt: "review"},
+		}
+		eng := testEngineWithStages(t, client, stgs)
+		eng.cfg.MaxRebaseCycles = 3
+		board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+		advancedItems := make(map[string]bool)
+		pctx := makeMergeGatePctx(board, advancedItems)
+		pctx.item.LinkedPRIsInMergeQueue = true // poll-native signal set; settle.PR is not
+
+		eng.handleMergeAndCIGates(pctx)
+		eng.wg.Wait()
+		snap, _ := eng.store.Get("owner/repo", 20)
+		if snap.RebaseCycles("Implement") != 0 || advancedItems["owner/repo#20"] {
+			t.Errorf("cache-miss in-queue: expected no dispatch from poll-native signal, got cycles=%d advanced=%v",
+				snap.RebaseCycles("Implement"), advancedItems["owner/repo#20"])
+		}
+	})
+
+	// merge_gate.go: checkAutoMergeConvergence. Same cache-miss shape.
+	t.Run("checkAutoMergeConvergence", func(t *testing.T) {
+		client := &mockGitHubClient{
+			fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+				return &gh.PRDetails{Number: 10, State: "open", AutoMergeEnabled: true, MergeableState: "dirty"}, nil
+			},
+		}
+		eng := testEngineForMerge(t, client)
+		eng.cfg.MaxRebaseCycles = 3
+		item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}, LinkedPRIsInMergeQueue: true}
+		stage := &stages.Stage{Name: "Validate"}
+		settle := PRSettleResult{Status: PRMergeConflicting, PR: &gh.PRDetails{Number: 10, IsInMergeQueue: false}}
+
+		eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, settle)
+		eng.wg.Wait()
+		if snap, err := eng.store.Get("owner/repo", 42); err == nil && snap.RebaseCycles("Validate") != 0 {
+			t.Errorf("cache-miss in-queue: expected no dispatch from poll-native signal, got cycles=%d", snap.RebaseCycles("Validate"))
+		}
+	})
+}
