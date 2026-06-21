@@ -299,6 +299,14 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 	// User manually disabled auto-merge: pause the issue to prevent the next poll
 	// from re-enabling auto-merge via Phase 2 (yoloActive=true + no label → attemptMergeOnValidate).
 	if !pr.AutoMergeEnabled {
+		// EnqueuePullRequest does not set auto_merge on the PR, so AutoMergeEnabled
+		// is false even for PRs correctly waiting in the merge queue. settle.PR.IsInMergeQueue
+		// (populated from GraphQL via FetchProjectBoard → boardcache) is the authoritative
+		// signal: if the PR is in the queue, skip the pause and wait for the queue to merge.
+		if settle.PR != nil && settle.PR.IsInMergeQueue {
+			e.logf(item.Number, "auto-merge", "PR #%d is in merge queue — waiting for queue to merge\n", pr.Number)
+			return
+		}
 		e.logf(item.Number, "auto-merge", "PR #%d auto-merge disabled by user — pausing\n", pr.Number)
 		msg := fmt.Sprintf("🏭 **Fabrik — auto-merge disabled**\n\n" +
 			"Fabrik detected that GitHub auto-merge was disabled on the linked PR. " +
