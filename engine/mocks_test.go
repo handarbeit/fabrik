@@ -58,6 +58,8 @@ type mockGitHubClient struct {
 	addProjectV2ItemByIdFn              func(projectID, contentNodeID string) (string, error)
 	addBlockedByIssueFn                 func(issueNodeID, blockerNodeID string) error
 	enablePullRequestAutoMergeFn        func(owner, repo string, prNumber int, strategy string) error
+	enqueuePullRequestFn                func(owner, repo string, prNumber int, expectedHeadOID string) error
+	dequeuePullRequestFn                func(owner, repo string, prNumber int) error
 	fetchCommitsBehindFn                func(owner, repo, base, head string) (int, error)
 	fetchAllowAutoMergeFn               func(owner, repo string) (bool, error)
 	fetchIssueFn                        func(owner, repo string, issueNumber int) (*gh.IssueData, error)
@@ -100,6 +102,8 @@ type mockGitHubClient struct {
 	addProjectV2ItemCalls               []addProjectV2ItemCall
 	addBlockedByIssueCalls              []addBlockedByIssueCall
 	enablePullRequestAutoMergeCalls     []enablePullRequestAutoMergeCall
+	enqueuePullRequestCalls             []enqueuePullRequestCall
+	dequeuePullRequestCalls             []dequeuePullRequestCall
 	fetchCommitsBehindCalls             []fetchCommitsBehindCall
 }
 
@@ -663,6 +667,17 @@ type fetchCommitsBehindCall struct {
 	owner, repo, base, head string
 }
 
+type enqueuePullRequestCall struct {
+	owner, repo     string
+	prNumber        int
+	expectedHeadOID string
+}
+
+type dequeuePullRequestCall struct {
+	owner, repo string
+	prNumber    int
+}
+
 func (m *mockGitHubClient) EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy string) error {
 	m.mu.Lock()
 	m.enablePullRequestAutoMergeCalls = append(m.enablePullRequestAutoMergeCalls, enablePullRequestAutoMergeCall{owner, repo, prNumber, strategy})
@@ -670,6 +685,28 @@ func (m *mockGitHubClient) EnablePullRequestAutoMerge(owner, repo string, prNumb
 	m.mu.Unlock()
 	if fn != nil {
 		return fn(owner, repo, prNumber, strategy)
+	}
+	return nil
+}
+
+func (m *mockGitHubClient) EnqueuePullRequest(owner, repo string, prNumber int, expectedHeadOID string) error {
+	m.mu.Lock()
+	m.enqueuePullRequestCalls = append(m.enqueuePullRequestCalls, enqueuePullRequestCall{owner, repo, prNumber, expectedHeadOID})
+	fn := m.enqueuePullRequestFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, prNumber, expectedHeadOID)
+	}
+	return nil
+}
+
+func (m *mockGitHubClient) DequeuePullRequest(owner, repo string, prNumber int) error {
+	m.mu.Lock()
+	m.dequeuePullRequestCalls = append(m.dequeuePullRequestCalls, dequeuePullRequestCall{owner, repo, prNumber})
+	fn := m.dequeuePullRequestFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, prNumber)
 	}
 	return nil
 }

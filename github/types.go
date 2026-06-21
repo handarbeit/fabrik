@@ -65,6 +65,14 @@ type PRReview struct {
 	DatabaseID int    // Numeric PR review ID (0 if not fetched or unavailable)
 }
 
+// MergeQueueEntry holds the merge-queue position and state for a pull request.
+// The pointer on ProjectItem and PRDetails is nil when no merge queue entry exists.
+type MergeQueueEntry struct {
+	State        string // e.g. "QUEUED", "AWAITING_CHECKS", "MERGEABLE", "UNMERGEABLE"
+	Position     int    // 1-indexed position in the queue; 0 when not yet positioned
+	EnqueuerLogin string // GitHub login of the user who enqueued the PR
+}
+
 // ProjectItem represents an issue or pull request card on the project board.
 type ProjectItem struct {
 	ID             string
@@ -100,6 +108,15 @@ type ProjectItem struct {
 	// LinkedPRResolvedThreadCount is the number of review threads on the linked PR
 	// that are currently resolved. Used by progress detection during turn extension.
 	LinkedPRResolvedThreadCount int
+
+	// LinkedPRIsMergeQueueEnabled is true when the repository has the merge queue
+	// feature enabled. Zero (false) when no queue exists or the field was not fetched.
+	LinkedPRIsMergeQueueEnabled bool
+	// LinkedPRIsInMergeQueue is true when the linked PR is currently in the merge queue.
+	LinkedPRIsInMergeQueue bool
+	// LinkedPRMergeQueueEntry holds the queue position and state when the PR is
+	// enqueued. Nil when the PR is not in the queue or mergeQueueEntry was null.
+	LinkedPRMergeQueueEntry *MergeQueueEntry
 }
 
 // Comment represents a comment on an issue or linked PR.

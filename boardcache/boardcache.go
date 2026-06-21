@@ -741,13 +741,16 @@ func (c *CacheImpl) FetchLinkedPR(owner, repo string, issueNumber int) (*gh.PRDe
 	if linkedPRNum != 0 && snapErr == nil {
 		if lpr := snap.LinkedPR(); lpr != nil && lpr.Title != "" && lpr.HeadSHA != "" {
 			return &gh.PRDetails{
-				Number:         lpr.Number,
-				Title:          lpr.Title,
-				State:          lpr.State,
-				Merged:         lpr.Merged,
-				Draft:          lpr.Draft,
-				HeadSHA:        lpr.HeadSHA,
-				MergeableState: lpr.MergeableState,
+				Number:              lpr.Number,
+				Title:               lpr.Title,
+				State:               lpr.State,
+				Merged:              lpr.Merged,
+				Draft:               lpr.Draft,
+				HeadSHA:             lpr.HeadSHA,
+				MergeableState:      lpr.MergeableState,
+				IsMergeQueueEnabled: lpr.IsMergeQueueEnabled,
+				IsInMergeQueue:      lpr.IsInMergeQueue,
+				MergeQueueEntry:     lpr.MergeQueueEntry,
 			}, nil
 		}
 	}

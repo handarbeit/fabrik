@@ -256,3 +256,137 @@ func TestLookupIssueProjectItem(t *testing.T) {
 		}
 	})
 }
+
+// minimalLinkedPRNode builds the shared fields for a linked-PR node in the
+// FetchItemDetails GraphQL mock response, avoiding repetition across sub-tests.
+func minimalLinkedPRNode(id string, number int, extra map[string]interface{}) map[string]interface{} {
+	node := map[string]interface{}{
+		"id":         id,
+		"number":     number,
+		"headRefOid": "sha" + id,
+		"comments":   map[string]interface{}{"nodes": []interface{}{}, "pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""}},
+		"reviewRequests": map[string]interface{}{"nodes": []interface{}{}},
+		"latestReviews":  map[string]interface{}{"nodes": []interface{}{}},
+		"reviewThreads":  map[string]interface{}{"nodes": []interface{}{}},
+	}
+	for k, v := range extra {
+		node[k] = v
+	}
+	return node
+}
+
+// minimalFetchItemDetailsResponse builds a complete FetchItemDetails GraphQL
+// response wrapping the given linked-PR nodes.
+func minimalFetchItemDetailsResponse(linkedPRNodes []interface{}) map[string]interface{} {
+	return map[string]interface{}{
+		"data": map[string]interface{}{
+			"node": map[string]interface{}{
+				"number": 5,
+				"title":  "Test issue",
+				"body":   "",
+				"url":    "https://github.com/test/repo/issues/5",
+				"author": map[string]interface{}{"login": "alice"},
+				"labels": map[string]interface{}{
+					"nodes":    []interface{}{},
+					"pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""},
+				},
+				"assignees": map[string]interface{}{"nodes": []interface{}{}},
+				"comments": map[string]interface{}{
+					"nodes":    []interface{}{},
+					"pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""},
+				},
+				"closedByPullRequestsReferences": map[string]interface{}{
+					"nodes": linkedPRNodes,
+				},
+			},
+		},
+	}
+}
+
+func TestFetchItemDetailsQueueFields(t *testing.T) {
+	t.Run("queue fields are populated when mergeQueueEntry is non-null", func(t *testing.T) {
+		prNode := minimalLinkedPRNode("PR_xyz", 7, map[string]interface{}{
+			"isMergeQueueEnabled": true,
+			"isInMergeQueue":      true,
+			"mergeQueueEntry": map[string]interface{}{
+				"state":    "QUEUED",
+				"position": 1,
+				"enqueuer": map[string]interface{}{"login": "bob"},
+			},
+		})
+		_, client := makeLookupServer(t, func() interface{} {
+			return minimalFetchItemDetailsResponse([]interface{}{prNode})
+		})
+
+		item := &ProjectItem{ID: "ISSUE_id", Number: 5}
+		if err := client.FetchItemDetails(item); err != nil {
+			t.Fatalf("FetchItemDetails: %v", err)
+		}
+
+		if !item.LinkedPRIsMergeQueueEnabled {
+			t.Error("LinkedPRIsMergeQueueEnabled = false, want true")
+		}
+		if !item.LinkedPRIsInMergeQueue {
+			t.Error("LinkedPRIsInMergeQueue = false, want true")
+		}
+		if item.LinkedPRMergeQueueEntry == nil {
+			t.Fatal("LinkedPRMergeQueueEntry = nil, want non-nil")
+		}
+		if item.LinkedPRMergeQueueEntry.State != "QUEUED" {
+			t.Errorf("MergeQueueEntry.State = %q, want %q", item.LinkedPRMergeQueueEntry.State, "QUEUED")
+		}
+		if item.LinkedPRMergeQueueEntry.Position != 1 {
+			t.Errorf("MergeQueueEntry.Position = %d, want 1", item.LinkedPRMergeQueueEntry.Position)
+		}
+		if item.LinkedPRMergeQueueEntry.EnqueuerLogin != "bob" {
+			t.Errorf("MergeQueueEntry.EnqueuerLogin = %q, want %q", item.LinkedPRMergeQueueEntry.EnqueuerLogin, "bob")
+		}
+	})
+
+	t.Run("queue fields are zero when mergeQueueEntry is null", func(t *testing.T) {
+		prNode := minimalLinkedPRNode("PR_abc", 8, map[string]interface{}{
+			"isMergeQueueEnabled": false,
+			"isInMergeQueue":      false,
+			"mergeQueueEntry":     nil,
+		})
+		_, client := makeLookupServer(t, func() interface{} {
+			return minimalFetchItemDetailsResponse([]interface{}{prNode})
+		})
+
+		item := &ProjectItem{ID: "ISSUE_id2", Number: 6}
+		if err := client.FetchItemDetails(item); err != nil {
+			t.Fatalf("FetchItemDetails: %v", err)
+		}
+
+		if item.LinkedPRIsMergeQueueEnabled {
+			t.Error("LinkedPRIsMergeQueueEnabled = true, want false")
+		}
+		if item.LinkedPRIsInMergeQueue {
+			t.Error("LinkedPRIsInMergeQueue = true, want false")
+		}
+		if item.LinkedPRMergeQueueEntry != nil {
+			t.Errorf("LinkedPRMergeQueueEntry = %+v, want nil", item.LinkedPRMergeQueueEntry)
+		}
+	})
+
+	t.Run("queue fields are zero when no linked PR", func(t *testing.T) {
+		_, client := makeLookupServer(t, func() interface{} {
+			return minimalFetchItemDetailsResponse([]interface{}{})
+		})
+
+		item := &ProjectItem{ID: "ISSUE_id3", Number: 7}
+		if err := client.FetchItemDetails(item); err != nil {
+			t.Fatalf("FetchItemDetails: %v", err)
+		}
+
+		if item.LinkedPRIsMergeQueueEnabled {
+			t.Error("LinkedPRIsMergeQueueEnabled = true, want false (no PR)")
+		}
+		if item.LinkedPRIsInMergeQueue {
+			t.Error("LinkedPRIsInMergeQueue = true, want false (no PR)")
+		}
+		if item.LinkedPRMergeQueueEntry != nil {
+			t.Errorf("LinkedPRMergeQueueEntry non-nil when no PR: %+v", item.LinkedPRMergeQueueEntry)
+		}
+	})
+}
