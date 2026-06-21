@@ -809,15 +809,15 @@ printf '%%s\n' '{"result":"comment done","session_id":"sess_cmt","num_turns":3,"
 	args, _ := os.ReadFile(argsFile)
 	argsStr := string(args)
 
-	// --max-turns should use CommentMaxTurns (7), not MaxTurns (50)
-	if !strings.Contains(argsStr, "--max-turns") {
-		t.Errorf("expected --max-turns in args, got: %q", argsStr)
+	// --max-turns should use CommentMaxTurns (7), not MaxTurns (50).
+	// Match the exact flag value rather than a bare digit substring: argsStr embeds
+	// the worktree temp path (via --allowedTools Edit(<tmpdir>/**)), whose random
+	// digits can contain "50"/"7" and produce spurious failures.
+	if !strings.Contains(argsStr, "--max-turns 7") {
+		t.Errorf("expected --max-turns 7 in args, got: %q", argsStr)
 	}
-	if strings.Contains(argsStr, "50") {
+	if strings.Contains(argsStr, "--max-turns 50") {
 		t.Errorf("stage MaxTurns (50) leaked into comment args: %q", argsStr)
-	}
-	if !strings.Contains(argsStr, "7") {
-		t.Errorf("expected comment limit (7) in args: %q", argsStr)
 	}
 
 	// usage.MaxTurns should reflect the comment limit, not stage.MaxTurns
