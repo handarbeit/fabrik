@@ -2715,8 +2715,8 @@ func TestRunProbeAndDeepFetch_IsClosedPropagates_WithoutDeepFetch(t *testing.T) 
 // normally. This covers the gap where BootstrapFromProbe cannot help: items
 // that appear in the probe for the first time during a mid-run cycle.
 func TestProbeNewItem_ClosedDone_SkipsDeepFetch(t *testing.T) {
-	const numClosed = 3  // closed Done items
-	const numOpen = 2    // open Research items
+	const numClosed = 3 // closed Done items
+	const numOpen = 2   // open Research items
 	var deepFetchCalls int
 	probeTime := time.Now().Add(-time.Minute)
 

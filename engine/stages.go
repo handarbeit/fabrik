@@ -265,6 +265,14 @@ func (e *Engine) attemptMergeOnValidate(_ context.Context, _ *gh.ProjectBoard, i
 	}
 
 	// Enqueue path: when the repo requires a merge queue and merge-queue routing is not disabled.
+	//
+	// Merge-queue awareness audit (ADR-058 D3 FR-1): this early-return IS the guard for
+	// the MergePR direct-merge fallback below. On a queue-enabled repo (default config),
+	// the enqueue path returns here before MergePR is ever reached — a queued PR is never
+	// directly merged (a direct merge on a queue-required branch returns HTTP 405). The
+	// only way to reach the MergePR fallback on a queue repo is merge_queue: off (the
+	// kill-switch), an operator's explicit choice. No separate guard is required at the
+	// MergePR site; this early-return is the audit evidence.
 	if e.cfg.MergeQueue != "off" && pr.IsMergeQueueEnabled {
 		if err := e.client.EnqueuePullRequest(owner, repo, pr.Number, pr.HeadSHA); err != nil {
 			return false, fmt.Errorf("enqueue PR #%d: %w", pr.Number, err)
