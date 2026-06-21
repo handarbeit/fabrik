@@ -264,6 +264,25 @@ func (e *Engine) attemptMergeOnValidate(_ context.Context, _ *gh.ProjectBoard, i
 		return false, nil
 	}
 
+	// Enqueue path: when the repo requires a merge queue and merge-queue routing is not disabled.
+	if e.cfg.MergeQueue != "off" && pr.IsMergeQueueEnabled {
+		if err := e.client.EnqueuePullRequest(owner, repo, pr.Number, pr.HeadSHA); err != nil {
+			return false, fmt.Errorf("enqueue PR #%d: %w", pr.Number, err)
+		}
+		if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); lerr != nil {
+			e.logf(item.Number, "warn", "could not add fabrik:auto-merge-enabled label: %v\n", lerr)
+		} else {
+			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+				cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:auto-merge-enabled")
+			}
+			if e.webhookMgr != nil {
+				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:auto-merge-enabled")
+			}
+		}
+		e.logf(item.Number, "info", "PR #%d enqueued into merge queue — awaiting GitHub merge\n", pr.Number)
+		return true, nil
+	}
+
 	strategy := e.cfg.AutoMergeStrategy
 	if strategy == "" {
 		strategy = "MERGE"

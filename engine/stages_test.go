@@ -400,3 +400,128 @@ func TestAdvanceToNextStage_WritesThrough_Cache(t *testing.T) {
 		t.Errorf("cache Status = %q after advanceToNextStage, want %q", found.Status, "Plan")
 	}
 }
+
+// TestAttemptMergeOnValidate_EnqueueOnYoloWithQueueEnabled verifies that when
+// IsMergeQueueEnabled is true and MergeQueue != "off", EnqueuePullRequest is called,
+// MergePR is not called, fabrik:auto-merge-enabled is applied, and (true, nil) is returned.
+func TestAttemptMergeOnValidate_EnqueueOnYoloWithQueueEnabled(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, HeadSHA: "abc123", IsMergeQueueEnabled: true}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+
+	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !enabled {
+		t.Fatal("expected autoMergeEnabled=true, got false")
+	}
+	if len(client.enqueuePullRequestCalls) != 1 {
+		t.Fatalf("expected EnqueuePullRequest called once, got %d", len(client.enqueuePullRequestCalls))
+	}
+	if client.enqueuePullRequestCalls[0].prNumber != 10 {
+		t.Errorf("EnqueuePullRequest called with PR %d, want 10", client.enqueuePullRequestCalls[0].prNumber)
+	}
+	if client.enqueuePullRequestCalls[0].expectedHeadOID != "abc123" {
+		t.Errorf("EnqueuePullRequest called with head OID %q, want %q", client.enqueuePullRequestCalls[0].expectedHeadOID, "abc123")
+	}
+	if len(client.mergePRCalls) != 0 {
+		t.Errorf("MergePR must not be called in enqueue path, got %d call(s)", len(client.mergePRCalls))
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 0 {
+		t.Errorf("EnablePullRequestAutoMerge must not be called in enqueue path, got %d call(s)", len(client.enablePullRequestAutoMergeCalls))
+	}
+	foundLabel := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:auto-merge-enabled" {
+			foundLabel = true
+		}
+	}
+	if !foundLabel {
+		t.Error("expected fabrik:auto-merge-enabled label to be applied")
+	}
+}
+
+// TestAttemptMergeOnValidate_NoEnqueueWhenQueueNotEnabled verifies that when
+// IsMergeQueueEnabled is false, the existing auto-merge path is taken (no enqueue call).
+func TestAttemptMergeOnValidate_NoEnqueueWhenQueueNotEnabled(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, HeadSHA: "sha1", IsMergeQueueEnabled: false}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+
+	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !enabled {
+		t.Fatal("expected autoMergeEnabled=true via existing path")
+	}
+	if len(client.enqueuePullRequestCalls) != 0 {
+		t.Errorf("EnqueuePullRequest must not be called when IsMergeQueueEnabled=false, got %d call(s)", len(client.enqueuePullRequestCalls))
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 1 {
+		t.Fatalf("expected EnablePullRequestAutoMerge called once (existing path), got %d", len(client.enablePullRequestAutoMergeCalls))
+	}
+}
+
+// TestAttemptMergeOnValidate_CruiseDoesNotEnqueue verifies that a cruise-labeled item
+// does not call EnqueuePullRequest or MergePR even when IsMergeQueueEnabled is true.
+func TestAttemptMergeOnValidate_CruiseDoesNotEnqueue(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, HeadSHA: "sha1", IsMergeQueueEnabled: true}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:cruise"}}
+
+	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	if err != nil {
+		t.Fatalf("unexpected error for cruise item: %v", err)
+	}
+	if enabled {
+		t.Error("expected autoMergeEnabled=false for cruise item")
+	}
+	if len(client.enqueuePullRequestCalls) != 0 {
+		t.Errorf("EnqueuePullRequest must not be called for cruise items, got %d call(s)", len(client.enqueuePullRequestCalls))
+	}
+	if len(client.mergePRCalls) != 0 {
+		t.Errorf("MergePR must not be called for cruise items, got %d call(s)", len(client.mergePRCalls))
+	}
+}
+
+// TestAttemptMergeOnValidate_MergeQueueOffDoesNotEnqueue verifies that when
+// MergeQueue == "off", the existing auto-merge path is taken even if IsMergeQueueEnabled is true.
+func TestAttemptMergeOnValidate_MergeQueueOffDoesNotEnqueue(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, HeadSHA: "sha1", IsMergeQueueEnabled: true}, nil
+		},
+	}
+	stgs := testStagesWithValidate()
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MergeQueue = "off"
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+
+	enabled, err := eng.attemptMergeOnValidate(context.Background(), &gh.ProjectBoard{}, item, &stages.Stage{Name: "Validate"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !enabled {
+		t.Fatal("expected autoMergeEnabled=true via existing path when MergeQueue=off")
+	}
+	if len(client.enqueuePullRequestCalls) != 0 {
+		t.Errorf("EnqueuePullRequest must not be called when MergeQueue=off, got %d call(s)", len(client.enqueuePullRequestCalls))
+	}
+	if len(client.enablePullRequestAutoMergeCalls) != 1 {
+		t.Fatalf("expected EnablePullRequestAutoMerge called once (existing path), got %d", len(client.enablePullRequestAutoMergeCalls))
+	}
+}
