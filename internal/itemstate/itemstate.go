@@ -141,6 +141,15 @@ type LinkedPRState struct {
 	ResolvedThreadCount int
 	CheckRuns           []gh.CheckRun
 
+	// IsMergeQueueEnabled is true when the repository has the merge queue feature
+	// enabled. Populated from GraphQL via FetchItemDetails; zero until first deep fetch.
+	IsMergeQueueEnabled bool
+	// IsInMergeQueue is true when the PR is currently in the merge queue.
+	IsInMergeQueue bool
+	// MergeQueueEntry holds queue position and state when the PR is enqueued.
+	// Nil when not in queue; set to nil again after dequeueing.
+	MergeQueueEntry *gh.MergeQueueEntry
+
 	// HasHadChecks records whether this PR has ever had CI check runs reported.
 	// Replaces engine.prHasHadChecks[iKey].
 	HasHadChecks bool

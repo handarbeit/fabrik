@@ -89,6 +89,17 @@ type PRDetails struct {
 	// the PR (auto_merge field is non-null). False when the user or engine
 	// has disabled it, or when it was never enabled.
 	AutoMergeEnabled bool
+
+	// IsMergeQueueEnabled is true when the repository has the merge queue feature
+	// enabled. Always false when populated via REST (GraphQL-only field).
+	IsMergeQueueEnabled bool
+	// IsInMergeQueue is true when the PR is currently in the merge queue.
+	// Always false when populated via REST (GraphQL-only field).
+	IsInMergeQueue bool
+	// MergeQueueEntry holds the queue position and state when the PR is enqueued.
+	// Nil when not in queue or populated via REST. Pointer because GitHub returns
+	// null after dequeueing and Go's json decoder maps null to nil only on pointers.
+	MergeQueueEntry *MergeQueueEntry
 }
 
 // FetchPRMergeableFields fetches both the mergeable flag and mergeable_state for
@@ -515,6 +526,119 @@ func isAutoMergeAlreadyCleanError(err error) bool {
 		return false
 	}
 	return strings.Contains(err.Error(), "Pull request is in clean status")
+}
+
+// EnqueuePullRequest adds a pull request to the repository's merge queue.
+// expectedHeadOID is the current head SHA of the PR; if the PR has been
+// force-pushed since the caller read the SHA, the mutation fails safely
+// (optimistic concurrency).
+//
+// Uses the same two-step pattern as MarkPRReady: fetch the PR node ID via
+// GraphQL, then call the enqueuePullRequest mutation.
+func (c *Client) EnqueuePullRequest(owner, repo string, prNumber int, expectedHeadOID string) error {
+	if expectedHeadOID == "" {
+		return fmt.Errorf("expectedHeadOID cannot be empty")
+	}
+	fetchQuery := `
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      id
+    }
+  }
+}`
+	fetchVars := map[string]interface{}{
+		"owner":  owner,
+		"repo":   repo,
+		"number": prNumber,
+	}
+	var fetchResult struct {
+		Data struct {
+			Repository struct {
+				PullRequest struct {
+					ID string `json:"id"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+	if err := c.graphqlRequest(fetchQuery, fetchVars, &fetchResult); err != nil {
+		return fmt.Errorf("fetching PR node ID: %w", err)
+	}
+	nodeID := fetchResult.Data.Repository.PullRequest.ID
+	if nodeID == "" {
+		return fmt.Errorf("PR #%d not found in repository %s/%s", prNumber, owner, repo)
+	}
+
+	mutation := `
+mutation($prId: ID!, $expectedHeadOid: GitObjectID!) {
+  enqueuePullRequest(input: { pullRequestId: $prId, expectedHeadOid: $expectedHeadOid }) {
+    mergeQueueEntry {
+      id
+    }
+  }
+}`
+	mutVars := map[string]interface{}{
+		"prId":            nodeID,
+		"expectedHeadOid": expectedHeadOID,
+	}
+	var mutResult struct{}
+	if err := c.graphqlRequest(mutation, mutVars, &mutResult); err != nil {
+		return fmt.Errorf("enqueueing PR #%d: %w", prNumber, err)
+	}
+	return nil
+}
+
+// DequeuePullRequest removes a pull request from the repository's merge queue.
+//
+// Uses the same two-step pattern as MarkPRReady: fetch the PR node ID via
+// GraphQL, then call the dequeuePullRequest mutation.
+func (c *Client) DequeuePullRequest(owner, repo string, prNumber int) error {
+	fetchQuery := `
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      id
+    }
+  }
+}`
+	fetchVars := map[string]interface{}{
+		"owner":  owner,
+		"repo":   repo,
+		"number": prNumber,
+	}
+	var fetchResult struct {
+		Data struct {
+			Repository struct {
+				PullRequest struct {
+					ID string `json:"id"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+	if err := c.graphqlRequest(fetchQuery, fetchVars, &fetchResult); err != nil {
+		return fmt.Errorf("fetching PR node ID: %w", err)
+	}
+	nodeID := fetchResult.Data.Repository.PullRequest.ID
+	if nodeID == "" {
+		return fmt.Errorf("PR #%d not found in repository %s/%s", prNumber, owner, repo)
+	}
+
+	mutation := `
+mutation($prId: ID!) {
+  dequeuePullRequest(input: { id: $prId }) {
+    mergeQueueEntry {
+      id
+    }
+  }
+}`
+	mutVars := map[string]interface{}{
+		"prId": nodeID,
+	}
+	var mutResult struct{}
+	if err := c.graphqlRequest(mutation, mutVars, &mutResult); err != nil {
+		return fmt.Errorf("dequeueing PR #%d: %w", prNumber, err)
+	}
+	return nil
 }
 
 // FetchCommitsBehind returns how many commits base is ahead of head using the

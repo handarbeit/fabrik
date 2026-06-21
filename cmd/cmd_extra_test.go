@@ -159,6 +159,12 @@ func (m *testGitHubUpgradeClient) DeleteForwardingHooks(owner, repo string) erro
 func (m *testGitHubUpgradeClient) EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy string) error {
 	return nil
 }
+func (m *testGitHubUpgradeClient) EnqueuePullRequest(owner, repo string, prNumber int, expectedHeadOID string) error {
+	return nil
+}
+func (m *testGitHubUpgradeClient) DequeuePullRequest(owner, repo string, prNumber int) error {
+	return nil
+}
 func (m *testGitHubUpgradeClient) FetchCommitsBehind(owner, repo, base, head string) (int, error) {
 	return 0, nil
 }
