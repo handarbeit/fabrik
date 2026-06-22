@@ -154,7 +154,6 @@ func TestEnsureBareClone_ExistingDir_FetchesOnly(t *testing.T) {
 	}
 }
 
-
 func TestSetCommitterIdentity_SetsWhenUnset(t *testing.T) {
 	skipIfNoGit(t)
 	repoDir := initBareRepo(t)

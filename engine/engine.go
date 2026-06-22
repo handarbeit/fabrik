@@ -53,7 +53,7 @@ type Config struct {
 	Webhooks                 bool
 	WebhookPort              int
 	WebhookEvents            []string
-	ProjectStatusPollSeconds int // Layer 2 status-only sweep cadence in seconds; default 15 s (gate runs every poll cycle; field retained for config compatibility)
+	ProjectStatusPollSeconds int   // Layer 2 status-only sweep cadence in seconds; default 15 s (gate runs every poll cycle; field retained for config compatibility)
 	JanitorIntervalHours     int   // Periodic worktree janitor cadence in hours; 0 disables the janitor (default 1)
 	LogRetentionDays         int   // Log files older than this many days are pruned; 0 disables age-based pruning (default 14)
 	LogMaxBytes              int64 // Total size cap for .fabrik/logs/; oldest files deleted first after age prune; 0 disables (default 2 GiB)
@@ -72,35 +72,35 @@ type cloneCall struct {
 }
 
 type Engine struct {
-	cfg                  Config
-	client               GitHubClient
-	readClient           boardcache.ReadClient // read-only GitHub calls; may be CacheImpl or GitHubAdapter
-	claude               ClaudeInvoker
-	statusField          *gh.StatusField
-	worktreeManagers     map[string]*WorktreeManager // key: "owner/repo"; one WM per discovered repo
-	fabrikDir            string                      // directory containing .fabrik/ (always os.Getwd() at startup)
-	mu                   sync.Mutex
-	store                *itemstate.Store // per-item engine state (locks, invocation outcomes, deep-fetch, CI-gate); see ADR-036
-	totalTokens          TokenUsage       // accumulated token usage since process start
-	lastReportedCost     float64          // cost at last [stats] report; skip repeat prints when unchanged
-	mayNeedWork          map[string]bool  // key: issueKey; items that have changed since the last poll cycle
-	mayNeedWorkMu        sync.Mutex       // guards mayNeedWork
-	seededRepos              map[string]bool  // key: "owner/repo"; in-memory guard to avoid re-seeding on every poll
-	checkedAutoMergeRepos    map[string]bool  // key: "owner/repo"; guard to emit allow_auto_merge warning at most once per run
-	idleCount            int              // consecutive idle polls; triggers self-upgrade at threshold
-	idleStart            time.Time        // when consecutive idle polls began; zero value = not idle
-	lastProjectUpdatedAt time.Time        // last seen project.updatedAt from FetchProjectUpdatedAt gate; zero = not yet checked
-	wakeCh               chan struct{}    // TUI sends on this to wake the poll loop immediately; nil if no TUI
-	stopCh               chan tui.StopRequest // TUI sends on this to stop a specific in-flight issue; nil if no TUI
-	sem                  chan struct{}    // semaphore bounding concurrent workers across poll cycles
-	wg                   sync.WaitGroup   // tracks in-flight workers for graceful shutdown
-	cloneInFlight        sync.Map         // key: "owner/repo" string, value: *cloneCall; per-repo bare-clone coordination
-	issueCtxs            sync.Map         // key: issueKey string, value: issueCtxEntry; per-issue context for kill-reason propagation
-	baseBranchWarnedSet  sync.Map         // key: "owner/repo#N:branch"; prevents repeated fallback comments for bad base: labels
-	events               chan tui.Event   // nil in tests / plain-text mode; TUI goroutine consumes
-	logFile              *os.File         // persistent log file at .fabrik/fabrik.log; nil if not opened
-	logMu                sync.Mutex       // serializes concurrent writes to logFile
-	webhookMgr           *webhookManager  // nil when webhooks are disabled
+	cfg                   Config
+	client                GitHubClient
+	readClient            boardcache.ReadClient // read-only GitHub calls; may be CacheImpl or GitHubAdapter
+	claude                ClaudeInvoker
+	statusField           *gh.StatusField
+	worktreeManagers      map[string]*WorktreeManager // key: "owner/repo"; one WM per discovered repo
+	fabrikDir             string                      // directory containing .fabrik/ (always os.Getwd() at startup)
+	mu                    sync.Mutex
+	store                 *itemstate.Store     // per-item engine state (locks, invocation outcomes, deep-fetch, CI-gate); see ADR-036
+	totalTokens           TokenUsage           // accumulated token usage since process start
+	lastReportedCost      float64              // cost at last [stats] report; skip repeat prints when unchanged
+	mayNeedWork           map[string]bool      // key: issueKey; items that have changed since the last poll cycle
+	mayNeedWorkMu         sync.Mutex           // guards mayNeedWork
+	seededRepos           map[string]bool      // key: "owner/repo"; in-memory guard to avoid re-seeding on every poll
+	checkedAutoMergeRepos map[string]bool      // key: "owner/repo"; guard to emit allow_auto_merge warning at most once per run
+	idleCount             int                  // consecutive idle polls; triggers self-upgrade at threshold
+	idleStart             time.Time            // when consecutive idle polls began; zero value = not idle
+	lastProjectUpdatedAt  time.Time            // last seen project.updatedAt from FetchProjectUpdatedAt gate; zero = not yet checked
+	wakeCh                chan struct{}        // TUI sends on this to wake the poll loop immediately; nil if no TUI
+	stopCh                chan tui.StopRequest // TUI sends on this to stop a specific in-flight issue; nil if no TUI
+	sem                   chan struct{}        // semaphore bounding concurrent workers across poll cycles
+	wg                    sync.WaitGroup       // tracks in-flight workers for graceful shutdown
+	cloneInFlight         sync.Map             // key: "owner/repo" string, value: *cloneCall; per-repo bare-clone coordination
+	issueCtxs             sync.Map             // key: issueKey string, value: issueCtxEntry; per-issue context for kill-reason propagation
+	baseBranchWarnedSet   sync.Map             // key: "owner/repo#N:branch"; prevents repeated fallback comments for bad base: labels
+	events                chan tui.Event       // nil in tests / plain-text mode; TUI goroutine consumes
+	logFile               *os.File             // persistent log file at .fabrik/fabrik.log; nil if not opened
+	logMu                 sync.Mutex           // serializes concurrent writes to logFile
+	webhookMgr            *webhookManager      // nil when webhooks are disabled
 	// heartbeatIntervalOverride overrides the package-level heartbeatInterval constant
 	// when non-zero. Used by tests to reduce the heartbeat period to sub-millisecond.
 	heartbeatIntervalOverride time.Duration
@@ -162,12 +162,12 @@ func New(cfg Config) (*Engine, error) {
 	worktreeRoot := filepath.Join(fabrikDir, ".fabrik", "worktrees")
 	sharedStore := itemstate.NewStore(nil)
 	eng := &Engine{
-		cfg:              cfg,
-		client:           gh.NewClient(cfg.Token),
-		claude:           &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},
-		worktreeManagers: make(map[string]*WorktreeManager),
-		fabrikDir:        fabrikDir,
-		store:            sharedStore,
+		cfg:                   cfg,
+		client:                gh.NewClient(cfg.Token),
+		claude:                &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},
+		worktreeManagers:      make(map[string]*WorktreeManager),
+		fabrikDir:             fabrikDir,
+		store:                 sharedStore,
 		mayNeedWork:           make(map[string]bool),
 		seededRepos:           make(map[string]bool),
 		checkedAutoMergeRepos: make(map[string]bool),

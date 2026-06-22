@@ -678,7 +678,14 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		releaseLock()
 		return fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
 	}
-	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, !lastAttempt.IsZero())
+	// Merge-queue awareness (ADR-058 D3): skip the preemptive rebase in
+	// updateWorktreeFromMain when the PR is in the queue (FR-1: a push/rebase ejects
+	// it) or when the repo is queue-enabled (FR-2: the queue enforces up-to-date at
+	// merge time, so preemptive rebasing is redundant). Both signals come from the
+	// GraphQL-populated ProjectItem fields; both are false-by-default (FR-3 no-op on
+	// non-queue repos). EnsureWorktree's existing skipUpdate arg bypasses the rebase.
+	skipUpdate := !lastAttempt.IsZero() || prInMergeQueue(item) || e.suppressPreemptiveRebase(item)
+	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, skipUpdate)
 	if err != nil {
 		releaseLock()
 		return fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
@@ -1064,9 +1071,13 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		e.commitWIP(workDir, item.Number, stage.Name)
 	}
 
-	// Always push the branch after a stage runs — preserves work even on failure/max_turns
+	// Always push the branch after a stage runs — preserves work even on failure/max_turns.
+	// Merge-queue awareness (ADR-058 D3 FR-1): skip the push when the PR is in the queue —
+	// pushing ejects it. The WIP-preservation push is forgone in that case, which is
+	// acceptable: queue entry happens at Validate completion, so stages rarely run while
+	// queued. No-op on non-queue repos (FR-3).
 	if claudeRan {
-		if pushErr := wm.PushBranch(item.Number); pushErr != nil {
+		if pushErr := e.pushBranchUnlessQueued(item, wm); pushErr != nil {
 			e.logf(item.Number, "warn", "could not push branch: %v\n", pushErr)
 		}
 	}
