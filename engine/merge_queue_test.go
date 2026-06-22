@@ -151,10 +151,11 @@ func TestSyncPRBase_InMergeQueue_SkipsUpdate(t *testing.T) {
 // ── FR-1/FR-2 boundary: dispatchRebaseReinvoke dispatch guards (Tasks 6, 7) ───
 
 // TestCheckAutoMergeConvergence_InMergeQueue_SkipsRebaseDispatch drives the
-// merge_gate.go dispatch site (checkAutoMergeConvergence). A PRMergeConflicting
-// PR that is in the queue must NOT dispatch a rebase reinvoke (FR-1: it would
-// eject the PR); the same PR not in the queue still dispatches (FR-2 boundary —
-// genuine conflict resolution is preserved when the PR is not queued).
+// merge_gate.go dispatch site (checkAutoMergeConvergence). FR-1 consolidates the
+// in-queue suppression into the settle status: an in-queue PR settles as
+// PRMergeQueued, which hands off at step ② (no rebase dispatch — a rebase+force-push
+// would eject it). The same PR once ejected settles as PRMergeConflicting and
+// dispatches the rebase reinvoke (FR-2 ejection→resolve, genuine conflict).
 func TestCheckAutoMergeConvergence_InMergeQueue_SkipsRebaseDispatch(t *testing.T) {
 	run := func(inQueue bool) int {
 		client := &mockGitHubClient{
@@ -166,9 +167,14 @@ func TestCheckAutoMergeConvergence_InMergeQueue_SkipsRebaseDispatch(t *testing.T
 		eng.cfg.MaxRebaseCycles = 3
 		item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
 		stage := &stages.Stage{Name: "Validate"}
-		settle := PRSettleResult{Status: PRMergeConflicting, PR: &gh.PRDetails{Number: 10, IsInMergeQueue: inQueue}}
+		// In-queue → PRMergeQueued (hand-off); ejected/not-queued conflict → PRMergeConflicting (dispatch).
+		status := PRMergeConflicting
+		if inQueue {
+			status = PRMergeQueued
+		}
+		settle := PRSettleResult{Status: status, PR: &gh.PRDetails{Number: 10, HeadSHA: "abc12345", IsInMergeQueue: inQueue}}
 
-		eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, settle)
+		eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, settle, false)
 		eng.wg.Wait()
 		snap, err := eng.store.Get("owner/repo", 42)
 		if err != nil {
@@ -180,10 +186,10 @@ func TestCheckAutoMergeConvergence_InMergeQueue_SkipsRebaseDispatch(t *testing.T
 	}
 
 	if got := run(true); got != 0 {
-		t.Errorf("in-queue conflict: expected RebaseCycles=0 (dispatch skipped), got %d", got)
+		t.Errorf("in-queue (PRMergeQueued): expected RebaseCycles=0 (hand-off, dispatch skipped), got %d", got)
 	}
 	if got := run(false); got != 1 {
-		t.Errorf("not-in-queue conflict: expected RebaseCycles=1 (dispatch fired), got %d", got)
+		t.Errorf("ejected conflict (PRMergeConflicting): expected RebaseCycles=1 (dispatch fired), got %d", got)
 	}
 }
 
@@ -269,7 +275,12 @@ func TestRebaseDispatchGuards_PollNativeSignal_CacheMiss(t *testing.T) {
 		}
 	})
 
-	// merge_gate.go: checkAutoMergeConvergence. Same cache-miss shape.
+	// merge_gate.go: checkAutoMergeConvergence. FR-1 consolidates the poll-native
+	// in-queue derivation into settlePRMergeState (covered by
+	// TestSettle_InMergeQueue_PollNativeSignal_CacheMiss): an item carrying the
+	// poll-native flag settles as PRMergeQueued even on a boardcache miss. This
+	// subtest confirms the convergence owner then hands off on PRMergeQueued with
+	// no rebase dispatch — even when settle.PR does NOT carry the in-queue flag.
 	t.Run("checkAutoMergeConvergence", func(t *testing.T) {
 		client := &mockGitHubClient{
 			fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
@@ -280,12 +291,14 @@ func TestRebaseDispatchGuards_PollNativeSignal_CacheMiss(t *testing.T) {
 		eng.cfg.MaxRebaseCycles = 3
 		item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}, LinkedPRIsInMergeQueue: true}
 		stage := &stages.Stage{Name: "Validate"}
-		settle := PRSettleResult{Status: PRMergeConflicting, PR: &gh.PRDetails{Number: 10, IsInMergeQueue: false}}
+		// Poll-native in-queue on a cache miss settles as PRMergeQueued (settle.PR
+		// does not carry the flag — REST fallback — but the ProjectItem field does).
+		settle := PRSettleResult{Status: PRMergeQueued, PR: &gh.PRDetails{Number: 10, HeadSHA: "abc12345", IsInMergeQueue: false}}
 
-		eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, settle)
+		eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, settle, false)
 		eng.wg.Wait()
 		if snap, err := eng.store.Get("owner/repo", 42); err == nil && snap.RebaseCycles("Validate") != 0 {
-			t.Errorf("cache-miss in-queue: expected no dispatch from poll-native signal, got cycles=%d", snap.RebaseCycles("Validate"))
+			t.Errorf("cache-miss in-queue: expected no dispatch (PRMergeQueued hand-off), got cycles=%d", snap.RebaseCycles("Validate"))
 		}
 	})
 }
