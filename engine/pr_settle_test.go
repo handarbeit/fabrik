@@ -157,6 +157,102 @@ func TestSettle_ClosedMergedUnconfirmable_ReturnsUnsettled(t *testing.T) {
 	}
 }
 
+// ── Merge queue (ADR-058 D4 FR-1) ─────────────────────────────────────────────
+
+// TestSettle_MergedBeatsInMergeQueue is the #913 merged-first ordering invariant:
+// a PR that is BOTH merged and (stale-state) in the queue must classify as
+// PRMergeTerminal, never PRMergeQueued. A queue merge is terminal, not "queued".
+func TestSettle_MergedBeatsInMergeQueue(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, Merged: true, State: "closed", IsInMergeQueue: true}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	r := eng.settlePRMergeState(settleItem(1), &stages.Stage{Name: "Validate"})
+	if r.Status != PRMergeTerminal {
+		t.Errorf("merged-first invariant violated: expected PRMergeTerminal, got %v", r.Status)
+	}
+}
+
+// TestSettle_InMergeQueue_ReturnsQueued covers the settle.PR.IsInMergeQueue source.
+func TestSettle_InMergeQueue_ReturnsQueued(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, State: "open", IsInMergeQueue: true}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	r := eng.settlePRMergeState(settleItem(1), &stages.Stage{Name: "Validate"})
+	if r.Status != PRMergeQueued {
+		t.Errorf("expected PRMergeQueued for in-queue PR, got %v", r.Status)
+	}
+	if r.PR == nil || r.PR.Number != 5 {
+		t.Error("expected PR details in PRMergeQueued result")
+	}
+}
+
+// TestSettle_InMergeQueue_PollNativeSignal_CacheMiss verifies PRMergeQueued is
+// derived from the GraphQL-authoritative ProjectItem field even when settle.PR
+// does NOT carry the flag (a boardcache miss: FetchLinkedPR falls back to REST,
+// which never decodes isInMergeQueue). The poll-native field must still drive it.
+func TestSettle_InMergeQueue_PollNativeSignal_CacheMiss(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			// Cache-miss REST fallback: in-queue flag absent.
+			return &gh.PRDetails{Number: 5, State: "open", IsInMergeQueue: false}, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			t.Error("FetchPRMergeableFields must not be called once the queue hand-off short-circuits")
+			f := true
+			return &f, "clean", nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1, Repo: "owner/repo", LinkedPRIsInMergeQueue: true}
+	r := eng.settlePRMergeState(item, &stages.Stage{Name: "Validate"})
+	if r.Status != PRMergeQueued {
+		t.Errorf("expected PRMergeQueued from poll-native signal on cache miss, got %v", r.Status)
+	}
+}
+
+// TestSettle_MergeQueueEntryState_ReturnsQueued covers the MergeQueueEntry.State
+// source (QUEUED / AWAITING_CHECKS) when neither IsInMergeQueue flag is set.
+func TestSettle_MergeQueueEntryState_ReturnsQueued(t *testing.T) {
+	for _, state := range []string{"QUEUED", "AWAITING_CHECKS"} {
+		client := &mockGitHubClient{
+			fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+				return &gh.PRDetails{Number: 5, State: "open", MergeQueueEntry: &gh.MergeQueueEntry{State: state}}, nil
+			},
+		}
+		eng := testEngineForMerge(t, client)
+		r := eng.settlePRMergeState(settleItem(1), &stages.Stage{Name: "Validate"})
+		if r.Status != PRMergeQueued {
+			t.Errorf("MergeQueueEntry.State=%q: expected PRMergeQueued, got %v", state, r.Status)
+		}
+	}
+}
+
+// TestSettle_InMergeQueue_BeatsConflicting verifies the queue check runs BEFORE
+// the mergeable-fields fetch: an in-queue PR that would otherwise classify as
+// Conflicting still returns PRMergeQueued (the queue owns it).
+func TestSettle_InMergeQueue_BeatsConflicting(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, State: "open", IsInMergeQueue: true}, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			f := false
+			return &f, "dirty", nil // would be Conflicting if reached
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	r := eng.settlePRMergeState(settleItem(1), &stages.Stage{Name: "Validate"})
+	if r.Status != PRMergeQueued {
+		t.Errorf("expected PRMergeQueued (queue check before mergeable fields), got %v", r.Status)
+	}
+}
+
 // ── Transient/null mergeable states ──────────────────────────────────────────
 
 func TestSettle_MergeableNil_ReturnsUnsettled(t *testing.T) {
