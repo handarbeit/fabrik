@@ -984,3 +984,285 @@ func TestPauseForEnqueueCycleLimit_PostsComment_AppliesLabels(t *testing.T) {
 		}
 	}
 }
+
+// ── Heavy ejection-classifier matrix (ADR-058 D4 FR-2/FR-3, acceptance core) ───
+//
+// Drives checkAutoMergeConvergence end-to-end over the "left the queue" edge:
+// {leftQueue} × {merged, open+conflicting, open+clean, open+blocked} × {cap below,
+// at}, plus the merged-on-dequeue #913 trap, the post-enqueue window, the
+// post-resolution tail, and the queue-repo auto-merge-disabled no-pause case.
+
+// queueConvItem returns a yolo item on a merge-queue-enabled repo (the poll-native
+// LinkedPRIsMergeQueueEnabled flag drives mergeQueueEnabled in the classifier).
+func queueConvItem() gh.ProjectItem {
+	return gh.ProjectItem{
+		Number: 42, Repo: "owner/repo",
+		Labels:                      []string{"fabrik:auto-merge-enabled"},
+		LinkedPRIsMergeQueueEnabled: true,
+	}
+}
+
+// leftQueue:true × merged (settle re-confirmed terminal): a queue merge is
+// terminal and advances to Done — never misread as an ejection failure.
+func TestCheckAutoMergeConvergence_LeftQueue_MergedTerminal_AdvancesToDone(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			// Stale REST list endpoint still shows the PR open after the queue merge.
+			return &gh.PRDetails{Number: 10, State: "open", Merged: false, AutoMergeEnabled: false}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MaxEnqueueCycles = 5
+	stage := &stages.Stage{Name: "Validate"}
+	// settle re-confirmed the merge via the authoritative endpoint → PRMergeTerminal.
+	settle := PRSettleResult{Status: PRMergeTerminal, PR: &gh.PRDetails{Number: 10, Merged: true}}
+
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, queueConvItem(), stage, settle, true)
+
+	client.mu.Lock()
+	advanceCalls := len(client.updateStatusCalls)
+	client.mu.Unlock()
+	if advanceCalls == 0 {
+		t.Error("expected advance to Done when settle re-confirmed terminal, even though REST shows open")
+	}
+	if len(client.enqueuePullRequestCalls) != 0 {
+		t.Errorf("terminal must NOT re-enqueue, got %d", len(client.enqueuePullRequestCalls))
+	}
+}
+
+// leftQueue:true × merged-on-dequeue (the #913 trap, heaviest coverage): settle
+// re-derived PRMergeReady (open/clean) and the REST list still shows open, but the
+// authoritative FetchPRMerged reports the queue merged it. The full classifier path
+// must reach reEnqueueOrPause and advance to Done — never re-enqueue or pause.
+func TestCheckAutoMergeConvergence_LeftQueue_MergedOnDequeue_AdvancesToDone(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, State: "open", Merged: false, AutoMergeEnabled: false}, nil
+		},
+		fetchPRMergedFn: func(owner, repo string, prNumber int) (bool, error) {
+			return true, nil // authoritative: the queue already merged it
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MaxEnqueueCycles = 5
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{Status: PRMergeReady, PR: &gh.PRDetails{Number: 10, HeadSHA: "abc12345"}}
+
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, queueConvItem(), stage, settle, true)
+
+	if len(client.enqueuePullRequestCalls) != 0 {
+		t.Errorf("#913 trap: merged-on-dequeue must NOT re-enqueue, got %d enqueue call(s)", len(client.enqueuePullRequestCalls))
+	}
+	client.mu.Lock()
+	advanceCalls := len(client.updateStatusCalls)
+	client.mu.Unlock()
+	if advanceCalls == 0 {
+		t.Error("#913 trap: expected advance to Done when FetchPRMerged confirms merge")
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			t.Error("#913 trap: merged-on-dequeue must NOT pause")
+		}
+	}
+	if snap, err := eng.store.Get("owner/repo", 42); err == nil && snap.EnqueueCycles("Validate") != 0 {
+		t.Errorf("merged-on-dequeue must not increment EnqueueCycles, got %d", snap.EnqueueCycles("Validate"))
+	}
+}
+
+// leftQueue:true × open+conflicting → Claude rebase reinvoke (bounded by
+// MaxRebaseCycles; re-enqueue happens later once resolved). No enqueue yet.
+func TestCheckAutoMergeConvergence_LeftQueue_Conflicting_DispatchesRebase(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, State: "open", AutoMergeEnabled: false, MergeableState: "dirty"}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MaxRebaseCycles = 3
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{Status: PRMergeConflicting, PR: &gh.PRDetails{Number: 10, HeadSHA: "abc12345"}}
+
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, queueConvItem(), stage, settle, true)
+	eng.wg.Wait()
+
+	snap, err := eng.store.Get("owner/repo", 42)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.RebaseCycles("Validate") != 1 {
+		t.Errorf("expected RebaseCycles=1 (rebase dispatched), got %d", snap.RebaseCycles("Validate"))
+	}
+	if len(client.enqueuePullRequestCalls) != 0 {
+		t.Errorf("conflict must rebase first, not re-enqueue, got %d enqueue(s)", len(client.enqueuePullRequestCalls))
+	}
+}
+
+// leftQueue:true × open+clean × cap below → re-enqueue fresh at the head SHA.
+func TestCheckAutoMergeConvergence_LeftQueue_CleanBelowCap_ReEnqueues(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, State: "open", AutoMergeEnabled: false}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MaxEnqueueCycles = 5
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{Status: PRMergeReady, PR: &gh.PRDetails{Number: 10, HeadSHA: "abc12345"}}
+
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, queueConvItem(), stage, settle, true)
+
+	if len(client.enqueuePullRequestCalls) != 1 {
+		t.Fatalf("expected 1 re-enqueue on the ejection edge, got %d", len(client.enqueuePullRequestCalls))
+	}
+	if client.enqueuePullRequestCalls[0].expectedHeadOID != "abc12345" {
+		t.Errorf("re-enqueue used SHA %q, want abc12345", client.enqueuePullRequestCalls[0].expectedHeadOID)
+	}
+	snap, _ := eng.store.Get("owner/repo", 42)
+	if snap.EnqueueCycles("Validate") != 1 {
+		t.Errorf("expected EnqueueCycles=1, got %d", snap.EnqueueCycles("Validate"))
+	}
+}
+
+// leftQueue:true × open+clean × cap at → pause for human, no re-enqueue.
+func TestCheckAutoMergeConvergence_LeftQueue_CleanAtCap_Pauses(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, State: "open", AutoMergeEnabled: false}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MaxEnqueueCycles = 2
+	for i := 0; i < 2; i++ {
+		eng.store.Apply(itemstate.EnqueueCycleIncremented{Repo: "owner/repo", Number: 42, StageName: "Validate"})
+	}
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{Status: PRMergeReady, PR: &gh.PRDetails{Number: 10, HeadSHA: "abc12345"}}
+
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, queueConvItem(), stage, settle, true)
+
+	if len(client.enqueuePullRequestCalls) != 0 {
+		t.Errorf("at cap must NOT re-enqueue, got %d", len(client.enqueuePullRequestCalls))
+	}
+	foundPaused := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			foundPaused = true
+		}
+	}
+	if !foundPaused {
+		t.Error("expected fabrik:paused when re-enqueue cap reached")
+	}
+}
+
+// leftQueue:true × open+blocked (re-derived CI failure) → Claude ci-fix reinvoke
+// (bounded by MaxCiFixCycles). No enqueue until CI is fixed.
+func TestCheckAutoMergeConvergence_LeftQueue_Blocked_DispatchesCIFix(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, State: "open", AutoMergeEnabled: false, MergeableState: "blocked"}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MaxCiFixCycles = 5
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{Status: PRMergeBlocked, PR: &gh.PRDetails{Number: 10, HeadSHA: "abc12345"}}
+
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, queueConvItem(), stage, settle, true)
+	eng.wg.Wait()
+
+	snap, err := eng.store.Get("owner/repo", 42)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.CIFixCycles("Validate") != 1 {
+		t.Errorf("expected CIFixCycles=1 (ci-fix dispatched), got %d", snap.CIFixCycles("Validate"))
+	}
+	if len(client.enqueuePullRequestCalls) != 0 {
+		t.Errorf("blocked must ci-fix first, not re-enqueue, got %d enqueue(s)", len(client.enqueuePullRequestCalls))
+	}
+}
+
+// post-resolution tail (FR-3 "fresh after off-queue resolution"): the PR has been
+// out of the queue for several polls (priorInQueue=false) but its head SHA changed
+// since the last enqueue (Claude resolved + pushed) → re-enqueue fresh.
+func TestCheckAutoMergeConvergence_PostResolutionTail_ReEnqueues(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, State: "open", AutoMergeEnabled: false}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MaxEnqueueCycles = 5
+	// Last enqueue was at the pre-resolution SHA; the PR has since been pushed.
+	eng.store.Apply(itemstate.PREnqueueRecorded{Repo: "owner/repo", Number: 42, SHA: "oldsha00"})
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{Status: PRMergeReady, PR: &gh.PRDetails{Number: 10, HeadSHA: "newsha11"}}
+
+	// priorInQueue=false: not the ejection edge — the SHA-change clause must fire.
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, queueConvItem(), stage, settle, false)
+
+	if len(client.enqueuePullRequestCalls) != 1 {
+		t.Fatalf("expected re-enqueue on post-resolution SHA change, got %d", len(client.enqueuePullRequestCalls))
+	}
+	if client.enqueuePullRequestCalls[0].expectedHeadOID != "newsha11" {
+		t.Errorf("re-enqueue used SHA %q, want newsha11", client.enqueuePullRequestCalls[0].expectedHeadOID)
+	}
+}
+
+// post-enqueue consistency window: priorInQueue=false AND head SHA still equals
+// LastEnqueuedSHA → suppress re-enqueue (the PR is already enqueued; GitHub just
+// hasn't reflected isInMergeQueue=true yet). No enqueue, no pause.
+func TestCheckAutoMergeConvergence_PostEnqueueWindow_NoReEnqueue(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, State: "open", AutoMergeEnabled: false}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MaxEnqueueCycles = 5
+	eng.store.Apply(itemstate.PREnqueueRecorded{Repo: "owner/repo", Number: 42, SHA: "abc12345"})
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{Status: PRMergeReady, PR: &gh.PRDetails{Number: 10, HeadSHA: "abc12345"}}
+
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, queueConvItem(), stage, settle, false)
+
+	if len(client.enqueuePullRequestCalls) != 0 {
+		t.Errorf("post-enqueue window must NOT re-enqueue (same SHA), got %d", len(client.enqueuePullRequestCalls))
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			t.Error("post-enqueue window must NOT pause")
+		}
+	}
+}
+
+// queue-repo auto-merge-disabled no-pause: an enqueue-path PR has
+// AutoMergeEnabled==false as its NORMAL state; on a merge-queue repo the classifier
+// must NOT misread that as a user action and pause (the #913-adjacent trap). Here
+// the PR is unsettled → wait, no pause, no comment, no churn.
+func TestCheckAutoMergeConvergence_QueueRepo_AutoMergeDisabled_NoPause(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, State: "open", AutoMergeEnabled: false}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{Status: PRMergeUnsettled, Reason: "GitHub computing", PR: &gh.PRDetails{Number: 10}}
+
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, queueConvItem(), stage, settle, false)
+
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			t.Error("queue-repo auto-merge-disabled must NOT pause (it is the normal enqueued state)")
+		}
+	}
+	if len(client.addCommentCalls) != 0 {
+		t.Errorf("expected no comment for queue-repo auto-merge-disabled wait, got %d", len(client.addCommentCalls))
+	}
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:auto-merge-enabled" {
+			t.Error("must NOT remove fabrik:auto-merge-enabled for a queued/ejected PR")
+		}
+	}
+}
