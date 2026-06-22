@@ -559,3 +559,138 @@ func (e *Engine) pauseForRebaseCycleLimit(board *gh.ProjectBoard, item gh.Projec
 		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
 	}
 }
+
+// advanceConvergedPRToDone removes the convergence labels and advances a merged
+// (or closed) auto-merge PR to the next stage (Done). It is shared by
+// checkAutoMergeConvergence's terminal-first guard and reEnqueueOrPause's
+// merged-at-the-mutation-point guard so the #913 merged-on-dequeue case is
+// handled identically wherever a merge is detected — a dequeue that is in fact a
+// successful merge always advances to Done, never re-enqueues or pauses. There is
+// no passive machinery that advances the board column once the label is removed,
+// so advanceToNextStage must be called explicitly.
+func (e *Engine) advanceConvergedPRToDone(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, prNumber int) {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	e.logf(item.Number, "auto-merge", "PR #%d merged or closed — advancing to Done\n", prNumber)
+	if rerr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); rerr != nil {
+		e.logf(item.Number, "warn", "could not remove fabrik:auto-merge-enabled: %v\n", rerr)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:auto-merge-enabled")
+	}
+	e.removeRebaseNeededLabel(owner, repo, item)
+	if err := e.advanceToNextStage(board, item, stage); err != nil {
+		e.logf(item.Number, "warn", "could not advance to Done after PR merge: %v\n", err)
+	}
+}
+
+// reEnqueueOrPause performs a fresh merge-queue enqueue for a yolo PR that left
+// the queue and re-derived clean (PRMergeReady), bounded by MaxEnqueueCycles
+// (ADR-058 D4 FR-2/FR-3). It is the single mutation point for D4 re-enqueue
+// (ADR-056). Re-enqueue is always "fresh after off-queue resolution," never
+// re-enqueue-in-place, so conflict-heavy PRs do not starve the queue.
+//
+// Order (the merged-first guard is deliberately first — the #913 trap):
+//  1. FetchPRMerged (authoritative single-PR endpoint) — the REST list endpoint
+//     reports merged=false for several seconds after a queue merge, so re-confirm
+//     right at the mutation point. Merged → advance to Done; error → wait (never
+//     re-enqueue on an unconfirmed state).
+//  2. Worker-in-flight guard — skip if a reinvoke goroutine is already running.
+//  3. EnqueueCycles >= MaxEnqueueCycles → pauseForEnqueueCycleLimit (queue-thrash).
+//  4. else EnqueuePullRequest at the fresh head SHA (optimistic concurrency fails
+//     safe on a stale SHA), then increment EnqueueCycles and record
+//     LastEnqueuedSHA. Enqueue failure does NOT increment the cycle.
+func (e *Engine) reEnqueueOrPause(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, settle PRSettleResult) {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+
+	pr := settle.PR
+	if pr == nil || pr.Number == 0 {
+		e.logf(item.Number, "auto-merge", "re-enqueue skipped — no PR in settle result\n")
+		return
+	}
+
+	// (1) Merged-first re-confirmation at the mutation point (#913 trap).
+	merged, mErr := e.client.FetchPRMerged(owner, repo, pr.Number)
+	if mErr != nil {
+		e.logf(item.Number, "auto-merge", "could not confirm merged-state of PR #%d before re-enqueue: %v — waiting\n", pr.Number, mErr)
+		return
+	}
+	if merged {
+		e.advanceConvergedPRToDone(board, item, stage, pr.Number)
+		return
+	}
+
+	// (2) Worker-in-flight guard + (3) cycle-limit check.
+	var cycleCount int
+	if snap, serr := e.store.Get(repoStr, item.Number); serr == nil {
+		if snap.Worker() != nil {
+			e.logf(item.Number, "auto-merge", "re-enqueue skipped — reinvoke already in-flight\n")
+			return
+		}
+		cycleCount = snap.EnqueueCycles(stage.Name)
+	}
+	maxCycles := e.cfg.MaxEnqueueCycles
+	if cycleCount >= maxCycles {
+		e.pauseForEnqueueCycleLimit(board, item, stage, cycleCount, maxCycles)
+		return
+	}
+
+	// (4) Fresh enqueue at the current head SHA. EnqueuePullRequest needs the SHA
+	// for optimistic concurrency; skip (wait) if it is not yet known.
+	if pr.HeadSHA == "" {
+		e.logf(item.Number, "auto-merge", "re-enqueue skipped — PR #%d head SHA empty\n", pr.Number)
+		return
+	}
+	if err := e.client.EnqueuePullRequest(owner, repo, pr.Number, pr.HeadSHA); err != nil {
+		// Do NOT increment the cycle on enqueue failure — a stale-SHA optimistic
+		// concurrency rejection or transient error should be retried next poll.
+		e.logf(item.Number, "warn", "re-enqueue of PR #%d failed: %v\n", pr.Number, err)
+		return
+	}
+	e.logf(item.Number, "auto-merge", "re-enqueued PR #%d into merge queue at %s (cycle %d/%d)\n",
+		pr.Number, pr.HeadSHA[:min(8, len(pr.HeadSHA))], cycleCount+1, maxCycles)
+	e.store.Apply(itemstate.EnqueueCycleIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+	e.store.Apply(itemstate.PREnqueueRecorded{Repo: repoStr, Number: item.Number, SHA: pr.HeadSHA})
+}
+
+// pauseForEnqueueCycleLimit pauses the issue when merge-queue re-enqueue trips
+// have been attempted too many times — a queue-thrash loop (enqueue → eject →
+// re-enqueue → eject) that no single sub-path cap (rebase / CI-fix) would catch.
+// Mirrors pauseForRebaseCycleLimit: structured comment naming --max-enqueue-cycles,
+// fabrik:paused + fabrik:awaiting-input (write-through). The EnqueueCycles counter
+// is cleared by clearFailedStage (EngineCyclesCleared) when the user unpauses.
+func (e *Engine) pauseForEnqueueCycleLimit(_ *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, cycleCount, maxCycles int) {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	e.logf(item.Number, "enqueue-cycles", "merge-queue re-enqueue limit %d reached — pausing for human intervention\n", maxCycles)
+
+	msg := fmt.Sprintf(
+		"🏭 **Fabrik — merge-queue re-enqueue limit reached**\n\nThe linked PR for stage **%s** has been re-enqueued into GitHub's merge queue %d time(s), "+
+			"which has reached the configured limit of %d (override with `--max-enqueue-cycles` or `FABRIK_MAX_ENQUEUE_CYCLES`).\n\n"+
+			"The PR keeps being ejected from the merge queue and re-enqueued without merging. This usually means the merge group repeatedly fails to build or test "+
+			"against the current base — for example a flaky required check, a missing `merge_group` CI trigger, or a persistent semantic conflict with other queued PRs.\n\n"+
+			"Fabrik has paused this issue. Investigate the merge-queue failures, then remove the `fabrik:paused` label to resume.",
+		stage.Name, cycleCount, maxCycles,
+	)
+	if dbID, err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
+		e.logf(item.Number, "warn", "could not post enqueue cycle limit comment: %v\n", err)
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+				DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
+			})
+		}
+		// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
+		if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+		}
+	}
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
+		e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
+	}
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
+		e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
+	}
+}

@@ -743,3 +743,238 @@ func TestCheckAutoMergeConvergence_UnregisteredRepo_NoPanic(t *testing.T) {
 		t.Error("expected fabrik:paused label to be added when clone fails")
 	}
 }
+
+// ── reEnqueueOrPause / pauseForEnqueueCycleLimit (ADR-058 D4 FR-3) ─────────────
+
+// TestReEnqueueOrPause_BelowCap_Enqueues verifies the happy path: a clean
+// off-queue PR below the cap is re-enqueued at its head SHA, EnqueueCycles is
+// incremented, and LastEnqueuedSHA is recorded.
+func TestReEnqueueOrPause_BelowCap_Enqueues(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRMergedFn: func(owner, repo string, prNumber int) (bool, error) { return false, nil },
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MaxEnqueueCycles = 5
+	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{Status: PRMergeReady, PR: &gh.PRDetails{Number: 10, HeadSHA: "abc12345"}}
+
+	eng.reEnqueueOrPause(&gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, settle)
+
+	if len(client.enqueuePullRequestCalls) != 1 {
+		t.Fatalf("expected 1 EnqueuePullRequest call, got %d", len(client.enqueuePullRequestCalls))
+	}
+	if client.enqueuePullRequestCalls[0].expectedHeadOID != "abc12345" {
+		t.Errorf("enqueue used head SHA %q, want abc12345", client.enqueuePullRequestCalls[0].expectedHeadOID)
+	}
+	snap, err := eng.store.Get("owner/repo", 42)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.EnqueueCycles("Validate") != 1 {
+		t.Errorf("expected EnqueueCycles=1 after re-enqueue, got %d", snap.EnqueueCycles("Validate"))
+	}
+	if snap.LastEnqueuedSHA() != "abc12345" {
+		t.Errorf("expected LastEnqueuedSHA=abc12345, got %q", snap.LastEnqueuedSHA())
+	}
+}
+
+// TestReEnqueueOrPause_MergedAtMutationPoint_AdvancesToDone is the #913 trap:
+// the REST list endpoint says open/clean but the authoritative FetchPRMerged
+// reports the queue already merged the PR. reEnqueueOrPause must advance to Done,
+// never re-enqueue.
+func TestReEnqueueOrPause_MergedAtMutationPoint_AdvancesToDone(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRMergedFn: func(owner, repo string, prNumber int) (bool, error) { return true, nil },
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MaxEnqueueCycles = 5
+	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
+	stage := &stages.Stage{Name: "Validate"}
+	// settle reports clean+open (stale list endpoint) — the FetchPRMerged guard wins.
+	settle := PRSettleResult{Status: PRMergeReady, PR: &gh.PRDetails{Number: 10, HeadSHA: "abc12345"}}
+
+	eng.reEnqueueOrPause(&gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, settle)
+
+	if len(client.enqueuePullRequestCalls) != 0 {
+		t.Errorf("merged-on-dequeue must NOT re-enqueue, got %d enqueue call(s)", len(client.enqueuePullRequestCalls))
+	}
+	client.mu.Lock()
+	advanceCalls := len(client.updateStatusCalls)
+	client.mu.Unlock()
+	if advanceCalls == 0 {
+		t.Error("expected advance to Done (UpdateProjectItemStatus) when PR already merged")
+	}
+	foundRemove := false
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:auto-merge-enabled" {
+			foundRemove = true
+		}
+	}
+	if !foundRemove {
+		t.Error("expected fabrik:auto-merge-enabled removed when PR already merged")
+	}
+	if snap, err := eng.store.Get("owner/repo", 42); err == nil && snap.EnqueueCycles("Validate") != 0 {
+		t.Errorf("EnqueueCycles must not increment on merged-at-mutation-point, got %d", snap.EnqueueCycles("Validate"))
+	}
+}
+
+// TestReEnqueueOrPause_FetchMergedError_Waits verifies we never re-enqueue (or
+// pause) on an unconfirmable merged state — re-evaluate next poll.
+func TestReEnqueueOrPause_FetchMergedError_Waits(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRMergedFn: func(owner, repo string, prNumber int) (bool, error) {
+			return false, errStubTransient
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MaxEnqueueCycles = 5
+	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{Status: PRMergeReady, PR: &gh.PRDetails{Number: 10, HeadSHA: "abc12345"}}
+
+	eng.reEnqueueOrPause(&gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, settle)
+
+	if len(client.enqueuePullRequestCalls) != 0 {
+		t.Errorf("must not enqueue on unconfirmed merged-state, got %d", len(client.enqueuePullRequestCalls))
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			t.Error("must not pause on unconfirmed merged-state")
+		}
+	}
+}
+
+// TestReEnqueueOrPause_AtCap_Pauses verifies the cap: EnqueueCycles at the limit
+// pauses for a human instead of re-enqueuing.
+func TestReEnqueueOrPause_AtCap_Pauses(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRMergedFn: func(owner, repo string, prNumber int) (bool, error) { return false, nil },
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MaxEnqueueCycles = 2
+	for i := 0; i < 2; i++ {
+		eng.store.Apply(itemstate.EnqueueCycleIncremented{Repo: "owner/repo", Number: 42, StageName: "Validate"})
+	}
+	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{Status: PRMergeReady, PR: &gh.PRDetails{Number: 10, HeadSHA: "abc12345"}}
+
+	eng.reEnqueueOrPause(&gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, settle)
+
+	if len(client.enqueuePullRequestCalls) != 0 {
+		t.Errorf("at cap must NOT re-enqueue, got %d", len(client.enqueuePullRequestCalls))
+	}
+	foundPaused := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			foundPaused = true
+		}
+	}
+	if !foundPaused {
+		t.Error("expected fabrik:paused when enqueue cycle limit reached")
+	}
+	if len(client.addCommentCalls) == 0 {
+		t.Error("expected an enqueue-cycle-limit comment")
+	}
+	for _, c := range client.addCommentCalls {
+		if strings.Contains(c.body, "re-enqueue limit reached") {
+			return
+		}
+	}
+	t.Error("pause comment should mention 're-enqueue limit reached'")
+}
+
+// TestReEnqueueOrPause_WorkerInFlight_Skips verifies the in-flight guard.
+func TestReEnqueueOrPause_WorkerInFlight_Skips(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRMergedFn: func(owner, repo string, prNumber int) (bool, error) { return false, nil },
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MaxEnqueueCycles = 5
+	eng.store.Apply(itemstate.LocalLockAcquired{
+		Repo: "owner/repo", Number: 42, User: "testuser", AcquiredAt: time.Now(),
+		Worker: &itemstate.WorkerHandle{StageName: "Validate", StartedAt: time.Now()},
+	})
+	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{Status: PRMergeReady, PR: &gh.PRDetails{Number: 10, HeadSHA: "abc12345"}}
+
+	eng.reEnqueueOrPause(&gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, settle)
+
+	if len(client.enqueuePullRequestCalls) != 0 {
+		t.Errorf("must skip re-enqueue when a worker is in-flight, got %d", len(client.enqueuePullRequestCalls))
+	}
+	if snap, err := eng.store.Get("owner/repo", 42); err == nil && snap.EnqueueCycles("Validate") != 0 {
+		t.Errorf("EnqueueCycles must not increment when dispatch skipped, got %d", snap.EnqueueCycles("Validate"))
+	}
+}
+
+// TestReEnqueueOrPause_EnqueueFailure_NoIncrement verifies an enqueue failure
+// (e.g. optimistic-concurrency rejection on a stale SHA) does not consume a cycle.
+func TestReEnqueueOrPause_EnqueueFailure_NoIncrement(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRMergedFn:      func(owner, repo string, prNumber int) (bool, error) { return false, nil },
+		enqueuePullRequestFn: func(owner, repo string, prNumber int, expectedHeadOID string) error { return errStubTransient },
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MaxEnqueueCycles = 5
+	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{Status: PRMergeReady, PR: &gh.PRDetails{Number: 10, HeadSHA: "abc12345"}}
+
+	eng.reEnqueueOrPause(&gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, settle)
+
+	if len(client.enqueuePullRequestCalls) != 1 {
+		t.Fatalf("expected the enqueue to be attempted once, got %d", len(client.enqueuePullRequestCalls))
+	}
+	if snap, err := eng.store.Get("owner/repo", 42); err == nil && snap.EnqueueCycles("Validate") != 0 {
+		t.Errorf("EnqueueCycles must not increment on enqueue failure, got %d", snap.EnqueueCycles("Validate"))
+	}
+}
+
+// TestReEnqueueOrPause_EmptyHeadSHA_Skips verifies we wait (no enqueue) when the
+// head SHA is not yet known — EnqueuePullRequest needs it for optimistic concurrency.
+func TestReEnqueueOrPause_EmptyHeadSHA_Skips(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchPRMergedFn: func(owner, repo string, prNumber int) (bool, error) { return false, nil },
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.MaxEnqueueCycles = 5
+	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{Status: PRMergeReady, PR: &gh.PRDetails{Number: 10, HeadSHA: ""}}
+
+	eng.reEnqueueOrPause(&gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, settle)
+
+	if len(client.enqueuePullRequestCalls) != 0 {
+		t.Errorf("must not enqueue with empty head SHA, got %d", len(client.enqueuePullRequestCalls))
+	}
+}
+
+// TestPauseForEnqueueCycleLimit_PostsComment_AppliesLabels is a direct test of
+// the pause helper.
+func TestPauseForEnqueueCycleLimit_PostsComment_AppliesLabels(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
+	stage := &stages.Stage{Name: "Validate"}
+
+	eng.pauseForEnqueueCycleLimit(&gh.ProjectBoard{}, item, stage, 5, 5)
+
+	if len(client.addCommentCalls) == 0 {
+		t.Fatal("expected a pause comment")
+	}
+	if !strings.Contains(client.addCommentCalls[0].body, "--max-enqueue-cycles") {
+		t.Errorf("comment should name --max-enqueue-cycles, got: %q", client.addCommentCalls[0].body)
+	}
+	wantAdded := map[string]bool{"fabrik:paused": false, "fabrik:awaiting-input": false}
+	for _, c := range client.addLabelCalls {
+		wantAdded[c.labelName] = true
+	}
+	for label, found := range wantAdded {
+		if !found {
+			t.Errorf("expected label %q to be added", label)
+		}
+	}
+}
