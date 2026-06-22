@@ -56,7 +56,9 @@ func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) (int, err
 		}
 		// No open PR (or closed/merged) — push and create.
 
-		if err := wm.PushBranch(item.Number); err != nil {
+		// Merge-queue awareness (ADR-058 D3 FR-1): skip the push when the PR is in
+		// the queue — pushing ejects it. No-op on non-queue repos (FR-3).
+		if err := e.pushBranchUnlessQueued(item, wm); err != nil {
 			if !isTransientError(err) {
 				e.logf(item.Number, "pr", "failed to create draft PR for branch %s: %v\n", head, err)
 				return 0, fmt.Errorf("pushing branch: %w", err)
@@ -112,6 +114,15 @@ func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) (int, err
 // Insertion point: called after EnsureWorktree succeeds (baseBranch is resolved and the
 // worktree lock is held) but before Claude is invoked.
 func (e *Engine) syncPRBase(item gh.ProjectItem, baseBranch string) {
+	// Merge-queue awareness (ADR-058 D3 FR-1): a base change on a queued PR disturbs
+	// the queue (it ejects the PR). When the PR is in the queue, skip the base sync
+	// entirely. Signal is the GraphQL-populated ProjectItem field; false-by-default,
+	// so non-queue repos are unchanged (FR-3).
+	if prInMergeQueue(item) {
+		e.logf(item.Number, "merge-queue", "PR in merge queue — skipping base sync (would eject from queue)\n")
+		return
+	}
+
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
 	prNumber, err := e.client.FindPRForIssue(owner, repo, item.Number)
@@ -245,7 +256,8 @@ func (e *Engine) ensurePRLinksIssue(item gh.ProjectItem, prNumber int) {
 func (e *Engine) markPRReady(item gh.ProjectItem, knownPR int) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	wm := e.worktreesFor(item.Repo)
-	if err := wm.PushBranch(item.Number); err != nil {
+	// Merge-queue awareness (ADR-058 D3 FR-1): skip the push when queued (ejects it).
+	if err := e.pushBranchUnlessQueued(item, wm); err != nil {
 		e.logf(item.Number, "warn", "could not push branch: %v\n", err)
 		// Don't return — still try to mark ready if push is a no-op (already up to date)
 	}

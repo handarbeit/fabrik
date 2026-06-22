@@ -326,7 +326,7 @@ func seedLogFile(t *testing.T, dir, name string, size int64, mtime time.Time) st
 func TestLogJanitorAgePrune(t *testing.T) {
 	logsRoot := t.TempDir()
 	now := time.Now()
-	old := now.Add(-15 * 24 * time.Hour) // 15 days ago — older than 14-day default
+	old := now.Add(-15 * 24 * time.Hour)   // 15 days ago — older than 14-day default
 	recent := now.Add(-1 * 24 * time.Hour) // 1 day ago — within retention window
 
 	issueDir := filepath.Join(logsRoot, "owner-repo", "issue-1")

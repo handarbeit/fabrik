@@ -814,12 +814,12 @@ func TestProcessItem_PRCreationFailed_R5_CallsMarkPRReady(t *testing.T) {
 	eng := testEngineWithRepo(t, client, claude)
 	eng.cfg.Stages = []*stages.Stage{
 		{
-			Name:                "Implement",
-			Order:               1,
-			Prompt:              "implement it",
-			CreateDraftPR:       true,
+			Name:                  "Implement",
+			Order:                 1,
+			Prompt:                "implement it",
+			CreateDraftPR:         true,
 			MarkPRReadyOnComplete: true,
-			Completion:          stages.CompletionCriteria{Type: "claude"},
+			Completion:            stages.CompletionCriteria{Type: "claude"},
 		},
 	}
 

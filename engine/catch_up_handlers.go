@@ -140,6 +140,20 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 
 	mergeBlocked, mergeConflict := e.checkMergeabilityGate(pctx.item, pctx.stage, settle)
 	if mergeConflict {
+		// Merge-queue awareness (ADR-058 D3 FR-1): never dispatch a rebase reinvoke
+		// for a PR the queue currently owns — the synthetic rebase+force-push ejects
+		// it. The conflict resolution path stays available for D4's ejection→resolve
+		// composition once the PR has left the queue. Guard at dispatch (not in the
+		// function body) so D4 can still invoke it. Source the signal from BOTH the
+		// poll-native ProjectItem field (always GraphQL-populated, reliable on every
+		// cycle) and settle.PR: settle.PR carries the flag only on a fully-populated
+		// boardcache hit and reports false on a cache miss (REST fallback), so the
+		// ProjectItem field is the authoritative source and settle.PR is a fresher
+		// supplement. Non-queue repos are unchanged (FR-3, both signals false-by-default).
+		if prInMergeQueue(pctx.item) || (settle.PR != nil && settle.PR.IsInMergeQueue) {
+			e.logf(pctx.item.Number, "merge-queue", "PR in merge queue — deferring rebase to queue\n")
+			return true
+		}
 		iKey := issueKey(pctx.item, e.defaultRepo())
 		repoStr := itemOwnerRepoString(pctx.item, e.defaultRepo())
 		var cycleCount int

@@ -130,7 +130,11 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		e.removeEditingLabel(owner, repo, item.Number)
 		return fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
 	}
-	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, false)
+	// Merge-queue awareness (ADR-058 D3): skip the preemptive rebase when the PR is
+	// in the queue (FR-1) or the repo is queue-enabled (FR-2). Both ProjectItem-sourced
+	// signals are false-by-default, preserving legacy behavior on non-queue repos (FR-3).
+	skipUpdate := prInMergeQueue(item) || e.suppressPreemptiveRebase(item)
+	workDir, err := wm.EnsureWorktree(item.Number, baseBranch, skipUpdate)
 	if err != nil {
 		e.removeEditingLabel(owner, repo, item.Number)
 		return fmt.Errorf("setting up worktree for %s/%s: %w", owner, repo, err)
