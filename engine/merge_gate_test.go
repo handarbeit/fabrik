@@ -222,6 +222,30 @@ func TestCheckMergeabilityGate_FetchMergeableError_BlocksForRetry(t *testing.T) 
 	}
 }
 
+// TestCheckMergeabilityGate_PRMergeQueued_BlocksNoChurn verifies the FR-1 gate
+// hand-off: an in-queue PR (PRMergeQueued) blocks the merge gate exactly like
+// PRMergeUnsettled — no conflict signal, no fabrik:rebase-needed label churn —
+// so a human-enqueued non-yolo PR at a gate-checked stage simply waits.
+func TestCheckMergeabilityGate_PRMergeQueued_BlocksNoChurn(t *testing.T) {
+	tr := true
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:rebase-needed"}}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+	settle := PRSettleResult{Status: PRMergeQueued, Reason: "PR in merge queue", PR: &gh.PRDetails{Number: 42}}
+
+	blocked, conflict := eng.checkMergeabilityGate(item, stage, settle)
+	if !blocked || conflict {
+		t.Errorf("expected blocked=true conflict=false for PRMergeQueued, got blocked=%v conflict=%v", blocked, conflict)
+	}
+	if len(client.addLabelCalls) != 0 {
+		t.Errorf("PRMergeQueued must not add any label, got %d add(s)", len(client.addLabelCalls))
+	}
+	if len(client.removeLabelCalls) != 0 {
+		t.Errorf("PRMergeQueued must not remove any label (no churn), got %d remove(s)", len(client.removeLabelCalls))
+	}
+}
+
 // errStubTransient is a sentinel used in merge-gate tests to simulate a
 // transient GitHub API error.
 var errStubTransient = &stubError{"simulated transient error"}
