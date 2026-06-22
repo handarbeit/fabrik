@@ -40,6 +40,11 @@ func (e *Engine) checkMergeabilityGate(item gh.ProjectItem, stage *stages.Stage,
 		return false, false
 	case PRMergeUnsettled:
 		return true, false
+	case PRMergeQueued:
+		// ADR-058 D4 FR-1: the PR is in GitHub's merge queue — a transient hand-off.
+		// Block like PRMergeUnsettled (no conflict, no fabrik:rebase-needed churn) so a
+		// human-enqueued non-yolo PR at a gate-checked stage simply waits for the queue.
+		return true, false
 	case PRMergeBlocked:
 		// CI has failed but there is no base-branch conflict. Clear the merge
 		// gate so checkCIGate can classify the failure and dispatch CI-fix.

@@ -172,6 +172,15 @@ type LinkedPRState struct {
 	// to block gate-clearance during the brief window after a force-push when GitHub
 	// has not yet computed mergeability or started CI for the new SHA.
 	LastHeadSHAUpdate time.Time
+
+	// LastEnqueuedSHA records the PR head SHA at the moment the engine last enqueued
+	// (or re-enqueued) this PR into GitHub's native merge queue (ADR-058 D4 FR-3).
+	// The convergence monitor uses it to distinguish a genuine post-resolution
+	// re-enqueue (head SHA changed since the last enqueue → enqueue fresh) from the
+	// brief post-enqueue consistency window where GitHub has not yet reflected
+	// isInMergeQueue=true (same SHA → suppress a spurious re-enqueue). Empty until the
+	// first enqueue.
+	LastEnqueuedSHA string
 }
 
 // StageState holds per-stage attempt counters and cycle counts.
@@ -199,6 +208,11 @@ type StageState struct {
 	// RebaseCycles counts how many rebase iterations each stage has completed.
 	// Replaces engine.rebaseCycleCount[stageKey].
 	RebaseCycles map[string]int
+	// EnqueueCycles counts how many times the engine has re-enqueued the linked PR
+	// into GitHub's native merge queue after an ejection (ADR-058 D4 FR-3). Bounds a
+	// queue-thrash loop (enqueue→eject→re-enqueue→eject) independently of the
+	// RebaseCycles/CIFixCycles that the conflict/CI sub-paths increment.
+	EnqueueCycles map[string]int
 	// ProcessedComments maps comment ID to the time Fabrik finished processing it.
 	ProcessedComments map[string]time.Time
 	// LinkageHealAttempted maps stage name to the PR head SHA for which a linkage

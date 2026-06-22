@@ -420,6 +420,18 @@ type RebaseCycleIncremented struct {
 func (RebaseCycleIncremented) isMutation()       {}
 func (m RebaseCycleIncremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// EnqueueCycleIncremented increments the merge-queue re-enqueue cycle counter for a
+// stage (ADR-058 D4 FR-3). Applied on each fresh enqueue trip in the convergence
+// monitor; bounds a queue-thrash loop independently of the rebase/CI-fix caps.
+type EnqueueCycleIncremented struct {
+	Repo      string
+	Number    int
+	StageName string
+}
+
+func (EnqueueCycleIncremented) isMutation()       {}
+func (m EnqueueCycleIncremented) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // PRCreationFailedRecorded records that Claude completed a stage but the draft PR
 // could not be created. In-memory only — does not survive restart. Cleared by
 // StageRetryCleared when the PR is eventually created or the stage succeeds.
@@ -611,6 +623,19 @@ type PRChecksObserved struct {
 func (PRChecksObserved) isMutation()       {}
 func (m PRChecksObserved) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// PREnqueueRecorded sets LinkedPRState.LastEnqueuedSHA to the head SHA at which the
+// engine last enqueued (or re-enqueued) the PR into GitHub's merge queue (ADR-058
+// D4 FR-3). Lets the convergence monitor distinguish a genuine post-resolution
+// re-enqueue (SHA changed) from the post-enqueue consistency window (SHA unchanged).
+type PREnqueueRecorded struct {
+	Repo   string
+	Number int
+	SHA    string
+}
+
+func (PREnqueueRecorded) isMutation()       {}
+func (m PREnqueueRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // CommentProcessed records that a comment has been processed by the engine.
 // Prevents reprocessing the same comment on subsequent polls or restarts
 // (backed by rocket reactions on GitHub for cross-restart durability).
@@ -646,9 +671,9 @@ type EngineUnpaused struct {
 func (EngineUnpaused) isMutation()       {}
 func (m EngineUnpaused) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
-// EngineCyclesCleared zeroes ReviewCycles, CIFixCycles, and RebaseCycles for a
-// stage. Called by clearFailedStage on unpause/success to prevent stale counters
-// from triggering premature max-cycle pauses on the next run.
+// EngineCyclesCleared zeroes ReviewCycles, CIFixCycles, RebaseCycles, and
+// EnqueueCycles for a stage. Called by clearFailedStage on unpause/success to
+// prevent stale counters from triggering premature max-cycle pauses on the next run.
 type EngineCyclesCleared struct {
 	Repo      string
 	Number    int
