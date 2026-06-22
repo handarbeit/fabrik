@@ -44,6 +44,7 @@ type Config struct {
 	WorkerStaleMins   int // minutes; 0 means use default (5)
 	MaxCiFixCycles    int // 0 means use default (5)
 	MaxRebaseCycles      int    // 0 means use default (3)
+	MaxEnqueueCycles     int    // 0 means use default (5)
 	ConvergenceBudget    string // Go duration string; "" means use default (30m); "0" means disabled
 	AutoMergeStrategy    string // MERGE, SQUASH, or REBASE; "" means use default (MERGE)
 	MergeQueue           string // auto or off; "" means use default (auto)
@@ -138,6 +139,7 @@ func Execute() error {
 	flag.IntVar(&cfg.WorkerStaleMins, "worker-stale-timeout", 0, "Minutes before a stale worker heartbeat triggers PID-liveness check (0 = use default of 5; also FABRIK_WORKER_STALE_TIMEOUT)")
 	flag.IntVar(&cfg.MaxCiFixCycles, "max-ci-fix-cycles", 0, "Maximum number of CI-fix cycles per issue before pausing (0 = use default of 5; also FABRIK_MAX_CI_FIX_CYCLES)")
 	flag.IntVar(&cfg.MaxRebaseCycles, "max-rebase-cycles", 0, "Maximum number of rebase-reinvoke cycles per issue before pausing (0 = use default of 3; also FABRIK_MAX_REBASE_CYCLES)")
+	flag.IntVar(&cfg.MaxEnqueueCycles, "max-enqueue-cycles", 0, "Maximum number of merge-queue re-enqueue cycles per issue before pausing (0 = use default of 5; also FABRIK_MAX_ENQUEUE_CYCLES)")
 	flag.StringVar(&cfg.ConvergenceBudget, "convergence-budget", "", "Wall-clock budget for post-Validate yolo convergence (Go duration: 30m, 1h; \"0\" disables; also FABRIK_CONVERGENCE_BUDGET)")
 	flag.StringVar(&cfg.AutoMergeStrategy, "auto-merge-strategy", "", "Merge method for GitHub auto-merge: MERGE, SQUASH, or REBASE (also FABRIK_AUTO_MERGE_STRATEGY; default MERGE)")
 	flag.StringVar(&cfg.MergeQueue, "merge-queue", "", "Merge queue routing for yolo path: auto (enqueue when repo uses merge queue) or off (skip enqueue; direct merge may fail on queue-required repos; also FABRIK_MERGE_QUEUE; default auto)")
@@ -353,6 +355,15 @@ func Execute() error {
 				cfg.MaxRebaseCycles = n
 			} else {
 				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_REBASE_CYCLES=%q is invalid (must be a positive integer); using default 3\n", v)
+			}
+		}
+	}
+	if !explicitFlags["max-enqueue-cycles"] {
+		if v := os.Getenv("FABRIK_MAX_ENQUEUE_CYCLES"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				cfg.MaxEnqueueCycles = n
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_ENQUEUE_CYCLES=%q is invalid (must be a positive integer); using default 5\n", v)
 			}
 		}
 	}
@@ -684,6 +695,7 @@ func Execute() error {
 		WorkerStaleTimeout:       workerStaleTimeout(cfg.WorkerStaleMins),
 		MaxCiFixCycles:           maxCiFixCycles(cfg.MaxCiFixCycles),
 		MaxRebaseCycles:          maxRebaseCycles(cfg.MaxRebaseCycles),
+		MaxEnqueueCycles:         maxEnqueueCycles(cfg.MaxEnqueueCycles),
 		ConvergenceBudget:        convergenceBudget(cfg.ConvergenceBudget),
 		AutoMergeStrategy:        autoMergeStrategy(cfg.AutoMergeStrategy),
 		MergeQueue:               mergeQueueMode(cfg.MergeQueue),
@@ -801,6 +813,16 @@ func maxCiFixCycles(n int) int {
 func maxRebaseCycles(n int) int {
 	if n <= 0 {
 		return 3
+	}
+	return n
+}
+
+// maxEnqueueCycles returns the configured MaxEnqueueCycles value, defaulting to 5
+// when n is 0 (unset). Bounds merge-queue re-enqueue trips so a queue-thrash loop
+// (enqueue → eject → re-enqueue → eject) pauses for a human (ADR-058 D4 FR-3).
+func maxEnqueueCycles(n int) int {
+	if n <= 0 {
+		return 5
 	}
 	return n
 }
