@@ -409,6 +409,11 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.StageState.RebaseCycles[v.StageName]++
 		return StageStateChanged
 
+	case EnqueueCycleIncremented:
+		ensureStageStateMaps(item)
+		item.StageState.EnqueueCycles[v.StageName]++
+		return StageStateChanged
+
 	case PRCreationFailedRecorded:
 		ensureStageStateMaps(item)
 		item.StageState.PRCreationFailed[v.StageName] = true
@@ -429,6 +434,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		delete(item.StageState.ReviewCycles, v.StageName)
 		delete(item.StageState.CIFixCycles, v.StageName)
 		delete(item.StageState.RebaseCycles, v.StageName)
+		delete(item.StageState.EnqueueCycles, v.StageName)
 		return StageStateChanged
 
 	case LinkageHealAttempted:
@@ -519,6 +525,11 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 			return 0 // already set; no-op
 		}
 		item.LinkedPR.HasHadChecks = true
+		return LinkedPRChanged
+
+	case PREnqueueRecorded:
+		ensureLinkedPR(item, 0)
+		item.LinkedPR.LastEnqueuedSHA = v.SHA
 		return LinkedPRChanged
 
 	case BaseBranchWarnRecorded:
@@ -1222,6 +1233,9 @@ func ensureStageStateMaps(item *ItemState) {
 	}
 	if ss.RebaseCycles == nil {
 		ss.RebaseCycles = make(map[string]int)
+	}
+	if ss.EnqueueCycles == nil {
+		ss.EnqueueCycles = make(map[string]int)
 	}
 	if ss.ProcessedComments == nil {
 		ss.ProcessedComments = make(map[string]time.Time)

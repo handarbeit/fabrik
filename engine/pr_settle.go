@@ -27,6 +27,14 @@ const (
 	PRMergeBlocked
 	// PRMergeTerminal indicates the PR is already merged or closed; both gates clear.
 	PRMergeTerminal
+	// PRMergeQueued indicates the PR is in GitHub's native merge queue (ADR-058 D4).
+	// Semantics: a transient hand-off — the queue owns the PR, so callers re-evaluate
+	// on the next poll with NO label churn (preserves ADR-032 R10c, mirroring
+	// PRMergeUnsettled). It is evaluated strictly AFTER the terminal check: a PR that
+	// merged via the queue is terminal, never "queued" (the #913 merged-first invariant).
+	// This is the canonical queue-membership signal — the single place queue state is
+	// interpreted (ADR-056 D1), replacing inline settle.PR.IsInMergeQueue reads.
+	PRMergeQueued
 )
 
 // PRSettleResult is the output of settlePRMergeState.
@@ -78,6 +86,22 @@ func (e *Engine) settlePRMergeState(item gh.ProjectItem, _ *stages.Stage) PRSett
 			return PRSettleResult{Status: PRMergeTerminal, Reason: fmt.Sprintf("PR #%d merged (confirmed via single-PR endpoint)", pr.Number), PR: pr}
 		}
 		return PRSettleResult{Status: PRMergeTerminal, Reason: fmt.Sprintf("PR #%d closed without merging", pr.Number), PR: pr}
+	}
+
+	// Queue hand-off (ADR-058 D4 FR-1): once the terminal check has confirmed the PR
+	// is neither merged nor closed, a PR sitting in GitHub's merge queue is a transient
+	// hand-off — the queue owns it and will merge or eject it. Both gates treat this
+	// like PRMergeUnsettled (block, no churn); the convergence owner waits. Source the
+	// signal from BOTH the GraphQL-authoritative ProjectItem field (reliable on every
+	// poll) and settle.PR / MergeQueueEntry: settle.PR carries the flag only on a
+	// fully-populated boardcache hit (false on a REST-fallback cache miss), so the
+	// ProjectItem field is the authoritative source and the others are fresher
+	// supplements. Mirrors the dual-source pattern used at the rebase dispatch sites.
+	if prInMergeQueue(item) ||
+		(pr.IsInMergeQueue) ||
+		(pr.MergeQueueEntry != nil && (pr.MergeQueueEntry.State == "QUEUED" || pr.MergeQueueEntry.State == "AWAITING_CHECKS")) {
+		e.logf(item.Number, "settle", "PR #%d in merge queue — transient hand-off\n", pr.Number)
+		return PRSettleResult{Status: PRMergeQueued, Reason: "PR in merge queue", PR: pr}
 	}
 
 	mergeable, mergeableState, err := e.readClient.FetchPRMergeableFields(owner, repo, pr.Number)

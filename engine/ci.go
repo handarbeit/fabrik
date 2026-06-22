@@ -72,6 +72,12 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 	case PRMergeConflicting:
 		// Merge gate already applied fabrik:rebase-needed; CI gate just blocks.
 		return true, false, false
+
+	case PRMergeQueued:
+		// ADR-058 D4 FR-1: the PR is in GitHub's merge queue — a transient hand-off.
+		// Block with no fabrik:awaiting-ci churn (mirrors the PRMergeUnsettled
+		// fall-through) so the queue owns the merge decision while it waits.
+		return true, false, false
 	}
 
 	// PRMergeUnsettled or PRMergeBlocked: detailed classification using settle.CheckRuns
