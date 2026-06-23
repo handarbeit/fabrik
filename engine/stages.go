@@ -240,7 +240,7 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 // when no action is needed (cruise label, no linked PR), and (false, err) on
 // failure. The fabrik:auto-merge-enabled label serves as both the idempotency
 // guard and the budget-start anchor read by checkAutoMergeConvergence.
-func (e *Engine) attemptMergeOnValidate(_ context.Context, _ *gh.ProjectBoard, item gh.ProjectItem, _ *stages.Stage) (bool, error) {
+func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, _ *stages.Stage) (bool, error) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
 	// cruise > yolo: when cruise is present, auto-merge is suppressed regardless of yolo.
@@ -252,6 +252,13 @@ func (e *Engine) attemptMergeOnValidate(_ context.Context, _ *gh.ProjectBoard, i
 	// Idempotency: auto-merge was already enabled on a prior run.
 	if hasLabel(item, "fabrik:auto-merge-enabled") {
 		return true, nil
+	}
+
+	// Merge-train gate: when merge_train: on, advance to Queued instead of enabling auto-merge.
+	// Cruise items always bypass this (handled above). New items never reach fabrik:auto-merge-enabled
+	// when merge_train: on, so this gate fires exactly once per qualifying Validate completion.
+	if e.cfg.MergeTrain == "on" {
+		return false, e.advanceToQueued(ctx, board, item, owner, repo)
 	}
 
 	pr, err := e.readClient.FetchLinkedPR(owner, repo, item.Number)
@@ -466,6 +473,48 @@ func (e *Engine) handleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 			e.logf(item.Number, "done", "closed issue (no work needed)\n")
 		}
 	}
+}
+
+// advanceToQueued moves an item from Validate to the Queued holding column when
+// merge_train: on. It sets the board status to Queued and adds stage:Validate:complete
+// so the Phase 2 catch-up loop does not re-dispatch Validate on the next poll.
+func (e *Engine) advanceToQueued(_ context.Context, board *gh.ProjectBoard, item gh.ProjectItem, owner, repo string) error {
+	if e.statusField == nil {
+		return fmt.Errorf("status field metadata not available; cannot advance to Queued")
+	}
+
+	optionID, ok := e.statusField.Options["Queued"]
+	if !ok {
+		return fmt.Errorf("no status option %q found on project board (available: %v); is the Queued column missing?",
+			"Queued", mapKeys(e.statusField.Options))
+	}
+
+	e.logf(item.Number, "merge-train", "advancing to Queued for merge train batching\n")
+	if err := e.client.UpdateProjectItemStatus(board.ProjectID, item.ItemID, e.statusField.FieldID, optionID); err != nil {
+		return fmt.Errorf("move to Queued: %w", err)
+	}
+	if cacheImpl, ok2 := e.readClient.(*boardcache.CacheImpl); ok2 {
+		cacheImpl.UpdateItemStatus(boardcache.ItemKey(item.Repo, item.Number), "Queued")
+	}
+	if e.webhookMgr != nil {
+		e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
+	}
+
+	// Add stage:Validate:complete so the Phase 2 catch-up loop does not re-dispatch Validate.
+	completeLabel := "stage:Validate:complete"
+	if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); lerr != nil {
+		e.logf(item.Number, "warn", "advanced to Queued but could not add %s label: %v — will retry on next poll\n", completeLabel, lerr)
+		return fmt.Errorf("add %s label: %w", completeLabel, lerr)
+	}
+	if cacheImpl, ok2 := e.readClient.(*boardcache.CacheImpl); ok2 {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
+	}
+	if e.webhookMgr != nil {
+		e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+completeLabel)
+	}
+
+	e.logf(item.Number, "merge-train", "queued for merge train — waiting for batch\n")
+	return nil
 }
 
 func (e *Engine) advanceToNextStage(board *gh.ProjectBoard, item gh.ProjectItem, currentStage *stages.Stage) error {

@@ -525,3 +525,124 @@ func TestAttemptMergeOnValidate_MergeQueueOffDoesNotEnqueue(t *testing.T) {
 		t.Fatalf("expected EnablePullRequestAutoMerge called once (existing path), got %d", len(client.enablePullRequestAutoMergeCalls))
 	}
 }
+
+// testStagesWithValidateAndQueued returns stages including Validate and Queued,
+// for merge-train advancement tests.
+func testStagesWithValidateAndQueued() []*stages.Stage {
+	return []*stages.Stage{
+		{Name: "Research", Order: 1, Prompt: "research"},
+		{Name: "Plan", Order: 2, Prompt: "plan"},
+		{Name: "Implement", Order: 3, Prompt: "implement"},
+		{Name: "Validate", Order: 4, Prompt: "validate"},
+		{Name: "Queued", Order: 6, HoldingStage: true},
+		{Name: "Done", Order: 99, CleanupWorktree: true},
+	}
+}
+
+// TestAttemptMergeOnValidate_MergeTrainOn_AdvancesToQueued verifies that when
+// merge_train: on, a yolo Validate completion advances the item to Queued,
+// adds stage:Validate:complete, and does NOT call auto-merge or enqueue.
+func TestAttemptMergeOnValidate_MergeTrainOn_AdvancesToQueued(t *testing.T) {
+	client := &mockGitHubClient{}
+	stgs := testStagesWithValidateAndQueued()
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MergeTrain = "on"
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Repo: "owner/repo"}
+
+	enabled, err := eng.attemptMergeOnValidate(context.Background(), board, item, &stages.Stage{Name: "Validate"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if enabled {
+		t.Fatal("expected enabled=false when advancing to Queued (not auto-merge path)")
+	}
+
+	// Must have called UpdateProjectItemStatus with the Queued option ID.
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected 1 UpdateProjectItemStatus call, got %d", len(client.updateStatusCalls))
+	}
+	if client.updateStatusCalls[0].optionID != "OPT_Queued" {
+		t.Errorf("UpdateProjectItemStatus called with option %q, want %q",
+			client.updateStatusCalls[0].optionID, "OPT_Queued")
+	}
+
+	// Must have added stage:Validate:complete.
+	var foundCompleteLabel bool
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Validate:complete" {
+			foundCompleteLabel = true
+		}
+	}
+	if !foundCompleteLabel {
+		t.Error("expected stage:Validate:complete label to be added")
+	}
+
+	// Must NOT have enabled auto-merge or enqueued.
+	if len(client.enablePullRequestAutoMergeCalls) != 0 {
+		t.Errorf("EnablePullRequestAutoMerge must not be called when merge_train: on, got %d call(s)",
+			len(client.enablePullRequestAutoMergeCalls))
+	}
+	if len(client.enqueuePullRequestCalls) != 0 {
+		t.Errorf("EnqueuePullRequest must not be called when merge_train: on, got %d call(s)",
+			len(client.enqueuePullRequestCalls))
+	}
+}
+
+// TestAttemptMergeOnValidate_MergeTrainOff_UsesExistingPath verifies that when
+// merge_train: off (default), the existing auto-merge path runs unchanged.
+func TestAttemptMergeOnValidate_MergeTrainOff_UsesExistingPath(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, HeadSHA: "sha1"}, nil
+		},
+	}
+	stgs := testStagesWithValidateAndQueued()
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MergeTrain = "off"
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1"}
+
+	enabled, err := eng.attemptMergeOnValidate(context.Background(), board, item, &stages.Stage{Name: "Validate"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !enabled {
+		t.Fatal("expected enabled=true via existing auto-merge path when merge_train: off")
+	}
+
+	// Must NOT have moved the item to Queued.
+	for _, c := range client.updateStatusCalls {
+		if c.optionID == "OPT_Queued" {
+			t.Errorf("UpdateProjectItemStatus must not target Queued when merge_train: off")
+		}
+	}
+
+	// Must have used the existing auto-merge path.
+	if len(client.enablePullRequestAutoMergeCalls) != 1 {
+		t.Fatalf("expected EnablePullRequestAutoMerge called once (existing path), got %d",
+			len(client.enablePullRequestAutoMergeCalls))
+	}
+}
+
+// TestAttemptMergeOnValidate_MergeTrainOn_CruiseBypasses verifies that cruise
+// items are unaffected when merge_train: on — cruise early-return fires first.
+func TestAttemptMergeOnValidate_MergeTrainOn_CruiseBypasses(t *testing.T) {
+	client := &mockGitHubClient{}
+	stgs := testStagesWithValidateAndQueued()
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MergeTrain = "on"
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 1, ItemID: "PVTI_1", Labels: []string{"fabrik:cruise"}}
+
+	enabled, err := eng.attemptMergeOnValidate(context.Background(), board, item, &stages.Stage{Name: "Validate"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if enabled {
+		t.Fatal("expected enabled=false for cruise item")
+	}
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("cruise item must not be advanced to Queued, got %d status update(s)", len(client.updateStatusCalls))
+	}
+}
