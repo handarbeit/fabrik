@@ -53,12 +53,19 @@ func (e *Engine) checkStageColumnAlignment(ctx context.Context) error {
 	e.statusField = sf
 	e.mu.Unlock()
 
-	// Build the set of non-cleanup stage names.
+	// Build the required stage set for column validation.
+	// Cleanup stages are always excluded (they have no board column requirement).
+	// Holding stages are excluded when merge_train is off — they only require a
+	// board column when merge_train is on (the operator must add the Queued column).
 	var checkStages []*stageNameOrder
 	for _, s := range e.cfg.Stages {
-		if !s.CleanupWorktree {
-			checkStages = append(checkStages, &stageNameOrder{name: s.Name, order: s.Order})
+		if s.CleanupWorktree {
+			continue
 		}
+		if s.HoldingStage && e.cfg.MergeTrain != "on" {
+			continue
+		}
+		checkStages = append(checkStages, &stageNameOrder{name: s.Name, order: s.Order, holdingStage: s.HoldingStage})
 	}
 	// Sort by Order for deterministic mismatch report output.
 	sort.Slice(checkStages, func(i, j int) bool {
@@ -133,12 +140,22 @@ func (e *Engine) checkStageColumnAlignment(ctx context.Context) error {
 	fmt.Fprintf(os.Stderr, "\nBoard columns found:\n  %s\n\n", strings.Join(allCols, ", "))
 	fmt.Fprintf(os.Stderr, "Fix: add the missing columns to your GitHub Project board, or update\n")
 	fmt.Fprintf(os.Stderr, ".fabrik/stages/ to match your board column names (case-sensitive).\n")
+	for _, s := range missing {
+		if s.holdingStage {
+			fmt.Fprintf(os.Stderr, "\nNote: %q is a holding stage required by merge_train: on.\n", s.name)
+			fmt.Fprintf(os.Stderr, "Add a `%s` column to your GitHub Project board between `Validate` and `Done`,\n", s.name)
+			fmt.Fprintf(os.Stderr, "then restart. See docs/state-machine.md for setup steps.\n")
+			fmt.Fprintf(os.Stderr, "If you copied queued.yaml from a new Fabrik installation, ensure the column\n")
+			fmt.Fprintf(os.Stderr, "name on the board matches the 'name' field in the YAML (case-sensitive).\n")
+		}
+	}
 
 	return fmt.Errorf("startup check failed: stage/board column mismatch")
 }
 
 // stageNameOrder is a helper for sorting and reporting stage names.
 type stageNameOrder struct {
-	name  string
-	order int
+	name         string
+	order        int
+	holdingStage bool
 }
