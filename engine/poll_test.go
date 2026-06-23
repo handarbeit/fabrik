@@ -3326,3 +3326,71 @@ func TestCIAndReviewGate_JointClearingHandoff(t *testing.T) {
 		t.Error("poll 2: expected handleReviewGate to add fabrik:awaiting-review for outstanding reviewer after CI clears")
 	}
 }
+
+func TestHandleMergeTrainBatch_LogsQueuedItems(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.cfg.MergeTrain = "on"
+
+	events := make(chan tui.Event, 10)
+	eng.events = events
+
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{Number: 42, Title: "fix the bug",    Status: "Queued"},
+			{Number: 43, Title: "add the feature", Status: "Implement"},
+			{Number: 44, Title: "another ready",   Status: "Queued"},
+		},
+	}
+
+	eng.handleMergeTrainBatch(context.Background(), board)
+
+	var logged []tui.LogEvent
+	for len(events) > 0 {
+		ev := <-events
+		if le, ok := ev.(tui.LogEvent); ok {
+			logged = append(logged, le)
+		}
+	}
+
+	if len(logged) == 0 {
+		t.Fatal("expected at least one log event from handleMergeTrainBatch, got none")
+	}
+	msg := logged[0].Message
+	if !strings.Contains(msg, "batch snapshot: 2 item(s)") {
+		t.Errorf("expected 'batch snapshot: 2 item(s)' in log message, got: %q", msg)
+	}
+	if !strings.Contains(msg, "#42") || !strings.Contains(msg, "#44") {
+		t.Errorf("expected both queued issue numbers in log message, got: %q", msg)
+	}
+	if strings.Contains(msg, "#43") {
+		t.Errorf("non-Queued item #43 must not appear in batch snapshot, got: %q", msg)
+	}
+	if logged[0].Tag != "merge-train" {
+		t.Errorf("expected tag 'merge-train', got %q", logged[0].Tag)
+	}
+}
+
+func TestHandleMergeTrainBatch_SilentWhenEmpty(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	eng.cfg.MergeTrain = "on"
+
+	events := make(chan tui.Event, 10)
+	eng.events = events
+
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{Number: 10, Title: "in progress", Status: "Implement"},
+			{Number: 11, Title: "reviewing",   Status: "Review"},
+		},
+	}
+
+	eng.handleMergeTrainBatch(context.Background(), board)
+
+	if len(events) != 0 {
+		t.Errorf("expected no log events when Queued column is empty, got %d", len(events))
+	}
+}
