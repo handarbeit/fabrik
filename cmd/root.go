@@ -48,6 +48,7 @@ type Config struct {
 	ConvergenceBudget    string // Go duration string; "" means use default (30m); "0" means disabled
 	AutoMergeStrategy    string // MERGE, SQUASH, or REBASE; "" means use default (MERGE)
 	MergeQueue           string // auto or off; "" means use default (auto)
+	MergeTrain           string // on or off; "" means use default (off)
 	ClaudeWaitDelay      int    // seconds; 0 means use default (30)
 	PostPushDwell        int    // seconds; 0 means use default (90)
 	KillGraceSigInt      string // Go duration string; "" means use default (10s); "0s" skips SIGINT step
@@ -143,6 +144,7 @@ func Execute() error {
 	flag.StringVar(&cfg.ConvergenceBudget, "convergence-budget", "", "Wall-clock budget for post-Validate yolo convergence (Go duration: 30m, 1h; \"0\" disables; also FABRIK_CONVERGENCE_BUDGET)")
 	flag.StringVar(&cfg.AutoMergeStrategy, "auto-merge-strategy", "", "Merge method for GitHub auto-merge: MERGE, SQUASH, or REBASE (also FABRIK_AUTO_MERGE_STRATEGY; default MERGE)")
 	flag.StringVar(&cfg.MergeQueue, "merge-queue", "", "Merge queue routing for yolo path: auto (enqueue when repo uses merge queue) or off (skip enqueue; direct merge may fail on queue-required repos; also FABRIK_MERGE_QUEUE; default auto)")
+	flag.StringVar(&cfg.MergeTrain, "merge-train", "", "Fabrik-internal merge train: on (advance yolo Validate completions to Queued column for batched landing) or off (also FABRIK_MERGE_TRAIN; default off)")
 	flag.IntVar(&cfg.ClaudeWaitDelay, "claude-wait-delay", 0, "Seconds to wait after Claude exits before recovering buffered output when grandchildren hold stdout pipe open (0 = use default of 30; also FABRIK_CLAUDE_WAIT_DELAY)")
 	flag.IntVar(&cfg.PostPushDwell, "post-push-dwell", 0, "Seconds to wait after a PR force-push before clearing the CI gate as 'no CI configured' (0 = use default of 90; also FABRIK_POST_PUSH_DWELL)")
 	flag.BoolVar(&cfg.DebugOutput, "debug-output", false, "Save Claude stage output to .fabrik/debug/ for debugging")
@@ -380,6 +382,11 @@ func Execute() error {
 	if !explicitFlags["merge-queue"] {
 		if v := os.Getenv("FABRIK_MERGE_QUEUE"); v != "" {
 			cfg.MergeQueue = v // validated in mergeQueueMode() helper
+		}
+	}
+	if !explicitFlags["merge-train"] {
+		if v := os.Getenv("FABRIK_MERGE_TRAIN"); v != "" {
+			cfg.MergeTrain = v // validated in mergeTrainMode() helper
 		}
 	}
 	if !explicitFlags["claude-wait-delay"] {
@@ -699,6 +706,7 @@ func Execute() error {
 		ConvergenceBudget:        convergenceBudget(cfg.ConvergenceBudget),
 		AutoMergeStrategy:        autoMergeStrategy(cfg.AutoMergeStrategy),
 		MergeQueue:               mergeQueueMode(cfg.MergeQueue),
+		MergeTrain:               mergeTrainMode(cfg.MergeTrain),
 		ClaudeWaitDelay:          claudeWaitDelay(cfg.ClaudeWaitDelay),
 		KillGraceSigInt:          killGraceSigInt(cfg.KillGraceSigInt),
 		KillGraceSigTerm:         killGraceSigTerm(cfg.KillGraceSigTerm),
@@ -956,6 +964,23 @@ func mergeQueueMode(s string) string {
 	default:
 		fmt.Fprintf(os.Stderr, "[warn] FABRIK_MERGE_QUEUE=%q is invalid (must be auto or off); using default auto\n", s)
 		return "auto"
+	}
+}
+
+// mergeTrainMode normalizes the --merge-train / FABRIK_MERGE_TRAIN value.
+// Valid values are "on" and "off" (case-insensitive). An empty string defaults to "off".
+// Unrecognized values produce a warning and fall back to "off".
+func mergeTrainMode(s string) string {
+	if s == "" {
+		return "off"
+	}
+	lower := strings.ToLower(s)
+	switch lower {
+	case "on", "off":
+		return lower
+	default:
+		fmt.Fprintf(os.Stderr, "[warn] FABRIK_MERGE_TRAIN=%q is invalid (must be on or off); using default off\n", s)
+		return "off"
 	}
 }
 
