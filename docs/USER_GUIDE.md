@@ -856,6 +856,48 @@ For lighter automation without auto-merge, use `fabrik:cruise`: it auto-advances
 
 See [Stage YAML Reference](#stage-yaml-reference) for the `auto_advance` field, which controls auto-advance behavior per stage independent of the global `--yolo` flag.
 
+### Merge Queue
+
+When a GitHub repository requires a **merge queue** (configured under **Settings → Branches → Branch protection rules → Require merge queue**), yolo-mode PRs are routed through the queue rather than merged directly via GitHub's native auto-merge.
+
+**How detection works:** Fabrik detects merge-queue repos automatically from the GraphQL `isMergeQueueEnabled` field on the linked PR. No operator action is required to enable detection — Fabrik reads the per-PR flag on every poll cycle. The kill-switch `--merge-queue off` (or `FABRIK_MERGE_QUEUE=off`) disables queue routing and restores legacy behavior (yolo PRs attempt direct auto-merge, which may fail with HTTP 405 on queue-required repos).
+
+**What Fabrik does:**
+1. When Validate completes on a yolo issue and the repo requires a merge queue, Fabrik calls `EnqueuePullRequest` instead of `EnablePullRequestAutoMerge`.
+2. The convergence monitor (`checkAutoMergeConvergence`) watches the queue state each poll cycle. While the PR is in the queue (`settle.Status == PRMergeQueued`), Fabrik waits without touching labels or branches.
+3. When the PR is ejected (CI failure or conflict), Fabrik classifies the reason and dispatches the appropriate recovery — CI-fix reinvoke or rebase reinvoke — then re-enqueues after the fix.
+4. When the PR merges via the queue, Fabrik detects the terminal state and advances the issue to Done.
+
+**`on: merge_group` CI prerequisite:**
+
+For GitHub's merge queue to function, **every required CI workflow must include `on: merge_group`** in its trigger list. Without this, GitHub creates a temporary merge-group branch to test the PR against the current base, but the CI workflow never fires against it — the PR sits in `AWAITING_CHECKS` state indefinitely, and the queue stalls silently.
+
+Example workflow trigger:
+```yaml
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:        # ← required for merge queue
+```
+
+**Stall detection (ADR-058 D5):** If the PR has been in the merge queue for longer than `CIWaitTimeout` (default 30 min; `FABRIK_CI_WAIT_TIMEOUT`) with no merge-group CI ever reporting, Fabrik detects the stall poll-natively and pauses the issue with an instructional comment:
+
+> 🏭 **Fabrik — merge queue stall detected**
+>
+> The merge queue is enabled but no CI check ever reported for the merge group after 30 minutes. This typically means no workflow has `on: merge_group` configured.
+>
+> **Action required**: add `on: merge_group` to each workflow that must pass as a required check, then re-queue the PR. Remove `fabrik:paused` to resume.
+
+The stall comment is posted once per event — subsequent polls skip the paused item, so no duplicate comments are produced.
+
+**Resume path after fixing CI:**
+1. Add `on: merge_group` to each required-check workflow and push to the default branch.
+2. Re-queue the PR manually (GitHub UI or `gh pr merge --merge --merge-queue <PR#>`).
+3. Remove `fabrik:paused` from the issue. Fabrik resumes monitoring on the next poll cycle.
+
+**Re-enqueue cap:** To prevent a queue-thrash loop (enqueue → eject → re-enqueue → eject), each re-enqueue attempt is counted. When the count reaches `MaxEnqueueCycles` (default 5; `--max-enqueue-cycles` / `FABRIK_MAX_ENQUEUE_CYCLES`), Fabrik pauses the issue for human intervention.
+
 ### Draft PR Workflow
 
 The Implement stage creates a **draft PR** linked to the issue when `create_draft_pr: true` is set (the default for Implement). This gives you a place to review incrementally. The Review stage then rebases, reviews, fixes, and pushes — turning the draft into a review-ready PR.
