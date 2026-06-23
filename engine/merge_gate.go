@@ -278,6 +278,14 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 
+	// Merge-train warning: this item carries fabrik:auto-merge-enabled but merge_train: on
+	// is now active. The item entered auto-merge convergence before merge_train was enabled.
+	// Let convergence complete rather than interrupting mid-flight PR state. New items will
+	// route through advanceToQueued instead (ADR-059 D6 resolves this interaction properly).
+	if e.cfg.MergeTrain == "on" {
+		e.logf(item.Number, "warn", "merge_train: on but item is in auto-merge convergence path (fabrik:auto-merge-enabled present from before merge_train was enabled); letting convergence complete\n")
+	}
+
 	// Use e.client (direct GitHub API) rather than e.readClient (boardcache) so
 	// that pr.AutoMergeEnabled reflects the live GitHub state. The boardcache
 	// LinkedPRState does not persist AutoMergeEnabled; a cache hit would return
