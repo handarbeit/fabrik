@@ -311,6 +311,76 @@ func TestApplyRebaseCycleIncremented(t *testing.T) {
 	}
 }
 
+// ---- EnqueueCycleIncremented (ADR-058 D4 FR-3) ----
+
+func TestApplyEnqueueCycleIncremented(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, EnqueueCycleIncremented{Repo: testRepo, Number: 1, StageName: "Validate"}, StageStateChanged)
+	if getItem(t, s, testRepo, 1).StageState.EnqueueCycles["Validate"] != 1 {
+		t.Error("EnqueueCycles not incremented")
+	}
+	// Second increment accumulates independently per stage.
+	applyExpect(t, s, EnqueueCycleIncremented{Repo: testRepo, Number: 1, StageName: "Validate"}, StageStateChanged)
+	if got := getItem(t, s, testRepo, 1).StageState.EnqueueCycles["Validate"]; got != 2 {
+		t.Errorf("EnqueueCycles[Validate] = %d, want 2", got)
+	}
+	if got := getItem(t, s, testRepo, 1).StageState.EnqueueCycles["Review"]; got != 0 {
+		t.Errorf("EnqueueCycles[Review] = %d, want 0 (per-stage isolation)", got)
+	}
+}
+
+// ---- PREnqueueRecorded (ADR-058 D4 FR-3) ----
+
+func TestApplyPREnqueueRecorded(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, PREnqueueRecorded{Repo: testRepo, Number: 1, SHA: "abc123"}, LinkedPRChanged)
+	st := getItem(t, s, testRepo, 1)
+	if st.LinkedPR == nil || st.LinkedPR.LastEnqueuedSHA != "abc123" {
+		t.Errorf("LastEnqueuedSHA not recorded; got %+v", st.LinkedPR)
+	}
+	// A later enqueue at a new SHA overwrites the record.
+	applyExpect(t, s, PREnqueueRecorded{Repo: testRepo, Number: 1, SHA: "def456"}, LinkedPRChanged)
+	if got := getItem(t, s, testRepo, 1).LinkedPR.LastEnqueuedSHA; got != "def456" {
+		t.Errorf("LastEnqueuedSHA = %q, want def456 after re-enqueue", got)
+	}
+}
+
+// TestEnqueueCyclesSnapshotIsDeepCopy verifies that a Snapshot taken before a
+// later EnqueueCycleIncremented retains its original count — confirming
+// copyStageState deep-copies the EnqueueCycles map (no shared backing map).
+func TestEnqueueCyclesSnapshotIsDeepCopy(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	held := applyExpect(t, s, EnqueueCycleIncremented{Repo: testRepo, Number: 1, StageName: "Validate"}, StageStateChanged)
+	if held.EnqueueCycles("Validate") != 1 {
+		t.Fatalf("precondition: held snapshot EnqueueCycles = %d, want 1", held.EnqueueCycles("Validate"))
+	}
+	// Mutate the store further.
+	s.Apply(EnqueueCycleIncremented{Repo: testRepo, Number: 1, StageName: "Validate"})
+	if held.EnqueueCycles("Validate") != 1 {
+		t.Errorf("held snapshot mutated by later increment: EnqueueCycles = %d, want 1", held.EnqueueCycles("Validate"))
+	}
+}
+
+// TestEngineCyclesClearedClearsEnqueueCycles verifies EngineCyclesCleared zeroes
+// EnqueueCycles alongside the review/CI/rebase counters (FR-3: a successful
+// settle/unpause must not leave a stale re-enqueue count that prematurely pauses).
+func TestEngineCyclesClearedClearsEnqueueCycles(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	s.Apply(EnqueueCycleIncremented{Repo: testRepo, Number: 1, StageName: "Validate"})
+	s.Apply(RebaseCycleIncremented{Repo: testRepo, Number: 1, StageName: "Validate"})
+	if getItem(t, s, testRepo, 1).StageState.EnqueueCycles["Validate"] != 1 {
+		t.Fatal("precondition: EnqueueCycles not set")
+	}
+	applyExpect(t, s, EngineCyclesCleared{Repo: testRepo, Number: 1, StageName: "Validate"}, StageStateChanged)
+	st := getItem(t, s, testRepo, 1)
+	if got := st.StageState.EnqueueCycles["Validate"]; got != 0 {
+		t.Errorf("EnqueueCycles not cleared: got %d, want 0", got)
+	}
+	if got := st.StageState.RebaseCycles["Validate"]; got != 0 {
+		t.Errorf("RebaseCycles not cleared by EngineCyclesCleared: got %d, want 0", got)
+	}
+}
+
 // ---- EnginePaused ----
 
 func TestApplyEnginePaused(t *testing.T) {

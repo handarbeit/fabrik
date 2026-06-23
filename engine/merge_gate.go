@@ -40,6 +40,11 @@ func (e *Engine) checkMergeabilityGate(item gh.ProjectItem, stage *stages.Stage,
 		return false, false
 	case PRMergeUnsettled:
 		return true, false
+	case PRMergeQueued:
+		// ADR-058 D4 FR-1: the PR is in GitHub's merge queue — a transient hand-off.
+		// Block like PRMergeUnsettled (no conflict, no fabrik:rebase-needed churn) so a
+		// human-enqueued non-yolo PR at a gate-checked stage simply waits for the queue.
+		return true, false
 	case PRMergeBlocked:
 		// CI has failed but there is no base-branch conflict. Clear the merge
 		// gate so checkCIGate can classify the failure and dispatch CI-fix.
@@ -209,8 +214,12 @@ func (e *Engine) dispatchRebaseReinvoke(ctx context.Context, board *gh.ProjectBo
 		}
 
 		// GitHub disables auto-merge on every push. Re-enable it if this issue is in
-		// the convergence flow (fabrik:auto-merge-enabled present at dispatch time).
-		if hasLabel(item, "fabrik:auto-merge-enabled") {
+		// the convergence flow (fabrik:auto-merge-enabled present at dispatch time) —
+		// but NOT on a merge-queue repo (ADR-058 D4): there the recovery path is
+		// re-enqueue, not native auto-merge, and the convergence monitor re-enqueues
+		// the resolved PR once it re-derives clean. Re-enabling auto-merge here would
+		// fight the queue model.
+		if hasLabel(item, "fabrik:auto-merge-enabled") && !item.LinkedPRIsMergeQueueEnabled {
 			pr, prErr := e.client.FetchLinkedPR(owner, repo, item.Number)
 			if prErr != nil || pr == nil || pr.Number == 0 {
 				e.logf(item.Number, "warn", "rebase reinvoke: could not fetch linked PR for auto-merge re-enable: %v\n", prErr)
@@ -248,7 +257,10 @@ func (e *Engine) dispatchRebaseReinvoke(ctx context.Context, board *gh.ProjectBo
 // settlePRMergeState; it drives the unsettled/conflict branch decisions so that
 // the convergence path no longer independently interprets mergeable_state.
 // Returns after completing any dispatch or pause.
-func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, settle PRSettleResult) {
+// priorInQueue is the item's previous-poll merge-queue membership, captured in
+// poll.go before ItemDeepFetched overwrites the store (ADR-058 D4 OQ-3). It drives
+// the poll-native "left the queue" edge used by the ejection-recovery classifier.
+func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, settle PRSettleResult, priorInQueue bool) {
 	// Phase 1 of the catch-up loop calls this before processItem has had a chance
 	// to register the WorktreeManager for item.Repo. Without this guard,
 	// pauseForConvergenceFailed → worktreesFor would panic on the first poll
@@ -279,34 +291,45 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 		return
 	}
 
-	// PR merged or closed: remove label and advance to the next stage (Done).
-	// There is no passive machinery that would advance the board column after the
-	// label is removed; advanceToNextStage must be called explicitly here.
-	if pr.Merged || pr.State == "closed" {
-		e.logf(item.Number, "auto-merge", "PR #%d merged or closed — advancing to Done\n", pr.Number)
-		if rerr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); rerr != nil {
-			e.logf(item.Number, "warn", "could not remove fabrik:auto-merge-enabled: %v\n", rerr)
-		} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:auto-merge-enabled")
-		}
-		e.removeRebaseNeededLabel(owner, repo, item)
-		if err := e.advanceToNextStage(board, item, stage); err != nil {
-			e.logf(item.Number, "warn", "could not advance to Done after PR merge: %v\n", err)
-		}
+	// ① Terminal-first (the #913 merged-first invariant): a PR that merged via the
+	// queue is terminal, never an ejection failure. settle.Status == PRMergeTerminal
+	// already re-confirmed merged/closed via the authoritative single-PR endpoint
+	// (pr_settle.go), catching the window where the REST list endpoint still reports
+	// merged=false for several seconds after a queue merge. Evaluate it FIRST, before
+	// any queue/ejection classification — a dequeue is never misread as a failure.
+	if settle.Status == PRMergeTerminal || pr.Merged || pr.State == "closed" {
+		e.advanceConvergedPRToDone(board, item, stage, pr.Number)
 		return
 	}
 
-	// User manually disabled auto-merge: pause the issue to prevent the next poll
-	// from re-enabling auto-merge via Phase 2 (yoloActive=true + no label → attemptMergeOnValidate).
-	if !pr.AutoMergeEnabled {
-		// EnqueuePullRequest does not set auto_merge on the PR, so AutoMergeEnabled
-		// is false even for PRs correctly waiting in the merge queue. settle.PR.IsInMergeQueue
-		// (populated from GraphQL via FetchProjectBoard → boardcache) is the authoritative
-		// signal: if the PR is in the queue, skip the pause and wait for the queue to merge.
-		if settle.PR != nil && settle.PR.IsInMergeQueue {
-			e.logf(item.Number, "auto-merge", "PR #%d is in merge queue — waiting for queue to merge\n", pr.Number)
-			return
+	// ② In-queue hand-off (ADR-058 D4 FR-1): the queue owns the PR — wait, no churn.
+	// This is the single place queue membership is interpreted in the convergence
+	// owner, replacing the inline settle.PR.IsInMergeQueue read #935 left here.
+	// Record the SHA at which GitHub holds the PR so the clean re-enqueue gate below
+	// can tell the post-enqueue consistency window (same SHA → suppress) apart from a
+	// genuine post-resolution re-enqueue (SHA changed → enqueue fresh).
+	if settle.Status == PRMergeQueued {
+		if settle.PR != nil && settle.PR.HeadSHA != "" {
+			e.store.Apply(itemstate.PREnqueueRecorded{Repo: repoStr, Number: item.Number, SHA: settle.PR.HeadSHA})
 		}
+		e.logf(item.Number, "auto-merge", "PR #%d in merge queue — waiting for queue to merge\n", pr.Number)
+		return
+	}
+
+	// mergeQueueEnabled gates the ejection-recovery ladder (queue repos) against the
+	// legacy GitHub-native auto-merge wait (non-queue repos). Dual-source for
+	// cache-miss safety, mirroring the settle PRMergeQueued derivation.
+	mergeQueueEnabled := item.LinkedPRIsMergeQueueEnabled || (settle.PR != nil && settle.PR.IsMergeQueueEnabled)
+	// leftQueue is the poll-native ejection edge: in the queue last poll, not now.
+	// settle.Status != PRMergeQueued is guaranteed here (handled at step ②).
+	leftQueue := priorInQueue
+
+	// ③ User manually disabled auto-merge: pause — but ONLY on non-queue repos. Every
+	// enqueue-path PR has AutoMergeEnabled==false (EnqueuePullRequest never sets
+	// auto_merge), so on a queue repo a false flag is the NORMAL state of an ejected
+	// PR, not a user action — misreading it would pause every ejected PR (the
+	// #913-adjacent trap). On queue repos the ejection-recovery ladder below owns it.
+	if !pr.AutoMergeEnabled && !mergeQueueEnabled {
 		e.logf(item.Number, "auto-merge", "PR #%d auto-merge disabled by user — pausing\n", pr.Number)
 		msg := fmt.Sprintf("🏭 **Fabrik — auto-merge disabled**\n\n" +
 			"Fabrik detected that GitHub auto-merge was disabled on the linked PR. " +
@@ -364,22 +387,16 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 		return
 	}
 
-	// Confirmed conflict: dispatch rebase reinvoke, bounded by MaxRebaseCycles.
-	// Mirrors the three-step pattern in handleMergeAndCIGates: in-flight guard →
-	// cycle-limit check → dispatch or pauseForRebaseCycleLimit.
+	// Confirmed conflict: dispatch a Claude rebase reinvoke, bounded by
+	// MaxRebaseCycles. Mirrors the three-step pattern in handleMergeAndCIGates:
+	// in-flight guard → cycle-limit check → dispatch or pauseForRebaseCycleLimit.
+	// Shared by queue and non-queue repos. Past step ②, settle.Status ==
+	// PRMergeConflicting guarantees the PR is NOT in the queue (an in-queue PR
+	// returns PRMergeQueued), so #935's inline in-queue guard here is now dead and
+	// removed — FR-1 consolidation. On a queue repo this is the D4 ejection→resolve
+	// path: Claude resolves + force-pushes, and the clean re-enqueue below fires on
+	// a later poll once the new SHA settles.
 	if settle.Status == PRMergeConflicting {
-		// Merge-queue awareness (ADR-058 D3 FR-1): never dispatch a rebase reinvoke
-		// for a PR the queue currently owns — the synthetic rebase+force-push ejects
-		// it. Guard at dispatch (not in the function body) so D4's ejection→resolve
-		// path can still invoke it after the PR leaves the queue. Source the signal
-		// from BOTH the poll-native ProjectItem field (always GraphQL-populated) and
-		// settle.PR: settle.PR carries the flag only on a fully-populated boardcache
-		// hit and reports false on a cache miss (REST fallback), so the ProjectItem
-		// field is the authoritative source. Non-queue repos are unchanged (FR-3).
-		if prInMergeQueue(item) || (settle.PR != nil && settle.PR.IsInMergeQueue) {
-			e.logf(item.Number, "merge-queue", "PR #%d in merge queue — deferring rebase to queue\n", pr.Number)
-			return
-		}
 		var cycleCount int
 		if snap, serr := e.store.Get(repoStr, item.Number); serr == nil {
 			if snap.Worker() != nil {
@@ -399,8 +416,59 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 		return
 	}
 
-	// All other settle statuses (PRMergeReady, PRMergeBlocked, PRMergeTerminal, PRMergeNoPR):
-	// GitHub is handling it — auto-merge will fire when conditions are met.
+	// Ejection recovery for the remaining statuses — queue repos only (ADR-058 D4
+	// FR-2/FR-3). A yolo PR that left the queue and re-derived its own verdict this
+	// poll (settle ran the merge+CI gate against the current base) is recovered
+	// poll-natively, no webhook:
+	//   - PRMergeBlocked (CI failed) → Claude ci-fix reinvoke, bounded by MaxCiFixCycles.
+	//   - PRMergeReady (clean) → re-enqueue fresh, gated to avoid the post-enqueue window.
+	if mergeQueueEnabled {
+		switch settle.Status {
+		case PRMergeBlocked:
+			var cycleCount int
+			if snap, serr := e.store.Get(repoStr, item.Number); serr == nil {
+				if snap.Worker() != nil {
+					e.logf(item.Number, "auto-merge", "ci-fix already in-flight — skipping dispatch\n")
+					return
+				}
+				cycleCount = snap.CIFixCycles(stage.Name)
+			}
+			maxCycles := e.cfg.MaxCiFixCycles
+			if cycleCount >= maxCycles {
+				e.pauseForCIFixCycleLimit(board, item, stage, cycleCount, maxCycles)
+			} else {
+				e.logf(item.Number, "auto-merge", "PR #%d ejected with failing CI — dispatching ci-fix reinvoke\n", pr.Number)
+				e.store.Apply(itemstate.CIFixCycleIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+				e.dispatchCIFixReinvoke(ctx, board, item, stage, settle)
+			}
+			return
+		case PRMergeReady:
+			// Re-derived clean. Re-enqueue on the ejection edge (leftQueue — same SHA,
+			// immediate) or after an off-queue resolution (head SHA changed since the
+			// last enqueue). The post-enqueue consistency window is suppressed: there
+			// priorInQueue==false AND the head SHA still equals LastEnqueuedSHA. The
+			// LastEnqueuedSHA != "" guard avoids a spurious re-enqueue before the PR
+			// has ever been observed in the queue (e.g. immediately after the initial
+			// enqueue, or across a restart that lost the in-memory edge).
+			var lastEnqueuedSHA string
+			if snap, serr := e.store.Get(repoStr, item.Number); serr == nil {
+				lastEnqueuedSHA = snap.LastEnqueuedSHA()
+			}
+			headSHA := ""
+			if settle.PR != nil {
+				headSHA = settle.PR.HeadSHA
+			}
+			if leftQueue || (lastEnqueuedSHA != "" && headSHA != lastEnqueuedSHA) {
+				e.reEnqueueOrPause(board, item, stage, settle)
+			} else {
+				e.logf(item.Number, "auto-merge", "PR #%d clean, not ejected (post-enqueue window) — waiting for queue\n", pr.Number)
+			}
+			return
+		}
+	}
+
+	// Non-queue fall-through (legacy GitHub-native auto-merge): GitHub is handling
+	// it — auto-merge will fire when conditions are met.
 	e.logf(item.Number, "auto-merge", "PR #%d settle=%s — waiting for GitHub auto-merge\n", pr.Number, settle.Reason)
 }
 
@@ -532,6 +600,141 @@ func (e *Engine) pauseForRebaseCycleLimit(board *gh.ProjectBoard, item gh.Projec
 	)
 	if dbID, err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
 		e.logf(item.Number, "warn", "could not post rebase cycle limit comment: %v\n", err)
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+				DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
+			})
+		}
+		// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
+		if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+		}
+	}
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
+		e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
+	}
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
+		e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
+	}
+}
+
+// advanceConvergedPRToDone removes the convergence labels and advances a merged
+// (or closed) auto-merge PR to the next stage (Done). It is shared by
+// checkAutoMergeConvergence's terminal-first guard and reEnqueueOrPause's
+// merged-at-the-mutation-point guard so the #913 merged-on-dequeue case is
+// handled identically wherever a merge is detected — a dequeue that is in fact a
+// successful merge always advances to Done, never re-enqueues or pauses. There is
+// no passive machinery that advances the board column once the label is removed,
+// so advanceToNextStage must be called explicitly.
+func (e *Engine) advanceConvergedPRToDone(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, prNumber int) {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	e.logf(item.Number, "auto-merge", "PR #%d merged or closed — advancing to Done\n", prNumber)
+	if rerr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); rerr != nil {
+		e.logf(item.Number, "warn", "could not remove fabrik:auto-merge-enabled: %v\n", rerr)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:auto-merge-enabled")
+	}
+	e.removeRebaseNeededLabel(owner, repo, item)
+	if err := e.advanceToNextStage(board, item, stage); err != nil {
+		e.logf(item.Number, "warn", "could not advance to Done after PR merge: %v\n", err)
+	}
+}
+
+// reEnqueueOrPause performs a fresh merge-queue enqueue for a yolo PR that left
+// the queue and re-derived clean (PRMergeReady), bounded by MaxEnqueueCycles
+// (ADR-058 D4 FR-2/FR-3). It is the single mutation point for D4 re-enqueue
+// (ADR-056). Re-enqueue is always "fresh after off-queue resolution," never
+// re-enqueue-in-place, so conflict-heavy PRs do not starve the queue.
+//
+// Order (the merged-first guard is deliberately first — the #913 trap):
+//  1. FetchPRMerged (authoritative single-PR endpoint) — the REST list endpoint
+//     reports merged=false for several seconds after a queue merge, so re-confirm
+//     right at the mutation point. Merged → advance to Done; error → wait (never
+//     re-enqueue on an unconfirmed state).
+//  2. Worker-in-flight guard — skip if a reinvoke goroutine is already running.
+//  3. EnqueueCycles >= MaxEnqueueCycles → pauseForEnqueueCycleLimit (queue-thrash).
+//  4. else EnqueuePullRequest at the fresh head SHA (optimistic concurrency fails
+//     safe on a stale SHA), then increment EnqueueCycles and record
+//     LastEnqueuedSHA. Enqueue failure does NOT increment the cycle.
+func (e *Engine) reEnqueueOrPause(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, settle PRSettleResult) {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
+
+	pr := settle.PR
+	if pr == nil || pr.Number == 0 {
+		e.logf(item.Number, "auto-merge", "re-enqueue skipped — no PR in settle result\n")
+		return
+	}
+
+	// (1) Merged-first re-confirmation at the mutation point (#913 trap).
+	merged, mErr := e.client.FetchPRMerged(owner, repo, pr.Number)
+	if mErr != nil {
+		e.logf(item.Number, "auto-merge", "could not confirm merged-state of PR #%d before re-enqueue: %v — waiting\n", pr.Number, mErr)
+		return
+	}
+	if merged {
+		e.advanceConvergedPRToDone(board, item, stage, pr.Number)
+		return
+	}
+
+	// (2) Worker-in-flight guard + (3) cycle-limit check.
+	var cycleCount int
+	if snap, serr := e.store.Get(repoStr, item.Number); serr == nil {
+		if snap.Worker() != nil {
+			e.logf(item.Number, "auto-merge", "re-enqueue skipped — reinvoke already in-flight\n")
+			return
+		}
+		cycleCount = snap.EnqueueCycles(stage.Name)
+	}
+	maxCycles := e.cfg.MaxEnqueueCycles
+	if cycleCount >= maxCycles {
+		e.pauseForEnqueueCycleLimit(board, item, stage, cycleCount, maxCycles)
+		return
+	}
+
+	// (4) Fresh enqueue at the current head SHA. EnqueuePullRequest needs the SHA
+	// for optimistic concurrency; skip (wait) if it is not yet known.
+	if pr.HeadSHA == "" {
+		e.logf(item.Number, "auto-merge", "re-enqueue skipped — PR #%d head SHA empty\n", pr.Number)
+		return
+	}
+	if err := e.client.EnqueuePullRequest(owner, repo, pr.Number, pr.HeadSHA); err != nil {
+		// Do NOT increment the cycle on enqueue failure — a stale-SHA optimistic
+		// concurrency rejection or transient error should be retried next poll.
+		e.logf(item.Number, "warn", "re-enqueue of PR #%d failed: %v\n", pr.Number, err)
+		return
+	}
+	e.logf(item.Number, "auto-merge", "re-enqueued PR #%d into merge queue at %s (cycle %d/%d)\n",
+		pr.Number, pr.HeadSHA[:min(8, len(pr.HeadSHA))], cycleCount+1, maxCycles)
+	e.store.Apply(itemstate.EnqueueCycleIncremented{Repo: repoStr, Number: item.Number, StageName: stage.Name})
+	e.store.Apply(itemstate.PREnqueueRecorded{Repo: repoStr, Number: item.Number, SHA: pr.HeadSHA})
+}
+
+// pauseForEnqueueCycleLimit pauses the issue when merge-queue re-enqueue trips
+// have been attempted too many times — a queue-thrash loop (enqueue → eject →
+// re-enqueue → eject) that no single sub-path cap (rebase / CI-fix) would catch.
+// Mirrors pauseForRebaseCycleLimit: structured comment naming --max-enqueue-cycles,
+// fabrik:paused + fabrik:awaiting-input (write-through). The EnqueueCycles counter
+// is cleared by clearFailedStage (EngineCyclesCleared) when the user unpauses.
+func (e *Engine) pauseForEnqueueCycleLimit(_ *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, cycleCount, maxCycles int) {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	e.logf(item.Number, "enqueue-cycles", "merge-queue re-enqueue limit %d reached — pausing for human intervention\n", maxCycles)
+
+	msg := fmt.Sprintf(
+		"🏭 **Fabrik — merge-queue re-enqueue limit reached**\n\nThe linked PR for stage **%s** has been re-enqueued into GitHub's merge queue %d time(s), "+
+			"which has reached the configured limit of %d (override with `--max-enqueue-cycles` or `FABRIK_MAX_ENQUEUE_CYCLES`).\n\n"+
+			"The PR keeps being ejected from the merge queue and re-enqueued without merging. This usually means the merge group repeatedly fails to build or test "+
+			"against the current base — for example a flaky required check, a missing `merge_group` CI trigger, or a persistent semantic conflict with other queued PRs.\n\n"+
+			"Fabrik has paused this issue. Investigate the merge-queue failures, then remove the `fabrik:paused` label to resume.",
+		stage.Name, cycleCount, maxCycles,
+	)
+	if dbID, err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
+		e.logf(item.Number, "warn", "could not post enqueue cycle limit comment: %v\n", err)
 	} else {
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{

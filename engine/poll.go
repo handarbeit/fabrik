@@ -1032,6 +1032,13 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// re-stamped — the advance changes the item's board column, so the new stage
 	// must dispatch on the next poll without waiting for the cooldown.
 	advancedItems := make(map[string]bool)
+	// priorInQueue captures each item's previous-poll merge-queue membership
+	// (LinkedPRState.IsInMergeQueue) BEFORE ItemDeepFetched overwrites the store
+	// with the current value. checkAutoMergeConvergence reads it to detect the
+	// "left the queue" edge poll-natively (ADR-058 D4 OQ-3): reading "prior" from
+	// e.store inside the classifier would yield the already-overwritten current
+	// value, silently losing the edge. Keyed by issueKey, mirroring advancedItems.
+	priorInQueue := make(map[string]bool)
 	defer func() {
 		// Refresh CooldownAt["periodic-re-eval"] for all non-advanced, non-cleanup
 		// deepFetchCandidates after each full poll cycle. This preserves the #488 fix:
@@ -1213,6 +1220,9 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		}
 		admitRepo := itemOwnerRepoString(board.Items[i], e.defaultRepo())
 		admitPreSnap, admitPreErr := e.store.Get(admitRepo, board.Items[i].Number)
+		// Capture prior-poll merge-queue membership BEFORE ItemDeepFetched
+		// overwrites it (ADR-058 D4 OQ-3 — the "left the queue" edge is otherwise lost).
+		priorInQueue[iKey] = admitPreErr == nil && admitPreSnap.LinkedPR() != nil && admitPreSnap.LinkedPR().IsInMergeQueue
 		e.store.Apply(itemstate.ItemDeepFetched{
 			Repo:       admitRepo,
 			Number:     board.Items[i].Number,
@@ -1289,6 +1299,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			stage:         stage,
 			hasComplete:   hasComplete,
 			advancedItems: advancedItems,
+			priorInQueue:  priorInQueue[issueKey(item, e.defaultRepo())],
 		}
 		claimed := false
 		for _, h := range catchUpPhase1Handlers {
