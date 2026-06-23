@@ -1265,7 +1265,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			continue
 		}
 		stage := stages.FindStage(e.cfg.Stages, item.Status)
-		if stage == nil || stage.CleanupWorktree {
+		if stage == nil || stage.CleanupWorktree || stage.HoldingStage {
 			continue
 		}
 		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
