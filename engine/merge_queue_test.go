@@ -335,9 +335,21 @@ func TestCheckAutoMergeConvergence_MergeGroupStall_DwellElapsed(t *testing.T) {
 
 	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, settle, false)
 
-	// Comment posted once.
+	// Comment posted once with the spec-required body (FR-1).
 	if len(client.addCommentCalls) != 1 {
 		t.Errorf("expected 1 AddComment call (stall comment), got %d", len(client.addCommentCalls))
+	}
+	if len(client.addCommentCalls) > 0 {
+		body := client.addCommentCalls[0].body
+		if !strings.Contains(body, "merge queue stall detected") {
+			t.Errorf("stall comment missing 'merge queue stall detected': %q", body)
+		}
+		if !strings.Contains(body, "on: merge_group") {
+			t.Errorf("stall comment missing 'on: merge_group': %q", body)
+		}
+		if !strings.Contains(body, "fabrik:paused") {
+			t.Errorf("stall comment missing 'fabrik:paused' resume instruction: %q", body)
+		}
 	}
 	// 🚀 reaction added.
 	if len(client.addCommentReactionCalls) != 1 {
