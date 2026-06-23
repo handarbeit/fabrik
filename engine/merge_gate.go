@@ -313,6 +313,23 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 			e.store.Apply(itemstate.PREnqueueRecorded{Repo: repoStr, Number: item.Number, SHA: settle.PR.HeadSHA})
 		}
 		e.logf(item.Number, "auto-merge", "PR #%d in merge queue — waiting for queue to merge\n", pr.Number)
+		// ②′ ADR-058 D5: stall detect-and-warn. When the PR has been in the queue
+		// past CIWaitTimeout with no merge-group CI ever reporting (observable as
+		// settle.Status remaining PRMergeQueued past the dwell), pause the issue with
+		// an instructional comment. The dwell is anchored to fabrik:auto-merge-enabled
+		// applied-at (set at first enqueue) so it survives restarts. Guard on
+		// CIWaitTimeout > 0 so operators can disable the check.
+		if e.cfg.CIWaitTimeout > 0 {
+			appliedAt, faErr := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:auto-merge-enabled")
+			if faErr != nil {
+				e.logf(item.Number, "auto-merge", "could not fetch fabrik:auto-merge-enabled applied-at for stall check: %v\n", faErr)
+			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= e.cfg.CIWaitTimeout {
+				e.logf(item.Number, "auto-merge", "PR #%d in merge queue past dwell (%s) with no merge-group CI — stall detected\n",
+					pr.Number, e.cfg.CIWaitTimeout)
+				e.pauseForMergeGroupStall(item, pr.Number)
+				return
+			}
+		}
 		return
 	}
 
@@ -755,5 +772,57 @@ func (e *Engine) pauseForEnqueueCycleLimit(_ *gh.ProjectBoard, item gh.ProjectIt
 		e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", err)
 	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
+	}
+}
+
+// pauseForMergeGroupStall pauses the issue when the linked PR has been in the
+// merge queue past CIWaitTimeout with no merge-group CI ever reporting (ADR-058
+// D5). Posts an instructional comment telling the operator to add on:merge_group
+// to their required-check workflows, then applies fabrik:paused +
+// fabrik:awaiting-input and removes fabrik:auto-merge-enabled.
+//
+// Removing fabrik:auto-merge-enabled resets the convergence flow so that after
+// the operator fixes CI and re-queues, attemptMergeOnValidate re-applies the
+// label with a fresh timestamp — preventing the stall check from re-firing
+// immediately on resume (the dwell anchor would otherwise already be elapsed).
+func (e *Engine) pauseForMergeGroupStall(item gh.ProjectItem, prNumber int) {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	dwellMinutes := int(e.cfg.CIWaitTimeout.Round(time.Minute).Minutes())
+	e.logf(item.Number, "merge-queue", "stall detected on PR #%d after %d minutes — pausing with instructional comment\n", prNumber, dwellMinutes)
+
+	msg := fmt.Sprintf(
+		"🏭 **Fabrik — merge queue stall detected**\n\n"+
+			"The merge queue is enabled but no CI check ever reported for the merge group after %d minutes. "+
+			"This typically means no workflow has `on: merge_group` configured.\n\n"+
+			"**Action required**: add `on: merge_group` to each workflow that must pass as a required check, "+
+			"then re-queue the PR. Remove `fabrik:paused` to resume.",
+		dwellMinutes,
+	)
+	if dbID, err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
+		e.logf(item.Number, "warn", "could not post merge-group stall comment: %v\n", err)
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+				DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
+			})
+		}
+		if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+			e.logf(item.Number, "warn", "could not add 🚀 to merge-group stall comment: %v\n", reactErr)
+		}
+	}
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
+		e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
+	}
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
+		e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
+	}
+	if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); err != nil {
+		e.logf(item.Number, "warn", "could not remove fabrik:auto-merge-enabled: %v\n", err)
+	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:auto-merge-enabled")
 	}
 }

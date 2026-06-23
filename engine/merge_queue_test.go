@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
@@ -301,4 +302,157 @@ func TestRebaseDispatchGuards_PollNativeSignal_CacheMiss(t *testing.T) {
 			t.Errorf("cache-miss in-queue: expected no dispatch (PRMergeQueued hand-off), got cycles=%d", snap.RebaseCycles("Validate"))
 		}
 	})
+}
+
+// ── ADR-058 D5: merge-group stall detect-and-warn ────────────────────────────
+
+// TestCheckAutoMergeConvergence_MergeGroupStall_DwellElapsed verifies that when
+// a yolo PR has been in the merge queue past CIWaitTimeout, checkAutoMergeConvergence
+// posts the stall comment, applies fabrik:paused + fabrik:awaiting-input, and
+// removes fabrik:auto-merge-enabled (FR-1, FR-2, FR-3, FR-4).
+func TestCheckAutoMergeConvergence_MergeGroupStall_DwellElapsed(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, State: "open", AutoMergeEnabled: false, IsMergeQueueEnabled: true}, nil
+		},
+		fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+			// Label applied 31 minutes ago — past the 30-minute CIWaitTimeout.
+			return time.Now().Add(-31 * time.Minute), nil
+		},
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			return 999, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.CIWaitTimeout = 30 * time.Minute
+
+	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{
+		Status: PRMergeQueued,
+		PR:     &gh.PRDetails{Number: 10, HeadSHA: "abc12345", IsMergeQueueEnabled: true},
+	}
+
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, settle, false)
+
+	// Comment posted once with the spec-required body (FR-1).
+	if len(client.addCommentCalls) != 1 {
+		t.Errorf("expected 1 AddComment call (stall comment), got %d", len(client.addCommentCalls))
+	}
+	if len(client.addCommentCalls) > 0 {
+		body := client.addCommentCalls[0].body
+		if !strings.Contains(body, "merge queue stall detected") {
+			t.Errorf("stall comment missing 'merge queue stall detected': %q", body)
+		}
+		if !strings.Contains(body, "on: merge_group") {
+			t.Errorf("stall comment missing 'on: merge_group': %q", body)
+		}
+		if !strings.Contains(body, "fabrik:paused") {
+			t.Errorf("stall comment missing 'fabrik:paused' resume instruction: %q", body)
+		}
+	}
+	// 🚀 reaction added.
+	if len(client.addCommentReactionCalls) != 1 {
+		t.Errorf("expected 1 AddCommentReaction call, got %d", len(client.addCommentReactionCalls))
+	}
+	if len(client.addCommentReactionCalls) > 0 && client.addCommentReactionCalls[0].content != "rocket" {
+		t.Errorf("expected rocket reaction, got %q", client.addCommentReactionCalls[0].content)
+	}
+	// fabrik:paused applied.
+	wantLabels := map[string]bool{"fabrik:paused": false, "fabrik:awaiting-input": false}
+	for _, c := range client.addLabelCalls {
+		if _, ok := wantLabels[c.labelName]; ok {
+			wantLabels[c.labelName] = true
+		}
+	}
+	for label, found := range wantLabels {
+		if !found {
+			t.Errorf("expected label %q to be added, but it was not", label)
+		}
+	}
+	// fabrik:auto-merge-enabled removed.
+	removedAME := false
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:auto-merge-enabled" {
+			removedAME = true
+		}
+	}
+	if !removedAME {
+		t.Error("expected fabrik:auto-merge-enabled to be removed, but it was not")
+	}
+}
+
+// TestCheckAutoMergeConvergence_MergeGroupStall_DwellNotElapsed verifies that
+// when the PR is in the queue but the dwell has not yet elapsed, no stall comment
+// is posted and no pause labels are applied.
+func TestCheckAutoMergeConvergence_MergeGroupStall_DwellNotElapsed(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, State: "open", AutoMergeEnabled: false, IsMergeQueueEnabled: true}, nil
+		},
+		fetchLabelAppliedAtFn: func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+			// Label applied only 5 minutes ago — well under the 30-minute timeout.
+			return time.Now().Add(-5 * time.Minute), nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.CIWaitTimeout = 30 * time.Minute
+
+	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:auto-merge-enabled"}}
+	stage := &stages.Stage{Name: "Validate"}
+	settle := PRSettleResult{
+		Status: PRMergeQueued,
+		PR:     &gh.PRDetails{Number: 10, HeadSHA: "abc12345", IsMergeQueueEnabled: true},
+	}
+
+	eng.checkAutoMergeConvergence(context.Background(), &gh.ProjectBoard{ProjectID: "PVT_1"}, item, stage, settle, false)
+
+	if len(client.addCommentCalls) != 0 {
+		t.Errorf("expected 0 AddComment calls (dwell not elapsed), got %d", len(client.addCommentCalls))
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			t.Errorf("expected no fabrik:paused label (dwell not elapsed), but it was added")
+		}
+	}
+}
+
+// TestCheckAutoMergeConvergence_MergeGroupStall_Idempotent verifies that after
+// a stall pause, the idempotency is guaranteed by removedfabrik:auto-merge-enabled:
+// handleAutoMergeConvergence returns false immediately when the label is absent,
+// so checkAutoMergeConvergence (and therefore the stall comment) is never reached
+// again on subsequent polls.
+func TestCheckAutoMergeConvergence_MergeGroupStall_Idempotent(t *testing.T) {
+	commentCount := 0
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 10, State: "open", AutoMergeEnabled: false, IsMergeQueueEnabled: true}, nil
+		},
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			commentCount++
+			return 1, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	eng.cfg.CIWaitTimeout = 30 * time.Minute
+
+	// Simulate state after pauseForMergeGroupStall ran: fabrik:auto-merge-enabled
+	// was removed, so the item no longer claims the convergence handler.
+	// An item with fabrik:paused but without fabrik:auto-merge-enabled.
+	item := gh.ProjectItem{Number: 42, Repo: "owner/repo", Labels: []string{"fabrik:paused", "fabrik:awaiting-input"}}
+	stage := &stages.Stage{Name: "Validate"}
+
+	pctx := &phase1Ctx{
+		ctx:   context.Background(),
+		board: &gh.ProjectBoard{ProjectID: "PVT_1"},
+		item:  item,
+		stage: stage,
+	}
+	// handleAutoMergeConvergence returns false when fabrik:auto-merge-enabled is absent.
+	if claimed := eng.handleAutoMergeConvergence(pctx); claimed {
+		t.Error("expected handleAutoMergeConvergence to return false (no fabrik:auto-merge-enabled), got true")
+	}
+	if commentCount != 0 {
+		t.Errorf("expected no AddComment calls after stall pause, got %d", commentCount)
+	}
 }
