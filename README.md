@@ -306,6 +306,7 @@ GITHUB_TOKEN=ghp_...    # Fallback
 | `--review-wait-timeout` | Minutes to wait per reviewer-gate cycle before pausing. Explicitly passing `0` uses the built-in default of `15` and bypasses `FABRIK_REVIEW_WAIT_TIMEOUT`. When absent, `FABRIK_REVIEW_WAIT_TIMEOUT` is consulted first; falls back to `15` if unset. | `0` |
 | `--max-review-cycles` | Max re-invocation cycles per reviewer-gate session. Explicitly passing `0` uses the built-in default of `5` and bypasses `FABRIK_MAX_REVIEW_CYCLES`. When absent, `FABRIK_MAX_REVIEW_CYCLES` is consulted first; falls back to `5` if unset. | `0` |
 | `--max-rebase-cycles` | Maximum rebase re-invocation cycles per issue before pausing (0 = default 3; also `FABRIK_MAX_REBASE_CYCLES`) | `0` (3 cycles) |
+| `--max-enqueue-cycles` | Maximum merge-queue re-enqueue cycles per issue before pausing (0 = default 5; also `FABRIK_MAX_ENQUEUE_CYCLES`) | `0` (5 cycles) |
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` for debugging | `false` |
 | `--symlink-env` | Create a relative symlink at `<worktree>/.env` pointing to the fabrikDir `.env` at worktree setup time. Enables stage code to read project secrets without copying them. Also `FABRIK_SYMLINK_ENV`. | `false` |
 | `--plugin-dir` | Path to Fabrik plugin directory (overrides installed plugin) | `""` |

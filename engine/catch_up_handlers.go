@@ -19,6 +19,10 @@ type phase1Ctx struct {
 	stage         *stages.Stage
 	hasComplete   bool
 	advancedItems map[string]bool
+	// priorInQueue is the item's previous-poll merge-queue membership, captured
+	// in poll.go before ItemDeepFetched overwrites the store. checkAutoMergeConvergence
+	// uses it to detect the poll-native "left the queue" edge (ADR-058 D4 OQ-3).
+	priorInQueue bool
 }
 
 // catchUpHandler is a named Phase 1 gate/recovery handler. The name field lets
@@ -123,7 +127,7 @@ func (e *Engine) handleAutoMergeConvergence(pctx *phase1Ctx) bool {
 		return false
 	}
 	settle := e.settlePRMergeState(pctx.item, pctx.stage)
-	e.checkAutoMergeConvergence(pctx.ctx, pctx.board, pctx.item, pctx.stage, settle)
+	e.checkAutoMergeConvergence(pctx.ctx, pctx.board, pctx.item, pctx.stage, settle, pctx.priorInQueue)
 	return true
 }
 

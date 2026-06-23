@@ -595,6 +595,30 @@ func TestCheckCIGate_MergedPR_ClearsGate(t *testing.T) {
 	}
 }
 
+// TestCheckCIGate_PRMergeQueued_BlocksNoChurn verifies the FR-1 gate hand-off:
+// an in-queue PR (PRMergeQueued) blocks the CI gate exactly like PRMergeUnsettled
+// — no fabrik:awaiting-ci churn, no completion label, no pause — so the queue
+// owns the merge decision while it waits.
+func TestCheckCIGate_PRMergeQueued_BlocksNoChurn(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	tr := true
+	item := gh.ProjectItem{Number: 1, Labels: []string{"fabrik:awaiting-ci"}}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	settle := PRSettleResult{Status: PRMergeQueued, Reason: "PR in merge queue", PR: &gh.PRDetails{Number: 5}}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	if !blocked || ciFailure || timedOut {
+		t.Errorf("expected (true,false,false) for PRMergeQueued, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
+	}
+	if len(client.addLabelCalls) != 0 {
+		t.Errorf("PRMergeQueued must not add any label, got %d add(s)", len(client.addLabelCalls))
+	}
+	if len(client.removeLabelCalls) != 0 {
+		t.Errorf("PRMergeQueued must not remove any label (no churn), got %d remove(s)", len(client.removeLabelCalls))
+	}
+}
+
 // TestCheckCIGate_ClosedNotMergedPR_Pauses verifies R2: when the linked PR is
 // closed without merging, checkCIGate pauses the issue with fabrik:paused +
 // fabrik:awaiting-input and removes fabrik:awaiting-ci. stage:X:complete must

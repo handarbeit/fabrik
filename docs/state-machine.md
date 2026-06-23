@@ -844,7 +844,7 @@ See **section 5.5** for how Fabrik monitors the convergence flow after auto-merg
 
 ### 5.5 Post-Validate Convergence Monitor (yolo issues)
 
-After `fabrik:auto-merge-enabled` is applied (section 5.4), every Phase 1 iteration of the catch-up loop calls `checkAutoMergeConvergence()` instead of the legacy `checkMergeabilityGate` / `checkCIGate` path. All merge decisions for the issue are delegated to GitHub's server-side auto-merge logic. `handleAutoMergeConvergence` calls `settlePRMergeState()` before forwarding to `checkAutoMergeConvergence()`; the settle result is consumed for merge/CI state interpretation (eliminating the split-brain), though the merge/CI gates remain bypassed — see §6.4.
+After `fabrik:auto-merge-enabled` is applied (section 5.4), every Phase 1 iteration of the catch-up loop calls `checkAutoMergeConvergence()` instead of the legacy `checkMergeabilityGate` / `checkCIGate` path. All merge decisions for the issue are delegated to GitHub's server-side auto-merge logic (legacy native auto-merge) or to GitHub's **merge queue** (ADR-058). `handleAutoMergeConvergence` calls `settlePRMergeState()` before forwarding to `checkAutoMergeConvergence()`; the settle result is consumed for merge/CI state interpretation (eliminating the split-brain), though the merge/CI gates remain bypassed — see §6.4. The function is the **single mutation point** for the convergence/ejection lifecycle (ADR-056 — no parallel scanner is added); the merge-queue ejection classifier (ADR-058 D4) is composed into the same branch ladder.
 
 **Convergence budget:**
 
@@ -852,19 +852,35 @@ After `fabrik:auto-merge-enabled` is applied (section 5.4), every Phase 1 iterat
 - The budget is configured via `FABRIK_CONVERGENCE_BUDGET` (Go duration syntax, e.g., `30m`). Default: 30 minutes. Set to `0` to disable the budget — Fabrik waits indefinitely for auto-merge to complete (or for the user to disable auto-merge in the GitHub UI). `MaxCiFixCycles` is not consulted while `fabrik:auto-merge-enabled` is present. `MaxRebaseCycles` IS consulted: the convergence path's rebase dispatch is bounded by the same `MaxRebaseCycles` gate used by `handleMergeAndCIGates`, preventing an unbounded rebase loop when a conflict is unresolvable (see `RebaseCycles vs. budget` below).
 - On each Phase 1 iteration: `elapsed = time.Since(budgetStart)`. If `elapsed > budget`, `pauseForConvergenceFailed()` fires.
 
-**`checkAutoMergeConvergence()` decision tree:**
+**`checkAutoMergeConvergence()` decision tree (ordered; first match wins):**
 
-| Observed state | Action |
-|---|---|
-| PR merged or closed | Remove `fabrik:auto-merge-enabled` + `fabrik:rebase-needed` (if present); existing machinery advances to Done |
-| `AutoMergeEnabled == false` (user disabled) | Apply `fabrik:paused` + `fabrik:awaiting-input`; remove `fabrik:auto-merge-enabled`; post comment with resume options (prevents Phase 2 from re-enabling auto-merge on the next poll) |
-| Budget exhausted | Call `pauseForConvergenceFailed()` (see below) |
-| `settle.Status == PRMergeUnsettled` | Wait — GitHub still computing after a push (replaces `mergeable_state == "unknown"`); re-evaluate next poll |
-| `settle.Status == PRMergeConflicting` | Worker guard (`snap.Worker() != nil`) → skip if in-flight; cycle-limit check (`snap.RebaseCycles(stage) >= MaxRebaseCycles`) → `pauseForRebaseCycleLimit()`; otherwise increment `RebaseCycles` and dispatch rebase reinvoke |
-| Any other settle status (`PRMergeReady`, `PRMergeBlocked`, `PRMergeTerminal`, `PRMergeNoPR`) | Wait — GitHub is handling it |
+| # | Observed state | Action |
+|---|---|---|
+| ① | **Terminal-first** (`settle.Status == PRMergeTerminal \|\| pr.Merged \|\| pr.State == "closed"`) | `advanceConvergedPRToDone`: remove `fabrik:auto-merge-enabled` + `fabrik:rebase-needed`, advance to Done. **Checked FIRST** so a queue merge (which also *dequeues* the PR) is never misread as an ejection failure (the #913 trap). `settle.Status == PRMergeTerminal` already re-confirmed the merge via the authoritative single-PR endpoint, catching the window where the REST list endpoint still reports the PR open. |
+| ② | **In-queue hand-off** (`settle.Status == PRMergeQueued`) | Record `LastEnqueuedSHA` (the SHA GitHub holds in the queue), log, and wait — **no label churn**. The queue owns the PR. Replaces #935's inline `settle.PR.IsInMergeQueue` read (ADR-056 D1 consolidation). |
+| ③ | **Auto-merge disabled** (`!pr.AutoMergeEnabled && !mergeQueueEnabled`) | Apply `fabrik:paused` + `fabrik:awaiting-input`; remove `fabrik:auto-merge-enabled`; post comment with resume options. **Guarded on `!mergeQueueEnabled`**: every enqueue-path PR has `AutoMergeEnabled == false` as its normal state (`EnqueuePullRequest` never sets `auto_merge`), so on a merge-queue repo a false flag is NOT a user action — misreading it would pause every ejected PR (a #913-adjacent trap). `mergeQueueEnabled = item.LinkedPRIsMergeQueueEnabled \|\| settle.PR.IsMergeQueueEnabled` (dual-source). |
+| ④ | **Budget exhausted** | Call `pauseForConvergenceFailed()` (see below). Applies to both queue and non-queue repos — the ultimate strand safety-net. |
+| ⑤ | `settle.Status == PRMergeUnsettled` | Wait — GitHub still computing after a push/dequeue; re-evaluate next poll. |
+| ⑥ | `settle.Status == PRMergeConflicting` | Worker guard (`snap.Worker() != nil`) → skip if in-flight; cycle-limit check (`snap.RebaseCycles(stage) >= MaxRebaseCycles`) → `pauseForRebaseCycleLimit()`; otherwise increment `RebaseCycles` and dispatch a Claude rebase reinvoke. Shared by queue and non-queue repos; past step ②, a conflicting PR is guaranteed not-in-queue, so #935's inline in-queue guard here is removed (dead). On a queue repo this is the **ejection→resolve** path; the clean re-enqueue (⑦) fires later once the resolved PR re-derives clean. |
+
+**Ejection-recovery ladder (steps ⑦–⑧) — merge-queue repos only (`mergeQueueEnabled == true`):**
+
+| # | Observed state | Action |
+|---|---|---|
+| ⑦ | `settle.Status == PRMergeBlocked` (ejected, re-derived CI failure) | Worker guard → skip if in-flight; cycle-limit (`snap.CIFixCycles(stage) >= MaxCiFixCycles`) → `pauseForCIFixCycleLimit()`; otherwise increment `CIFixCycles` and dispatch a Claude ci-fix reinvoke. Re-enqueue (⑧) fires later once CI is fixed. |
+| ⑧ | `settle.Status == PRMergeReady` (ejected, re-derived clean) **and** (`leftQueue \|\| (LastEnqueuedSHA != "" && pr.HeadSHA != LastEnqueuedSHA)`) | `reEnqueueOrPause` — re-enqueue fresh (see below). `leftQueue` (= `priorInQueue`) fires the immediate same-SHA ejection re-enqueue; the SHA-change clause fires the post-resolution tail re-enqueue. When neither holds (post-enqueue consistency window: `priorInQueue == false` and the SHA still equals `LastEnqueuedSHA`), **wait** — the PR is already enqueued and GitHub just hasn't reflected `isInMergeQueue == true` yet. |
+| ⑨ | Non-queue fall-through (any other status) | Wait — GitHub's native auto-merge is handling it. |
+
+**Poll-native ejection detection (the "left the queue" edge):** `leftQueue = priorInQueue` (settle.Status != PRMergeQueued is guaranteed past step ②). `priorInQueue` is the item's previous-poll `LinkedPRState.IsInMergeQueue`, captured in `poll.go` from the pre-fetch store snapshot **before** `ItemDeepFetched` overwrites the store with the current value, then threaded through `phase1Ctx` → `handleAutoMergeConvergence` → `checkAutoMergeConvergence` (ADR-058 D4 OQ-3). Reading "prior" from `e.store` inside the classifier would yield the already-overwritten current value, silently losing the edge. No webhook is required; `dequeued.reason` is never consulted for correctness.
+
+**`reEnqueueOrPause` — bounded fresh re-enqueue (FR-3):**
+1. **Merged-first re-confirmation at the mutation point** (the #913 trap): `FetchPRMerged` (authoritative single-PR endpoint) — if merged → `advanceConvergedPRToDone`; if the call errors → wait (never re-enqueue on an unconfirmed state). The REST list endpoint reports `merged == false` for several seconds after a queue merge, so this guard runs right before the dangerous mutation.
+2. Worker-in-flight guard (`snap.Worker() != nil`) → skip.
+3. `snap.EnqueueCycles(stage) >= MaxEnqueueCycles` → `pauseForEnqueueCycleLimit()` (queue-thrash exhaustion).
+4. Otherwise `EnqueuePullRequest(owner, repo, prNum, pr.HeadSHA)` at the **fresh** head SHA (optimistic concurrency fails safe on a stale SHA; skipped if HeadSHA is empty), then apply `EnqueueCycleIncremented` + `PREnqueueRecorded`. Re-enqueue is always **fresh after off-queue resolution**, never re-enqueue-in-place, so conflict-heavy PRs do not starve the queue. An enqueue **failure does not** increment the cycle.
 
 **Rebase reinvoke + auto-merge re-enable:**
-GitHub disables auto-merge on every push. After `dispatchRebaseReinvoke()` completes successfully (Claude resolved conflicts, pushed), `EnablePullRequestAutoMerge` is called again to re-arm auto-merge. This is the only scenario where auto-merge is re-enabled without going through `attemptMergeOnValidate`.
+GitHub disables auto-merge on every push. After `dispatchRebaseReinvoke()` completes successfully (Claude resolved conflicts, pushed), `EnablePullRequestAutoMerge` is called again to re-arm auto-merge — **but only on non-merge-queue repos** (`!item.LinkedPRIsMergeQueueEnabled`, ADR-058 D4). On a merge-queue repo the recovery path is re-enqueue, not native auto-merge, so the convergence monitor re-enqueues the resolved PR once it re-derives clean (step ⑧); re-enabling native auto-merge there would fight the queue model. This is the only scenario where auto-merge is re-enabled without going through `attemptMergeOnValidate`.
 
 **`pauseForConvergenceFailed()` — convergence budget exhausted:**
 Uses `settle.PR` (from the pre-fetched `PRSettleResult`) for PR diagnostic fields, `FetchCommitsBehind` for the commits-behind count, `settle.CheckRuns` for the CI summary, and the store for the current rebase cycle count — no independent `FetchLinkedPR` or `FetchCheckRuns` calls. Posts a structured pause comment containing:
@@ -879,17 +895,32 @@ Then: applies `fabrik:paused` + `fabrik:awaiting-input`; removes `fabrik:auto-me
 
 **`RebaseCycles` vs. budget:** Under the convergence flow, `RebaseCycles` is incremented on every rebase dispatch. `MaxRebaseCycles` IS consulted as a gate — the same three-step guard used by `handleMergeAndCIGates` (in-flight guard → cycle-limit check → dispatch or `pauseForRebaseCycleLimit`) applies here. When `FABRIK_CONVERGENCE_BUDGET=0`, the time-based budget check is skipped, but `MaxRebaseCycles` still bounds rebase reinvokes — so an unresolvable conflict never produces an unbounded rebase loop.
 
+**Cap composition (ADR-058 D4 FR-3):** Four bounded paths pause independently, first-to-trip wins, no double-pause (each pause returns immediately after applying `fabrik:paused`, and a paused item is skipped on the next poll):
+
+| Cap | Counter | Increment site | Pause | Catches |
+|---|---|---|---|---|
+| `MaxEnqueueCycles` (default 5; `--max-enqueue-cycles` / `FABRIK_MAX_ENQUEUE_CYCLES`) | `EnqueueCycles` | each fresh re-enqueue trip (step ⑧) | `pauseForEnqueueCycleLimit` | queue-thrash loop (enqueue → eject → re-enqueue → eject) that no single sub-cap would catch |
+| `MaxRebaseCycles` (default 3) | `RebaseCycles` | each rebase dispatch (step ⑥) | `pauseForRebaseCycleLimit` | unresolvable conflict |
+| `MaxCiFixCycles` (default 5) | `CIFixCycles` | each ci-fix dispatch (step ⑦) | `pauseForCIFixCycleLimit` | persistent CI failure |
+| `ConvergenceBudget` (default 30m; `0` disables) | wall-clock since `fabrik:auto-merge-enabled` applied | n/a (time-based) | `pauseForConvergenceFailed` | the ultimate strand safety-net |
+
+`EnqueueCycles` is dedicated and independent of `RebaseCycles`/`CIFixCycles`: the sub-paths increment their own counter when they fire, while `EnqueueCycles` counts trips through the queue. All four counters are cleared by `EngineCyclesCleared` (applied by `clearFailedStage` on unpause/success), so a resumed issue starts fresh. `LastEnqueuedSHA` (on `LinkedPRState`) records the head SHA at the last enqueue (recorded both at the in-queue hand-off ② and at each re-enqueue ⑧), making the step-⑧ post-enqueue-window suppression SHA-precise.
+
 **State transitions for yolo Validate convergence:**
 
 | State | Trigger | New state | Labels added | Labels removed |
 |---|---|---|---|---|
 | Validate, Complete | Poll tick (Phase 2) | Validate, Convergence | `fabrik:auto-merge-enabled` | |
-| Validate, Convergence | PR merged (GitHub) | Done, Pending Cleanup | | `fabrik:auto-merge-enabled`, `fabrik:rebase-needed` |
+| Validate, Convergence | PR merged (GitHub, incl. via merge queue) | Done, Pending Cleanup | | `fabrik:auto-merge-enabled`, `fabrik:rebase-needed` |
+| Validate, Convergence | `settle.Status=PRMergeQueued` (enqueued / in queue) | Validate, Convergence (hand-off) | | | *(no churn; queue owns the PR)* |
 | Validate, Convergence | `settle.Status=PRMergeConflicting` (conflict, below `MaxRebaseCycles`) | Validate, Convergence + Rebase in-flight | `fabrik:rebase-needed` | |
 | Validate, Convergence | `settle.Status=PRMergeConflicting` (conflict, at `MaxRebaseCycles` limit) | Validate, Paused | `fabrik:paused`, `fabrik:awaiting-input` | |
 | Validate, Convergence + Rebase in-flight | Rebase push succeeds | Validate, Convergence | | |
+| Validate, Convergence | **Ejected** + re-derived clean (`leftQueue`/SHA-changed), `EnqueueCycles < Max` | Validate, Convergence (re-enqueued) | | | *(merge-queue repos; `EnqueueCycles++`, `LastEnqueuedSHA` recorded)* |
+| Validate, Convergence | **Ejected** + re-derived clean, `EnqueueCycles ≥ MaxEnqueueCycles` | Validate, Paused | `fabrik:paused`, `fabrik:awaiting-input` | | *(merge-queue repos; `pauseForEnqueueCycleLimit`)* |
+| Validate, Convergence | **Ejected** + re-derived CI failure (`PRMergeBlocked`), `CIFixCycles < Max` | Validate, Convergence + CI-fix in-flight | | | *(merge-queue repos; `CIFixCycles++`)* |
 | Validate, Convergence | Budget exhausted | Validate, Paused | `fabrik:paused`, `fabrik:awaiting-input` | `fabrik:auto-merge-enabled` |
-| Validate, Convergence | User disables auto-merge in GitHub UI | Validate, Paused | `fabrik:paused`, `fabrik:awaiting-input` | `fabrik:auto-merge-enabled` |
+| Validate, Convergence | User disables auto-merge in GitHub UI (**non-queue repo**) | Validate, Paused | `fabrik:paused`, `fabrik:awaiting-input` | `fabrik:auto-merge-enabled` |
 
 ### 5.6 Engine-Mechanized PR Creation (`FABRIK_PR_CREATE` Marker)
 
@@ -978,7 +1009,7 @@ After the marker block is processed, the `FABRIK_PR_CREATE_BEGIN/END` content is
 
 ### 5.8 Merge-Queue Awareness (ADR-058 D3)
 
-When the linked PR's repository has GitHub's **merge queue** enabled, Fabrik's preemptive rebasing and branch mutations fight the queue: the queue already enforces "up-to-date at merge time," and **any push, rebase, or base-branch change to a PR currently in the queue ejects it**. Two guards make every engine-initiated git/PR mutation queue-aware, across **all** paths (yolo, cruise, manual). Both guards source their signal exclusively from the GraphQL-populated `ProjectItem` fields — never from `e.client.FetchLinkedPR` (the REST `pulls` endpoint does not carry these flags, so it always reports false). Conflict-dispatch sites read the same flag via `settle.PR.IsInMergeQueue` (the settle primitive reads through `readClient`, §6.4).
+When the linked PR's repository has GitHub's **merge queue** enabled, Fabrik's preemptive rebasing and branch mutations fight the queue: the queue already enforces "up-to-date at merge time," and **any push, rebase, or base-branch change to a PR currently in the queue ejects it**. Two guards make every engine-initiated git/PR mutation queue-aware, across **all** paths (yolo, cruise, manual). Both guards source their signal exclusively from the GraphQL-populated `ProjectItem` fields — never from `e.client.FetchLinkedPR` (the REST `pulls` endpoint does not carry these flags, so it always reports false). The convergence-owner conflict-dispatch site no longer reads `settle.PR.IsInMergeQueue` inline: D4 (§5.5) consolidates queue membership into the `PRMergeQueued` settle status, which intercepts an in-queue PR before the conflict branch is reached.
 
 **Signal fields:**
 
@@ -1000,7 +1031,8 @@ When the linked PR's repository has GitHub's **merge queue** enabled, Fabrik's p
 | `engine/prcreate.go` `processPRCreateMarker` | `git push --force-with-lease` | `pushBranchUnlessQueued` | FR-1 |
 | `engine/item.go` post-stage WIP push | `git push --force-with-lease` | `pushBranchUnlessQueued` | FR-1 |
 | `engine/pr.go` `syncPRBase` | `UpdatePRBase` (PR base change) | early-return `if prInMergeQueue(item)` | FR-1 |
-| `engine/catch_up_handlers.go` `handleMergeAndCIGates`; `engine/merge_gate.go` `checkAutoMergeConvergence` | `dispatchRebaseReinvoke` (synthetic rebase + force-push) | skip dispatch when `settle.PR.IsInMergeQueue` (guard at dispatch, **not** in the function body — preserves the path for the D4 ejection→resolve composition) | FR-1 |
+| `engine/catch_up_handlers.go` `handleMergeAndCIGates` | `dispatchRebaseReinvoke` (synthetic rebase + force-push) | for an in-queue PR `settlePRMergeState` returns `PRMergeQueued`, so `checkMergeabilityGate` clears `mergeConflict` and the rebase dispatch is never reached; the inline `prInMergeQueue \|\| settle.PR.IsInMergeQueue` guard at the dispatch site remains as a defensive backstop | FR-1 |
+| `engine/merge_gate.go` `checkAutoMergeConvergence` | `dispatchRebaseReinvoke` (synthetic rebase + force-push) | **D4 (landed):** the in-queue PR is intercepted by the `PRMergeQueued` hand-off (step ②) before the conflict branch — a `PRMergeConflicting` settle is therefore guaranteed not-in-queue, so the former inline conflict-branch guard is removed (dead). After the PR leaves the queue, the conflict branch dispatches the rebase (the ejection→resolve composition); see §5.5 | FR-1 |
 | `engine/stages.go` `attemptMergeOnValidate` `MergePR` fallback | direct merge | **no new guard** — the D2 enqueue early-return (`cfg.MergeQueue != "off" && pr.IsMergeQueueEnabled`) returns before `MergePR` is reached on a queue repo; a queued PR is never directly merged | FR-1 (audit) |
 
 **Non-mutating (no guard needed):** `engine/pr_terminal_advance.go` rebase-needed handling is `removeRebaseNeededLabel` only (label cleanup, no git/PR mutation) and runs only after a PR is already merged/closed.
@@ -1139,13 +1171,13 @@ Phase 1 is implemented as an explicit ordered slice of named handler methods (`c
 In both cases, this eliminates the split-brain where two separate REST calls within one poll cycle could observe different GitHub state.
 
 **Return type:** `PRSettleResult` carries:
-- `Status PRMergeStatus` — one of six typed constants (see below)
+- `Status PRMergeStatus` — one of seven typed constants (see below)
 - `PR *gh.PRDetails` — the fetched PR (nil when status is `PRMergeNoPR`)
 - `MergeableState string` — raw `mergeable_state` from GitHub (empty when intentionally omitted — see invariant below)
 - `CheckRuns []gh.CheckRun` — check runs for the PR head SHA (nil when not fetched)
 - `Reason string` — human-readable explanation for the status
 
-**Six status constants:**
+**Seven status constants:**
 
 | Constant | Meaning |
 |---|---|
@@ -1155,25 +1187,27 @@ In both cases, this eliminates the split-brain where two separate REST calls wit
 | `PRMergeConflicting` | `mergeable == false` — confirmed base-branch conflict |
 | `PRMergeBlocked` | CI checks have failed; `checkCIGate` dispatches `dispatchCIFixReinvoke()` |
 | `PRMergeTerminal` | PR is merged or closed without merging; both gates handle terminal state |
+| `PRMergeQueued` | PR is in GitHub's native merge queue (ADR-058 D4) — a **transient hand-off**: the queue owns the PR and will merge or eject it. Both gates block like `PRMergeUnsettled` (no conflict, **no label churn**); the convergence monitor waits. The single canonical queue-membership signal (ADR-056 D1), evaluated strictly **after** the terminal check (the #913 merged-first invariant: a PR that merged via the queue is terminal, never "queued"). |
 
 **Settling rules (applied in order):**
 
 1. `FetchLinkedPR()` — if no linked PR: return `PRMergeNoPR`.
 2. PR merged (`pr.Merged == true`): return `PRMergeTerminal`.
-3. PR closed, not merged (`pr.State == "closed"`): return `PRMergeTerminal`.
-4. `FetchPRMergeableFields()` — fetches `mergeable` (bool ptr) and `mergeable_state` (string) in one REST call (single-PR endpoint; the list endpoint used by `FetchLinkedPR` does not return `mergeable`). API error → return `PRMergeUnsettled`.
-5. `mergeable == nil` (GitHub still computing): return `PRMergeUnsettled` (`MergeableState` set).
-6. `mergeable_state == "unknown"` (transient): return `PRMergeUnsettled` (`MergeableState` set).
-7. `mergeable == false`: return `PRMergeConflicting` (`MergeableState` set).
-8. `mergeable_state ∈ {clean, unstable}` (per `MergeableStateAccepted` allowlist): return `PRMergeReady` — per ADR-033, GitHub's branch-protection signal is authoritative; `FetchCheckRuns` is not called.
-9. HeadSHA empty: return `PRMergeUnsettled` (`MergeableState` **intentionally omitted** — see invariant).
-10. `FetchCheckRuns()` — API error → return `PRMergeUnsettled`.
-11. Check runs non-empty: apply `PRChecksObserved` store event (sets `HasHadChecks`).
-12. Check runs empty + `hadChecks` (store: `LinkedPRState.HasHadChecks`): return `PRMergeUnsettled` (`MergeableState` **intentionally omitted** — see invariant).
-13. Check runs empty + post-push dwell active (`LastHeadSHAUpdate` non-zero and `time.Since < PostPushDwell`, default 90 s): return `PRMergeUnsettled` (`MergeableState` **intentionally omitted** — see invariant). Zero `LastHeadSHAUpdate` (cold start / post-restart) falls through.
-14. Check runs empty + `mergeable_state ∉ {"", "unknown"}`: return `PRMergeUnsettled` (`MergeableState` set — R3/branch-protection signal for `checkCIGate`).
-15. Check runs empty + `mergeable_state ∈ {"", "unknown"}`: return `PRMergeReady` (no CI configured).
-16. Check runs non-empty: any failed (`failure`/`timed_out`/`action_required`) → return `PRMergeBlocked` (`CheckRuns` set); any pending (`queued`/`in_progress`) → return `PRMergeUnsettled` (`CheckRuns` set); all green → return `PRMergeReady` (`CheckRuns` set).
+3. PR closed, not merged (`pr.State == "closed"`): return `PRMergeTerminal` (re-confirmed via the authoritative single-PR `FetchPRMerged` endpoint, since the list endpoint reports `merged == false` for several seconds after a queue merge — the #913 trap).
+4. **PR in merge queue** (`prInMergeQueue(item) || pr.IsInMergeQueue || pr.MergeQueueEntry.State ∈ {QUEUED, AWAITING_CHECKS}`): return `PRMergeQueued`. Evaluated **after** the terminal check (rules 2–3, the merged-first invariant) and **before** mergeable/CI classification — a queued PR is a transient hand-off, so the gates never interpret its `mergeable_state`. Dual-sourced from the GraphQL-authoritative `ProjectItem` field (reliable on every poll) **and** `settle.PR`/`MergeQueueEntry`, so it holds on a boardcache miss (the REST `FetchLinkedPR` fallback reports the flag as false).
+5. `FetchPRMergeableFields()` — fetches `mergeable` (bool ptr) and `mergeable_state` (string) in one REST call (single-PR endpoint; the list endpoint used by `FetchLinkedPR` does not return `mergeable`). API error → return `PRMergeUnsettled`.
+6. `mergeable == nil` (GitHub still computing): return `PRMergeUnsettled` (`MergeableState` set).
+7. `mergeable_state == "unknown"` (transient): return `PRMergeUnsettled` (`MergeableState` set).
+8. `mergeable == false`: return `PRMergeConflicting` (`MergeableState` set).
+9. `mergeable_state ∈ {clean, unstable}` (per `MergeableStateAccepted` allowlist): return `PRMergeReady` — per ADR-033, GitHub's branch-protection signal is authoritative; `FetchCheckRuns` is not called.
+10. HeadSHA empty: return `PRMergeUnsettled` (`MergeableState` **intentionally omitted** — see invariant).
+11. `FetchCheckRuns()` — API error → return `PRMergeUnsettled`.
+12. Check runs non-empty: apply `PRChecksObserved` store event (sets `HasHadChecks`).
+13. Check runs empty + `hadChecks` (store: `LinkedPRState.HasHadChecks`): return `PRMergeUnsettled` (`MergeableState` **intentionally omitted** — see invariant).
+14. Check runs empty + post-push dwell active (`LastHeadSHAUpdate` non-zero and `time.Since < PostPushDwell`, default 90 s): return `PRMergeUnsettled` (`MergeableState` **intentionally omitted** — see invariant). Zero `LastHeadSHAUpdate` (cold start / post-restart) falls through.
+15. Check runs empty + `mergeable_state ∉ {"", "unknown"}`: return `PRMergeUnsettled` (`MergeableState` set — R3/branch-protection signal for `checkCIGate`).
+16. Check runs empty + `mergeable_state ∈ {"", "unknown"}`: return `PRMergeReady` (no CI configured).
+17. Check runs non-empty: any failed (`failure`/`timed_out`/`action_required`) → return `PRMergeBlocked` (`CheckRuns` set); any pending (`queued`/`in_progress`) → return `PRMergeUnsettled` (`CheckRuns` set); all green → return `PRMergeReady` (`CheckRuns` set).
 
 **`MergeableState` omission invariant:** `checkCIGate` uses `settle.MergeableState` to detect R3 (OPEN+BLOCKED+no-check-runs+`fabrik:awaiting-ci` elapsed → `pauseForRequiredNeverRunningCheck`). The primitive omits `MergeableState` from the `PRSettleResult` in the hadChecks, post-push dwell, and HeadSHA-empty cases. This prevents R3 from misfiring on cases where `hadChecks == true` (checks have been observed) or where GitHub simply hasn't computed mergeability yet (post-push window). Only a non-empty `MergeableState` in the settle result is genuinely relevant for R3/branch-protection timeout checking.
 
@@ -1208,6 +1242,7 @@ The CI gate has two paths that handle different timing scenarios:
   - `(ciBlocked=true, ciFailure=true, ciTimedOut=false)` — failure confirmed; `fabrik:awaiting-ci` applied idempotently; dispatch `dispatchCIFixReinvoke()` or pause on cycle limit
   - `(ciBlocked=false, ciFailure=false, ciTimedOut=true)` — `fabrik:awaiting-ci` has been present ≥ `CIWaitTimeout`; pause via `pauseForCITimeout()`
 - **Gate cleared outcome:** When all checks pass (or no check runs exist — R5), `checkCIGate` calls `addCompleteLabelAndRemoveCI`: adds `stage:X:complete` and removes `fabrik:awaiting-ci`.
+- **`PRMergeQueued` hand-off (ADR-058 D4 FR-1):** when the PR is in GitHub's merge queue, `checkCIGate` returns `(true, false, false)` — block with **no `fabrik:awaiting-ci` churn**, mirroring the `PRMergeUnsettled` fall-through. The queue owns the merge decision while the PR waits; the next poll re-evaluates.
 
 **Clearing-owner invariant for `wait_for_ci: true` stages:** Exactly two code paths may add `stage:X:complete` for these stages; they are mutually exclusive by PR state at the time of evaluation:
 1. **Normal path** (`addCompleteLabelAndRemoveCI`, called from `checkCIGate`): PR is still open; CI checks clear (or R5 — no CI configured). Runs inside `handleMergeAndCIGates` in the catch-up Phase 1 loop.
@@ -1265,7 +1300,7 @@ The merge-conflict gate is a third prong of the catch-up loop Phase 1, sitting b
 `checkMergeabilityGate()` runs only when `stage.WaitForCI` is true (the same opt-in that admits items to the catch-up window via `fabrik:awaiting-ci`). It returns `(blocked, conflict)`:
 
 - `(false, false)` — clear: `PRMergeNoPR`, `PRMergeTerminal`, `PRMergeReady`, or `PRMergeBlocked` (CI failed — no base conflict; deferred to the CI gate). Any stale `fabrik:rebase-needed` label is removed. Caller falls through to the CI gate.
-- `(true, false)` — `PRMergeUnsettled` (`mergeable == null`, still computing, or transient API error). The gate blocks but **no label is applied** — unknown states must not produce label churn (ADR-032 R10c). Caller skips to the next item; the next poll re-evaluates.
+- `(true, false)` — `PRMergeUnsettled` (`mergeable == null`, still computing, or transient API error) **or `PRMergeQueued`** (the PR is in GitHub's merge queue — ADR-058 D4). The gate blocks but **no label is applied** — unknown/queued states must not produce label churn (ADR-032 R10c). For `PRMergeQueued` this is the FR-1 hand-off: a human-enqueued non-yolo PR at a gate-checked stage simply waits for the queue. Caller skips to the next item; the next poll re-evaluates.
 - `(true, true)` — `PRMergeConflicting` (`mergeable == false`, confirmed conflict). `fabrik:rebase-needed` is applied idempotently. The caller in `poll()` dispatches a rebase reinvoke or pauses on the cycle limit.
 
 The gate's inputs come from `settlePRMergeState()` (§6.4), called once per Phase 1 iteration before both gates. `FetchPRMergeableFields()` (single-PR endpoint, not the list endpoint used by `FetchLinkedPR`) provides both `mergeable` and `mergeable_state` in one request — the list endpoint does not return `mergeable`.

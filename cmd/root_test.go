@@ -356,6 +356,32 @@ func TestExecute_MaxReviewCyclesFlag(t *testing.T) {
 	}
 }
 
+func TestExecute_MaxEnqueueCyclesFlag(t *testing.T) {
+	resetFlags()
+	stagesDir := t.TempDir()
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--token", "tok", "--stages", stagesDir, "--max-enqueue-cycles", "7"}
+
+	err := Execute()
+	if err == nil {
+		t.Fatal("expected error (no stages)")
+	}
+	if err.Error() == "unknown flag: --max-enqueue-cycles" {
+		t.Error("--max-enqueue-cycles flag not registered")
+	}
+}
+
+func TestMaxEnqueueCycles_Default(t *testing.T) {
+	if got := maxEnqueueCycles(0); got != 5 {
+		t.Errorf("maxEnqueueCycles(0) = %d, want default 5", got)
+	}
+	if got := maxEnqueueCycles(-1); got != 5 {
+		t.Errorf("maxEnqueueCycles(-1) = %d, want default 5", got)
+	}
+	if got := maxEnqueueCycles(9); got != 9 {
+		t.Errorf("maxEnqueueCycles(9) = %d, want passthrough 9", got)
+	}
+}
+
 func TestExecute_HelpIncludesSubcommands(t *testing.T) {
 	resetFlags()
 	// Route flag.CommandLine output to a buffer so we can inspect usage text.

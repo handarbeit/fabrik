@@ -38,6 +38,7 @@ type Config struct {
 	PostPushDwell            time.Duration // How long to wait after a PR push before clearing CI gate as 'no CI configured' (default 90s)
 	MaxCiFixCycles           int           // Max CI-fix re-invocation cycles per issue before pausing (default 5)
 	MaxRebaseCycles          int           // Max rebase re-invocation cycles per issue before pausing (default 3)
+	MaxEnqueueCycles         int           // Max merge-queue re-enqueue cycles per issue before pausing (default 5; ADR-058 D4)
 	ConvergenceBudget        time.Duration // Wall-clock budget for post-Validate yolo convergence (default 30m; 0 = disabled, waits indefinitely)
 	AutoMergeStrategy        string        // Merge method for enablePullRequestAutoMerge: MERGE, SQUASH, or REBASE (default MERGE)
 	MergeQueue               string        // Merge queue routing for yolo path: "auto" (enqueue when repo uses merge queue) or "off" (skip enqueue)
