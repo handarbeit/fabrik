@@ -236,6 +236,66 @@ func TestFindStage(t *testing.T) {
 	}
 }
 
+// TestLoadAll_HoldingStage verifies that a stage with holding_stage: true
+// loads successfully without a prompt or skill, and has no Claude completion type.
+func TestLoadAll_HoldingStage(t *testing.T) {
+	dir := t.TempDir()
+	writeStageFile(t, dir, "queued.yaml", `
+name: Queued
+order: 6
+holding_stage: true
+`)
+
+	ss, err := LoadAll(dir)
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	if len(ss) != 1 {
+		t.Fatalf("expected 1 stage, got %d", len(ss))
+	}
+	s := ss[0]
+	if !s.HoldingStage {
+		t.Error("HoldingStage should be true")
+	}
+	if s.Completion.Type != "" {
+		t.Errorf("holding stage should have no completion type, got %q", s.Completion.Type)
+	}
+}
+
+// TestLoadAll_MissingPromptNotHolding is a regression guard: a stage without
+// cleanup_worktree or holding_stage and without a prompt/skill must be rejected.
+func TestLoadAll_MissingPromptNotHolding(t *testing.T) {
+	dir := t.TempDir()
+	writeStageFile(t, dir, "bad.yaml", `
+name: BadStage
+order: 3
+`)
+
+	_, err := LoadAll(dir)
+	if err == nil {
+		t.Fatal("expected error for stage missing prompt/skill/cleanup_worktree/holding_stage")
+	}
+}
+
+// TestLoadAll_CleanupWorktreeNoPrompt_Regression verifies that cleanup_worktree:true
+// stages still load without a prompt (regression guard for the prior bypass).
+func TestLoadAll_CleanupWorktreeNoPrompt_Regression(t *testing.T) {
+	dir := t.TempDir()
+	writeStageFile(t, dir, "done.yaml", `
+name: Done
+order: 99
+cleanup_worktree: true
+`)
+
+	ss, err := LoadAll(dir)
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	if len(ss) != 1 || !ss[0].CleanupWorktree {
+		t.Errorf("expected 1 cleanup stage, got %+v", ss)
+	}
+}
+
 func TestLoadAll_ReadError(t *testing.T) {
 	dir := t.TempDir()
 	// Create a directory named bad.yaml so os.ReadFile fails deterministically
