@@ -104,6 +104,13 @@ type Stage struct {
 	// Use this for terminal stages like "Done" to reclaim disk space.
 	CleanupWorktree bool `yaml:"cleanup_worktree,omitempty"`
 
+	// HoldingStage marks this stage as an engine-managed holding stage that
+	// requires no Claude invocation and no worktree cleanup. Items in a holding
+	// stage are never individually dispatched; the engine handles them in batch
+	// (e.g., the Queued merge-train stage). When true, the prompt/skill requirement
+	// is waived and no Claude completion type is assigned.
+	HoldingStage bool `yaml:"holding_stage,omitempty"`
+
 	// DisableAdaptiveThinking controls whether Claude Code's adaptive (auto-reduced)
 	// thinking budget is disabled. nil means use the default (disabled). When nil or
 	// true, CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 is injected into the subprocess
@@ -211,7 +218,7 @@ func loadOne(path string) (*Stage, error) {
 		return nil, fmt.Errorf("stage must have a 'name' field")
 	}
 
-	if !s.CleanupWorktree {
+	if !s.CleanupWorktree && !s.HoldingStage {
 		if s.Prompt == "" && s.Skill == "" {
 			return nil, fmt.Errorf("stage %q must have a 'prompt' or 'skill' field", s.Name)
 		}
