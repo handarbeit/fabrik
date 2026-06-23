@@ -1551,6 +1551,12 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	}
 doneDispatching:
 
+	// Merge-train batch snapshot: log all items currently in the Queued column.
+	// Runs every poll cycle when merge_train: on. No dispatch, no mutation — D1 skeleton only.
+	if e.cfg.MergeTrain == "on" {
+		e.handleMergeTrainBatch(ctx, board)
+	}
+
 	// Remove stale fabrik:locked labels from closed issues. This handles the case
 	// where an issue was closed while a stage was in-flight, leaving the lock label
 	// behind. We do this every poll so it also catches locks from prior Fabrik runs.
@@ -1619,6 +1625,26 @@ doneDispatching:
 		Dispatched: dispatched,
 		SeenRepos:  seenRepos,
 	}, nil
+}
+
+// handleMergeTrainBatch snapshots all items currently in the Queued column and
+// logs the batch that the merge train would form on this poll cycle. This is the
+// ADR-059 D1 skeleton — no trial branch, no landing logic yet (D2–D5 follow).
+func (e *Engine) handleMergeTrainBatch(_ context.Context, board *gh.ProjectBoard) {
+	var batch []gh.ProjectItem
+	for _, item := range board.Items {
+		if item.Status == "Queued" {
+			batch = append(batch, item)
+		}
+	}
+	if len(batch) == 0 {
+		return
+	}
+	var parts []string
+	for _, item := range batch {
+		parts = append(parts, fmt.Sprintf("#%d %q", item.Number, item.Title))
+	}
+	e.logf(0, "merge-train", "batch snapshot: %d item(s) — %s\n", len(batch), strings.Join(parts, ", "))
 }
 
 func gitRevParse(dir, ref string) (string, error) {
