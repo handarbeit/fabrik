@@ -124,6 +124,12 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 		return false
 	}
 
+	// Holding stages are batch-scoped (handled by handleMergeTrainBatch in poll.go),
+	// not per-item. Never dispatch individual items at a holding stage.
+	if stage.HoldingStage {
+		return false
+	}
+
 	// Cleanup stages bypass the updatedAt cache — their trigger is worktree
 	// existence (a local filesystem check), not issue/PR changes. Board column
 	// moves (Validate→Done by a human) don't always bump updatedAt, so cleanup
@@ -182,6 +188,11 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	}
 
 	if stage == nil {
+		return false
+	}
+
+	// Holding stages are batch-scoped; never dispatch individual items.
+	if stage.HoldingStage {
 		return false
 	}
 
@@ -395,6 +406,12 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			Reason: "dep-blocked",
 			Until:  time.Now().Add(cooldown),
 		})
+		return nil
+	}
+
+	// Holding stage: batch-managed by handleMergeTrainBatch in poll.go, never per-item.
+	// itemMayNeedWork/itemNeedsWork should have filtered these out; this is a safety net.
+	if stage.HoldingStage {
 		return nil
 	}
 
