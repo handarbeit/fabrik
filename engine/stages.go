@@ -475,26 +475,40 @@ func (e *Engine) handleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 	}
 }
 
-// advanceToQueued moves an item from Validate to the Queued holding column when
-// merge_train: on. It sets the board status to Queued and adds stage:Validate:complete
+// holdingStage returns the first stage in cfg with HoldingStage: true, or nil if none.
+func holdingStage(cfg Config) *stages.Stage {
+	for _, s := range cfg.Stages {
+		if s.HoldingStage {
+			return s
+		}
+	}
+	return nil
+}
+
+// advanceToQueued moves an item from Validate to the configured holding stage column
+// when merge_train: on. It sets the board status and adds stage:Validate:complete
 // so the Phase 2 catch-up loop does not re-dispatch Validate on the next poll.
 func (e *Engine) advanceToQueued(_ context.Context, board *gh.ProjectBoard, item gh.ProjectItem, owner, repo string) error {
+	hs := holdingStage(e.cfg)
+	if hs == nil {
+		return fmt.Errorf("merge_train: on but no holding stage (HoldingStage: true) configured in stages")
+	}
 	if e.statusField == nil {
-		return fmt.Errorf("status field metadata not available; cannot advance to Queued")
+		return fmt.Errorf("status field metadata not available; cannot advance to %s", hs.Name)
 	}
 
-	optionID, ok := e.statusField.Options["Queued"]
+	optionID, ok := e.statusField.Options[hs.Name]
 	if !ok {
-		return fmt.Errorf("no status option %q found on project board (available: %v); is the Queued column missing?",
-			"Queued", mapKeys(e.statusField.Options))
+		return fmt.Errorf("no status option %q found on project board (available: %v); is the %s column missing?",
+			hs.Name, mapKeys(e.statusField.Options), hs.Name)
 	}
 
-	e.logf(item.Number, "merge-train", "advancing to Queued for merge train batching\n")
+	e.logf(item.Number, "merge-train", "advancing to %s for merge train batching\n", hs.Name)
 	if err := e.client.UpdateProjectItemStatus(board.ProjectID, item.ItemID, e.statusField.FieldID, optionID); err != nil {
-		return fmt.Errorf("move to Queued: %w", err)
+		return fmt.Errorf("move to %s: %w", hs.Name, err)
 	}
 	if cacheImpl, ok2 := e.readClient.(*boardcache.CacheImpl); ok2 {
-		cacheImpl.UpdateItemStatus(boardcache.ItemKey(item.Repo, item.Number), "Queued")
+		cacheImpl.UpdateItemStatus(boardcache.ItemKey(item.Repo, item.Number), hs.Name)
 	}
 	if e.webhookMgr != nil {
 		e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
@@ -503,7 +517,7 @@ func (e *Engine) advanceToQueued(_ context.Context, board *gh.ProjectBoard, item
 	// Add stage:Validate:complete so the Phase 2 catch-up loop does not re-dispatch Validate.
 	completeLabel := "stage:Validate:complete"
 	if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); lerr != nil {
-		e.logf(item.Number, "warn", "advanced to Queued but could not add %s label: %v — will retry on next poll\n", completeLabel, lerr)
+		e.logf(item.Number, "warn", "advanced to %s but could not add %s label: %v — will retry on next poll\n", hs.Name, completeLabel, lerr)
 		return fmt.Errorf("add %s label: %w", completeLabel, lerr)
 	}
 	if cacheImpl, ok2 := e.readClient.(*boardcache.CacheImpl); ok2 {
@@ -513,7 +527,7 @@ func (e *Engine) advanceToQueued(_ context.Context, board *gh.ProjectBoard, item
 		e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+completeLabel)
 	}
 
-	e.logf(item.Number, "merge-train", "queued for merge train — waiting for batch\n")
+	e.logf(item.Number, "merge-train", "holding in %s — waiting for batch\n", hs.Name)
 	return nil
 }
 

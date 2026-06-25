@@ -526,25 +526,26 @@ func TestAttemptMergeOnValidate_MergeQueueOffDoesNotEnqueue(t *testing.T) {
 	}
 }
 
-// testStagesWithValidateAndQueued returns stages including Validate and Queued,
-// for merge-train advancement tests.
-func testStagesWithValidateAndQueued() []*stages.Stage {
+// testStagesWithValidateAndHolding returns stages including Validate and a holding
+// stage named "BatchHold" (deliberately not "Queued") to verify behavior is driven
+// by the HoldingStage field, not the column name.
+func testStagesWithValidateAndHolding() []*stages.Stage {
 	return []*stages.Stage{
 		{Name: "Research", Order: 1, Prompt: "research"},
 		{Name: "Plan", Order: 2, Prompt: "plan"},
 		{Name: "Implement", Order: 3, Prompt: "implement"},
 		{Name: "Validate", Order: 4, Prompt: "validate"},
-		{Name: "Queued", Order: 6, HoldingStage: true},
+		{Name: "BatchHold", Order: 6, HoldingStage: true},
 		{Name: "Done", Order: 99, CleanupWorktree: true},
 	}
 }
 
 // TestAttemptMergeOnValidate_MergeTrainOn_AdvancesToQueued verifies that when
-// merge_train: on, a yolo Validate completion advances the item to Queued,
+// merge_train: on, a yolo Validate completion advances the item to the holding stage,
 // adds stage:Validate:complete, and does NOT call auto-merge or enqueue.
 func TestAttemptMergeOnValidate_MergeTrainOn_AdvancesToQueued(t *testing.T) {
 	client := &mockGitHubClient{}
-	stgs := testStagesWithValidateAndQueued()
+	stgs := testStagesWithValidateAndHolding()
 	eng := testEngineWithStages(t, client, stgs)
 	eng.cfg.MergeTrain = "on"
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
@@ -555,16 +556,18 @@ func TestAttemptMergeOnValidate_MergeTrainOn_AdvancesToQueued(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if enabled {
-		t.Fatal("expected enabled=false when advancing to Queued (not auto-merge path)")
+		t.Fatal("expected enabled=false when advancing to holding stage (not auto-merge path)")
 	}
 
-	// Must have called UpdateProjectItemStatus with the Queued option ID.
+	// Must have called UpdateProjectItemStatus with the holding stage option ID.
 	if len(client.updateStatusCalls) != 1 {
 		t.Fatalf("expected 1 UpdateProjectItemStatus call, got %d", len(client.updateStatusCalls))
 	}
-	if client.updateStatusCalls[0].optionID != "OPT_Queued" {
+	// The holding stage is named "BatchHold" (not "Queued") — option ID must match the
+	// HoldingStage field, not a hardcoded name.
+	if client.updateStatusCalls[0].optionID != "OPT_BatchHold" {
 		t.Errorf("UpdateProjectItemStatus called with option %q, want %q",
-			client.updateStatusCalls[0].optionID, "OPT_Queued")
+			client.updateStatusCalls[0].optionID, "OPT_BatchHold")
 	}
 
 	// Must have added stage:Validate:complete.
@@ -597,7 +600,7 @@ func TestAttemptMergeOnValidate_MergeTrainOff_UsesExistingPath(t *testing.T) {
 			return &gh.PRDetails{Number: 10, HeadSHA: "sha1"}, nil
 		},
 	}
-	stgs := testStagesWithValidateAndQueued()
+	stgs := testStagesWithValidateAndHolding()
 	eng := testEngineWithStages(t, client, stgs)
 	eng.cfg.MergeTrain = "off"
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
@@ -611,10 +614,10 @@ func TestAttemptMergeOnValidate_MergeTrainOff_UsesExistingPath(t *testing.T) {
 		t.Fatal("expected enabled=true via existing auto-merge path when merge_train: off")
 	}
 
-	// Must NOT have moved the item to Queued.
+	// Must NOT have moved the item to the holding stage.
 	for _, c := range client.updateStatusCalls {
-		if c.optionID == "OPT_Queued" {
-			t.Errorf("UpdateProjectItemStatus must not target Queued when merge_train: off")
+		if c.optionID == "OPT_BatchHold" {
+			t.Errorf("UpdateProjectItemStatus must not target holding stage when merge_train: off")
 		}
 	}
 
@@ -629,7 +632,7 @@ func TestAttemptMergeOnValidate_MergeTrainOff_UsesExistingPath(t *testing.T) {
 // items are unaffected when merge_train: on — cruise early-return fires first.
 func TestAttemptMergeOnValidate_MergeTrainOn_CruiseBypasses(t *testing.T) {
 	client := &mockGitHubClient{}
-	stgs := testStagesWithValidateAndQueued()
+	stgs := testStagesWithValidateAndHolding()
 	eng := testEngineWithStages(t, client, stgs)
 	eng.cfg.MergeTrain = "on"
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
@@ -643,6 +646,6 @@ func TestAttemptMergeOnValidate_MergeTrainOn_CruiseBypasses(t *testing.T) {
 		t.Fatal("expected enabled=false for cruise item")
 	}
 	if len(client.updateStatusCalls) != 0 {
-		t.Errorf("cruise item must not be advanced to Queued, got %d status update(s)", len(client.updateStatusCalls))
+		t.Errorf("cruise item must not be advanced to holding stage, got %d status update(s)", len(client.updateStatusCalls))
 	}
 }

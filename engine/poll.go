@@ -1627,13 +1627,17 @@ doneDispatching:
 	}, nil
 }
 
-// handleMergeTrainBatch snapshots all items currently in the Queued column and
+// handleMergeTrainBatch snapshots all items currently in the holding stage column and
 // logs the batch that the merge train would form on this poll cycle. This is the
 // ADR-059 D1 skeleton — no trial branch, no landing logic yet (D2–D5 follow).
 func (e *Engine) handleMergeTrainBatch(_ context.Context, board *gh.ProjectBoard) {
+	hs := holdingStage(e.cfg)
+	if hs == nil {
+		return
+	}
 	var batch []gh.ProjectItem
 	for _, item := range board.Items {
-		if item.Status == "Queued" {
+		if item.Status == hs.Name {
 			batch = append(batch, item)
 		}
 	}
