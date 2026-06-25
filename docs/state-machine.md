@@ -33,7 +33,7 @@ This document is the formal specification of Fabrik's issue-level state machine:
 Issues traverse a linear pipeline of stages, each corresponding to a column on the GitHub Project board:
 
 ```
-Specify → Research → Plan → Implement → Review → Validate → Done
+Specify → Research → Plan → Implement → Review → Validate → [Queued†] → Done
 ```
 
 | Stage | Order | Read-Only | PostToPR | CreateDraftPR | MarkPRReady | WaitForReviews | CleanupWorktree |
@@ -44,9 +44,12 @@ Specify → Research → Plan → Implement → Review → Validate → Done
 | Implement | 3 | No | Yes | Yes | Yes | No | No |
 | Review | 4 | No | Yes | No | Yes | Yes* | No |
 | Validate | 5 | No | Yes | No | No | Yes* | No |
+| Queued† | 6 | — | — | — | — | — | — |
 | Done | 99 | N/A | No | No | No | No | Yes |
 
 \* All flags in this table reflect the **default stage configuration** shipped in `.fabrik/stages/`. Each flag is opt-in per stage YAML and may differ in custom configurations. `wait_for_reviews` is enabled for Review and Validate in the defaults.
+
+† **Queued** is a *holding stage* (`holding_stage: true`) active only when `merge_train: on`. Items enter Queued when `attemptMergeOnValidate` routes to `advanceToQueued` instead of GitHub auto-merge. Per-item dispatch is suppressed (`itemMayNeedWork` / `itemNeedsWork` return false for holding stages); the batch handler `handleMergeTrainBatch` snapshots all Queued items once per poll cycle (D1 skeleton — no landing logic yet). The Queued column must exist on the GitHub Project board when `merge_train: on`; it is validated at startup.
 
 ---
 
@@ -124,6 +127,16 @@ Each active stage column has the same set of reachable sub-states:
 | **Pending Cleanup** | (none) | Worktree exists; engine will remove it |
 | **Complete** | `stage:Done:complete` | Worktree removed; terminal state |
 | **Paused** | `fabrik:paused` | Manually paused; cleanup skipped |
+
+#### Queued (Holding Stage — `merge_train: on` only)
+
+> This stage is a no-op for per-item dispatch. It exists solely as a batching rendezvous point for the merge train.
+
+| Sub-State | Labels Present | Description |
+|-----------|---------------|-------------|
+| **Waiting** | `stage:Validate:complete` | Item moved to Queued column; `advanceToQueued` added `stage:Validate:complete` atomically. Awaiting `handleMergeTrainBatch` to form a landing batch (D2–D5, not yet implemented). |
+
+`itemMayNeedWork` and `itemNeedsWork` both return `false` for any stage with `holding_stage: true`, so these items are never dispatched to a per-item worker. `processItem` also short-circuits on `stage.HoldingStage` as a defense-in-depth guard. The catch-up loop skips holding stages for the same reason.
 
 ### 1.4 Label Semantics Reference
 

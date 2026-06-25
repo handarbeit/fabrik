@@ -380,3 +380,104 @@ func TestDriftScan_NonCleanupStage_NoWarning(t *testing.T) {
 		}
 	}
 }
+
+// testStagesWithQueued returns stages including a Queued holding stage, for merge-train tests.
+func testStagesWithQueued() []*stages.Stage {
+	return []*stages.Stage{
+		{Name: "Research", Order: 1, Prompt: "research"},
+		{Name: "Plan", Order: 2, Prompt: "plan"},
+		{Name: "Implement", Order: 3, Prompt: "implement"},
+		{Name: "Validate", Order: 4, Prompt: "validate"},
+		{Name: "Queued", Order: 6, HoldingStage: true},
+		{Name: "Done", Order: 99, CleanupWorktree: true},
+	}
+}
+
+// TestCheckStageColumnAlignment_HoldingStageRequiredWhenMergeTrainOn verifies
+// that a missing Queued column is a fatal error when merge_train is on.
+func TestCheckStageColumnAlignment_HoldingStageRequiredWhenMergeTrainOn(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: boardWithColumns("proj-1"),
+		// Board has all stages except Queued.
+		fetchStatusFieldFn: statusFieldWithOptions("Research", "Plan", "Implement", "Validate"),
+	}
+	e := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithQueued(),
+			MergeTrain:    "on",
+		},
+		client,
+		&mockClaudeInvoker{},
+		NewWorktreeManager(t.TempDir()),
+	)
+	err := e.checkStageColumnAlignment(context.Background())
+	if err == nil {
+		t.Fatal("expected error for missing Queued column when merge_train: on, got nil")
+	}
+	if !strings.Contains(err.Error(), "mismatch") {
+		t.Errorf("error should mention mismatch, got: %v", err)
+	}
+}
+
+// TestCheckStageColumnAlignment_HoldingStageExcludedWhenMergeTrainOff verifies
+// that a missing Queued column is not a fatal error when merge_train is off (default).
+func TestCheckStageColumnAlignment_HoldingStageExcludedWhenMergeTrainOff(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: boardWithColumns("proj-1"),
+		// Board does NOT have a Queued column — fine when merge_train is off.
+		fetchStatusFieldFn: statusFieldWithOptions("Research", "Plan", "Implement", "Validate"),
+	}
+	e := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithQueued(),
+			MergeTrain:    "off",
+		},
+		client,
+		&mockClaudeInvoker{},
+		NewWorktreeManager(t.TempDir()),
+	)
+	err := e.checkStageColumnAlignment(context.Background())
+	if err != nil {
+		t.Fatalf("holding stage missing from board should not be fatal when merge_train: off, got: %v", err)
+	}
+}
+
+// TestCheckStageColumnAlignment_HoldingStagePresent verifies that when merge_train: on
+// and the Queued column exists on the board, startup succeeds.
+func TestCheckStageColumnAlignment_HoldingStagePresent(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: boardWithColumns("proj-1"),
+		fetchStatusFieldFn:  statusFieldWithOptions("Research", "Plan", "Implement", "Validate", "Queued"),
+	}
+	e := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithQueued(),
+			MergeTrain:    "on",
+		},
+		client,
+		&mockClaudeInvoker{},
+		NewWorktreeManager(t.TempDir()),
+	)
+	err := e.checkStageColumnAlignment(context.Background())
+	if err != nil {
+		t.Fatalf("startup should succeed when Queued column present: %v", err)
+	}
+}
