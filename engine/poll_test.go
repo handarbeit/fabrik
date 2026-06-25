@@ -3328,8 +3328,11 @@ func TestCIAndReviewGate_JointClearingHandoff(t *testing.T) {
 }
 
 func TestHandleMergeTrainBatch_LogsQueuedItems(t *testing.T) {
+	// Use a holding stage named "BatchHold" (not "Queued") to verify that
+	// handleMergeTrainBatch is driven by the HoldingStage field, not a hardcoded name.
 	client := &mockGitHubClient{}
-	eng := testEngine(t, client, &mockClaudeInvoker{})
+	stgs := testStagesWithValidateAndHolding()
+	eng := testEngineWithStages(t, client, stgs)
 	eng.cfg.MergeTrain = "on"
 
 	events := make(chan tui.Event, 10)
@@ -3338,9 +3341,9 @@ func TestHandleMergeTrainBatch_LogsQueuedItems(t *testing.T) {
 	board := &gh.ProjectBoard{
 		ProjectID: "PVT_1",
 		Items: []gh.ProjectItem{
-			{Number: 42, Title: "fix the bug",    Status: "Queued"},
+			{Number: 42, Title: "fix the bug",    Status: "BatchHold"},
 			{Number: 43, Title: "add the feature", Status: "Implement"},
-			{Number: 44, Title: "another ready",   Status: "Queued"},
+			{Number: 44, Title: "another ready",   Status: "BatchHold"},
 		},
 	}
 
@@ -3362,10 +3365,10 @@ func TestHandleMergeTrainBatch_LogsQueuedItems(t *testing.T) {
 		t.Errorf("expected 'batch snapshot: 2 item(s)' in log message, got: %q", msg)
 	}
 	if !strings.Contains(msg, "#42") || !strings.Contains(msg, "#44") {
-		t.Errorf("expected both queued issue numbers in log message, got: %q", msg)
+		t.Errorf("expected both holding-stage issue numbers in log message, got: %q", msg)
 	}
 	if strings.Contains(msg, "#43") {
-		t.Errorf("non-Queued item #43 must not appear in batch snapshot, got: %q", msg)
+		t.Errorf("non-holding-stage item #43 must not appear in batch snapshot, got: %q", msg)
 	}
 	if logged[0].Tag != "merge-train" {
 		t.Errorf("expected tag 'merge-train', got %q", logged[0].Tag)
@@ -3373,8 +3376,11 @@ func TestHandleMergeTrainBatch_LogsQueuedItems(t *testing.T) {
 }
 
 func TestHandleMergeTrainBatch_SilentWhenEmpty(t *testing.T) {
+	// Use a holding stage so the engine has a configured holding column; none of the
+	// board items have that status — the batch snapshot must be silent.
 	client := &mockGitHubClient{}
-	eng := testEngine(t, client, &mockClaudeInvoker{})
+	stgs := testStagesWithValidateAndHolding()
+	eng := testEngineWithStages(t, client, stgs)
 	eng.cfg.MergeTrain = "on"
 
 	events := make(chan tui.Event, 10)
@@ -3391,6 +3397,6 @@ func TestHandleMergeTrainBatch_SilentWhenEmpty(t *testing.T) {
 	eng.handleMergeTrainBatch(context.Background(), board)
 
 	if len(events) != 0 {
-		t.Errorf("expected no log events when Queued column is empty, got %d", len(events))
+		t.Errorf("expected no log events when holding stage column is empty, got %d", len(events))
 	}
 }
