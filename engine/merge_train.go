@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -23,12 +24,14 @@ const (
 
 // mergeTrainWorkerState tracks an in-flight or completed merge-train worker.
 // Stored in Engine.mergeTrainInFlight keyed by "owner/repo".
+// mu guards all fields that the poll loop reads while the goroutine writes them.
 type mergeTrainWorkerState struct {
+	mu             sync.RWMutex
 	assembling     bool          // true while building the trial branch; false once PR is open
 	prNum          int           // integration PR number (set after PR is created)
 	trialBranchSHA string        // HEAD SHA of the trial branch (set after push)
 	CIResult       TrainCIResult // final CI result (set by pollTrainCI on exit)
-	trialName      string        // unique trial name (e.g. "merge-train-main-1751234567")
+	trialName      string        // unique trial name (set once before goroutine starts; immutable after)
 }
 
 // sanitizeBranchName replaces characters that are invalid in directory names
@@ -49,25 +52,28 @@ func (e *Engine) dispatchMergeTrainWorker(ctx context.Context, batch []gh.Projec
 
 	if existing, loaded := e.mergeTrainInFlight.Load(repoKey); loaded {
 		state := existing.(*mergeTrainWorkerState)
-		if state.assembling {
+		state.mu.RLock()
+		assembling := state.assembling
+		prNum := state.prNum
+		ciResult := state.CIResult
+		state.mu.RUnlock()
+		if assembling {
 			e.logf(0, "merge-train", "train worker already assembling for %s — skipping\n", repoKey)
 		} else {
-			switch state.CIResult {
+			switch ciResult {
 			case TrainCIGreen:
-				e.logf(0, "merge-train", "train CI green for %s (PR #%d) — awaiting landing step\n", repoKey, state.prNum)
+				e.logf(0, "merge-train", "train CI green for %s (PR #%d) — awaiting landing step\n", repoKey, prNum)
 			case TrainCIRed:
-				e.logf(0, "merge-train", "train CI red for %s (PR #%d) — needs attention\n", repoKey, state.prNum)
+				e.logf(0, "merge-train", "train CI red for %s (PR #%d) — needs attention\n", repoKey, prNum)
 			default:
-				e.logf(0, "merge-train", "train CI pending for %s (PR #%d) — still polling\n", repoKey, state.prNum)
+				e.logf(0, "merge-train", "train CI pending for %s (PR #%d) — still polling\n", repoKey, prNum)
 			}
 		}
 		return
 	}
 
-	trialName := fmt.Sprintf("merge-train-%s-%d", sanitizeBranchName(repo), time.Now().Unix())
 	state := &mergeTrainWorkerState{
 		assembling: true,
-		trialName:  trialName,
 	}
 	e.mergeTrainInFlight.Store(repoKey, state)
 	e.wg.Add(1)
@@ -112,7 +118,10 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		return
 	}
 
-	trialName := state.trialName
+	// Generate trial name here (after baseBranch is known) so the branch name
+	// reflects the target base (e.g. "merge-train-main-1751234567"), matching FR-1.
+	trialName := fmt.Sprintf("merge-train-%s-%d", sanitizeBranchName(baseBranch), time.Now().Unix())
+	state.trialName = trialName
 	e.logf(0, "merge-train", "building trial branch %q for %s (%d members)\n", trialName, repoKey, len(batch))
 
 	wtDir, err := wm.EnsureTrainWorktree(trialName, baseBranch)
@@ -222,7 +231,9 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		e.mergeTrainInFlight.Delete(repoKey)
 		return
 	}
+	state.mu.Lock()
 	state.trialBranchSHA = trialSHA
+	state.mu.Unlock()
 
 	// Build integration PR body listing survivors.
 	var memberRefs []string
@@ -244,8 +255,10 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		e.mergeTrainInFlight.Delete(repoKey)
 		return
 	}
+	state.mu.Lock()
 	state.prNum = prNum
 	state.assembling = false
+	state.mu.Unlock()
 	e.logf(0, "merge-train", "opened draft integration PR #%d for %s (%d survivors)\n", prNum, repoKey, len(survivors))
 
 	// Clean up local worktree — trial branch is now on origin.
@@ -255,7 +268,9 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 
 	// Poll CI — this blocks inside the goroutine.
 	ciResult := e.pollTrainCI(ctx, owner, repo, prNum, trialSHA)
+	state.mu.Lock()
 	state.CIResult = ciResult
+	state.mu.Unlock()
 
 	switch ciResult {
 	case TrainCIGreen:
