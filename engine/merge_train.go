@@ -446,6 +446,13 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 			}
 		}
 
+		// Check deadline again before the sleep so a short CIWaitTimeout doesn't
+		// block unnecessarily in the poll interval when the deadline has already elapsed.
+		if time.Now().After(deadline) {
+			e.logf(0, "merge-train", "CI wait timeout for integration PR #%d\n", prNum)
+			return TrainCIPending
+		}
+
 		// Poll again after 30 seconds.
 		select {
 		case <-ctx.Done():
