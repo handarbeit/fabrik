@@ -50,7 +50,11 @@ func (e *Engine) dispatchMergeTrainWorker(ctx context.Context, batch []gh.Projec
 	owner, repo := itemOwnerRepo(batch[0], e.defaultRepo())
 	repoKey := owner + "/" + repo
 
-	if existing, loaded := e.mergeTrainInFlight.Load(repoKey); loaded {
+	// Use LoadOrStore so the check-and-register is atomic: two concurrent callers
+	// can never both pass the "not loaded" path and launch duplicate workers.
+	candidate := &mergeTrainWorkerState{assembling: true}
+	existing, loaded := e.mergeTrainInFlight.LoadOrStore(repoKey, candidate)
+	if loaded {
 		state := existing.(*mergeTrainWorkerState)
 		state.mu.RLock()
 		assembling := state.assembling
@@ -72,10 +76,8 @@ func (e *Engine) dispatchMergeTrainWorker(ctx context.Context, batch []gh.Projec
 		return
 	}
 
-	state := &mergeTrainWorkerState{
-		assembling: true,
-	}
-	e.mergeTrainInFlight.Store(repoKey, state)
+	// candidate was atomically stored — launch the worker with it.
+	state := candidate
 	e.wg.Add(1)
 
 	go func() {
@@ -275,12 +277,17 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 	switch ciResult {
 	case TrainCIGreen:
 		e.logf(0, "merge-train", "CI green for integration PR #%d (%s) — ready for landing\n", prNum, repoKey)
+		// Leave in-flight entry intact — #948 landing step reads prNum and trialBranchSHA from it.
 	case TrainCIRed:
 		e.logf(0, "merge-train", "CI red for integration PR #%d (%s) — batch needs attention\n", prNum, repoKey)
+		// Clear so the next poll cycle can dispatch a fresh train rather than
+		// logging "needs attention" forever with no way to restart.
+		e.mergeTrainInFlight.Delete(repoKey)
 	default:
 		e.logf(0, "merge-train", "CI timed out / pending for integration PR #%d (%s)\n", prNum, repoKey)
+		// Same: clear so a new worker can rebuild the trial branch on the next poll.
+		e.mergeTrainInFlight.Delete(repoKey)
 	}
-	// Do NOT delete in-flight entry — leave for #948 landing step to consume.
 }
 
 // buildTrainConflictComment constructs a synthetic comment instructing Claude to
@@ -328,12 +335,20 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.Pr
 	_ = output
 
 	// Check whether conflicts remain after Claude's work.
+	// Parse line-by-line to avoid false positives from file paths containing
+	// "UU", "AA", or "DD" as substrings. Also covers additional unmerged states.
 	statusCmd := exec.Command("git", "status", "--porcelain")
 	statusCmd.Dir = trainWorkDir
 	statusOut, _ := statusCmd.CombinedOutput()
-	if strings.Contains(string(statusOut), "UU") || strings.Contains(string(statusOut), "AA") || strings.Contains(string(statusOut), "DD") {
-		e.logf(memberItem.Number, "merge-train", "conflict markers remain after Claude resolution\n")
-		return false
+	for _, line := range strings.Split(string(statusOut), "\n") {
+		if len(line) >= 2 {
+			code := line[:2]
+			if code == "UU" || code == "AA" || code == "DD" ||
+				code == "AU" || code == "UD" || code == "UA" || code == "DU" {
+				e.logf(memberItem.Number, "merge-train", "conflict markers remain after Claude resolution\n")
+				return false
+			}
+		}
 	}
 
 	// Check that there are no staged conflict markers in the diff.
@@ -387,6 +402,12 @@ func (e *Engine) ejectMember(ctx context.Context, owner, repo string, memberItem
 		maxEjections = 3
 	}
 	if count >= maxEjections {
+		// Reset the counter so that if the user manually unpauses the issue,
+		// it gets a fresh set of N attempts before being paused again.
+		e.mergeTrainEjectionsMu.Lock()
+		e.mergeTrainEjectionCounts[counterKey] = 0
+		e.mergeTrainEjectionsMu.Unlock()
+
 		e.logf(memberItem.Number, "merge-train", "#%d ejected %d time(s) — pausing\n", memberItem.Number, count)
 		pauseMsg := fmt.Sprintf("🏭 **Fabrik merge-train — pausing after %d ejections**\n\n"+
 			"This issue has been ejected from the merge-train %d consecutive times. "+

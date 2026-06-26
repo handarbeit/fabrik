@@ -338,6 +338,11 @@ func (wm *WorktreeManager) EnsureTrainWorktree(name, baseBranch string) (string,
 		rmCmd.Dir = wm.baseDir
 		rmCmd.CombinedOutput() // best-effort
 	}
+	// Prune stale worktree metadata so a prior crash doesn't leave an
+	// "already exists" tombstone that blocks the new worktree add.
+	pruneCmd := exec.Command("git", "worktree", "prune")
+	pruneCmd.Dir = wm.baseDir
+	pruneCmd.Run() // best-effort
 
 	// Ensure root directory exists.
 	if err := os.MkdirAll(wm.rootDir, 0755); err != nil {
