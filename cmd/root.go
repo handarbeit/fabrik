@@ -707,6 +707,7 @@ func Execute() error {
 		AutoMergeStrategy:        autoMergeStrategy(cfg.AutoMergeStrategy),
 		MergeQueue:               mergeQueueMode(cfg.MergeQueue),
 		MergeTrain:               mergeTrainMode(cfg.MergeTrain),
+		MaxMergeTrainEjections:   3, // ADR-059 default
 		ClaudeWaitDelay:          claudeWaitDelay(cfg.ClaudeWaitDelay),
 		KillGraceSigInt:          killGraceSigInt(cfg.KillGraceSigInt),
 		KillGraceSigTerm:         killGraceSigTerm(cfg.KillGraceSigTerm),
