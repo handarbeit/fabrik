@@ -305,6 +305,110 @@ func (wm *WorktreeManager) WorktreeDir(issueNumber int) string {
 	return wm.worktreeDir(issueNumber)
 }
 
+// trainWorktreeDir returns the path to a merge-train worktree directory.
+func (wm *WorktreeManager) trainWorktreeDir(name string) string {
+	if wm.repoName != "" {
+		return filepath.Join(wm.rootDir, wm.repoName, name)
+	}
+	return filepath.Join(wm.rootDir, name)
+}
+
+func (wm *WorktreeManager) trainBranchName(name string) string {
+	return "fabrik/merge-train/" + name
+}
+
+// TrainWorktreeDir returns the path to a merge-train worktree (whether it exists or not).
+func (wm *WorktreeManager) TrainWorktreeDir(name string) string {
+	return wm.trainWorktreeDir(name)
+}
+
+// EnsureTrainWorktree creates a worktree for the trial branch, forking fresh from
+// origin/<baseBranch>. Unlike EnsureWorktree it never reuses an existing worktree
+// (trial branches are disposable) and never updates from main (the fork is always fresh).
+func (wm *WorktreeManager) EnsureTrainWorktree(name, baseBranch string) (string, error) {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+
+	wtDir := wm.trainWorktreeDir(name)
+	branch := wm.trainBranchName(name)
+
+	// Remove any pre-existing worktree at this path (e.g. from a crashed previous run).
+	if _, err := os.Stat(wtDir); err == nil {
+		rmCmd := exec.Command("git", "worktree", "remove", "--force", wtDir)
+		rmCmd.Dir = wm.baseDir
+		rmCmd.CombinedOutput() // best-effort
+	}
+
+	// Ensure root directory exists.
+	if err := os.MkdirAll(wm.rootDir, 0755); err != nil {
+		return "", fmt.Errorf("creating worktree root: %w", err)
+	}
+
+	// Delete the branch if it already exists (stale from a prior crashed run).
+	if wm.branchExists(branch) {
+		delCmd := exec.Command("git", "branch", "-D", branch)
+		delCmd.Dir = wm.baseDir
+		delCmd.CombinedOutput() // best-effort
+	}
+
+	// Fork from origin/<baseBranch>.
+	baseRef := "refs/remotes/origin/" + baseBranch
+	if !wm.branchExists("origin/" + baseBranch) {
+		baseRef = baseBranch
+	}
+	cmd := exec.Command("git", "branch", branch, baseRef)
+	cmd.Dir = wm.baseDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("creating trial branch %s from %s: %s: %w", branch, baseRef, string(out), err)
+	}
+
+	// Create the worktree.
+	cmd = exec.Command("git", "worktree", "add", "-f", wtDir, branch)
+	cmd.Dir = wm.baseDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("creating train worktree: %s: %w", string(out), err)
+	}
+
+	return wtDir, nil
+}
+
+// PushTrainBranch pushes the trial branch to origin.
+func (wm *WorktreeManager) PushTrainBranch(name string) error {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	wtDir := wm.trainWorktreeDir(name)
+	branch := wm.trainBranchName(name)
+	cmd := exec.Command("git", "push", "-u", "origin", branch)
+	cmd.Dir = wtDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("pushing trial branch %s: %s: %w", branch, strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// CleanupTrainWorktree removes the trial branch worktree and optionally its branch.
+func (wm *WorktreeManager) CleanupTrainWorktree(name string, deleteBranch bool) error {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	wtDir := wm.trainWorktreeDir(name)
+
+	cmd := exec.Command("git", "worktree", "remove", "--force", wtDir)
+	cmd.Dir = wm.baseDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("removing train worktree: %s: %w", string(out), err)
+	}
+
+	if deleteBranch {
+		branch := wm.trainBranchName(name)
+		cmd := exec.Command("git", "branch", "-D", branch)
+		cmd.Dir = wm.baseDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("deleting trial branch %s: %s: %w", branch, string(out), err)
+		}
+	}
+	return nil
+}
+
 func (wm *WorktreeManager) worktreeDir(issueNumber int) string {
 	if wm.repoName != "" {
 		return filepath.Join(wm.rootDir, wm.repoName, fmt.Sprintf("issue-%d", issueNumber))
