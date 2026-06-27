@@ -43,6 +43,7 @@ type Config struct {
 	AutoMergeStrategy        string        // Merge method for enablePullRequestAutoMerge: MERGE, SQUASH, or REBASE (default MERGE)
 	MergeQueue               string        // Merge queue routing for yolo path: "auto" (enqueue when repo uses merge queue) or "off" (skip enqueue)
 	MergeTrain               string        // Fabrik-internal merge train: "on" (advance yolo Validate completions to Queued) or "off" (default; existing auto-merge path unchanged)
+	MaxMergeTrainEjections   int           // Max merge-train ejections before pausing a member (default 3; ADR-059)
 	KillGraceSigInt          time.Duration // Grace window after SIGINT before SIGTERM (default 10s; 0 = skip SIGINT step)
 	KillGraceSigTerm         time.Duration // Grace window after SIGTERM before SIGKILL (default 10s)
 	ClaudeWaitDelay          time.Duration // How long to wait after Claude exits before giving up on pipe drain and recovering output (default 30s)
@@ -97,6 +98,9 @@ type Engine struct {
 	sem                   chan struct{}        // semaphore bounding concurrent workers across poll cycles
 	wg                    sync.WaitGroup       // tracks in-flight workers for graceful shutdown
 	cloneInFlight         sync.Map             // key: "owner/repo" string, value: *cloneCall; per-repo bare-clone coordination
+	mergeTrainInFlight       sync.Map        // key: "owner/repo", value: *mergeTrainWorkerState; per-repo train dispatch guard
+	mergeTrainEjectionsMu   sync.Mutex      // guards mergeTrainEjectionCounts
+	mergeTrainEjectionCounts map[string]int  // key: "owner/repo#N", ejection count per member
 	issueCtxs             sync.Map             // key: issueKey string, value: issueCtxEntry; per-issue context for kill-reason propagation
 	baseBranchWarnedSet   sync.Map             // key: "owner/repo#N:branch"; prevents repeated fallback comments for bad base: labels
 	events                chan tui.Event       // nil in tests / plain-text mode; TUI goroutine consumes
@@ -164,16 +168,17 @@ func New(cfg Config) (*Engine, error) {
 	worktreeRoot := filepath.Join(fabrikDir, ".fabrik", "worktrees")
 	sharedStore := itemstate.NewStore(nil)
 	eng := &Engine{
-		cfg:                   cfg,
-		client:                gh.NewClient(cfg.Token),
-		claude:                &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},
-		worktreeManagers:      make(map[string]*WorktreeManager),
-		fabrikDir:             fabrikDir,
-		store:                 sharedStore,
-		mayNeedWork:           make(map[string]bool),
-		seededRepos:           make(map[string]bool),
-		checkedAutoMergeRepos: make(map[string]bool),
-		sem:                   make(chan struct{}, cfg.MaxConcurrent),
+		cfg:                      cfg,
+		client:                   gh.NewClient(cfg.Token),
+		claude:                   &RealClaudeInvoker{DebugOutput: cfg.DebugOutput},
+		worktreeManagers:         make(map[string]*WorktreeManager),
+		fabrikDir:                fabrikDir,
+		store:                    sharedStore,
+		mayNeedWork:              make(map[string]bool),
+		seededRepos:              make(map[string]bool),
+		checkedAutoMergeRepos:    make(map[string]bool),
+		sem:                      make(chan struct{}, cfg.MaxConcurrent),
+		mergeTrainEjectionCounts: make(map[string]int),
 	}
 
 	// Migrate any old-style worktrees (issue-N/) to the new per-repo layout.
@@ -218,15 +223,16 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 	}
 	wms := make(map[string]*WorktreeManager)
 	eng := &Engine{
-		cfg:                   cfg,
-		client:                client,
-		claude:                claude,
-		worktreeManagers:      wms,
-		store:                 itemstate.NewStore(nil),
-		mayNeedWork:           make(map[string]bool),
-		seededRepos:           make(map[string]bool),
-		checkedAutoMergeRepos: make(map[string]bool),
-		sem:                   make(chan struct{}, maxConcurrent),
+		cfg:                      cfg,
+		client:                   client,
+		claude:                   claude,
+		worktreeManagers:         wms,
+		store:                    itemstate.NewStore(nil),
+		mayNeedWork:              make(map[string]bool),
+		seededRepos:              make(map[string]bool),
+		checkedAutoMergeRepos:    make(map[string]bool),
+		sem:                      make(chan struct{}, maxConcurrent),
+		mergeTrainEjectionCounts: make(map[string]int),
 	}
 	if worktrees != nil {
 		worktrees.logfFn = eng.logf

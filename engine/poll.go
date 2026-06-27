@@ -1627,10 +1627,10 @@ doneDispatching:
 	}, nil
 }
 
-// handleMergeTrainBatch snapshots all items currently in the holding stage column and
-// logs the batch that the merge train would form on this poll cycle. This is the
-// ADR-059 D1 skeleton — no trial branch, no landing logic yet (D2–D5 follow).
-func (e *Engine) handleMergeTrainBatch(_ context.Context, board *gh.ProjectBoard) {
+// handleMergeTrainBatch processes the current Queued batch for the merge train.
+// On first call with a new batch, dispatches a merge-train worker goroutine.
+// On subsequent calls, logs the current worker state without re-dispatching.
+func (e *Engine) handleMergeTrainBatch(ctx context.Context, board *gh.ProjectBoard) {
 	hs := holdingStage(e.cfg)
 	if hs == nil {
 		return
@@ -1649,6 +1649,7 @@ func (e *Engine) handleMergeTrainBatch(_ context.Context, board *gh.ProjectBoard
 		parts = append(parts, fmt.Sprintf("#%d %q", item.Number, item.Title))
 	}
 	e.logf(0, "merge-train", "batch snapshot: %d item(s) — %s\n", len(batch), strings.Join(parts, ", "))
+	e.dispatchMergeTrainWorker(ctx, batch)
 }
 
 func gitRevParse(dir, ref string) (string, error) {
