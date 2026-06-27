@@ -22,16 +22,25 @@ const (
 	TrainCIRed                          // at least one required check failed
 )
 
+// trainMember pairs a batch member's ProjectItem with its linked PR number.
+// The PR number is fetched once during the assembly loop and reused during landing
+// to avoid extra API calls.
+type trainMember struct {
+	item  gh.ProjectItem
+	prNum int
+}
+
 // mergeTrainWorkerState tracks an in-flight or completed merge-train worker.
 // Stored in Engine.mergeTrainInFlight keyed by "owner/repo".
 // mu guards all fields that the poll loop reads while the goroutine writes them.
 type mergeTrainWorkerState struct {
 	mu             sync.RWMutex
 	assembling     bool          // true while building the trial branch; false once PR is open
-	prNum          int           // integration PR number (set after PR is created)
+	prNum          int           // draft CI PR number (set after draft PR is created)
 	trialBranchSHA string        // HEAD SHA of the trial branch (set after push)
 	CIResult       TrainCIResult // final CI result (set by pollTrainCI on exit)
 	trialName      string        // unique trial name (set once before goroutine starts; immutable after)
+	projectID      string        // board project ID for advanceToNextStage (immutable after dispatch)
 }
 
 // sanitizeBranchName replaces characters that are invalid in directory names
@@ -43,7 +52,9 @@ func sanitizeBranchName(s string) string {
 
 // dispatchMergeTrainWorker checks whether a train worker is already in-flight for
 // the batch's repo and, if not, starts one. Safe to call from the poll goroutine.
-func (e *Engine) dispatchMergeTrainWorker(ctx context.Context, batch []gh.ProjectItem) {
+// projectID is the GitHub project board ID, threaded so landMergeTrainBatch can
+// call advanceToNextStage without fetching the board again.
+func (e *Engine) dispatchMergeTrainWorker(ctx context.Context, batch []gh.ProjectItem, projectID string) {
 	if len(batch) == 0 {
 		return
 	}
@@ -52,7 +63,7 @@ func (e *Engine) dispatchMergeTrainWorker(ctx context.Context, batch []gh.Projec
 
 	// Use LoadOrStore so the check-and-register is atomic: two concurrent callers
 	// can never both pass the "not loaded" path and launch duplicate workers.
-	candidate := &mergeTrainWorkerState{assembling: true}
+	candidate := &mergeTrainWorkerState{assembling: true, projectID: projectID}
 	existing, loaded := e.mergeTrainInFlight.LoadOrStore(repoKey, candidate)
 	if loaded {
 		state := existing.(*mergeTrainWorkerState)
@@ -162,8 +173,8 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		maxTurnsOverride = holdingStg.MaxTurns * 2
 	}
 
-	// Sequential merge loop.
-	var survivors []gh.ProjectItem
+	// Sequential merge loop — builds trainMembers with the member PR number stored.
+	var survivors []trainMember
 	for _, member := range batch {
 		pr, fetchErr := e.client.FetchLinkedPR(owner, repo, member.Number)
 		if fetchErr != nil || pr == nil {
@@ -183,7 +194,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 
 		if mergeErr == nil {
 			// Clean merge.
-			survivors = append(survivors, member)
+			survivors = append(survivors, trainMember{item: member, prNum: pr.Number})
 			e.logf(member.Number, "merge-train", "merged #%d cleanly into trial branch\n", member.Number)
 			continue
 		}
@@ -196,7 +207,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		}
 		resolved := e.resolveConflictWithClaude(ctx, member, wtDir, holdingStg, pr.HeadSHA, opts)
 		if resolved {
-			survivors = append(survivors, member)
+			survivors = append(survivors, trainMember{item: member, prNum: pr.Number})
 			e.logf(member.Number, "merge-train", "conflict for #%d resolved by Claude\n", member.Number)
 			continue
 		}
@@ -237,10 +248,10 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 	state.trialBranchSHA = trialSHA
 	state.mu.Unlock()
 
-	// Build integration PR body listing survivors.
+	// Build draft CI PR body listing survivors.
 	var memberRefs []string
 	for _, s := range survivors {
-		memberRefs = append(memberRefs, fmt.Sprintf("#%d", s.Number))
+		memberRefs = append(memberRefs, fmt.Sprintf("#%d", s.item.Number))
 	}
 	prTitle := fmt.Sprintf("chore(merge-train): trial integration for %s", strings.Join(memberRefs, " "))
 	prBody := fmt.Sprintf("🏭 **Fabrik merge-train integration PR** (trial → %s)\n\n"+
@@ -261,7 +272,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 	state.prNum = prNum
 	state.assembling = false
 	state.mu.Unlock()
-	e.logf(0, "merge-train", "opened draft integration PR #%d for %s (%d survivors)\n", prNum, repoKey, len(survivors))
+	e.logf(0, "merge-train", "opened draft CI PR #%d for %s (%d survivors)\n", prNum, repoKey, len(survivors))
 
 	// Clean up local worktree — trial branch is now on origin.
 	if cleanErr := wm.CleanupTrainWorktree(trialName, false); cleanErr != nil {

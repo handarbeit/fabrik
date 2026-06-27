@@ -1649,7 +1649,7 @@ func (e *Engine) handleMergeTrainBatch(ctx context.Context, board *gh.ProjectBoa
 		parts = append(parts, fmt.Sprintf("#%d %q", item.Number, item.Title))
 	}
 	e.logf(0, "merge-train", "batch snapshot: %d item(s) — %s\n", len(batch), strings.Join(parts, ", "))
-	e.dispatchMergeTrainWorker(ctx, batch)
+	e.dispatchMergeTrainWorker(ctx, batch, board.ProjectID)
 }
 
 func gitRevParse(dir, ref string) (string, error) {
