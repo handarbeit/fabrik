@@ -415,7 +415,7 @@ func TestDispatchMergeTrainWorker_SkipsWhenAlreadyAssembling(t *testing.T) {
 	eng.mergeTrainInFlight.Store("owner/repo", existingState)
 
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1")}
-	eng.dispatchMergeTrainWorker(context.Background(), batch)
+	eng.dispatchMergeTrainWorker(context.Background(), batch, "")
 
 	// No goroutine should have been launched (wg count stays 0).
 	done := make(chan struct{})
@@ -442,7 +442,7 @@ func TestDispatchMergeTrainWorker_LogsGreenState(t *testing.T) {
 
 	batch := []gh.ProjectItem{makeTrainItem(1, "Issue 1")}
 	// Just verify it doesn't panic or launch a worker.
-	eng.dispatchMergeTrainWorker(context.Background(), batch)
+	eng.dispatchMergeTrainWorker(context.Background(), batch, "")
 }
 
 func TestDispatchMergeTrainWorker_EmptyBatch_NoOp(t *testing.T) {
@@ -450,8 +450,8 @@ func TestDispatchMergeTrainWorker_EmptyBatch_NoOp(t *testing.T) {
 	claude := &mockClaudeInvoker{}
 	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
 
-	eng.dispatchMergeTrainWorker(context.Background(), nil)
-	eng.dispatchMergeTrainWorker(context.Background(), []gh.ProjectItem{})
+	eng.dispatchMergeTrainWorker(context.Background(), nil, "")
+	eng.dispatchMergeTrainWorker(context.Background(), []gh.ProjectItem{}, "")
 	// Should not panic or store anything.
 }
 
