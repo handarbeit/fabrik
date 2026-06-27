@@ -287,15 +287,16 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 
 	switch ciResult {
 	case TrainCIGreen:
-		e.logf(0, "merge-train", "CI green for integration PR #%d (%s) — ready for landing\n", prNum, repoKey)
-		// Leave in-flight entry intact — #948 landing step reads prNum and trialBranchSHA from it.
+		e.logf(0, "merge-train", "CI green for draft PR #%d (%s) — proceeding to landing\n", prNum, repoKey)
+		e.landMergeTrainBatch(ctx, state, owner, repo, survivors, wm)
+		// landMergeTrainBatch calls e.mergeTrainInFlight.Delete via its deferred cleanup.
 	case TrainCIRed:
-		e.logf(0, "merge-train", "CI red for integration PR #%d (%s) — batch needs attention\n", prNum, repoKey)
+		e.logf(0, "merge-train", "CI red for draft PR #%d (%s) — batch needs attention\n", prNum, repoKey)
 		// Clear so the next poll cycle can dispatch a fresh train rather than
 		// logging "needs attention" forever with no way to restart.
 		e.mergeTrainInFlight.Delete(repoKey)
 	default:
-		e.logf(0, "merge-train", "CI timed out / pending for integration PR #%d (%s)\n", prNum, repoKey)
+		e.logf(0, "merge-train", "CI timed out / pending for draft PR #%d (%s)\n", prNum, repoKey)
 		// Same: clear so a new worker can rebuild the trial branch on the next poll.
 		e.mergeTrainInFlight.Delete(repoKey)
 	}
@@ -434,6 +435,213 @@ func (e *Engine) ejectMember(ctx context.Context, owner, repo string, memberItem
 			e.logf(memberItem.Number, "warn", "could not add fabrik:awaiting-input: %v\n", err)
 		}
 	}
+}
+
+// mergeTrainBatchMarker is the idempotency marker embedded in integration PR bodies.
+const mergeTrainBatchMarker = "<!-- fabrik-merge-train-batch -->"
+
+// buildIntegrationPRTitle returns the title for the landing integration PR.
+func buildIntegrationPRTitle(survivors []trainMember) string {
+	parts := make([]string, len(survivors))
+	for i, m := range survivors {
+		parts[i] = fmt.Sprintf("#%d", m.item.Number)
+	}
+	return "[merge-train] batch: " + strings.Join(parts, ", ")
+}
+
+// buildIntegrationPRBody returns the body for the landing integration PR.
+// Includes the idempotency marker and a human-readable member list.
+func buildIntegrationPRBody(survivors []trainMember) string {
+	var lines []string
+	for _, m := range survivors {
+		lines = append(lines, fmt.Sprintf("- #%d — %s", m.item.Number, m.item.Title))
+	}
+	return fmt.Sprintf("🏭 **Fabrik merge-train landing PR**\n\n"+
+		"This PR lands the following Queued issues via the internal merge train:\n\n%s\n\n"+
+		"%s",
+		strings.Join(lines, "\n"), mergeTrainBatchMarker)
+}
+
+// findIntegrationPR searches recent PRs for an existing landing integration PR
+// for this batch (idempotency check for restarts). Returns the first PR whose
+// body contains the batch marker, or nil if none is found.
+func (e *Engine) findIntegrationPR(owner, repo string) (*gh.PRDetails, error) {
+	prs, err := e.client.ListPRs(owner, repo)
+	if err != nil {
+		return nil, fmt.Errorf("listing PRs for integration PR search: %w", err)
+	}
+	for i := range prs {
+		if strings.Contains(prs[i].Body, mergeTrainBatchMarker) {
+			return &prs[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// pollForMergeable polls the integration PR until its mergeable_state is "clean",
+// blocking up to CIWaitTimeout. Returns true when the PR is ready to merge.
+// On timeout, posts a warning comment on the first batch member issue and returns false.
+func (e *Engine) pollForMergeable(ctx context.Context, owner, repo string, prNum int, survivors []trainMember) bool {
+	ciWaitTimeout := e.cfg.CIWaitTimeout
+	if ciWaitTimeout <= 0 {
+		ciWaitTimeout = 30 * time.Minute
+	}
+	deadline := time.Now().Add(ciWaitTimeout)
+
+	for {
+		select {
+		case <-ctx.Done():
+			e.logf(0, "merge-train", "context cancelled while polling integration PR #%d for mergeability\n", prNum)
+			return false
+		default:
+		}
+
+		if time.Now().After(deadline) {
+			break
+		}
+
+		_, mergeableState, err := e.client.FetchPRMergeableFields(owner, repo, prNum)
+		if err != nil {
+			e.logf(0, "merge-train", "warn: FetchPRMergeableFields failed for integration PR #%d: %v\n", prNum, err)
+		} else if mergeableState == "clean" {
+			return true
+		} else if mergeableState == "dirty" {
+			e.logf(0, "merge-train", "integration PR #%d has merge conflict (dirty) — cannot land\n", prNum)
+			return false
+		}
+
+		if time.Now().After(deadline) {
+			break
+		}
+
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(30 * time.Second):
+		}
+	}
+
+	e.logf(0, "merge-train", "timed out waiting for integration PR #%d to become mergeable\n", prNum)
+	if len(survivors) > 0 {
+		msg := fmt.Sprintf("🏭 **Fabrik merge-train — landing timeout**\n\n"+
+			"Timed out waiting for integration PR #%d to reach `mergeable_state: clean`. "+
+			"Batch members remain in the Queued column and will be retried in the next train cycle.\n\n"+
+			"Possible causes: branch protection checks are slow, or the base branch has advanced "+
+			"and the integration PR needs rebasing.",
+			prNum)
+		if _, commentErr := e.client.AddComment(owner, repo, survivors[0].item.Number, msg); commentErr != nil {
+			e.logf(0, "merge-train", "warn: could not post timeout comment: %v\n", commentErr)
+		}
+	}
+	return false
+}
+
+// landMergeTrainBatch executes FR-1 through FR-5 after a green CI result:
+// opens (or finds) the integration PR, polls until mergeable, merges, advances
+// each member to Done and closes their PRs, then cleans up trial artifacts.
+func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorkerState, owner, repo string, survivors []trainMember, wm *WorktreeManager) {
+	repoKey := owner + "/" + repo
+	trialName := state.trialName
+
+	defer func() {
+		// FR-4: cleanup trial worktree and remote branch regardless of landing outcome.
+		if cleanErr := wm.CleanupTrainWorktree(trialName, true); cleanErr != nil {
+			e.logf(0, "merge-train", "warn: cleanup trial worktree for %s failed: %v\n", repoKey, cleanErr)
+		}
+		e.mergeTrainInFlight.Delete(repoKey)
+	}()
+
+	state.mu.RLock()
+	trialBranch := "fabrik/merge-train/" + trialName
+	baseBranch, _ := wm.DefaultBaseBranch()
+	state.mu.RUnlock()
+
+	// FR-1 / FR-5: find or create the landing integration PR.
+	integrationPR, err := e.findIntegrationPR(owner, repo)
+	if err != nil {
+		e.logf(0, "merge-train", "warn: error searching for existing integration PR: %v — will attempt to create\n", err)
+	}
+
+	var integrationPRNum int
+	var alreadyMerged bool
+
+	if integrationPR != nil {
+		integrationPRNum = integrationPR.Number
+		alreadyMerged = integrationPR.Merged
+		e.logf(0, "merge-train", "found existing integration PR #%d (merged=%v) for %s\n", integrationPRNum, alreadyMerged, repoKey)
+	} else {
+		// FR-1: open the landing integration PR (not a draft).
+		title := buildIntegrationPRTitle(survivors)
+		body := buildIntegrationPRBody(survivors)
+		integrationPRNum, err = e.client.CreatePR(owner, repo, title, trialBranch, baseBranch, body)
+		if err != nil {
+			e.logf(0, "merge-train", "cannot create integration PR for %s: %v\n", repoKey, err)
+			return
+		}
+		e.logf(0, "merge-train", "opened integration PR #%d for %s (%d survivors)\n", integrationPRNum, repoKey, len(survivors))
+	}
+
+	// FR-2: poll until mergeable, then merge (skip if already merged).
+	if !alreadyMerged {
+		if !e.pollForMergeable(ctx, owner, repo, integrationPRNum, survivors) {
+			// Timeout or dirty — leave members in Queued.
+			return
+		}
+
+		if err := e.client.MergePR(owner, repo, integrationPRNum); err != nil {
+			e.logf(0, "merge-train", "merge of integration PR #%d failed: %v\n", integrationPRNum, err)
+			msg := fmt.Sprintf("🏭 **Fabrik merge-train — merge failure**\n\n"+
+				"Failed to merge integration PR #%d: %v\n\n"+
+				"Batch members remain in the Queued column. Manual intervention may be required.",
+				integrationPRNum, err)
+			if len(survivors) > 0 {
+				if _, commentErr := e.client.AddComment(owner, repo, survivors[0].item.Number, msg); commentErr != nil {
+					e.logf(0, "merge-train", "warn: could not post merge-failure comment: %v\n", commentErr)
+				}
+			}
+			return
+		}
+		e.logf(0, "merge-train", "merged integration PR #%d for %s\n", integrationPRNum, repoKey)
+	}
+
+	// FR-3: advance each member from Queued → Done and close their PR.
+	holdingStg := holdingStage(e.cfg)
+	if holdingStg == nil {
+		e.logf(0, "merge-train", "no holding stage — cannot advance members to Done\n")
+		return
+	}
+	board := &gh.ProjectBoard{ProjectID: state.projectID}
+
+	for _, m := range survivors {
+		// Skip members already in Done column (restart safety).
+		if m.item.Status == "Done" {
+			e.logf(m.item.Number, "merge-train", "#%d already in Done column — skipping\n", m.item.Number)
+			continue
+		}
+
+		// Advance Queued → Done.
+		if e.statusField == nil {
+			e.logf(m.item.Number, "merge-train", "warn: statusField not available — cannot advance #%d to Done\n", m.item.Number)
+		} else if advErr := e.advanceToNextStage(board, m.item, holdingStg); advErr != nil {
+			e.logf(m.item.Number, "merge-train", "warn: could not advance #%d to Done: %v\n", m.item.Number, advErr)
+		} else {
+			e.logf(m.item.Number, "merge-train", "advanced #%d to Done\n", m.item.Number)
+		}
+
+		// Close member PR with a comment citing the integration PR.
+		if m.prNum != 0 {
+			landedComment := fmt.Sprintf("Landed via merge-train batch PR #%d.", integrationPRNum)
+			if _, commentErr := e.client.AddComment(owner, repo, m.prNum, landedComment); commentErr != nil {
+				e.logf(m.item.Number, "merge-train", "warn: could not post landed comment on PR #%d: %v\n", m.prNum, commentErr)
+			}
+			if closeErr := e.client.CloseIssue(owner, repo, m.prNum); closeErr != nil {
+				e.logf(m.item.Number, "merge-train", "warn: could not close member PR #%d: %v\n", m.prNum, closeErr)
+			} else {
+				e.logf(m.item.Number, "merge-train", "closed member PR #%d\n", m.prNum)
+			}
+		}
+	}
+	e.logf(0, "merge-train", "landing complete for %s (integration PR #%d, %d members)\n", repoKey, integrationPRNum, len(survivors))
 }
 
 // pollTrainCI polls the integration PR's required CI checks, returning the typed result.
