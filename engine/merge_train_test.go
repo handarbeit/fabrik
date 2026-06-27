@@ -18,8 +18,9 @@ import (
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 // trainTestEngine builds an Engine wired with the given mock client and invoker.
-// It configures a Queued holding stage for merge-train use and sets a short
-// CIWaitTimeout so CI-polling tests terminate quickly.
+// It configures a Queued holding stage and a Done stage for merge-train use, and sets
+// a short CIWaitTimeout so CI-polling tests terminate quickly. statusField is pre-set
+// so advanceToNextStage can advance members from Queued to Done in landing tests.
 func trainTestEngine(t *testing.T, client *mockGitHubClient, claude *mockClaudeInvoker, wm *WorktreeManager) *Engine {
 	t.Helper()
 	holdingStageConfig := &stages.Stage{
@@ -44,12 +45,21 @@ func trainTestEngine(t *testing.T, client *mockGitHubClient, claude *mockClaudeI
 				{Name: "Plan", Order: 2, Prompt: "Make a plan"},
 				{Name: "Implement", Order: 3, Prompt: "Implement it"},
 				holdingStageConfig,
+				{Name: "Done", Order: 99, Prompt: "Cleanup"},
 			},
 		},
 		client,
 		claude,
 		wm,
 	)
+	// Pre-set statusField so advanceToNextStage can find the "Done" board column.
+	eng.statusField = &gh.StatusField{
+		FieldID: "sf-test-1",
+		Options: map[string]string{
+			"Done":   "opt-done",
+			"Queued": "opt-queued",
+		},
+	}
 	return eng
 }
 
@@ -852,5 +862,337 @@ func TestEnsureTrainWorktree(t *testing.T) {
 	// Cleanup.
 	if err := wm.CleanupTrainWorktree("test-trial-123", true); err != nil {
 		t.Errorf("CleanupTrainWorktree: %v", err)
+	}
+}
+
+// ── landMergeTrainBatch unit tests ────────────────────────────────────────────
+
+// makeQueuedMember returns a trainMember with Status "Queued".
+func makeQueuedMember(number, prNum int, title string) trainMember {
+	return trainMember{
+		item: gh.ProjectItem{
+			Number: number,
+			Title:  title,
+			ItemID: fmt.Sprintf("item-%d", number),
+			Repo:   "owner/repo",
+			Status: "Queued",
+		},
+		prNum: prNum,
+	}
+}
+
+// TestLandMergeTrainBatch_HappyPath verifies the full FR-1 through FR-5 landing sequence:
+// integration PR is created (not draft, with batch marker, no Closes #N), polled to clean,
+// merged, each member is advanced to Done, and their PRs are closed with a landing comment.
+func TestLandMergeTrainBatch_HappyPath(t *testing.T) {
+	survivors := []trainMember{
+		makeQueuedMember(1, 10, "Issue One"),
+		makeQueuedMember(2, 11, "Issue Two"),
+	}
+
+	var createPRTitle, createPRBody string
+	var mergePRNum int
+
+	client := &mockGitHubClient{
+		listPRsFn: func(owner, repo string) ([]gh.PRDetails, error) {
+			return nil, nil // no existing integration PR
+		},
+		createPRFn: func(owner, repo, title, head, base, body string) (int, error) {
+			createPRTitle = title
+			createPRBody = body
+			return 100, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		mergePRFn: func(owner, repo string, prNumber int) error {
+			mergePRNum = prNumber
+			return nil
+		},
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			return 1, nil
+		},
+	}
+
+	claude := &mockClaudeInvoker{}
+	wm := NewWorktreeManager(t.TempDir())
+	eng := trainTestEngine(t, client, claude, wm)
+
+	state := &mergeTrainWorkerState{
+		trialName: "merge-train-main-12345",
+		projectID: "PVT_test",
+	}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", survivors, wm)
+
+	// FR-1: integration PR created with correct title, body marker, and no Closes #N.
+	expectedTitle := "[merge-train] batch: #1, #2"
+	if createPRTitle != expectedTitle {
+		t.Errorf("integration PR title: got %q, want %q", createPRTitle, expectedTitle)
+	}
+	if !strings.Contains(createPRBody, mergeTrainBatchMarker) {
+		t.Errorf("integration PR body missing batch marker %q", mergeTrainBatchMarker)
+	}
+	if strings.Contains(createPRBody, "Closes #") {
+		t.Errorf("integration PR body must not contain 'Closes #N'")
+	}
+
+	// FR-2: integration PR is merged.
+	if mergePRNum != 100 {
+		t.Errorf("expected MergePR called with integration PR #100, got #%d", mergePRNum)
+	}
+
+	// FR-3: both members advanced to Done.
+	client.mu.Lock()
+	advancedItems := make([]string, len(client.updateStatusCalls))
+	for i, c := range client.updateStatusCalls {
+		advancedItems[i] = c.itemID
+	}
+	closedPRs := make([]int, len(client.closeIssueCalls))
+	for i, c := range client.closeIssueCalls {
+		closedPRs[i] = c.issueNumber
+	}
+	comments := client.addCommentCalls
+	client.mu.Unlock()
+
+	if len(advancedItems) != 2 {
+		t.Errorf("expected 2 board status updates (Queued→Done), got %d", len(advancedItems))
+	}
+
+	// FR-3: member PRs closed.
+	if len(closedPRs) != 2 {
+		t.Errorf("expected 2 member PRs closed, got %d", len(closedPRs))
+	}
+	// Verify it's the member PRs (10 and 11), not the integration PR (100).
+	for _, prNum := range closedPRs {
+		if prNum != 10 && prNum != 11 {
+			t.Errorf("unexpected PR closed: #%d (expected 10 or 11)", prNum)
+		}
+	}
+
+	// Each closure must be preceded by a landed comment citing integration PR #100.
+	foundLandedComment := false
+	for _, c := range comments {
+		if strings.Contains(c.body, "#100") && strings.Contains(c.body, "Landed via merge-train") {
+			foundLandedComment = true
+			break
+		}
+	}
+	if !foundLandedComment {
+		t.Errorf("expected a 'Landed via merge-train batch PR #100' comment, not found in %v", comments)
+	}
+
+	// FR-4: mergeTrainInFlight cleared (cleanup ran).
+	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+		t.Error("expected mergeTrainInFlight to be cleared after successful landing")
+	}
+}
+
+// TestLandMergeTrainBatch_ExistingOpenPR_SkipsFR1 verifies restart idempotency:
+// if ListPRs returns a PR whose body contains the batch marker, CreatePR is not called.
+func TestLandMergeTrainBatch_ExistingOpenPR_SkipsFR1(t *testing.T) {
+	survivors := []trainMember{makeQueuedMember(1, 10, "Issue One")}
+
+	createPRCalled := false
+	client := &mockGitHubClient{
+		listPRsFn: func(owner, repo string) ([]gh.PRDetails, error) {
+			return []gh.PRDetails{
+				{Number: 200, State: "open", Merged: false, Body: "text " + mergeTrainBatchMarker + " more"},
+			}, nil
+		},
+		createPRFn: func(owner, repo, title, head, base, body string) (int, error) {
+			createPRCalled = true
+			return 999, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		mergePRFn: func(owner, repo string, prNumber int) error { return nil },
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			return 1, nil
+		},
+	}
+
+	claude := &mockClaudeInvoker{}
+	wm := NewWorktreeManager(t.TempDir())
+	eng := trainTestEngine(t, client, claude, wm)
+	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", survivors, wm)
+
+	if createPRCalled {
+		t.Error("CreatePR must not be called when an existing integration PR is found (FR-1 skip)")
+	}
+
+	// Integration PR #200 should be merged instead.
+	client.mu.Lock()
+	mergedPRs := client.mergePRCalls
+	client.mu.Unlock()
+	if len(mergedPRs) != 1 || mergedPRs[0].prNumber != 200 {
+		t.Errorf("expected MergePR #200, got %v", mergedPRs)
+	}
+}
+
+// TestLandMergeTrainBatch_AlreadyMergedPR_SkipsFR2 verifies restart idempotency:
+// if the found integration PR is already merged, FR-2 (MergePR) is skipped and
+// FR-3 (member advancement) proceeds.
+func TestLandMergeTrainBatch_AlreadyMergedPR_SkipsFR2(t *testing.T) {
+	survivors := []trainMember{makeQueuedMember(1, 10, "Issue One")}
+
+	mergePRCalled := false
+	client := &mockGitHubClient{
+		listPRsFn: func(owner, repo string) ([]gh.PRDetails, error) {
+			return []gh.PRDetails{
+				{Number: 300, State: "closed", Merged: true, Body: mergeTrainBatchMarker},
+			}, nil
+		},
+		mergePRFn: func(owner, repo string, prNumber int) error {
+			mergePRCalled = true
+			return nil
+		},
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			return 1, nil
+		},
+	}
+
+	claude := &mockClaudeInvoker{}
+	wm := NewWorktreeManager(t.TempDir())
+	eng := trainTestEngine(t, client, claude, wm)
+	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", survivors, wm)
+
+	// FR-2 skip: MergePR must not be called.
+	if mergePRCalled {
+		t.Error("MergePR must not be called when integration PR is already merged (FR-2 skip)")
+	}
+
+	// FR-3: member should still be advanced.
+	client.mu.Lock()
+	advanced := len(client.updateStatusCalls)
+	closed := len(client.closeIssueCalls)
+	client.mu.Unlock()
+
+	if advanced != 1 {
+		t.Errorf("expected 1 board status update (FR-3), got %d", advanced)
+	}
+	if closed != 1 {
+		t.Errorf("expected 1 member PR close (FR-3), got %d", closed)
+	}
+}
+
+// TestLandMergeTrainBatch_MemberAlreadyInDone_SkipsFR3 verifies that a member whose
+// Status is "Done" is silently skipped during the FR-3 advancement loop.
+func TestLandMergeTrainBatch_MemberAlreadyInDone_SkipsFR3(t *testing.T) {
+	survivors := []trainMember{
+		{item: gh.ProjectItem{Number: 1, Title: "Done Member", ItemID: "item-1", Repo: "owner/repo", Status: "Done"}, prNum: 10},
+		makeQueuedMember(2, 11, "Queued Member"),
+	}
+
+	client := &mockGitHubClient{
+		listPRsFn: func(owner, repo string) ([]gh.PRDetails, error) { return nil, nil },
+		createPRFn: func(owner, repo, title, head, base, body string) (int, error) {
+			return 100, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		mergePRFn: func(owner, repo string, prNumber int) error { return nil },
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			return 1, nil
+		},
+	}
+
+	claude := &mockClaudeInvoker{}
+	wm := NewWorktreeManager(t.TempDir())
+	eng := trainTestEngine(t, client, claude, wm)
+	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", survivors, wm)
+
+	// Only the Queued member should be advanced; the Done member must be skipped.
+	client.mu.Lock()
+	advanced := len(client.updateStatusCalls)
+	closed := client.closeIssueCalls
+	client.mu.Unlock()
+
+	if advanced != 1 {
+		t.Errorf("expected 1 board status update (Done member skipped), got %d", advanced)
+	}
+	if len(closed) != 1 || closed[0].issueNumber != 11 {
+		t.Errorf("expected only member PR #11 closed, got %v", closed)
+	}
+}
+
+// TestLandMergeTrainBatch_MergeAPIFailure verifies that a MergePR error results in
+// an error comment on the first batch member issue, members remain in Queued
+// (no UpdateProjectItemStatus calls), and cleanup still runs.
+func TestLandMergeTrainBatch_MergeAPIFailure(t *testing.T) {
+	survivors := []trainMember{
+		makeQueuedMember(1, 10, "Issue One"),
+		makeQueuedMember(2, 11, "Issue Two"),
+	}
+
+	client := &mockGitHubClient{
+		listPRsFn: func(owner, repo string) ([]gh.PRDetails, error) { return nil, nil },
+		createPRFn: func(owner, repo, title, head, base, body string) (int, error) {
+			return 100, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		mergePRFn: func(owner, repo string, prNumber int) error {
+			return fmt.Errorf("merge rejected: branch protection rules not satisfied")
+		},
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			return 1, nil
+		},
+	}
+
+	claude := &mockClaudeInvoker{}
+	wm := NewWorktreeManager(t.TempDir())
+	eng := trainTestEngine(t, client, claude, wm)
+	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", survivors, wm)
+
+	client.mu.Lock()
+	advanced := len(client.updateStatusCalls)
+	closed := len(client.closeIssueCalls)
+	comments := client.addCommentCalls
+	client.mu.Unlock()
+
+	// Members must not be advanced or closed after a merge failure.
+	if advanced != 0 {
+		t.Errorf("expected 0 board status updates after merge failure, got %d", advanced)
+	}
+	if closed != 0 {
+		t.Errorf("expected 0 PR closures after merge failure, got %d", closed)
+	}
+
+	// An error comment must be posted on the first batch member issue.
+	foundErrComment := false
+	for _, c := range comments {
+		if c.issueNumber == 1 && strings.Contains(c.body, "merge failure") {
+			foundErrComment = true
+			break
+		}
+	}
+	if !foundErrComment {
+		t.Errorf("expected a merge-failure comment on issue #1, got comments: %v", comments)
+	}
+
+	// Cleanup must still run (mergeTrainInFlight cleared).
+	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+		t.Error("expected mergeTrainInFlight to be cleared after merge failure (cleanup deferred)")
 	}
 }
