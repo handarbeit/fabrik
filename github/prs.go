@@ -76,6 +76,7 @@ type PRDetails struct {
 	Merged  bool
 	Draft   bool
 	HeadSHA string
+	Body    string
 	// MergeableState reflects GitHub's branch-protection-aware mergeable
 	// status: "clean" (ready to merge), "unstable" (non-required checks
 	// failing but still mergeable), "blocked" (required checks pending or
@@ -187,6 +188,7 @@ func (c *Client) FetchPRDetails(owner, repo string, prNumber int) (*PRDetails, e
 		State          string      `json:"state"`
 		Merged         bool        `json:"merged"`
 		Draft          bool        `json:"draft"`
+		Body           string      `json:"body"`
 		MergeableState string      `json:"mergeable_state"`
 		AutoMerge      interface{} `json:"auto_merge"` // non-null object = enabled, null = disabled
 		Head           struct {
@@ -202,6 +204,7 @@ func (c *Client) FetchPRDetails(owner, repo string, prNumber int) (*PRDetails, e
 		State:            raw.State,
 		Merged:           raw.Merged,
 		Draft:            raw.Draft,
+		Body:             raw.Body,
 		HeadSHA:          raw.Head.SHA,
 		MergeableState:   raw.MergeableState,
 		AutoMergeEnabled: raw.AutoMerge != nil,
@@ -310,6 +313,61 @@ func (c *Client) CreateDraftPR(owner, repo, title, head, base, body string, _ in
 		return 0, fmt.Errorf("creating draft PR: %w", err)
 	}
 	return result.Number, nil
+}
+
+// CreatePR creates a non-draft pull request. Returns the PR number.
+// Unlike CreateDraftPR, the PR is immediately ready for review and CI.
+func (c *Client) CreatePR(owner, repo, title, head, base, body string) (int, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls", c.baseURL, owner, repo)
+	reqBody := map[string]interface{}{
+		"title": title,
+		"head":  head,
+		"base":  base,
+		"body":  body,
+		"draft": false,
+	}
+	var result struct {
+		Number int `json:"number"`
+	}
+	if err := c.restPostWithResponse(apiURL, reqBody, &result); err != nil {
+		return 0, fmt.Errorf("creating PR: %w", err)
+	}
+	return result.Number, nil
+}
+
+// ListPRs returns recent pull requests (open and closed) for a repository,
+// including their body text. Capped at the 50 most-recently-updated PRs.
+// Used for idempotency detection (e.g. finding an existing integration PR).
+func (c *Client) ListPRs(owner, repo string) ([]PRDetails, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls?state=all&per_page=50&sort=updated&direction=desc",
+		c.baseURL, owner, repo)
+	var raw []struct {
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		State  string `json:"state"`
+		Merged bool   `json:"merged"`
+		Draft  bool   `json:"draft"`
+		Body   string `json:"body"`
+		Head   struct {
+			SHA string `json:"sha"`
+		} `json:"head"`
+	}
+	if err := c.restGetJSON(apiURL, &raw); err != nil {
+		return nil, fmt.Errorf("listing PRs for %s/%s: %w", owner, repo, err)
+	}
+	out := make([]PRDetails, len(raw))
+	for i, pr := range raw {
+		out[i] = PRDetails{
+			Number:  pr.Number,
+			Title:   pr.Title,
+			State:   pr.State,
+			Merged:  pr.Merged,
+			Draft:   pr.Draft,
+			HeadSHA: pr.Head.SHA,
+			Body:    pr.Body,
+		}
+	}
+	return out, nil
 }
 
 // MarkPRReady transitions a draft PR to ready-for-review.

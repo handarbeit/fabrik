@@ -171,6 +171,12 @@ func (m *testGitHubUpgradeClient) FetchCommitsBehind(owner, repo, base, head str
 func (m *testGitHubUpgradeClient) FetchIssue(owner, repo string, issueNumber int) (*gh.IssueData, error) {
 	return nil, nil
 }
+func (m *testGitHubUpgradeClient) CreatePR(owner, repo, title, head, base, body string) (int, error) {
+	return 0, nil
+}
+func (m *testGitHubUpgradeClient) ListPRs(owner, repo string) ([]gh.PRDetails, error) {
+	return nil, nil
+}
 
 // ── upgrade ───────────────────────────────────────────────────────────────────
 
