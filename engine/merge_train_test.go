@@ -925,7 +925,7 @@ func TestLandMergeTrainBatch_HappyPath(t *testing.T) {
 	}
 	eng.mergeTrainInFlight.Store("owner/repo", state)
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
 
 	// FR-1: integration PR created with correct title, body marker, and no Closes #N.
 	expectedTitle := "[merge-train] batch: #1, #2"
@@ -1022,7 +1022,7 @@ func TestLandMergeTrainBatch_ExistingOpenPR_SkipsFR1(t *testing.T) {
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
 	eng.mergeTrainInFlight.Store("owner/repo", state)
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
 
 	if createPRCalled {
 		t.Error("CreatePR must not be called when an existing integration PR is found (FR-1 skip)")
@@ -1065,7 +1065,7 @@ func TestLandMergeTrainBatch_AlreadyMergedPR_SkipsFR2(t *testing.T) {
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
 	eng.mergeTrainInFlight.Store("owner/repo", state)
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
 
 	// FR-2 skip: MergePR must not be called.
 	if mergePRCalled {
@@ -1115,7 +1115,7 @@ func TestLandMergeTrainBatch_MemberAlreadyInDone_SkipsFR3(t *testing.T) {
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
 	eng.mergeTrainInFlight.Store("owner/repo", state)
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
 
 	// Only the Queued member should be advanced; the Done member must be skipped.
 	client.mu.Lock()
@@ -1163,7 +1163,7 @@ func TestLandMergeTrainBatch_MergeAPIFailure(t *testing.T) {
 	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
 	eng.mergeTrainInFlight.Store("owner/repo", state)
 
-	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", survivors, wm)
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
 
 	client.mu.Lock()
 	advanced := len(client.updateStatusCalls)
