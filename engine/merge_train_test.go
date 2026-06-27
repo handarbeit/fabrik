@@ -1196,3 +1196,52 @@ func TestLandMergeTrainBatch_MergeAPIFailure(t *testing.T) {
 		t.Error("expected mergeTrainInFlight to be cleared after merge failure (cleanup deferred)")
 	}
 }
+
+// TestLandMergeTrainBatch_ResetsEjectionCounter verifies that a successful landing resets
+// the per-member ejection counter, so stale history from a prior train does not count
+// toward the pause cap on a future train.
+func TestLandMergeTrainBatch_ResetsEjectionCounter(t *testing.T) {
+	survivors := []trainMember{
+		makeQueuedMember(1, 10, "Issue One"),
+		makeQueuedMember(2, 11, "Issue Two"),
+	}
+
+	client := &mockGitHubClient{
+		listPRsFn:  func(owner, repo string) ([]gh.PRDetails, error) { return nil, nil },
+		createPRFn: func(owner, repo, title, head, base, body string) (int, error) { return 100, nil },
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		mergePRFn:    func(owner, repo string, prNumber int) error { return nil },
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) { return 1, nil },
+		closeIssueFn: func(owner, repo string, number int) error { return nil },
+	}
+
+	claude := &mockClaudeInvoker{}
+	wm := NewWorktreeManager(t.TempDir())
+	eng := trainTestEngine(t, client, claude, wm)
+	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	// Pre-seed stale ejection counts from a prior train.
+	eng.mergeTrainEjectionsMu.Lock()
+	eng.mergeTrainEjectionCounts["owner/repo#1"] = 2
+	eng.mergeTrainEjectionCounts["owner/repo#2"] = 1
+	eng.mergeTrainEjectionsMu.Unlock()
+
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+
+	// After landing, both counters must be zeroed.
+	eng.mergeTrainEjectionsMu.Lock()
+	count1 := eng.mergeTrainEjectionCounts["owner/repo#1"]
+	count2 := eng.mergeTrainEjectionCounts["owner/repo#2"]
+	eng.mergeTrainEjectionsMu.Unlock()
+
+	if count1 != 0 {
+		t.Errorf("expected ejection counter for member #1 to be 0 after landing, got %d", count1)
+	}
+	if count2 != 0 {
+		t.Errorf("expected ejection counter for member #2 to be 0 after landing, got %d", count2)
+	}
+}
