@@ -36,6 +36,7 @@ CI's `docs-drift` workflow (`.github/workflows/docs-drift.yml`) runs the regen a
 - `engine/repo.go` — Per-repo identity helpers (parseOwnerRepo, repoName, issueKey)
 - `engine/claude.go` — Claude Code invocation, prompt building, marker extraction
 - `engine/worktree.go` — Git worktree lifecycle (create, update, push, cleanup)
+- `engine/merge_train.go` — Merge-train worker: trial branch assembly, inline conflict resolution, integration PR creation and CI polling (ADR-059 D3)
 - `engine/interfaces.go` — GitHubClient and ClaudeInvoker interfaces (for testing)
 - `github/project.go` — GraphQL board fetching (single query for all items + comments + linked PRs)
 - `github/client.go` — HTTP client construction and shared request helpers
