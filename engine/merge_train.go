@@ -288,7 +288,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 	switch ciResult {
 	case TrainCIGreen:
 		e.logf(0, "merge-train", "CI green for draft PR #%d (%s) — proceeding to landing\n", prNum, repoKey)
-		e.landMergeTrainBatch(ctx, state, owner, repo, survivors, wm)
+		e.landMergeTrainBatch(ctx, state, owner, repo, baseBranch, survivors, wm)
 		// landMergeTrainBatch calls e.mergeTrainInFlight.Delete via its deferred cleanup.
 	case TrainCIRed:
 		e.logf(0, "merge-train", "CI red for draft PR #%d (%s) — batch needs attention\n", prNum, repoKey)
@@ -539,7 +539,8 @@ func (e *Engine) pollForMergeable(ctx context.Context, owner, repo string, prNum
 // landMergeTrainBatch executes FR-1 through FR-5 after a green CI result:
 // opens (or finds) the integration PR, polls until mergeable, merges, advances
 // each member to Done and closes their PRs, then cleans up trial artifacts.
-func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorkerState, owner, repo string, survivors []trainMember, wm *WorktreeManager) {
+// baseBranch is the target branch for the integration PR (already known from runMergeTrainWorker).
+func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorkerState, owner, repo, baseBranch string, survivors []trainMember, wm *WorktreeManager) {
 	repoKey := owner + "/" + repo
 	trialName := state.trialName
 
@@ -551,10 +552,7 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 		e.mergeTrainInFlight.Delete(repoKey)
 	}()
 
-	state.mu.RLock()
 	trialBranch := "fabrik/merge-train/" + trialName
-	baseBranch, _ := wm.DefaultBaseBranch()
-	state.mu.RUnlock()
 
 	// FR-1 / FR-5: find or create the landing integration PR.
 	integrationPR, err := e.findIntegrationPR(owner, repo)
