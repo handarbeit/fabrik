@@ -598,9 +598,9 @@ func TestMergeTrainWorker_CleanBatch(t *testing.T) {
 	}
 	mu.Unlock()
 
-	// In-flight entry should remain (for #948 to consume).
-	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); !ok {
-		t.Error("expected mergeTrainInFlight entry to persist after CI resolved")
+	// Landing runs on TrainCIGreen and clears the in-flight entry when done.
+	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+		t.Error("expected mergeTrainInFlight to be cleared after landing completes")
 	}
 	if state.CIResult != TrainCIGreen {
 		t.Errorf("expected TrainCIGreen, got %v", state.CIResult)
@@ -975,7 +975,7 @@ func TestLandMergeTrainBatch_HappyPath(t *testing.T) {
 	// Each closure must be preceded by a landed comment citing integration PR #100.
 	foundLandedComment := false
 	for _, c := range comments {
-		if strings.Contains(c.body, "#100") && strings.Contains(c.body, "Landed via merge-train") {
+		if strings.Contains(c.body, "#100") && strings.Contains(c.body, "Fabrik merge-train") {
 			foundLandedComment = true
 			break
 		}

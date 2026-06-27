@@ -630,7 +630,7 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 
 		// Close member PR with a comment citing the integration PR.
 		if m.prNum != 0 {
-			landedComment := fmt.Sprintf("Landed via merge-train batch PR #%d.", integrationPRNum)
+			landedComment := fmt.Sprintf("🏭 **Fabrik merge-train** — Landed via batch PR #%d.", integrationPRNum)
 			if _, commentErr := e.client.AddComment(owner, repo, m.prNum, landedComment); commentErr != nil {
 				e.logf(m.item.Number, "merge-train", "warn: could not post landed comment on PR #%d: %v\n", m.prNum, commentErr)
 			}
