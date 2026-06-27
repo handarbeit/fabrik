@@ -39,6 +39,8 @@ type GitHubClient interface {
 	GetPRBase(owner, repo string, prNumber int) (string, error)
 	UpdatePRBase(owner, repo string, prNumber int, newBase string) error
 	CreateDraftPR(owner, repo, title, head, base, body string, issueNumber int) (int, error)
+	CreatePR(owner, repo, title, head, base, body string) (int, error)
+	ListPRs(owner, repo string) ([]gh.PRDetails, error)
 	MarkPRReady(owner, repo string, prNumber int) error
 	MergePR(owner, repo string, prNumber int) error
 	EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy string) error

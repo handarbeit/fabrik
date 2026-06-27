@@ -63,6 +63,8 @@ type mockGitHubClient struct {
 	fetchCommitsBehindFn          func(owner, repo, base, head string) (int, error)
 	fetchAllowAutoMergeFn         func(owner, repo string) (bool, error)
 	fetchIssueFn                  func(owner, repo string, issueNumber int) (*gh.IssueData, error)
+	createPRFn                    func(owner, repo, title, head, base, body string) (int, error)
+	listPRsFn                     func(owner, repo string) ([]gh.PRDetails, error)
 
 	// Track call counts for FetchProjectItemStatus
 	fetchProjectItemStatusCalls []string
@@ -105,6 +107,12 @@ type mockGitHubClient struct {
 	enqueuePullRequestCalls         []enqueuePullRequestCall
 	dequeuePullRequestCalls         []dequeuePullRequestCall
 	fetchCommitsBehindCalls         []fetchCommitsBehindCall
+	createPRCalls                   []createPRCall
+	listPRsCalls                    int
+}
+
+type createPRCall struct {
+	owner, repo, title, head, base, body string
 }
 
 type reviewRequestCall struct {
@@ -720,6 +728,28 @@ func (m *mockGitHubClient) FetchCommitsBehind(owner, repo, base, head string) (i
 		return fn(owner, repo, base, head)
 	}
 	return 0, nil
+}
+
+func (m *mockGitHubClient) CreatePR(owner, repo, title, head, base, body string) (int, error) {
+	m.mu.Lock()
+	m.createPRCalls = append(m.createPRCalls, createPRCall{owner, repo, title, head, base, body})
+	fn := m.createPRFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo, title, head, base, body)
+	}
+	return 0, nil
+}
+
+func (m *mockGitHubClient) ListPRs(owner, repo string) ([]gh.PRDetails, error) {
+	m.mu.Lock()
+	m.listPRsCalls++
+	fn := m.listPRsFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(owner, repo)
+	}
+	return nil, nil
 }
 
 func (m *mockGitHubClient) CreateIssue(owner, repo, title, body string) (int, string, error) {
