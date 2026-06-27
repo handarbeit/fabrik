@@ -342,13 +342,13 @@ func (c *Client) ListPRs(owner, repo string) ([]PRDetails, error) {
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls?state=all&per_page=50&sort=updated&direction=desc",
 		c.baseURL, owner, repo)
 	var raw []struct {
-		Number int    `json:"number"`
-		Title  string `json:"title"`
-		State  string `json:"state"`
-		Merged bool   `json:"merged"`
-		Draft  bool   `json:"draft"`
-		Body   string `json:"body"`
-		Head   struct {
+		Number   int    `json:"number"`
+		Title    string `json:"title"`
+		State    string `json:"state"`
+		MergedAt string `json:"merged_at"` // non-null when merged; list endpoint omits the boolean "merged" field
+		Draft    bool   `json:"draft"`
+		Body     string `json:"body"`
+		Head     struct {
 			SHA string `json:"sha"`
 		} `json:"head"`
 	}
@@ -361,7 +361,7 @@ func (c *Client) ListPRs(owner, repo string) ([]PRDetails, error) {
 			Number:  pr.Number,
 			Title:   pr.Title,
 			State:   pr.State,
-			Merged:  pr.Merged,
+			Merged:  pr.MergedAt != "",
 			Draft:   pr.Draft,
 			HeadSHA: pr.Head.SHA,
 			Body:    pr.Body,
