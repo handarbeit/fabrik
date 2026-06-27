@@ -437,6 +437,15 @@ func (e *Engine) ejectMember(ctx context.Context, owner, repo string, memberItem
 	}
 }
 
+// resetEjectionCount zeroes the per-member ejection counter after a successful landing
+// so ejection history from a prior train doesn't count toward the pause cap on a future train.
+func (e *Engine) resetEjectionCount(owner, repo string, memberNum int) {
+	counterKey := fmt.Sprintf("%s/%s#%d", owner, repo, memberNum)
+	e.mergeTrainEjectionsMu.Lock()
+	delete(e.mergeTrainEjectionCounts, counterKey)
+	e.mergeTrainEjectionsMu.Unlock()
+}
+
 // mergeTrainBatchMarker is the idempotency marker embedded in integration PR bodies.
 const mergeTrainBatchMarker = "<!-- fabrik-merge-train-batch -->"
 
@@ -616,6 +625,8 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 		// Skip members already in Done column (restart safety).
 		if m.item.Status == "Done" {
 			e.logf(m.item.Number, "merge-train", "#%d already in Done column — skipping\n", m.item.Number)
+			// Still reset the ejection counter: this member landed successfully.
+			e.resetEjectionCount(owner, repo, m.item.Number)
 			continue
 		}
 
@@ -640,6 +651,10 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 				e.logf(m.item.Number, "merge-train", "closed member PR #%d\n", m.prNum)
 			}
 		}
+
+		// Reset ejection counter: this member has landed; prior ejection history
+		// from earlier trains must not count toward the pause cap on future trains.
+		e.resetEjectionCount(owner, repo, m.item.Number)
 	}
 	e.logf(0, "merge-train", "landing complete for %s (integration PR #%d, %d members)\n", repoKey, integrationPRNum, len(survivors))
 }
