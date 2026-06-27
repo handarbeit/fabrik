@@ -478,8 +478,9 @@ func (e *Engine) findIntegrationPR(owner, repo string) (*gh.PRDetails, error) {
 	return nil, nil
 }
 
-// pollForMergeable polls the integration PR until its mergeable_state is "clean",
-// blocking up to CIWaitTimeout. Returns true when the PR is ready to merge.
+// pollForMergeable polls the integration PR until its mergeable_state is "clean" or
+// "unstable" (per gh.MergeableStateAccepted), blocking up to CIWaitTimeout.
+// Returns true when the PR is ready to merge.
 // On timeout, posts a warning comment on the first batch member issue and returns false.
 func (e *Engine) pollForMergeable(ctx context.Context, owner, repo string, prNum int, survivors []trainMember) bool {
 	ciWaitTimeout := e.cfg.CIWaitTimeout
@@ -503,7 +504,7 @@ func (e *Engine) pollForMergeable(ctx context.Context, owner, repo string, prNum
 		_, mergeableState, err := e.client.FetchPRMergeableFields(owner, repo, prNum)
 		if err != nil {
 			e.logf(0, "merge-train", "warn: FetchPRMergeableFields failed for integration PR #%d: %v\n", prNum, err)
-		} else if mergeableState == "clean" {
+		} else if gh.MergeableStateAccepted(mergeableState) {
 			return true
 		} else if mergeableState == "dirty" {
 			e.logf(0, "merge-train", "integration PR #%d has merge conflict (dirty) — cannot land\n", prNum)
@@ -524,7 +525,7 @@ func (e *Engine) pollForMergeable(ctx context.Context, owner, repo string, prNum
 	e.logf(0, "merge-train", "timed out waiting for integration PR #%d to become mergeable\n", prNum)
 	if len(survivors) > 0 {
 		msg := fmt.Sprintf("🏭 **Fabrik merge-train — landing timeout**\n\n"+
-			"Timed out waiting for integration PR #%d to reach `mergeable_state: clean`. "+
+			"Timed out waiting for integration PR #%d to reach a mergeable state (`clean` or `unstable`). "+
 			"Batch members remain in the Queued column and will be retried in the next train cycle.\n\n"+
 			"Possible causes: branch protection checks are slow, or the base branch has advanced "+
 			"and the integration PR needs rebasing.",
@@ -557,7 +558,8 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 	// FR-1 / FR-5: find or create the landing integration PR.
 	integrationPR, err := e.findIntegrationPR(owner, repo)
 	if err != nil {
-		e.logf(0, "merge-train", "warn: error searching for existing integration PR: %v — will attempt to create\n", err)
+		e.logf(0, "merge-train", "cannot search for existing integration PR for %s: %v\n", repoKey, err)
+		return
 	}
 
 	var integrationPRNum int
