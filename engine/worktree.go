@@ -391,24 +391,36 @@ func (wm *WorktreeManager) PushTrainBranch(name string) error {
 	return nil
 }
 
-// CleanupTrainWorktree removes the trial branch worktree and optionally its branch.
+// CleanupTrainWorktree removes the trial branch worktree and optionally its local
+// and remote branches. All operations are best-effort: failures are logged but do not
+// stop remaining cleanup steps.
 func (wm *WorktreeManager) CleanupTrainWorktree(name string, deleteBranch bool) error {
 	wm.mu.Lock()
 	defer wm.mu.Unlock()
 	wtDir := wm.trainWorktreeDir(name)
 
-	cmd := exec.Command("git", "worktree", "remove", "--force", wtDir)
-	cmd.Dir = wm.baseDir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("removing train worktree: %s: %w", string(out), err)
+	// Best-effort local worktree removal — may already be gone.
+	rmCmd := exec.Command("git", "worktree", "remove", "--force", wtDir)
+	rmCmd.Dir = wm.baseDir
+	if out, err := rmCmd.CombinedOutput(); err != nil {
+		wm.logf(0, "merge-train", "warn: could not remove train worktree %s: %s\n", wtDir, strings.TrimSpace(string(out)))
 	}
 
 	if deleteBranch {
 		branch := wm.trainBranchName(name)
-		cmd := exec.Command("git", "branch", "-D", branch)
-		cmd.Dir = wm.baseDir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("deleting trial branch %s: %s: %w", branch, string(out), err)
+
+		// Delete local tracking branch (best-effort).
+		localDel := exec.Command("git", "branch", "-D", branch)
+		localDel.Dir = wm.baseDir
+		if out, err := localDel.CombinedOutput(); err != nil {
+			wm.logf(0, "merge-train", "warn: could not delete local trial branch %s: %s\n", branch, strings.TrimSpace(string(out)))
+		}
+
+		// Push-delete the remote trial branch (best-effort).
+		remoteDel := exec.Command("git", "push", "origin", "--delete", branch)
+		remoteDel.Dir = wm.baseDir
+		if out, err := remoteDel.CombinedOutput(); err != nil {
+			wm.logf(0, "merge-train", "warn: could not delete remote trial branch %s: %s\n", branch, strings.TrimSpace(string(out)))
 		}
 	}
 	return nil
