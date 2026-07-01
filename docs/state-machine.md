@@ -1602,7 +1602,9 @@ When the webhook stream is healthy or starting up, steady-state polling is suppr
 
 Webhooks continue to apply deltas to the cache via `ApplyDelta` but no longer drive health state. Event silence does not produce health transitions — only `LightReconcile` drift detection does.
 
-**Webhook mode is always non-fatal.** If the `gh webhook forward` subprocess fails to start, the stream state stays `Unhealthy` and the 5-minute idle cap applies. The poll loop continues normally.
+**The reconcile ticker runs independent of webhooks (poll-only correctness backstop).** `reconcileLoop` (`engine/poll.go`) is launched unconditionally whenever the cache is active — it is *not* nested in the webhook-manager start path. This is required because webhooks are an optimization, not a correctness requirement: on a webhook-less deployment (or when the `gh webhook forward` subprocess fails to start), the reconcile ticker is the only mechanism that re-syncs the cache with GitHub, and it must still run. When the webhook manager is present it also receives the health-state transitions above; when it is absent (`wm == nil`) the drift detection and `Pause → Reconcile → Resume` repair still run, only the health-state signaling is skipped. `LightReconcile` drift detection compares `status`, `updatedAt`, and the **fabrik-managed label set** (`fabrik:*` / `stage:*` labels only — the board query truncates labels at 30, so the full set is not compared; the gate-label subset is small and never truncated). Comparing the gate-label subset closes the case where a store label set diverges from GitHub with a matching `updatedAt` (e.g. `updatedAt` advanced by a deep-fetch that syncs `updatedAt` but not labels), which would otherwise strand an item at a gate (e.g. `fabrik:awaiting-ci` missing from the store) indefinitely on a webhook-less deployment.
+
+**Webhook mode is always non-fatal.** If the `gh webhook forward` subprocess fails to start, the stream state stays `Unhealthy` and the 5-minute idle cap applies. The poll loop (and the reconcile ticker) continues normally.
 
 **References:** [ADR-032: Webhook-Driven Event Delivery](../adrs/032-webhook-event-delivery.md)
 
