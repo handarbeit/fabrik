@@ -1193,6 +1193,9 @@ func copyDeepFields(dst, src *gh.ProjectItem) {
 // the cache and GitHub without false-positiving on the board query's label
 // truncation (only these few labels are compared, and they never exceed the cap).
 func fabrikManagedLabelKey(labels []string) string {
+	if len(labels) == 0 {
+		return ""
+	}
 	managed := make([]string, 0, len(labels))
 	for _, l := range labels {
 		if strings.HasPrefix(l, "fabrik:") || strings.HasPrefix(l, "stage:") {
