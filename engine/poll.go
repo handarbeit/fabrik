@@ -476,46 +476,22 @@ func (e *Engine) Run() error {
 		if err := wm.Start(ctx, e.cfg.WebhookPort); err == nil {
 			e.webhookMgr = wm
 			defer wm.Stop()
-
-			if cacheImpl != nil {
-				reconcileInterval := e.cfg.ReconcileInterval
-				if reconcileInterval <= 0 {
-					reconcileInterval = lightReconcileInterval
-				}
-				go func() {
-					ticker := time.NewTicker(reconcileInterval)
-					defer ticker.Stop()
-					for {
-						select {
-						case <-ctx.Done():
-							return
-						case <-ticker.C:
-							driftCount, driftedKeys, freshBoard, err := cacheImpl.LightReconcile(
-								e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType,
-							)
-							if err != nil {
-								e.logf(0, "reconcile", "light reconcile failed (no health state change): %v\n", err)
-								continue
-							}
-							if driftCount == 0 {
-								wm.transitionHealthState(WebhookStreamHealthy, "")
-							} else {
-								keyStr := fmt.Sprintf("%v", driftedKeys)
-								if len(driftedKeys) > 5 {
-									keyStr = fmt.Sprintf("%v … %d more", driftedKeys[:5], len(driftedKeys)-5)
-								}
-								e.logf(0, "reconcile", "light reconcile: %d item(s) drifted (%s) — reconciling cache\n", driftCount, keyStr)
-								wm.transitionHealthState(WebhookStreamUnhealthy, fmt.Sprintf("%d item(s) drifted", driftCount))
-								cacheImpl.Pause()
-								cacheImpl.Reconcile(freshBoard)
-								cacheImpl.Resume()
-								wm.transitionHealthState(WebhookStreamHealthy, "drift reconciled")
-							}
-						}
-					}
-				}()
-			}
 		}
+		// NOTE: the reconcile ticker is intentionally NOT started here. It is the
+		// poll-only correctness backstop and must run whether or not the webhook
+		// manager started (#955) — it is launched unconditionally below.
+	}
+
+	// Reconcile ticker: the poll-only correctness backstop that re-syncs the cache
+	// from GitHub on drift — notably fabrik-managed label state, whose divergence
+	// (e.g. a store missing fabrik:awaiting-ci while GitHub has it) otherwise
+	// strands an item at a gate forever. This MUST run independent of webhooks
+	// (#955): webhooks are an optimization, not a requirement, so drift repair may
+	// not be gated on the webhook manager starting. e.webhookMgr is nil when
+	// webhooks are disabled or failed to start; reconcileLoop skips health-state
+	// signaling in that case.
+	if cacheImpl != nil {
+		go e.reconcileLoop(ctx, cacheImpl, e.webhookMgr)
 	}
 
 	if e.events == nil {
@@ -2318,6 +2294,57 @@ func (e *Engine) reconcileCache(cache *boardcache.CacheImpl) {
 		return
 	}
 	cache.Reconcile(board)
+}
+
+// reconcileLoop is the poll-only correctness backstop for cache/GitHub divergence.
+// It periodically runs LightReconcile (a fresh shallow board fetch + drift compare)
+// and, on drift, reconciles the cache — re-syncing shallow fields including the
+// fabrik-managed label set. It MUST run whether or not the webhook manager started
+// (#955): a webhook-less (or webhook-failed) deployment must still self-heal, so
+// this loop is launched unconditionally rather than nested in the webhook-start
+// path. wm may be nil (webhooks off/failed); webhook health-state transitions are
+// skipped in that case, but drift detection and repair still run.
+func (e *Engine) reconcileLoop(ctx context.Context, cacheImpl *boardcache.CacheImpl, wm *webhookManager) {
+	reconcileInterval := e.cfg.ReconcileInterval
+	if reconcileInterval <= 0 {
+		reconcileInterval = lightReconcileInterval
+	}
+	ticker := time.NewTicker(reconcileInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			driftCount, driftedKeys, freshBoard, err := cacheImpl.LightReconcile(
+				e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType,
+			)
+			if err != nil {
+				e.logf(0, "reconcile", "light reconcile failed (no health state change): %v\n", err)
+				continue
+			}
+			if driftCount == 0 {
+				if wm != nil {
+					wm.transitionHealthState(WebhookStreamHealthy, "")
+				}
+				continue
+			}
+			keyStr := fmt.Sprintf("%v", driftedKeys)
+			if len(driftedKeys) > 5 {
+				keyStr = fmt.Sprintf("%v … %d more", driftedKeys[:5], len(driftedKeys)-5)
+			}
+			e.logf(0, "reconcile", "light reconcile: %d item(s) drifted (%s) — reconciling cache\n", driftCount, keyStr)
+			if wm != nil {
+				wm.transitionHealthState(WebhookStreamUnhealthy, fmt.Sprintf("%d item(s) drifted", driftCount))
+			}
+			cacheImpl.Pause()
+			cacheImpl.Reconcile(freshBoard)
+			cacheImpl.Resume()
+			if wm != nil {
+				wm.transitionHealthState(WebhookStreamHealthy, "drift reconciled")
+			}
+		}
+	}
 }
 
 // applyLayer1StatusRefresh handles the Layer 1 opportunistic per-event Status
