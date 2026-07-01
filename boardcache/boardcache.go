@@ -1,6 +1,7 @@
 package boardcache
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1092,6 +1093,7 @@ func (c *CacheImpl) LightReconcile(owner, repo string, projectNum int, ownerType
 	type entry struct {
 		status    string
 		updatedAt time.Time
+		gateLabel string
 	}
 
 	// Snapshot current cache items. Store.All() handles its own locking.
@@ -1102,6 +1104,7 @@ func (c *CacheImpl) LightReconcile(owner, repo string, projectNum int, ownerType
 		cached[itemKey(snap.Repo(), snap.Number())] = entry{
 			status:    s.Status,
 			updatedAt: s.UpdatedAt,
+			gateLabel: fabrikManagedLabelKey(s.Labels),
 		}
 	}
 
@@ -1122,7 +1125,18 @@ func (c *CacheImpl) LightReconcile(owner, repo string, projectNum int, ownerType
 			driftedKeys = append(driftedKeys, key)
 			continue
 		}
-		if e.status != pi.Status || !e.updatedAt.Equal(pi.UpdatedAt) {
+		// Compare status, updatedAt, AND the fabrik-managed label set. Label
+		// comparison is scoped to fabrik: / stage: labels (the ones that gate
+		// dispatch) rather than the full set: the board query truncates labels
+		// (first: 30), so comparing all labels would false-positive for issues
+		// with many labels (#641). The gate-label subset is small and never
+		// truncated. Including it here closes the hole where a store label set
+		// diverges from GitHub with a matching updatedAt (e.g. updatedAt laundered
+		// by a deep-fetch that syncs updatedAt but not labels), which otherwise
+		// strands an item at a gate forever on webhook-less deployments (#955).
+		if e.status != pi.Status ||
+			!e.updatedAt.Equal(pi.UpdatedAt) ||
+			e.gateLabel != fabrikManagedLabelKey(pi.Labels) {
 			driftCount++
 			driftedKeys = append(driftedKeys, key)
 		}
@@ -1171,6 +1185,25 @@ func copyDeepFields(dst, src *gh.ProjectItem) {
 	dst.LinkedPRReviews = clonePRReviews(src.LinkedPRReviews)
 	dst.LinkedPRReviewThreadComments = cloneComments(src.LinkedPRReviewThreadComments)
 	dst.LinkedPRResolvedThreadCount = src.LinkedPRResolvedThreadCount
+}
+
+// fabrikManagedLabelKey returns an order-independent canonical key of the
+// fabrik-managed labels (fabrik: / stage: prefixes) in the slice — the labels
+// that gate dispatch. Used by LightReconcile to detect gate-label drift between
+// the cache and GitHub without false-positiving on the board query's label
+// truncation (only these few labels are compared, and they never exceed the cap).
+func fabrikManagedLabelKey(labels []string) string {
+	if len(labels) == 0 {
+		return ""
+	}
+	managed := make([]string, 0, len(labels))
+	for _, l := range labels {
+		if strings.HasPrefix(l, "fabrik:") || strings.HasPrefix(l, "stage:") {
+			managed = append(managed, l)
+		}
+	}
+	sort.Strings(managed)
+	return strings.Join(managed, "\n")
 }
 
 func cloneStrings(s []string) []string {

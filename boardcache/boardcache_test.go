@@ -2246,6 +2246,61 @@ func TestLightReconcile_DriftDetected(t *testing.T) {
 	}
 }
 
+// TestLightReconcile_FabrikManagedLabelDriftDetected is the #955 regression: a
+// store whose fabrik-managed label set diverged from GitHub (here the store is
+// missing fabrik:awaiting-ci) with a MATCHING updatedAt — the exact condition that
+// stranded shadoworg/fantasy#1479 — must be detected as drift so Reconcile repairs
+// the label set. A non-fabrik label change with matching updatedAt must NOT drift
+// (preserving #641's fix against board-query label truncation false-positives).
+func TestLightReconcile_FabrikManagedLabelDriftDetected(t *testing.T) {
+	t1 := time.Now().Truncate(time.Second)
+
+	seedBoard := &gh.ProjectBoard{
+		ProjectID: "PID",
+		Items: []gh.ProjectItem{
+			// #1 seeded WITHOUT fabrik:awaiting-ci (the drifted store state).
+			{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Validate", Labels: []string{"fabrik:cruise", "stage:Review:complete"}, UpdatedAt: t1},
+			// #2 seeded with a user label.
+			{ID: "I_2", Number: 2, Repo: "owner/repo", Status: "Plan", Labels: []string{"user-label"}, UpdatedAt: t1},
+		},
+	}
+	mc := &mockClient{}
+	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
+	testBootstrapFromBoard(c, seedBoard)
+
+	// Fresh board: SAME status + updatedAt for both. #1 gained fabrik:awaiting-ci
+	// (a fabrik-managed gate label) — must be drift. #2 changed a user label only —
+	// must NOT be drift (label truncation false-positive guard, #641).
+	mc.projectBoardResult = &gh.ProjectBoard{
+		ProjectID: "PID",
+		Items: []gh.ProjectItem{
+			{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Validate", Labels: []string{"fabrik:cruise", "stage:Review:complete", "fabrik:awaiting-ci"}, UpdatedAt: t1},
+			{ID: "I_2", Number: 2, Repo: "owner/repo", Status: "Plan", Labels: []string{"different-user-label"}, UpdatedAt: t1},
+		},
+	}
+
+	driftCount, driftedKeys, freshBoard, err := c.LightReconcile("owner", "repo", 1, "organization")
+	if err != nil {
+		t.Fatalf("LightReconcile returned unexpected error: %v", err)
+	}
+	if freshBoard == nil {
+		t.Error("freshBoard should not be nil on success")
+	}
+	seen := make(map[string]bool)
+	for _, k := range driftedKeys {
+		seen[k] = true
+	}
+	if !seen["owner/repo#1"] {
+		t.Errorf("fabrik-managed label drift on #1 not detected; driftedKeys = %v", driftedKeys)
+	}
+	if seen["owner/repo#2"] {
+		t.Errorf("non-fabrik label change on #2 must not drift (truncation guard); driftedKeys = %v", driftedKeys)
+	}
+	if driftCount != 1 {
+		t.Errorf("driftCount = %d, want 1 (only #1); driftedKeys: %v", driftCount, driftedKeys)
+	}
+}
+
 func TestLightReconcile_RemovedItemIsDrift(t *testing.T) {
 	t1 := time.Now().Truncate(time.Second)
 
