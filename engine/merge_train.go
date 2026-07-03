@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -86,6 +88,18 @@ func (e *Engine) effectiveBisectCap() int {
 		return e.cfg.MaxBisectValidations
 	}
 	return 2*ceilLog2(e.effectiveMaxBatchSize()) + 1
+}
+
+// effectiveMaxTrainRebaseCycles returns the maximum number of main-moved
+// rebase+revalidate cycles permitted per merge-train batch, defaulting to 3
+// (mirroring the per-issue MaxRebaseCycles default) when unset (≤ 0). Beyond
+// this bound, a batch that keeps falling behind its base is dissolved back to
+// Queued (ADR-059 D5, FR-2/FR-5).
+func (e *Engine) effectiveMaxTrainRebaseCycles() int {
+	if e.cfg.MaxTrainRebaseCycles <= 0 {
+		return 3
+	}
+	return e.cfg.MaxTrainRebaseCycles
 }
 
 // capBatch returns the first max items of the batch, preserving entry order
@@ -220,28 +234,6 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		maxTurnsOverride = holdingStg.MaxTurns * 2
 	}
 
-	// Pin the base SHA once (ADR-059 D-b) so every trial — the initial batch and every
-	// bisection sub-trial — forks off the same base and a red result is attributable to
-	// member composition, not a moving base branch. Skipped under the test seam (no git).
-	baseSHA := ""
-	if e.trainValidateFn == nil {
-		fetchCmd := exec.Command("git", "fetch", "origin")
-		fetchCmd.Dir = wm.baseDir
-		fetchCmd.Env = nonInteractiveGitEnv()
-		if out, ferr := fetchCmd.CombinedOutput(); ferr != nil {
-			e.logf(0, "merge-train", "warn: fetch origin before pinning base failed: %s\n", strings.TrimSpace(string(out)))
-		}
-		baseSHA, err = gitRevParse(wm.baseDir, "refs/remotes/origin/"+baseBranch)
-		if err != nil {
-			if baseSHA, err = gitRevParse(wm.baseDir, baseBranch); err != nil {
-				e.logf(0, "merge-train", "cannot pin base SHA for %s: %v\n", repoKey, err)
-				e.mergeTrainInFlight.Delete(repoKey)
-				return
-			}
-		}
-		e.logf(0, "merge-train", "pinned base %s (%s) for %s train\n", baseBranch, baseSHA, repoKey)
-	}
-
 	// Unique, monotonic trial-name generator (first call == base name). Every trial —
 	// main-loop re-forms and bisection sub-trials — gets a distinct name so their branches,
 	// worktrees, and draft CI PRs never collide.
@@ -260,11 +252,40 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		owner:            owner,
 		repo:             repo,
 		baseBranch:       baseBranch,
-		baseSHA:          baseSHA,
 		wm:               wm,
 		holdingStg:       holdingStg,
 		maxTurnsOverride: maxTurnsOverride,
 		nextTrialName:    nextTrialName,
+	}
+
+	// FR-1/FR-4: reconstruct durable in-flight state before forming a fresh batch, so
+	// a restart with an empty in-memory map resumes / completes / dissolves an existing
+	// train instead of starting a duplicate. Reads only durable artifacts; each terminal
+	// route clears the in-flight marker itself.
+	if e.reconstructTrainState(ctx, state, p, batch) {
+		return
+	}
+
+	// Pin the base SHA once (ADR-059 D-b) so every trial — the initial batch and every
+	// bisection sub-trial — forks off the same base and a red result is attributable to
+	// member composition, not a moving base branch. Skipped under the test seam (no git).
+	if e.trainValidateFn == nil {
+		fetchCmd := exec.Command("git", "fetch", "origin")
+		fetchCmd.Dir = wm.baseDir
+		fetchCmd.Env = nonInteractiveGitEnv()
+		if out, ferr := fetchCmd.CombinedOutput(); ferr != nil {
+			e.logf(0, "merge-train", "warn: fetch origin before pinning base failed: %s\n", strings.TrimSpace(string(out)))
+		}
+		baseSHA, perr := gitRevParse(wm.baseDir, "refs/remotes/origin/"+baseBranch)
+		if perr != nil {
+			if baseSHA, perr = gitRevParse(wm.baseDir, baseBranch); perr != nil {
+				e.logf(0, "merge-train", "cannot pin base SHA for %s: %v\n", repoKey, perr)
+				e.mergeTrainInFlight.Delete(repoKey)
+				return
+			}
+		}
+		p.baseSHA = baseSHA
+		e.logf(0, "merge-train", "pinned base %s (%s) for %s train\n", baseBranch, baseSHA, repoKey)
 	}
 
 	// Resolve each member's linked PR number + head SHA once, ejecting fetch failures.
@@ -309,9 +330,11 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		switch result {
 		case TrainCIGreen:
 			// D-d hard invariant: a green batch lands immediately, zero bisection.
+			// landGreenBatch adds the D5 main-moved landing gate (behind → rebase →
+			// revalidate → dissolve-on-exhaustion) around landMergeTrainBatch; both
+			// terminal paths clear mergeTrainInFlight.
 			e.logf(0, "merge-train", "combined Validate green for %s (%d survivor(s)) — landing\n", repoKey, len(survivors))
-			e.landMergeTrainBatch(ctx, state, owner, repo, baseBranch, survivors, wm)
-			// landMergeTrainBatch clears mergeTrainInFlight via its deferred cleanup.
+			e.landGreenBatch(ctx, p, survivors)
 			return
 		case TrainCIPending:
 			e.logf(0, "merge-train", "combined Validate pending/timed out for %s — will retry next poll\n", repoKey)
@@ -840,6 +863,73 @@ func (e *Engine) findIntegrationPR(owner, repo string) (*gh.PRDetails, error) {
 	return nil, nil
 }
 
+// reTrainMember matches "#N" issue references in a train PR body.
+var reTrainMember = regexp.MustCompile(`#(\d+)`)
+
+// isTrainPR reports whether pr is a Fabrik merge-train PR — either a landing
+// integration PR (body carries the batch marker) or a draft CI PR (identified
+// only by its fabrik/merge-train/* head branch, which carries no marker).
+func isTrainPR(pr gh.PRDetails) bool {
+	return strings.Contains(pr.Body, mergeTrainBatchMarker) ||
+		strings.HasPrefix(pr.HeadRefName, trainBranchPrefix)
+}
+
+// trialNameFromBranch strips the fabrik/merge-train/ prefix from a trial branch
+// head ref, returning the bare trial name (e.g. "merge-train-main-123"). Returns
+// "" when headRef is not a merge-train branch.
+func trialNameFromBranch(headRef string) string {
+	if !strings.HasPrefix(headRef, trainBranchPrefix) {
+		return ""
+	}
+	return strings.TrimPrefix(headRef, trainBranchPrefix)
+}
+
+// parseTrainMembers extracts the distinct member issue numbers referenced as "#N"
+// in a train PR body, preserving first-seen order.
+func parseTrainMembers(body string) []int {
+	var nums []int
+	seen := map[int]bool{}
+	for _, m := range reTrainMember.FindAllStringSubmatch(body, -1) {
+		n, err := strconv.Atoi(m[1])
+		if err != nil || seen[n] {
+			continue
+		}
+		seen[n] = true
+		nums = append(nums, n)
+	}
+	return nums
+}
+
+// filterBatchByNumbers returns the subset of batch whose issue numbers appear in
+// nums, preserving batch (entry) order. Used to intersect a reconstructed PR's
+// parsed members with the still-Queued snapshot.
+func filterBatchByNumbers(batch []gh.ProjectItem, nums []int) []gh.ProjectItem {
+	want := make(map[int]bool, len(nums))
+	for _, n := range nums {
+		want[n] = true
+	}
+	var out []gh.ProjectItem
+	for _, it := range batch {
+		if want[it.Number] {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
+// trialBehind reports whether the trial branch has fallen behind its base branch —
+// i.e. main advanced (via an external direct push) since the trial forked (ADR-059
+// D5, FR-2). It uses the PR-independent GitHub compare API (FetchCommitsBehind), so
+// it works under the membership-keyed test seam via the mocked fetchCommitsBehindFn.
+func (e *Engine) trialBehind(owner, repo, baseBranch, trialBranch string) bool {
+	behind, err := e.client.FetchCommitsBehind(owner, repo, baseBranch, trialBranch)
+	if err != nil {
+		e.logf(0, "merge-train", "warn: FetchCommitsBehind(%s...%s) failed: %v — assuming up to date\n", baseBranch, trialBranch, err)
+		return false
+	}
+	return behind > 0
+}
+
 // pollForMergeable polls the integration PR until its mergeable_state is "clean" or
 // "unstable" (per gh.MergeableStateAccepted), blocking up to CIWaitTimeout.
 // Returns true when the PR is ready to merge.
@@ -1010,6 +1100,308 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 		e.resetEjectionCount(owner, repo, m.item.Number)
 	}
 	e.logf(0, "merge-train", "landing complete for %s (integration PR #%d, %d members)\n", repoKey, integrationPRNum, len(survivors))
+}
+
+// dissolveBatch tears down an in-flight batch and returns every member to the
+// Queued column untouched (ADR-059 D5, FR-5). It closes the integration/CI PR (if
+// open), deletes the trial branch locally and on origin, posts an explanatory
+// comment on each member so the outcome is observable, and clears the in-flight
+// marker. Members are never status-rolled-back — they only advance to Done on a
+// successful landing, so leaving them in Queued needs no mutation. The next poll
+// re-snapshots Queued and forms a fresh train.
+//
+// Idempotent: CloseIssue on an already-closed PR and CleanupTrainWorktree on an
+// already-deleted branch are best-effort no-ops, so a crash mid-dissolve is safe
+// to retry (the explanatory comment may double-post — acceptable and observable).
+func (e *Engine) dissolveBatch(ctx context.Context, state *mergeTrainWorkerState, p trialParams, prNum int, trialName string, members []gh.ProjectItem, reason string) {
+	_ = ctx
+	repoKey := p.owner + "/" + p.repo
+	e.logf(0, "merge-train", "dissolving batch for %s (%s) — %d member(s) remain in Queued\n", repoKey, reason, len(members))
+
+	// Close the integration/CI PR if we have one (PRs are issues; no ClosePR).
+	if prNum != 0 {
+		if err := e.client.CloseIssue(p.owner, p.repo, prNum); err != nil {
+			e.logf(0, "merge-train", "warn: could not close PR #%d during dissolve: %v\n", prNum, err)
+		}
+	}
+
+	// Delete the trial branch locally and on origin (also closes the draft CI PR).
+	if trialName != "" {
+		e.cleanupTrialArtifacts(p.wm, trialName)
+	}
+
+	// Post an explanatory comment on each member for observability (FR-5).
+	msg := fmt.Sprintf("🏭 **Fabrik merge-train — batch dissolved**\n\n%s\n\n"+
+		"This issue remains in the Queued column, untouched, and will be picked up by a fresh train on the next poll.",
+		reason)
+	for _, m := range members {
+		if _, err := e.client.AddComment(p.owner, p.repo, m.Number, msg); err != nil {
+			e.logf(m.Number, "merge-train", "warn: could not post dissolve comment: %v\n", err)
+		}
+	}
+
+	e.mergeTrainInFlight.Delete(repoKey)
+}
+
+// membersToItems projects a []trainMember down to the underlying []gh.ProjectItem.
+func membersToItems(members []trainMember) []gh.ProjectItem {
+	items := make([]gh.ProjectItem, len(members))
+	for i, m := range members {
+		items[i] = m.item
+	}
+	return items
+}
+
+// landGreenBatch is the landing gate with main-moved recovery (ADR-059 D5,
+// FR-2/FR-6). Before merging, it checks whether the validated-green trial branch
+// has fallen behind its base (an external direct push advanced main). If up to
+// date, it delegates to landMergeTrainBatch unchanged. If behind, it re-pins the
+// base to the current origin/<base> and re-assembles+re-validates the survivors
+// off the new base (reusing assembleAndValidate, which invokes Claude conflict
+// resolution for FR-6), bounded by MaxTrainRebaseCycles. On a green re-validation
+// it loops back to the gate; on exhaustion, a non-green re-validation, or an
+// assembly wipeout it dissolves the batch (FR-5) and lets the next poll re-form.
+//
+// The rebase path is deliberately disjoint from red-batch bisection: a red
+// re-validation here dissolves rather than bisecting, so the rebase-cycle budget
+// and the bisection cost cap never interact (compose-not-duplicate).
+func (e *Engine) landGreenBatch(ctx context.Context, state *mergeTrainWorkerState, p trialParams, survivors []trainMember) {
+	maxCycles := e.effectiveMaxTrainRebaseCycles()
+	cycles := 0
+
+	for {
+		state.mu.RLock()
+		trialName := state.trialName
+		prNum := state.prNum
+		state.mu.RUnlock()
+		trialBranch := trainBranchPrefix + trialName
+
+		if !e.trialBehind(p.owner, p.repo, p.baseBranch, trialBranch) {
+			// Up to date: land via the unchanged terminal path (clears the map).
+			e.landMergeTrainBatch(ctx, state, p.owner, p.repo, p.baseBranch, survivors, p.wm)
+			return
+		}
+
+		// Main moved under the batch.
+		if cycles >= maxCycles {
+			e.dissolveBatch(ctx, state, p, prNum, trialName, membersToItems(survivors),
+				fmt.Sprintf("the base branch advanced under the batch and it still could not catch up after %d rebase attempt(s) (main-moved rebase limit)", maxCycles))
+			return
+		}
+		cycles++
+		e.logf(0, "merge-train", "trial %s is behind %s (main moved) — rebasing off the new base (cycle %d/%d)\n", trialName, p.baseBranch, cycles, maxCycles)
+
+		// Re-pin the base to the current origin/<base> so the re-assembly forks off
+		// the advanced main (skipped under the test seam — no real git).
+		if e.trainValidateFn == nil {
+			fetchCmd := exec.Command("git", "fetch", "origin")
+			fetchCmd.Dir = p.wm.baseDir
+			fetchCmd.Env = nonInteractiveGitEnv()
+			fetchCmd.CombinedOutput() // best-effort
+			if sha, rerr := gitRevParse(p.wm.baseDir, "refs/remotes/origin/"+p.baseBranch); rerr == nil {
+				p.baseSHA = sha // local copy; the loop reuses it, no leak to caller
+			}
+		}
+
+		// Clean up the now-stale (behind) trial before building the next one.
+		oldTrialName := trialName
+		newTrialName := p.nextTrialName()
+		state.mu.Lock()
+		state.trialName = newTrialName
+		state.assembling = true
+		state.mu.Unlock()
+
+		newSurvivors, result, newPRNum, aerr := e.assembleAndValidate(ctx, p, survivors, newTrialName)
+		e.cleanupTrialArtifacts(p.wm, oldTrialName)
+
+		state.mu.Lock()
+		state.prNum = newPRNum
+		state.assembling = false
+		state.CIResult = result
+		state.mu.Unlock()
+
+		if aerr != nil || len(newSurvivors) == 0 {
+			e.dissolveBatch(ctx, state, p, newPRNum, newTrialName, membersToItems(survivors),
+				"the base branch advanced and the batch could not be re-assembled onto it")
+			return
+		}
+		if result != TrainCIGreen {
+			// A red/pending re-validation after a rebase dissolves (disjoint from
+			// bisection); the next poll re-forms a fresh train that bisects cleanly.
+			e.dissolveBatch(ctx, state, p, newPRNum, newTrialName, membersToItems(newSurvivors),
+				"the base branch advanced and the re-validated batch was no longer green")
+			return
+		}
+		survivors = newSurvivors // green off the new base — loop back to the gate
+	}
+}
+
+// reconstructTrainState makes the per-repo in-flight guard durable and restart-safe
+// (ADR-059 D5, FR-1/FR-4). Running inside the already-guarded worker goroutine
+// (after LoadOrStore, before base pinning), it probes durable artifacts — open or
+// merged merge-train PRs (via ListPRs) and fabrik/merge-train/* origin branches
+// (via ls-remote) — and routes to one of four outcomes, returning true when it has
+// fully handled the batch (each terminal route clears the in-flight marker):
+//
+//   - merged landing PR (batch marker) with members still Queued → complete the
+//     deferred member lifecycle (idempotent landMergeTrainBatch advancement);
+//   - open train PR backed by an origin branch → resume (poll CI, then land with
+//     main-moved recovery);
+//   - open PR without a backing branch, or an orphaned trial branch without a PR →
+//     dissolve cleanly (FR-5);
+//   - nothing durable → return false (the caller proceeds to form a fresh train).
+//
+// It reads only durable state (never the in-flight map) and never launches a
+// goroutine, so it survives a restart with an empty map without a duplicate worker.
+func (e *Engine) reconstructTrainState(ctx context.Context, state *mergeTrainWorkerState, p trialParams, batch []gh.ProjectItem) bool {
+	repoKey := p.owner + "/" + p.repo
+
+	prs, err := e.client.ListPRs(p.owner, p.repo)
+	if err != nil {
+		e.logf(0, "merge-train", "reconstruct: ListPRs failed for %s: %v — proceeding fresh\n", repoKey, err)
+		return false
+	}
+	var trainPR *gh.PRDetails
+	for i := range prs {
+		if isTrainPR(prs[i]) {
+			trainPR = &prs[i]
+			break
+		}
+	}
+
+	// Probe origin branches. Skipped under the test seam (no real git); tests drive
+	// reconstruction through listPRsFn and treat an open PR's branch as present.
+	var originBranches []string
+	if e.trainValidateFn == nil {
+		if b, berr := p.wm.ListTrainBranchesOnOrigin(); berr != nil {
+			e.logf(0, "merge-train", "reconstruct: ls-remote failed for %s: %v\n", repoKey, berr)
+		} else {
+			originBranches = b
+		}
+	}
+
+	// Nothing durable — fresh train.
+	if trainPR == nil && len(originBranches) == 0 {
+		return false
+	}
+
+	// Route 1: a merged landing PR (batch marker) → complete the deferred landing.
+	// Checked first so already-landed work is never misclassified as an orphan.
+	if trainPR != nil && trainPR.Merged && strings.Contains(trainPR.Body, mergeTrainBatchMarker) {
+		e.completeDeferredLanding(ctx, state, p, *trainPR, batch)
+		return true
+	}
+
+	// Route 2: an open train PR.
+	if trainPR != nil && trainPR.State == "open" {
+		trialName := trialNameFromBranch(trainPR.HeadRefName)
+		branchPresent := e.trainValidateFn != nil || // seam: treat as present
+			(trialName != "" && containsBranch(originBranches, trainBranchPrefix+trialName))
+		if trialName != "" && branchPresent {
+			e.resumeTrain(ctx, state, p, *trainPR, trialName, batch)
+			return true
+		}
+		// Open PR without a backing trial branch → orphan → dissolve.
+		e.dissolveBatch(ctx, state, p, trainPR.Number, trialName, batch,
+			"reconstruct: found an open integration PR without a backing trial branch after a restart")
+		return true
+	}
+
+	// Route 3: origin trial branch(es) but no open/merged marker PR (or a closed,
+	// non-merged train PR) → orphaned remnant → dissolve each.
+	for _, b := range originBranches {
+		e.dissolveBatch(ctx, state, p, 0, trialNameFromBranch(trainBranchPrefix+strings.TrimPrefix(b, trainBranchPrefix)), batch,
+			"reconstruct: found an orphaned merge-train trial branch without an integration PR after a restart")
+	}
+	// A closed non-merged train PR with no branch: nothing to clean up, just clear.
+	if len(originBranches) == 0 {
+		e.mergeTrainInFlight.Delete(repoKey)
+	}
+	return true
+}
+
+// completeDeferredLanding finishes a landing that merged before a crash but whose
+// members are still in Queued (ADR-059 D5, FR-4). It parses the merged PR's member
+// list, intersects it with the still-Queued snapshot, and runs the idempotent
+// landMergeTrainBatch advancement (which finds the already-merged PR, skips the
+// merge, and advances each still-Queued member to Done).
+func (e *Engine) completeDeferredLanding(ctx context.Context, state *mergeTrainWorkerState, p trialParams, pr gh.PRDetails, batch []gh.ProjectItem) {
+	repoKey := p.owner + "/" + p.repo
+	items := filterBatchByNumbers(batch, parseTrainMembers(pr.Body))
+	if len(items) == 0 {
+		e.logf(0, "merge-train", "reconstruct: merged integration PR #%d for %s has no still-Queued members — nothing to complete\n", pr.Number, repoKey)
+		e.mergeTrainInFlight.Delete(repoKey)
+		return
+	}
+	e.logf(0, "merge-train", "reconstruct: completing deferred landing for %s from merged PR #%d (%d still-Queued member(s))\n", repoKey, pr.Number, len(items))
+
+	state.mu.Lock()
+	state.trialName = trialNameFromBranch(pr.HeadRefName)
+	state.mu.Unlock()
+
+	survivors := e.fetchTrainMembers(ctx, p.owner, p.repo, items)
+	if len(survivors) == 0 {
+		e.logf(0, "merge-train", "reconstruct: no member PRs resolvable for deferred landing of %s — clearing\n", repoKey)
+		e.mergeTrainInFlight.Delete(repoKey)
+		return
+	}
+	// landMergeTrainBatch re-finds the merged marker PR, skips FR-2, advances members,
+	// and clears the in-flight marker in its deferred cleanup.
+	e.landMergeTrainBatch(ctx, state, p.owner, p.repo, p.baseBranch, survivors, p.wm)
+}
+
+// resumeTrain re-establishes an in-flight batch from an open train PR after a
+// restart (ADR-059 D5, FR-4). It re-resolves the still-Queued members, polls CI on
+// the existing trial head, and — on green — lands via landGreenBatch (with
+// main-moved recovery). Any non-green outcome (red, pending, or no resolvable
+// members) dissolves the batch so the next poll re-forms a fresh, clean train
+// rather than re-entering bisection on resume.
+func (e *Engine) resumeTrain(ctx context.Context, state *mergeTrainWorkerState, p trialParams, pr gh.PRDetails, trialName string, batch []gh.ProjectItem) {
+	repoKey := p.owner + "/" + p.repo
+	items := filterBatchByNumbers(batch, parseTrainMembers(pr.Body))
+	if len(items) == 0 {
+		e.dissolveBatch(ctx, state, p, pr.Number, trialName, batch,
+			"reconstruct: an open train PR had no members still in Queued after a restart")
+		return
+	}
+	survivors := e.fetchTrainMembers(ctx, p.owner, p.repo, items)
+	if len(survivors) == 0 {
+		e.dissolveBatch(ctx, state, p, pr.Number, trialName, items,
+			"reconstruct: could not resolve any member PRs while resuming the batch")
+		return
+	}
+
+	state.mu.Lock()
+	state.trialName = trialName
+	state.prNum = pr.Number
+	state.assembling = false
+	state.mu.Unlock()
+
+	e.logf(0, "merge-train", "reconstruct: resuming train for %s from open PR #%d (trial %s, %d member(s))\n", repoKey, pr.Number, trialName, len(survivors))
+
+	var result TrainCIResult
+	if e.trainValidateFn != nil {
+		result = e.trainValidateFn(ctx, survivors)
+	} else {
+		result = e.pollTrainCI(ctx, p.owner, p.repo, pr.Number, pr.HeadSHA)
+	}
+
+	if result == TrainCIGreen {
+		e.landGreenBatch(ctx, state, p, survivors)
+		return
+	}
+	e.dissolveBatch(ctx, state, p, pr.Number, trialName, items,
+		"reconstruct: the resumed trial did not validate green — re-forming a fresh train")
+}
+
+// containsBranch reports whether branch is in slice.
+func containsBranch(slice []string, branch string) bool {
+	for _, v := range slice {
+		if v == branch {
+			return true
+		}
+	}
+	return false
 }
 
 // pollTrainCI polls the integration PR's required CI checks, returning the typed result.
