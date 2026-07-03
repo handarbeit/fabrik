@@ -1620,6 +1620,12 @@ func (e *Engine) handleMergeTrainBatch(ctx context.Context, board *gh.ProjectBoa
 	if len(batch) == 0 {
 		return
 	}
+	// FR-4: cap the batch to the first N Queued items by entry order (ADR-059 D2).
+	// Log the truncation explicitly so operators can see it — never silent.
+	if maxBatch := e.effectiveMaxBatchSize(); len(batch) > maxBatch {
+		e.logf(0, "merge-train", "batch capped: %d Queued item(s) exceed max_batch_size=%d — landing first %d by entry order\n", len(batch), maxBatch, maxBatch)
+		batch = capBatch(batch, maxBatch)
+	}
 	var parts []string
 	for _, item := range batch {
 		parts = append(parts, fmt.Sprintf("#%d %q", item.Number, item.Title))

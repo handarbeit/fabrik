@@ -87,6 +87,16 @@ func (e *Engine) effectiveBisectCap() int {
 	return 2*ceilLog2(e.effectiveMaxBatchSize()) + 1
 }
 
+// capBatch returns the first max items of the batch, preserving entry order
+// (ADR-059 D2 / FR-4). max ≤ 0 means no cap. Capping to the first N bounds the
+// worst-case bisection cost if the batch turns out red.
+func capBatch(items []gh.ProjectItem, max int) []gh.ProjectItem {
+	if max <= 0 || len(items) <= max {
+		return items
+	}
+	return items[:max]
+}
+
 // dispatchMergeTrainWorker checks whether a train worker is already in-flight for
 // the batch's repo and, if not, starts one. Safe to call from the poll goroutine.
 // projectID is the GitHub project board ID, threaded so landMergeTrainBatch can
