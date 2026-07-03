@@ -1637,3 +1637,588 @@ func TestMergeTrainBisect_InteractionFallsBack(t *testing.T) {
 		t.Errorf("expected 4 singleton landing PRs under the fallback, got %d", singletonPRs)
 	}
 }
+
+// ── D5: main-moved rebase/revalidate + durable in-flight reconstruction ───────
+
+// TestEffectiveMaxTrainRebaseCycles verifies the default (3) and explicit override
+// of the per-batch main-moved rebase-cycle bound (ADR-059 D5, FR-2).
+func TestEffectiveMaxTrainRebaseCycles(t *testing.T) {
+	if got := (&Engine{cfg: Config{MaxTrainRebaseCycles: 0}}).effectiveMaxTrainRebaseCycles(); got != 3 {
+		t.Errorf("effectiveMaxTrainRebaseCycles() with unset (0) = %d, want 3 (default)", got)
+	}
+	if got := (&Engine{cfg: Config{MaxTrainRebaseCycles: 5}}).effectiveMaxTrainRebaseCycles(); got != 5 {
+		t.Errorf("effectiveMaxTrainRebaseCycles() with 5 = %d, want 5", got)
+	}
+	if got := (&Engine{cfg: Config{MaxTrainRebaseCycles: -2}}).effectiveMaxTrainRebaseCycles(); got != 3 {
+		t.Errorf("effectiveMaxTrainRebaseCycles() with negative = %d, want 3 (default)", got)
+	}
+}
+
+// TestIsTrainPR verifies a PR is recognised as a merge-train PR by either the batch
+// marker in its body (landing integration PR) or the fabrik/merge-train/ head-branch
+// prefix (draft CI PR, which carries no marker) — FR-1/FR-4.
+func TestIsTrainPR(t *testing.T) {
+	cases := []struct {
+		name string
+		pr   gh.PRDetails
+		want bool
+	}{
+		{"marker in body", gh.PRDetails{Body: "before " + mergeTrainBatchMarker + " after"}, true},
+		{"train head branch", gh.PRDetails{HeadRefName: "fabrik/merge-train/merge-train-main-1"}, true},
+		{"both", gh.PRDetails{Body: mergeTrainBatchMarker, HeadRefName: "fabrik/merge-train/x"}, true},
+		{"neither", gh.PRDetails{Body: "just a normal PR", HeadRefName: "fabrik/issue-42"}, false},
+		{"empty", gh.PRDetails{}, false},
+	}
+	for _, tc := range cases {
+		if got := isTrainPR(tc.pr); got != tc.want {
+			t.Errorf("isTrainPR(%s) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestTrialNameFromBranch verifies stripping the fabrik/merge-train/ prefix from a
+// head ref, and the empty return for non-train branches.
+func TestTrialNameFromBranch(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"fabrik/merge-train/merge-train-main-123", "merge-train-main-123"},
+		{"fabrik/merge-train/", ""},
+		{"fabrik/issue-1", ""},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := trialNameFromBranch(tc.in); got != tc.want {
+			t.Errorf("trialNameFromBranch(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestParseTrainMembers verifies extraction of distinct #N member references from a
+// train PR body, preserving first-seen order and de-duplicating.
+func TestParseTrainMembers(t *testing.T) {
+	body := "batch: #7, #3, #7 and again #12 (see #3)"
+	got := parseTrainMembers(body)
+	want := []int{7, 3, 12}
+	if len(got) != len(want) {
+		t.Fatalf("parseTrainMembers len = %d (%v), want %d (%v)", len(got), got, len(want), want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("parseTrainMembers[%d] = %d, want %d (order/dedupe)", i, got[i], want[i])
+		}
+	}
+	if n := parseTrainMembers("no references here"); len(n) != 0 {
+		t.Errorf("parseTrainMembers(no refs) = %v, want empty", n)
+	}
+}
+
+// TestFilterBatchByNumbers verifies the batch subset is intersected by issue number
+// and keeps entry order.
+func TestFilterBatchByNumbers(t *testing.T) {
+	batch := []gh.ProjectItem{{Number: 1}, {Number: 2}, {Number: 3}, {Number: 4}}
+	got := filterBatchByNumbers(batch, []int{3, 1})
+	if len(got) != 2 || got[0].Number != 1 || got[1].Number != 3 {
+		t.Errorf("filterBatchByNumbers = %v, want [#1 #3] in entry order", got)
+	}
+	if n := filterBatchByNumbers(batch, []int{99}); len(n) != 0 {
+		t.Errorf("filterBatchByNumbers(no match) = %v, want empty", n)
+	}
+}
+
+// TestContainsBranch is a small guard for the reconstruction branch-presence check.
+func TestContainsBranch(t *testing.T) {
+	s := []string{"fabrik/merge-train/a", "fabrik/merge-train/b"}
+	if !containsBranch(s, "fabrik/merge-train/b") {
+		t.Error("containsBranch should find present branch")
+	}
+	if containsBranch(s, "fabrik/merge-train/c") {
+		t.Error("containsBranch should not find absent branch")
+	}
+}
+
+// TestTrialBehind verifies the behind signal is read from FetchCommitsBehind: >0 means
+// behind (main moved), 0 means up to date, and an error is treated as up to date
+// (fail-safe: never block landing on a probe failure) — FR-2.
+func TestTrialBehind(t *testing.T) {
+	mk := func(fn func(owner, repo, base, head string) (int, error)) *Engine {
+		return trainTestEngine(t, &mockGitHubClient{fetchCommitsBehindFn: fn}, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+	}
+	if e := mk(func(_, _, _, _ string) (int, error) { return 2, nil }); !e.trialBehind("o", "r", "main", "fabrik/merge-train/x") {
+		t.Error("trialBehind should be true when behind_by > 0")
+	}
+	if e := mk(func(_, _, _, _ string) (int, error) { return 0, nil }); e.trialBehind("o", "r", "main", "fabrik/merge-train/x") {
+		t.Error("trialBehind should be false when behind_by == 0")
+	}
+	if e := mk(func(_, _, _, _ string) (int, error) { return 0, fmt.Errorf("boom") }); e.trialBehind("o", "r", "main", "fabrik/merge-train/x") {
+		t.Error("trialBehind should be false (fail-safe) on probe error")
+	}
+}
+
+// TestListTrainBranchesOnOrigin verifies the ls-remote probe returns only the
+// fabrik/merge-train/* branches present on origin, as bare names (FR-1/FR-4).
+func TestListTrainBranchesOnOrigin(t *testing.T) {
+	skipIfNoGit(t)
+	_, srcDir, _, wm := setupTrainRepo(t)
+
+	// origin (for wm.baseDir) is srcDir; create a merge-train branch there plus a
+	// non-train branch that must be excluded.
+	mustGit(t, srcDir, "branch", "fabrik/merge-train/merge-train-main-1")
+	mustGit(t, srcDir, "branch", "fabrik/issue-99")
+
+	got, err := wm.ListTrainBranchesOnOrigin()
+	if err != nil {
+		t.Fatalf("ListTrainBranchesOnOrigin: %v", err)
+	}
+	if len(got) != 1 || got[0] != "fabrik/merge-train/merge-train-main-1" {
+		t.Errorf("ListTrainBranchesOnOrigin = %v, want [fabrik/merge-train/merge-train-main-1]", got)
+	}
+}
+
+// TestListTrainBranchesOnOrigin_None verifies an empty result when no merge-train
+// branches exist on origin (the common fresh-train case).
+func TestListTrainBranchesOnOrigin_None(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	got, err := wm.ListTrainBranchesOnOrigin()
+	if err != nil {
+		t.Fatalf("ListTrainBranchesOnOrigin: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("ListTrainBranchesOnOrigin (none) = %v, want empty", got)
+	}
+}
+
+// TestDissolveBatch verifies FR-5 dissolve semantics: the integration/CI PR is closed,
+// an explanatory comment is posted on every member, the in-flight marker is cleared,
+// and members are left untouched in Queued (no board status mutation).
+func TestDissolveBatch(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	client := &mockGitHubClient{
+		closeIssueFn: func(owner, repo string, n int) error { return nil },
+		addCommentFn: func(owner, repo string, n int, body string) (int, error) { return 1, nil },
+	}
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
+	state := &mergeTrainWorkerState{trialName: "merge-train-main-1", projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm}
+	members := []gh.ProjectItem{makeTrainItem(1, "One"), makeTrainItem(2, "Two")}
+
+	eng.dissolveBatch(context.Background(), state, p, 200, "merge-train-main-1", members, "the base branch advanced")
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	// PR closed.
+	if len(client.closeIssueCalls) != 1 || client.closeIssueCalls[0].issueNumber != 200 {
+		t.Errorf("expected integration PR #200 closed, got %v", client.closeIssueCalls)
+	}
+	// Explanatory comment on each member.
+	dissolveComments := 0
+	for _, c := range client.addCommentCalls {
+		if strings.Contains(c.body, "batch dissolved") {
+			dissolveComments++
+		}
+	}
+	if dissolveComments != 2 {
+		t.Errorf("expected 2 dissolve comments (one per member), got %d", dissolveComments)
+	}
+	// Members untouched in Queued — no board status update.
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("dissolve must not mutate member board status, got %d update(s)", len(client.updateStatusCalls))
+	}
+	// In-flight marker cleared.
+	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+		t.Error("expected mergeTrainInFlight cleared after dissolve")
+	}
+}
+
+// TestDissolveBatch_NoPR verifies dissolve is a no-op on the PR close when prNum==0
+// (an orphaned trial branch with no integration PR) yet still comments and clears.
+func TestDissolveBatch_NoPR(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	client := &mockGitHubClient{
+		addCommentFn: func(owner, repo string, n int, body string) (int, error) { return 1, nil },
+	}
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
+	state := &mergeTrainWorkerState{trialName: "merge-train-main-1"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm}
+
+	eng.dissolveBatch(context.Background(), state, p, 0, "merge-train-main-1", []gh.ProjectItem{makeTrainItem(1, "One")}, "orphan")
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.closeIssueCalls) != 0 {
+		t.Errorf("dissolve with prNum==0 must not close any PR, got %v", client.closeIssueCalls)
+	}
+	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+		t.Error("expected mergeTrainInFlight cleared after dissolve")
+	}
+}
+
+// trialNameGen returns a unique-trial-name generator mirroring the worker's (first
+// call == base name; subsequent calls suffixed) for direct landGreenBatch tests.
+func trialNameGen(base string) func() string {
+	seq := 0
+	return func() string {
+		n := base
+		if seq > 0 {
+			n = fmt.Sprintf("%s-t%d", base, seq)
+		}
+		seq++
+		return n
+	}
+}
+
+// TestLandGreenBatch_BehindOnceThenLands verifies FR-2: when the validated-green trial
+// has fallen behind its base (main moved) exactly once, the batch is rebased off the
+// new base, re-validated green, and then lands (members advanced to Done, integration
+// PR merged) without dissolving.
+func TestLandGreenBatch_BehindOnceThenLands(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	eng, client, rv := seamTrainEngine(t, wm, func(map[int]bool) bool { return false }) // always green
+
+	// Behind on the first landing-gate check, up to date thereafter.
+	var mu sync.Mutex
+	behindCalls := 0
+	client.fetchCommitsBehindFn = func(_, _, _, _ string) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		behindCalls++
+		if behindCalls == 1 {
+			return 1, nil // main moved
+		}
+		return 0, nil // caught up after rebase
+	}
+
+	survivors := []trainMember{makeQueuedMember(1, 101, "One"), makeQueuedMember(2, 102, "Two")}
+	state := &mergeTrainWorkerState{trialName: "merge-train-main-1", projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm, nextTrialName: trialNameGen("merge-train-main-1")}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.landGreenBatch(ctx, state, p, survivors)
+
+	// One rebase → one extra combined validation (the re-validate off the new base).
+	if got := rv.count(); got != 1 {
+		t.Errorf("expected exactly 1 re-validation after a single rebase, got %d", got)
+	}
+	client.mu.Lock()
+	merges := len(client.mergePRCalls)
+	advances := len(client.updateStatusCalls)
+	client.mu.Unlock()
+	if merges != 1 {
+		t.Errorf("expected the rebased batch to land (1 merge), got %d", merges)
+	}
+	if advances != 2 {
+		t.Errorf("expected 2 members advanced to Done after landing, got %d", advances)
+	}
+	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+		t.Error("expected mergeTrainInFlight cleared after landing")
+	}
+}
+
+// TestLandGreenBatch_ExhaustionDissolves verifies FR-2/FR-5: when the trial keeps
+// falling behind past MaxTrainRebaseCycles, the batch is dissolved — members left
+// untouched in Queued (no advancement, no merge) and the in-flight marker cleared.
+func TestLandGreenBatch_ExhaustionDissolves(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	eng, client, _ := seamTrainEngine(t, wm, func(map[int]bool) bool { return false }) // always green
+	eng.cfg.MaxTrainRebaseCycles = 2                                                   // small bound for a fast test
+
+	client.fetchCommitsBehindFn = func(_, _, _, _ string) (int, error) { return 1, nil } // never catches up
+
+	survivors := []trainMember{makeQueuedMember(1, 101, "One"), makeQueuedMember(2, 102, "Two")}
+	state := &mergeTrainWorkerState{trialName: "merge-train-main-1", projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm, nextTrialName: trialNameGen("merge-train-main-1")}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.landGreenBatch(ctx, state, p, survivors)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.mergePRCalls) != 0 {
+		t.Errorf("exhausted batch must not merge, got %d merge(s)", len(client.mergePRCalls))
+	}
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("exhausted batch must leave members in Queued (no advancement), got %d update(s)", len(client.updateStatusCalls))
+	}
+	dissolveComments := 0
+	for _, c := range client.addCommentCalls {
+		if strings.Contains(c.body, "batch dissolved") {
+			dissolveComments++
+		}
+	}
+	if dissolveComments != 2 {
+		t.Errorf("expected 2 dissolve comments (one per member), got %d", dissolveComments)
+	}
+	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+		t.Error("expected mergeTrainInFlight cleared after dissolve")
+	}
+}
+
+// reconstructParams builds a trialParams suitable for direct reconstructTrainState /
+// resume / complete-deferred tests against a real bare repo.
+func reconstructParams(wm *WorktreeManager) trialParams {
+	return trialParams{
+		owner:         "owner",
+		repo:          "repo",
+		baseBranch:    "main",
+		wm:            wm,
+		nextTrialName: trialNameGen("merge-train-main-1"),
+	}
+}
+
+// TestReconstructTrainState_Fresh verifies that with no durable artifacts (no train
+// PRs, no origin branches), reconstruction returns false so the caller forms a fresh
+// train — FR-1/FR-4 "fresh" route.
+func TestReconstructTrainState_Fresh(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	client := &mockGitHubClient{listPRsFn: func(owner, repo string) ([]gh.PRDetails, error) { return nil, nil }}
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
+	state := &mergeTrainWorkerState{assembling: true}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	if eng.reconstructTrainState(context.Background(), state, reconstructParams(wm), makeSeamBatch(2)) {
+		t.Error("reconstructTrainState with no durable artifacts should return false (fresh)")
+	}
+}
+
+// TestReconstructTrainState_ResumeOpenPR verifies FR-4 resume: a durable open train PR
+// backed by a trial branch is resumed (CI re-polled green, then landed) without forming
+// a fresh batch — no duplicate draft CI PR, members advanced to Done.
+func TestReconstructTrainState_ResumeOpenPR(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	openPR := gh.PRDetails{
+		Number:      300,
+		State:       "open",
+		Merged:      false,
+		HeadRefName: "fabrik/merge-train/merge-train-main-1",
+		HeadSHA:     "trialsha",
+		Body:        "batch: #1, #2\n" + mergeTrainBatchMarker,
+	}
+	eng, client, rv := seamTrainEngine(t, wm, func(map[int]bool) bool { return false }) // green
+	client.listPRsFn = func(owner, repo string) ([]gh.PRDetails, error) { return []gh.PRDetails{openPR}, nil }
+
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	handled := eng.reconstructTrainState(context.Background(), state, reconstructParams(wm), makeSeamBatch(2))
+	if !handled {
+		t.Fatal("reconstructTrainState should have handled the open train PR (resume)")
+	}
+	if got := rv.count(); got != 1 {
+		t.Errorf("resume should re-validate exactly once, got %d", got)
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.createDraftPRCalls) != 0 {
+		t.Errorf("resume must not open a fresh draft CI PR, got %d", len(client.createDraftPRCalls))
+	}
+	if len(client.mergePRCalls) != 1 || client.mergePRCalls[0].prNumber != 300 {
+		t.Errorf("resume should merge the existing integration PR #300, got %v", client.mergePRCalls)
+	}
+	if len(client.updateStatusCalls) != 2 {
+		t.Errorf("resume should advance 2 members to Done, got %d", len(client.updateStatusCalls))
+	}
+}
+
+// TestReconstructTrainState_CompleteDeferredLanding verifies FR-4 complete-deferred: an
+// already-merged integration PR whose members are still Queued completes the deferred
+// member lifecycle (advance to Done) rather than re-merging.
+func TestReconstructTrainState_CompleteDeferredLanding(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	mergedPR := gh.PRDetails{
+		Number:      400,
+		State:       "closed",
+		Merged:      true,
+		HeadRefName: "fabrik/merge-train/merge-train-main-1",
+		Body:        "batch: #1, #2\n" + mergeTrainBatchMarker,
+	}
+	eng, client, rv := seamTrainEngine(t, wm, func(map[int]bool) bool { return false })
+	client.listPRsFn = func(owner, repo string) ([]gh.PRDetails, error) { return []gh.PRDetails{mergedPR}, nil }
+
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	handled := eng.reconstructTrainState(context.Background(), state, reconstructParams(wm), makeSeamBatch(2))
+	if !handled {
+		t.Fatal("reconstructTrainState should have handled the merged integration PR (complete-deferred)")
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	// Already merged → no merge, no re-validation, but members advanced.
+	if len(client.mergePRCalls) != 0 {
+		t.Errorf("complete-deferred must not re-merge an already-merged PR, got %d merge(s)", len(client.mergePRCalls))
+	}
+	if rv.count() != 0 {
+		t.Errorf("complete-deferred must not re-validate, got %d validation(s)", rv.count())
+	}
+	if len(client.updateStatusCalls) != 2 {
+		t.Errorf("complete-deferred should advance 2 still-Queued members to Done, got %d", len(client.updateStatusCalls))
+	}
+	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+		t.Error("expected mergeTrainInFlight cleared after complete-deferred landing")
+	}
+}
+
+// TestReconstructTrainState_OrphanOpenPRNoBranch_Dissolves verifies FR-4/FR-5: an open
+// train PR with no backing trial branch on origin is an orphaned remnant and is
+// dissolved (PR closed, members left in Queued, marker cleared). This runs with real
+// git (no validate seam) so the ls-remote branch probe executes.
+func TestReconstructTrainState_OrphanOpenPRNoBranch_Dissolves(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t) // no fabrik/merge-train/* branch on origin
+	orphanPR := gh.PRDetails{
+		Number:      500,
+		State:       "open",
+		Merged:      false,
+		HeadRefName: "fabrik/merge-train/merge-train-main-9",
+		Body:        "batch: #1, #2\n" + mergeTrainBatchMarker,
+	}
+	client := &mockGitHubClient{
+		listPRsFn:    func(owner, repo string) ([]gh.PRDetails, error) { return []gh.PRDetails{orphanPR}, nil },
+		closeIssueFn: func(owner, repo string, n int) error { return nil },
+		addCommentFn: func(owner, repo string, n int, body string) (int, error) { return 1, nil },
+	}
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm) // no trainValidateFn → ls-remote runs
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	handled := eng.reconstructTrainState(context.Background(), state, reconstructParams(wm), makeSeamBatch(2))
+	if !handled {
+		t.Fatal("reconstructTrainState should have handled the orphaned open PR (dissolve)")
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.closeIssueCalls) != 1 || client.closeIssueCalls[0].issueNumber != 500 {
+		t.Errorf("orphan dissolve should close integration PR #500, got %v", client.closeIssueCalls)
+	}
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("orphan dissolve must leave members in Queued, got %d status update(s)", len(client.updateStatusCalls))
+	}
+	dissolveComments := 0
+	for _, c := range client.addCommentCalls {
+		if strings.Contains(c.body, "batch dissolved") {
+			dissolveComments++
+		}
+	}
+	if dissolveComments != 2 {
+		t.Errorf("expected 2 dissolve comments, got %d", dissolveComments)
+	}
+	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+		t.Error("expected mergeTrainInFlight cleared after orphan dissolve")
+	}
+}
+
+// TestDispatchMergeTrainWorker_DifferentReposConcurrent verifies FR-3: the per-repo
+// serialization guard keyed on owner/repo does NOT cross-block distinct repos — two
+// repos' trains run at the same time under the shared MaxConcurrent semaphore. The
+// combined-Validate seam acts as a barrier: each worker records its concurrency and
+// waits for the other to arrive; if the guard wrongly cross-blocked, only one worker
+// would ever be in flight and the observed maximum concurrency would be 1.
+func TestDispatchMergeTrainWorker_DifferentReposConcurrent(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wmA := setupTrainRepo(t)
+	_, _, _, wmB := setupTrainRepo(t)
+
+	var mu sync.Mutex
+	inFlight, maxInFlight := 0, 0
+	bothArrived := make(chan struct{})
+	var once sync.Once
+
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, n int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 1000 + n, HeadSHA: fmt.Sprintf("sha-%d", n), State: "open"}, nil
+		},
+		listPRsFn:  func(owner, repo string) ([]gh.PRDetails, error) { return nil, nil },
+		createPRFn: func(owner, repo, title, head, base, body string) (int, error) { return 900, nil },
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		mergePRFn:    func(owner, repo string, prNumber int) error { return nil },
+		addCommentFn: func(owner, repo string, n int, body string) (int, error) { return 1, nil },
+		closeIssueFn: func(owner, repo string, n int) error { return nil },
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, wmA)
+	eng.mu.Lock()
+	eng.worktreeManagers["ownerA/repoA"] = wmA
+	eng.worktreeManagers["ownerB/repoB"] = wmB
+	eng.mu.Unlock()
+
+	eng.trainValidateFn = func(_ context.Context, _ []trainMember) TrainCIResult {
+		mu.Lock()
+		inFlight++
+		if inFlight > maxInFlight {
+			maxInFlight = inFlight
+		}
+		reached := inFlight == 2
+		mu.Unlock()
+		if reached {
+			once.Do(func() { close(bothArrived) })
+		}
+		select {
+		case <-bothArrived:
+		case <-time.After(5 * time.Second): // guard against a hang if cross-blocked
+		}
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		return TrainCIGreen
+	}
+
+	itemA := gh.ProjectItem{Number: 1, Repo: "ownerA/repoA", Status: "Queued", ItemID: "a1"}
+	itemB := gh.ProjectItem{Number: 2, Repo: "ownerB/repoB", Status: "Queued", ItemID: "b2"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	eng.dispatchMergeTrainWorker(ctx, []gh.ProjectItem{itemA}, "")
+	eng.dispatchMergeTrainWorker(ctx, []gh.ProjectItem{itemB}, "")
+
+	done := make(chan struct{})
+	go func() { eng.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("workers did not finish — per-repo guard likely cross-blocked distinct repos")
+	}
+
+	mu.Lock()
+	got := maxInFlight
+	mu.Unlock()
+	if got != 2 {
+		t.Errorf("expected 2 repos' trains to validate concurrently, observed max concurrency %d", got)
+	}
+}
+
+// TestDispatchMergeTrainWorker_SameRepoSuppressedDurably verifies FR-1: while a train
+// is in flight for a repo (in-memory marker present), a second dispatch for the SAME
+// repo does not launch another worker.
+func TestDispatchMergeTrainWorker_SameRepoSuppressedDurably(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+
+	// Simulate an in-flight train (e.g. resumed after reconstruction).
+	eng.mergeTrainInFlight.Store("owner/repo", &mergeTrainWorkerState{assembling: true, trialName: "merge-train-main-1"})
+
+	eng.dispatchMergeTrainWorker(context.Background(), []gh.ProjectItem{makeTrainItem(1, "One")}, "")
+
+	done := make(chan struct{})
+	go func() { eng.wg.Wait(); close(done) }()
+	select {
+	case <-done: // good — no worker launched
+	case <-time.After(200 * time.Millisecond):
+		t.Error("a duplicate worker was launched despite an in-flight train for the same repo")
+	}
+}
