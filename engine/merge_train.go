@@ -22,12 +22,13 @@ const (
 	TrainCIRed                          // at least one required check failed
 )
 
-// trainMember pairs a batch member's ProjectItem with its linked PR number.
-// The PR number is fetched once during the assembly loop and reused during landing
-// to avoid extra API calls.
+// trainMember pairs a batch member's ProjectItem with its linked PR number and head SHA.
+// Both are fetched once (fetchTrainMembers) and reused across every bisection trial and
+// the landing step to avoid extra API calls.
 type trainMember struct {
-	item  gh.ProjectItem
-	prNum int
+	item    gh.ProjectItem
+	prNum   int
+	headSHA string
 }
 
 // mergeTrainWorkerState tracks an in-flight or completed merge-train worker.
@@ -36,10 +37,11 @@ type trainMember struct {
 type mergeTrainWorkerState struct {
 	mu             sync.RWMutex
 	assembling     bool          // true while building the trial branch; false once PR is open
+	bisecting      bool          // true while halving a red batch to isolate the poisoner (ADR-059 D4)
 	prNum          int           // draft CI PR number (set after draft PR is created)
 	trialBranchSHA string        // HEAD SHA of the trial branch (set after push)
 	CIResult       TrainCIResult // final CI result (set by pollTrainCI on exit)
-	trialName      string        // unique trial name (set once before goroutine starts; immutable after)
+	trialName      string        // trial name of the most recent trial (churns during bisection)
 	projectID      string        // board project ID for advanceToNextStage (immutable after dispatch)
 }
 
