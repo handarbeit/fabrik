@@ -524,6 +524,33 @@ func TestEffectiveBisectCap_ExplicitOverride(t *testing.T) {
 	}
 }
 
+// ── capBatch tests (Task 2, FR-4) ─────────────────────────────────────────────
+
+func TestCapBatch(t *testing.T) {
+	items := []gh.ProjectItem{
+		{Number: 1}, {Number: 2}, {Number: 3}, {Number: 4}, {Number: 5}, {Number: 6},
+	}
+	// Larger than cap → capped to first N, entry order preserved.
+	got := capBatch(items, 5)
+	if len(got) != 5 {
+		t.Fatalf("capBatch(6 items, 5) len = %d, want 5", len(got))
+	}
+	for i, it := range got {
+		if it.Number != i+1 {
+			t.Errorf("capBatch entry %d = #%d, want #%d (entry order not preserved)", i, it.Number, i+1)
+		}
+	}
+	// Set ≤ cap → unchanged.
+	small := []gh.ProjectItem{{Number: 1}, {Number: 2}}
+	if got := capBatch(small, 5); len(got) != 2 {
+		t.Errorf("capBatch(2 items, 5) len = %d, want 2 (unchanged)", len(got))
+	}
+	// max ≤ 0 → no cap.
+	if got := capBatch(items, 0); len(got) != 6 {
+		t.Errorf("capBatch(6 items, 0) len = %d, want 6 (no cap)", len(got))
+	}
+}
+
 // ── Integration tests (Tasks 11a-e + Task 12, real git) ──────────────────────
 
 // setupTrainRepo creates a bare clone with main configured and a source clone for
