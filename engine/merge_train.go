@@ -1310,7 +1310,8 @@ func (e *Engine) reconstructTrainState(ctx context.Context, state *mergeTrainWor
 	// Route 3: origin trial branch(es) but no open/merged marker PR (or a closed,
 	// non-merged train PR) → orphaned remnant → dissolve each.
 	for _, b := range originBranches {
-		e.dissolveBatch(ctx, state, p, 0, trialNameFromBranch(trainBranchPrefix+strings.TrimPrefix(b, trainBranchPrefix)), batch,
+		// b is a full head ref (e.g. "fabrik/merge-train/…") from ListTrainBranchesOnOrigin.
+		e.dissolveBatch(ctx, state, p, 0, trialNameFromBranch(b), batch,
 			"reconstruct: found an orphaned merge-train trial branch without an integration PR after a restart")
 	}
 	// A closed non-merged train PR with no branch: nothing to clean up, just clear.
