@@ -76,7 +76,10 @@ type PRDetails struct {
 	Merged  bool
 	Draft   bool
 	HeadSHA string
-	Body    string
+	// HeadRefName is the PR's head branch name (e.g. "fabrik/merge-train/…").
+	// Populated by ListPRs (from head.ref); other constructors may leave it empty.
+	HeadRefName string
+	Body        string
 	// MergeableState reflects GitHub's branch-protection-aware mergeable
 	// status: "clean" (ready to merge), "unstable" (non-required checks
 	// failing but still mergeable), "blocked" (required checks pending or
@@ -350,6 +353,7 @@ func (c *Client) ListPRs(owner, repo string) ([]PRDetails, error) {
 		Body     string `json:"body"`
 		Head     struct {
 			SHA string `json:"sha"`
+			Ref string `json:"ref"`
 		} `json:"head"`
 	}
 	if err := c.restGetJSON(apiURL, &raw); err != nil {
@@ -358,13 +362,14 @@ func (c *Client) ListPRs(owner, repo string) ([]PRDetails, error) {
 	out := make([]PRDetails, len(raw))
 	for i, pr := range raw {
 		out[i] = PRDetails{
-			Number:  pr.Number,
-			Title:   pr.Title,
-			State:   pr.State,
-			Merged:  pr.MergedAt != "",
-			Draft:   pr.Draft,
-			HeadSHA: pr.Head.SHA,
-			Body:    pr.Body,
+			Number:      pr.Number,
+			Title:       pr.Title,
+			State:       pr.State,
+			Merged:      pr.MergedAt != "",
+			Draft:       pr.Draft,
+			HeadSHA:     pr.Head.SHA,
+			HeadRefName: pr.Head.Ref,
+			Body:        pr.Body,
 		}
 	}
 	return out, nil

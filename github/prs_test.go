@@ -593,3 +593,57 @@ func TestDequeuePullRequest(t *testing.T) {
 		t.Fatalf("DequeuePullRequest: %v", err)
 	}
 }
+
+func TestListPRs_CapturesHeadRefAndMergedAt(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if !strings.Contains(r.URL.RawQuery, "state=all") {
+			t.Errorf("expected state=all query param, got %s", r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]interface{}{
+			{
+				"number":    200,
+				"title":     "trial integration",
+				"state":     "open",
+				"merged_at": nil,
+				"draft":     true,
+				"body":      "trial body",
+				"head":      map[string]string{"sha": "abc123", "ref": "fabrik/merge-train/merge-train-main-99"},
+			},
+			{
+				"number":    201,
+				"title":     "landed batch",
+				"state":     "closed",
+				"merged_at": "2026-07-03T00:00:00Z",
+				"draft":     false,
+				"body":      "landing body",
+				"head":      map[string]string{"sha": "def456", "ref": "fabrik/merge-train/merge-train-main-42"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	prs, err := c.ListPRs("owner", "repo")
+	if err != nil {
+		t.Fatalf("ListPRs: %v", err)
+	}
+	if len(prs) != 2 {
+		t.Fatalf("expected 2 PRs, got %d", len(prs))
+	}
+	if prs[0].HeadRefName != "fabrik/merge-train/merge-train-main-99" {
+		t.Errorf("PR[0].HeadRefName = %q, want the trial head ref", prs[0].HeadRefName)
+	}
+	if prs[0].Merged {
+		t.Errorf("PR[0].Merged = true, want false (merged_at null)")
+	}
+	if prs[1].HeadRefName != "fabrik/merge-train/merge-train-main-42" {
+		t.Errorf("PR[1].HeadRefName = %q, want the landing head ref", prs[1].HeadRefName)
+	}
+	if !prs[1].Merged {
+		t.Errorf("PR[1].Merged = false, want true (merged_at set)")
+	}
+}
