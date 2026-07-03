@@ -1341,3 +1341,299 @@ func TestLandMergeTrainBatch_ResetsEjectionCounter(t *testing.T) {
 		t.Errorf("expected ejection counter for member #2 to be 0 after landing, got %d", count2)
 	}
 }
+
+// ── bisection AC tests: mock combined-Validate keyed on batch membership (Tasks 10-11) ──
+
+// recordingValidator is a membership-keyed combined-Validate stub for the trainValidateFn
+// seam. It is red iff redWhen(present) is true (present = set of member issue numbers in the
+// validated batch) and records the sequence of validated member-number sets for assertions.
+type recordingValidator struct {
+	mu      sync.Mutex
+	calls   [][]int
+	redWhen func(present map[int]bool) bool
+}
+
+func (rv *recordingValidator) fn(_ context.Context, members []trainMember) TrainCIResult {
+	present := make(map[int]bool, len(members))
+	nums := make([]int, 0, len(members))
+	for _, m := range members {
+		present[m.item.Number] = true
+		nums = append(nums, m.item.Number)
+	}
+	rv.mu.Lock()
+	rv.calls = append(rv.calls, nums)
+	rv.mu.Unlock()
+	if rv.redWhen(present) {
+		return TrainCIRed
+	}
+	return TrainCIGreen
+}
+
+func (rv *recordingValidator) count() int {
+	rv.mu.Lock()
+	defer rv.mu.Unlock()
+	return len(rv.calls)
+}
+
+func (rv *recordingValidator) last() []int {
+	rv.mu.Lock()
+	defer rv.mu.Unlock()
+	if len(rv.calls) == 0 {
+		return nil
+	}
+	return rv.calls[len(rv.calls)-1]
+}
+
+// seamTrainEngine wires an Engine with the membership-keyed validation seam installed and a
+// mock GitHub client sufficient for landing (integration PR create/merge, singleton landing,
+// ejection comments). wm should be a real bare repo (setupTrainRepo) so DefaultBaseBranch
+// resolves; the base-SHA pin and all trial git work are skipped under the seam.
+func seamTrainEngine(t *testing.T, wm *WorktreeManager, redWhen func(map[int]bool) bool) (*Engine, *mockGitHubClient, *recordingValidator) {
+	t.Helper()
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, n int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 100 + n, HeadSHA: fmt.Sprintf("sha-%d", n), State: "open"}, nil
+		},
+		listPRsFn:  func(owner, repo string) ([]gh.PRDetails, error) { return nil, nil },
+		createPRFn: func(owner, repo, title, head, base, body string) (int, error) { return 900, nil },
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		mergePRFn:    func(owner, repo string, prNumber int) error { return nil },
+		addCommentFn: func(owner, repo string, n int, body string) (int, error) { return 1, nil },
+		closeIssueFn: func(owner, repo string, n int) error { return nil },
+	}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, wm)
+	eng.mu.Lock()
+	eng.worktreeManagers["owner/repo"] = wm
+	eng.mu.Unlock()
+	rv := &recordingValidator{redWhen: redWhen}
+	eng.trainValidateFn = rv.fn
+	return eng, client, rv
+}
+
+// makeSeamBatch builds a batch of n members numbered 1..n with ItemIDs set (for advancement).
+func makeSeamBatch(n int) []gh.ProjectItem {
+	batch := make([]gh.ProjectItem, 0, n)
+	for i := 1; i <= n; i++ {
+		it := makeTrainItem(i, fmt.Sprintf("Issue %d", i))
+		it.ItemID = fmt.Sprintf("item-%d", i)
+		batch = append(batch, it)
+	}
+	return batch
+}
+
+// ejectionCommentCount counts ejection comments posted on a given member issue number.
+func ejectionCommentCount(client *mockGitHubClient, issueNumber int) int {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	n := 0
+	for _, c := range client.addCommentCalls {
+		if c.issueNumber == issueNumber && strings.Contains(c.body, "ejected") {
+			n++
+		}
+	}
+	return n
+}
+
+// TestMergeTrainBisect_GreenCommonPath is the D-d hard invariant: a green batch costs exactly
+// one combined validation, performs zero bisection, and lands.
+func TestMergeTrainBisect_GreenCommonPath(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	eng, client, rv := seamTrainEngine(t, wm, func(map[int]bool) bool { return false }) // always green
+
+	batch := makeSeamBatch(3)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+
+	if got := rv.count(); got != 1 {
+		t.Errorf("green common path must cost exactly 1 combined validation (zero bisection), got %d", got)
+	}
+	for i := 1; i <= 3; i++ {
+		if c := ejectionCommentCount(client, i); c != 0 {
+			t.Errorf("green path must not eject member #%d, got %d ejection comment(s)", i, c)
+		}
+	}
+	client.mu.Lock()
+	merges := len(client.mergePRCalls)
+	client.mu.Unlock()
+	if merges != 1 {
+		t.Errorf("expected the integration PR to be merged once (batch landed), got %d", merges)
+	}
+	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+		t.Error("expected mergeTrainInFlight cleared after green landing")
+	}
+}
+
+// TestMergeTrainBisect_SinglePoisoner verifies FR-1/FR-2/FR-3: a single poisoner is isolated
+// in O(log N) validations and ejected; the survivor batch is re-formed and re-validated.
+func TestMergeTrainBisect_SinglePoisoner(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	// Red iff #3 is present. #3 is the poisoner.
+	eng, client, rv := seamTrainEngine(t, wm, func(p map[int]bool) bool { return p[3] })
+
+	batch := makeSeamBatch(5)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+
+	// #3 ejected exactly once.
+	if c := ejectionCommentCount(client, 3); c != 1 {
+		t.Errorf("expected #3 ejected once as the poisoner, got %d ejection comment(s)", c)
+	}
+	// No other member ejected.
+	for _, n := range []int{1, 2, 4, 5} {
+		if c := ejectionCommentCount(client, n); c != 0 {
+			t.Errorf("expected member #%d not ejected, got %d", n, c)
+		}
+	}
+	// O(log N): total combined validations ≤ per-episode cost cap + 1 re-form validation.
+	cap := eng.effectiveBisectCap()
+	if got := rv.count(); got > cap+1 {
+		t.Errorf("expected O(log N) validations (≤ %d), got %d", cap+1, got)
+	}
+	// Survivor batch {1,2,4,5} was re-formed and re-validated (the final validation).
+	last := rv.last()
+	if fmt.Sprint(last) != fmt.Sprint([]int{1, 2, 4, 5}) {
+		t.Errorf("expected survivor batch {1,2,4,5} re-validated last, got %v", last)
+	}
+	// Survivors landed (integration PR merged).
+	client.mu.Lock()
+	merges := len(client.mergePRCalls)
+	client.mu.Unlock()
+	if merges != 1 {
+		t.Errorf("expected survivor integration PR merged once, got %d", merges)
+	}
+}
+
+// TestMergeTrainBisect_RepeatedEjectionPauses verifies D-a: a bisection-identified ejection
+// increments the SAME shared MaxMergeTrainEjections counter, and hitting the cap pauses the
+// member with fabrik:paused + fabrik:awaiting-input.
+func TestMergeTrainBisect_RepeatedEjectionPauses(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	eng, client, _ := seamTrainEngine(t, wm, func(p map[int]bool) bool { return p[3] }) // #3 poisons
+
+	// Pre-seed #3's ejection counter to one below the cap (proves the shared counter).
+	eng.mergeTrainEjectionsMu.Lock()
+	eng.mergeTrainEjectionCounts["owner/repo#3"] = eng.cfg.MaxMergeTrainEjections - 1
+	eng.mergeTrainEjectionsMu.Unlock()
+
+	batch := makeSeamBatch(5)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+
+	client.mu.Lock()
+	paused, awaiting := false, false
+	for _, c := range client.addLabelCalls {
+		if c.issueNumber == 3 && c.labelName == "fabrik:paused" {
+			paused = true
+		}
+		if c.issueNumber == 3 && c.labelName == "fabrik:awaiting-input" {
+			awaiting = true
+		}
+	}
+	client.mu.Unlock()
+	if !paused {
+		t.Error("expected #3 to be paused (fabrik:paused) at the shared eject cap")
+	}
+	if !awaiting {
+		t.Error("expected #3 to get fabrik:awaiting-input at the shared eject cap")
+	}
+}
+
+// TestMergeTrainBisect_CostCapFallbackLogs verifies FR-5: exceeding the per-red-batch
+// validation cap degrades to one-at-a-time landing with a clear log line (no silent
+// truncation). Uses an interaction (red iff {#1,#2}) and a low MaxBisectValidations so the
+// cap fires before isolation.
+func TestMergeTrainBisect_CostCapFallbackLogs(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	eng, client, _ := seamTrainEngine(t, wm, func(p map[int]bool) bool { return p[1] && p[2] })
+	eng.cfg.MaxBisectValidations = 2 // force the cost cap to fire during bisection
+
+	batch := makeSeamBatch(4)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out := captureStdout(func() {
+		eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	})
+
+	if !strings.Contains(out, "cost cap") {
+		t.Errorf("expected a cost-cap log line (no silent truncation); stdout was:\n%s", out)
+	}
+	if !strings.Contains(out, "one-at-a-time") {
+		t.Errorf("expected a one-at-a-time fallback log line; stdout was:\n%s", out)
+	}
+	// The fallback lands each of the 4 members as its own singleton (marker-free CreatePR).
+	client.mu.Lock()
+	singletonPRs := 0
+	for _, c := range client.createPRCalls {
+		if strings.Contains(c.title, "singleton") {
+			singletonPRs++
+		}
+	}
+	client.mu.Unlock()
+	if singletonPRs != 4 {
+		t.Errorf("expected 4 singleton landing PRs under the fallback, got %d", singletonPRs)
+	}
+}
+
+// TestMergeTrainBisect_InteractionFallsBack verifies the interaction case (D-e): a non-
+// isolable cross-PR interaction (each half green alone, the union red) with ample budget
+// triggers the one-at-a-time fallback rather than falsely isolating/ejecting a single member.
+func TestMergeTrainBisect_InteractionFallsBack(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	// Red iff BOTH #1 and #2 are present; either alone is green. Ample (default) budget.
+	eng, client, _ := seamTrainEngine(t, wm, func(p map[int]bool) bool { return p[1] && p[2] })
+
+	batch := makeSeamBatch(4)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out := captureStdout(func() {
+		eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	})
+
+	// Fell back to one-at-a-time (not a bespoke isolation path).
+	if !strings.Contains(out, "one-at-a-time") {
+		t.Errorf("expected the interaction to degrade to one-at-a-time; stdout was:\n%s", out)
+	}
+	// No member was ejected as "the batch poisoner" (bisection must not falsely isolate).
+	if strings.Contains(out, "batch poisoner") {
+		t.Errorf("interaction must not falsely isolate a single poisoner; stdout was:\n%s", out)
+	}
+	// Each member is landed as its own singleton batch.
+	client.mu.Lock()
+	singletonPRs := 0
+	for _, c := range client.createPRCalls {
+		if strings.Contains(c.title, "singleton") {
+			singletonPRs++
+		}
+	}
+	client.mu.Unlock()
+	if singletonPRs != 4 {
+		t.Errorf("expected 4 singleton landing PRs under the fallback, got %d", singletonPRs)
+	}
+}
