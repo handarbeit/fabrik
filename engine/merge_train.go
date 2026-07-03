@@ -372,13 +372,13 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 		return nil, "", fmt.Errorf("creating trial worktree: %w", err)
 	}
 
-	// Fetch all objects so git merge <sha> can resolve member commits.
-	fetchCmd := exec.Command("git", "fetch", "origin")
-	fetchCmd.Dir = wtDir
-	fetchCmd.Env = nonInteractiveGitEnv()
-	if out, ferr := fetchCmd.CombinedOutput(); ferr != nil {
-		e.logf(0, "merge-train", "warn: fetch origin in trial worktree failed: %s\n", strings.TrimSpace(string(out)))
-	}
+	// No fetch is needed here: the trial worktree shares the bare repo's object database,
+	// and the caller has already run `git fetch origin` in wm.baseDir before assembling —
+	// the base-SHA pin at worker start (runMergeTrainWorker) covers the main-loop trial and
+	// every bisection sub-trial, and landOneAtATime re-pins per singleton — so each member
+	// headSHA (an immutable snapshot captured once in fetchTrainMembers) is already a local
+	// object resolvable by `git merge <sha>`. Re-fetching per trial would be a wasted network
+	// round-trip on every bisection sub-trial. Keep this invariant if the fetch is refactored.
 
 	var survivors []trainMember
 	for _, member := range members {
