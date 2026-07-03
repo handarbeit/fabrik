@@ -934,6 +934,33 @@ func TestEnsureTrainWorktree(t *testing.T) {
 	}
 }
 
+// TestEnsureTrainWorktreeAt verifies base-SHA pinning (D-b): the trial branch is forked
+// off the exact SHA passed, not the moving branch tip.
+func TestEnsureTrainWorktreeAt(t *testing.T) {
+	skipIfNoGit(t)
+	bareDir, _, _, wm := setupTrainRepo(t)
+
+	// Resolve the pinned base SHA from the bare repo's origin/main.
+	baseSHA := strings.TrimSpace(gitOutputDir(t, bareDir, "rev-parse", "refs/remotes/origin/main"))
+
+	wtDir, err := wm.EnsureTrainWorktreeAt("pinned-trial", baseSHA)
+	if err != nil {
+		t.Fatalf("EnsureTrainWorktreeAt: %v", err)
+	}
+	if _, err := os.Stat(wtDir); err != nil {
+		t.Errorf("train worktree directory not created: %v", err)
+	}
+
+	head := strings.TrimSpace(gitOutputDir(t, wtDir, "rev-parse", "HEAD"))
+	if head != baseSHA {
+		t.Errorf("worktree HEAD = %s, want pinned base SHA %s", head, baseSHA)
+	}
+
+	if err := wm.CleanupTrainWorktree("pinned-trial", true); err != nil {
+		t.Errorf("CleanupTrainWorktree: %v", err)
+	}
+}
+
 // ── landMergeTrainBatch unit tests ────────────────────────────────────────────
 
 // makeQueuedMember returns a trainMember with Status "Queued".

@@ -326,6 +326,29 @@ func (wm *WorktreeManager) TrainWorktreeDir(name string) string {
 // origin/<baseBranch>. Unlike EnsureWorktree it never reuses an existing worktree
 // (trial branches are disposable) and never updates from main (the fork is always fresh).
 func (wm *WorktreeManager) EnsureTrainWorktree(name, baseBranch string) (string, error) {
+	// Fork from origin/<baseBranch>, falling back to a local ref when the remote
+	// tracking branch is absent. branchExists is a read-only rev-parse, so it is
+	// safe to resolve the ref before taking the worktree mutex.
+	baseRef := "refs/remotes/origin/" + baseBranch
+	if !wm.branchExists("origin/" + baseBranch) {
+		baseRef = baseBranch
+	}
+	return wm.ensureTrainWorktreeFromRef(name, baseRef)
+}
+
+// EnsureTrainWorktreeAt creates a trial-branch worktree forked off a raw commit SHA
+// rather than the moving origin/<baseBranch> tip. Merge-train bisection pins the base
+// SHA once at batch start (ADR-059 D-b) and forks every trial off it, so a red combined
+// Validate is attributable to member composition alone, not a base branch that advanced
+// between trials.
+func (wm *WorktreeManager) EnsureTrainWorktreeAt(name, baseSHA string) (string, error) {
+	return wm.ensureTrainWorktreeFromRef(name, baseSHA)
+}
+
+// ensureTrainWorktreeFromRef is the shared body of EnsureTrainWorktree /
+// EnsureTrainWorktreeAt: it removes any stale worktree/branch for name and creates a
+// fresh disposable trial branch + worktree forked off baseRef (a branch ref or a raw SHA).
+func (wm *WorktreeManager) ensureTrainWorktreeFromRef(name, baseRef string) (string, error) {
 	wm.mu.Lock()
 	defer wm.mu.Unlock()
 
@@ -356,11 +379,7 @@ func (wm *WorktreeManager) EnsureTrainWorktree(name, baseBranch string) (string,
 		delCmd.CombinedOutput() // best-effort
 	}
 
-	// Fork from origin/<baseBranch>.
-	baseRef := "refs/remotes/origin/" + baseBranch
-	if !wm.branchExists("origin/" + baseBranch) {
-		baseRef = baseBranch
-	}
+	// Fork the trial branch off baseRef.
 	cmd := exec.Command("git", "branch", branch, baseRef)
 	cmd.Dir = wm.baseDir
 	if out, err := cmd.CombinedOutput(); err != nil {
