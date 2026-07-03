@@ -135,7 +135,7 @@ Each active stage column has the same set of reachable sub-states:
 | Sub-State | Labels Present | Description |
 |-----------|---------------|-------------|
 | **Waiting** | `stage:Validate:complete` | Item moved to Queued column; `advanceToQueued` added `stage:Validate:complete` atomically. Awaiting `handleMergeTrainBatch` to form a landing batch. |
-| **Landing** | `stage:Validate:complete` | Batch assigned to `runMergeTrainWorker`; trial branch being assembled, CI polling, or landing integration PR open/merge in progress. |
+| **Landing** | `stage:Validate:complete` | Batch assigned to `runMergeTrainWorker`; trial branch being assembled, combined-Validate CI polling, red-batch bisection (`state.bisecting`), one-at-a-time fallback, or landing integration PR open/merge in progress. |
 | **Done** | *(none — advanced by `advanceToNextStage`)* | Integration PR merged; member advanced to Done column via `advanceToNextStage`; member PR closed with batch reference comment. |
 
 `itemMayNeedWork` and `itemNeedsWork` both return `false` for any stage with `holding_stage: true`, so these items are never dispatched to a per-item worker. `processItem` also short-circuits on `stage.HoldingStage` as a defense-in-depth guard. The catch-up loop skips holding stages for the same reason.
@@ -161,6 +161,24 @@ When `handleMergeTrainBatch` has a non-empty batch of Queued items, it calls `di
 **State threading**: `board.ProjectID` is threaded from `handleMergeTrainBatch` → `dispatchMergeTrainWorker(ctx, batch, projectID)` → `mergeTrainWorkerState.projectID` (immutable after dispatch, no mutex needed). Inside `landMergeTrainBatch`, a minimal `&gh.ProjectBoard{ProjectID: projectID}` is constructed for the `advanceToNextStage` call.
 
 **`mergeTrainInFlight` lifecycle**: set at `dispatchMergeTrainWorker` entry (LoadOrStore), cleared in the `landMergeTrainBatch` deferred cleanup (both on success and failure). The goroutine's entry in `mergeTrainInFlight` is therefore gone by the time `landMergeTrainBatch` returns, and the next `handleMergeTrainBatch` poll cycle can dispatch a fresh train for any still-Queued members.
+
+##### Merge-Train Red-Batch Bisection (ADR-059 D4)
+
+A batch is **usually green**: every member already passed Validate individually, so a batch fails only on a genuine cross-PR semantic conflict. `runMergeTrainWorker` is therefore structured as a **re-form loop** around a single combined validation per (re-formed) batch:
+
+- **Green path is a hard invariant (D-d):** a green combined Validate costs **exactly one** validation and performs **zero** bisection — it lands immediately via `landMergeTrainBatch`. Bisection is strictly gated behind a red result.
+- **`max_batch_size` cap (FR-4):** `handleMergeTrainBatch` caps the Queued snapshot to the first `MaxBatchSize` items (default 5) by entry order (`capBatch`), logging any truncation. This bounds the worst-case bisection depth.
+
+**Bisection on red (FR-1):** when the combined Validate is red, `handleRedBatch` opens a **per-episode cost budget** (`used = 1` for the initial red validation, capped at `effectiveBisectCap()` = `MaxBisectValidations`, default `2·⌈log₂(max_batch_size)⌉ + 1 ≈ 7`) and calls `bisect`. `bisect` recursively halves the red member set in bors-ng order — validate half A; if red recurse into A; else validate half B; if red recurse into B — until a **red singleton** (the poisoner) is isolated. Every trial (initial and every sub-trial) is assembled by `assembleAndValidate` off the **same base SHA pinned once at batch start** (D-b, via `EnsureTrainWorktreeAt`), so redness is attributable to member composition, not a moving base branch (main-moved is D5, out of scope). Each sub-trial's branch + worktree + draft CI PR is reaped immediately by `cleanupTrialArtifacts`.
+
+**Eject + re-form + re-validate (FR-2/FR-3):** the isolated poisoner is ejected via the **unchanged `ejectMember`** (D-a — the same shared `MaxMergeTrainEjections` counter that assembly-conflict ejections increment; D-c — the ejection comment is the attention marker; cap→pause reuse: after `MaxMergeTrainEjections` ejections the member gets `fabrik:paused` + `fabrik:awaiting-input`). The poisoner **remains in Queued** for a future differently-composed train. `handleRedBatch` returns the surviving members; the main loop **re-forms and re-validates** them (a survivor batch is not assumed green — a second poisoner or interaction may remain). Terminal states are clean: an empty survivor set completes the train with nothing to land (the existing zero-survivor path); each episode ejects ≥1 member or falls back, so the loop runs ≤ N episodes.
+
+**One-at-a-time fallback (FR-5):** when bisection cannot isolate a single culprit within the cost budget — either the budget is exhausted, or both halves validate green (a **non-isolable cross-PR interaction**: each half green alone, the union red — D-e, no bespoke interaction-detection in v1) — `handleRedBatch` logs the degrade clearly (never silent) and calls `landOneAtATime`, which validates and lands each remaining member as its **own singleton batch**. A green singleton lands via `landSingleton`; a red singleton (fails even in isolation) is ejected; a pending singleton stays in Queued. This dissolves any interaction by construction (no two members co-reside). Two non-obvious correctness points:
+
+- **Per-singleton base re-pin:** unlike bisection (which pins the base once, D-b), `landOneAtATime` re-pins the base to the current `origin/<base>` before **each** singleton so a prior singleton's land is visible to the next member's validation — this is what actually dissolves a genuine `{A,B}` interaction (landing `A`, then validating `B` against `main`-with-`A`, which now goes red and ejects `B` rather than letting both land and poison `main`). This is a deliberate sequential base advance, distinct from the D5 concurrent main-moved race. Under the membership-keyed test seam this git step is skipped (the stub is stateless).
+- **`landSingleton`, not `landMergeTrainBatch`:** `landSingleton` creates a **marker-free** integration PR. Reusing `landMergeTrainBatch` across sequential singletons would make a later singleton's `findIntegrationPR` (which matches merged PRs via `ListPRs` state=all) match an earlier singleton's already-merged integration PR by the shared `<!-- fabrik-merge-train-batch -->` marker, skip the later singleton's own merge, and advance it to Done without landing its code — a data-loss bug.
+
+**Dispatch-guard logging:** `state.bisecting` (set for the duration of `handleRedBatch`) makes `dispatchMergeTrainWorker` log "bisecting red batch" for a re-dispatch attempt during bisection, rather than the misleading "CI red — needs attention".
 
 ### 1.4 Label Semantics Reference
 
