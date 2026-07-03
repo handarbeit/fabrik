@@ -482,6 +482,48 @@ func TestSanitizeBranchName(t *testing.T) {
 	}
 }
 
+// ── bisection cost-cap derivation tests (Task 1) ──────────────────────────────
+
+func TestCeilLog2(t *testing.T) {
+	cases := []struct{ in, want int }{
+		{0, 0}, {1, 0}, {2, 1}, {3, 2}, {4, 2}, {5, 3}, {8, 3}, {9, 4}, {16, 4}, {17, 5},
+	}
+	for _, tc := range cases {
+		if got := ceilLog2(tc.in); got != tc.want {
+			t.Errorf("ceilLog2(%d) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestEffectiveMaxBatchSize(t *testing.T) {
+	if got := (&Engine{cfg: Config{MaxBatchSize: 0}}).effectiveMaxBatchSize(); got != 5 {
+		t.Errorf("effectiveMaxBatchSize() with unset (0) = %d, want 5 (default)", got)
+	}
+	if got := (&Engine{cfg: Config{MaxBatchSize: 3}}).effectiveMaxBatchSize(); got != 3 {
+		t.Errorf("effectiveMaxBatchSize() with 3 = %d, want 3", got)
+	}
+}
+
+func TestEffectiveBisectCap_Derivation(t *testing.T) {
+	// FR-5 / D-f default: 2·⌈log₂(max_batch_size)⌉ + 1.
+	cases := []struct{ batchSize, wantCap int }{
+		{1, 1}, {2, 3}, {4, 5}, {5, 7}, {8, 7}, {16, 9},
+	}
+	for _, tc := range cases {
+		e := &Engine{cfg: Config{MaxBatchSize: tc.batchSize}}
+		if got := e.effectiveBisectCap(); got != tc.wantCap {
+			t.Errorf("effectiveBisectCap() with MaxBatchSize=%d = %d, want %d", tc.batchSize, got, tc.wantCap)
+		}
+	}
+}
+
+func TestEffectiveBisectCap_ExplicitOverride(t *testing.T) {
+	e := &Engine{cfg: Config{MaxBatchSize: 5, MaxBisectValidations: 2}}
+	if got := e.effectiveBisectCap(); got != 2 {
+		t.Errorf("effectiveBisectCap() with explicit override 2 = %d, want 2", got)
+	}
+}
+
 // ── Integration tests (Tasks 11a-e + Task 12, real git) ──────────────────────
 
 // setupTrainRepo creates a bare clone with main configured and a source clone for

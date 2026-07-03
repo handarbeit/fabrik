@@ -50,6 +50,43 @@ func sanitizeBranchName(s string) string {
 	return strings.ReplaceAll(s, "/", "-")
 }
 
+// ceilLog2 returns ⌈log₂(n)⌉ for n ≥ 1 and 0 for n ≤ 1. It is the number of
+// halving levels needed to bisect a set of n members down to a singleton, and
+// underpins the default bisection cost cap (ADR-059 D-f).
+func ceilLog2(n int) int {
+	if n <= 1 {
+		return 0
+	}
+	bits := 0
+	for v := n - 1; v > 0; v >>= 1 {
+		bits++
+	}
+	return bits
+}
+
+// effectiveMaxBatchSize returns the configured MaxBatchSize, defaulting to 5
+// (ADR-059 D-f) when unset (≤ 0). This caps how many Queued items are snapshotted
+// into a single merge-train batch (FR-4).
+func (e *Engine) effectiveMaxBatchSize() int {
+	if e.cfg.MaxBatchSize <= 0 {
+		return 5
+	}
+	return e.cfg.MaxBatchSize
+}
+
+// effectiveBisectCap returns the maximum number of combined validations permitted
+// per red-batch episode (the initial red validation plus all bisection trial
+// validations), defaulting to 2·⌈log₂(max_batch_size)⌉ + 1 (ADR-059 D-f) when unset
+// (≤ 0). Beyond this cap, a red batch degrades to the one-at-a-time fallback (FR-5).
+// The default is derived from the configured max_batch_size, not the actual batch
+// length, per FR-5.
+func (e *Engine) effectiveBisectCap() int {
+	if e.cfg.MaxBisectValidations > 0 {
+		return e.cfg.MaxBisectValidations
+	}
+	return 2*ceilLog2(e.effectiveMaxBatchSize()) + 1
+}
+
 // dispatchMergeTrainWorker checks whether a train worker is already in-flight for
 // the batch's repo and, if not, starts one. Safe to call from the poll goroutine.
 // projectID is the GitHub project board ID, threaded so landMergeTrainBatch can
