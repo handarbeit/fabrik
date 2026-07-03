@@ -334,7 +334,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 			// revalidate → dissolve-on-exhaustion) around landMergeTrainBatch; both
 			// terminal paths clear mergeTrainInFlight.
 			e.logf(0, "merge-train", "combined Validate green for %s (%d survivor(s)) — landing\n", repoKey, len(survivors))
-			e.landGreenBatch(ctx, p, survivors)
+			e.landGreenBatch(ctx, state, p, survivors)
 			return
 		case TrainCIPending:
 			e.logf(0, "merge-train", "combined Validate pending/timed out for %s — will retry next poll\n", repoKey)
