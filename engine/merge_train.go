@@ -35,14 +35,13 @@ type trainMember struct {
 // Stored in Engine.mergeTrainInFlight keyed by "owner/repo".
 // mu guards all fields that the poll loop reads while the goroutine writes them.
 type mergeTrainWorkerState struct {
-	mu             sync.RWMutex
-	assembling     bool          // true while building the trial branch; false once PR is open
-	bisecting      bool          // true while halving a red batch to isolate the poisoner (ADR-059 D4)
-	prNum          int           // draft CI PR number (set after draft PR is created)
-	trialBranchSHA string        // HEAD SHA of the trial branch (set after push)
-	CIResult       TrainCIResult // final CI result (set by pollTrainCI on exit)
-	trialName      string        // trial name of the most recent trial (churns during bisection)
-	projectID      string        // board project ID for advanceToNextStage (immutable after dispatch)
+	mu         sync.RWMutex
+	assembling bool          // true while building the trial branch; false once PR is open
+	bisecting  bool          // true while halving a red batch to isolate the poisoner (ADR-059 D4)
+	prNum      int           // draft CI PR number (set after draft PR is created)
+	CIResult   TrainCIResult // final CI result (set by pollTrainCI on exit)
+	trialName  string        // trial name of the most recent trial (churns during bisection)
+	projectID  string        // board project ID for advanceToNextStage (immutable after dispatch)
 }
 
 // sanitizeBranchName replaces characters that are invalid in directory names
@@ -118,12 +117,16 @@ func (e *Engine) dispatchMergeTrainWorker(ctx context.Context, batch []gh.Projec
 		state := existing.(*mergeTrainWorkerState)
 		state.mu.RLock()
 		assembling := state.assembling
+		bisecting := state.bisecting
 		prNum := state.prNum
 		ciResult := state.CIResult
 		state.mu.RUnlock()
-		if assembling {
+		switch {
+		case assembling:
 			e.logf(0, "merge-train", "train worker already assembling for %s — skipping\n", repoKey)
-		} else {
+		case bisecting:
+			e.logf(0, "merge-train", "train worker bisecting red batch for %s — skipping\n", repoKey)
+		default:
 			switch ciResult {
 			case TrainCIGreen:
 				e.logf(0, "merge-train", "train CI green for %s (PR #%d) — awaiting landing step\n", repoKey, prNum)
@@ -146,9 +149,26 @@ func (e *Engine) dispatchMergeTrainWorker(ctx context.Context, batch []gh.Projec
 	}()
 }
 
-// runMergeTrainWorker is the main body of the merge-train goroutine.
-// It acquires the semaphore, assembles the trial branch, resolves conflicts,
-// pushes, opens a draft integration PR, polls CI, and records the result.
+// trialParams bundles the immutable per-worker context threaded through the
+// assemble / bisect / land helpers so their signatures stay manageable. baseSHA is
+// pinned once at batch start (ADR-059 D-b) and is only re-pinned deliberately, per
+// singleton, inside landOneAtATime (the sequential-land base advance).
+type trialParams struct {
+	owner, repo      string
+	baseBranch       string
+	baseSHA          string
+	wm               *WorktreeManager
+	holdingStg       *stages.Stage
+	maxTurnsOverride int
+	nextTrialName    func() string // returns a unique trial name per call (first == base)
+}
+
+// runMergeTrainWorker is the main body of the merge-train goroutine (ADR-059 D3/D4).
+// It pins the base SHA once, then runs a re-form loop: assemble+validate the (re-formed)
+// batch exactly once; a green result lands immediately (D-d — zero bisection on the common
+// path); a red result opens a per-episode cost budget and bisects to isolate and eject the
+// poisoner (FR-1/FR-2), re-forming the survivors and re-validating (FR-3); cost-cap
+// exhaustion or a non-isolable interaction degrades to the one-at-a-time fallback (FR-5).
 func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorkerState, owner, repo string, batch []gh.ProjectItem) {
 	repoKey := owner + "/" + repo
 
@@ -180,31 +200,9 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		return
 	}
 
-	// Generate trial name here (after baseBranch is known) so the branch name
-	// reflects the target base (e.g. "merge-train-main-1751234567"), matching FR-1.
-	trialName := fmt.Sprintf("merge-train-%s-%d", sanitizeBranchName(baseBranch), time.Now().Unix())
-	state.trialName = trialName
-	e.logf(0, "merge-train", "building trial branch %q for %s (%d members)\n", trialName, repoKey, len(batch))
-
-	wtDir, err := wm.EnsureTrainWorktree(trialName, baseBranch)
-	if err != nil {
-		e.logf(0, "merge-train", "cannot create trial worktree for %s: %v\n", repoKey, err)
-		e.mergeTrainInFlight.Delete(repoKey)
-		return
-	}
-
-	// Fetch all objects so git merge <sha> can resolve them.
-	fetchCmd := exec.Command("git", "fetch", "origin")
-	fetchCmd.Dir = wtDir
-	fetchCmd.Env = nonInteractiveGitEnv()
-	if out, err := fetchCmd.CombinedOutput(); err != nil {
-		e.logf(0, "merge-train", "warn: fetch origin in trial worktree failed: %s\n", strings.TrimSpace(string(out)))
-	}
-
 	holdingStg := holdingStage(e.cfg)
 	if holdingStg == nil {
 		e.logf(0, "merge-train", "no holding stage configured — aborting train\n")
-		wm.CleanupTrainWorktree(trialName, true) // best-effort
 		e.mergeTrainInFlight.Delete(repoKey)
 		return
 	}
@@ -222,8 +220,130 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		maxTurnsOverride = holdingStg.MaxTurns * 2
 	}
 
-	// Sequential merge loop — builds trainMembers with the member PR number stored.
-	var survivors []trainMember
+	// Pin the base SHA once (ADR-059 D-b) so every trial — the initial batch and every
+	// bisection sub-trial — forks off the same base and a red result is attributable to
+	// member composition, not a moving base branch. Skipped under the test seam (no git).
+	baseSHA := ""
+	if e.trainValidateFn == nil {
+		fetchCmd := exec.Command("git", "fetch", "origin")
+		fetchCmd.Dir = wm.baseDir
+		fetchCmd.Env = nonInteractiveGitEnv()
+		if out, ferr := fetchCmd.CombinedOutput(); ferr != nil {
+			e.logf(0, "merge-train", "warn: fetch origin before pinning base failed: %s\n", strings.TrimSpace(string(out)))
+		}
+		baseSHA, err = gitRevParse(wm.baseDir, "refs/remotes/origin/"+baseBranch)
+		if err != nil {
+			if baseSHA, err = gitRevParse(wm.baseDir, baseBranch); err != nil {
+				e.logf(0, "merge-train", "cannot pin base SHA for %s: %v\n", repoKey, err)
+				e.mergeTrainInFlight.Delete(repoKey)
+				return
+			}
+		}
+		e.logf(0, "merge-train", "pinned base %s (%s) for %s train\n", baseBranch, baseSHA, repoKey)
+	}
+
+	// Unique, monotonic trial-name generator (first call == base name). Every trial —
+	// main-loop re-forms and bisection sub-trials — gets a distinct name so their branches,
+	// worktrees, and draft CI PRs never collide.
+	baseTrialName := fmt.Sprintf("merge-train-%s-%d", sanitizeBranchName(baseBranch), time.Now().Unix())
+	trialSeq := 0
+	nextTrialName := func() string {
+		n := baseTrialName
+		if trialSeq > 0 {
+			n = fmt.Sprintf("%s-t%d", baseTrialName, trialSeq)
+		}
+		trialSeq++
+		return n
+	}
+
+	p := trialParams{
+		owner:            owner,
+		repo:             repo,
+		baseBranch:       baseBranch,
+		baseSHA:          baseSHA,
+		wm:               wm,
+		holdingStg:       holdingStg,
+		maxTurnsOverride: maxTurnsOverride,
+		nextTrialName:    nextTrialName,
+	}
+
+	// Resolve each member's linked PR number + head SHA once, ejecting fetch failures.
+	current := e.fetchTrainMembers(ctx, owner, repo, batch)
+	e.logf(0, "merge-train", "assembled %d train member(s) for %s\n", len(current), repoKey)
+
+	// Re-form loop: validate, land-on-green, or bisect-eject-reform on red.
+	for {
+		if len(current) == 0 {
+			e.logf(0, "merge-train", "no survivors remaining for %s — train complete with nothing to land\n", repoKey)
+			e.mergeTrainInFlight.Delete(repoKey)
+			return
+		}
+
+		trialName := p.nextTrialName()
+		state.mu.Lock()
+		state.trialName = trialName
+		state.assembling = true
+		state.mu.Unlock()
+
+		survivors, result, prNum, aerr := e.assembleAndValidate(ctx, p, current, trialName)
+		if aerr != nil {
+			e.logf(0, "merge-train", "assemble/validate failed for %s: %v\n", repoKey, aerr)
+			e.cleanupTrialArtifacts(p.wm, trialName)
+			e.mergeTrainInFlight.Delete(repoKey)
+			return
+		}
+		if len(survivors) == 0 {
+			// Every member was ejected during assembly (unresolvable conflicts).
+			e.logf(0, "merge-train", "entire batch ejected during assembly for %s\n", repoKey)
+			e.cleanupTrialArtifacts(p.wm, trialName)
+			e.mergeTrainInFlight.Delete(repoKey)
+			return
+		}
+
+		state.mu.Lock()
+		state.prNum = prNum
+		state.assembling = false
+		state.CIResult = result
+		state.mu.Unlock()
+
+		switch result {
+		case TrainCIGreen:
+			// D-d hard invariant: a green batch lands immediately, zero bisection.
+			e.logf(0, "merge-train", "combined Validate green for %s (%d survivor(s)) — landing\n", repoKey, len(survivors))
+			e.landMergeTrainBatch(ctx, state, owner, repo, baseBranch, survivors, wm)
+			// landMergeTrainBatch clears mergeTrainInFlight via its deferred cleanup.
+			return
+		case TrainCIPending:
+			e.logf(0, "merge-train", "combined Validate pending/timed out for %s — will retry next poll\n", repoKey)
+			e.cleanupTrialArtifacts(p.wm, trialName)
+			e.mergeTrainInFlight.Delete(repoKey)
+			return
+		default: // TrainCIRed
+			e.logf(0, "merge-train", "combined Validate RED for %s (%d member(s)) — bisecting to isolate the poisoner\n", repoKey, len(survivors))
+			// The red trial's artifacts are unneeded; bisection sub-trials build fresh.
+			e.cleanupTrialArtifacts(p.wm, trialName)
+			state.mu.Lock()
+			state.bisecting = true
+			state.mu.Unlock()
+			nextSurvivors, fellBack := e.handleRedBatch(ctx, state, p, survivors)
+			state.mu.Lock()
+			state.bisecting = false
+			state.mu.Unlock()
+			if fellBack {
+				// The one-at-a-time fallback already landed/ejected every member.
+				e.mergeTrainInFlight.Delete(repoKey)
+				return
+			}
+			current = nextSurvivors // re-form survivors and re-validate (FR-3)
+		}
+	}
+}
+
+// fetchTrainMembers resolves each batch member's linked PR number and head SHA once
+// (reused across every bisection trial and the landing step), ejecting any member whose
+// linked PR cannot be fetched or has no head SHA. The returned slice preserves batch order.
+func (e *Engine) fetchTrainMembers(ctx context.Context, owner, repo string, batch []gh.ProjectItem) []trainMember {
+	var members []trainMember
 	for _, member := range batch {
 		pr, fetchErr := e.client.FetchLinkedPR(owner, repo, member.Number)
 		if fetchErr != nil || pr == nil {
@@ -236,28 +356,48 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 			e.ejectMember(ctx, owner, repo, member, "ejected from merge-train — linked PR has no head SHA")
 			continue
 		}
+		members = append(members, trainMember{item: member, prNum: pr.Number, headSHA: pr.HeadSHA})
+	}
+	return members
+}
 
-		mergeCmd := exec.Command("git", "merge", "--no-ff", "--no-edit", pr.HeadSHA)
+// assembleTrialBranch creates a fresh trial worktree forked off the pinned base SHA (D-b)
+// and sequentially merges each member's head SHA into it, resolving conflicts via Claude and
+// ejecting members whose conflicts are unresolvable. It returns the survivors (members that
+// merged or were resolved), the pushed trial branch HEAD SHA, and any fatal error. A zero-
+// survivor result returns (nil, "", nil) — the caller handles the terminal.
+func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members []trainMember, trialName string) ([]trainMember, string, error) {
+	wtDir, err := p.wm.EnsureTrainWorktreeAt(trialName, p.baseSHA)
+	if err != nil {
+		return nil, "", fmt.Errorf("creating trial worktree: %w", err)
+	}
+
+	// Fetch all objects so git merge <sha> can resolve member commits.
+	fetchCmd := exec.Command("git", "fetch", "origin")
+	fetchCmd.Dir = wtDir
+	fetchCmd.Env = nonInteractiveGitEnv()
+	if out, ferr := fetchCmd.CombinedOutput(); ferr != nil {
+		e.logf(0, "merge-train", "warn: fetch origin in trial worktree failed: %s\n", strings.TrimSpace(string(out)))
+	}
+
+	var survivors []trainMember
+	for _, member := range members {
+		mergeCmd := exec.Command("git", "merge", "--no-ff", "--no-edit", member.headSHA)
 		mergeCmd.Dir = wtDir
 		mergeOut, mergeErr := mergeCmd.CombinedOutput()
 
 		if mergeErr == nil {
-			// Clean merge.
-			survivors = append(survivors, trainMember{item: member, prNum: pr.Number})
-			e.logf(member.Number, "merge-train", "merged #%d cleanly into trial branch\n", member.Number)
+			survivors = append(survivors, member)
+			e.logf(member.item.Number, "merge-train", "merged #%d cleanly into trial branch\n", member.item.Number)
 			continue
 		}
 
 		// Conflict — attempt Claude resolution.
-		e.logf(member.Number, "merge-train", "merge conflict for #%d: %s — attempting Claude resolution\n", member.Number, strings.TrimSpace(string(mergeOut)))
-		opts := InvokeOptions{
-			BaseBranch:       baseBranch,
-			MaxTurnsOverride: maxTurnsOverride,
-		}
-		resolved := e.resolveConflictWithClaude(ctx, member, wtDir, holdingStg, pr.HeadSHA, opts)
-		if resolved {
-			survivors = append(survivors, trainMember{item: member, prNum: pr.Number})
-			e.logf(member.Number, "merge-train", "conflict for #%d resolved by Claude\n", member.Number)
+		e.logf(member.item.Number, "merge-train", "merge conflict for #%d: %s — attempting Claude resolution\n", member.item.Number, strings.TrimSpace(string(mergeOut)))
+		opts := InvokeOptions{BaseBranch: p.baseBranch, MaxTurnsOverride: p.maxTurnsOverride}
+		if e.resolveConflictWithClaude(ctx, member.item, wtDir, p.holdingStg, member.headSHA, opts) {
+			survivors = append(survivors, member)
+			e.logf(member.item.Number, "merge-train", "conflict for #%d resolved by Claude\n", member.item.Number)
 			continue
 		}
 
@@ -265,39 +405,48 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		abortCmd := exec.Command("git", "merge", "--abort")
 		abortCmd.Dir = wtDir
 		abortCmd.CombinedOutput() // best-effort
-		e.logf(member.Number, "merge-train", "cannot resolve conflict for #%d — ejecting\n", member.Number)
-		e.ejectMember(ctx, owner, repo, member, fmt.Sprintf("ejected from merge-train batch — unresolvable conflict (PR SHA %s)", pr.HeadSHA))
+		e.logf(member.item.Number, "merge-train", "cannot resolve conflict for #%d — ejecting\n", member.item.Number)
+		e.ejectMember(ctx, p.owner, p.repo, member.item, fmt.Sprintf("ejected from merge-train batch — unresolvable conflict (PR SHA %s)", member.headSHA))
 	}
 
-	// FR-6: zero survivors.
 	if len(survivors) == 0 {
-		e.logf(0, "merge-train", "entire batch ejected, %d member(s) need attention\n", len(batch))
-		wm.CleanupTrainWorktree(trialName, true) // best-effort
-		e.mergeTrainInFlight.Delete(repoKey)
-		return
+		return nil, "", nil
 	}
 
-	// Push trial branch to origin.
-	if err := wm.PushTrainBranch(trialName); err != nil {
-		e.logf(0, "merge-train", "cannot push trial branch for %s: %v\n", repoKey, err)
-		wm.CleanupTrainWorktree(trialName, true) // best-effort
-		e.mergeTrainInFlight.Delete(repoKey)
-		return
+	if err := p.wm.PushTrainBranch(trialName); err != nil {
+		return nil, "", fmt.Errorf("pushing trial branch: %w", err)
 	}
-
-	// Capture trial branch HEAD SHA.
 	trialSHA, err := gitRevParse(wtDir, "HEAD")
 	if err != nil {
-		e.logf(0, "merge-train", "cannot read trial branch SHA for %s: %v\n", repoKey, err)
-		wm.CleanupTrainWorktree(trialName, true) // best-effort
-		e.mergeTrainInFlight.Delete(repoKey)
-		return
+		return nil, "", fmt.Errorf("reading trial branch SHA: %w", err)
 	}
-	state.mu.Lock()
-	state.trialBranchSHA = trialSHA
-	state.mu.Unlock()
+	return survivors, trialSHA, nil
+}
 
-	// Build draft CI PR body listing survivors.
+// assembleAndValidate builds a trial branch for members (off the pinned base SHA), opens a
+// draft CI PR, and polls the combined Validate. It returns the survivors, the CI result, and
+// the draft PR number. The local trial worktree is always removed before returning; the
+// remote branch persists to back the draft CI PR and is cleaned up by the caller (or by
+// landMergeTrainBatch on a green landing).
+//
+// When e.trainValidateFn is set (tests), it short-circuits the whole git/CI path and returns
+// (members, e.trainValidateFn(ctx, members), 0, nil), keying the result on batch membership
+// alone (ADR-059 D4 test seam). This is the ONLY combined validation on the common path — a
+// green result must never trigger bisection (D-d).
+func (e *Engine) assembleAndValidate(ctx context.Context, p trialParams, members []trainMember, trialName string) ([]trainMember, TrainCIResult, int, error) {
+	if e.trainValidateFn != nil {
+		return members, e.trainValidateFn(ctx, members), 0, nil
+	}
+
+	survivors, trialSHA, err := e.assembleTrialBranch(ctx, p, members, trialName)
+	if err != nil {
+		return nil, TrainCIPending, 0, err
+	}
+	if len(survivors) == 0 {
+		return nil, TrainCIPending, 0, nil
+	}
+
+	// Open a draft CI PR listing the survivors.
 	var memberRefs []string
 	for _, s := range survivors {
 		memberRefs = append(memberRefs, fmt.Sprintf("#%d", s.item.Number))
@@ -307,47 +456,202 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		"This is a disposable trial branch combining the following Queued member PRs:\n%s\n\n"+
 		"Do not merge this PR manually — Fabrik manages the landing step.\n"+
 		"Orphaned integration PRs (if the train worker crashed) can be closed manually via the GitHub UI.",
-		baseBranch, strings.Join(memberRefs, "\n"))
+		p.baseBranch, strings.Join(memberRefs, "\n"))
 
 	trialBranch := "fabrik/merge-train/" + trialName
-	prNum, err := e.client.CreateDraftPR(owner, repo, prTitle, trialBranch, baseBranch, prBody, 0)
+	prNum, err := e.client.CreateDraftPR(p.owner, p.repo, prTitle, trialBranch, p.baseBranch, prBody, 0)
 	if err != nil {
-		e.logf(0, "merge-train", "cannot create integration PR for %s: %v\n", repoKey, err)
-		wm.CleanupTrainWorktree(trialName, true) // best-effort
-		e.mergeTrainInFlight.Delete(repoKey)
+		return nil, TrainCIPending, 0, fmt.Errorf("creating draft CI PR: %w", err)
+	}
+	e.logf(0, "merge-train", "opened draft CI PR #%d for %s/%s (%d survivor(s))\n", prNum, p.owner, p.repo, len(survivors))
+
+	// Remove the local worktree — the trial branch now lives on origin.
+	if cleanErr := p.wm.CleanupTrainWorktree(trialName, false); cleanErr != nil {
+		e.logf(0, "merge-train", "warn: could not clean up local trial worktree %s: %v\n", trialName, cleanErr)
+	}
+
+	result := e.pollTrainCI(ctx, p.owner, p.repo, prNum, trialSHA)
+	return survivors, result, prNum, nil
+}
+
+// bisect recursively halves a known-red member set to isolate the single poisoning member
+// (ADR-059 D4 / FR-1), reusing assembleAndValidate for each trial in the bors-ng test order
+// (test half A; if red recurse into A; else test half B; if red recurse into B). It returns
+// the isolated poisoner, or (nil, true) when the redness is a non-isolable cross-PR
+// interaction (both halves green) or the per-episode cost budget (*used vs costCap) is
+// exhausted — either of which degrades to the FR-5 one-at-a-time fallback (D-e). red is
+// assumed to be a validated-red set (its redness established by the caller).
+func (e *Engine) bisect(ctx context.Context, p trialParams, red []trainMember, used *int, costCap int) (*trainMember, bool) {
+	if len(red) == 1 {
+		return &red[0], false
+	}
+
+	mid := len(red) / 2
+	for _, half := range [][]trainMember{red[:mid], red[mid:]} {
+		if *used >= costCap {
+			e.logf(0, "merge-train", "bisection cost cap (%d validations) reached — degrading to one-at-a-time fallback\n", costCap)
+			return nil, true
+		}
+		trialName := p.nextTrialName()
+		survivors, result, _, err := e.assembleAndValidate(ctx, p, half, trialName)
+		*used++
+		e.cleanupTrialArtifacts(p.wm, trialName)
+		if err != nil {
+			e.logf(0, "merge-train", "bisection trial failed to assemble: %v — degrading to one-at-a-time fallback\n", err)
+			return nil, true
+		}
+		if result == TrainCIRed && len(survivors) > 0 {
+			return e.bisect(ctx, p, survivors, used, costCap)
+		}
+	}
+
+	// Both halves green: the redness spans the split — a non-isolable interaction (D-e).
+	return nil, true
+}
+
+// handleRedBatch bisects a red batch to isolate and eject the poisoning member (FR-1/FR-2),
+// then returns the surviving members for the main loop to re-form and re-validate (FR-3).
+// When bisection cannot isolate a single culprit within the cost budget (a non-isolable
+// interaction or cost-cap exhaustion), it degrades to the one-at-a-time fallback (FR-5),
+// which lands/ejects every member itself, and returns (nil, true). The cost budget is
+// per red-batch episode: it starts at 1 (the initial red validation) and is capped at
+// effectiveBisectCap().
+func (e *Engine) handleRedBatch(ctx context.Context, state *mergeTrainWorkerState, p trialParams, red []trainMember) ([]trainMember, bool) {
+	used := 1 // the initial red validation counts toward the per-episode budget
+	costCap := e.effectiveBisectCap()
+
+	poisoner, fellBack := e.bisect(ctx, p, red, &used, costCap)
+	if fellBack {
+		e.logf(0, "merge-train", "could not isolate a single poisoner for %s/%s (%d/%d validations used) — degrading to one-at-a-time landing of %d member(s)\n", p.owner, p.repo, used, costCap, len(red))
+		e.landOneAtATime(ctx, state, p, red)
+		return nil, true
+	}
+
+	// Eject the isolated poisoner (D-a shared counter, D-c comment, cap→pause reuse).
+	e.logf(poisoner.item.Number, "merge-train", "bisection isolated #%d as the batch poisoner — ejecting\n", poisoner.item.Number)
+	e.ejectMember(ctx, p.owner, p.repo, poisoner.item,
+		fmt.Sprintf("ejected from merge-train — the combined Validate fails whenever #%d is in the batch (isolated by halving bisection). It will be retried in a future train with a different composition.", poisoner.item.Number))
+
+	var survivors []trainMember
+	for i := range red {
+		if red[i].item.Number != poisoner.item.Number {
+			survivors = append(survivors, red[i])
+		}
+	}
+	return survivors, false
+}
+
+// landOneAtATime is the FR-5 fallback: it validates and lands each member as its own
+// singleton batch, which dissolves any cross-PR interaction by construction (no two members
+// co-reside). A green singleton lands via landSingleton; a red singleton fails even in
+// isolation and is ejected; a pending singleton is left in Queued to retry. In the real path
+// the base is re-pinned to the current origin/<base> before each singleton so a prior land is
+// visible to the next member's validation (this is what actually dissolves a genuine
+// interaction); under the test seam this git step is skipped (the membership-keyed fn is
+// stateless — see the ADR-059 D4 landOneAtATime note in docs/state-machine.md).
+func (e *Engine) landOneAtATime(ctx context.Context, state *mergeTrainWorkerState, p trialParams, members []trainMember) {
+	e.logf(0, "merge-train", "one-at-a-time fallback: processing %d member(s) as singleton batches\n", len(members))
+	for _, m := range members {
+		if e.trainValidateFn == nil {
+			// Re-pin the base to current origin/<base> so a prior singleton's land is seen.
+			fetchCmd := exec.Command("git", "fetch", "origin")
+			fetchCmd.Dir = p.wm.baseDir
+			fetchCmd.Env = nonInteractiveGitEnv()
+			fetchCmd.CombinedOutput() // best-effort
+			if sha, rerr := gitRevParse(p.wm.baseDir, "refs/remotes/origin/"+p.baseBranch); rerr == nil {
+				p.baseSHA = sha // local copy; persists across this loop, does not leak to caller
+			}
+		}
+
+		trialName := p.nextTrialName()
+		survivors, result, _, err := e.assembleAndValidate(ctx, p, []trainMember{m}, trialName)
+		if err != nil || len(survivors) == 0 {
+			e.logf(m.item.Number, "merge-train", "could not assemble #%d in isolation: %v — leaving in Queued\n", m.item.Number, err)
+			e.cleanupTrialArtifacts(p.wm, trialName)
+			continue
+		}
+
+		switch result {
+		case TrainCIGreen:
+			e.landSingleton(ctx, state, p, m, trialName)
+		case TrainCIRed:
+			e.cleanupTrialArtifacts(p.wm, trialName)
+			e.logf(m.item.Number, "merge-train", "#%d fails combined Validate even in isolation — ejecting\n", m.item.Number)
+			e.ejectMember(ctx, p.owner, p.repo, m.item,
+				fmt.Sprintf("ejected from merge-train — #%d fails the combined Validate even when landed alone.", m.item.Number))
+		default: // TrainCIPending
+			e.cleanupTrialArtifacts(p.wm, trialName)
+			e.logf(m.item.Number, "merge-train", "combined Validate pending for singleton #%d — leaving in Queued\n", m.item.Number)
+		}
+	}
+}
+
+// landSingleton lands a single member from its own validated-green trial branch. It creates a
+// dedicated integration PR WITHOUT the shared batch marker — sequential singleton lands must
+// not collide on findIntegrationPR (which matches merged PRs via ListPRs state=all), which
+// would make a later singleton skip its own merge and advance without landing its code (a
+// data-loss bug; see the ADR-059 D4 landSingleton note). It merges the PR, advances the
+// member Queued→Done, closes the member's linked PR, and resets its ejection counter.
+func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState, p trialParams, m trainMember, trialName string) {
+	trialBranch := "fabrik/merge-train/" + trialName
+	defer e.cleanupTrialArtifacts(p.wm, trialName)
+
+	title := fmt.Sprintf("[merge-train] singleton: #%d", m.item.Number)
+	body := fmt.Sprintf("🏭 **Fabrik merge-train singleton landing PR**\n\n"+
+		"Lands #%d — %s — one-at-a-time after the batch could not be landed together.\n\n"+
+		"Do not merge manually; Fabrik manages the landing step.",
+		m.item.Number, m.item.Title)
+
+	prNum, err := e.client.CreatePR(p.owner, p.repo, title, trialBranch, p.baseBranch, body)
+	if err != nil {
+		e.logf(m.item.Number, "merge-train", "cannot create singleton landing PR for #%d: %v\n", m.item.Number, err)
 		return
 	}
-	state.mu.Lock()
-	state.prNum = prNum
-	state.assembling = false
-	state.mu.Unlock()
-	e.logf(0, "merge-train", "opened draft CI PR #%d for %s (%d survivors)\n", prNum, repoKey, len(survivors))
 
-	// Clean up local worktree — trial branch is now on origin.
-	if cleanErr := wm.CleanupTrainWorktree(trialName, false); cleanErr != nil {
-		e.logf(0, "merge-train", "warn: could not clean up trial worktree for %s: %v\n", repoKey, cleanErr)
+	if !e.pollForMergeable(ctx, p.owner, p.repo, prNum, []trainMember{m}) {
+		return // timeout / dirty — leave in Queued
+	}
+	if err := e.client.MergePR(p.owner, p.repo, prNum); err != nil {
+		e.logf(m.item.Number, "merge-train", "merge of singleton PR #%d failed: %v\n", prNum, err)
+		return
+	}
+	e.logf(m.item.Number, "merge-train", "merged singleton landing PR #%d for #%d\n", prNum, m.item.Number)
+
+	// Advance Queued → Done (unless already Done from a prior partial run).
+	if m.item.Status != "Done" {
+		board := &gh.ProjectBoard{ProjectID: state.projectID}
+		if e.statusField == nil {
+			e.logf(m.item.Number, "merge-train", "warn: statusField unavailable — cannot advance #%d to Done\n", m.item.Number)
+		} else if advErr := e.advanceToNextStage(board, m.item, p.holdingStg); advErr != nil {
+			e.logf(m.item.Number, "merge-train", "warn: could not advance #%d to Done: %v\n", m.item.Number, advErr)
+		} else {
+			e.logf(m.item.Number, "merge-train", "advanced #%d to Done\n", m.item.Number)
+		}
 	}
 
-	// Poll CI — this blocks inside the goroutine.
-	ciResult := e.pollTrainCI(ctx, owner, repo, prNum, trialSHA)
-	state.mu.Lock()
-	state.CIResult = ciResult
-	state.mu.Unlock()
+	// Close the member's linked PR with a landing comment.
+	if m.prNum != 0 {
+		landedComment := fmt.Sprintf("🏭 **Fabrik merge-train** — Landed one-at-a-time via singleton PR #%d.", prNum)
+		if _, commentErr := e.client.AddComment(p.owner, p.repo, m.prNum, landedComment); commentErr != nil {
+			e.logf(m.item.Number, "merge-train", "warn: could not post landed comment on PR #%d: %v\n", m.prNum, commentErr)
+		}
+		if closeErr := e.client.CloseIssue(p.owner, p.repo, m.prNum); closeErr != nil {
+			e.logf(m.item.Number, "merge-train", "warn: could not close member PR #%d: %v\n", m.prNum, closeErr)
+		}
+	}
 
-	switch ciResult {
-	case TrainCIGreen:
-		e.logf(0, "merge-train", "CI green for draft PR #%d (%s) — proceeding to landing\n", prNum, repoKey)
-		e.landMergeTrainBatch(ctx, state, owner, repo, baseBranch, survivors, wm)
-		// landMergeTrainBatch calls e.mergeTrainInFlight.Delete via its deferred cleanup.
-	case TrainCIRed:
-		e.logf(0, "merge-train", "CI red for draft PR #%d (%s) — batch needs attention\n", prNum, repoKey)
-		// Clear so the next poll cycle can dispatch a fresh train rather than
-		// logging "needs attention" forever with no way to restart.
-		e.mergeTrainInFlight.Delete(repoKey)
-	default:
-		e.logf(0, "merge-train", "CI timed out / pending for draft PR #%d (%s)\n", prNum, repoKey)
-		// Same: clear so a new worker can rebuild the trial branch on the next poll.
-		e.mergeTrainInFlight.Delete(repoKey)
+	e.resetEjectionCount(p.owner, p.repo, m.item.Number)
+}
+
+// cleanupTrialArtifacts removes a trial's local worktree and its local+remote branch (which
+// implicitly closes the trial's draft CI PR). It is a no-op under the test seam, where no real
+// git artifacts exist. Best-effort: failures are logged, not fatal.
+func (e *Engine) cleanupTrialArtifacts(wm *WorktreeManager, trialName string) {
+	if e.trainValidateFn != nil {
+		return
+	}
+	if err := wm.CleanupTrainWorktree(trialName, true); err != nil {
+		e.logf(0, "merge-train", "warn: could not clean up trial %s: %v\n", trialName, err)
 	}
 }
 
