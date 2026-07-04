@@ -1603,35 +1603,111 @@ doneDispatching:
 	}, nil
 }
 
-// handleMergeTrainBatch processes the current Queued batch for the merge train.
-// On first call with a new batch, dispatches a merge-train worker goroutine.
-// On subsequent calls, logs the current worker state without re-dispatching.
+// queuedRepoGroup is the Queued-column subset for a single owner/repo, preserving
+// the board entry order of its members. ADR-059 D6 routes each group to its landing
+// engine independently (isMergeQueueEnabled is a per-PR/per-repo signal).
+type queuedRepoGroup struct {
+	repoKey string // "owner/repo"
+	items   []gh.ProjectItem
+}
+
+// groupQueuedByRepo collects board items in the holding (Queued) column and groups
+// them by owner/repo, preserving first-seen repo order and per-repo entry order. This
+// replaces the former flat cross-repo batch (which anchored the whole set on batch[0]'s
+// repo and would shove repo B's items into repo A's trial branch — a latent multi-repo
+// bug that per-repo grouping also hardens; ADR-059 D-3).
+func groupQueuedByRepo(items []gh.ProjectItem, holdingStatus, defaultRepo string) []queuedRepoGroup {
+	var order []string
+	byRepo := make(map[string][]gh.ProjectItem)
+	for _, item := range items {
+		if item.Status != holdingStatus {
+			continue
+		}
+		key := itemOwnerRepoString(item, defaultRepo)
+		if _, seen := byRepo[key]; !seen {
+			order = append(order, key)
+		}
+		byRepo[key] = append(byRepo[key], item)
+	}
+	groups := make([]queuedRepoGroup, 0, len(order))
+	for _, key := range order {
+		groups = append(groups, queuedRepoGroup{repoKey: key, items: byRepo[key]})
+	}
+	return groups
+}
+
+// handleMergeTrainBatch is the ADR-059 D6 "one board column, two landing engines"
+// composition point: the single convergence owner (ADR-056 — no parallel scanner) that
+// picks the landing engine per repo for the current Queued batch. Each poll it groups
+// the Queued snapshot by owner/repo and routes each group by the poll-native
+// isMergeQueueEnabled signal (FR-1/FR-3 precedence):
+//
+//  1. Native merge queue present (MergeQueue != "off" && LinkedPRIsMergeQueueEnabled) →
+//     ADR-058 enqueue path (GitHub batches), regardless of merge_train. checkAutoMergeConvergence
+//     then drains each enqueued item Queued → Done. Queue always wins (a direct/train merge on a
+//     queue-required branch returns HTTP 405).
+//  2. Else (merge_train: on, which is the only way items reach Queued) → the ADR-059 internal
+//     merge train: one per-repo worker builds a trial branch, runs combined Validate, and lands
+//     members Queued → Done.
+//
+// Both engines drain the same Queued column and advance their members to Done on land; only
+// who batches differs.
 func (e *Engine) handleMergeTrainBatch(ctx context.Context, board *gh.ProjectBoard) {
 	hs := holdingStage(e.cfg)
 	if hs == nil {
 		return
 	}
-	var batch []gh.ProjectItem
-	for _, item := range board.Items {
-		if item.Status == hs.Name {
-			batch = append(batch, item)
-		}
+	for _, g := range groupQueuedByRepo(board.Items, hs.Name, e.defaultRepo()) {
+		e.routeQueuedGroup(ctx, g.repoKey, g.items, board.ProjectID)
 	}
-	if len(batch) == 0 {
+}
+
+// routeQueuedGroup applies the FR-1 per-repo engine selection to a single repo's Queued
+// subset: queue-enabled items take the ADR-058 enqueue path (per item), the remainder form
+// one internal-train batch (per repo) dispatched to a single worker. Runs in the poll
+// goroutine; the enqueue is a per-item GitHub mutation idempotent via fabrik:auto-merge-enabled.
+func (e *Engine) routeQueuedGroup(ctx context.Context, repoKey string, items []gh.ProjectItem, projectID string) {
+	var trainItems []gh.ProjectItem
+	for _, item := range items {
+		// Precedence rule 1 (FR-3): native merge queue present → ADR-058 enqueue path.
+		if e.cfg.MergeQueue != "off" && item.LinkedPRIsMergeQueueEnabled {
+			// Idempotency: an item already carrying the label is mid-convergence — the
+			// convergence monitor owns it. Don't re-enqueue.
+			if hasLabel(item, "fabrik:auto-merge-enabled") {
+				continue
+			}
+			// Signal source is poll-native (FR-1): the linked-PR number and head SHA come from
+			// the GraphQL-populated item fields, never a REST re-fetch. On a cache miss, skip
+			// this item this poll and retry next — enqueue needs the head SHA for the expected-OID guard.
+			if item.LinkedPRNumber == 0 || item.LinkedPRHeadSHA == "" {
+				e.logf(item.Number, "merge-train", "queue-enabled item missing poll-native linked-PR state (number=%d, headSHA=%q) — skipping enqueue this poll, will retry\n", item.LinkedPRNumber, item.LinkedPRHeadSHA)
+				continue
+			}
+			owner, repo := itemOwnerRepo(item, e.defaultRepo())
+			if _, err := e.enqueueForQueue(owner, repo, item, item.LinkedPRNumber, item.LinkedPRHeadSHA); err != nil {
+				e.logf(item.Number, "warn", "enqueue from Queued handler failed: %v — will retry next poll\n", err)
+			}
+			continue
+		}
+		// Precedence rule 2 (FR-3): else the internal merge train.
+		trainItems = append(trainItems, item)
+	}
+
+	if len(trainItems) == 0 {
 		return
 	}
-	// FR-4: cap the batch to the first N Queued items by entry order (ADR-059 D2).
-	// Log the truncation explicitly so operators can see it — never silent.
-	if maxBatch := e.effectiveMaxBatchSize(); len(batch) > maxBatch {
-		e.logf(0, "merge-train", "batch capped: %d Queued item(s) exceed max_batch_size=%d — landing first %d by entry order\n", len(batch), maxBatch, maxBatch)
-		batch = capBatch(batch, maxBatch)
+	// FR-4: cap the internal-train batch to the first N items by entry order (ADR-059 D2),
+	// applied PER repo group. Log the truncation explicitly so operators can see it — never silent.
+	if maxBatch := e.effectiveMaxBatchSize(); len(trainItems) > maxBatch {
+		e.logf(0, "merge-train", "batch capped for %s: %d Queued item(s) exceed max_batch_size=%d — landing first %d by entry order\n", repoKey, len(trainItems), maxBatch, maxBatch)
+		trainItems = capBatch(trainItems, maxBatch)
 	}
 	var parts []string
-	for _, item := range batch {
+	for _, item := range trainItems {
 		parts = append(parts, fmt.Sprintf("#%d %q", item.Number, item.Title))
 	}
-	e.logf(0, "merge-train", "batch snapshot: %d item(s) — %s\n", len(batch), strings.Join(parts, ", "))
-	e.dispatchMergeTrainWorker(ctx, batch, board.ProjectID)
+	e.logf(0, "merge-train", "batch snapshot for %s: %d item(s) — %s\n", repoKey, len(trainItems), strings.Join(parts, ", "))
+	e.dispatchMergeTrainWorker(ctx, trainItems, projectID)
 }
 
 func gitRevParse(dir, ref string) (string, error) {

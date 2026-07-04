@@ -3361,8 +3361,8 @@ func TestHandleMergeTrainBatch_LogsQueuedItems(t *testing.T) {
 		t.Fatal("expected at least one log event from handleMergeTrainBatch, got none")
 	}
 	msg := logged[0].Message
-	if !strings.Contains(msg, "batch snapshot: 2 item(s)") {
-		t.Errorf("expected 'batch snapshot: 2 item(s)' in log message, got: %q", msg)
+	if !strings.Contains(msg, "batch snapshot for owner/repo: 2 item(s)") {
+		t.Errorf("expected 'batch snapshot for owner/repo: 2 item(s)' in log message, got: %q", msg)
 	}
 	if !strings.Contains(msg, "#42") || !strings.Contains(msg, "#44") {
 		t.Errorf("expected both holding-stage issue numbers in log message, got: %q", msg)
@@ -3398,6 +3398,290 @@ func TestHandleMergeTrainBatch_SilentWhenEmpty(t *testing.T) {
 
 	if len(events) != 0 {
 		t.Errorf("expected no log events when holding stage column is empty, got %d", len(events))
+	}
+}
+
+// drainLogMessages collects all LogEvent messages currently buffered on the channel.
+func drainLogMessages(events chan tui.Event) []string {
+	var msgs []string
+	for len(events) > 0 {
+		if le, ok := (<-events).(tui.LogEvent); ok {
+			msgs = append(msgs, le.Message)
+		}
+	}
+	return msgs
+}
+
+func anyContains(msgs []string, sub string) bool {
+	for _, m := range msgs {
+		if strings.Contains(m, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// fillSem fills the engine semaphore to capacity so any merge-train worker goroutine
+// launched by dispatchMergeTrainWorker parks at its select (sem full, ctx live) instead
+// of running real git work — keeping routing tests hermetic while still proving that
+// the LoadOrStore registration (which happens synchronously, before the goroutine) fired.
+func fillSem(eng *Engine) {
+	for i := 0; i < cap(eng.sem); i++ {
+		eng.sem <- struct{}{}
+	}
+}
+
+// TestHandleMergeTrainBatch_QueueEnabledRepo_Enqueues is the ADR-059 D6 FR-1 routing
+// assertion for a queue-enabled repo: Queued items take the ADR-058 enqueue path, NOT the
+// internal train. EnqueuePullRequest is called with the poll-native linked-PR SHA,
+// fabrik:auto-merge-enabled is applied, and no train worker is registered.
+func TestHandleMergeTrainBatch_QueueEnabledRepo_Enqueues(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineWithStages(t, client, testStagesWithValidateAndHolding())
+	eng.cfg.MergeTrain = "on"
+
+	events := make(chan tui.Event, 20)
+	eng.events = events
+
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{Number: 42, Title: "a", Status: "BatchHold", Repo: "owner/repo",
+				LinkedPRIsMergeQueueEnabled: true, LinkedPRNumber: 142, LinkedPRHeadSHA: "sha42"},
+			{Number: 43, Title: "b", Status: "BatchHold", Repo: "owner/repo",
+				LinkedPRIsMergeQueueEnabled: true, LinkedPRNumber: 143, LinkedPRHeadSHA: "sha43"},
+		},
+	}
+
+	eng.handleMergeTrainBatch(context.Background(), board)
+
+	if len(client.enqueuePullRequestCalls) != 2 {
+		t.Fatalf("expected 2 EnqueuePullRequest calls (058 path), got %d", len(client.enqueuePullRequestCalls))
+	}
+	if client.enqueuePullRequestCalls[0].prNumber != 142 || client.enqueuePullRequestCalls[0].expectedHeadOID != "sha42" {
+		t.Errorf("enqueue #0 = PR %d @ %q, want 142 @ sha42", client.enqueuePullRequestCalls[0].prNumber, client.enqueuePullRequestCalls[0].expectedHeadOID)
+	}
+	// fabrik:auto-merge-enabled applied to both items (idempotency + convergence anchor).
+	var labelAdds int
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:auto-merge-enabled" {
+			labelAdds++
+		}
+	}
+	if labelAdds != 2 {
+		t.Errorf("expected 2 fabrik:auto-merge-enabled label adds, got %d", labelAdds)
+	}
+	// No internal train worker for a queue-enabled repo.
+	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+		t.Error("queue-enabled repo must NOT dispatch an internal train worker")
+	}
+	if msgs := drainLogMessages(events); anyContains(msgs, "batch snapshot") {
+		t.Errorf("queue-enabled repo must not log an internal-train batch snapshot; got %v", msgs)
+	}
+}
+
+// TestHandleMergeTrainBatch_NonQueueRepo_DispatchesTrain is the FR-1 routing assertion for
+// a non-queue repo: Queued items take the internal merge train, NOT the enqueue path. A train
+// worker is registered in mergeTrainInFlight and EnqueuePullRequest is never called.
+func TestHandleMergeTrainBatch_NonQueueRepo_DispatchesTrain(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineWithStages(t, client, testStagesWithValidateAndHolding())
+	eng.cfg.MergeTrain = "on"
+	fillSem(eng) // park the worker goroutine at the semaphore; no real git work.
+
+	events := make(chan tui.Event, 20)
+	eng.events = events
+
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{Number: 50, Title: "x", Status: "BatchHold", Repo: "owner/repo", LinkedPRIsMergeQueueEnabled: false},
+			{Number: 51, Title: "y", Status: "BatchHold", Repo: "owner/repo", LinkedPRIsMergeQueueEnabled: false},
+		},
+	}
+
+	eng.handleMergeTrainBatch(context.Background(), board)
+
+	// Train worker registered (LoadOrStore fires synchronously before the goroutine).
+	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); !ok {
+		t.Error("non-queue repo must dispatch an internal train worker (mergeTrainInFlight entry expected)")
+	}
+	if len(client.enqueuePullRequestCalls) != 0 {
+		t.Errorf("non-queue repo must NOT call EnqueuePullRequest, got %d", len(client.enqueuePullRequestCalls))
+	}
+	if msgs := drainLogMessages(events); !anyContains(msgs, "batch snapshot for owner/repo: 2 item(s)") {
+		t.Errorf("expected internal-train batch snapshot for the repo; got %v", msgs)
+	}
+}
+
+// TestHandleMergeTrainBatch_MixedRepoBatch_RoutesPerRepo is the FR-1 D-3 mixed-repo assertion:
+// a Queued column holding items from a queue-enabled repo A and a non-queue repo B routes each
+// repo's subset to the correct engine — A enqueues, B trains — and B's items never enter A's batch.
+func TestHandleMergeTrainBatch_MixedRepoBatch_RoutesPerRepo(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineWithStages(t, client, testStagesWithValidateAndHolding())
+	eng.cfg.MergeTrain = "on"
+	fillSem(eng)
+
+	events := make(chan tui.Event, 30)
+	eng.events = events
+
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			// Repo A: queue-enabled -> enqueue.
+			{Number: 60, Title: "a1", Status: "BatchHold", Repo: "owner/repo-a",
+				LinkedPRIsMergeQueueEnabled: true, LinkedPRNumber: 160, LinkedPRHeadSHA: "shaA"},
+			// Repo B: non-queue -> internal train.
+			{Number: 70, Title: "b1", Status: "BatchHold", Repo: "owner/repo-b", LinkedPRIsMergeQueueEnabled: false},
+			{Number: 71, Title: "b2", Status: "BatchHold", Repo: "owner/repo-b", LinkedPRIsMergeQueueEnabled: false},
+		},
+	}
+
+	eng.handleMergeTrainBatch(context.Background(), board)
+
+	// Repo A: exactly one enqueue (its single item), no train worker.
+	if len(client.enqueuePullRequestCalls) != 1 || client.enqueuePullRequestCalls[0].prNumber != 160 {
+		t.Fatalf("expected exactly one enqueue for repo A PR #160, got %+v", client.enqueuePullRequestCalls)
+	}
+	if _, ok := eng.mergeTrainInFlight.Load("owner/repo-a"); ok {
+		t.Error("queue-enabled repo A must NOT dispatch an internal train worker")
+	}
+	// Repo B: train worker registered, and its snapshot mentions only B's items (#70,#71) — never A's #60.
+	if _, ok := eng.mergeTrainInFlight.Load("owner/repo-b"); !ok {
+		t.Error("non-queue repo B must dispatch an internal train worker")
+	}
+	msgs := drainLogMessages(events)
+	if !anyContains(msgs, "batch snapshot for owner/repo-b: 2 item(s)") {
+		t.Errorf("expected repo B train snapshot with 2 items; got %v", msgs)
+	}
+	for _, m := range msgs {
+		if strings.Contains(m, "batch snapshot") && strings.Contains(m, "#60") {
+			t.Errorf("repo A's item #60 must never appear in an internal-train batch snapshot; got %q", m)
+		}
+	}
+}
+
+// TestHandleMergeTrainBatch_Idempotency_SkipsAlreadyEnqueued verifies the FR-1 idempotency
+// guard: a queue-enabled Queued item already carrying fabrik:auto-merge-enabled is mid-
+// convergence and must not be re-enqueued.
+func TestHandleMergeTrainBatch_Idempotency_SkipsAlreadyEnqueued(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineWithStages(t, client, testStagesWithValidateAndHolding())
+	eng.cfg.MergeTrain = "on"
+
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{Number: 80, Title: "already", Status: "BatchHold", Repo: "owner/repo",
+				LinkedPRIsMergeQueueEnabled: true, LinkedPRNumber: 180, LinkedPRHeadSHA: "sha80",
+				Labels: []string{"fabrik:auto-merge-enabled"}},
+		},
+	}
+
+	eng.handleMergeTrainBatch(context.Background(), board)
+
+	if len(client.enqueuePullRequestCalls) != 0 {
+		t.Errorf("item already carrying fabrik:auto-merge-enabled must not be re-enqueued, got %d enqueue call(s)", len(client.enqueuePullRequestCalls))
+	}
+}
+
+// TestHandleMergeTrainBatch_QueueEnabled_CacheMissSkips verifies the FR-1 poll-native
+// cache-miss guard: a queue-enabled item missing its linked-PR number/head SHA is skipped
+// this poll (no enqueue, no REST fetch) and retried next.
+func TestHandleMergeTrainBatch_QueueEnabled_CacheMissSkips(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineWithStages(t, client, testStagesWithValidateAndHolding())
+	eng.cfg.MergeTrain = "on"
+
+	events := make(chan tui.Event, 10)
+	eng.events = events
+
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{Number: 90, Title: "no-sha", Status: "BatchHold", Repo: "owner/repo",
+				LinkedPRIsMergeQueueEnabled: true, LinkedPRNumber: 190, LinkedPRHeadSHA: ""},
+		},
+	}
+
+	eng.handleMergeTrainBatch(context.Background(), board)
+
+	if len(client.enqueuePullRequestCalls) != 0 {
+		t.Errorf("cache-miss item (empty head SHA) must not be enqueued, got %d", len(client.enqueuePullRequestCalls))
+	}
+	if msgs := drainLogMessages(events); !anyContains(msgs, "missing poll-native linked-PR state") {
+		t.Errorf("expected cache-miss skip log; got %v", msgs)
+	}
+}
+
+// TestHandleMergeTrainBatch_PerGroupMaxBatchSize verifies FR-4 as realized in D6: max_batch_size
+// caps each repo's internal-train subset INDEPENDENTLY, not the flat cross-repo batch.
+func TestHandleMergeTrainBatch_PerGroupMaxBatchSize(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineWithStages(t, client, testStagesWithValidateAndHolding())
+	eng.cfg.MergeTrain = "on"
+	eng.cfg.MaxBatchSize = 2
+	fillSem(eng)
+
+	events := make(chan tui.Event, 40)
+	eng.events = events
+
+	// Repo A: 3 non-queue items (exceeds cap 2). Repo B: 1 non-queue item (under cap).
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{Number: 1, Title: "a1", Status: "BatchHold", Repo: "owner/repo-a"},
+			{Number: 2, Title: "a2", Status: "BatchHold", Repo: "owner/repo-a"},
+			{Number: 3, Title: "a3", Status: "BatchHold", Repo: "owner/repo-a"},
+			{Number: 4, Title: "b1", Status: "BatchHold", Repo: "owner/repo-b"},
+		},
+	}
+
+	eng.handleMergeTrainBatch(context.Background(), board)
+
+	msgs := drainLogMessages(events)
+	// Repo A capped to 2 (its own group), logged explicitly (never silent).
+	if !anyContains(msgs, "batch capped for owner/repo-a") {
+		t.Errorf("expected per-group cap log for repo A; got %v", msgs)
+	}
+	if !anyContains(msgs, "batch snapshot for owner/repo-a: 2 item(s)") {
+		t.Errorf("expected repo A snapshot of 2 items after cap; got %v", msgs)
+	}
+	// Repo B (1 item) is under the cap — no cap log, snapshot of 1.
+	if anyContains(msgs, "batch capped for owner/repo-b") {
+		t.Errorf("repo B (1 item) must not be capped; got %v", msgs)
+	}
+	if !anyContains(msgs, "batch snapshot for owner/repo-b: 1 item(s)") {
+		t.Errorf("expected repo B snapshot of 1 item; got %v", msgs)
+	}
+}
+
+// TestGroupQueuedByRepo verifies the D-3 grouping helper: only holding-stage items are
+// collected, grouped by owner/repo, preserving first-seen repo order and per-repo entry order.
+func TestGroupQueuedByRepo(t *testing.T) {
+	items := []gh.ProjectItem{
+		{Number: 1, Status: "BatchHold", Repo: "owner/repo-b"},
+		{Number: 2, Status: "Implement", Repo: "owner/repo-a"}, // not holding — excluded
+		{Number: 3, Status: "BatchHold", Repo: "owner/repo-a"},
+		{Number: 4, Status: "BatchHold", Repo: "owner/repo-b"},
+		{Number: 5, Status: "BatchHold", Repo: ""}, // defaults to owner/repo
+	}
+	groups := groupQueuedByRepo(items, "BatchHold", "owner/repo")
+
+	if len(groups) != 3 {
+		t.Fatalf("expected 3 repo groups, got %d: %+v", len(groups), groups)
+	}
+	// First-seen order: repo-b, repo-a, then the default repo.
+	if groups[0].repoKey != "owner/repo-b" || groups[1].repoKey != "owner/repo-a" || groups[2].repoKey != "owner/repo" {
+		t.Errorf("unexpected group order: %q, %q, %q", groups[0].repoKey, groups[1].repoKey, groups[2].repoKey)
+	}
+	// repo-b keeps entry order #1 then #4; the non-holding #2 is excluded.
+	if len(groups[0].items) != 2 || groups[0].items[0].Number != 1 || groups[0].items[1].Number != 4 {
+		t.Errorf("repo-b group wrong: %+v", groups[0].items)
+	}
+	if len(groups[1].items) != 1 || groups[1].items[0].Number != 3 {
+		t.Errorf("repo-a group wrong: %+v", groups[1].items)
 	}
 }
 

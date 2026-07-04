@@ -906,6 +906,43 @@ The stall comment is posted once per event — subsequent polls skip the paused 
 
 **Re-enqueue cap:** To prevent a queue-thrash loop (enqueue → eject → re-enqueue → eject), each re-enqueue attempt is counted. When the count reaches `MaxEnqueueCycles` (default 5; `--max-enqueue-cycles` / `FABRIK_MAX_ENQUEUE_CYCLES`), Fabrik pauses the issue for human intervention.
 
+### Merge Train / Queued
+
+GitHub's native merge queue (above) is only available on GitHub Enterprise Cloud and org-owned public repos. On the common target — private **GitHub Team** repos and personal-account repos with `strict` branch protection — the native queue **cannot run**, yet these are exactly the repos that suffer the O(N²) rebase-and-retest cascade when several ready PRs land serially: each merge invalidates every other ready PR's "up-to-date + green" status, forcing a rebase and a full required-check re-run before the next merge.
+
+Fabrik's **internal merge train** (ADR-059) is the plan-agnostic, host-agnostic answer. It batches ready PRs, validates the combined batch **once**, and lands them together — collapsing the cascade. It is opt-in via `--merge-train on` (or `FABRIK_MERGE_TRAIN=on`).
+
+**One board column, two landing engines.** When `merge_train: on`, every yolo Validate completion advances into a single **`Queued`** board column instead of merging immediately. Each poll, the `Queued` handler picks the landing engine **per repo** (a `Queued` column can hold items from several repos at once), so you see one board model, not two parallel merge paths:
+
+| Repo has a native merge queue? | Landing engine |
+|---|---|
+| **Yes** (`isMergeQueueEnabled`) | GitHub's **native merge queue** (ADR-058) — Fabrik enqueues each PR; GitHub does the speculative-parallel batching. |
+| **No** | Fabrik's **internal merge train** (ADR-059) — one trial branch per repo, a single combined Validate, then a batched land. |
+
+Both engines drain the same `Queued` column and advance their members to **Done** on land; only *who batches* differs. This means **queue-enabled repos still use GitHub's native queue even under `merge_train: on`** — the train never overrides an available native queue (a direct/train merge on a queue-required branch returns HTTP 405).
+
+**Precedence** (per repo, highest first):
+1. **Native merge queue present** → GitHub's queue (ADR-058), regardless of `merge_train`.
+2. **Else `merge_train: on`** → the internal train (ADR-059).
+3. **Else** → legacy per-PR serial auto-merge (the pre-merge-train default).
+
+**Operator setup — add the `Queued` column.** The train stages ready PRs on a board column whose name matches a stage with `holding_stage: true` (named `Queued` in the default stages). Before enabling the train you must:
+
+1. **Add a `Queued` column** to your GitHub Project board (a new single-select "Status" option). Its name must exactly match the holding stage's `name`.
+2. **Add the holding stage** to your `.fabrik/stages/` config if it is not already present (`fabrik refresh-stages` surfaces it as a missing default). A minimal holding stage:
+   ```yaml
+   name: Queued
+   order: 6            # after Validate, before Done
+   holding_stage: true
+   ```
+3. **Enable the train**: `--merge-train on` (or `FABRIK_MERGE_TRAIN=on`).
+
+> **Startup requirement.** When `merge_train: on`, the `Queued` board column is **mandatory** — Fabrik fails startup if it is missing (the same board-validation that guards every non-cleanup stage). This is why the train is **off by default**: flipping it on globally would break startup on every board that has not yet added the column. Enable it per deployment only after step 1.
+
+**Batch tuning.** `--max-batch-size` (default 5) caps how many `Queued` items land in one batch, **per repo**. A red batch (a genuine cross-PR conflict — rare, since every member already passed Validate alone) is isolated by halving bisection, bounded by `--max-bisect-validations`; the poisoner is ejected and the survivors re-form. If the base branch moves under an in-flight batch (an external push), the trial is rebased and re-validated up to `--max-train-rebase-cycles` times before the batch dissolves back to `Queued`. See the flag reference above for all knobs.
+
+**Scope note.** In v1 the train batches **yolo** `Queued` items only. `fabrik:cruise` and manual-merge items return early at Validate (before the train gate) and never enter the train — batching human-merge items behind an explicit "go" is a planned fast-follow.
+
 ### Draft PR Workflow
 
 The Implement stage creates a **draft PR** linked to the issue when `create_draft_pr: true` is set (the default for Implement). This gives you a place to review incrementally. The Review stage then rebases, reviews, fixes, and pushes — turning the draft into a review-ready PR.

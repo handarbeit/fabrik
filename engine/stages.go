@@ -281,21 +281,7 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 	// kill-switch), an operator's explicit choice. No separate guard is required at the
 	// MergePR site; this early-return is the audit evidence.
 	if e.cfg.MergeQueue != "off" && pr.IsMergeQueueEnabled {
-		if err := e.client.EnqueuePullRequest(owner, repo, pr.Number, pr.HeadSHA); err != nil {
-			return false, fmt.Errorf("enqueue PR #%d: %w", pr.Number, err)
-		}
-		if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); lerr != nil {
-			e.logf(item.Number, "warn", "could not add fabrik:auto-merge-enabled label: %v\n", lerr)
-		} else {
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:auto-merge-enabled")
-			}
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:auto-merge-enabled")
-			}
-		}
-		e.logf(item.Number, "info", "PR #%d enqueued into merge queue — awaiting GitHub merge\n", pr.Number)
-		return true, nil
+		return e.enqueueForQueue(owner, repo, item, pr.Number, pr.HeadSHA)
 	}
 
 	strategy := e.cfg.AutoMergeStrategy
@@ -344,6 +330,46 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 	}
 
 	e.logf(item.Number, "info", "GitHub auto-merge enabled on PR #%d (%s) — awaiting GitHub atomic merge\n", pr.Number, strategy)
+	return true, nil
+}
+
+// enqueueForQueue enqueues a linked PR into the repository's native merge queue
+// (ADR-058) and applies the fabrik:auto-merge-enabled label as both idempotency
+// guard and the convergence anchor read by checkAutoMergeConvergence. It performs
+// the boardcache write-through and webhook echo so the label is visible without a
+// GitHub round-trip. Returns (true, nil) on successful enqueue, (false, err) if the
+// enqueue mutation fails (a label-add failure is non-fatal: logged and swallowed).
+//
+// This is the ADR-058 enqueue path, extracted from attemptMergeOnValidate so it can
+// be invoked from two convergence-owner call sites (ADR-059 D6 "invoke, don't
+// relocate"): (1) attemptMergeOnValidate on the merge_train: off precedence path,
+// and (2) handleMergeTrainBatch's per-repo engine selection for queue-enabled repos
+// when merge_train: on. Both callers apply the MergeQueue != "off" && merge-queue-
+// enabled guard before calling; the guard is deliberately kept at the call sites (it
+// doubles as the HTTP-405 direct-merge audit evidence noted in attemptMergeOnValidate).
+//
+// The head SHA is passed by the caller from poll-native state (pr.HeadSHA or the
+// GraphQL-populated item.LinkedPRHeadSHA) — never from a REST re-fetch of the queue
+// flag, per ADR-058/ADR-059 FR-1.
+func (e *Engine) enqueueForQueue(owner, repo string, item gh.ProjectItem, prNumber int, headSHA string) (bool, error) {
+	if err := e.client.EnqueuePullRequest(owner, repo, prNumber, headSHA); err != nil {
+		return false, fmt.Errorf("enqueue PR #%d: %w", prNumber, err)
+	}
+	if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); lerr != nil {
+		e.logf(item.Number, "warn", "could not add fabrik:auto-merge-enabled label: %v\n", lerr)
+	} else {
+		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+			// Use the resolved owner/repo (not item.Repo, which may be empty when it
+			// defaults to the default repo) so the cache key matches the stored entry
+			// and the write-through actually lands on the right item — consistent with
+			// the webhook-echo key below.
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:auto-merge-enabled")
+		}
+		if e.webhookMgr != nil {
+			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:auto-merge-enabled")
+		}
+	}
+	e.logf(item.Number, "info", "PR #%d enqueued into merge queue — awaiting GitHub merge\n", prNumber)
 	return true, nil
 }
 
