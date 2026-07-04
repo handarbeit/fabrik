@@ -278,12 +278,16 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 
-	// Merge-train warning: this item carries fabrik:auto-merge-enabled but merge_train: on
-	// is now active. The item entered auto-merge convergence before merge_train was enabled.
-	// Let convergence complete rather than interrupting mid-flight PR state. New items will
-	// route through advanceToQueued instead (ADR-059 D6 resolves this interaction properly).
+	// ADR-059 D6: under merge_train: on, fabrik:auto-merge-enabled is the expected anchor
+	// for queue-enabled repos. handleMergeTrainBatch routes each Queued item to its landing
+	// engine per repo: queue-enabled repos take the ADR-058 enqueue path (which applies this
+	// label), and this convergence monitor then drains them Queued → Done. Non-queue repos go
+	// to the internal train and never reach this path. So an item here under merge_train: on is
+	// the intended 058-from-Queued convergence (or a pre-merge_train straggler); either way, let
+	// convergence complete rather than interrupting mid-flight PR state. This is a debug trace,
+	// not a warning — the interaction is now resolved by design.
 	if e.cfg.MergeTrain == "on" {
-		e.logf(item.Number, "warn", "merge_train: on but item is in auto-merge convergence path (fabrik:auto-merge-enabled present from before merge_train was enabled); letting convergence complete\n")
+		e.logf(item.Number, "auto-merge", "merge_train: on — item in auto-merge convergence (ADR-058 enqueue path from Queued handler); letting convergence complete\n")
 	}
 
 	// Use e.client (direct GitHub API) rather than e.readClient (boardcache) so

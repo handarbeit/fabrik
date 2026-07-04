@@ -3361,8 +3361,8 @@ func TestHandleMergeTrainBatch_LogsQueuedItems(t *testing.T) {
 		t.Fatal("expected at least one log event from handleMergeTrainBatch, got none")
 	}
 	msg := logged[0].Message
-	if !strings.Contains(msg, "batch snapshot: 2 item(s)") {
-		t.Errorf("expected 'batch snapshot: 2 item(s)' in log message, got: %q", msg)
+	if !strings.Contains(msg, "batch snapshot for owner/repo: 2 item(s)") {
+		t.Errorf("expected 'batch snapshot for owner/repo: 2 item(s)' in log message, got: %q", msg)
 	}
 	if !strings.Contains(msg, "#42") || !strings.Contains(msg, "#44") {
 		t.Errorf("expected both holding-stage issue numbers in log message, got: %q", msg)
