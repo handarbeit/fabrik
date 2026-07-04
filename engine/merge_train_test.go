@@ -2120,6 +2120,136 @@ func TestReconstructTrainState_OrphanOpenPRNoBranch_Dissolves(t *testing.T) {
 	}
 }
 
+// TestReconstructTrainState_HistoricalMergedPR_ProceedsFresh is a regression test for
+// the "train stalls after the first landing" bug: ListPRs returns state=all, so a
+// merged integration PR from a *prior* completed batch is still surfaced. Its members
+// (#1, #2) already advanced to Done and are no longer in today's Queued snapshot
+// (#10, #11). Reconstruction must recognise it as irrelevant and return false (proceed
+// fresh) — NOT route to complete-deferred, find no still-Queued members, and abort
+// today's batch. (FR-1/FR-4.)
+func TestReconstructTrainState_HistoricalMergedPR_ProceedsFresh(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	historicalPR := gh.PRDetails{
+		Number:      400,
+		State:       "closed",
+		Merged:      true,
+		HeadRefName: "fabrik/merge-train/merge-train-main-1",
+		Body:        "batch: #1, #2\n" + mergeTrainBatchMarker, // yesterday's members
+	}
+	eng, client, rv := seamTrainEngine(t, wm, func(map[int]bool) bool { return false })
+	client.listPRsFn = func(owner, repo string) ([]gh.PRDetails, error) { return []gh.PRDetails{historicalPR}, nil }
+
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	// Today's fresh Queued batch — disjoint from the historical PR's members.
+	batch := []gh.ProjectItem{makeTrainItem(10, "Ten"), makeTrainItem(11, "Eleven")}
+	batch[0].ItemID, batch[1].ItemID = "item-10", "item-11"
+
+	if eng.reconstructTrainState(context.Background(), state, reconstructParams(wm), batch) {
+		t.Fatal("historical merged PR (no still-Queued members) must not be handled — reconstruct should return false (fresh)")
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if rv.count() != 0 {
+		t.Errorf("historical PR must not trigger any (re)validation, got %d", rv.count())
+	}
+	if len(client.mergePRCalls) != 0 {
+		t.Errorf("historical PR must not be (re)merged, got %d merge(s)", len(client.mergePRCalls))
+	}
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("historical PR must not advance any member, got %d status update(s)", len(client.updateStatusCalls))
+	}
+}
+
+// TestReconstructTrainState_StaleOpenPR_ClosedAndProceedsFresh verifies that a stale
+// *open* train PR with no members still in today's Queued snapshot is closed (so it
+// can't later hijack findIntegrationPR) and reconstruction proceeds fresh (returns
+// false) rather than resuming or dissolving with unrelated members. (FR-1/FR-4.)
+func TestReconstructTrainState_StaleOpenPR_ClosedAndProceedsFresh(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	staleOpenPR := gh.PRDetails{
+		Number:      500,
+		State:       "open",
+		Merged:      false,
+		HeadRefName: "fabrik/merge-train/merge-train-main-1",
+		Body:        "batch: #1, #2\n" + mergeTrainBatchMarker,
+	}
+	eng, client, rv := seamTrainEngine(t, wm, func(map[int]bool) bool { return false })
+	client.listPRsFn = func(owner, repo string) ([]gh.PRDetails, error) { return []gh.PRDetails{staleOpenPR}, nil }
+
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	batch := []gh.ProjectItem{makeTrainItem(10, "Ten"), makeTrainItem(11, "Eleven")}
+	batch[0].ItemID, batch[1].ItemID = "item-10", "item-11"
+
+	if eng.reconstructTrainState(context.Background(), state, reconstructParams(wm), batch) {
+		t.Fatal("stale open PR (no still-Queued members) must not be handled — reconstruct should return false (fresh)")
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.closeIssueCalls) != 1 || client.closeIssueCalls[0].issueNumber != 500 {
+		t.Errorf("stale open PR #500 should be closed, got %v", client.closeIssueCalls)
+	}
+	if len(client.mergePRCalls) != 0 || rv.count() != 0 || len(client.updateStatusCalls) != 0 {
+		t.Errorf("stale open PR must not resume/land: merges=%d validations=%d advances=%d", len(client.mergePRCalls), rv.count(), len(client.updateStatusCalls))
+	}
+	dissolveComments := 0
+	for _, c := range client.addCommentCalls {
+		if strings.Contains(c.body, "batch dissolved") {
+			dissolveComments++
+		}
+	}
+	if dissolveComments != 0 {
+		t.Errorf("stale open PR must not post dissolve comments on unrelated members, got %d", dissolveComments)
+	}
+}
+
+// TestReconstructTrainState_OrphanedBranchNoPR_ProceedsFresh is a regression test: an
+// orphaned fabrik/merge-train/* branch on origin (a crash remnant) with no relevant
+// train PR must be cleaned up SILENTLY and reconstruction must proceed fresh (return
+// false) — NOT dissolve with today's members (which would post "batch dissolved"
+// comments on unrelated fresh Queued issues) and abort today's batch. Runs with real
+// git (no seam) so the ls-remote probe executes. (FR-4/FR-5.)
+func TestReconstructTrainState_OrphanedBranchNoPR_ProceedsFresh(t *testing.T) {
+	skipIfNoGit(t)
+	_, srcDir, _, wm := setupTrainRepo(t)
+	// Orphaned trial branch on origin, no integration PR.
+	mustGit(t, srcDir, "branch", "fabrik/merge-train/merge-train-main-9")
+
+	client := &mockGitHubClient{
+		listPRsFn:    func(owner, repo string) ([]gh.PRDetails, error) { return nil, nil }, // no train PR
+		addCommentFn: func(owner, repo string, n int, body string) (int, error) { return 1, nil },
+		closeIssueFn: func(owner, repo string, n int) error { return nil },
+	}
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm) // no trainValidateFn → ls-remote runs
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	batch := []gh.ProjectItem{makeTrainItem(10, "Ten"), makeTrainItem(11, "Eleven")}
+
+	if eng.reconstructTrainState(context.Background(), state, reconstructParams(wm), batch) {
+		t.Fatal("orphaned branch with no relevant PR must not be handled — reconstruct should return false (fresh)")
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	dissolveComments := 0
+	for _, c := range client.addCommentCalls {
+		if strings.Contains(c.body, "batch dissolved") {
+			dissolveComments++
+		}
+	}
+	if dissolveComments != 0 {
+		t.Errorf("orphaned-branch cleanup must be silent (no dissolve comments on fresh members), got %d", dissolveComments)
+	}
+	if len(client.updateStatusCalls) != 0 {
+		t.Errorf("orphaned-branch cleanup must not touch member status, got %d update(s)", len(client.updateStatusCalls))
+	}
+}
+
 // TestDispatchMergeTrainWorker_DifferentReposConcurrent verifies FR-3: the per-repo
 // serialization guard keyed on owner/repo does NOT cross-block distinct repos — two
 // repos' trains run at the same time under the shared MaxConcurrent semaphore. The

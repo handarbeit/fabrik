@@ -1238,18 +1238,20 @@ func (e *Engine) landGreenBatch(ctx context.Context, state *mergeTrainWorkerStat
 
 // reconstructTrainState makes the per-repo in-flight guard durable and restart-safe
 // (ADR-059 D5, FR-1/FR-4). Running inside the already-guarded worker goroutine
-// (after LoadOrStore, before base pinning), it probes durable artifacts — open or
-// merged merge-train PRs (via ListPRs) and fabrik/merge-train/* origin branches
-// (via ls-remote) — and routes to one of four outcomes, returning true when it has
-// fully handled the batch (each terminal route clears the in-flight marker):
+// (after LoadOrStore, before base pinning), it probes durable artifacts — merge-train
+// PRs (via ListPRs) and fabrik/merge-train/* origin branches (via ls-remote) — and
+// routes based on the train PR whose members are still in the current Queued snapshot
+// (historical PRs from prior completed batches are skipped so they cannot abort or
+// corrupt today's fresh batch). It returns true only when it has fully handled an
+// in-flight batch (each such terminal route clears the in-flight marker):
 //
 //   - merged landing PR (batch marker) with members still Queued → complete the
 //     deferred member lifecycle (idempotent landMergeTrainBatch advancement);
 //   - open train PR backed by an origin branch → resume (poll CI, then land with
 //     main-moved recovery);
-//   - open PR without a backing branch, or an orphaned trial branch without a PR →
-//     dissolve cleanly (FR-5);
-//   - nothing durable → return false (the caller proceeds to form a fresh train).
+//   - open PR (with still-Queued members) without a backing branch → dissolve (FR-5);
+//   - nothing relevant, or only orphaned remnants → clean any orphaned trial branches
+//     silently and return false so the caller forms a fresh train this poll.
 //
 // It reads only durable state (never the in-flight map) and never launches a
 // goroutine, so it survives a restart with an empty map without a duplicate worker.
@@ -1261,11 +1263,33 @@ func (e *Engine) reconstructTrainState(ctx context.Context, state *mergeTrainWor
 		e.logf(0, "merge-train", "reconstruct: ListPRs failed for %s: %v — proceeding fresh\n", repoKey, err)
 		return false
 	}
+
+	// Select the first train PR *relevant to the current Queued members*. ListPRs
+	// returns state=all, so it also surfaces merged/closed integration PRs from prior
+	// completed batches; those still carry the batch marker but have no members left
+	// in today's Queued snapshot (members only leave Queued on a successful land).
+	// Reconstructing from such a historical PR would wrongly abort today's fresh batch
+	// (complete-deferred finds no still-Queued members and exits early), permanently
+	// stalling the train after the first landing — so skip it. A stale *open* train PR
+	// (no still-Queued members) is closed and its branch cleaned so it cannot later
+	// hijack findIntegrationPR during a fresh batch's landing.
 	var trainPR *gh.PRDetails
 	for i := range prs {
-		if isTrainPR(prs[i]) {
+		if !isTrainPR(prs[i]) {
+			continue
+		}
+		if len(filterBatchByNumbers(batch, parseTrainMembers(prs[i].Body))) > 0 {
 			trainPR = &prs[i]
 			break
+		}
+		if prs[i].State == "open" {
+			e.logf(0, "merge-train", "reconstruct: closing stale open train PR #%d (no members still Queued) for %s\n", prs[i].Number, repoKey)
+			if cerr := e.client.CloseIssue(p.owner, p.repo, prs[i].Number); cerr != nil {
+				e.logf(0, "merge-train", "warn: could not close stale train PR #%d: %v\n", prs[i].Number, cerr)
+			}
+			if tn := trialNameFromBranch(prs[i].HeadRefName); tn != "" {
+				e.cleanupTrialArtifacts(p.wm, tn)
+			}
 		}
 	}
 
@@ -1280,19 +1304,14 @@ func (e *Engine) reconstructTrainState(ctx context.Context, state *mergeTrainWor
 		}
 	}
 
-	// Nothing durable — fresh train.
-	if trainPR == nil && len(originBranches) == 0 {
-		return false
-	}
-
-	// Route 1: a merged landing PR (batch marker) → complete the deferred landing.
-	// Checked first so already-landed work is never misclassified as an orphan.
+	// Route 1: a merged landing PR (batch marker) with still-Queued members → complete
+	// the deferred landing (already-landed work is never dropped; checked first).
 	if trainPR != nil && trainPR.Merged && strings.Contains(trainPR.Body, mergeTrainBatchMarker) {
 		e.completeDeferredLanding(ctx, state, p, *trainPR, batch)
 		return true
 	}
 
-	// Route 2: an open train PR.
+	// Route 2: an open train PR with still-Queued members.
 	if trainPR != nil && trainPR.State == "open" {
 		trialName := trialNameFromBranch(trainPR.HeadRefName)
 		branchPresent := e.trainValidateFn != nil || // seam: treat as present
@@ -1301,24 +1320,26 @@ func (e *Engine) reconstructTrainState(ctx context.Context, state *mergeTrainWor
 			e.resumeTrain(ctx, state, p, *trainPR, trialName, batch)
 			return true
 		}
-		// Open PR without a backing trial branch → orphan → dissolve.
-		e.dissolveBatch(ctx, state, p, trainPR.Number, trialName, batch,
+		// Open PR without a backing trial branch → orphan → dissolve. Comment only on
+		// this PR's own members (never on unrelated fresh Queued items).
+		members := filterBatchByNumbers(batch, parseTrainMembers(trainPR.Body))
+		e.dissolveBatch(ctx, state, p, trainPR.Number, trialName, members,
 			"reconstruct: found an open integration PR without a backing trial branch after a restart")
 		return true
 	}
 
-	// Route 3: origin trial branch(es) but no open/merged marker PR (or a closed,
-	// non-merged train PR) → orphaned remnant → dissolve each.
+	// Route 3: orphaned trial branch(es) on origin but no relevant train PR — a crash
+	// remnant. Clean them up SILENTLY and proceed fresh: dissolving with today's members
+	// would post confusing "batch dissolved" comments on unrelated fresh Queued items,
+	// and returning true would abort today's batch. Returning false lets the current
+	// batch form on this poll (a fresh trial gets a new, unique branch name — no clash).
 	for _, b := range originBranches {
-		// b is a full head ref (e.g. "fabrik/merge-train/…") from ListTrainBranchesOnOrigin.
-		e.dissolveBatch(ctx, state, p, 0, trialNameFromBranch(b), batch,
-			"reconstruct: found an orphaned merge-train trial branch without an integration PR after a restart")
+		if tn := trialNameFromBranch(b); tn != "" {
+			e.logf(0, "merge-train", "reconstruct: cleaning up orphaned trial branch %s for %s\n", tn, repoKey)
+			e.cleanupTrialArtifacts(p.wm, tn)
+		}
 	}
-	// A closed non-merged train PR with no branch: nothing to clean up, just clear.
-	if len(originBranches) == 0 {
-		e.mergeTrainInFlight.Delete(repoKey)
-	}
-	return true
+	return false
 }
 
 // completeDeferredLanding finishes a landing that merged before a crash but whose
@@ -1361,7 +1382,7 @@ func (e *Engine) resumeTrain(ctx context.Context, state *mergeTrainWorkerState, 
 	repoKey := p.owner + "/" + p.repo
 	items := filterBatchByNumbers(batch, parseTrainMembers(pr.Body))
 	if len(items) == 0 {
-		e.dissolveBatch(ctx, state, p, pr.Number, trialName, batch,
+		e.dissolveBatch(ctx, state, p, pr.Number, trialName, items,
 			"reconstruct: an open train PR had no members still in Queued after a restart")
 		return
 	}
