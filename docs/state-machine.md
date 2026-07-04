@@ -130,7 +130,7 @@ Each active stage column has the same set of reachable sub-states:
 
 #### Queued (Holding Stage — `merge_train: on` only)
 
-> This stage is a no-op for per-item dispatch. It exists solely as a batching rendezvous point for the merge train.
+> This stage is a no-op for per-item dispatch. It is the **universal landing rendezvous**: every yolo Validate completion advances here under `merge_train: on`, and the `Queued` handler then picks the landing engine per repo (ADR-059 D6 — see [Engine Selection](#engine-selection-058-native-queue-vs-059-internal-train-adr-059-d6) below).
 
 | Sub-State | Labels Present | Description |
 |-----------|---------------|-------------|
@@ -139,6 +139,23 @@ Each active stage column has the same set of reachable sub-states:
 | **Done** | *(none — advanced by `advanceToNextStage`)* | Integration PR merged; member advanced to Done column via `advanceToNextStage`; member PR closed with batch reference comment. |
 
 `itemMayNeedWork` and `itemNeedsWork` both return `false` for any stage with `holding_stage: true`, so these items are never dispatched to a per-item worker. `processItem` also short-circuits on `stage.HoldingStage` as a defense-in-depth guard. The catch-up loop skips holding stages for the same reason.
+
+##### Engine Selection: 058 Native Queue vs 059 Internal Train (ADR-059 D6)
+
+`Queued` is **one board column served by two landing engines**. The single convergence owner `handleMergeTrainBatch` (ADR-056 — there is **no** parallel scanner) picks the engine **per repo** each poll, because `isMergeQueueEnabled` is a per-PR/per-repo signal and the `Queued` column may hold items from several repos at once.
+
+**Selection algorithm.** `handleMergeTrainBatch` groups the current Queued snapshot by `owner/repo` (`groupQueuedByRepo`, preserving first-seen repo order and per-repo entry order), then `routeQueuedGroup` routes each group by the **poll-native** `LinkedPRIsMergeQueueEnabled` signal (populated by the GraphQL board query — never a REST `pulls` fetch, which always reports `false` for the queue flag, and never a webhook payload):
+
+- **Queue-enabled repo** (`MergeQueue != "off" && LinkedPRIsMergeQueueEnabled`) → the **ADR-058 enqueue path**, invoked per item via `enqueueForQueue` (the same helper `attemptMergeOnValidate` uses on the `merge_train: off` path). It calls `EnqueuePullRequest` with the poll-native `LinkedPRHeadSHA` as the expected-OID guard and applies `fabrik:auto-merge-enabled` (idempotency + convergence anchor). `checkAutoMergeConvergence` then drains each enqueued item `Queued → Done` (it claims any `fabrik:auto-merge-enabled` item regardless of its column). Two guards: an item already carrying `fabrik:auto-merge-enabled` is mid-convergence and is **not** re-enqueued; an item whose `LinkedPRNumber`/`LinkedPRHeadSHA` is empty (cache miss) is **skipped this poll and retried next** (no REST fetch).
+- **Non-queue repo** → the **ADR-059 internal merge train**: the group's remaining items form one per-repo batch dispatched to a single `dispatchMergeTrainWorker` (already keyed `owner/repo` via `mergeTrainInFlight`), which lands members `Queued → Done` via `landMergeTrainBatch`.
+
+Both engines drain the same `Queued` column and advance their members to `Done` on land; only **who batches** differs (GitHub's queue vs Fabrik's trial branch). `max_batch_size` caps the internal-train subset **per repo group**, not the flat cross-repo batch — so a large repo A never starves repo B, and repo B's items can never be shoved into repo A's trial branch (the pre-D6 `batch[0]`-anchored latent multi-repo bug, now hardened by grouping).
+
+**Precedence (FR-3).** For any item reaching a landing decision:
+
+1. **Native merge queue present on the repo** (`MergeQueue != "off" && LinkedPRIsMergeQueueEnabled`) → **058 enqueue path**, *regardless of* `merge_train`. The queue always wins: a direct or trial-branch merge on a queue-required branch returns HTTP 405. Under `merge_train: off` this fires inline in `attemptMergeOnValidate`; under `merge_train: on` it fires from the `Queued` handler.
+2. **Else `merge_train: on`** → the **internal train** (from the `Queued` handler).
+3. **Else** → **legacy per-PR serial auto-merge** (`attemptMergeOnValidate`'s native-auto-merge / direct-merge fallback), unchanged from pre-merge-train behavior.
 
 ##### Merge-Train Landing Lifecycle (ADR-059 D3)
 
