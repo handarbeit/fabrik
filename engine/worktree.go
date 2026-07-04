@@ -445,6 +445,38 @@ func (wm *WorktreeManager) CleanupTrainWorktree(name string, deleteBranch bool) 
 	return nil
 }
 
+// trainBranchPrefix is the origin-branch namespace for merge-train trial branches.
+const trainBranchPrefix = "fabrik/merge-train/"
+
+// ListTrainBranchesOnOrigin returns the merge-train trial branch names that exist
+// on origin (e.g. "fabrik/merge-train/merge-train-main-123"), via
+// `git ls-remote --heads`. It is a read-only network probe used to reconstruct
+// durable in-flight train state after a restart (ADR-059 D5, FR-1/FR-4). Returns
+// an empty slice when no such branches exist.
+func (wm *WorktreeManager) ListTrainBranchesOnOrigin() ([]string, error) {
+	cmd := exec.Command("git", "ls-remote", "--heads", "origin", "refs/heads/"+trainBranchPrefix+"*")
+	cmd.Dir = wm.baseDir
+	cmd.Env = nonInteractiveGitEnv()
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("ls-remote merge-train branches: %w", err)
+	}
+	var branches []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Each line: "<sha>\trefs/heads/<branch>".
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		branches = append(branches, strings.TrimPrefix(fields[1], "refs/heads/"))
+	}
+	return branches, nil
+}
+
 func (wm *WorktreeManager) worktreeDir(issueNumber int) string {
 	if wm.repoName != "" {
 		return filepath.Join(wm.rootDir, wm.repoName, fmt.Sprintf("issue-%d", issueNumber))

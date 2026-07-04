@@ -51,6 +51,7 @@ type Config struct {
 	MergeTrain           string // on or off; "" means use default (off)
 	MaxBatchSize         int    // 0 means use default (5)
 	MaxBisectValidations int    // 0 means derive default (2·⌈log₂(MaxBatchSize)⌉+1)
+	MaxTrainRebaseCycles int    // 0 means use default (3)
 	ClaudeWaitDelay      int    // seconds; 0 means use default (30)
 	PostPushDwell        int    // seconds; 0 means use default (90)
 	KillGraceSigInt      string // Go duration string; "" means use default (10s); "0s" skips SIGINT step
@@ -149,6 +150,7 @@ func Execute() error {
 	flag.StringVar(&cfg.MergeTrain, "merge-train", "", "Fabrik-internal merge train: on (advance yolo Validate completions to Queued column for batched landing) or off (also FABRIK_MERGE_TRAIN; default off)")
 	flag.IntVar(&cfg.MaxBatchSize, "max-batch-size", 0, "Maximum Queued items landed in a single merge-train batch, ordered by entry (0 = use default of 5; smaller = cheaper worst-case bisection, fewer N² savings; also FABRIK_MAX_BATCH_SIZE)")
 	flag.IntVar(&cfg.MaxBisectValidations, "max-bisect-validations", 0, "Maximum combined validations per red merge-train batch before degrading to one-at-a-time landing (0 = derive 2·⌈log₂(max-batch-size)⌉+1, ≈7 at the default batch size; also FABRIK_MAX_BISECT_VALIDATIONS)")
+	flag.IntVar(&cfg.MaxTrainRebaseCycles, "max-train-rebase-cycles", 0, "Maximum main-moved rebase+revalidate cycles for a merge-train batch before dissolving it back to Queued (0 = use default of 3; also FABRIK_MAX_TRAIN_REBASE_CYCLES)")
 	flag.IntVar(&cfg.ClaudeWaitDelay, "claude-wait-delay", 0, "Seconds to wait after Claude exits before recovering buffered output when grandchildren hold stdout pipe open (0 = use default of 30; also FABRIK_CLAUDE_WAIT_DELAY)")
 	flag.IntVar(&cfg.PostPushDwell, "post-push-dwell", 0, "Seconds to wait after a PR force-push before clearing the CI gate as 'no CI configured' (0 = use default of 90; also FABRIK_POST_PUSH_DWELL)")
 	flag.BoolVar(&cfg.DebugOutput, "debug-output", false, "Save Claude stage output to .fabrik/debug/ for debugging")
@@ -408,6 +410,15 @@ func Execute() error {
 				cfg.MaxBisectValidations = n
 			} else {
 				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_BISECT_VALIDATIONS=%q is invalid (must be a positive integer); using derived default\n", v)
+			}
+		}
+	}
+	if !explicitFlags["max-train-rebase-cycles"] {
+		if v := os.Getenv("FABRIK_MAX_TRAIN_REBASE_CYCLES"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				cfg.MaxTrainRebaseCycles = n
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_TRAIN_REBASE_CYCLES=%q is invalid (must be a positive integer); using default 3\n", v)
 			}
 		}
 	}
@@ -732,6 +743,7 @@ func Execute() error {
 		MaxMergeTrainEjections:   3, // ADR-059 default
 		MaxBatchSize:             cfg.MaxBatchSize,         // 0 = derive default (5) in engine
 		MaxBisectValidations:     cfg.MaxBisectValidations, // 0 = derive default in engine
+		MaxTrainRebaseCycles:     cfg.MaxTrainRebaseCycles, // 0 = derive default (3) in engine
 		ClaudeWaitDelay:          claudeWaitDelay(cfg.ClaudeWaitDelay),
 		KillGraceSigInt:          killGraceSigInt(cfg.KillGraceSigInt),
 		KillGraceSigTerm:         killGraceSigTerm(cfg.KillGraceSigTerm),

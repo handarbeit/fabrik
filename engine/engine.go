@@ -46,6 +46,7 @@ type Config struct {
 	MaxMergeTrainEjections   int           // Max merge-train ejections before pausing a member (default 3; ADR-059)
 	MaxBatchSize             int           // Max Queued items snapshotted into one merge-train batch (0 = derive default 5; ADR-059 D4/D-f)
 	MaxBisectValidations     int           // Max combined validations per red batch before the one-at-a-time fallback (0 = derive 2·⌈log₂(MaxBatchSize)⌉+1; ADR-059 D4/D-f)
+	MaxTrainRebaseCycles     int           // Max main-moved rebase+revalidate cycles per merge-train batch before dissolving (0 = default 3; ADR-059 D5)
 	KillGraceSigInt          time.Duration // Grace window after SIGINT before SIGTERM (default 10s; 0 = skip SIGINT step)
 	KillGraceSigTerm         time.Duration // Grace window after SIGTERM before SIGKILL (default 10s)
 	ClaudeWaitDelay          time.Duration // How long to wait after Claude exits before giving up on pipe drain and recovering output (default 30s)
