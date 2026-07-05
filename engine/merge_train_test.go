@@ -1133,6 +1133,71 @@ func TestLandMergeTrainBatch_ExistingOpenPR_SkipsFR1(t *testing.T) {
 	}
 }
 
+// TestLandMergeTrainBatch_ReusesDraftCIPR_MarksReady is the regression for the
+// landing bug the e2e caught: the trial's draft CI PR carries mergeTrainBatchMarker
+// and IS the landing integration PR, so findIntegrationPR must reuse it — and
+// because it is a draft, landing must MarkPRReady before merging (GitHub refuses to
+// merge a draft). Before the fix, the draft body lacked the marker so findIntegrationPR
+// returned nil and landing tried to CreatePR a second PR on the same trial branch,
+// which GitHub rejects with a 422 ("a pull request already exists").
+func TestLandMergeTrainBatch_ReusesDraftCIPR_MarksReady(t *testing.T) {
+	survivors := []trainMember{makeQueuedMember(1, 10, "Issue One")}
+
+	createPRCalled := false
+	client := &mockGitHubClient{
+		listPRsFn: func(owner, repo string) ([]gh.PRDetails, error) {
+			return []gh.PRDetails{
+				{Number: 200, State: "open", Merged: false, Draft: true, Body: "draft CI PR " + mergeTrainBatchMarker},
+			}, nil
+		},
+		createPRFn: func(owner, repo, title, head, base, body string) (int, error) {
+			createPRCalled = true
+			return 999, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			tr := true
+			return &tr, "clean", nil
+		},
+		mergePRFn:    func(owner, repo string, prNumber int) error { return nil },
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) { return 1, nil },
+	}
+
+	claude := &mockClaudeInvoker{}
+	wm := NewWorktreeManager(t.TempDir())
+	eng := trainTestEngine(t, client, claude, wm)
+	state := &mergeTrainWorkerState{trialName: "merge-train-main-12345", projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
+
+	if createPRCalled {
+		t.Error("CreatePR must not be called — the draft CI PR must be reused (regression: 422 collision)")
+	}
+	client.mu.Lock()
+	ready := client.markPRReadyCalls
+	merged := client.mergePRCalls
+	client.mu.Unlock()
+
+	readyOK := false
+	for _, c := range ready {
+		if c.prNumber == 200 {
+			readyOK = true
+		}
+	}
+	if !readyOK {
+		t.Errorf("draft integration PR #200 must be MarkPRReady'd before merge; got %+v", ready)
+	}
+	mergedOK := false
+	for _, c := range merged {
+		if c.prNumber == 200 {
+			mergedOK = true
+		}
+	}
+	if !mergedOK {
+		t.Errorf("integration PR #200 must be merged; got %+v", merged)
+	}
+}
+
 // TestLandMergeTrainBatch_AlreadyMergedPR_SkipsFR2 verifies restart idempotency:
 // if the found integration PR is already merged, FR-2 (MergePR) is skipped and
 // FR-3 (member advancement) proceeds.
