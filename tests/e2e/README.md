@@ -106,6 +106,42 @@ the canonical setup.
     E2E_TIMEOUT=2h scripts/e2e/run.sh -run TestConjunctiveCIReviewGate
     ```
 
+### Additional prerequisites for the merge-train scenarios (ADR-059)
+
+`TestMergeTrainHappyPathLanding`, `TestMergeTrainBisectionEjectsPoisoner`, and
+`TestMergeTrainRestartSafety` need one-time bed setup. They **skip cleanly**
+(`requireTrainBed`) if the `Queued` column is absent, so they are safe to merge
+before the bed is set up.
+
+13. **`Queued` board column** on `handarbeit/projects/2`, positioned between
+    `Validate` and `Done` (ADR-059 D1 — the durable train queue). Add it in the
+    Project's Status field options.
+14. **`queued.yaml` holding stage** in the bed's `.fabrik/stages/`, e.g.:
+    ```yaml
+    name: Queued
+    order: 8            # after Validate, before Done
+    holding_stage: true # engine-managed; no Claude invocation
+    ```
+    Copy from `stages/examples/queued.yaml` (`fabrik init` / `fabrik refresh-stages`).
+15. **Train-capable binary** in the bed, built from `main` (the release does not
+    yet carry ADR-059). Run it **without `--auto-upgrade`** so it is not reverted
+    to a release mid-suite:
+    ```bash
+    (cd ~/dev/fabrik && go build -o ~/dev/fabrik-test/fabrik .)
+    # on macOS/Apple Silicon a copied binary may be SIGKILL'd; build in place or:
+    #   xattr -cr ~/dev/fabrik-test/fabrik && codesign --force --sign - ~/dev/fabrik-test/fabrik
+    ```
+16. **`train-poison-guard` required check** on `fabrik-test-alpha` — only for
+    `TestMergeTrainBisectionEjectsPoisoner`. Commit
+    `tests/e2e/testdata/train-poison-guard.yml` to the repo as
+    `.github/workflows/train-poison-guard.yml` and mark the `train-poison-guard`
+    check REQUIRED on branch protection, so the combined-Validate poll gates on it.
+    The bisection test skips this check indirectly — if the guard is absent the
+    combined batch is green and no bisection occurs, failing the `bisecting`
+    log-line wait; run it only after the guard is enrolled.
+17. **`E2E_TIMEOUT=2h`** (happy/bisect) or **`E2E_TIMEOUT=3h`** (restart — two
+    sequential landings) when running these in isolation.
+
 ## Running
 
 The recommended entrypoint is the runner script, which sets sensible defaults:
@@ -152,6 +188,9 @@ otherwise).
 | `TestCIFixReinvokeCycleLimit` | CI-fix reinvoke negative path: unfixable sentinel exhausts MaxCiFixCycles, issue pauses | 30–60 min | $0.50–1.50 |
 | `TestPausedMergedPRRecovery` | paused + gate-label at Validate with merged PR heals to CLOSED (3 sequential sub-tests: awaiting-ci, awaiting-review, no-gate-label); regression guard for #874 class | 60–90 min (3 sequential sub-tests, ~20–30 min each); run with `E2E_TIMEOUT=3h` | $1.50–4.50 |
 | `TestConjunctiveCIReviewGate` | Conjunctive CI∧review gate: fabrik:awaiting-ci holds before CI, PR comment during CI-await not dropped, fabrik:awaiting-review holds before approval, advance suppressed until both gates clear | 60–90 min (approval path) / 30–50 min (timeout path) | $1.00–2.50 |
+| `TestMergeTrainHappyPathLanding` | ADR-059 internal train: 3 clean Queued members → one integration PR → all advance Queued→Done, PRs closed, no O(N²) per-member retests | 10–25 min | low (no Claude) |
+| `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4: red combined batch → halving bisection isolates the poison member → ejected → survivors land. Needs the `train-poison-guard` required check | 20–40 min | low–moderate |
+| `TestMergeTrainRestartSafety` | ADR-059 D5 / #960: after a landing, a restart with the historical merged integration PR present does NOT stall the next batch (reconstruct proceeds fresh). **Not parallel** — restarts the bed | 25–50 min | low |
 
 Approximate suite total: ~470 min wall-clock, $7.50–24 in Claude tokens (CI-fix, `TestPausedMergedPRRecovery`, and conjunctive-gate tests should be run separately with `E2E_TIMEOUT=3h` or `E2E_TIMEOUT=2h` as noted above).
 
@@ -170,6 +209,9 @@ Approximate suite total: ~470 min wall-clock, $7.50–24 in Claude tokens (CI-fi
 | `TestCIFixReinvokeCycleLimit` | CI-fix cycle limit (`pauseForCIFixCycleLimit`), `MaxCiFixCycles` exhaustion path |
 | `TestPausedMergedPRRecovery` | #874 (paused+merged PR recovery class), #887 (settle-owner structural fix, `runValidatePRTerminalAdvance`), ADR-056 D2 (single-owner for PR-terminal → Done) |
 | `TestConjunctiveCIReviewGate` | ADR-056 D2 (conjunctive gate joint-clear), #887 (settle-owner), #895 (this scenario) |
+| `TestMergeTrainHappyPathLanding` | ADR-059 D1/D3 (#946, #947, #948) — Queued column, trial-branch build, integration-PR landing + member lifecycle |
+| `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4 (#949) — halving bisection, ejection, one-at-a-time fallback |
+| `TestMergeTrainRestartSafety` | ADR-059 D5 (#950) + PR #960 (reconstruct must not stall on a historical merged PR) |
 
 Every escape-from-release regression earns a new scenario in this table.
 

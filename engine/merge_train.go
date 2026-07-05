@@ -475,11 +475,15 @@ func (e *Engine) assembleAndValidate(ctx context.Context, p trialParams, members
 		memberRefs = append(memberRefs, fmt.Sprintf("#%d", s.item.Number))
 	}
 	prTitle := fmt.Sprintf("chore(merge-train): trial integration for %s", strings.Join(memberRefs, " "))
+	// The draft CI PR IS the landing integration PR (same trial branch → base). It
+	// carries mergeTrainBatchMarker so the landing step's findIntegrationPR reuses
+	// it (marking it ready) rather than trying to CreatePR a second PR on the same
+	// branch — which GitHub rejects with a 422 "a pull request already exists".
 	prBody := fmt.Sprintf("🏭 **Fabrik merge-train integration PR** (trial → %s)\n\n"+
 		"This is a disposable trial branch combining the following Queued member PRs:\n%s\n\n"+
 		"Do not merge this PR manually — Fabrik manages the landing step.\n"+
-		"Orphaned integration PRs (if the train worker crashed) can be closed manually via the GitHub UI.",
-		p.baseBranch, strings.Join(memberRefs, "\n"))
+		"Orphaned integration PRs (if the train worker crashed) can be closed manually via the GitHub UI.\n\n%s",
+		p.baseBranch, strings.Join(memberRefs, "\n"), mergeTrainBatchMarker)
 
 	trialBranch := "fabrik/merge-train/" + trialName
 	prNum, err := e.client.CreateDraftPR(p.owner, p.repo, prTitle, trialBranch, p.baseBranch, prBody, 0)
@@ -1020,7 +1024,16 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 	if integrationPR != nil {
 		integrationPRNum = integrationPR.Number
 		alreadyMerged = integrationPR.Merged
-		e.logf(0, "merge-train", "found existing integration PR #%d (merged=%v) for %s\n", integrationPRNum, alreadyMerged, repoKey)
+		e.logf(0, "merge-train", "found existing integration PR #%d (merged=%v, draft=%v) for %s\n", integrationPRNum, alreadyMerged, integrationPR.Draft, repoKey)
+		// The reused PR is the trial's draft CI PR — promote it to ready-for-review
+		// so it can be merged (GitHub refuses to merge a draft).
+		if integrationPR.Draft && !alreadyMerged {
+			if rerr := e.client.MarkPRReady(owner, repo, integrationPRNum); rerr != nil {
+				e.logf(0, "merge-train", "cannot mark integration PR #%d ready for %s: %v — leaving members in Queued\n", integrationPRNum, repoKey, rerr)
+				return
+			}
+			e.logf(0, "merge-train", "marked integration PR #%d ready for landing (%s)\n", integrationPRNum, repoKey)
+		}
 	} else {
 		// FR-1: open the landing integration PR (not a draft).
 		title := buildIntegrationPRTitle(survivors)
