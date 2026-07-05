@@ -1,0 +1,33 @@
+# Merge-train e2e bisection fixture — commit this to fabrik-test-alpha as
+# .github/workflows/train-poison-guard.yml and mark the "train-poison-guard"
+# check REQUIRED on branch protection (so the internal train's combined-Validate
+# poll gates on it).
+#
+# It fails iff any file under e2e/train/entries/ contains the sentinel "POISON".
+# TestMergeTrainBisectionEjectsPoisoner relies on this: clean members' files pass;
+# a single "poison" member's file makes the COMBINED trial branch red (the files
+# merge cleanly — this is a semantic cross-PR failure, exactly what bisection is
+# for), so the train must halving-bisect, isolate the poison member, eject it, and
+# land the survivors.
+#
+# Scoped so it never disrupts other e2e scenarios: it is a fast grep, and green
+# whenever no poison entry is present (the common case).
+name: train-poison-guard
+
+on:
+  pull_request:
+
+jobs:
+  train-poison-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject POISON entries in the combined tree
+        run: |
+          dir="e2e/train/entries"
+          if [ -d "$dir" ] && grep -rlq "POISON" "$dir"; then
+            echo "::error::found POISON sentinel in $dir — combined batch is red (bisection fixture)"
+            grep -rl "POISON" "$dir" || true
+            exit 1
+          fi
+          echo "no POISON entries — train-poison-guard green"
