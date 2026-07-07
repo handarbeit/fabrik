@@ -2840,7 +2840,7 @@ A batch is **usually green**: every member already passed Validate individually,
 
 The one-poll-cycle gap between Hook 1 firing and Hook 2 handling beyond-cap members is acceptable: beyond-cap members cannot form their own batch while the worker goroutine is still active.
 
-**Operator resume:** once the runaway guard fires, all affected members have `fabrik:paused` and are therefore excluded from `groupQueuedByRepo` on every subsequent poll. No re-formation occurs until a human manually removes `fabrik:paused` from each affected member. Before doing so, the operator should investigate the infra root cause (GitHub Actions billing, required-check configuration, base-branch health). The in-memory trial counter resets to zero on engine restart, but `fabrik:paused` labels persist on GitHub — so a restart alone does not re-enable the train; the labels must be cleared explicitly.
+**Operator resume:** once the runaway guard fires, all affected members have `fabrik:paused` and `fabrik:awaiting-input` applied and are therefore excluded from `groupQueuedByRepo` on every subsequent poll. No re-formation occurs until a human manually removes both `fabrik:paused` and `fabrik:awaiting-input` from each affected member. Before doing so, the operator should investigate the infra root cause (GitHub Actions billing, required-check configuration, base-branch health). The in-memory trial counter resets to zero on engine restart, but `fabrik:paused` labels persist on GitHub — so a restart alone does not re-enable the train; the labels must be cleared explicitly.
 
 ##### Merge-Train Serialization + Main-Moved Recovery (ADR-059 D5)
 

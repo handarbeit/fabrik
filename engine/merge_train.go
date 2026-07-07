@@ -892,7 +892,7 @@ func (e *Engine) effectiveTrialWindow() (int, time.Duration) {
 // recordTrial appends a timestamp for repoKey, prunes entries older than the window,
 // and returns the current count. Called at the start of every assembleAndValidate.
 func (e *Engine) recordTrial(repoKey string) int {
-	n, m := e.effectiveTrialWindow()
+	_, m := e.effectiveTrialWindow()
 	now := time.Now()
 	cutoff := now.Add(-m)
 	e.mergeTrainTrialsMu.Lock()
@@ -907,7 +907,6 @@ func (e *Engine) recordTrial(repoKey string) int {
 	e.mergeTrainTrials[repoKey] = pruned
 	count := len(pruned)
 	e.mergeTrainTrialsMu.Unlock()
-	_ = n
 	return count
 }
 
@@ -955,7 +954,7 @@ func (e *Engine) fireRunawayGuard(ctx context.Context, owner, repo string, items
 			"**What to do:**\n"+
 			"1. Investigate the infra root cause (check GitHub Actions billing, required check configuration, base branch health).\n"+
 			"2. Resolve the underlying issue.\n"+
-			"3. Manually remove `fabrik:paused` from each affected Queued member to re-enable the merge-train.",
+			"3. Manually remove `fabrik:paused` and `fabrik:awaiting-input` from each affected Queued member to re-enable the merge-train.",
 			count, repoKey, m)
 		if _, commentErr := e.client.AddComment(owner, repo, item.Number, msg); commentErr != nil {
 			e.logf(item.Number, "merge-train", "warn: could not post runaway guard comment: %v\n", commentErr)
