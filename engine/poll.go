@@ -1714,10 +1714,11 @@ func (e *Engine) routeQueuedGroup(ctx context.Context, repoKey string, items []g
 	}
 	// Hook 2: pre-dispatch runaway guard check (ADR-059 D8). Handles beyond-cap Queued
 	// members that the in-flight worker couldn't reach during Hook 1 (one-poll-cycle gap).
+	// Uses the uncapped `items` slice so all Queued members are paused, not just the batch cap.
 	if count, tripped := e.isRunawayTripped(repoKey); tripped {
 		owner, repo := parseOwnerRepo(repoKey)
-		e.logf(0, "merge-train", "runaway guard already tripped for %s (%d trial(s)) — pausing %d Queued member(s) before dispatch\n", repoKey, count, len(trainItems))
-		e.fireRunawayGuard(ctx, owner, repo, trainItems, count)
+		e.logf(0, "merge-train", "runaway guard already tripped for %s (%d trial(s)) — pausing %d Queued member(s) before dispatch\n", repoKey, count, len(items))
+		e.fireRunawayGuard(ctx, owner, repo, items, count)
 		return
 	}
 	var parts []string
