@@ -3685,6 +3685,28 @@ func TestGroupQueuedByRepo(t *testing.T) {
 	}
 }
 
+// TestGroupQueuedByRepo_ExcludesPausedAndClosed is the poison-well regression: an
+// ejected poisoner is paused-but-left-in-Queued by ejectMember, and a stale board
+// entry may point at a closed issue. Neither can land, and re-snapshotting a poisoner
+// into every batch reds/bisects the train forever and starves clean members. Both must
+// be excluded from train batches until a human unpauses/resolves them.
+func TestGroupQueuedByRepo_ExcludesPausedAndClosed(t *testing.T) {
+	items := []gh.ProjectItem{
+		{Number: 1, Status: "BatchHold", Repo: "owner/repo"},
+		{Number: 2, Status: "BatchHold", Repo: "owner/repo", Labels: []string{"fabrik:paused"}}, // ejected poisoner — excluded
+		{Number: 3, Status: "BatchHold", Repo: "owner/repo", IsClosed: true},                    // stale closed entry — excluded
+		{Number: 4, Status: "BatchHold", Repo: "owner/repo"},
+	}
+	groups := groupQueuedByRepo(items, "BatchHold", "owner/repo")
+
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 repo group, got %d: %+v", len(groups), groups)
+	}
+	if len(groups[0].items) != 2 || groups[0].items[0].Number != 1 || groups[0].items[1].Number != 4 {
+		t.Errorf("expected only clean members #1 and #4, got %+v", groups[0].items)
+	}
+}
+
 // TestReconcileLoop_RunsWithoutWebhookManager is the #955 regression for the
 // architectural fix: the reconcile ticker must run — and repair label drift — even
 // when the webhook manager is nil (webhooks disabled or wm.Start failed).

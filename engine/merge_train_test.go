@@ -1023,7 +1023,9 @@ func TestLandMergeTrainBatch_HappyPath(t *testing.T) {
 
 	eng.landMergeTrainBatch(context.Background(), state, "owner", "repo", "main", survivors, wm)
 
-	// FR-1: integration PR created with correct title, body marker, and no Closes #N.
+	// FR-1 + connectivity: integration PR created with correct title, the batch
+	// marker, AND a Closes #N per member issue (auto-closes them on merge, linking
+	// each issue to the landing PR).
 	expectedTitle := "[merge-train] batch: #1, #2"
 	if createPRTitle != expectedTitle {
 		t.Errorf("integration PR title: got %q, want %q", createPRTitle, expectedTitle)
@@ -1031,8 +1033,10 @@ func TestLandMergeTrainBatch_HappyPath(t *testing.T) {
 	if !strings.Contains(createPRBody, mergeTrainBatchMarker) {
 		t.Errorf("integration PR body missing batch marker %q", mergeTrainBatchMarker)
 	}
-	if strings.Contains(createPRBody, "Closes #") {
-		t.Errorf("integration PR body must not contain 'Closes #N'")
+	for _, want := range []string{"Closes #1", "Closes #2"} {
+		if !strings.Contains(createPRBody, want) {
+			t.Errorf("integration PR body missing %q (member-issue auto-close)", want)
+		}
 	}
 
 	// FR-2: integration PR is merged.
@@ -1046,9 +1050,9 @@ func TestLandMergeTrainBatch_HappyPath(t *testing.T) {
 	for i, c := range client.updateStatusCalls {
 		advancedItems[i] = c.itemID
 	}
-	closedPRs := make([]int, len(client.closeIssueCalls))
+	closed := make([]int, len(client.closeIssueCalls))
 	for i, c := range client.closeIssueCalls {
-		closedPRs[i] = c.issueNumber
+		closed[i] = c.issueNumber
 	}
 	comments := client.addCommentCalls
 	client.mu.Unlock()
@@ -1057,14 +1061,23 @@ func TestLandMergeTrainBatch_HappyPath(t *testing.T) {
 		t.Errorf("expected 2 board status updates (Queued→Done), got %d", len(advancedItems))
 	}
 
-	// FR-3: member PRs closed.
-	if len(closedPRs) != 2 {
-		t.Errorf("expected 2 member PRs closed, got %d", len(closedPRs))
+	// FR-3: each member's PR (10, 11) AND its issue (1, 2) are closed. The integration
+	// PR (#100) must NOT be closed via CloseIssue (it is merged). Closing the issue is
+	// the connectivity fix — the member PR is closed-not-merged, so its Closes #N never
+	// fires; the landing closes the issue explicitly (belt to the integration PR's
+	// Closes #N auto-close).
+	wantClosed := map[int]bool{10: false, 11: false, 1: false, 2: false}
+	for _, n := range closed {
+		if n == 100 {
+			t.Errorf("integration PR #100 must not be CloseIssue'd (it is merged)")
+		}
+		if _, ok := wantClosed[n]; ok {
+			wantClosed[n] = true
+		}
 	}
-	// Verify it's the member PRs (10 and 11), not the integration PR (100).
-	for _, prNum := range closedPRs {
-		if prNum != 10 && prNum != 11 {
-			t.Errorf("unexpected PR closed: #%d (expected 10 or 11)", prNum)
+	for n, seen := range wantClosed {
+		if !seen {
+			t.Errorf("expected #%d closed (member PR or issue); closes seen: %v", n, closed)
 		}
 	}
 
@@ -1242,8 +1255,8 @@ func TestLandMergeTrainBatch_AlreadyMergedPR_SkipsFR2(t *testing.T) {
 	if advanced != 1 {
 		t.Errorf("expected 1 board status update (FR-3), got %d", advanced)
 	}
-	if closed != 1 {
-		t.Errorf("expected 1 member PR close (FR-3), got %d", closed)
+	if closed != 2 {
+		t.Errorf("expected 2 closes — member PR #10 + member issue #1 (connectivity fix), got %d", closed)
 	}
 }
 
@@ -1287,8 +1300,18 @@ func TestLandMergeTrainBatch_MemberAlreadyInDone_SkipsFR3(t *testing.T) {
 	if advanced != 1 {
 		t.Errorf("expected 1 board status update (Done member skipped), got %d", advanced)
 	}
-	if len(closed) != 1 || closed[0].issueNumber != 11 {
-		t.Errorf("expected only member PR #11 closed, got %v", closed)
+	// The Queued member closes its PR (#11) AND its issue (#2); the Done member
+	// (#1 / PR #10) is skipped entirely — neither closed.
+	if len(closed) != 2 {
+		t.Errorf("expected 2 closes (PR #11 + issue #2 for the Queued member); Done member skipped; got %v", closed)
+	}
+	for _, c := range closed {
+		if c.issueNumber == 10 || c.issueNumber == 1 {
+			t.Errorf("Done member (#1 / PR #10) must be skipped, not closed; got %v", closed)
+		}
+		if c.issueNumber != 11 && c.issueNumber != 2 {
+			t.Errorf("unexpected close #%d (want PR #11 or issue #2); got %v", c.issueNumber, closed)
+		}
 	}
 }
 
@@ -2415,5 +2438,22 @@ func TestDispatchMergeTrainWorker_SameRepoSuppressedDurably(t *testing.T) {
 	case <-done: // good — no worker launched
 	case <-time.After(200 * time.Millisecond):
 		t.Error("a duplicate worker was launched despite an in-flight train for the same repo")
+	}
+}
+
+// TestBuildIntegrationPRBody_ClosesMembers verifies the landing integration PR body
+// carries a "Closes #N" line per member, so merging it auto-closes the member issues
+// (restoring issue↔landing-PR connectivity) — plus the batch marker.
+func TestBuildIntegrationPRBody_ClosesMembers(t *testing.T) {
+	survivors := []trainMember{makeQueuedMember(7, 70, "Seven"), makeQueuedMember(9, 90, "Nine")}
+	body := buildIntegrationPRBody(survivors)
+	for _, want := range []string{"Closes #7", "Closes #9", mergeTrainBatchMarker} {
+		if !strings.Contains(body, want) {
+			t.Errorf("integration PR body missing %q\n---\n%s", want, body)
+		}
+	}
+	// Must not close a PR/issue that isn't a member.
+	if strings.Contains(body, "Closes #70") || strings.Contains(body, "Closes #90") {
+		t.Errorf("body must Closes the issue numbers (7,9), not the PR numbers (70,90)\n%s", body)
 	}
 }

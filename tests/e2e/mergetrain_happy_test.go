@@ -57,14 +57,16 @@ func TestMergeTrainHappyPathLanding(t *testing.T) {
 	WaitForLogLine(t, env, "landing complete", logStart, 30*time.Minute)
 	t.Logf("train landed a batch")
 
-	// Every member advances Queued → Done and its member PR is closed (the member
-	// PR is closed, not merged — the changes land via the integration PR). Board=Done
-	// + PR-closed is the definitive per-member landed signal; issue closure is a
-	// downstream Done-stage cleanup and is not asserted here to avoid timing flakiness.
+	// Every member advances Queued → Done, its member PR is closed, and its ISSUE is
+	// closed. The member PR is closed-not-merged (the change lands via the integration
+	// PR), so the issue closes via the integration PR's Closes #N on merge + the
+	// landing's explicit fallback close — NOT via the member PR. Asserting issue
+	// closure here is the regression guard for the connectivity fix.
 	for _, m := range members {
 		WaitForProjectStatus(t, env, env.RepoAlpha, m.issue, "Done", 10*time.Minute)
 		waitForPRClosed(t, env, env.RepoAlpha, m.pr, 10*time.Minute)
-		t.Logf("member #%d landed: Done + member PR #%d closed", m.issue, m.pr)
+		WaitForIssueClosed(t, env, env.RepoAlpha, m.issue, 10*time.Minute)
+		t.Logf("member #%d landed: Done + issue closed + member PR #%d closed", m.issue, m.pr)
 	}
 
 	// No stale train branches/PRs should remain after the landing.
