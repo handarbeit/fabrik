@@ -470,20 +470,27 @@ func (e *Engine) assembleAndValidate(ctx context.Context, p trialParams, members
 	}
 
 	// Open a draft CI PR listing the survivors.
-	var memberRefs []string
+	var memberRefs, closesLines []string
 	for _, s := range survivors {
 		memberRefs = append(memberRefs, fmt.Sprintf("#%d", s.item.Number))
+		closesLines = append(closesLines, fmt.Sprintf("Closes #%d", s.item.Number))
 	}
 	prTitle := fmt.Sprintf("chore(merge-train): trial integration for %s", strings.Join(memberRefs, " "))
 	// The draft CI PR IS the landing integration PR (same trial branch → base). It
 	// carries mergeTrainBatchMarker so the landing step's findIntegrationPR reuses
 	// it (marking it ready) rather than trying to CreatePR a second PR on the same
 	// branch — which GitHub rejects with a 422 "a pull request already exists".
+	// The "Closes #N" lines link each member issue to this landing PR and auto-close
+	// them when it merges (into the default branch), restoring issue↔landing-PR
+	// connectivity — the member PRs are closed-not-merged, so their own Closes #N
+	// never fires. (A non-default base won't auto-close; the landing step closes the
+	// issues explicitly as a fallback.)
 	prBody := fmt.Sprintf("🏭 **Fabrik merge-train integration PR** (trial → %s)\n\n"+
 		"This is a disposable trial branch combining the following Queued member PRs:\n%s\n\n"+
 		"Do not merge this PR manually — Fabrik manages the landing step.\n"+
-		"Orphaned integration PRs (if the train worker crashed) can be closed manually via the GitHub UI.\n\n%s",
-		p.baseBranch, strings.Join(memberRefs, "\n"), mergeTrainBatchMarker)
+		"Orphaned integration PRs (if the train worker crashed) can be closed manually via the GitHub UI.\n\n"+
+		"%s\n\n%s",
+		p.baseBranch, strings.Join(memberRefs, "\n"), strings.Join(closesLines, "\n"), mergeTrainBatchMarker)
 
 	trialBranch := "fabrik/merge-train/" + trialName
 	prNum, err := e.client.CreateDraftPR(p.owner, p.repo, prTitle, trialBranch, p.baseBranch, prBody, 0)
@@ -667,6 +674,16 @@ func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState
 		}
 	}
 
+	// Close the member issue. The singleton landing PR's Closes #N auto-closes it on
+	// merge into the default branch; this explicit close is the fallback for
+	// non-default bases and auto-close lag (idempotent). Without it the issue is
+	// left landed-but-open (the member PR is closed-not-merged).
+	if closeErr := e.client.CloseIssue(p.owner, p.repo, m.item.Number); closeErr != nil {
+		e.logf(m.item.Number, "merge-train", "warn: could not close member issue #%d: %v\n", m.item.Number, closeErr)
+	} else {
+		e.logf(m.item.Number, "merge-train", "closed member issue #%d\n", m.item.Number)
+	}
+
 	e.resetEjectionCount(p.owner, p.repo, m.item.Number)
 }
 
@@ -841,14 +858,19 @@ func buildIntegrationPRTitle(survivors []trainMember) string {
 // buildIntegrationPRBody returns the body for the landing integration PR.
 // Includes the idempotency marker and a human-readable member list.
 func buildIntegrationPRBody(survivors []trainMember) string {
-	var lines []string
+	var lines, closesLines []string
 	for _, m := range survivors {
 		lines = append(lines, fmt.Sprintf("- #%d — %s", m.item.Number, m.item.Title))
+		closesLines = append(closesLines, fmt.Sprintf("Closes #%d", m.item.Number))
 	}
+	// Closes #N links each member issue to this landing PR and auto-closes them on
+	// merge into the default branch (member PRs are closed-not-merged, so their own
+	// Closes #N never fires). The landing step also closes them explicitly as a
+	// fallback for non-default bases.
 	return fmt.Sprintf("🏭 **Fabrik merge-train landing PR**\n\n"+
 		"This PR lands the following Queued issues via the internal merge train:\n\n%s\n\n"+
-		"%s",
-		strings.Join(lines, "\n"), mergeTrainBatchMarker)
+		"%s\n\n%s",
+		strings.Join(lines, "\n"), strings.Join(closesLines, "\n"), mergeTrainBatchMarker)
 }
 
 // findIntegrationPR searches recent PRs for an existing landing integration PR
@@ -1106,6 +1128,17 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 			} else {
 				e.logf(m.item.Number, "merge-train", "closed member PR #%d\n", m.prNum)
 			}
+		}
+
+		// Close the member issue. The integration PR's Closes #N auto-closes it on
+		// merge into the default branch; this explicit close is the fallback for
+		// non-default bases and any auto-close lag (idempotent — no-op if already
+		// closed). The member PR is closed-not-merged, so its own Closes #N never
+		// fires — without this the issue is left landed-but-open.
+		if closeErr := e.client.CloseIssue(owner, repo, m.item.Number); closeErr != nil {
+			e.logf(m.item.Number, "merge-train", "warn: could not close member issue #%d: %v\n", m.item.Number, closeErr)
+		} else {
+			e.logf(m.item.Number, "merge-train", "closed member issue #%d\n", m.item.Number)
 		}
 
 		// Reset ejection counter: this member has landed; prior ejection history
