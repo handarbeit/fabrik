@@ -1623,6 +1623,16 @@ func groupQueuedByRepo(items []gh.ProjectItem, holdingStatus, defaultRepo string
 		if item.Status != holdingStatus {
 			continue
 		}
+		// Never form a train around a closed or paused member. A poisoner that fails the
+		// combined Validate even in isolation is ejected and (after MaxMergeTrainEjections)
+		// paused, but ejectMember deliberately leaves it in the Queued column. Without this
+		// guard it would be re-snapshotted into every subsequent batch — a "poison well" that
+		// reds and bisects the train indefinitely and starves clean members from ever landing.
+		// A closed issue in Queued (stale board entry) likewise has no PR to land. Paused ==
+		// "manual intervention required"; both are excluded until a human resolves and unpauses.
+		if item.IsClosed || hasLabel(item, "fabrik:paused") {
+			continue
+		}
 		key := itemOwnerRepoString(item, defaultRepo)
 		if _, seen := byRepo[key]; !seen {
 			order = append(order, key)
