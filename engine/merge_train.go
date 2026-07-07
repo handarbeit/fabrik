@@ -549,6 +549,9 @@ func (e *Engine) bisect(ctx context.Context, p trialParams, red []trainMember, u
 		e.cleanupTrialArtifacts(p.wm, trialName)
 		if err != nil {
 			e.logf(0, "merge-train", "bisection trial failed to assemble: %v — degrading to one-at-a-time fallback\n", err)
+			if _, tripped := e.isRunawayTripped(repoKey); tripped {
+				return nil, false, true
+			}
 			return nil, true, false
 		}
 		if _, tripped := e.isRunawayTripped(repoKey); tripped {
@@ -628,6 +631,9 @@ func (e *Engine) landOneAtATime(ctx context.Context, state *mergeTrainWorkerStat
 		if err != nil || len(survivors) == 0 {
 			e.logf(m.item.Number, "merge-train", "could not assemble #%d in isolation: %v — leaving in Queued\n", m.item.Number, err)
 			e.cleanupTrialArtifacts(p.wm, trialName)
+			if _, tripped := e.isRunawayTripped(repoKey); tripped {
+				return true
+			}
 			continue
 		}
 		if _, tripped := e.isRunawayTripped(repoKey); tripped {
@@ -923,7 +929,11 @@ func (e *Engine) isRunawayTripped(repoKey string) (int, bool) {
 			pruned = append(pruned, t)
 		}
 	}
-	e.mergeTrainTrials[repoKey] = pruned
+	if len(pruned) == 0 {
+		delete(e.mergeTrainTrials, repoKey)
+	} else {
+		e.mergeTrainTrials[repoKey] = pruned
+	}
 	count := len(pruned)
 	e.mergeTrainTrialsMu.Unlock()
 	return count, count >= n
