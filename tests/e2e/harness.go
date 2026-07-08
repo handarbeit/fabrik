@@ -1027,6 +1027,30 @@ func readEnvFileMaxCiFixCycles(t *testing.T, env *Env) int {
 	return n
 }
 
+// assertTrainPoisonGuardRequired skips the test if "train-poison-guard" is not
+// a required status check on the repo's main branch. Accepts repo as a
+// parameter so it works for both Alpha and Beta repos. Skips (never fatals) so
+// the test suite remains green before the guard CI job is enrolled.
+func assertTrainPoisonGuardRequired(t *testing.T, env *Env, repo string) {
+	t.Helper()
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		t.Fatalf("bad repo: %q", repo)
+	}
+	out, err := ghOutput(env, "api",
+		fmt.Sprintf("repos/%s/%s/branches/main/protection", owner, name),
+		"--jq", ".required_status_checks.contexts[]")
+	if err != nil {
+		t.Skipf("train-poison-guard not enrolled as required check on %s/main (branch protection API error: %v)", repo, err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if strings.TrimSpace(line) == "train-poison-guard" {
+			return
+		}
+	}
+	t.Skipf("train-poison-guard not in required status checks for %s/main — enroll it before running this test", repo)
+}
+
 // assertSlowGateRequired skips the test if "slow-gate" is not a required
 // status check on the repo's main branch. Skips (never fatals) so the test
 // suite remains green before the slow-gate CI job is enrolled.

@@ -108,10 +108,10 @@ the canonical setup.
 
 ### Additional prerequisites for the merge-train scenarios (ADR-059)
 
-`TestMergeTrainHappyPathLanding`, `TestMergeTrainBisectionEjectsPoisoner`, and
-`TestMergeTrainRestartSafety` need one-time bed setup. They **skip cleanly**
-(`requireTrainBed`) if the `Queued` column is absent, so they are safe to merge
-before the bed is set up.
+`TestMergeTrainHappyPathLanding`, `TestMergeTrainBisectionEjectsPoisoner`,
+`TestMergeTrainRestartSafety`, and `TestMergeTrainRunawayGuardPausesBatch` need
+one-time bed setup. They **skip cleanly** (`requireTrainBed`) if the `Queued`
+column is absent, so they are safe to merge before the bed is set up.
 
 13. **`Queued` board column** on `handarbeit/projects/2`, positioned between
     `Validate` and `Done` (ADR-059 D1 — the durable train queue). Add it in the
@@ -141,6 +141,19 @@ before the bed is set up.
     log-line wait; run it only after the guard is enrolled.
 17. **`E2E_TIMEOUT=2h`** (happy/bisect) or **`E2E_TIMEOUT=3h`** (restart — two
     sequential landings) when running these in isolation.
+18. **`train-poison-guard` required check on `fabrik-test-beta`** — only for
+    `TestMergeTrainRunawayGuardPausesBatch`. Commit
+    `tests/e2e/testdata/train-poison-guard.yml` to `handarbeit/fabrik-test-beta`
+    as `.github/workflows/train-poison-guard.yml` and mark the
+    `train-poison-guard` check REQUIRED on branch protection (same steps as for
+    Alpha in prerequisite #16, targeting Beta instead). The runaway test skips
+    cleanly until this is enrolled.
+    **`FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW=6`** must also be set in the bed's
+    `.env` before launching the Fabrik instance for this test. At the default
+    (20), the guard would require ~20 red trials — the 4-member all-poison batch
+    generates only ~7–10, so the test would time out. A cap of 6 sits above
+    Alpha's bisect-scenario max (~4 trials) with comfortable margin. Wall-clock:
+    ~10–20 min; ~6 trials × 2 required checks ≈ 12 Actions runs.
 
 ## Running
 
@@ -191,6 +204,7 @@ otherwise).
 | `TestMergeTrainHappyPathLanding` | ADR-059 internal train: 3 clean Queued members → one integration PR → all advance Queued→Done, PRs closed, no O(N²) per-member retests | 10–25 min | low (no Claude) |
 | `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4: red combined batch → halving bisection isolates the poison member → ejected → survivors land. Needs the `train-poison-guard` required check | 20–40 min | low–moderate |
 | `TestMergeTrainRestartSafety` | ADR-059 D5 / #960: after a landing, a restart with the historical merged integration PR present does NOT stall the next batch (reconstruct proceeds fresh). **Not parallel** — restarts the bed | 25–50 min | low |
+| `TestMergeTrainRunawayGuardPausesBatch` | ADR-059 D8 (#964/#965): persistently-red 4-member batch trips the runaway guard at cap=6, pauses all Queued members, no member reaches Done. Runs on RepoBeta for counter isolation | 10–20 min | low (no Claude) |
 
 Approximate suite total: ~470 min wall-clock, $7.50–24 in Claude tokens (CI-fix, `TestPausedMergedPRRecovery`, and conjunctive-gate tests should be run separately with `E2E_TIMEOUT=3h` or `E2E_TIMEOUT=2h` as noted above).
 
@@ -212,6 +226,7 @@ Approximate suite total: ~470 min wall-clock, $7.50–24 in Claude tokens (CI-fi
 | `TestMergeTrainHappyPathLanding` | ADR-059 D1/D3 (#946, #947, #948) — Queued column, trial-branch build, integration-PR landing + member lifecycle |
 | `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4 (#949) — halving bisection, ejection, one-at-a-time fallback |
 | `TestMergeTrainRestartSafety` | ADR-059 D5 (#950) + PR #960 (reconstruct must not stall on a historical merged PR) |
+| `TestMergeTrainRunawayGuardPausesBatch` | ADR-059 D8 (#964) — runaway guard trial cap, per-repo counter isolation |
 
 Every escape-from-release regression earns a new scenario in this table.
 
