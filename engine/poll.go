@@ -1712,6 +1712,15 @@ func (e *Engine) routeQueuedGroup(ctx context.Context, repoKey string, items []g
 		e.logf(0, "merge-train", "batch capped for %s: %d Queued item(s) exceed max_batch_size=%d — landing first %d by entry order\n", repoKey, len(trainItems), maxBatch, maxBatch)
 		trainItems = capBatch(trainItems, maxBatch)
 	}
+	// Hook 2: pre-dispatch runaway guard check (ADR-059 D8). Handles beyond-cap Queued
+	// members that the in-flight worker couldn't reach during Hook 1 (one-poll-cycle gap).
+	// Uses the uncapped `items` slice so all Queued members are paused, not just the batch cap.
+	if count, tripped := e.isRunawayTripped(repoKey); tripped {
+		owner, repo := parseOwnerRepo(repoKey)
+		e.logf(0, "merge-train", "runaway guard already tripped for %s (%d trial(s)) — pausing %d Queued member(s) before dispatch\n", repoKey, count, len(items))
+		e.fireRunawayGuard(ctx, owner, repo, items, count)
+		return
+	}
 	var parts []string
 	for _, item := range trainItems {
 		parts = append(parts, fmt.Sprintf("#%d %q", item.Number, item.Title))

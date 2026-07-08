@@ -121,6 +121,26 @@ personal — the internal-train branch is always taken.)
   (a label or sub-state), preserving cruise's "human decides to merge" contract — now batched.
   (v1 may scope the train to yolo `Queued` items and treat cruise batching as a fast-follow.)
 
+### D8 — Runaway guard (composition-agnostic trial rate cap)
+
+**Problem.** On 2026-07-06, a billing-blocked CI on `handarbeit/fabrik-test-alpha` produced 2,730 GitHub Actions workflow runs in a single day (~1,400 trial PRs × 2 required checks). The root cause: GitHub reports a billing-blocked job as plain `conclusion: failure`, indistinguishable from a content-red batch without parsing the per-step annotation text ("recent account payments have failed"). The train therefore treated the infra fault as a persistent poisoner, bisected and ejected every member (up to `MaxMergeTrainEjections` rounds each), and re-formed a fresh batch on every poll cycle — burning ~1 trial family per 60 seconds until the account was exhausted.
+
+**Why not classify failure causes?** Parsing per-check annotations to distinguish "infra failure" from "code failure" would require fetching the check run's step annotations on every red result — extra API traffic, fragile to GitHub annotation format changes, and still not complete (a broken base branch or a test suite permanently broken by a merged commit looks exactly like a content-red to annotation parsing). This path is deferred as a potential future fast-path but is not taken here.
+
+**Decision: composition-agnostic trial rate cap.** Add a cross-poll-cycle rolling-window counter keyed `owner/repo` (parallel to `mergeTrainEjectionCounts`). If a repo creates ≥ `MaxTrainTrialsPerWindow` trial branches with **zero successful landings** within a rolling `TrainTrialWindowDuration` window, pause all Queued members for that repo and stop dispatching until a human clears the labels.
+
+**Design:**
+- `recordTrial(repoKey)` is called at the top of `assembleAndValidate` (the single site where all trial branches are created) before the test-seam branch, so every trial — initial batch, bisection sub-trials, and one-at-a-time singletons — counts.
+- `resetTrialCounter(repoKey)` is called from `landMergeTrainBatch` and `landSingleton` after a successful merge. A train where survivors do land (normal poison bisection) never accumulates toward the cap.
+- Two hooks ensure all Queued members are paused, not just the active batch: **Hook 1** inside `runMergeTrainWorker` (pauses the active batch immediately when the guard fires); **Hook 2** in `routeQueuedGroup` before dispatch (pauses any beyond-cap Queued members on the next poll). The one-poll-cycle gap for beyond-cap members is acceptable because they cannot form a new batch while the worker goroutine is still active.
+- `fireRunawayGuard` logs at the `merge-train` tag, applies `fabrik:paused` + `fabrik:awaiting-input` to each member, and posts an alert comment explaining the trial count, window, and remediation steps.
+
+**Defaults:** `MaxTrainTrialsPerWindow = 20`, `TrainTrialWindowDuration = 60 min`.
+
+Derivation: worst-case legitimate bisection (MaxBatchSize=5) resets the counter at or before trial 8 (a bisection that isolates a poisoner, plus one green re-form trial). The one-at-a-time fallback with a cross-PR interaction accumulates at most 7 trials before the first singleton lands and resets. N=20 is well above both: a billing-blocked repo accumulates 20 trials in seconds (CI fails immediately); a healthy repo lands members and resets before reaching 20. The 60-min window covers slow CI (30 min/check × 2 checks = 60 min for one real trial) while billing-blocked CI hits the cap in under a minute.
+
+**Restart semantics:** the counter is in-memory and resets on engine restart. `fabrik:paused` labels persist on GitHub, so the poison-well exclusion (`groupQueuedByRepo`) continues preventing re-formation after a restart. The only gap is a simultaneous restart + manual unpause while infra is still broken — this is acceptable per the spec (R6).
+
 ## Consequences
 
 **Positive:**
