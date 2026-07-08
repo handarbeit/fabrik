@@ -47,6 +47,8 @@ type Config struct {
 	MaxBatchSize             int           // Max Queued items snapshotted into one merge-train batch (0 = derive default 5; ADR-059 D4/D-f)
 	MaxBisectValidations     int           // Max combined validations per red batch before the one-at-a-time fallback (0 = derive 2·⌈log₂(MaxBatchSize)⌉+1; ADR-059 D4/D-f)
 	MaxTrainRebaseCycles     int           // Max main-moved rebase+revalidate cycles per merge-train batch before dissolving (0 = default 3; ADR-059 D5)
+	MaxTrainTrialsPerWindow  int           // Runaway guard: max trial-branch creations with zero successful lands before pausing all Queued members (0 = default 20; ADR-059 D8)
+	TrainTrialWindowDuration time.Duration // Runaway guard: rolling window over which MaxTrainTrialsPerWindow is measured (0 = default 60m; ADR-059 D8)
 	KillGraceSigInt          time.Duration // Grace window after SIGINT before SIGTERM (default 10s; 0 = skip SIGINT step)
 	KillGraceSigTerm         time.Duration // Grace window after SIGTERM before SIGKILL (default 10s)
 	ClaudeWaitDelay          time.Duration // How long to wait after Claude exits before giving up on pipe drain and recovering output (default 30s)
@@ -104,6 +106,8 @@ type Engine struct {
 	mergeTrainInFlight       sync.Map        // key: "owner/repo", value: *mergeTrainWorkerState; per-repo train dispatch guard
 	mergeTrainEjectionsMu   sync.Mutex      // guards mergeTrainEjectionCounts
 	mergeTrainEjectionCounts map[string]int  // key: "owner/repo#N", ejection count per member
+	mergeTrainTrialsMu      sync.Mutex      // guards mergeTrainTrials
+	mergeTrainTrials        map[string][]time.Time // key: "owner/repo", trial timestamps for runaway guard (ADR-059 D8)
 	issueCtxs             sync.Map             // key: issueKey string, value: issueCtxEntry; per-issue context for kill-reason propagation
 	baseBranchWarnedSet   sync.Map             // key: "owner/repo#N:branch"; prevents repeated fallback comments for bad base: labels
 	events                chan tui.Event       // nil in tests / plain-text mode; TUI goroutine consumes
@@ -187,6 +191,7 @@ func New(cfg Config) (*Engine, error) {
 		checkedAutoMergeRepos:    make(map[string]bool),
 		sem:                      make(chan struct{}, cfg.MaxConcurrent),
 		mergeTrainEjectionCounts: make(map[string]int),
+		mergeTrainTrials:         make(map[string][]time.Time),
 	}
 
 	// Migrate any old-style worktrees (issue-N/) to the new per-repo layout.
@@ -241,6 +246,7 @@ func NewWithDeps(cfg Config, client GitHubClient, claude ClaudeInvoker, worktree
 		checkedAutoMergeRepos:    make(map[string]bool),
 		sem:                      make(chan struct{}, maxConcurrent),
 		mergeTrainEjectionCounts: make(map[string]int),
+		mergeTrainTrials:         make(map[string][]time.Time),
 	}
 	if worktrees != nil {
 		worktrees.logfFn = eng.logf

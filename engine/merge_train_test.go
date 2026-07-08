@@ -2457,3 +2457,268 @@ func TestBuildIntegrationPRBody_ClosesMembers(t *testing.T) {
 		t.Errorf("body must Closes the issue numbers (7,9), not the PR numbers (70,90)\n%s", body)
 	}
 }
+
+// ── ADR-059 D8: runaway guard ─────────────────────────────────────────────────
+
+// TestEffectiveTrialWindow_Defaults verifies zero-means-default: N=20, M=60min.
+func TestEffectiveTrialWindow_Defaults(t *testing.T) {
+	eng := &Engine{cfg: Config{}, mergeTrainTrials: make(map[string][]time.Time)}
+	n, m := eng.effectiveTrialWindow()
+	if n != 20 {
+		t.Errorf("effectiveTrialWindow() N = %d, want 20", n)
+	}
+	if m != 60*time.Minute {
+		t.Errorf("effectiveTrialWindow() M = %v, want 60m", m)
+	}
+}
+
+// TestEffectiveTrialWindow_Override verifies explicit config values are respected.
+func TestEffectiveTrialWindow_Override(t *testing.T) {
+	eng := &Engine{cfg: Config{MaxTrainTrialsPerWindow: 5, TrainTrialWindowDuration: 30 * time.Minute}, mergeTrainTrials: make(map[string][]time.Time)}
+	n, m := eng.effectiveTrialWindow()
+	if n != 5 {
+		t.Errorf("effectiveTrialWindow() N = %d, want 5", n)
+	}
+	if m != 30*time.Minute {
+		t.Errorf("effectiveTrialWindow() M = %v, want 30m", m)
+	}
+}
+
+// TestRecordTrial_Increments verifies recordTrial appends timestamps and returns
+// the growing count. isRunawayTripped returns false below the threshold.
+func TestRecordTrial_Increments(t *testing.T) {
+	eng := &Engine{cfg: Config{MaxTrainTrialsPerWindow: 3, TrainTrialWindowDuration: time.Hour}, mergeTrainTrials: make(map[string][]time.Time)}
+	const key = "owner/repo"
+
+	for i := 1; i <= 2; i++ {
+		count := eng.recordTrial(key)
+		if count != i {
+			t.Errorf("recordTrial iteration %d: count = %d, want %d", i, count, i)
+		}
+		if _, tripped := eng.isRunawayTripped(key); tripped {
+			t.Errorf("isRunawayTripped should be false before threshold (iteration %d)", i)
+		}
+	}
+}
+
+// TestIsRunawayTripped_AtThreshold verifies the guard trips at exactly N trials.
+func TestIsRunawayTripped_AtThreshold(t *testing.T) {
+	const N = 3
+	eng := &Engine{cfg: Config{MaxTrainTrialsPerWindow: N, TrainTrialWindowDuration: time.Hour}, mergeTrainTrials: make(map[string][]time.Time)}
+	const key = "owner/repo"
+
+	for i := 0; i < N-1; i++ {
+		eng.recordTrial(key)
+	}
+	if _, tripped := eng.isRunawayTripped(key); tripped {
+		t.Error("guard must not trip before reaching N trials")
+	}
+	eng.recordTrial(key)
+	count, tripped := eng.isRunawayTripped(key)
+	if !tripped {
+		t.Errorf("guard must trip at N=%d trials, count=%d", N, count)
+	}
+	if count != N {
+		t.Errorf("count = %d, want %d", count, N)
+	}
+}
+
+// TestResetTrialCounter clears the counter so isRunawayTripped returns false.
+func TestResetTrialCounter(t *testing.T) {
+	const N = 3
+	eng := &Engine{cfg: Config{MaxTrainTrialsPerWindow: N, TrainTrialWindowDuration: time.Hour}, mergeTrainTrials: make(map[string][]time.Time)}
+	const key = "owner/repo"
+
+	for i := 0; i < N; i++ {
+		eng.recordTrial(key)
+	}
+	if _, tripped := eng.isRunawayTripped(key); !tripped {
+		t.Fatal("precondition: guard should be tripped before reset")
+	}
+	eng.resetTrialCounter(key)
+	if _, tripped := eng.isRunawayTripped(key); tripped {
+		t.Error("guard must not be tripped after reset")
+	}
+}
+
+// TestRunawayGuard_Fires verifies that when the trial counter reaches N with no
+// successful lands, the guard pauses all batch members and posts an alert comment.
+// N=2: trial 1 (initial batch), trial 2 (bisect half) → guard trips during bisect
+// while all members are still in the active survivors set from the initial red trial.
+func TestRunawayGuard_Fires(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	// Always red — no member ever lands.
+	eng, client, _ := seamTrainEngine(t, wm, func(map[int]bool) bool { return true })
+	eng.cfg.MaxTrainTrialsPerWindow = 2
+	eng.cfg.TrainTrialWindowDuration = time.Hour
+
+	batch := makeSeamBatch(3)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	// All 3 batch members must have fabrik:paused + fabrik:awaiting-input applied.
+	for _, issueNum := range []int{1, 2, 3} {
+		paused, awaiting := false, false
+		for _, c := range client.addLabelCalls {
+			if c.issueNumber == issueNum && c.labelName == "fabrik:paused" {
+				paused = true
+			}
+			if c.issueNumber == issueNum && c.labelName == "fabrik:awaiting-input" {
+				awaiting = true
+			}
+		}
+		if !paused {
+			t.Errorf("member #%d: expected fabrik:paused (runaway guard)", issueNum)
+		}
+		if !awaiting {
+			t.Errorf("member #%d: expected fabrik:awaiting-input (runaway guard)", issueNum)
+		}
+		// Alert comment posted on each member.
+		hasAlert := false
+		for _, c := range client.addCommentCalls {
+			if c.issueNumber == issueNum && strings.Contains(c.body, "runaway guard") {
+				hasAlert = true
+			}
+		}
+		if !hasAlert {
+			t.Errorf("member #%d: expected runaway guard alert comment", issueNum)
+		}
+	}
+
+	// mergeTrainInFlight must be cleared after the guard fires.
+	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+		t.Error("expected mergeTrainInFlight cleared after runaway guard fires")
+	}
+}
+
+// TestRunawayGuard_NormalBisectionNotTripped verifies R7: a batch with a single real
+// poisoner isolates the poisoner, lands the survivors, and never trips the guard,
+// because a successful landing resets the counter.
+func TestRunawayGuard_NormalBisectionNotTripped(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	// Red iff #3 is present; #3 is the sole poisoner.
+	eng, client, _ := seamTrainEngine(t, wm, func(p map[int]bool) bool { return p[3] })
+	// Low threshold — still must not trip because survivors land and reset the counter.
+	eng.cfg.MaxTrainTrialsPerWindow = 10
+	eng.cfg.TrainTrialWindowDuration = time.Hour
+
+	batch := makeSeamBatch(5)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	// #3 ejected (poisoner), survivors land — no member should have fabrik:paused
+	// from the runaway guard (the ejection-pause from MaxMergeTrainEjections is a
+	// different code path; here MaxMergeTrainEjections=3 so #3 gets paused by ejectMember
+	// after the first ejection only when the counter is pre-seeded — it won't here).
+	for _, issueNum := range []int{1, 2, 4, 5} {
+		for _, c := range client.addLabelCalls {
+			if c.issueNumber == issueNum && c.labelName == "fabrik:paused" {
+				// Only look for "runaway guard" comments — ejection-pause is a distinct path.
+				for _, cc := range client.addCommentCalls {
+					if cc.issueNumber == issueNum && strings.Contains(cc.body, "runaway guard") {
+						t.Errorf("survivor #%d got a runaway guard alert — guard must not fire when survivors land", issueNum)
+					}
+				}
+			}
+		}
+	}
+
+	// Survivors integration PR must be merged exactly once.
+	merges := len(client.mergePRCalls)
+	if merges != 1 {
+		t.Errorf("expected survivors to land (1 merge), got %d merges", merges)
+	}
+}
+
+// TestMergeTrainRunawayGuard is the e2e runaway guard test: a persistently-red batch
+// where every trial fails and no member ever lands trips the guard within N trials,
+// pausing all Queued members. Follows the pattern of TestMergeTrainBisect_CostCapFallbackLogs.
+// N=2 so the guard trips during the first bisection sub-trial, before any member is ejected,
+// ensuring all original batch members are still in survivors when fireRunawayGuard is called.
+func TestMergeTrainRunawayGuard(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	// All batches always red — no member ever lands.
+	eng, client, rv := seamTrainEngine(t, wm, func(map[int]bool) bool { return true })
+	eng.cfg.MaxTrainTrialsPerWindow = 2
+	eng.cfg.TrainTrialWindowDuration = time.Hour
+
+	batch := makeSeamBatch(3)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out := captureStdout(func() {
+		eng.runMergeTrainWorker(ctx, state, "owner", "repo", batch)
+	})
+
+	// Guard must fire within the configured trial bound.
+	if rv.count() > 2 {
+		t.Errorf("guard must fire within N=2 trials, got %d trials", rv.count())
+	}
+
+	// Log must mention the runaway guard.
+	if !strings.Contains(out, "runaway guard") {
+		t.Errorf("expected 'runaway guard' in log output; stdout was:\n%s", out)
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+
+	// All 3 members must be paused + awaiting-input.
+	for _, issueNum := range []int{1, 2, 3} {
+		paused, awaiting := false, false
+		for _, c := range client.addLabelCalls {
+			if c.issueNumber == issueNum && c.labelName == "fabrik:paused" {
+				paused = true
+			}
+			if c.issueNumber == issueNum && c.labelName == "fabrik:awaiting-input" {
+				awaiting = true
+			}
+		}
+		if !paused {
+			t.Errorf("e2e: member #%d must have fabrik:paused (runaway guard)", issueNum)
+		}
+		if !awaiting {
+			t.Errorf("e2e: member #%d must have fabrik:awaiting-input (runaway guard)", issueNum)
+		}
+		hasAlert := false
+		for _, c := range client.addCommentCalls {
+			if c.issueNumber == issueNum && strings.Contains(c.body, "runaway guard") {
+				hasAlert = true
+			}
+		}
+		if !hasAlert {
+			t.Errorf("e2e: member #%d: expected runaway guard alert comment", issueNum)
+		}
+	}
+
+	// No integration PR should be created (guard fires before landing).
+	for _, c := range client.createPRCalls {
+		if strings.Contains(c.title, "[merge-train] batch") {
+			t.Errorf("e2e: integration landing PR must not be created when guard fires, got PR: %q", c.title)
+		}
+	}
+
+	// mergeTrainInFlight must be cleared.
+	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
+		t.Error("e2e: expected mergeTrainInFlight cleared after runaway guard fires")
+	}
+}

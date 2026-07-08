@@ -321,6 +321,14 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 			return
 		}
 
+		// Hook 1: check runaway guard after the initial re-form trial (ADR-059 D8).
+		if count, tripped := e.isRunawayTripped(repoKey); tripped {
+			e.cleanupTrialArtifacts(p.wm, trialName)
+			e.fireRunawayGuard(ctx, p.owner, p.repo, membersToItems(current), count)
+			e.mergeTrainInFlight.Delete(repoKey)
+			return
+		}
+
 		state.mu.Lock()
 		state.prNum = prNum
 		state.assembling = false
@@ -348,10 +356,17 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 			state.mu.Lock()
 			state.bisecting = true
 			state.mu.Unlock()
-			nextSurvivors, fellBack := e.handleRedBatch(ctx, state, p, survivors)
+			nextSurvivors, fellBack, runaway := e.handleRedBatch(ctx, state, p, survivors)
 			state.mu.Lock()
 			state.bisecting = false
 			state.mu.Unlock()
+			if runaway {
+				// Runaway guard fired inside bisect or landOneAtATime.
+				count, _ := e.isRunawayTripped(repoKey)
+				e.fireRunawayGuard(ctx, p.owner, p.repo, membersToItems(survivors), count)
+				e.mergeTrainInFlight.Delete(repoKey)
+				return
+			}
 			if fellBack {
 				// The one-at-a-time fallback already landed/ejected every member.
 				e.mergeTrainInFlight.Delete(repoKey)
@@ -457,6 +472,7 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 // alone (ADR-059 D4 test seam). This is the ONLY combined validation on the common path — a
 // green result must never trigger bisection (D-d).
 func (e *Engine) assembleAndValidate(ctx context.Context, p trialParams, members []trainMember, trialName string) ([]trainMember, TrainCIResult, int, error) {
+	e.recordTrial(p.owner + "/" + p.repo)
 	if e.trainValidateFn != nil {
 		return members, e.trainValidateFn(ctx, members), 0, nil
 	}
@@ -511,20 +527,21 @@ func (e *Engine) assembleAndValidate(ctx context.Context, p trialParams, members
 // bisect recursively halves a known-red member set to isolate the single poisoning member
 // (ADR-059 D4 / FR-1), reusing assembleAndValidate for each trial in the bors-ng test order
 // (test half A; if red recurse into A; else test half B; if red recurse into B). It returns
-// the isolated poisoner, or (nil, true) when the redness is a non-isolable cross-PR
+// the isolated poisoner, (nil, true, false) when the redness is a non-isolable cross-PR
 // interaction (both halves green) or the per-episode cost budget (*used vs costCap) is
-// exhausted — either of which degrades to the FR-5 one-at-a-time fallback (D-e). red is
-// assumed to be a validated-red set (its redness established by the caller).
-func (e *Engine) bisect(ctx context.Context, p trialParams, red []trainMember, used *int, costCap int) (*trainMember, bool) {
+// exhausted — either degrades to the FR-5 one-at-a-time fallback (D-e) — or (nil, false, true)
+// when the runaway guard fires. red is assumed to be a validated-red set.
+func (e *Engine) bisect(ctx context.Context, p trialParams, red []trainMember, used *int, costCap int) (*trainMember, bool, bool) {
 	if len(red) == 1 {
-		return &red[0], false
+		return &red[0], false, false
 	}
 
+	repoKey := p.owner + "/" + p.repo
 	mid := len(red) / 2
 	for _, half := range [][]trainMember{red[:mid], red[mid:]} {
 		if *used >= costCap {
 			e.logf(0, "merge-train", "bisection cost cap (%d validations) reached — degrading to one-at-a-time fallback\n", costCap)
-			return nil, true
+			return nil, true, false
 		}
 		trialName := p.nextTrialName()
 		survivors, result, _, err := e.assembleAndValidate(ctx, p, half, trialName)
@@ -532,7 +549,13 @@ func (e *Engine) bisect(ctx context.Context, p trialParams, red []trainMember, u
 		e.cleanupTrialArtifacts(p.wm, trialName)
 		if err != nil {
 			e.logf(0, "merge-train", "bisection trial failed to assemble: %v — degrading to one-at-a-time fallback\n", err)
-			return nil, true
+			if _, tripped := e.isRunawayTripped(repoKey); tripped {
+				return nil, false, true
+			}
+			return nil, true, false
+		}
+		if _, tripped := e.isRunawayTripped(repoKey); tripped {
+			return nil, false, true
 		}
 		if result == TrainCIRed && len(survivors) > 0 {
 			return e.bisect(ctx, p, survivors, used, costCap)
@@ -540,25 +563,29 @@ func (e *Engine) bisect(ctx context.Context, p trialParams, red []trainMember, u
 	}
 
 	// Both halves green: the redness spans the split — a non-isolable interaction (D-e).
-	return nil, true
+	return nil, true, false
 }
 
 // handleRedBatch bisects a red batch to isolate and eject the poisoning member (FR-1/FR-2),
 // then returns the surviving members for the main loop to re-form and re-validate (FR-3).
 // When bisection cannot isolate a single culprit within the cost budget (a non-isolable
 // interaction or cost-cap exhaustion), it degrades to the one-at-a-time fallback (FR-5),
-// which lands/ejects every member itself, and returns (nil, true). The cost budget is
-// per red-batch episode: it starts at 1 (the initial red validation) and is capped at
-// effectiveBisectCap().
-func (e *Engine) handleRedBatch(ctx context.Context, state *mergeTrainWorkerState, p trialParams, red []trainMember) ([]trainMember, bool) {
+// which lands/ejects every member itself, and returns (nil, true, false). Returns
+// (nil, false, true) when the runaway guard fires inside bisect or landOneAtATime. The
+// cost budget is per red-batch episode: it starts at 1 (the initial red validation) and
+// is capped at effectiveBisectCap().
+func (e *Engine) handleRedBatch(ctx context.Context, state *mergeTrainWorkerState, p trialParams, red []trainMember) ([]trainMember, bool, bool) {
 	used := 1 // the initial red validation counts toward the per-episode budget
 	costCap := e.effectiveBisectCap()
 
-	poisoner, fellBack := e.bisect(ctx, p, red, &used, costCap)
+	poisoner, fellBack, runaway := e.bisect(ctx, p, red, &used, costCap)
+	if runaway {
+		return nil, false, true
+	}
 	if fellBack {
 		e.logf(0, "merge-train", "could not isolate a single poisoner for %s/%s (%d/%d validations used) — degrading to one-at-a-time landing of %d member(s)\n", p.owner, p.repo, used, costCap, len(red))
-		e.landOneAtATime(ctx, state, p, red)
-		return nil, true
+		runaway = e.landOneAtATime(ctx, state, p, red)
+		return nil, true, runaway
 	}
 
 	// Eject the isolated poisoner (D-a shared counter, D-c comment, cap→pause reuse).
@@ -572,18 +599,20 @@ func (e *Engine) handleRedBatch(ctx context.Context, state *mergeTrainWorkerStat
 			survivors = append(survivors, red[i])
 		}
 	}
-	return survivors, false
+	return survivors, false, false
 }
 
 // landOneAtATime is the FR-5 fallback: it validates and lands each member as its own
 // singleton batch, which dissolves any cross-PR interaction by construction (no two members
 // co-reside). A green singleton lands via landSingleton; a red singleton fails even in
-// isolation and is ejected; a pending singleton is left in Queued to retry. In the real path
-// the base is re-pinned to the current origin/<base> before each singleton so a prior land is
-// visible to the next member's validation (this is what actually dissolves a genuine
-// interaction); under the test seam this git step is skipped (the membership-keyed fn is
-// stateless — see the ADR-059 D4 landOneAtATime note in docs/state-machine.md).
-func (e *Engine) landOneAtATime(ctx context.Context, state *mergeTrainWorkerState, p trialParams, members []trainMember) {
+// isolation and is ejected; a pending singleton is left in Queued to retry. Returns true if
+// the runaway guard fires during processing. In the real path the base is re-pinned to the
+// current origin/<base> before each singleton so a prior land is visible to the next member's
+// validation (this is what actually dissolves a genuine interaction); under the test seam this
+// git step is skipped (the membership-keyed fn is stateless — see the ADR-059 D4
+// landOneAtATime note in docs/state-machine.md).
+func (e *Engine) landOneAtATime(ctx context.Context, state *mergeTrainWorkerState, p trialParams, members []trainMember) bool {
+	repoKey := p.owner + "/" + p.repo
 	e.logf(0, "merge-train", "one-at-a-time fallback: processing %d member(s) as singleton batches\n", len(members))
 	for _, m := range members {
 		if e.trainValidateFn == nil {
@@ -602,7 +631,14 @@ func (e *Engine) landOneAtATime(ctx context.Context, state *mergeTrainWorkerStat
 		if err != nil || len(survivors) == 0 {
 			e.logf(m.item.Number, "merge-train", "could not assemble #%d in isolation: %v — leaving in Queued\n", m.item.Number, err)
 			e.cleanupTrialArtifacts(p.wm, trialName)
+			if _, tripped := e.isRunawayTripped(repoKey); tripped {
+				return true
+			}
 			continue
+		}
+		if _, tripped := e.isRunawayTripped(repoKey); tripped {
+			e.cleanupTrialArtifacts(p.wm, trialName)
+			return true
 		}
 
 		switch result {
@@ -618,6 +654,7 @@ func (e *Engine) landOneAtATime(ctx context.Context, state *mergeTrainWorkerStat
 			e.logf(m.item.Number, "merge-train", "combined Validate pending for singleton #%d — leaving in Queued\n", m.item.Number)
 		}
 	}
+	return false
 }
 
 // landSingleton lands a single member from its own validated-green trial branch. It creates a
@@ -685,6 +722,7 @@ func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState
 	}
 
 	e.resetEjectionCount(p.owner, p.repo, m.item.Number)
+	e.resetTrialCounter(p.owner + "/" + p.repo)
 }
 
 // cleanupTrialArtifacts removes a trial's local worktree and its local+remote branch (which
@@ -841,6 +879,103 @@ func (e *Engine) resetEjectionCount(owner, repo string, memberNum int) {
 	e.mergeTrainEjectionsMu.Lock()
 	delete(e.mergeTrainEjectionCounts, counterKey)
 	e.mergeTrainEjectionsMu.Unlock()
+}
+
+// effectiveTrialWindow returns the runaway-guard threshold (N) and rolling window (M),
+// applying zero-means-default semantics: N=20, M=60min (ADR-059 D8).
+func (e *Engine) effectiveTrialWindow() (int, time.Duration) {
+	n := e.cfg.MaxTrainTrialsPerWindow
+	if n <= 0 {
+		n = 20
+	}
+	m := e.cfg.TrainTrialWindowDuration
+	if m <= 0 {
+		m = 60 * time.Minute
+	}
+	return n, m
+}
+
+// recordTrial appends a timestamp for repoKey, prunes entries older than the window,
+// and returns the current count. Called at the start of every assembleAndValidate.
+func (e *Engine) recordTrial(repoKey string) int {
+	_, m := e.effectiveTrialWindow()
+	now := time.Now()
+	cutoff := now.Add(-m)
+	e.mergeTrainTrialsMu.Lock()
+	ts := e.mergeTrainTrials[repoKey]
+	ts = append(ts, now)
+	pruned := ts[:0]
+	for _, t := range ts {
+		if !t.Before(cutoff) {
+			pruned = append(pruned, t)
+		}
+	}
+	e.mergeTrainTrials[repoKey] = pruned
+	count := len(pruned)
+	e.mergeTrainTrialsMu.Unlock()
+	return count
+}
+
+// isRunawayTripped returns the current pruned trial count for repoKey and whether it has
+// reached the threshold. Called after each trial-producing operation.
+func (e *Engine) isRunawayTripped(repoKey string) (int, bool) {
+	n, m := e.effectiveTrialWindow()
+	cutoff := time.Now().Add(-m)
+	e.mergeTrainTrialsMu.Lock()
+	ts := e.mergeTrainTrials[repoKey]
+	pruned := ts[:0]
+	for _, t := range ts {
+		if !t.Before(cutoff) {
+			pruned = append(pruned, t)
+		}
+	}
+	if len(pruned) == 0 {
+		delete(e.mergeTrainTrials, repoKey)
+	} else {
+		e.mergeTrainTrials[repoKey] = pruned
+	}
+	count := len(pruned)
+	e.mergeTrainTrialsMu.Unlock()
+	return count, count >= n
+}
+
+// resetTrialCounter clears the trial counter for repoKey after a successful landing,
+// so normal poison bisection (where survivors do land) never accumulates toward the cap.
+func (e *Engine) resetTrialCounter(repoKey string) {
+	e.mergeTrainTrialsMu.Lock()
+	delete(e.mergeTrainTrials, repoKey)
+	e.mergeTrainTrialsMu.Unlock()
+}
+
+// fireRunawayGuard pauses all Queued members for the repo, posts an alert comment on each,
+// and logs the event. Called when the trial counter reaches the runaway threshold (ADR-059 D8).
+func (e *Engine) fireRunawayGuard(ctx context.Context, owner, repo string, items []gh.ProjectItem, count int) {
+	_, m := e.effectiveTrialWindow()
+	repoKey := owner + "/" + repo
+	e.logf(0, "merge-train", "runaway guard fired for %s: %d trial(s) with zero successful lands within %s — pausing %d Queued member(s)\n",
+		repoKey, count, m, len(items))
+	for _, item := range items {
+		msg := fmt.Sprintf("🏭 **Fabrik merge-train — runaway guard tripped**\n\n"+
+			"The merge-train has created **%d trial branches** for `%s` within the last %s "+
+			"with **zero successful landings**. This indicates a persistent infra failure "+
+			"(e.g. billing-blocked CI, broken base branch, or all required checks erroring) "+
+			"rather than a code-composition issue.\n\n"+
+			"**Actions taken:** `fabrik:paused` and `fabrik:awaiting-input` applied to all Queued members.\n\n"+
+			"**What to do:**\n"+
+			"1. Investigate the infra root cause (check GitHub Actions billing, required check configuration, base branch health).\n"+
+			"2. Resolve the underlying issue.\n"+
+			"3. Manually remove `fabrik:paused` and `fabrik:awaiting-input` from each affected Queued member to re-enable the merge-train.",
+			count, repoKey, m)
+		if _, commentErr := e.client.AddComment(owner, repo, item.Number, msg); commentErr != nil {
+			e.logf(item.Number, "merge-train", "warn: could not post runaway guard comment: %v\n", commentErr)
+		}
+		if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
+			e.logf(item.Number, "warn", "could not add fabrik:paused (runaway guard): %v\n", err)
+		}
+		if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
+			e.logf(item.Number, "warn", "could not add fabrik:awaiting-input (runaway guard): %v\n", err)
+		}
+	}
 }
 
 // mergeTrainBatchMarker is the idempotency marker embedded in integration PR bodies.
@@ -1145,6 +1280,7 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 		// from earlier trains must not count toward the pause cap on future trains.
 		e.resetEjectionCount(owner, repo, m.item.Number)
 	}
+	e.resetTrialCounter(repoKey)
 	e.logf(0, "merge-train", "landing complete for %s (integration PR #%d, %d members)\n", repoKey, integrationPRNum, len(survivors))
 }
 

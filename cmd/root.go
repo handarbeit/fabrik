@@ -49,10 +49,12 @@ type Config struct {
 	AutoMergeStrategy    string // MERGE, SQUASH, or REBASE; "" means use default (MERGE)
 	MergeQueue           string // auto or off; "" means use default (auto)
 	MergeTrain           string // on or off; "" means use default (off)
-	MaxBatchSize         int    // 0 means use default (5)
-	MaxBisectValidations int    // 0 means derive default (2·⌈log₂(MaxBatchSize)⌉+1)
-	MaxTrainRebaseCycles int    // 0 means use default (3)
-	ClaudeWaitDelay      int    // seconds; 0 means use default (30)
+	MaxBatchSize             int    // 0 means use default (5)
+	MaxBisectValidations     int    // 0 means derive default (2·⌈log₂(MaxBatchSize)⌉+1)
+	MaxTrainRebaseCycles     int    // 0 means use default (3)
+	MaxTrainTrialsPerWindow  int    // 0 means use default (20)
+	TrainTrialWindowMinutes  int    // 0 means use default (60)
+	ClaudeWaitDelay          int    // seconds; 0 means use default (30)
 	PostPushDwell        int    // seconds; 0 means use default (90)
 	KillGraceSigInt      string // Go duration string; "" means use default (10s); "0s" skips SIGINT step
 	KillGraceSigTerm     string // Go duration string; "" means use default (10s)
@@ -151,6 +153,8 @@ func Execute() error {
 	flag.IntVar(&cfg.MaxBatchSize, "max-batch-size", 0, "Maximum Queued items landed in a single merge-train batch, ordered by entry (0 = use default of 5; smaller = cheaper worst-case bisection, fewer N² savings; also FABRIK_MAX_BATCH_SIZE)")
 	flag.IntVar(&cfg.MaxBisectValidations, "max-bisect-validations", 0, "Maximum combined validations per red merge-train batch before degrading to one-at-a-time landing (0 = derive 2·⌈log₂(max-batch-size)⌉+1, ≈7 at the default batch size; also FABRIK_MAX_BISECT_VALIDATIONS)")
 	flag.IntVar(&cfg.MaxTrainRebaseCycles, "max-train-rebase-cycles", 0, "Maximum main-moved rebase+revalidate cycles for a merge-train batch before dissolving it back to Queued (0 = use default of 3; also FABRIK_MAX_TRAIN_REBASE_CYCLES)")
+	flag.IntVar(&cfg.MaxTrainTrialsPerWindow, "max-train-trials-per-window", 0, "Runaway guard: maximum trial-branch creations with zero successful lands within the window before pausing all Queued members (0 = use default of 20; also FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW)")
+	flag.IntVar(&cfg.TrainTrialWindowMinutes, "train-trial-window", 0, "Runaway guard: rolling window in minutes over which max-train-trials-per-window is measured (0 = use default of 60; also FABRIK_TRAIN_TRIAL_WINDOW)")
 	flag.IntVar(&cfg.ClaudeWaitDelay, "claude-wait-delay", 0, "Seconds to wait after Claude exits before recovering buffered output when grandchildren hold stdout pipe open (0 = use default of 30; also FABRIK_CLAUDE_WAIT_DELAY)")
 	flag.IntVar(&cfg.PostPushDwell, "post-push-dwell", 0, "Seconds to wait after a PR force-push before clearing the CI gate as 'no CI configured' (0 = use default of 90; also FABRIK_POST_PUSH_DWELL)")
 	flag.BoolVar(&cfg.DebugOutput, "debug-output", false, "Save Claude stage output to .fabrik/debug/ for debugging")
@@ -419,6 +423,24 @@ func Execute() error {
 				cfg.MaxTrainRebaseCycles = n
 			} else {
 				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_TRAIN_REBASE_CYCLES=%q is invalid (must be a positive integer); using default 3\n", v)
+			}
+		}
+	}
+	if !explicitFlags["max-train-trials-per-window"] {
+		if v := os.Getenv("FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				cfg.MaxTrainTrialsPerWindow = n
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW=%q is invalid (must be a positive integer); using default 20\n", v)
+			}
+		}
+	}
+	if !explicitFlags["train-trial-window"] {
+		if v := os.Getenv("FABRIK_TRAIN_TRIAL_WINDOW"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				cfg.TrainTrialWindowMinutes = n
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_TRAIN_TRIAL_WINDOW=%q is invalid (must be a positive integer of minutes); using default 60\n", v)
 			}
 		}
 	}
@@ -741,9 +763,11 @@ func Execute() error {
 		MergeQueue:               mergeQueueMode(cfg.MergeQueue),
 		MergeTrain:               mergeTrainMode(cfg.MergeTrain),
 		MaxMergeTrainEjections:   3, // ADR-059 default
-		MaxBatchSize:             cfg.MaxBatchSize,         // 0 = derive default (5) in engine
-		MaxBisectValidations:     cfg.MaxBisectValidations, // 0 = derive default in engine
-		MaxTrainRebaseCycles:     cfg.MaxTrainRebaseCycles, // 0 = derive default (3) in engine
+		MaxBatchSize:             cfg.MaxBatchSize,                                // 0 = derive default (5) in engine
+		MaxBisectValidations:     cfg.MaxBisectValidations,                        // 0 = derive default in engine
+		MaxTrainRebaseCycles:     cfg.MaxTrainRebaseCycles,                        // 0 = derive default (3) in engine
+		MaxTrainTrialsPerWindow:  cfg.MaxTrainTrialsPerWindow,                     // 0 = derive default (20) in engine
+		TrainTrialWindowDuration: trainTrialWindowDuration(cfg.TrainTrialWindowMinutes), // 0 = derive default (60m) in engine
 		ClaudeWaitDelay:          claudeWaitDelay(cfg.ClaudeWaitDelay),
 		KillGraceSigInt:          killGraceSigInt(cfg.KillGraceSigInt),
 		KillGraceSigTerm:         killGraceSigTerm(cfg.KillGraceSigTerm),
@@ -839,6 +863,16 @@ func ciWaitTimeout(minutes int) time.Duration {
 func workerStaleTimeout(minutes int) time.Duration {
 	if minutes <= 0 {
 		return 5 * time.Minute
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+// trainTrialWindowDuration converts a TrainTrialWindowMinutes config value (minutes) to a
+// time.Duration for the runaway guard rolling window (ADR-059 D8). When minutes is 0
+// (unset), returns 0 so the engine applies its own default of 60 minutes.
+func trainTrialWindowDuration(minutes int) time.Duration {
+	if minutes <= 0 {
+		return 0
 	}
 	return time.Duration(minutes) * time.Minute
 }

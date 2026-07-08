@@ -197,6 +197,23 @@ A batch is **usually green**: every member already passed Validate individually,
 
 **Dispatch-guard logging:** `state.bisecting` (set for the duration of `handleRedBatch`) makes `dispatchMergeTrainWorker` log "bisecting red batch" for a re-dispatch attempt during bisection, rather than the misleading "CI red — needs attention".
 
+**Runaway guard (ADR-059 D8):** a composition-agnostic rate cap that fires when a repo creates ≥ `MaxTrainTrialsPerWindow` trial branches (default 20) with **zero successful landings** within a rolling `TrainTrialWindowDuration` window (default 60 min). The guard is distinct from the poison-well guard (which terminates the loop) and the bisect cost cap (which degrades to one-at-a-time within one goroutine run): it bounds the cross-poll-cycle burst that occurs when infra is broken and every trial fails.
+
+**Counter:** `recordTrial(repoKey)` is called at the start of **every** `assembleAndValidate` call — the single site where all trial branches are created, covering both bisection sub-trials and one-at-a-time singletons. The counter is a rolling window (slice of `time.Time`) keyed `owner/repo`, protected by `mergeTrainTrialsMu`. `resetTrialCounter(repoKey)` deletes the entry; it is called from both `landMergeTrainBatch` and `landSingleton` after a successful merge, so any train where survivors do land never accumulates toward the cap.
+
+**Guard fires:** when `isRunawayTripped(repoKey)` returns `true` (count ≥ N within M minutes with zero resets), `fireRunawayGuard` is called. It:
+- Logs the event at the `merge-train` tag (never silent): repo key, trial count, window duration, and member count.
+- Applies `fabrik:paused` + `fabrik:awaiting-input` to **every current Queued member** passed to it.
+- Posts an alert comment on each member explaining the trial count seen, the window, and operator instructions.
+
+**Two-hook dispatch:** the guard is checked at two complementary points to cover both the active batch and any beyond-cap Queued members:
+1. **Hook 1 (worker-side, `runMergeTrainWorker`):** after the initial re-form trial and after `handleRedBatch` returns `runaway=true` (propagated from `bisect` or `landOneAtATime`). Pauses the active batch members (`membersToItems(survivors)` — the survivors of the initial trial assembly, which are all members when the guard trips during bisect before any ejection).
+2. **Hook 2 (poll-side, `routeQueuedGroup`):** before `dispatchMergeTrainWorker` is called. If the counter is already tripped (from a prior worker run), pauses all `trainItems` in the current Queued snapshot and skips dispatch. This handles beyond-cap members that Hook 1 could not reach.
+
+The one-poll-cycle gap between Hook 1 firing and Hook 2 handling beyond-cap members is acceptable: beyond-cap members cannot form their own batch while the worker goroutine is still active.
+
+**Operator resume:** once the runaway guard fires, all affected members have `fabrik:paused` and `fabrik:awaiting-input` applied and are therefore excluded from `groupQueuedByRepo` on every subsequent poll. No re-formation occurs until a human manually removes both `fabrik:paused` and `fabrik:awaiting-input` from each affected member. Before doing so, the operator should investigate the infra root cause (GitHub Actions billing, required-check configuration, base-branch health). The in-memory trial counter resets to zero on engine restart, but `fabrik:paused` labels persist on GitHub — so a restart alone does not re-enable the train; the labels must be cleared explicitly.
+
 ##### Merge-Train Serialization + Main-Moved Recovery (ADR-059 D5)
 
 The batch validates a *combined batch* against `main` once; its correctness rests on **the `main` the batch validated against being the `main` it lands on**. Serializing the train (one batch in flight per repo) keeps `main` from moving under a validating batch; the only remaining mover is an **external direct push by a human**, which is detected and recovered. D5 adds two things without weakening the atomic `LoadOrStore` guard on `mergeTrainInFlight`.
