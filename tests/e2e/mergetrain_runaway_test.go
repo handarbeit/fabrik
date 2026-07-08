@@ -58,7 +58,7 @@ func TestMergeTrainRunawayGuardPausesBatch(t *testing.T) {
 	t.Logf("all 4 poison members queued on %s; awaiting runaway guard", env.RepoBeta)
 
 	// Wait for the guard to fire — the longest assertion (up to 25 min).
-	WaitForLogLine(t, env, "runaway guard fired", logStart, 25*time.Minute)
+	WaitForLogLine(t, env, fmt.Sprintf("runaway guard fired for %s", env.RepoBeta), logStart, 25*time.Minute)
 	t.Logf("runaway guard fired; checking member labels and comments")
 
 	// Labels are applied inside fireRunawayGuard before the log line is written,
