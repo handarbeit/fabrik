@@ -3,10 +3,12 @@
 #
 # Usage:
 #   scripts/e2e/run.sh                       # full suite
+#   scripts/e2e/run.sh --clean               # reset boards/PRs/branches first, then full suite
 #   scripts/e2e/run.sh -run TestSmokeSingleRepoDispatch    # one test
 #   scripts/e2e/run.sh -run 'Smoke|NoWork'                 # subset
 #
-# Anything after the script name is passed to `go test`.
+# --clean (if given, must be the first argument) runs scripts/e2e/reset.sh for a
+# clean-slate bed before the suite. Anything else is passed to `go test`.
 #
 # Prerequisites (one-time setup):
 #   - ~/dev/fabrik-test/ exists with .env (FABRIK_TOKEN for @arbeithand)
@@ -19,6 +21,14 @@ set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
+
+# Optional clean-slate reset before the suite (must be the first argument).
+if [ "${1:-}" = "--clean" ]; then
+  shift
+  echo "== --clean: resetting the test bed via scripts/e2e/reset.sh =="
+  "$REPO_ROOT/scripts/e2e/reset.sh"
+  echo "== reset complete; starting suite =="
+fi
 
 # Default timeout — generous because scenarios can wait on Claude for minutes.
 TIMEOUT="${E2E_TIMEOUT:-90m}"
