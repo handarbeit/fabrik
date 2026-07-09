@@ -177,14 +177,27 @@ The `e2e` build tag keeps all of this out of the default `go test ./...` run.
 
 ### Reset between runs
 
+**Run this as part of test prep** — before a clean suite, so the bed starts from a
+known-empty state. Stale closed issues linger as **project-board items** and leftover
+`fabrik/*` branches otherwise pollute the next run's merge-train snapshots and make
+results hard to read.
+
 ```bash
-scripts/e2e/reset.sh             # closes open issues in alpha + beta
-scripts/e2e/reset.sh --worktrees # also wipes Fabrik's worktrees + bare clones (destructive)
+scripts/e2e/reset.sh             # full clean: PRs + issues + branches + board items (alpha + beta)
+scripts/e2e/reset.sh --worktrees # ALSO wipes Fabrik's worktrees + bare clones (destructive)
 ```
 
-Use the plain form between test runs to clean issues. The `--worktrees` form
-is for when the test bed itself is wedged (stop Fabrik first, it will refuse
-otherwise).
+The plain form resets to a clean slate: closes open PRs (deleting their branches),
+closes open issues, deletes leftover `fabrik/*` branches, and **removes every item
+from the "Fabrik Test" project board** (board items survive an issue close, so this
+is what an earlier issues-only reset missed). Overridable via `FABRIK_TEST_PROJECT_OWNER`
+/ `FABRIK_TEST_PROJECT_NUMBER` (default `handarbeit` / `2`).
+
+The `--worktrees` form is for when the test bed itself is wedged — stop Fabrik first,
+it will refuse otherwise.
+
+> Do **not** run reset while a suite is in flight — it will drain the board out from
+> under the running tests.
 
 ## Scenarios
 
