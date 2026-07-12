@@ -175,16 +175,51 @@ overall test timeout with `E2E_TIMEOUT` (default `90m`).
 
 The `e2e` build tag keeps all of this out of the default `go test ./...` run.
 
-### Reset between runs
+#### Parallelism cap — the shared bed oversubscribes easily
+
+15 of the 16 scenarios are `t.Parallel()`, but they **all drive one shared
+Fabrik bed** (5 workers by default) against **one shared board and one shared
+GitHub API budget**. Go's default `-parallel` is `GOMAXPROCS` (~8–12 cores), so
+an unbounded full run fires ~15 scenarios at once, floods the 5-worker bed, and
+saturates the API — producing cascading `transient gh error … (will retry)`
+timeouts **even though every scenario passes standalone** (see issue #971).
+
+`run.sh` therefore caps concurrency with `-parallel`, defaulting to **4**
+(`E2E_PARALLEL`):
 
 ```bash
-scripts/e2e/reset.sh             # closes open issues in alpha + beta
-scripts/e2e/reset.sh --worktrees # also wipes Fabrik's worktrees + bare clones (destructive)
+E2E_PARALLEL=2 scripts/e2e/run.sh   # tighter cap for a heavy/merge-train-heavy run
+E2E_PARALLEL=6 scripts/e2e/run.sh   # looser, only if the bed's --max-concurrent is raised too
 ```
 
-Use the plain form between test runs to clean issues. The `--worktrees` form
-is for when the test bed itself is wedged (stop Fabrik first, it will refuse
-otherwise).
+Lower values reduce oversubscription at the cost of wall-clock. The long
+merge-train and CI-fix scenarios (see their notes above) are still best run in
+isolation. **Do not** run the full suite unbounded expecting a clean pass — the
+failure will be timeouts, not real regressions.
+
+### Reset between runs
+
+**Run this as part of test prep** — before a clean suite, so the bed starts from a
+known-empty state. Stale closed issues linger as **project-board items** and leftover
+`fabrik/*` branches otherwise pollute the next run's merge-train snapshots and make
+results hard to read.
+
+```bash
+scripts/e2e/reset.sh             # full clean: PRs + issues + branches + board items (alpha + beta)
+scripts/e2e/reset.sh --worktrees # ALSO wipes Fabrik's worktrees + bare clones (destructive)
+```
+
+The plain form resets to a clean slate: closes open PRs (deleting their branches),
+closes open issues, deletes leftover `fabrik/*` branches, and **removes every item
+from the "Fabrik Test" project board** (board items survive an issue close, so this
+is what an earlier issues-only reset missed). Overridable via `FABRIK_TEST_PROJECT_OWNER`
+/ `FABRIK_TEST_PROJECT_NUMBER` (default `handarbeit` / `2`).
+
+The `--worktrees` form is for when the test bed itself is wedged — stop Fabrik first,
+it will refuse otherwise.
+
+> Do **not** run reset while a suite is in flight — it will drain the board out from
+> under the running tests.
 
 ## Scenarios
 
