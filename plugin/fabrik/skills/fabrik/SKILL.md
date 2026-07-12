@@ -160,7 +160,29 @@ Don't intervene when:
 
 ### Reading the board with the user
 
-If the user asks "what's going on?" or similar, suggest `/fabrik:status` (this plugin's slash command). It summarises in-flight issues, worker processes, and worktrees with uncommitted changes. For deeper inspection: `gh project item-list ...` or open the Project board in a browser.
+If the user asks "what's going on?" or similar, suggest `/fabrik:status` (this plugin's slash command). It summarises in-flight issues, worker processes, and worktrees with uncommitted changes. For deeper inspection: use the reusable helpers below, `gh project item-list ...`, or open the Project board in a browser.
+
+## Reusable helpers — prefer these over hand-rolled `gh` + `jq`
+
+This skill ships small bash scripts for the queries you'll run every session. **Use them.** Hand-rolling a GraphQL query for each request wastes tokens and drifts in shape between answers. All scripts auto-locate `.fabrik/config.yaml` by walking up from `$PWD` and handle both org- and user-owned projects. They live in `${CLAUDE_PLUGIN_ROOT}/skills/fabrik/scripts/` (or, if you can't resolve that, adjacent to this SKILL.md at `scripts/`).
+
+| When the user asks… | Run |
+|---|---|
+| "what's on the board?", "what's in flight?" | `scripts/board.sh` |
+| "show me `#N`", "status of `#N`", "which column is `#N` in?" | `scripts/issue.sh <N>` (add `--body` when you actually need the spec) |
+| "what did `<stage>` say on `#N`?", "show me the Research output" | `scripts/stage-output.sh <N> <StageName>` |
+| "what are the recent comments on `#N`?", "did my comment get processed?" | `scripts/comments.sh <N> --last 5` (add `--pr` for the linked PR's comments) |
+
+**Design notes:**
+
+- `board.sh` hides Done items and `stage:*:complete` labels by default (they're pipeline noise). Pass `--all` and `--raw-labels` when the user genuinely wants the full picture; pass `--column <Name>` or `--label <substring>` to slice.
+- `issue.sh` shows column, labels, updated time, comment count with last-comment metadata, and linked PRs — enough to answer 90% of "what's happening with `#N`?" without a second call.
+- `comments.sh` truncates bodies to 500 chars and shows reaction counts including 👀 and 🚀 so you can see comment-processing state at a glance. Pass `--full` when the user needs the whole thing.
+- `stage-output.sh` finds the last comment starting with `🏭 **Fabrik — stage: <StageName>**` and prints it — this is how Fabrik marks stage output. Also matches variants like `Fabrik — stage: Review (review feedback addressed)`.
+- `board.sh`, `issue.sh`, and `comments.sh` support `--json` when you need to chain further. `board.sh --json` returns the full `gh project item-list` payload. `stage-output.sh` prints text only — if you need JSON, `comments.sh <N> --json` and filter for the marker yourself.
+- Multi-repo mode (`repo:` unset in `config.yaml`): the scripts resolve the issue's repo from the project board automatically. If you already know the repo, pass `-r owner/repo` to skip the lookup — meaningful only on large boards.
+
+**Fallback:** if a script fails (missing `gh`, unusual config), the underlying commands are simple enough to inline — but do the debugging *once* and fix the script rather than routing around it every session.
 
 ## Pointers — link the user, don't paraphrase
 
