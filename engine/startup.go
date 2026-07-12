@@ -80,14 +80,22 @@ func (e *Engine) checkStageColumnAlignment(ctx context.Context) error {
 		}
 	}
 
-	// Find extra board columns (column not matching any non-cleanup stage).
-	stageNames := make(map[string]bool, len(checkStages))
-	for _, s := range checkStages {
-		stageNames[s.name] = true
+	// Find extra board columns: columns that no configured stage backs and that
+	// are not a well-known unmanaged column. Unlike the missing-column check
+	// above, this recognizes EVERY configured stage — including cleanup stages
+	// (e.g. Done) and holding stages (e.g. Queued) — because those columns are
+	// legitimately backed by a stage even though they don't require one. The
+	// "Backlog" entry column is intentionally unmanaged (Fabrik ignores it), so
+	// it is never reported as extra. A genuine typo'd column matches neither and
+	// is still surfaced.
+	recognized := make(map[string]bool, len(e.cfg.Stages)+1)
+	for _, s := range e.cfg.Stages {
+		recognized[s.Name] = true
 	}
+	recognized["Backlog"] = true
 	var extra []string
 	for colName := range sf.Options {
-		if !stageNames[colName] {
+		if !recognized[colName] {
 			extra = append(extra, colName)
 		}
 	}
