@@ -33,7 +33,7 @@ fabrik_find_root() {
 fabrik_config_get() {
   local key=$1 file=$2
   awk -v k="$key" '
-    BEGIN { pat = "^[[:space:]]*" k "[[:space:]]*:" }
+    BEGIN { pat = "^" k "[[:space:]]*:" }
     /^[[:space:]]*#/ { next }
     $0 ~ pat {
       sub(/^[^:]*:[[:space:]]*/, "")
@@ -89,10 +89,13 @@ fabrik_resolve_repo() {
   fi
   # Multi-repo mode: look the issue up on the project. `gh project item-list`
   # paginates via --limit, so this works for large boards.
+  # Two issues with the same number can exist in different repos on one project;
+  # take the first match. Don't swallow gh errors — let auth/network/missing-gh
+  # failures surface with their real message.
   local nw
   nw=$(gh project item-list "$FABRIK_PROJECT" --owner "$FABRIK_OWNER" \
         --limit 500 --format json \
-        --jq ".items[] | select(.content.number == $n) | .content.repository" 2>/dev/null || true)
+        --jq "[.items[] | select(.content.number == $n) | .content.repository][0] // empty")
   if [ -z "$nw" ]; then
     echo "fabrik: issue #$n not found on project $FABRIK_OWNER/$FABRIK_PROJECT (set repo: in config.yaml or FABRIK_ISSUE_REPO=owner/repo)" >&2
     return 1
