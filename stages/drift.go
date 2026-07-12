@@ -116,13 +116,20 @@ func warnDriftFrom(userStages []*Stage, version string, w io.Writer, defaults fs
 		_ = warnings.Record(warnings.Entry{
 			Key:       "stage_drift:" + name,
 			Type:      "stage_drift",
-			Title:     fmt.Sprintf("%s has %d missing field(s)", userStage.FilePath, len(missing)),
+			Title:     driftTitle(userStage.FilePath, missing),
 			Detail:    fmt.Sprintf("%s is missing fields present in %s defaults: %s\n\nFix: fabrik refresh-stages --apply", userStage.FilePath, version, strings.Join(missing, ", ")),
 			FixAction: "fabrik_command",
 			FixParams: map[string]string{"args": "refresh-stages --apply"},
 		})
 		return nil
 	})
+}
+
+// driftTitle builds the one-line warnings-panel title for a stage-drift entry.
+// It names the missing keys (not just their count) so the summary is actionable
+// without drilling into the detail view.
+func driftTitle(filePath string, missing []string) string {
+	return fmt.Sprintf("%s missing %d field(s): %s", filePath, len(missing), strings.Join(missing, ", "))
 }
 
 // MissingTopLevelKeys reads the YAML file at userPath and returns a sorted slice
