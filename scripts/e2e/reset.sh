@@ -87,10 +87,12 @@ delete_fabrik_branches_in() {
   fi
   echo "  $repo: deleting $(echo "$refs" | grep -c . ) fabrik/* branch(es)"
   for r in $refs; do
-    # matching-refs returns full refs (refs/heads/...); the delete endpoint
-    # wants git/refs/<heads/...>, so strip the leading "refs/".
-    gh_ api -X DELETE "repos/$repo/git/refs/${r#refs/heads/}" >/dev/null 2>&1 \
-      || gh_ api -X DELETE "repos/$repo/git/${r#refs/}" >/dev/null 2>&1 || true
+    # matching-refs returns full refs (refs/heads/fabrik/...). The delete
+    # endpoint is DELETE /repos/{repo}/git/refs/{ref}, where {ref} is the ref
+    # WITHOUT the leading "refs/" (i.e. "heads/fabrik/..."). Strip only "refs/"
+    # and append to git/refs/ → git/refs/heads/fabrik/... (verified working;
+    # the two earlier variants both produced malformed paths that 404'd).
+    gh_ api -X DELETE "repos/$repo/git/refs/${r#refs/}" >/dev/null 2>&1 || true
   done
 }
 
