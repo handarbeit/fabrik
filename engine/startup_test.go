@@ -60,20 +60,68 @@ func TestCheckStageColumnAlignment_MissingStage(t *testing.T) {
 }
 
 func TestCheckStageColumnAlignment_ExtraColumns(t *testing.T) {
-	// Board has all stages plus extra columns (Triage, Backlog).
+	// Board has all stages plus extra columns (Triage, Backlog). Extra columns
+	// are a warning, never fatal.
 	client := &mockGitHubClient{
 		fetchProjectBoardFn: boardWithColumns("proj-1"),
 		fetchStatusFieldFn:  statusFieldWithOptions("Research", "Plan", "Implement", "Triage", "Backlog"),
 	}
-	var logged []string
 	e := testEngine(t, client, &mockClaudeInvoker{})
-	// Capture logf output by overriding the events channel (nil = direct print).
-	// We can't easily intercept logf in plain-text mode, so just verify no error.
 	err := e.checkStageColumnAlignment(context.Background())
 	if err != nil {
 		t.Fatalf("extra board columns should not be fatal, got: %v", err)
 	}
-	_ = logged // checked via no-error
+}
+
+// TestCheckStageColumnAlignment_BacklogAndDoneNotExtra verifies that the
+// "no matching stage" warning excludes the conventional unmanaged Backlog
+// column and the Done column (which is backed by a cleanup stage), while still
+// surfacing a genuinely unrecognized column.
+func TestCheckStageColumnAlignment_BacklogAndDoneNotExtra(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: boardWithColumns("proj-1"),
+		fetchStatusFieldFn:  statusFieldWithOptions("Research", "Plan", "Implement", "Done", "Backlog", "Triage"),
+	}
+	e := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithCleanup(),
+		},
+		client,
+		&mockClaudeInvoker{},
+		NewWorktreeManager(t.TempDir()),
+	)
+	events := make(chan tui.Event, 32)
+	e.events = events
+
+	if err := e.checkStageColumnAlignment(context.Background()); err != nil {
+		t.Fatalf("extra columns should not be fatal, got: %v", err)
+	}
+	close(events)
+
+	var extraWarn string
+	for ev := range events {
+		if le, ok := ev.(tui.LogEvent); ok && strings.Contains(le.Message, "no matching stage") {
+			extraWarn = le.Message
+		}
+	}
+	if extraWarn == "" {
+		t.Fatal("expected a 'no matching stage' warning for the genuine extra column")
+	}
+	if !strings.Contains(extraWarn, "Triage") {
+		t.Errorf("genuine extra column Triage should be warned, got: %q", extraWarn)
+	}
+	if strings.Contains(extraWarn, "Backlog") {
+		t.Errorf("Backlog (unmanaged entry column) must not be flagged as extra, got: %q", extraWarn)
+	}
+	if strings.Contains(extraWarn, "Done") {
+		t.Errorf("Done (backed by a cleanup stage) must not be flagged as extra, got: %q", extraWarn)
+	}
 }
 
 func TestCheckStageColumnAlignment_FetchBoardError(t *testing.T) {
