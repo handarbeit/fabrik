@@ -35,15 +35,22 @@ done
 
 fabrik_resolve_repo "$N"
 
-marker="Fabrik — stage: $STAGE"
+# Anchor to the actual marker line Fabrik emits at the top of every stage
+# output comment: `🏭 **Fabrik — stage: <StageName>**`. Trailing content
+# (e.g. " (comment review)", " (review feedback addressed)") after the
+# stage name is allowed — we match the prefix, not the whole line.
+marker="🏭 **Fabrik — stage: $STAGE"
 
+# `gh api --paginate` returns one JSON array per page; slurp + flatten so
+# .[-1] picks the true latest comment across all pages, not per-page.
 gh api "repos/$ISSUE_OWNER/$ISSUE_REPO/issues/$N/comments?per_page=100" --paginate \
-  | jq -r --arg m "$marker" '
-      map(select((.body // "") | contains($m)))
+  | jq -s -r --arg m "$marker" '
+      add
+      | map(select((.body // "") | startswith($m)))
       | if length == 0 then
           "no comment matching \"\($m)\" on this issue"
         else
           .[-1] as $c
-          | "── \($c.created_at)  \($c.user.login)\n\n\($c.body)"
+          | "── \($c.created_at)  \((($c.user | .login) // "ghost"))\n\n\($c.body)"
         end
     '

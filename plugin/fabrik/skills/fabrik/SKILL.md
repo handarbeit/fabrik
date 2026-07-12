@@ -179,7 +179,7 @@ This skill ships small bash scripts for the queries you'll run every session. **
 - `issue.sh` shows column, labels, updated time, comment count with last-comment metadata, and linked PRs — enough to answer 90% of "what's happening with `#N`?" without a second call.
 - `comments.sh` truncates bodies to 500 chars and shows reaction counts including 👀 and 🚀 so you can see comment-processing state at a glance. Pass `--full` when the user needs the whole thing.
 - `stage-output.sh` finds the last comment starting with `🏭 **Fabrik — stage: <StageName>**` and prints it — this is how Fabrik marks stage output. Also matches variants like `Fabrik — stage: Review (review feedback addressed)`.
-- All scripts support `--json` (or emit raw JSON in `stage-output.sh`'s case with jq itself) if you need to chain further. `board.sh --json` returns the full `gh project item-list` payload.
+- `board.sh`, `issue.sh`, and `comments.sh` support `--json` when you need to chain further. `board.sh --json` returns the full `gh project item-list` payload. `stage-output.sh` prints text only — if you need JSON, `comments.sh <N> --json` and filter for the marker yourself.
 - Multi-repo mode (`repo:` unset in `config.yaml`): the scripts resolve the issue's repo from the project board automatically. If you already know the repo, pass `-r owner/repo` to skip the lookup — meaningful only on large boards.
 
 **Fallback:** if a script fails (missing `gh`, unusual config), the underlying commands are simple enough to inline — but do the debugging *once* and fix the script rather than routing around it every session.

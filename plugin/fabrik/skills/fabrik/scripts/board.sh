@@ -17,6 +17,11 @@ set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/lib.sh"
 
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  awk 'NR==1{next} /^#/{sub(/^# ?/, ""); print; next} {exit}' "$0"
+  exit 0
+fi
+
 fabrik_load_config
 
 JSON=false

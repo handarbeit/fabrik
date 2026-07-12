@@ -81,13 +81,13 @@ raw=$(gh api graphql \
 
 # Extract just the issue node, augmented with the resolved column for
 # this specific project (from projectItems).
-issue=$(printf '%s\n' "$raw" | jq --arg proj_owner "$FABRIK_OWNER" --argjson proj_num "$FABRIK_PROJECT" '
+issue=$(printf '%s\n' "$raw" | jq --arg proj_owner "$FABRIK_OWNER" --arg proj_num "$FABRIK_PROJECT" '
   .data.repository.issue // null
   | if . == null then null
     else . + {
       column: (
         [.projectItems.nodes[]?
-         | select(.project.number == $proj_num and .project.owner.login == $proj_owner)
+         | select((.project.number | tostring) == $proj_num and .project.owner.login == $proj_owner)
          | .fieldValues.nodes[]?
          | select(.field.name == "Status")
          | .name
@@ -114,7 +114,7 @@ printf '%s\n' "$issue" | jq -r --argjson body "$BODY" \
   def lastcomm:
     (.comments.nodes[0]) as $c
     | if $c == null then "none"
-      else "last by \($c.author.login // "-") at \($c.createdAt)"
+      else "last by \((($c.author | .login) // "ghost")) at \($c.createdAt)"
       end;
   "#\(.number)  \(.title)",
   "State:      \(.state)",

@@ -72,10 +72,14 @@ if $JSON; then
   exit 0
 fi
 
-printf '%s\n' "$raw" | jq -r --argjson last "$LAST" --argjson full "$FULL" '
-  (if $last > 0 then .[-$last:] else . end)
+# `gh api --paginate` concatenates one JSON array per page; slurp + flatten
+# so --last operates across the whole comment history, not per page. Also
+# handle deleted users (author == null) gracefully.
+printf '%s\n' "$raw" | jq -s -r --argjson last "$LAST" --argjson full "$FULL" '
+  add
+  | (if $last > 0 then .[-$last:] else . end)
   | .[]
-  | "── \(.created_at)  \(.user.login)  [👀\(.reactions.eyes // 0) 🚀\(.reactions.rocket // 0) 👍\(.reactions["+1"] // 0)]",
+  | "── \(.created_at)  \(((.user | .login) // "ghost"))  [👀\(.reactions.eyes // 0) 🚀\(.reactions.rocket // 0) 👍\(.reactions["+1"] // 0)]",
     (if $full then (.body // "") else ((.body // "") | if length > 500 then .[0:500] + "…" else . end) end),
     ""
 '
