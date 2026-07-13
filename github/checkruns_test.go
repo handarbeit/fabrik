@@ -119,3 +119,29 @@ func TestClassifyCheckRuns_LatestByID_HigherIDWins(t *testing.T) {
 		t.Errorf("expected no failed runs regardless of input order, got %v", failed2)
 	}
 }
+
+// TestClassifyCheckRuns_FailedOrder_MatchesFirstAppearance guards against
+// non-deterministic map-iteration order in latestCheckRunsByName: with
+// several distinct failed check names, the returned failed slice must follow
+// each name's first appearance in the input, not an arbitrary map order.
+func TestClassifyCheckRuns_FailedOrder_MatchesFirstAppearance(t *testing.T) {
+	input := []CheckRun{
+		{ID: 1, Name: "zeta", Status: "completed", Conclusion: "failure"},
+		{ID: 2, Name: "alpha", Status: "completed", Conclusion: "failure"},
+		{ID: 3, Name: "mid", Status: "completed", Conclusion: "success"},
+		{ID: 4, Name: "beta", Status: "completed", Conclusion: "failure"},
+	}
+	want := []string{"zeta", "alpha", "beta"}
+
+	for i := 0; i < 20; i++ {
+		_, _, failed := ClassifyCheckRuns(input)
+		if len(failed) != len(want) {
+			t.Fatalf("run %d: expected %d failed runs, got %v", i, len(want), failed)
+		}
+		for j, cr := range failed {
+			if cr.Name != want[j] {
+				t.Fatalf("run %d: failed order = %v, want names in input order %v", i, failed, want)
+			}
+		}
+	}
+}

@@ -54,18 +54,25 @@ func ClassifyCheckRuns(checkRuns []CheckRun) (status CheckRunStatus, pending, fa
 
 // latestCheckRunsByName reduces checkRuns to one entry per Name, keeping the
 // run with the highest ID (GitHub check-run IDs are monotonically increasing,
-// so the highest ID is the most recent rerun of that check name).
+// so the highest ID is the most recent rerun of that check name). Output
+// order follows each name's first appearance in checkRuns — Go map iteration
+// order is randomized, so this keeps ClassifyCheckRuns's pending/failed
+// slices (and anything logged or rendered from them) deterministic.
 func latestCheckRunsByName(checkRuns []CheckRun) []CheckRun {
 	byName := make(map[string]CheckRun, len(checkRuns))
+	names := make([]string, 0, len(checkRuns))
 	for _, cr := range checkRuns {
 		existing, ok := byName[cr.Name]
-		if !ok || cr.ID > existing.ID {
+		if !ok {
+			names = append(names, cr.Name)
+			byName[cr.Name] = cr
+		} else if cr.ID > existing.ID {
 			byName[cr.Name] = cr
 		}
 	}
 	out := make([]CheckRun, 0, len(byName))
-	for _, cr := range byName {
-		out = append(out, cr)
+	for _, name := range names {
+		out = append(out, byName[name])
 	}
 	return out
 }
