@@ -346,7 +346,7 @@ This scan is **informational only** — no auto-advance occurs. Move the card to
 
 ### Stage YAML Drift Warning
 
-After loading your stage YAMLs from `.fabrik/stages/`, Fabrik compares each stage against the embedded default with the same `name:` field. If the embedded default contains top-level YAML keys that your file does not, Fabrik prints a warning to stderr at startup:
+After loading your stage YAMLs from `.fabrik/stages/`, Fabrik compares each stage against the embedded default with the same `name:` field. If the embedded default contains top-level YAML keys that your file does not, Fabrik prints a warning to stderr at startup — but only when adding that key would actually change the stage's behavior. A missing key whose embedded-default value is behaviorally identical to omitting it (e.g. `kill_grace: {sigint: 10s, sigterm: 10s}`, which matches the engine's own inherit-on-omission default) is **not** reported.
 
 ```
 [startup] warning: .fabrik/stages/validate.yaml is missing fields present in v0.0.53 defaults: wait_for_ci, wait_for_reviews. Run `fabrik refresh-stages --apply` to add the missing keys.
@@ -361,11 +361,17 @@ This warning is **informational only** — the engine continues running with you
 3. Run `git diff` to review the changes.
 4. `git commit` to record the update.
 
+`fabrik refresh-stages` uses the same value-aware comparison as the startup warning, so it never offers to add a key that drift detection considers a no-op.
+
 **Common keys that trigger this warning:**
 
 - `wait_for_ci: true` — enables the CI gate on Validate auto-advance (added in v0.0.49)
 - `wait_for_reviews: true` — enables the reviewer gate on Validate auto-advance (added in v0.0.49)
-- `completion:` — marks the stage completion type (added as an explicit top-level key; omitting it is safe for normal Claude-invoked stages because the engine defaults it to `{type: claude}`)
+
+**Keys that do NOT trigger this warning at their default value** (safe to omit; the engine treats an absent key identically to the value shown):
+
+- `kill_grace: {sigint: 10s, sigterm: 10s}` — signal escalation grace windows; the engine's own fallback is 10s/10s, so an absent `kill_grace` block behaves identically. A *different* value (e.g. `sigint: 0s`, which skips the SIGINT step) is a real behavioral change and still triggers the warning if missing.
+- `completion: {type: claude}` — the engine defaults `completion.type` to `claude` when the key is absent, so this block is a no-op at its default value.
 
 Custom stages (names not present in any embedded default) are silently skipped — no warning is produced for them.
 
@@ -2383,7 +2389,7 @@ To fix: ensure stage YAML `name` fields match board column names exactly (case-s
 
 ### Stage YAML Drift Warning
 
-At startup, Fabrik prints a warning when a `.fabrik/stages/*.yaml` file is missing top-level keys that exist in the embedded defaults for the same stage name:
+At startup, Fabrik prints a warning when a `.fabrik/stages/*.yaml` file is missing top-level keys that exist in the embedded defaults for the same stage name — but only when adding the key would change the stage's effective behavior. A missing key whose embedded-default value is behaviorally identical to omission (e.g. `kill_grace: {sigint: 10s, sigterm: 10s}`, `completion: {type: claude}`) is not reported.
 
 ```
 [startup] warning: .fabrik/stages/validate.yaml is missing fields present in v0.0.53 defaults: wait_for_ci, wait_for_reviews. Run `fabrik refresh-stages --apply` to add the missing keys.

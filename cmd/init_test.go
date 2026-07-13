@@ -510,3 +510,41 @@ func TestRunInit_IdempotentDestDir(t *testing.T) {
 		t.Fatalf("second runInit: %v", err)
 	}
 }
+
+// TestRunInit_DriftClean verifies a freshly-init'd .fabrik/stages/ still
+// carries the advisory knobs (e.g. kill_grace) and produces zero drift
+// warnings against the embedded defaults it was seeded from.
+func TestRunInit_DriftClean(t *testing.T) {
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(orig) //nolint
+
+	if err := runInit([]string{}); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	implementYAML, err := os.ReadFile(filepath.Join(dir, ".fabrik", "stages", "implement.yaml"))
+	if err != nil {
+		t.Fatalf("reading implement.yaml: %v", err)
+	}
+	if !strings.Contains(string(implementYAML), "kill_grace:") {
+		t.Errorf("expected kill_grace: in freshly-init'd implement.yaml, got:\n%s", string(implementYAML))
+	}
+
+	userStages, err := stages.LoadAll(filepath.Join(dir, ".fabrik", "stages"))
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+
+	var out strings.Builder
+	stages.WarnStageDrift(userStages, "v0.0.99", &out)
+	if got := out.String(); got != "" {
+		t.Errorf("expected zero drift warnings for freshly-init'd stages, got: %q", got)
+	}
+}
