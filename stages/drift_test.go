@@ -31,6 +31,16 @@ func syntheticFS(t *testing.T, name string, keys ...string) fstest.MapFS {
 	}
 }
 
+// syntheticFSRaw builds an in-memory fs.FS with a single default stage YAML
+// under examples/<name>.yaml, using the full body verbatim. Unlike syntheticFS
+// (flat scalar keys only), this lets tests express nested blocks like
+// kill_grace: / completion:.
+func syntheticFSRaw(name, body string) fstest.MapFS {
+	return fstest.MapFS{
+		"examples/" + strings.ToLower(name) + ".yaml": {Data: []byte(body)},
+	}
+}
+
 // makeUserStage writes a YAML stage file to dir and returns a *Stage with FilePath set.
 func makeUserStage(t *testing.T, dir, filename, content string) *Stage {
 	t.Helper()
@@ -162,6 +172,62 @@ func TestWarnStageDrift_MultipleMissingKeysSorted(t *testing.T) {
 	}
 	if idxCI > idxRev {
 		t.Errorf("expected wait_for_ci before wait_for_reviews (sorted), got: %q", got)
+	}
+}
+
+func TestWarnStageDrift_KillGraceNoOpOmitted(t *testing.T) {
+	setWarningsOverride(t)
+	dir := t.TempDir()
+	// User stage omits kill_grace entirely — the embedded default's value
+	// (10s/10s) is identical to the engine's inherit-on-omission behavior.
+	userStage := makeUserStage(t, dir, "implement.yaml", "name: Implement\nprompt: do stuff\n")
+
+	defaults := syntheticFSRaw("Implement", "name: Implement\nprompt: do stuff\nkill_grace:\n  sigint: 10s\n  sigterm: 10s\n")
+
+	var out strings.Builder
+	warnDriftFrom([]*Stage{userStage}, "v0.0.99", &out, defaults)
+
+	if got := out.String(); got != "" {
+		t.Errorf("expected no warning for no-op kill_grace (10s/10s), got: %q", got)
+	}
+}
+
+func TestWarnStageDrift_KillGraceMeaningfulOmittedStillWarns(t *testing.T) {
+	setWarningsOverride(t)
+	dir := t.TempDir()
+	// User stage omits kill_grace; the embedded default sets sigint: 0s,
+	// which skips the SIGINT step entirely — behaviorally different from
+	// omission, so this must still warn.
+	userStage := makeUserStage(t, dir, "implement.yaml", "name: Implement\nprompt: do stuff\n")
+
+	defaults := syntheticFSRaw("Implement", "name: Implement\nprompt: do stuff\nkill_grace:\n  sigint: 0s\n  sigterm: 10s\n")
+
+	var out strings.Builder
+	warnDriftFrom([]*Stage{userStage}, "v0.0.99", &out, defaults)
+
+	got := out.String()
+	if !strings.Contains(got, "[startup] warning:") {
+		t.Errorf("expected warning for meaningful kill_grace (sigint: 0s), got: %q", got)
+	}
+	if !strings.Contains(got, "kill_grace") {
+		t.Errorf("expected warning to mention kill_grace, got: %q", got)
+	}
+}
+
+func TestWarnStageDrift_CompletionNoOpOmitted(t *testing.T) {
+	setWarningsOverride(t)
+	dir := t.TempDir()
+	// User stage omits completion entirely — the embedded default's value
+	// (type: claude) is identical to loadOne's fallback on omission.
+	userStage := makeUserStage(t, dir, "implement.yaml", "name: Implement\nprompt: do stuff\n")
+
+	defaults := syntheticFSRaw("Implement", "name: Implement\nprompt: do stuff\ncompletion:\n  type: claude\n")
+
+	var out strings.Builder
+	warnDriftFrom([]*Stage{userStage}, "v0.0.99", &out, defaults)
+
+	if got := out.String(); got != "" {
+		t.Errorf("expected no warning for no-op completion (type: claude), got: %q", got)
 	}
 }
 

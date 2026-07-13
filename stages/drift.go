@@ -69,6 +69,16 @@ func warnDriftFrom(userStages []*Stage, version string, w io.Writer, defaults fs
 			return nil
 		}
 
+		// Best-effort typed parse for value-aware equivalence checks. A failure
+		// here degrades to the pre-existing structural (over-warning) behavior
+		// rather than silently under-warning — defaultStage stays nil and
+		// FilterNoOpKeys becomes a no-op.
+		var defaultStage *Stage
+		var typed Stage
+		if err := yaml.Unmarshal(buf, &typed); err == nil {
+			defaultStage = &typed
+		}
+
 		userStage, ok := byName[name]
 		if !ok {
 			return nil // custom stage — skip
@@ -86,6 +96,7 @@ func warnDriftFrom(userStages []*Stage, version string, w io.Writer, defaults fs
 		if err != nil {
 			return nil
 		}
+		missing = FilterNoOpKeys(missing, defaultStage)
 		if len(missing) == 0 {
 			_ = warnings.Clear("stage_drift:" + name)
 			return nil
