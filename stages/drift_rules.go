@@ -65,7 +65,7 @@ func FilterNoOpKeys(missing []string, defaultStage *Stage) []string {
 	if defaultStage == nil {
 		return missing
 	}
-	filtered := missing[:0:0]
+	filtered := missing[:0]
 	for _, key := range missing {
 		if rule, ok := noOpKeyRules[key]; ok && rule(defaultStage) {
 			continue
