@@ -124,6 +124,16 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 		return false
 	}
 
+	// A pending no-work-needed decision suppresses all further dispatch,
+	// independent of item.Status — the board move to Done may still be
+	// outstanding (retried by the settle scan in poll.go), but the decision has
+	// already been made and must not be re-litigated by the normal pipeline.
+	// Cleanup stages are exempt so Done's worktree cleanup can still run once the
+	// settle scan finally lands the move.
+	if !stage.CleanupWorktree && hasLabel(item, "fabrik:awaiting-done") {
+		return false
+	}
+
 	// Holding stages are batch-scoped (handled by handleMergeTrainBatch in poll.go),
 	// not per-item. Never dispatch individual items at a holding stage.
 	if stage.HoldingStage {
@@ -188,6 +198,14 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	}
 
 	if stage == nil {
+		return false
+	}
+
+	// A pending no-work-needed decision suppresses all further dispatch,
+	// independent of item.Status — mirrors the itemMayNeedWork gate above. The
+	// settle scan in poll.go (not the normal dispatch path) is the only thing
+	// that may act on the item while this marker is present.
+	if !stage.CleanupWorktree && hasLabel(item, "fabrik:awaiting-done") {
 		return false
 	}
 
