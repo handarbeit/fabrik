@@ -86,19 +86,9 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 	mergeableState := settle.MergeableState
 
 	if len(checkRuns) > 0 {
-		// Check runs are available: classify pending vs failed, then apply R7 timeout.
-		var pending, failed []gh.CheckRun
-		for _, cr := range checkRuns {
-			switch cr.Status {
-			case "queued", "in_progress":
-				pending = append(pending, cr)
-			case "completed":
-				switch cr.Conclusion {
-				case "failure", "timed_out", "action_required":
-					failed = append(failed, cr)
-				}
-			}
-		}
+		// Check runs are available: classify pending vs failed via the shared
+		// helper (pending always wins over failed), then apply R7 timeout.
+		status, pending, failed := gh.ClassifyCheckRuns(checkRuns)
 
 		// R7: CIWaitTimeout applies to the full CI-await window — both pending and
 		// failed checks. Under ADR-032, fabrik:awaiting-ci is present from the moment
@@ -126,8 +116,10 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 			}
 		}
 
-		if len(failed) == 0 {
-			// Checks still running.
+		if status != gh.CheckRunsFailed {
+			// Checks still running (pending takes precedence over any failed
+			// run, whether a sibling check or a stale entry for the same
+			// name superseded by a fresh rerun).
 			names := make([]string, 0, len(pending))
 			for _, cr := range pending {
 				names = append(names, cr.Name)
@@ -386,6 +378,12 @@ func (e *Engine) dispatchCIFixReinvoke(ctx context.Context, board *gh.ProjectBoa
 		wm := e.worktreesFor(item.Repo)
 		workDir := wm.WorktreeDir(item.Number)
 
+		// Snapshot HEAD before reinvoking so a no-op reinvoke (nothing to
+		// push because the fix is already in) can be recorded and debounced
+		// on the next poll instead of burning further CI-fix cycle budget
+		// while the current head's CI is still resolving (#958 leg 2).
+		headBefore, _ := gitHeadSHA(workDir)
+
 		// Build the synthetic comment with CI failure context.
 		syntheticComment := e.buildCIFixComment(item, stage, workDir, settle)
 
@@ -414,6 +412,19 @@ func (e *Engine) dispatchCIFixReinvoke(ctx context.Context, board *gh.ProjectBoa
 
 		e.logf(item.Number, "ci-fix-reinvoke", "re-invoking stage %q via comment processing with CI failure context\n", stage.Name)
 		err := e.processComments(ctx, board, item, &ciFixStage, []gh.Comment{syntheticComment}, onPIDReady)
+
+		// Only record a no-op when the reinvoke actually completed: a failed
+		// processComments (transient network issue, rate limit, workspace
+		// lock) also leaves HEAD unchanged, but recording a no-op for that
+		// case would wrongly debounce a retry that never got a chance to push
+		// a real fix.
+		if err == nil {
+			if headAfter, hErr := gitHeadSHA(workDir); hErr == nil && headBefore != "" && headAfter == headBefore {
+				e.logf(item.Number, "ci-fix-reinvoke", "no new commit pushed (HEAD still %s) — recording no-op for this head\n",
+					headAfter[:min(8, len(headAfter))])
+				e.store.Apply(itemstate.CIFixNoOpRecorded{Repo: itemRepo, Number: item.Number, SHA: headAfter})
+			}
+		}
 
 		if err != nil {
 			if ctx.Err() != nil {

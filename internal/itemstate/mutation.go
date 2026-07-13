@@ -636,6 +636,20 @@ type PREnqueueRecorded struct {
 func (PREnqueueRecorded) isMutation()       {}
 func (m PREnqueueRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
+// CIFixNoOpRecorded sets LinkedPRState.LastCIFixNoOpSHA to the head SHA at which a
+// CI-fix reinvoke (engine.dispatchCIFixReinvoke) completed without pushing a new
+// commit (#958 leg 2). While the head SHA stays at this value, handleMergeAndCIGates
+// skips further CI-fix dispatch/cycle-increment for it — CIWaitTimeout remains the
+// backstop if CI never resolves on this SHA.
+type CIFixNoOpRecorded struct {
+	Repo   string
+	Number int
+	SHA    string
+}
+
+func (CIFixNoOpRecorded) isMutation()       {}
+func (m CIFixNoOpRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
 // CommentProcessed records that a comment has been processed by the engine.
 // Prevents reprocessing the same comment on subsequent polls or restarts
 // (backed by rocket reactions on GitHub for cross-restart durability).

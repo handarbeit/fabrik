@@ -612,6 +612,56 @@ func TestSettle_ChecksFailedWithTimedOut_ReturnsBlocked(t *testing.T) {
 	}
 }
 
+func TestSettle_PendingSiblingBeatsFailed_ReturnsUnsettled(t *testing.T) {
+	// #958 regression: a failed check coexisting with a pending check on the
+	// same head must classify as WAIT, not FAIL — the classifier must not
+	// burn CI-fix cycle budget while the current head's CI is still running.
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, State: "open", HeadSHA: "sha1"}, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			return boolPtr(true), "blocked", nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return []gh.CheckRun{
+				{ID: 1, Name: "build", Status: "completed", Conclusion: "failure"},
+				{ID: 2, Name: "test", Status: "in_progress"},
+			}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	r := eng.settlePRMergeState(settleItem(1), &stages.Stage{Name: "Validate"})
+	if r.Status != PRMergeUnsettled {
+		t.Errorf("expected PRMergeUnsettled when a pending check coexists with a failed sibling, got %v", r.Status)
+	}
+}
+
+func TestSettle_StaleFailedRunSupersededByFreshPending_ReturnsUnsettled(t *testing.T) {
+	// #958 regression: a stale failed run for a check name, superseded by a
+	// fresh (higher-ID) pending rerun of the *same* name, must not shadow
+	// the fresh rerun's classification.
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 5, State: "open", HeadSHA: "sha1"}, nil
+		},
+		fetchPRMergeableFieldsFn: func(owner, repo string, prNumber int) (*bool, string, error) {
+			return boolPtr(true), "blocked", nil
+		},
+		fetchCheckRunsFn: func(owner, repo, sha string) ([]gh.CheckRun, error) {
+			return []gh.CheckRun{
+				{ID: 1, Name: "build", Status: "completed", Conclusion: "failure"},
+				{ID: 2, Name: "build", Status: "in_progress"},
+			}, nil
+		},
+	}
+	eng := testEngineForMerge(t, client)
+	r := eng.settlePRMergeState(settleItem(1), &stages.Stage{Name: "Validate"})
+	if r.Status != PRMergeUnsettled {
+		t.Errorf("expected PRMergeUnsettled when the latest run of a name is pending, got %v", r.Status)
+	}
+}
+
 // ── PRChecksObserved applied on non-empty check runs ─────────────────────────
 
 func TestSettle_NonEmptyCheckRuns_AppliesPRChecksObserved(t *testing.T) {

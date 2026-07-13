@@ -697,7 +697,16 @@ func (c *CacheImpl) FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, erro
 	}
 
 	if runs := c.store.CheckRunsBySHA(sha); len(runs) > 0 {
-		return runs, nil
+		// Never trust a cached read that would classify as FAILED without
+		// confirming it live first: on a webhook-less deployment there is no
+		// check_run event to refresh a stale cached failure, and blindly
+		// trusting it would let a superseded/rerun check keep shadowing its
+		// own fresh rerun forever (#958 leg 3). A cached WAIT or READY
+		// classification is still served from cache.
+		if status, _, _ := gh.ClassifyCheckRuns(runs); status != gh.CheckRunsFailed {
+			return runs, nil
+		}
+		c.logFn("[cache] cached check runs for sha=%s classify as FAILED — refetching from GitHub before trusting it\n", sha)
 	}
 
 	c.logFn("[cache] miss: FetchCheckRuns sha=%s — fetching from GitHub\n", sha)

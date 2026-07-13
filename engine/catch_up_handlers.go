@@ -194,12 +194,23 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 		iKey := issueKey(pctx.item, e.defaultRepo())
 		repoStr := itemOwnerRepoString(pctx.item, e.defaultRepo())
 		var cycleCount int
+		var lastNoOpSHA string
 		if snap, snapErr := e.store.Get(repoStr, pctx.item.Number); snapErr == nil {
 			if snap.Worker() != nil {
 				e.logf(pctx.item.Number, "ci-fix-reinvoke", "skipping dispatch — CI-fix reinvoke already in-flight\n")
 				return true
 			}
 			cycleCount = snap.CIFixCycles(pctx.stage.Name)
+			lastNoOpSHA = snap.LastCIFixNoOpSHA()
+		}
+		if settle.PR != nil && lastNoOpSHA != "" && lastNoOpSHA == settle.PR.HeadSHA {
+			// The last CI-fix reinvoke for this exact head SHA pushed no new
+			// commit — dispatching again would just repeat the same no-op
+			// and burn cycle budget for nothing. Wait for the SHA to advance
+			// (a genuine fix) or for CIWaitTimeout to fire (#958 leg 2).
+			e.logf(pctx.item.Number, "ci-fix-reinvoke", "skipping dispatch — no-op already recorded for head %s\n",
+				lastNoOpSHA[:min(8, len(lastNoOpSHA))])
+			return true
 		}
 		maxCycles := e.cfg.MaxCiFixCycles
 		if cycleCount >= maxCycles {

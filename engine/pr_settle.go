@@ -193,25 +193,15 @@ func (e *Engine) settlePRMergeState(item gh.ProjectItem, _ *stages.Stage) PRSett
 		return PRSettleResult{Status: PRMergeReady, Reason: "no CI configured", MergeableState: mergeableState, PR: pr}
 	}
 
-	// Classify check runs: pending → Unsettled, any failed → Blocked, all green → Ready.
-	var hasPending, hasFailed bool
-	for _, cr := range checkRuns {
-		switch cr.Status {
-		case "queued", "in_progress":
-			hasPending = true
-		case "completed":
-			switch cr.Conclusion {
-			case "failure", "timed_out", "action_required":
-				hasFailed = true
-			}
-		}
-	}
-
-	if hasFailed {
+	// Classify check runs via the shared gh.ClassifyCheckRuns helper: pending
+	// (on the latest run per check name) always wins over failed, so a stale
+	// failed run never masks a fresh rerun in progress.
+	switch status, _, _ := gh.ClassifyCheckRuns(checkRuns); status {
+	case gh.CheckRunsFailed:
 		return PRSettleResult{Status: PRMergeBlocked, Reason: "CI checks failed", MergeableState: mergeableState, CheckRuns: checkRuns, PR: pr}
-	}
-	if hasPending {
+	case gh.CheckRunsPending:
 		return PRSettleResult{Status: PRMergeUnsettled, Reason: "CI checks pending", MergeableState: mergeableState, CheckRuns: checkRuns, PR: pr}
+	default:
+		return PRSettleResult{Status: PRMergeReady, Reason: "all CI checks passed", MergeableState: mergeableState, CheckRuns: checkRuns, PR: pr}
 	}
-	return PRSettleResult{Status: PRMergeReady, Reason: "all CI checks passed", MergeableState: mergeableState, CheckRuns: checkRuns, PR: pr}
 }

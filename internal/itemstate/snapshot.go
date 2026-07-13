@@ -220,6 +220,17 @@ func (s Snapshot) LastEnqueuedSHA() string {
 	return s.state.LinkedPR.LastEnqueuedSHA
 }
 
+// LastCIFixNoOpSHA returns the PR head SHA for which the most recent CI-fix
+// reinvoke completed without pushing a new commit, or "" if not recorded
+// (LinkedPR is nil or no no-op has occurred). Used by handleMergeAndCIGates
+// to skip a further CI-fix dispatch/cycle-increment for the same SHA (#958).
+func (s Snapshot) LastCIFixNoOpSHA() string {
+	if s.state.LinkedPR == nil {
+		return ""
+	}
+	return s.state.LinkedPR.LastCIFixNoOpSHA
+}
+
 // CommentProcessed returns the timestamp when a comment was last processed,
 // or zero if it has not been seen.
 func (s Snapshot) CommentProcessed(commentID string) time.Time {

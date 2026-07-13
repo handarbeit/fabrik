@@ -181,6 +181,16 @@ type LinkedPRState struct {
 	// isInMergeQueue=true (same SHA → suppress a spurious re-enqueue). Empty until the
 	// first enqueue.
 	LastEnqueuedSHA string
+
+	// LastCIFixNoOpSHA records the head SHA for which the most recent CI-fix
+	// reinvoke (engine.dispatchCIFixReinvoke) observed no new commit pushed
+	// (HEAD unchanged before/after processComments). While the head SHA
+	// stays at this value, handleMergeAndCIGates skips further CI-fix
+	// dispatch/cycle-increment for it — a repeated no-op reinvoke burns
+	// nothing further; CIWaitTimeout remains the backstop if CI never
+	// resolves. Cleared implicitly once HeadSHA advances past it. Empty
+	// means "no no-op recorded for the current SHA."
+	LastCIFixNoOpSHA string
 }
 
 // StageState holds per-stage attempt counters and cycle counts.
