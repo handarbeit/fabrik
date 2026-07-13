@@ -186,6 +186,69 @@ func TestCheckCIGate_Pending_TimedOut(t *testing.T) {
 	}
 }
 
+// TestCheckCIGate_PendingSiblingBeatsFailed_BlocksNoLabel is the #958
+// regression: a failed check coexisting with a pending check on the same
+// head must classify as WAIT (blocked, no ciFailure), never FAIL — the
+// engine must not dispatch a CI-fix reinvoke or add fabrik:awaiting-ci
+// while the current head's CI is still running.
+func TestCheckCIGate_PendingSiblingBeatsFailed_BlocksNoLabel(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	tr := true
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	settle := PRSettleResult{
+		Status: PRMergeUnsettled,
+		Reason: "CI checks pending",
+		CheckRuns: []gh.CheckRun{
+			{ID: 1, Name: "build", Status: "completed", Conclusion: "failure"},
+			{ID: 2, Name: "test", Status: "in_progress"},
+		},
+		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha3"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	if !blocked {
+		t.Error("expected blocked=true when a pending check coexists with a failed sibling")
+	}
+	if ciFailure {
+		t.Error("expected ciFailure=false when a pending check coexists with a failed sibling — must not dispatch CI-fix reinvoke")
+	}
+	if timedOut {
+		t.Error("expected timedOut=false")
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:awaiting-ci" {
+			t.Error("checkCIGate must NOT add fabrik:awaiting-ci while a sibling check is still pending")
+		}
+	}
+}
+
+// TestCheckCIGate_StaleFailedSupersededByPendingRerun_BlocksNoLabel covers
+// the same-name case: a stale failed run superseded by a fresh (higher-ID)
+// pending rerun of the same check name must not be classified as failed.
+func TestCheckCIGate_StaleFailedSupersededByPendingRerun_BlocksNoLabel(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineForMerge(t, client)
+	tr := true
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Validate", WaitForCI: &tr}
+
+	settle := PRSettleResult{
+		Status: PRMergeUnsettled,
+		Reason: "CI checks pending",
+		CheckRuns: []gh.CheckRun{
+			{ID: 1, Name: "build", Status: "completed", Conclusion: "failure"},
+			{ID: 2, Name: "build", Status: "in_progress"},
+		},
+		PR: &gh.PRDetails{Number: 5, HeadSHA: "sha3"},
+	}
+	blocked, ciFailure, timedOut := eng.checkCIGate(nil, item, stage, settle)
+	if !blocked || ciFailure || timedOut {
+		t.Errorf("expected blocked=true ciFailure=false timedOut=false for stale-failed-superseded-by-pending, got blocked=%v ciFailure=%v timedOut=%v", blocked, ciFailure, timedOut)
+	}
+}
+
 func TestCheckCIGate_Failed_BlocksAndAddsLabel(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := testEngineForMerge(t, client)

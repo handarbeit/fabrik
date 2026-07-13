@@ -86,19 +86,9 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 	mergeableState := settle.MergeableState
 
 	if len(checkRuns) > 0 {
-		// Check runs are available: classify pending vs failed, then apply R7 timeout.
-		var pending, failed []gh.CheckRun
-		for _, cr := range checkRuns {
-			switch cr.Status {
-			case "queued", "in_progress":
-				pending = append(pending, cr)
-			case "completed":
-				switch cr.Conclusion {
-				case "failure", "timed_out", "action_required":
-					failed = append(failed, cr)
-				}
-			}
-		}
+		// Check runs are available: classify pending vs failed via the shared
+		// helper (pending always wins over failed), then apply R7 timeout.
+		status, pending, failed := gh.ClassifyCheckRuns(checkRuns)
 
 		// R7: CIWaitTimeout applies to the full CI-await window — both pending and
 		// failed checks. Under ADR-032, fabrik:awaiting-ci is present from the moment
@@ -126,8 +116,10 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 			}
 		}
 
-		if len(failed) == 0 {
-			// Checks still running.
+		if status != gh.CheckRunsFailed {
+			// Checks still running (pending takes precedence over any failed
+			// run, whether a sibling check or a stale entry for the same
+			// name superseded by a fresh rerun).
 			names := make([]string, 0, len(pending))
 			for _, cr := range pending {
 				names = append(names, cr.Name)
