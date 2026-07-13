@@ -21,6 +21,15 @@ func WarnStageDrift(userStages []*Stage, version string, w io.Writer) {
 	warnDriftFrom(userStages, version, w, DefaultStages)
 }
 
+// WarnStageDriftFromFS is the fs.FS-parameterized form of WarnStageDrift,
+// exported for callers outside this package that need to verify agreement
+// against a synthetic set of embedded defaults (e.g. cmd's refresh-stages
+// tests, which check that drift detection and refresh-stages report the
+// same set of missing keys for the same fixtures).
+func WarnStageDriftFromFS(userStages []*Stage, version string, w io.Writer, defaults fs.FS) {
+	warnDriftFrom(userStages, version, w, defaults)
+}
+
 // warnDriftFrom is the testable core of WarnStageDrift. It accepts any fs.FS
 // containing YAML stage files under "examples/", so tests can inject a synthetic FS.
 func warnDriftFrom(userStages []*Stage, version string, w io.Writer, defaults fs.FS) {
@@ -69,6 +78,16 @@ func warnDriftFrom(userStages []*Stage, version string, w io.Writer, defaults fs
 			return nil
 		}
 
+		// Best-effort typed parse for value-aware equivalence checks. A failure
+		// here degrades to the pre-existing structural (over-warning) behavior
+		// rather than silently under-warning — defaultStage stays nil and
+		// FilterNoOpKeys becomes a no-op.
+		var defaultStage *Stage
+		var typed Stage
+		if err := yaml.Unmarshal(buf, &typed); err == nil {
+			defaultStage = &typed
+		}
+
 		userStage, ok := byName[name]
 		if !ok {
 			return nil // custom stage — skip
@@ -86,6 +105,7 @@ func warnDriftFrom(userStages []*Stage, version string, w io.Writer, defaults fs
 		if err != nil {
 			return nil
 		}
+		missing = FilterNoOpKeys(missing, defaultStage)
 		if len(missing) == 0 {
 			_ = warnings.Clear("stage_drift:" + name)
 			return nil

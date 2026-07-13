@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"github.com/handarbeit/fabrik/stages"
 )
 
 // syntheticDefaultsFS builds an in-memory fs.FS with one embedded default stage
@@ -243,6 +245,85 @@ func TestRefreshStages_ApplySequenceValue(t *testing.T) {
 	}
 	if !strings.Contains(content, "max_turns") {
 		t.Errorf("existing max_turns must survive apply, got:\n%s", content)
+	}
+}
+
+// syntheticDefaultsFSRaw builds an in-memory fs.FS with one embedded default
+// stage YAML under examples/<lowername>.yaml, using the full body verbatim.
+// Unlike syntheticDefaultsFS (flat scalar/sequence keys only), this lets
+// tests express nested blocks like kill_grace:.
+func syntheticDefaultsFSRaw(name, body string) fstest.MapFS {
+	return fstest.MapFS{
+		"examples/" + strings.ToLower(name) + ".yaml": {Data: []byte(body)},
+	}
+}
+
+func TestRefreshStages_KillGraceNoOpOmitted(t *testing.T) {
+	dir := t.TempDir()
+	origContent := "name: Implement\nprompt: do stuff\n"
+	path := writeUserStage(t, dir, "implement.yaml", origContent)
+
+	defaults := syntheticDefaultsFSRaw("Implement", "name: Implement\nprompt: do stuff\nkill_grace:\n  sigint: 10s\n  sigterm: 10s\n")
+
+	var out strings.Builder
+	err := refreshStagesWithReader(dir, false, false, false, strings.NewReader(""), &out, defaults)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := out.String(); got != "" {
+		t.Errorf("expected no output for no-op kill_grace (10s/10s), got: %q", got)
+	}
+
+	data, _ := os.ReadFile(path)
+	if string(data) != origContent {
+		t.Errorf("file should be unmodified, got:\n%s", string(data))
+	}
+}
+
+func TestRefreshStages_KillGraceMeaningfulOmittedStillOffered(t *testing.T) {
+	dir := t.TempDir()
+	writeUserStage(t, dir, "implement.yaml", "name: Implement\nprompt: do stuff\n")
+
+	defaults := syntheticDefaultsFSRaw("Implement", "name: Implement\nprompt: do stuff\nkill_grace:\n  sigint: 0s\n  sigterm: 10s\n")
+
+	var out strings.Builder
+	err := refreshStagesWithReader(dir, false, false, false, strings.NewReader(""), &out, defaults)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "kill_grace") {
+		t.Errorf("expected kill_grace offered for meaningful value (sigint: 0s), got: %q", got)
+	}
+}
+
+func TestRefreshStages_DriftAndRefreshAgree(t *testing.T) {
+	dir := t.TempDir()
+	writeUserStage(t, dir, "implement.yaml", "name: Implement\nprompt: do stuff\n")
+
+	body := "name: Implement\nprompt: do stuff\nkill_grace:\n  sigint: 10s\n  sigterm: 10s\n"
+	defaults := syntheticDefaultsFSRaw("Implement", body)
+
+	userStages, err := stages.LoadAll(dir)
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+
+	var driftOut strings.Builder
+	stages.WarnStageDriftFromFS(userStages, "v0.0.99", &driftOut, defaults)
+	driftWarned := strings.Contains(driftOut.String(), "kill_grace")
+
+	var refreshOut strings.Builder
+	if err := refreshStagesWithReader(dir, false, false, false, strings.NewReader(""), &refreshOut, defaults); err != nil {
+		t.Fatalf("refreshStagesWithReader: %v", err)
+	}
+	refreshOffered := strings.Contains(refreshOut.String(), "kill_grace")
+
+	if driftWarned != refreshOffered {
+		t.Errorf("drift and refresh-stages disagree on kill_grace: drift warned=%v, refresh offered=%v", driftWarned, refreshOffered)
+	}
+	if driftWarned {
+		t.Errorf("expected both to treat no-op kill_grace (10s/10s) as not-missing")
 	}
 }
 
