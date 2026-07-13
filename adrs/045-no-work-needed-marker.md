@@ -73,3 +73,5 @@ Without `stage:<Y>:complete` labels on bypassed stages, the catch-up advancement
 - Existing stuck issues with the "no commits" symptom must be manually closed or recovered — the marker is not backported. Future issues of the same class will be caught by Plan emitting the marker.
 
 **References:** [ADR-017: Decomposed Marker State Machine](017-decomposed-marker-state-machine.md)
+
+**Superseded in part by:** [ADR-060: Durable No-Work-Needed Marker](060-durable-no-work-needed-marker.md), which makes the Done-move/close atomic with the decision (a durable `fabrik:awaiting-done` marker, retried on failure, escalated past `MaxRetries`) — the "moves the issue directly to Done" step above was not originally interruption-safe.
