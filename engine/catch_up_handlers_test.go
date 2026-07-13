@@ -458,6 +458,44 @@ func TestHandleCIFixReinvoke_CycleLimit_Pauses(t *testing.T) {
 	}
 }
 
+// TestHandleCIFixReinvoke_NoOpDebounce_SkipsDispatch is the #958 leg 2
+// regression: when a prior CI-fix reinvoke already recorded a no-op (no new
+// commit pushed) for the exact current head SHA, handleMergeAndCIGates must
+// not dispatch another reinvoke or increment CIFixCycles — repeating the
+// same no-op burns cycle budget for nothing.
+func TestHandleCIFixReinvoke_NoOpDebounce_SkipsDispatch(t *testing.T) {
+	client := ciFailureSettleClient()
+	waitTrue := true
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1, Prompt: "implement", WaitForCI: &waitTrue},
+		{Name: "Review", Order: 2, Prompt: "review"},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+	eng.cfg.MaxCiFixCycles = 5
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	advancedItems := make(map[string]bool)
+	pctx := makeMergeGatePctx(board, advancedItems)
+
+	// A prior reinvoke already observed no new commit for this exact head SHA
+	// (ciFailureSettleClient's PR HeadSHA is "cafebabe").
+	eng.store.Apply(itemstate.CIFixNoOpRecorded{Repo: "owner/repo", Number: 20, SHA: "cafebabe"})
+
+	got := eng.handleMergeAndCIGates(pctx)
+
+	if !got {
+		t.Error("handleMergeAndCIGates: expected true (item claimed), got false")
+	}
+	eng.wg.Wait()
+	snap, _ := eng.store.Get("owner/repo", 20)
+	if snap.CIFixCycles("Implement") != 0 {
+		t.Errorf("CIFixCycles(Implement) = %d; want 0 (no-op debounce must prevent dispatch)", snap.CIFixCycles("Implement"))
+	}
+	if advancedItems["owner/repo#20"] {
+		t.Error("advancedItems must not be set when the no-op debounce guard fires")
+	}
+}
+
 // TestHandleCIFixReinvoke_HappyPath_Dispatches verifies the happy path for CI-fix
 // reinvoke: PRMergeBlocked (CI failed), no worker in-flight, cycle below limit →
 // CIFixCycles incremented, advancedItems set, handler returns true.
