@@ -268,7 +268,7 @@ func (e *Engine) escalateNoWorkNeededFailure(item gh.ProjectItem) {
 	}
 
 	comment := fmt.Sprintf(
-		"🏭 **Fabrik — no-work-needed completion failed**\n\nThis issue was determined to need no code or documentation changes, but the board move to Done and/or the issue close could not be completed after %d attempt(s). The issue has been paused.\n\nManual fix:\n```\ngh issue close %d --repo %s/%s\n```\nThen move the issue's project-board column to Done yourself (no `gh` one-liner exists for Projects-v2 status fields).\n\nThen remove the `fabrik:paused` label. Do not remove it without completing the above — this issue will not automatically retry after being unpaused.",
+		"🏭 **Fabrik — no-work-needed completion failed**\n\nThis issue was determined to need no code or documentation changes, but the board move to Done and/or the issue close could not be completed after %d attempt(s). The issue has been paused.\n\nManual fix:\n```\ngh issue close %d --repo %s/%s\n```\nThen move the issue's project-board column to Done yourself (no `gh` one-liner exists for Projects-v2 status fields).\n\nThen remove the `fabrik:paused` label. Do not remove it without completing the above — removing the `fabrik:paused` label without completing these steps may cause the issue to re-enter the normal pipeline unexpectedly.",
 		e.cfg.MaxRetries, item.Number, owner, repo,
 	)
 	if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
