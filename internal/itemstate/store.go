@@ -532,6 +532,11 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.LinkedPR.LastEnqueuedSHA = v.SHA
 		return LinkedPRChanged
 
+	case CIFixNoOpRecorded:
+		ensureLinkedPR(item, 0)
+		item.LinkedPR.LastCIFixNoOpSHA = v.SHA
+		return LinkedPRChanged
+
 	case BaseBranchWarnRecorded:
 		if item.BaseBranchWarned == nil {
 			item.BaseBranchWarned = make(map[string]bool)
