@@ -438,6 +438,92 @@ func TestSettleNoWorkNeeded_RetryThenSucceed(t *testing.T) {
 	}
 }
 
+// TestSettleNoWorkNeeded_StatusSucceedsCloseFailsThenRetry verifies the specific
+// sequence where UpdateProjectItemStatus succeeds but CloseIssue fails in the same
+// pass, and a later poll retries via poll.go's settle scan — which re-resolves
+// `stage` from item.Status (now "Done") rather than the original emitting stage.
+// The retry must not spuriously add a stage:Done:complete label — that label
+// means "the Done cleanup stage's worktree removal already ran" (see
+// itemNeedsWork's CleanupWorktree branch and janitorIsOffBoardOrCleanupComplete),
+// and settleNoWorkNeeded never performs that removal. A spurious label here would
+// permanently short-circuit normal cleanup dispatch for the item.
+func TestSettleNoWorkNeeded_StatusSucceedsCloseFailsThenRetry(t *testing.T) {
+	var closeShouldFail atomic.Bool
+	closeShouldFail.Store(true)
+	client := &mockGitHubClient{
+		closeIssueFn: func(_, _ string, _ int) error {
+			if closeShouldFail.Load() {
+				return fmt.Errorf("rate limited")
+			}
+			return nil
+		},
+	}
+	stgs := testStagesWithCleanup()
+	eng := testEngineWithStages(t, client, stgs)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 5, ItemID: "PVTI_5", Repo: "owner/repo", Status: "Research"}
+	stage := &stages.Stage{Name: "Research", Order: 1}
+
+	// First pass: status move succeeds, close fails.
+	eng.settleNoWorkNeeded(board, item, stage)
+
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected 1 status update, got %d", len(client.updateStatusCalls))
+	}
+	if len(client.closeIssueCalls) != 1 {
+		t.Fatalf("expected 1 CloseIssue attempt, got %d", len(client.closeIssueCalls))
+	}
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-done" {
+			t.Error("fabrik:awaiting-done must not be cleared while CloseIssue is still failing")
+		}
+	}
+
+	// Refetch: item.Status now reflects the successful board move to "Done";
+	// the issue is still open. This is exactly what poll.go's settle scan sees
+	// and resolves `stage` from — stages.FindStage(cfg.Stages, "Done") — which
+	// returns the cleanup stage itself, not the original "Research" stage.
+	var labels []string
+	for _, c := range client.addLabelCalls {
+		labels = append(labels, c.labelName)
+	}
+	retryItem := gh.ProjectItem{
+		Number: 5, ItemID: "PVTI_5", Repo: "owner/repo", Status: "Done",
+		Labels: labels,
+	}
+	retryStage := stages.FindStage(stgs, retryItem.Status)
+	if retryStage == nil || !retryStage.CleanupWorktree {
+		t.Fatalf("expected FindStage(%q) to resolve to the cleanup stage, got %+v", retryItem.Status, retryStage)
+	}
+
+	// Second pass: mock now succeeds.
+	closeShouldFail.Store(false)
+	eng.settleNoWorkNeeded(board, retryItem, retryStage)
+
+	if len(client.closeIssueCalls) != 2 {
+		t.Fatalf("expected 2 total CloseIssue attempts, got %d", len(client.closeIssueCalls))
+	}
+	// No status update should have been attempted again — item.Status was already "Done".
+	if len(client.updateStatusCalls) != 1 {
+		t.Errorf("expected still only 1 status update, got %d", len(client.updateStatusCalls))
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Done:complete" {
+			t.Error("settleNoWorkNeeded must never add stage:Done:complete — it does not perform the actual Done-stage worktree cleanup")
+		}
+	}
+	markerCleared := false
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-done" {
+			markerCleared = true
+		}
+	}
+	if !markerCleared {
+		t.Error("expected fabrik:awaiting-done to be removed once CloseIssue finally succeeds")
+	}
+}
+
 // TestRecordNoWorkNeededRetry_EscalatesAtMaxRetries verifies that repeated
 // no-work-needed settle failures escalate (fabrik:paused added, fabrik:awaiting-done
 // removed, explanatory comment posted) once MaxRetries is reached, instead of

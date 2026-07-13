@@ -47,100 +47,114 @@ func (e *Engine) settleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 
 	allStepsOK := true
 
-	// Clear any orphaned fabrik:awaiting-input label (same rationale as handleStageComplete).
-	if hasLabel(item, "fabrik:awaiting-input") {
-		if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil &&
-			!errors.Is(err, gh.ErrNotFound) {
-			e.logf(item.Number, "warn", "could not remove awaiting-input label: %v\n", err)
-			allStepsOK = false
-		} else if err == nil {
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
-			}
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-input")
+	// The label/comment marking steps below are only meaningful before the board
+	// move to Done succeeds. Once item.Status == "Done", these steps are
+	// guaranteed to have already completed successfully in an earlier pass — the
+	// move to Done is only ever attempted after allStepsOK, below, so item.Status
+	// cannot be "Done" unless every step here already landed. Skipping them here
+	// also sidesteps a stage-resolution hazard on retry: the settle scan in
+	// poll.go re-derives `stage` via stages.FindStage(item.Status), which once the
+	// board has moved to Done resolves to the cleanup stage itself rather than the
+	// original emitting stage — using that resolved stage below would spuriously
+	// add a stage:Done:complete label before the real Done-stage cleanup
+	// (worktree removal) has ever run, permanently short-circuiting normal
+	// cleanup dispatch for the item (see itemNeedsWork's CleanupWorktree branch).
+	if item.Status != "Done" {
+		// Clear any orphaned fabrik:awaiting-input label (same rationale as handleStageComplete).
+		if hasLabel(item, "fabrik:awaiting-input") {
+			if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil &&
+				!errors.Is(err, gh.ErrNotFound) {
+				e.logf(item.Number, "warn", "could not remove awaiting-input label: %v\n", err)
+				allStepsOK = false
+			} else if err == nil {
+				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
+				}
+				if e.webhookMgr != nil {
+					e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-input")
+				}
 			}
 		}
-	}
 
-	// Mark the emitting stage complete so the engine doesn't re-run it on restart.
-	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
-	if !hasLabel(item, completeLabel) {
-		if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
-			e.logf(item.Number, "warn", "could not add completion label for stage %q: %v\n", stage.Name, err)
-			allStepsOK = false
-		} else {
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
+		// Mark the emitting stage complete so the engine doesn't re-run it on restart.
+		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
+		if !hasLabel(item, completeLabel) {
+			if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
+				e.logf(item.Number, "warn", "could not add completion label for stage %q: %v\n", stage.Name, err)
+				allStepsOK = false
+			} else {
+				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+					cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
+				}
+				if e.webhookMgr != nil {
+					e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+completeLabel)
+				}
+				if stage.Name == "Validate" {
+					repoStr := itemOwnerRepoString(item, e.defaultRepo())
+					wm := e.worktreesFor(item.Repo)
+					if sha, shaErr := gitRevParse(wm.WorktreeDir(item.Number), "HEAD"); shaErr == nil && sha != "" {
+						e.store.Apply(itemstate.ValidateCompletedAtSHA{Repo: repoStr, Number: item.Number, SHA: sha})
+						e.logf(item.Number, "validate-sha", "recorded completion SHA %s\n", sha)
+					} else {
+						e.logf(item.Number, "warn", "could not record completion SHA: %v\n", shaErr)
+					}
+				}
 			}
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+completeLabel)
+		}
+
+		// Find the order boundary for the cleanup (Done) stage.
+		doneOrder := math.MaxInt
+		for _, s := range e.cfg.Stages {
+			if s.CleanupWorktree && s.Order < doneOrder {
+				doneOrder = s.Order
 			}
-			if stage.Name == "Validate" {
-				repoStr := itemOwnerRepoString(item, e.defaultRepo())
-				wm := e.worktreesFor(item.Repo)
-				if sha, shaErr := gitRevParse(wm.WorktreeDir(item.Number), "HEAD"); shaErr == nil && sha != "" {
-					e.store.Apply(itemstate.ValidateCompletedAtSHA{Repo: repoStr, Number: item.Number, SHA: sha})
-					e.logf(item.Number, "validate-sha", "recorded completion SHA %s\n", sha)
+		}
+
+		// Add dummy completion labels and "skipped" comments for all subsequent non-cleanup stages.
+		// The comment body must start with the canonical "🏭 **Fabrik" prefix so findNewComments
+		// dedup prevents Fabrik from processing its own output on the next poll.
+		//
+		// Every skip comment for this decision carries identical text (it names the emitting
+		// stage, not the individual skipped stage — see the Sprintf below), so they are
+		// indistinguishable from each other in item.Comments. hasSkippedComment is therefore
+		// checked once, before the loop, as a per-decision idempotency guard: if any skip
+		// comment for this emitting stage already exists, assume the full comment set was
+		// already posted and don't re-post. Skip labels remain independently idempotent
+		// per-stage via hasLabel.
+		skippedComment := fmt.Sprintf("🏭 **Fabrik — skipped: no work needed**\n\n_Skipped: no work needed (FABRIK_NO_WORK_NEEDED emitted by %s)._", stage.Name)
+		alreadyPostedSkipComments := hasSkippedComment(item, stage.Name)
+		for _, s := range e.cfg.Stages {
+			if s.Order <= stage.Order || s.Order >= doneOrder {
+				continue
+			}
+			skipLabel := fmt.Sprintf("stage:%s:complete", s.Name)
+			if !hasLabel(item, skipLabel) {
+				if err := e.client.AddLabelToIssue(owner, repo, item.Number, skipLabel); err != nil {
+					e.logf(item.Number, "warn", "could not add skip label for stage %q: %v\n", s.Name, err)
+					allStepsOK = false
 				} else {
-					e.logf(item.Number, "warn", "could not record completion SHA: %v\n", shaErr)
+					if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+						cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), skipLabel)
+					}
+					if e.webhookMgr != nil {
+						e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+skipLabel)
+					}
 				}
 			}
-		}
-	}
-
-	// Find the order boundary for the cleanup (Done) stage.
-	doneOrder := math.MaxInt
-	for _, s := range e.cfg.Stages {
-		if s.CleanupWorktree && s.Order < doneOrder {
-			doneOrder = s.Order
-		}
-	}
-
-	// Add dummy completion labels and "skipped" comments for all subsequent non-cleanup stages.
-	// The comment body must start with the canonical "🏭 **Fabrik" prefix so findNewComments
-	// dedup prevents Fabrik from processing its own output on the next poll.
-	//
-	// Every skip comment for this decision carries identical text (it names the emitting
-	// stage, not the individual skipped stage — see the Sprintf below), so they are
-	// indistinguishable from each other in item.Comments. hasSkippedComment is therefore
-	// checked once, before the loop, as a per-decision idempotency guard: if any skip
-	// comment for this emitting stage already exists, assume the full comment set was
-	// already posted and don't re-post. Skip labels remain independently idempotent
-	// per-stage via hasLabel.
-	skippedComment := fmt.Sprintf("🏭 **Fabrik — skipped: no work needed**\n\n_Skipped: no work needed (FABRIK_NO_WORK_NEEDED emitted by %s)._", stage.Name)
-	alreadyPostedSkipComments := hasSkippedComment(item, stage.Name)
-	for _, s := range e.cfg.Stages {
-		if s.Order <= stage.Order || s.Order >= doneOrder {
-			continue
-		}
-		skipLabel := fmt.Sprintf("stage:%s:complete", s.Name)
-		if !hasLabel(item, skipLabel) {
-			if err := e.client.AddLabelToIssue(owner, repo, item.Number, skipLabel); err != nil {
-				e.logf(item.Number, "warn", "could not add skip label for stage %q: %v\n", s.Name, err)
-				allStepsOK = false
-			} else {
-				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-					cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), skipLabel)
-				}
-				if e.webhookMgr != nil {
-					e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+skipLabel)
-				}
-			}
-		}
-		// Post the "skipped" comment — no rocket reaction, this is engine-generated metadata.
-		if !alreadyPostedSkipComments {
-			if dbID, err := e.client.AddComment(owner, repo, item.Number, skippedComment); err != nil {
-				e.logf(item.Number, "warn", "could not post skipped comment for stage %q: %v\n", s.Name, err)
-				allStepsOK = false
-			} else {
-				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-					cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-						DatabaseID: dbID, Body: skippedComment, Author: e.cfg.User, CreatedAt: time.Now(),
-					})
-				}
-				if e.webhookMgr != nil {
-					e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
+			// Post the "skipped" comment — no rocket reaction, this is engine-generated metadata.
+			if !alreadyPostedSkipComments {
+				if dbID, err := e.client.AddComment(owner, repo, item.Number, skippedComment); err != nil {
+					e.logf(item.Number, "warn", "could not post skipped comment for stage %q: %v\n", s.Name, err)
+					allStepsOK = false
+				} else {
+					if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+						cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+							DatabaseID: dbID, Body: skippedComment, Author: e.cfg.User, CreatedAt: time.Now(),
+						})
+					}
+					if e.webhookMgr != nil {
+						e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
+					}
 				}
 			}
 		}
