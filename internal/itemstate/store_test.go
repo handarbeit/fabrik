@@ -912,6 +912,82 @@ func TestCheckRunDrainOnPRHeadSHAUpdated(t *testing.T) {
 	}
 }
 
+// TestPRHeadSHAUpdated_GenuineSHAChangePrunesStaleCheckRuns is the #958 leg 3
+// regression: when the head SHA genuinely changes (a new push), the item's
+// LinkedPR.CheckRuns from the outgoing SHA must be pruned — otherwise
+// CheckRunsBySHA(newSHA) keeps returning runs from a prior push, letting a
+// stale failed run shadow the new head's classification forever on a
+// webhook-less deployment.
+func TestPRHeadSHAUpdated_GenuineSHAChangePrunesStaleCheckRuns(t *testing.T) {
+	s := NewStore(nil)
+	s.Apply(IssueOpened{Item: testProjectItem(testRepo, 21)})
+
+	// First push: sha_old, with a failed check run observed for it.
+	s.Apply(PRHeadSHAUpdated{Repo: testRepo, Number: 21, LinkedPRNum: 90, SHA: "sha_old"})
+	s.Apply(CheckRunCompleted{Repo: testRepo, SHA: "sha_old", Run: gh.CheckRun{ID: 1, Name: "ci", Status: "completed", Conclusion: "failure"}})
+
+	snap, _ := s.Get(testRepo, 21)
+	if lpr := snap.LinkedPR(); lpr == nil || len(lpr.CheckRuns) != 1 {
+		t.Fatalf("expected 1 check run for sha_old before SHA change, got %v", snap.LinkedPR())
+	}
+
+	// Second push: sha_new — a genuine SHA change (not first linkage).
+	_, changes, err := s.Apply(PRHeadSHAUpdated{Repo: testRepo, Number: 21, LinkedPRNum: 90, SHA: "sha_new"})
+	if err != nil {
+		t.Fatalf("PRHeadSHAUpdated: %v", err)
+	}
+	if len(changes) == 0 || changes[0].Fields&CheckRunChanged == 0 {
+		t.Errorf("expected CheckRunChanged when pruning stale runs on SHA change, got %v", changes)
+	}
+
+	snap, _ = s.Get(testRepo, 21)
+	lpr := snap.LinkedPR()
+	if lpr == nil {
+		t.Fatal("expected LinkedPR non-nil after second PRHeadSHAUpdated")
+	}
+	if len(lpr.CheckRuns) != 0 {
+		t.Errorf("expected stale sha_old check runs pruned on SHA change, got %v", lpr.CheckRuns)
+	}
+	if !lpr.HasHadChecks {
+		t.Error("expected HasHadChecks to remain true across the SHA change")
+	}
+
+	// CheckRunsBySHA for the new SHA must not return the pruned stale run.
+	if got := s.CheckRunsBySHA("sha_new"); len(got) != 0 {
+		t.Errorf("expected no check runs for sha_new immediately after the SHA change, got %v", got)
+	}
+	// CheckRunsBySHA for the old SHA must also come back empty — shaToKey no
+	// longer maps it to this item.
+	if got := s.CheckRunsBySHA("sha_old"); len(got) != 0 {
+		t.Errorf("expected no check runs for sha_old after it stopped being the head, got %v", got)
+	}
+}
+
+// TestPRHeadSHAUpdated_FirstLinkageDoesNotPrune verifies the first-linkage
+// case (HeadSHA transitioning from "" to a value) is not treated as a SHA
+// change — there is nothing to prune, and any pre-linkage buffered runs for
+// that SHA must still drain normally.
+func TestPRHeadSHAUpdated_FirstLinkageDoesNotPrune(t *testing.T) {
+	s := NewStore(nil)
+	s.Apply(IssueOpened{Item: testProjectItem(testRepo, 22)})
+
+	s.Apply(CheckRunCompleted{Repo: testRepo, SHA: "sha_first", Run: gh.CheckRun{ID: 1, Name: "ci", Status: "completed", Conclusion: "success"}})
+
+	_, changes, err := s.Apply(PRHeadSHAUpdated{Repo: testRepo, Number: 22, LinkedPRNum: 91, SHA: "sha_first"})
+	if err != nil {
+		t.Fatalf("PRHeadSHAUpdated: %v", err)
+	}
+	if len(changes) == 0 {
+		t.Fatal("expected a change on first linkage")
+	}
+
+	snap, _ := s.Get(testRepo, 22)
+	lpr := snap.LinkedPR()
+	if lpr == nil || len(lpr.CheckRuns) != 1 {
+		t.Errorf("expected the pre-linkage buffered run to drain normally on first linkage, got %v", lpr)
+	}
+}
+
 // ---- TerminalFlagSet mutation ----
 
 func TestTerminalFlagSet_SetsFlag(t *testing.T) {
