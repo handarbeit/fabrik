@@ -782,7 +782,11 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		spawned, spawnErr := e.preImplement(ctx, board, item)
 		if spawnErr != nil {
 			releaseLock()
-			return nil // preImplement already added fabrik:paused; wait for user to re-advance
+			// Either a fatal error (preImplement already added fabrik:paused;
+			// wait for user to re-advance) or errPreImplementDeferred (recovery
+			// of the #982 stale-snapshot inconsistency was inconclusive; the
+			// parent is not paused and will be retried on a subsequent poll).
+			return nil
 		}
 		if spawned {
 			// Children just created. checkDependencies will apply fabrik:blocked
