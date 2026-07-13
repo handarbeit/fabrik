@@ -345,6 +345,34 @@ func TestApplyPREnqueueRecorded(t *testing.T) {
 	}
 }
 
+// ---- CIFixNoOpRecorded (#958 leg 2) ----
+
+func TestApplyCIFixNoOpRecorded(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, CIFixNoOpRecorded{Repo: testRepo, Number: 1, SHA: "sha_noop_1"}, LinkedPRChanged)
+	st := getItem(t, s, testRepo, 1)
+	if st.LinkedPR == nil || st.LinkedPR.LastCIFixNoOpSHA != "sha_noop_1" {
+		t.Errorf("LastCIFixNoOpSHA not recorded; got %+v", st.LinkedPR)
+	}
+	snap, _ := s.Get(testRepo, 1)
+	if got := snap.LastCIFixNoOpSHA(); got != "sha_noop_1" {
+		t.Errorf("Snapshot.LastCIFixNoOpSHA() = %q, want sha_noop_1", got)
+	}
+	// A later no-op at a new SHA overwrites the record.
+	applyExpect(t, s, CIFixNoOpRecorded{Repo: testRepo, Number: 1, SHA: "sha_noop_2"}, LinkedPRChanged)
+	if got := getItem(t, s, testRepo, 1).LinkedPR.LastCIFixNoOpSHA; got != "sha_noop_2" {
+		t.Errorf("LastCIFixNoOpSHA = %q, want sha_noop_2 after second no-op", got)
+	}
+}
+
+func TestSnapshot_LastCIFixNoOpSHA_EmptyWhenUnset(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	snap, _ := s.Get(testRepo, 1)
+	if got := snap.LastCIFixNoOpSHA(); got != "" {
+		t.Errorf("LastCIFixNoOpSHA() = %q, want empty when never recorded", got)
+	}
+}
+
 // TestEnqueueCyclesSnapshotIsDeepCopy verifies that a Snapshot taken before a
 // later EnqueueCycleIncremented retains its original count — confirming
 // copyStageState deep-copies the EnqueueCycles map (no shared backing map).
