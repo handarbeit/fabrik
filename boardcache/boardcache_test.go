@@ -874,6 +874,65 @@ func TestFetchCheckRunsFallback(t *testing.T) {
 	}
 }
 
+// TestFetchCheckRuns_StaleCachedFailure_RefetchesLive is the #958 leg 3
+// regression: a cached failed check run must not be trusted blindly.
+// FetchCheckRuns must refetch live before returning a FAILED classification,
+// so a stale cached failure can't shadow a fresh green/pending status
+// forever on a webhook-less deployment (no check_run webhook to refresh it).
+func TestFetchCheckRuns_StaleCachedFailure_RefetchesLive(t *testing.T) {
+	store := itemstate.NewStore(nil)
+	store.Apply(itemstate.CheckRunCompleted{
+		Repo: "owner/repo",
+		SHA:  "sha_stale",
+		Run:  gh.CheckRun{ID: 1, Name: "build", Status: "completed", Conclusion: "failure"},
+	})
+
+	// Live GitHub now reports the same failed run superseded by a fresh
+	// pending rerun of the same name.
+	mc := &mockClient{checkRunsResult: []gh.CheckRun{
+		{ID: 1, Name: "build", Status: "completed", Conclusion: "failure"},
+		{ID: 2, Name: "build", Status: "in_progress"},
+	}}
+	c := NewCacheImpl(mc, store, nopLog)
+
+	runs, err := c.FetchCheckRuns("owner", "repo", "sha_stale")
+	if err != nil {
+		t.Fatalf("FetchCheckRuns: %v", err)
+	}
+	if mc.fetchCheckRunsCount != 1 {
+		t.Errorf("expected a live refetch when the cached classification is FAILED, got %d calls", mc.fetchCheckRunsCount)
+	}
+	if len(runs) != 2 {
+		t.Errorf("expected the live (refreshed) run set, got %+v", runs)
+	}
+}
+
+// TestFetchCheckRuns_CachedPending_ServedFromCache verifies the stale-cache
+// guard is specific to a FAILED classification — a cached WAIT (pending)
+// classification is still served from cache without a live refetch.
+func TestFetchCheckRuns_CachedPending_ServedFromCache(t *testing.T) {
+	store := itemstate.NewStore(nil)
+	store.Apply(itemstate.CheckRunCompleted{
+		Repo: "owner/repo",
+		SHA:  "sha_pending",
+		Run:  gh.CheckRun{ID: 1, Name: "build", Status: "in_progress"},
+	})
+
+	mc := &mockClient{}
+	c := NewCacheImpl(mc, store, nopLog)
+
+	runs, err := c.FetchCheckRuns("owner", "repo", "sha_pending")
+	if err != nil {
+		t.Fatalf("FetchCheckRuns: %v", err)
+	}
+	if mc.fetchCheckRunsCount != 0 {
+		t.Errorf("expected cached pending classification served without live refetch, got %d calls", mc.fetchCheckRunsCount)
+	}
+	if len(runs) != 1 {
+		t.Errorf("expected 1 cached run, got %+v", runs)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // FetchLabels — from cache
 // ---------------------------------------------------------------------------
