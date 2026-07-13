@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
-	"time"
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
@@ -374,131 +372,32 @@ func (e *Engine) enqueueForQueue(owner, repo string, item gh.ProjectItem, prNumb
 }
 
 // handleNoWorkNeeded is called when a stage outputs both FABRIK_STAGE_COMPLETE and
-// FABRIK_NO_WORK_NEEDED. It marks the emitting stage complete, adds dummy
-// stage:<name>:complete labels for all subsequent non-cleanup stages (with a one-line
-// "skipped" comment per stage), and moves the issue directly to Done without creating
-// a PR. This is the canonical path when Plan (or any stage) determines that no code
-// or documentation changes are required.
+// FABRIK_NO_WORK_NEEDED. It durably records the no-work-needed decision (the
+// fabrik:awaiting-done marker) as its very first mutation — before any other API
+// call — so a rate-limited or otherwise-failed invocation still leaves a trace that
+// this issue's fate was decided, and does not silently fall back into the normal
+// pipeline on a later poll (see adrs/ for the durable-marker rationale). The rest of
+// the work (completion labels, skip comments, the Done move, and the issue close) is
+// delegated to settleNoWorkNeeded, which is idempotent and safe to retry.
 func (e *Engine) handleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
 	e.logf(item.Number, "done", "stage %q signaled no work needed — skipping remaining stages and moving to Done\n", stage.Name)
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
-	// Clear any orphaned fabrik:awaiting-input label (same rationale as handleStageComplete).
-	if hasLabel(item, "fabrik:awaiting-input") {
-		if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil &&
-			!errors.Is(err, gh.ErrNotFound) {
-			e.logf(item.Number, "warn", "could not remove awaiting-input label: %v\n", err)
-		} else if err == nil {
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
-			}
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-input")
-			}
-		}
-	}
-
-	// Mark the emitting stage complete so the engine doesn't re-run it on restart.
-	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
-		e.logf(item.Number, "warn", "could not add completion label for stage %q: %v\n", stage.Name, err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+completeLabel)
-		}
-		if stage.Name == "Validate" {
-			repoStr := itemOwnerRepoString(item, e.defaultRepo())
-			wm := e.worktreesFor(item.Repo)
-			if sha, shaErr := gitRevParse(wm.WorktreeDir(item.Number), "HEAD"); shaErr == nil && sha != "" {
-				e.store.Apply(itemstate.ValidateCompletedAtSHA{Repo: repoStr, Number: item.Number, SHA: sha})
-				e.logf(item.Number, "validate-sha", "recorded completion SHA %s\n", sha)
-			} else {
-				e.logf(item.Number, "warn", "could not record completion SHA: %v\n", shaErr)
-			}
-		}
-	}
-
-	// Find the order boundary for the cleanup (Done) stage.
-	doneOrder := math.MaxInt
-	for _, s := range e.cfg.Stages {
-		if s.CleanupWorktree && s.Order < doneOrder {
-			doneOrder = s.Order
-		}
-	}
-
-	// Add dummy completion labels and "skipped" comments for all subsequent non-cleanup stages.
-	// The comment body must start with the canonical "🏭 **Fabrik" prefix so findNewComments
-	// dedup prevents Fabrik from processing its own output on the next poll.
-	skippedComment := fmt.Sprintf("🏭 **Fabrik — skipped: no work needed**\n\n_Skipped: no work needed (FABRIK_NO_WORK_NEEDED emitted by %s)._", stage.Name)
-	for _, s := range e.cfg.Stages {
-		if s.Order <= stage.Order || s.Order >= doneOrder {
-			continue
-		}
-		skipLabel := fmt.Sprintf("stage:%s:complete", s.Name)
-		if err := e.client.AddLabelToIssue(owner, repo, item.Number, skipLabel); err != nil {
-			e.logf(item.Number, "warn", "could not add skip label for stage %q: %v\n", s.Name, err)
+	if !hasLabel(item, "fabrik:awaiting-done") {
+		if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-done"); err != nil {
+			e.logf(item.Number, "warn", "could not add awaiting-done marker: %v\n", err)
 		} else {
 			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), skipLabel)
+				cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-done")
 			}
 			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+skipLabel)
-			}
-		}
-		// Post the "skipped" comment — no rocket reaction, this is engine-generated metadata.
-		if dbID, err := e.client.AddComment(owner, repo, item.Number, skippedComment); err != nil {
-			e.logf(item.Number, "warn", "could not post skipped comment for stage %q: %v\n", s.Name, err)
-		} else {
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-					DatabaseID: dbID, Body: skippedComment, Author: e.cfg.User, CreatedAt: time.Now(),
-				})
-			}
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
+				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-done")
 			}
 		}
 	}
 
-	if e.statusField == nil {
-		e.logf(item.Number, "warn", "status field metadata not available; cannot move to Done\n")
-		return
-	}
-
-	optionID, ok := e.statusField.Options["Done"]
-	if !ok {
-		e.logf(item.Number, "warn", "no status option %q found on project board (available: %v); cannot move to Done\n",
-			"Done", mapKeys(e.statusField.Options))
-		return
-	}
-
-	e.logf(item.Number, "advance", "moving no-work-needed issue to Done\n")
-	if err := e.client.UpdateProjectItemStatus(board.ProjectID, item.ItemID, e.statusField.FieldID, optionID); err != nil {
-		e.logf(item.Number, "warn", "could not move issue to Done: %v\n", err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.UpdateItemStatus(boardcache.ItemKey(item.Repo, item.Number), "Done")
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
-		}
-		// Close the GitHub issue so it mirrors the normal pipeline close-on-merge path.
-		// No webhook echo registered: applyIssuesDelta's "closed" case never calls
-		// matchEchoFn, so any registered echo would expire unused. The ApplyIssueClosed
-		// write-through handles cache coherence immediately.
-		if err := e.client.CloseIssue(owner, repo, item.Number); err != nil {
-			e.logf(item.Number, "warn", "could not close issue (no work needed): %v\n", err)
-		} else {
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyIssueClosed(boardcache.ItemKey(item.Repo, item.Number))
-			}
-			e.logf(item.Number, "done", "closed issue (no work needed)\n")
-		}
-	}
+	e.settleNoWorkNeeded(board, item, stage)
 }
 
 // holdingStage returns the first stage in cfg with HoldingStage: true, or nil if none.
