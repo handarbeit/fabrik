@@ -413,10 +413,17 @@ func (e *Engine) dispatchCIFixReinvoke(ctx context.Context, board *gh.ProjectBoa
 		e.logf(item.Number, "ci-fix-reinvoke", "re-invoking stage %q via comment processing with CI failure context\n", stage.Name)
 		err := e.processComments(ctx, board, item, &ciFixStage, []gh.Comment{syntheticComment}, onPIDReady)
 
-		if headAfter, hErr := gitHeadSHA(workDir); hErr == nil && headBefore != "" && headAfter == headBefore {
-			e.logf(item.Number, "ci-fix-reinvoke", "no new commit pushed (HEAD still %s) — recording no-op for this head\n",
-				headAfter[:min(8, len(headAfter))])
-			e.store.Apply(itemstate.CIFixNoOpRecorded{Repo: itemRepo, Number: item.Number, SHA: headAfter})
+		// Only record a no-op when the reinvoke actually completed: a failed
+		// processComments (transient network issue, rate limit, workspace
+		// lock) also leaves HEAD unchanged, but recording a no-op for that
+		// case would wrongly debounce a retry that never got a chance to push
+		// a real fix.
+		if err == nil {
+			if headAfter, hErr := gitHeadSHA(workDir); hErr == nil && headBefore != "" && headAfter == headBefore {
+				e.logf(item.Number, "ci-fix-reinvoke", "no new commit pushed (HEAD still %s) — recording no-op for this head\n",
+					headAfter[:min(8, len(headAfter))])
+				e.store.Apply(itemstate.CIFixNoOpRecorded{Repo: itemRepo, Number: item.Number, SHA: headAfter})
+			}
 		}
 
 		if err != nil {
