@@ -532,6 +532,11 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.LinkedPR.LastEnqueuedSHA = v.SHA
 		return LinkedPRChanged
 
+	case CIFixNoOpRecorded:
+		ensureLinkedPR(item, 0)
+		item.LinkedPR.LastCIFixNoOpSHA = v.SHA
+		return LinkedPRChanged
+
 	case BaseBranchWarnRecorded:
 		if item.BaseBranchWarned == nil {
 			item.BaseBranchWarned = make(map[string]bool)
@@ -572,11 +577,19 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		if v.LinkedPRNum != 0 {
 			item.LinkedPR.Number = v.LinkedPRNum
 		}
+		flags := ChangeFlags(LinkedPRChanged)
 		if v.SHA != item.LinkedPR.HeadSHA && item.LinkedPR.HeadSHA != "" {
 			item.LinkedPR.LastHeadSHAUpdate = time.Now()
+			// The outgoing SHA's check runs never apply to the new head.
+			// Prune them so CheckRunsBySHA(newSHA) — and boardcache reads
+			// that trust it — can't be shadowed by a stale run left behind
+			// from a prior push (#958 leg 3).
+			if len(item.LinkedPR.CheckRuns) > 0 {
+				item.LinkedPR.CheckRuns = nil
+				flags |= CheckRunChanged
+			}
 		}
 		item.LinkedPR.HeadSHA = v.SHA
-		flags := ChangeFlags(LinkedPRChanged)
 		// Drain any pre-linkage check runs buffered for this SHA.
 		if pending, ok := s.pendingCheckRuns[v.SHA]; ok && len(pending) > 0 {
 			for _, run := range pending {
