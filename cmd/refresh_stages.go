@@ -44,6 +44,7 @@ func runRefreshStages(args []string) error {
 type defaultNodeIndex struct {
 	keySet     map[string]bool
 	nodesByKey map[string][2]*yaml.Node // key string → [keyNode, valueNode]
+	stage      *stages.Stage            // typed parse, for value-aware no-op filtering; nil on parse failure
 }
 
 // refreshStagesWithReader is the testable core of runRefreshStages.
@@ -110,6 +111,7 @@ func refreshStagesWithReader(
 		if err != nil {
 			return fmt.Errorf("checking drift for %s: %w", userPath, err)
 		}
+		missing = stages.FilterNoOpKeys(missing, idx.stage)
 		if len(missing) == 0 {
 			continue // no drift — silently skip
 		}
@@ -195,6 +197,15 @@ func buildDefaultNodeIndex(defaults fs.FS) (map[string]*defaultNodeIndex, error)
 		idx := &defaultNodeIndex{
 			keySet:     make(map[string]bool),
 			nodesByKey: make(map[string][2]*yaml.Node),
+		}
+
+		// Best-effort typed parse for value-aware no-op filtering. A failure here
+		// leaves idx.stage nil, and FilterNoOpKeys degrades to reporting every
+		// missing key (the pre-existing structural behavior) rather than
+		// silently under-reporting.
+		var typed stages.Stage
+		if err := yaml.Unmarshal(data, &typed); err == nil {
+			idx.stage = &typed
 		}
 
 		// Walk alternating key/value pairs in the mapping.
