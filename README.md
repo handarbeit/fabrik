@@ -114,7 +114,7 @@ Two landing engines share one `Queued` board column, and Fabrik picks per repo:
 - **GitHub's native merge queue** (ADR-058) — used automatically when the repo has one enabled (Enterprise Cloud or org-owned public repos). Kill-switch: `--merge-queue off`.
 - **Fabrik's internal merge train** (ADR-059) — the plan- and host-agnostic fallback for private Team and personal-account repos where GitHub's native queue isn't available. It stages a trial branch per repo, runs one combined Validate, and lands the batch atomically; a red batch is isolated via halving bisection so a single poisoner doesn't block the rest. Opt-in via `--merge-train on`.
 
-Both are off by default and additive to the existing serial auto-merge path. See [Merge Queue](docs/USER_GUIDE.md#merge-queue) and [Merge Train / Queued](docs/USER_GUIDE.md#merge-train--queued) in the User Guide for setup (including the required `Queued` board column) and tuning knobs.
+Native queue routing defaults to `auto` (it only engages on repos where GitHub's native queue is already enabled); the merge train defaults to `off`. Both leave the existing serial auto-merge path untouched unless explicitly turned on. See [Merge Queue](docs/USER_GUIDE.md#merge-queue) and [Merge Train / Queued](docs/USER_GUIDE.md#merge-train--queued) in the User Guide for setup (including the required `Queued` board column) and tuning knobs.
 
 ### Comment Processing
 
