@@ -295,3 +295,19 @@ func TestMissingTopLevelKeys_SortedOutput(t *testing.T) {
 		t.Errorf("expected sorted output [apple mango zebra], got: %v", missing)
 	}
 }
+
+func TestDriftTitle_NamesMissingFields(t *testing.T) {
+	// The summary title must name the missing key(s), not just their count, so
+	// the warnings panel is actionable without opening the detail view.
+	got := driftTitle(".fabrik/stages/implement.yaml", []string{"kill_grace"})
+	want := ".fabrik/stages/implement.yaml missing 1 field(s): kill_grace"
+	if got != want {
+		t.Errorf("driftTitle = %q, want %q", got, want)
+	}
+
+	// Multiple missing fields are all named.
+	multi := driftTitle("review.yaml", []string{"kill_grace", "wait_for_ci"})
+	if !strings.Contains(multi, "kill_grace, wait_for_ci") {
+		t.Errorf("expected both fields named, got %q", multi)
+	}
+}
