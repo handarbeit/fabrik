@@ -2,14 +2,17 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 )
 
 // planCommentBody returns a fake Plan stage comment body containing the given spawn blocks.
@@ -261,8 +264,19 @@ FABRIK_SPAWN_CHILD_END
 	}
 }
 
+// TestPreImplement_NoOp_NoPlanComment covers the #982 inconsistency: stage:Plan:complete
+// is present but item.Comments has no Plan comment. This must NOT silently no-op —
+// preImplement must attempt recovery via a live re-read before concluding there is
+// nothing to spawn. This test's live re-read also finds no Plan comment, so the
+// final outcome is still spawned=false, err=nil — but only after recovery genuinely ran.
 func TestPreImplement_NoOp_NoPlanComment(t *testing.T) {
-	client := &mockGitHubClient{}
+	var fetchCalls int
+	client := &mockGitHubClient{
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			fetchCalls++
+			return nil // fresh read still has no comments
+		},
+	}
 	eng := spawnTestEngine(t, client)
 
 	item := gh.ProjectItem{
@@ -280,6 +294,178 @@ func TestPreImplement_NoOp_NoPlanComment(t *testing.T) {
 	}
 	if spawned {
 		t.Error("expected spawned=false with no Plan comment")
+	}
+	if fetchCalls != 1 {
+		t.Errorf("expected live re-read to be attempted exactly once, got %d calls", fetchCalls)
+	}
+}
+
+// TestPreImplement_RecoversViaLiveRead_SpawnsChildren covers the #982 recovery path
+// where the live re-read finds the Plan comment (with spawn blocks) that was missing
+// from the stale item.Comments snapshot. Children must be spawned exactly once.
+func TestPreImplement_RecoversViaLiveRead_SpawnsChildren(t *testing.T) {
+	childCounter := 0
+	client := &mockGitHubClient{
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			item.Comments = []gh.Comment{
+				{
+					DatabaseID: 1001,
+					Author:     "testuser",
+					Body: planCommentWithBlocks(`
+FABRIK_SPAWN_CHILD_BEGIN owner/child
+TITLE: Recovered child
+Recovered body.
+FABRIK_SPAWN_CHILD_END
+`),
+				},
+			}
+			return nil
+		},
+		createIssueFn: func(owner, repo, title, body string) (int, string, error) {
+			childCounter++
+			return 300 + childCounter, fmt.Sprintf("I_recovered%d", childCounter), nil
+		},
+		addProjectV2ItemByIdFn: func(projectID, contentNodeID string) (string, error) {
+			return "PVTI_" + contentNodeID, nil
+		},
+	}
+	eng := spawnTestEngine(t, client)
+
+	item := gh.ProjectItem{
+		ID:     "I_parent",
+		ItemID: "PVTI_parent",
+		Number: 42,
+		Repo:   "owner/repo",
+		Labels: []string{"stage:Plan:complete"},
+		// item.Comments is empty — simulates the stale-snapshot miss.
+	}
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !spawned {
+		t.Fatal("expected spawned=true after recovery finds spawn blocks")
+	}
+	if len(client.createIssueCalls) != 1 {
+		t.Fatalf("expected 1 CreateIssue call, got %d", len(client.createIssueCalls))
+	}
+
+	var spawnedLabelCount int
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:children-spawned" {
+			spawnedLabelCount++
+		}
+	}
+	if spawnedLabelCount != 1 {
+		t.Errorf("expected fabrik:children-spawned added exactly once, got %d", spawnedLabelCount)
+	}
+}
+
+// TestPreImplement_RecoversViaLiveRead_ConfirmsNothingToSpawn covers the #982 recovery
+// path where the live re-read succeeds but confirms there really is nothing to spawn
+// (Plan comment recovered, but with no spawn blocks).
+func TestPreImplement_RecoversViaLiveRead_ConfirmsNothingToSpawn(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			item.Comments = []gh.Comment{
+				{DatabaseID: 1001, Author: "testuser", Body: planCommentWithBlocks("No spawn blocks in here.")},
+			}
+			return nil
+		},
+	}
+	eng := spawnTestEngine(t, client)
+
+	item := gh.ProjectItem{
+		ID:     "I_parent",
+		Number: 42,
+		Repo:   "owner/repo",
+		Labels: []string{"stage:Plan:complete"},
+	}
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if spawned {
+		t.Error("expected spawned=false when recovered Plan comment has no spawn blocks")
+	}
+	if len(client.createIssueCalls) != 0 {
+		t.Error("CreateIssue should not be called when there is nothing to spawn")
+	}
+}
+
+// TestPreImplement_RecoveryFails_DefersWithoutPausing covers the #982 outcome where the
+// live re-read itself fails — preImplement must return errPreImplementDeferred (so the
+// parent is retried on a subsequent poll) and must NOT pause the issue.
+func TestPreImplement_RecoveryFails_DefersWithoutPausing(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			return errors.New("simulated GraphQL failure")
+		},
+	}
+	eng := spawnTestEngine(t, client)
+
+	item := gh.ProjectItem{
+		ID:     "I_parent",
+		Number: 42,
+		Repo:   "owner/repo",
+		Labels: []string{"stage:Plan:complete"},
+	}
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if !errors.Is(err, errPreImplementDeferred) {
+		t.Fatalf("expected errPreImplementDeferred, got %v", err)
+	}
+	if spawned {
+		t.Error("expected spawned=false on deferred recovery")
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			t.Error("fabrik:paused must not be added on the deferred outcome")
+		}
+	}
+}
+
+// TestPreImplement_RecoveryDeferred_CooldownSkipsLiveRead verifies that an active
+// spawn-recovery cooldown short-circuits the live-read call entirely, bounding
+// repeated GraphQL load during a sustained failure window (#971-style pressure).
+func TestPreImplement_RecoveryDeferred_CooldownSkipsLiveRead(t *testing.T) {
+	var fetchCalls int
+	client := &mockGitHubClient{
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			fetchCalls++
+			return nil
+		},
+	}
+	eng := spawnTestEngine(t, client)
+	eng.store.Apply(itemstate.CooldownRecorded{
+		Repo:   "owner/repo",
+		Number: 42,
+		Reason: "spawn-recovery-deferred",
+		Until:  time.Now().Add(10 * time.Minute),
+	})
+
+	item := gh.ProjectItem{
+		ID:     "I_parent",
+		Number: 42,
+		Repo:   "owner/repo",
+		Labels: []string{"stage:Plan:complete"},
+	}
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	spawned, err := eng.preImplement(context.Background(), board, item)
+	if !errors.Is(err, errPreImplementDeferred) {
+		t.Fatalf("expected errPreImplementDeferred, got %v", err)
+	}
+	if spawned {
+		t.Error("expected spawned=false while cooldown is active")
+	}
+	if fetchCalls != 0 {
+		t.Errorf("expected live re-read to be skipped while cooldown is active, got %d calls", fetchCalls)
 	}
 }
 
