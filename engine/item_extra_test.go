@@ -1070,6 +1070,138 @@ func TestItemNeedsWork_ClosedIssue_AwaitingCI_Passes(t *testing.T) {
 	}
 }
 
+// TestItemMayNeedWork_AwaitingDone_SuppressesDispatch verifies that
+// fabrik:awaiting-done suppresses itemMayNeedWork for a non-cleanup stage while
+// the item still sits at the emitting stage's own column — the durable-marker
+// dispatch gate for #981.
+func TestItemMayNeedWork_AwaitingDone_SuppressesDispatch(t *testing.T) {
+	eng := testEngineWithStages(t, &mockGitHubClient{}, testStagesWithCleanup())
+	item := gh.ProjectItem{
+		Number: 70,
+		Status: "Research",
+		Labels: []string{"fabrik:awaiting-done"},
+	}
+	if eng.itemMayNeedWork(item) {
+		t.Error("itemMayNeedWork must return false while fabrik:awaiting-done is present on a non-cleanup stage")
+	}
+}
+
+// TestItemMayNeedWork_AwaitingDone_SuppressesDispatch_IndependentOfStatus verifies
+// that the awaiting-done gate keys off the resolved stage's CleanupWorktree
+// property, not the literal status string "Done" — the Done-move itself may be
+// what's failing, so the item could be observed at any column, including one that
+// happens to be named "Done" but isn't actually the cleanup stage.
+func TestItemMayNeedWork_AwaitingDone_SuppressesDispatch_IndependentOfStatus(t *testing.T) {
+	stgs := []*stages.Stage{{Name: "Done", Order: 1, Prompt: "not actually cleanup"}}
+	eng := testEngineWithStages(t, &mockGitHubClient{}, stgs)
+	item := gh.ProjectItem{
+		Number: 71,
+		Status: "Done",
+		Labels: []string{"fabrik:awaiting-done"},
+	}
+	if eng.itemMayNeedWork(item) {
+		t.Error("itemMayNeedWork must return false while fabrik:awaiting-done is present, regardless of item.Status")
+	}
+}
+
+// TestItemMayNeedWork_AwaitingDone_CleanupStageUnaffected verifies that the
+// awaiting-done gate does not block the actual cleanup (Done) stage — the settle
+// scan clears the marker once the Done-move and close land, and cleanup must still
+// run to remove the worktree.
+func TestItemMayNeedWork_AwaitingDone_CleanupStageUnaffected(t *testing.T) {
+	rootDir := t.TempDir()
+	wm := NewWorktreeManager(rootDir)
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithCleanup(),
+		},
+		&mockGitHubClient{},
+		&mockClaudeInvoker{},
+		wm,
+	)
+	const issueNum = 72
+	if err := os.MkdirAll(wm.WorktreeDir(issueNum), 0755); err != nil {
+		t.Fatal(err)
+	}
+	item := gh.ProjectItem{
+		Number: issueNum,
+		Status: "Done",
+		Labels: []string{"fabrik:awaiting-done"},
+	}
+	if !eng.itemMayNeedWork(item) {
+		t.Error("itemMayNeedWork must not be suppressed by fabrik:awaiting-done on the cleanup stage")
+	}
+}
+
+// TestItemNeedsWork_AwaitingDone_SuppressesDispatch mirrors
+// TestItemMayNeedWork_AwaitingDone_SuppressesDispatch for the full itemNeedsWork gate.
+func TestItemNeedsWork_AwaitingDone_SuppressesDispatch(t *testing.T) {
+	eng := testEngineWithStages(t, &mockGitHubClient{}, testStagesWithCleanup())
+	item := gh.ProjectItem{
+		Number: 73,
+		Status: "Research",
+		Labels: []string{"fabrik:awaiting-done"},
+	}
+	if eng.itemNeedsWork(item) {
+		t.Error("itemNeedsWork must return false while fabrik:awaiting-done is present on a non-cleanup stage")
+	}
+}
+
+// TestItemNeedsWork_AwaitingDone_SuppressesDispatch_IndependentOfStatus mirrors
+// TestItemMayNeedWork_AwaitingDone_SuppressesDispatch_IndependentOfStatus for
+// itemNeedsWork.
+func TestItemNeedsWork_AwaitingDone_SuppressesDispatch_IndependentOfStatus(t *testing.T) {
+	stgs := []*stages.Stage{{Name: "Done", Order: 1, Prompt: "not actually cleanup"}}
+	eng := testEngineWithStages(t, &mockGitHubClient{}, stgs)
+	item := gh.ProjectItem{
+		Number: 74,
+		Status: "Done",
+		Labels: []string{"fabrik:awaiting-done"},
+	}
+	if eng.itemNeedsWork(item) {
+		t.Error("itemNeedsWork must return false while fabrik:awaiting-done is present, regardless of item.Status")
+	}
+}
+
+// TestItemNeedsWork_AwaitingDone_CleanupStageUnaffected mirrors
+// TestItemMayNeedWork_AwaitingDone_CleanupStageUnaffected for itemNeedsWork.
+func TestItemNeedsWork_AwaitingDone_CleanupStageUnaffected(t *testing.T) {
+	rootDir := t.TempDir()
+	wm := NewWorktreeManager(rootDir)
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithCleanup(),
+		},
+		&mockGitHubClient{},
+		&mockClaudeInvoker{},
+		wm,
+	)
+	const issueNum = 75
+	if err := os.MkdirAll(wm.WorktreeDir(issueNum), 0755); err != nil {
+		t.Fatal(err)
+	}
+	item := gh.ProjectItem{
+		Number: issueNum,
+		Status: "Done",
+		Labels: []string{"fabrik:awaiting-done"},
+	}
+	if !eng.itemNeedsWork(item) {
+		t.Error("itemNeedsWork must not be suppressed by fabrik:awaiting-done on the cleanup stage")
+	}
+}
+
 // TestPoll_DeferredRefresh_DoesNotRefreshIncompleteItem verifies that the deferred
 // CooldownAt["periodic-re-eval"] refresh in poll() does NOT refresh LastAttemptAt
 // for incomplete items. Refreshing LastAttemptAt would defeat the retry-after-cooldown

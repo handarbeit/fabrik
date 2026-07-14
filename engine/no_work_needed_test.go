@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/handarbeit/fabrik/boardcache"
@@ -305,5 +306,357 @@ func TestHandleNoWorkNeeded_DirectlyDoneNotNextStage(t *testing.T) {
 	// Must be Done, not the next sequential stage.
 	if client.updateStatusCalls[0].optionID != "OPT_Done" {
 		t.Errorf("handleNoWorkNeeded must set status to Done, got %q", client.updateStatusCalls[0].optionID)
+	}
+}
+
+// TestHandleNoWorkNeeded_AwaitingDoneMarkerWrittenFirst verifies that
+// fabrik:awaiting-done is the very first AddLabelToIssue call in
+// handleNoWorkNeeded — ahead of the awaiting-input clear and the completion
+// label — so a fully-rate-limited invocation still leaves a durable trace (#981).
+// It also verifies the marker is never removed when UpdateProjectItemStatus fails:
+// clearNoWorkNeededMarker only runs after a fully successful settle pass.
+func TestHandleNoWorkNeeded_AwaitingDoneMarkerWrittenFirst(t *testing.T) {
+	client := &mockGitHubClient{
+		updateProjectItemStatusFn: func(_, _, _, _ string) error {
+			return fmt.Errorf("rate limited")
+		},
+	}
+	eng := testEngineWithStages(t, client, testStagesWithCleanup())
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 5, ItemID: "PVTI_5", Repo: "owner/repo", Labels: []string{"fabrik:awaiting-input"}}
+	stage := &stages.Stage{Name: "Plan", Order: 2}
+
+	eng.handleNoWorkNeeded(board, item, stage)
+
+	if len(client.addLabelCalls) == 0 {
+		t.Fatal("expected at least one AddLabelToIssue call")
+	}
+	if got := client.addLabelCalls[0].labelName; got != "fabrik:awaiting-done" {
+		t.Errorf("first AddLabelToIssue call = %q, want fabrik:awaiting-done", got)
+	}
+
+	// The marker must remain present — clearNoWorkNeededMarker never ran because
+	// the status update failed.
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-done" {
+			t.Error("fabrik:awaiting-done must not be removed when the Done-move fails")
+		}
+	}
+}
+
+// TestSettleNoWorkNeeded_RetryThenSucceed drives the exact scenario required by
+// the issue: settleNoWorkNeeded is called once with a failing
+// UpdateProjectItemStatus (no CloseIssue, marker stays), then again — simulating a
+// later poll with a fresh item snapshot reflecting what actually persisted from the
+// first pass — with the mock now succeeding. The second call must complete the
+// Done move, close the issue, and clear the marker, without re-posting any of the
+// already-persisted skip labels/comments.
+func TestSettleNoWorkNeeded_RetryThenSucceed(t *testing.T) {
+	var statusShouldFail atomic.Bool
+	statusShouldFail.Store(true)
+	client := &mockGitHubClient{
+		updateProjectItemStatusFn: func(_, _, _, _ string) error {
+			if statusShouldFail.Load() {
+				return fmt.Errorf("rate limited")
+			}
+			return nil
+		},
+	}
+	eng := testEngineWithStages(t, client, testStagesWithCleanup())
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 5, ItemID: "PVTI_5", Repo: "owner/repo", Status: "Plan"}
+	stage := &stages.Stage{Name: "Plan", Order: 2}
+
+	// First pass: status update fails.
+	eng.settleNoWorkNeeded(board, item, stage)
+
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected 1 status update attempt on first pass, got %d", len(client.updateStatusCalls))
+	}
+	if len(client.closeIssueCalls) != 0 {
+		t.Fatalf("expected no CloseIssue call on first pass, got %d", len(client.closeIssueCalls))
+	}
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-done" {
+			t.Error("fabrik:awaiting-done must not be cleared after a failed first pass")
+		}
+	}
+
+	// Build a fresh item snapshot reflecting what actually persisted from pass 1
+	// (labels/comments added via the mock), the same way a real poll would refetch
+	// full item state from GitHub.
+	var labels []string
+	for _, c := range client.addLabelCalls {
+		labels = append(labels, c.labelName)
+	}
+	var comments []gh.Comment
+	for _, c := range client.addCommentCalls {
+		comments = append(comments, gh.Comment{Body: c.body})
+	}
+	retryItem := gh.ProjectItem{
+		Number: 5, ItemID: "PVTI_5", Repo: "owner/repo", Status: "Plan",
+		Labels: labels, Comments: comments,
+	}
+
+	// Second pass: mock now succeeds.
+	statusShouldFail.Store(false)
+	eng.settleNoWorkNeeded(board, retryItem, stage)
+
+	if len(client.updateStatusCalls) != 2 {
+		t.Fatalf("expected 2 total status update attempts, got %d", len(client.updateStatusCalls))
+	}
+	if len(client.closeIssueCalls) != 1 {
+		t.Fatalf("expected 1 CloseIssue call after successful retry, got %d", len(client.closeIssueCalls))
+	}
+
+	// The skip label/comment for Implement (the only intermediate stage between
+	// Plan and the cleanup Done stage) must not be duplicated across both passes.
+	implementLabelCount := 0
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Implement:complete" {
+			implementLabelCount++
+		}
+	}
+	if implementLabelCount != 1 {
+		t.Errorf("expected exactly 1 stage:Implement:complete label across both passes (no duplication), got %d", implementLabelCount)
+	}
+	if len(client.addCommentCalls) != 1 {
+		t.Errorf("expected exactly 1 skipped comment across both passes (no duplication), got %d", len(client.addCommentCalls))
+	}
+
+	// Marker must be cleared after the fully successful pass.
+	markerCleared := false
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-done" {
+			markerCleared = true
+		}
+	}
+	if !markerCleared {
+		t.Error("expected fabrik:awaiting-done to be removed after a fully successful settle pass")
+	}
+}
+
+// TestSettleNoWorkNeeded_StatusSucceedsCloseFailsThenRetry verifies the specific
+// sequence where UpdateProjectItemStatus succeeds but CloseIssue fails in the same
+// pass, and a later poll retries via poll.go's settle scan — which re-resolves
+// `stage` from item.Status (now "Done") rather than the original emitting stage.
+// The retry must not spuriously add a stage:Done:complete label — that label
+// means "the Done cleanup stage's worktree removal already ran" (see
+// itemNeedsWork's CleanupWorktree branch and janitorIsOffBoardOrCleanupComplete),
+// and settleNoWorkNeeded never performs that removal. A spurious label here would
+// permanently short-circuit normal cleanup dispatch for the item.
+func TestSettleNoWorkNeeded_StatusSucceedsCloseFailsThenRetry(t *testing.T) {
+	var closeShouldFail atomic.Bool
+	closeShouldFail.Store(true)
+	client := &mockGitHubClient{
+		closeIssueFn: func(_, _ string, _ int) error {
+			if closeShouldFail.Load() {
+				return fmt.Errorf("rate limited")
+			}
+			return nil
+		},
+	}
+	stgs := testStagesWithCleanup()
+	eng := testEngineWithStages(t, client, stgs)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 5, ItemID: "PVTI_5", Repo: "owner/repo", Status: "Research"}
+	stage := &stages.Stage{Name: "Research", Order: 1}
+
+	// First pass: status move succeeds, close fails.
+	eng.settleNoWorkNeeded(board, item, stage)
+
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected 1 status update, got %d", len(client.updateStatusCalls))
+	}
+	if len(client.closeIssueCalls) != 1 {
+		t.Fatalf("expected 1 CloseIssue attempt, got %d", len(client.closeIssueCalls))
+	}
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-done" {
+			t.Error("fabrik:awaiting-done must not be cleared while CloseIssue is still failing")
+		}
+	}
+
+	// Refetch: item.Status now reflects the successful board move to "Done";
+	// the issue is still open. This is exactly what poll.go's settle scan sees
+	// and resolves `stage` from — stages.FindStage(cfg.Stages, "Done") — which
+	// returns the cleanup stage itself, not the original "Research" stage.
+	var labels []string
+	for _, c := range client.addLabelCalls {
+		labels = append(labels, c.labelName)
+	}
+	retryItem := gh.ProjectItem{
+		Number: 5, ItemID: "PVTI_5", Repo: "owner/repo", Status: "Done",
+		Labels: labels,
+	}
+	retryStage := stages.FindStage(stgs, retryItem.Status)
+	if retryStage == nil || !retryStage.CleanupWorktree {
+		t.Fatalf("expected FindStage(%q) to resolve to the cleanup stage, got %+v", retryItem.Status, retryStage)
+	}
+
+	// Second pass: mock now succeeds.
+	closeShouldFail.Store(false)
+	eng.settleNoWorkNeeded(board, retryItem, retryStage)
+
+	if len(client.closeIssueCalls) != 2 {
+		t.Fatalf("expected 2 total CloseIssue attempts, got %d", len(client.closeIssueCalls))
+	}
+	// No status update should have been attempted again — item.Status was already "Done".
+	if len(client.updateStatusCalls) != 1 {
+		t.Errorf("expected still only 1 status update, got %d", len(client.updateStatusCalls))
+	}
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "stage:Done:complete" {
+			t.Error("settleNoWorkNeeded must never add stage:Done:complete — it does not perform the actual Done-stage worktree cleanup")
+		}
+	}
+	markerCleared := false
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-done" {
+			markerCleared = true
+		}
+	}
+	if !markerCleared {
+		t.Error("expected fabrik:awaiting-done to be removed once CloseIssue finally succeeds")
+	}
+}
+
+// TestRecordNoWorkNeededRetry_EscalatesAtMaxRetries verifies that repeated
+// no-work-needed settle failures escalate (fabrik:paused added, fabrik:awaiting-done
+// removed, explanatory comment posted) once MaxRetries is reached, instead of
+// retrying forever.
+func TestRecordNoWorkNeededRetry_EscalatesAtMaxRetries(t *testing.T) {
+	client := &mockGitHubClient{
+		updateProjectItemStatusFn: func(_, _, _, _ string) error {
+			return fmt.Errorf("rate limited")
+		},
+	}
+	eng := testEngineWithStages(t, client, testStagesWithCleanup())
+	eng.cfg.MaxRetries = 2
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 5, ItemID: "PVTI_5", Repo: "owner/repo", Status: "Plan",
+		Labels: []string{"stage:Plan:complete", "stage:Implement:complete"},
+		Comments: []gh.Comment{
+			{Body: "🏭 **Fabrik — skipped: no work needed**\n\n_Skipped: no work needed (FABRIK_NO_WORK_NEEDED emitted by Plan)._"},
+		},
+	}
+	stage := &stages.Stage{Name: "Plan", Order: 2}
+
+	// Drive MaxRetries settle failures.
+	for i := 0; i < eng.cfg.MaxRetries; i++ {
+		eng.settleNoWorkNeeded(board, item, stage)
+	}
+
+	pausedAdded := false
+	markerRemoved := false
+	for _, c := range client.addLabelCalls {
+		if c.labelName == "fabrik:paused" {
+			pausedAdded = true
+		}
+	}
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-done" {
+			markerRemoved = true
+		}
+	}
+	if !pausedAdded {
+		t.Error("expected fabrik:paused to be added after MaxRetries settle failures")
+	}
+	if !markerRemoved {
+		t.Error("expected fabrik:awaiting-done to be removed on escalation")
+	}
+	if len(client.addCommentCalls) == 0 {
+		t.Error("expected an explanatory escalation comment to be posted")
+	}
+}
+
+// TestHandleNoWorkNeeded_NoDispatchWhileAwaitingDone drives the exact scenario
+// required by the issue: a simulated Done-move failure after FABRIK_NO_WORK_NEEDED
+// must result in no further stage dispatch, a successful retry on a later poll,
+// and the issue closing without re-entering the pipeline.
+func TestHandleNoWorkNeeded_NoDispatchWhileAwaitingDone(t *testing.T) {
+	var statusShouldFail atomic.Bool
+	statusShouldFail.Store(true)
+	client := &mockGitHubClient{
+		updateProjectItemStatusFn: func(_, _, _, _ string) error {
+			if statusShouldFail.Load() {
+				return fmt.Errorf("rate limited")
+			}
+			return nil
+		},
+	}
+	claude := &mockClaudeInvoker{}
+	stgs := testStagesWithCleanup()
+	eng := testEngineWithStages(t, client, stgs)
+	eng.claude = claude
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 5, ItemID: "PVTI_5", Repo: "owner/repo", Status: "Research"}
+	stage := &stages.Stage{Name: "Research", Order: 1}
+
+	// Research emits FABRIK_NO_WORK_NEEDED; the Done-move fails (rate limit).
+	eng.handleNoWorkNeeded(board, item, stage)
+	if len(client.closeIssueCalls) != 0 {
+		t.Fatalf("expected no CloseIssue call while the Done-move is still failing, got %d", len(client.closeIssueCalls))
+	}
+
+	// Refetch: the marker is present, item.Status is unchanged (still "Research").
+	var labels []string
+	for _, c := range client.addLabelCalls {
+		labels = append(labels, c.labelName)
+	}
+	var comments []gh.Comment
+	for _, c := range client.addCommentCalls {
+		comments = append(comments, gh.Comment{Body: c.body})
+	}
+	pendingItem := gh.ProjectItem{
+		Number: 5, ItemID: "PVTI_5", Repo: "owner/repo", Status: "Research",
+		Labels: labels, Comments: comments,
+	}
+
+	// Dispatch must be suppressed for every configured stage while the marker is
+	// present, regardless of which column the item is (still) sitting in.
+	for _, s := range stgs {
+		if s.CleanupWorktree {
+			continue
+		}
+		itemAtStage := pendingItem
+		itemAtStage.Status = s.Name
+		if eng.itemMayNeedWork(itemAtStage) {
+			t.Errorf("itemMayNeedWork must return false for stage %q while fabrik:awaiting-done is present", s.Name)
+		}
+		if eng.itemNeedsWork(itemAtStage) {
+			t.Errorf("itemNeedsWork must return false for stage %q while fabrik:awaiting-done is present", s.Name)
+		}
+	}
+
+	// Later poll: the settle scan retries with the mock now succeeding.
+	statusShouldFail.Store(false)
+	retryStage := stages.FindStage(stgs, pendingItem.Status)
+	if retryStage == nil {
+		t.Fatal("expected to resolve the emitting stage from item.Status on retry")
+	}
+	eng.settleNoWorkNeeded(board, pendingItem, retryStage)
+
+	if len(client.closeIssueCalls) != 1 {
+		t.Fatalf("expected 1 CloseIssue call after the retried settle succeeds, got %d", len(client.closeIssueCalls))
+	}
+	if len(claude.calls) != 0 {
+		t.Errorf("expected Claude to never be invoked for Plan/Implement/etc while the no-work-needed decision was pending, got %d invocation(s)", len(claude.calls))
+	}
+
+	markerRemoved := false
+	for _, c := range client.removeLabelCalls {
+		if c.labelName == "fabrik:awaiting-done" {
+			markerRemoved = true
+		}
+	}
+	if !markerRemoved {
+		t.Error("expected fabrik:awaiting-done to be cleared once the issue reaches Done")
 	}
 }

@@ -1338,6 +1338,26 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// Runs regardless of which gate label is present; no label negation required.
 	e.runValidatePRTerminalAdvance(board, deepFetchCandidates, advancedItems)
 
+	// No-work-needed settle scan: retries the outstanding Done-move/close for any
+	// item carrying fabrik:awaiting-done, independent of item.Status (the board move
+	// may still be sitting at whichever column the emitting stage ran in — see
+	// itemMayNeedWork/itemNeedsWork, which suppress normal dispatch for these items).
+	// Paused items are skipped: either escalateNoWorkNeededFailure already handled
+	// them (marker removed) or an operator is investigating a paused item for an
+	// unrelated reason and this scan must not fight them.
+	for _, item := range deepFetchCandidates {
+		if !hasLabel(item, "fabrik:awaiting-done") || hasLabel(item, "fabrik:paused") {
+			continue
+		}
+		stage := stages.FindStage(e.cfg.Stages, item.Status)
+		if stage == nil {
+			e.logf(item.Number, "warn", "no-work-needed settle: no stage matches board column %q — will retry next poll\n", item.Status)
+			e.recordNoWorkNeededRetry(item)
+			continue
+		}
+		e.settleNoWorkNeeded(board, item, stage)
+	}
+
 	// Revalidate scan: operator-facing fabrik:revalidate label re-entry.
 	// Runs on ALL deepFetchCandidates unconditionally (paused items included — FR-5).
 	// Uses next-poll dispatch: does not mutate deepFetchCandidates in place.
