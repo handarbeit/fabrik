@@ -118,7 +118,9 @@ Before the Claude invocation on every Implement dispatch, the engine calls `preI
 
 ### Inputs
 
-- **Plan stage comment body** — read via `findStageComment(item.Comments, "Plan")`. If no Plan comment exists, `preImplement` returns immediately (no-op).
+- **Plan stage comment body** — read via `findStageComment(item.Comments, "Plan")`. If no Plan comment is found, the outcome depends on the `stage:Plan:complete` label:
+  - **Label absent** — true no-op; Plan hasn't run yet. `preImplement` returns immediately.
+  - **Label present** — an inconsistency (#982): the label says Plan finished, but the comment the spawn logic reads from is missing from `item.Comments` (a stale deep-field snapshot; see #957). `preImplement` does not silently no-op here — it recovers the true spawn intent via a live, uncached re-read before deciding. See [State Machine §6.7](state-machine.md#67-pre-implement-spawn-path) for the full detect → recover → three-way-outcome flow.
 - **`FABRIK_SPAWN_CHILD_BEGIN/END` blocks** in the Plan comment — structured declarations of child issues to create:
   ```
   FABRIK_SPAWN_CHILD_BEGIN owner/repo
@@ -157,7 +159,7 @@ To trigger a fresh spawn (e.g., after Plan is revised), the user must manually r
 
 A child issue created by `preImplement` runs the full Fabrik pipeline. If the child's own Plan emits `FABRIK_SPAWN_CHILD_*` blocks, the child's Implement dispatch triggers another `preImplement` — grandchildren are created by the same mechanism. There is no depth limit.
 
-**References:** [ADR-048: Engine-Side Pre-Implement Spawn](../adrs/048-spawn-child-engine-side.md), [State Machine §6.6](state-machine.md#66-pre-implement-spawn-path)
+**References:** [ADR-048: Engine-Side Pre-Implement Spawn](../adrs/048-spawn-child-engine-side.md), [State Machine §6.7](state-machine.md#67-pre-implement-spawn-path)
 
 ---
 

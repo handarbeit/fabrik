@@ -4156,7 +4156,19 @@ These blocks persist in the Plan stage comment — they are data, not consumed-a
 
 **Code path:** `processItem()` → Implement stage dispatch → `preImplement()` (in `engine/spawn.go`)
 
-**Idempotency guard:** If the parent issue has `fabrik:children-spawned`, `preImplement` returns immediately (no-op). Manual removal of this label (and closing of orphaned children) is required to trigger a fresh spawn.
+**Idempotency guard:** If the parent issue has `fabrik:children-spawned`, `preImplement` returns immediately (no-op). Manual removal of this label (and closing of orphaned children) is required to trigger a fresh spawn. This guard runs before the recovery path below and must remain first — recovery must never bypass it, or repeated deferred-retry cycles risk double-spawning.
+
+**Missing-Plan-comment recovery (#982):** `findStageComment(item.Comments, "Plan")` returning `nil` is ambiguous on its own — it means either "Plan genuinely declared nothing to spawn" or "the item snapshot's `Comments` is stale" (`Comments` is a deep field whose cache freshness is `updatedAt`-keyed; see #957). `preImplement` disambiguates using the `stage:Plan:complete` label, which is populated through a different path and can be visible even when `Comments` lags:
+- **No `stage:Plan:complete` label** — true no-op; Plan hasn't run (or hasn't been recorded as complete) yet. Returns `(false, nil)` with no further action.
+- **`stage:Plan:complete` present but no Plan comment found** — an inconsistent state. `preImplement` calls `recoverMissingPlanComment`, which:
+  1. Logs an actionable line naming the item, stage, and inconsistency — unconditionally, before any of the following steps, so it fires regardless of which outcome below is reached.
+  2. Checks a per-item cooldown (`CooldownAt("spawn-recovery-deferred")`, mirroring the `dep-blocked` cooldown pattern). If active, skips the live re-read and returns `(false, errPreImplementDeferred)` immediately — bounding repeated GraphQL load to once per cooldown window (`PollSeconds*10` seconds) during a sustained failure (e.g. #971-style rate-limit pressure).
+  3. Otherwise performs a live, uncached `e.client.FetchItemDetails` re-read (the same primitive `verifyAndHealLinkage` uses for the closing-issue-linkage deep field) and re-checks `findStageComment` against the freshly fetched comments.
+  4. **Live re-read fails:** logs the error, records the cooldown, and returns `(false, errPreImplementDeferred)` — the parent is **not** paused; it is retried on a subsequent poll cycle (the deferred outcome is returned before `StageAttempted`/`LastAttemptAt` is recorded, so no dispatch cooldown suppresses the retry).
+  5. **Live re-read succeeds but still finds no Plan comment, or finds one with no spawn blocks:** confirms there is genuinely nothing to spawn — returns `(false, nil)`.
+  6. **Live re-read recovers a Plan comment with spawn blocks:** proceeds to spawn via the same `spawnChildren` helper the direct path uses (step-for-step identical to the Flow below), guaranteeing `fabrik:children-spawned` is applied through a single code path regardless of which path (direct or recovered) triggered it.
+
+  A recovered live-read's `Comments` are used locally for this call only — they are not written back into the cache/store; this keeps the fix scoped to the `preImplement` decision point rather than becoming a general-purpose cache-refresh utility.
 
 **Flow (when spawn blocks are present and not yet spawned):**
 1. Validate all target repos: call `ensureRepoReady` for each unique target repo in the spawn blocks. If any repo is not in Fabrik's managed set, post an error comment listing the gaps, add `fabrik:paused`, and stop — no children are created.
@@ -5531,7 +5543,9 @@ Before the Claude invocation on every Implement dispatch, the engine calls `preI
 
 ### Inputs
 
-- **Plan stage comment body** — read via `findStageComment(item.Comments, "Plan")`. If no Plan comment exists, `preImplement` returns immediately (no-op).
+- **Plan stage comment body** — read via `findStageComment(item.Comments, "Plan")`. If no Plan comment is found, the outcome depends on the `stage:Plan:complete` label:
+  - **Label absent** — true no-op; Plan hasn't run yet. `preImplement` returns immediately.
+  - **Label present** — an inconsistency (#982): the label says Plan finished, but the comment the spawn logic reads from is missing from `item.Comments` (a stale deep-field snapshot; see #957). `preImplement` does not silently no-op here — it recovers the true spawn intent via a live, uncached re-read before deciding. See [State Machine §6.7](state-machine.md#67-pre-implement-spawn-path) for the full detect → recover → three-way-outcome flow.
 - **`FABRIK_SPAWN_CHILD_BEGIN/END` blocks** in the Plan comment — structured declarations of child issues to create:
   ```
   FABRIK_SPAWN_CHILD_BEGIN owner/repo
@@ -5570,7 +5584,7 @@ To trigger a fresh spawn (e.g., after Plan is revised), the user must manually r
 
 A child issue created by `preImplement` runs the full Fabrik pipeline. If the child's own Plan emits `FABRIK_SPAWN_CHILD_*` blocks, the child's Implement dispatch triggers another `preImplement` — grandchildren are created by the same mechanism. There is no depth limit.
 
-**References:** [ADR-048: Engine-Side Pre-Implement Spawn](../adrs/048-spawn-child-engine-side.md), [State Machine §6.6](state-machine.md#66-pre-implement-spawn-path)
+**References:** [ADR-048: Engine-Side Pre-Implement Spawn](../adrs/048-spawn-child-engine-side.md), [State Machine §6.7](state-machine.md#67-pre-implement-spawn-path)
 
 ---
 
