@@ -105,6 +105,17 @@ Fabrik can receive GitHub events in near-real-time (within ~2 seconds) instead o
 
 > **Single-user constraint:** GitHub allows only one active `gh webhook forward` subscription per repository or organization at a time. Coordinate across your team so only one Fabrik instance runs with `--webhooks`; other instances can run without it and will still process issues via polling. See [§10 of the User Guide](docs/USER_GUIDE.md#10-webhook-mode) for full setup, configuration, and troubleshooting details.
 
+### Merge Train & Merge Queue (Optional)
+
+On a repo with `strict` branch protection, landing several ready PRs serially produces an O(N²) rebase-and-retest cascade — each merge invalidates every other ready PR's "up-to-date + green" status, forcing a rebase and a full required-check re-run before the next one can land. Fabrik solves this by batching ready PRs and validating the combined result once instead of retesting each one against every prior merge.
+
+Two landing engines share one `Queued` board column, and Fabrik picks per repo:
+
+- **GitHub's native merge queue** (ADR-058) — used automatically when the repo has one enabled (Enterprise Cloud or org-owned public repos). Kill-switch: `--merge-queue off`.
+- **Fabrik's internal merge train** (ADR-059) — the plan- and host-agnostic fallback for private Team and personal-account repos where GitHub's native queue isn't available. It stages a trial branch per repo, runs one combined Validate, and lands the batch atomically; a red batch is isolated via halving bisection so a single poisoner doesn't block the rest. Opt-in via `--merge-train on`.
+
+Both are off by default and additive to the existing serial auto-merge path. See [Merge Queue](docs/USER_GUIDE.md#merge-queue) and [Merge Train / Queued](docs/USER_GUIDE.md#merge-train--queued) in the User Guide for setup (including the required `Queued` board column) and tuning knobs.
+
 ### Comment Processing
 
 When anyone comments on an issue in an active stage:
@@ -307,6 +318,10 @@ GITHUB_TOKEN=ghp_...    # Fallback
 | `--max-review-cycles` | Max re-invocation cycles per reviewer-gate session. Explicitly passing `0` uses the built-in default of `5` and bypasses `FABRIK_MAX_REVIEW_CYCLES`. When absent, `FABRIK_MAX_REVIEW_CYCLES` is consulted first; falls back to `5` if unset. | `0` |
 | `--max-rebase-cycles` | Maximum rebase re-invocation cycles per issue before pausing (0 = default 3; also `FABRIK_MAX_REBASE_CYCLES`) | `0` (3 cycles) |
 | `--max-enqueue-cycles` | Maximum merge-queue re-enqueue cycles per issue before pausing (0 = default 5; also `FABRIK_MAX_ENQUEUE_CYCLES`) | `0` (5 cycles) |
+| `--merge-queue` | Merge queue routing for the yolo path: `auto` (enqueue when the repo requires GitHub's native merge queue) or `off` (skip enqueue; direct merge may fail on queue-required repos; also `FABRIK_MERGE_QUEUE`) | `auto` |
+| `--merge-train` | Fabrik-internal merge train (ADR-059): `on` advances yolo Validate completions into the `Queued` column for batched landing with a single combined Validate, or `off` to keep the existing per-PR auto-merge path (also `FABRIK_MERGE_TRAIN`) | `off` |
+| `--max-train-trials-per-window` | Merge-train runaway guard: maximum trial-branch creations with zero successful lands within the window before pausing all `Queued` members (0 = default 20; also `FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW`) | `0` (20) |
+| `--train-trial-window` | Merge-train runaway guard: rolling window in minutes over which `--max-train-trials-per-window` is measured (0 = default 60; also `FABRIK_TRAIN_TRIAL_WINDOW`) | `0` (60 min) |
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` for debugging | `false` |
 | `--symlink-env` | Create a relative symlink at `<worktree>/.env` pointing to the fabrikDir `.env` at worktree setup time. Enables stage code to read project secrets without copying them. Also `FABRIK_SYMLINK_ENV`. | `false` |
 | `--plugin-dir` | Path to Fabrik plugin directory (overrides installed plugin) | `""` |
@@ -478,7 +493,10 @@ cp ./stages/mystages/*.yaml .fabrik/stages/
 
 ## Architecture Decision Records
 
-See [adrs/](adrs/) for documented decisions and their rationale.
+See [adrs/](adrs/) for documented decisions and their rationale. Of particular note:
+
+- [ADR-058: GitHub Merge Queue Integration](adrs/058-merge-queue-integration.md) — native queue auto-detection and routing, killing the O(N²) rebase-and-retest cascade on queue-enabled repos.
+- [ADR-059: Fabrik-Internal Merge Train](adrs/059-internal-merge-train.md) — the plan/host-agnostic batched-landing fallback for repos where GitHub's native queue is unavailable.
 
 ## Requirements
 
