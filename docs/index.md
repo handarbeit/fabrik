@@ -512,6 +512,13 @@ fabrik --auto-upgrade</pre>
           Optional GitHub event stream collapses event latency from ~30 s to near-zero and slashes GraphQL traffic — no public endpoint, no ngrok, no infra. Polling stays on as a safety net.
         </div>
       </a>
+      <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#merge-train--queued" aria-label="Merge Train &amp; Merge Queue — open documentation">
+        <span class="feature-icon">🚂</span>
+        <div class="feature-title">Merge Train &amp; Merge Queue</div>
+        <div class="feature-desc">
+          Batches ready PRs and validates the combined result once, killing the O(N²) rebase-and-retest cascade — GitHub's native queue where available, an internal plan-agnostic merge train everywhere else.
+        </div>
+      </a>
     </div>
 
     <div class="factory-callout">
