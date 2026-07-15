@@ -23,6 +23,11 @@ import (
 // signal.Notify is installed, which would terminate the process.
 var testReadyCh chan struct{}
 
+// testResolvedConfigHook is set by tests to observe the fully-resolved Config
+// immediately before engine.New is called. When set, Execute returns nil
+// right after invoking it, short-circuiting before the engine is constructed.
+var testResolvedConfigHook func(Config)
+
 type Config struct {
 	Owner             string
 	Repo              string
@@ -397,6 +402,8 @@ func Execute() error {
 	if !explicitFlags["merge-train"] {
 		if v := os.Getenv("FABRIK_MERGE_TRAIN"); v != "" {
 			cfg.MergeTrain = v // validated in mergeTrainMode() helper
+		} else if pc.MergeTrain != "" {
+			cfg.MergeTrain = pc.MergeTrain // validated in mergeTrainMode() helper
 		}
 	}
 	if !explicitFlags["max-batch-size"] {
@@ -405,6 +412,12 @@ func Execute() error {
 				cfg.MaxBatchSize = n
 			} else {
 				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_BATCH_SIZE=%q is invalid (must be a positive integer); using default 5\n", v)
+			}
+		} else if pc.MaxBatchSize != nil {
+			if *pc.MaxBatchSize <= 0 {
+				fmt.Fprintf(os.Stderr, "[warn] config.yaml max_batch_size=%d is invalid (must be a positive integer); using default 5\n", *pc.MaxBatchSize)
+			} else {
+				cfg.MaxBatchSize = *pc.MaxBatchSize
 			}
 		}
 	}
@@ -415,6 +428,12 @@ func Execute() error {
 			} else {
 				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_BISECT_VALIDATIONS=%q is invalid (must be a positive integer); using derived default\n", v)
 			}
+		} else if pc.MaxBisectValidations != nil {
+			if *pc.MaxBisectValidations <= 0 {
+				fmt.Fprintf(os.Stderr, "[warn] config.yaml max_bisect_validations=%d is invalid (must be a positive integer); using derived default\n", *pc.MaxBisectValidations)
+			} else {
+				cfg.MaxBisectValidations = *pc.MaxBisectValidations
+			}
 		}
 	}
 	if !explicitFlags["max-train-rebase-cycles"] {
@@ -423,6 +442,12 @@ func Execute() error {
 				cfg.MaxTrainRebaseCycles = n
 			} else {
 				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_TRAIN_REBASE_CYCLES=%q is invalid (must be a positive integer); using default 3\n", v)
+			}
+		} else if pc.MaxTrainRebaseCycles != nil {
+			if *pc.MaxTrainRebaseCycles <= 0 {
+				fmt.Fprintf(os.Stderr, "[warn] config.yaml max_train_rebase_cycles=%d is invalid (must be a positive integer); using default 3\n", *pc.MaxTrainRebaseCycles)
+			} else {
+				cfg.MaxTrainRebaseCycles = *pc.MaxTrainRebaseCycles
 			}
 		}
 	}
@@ -433,6 +458,12 @@ func Execute() error {
 			} else {
 				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW=%q is invalid (must be a positive integer); using default 20\n", v)
 			}
+		} else if pc.MaxTrainTrialsPerWindow != nil {
+			if *pc.MaxTrainTrialsPerWindow <= 0 {
+				fmt.Fprintf(os.Stderr, "[warn] config.yaml max_train_trials_per_window=%d is invalid (must be a positive integer); using default 20\n", *pc.MaxTrainTrialsPerWindow)
+			} else {
+				cfg.MaxTrainTrialsPerWindow = *pc.MaxTrainTrialsPerWindow
+			}
 		}
 	}
 	if !explicitFlags["train-trial-window"] {
@@ -441,6 +472,12 @@ func Execute() error {
 				cfg.TrainTrialWindowMinutes = n
 			} else {
 				fmt.Fprintf(os.Stderr, "[warn] FABRIK_TRAIN_TRIAL_WINDOW=%q is invalid (must be a positive integer of minutes); using default 60\n", v)
+			}
+		} else if pc.TrainTrialWindow != nil {
+			if *pc.TrainTrialWindow <= 0 {
+				fmt.Fprintf(os.Stderr, "[warn] config.yaml train_trial_window=%d is invalid (must be a positive integer of minutes); using default 60\n", *pc.TrainTrialWindow)
+			} else {
+				cfg.TrainTrialWindowMinutes = *pc.TrainTrialWindow
 			}
 		}
 	}
@@ -734,6 +771,11 @@ func Execute() error {
 		}
 	} else if len(pc.WebhookEvents) > 0 {
 		webhookEvents = pc.WebhookEvents
+	}
+
+	if testResolvedConfigHook != nil {
+		testResolvedConfigHook(*cfg)
+		return nil
 	}
 
 	eng, err := engine.New(engine.Config{
