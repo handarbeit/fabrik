@@ -15,15 +15,22 @@ func init() {
 }
 
 // versionWithSHA returns v unchanged if it is not "dev" (i.e. a real release
-// version was injected). For "dev" builds it appends the short VCS SHA from
-// the build info, producing e.g. "dev(abc1234)". If VCS info is unavailable
-// it returns "dev" unchanged.
+// version was injected). For "dev" builds it first checks info.Main.Version:
+// `go install pkg@vX.Y.Z` builds populate this with the resolved module
+// version (but have no vcs.revision), so that value is reported directly.
+// Local checkout builds (go build/go run) set Main.Version to the "(devel)"
+// sentinel instead, so those fall through to the existing VCS SHA
+// enrichment, producing e.g. "dev(abc1234)". If no VCS info is available
+// either, it returns "dev" unchanged.
 func versionWithSHA(v string, info *debug.BuildInfo, ok bool) string {
 	if v != "dev" {
 		return v
 	}
 	if !ok || info == nil {
 		return v
+	}
+	if mv := info.Main.Version; mv != "" && mv != "(devel)" {
+		return mv
 	}
 	var revision string
 	for _, s := range info.Settings {

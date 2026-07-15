@@ -13,6 +13,12 @@ func buildInfoWithRevision(rev string) *debug.BuildInfo {
 	}
 }
 
+func buildInfoWithMainVersion(mv string) *debug.BuildInfo {
+	return &debug.BuildInfo{
+		Main: debug.Module{Version: mv},
+	}
+}
+
 func TestVersionWithSHA(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -60,6 +66,25 @@ func TestVersionWithSHA(t *testing.T) {
 			name:     "dev with exactly 7 char SHA",
 			v:        "dev",
 			info:     buildInfoWithRevision("abcdef1"),
+			ok:       true,
+			expected: "dev(abcdef1)",
+		},
+		{
+			name:     "go install pkg@vX.Y.Z reports Main.Version",
+			v:        "dev",
+			info:     buildInfoWithMainVersion("v0.0.71"),
+			ok:       true,
+			expected: "v0.0.71",
+		},
+		{
+			name: "local checkout with (devel) Main.Version falls through to VCS SHA",
+			v:    "dev",
+			info: &debug.BuildInfo{
+				Main: debug.Module{Version: "(devel)"},
+				Settings: []debug.BuildSetting{
+					{Key: "vcs.revision", Value: "abcdef1234567"},
+				},
+			},
 			ok:       true,
 			expected: "dev(abcdef1)",
 		},
