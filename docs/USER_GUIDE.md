@@ -543,6 +543,28 @@ user: your-github-username
 # oldest files are deleted first until total size is under this cap. Set to 0
 # to disable size-cap pruning.
 # log_max_bytes: 2147483648
+
+# Fabrik-internal merge train (ADR-059). When "on", yolo Validate completions
+# advance into the Queued column for batched landing with a single combined
+# Validate instead of merging one PR at a time. Off by default — see the
+# "Merge Train" section below before enabling.
+# merge_train: off
+
+# Merge-train batch-tuning knobs (only consulted when merge_train: on).
+# Maximum Queued items landed in a single batch.
+# max_batch_size: 5
+# Maximum combined validations per red batch before degrading to landing
+# members one-at-a-time. Unset derives 2*ceil(log2(max_batch_size))+1.
+# max_bisect_validations: 0
+# Maximum main-moved rebase+revalidate cycles before a batch is dissolved
+# back to Queued.
+# max_train_rebase_cycles: 3
+# Runaway guard (ADR-059 §D8): maximum trial-branch creations with zero
+# successful lands within the rolling window before pausing all Queued members.
+# max_train_trials_per_window: 20
+# Runaway guard (ADR-059 §D8): rolling window in minutes over which
+# max_train_trials_per_window is measured.
+# train_trial_window: 60
 ```
 
 **Multi-repo mode:** When `repo:` is commented out or omitted, Fabrik processes issues from *all* repositories on the project board. Use this when your project board spans multiple repos (cross-org collaborations, monorepos with independent sub-repos, or a single board managing several distinct services). To restrict Fabrik to one repository, uncomment and set `repo:`.
@@ -639,12 +661,12 @@ FABRIK_USER=my-personal-username
 | `FABRIK_MAX_REBASE_CYCLES` | *(no config.yaml key)* | Maximum number of rebase re-invocation cycles per issue before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 3). Lower than CI/review because rebase either succeeds in one shot or needs human judgment for a semantic conflict. | `3` |
 | `FABRIK_MAX_ENQUEUE_CYCLES` | *(no config.yaml key)* | Maximum number of merge-queue re-enqueue cycles per issue before pausing with `fabrik:awaiting-input` (positive integer; invalid or unset values default to 5). Bounds a queue-thrash loop (a yolo PR repeatedly ejected from GitHub's merge queue and re-enqueued without merging), independently of the rebase/CI-fix caps that the ejection sub-paths increment. | `5` |
 | `FABRIK_MERGE_QUEUE` | *(no config.yaml key)* | Merge queue routing for the yolo path: `auto` (enqueue when the repo requires GitHub's native merge queue) or `off` (disable enqueue; yolo merges may fail with HTTP 405 on queue-required repos). Invalid or unset values default to `auto`. See `--merge-queue`. | `auto` |
-| `FABRIK_MERGE_TRAIN` | *(no config.yaml key)* | Fabrik-internal merge train (ADR-059): `on` advances yolo Validate completions into the Queued column for batched landing with a single combined Validate; `off` keeps the existing per-PR auto-merge path. Invalid or unset values default to `off`. See `--merge-train`. | `off` |
-| `FABRIK_MAX_BATCH_SIZE` | *(no config.yaml key)* | Maximum Queued items landed in a single merge-train batch, ordered by entry (positive integer; invalid or unset values default to 5). Smaller = cheaper worst-case red-batch bisection but fewer N² CI savings; larger = more savings but costlier worst-case bisection. See `--max-batch-size`. | `5` |
-| `FABRIK_MAX_BISECT_VALIDATIONS` | *(no config.yaml key)* | Maximum combined validations per red merge-train batch before degrading to one-at-a-time landing (positive integer; invalid or unset values derive `2·⌈log₂(max_batch_size)⌉ + 1`, ≈ 7 at the default batch size). The fallback is logged, never silent. See `--max-bisect-validations`. | derived (≈7) |
-| `FABRIK_MAX_TRAIN_REBASE_CYCLES` | *(no config.yaml key)* | Maximum main-moved rebase+revalidate cycles for a merge-train batch before dissolving it back to Queued (positive integer; invalid or unset values default to 3). On exhaustion the batch's integration PR is closed and trial branch deleted, members remain in Queued, and a fresh train forms next poll. See `--max-train-rebase-cycles`. | `3` |
-| `FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW` | *(no config.yaml key)* | Runaway guard (ADR-059 §D8): maximum trial-branch creations with zero successful lands within the rolling window before pausing all `Queued` members (positive integer; invalid or unset values default to 20). See `--max-train-trials-per-window`. | `20` |
-| `FABRIK_TRAIN_TRIAL_WINDOW` | *(no config.yaml key)* | Runaway guard (ADR-059 §D8): rolling window in minutes over which `FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW` is measured (positive integer; invalid or unset values default to 60). See `--train-trial-window`. | `60` |
+| `FABRIK_MERGE_TRAIN` | `merge_train` | Fabrik-internal merge train (ADR-059): `on` advances yolo Validate completions into the Queued column for batched landing with a single combined Validate; `off` keeps the existing per-PR auto-merge path. Invalid or unset values default to `off`. See `--merge-train`. | `off` |
+| `FABRIK_MAX_BATCH_SIZE` | `max_batch_size` | Maximum Queued items landed in a single merge-train batch, ordered by entry (positive integer; invalid or unset values default to 5). Smaller = cheaper worst-case red-batch bisection but fewer N² CI savings; larger = more savings but costlier worst-case bisection. See `--max-batch-size`. | `5` |
+| `FABRIK_MAX_BISECT_VALIDATIONS` | `max_bisect_validations` | Maximum combined validations per red merge-train batch before degrading to one-at-a-time landing (positive integer; invalid or unset values derive `2·⌈log₂(max_batch_size)⌉ + 1`, ≈ 7 at the default batch size). The fallback is logged, never silent. See `--max-bisect-validations`. | derived (≈7) |
+| `FABRIK_MAX_TRAIN_REBASE_CYCLES` | `max_train_rebase_cycles` | Maximum main-moved rebase+revalidate cycles for a merge-train batch before dissolving it back to Queued (positive integer; invalid or unset values default to 3). On exhaustion the batch's integration PR is closed and trial branch deleted, members remain in Queued, and a fresh train forms next poll. See `--max-train-rebase-cycles`. | `3` |
+| `FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW` | `max_train_trials_per_window` | Runaway guard (ADR-059 §D8): maximum trial-branch creations with zero successful lands within the rolling window before pausing all `Queued` members (positive integer; invalid or unset values default to 20). See `--max-train-trials-per-window`. | `20` |
+| `FABRIK_TRAIN_TRIAL_WINDOW` | `train_trial_window` | Runaway guard (ADR-059 §D8): rolling window in minutes over which `FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW` is measured (positive integer; invalid or unset values default to 60). See `--train-trial-window`. | `60` |
 | `FABRIK_CONVERGENCE_BUDGET` | *(no config.yaml key)* | Wall-clock budget for post-Validate yolo PR convergence (Go duration syntax: `30m`, `1h`, `2h30m`; `0` disables; invalid values default to 30 min). When the budget expires and the PR has not merged, Fabrik pauses the issue with `fabrik:awaiting-input`. | `30m` |
 | `FABRIK_AUTO_MERGE_STRATEGY` | *(no config.yaml key)* | Merge method used when calling GitHub's `enablePullRequestAutoMerge` for yolo PRs. Accepted values: `MERGE`, `SQUASH`, `REBASE`. Invalid or unset values default to `MERGE`. | `MERGE` |
 | `FABRIK_CLAUDE_WAIT_DELAY` | *(no config.yaml key)* | Seconds to wait after Claude exits before recovering buffered output (non-negative integer; `0` or unset uses the default of 30; invalid values default to 30). Prevents worker goroutines from blocking indefinitely when Claude uses `run_in_background` or the Monitor tool, which can hold stdout open after the main Claude process exits. | `30` |
