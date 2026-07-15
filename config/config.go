@@ -37,6 +37,12 @@ type ProjectConfig struct {
 	JanitorIntervalHours    *int     `yaml:"janitor_interval_hours"`
 	LogRetentionDays        *int     `yaml:"log_retention_days"`
 	LogMaxBytes             *int64   `yaml:"log_max_bytes"`
+	MergeTrain              string   `yaml:"merge_train"`
+	MaxBatchSize            *int     `yaml:"max_batch_size"`
+	MaxBisectValidations    *int     `yaml:"max_bisect_validations"`
+	MaxTrainRebaseCycles    *int     `yaml:"max_train_rebase_cycles"`
+	MaxTrainTrialsPerWindow *int     `yaml:"max_train_trials_per_window"`
+	TrainTrialWindow        *int     `yaml:"train_trial_window"`
 }
 
 // LoadProjectConfig reads .fabrik/config.yaml from CWD.
