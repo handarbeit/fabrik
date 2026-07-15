@@ -368,3 +368,33 @@ func TestExecute_TrainTrialWindowConfigOnly(t *testing.T) {
 		t.Errorf("cfg.TrainTrialWindowMinutes = %d, want 45 from config.yaml", cfg.TrainTrialWindowMinutes)
 	}
 }
+
+func TestExecute_MaxBisectValidationsConfigZeroMeansDerive(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("max_bisect_validations: 0\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.MaxBisectValidations != 0 {
+		t.Errorf("cfg.MaxBisectValidations = %d, want 0 (config.yaml 0 means derive default, not invalid)", cfg.MaxBisectValidations)
+	}
+}
+
+func TestExecute_MaxBisectValidationsConfigNegativeIsInvalid(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("max_bisect_validations: -1\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.MaxBisectValidations != 0 {
+		t.Errorf("cfg.MaxBisectValidations = %d, want 0 (negative config.yaml value falls back to default)", cfg.MaxBisectValidations)
+	}
+}

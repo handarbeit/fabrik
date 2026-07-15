@@ -429,8 +429,8 @@ func Execute() error {
 				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_BISECT_VALIDATIONS=%q is invalid (must be a positive integer); using derived default\n", v)
 			}
 		} else if pc.MaxBisectValidations != nil {
-			if *pc.MaxBisectValidations <= 0 {
-				fmt.Fprintf(os.Stderr, "[warn] config.yaml max_bisect_validations=%d is invalid (must be a positive integer); using derived default\n", *pc.MaxBisectValidations)
+			if *pc.MaxBisectValidations < 0 {
+				fmt.Fprintf(os.Stderr, "[warn] config.yaml max_bisect_validations=%d is invalid (must be a non-negative integer); using derived default\n", *pc.MaxBisectValidations)
 			} else {
 				cfg.MaxBisectValidations = *pc.MaxBisectValidations
 			}
