@@ -190,3 +190,181 @@ func TestExecute_StreamFilterSubcommand(t *testing.T) {
 		t.Fatalf("Execute stream-filter: %v", err)
 	}
 }
+
+// executeWithConfigHook runs Execute() with testResolvedConfigHook installed,
+// capturing the fully-resolved Config right before engine.New would be
+// called. The hook makes Execute return immediately once resolution
+// completes, so no engine startup or SIGINT dance is needed.
+func executeWithConfigHook(t *testing.T) Config {
+	t.Helper()
+	var captured Config
+	var called bool
+	testResolvedConfigHook = func(cfg Config) {
+		captured = cfg
+		called = true
+	}
+	defer func() { testResolvedConfigHook = nil }()
+
+	if err := Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !called {
+		t.Fatal("testResolvedConfigHook was not invoked")
+	}
+	return captured
+}
+
+func TestExecute_MergeTrainConfigOnly(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("merge_train: on\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if got := mergeTrainMode(cfg.MergeTrain); got != "on" {
+		t.Errorf("resolved merge train mode = %q, want on (config.yaml should enable it)", got)
+	}
+}
+
+func TestExecute_MergeTrainFlagBeatsConfig(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("merge_train: on\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir, "--merge-train", "off"}
+
+	cfg := executeWithConfigHook(t)
+	if got := mergeTrainMode(cfg.MergeTrain); got != "off" {
+		t.Errorf("resolved merge train mode = %q, want off (explicit flag should beat config.yaml)", got)
+	}
+}
+
+func TestExecute_MergeTrainEnvBeatsConfig(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("merge_train: on\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("FABRIK_MERGE_TRAIN", "off")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if got := mergeTrainMode(cfg.MergeTrain); got != "off" {
+		t.Errorf("resolved merge train mode = %q, want off (env var should beat config.yaml)", got)
+	}
+}
+
+func TestExecute_MergeTrainInvalidConfigValue(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("merge_train: maybe\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.MergeTrain != "maybe" {
+		t.Errorf("cfg.MergeTrain = %q, want raw config.yaml value %q to flow through unvalidated", cfg.MergeTrain, "maybe")
+	}
+	if got := mergeTrainMode(cfg.MergeTrain); got != "off" {
+		t.Errorf("mergeTrainMode(%q) = %q, want off (invalid value falls back to default)", cfg.MergeTrain, got)
+	}
+}
+
+func TestMergeTrainMode(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", "off"},
+		{"on", "on"},
+		{"ON", "on"},
+		{"off", "off"},
+		{"maybe", "off"},
+	}
+	for _, c := range cases {
+		if got := mergeTrainMode(c.in); got != c.want {
+			t.Errorf("mergeTrainMode(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestExecute_MaxBatchSizeConfigOnly(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("max_batch_size: 8\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.MaxBatchSize != 8 {
+		t.Errorf("cfg.MaxBatchSize = %d, want 8 from config.yaml", cfg.MaxBatchSize)
+	}
+}
+
+func TestExecute_MaxBatchSizeEnvBeatsConfig(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("max_batch_size: 8\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("FABRIK_MAX_BATCH_SIZE", "12")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.MaxBatchSize != 12 {
+		t.Errorf("cfg.MaxBatchSize = %d, want 12 (env var should beat config.yaml)", cfg.MaxBatchSize)
+	}
+}
+
+func TestExecute_MaxBatchSizeFlagBeatsConfig(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("max_batch_size: 8\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir, "--max-batch-size", "3"}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.MaxBatchSize != 3 {
+		t.Errorf("cfg.MaxBatchSize = %d, want 3 (explicit flag should beat config.yaml)", cfg.MaxBatchSize)
+	}
+}
+
+func TestExecute_MaxBatchSizeInvalidConfigValue(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("max_batch_size: 0\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.MaxBatchSize != 0 {
+		t.Errorf("cfg.MaxBatchSize = %d, want 0 (invalid config.yaml value falls back to default)", cfg.MaxBatchSize)
+	}
+}
+
+func TestExecute_TrainTrialWindowConfigOnly(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	os.MkdirAll(filepath.Join(dir, ".fabrik"), 0755)
+	os.WriteFile(filepath.Join(dir, ".fabrik", "config.yaml"), []byte("train_trial_window: 45\n"), 0644)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if cfg.TrainTrialWindowMinutes != 45 {
+		t.Errorf("cfg.TrainTrialWindowMinutes = %d, want 45 from config.yaml", cfg.TrainTrialWindowMinutes)
+	}
+}
