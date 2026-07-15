@@ -943,7 +943,7 @@ The stall comment is posted once per event — subsequent polls skip the paused 
 
 GitHub's native merge queue (above) is only available on GitHub Enterprise Cloud and org-owned public repos. On the common target — private **GitHub Team** repos and personal-account repos with `strict` branch protection — the native queue **cannot run**, yet these are exactly the repos that suffer the O(N²) rebase-and-retest cascade when several ready PRs land serially: each merge invalidates every other ready PR's "up-to-date + green" status, forcing a rebase and a full required-check re-run before the next merge.
 
-Fabrik's **internal merge train** (ADR-059) is the plan-agnostic, host-agnostic answer. It batches ready PRs, validates the combined batch **once**, and lands them together — collapsing the cascade. It is opt-in via `--merge-train on` (or `FABRIK_MERGE_TRAIN=on`).
+Fabrik's **internal merge train** (ADR-059) is the plan-agnostic, host-agnostic answer. It batches ready PRs, validates the combined batch **once**, and lands them together — collapsing the cascade. It is opt-in via `--merge-train on`, `FABRIK_MERGE_TRAIN=on`, or `merge_train: on` in `.fabrik/config.yaml` (flag > env var > config.yaml > default `off`).
 
 **One board column, two landing engines.** When `merge_train: on`, every yolo Validate completion advances into a single **`Queued`** board column instead of merging immediately. Each poll, the `Queued` handler picks the landing engine **per repo** (a `Queued` column can hold items from several repos at once), so you see one board model, not two parallel merge paths:
 
@@ -968,7 +968,7 @@ Both engines drain the same `Queued` column and advance their members to **Done*
    order: 6            # after Validate, before Done
    holding_stage: true
    ```
-3. **Enable the train**: `--merge-train on` (or `FABRIK_MERGE_TRAIN=on`).
+3. **Enable the train**: `--merge-train on`, `FABRIK_MERGE_TRAIN=on`, or `merge_train: on` in `.fabrik/config.yaml`.
 
 > **Startup requirement.** When `merge_train: on`, the `Queued` board column is **mandatory** — Fabrik fails startup if it is missing (the same board-validation that guards every non-cleanup stage). This is why the train is **off by default**: flipping it on globally would break startup on every board that has not yet added the column. Enable it per deployment only after step 1.
 
