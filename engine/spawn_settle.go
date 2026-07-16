@@ -124,7 +124,7 @@ func (e *Engine) escalateChildPlacementFailure(item gh.ProjectItem) {
 		e.logf(item.Number, "warn", "could not remove %s marker: %v\n", childPlacementLabel, err)
 	} else if err == nil {
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), childPlacementLabel)
+			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), childPlacementLabel)
 		}
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+childPlacementLabel)
@@ -139,7 +139,7 @@ func (e *Engine) escalateChildPlacementFailure(item gh.ProjectItem) {
 		e.logf(item.Number, "warn", "could not post child-placement escalation comment: %v\n", err)
 	} else {
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
 				DatabaseID: dbID, Body: comment, Author: e.cfg.User,
 			})
 		}
@@ -168,7 +168,7 @@ func (e *Engine) clearChildPlacementMarker(item gh.ProjectItem, owner, repo stri
 		return
 	} else if err == nil {
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), childPlacementLabel)
+			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), childPlacementLabel)
 		}
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+childPlacementLabel)
@@ -189,13 +189,12 @@ func (e *Engine) clearChildPlacementMarker(item gh.ProjectItem, owner, repo stri
 // already completed by the time this is called and must not be affected by
 // this function's outcome.
 func (e *Engine) notifyParentOfStalledChild(childOwner, childRepo string, childItem gh.ProjectItem) {
-	fresh := childItem
-	if err := e.readClient.FetchItemDetails(&fresh); err != nil {
+	if err := e.readClient.FetchItemDetails(&childItem); err != nil {
 		e.logf(childItem.Number, "warn", "could not fetch child body to notify parent: %v\n", err)
 		return
 	}
 
-	parentOwner, parentRepo, parentNumber, ok := parseParentFromChildBody(fresh.Body)
+	parentOwner, parentRepo, parentNumber, ok := parseParentFromChildBody(childItem.Body)
 	if !ok {
 		e.logf(childItem.Number, "warn", "could not recover parent link from child body — skipping parent notification\n")
 		return
