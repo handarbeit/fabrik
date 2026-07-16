@@ -1553,12 +1553,42 @@ doneDispatching:
 		e.handleMergeTrainBatch(ctx, board)
 	}
 
+	// Merge-train member-issue close settle scan (ADR-061): retries the outstanding
+	// landSingleton member-issue CloseIssue call for any item carrying
+	// fabrik:awaiting-member-close. Runs unconditionally, independent of merge_train:
+	// on/off, so a marker written while merge_train was enabled keeps draining even if
+	// the setting is later turned off.
+	e.settleMergeTrainMemberCloses(board)
+
 	// Remove stale fabrik:locked labels from closed issues. This handles the case
 	// where an issue was closed while a stage was in-flight, leaving the lock label
 	// behind. We do this every poll so it also catches locks from prior Fabrik runs.
 	e.cleanupClosedIssueLocks(board)
 	// Sweep transient lifecycle labels from closed issues every poll cycle (#617).
 	e.cleanupClosedIssueTransientLabels(board)
+
+	// Child board-placement settle scan: retries the outstanding project Status
+	// placement for any spawned child carrying fabrik:awaiting-placement, independent
+	// of stage dispatch. Sourced from board.Items directly, NOT deepFetchCandidates —
+	// a stranded child sits in a column (typically Backlog) with no matching configured
+	// stage, so it never passes itemMayNeedWork's stage == nil guard and never reaches
+	// deepFetchCandidates (see engine/spawn_settle.go). Paused items are skipped: either
+	// escalateChildPlacementFailure already handled them (marker removed) or an operator
+	// is investigating for an unrelated reason and this scan must not fight them.
+	for _, item := range board.Items {
+		if !hasLabel(item, childPlacementLabel) || hasLabel(item, "fabrik:paused") {
+			continue
+		}
+		if item.IsClosed {
+			// A closed child needs no further board dispatch — the only purpose of
+			// correct placement was to let the pipeline process it, which no longer
+			// applies. Clear the marker without attempting placement or escalation.
+			owner, repo := itemOwnerRepo(item, e.defaultRepo())
+			e.clearChildPlacementMarker(item, owner, repo)
+			continue
+		}
+		e.settleChildPlacement(board, item)
+	}
 
 	// Archive any Done+complete items (lazy migration + ongoing cleanup).
 	// Uses shallow board data — labels(first:15) is sufficient to see
