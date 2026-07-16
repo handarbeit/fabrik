@@ -714,9 +714,12 @@ func (e *Engine) landSingleton(ctx context.Context, state *mergeTrainWorkerState
 	// Close the member issue. The singleton landing PR's Closes #N auto-closes it on
 	// merge into the default branch; this explicit close is the fallback for
 	// non-default bases and auto-close lag (idempotent). Without it the issue is
-	// left landed-but-open (the member PR is closed-not-merged).
+	// left landed-but-open (the member PR is closed-not-merged). On failure, the
+	// outstanding close is durably recorded (fabrik:awaiting-member-close) and retried
+	// by the settle scan in poll.go every poll until it succeeds or escalates — ADR-061.
 	if closeErr := e.client.CloseIssue(p.owner, p.repo, m.item.Number); closeErr != nil {
-		e.logf(m.item.Number, "merge-train", "warn: could not close member issue #%d: %v\n", m.item.Number, closeErr)
+		e.logf(m.item.Number, "merge-train", "warn: could not close member issue #%d: %v — will retry via settle scan\n", m.item.Number, closeErr)
+		e.markMergeTrainMemberCloseOutstanding(m.item, p.owner, p.repo)
 	} else {
 		e.logf(m.item.Number, "merge-train", "closed member issue #%d\n", m.item.Number)
 	}
