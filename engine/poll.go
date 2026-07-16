@@ -1560,6 +1560,29 @@ doneDispatching:
 	// Sweep transient lifecycle labels from closed issues every poll cycle (#617).
 	e.cleanupClosedIssueTransientLabels(board)
 
+	// Child board-placement settle scan: retries the outstanding project Status
+	// placement for any spawned child carrying fabrik:awaiting-placement, independent
+	// of stage dispatch. Sourced from board.Items directly, NOT deepFetchCandidates —
+	// a stranded child sits in a column (typically Backlog) with no matching configured
+	// stage, so it never passes itemMayNeedWork's stage == nil guard and never reaches
+	// deepFetchCandidates (see engine/spawn_settle.go). Paused items are skipped: either
+	// escalateChildPlacementFailure already handled them (marker removed) or an operator
+	// is investigating for an unrelated reason and this scan must not fight them.
+	for _, item := range board.Items {
+		if !hasLabel(item, childPlacementLabel) || hasLabel(item, "fabrik:paused") {
+			continue
+		}
+		if item.IsClosed {
+			// A closed child needs no further board dispatch — the only purpose of
+			// correct placement was to let the pipeline process it, which no longer
+			// applies. Clear the marker without attempting placement or escalation.
+			owner, repo := itemOwnerRepo(item, e.defaultRepo())
+			e.clearChildPlacementMarker(item, owner, repo)
+			continue
+		}
+		e.settleChildPlacement(board, item)
+	}
+
 	// Archive any Done+complete items (lazy migration + ongoing cleanup).
 	// Uses shallow board data — labels(first:15) is sufficient to see
 	// stage:Done:complete. Idempotent: archived items disappear from board

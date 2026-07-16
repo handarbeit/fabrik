@@ -369,14 +369,23 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		}
 
 		// Set child's project Status to Specify (or first processing stage) when statusField is available.
+		// Any failure here is non-fatal to spawning (the child issue, board item, and
+		// blockedBy link already exist) but leaves the child stranded in whatever column
+		// GitHub defaulted it to (typically Backlog) — a column with no configured stage,
+		// so ordinary dispatch (itemMayNeedWork/itemNeedsWork) would never revisit it.
+		// recordChildPlacementFailure writes a durable marker so the settle scan in
+		// poll.go retries the placement independent of stage dispatch (see spawn_settle.go).
 		if optionID := resolveSpecifyOptionID(sf); optionID != "" {
 			if err := e.client.UpdateProjectItemStatus(board.ProjectID, childItemID, sf.FieldID, optionID); err != nil {
 				e.logf(item.Number, "warn", "could not set project status on %s#%d: %v\n", block.Repo, childNumber, err)
+				e.recordChildPlacementFailure(childOwner, childRepo, childNumber)
 			}
 		} else if sf == nil {
 			e.logf(item.Number, "warn", "project status field unavailable for %s#%d; child lands in Backlog\n", block.Repo, childNumber)
+			e.recordChildPlacementFailure(childOwner, childRepo, childNumber)
 		} else {
 			e.logf(item.Number, "warn", "no Specify/processing status option found for %s#%d; child lands in Backlog\n", block.Repo, childNumber)
+			e.recordChildPlacementFailure(childOwner, childRepo, childNumber)
 		}
 
 		// Inherit fabrik:yolo and fabrik:cruise from parent (enables autonomous child pipeline).
