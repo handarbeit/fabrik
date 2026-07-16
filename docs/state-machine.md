@@ -2399,6 +2399,34 @@ stateDiagram-v2
         Done = Pending Cleanup
         (worktree removal by janitor)
     end note
+
+    %% Spawned child board-placement retry (§6.9, ADR-061)
+    ChildCreated --> AwaitingPlacement : UpdateProjectItemStatus fails\n(call error, nil statusField, or no suitable option)\nfabrik:awaiting-placement written on the CHILD;\nchild, board item, blockedBy link already exist
+    AwaitingPlacement --> AwaitingPlacement : Settle pass fails\nRetried every poll, sourced from board.Items directly\n(NOT deepFetchCandidates — child's column matches no stage);\nfabrik:awaiting-placement remains
+    AwaitingPlacement --> ChildPlaced : Settle pass succeeds\nfabrik:awaiting-placement removed
+    AwaitingPlacement --> ChildClosed : Child observed closed\nclearChildPlacementMarker: fabrik:awaiting-placement removed;\nno placement attempt, no pause, no comment
+    AwaitingPlacement --> ChildPaused : Settle pass fails Attempts >= MaxRetries times\nescalateChildPlacementFailure: fabrik:paused added to child,\nfabrik:awaiting-placement removed, comment posted on child,\nbest-effort comment posted on parent
+
+    note right of AwaitingPlacement
+        AwaitingPlacement = fabrik:awaiting-placement present
+        Board column is typically Backlog —
+        a column with no configured stage,
+        so ordinary dispatch never revisits it
+    end note
+
+    note right of ChildPaused
+        ChildPaused = fabrik:paused present on the child,
+        fabrik:awaiting-placement removed.
+        Parent remains blocked (blockedBy) with
+        no other visibility — the best-effort
+        parent comment is the only signal
+    end note
+
+    note right of ChildClosed
+        ChildClosed = child issue closed;
+        no further board dispatch is needed,
+        so the marker is simply cleared
+    end note
 ```
 
 **Assignee transitions (§2.13):** Assignee changes fire `AssigneesChanged → wakeChObserver`, re-evaluating the item on the next poll. No label is mutated. No separate diagram node is warranted.
