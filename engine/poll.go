@@ -1553,6 +1553,13 @@ doneDispatching:
 		e.handleMergeTrainBatch(ctx, board)
 	}
 
+	// Merge-train member-issue close settle scan (ADR-061): retries the outstanding
+	// landSingleton member-issue CloseIssue call for any item carrying
+	// fabrik:awaiting-member-close. Runs unconditionally, independent of merge_train:
+	// on/off, so a marker written while merge_train was enabled keeps draining even if
+	// the setting is later turned off.
+	e.settleMergeTrainMemberCloses(board)
+
 	// Remove stale fabrik:locked labels from closed issues. This handles the case
 	// where an issue was closed while a stage was in-flight, leaving the lock label
 	// behind. We do this every poll so it also catches locks from prior Fabrik runs.
