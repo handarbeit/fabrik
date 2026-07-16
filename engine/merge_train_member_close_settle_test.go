@@ -33,7 +33,7 @@ func TestLandSingleton_MemberIssueCloseFailure_MarksOutstanding(t *testing.T) {
 	wm := NewWorktreeManager(t.TempDir())
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
 	state := &mergeTrainWorkerState{projectID: "PVT_test"}
-	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm}
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm, holdingStg: holdingStage(eng.cfg)}
 
 	eng.landSingleton(context.Background(), state, p, m, "merge-train-singleton-1")
 
@@ -78,7 +78,7 @@ func TestLandSingleton_MemberIssueCloseSuccess_NoMarker(t *testing.T) {
 	wm := NewWorktreeManager(t.TempDir())
 	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, wm)
 	state := &mergeTrainWorkerState{projectID: "PVT_test"}
-	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm}
+	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm, holdingStg: holdingStage(eng.cfg)}
 
 	eng.landSingleton(context.Background(), state, p, m, "merge-train-singleton-1")
 
