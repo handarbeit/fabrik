@@ -45,9 +45,10 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 	// — the #917 fix) and R3 (comment processed during CI-await) pass, but R2/R5
 	// (the review-gate approval path) cannot pass in the current test bed due to
 	// three test-harness/environment confounds — none an engine bug:
-	//   1. Engine identity collides with the reviewer: GITHUB_TOKEN=verveguy in the
-	//      engine process env overrides FABRIK_TOKEN=arbeithand (shell env > .env),
-	//      so PRs are authored by verveguy — the same identity as
+	//   1. Engine identity collides with the reviewer: a GITHUB_TOKEN for the
+	//      operator's personal identity in the engine process env overrides
+	//      FABRIK_TOKEN=arbeithand (shell env > .env), so PRs are authored by that
+	//      personal identity — the same identity as
 	//      FABRIK_REVIEWER_TOKEN. GitHub forbids self-review, so RequestPRReviewer
 	//      is a silent no-op and the R5 approval is impossible.
 	//   2. Dual review gate: both Review and Validate have wait_for_reviews:true, so

@@ -41,7 +41,7 @@ import (
 //     succeeded within budget).
 //
 // This is the regression test for the production failure on
-// verveguy/liminis-graph#82 (spurious "CI fix cycle limit reached" on a
+// example-org/example-repo#82 (spurious "CI fix cycle limit reached" on a
 // post-Validate yolo PR whose only real problem was that main moved during
 // its CI run). Before #829, this test would fail with the second PR stuck
 // in fabrik:paused.
