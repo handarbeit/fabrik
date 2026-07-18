@@ -506,3 +506,7 @@ See [adrs/](adrs/) for documented decisions and their rationale. Of particular n
   - Fine-grained tokens (`github_pat_...`) are **not supported** — GitHub Projects v2 GraphQL requires a classic PAT
   - Create one at: https://github.com/settings/tokens (select "Tokens (classic)")
 - A GitHub Project (v2) with board columns matching your stage names
+
+## License
+
+[Apache License 2.0](LICENSE). Contributions are accepted under the same license (see [CONTRIBUTING.md](CONTRIBUTING.md)) — no CLA required.
