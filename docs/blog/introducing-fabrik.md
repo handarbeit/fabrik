@@ -42,7 +42,7 @@ Fabrik didn't come from nowhere:
 
 - The core "project board as a state machine" idea I first saw in an internal system built by a colleague. Fabrik is a small, public take on that idea — I'm not claiming the concept.
 - After trying [Gastown](https://github.com/gastownhall/gastown) — a much larger, multi-agent take on the "software factory" — I wanted something far smaller and simpler. Fabrik is that leaner answer.
-- [@totalslacker](https://github.com/totalslacker) had been down the same path and helped shape Fabrik in response, and built [switchcraft](https://github.com/totalslacker/switchcraft) with it; a friend contributed code and put it to real use. Thanks to both.
+- [@totalslacker](https://github.com/totalslacker) had been down the same path and helped shape Fabrik in response, and built [switchcraft](https://github.com/totalslacker/switchcraft) with it; [@jmatthewpryor](https://github.com/jmatthewpryor) contributed code and put it to real use. Thanks to both.
 
 ## Try it
 
