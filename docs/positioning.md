@@ -24,7 +24,7 @@ title: Fabrik Positioning
 
 ### Kanban-first, local agent runners
 
-- **KanBots** (leodavinci1, github.com/leodavinci1/kanbots) — local Electron app; SQLite board with optional GitHub Issues sync; single agent per card; Autopilot personas (PM/Eng/UX/Growth/SRE) spawn subtasks autonomously; Claude Code + Codex via AgentCliAdapter; Decision Points for HITL; pre-push safety hook; per-run cost analytics; MCP server surface. OSS (MIT) + $19/seat Pro. See [competitive analysis](competitive/kanbots.md).
+- **KanBots** (leodavinci1, github.com/leodavinci1/kanbots) — local Electron app; SQLite board with optional GitHub Issues sync; single agent per card; Autopilot personas (PM/Eng/UX/Growth/SRE) spawn subtasks autonomously; Claude Code + Codex via AgentCliAdapter; Decision Points for HITL; pre-push safety hook; per-run cost analytics; MCP server surface. OSS (MIT) + $19/seat Pro.
 
 ### Platform-level
 
