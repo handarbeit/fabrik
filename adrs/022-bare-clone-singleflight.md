@@ -11,7 +11,7 @@ When multiple issues from the same new repository appear on the project board si
 The first clone succeeds; subsequent clones fail with:
 
 ```
-fatal: cannot copy '.../templates/info/exclude' to '.../shadoworg-fabrik.git/info/exclude': File exists
+fatal: cannot copy '.../templates/info/exclude' to '.../handarbeit-fabrik.git/info/exclude': File exists
 ```
 
 This causes those issues to receive `fabrik:paused` + `fabrik:awaiting-input` labels, requiring manual intervention to retry.
