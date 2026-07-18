@@ -109,6 +109,6 @@ If the script exits non-zero, surface the script's last error message verbatim. 
 
 ## Important
 
-- **Never edit `scripts/cut-release.sh` to bypass a check** — every guard exists because something failed once. The bot-identity guards in particular took three deletion-and-republish cycles to diagnose (the workflow secret `PUBLIC_REPO_RELEASE_TOKEN` is the root cause when the verveguy-attribution bug recurs).
+- **Never edit `scripts/cut-release.sh` to bypass a check** — every guard exists because something failed once. The bot-identity guards in particular took three deletion-and-republish cycles to diagnose (the workflow secret `PUBLIC_REPO_RELEASE_TOKEN` is the root cause when the wrong-identity attribution bug recurs).
 - **The script is bot-only** — only someone with the `arbeithand` PAT (i.e., the handarbeit/fabrik publisher) can use it. Fork maintainers cutting their own fork releases would need to parameterize the constants at the top.
 - **Authoring release notes is the AI's job; everything else is the script's.** Don't reinvent the publication mechanics inline — past attempts at that produced wrong-identity releases that had to be cleaned up.

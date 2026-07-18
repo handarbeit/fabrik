@@ -13,8 +13,8 @@ open PR onto the advanced base. On any repo with `required_status_checks.strict:
 branches up-to-date before merge), a batch of N concurrently-ready PRs produces an **O(N²) rebase +
 retest cascade** — each merge invalidates every other ready PR's "up-to-date + green" status,
 forcing a rebase (new HEAD SHA) and a full required-check re-run before the next merge. Observed on
-`shadoworg/fantasy` 2026-06-20: 4 concurrent `fabrik:cruise` PRs at Validate, ~N−1 extra validate
-rounds throttled by a low-slot test queue (#924).
+a private production repo (2026-06-20): 4 concurrent `fabrik:cruise` PRs at Validate, ~N−1 extra
+validate rounds throttled by a low-slot test queue (#924).
 
 This is not project-specific — it bites any Fabrik-driven repo with concurrent PRs and strict
 protection. Fabrik already owns merge orchestration (`merge-gate`, `rebase-reinvoke`, `ci-gate`,

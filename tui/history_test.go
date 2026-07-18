@@ -442,7 +442,7 @@ func TestHistory_TurnCappedRetries(t *testing.T) {
 	sendEvent := func(cost float64, completed bool, ts time.Time) {
 		comp, _ := h.Update(JobCompletedEvent{
 			IssueNumber: 1128,
-			Repo:        "verveguy/fantasy",
+			Repo:        "example-org/example-repo",
 			StageName:   "Implement",
 			Success:     completed,
 			Completed:   completed,

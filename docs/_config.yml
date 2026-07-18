@@ -25,8 +25,16 @@ sass:
   style: compressed
 
 # Exclude from build
+# Only curated, user-facing docs are published to fabrik.handarbeit.io.
+# Internal engineering docs (design explorations, postmortems, competitive
+# analysis, historical specs) live in the repo but must NOT be served on the
+# marketing site.
 exclude:
   - Gemfile
   - Gemfile.lock
   - README.md
   - competitive
+  - postmortems
+  - cache-refactor
+  - design
+  - specs

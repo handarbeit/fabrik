@@ -2308,7 +2308,7 @@ func TestLightReconcile_DriftDetected(t *testing.T) {
 // TestLightReconcile_FabrikManagedLabelDriftDetected is the #955 regression: a
 // store whose fabrik-managed label set diverged from GitHub (here the store is
 // missing fabrik:awaiting-ci) with a MATCHING updatedAt — the exact condition that
-// stranded shadoworg/fantasy#1479 — must be detected as drift so Reconcile repairs
+// stranded example-org/example-repo#1479 — must be detected as drift so Reconcile repairs
 // the label set. A non-fabrik label change with matching updatedAt must NOT drift
 // (preserving #641's fix against board-query label truncation false-positives).
 func TestLightReconcile_FabrikManagedLabelDriftDetected(t *testing.T) {

@@ -32,3 +32,8 @@ engine/.fabrik/
 
 # Old release-notes input file — superseded by release-notes/<version>.md
 release-notes.md
+
+# Operator-local docs: handoff notes, site/release runbooks. Contain paths,
+# identities, and token-handling procedures — never publish to the repo or site.
+notes/private/
+SITE-OPS.md
