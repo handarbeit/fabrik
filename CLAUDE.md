@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Fabrik is a Go CLI that orchestrates Claude Code through an SDLC pipeline defined on a GitHub Project board. Issues are the unit of work. The pipeline stages (Research → Plan → Implement → Review → Validate) are configured via YAML files.
+Fabrik is a Go CLI that orchestrates Claude Code through an SDLC pipeline defined on a GitHub Project board. Issues are the unit of work. The pipeline stages (Specify → Research → Plan → Implement → Review → Validate) are configured via YAML files.
 
 ## Build & Test
 

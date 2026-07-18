@@ -45,7 +45,7 @@ title: Fabrik Positioning
 
 2. **Driver, not observer.** The poll loop reads board columns and dispatches Claude Code per issue. NikiforovAll's observer model is the opposite direction.
 
-3. **YAML-configurable SDLC pipeline.** Research → Plan → Implement → Review → Validate are not hardcoded. Each stage has its own prompt, skill, model, tool allowlist, `max_turns`, and lifecycle flags (`post_to_pr`, `create_draft_pr`, `read_only`, `cleanup_worktree`, `wait_for_reviews`). Vibe Kanban and Kanban Code have fixed workflows; The Claude Protocol hardcodes 13 hooks. Closer to GitHub Agentic Workflows' markdown-described workflows, but typed and validated against the board on startup.
+3. **YAML-configurable SDLC pipeline.** Specify → Research → Plan → Implement → Review → Validate are not hardcoded. Each stage has its own prompt, skill, model, tool allowlist, `max_turns`, and lifecycle flags (`post_to_pr`, `create_draft_pr`, `read_only`, `cleanup_worktree`, `wait_for_reviews`). Vibe Kanban and Kanban Code have fixed workflows; The Claude Protocol hardcodes 13 hooks. Closer to GitHub Agentic Workflows' markdown-described workflows, but typed and validated against the board on startup.
 
 4. **Durable state via GitHub-native primitives.** Comment reactions (👀/🚀) survive restarts; labels (`stage:*:complete`, `fabrik:paused`, `fabrik:awaiting-review`, `model:*`, `effort:*`, `fabrik:yolo`, `fabrik:cruise`) encode control flow. No SQLite, no `ACTIVE.md`, no proprietary store. Everything inspectable by a human on github.com.
 

@@ -461,7 +461,7 @@ When an issue reaches Done, it remains on the board in the Done column. Auto-arc
 ## The Self-Evolving Factory
 
 Fabrik is used to develop Fabrik. Issues filed against this repo go through
-the same Research → Plan → Implement → Review → Validate pipeline that Fabrik
+the same Specify → Research → Plan → Implement → Review → Validate pipeline that Fabrik
 orchestrates. When we filed an issue to add PR comment processing, Fabrik
 researched its own codebase, planned the GraphQL changes, and will eventually
 implement the feature that lets it read PR comments — gaining a capability it

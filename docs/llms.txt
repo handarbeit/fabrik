@@ -2,7 +2,7 @@
 
 > Fabrik is a Go CLI that orchestrates Claude Code through an SDLC pipeline
 > defined on a GitHub Project board. Issues are the unit of work; the pipeline
-> stages (Research → Plan → Implement → Review → Validate) are configured via
+> stages (Specify → Research → Plan → Implement → Review → Validate) are configured via
 > YAML files and driven by the Fabrik engine against your GitHub Project board.
 
 ## User Guide
