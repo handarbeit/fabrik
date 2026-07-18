@@ -6,6 +6,8 @@ Fabrik watches a GitHub Project board and drives Claude Code through configurabl
 workflow stages. Issues are the unit of work — the issue body is the spec, comments
 are user input, and the board columns define the workflow.
 
+**📖 Documentation, guides, and examples → [fabrik.handarbeit.io](https://fabrik.handarbeit.io)**
+
 ## Quick Start
 
 Requires Go 1.26.1+, the [Claude Code CLI](https://docs.claude.com/en/docs/agents-and-tools/claude-code/overview), and a GitHub token with `repo` and `project` scopes.
