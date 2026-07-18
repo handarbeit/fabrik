@@ -14,9 +14,8 @@ and backward-compatible — but on activation we hit a wall: **GitHub's merge qu
 Enterprise Cloud (for private repos) or on org-owned public repos.** It is *not* available on the
 plans Fabrik's actual repos run under:
 
-- `handarbeit/fantasy` — **private, GitHub Team** → no merge queue.
-- `arbeithand/example-repo` (and the Liminis fleet) — owned by a **personal account** → not
-  eligible even when public.
+- A **private, GitHub Team** repo → no merge queue.
+- A repo owned by a **personal account** (and its sibling fleet) → not eligible even when public.
 
 So the ADR-058 work, while correct, **cannot be activated on the repos that experience the problem.**
 ADR-058's deferral of "flavor 2 — the host-agnostic merge train" as a non-goal (on the assumption
