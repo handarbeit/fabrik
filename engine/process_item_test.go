@@ -58,6 +58,31 @@ func TestProcessItem_SkipsUnknownStage(t *testing.T) {
 	}
 }
 
+// TestProcessItem_SkipsUnmanagedStage verifies that processItem's Unmanaged
+// safety net short-circuits before invoking Claude, mirroring the HoldingStage
+// safety net. itemMayNeedWork/itemNeedsWork are expected to have already
+// filtered these out; this exercises the defense-in-depth path directly.
+func TestProcessItem_SkipsUnmanagedStage(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := testEngineWithStages(t, client, testStagesWithBacklog())
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 1,
+		Title:  "Test",
+		Status: "Backlog",
+	}
+
+	err := eng.processItem(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if len(claude.calls) != 0 {
+		t.Error("should not invoke claude for an unmanaged stage")
+	}
+}
+
 func TestProcessItem_SkipsLockedByOther(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
