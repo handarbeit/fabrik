@@ -566,6 +566,13 @@ fabrik --auto-upgrade</pre>
           <div class="link-desc">Releases (with announcements in GitHub Discussions), issue tracker, and community skills</div>
         </div>
       </a>
+      <a href="{{ '/faq' | relative_url }}" class="link-card">
+        <span class="link-icon">❓</span>
+        <div>
+          <div class="link-title">FAQ</div>
+          <div class="link-desc">Short, honest answers to the questions people ask most</div>
+        </div>
+      </a>
       <a href="{{ '/USER_GUIDE' | relative_url }}" class="link-card">
         <span class="link-icon">📖</span>
         <div>
