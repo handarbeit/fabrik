@@ -1020,6 +1020,117 @@ printf '%%s\n' '{"result":"env test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess
 	})
 }
 
+// TestInvokeClaude_GHTokenInjected verifies that the engine's resolved GitHub
+// token (claudeGHToken, set from Config.Token in Engine.New) is injected into
+// the worker's environment as both GH_TOKEN and GITHUB_TOKEN, that the
+// injection wins over an ambient value already present in the base
+// environment, and that injection is skipped when no token is configured.
+func TestInvokeClaude_GHTokenInjected(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	envFile := filepath.Join(binDir, "env.txt")
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := fmt.Sprintf(`#!/bin/sh
+cat >/dev/null
+env > %s
+printf '%%s\n' '{"result":"gh token test\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_ghtoken","num_turns":1,"total_cost_usd":0.0}'
+`, envFile)
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "Research",
+		Prompt:     "Do research",
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+
+	t.Run("token injected as GH_TOKEN and GITHUB_TOKEN", func(t *testing.T) {
+		claudeGHToken = "engine-token"
+		t.Cleanup(func() { claudeGHToken = "" })
+
+		issue := gh.ProjectItem{Number: 200, Title: "GH token test"}
+		_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+		if err != nil {
+			t.Fatalf("InvokeClaude: %v", err)
+		}
+		data, err := os.ReadFile(envFile)
+		if err != nil {
+			t.Fatalf("reading env file: %v", err)
+		}
+		env := string(data)
+		if !strings.Contains(env, "\nGH_TOKEN=engine-token\n") {
+			t.Errorf("expected GH_TOKEN=engine-token in env, got:\n%s", env)
+		}
+		if !strings.Contains(env, "\nGITHUB_TOKEN=engine-token\n") {
+			t.Errorf("expected GITHUB_TOKEN=engine-token in env, got:\n%s", env)
+		}
+	})
+
+	t.Run("engine token wins over ambient shell value", func(t *testing.T) {
+		claudeGHToken = "engine-token"
+		t.Cleanup(func() { claudeGHToken = "" })
+		t.Setenv("GH_TOKEN", "wrong-ambient-gh")
+		t.Setenv("GITHUB_TOKEN", "wrong-ambient-github")
+
+		issue := gh.ProjectItem{Number: 201, Title: "GH token override test"}
+		_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+		if err != nil {
+			t.Fatalf("InvokeClaude: %v", err)
+		}
+		data, err := os.ReadFile(envFile)
+		if err != nil {
+			t.Fatalf("reading env file: %v", err)
+		}
+		env := string(data)
+		if !strings.Contains(env, "\nGH_TOKEN=engine-token\n") {
+			t.Errorf("expected GH_TOKEN=engine-token to win over ambient value, got:\n%s", env)
+		}
+		if !strings.Contains(env, "\nGITHUB_TOKEN=engine-token\n") {
+			t.Errorf("expected GITHUB_TOKEN=engine-token to win over ambient value, got:\n%s", env)
+		}
+		if strings.Contains(env, "wrong-ambient") {
+			t.Errorf("expected ambient GH_TOKEN/GITHUB_TOKEN values to be fully overridden, got:\n%s", env)
+		}
+	})
+
+	t.Run("no token configured skips injection", func(t *testing.T) {
+		claudeGHToken = ""
+		// Unset ambient GH_TOKEN/GITHUB_TOKEN for this subtest so the
+		// assertion below isn't confounded by whatever the host environment
+		// (e.g. a developer's own gh auth) happens to export.
+		origGH, hadGH := os.LookupEnv("GH_TOKEN")
+		origGithub, hadGithub := os.LookupEnv("GITHUB_TOKEN")
+		os.Unsetenv("GH_TOKEN")
+		os.Unsetenv("GITHUB_TOKEN")
+		t.Cleanup(func() {
+			if hadGH {
+				os.Setenv("GH_TOKEN", origGH)
+			}
+			if hadGithub {
+				os.Setenv("GITHUB_TOKEN", origGithub)
+			}
+		})
+
+		issue := gh.ProjectItem{Number: 202, Title: "GH token empty test"}
+		_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+		if err != nil {
+			t.Fatalf("InvokeClaude: %v", err)
+		}
+		data, err := os.ReadFile(envFile)
+		if err != nil {
+			t.Fatalf("reading env file: %v", err)
+		}
+		env := string(data)
+		if strings.Contains(env, "GH_TOKEN=") || strings.Contains(env, "GITHUB_TOKEN=") {
+			t.Errorf("expected neither GH_TOKEN nor GITHUB_TOKEN to be present when claudeGHToken is empty, got:\n%s", env)
+		}
+	})
+}
+
 // TestBuildClaudeArgs_PermissionModeDontAsk verifies that --permission-mode dontAsk
 // is passed for non-unrestricted invocations.
 func TestBuildClaudeArgs_PermissionModeDontAsk(t *testing.T) {
