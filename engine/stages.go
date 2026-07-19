@@ -410,6 +410,19 @@ func holdingStage(cfg Config) *stages.Stage {
 	return nil
 }
 
+// cleanupStage returns the lowest-Order stage in cfg with CleanupWorktree: true,
+// or nil if none is configured. Used by settleClosedItemsToDone to locate the
+// Done column by its behavioral flag rather than a hardcoded stage name.
+func cleanupStage(cfg Config) *stages.Stage {
+	var cleanup *stages.Stage
+	for _, s := range cfg.Stages {
+		if s.CleanupWorktree && (cleanup == nil || s.Order < cleanup.Order) {
+			cleanup = s
+		}
+	}
+	return cleanup
+}
+
 // advanceToQueued moves an item from Validate to the configured holding stage column
 // when merge_train: on. It sets the board status and adds stage:Validate:complete
 // so the Phase 2 catch-up loop does not re-dispatch Validate on the next poll.

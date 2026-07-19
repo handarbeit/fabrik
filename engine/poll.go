@@ -1590,6 +1590,17 @@ doneDispatching:
 		e.settleChildPlacement(board, item)
 	}
 
+	// Closed-item-at-any-stage advance to Done (ADR-063): a closed issue sitting
+	// at any non-Done, non-Holding, non-cleanup, non-gate-checked column never
+	// passes itemMayNeedWork/itemNeedsWork's admission guard, so it never reaches
+	// deepFetchCandidates and is never dispatched again — its worktree leaks and
+	// it never gets archived. Sourced from board.Items directly, same rationale
+	// as the child-placement scan above. Gate-checked stages (Validate) are
+	// excluded — those closed items remain the exclusive responsibility of
+	// runValidatePRTerminalAdvance, to avoid double-advance/racing between the
+	// two settle-owners.
+	e.settleClosedItemsToDone(board)
+
 	// Archive any Done+complete items (lazy migration + ongoing cleanup).
 	// Uses shallow board data — labels(first:15) is sufficient to see
 	// stage:Done:complete. Idempotent: archived items disappear from board
