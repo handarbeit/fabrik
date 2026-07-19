@@ -157,7 +157,10 @@ func (c WarningsPaneComponent) currentVisible() *warnings.Entry {
 // warnings and no dismissed ones to advertise. Used to skip it in the focus
 // cycle so tab never lands on an invisible pane.
 func (c WarningsPaneComponent) IsEmpty() bool {
-	return len(c.visibleEntries()) == 0 && c.dismissedCount() == 0
+	// Any entry — active or dismissed — means the pane renders something (a
+	// warning row, or the "none (N dismissed…)" hint), so it's only truly
+	// empty when there are no entries at all.
+	return len(c.entries) == 0
 }
 
 // SelectedEntry returns the currently selected entry, or nil if none.
