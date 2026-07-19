@@ -111,6 +111,16 @@ type Stage struct {
 	// is waived and no Claude completion type is assigned.
 	HoldingStage bool `yaml:"holding_stage,omitempty"`
 
+	// Unmanaged marks this stage as a parking column that Fabrik recognizes but
+	// never runs a workflow for. Items in an unmanaged column are never dispatched
+	// and never auto-advanced — they sit until a human moves them to a real stage.
+	// When true, the prompt/skill requirement is waived, mirroring HoldingStage.
+	// Combining Unmanaged with Prompt/Skill/CleanupWorktree/HoldingStage is
+	// discouraged but not rejected: Unmanaged simply means "never dispatch",
+	// which takes precedence over any other flag in practice (see engine dispatch
+	// guards in engine/item.go and engine/poll.go).
+	Unmanaged bool `yaml:"unmanaged,omitempty"`
+
 	// DisableAdaptiveThinking controls whether Claude Code's adaptive (auto-reduced)
 	// thinking budget is disabled. nil means use the default (disabled). When nil or
 	// true, CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 is injected into the subprocess
@@ -218,7 +228,7 @@ func loadOne(path string) (*Stage, error) {
 		return nil, fmt.Errorf("stage must have a 'name' field")
 	}
 
-	if !s.CleanupWorktree && !s.HoldingStage {
+	if !s.CleanupWorktree && !s.HoldingStage && !s.Unmanaged {
 		if s.Prompt == "" && s.Skill == "" {
 			return nil, fmt.Errorf("stage %q must have a 'prompt' or 'skill' field", s.Name)
 		}
