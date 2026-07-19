@@ -503,6 +503,32 @@ func TestItemNeedsWork_ClosedIssue(t *testing.T) {
 	}
 }
 
+// TestItemMayNeedWork_UnmanagedStage verifies that an item sitting in an
+// unmanaged column (e.g. Backlog) is never dispatched, mirroring HoldingStage.
+func TestItemMayNeedWork_UnmanagedStage(t *testing.T) {
+	eng := testEngineWithStages(t, &mockGitHubClient{}, testStagesWithBacklog())
+	item := gh.ProjectItem{
+		Number: 1,
+		Status: "Backlog",
+	}
+	if eng.itemMayNeedWork(item) {
+		t.Error("item in an unmanaged column should not need work")
+	}
+}
+
+// TestItemNeedsWork_UnmanagedStage verifies that an item sitting in an
+// unmanaged column (e.g. Backlog) is never dispatched by itemNeedsWork either.
+func TestItemNeedsWork_UnmanagedStage(t *testing.T) {
+	eng := testEngineWithStages(t, &mockGitHubClient{}, testStagesWithBacklog())
+	item := gh.ProjectItem{
+		Number: 1,
+		Status: "Backlog",
+	}
+	if eng.itemNeedsWork(item) {
+		t.Error("item in an unmanaged column should not need work (itemNeedsWork)")
+	}
+}
+
 // TestItemMayNeedWork_ClosedIssue_CleanupStage verifies that a closed issue in
 // a cleanup stage still passes itemMayNeedWork when the worktree directory exists.
 func TestItemMayNeedWork_ClosedIssue_CleanupStage(t *testing.T) {
