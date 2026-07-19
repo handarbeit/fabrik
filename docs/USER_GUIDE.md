@@ -744,6 +744,14 @@ auto_advance: false       # Optional. Per-stage override for the global yolo set
 cleanup_worktree: false   # Optional. Removes the issue worktree instead of invoking Claude.
                           #   Use for terminal stages (e.g., Done) where no further work
                           #   is needed on the branch.
+holding_stage: false      # Optional. Marks this stage as an engine-managed batch holding pen
+                          #   (e.g., Queued for merge-train). Items are never dispatched
+                          #   individually — the engine batch-handles them once per poll cycle.
+unmanaged: false          # Optional. Declares a "parking column" (e.g., Backlog) that Fabrik
+                          #   recognizes but runs no workflow for. Items in an unmanaged column
+                          #   are never dispatched and never auto-advanced — they sit until a
+                          #   human moves them to a real stage. See §Backlog and the Unmanaged
+                          #   Stage Flag below.
 wait_for_reviews: false   # Optional. When true, Fabrik waits for all requested PR reviewers
                           #   to submit and re-invokes the stage agent via the comment-processing
                           #   path to address submitted inline feedback. Re-invocation is
@@ -786,7 +794,9 @@ completion:
   type: claude            # Only supported type (default).
 ```
 
-Either `skill` or `prompt` is required (unless `cleanup_worktree` is true). When `skill`
+Either `skill` or `prompt` is required (unless `cleanup_worktree`, `holding_stage`, or
+`unmanaged` is true — these three flags mark stages that are never dispatched to Claude,
+so no prompt is needed). When `skill`
 is set, Fabrik sends a directive prompt telling Claude to follow the named skill; the
 skill provides the detailed methodology via the plugin system. Prefer `skill` for complex
 stages — it supports rich methodology, quality checklists, and scope boundaries. Use
@@ -1556,7 +1566,7 @@ Validate then runs on the new HEAD SHA, with the full CI gate and convergence-mo
 
 | Stage | Order | Purpose |
 |-------|-------|---------|
-| **Backlog** | -- | Parking lot. No stage config needed. |
+| **Backlog** | -1 | Parking lot. Declared `unmanaged: true` (`stages/examples/backlog.yaml`) — recognized by startup validation, never dispatched. |
 | **Specify** | 0 | Refine rough issues into clear, unambiguous specs. |
 | **Research** | 1 | Explore codebase, surface technical findings and questions. |
 | **Plan** | 2 | Design implementation approach with task checklist. |
