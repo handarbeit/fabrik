@@ -55,11 +55,17 @@ func (e *Engine) checkStageColumnAlignment(ctx context.Context) error {
 
 	// Build the required stage set for column validation.
 	// Cleanup stages are always excluded (they have no board column requirement).
+	// Unmanaged stages (e.g. Backlog) are always excluded — they're parking
+	// columns Fabrik recognizes but never requires a matching board column for,
+	// regardless of merge_train.
 	// Holding stages are excluded when merge_train is off — they only require a
 	// board column when merge_train is on (the operator must add the Queued column).
 	var checkStages []*stageNameOrder
 	for _, s := range e.cfg.Stages {
 		if s.CleanupWorktree {
+			continue
+		}
+		if s.Unmanaged {
 			continue
 		}
 		if s.HoldingStage && e.cfg.MergeTrain != "on" {
@@ -83,11 +89,16 @@ func (e *Engine) checkStageColumnAlignment(ctx context.Context) error {
 	// Find extra board columns: columns that no configured stage backs and that
 	// are not a well-known unmanaged column. Unlike the missing-column check
 	// above, this recognizes EVERY configured stage — including cleanup stages
-	// (e.g. Done) and holding stages (e.g. Queued) — because those columns are
+	// (e.g. Done), holding stages (e.g. Queued), and unmanaged stages (e.g.
+	// Backlog, via stages/examples/backlog.yaml) — because those columns are
 	// legitimately backed by a stage even though they don't require one. The
-	// "Backlog" entry column is intentionally unmanaged (Fabrik ignores it), so
-	// it is never reported as extra. A genuine typo'd column matches neither and
-	// is still surfaced.
+	// hardcoded "Backlog" fallback below remains as a compat net for installs
+	// that predate backlog.yaml and have no local copy of it: without a
+	// configured Backlog stage, the loop above never adds "Backlog" to
+	// `recognized`, so the hardcode is what keeps those installs silent. Once a
+	// stage named Backlog is configured (unmanaged or not), the hardcode is a
+	// harmless no-op (the map entry is already true). A genuine typo'd column
+	// matches neither and is still surfaced.
 	recognized := make(map[string]bool, len(e.cfg.Stages)+1)
 	for _, s := range e.cfg.Stages {
 		recognized[s.Name] = true
