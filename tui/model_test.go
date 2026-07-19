@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/handarbeit/fabrik/warnings"
 )
 
 func TestNew(t *testing.T) {
@@ -97,11 +98,15 @@ func TestUpdate_QuitKey(t *testing.T) {
 	}
 }
 
-// TestUpdate_TabKey_SwitchesPanes verifies tab cycles through all three panes.
+// TestUpdate_TabKey_SwitchesPanes verifies tab cycles through all three panes
+// when the warnings pane has content.
 func TestUpdate_TabKey_SwitchesPanes(t *testing.T) {
 	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
 	m.width = 80
 	m.height = 24
+	// Seed a warning so the warnings pane is non-empty and participates in the
+	// focus cycle.
+	m.warnings.entries = []warnings.Entry{{Key: "k1", Title: "a warning"}}
 	if m.focusPane != paneActive {
 		t.Fatal("expected initial pane to be active")
 	}
@@ -122,6 +127,28 @@ func TestUpdate_TabKey_SwitchesPanes(t *testing.T) {
 	nm3 := next3.(Model)
 	if nm3.focusPane != paneActive {
 		t.Error("expected pane to switch back to active after third tab")
+	}
+}
+
+// TestUpdate_TabKey_SkipsEmptyWarningsPane verifies tab skips the warnings pane
+// when it is empty (hidden), so focus never lands on an invisible pane.
+func TestUpdate_TabKey_SkipsEmptyWarningsPane(t *testing.T) {
+	m := New(30, ProjectInfo{}, "", nil, nil, 0, false)
+	m.width = 80
+	m.height = 24
+	m.warnings.entries = nil // no warnings → pane hidden
+	if !m.warnings.IsEmpty() {
+		t.Fatal("expected warnings pane to be empty")
+	}
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	nm := next.(Model)
+	if nm.focusPane != paneHistory {
+		t.Fatalf("expected history after first tab, got %v", nm.focusPane)
+	}
+	next2, _ := nm.Update(tea.KeyMsg{Type: tea.KeyTab})
+	nm2 := next2.(Model)
+	if nm2.focusPane != paneActive {
+		t.Errorf("expected active after second tab (warnings skipped), got %v", nm2.focusPane)
 	}
 }
 

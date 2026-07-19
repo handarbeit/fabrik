@@ -133,6 +133,17 @@ func (c WarningsPaneComponent) visibleEntries() []warnings.Entry {
 	return out
 }
 
+// dismissedCount returns the number of dismissed entries.
+func (c WarningsPaneComponent) dismissedCount() int {
+	n := 0
+	for _, e := range c.entries {
+		if e.Dismissed {
+			n++
+		}
+	}
+	return n
+}
+
 // currentVisible returns the currently selected visible entry, or nil.
 func (c WarningsPaneComponent) currentVisible() *warnings.Entry {
 	visible := c.visibleEntries()
@@ -140,6 +151,13 @@ func (c WarningsPaneComponent) currentVisible() *warnings.Entry {
 		return nil
 	}
 	return &visible[c.curIdx]
+}
+
+// IsEmpty reports whether the pane has nothing to render — no active
+// warnings and no dismissed ones to advertise. Used to skip it in the focus
+// cycle so tab never lands on an invisible pane.
+func (c WarningsPaneComponent) IsEmpty() bool {
+	return len(c.visibleEntries()) == 0 && c.dismissedCount() == 0
 }
 
 // SelectedEntry returns the currently selected entry, or nil if none.
@@ -165,6 +183,12 @@ func (c WarningsPaneComponent) Height() int {
 	}
 	visible := c.visibleEntries()
 	if len(visible) == 0 {
+		// No active warnings: collapse the pane entirely so it consumes no
+		// space. Keep a single hint line only when dismissed warnings exist,
+		// so they remain discoverable.
+		if c.dismissedCount() == 0 {
+			return 0
+		}
 		return 1
 	}
 	rows := min(len(visible), maxWarningRows)
@@ -196,18 +220,14 @@ func (c WarningsPaneComponent) View(width int) string {
 	visible := c.visibleEntries()
 
 	if len(visible) == 0 {
-		// Count dismissed entries for the footer hint.
-		dismissedCount := 0
-		for _, e := range c.entries {
-			if e.Dismissed {
-				dismissedCount++
-			}
+		// No active warnings: render nothing so the pane consumes no space.
+		// Keep a single hint line only when dismissed warnings exist, so they
+		// remain discoverable.
+		dismissedCount := c.dismissedCount()
+		if dismissedCount == 0 {
+			return ""
 		}
-		msg := "  Warnings: none"
-		if dismissedCount > 0 {
-			msg = fmt.Sprintf("  Warnings: none (%d dismissed, press tab + S to show)", dismissedCount)
-		}
-		return dimStyle.Render(msg)
+		return dimStyle.Render(fmt.Sprintf("  Warnings: none (%d dismissed, press tab + S to show)", dismissedCount))
 	}
 
 	innerWidth := max(width-6, 20)

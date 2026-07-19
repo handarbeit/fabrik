@@ -371,7 +371,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case paneActive:
 				m.focusPane = paneHistory
 			case paneHistory:
-				m.focusPane = paneWarnings
+				// Skip the warnings pane when it is empty (hidden), so tab
+				// never lands focus on an invisible pane.
+				if m.warnings.IsEmpty() {
+					m.focusPane = paneActive
+				} else {
+					m.focusPane = paneWarnings
+				}
 			default:
 				m.focusPane = paneActive
 			}
