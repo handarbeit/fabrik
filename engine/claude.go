@@ -89,6 +89,13 @@ var claudeKillGraceSigInt = 10 * time.Second
 // Default 10s; set from Config.KillGraceSigTerm in New().
 var claudeKillGraceSigTerm = 10 * time.Second
 
+// claudeGHToken is the engine's resolved GitHub token (Config.Token). Set by
+// the Engine during construction. Injected into every Claude worker's
+// environment as GH_TOKEN and GITHUB_TOKEN so the worker's gh invocations
+// always authenticate as the same identity as the engine itself, regardless
+// of the launching shell's ambient environment. Empty skips injection.
+var claudeGHToken string
+
 // killReasonCtxKey is the context key for kill reason annotation.
 type killReasonCtxKey struct{}
 
@@ -420,6 +427,9 @@ func buildClaudeEnv(stage *stages.Stage, effortOverride string) []string {
 		level = "high"
 	}
 	env = append(env, "CLAUDE_CODE_EFFORT_LEVEL="+level)
+	if claudeGHToken != "" {
+		env = append(env, "GH_TOKEN="+claudeGHToken, "GITHUB_TOKEN="+claudeGHToken)
+	}
 	return env
 }
 
