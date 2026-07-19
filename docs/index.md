@@ -13,11 +13,12 @@ description: >-
 <section class="hero">
   <div class="container">
     <div class="hero-eyebrow">🏭 Open Source · Apache-2.0</div>
-    <h1>Your SDLC,<br>on <span class="accent">autopilot</span></h1>
+    <h1>Claude Code,<br>on your <span class="accent">GitHub board</span></h1>
     <p class="hero-tagline">
-      Fabrik watches your GitHub Project board and drives Claude Code through
-      a full software development pipeline — Specify, Research, Plan, Implement,
-      Review, Validate — automatically. File an issue. Drag a card. Ship.
+      Fabrik watches your GitHub Project board and drives Claude Code through an
+      SDLC pipeline — Specify → Research → Plan → Implement → Review → Validate.
+      You file an issue and move it across the board; Fabrik runs each stage and
+      posts the results back as comments and PRs. Stay in the loop, or let it run.
     </p>
 
     <div class="hero-video">
@@ -364,11 +365,10 @@ fabrik --auto-upgrade</pre>
 <section id="features">
   <div class="container">
     <p class="section-label">Features</p>
-    <h2 class="section-title">Everything you need to automate your SDLC</h2>
+    <h2 class="section-title">What Fabrik gives Claude Code</h2>
     <p class="section-subtitle">
-      Fabrik gives Claude Code the structure, context, and tooling to work
-      reliably through a full software lifecycle — with you in the loop at
-      every step.
+      The structure, context, and tooling for Claude Code to work through a
+      software lifecycle in stages — with you able to step in at any point.
     </p>
 
     <div class="features-grid">
@@ -534,9 +534,9 @@ fabrik --auto-upgrade</pre>
           streaming and CI check UI — building the observatory it now uses to watch itself
           build features. This page was written by Fabrik too.
           <br><br>
-          The human's role is product manager, architect, and UX designer all in
-          one: file issues, answer clarifying questions, drag cards, and
-          occasionally comment to redirect the work. The factory does the rest.
+          The human's role is closer to product manager and reviewer: file issues,
+          answer clarifying questions, move cards, and comment to redirect when
+          needed. Fabrik handles the mechanics in between.
         </div>
       </div>
     </div>
