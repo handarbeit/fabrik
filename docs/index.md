@@ -353,7 +353,7 @@ fabrik --auto-upgrade</pre>
         <li>With <code>fabrik:yolo</code>, completion enables auto-merge; the PR merges once branch protection is satisfied.</li>
         <li>Records the validated SHA, so a later force-push or external commit automatically re-enters Validate.</li>
       </ul>
-      <a class="stage-detail-link" href="{{ '/state-machine' | relative_url }}#64-ci-gate-and-ci-fix-reinvoke">CI gate and CI-fix reinvoke →</a>
+      <a class="stage-detail-link" href="{{ '/state-machine' | relative_url }}#65-ci-gate-and-ci-fix-reinvoke">CI gate and CI-fix reinvoke →</a>
     </div>
   </div>
 </section>
@@ -477,7 +477,7 @@ fabrik --auto-upgrade</pre>
           Waits for all requested PR reviewers then re-invokes the stage to address comments.
         </div>
       </a>
-      <a class="feature-card" href="{{ '/state-machine' | relative_url }}#64-ci-gate-and-ci-fix-reinvoke" aria-label="CI Gate — open documentation">
+      <a class="feature-card" href="{{ '/state-machine' | relative_url }}#65-ci-gate-and-ci-fix-reinvoke" aria-label="CI Gate — open documentation">
         <span class="feature-icon">✅</span>
         <div class="feature-title">CI Gate</div>
         <div class="feature-desc">
@@ -580,7 +580,7 @@ fabrik --auto-upgrade</pre>
           <div class="link-desc">Visual lifecycle overview plus authoritative spec for engine state transitions, label semantics, and review gate behavior</div>
         </div>
       </a>
-      <a href="{{ '/USER_GUIDE#10-troubleshooting' | relative_url }}" class="link-card">
+      <a href="{{ '/USER_GUIDE#11-troubleshooting' | relative_url }}" class="link-card">
         <span class="link-icon">🔧</span>
         <div>
           <div class="link-title">Troubleshooting</div>

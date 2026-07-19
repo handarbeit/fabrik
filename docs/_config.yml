@@ -8,6 +8,15 @@ baseurl: ""
 github_username: handarbeit
 github_repo: fabrik
 
+# Social / SEO: default preview image for link unfurls (LinkedIn, Slack, X, etc.)
+twitter:
+  card: summary_large_image
+defaults:
+  - scope:
+      path: ""
+    values:
+      image: /assets/images/fabrik-social-preview.png
+
 # Plugins
 plugins:
   - jekyll-feed
