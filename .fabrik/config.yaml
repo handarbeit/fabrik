@@ -18,7 +18,7 @@ user: arbeithand
 
 # Optional settings (defaults shown):
 # stages: ./.fabrik/stages
-poll: 15
+poll: 30
 max_concurrent: 5
 # max_retries: 3
 # yolo: false
