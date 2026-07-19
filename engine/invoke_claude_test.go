@@ -1049,6 +1049,7 @@ printf '%%s\n' '{"result":"gh token test\nFABRIK_STAGE_COMPLETE\n","session_id":
 	}
 
 	t.Run("token injected as GH_TOKEN and GITHUB_TOKEN", func(t *testing.T) {
+		_ = os.Remove(envFile)
 		claudeGHToken = "engine-token"
 		t.Cleanup(func() { claudeGHToken = "" })
 
@@ -1071,6 +1072,7 @@ printf '%%s\n' '{"result":"gh token test\nFABRIK_STAGE_COMPLETE\n","session_id":
 	})
 
 	t.Run("engine token wins over ambient shell value", func(t *testing.T) {
+		_ = os.Remove(envFile)
 		claudeGHToken = "engine-token"
 		t.Cleanup(func() { claudeGHToken = "" })
 		t.Setenv("GH_TOKEN", "wrong-ambient-gh")
@@ -1098,6 +1100,7 @@ printf '%%s\n' '{"result":"gh token test\nFABRIK_STAGE_COMPLETE\n","session_id":
 	})
 
 	t.Run("no token configured skips injection", func(t *testing.T) {
+		_ = os.Remove(envFile)
 		claudeGHToken = ""
 		// Unset ambient GH_TOKEN/GITHUB_TOKEN for this subtest so the
 		// assertion below isn't confounded by whatever the host environment
