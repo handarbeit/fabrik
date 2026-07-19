@@ -31,6 +31,20 @@ func (e *Engine) settleClosedItemsToDone(board *gh.ProjectBoard) {
 	if cleanup == nil {
 		return
 	}
+	// Hoisted out of the per-item loop: both checks are independent of the
+	// individual item, so evaluating them once avoids O(N) redundant map
+	// lookups and repeated warning-log spam when the status field or option
+	// is unavailable across a poll with many stranded closed items.
+	if e.statusField == nil {
+		e.logf(0, "warn", "closed-item advance: status field metadata not available; cannot move items to %s — will retry next poll\n", cleanup.Name)
+		return
+	}
+	optionID, ok := e.statusField.Options[cleanup.Name]
+	if !ok {
+		e.logf(0, "warn", "closed-item advance: no status option %q found on project board (available: %v) — will retry next poll\n",
+			cleanup.Name, mapKeys(e.statusField.Options))
+		return
+	}
 	for _, item := range board.Items {
 		if !item.IsClosed {
 			continue
@@ -39,7 +53,7 @@ func (e *Engine) settleClosedItemsToDone(board *gh.ProjectBoard) {
 		if stage == nil || stage.CleanupWorktree || stage.HoldingStage || stageIsGateChecked(stage) {
 			continue
 		}
-		e.advanceClosedItemToDone(board, item, cleanup)
+		e.advanceClosedItemToDone(board, item, optionID, cleanup.Name)
 	}
 }
 
@@ -49,25 +63,14 @@ func (e *Engine) settleClosedItemsToDone(board *gh.ProjectBoard) {
 // unlike advanceToQueued, this scan has no stage:X:complete bookkeeping to do;
 // landing at the cleanup column is sufficient to let the existing
 // CleanupWorktree dispatch path (engine/item.go) take over on the next poll.
-func (e *Engine) advanceClosedItemToDone(board *gh.ProjectBoard, item gh.ProjectItem, cleanup *stages.Stage) {
-	if e.statusField == nil {
-		e.logf(item.Number, "warn", "closed-item advance: status field metadata not available; cannot move to %s — will retry next poll\n", cleanup.Name)
-		return
-	}
-	optionID, ok := e.statusField.Options[cleanup.Name]
-	if !ok {
-		e.logf(item.Number, "warn", "closed-item advance: no status option %q found on project board (available: %v) — will retry next poll\n",
-			cleanup.Name, mapKeys(e.statusField.Options))
-		return
-	}
-
-	e.logf(item.Number, "closed-advance", "closed issue stranded outside %s — advancing\n", cleanup.Name)
+func (e *Engine) advanceClosedItemToDone(board *gh.ProjectBoard, item gh.ProjectItem, optionID, cleanupName string) {
+	e.logf(item.Number, "closed-advance", "closed issue stranded outside %s — advancing\n", cleanupName)
 	if err := e.client.UpdateProjectItemStatus(board.ProjectID, item.ItemID, e.statusField.FieldID, optionID); err != nil {
-		e.logf(item.Number, "warn", "closed-item advance: could not move to %s: %v — will retry next poll\n", cleanup.Name, err)
+		e.logf(item.Number, "warn", "closed-item advance: could not move to %s: %v — will retry next poll\n", cleanupName, err)
 		return
 	}
 	if cacheImpl, ok2 := e.readClient.(*boardcache.CacheImpl); ok2 {
-		cacheImpl.UpdateItemStatus(boardcache.ItemKey(item.Repo, item.Number), cleanup.Name)
+		cacheImpl.UpdateItemStatus(boardcache.ItemKey(item.Repo, item.Number), cleanupName)
 	}
 	if e.webhookMgr != nil {
 		e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
