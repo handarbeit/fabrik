@@ -177,6 +177,7 @@ func New(cfg Config) (*Engine, error) {
 	} else {
 		claudeKillGraceSigTerm = 10 * time.Second
 	}
+	claudeGHToken = cfg.Token
 	worktreeRoot := filepath.Join(fabrikDir, ".fabrik", "worktrees")
 	sharedStore := itemstate.NewStore(nil)
 	eng := &Engine{
