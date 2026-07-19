@@ -983,3 +983,115 @@ code {
     padding: 32px 16px 60px;
   }
 }
+
+// ============================================================
+// Blog post (article reading column)
+// ============================================================
+.post {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 56px 24px 96px;
+  font-size: 1.05rem;
+  line-height: 1.7;
+  color: $color-text;
+
+  .post-back {
+    display: inline-block;
+    margin-bottom: 32px;
+    font-size: 0.85rem;
+    color: $color-text-muted;
+    letter-spacing: 0.02em;
+  }
+  .post-back:hover { color: $color-accent; text-decoration: none; }
+
+  .post-date {
+    color: $color-text-subtle;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 8px;
+  }
+
+  h1 {
+    font-size: clamp(1.9rem, 4vw, 2.6rem);
+    line-height: 1.15;
+    letter-spacing: -0.02em;
+    margin: 0 0 28px;
+  }
+
+  h2 {
+    font-size: 1.5rem;
+    line-height: 1.25;
+    margin: 52px 0 16px;
+    padding-top: 8px;
+  }
+
+  h3 {
+    font-size: 1.2rem;
+    margin: 36px 0 12px;
+  }
+
+  // First paragraph after the title reads as a lede.
+  h1 + p {
+    font-size: 1.2rem;
+    line-height: 1.6;
+    color: $color-text-muted;
+    margin-bottom: 32px;
+  }
+
+  p { margin: 0 0 22px; }
+
+  ul, ol {
+    margin: 0 0 22px;
+    padding-left: 24px;
+  }
+  li { margin-bottom: 10px; }
+  li > p { margin-bottom: 10px; }
+
+  strong { color: $color-text; font-weight: 600; }
+
+  a {
+    color: $color-accent-2;
+    text-decoration: underline;
+    text-decoration-color: rgba($color-accent-2, 0.35);
+    text-underline-offset: 2px;
+  }
+  a:hover { text-decoration-color: $color-accent-2; }
+
+  code {
+    background: $color-surface-2;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.85em;
+  }
+  pre {
+    background: $color-surface;
+    border: 1px solid $color-border;
+    border-radius: $radius;
+    padding: 16px 18px;
+    overflow-x: auto;
+    margin: 0 0 22px;
+  }
+  pre code { background: none; padding: 0; }
+
+  blockquote {
+    border-left: 3px solid $color-border;
+    padding-left: 18px;
+    margin: 0 0 22px;
+    color: $color-text-muted;
+  }
+
+  hr {
+    border: none;
+    border-top: 1px solid $color-border;
+    margin: 44px 0;
+  }
+}
+
+@media (max-width: 480px) {
+  .post {
+    padding: 36px 18px 64px;
+    font-size: 1rem;
+  }
+  .post h2 { margin-top: 40px; }
+}

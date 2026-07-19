@@ -1,0 +1,8 @@
+---
+layout: default
+---
+<article class="post">
+  <a class="post-back" href="{{ '/' | relative_url }}">← Fabrik</a>
+  {% if page.date %}<p class="post-date">{{ page.date | date: "%B %-d, %Y" }}</p>{% endif %}
+  {{ content }}
+</article>

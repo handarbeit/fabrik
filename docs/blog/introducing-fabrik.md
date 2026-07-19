@@ -1,5 +1,5 @@
 ---
-layout: default
+layout: post
 title: "A lean take on the software factory"
 description: "Fabrik drives Claude Code through an SDLC pipeline defined on a GitHub Project board. Now open source under Apache-2.0."
 date: 2026-07-18
