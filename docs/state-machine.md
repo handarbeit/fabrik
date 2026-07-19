@@ -2518,6 +2518,10 @@ condition is left in place and counted toward the `skipped` total.
 **Cleanup path (FR-6):**  
 `WorktreeManager.CleanupWorktree(number, false)` — the same path used by the Done stage.
 If the bare repo is absent (manually deleted), falls back to `os.RemoveAll` with a warning.
+Both paths now run the cwd-rooted process reaper immediately before removing the directory
+(including the `os.RemoveAll` fallback) — see
+[stage-lifecycle.md § Worktree Teardown Process Reaping](stage-lifecycle.md#worktree-teardown-process-reaping)
+for detail.
 
 ### 11.4 Owner/Repo Resolution
 
