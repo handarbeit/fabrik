@@ -125,6 +125,11 @@ mark_pr_ready_on_complete: true # Mark PR ready when stage completes
 auto_advance: false             # Override global yolo setting
 read_only: false                # Stash/restore worktree changes (for Specify/Research stages that don't write code)
 cleanup_worktree: false         # Remove worktree when stage completes (for Done/cleanup stages)
+holding_stage: false            # Engine-managed batch holding pen (e.g. Queued for merge-train); no prompt/skill
+                                # needed; items are never dispatched individually — batch-handled by the engine.
+unmanaged: false                # Declares a recognized "parking column" (e.g. Backlog) Fabrik runs no workflow
+                                # for. No prompt/skill needed; items are never dispatched and never auto-advanced —
+                                # they sit until a human moves them to a real stage. See stages/examples/backlog.yaml.
 max_wall_time: "45m"            # Optional: wall-clock deadline for a single Claude invocation (e.g. "30m", "1h").
                                 # When exceeded, SIGTERM → 10s → SIGKILL sent to the process group. Output
                                 # collected before the kill is scanned for FABRIK_STAGE_COMPLETE so completed
