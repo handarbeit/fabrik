@@ -1241,7 +1241,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			continue
 		}
 		stage := stages.FindStage(e.cfg.Stages, item.Status)
-		if stage == nil || stage.CleanupWorktree || stage.HoldingStage {
+		if stage == nil || stage.CleanupWorktree || stage.HoldingStage || stage.Unmanaged {
 			continue
 		}
 		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
@@ -1835,10 +1835,14 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 		}
 		newKeys[fmt.Sprintf("%s#%d", repo, pi.Number)] = true
 
-		// Stage-membership guard: whether the item's column has a matching Fabrik stage.
+		// Stage-membership guard: whether the item's column has a matching Fabrik stage
+		// that Fabrik actually dispatches work for. Unmanaged stages (e.g. Backlog) are
+		// treated as unconfigured here even though a Stage exists for them — dispatch
+		// never touches them, so deep-fetching them would be wasted work (issue #778).
 		// The guard must come after newKeys[key]=true so unconfigured items are not
 		// falsely evicted from the store by the post-loop tombstoning pass (lines below).
-		configuredStage := stages.FindStage(e.cfg.Stages, pi.Status) != nil
+		matchedStage := stages.FindStage(e.cfg.Stages, pi.Status)
+		configuredStage := matchedStage != nil && !matchedStage.Unmanaged
 
 		snap, snapErr := e.store.Get(repo, pi.Number)
 		if snapErr != nil {

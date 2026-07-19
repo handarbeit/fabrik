@@ -135,8 +135,10 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 	}
 
 	// Holding stages are batch-scoped (handled by handleMergeTrainBatch in poll.go),
-	// not per-item. Never dispatch individual items at a holding stage.
-	if stage.HoldingStage {
+	// not per-item. Never dispatch individual items at a holding stage. Unmanaged
+	// stages (e.g. Backlog) are parking columns Fabrik never dispatches at all —
+	// items sit until a human moves them to a real stage.
+	if stage.HoldingStage || stage.Unmanaged {
 		return false
 	}
 
@@ -209,8 +211,9 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		return false
 	}
 
-	// Holding stages are batch-scoped; never dispatch individual items.
-	if stage.HoldingStage {
+	// Holding stages are batch-scoped; never dispatch individual items. Unmanaged
+	// stages (e.g. Backlog) are parking columns never dispatched at all.
+	if stage.HoldingStage || stage.Unmanaged {
 		return false
 	}
 
@@ -428,8 +431,9 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	}
 
 	// Holding stage: batch-managed by handleMergeTrainBatch in poll.go, never per-item.
+	// Unmanaged stage: a parking column (e.g. Backlog) Fabrik never dispatches at all.
 	// itemMayNeedWork/itemNeedsWork should have filtered these out; this is a safety net.
-	if stage.HoldingStage {
+	if stage.HoldingStage || stage.Unmanaged {
 		return nil
 	}
 
