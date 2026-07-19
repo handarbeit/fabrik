@@ -379,6 +379,13 @@ fabrik --auto-upgrade</pre>
           Board columns define stages and labels define state.
         </div>
       </a>
+      <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#install-the-fabrik-pm-plugin" aria-label="Interactive PM Plugin — open documentation">
+        <span class="feature-icon">🔌</span>
+        <div class="feature-title">Interactive PM Plugin</div>
+        <div class="feature-desc">
+          A Claude Code plugin for your own session — ask "what's on the board?" or "why is #42 stuck?" and steer Fabrik from inside interactive Claude Code. No binary install needed.
+        </div>
+      </a>
       <a class="feature-card" href="{{ '/USER_GUIDE' | relative_url }}#git-repositories-and-worktrees" aria-label="Isolated Git Worktrees — open documentation">
         <span class="feature-icon">🌿</span>
         <div class="feature-title">Isolated Git Worktrees</div>
@@ -564,6 +571,13 @@ fabrik --auto-upgrade</pre>
         <div>
           <div class="link-title">User Guide</div>
           <div class="link-desc">Full configuration reference and workflow patterns</div>
+        </div>
+      </a>
+      <a href="{{ '/USER_GUIDE' | relative_url }}#install-the-fabrik-pm-plugin" class="link-card">
+        <span class="link-icon">🔌</span>
+        <div>
+          <div class="link-title">Interactive PM Plugin</div>
+          <div class="link-desc">Ask Claude "what's on the board?" from your own session — no binary install</div>
         </div>
       </a>
       <a href="{{ '/stage-lifecycle' | relative_url }}" class="link-card">
