@@ -88,6 +88,24 @@ func TestVersionWithSHA(t *testing.T) {
 			ok:       true,
 			expected: "dev(abcdef1)",
 		},
+		{
+			// Regression: modern Go (1.24+) stamps a VCS-derived pseudo-version
+			// into Main.Version for working-tree builds instead of "(devel)".
+			// vcs.revision is still present, so this must report dev(<sha>) — not
+			// the pseudo-version — or the "dev"-prefixed auto-upgrade gate breaks
+			// and the instance never rebuilds from origin/main.
+			name: "working-tree build with pseudo-version Main.Version still reports dev(sha)",
+			v:    "dev",
+			info: &debug.BuildInfo{
+				Main: debug.Module{Version: "v0.0.74-0.20260716173320-6198e8102f90+dirty"},
+				Settings: []debug.BuildSetting{
+					{Key: "vcs.revision", Value: "6198e8102f90bc3757461fdfc50707d0a4767cc7"},
+					{Key: "vcs.modified", Value: "true"},
+				},
+			},
+			ok:       true,
+			expected: "dev(6198e81)",
+		},
 	}
 
 	for _, tt := range tests {
