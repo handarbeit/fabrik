@@ -103,6 +103,12 @@ func reapWorktreeProcessesLinux(wtDir string, issueNumber int, logf func(int, st
 			// (e.g. a different user's process) — both are expected and non-fatal.
 			continue
 		}
+		// The kernel appends " (deleted)" to the readlink target when the cwd's
+		// underlying directory has been unlinked (e.g. a crashed prior run left
+		// a process whose worktree was partially removed) — strip it before
+		// matching, or the prefix check silently fails on exactly the orphans
+		// this reaper exists to catch.
+		cwd = strings.TrimSuffix(cwd, " (deleted)")
 		if !isUnderWorktreeDir(cwd, wtDir) {
 			continue
 		}
@@ -111,7 +117,11 @@ func reapWorktreeProcessesLinux(wtDir string, issueNumber int, logf func(int, st
 		// window in which this pid could have been recycled for a different,
 		// unrelated process since the check above.
 		cwd2, readErr2 := os.Readlink(filepath.Join("/proc", entry.Name(), "cwd"))
-		if readErr2 != nil || !isUnderWorktreeDir(cwd2, wtDir) {
+		if readErr2 != nil {
+			continue
+		}
+		cwd2 = strings.TrimSuffix(cwd2, " (deleted)")
+		if !isUnderWorktreeDir(cwd2, wtDir) {
 			continue
 		}
 
