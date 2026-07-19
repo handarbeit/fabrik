@@ -296,6 +296,75 @@ cleanup_worktree: true
 	}
 }
 
+// TestLoadAll_UnmanagedStage verifies that a stage with unmanaged: true
+// loads successfully without a prompt or skill, and has no Claude completion type.
+func TestLoadAll_UnmanagedStage(t *testing.T) {
+	dir := t.TempDir()
+	writeStageFile(t, dir, "backlog.yaml", `
+name: Backlog
+order: -1
+unmanaged: true
+`)
+
+	ss, err := LoadAll(dir)
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	if len(ss) != 1 {
+		t.Fatalf("expected 1 stage, got %d", len(ss))
+	}
+	s := ss[0]
+	if !s.Unmanaged {
+		t.Error("Unmanaged should be true")
+	}
+	if s.Completion.Type != "" {
+		t.Errorf("unmanaged stage should have no completion type, got %q", s.Completion.Type)
+	}
+}
+
+// TestLoadAll_UnmanagedCombinations documents current precedence behavior:
+// unmanaged combined with prompt/skill/cleanup_worktree/holding_stage is not
+// rejected (mirrors the codebase's existing lack of mutual-exclusion validation
+// between cleanup_worktree and holding_stage).
+func TestLoadAll_UnmanagedCombinations(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+	}{
+		{
+			name: "with prompt",
+			yaml: "name: Backlog\norder: -1\nunmanaged: true\nprompt: |\n  do something\n",
+		},
+		{
+			name: "with skill",
+			yaml: "name: Backlog\norder: -1\nunmanaged: true\nskill: some-skill\n",
+		},
+		{
+			name: "with cleanup_worktree",
+			yaml: "name: Backlog\norder: -1\nunmanaged: true\ncleanup_worktree: true\n",
+		},
+		{
+			name: "with holding_stage",
+			yaml: "name: Backlog\norder: -1\nunmanaged: true\nholding_stage: true\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeStageFile(t, dir, "backlog.yaml", tt.yaml)
+
+			ss, err := LoadAll(dir)
+			if err != nil {
+				t.Fatalf("LoadAll: %v", err)
+			}
+			if len(ss) != 1 || !ss[0].Unmanaged {
+				t.Errorf("expected 1 unmanaged stage, got %+v", ss)
+			}
+		})
+	}
+}
+
 func TestLoadAll_ReadError(t *testing.T) {
 	dir := t.TempDir()
 	// Create a directory named bad.yaml so os.ReadFile fails deterministically
