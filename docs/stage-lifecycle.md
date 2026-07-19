@@ -501,6 +501,21 @@ The Done stage (`cleanup_worktree: true`) is terminal:
 
 ---
 
+## Phase 6b: Unmanaged Stage (Backlog)
+
+An `unmanaged: true` stage (the default `Backlog`, `stages/examples/backlog.yaml`) declares a
+"parking column" Fabrik recognizes but runs no workflow for:
+- No Claude invocation, no lock, no in-progress label management — same as a cleanup stage,
+  but no worktree action either (nothing to clean up; the item never had one)
+- `itemMayNeedWork` and `itemNeedsWork` both return `false` for it, so it is never dispatched
+- The yolo/cruise catch-up loop skips it, so it is never auto-advanced out of the column
+- `runProbeAndDeepFetch`'s stage-membership guard treats it as unconfigured for deep-fetch
+  purposes — items sitting in an unmanaged column are never `FetchItemDetails`-fetched, even
+  though a matching `Stage` exists (preserving the pre-existing Backlog deep-fetch avoidance)
+- Items sit here until a human moves them to a real stage's column
+
+---
+
 ## Markers Reference
 
 | Marker | Direction | Purpose | Where Checked |
@@ -546,6 +561,8 @@ create_draft_pr: false      # Create draft PR on completion
 mark_pr_ready_on_complete: false  # Mark PR ready on completion
 auto_advance: null          # Override global yolo (true/false/null)
 cleanup_worktree: false     # Terminal stage — remove worktree
+holding_stage: false        # Engine-managed batch holding pen (e.g. Queued) — no per-item dispatch
+unmanaged: false            # Parking column (e.g. Backlog) — recognized but never dispatched or auto-advanced
 kill_grace:
   sigint: 10s               # Grace window after SIGINT before SIGTERM (empty = engine default; "0s" = skip SIGINT)
   sigterm: 10s              # Grace window after SIGTERM before SIGKILL (empty = engine default; "0s" = skip SIGTERM)
@@ -553,4 +570,4 @@ completion:
   type: claude              # Only supported type
 ```
 
-Either `skill` or `prompt` is required (unless `cleanup_worktree` is true). When `skill` is set, the engine sends a directive prompt and the skill is loaded via `--plugin-dir`.
+Either `skill` or `prompt` is required (unless `cleanup_worktree`, `holding_stage`, or `unmanaged` is true — these three flags mark stages that are never dispatched to Claude). When `skill` is set, the engine sends a directive prompt and the skill is loaded via `--plugin-dir`.

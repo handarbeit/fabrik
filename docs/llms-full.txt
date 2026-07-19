@@ -736,6 +736,14 @@ auto_advance: false       # Optional. Per-stage override for the global yolo set
 cleanup_worktree: false   # Optional. Removes the issue worktree instead of invoking Claude.
                           #   Use for terminal stages (e.g., Done) where no further work
                           #   is needed on the branch.
+holding_stage: false      # Optional. Marks this stage as an engine-managed batch holding pen
+                          #   (e.g., Queued for merge-train). Items are never dispatched
+                          #   individually — the engine batch-handles them once per poll cycle.
+unmanaged: false          # Optional. Declares a "parking column" (e.g., Backlog) that Fabrik
+                          #   recognizes but runs no workflow for. Items in an unmanaged column
+                          #   are never dispatched and never auto-advanced — they sit until a
+                          #   human moves them to a real stage. See §Backlog and the Unmanaged
+                          #   Stage Flag below.
 wait_for_reviews: false   # Optional. When true, Fabrik waits for all requested PR reviewers
                           #   to submit and re-invokes the stage agent via the comment-processing
                           #   path to address submitted inline feedback. Re-invocation is
@@ -778,7 +786,9 @@ completion:
   type: claude            # Only supported type (default).
 ```
 
-Either `skill` or `prompt` is required (unless `cleanup_worktree` is true). When `skill`
+Either `skill` or `prompt` is required (unless `cleanup_worktree`, `holding_stage`, or
+`unmanaged` is true — these three flags mark stages that are never dispatched to Claude,
+so no prompt is needed). When `skill`
 is set, Fabrik sends a directive prompt telling Claude to follow the named skill; the
 skill provides the detailed methodology via the plugin system. Prefer `skill` for complex
 stages — it supports rich methodology, quality checklists, and scope boundaries. Use
@@ -1548,7 +1558,7 @@ Validate then runs on the new HEAD SHA, with the full CI gate and convergence-mo
 
 | Stage | Order | Purpose |
 |-------|-------|---------|
-| **Backlog** | -- | Parking lot. No stage config needed. |
+| **Backlog** | -1 | Parking lot. Declared `unmanaged: true` (`stages/examples/backlog.yaml`) — recognized by startup validation, never dispatched. |
 | **Specify** | 0 | Refine rough issues into clear, unambiguous specs. |
 | **Research** | 1 | Explore codebase, surface technical findings and questions. |
 | **Plan** | 2 | Design implementation approach with task checklist. |
@@ -2789,7 +2799,15 @@ Each active stage column has the same set of reachable sub-states:
 >
 > Distinct from Cooldown is **Deferred Dispatch**: an item whose dispatch was skipped in the current poll cycle solely because a worker from a prior cycle is still running. Deferred-Dispatch items still receive the `CooldownAt("periodic-re-eval")` stamp at end-of-poll — the cooldown avoids repeated deep-fetch evaluation (and the fallback GraphQL fetch when the cache is invalidated or disabled) for an item the dispatch guard (`snap.Worker() != nil`) would block anyway. Prompt re-dispatch after the prior worker exits is guaranteed by `WorkerExited → WorkerLifecycleChanged`, which is in `wakeChFlags` and wakes the poll loop immediately (#544). Note: `WorkerLifecycleChanged` is excluded from `cycleSetFlags` (Fix B, issue #576) so it does not bypass the cooldown gate via `mayNeedWork`. For successful workers, `StatusChanged` from `advanceToNextStage` adds the item to cycleSet (bypassing the cooldown) so the next stage dispatches promptly. For aborted workers (max-turns, error), the cooldown expires naturally and the next ticker poll re-evaluates the item. See §3.2, §9.2, and §9.9.
 >
-> **Not listed above:** `fabrik:awaiting-placement` is a related but distinct marker applied to a spawned **child** issue whose initial board placement failed — by construction it is sitting **outside** any of these active-stage columns (typically `Backlog`, which has no configured stage at all), so it never appears as a sub-state of an active-stage column. See §6.9.
+> **Not listed above:** `fabrik:awaiting-placement` is a related but distinct marker applied to a spawned **child** issue whose initial board placement failed — by construction it is sitting **outside** any of these active-stage columns (typically `Backlog`, which is declared `unmanaged: true` — see below — and therefore never dispatched to regardless), so it never appears as a sub-state of an active-stage column. See §6.9.
+
+#### Backlog (Unmanaged Stage)
+
+| Sub-State | Labels Present | Description |
+|-----------|---------------|-------------|
+| **Parked** | (any / none) | Item sits in the column; engine never inspects it beyond the stage-membership check |
+
+`itemMayNeedWork` and `itemNeedsWork` both return `false` for any stage with `unmanaged: true`, so these items are never dispatched to a per-item worker and never auto-advanced by the catch-up loop (same mechanism as `holding_stage`, see below). Unlike a holding stage, no batch handler ever acts on an unmanaged stage's items either — it is a pure no-op declaration. `stages/examples/backlog.yaml` (`name: Backlog`, `unmanaged: true`) is the shipped default; the hardcoded `"Backlog"` recognition in `checkStageColumnAlignment` (`engine/startup.go`) remains as a compat net for installs that predate this file — see [USER_GUIDE.md §Startup Board Validation](USER_GUIDE.md#startup-board-validation).
 
 #### Done (Cleanup Stage)
 
@@ -5113,7 +5131,8 @@ stateDiagram-v2
     note right of AwaitingPlacement
         AwaitingPlacement = fabrik:awaiting-placement present
         Board column is typically Backlog —
-        a column with no configured stage,
+        declared unmanaged (or, on installs
+        without backlog.yaml, still unrecognized),
         so ordinary dispatch never revisits it
     end note
 
@@ -6121,6 +6140,21 @@ The Done stage (`cleanup_worktree: true`) is terminal:
 
 ---
 
+## Phase 6b: Unmanaged Stage (Backlog)
+
+An `unmanaged: true` stage (the default `Backlog`, `stages/examples/backlog.yaml`) declares a
+"parking column" Fabrik recognizes but runs no workflow for:
+- No Claude invocation, no lock, no in-progress label management — same as a cleanup stage,
+  but no worktree action either (nothing to clean up; the item never had one)
+- `itemMayNeedWork` and `itemNeedsWork` both return `false` for it, so it is never dispatched
+- The yolo/cruise catch-up loop skips it, so it is never auto-advanced out of the column
+- `runProbeAndDeepFetch`'s stage-membership guard treats it as unconfigured for deep-fetch
+  purposes — items sitting in an unmanaged column are never `FetchItemDetails`-fetched, even
+  though a matching `Stage` exists (preserving the pre-existing Backlog deep-fetch avoidance)
+- Items sit here until a human moves them to a real stage's column
+
+---
+
 ## Markers Reference
 
 | Marker | Direction | Purpose | Where Checked |
@@ -6166,6 +6200,8 @@ create_draft_pr: false      # Create draft PR on completion
 mark_pr_ready_on_complete: false  # Mark PR ready on completion
 auto_advance: null          # Override global yolo (true/false/null)
 cleanup_worktree: false     # Terminal stage — remove worktree
+holding_stage: false        # Engine-managed batch holding pen (e.g. Queued) — no per-item dispatch
+unmanaged: false            # Parking column (e.g. Backlog) — recognized but never dispatched or auto-advanced
 kill_grace:
   sigint: 10s               # Grace window after SIGINT before SIGTERM (empty = engine default; "0s" = skip SIGINT)
   sigterm: 10s              # Grace window after SIGTERM before SIGKILL (empty = engine default; "0s" = skip SIGTERM)
@@ -6173,7 +6209,7 @@ completion:
   type: claude              # Only supported type
 ```
 
-Either `skill` or `prompt` is required (unless `cleanup_worktree` is true). When `skill` is set, the engine sends a directive prompt and the skill is loaded via `--plugin-dir`.
+Either `skill` or `prompt` is required (unless `cleanup_worktree`, `holding_stage`, or `unmanaged` is true — these three flags mark stages that are never dispatched to Claude). When `skill` is set, the engine sends a directive prompt and the skill is loaded via `--plugin-dir`.
 
 ---
 

@@ -123,7 +123,15 @@ Each active stage column has the same set of reachable sub-states:
 >
 > Distinct from Cooldown is **Deferred Dispatch**: an item whose dispatch was skipped in the current poll cycle solely because a worker from a prior cycle is still running. Deferred-Dispatch items still receive the `CooldownAt("periodic-re-eval")` stamp at end-of-poll — the cooldown avoids repeated deep-fetch evaluation (and the fallback GraphQL fetch when the cache is invalidated or disabled) for an item the dispatch guard (`snap.Worker() != nil`) would block anyway. Prompt re-dispatch after the prior worker exits is guaranteed by `WorkerExited → WorkerLifecycleChanged`, which is in `wakeChFlags` and wakes the poll loop immediately (#544). Note: `WorkerLifecycleChanged` is excluded from `cycleSetFlags` (Fix B, issue #576) so it does not bypass the cooldown gate via `mayNeedWork`. For successful workers, `StatusChanged` from `advanceToNextStage` adds the item to cycleSet (bypassing the cooldown) so the next stage dispatches promptly. For aborted workers (max-turns, error), the cooldown expires naturally and the next ticker poll re-evaluates the item. See §3.2, §9.2, and §9.9.
 >
-> **Not listed above:** `fabrik:awaiting-placement` is a related but distinct marker applied to a spawned **child** issue whose initial board placement failed — by construction it is sitting **outside** any of these active-stage columns (typically `Backlog`, which has no configured stage at all), so it never appears as a sub-state of an active-stage column. See §6.9.
+> **Not listed above:** `fabrik:awaiting-placement` is a related but distinct marker applied to a spawned **child** issue whose initial board placement failed — by construction it is sitting **outside** any of these active-stage columns (typically `Backlog`, which is declared `unmanaged: true` — see below — and therefore never dispatched to regardless), so it never appears as a sub-state of an active-stage column. See §6.9.
+
+#### Backlog (Unmanaged Stage)
+
+| Sub-State | Labels Present | Description |
+|-----------|---------------|-------------|
+| **Parked** | (any / none) | Item sits in the column; engine never inspects it beyond the stage-membership check |
+
+`itemMayNeedWork` and `itemNeedsWork` both return `false` for any stage with `unmanaged: true`, so these items are never dispatched to a per-item worker and never auto-advanced by the catch-up loop (same mechanism as `holding_stage`, see below). Unlike a holding stage, no batch handler ever acts on an unmanaged stage's items either — it is a pure no-op declaration. `stages/examples/backlog.yaml` (`name: Backlog`, `unmanaged: true`) is the shipped default; the hardcoded `"Backlog"` recognition in `checkStageColumnAlignment` (`engine/startup.go`) remains as a compat net for installs that predate this file — see [USER_GUIDE.md §Startup Board Validation](USER_GUIDE.md#startup-board-validation).
 
 #### Done (Cleanup Stage)
 
@@ -2447,7 +2455,8 @@ stateDiagram-v2
     note right of AwaitingPlacement
         AwaitingPlacement = fabrik:awaiting-placement present
         Board column is typically Backlog —
-        a column with no configured stage,
+        declared unmanaged (or, on installs
+        without backlog.yaml, still unrecognized),
         so ordinary dispatch never revisits it
     end note
 
