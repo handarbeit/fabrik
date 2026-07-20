@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/stages"
 )
@@ -410,6 +411,105 @@ func TestEjectMember_EjectionCountIsPerMember(t *testing.T) {
 	}
 	if pausedIssues[2] {
 		t.Error("expected issue #2 NOT to be paused after only 1 ejection")
+	}
+}
+
+// TestEjectMember_PauseVisibleToCacheAndEcho verifies that when ejectMember pauses a
+// member after MaxMergeTrainEjections, the pause labels are mirrored into the board
+// cache and registered as pending webhook echoes — not just posted to GitHub. Before
+// the fix, ejectMember called AddLabelToIssue with no ApplyLabelAdded/RegisterEcho,
+// leaving the cached snapshot stale until the next full board fetch.
+func TestEjectMember_PauseVisibleToCacheAndEcho(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	cache.BootstrapFromProbe([]gh.BoardProbeItem{
+		{ContentID: "I_005", ItemID: "PVTI_005", Number: 5, Repo: "owner/repo", Status: "Queued"},
+	}, "PVT_1")
+	eng.readClient = cache
+
+	wm, _ := newTestWebhookManager(t)
+	eng.webhookMgr = wm
+
+	member := makeTrainItem(5, "Problem Issue")
+	ctx := context.Background()
+
+	eng.ejectMember(ctx, "owner", "repo", member, "conflict")
+	eng.ejectMember(ctx, "owner", "repo", member, "conflict")
+	eng.ejectMember(ctx, "owner", "repo", member, "conflict") // triggers pause
+
+	labels, err := cache.FetchLabels("owner", "repo", 5)
+	if err != nil {
+		t.Fatalf("FetchLabels: %v", err)
+	}
+	labelSet := map[string]bool{}
+	for _, l := range labels {
+		labelSet[l] = true
+	}
+	if !labelSet["fabrik:paused"] {
+		t.Error("expected fabrik:paused to be write-through applied to the cache")
+	}
+	if !labelSet["fabrik:awaiting-input"] {
+		t.Error("expected fabrik:awaiting-input to be write-through applied to the cache")
+	}
+
+	wm.mu.Lock()
+	_, pausedEcho := wm.pendingEchoes[echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 5)+"+"+"fabrik:paused")]
+	_, awaitingEcho := wm.pendingEchoes[echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 5)+"+"+"fabrik:awaiting-input")]
+	wm.mu.Unlock()
+	if !pausedEcho {
+		t.Error("expected fabrik:paused webhook echo to be registered")
+	}
+	if !awaitingEcho {
+		t.Error("expected fabrik:awaiting-input webhook echo to be registered")
+	}
+}
+
+// TestFireRunawayGuard_PauseVisibleToCacheAndEcho verifies the same cache/echo
+// write-through for the runaway-guard pause path.
+func TestFireRunawayGuard_PauseVisibleToCacheAndEcho(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
+
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	cache.BootstrapFromProbe([]gh.BoardProbeItem{
+		{ContentID: "I_007", ItemID: "PVTI_007", Number: 7, Repo: "owner/repo", Status: "Queued"},
+	}, "PVT_1")
+	eng.readClient = cache
+
+	wm, _ := newTestWebhookManager(t)
+	eng.webhookMgr = wm
+
+	member := makeTrainItem(7, "Runaway Issue")
+	eng.fireRunawayGuard(context.Background(), "owner", "repo", []gh.ProjectItem{member}, 20)
+
+	labels, err := cache.FetchLabels("owner", "repo", 7)
+	if err != nil {
+		t.Fatalf("FetchLabels: %v", err)
+	}
+	labelSet := map[string]bool{}
+	for _, l := range labels {
+		labelSet[l] = true
+	}
+	if !labelSet["fabrik:paused"] {
+		t.Error("expected fabrik:paused to be write-through applied to the cache")
+	}
+	if !labelSet["fabrik:awaiting-input"] {
+		t.Error("expected fabrik:awaiting-input to be write-through applied to the cache")
+	}
+
+	wm.mu.Lock()
+	_, pausedEcho := wm.pendingEchoes[echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 7)+"+"+"fabrik:paused")]
+	_, awaitingEcho := wm.pendingEchoes[echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 7)+"+"+"fabrik:awaiting-input")]
+	wm.mu.Unlock()
+	if !pausedEcho {
+		t.Error("expected fabrik:paused webhook echo to be registered")
+	}
+	if !awaitingEcho {
+		t.Error("expected fabrik:awaiting-input webhook echo to be registered")
 	}
 }
 
