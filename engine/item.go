@@ -392,7 +392,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 					e.logf(item.Number, "warn", "could not remove fabrik:paused label: %v\n", err)
 				} else {
 					if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-						cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
+						cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:paused")
 					}
 					if e.webhookMgr != nil {
 						e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:paused")
@@ -473,7 +473,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			e.logf(item.Number, "warn", "could not add completion label: %v\n", err)
 		} else {
 			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
+				cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), completeLabel)
 			}
 			if e.webhookMgr != nil {
 				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+completeLabel)
@@ -491,7 +491,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			e.logf(item.Number, "warn", "could not remove extend-turns label: %v\n", removeErr)
 		} else if removeErr == nil {
 			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:extend-turns")
+				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:extend-turns")
 			}
 			if e.webhookMgr != nil {
 				e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:extend-turns")
@@ -607,7 +607,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			Worker:     &itemstate.WorkerHandle{StageName: stage.Name, StartedAt: workerStartedAt, LastSignAt: workerStartedAt},
 		})
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), lockLabel)
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), lockLabel)
 		}
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+lockLabel)
@@ -694,7 +694,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	} else {
 		inProgressAdded = true
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), inProgressLabel)
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), inProgressLabel)
 		}
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+inProgressLabel)
@@ -980,7 +980,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			if dbID, commentErr := e.client.AddComment(owner, repo, item.Number, msg); commentErr != nil {
 				e.logf(item.Number, "warn", "could not post FABRIK_PR_CREATE error comment: %v\n", commentErr)
 			} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
 					DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
 				})
 			}
@@ -1034,7 +1034,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 				e.logf(item.Number, "warn", "could not post comment: %v\n", err)
 			} else {
 				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-					cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+					cacheImpl.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
 						DatabaseID: dbID, Body: comment, Author: e.cfg.User, CreatedAt: time.Now(),
 					})
 				}
@@ -1089,7 +1089,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			e.logf(item.Number, "warn", "could not post empty-output warning: %v\n", commentErr)
 		} else {
 			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
 					DatabaseID: dbID, Body: warnComment, Author: e.cfg.User, CreatedAt: time.Now(),
 				})
 			}
@@ -1236,7 +1236,7 @@ func (e *Engine) escalatePRCreationFailure(item gh.ProjectItem, stage *stages.St
 		e.logf(item.Number, "warn", "could not add paused label: %v\n", err)
 	} else {
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:paused")
 		}
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:paused")
@@ -1253,7 +1253,7 @@ func (e *Engine) escalatePRCreationFailure(item gh.ProjectItem, stage *stages.St
 		e.logf(item.Number, "warn", "could not post PR escalation comment: %v\n", err)
 	} else {
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
 				DatabaseID: dbID, Body: comment, Author: e.cfg.User, CreatedAt: time.Now(),
 			})
 		}
@@ -1282,7 +1282,7 @@ func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 		e.logf(item.Number, "warn", "could not add paused label: %v\n", err)
 	} else {
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:paused")
 		}
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:paused")
@@ -1299,7 +1299,7 @@ func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 		e.logf(item.Number, "warn", "could not post escalation comment: %v\n", err)
 	} else {
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
 				DatabaseID: dbID, Body: comment, Author: e.cfg.User, CreatedAt: time.Now(),
 			})
 		}
@@ -1329,7 +1329,7 @@ func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 		e.logf(item.Number, "warn", "could not remove failed label: %v\n", err)
 	} else if err == nil {
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), failedLabel)
+			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), failedLabel)
 		}
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+failedLabel)
@@ -1505,7 +1505,7 @@ func (e *Engine) blockOnInput(item gh.ProjectItem, stage *stages.Stage, output s
 		e.logf(item.Number, "warn", "could not add paused label: %v\n", err)
 	} else {
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:paused")
 		}
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:paused")
@@ -1515,7 +1515,7 @@ func (e *Engine) blockOnInput(item gh.ProjectItem, stage *stages.Stage, output s
 		e.logf(item.Number, "warn", "could not add awaiting-input label: %v\n", err)
 	} else {
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:awaiting-input")
 		}
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-input")
@@ -1531,7 +1531,7 @@ func (e *Engine) blockOnInput(item gh.ProjectItem, stage *stages.Stage, output s
 		e.logf(item.Number, "warn", "could not post awaiting-input notification comment: %v\n", err)
 	} else {
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
 				DatabaseID: dbID, Body: comment, Author: e.cfg.User, CreatedAt: time.Now(),
 			})
 		}
@@ -1553,7 +1553,7 @@ func (e *Engine) unblockAwaitingInput(item gh.ProjectItem, stage *stages.Stage) 
 		e.logf(item.Number, "warn", "could not remove paused label: %v\n", err)
 	} else if err == nil {
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
+			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:paused")
 		}
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:paused")
@@ -1564,7 +1564,7 @@ func (e *Engine) unblockAwaitingInput(item gh.ProjectItem, stage *stages.Stage) 
 		e.logf(item.Number, "warn", "could not remove awaiting-input label: %v\n", err)
 	} else if err == nil {
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
+			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:awaiting-input")
 		}
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-input")
@@ -1687,7 +1687,7 @@ func (e *Engine) baseBranchForItem(item gh.ProjectItem, wm *WorktreeManager) (st
 			e.logf(item.Number, "warn", "could not post base branch fallback comment: %v\n", err)
 		} else {
 			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
 					DatabaseID: dbID, Body: body, Author: e.cfg.User, CreatedAt: time.Now(),
 				})
 			}
@@ -2056,7 +2056,7 @@ func (e *Engine) handleBoundaryViolation(owner, repo string, repoStr string, ite
 		e.logf(item.Number, "warn", "could not post boundary violation comment: %v\n", err)
 	} else {
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
 				DatabaseID: dbID, Body: comment, Author: e.cfg.User, CreatedAt: time.Now(),
 			})
 		}
@@ -2072,7 +2072,7 @@ func (e *Engine) handleBoundaryViolation(owner, repo string, repoStr string, ite
 		e.logf(item.Number, "warn", "could not add paused label: %v\n", err)
 	} else {
 		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
+			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:paused")
 		}
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:paused")
