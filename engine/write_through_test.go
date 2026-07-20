@@ -7,6 +7,7 @@ import (
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 // TestLabelWriteThrough verifies that successful label mutations are immediately
@@ -221,4 +222,110 @@ func containsCommentByID(comments []gh.Comment, dbID int) bool {
 		}
 	}
 	return false
+}
+
+// ── fix #2 regression tests (issue #1024) ───────────────────────────────────
+//
+// Several engine/item.go call sites keyed the board-cache write-through on the
+// raw item.Repo field while the adjacent webhook-echo registration correctly
+// used the resolved owner+"/"+repo. Since item.Repo is empty for default-repo
+// items, the two beats produced different cache keys and the write-through
+// silently landed on a key nothing ever reads. Every item below is constructed
+// with an empty Repo (relying on defaultRepo() fallback) so the pre-fix bug is
+// actually observable — a test using an explicit non-empty item.Repo would not
+// catch this.
+
+func TestEscalatePRCreationFailure_CacheKeyUsesResolvedRepo(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
+	wm, _ := newTestWebhookManager(t)
+	eng.webhookMgr = wm
+
+	item := gh.ProjectItem{Number: 1} // empty Repo — must fall back to defaultRepo() "owner/repo"
+	stage := &stages.Stage{Name: "Implement", Order: 3, Prompt: "implement"}
+
+	eng.escalatePRCreationFailure(item, stage, "main")
+
+	labels, err := cache.FetchLabels("owner", "repo", 1)
+	if err != nil {
+		t.Fatalf("FetchLabels: %v", err)
+	}
+	if !containsLabel(labels, "fabrik:paused") {
+		t.Errorf("expected fabrik:paused to be write-through applied to the cache under the resolved owner/repo key, got %v", labels)
+	}
+}
+
+func TestEscalateFailedStage_CacheKeyUsesResolvedRepo(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
+	wm, _ := newTestWebhookManager(t)
+	eng.webhookMgr = wm
+
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Implement", Order: 3, Prompt: "implement"}
+
+	eng.escalateFailedStage(item, stage)
+
+	labels, err := cache.FetchLabels("owner", "repo", 1)
+	if err != nil {
+		t.Fatalf("FetchLabels: %v", err)
+	}
+	if !containsLabel(labels, "fabrik:paused") {
+		t.Errorf("expected fabrik:paused to be write-through applied to the cache under the resolved owner/repo key, got %v", labels)
+	}
+}
+
+func TestBlockOnInputAndUnblock_CacheKeyUsesResolvedRepo(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
+	wm, _ := newTestWebhookManager(t)
+	eng.webhookMgr = wm
+
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Implement", Order: 3, Prompt: "implement"}
+
+	eng.blockOnInput(item, stage, "need input please")
+
+	labels, err := cache.FetchLabels("owner", "repo", 1)
+	if err != nil {
+		t.Fatalf("FetchLabels: %v", err)
+	}
+	if !containsLabel(labels, "fabrik:paused") {
+		t.Errorf("expected fabrik:paused to be write-through applied to the cache, got %v", labels)
+	}
+	if !containsLabel(labels, "fabrik:awaiting-input") {
+		t.Errorf("expected fabrik:awaiting-input to be write-through applied to the cache, got %v", labels)
+	}
+
+	// unblockAwaitingInput removes both labels; verify the removal also lands on
+	// the resolved owner/repo key (not item.Repo) so the cache actually clears.
+	eng.unblockAwaitingInput(item, stage)
+
+	labels, err = cache.FetchLabels("owner", "repo", 1)
+	if err != nil {
+		t.Fatalf("FetchLabels: %v", err)
+	}
+	if containsLabel(labels, "fabrik:paused") || containsLabel(labels, "fabrik:awaiting-input") {
+		t.Errorf("expected pause labels removed from the cache, got %v", labels)
+	}
+}
+
+func TestHandleBoundaryViolation_CacheKeyUsesResolvedRepo(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
+	wm, _ := newTestWebhookManager(t)
+	eng.webhookMgr = wm
+
+	item := gh.ProjectItem{Number: 1}
+	stage := &stages.Stage{Name: "Implement", Order: 3, Prompt: "implement"}
+
+	eng.handleBoundaryViolation("owner", "repo", "owner/repo", item, stage, []string{"pushed to origin/main"}, func() {})
+
+	labels, err := cache.FetchLabels("owner", "repo", 1)
+	if err != nil {
+		t.Fatalf("FetchLabels: %v", err)
+	}
+	if !containsLabel(labels, "fabrik:paused") {
+		t.Errorf("expected fabrik:paused to be write-through applied to the cache under the resolved owner/repo key, got %v", labels)
+	}
 }
