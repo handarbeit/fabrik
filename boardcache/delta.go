@@ -612,8 +612,8 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 	// Auto-heal: resolve PR linkage via REST or authoritative index.
 	key, resolvedIssNum, found, healed, healErr := c.resolvePRLinkage(owner, repoName, prNum)
 
-	c.mu.Lock()
 	if !found {
+		c.mu.Lock()
 		if healErr == nil {
 			c.recentMissCache[mk] = time.Now()
 		}
@@ -621,8 +621,11 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 		c.logFn("[cache] dropped pull_request delta for PR #%d: no closing issue in cache\n", prNum)
 		return
 	}
-	// Confirm item still in Store before proceeding.
-	if _, storeErr := c.store.Get(repo, resolvedIssNum); storeErr != nil {
+	// Confirm item still in Store before proceeding. Must not hold c.mu while
+	// calling any Store method (boardcache.go struct-doc invariant).
+	_, storeErr := c.store.Get(repo, resolvedIssNum)
+	c.mu.Lock()
+	if storeErr != nil {
 		c.recentMissCache[mk] = time.Now()
 		c.mu.Unlock()
 		return
