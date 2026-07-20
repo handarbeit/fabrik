@@ -40,6 +40,28 @@ func TestSettleClosedItemsToDone_ClosedAtEligibleStage_Advances(t *testing.T) {
 	}
 }
 
+func TestSettleClosedItemsToDone_ClosedAtUnconfiguredColumn_Advances(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineWithStages(t, client, closedAdvanceStages())
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	// "Backlog" has no matching entry in closedAdvanceStages(), so
+	// stages.FindStage returns nil for it — this is the case a closed item
+	// has no worktree and no stage bookkeeping to protect, so it must still
+	// be advanced rather than skipped.
+	item := gh.ProjectItem{Number: 9, ItemID: "PVTI_9", Repo: "owner/repo", Status: "Backlog", IsClosed: true}
+	board.Items = []gh.ProjectItem{item}
+
+	eng.settleClosedItemsToDone(board)
+
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected a closed item at an unconfigured column (Backlog) to be advanced, got %d status update calls", len(client.updateStatusCalls))
+	}
+	if client.updateStatusCalls[0].optionID != "OPT_Done" {
+		t.Errorf("expected advance to Done option, got %s", client.updateStatusCalls[0].optionID)
+	}
+}
+
 func TestSettleClosedItemsToDone_AlreadyAtDone_Idempotent(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := testEngineWithStages(t, client, closedAdvanceStages())

@@ -21,7 +21,7 @@ import (
 // fabrik:blocked, etc.) — a closed issue at a non-terminal column is itself the
 // complete, sufficient, and durable trigger; there is no marker to lose or leak,
 // and no in-flight gate/lock label survives a closed issue meaningfully (no
-// further pipeline work can occur on it regardless). See ADR-063.
+// further pipeline work can occur on it regardless). See ADR-064.
 //
 // Gate-checked stages (currently only Validate) are excluded so this scan never
 // races or double-advances against runValidatePRTerminalAdvance, which remains
@@ -49,8 +49,13 @@ func (e *Engine) settleClosedItemsToDone(board *gh.ProjectBoard) {
 		if !item.IsClosed {
 			continue
 		}
+		// stage == nil covers columns with no matching stage config (Backlog,
+		// or any custom/extra column) — such an item has no stage bookkeeping
+		// to do and, by construction, no worktree, so it advances unconditionally.
+		// Only a *resolved* stage that is itself Cleanup/Holding/gate-checked
+		// is grounds to skip.
 		stage := stages.FindStage(e.cfg.Stages, item.Status)
-		if stage == nil || stage.CleanupWorktree || stage.HoldingStage || stageIsGateChecked(stage) {
+		if stage != nil && (stage.CleanupWorktree || stage.HoldingStage || stageIsGateChecked(stage)) {
 			continue
 		}
 		e.advanceClosedItemToDone(board, item, optionID, cleanup.Name)

@@ -1590,7 +1590,7 @@ doneDispatching:
 		e.settleChildPlacement(board, item)
 	}
 
-	// Closed-item-at-any-stage advance to Done (ADR-063): a closed issue sitting
+	// Closed-item-at-any-stage advance to Done (ADR-064): a closed issue sitting
 	// at any non-Done, non-Holding, non-cleanup, non-gate-checked column never
 	// passes itemMayNeedWork/itemNeedsWork's admission guard, so it never reaches
 	// deepFetchCandidates and is never dispatched again — its worktree leaks and

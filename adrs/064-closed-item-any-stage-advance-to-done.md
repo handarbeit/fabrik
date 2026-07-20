@@ -1,4 +1,4 @@
-# ADR 063: Closed-Item-At-Any-Stage Advance To Done
+# ADR 064: Closed-Item-At-Any-Stage Advance To Done
 
 **Date**: 2026-07-19
 **Status**: Accepted
@@ -16,7 +16,9 @@ ADR-060/061/062 established the settle-owner pattern for structurally similar pr
 
 ## Decision
 
-Add a new unconditional per-poll settle scan, `settleClosedItemsToDone` (`engine/closed_item_advance_settle.go`), that iterates `board.Items` directly. For every item matching `item.IsClosed && stage != nil && !stage.CleanupWorktree && !stage.HoldingStage && !stageIsGateChecked(stage)`, it moves the item's board Status directly to the cleanup (Done) stage via `UpdateProjectItemStatus`, mirroring `advanceToQueued`'s shape (status-field lookup, API call, `boardcache.CacheImpl` write-through, webhook echo) — but with no completion label to add, since this scan has no per-stage bookkeeping responsibility.
+Add a new unconditional per-poll settle scan, `settleClosedItemsToDone` (`engine/closed_item_advance_settle.go`), that iterates `board.Items` directly. For every item matching `item.IsClosed && !(stage != nil && (stage.CleanupWorktree || stage.HoldingStage || stageIsGateChecked(stage)))`, it moves the item's board Status directly to the cleanup (Done) stage via `UpdateProjectItemStatus`, mirroring `advanceToQueued`'s shape (status-field lookup, API call, `boardcache.CacheImpl` write-through, webhook echo) — but with no completion label to add, since this scan has no per-stage bookkeeping responsibility.
+
+Note the predicate is deliberately *not* `stage != nil && ...`: a closed item at a column with no matching stage config at all (Backlog, or any custom/extra column) is also advanced. Such an item has no stage bookkeeping to do and, by construction, no worktree to protect — it only needs to *reach* Done so the existing archive path can eventually run. Only a *resolved* stage that is itself Cleanup/Holding/gate-checked is grounds to skip.
 
 The cleanup stage is located via a new helper, `cleanupStage(cfg Config) *stages.Stage` (`engine/stages.go`, next to the existing `holdingStage`), which returns the lowest-`Order` stage with `CleanupWorktree: true` — never a hardcoded stage name, per the existing convention pinned by `TestRunStartupTerminalScan_UsesCleanupStageNotHardcodedDone`.
 
