@@ -25,6 +25,13 @@ Read the user's comment carefully to understand what they're requesting:
 **Re-run checks**: The user wants validation checks re-executed (e.g., after a recent fix).
 - **Fetch the target base branch first** — run `git fetch origin "$(gh pr view --json baseRefName --jq .baseRefName)"` before any comparison of branch CI failures to base-branch state. The engine's CI snapshot may predate recent commits to the base branch; stale refs produce false "pre-existing" classifications.
 - Run the relevant checks (tests, linting, build)
+- If re-verification needs a running instance of the managed app (e.g. a `npm run dev` dev server), do not start it in the background and continue in a later tool call — Claude Code's background-bash detaches the process into its own session (`setsid`), so it survives across tool calls and outlives the stage, and the engine's process-group-scoped teardown kill cannot reach it. In preference order: prefer one-shot verification (e.g. `npm run build`, or a bounded-lifetime `vite preview`); if a live server is genuinely needed, bracket it in a single command with guaranteed teardown:
+  ```bash
+  npm run dev --port "$PORT" & DEV=$!
+  trap 'kill -- -$(ps -o pgid= -p "$DEV" | tr -d " ") 2>/dev/null' EXIT
+  # health-check / curl / run the verification here
+  ```
+  or, if a persistent server is unavoidable, bound it with `timeout --signal=KILL <N> npm run dev …` so it self-terminates.
 - Update the validation report with the new results
 
 **Apply a minor fix**: The user has identified a small issue to address before closing.
@@ -72,6 +79,7 @@ This applies to ordinal numbering in any output that reaches a GitHub comment bo
 - **Do not apply fixes beyond what the user requested** — minimal targeted changes only
 - **Do not leave uncommitted changes** — always commit and push before returning
 - **Do not re-run the full validation suite** unless the user specifically requests it — focus on the checks relevant to their feedback
+- **Never background a dev server and continue in a later tool call to re-verify a change** — it detaches via `setsid` and outlives the stage, becoming an orphaned process holding a port. See "Re-run checks" above.
 - **Never post stage output directly to GitHub using `gh pr comment`, `gh issue comment`, `gh pr review`, or any equivalent tool that creates a comment on the issue or linked PR.** Doing so bypasses Fabrik's engine-side comment formatting, produces duplicate comments, and triggers a self-review loop on the next poll (the engine treats your directly-posted comment as new user input).
 
   Write all stage output to stdout only. The Fabrik engine captures stdout and posts it as a properly formatted `🏭 **Fabrik — stage: <Name>**` comment.
