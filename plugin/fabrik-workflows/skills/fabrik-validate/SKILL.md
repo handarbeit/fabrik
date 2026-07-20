@@ -68,6 +68,24 @@ Create a verification checklist:
 - [ ] Requirement 3: FAILED — describe what's wrong
 ```
 
+### Verifying with a live server
+
+If confirming a requirement needs a running instance of the managed app (e.g. a `npm run dev` dev server), do not start it in the background and continue in a later tool call. Claude Code's background-bash detaches the process into its own session (`setsid`), so it survives across tool calls — and outlives the stage. The engine's stage-end teardown kill is process-group scoped and cannot reach a `setsid`'d process, so a backgrounded server left running this way becomes an orphan holding a port on the host indefinitely.
+
+In preference order:
+
+1. **Prefer one-shot verification.** Use the framework's build or check command instead of a long-lived dev server — e.g. `npm run build` (or the framework's equivalent), or a bounded-lifetime preview command like `vite preview` — rather than standing up a persistent server just to confirm a requirement is met.
+2. **If a live server is genuinely needed** (e.g. an HTTP health check), bracket it in a single command with guaranteed teardown, so it never needs to detach and can't outlive the check:
+   ```bash
+   npm run dev --port "$PORT" & DEV=$!
+   trap 'kill -- -$(ps -o pgid= -p "$DEV" | tr -d " ") 2>/dev/null' EXIT
+   # health-check / curl / run the verification here
+   ```
+3. **If a persistent server is unavoidable, bound it with a timeout** so it self-terminates:
+   ```bash
+   timeout --signal=KILL <N> npm run dev …
+   ```
+
 ### Test suite
 
 Run the full test suite. **Always include a per-test timeout** appropriate to the project's test framework (e.g., `pytest --timeout=60`, `go test -timeout 5m`, `jest --testTimeout=30000`). Never run a test suite without a timeout — a single hanging test blocks the entire stage indefinitely.
@@ -277,3 +295,4 @@ When you receive this comment:
 - **Re-reviewing instead of validating**: You're not doing another code review. You're verifying the implementation meets the spec.
 - **Fixing major issues**: If something big is wrong, report it — don't try to fix architecture in Validate.
 - **Forgetting to rebase**: Main may have moved since Review. Always rebase first.
+- **Backgrounding a dev server to verify a requirement**: Never background it and continue in a later tool call — it detaches via `setsid` and outlives the stage, becoming an orphaned process holding a port. See "Verifying with a live server" above.
