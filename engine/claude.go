@@ -261,16 +261,21 @@ func logDirForItem(issue gh.ProjectItem) string {
 	return filepath.Join(cwd, ".fabrik", "logs", repoPart, issuePart)
 }
 
-// sessionFile returns the path to the session ID file for a given issue+stage.
-// stageName is sanitized to prevent path traversal: filepath.Base strips directory
-// components, and an additional check rejects names that are empty, ".", or the
-// path separator (e.g. filepath.Base("/") == "/"), falling back to "default".
-func sessionFile(issueNumber int, stageName string) string {
+// sanitizeStageName sanitizes a stage name for use as a session-file basename,
+// preventing path traversal: filepath.Base strips directory components, and an
+// additional check rejects names that are empty, ".", or the path separator
+// (e.g. filepath.Base("/") == "/"), falling back to "default".
+func sanitizeStageName(stageName string) string {
 	base := filepath.Base(stageName)
 	if base == "" || base == "." || base == "/" || base == string(filepath.Separator) {
 		base = "default"
 	}
-	return filepath.Join(SessionDir(issueNumber), base+".session")
+	return base
+}
+
+// sessionFile returns the path to the session ID file for a given issue+stage.
+func sessionFile(issueNumber int, stageName string) string {
+	return filepath.Join(SessionDir(issueNumber), sanitizeStageName(stageName)+".session")
 }
 
 // ReadSessionID reads the session ID for a given repo, issue, and stage name.
@@ -278,10 +283,7 @@ func sessionFile(issueNumber int, stageName string) string {
 // Returns the session ID string, or empty string if the file does not exist,
 // is unreadable, or is empty.
 func ReadSessionID(repo string, issueNumber int, stageName string) string {
-	base := filepath.Base(stageName)
-	if base == "" || base == "." || base == "/" || base == string(filepath.Separator) {
-		base = "default"
-	}
+	base := sanitizeStageName(stageName)
 	cwd, _ := os.Getwd()
 	issuePart := fmt.Sprintf("issue-%d", issueNumber)
 	var sessDir string
@@ -312,7 +314,7 @@ func InvokeClaude(ctx context.Context, stage *stages.Stage, issue gh.ProjectItem
 		return "", false, TokenUsage{}, fmt.Errorf("setting session dir permissions: %w", err)
 	}
 
-	sessFilePath := filepath.Join(sessDir, filepath.Base(stage.Name)+".session")
+	sessFilePath := filepath.Join(sessDir, sanitizeStageName(stage.Name)+".session")
 	ld := logDirForItem(issue)
 
 	prompt := buildPrompt(stage, issue, newComments, opts.BaseBranch)
@@ -345,7 +347,7 @@ func InvokeClaudeForComments(ctx context.Context, stage *stages.Stage, issue gh.
 		return "", false, TokenUsage{}, fmt.Errorf("setting session dir permissions: %w", err)
 	}
 
-	sessFilePath := filepath.Join(sessDir, filepath.Base(stage.Name)+".session")
+	sessFilePath := filepath.Join(sessDir, sanitizeStageName(stage.Name)+".session")
 	ld := logDirForItem(issue)
 
 	prompt := buildCommentReviewPrompt(stage, issue, comments, opts.BaseBranch)
