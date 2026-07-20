@@ -280,6 +280,11 @@ func (wm *WorktreeManager) CleanupWorktree(issueNumber int, deleteBranch bool) e
 	defer wm.mu.Unlock()
 	wtDir := wm.worktreeDir(issueNumber)
 
+	// Reap any process still rooted in this worktree's cwd (e.g. a setsid'd dev
+	// server that escaped the worker's process group) before the directory is
+	// removed. Non-fatal by construction — proceeds regardless of outcome.
+	reapWorktreeProcesses(wtDir, issueNumber, wm.logf)
+
 	// Remove the worktree
 	cmd := exec.Command("git", "worktree", "remove", "--force", wtDir)
 	cmd.Dir = wm.baseDir
@@ -357,6 +362,9 @@ func (wm *WorktreeManager) ensureTrainWorktreeFromRef(name, baseRef string) (str
 
 	// Remove any pre-existing worktree at this path (e.g. from a crashed previous run).
 	if _, err := os.Stat(wtDir); err == nil {
+		// A crashed prior trial's detached server (e.g. from a build/CI command)
+		// may still be running with cwd rooted here. Reap it before reuse.
+		reapWorktreeProcesses(wtDir, 0, wm.logf)
 		rmCmd := exec.Command("git", "worktree", "remove", "--force", wtDir)
 		rmCmd.Dir = wm.baseDir
 		rmCmd.CombinedOutput() // best-effort
@@ -417,6 +425,10 @@ func (wm *WorktreeManager) CleanupTrainWorktree(name string, deleteBranch bool) 
 	wm.mu.Lock()
 	defer wm.mu.Unlock()
 	wtDir := wm.trainWorktreeDir(name)
+
+	// Reap any process still rooted in this trial worktree's cwd before removal —
+	// a build/CI command run during the trial may have started a detached server.
+	reapWorktreeProcesses(wtDir, 0, wm.logf)
 
 	// Best-effort local worktree removal — may already be gone.
 	rmCmd := exec.Command("git", "worktree", "remove", "--force", wtDir)

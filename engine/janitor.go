@@ -150,6 +150,7 @@ func (e *Engine) runWorktreeJanitor(ctx context.Context) {
 			} else {
 				// Bare repo absent — fall back to direct removal.
 				e.logf(0, "janitor", "warn: bare repo not found for %s — using os.RemoveAll for #%d\n", dirName, issueNumber)
+				reapWorktreeProcesses(wtPath, issueNumber, e.logf)
 				if err := os.RemoveAll(wtPath); err != nil {
 					reason := fmt.Sprintf("removeall error: %v", err)
 					skipReasons = append(skipReasons, reason)

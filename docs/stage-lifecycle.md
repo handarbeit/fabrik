@@ -280,6 +280,31 @@ After `cmd.Run()` returns, two cleanup steps run unconditionally:
 
 2. **WaitDelay bound**: `cmd.WaitDelay` is set to 30s (configurable via `--claude-wait-delay` / `FABRIK_CLAUDE_WAIT_DELAY`). When grandchild processes hold the stdout pipe open after Claude exits, Go's `cmd.Wait()` would otherwise block indefinitely. With `WaitDelay`, Go forcibly closes its end of the pipe after the deadline and returns `exec.ErrWaitDelay`. The engine detects this error, logs a diagnostic warning, clears the error, and processes the buffered output normally — including any `FABRIK_STAGE_COMPLETE` marker. This prevents the worker goroutine from being permanently stuck when Claude uses `run_in_background` or the Monitor tool.
 
+### Worktree Teardown Process Reaping
+
+The grandchild cleanup above is **PGID-scoped**: it can only reach descendants that stayed in the worker's process group. A descendant that calls `setsid()` — exactly what Claude Code's background-bash tool does to keep a backgrounded process (e.g. `npm run dev`) alive across tool calls — leaves the worker's process group entirely, taking on a fresh PGID equal to its own PID. `kill(-workerPGID, SIGKILL)` cannot reach it, so it survives Claude's exit and outlives the worktree directory it was started in.
+
+`reapWorktreeProcesses` (`engine/reaper_unix.go`) closes this gap with a **cwd-rooted** reaper, run immediately before every worktree directory removal: it enumerates live processes whose current working directory is the worktree path or a subdirectory of it — regardless of process-group membership — and sends SIGKILL to each. It is a package-level function (not a `WorktreeManager` method), so it can be called from contexts with no `WorktreeManager` instance available.
+
+**Platform implementations:**
+- **Linux**: scans `/proc/*/cwd` symlinks and prefix-matches each against the worktree directory. Immediately before killing a match, it re-reads `/proc/<pid>/cwd` to close the TOCTOU window in which the pid could have been recycled for an unrelated process between enumeration and kill.
+- **macOS**: runs `lsof -a -d cwd -n -P -Fpcn`, which inspects only each process's cwd file descriptor (not every open fd, unlike `lsof +D`) — kept fast and non-hanging on the synchronous teardown path even for a `node_modules`-heavy worktree. macOS has no `/proc`-equivalent cheap re-check primitive, so the same TOCTOU window is accepted rather than mitigated here.
+- **Windows**: no-op (`engine/reaper_windows.go`), matching `killProcGroup`'s existing Windows precedent.
+
+Both platform paths resolve symlinks in the worktree directory before matching (`filepath.EvalSymlinks`), since `/proc/*/cwd` and `lsof`'s reported path are both fully-resolved real paths (e.g. macOS resolves `/tmp` → `/private/tmp`), which would otherwise defeat a literal prefix match.
+
+Each kill is logged via the existing `[#N kill] ...` convention: `[#N kill] sending SIGKILL to PID <pid> (<comm>) rooted in <wtDir> (worktree cwd cleanup)`, alongside the `(grandchild cleanup)` PGID-kill log line so both are visible in the same log stream. Enumeration and kill failures (missing `lsof`, a `/proc/<pid>/cwd` read racing process exit, permission errors) are always non-fatal: logged as a warning, never blocking the caller's own worktree removal.
+
+**Call sites** (every path that removes a worktree directory):
+- `WorktreeManager.CleanupWorktree` — issue worktree teardown (Done-stage teardown, periodic janitor)
+- `WorktreeManager.ensureTrainWorktreeFromRef`'s stale-worktree removal — crash-recovery cleanup before a merge-train trial worktree is recreated under the same name
+- `WorktreeManager.CleanupTrainWorktree` — merge-train trial worktree teardown
+- The worktree janitor's `os.RemoveAll` fallback (`engine/janitor.go`), which fires when no `WorktreeManager` is available for the repo (bare repo missing) — this is why the reaper is a free function rather than a `WorktreeManager` method
+
+**Documented residual risks** (see ADR 063):
+- **PID-reuse TOCTOU on macOS**: unlike Linux, there is no cheap re-check between enumeration and kill, so a small window exists where a recycled pid could receive an unintended SIGKILL.
+- **`chdir`'d descendants are not caught**: this reaper is cwd-based by design (matching the issue's reported failure mode); a process that opened a file in the worktree and then `chdir`'d elsewhere is out of scope and will still leak.
+
 ### Progress Baseline Snapshot
 
 Immediately before the first invocation, `snapshotBaseline` captures observable progress state for this stage:
