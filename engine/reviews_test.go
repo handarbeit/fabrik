@@ -2,10 +2,12 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
@@ -950,6 +952,53 @@ func TestRemoveAwaitingReviewLabel_CleansRepromptedLabels(t *testing.T) {
 	}
 	if !removedLabels["fabrik:bot-reprompted"] {
 		t.Error("expected fabrik:bot-reprompted to be removed")
+	}
+}
+
+// TestRemoveAwaitingReviewLabel_ErrNotFound verifies fix #4 (issue #1024): a 404
+// from RemoveLabelFromIssue must be treated as success (label already absent on
+// GitHub) and the cache synced accordingly — mirroring removeAwaitingCILabel's
+// ErrNotFound branch exactly. Before the fix, an ErrNotFound just logged a
+// warning and left the cache believing the label was still present.
+func TestRemoveAwaitingReviewLabel_ErrNotFound(t *testing.T) {
+	var calls int
+	client := &mockGitHubClient{
+		removeLabelFromIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			if labelName == "fabrik:awaiting-review" {
+				calls++
+				return fmt.Errorf("GitHub API returned 404: label not found: %w", gh.ErrNotFound)
+			}
+			return nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	cache.BootstrapFromProbe([]gh.BoardProbeItem{
+		{ContentID: "I_010", ItemID: "PVTI_010", Number: 10, Repo: "owner/repo", Status: "Review"},
+	}, "PVT_1")
+	cache.ApplyLabelAdded(boardcache.ItemKey("owner/repo", 10), "fabrik:awaiting-review")
+	eng.readClient = cache
+
+	item := gh.ProjectItem{
+		Number: 10,
+		Repo:   "owner/repo",
+		Labels: []string{"fabrik:awaiting-review"},
+	}
+
+	eng.removeAwaitingReviewLabel("owner", "repo", item)
+
+	if calls != 1 {
+		t.Errorf("expected exactly 1 RemoveLabelFromIssue call for ErrNotFound, got %d", calls)
+	}
+
+	labels, err := cache.FetchLabels("owner", "repo", 10)
+	if err != nil {
+		t.Fatalf("FetchLabels: %v", err)
+	}
+	for _, l := range labels {
+		if l == "fabrik:awaiting-review" {
+			t.Error("expected fabrik:awaiting-review to be removed from cache after ErrNotFound — cache is stuck believing the label is still present")
+		}
 	}
 }
 
