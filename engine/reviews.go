@@ -287,14 +287,28 @@ func (e *Engine) removeAwaitingReviewLabel(owner, repo string, item gh.ProjectIt
 	for _, l := range item.Labels {
 		if l == "fabrik:awaiting-review" {
 			if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:awaiting-review"); err != nil {
-				e.logf(item.Number, "warn", "could not remove fabrik:awaiting-review label: %v\n", err)
+				if errors.Is(err, gh.ErrNotFound) {
+					// Label already absent on GitHub — desired end state achieved; sync cache.
+					if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+						cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-review")
+					}
+				} else {
+					e.logf(item.Number, "warn", "could not remove fabrik:awaiting-review label: %v\n", err)
+				}
 			} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-review")
 			}
 		}
 		if l == botRepromptedLabel {
 			if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, l); err != nil {
-				e.logf(item.Number, "warn", "could not remove %s label: %v\n", l, err)
+				if errors.Is(err, gh.ErrNotFound) {
+					// Label already absent on GitHub — desired end state achieved; sync cache.
+					if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+						cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), l)
+					}
+				} else {
+					e.logf(item.Number, "warn", "could not remove %s label: %v\n", l, err)
+				}
 			} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
 				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), l)
 			}
