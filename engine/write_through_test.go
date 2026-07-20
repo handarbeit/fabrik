@@ -329,3 +329,36 @@ func TestHandleBoundaryViolation_CacheKeyUsesResolvedRepo(t *testing.T) {
 		t.Errorf("expected fabrik:paused to be write-through applied to the cache under the resolved owner/repo key, got %v", labels)
 	}
 }
+
+// ── fix #3 regression test (issue #1024) ────────────────────────────────────
+//
+// addPausedLabelToItem (spawn.go) did the label add + cache write-through but
+// never called RegisterEcho, so a stale inbound webhook could re-clear the
+// cached paused state. It also had the same item.Repo-vs-resolved-owner/repo
+// key mismatch as fix #2, fixed in the same edit since both live in the exact
+// same few lines.
+func TestAddPausedLabelToItem_CacheKeyAndEcho(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
+	wm, _ := newTestWebhookManager(t)
+	eng.webhookMgr = wm
+
+	item := gh.ProjectItem{Number: 1} // empty Repo — must fall back to the passed-in owner/repo
+
+	eng.addPausedLabelToItem("owner", "repo", item)
+
+	labels, err := cache.FetchLabels("owner", "repo", 1)
+	if err != nil {
+		t.Fatalf("FetchLabels: %v", err)
+	}
+	if !containsLabel(labels, "fabrik:paused") {
+		t.Errorf("expected fabrik:paused to be write-through applied to the cache under the resolved owner/repo key, got %v", labels)
+	}
+
+	wm.mu.Lock()
+	_, gotEcho := wm.pendingEchoes[echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 1)+"+"+"fabrik:paused")]
+	wm.mu.Unlock()
+	if !gotEcho {
+		t.Error("expected fabrik:paused webhook echo to be registered")
+	}
+}
