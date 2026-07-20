@@ -1442,3 +1442,79 @@ printf '%%s\n' '{"result":"ok","session_id":"sess_ur","num_turns":1,"total_cost_
 		t.Error("expected --permission-mode NOT to be present for unrestricted issue")
 	}
 }
+
+// ── fix #5 regression tests (issue #1024) ───────────────────────────────────
+//
+// InvokeClaude/InvokeClaudeForComments built the session-file path inline with
+// only filepath.Base(stage.Name), bypassing the sanitizer that sessionFile/
+// ReadSessionID use — which additionally substitutes "default" when the
+// sanitized name is empty, ".", or a path separator. A pathological stage name
+// (here, "") would write a session file the read path never looks for. Both
+// invocation entry points now route through the same sanitizeStageName helper.
+
+func TestInvokeClaude_PathologicalStageName_SessionRoundTrips(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := `#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"result":"done\nFABRIK_STAGE_COMPLETE\n","session_id":"sess_pathological","num_turns":1,"total_cost_usd":0.001}'
+`
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "", // pathological: empty stage name
+		Prompt:     "test",
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 909, Title: "T"}
+
+	_, _, _, err := InvokeClaude(context.Background(), stage, issue, nil, false, workDir, InvokeOptions{})
+	if err != nil {
+		t.Fatalf("InvokeClaude: %v", err)
+	}
+
+	// ReadSessionID must find the session written by the write path above —
+	// both must resolve the same sanitized ("default") basename.
+	got := ReadSessionID("", 909, "")
+	if got != "sess_pathological" {
+		t.Errorf("ReadSessionID(\"\", 909, \"\") = %q, want %q — write/read path basename mismatch", got, "sess_pathological")
+	}
+}
+
+func TestInvokeClaudeForComments_PathologicalStageName_SessionRoundTrips(t *testing.T) {
+	t.Chdir(t.TempDir())
+	binDir := t.TempDir()
+	fakeClaude := filepath.Join(binDir, "claude")
+	script := `#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"result":"comment done","session_id":"sess_cmt_pathological","num_turns":1,"total_cost_usd":0.001}'
+`
+	if err := os.WriteFile(fakeClaude, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	workDir := t.TempDir()
+	stage := &stages.Stage{
+		Name:       "", // pathological: empty stage name
+		Prompt:     "test",
+		Completion: stages.CompletionCriteria{Type: "claude"},
+	}
+	issue := gh.ProjectItem{Number: 910, Title: "T"}
+	comments := []gh.Comment{{Author: "user", Body: "please fix", CreatedAt: time.Now()}}
+
+	_, _, _, err := InvokeClaudeForComments(context.Background(), stage, issue, comments, workDir, InvokeOptions{})
+	if err != nil {
+		t.Fatalf("InvokeClaudeForComments: %v", err)
+	}
+
+	got := ReadSessionID("", 910, "")
+	if got != "sess_cmt_pathological" {
+		t.Errorf("ReadSessionID(\"\", 910, \"\") = %q, want %q — write/read path basename mismatch", got, "sess_cmt_pathological")
+	}
+}
