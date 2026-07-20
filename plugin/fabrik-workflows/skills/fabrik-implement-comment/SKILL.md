@@ -37,6 +37,24 @@ After making the change:
 
 Good commit message: `Apply user feedback: use interface X instead of concrete type Y`
 
+### Verifying with a live server
+
+If the user's requested change needs a running instance of the managed app to verify (e.g. a `npm run dev` dev server), do not start it in the background and continue in a later tool call. Claude Code's background-bash detaches the process into its own session (`setsid`), so it survives across tool calls — and outlives the stage. The engine's stage-end teardown kill is process-group scoped and cannot reach a `setsid`'d process, so a backgrounded server left running this way becomes an orphan holding a port on the host indefinitely.
+
+In preference order:
+
+1. **Prefer one-shot verification.** Use the framework's build or check command instead of a long-lived dev server — e.g. `npm run build` (or the framework's equivalent), or a bounded-lifetime preview command like `vite preview`.
+2. **If a live server is genuinely needed** (e.g. an HTTP health check), bracket it in a single command with guaranteed teardown:
+   ```bash
+   npm run dev --port "$PORT" & DEV=$!
+   trap 'kill -- -$(ps -o pgid= -p "$DEV" | tr -d " ") 2>/dev/null' EXIT
+   # health-check / curl / run the verification here
+   ```
+3. **If a persistent server is unavoidable, bound it with a timeout** so it self-terminates:
+   ```bash
+   timeout --signal=KILL <N> npm run dev …
+   ```
+
 ### Update the task checklist
 
 If the user's change affects task completion status (e.g., a previously checked task needs to be reopened, or a new sub-task is implied), update the Plan stage comment accordingly.
@@ -72,6 +90,7 @@ This applies when you are using `#N` as an ordinal label for your own numbered c
 - **Do not skip compilation and test verification** before committing
 - **Do not make unrelated changes** while applying the requested fix
 - **Do not leave uncommitted changes** — always commit and push before returning
+- **Never background a dev server and continue in a later tool call to verify a change** — it detaches via `setsid` and outlives the stage, becoming an orphaned process holding a port. See "Verifying with a live server" above.
 - **Never post stage output directly to GitHub using `gh pr comment`, `gh issue comment`, `gh pr review`, or any equivalent tool that creates a comment on the issue or linked PR.** Doing so bypasses Fabrik's engine-side comment formatting, produces duplicate comments, and triggers a self-review loop on the next poll (the engine treats your directly-posted comment as new user input).
 
   Write all stage output to stdout only. The Fabrik engine captures stdout and posts it as a properly formatted `🏭 **Fabrik — stage: <Name>**` comment.
