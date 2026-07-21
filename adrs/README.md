@@ -29,3 +29,4 @@ contributors and future maintainers.
 | [056](056-consolidate-convergence-gate-recovery.md) | Consolidate the convergence / gate / recovery architecture | Accepted |
 | [065](065-consolidated-mutation-helpers.md) | Consolidated GitHub-mutation helpers (label/comment/pause) | Accepted |
 | [066](066-consolidated-github-request-helpers.md) | Consolidated GitHub-client request helpers (REST core, paginator, boardcache mutation/heal) | Accepted |
+| [067](067-merge-train-centralized-inflight-cleanup.md) | Centralized Merge-Train In-Flight Marker Cleanup | Accepted |

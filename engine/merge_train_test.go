@@ -1000,6 +1000,57 @@ func TestMergeTrainWorker_ConflictResolvedByClaude(t *testing.T) {
 	}
 }
 
+// TestPrepareTrainWorker_FailurePathClearsMarkerAndSemaphore verifies the ADR-067
+// invariant directly: when prepareTrainWorker fails after acquiring the semaphore
+// (here, no holding stage configured), its own defer must release the semaphore AND
+// clear mergeTrainInFlight — since ok=false means runMergeTrainWorker's top-level
+// defer never gets registered, prepareTrainWorker's own-failure defer is the only
+// thing that can prevent a leaked semaphore slot or a permanently wedged train.
+func TestPrepareTrainWorker_FailurePathClearsMarkerAndSemaphore(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := trainTestEngine(t, client, claude, wm)
+	eng.mu.Lock()
+	eng.worktreeManagers["owner/repo"] = wm
+	eng.mu.Unlock()
+
+	// Remove the holding stage so prepareTrainWorker's holdingStage(e.cfg) == nil
+	// check fires — one of its four early-return failure branches.
+	eng.cfg.Stages = []*stages.Stage{
+		{Name: "Research", Order: 1, Prompt: "Do research"},
+	}
+
+	batch := makeSeamBatch(1)
+	state := &mergeTrainWorkerState{assembling: true, projectID: "PVT_test"}
+	eng.mergeTrainInFlight.Store("owner/repo", state)
+
+	_, _, ok := eng.prepareTrainWorker(context.Background(), state, "owner", "repo", batch)
+	if ok {
+		t.Fatal("expected prepareTrainWorker to fail with no holding stage configured")
+	}
+
+	if _, found := eng.mergeTrainInFlight.Load("owner/repo"); found {
+		t.Error("expected mergeTrainInFlight cleared by prepareTrainWorker's own-failure defer")
+	}
+
+	// The semaphore must be released too: acquiring MaxConcurrent slots must succeed
+	// without blocking if prepareTrainWorker didn't leak the one it took.
+	acquired := 0
+	for i := 0; i < eng.cfg.MaxConcurrent; i++ {
+		select {
+		case eng.sem <- struct{}{}:
+			acquired++
+		default:
+			t.Fatalf("semaphore slot %d unavailable — prepareTrainWorker leaked its acquired slot", i)
+		}
+	}
+	for i := 0; i < acquired; i++ {
+		<-eng.sem
+	}
+}
+
 // TestEnsureTrainWorktree verifies the WorktreeManager train methods (Task 2 integration).
 func TestEnsureTrainWorktree(t *testing.T) {
 	skipIfNoGit(t)
