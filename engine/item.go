@@ -388,16 +388,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			newComments := e.findNewComments(item)
 			if len(newComments) > 0 {
 				e.logf(item.Number, "unpause", "user commented on paused issue — unpausing\n")
-				if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
-					e.logf(item.Number, "warn", "could not remove fabrik:paused label: %v\n", err)
-				} else {
-					if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-						cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:paused")
-					}
-					if e.webhookMgr != nil {
-						e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:paused")
-					}
-				}
+				e.removeLabel(item, "fabrik:paused")
 				// Also clear any failed label so the stage retries cleanly
 				e.clearFailedStage(item, stage)
 				break // fall through to comment processing below
@@ -469,34 +460,16 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			}
 		}
 
-		if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
-			e.logf(item.Number, "warn", "could not add completion label: %v\n", err)
-		} else {
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), completeLabel)
-			}
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+completeLabel)
-			}
-		}
+		e.addLabel(item, completeLabel)
 
 		// Remove fabrik:extend-turns at cleanup (Done) stage — this is the designated
 		// removal site. The label persists across all intermediate stages so the operator
 		// can apply it once and have it take effect on every stage until Done.
 		// Called unconditionally (not guarded by hasLabel) because cleanup items are
 		// dispatched from shallow board items (labels(first:15)) and the label may be
-		// present on GitHub without appearing in item.Labels. ErrNotFound = already gone.
-		if removeErr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:extend-turns"); removeErr != nil &&
-			!errors.Is(removeErr, gh.ErrNotFound) {
-			e.logf(item.Number, "warn", "could not remove extend-turns label: %v\n", removeErr)
-		} else if removeErr == nil {
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:extend-turns")
-			}
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:extend-turns")
-			}
-		}
+		// present on GitHub without appearing in item.Labels. ErrNotFound = already gone
+		// (removeLabel treats it as success and still syncs the cache).
+		e.removeLabel(item, "fabrik:extend-turns")
 
 		// Auto-archiving of Done items is not currently performed (see #1035).
 
@@ -1679,25 +1652,24 @@ func isTransientError(err error) bool {
 	return false
 }
 
+// removeEditingLabel removes fabrik:editing, retrying up to 3 times with
+// exponential backoff on transient errors. The GitHub mutation is performed
+// directly here (not via removeLabel) so the retry loop can inspect the raw
+// error and decide whether to retry; the shared cache write-through + echo
+// tail is delegated to syncLabelRemoval so the idiom itself isn't re-typed.
 func (e *Engine) removeEditingLabel(owner, repo string, issueNumber int) {
+	item := gh.ProjectItem{Number: issueNumber, Repo: owner + "/" + repo}
 	const maxAttempts = 3
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		err := e.client.RemoveLabelFromIssue(owner, repo, issueNumber, "fabrik:editing")
 		if err == nil {
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, issueNumber), "fabrik:editing")
-			}
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, issueNumber)+"+"+"fabrik:editing")
-			}
+			e.syncLabelRemoval(item, "fabrik:editing", true)
 			return
 		}
 		if errors.Is(err, gh.ErrNotFound) {
-			// Label already absent — treat as success and sync cache.
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, issueNumber), "fabrik:editing")
-			}
+			// Label already absent — treat as success and sync cache (no echo).
+			e.syncLabelRemoval(item, "fabrik:editing", false)
 			return
 		}
 		if !isTransientError(err) {
@@ -1714,61 +1686,19 @@ func (e *Engine) removeEditingLabel(owner, repo string, issueNumber int) {
 }
 
 func (e *Engine) removeLockLabel(owner, repo string, issueNumber int, label string) {
-	if err := e.client.RemoveLabelFromIssue(owner, repo, issueNumber, label); err != nil &&
-		!errors.Is(err, gh.ErrNotFound) {
-		e.logf(issueNumber, "warn", "could not remove lock label: %v\n", err)
-	} else if err == nil {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, issueNumber), label)
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, issueNumber)+"+"+label)
-		}
-	}
+	e.removeLabel(gh.ProjectItem{Number: issueNumber, Repo: owner + "/" + repo}, label)
 }
 
 func (e *Engine) removeInProgressLabel(owner, repo string, issueNumber int, stageName string) {
-	label := fmt.Sprintf("stage:%s:in_progress", stageName)
-	if err := e.client.RemoveLabelFromIssue(owner, repo, issueNumber, label); err != nil &&
-		!errors.Is(err, gh.ErrNotFound) {
-		e.logf(issueNumber, "warn", "could not remove in_progress label: %v\n", err)
-	} else if err == nil {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, issueNumber), label)
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, issueNumber)+"+"+label)
-		}
-	}
+	e.removeLabel(gh.ProjectItem{Number: issueNumber, Repo: owner + "/" + repo}, fmt.Sprintf("stage:%s:in_progress", stageName))
 }
 
 func (e *Engine) addFailedLabel(owner, repo string, issueNumber int, stageName string) {
-	label := fmt.Sprintf("stage:%s:failed", stageName)
-	if err := e.client.AddLabelToIssue(owner, repo, issueNumber, label); err != nil {
-		e.logf(issueNumber, "warn", "could not add failed label: %v\n", err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, issueNumber), label)
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, issueNumber)+"+"+label)
-		}
-	}
+	e.addLabel(gh.ProjectItem{Number: issueNumber, Repo: owner + "/" + repo}, fmt.Sprintf("stage:%s:failed", stageName))
 }
 
 func (e *Engine) removeFailedLabel(owner, repo string, issueNumber int, stageName string) {
-	label := fmt.Sprintf("stage:%s:failed", stageName)
-	if err := e.client.RemoveLabelFromIssue(owner, repo, issueNumber, label); err != nil &&
-		!errors.Is(err, gh.ErrNotFound) {
-		e.logf(issueNumber, "warn", "could not remove failed label: %v\n", err)
-	} else if err == nil {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, issueNumber), label)
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, issueNumber)+"+"+label)
-		}
-	}
+	e.removeLabel(gh.ProjectItem{Number: issueNumber, Repo: owner + "/" + repo}, fmt.Sprintf("stage:%s:failed", stageName))
 }
 
 // commitWIP commits any uncommitted changes in the worktree as a partial-progress

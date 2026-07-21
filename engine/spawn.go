@@ -415,16 +415,7 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 // addPausedLabelToItem adds fabrik:paused to the given item, with cache write-through
 // and webhook echo registration.
 func (e *Engine) addPausedLabelToItem(owner, repo string, item gh.ProjectItem) {
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
-		e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:paused")
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:paused")
-		}
-	}
+	e.addLabel(gh.ProjectItem{Number: item.Number, Repo: owner + "/" + repo}, "fabrik:paused")
 }
 
 // parseOwnerRepoStr splits "owner/repo" into owner and repo. Returns false if
