@@ -60,7 +60,7 @@ func (e *Engine) settleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 	// cleanup dispatch for the item (see itemNeedsWork's CleanupWorktree branch).
 	if item.Status != "Done" {
 		// Clear any orphaned fabrik:awaiting-input label (same rationale as handleStageComplete).
-		if hasLabel(item, "fabrik:awaiting-input") {
+		if hasLabel(item.Labels, "fabrik:awaiting-input") {
 			if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil &&
 				!errors.Is(err, gh.ErrNotFound) {
 				e.logf(item.Number, "warn", "could not remove awaiting-input label: %v\n", err)
@@ -72,7 +72,7 @@ func (e *Engine) settleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 
 		// Mark the emitting stage complete so the engine doesn't re-run it on restart.
 		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
-		if !hasLabel(item, completeLabel) {
+		if !hasLabel(item.Labels, completeLabel) {
 			if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
 				e.logf(item.Number, "warn", "could not add completion label for stage %q: %v\n", stage.Name, err)
 				allStepsOK = false
@@ -117,7 +117,7 @@ func (e *Engine) settleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 				continue
 			}
 			skipLabel := fmt.Sprintf("stage:%s:complete", s.Name)
-			if !hasLabel(item, skipLabel) {
+			if !hasLabel(item.Labels, skipLabel) {
 				if err := e.client.AddLabelToIssue(owner, repo, item.Number, skipLabel); err != nil {
 					e.logf(item.Number, "warn", "could not add skip label for stage %q: %v\n", s.Name, err)
 					allStepsOK = false

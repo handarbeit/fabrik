@@ -35,7 +35,7 @@ func (e *Engine) runValidatePRTerminalAdvance(board *gh.ProjectBoard, items []gh
 		}
 		// Items with fabrik:auto-merge-enabled are exclusively managed by
 		// checkAutoMergeConvergence (Phase 1). Single owner does not touch them.
-		if hasLabel(item, "fabrik:auto-merge-enabled") {
+		if hasLabel(item.Labels, "fabrik:auto-merge-enabled") {
 			continue
 		}
 		iKey := issueKey(item, e.defaultRepo())
@@ -76,7 +76,7 @@ func (e *Engine) runValidatePRTerminalAdvance(board *gh.ProjectBoard, items []gh
 			// only fill in stages that are missing their completion label (EC-3).
 			highestCompleteOrder := -1
 			for _, s := range e.cfg.Stages {
-				if !s.CleanupWorktree && hasLabel(item, fmt.Sprintf("stage:%s:complete", s.Name)) {
+				if !s.CleanupWorktree && hasLabel(item.Labels, fmt.Sprintf("stage:%s:complete", s.Name)) {
 					if s.Order > highestCompleteOrder {
 						highestCompleteOrder = s.Order
 					}
@@ -100,7 +100,7 @@ func (e *Engine) runValidatePRTerminalAdvance(board *gh.ProjectBoard, items []gh
 					continue
 				}
 				completeLabel := fmt.Sprintf("stage:%s:complete", s.Name)
-				if hasLabel(item, completeLabel) {
+				if hasLabel(item.Labels, completeLabel) {
 					continue // already present — idempotent no-op
 				}
 				if addErr := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); addErr != nil {
@@ -117,17 +117,17 @@ func (e *Engine) runValidatePRTerminalAdvance(board *gh.ProjectBoard, items []gh
 			}
 
 			// Clear all gate labels now that all completion labels have been added.
-			if hasLabel(item, "fabrik:awaiting-ci") {
+			if hasLabel(item.Labels, "fabrik:awaiting-ci") {
 				e.removeAwaitingCILabel(owner, repo, item)
 			}
-			if hasLabel(item, "fabrik:awaiting-review") {
+			if hasLabel(item.Labels, "fabrik:awaiting-review") {
 				e.removeAwaitingReviewLabel(owner, repo, item)
 			}
-			if hasLabel(item, "fabrik:rebase-needed") {
+			if hasLabel(item.Labels, "fabrik:rebase-needed") {
 				e.removeRebaseNeededLabel(owner, repo, item)
 			}
 			for _, lbl := range []string{"fabrik:paused", "fabrik:awaiting-input"} {
-				if hasLabel(item, lbl) {
+				if hasLabel(item.Labels, lbl) {
 					if rerr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, lbl); rerr != nil {
 						if errors.Is(rerr, gh.ErrNotFound) {
 							// Label already absent on GitHub — desired end state achieved; sync cache.
@@ -152,7 +152,7 @@ func (e *Engine) runValidatePRTerminalAdvance(board *gh.ProjectBoard, items []gh
 
 		// PR is closed without merging.
 		// Skip if already paused to avoid posting a duplicate comment on the next poll.
-		if hasLabel(item, "fabrik:paused") {
+		if hasLabel(item.Labels, "fabrik:paused") {
 			continue
 		}
 		e.logf(item.Number, "pr-terminal", "PR #%d closed without merging — pausing\n", pr.Number)

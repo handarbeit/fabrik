@@ -165,7 +165,7 @@ func (e *Engine) dispatchWithCycleLimit(
 // read per poll cycle with no independent mergeable_state interpretation; the
 // merge/CI gates remain bypassed — GitHub owns the merge decision for these items.
 func (e *Engine) handleAutoMergeConvergence(pctx *phase1Ctx) bool {
-	if !hasLabel(pctx.item, "fabrik:auto-merge-enabled") {
+	if !hasLabel(pctx.item.Labels, "fabrik:auto-merge-enabled") {
 		return false
 	}
 	settle := e.settlePRMergeState(pctx.item, pctx.stage)

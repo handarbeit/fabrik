@@ -93,7 +93,7 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 		// failed checks. Under ADR-032, fabrik:awaiting-ci is present from the moment
 		// handleStageComplete fires, so timeout tracking covers "checks still running"
 		// as well as "checks failed".
-		if hasLabel(item, "fabrik:awaiting-ci") {
+		if hasLabel(item.Labels, "fabrik:awaiting-ci") {
 			timeout := e.cfg.CIWaitTimeout
 			if timeout <= 0 {
 				timeout = 30 * time.Minute
@@ -134,7 +134,7 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 		}
 		e.logf(item.Number, "ci-gate", "CI check(s) failed: %s\n", strings.Join(failedNames, ", "))
 
-		if !hasLabel(item, "fabrik:awaiting-ci") {
+		if !hasLabel(item.Labels, "fabrik:awaiting-ci") {
 			e.applyLabelAdd(item, "fabrik:awaiting-ci", false)
 		}
 
@@ -154,7 +154,7 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 		if timeout <= 0 {
 			timeout = 30 * time.Minute
 		}
-		if hasLabel(item, "fabrik:awaiting-ci") {
+		if hasLabel(item.Labels, "fabrik:awaiting-ci") {
 			appliedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:awaiting-ci")
 			if err != nil {
 				e.logf(item.Number, "warn", "R3: could not fetch awaiting-ci label timestamp: %v\n", err)
@@ -175,7 +175,7 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 		if timeout <= 0 {
 			timeout = 30 * time.Minute
 		}
-		if hasLabel(item, "fabrik:awaiting-ci") {
+		if hasLabel(item.Labels, "fabrik:awaiting-ci") {
 			appliedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:awaiting-ci")
 			if err != nil {
 				e.logf(item.Number, "warn", "could not fetch awaiting-ci label timestamp: %v\n", err)

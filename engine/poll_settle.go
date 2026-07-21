@@ -17,7 +17,7 @@ import (
 // paused item for an unrelated reason and this scan must not fight them.
 func (e *Engine) settleNoWorkNeededScan(board *gh.ProjectBoard, candidates []gh.ProjectItem) {
 	for _, item := range candidates {
-		if !hasLabel(item, "fabrik:awaiting-done") || hasLabel(item, "fabrik:paused") {
+		if !hasLabel(item.Labels, "fabrik:awaiting-done") || hasLabel(item.Labels, "fabrik:paused") {
 			continue
 		}
 		stage := stages.FindStage(e.cfg.Stages, item.Status)
@@ -35,7 +35,7 @@ func (e *Engine) settleNoWorkNeededScan(board *gh.ProjectBoard, candidates []gh.
 // FR-5). Uses next-poll dispatch: does not mutate candidates in place.
 func (e *Engine) settleRevalidateScan(candidates []gh.ProjectItem) {
 	for _, item := range candidates {
-		if !hasLabel(item, "fabrik:revalidate") {
+		if !hasLabel(item.Labels, "fabrik:revalidate") {
 			continue
 		}
 		owner, repo := itemOwnerRepo(item, e.defaultRepo())
@@ -79,7 +79,7 @@ func (e *Engine) settleRevalidateScan(candidates []gh.ProjectItem) {
 // recorded. Runs on ALL candidates where stage:Validate:complete is present.
 func (e *Engine) settleSHAInvalidationScan(candidates []gh.ProjectItem) {
 	for _, item := range candidates {
-		if !hasLabel(item, "stage:Validate:complete") {
+		if !hasLabel(item.Labels, "stage:Validate:complete") {
 			continue
 		}
 		owner, repo := itemOwnerRepo(item, e.defaultRepo())
@@ -117,7 +117,7 @@ func (e *Engine) settleSHAInvalidationScan(candidates []gh.ProjectItem) {
 // reason and this scan must not fight them.
 func (e *Engine) settleChildPlacements(board *gh.ProjectBoard) {
 	for _, item := range board.Items {
-		if !hasLabel(item, childPlacementLabel) || hasLabel(item, "fabrik:paused") {
+		if !hasLabel(item.Labels, childPlacementLabel) || hasLabel(item.Labels, "fabrik:paused") {
 			continue
 		}
 		if item.IsClosed {

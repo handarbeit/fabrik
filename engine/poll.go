@@ -756,14 +756,7 @@ func (e *Engine) cleanupClosedIssueLocks(board *gh.ProjectBoard) {
 		if !item.IsClosed {
 			continue
 		}
-		hasLock := false
-		for _, l := range item.Labels {
-			if l == lockLabel {
-				hasLock = true
-				break
-			}
-		}
-		if !hasLock {
+		if !hasLabel(item.Labels, lockLabel) {
 			continue
 		}
 		owner, repo, num := parseIssueKey(issueKey(item, e.defaultRepo()), e.cfg.Owner, e.cfg.Repo)
@@ -1078,14 +1071,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// Phase 2 (gated): stage advancement, gated on yolo/cruise/auto_advance.
 	for _, item := range deepFetchCandidates {
 		// Skip paused items in both phases.
-		isPaused := false
-		for _, l := range item.Labels {
-			if l == "fabrik:paused" {
-				isPaused = true
-				break
-			}
-		}
-		if isPaused {
+		if hasLabel(item.Labels, "fabrik:paused") {
 			continue
 		}
 		stage := stages.FindStage(e.cfg.Stages, item.Status)
@@ -1093,16 +1079,8 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			continue
 		}
 		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
-		hasComplete := false
-		hasAwaitingCI := false
-		for _, l := range item.Labels {
-			if l == completeLabel {
-				hasComplete = true
-			}
-			if l == "fabrik:awaiting-ci" {
-				hasAwaitingCI = true
-			}
-		}
+		hasComplete := hasLabel(item.Labels, completeLabel)
+		hasAwaitingCI := hasLabel(item.Labels, "fabrik:awaiting-ci")
 		// Admit items with fabrik:awaiting-ci on a wait_for_ci stage even when
 		// stage:X:complete is absent — handleStageComplete now defers the
 		// completion label until checkCIGate confirms CI is green (R4).
@@ -1157,7 +1135,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			// Items with fabrik:auto-merge-enabled are already in the GitHub
 			// auto-merge convergence flow; checkAutoMergeConvergence (Phase 1)
 			// monitors them and advances to Done when the PR merges.
-			if hasLabel(item, "fabrik:auto-merge-enabled") {
+			if hasLabel(item.Labels, "fabrik:auto-merge-enabled") {
 				continue
 			}
 			_, mergeErr := e.attemptMergeOnValidate(ctx, board, item, stage)
@@ -1461,7 +1439,7 @@ func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter st
 		if !cycleSet[iKey] {
 			stage := stages.FindStage(e.cfg.Stages, item.Status)
 			isCleanup := stage != nil && stage.CleanupWorktree
-			hasAwaitingLabel := hasLabel(item, "fabrik:awaiting-ci") || hasLabel(item, "fabrik:rebase-needed") || hasLabel(item, "fabrik:awaiting-review") || hasLabel(item, "fabrik:auto-merge-enabled") || hasLabel(item, "fabrik:revalidate")
+			hasAwaitingLabel := hasLabel(item.Labels, "fabrik:awaiting-ci") || hasLabel(item.Labels, "fabrik:rebase-needed") || hasLabel(item.Labels, "fabrik:awaiting-review") || hasLabel(item.Labels, "fabrik:auto-merge-enabled") || hasLabel(item.Labels, "fabrik:revalidate")
 			var hasExpiredCooldown, notInStore bool
 			if !isCleanup && !hasAwaitingLabel {
 				repo := itemOwnerRepoString(item, e.defaultRepo())
@@ -1561,7 +1539,7 @@ func groupQueuedByRepo(items []gh.ProjectItem, holdingStatus, defaultRepo string
 		// reds and bisects the train indefinitely and starves clean members from ever landing.
 		// A closed issue in Queued (stale board entry) likewise has no PR to land. Paused ==
 		// "manual intervention required"; both are excluded until a human resolves and unpauses.
-		if item.IsClosed || hasLabel(item, "fabrik:paused") {
+		if item.IsClosed || hasLabel(item.Labels, "fabrik:paused") {
 			continue
 		}
 		key := itemOwnerRepoString(item, defaultRepo)
@@ -1614,7 +1592,7 @@ func (e *Engine) routeQueuedGroup(ctx context.Context, repoKey string, items []g
 		if e.cfg.MergeQueue != "off" && item.LinkedPRIsMergeQueueEnabled {
 			// Idempotency: an item already carrying the label is mid-convergence — the
 			// convergence monitor owns it. Don't re-enqueue.
-			if hasLabel(item, "fabrik:auto-merge-enabled") {
+			if hasLabel(item.Labels, "fabrik:auto-merge-enabled") {
 				continue
 			}
 			// Signal source is poll-native (FR-1): the linked-PR number and head SHA come from

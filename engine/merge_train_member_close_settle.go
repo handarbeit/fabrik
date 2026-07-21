@@ -28,7 +28,7 @@ const mergeTrainMemberCloseRetryStage = "__merge_train_member_close__"
 // call failed, so settleMergeTrainMemberCloses retries it on a later poll. Idempotent — a
 // no-op if the marker is already present.
 func (e *Engine) markMergeTrainMemberCloseOutstanding(item gh.ProjectItem, owner, repo string) {
-	if hasLabel(item, mergeTrainAwaitingMemberCloseLabel) {
+	if hasLabel(item.Labels, mergeTrainAwaitingMemberCloseLabel) {
 		return
 	}
 	e.addLabel(item, mergeTrainAwaitingMemberCloseLabel)
@@ -44,7 +44,7 @@ func (e *Engine) markMergeTrainMemberCloseOutstanding(item gh.ProjectItem, owner
 // interaction — this scan sidesteps that entirely by not depending on either mechanism).
 func (e *Engine) settleMergeTrainMemberCloses(board *gh.ProjectBoard) {
 	for _, item := range board.Items {
-		if !hasLabel(item, mergeTrainAwaitingMemberCloseLabel) || hasLabel(item, "fabrik:paused") {
+		if !hasLabel(item.Labels, mergeTrainAwaitingMemberCloseLabel) || hasLabel(item.Labels, "fabrik:paused") {
 			continue
 		}
 		e.settleMergeTrainMemberClose(item)

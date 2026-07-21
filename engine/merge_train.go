@@ -225,7 +225,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 	// Check if any batch member has fabrik:extend-turns — if so, double max_turns.
 	extendTurns := false
 	for _, m := range batch {
-		if hasLabel(m, "fabrik:extend-turns") {
+		if hasLabel(m.Labels, "fabrik:extend-turns") {
 			extendTurns = true
 			break
 		}
