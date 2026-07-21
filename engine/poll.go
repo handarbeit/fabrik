@@ -831,51 +831,6 @@ func (e *Engine) cleanupClosedIssueTransientLabels(board *gh.ProjectBoard) {
 	}
 }
 
-// archiveDoneCompleteItems archives board items in a cleanup (Done) stage that
-// have the stage:<Name>:complete label. Handles both legacy items (pre-archive
-// feature) and ongoing cleanup. Uses shallow board data — labels(first:15) is
-// sufficient to see stage:Done:complete even on issues with many labels.
-// Idempotent: archived items disappear from subsequent board queries.
-// archiveGracePeriod is how long a completed Done item stays visible on the
-// board before being archived. This gives users time to see what completed
-// while they were away, especially in yolo mode.
-const archiveGracePeriod = 24 * time.Hour
-
-func (e *Engine) archiveDoneCompleteItems(projectID string, items []gh.ProjectItem) {
-	archived := 0
-	for _, item := range items {
-		st := stages.FindStage(e.cfg.Stages, item.Status)
-		if st == nil || !st.CleanupWorktree {
-			continue
-		}
-		completeLabel := fmt.Sprintf("stage:%s:complete", st.Name)
-		hasComplete := false
-		for _, l := range item.Labels {
-			if l == completeLabel {
-				hasComplete = true
-				break
-			}
-		}
-		if !hasComplete {
-			continue
-		}
-		// Let completed items stay visible for 24 hours so users can see
-		// what finished while they were away. If UpdatedAt is unknown (zero),
-		// don't archive — we can't tell how old it is.
-		if item.UpdatedAt.IsZero() || time.Since(item.UpdatedAt) < archiveGracePeriod {
-			continue
-		}
-		if err := e.client.ArchiveProjectItem(projectID, item.ItemID); err != nil {
-			e.logf(item.Number, "warn", "could not archive done item: %v\n", err)
-			continue
-		}
-		archived++
-	}
-	if archived > 0 {
-		e.logf(0, "poll", "archived %d done item(s) from board\n", archived)
-	}
-}
-
 type pollResult struct {
 	Active     bool
 	ItemCount  int
@@ -1600,16 +1555,6 @@ doneDispatching:
 	// runValidatePRTerminalAdvance, to avoid double-advance/racing between the
 	// two settle-owners.
 	e.settleClosedItemsToDone(board)
-
-	// Archive any Done+complete items (lazy migration + ongoing cleanup).
-	// Uses shallow board data — labels(first:15) is sufficient to see
-	// stage:Done:complete. Idempotent: archived items disappear from board
-	// results, so this converges to a no-op after legacy items are cleaned up.
-	// Auto-archive disabled — too aggressive in practice, removing items
-	// before users can see what completed. Re-enable once the timing logic
-	// is reworked to track when the Done stage actually completed rather
-	// than relying on UpdatedAt.
-	// e.archiveDoneCompleteItems(board.ProjectID, board.Items)
 
 	// Report cumulative token consumption only when new cost has accrued since
 	// the last print, to avoid repeated log noise on idle polls.
@@ -2448,17 +2393,6 @@ func (e *Engine) checkURLRewrite() bool {
 		}
 	}
 	return false
-}
-
-// reconcileCache fetches a fresh board snapshot from GitHub and applies it to
-// the in-memory cache, preserving deep fields already fetched for individual items.
-func (e *Engine) reconcileCache(cache *boardcache.CacheImpl) {
-	board, err := e.client.FetchProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
-	if err != nil {
-		e.logf(0, "cache", "reconciliation fetch failed: %v\n", err)
-		return
-	}
-	cache.Reconcile(board)
 }
 
 // reconcileLoop is the poll-only correctness backstop for cache/GitHub divergence.

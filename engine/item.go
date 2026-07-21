@@ -498,9 +498,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			}
 		}
 
-		// Archive is handled by archiveDoneCompleteItems in the poll loop,
-		// which enforces the 24-hour grace period so completed items remain
-		// visible on the board.
+		// Auto-archiving of Done items is not currently performed (see #1035).
 
 		// Record CooldownAt["periodic-re-eval"] so itemMayNeedWork suppresses
 		// deep-fetches for this terminal item during the cooldown window.

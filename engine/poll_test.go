@@ -513,37 +513,6 @@ func TestPoll_RateLimitWarning(t *testing.T) {
 	}
 }
 
-// TestArchiveDoneCompleteItems_ArchivesCompleteItems verifies that items in a
-// CleanupWorktree stage with the stage:<Name>:complete label are archived.
-func TestArchiveDoneCompleteItems_ArchivesCompleteItems(t *testing.T) {
-	client := &mockGitHubClient{}
-	eng := testEngine(t, client, &mockClaudeInvoker{})
-	eng.cfg.Stages = testStagesWithCleanup()
-
-	board := &gh.ProjectBoard{
-		ProjectID: "PVT_test",
-		Items: []gh.ProjectItem{
-			{
-				Number:    10,
-				ItemID:    "PVTI_10",
-				Status:    "Done",
-				Labels:    []string{"stage:Done:complete"},
-				UpdatedAt: time.Now().Add(-48 * time.Hour), // older than 24h grace period
-			},
-		},
-	}
-
-	eng.archiveDoneCompleteItems(board.ProjectID, board.Items)
-
-	if len(client.archiveProjectItemCalls) != 1 {
-		t.Fatalf("expected 1 ArchiveProjectItem call, got %d", len(client.archiveProjectItemCalls))
-	}
-	got := client.archiveProjectItemCalls[0]
-	if got.projectID != "PVT_test" || got.itemID != "PVTI_10" {
-		t.Errorf("ArchiveProjectItem(%q, %q), want (PVT_test, PVTI_10)", got.projectID, got.itemID)
-	}
-}
-
 // ── Bug A: catch-up loop review-gate guard (#617) ────────────────────────────
 
 // TestCatchupLoop_SkipsReviewGate_WhenAwaitingCIWithoutComplete verifies that
@@ -788,32 +757,6 @@ func TestCleanupClosedIssueTransientLabels_APIErrorContinues(t *testing.T) {
 	}
 }
 
-// TestArchiveDoneCompleteItems_SkipsIncompleteItems verifies that Done items
-// without the stage:Done:complete label are not archived.
-func TestArchiveDoneCompleteItems_SkipsIncompleteItems(t *testing.T) {
-	client := &mockGitHubClient{}
-	eng := testEngine(t, client, &mockClaudeInvoker{})
-	eng.cfg.Stages = testStagesWithCleanup()
-
-	board := &gh.ProjectBoard{
-		ProjectID: "PVT_test",
-		Items: []gh.ProjectItem{
-			{
-				Number: 20,
-				ItemID: "PVTI_20",
-				Status: "Done",
-				Labels: []string{"enhancement"}, // no complete label
-			},
-		},
-	}
-
-	eng.archiveDoneCompleteItems(board.ProjectID, board.Items)
-
-	if len(client.archiveProjectItemCalls) != 0 {
-		t.Errorf("expected no ArchiveProjectItem calls for incomplete item, got %d", len(client.archiveProjectItemCalls))
-	}
-}
-
 // TestYoloCatchUpEnablesAutoMerge verifies that when an item sits in the
 // Validate column with stage:Validate:complete + fabrik:yolo, the catch-up loop
 // calls EnablePullRequestAutoMerge (not MergePR) and does NOT immediately advance
@@ -1003,32 +946,6 @@ func TestYoloCatchUpSkipsAdvanceOnUnprocessedComment(t *testing.T) {
 
 	if advances != 0 {
 		t.Errorf("expected no UpdateProjectItemStatus when unprocessed comment exists, got %d", advances)
-	}
-}
-
-// TestArchiveDoneCompleteItems_SkipsNonCleanupStages verifies that items in
-// non-cleanup stages are not archived even if they have complete labels.
-func TestArchiveDoneCompleteItems_SkipsNonCleanupStages(t *testing.T) {
-	client := &mockGitHubClient{}
-	eng := testEngine(t, client, &mockClaudeInvoker{})
-	eng.cfg.Stages = testStagesWithCleanup()
-
-	board := &gh.ProjectBoard{
-		ProjectID: "PVT_test",
-		Items: []gh.ProjectItem{
-			{
-				Number: 30,
-				ItemID: "PVTI_30",
-				Status: "Research",
-				Labels: []string{"stage:Research:complete"},
-			},
-		},
-	}
-
-	eng.archiveDoneCompleteItems(board.ProjectID, board.Items)
-
-	if len(client.archiveProjectItemCalls) != 0 {
-		t.Errorf("expected no ArchiveProjectItem calls for non-cleanup stage, got %d", len(client.archiveProjectItemCalls))
 	}
 }
 
