@@ -20,6 +20,22 @@ func (e *Engine) cache() *boardcache.CacheImpl {
 	return c
 }
 
+// syncLabelAdd mirrors a label addition into the cache and, when echo is
+// true, registers a webhook echo. Split out from applyLabelAdd, symmetric to
+// syncLabelRemoval, so callers that must perform the GitHub mutation
+// themselves (e.g. lock/in-progress label sites that gate further side
+// effects on success) can still share the write-through + echo tail instead
+// of re-typing it.
+func (e *Engine) syncLabelAdd(item gh.ProjectItem, label string, echo bool) {
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	if c := e.cache(); c != nil {
+		c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), label)
+	}
+	if echo && e.webhookMgr != nil {
+		e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+label)
+	}
+}
+
 // applyLabelAdd performs the three-beat label-add idiom: GitHub mutation ->
 // cache write-through -> conditional webhook echo. The repo is resolved once,
 // canonically, via itemOwnerRepo so a caller can never accidentally use
@@ -32,12 +48,7 @@ func (e *Engine) applyLabelAdd(item gh.ProjectItem, label string, echo bool) {
 		e.logf(item.Number, "warn", "could not add label %q: %v\n", label, err)
 		return
 	}
-	if c := e.cache(); c != nil {
-		c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), label)
-	}
-	if echo && e.webhookMgr != nil {
-		e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+label)
-	}
+	e.syncLabelAdd(item, label, echo)
 }
 
 // addLabel is the always-echoing public entry point for applyLabelAdd, used by
