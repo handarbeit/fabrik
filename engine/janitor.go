@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -435,7 +434,7 @@ func pruneLogs(root string, retentionDays int, maxBytes int64, now time.Time) (
 //   - Item at a cleanup_worktree:true stage with stage:<Name>:complete label → true
 //   - Otherwise → false (on an active board stage or cleanup incomplete)
 func (e *Engine) janitorIsOffBoardOrCleanupComplete(snap itemstate.Snapshot, snapErr error) bool {
-	if errors.Is(snapErr, itemstate.ErrNotFound) || snapErr != nil {
+	if snapErr != nil {
 		return true
 	}
 	status := snap.Status()
