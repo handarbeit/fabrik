@@ -239,6 +239,49 @@ func (c *CacheImpl) ensureIssueInStore(owner, fullRepo string, issNum int) error
 	return nil
 }
 
+// resolveOrHealPRLinkage resolves the closing issue for PR #prNum in
+// owner/repoName, auto-healing via c.resolvePRLinkage when the PR isn't yet
+// in the Store's prToKey index. On failure to resolve, records a negative-
+// cache miss at missCacheKey (skipped when resolvePRLinkage itself errored,
+// so a transient REST failure is retried on the next webhook rather than
+// suppressed for recentMissTTL) and logs notFoundMsg. On success, it
+// additionally confirms the resolved issue still exists in the Store —
+// store.Get is called deliberately outside c.mu, preserving the
+// boardcache.go struct-doc invariant that Store methods must never be called
+// while c.mu is held (a Store observer callback into CacheImpl would
+// deadlock otherwise). Returns ok=false if resolution or confirmation
+// failed; callers must not proceed with any store.Apply in that case.
+//
+// The PR-scoped negative-cache pre-check (checking recentMissCache[missCacheKey]
+// before calling this) stays inline in each caller that has one —
+// applyCheckRunDelta doesn't, since it already performs its own SHA-keyed
+// negative-cache check earlier (before FetchPRsForSHA), so folding a PR-keyed
+// pre-check in here would add a code path that doesn't exist for that handler.
+func (c *CacheImpl) resolveOrHealPRLinkage(owner, repoName, repo string, prNum int, missCacheKey, notFoundMsg string) (key string, issNum int, healed, ok bool) {
+	key, issNum, found, healed, healErr := c.resolvePRLinkage(owner, repoName, prNum)
+	if !found {
+		c.mu.Lock()
+		if healErr == nil {
+			c.recentMissCache[missCacheKey] = time.Now()
+		}
+		c.mu.Unlock()
+		c.logFn("[cache] %s\n", notFoundMsg)
+		return "", 0, false, false
+	}
+	// Confirm item still in Store before proceeding. Must not hold c.mu while
+	// calling any Store method (boardcache.go struct-doc invariant).
+	_, storeErr := c.store.Get(repo, issNum)
+	c.mu.Lock()
+	if storeErr != nil {
+		c.recentMissCache[missCacheKey] = time.Now()
+		c.mu.Unlock()
+		return "", 0, false, false
+	}
+	c.mu.Unlock()
+	// prToKey is populated by PRHeadSHAUpdated via updateIndexes — no explicit write needed.
+	return key, issNum, healed, true
+}
+
 // ---------------------------------------------------------------------------
 // Delta functions
 // ---------------------------------------------------------------------------
@@ -610,28 +653,11 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 	c.mu.RUnlock()
 
 	// Auto-heal: resolve PR linkage via REST or authoritative index.
-	key, resolvedIssNum, found, healed, healErr := c.resolvePRLinkage(owner, repoName, prNum)
-
-	if !found {
-		c.mu.Lock()
-		if healErr == nil {
-			c.recentMissCache[mk] = time.Now()
-		}
-		c.mu.Unlock()
-		c.logFn("[cache] dropped pull_request delta for PR #%d: no closing issue in cache\n", prNum)
+	key, resolvedIssNum, healed, ok := c.resolveOrHealPRLinkage(owner, repoName, repo, prNum, mk,
+		fmt.Sprintf("dropped pull_request delta for PR #%d: no closing issue in cache", prNum))
+	if !ok {
 		return
 	}
-	// Confirm item still in Store before proceeding. Must not hold c.mu while
-	// calling any Store method (boardcache.go struct-doc invariant).
-	_, storeErr := c.store.Get(repo, resolvedIssNum)
-	c.mu.Lock()
-	if storeErr != nil {
-		c.recentMissCache[mk] = time.Now()
-		c.mu.Unlock()
-		return
-	}
-	c.mu.Unlock()
-	// prToKey is populated by PRHeadSHAUpdated via updateIndexes — no explicit write needed.
 
 	c.store.Apply(itemstate.PRDetailsUpdated{
 		Repo:     repo,
@@ -717,28 +743,11 @@ func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 	c.mu.RUnlock()
 
 	// Auto-heal: resolve PR linkage via REST or authoritative index.
-	key, resolvedIssNum, found, healed, healErr := c.resolvePRLinkage(owner, repoName, prNum)
-
-	if !found {
-		c.mu.Lock()
-		if healErr == nil {
-			c.recentMissCache[mk] = time.Now()
-		}
-		c.mu.Unlock()
-		c.logFn("[cache] dropped pull_request_review delta for PR #%d: no closing issue in cache\n", prNum)
+	key, resolvedIssNum, healed, ok := c.resolveOrHealPRLinkage(owner, repoName, repo, prNum, mk,
+		fmt.Sprintf("dropped pull_request_review delta for PR #%d: no closing issue in cache", prNum))
+	if !ok {
 		return
 	}
-	// Confirm item still in Store before proceeding. Must not hold c.mu while
-	// calling any Store method (boardcache.go struct-doc invariant).
-	_, storeErr := c.store.Get(repo, resolvedIssNum)
-	c.mu.Lock()
-	if storeErr != nil {
-		c.recentMissCache[mk] = time.Now()
-		c.mu.Unlock()
-		return
-	}
-	c.mu.Unlock()
-	// prToKey is populated by PRHeadSHAUpdated via updateIndexes — no explicit write needed.
 
 	c.store.Apply(itemstate.PRHeadSHAUpdated{
 		Repo:        repo,
@@ -835,28 +844,11 @@ func (c *CacheImpl) applyPullRequestReviewCommentDelta(payload []byte) {
 	c.mu.RUnlock()
 
 	// Auto-heal: resolve PR linkage via REST or authoritative index.
-	key, resolvedIssNum, found, healed, healErr := c.resolvePRLinkage(owner, repoName, prNum)
-
-	if !found {
-		c.mu.Lock()
-		if healErr == nil {
-			c.recentMissCache[mk] = time.Now()
-		}
-		c.mu.Unlock()
-		c.logFn("[cache] dropped pull_request_review_comment delta for PR #%d: no closing issue in cache\n", prNum)
+	key, resolvedIssNum, healed, ok := c.resolveOrHealPRLinkage(owner, repoName, repo, prNum, mk,
+		fmt.Sprintf("dropped pull_request_review_comment delta for PR #%d: no closing issue in cache", prNum))
+	if !ok {
 		return
 	}
-	// Confirm item still in Store before proceeding. Must not hold c.mu while
-	// calling any Store method (boardcache.go struct-doc invariant).
-	_, storeErr := c.store.Get(repo, resolvedIssNum)
-	c.mu.Lock()
-	if storeErr != nil {
-		c.recentMissCache[mk] = time.Now()
-		c.mu.Unlock()
-		return
-	}
-	c.mu.Unlock()
-	// prToKey is populated by PRHeadSHAUpdated via updateIndexes — no explicit write needed.
 
 	c.store.Apply(itemstate.PRHeadSHAUpdated{
 		Repo:        repo,
@@ -955,28 +947,11 @@ func (c *CacheImpl) applyCheckRunDelta(payload []byte) {
 	prNum := prNums[0]
 
 	// Auto-heal step 2: resolve which issue the PR closes.
-	key, resolvedIssNum, found, healed, healErr := c.resolvePRLinkage(owner, repoName, prNum)
-
-	if !found {
-		c.mu.Lock()
-		if healErr == nil {
-			c.recentMissCache[msha] = time.Now()
-		}
-		c.mu.Unlock()
-		c.logFn("[cache] dropped check_run delta for SHA %s: no closing issue in cache for PR #%d\n", sha, prNum)
+	key, resolvedIssNum, healed, ok := c.resolveOrHealPRLinkage(owner, repoName, repo, prNum, msha,
+		fmt.Sprintf("dropped check_run delta for SHA %s: no closing issue in cache for PR #%d", sha, prNum))
+	if !ok {
 		return
 	}
-	// Confirm item still in Store before proceeding. Must not hold c.mu while
-	// calling any Store method (boardcache.go struct-doc invariant).
-	_, storeErr := c.store.Get(repo, resolvedIssNum)
-	c.mu.Lock()
-	if storeErr != nil {
-		c.recentMissCache[msha] = time.Now()
-		c.mu.Unlock()
-		return
-	}
-	c.mu.Unlock()
-	// prToKey is populated by PRHeadSHAUpdated via updateIndexes — no explicit write needed.
 
 	// Update Store: set LinkedPRNum + SHA (updates shaToKey index). PRHeadSHAUpdated
 	// drains any pendingCheckRuns[sha] into the item's LinkedPR.CheckRuns automatically

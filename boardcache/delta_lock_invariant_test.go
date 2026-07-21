@@ -30,6 +30,7 @@ func TestDeltaHealPaths_DoNotCallStoreWhileLocked(t *testing.T) {
 		"applyPullRequestReviewDelta",
 		"applyPullRequestReviewCommentDelta",
 		"applyCheckRunDelta",
+		"resolveOrHealPRLinkage",
 	}
 
 	for _, name := range funcNames {
