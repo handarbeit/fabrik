@@ -825,3 +825,417 @@ func TestRunProbeAndDeepFetch_UnconfiguredColumn_StatusDrift_UpdatesStore(t *tes
 		t.Errorf("store Status = %q, want %q (ProbeBoardItemUpdated must apply even for unconfigured columns)", got, "Backlog")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// runProbeAndDeepFetch integration tests
+// ---------------------------------------------------------------------------
+
+// TestRunProbeAndDeepFetch_StaleItem_TriggersDeepFetch verifies that an item
+// with no prior deep-fetch (LastSeenSourceUpdatedAt == zero) triggers
+// FetchItemDetails when the probe returns a nonzero EffectiveUpdatedAt.
+func TestRunProbeAndDeepFetch_StaleItem_TriggersDeepFetch(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	var deepFetchCalls int
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return []gh.BoardProbeItem{
+				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo", Status: "Research", EffectiveUpdatedAt: now},
+			}, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalls++
+			return nil
+		},
+	}
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
+	eng.runProbeAndDeepFetch(cache)
+	if deepFetchCalls == 0 {
+		t.Error("expected FetchItemDetails called for stale item (zero LastSeenSourceUpdatedAt); got 0 calls")
+	}
+}
+
+// TestRunProbeAndDeepFetch_FreshItem_SkipsDeepFetch verifies that an item
+// whose LastSeenSourceUpdatedAt matches the probe's EffectiveUpdatedAt does
+// not trigger a FetchItemDetails call.
+func TestRunProbeAndDeepFetch_FreshItem_SkipsDeepFetch(t *testing.T) {
+	T1 := time.Now().Add(-time.Hour).Truncate(time.Second)
+	var deepFetchCalls int
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return []gh.BoardProbeItem{
+				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo", Status: "Research", EffectiveUpdatedAt: T1},
+			}, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalls++
+			return nil
+		},
+	}
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
+	// Simulate a prior deep-fetch that set LastSeenSourceUpdatedAt = T1.
+	eng.store.Apply(itemstate.ItemDeepFetched{
+		Repo:   "owner/repo",
+		Number: 1,
+		FreshState: gh.ProjectItem{
+			ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", UpdatedAt: T1,
+		},
+	})
+	eng.runProbeAndDeepFetch(cache)
+	if deepFetchCalls != 0 {
+		t.Errorf("expected 0 FetchItemDetails calls for fresh item; got %d", deepFetchCalls)
+	}
+}
+
+// TestRunProbeAndDeepFetch_LinkageDrift_InvalidatesAndDeepFetches verifies
+// that when the probe detects a linked PR number different from the cached
+// value, the cache is invalidated (DeepFetchInvalidated) and FetchItemDetails
+// is triggered even though EffectiveUpdatedAt has not advanced.
+func TestRunProbeAndDeepFetch_LinkageDrift_InvalidatesAndDeepFetches(t *testing.T) {
+	T1 := time.Now().Add(-time.Hour).Truncate(time.Second)
+	var deepFetchCalls int
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return []gh.BoardProbeItem{
+				// Same EffectiveUpdatedAt as last deep-fetch (would be fresh) but LinkedPRNumber changed.
+				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo", Status: "Research", EffectiveUpdatedAt: T1, LinkedPRNumber: 99},
+			}, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalls++
+			return nil
+		},
+	}
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
+	// Simulate fresh state at T1 with no linked PR (cached LinkedPRNumber = 0).
+	eng.store.Apply(itemstate.ItemDeepFetched{
+		Repo:   "owner/repo",
+		Number: 1,
+		FreshState: gh.ProjectItem{
+			ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", UpdatedAt: T1,
+		},
+	})
+	eng.runProbeAndDeepFetch(cache)
+	if deepFetchCalls == 0 {
+		t.Error("expected FetchItemDetails called after linkage drift (PR# 0 → 99); got 0 calls")
+	}
+}
+
+// TestRunProbeAndDeepFetch_ItemGone_RemovedFromStore verifies that an item
+// present in the store but absent from probe results is removed from the store.
+func TestRunProbeAndDeepFetch_ItemGone_RemovedFromStore(t *testing.T) {
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			// Only item #1; item #2 has left the board.
+			return []gh.BoardProbeItem{
+				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo", Status: "Research"},
+			}, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error { return nil },
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	testBootstrapFromBoard(cache, &gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo"},
+			{ID: "I_002", ItemID: "PVTI_002", Number: 2, Repo: "owner/repo"},
+		},
+	})
+	eng.readClient = cache
+
+	eng.runProbeAndDeepFetch(cache)
+
+	if _, err := eng.store.Get("owner/repo", 2); err == nil {
+		t.Error("item #2 should be removed from store after probe omits it")
+	}
+	if _, err := eng.store.Get("owner/repo", 1); err != nil {
+		t.Errorf("item #1 should still be in store after probe includes it: %v", err)
+	}
+}
+
+// TestColdStart_ProbeBootstrap_TerminalItemsSkipDeepFetch verifies the cold-start cost
+// reduction: 10 closed Done items are seeded terminal by BootstrapFromProbe and
+// are never deep-fetched, while 3 open active items are deep-fetched normally.
+// Expected deep-fetch count after the first probe cycle: ≤ 3.
+func TestColdStart_ProbeBootstrap_TerminalItemsSkipDeepFetch(t *testing.T) {
+	var deepFetchCalls int
+	probeTime := time.Now().Add(-time.Minute)
+
+	// Build 10 closed Done items + 3 open Research items for the probe response.
+	var probeItems []gh.BoardProbeItem
+	for i := 1; i <= 10; i++ {
+		probeItems = append(probeItems, gh.BoardProbeItem{
+			ContentID: fmt.Sprintf("I_%03d", i), ItemID: fmt.Sprintf("PVTI_%03d", i),
+			Number: i, Repo: "owner/repo",
+			Status:             "Done",
+			IsClosed:           true,
+			EffectiveUpdatedAt: probeTime,
+		})
+	}
+	for i := 11; i <= 13; i++ {
+		probeItems = append(probeItems, gh.BoardProbeItem{
+			ContentID: fmt.Sprintf("I_%03d", i), ItemID: fmt.Sprintf("PVTI_%03d", i),
+			Number: i, Repo: "owner/repo",
+			Status:             "Research",
+			IsClosed:           false,
+			EffectiveUpdatedAt: probeTime,
+		})
+	}
+
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return probeItems, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalls++
+			return nil
+		},
+	}
+	eng := NewWithDeps(
+		Config{
+			Owner: "owner", Repo: "repo", ProjectNum: 1,
+			User: "testuser", Token: "token", MaxConcurrent: 5,
+			Stages: testStagesWithCleanup(),
+		},
+		client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()),
+	)
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	eng.readClient = cache
+
+	// Simulate the virgin-cache branch: probe bootstrap seeds the store.
+	items, projectID, err := client.ProbeProjectBoard("owner", "repo", 1, "organization")
+	if err != nil {
+		t.Fatalf("ProbeProjectBoard: %v", err)
+	}
+	cache.BootstrapFromProbe(items, projectID)
+	eng.seedTerminalFromProbeItems(items)
+
+	// Now simulate the next poll cycle — probe-driven deep-fetch pass.
+	eng.runProbeAndDeepFetch(cache)
+
+	// The 10 closed Done items are seeded terminal and must NOT be deep-fetched.
+	// The 3 open Research items have no prior deep-fetch and MUST be deep-fetched.
+	if deepFetchCalls > 3 {
+		t.Errorf("cold-start deep-fetch count = %d, want ≤ 3 (only active items)", deepFetchCalls)
+	}
+	if deepFetchCalls == 0 {
+		t.Error("expected ≥ 1 deep-fetch for active items; got 0")
+	}
+
+	// Terminal flag must be set on all closed Done items.
+	for i := 1; i <= 10; i++ {
+		snap, snapErr := eng.store.Get("owner/repo", i)
+		if snapErr != nil {
+			t.Errorf("item #%d not found in store", i)
+			continue
+		}
+		if !snap.IsTerminal() {
+			t.Errorf("item #%d (closed Done): expected IsTerminal()=true", i)
+		}
+	}
+
+	// Active Research items must NOT be terminal.
+	for i := 11; i <= 13; i++ {
+		snap, snapErr := eng.store.Get("owner/repo", i)
+		if snapErr != nil {
+			t.Errorf("item #%d not found in store", i)
+			continue
+		}
+		if snap.IsTerminal() {
+			t.Errorf("item #%d (open Research): expected IsTerminal()=false", i)
+		}
+	}
+}
+
+// TestWebhookModeStartup_ClosedDoneItemsNotDeepFetched is the regression test
+// for issue #751. It verifies that after the fixed webhook-mode startup path
+// (BootstrapFromProbe instead of Bootstrap), the first probe cycle does NOT
+// call FetchItemDetails for closed Done items. Only active items are fetched.
+func TestWebhookModeStartup_ClosedDoneItemsNotDeepFetched(t *testing.T) {
+	var deepFetchCalls int
+	probeTime := time.Now().Add(-time.Minute)
+
+	// 3 closed Done items + 1 open Research item returned by the probe.
+	allProbeItems := []gh.BoardProbeItem{
+		{ContentID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo",
+			Status: "Done", IsClosed: true, EffectiveUpdatedAt: probeTime},
+		{ContentID: "I_002", ItemID: "PVTI_002", Number: 2, Repo: "owner/repo",
+			Status: "Done", IsClosed: true, EffectiveUpdatedAt: probeTime},
+		{ContentID: "I_003", ItemID: "PVTI_003", Number: 3, Repo: "owner/repo",
+			Status: "Done", IsClosed: true, EffectiveUpdatedAt: probeTime},
+		{ContentID: "I_004", ItemID: "PVTI_004", Number: 4, Repo: "owner/repo",
+			Status: "Research", IsClosed: false, EffectiveUpdatedAt: probeTime},
+	}
+
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return allProbeItems, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalls++
+			return nil
+		},
+	}
+	eng := NewWithDeps(
+		Config{
+			Owner: "owner", Repo: "repo", ProjectNum: 1,
+			User: "testuser", Token: "token", MaxConcurrent: 5,
+			Stages: testStagesWithCleanup(),
+		},
+		client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()),
+	)
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+
+	// Simulate the fixed webhook startup path: BootstrapFromProbe seeds Terminal
+	// for closed Done items before the first poll cycle runs.
+	cache.BootstrapFromProbe(allProbeItems, "PVT_1")
+	eng.seedTerminalFromProbeItems(allProbeItems)
+	eng.readClient = cache
+
+	// Run one probe cycle — this is what the first poll does after startup.
+	eng.runProbeAndDeepFetch(cache)
+
+	// The 3 closed Done items are seeded terminal and must NOT be deep-fetched.
+	// Only the 1 open Research item should trigger FetchItemDetails.
+	if deepFetchCalls != 1 {
+		t.Errorf("webhook startup deep-fetch count = %d, want 1 (only active Research item)", deepFetchCalls)
+	}
+
+	// Verify terminal flag is set for closed Done items.
+	for i := 1; i <= 3; i++ {
+		snap, err := eng.store.Get("owner/repo", i)
+		if err != nil {
+			t.Errorf("item #%d not in store: %v", i, err)
+			continue
+		}
+		if !snap.IsTerminal() {
+			t.Errorf("item #%d (closed Done): expected IsTerminal()=true after webhook startup", i)
+		}
+	}
+}
+
+// TestRunProbeAndDeepFetch_IsClosedPropagates_WithoutDeepFetch verifies that
+// IsClosed=true is written to the store via ProbeBoardItemUpdated even when
+// the item is cache-fresh (EffectiveUpdatedAt unchanged → no deep-fetch).
+func TestRunProbeAndDeepFetch_IsClosedPropagates_WithoutDeepFetch(t *testing.T) {
+	T1 := time.Now().Add(-time.Hour).Truncate(time.Second)
+	var deepFetchCalls int
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return []gh.BoardProbeItem{
+				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo", Status: "Research", IsClosed: true, EffectiveUpdatedAt: T1},
+			}, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalls++
+			return nil
+		},
+	}
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
+	// Fresh at T1 — deep-fetch should not be triggered.
+	eng.store.Apply(itemstate.ItemDeepFetched{
+		Repo:   "owner/repo",
+		Number: 1,
+		FreshState: gh.ProjectItem{
+			ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", UpdatedAt: T1,
+		},
+	})
+	eng.runProbeAndDeepFetch(cache)
+	if deepFetchCalls != 0 {
+		t.Errorf("expected 0 deep-fetch calls for fresh item; got %d", deepFetchCalls)
+	}
+	snap, err := eng.store.Get("owner/repo", 1)
+	if err != nil {
+		t.Fatalf("store.Get after probe: %v", err)
+	}
+	if !snap.IsClosed() {
+		t.Error("expected IsClosed=true after ProbeBoardItemUpdated; got false")
+	}
+}
+
+// TestProbeNewItem_ClosedDone_SkipsDeepFetch is a regression test for the
+// new-item branch of runProbeAndDeepFetch. It verifies that closed Done items
+// discovered by the probe (not yet in store, no prior bootstrap) are seeded as
+// terminal and never deep-fetched, while open active items are deep-fetched
+// normally. This covers the gap where BootstrapFromProbe cannot help: items
+// that appear in the probe for the first time during a mid-run cycle.
+func TestProbeNewItem_ClosedDone_SkipsDeepFetch(t *testing.T) {
+	const numClosed = 3 // closed Done items
+	const numOpen = 2   // open Research items
+	var deepFetchCalls int
+	probeTime := time.Now().Add(-time.Minute)
+
+	var probeItems []gh.BoardProbeItem
+	for i := 1; i <= numClosed; i++ {
+		probeItems = append(probeItems, gh.BoardProbeItem{
+			ContentID: fmt.Sprintf("I_%03d", i), ItemID: fmt.Sprintf("PVTI_%03d", i),
+			Number:             i,
+			Repo:               "owner/repo",
+			Status:             "Done",
+			IsClosed:           true,
+			EffectiveUpdatedAt: probeTime,
+		})
+	}
+	for i := numClosed + 1; i <= numClosed+numOpen; i++ {
+		probeItems = append(probeItems, gh.BoardProbeItem{
+			ContentID: fmt.Sprintf("I_%03d", i), ItemID: fmt.Sprintf("PVTI_%03d", i),
+			Number:             i,
+			Repo:               "owner/repo",
+			Status:             "Research",
+			IsClosed:           false,
+			EffectiveUpdatedAt: probeTime,
+		})
+	}
+
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return probeItems, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalls++
+			return nil
+		},
+	}
+	eng := NewWithDeps(
+		Config{
+			Owner: "owner", Repo: "repo", ProjectNum: 1,
+			User: "testuser", Token: "token", MaxConcurrent: 5,
+			Stages: testStagesWithCleanup(),
+		},
+		client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()),
+	)
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	eng.readClient = cache
+
+	// No prior bootstrap — store is empty. All items are new-item discoveries.
+	eng.runProbeAndDeepFetch(cache)
+
+	// Only the open Research items should have been deep-fetched.
+	if deepFetchCalls != numOpen {
+		t.Errorf("deep-fetch count = %d, want %d (open items only)", deepFetchCalls, numOpen)
+	}
+
+	// Closed Done items must be terminal in the store.
+	for i := 1; i <= numClosed; i++ {
+		snap, snapErr := eng.store.Get("owner/repo", i)
+		if snapErr != nil {
+			t.Errorf("closed Done item #%d not found in store", i)
+			continue
+		}
+		if !snap.IsTerminal() {
+			t.Errorf("item #%d (closed Done): expected IsTerminal()=true", i)
+		}
+	}
+
+	// Open Research items must NOT be terminal.
+	for i := numClosed + 1; i <= numClosed+numOpen; i++ {
+		snap, snapErr := eng.store.Get("owner/repo", i)
+		if snapErr != nil {
+			t.Errorf("open Research item #%d not found in store", i)
+			continue
+		}
+		if snap.IsTerminal() {
+			t.Errorf("item #%d (open Research): expected IsTerminal()=false", i)
+		}
+	}
+}
