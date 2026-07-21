@@ -172,8 +172,8 @@ func (e *Engine) runStartupCleanup() {
 					e.logf(number, "warn", "could not remove stale in_progress label %q: %v\n", label, err)
 				} else {
 					e.logf(number, "startup", "removed stale label %q\n", label)
-					if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-						cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repoName, number), label)
+					if c := e.cache(); c != nil {
+						c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repoName, number), label)
 					}
 				}
 			}

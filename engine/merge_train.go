@@ -870,8 +870,8 @@ func (e *Engine) ejectMember(ctx context.Context, owner, repo string, memberItem
 		if err := e.client.AddLabelToIssue(owner, repo, memberItem.Number, "fabrik:paused"); err != nil {
 			e.logf(memberItem.Number, "warn", "could not add fabrik:paused: %v\n", err)
 		} else {
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, memberItem.Number), "fabrik:paused")
+			if c := e.cache(); c != nil {
+				c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, memberItem.Number), "fabrik:paused")
 			}
 			if e.webhookMgr != nil {
 				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, memberItem.Number)+"+"+"fabrik:paused")
@@ -880,8 +880,8 @@ func (e *Engine) ejectMember(ctx context.Context, owner, repo string, memberItem
 		if err := e.client.AddLabelToIssue(owner, repo, memberItem.Number, "fabrik:awaiting-input"); err != nil {
 			e.logf(memberItem.Number, "warn", "could not add fabrik:awaiting-input: %v\n", err)
 		} else {
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, memberItem.Number), "fabrik:awaiting-input")
+			if c := e.cache(); c != nil {
+				c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, memberItem.Number), "fabrik:awaiting-input")
 			}
 			if e.webhookMgr != nil {
 				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, memberItem.Number)+"+"+"fabrik:awaiting-input")
@@ -990,8 +990,8 @@ func (e *Engine) fireRunawayGuard(ctx context.Context, owner, repo string, items
 		if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
 			e.logf(item.Number, "warn", "could not add fabrik:paused (runaway guard): %v\n", err)
 		} else {
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:paused")
+			if c := e.cache(); c != nil {
+				c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:paused")
 			}
 			if e.webhookMgr != nil {
 				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:paused")
@@ -1000,8 +1000,8 @@ func (e *Engine) fireRunawayGuard(ctx context.Context, owner, repo string, items
 		if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
 			e.logf(item.Number, "warn", "could not add fabrik:awaiting-input (runaway guard): %v\n", err)
 		} else {
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:awaiting-input")
+			if c := e.cache(); c != nil {
+				c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:awaiting-input")
 			}
 			if e.webhookMgr != nil {
 				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-input")
