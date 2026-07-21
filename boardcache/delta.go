@@ -440,44 +440,34 @@ func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 		c.bumpLocalDeltaAt(key)
 
 	case "labeled":
-		if c.matchEchoFn != nil {
-			c.matchEchoFn("issues", "labeled", key+"+"+p.Label.Name)
-		}
-		if err := c.ensureIssueInStore(owner, fullRepo, issNum); err != nil {
-			c.logFn("[cache] applyIssuesDelta(labeled): ensure #%d: %v\n", issNum, err)
-			return
-		}
-		_, changes, _ := c.store.Apply(itemstate.IssueLabeled{
-			Repo:   fullRepo,
-			Number: issNum,
-			Label:  p.Label.Name,
-		})
-		if len(changes) == 0 {
-			return
-		}
-		c.bumpLocalDeltaAt(key)
+		c.applyIssueLabelMutationDelta(owner, fullRepo, issNum, key, "labeled", p.Label.Name,
+			itemstate.IssueLabeled{Repo: fullRepo, Number: issNum, Label: p.Label.Name})
 
 	case "unlabeled":
-		if c.matchEchoFn != nil {
-			c.matchEchoFn("issues", "unlabeled", key+"+"+p.Label.Name)
-		}
-		if err := c.ensureIssueInStore(owner, fullRepo, issNum); err != nil {
-			c.logFn("[cache] applyIssuesDelta(unlabeled): ensure #%d: %v\n", issNum, err)
-			return
-		}
-		_, changes, _ := c.store.Apply(itemstate.IssueUnlabeled{
-			Repo:   fullRepo,
-			Number: issNum,
-			Label:  p.Label.Name,
-		})
-		if len(changes) == 0 {
-			return
-		}
-		c.bumpLocalDeltaAt(key)
+		c.applyIssueLabelMutationDelta(owner, fullRepo, issNum, key, "unlabeled", p.Label.Name,
+			itemstate.IssueUnlabeled{Repo: fullRepo, Number: issNum, Label: p.Label.Name})
 
 		// milestoned, demilestoned, locked, unlocked, pinned, unpinned:
 		// no state in the engine's pipeline depends on these fields.
 	}
+}
+
+// applyIssueLabelMutationDelta is the shared body for the "labeled"/"unlabeled"
+// cases of applyIssuesDelta: echo the match, ensure the issue is in the Store,
+// apply the given mutation, and bump the local delta on a real change.
+func (c *CacheImpl) applyIssueLabelMutationDelta(owner, fullRepo string, issNum int, key, action, labelName string, mutation itemstate.Mutation) {
+	if c.matchEchoFn != nil {
+		c.matchEchoFn("issues", action, key+"+"+labelName)
+	}
+	if err := c.ensureIssueInStore(owner, fullRepo, issNum); err != nil {
+		c.logFn("[cache] applyIssuesDelta(%s): ensure #%d: %v\n", action, issNum, err)
+		return
+	}
+	_, changes, _ := c.store.Apply(mutation)
+	if len(changes) == 0 {
+		return
+	}
+	c.bumpLocalDeltaAt(key)
 }
 
 func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
