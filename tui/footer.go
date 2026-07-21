@@ -74,16 +74,6 @@ func supportsOSC8() bool {
 	return false
 }
 
-// applyOSC8 wraps the first occurrence of title in plain with an OSC 8 hyperlink
-// pointing to boardURL. If title or boardURL is empty, or if the terminal does not
-// support OSC 8, plain is returned unchanged.
-func applyOSC8(plain, title, boardURL string) string {
-	if title == "" || boardURL == "" || !supportsOSC8() {
-		return plain
-	}
-	return strings.Replace(plain, title, termenv.Hyperlink(boardURL, title), 1)
-}
-
 // renderWithOSC8 applies dimStyle to plain text but preserves OSC 8 hyperlinks.
 // Renders the entire string in dim first, then replaces the plain title with
 // the OSC 8 hyperlinked version so SGR codes flow through naturally.
