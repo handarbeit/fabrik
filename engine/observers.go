@@ -199,7 +199,6 @@ func (o *PushUnblockObserver) OnChange(change itemstate.Change, snap itemstate.S
 		closedRepo := change.Repo
 		closedNum := change.Number
 
-		matched := 0
 		for _, x := range o.Store.All() {
 			xState := x.State()
 
@@ -242,13 +241,11 @@ func (o *PushUnblockObserver) OnChange(change itemstate.Change, snap itemstate.S
 				continue
 			}
 			xNum := xState.Number
-			matched++
 			o.logf("blocker %s#%d closed → removing fabrik:blocked from dependent %s#%d\n",
 				closedRepo, closedNum, xState.Repo, xNum)
 			go o.Remove(xOwner, xRepo, xNum)
 		}
 		// Silent when no dependents match — common case for closes of unrelated issues.
-		_ = matched
 	}
 
 	// Path 2: dependent's BlockedBy just populated via deep-fetch → check only this item.
