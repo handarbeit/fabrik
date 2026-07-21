@@ -1,7 +1,10 @@
 package engine
 
 // TestAddCommentCompliance verifies that every AddComment call site in the
-// engine source passes a body that begins with the canonical "🏭 **Fabrik"
+// engine source — plus every body/comment argument passed through the
+// e.postComment / e.postItemComment / e.pauseIssue mutation helpers (which
+// funnel into the single canonical e.client.AddComment call inside
+// postComment) — passes a body that begins with the canonical "🏭 **Fabrik"
 // header.  This ensures findNewComments' prefix dedup in comments.go catches
 // all engine-generated comments and prevents Fabrik from processing its own
 // output on the next poll.
@@ -13,6 +16,11 @@ package engine
 //   - It is a local variable where any assignment in the same function scope
 //     is compliant (i.e. a fmt.Sprintf whose format string starts with
 //     "🏭 **Fabrik", or a call to the canonical formatters).
+//
+// The e.client.AddComment call inside postComment itself (mutate.go) is
+// exempt from the literal check — it passes through postComment's own body
+// parameter, and callers of postComment/postItemComment/pauseIssue are
+// checked instead, at their own body/comment argument.
 //
 // Test files (*_test.go) are excluded because mock AddComment implementations
 // may accept arbitrary bodies.
@@ -52,15 +60,51 @@ func TestAddCommentCompliance(t *testing.T) {
 			if !ok || fd.Body == nil {
 				continue
 			}
-			checkAddCommentBody(t, fset, fd.Body)
+			// Each function in the funnel (postComment -> postItemComment,
+			// postComment -> pauseIssue) passes its own body/comment parameter
+			// straight through to the next call — that inner call is exempt
+			// from the literal check because the funnel function's callers are
+			// already checked at their own body/comment argument (see
+			// bodyBearingCalls below), so the exemption doesn't create a gap.
+			var skipCall string
+			if fd.Name != nil {
+				skipCall = funnelSkips[fd.Name.Name]
+			}
+			checkAddCommentBody(t, fset, fd.Body, skipCall)
 		}
 	}
 }
 
-// checkAddCommentBody walks a function body, finds all AddComment calls, and
-// reports any whose body argument is non-compliant.  It recurses into nested
-// function literals with their own assignment context.
-func checkAddCommentBody(t *testing.T, fset *token.FileSet, body *ast.BlockStmt) {
+// bodyBearingCalls maps the selector name of a body/comment-bearing call to
+// the index of its body/comment argument, covering the canonical
+// e.client.AddComment plus the e.postComment -> e.postItemComment /
+// e.pauseIssue mutation-helper call graph that funnels into it.
+var bodyBearingCalls = map[string]int{
+	"AddComment":      3, // (owner, repo string, issueNumber int, body string)
+	"postComment":     1, // (item, body string, react, echo bool)
+	"postItemComment": 1, // (item, body string, react bool)
+	"pauseIssue":      1, // (item, comment string, opts pauseOpts)
+}
+
+// funnelSkips maps a function name to the single body-bearing call name that
+// function is exempt from checking on itself, because that call passes
+// through the function's own body/comment parameter — a pass-through, not a
+// new body. The funnel is: postComment (raw AddComment) <- postItemComment
+// (postComment) <- pauseIssue (postComment). Every function's *callers* are
+// still checked normally via bodyBearingCalls.
+var funnelSkips = map[string]string{
+	"postComment":     "AddComment",
+	"postItemComment": "postComment",
+	"pauseIssue":      "postComment",
+}
+
+// checkAddCommentBody walks a function body, finds all AddComment (and
+// postComment/postItemComment/pauseIssue) calls, and reports any whose
+// body/comment argument is non-compliant.  It recurses into nested function
+// literals with their own assignment context. skipCall, when non-empty,
+// exempts that one call name from the check (used only for a funnel
+// function's own pass-through call, whose callers are checked instead).
+func checkAddCommentBody(t *testing.T, fset *token.FileSet, body *ast.BlockStmt, skipCall string) {
 	t.Helper()
 
 	// Collect all variable assignments within this function scope (excluding
@@ -72,25 +116,30 @@ func checkAddCommentBody(t *testing.T, fset *token.FileSet, body *ast.BlockStmt)
 		switch v := n.(type) {
 		case *ast.FuncLit:
 			// Recurse with a fresh assignment scope for the nested function.
-			checkAddCommentBody(t, fset, v.Body)
+			checkAddCommentBody(t, fset, v.Body, "")
 			return false // prevent outer Inspect from also walking into this body
 
 		case *ast.CallExpr:
 			sel, ok := v.Fun.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "AddComment" {
+			if !ok {
 				return true
 			}
-			// AddComment signature: (owner, repo string, issueNumber int, body string)
-			// body is the 4th argument (index 3).
-			if len(v.Args) < 4 {
+			argIdx, tracked := bodyBearingCalls[sel.Sel.Name]
+			if !tracked {
 				return true
 			}
-			bodyArg := v.Args[3]
+			if skipCall != "" && sel.Sel.Name == skipCall {
+				return true
+			}
+			if len(v.Args) <= argIdx {
+				return true
+			}
+			bodyArg := v.Args[argIdx]
 			if !isCompliantAddCommentArg(bodyArg, assigns) {
 				pos := fset.Position(v.Pos())
 				t.Errorf(
-					"non-compliant AddComment body at %s:%d — body must start with %q or go through formatOutputComment/formatPRSummaryComment/formatReviewFeedbackComment/buildAwaitingInputComment",
-					pos.Filename, pos.Line, "🏭 **Fabrik",
+					"non-compliant %s body at %s:%d — body must start with %q or go through formatOutputComment/formatPRSummaryComment/formatReviewFeedbackComment/buildAwaitingInputComment",
+					sel.Sel.Name, pos.Filename, pos.Line, "🏭 **Fabrik",
 				)
 			}
 		}

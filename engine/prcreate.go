@@ -270,7 +270,7 @@ func (e *Engine) verifyAndHealLinkage(ctx context.Context, item gh.ProjectItem, 
 	currentBody, fetchErr := e.client.GetIssueBody(owner, repo, pr.Number)
 	if fetchErr != nil {
 		e.logf(item.Number, "warn", "verifyAndHealLinkage: could not fetch PR #%d body: %v\n", pr.Number, fetchErr)
-		e.pauseForBrokenLinkage(owner, repo, item, pr.Number, closingLine, "could not fetch PR body for auto-heal")
+		e.pauseForBrokenLinkage(item, pr.Number, closingLine, "could not fetch PR body for auto-heal")
 		return false
 	}
 
@@ -278,7 +278,7 @@ func (e *Engine) verifyAndHealLinkage(ctx context.Context, item gh.ProjectItem, 
 	const maxBodyLen = 65300
 	if len(currentBody)+len(closingLine)+2 > maxBodyLen {
 		e.logf(item.Number, "warn", "verifyAndHealLinkage: PR #%d body is too long (%d chars) to prepend closing keyword\n", pr.Number, len(currentBody))
-		e.pauseForBrokenLinkage(owner, repo, item, pr.Number, closingLine, "PR body too long for auto-heal")
+		e.pauseForBrokenLinkage(item, pr.Number, closingLine, "PR body too long for auto-heal")
 		return false
 	}
 
@@ -286,7 +286,7 @@ func (e *Engine) verifyAndHealLinkage(ctx context.Context, item gh.ProjectItem, 
 	snap, _ := e.store.Get(repoStr, item.Number)
 	if snap.LinkageHealAttempted(stage.Name, prSHA) {
 		e.logf(item.Number, "warn", "verifyAndHealLinkage: heal already attempted for PR #%d (SHA %s) — pausing\n", pr.Number, prSHA)
-		e.pauseForBrokenLinkage(owner, repo, item, pr.Number, closingLine, "auto-heal was already attempted once but linkage is still missing")
+		e.pauseForBrokenLinkage(item, pr.Number, closingLine, "auto-heal was already attempted once but linkage is still missing")
 		return false
 	}
 
@@ -305,7 +305,7 @@ func (e *Engine) verifyAndHealLinkage(ctx context.Context, item gh.ProjectItem, 
 	// no write-through: excluded — issue body is not read from cache for dispatch decisions
 	if err := e.client.UpdateIssueBody(owner, repo, pr.Number, healedBody); err != nil {
 		e.logf(item.Number, "warn", "verifyAndHealLinkage: could not update PR #%d body: %v\n", pr.Number, err)
-		e.pauseForBrokenLinkage(owner, repo, item, pr.Number, closingLine, fmt.Sprintf("UpdateIssueBody failed: %v", err))
+		e.pauseForBrokenLinkage(item, pr.Number, closingLine, fmt.Sprintf("UpdateIssueBody failed: %v", err))
 		return false
 	}
 	if e.webhookMgr != nil {
@@ -348,13 +348,13 @@ func (e *Engine) verifyAndHealLinkage(ctx context.Context, item gh.ProjectItem, 
 
 	// Still not linked after heal — pause with recovery commands.
 	e.logf(item.Number, "warn", "verifyAndHealLinkage: linkage still missing after heal — pausing\n")
-	e.pauseForBrokenLinkage(owner, repo, item, pr.Number, closingLine, "auto-heal completed but GitHub still reports no closing-issue linkage")
+	e.pauseForBrokenLinkage(item, pr.Number, closingLine, "auto-heal completed but GitHub still reports no closing-issue linkage")
 	return false
 }
 
 // pauseForBrokenLinkage pauses the issue with fabrik:paused and posts a comment
 // naming the failure mode and providing a copy-paste recovery command.
-func (e *Engine) pauseForBrokenLinkage(owner, repo string, item gh.ProjectItem, prNumber int, closingLine, reason string) {
+func (e *Engine) pauseForBrokenLinkage(item gh.ProjectItem, prNumber int, closingLine, reason string) {
 	msg := fmt.Sprintf(
 		"🏭 **Fabrik — broken PR↔issue linkage**\n\n"+
 			"PR #%d exists but is not linked to issue #%d via a closing keyword (`closingIssuesReferences` is empty). "+
@@ -368,12 +368,7 @@ func (e *Engine) pauseForBrokenLinkage(owner, repo string, item gh.ProjectItem, 
 			"Then remove `fabrik:paused` to resume.",
 		prNumber, item.Number, reason, prNumber, closingLine, prNumber,
 	)
-	e.addPausedLabelToItem(owner, repo, item)
-	if dbID, err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
-		e.logf(item.Number, "warn", "could not post broken-linkage comment: %v\n", err)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-			DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
-		})
-	}
+	e.pauseIssue(item, msg, pauseOpts{
+		labelEcho: true,
+	})
 }
