@@ -319,7 +319,7 @@ func TestEjectMember_PostsComment(t *testing.T) {
 	eng := trainTestEngine(t, client, claude, NewWorktreeManager(t.TempDir()))
 
 	member := makeTrainItem(1, "Test Issue")
-	eng.ejectMember(context.Background(), "owner", "repo", member, "conflict with #2")
+	eng.ejectMember("owner", "repo", member, "conflict with #2")
 
 	client.mu.Lock()
 	calls := client.addCommentCalls
@@ -340,11 +340,10 @@ func TestEjectMember_PausesAfterMaxEjections(t *testing.T) {
 	// MaxMergeTrainEjections = 3
 
 	member := makeTrainItem(5, "Problem Issue")
-	ctx := context.Background()
 
 	// First two ejections should not add pause labels.
-	eng.ejectMember(ctx, "owner", "repo", member, "conflict")
-	eng.ejectMember(ctx, "owner", "repo", member, "conflict")
+	eng.ejectMember("owner", "repo", member, "conflict")
+	eng.ejectMember("owner", "repo", member, "conflict")
 
 	client.mu.Lock()
 	pauseCount := 0
@@ -359,7 +358,7 @@ func TestEjectMember_PausesAfterMaxEjections(t *testing.T) {
 	}
 
 	// Third ejection should trigger pause.
-	eng.ejectMember(ctx, "owner", "repo", member, "conflict")
+	eng.ejectMember("owner", "repo", member, "conflict")
 
 	client.mu.Lock()
 	pauseCount = 0
@@ -389,13 +388,12 @@ func TestEjectMember_EjectionCountIsPerMember(t *testing.T) {
 
 	member1 := makeTrainItem(1, "Issue 1")
 	member2 := makeTrainItem(2, "Issue 2")
-	ctx := context.Background()
 
 	// Eject member 1 three times and member 2 once.
-	eng.ejectMember(ctx, "owner", "repo", member1, "conflict")
-	eng.ejectMember(ctx, "owner", "repo", member1, "conflict")
-	eng.ejectMember(ctx, "owner", "repo", member1, "conflict") // triggers pause for #1
-	eng.ejectMember(ctx, "owner", "repo", member2, "conflict") // should NOT trigger pause for #2
+	eng.ejectMember("owner", "repo", member1, "conflict")
+	eng.ejectMember("owner", "repo", member1, "conflict")
+	eng.ejectMember("owner", "repo", member1, "conflict") // triggers pause for #1
+	eng.ejectMember("owner", "repo", member2, "conflict") // should NOT trigger pause for #2
 
 	client.mu.Lock()
 	pausedIssues := make(map[int]bool)
@@ -434,11 +432,10 @@ func TestEjectMember_PauseVisibleToCacheAndEcho(t *testing.T) {
 	eng.webhookMgr = wm
 
 	member := makeTrainItem(5, "Problem Issue")
-	ctx := context.Background()
 
-	eng.ejectMember(ctx, "owner", "repo", member, "conflict")
-	eng.ejectMember(ctx, "owner", "repo", member, "conflict")
-	eng.ejectMember(ctx, "owner", "repo", member, "conflict") // triggers pause
+	eng.ejectMember("owner", "repo", member, "conflict")
+	eng.ejectMember("owner", "repo", member, "conflict")
+	eng.ejectMember("owner", "repo", member, "conflict") // triggers pause
 
 	labels, err := cache.FetchLabels("owner", "repo", 5)
 	if err != nil {
@@ -1992,7 +1989,7 @@ func TestDissolveBatch(t *testing.T) {
 	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm}
 	members := []gh.ProjectItem{makeTrainItem(1, "One"), makeTrainItem(2, "Two")}
 
-	eng.dissolveBatch(context.Background(), state, p, 200, "merge-train-main-1", members, "the base branch advanced")
+	eng.dissolveBatch(state, p, 200, "merge-train-main-1", members, "the base branch advanced")
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -2033,7 +2030,7 @@ func TestDissolveBatch_NoPR(t *testing.T) {
 	eng.mergeTrainInFlight.Store("owner/repo", state)
 	p := trialParams{owner: "owner", repo: "repo", baseBranch: "main", wm: wm}
 
-	eng.dissolveBatch(context.Background(), state, p, 0, "merge-train-main-1", []gh.ProjectItem{makeTrainItem(1, "One")}, "orphan")
+	eng.dissolveBatch(state, p, 0, "merge-train-main-1", []gh.ProjectItem{makeTrainItem(1, "One")}, "orphan")
 
 	client.mu.Lock()
 	defer client.mu.Unlock()

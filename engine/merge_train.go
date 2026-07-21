@@ -387,12 +387,12 @@ func (e *Engine) fetchTrainMembers(ctx context.Context, owner, repo string, batc
 		pr, fetchErr := e.client.FetchLinkedPR(owner, repo, member.Number)
 		if fetchErr != nil || pr == nil {
 			e.logf(member.Number, "merge-train", "cannot fetch linked PR for #%d: %v — ejecting\n", member.Number, fetchErr)
-			e.ejectMember(ctx, owner, repo, member, fmt.Sprintf("ejected from merge-train — could not fetch linked PR: %v", fetchErr))
+			e.ejectMember(owner, repo, member, fmt.Sprintf("ejected from merge-train — could not fetch linked PR: %v", fetchErr))
 			continue
 		}
 		if pr.HeadSHA == "" {
 			e.logf(member.Number, "merge-train", "#%d has no PR head SHA — ejecting\n", member.Number)
-			e.ejectMember(ctx, owner, repo, member, "ejected from merge-train — linked PR has no head SHA")
+			e.ejectMember(owner, repo, member, "ejected from merge-train — linked PR has no head SHA")
 			continue
 		}
 		members = append(members, trainMember{item: member, prNum: pr.Number, headSHA: pr.HeadSHA})
@@ -445,7 +445,7 @@ func (e *Engine) assembleTrialBranch(ctx context.Context, p trialParams, members
 		abortCmd.Dir = wtDir
 		abortCmd.CombinedOutput() // best-effort
 		e.logf(member.item.Number, "merge-train", "cannot resolve conflict for #%d — ejecting\n", member.item.Number)
-		e.ejectMember(ctx, p.owner, p.repo, member.item, fmt.Sprintf("ejected from merge-train batch — unresolvable conflict (PR SHA %s)", member.headSHA))
+		e.ejectMember(p.owner, p.repo, member.item, fmt.Sprintf("ejected from merge-train batch — unresolvable conflict (PR SHA %s)", member.headSHA))
 	}
 
 	if len(survivors) == 0 {
@@ -591,7 +591,7 @@ func (e *Engine) handleRedBatch(ctx context.Context, state *mergeTrainWorkerStat
 
 	// Eject the isolated poisoner (D-a shared counter, D-c comment, cap→pause reuse).
 	e.logf(poisoner.item.Number, "merge-train", "bisection isolated #%d as the batch poisoner — ejecting\n", poisoner.item.Number)
-	e.ejectMember(ctx, p.owner, p.repo, poisoner.item,
+	e.ejectMember(p.owner, p.repo, poisoner.item,
 		fmt.Sprintf("ejected from merge-train — the combined Validate fails whenever #%d is in the batch (isolated by halving bisection). It will be retried in a future train with a different composition.", poisoner.item.Number))
 
 	var survivors []trainMember
@@ -648,7 +648,7 @@ func (e *Engine) landOneAtATime(ctx context.Context, state *mergeTrainWorkerStat
 		case TrainCIRed:
 			e.cleanupTrialArtifacts(p.wm, trialName)
 			e.logf(m.item.Number, "merge-train", "#%d fails combined Validate even in isolation — ejecting\n", m.item.Number)
-			e.ejectMember(ctx, p.owner, p.repo, m.item,
+			e.ejectMember(p.owner, p.repo, m.item,
 				fmt.Sprintf("ejected from merge-train — #%d fails the combined Validate even when landed alone.", m.item.Number))
 		default: // TrainCIPending
 			e.cleanupTrialArtifacts(p.wm, trialName)
@@ -831,8 +831,7 @@ func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.Pr
 
 // ejectMember posts an ejection comment on the member issue, increments the ejection
 // counter, and pauses the member after MaxMergeTrainEjections.
-func (e *Engine) ejectMember(ctx context.Context, owner, repo string, memberItem gh.ProjectItem, reason string) {
-	_ = ctx
+func (e *Engine) ejectMember(owner, repo string, memberItem gh.ProjectItem, reason string) {
 	msg := fmt.Sprintf("🏭 **Fabrik merge-train — ejected**\n\n%s\n\n"+
 		"This issue remains in the Queued column and will be retried in a future train with a different composition.",
 		reason)
@@ -1325,8 +1324,7 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 // Idempotent: CloseIssue on an already-closed PR and CleanupTrainWorktree on an
 // already-deleted branch are best-effort no-ops, so a crash mid-dissolve is safe
 // to retry (the explanatory comment may double-post — acceptable and observable).
-func (e *Engine) dissolveBatch(ctx context.Context, state *mergeTrainWorkerState, p trialParams, prNum int, trialName string, members []gh.ProjectItem, reason string) {
-	_ = ctx
+func (e *Engine) dissolveBatch(state *mergeTrainWorkerState, p trialParams, prNum int, trialName string, members []gh.ProjectItem, reason string) {
 	repoKey := p.owner + "/" + p.repo
 	e.logf(0, "merge-train", "dissolving batch for %s (%s) — %d member(s) remain in Queued\n", repoKey, reason, len(members))
 
@@ -1396,7 +1394,7 @@ func (e *Engine) landGreenBatch(ctx context.Context, state *mergeTrainWorkerStat
 
 		// Main moved under the batch.
 		if cycles >= maxCycles {
-			e.dissolveBatch(ctx, state, p, prNum, trialName, membersToItems(survivors),
+			e.dissolveBatch(state, p, prNum, trialName, membersToItems(survivors),
 				fmt.Sprintf("the base branch advanced under the batch and it still could not catch up after %d rebase attempt(s) (main-moved rebase limit)", maxCycles))
 			return
 		}
@@ -1433,14 +1431,14 @@ func (e *Engine) landGreenBatch(ctx context.Context, state *mergeTrainWorkerStat
 		state.mu.Unlock()
 
 		if aerr != nil || len(newSurvivors) == 0 {
-			e.dissolveBatch(ctx, state, p, newPRNum, newTrialName, membersToItems(survivors),
+			e.dissolveBatch(state, p, newPRNum, newTrialName, membersToItems(survivors),
 				"the base branch advanced and the batch could not be re-assembled onto it")
 			return
 		}
 		if result != TrainCIGreen {
 			// A red/pending re-validation after a rebase dissolves (disjoint from
 			// bisection); the next poll re-forms a fresh train that bisects cleanly.
-			e.dissolveBatch(ctx, state, p, newPRNum, newTrialName, membersToItems(newSurvivors),
+			e.dissolveBatch(state, p, newPRNum, newTrialName, membersToItems(newSurvivors),
 				"the base branch advanced and the re-validated batch was no longer green")
 			return
 		}
@@ -1535,7 +1533,7 @@ func (e *Engine) reconstructTrainState(ctx context.Context, state *mergeTrainWor
 		// Open PR without a backing trial branch → orphan → dissolve. Comment only on
 		// this PR's own members (never on unrelated fresh Queued items).
 		members := filterBatchByNumbers(batch, parseTrainMembers(trainPR.Body))
-		e.dissolveBatch(ctx, state, p, trainPR.Number, trialName, members,
+		e.dissolveBatch(state, p, trainPR.Number, trialName, members,
 			"reconstruct: found an open integration PR without a backing trial branch after a restart")
 		return true
 	}
@@ -1594,13 +1592,13 @@ func (e *Engine) resumeTrain(ctx context.Context, state *mergeTrainWorkerState, 
 	repoKey := p.owner + "/" + p.repo
 	items := filterBatchByNumbers(batch, parseTrainMembers(pr.Body))
 	if len(items) == 0 {
-		e.dissolveBatch(ctx, state, p, pr.Number, trialName, items,
+		e.dissolveBatch(state, p, pr.Number, trialName, items,
 			"reconstruct: an open train PR had no members still in Queued after a restart")
 		return
 	}
 	survivors := e.fetchTrainMembers(ctx, p.owner, p.repo, items)
 	if len(survivors) == 0 {
-		e.dissolveBatch(ctx, state, p, pr.Number, trialName, items,
+		e.dissolveBatch(state, p, pr.Number, trialName, items,
 			"reconstruct: could not resolve any member PRs while resuming the batch")
 		return
 	}
@@ -1624,7 +1622,7 @@ func (e *Engine) resumeTrain(ctx context.Context, state *mergeTrainWorkerState, 
 		e.landGreenBatch(ctx, state, p, survivors)
 		return
 	}
-	e.dissolveBatch(ctx, state, p, pr.Number, trialName, items,
+	e.dissolveBatch(state, p, pr.Number, trialName, items,
 		"reconstruct: the resumed trial did not validate green — re-forming a fresh train")
 }
 
