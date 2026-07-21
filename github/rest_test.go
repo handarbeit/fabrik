@@ -1,6 +1,7 @@
 package github
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -213,6 +214,214 @@ func TestRestPost_500NoHint(t *testing.T) {
 	}
 	if containsStr(err.Error(), "classic personal access token") {
 		t.Errorf("500 error should not contain auth hint, got: %q", err.Error())
+	}
+}
+
+func TestDo_SuccessBodyPassthrough(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("test-token", srv.URL)
+	resp, body, err := c.do("GET", srv.URL+"/test", nil)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("StatusCode = %d, want 200", resp.StatusCode)
+	}
+	if string(body) != `{"ok":true}` {
+		t.Errorf("body = %q, want %q", string(body), `{"ok":true}`)
+	}
+}
+
+func TestDo_ContentTypeOnlyWhenBodyNonNil(t *testing.T) {
+	var gotCT string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCT = r.Header.Get("Content-Type")
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	if _, _, err := c.do("GET", srv.URL+"/test", nil); err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	if gotCT != "" {
+		t.Errorf("Content-Type = %q, want empty for nil body", gotCT)
+	}
+
+	if _, _, err := c.do("POST", srv.URL+"/test", map[string]string{"k": "v"}); err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	if gotCT != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json for non-nil body", gotCT)
+	}
+}
+
+func TestDo_404MapsToErrNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404)
+		w.Write([]byte(`{"message":"Not Found"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	_, _, err := c.do("GET", srv.URL+"/test", nil)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("do: expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestDo_405MapsToErrMethodNotAllowed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(405)
+		w.Write([]byte(`{"message":"Not Allowed"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	_, _, err := c.do("PUT", srv.URL+"/test", map[string]string{"k": "v"})
+	if !errors.Is(err, ErrMethodNotAllowed) {
+		t.Fatalf("do: expected ErrMethodNotAllowed, got %v", err)
+	}
+}
+
+func TestDo_422MapsToErrUnprocessableEntity(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(422)
+		w.Write([]byte(`{"message":"Validation Failed"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	_, _, err := c.do("POST", srv.URL+"/test", map[string]string{"k": "v"})
+	if !errors.Is(err, ErrUnprocessableEntity) {
+		t.Fatalf("do: expected ErrUnprocessableEntity, got %v", err)
+	}
+}
+
+func TestDo_Generic5xxError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+		w.Write([]byte(`Internal Server Error`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	_, _, err := c.do("GET", srv.URL+"/test", nil)
+	if err == nil {
+		t.Fatal("expected error for 500 response")
+	}
+	if errors.Is(err, ErrNotFound) || errors.Is(err, ErrMethodNotAllowed) || errors.Is(err, ErrUnprocessableEntity) {
+		t.Errorf("500 should not map to a sentinel, got %v", err)
+	}
+}
+
+func TestDo_AuthHintOn401(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	_, _, err := c.do("GET", srv.URL+"/test", nil)
+	if err == nil || !containsStr(err.Error(), "classic personal access token") {
+		t.Fatalf("expected auth hint in error, got %v", err)
+	}
+}
+
+func TestDo_RateLimitHeaderCapture(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Limit", "5000")
+		w.Header().Set("X-RateLimit-Remaining", "4999")
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	if _, _, err := c.do("GET", srv.URL+"/test", nil); err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	rest, _ := c.RateLimitStats()
+	if rest.Limit != 5000 {
+		t.Errorf("rest.Limit = %d, want 5000", rest.Limit)
+	}
+}
+
+func TestDo_MarshalError(t *testing.T) {
+	c := NewClientWithBaseURL("token", "http://example.com")
+	_, _, err := c.do("POST", "http://example.com/test", make(chan int))
+	if err == nil {
+		t.Fatal("expected marshal error for unsupported body type")
+	}
+}
+
+func TestDo_RequestCreationError(t *testing.T) {
+	c := NewClientWithBaseURL("token", "http://example.com")
+	_, _, err := c.do("GET", "://invalid-url", nil)
+	if err == nil {
+		t.Fatal("expected error for invalid URL")
+	}
+}
+
+// Sentinel-mapping coverage for helpers that did not check these codes before
+// the do() core unified the mapping (restGet, restPostWithResponse never
+// mapped 404/405/422; restGetJSON/restDelete never mapped 405/422).
+
+func TestRestGet_404MapsToErrNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	_, err := c.restGet(srv.URL + "/test")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("restGet: expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestRestPostWithResponse_404MapsToErrNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	var target struct{}
+	err := c.restPostWithResponse(srv.URL+"/test", map[string]string{}, &target)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("restPostWithResponse: expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestRestGetJSON_405MapsToErrMethodNotAllowed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(405)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	var target struct{}
+	err := c.restGetJSON(srv.URL+"/test", &target)
+	if !errors.Is(err, ErrMethodNotAllowed) {
+		t.Fatalf("restGetJSON: expected ErrMethodNotAllowed, got %v", err)
+	}
+}
+
+func TestRestDelete_422MapsToErrUnprocessableEntity(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(422)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	err := c.restDelete(srv.URL + "/test")
+	if !errors.Is(err, ErrUnprocessableEntity) {
+		t.Fatalf("restDelete: expected ErrUnprocessableEntity, got %v", err)
 	}
 }
 
