@@ -100,8 +100,10 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 				pr.Number, item.Number, item.Number,
 				pr.Number, item.Number, pr.Number,
 			)
-			e.addPausedLabelToItem(owner, repo, item)
-			e.postComment(item, msg, false, false) //nolint:errcheck // failure already logged by postComment
+			e.pauseIssue(item, msg, pauseOpts{
+				labelEcho:  true,
+				labelFirst: true,
+			})
 			// Return (false, false): the gate did not time out — it paused for a different reason.
 			// The catch-up loop will not reapply fabrik:awaiting-review.
 			return false, false

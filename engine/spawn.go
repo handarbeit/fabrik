@@ -301,8 +301,9 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		if !ok {
 			msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nInvalid repo in spawn block #%d: `%s`. Created so far: %s\n\nRemove `fabrik:paused` after fixing the Plan output to retry.",
 				i+1, block.Repo, formatSpawnedList(spawned))
-			e.postComment(item, msg, false, false) //nolint:errcheck // failure already logged by postComment
-			e.addPausedLabelToItem(owner, repo, item)
+			e.pauseIssue(item, msg, pauseOpts{
+				labelEcho: true,
+			})
 			return false, fmt.Errorf("pre-implement: invalid repo %q in block %d", block.Repo, i+1)
 		}
 
@@ -311,8 +312,9 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		if err != nil {
 			msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nFailed to create child issue %d/%d in `%s`: `%v`\n\nCreated so far: %s\n\nManually close any orphaned children, remove `fabrik:paused`, then re-advance to retry.",
 				i+1, len(blocks), block.Repo, err, formatSpawnedList(spawned))
-			e.postComment(item, msg, false, false) //nolint:errcheck // failure already logged by postComment
-			e.addPausedLabelToItem(owner, repo, item)
+			e.pauseIssue(item, msg, pauseOpts{
+				labelEcho: true,
+			})
 			return false, fmt.Errorf("pre-implement: creating child %d: %w", i+1, err)
 		}
 		e.logf(item.Number, "spawn", "created child %s/%s#%d\n", childOwner, childRepo, childNumber)
@@ -323,8 +325,9 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		if err != nil {
 			msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nFailed to add child %s/%s#%d to project board: `%v`\n\nCreated so far: %s\n\nManually close any orphaned children, remove `fabrik:paused`, then re-advance to retry.",
 				childOwner, childRepo, childNumber, err, formatSpawnedList(spawned))
-			e.postComment(item, msg, false, false) //nolint:errcheck // failure already logged by postComment
-			e.addPausedLabelToItem(owner, repo, item)
+			e.pauseIssue(item, msg, pauseOpts{
+				labelEcho: true,
+			})
 			return false, fmt.Errorf("pre-implement: adding child %s#%d to project: %w", block.Repo, childNumber, err)
 		}
 
@@ -333,8 +336,9 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		if err := e.client.AddBlockedByIssue(item.ID, childNodeID); err != nil {
 			msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nFailed to link child %s/%s#%d as blocked-by of parent: `%v`\n\nCreated so far: %s\n\nManually close any orphaned children, remove `fabrik:paused`, then re-advance to retry.",
 				childOwner, childRepo, childNumber, err, formatSpawnedList(spawned))
-			e.postComment(item, msg, false, false) //nolint:errcheck // failure already logged by postComment
-			e.addPausedLabelToItem(owner, repo, item)
+			e.pauseIssue(item, msg, pauseOpts{
+				labelEcho: true,
+			})
 			return false, fmt.Errorf("pre-implement: linking child %s#%d as blocked-by: %w", block.Repo, childNumber, err)
 		}
 

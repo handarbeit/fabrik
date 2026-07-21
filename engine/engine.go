@@ -478,9 +478,10 @@ func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error
 		e.cloneInFlight.Delete(nameWithOwner)
 
 		msg := fmt.Sprintf("🏭 **Fabrik — cannot clone repo**\n\nFailed to clone `%s/%s`:\n```\n%v\n```\nHuman intervention required. Fix the clone issue and remove `fabrik:paused` to retry.", owner, repo, err)
-		e.postItemComment(item, msg, true)
-		e.applyLabelAdd(item, "fabrik:paused", false)
-		e.applyLabelAdd(item, "fabrik:awaiting-input", false)
+		e.pauseIssue(item, msg, pauseOpts{
+			awaitingInput: true,
+			reactRocket:   true,
+		})
 		// Append a history entry so the TUI records the failure.
 		hist := tui.LoadHistory()
 		hist = append(hist, tui.HistoryEntry{
@@ -582,8 +583,8 @@ func (e *Engine) ensureSpawnTargetReady(ctx context.Context, targetOwner, target
 func (e *Engine) postSpawnCloneError(parentOwner, parentRepo string, parentItem gh.ProjectItem, targetOwner, targetRepo string, cloneErr error) {
 	msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nFailed to clone spawn target `%s/%s`:\n```\n%v\n```\nFix the clone issue (SSH key, PAT access) and remove `fabrik:paused` to retry.",
 		targetOwner, targetRepo, cloneErr)
-	e.postItemComment(parentItem, msg, false)
-	e.applyLabelAdd(parentItem, "fabrik:paused", false)
-	e.applyLabelAdd(parentItem, "fabrik:awaiting-input", false)
+	e.pauseIssue(parentItem, msg, pauseOpts{
+		awaitingInput: true,
+	})
 	e.logf(parentItem.Number, "error", "cannot clone spawn target %s/%s: %v — pausing parent\n", targetOwner, targetRepo, cloneErr)
 }
