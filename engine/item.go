@@ -577,12 +577,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			AcquiredAt: workerStartedAt,
 			Worker:     &itemstate.WorkerHandle{StageName: stage.Name, StartedAt: workerStartedAt, LastSignAt: workerStartedAt},
 		})
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), lockLabel)
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+lockLabel)
-		}
+		e.syncLabelAdd(item, lockLabel, true)
 		workerDone = make(chan struct{})
 		e.startHeartbeat(ctx, repoStr, item.Number, workerDone)
 	}
@@ -664,12 +659,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		e.logf(item.Number, "warn", "could not add in_progress label: %v\n", err)
 	} else {
 		inProgressAdded = true
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), inProgressLabel)
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+inProgressLabel)
-		}
+		e.syncLabelAdd(item, inProgressLabel, true)
 	}
 
 	// Ensure the WorktreeManager for this item's repo is ready.
@@ -948,13 +938,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		prBlock, prBlockErr := ParsePRCreateBlock(output)
 		if prBlockErr != nil {
 			msg := fmt.Sprintf("🏭 **Fabrik — malformed FABRIK_PR_CREATE marker**\n\n%v\n\nRemove `fabrik:paused` after fixing the skill output to retry.", prBlockErr)
-			if dbID, commentErr := e.client.AddComment(owner, repo, item.Number, msg); commentErr != nil {
-				e.logf(item.Number, "warn", "could not post FABRIK_PR_CREATE error comment: %v\n", commentErr)
-			} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
-					DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
-				})
-			}
+			e.postComment(item, msg, false, false) //nolint:errcheck // failure already logged by postComment
 			e.addPausedLabelToItem(owner, repo, item)
 			releaseLock()
 			return nil
@@ -1001,22 +985,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			e.postOutputToPR(item, stage.Name, postOutput, footer, branch, commit, mainSHA, timestamp)
 		} else {
 			comment := formatOutputComment(stage.Name, postOutput, footer, branch, commit, mainSHA, timestamp)
-			if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
-				e.logf(item.Number, "warn", "could not post comment: %v\n", err)
-			} else {
-				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-					cacheImpl.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
-						DatabaseID: dbID, Body: comment, Author: e.cfg.User, CreatedAt: time.Now(),
-					})
-				}
-				if e.webhookMgr != nil {
-					e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
-				}
-				// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
-				if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-					e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
-				}
-			}
+			e.postItemComment(item, comment, true)
 		}
 	}
 
@@ -1056,22 +1025,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	if claudeRan && err == nil && strings.TrimSpace(output) == "" {
 		e.logf(item.Number, "warn", "stage %q ran without error but produced no output\n", stage.Name)
 		warnComment := fmt.Sprintf("🏭 **Fabrik — empty stage output**\n\nStage **%s** ran without error but produced no output.", stage.Name)
-		if dbID, commentErr := e.client.AddComment(e.cfg.Owner, e.cfg.Repo, item.Number, warnComment); commentErr != nil {
-			e.logf(item.Number, "warn", "could not post empty-output warning: %v\n", commentErr)
-		} else {
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
-					DatabaseID: dbID, Body: warnComment, Author: e.cfg.User, CreatedAt: time.Now(),
-				})
-			}
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
-			}
-			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
-			if reactErr := e.client.AddCommentReaction(e.cfg.Owner, e.cfg.Repo, dbID, "rocket"); reactErr != nil {
-				e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
-			}
-		}
+		e.postItemComment(item, warnComment, true)
 	}
 
 	// Commit any uncommitted changes so partial work isn't lost (e.g., max_turns reached).
@@ -1247,19 +1201,8 @@ func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 func (e *Engine) clearFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 	e.logf(item.Number, "unpause", "clearing failed stage %q after manual unpause\n", stage.Name)
 
-	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	failedLabel := fmt.Sprintf("stage:%s:failed", stage.Name)
-	if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, failedLabel); err != nil &&
-		!errors.Is(err, gh.ErrNotFound) {
-		e.logf(item.Number, "warn", "could not remove failed label: %v\n", err)
-	} else if err == nil {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), failedLabel)
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+failedLabel)
-		}
-	}
+	e.removeLabel(item, failedLabel)
 
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
@@ -1291,9 +1234,7 @@ func (e *Engine) handleRevalidateLabel(item gh.ProjectItem, owner, repo string) 
 		if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, lbl); err != nil {
 			if errors.Is(err, gh.ErrNotFound) {
 				// Label already absent — desired state achieved; sync cache.
-				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(repoStr, item.Number), lbl)
-				}
+				e.syncLabelRemoval(item, lbl, false)
 				continue
 			}
 			e.logf(item.Number, "warn", "revalidate: could not remove %s: %v\n", lbl, err)
@@ -1301,12 +1242,7 @@ func (e *Engine) handleRevalidateLabel(item gh.ProjectItem, owner, repo string) 
 			continue
 		}
 		e.logf(item.Number, "revalidate", "removed label %s\n", lbl)
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(repoStr, item.Number), lbl)
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(repoStr, item.Number)+"+"+lbl)
-		}
+		e.syncLabelRemoval(item, lbl, true)
 	}
 
 	if hasError {
@@ -1316,21 +1252,14 @@ func (e *Engine) handleRevalidateLabel(item gh.ProjectItem, owner, repo string) 
 
 	if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:revalidate"); err != nil {
 		if errors.Is(err, gh.ErrNotFound) {
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(repoStr, item.Number), "fabrik:revalidate")
-			}
+			e.syncLabelRemoval(item, "fabrik:revalidate", false)
 		} else {
 			e.logf(item.Number, "warn", "revalidate: could not remove trigger label: %v\n", err)
 			return
 		}
 	} else {
 		e.logf(item.Number, "revalidate", "removed trigger label fabrik:revalidate\n")
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(repoStr, item.Number), "fabrik:revalidate")
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(repoStr, item.Number)+"+"+"fabrik:revalidate")
-		}
+		e.syncLabelRemoval(item, "fabrik:revalidate", true)
 	}
 
 	e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: "Validate"})
@@ -1362,9 +1291,7 @@ func (e *Engine) handleValidateSHAInvalidation(item gh.ProjectItem, owner, repo 
 	for _, lbl := range labelsToRemove {
 		if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, lbl); err != nil {
 			if errors.Is(err, gh.ErrNotFound) {
-				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(repoStr, item.Number), lbl)
-				}
+				e.syncLabelRemoval(item, lbl, false)
 				continue
 			}
 			e.logf(item.Number, "warn", "validate-sha: could not remove %s: %v\n", lbl, err)
@@ -1372,12 +1299,7 @@ func (e *Engine) handleValidateSHAInvalidation(item gh.ProjectItem, owner, repo 
 			break
 		}
 		e.logf(item.Number, "validate-sha", "removed label %s\n", lbl)
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(repoStr, item.Number), lbl)
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(repoStr, item.Number)+"+"+lbl)
-		}
+		e.syncLabelRemoval(item, lbl, true)
 	}
 
 	if hasError {
@@ -1425,45 +1347,15 @@ func buildAwaitingInputComment(user, stageName, summary string) string {
 func (e *Engine) blockOnInput(item gh.ProjectItem, stage *stages.Stage, output string) {
 	e.logf(item.Number, "block", "stage %q needs user input — pausing with awaiting-input\n", stage.Name)
 
-	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
-		e.logf(item.Number, "warn", "could not add paused label: %v\n", err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:paused")
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:paused")
-		}
-	}
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
-		e.logf(item.Number, "warn", "could not add awaiting-input label: %v\n", err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:awaiting-input")
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-input")
-		}
-	}
+	e.addLabel(item, "fabrik:paused")
+	e.addLabel(item, "fabrik:awaiting-input")
 
 	// Post a dedicated @mention notification comment so GitHub delivers a mobile
 	// push to the operator. No rocket reaction — this is engine-generated, not
 	// Claude output, so the reaction-based reprocessing guard should not apply.
 	summary := extractSummary(output)
 	comment := buildAwaitingInputComment(e.cfg.User, stage.Name, summary)
-	if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
-		e.logf(item.Number, "warn", "could not post awaiting-input notification comment: %v\n", err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
-				DatabaseID: dbID, Body: comment, Author: e.cfg.User, CreatedAt: time.Now(),
-			})
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
-		}
-	}
+	e.postItemComment(item, comment, false)
 }
 
 // unblockAwaitingInput is called when a user comment arrives on an issue that
@@ -1472,29 +1364,8 @@ func (e *Engine) blockOnInput(item gh.ProjectItem, stage *stages.Stage, output s
 func (e *Engine) unblockAwaitingInput(item gh.ProjectItem, stage *stages.Stage) {
 	e.logf(item.Number, "unblock", "user comment received — removing awaiting-input pause\n")
 
-	owner, repo := itemOwnerRepo(item, e.defaultRepo())
-	if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:paused"); err != nil &&
-		!errors.Is(err, gh.ErrNotFound) {
-		e.logf(item.Number, "warn", "could not remove paused label: %v\n", err)
-	} else if err == nil {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:paused")
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:paused")
-		}
-	}
-	if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil &&
-		!errors.Is(err, gh.ErrNotFound) {
-		e.logf(item.Number, "warn", "could not remove awaiting-input label: %v\n", err)
-	} else if err == nil {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:awaiting-input")
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-input")
-		}
-	}
+	e.removeLabel(item, "fabrik:paused")
+	e.removeLabel(item, "fabrik:awaiting-input")
 
 	// Clear LastAttemptAt so the stage re-runs immediately after comment processing,
 	// and reset retry/pause state that may have accumulated before the block.
@@ -1608,22 +1479,7 @@ func (e *Engine) baseBranchForItem(item gh.ProjectItem, wm *WorktreeManager) (st
 	warnKey := fmt.Sprintf("%s/%s#%d:%s", owner, repo, item.Number, candidate)
 	if _, alreadyWarned := e.baseBranchWarnedSet.LoadOrStore(warnKey, true); !alreadyWarned {
 		body := fmt.Sprintf("🏭 **Fabrik — base branch not found**\n\nFabrik could not find branch `%s` on the remote (from `base:%s` label). Falling back to the repository default branch.", candidate, candidate)
-		if dbID, err := e.client.AddComment(owner, repo, item.Number, body); err != nil {
-			e.logf(item.Number, "warn", "could not post base branch fallback comment: %v\n", err)
-		} else {
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
-					DatabaseID: dbID, Body: body, Author: e.cfg.User, CreatedAt: time.Now(),
-				})
-			}
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
-			}
-			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
-			if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-				e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
-			}
-		}
+		e.postItemComment(item, body, true)
 	}
 	return wm.DefaultBaseBranch()
 }
@@ -1934,32 +1790,12 @@ func (e *Engine) handleBoundaryViolation(owner, repo string, repoStr string, ite
 		stage.Name, violationList,
 	)
 
-	if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
-		e.logf(item.Number, "warn", "could not post boundary violation comment: %v\n", err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
-				DatabaseID: dbID, Body: comment, Author: e.cfg.User, CreatedAt: time.Now(),
-			})
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
-		}
-	}
+	e.postItemComment(item, comment, false)
 
 	// Add fabrik:paused so itemNeedsWork skips this issue until the user
 	// removes it. Without fabrik:paused the clearFailedStage path in
 	// processItem would auto-clear the failed label on the next poll cycle.
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
-		e.logf(item.Number, "warn", "could not add paused label: %v\n", err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:paused")
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:paused")
-		}
-	}
+	e.addLabel(item, "fabrik:paused")
 
 	e.addFailedLabel(owner, repo, item.Number, stage.Name)
 
@@ -2002,47 +1838,18 @@ func (e *Engine) handleStopRequest(ctx context.Context, req tui.StopRequest) {
 		e.logf(req.IssueNumber, "stop", "no in-flight worker for %s — applying labels only\n", iKey)
 	}
 
-	owner, repo, _ := strings.Cut(repoStr, "/")
+	item := gh.ProjectItem{Number: req.IssueNumber, Repo: repoStr}
 
 	// Apply fabrik:paused with cache write-through + webhook echo.
-	if err := e.client.AddLabelToIssue(owner, repo, req.IssueNumber, "fabrik:paused"); err != nil {
-		e.logf(req.IssueNumber, "warn", "stop: could not add paused label: %v\n", err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(repoStr, req.IssueNumber), "fabrik:paused")
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(repoStr, req.IssueNumber)+"+"+"fabrik:paused")
-		}
-	}
+	e.addLabel(item, "fabrik:paused")
 
 	// Apply fabrik:awaiting-input with cache write-through + webhook echo.
-	if err := e.client.AddLabelToIssue(owner, repo, req.IssueNumber, "fabrik:awaiting-input"); err != nil {
-		e.logf(req.IssueNumber, "warn", "stop: could not add awaiting-input label: %v\n", err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(repoStr, req.IssueNumber), "fabrik:awaiting-input")
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(repoStr, req.IssueNumber)+"+"+"fabrik:awaiting-input")
-		}
-	}
+	e.addLabel(item, "fabrik:awaiting-input")
 
 	// Post explanatory comment so there is a durable audit trail.
 	comment := fmt.Sprintf(
 		"🏭 **Fabrik — stopped from TUI by %s**\n\nStage **%s** was stopped manually from the TUI. Remove `fabrik:paused` to resume.",
 		e.cfg.User, req.StageName,
 	)
-	if dbID, err := e.client.AddComment(owner, repo, req.IssueNumber, comment); err != nil {
-		e.logf(req.IssueNumber, "warn", "stop: could not post stop comment: %v\n", err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(repoStr, req.IssueNumber), gh.Comment{
-				DatabaseID: dbID, Body: comment, Author: e.cfg.User, CreatedAt: time.Now(),
-			})
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(repoStr, req.IssueNumber))
-		}
-	}
+	e.postItemComment(item, comment, false)
 }
