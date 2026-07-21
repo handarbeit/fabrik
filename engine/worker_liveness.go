@@ -109,7 +109,7 @@ func (e *Engine) runWorkerDetectorScan() {
 		// Stale heartbeat detected. Verify liveness via signal 0.
 		repo := snap.Repo()
 		number := snap.Number()
-		if isProcessAlive(w.PID) {
+		if !isWorkerStale(w, threshold) {
 			// Process is alive but heartbeat is stale. Log warning; do not kill.
 			e.logf(number, "worker-detector", "stale heartbeat for PID %d (stage %q) — process alive, waiting for natural exit\n", w.PID, w.StageName)
 		} else {
@@ -134,6 +134,21 @@ func (e *Engine) cleanupStaleWorker(repo string, number int, lockLabel string, s
 	e.logf(number, "worker-detector", "stale worker cleanup complete for stage %q\n", stageName)
 }
 
+// forEachStaleUnworkedItem iterates store items that have no active Worker
+// (grace period for in-session workers) and carry label, invoking fn for each.
+func (e *Engine) forEachStaleUnworkedItem(label string, fn func(snap itemstate.Snapshot, owner, repoName string, number int)) {
+	for _, snap := range e.store.All() {
+		if snap.Worker() != nil {
+			continue
+		}
+		if !hasLabel(snap.Labels(), label) {
+			continue
+		}
+		owner, repoName := parseOwnerRepo(snap.Repo())
+		fn(snap, owner, repoName, snap.Number())
+	}
+}
+
 // runStartupCleanup scans the store for items that have a fabrik:locked:<user>
 // label but no active Worker (Worker == nil). This catches the restart case where
 // a prior Fabrik instance crashed, leaving stale lock labels behind.
@@ -142,25 +157,8 @@ func (e *Engine) cleanupStaleWorker(repo string, number int, lockLabel string, s
 func (e *Engine) runStartupCleanup() {
 	lockLabel := fmt.Sprintf("fabrik:locked:%s", e.cfg.User)
 	var cleaned int
-	for _, snap := range e.store.All() {
-		if snap.Worker() != nil {
-			// Worker is active in this session — skip (grace period).
-			continue
-		}
-		hasLock := false
-		for _, l := range snap.Labels() {
-			if l == lockLabel {
-				hasLock = true
-				break
-			}
-		}
-		if !hasLock {
-			continue
-		}
-
+	e.forEachStaleUnworkedItem(lockLabel, func(snap itemstate.Snapshot, owner, repoName string, number int) {
 		repo := snap.Repo()
-		number := snap.Number()
-		owner, repoName := parseOwnerRepo(repo)
 
 		e.logf(number, "startup", "found stale lock label from prior crash — removing\n")
 		e.removeLockLabel(owner, repoName, number, lockLabel)
@@ -182,36 +180,18 @@ func (e *Engine) runStartupCleanup() {
 		// No-op since Worker is already nil, but applied for idempotency.
 		e.store.Apply(itemstate.WorkerExited{Repo: repo, Number: number})
 		cleaned++
-	}
+	})
 	if cleaned > 0 {
 		e.logf(0, "startup", "startup cleanup: removed stale locks from %d issue(s)\n", cleaned)
 	}
 
 	// Second pass: remove stale fabrik:editing labels left by prior crashes.
 	var cleanedEditing int
-	for _, snap := range e.store.All() {
-		if snap.Worker() != nil {
-			continue
-		}
-		hasEditing := false
-		for _, l := range snap.Labels() {
-			if l == "fabrik:editing" {
-				hasEditing = true
-				break
-			}
-		}
-		if !hasEditing {
-			continue
-		}
-
-		repo := snap.Repo()
-		number := snap.Number()
-		owner, repoName := parseOwnerRepo(repo)
-
+	e.forEachStaleUnworkedItem("fabrik:editing", func(snap itemstate.Snapshot, owner, repoName string, number int) {
 		e.logf(number, "startup", "found stale editing label from prior crash — removing\n")
 		e.removeEditingLabel(owner, repoName, number)
 		cleanedEditing++
-	}
+	})
 	if cleanedEditing > 0 {
 		e.logf(0, "startup", "startup cleanup: attempted stale editing label removal on %d issue(s)\n", cleanedEditing)
 	}
