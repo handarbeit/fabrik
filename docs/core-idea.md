@@ -12,7 +12,7 @@ Fabrik is a workflow harness wrapped around Claude Code. Everything else about i
 
 When Fabrik went public, the sharpest thing anyone asked me was this: *if it's Claude-specific, what's the benefit over Claude Code subagents? They already use worktrees, support varying degrees of autonomy, store memories at user and project levels, use models suited for each step, and collaborate with each other. Claude Code can generate a majority of this with a few prompts.*
 
-He was right — on every point. And answering him honestly turned out to be the best way to explain what Fabrik actually is.
+They were right — on every point. And answering them honestly turned out to be the best way to explain what Fabrik actually is.
 
 ## Claude Code is a harness, not just a model
 
