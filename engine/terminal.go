@@ -12,6 +12,16 @@ import (
 	"github.com/handarbeit/fabrik/tui"
 )
 
+// runProbeAndDeepFetch performs the per-poll probe-driven cache refresh for a
+// bootstrapped CacheImpl. It calls ProbeProjectBoard to get a minimal per-item
+// snapshot (no labels; single linked-PR node) and uses effectiveUpdatedAt to
+// detect which items need a full FetchItemDetails call. Items that haven't
+// changed since the last deep-fetch skip all GitHub traffic. This replaces the
+// previous Reconcile(shallowBoard) path and reduces GraphQL cost ~5-10x on
+// idle boards.
+//
+// Probe mutations must NOT touch the Labels field; use ProbeBoardItemUpdated,
+// not ShallowBoardItemUpdated, to preserve webhook-driven label state.
 func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 	probeItems, _, err := e.client.ProbeProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
 	if err != nil {
