@@ -124,10 +124,11 @@ func (e *Engine) buildRebaseComment(item gh.ProjectItem, stage *stages.Stage, ba
 	}
 }
 
-// dispatchRebaseReinvoke spawns a goroutine that re-invokes the stage agent
-// with a synthetic rebase-required comment. Mirrors dispatchCIFixReinvoke /
-// dispatchReviewReinvoke: marks the item in-flight via WorkerEntered, acquires
-// the semaphore, calls processComments, then releases both.
+// dispatchRebaseReinvoke re-invokes the stage agent with a synthetic
+// rebase-required comment. A thin wrapper over dispatchReinvoke, supplying
+// only the rebase-specific comment builder, the RebaseSkill stage variant,
+// and the post-run auto-merge re-enablement — the shared goroutine scaffold
+// lives in reinvoke.go.
 func (e *Engine) dispatchRebaseReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
 	e.dispatchReinvoke(ctx, board, item, stage, reinvokeOpts{
 		tag: "rebase-reinvoke",

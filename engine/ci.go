@@ -319,10 +319,11 @@ func (e *Engine) buildCIFixComment(item gh.ProjectItem, stage *stages.Stage, wor
 	}
 }
 
-// dispatchCIFixReinvoke spawns a goroutine to re-invoke the stage agent via
-// processComments with a synthetic CI-failure context comment. It mirrors
-// dispatchReviewReinvoke exactly: marks the item in-flight via WorkerEntered,
-// acquires semaphore, calls processComments, then releases both.
+// dispatchCIFixReinvoke re-invokes the stage agent via processComments with a
+// synthetic CI-failure context comment. A thin wrapper over dispatchReinvoke,
+// supplying only the CI-fix-specific comment builder (which also snapshots
+// HEAD before the reinvoke), the CIFixSkill stage variant, and the post-run
+// no-op-SHA recording — the shared goroutine scaffold lives in reinvoke.go.
 func (e *Engine) dispatchCIFixReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, settle PRSettleResult) {
 	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
 	var headBefore string

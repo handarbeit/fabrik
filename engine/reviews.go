@@ -382,11 +382,11 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 	})
 }
 
-// dispatchReviewReinvoke spawns a goroutine to re-invoke the stage agent via
-// processComments with synthetic review comments. It marks the item in-flight,
-// acquires the semaphore, calls processComments, then releases both.
-// This allows the catch-up loop to remain non-blocking while the Claude
-// invocation runs asynchronously.
+// dispatchReviewReinvoke re-invokes the stage agent via processComments with
+// synthetic review comments. A thin wrapper over dispatchReinvoke, supplying
+// only review's pre-dispatch emptiness precheck and its comment builder —
+// the shared goroutine scaffold (WorkerEntered/semaphore/processComments)
+// lives in reinvoke.go.
 func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
 	e.dispatchReinvoke(ctx, board, item, stage, reinvokeOpts{
 		tag: "review-reinvoke",
