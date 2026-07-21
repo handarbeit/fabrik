@@ -1178,22 +1178,6 @@ func copyDeepFieldsFromState(dst *gh.ProjectItem, s itemstate.ItemState) {
 	}
 }
 
-// copyDeepFields overlays the deep fields from src onto dst.
-// Shallow fields (Labels, Status, Title, UpdatedAt) are left unchanged in dst.
-func copyDeepFields(dst, src *gh.ProjectItem) {
-	dst.Body = src.Body
-	dst.URL = src.URL
-	dst.Author = src.Author
-	dst.Assignees = cloneStrings(src.Assignees)
-	dst.BlockedBy = cloneDependencies(src.BlockedBy)
-	dst.Comments = cloneComments(src.Comments)
-	dst.LinkedPRNumber = src.LinkedPRNumber
-	dst.LinkedPRReviewRequests = cloneReviewRequests(src.LinkedPRReviewRequests)
-	dst.LinkedPRReviews = clonePRReviews(src.LinkedPRReviews)
-	dst.LinkedPRReviewThreadComments = cloneComments(src.LinkedPRReviewThreadComments)
-	dst.LinkedPRResolvedThreadCount = src.LinkedPRResolvedThreadCount
-}
-
 // fabrikManagedLabelKey returns an order-independent canonical key of the
 // fabrik-managed labels (fabrik: / stage: prefixes) in the slice — the labels
 // that gate dispatch. Used by LightReconcile to detect gate-label drift between
