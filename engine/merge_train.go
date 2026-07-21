@@ -1618,8 +1618,10 @@ func (e *Engine) completeDeferredLanding(ctx context.Context, state *mergeTrainW
 		return
 	}
 	// landMergeTrainBatch re-finds the merged marker PR and skips FR-2 (merge already
-	// happened); the in-flight marker is cleared by runMergeTrainWorker's top-level
-	// defer once this whole call chain unwinds.
+	// happened); the in-flight marker is cleared by prepareTrainWorker's own-failure
+	// defer once this whole call chain unwinds (this function is only reached via
+	// reconstructTrainState returning true, which prepareTrainWorker treats as
+	// ok=false) — see ADR-067.
 	e.landMergeTrainBatch(ctx, state, p.owner, p.repo, p.baseBranch, survivors, p.wm)
 }
 
