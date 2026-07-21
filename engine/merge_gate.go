@@ -358,10 +358,10 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 			"- **Keep cruise behavior**: Remove `fabrik:paused` and `fabrik:yolo`. Fabrik will keep the branch up-to-date but leave merging to you.\n" +
 			"- **Re-enable auto-merge**: Remove `fabrik:paused`. Fabrik will re-enable auto-merge on the next poll cycle.\n" +
 			"- **Leave as-is**: Take no action. The PR remains open and unmerged until you act.")
-		e.postComment(item, msg, false, false) //nolint:errcheck // failure already logged by postComment
-		e.applyLabelAdd(item, "fabrik:paused", false)
-		e.applyLabelAdd(item, "fabrik:awaiting-input", false)
-		e.applyLabelRemove(item, "fabrik:auto-merge-enabled", false)
+		e.pauseIssue(item, msg, pauseOpts{
+			awaitingInput:   true,
+			removeAutoMerge: true,
+		})
 		return
 	}
 

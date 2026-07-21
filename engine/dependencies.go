@@ -183,8 +183,7 @@ func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, 
 		if detectCycle(e.store, itemRepo, item.Number, openDeps, 4) {
 			e.logf(item.Number, "warn", "cycle detected in blockedBy graph — pausing issue\n")
 			cycleMsg := fmt.Sprintf("🏭 **Fabrik — cycle detected**\n\nIssue #%d has a cyclic `blockedBy` dependency: it is waiting for issues that are themselves (transitively) waiting for this issue. Fabrik cannot make progress. Remove the cycle manually and then remove `fabrik:paused` to continue.", item.Number)
-			e.postComment(item, cycleMsg, false, false) //nolint:errcheck // failure already logged by postComment
-			e.applyLabelAdd(item, "fabrik:paused", false)
+			e.pauseIssue(item, cycleMsg, pauseOpts{})
 			return false
 		}
 
