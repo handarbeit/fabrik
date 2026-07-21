@@ -76,54 +76,13 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
-	// Broken-linkage guard (FR-013): if the item has no linked PR via
-	// closingIssuesReferences (LinkedPRNumber == 0) but a PR exists on the
-	// fabrik/issue-N branch, the gate would silently loop forever applying
-	// fabrik:awaiting-review. Detect this, pause with a clear message, and
-	// do NOT apply fabrik:awaiting-review.
-	if item.LinkedPRNumber == 0 {
-		pr, prErr := e.readClient.FetchLinkedPR(owner, repo, item.Number)
-		if prErr == nil && pr != nil && pr.Number > 0 && pr.State == "open" && !pr.Merged {
-			e.logf(item.Number, "review-gate", "broken linkage: PR #%d exists on branch fabrik/issue-%d but is not linked via closing keyword\n", pr.Number, item.Number)
-			msg := fmt.Sprintf(
-				"🏭 **Fabrik — broken PR↔issue linkage**\n\n"+
-					"PR #%d exists on branch `fabrik/issue-%d` but is not linked to this issue via a closing keyword "+
-					"(`closingIssuesReferences` is empty). The review gate cannot proceed without this linkage.\n\n"+
-					"Add `Closes #%d` as the first line of the PR body and remove `fabrik:paused` to resume:\n\n"+
-					"```bash\n"+
-					"gh pr view %d --json body --jq '.body' > /tmp/pr_body.txt && "+
-					"printf 'Closes #%d\\n\\n' | cat - /tmp/pr_body.txt | "+
-					"gh pr edit %d --body-file -\n"+
-					"```",
-				pr.Number, item.Number, item.Number,
-				pr.Number, item.Number, pr.Number,
-			)
-			e.pauseIssue(item, msg, pauseOpts{
-				labelEcho:  true,
-				labelFirst: true,
-			})
-			// Return (false, false): the gate did not time out — it paused for a different reason.
-			// The catch-up loop will not reapply fabrik:awaiting-review.
-			return false, false
-		}
+	if e.handleBrokenReviewLinkage(owner, repo, item) {
+		// Return (false, false): the gate did not time out — it paused for a different reason.
+		// The catch-up loop will not reapply fabrik:awaiting-review.
+		return false, false
 	}
 
-	// Outstanding requested reviewers (humans or bots using the formal
-	// request mechanism). A dismissed review puts the reviewer back here;
-	// if they're not here, they've finished.
-	outstanding := make([]string, 0, len(item.LinkedPRReviewRequests))
-	for _, rr := range item.LinkedPRReviewRequests {
-		if rr.Login != "" {
-			outstanding = append(outstanding, rr.Login)
-		}
-	}
-	hasReviews := false
-	for _, r := range item.LinkedPRReviews {
-		if r.State != "DISMISSED" {
-			hasReviews = true
-			break
-		}
-	}
+	outstanding, hasReviews := reviewGateOutstanding(item)
 
 	// Gate clears when all outstanding requested reviewers have responded
 	// AND at least one non-DISMISSED review exists. This catches both human
@@ -135,13 +94,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	}
 
 	// Determine if all outstanding reviewers are bots. Used by Phase 1/2 logic.
-	allBots := len(outstanding) > 0
-	for _, rr := range item.LinkedPRReviewRequests {
-		if rr.Login != "" && !rr.IsBot {
-			allBots = false
-			break
-		}
-	}
+	allBots := reviewGateAllBots(item, outstanding)
 
 	// Find the fabrik:bot-reprompted label (idempotency guard for Phase 1 and
 	// timing anchor for Phase 2).
@@ -156,89 +109,16 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	// Phase 2 check: if a re-prompt was already sent and another full timeout
 	// window has elapsed without response, pause for human.
 	if reprompted && allBots {
-		repromptedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, botRepromptedLabel)
-		if err != nil {
-			e.logf(item.Number, "warn", "could not fetch bot-reprompted label timestamp: %v\n", err)
-		} else if !repromptedAt.IsZero() {
-			timeout := e.cfg.ReviewWaitTimeout
-			if timeout <= 0 {
-				timeout = 15 * time.Minute
-			}
-			if time.Since(repromptedAt) >= timeout {
-				e.logf(item.Number, "review-gate", "phase 2: bot(s) unresponsive after re-prompt — pausing for human\n")
-				// Remove fabrik:bot-reprompted and fabrik:awaiting-review.
-				// item.Labels is the pre-cleanup snapshot so pauseForReviewTimeout
-				// can still detect Phase 2 context from it after we return.
-				for _, l := range item.Labels {
-					if l == botRepromptedLabel || l == "fabrik:awaiting-review" {
-						e.applyLabelRemove(item, l, false)
-					}
-				}
-				return false, true
-			}
+		if blocked, timedOut, done := e.checkBotPhase2Timeout(owner, repo, item); done {
+			return blocked, timedOut
 		}
 	}
 
-	// Still waiting. Check the fabrik:awaiting-review timeout.
-	timeout := e.cfg.ReviewWaitTimeout
-	if timeout <= 0 {
-		timeout = 15 * time.Minute
-	}
-	for _, l := range item.Labels {
-		if l == "fabrik:awaiting-review" {
-			appliedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:awaiting-review")
-			if err != nil {
-				e.logf(item.Number, "warn", "could not fetch awaiting-review label timestamp: %v\n", err)
-			} else if !appliedAt.IsZero() && time.Since(appliedAt) >= timeout {
-				// 1× timeout elapsed.
-				if allBots && item.LinkedPRNumber > 0 && !reprompted {
-					// Phase 1: re-prompt all outstanding bot reviewers.
-					var repromptedLogins []string
-					for _, rr := range item.LinkedPRReviewRequests {
-						if rr.Login == "" {
-							continue
-						}
-						login := rr.Login
-						if err := e.client.DeleteReviewRequest(owner, repo, item.LinkedPRNumber, []string{login}); err != nil {
-							e.logf(item.Number, "warn", "phase 1: could not delete review request for %s: %v\n", login, err)
-						}
-						if err := e.client.AddReviewRequest(owner, repo, item.LinkedPRNumber, []string{login}); err != nil {
-							e.logf(item.Number, "warn", "phase 1: could not re-add review request for %s: %v\n", login, err)
-						}
-						msg := fmt.Sprintf("🏭 **Fabrik — review re-prompt**\n\n@%s just checking in — could you take a look at this PR?", botMentionHandle(login))
-						// no write-through: excluded — posts to item.LinkedPRNumber (PR comment thread, not issue cache)
-						if dbID, err := e.client.AddComment(owner, repo, item.LinkedPRNumber, msg); err != nil {
-							e.logf(item.Number, "warn", "phase 1: could not post re-prompt comment for %s: %v\n", login, err)
-							// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
-						} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-							e.logf(item.Number, "warn", "phase 1: could not add 🚀 to re-prompt comment: %v\n", reactErr)
-						}
-						repromptedLogins = append(repromptedLogins, login)
-					}
-					e.applyLabelAdd(item, botRepromptedLabel, false)
-					e.logf(item.Number, "review-gate", "phase 1: re-prompted bot reviewer(s): %s\n", strings.Join(repromptedLogins, ", "))
-					return true, false
-				}
-
-				// If Phase 1 already fired (reprompted label present) and Phase 2
-				// hasn't timed out yet, stay blocked and let Phase 2 handle it.
-				if allBots && reprompted {
-					break
-				}
-
-				// Mixed/pure-human or no PR number: existing pause behavior.
-				var reason string
-				if len(outstanding) > 0 {
-					reason = "pending reviewers: " + strings.Join(outstanding, ", ")
-				} else {
-					reason = "no reviews submitted yet (bots may not have responded)"
-				}
-				e.logf(item.Number, "warn", "review wait timeout elapsed; pausing issue — %s\n", reason)
-				e.removeAwaitingReviewLabel(owner, repo, item)
-				return false, true
-			}
-			break
-		}
+	// Still waiting. Check the fabrik:awaiting-review timeout (Phase 1
+	// re-prompt, an already-fired Phase 1 waiting on Phase 2, or a
+	// mixed/pure-human/no-PR-number pause).
+	if blocked, timedOut, done := e.checkAwaitingReviewTimeout(owner, repo, item, outstanding, allBots, reprompted); done {
+		return blocked, timedOut
 	}
 
 	if len(outstanding) > 0 {
@@ -260,6 +140,184 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	}
 
 	return true, false
+}
+
+// handleBrokenReviewLinkage detects FR-013's broken-linkage case: the item
+// has no linked PR via closingIssuesReferences (LinkedPRNumber == 0) but a PR
+// exists on the fabrik/issue-N branch. Without this guard the gate would
+// silently loop forever applying fabrik:awaiting-review. When detected, it
+// pauses with a clear message (without applying fabrik:awaiting-review) and
+// reports true so the caller returns (false, false) directly.
+func (e *Engine) handleBrokenReviewLinkage(owner, repo string, item gh.ProjectItem) bool {
+	if item.LinkedPRNumber == 0 {
+		pr, prErr := e.readClient.FetchLinkedPR(owner, repo, item.Number)
+		if prErr == nil && pr != nil && pr.Number > 0 && pr.State == "open" && !pr.Merged {
+			e.logf(item.Number, "review-gate", "broken linkage: PR #%d exists on branch fabrik/issue-%d but is not linked via closing keyword\n", pr.Number, item.Number)
+			msg := fmt.Sprintf(
+				"🏭 **Fabrik — broken PR↔issue linkage**\n\n"+
+					"PR #%d exists on branch `fabrik/issue-%d` but is not linked to this issue via a closing keyword "+
+					"(`closingIssuesReferences` is empty). The review gate cannot proceed without this linkage.\n\n"+
+					"Add `Closes #%d` as the first line of the PR body and remove `fabrik:paused` to resume:\n\n"+
+					"```bash\n"+
+					"gh pr view %d --json body --jq '.body' > /tmp/pr_body.txt && "+
+					"printf 'Closes #%d\\n\\n' | cat - /tmp/pr_body.txt | "+
+					"gh pr edit %d --body-file -\n"+
+					"```",
+				pr.Number, item.Number, item.Number,
+				pr.Number, item.Number, pr.Number,
+			)
+			e.pauseIssue(item, msg, pauseOpts{
+				labelEcho:  true,
+				labelFirst: true,
+			})
+			return true
+		}
+	}
+	return false
+}
+
+// reviewGateOutstanding computes the outstanding requested reviewers (humans
+// or bots using the formal request mechanism — a dismissed review puts the
+// reviewer back here; if they're not here, they've finished) and whether at
+// least one non-DISMISSED review has been submitted.
+func reviewGateOutstanding(item gh.ProjectItem) (outstanding []string, hasReviews bool) {
+	for _, rr := range item.LinkedPRReviewRequests {
+		if rr.Login != "" {
+			outstanding = append(outstanding, rr.Login)
+		}
+	}
+	for _, r := range item.LinkedPRReviews {
+		if r.State != "DISMISSED" {
+			hasReviews = true
+			break
+		}
+	}
+	return outstanding, hasReviews
+}
+
+// reviewGateAllBots reports whether every outstanding requested reviewer is a
+// bot (false when there are no outstanding reviewers at all).
+func reviewGateAllBots(item gh.ProjectItem, outstanding []string) bool {
+	allBots := len(outstanding) > 0
+	for _, rr := range item.LinkedPRReviewRequests {
+		if rr.Login != "" && !rr.IsBot {
+			allBots = false
+			break
+		}
+	}
+	return allBots
+}
+
+// checkBotPhase2Timeout implements Phase 2 of the bot-reviewer escalation
+// ladder. It is only called when a Phase 1 re-prompt was already sent and all
+// outstanding reviewers are bots. If a full ReviewWaitTimeout window has
+// elapsed since fabrik:bot-reprompted was applied, it removes
+// fabrik:bot-reprompted and fabrik:awaiting-review and reports done=true with
+// (blocked=false, timedOut=true) so the caller pauses with Phase-2 context.
+// done=false means the caller should fall through to the next phase (the
+// label timestamp fetch failed, or the timeout window hasn't elapsed yet).
+func (e *Engine) checkBotPhase2Timeout(owner, repo string, item gh.ProjectItem) (blocked, timedOut, done bool) {
+	repromptedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, botRepromptedLabel)
+	if err != nil {
+		e.logf(item.Number, "warn", "could not fetch bot-reprompted label timestamp: %v\n", err)
+		return false, false, false
+	}
+	if repromptedAt.IsZero() {
+		return false, false, false
+	}
+	timeout := e.cfg.ReviewWaitTimeout
+	if timeout <= 0 {
+		timeout = 15 * time.Minute
+	}
+	if time.Since(repromptedAt) < timeout {
+		return false, false, false
+	}
+	e.logf(item.Number, "review-gate", "phase 2: bot(s) unresponsive after re-prompt — pausing for human\n")
+	// Remove fabrik:bot-reprompted and fabrik:awaiting-review.
+	// item.Labels is the pre-cleanup snapshot so pauseForReviewTimeout
+	// can still detect Phase 2 context from it after we return.
+	for _, l := range item.Labels {
+		if l == botRepromptedLabel || l == "fabrik:awaiting-review" {
+			e.applyLabelRemove(item, l, false)
+		}
+	}
+	return false, true, true
+}
+
+// checkAwaitingReviewTimeout implements the fabrik:awaiting-review timeout
+// check: once ReviewWaitTimeout has elapsed since the label was applied, it
+// either fires Phase 1 of the bot-reviewer escalation ladder (re-prompting
+// every outstanding bot reviewer), lets an already-fired Phase 1 continue
+// waiting for Phase 2, or pauses for a mixed/pure-human/no-PR-number gate.
+// done=true means the caller should return (blocked, timedOut) directly;
+// done=false means the label wasn't found, was found but the timeout hasn't
+// elapsed yet, or Phase 1 already fired and Phase 2 hasn't timed out yet —
+// the caller falls through to the "still waiting" logging/label-apply tail.
+func (e *Engine) checkAwaitingReviewTimeout(owner, repo string, item gh.ProjectItem, outstanding []string, allBots, reprompted bool) (blocked, timedOut, done bool) {
+	timeout := e.cfg.ReviewWaitTimeout
+	if timeout <= 0 {
+		timeout = 15 * time.Minute
+	}
+	for _, l := range item.Labels {
+		if l != "fabrik:awaiting-review" {
+			continue
+		}
+		appliedAt, err := e.client.FetchLabelAppliedAt(owner, repo, item.Number, "fabrik:awaiting-review")
+		if err != nil {
+			e.logf(item.Number, "warn", "could not fetch awaiting-review label timestamp: %v\n", err)
+			return false, false, false
+		}
+		if appliedAt.IsZero() || time.Since(appliedAt) < timeout {
+			return false, false, false
+		}
+		// 1× timeout elapsed.
+		if allBots && item.LinkedPRNumber > 0 && !reprompted {
+			// Phase 1: re-prompt all outstanding bot reviewers.
+			var repromptedLogins []string
+			for _, rr := range item.LinkedPRReviewRequests {
+				if rr.Login == "" {
+					continue
+				}
+				login := rr.Login
+				if err := e.client.DeleteReviewRequest(owner, repo, item.LinkedPRNumber, []string{login}); err != nil {
+					e.logf(item.Number, "warn", "phase 1: could not delete review request for %s: %v\n", login, err)
+				}
+				if err := e.client.AddReviewRequest(owner, repo, item.LinkedPRNumber, []string{login}); err != nil {
+					e.logf(item.Number, "warn", "phase 1: could not re-add review request for %s: %v\n", login, err)
+				}
+				msg := fmt.Sprintf("🏭 **Fabrik — review re-prompt**\n\n@%s just checking in — could you take a look at this PR?", botMentionHandle(login))
+				// no write-through: excluded — posts to item.LinkedPRNumber (PR comment thread, not issue cache)
+				if dbID, err := e.client.AddComment(owner, repo, item.LinkedPRNumber, msg); err != nil {
+					e.logf(item.Number, "warn", "phase 1: could not post re-prompt comment for %s: %v\n", login, err)
+					// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
+				} else if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+					e.logf(item.Number, "warn", "phase 1: could not add 🚀 to re-prompt comment: %v\n", reactErr)
+				}
+				repromptedLogins = append(repromptedLogins, login)
+			}
+			e.applyLabelAdd(item, botRepromptedLabel, false)
+			e.logf(item.Number, "review-gate", "phase 1: re-prompted bot reviewer(s): %s\n", strings.Join(repromptedLogins, ", "))
+			return true, false, true
+		}
+
+		// If Phase 1 already fired (reprompted label present) and Phase 2
+		// hasn't timed out yet, stay blocked and let Phase 2 handle it.
+		if allBots && reprompted {
+			return false, false, false
+		}
+
+		// Mixed/pure-human or no PR number: existing pause behavior.
+		var reason string
+		if len(outstanding) > 0 {
+			reason = "pending reviewers: " + strings.Join(outstanding, ", ")
+		} else {
+			reason = "no reviews submitted yet (bots may not have responded)"
+		}
+		e.logf(item.Number, "warn", "review wait timeout elapsed; pausing issue — %s\n", reason)
+		e.removeAwaitingReviewLabel(owner, repo, item)
+		return false, true, true
+	}
+	return false, false, false
 }
 
 // removeAwaitingReviewLabel removes fabrik:awaiting-review and the
