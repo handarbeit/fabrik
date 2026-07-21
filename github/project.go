@@ -1513,5 +1513,8 @@ mutation($issueId: ID!, $blockingIssueId: ID!) {
 	}
 
 	var result struct{}
-	return c.graphqlRequest(query, vars, &result)
+	if err := c.graphqlRequest(query, vars, &result); err != nil {
+		return fmt.Errorf("adding blocked-by edge %s -> %s: %w", issueNodeID, blockerNodeID, err)
+	}
+	return nil
 }

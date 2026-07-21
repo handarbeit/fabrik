@@ -99,7 +99,7 @@ func (c *Client) FetchLabels(owner, repo string, issueNumber int) ([]string, err
 		Name string `json:"name"`
 	}
 	if err := c.restGetJSON(apiURL, &labels); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("fetching labels for %s/%s#%d: %w", owner, repo, issueNumber, err)
 	}
 	names := make([]string, len(labels))
 	for i, l := range labels {
@@ -113,7 +113,7 @@ func (c *Client) AddLabelToIssue(owner, repo string, issueNumber int, labelName 
 	desc, color := labelDefFor(labelName)
 	// First ensure the label exists with the right description and color.
 	if err := c.ensureLabel(owner, repo, labelName, desc, color); err != nil {
-		return err
+		return fmt.Errorf("ensuring label %q exists on %s/%s: %w", labelName, owner, repo, err)
 	}
 
 	// Use REST API for simplicity — add label to issue
@@ -121,13 +121,19 @@ func (c *Client) AddLabelToIssue(owner, repo string, issueNumber int, labelName 
 	body := map[string]interface{}{
 		"labels": []string{labelName},
 	}
-	return c.restPost(apiURL, body)
+	if err := c.restPost(apiURL, body); err != nil {
+		return fmt.Errorf("adding label %q to %s/%s#%d: %w", labelName, owner, repo, issueNumber, err)
+	}
+	return nil
 }
 
 // RemoveLabelFromIssue removes a label from an issue.
 func (c *Client) RemoveLabelFromIssue(owner, repo string, issueNumber int, labelName string) error {
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/issues/%d/labels/%s", c.baseURL, owner, repo, issueNumber, url.PathEscape(labelName))
-	return c.restDelete(apiURL)
+	if err := c.restDelete(apiURL); err != nil {
+		return fmt.Errorf("removing label %q from %s/%s#%d: %w", labelName, owner, repo, issueNumber, err)
+	}
+	return nil
 }
 
 // FetchLabelAppliedAt returns the time when labelName was last applied to the
@@ -181,7 +187,7 @@ func (c *Client) ensureLabel(owner, repo, name, description, color string) error
 	}
 	// Ignore 422 (label already exists); propagate all other errors.
 	if err := c.restPost(apiURL, body); err != nil && !errors.Is(err, ErrUnprocessableEntity) {
-		return err
+		return fmt.Errorf("creating label %q on %s/%s: %w", name, owner, repo, err)
 	}
 	return nil
 }
@@ -259,11 +265,11 @@ func (c *Client) seedOneLabel(owner, repo string, d labelDef) error {
 				"description": d.description,
 			}
 			if postErr := c.restPost(createURL, body); postErr != nil && !errors.Is(postErr, ErrUnprocessableEntity) {
-				return postErr
+				return fmt.Errorf("creating label %q on %s/%s: %w", d.name, owner, repo, postErr)
 			}
 			return nil
 		}
-		return err
+		return fmt.Errorf("fetching label %q on %s/%s: %w", d.name, owner, repo, err)
 	}
 
 	// Label exists. Enforce color; backfill description only if currently empty.
@@ -280,5 +286,8 @@ func (c *Client) seedOneLabel(owner, repo string, d labelDef) error {
 		patch["color"] = d.color
 	}
 	patchURL := fmt.Sprintf("%s/repos/%s/%s/labels/%s", c.baseURL, owner, repo, url.PathEscape(d.name))
-	return c.restPatch(patchURL, patch)
+	if err := c.restPatch(patchURL, patch); err != nil {
+		return fmt.Errorf("patching label %q on %s/%s: %w", d.name, owner, repo, err)
+	}
+	return nil
 }

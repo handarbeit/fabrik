@@ -32,7 +32,10 @@ mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
 	}
 
 	var result struct{}
-	return c.graphqlRequest(query, vars, &result)
+	if err := c.graphqlRequest(query, vars, &result); err != nil {
+		return fmt.Errorf("updating status for item %s on project %s: %w", itemID, projectID, err)
+	}
+	return nil
 }
 
 // ArchiveProjectItem archives a project item so it no longer appears in paginated board results.
@@ -50,7 +53,10 @@ mutation($projectId: ID!, $itemId: ID!) {
 	}
 
 	var result struct{}
-	return c.graphqlRequest(query, vars, &result)
+	if err := c.graphqlRequest(query, vars, &result); err != nil {
+		return fmt.Errorf("archiving item %s on project %s: %w", itemID, projectID, err)
+	}
+	return nil
 }
 
 // FetchStatusField retrieves the Status field ID and its option IDs for a project.
@@ -90,7 +96,7 @@ query($projectId: ID!) {
 	}
 
 	if err := c.graphqlRequest(query, vars, &result); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("fetching status field for project %s: %w", projectID, err)
 	}
 
 	if result.Data.Node.Field == nil || result.Data.Node.Field.ID == "" {
