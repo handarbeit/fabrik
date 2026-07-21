@@ -7,6 +7,15 @@ import (
 	"time"
 )
 
+// commentSelectionFragment is the GraphQL field selection for a plain issue/PR
+// comment, decoded into commentNodeData. It is hand-inlined into every query
+// that fetches a comment list (GraphQL has no query-level fragment reuse
+// across separately-constructed query strings, so this is Go-level dedup).
+// It intentionally does not include the extra location fields (diffHunk,
+// path, line, originalLine) that PR review-thread comments carry — that
+// selection is a strict superset and stays hand-written where it's used.
+const commentSelectionFragment = `id databaseId author { login } body createdAt reactionGroups { content reactors { totalCount } }`
+
 // commentNodeData holds the raw data for a comment returned from the API.
 type commentNodeData struct {
 	ID         string `json:"id"`
@@ -29,6 +38,34 @@ type commentNodeData struct {
 	Path         string `json:"path"`
 	Line         *int   `json:"line"`
 	OriginalLine *int   `json:"originalLine"`
+}
+
+// mergeQueueEntryData holds the raw merge-queue state/position/enqueuer for a
+// linked pull request, shared by the two response shapes (itemNode's shallow
+// LinkedPRs and FetchItemDetails' LinkedPRs) that both decode a
+// mergeQueueEntry field with this exact shape.
+type mergeQueueEntryData struct {
+	State    string `json:"state"`
+	Position int    `json:"position"`
+	Enqueuer *struct {
+		Login string `json:"login"`
+	} `json:"enqueuer"`
+}
+
+// toMergeQueueEntry converts raw merge-queue data decoded from the GraphQL
+// response into the public MergeQueueEntry type. Returns nil if raw is nil.
+func toMergeQueueEntry(raw *mergeQueueEntryData) *MergeQueueEntry {
+	if raw == nil {
+		return nil
+	}
+	entry := &MergeQueueEntry{
+		State:    raw.State,
+		Position: raw.Position,
+	}
+	if raw.Enqueuer != nil {
+		entry.EnqueuerLogin = raw.Enqueuer.Login
+	}
+	return entry
 }
 
 // itemNode mirrors one element of items.nodes in the FetchProjectBoard query.
@@ -58,18 +95,12 @@ type itemNode struct {
 		} `json:"labels"`
 		LinkedPRs *struct {
 			Nodes []struct {
-				UpdatedAt           string `json:"updatedAt"`
-				Number              int    `json:"number"`
-				HeadRefOid          string `json:"headRefOid"`
-				IsMergeQueueEnabled bool   `json:"isMergeQueueEnabled"`
-				IsInMergeQueue      bool   `json:"isInMergeQueue"`
-				MergeQueueEntry     *struct {
-					State         string `json:"state"`
-					Position      int    `json:"position"`
-					Enqueuer      *struct {
-						Login string `json:"login"`
-					} `json:"enqueuer"`
-				} `json:"mergeQueueEntry"`
+				UpdatedAt           string               `json:"updatedAt"`
+				Number              int                  `json:"number"`
+				HeadRefOid          string               `json:"headRefOid"`
+				IsMergeQueueEnabled bool                 `json:"isMergeQueueEnabled"`
+				IsInMergeQueue      bool                 `json:"isInMergeQueue"`
+				MergeQueueEntry     *mergeQueueEntryData `json:"mergeQueueEntry"`
 			} `json:"nodes"`
 		} `json:"closedByPullRequestsReferences"`
 	} `json:"content"`
@@ -366,16 +397,7 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 				item.LinkedPRHeadSHA = pr0.HeadRefOid
 				item.LinkedPRIsMergeQueueEnabled = pr0.IsMergeQueueEnabled
 				item.LinkedPRIsInMergeQueue = pr0.IsInMergeQueue
-				if pr0.MergeQueueEntry != nil {
-					entry := &MergeQueueEntry{
-						State:    pr0.MergeQueueEntry.State,
-						Position: pr0.MergeQueueEntry.Position,
-					}
-					if pr0.MergeQueueEntry.Enqueuer != nil {
-						entry.EnqueuerLogin = pr0.MergeQueueEntry.Enqueuer.Login
-					}
-					item.LinkedPRMergeQueueEntry = entry
-				}
+				item.LinkedPRMergeQueueEntry = toMergeQueueEntry(pr0.MergeQueueEntry)
 			}
 		}
 
@@ -647,17 +669,7 @@ query($id: ID!) {
         }
       }
       comments(first: 100) {
-        nodes {
-          id
-          databaseId
-          author { login }
-          body
-          createdAt
-          reactionGroups {
-            content
-            reactors { totalCount }
-          }
-        }
+        nodes { ` + commentSelectionFragment + ` }
         pageInfo { hasNextPage endCursor }
       }
       closedByPullRequestsReferences(first: 10) {
@@ -673,17 +685,7 @@ query($id: ID!) {
             enqueuer { login }
           }
           comments(first: 100) {
-            nodes {
-              id
-              databaseId
-              author { login }
-              body
-              createdAt
-              reactionGroups {
-                content
-                reactors { totalCount }
-              }
-            }
+            nodes { ` + commentSelectionFragment + ` }
             pageInfo { hasNextPage endCursor }
           }
           reviewRequests(first: 10) {
@@ -746,17 +748,7 @@ query($id: ID!) {
         nodes { login }
       }
       comments(first: 100) {
-        nodes {
-          id
-          databaseId
-          author { login }
-          body
-          createdAt
-          reactionGroups {
-            content
-            reactors { totalCount }
-          }
-        }
+        nodes { ` + commentSelectionFragment + ` }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -809,19 +801,13 @@ query($id: ID!) {
 				} `json:"comments"`
 				LinkedPRs *struct {
 					Nodes []struct {
-						ID                  string `json:"id"`
-						Number              int    `json:"number"`
-						HeadRefOid          string `json:"headRefOid"`
-						IsMergeQueueEnabled bool   `json:"isMergeQueueEnabled"`
-						IsInMergeQueue      bool   `json:"isInMergeQueue"`
-						MergeQueueEntry     *struct {
-							State    string `json:"state"`
-							Position int    `json:"position"`
-							Enqueuer *struct {
-								Login string `json:"login"`
-							} `json:"enqueuer"`
-						} `json:"mergeQueueEntry"`
-						Comments struct {
+						ID                  string               `json:"id"`
+						Number              int                  `json:"number"`
+						HeadRefOid          string               `json:"headRefOid"`
+						IsMergeQueueEnabled bool                 `json:"isMergeQueueEnabled"`
+						IsInMergeQueue      bool                 `json:"isInMergeQueue"`
+						MergeQueueEntry     *mergeQueueEntryData `json:"mergeQueueEntry"`
+						Comments            struct {
 							Nodes    []commentNodeData `json:"nodes"`
 							PageInfo struct {
 								HasNextPage bool   `json:"hasNextPage"`
@@ -966,17 +952,7 @@ query($id: ID!) {
 				item.LinkedPRHeadSHA = pr.HeadRefOid
 				item.LinkedPRIsMergeQueueEnabled = pr.IsMergeQueueEnabled
 				item.LinkedPRIsInMergeQueue = pr.IsInMergeQueue
-				item.LinkedPRMergeQueueEntry = nil
-				if pr.MergeQueueEntry != nil {
-					entry := &MergeQueueEntry{
-						State:    pr.MergeQueueEntry.State,
-						Position: pr.MergeQueueEntry.Position,
-					}
-					if pr.MergeQueueEntry.Enqueuer != nil {
-						entry.EnqueuerLogin = pr.MergeQueueEntry.Enqueuer.Login
-					}
-					item.LinkedPRMergeQueueEntry = entry
-				}
+				item.LinkedPRMergeQueueEntry = toMergeQueueEntry(pr.MergeQueueEntry)
 			}
 			prCommentNodes := pr.Comments.Nodes
 			if pr.Comments.PageInfo.HasNextPage {
@@ -1064,21 +1040,7 @@ query($id: ID!, $cursor: String) {
   node(id: $id) {
     ... on Issue {
       comments(first: 100, after: $cursor) {
-        nodes {
-          id
-          databaseId
-          author {
-            login
-          }
-          body
-          createdAt
-          reactionGroups {
-            content
-            reactors {
-              totalCount
-            }
-          }
-        }
+        nodes { ` + commentSelectionFragment + ` }
         pageInfo {
           hasNextPage
           endCursor
@@ -1087,21 +1049,7 @@ query($id: ID!, $cursor: String) {
     }
     ... on PullRequest {
       comments(first: 100, after: $cursor) {
-        nodes {
-          id
-          databaseId
-          author {
-            login
-          }
-          body
-          createdAt
-          reactionGroups {
-            content
-            reactors {
-              totalCount
-            }
-          }
-        }
+        nodes { ` + commentSelectionFragment + ` }
         pageInfo {
           hasNextPage
           endCursor
