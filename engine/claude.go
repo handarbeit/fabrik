@@ -549,7 +549,11 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	var stdout bytes.Buffer
 	stdoutWriter, logFile := openStageLog(issueNumber, logDir, label, &stdout)
 	if logFile != nil {
-		defer logFile.Close()
+		defer func() {
+			if cerr := logFile.Close(); cerr != nil {
+				claudeLog(issueNumber, "warn", "could not close log file %s: %v\n", logFile.Name(), cerr)
+			}
+		}()
 	}
 
 	// Per-invocation context: with wall-time timeout if configured, or plain parent ctx.
