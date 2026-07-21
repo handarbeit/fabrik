@@ -1037,20 +1037,16 @@ func extractSummary(output string) string {
 	return extractBetweenMarkers(output, "FABRIK_SUMMARY_BEGIN", "FABRIK_SUMMARY_END")
 }
 
-// extractIssueUpdateFromAssistantTurns scans raw NDJSON output for the last
-// FABRIK_ISSUE_UPDATE_BEGIN/END block across all {"type":"assistant",...} messages.
-// Returns the reconstructed "FABRIK_ISSUE_UPDATE_BEGIN\n<body>\nFABRIK_ISSUE_UPDATE_END"
-// string if found, or empty string if not. Used as a fallback when the markers
-// do not appear in the result field (emitted in an intermediate turn).
-func extractIssueUpdateFromAssistantTurns(rawOutput []byte) string {
-	var lastBlock string
+// forEachAssistantText scans raw NDJSON output line by line, and for each
+// {"type":"assistant",...} message invokes fn with the concatenated text of
+// its content blocks. Non-JSON, blank, or non-assistant lines are skipped.
+func forEachAssistantText(rawOutput []byte, fn func(text string)) {
 	lines := bytes.Split(rawOutput, []byte("\n"))
 	for _, line := range lines {
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
 			continue
 		}
-		// Only examine assistant-type messages.
 		var envelope struct {
 			Type    string `json:"type"`
 			Message struct {
@@ -1063,18 +1059,28 @@ func extractIssueUpdateFromAssistantTurns(rawOutput []byte) string {
 		if err := json.Unmarshal(line, &envelope); err != nil || envelope.Type != "assistant" {
 			continue
 		}
-		// Collect text content from all content blocks.
 		var sb strings.Builder
 		for _, block := range envelope.Message.Content {
 			if block.Type == "text" {
 				sb.WriteString(block.Text)
 			}
 		}
-		text := sb.String()
+		fn(sb.String())
+	}
+}
+
+// extractIssueUpdateFromAssistantTurns scans raw NDJSON output for the last
+// FABRIK_ISSUE_UPDATE_BEGIN/END block across all {"type":"assistant",...} messages.
+// Returns the reconstructed "FABRIK_ISSUE_UPDATE_BEGIN\n<body>\nFABRIK_ISSUE_UPDATE_END"
+// string if found, or empty string if not. Used as a fallback when the markers
+// do not appear in the result field (emitted in an intermediate turn).
+func extractIssueUpdateFromAssistantTurns(rawOutput []byte) string {
+	var lastBlock string
+	forEachAssistantText(rawOutput, func(text string) {
 		if body := extractUpdatedBody(text); body != "" {
 			lastBlock = "FABRIK_ISSUE_UPDATE_BEGIN\n" + body + "\nFABRIK_ISSUE_UPDATE_END"
 		}
-	}
+	})
 	return lastBlock
 }
 
@@ -1084,30 +1090,9 @@ func extractIssueUpdateFromAssistantTurns(rawOutput []byte) string {
 // the Claude process was terminated before emitting a final "result" JSON line.
 func extractTextFromAssistantTurns(rawOutput []byte) string {
 	var sb strings.Builder
-	lines := bytes.Split(rawOutput, []byte("\n"))
-	for _, line := range lines {
-		line = bytes.TrimSpace(line)
-		if len(line) == 0 {
-			continue
-		}
-		var envelope struct {
-			Type    string `json:"type"`
-			Message struct {
-				Content []struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
-				} `json:"content"`
-			} `json:"message"`
-		}
-		if err := json.Unmarshal(line, &envelope); err != nil || envelope.Type != "assistant" {
-			continue
-		}
-		for _, block := range envelope.Message.Content {
-			if block.Type == "text" {
-				sb.WriteString(block.Text)
-			}
-		}
-	}
+	forEachAssistantText(rawOutput, func(text string) {
+		sb.WriteString(text)
+	})
 	return sb.String()
 }
 
