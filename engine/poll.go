@@ -2318,7 +2318,10 @@ func (e *Engine) checkReleaseUpgrade() {
 	logf := func(format string, args ...any) {
 		e.logf(0, "upgrade", format, args...)
 	}
-	PerformReleaseUpgrade(e.client, e.cfg.Version, e.cfg.Token, []string{"FABRIK_AUTO_UPGRADED=1"}, logf)
+	// Error discarded intentionally: failures are logged by PerformReleaseUpgrade
+	// itself via logf, and this caller's contract is non-fatal — the poll loop
+	// continues regardless (unlike the foreground `fabrik upgrade` command).
+	_ = PerformReleaseUpgrade(e.client, e.cfg.Version, e.cfg.Token, []string{"FABRIK_AUTO_UPGRADED=1"}, logf)
 }
 
 // captureGitMeta captures the current branch name, short commit SHA,

@@ -115,22 +115,26 @@ func ExtractBinaryFromTarball(tarballPath, destDir string) (string, error) {
 // re-execs with os.Args. extraEnv is appended to the environment for the
 // re-exec (e.g. []string{"FABRIK_AUTO_UPGRADED=1"}); pass nil for no extras.
 //
-// All failures are non-fatal: logf is called with a warning and the function
-// returns so the caller can fall through to its normal operation.
-func PerformReleaseUpgrade(client GitHubClient, version, token string, extraEnv []string, logf func(string, ...any)) {
+// logf is always called with a warning on failure; the returned error lets
+// callers decide whether a failure should be fatal (e.g. a foreground `fabrik
+// upgrade` command halting before plugin refresh) or non-fatal (e.g. the
+// background poll loop, which must continue regardless — see
+// engine/poll.go's checkReleaseUpgrade). "Already up to date" and "no release
+// object" are not failures and return nil.
+func PerformReleaseUpgrade(client GitHubClient, version, token string, extraEnv []string, logf func(string, ...any)) error {
 	release, err := client.FetchLatestRelease(fabrikOwner, fabrikRepo)
 	if err != nil {
 		logf("could not fetch latest release: %v\n", err)
-		return
+		return fmt.Errorf("fetching latest release: %w", err)
 	}
 	if release == nil {
-		return
+		return nil
 	}
 
 	latestTag := release.TagName
 	if !SemverGreater(latestTag, version) {
 		// Up to date; log nothing.
-		return
+		return nil
 	}
 
 	logf("new release available: %s (running %s) — upgrading\n", latestTag, version)
@@ -152,19 +156,19 @@ func PerformReleaseUpgrade(client GitHubClient, version, token string, extraEnv 
 	}
 	if downloadURL == "" {
 		logf("no matching asset for %s/%s (want %s) — skipping\n", runtime.GOOS, runtime.GOARCH, wantName)
-		return
+		return fmt.Errorf("no matching release asset for %s/%s (want %s)", runtime.GOOS, runtime.GOARCH, wantName)
 	}
 
 	// Determine current executable path.
 	exe, err := os.Executable()
 	if err != nil {
 		logf("could not determine executable path: %v\n", err)
-		return
+		return fmt.Errorf("determining executable path: %w", err)
 	}
 	exe, err = filepath.EvalSymlinks(exe)
 	if err != nil {
 		logf("could not resolve symlinks for executable: %v\n", err)
-		return
+		return fmt.Errorf("resolving executable symlinks: %w", err)
 	}
 
 	logf("downloading %s\n", downloadURL)
@@ -174,7 +178,7 @@ func PerformReleaseUpgrade(client GitHubClient, version, token string, extraEnv 
 	tarballTmp, err := os.CreateTemp(filepath.Dir(exe), "fabrik-download-*")
 	if err != nil {
 		logf("could not create download temp file: %v\n", err)
-		return
+		return fmt.Errorf("creating download temp file: %w", err)
 	}
 	tarballPath := tarballTmp.Name()
 	defer os.Remove(tarballPath)
@@ -194,29 +198,29 @@ func PerformReleaseUpgrade(client GitHubClient, version, token string, extraEnv 
 	if err != nil {
 		tarballTmp.Close()
 		logf("download failed: %v\n", err)
-		return
+		return fmt.Errorf("downloading release asset: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		tarballTmp.Close()
 		logf("download returned HTTP %d\n", resp.StatusCode)
-		return
+		return fmt.Errorf("downloading release asset: HTTP %d", resp.StatusCode)
 	}
 	if _, err := io.Copy(tarballTmp, resp.Body); err != nil {
 		tarballTmp.Close()
 		logf("writing download: %v\n", err)
-		return
+		return fmt.Errorf("writing downloaded asset: %w", err)
 	}
 	if err := tarballTmp.Close(); err != nil {
 		logf("closing download: %v\n", err)
-		return
+		return fmt.Errorf("closing downloaded asset: %w", err)
 	}
 
 	// Extract the binary from the tarball.
 	newBin, err := ExtractBinaryFromTarball(tarballPath, filepath.Dir(exe))
 	if err != nil {
 		logf("extracting binary: %v\n", err)
-		return
+		return fmt.Errorf("extracting binary from tarball: %w", err)
 	}
 
 	// Atomically replace the running binary; only remove newBin if rename fails.
@@ -228,7 +232,7 @@ func PerformReleaseUpgrade(client GitHubClient, version, token string, extraEnv 
 	}()
 	if err := os.Rename(newBin, exe); err != nil {
 		logf("replacing binary: %v\n", err)
-		return
+		return fmt.Errorf("replacing running binary: %w", err)
 	}
 	renamed = true
 
@@ -245,5 +249,7 @@ func PerformReleaseUpgrade(client GitHubClient, version, token string, extraEnv 
 	env := append(os.Environ(), extraEnv...)
 	if err := syscall.Exec(exe, os.Args, env); err != nil {
 		logf("exec failed: %v\n", err)
+		return fmt.Errorf("re-executing upgraded binary: %w", err)
 	}
+	return nil
 }

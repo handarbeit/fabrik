@@ -62,9 +62,11 @@ func runUpgrade(args []string) error {
 		if client == nil {
 			client = gh.NewClient(token)
 		}
-		engine.PerformReleaseUpgrade(client, Version, token, nil, func(format string, args ...any) {
+		if err := engine.PerformReleaseUpgrade(client, Version, token, nil, func(format string, args ...any) {
 			fmt.Printf(format, args...)
-		})
+		}); err != nil {
+			return fmt.Errorf("release upgrade: %w", err)
+		}
 	}
 
 	if force {
