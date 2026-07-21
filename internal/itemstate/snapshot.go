@@ -48,8 +48,8 @@ func newSnapshot(s ItemState) Snapshot {
 	c.Assignees = copyStrings(s.Assignees)
 	c.Comments = copyComments(s.Comments)
 	c.BlockedBy = copyDeps(s.BlockedBy)
-	c.CooldownAt = copyTimeMap(s.CooldownAt)
-	c.BaseBranchWarned = copyBoolMap(s.BaseBranchWarned)
+	c.CooldownAt = copyMap(s.CooldownAt)
+	c.BaseBranchWarned = copyMap(s.BaseBranchWarned)
 	c.StageState = copyStageState(s.StageState)
 
 	if s.LinkedPR != nil {
@@ -307,33 +307,11 @@ func copyCheckRuns(src []gh.CheckRun) []gh.CheckRun {
 	return dst
 }
 
-func copyTimeMap(src map[string]time.Time) map[string]time.Time {
+func copyMap[K comparable, V any](src map[K]V) map[K]V {
 	if src == nil {
 		return nil
 	}
-	dst := make(map[string]time.Time, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
-	return dst
-}
-
-func copyBoolMap(src map[string]bool) map[string]bool {
-	if src == nil {
-		return nil
-	}
-	dst := make(map[string]bool, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
-	return dst
-}
-
-func copyIntMap(src map[string]int) map[string]int {
-	if src == nil {
-		return nil
-	}
-	dst := make(map[string]int, len(src))
+	dst := make(map[K]V, len(src))
 	for k, v := range src {
 		dst[k] = v
 	}
@@ -342,26 +320,15 @@ func copyIntMap(src map[string]int) map[string]int {
 
 func copyStageState(s StageState) StageState {
 	return StageState{
-		Attempts:             copyIntMap(s.Attempts),
-		LastAttemptAt:        copyTimeMap(s.LastAttemptAt),
-		PausedByEngine:       copyBoolMap(s.PausedByEngine),
-		PRCreationFailed:     copyBoolMap(s.PRCreationFailed),
-		ReviewCycles:         copyIntMap(s.ReviewCycles),
-		CIFixCycles:          copyIntMap(s.CIFixCycles),
-		RebaseCycles:         copyIntMap(s.RebaseCycles),
-		EnqueueCycles:        copyIntMap(s.EnqueueCycles),
-		ProcessedComments:    copyTimeMap(s.ProcessedComments),
-		LinkageHealAttempted: copyStringMap(s.LinkageHealAttempted),
+		Attempts:             copyMap(s.Attempts),
+		LastAttemptAt:        copyMap(s.LastAttemptAt),
+		PausedByEngine:       copyMap(s.PausedByEngine),
+		PRCreationFailed:     copyMap(s.PRCreationFailed),
+		ReviewCycles:         copyMap(s.ReviewCycles),
+		CIFixCycles:          copyMap(s.CIFixCycles),
+		RebaseCycles:         copyMap(s.RebaseCycles),
+		EnqueueCycles:        copyMap(s.EnqueueCycles),
+		ProcessedComments:    copyMap(s.ProcessedComments),
+		LinkageHealAttempted: copyMap(s.LinkageHealAttempted),
 	}
-}
-
-func copyStringMap(src map[string]string) map[string]string {
-	if src == nil {
-		return nil
-	}
-	dst := make(map[string]string, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
-	return dst
 }
