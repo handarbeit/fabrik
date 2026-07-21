@@ -960,6 +960,11 @@ func TestRemoveAwaitingReviewLabel_CleansRepromptedLabels(t *testing.T) {
 // GitHub) and the cache synced accordingly — mirroring removeAwaitingCILabel's
 // ErrNotFound branch exactly. Before the fix, an ErrNotFound just logged a
 // warning and left the cache believing the label was still present.
+//
+// The item is constructed with an empty Repo (relying on the defaultRepo()
+// fallback to "owner/repo") so the item.Repo-vs-resolved-owner/repo cache key
+// mismatch is also observable here — a test using an explicit non-empty
+// item.Repo would not catch that bug class.
 func TestRemoveAwaitingReviewLabel_ErrNotFound(t *testing.T) {
 	var calls int
 	client := &mockGitHubClient{
@@ -981,7 +986,6 @@ func TestRemoveAwaitingReviewLabel_ErrNotFound(t *testing.T) {
 
 	item := gh.ProjectItem{
 		Number: 10,
-		Repo:   "owner/repo",
 		Labels: []string{"fabrik:awaiting-review"},
 	}
 
