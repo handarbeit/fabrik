@@ -12,7 +12,7 @@ func (c *Client) AddComment(owner, repo string, issueNumber int, body string) (i
 		ID int `json:"id"`
 	}
 	if err := c.restPostWithResponse(apiURL, payload, &resp); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("adding comment to %s/%s#%d: %w", owner, repo, issueNumber, err)
 	}
 	if resp.ID <= 0 {
 		return 0, fmt.Errorf("github: add comment response missing valid id")
@@ -29,7 +29,10 @@ func (c *Client) AddCommentReaction(owner, repo string, commentDatabaseID int, c
 	payload := map[string]interface{}{
 		"content": content,
 	}
-	return c.restPost(apiURL, payload)
+	if err := c.restPost(apiURL, payload); err != nil {
+		return fmt.Errorf("adding %q reaction to comment %d on %s/%s: %w", content, commentDatabaseID, owner, repo, err)
+	}
+	return nil
 }
 
 // AddPRReviewCommentReaction adds a reaction to a PR review thread (inline)
@@ -40,7 +43,10 @@ func (c *Client) AddPRReviewCommentReaction(owner, repo string, commentDatabaseI
 	payload := map[string]interface{}{
 		"content": content,
 	}
-	return c.restPost(apiURL, payload)
+	if err := c.restPost(apiURL, payload); err != nil {
+		return fmt.Errorf("adding %q reaction to PR review comment %d on %s/%s: %w", content, commentDatabaseID, owner, repo, err)
+	}
+	return nil
 }
 
 // ResolveReviewThread marks a PR review thread as resolved ("Resolve
@@ -64,7 +70,10 @@ mutation($threadId: ID!) {
 			} `json:"resolveReviewThread"`
 		} `json:"data"`
 	}
-	return c.graphqlRequest(query, vars, &result)
+	if err := c.graphqlRequest(query, vars, &result); err != nil {
+		return fmt.Errorf("resolving review thread %s: %w", threadID, err)
+	}
+	return nil
 }
 
 // UpdateComment replaces the body of an existing issue comment.
@@ -73,7 +82,10 @@ func (c *Client) UpdateComment(owner, repo string, commentDatabaseID int, body s
 	payload := map[string]interface{}{
 		"body": body,
 	}
-	return c.restPatch(apiURL, payload)
+	if err := c.restPatch(apiURL, payload); err != nil {
+		return fmt.Errorf("updating comment %d on %s/%s: %w", commentDatabaseID, owner, repo, err)
+	}
+	return nil
 }
 
 // UpdateIssueBody updates the body of an issue.
@@ -82,7 +94,10 @@ func (c *Client) UpdateIssueBody(owner, repo string, issueNumber int, body strin
 	payload := map[string]interface{}{
 		"body": body,
 	}
-	return c.restPatch(apiURL, payload)
+	if err := c.restPatch(apiURL, payload); err != nil {
+		return fmt.Errorf("updating body of %s/%s#%d: %w", owner, repo, issueNumber, err)
+	}
+	return nil
 }
 
 // GetIssueBody fetches the body of an issue (or PR, since PRs are issues on the REST API).
@@ -92,7 +107,7 @@ func (c *Client) GetIssueBody(owner, repo string, issueNumber int) (string, erro
 		Body string `json:"body"`
 	}
 	if err := c.restGetJSON(apiURL, &result); err != nil {
-		return "", err
+		return "", fmt.Errorf("fetching body of %s/%s#%d: %w", owner, repo, issueNumber, err)
 	}
 	return result.Body, nil
 }
