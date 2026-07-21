@@ -76,10 +76,10 @@ func (e *Engine) worktreeExistsForItem(item gh.ProjectItem) bool {
 	return err == nil
 }
 
-// hasLabel reports whether item.Labels contains label.
-func hasLabel(item gh.ProjectItem, label string) bool {
-	for _, l := range item.Labels {
-		if l == label {
+// hasLabel reports whether labels contains want.
+func hasLabel(labels []string, want string) bool {
+	for _, l := range labels {
+		if l == want {
 			return true
 		}
 	}
@@ -115,7 +115,7 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 		// the admit on the gate-checked stage rather than a fixed label allowlist
 		// removes the label coupling that previously stranded paused / awaiting-review
 		// merges (the #874 class) one layer upstream of the settle-owner.
-		if !stage.CleanupWorktree && !hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) && !hasLabel(item, "fabrik:awaiting-ci") && !hasLabel(item, "fabrik:auto-merge-enabled") && !stageIsGateChecked(stage) {
+		if !stage.CleanupWorktree && !hasLabel(item.Labels, fmt.Sprintf("stage:%s:complete", stage.Name)) && !hasLabel(item.Labels, "fabrik:awaiting-ci") && !hasLabel(item.Labels, "fabrik:auto-merge-enabled") && !stageIsGateChecked(stage) {
 			return false
 		}
 	}
@@ -130,7 +130,7 @@ func (e *Engine) itemMayNeedWork(item gh.ProjectItem) bool {
 	// already been made and must not be re-litigated by the normal pipeline.
 	// Cleanup stages are exempt so Done's worktree cleanup can still run once the
 	// settle scan finally lands the move.
-	if !stage.CleanupWorktree && hasLabel(item, "fabrik:awaiting-done") {
+	if !stage.CleanupWorktree && hasLabel(item.Labels, "fabrik:awaiting-done") {
 		return false
 	}
 
@@ -192,7 +192,7 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		// gate-checked stage (Validate) lacking stage:complete so the gate-label-
 		// agnostic settle-owner can heal paused / awaiting-review merges (ADR-056 D2,
 		// #874 class) — not only fabrik:awaiting-ci / fabrik:auto-merge-enabled.
-		if !stage.CleanupWorktree && !hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) && !hasLabel(item, "fabrik:awaiting-ci") && !hasLabel(item, "fabrik:auto-merge-enabled") && !stageIsGateChecked(stage) {
+		if !stage.CleanupWorktree && !hasLabel(item.Labels, fmt.Sprintf("stage:%s:complete", stage.Name)) && !hasLabel(item.Labels, "fabrik:awaiting-ci") && !hasLabel(item.Labels, "fabrik:auto-merge-enabled") && !stageIsGateChecked(stage) {
 			return false
 		}
 	}
@@ -205,7 +205,7 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	// independent of item.Status — mirrors the itemMayNeedWork gate above. The
 	// settle scan in poll.go (not the normal dispatch path) is the only thing
 	// that may act on the item while this marker is present.
-	if !stage.CleanupWorktree && hasLabel(item, "fabrik:awaiting-done") {
+	if !stage.CleanupWorktree && hasLabel(item.Labels, "fabrik:awaiting-done") {
 		return false
 	}
 
@@ -216,10 +216,10 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 
 	// Cleanup stages bypass comment processing and cooldown checks.
 	if stage.CleanupWorktree {
-		if hasLabel(item, "fabrik:paused") {
+		if hasLabel(item.Labels, "fabrik:paused") {
 			return false
 		}
-		if hasLabel(item, fmt.Sprintf("stage:%s:complete", stage.Name)) {
+		if hasLabel(item.Labels, fmt.Sprintf("stage:%s:complete", stage.Name)) {
 			return false
 		}
 		return e.worktreeExistsForItem(item)
@@ -242,7 +242,7 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 
 	// Items being edited by a comment-processing worker must not receive a new
 	// stage dispatch — pre-dispatch gate symmetric with fabrik:locked:<other-user>.
-	if hasLabel(item, "fabrik:editing") {
+	if hasLabel(item.Labels, "fabrik:editing") {
 		return false
 	}
 
@@ -254,7 +254,7 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	// re-evaluate: if still blocked it re-stamps the cooldown; if resolved it
 	// removes the label. No store entry (cold-start or restart) also admits,
 	// since no active cooldown exists yet.
-	if hasLabel(item, "fabrik:blocked") {
+	if hasLabel(item.Labels, "fabrik:blocked") {
 		repo := itemOwnerRepoString(item, e.defaultRepo())
 		if snap, err := e.store.Get(repo, item.Number); err == nil {
 			if cooldown := snap.CooldownAt("dep-blocked"); !cooldown.IsZero() && time.Now().Before(cooldown) {
@@ -272,7 +272,7 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 
 	// Paused items: a new user comment is an implicit "resume and handle this."
 	// Without a comment, respect the pause.
-	isPaused := hasLabel(item, "fabrik:paused")
+	isPaused := hasLabel(item.Labels, "fabrik:paused")
 	newComments := e.findNewComments(item)
 	if isPaused {
 		if len(newComments) > 0 {
@@ -308,7 +308,7 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 	// must not re-invoke while CI is being awaited (R3). Scoped to wait_for_ci
 	// stages so a stale label on a non-CI-gated stage does not permanently
 	// suppress dispatch (e.g., if a user manually moves an item to a different stage).
-	if stage.WaitForCI != nil && *stage.WaitForCI && hasLabel(item, "fabrik:awaiting-ci") {
+	if stage.WaitForCI != nil && *stage.WaitForCI && hasLabel(item.Labels, "fabrik:awaiting-ci") {
 		return false
 	}
 
@@ -1707,7 +1707,7 @@ type progressBaseline struct {
 
 // hasExtendTurnsLabel returns true if item carries the "fabrik:extend-turns" label.
 func hasExtendTurnsLabel(item gh.ProjectItem) bool {
-	return hasLabel(item, "fabrik:extend-turns")
+	return hasLabel(item.Labels, "fabrik:extend-turns")
 }
 
 // snapshotBaseline captures observable progress state for stage before the first invocation.

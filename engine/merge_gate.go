@@ -61,14 +61,7 @@ func (e *Engine) checkMergeabilityGate(item gh.ProjectItem, stage *stages.Stage,
 		}
 		// Confirmed conflict. Apply fabrik:rebase-needed (idempotent).
 		e.logf(item.Number, "merge-gate", "PR #%d is not mergeable (base conflict) — rebase required\n", prNum)
-		alreadyLabeled := false
-		for _, l := range item.Labels {
-			if l == "fabrik:rebase-needed" {
-				alreadyLabeled = true
-				break
-			}
-		}
-		if !alreadyLabeled {
+		if !hasLabel(item.Labels, "fabrik:rebase-needed") {
 			e.applyLabelAdd(item, "fabrik:rebase-needed", false)
 		}
 		return true, true
@@ -78,11 +71,8 @@ func (e *Engine) checkMergeabilityGate(item gh.ProjectItem, stage *stages.Stage,
 
 // removeRebaseNeededLabel clears fabrik:rebase-needed if present.
 func (e *Engine) removeRebaseNeededLabel(owner, repo string, item gh.ProjectItem) {
-	for _, l := range item.Labels {
-		if l == "fabrik:rebase-needed" {
-			e.applyLabelRemove(item, "fabrik:rebase-needed", false)
-			return
-		}
+	if hasLabel(item.Labels, "fabrik:rebase-needed") {
+		e.applyLabelRemove(item, "fabrik:rebase-needed", false)
 	}
 }
 
@@ -159,7 +149,7 @@ func (e *Engine) dispatchRebaseReinvoke(ctx context.Context, board *gh.ProjectBo
 			// re-enqueue, not native auto-merge, and the convergence monitor re-enqueues
 			// the resolved PR once it re-derives clean. Re-enabling auto-merge here would
 			// fight the queue model.
-			if !hasLabel(item, "fabrik:auto-merge-enabled") || item.LinkedPRIsMergeQueueEnabled {
+			if !hasLabel(item.Labels, "fabrik:auto-merge-enabled") || item.LinkedPRIsMergeQueueEnabled {
 				return
 			}
 

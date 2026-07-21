@@ -180,14 +180,14 @@ func (e *Engine) preImplement(ctx context.Context, board *gh.ProjectBoard, item 
 	// Idempotency guard: if children have already been spawned, skip. This must
 	// remain the first check — recoverMissingPlanComment's live-read path relies
 	// on this ordering to avoid double-spawning across retried recovery attempts.
-	if hasLabel(item, "fabrik:children-spawned") {
+	if hasLabel(item.Labels, "fabrik:children-spawned") {
 		return false, nil
 	}
 
 	// Find the most recent Plan stage comment.
 	planComment := findStageComment(item.Comments, "Plan")
 	if planComment == nil {
-		if hasLabel(item, "stage:Plan:complete") {
+		if hasLabel(item.Labels, "stage:Plan:complete") {
 			// Inconsistent state: Plan finished (and may have declared spawn
 			// blocks) but the comment the spawn logic reads from is missing
 			// from this item snapshot — a stale deep-field read (#982).
@@ -368,12 +368,12 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		}
 
 		// Inherit fabrik:yolo and fabrik:cruise from parent (enables autonomous child pipeline).
-		if hasLabel(item, "fabrik:yolo") {
+		if hasLabel(item.Labels, "fabrik:yolo") {
 			if err := e.client.AddLabelToIssue(childOwner, childRepo, childNumber, "fabrik:yolo"); err != nil {
 				e.logf(item.Number, "warn", "could not add fabrik:yolo to %s#%d: %v\n", block.Repo, childNumber, err)
 			}
 		}
-		if hasLabel(item, "fabrik:cruise") {
+		if hasLabel(item.Labels, "fabrik:cruise") {
 			if err := e.client.AddLabelToIssue(childOwner, childRepo, childNumber, "fabrik:cruise"); err != nil {
 				e.logf(item.Number, "warn", "could not add fabrik:cruise to %s#%d: %v\n", block.Repo, childNumber, err)
 			}

@@ -75,7 +75,7 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	// when Claude emits FABRIK_BLOCKED_ON_INPUT; if the user manually removes
 	// fabrik:paused (bypassing unblockAwaitingInput), the label can survive through
 	// subsequent stage runs. Clean it up on every completion path.
-	if hasLabel(item, "fabrik:awaiting-input") {
+	if hasLabel(item.Labels, "fabrik:awaiting-input") {
 		if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil &&
 			!errors.Is(err, gh.ErrNotFound) {
 			e.logf(item.Number, "warn", "could not remove awaiting-input label: %v\n", err)
@@ -248,7 +248,7 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 	}
 
 	// Idempotency: auto-merge was already enabled on a prior run.
-	if hasLabel(item, "fabrik:auto-merge-enabled") {
+	if hasLabel(item.Labels, "fabrik:auto-merge-enabled") {
 		return true, nil
 	}
 
@@ -384,7 +384,7 @@ func (e *Engine) handleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
-	if !hasLabel(item, "fabrik:awaiting-done") {
+	if !hasLabel(item.Labels, "fabrik:awaiting-done") {
 		if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-done"); err != nil {
 			e.logf(item.Number, "warn", "could not add awaiting-done marker: %v\n", err)
 		} else {
