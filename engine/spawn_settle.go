@@ -1,13 +1,11 @@
 package engine
 
 import (
-	"errors"
 	"fmt"
 	"regexp"
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
-	"github.com/handarbeit/fabrik/internal/itemstate"
 )
 
 // childPlacementLabel is the durable marker recording that a spawned child
@@ -79,18 +77,7 @@ func (e *Engine) settleChildPlacement(board *gh.ProjectBoard, item gh.ProjectIte
 // (not any real stage name — see the ADR for rationale). Escalates via
 // escalateChildPlacementFailure once e.cfg.MaxRetries is reached.
 func (e *Engine) recordChildPlacementRetry(item gh.ProjectItem) {
-	if e.cfg.MaxRetries <= 0 {
-		return
-	}
-	repoStr := itemOwnerRepoString(item, e.defaultRepo())
-	e.store.Apply(itemstate.StageRetryIncremented{Repo: repoStr, Number: item.Number, StageName: childPlacementRetryStage})
-	var count int
-	if snap, err := e.store.Get(repoStr, item.Number); err == nil {
-		count = snap.Attempts(childPlacementRetryStage)
-	}
-	if count >= e.cfg.MaxRetries {
-		e.escalateChildPlacementFailure(item)
-	}
+	e.recordSettleRetry(item, childPlacementRetryStage, e.escalateChildPlacementFailure)
 }
 
 // escalateChildPlacementFailure is called when a spawned child's outstanding
@@ -108,37 +95,32 @@ func (e *Engine) escalateChildPlacementFailure(item gh.ProjectItem) {
 
 	e.logf(item.Number, "escalate", "child board placement on %s/%s#%d failed %d time(s) — pausing issue\n", owner, repo, item.Number, e.cfg.MaxRetries)
 
-	e.addPausedLabelToItem(owner, repo, item)
-
-	e.applyLabelRemove(item, childPlacementLabel, true)
-
-	comment := fmt.Sprintf(
-		"🏭 **Fabrik — spawned child board placement failed**\n\nThis issue was spawned as a sub-issue, but Fabrik could not place it into the `Specify` (or first processing) column on the project board after %d attempt(s). It may still be sitting in `Backlog` or wherever GitHub defaulted it. The issue has been paused.\n\nManual fix:\nMove this issue's project-board column to `Specify` (or the first processing stage) yourself, then remove the `fabrik:paused` label to let Fabrik pick it up.\n\nIf no suitable column exists on the board, this may indicate a board-configuration problem — check that a `Specify` (or equivalent first-stage) column exists.",
-		e.cfg.MaxRetries,
-	)
-	// NOTE: this comment-post's cache write-through deliberately omits CreatedAt
-	// (unlike postComment, which always stamps time.Now()) to preserve this
-	// site's pre-existing behavior exactly; using e.cache() directly here
-	// (rather than postComment/postItemComment) keeps that omission intact.
-	if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
-		e.logf(item.Number, "warn", "could not post child-placement escalation comment: %v\n", err)
-	} else {
-		if c := e.cache(); c != nil {
-			c.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
-				DatabaseID: dbID, Body: comment, Author: e.cfg.User,
-			})
+	e.escalateSettle(item, childPlacementLabel, childPlacementRetryStage, func(item gh.ProjectItem) {
+		comment := fmt.Sprintf(
+			"🏭 **Fabrik — spawned child board placement failed**\n\nThis issue was spawned as a sub-issue, but Fabrik could not place it into the `Specify` (or first processing) column on the project board after %d attempt(s). It may still be sitting in `Backlog` or wherever GitHub defaulted it. The issue has been paused.\n\nManual fix:\nMove this issue's project-board column to `Specify` (or the first processing stage) yourself, then remove the `fabrik:paused` label to let Fabrik pick it up.\n\nIf no suitable column exists on the board, this may indicate a board-configuration problem — check that a `Specify` (or equivalent first-stage) column exists.",
+			e.cfg.MaxRetries,
+		)
+		// NOTE: this comment-post's cache write-through deliberately omits CreatedAt
+		// (unlike postComment, which always stamps time.Now()) to preserve this
+		// site's pre-existing behavior exactly; using e.cache() directly here
+		// (rather than postComment/postItemComment) keeps that omission intact.
+		if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
+			e.logf(item.Number, "warn", "could not post child-placement escalation comment: %v\n", err)
+		} else {
+			if c := e.cache(); c != nil {
+				c.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
+					DatabaseID: dbID, Body: comment, Author: e.cfg.User,
+				})
+			}
+			if e.webhookMgr != nil {
+				e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
+			}
+			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
+			if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
+				e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
+			}
 		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
-		}
-		// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
-		if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
-		}
-	}
-
-	repoStr := itemOwnerRepoString(item, e.defaultRepo())
-	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: childPlacementRetryStage})
+	})
 
 	e.notifyParentOfStalledChild(owner, repo, item)
 }
@@ -147,16 +129,7 @@ func (e *Engine) escalateChildPlacementFailure(item gh.ProjectItem) {
 // the retry counter once settleChildPlacement has succeeded (or the closed-
 // child short-circuit in the poll.go settle scan applies).
 func (e *Engine) clearChildPlacementMarker(item gh.ProjectItem, owner, repo string) {
-	if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, childPlacementLabel); err != nil &&
-		!errors.Is(err, gh.ErrNotFound) {
-		e.logf(item.Number, "warn", "could not remove %s marker: %v\n", childPlacementLabel, err)
-		return
-	} else if err == nil {
-		e.syncLabelRemoval(item, childPlacementLabel, true)
-	}
-
-	repoStr := itemOwnerRepoString(item, e.defaultRepo())
-	e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: childPlacementRetryStage})
+	e.clearSettleMarker(item, owner, repo, childPlacementLabel, childPlacementRetryStage)
 }
 
 // notifyParentOfStalledChild makes a best-effort attempt to post a comment on

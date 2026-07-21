@@ -1,12 +1,10 @@
 package engine
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
-	"github.com/handarbeit/fabrik/internal/itemstate"
 )
 
 // mergeTrainAwaitingMemberCloseLabel marks a merge-train singleton landing (landSingleton)
@@ -84,18 +82,7 @@ func (e *Engine) settleMergeTrainMemberClose(item gh.ProjectItem) {
 // reached. Mirrors recordNoWorkNeededRetry, including its MaxRetries<=0 (unlimited retries,
 // never escalate) guard.
 func (e *Engine) recordMergeTrainMemberCloseRetry(item gh.ProjectItem) {
-	if e.cfg.MaxRetries <= 0 {
-		return
-	}
-	repoStr := itemOwnerRepoString(item, e.defaultRepo())
-	e.store.Apply(itemstate.StageRetryIncremented{Repo: repoStr, Number: item.Number, StageName: mergeTrainMemberCloseRetryStage})
-	var count int
-	if snap, err := e.store.Get(repoStr, item.Number); err == nil {
-		count = snap.Attempts(mergeTrainMemberCloseRetryStage)
-	}
-	if count >= e.cfg.MaxRetries {
-		e.escalateMergeTrainMemberCloseFailure(item)
-	}
+	e.recordSettleRetry(item, mergeTrainMemberCloseRetryStage, e.escalateMergeTrainMemberCloseFailure)
 }
 
 // escalateMergeTrainMemberCloseFailure is called when the outstanding merge-train
@@ -109,31 +96,18 @@ func (e *Engine) escalateMergeTrainMemberCloseFailure(item gh.ProjectItem) {
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
-	e.addLabel(item, "fabrik:paused")
-	e.applyLabelRemove(item, mergeTrainAwaitingMemberCloseLabel, true)
-
-	comment := fmt.Sprintf(
-		"🏭 **Fabrik — merge-train member-issue close failed**\n\nThis issue landed successfully via the merge-train singleton path, but closing the issue itself could not be completed after %d attempt(s). The issue has been paused.\n\nManual fix:\n```\ngh issue close %d --repo %s/%s\n```\nThen remove the `fabrik:paused` label.",
-		e.cfg.MaxRetries, item.Number, owner, repo,
-	)
-	e.postItemComment(item, comment, true)
-
-	repoStr := itemOwnerRepoString(item, e.defaultRepo())
-	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: mergeTrainMemberCloseRetryStage})
+	e.escalateSettle(item, mergeTrainAwaitingMemberCloseLabel, mergeTrainMemberCloseRetryStage, func(item gh.ProjectItem) {
+		comment := fmt.Sprintf(
+			"🏭 **Fabrik — merge-train member-issue close failed**\n\nThis issue landed successfully via the merge-train singleton path, but closing the issue itself could not be completed after %d attempt(s). The issue has been paused.\n\nManual fix:\n```\ngh issue close %d --repo %s/%s\n```\nThen remove the `fabrik:paused` label.",
+			e.cfg.MaxRetries, item.Number, owner, repo,
+		)
+		e.postItemComment(item, comment, true)
+	})
 }
 
 // clearMergeTrainMemberCloseMarker removes the awaiting-member-close marker and clears the
 // retry counter once the member issue is confirmed closed (by us or by GitHub's own
 // Closes #N auto-close).
 func (e *Engine) clearMergeTrainMemberCloseMarker(item gh.ProjectItem, owner, repo string) {
-	if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, mergeTrainAwaitingMemberCloseLabel); err != nil &&
-		!errors.Is(err, gh.ErrNotFound) {
-		e.logf(item.Number, "warn", "could not remove %s marker: %v\n", mergeTrainAwaitingMemberCloseLabel, err)
-		return
-	} else if err == nil {
-		e.syncLabelRemoval(item, mergeTrainAwaitingMemberCloseLabel, true)
-	}
-
-	repoStr := itemOwnerRepoString(item, e.defaultRepo())
-	e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: mergeTrainMemberCloseRetryStage})
+	e.clearSettleMarker(item, owner, repo, mergeTrainAwaitingMemberCloseLabel, mergeTrainMemberCloseRetryStage)
 }

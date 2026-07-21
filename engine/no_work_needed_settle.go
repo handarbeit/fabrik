@@ -193,18 +193,7 @@ func (e *Engine) settleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 // constant (not the emitting stage's real name — see the ADR for rationale).
 // Escalates via escalateNoWorkNeededFailure once e.cfg.MaxRetries is reached.
 func (e *Engine) recordNoWorkNeededRetry(item gh.ProjectItem) {
-	if e.cfg.MaxRetries <= 0 {
-		return
-	}
-	repoStr := itemOwnerRepoString(item, e.defaultRepo())
-	e.store.Apply(itemstate.StageRetryIncremented{Repo: repoStr, Number: item.Number, StageName: noWorkNeededRetryStage})
-	var count int
-	if snap, err := e.store.Get(repoStr, item.Number); err == nil {
-		count = snap.Attempts(noWorkNeededRetryStage)
-	}
-	if count >= e.cfg.MaxRetries {
-		e.escalateNoWorkNeededFailure(item)
-	}
+	e.recordSettleRetry(item, noWorkNeededRetryStage, e.escalateNoWorkNeededFailure)
 }
 
 // escalateNoWorkNeededFailure is called when the outstanding no-work-needed
@@ -218,31 +207,18 @@ func (e *Engine) escalateNoWorkNeededFailure(item gh.ProjectItem) {
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
-	e.addLabel(item, "fabrik:paused")
-	e.applyLabelRemove(item, "fabrik:awaiting-done", true)
-
-	comment := fmt.Sprintf(
-		"🏭 **Fabrik — no-work-needed completion failed**\n\nThis issue was determined to need no code or documentation changes, but the board move to Done and/or the issue close could not be completed after %d attempt(s). The issue has been paused.\n\nManual fix:\n```\ngh issue close %d --repo %s/%s\n```\nThen move the issue's project-board column to Done yourself (no `gh` one-liner exists for Projects-v2 status fields).\n\nThen remove the `fabrik:paused` label. Do not remove it without completing the above — removing the `fabrik:paused` label without completing these steps may cause the issue to re-enter the normal pipeline unexpectedly.",
-		e.cfg.MaxRetries, item.Number, owner, repo,
-	)
-	e.postItemComment(item, comment, true)
-
-	repoStr := itemOwnerRepoString(item, e.defaultRepo())
-	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: noWorkNeededRetryStage})
+	e.escalateSettle(item, "fabrik:awaiting-done", noWorkNeededRetryStage, func(item gh.ProjectItem) {
+		comment := fmt.Sprintf(
+			"🏭 **Fabrik — no-work-needed completion failed**\n\nThis issue was determined to need no code or documentation changes, but the board move to Done and/or the issue close could not be completed after %d attempt(s). The issue has been paused.\n\nManual fix:\n```\ngh issue close %d --repo %s/%s\n```\nThen move the issue's project-board column to Done yourself (no `gh` one-liner exists for Projects-v2 status fields).\n\nThen remove the `fabrik:paused` label. Do not remove it without completing the above — removing the `fabrik:paused` label without completing these steps may cause the issue to re-enter the normal pipeline unexpectedly.",
+			e.cfg.MaxRetries, item.Number, owner, repo,
+		)
+		e.postItemComment(item, comment, true)
+	})
 }
 
 // clearNoWorkNeededMarker removes the fabrik:awaiting-done marker and clears the
 // retry counter once settleNoWorkNeeded has fully succeeded (status moved to Done
 // and the issue closed).
 func (e *Engine) clearNoWorkNeededMarker(item gh.ProjectItem, owner, repo string) {
-	if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:awaiting-done"); err != nil &&
-		!errors.Is(err, gh.ErrNotFound) {
-		e.logf(item.Number, "warn", "could not remove awaiting-done marker: %v\n", err)
-		return
-	} else if err == nil {
-		e.syncLabelRemoval(item, "fabrik:awaiting-done", true)
-	}
-
-	repoStr := itemOwnerRepoString(item, e.defaultRepo())
-	e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: noWorkNeededRetryStage})
+	e.clearSettleMarker(item, owner, repo, "fabrik:awaiting-done", noWorkNeededRetryStage)
 }
