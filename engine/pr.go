@@ -49,8 +49,8 @@ func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) (int, err
 			// An open PR already exists — use it.
 			e.logf(item.Number, "pr", "PR #%d already exists (branch: %s, sha: %s), ensuring issue link\n", pr.Number, head, pr.HeadSHA)
 			e.ensurePRLinksIssue(item, pr.Number)
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.RecordPRLinkage(owner+"/"+repo, pr.Number, item.Number)
+			if c := e.cache(); c != nil {
+				c.RecordPRLinkage(owner+"/"+repo, pr.Number, item.Number)
 			}
 			return pr.Number, nil
 		}
@@ -95,8 +95,8 @@ func (e *Engine) ensureDraftPR(item gh.ProjectItem, baseBranch string) (int, err
 		}
 		headSHA, _ := gitHeadSHA(workDir)
 		e.logf(item.Number, "pr", "created draft PR #%d (branch: %s, sha: %s)\n", prNum, head, headSHA)
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.RecordPRLinkage(owner+"/"+repo, prNum, item.Number)
+		if c := e.cache(); c != nil {
+			c.RecordPRLinkage(owner+"/"+repo, prNum, item.Number)
 		}
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEcho("pull_request", "opened", fmt.Sprintf("%s/%s#pr%d", owner, repo, prNum))
@@ -327,42 +327,12 @@ func (e *Engine) postOutputToPR(item gh.ProjectItem, stageName, output, footer, 
 
 		// Post brief summary on the issue
 		summary := formatPRSummaryComment(stageName, prNumber, output, branch, commit, mainSHA, timestamp)
-		if dbID, err := e.client.AddComment(owner, repo, item.Number, summary); err != nil {
-			e.logf(item.Number, "warn", "could not post summary: %v\n", err)
-		} else {
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-					DatabaseID: dbID, Body: summary, Author: e.cfg.User, CreatedAt: time.Now(),
-				})
-			}
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
-			}
-			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
-			if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-				e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
-			}
-		}
+		e.postItemComment(item, summary, true)
 	} else {
 		// No PR found — fall back to posting on the issue
 		e.logf(item.Number, "warn", "no open PR found, posting on issue instead\n")
 		comment := formatOutputComment(stageName, output, footer, branch, commit, mainSHA, timestamp)
-		if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
-			e.logf(item.Number, "warn", "could not post comment: %v\n", err)
-		} else {
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-					DatabaseID: dbID, Body: comment, Author: e.cfg.User, CreatedAt: time.Now(),
-				})
-			}
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
-			}
-			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
-			if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-				e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
-			}
-		}
+		e.postItemComment(item, comment, true)
 	}
 }
 
