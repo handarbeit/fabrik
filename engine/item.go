@@ -428,66 +428,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// Runs before new-comment check — cleanup stages are terminal and should not route
 	// comments to processComments. Also handles PR items (no worktree to remove, just label).
 	if stage.CleanupWorktree {
-		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
-		for _, label := range item.Labels {
-			if label == completeLabel {
-				return nil
-			}
-		}
-
-		// Issues have worktrees; PRs on the board do not — skip the removal for PRs.
-		if !item.IsPR {
-			wm := e.worktreesFor(item.Repo)
-			wtDir := wm.WorktreeDir(item.Number)
-			statusCmd := exec.Command("git", "status", "--porcelain")
-			statusCmd.Dir = wtDir
-			if out, err := statusCmd.Output(); err == nil {
-				for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-					if line == "" {
-						continue
-					}
-					path := strings.TrimSpace(line[2:])
-					if isEngineManagedPath(path) {
-						continue
-					}
-					e.logf(item.Number, "warn", "worktree dirty at cleanup — uncommitted changes will be discarded\n")
-					break
-				}
-			}
-
-			if err := wm.CleanupWorktree(item.Number, false); err != nil {
-				e.logf(item.Number, "warn", "could not clean up worktree: %v\n", err)
-			}
-		}
-
-		e.addLabel(item, completeLabel)
-
-		// Remove fabrik:extend-turns at cleanup (Done) stage — this is the designated
-		// removal site. The label persists across all intermediate stages so the operator
-		// can apply it once and have it take effect on every stage until Done.
-		// Called unconditionally (not guarded by hasLabel) because cleanup items are
-		// dispatched from shallow board items (labels(first:15)) and the label may be
-		// present on GitHub without appearing in item.Labels. ErrNotFound = already gone
-		// (removeLabel treats it as success and still syncs the cache).
-		e.removeLabel(item, "fabrik:extend-turns")
-
-		// Auto-archiving of Done items is not currently performed (see #1035).
-
-		// Record CooldownAt["periodic-re-eval"] so itemMayNeedWork suppresses
-		// deep-fetches for this terminal item during the cooldown window.
-		cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
-		e.store.Apply(itemstate.CooldownRecorded{
-			Repo:   repoStr,
-			Number: item.Number,
-			Reason: "periodic-re-eval",
-			Until:  time.Now().Add(cooldown),
-		})
-		e.store.Apply(itemstate.InvocationRecorded{
-			Repo:      itemOwnerRepoString(item, e.defaultRepo()),
-			Number:    item.Number,
-			Completed: true,
-		})
-
+		e.handleCleanupStage(item, stage, repoStr)
 		return nil
 	}
 
@@ -563,24 +504,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// the stage completes or is permanently abandoned — NOT on every
 	// processItem return. This keeps the issue locked through cooldown
 	// retries so other instances don't pick it up.
-	lockAcquired := false
-	var workerDone chan struct{}
-	workerStartedAt := time.Now()
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, lockLabel); err != nil {
-		e.logf(item.Number, "warn", "could not add lock label: %v\n", err)
-	} else {
-		lockAcquired = true
-		e.store.Apply(itemstate.LocalLockAcquired{
-			Repo:       repoStr,
-			Number:     item.Number,
-			User:       e.cfg.User,
-			AcquiredAt: workerStartedAt,
-			Worker:     &itemstate.WorkerHandle{StageName: stage.Name, StartedAt: workerStartedAt, LastSignAt: workerStartedAt},
-		})
-		e.syncLabelAdd(item, lockLabel, true)
-		workerDone = make(chan struct{})
-		e.startHeartbeat(ctx, repoStr, item.Number, workerDone)
-	}
+	releaseLock, workerStartedAt, workerDone, ok := e.acquireLockAndVerify(ctx, item, stage, owner, repo, repoStr, lockLabel)
 	defer func() {
 		if workerDone != nil {
 			close(workerDone)
@@ -605,61 +529,10 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		Skipped:     true,
 	})
 
-	inProgressLabel := fmt.Sprintf("stage:%s:in_progress", stage.Name)
-	inProgressAdded := false
-
-	// releaseLock is called when we're truly done with this issue+stage
-	// (completed, permanently failed, or paused). NOT called on cooldown retry.
-	// Defined here (before in_progress is added) so the lock-then-verify loser
-	// path can call it safely with inProgressAdded still false.
-	releaseLock := func() {
-		if lockAcquired {
-			e.removeLockLabel(owner, repo, item.Number, lockLabel)
-			e.store.Apply(itemstate.LocalLockReleased{
-				Repo:   itemOwnerRepoString(item, e.defaultRepo()),
-				Number: item.Number,
-			})
-		}
-		if inProgressAdded {
-			e.removeInProgressLabel(owner, repo, item.Number, stage.Name)
-		}
-	}
-
-	// Lock-then-verify: after acquiring our lock, wait briefly to let a
-	// competing instance place its own lock, then re-check. If another
-	// fabrik:locked:* label is present, apply lexicographic tie-breaking:
-	// lower username wins (keeps lock and proceeds); higher username loses
-	// (releases lock and skips this cycle). This is deterministic — exactly
-	// one instance wins any conflict. Note: identical usernames are unsupported
-	// and treated as "win" (both proceed), consistent with single-instance use.
-	if lockAcquired {
-		time.Sleep(lockVerifyDelay)
-		// Lock verification needs live labels, not cached state — another instance
-		// may have written its lock label in the window since we read from cache.
-		labels, err := e.client.FetchLabels(owner, repo, item.Number)
-		if err != nil {
-			e.logf(item.Number, "warn", "could not re-fetch labels for lock verify: %v\n", err)
-		} else {
-			for _, label := range labels {
-				if strings.HasPrefix(label, "fabrik:locked:") && label != lockLabel {
-					competing := strings.TrimPrefix(label, "fabrik:locked:")
-					if e.cfg.User > competing {
-						e.logf(item.Number, "skip", "lock conflict with %q — yielding (lexicographic tie-break)\n", competing)
-						releaseLock()
-						return nil
-					}
-					e.logf(item.Number, "info", "lock conflict with %q — proceeding as winner\n", competing)
-					break
-				}
-			}
-		}
-	}
-
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, inProgressLabel); err != nil {
-		e.logf(item.Number, "warn", "could not add in_progress label: %v\n", err)
-	} else {
-		inProgressAdded = true
-		e.syncLabelAdd(item, inProgressLabel, true)
+	if !ok {
+		// Lock-then-verify tie-break was lost — acquireLockAndVerify already
+		// released whatever it had acquired.
+		return nil
 	}
 
 	// Ensure the WorktreeManager for this item's repo is ready.
@@ -775,7 +648,216 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}
 	}
 
-	// Invoke Claude Code in the issue's worktree
+	// Invoke Claude Code in the issue's worktree.
+	resume := !lastAttempt.IsZero() // resume session if we've processed this before
+
+	// Pre-audit snapshot: capture refs in all registered repos before Claude runs.
+	// Only taken for non-read-only, non-unrestricted stages (write-capable stages).
+	// In single-repo projects this produces a one-entry map; crossRepoViolations
+	// filters out the active repo, so no false positives are generated.
+	var preAuditSnapshot map[string]map[string]string
+	if !stage.ReadOnly && !hasUnrestrictedLabel(item) && e.cfg.WorktreeBoundaryAudit {
+		preAuditSnapshot = e.snapshotAllRepoRefs(item.Number)
+	}
+
+	output, completed, usage, totalMultiple, err := e.runInvocationWithExtension(ctx, item, stage, baseBranch, workDir, resume)
+
+	// Post-audit: compare ref snapshot taken before Claude ran against current state.
+	// Any new or changed ref in a non-active repo is a boundary violation.
+	if preAuditSnapshot != nil {
+		postAuditSnapshot := e.snapshotAllRepoRefs(item.Number)
+		if violations := crossRepoViolations(preAuditSnapshot, postAuditSnapshot, repoStr); len(violations) > 0 {
+			e.handleBoundaryViolation(owner, repo, repoStr, item, stage, violations, releaseLock)
+			return nil
+		}
+	}
+	// Report cumulative budget across all extensions in stats footer.
+	usage.MaxTurns = totalMultiple * stage.MaxTurns
+
+	e.finalizeStageOutcome(stageOutcomeParams{
+		ctx:             ctx,
+		board:           board,
+		item:            item,
+		stage:           stage,
+		owner:           owner,
+		repo:            repo,
+		repoStr:         repoStr,
+		baseBranch:      baseBranch,
+		workDir:         workDir,
+		output:          output,
+		completed:       completed,
+		usage:           usage,
+		invokeErr:       err,
+		release:         releaseLock,
+		stashed:         stashed,
+		workerStartedAt: workerStartedAt,
+	})
+
+	return nil
+}
+
+// handleCleanupStage handles a cleanup-stage item: removes the worktree (if this is
+// an issue, not a PR), marks the stage complete, and clears the fabrik:extend-turns
+// label (this is the designated removal site — the label persists across all
+// intermediate stages so the operator can apply it once and have it take effect
+// until Done). No lock, no Claude invocation, no comment processing is needed for
+// cleanup stages; the caller returns immediately after this call.
+func (e *Engine) handleCleanupStage(item gh.ProjectItem, stage *stages.Stage, repoStr string) {
+	completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)
+	for _, label := range item.Labels {
+		if label == completeLabel {
+			return
+		}
+	}
+
+	// Issues have worktrees; PRs on the board do not — skip the removal for PRs.
+	if !item.IsPR {
+		wm := e.worktreesFor(item.Repo)
+		wtDir := wm.WorktreeDir(item.Number)
+		statusCmd := exec.Command("git", "status", "--porcelain")
+		statusCmd.Dir = wtDir
+		if out, err := statusCmd.Output(); err == nil {
+			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				if line == "" {
+					continue
+				}
+				path := strings.TrimSpace(line[2:])
+				if isEngineManagedPath(path) {
+					continue
+				}
+				e.logf(item.Number, "warn", "worktree dirty at cleanup — uncommitted changes will be discarded\n")
+				break
+			}
+		}
+
+		if err := wm.CleanupWorktree(item.Number, false); err != nil {
+			e.logf(item.Number, "warn", "could not clean up worktree: %v\n", err)
+		}
+	}
+
+	e.addLabel(item, completeLabel)
+
+	// Called unconditionally (not guarded by hasLabel) because cleanup items are
+	// dispatched from shallow board items (labels(first:15)) and the label may be
+	// present on GitHub without appearing in item.Labels. ErrNotFound = already gone
+	// (removeLabel treats it as success and still syncs the cache).
+	e.removeLabel(item, "fabrik:extend-turns")
+
+	// Auto-archiving of Done items is not currently performed (see #1035).
+
+	// Record CooldownAt["periodic-re-eval"] so itemMayNeedWork suppresses
+	// deep-fetches for this terminal item during the cooldown window.
+	cooldown := time.Duration(e.cfg.PollSeconds*10) * time.Second
+	e.store.Apply(itemstate.CooldownRecorded{
+		Repo:   repoStr,
+		Number: item.Number,
+		Reason: "periodic-re-eval",
+		Until:  time.Now().Add(cooldown),
+	})
+	e.store.Apply(itemstate.InvocationRecorded{
+		Repo:      itemOwnerRepoString(item, e.defaultRepo()),
+		Number:    item.Number,
+		Completed: true,
+	})
+}
+
+// acquireLockAndVerify acquires the per-issue lock label and starts the heartbeat,
+// resolves any lock conflict via lock-then-verify lexicographic tie-break, and
+// finally adds the stage's in_progress label. release is idempotent and removes
+// whichever of the lock/in_progress labels were actually acquired; the caller must
+// invoke it when fully done with this issue+stage (completed, permanently failed,
+// or paused) — NOT on every processItem return, so the issue stays locked through
+// cooldown retries. workerDone is non-nil only when the lock label was acquired;
+// the caller owns closing it (heartbeat shutdown) once processing ends. When ok is
+// false, this instance lost the lock-then-verify tie-break against a competing
+// instance and release has already been called — the caller must return immediately
+// without calling release again.
+func (e *Engine) acquireLockAndVerify(ctx context.Context, item gh.ProjectItem, stage *stages.Stage, owner, repo, repoStr, lockLabel string) (release func(), workerStartedAt time.Time, workerDone chan struct{}, ok bool) {
+	lockAcquired := false
+	workerStartedAt = time.Now()
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, lockLabel); err != nil {
+		e.logf(item.Number, "warn", "could not add lock label: %v\n", err)
+	} else {
+		lockAcquired = true
+		e.store.Apply(itemstate.LocalLockAcquired{
+			Repo:       repoStr,
+			Number:     item.Number,
+			User:       e.cfg.User,
+			AcquiredAt: workerStartedAt,
+			Worker:     &itemstate.WorkerHandle{StageName: stage.Name, StartedAt: workerStartedAt, LastSignAt: workerStartedAt},
+		})
+		e.syncLabelAdd(item, lockLabel, true)
+		workerDone = make(chan struct{})
+		e.startHeartbeat(ctx, repoStr, item.Number, workerDone)
+	}
+
+	inProgressLabel := fmt.Sprintf("stage:%s:in_progress", stage.Name)
+	inProgressAdded := false
+
+	// release is called when we're truly done with this issue+stage (completed,
+	// permanently failed, or paused). Defined here (before in_progress is added)
+	// so the lock-then-verify loser path can call it safely with inProgressAdded
+	// still false.
+	release = func() {
+		if lockAcquired {
+			e.removeLockLabel(owner, repo, item.Number, lockLabel)
+			e.store.Apply(itemstate.LocalLockReleased{
+				Repo:   itemOwnerRepoString(item, e.defaultRepo()),
+				Number: item.Number,
+			})
+		}
+		if inProgressAdded {
+			e.removeInProgressLabel(owner, repo, item.Number, stage.Name)
+		}
+	}
+
+	// Lock-then-verify: after acquiring our lock, wait briefly to let a
+	// competing instance place its own lock, then re-check. If another
+	// fabrik:locked:* label is present, apply lexicographic tie-breaking:
+	// lower username wins (keeps lock and proceeds); higher username loses
+	// (releases lock and skips this cycle). This is deterministic — exactly
+	// one instance wins any conflict. Note: identical usernames are unsupported
+	// and treated as "win" (both proceed), consistent with single-instance use.
+	if lockAcquired {
+		time.Sleep(lockVerifyDelay)
+		// Lock verification needs live labels, not cached state — another instance
+		// may have written its lock label in the window since we read from cache.
+		labels, err := e.client.FetchLabels(owner, repo, item.Number)
+		if err != nil {
+			e.logf(item.Number, "warn", "could not re-fetch labels for lock verify: %v\n", err)
+		} else {
+			for _, label := range labels {
+				if strings.HasPrefix(label, "fabrik:locked:") && label != lockLabel {
+					competing := strings.TrimPrefix(label, "fabrik:locked:")
+					if e.cfg.User > competing {
+						e.logf(item.Number, "skip", "lock conflict with %q — yielding (lexicographic tie-break)\n", competing)
+						release()
+						return release, workerStartedAt, workerDone, false
+					}
+					e.logf(item.Number, "info", "lock conflict with %q — proceeding as winner\n", competing)
+					break
+				}
+			}
+		}
+	}
+
+	if err := e.client.AddLabelToIssue(owner, repo, item.Number, inProgressLabel); err != nil {
+		e.logf(item.Number, "warn", "could not add in_progress label: %v\n", err)
+	} else {
+		inProgressAdded = true
+		e.syncLabelAdd(item, inProgressLabel, true)
+	}
+
+	return release, workerStartedAt, workerDone, true
+}
+
+// runInvocationWithExtension resolves invocation options (model/effort overrides,
+// kill-grace windows, initial turn budget) and runs the Claude invocation loop,
+// re-invoking with --resume when max_turns is hit and progress is detected. The
+// hard cap is 3× stage.MaxTurns total across all invocations. totalMultiple
+// reports how many budget multiples were ultimately used, so the caller can
+// compute a cumulative-budget stats footer.
+func (e *Engine) runInvocationWithExtension(ctx context.Context, item gh.ProjectItem, stage *stages.Stage, baseBranch, workDir string, resume bool) (output string, completed bool, usage TokenUsage, totalMultiple int, err error) {
 	modelOverride := e.extractModelOverride(item.Number, item.Labels)
 	if modelOverride != "" {
 		e.logf(item.Number, "model", "using model override %q\n", modelOverride)
@@ -784,7 +866,6 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	if effortOverride != "" {
 		e.logf(item.Number, "effort", "using effort override %q\n", effortOverride)
 	}
-	resume := !lastAttempt.IsZero() // resume session if we've processed this before
 	// Resolve effective kill-grace windows for this stage. Stage-level values override
 	// engine defaults; -1 is the sentinel for "skip this signal step" (sigint: 0s in YAML).
 	sigIntGrace := stage.KillGrace.SigInt
@@ -799,6 +880,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	} else if sigTermGrace == 0 {
 		sigTermGrace = -1 // "0s" explicit → skip SIGTERM (sentinel)
 	}
+	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	opts := InvokeOptions{
 		ModelOverride:  modelOverride,
 		EffortOverride: effortOverride,
@@ -816,27 +898,13 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// Determine initial turn budget. When fabrik:extend-turns is present the first
 	// invocation gets a 2× budget (pre-granted extension, no progress check needed).
 	firstBudget := stage.MaxTurns
-	totalMultiple := 1
+	totalMultiple = 1
 	if hadExtendTurnsLabel && stage.MaxTurns > 0 {
 		firstBudget = 2 * stage.MaxTurns
 		totalMultiple = 2
 	}
 	baseline := snapshotBaseline(stage, item, workDir)
 
-	// Pre-audit snapshot: capture refs in all registered repos before Claude runs.
-	// Only taken for non-read-only, non-unrestricted stages (write-capable stages).
-	// In single-repo projects this produces a one-entry map; crossRepoViolations
-	// filters out the active repo, so no false positives are generated.
-	var preAuditSnapshot map[string]map[string]string
-	if !stage.ReadOnly && !hasUnrestrictedLabel(item) && e.cfg.WorktreeBoundaryAudit {
-		preAuditSnapshot = e.snapshotAllRepoRefs(item.Number)
-	}
-
-	// Extension loop: re-invoke with --resume when max_turns is hit and progress is detected.
-	// Hard cap is 3× stage.MaxTurns total across all invocations.
-	var output string
-	var completed bool
-	var usage TokenUsage
 	currentBudget := firstBudget
 	for {
 		opts.MaxTurnsOverride = currentBudget
@@ -867,17 +935,47 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		resume = true
 	}
 
-	// Post-audit: compare ref snapshot taken before Claude ran against current state.
-	// Any new or changed ref in a non-active repo is a boundary violation.
-	if preAuditSnapshot != nil {
-		postAuditSnapshot := e.snapshotAllRepoRefs(item.Number)
-		if violations := crossRepoViolations(preAuditSnapshot, postAuditSnapshot, repoStr); len(violations) > 0 {
-			e.handleBoundaryViolation(owner, repo, repoStr, item, stage, violations, releaseLock)
-			return nil
-		}
-	}
-	// Report cumulative budget across all extensions in stats footer.
-	usage.MaxTurns = totalMultiple * stage.MaxTurns
+	return output, completed, usage, totalMultiple, err
+}
+
+// stageOutcomeParams bundles the inputs finalizeStageOutcome needs to interpret a
+// completed Claude invocation and drive the issue to its next state (PR creation,
+// stage completion, blocked-on-input, or retry/escalation).
+type stageOutcomeParams struct {
+	ctx             context.Context
+	board           *gh.ProjectBoard
+	item            gh.ProjectItem
+	stage           *stages.Stage
+	owner, repo     string
+	repoStr         string
+	baseBranch      string
+	workDir         string
+	output          string
+	completed       bool
+	usage           TokenUsage
+	invokeErr       error
+	release         func()
+	stashed         bool
+	workerStartedAt time.Time
+}
+
+// finalizeStageOutcome runs everything that happens after a Claude invocation
+// returns: stats logging, restoring any stash, recording attempt/invocation state,
+// posting output, handling the FABRIK_PR_CREATE marker, and routing to PR
+// creation, stage completion, blocked-on-input, or retry/escalation depending on
+// how the stage concluded.
+func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
+	item := p.item
+	stage := p.stage
+	owner, repo := p.owner, p.repo
+	repoStr := p.repoStr
+	baseBranch := p.baseBranch
+	workDir := p.workDir
+	output := p.output
+	completed := p.completed
+	usage := p.usage
+	err := p.invokeErr
+	releaseLock := p.release
 
 	if usage.TurnsUsed > 0 || usage.InputTokens > 0 || usage.OutputTokens > 0 {
 		if usage.MaxTurns > 0 {
@@ -895,7 +993,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	}()
 
 	// Restore any stashed changes now that the read-only stage has finished.
-	if stashed {
+	if p.stashed {
 		popCmd := exec.Command("git", "stash", "pop")
 		popCmd.Dir = workDir
 		if popOut, popErr := popCmd.CombinedOutput(); popErr != nil {
@@ -905,10 +1003,10 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		}
 	}
 	if err != nil {
-		if ctx.Err() != nil {
+		if p.ctx.Err() != nil {
 			e.logf(item.Number, "skip", "cancelled during claude invocation\n")
 			releaseLock()
-			return nil
+			return
 		}
 		e.logf(item.Number, "warn", "claude invocation issue: %v\n", err)
 	}
@@ -941,13 +1039,13 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			e.postComment(item, msg, false, false) //nolint:errcheck // failure already logged by postComment
 			e.addPausedLabelToItem(owner, repo, item)
 			releaseLock()
-			return nil
+			return
 		} else if prBlock != nil {
-			createdPRNum, createErr := e.processPRCreateMarker(ctx, item, prBlock, owner, repo, baseBranch, repoStr)
+			createdPRNum, createErr := e.processPRCreateMarker(p.ctx, item, prBlock, owner, repo, baseBranch, repoStr)
 			if createErr != nil {
 				// processPRCreateMarker already paused the issue and posted a comment.
 				releaseLock()
-				return nil
+				return
 			}
 			prNumber = createdPRNum
 			// Strip the marker block from output so it is not posted as a comment.
@@ -1041,6 +1139,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// acceptable: queue entry happens at Validate completion, so stages rarely run while
 	// queued. No-op on non-queue repos (FR-3).
 	if claudeRan {
+		wm := e.worktreesFor(item.Repo)
 		if pushErr := e.pushBranchUnlessQueued(item, wm); pushErr != nil {
 			e.logf(item.Number, "warn", "could not push branch: %v\n", pushErr)
 		}
@@ -1070,7 +1169,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		Blocked:   blockedOnInput,
 		Errored:   err != nil,
 		Usage:     usage,
-		Duration:  time.Since(workerStartedAt),
+		Duration:  time.Since(p.workerStartedAt),
 	})
 
 	if completed && noWorkNeeded {
@@ -1079,7 +1178,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		releaseLock()
 		e.store.Apply(itemstate.StageRetryCleared{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 		e.store.Apply(itemstate.EngineUnpaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
-		e.handleNoWorkNeeded(board, item, stage)
+		e.handleNoWorkNeeded(p.board, item, stage)
 	} else if completed {
 		// Post-stage: create draft PR and/or mark ready now that commits exist.
 		// prNumber may already be set if the early guard above ran (PostToPR + CreateDraftPR path).
@@ -1099,23 +1198,23 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 						if count >= e.cfg.MaxRetries {
 							e.escalatePRCreationFailure(item, stage, baseBranch)
 							releaseLock()
-							return nil
+							return
 						}
 					}
 					// Below MaxRetries threshold — record flag so next poll retries PR creation
 					// before re-invoking Claude, then release lock and let cooldown expire.
 					e.store.Apply(itemstate.PRCreationFailedRecorded{Repo: repoStr, Number: item.Number, StageName: stage.Name})
 					releaseLock()
-					return nil
+					return
 				}
 			}
 			e.updatePRVerification(item, prNumber, extractSummary(output))
 			// Verify that the PR's closingIssuesReferences includes this issue.
 			// If missing, attempt one auto-heal before advancing to handleStageComplete.
 			// Returns false only when linkage cannot be established — issue is already paused.
-			if !e.verifyAndHealLinkage(ctx, item, prNumber, stage, owner, repo, repoStr) {
+			if !e.verifyAndHealLinkage(p.ctx, item, prNumber, stage, owner, repo, repoStr) {
 				releaseLock()
-				return nil
+				return
 			}
 		}
 		// PR creation succeeded (or not required) — advance the stage.
@@ -1125,7 +1224,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		if stage.MarkPRReadyOnComplete {
 			e.markPRReady(item, prNumber)
 		}
-		e.handleStageComplete(ctx, board, item, stage)
+		e.handleStageComplete(p.ctx, p.board, item, stage)
 	} else if blockedOnInput {
 		releaseLock()
 		e.blockOnInput(item, stage, output)
@@ -1144,8 +1243,6 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			}
 		}
 	}
-
-	return nil
 }
 
 // escalatePRCreationFailure is called when create_draft_pr: true and ensureDraftPR
