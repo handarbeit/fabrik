@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -1041,9 +1042,13 @@ func extractSummary(output string) string {
 // {"type":"assistant",...} message invokes fn with the concatenated text of
 // its content blocks. Non-JSON, blank, or non-assistant lines are skipped.
 func forEachAssistantText(rawOutput []byte, fn func(text string)) {
-	lines := bytes.Split(rawOutput, []byte("\n"))
-	for _, line := range lines {
-		line = bytes.TrimSpace(line)
+	scanner := bufio.NewScanner(bytes.NewReader(rawOutput))
+	// A single NDJSON line (e.g. a large tool_use/tool_result block) can exceed
+	// bufio.Scanner's default 64KB max token size; a line can never be longer
+	// than the whole input, so len(rawOutput)+1 always fits without truncating.
+	scanner.Buffer(make([]byte, 0, 64*1024), len(rawOutput)+1)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
 		if len(line) == 0 {
 			continue
 		}
