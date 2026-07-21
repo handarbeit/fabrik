@@ -27,3 +27,4 @@ contributors and future maintainers.
 | [030](030-progress-based-turn-extension.md) | Progress-Based Turn Extension | Accepted |
 | [039](039-cycleset-excludes-worker-lifecycle.md) | cycleSetFlags excludes WorkerLifecycleChanged | Accepted |
 | [056](056-consolidate-convergence-gate-recovery.md) | Consolidate the convergence / gate / recovery architecture | Accepted |
+| [065](065-consolidated-mutation-helpers.md) | Consolidated GitHub-mutation helpers (label/comment/pause) | Accepted |
