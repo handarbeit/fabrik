@@ -136,11 +136,7 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 		e.logf(item.Number, "ci-gate", "CI check(s) failed: %s\n", strings.Join(failedNames, ", "))
 
 		if !hasLabel(item, "fabrik:awaiting-ci") {
-			if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-ci"); err != nil {
-				e.logf(item.Number, "warn", "could not add fabrik:awaiting-ci label: %v\n", err)
-			} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-ci")
-			}
+			e.applyLabelAdd(item, "fabrik:awaiting-ci", false)
 		}
 
 		return true, true, false
@@ -203,18 +199,7 @@ func (e *Engine) checkCIGate(board *gh.ProjectBoard, item gh.ProjectItem, stage 
 func (e *Engine) removeAwaitingCILabel(owner, repo string, item gh.ProjectItem) {
 	for _, l := range item.Labels {
 		if l == "fabrik:awaiting-ci" {
-			if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:awaiting-ci"); err != nil {
-				if errors.Is(err, gh.ErrNotFound) {
-					// Label already absent on GitHub — desired end state achieved; sync cache.
-					if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-						cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-ci")
-					}
-				} else {
-					e.logf(item.Number, "warn", "could not remove fabrik:awaiting-ci label: %v\n", err)
-				}
-			} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-ci")
-			}
+			e.applyLabelRemove(item, "fabrik:awaiting-ci", false)
 			return
 		}
 	}
@@ -229,8 +214,8 @@ func (e *Engine) addCompleteLabelAndRemoveCI(owner, repo string, item gh.Project
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
 		e.logf(item.Number, "warn", "could not add completion label %s: %v\n", completeLabel, err)
 		return // preserve fabrik:awaiting-ci so the next poll retries
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
+	} else if c := e.cache(); c != nil {
+		c.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
 	}
 	if stage.Name == "Validate" {
 		repoStr := owner + "/" + repo
