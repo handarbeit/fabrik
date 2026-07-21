@@ -91,25 +91,8 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		Skipped:     true,
 	})
 
-	// Step 1: React with 👀 to all new comments. PR review thread (inline)
-	// comments use a different REST endpoint than issue comments.
-	for _, c := range comments {
-		if c.DatabaseID == 0 {
-			e.logf(item.Number, "debug", "skipping 👀 reaction for synthetic comment %s (no DatabaseID)\n", c.ID)
-			continue
-		}
-		if c.ReviewThreadID != "" {
-			// no write-through: excluded — AddPRReviewCommentReaction does not affect dispatch-relevant cache state
-			if err := e.client.AddPRReviewCommentReaction(owner, repo, c.DatabaseID, "eyes"); err != nil {
-				e.logf(item.Number, "warn", "could not add 👀 to review thread comment %s: %v\n", c.ID, err)
-			}
-		} else {
-			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
-			if err := e.client.AddCommentReaction(owner, repo, c.DatabaseID, "eyes"); err != nil {
-				e.logf(item.Number, "warn", "could not add 👀 to comment %s: %v\n", c.ID, err)
-			}
-		}
-	}
+	// Step 1: React with 👀 to all new comments.
+	e.acknowledgeComments(owner, repo, item.Number, comments)
 
 	// Step 2: Add editing label
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:editing"); err != nil {
@@ -160,55 +143,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// Snapshot extend-turns label before loop (stable across any mid-loop FetchItemDetails re-fetch).
 	hadExtendTurnsLabel := hasExtendTurnsLabel(item)
 
-	// Determine initial turn budget. Label absent → MaxTurnsOverride=0 (InvokeClaudeForComments uses
-	// commentMaxTurns naturally). Label present → 2× pre-granted budget (no progress check for first hit).
-	base := commentMaxTurns(stage)
-	firstBudget := 0
-	totalMultiple := 1
-	if hadExtendTurnsLabel && base > 0 {
-		firstBudget = 2 * base
-		totalMultiple = 2
-	}
-	baseline := snapshotBaseline(stage, item, workDir)
-
-	// Extension loop: InvokeForComments resumes the existing session internally.
-	// Hard cap is 3× commentMaxTurns across all invocations.
-	var output string
-	var usage TokenUsage
-	var invCompleted bool
-	currentBudget := firstBudget
-	for {
-		invokeOpts.MaxTurnsOverride = currentBudget
-		var invOutput string
-		var invUsage TokenUsage
-		invOutput, invCompleted, invUsage, err = e.claude.InvokeForComments(ctx, stage, item, comments, workDir, invokeOpts)
-		output += invOutput
-		usage = addTokenUsage(usage, invUsage)
-
-		// hitLimit uses currentBudget > 0 (not base > 0) so that extension only fires
-		// when fabrik:extend-turns is present. Unlike the stage path, comment-review
-		// extension is intentionally label-gated: no silent budget expansion without opt-in.
-		hitLimit := !invCompleted && err == nil && currentBudget > 0 && invUsage.TurnsUsed >= currentBudget
-		if !hitLimit || totalMultiple >= 3 {
-			break
-		}
-		issueLogf := func(tag, format string, args ...any) {
-			e.logf(item.Number, tag, format, args...)
-		}
-		hasProgress, progressErr := detectProgress(ctx, stage, &item, baseline, workDir, e.client, issueLogf)
-		if progressErr != nil {
-			e.logf(item.Number, "extend-turns", "comment progress check failed: %v\n", progressErr)
-			break
-		}
-		if !hasProgress {
-			break
-		}
-		totalMultiple++
-		currentBudget = base
-		e.logf(item.Number, "extend-turns", "extending comment review to %d× budget (%d turns used)\n", totalMultiple, usage.TurnsUsed)
-	}
-	// Report cumulative budget across all extensions.
-	usage.MaxTurns = totalMultiple * base
+	output, usage, invCompleted, err := e.runCommentExtensionLoop(ctx, stage, &item, comments, workDir, invokeOpts, hadExtendTurnsLabel)
 
 	if usage.TurnsUsed > 0 || usage.InputTokens > 0 || usage.OutputTokens > 0 {
 		if usage.MaxTurns > 0 {
@@ -259,14 +194,104 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		e.logf(item.Number, "warn", "claude comment review exited with error but stage completed (marker found) — proceeding: %v\n", err)
 	}
 
-	// Capture git metadata for the comment header
+	summary := e.publishCommentOutput(owner, repo, item, stage, comments, output, workDir, baseBranch)
+
+	e.finalizeComments(ctx, board, item, stage, comments, owner, repo, baseBranch, completed, summary)
+
+	return nil
+}
+
+// acknowledgeComments reacts with 👀 to all new comments. PR review thread
+// (inline) comments use a different REST endpoint than issue comments.
+func (e *Engine) acknowledgeComments(owner, repo string, itemNumber int, comments []gh.Comment) {
+	for _, c := range comments {
+		if c.DatabaseID == 0 {
+			e.logf(itemNumber, "debug", "skipping 👀 reaction for synthetic comment %s (no DatabaseID)\n", c.ID)
+			continue
+		}
+		if c.ReviewThreadID != "" {
+			// no write-through: excluded — AddPRReviewCommentReaction does not affect dispatch-relevant cache state
+			if err := e.client.AddPRReviewCommentReaction(owner, repo, c.DatabaseID, "eyes"); err != nil {
+				e.logf(itemNumber, "warn", "could not add 👀 to review thread comment %s: %v\n", c.ID, err)
+			}
+		} else {
+			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
+			if err := e.client.AddCommentReaction(owner, repo, c.DatabaseID, "eyes"); err != nil {
+				e.logf(itemNumber, "warn", "could not add 👀 to comment %s: %v\n", c.ID, err)
+			}
+		}
+	}
+}
+
+// runCommentExtensionLoop determines the initial turn budget (label absent →
+// MaxTurnsOverride=0, using commentMaxTurns naturally; label present → 2× the
+// pre-granted budget, no progress check for the first hit), then invokes
+// Claude for comment review, extending the turn budget while fabrik:extend-turns
+// is present and progress is detected, up to a hard cap of 3× commentMaxTurns
+// across all invocations. InvokeForComments resumes the existing session
+// internally on each extension. Unlike the stage path, comment-review
+// extension is intentionally label-gated: no silent budget expansion without
+// opt-in. item is a pointer because a mid-loop progress check may re-fetch it
+// (see detectProgress) — the caller observes the refreshed item afterward.
+func (e *Engine) runCommentExtensionLoop(ctx context.Context, stage *stages.Stage, item *gh.ProjectItem, comments []gh.Comment, workDir string, invokeOpts InvokeOptions, hadExtendTurnsLabel bool) (output string, usage TokenUsage, completed bool, err error) {
+	base := commentMaxTurns(stage)
+	firstBudget := 0
+	totalMultiple := 1
+	if hadExtendTurnsLabel && base > 0 {
+		firstBudget = 2 * base
+		totalMultiple = 2
+	}
+	baseline := snapshotBaseline(stage, *item, workDir)
+
+	currentBudget := firstBudget
+	for {
+		invokeOpts.MaxTurnsOverride = currentBudget
+		var invOutput string
+		var invUsage TokenUsage
+		invOutput, completed, invUsage, err = e.claude.InvokeForComments(ctx, stage, *item, comments, workDir, invokeOpts)
+		output += invOutput
+		usage = addTokenUsage(usage, invUsage)
+
+		// hitLimit uses currentBudget > 0 (not base > 0) so that extension only fires
+		// when fabrik:extend-turns is present.
+		hitLimit := !completed && err == nil && currentBudget > 0 && invUsage.TurnsUsed >= currentBudget
+		if !hitLimit || totalMultiple >= 3 {
+			break
+		}
+		issueLogf := func(tag, format string, args ...any) {
+			e.logf(item.Number, tag, format, args...)
+		}
+		hasProgress, progressErr := detectProgress(ctx, stage, item, baseline, workDir, e.client, issueLogf)
+		if progressErr != nil {
+			e.logf(item.Number, "extend-turns", "comment progress check failed: %v\n", progressErr)
+			break
+		}
+		if !hasProgress {
+			break
+		}
+		totalMultiple++
+		currentBudget = base
+		e.logf(item.Number, "extend-turns", "extending comment review to %d× budget (%d turns used)\n", totalMultiple, usage.TurnsUsed)
+	}
+	// Report cumulative budget across all extensions.
+	usage.MaxTurns = totalMultiple * base
+	return output, usage, completed, err
+}
+
+// publishCommentOutput captures the summary from output (before markers are
+// stripped in-place below — once stripped, extractSummary(output) returns ""
+// and the Verification update would be silently lost), applies any
+// FABRIK_ISSUE_UPDATE_BEGIN/END issue-body update, strips Fabrik markers, and
+// posts the stage comment — plus, for a review-reinvoke, a Fabrik-marked
+// summary comment on the linked PR so reviewers can see at a glance that their
+// feedback was addressed. Returns the extracted summary for the caller to pass
+// to updatePRVerification on stage completion.
+func (e *Engine) publishCommentOutput(owner, repo string, item gh.ProjectItem, stage *stages.Stage, comments []gh.Comment, output, workDir, baseBranch string) string {
 	branch, commit, mainSHA, timestamp := captureGitMeta(workDir, baseBranch)
 
-	// Step 5: Capture summary before markers are stripped in-place below — once stripped,
-	// extractSummary(output) returns "" and the Verification update is silently lost.
 	summary := extractSummary(output)
 
-	// Step 6: Strip FABRIK_ISSUE_UPDATE block from output, then update issue body.
+	// Strip FABRIK_ISSUE_UPDATE block from output, then update issue body.
 	if updatedBody := extractUpdatedBody(output); updatedBody != "" {
 		e.logf(item.Number, "edit", "updating issue body\n")
 		// no write-through: excluded — issue body is not read from cache for dispatch decisions
@@ -278,7 +303,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		output = stripMarkers(output, "FABRIK_ISSUE_UPDATE_BEGIN", "FABRIK_ISSUE_UPDATE_END")
 	}
 
-	// Step 7: Strip all Fabrik markers from output before posting.
+	// Strip all Fabrik markers from output before posting.
 	output = stripLine(output, "FABRIK_STAGE_COMPLETE")
 	output = stripLine(output, "FABRIK_BLOCKED_ON_INPUT")
 	output = stripLine(output, "FABRIK_NO_WORK_NEEDED")
@@ -286,9 +311,9 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	output = stripLine(output, "FABRIK_SUMMARY_END")
 	output = strings.TrimSpace(output)
 
-	// Step 8: Rewrite or create the stage comment (unless post_to_pr).
-	// For post_to_pr stages the stage output lives on the PR; comment processing
-	// output on such stages is posted as a new comment on the issue as before.
+	// Rewrite or create the stage comment (unless post_to_pr). For post_to_pr
+	// stages the stage output lives on the PR; comment processing output on
+	// such stages is posted as a new comment on the issue as before.
 	if output != "" {
 		if stage.PostToPR {
 			comment := formatOutputComment(stage.Name+" (comment review)", output, "", branch, commit, mainSHA, timestamp)
@@ -307,12 +332,11 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		}
 	}
 
-	// Step 8b: When this is a review-reinvoke (all comments are PR inline review
-	// thread comments), also post a Fabrik-marked summary on the linked PR so
-	// reviewers can see at a glance that their feedback was addressed. The
-	// existing issue comment from Step 8 is unchanged (R4). Gate: output != ""
-	// and a linked PR exists. No post_to_pr check — linked-PR existence is the
-	// only gate (R5).
+	// When this is a review-reinvoke (all comments are PR inline review thread
+	// comments), also post a Fabrik-marked summary on the linked PR. The
+	// existing issue comment above is unchanged (R4). Gate: output != "" and a
+	// linked PR exists. No post_to_pr check — linked-PR existence is the only
+	// gate (R5).
 	if isReviewReinvoke(comments) && output != "" {
 		prNumber, prErr := e.client.FindPRForIssue(owner, repo, item.Number)
 		if prErr != nil {
@@ -334,11 +358,17 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 		}
 	}
 
-	// Step 9: Remove editing label
+	return summary
+}
+
+// finalizeComments removes the editing label, reacts with 🚀 to all processed
+// comments (resolving any addressed review threads), marks the comments as
+// processed so they won't be retried, and — if comment processing resolved
+// the stage — creates/marks-ready the draft PR and advances to the next
+// stage. This avoids an unnecessary extra stage invocation after unblocking.
+func (e *Engine) finalizeComments(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, comments []gh.Comment, owner, repo, baseBranch string, completed bool, summary string) {
 	e.removeEditingLabel(owner, repo, item.Number)
 
-	// Step 10: React with 🚀 to all processed comments and resolve any review
-	// threads that were addressed.
 	resolvedThreads := make(map[string]bool)
 	for _, c := range comments {
 		if c.DatabaseID == 0 {
@@ -369,8 +399,6 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	// Mark comments as processed only after everything succeeded
 	e.markCommentsProcessed(item, comments)
 
-	// Step 11: If comment processing resolved the stage, handle completion.
-	// This avoids an unnecessary extra stage invocation after unblocking.
 	if completed {
 		e.logf(item.Number, "done", "comment processing completed stage %q\n", stage.Name)
 		repoStr := itemOwnerRepoString(item, e.defaultRepo())
@@ -390,8 +418,6 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	} else {
 		e.logf(item.Number, "done", "comment processing complete\n")
 	}
-
-	return nil
 }
 
 // isReviewReinvoke reports whether this processComments invocation originated
