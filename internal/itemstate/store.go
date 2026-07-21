@@ -149,6 +149,7 @@ func (s *Store) Get(repo string, number int) (Snapshot, error) {
 	}
 	fetched, err := s.fallback.FetchItem(repo, number)
 	if err != nil {
+		s.logf("itemstate: FetchItem(%s#%d) failed, returning ErrNotFound: %v\n", repo, number, err)
 		return Snapshot{}, ErrNotFound
 	}
 	fetched.Repo = repo
@@ -342,6 +343,12 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		return LabelsChanged
 
 	case LocalCommentAdded:
+		// Idempotent: skip if comment with this DatabaseID already exists.
+		for _, existing := range item.Comments {
+			if existing.DatabaseID == v.Comment.DatabaseID && v.Comment.DatabaseID != 0 {
+				return 0
+			}
+		}
 		item.Comments = append(item.Comments, v.Comment)
 		return CommentsChanged
 

@@ -197,6 +197,31 @@ func TestApplyLocalCommentAdded(t *testing.T) {
 	}
 }
 
+func TestApplyLocalCommentAdded_DedupsByDatabaseID(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	c := gh.Comment{ID: "local1", DatabaseID: 42, Body: "Fabrik posted"}
+	applyExpect(t, s, LocalCommentAdded{Repo: testRepo, Number: 1, Comment: c}, CommentsChanged)
+	// Re-applying the same local add (e.g. a retried mutation after a crash)
+	// must not duplicate the comment.
+	snap, changes, err := s.Apply(LocalCommentAdded{Repo: testRepo, Number: 1, Comment: c})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Errorf("re-applying an existing local comment produced changes %v; want none", changes)
+	}
+	st := snap.State()
+	count := 0
+	for _, got := range st.Comments {
+		if got.DatabaseID == 42 {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("Comments has %d entries with DatabaseID 42; want 1", count)
+	}
+}
+
 // ---- LocalLockAcquired / LocalLockReleased ----
 
 func TestApplyLocalLockAcquired(t *testing.T) {

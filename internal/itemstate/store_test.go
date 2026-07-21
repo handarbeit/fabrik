@@ -2,6 +2,8 @@ package itemstate
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -160,6 +162,38 @@ func TestCacheMissFallbackErrorReturnsErrNotFound(t *testing.T) {
 	_, err := s.Get(testRepo, 1)
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("Get returned %v; want ErrNotFound", err)
+	}
+}
+
+// TestCacheMissFallbackErrorIsLogged verifies that a real FetchItem error
+// (network/auth/rate-limit) is logged before being flattened to ErrNotFound,
+// so an outage is not silently indistinguishable from "issue doesn't exist".
+func TestCacheMissFallbackErrorIsLogged(t *testing.T) {
+	underlying := errors.New("rate limited")
+	fb := &stubFallback{err: underlying}
+	var mu sync.Mutex
+	var logged []string
+	s := NewStore(fb, WithLogger(func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}))
+	if _, err := s.Get(testRepo, 1); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get returned %v; want ErrNotFound", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(logged) == 0 {
+		t.Fatal("Get did not log the underlying fallback error")
+	}
+	found := false
+	for _, l := range logged {
+		if strings.Contains(l, underlying.Error()) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("logged messages %v do not mention underlying error %q", logged, underlying)
 	}
 }
 

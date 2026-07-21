@@ -973,11 +973,9 @@ func (c *CacheImpl) ApplyIssueClosed(key string) {
 // identified by key. No-op when the key is not in the cache.
 // Safe for concurrent use.
 //
-// Note: LocalCommentAdded is a raw append (not idempotent by DatabaseID).
+// Note: LocalCommentAdded dedups by DatabaseID, mirroring IssueCommentCreated.
 // If a webhook echo for the same comment arrives before the next Reconcile,
-// the comment may appear twice in the cache until Reconcile replaces it.
-// This is acceptable because dispatch-relevant comment checks use rocket-reaction
-// detection rather than DatabaseID uniqueness.
+// the repeated LocalCommentAdded is a no-op rather than a duplicate append.
 func (c *CacheImpl) ApplyCommentAdded(key string, comment gh.Comment) {
 	repo, number, ok := parseItemKey(key)
 	if !ok {
