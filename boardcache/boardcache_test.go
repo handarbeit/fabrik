@@ -3,6 +3,7 @@ package boardcache
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -1490,7 +1491,7 @@ func TestAutoHealCheckRunCompleted(t *testing.T) {
 
 func TestAutoHealDropsWhenNoPRClosingKeyword(t *testing.T) {
 	var logBuf strings.Builder
-	logFn := func(format string, args ...any) { logBuf.WriteString(format) }
+	logFn := func(format string, args ...any) { fmt.Fprintf(&logBuf, format, args...) }
 
 	mc := &mockClient{
 		fetchPRClosingIssuesFn: func(owner, repo string, prNumber int) ([]int, error) {
