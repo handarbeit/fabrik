@@ -375,11 +375,11 @@ func (c *Client) ListPRs(owner, repo string) ([]PRDetails, error) {
 	return out, nil
 }
 
-// MarkPRReady transitions a draft PR to ready-for-review.
-// Uses the GraphQL markPullRequestReadyForReview mutation, which is the supported
-// path — REST PATCH does not reliably support draft→ready transitions.
-func (c *Client) MarkPRReady(owner, repo string, prNumber int) error {
-	// Fetch the PR node ID (required for the GraphQL mutation)
+// prNodeID fetches the GraphQL node ID of a pull request by its REST number.
+// The node ID is required by every GraphQL mutation that operates on a PR
+// (markPullRequestReadyForReview, enablePullRequestAutoMerge, enqueuePullRequest,
+// dequeuePullRequest) since none of them accept a plain PR number.
+func (c *Client) prNodeID(owner, repo string, prNumber int) (string, error) {
 	fetchQuery := `
 query($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
@@ -403,11 +403,22 @@ query($owner: String!, $repo: String!, $number: Int!) {
 		} `json:"data"`
 	}
 	if err := c.graphqlRequest(fetchQuery, fetchVars, &fetchResult); err != nil {
-		return fmt.Errorf("fetching PR node ID: %w", err)
+		return "", fmt.Errorf("fetching PR node ID: %w", err)
 	}
 	nodeID := fetchResult.Data.Repository.PullRequest.ID
 	if nodeID == "" {
-		return fmt.Errorf("PR #%d not found in repository %s/%s", prNumber, owner, repo)
+		return "", fmt.Errorf("PR #%d not found in repository %s/%s", prNumber, owner, repo)
+	}
+	return nodeID, nil
+}
+
+// MarkPRReady transitions a draft PR to ready-for-review.
+// Uses the GraphQL markPullRequestReadyForReview mutation, which is the supported
+// path — REST PATCH does not reliably support draft→ready transitions.
+func (c *Client) MarkPRReady(owner, repo string, prNumber int) error {
+	nodeID, err := c.prNodeID(owner, repo, prNumber)
+	if err != nil {
+		return err
 	}
 
 	mutation := `
@@ -511,35 +522,9 @@ var ErrAutoMergeAlreadyClean = errors.New("PR is already in clean status — mer
 //
 // Returns ErrAutoMergeNotEnabled when the repository setting is disabled.
 func (c *Client) EnablePullRequestAutoMerge(owner, repo string, prNumber int, strategy string) error {
-	// Fetch the PR node ID (required for the GraphQL mutation).
-	fetchQuery := `
-query($owner: String!, $repo: String!, $number: Int!) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      id
-    }
-  }
-}`
-	fetchVars := map[string]interface{}{
-		"owner":  owner,
-		"repo":   repo,
-		"number": prNumber,
-	}
-	var fetchResult struct {
-		Data struct {
-			Repository struct {
-				PullRequest struct {
-					ID string `json:"id"`
-				} `json:"pullRequest"`
-			} `json:"repository"`
-		} `json:"data"`
-	}
-	if err := c.graphqlRequest(fetchQuery, fetchVars, &fetchResult); err != nil {
-		return fmt.Errorf("fetching PR node ID: %w", err)
-	}
-	nodeID := fetchResult.Data.Repository.PullRequest.ID
-	if nodeID == "" {
-		return fmt.Errorf("PR #%d not found in repository %s/%s", prNumber, owner, repo)
+	nodeID, err := c.prNodeID(owner, repo, prNumber)
+	if err != nil {
+		return err
 	}
 
 	mutation := `
@@ -602,34 +587,9 @@ func (c *Client) EnqueuePullRequest(owner, repo string, prNumber int, expectedHe
 	if expectedHeadOID == "" {
 		return fmt.Errorf("expectedHeadOID cannot be empty")
 	}
-	fetchQuery := `
-query($owner: String!, $repo: String!, $number: Int!) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      id
-    }
-  }
-}`
-	fetchVars := map[string]interface{}{
-		"owner":  owner,
-		"repo":   repo,
-		"number": prNumber,
-	}
-	var fetchResult struct {
-		Data struct {
-			Repository struct {
-				PullRequest struct {
-					ID string `json:"id"`
-				} `json:"pullRequest"`
-			} `json:"repository"`
-		} `json:"data"`
-	}
-	if err := c.graphqlRequest(fetchQuery, fetchVars, &fetchResult); err != nil {
-		return fmt.Errorf("fetching PR node ID: %w", err)
-	}
-	nodeID := fetchResult.Data.Repository.PullRequest.ID
-	if nodeID == "" {
-		return fmt.Errorf("PR #%d not found in repository %s/%s", prNumber, owner, repo)
+	nodeID, err := c.prNodeID(owner, repo, prNumber)
+	if err != nil {
+		return err
 	}
 
 	mutation := `
@@ -656,34 +616,9 @@ mutation($prId: ID!, $expectedHeadOid: GitObjectID!) {
 // Uses the same two-step pattern as MarkPRReady: fetch the PR node ID via
 // GraphQL, then call the dequeuePullRequest mutation.
 func (c *Client) DequeuePullRequest(owner, repo string, prNumber int) error {
-	fetchQuery := `
-query($owner: String!, $repo: String!, $number: Int!) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      id
-    }
-  }
-}`
-	fetchVars := map[string]interface{}{
-		"owner":  owner,
-		"repo":   repo,
-		"number": prNumber,
-	}
-	var fetchResult struct {
-		Data struct {
-			Repository struct {
-				PullRequest struct {
-					ID string `json:"id"`
-				} `json:"pullRequest"`
-			} `json:"repository"`
-		} `json:"data"`
-	}
-	if err := c.graphqlRequest(fetchQuery, fetchVars, &fetchResult); err != nil {
-		return fmt.Errorf("fetching PR node ID: %w", err)
-	}
-	nodeID := fetchResult.Data.Repository.PullRequest.ID
-	if nodeID == "" {
-		return fmt.Errorf("PR #%d not found in repository %s/%s", prNumber, owner, repo)
+	nodeID, err := c.prNodeID(owner, repo, prNumber)
+	if err != nil {
+		return err
 	}
 
 	mutation := `
