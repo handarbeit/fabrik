@@ -1165,6 +1165,7 @@ func (e *Engine) escalatePRCreationFailure(item gh.ProjectItem, stage *stages.St
 		reactRocket: true,
 		labelEcho:   true,
 		commentEcho: true,
+		labelFirst:  true,
 	})
 	e.addFailedLabel(owner, repo, item.Number, stage.Name)
 
@@ -1188,6 +1189,7 @@ func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 		reactRocket: true,
 		labelEcho:   true,
 		commentEcho: true,
+		labelFirst:  true,
 	})
 	e.addFailedLabel(owner, repo, item.Number, stage.Name)
 
