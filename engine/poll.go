@@ -1064,114 +1064,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 		return s
 	}()
 
-	var deepFetched int
-	for i := range board.Items {
-		if repoFilter != "" && board.Items[i].Repo != "" && board.Items[i].Repo != repoFilter {
-			continue
-		}
-		// Pre-filter: skip items that haven't changed since the last poll cycle.
-		// An item is eligible for deep-fetch evaluation if:
-		//   (a) it is in cycleSet (an observer saw a relevant Store change), OR
-		//   (b) it is a cleanup stage (checks local filesystem, not board state), OR
-		//   (c) it has a bypass label (awaiting-ci, awaiting-review, or rebase-needed need per-poll eval), OR
-		//   (d) it has an expired CooldownAt (periodic re-evaluation gate has passed), OR
-		//   (e) it is not yet recorded in the engine store (first poll / fresh startup).
-		// Items with an active CooldownAt but no other signal are suppressed.
-		item := board.Items[i]
-		iKey := issueKey(item, e.defaultRepo())
-		// Terminal skip: skip items flagged terminal while still in the same cleanup
-		// stage — external board activity (label-bot, PR comments, GitHub bookkeeping)
-		// bumps updatedAt but Fabrik has nothing left to do for them.
-		// item.Status == admitSnap.Status() guards against items that moved between two
-		// cleanup stages: in that case we must process normally to update the store.
-		if admitSnap, admitErr := e.store.Get(itemOwnerRepoString(item, e.defaultRepo()), item.Number); admitErr == nil {
-			if admitSnap.IsTerminal() {
-				if pst := stages.FindStage(e.cfg.Stages, item.Status); pst != nil && pst.CleanupWorktree && item.Status == admitSnap.Status() {
-					continue // terminal + still in same cleanup stage: skip entirely
-				}
-				// Status changed (left cleanup or moved to a different cleanup stage) —
-				// clear the flag and fall through.
-				e.store.Apply(itemstate.TerminalFlagSet{
-					Repo:     itemOwnerRepoString(item, e.defaultRepo()),
-					Number:   item.Number,
-					Terminal: false,
-				})
-				e.logf(item.Number, "poll", "terminal flag cleared (status drifted to %q)\n", item.Status)
-			}
-		}
-		if !cycleSet[iKey] {
-			stage := stages.FindStage(e.cfg.Stages, item.Status)
-			isCleanup := stage != nil && stage.CleanupWorktree
-			hasAwaitingLabel := hasLabel(item, "fabrik:awaiting-ci") || hasLabel(item, "fabrik:rebase-needed") || hasLabel(item, "fabrik:awaiting-review") || hasLabel(item, "fabrik:auto-merge-enabled") || hasLabel(item, "fabrik:revalidate")
-			var hasExpiredCooldown, notInStore bool
-			if !isCleanup && !hasAwaitingLabel {
-				repo := itemOwnerRepoString(item, e.defaultRepo())
-				if snap, snapErr := e.store.Get(repo, item.Number); snapErr == nil {
-					now := time.Now()
-					hasExpiredCooldown = snap.HasExpiredCooldown(now)
-					if snap.HasActiveCooldown(now) && !hasExpiredCooldown {
-						continue // within cooldown window: no change + no expired window
-					}
-				} else {
-					// Item not yet recorded in the engine store (first poll or fresh startup):
-					// let it through so the deep-fetch path can populate the store.
-					notInStore = true
-				}
-			}
-			if !isCleanup && !hasAwaitingLabel && !hasExpiredCooldown && !notInStore {
-				continue // no state change, no bypass — skip this cycle
-			}
-		}
-		if !e.itemMayNeedWork(board.Items[i]) {
-			continue
-		}
-		// Cleanup stages don't need comments or linked-PR data — skip FetchItemDetails
-		// to avoid wasting GraphQL points on items that only need a worktree existence
-		// check and a completion label.
-		if st := stages.FindStage(e.cfg.Stages, board.Items[i].Status); st != nil && st.CleanupWorktree {
-			e.logf(0, "poll", "skipping deep-fetch for cleanup-stage item #%d\n", board.Items[i].Number)
-			deepFetchCandidates = append(deepFetchCandidates, board.Items[i])
-			continue
-		}
-		if c := e.cache(); c != nil && !c.IsPaused() && c.IsItemCacheFresh(board.Items[i].Repo, board.Items[i].Number, board.Items[i].UpdatedAt) {
-			e.logf(0, "poll", "reading details for #%d from cache\n", board.Items[i].Number)
-		} else {
-			e.logf(0, "poll", "deep-fetching details for #%d from GitHub\n", board.Items[i].Number)
-		}
-		if err := e.readClient.FetchItemDetails(&board.Items[i]); err != nil {
-			e.logf(0, "warn", "could not fetch details for #%d: %v\n", board.Items[i].Number, err)
-			e.store.Apply(itemstate.DeepFetchFailed{
-				Repo:   itemOwnerRepoString(board.Items[i], e.defaultRepo()),
-				Number: board.Items[i].Number,
-				At:     time.Now(),
-			})
-			// Skip appending to deepFetchCandidates.
-			// The next poll will retry the deep-fetch for this item.
-			continue
-		}
-		admitRepo := itemOwnerRepoString(board.Items[i], e.defaultRepo())
-		admitPreSnap, admitPreErr := e.store.Get(admitRepo, board.Items[i].Number)
-		// Capture prior-poll merge-queue membership BEFORE ItemDeepFetched
-		// overwrites it (ADR-058 D4 OQ-3 — the "left the queue" edge is otherwise lost).
-		priorInQueue[iKey] = admitPreErr == nil && admitPreSnap.LinkedPR() != nil && admitPreSnap.LinkedPR().IsInMergeQueue
-		e.store.Apply(itemstate.ItemDeepFetched{
-			Repo:       admitRepo,
-			Number:     board.Items[i].Number,
-			FreshState: board.Items[i],
-		})
-		// After a successful deep-fetch, check if this item just became terminal.
-		if isTerminalPredicate(board.Items[i].Labels, board.Items[i].Status, e.cfg.Stages) {
-			if admitPreErr != nil || !admitPreSnap.IsTerminal() {
-				e.logf(board.Items[i].Number, "poll", "terminal flag set\n")
-			}
-			e.store.Apply(itemstate.TerminalFlagSet{Repo: admitRepo, Number: board.Items[i].Number, Terminal: true})
-		}
-		deepFetchCandidates = append(deepFetchCandidates, board.Items[i])
-		deepFetched++
-	}
-	if deepFetched > 0 {
-		e.logf(0, "poll", "deep-fetched details for %d item(s)\n", deepFetched)
-	}
+	deepFetchCandidates, deepFetched := e.selectDeepFetchCandidates(board, repoFilter, cycleSet, priorInQueue)
 
 	// Catch-up loop: operates only on deepFetchCandidates so the full label set is available.
 	//
@@ -1304,122 +1197,13 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// the linked PR's HEAD SHA after stage:Validate:complete was recorded.
 	e.settleSHAInvalidationScan(deepFetchCandidates)
 
-	var dispatched int
 	// Dispatch only items from deepFetchCandidates — items that passed
 	// itemMayNeedWork and (for non-cleanup stages) had FetchItemDetails called to
 	// populate the full label set. Iterating board.Items here instead would
 	// incorrectly pass shallow-label items (labels(first:5) only) to itemNeedsWork,
 	// which could miss stage-complete labels beyond position 5 and re-dispatch
 	// already-completed items on every poll after their updatedAt settles.
-	// Check for duplicate items in deepFetchCandidates
-	seenItems := make(map[string]int)
-	for _, item := range deepFetchCandidates {
-		k := issueKey(item, e.defaultRepo())
-		seenItems[k]++
-		if seenItems[k] > 1 {
-			debugLog("DUPLICATE-IN-CANDIDATES", map[string]interface{}{
-				"key": k, "count": seenItems[k], "number": item.Number,
-			})
-			e.logf(item.Number, "BUG", "item appears %d times in deepFetchCandidates\n", seenItems[k])
-		}
-	}
-
-	for _, item := range deepFetchCandidates {
-		item := item
-		iKey := issueKey(item, e.defaultRepo())
-		itemRepo := itemOwnerRepoString(item, e.defaultRepo())
-		debugLog("dispatch-check", map[string]interface{}{
-			"number": item.Number, "key": iKey, "status": item.Status,
-		})
-		// Full check including comments (populated by deep fetch above).
-		if !e.itemNeedsWork(item) {
-			debugLog("dispatch-skip-no-work", map[string]interface{}{"number": item.Number})
-			continue
-		}
-		// Skip issues already being processed by a previous poll cycle's worker.
-		// Use the Store-backed Worker field (set by WorkerEntered before goroutine launch)
-		// so this check is consistent with the observer pipeline.
-		//
-		// Do NOT cancel the in-flight context here. Every stage adds
-		// stage:X:in_progress when it starts, which fires a webhook, marks the cache
-		// stale, and triggers a new poll while the worker is still running. Cancelling
-		// on every re-encounter creates a tight dispatch → label → webhook → poll →
-		// cancel → respawn feedback loop that prevents any stage from completing a
-		// turn. Genuine "supplant on new event" semantics need to distinguish
-		// self-generated label changes from external ones — left as future work.
-		if snap, err := e.store.Get(itemRepo, item.Number); err == nil && snap.Worker() != nil {
-			debugLog("dispatch-skip-inflight", map[string]interface{}{"number": item.Number})
-			continue
-		}
-		debugLog("dispatch-WILL-DISPATCH", map[string]interface{}{
-			"number": item.Number, "key": iKey,
-		})
-		// Acquire semaphore slot, but abort if the context is cancelled so we
-		// don't block indefinitely when all slots are taken at shutdown time.
-		select {
-		case e.sem <- struct{}{}:
-		case <-ctx.Done():
-			goto doneDispatching
-		}
-		// Capture stage name and start time for job tracking.
-		var stageName string
-		if s := stages.FindStage(e.cfg.Stages, item.Status); s != nil {
-			stageName = s.Name
-		}
-		startTime := time.Now()
-		// Apply WorkerEntered synchronously before the goroutine starts so that
-		// snap.Worker() != nil is immediately true for any concurrent dispatch check.
-		e.store.Apply(itemstate.WorkerEntered{
-			Repo:      itemRepo,
-			Number:    item.Number,
-			StageName: stageName,
-			StartedAt: startTime,
-		})
-		// Create a per-issue context so kill-reason annotation can propagate from
-		// the cancellation path (daemon shutdown, supplant) to the kill log.
-		// The holder is read in cmd.Cancel to derive the reason string.
-		issueHolder := &killReasonHolder{}
-		issueCtx, issueCancel := context.WithCancel(context.WithValue(ctx, killReasonCtxKey{}, issueHolder))
-		e.issueCtxs.Store(iKey, issueCtxEntry{cancel: issueCancel, holder: issueHolder})
-		e.wg.Add(1)
-		dispatched++
-		go func(issueCtx context.Context, issueCancel context.CancelFunc, iKey string, holder *killReasonHolder) {
-			defer e.wg.Done()
-			// Remove per-issue context entry on any exit path (success, panic, cancel).
-			// Guard with holder pointer equality: if a supplant-cancel raced a new dispatch
-			// between WorkerExited (which clears snap.Worker) and this delete, the new entry
-			// would have a different holder and must not be removed.
-			// issueCancel must also be called to release context resources even if the
-			// parent ctx already cancelled (Go context semantics require explicit cancel call).
-			defer func() {
-				if current, ok := e.issueCtxs.Load(iKey); ok && current.(issueCtxEntry).holder == holder {
-					e.issueCtxs.Delete(iKey)
-				}
-				issueCancel()
-			}()
-			// WorkerExited must be deferred at the goroutine top level so it fires on
-			// every exit path, including processItem early-returns (paused, blocked,
-			// awaiting-input, locked-by-other, stage-complete, etc.). The defer inside
-			// processItem (item.go, after lock acquired) is reached only after ~14
-			// early-return guards; any of them would leak the Worker entry and
-			// permanently block re-dispatch via the snap.Worker() != nil guard. Same
-			// pattern as the reinvoke dispatchers in reviews.go, ci.go, and
-			// merge_gate.go.
-			//
-			// Ordering: WorkerExited must fire AFTER the semaphore release so the wake
-			// it triggers does not race a fresh dispatch into a still-occupied slot.
-			// Defers run LIFO; declaring WorkerExited BEFORE the sem-release defer
-			// means sem-release runs first on exit, then WorkerExited fires its wake
-			// against a freed slot.
-			defer e.store.Apply(itemstate.WorkerExited{Repo: itemRepo, Number: item.Number})
-			defer func() { <-e.sem }()
-			err := e.processItem(issueCtx, board, item)
-			if err != nil {
-				e.logf(item.Number, "error", "%v\n", err)
-			}
-		}(issueCtx, issueCancel, iKey, issueHolder)
-	}
-doneDispatching:
+	dispatched := e.dispatchCandidates(ctx, board, deepFetchCandidates)
 
 	// Merge-train batch snapshot: log all items currently in the Queued column.
 	// Runs every poll cycle when merge_train: on. No dispatch, no mutation — D1 skeleton only.
@@ -1507,6 +1291,247 @@ doneDispatching:
 		Dispatched: dispatched,
 		SeenRepos:  seenRepos,
 	}, nil
+}
+
+// dispatchCandidates checks each deep-fetch candidate against itemNeedsWork and
+// the in-flight worker guard, then dispatches a goroutine per admitted item,
+// gated on an available e.sem slot. It aborts early (without blocking further)
+// if ctx is cancelled while waiting for a slot. Returns the number of items
+// dispatched this cycle.
+func (e *Engine) dispatchCandidates(ctx context.Context, board *gh.ProjectBoard, deepFetchCandidates []gh.ProjectItem) int {
+	var dispatched int
+
+	// Check for duplicate items in deepFetchCandidates.
+	seenItems := make(map[string]int)
+	for _, item := range deepFetchCandidates {
+		k := issueKey(item, e.defaultRepo())
+		seenItems[k]++
+		if seenItems[k] > 1 {
+			debugLog("DUPLICATE-IN-CANDIDATES", map[string]interface{}{
+				"key": k, "count": seenItems[k], "number": item.Number,
+			})
+			e.logf(item.Number, "BUG", "item appears %d times in deepFetchCandidates\n", seenItems[k])
+		}
+	}
+
+	for _, item := range deepFetchCandidates {
+		item := item
+		iKey := issueKey(item, e.defaultRepo())
+		itemRepo := itemOwnerRepoString(item, e.defaultRepo())
+		debugLog("dispatch-check", map[string]interface{}{
+			"number": item.Number, "key": iKey, "status": item.Status,
+		})
+		// Full check including comments (populated by deep fetch above).
+		if !e.itemNeedsWork(item) {
+			debugLog("dispatch-skip-no-work", map[string]interface{}{"number": item.Number})
+			continue
+		}
+		// Skip issues already being processed by a previous poll cycle's worker.
+		// Use the Store-backed Worker field (set by WorkerEntered before goroutine launch)
+		// so this check is consistent with the observer pipeline.
+		//
+		// Do NOT cancel the in-flight context here. Every stage adds
+		// stage:X:in_progress when it starts, which fires a webhook, marks the cache
+		// stale, and triggers a new poll while the worker is still running. Cancelling
+		// on every re-encounter creates a tight dispatch → label → webhook → poll →
+		// cancel → respawn feedback loop that prevents any stage from completing a
+		// turn. Genuine "supplant on new event" semantics need to distinguish
+		// self-generated label changes from external ones — left as future work.
+		if snap, err := e.store.Get(itemRepo, item.Number); err == nil && snap.Worker() != nil {
+			debugLog("dispatch-skip-inflight", map[string]interface{}{"number": item.Number})
+			continue
+		}
+		debugLog("dispatch-WILL-DISPATCH", map[string]interface{}{
+			"number": item.Number, "key": iKey,
+		})
+		// Acquire semaphore slot, but abort if the context is cancelled so we
+		// don't block indefinitely when all slots are taken at shutdown time.
+		select {
+		case e.sem <- struct{}{}:
+		case <-ctx.Done():
+			return dispatched
+		}
+		// Capture stage name and start time for job tracking.
+		var stageName string
+		if s := stages.FindStage(e.cfg.Stages, item.Status); s != nil {
+			stageName = s.Name
+		}
+		startTime := time.Now()
+		// Apply WorkerEntered synchronously before the goroutine starts so that
+		// snap.Worker() != nil is immediately true for any concurrent dispatch check.
+		e.store.Apply(itemstate.WorkerEntered{
+			Repo:      itemRepo,
+			Number:    item.Number,
+			StageName: stageName,
+			StartedAt: startTime,
+		})
+		// Create a per-issue context so kill-reason annotation can propagate from
+		// the cancellation path (daemon shutdown, supplant) to the kill log.
+		// The holder is read in cmd.Cancel to derive the reason string.
+		issueHolder := &killReasonHolder{}
+		issueCtx, issueCancel := context.WithCancel(context.WithValue(ctx, killReasonCtxKey{}, issueHolder))
+		e.issueCtxs.Store(iKey, issueCtxEntry{cancel: issueCancel, holder: issueHolder})
+		e.wg.Add(1)
+		dispatched++
+		go func(issueCtx context.Context, issueCancel context.CancelFunc, iKey string, holder *killReasonHolder) {
+			defer e.wg.Done()
+			// Remove per-issue context entry on any exit path (success, panic, cancel).
+			// Guard with holder pointer equality: if a supplant-cancel raced a new dispatch
+			// between WorkerExited (which clears snap.Worker) and this delete, the new entry
+			// would have a different holder and must not be removed.
+			// issueCancel must also be called to release context resources even if the
+			// parent ctx already cancelled (Go context semantics require explicit cancel call).
+			defer func() {
+				if current, ok := e.issueCtxs.Load(iKey); ok && current.(issueCtxEntry).holder == holder {
+					e.issueCtxs.Delete(iKey)
+				}
+				issueCancel()
+			}()
+			// WorkerExited must be deferred at the goroutine top level so it fires on
+			// every exit path, including processItem early-returns (paused, blocked,
+			// awaiting-input, locked-by-other, stage-complete, etc.). The defer inside
+			// processItem (item.go, after lock acquired) is reached only after ~14
+			// early-return guards; any of them would leak the Worker entry and
+			// permanently block re-dispatch via the snap.Worker() != nil guard. Same
+			// pattern as the reinvoke dispatchers in reviews.go, ci.go, and
+			// merge_gate.go.
+			//
+			// Ordering: WorkerExited must fire AFTER the semaphore release so the wake
+			// it triggers does not race a fresh dispatch into a still-occupied slot.
+			// Defers run LIFO; declaring WorkerExited BEFORE the sem-release defer
+			// means sem-release runs first on exit, then WorkerExited fires its wake
+			// against a freed slot.
+			defer e.store.Apply(itemstate.WorkerExited{Repo: itemRepo, Number: item.Number})
+			defer func() { <-e.sem }()
+			err := e.processItem(issueCtx, board, item)
+			if err != nil {
+				e.logf(item.Number, "error", "%v\n", err)
+			}
+		}(issueCtx, issueCancel, iKey, issueHolder)
+	}
+
+	return dispatched
+}
+
+// selectDeepFetchCandidates runs the deep-fetch pre-filter loop: for each board
+// item that passes the shallow admission checks (cycleSet membership, cleanup
+// stage, bypass label, expired cooldown, or not-yet-recorded-in-store), it calls
+// FetchItemDetails to populate the full label/comment/linked-PR set and appends
+// the item to the returned slice. Cleanup-stage items are admitted without a
+// deep-fetch (they only need a worktree existence check). priorInQueue is
+// populated in place with each item's previous-poll merge-queue membership,
+// captured before ItemDeepFetched overwrites the store (ADR-058 D4 OQ-3).
+func (e *Engine) selectDeepFetchCandidates(board *gh.ProjectBoard, repoFilter string, cycleSet map[string]bool, priorInQueue map[string]bool) ([]gh.ProjectItem, int) {
+	var deepFetchCandidates []gh.ProjectItem
+	var deepFetched int
+	for i := range board.Items {
+		if repoFilter != "" && board.Items[i].Repo != "" && board.Items[i].Repo != repoFilter {
+			continue
+		}
+		// Pre-filter: skip items that haven't changed since the last poll cycle.
+		// An item is eligible for deep-fetch evaluation if:
+		//   (a) it is in cycleSet (an observer saw a relevant Store change), OR
+		//   (b) it is a cleanup stage (checks local filesystem, not board state), OR
+		//   (c) it has a bypass label (awaiting-ci, awaiting-review, or rebase-needed need per-poll eval), OR
+		//   (d) it has an expired CooldownAt (periodic re-evaluation gate has passed), OR
+		//   (e) it is not yet recorded in the engine store (first poll / fresh startup).
+		// Items with an active CooldownAt but no other signal are suppressed.
+		item := board.Items[i]
+		iKey := issueKey(item, e.defaultRepo())
+		// Terminal skip: skip items flagged terminal while still in the same cleanup
+		// stage — external board activity (label-bot, PR comments, GitHub bookkeeping)
+		// bumps updatedAt but Fabrik has nothing left to do for them.
+		// item.Status == admitSnap.Status() guards against items that moved between two
+		// cleanup stages: in that case we must process normally to update the store.
+		if admitSnap, admitErr := e.store.Get(itemOwnerRepoString(item, e.defaultRepo()), item.Number); admitErr == nil {
+			if admitSnap.IsTerminal() {
+				if pst := stages.FindStage(e.cfg.Stages, item.Status); pst != nil && pst.CleanupWorktree && item.Status == admitSnap.Status() {
+					continue // terminal + still in same cleanup stage: skip entirely
+				}
+				// Status changed (left cleanup or moved to a different cleanup stage) —
+				// clear the flag and fall through.
+				e.store.Apply(itemstate.TerminalFlagSet{
+					Repo:     itemOwnerRepoString(item, e.defaultRepo()),
+					Number:   item.Number,
+					Terminal: false,
+				})
+				e.logf(item.Number, "poll", "terminal flag cleared (status drifted to %q)\n", item.Status)
+			}
+		}
+		if !cycleSet[iKey] {
+			stage := stages.FindStage(e.cfg.Stages, item.Status)
+			isCleanup := stage != nil && stage.CleanupWorktree
+			hasAwaitingLabel := hasLabel(item, "fabrik:awaiting-ci") || hasLabel(item, "fabrik:rebase-needed") || hasLabel(item, "fabrik:awaiting-review") || hasLabel(item, "fabrik:auto-merge-enabled") || hasLabel(item, "fabrik:revalidate")
+			var hasExpiredCooldown, notInStore bool
+			if !isCleanup && !hasAwaitingLabel {
+				repo := itemOwnerRepoString(item, e.defaultRepo())
+				if snap, snapErr := e.store.Get(repo, item.Number); snapErr == nil {
+					now := time.Now()
+					hasExpiredCooldown = snap.HasExpiredCooldown(now)
+					if snap.HasActiveCooldown(now) && !hasExpiredCooldown {
+						continue // within cooldown window: no change + no expired window
+					}
+				} else {
+					// Item not yet recorded in the engine store (first poll or fresh startup):
+					// let it through so the deep-fetch path can populate the store.
+					notInStore = true
+				}
+			}
+			if !isCleanup && !hasAwaitingLabel && !hasExpiredCooldown && !notInStore {
+				continue // no state change, no bypass — skip this cycle
+			}
+		}
+		if !e.itemMayNeedWork(board.Items[i]) {
+			continue
+		}
+		// Cleanup stages don't need comments or linked-PR data — skip FetchItemDetails
+		// to avoid wasting GraphQL points on items that only need a worktree existence
+		// check and a completion label.
+		if st := stages.FindStage(e.cfg.Stages, board.Items[i].Status); st != nil && st.CleanupWorktree {
+			e.logf(0, "poll", "skipping deep-fetch for cleanup-stage item #%d\n", board.Items[i].Number)
+			deepFetchCandidates = append(deepFetchCandidates, board.Items[i])
+			continue
+		}
+		if c := e.cache(); c != nil && !c.IsPaused() && c.IsItemCacheFresh(board.Items[i].Repo, board.Items[i].Number, board.Items[i].UpdatedAt) {
+			e.logf(0, "poll", "reading details for #%d from cache\n", board.Items[i].Number)
+		} else {
+			e.logf(0, "poll", "deep-fetching details for #%d from GitHub\n", board.Items[i].Number)
+		}
+		if err := e.readClient.FetchItemDetails(&board.Items[i]); err != nil {
+			e.logf(0, "warn", "could not fetch details for #%d: %v\n", board.Items[i].Number, err)
+			e.store.Apply(itemstate.DeepFetchFailed{
+				Repo:   itemOwnerRepoString(board.Items[i], e.defaultRepo()),
+				Number: board.Items[i].Number,
+				At:     time.Now(),
+			})
+			// Skip appending to deepFetchCandidates.
+			// The next poll will retry the deep-fetch for this item.
+			continue
+		}
+		admitRepo := itemOwnerRepoString(board.Items[i], e.defaultRepo())
+		admitPreSnap, admitPreErr := e.store.Get(admitRepo, board.Items[i].Number)
+		// Capture prior-poll merge-queue membership BEFORE ItemDeepFetched
+		// overwrites it (ADR-058 D4 OQ-3 — the "left the queue" edge is otherwise lost).
+		priorInQueue[iKey] = admitPreErr == nil && admitPreSnap.LinkedPR() != nil && admitPreSnap.LinkedPR().IsInMergeQueue
+		e.store.Apply(itemstate.ItemDeepFetched{
+			Repo:       admitRepo,
+			Number:     board.Items[i].Number,
+			FreshState: board.Items[i],
+		})
+		// After a successful deep-fetch, check if this item just became terminal.
+		if isTerminalPredicate(board.Items[i].Labels, board.Items[i].Status, e.cfg.Stages) {
+			if admitPreErr != nil || !admitPreSnap.IsTerminal() {
+				e.logf(board.Items[i].Number, "poll", "terminal flag set\n")
+			}
+			e.store.Apply(itemstate.TerminalFlagSet{Repo: admitRepo, Number: board.Items[i].Number, Terminal: true})
+		}
+		deepFetchCandidates = append(deepFetchCandidates, board.Items[i])
+		deepFetched++
+	}
+	if deepFetched > 0 {
+		e.logf(0, "poll", "deep-fetched details for %d item(s)\n", deepFetched)
+	}
+	return deepFetchCandidates, deepFetched
 }
 
 // queuedRepoGroup is the Queued-column subset for a single owner/repo, preserving
