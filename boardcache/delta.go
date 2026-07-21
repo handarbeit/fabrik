@@ -271,13 +271,12 @@ func (c *CacheImpl) resolveOrHealPRLinkage(owner, repoName, repo string, prNum i
 	// Confirm item still in Store before proceeding. Must not hold c.mu while
 	// calling any Store method (boardcache.go struct-doc invariant).
 	_, storeErr := c.store.Get(repo, issNum)
-	c.mu.Lock()
 	if storeErr != nil {
+		c.mu.Lock()
 		c.recentMissCache[missCacheKey] = time.Now()
 		c.mu.Unlock()
 		return "", 0, false, false
 	}
-	c.mu.Unlock()
 	// prToKey is populated by PRHeadSHAUpdated via updateIndexes — no explicit write needed.
 	return key, issNum, healed, true
 }
