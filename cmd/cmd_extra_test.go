@@ -239,9 +239,11 @@ func TestRunUpgrade_DevBuildSkipsBinaryCheck(t *testing.T) {
 	}
 }
 
-// TestRunUpgrade_NetworkFailureFallsThrough verifies that when the release API
-// returns an error, runUpgrade still falls through and refreshes plugin skills.
-func TestRunUpgrade_NetworkFailureFallsThrough(t *testing.T) {
+// TestRunUpgrade_NetworkFailureHaltsBeforePluginRefresh verifies that when the
+// release API returns an error, runUpgrade halts (returning the wrapped error)
+// before reaching plugin refresh — a failed release upgrade attempt must
+// surface as a command error rather than being silently swallowed.
+func TestRunUpgrade_NetworkFailureHaltsBeforePluginRefresh(t *testing.T) {
 	dir := t.TempDir()
 	chdirTest(t, dir)
 
@@ -256,25 +258,21 @@ func TestRunUpgrade_NetworkFailureFallsThrough(t *testing.T) {
 	Version = "v0.0.1"
 	t.Cleanup(func() { Version = orig })
 
-	if err := runUpgrade(nil); err != nil {
-		t.Fatalf("runUpgrade should not fail on network error, got: %v", err)
+	if err := runUpgrade(nil); err == nil {
+		t.Fatal("runUpgrade should fail when the release upgrade fails")
 	}
 
-	// Plugin files should still have been written despite the network error.
-	entries, err := os.ReadDir(filepath.Join(dir, ".fabrik", "plugin"))
-	if err != nil {
-		t.Fatalf(".fabrik/plugin not created: %v", err)
-	}
-	if len(entries) == 0 {
-		t.Error("expected plugin files to be written even when binary upgrade fails")
+	// Plugin refresh must not have run.
+	if _, err := os.Stat(filepath.Join(dir, ".fabrik", "plugin")); !os.IsNotExist(err) {
+		t.Error("expected plugin files not to be written when the release upgrade fails")
 	}
 }
 
-// TestRunUpgrade_BinaryUpgrade_DownloadAttempted verifies that when a newer
-// release exists with a platform-matching asset, the download URL is hit. The
-// server returns 500 so the upgrade fails gracefully and plugin refresh still
-// runs.
-func TestRunUpgrade_BinaryUpgrade_DownloadAttempted(t *testing.T) {
+// TestRunUpgrade_BinaryUpgrade_DownloadFailureHaltsBeforePluginRefresh verifies
+// that when a newer release exists with a platform-matching asset, the download
+// URL is hit; when the download fails (server returns 500), runUpgrade halts
+// with an error before reaching plugin refresh.
+func TestRunUpgrade_BinaryUpgrade_DownloadFailureHaltsBeforePluginRefresh(t *testing.T) {
 	dir := t.TempDir()
 	chdirTest(t, dir)
 
@@ -302,21 +300,17 @@ func TestRunUpgrade_BinaryUpgrade_DownloadAttempted(t *testing.T) {
 	Version = "v0.0.1"
 	t.Cleanup(func() { Version = orig })
 
-	if err := runUpgrade(nil); err != nil {
-		t.Fatalf("runUpgrade should not fail on download error, got: %v", err)
+	if err := runUpgrade(nil); err == nil {
+		t.Fatal("runUpgrade should fail when the binary download fails")
 	}
 
 	if !downloaded {
 		t.Error("download server was not hit even though a matching asset was provided")
 	}
 
-	// Plugin files should still have been written despite the failed download.
-	entries, err := os.ReadDir(filepath.Join(dir, ".fabrik", "plugin"))
-	if err != nil {
-		t.Fatalf(".fabrik/plugin not created: %v", err)
-	}
-	if len(entries) == 0 {
-		t.Error("expected plugin files to be written even when binary download fails")
+	// Plugin refresh must not have run.
+	if _, err := os.Stat(filepath.Join(dir, ".fabrik", "plugin")); !os.IsNotExist(err) {
+		t.Error("expected plugin files not to be written when the binary download fails")
 	}
 }
 
