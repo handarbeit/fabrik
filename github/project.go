@@ -127,40 +127,74 @@ func projectBoardFetchBackoff(attempt int) time.Duration {
 	return time.Duration(attempt-1) * time.Second
 }
 
-func (c *Client) fetchProjectBoard(owner, repo string, projectNum int, ownerType string) (*ProjectBoard, error) {
-	var lastBoard *ProjectBoard
+// retryOnEmpty wraps a single-pass fetch with the project-board empty/
+// inconsistent-response retry policy: if fetch reports fewer raw items than
+// the server's totalCount (or zero items and zero totalCount — an indexer
+// hiccup indistinguishable at the API level from a genuinely empty project),
+// retry with linear backoff up to projectBoardFetchAttempts times before
+// accepting the last observed result. Errors from fetch return immediately —
+// retry is for empty/inconsistent successes, not transport failures. opLabel
+// only affects the retry log line's wording.
+func retryOnEmpty[T any](opLabel string, fetch func(attempt int) (result T, rawCount, totalCount int, err error)) (T, error) {
+	var lastResult T
 	for attempt := 1; attempt <= projectBoardFetchAttempts; attempt++ {
 		if d := projectBoardFetchBackoff(attempt); d > 0 {
 			time.Sleep(d)
 		}
-		board, rawNodeCount, totalCount, err := c.fetchProjectBoardOnce(owner, repo, projectNum, ownerType)
+		result, rawCount, totalCount, err := fetch(attempt)
 		if err != nil {
-			// Errors return immediately — retry is for empty/inconsistent
-			// successes, not transport failures (the caller may want to
-			// fall back to a different ownerType on error).
-			return nil, err
+			var zero T
+			return zero, err
 		}
-		lastBoard = board
-		// Healthy response: either we collected at least totalCount nodes (the
-		// indexer-agrees-with-itself case, using >= because totalCount can
-		// shift if items are added/removed between page fetches), or we have
-		// nodes at all (handles older/test responses where totalCount may not
-		// be present — degraded responses always return both rawNodeCount=0
-		// AND totalCount=0 together, so "nodes present" is sufficient).
-		if (totalCount > 0 && rawNodeCount >= totalCount) || rawNodeCount > 0 {
-			return board, nil
+		lastResult = result
+		if (totalCount > 0 && rawCount >= totalCount) || rawCount > 0 {
+			return result, nil
 		}
-		// Inconsistent response: zero raw nodes AND zero totalCount. Could be
-		// a genuinely empty project, or the indexer briefly forgot the project
-		// (observed during GitHub Projects degradation). Worth retrying; if
-		// every attempt agrees, accept it as genuinely empty.
 		if attempt < projectBoardFetchAttempts {
 			logf(0, "warn",
-				"project board fetch returned %d items, totalCount=%d (attempt %d/%d) — retrying in case of indexer hiccup\n",
-				rawNodeCount, totalCount, attempt, projectBoardFetchAttempts)
+				"%s returned %d items, totalCount=%d (attempt %d/%d) — retrying in case of indexer hiccup\n",
+				opLabel, rawCount, totalCount, attempt, projectBoardFetchAttempts)
 		}
 	}
-	return lastBoard, nil
+	return lastResult, nil
+}
+
+// paginateGraphQL accumulates all nodes across a cursor-paginated GraphQL
+// query. fetchPage is called once per page with the current cursor ("" for
+// the first page) and must return that page's nodes plus the pagination
+// envelope (hasNextPage, endCursor) and the totalCount the server reported
+// for this query (0 if the query doesn't report one). Returns the
+// concatenated nodes and the largest totalCount observed across pages.
+// opLabel is used only to build the hasNextPage-with-no-cursor error message.
+func paginateGraphQL[T any](opLabel string, fetchPage func(cursor string) (nodes []T, hasNextPage bool, endCursor string, totalCount int, err error)) ([]T, int, error) {
+	var allNodes []T
+	maxTotalCount := 0
+	cursor := ""
+	for {
+		nodes, hasNextPage, endCursor, totalCount, err := fetchPage(cursor)
+		if err != nil {
+			return nil, 0, err
+		}
+		if totalCount > maxTotalCount {
+			maxTotalCount = totalCount
+		}
+		allNodes = append(allNodes, nodes...)
+
+		if !hasNextPage {
+			break
+		}
+		if endCursor == "" {
+			return nil, 0, fmt.Errorf("%s: hasNextPage=true but endCursor is empty", opLabel)
+		}
+		cursor = endCursor
+	}
+	return allNodes, maxTotalCount, nil
+}
+
+func (c *Client) fetchProjectBoard(owner, repo string, projectNum int, ownerType string) (*ProjectBoard, error) {
+	return retryOnEmpty("project board fetch", func(attempt int) (*ProjectBoard, int, int, error) {
+		return c.fetchProjectBoardOnce(owner, repo, projectNum, ownerType)
+	})
 }
 
 // fetchProjectBoardOnce performs one full pagination pass and returns the
@@ -243,14 +277,8 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 
 	var projectID string
 	var projectTitle string
-	var allNodes []itemNode
-	// maxTotalCount tracks the largest totalCount observed across pages.
-	// Compared to len(allNodes) post-pagination to detect partial fetches.
-	maxTotalCount := 0
 
-	// Paginate over items.
-	cursor := ""
-	for {
+	allNodes, maxTotalCount, err := paginateGraphQL("fetching project board", func(cursor string) ([]itemNode, bool, string, int, error) {
 		vars := map[string]interface{}{
 			"owner":      owner,
 			"projectNum": projectNum,
@@ -277,30 +305,22 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 		}
 
 		if err := c.graphqlRequest(query, vars, &result); err != nil {
-			return nil, 0, 0, fmt.Errorf("fetching project board: %w", err)
+			return nil, false, "", 0, fmt.Errorf("fetching project board: %w", err)
 		}
 
 		ownerData, ok := result.Data[ownerType]
 		if !ok {
-			return nil, 0, 0, fmt.Errorf("fetching project board: no %s data in response", ownerType)
+			return nil, false, "", 0, fmt.Errorf("fetching project board: no %s data in response", ownerType)
 		}
 		proj := ownerData.ProjectV2
 		if projectID == "" {
 			projectID = proj.ID
 			projectTitle = proj.Title
 		}
-		if proj.Items.TotalCount > maxTotalCount {
-			maxTotalCount = proj.Items.TotalCount
-		}
-		allNodes = append(allNodes, proj.Items.Nodes...)
-
-		if !proj.Items.PageInfo.HasNextPage {
-			break
-		}
-		if proj.Items.PageInfo.EndCursor == "" {
-			return nil, 0, 0, fmt.Errorf("fetching project board: hasNextPage=true but endCursor is empty")
-		}
-		cursor = proj.Items.PageInfo.EndCursor
+		return proj.Items.Nodes, proj.Items.PageInfo.HasNextPage, proj.Items.PageInfo.EndCursor, proj.Items.TotalCount, nil
+	})
+	if err != nil {
+		return nil, 0, 0, err
 	}
 
 	board := &ProjectBoard{ProjectID: projectID, Title: projectTitle, OwnerType: ownerType}
@@ -426,29 +446,22 @@ func (c *Client) ProbeProjectBoard(owner, repo string, projectNum int, ownerType
 	return items, projectID, err
 }
 
+// probeBoardResult bundles probeProjectBoardOnce's two success values so
+// retryOnEmpty's single-result-type contract can carry both through retries.
+type probeBoardResult struct {
+	Items     []BoardProbeItem
+	ProjectID string
+}
+
 func (c *Client) probeProjectBoard(owner, repo string, projectNum int, ownerType string) ([]BoardProbeItem, string, error) {
-	var lastItems []BoardProbeItem
-	var lastProjectID string
-	for attempt := 1; attempt <= projectBoardFetchAttempts; attempt++ {
-		if d := projectBoardFetchBackoff(attempt); d > 0 {
-			time.Sleep(d)
-		}
+	result, err := retryOnEmpty("project board probe", func(attempt int) (probeBoardResult, int, int, error) {
 		items, projectID, rawNodeCount, totalCount, err := c.probeProjectBoardOnce(owner, repo, projectNum, ownerType)
-		if err != nil {
-			return nil, "", err
-		}
-		lastItems = items
-		lastProjectID = projectID
-		if (totalCount > 0 && rawNodeCount >= totalCount) || rawNodeCount > 0 {
-			return items, projectID, nil
-		}
-		if attempt < projectBoardFetchAttempts {
-			logf(0, "warn",
-				"project board probe returned %d items, totalCount=%d (attempt %d/%d) — retrying in case of indexer hiccup\n",
-				rawNodeCount, totalCount, attempt, projectBoardFetchAttempts)
-		}
+		return probeBoardResult{Items: items, ProjectID: projectID}, rawNodeCount, totalCount, err
+	})
+	if err != nil {
+		return nil, "", err
 	}
-	return lastItems, lastProjectID, nil
+	return result.Items, result.ProjectID, nil
 }
 
 func (c *Client) probeProjectBoardOnce(owner, repo string, projectNum int, ownerType string) ([]BoardProbeItem, string, int, int, error) {
@@ -512,11 +525,8 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 }`, ownerType)
 
 	var projectID string
-	var allNodes []probeItemNode
-	maxTotalCount := 0
 
-	cursor := ""
-	for {
+	allNodes, maxTotalCount, err := paginateGraphQL("probing project board", func(cursor string) ([]probeItemNode, bool, string, int, error) {
 		vars := map[string]interface{}{
 			"owner":      owner,
 			"projectNum": projectNum,
@@ -542,29 +552,21 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 		}
 
 		if err := c.graphqlRequest(query, vars, &result); err != nil {
-			return nil, "", 0, 0, fmt.Errorf("probing project board: %w", err)
+			return nil, false, "", 0, fmt.Errorf("probing project board: %w", err)
 		}
 
 		ownerData, ok := result.Data[ownerType]
 		if !ok {
-			return nil, "", 0, 0, fmt.Errorf("probing project board: no %s data in response", ownerType)
+			return nil, false, "", 0, fmt.Errorf("probing project board: no %s data in response", ownerType)
 		}
 		proj := ownerData.ProjectV2
 		if projectID == "" {
 			projectID = proj.ID
 		}
-		if proj.Items.TotalCount > maxTotalCount {
-			maxTotalCount = proj.Items.TotalCount
-		}
-		allNodes = append(allNodes, proj.Items.Nodes...)
-
-		if !proj.Items.PageInfo.HasNextPage {
-			break
-		}
-		if proj.Items.PageInfo.EndCursor == "" {
-			return nil, "", 0, 0, fmt.Errorf("probing project board: hasNextPage=true but endCursor is empty")
-		}
-		cursor = proj.Items.PageInfo.EndCursor
+		return proj.Items.Nodes, proj.Items.PageInfo.HasNextPage, proj.Items.PageInfo.EndCursor, proj.Items.TotalCount, nil
+	})
+	if err != nil {
+		return nil, "", 0, 0, err
 	}
 
 	var items []BoardProbeItem
@@ -1342,10 +1344,7 @@ query($id: ID!, $cursor: String) {
 		} `json:"fieldValueByName"`
 	}
 
-	out := make(map[string]string)
-	cursor := ""
-
-	for {
+	nodes, _, err := paginateGraphQL("fetching project item status batch", func(cursor string) ([]statusNode, bool, string, int, error) {
 		vars := map[string]interface{}{"id": projectID}
 		if cursor != "" {
 			vars["cursor"] = cursor
@@ -1366,27 +1365,25 @@ query($id: ID!, $cursor: String) {
 		}
 
 		if err := c.graphqlRequest(query, vars, &result); err != nil {
-			return nil, fmt.Errorf("fetching project item status batch: %w", err)
+			return nil, false, "", 0, fmt.Errorf("fetching project item status batch: %w", err)
 		}
 		if result.Data.Node == nil {
-			return nil, fmt.Errorf("fetching project item status batch: project not found or not a ProjectV2")
+			return nil, false, "", 0, fmt.Errorf("fetching project item status batch: project not found or not a ProjectV2")
 		}
 
-		for _, n := range result.Data.Node.Items.Nodes {
-			if n.FieldValueByName != nil {
-				out[n.ID] = n.FieldValueByName.Name
-			} else {
-				out[n.ID] = ""
-			}
-		}
+		return result.Data.Node.Items.Nodes, result.Data.Node.Items.PageInfo.HasNextPage, result.Data.Node.Items.PageInfo.EndCursor, 0, nil
+	})
+	if err != nil {
+		return nil, err
+	}
 
-		if !result.Data.Node.Items.PageInfo.HasNextPage {
-			break
+	out := make(map[string]string)
+	for _, n := range nodes {
+		if n.FieldValueByName != nil {
+			out[n.ID] = n.FieldValueByName.Name
+		} else {
+			out[n.ID] = ""
 		}
-		if result.Data.Node.Items.PageInfo.EndCursor == "" {
-			return nil, fmt.Errorf("fetching project item status batch: hasNextPage=true but endCursor is empty")
-		}
-		cursor = result.Data.Node.Items.PageInfo.EndCursor
 	}
 
 	return out, nil
