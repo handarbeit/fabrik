@@ -165,7 +165,8 @@ fabrik --auto-upgrade</pre>
       Each issue moves through board columns that map to pipeline stages.
       Fabrik polls the board, matches the issue's column to a stage config,
       spins up an isolated git worktree, and invokes Claude Code with the
-      stage's prompt.
+      stage's prompt. Curious why it's built this way?
+      Read <a href="{{ '/core-idea' | relative_url }}">the core idea →</a>
     </p>
 
     <div class="pipeline">
@@ -559,6 +560,13 @@ fabrik --auto-upgrade</pre>
     <h2 class="section-title">Learn more</h2>
 
     <div class="links-grid">
+      <a href="{{ '/core-idea' | relative_url }}" class="link-card">
+        <span class="link-icon">💡</span>
+        <div>
+          <div class="link-title">The Core Idea</div>
+          <div class="link-desc">Why Fabrik wraps Claude Code in an external SDLC harness — and why the context window is not a database</div>
+        </div>
+      </a>
       <a href="https://github.com/handarbeit/fabrik" class="link-card" target="_blank" rel="noopener">
         <span class="link-icon">⭐</span>
         <div>
