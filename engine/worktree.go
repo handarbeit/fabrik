@@ -237,7 +237,7 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string, sk
 		cmd := exec.Command("git", "branch", branch, baseRef)
 		cmd.Dir = wm.baseDir
 		if out, err := cmd.CombinedOutput(); err != nil {
-			return "", fmt.Errorf("creating branch %s from %s: %s: %w", branch, baseRef, string(out), err)
+			return "", fmt.Errorf("creating branch %s from %s: %s: %w", branch, baseRef, strings.TrimSpace(string(out)), err)
 		}
 	}
 
@@ -245,7 +245,7 @@ func (wm *WorktreeManager) EnsureWorktree(issueNumber int, baseBranch string, sk
 	cmd := exec.Command("git", "worktree", "add", "-f", wtDir, branch)
 	cmd.Dir = wm.baseDir
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("creating worktree: %s: %w", string(out), err)
+		return "", fmt.Errorf("creating worktree: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 
 	wm.logf(issueNumber, "worktree", "created %s\n", wtDir)
@@ -289,7 +289,7 @@ func (wm *WorktreeManager) CleanupWorktree(issueNumber int, deleteBranch bool) e
 	cmd := exec.Command("git", "worktree", "remove", "--force", wtDir)
 	cmd.Dir = wm.baseDir
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("removing worktree: %s: %w", string(out), err)
+		return fmt.Errorf("removing worktree: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 
 	if deleteBranch {
@@ -297,7 +297,7 @@ func (wm *WorktreeManager) CleanupWorktree(issueNumber int, deleteBranch bool) e
 		cmd := exec.Command("git", "branch", "-D", branch)
 		cmd.Dir = wm.baseDir
 		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("deleting branch %s: %s: %w", branch, string(out), err)
+			return fmt.Errorf("deleting branch %s: %s: %w", branch, strings.TrimSpace(string(out)), err)
 		}
 	}
 
