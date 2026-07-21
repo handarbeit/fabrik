@@ -198,12 +198,12 @@ func addTokenUsage(a, b TokenUsage) TokenUsage {
 func saveDebugLog(issueNumber int, label string, output string) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[warn] saveDebugLog: getting cwd: %v\n", err)
+		claudeLog(issueNumber, "warn", "saveDebugLog: getting cwd: %v\n", err)
 		return
 	}
 	debugDir := filepath.Join(cwd, ".fabrik", "debug")
 	if err := os.MkdirAll(debugDir, 0700); err != nil {
-		fmt.Fprintf(os.Stderr, "[warn] saveDebugLog: creating debug dir: %v\n", err)
+		claudeLog(issueNumber, "warn", "saveDebugLog: creating debug dir: %v\n", err)
 		return
 	}
 	// Sanitize label for use in filename.
@@ -214,7 +214,7 @@ func saveDebugLog(issueNumber int, label string, output string) {
 	name := fmt.Sprintf("issue-%d_%d_%s.log", issueNumber, time.Now().UnixNano(), safe)
 	path := filepath.Join(debugDir, name)
 	if err := os.WriteFile(path, []byte(output), 0600); err != nil {
-		fmt.Fprintf(os.Stderr, "[warn] saveDebugLog: writing %s: %v\n", path, err)
+		claudeLog(issueNumber, "warn", "saveDebugLog: writing %s: %v\n", path, err)
 	}
 }
 
@@ -712,7 +712,7 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 		} else {
 			claudeLog(issueNumber, "claude", "completed in %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
 		}
-		saveSessionIDDirect(sessFilePath, resp.SessionID)
+		saveSessionIDDirect(issueNumber, sessFilePath, resp.SessionID)
 	} else if wasTimedOut {
 		// Process was killed before emitting a result JSON line. Extract text from
 		// intermediate assistant turns collected before the kill so we can detect
@@ -1378,15 +1378,15 @@ func findWorktreeForIssue(worktreeRoot, issueDirName string) string {
 }
 
 // saveSessionIDDirect saves a known session ID to disk for future resumption.
-func saveSessionIDDirect(path, sessionID string) {
+func saveSessionIDDirect(issueNumber int, path, sessionID string) {
 	if sessionID == "" {
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		claudeLog(0, "warn", "failed to create session dir for %s: %v\n", path, err)
+		claudeLog(issueNumber, "warn", "failed to create session dir for %s: %v\n", path, err)
 		return
 	}
 	if err := os.WriteFile(path, []byte(sessionID), 0600); err != nil {
-		claudeLog(0, "warn", "failed to save session id to %s: %v\n", path, err)
+		claudeLog(issueNumber, "warn", "failed to save session id to %s: %v\n", path, err)
 	}
 }

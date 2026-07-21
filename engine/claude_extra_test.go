@@ -11,7 +11,7 @@ import (
 func TestSaveSessionIDDirect_EmptyID_IsNoop(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sessions", "session.txt")
-	saveSessionIDDirect(path, "")
+	saveSessionIDDirect(1, path, "")
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Error("file should not be created for empty session ID")
 	}
@@ -21,7 +21,7 @@ func TestSaveSessionIDDirect_EmptyID_IsNoop(t *testing.T) {
 func TestSaveSessionIDDirect_WritesSID(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sessions", "session.txt")
-	saveSessionIDDirect(path, "test-session-id")
+	saveSessionIDDirect(1, path, "test-session-id")
 
 	content, err := os.ReadFile(path)
 	if err != nil {
