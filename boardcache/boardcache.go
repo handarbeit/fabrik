@@ -863,98 +863,61 @@ func (c *CacheImpl) RateLimitStats() (rest, graphql gh.RateLimitStats) {
 	return c.fallback.RateLimitStats()
 }
 
-// UpdateItemStatus updates the Status field for the item identified by key.
-// No-op when the key is not in the cache. Safe for concurrent use.
-func (c *CacheImpl) UpdateItemStatus(key, newStatus string) {
+// applyKeyedMutation is the shared preamble for the five key-addressed
+// mutators below: parse key → log and no-op on invalid key → guard against
+// creating a phantom Store entry for a key that was never bootstrapped →
+// apply the mutation built by build(repo, number) → bump the local delta
+// timestamp only if the mutation actually changed anything. opName is used
+// only in the invalid-key log line.
+func (c *CacheImpl) applyKeyedMutation(key, opName string, build func(repo string, number int) itemstate.Mutation) {
 	repo, number, ok := parseItemKey(key)
 	if !ok {
-		c.logFn("[cache] UpdateItemStatus: key %q not found — no-op\n", key)
+		c.logFn("[cache] %s: key %q invalid — no-op\n", opName, key)
 		return
 	}
 	// Guard: do not create a phantom Store entry for a key that was never bootstrapped.
 	if _, err := c.store.Get(repo, number); err != nil {
 		return
 	}
-	_, changes, _ := c.store.Apply(itemstate.LocalStatusUpdated{
-		Repo:      repo,
-		Number:    number,
-		NewStatus: newStatus,
-	})
+	_, changes, _ := c.store.Apply(build(repo, number))
 	if len(changes) == 0 {
-		// Status unchanged.
 		return
 	}
 	c.bumpLocalDeltaAt(key)
+}
+
+// UpdateItemStatus updates the Status field for the item identified by key.
+// No-op when the key is not in the cache. Safe for concurrent use.
+func (c *CacheImpl) UpdateItemStatus(key, newStatus string) {
+	c.applyKeyedMutation(key, "UpdateItemStatus", func(repo string, number int) itemstate.Mutation {
+		return itemstate.LocalStatusUpdated{Repo: repo, Number: number, NewStatus: newStatus}
+	})
 }
 
 // ApplyLabelAdded updates the cached label list for the item identified by key,
 // appending label if not already present. No-op when the key is not in the cache.
 // Safe for concurrent use.
 func (c *CacheImpl) ApplyLabelAdded(key, label string) {
-	repo, number, ok := parseItemKey(key)
-	if !ok {
-		c.logFn("[cache] ApplyLabelAdded: key %q invalid — no-op\n", key)
-		return
-	}
-	// Guard: do not create a phantom Store entry for a key that was never bootstrapped.
-	if _, err := c.store.Get(repo, number); err != nil {
-		return
-	}
-	_, changes, _ := c.store.Apply(itemstate.LocalLabelAdded{
-		Repo:   repo,
-		Number: number,
-		Label:  label,
+	c.applyKeyedMutation(key, "ApplyLabelAdded", func(repo string, number int) itemstate.Mutation {
+		return itemstate.LocalLabelAdded{Repo: repo, Number: number, Label: label}
 	})
-	if len(changes) == 0 {
-		return
-	}
-	c.bumpLocalDeltaAt(key)
 }
 
 // ApplyLabelRemoved updates the cached label list for the item identified by key,
 // removing label if present. No-op when the key is not in the cache or label is absent.
 // Safe for concurrent use.
 func (c *CacheImpl) ApplyLabelRemoved(key, label string) {
-	repo, number, ok := parseItemKey(key)
-	if !ok {
-		c.logFn("[cache] ApplyLabelRemoved: key %q invalid — no-op\n", key)
-		return
-	}
-	// Guard: do not create a phantom Store entry for a key that was never bootstrapped.
-	if _, err := c.store.Get(repo, number); err != nil {
-		return
-	}
-	_, changes, _ := c.store.Apply(itemstate.LocalLabelRemoved{
-		Repo:   repo,
-		Number: number,
-		Label:  label,
+	c.applyKeyedMutation(key, "ApplyLabelRemoved", func(repo string, number int) itemstate.Mutation {
+		return itemstate.LocalLabelRemoved{Repo: repo, Number: number, Label: label}
 	})
-	if len(changes) == 0 {
-		return
-	}
-	c.bumpLocalDeltaAt(key)
 }
 
 // ApplyIssueClosed marks the item identified by key as closed in the store.
 // No-op when the key is not in the cache. Safe for concurrent use.
 func (c *CacheImpl) ApplyIssueClosed(key string) {
-	repo, number, ok := parseItemKey(key)
-	if !ok {
-		c.logFn("[cache] ApplyIssueClosed: key %q invalid — no-op\n", key)
-		return
-	}
-	// Guard: do not create a phantom Store entry for a key that was never bootstrapped.
-	if _, err := c.store.Get(repo, number); err != nil {
-		return
-	}
-	_, changes, _ := c.store.Apply(itemstate.IssueClosed{
-		Repo:   repo,
-		Number: number,
+	c.applyKeyedMutation(key, "ApplyIssueClosed", func(repo string, number int) itemstate.Mutation {
+		return itemstate.IssueClosed{Repo: repo, Number: number}
 	})
-	if len(changes) == 0 {
-		return
-	}
-	c.bumpLocalDeltaAt(key)
 }
 
 // ApplyCommentAdded appends comment to the cached comment list for the item
@@ -965,24 +928,9 @@ func (c *CacheImpl) ApplyIssueClosed(key string) {
 // If a webhook echo for the same comment arrives before the next Reconcile,
 // the repeated LocalCommentAdded is a no-op rather than a duplicate append.
 func (c *CacheImpl) ApplyCommentAdded(key string, comment gh.Comment) {
-	repo, number, ok := parseItemKey(key)
-	if !ok {
-		c.logFn("[cache] ApplyCommentAdded: key %q invalid — no-op\n", key)
-		return
-	}
-	// Guard: do not create a phantom Store entry for a key that was never bootstrapped.
-	if _, err := c.store.Get(repo, number); err != nil {
-		return
-	}
-	_, changes, _ := c.store.Apply(itemstate.LocalCommentAdded{
-		Repo:    repo,
-		Number:  number,
-		Comment: comment,
+	c.applyKeyedMutation(key, "ApplyCommentAdded", func(repo string, number int) itemstate.Mutation {
+		return itemstate.LocalCommentAdded{Repo: repo, Number: number, Comment: comment}
 	})
-	if len(changes) == 0 {
-		return
-	}
-	c.bumpLocalDeltaAt(key)
 }
 
 // ApplyStatusBatch updates Status for items identified by project-item node IDs.
