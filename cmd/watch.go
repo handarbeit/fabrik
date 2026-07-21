@@ -110,5 +110,8 @@ func runWatch(args []string) error {
 	}
 
 	model := watch.NewModel(issueNumber, opts, stagesDir)
-	return watch.Run(model)
+	if err := watch.Run(model); err != nil {
+		return fmt.Errorf("running watch: %w", err)
+	}
+	return nil
 }
