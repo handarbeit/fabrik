@@ -46,6 +46,8 @@ A single `bool` cannot describe every call site's behavior, because reading all 
 
 `pauseOpts` makes each axis an explicit field (`awaitingInput`, `reactRocket`, `labelEcho`, `commentEcho`, `removeAutoMerge`), so every call site passes a literal matching its own row in the table above — auditable, and impossible to silently unify. The `RegisterEcho` asymmetry between `pauseFor*` (never echoes) and `escalate*` (always echoes) is a genuine pre-existing inconsistency, not something this refactor is chartered to fix; `pauseOpts` preserves it exactly rather than picking a side.
 
+A fourth axis surfaced during review: *order*. Pattern A's `pauseFor*` functions historically posted their comment before adding `fabrik:paused`; Patterns B and C added the label first. `pauseOpts.labelFirst` (default `false`, matching Pattern A) reproduces each site's original ordering — Patterns B and C set it to `true`. `TestPauseIssue_PatternA_CommentBeforeLabel` and the order assertions in the Pattern B/C tests pin this down.
+
 ### `bumpLocalDeltaAt` re-inlining
 
 Separately, `boardcache/boardcache.go` had 7 mutator methods that re-inlined the `now := time.Now(); c.mu.Lock(); c.localDeltaAt[key] = now; c.mu.Unlock()` sequence instead of calling the existing `bumpLocalDeltaAt` helper (already used correctly 23 times in `boardcache/delta.go`). These were collapsed to `c.bumpLocalDeltaAt(key)` calls as part of the same cleanup, since it is the same "helper exists but isn't used everywhere" problem this ADR addresses, just for a cache-internal idiom rather than an engine-to-GitHub one.
