@@ -546,25 +546,10 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 
 	// Open the .log file before running Claude so stdout (NDJSON stream-json) is
 	// tee'd to disk in real time. This enables fabrik watch to follow the live output.
-	var stdoutWriter io.Writer
 	var stdout bytes.Buffer
-	stdoutWriter = &stdout
-
-	safeLabel := strings.NewReplacer("/", "-", "\\", "-", ":", "-", " ", "-").Replace(label)
-	if err := os.MkdirAll(logDir, 0700); err != nil {
-		claudeLog(issueNumber, "warn", "could not create log dir: %v\n", err)
-	} else if err := os.Chmod(logDir, 0700); err != nil {
-		claudeLog(issueNumber, "warn", "could not set log dir permissions: %v\n", err)
-	} else {
-		now := time.Now().UTC()
-		logPath := filepath.Join(logDir, fmt.Sprintf("%s-%s-%d.log", safeLabel, now.Format("20060102-150405"), now.UnixNano()))
-		if logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); err != nil {
-			claudeLog(issueNumber, "warn", "could not create log file %s: %v\n", logPath, err)
-		} else {
-			defer logFile.Close()
-			// Tee stdout to both the in-memory buffer (for parsing) and the .log file (for live follow).
-			stdoutWriter = io.MultiWriter(&stdout, logFile)
-		}
+	stdoutWriter, logFile := openStageLog(issueNumber, logDir, label, &stdout)
+	if logFile != nil {
+		defer logFile.Close()
 	}
 
 	// Per-invocation context: with wall-time timeout if configured, or plain parent ctx.
@@ -677,6 +662,44 @@ func runClaude(ctx context.Context, args []string, prompt string, workDir string
 	// we still process whatever output was collected before the kill.
 	wasTimedOut := inactivityFired.Load() || (stageCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil)
 
+	return interpretClaudeResult(ctx, issueNumber, rawOutput, runErr, wasTimedOut, sessFilePath, logDir)
+}
+
+// openStageLog opens (creating logDir if necessary) a new timestamped .log
+// file for this invocation and returns an io.Writer that tees stdout to both
+// the in-memory buffer (for parsing) and the .log file (for `fabrik watch` to
+// follow live), plus the opened file so the caller can defer its Close. If
+// logDir cannot be created/chmod'd or the log file cannot be opened, it warns
+// and returns stdout alone with a nil file — invocation proceeds without disk
+// logging rather than failing outright.
+func openStageLog(issueNumber int, logDir, label string, stdout *bytes.Buffer) (io.Writer, *os.File) {
+	if err := os.MkdirAll(logDir, 0700); err != nil {
+		claudeLog(issueNumber, "warn", "could not create log dir: %v\n", err)
+		return stdout, nil
+	}
+	if err := os.Chmod(logDir, 0700); err != nil {
+		claudeLog(issueNumber, "warn", "could not set log dir permissions: %v\n", err)
+		return stdout, nil
+	}
+	safeLabel := strings.NewReplacer("/", "-", "\\", "-", ":", "-", " ", "-").Replace(label)
+	now := time.Now().UTC()
+	logPath := filepath.Join(logDir, fmt.Sprintf("%s-%s-%d.log", safeLabel, now.Format("20060102-150405"), now.UnixNano()))
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		claudeLog(issueNumber, "warn", "could not create log file %s: %v\n", logPath, err)
+		return stdout, nil
+	}
+	return io.MultiWriter(stdout, logFile), logFile
+}
+
+// interpretClaudeResult classifies a completed Claude invocation's raw NDJSON
+// output: it checks for a WaitDelay-related exit override, parses the
+// stream-json result, extracts result text and token usage (falling back to
+// scanning intermediate assistant turns when JSON parsing failed or the
+// process was killed before emitting a result line), and classifies the
+// completion/error status of the invocation from the parsed or extracted
+// text.
+func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byte, runErr error, wasTimedOut bool, sessFilePath, logDir string) (string, bool, TokenUsage, error) {
 	if errors.Is(runErr, exec.ErrWaitDelay) && ctx.Err() == nil {
 		claudeLog(issueNumber, "warn", "WaitDelay fired: Claude exited but grandchild processes held stdout pipe open; processing buffered output (%d bytes)\n", len(rawOutput))
 		runErr = nil
