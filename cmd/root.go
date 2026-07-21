@@ -261,20 +261,10 @@ func Execute() error {
 		}
 	}
 	if !cfg.Yolo {
-		if v := os.Getenv("FABRIK_YOLO"); v != "" {
-			lv := strings.ToLower(v)
-			cfg.Yolo = lv == "true" || lv == "1" || lv == "yes"
-		} else if pc.Yolo {
-			cfg.Yolo = true
-		}
+		cfg.Yolo = resolveBool("FABRIK_YOLO", pc.Yolo)
 	}
 	if !cfg.GitSSH {
-		if v := os.Getenv("FABRIK_GIT_SSH"); v != "" {
-			lv := strings.ToLower(v)
-			cfg.GitSSH = lv == "true" || lv == "1" || lv == "yes"
-		} else if pc.GitSSH {
-			cfg.GitSSH = true
-		}
+		cfg.GitSSH = resolveBool("FABRIK_GIT_SSH", pc.GitSSH)
 	}
 	if cfg.PollSeconds == 30 {
 		if v := os.Getenv("FABRIK_POLL"); v != "" {
@@ -322,72 +312,28 @@ func Execute() error {
 		}
 	}
 	if !explicitFlags["review-wait-timeout"] {
-		if v := os.Getenv("FABRIK_REVIEW_WAIT_TIMEOUT"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				cfg.ReviewWaitTimeout = n
-			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_REVIEW_WAIT_TIMEOUT=%q is invalid (must be a positive integer of minutes); using default 15\n", v)
-			}
-		}
+		cfg.ReviewWaitTimeout = resolveInt(cfg.ReviewWaitTimeout, "FABRIK_REVIEW_WAIT_TIMEOUT", "of minutes", 15)
 	}
 	if !explicitFlags["max-review-cycles"] {
-		if v := os.Getenv("FABRIK_MAX_REVIEW_CYCLES"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				cfg.MaxReviewCycles = n
-			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_REVIEW_CYCLES=%q is invalid (must be a positive integer); using default 5\n", v)
-			}
-		}
+		cfg.MaxReviewCycles = resolveInt(cfg.MaxReviewCycles, "FABRIK_MAX_REVIEW_CYCLES", "", 5)
 	}
 	if !explicitFlags["ci-wait-timeout"] {
-		if v := os.Getenv("FABRIK_CI_WAIT_TIMEOUT"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				cfg.CIWaitTimeout = n
-			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_CI_WAIT_TIMEOUT=%q is invalid (must be a positive integer of minutes); using default 30\n", v)
-			}
-		}
+		cfg.CIWaitTimeout = resolveInt(cfg.CIWaitTimeout, "FABRIK_CI_WAIT_TIMEOUT", "of minutes", 30)
 	}
 	if !explicitFlags["worker-stale-timeout"] {
-		if v := os.Getenv("FABRIK_WORKER_STALE_TIMEOUT"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				cfg.WorkerStaleMins = n
-			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_WORKER_STALE_TIMEOUT=%q is invalid (must be a positive integer of minutes); using default 5\n", v)
-			}
-		}
+		cfg.WorkerStaleMins = resolveInt(cfg.WorkerStaleMins, "FABRIK_WORKER_STALE_TIMEOUT", "of minutes", 5)
 	}
 	if !explicitFlags["max-ci-fix-cycles"] {
-		if v := os.Getenv("FABRIK_MAX_CI_FIX_CYCLES"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				cfg.MaxCiFixCycles = n
-			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_CI_FIX_CYCLES=%q is invalid (must be a positive integer); using default 5\n", v)
-			}
-		}
+		cfg.MaxCiFixCycles = resolveInt(cfg.MaxCiFixCycles, "FABRIK_MAX_CI_FIX_CYCLES", "", 5)
 	}
 	if !explicitFlags["max-rebase-cycles"] {
-		if v := os.Getenv("FABRIK_MAX_REBASE_CYCLES"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				cfg.MaxRebaseCycles = n
-			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_REBASE_CYCLES=%q is invalid (must be a positive integer); using default 3\n", v)
-			}
-		}
+		cfg.MaxRebaseCycles = resolveInt(cfg.MaxRebaseCycles, "FABRIK_MAX_REBASE_CYCLES", "", 3)
 	}
 	if !explicitFlags["max-enqueue-cycles"] {
-		if v := os.Getenv("FABRIK_MAX_ENQUEUE_CYCLES"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				cfg.MaxEnqueueCycles = n
-			} else {
-				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_ENQUEUE_CYCLES=%q is invalid (must be a positive integer); using default 5\n", v)
-			}
-		}
+		cfg.MaxEnqueueCycles = resolveInt(cfg.MaxEnqueueCycles, "FABRIK_MAX_ENQUEUE_CYCLES", "", 5)
 	}
 	if !explicitFlags["convergence-budget"] {
-		if v := os.Getenv("FABRIK_CONVERGENCE_BUDGET"); v != "" {
-			cfg.ConvergenceBudget = v // validated in convergenceBudget() helper
-		}
+		cfg.ConvergenceBudget = resolveDuration(cfg.ConvergenceBudget, "FABRIK_CONVERGENCE_BUDGET")
 	}
 	if !explicitFlags["auto-merge-strategy"] {
 		if v := os.Getenv("FABRIK_AUTO_MERGE_STRATEGY"); v != "" {
@@ -562,22 +508,13 @@ func Execute() error {
 		}
 	}
 	if !explicitFlags["kill-grace-sigint"] {
-		if v := os.Getenv("FABRIK_KILL_GRACE_SIGINT"); v != "" {
-			cfg.KillGraceSigInt = v // validated in killGraceSigInt() helper
-		}
+		cfg.KillGraceSigInt = resolveDuration(cfg.KillGraceSigInt, "FABRIK_KILL_GRACE_SIGINT") // validated in killGraceSigInt() helper
 	}
 	if !explicitFlags["kill-grace-sigterm"] {
-		if v := os.Getenv("FABRIK_KILL_GRACE_SIGTERM"); v != "" {
-			cfg.KillGraceSigTerm = v // validated in killGraceSigTerm() helper
-		}
+		cfg.KillGraceSigTerm = resolveDuration(cfg.KillGraceSigTerm, "FABRIK_KILL_GRACE_SIGTERM") // validated in killGraceSigTerm() helper
 	}
 	if !cfg.AutoUpgrade {
-		if v := os.Getenv("FABRIK_AUTO_UPGRADE"); v != "" {
-			lv := strings.ToLower(v)
-			cfg.AutoUpgrade = lv == "true" || lv == "1" || lv == "yes"
-		} else if pc.AutoUpgrade {
-			cfg.AutoUpgrade = true
-		}
+		cfg.AutoUpgrade = resolveBool("FABRIK_AUTO_UPGRADE", pc.AutoUpgrade)
 	}
 	cfg.TUI = true // default on
 	if noTUI {
@@ -591,28 +528,13 @@ func Execute() error {
 		cfg.TUI = false
 	}
 	if !cfg.DebugOutput {
-		if v := os.Getenv("FABRIK_DEBUG_OUTPUT"); v != "" {
-			lv := strings.ToLower(v)
-			cfg.DebugOutput = lv == "true" || lv == "1" || lv == "yes"
-		} else if pc.DebugOutput {
-			cfg.DebugOutput = true
-		}
+		cfg.DebugOutput = resolveBool("FABRIK_DEBUG_OUTPUT", pc.DebugOutput)
 	}
 	if !cfg.SymlinkEnv {
-		if v := os.Getenv("FABRIK_SYMLINK_ENV"); v != "" {
-			lv := strings.ToLower(v)
-			cfg.SymlinkEnv = lv == "true" || lv == "1" || lv == "yes"
-		} else if pc.SymlinkEnv {
-			cfg.SymlinkEnv = true
-		}
+		cfg.SymlinkEnv = resolveBool("FABRIK_SYMLINK_ENV", pc.SymlinkEnv)
 	}
 	if !explicitFlags["worktree-boundary-audit"] {
-		if v := os.Getenv("FABRIK_WORKTREE_BOUNDARY_AUDIT"); v != "" {
-			lv := strings.ToLower(v)
-			cfg.WorktreeBoundaryAudit = lv == "true" || lv == "1" || lv == "yes"
-		} else if pc.WorktreeBoundaryAudit {
-			cfg.WorktreeBoundaryAudit = true
-		}
+		cfg.WorktreeBoundaryAudit = resolveBool("FABRIK_WORKTREE_BOUNDARY_AUDIT", pc.WorktreeBoundaryAudit)
 	}
 	if cfg.PluginDir == "" {
 		if v := os.Getenv("FABRIK_PLUGIN_DIR"); v != "" {
@@ -620,12 +542,7 @@ func Execute() error {
 		}
 	}
 	if !explicitFlags["webhooks"] {
-		if v := os.Getenv("FABRIK_WEBHOOKS"); v != "" {
-			lv := strings.ToLower(v)
-			cfg.Webhooks = lv == "true" || lv == "1" || lv == "yes"
-		} else if pc.Webhooks {
-			cfg.Webhooks = true
-		}
+		cfg.Webhooks = resolveBool("FABRIK_WEBHOOKS", pc.Webhooks)
 	}
 	if !explicitFlags["webhook-port"] {
 		if v := os.Getenv("FABRIK_WEBHOOK_PORT"); v != "" {
@@ -718,47 +635,11 @@ func Execute() error {
 	}
 	fmt.Printf("  debug-output: %v\n", cfg.DebugOutput)
 
-	// If the process was re-exec'd after an auto-upgrade, conditionally refresh
-	// embedded plugin skills. Three-way comparison: skip refresh when operator
-	// has local customizations (disk ≠ installed-version).
-	if os.Getenv("FABRIK_AUTO_UPGRADED") == "1" {
-		os.Unsetenv("FABRIK_AUTO_UPGRADED")
-		customWorkflowOnReexec, upgradeNeededOnReexec, stateErr := fabrikplugin.CheckPluginState(".fabrik/plugin")
-		if stateErr != nil {
-			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin state check failed: %v\n", stateErr)
-		} else if customWorkflowOnReexec {
-			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skills have local customizations — skipping auto-refresh; run 'fabrik upgrade --force' to overwrite\n")
-		} else if upgradeNeededOnReexec {
-			if _, err := fabrikplugin.RefreshPlugin(); err != nil {
-				fmt.Fprintf(os.Stderr, "[upgrade] warning: RefreshPlugin failed: %v\n", err)
-			} else if err := fabrikplugin.WriteInstalledVersion(".fabrik/plugin"); err != nil {
-				fmt.Fprintf(os.Stderr, "[upgrade] warning: writing installed version failed: %v\n", err)
-			}
-		} else {
-			fmt.Fprintf(os.Stderr, "[upgrade] info: plugin baseline seeded; skill refresh deferred to next startup\n")
-		}
-	}
-
-	// If the process was re-exec'd by a SIGHUP restart, conditionally refresh
-	// plugin skills using the same three-way comparison. The env var is unset
-	// immediately so Claude child processes do not inherit it.
-	if os.Getenv("FABRIK_SIGHUP_RESTART") == "1" {
-		os.Unsetenv("FABRIK_SIGHUP_RESTART")
-		customWorkflowOnSighup, upgradeNeededOnSighup, stateErr := fabrikplugin.CheckPluginState(".fabrik/plugin")
-		if stateErr != nil {
-			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin state check failed after SIGHUP restart: %v\n", stateErr)
-		} else if customWorkflowOnSighup {
-			fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skills have local customizations — skipping auto-refresh; run 'fabrik upgrade --force' to overwrite\n")
-		} else if upgradeNeededOnSighup {
-			if _, err := fabrikplugin.RefreshPlugin(); err != nil {
-				fmt.Fprintf(os.Stderr, "[upgrade] warning: RefreshPlugin failed after SIGHUP restart: %v\n", err)
-			} else if err := fabrikplugin.WriteInstalledVersion(".fabrik/plugin"); err != nil {
-				fmt.Fprintf(os.Stderr, "[upgrade] warning: writing installed version failed after SIGHUP restart: %v\n", err)
-			}
-		} else {
-			fmt.Fprintf(os.Stderr, "[upgrade] info: plugin baseline seeded; skill refresh deferred to next startup\n")
-		}
-	}
+	// If the process was re-exec'd after an auto-upgrade or a SIGHUP restart,
+	// conditionally refresh embedded plugin skills (three-way comparison: skip
+	// refresh when the operator has local customizations).
+	handleReexecPluginRefresh("FABRIK_AUTO_UPGRADED", "")
+	handleReexecPluginRefresh("FABRIK_SIGHUP_RESTART", " after SIGHUP restart")
 
 	// Parse webhook events from comma-separated string.
 	var webhookEvents []string
@@ -871,6 +752,79 @@ func Execute() error {
 		}
 	}
 	return eng.Run()
+}
+
+// resolveBool resolves a boolean config value from an environment variable
+// (truthy values: "true", "1", "yes", case-insensitive) when set, falling back
+// to the project-config value otherwise. Callers gate the call on whichever
+// precedence condition applies (an already-false flag value, or an
+// unspecified flag via explicitFlags) — resolveBool only handles the
+// env-or-config-file half of the flag > env > config.yaml precedence chain.
+func resolveBool(envVar string, pcVal bool) bool {
+	if v := os.Getenv(envVar); v != "" {
+		lv := strings.ToLower(v)
+		return lv == "true" || lv == "1" || lv == "yes"
+	}
+	return pcVal
+}
+
+// resolveInt resolves an integer config value from an environment variable
+// requiring a positive integer, returning current unchanged (and printing a
+// warning naming defaultVal) when the variable is unset or invalid. unit, when
+// non-empty, is inserted into the warning message (e.g. "of minutes"). Callers
+// gate the call on explicitFlags so an explicit flag value is never overridden.
+func resolveInt(current int, envVar, unit string, defaultVal int) int {
+	v := os.Getenv(envVar)
+	if v == "" {
+		return current
+	}
+	if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		return n
+	}
+	unitSuffix := ""
+	if unit != "" {
+		unitSuffix = " " + unit
+	}
+	fmt.Fprintf(os.Stderr, "[warn] %s=%q is invalid (must be a positive integer%s); using default %d\n", envVar, v, unitSuffix, defaultVal)
+	return current
+}
+
+// resolveDuration resolves a raw duration-string config value (validated later
+// by its dedicated helper, e.g. killGraceSigInt or convergenceBudget) from an
+// environment variable, returning current unchanged when unset.
+func resolveDuration(current string, envVar string) string {
+	if v := os.Getenv(envVar); v != "" {
+		return v
+	}
+	return current
+}
+
+// handleReexecPluginRefresh checks and unsets envVar (a re-exec marker set
+// before this process replaced itself via syscall.Exec, or before a SIGHUP
+// restart), then conditionally refreshes embedded plugin skills using a
+// three-way comparison: skip when the operator has local customizations (disk
+// ≠ installed-version). msgSuffix is appended to warning messages to
+// distinguish the auto-upgrade re-exec path from the SIGHUP-restart path
+// (e.g. "" or " after SIGHUP restart").
+func handleReexecPluginRefresh(envVar, msgSuffix string) {
+	if os.Getenv(envVar) != "1" {
+		return
+	}
+	os.Unsetenv(envVar)
+	customWorkflow, upgradeNeeded, stateErr := fabrikplugin.CheckPluginState(".fabrik/plugin")
+	if stateErr != nil {
+		fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin state check failed%s: %v\n", msgSuffix, stateErr)
+	} else if customWorkflow {
+		fmt.Fprintf(os.Stderr, "[upgrade] warning: plugin skills have local customizations — skipping auto-refresh; run 'fabrik upgrade --force' to overwrite\n")
+	} else if upgradeNeeded {
+		if _, err := fabrikplugin.RefreshPlugin(); err != nil {
+			fmt.Fprintf(os.Stderr, "[upgrade] warning: RefreshPlugin failed%s: %v\n", msgSuffix, err)
+		} else if err := fabrikplugin.WriteInstalledVersion(".fabrik/plugin"); err != nil {
+			fmt.Fprintf(os.Stderr, "[upgrade] warning: writing installed version failed%s: %v\n", msgSuffix, err)
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "[upgrade] info: plugin baseline seeded; skill refresh deferred to next startup\n")
+	}
 }
 
 // reviewWaitTimeout converts a ReviewWaitTimeout config value (minutes) to a
