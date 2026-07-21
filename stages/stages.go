@@ -203,6 +203,20 @@ func LoadAll(dir string) ([]*Stage, error) {
 	return stages, nil
 }
 
+// parseNonNegativeDuration parses raw as a time.Duration for the given stage
+// and field, rejecting negative durations. fieldLabel is used verbatim in
+// error messages (e.g. "max_wall_time", "kill_grace.sigint").
+func parseNonNegativeDuration(stageName, fieldLabel, raw string) (time.Duration, error) {
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("stage %q: invalid %s %q: %w", stageName, fieldLabel, raw, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("stage %q: %s must not be negative, got %q", stageName, fieldLabel, raw)
+	}
+	return d, nil
+}
+
 func loadOne(path string) (*Stage, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -236,33 +250,24 @@ func loadOne(path string) (*Stage, error) {
 	}
 
 	if s.MaxWallTimeRaw != "" {
-		d, err := time.ParseDuration(s.MaxWallTimeRaw)
+		d, err := parseNonNegativeDuration(s.Name, "max_wall_time", s.MaxWallTimeRaw)
 		if err != nil {
-			return nil, fmt.Errorf("stage %q: invalid max_wall_time %q: %w", s.Name, s.MaxWallTimeRaw, err)
-		}
-		if d < 0 {
-			return nil, fmt.Errorf("stage %q: max_wall_time must not be negative, got %q", s.Name, s.MaxWallTimeRaw)
+			return nil, err
 		}
 		s.MaxWallTime = d
 	}
 
 	if s.KillGrace.SigIntRaw != "" {
-		d, err := time.ParseDuration(s.KillGrace.SigIntRaw)
+		d, err := parseNonNegativeDuration(s.Name, "kill_grace.sigint", s.KillGrace.SigIntRaw)
 		if err != nil {
-			return nil, fmt.Errorf("stage %q: invalid kill_grace.sigint %q: %w", s.Name, s.KillGrace.SigIntRaw, err)
-		}
-		if d < 0 {
-			return nil, fmt.Errorf("stage %q: kill_grace.sigint must not be negative, got %q", s.Name, s.KillGrace.SigIntRaw)
+			return nil, err
 		}
 		s.KillGrace.SigInt = d
 	}
 	if s.KillGrace.SigTermRaw != "" {
-		d, err := time.ParseDuration(s.KillGrace.SigTermRaw)
+		d, err := parseNonNegativeDuration(s.Name, "kill_grace.sigterm", s.KillGrace.SigTermRaw)
 		if err != nil {
-			return nil, fmt.Errorf("stage %q: invalid kill_grace.sigterm %q: %w", s.Name, s.KillGrace.SigTermRaw, err)
-		}
-		if d < 0 {
-			return nil, fmt.Errorf("stage %q: kill_grace.sigterm must not be negative, got %q", s.Name, s.KillGrace.SigTermRaw)
+			return nil, err
 		}
 		s.KillGrace.SigTerm = d
 	}
