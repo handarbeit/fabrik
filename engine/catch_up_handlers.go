@@ -89,32 +89,74 @@ func (e *Engine) handleReviewGate(pctx *phase1Ctx) bool {
 	// advancing. Reviews with empty bodies (e.g. APPROVED with no comment)
 	// have nothing to address; fall through to Phase 2.
 	if syntheticComments := e.buildReviewThreadComments(pctx.item); len(syntheticComments) > 0 {
-		iKey := issueKey(pctx.item, e.defaultRepo())
-		repoStr := itemOwnerRepoString(pctx.item, e.defaultRepo())
 		// Guard: if a goroutine from a previous poll cycle is still running
 		// dispatchReviewReinvoke for this item, skip the entire reinvoke path —
 		// including cycle-limit checks — to avoid pausing an item while valid
 		// work is still in progress. The store Worker field is the semantic
-		// source of truth for in-flight state.
-		var cycleCount int
-		if snap, snapErr := e.store.Get(repoStr, pctx.item.Number); snapErr == nil {
-			if snap.Worker() != nil {
-				e.logf(pctx.item.Number, "review-reinvoke", "skipping dispatch — review reinvoke already in-flight\n")
-				return true
-			}
-			cycleCount = snap.ReviewCycles(pctx.stage.Name)
-		}
-		maxCycles := e.cfg.MaxReviewCycles
-		if cycleCount >= maxCycles {
-			e.pauseForReviewCycleLimit(pctx.board, pctx.item, pctx.stage, cycleCount, maxCycles)
-		} else {
-			e.store.Apply(itemstate.ReviewCycleIncremented{Repo: repoStr, Number: pctx.item.Number, StageName: pctx.stage.Name})
-			e.dispatchReviewReinvoke(pctx.ctx, pctx.board, pctx.item, pctx.stage)
-			pctx.advancedItems[iKey] = true
-		}
-		return true
+		// source of truth for in-flight state. (Enforced by
+		// dispatchWithCycleLimit's in-flight bail.)
+		return e.dispatchWithCycleLimit(
+			pctx,
+			"review-reinvoke",
+			func(snap itemstate.Snapshot) int { return snap.ReviewCycles(pctx.stage.Name) },
+			e.cfg.MaxReviewCycles,
+			nil,
+			func(repoStr string) {
+				e.store.Apply(itemstate.ReviewCycleIncremented{Repo: repoStr, Number: pctx.item.Number, StageName: pctx.stage.Name})
+			},
+			func() { e.dispatchReviewReinvoke(pctx.ctx, pctx.board, pctx.item, pctx.stage) },
+			func(cycleCount int) {
+				e.pauseForReviewCycleLimit(pctx.board, pctx.item, pctx.stage, cycleCount, e.cfg.MaxReviewCycles)
+			},
+		)
 	}
 	return false
+}
+
+// dispatchWithCycleLimit implements the cycle-limit dispatch pattern shared
+// by the review, rebase, and CI-fix reinvoke paths: read the item's store
+// snapshot, bail if a reinvoke is already in-flight, read the current cycle
+// count, apply an optional short-circuit (CI-fix's no-op-SHA debounce; nil
+// for review/rebase, which have no such check), then either pause at the
+// cycle limit or increment-and-dispatch. shortCircuit and the snapshot read
+// are skipped together on a store-read error, mirroring each original
+// block's behavior (cycleCount defaults to 0, and a short-circuit keyed off
+// snapshot state can never fire without a snapshot). Always returns true —
+// callers only reach this after already deciding a reinvoke condition holds
+// (blocked review, merge conflict, CI failure).
+func (e *Engine) dispatchWithCycleLimit(
+	pctx *phase1Ctx,
+	tag string,
+	cycles func(itemstate.Snapshot) int,
+	maxCycles int,
+	shortCircuit func(itemstate.Snapshot) bool,
+	increment func(repoStr string),
+	dispatch func(),
+	pause func(cycleCount int),
+) bool {
+	iKey := issueKey(pctx.item, e.defaultRepo())
+	repoStr := itemOwnerRepoString(pctx.item, e.defaultRepo())
+
+	var cycleCount int
+	if snap, snapErr := e.store.Get(repoStr, pctx.item.Number); snapErr == nil {
+		if snap.Worker() != nil {
+			e.logf(pctx.item.Number, tag, "skipping dispatch — reinvoke already in-flight\n")
+			return true
+		}
+		cycleCount = cycles(snap)
+		if shortCircuit != nil && shortCircuit(snap) {
+			return true
+		}
+	}
+
+	if cycleCount >= maxCycles {
+		pause(cycleCount)
+	} else {
+		increment(repoStr)
+		dispatch()
+		pctx.advancedItems[iKey] = true
+	}
+	return true
 }
 
 // handleAutoMergeConvergence claims items with fabrik:auto-merge-enabled,
@@ -158,25 +200,20 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 			e.logf(pctx.item.Number, "merge-queue", "PR in merge queue — deferring rebase to queue\n")
 			return true
 		}
-		iKey := issueKey(pctx.item, e.defaultRepo())
-		repoStr := itemOwnerRepoString(pctx.item, e.defaultRepo())
-		var cycleCount int
-		if snap, snapErr := e.store.Get(repoStr, pctx.item.Number); snapErr == nil {
-			if snap.Worker() != nil {
-				e.logf(pctx.item.Number, "rebase-reinvoke", "skipping dispatch — rebase reinvoke already in-flight\n")
-				return true
-			}
-			cycleCount = snap.RebaseCycles(pctx.stage.Name)
-		}
-		maxCycles := e.cfg.MaxRebaseCycles
-		if cycleCount >= maxCycles {
-			e.pauseForRebaseCycleLimit(pctx.board, pctx.item, pctx.stage, cycleCount, maxCycles)
-		} else {
-			e.store.Apply(itemstate.RebaseCycleIncremented{Repo: repoStr, Number: pctx.item.Number, StageName: pctx.stage.Name})
-			e.dispatchRebaseReinvoke(pctx.ctx, pctx.board, pctx.item, pctx.stage)
-			pctx.advancedItems[iKey] = true
-		}
-		return true
+		return e.dispatchWithCycleLimit(
+			pctx,
+			"rebase-reinvoke",
+			func(snap itemstate.Snapshot) int { return snap.RebaseCycles(pctx.stage.Name) },
+			e.cfg.MaxRebaseCycles,
+			nil,
+			func(repoStr string) {
+				e.store.Apply(itemstate.RebaseCycleIncremented{Repo: repoStr, Number: pctx.item.Number, StageName: pctx.stage.Name})
+			},
+			func() { e.dispatchRebaseReinvoke(pctx.ctx, pctx.board, pctx.item, pctx.stage) },
+			func(cycleCount int) {
+				e.pauseForRebaseCycleLimit(pctx.board, pctx.item, pctx.stage, cycleCount, e.cfg.MaxRebaseCycles)
+			},
+		)
 	}
 	if mergeBlocked {
 		return true // mergeability not yet computed; re-evaluate on next poll
@@ -191,36 +228,32 @@ func (e *Engine) handleMergeAndCIGates(pctx *phase1Ctx) bool {
 		return true
 	}
 	if ciFailure {
-		iKey := issueKey(pctx.item, e.defaultRepo())
-		repoStr := itemOwnerRepoString(pctx.item, e.defaultRepo())
-		var cycleCount int
-		var lastNoOpSHA string
-		if snap, snapErr := e.store.Get(repoStr, pctx.item.Number); snapErr == nil {
-			if snap.Worker() != nil {
-				e.logf(pctx.item.Number, "ci-fix-reinvoke", "skipping dispatch — CI-fix reinvoke already in-flight\n")
+		return e.dispatchWithCycleLimit(
+			pctx,
+			"ci-fix-reinvoke",
+			func(snap itemstate.Snapshot) int { return snap.CIFixCycles(pctx.stage.Name) },
+			e.cfg.MaxCiFixCycles,
+			func(snap itemstate.Snapshot) bool {
+				lastNoOpSHA := snap.LastCIFixNoOpSHA()
+				if settle.PR == nil || lastNoOpSHA == "" || lastNoOpSHA != settle.PR.HeadSHA {
+					return false
+				}
+				// The last CI-fix reinvoke for this exact head SHA pushed no new
+				// commit — dispatching again would just repeat the same no-op
+				// and burn cycle budget for nothing. Wait for the SHA to advance
+				// (a genuine fix) or for CIWaitTimeout to fire (#958 leg 2).
+				e.logf(pctx.item.Number, "ci-fix-reinvoke", "skipping dispatch — no-op already recorded for head %s\n",
+					lastNoOpSHA[:min(8, len(lastNoOpSHA))])
 				return true
-			}
-			cycleCount = snap.CIFixCycles(pctx.stage.Name)
-			lastNoOpSHA = snap.LastCIFixNoOpSHA()
-		}
-		if settle.PR != nil && lastNoOpSHA != "" && lastNoOpSHA == settle.PR.HeadSHA {
-			// The last CI-fix reinvoke for this exact head SHA pushed no new
-			// commit — dispatching again would just repeat the same no-op
-			// and burn cycle budget for nothing. Wait for the SHA to advance
-			// (a genuine fix) or for CIWaitTimeout to fire (#958 leg 2).
-			e.logf(pctx.item.Number, "ci-fix-reinvoke", "skipping dispatch — no-op already recorded for head %s\n",
-				lastNoOpSHA[:min(8, len(lastNoOpSHA))])
-			return true
-		}
-		maxCycles := e.cfg.MaxCiFixCycles
-		if cycleCount >= maxCycles {
-			e.pauseForCIFixCycleLimit(pctx.board, pctx.item, pctx.stage, cycleCount, maxCycles)
-		} else {
-			e.store.Apply(itemstate.CIFixCycleIncremented{Repo: repoStr, Number: pctx.item.Number, StageName: pctx.stage.Name})
-			e.dispatchCIFixReinvoke(pctx.ctx, pctx.board, pctx.item, pctx.stage, settle)
-			pctx.advancedItems[iKey] = true
-		}
-		return true
+			},
+			func(repoStr string) {
+				e.store.Apply(itemstate.CIFixCycleIncremented{Repo: repoStr, Number: pctx.item.Number, StageName: pctx.stage.Name})
+			},
+			func() { e.dispatchCIFixReinvoke(pctx.ctx, pctx.board, pctx.item, pctx.stage, settle) },
+			func(cycleCount int) {
+				e.pauseForCIFixCycleLimit(pctx.board, pctx.item, pctx.stage, cycleCount, e.cfg.MaxCiFixCycles)
+			},
+		)
 	}
 	if ciBlocked {
 		return true // CI still pending; re-evaluate on next poll
