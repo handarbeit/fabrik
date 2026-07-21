@@ -346,11 +346,19 @@ func TestPauseIssue_PatternA(t *testing.T) {
 }
 
 // Pattern B: escalatePRCreationFailure / escalateFailedStage — no
-// awaiting-input, comment rocket-reacted, both label and comment echoed.
+// awaiting-input, comment rocket-reacted, both label and comment echoed,
+// fabrik:paused added *before* the comment is posted (labelFirst) — matching
+// the original hand-inlined order at these two call sites.
 func TestPauseIssue_PatternB(t *testing.T) {
+	var order []string
 	client := &mockGitHubClient{
 		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			order = append(order, "comment")
 			return 7, nil
+		},
+		addLabelToIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			order = append(order, "label:"+labelName)
+			return nil
 		},
 	}
 	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
@@ -363,6 +371,7 @@ func TestPauseIssue_PatternB(t *testing.T) {
 		reactRocket:   true,
 		labelEcho:     true,
 		commentEcho:   true,
+		labelFirst:    true,
 	})
 
 	labels, _ := cache.FetchLabels("owner", "repo", 1)
@@ -371,6 +380,10 @@ func TestPauseIssue_PatternB(t *testing.T) {
 	}
 	if containsLabel(labels, "fabrik:awaiting-input") {
 		t.Errorf("Pattern B must not add fabrik:awaiting-input, got %v", labels)
+	}
+
+	if want := []string{"label:fabrik:paused", "comment"}; len(order) != len(want) || order[0] != want[0] || order[1] != want[1] {
+		t.Errorf("Pattern B must add fabrik:paused before posting the comment, got order %v", order)
 	}
 
 	wm.mu.Lock()
@@ -386,11 +399,19 @@ func TestPauseIssue_PatternB(t *testing.T) {
 }
 
 // Pattern C: pauseForBrokenLinkage — no awaiting-input, no rocket reaction, no
-// comment echo, but the label write is still echoed (via addPausedLabelToItem).
+// comment echo, but the label write is still echoed (via addPausedLabelToItem),
+// and fabrik:paused is added *before* the comment is posted (labelFirst) —
+// matching the original hand-inlined order at this call site.
 func TestPauseIssue_PatternC(t *testing.T) {
+	var order []string
 	client := &mockGitHubClient{
 		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			order = append(order, "comment")
 			return 7, nil
+		},
+		addLabelToIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			order = append(order, "label:"+labelName)
+			return nil
 		},
 	}
 	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
@@ -403,6 +424,7 @@ func TestPauseIssue_PatternC(t *testing.T) {
 		reactRocket:   false,
 		labelEcho:     true,
 		commentEcho:   false,
+		labelFirst:    true,
 	})
 
 	labels, _ := cache.FetchLabels("owner", "repo", 1)
@@ -416,6 +438,10 @@ func TestPauseIssue_PatternC(t *testing.T) {
 		t.Errorf("Pattern C must not rocket-react, got %d calls", len(client.addCommentReactionCalls))
 	}
 
+	if want := []string{"label:fabrik:paused", "comment"}; len(order) != len(want) || order[0] != want[0] || order[1] != want[1] {
+		t.Errorf("Pattern C must add fabrik:paused before posting the comment, got order %v", order)
+	}
+
 	wm.mu.Lock()
 	_, labelEchoed := wm.pendingEchoes[echoKey("issues", "labeled", boardcache.ItemKey("owner/repo", 1)+"+"+"fabrik:paused")]
 	_, commentEchoed := wm.pendingEchoes[echoKey("issue_comment", "created", boardcache.ItemKey("owner/repo", 1))]
@@ -425,6 +451,41 @@ func TestPauseIssue_PatternC(t *testing.T) {
 	}
 	if commentEchoed {
 		t.Error("Pattern C must not echo the comment write")
+	}
+}
+
+// Pattern A order: the 10 pauseFor* functions historically posted their
+// comment before adding fabrik:paused — pauseIssue's default (labelFirst:
+// false) must preserve that order.
+func TestPauseIssue_PatternA_CommentBeforeLabel(t *testing.T) {
+	var order []string
+	client := &mockGitHubClient{
+		addCommentFn: func(owner, repo string, issueNumber int, body string) (int, error) {
+			order = append(order, "comment")
+			return 7, nil
+		},
+		addLabelToIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			order = append(order, "label:"+labelName)
+			return nil
+		},
+	}
+	eng, _ := testEngineWithCache(t, client, &mockClaudeInvoker{})
+
+	item := gh.ProjectItem{Number: 1, Repo: "owner/repo"}
+	eng.pauseIssue(item, "paused message", pauseOpts{
+		awaitingInput: true,
+		reactRocket:   true,
+	})
+
+	if want := []string{"comment", "label:fabrik:paused", "label:fabrik:awaiting-input"}; len(order) != len(want) {
+		t.Fatalf("Pattern A order mismatch, got %v want %v", order, want)
+	} else {
+		for i := range want {
+			if order[i] != want[i] {
+				t.Errorf("Pattern A order mismatch at index %d: got %v want %v", i, order, want)
+				break
+			}
+		}
 	}
 }
 

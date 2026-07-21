@@ -148,6 +148,13 @@ type pauseOpts struct {
 	labelEcho       bool // RegisterEcho after the paused/awaiting-input/auto-merge label writes
 	commentEcho     bool // RegisterEcho after the comment write
 	removeAutoMerge bool // also remove fabrik:auto-merge-enabled
+	// labelFirst preserves call-site ordering: the 10 Pattern-A pauseFor*
+	// functions historically posted their comment before adding fabrik:paused,
+	// while escalatePRCreationFailure, escalateFailedStage, and
+	// pauseForBrokenLinkage added fabrik:paused first. The Scope section
+	// requires "no change to when labels/comments/pauses happen," so pauseIssue
+	// must reproduce each call site's original ordering rather than pick one.
+	labelFirst bool
 }
 
 // pauseIssue posts the given comment and applies fabrik:paused (plus,
@@ -158,6 +165,21 @@ type pauseOpts struct {
 // pauseForPRClosedNotMerged's fabrik:awaiting-ci removal) do so themselves
 // around this call — those steps are outside the shared pause tail.
 func (e *Engine) pauseIssue(item gh.ProjectItem, comment string, opts pauseOpts) {
+	// Note: the two branches below are intentionally not factored into a
+	// shared closure — TestAddCommentCompliance's funnel-skip exemption for
+	// pauseIssue's postComment call is keyed off this function's own name and
+	// does not follow calls into a nested function literal.
+	if opts.labelFirst {
+		e.applyLabelAdd(item, "fabrik:paused", opts.labelEcho)
+		if opts.awaitingInput {
+			e.applyLabelAdd(item, "fabrik:awaiting-input", opts.labelEcho)
+		}
+		if opts.removeAutoMerge {
+			e.applyLabelRemove(item, "fabrik:auto-merge-enabled", opts.labelEcho)
+		}
+		e.postComment(item, comment, opts.reactRocket, opts.commentEcho) //nolint:errcheck // failure already logged by postComment
+		return
+	}
 	e.postComment(item, comment, opts.reactRocket, opts.commentEcho) //nolint:errcheck // failure already logged by postComment
 	e.applyLabelAdd(item, "fabrik:paused", opts.labelEcho)
 	if opts.awaitingInput {

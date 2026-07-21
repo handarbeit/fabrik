@@ -329,6 +329,7 @@ func (e *Engine) pauseForBrokenLinkage(item gh.ProjectItem, prNumber int, closin
 		prNumber, item.Number, reason, prNumber, closingLine, prNumber,
 	)
 	e.pauseIssue(item, msg, pauseOpts{
-		labelEcho: true,
+		labelEcho:  true,
+		labelFirst: true,
 	})
 }
