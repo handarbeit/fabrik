@@ -74,8 +74,8 @@ func (e *Engine) advanceClosedItemToDone(board *gh.ProjectBoard, item gh.Project
 		e.logf(item.Number, "warn", "closed-item advance: could not move to %s: %v — will retry next poll\n", cleanupName, err)
 		return
 	}
-	if cacheImpl, ok2 := e.readClient.(*boardcache.CacheImpl); ok2 {
-		cacheImpl.UpdateItemStatus(boardcache.ItemKey(item.Repo, item.Number), cleanupName)
+	if c := e.cache(); c != nil {
+		c.UpdateItemStatus(boardcache.ItemKey(item.Repo, item.Number), cleanupName)
 	}
 	if e.webhookMgr != nil {
 		e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)

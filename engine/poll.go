@@ -738,8 +738,8 @@ func (e *Engine) cleanupLockedIssues() {
 			e.logf(num, "warn", "could not remove lock label during shutdown: %v\n", err)
 		} else {
 			e.logf(num, "shutdown", "removed lock label\n")
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, num), lockLabel)
+			if c := e.cache(); c != nil {
+				c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, num), lockLabel)
 			}
 		}
 		e.store.Apply(itemstate.LocalLockReleased{Repo: snap.Repo(), Number: num})
@@ -773,8 +773,8 @@ func (e *Engine) cleanupClosedIssueLocks(board *gh.ProjectBoard) {
 			}
 		} else {
 			e.logf(num, "poll", "removed stale lock label from closed issue\n")
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), lockLabel)
+			if c := e.cache(); c != nil {
+				c.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), lockLabel)
 			}
 		}
 	}
@@ -815,16 +815,16 @@ func (e *Engine) cleanupClosedIssueTransientLabels(board *gh.ProjectBoard) {
 			if err := e.client.RemoveLabelFromIssue(owner, repo, num, label); err != nil {
 				if errors.Is(err, gh.ErrNotFound) {
 					// Label already absent on GitHub — desired state achieved; sync cache.
-					if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-						cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(repoKey, num), label)
+					if c := e.cache(); c != nil {
+						c.ApplyLabelRemoved(boardcache.ItemKey(repoKey, num), label)
 					}
 				} else {
 					e.logf(num, "warn", "could not remove transient label %q from closed issue: %v\n", label, err)
 				}
 			} else {
 				e.logf(num, "poll", "removed transient label %q from closed issue\n", label)
-				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(repoKey, num), label)
+				if c := e.cache(); c != nil {
+					c.ApplyLabelRemoved(boardcache.ItemKey(repoKey, num), label)
 				}
 			}
 		}
@@ -840,7 +840,7 @@ type pollResult struct {
 
 func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	e.emitStructural(tui.PollStartedEvent{Owner: e.cfg.Owner, Repo: e.cfg.Repo, Project: e.cfg.ProjectNum})
-	if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok && cacheImpl.IsBootstrapped() && !cacheImpl.IsPaused() {
+	if c := e.cache(); c != nil && c.IsBootstrapped() && !c.IsPaused() {
 		e.logf(0, "poll", "reading project board from cache: %s/%s#%d\n", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
 	} else {
 		e.logf(0, "poll", "fetching project board from GitHub: %s/%s#%d\n", e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum)
@@ -850,8 +850,8 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// holds fresh Status values when poll() processes items this cycle.
 	// Only active when the in-memory cache is bootstrapped (cacheImpl != nil and
 	// ProjectID is known); skipped on the very first cycle when cache is unset.
-	if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok && cacheImpl.ProjectID() != "" {
-		projectID := cacheImpl.ProjectID()
+	if c := e.cache(); c != nil && c.ProjectID() != "" {
+		projectID := c.ProjectID()
 		updatedAt, gateErr := e.client.FetchProjectUpdatedAt(projectID)
 		if gateErr != nil {
 			e.logf(0, "cache", "layer2 gate: FetchProjectUpdatedAt failed: %v; running batch as fallback\n", gateErr)
@@ -861,7 +861,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			if err != nil {
 				e.logf(0, "cache", "layer2 status sweep failed: %v\n", err)
 			} else {
-				cacheImpl.ApplyStatusBatch(updates)
+				c.ApplyStatusBatch(updates)
 				if gateErr == nil {
 					e.lastProjectUpdatedAt = updatedAt
 				}
@@ -888,20 +888,20 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// repo-level projects (and only sometimes for org-level projects with the
 	// right permissions). The Layer 2 status sweep above must continue running
 	// regardless of webhook state — it is the only delivery path for Status.
-	if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+	if c := e.cache(); c != nil {
 		switch {
-		case cacheImpl.IsPaused():
+		case c.IsPaused():
 			// Paused: FetchProjectBoard below falls through to GitHub directly.
-		case cacheImpl.IsBootstrapped() || cacheImpl.ProjectID() != "":
+		case c.IsBootstrapped() || c.ProjectID() != "":
 			// Bootstrapped: use probe-driven refresh (avoids full shallow fetch cost).
-			e.runProbeAndDeepFetch(cacheImpl)
+			e.runProbeAndDeepFetch(c)
 		default:
 			// Virgin: probe bootstrap (~250 nodes vs ~2350 for full shallow fetch).
 			probeItems, projectID, refreshErr := e.client.ProbeProjectBoard(e.cfg.Owner, e.cfg.Repo, e.cfg.ProjectNum, e.cfg.OwnerType)
 			if refreshErr != nil {
 				e.logf(0, "cache", "initial board probe failed (using empty cache): %v\n", refreshErr)
 			} else if projectID != "" && len(probeItems) > 0 {
-				cacheImpl.BootstrapFromProbe(probeItems, projectID)
+				c.BootstrapFromProbe(probeItems, projectID)
 				e.seedTerminalFromProbeItems(probeItems)
 			} else if projectID != "" {
 				// Probe succeeded but returned 0 items — possible transient indexer hiccup.
@@ -1133,7 +1133,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			deepFetchCandidates = append(deepFetchCandidates, board.Items[i])
 			continue
 		}
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok && !cacheImpl.IsPaused() && cacheImpl.IsItemCacheFresh(board.Items[i].Repo, board.Items[i].Number, board.Items[i].UpdatedAt) {
+		if c := e.cache(); c != nil && !c.IsPaused() && c.IsItemCacheFresh(board.Items[i].Repo, board.Items[i].Number, board.Items[i].UpdatedAt) {
 			e.logf(0, "poll", "reading details for #%d from cache\n", board.Items[i].Number)
 		} else {
 			e.logf(0, "poll", "deep-fetching details for #%d from GitHub\n", board.Items[i].Number)
@@ -1331,15 +1331,15 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			e.logf(item.Number, "warn", "fabrik:revalidate applied to non-Validate stage %q — removing label, no action\n", stageName)
 			if rerr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:revalidate"); rerr != nil {
 				if errors.Is(rerr, gh.ErrNotFound) {
-					if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-						cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(repoStr, item.Number), "fabrik:revalidate")
+					if c := e.cache(); c != nil {
+						c.ApplyLabelRemoved(boardcache.ItemKey(repoStr, item.Number), "fabrik:revalidate")
 					}
 				} else {
 					e.logf(item.Number, "warn", "revalidate: could not remove label from non-Validate issue: %v\n", rerr)
 				}
 			} else {
-				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(repoStr, item.Number), "fabrik:revalidate")
+				if c := e.cache(); c != nil {
+					c.ApplyLabelRemoved(boardcache.ItemKey(repoStr, item.Number), "fabrik:revalidate")
 				}
 				if e.webhookMgr != nil {
 					e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(repoStr, item.Number)+"+"+"fabrik:revalidate")

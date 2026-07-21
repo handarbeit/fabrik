@@ -107,8 +107,8 @@ func (e *Engine) runValidatePRTerminalAdvance(board *gh.ProjectBoard, items []gh
 					e.logf(item.Number, "warn", "pr-terminal: could not add %s: %v — skipping item\n", completeLabel, addErr)
 					fillFailed = true
 					break
-				} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-					cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), completeLabel)
+				} else if c := e.cache(); c != nil {
+					c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), completeLabel)
 				}
 				e.logf(item.Number, "pr-terminal", "added %s\n", completeLabel)
 			}
@@ -131,14 +131,14 @@ func (e *Engine) runValidatePRTerminalAdvance(board *gh.ProjectBoard, items []gh
 					if rerr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, lbl); rerr != nil {
 						if errors.Is(rerr, gh.ErrNotFound) {
 							// Label already absent on GitHub — desired end state achieved; sync cache.
-							if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-								cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), lbl)
+							if c := e.cache(); c != nil {
+								c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), lbl)
 							}
 						} else {
 							e.logf(item.Number, "warn", "pr-terminal: could not remove %s: %v\n", lbl, rerr)
 						}
-					} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-						cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), lbl)
+					} else if c := e.cache(); c != nil {
+						c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), lbl)
 					}
 				}
 			}

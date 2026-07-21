@@ -80,8 +80,8 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 			!errors.Is(err, gh.ErrNotFound) {
 			e.logf(item.Number, "warn", "could not remove awaiting-input label: %v\n", err)
 		} else if err == nil {
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
+			if c := e.cache(); c != nil {
+				c.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
 			}
 			if e.webhookMgr != nil {
 				e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-input")
@@ -134,8 +134,8 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 			if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-ci"); err != nil {
 				e.logf(item.Number, "warn", "could not add fabrik:awaiting-ci label: %v\n", err)
 			} else {
-				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-					cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-ci")
+				if c := e.cache(); c != nil {
+					c.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-ci")
 				}
 				if e.webhookMgr != nil {
 					e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-ci")
@@ -153,8 +153,8 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, completeLabel); err != nil {
 		e.logf(item.Number, "warn", "could not add completion label: %v\n", err)
 	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
+		if c := e.cache(); c != nil {
+			c.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
 		}
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+completeLabel)
@@ -213,8 +213,8 @@ func (e *Engine) handleStageComplete(ctx context.Context, board *gh.ProjectBoard
 				if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-review"); err != nil {
 					e.logf(item.Number, "warn", "could not add fabrik:awaiting-review label: %v\n", err)
 				} else {
-					if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-						cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-review")
+					if c := e.cache(); c != nil {
+						c.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-review")
 					}
 					if e.webhookMgr != nil {
 						e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-review")
@@ -304,8 +304,8 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 		if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); lerr != nil {
 			e.logf(item.Number, "warn", "could not add fabrik:auto-merge-enabled label: %v\n", lerr)
 		} else {
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:auto-merge-enabled")
+			if c := e.cache(); c != nil {
+				c.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:auto-merge-enabled")
 			}
 			if e.webhookMgr != nil {
 				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:auto-merge-enabled")
@@ -319,8 +319,8 @@ func (e *Engine) attemptMergeOnValidate(ctx context.Context, board *gh.ProjectBo
 	if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); lerr != nil {
 		e.logf(item.Number, "warn", "could not add fabrik:auto-merge-enabled label: %v\n", lerr)
 	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:auto-merge-enabled")
+		if c := e.cache(); c != nil {
+			c.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:auto-merge-enabled")
 		}
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:auto-merge-enabled")
@@ -356,12 +356,12 @@ func (e *Engine) enqueueForQueue(owner, repo string, item gh.ProjectItem, prNumb
 	if lerr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); lerr != nil {
 		e.logf(item.Number, "warn", "could not add fabrik:auto-merge-enabled label: %v\n", lerr)
 	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
+		if c := e.cache(); c != nil {
 			// Use the resolved owner/repo (not item.Repo, which may be empty when it
 			// defaults to the default repo) so the cache key matches the stored entry
 			// and the write-through actually lands on the right item — consistent with
 			// the webhook-echo key below.
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:auto-merge-enabled")
+			c.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:auto-merge-enabled")
 		}
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:auto-merge-enabled")
@@ -388,8 +388,8 @@ func (e *Engine) handleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 		if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-done"); err != nil {
 			e.logf(item.Number, "warn", "could not add awaiting-done marker: %v\n", err)
 		} else {
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-done")
+			if c := e.cache(); c != nil {
+				c.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-done")
 			}
 			if e.webhookMgr != nil {
 				e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:awaiting-done")
@@ -445,8 +445,8 @@ func (e *Engine) advanceToQueued(_ context.Context, board *gh.ProjectBoard, item
 	if err := e.client.UpdateProjectItemStatus(board.ProjectID, item.ItemID, e.statusField.FieldID, optionID); err != nil {
 		return fmt.Errorf("move to %s: %w", hs.Name, err)
 	}
-	if cacheImpl, ok2 := e.readClient.(*boardcache.CacheImpl); ok2 {
-		cacheImpl.UpdateItemStatus(boardcache.ItemKey(item.Repo, item.Number), hs.Name)
+	if c := e.cache(); c != nil {
+		c.UpdateItemStatus(boardcache.ItemKey(item.Repo, item.Number), hs.Name)
 	}
 	if e.webhookMgr != nil {
 		e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
@@ -458,8 +458,8 @@ func (e *Engine) advanceToQueued(_ context.Context, board *gh.ProjectBoard, item
 		e.logf(item.Number, "warn", "advanced to %s but could not add %s label: %v — will retry on next poll\n", hs.Name, completeLabel, lerr)
 		return fmt.Errorf("add %s label: %w", completeLabel, lerr)
 	}
-	if cacheImpl, ok2 := e.readClient.(*boardcache.CacheImpl); ok2 {
-		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
+	if c := e.cache(); c != nil {
+		c.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), completeLabel)
 	}
 	if e.webhookMgr != nil {
 		e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+completeLabel)
@@ -487,11 +487,11 @@ func (e *Engine) advanceToNextStage(board *gh.ProjectBoard, item gh.ProjectItem,
 	}
 
 	e.logf(item.Number, "advance", "moving to stage %q\n", next.Name)
-	// write-through: already covered by cacheImpl.UpdateItemStatus call in the else block below
+	// write-through: already covered by c.UpdateItemStatus call in the else block below
 	err := e.client.UpdateProjectItemStatus(board.ProjectID, item.ItemID, e.statusField.FieldID, optionID)
 	if err == nil {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.UpdateItemStatus(boardcache.ItemKey(item.Repo, item.Number), next.Name)
+		if c := e.cache(); c != nil {
+			c.UpdateItemStatus(boardcache.ItemKey(item.Repo, item.Number), next.Name)
 		}
 		if e.webhookMgr != nil {
 			e.webhookMgr.RegisterEchoIfSubscribed("projects_v2_item", "edited", item.ItemID)
