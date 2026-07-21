@@ -97,7 +97,7 @@ func runUpgrade(args []string) error {
 
 	wrote, err := fabrikplugin.RefreshPlugin()
 	if err != nil {
-		return err
+		return fmt.Errorf("refreshing plugin: %w", err)
 	}
 	if err := fabrikplugin.WriteInstalledVersion(".fabrik/plugin"); err != nil {
 		return fmt.Errorf("writing installed version: %w", err)
