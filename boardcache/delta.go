@@ -288,6 +288,7 @@ func (c *CacheImpl) resolveOrHealPRLinkage(owner, repoName, repo string, prNum i
 func (c *CacheImpl) applyIssueCommentDelta(payload []byte) {
 	var p issueCommentPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
+		c.logFn("[cache] applyIssueCommentDelta: unmarshal payload: %v\n", err)
 		return
 	}
 	switch p.Action {
@@ -337,6 +338,7 @@ func (c *CacheImpl) applyIssueCommentDelta(payload []byte) {
 func (c *CacheImpl) applyIssuesDelta(payload []byte) {
 	var p issuesPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
+		c.logFn("[cache] applyIssuesDelta: unmarshal payload: %v\n", err)
 		return
 	}
 
@@ -473,6 +475,7 @@ func (c *CacheImpl) applyIssueLabelMutationDelta(owner, fullRepo string, issNum 
 func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 	var p pullRequestPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
+		c.logFn("[cache] applyPullRequestDelta: unmarshal payload: %v\n", err)
 		return
 	}
 
@@ -673,6 +676,7 @@ func (c *CacheImpl) applyPullRequestDelta(payload []byte) {
 func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 	var p pullRequestReviewPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
+		c.logFn("[cache] applyPullRequestReviewDelta: unmarshal payload: %v\n", err)
 		return
 	}
 	switch p.Action {
@@ -764,6 +768,7 @@ func (c *CacheImpl) applyPullRequestReviewDelta(payload []byte) {
 func (c *CacheImpl) applyPullRequestReviewCommentDelta(payload []byte) {
 	var p pullRequestReviewCommentPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
+		c.logFn("[cache] applyPullRequestReviewCommentDelta: unmarshal payload: %v\n", err)
 		return
 	}
 	switch p.Action {
@@ -862,6 +867,7 @@ func (c *CacheImpl) applyPullRequestReviewCommentDelta(payload []byte) {
 func (c *CacheImpl) applyCheckRunDelta(payload []byte) {
 	var p checkRunPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
+		c.logFn("[cache] applyCheckRunDelta: unmarshal payload: %v\n", err)
 		return
 	}
 	switch p.Action {
@@ -965,6 +971,7 @@ func (c *CacheImpl) applyCheckSuite(_ []byte) {}
 func (c *CacheImpl) applyProjectsV2ItemDelta(payload []byte) {
 	var p projectsV2ItemPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
+		c.logFn("[cache] applyProjectsV2ItemDelta: unmarshal payload: %v\n", err)
 		return
 	}
 
