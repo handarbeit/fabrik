@@ -2,13 +2,17 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
+	"github.com/handarbeit/fabrik/warnings"
 )
 
 // boardWithColumns returns a mock FetchProjectBoard func that returns a board
@@ -527,5 +531,150 @@ func TestCheckStageColumnAlignment_HoldingStagePresent(t *testing.T) {
 	err := e.checkStageColumnAlignment(context.Background())
 	if err != nil {
 		t.Fatalf("startup should succeed when Queued column present: %v", err)
+	}
+}
+
+// TestRunStartupTransientLabelScan_RemovesStaleLabelsFromClosedItems verifies
+// that runStartupTransientLabelScan triggers label cleanup on closed store
+// entries carrying transient lifecycle labels, without touching open items or
+// clean closed items.
+func TestRunStartupTransientLabelScan_RemovesStaleLabelsFromClosedItems(t *testing.T) {
+	var removedLabels []string
+	client := &mockGitHubClient{
+		removeLabelFromIssueFn: func(owner, repo string, issueNumber int, labelName string) error {
+			removedLabels = append(removedLabels, labelName)
+			return nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+
+	// Seed three items into the store:
+	//   #1 — closed, carries a transient label → should be cleaned
+	//   #2 — open, carries a transient label → must be skipped
+	//   #3 — closed, no transient labels → must be skipped
+	for _, pi := range []gh.ProjectItem{
+		{ID: "I_001", Number: 1, Repo: "owner/repo", IsClosed: true, Labels: []string{"fabrik:awaiting-review", "stage:Review:complete"}},
+		{ID: "I_002", Number: 2, Repo: "owner/repo", IsClosed: false, Labels: []string{"fabrik:awaiting-ci"}},
+		{ID: "I_003", Number: 3, Repo: "owner/repo", IsClosed: true, Labels: []string{"stage:Validate:complete"}},
+	} {
+		eng.store.Apply(itemstate.IssueOpened{Item: pi})
+		eng.store.Apply(itemstate.ItemDeepFetched{
+			Repo:       pi.Repo,
+			Number:     pi.Number,
+			FreshState: pi,
+		})
+	}
+
+	eng.runStartupTransientLabelScan()
+
+	// Only the transient label from issue #1 should be removed.
+	if len(removedLabels) == 0 {
+		t.Fatal("expected RemoveLabelFromIssue called for closed item with stale transient label; got 0 calls")
+	}
+	found := false
+	for _, l := range removedLabels {
+		if l == "fabrik:awaiting-review" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected 'fabrik:awaiting-review' to be removed; removed labels: %v", removedLabels)
+	}
+}
+
+func TestCheckAllowAutoMerge_DisabledEmitsWarning(t *testing.T) {
+	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
+	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
+	client := &mockGitHubClient{
+		fetchAllowAutoMergeFn: func(owner, repo string) (bool, error) {
+			return false, nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+
+	out := captureStdout(func() {
+		eng.checkAllowAutoMerge("owner", "repo")
+	})
+
+	if !strings.Contains(out, "WARNING") {
+		t.Errorf("expected WARNING in output; got: %q", out)
+	}
+	if !strings.Contains(out, "allow_auto_merge") {
+		t.Errorf("expected allow_auto_merge mention in output; got: %q", out)
+	}
+	if !strings.Contains(out, "gh api -X PATCH repos/owner/repo") {
+		t.Errorf("expected fix command in output; got: %q", out)
+	}
+}
+
+func TestCheckAllowAutoMerge_EnabledIsSilent(t *testing.T) {
+	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
+	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
+	client := &mockGitHubClient{
+		fetchAllowAutoMergeFn: func(owner, repo string) (bool, error) {
+			return true, nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+
+	out := captureStdout(func() {
+		eng.checkAllowAutoMerge("owner", "repo")
+	})
+
+	if out != "" {
+		t.Errorf("expected no output for enabled repo; got: %q", out)
+	}
+}
+
+func TestCheckAllowAutoMerge_APIErrorIsNonFatal(t *testing.T) {
+	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
+	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
+	client := &mockGitHubClient{
+		fetchAllowAutoMergeFn: func(owner, repo string) (bool, error) {
+			return false, errors.New("network error")
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+
+	// Should not panic; engine should log the error at warn level and continue.
+	out := captureStdout(func() {
+		eng.checkAllowAutoMerge("owner", "repo")
+	})
+
+	// No WARNING block should be emitted for an API error.
+	if strings.Contains(out, "WARNING") {
+		t.Errorf("should not print WARNING on API error; got: %q", out)
+	}
+}
+
+func TestCheckAllowAutoMerge_DedupSuppressesSecondCall(t *testing.T) {
+	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
+	t.Cleanup(func() { warnings.WarningsPathOverride = "" })
+	var callCount int
+	client := &mockGitHubClient{
+		fetchAllowAutoMergeFn: func(owner, repo string) (bool, error) {
+			callCount++
+			return false, nil
+		},
+	}
+	eng := testEngine(t, client, &mockClaudeInvoker{})
+
+	// First call should emit warning.
+	out1 := captureStdout(func() {
+		eng.checkAllowAutoMerge("owner", "repo")
+	})
+	if !strings.Contains(out1, "WARNING") {
+		t.Errorf("first call: expected WARNING; got: %q", out1)
+	}
+
+	// Second call for the same repo should be a no-op.
+	out2 := captureStdout(func() {
+		eng.checkAllowAutoMerge("owner", "repo")
+	})
+	if out2 != "" {
+		t.Errorf("second call: expected no output (dedup); got: %q", out2)
+	}
+	if callCount != 1 {
+		t.Errorf("expected API to be called exactly once; got %d", callCount)
 	}
 }
