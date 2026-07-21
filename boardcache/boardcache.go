@@ -884,10 +884,7 @@ func (c *CacheImpl) UpdateItemStatus(key, newStatus string) {
 		// Status unchanged.
 		return
 	}
-	now := time.Now()
-	c.mu.Lock()
-	c.localDeltaAt[key] = now
-	c.mu.Unlock()
+	c.bumpLocalDeltaAt(key)
 }
 
 // ApplyLabelAdded updates the cached label list for the item identified by key,
@@ -911,10 +908,7 @@ func (c *CacheImpl) ApplyLabelAdded(key, label string) {
 	if len(changes) == 0 {
 		return
 	}
-	now := time.Now()
-	c.mu.Lock()
-	c.localDeltaAt[key] = now
-	c.mu.Unlock()
+	c.bumpLocalDeltaAt(key)
 }
 
 // ApplyLabelRemoved updates the cached label list for the item identified by key,
@@ -938,10 +932,7 @@ func (c *CacheImpl) ApplyLabelRemoved(key, label string) {
 	if len(changes) == 0 {
 		return
 	}
-	now := time.Now()
-	c.mu.Lock()
-	c.localDeltaAt[key] = now
-	c.mu.Unlock()
+	c.bumpLocalDeltaAt(key)
 }
 
 // ApplyIssueClosed marks the item identified by key as closed in the store.
@@ -963,10 +954,7 @@ func (c *CacheImpl) ApplyIssueClosed(key string) {
 	if len(changes) == 0 {
 		return
 	}
-	now := time.Now()
-	c.mu.Lock()
-	c.localDeltaAt[key] = now
-	c.mu.Unlock()
+	c.bumpLocalDeltaAt(key)
 }
 
 // ApplyCommentAdded appends comment to the cached comment list for the item
@@ -994,10 +982,7 @@ func (c *CacheImpl) ApplyCommentAdded(key string, comment gh.Comment) {
 	if len(changes) == 0 {
 		return
 	}
-	now := time.Now()
-	c.mu.Lock()
-	c.localDeltaAt[key] = now
-	c.mu.Unlock()
+	c.bumpLocalDeltaAt(key)
 }
 
 // ApplyStatusBatch updates Status for items identified by project-item node IDs.
@@ -1013,10 +998,7 @@ func (c *CacheImpl) ApplyStatusBatch(updates map[string]string) {
 			continue
 		}
 		key := itemKey(snap.Repo(), snap.Number())
-		now := time.Now()
-		c.mu.Lock()
-		c.localDeltaAt[key] = now
-		c.mu.Unlock()
+		c.bumpLocalDeltaAt(key)
 	}
 }
 
@@ -1044,10 +1026,7 @@ func (c *CacheImpl) RegisterItemID(key, itemID string) {
 	if len(changes) == 0 {
 		return
 	}
-	now := time.Now()
-	c.mu.Lock()
-	c.localDeltaAt[key] = now
-	c.mu.Unlock()
+	c.bumpLocalDeltaAt(key)
 }
 
 // GetItemID returns the project-item node ID (PVTI_...) for the given cache key.
