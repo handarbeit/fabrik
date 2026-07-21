@@ -556,6 +556,102 @@ func makeTwoStepGraphQLServer(t *testing.T, prNodeID string, checkFn func(t *tes
 	return srv, NewClientWithBaseURL("test-token", srv.URL)
 }
 
+func TestPRNodeID_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"repository": map[string]interface{}{
+					"pullRequest": map[string]interface{}{
+						"id": "PR_abc123",
+					},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("test-token", srv.URL)
+	id, err := c.prNodeID("owner", "repo", 42)
+	if err != nil {
+		t.Fatalf("prNodeID: %v", err)
+	}
+	if id != "PR_abc123" {
+		t.Errorf("prNodeID = %q, want PR_abc123", id)
+	}
+}
+
+func TestPRNodeID_EmptyIDReturnsNotFoundError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"repository": map[string]interface{}{
+					"pullRequest": map[string]interface{}{
+						"id": "",
+					},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("test-token", srv.URL)
+	_, err := c.prNodeID("owner", "repo", 42)
+	if err == nil {
+		t.Fatal("expected error for empty PR node id")
+	}
+	if !strings.Contains(err.Error(), "PR #42 not found in repository owner/repo") {
+		t.Errorf("error = %q, want PR-not-found message", err.Error())
+	}
+}
+
+func TestPRNodeID_GraphQLErrorWrapped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("test-token", srv.URL)
+	_, err := c.prNodeID("owner", "repo", 42)
+	if err == nil || !strings.Contains(err.Error(), "fetching PR node ID") {
+		t.Errorf("expected wrapped 'fetching PR node ID' error, got %v", err)
+	}
+}
+
+func TestMarkPRReady(t *testing.T) {
+	const prNodeID = "PR_readynode"
+
+	_, c := makeTwoStepGraphQLServer(t, prNodeID, func(t *testing.T, vars map[string]interface{}) {
+		t.Helper()
+		if got, ok := vars["prId"].(string); !ok || got != prNodeID {
+			t.Errorf("mutation vars[prId] = %v, want %q", vars["prId"], prNodeID)
+		}
+	})
+
+	if err := c.MarkPRReady("owner", "repo", 42); err != nil {
+		t.Fatalf("MarkPRReady: %v", err)
+	}
+}
+
+func TestEnablePullRequestAutoMerge(t *testing.T) {
+	const prNodeID = "PR_automergenode"
+
+	_, c := makeTwoStepGraphQLServer(t, prNodeID, func(t *testing.T, vars map[string]interface{}) {
+		t.Helper()
+		if got, ok := vars["prId"].(string); !ok || got != prNodeID {
+			t.Errorf("mutation vars[prId] = %v, want %q", vars["prId"], prNodeID)
+		}
+		if got, ok := vars["method"].(string); !ok || got != "SQUASH" {
+			t.Errorf("mutation vars[method] = %v, want SQUASH", vars["method"])
+		}
+	})
+
+	if err := c.EnablePullRequestAutoMerge("owner", "repo", 42, "SQUASH"); err != nil {
+		t.Fatalf("EnablePullRequestAutoMerge: %v", err)
+	}
+}
+
 func TestEnqueuePullRequest(t *testing.T) {
 	const prNodeID = "PR_testnode"
 	const expectedHeadOID = "deadbeef1234"
