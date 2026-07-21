@@ -129,116 +129,68 @@ func (e *Engine) buildRebaseComment(item gh.ProjectItem, stage *stages.Stage, ba
 // dispatchReviewReinvoke: marks the item in-flight via WorkerEntered, acquires
 // the semaphore, calls processComments, then releases both.
 func (e *Engine) dispatchRebaseReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
-	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
-
-	// Mark in-flight via the Store so the dispatch guard (snap.Worker() != nil) blocks
-	// double-dispatch before the goroutine starts. WorkerExited is deferred inside the
-	// goroutine so any early exit also clears it.
-	e.store.Apply(itemstate.WorkerEntered{
-		Repo:      itemRepo,
-		Number:    item.Number,
-		StageName: stage.Name,
-		StartedAt: time.Now(),
-	})
-	e.wg.Add(1)
-
-	go func() {
-		defer e.wg.Done()
-		defer e.store.Apply(itemstate.WorkerExited{Repo: itemRepo, Number: item.Number})
-
-		select {
-		case e.sem <- struct{}{}:
-		case <-ctx.Done():
-			e.logf(item.Number, "rebase-reinvoke", "context cancelled before semaphore acquired\n")
-			return
-		}
-		defer func() { <-e.sem }()
-
-		if err := e.ensureRepoReady(ctx, item); err != nil {
-			if errors.Is(err, ErrSkipItem) {
-				e.logf(item.Number, "rebase-reinvoke", "repo not ready, skipping reinvoke\n")
+	e.dispatchReinvoke(ctx, board, item, stage, reinvokeOpts{
+		tag: "rebase-reinvoke",
+		build: func(workDir string) []gh.Comment {
+			// Resolve the base branch for the rebase instructions. Failure here is
+			// not fatal — the synthetic comment falls back to "main".
+			wm := e.worktreesFor(item.Repo)
+			baseBranch, _ := e.baseBranchForItem(item, wm)
+			return []gh.Comment{e.buildRebaseComment(item, stage, baseBranch)}
+		},
+		stageVariant: func(s *stages.Stage) *stages.Stage {
+			if s.RebaseSkill == "" {
+				return s
+			}
+			variant := *s
+			variant.CommentSkill = s.RebaseSkill
+			variant.CommentPrompt = ""
+			return &variant
+		},
+		after: func(workDir string, err error) {
+			if err != nil {
 				return
 			}
-			e.logf(item.Number, "warn", "rebase reinvoke: ensureRepoReady failed: %v\n", err)
-			return
-		}
 
-		// Resolve the base branch for the rebase instructions. Failure here is
-		// not fatal — the synthetic comment falls back to "main".
-		wm := e.worktreesFor(item.Repo)
-		baseBranch, _ := e.baseBranchForItem(item, wm)
-
-		syntheticComment := e.buildRebaseComment(item, stage, baseBranch)
-
-		rebaseStage := *stage
-		if stage.RebaseSkill != "" {
-			rebaseStage.CommentSkill = stage.RebaseSkill
-			rebaseStage.CommentPrompt = ""
-		}
-
-		// Register WorkerHandle so the heartbeat/liveness system tracks this goroutine.
-		now := time.Now()
-		e.store.Apply(itemstate.LocalLockAcquired{
-			Repo:       itemRepo,
-			Number:     item.Number,
-			User:       e.cfg.User,
-			AcquiredAt: now,
-			Worker:     &itemstate.WorkerHandle{StageName: stage.Name, StartedAt: now, LastSignAt: now},
-		})
-		done := make(chan struct{})
-		defer close(done)
-		e.startHeartbeat(ctx, itemRepo, item.Number, done)
-		onPIDReady := func(pid int) {
-			e.store.Apply(itemstate.WorkerPIDSet{Repo: itemRepo, Number: item.Number, PID: pid})
-		}
-
-		e.logf(item.Number, "rebase-reinvoke", "re-invoking stage %q via comment processing with rebase context\n", stage.Name)
-		owner, repo := itemOwnerRepo(item, e.defaultRepo())
-		err := e.processComments(ctx, board, item, &rebaseStage, []gh.Comment{syntheticComment}, onPIDReady)
-
-		if err != nil {
-			if ctx.Err() != nil {
+			// GitHub disables auto-merge on every push. Re-enable it if this issue is in
+			// the convergence flow (fabrik:auto-merge-enabled present at dispatch time) —
+			// but NOT on a merge-queue repo (ADR-058 D4): there the recovery path is
+			// re-enqueue, not native auto-merge, and the convergence monitor re-enqueues
+			// the resolved PR once it re-derives clean. Re-enabling auto-merge here would
+			// fight the queue model.
+			if !hasLabel(item, "fabrik:auto-merge-enabled") || item.LinkedPRIsMergeQueueEnabled {
 				return
 			}
-			e.logf(item.Number, "warn", "rebase re-invocation failed: %v\n", err)
-			return
-		}
 
-		// GitHub disables auto-merge on every push. Re-enable it if this issue is in
-		// the convergence flow (fabrik:auto-merge-enabled present at dispatch time) —
-		// but NOT on a merge-queue repo (ADR-058 D4): there the recovery path is
-		// re-enqueue, not native auto-merge, and the convergence monitor re-enqueues
-		// the resolved PR once it re-derives clean. Re-enabling auto-merge here would
-		// fight the queue model.
-		if hasLabel(item, "fabrik:auto-merge-enabled") && !item.LinkedPRIsMergeQueueEnabled {
+			owner, repo := itemOwnerRepo(item, e.defaultRepo())
 			pr, prErr := e.client.FetchLinkedPR(owner, repo, item.Number)
 			if prErr != nil || pr == nil || pr.Number == 0 {
 				e.logf(item.Number, "warn", "rebase reinvoke: could not fetch linked PR for auto-merge re-enable: %v\n", prErr)
-			} else {
-				strategy := e.cfg.AutoMergeStrategy
-				if strategy == "" {
-					strategy = "MERGE"
-				}
-				if rerr := e.client.EnablePullRequestAutoMerge(owner, repo, pr.Number, strategy); rerr != nil {
-					if errors.Is(rerr, gh.ErrAutoMergeAlreadyClean) {
-						// PR is already CLEAN after the rebase push — merge directly.
-						// Without this, checkAutoMergeConvergence sees AutoMergeEnabled=false
-						// and incorrectly pauses the issue as "user disabled auto-merge".
-						e.logf(item.Number, "info", "PR #%d is already in clean status after rebase — falling back to direct merge\n", pr.Number)
-						if mergeErr := e.client.MergePR(owner, repo, pr.Number); mergeErr != nil {
-							e.logf(item.Number, "warn", "direct merge fallback after rebase failed: %v\n", mergeErr)
-						} else {
-							e.logf(item.Number, "info", "PR #%d merged directly after rebase push (already-clean fallback)\n", pr.Number)
-						}
+				return
+			}
+			strategy := e.cfg.AutoMergeStrategy
+			if strategy == "" {
+				strategy = "MERGE"
+			}
+			if rerr := e.client.EnablePullRequestAutoMerge(owner, repo, pr.Number, strategy); rerr != nil {
+				if errors.Is(rerr, gh.ErrAutoMergeAlreadyClean) {
+					// PR is already CLEAN after the rebase push — merge directly.
+					// Without this, checkAutoMergeConvergence sees AutoMergeEnabled=false
+					// and incorrectly pauses the issue as "user disabled auto-merge".
+					e.logf(item.Number, "info", "PR #%d is already in clean status after rebase — falling back to direct merge\n", pr.Number)
+					if mergeErr := e.client.MergePR(owner, repo, pr.Number); mergeErr != nil {
+						e.logf(item.Number, "warn", "direct merge fallback after rebase failed: %v\n", mergeErr)
 					} else {
-						e.logf(item.Number, "warn", "auto-merge re-enable after rebase failed: %v\n", rerr)
+						e.logf(item.Number, "info", "PR #%d merged directly after rebase push (already-clean fallback)\n", pr.Number)
 					}
 				} else {
-					e.logf(item.Number, "auto-merge", "re-enabled auto-merge on PR #%d after rebase push\n", pr.Number)
+					e.logf(item.Number, "warn", "auto-merge re-enable after rebase failed: %v\n", rerr)
 				}
+			} else {
+				e.logf(item.Number, "auto-merge", "re-enabled auto-merge on PR #%d after rebase push\n", pr.Number)
 			}
-		}
-	}()
+		},
+	})
 }
 
 // checkAutoMergeConvergence monitors a yolo issue that has entered the GitHub

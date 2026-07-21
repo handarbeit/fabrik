@@ -2,13 +2,11 @@ package engine
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
-	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
 )
 
@@ -390,79 +388,18 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 // This allows the catch-up loop to remain non-blocking while the Claude
 // invocation runs asynchronously.
 func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
-	syntheticComments := e.buildReviewThreadComments(item)
-	if len(syntheticComments) == 0 {
-		e.logf(item.Number, "review-reinvoke", "no review bodies to process; skipping re-invocation\n")
-		return
-	}
-
-	// Mark in-flight via the Store so the dispatch guard (snap.Worker() != nil) blocks
-	// double-dispatch before the goroutine starts. WorkerExited is deferred inside the
-	// goroutine so any early exit (context cancel, ensureRepoReady failure) also clears it.
-	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
-	e.store.Apply(itemstate.WorkerEntered{
-		Repo:      itemRepo,
-		Number:    item.Number,
-		StageName: stage.Name,
-		StartedAt: time.Now(),
+	e.dispatchReinvoke(ctx, board, item, stage, reinvokeOpts{
+		tag: "review-reinvoke",
+		// precheck runs synchronously before WorkerEntered/goroutine dispatch —
+		// buildReviewThreadComments needs no workDir, so there's no reason to
+		// incur ensureRepoReady/WorkerEntered churn for a same-poll no-op.
+		precheck: func() bool {
+			return len(e.buildReviewThreadComments(item)) > 0
+		},
+		build: func(workDir string) []gh.Comment {
+			return e.buildReviewThreadComments(item)
+		},
 	})
-	e.wg.Add(1)
-
-	go func() {
-		defer e.wg.Done()
-		defer e.store.Apply(itemstate.WorkerExited{Repo: itemRepo, Number: item.Number})
-
-		// Acquire semaphore slot (respects MaxConcurrent; blocks until available).
-		select {
-		case e.sem <- struct{}{}:
-		case <-ctx.Done():
-			e.logf(item.Number, "review-reinvoke", "context cancelled before semaphore acquired\n")
-			return
-		}
-		defer func() { <-e.sem }()
-
-		// Ensure the repo's WorktreeManager is registered before processComments
-		// tries to use it. Phase 1 of the catch-up loop dispatches reinvokes
-		// independently of the main dispatch loop, so this may be the first time
-		// we touch this repo in the current session — processItem's ensureRepoReady
-		// call cannot be relied on here. Without this, processComments panics at
-		// worktreesFor() on a freshly-started Fabrik.
-		if err := e.ensureRepoReady(ctx, item); err != nil {
-			if errors.Is(err, ErrSkipItem) {
-				e.logf(item.Number, "review-reinvoke", "repo not ready (clone failed elsewhere), skipping reinvoke\n")
-				return
-			}
-			e.logf(item.Number, "warn", "review reinvoke: ensureRepoReady failed: %v\n", err)
-			return
-		}
-
-		// Register WorkerHandle so the heartbeat/liveness system tracks this goroutine.
-		now := time.Now()
-		e.store.Apply(itemstate.LocalLockAcquired{
-			Repo:       itemRepo,
-			Number:     item.Number,
-			User:       e.cfg.User,
-			AcquiredAt: now,
-			Worker:     &itemstate.WorkerHandle{StageName: stage.Name, StartedAt: now, LastSignAt: now},
-		})
-		done := make(chan struct{})
-		defer close(done)
-		e.startHeartbeat(ctx, itemRepo, item.Number, done)
-		onPIDReady := func(pid int) {
-			e.store.Apply(itemstate.WorkerPIDSet{Repo: itemRepo, Number: item.Number, PID: pid})
-		}
-
-		e.logf(item.Number, "review-reinvoke", "re-invoking stage %q via comment processing with %d synthetic review comment(s)\n",
-			stage.Name, len(syntheticComments))
-		err := e.processComments(ctx, board, item, stage, syntheticComments, onPIDReady)
-
-		if err != nil {
-			if ctx.Err() != nil {
-				return // context cancelled; normal shutdown
-			}
-			e.logf(item.Number, "warn", "review re-invocation failed: %v\n", err)
-		}
-	}()
 }
 
 // pauseForReviewCycleLimit pauses the issue when the maximum review re-invocation

@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -326,98 +325,44 @@ func (e *Engine) buildCIFixComment(item gh.ProjectItem, stage *stages.Stage, wor
 // acquires semaphore, calls processComments, then releases both.
 func (e *Engine) dispatchCIFixReinvoke(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, settle PRSettleResult) {
 	itemRepo := itemOwnerRepoString(item, e.defaultRepo())
+	var headBefore string
 
-	// Mark in-flight via the Store so the dispatch guard (snap.Worker() != nil) blocks
-	// double-dispatch before the goroutine starts. WorkerExited is deferred inside the
-	// goroutine so any early exit also clears it.
-	e.store.Apply(itemstate.WorkerEntered{
-		Repo:      itemRepo,
-		Number:    item.Number,
-		StageName: stage.Name,
-		StartedAt: time.Now(),
-	})
-	e.wg.Add(1)
-
-	go func() {
-		defer e.wg.Done()
-		defer e.store.Apply(itemstate.WorkerExited{Repo: itemRepo, Number: item.Number})
-
-		select {
-		case e.sem <- struct{}{}:
-		case <-ctx.Done():
-			e.logf(item.Number, "ci-fix-reinvoke", "context cancelled before semaphore acquired\n")
-			return
-		}
-		defer func() { <-e.sem }()
-
-		if err := e.ensureRepoReady(ctx, item); err != nil {
-			if errors.Is(err, ErrSkipItem) {
-				e.logf(item.Number, "ci-fix-reinvoke", "repo not ready, skipping reinvoke\n")
+	e.dispatchReinvoke(ctx, board, item, stage, reinvokeOpts{
+		tag: "ci-fix-reinvoke",
+		build: func(workDir string) []gh.Comment {
+			// Snapshot HEAD before reinvoking so a no-op reinvoke (nothing to
+			// push because the fix is already in) can be recorded and debounced
+			// on the next poll instead of burning further CI-fix cycle budget
+			// while the current head's CI is still resolving (#958 leg 2).
+			headBefore, _ = gitHeadSHA(workDir)
+			return []gh.Comment{e.buildCIFixComment(item, stage, workDir, settle)}
+		},
+		stageVariant: func(s *stages.Stage) *stages.Stage {
+			// Use ci_fix_skill if configured; fall back to comment_skill.
+			if s.CIFixSkill == "" {
+				return s
+			}
+			variant := *s
+			variant.CommentSkill = s.CIFixSkill
+			variant.CommentPrompt = ""
+			return &variant
+		},
+		after: func(workDir string, err error) {
+			// Only record a no-op when the reinvoke actually completed: a failed
+			// processComments (transient network issue, rate limit, workspace
+			// lock) also leaves HEAD unchanged, but recording a no-op for that
+			// case would wrongly debounce a retry that never got a chance to push
+			// a real fix.
+			if err != nil {
 				return
 			}
-			e.logf(item.Number, "warn", "ci-fix reinvoke: ensureRepoReady failed: %v\n", err)
-			return
-		}
-
-		// Get worktree path for base branch CI comparison.
-		wm := e.worktreesFor(item.Repo)
-		workDir := wm.WorktreeDir(item.Number)
-
-		// Snapshot HEAD before reinvoking so a no-op reinvoke (nothing to
-		// push because the fix is already in) can be recorded and debounced
-		// on the next poll instead of burning further CI-fix cycle budget
-		// while the current head's CI is still resolving (#958 leg 2).
-		headBefore, _ := gitHeadSHA(workDir)
-
-		// Build the synthetic comment with CI failure context.
-		syntheticComment := e.buildCIFixComment(item, stage, workDir, settle)
-
-		// Use ci_fix_skill if configured; fall back to comment_skill.
-		ciFixStage := *stage
-		if stage.CIFixSkill != "" {
-			ciFixStage.CommentSkill = stage.CIFixSkill
-			ciFixStage.CommentPrompt = ""
-		}
-
-		// Register WorkerHandle so the heartbeat/liveness system tracks this goroutine.
-		now := time.Now()
-		e.store.Apply(itemstate.LocalLockAcquired{
-			Repo:       itemRepo,
-			Number:     item.Number,
-			User:       e.cfg.User,
-			AcquiredAt: now,
-			Worker:     &itemstate.WorkerHandle{StageName: stage.Name, StartedAt: now, LastSignAt: now},
-		})
-		done := make(chan struct{})
-		defer close(done)
-		e.startHeartbeat(ctx, itemRepo, item.Number, done)
-		onPIDReady := func(pid int) {
-			e.store.Apply(itemstate.WorkerPIDSet{Repo: itemRepo, Number: item.Number, PID: pid})
-		}
-
-		e.logf(item.Number, "ci-fix-reinvoke", "re-invoking stage %q via comment processing with CI failure context\n", stage.Name)
-		err := e.processComments(ctx, board, item, &ciFixStage, []gh.Comment{syntheticComment}, onPIDReady)
-
-		// Only record a no-op when the reinvoke actually completed: a failed
-		// processComments (transient network issue, rate limit, workspace
-		// lock) also leaves HEAD unchanged, but recording a no-op for that
-		// case would wrongly debounce a retry that never got a chance to push
-		// a real fix.
-		if err == nil {
 			if headAfter, hErr := gitHeadSHA(workDir); hErr == nil && headBefore != "" && headAfter == headBefore {
 				e.logf(item.Number, "ci-fix-reinvoke", "no new commit pushed (HEAD still %s) — recording no-op for this head\n",
 					headAfter[:min(8, len(headAfter))])
 				e.store.Apply(itemstate.CIFixNoOpRecorded{Repo: itemRepo, Number: item.Number, SHA: headAfter})
 			}
-		}
-
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			e.logf(item.Number, "warn", "CI-fix re-invocation failed: %v\n", err)
-		}
-	}()
+		},
+	})
 }
 
 // pauseForCITimeout pauses the issue when the CI wait timeout in the catch-up
