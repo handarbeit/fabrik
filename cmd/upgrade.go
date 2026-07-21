@@ -47,6 +47,8 @@ func runUpgrade(args []string) error {
 		fmt.Fprintf(fset.Output(), "\nTo update stage YAML files with missing keys, run: fabrik refresh-stages --apply\n")
 	}
 	if err := fset.Parse(args); err != nil {
+		// Not wrapped: flag.ErrHelp must propagate by identity (see main.go /
+		// TestRunUpgrade_HelpFlag, which checks err == flag.ErrHelp directly).
 		return err
 	}
 
@@ -71,7 +73,7 @@ func runUpgrade(args []string) error {
 	if force {
 		wrote, err := fabrikplugin.RefreshPlugin()
 		if err != nil {
-			return err
+			return fmt.Errorf("refreshing plugin: %w", err)
 		}
 		if err := fabrikplugin.WriteInstalledVersion(".fabrik/plugin"); err != nil {
 			return fmt.Errorf("writing installed version: %w", err)
