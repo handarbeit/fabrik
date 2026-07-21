@@ -536,7 +536,7 @@ Note: within `checkDependencies()`, for each blocker the engine first consults `
 **Guards:**
 - **FR-5 (empty completion SHA):** If `snap.ValidateCompletedSHA() == ""` — pre-feature legacy item, or worktree HEAD was unavailable at completion time — the scan skips the item unconditionally. Operators use `fabrik:revalidate` (§2.15) for legacy items.
 - **FR-6 (in-flight worker):** If `snap.Worker() != nil` (a Validate invocation is active), the scan defers to the next poll. When the worker exits, `WorkerExited` re-populates `mayNeedWork` and the SHA-invalidation scan re-evaluates on the next poll.
-- **FR-4 (idempotency):** After the first mismatch triggers clearance, `stage:Validate:complete` is removed. Subsequent `PRHeadSHAUpdated` events for the same SHA find the label absent — the scan's first guard (`!hasLabel(item, "stage:Validate:complete")`) causes an immediate skip.
+- **FR-4 (idempotency):** After the first mismatch triggers clearance, `stage:Validate:complete` is removed. Subsequent `PRHeadSHAUpdated` events for the same SHA find the label absent — the scan's first guard (`!hasLabel(item.Labels, "stage:Validate:complete")`) causes an immediate skip.
 
 **Loop prevention:** The SHA is recorded AFTER Claude's final commit and AFTER the worktree HEAD is finalized (`git rev-parse HEAD` in the worktree). The subsequent `PRHeadSHAUpdated` event for Validate's own commit arrives with `SHA == ValidateCompletedSHA`, so the mismatch check returns false and the scan is a no-op. The loop is architecturally closed.
 
