@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
@@ -71,13 +72,9 @@ func WithLogger(l Logger) StoreOption {
 }
 
 var nextObserverID uint64
-var observerIDMu sync.Mutex
 
 func newObserverID() uint64 {
-	observerIDMu.Lock()
-	defer observerIDMu.Unlock()
-	nextObserverID++
-	return nextObserverID
+	return atomic.AddUint64(&nextObserverID, 1)
 }
 
 // NewStore creates a new Store. fallback may be nil, in which case cache misses
@@ -219,7 +216,7 @@ func (s *Store) applySingleItem(m Mutation) (Snapshot, []Change, error) {
 
 	s.mu.Lock()
 
-	item := s.getOrCreate(key, m)
+	item := s.getOrCreate(key)
 	// Deep-copy before state so no-op detection is not fooled by shared maps/pointers.
 	before := newSnapshot(*item).state
 
@@ -247,7 +244,7 @@ func (s *Store) applySingleItem(m Mutation) (Snapshot, []Change, error) {
 
 // getOrCreate returns the existing *ItemState for key, or creates a new zero-value one.
 // Must be called with s.mu held for writing.
-func (s *Store) getOrCreate(key string, m Mutation) *ItemState {
+func (s *Store) getOrCreate(key string) *ItemState {
 	if item, ok := s.items[key]; ok {
 		return item
 	}
@@ -641,6 +638,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 // applyBoardReconciled processes a bulk board snapshot, updating or creating each item.
 func (s *Store) applyBoardReconciled(v BoardReconciled) (Snapshot, []Change, error) {
 	var changes []Change
+	obs := s.captureObservers()
 
 	for _, pi := range v.Items {
 		key := itemKeyFor(pi.Repo, pi.Number)
@@ -649,7 +647,7 @@ func (s *Store) applyBoardReconciled(v BoardReconciled) (Snapshot, []Change, err
 		}
 
 		s.mu.Lock()
-		item := s.getOrCreate(key, IssueOpened{Item: pi})
+		item := s.getOrCreate(key)
 		before := newSnapshot(*item).state
 		flags := applyProjectItem(item, pi)
 
@@ -664,7 +662,6 @@ func (s *Store) applyBoardReconciled(v BoardReconciled) (Snapshot, []Change, err
 		s.mu.Unlock()
 
 		change := Change{Repo: repo, Number: number, Fields: flags}
-		obs := s.captureObservers()
 		s.notify(obs, change, snap)
 		changes = append(changes, change)
 	}
@@ -1122,8 +1119,8 @@ func (s *Store) Reset(items []gh.ProjectItem) {
 
 	s.mu.Unlock()
 
+	obs := s.captureObservers()
 	for _, n := range notifications {
-		obs := s.captureObservers()
 		s.notify(obs, n.change, n.snap)
 	}
 }
