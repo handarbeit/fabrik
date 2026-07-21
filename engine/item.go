@@ -1230,39 +1230,16 @@ func (e *Engine) escalatePRCreationFailure(item gh.ProjectItem, stage *stages.St
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
-		e.logf(item.Number, "warn", "could not add paused label: %v\n", err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:paused")
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:paused")
-		}
-	}
-
-	e.addFailedLabel(owner, repo, item.Number, stage.Name)
-
 	comment := fmt.Sprintf(
 		"🏭 **Fabrik — PR creation failed**\n\nStage **%s** completed successfully but the draft PR could not be created after %d attempt(s). The issue has been paused.\n\nManual fix:\n```\ngh pr create --head fabrik/issue-%d --base %s --body \"Closes #%d\"\n```\n\nThen remove the `fabrik:paused` label to resume.",
 		stage.Name, e.cfg.MaxRetries, item.Number, baseBranch, item.Number,
 	)
-	if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
-		e.logf(item.Number, "warn", "could not post PR escalation comment: %v\n", err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
-				DatabaseID: dbID, Body: comment, Author: e.cfg.User, CreatedAt: time.Now(),
-			})
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
-		}
-		// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
-		if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
-		}
-	}
+	e.pauseIssue(item, comment, pauseOpts{
+		reactRocket: true,
+		labelEcho:   true,
+		commentEcho: true,
+	})
+	e.addFailedLabel(owner, repo, item.Number, stage.Name)
 
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})
@@ -1276,39 +1253,16 @@ func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
-		e.logf(item.Number, "warn", "could not add paused label: %v\n", err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), "fabrik:paused")
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:paused")
-		}
-	}
-
-	e.addFailedLabel(owner, repo, item.Number, stage.Name)
-
 	comment := fmt.Sprintf(
 		"🏭 **Fabrik — stage failed**\n\nStage **%s** failed to complete after %d attempt(s). The issue has been paused (`fabrik:paused`).\n\nTo retry: investigate the failure, make any needed fixes, then remove the `fabrik:paused` label.",
 		stage.Name, e.cfg.MaxRetries,
 	)
-	if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
-		e.logf(item.Number, "warn", "could not post escalation comment: %v\n", err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
-				DatabaseID: dbID, Body: comment, Author: e.cfg.User, CreatedAt: time.Now(),
-			})
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
-		}
-		// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
-		if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
-		}
-	}
+	e.pauseIssue(item, comment, pauseOpts{
+		reactRocket: true,
+		labelEcho:   true,
+		commentEcho: true,
+	})
+	e.addFailedLabel(owner, repo, item.Number, stage.Name)
 
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: stage.Name})

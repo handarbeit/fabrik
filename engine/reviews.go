@@ -352,7 +352,6 @@ func (e *Engine) buildReviewThreadComments(item gh.ProjectItem) []gh.Comment {
 // captured before checkReviewGate removed it), Phase 2 context is detected and a
 // more specific "after re-prompt" message is posted.
 func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage) {
-	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	e.logf(item.Number, "review-timeout", "review wait timeout elapsed — pausing for human intervention\n")
 
 	// Build pending-reviewer list with bot/human tags for the pause comment.
@@ -418,29 +417,10 @@ func (e *Engine) pauseForReviewTimeout(board *gh.ProjectBoard, item gh.ProjectIt
 		)
 	}
 
-	if dbID, err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
-		e.logf(item.Number, "warn", "could not post review timeout comment: %v\n", err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-				DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
-			})
-		}
-		// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
-		if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
-		}
-	}
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
-		e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", err)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
-	}
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
-		e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", err)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
-	}
+	e.pauseIssue(item, msg, pauseOpts{
+		awaitingInput: true,
+		reactRocket:   true,
+	})
 }
 
 // dispatchReviewReinvoke spawns a goroutine to re-invoke the stage agent via
@@ -528,7 +508,6 @@ func (e *Engine) dispatchReviewReinvoke(ctx context.Context, board *gh.ProjectBo
 // cycle count is reached. It applies fabrik:paused + fabrik:awaiting-input and
 // posts an explanatory comment.
 func (e *Engine) pauseForReviewCycleLimit(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, cycleCount, maxCycles int) {
-	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	e.logf(item.Number, "review-cycles", "review cycle limit %d reached — pausing for human intervention\n", maxCycles)
 
 	msg := fmt.Sprintf(
@@ -539,29 +518,10 @@ func (e *Engine) pauseForReviewCycleLimit(board *gh.ProjectBoard, item gh.Projec
 			"remove the `fabrik:paused` label to resume.",
 		stage.Name, cycleCount, maxCycles,
 	)
-	if dbID, err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
-		e.logf(item.Number, "warn", "could not post review cycle limit comment: %v\n", err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-				DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
-			})
-		}
-		// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
-		if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
-		}
-	}
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
-		e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", err)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
-	}
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
-		e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", err)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
-	}
+	e.pauseIssue(item, msg, pauseOpts{
+		awaitingInput: true,
+		reactRocket:   true,
+	})
 }
 
 // botMentionHandle maps copilot-* logins to "copilot" — GitHub's canonical mention surface for the reviewer bot.

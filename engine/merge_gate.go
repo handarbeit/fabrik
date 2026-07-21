@@ -555,34 +555,11 @@ func (e *Engine) pauseForConvergenceFailed(_ context.Context, _ *gh.ProjectBoard
 		mergeableState, headSHA, latestCI,
 	)
 
-	if dbID, err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
-		e.logf(item.Number, "warn", "could not post convergence-failed pause comment: %v\n", err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-				DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
-			})
-		}
-		if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-			e.logf(item.Number, "warn", "could not add 🚀 to convergence-failed comment: %v\n", reactErr)
-		}
-	}
-
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
-		e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", err)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
-	}
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
-		e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", err)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
-	}
-	if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); err != nil {
-		e.logf(item.Number, "warn", "could not remove fabrik:auto-merge-enabled: %v\n", err)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:auto-merge-enabled")
-	}
+	e.pauseIssue(item, msg, pauseOpts{
+		awaitingInput:   true,
+		reactRocket:     true,
+		removeAutoMerge: true,
+	})
 }
 
 // summarizeCIRuns produces a brief human-readable summary of check run results.
@@ -614,7 +591,6 @@ func summarizeCIRuns(runs []gh.CheckRun) string {
 // been attempted too many times — usually a signal that the conflict needs
 // human judgment.
 func (e *Engine) pauseForRebaseCycleLimit(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, cycleCount, maxCycles int) {
-	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	e.logf(item.Number, "rebase-cycles", "rebase cycle limit %d reached — pausing for human intervention\n", maxCycles)
 
 	msg := fmt.Sprintf(
@@ -627,29 +603,10 @@ func (e *Engine) pauseForRebaseCycleLimit(board *gh.ProjectBoard, item gh.Projec
 			"`fabrik:rebase-needed` labels to resume.",
 		stage.Name, cycleCount, maxCycles,
 	)
-	if dbID, err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
-		e.logf(item.Number, "warn", "could not post rebase cycle limit comment: %v\n", err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-				DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
-			})
-		}
-		// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
-		if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
-		}
-	}
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
-		e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", err)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
-	}
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
-		e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", err)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
-	}
+	e.pauseIssue(item, msg, pauseOpts{
+		awaitingInput: true,
+		reactRocket:   true,
+	})
 }
 
 // advanceConvergedPRToDone removes the convergence labels and advances a merged
@@ -751,7 +708,6 @@ func (e *Engine) reEnqueueOrPause(board *gh.ProjectBoard, item gh.ProjectItem, s
 // fabrik:paused + fabrik:awaiting-input (write-through). The EnqueueCycles counter
 // is cleared by clearFailedStage (EngineCyclesCleared) when the user unpauses.
 func (e *Engine) pauseForEnqueueCycleLimit(_ *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, cycleCount, maxCycles int) {
-	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	e.logf(item.Number, "enqueue-cycles", "merge-queue re-enqueue limit %d reached — pausing for human intervention\n", maxCycles)
 
 	msg := fmt.Sprintf(
@@ -762,29 +718,10 @@ func (e *Engine) pauseForEnqueueCycleLimit(_ *gh.ProjectBoard, item gh.ProjectIt
 			"Fabrik has paused this issue. Investigate the merge-queue failures, then remove the `fabrik:paused` label to resume.",
 		stage.Name, cycleCount, maxCycles,
 	)
-	if dbID, err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
-		e.logf(item.Number, "warn", "could not post enqueue cycle limit comment: %v\n", err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-				DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
-			})
-		}
-		// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
-		if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
-		}
-	}
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
-		e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", err)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
-	}
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
-		e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", err)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
-	}
+	e.pauseIssue(item, msg, pauseOpts{
+		awaitingInput: true,
+		reactRocket:   true,
+	})
 }
 
 // pauseForMergeGroupStall pauses the issue when the linked PR has been in the
@@ -798,7 +735,6 @@ func (e *Engine) pauseForEnqueueCycleLimit(_ *gh.ProjectBoard, item gh.ProjectIt
 // label with a fresh timestamp — preventing the stall check from re-firing
 // immediately on resume (the dwell anchor would otherwise already be elapsed).
 func (e *Engine) pauseForMergeGroupStall(item gh.ProjectItem, prNumber int) {
-	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	dwellMinutes := int(e.cfg.CIWaitTimeout.Round(time.Minute).Minutes())
 	e.logf(item.Number, "merge-queue", "stall detected on PR #%d after %d minutes — pausing with instructional comment\n", prNumber, dwellMinutes)
 
@@ -810,31 +746,9 @@ func (e *Engine) pauseForMergeGroupStall(item gh.ProjectItem, prNumber int) {
 			"then re-queue the PR. Remove `fabrik:paused` to resume.",
 		dwellMinutes,
 	)
-	if dbID, err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
-		e.logf(item.Number, "warn", "could not post merge-group stall comment: %v\n", err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-				DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
-			})
-		}
-		if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-			e.logf(item.Number, "warn", "could not add 🚀 to merge-group stall comment: %v\n", reactErr)
-		}
-	}
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
-		e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", err)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
-	}
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
-		e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", err)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
-	}
-	if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); err != nil {
-		e.logf(item.Number, "warn", "could not remove fabrik:auto-merge-enabled: %v\n", err)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:auto-merge-enabled")
-	}
+	e.pauseIssue(item, msg, pauseOpts{
+		awaitingInput:   true,
+		reactRocket:     true,
+		removeAutoMerge: true,
+	})
 }
