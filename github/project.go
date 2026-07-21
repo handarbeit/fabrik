@@ -637,13 +637,9 @@ query($owner: String!, $projectNum: Int!, $cursor: String) {
 	return items, projectID, len(allNodes), maxTotalCount, nil
 }
 
-// FetchItemDetails populates the Comments, Labels, Body, URL, Author, Assignees,
-// and BlockedBy fields of a ProjectItem by fetching full item data via individual
-// node queries. This is the "deep" phase of the two-phase fetch approach.
-// If item.Number is zero (e.g., for projects_v2_item.created with only a node_id),
-// it is populated from the GraphQL response.
-func (c *Client) FetchItemDetails(item *ProjectItem) error {
-	query := `
+// fetchItemDetailsQuery is the GraphQL query used by FetchItemDetails to fetch
+// full item data (labels, comments, blockedBy, linked PRs) via a single node query.
+const fetchItemDetailsQuery = `
 query($id: ID!) {
   node(id: $id) {
     ... on Issue {
@@ -755,103 +751,114 @@ query($id: ID!) {
   }
 }`
 
+// fetchItemDetailsResult is the decoded response shape for fetchItemDetailsQuery.
+type fetchItemDetailsResult struct {
+	Data struct {
+		Node *fetchItemDetailsNode `json:"node"`
+	} `json:"data"`
+}
+
+// fetchItemDetailsNode is the node payload within fetchItemDetailsResult.
+type fetchItemDetailsNode struct {
+	Number     int    `json:"number"`
+	Title      string `json:"title"`
+	Body       string `json:"body"`
+	URL        string `json:"url"`
+	Repository *struct {
+		NameWithOwner string `json:"nameWithOwner"`
+	} `json:"repository"`
+	Author *struct {
+		Login string `json:"login"`
+	} `json:"author"`
+	Labels struct {
+		Nodes []struct {
+			Name string `json:"name"`
+		} `json:"nodes"`
+		PageInfo struct {
+			HasNextPage bool   `json:"hasNextPage"`
+			EndCursor   string `json:"endCursor"`
+		} `json:"pageInfo"`
+	} `json:"labels"`
+	Assignees struct {
+		Nodes []struct {
+			Login string `json:"login"`
+		} `json:"nodes"`
+	} `json:"assignees"`
+	BlockedBy *struct {
+		PageInfo struct {
+			HasNextPage bool `json:"hasNextPage"`
+		} `json:"pageInfo"`
+		Nodes []blockedByNode `json:"nodes"`
+	} `json:"blockedBy"`
+	Comments struct {
+		Nodes    []commentNodeData `json:"nodes"`
+		PageInfo struct {
+			HasNextPage bool   `json:"hasNextPage"`
+			EndCursor   string `json:"endCursor"`
+		} `json:"pageInfo"`
+	} `json:"comments"`
+	LinkedPRs *struct {
+		Nodes []struct {
+			ID                  string               `json:"id"`
+			Number              int                  `json:"number"`
+			HeadRefOid          string               `json:"headRefOid"`
+			IsMergeQueueEnabled bool                 `json:"isMergeQueueEnabled"`
+			IsInMergeQueue      bool                 `json:"isInMergeQueue"`
+			MergeQueueEntry     *mergeQueueEntryData `json:"mergeQueueEntry"`
+			Comments            struct {
+				Nodes    []commentNodeData `json:"nodes"`
+				PageInfo struct {
+					HasNextPage bool   `json:"hasNextPage"`
+					EndCursor   string `json:"endCursor"`
+				} `json:"pageInfo"`
+			} `json:"comments"`
+			ReviewRequests struct {
+				Nodes []struct {
+					RequestedReviewer struct {
+						Typename string `json:"__typename"`
+						Login    string `json:"login"`
+					} `json:"requestedReviewer"`
+				} `json:"nodes"`
+			} `json:"reviewRequests"`
+			LatestReviews struct {
+				Nodes []struct {
+					DatabaseID int `json:"databaseId"`
+					Author     *struct {
+						Login string `json:"login"`
+					} `json:"author"`
+					State string `json:"state"`
+					Body  string `json:"body"`
+				} `json:"nodes"`
+			} `json:"latestReviews"`
+			ReviewThreads struct {
+				Nodes []struct {
+					ID           string  `json:"id"`
+					IsResolved   bool    `json:"isResolved"`
+					Path         string  `json:"path"`
+					Line         *int    `json:"line"`
+					OriginalLine *int    `json:"originalLine"`
+					DiffSide     *string `json:"diffSide"`
+					Comments     struct {
+						Nodes []commentNodeData `json:"nodes"`
+					} `json:"comments"`
+				} `json:"nodes"`
+			} `json:"reviewThreads"`
+		} `json:"nodes"`
+	} `json:"closedByPullRequestsReferences"`
+}
+
+// FetchItemDetails populates the Comments, Labels, Body, URL, Author, Assignees,
+// and BlockedBy fields of a ProjectItem by fetching full item data via individual
+// node queries. This is the "deep" phase of the two-phase fetch approach.
+// If item.Number is zero (e.g., for projects_v2_item.created with only a node_id),
+// it is populated from the GraphQL response.
+func (c *Client) FetchItemDetails(item *ProjectItem) error {
 	vars := map[string]interface{}{
 		"id": item.ID,
 	}
 
-	var result struct {
-		Data struct {
-			Node *struct {
-				Number     int    `json:"number"`
-				Title      string `json:"title"`
-				Body       string `json:"body"`
-				URL        string `json:"url"`
-				Repository *struct {
-					NameWithOwner string `json:"nameWithOwner"`
-				} `json:"repository"`
-				Author *struct {
-					Login string `json:"login"`
-				} `json:"author"`
-				Labels struct {
-					Nodes []struct {
-						Name string `json:"name"`
-					} `json:"nodes"`
-					PageInfo struct {
-						HasNextPage bool   `json:"hasNextPage"`
-						EndCursor   string `json:"endCursor"`
-					} `json:"pageInfo"`
-				} `json:"labels"`
-				Assignees struct {
-					Nodes []struct {
-						Login string `json:"login"`
-					} `json:"nodes"`
-				} `json:"assignees"`
-				BlockedBy *struct {
-					PageInfo struct {
-						HasNextPage bool `json:"hasNextPage"`
-					} `json:"pageInfo"`
-					Nodes []blockedByNode `json:"nodes"`
-				} `json:"blockedBy"`
-				Comments struct {
-					Nodes    []commentNodeData `json:"nodes"`
-					PageInfo struct {
-						HasNextPage bool   `json:"hasNextPage"`
-						EndCursor   string `json:"endCursor"`
-					} `json:"pageInfo"`
-				} `json:"comments"`
-				LinkedPRs *struct {
-					Nodes []struct {
-						ID                  string               `json:"id"`
-						Number              int                  `json:"number"`
-						HeadRefOid          string               `json:"headRefOid"`
-						IsMergeQueueEnabled bool                 `json:"isMergeQueueEnabled"`
-						IsInMergeQueue      bool                 `json:"isInMergeQueue"`
-						MergeQueueEntry     *mergeQueueEntryData `json:"mergeQueueEntry"`
-						Comments            struct {
-							Nodes    []commentNodeData `json:"nodes"`
-							PageInfo struct {
-								HasNextPage bool   `json:"hasNextPage"`
-								EndCursor   string `json:"endCursor"`
-							} `json:"pageInfo"`
-						} `json:"comments"`
-						ReviewRequests struct {
-							Nodes []struct {
-								RequestedReviewer struct {
-									Typename string `json:"__typename"`
-									Login    string `json:"login"`
-								} `json:"requestedReviewer"`
-							} `json:"nodes"`
-						} `json:"reviewRequests"`
-						LatestReviews struct {
-							Nodes []struct {
-								DatabaseID int `json:"databaseId"`
-								Author     *struct {
-									Login string `json:"login"`
-								} `json:"author"`
-								State string `json:"state"`
-								Body  string `json:"body"`
-							} `json:"nodes"`
-						} `json:"latestReviews"`
-						ReviewThreads struct {
-							Nodes []struct {
-								ID           string  `json:"id"`
-								IsResolved   bool    `json:"isResolved"`
-								Path         string  `json:"path"`
-								Line         *int    `json:"line"`
-								OriginalLine *int    `json:"originalLine"`
-								DiffSide     *string `json:"diffSide"`
-								Comments     struct {
-									Nodes []commentNodeData `json:"nodes"`
-								} `json:"comments"`
-							} `json:"nodes"`
-						} `json:"reviewThreads"`
-					} `json:"nodes"`
-				} `json:"closedByPullRequestsReferences"`
-			} `json:"node"`
-		} `json:"data"`
-	}
-
-	if err := c.graphqlRequest(query, vars, &result); err != nil {
+	var result fetchItemDetailsResult
+	if err := c.graphqlRequest(fetchItemDetailsQuery, vars, &result); err != nil {
 		return fmt.Errorf("fetching details for item #%d: %w", item.Number, err)
 	}
 	if result.Data.Node == nil {
@@ -880,7 +887,29 @@ query($id: ID!) {
 		item.Author = node.Author.Login
 	}
 
-	// Reset and populate labels (authoritative set from deep fetch)
+	// Populate assignees
+	item.Assignees = nil
+	for _, a := range node.Assignees.Nodes {
+		item.Assignees = append(item.Assignees, a.Login)
+	}
+
+	if err := c.applyLabels(item, node); err != nil {
+		return err
+	}
+	c.applyBlockedBy(item, node)
+	if err := c.applyComments(item, node); err != nil {
+		return err
+	}
+	if err := c.applyLinkedPRs(item, node); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// applyLabels resets and repopulates item.Labels from the deep-fetch response,
+// which is authoritative (unlike the shallow board-fetch label set).
+func (c *Client) applyLabels(item *ProjectItem, node *fetchItemDetailsNode) error {
 	item.Labels = nil
 	for _, l := range node.Labels.Nodes {
 		item.Labels = append(item.Labels, l.Name)
@@ -892,44 +921,37 @@ query($id: ID!) {
 		}
 		item.Labels = append(item.Labels, extra...)
 	}
+	return nil
+}
 
-	// Populate assignees
-	item.Assignees = nil
-	for _, a := range node.Assignees.Nodes {
-		item.Assignees = append(item.Assignees, a.Login)
-	}
-
-	// Populate blockedBy (Issues only; PRs will have nil BlockedBy node)
+// applyBlockedBy resets and repopulates item.BlockedBy (Issues only; PRs will
+// have a nil BlockedBy node).
+func (c *Client) applyBlockedBy(item *ProjectItem, node *fetchItemDetailsNode) {
 	item.BlockedBy = nil
-	if node.BlockedBy != nil {
-		if node.BlockedBy.PageInfo.HasNextPage {
-			fmt.Printf("[deep-fetch] #%d: blockedBy has more than 10 entries; only first 10 are used\n", item.Number)
-		}
-		for _, dep := range node.BlockedBy.Nodes {
-			d := Dependency{
-				Number: dep.Number,
-				State:  dep.State,
-			}
-			if dep.Repository != nil {
-				d.Repo = dep.Repository.NameWithOwner
-			}
-			item.BlockedBy = append(item.BlockedBy, d)
-		}
+	if node.BlockedBy == nil {
+		return
 	}
+	if node.BlockedBy.PageInfo.HasNextPage {
+		fmt.Printf("[deep-fetch] #%d: blockedBy has more than 10 entries; only first 10 are used\n", item.Number)
+	}
+	for _, dep := range node.BlockedBy.Nodes {
+		d := Dependency{
+			Number: dep.Number,
+			State:  dep.State,
+		}
+		if dep.Repository != nil {
+			d.Repo = dep.Repository.NameWithOwner
+		}
+		item.BlockedBy = append(item.BlockedBy, d)
+	}
+}
 
-	// Reset append-to fields before repopulating so repeated FetchItemDetails calls
-	// (e.g. during progress detection in the turn-extension loop) are idempotent.
+// applyComments resets item.Comments and repopulates it from the item's own
+// (non-linked-PR) comments. Reset happens here (rather than in FetchItemDetails)
+// so repeated FetchItemDetails calls (e.g. during progress detection in the
+// turn-extension loop) are idempotent.
+func (c *Client) applyComments(item *ProjectItem, node *fetchItemDetailsNode) error {
 	item.Comments = nil
-	item.LinkedPRNumber = 0
-	item.LinkedPRReviewRequests = nil
-	item.LinkedPRReviews = nil
-	item.LinkedPRReviewThreadComments = nil
-	item.LinkedPRResolvedThreadCount = 0
-	item.LinkedPRIsMergeQueueEnabled = false
-	item.LinkedPRIsInMergeQueue = false
-	item.LinkedPRMergeQueueEntry = nil
-
-	// Process issue/PR comments
 	commentNodes := node.Comments.Nodes
 	if node.Comments.PageInfo.HasNextPage {
 		extra, err := c.fetchNodeComments(item.ID, node.Comments.PageInfo.EndCursor)
@@ -941,60 +963,74 @@ query($id: ID!) {
 	for _, cm := range commentNodes {
 		item.Comments = append(item.Comments, toComment(cm, 0))
 	}
+	return nil
+}
 
-	// Merge comments, review requests, and reviews from linked PRs
-	if node.LinkedPRs != nil {
-		for i, pr := range node.LinkedPRs.Nodes {
-			// Record the first linked PR's number, head SHA, and queue state for
-			// REST re-request, CI gate calls, and merge-queue integration.
-			if i == 0 {
-				item.LinkedPRNumber = pr.Number
-				item.LinkedPRHeadSHA = pr.HeadRefOid
-				item.LinkedPRIsMergeQueueEnabled = pr.IsMergeQueueEnabled
-				item.LinkedPRIsInMergeQueue = pr.IsInMergeQueue
-				item.LinkedPRMergeQueueEntry = toMergeQueueEntry(pr.MergeQueueEntry)
+// applyLinkedPRs resets the LinkedPR* fields and repopulates them by merging
+// comments, review requests, reviews, and unresolved review-thread comments
+// from every linked PR into item.Comments and the LinkedPR* fields.
+func (c *Client) applyLinkedPRs(item *ProjectItem, node *fetchItemDetailsNode) error {
+	item.LinkedPRNumber = 0
+	item.LinkedPRReviewRequests = nil
+	item.LinkedPRReviews = nil
+	item.LinkedPRReviewThreadComments = nil
+	item.LinkedPRResolvedThreadCount = 0
+	item.LinkedPRIsMergeQueueEnabled = false
+	item.LinkedPRIsInMergeQueue = false
+	item.LinkedPRMergeQueueEntry = nil
+
+	if node.LinkedPRs == nil {
+		return nil
+	}
+	for i, pr := range node.LinkedPRs.Nodes {
+		// Record the first linked PR's number, head SHA, and queue state for
+		// REST re-request, CI gate calls, and merge-queue integration.
+		if i == 0 {
+			item.LinkedPRNumber = pr.Number
+			item.LinkedPRHeadSHA = pr.HeadRefOid
+			item.LinkedPRIsMergeQueueEnabled = pr.IsMergeQueueEnabled
+			item.LinkedPRIsInMergeQueue = pr.IsInMergeQueue
+			item.LinkedPRMergeQueueEntry = toMergeQueueEntry(pr.MergeQueueEntry)
+		}
+		prCommentNodes := pr.Comments.Nodes
+		if pr.Comments.PageInfo.HasNextPage {
+			extra, err := c.fetchNodeComments(pr.ID, pr.Comments.PageInfo.EndCursor)
+			if err != nil {
+				return err
 			}
-			prCommentNodes := pr.Comments.Nodes
-			if pr.Comments.PageInfo.HasNextPage {
-				extra, err := c.fetchNodeComments(pr.ID, pr.Comments.PageInfo.EndCursor)
-				if err != nil {
-					return err
-				}
-				prCommentNodes = append(prCommentNodes, extra...)
+			prCommentNodes = append(prCommentNodes, extra...)
+		}
+		for _, cm := range prCommentNodes {
+			item.Comments = append(item.Comments, toComment(cm, pr.Number))
+		}
+		for _, rr := range pr.ReviewRequests.Nodes {
+			if login := rr.RequestedReviewer.Login; login != "" {
+				isBot := rr.RequestedReviewer.Typename == "Bot" || isBotLogin(login)
+				item.LinkedPRReviewRequests = append(item.LinkedPRReviewRequests, ReviewRequest{Login: login, IsBot: isBot})
 			}
-			for _, cm := range prCommentNodes {
-				item.Comments = append(item.Comments, toComment(cm, pr.Number))
+		}
+		for _, rev := range pr.LatestReviews.Nodes {
+			if rev.Author != nil && rev.Author.Login != "" {
+				item.LinkedPRReviews = append(item.LinkedPRReviews, PRReview{
+					Author:     rev.Author.Login,
+					State:      rev.State,
+					Body:       rev.Body,
+					DatabaseID: rev.DatabaseID,
+				})
 			}
-			for _, rr := range pr.ReviewRequests.Nodes {
-				if login := rr.RequestedReviewer.Login; login != "" {
-					isBot := rr.RequestedReviewer.Typename == "Bot" || isBotLogin(login)
-					item.LinkedPRReviewRequests = append(item.LinkedPRReviewRequests, ReviewRequest{Login: login, IsBot: isBot})
-				}
+		}
+		for _, thread := range pr.ReviewThreads.Nodes {
+			if thread.IsResolved {
+				item.LinkedPRResolvedThreadCount++
+				continue
 			}
-			for _, rev := range pr.LatestReviews.Nodes {
-				if rev.Author != nil && rev.Author.Login != "" {
-					item.LinkedPRReviews = append(item.LinkedPRReviews, PRReview{
-						Author:     rev.Author.Login,
-						State:      rev.State,
-						Body:       rev.Body,
-						DatabaseID: rev.DatabaseID,
-					})
-				}
-			}
-			for _, thread := range pr.ReviewThreads.Nodes {
-				if thread.IsResolved {
-					item.LinkedPRResolvedThreadCount++
-					continue
-				}
-				for _, cm := range thread.Comments.Nodes {
-					c := toComment(cm, pr.Number)
-					c.ReviewThreadID = thread.ID
-					item.LinkedPRReviewThreadComments = append(item.LinkedPRReviewThreadComments, c)
-				}
+			for _, cm := range thread.Comments.Nodes {
+				c := toComment(cm, pr.Number)
+				c.ReviewThreadID = thread.ID
+				item.LinkedPRReviewThreadComments = append(item.LinkedPRReviewThreadComments, c)
 			}
 		}
 	}
-
 	return nil
 }
 
