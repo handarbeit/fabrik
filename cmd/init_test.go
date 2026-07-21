@@ -548,3 +548,57 @@ func TestRunInit_DriftClean(t *testing.T) {
 		t.Errorf("expected zero drift warnings for freshly-init'd stages, got: %q", got)
 	}
 }
+
+// TestWriteGitExclude_WriteFailurePropagates verifies that a failure writing
+// .git/info/exclude is surfaced as an error rather than silently discarded.
+// Pre-fix, writeGitExclude ignored the os.WriteFile error entirely.
+func TestWriteGitExclude_WriteFailurePropagates(t *testing.T) {
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(orig) //nolint
+
+	if err := os.Mkdir(".git", 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Make .git/info a regular file (not a directory), so os.Stat(".git/info")
+	// succeeds (the "not a git repo" early-return doesn't fire) but
+	// os.WriteFile(".git/info/exclude", ...) fails with ENOTDIR.
+	if err := os.WriteFile(".git/info", []byte("not a directory"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeGitExclude(); err == nil {
+		t.Fatal("expected writeGitExclude to return an error when the write fails")
+	}
+}
+
+// TestRunInit_HaltsOnGitExcludeFailure verifies runInit propagates a
+// writeGitExclude failure instead of reporting success.
+func TestRunInit_HaltsOnGitExcludeFailure(t *testing.T) {
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(orig) //nolint
+
+	if err := os.Mkdir(".git", 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(".git/info", []byte("not a directory"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runInit([]string{}); err == nil {
+		t.Fatal("expected runInit to fail when writeGitExclude fails")
+	}
+}
