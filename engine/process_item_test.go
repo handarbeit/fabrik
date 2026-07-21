@@ -1004,10 +1004,10 @@ func TestProcessItem_CleanupStage_CleanWorktree(t *testing.T) {
 		t.Errorf("completion label = %q, want stage:Done:complete", addedLabel)
 	}
 
-	// ArchiveProjectItem should NOT be called inline — archiving is deferred to
-	// archiveDoneCompleteItems which enforces the 24-hour grace period.
+	// ArchiveProjectItem should NOT be called inline — auto-archiving of Done
+	// items is not currently performed.
 	if len(client.archiveProjectItemCalls) != 0 {
-		t.Errorf("expected no ArchiveProjectItem calls (deferred to grace period), got %d", len(client.archiveProjectItemCalls))
+		t.Errorf("expected no ArchiveProjectItem calls, got %d", len(client.archiveProjectItemCalls))
 	}
 
 	// CooldownAt["periodic-re-eval"] should be set so itemMayNeedWork suppresses future deep-fetches
@@ -1126,9 +1126,10 @@ func TestProcessItem_CleanupStage_PRItem(t *testing.T) {
 	if len(client.addLabelCalls) != 1 || client.addLabelCalls[0].labelName != "stage:Done:complete" {
 		t.Errorf("expected stage:Done:complete label, got %v", client.addLabelCalls)
 	}
-	// ArchiveProjectItem should NOT be called inline — deferred to grace period.
+	// ArchiveProjectItem should NOT be called inline — auto-archiving of Done
+	// items is not currently performed.
 	if len(client.archiveProjectItemCalls) != 0 {
-		t.Errorf("expected no ArchiveProjectItem calls for PR item (deferred), got %d", len(client.archiveProjectItemCalls))
+		t.Errorf("expected no ArchiveProjectItem calls for PR item, got %d", len(client.archiveProjectItemCalls))
 	}
 	if len(claude.calls) != 0 {
 		t.Error("should not invoke claude for cleanup stage PR item")
