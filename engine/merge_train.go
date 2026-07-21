@@ -743,7 +743,7 @@ func (e *Engine) cleanupTrialArtifacts(wm *WorktreeManager, trialName string) {
 
 // buildTrainConflictComment constructs a synthetic comment instructing Claude to
 // resolve merge conflict markers in the current worktree (inline, without a rebase).
-func buildTrainConflictComment(memberItem gh.ProjectItem, prSHA, baseBranch string) gh.Comment {
+func buildTrainConflictComment(memberItem gh.ProjectItem, prSHA string) gh.Comment {
 	body := fmt.Sprintf(
 		"🏭 **Fabrik merge-train — conflict resolution required**\n\n"+
 			"The merge of PR head `%s` (issue #%d) into the trial integration branch has left "+
@@ -763,7 +763,6 @@ func buildTrainConflictComment(memberItem gh.ProjectItem, prSHA, baseBranch stri
 			"abort with `git merge --abort` and explain in your response why resolution is not possible.\n",
 		prSHA, memberItem.Number, memberItem.Number,
 	)
-	_ = baseBranch
 	return gh.Comment{
 		ID:         "merge-train-conflict-synthetic",
 		DatabaseID: 0,
@@ -776,14 +775,13 @@ func buildTrainConflictComment(memberItem gh.ProjectItem, prSHA, baseBranch stri
 // trial branch worktree. Returns true if resolution succeeded (no conflict markers remain
 // and the resolution is committed).
 func (e *Engine) resolveConflictWithClaude(ctx context.Context, memberItem gh.ProjectItem, trainWorkDir string, holdingStg *stages.Stage, prSHA string, opts InvokeOptions) bool {
-	comment := buildTrainConflictComment(memberItem, prSHA, opts.BaseBranch)
+	comment := buildTrainConflictComment(memberItem, prSHA)
 
-	output, _, _, err := e.claude.InvokeForComments(ctx, holdingStg, memberItem, []gh.Comment{comment}, trainWorkDir, opts)
+	_, _, _, err := e.claude.InvokeForComments(ctx, holdingStg, memberItem, []gh.Comment{comment}, trainWorkDir, opts)
 	if err != nil {
 		e.logf(memberItem.Number, "merge-train", "Claude conflict resolution failed: %v\n", err)
 		return false
 	}
-	_ = output
 
 	// Check whether conflicts remain after Claude's work.
 	// Parse line-by-line to avoid false positives from file paths containing
