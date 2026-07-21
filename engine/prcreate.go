@@ -135,13 +135,7 @@ func (e *Engine) processPRCreateMarker(ctx context.Context, item gh.ProjectItem,
 			block.TargetRepo, owner, repo,
 		)
 		e.addPausedLabelToItem(owner, repo, item)
-		if dbID, err := e.client.AddComment(owner, repo, item.Number, msg); err != nil {
-			e.logf(item.Number, "warn", "could not post cross-repo PR error comment: %v\n", err)
-		} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-				DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
-			})
-		}
+		e.postComment(item, msg, false, false) //nolint:errcheck // failure already logged by postComment
 		return 0, fmt.Errorf("cross-repo PR creation not supported (target: %s)", block.TargetRepo)
 	}
 
@@ -151,8 +145,8 @@ func (e *Engine) processPRCreateMarker(ctx context.Context, item gh.ProjectItem,
 	existingPR, err := e.client.FetchLinkedPR(owner, repo, item.Number)
 	if err == nil && existingPR != nil && existingPR.State == "open" && !existingPR.Merged {
 		e.logf(item.Number, "pr", "FABRIK_PR_CREATE: PR #%d already exists — using existing PR\n", existingPR.Number)
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.RecordPRLinkage(owner+"/"+repo, existingPR.Number, item.Number)
+		if c := e.cache(); c != nil {
+			c.RecordPRLinkage(owner+"/"+repo, existingPR.Number, item.Number)
 		}
 		return existingPR.Number, nil
 	}
@@ -194,21 +188,15 @@ func (e *Engine) processPRCreateMarker(ctx context.Context, item gh.ProjectItem,
 			item.Number, maxAttempts, lastErr,
 		)
 		e.addPausedLabelToItem(owner, repo, item)
-		if dbID, commentErr := e.client.AddComment(owner, repo, item.Number, msg); commentErr != nil {
-			e.logf(item.Number, "warn", "could not post PR creation error comment: %v\n", commentErr)
-		} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-				DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
-			})
-		}
+		e.postComment(item, msg, false, false) //nolint:errcheck // failure already logged by postComment
 		return 0, fmt.Errorf("creating PR via FABRIK_PR_CREATE: %w", lastErr)
 	}
 
 	e.logf(item.Number, "pr", "FABRIK_PR_CREATE: created draft PR #%d (title: %q)\n", prNum, block.Title)
 
 	// Cache write-through.
-	if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.RecordPRLinkage(owner+"/"+repo, prNum, item.Number)
+	if c := e.cache(); c != nil {
+		c.RecordPRLinkage(owner+"/"+repo, prNum, item.Number)
 	}
 	if e.webhookMgr != nil {
 		e.webhookMgr.RegisterEcho("pull_request", "opened", fmt.Sprintf("%s/%s#pr%d", owner, repo, prNum))
@@ -216,18 +204,7 @@ func (e *Engine) processPRCreateMarker(ctx context.Context, item gh.ProjectItem,
 
 	// Acknowledgement comment on the issue.
 	ackMsg := fmt.Sprintf("🏭 **Fabrik** — opened PR #%d", prNum)
-	if dbID, commentErr := e.client.AddComment(owner, repo, item.Number, ackMsg); commentErr != nil {
-		e.logf(item.Number, "warn", "could not post PR-opened acknowledgement: %v\n", commentErr)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-				DatabaseID: dbID, Body: ackMsg, Author: e.cfg.User, CreatedAt: time.Now(),
-			})
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
-		}
-	}
+	e.postComment(item, ackMsg, false, true) //nolint:errcheck // failure already logged by postComment
 
 	return prNum, nil
 }
@@ -318,31 +295,14 @@ func (e *Engine) verifyAndHealLinkage(ctx context.Context, item gh.ProjectItem, 
 		e.logf(item.Number, "warn", "verifyAndHealLinkage: re-verification FetchItemDetails failed: %v\n", err)
 		// Can't confirm — treat as success (heal likely took effect; GitHub may lag).
 		healMsg := fmt.Sprintf("🏭 **Fabrik** — PR body auto-corrected: `%s` prepended (PR was opened without the closing reference). Re-verification fetch failed; please confirm linkage.", closingLine)
-		if dbID, commentErr := e.client.AddComment(owner, repo, item.Number, healMsg); commentErr != nil {
-			e.logf(item.Number, "warn", "could not post heal confirmation comment: %v\n", commentErr)
-		} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-				DatabaseID: dbID, Body: healMsg, Author: e.cfg.User, CreatedAt: time.Now(),
-			})
-		}
+		e.postComment(item, healMsg, false, false) //nolint:errcheck // failure already logged by postComment
 		return true
 	}
 
 	if item.LinkedPRNumber != 0 {
 		e.logf(item.Number, "pr", "verifyAndHealLinkage: linkage confirmed for PR #%d\n", pr.Number)
 		healMsg := fmt.Sprintf("🏭 **Fabrik** — PR body auto-corrected: `%s` prepended (PR was opened without the closing reference).", closingLine)
-		if dbID, commentErr := e.client.AddComment(owner, repo, item.Number, healMsg); commentErr != nil {
-			e.logf(item.Number, "warn", "could not post heal confirmation comment: %v\n", commentErr)
-		} else {
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-					DatabaseID: dbID, Body: healMsg, Author: e.cfg.User, CreatedAt: time.Now(),
-				})
-			}
-			if e.webhookMgr != nil {
-				e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
-			}
-		}
+		e.postComment(item, healMsg, false, true) //nolint:errcheck // failure already logged by postComment
 		return true
 	}
 

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
 	"github.com/handarbeit/fabrik/stages"
@@ -70,11 +69,7 @@ func (e *Engine) checkMergeabilityGate(item gh.ProjectItem, stage *stages.Stage,
 			}
 		}
 		if !alreadyLabeled {
-			if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:rebase-needed"); err != nil {
-				e.logf(item.Number, "warn", "could not add fabrik:rebase-needed label: %v\n", err)
-			} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:rebase-needed")
-			}
+			e.applyLabelAdd(item, "fabrik:rebase-needed", false)
 		}
 		return true, true
 	}
@@ -85,11 +80,7 @@ func (e *Engine) checkMergeabilityGate(item gh.ProjectItem, stage *stages.Stage,
 func (e *Engine) removeRebaseNeededLabel(owner, repo string, item gh.ProjectItem) {
 	for _, l := range item.Labels {
 		if l == "fabrik:rebase-needed" {
-			if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:rebase-needed"); err != nil {
-				e.logf(item.Number, "warn", "could not remove fabrik:rebase-needed label: %v\n", err)
-			} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:rebase-needed")
-			}
+			e.applyLabelRemove(item, "fabrik:rebase-needed", false)
 			return
 		}
 	}
@@ -367,30 +358,10 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 			"- **Keep cruise behavior**: Remove `fabrik:paused` and `fabrik:yolo`. Fabrik will keep the branch up-to-date but leave merging to you.\n" +
 			"- **Re-enable auto-merge**: Remove `fabrik:paused`. Fabrik will re-enable auto-merge on the next poll cycle.\n" +
 			"- **Leave as-is**: Take no action. The PR remains open and unmerged until you act.")
-		if dbID, cerr := e.client.AddComment(owner, repo, item.Number, msg); cerr != nil {
-			e.logf(item.Number, "warn", "could not post auto-merge disabled comment: %v\n", cerr)
-		} else {
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-					DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
-				})
-			}
-		}
-		if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
-			e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", err)
-		} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
-		}
-		if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); err != nil {
-			e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", err)
-		} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
-		}
-		if rerr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); rerr != nil {
-			e.logf(item.Number, "warn", "could not remove fabrik:auto-merge-enabled: %v\n", rerr)
-		} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:auto-merge-enabled")
-		}
+		e.postComment(item, msg, false, false) //nolint:errcheck // failure already logged by postComment
+		e.applyLabelAdd(item, "fabrik:paused", false)
+		e.applyLabelAdd(item, "fabrik:awaiting-input", false)
+		e.applyLabelRemove(item, "fabrik:auto-merge-enabled", false)
 		return
 	}
 
@@ -620,11 +591,7 @@ func (e *Engine) pauseForRebaseCycleLimit(board *gh.ProjectBoard, item gh.Projec
 func (e *Engine) advanceConvergedPRToDone(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, prNumber int) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	e.logf(item.Number, "auto-merge", "PR #%d merged or closed — advancing to Done\n", prNumber)
-	if rerr := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:auto-merge-enabled"); rerr != nil {
-		e.logf(item.Number, "warn", "could not remove fabrik:auto-merge-enabled: %v\n", rerr)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:auto-merge-enabled")
-	}
+	e.applyLabelRemove(item, "fabrik:auto-merge-enabled", false)
 	e.removeRebaseNeededLabel(owner, repo, item)
 	if err := e.advanceToNextStage(board, item, stage); err != nil {
 		e.logf(item.Number, "warn", "could not advance to Done after PR merge: %v\n", err)
