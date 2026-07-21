@@ -322,11 +322,6 @@ func (wm *WorktreeManager) trainBranchName(name string) string {
 	return "fabrik/merge-train/" + name
 }
 
-// TrainWorktreeDir returns the path to a merge-train worktree (whether it exists or not).
-func (wm *WorktreeManager) TrainWorktreeDir(name string) string {
-	return wm.trainWorktreeDir(name)
-}
-
 // EnsureTrainWorktree creates a worktree for the trial branch, forking fresh from
 // origin/<baseBranch>. Unlike EnsureWorktree it never reuses an existing worktree
 // (trial branches are disposable) and never updates from main (the fork is always fresh).

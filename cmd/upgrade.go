@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/mattn/go-isatty"
 	"github.com/handarbeit/fabrik/config"
 	"github.com/handarbeit/fabrik/engine"
 	gh "github.com/handarbeit/fabrik/github"
@@ -105,17 +104,12 @@ func runUpgrade(args []string) error {
 	return nil
 }
 
-// checkPluginSkills compares embedded plugin files against on-disk files in
-// pluginDir. If any differ and stdin is a TTY, the user is prompted to upgrade.
-// In non-interactive mode a warning is printed to stderr and execution continues.
-// Returns nil if the directory does not exist (no fabrik init done yet).
-func checkPluginSkills(pluginDir string) error {
-	isTTY := isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
-	return checkPluginSkillsWithReader(pluginDir, isTTY, os.Stdin)
-}
-
-// checkPluginSkillsWithReader is the testable implementation of checkPluginSkills.
-// isTTY and r control interactive-prompt behaviour without requiring a real PTY.
+// checkPluginSkillsWithReader compares embedded plugin files against on-disk
+// files in pluginDir. If any differ and isTTY is true, the user is prompted
+// to upgrade. In non-interactive mode a warning is printed to stderr and
+// execution continues. Returns nil if the directory does not exist (no
+// fabrik init done yet). isTTY and r control interactive-prompt behaviour
+// without requiring a real PTY.
 func checkPluginSkillsWithReader(pluginDir string, isTTY bool, r io.Reader) error {
 	if _, err := os.Stat(pluginDir); os.IsNotExist(err) {
 		return nil
