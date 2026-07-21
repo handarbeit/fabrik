@@ -14,7 +14,7 @@ func TestSaveSessionIDDirect(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.session")
 
-	saveSessionIDDirect(path, "sess_abc123")
+	saveSessionIDDirect(1, path, "sess_abc123")
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -29,7 +29,7 @@ func TestSaveSessionIDDirect_Empty(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.session")
 
-	saveSessionIDDirect(path, "")
+	saveSessionIDDirect(1, path, "")
 
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Error("session file should not exist for empty session ID")
