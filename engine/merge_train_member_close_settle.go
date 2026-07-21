@@ -3,7 +3,6 @@ package engine
 import (
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
@@ -34,16 +33,7 @@ func (e *Engine) markMergeTrainMemberCloseOutstanding(item gh.ProjectItem, owner
 	if hasLabel(item, mergeTrainAwaitingMemberCloseLabel) {
 		return
 	}
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, mergeTrainAwaitingMemberCloseLabel); err != nil {
-		e.logf(item.Number, "merge-train", "warn: could not add %s marker: %v\n", mergeTrainAwaitingMemberCloseLabel, err)
-		return
-	}
-	if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), mergeTrainAwaitingMemberCloseLabel)
-	}
-	if e.webhookMgr != nil {
-		e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+mergeTrainAwaitingMemberCloseLabel)
-	}
+	e.addLabel(item, mergeTrainAwaitingMemberCloseLabel)
 }
 
 // settleMergeTrainMemberCloses is the per-poll settle scan for the merge-train member-issue
@@ -81,8 +71,8 @@ func (e *Engine) settleMergeTrainMemberClose(item gh.ProjectItem) {
 		return
 	}
 
-	if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyIssueClosed(boardcache.ItemKey(item.Repo, item.Number))
+	if c := e.cache(); c != nil {
+		c.ApplyIssueClosed(boardcache.ItemKey(item.Repo, item.Number))
 	}
 	e.logf(item.Number, "merge-train", "closed member issue #%d (retry)\n", item.Number)
 	e.clearMergeTrainMemberCloseMarker(item, owner, repo)
@@ -119,49 +109,14 @@ func (e *Engine) escalateMergeTrainMemberCloseFailure(item gh.ProjectItem) {
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
-	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
-		e.logf(item.Number, "warn", "could not add paused label: %v\n", err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:paused")
-		}
-	}
-
-	if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, mergeTrainAwaitingMemberCloseLabel); err != nil &&
-		!errors.Is(err, gh.ErrNotFound) {
-		e.logf(item.Number, "warn", "could not remove %s marker: %v\n", mergeTrainAwaitingMemberCloseLabel, err)
-	} else if err == nil {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), mergeTrainAwaitingMemberCloseLabel)
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+mergeTrainAwaitingMemberCloseLabel)
-		}
-	}
+	e.addLabel(item, "fabrik:paused")
+	e.applyLabelRemove(item, mergeTrainAwaitingMemberCloseLabel, true)
 
 	comment := fmt.Sprintf(
 		"🏭 **Fabrik — merge-train member-issue close failed**\n\nThis issue landed successfully via the merge-train singleton path, but closing the issue itself could not be completed after %d attempt(s). The issue has been paused.\n\nManual fix:\n```\ngh issue close %d --repo %s/%s\n```\nThen remove the `fabrik:paused` label.",
 		e.cfg.MaxRetries, item.Number, owner, repo,
 	)
-	if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
-		e.logf(item.Number, "warn", "could not post merge-train member-close escalation comment: %v\n", err)
-	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-				DatabaseID: dbID, Body: comment, Author: e.cfg.User, CreatedAt: time.Now(),
-			})
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
-		}
-		// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
-		if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-			e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
-		}
-	}
+	e.postItemComment(item, comment, true)
 
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
 	e.store.Apply(itemstate.EnginePaused{Repo: repoStr, Number: item.Number, StageName: mergeTrainMemberCloseRetryStage})
@@ -176,12 +131,7 @@ func (e *Engine) clearMergeTrainMemberCloseMarker(item gh.ProjectItem, owner, re
 		e.logf(item.Number, "warn", "could not remove %s marker: %v\n", mergeTrainAwaitingMemberCloseLabel, err)
 		return
 	} else if err == nil {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), mergeTrainAwaitingMemberCloseLabel)
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+mergeTrainAwaitingMemberCloseLabel)
-		}
+		e.syncLabelRemoval(item, mergeTrainAwaitingMemberCloseLabel, true)
 	}
 
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())

@@ -147,18 +147,7 @@ func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, 
 		// All dependencies resolved (or none exist) — remove fabrik:blocked if present.
 		for _, l := range item.Labels {
 			if l == "fabrik:blocked" {
-				if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, "fabrik:blocked"); err != nil {
-					if errors.Is(err, gh.ErrNotFound) {
-						// Label already absent on GitHub — desired end state achieved; sync cache.
-						if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-							cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:blocked")
-						}
-					} else {
-						e.logf(item.Number, "warn", "could not remove fabrik:blocked label: %v\n", err)
-					}
-				} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-					cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), "fabrik:blocked")
-				}
+				e.applyLabelRemove(item, "fabrik:blocked", false)
 				break
 			}
 		}
@@ -194,48 +183,22 @@ func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, 
 		if detectCycle(e.store, itemRepo, item.Number, openDeps, 4) {
 			e.logf(item.Number, "warn", "cycle detected in blockedBy graph — pausing issue\n")
 			cycleMsg := fmt.Sprintf("🏭 **Fabrik — cycle detected**\n\nIssue #%d has a cyclic `blockedBy` dependency: it is waiting for issues that are themselves (transitively) waiting for this issue. Fabrik cannot make progress. Remove the cycle manually and then remove `fabrik:paused` to continue.", item.Number)
-			if dbID, commentErr := e.client.AddComment(owner, repo, item.Number, cycleMsg); commentErr != nil {
-				e.logf(item.Number, "warn", "could not post cycle-detected comment: %v\n", commentErr)
-			} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-					DatabaseID: dbID, Body: cycleMsg, Author: e.cfg.User, CreatedAt: time.Now(),
-				})
-			}
-			if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); err != nil {
-				e.logf(item.Number, "warn", "could not add fabrik:paused for cycle: %v\n", err)
-			} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
-			}
+			e.postComment(item, cycleMsg, false, false) //nolint:errcheck // failure already logged by postComment
+			e.applyLabelAdd(item, "fabrik:paused", false)
 			return false
 		}
 
 		// First-time block: post the comment and add the label.
-		if dbID, err := e.client.AddComment(owner, repo, item.Number, newComment); err != nil {
-			e.logf(item.Number, "warn", "could not post blocked comment: %v\n", err)
-		} else {
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-					DatabaseID: dbID, Body: newComment, Author: e.cfg.User, CreatedAt: time.Now(),
-				})
-			}
-			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
-			if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-				e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
-			}
-		}
-		if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:blocked"); err != nil {
-			e.logf(item.Number, "warn", "could not add fabrik:blocked label: %v\n", err)
-		} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:blocked")
-		}
+		e.postItemComment(item, newComment, true)
+		e.applyLabelAdd(item, "fabrik:blocked", false)
 	} else {
 		// Already blocked: edit the existing comment in-place if the dep list changed.
 		existing := findBlockedComment(item.Comments, e.cfg.User)
 		if existing != nil && existing.Body != newComment {
 			if err := e.client.UpdateComment(owner, repo, existing.DatabaseID, newComment); err != nil {
 				e.logf(item.Number, "warn", "could not update blocked comment: %v\n", err)
-			} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+			} else if c := e.cache(); c != nil {
+				c.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
 					DatabaseID: existing.DatabaseID, Body: newComment, Author: e.cfg.User, CreatedAt: time.Now(),
 				})
 			}
@@ -266,15 +229,15 @@ func (e *Engine) removeBlockedIfResolved(owner, repo string, issueNumber int) {
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		err := e.client.RemoveLabelFromIssue(owner, repo, issueNumber, "fabrik:blocked")
 		if err == nil {
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, issueNumber), "fabrik:blocked")
+			if c := e.cache(); c != nil {
+				c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, issueNumber), "fabrik:blocked")
 			}
 			return
 		}
 		if errors.Is(err, gh.ErrNotFound) {
 			// Label already absent — treat as success and sync cache.
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, issueNumber), "fabrik:blocked")
+			if c := e.cache(); c != nil {
+				c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, issueNumber), "fabrik:blocked")
 			}
 			return
 		}

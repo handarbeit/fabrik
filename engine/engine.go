@@ -478,29 +478,9 @@ func (e *Engine) ensureRepoReady(ctx context.Context, item gh.ProjectItem) error
 		e.cloneInFlight.Delete(nameWithOwner)
 
 		msg := fmt.Sprintf("🏭 **Fabrik — cannot clone repo**\n\nFailed to clone `%s/%s`:\n```\n%v\n```\nHuman intervention required. Fix the clone issue and remove `fabrik:paused` to retry.", owner, repo, err)
-		if dbID, commentErr := e.client.AddComment(owner, repo, item.Number, msg); commentErr != nil {
-			e.logf(item.Number, "warn", "could not post clone-failure comment: %v\n", commentErr)
-		} else {
-			if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-				cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-					DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
-				})
-			}
-			// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
-			if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-				e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
-			}
-		}
-		if labelErr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:paused"); labelErr != nil {
-			e.logf(item.Number, "warn", "could not add fabrik:paused: %v\n", labelErr)
-		} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:paused")
-		}
-		if labelErr := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:awaiting-input"); labelErr != nil {
-			e.logf(item.Number, "warn", "could not add fabrik:awaiting-input: %v\n", labelErr)
-		} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:awaiting-input")
-		}
+		e.postItemComment(item, msg, true)
+		e.applyLabelAdd(item, "fabrik:paused", false)
+		e.applyLabelAdd(item, "fabrik:awaiting-input", false)
 		// Append a history entry so the TUI records the failure.
 		hist := tui.LoadHistory()
 		hist = append(hist, tui.HistoryEntry{
@@ -602,22 +582,8 @@ func (e *Engine) ensureSpawnTargetReady(ctx context.Context, targetOwner, target
 func (e *Engine) postSpawnCloneError(parentOwner, parentRepo string, parentItem gh.ProjectItem, targetOwner, targetRepo string, cloneErr error) {
 	msg := fmt.Sprintf("🏭 **Fabrik — pre-Implement spawn failed**\n\nFailed to clone spawn target `%s/%s`:\n```\n%v\n```\nFix the clone issue (SSH key, PAT access) and remove `fabrik:paused` to retry.",
 		targetOwner, targetRepo, cloneErr)
-	if dbID, commentErr := e.client.AddComment(parentOwner, parentRepo, parentItem.Number, msg); commentErr != nil {
-		e.logf(parentItem.Number, "warn", "could not post spawn clone-failure comment: %v\n", commentErr)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyCommentAdded(boardcache.ItemKey(parentItem.Repo, parentItem.Number), gh.Comment{
-			DatabaseID: dbID, Body: msg, Author: e.cfg.User, CreatedAt: time.Now(),
-		})
-	}
-	if labelErr := e.client.AddLabelToIssue(parentOwner, parentRepo, parentItem.Number, "fabrik:paused"); labelErr != nil {
-		e.logf(parentItem.Number, "warn", "could not add fabrik:paused: %v\n", labelErr)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(parentItem.Repo, parentItem.Number), "fabrik:paused")
-	}
-	if labelErr := e.client.AddLabelToIssue(parentOwner, parentRepo, parentItem.Number, "fabrik:awaiting-input"); labelErr != nil {
-		e.logf(parentItem.Number, "warn", "could not add fabrik:awaiting-input: %v\n", labelErr)
-	} else if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(parentItem.Repo, parentItem.Number), "fabrik:awaiting-input")
-	}
+	e.postItemComment(parentItem, msg, false)
+	e.applyLabelAdd(parentItem, "fabrik:paused", false)
+	e.applyLabelAdd(parentItem, "fabrik:awaiting-input", false)
 	e.logf(parentItem.Number, "error", "cannot clone spawn target %s/%s: %v — pausing parent\n", targetOwner, targetRepo, cloneErr)
 }

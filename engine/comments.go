@@ -115,12 +115,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	if err := e.client.AddLabelToIssue(owner, repo, item.Number, "fabrik:editing"); err != nil {
 		return fmt.Errorf("adding editing label: %w", err)
 	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelAdded(boardcache.ItemKey(item.Repo, item.Number), "fabrik:editing")
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+"fabrik:editing")
-		}
+		e.syncLabelAdd(item, "fabrik:editing", true)
 	}
 
 	// Step 3: Ensure worktree
@@ -297,22 +292,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 	if output != "" {
 		if stage.PostToPR {
 			comment := formatOutputComment(stage.Name+" (comment review)", output, "", branch, commit, mainSHA, timestamp)
-			if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
-				e.logf(item.Number, "warn", "could not post comment: %v\n", err)
-			} else {
-				if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-					cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-						DatabaseID: dbID, Body: comment, Author: e.cfg.User, CreatedAt: time.Now(),
-					})
-				}
-				if e.webhookMgr != nil {
-					e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
-				}
-				// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
-				if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-					e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
-				}
-			}
+			e.postItemComment(item, comment, true)
 		} else {
 			existing := findStageComment(item.Comments, stage.Name)
 			stageComment := formatOutputComment(stage.Name, output, "", branch, commit, mainSHA, timestamp)
@@ -322,22 +302,7 @@ func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, it
 					e.logf(item.Number, "warn", "could not update stage comment: %v\n", err)
 				}
 			} else {
-				if dbID, err := e.client.AddComment(owner, repo, item.Number, stageComment); err != nil {
-					e.logf(item.Number, "warn", "could not post stage comment: %v\n", err)
-				} else {
-					if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-						cacheImpl.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
-							DatabaseID: dbID, Body: stageComment, Author: e.cfg.User, CreatedAt: time.Now(),
-						})
-					}
-					if e.webhookMgr != nil {
-						e.webhookMgr.RegisterEcho("issue_comment", "created", boardcache.ItemKey(owner+"/"+repo, item.Number))
-					}
-					// no write-through: excluded — AddCommentReaction does not affect dispatch-relevant cache state
-					if reactErr := e.client.AddCommentReaction(owner, repo, dbID, "rocket"); reactErr != nil {
-						e.logf(item.Number, "warn", "could not add 🚀 to posted comment: %v\n", reactErr)
-					}
-				}
+				e.postItemComment(item, stageComment, true)
 			}
 		}
 	}

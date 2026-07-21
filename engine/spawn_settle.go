@@ -40,16 +40,7 @@ var childParentFooterRe = regexp.MustCompile(`Spawned by Fabrik from parent issu
 // resolves to no configured stage, so itemMayNeedWork/itemNeedsWork would
 // never revisit it via the ordinary dispatch path.
 func (e *Engine) recordChildPlacementFailure(childOwner, childRepo string, childNumber int) {
-	if err := e.client.AddLabelToIssue(childOwner, childRepo, childNumber, childPlacementLabel); err != nil {
-		e.logf(childNumber, "warn", "could not add %s marker to %s/%s#%d: %v\n", childPlacementLabel, childOwner, childRepo, childNumber, err)
-		return
-	}
-	if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-		cacheImpl.ApplyLabelAdded(boardcache.ItemKey(childOwner+"/"+childRepo, childNumber), childPlacementLabel)
-	}
-	if e.webhookMgr != nil {
-		e.webhookMgr.RegisterEcho("issues", "labeled", boardcache.ItemKey(childOwner+"/"+childRepo, childNumber)+"+"+childPlacementLabel)
-	}
+	e.addLabel(gh.ProjectItem{Repo: childOwner + "/" + childRepo, Number: childNumber}, childPlacementLabel)
 }
 
 // settleChildPlacement retries a spawned child's outstanding project Status
@@ -119,27 +110,21 @@ func (e *Engine) escalateChildPlacementFailure(item gh.ProjectItem) {
 
 	e.addPausedLabelToItem(owner, repo, item)
 
-	if err := e.client.RemoveLabelFromIssue(owner, repo, item.Number, childPlacementLabel); err != nil &&
-		!errors.Is(err, gh.ErrNotFound) {
-		e.logf(item.Number, "warn", "could not remove %s marker: %v\n", childPlacementLabel, err)
-	} else if err == nil {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), childPlacementLabel)
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+childPlacementLabel)
-		}
-	}
+	e.applyLabelRemove(item, childPlacementLabel, true)
 
 	comment := fmt.Sprintf(
 		"🏭 **Fabrik — spawned child board placement failed**\n\nThis issue was spawned as a sub-issue, but Fabrik could not place it into the `Specify` (or first processing) column on the project board after %d attempt(s). It may still be sitting in `Backlog` or wherever GitHub defaulted it. The issue has been paused.\n\nManual fix:\nMove this issue's project-board column to `Specify` (or the first processing stage) yourself, then remove the `fabrik:paused` label to let Fabrik pick it up.\n\nIf no suitable column exists on the board, this may indicate a board-configuration problem — check that a `Specify` (or equivalent first-stage) column exists.",
 		e.cfg.MaxRetries,
 	)
+	// NOTE: this comment-post's cache write-through deliberately omits CreatedAt
+	// (unlike postComment, which always stamps time.Now()) to preserve this
+	// site's pre-existing behavior exactly; using e.cache() directly here
+	// (rather than postComment/postItemComment) keeps that omission intact.
 	if dbID, err := e.client.AddComment(owner, repo, item.Number, comment); err != nil {
 		e.logf(item.Number, "warn", "could not post child-placement escalation comment: %v\n", err)
 	} else {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
+		if c := e.cache(); c != nil {
+			c.ApplyCommentAdded(boardcache.ItemKey(owner+"/"+repo, item.Number), gh.Comment{
 				DatabaseID: dbID, Body: comment, Author: e.cfg.User,
 			})
 		}
@@ -167,12 +152,7 @@ func (e *Engine) clearChildPlacementMarker(item gh.ProjectItem, owner, repo stri
 		e.logf(item.Number, "warn", "could not remove %s marker: %v\n", childPlacementLabel, err)
 		return
 	} else if err == nil {
-		if cacheImpl, ok := e.readClient.(*boardcache.CacheImpl); ok {
-			cacheImpl.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), childPlacementLabel)
-		}
-		if e.webhookMgr != nil {
-			e.webhookMgr.RegisterEcho("issues", "unlabeled", boardcache.ItemKey(owner+"/"+repo, item.Number)+"+"+childPlacementLabel)
-		}
+		e.syncLabelRemoval(item, childPlacementLabel, true)
 	}
 
 	repoStr := itemOwnerRepoString(item, e.defaultRepo())
