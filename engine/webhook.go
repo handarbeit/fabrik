@@ -648,12 +648,8 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 		// Zero-repo guard: all repos quarantined — skip subprocess launch.
 		if org == "" && len(repos) == 0 {
 			wm.logFn(0, "webhook", "all webhook-subscribed repos are quarantined — no subprocess launched; safety-net poll continues\n")
-			select {
-			case <-ctx.Done():
+			if !sleepOrStop(ctx, wm.stopCh, webhookMaxRestartBackoff) {
 				return
-			case <-wm.stopCh:
-				return
-			case <-time.After(webhookMaxRestartBackoff):
 			}
 			continue
 		}
@@ -678,15 +674,11 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 		cmd, stderrCh, err := startFn(ctx, args)
 		if err != nil {
 			wm.logFn(0, "webhook", "failed to start gh webhook forward: %v\n", err)
-			select {
-			case <-ctx.Done():
+			if !sleepOrStop(ctx, wm.stopCh, backoff) {
 				return
-			case <-wm.stopCh:
-				return
-			case <-time.After(backoff):
-				backoff = minWebhookDuration(backoff*2, webhookMaxRestartBackoff)
-				continue
 			}
+			backoff = minWebhookDuration(backoff*2, webhookMaxRestartBackoff)
+			continue
 		}
 		backoff = time.Second // reset on successful start
 
@@ -719,12 +711,13 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 		}
 
 		probeTimeout := wm.effectiveProbeTimeout()
+		cls := classifyExit(elapsed, probeTimeout, stderrContent)
 
 		// Time-based convergent fallback for projects_v2_item in per-repo mode.
 		// If the subprocess exits quickly and projects_v2_item is still in the event
 		// list (meaning the stderr-based detection did not fire), drop it for the next
 		// restart to break any infinite crash-restart cycle.
-		if org == "" && elapsed < probeTimeout {
+		if org == "" && cls.quick {
 			wm.mu.Lock()
 			if containsEvent(wm.events, "projects_v2_item") {
 				wm.events = filterOutEvent(wm.events, "projects_v2_item")
@@ -742,7 +735,7 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 		// Quick exits with non-422 stderr are transient crashes; they neither increment nor reset
 		// the counter. A durable run (elapsed >= orgModeProbeTimeout) resets the counter.
 		if org == "" {
-			if elapsed < probeTimeout && is422ShapedError(stderrContent) {
+			if cls.quick && cls.is422 {
 				wm.mu.Lock()
 				wm.permanentFailureCount++
 				count := wm.permanentFailureCount
@@ -761,7 +754,7 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 					return
 				}
 				wm.mu.Unlock()
-			} else if elapsed >= probeTimeout {
+			} else if !cls.quick {
 				// Subprocess ran durably — reset the 422 circuit-breaker counter.
 				wm.mu.Lock()
 				wm.permanentFailureCount = 0
@@ -772,8 +765,8 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 		// Detect org mode rejection: combine time-based and stderr content signals.
 		// A quick exit with an auth-shaped error → permanent per-repo fallback.
 		// A quick exit without an auth error → transient crash; retry org mode with backoff.
-		if org != "" && elapsed < probeTimeout {
-			if isAuthShapedError(stderrContent) {
+		if org != "" && cls.quick {
+			if cls.authShaped {
 				wm.logFn(0, "webhook", "org-level webhook failed (permission error, %v) — falling back to per-repo subscription\n", elapsed.Round(time.Millisecond))
 				wm.mu.Lock()
 				wm.orgModeFailed = true
@@ -804,14 +797,47 @@ func (wm *webhookManager) supervise(ctx context.Context) {
 			wm.logFn(0, "webhook", "gh webhook forward exited — restarting in %v\n", backoff)
 		}
 
-		select {
-		case <-ctx.Done():
+		if !sleepOrStop(ctx, wm.stopCh, backoff) {
 			return
-		case <-wm.stopCh:
-			return
-		case <-time.After(backoff):
-			backoff = minWebhookDuration(backoff*2, webhookMaxRestartBackoff)
 		}
+		backoff = minWebhookDuration(backoff*2, webhookMaxRestartBackoff)
+	}
+}
+
+// sleepOrStop waits for d, or until ctx is cancelled or stopCh is closed,
+// whichever comes first. It reports true if the wait completed normally
+// (caller should proceed) or false if ctx/stopCh fired first (caller should
+// return immediately).
+func sleepOrStop(ctx context.Context, stopCh <-chan struct{}, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-stopCh:
+		return false
+	case <-time.After(d):
+		return true
+	}
+}
+
+// exitClassification captures the timing/error-shape signals used across
+// supervise's post-exit branches (projects_v2_item fallback, 422
+// circuit-breaker, org-mode rejection, per-repo failure isolation) so each
+// branch doesn't independently recompute elapsed/probeTimeout/stderrContent
+// comparisons.
+type exitClassification struct {
+	quick      bool // elapsed < probeTimeout: the subprocess exited before it could be considered a durable run
+	is422      bool // stderrContent looks like an HTTP 422 (permanent configuration error)
+	authShaped bool // stderrContent looks like an auth/permission error
+}
+
+// classifyExit computes the exit classification for a single subprocess
+// run given its elapsed runtime, the current probe timeout, and its
+// accumulated stderr content.
+func classifyExit(elapsed, probeTimeout time.Duration, stderrContent string) exitClassification {
+	return exitClassification{
+		quick:      elapsed < probeTimeout,
+		is422:      is422ShapedError(stderrContent),
+		authShaped: isAuthShapedError(stderrContent),
 	}
 }
 
