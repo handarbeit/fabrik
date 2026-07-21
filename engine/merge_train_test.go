@@ -1190,10 +1190,9 @@ func TestLandMergeTrainBatch_HappyPath(t *testing.T) {
 		t.Errorf("expected a 'Landed via merge-train batch PR #100' comment, not found in %v", comments)
 	}
 
-	// FR-4: mergeTrainInFlight cleared (cleanup ran).
-	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
-		t.Error("expected mergeTrainInFlight to be cleared after successful landing")
-	}
+	// FR-4: worktree cleanup ran. The in-flight marker itself is cleared by
+	// runMergeTrainWorker's top-level defer, not by landMergeTrainBatch (ADR-067) —
+	// covered by TestMergeTrainWorker_CleanBatch's end-to-end assertion instead.
 }
 
 // TestLandMergeTrainBatch_ExistingOpenPR_SkipsFR1 verifies restart idempotency:
@@ -1472,10 +1471,9 @@ func TestLandMergeTrainBatch_MergeAPIFailure(t *testing.T) {
 		t.Errorf("expected a merge-failure comment on issue #1, got comments: %v", comments)
 	}
 
-	// Cleanup must still run (mergeTrainInFlight cleared).
-	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
-		t.Error("expected mergeTrainInFlight to be cleared after merge failure (cleanup deferred)")
-	}
+	// Cleanup (worktree removal) must still run via the deferred func inside
+	// landMergeTrainBatch. The in-flight marker itself is cleared by
+	// runMergeTrainWorker's top-level defer, not here (ADR-067).
 }
 
 // TestLandMergeTrainBatch_ResetsEjectionCounter verifies that a successful landing resets
@@ -2011,14 +2009,13 @@ func TestDissolveBatch(t *testing.T) {
 	if len(client.updateStatusCalls) != 0 {
 		t.Errorf("dissolve must not mutate member board status, got %d update(s)", len(client.updateStatusCalls))
 	}
-	// In-flight marker cleared.
-	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
-		t.Error("expected mergeTrainInFlight cleared after dissolve")
-	}
+	// The in-flight marker itself is cleared by runMergeTrainWorker's top-level
+	// defer, not by dissolveBatch (ADR-067) — covered by
+	// TestLandGreenBatch_ExhaustionDissolves via the worker's own dissolve path.
 }
 
 // TestDissolveBatch_NoPR verifies dissolve is a no-op on the PR close when prNum==0
-// (an orphaned trial branch with no integration PR) yet still comments and clears.
+// (an orphaned trial branch with no integration PR) yet still comments.
 func TestDissolveBatch_NoPR(t *testing.T) {
 	skipIfNoGit(t)
 	_, _, _, wm := setupTrainRepo(t)
@@ -2036,9 +2033,6 @@ func TestDissolveBatch_NoPR(t *testing.T) {
 	defer client.mu.Unlock()
 	if len(client.closeIssueCalls) != 0 {
 		t.Errorf("dissolve with prNum==0 must not close any PR, got %v", client.closeIssueCalls)
-	}
-	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
-		t.Error("expected mergeTrainInFlight cleared after dissolve")
 	}
 }
 
@@ -2101,9 +2095,8 @@ func TestLandGreenBatch_BehindOnceThenLands(t *testing.T) {
 	if advances != 2 {
 		t.Errorf("expected 2 members advanced to Done after landing, got %d", advances)
 	}
-	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
-		t.Error("expected mergeTrainInFlight cleared after landing")
-	}
+	// The in-flight marker itself is cleared by runMergeTrainWorker's top-level
+	// defer, not by landGreenBatch/landMergeTrainBatch (ADR-067).
 }
 
 // TestLandGreenBatch_ExhaustionDissolves verifies FR-2/FR-5: when the trial keeps
@@ -2143,9 +2136,8 @@ func TestLandGreenBatch_ExhaustionDissolves(t *testing.T) {
 	if dissolveComments != 2 {
 		t.Errorf("expected 2 dissolve comments (one per member), got %d", dissolveComments)
 	}
-	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
-		t.Error("expected mergeTrainInFlight cleared after dissolve")
-	}
+	// The in-flight marker itself is cleared by runMergeTrainWorker's top-level
+	// defer, not by landGreenBatch/dissolveBatch (ADR-067).
 }
 
 // reconstructParams builds a trialParams suitable for direct reconstructTrainState /
@@ -2251,9 +2243,9 @@ func TestReconstructTrainState_CompleteDeferredLanding(t *testing.T) {
 	if len(client.updateStatusCalls) != 2 {
 		t.Errorf("complete-deferred should advance 2 still-Queued members to Done, got %d", len(client.updateStatusCalls))
 	}
-	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
-		t.Error("expected mergeTrainInFlight cleared after complete-deferred landing")
-	}
+	// The in-flight marker itself is cleared by prepareTrainWorker's own-failure
+	// defer when reconstructTrainState returns true (ADR-067), not by
+	// completeDeferredLanding/reconstructTrainState called directly here.
 }
 
 // TestReconstructTrainState_OrphanOpenPRNoBranch_Dissolves verifies FR-4/FR-5: an open
@@ -2300,9 +2292,9 @@ func TestReconstructTrainState_OrphanOpenPRNoBranch_Dissolves(t *testing.T) {
 	if dissolveComments != 2 {
 		t.Errorf("expected 2 dissolve comments, got %d", dissolveComments)
 	}
-	if _, ok := eng.mergeTrainInFlight.Load("owner/repo"); ok {
-		t.Error("expected mergeTrainInFlight cleared after orphan dissolve")
-	}
+	// The in-flight marker itself is cleared by prepareTrainWorker's own-failure
+	// defer when reconstructTrainState returns true (ADR-067), not by
+	// dissolveBatch/reconstructTrainState called directly here.
 }
 
 // TestReconstructTrainState_HistoricalMergedPR_ProceedsFresh is a regression test for

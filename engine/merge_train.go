@@ -178,23 +178,49 @@ type trialParams struct {
 	nextTrialName    func() string // returns a unique trial name per call (first == base)
 }
 
-// runMergeTrainWorker is the main body of the merge-train goroutine (ADR-059 D3/D4).
-// It pins the base SHA once, then runs a re-form loop: assemble+validate the (re-formed)
-// batch exactly once; a green result lands immediately (D-d — zero bisection on the common
-// path); a red result opens a per-episode cost budget and bisects to isolate and eject the
-// poisoner (FR-1/FR-2), re-forming the survivors and re-validating (FR-3); cost-cap
-// exhaustion or a non-isolable interaction degrades to the one-at-a-time fallback (FR-5).
-func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorkerState, owner, repo string, batch []gh.ProjectItem) {
+// finishTrain clears the per-repo in-flight marker. It is the single, centralized
+// point through which the marker is ever cleared — sync.Map.Delete on an absent
+// key is a safe no-op, so the two callers (prepareTrainWorker's own-failure defer
+// and runMergeTrainWorker's top-level defer) never need to coordinate. Any new
+// early-return path added to the runMergeTrainWorker call graph must rely on one
+// of those two defers rather than calling mergeTrainInFlight.Delete directly —
+// see ADR-067.
+func (e *Engine) finishTrain(repoKey string) {
+	e.mergeTrainInFlight.Delete(repoKey)
+}
+
+// prepareTrainWorker performs all one-time setup for a merge-train worker: semaphore
+// acquisition, repo readiness, base-branch resolution, holding-stage lookup,
+// extend-turns computation, trialParams construction, restart-time state
+// reconstruction (ADR-059 D5, FR-1/FR-4), base-SHA pinning, and member resolution.
+//
+// On success (ok=true) it returns the assembled trialParams and members with the
+// semaphore still held — the caller (runMergeTrainWorker) owns releasing it and
+// clearing the in-flight marker for the remainder of the worker's lifetime.
+//
+// On failure (ok=false) it has already released the semaphore (if acquired) and
+// cleared the in-flight marker via finishTrain; the caller must simply return.
+func (e *Engine) prepareTrainWorker(ctx context.Context, state *mergeTrainWorkerState, owner, repo string, batch []gh.ProjectItem) (p trialParams, members []trainMember, ok bool) {
 	repoKey := owner + "/" + repo
 
 	select {
 	case e.sem <- struct{}{}:
 	case <-ctx.Done():
 		e.logf(0, "merge-train", "context cancelled before semaphore acquired for %s\n", repoKey)
-		e.mergeTrainInFlight.Delete(repoKey)
-		return
+		e.finishTrain(repoKey)
+		return trialParams{}, nil, false
 	}
-	defer func() { <-e.sem }()
+
+	// The semaphore is now held. Every early-return below must release it, since
+	// only a successful (ok=true) return transfers semaphore ownership to the
+	// caller. Collapsing this into one deferred cleanup means a future early
+	// return added here can't forget to release the semaphore or clear the marker.
+	defer func() {
+		if !ok {
+			<-e.sem
+			e.finishTrain(repoKey)
+		}
+	}()
 
 	// Use batch[0] as the repo anchor for ensureRepoReady.
 	if err := e.ensureRepoReady(ctx, batch[0]); err != nil {
@@ -203,23 +229,20 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		} else {
 			e.logf(0, "merge-train", "ensureRepoReady failed for %s: %v\n", repoKey, err)
 		}
-		e.mergeTrainInFlight.Delete(repoKey)
-		return
+		return trialParams{}, nil, false
 	}
 
 	wm := e.worktreesFor(repoKey)
 	baseBranch, err := wm.DefaultBaseBranch()
 	if err != nil {
 		e.logf(0, "merge-train", "cannot determine base branch for %s: %v\n", repoKey, err)
-		e.mergeTrainInFlight.Delete(repoKey)
-		return
+		return trialParams{}, nil, false
 	}
 
 	holdingStg := holdingStage(e.cfg)
 	if holdingStg == nil {
 		e.logf(0, "merge-train", "no holding stage configured — aborting train\n")
-		e.mergeTrainInFlight.Delete(repoKey)
-		return
+		return trialParams{}, nil, false
 	}
 
 	// Check if any batch member has fabrik:extend-turns — if so, double max_turns.
@@ -249,7 +272,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		return n
 	}
 
-	p := trialParams{
+	p = trialParams{
 		owner:            owner,
 		repo:             repo,
 		baseBranch:       baseBranch,
@@ -261,10 +284,9 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 
 	// FR-1/FR-4: reconstruct durable in-flight state before forming a fresh batch, so
 	// a restart with an empty in-memory map resumes / completes / dissolves an existing
-	// train instead of starting a duplicate. Reads only durable artifacts; each terminal
-	// route clears the in-flight marker itself.
+	// train instead of starting a duplicate. Reads only durable artifacts.
 	if e.reconstructTrainState(ctx, state, p, batch) {
-		return
+		return trialParams{}, nil, false
 	}
 
 	// Pin the base SHA once (ADR-059 D-b) so every trial — the initial batch and every
@@ -281,8 +303,7 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		if perr != nil {
 			if baseSHA, perr = gitRevParse(wm.baseDir, baseBranch); perr != nil {
 				e.logf(0, "merge-train", "cannot pin base SHA for %s: %v\n", repoKey, perr)
-				e.mergeTrainInFlight.Delete(repoKey)
-				return
+				return trialParams{}, nil, false
 			}
 		}
 		p.baseSHA = baseSHA
@@ -293,11 +314,32 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 	current := e.fetchTrainMembers(ctx, owner, repo, batch)
 	e.logf(0, "merge-train", "assembled %d train member(s) for %s\n", len(current), repoKey)
 
+	return p, current, true
+}
+
+// runMergeTrainWorker is the main body of the merge-train goroutine (ADR-059 D3/D4).
+// After prepareTrainWorker hands off setup, it runs a re-form loop: assemble+validate
+// the (re-formed) batch exactly once; a green result lands immediately (D-d — zero
+// bisection on the common path); a red result opens a per-episode cost budget and
+// bisects to isolate and eject the poisoner (FR-1/FR-2), re-forming the survivors and
+// re-validating (FR-3); cost-cap exhaustion or a non-isolable interaction degrades to
+// the one-at-a-time fallback (FR-5). Every exit from this function — including every
+// nested landing/dissolve helper it calls — clears the in-flight marker via the single
+// deferred finishTrain call below (see ADR-067).
+func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorkerState, owner, repo string, batch []gh.ProjectItem) {
+	repoKey := owner + "/" + repo
+
+	p, current, ok := e.prepareTrainWorker(ctx, state, owner, repo, batch)
+	if !ok {
+		return
+	}
+	defer func() { <-e.sem }()
+	defer e.finishTrain(repoKey)
+
 	// Re-form loop: validate, land-on-green, or bisect-eject-reform on red.
 	for {
 		if len(current) == 0 {
 			e.logf(0, "merge-train", "no survivors remaining for %s — train complete with nothing to land\n", repoKey)
-			e.mergeTrainInFlight.Delete(repoKey)
 			return
 		}
 
@@ -311,14 +353,12 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		if aerr != nil {
 			e.logf(0, "merge-train", "assemble/validate failed for %s: %v\n", repoKey, aerr)
 			e.cleanupTrialArtifacts(p.wm, trialName)
-			e.mergeTrainInFlight.Delete(repoKey)
 			return
 		}
 		if len(survivors) == 0 {
 			// Every member was ejected during assembly (unresolvable conflicts).
 			e.logf(0, "merge-train", "entire batch ejected during assembly for %s\n", repoKey)
 			e.cleanupTrialArtifacts(p.wm, trialName)
-			e.mergeTrainInFlight.Delete(repoKey)
 			return
 		}
 
@@ -326,7 +366,6 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		if count, tripped := e.isRunawayTripped(repoKey); tripped {
 			e.cleanupTrialArtifacts(p.wm, trialName)
 			e.fireRunawayGuard(ctx, p.owner, p.repo, membersToItems(current), count)
-			e.mergeTrainInFlight.Delete(repoKey)
 			return
 		}
 
@@ -340,15 +379,13 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 		case TrainCIGreen:
 			// D-d hard invariant: a green batch lands immediately, zero bisection.
 			// landGreenBatch adds the D5 main-moved landing gate (behind → rebase →
-			// revalidate → dissolve-on-exhaustion) around landMergeTrainBatch; both
-			// terminal paths clear mergeTrainInFlight.
+			// revalidate → dissolve-on-exhaustion) around landMergeTrainBatch.
 			e.logf(0, "merge-train", "combined Validate green for %s (%d survivor(s)) — landing\n", repoKey, len(survivors))
 			e.landGreenBatch(ctx, state, p, survivors)
 			return
 		case TrainCIPending:
 			e.logf(0, "merge-train", "combined Validate pending/timed out for %s — will retry next poll\n", repoKey)
 			e.cleanupTrialArtifacts(p.wm, trialName)
-			e.mergeTrainInFlight.Delete(repoKey)
 			return
 		default: // TrainCIRed
 			e.logf(0, "merge-train", "combined Validate RED for %s (%d member(s)) — bisecting to isolate the poisoner\n", repoKey, len(survivors))
@@ -365,12 +402,10 @@ func (e *Engine) runMergeTrainWorker(ctx context.Context, state *mergeTrainWorke
 				// Runaway guard fired inside bisect or landOneAtATime.
 				count, _ := e.isRunawayTripped(repoKey)
 				e.fireRunawayGuard(ctx, p.owner, p.repo, membersToItems(survivors), count)
-				e.mergeTrainInFlight.Delete(repoKey)
 				return
 			}
 			if fellBack {
 				// The one-at-a-time fallback already landed/ejected every member.
-				e.mergeTrainInFlight.Delete(repoKey)
 				return
 			}
 			current = nextSurvivors // re-form survivors and re-validate (FR-3)
@@ -1189,10 +1224,11 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 
 	defer func() {
 		// FR-4: cleanup trial worktree and remote branch regardless of landing outcome.
+		// The in-flight marker itself is cleared by runMergeTrainWorker's top-level
+		// defer, not here — see ADR-067.
 		if cleanErr := wm.CleanupTrainWorktree(trialName, true); cleanErr != nil {
 			e.logf(0, "merge-train", "warn: cleanup trial worktree for %s failed: %v\n", repoKey, cleanErr)
 		}
-		e.mergeTrainInFlight.Delete(repoKey)
 	}()
 
 	trialBranch := "fabrik/merge-train/" + trialName
@@ -1315,11 +1351,12 @@ func (e *Engine) landMergeTrainBatch(ctx context.Context, state *mergeTrainWorke
 
 // dissolveBatch tears down an in-flight batch and returns every member to the
 // Queued column untouched (ADR-059 D5, FR-5). It closes the integration/CI PR (if
-// open), deletes the trial branch locally and on origin, posts an explanatory
-// comment on each member so the outcome is observable, and clears the in-flight
-// marker. Members are never status-rolled-back — they only advance to Done on a
-// successful landing, so leaving them in Queued needs no mutation. The next poll
-// re-snapshots Queued and forms a fresh train.
+// open), deletes the trial branch locally and on origin, and posts an explanatory
+// comment on each member so the outcome is observable. The in-flight marker itself
+// is cleared by the caller's chain back to runMergeTrainWorker or prepareTrainWorker,
+// not by dissolveBatch (ADR-067). Members are never status-rolled-back — they only
+// advance to Done on a successful landing, so leaving them in Queued needs no
+// mutation. The next poll re-snapshots Queued and forms a fresh train.
 //
 // Idempotent: CloseIssue on an already-closed PR and CleanupTrainWorktree on an
 // already-deleted branch are best-effort no-ops, so a crash mid-dissolve is safe
@@ -1350,7 +1387,8 @@ func (e *Engine) dissolveBatch(state *mergeTrainWorkerState, p trialParams, prNu
 		}
 	}
 
-	e.mergeTrainInFlight.Delete(repoKey)
+	// The in-flight marker itself is cleared by runMergeTrainWorker's top-level
+	// defer, not here — see ADR-067.
 }
 
 // membersToItems projects a []trainMember down to the underlying []gh.ProjectItem.
@@ -1453,7 +1491,8 @@ func (e *Engine) landGreenBatch(ctx context.Context, state *mergeTrainWorkerStat
 // routes based on the train PR whose members are still in the current Queued snapshot
 // (historical PRs from prior completed batches are skipped so they cannot abort or
 // corrupt today's fresh batch). It returns true only when it has fully handled an
-// in-flight batch (each such terminal route clears the in-flight marker):
+// in-flight batch — the caller (prepareTrainWorker) treats a true return as its own
+// failure path and clears the in-flight marker itself (ADR-067):
 //
 //   - merged landing PR (batch marker) with members still Queued → complete the
 //     deferred member lifecycle (idempotent landMergeTrainBatch advancement);
@@ -1562,7 +1601,9 @@ func (e *Engine) completeDeferredLanding(ctx context.Context, state *mergeTrainW
 	items := filterBatchByNumbers(batch, parseTrainMembers(pr.Body))
 	if len(items) == 0 {
 		e.logf(0, "merge-train", "reconstruct: merged integration PR #%d for %s has no still-Queued members — nothing to complete\n", pr.Number, repoKey)
-		e.mergeTrainInFlight.Delete(repoKey)
+		// The in-flight marker is cleared by prepareTrainWorker's own-failure defer
+		// (this function is only reached via reconstructTrainState returning true,
+		// which prepareTrainWorker treats as ok=false) — see ADR-067.
 		return
 	}
 	e.logf(0, "merge-train", "reconstruct: completing deferred landing for %s from merged PR #%d (%d still-Queued member(s))\n", repoKey, pr.Number, len(items))
@@ -1574,11 +1615,11 @@ func (e *Engine) completeDeferredLanding(ctx context.Context, state *mergeTrainW
 	survivors := e.fetchTrainMembers(ctx, p.owner, p.repo, items)
 	if len(survivors) == 0 {
 		e.logf(0, "merge-train", "reconstruct: no member PRs resolvable for deferred landing of %s — clearing\n", repoKey)
-		e.mergeTrainInFlight.Delete(repoKey)
 		return
 	}
-	// landMergeTrainBatch re-finds the merged marker PR, skips FR-2, advances members,
-	// and clears the in-flight marker in its deferred cleanup.
+	// landMergeTrainBatch re-finds the merged marker PR and skips FR-2 (merge already
+	// happened); the in-flight marker is cleared by runMergeTrainWorker's top-level
+	// defer once this whole call chain unwinds.
 	e.landMergeTrainBatch(ctx, state, p.owner, p.repo, p.baseBranch, survivors, p.wm)
 }
 
