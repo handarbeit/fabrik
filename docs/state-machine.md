@@ -1715,7 +1715,7 @@ This is a deliberately fragile-by-design, best-effort mechanism: a parameterized
 
 **Deliberately label-state-agnostic.** Unlike every other settle-owner, this scan is **not** conditioned on `fabrik:paused`, `fabrik:awaiting-input`, `fabrik:blocked`, or any other in-flight label. A closed issue at a non-terminal column is itself a terminal state that supersedes any gate/lock label — no further pipeline work can occur on a closed issue sitting outside Done regardless of what else is set on it, so there is nothing for those labels to protect against here (ADR-064).
 
-**Code path:** the settle scan, `settleClosedItemsToDone` (`engine/closed_item_advance_settle.go`), called unconditionally every poll from `poll.go`, immediately after the child board-placement settle scan (§6.9) and before the (currently disabled) `archiveDoneCompleteItems` call.
+**Code path:** the settle scan, `settleClosedItemsToDone` (`engine/closed_item_advance_settle.go`), called unconditionally every poll from `poll.go`, immediately after the child board-placement settle scan (§6.9). Auto-archiving of Done items is not currently implemented (tracked separately by #1035).
 
 **Flow:**
 1. Resolve the cleanup (Done) stage via `cleanupStage(e.cfg)` — the lowest-`Order` stage with `CleanupWorktree: true`, mirroring `holdingStage`'s shape but by explicit min-`Order` scan (the same convention `settleNoWorkNeeded` uses) rather than first-encountered, since `e.cfg.Stages` could theoretically contain more than one cleanup-flagged stage. If none is configured, the scan is a no-op for the whole poll — no panic.
@@ -1724,7 +1724,7 @@ This is a deliberately fragile-by-design, best-effort mechanism: a parameterized
 4. Otherwise call `advanceClosedItemToDone`, which mirrors `advanceToQueued`'s shape: look up the cleanup stage's status option, call `UpdateProjectItemStatus`, write through `boardcache.CacheImpl.UpdateItemStatus`, and register the webhook echo. No completion label is added — unlike `advanceToQueued`'s `stage:Validate:complete`, this scan has no per-stage bookkeeping to do; landing the item at the cleanup column is sufficient for the existing `CleanupWorktree` dispatch branch (`engine/item.go:439`) to take over unmodified on the next poll (worktree reaping, `stage:Done:complete` labeling).
 5. On any failure (`e.statusField == nil`, no matching status option, or the API call itself failing), log a warning and move on — no retry counter, no escalation. The next poll re-derives the same predicate from `board.Items` and retries automatically; there is nothing to lose between polls, so a bare retry-forever loop is sufficient (ADR-064; contrast with §6.7–6.10's `MaxRetries`/escalation machinery, which exists to protect an at-risk *sequence* of calls or a durable marker this scan does not have).
 
-**Downstream: unmodified.** Once an item lands at the cleanup column via this scan, no new logic runs — the existing `CleanupWorktree` dispatch branch reaps the worktree and adds `stage:Done:complete` exactly as it already does for every other route into Done (§6.10, the normal pipeline advance, `settleNoWorkNeeded`). `archiveDoneCompleteItems` remains disabled in production (`engine/poll.go`, tracked separately by #687) — this scan closes the *reachability* gap (worktree leak, permanent dispatch stall) but not the *archival* gap: a previously-stranded closed item now gets cleaned up and reaches a `stage:Done:complete`, terminal-skip-eligible state, but still occupies a board row (a cheap one, skipped on every subsequent poll) until #687 ships or an operator manually archives it.
+**Downstream: unmodified.** Once an item lands at the cleanup column via this scan, no new logic runs — the existing `CleanupWorktree` dispatch branch reaps the worktree and adds `stage:Done:complete` exactly as it already does for every other route into Done (§6.10, the normal pipeline advance, `settleNoWorkNeeded`). Auto-archiving of Done items is not currently implemented (tracked separately by #1035) — this scan closes the *reachability* gap (worktree leak, permanent dispatch stall) but not the *archival* gap: a previously-stranded closed item now gets cleaned up and reaches a `stage:Done:complete`, terminal-skip-eligible state, but still occupies a board row (a cheap one, skipped on every subsequent poll) until #1035 ships or an operator manually archives it.
 
 **State transitions:**
 
@@ -2512,9 +2512,9 @@ The worktree janitor reaps orphaned git worktrees left behind when issues exit t
 managed lifecycle without triggering the normal `cleanup_worktree: true` Done-stage path.
 Three scenarios produce stranded worktrees:
 
-1. **Off-board items** — issues removed from the project board (archived, deleted, or
-   removed by `archiveDoneCompleteItems`) are no longer iterated by the poll loop; their
-   worktrees persist indefinitely.
+1. **Off-board items** — issues removed from the project board (archived manually by an
+   operator, or deleted) are no longer iterated by the poll loop; their worktrees
+   persist indefinitely.
 2. **Narrow restart window** — Fabrik dies after `attemptMergeOnValidate` advances the
    board to Done but before the next poll dispatches the Done stage.
 3. **Stage YAML drift** — an operator who renames or removes the Done stage from their
@@ -2855,7 +2855,7 @@ Terminal state is stored as a `Terminal bool` field in `ItemState` and set/clear
 
 **Full reconcile — drift-recovery (webhook mode)**
 
-`LightReconcile` returns the fresh board snapshot when drift is detected, which the `reconcileTicker` goroutine passes directly to `cacheImpl.Reconcile(board)` — avoiding a second API call. `reconcileCache` (the older full-fetch-and-reconcile helper) is retained but is no longer called by the engine.
+`LightReconcile` returns the fresh board snapshot when drift is detected, which the `reconcileTicker` goroutine passes directly to `cacheImpl.Reconcile(board)` — avoiding a second API call. The older full-fetch-and-reconcile helper (`reconcileCache`) has been removed; `reconcileLoop`'s `LightReconcile` path is the sole reconciliation mechanism.
 
 `Reconcile` performs a deep partial update:
 - For each item in the fresh board snapshot: update shallow fields (`Status`, shallow `Labels`, `UpdatedAt`, etc.) in-place. Deep fields (`Comments`, `LinkedPR*`, etc.) are **preserved** from the existing cache entry to avoid triggering a burst of FetchItemDetails calls after each reconciliation.
