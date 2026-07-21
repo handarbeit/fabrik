@@ -44,67 +44,72 @@ func authErrorHint(statusCode int) string {
 	return ""
 }
 
-func (c *Client) restRequest(method, url string, body interface{}) error {
-	jsonBody, err := json.Marshal(body)
-	if err != nil {
-		return fmt.Errorf("marshaling request: %w", err)
+// do is the shared REST request core. It marshals body (when non-nil), sets
+// auth/content-type/accept headers, executes the request, records rate-limit
+// stats, and maps 404/405/422 responses to their sentinel errors uniformly
+// across every REST verb. body may be nil for GET/DELETE-without-body calls;
+// Content-Type is only set when body is non-nil, matching what each verb sent
+// before this helper existed. The full response body is always read and
+// returned so typed callers can decode it themselves.
+func (c *Client) do(method, url string, body interface{}) (*http.Response, []byte, error) {
+	var reader io.Reader
+	if body != nil {
+		jsonBody, err := json.Marshal(body)
+		if err != nil {
+			return nil, nil, fmt.Errorf("marshaling request: %w", err)
+		}
+		reader = bytes.NewReader(jsonBody)
 	}
 
-	req, err := http.NewRequest(method, url, bytes.NewReader(jsonBody))
+	req, err := http.NewRequest(method, url, reader)
 	if err != nil {
-		return fmt.Errorf("creating request: %w", err)
+		return nil, nil, fmt.Errorf("creating request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Content-Type", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("executing request: %w", err)
+		return nil, nil, fmt.Errorf("executing request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	c.updateRestStats(resp.Header)
 
-	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
-		switch resp.StatusCode {
-		case 405:
-			return fmt.Errorf("GitHub API returned 405: %s: %w", string(respBody), ErrMethodNotAllowed)
-		case 422:
-			return fmt.Errorf("GitHub API returned 422: %s: %w", string(respBody), ErrUnprocessableEntity)
-		}
-		return fmt.Errorf("GitHub API returned %d: %s%s", resp.StatusCode, string(respBody), authErrorHint(resp.StatusCode))
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading response: %w", err)
 	}
 
-	return nil
+	if resp.StatusCode >= 400 {
+		switch resp.StatusCode {
+		case 404:
+			return resp, respBody, fmt.Errorf("GitHub API returned 404: %s: %w", string(respBody), ErrNotFound)
+		case 405:
+			return resp, respBody, fmt.Errorf("GitHub API returned 405: %s: %w", string(respBody), ErrMethodNotAllowed)
+		case 422:
+			return resp, respBody, fmt.Errorf("GitHub API returned 422: %s: %w", string(respBody), ErrUnprocessableEntity)
+		}
+		return resp, respBody, fmt.Errorf("GitHub API returned %d: %s%s", resp.StatusCode, string(respBody), authErrorHint(resp.StatusCode))
+	}
+
+	return resp, respBody, nil
+}
+
+func (c *Client) restRequest(method, url string, body interface{}) error {
+	_, _, err := c.do(method, url, body)
+	return err
 }
 
 func (c *Client) restGetJSON(url string, result interface{}) error {
-	req, err := http.NewRequest("GET", url, nil)
+	_, respBody, err := c.do("GET", url, nil)
 	if err != nil {
-		return fmt.Errorf("creating request: %w", err)
+		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("executing request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	c.updateRestStats(resp.Header)
-
-	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode == 404 {
-			return fmt.Errorf("GitHub API returned 404: %s: %w", string(respBody), ErrNotFound)
-		}
-		return fmt.Errorf("GitHub API returned %d: %s%s", resp.StatusCode, string(respBody), authErrorHint(resp.StatusCode))
-	}
-
-	return json.NewDecoder(resp.Body).Decode(result)
+	return json.Unmarshal(respBody, result)
 }
 
 // SearchResult represents the response from GitHub's search API.
@@ -115,28 +120,12 @@ type SearchResult struct {
 }
 
 func (c *Client) restGet(url string) (*SearchResult, error) {
-	req, err := http.NewRequest("GET", url, nil)
+	_, respBody, err := c.do("GET", url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
+		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("executing request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	c.updateRestStats(resp.Header)
-
-	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("GitHub API returned %d: %s%s", resp.StatusCode, string(respBody), authErrorHint(resp.StatusCode))
-	}
-
 	var result SearchResult
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
 	return &result, nil
@@ -148,33 +137,11 @@ func (c *Client) restPost(url string, body interface{}) error {
 
 // restPostWithResponse POSTs and decodes the response body into the provided target.
 func (c *Client) restPostWithResponse(url string, body interface{}, target interface{}) error {
-	jsonBody, err := json.Marshal(body)
+	_, respBody, err := c.do("POST", url, body)
 	if err != nil {
-		return fmt.Errorf("marshaling request: %w", err)
+		return err
 	}
-
-	req, err := http.NewRequest("POST", url, bytes.NewReader(jsonBody))
-	if err != nil {
-		return fmt.Errorf("creating request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/vnd.github+json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("executing request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	c.updateRestStats(resp.Header)
-
-	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("GitHub API returned %d: %s%s", resp.StatusCode, string(respBody), authErrorHint(resp.StatusCode))
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
+	if err := json.Unmarshal(respBody, target); err != nil {
 		return fmt.Errorf("decoding response: %w", err)
 	}
 	return nil
@@ -186,67 +153,17 @@ func (c *Client) restPatch(url string, body interface{}) error {
 
 // restPutWithResponse PUTs and decodes the response body into the provided target.
 func (c *Client) restPutWithResponse(url string, body interface{}, target interface{}) error {
-	jsonBody, err := json.Marshal(body)
+	_, respBody, err := c.do("PUT", url, body)
 	if err != nil {
-		return fmt.Errorf("marshaling request: %w", err)
+		return err
 	}
-
-	req, err := http.NewRequest("PUT", url, bytes.NewReader(jsonBody))
-	if err != nil {
-		return fmt.Errorf("creating request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/vnd.github+json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("executing request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	c.updateRestStats(resp.Header)
-
-	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
-		switch resp.StatusCode {
-		case 405:
-			return fmt.Errorf("GitHub API returned 405: %s: %w", string(respBody), ErrMethodNotAllowed)
-		case 422:
-			return fmt.Errorf("GitHub API returned 422: %s: %w", string(respBody), ErrUnprocessableEntity)
-		}
-		return fmt.Errorf("GitHub API returned %d: %s%s", resp.StatusCode, string(respBody), authErrorHint(resp.StatusCode))
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
+	if err := json.Unmarshal(respBody, target); err != nil {
 		return fmt.Errorf("decoding response: %w", err)
 	}
 	return nil
 }
 
 func (c *Client) restDelete(url string) error {
-	req, err := http.NewRequest("DELETE", url, nil)
-	if err != nil {
-		return fmt.Errorf("creating request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("executing request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	c.updateRestStats(resp.Header)
-
-	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode == 404 {
-			return fmt.Errorf("GitHub API returned 404: %s: %w", string(respBody), ErrNotFound)
-		}
-		return fmt.Errorf("GitHub API returned %d: %s%s", resp.StatusCode, string(respBody), authErrorHint(resp.StatusCode))
-	}
-
-	return nil
+	_, _, err := c.do("DELETE", url, nil)
+	return err
 }
