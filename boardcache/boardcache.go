@@ -950,6 +950,17 @@ func (c *CacheImpl) ApplyStatusBatch(updates map[string]string) {
 	}
 }
 
+// RemoveItem removes the cached item identified by itemID (the GraphQL project-item
+// node ID), mirroring the webhook delta path's "deleted"/"archived" handling
+// (boardcache/delta.go). Used by the archive-done settle scan (engine/archive_done_settle.go)
+// to write through a successful ArchiveProjectItem call so the cache stays consistent
+// with GitHub's view without waiting for a webhook echo or the next Reconcile.
+// No-op (not an error) when itemID is unknown — safe to call redundantly. Safe for
+// concurrent use.
+func (c *CacheImpl) RemoveItem(itemID string) {
+	c.store.RemoveByItemID(itemID)
+}
+
 // RegisterItemID sets the project-item node ID for an existing cache entry that
 // was added without one (e.g., via issues.opened before projects_v2_item.created).
 // No-op when key is not in the Store or itemID is empty. Safe for concurrent use.

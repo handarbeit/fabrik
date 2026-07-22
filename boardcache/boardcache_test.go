@@ -1316,6 +1316,33 @@ func TestApplyStatusBatchSkipsUnknownItemIDs(t *testing.T) {
 	}
 }
 
+func TestRemoveItemRemovesCachedItem(t *testing.T) {
+	c := seedCache(t)
+
+	c.RemoveItem("PVTI_001")
+
+	if _, err := c.store.Get("owner/repo", 1); !errors.Is(err, itemstate.ErrNotFound) {
+		t.Errorf("expected item 1 to be removed (ErrNotFound), got err=%v", err)
+	}
+	// Item 2 must remain untouched.
+	if _, err := c.store.Get("owner/repo", 2); err != nil {
+		t.Errorf("expected item 2 to remain cached, got err=%v", err)
+	}
+	if len(c.store.All()) != 1 {
+		t.Errorf("item count should be 1 after removal, got %d", len(c.store.All()))
+	}
+}
+
+func TestRemoveItemUnknownItemIDIsNoOp(t *testing.T) {
+	c := seedCache(t)
+
+	c.RemoveItem("PVTI_UNKNOWN")
+
+	if len(c.store.All()) != 2 {
+		t.Errorf("item count should remain 2, got %d", len(c.store.All()))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // GetItemID and ProjectID tests
 // ---------------------------------------------------------------------------
