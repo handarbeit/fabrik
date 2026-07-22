@@ -252,3 +252,81 @@ func TestSettleArchiveDoneItems_SuccessfulArchive_ArchivesImmediatelyWithZeroGra
 		t.Fatalf("expected 1 archive call, got %d", len(client.archiveProjectItemCalls))
 	}
 }
+
+// TestSettleArchiveDoneItems_SuccessfulArchive_NoWebhookEchoRegistered is the
+// regression test for the adversarial-review [HIGH] finding: delta.go's
+// applyProjectsV2ItemDelta "deleted"/"archived" case never calls matchEchoFn
+// (only "edited" does), so an echo registered for the archive path would
+// expire unmatched and could trip doEchoSweep's WebhookStreamUnhealthy
+// threshold on burst-archival. maybeArchiveDoneItem must not register one.
+func TestSettleArchiveDoneItems_SuccessfulArchive_NoWebhookEchoRegistered(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineWithStages(t, client, closedAdvanceStages())
+	eng.cfg.ArchiveAfter = 0
+	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+		return time.Now().Add(-1 * time.Second), nil
+	}
+	wm, _ := newTestWebhookManager(t)
+	eng.webhookMgr = wm
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 10, ItemID: "PVTI_10", Repo: "owner/repo",
+		Status: "Done", Labels: []string{"stage:Done:complete"},
+	}
+	board.Items = []gh.ProjectItem{item}
+
+	eng.settleArchiveDoneItems(board)
+
+	if len(client.archiveProjectItemCalls) != 1 {
+		t.Fatalf("expected 1 archive call, got %d", len(client.archiveProjectItemCalls))
+	}
+	wm.mu.Lock()
+	pending := len(wm.pendingEchoes)
+	wm.mu.Unlock()
+	if pending != 0 {
+		t.Errorf("expected no pending webhook echo after archive (would expire unmatched), got %d", pending)
+	}
+}
+
+// TestSettleArchiveDoneItems_FetchBudgetCappedPerPoll is the regression test for
+// the adversarial-review [MED] cold-cache-restart-burst finding: on a fresh
+// engine (empty CooldownAt cache — e.g. right after a restart), a poll must not
+// fire an unbounded number of synchronous FetchLabelAppliedAt calls. Only
+// maxArchiveLabelFetchesPerPoll cache-misses are evaluated per poll; the rest
+// are left uncached and retried on the next poll.
+func TestSettleArchiveDoneItems_FetchBudgetCappedPerPoll(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineWithStages(t, client, closedAdvanceStages())
+	eng.cfg.ArchiveAfter = 24 * time.Hour
+	client.fetchLabelAppliedAtFn = func(owner, repo string, issueNumber int, labelName string) (time.Time, error) {
+		return time.Now().Add(-1 * time.Hour), nil
+	}
+
+	origBudget := maxArchiveLabelFetchesPerPoll
+	maxArchiveLabelFetchesPerPoll = 2
+	t.Cleanup(func() { maxArchiveLabelFetchesPerPoll = origBudget })
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	for i := 20; i < 25; i++ { // 5 items, budget of 2
+		board.Items = append(board.Items, gh.ProjectItem{
+			Number: i, ItemID: "PVTI_" + string(rune('A'+i)), Repo: "owner/repo",
+			Status: "Done", Labels: []string{"stage:Done:complete"},
+		})
+	}
+
+	eng.settleArchiveDoneItems(board)
+
+	if len(client.fetchLabelAppliedAtCalls) != 2 {
+		t.Fatalf("expected FetchLabelAppliedAt capped at budget of 2, got %d calls", len(client.fetchLabelAppliedAtCalls))
+	}
+
+	// The remaining 3 items must retry (uncached) on the next poll, not be
+	// stuck forever: with the budget restored to a large value, a second pass
+	// should fetch the other 3.
+	maxArchiveLabelFetchesPerPoll = origBudget
+	eng.settleArchiveDoneItems(board)
+	if len(client.fetchLabelAppliedAtCalls) != 5 {
+		t.Errorf("expected all 5 items fetched after budget lifted on next poll, got %d calls", len(client.fetchLabelAppliedAtCalls))
+	}
+}
