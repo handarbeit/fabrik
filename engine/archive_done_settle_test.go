@@ -226,7 +226,12 @@ func TestSettleArchiveDoneItems_ZeroTimeAppliedAt_SkipsWithoutCaching(t *testing
 	}
 }
 
-func TestSettleArchiveDoneItems_SuccessfulArchive_WritesThroughCacheAndEcho(t *testing.T) {
+// Cache write-through and webhook-echo registration for a successful archive
+// are exercised at the boardcache level (TestRemoveItemRemovesCachedItem) and
+// via webhookManager's own tests, matching settleClosedItemsToDone's (ADR-064)
+// test-depth convention: this settle-scan test verifies the ArchiveProjectItem
+// call itself, not the write-through machinery downstream of it.
+func TestSettleArchiveDoneItems_SuccessfulArchive_ArchivesImmediatelyWithZeroGracePeriod(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := testEngineWithStages(t, client, closedAdvanceStages())
 	eng.cfg.ArchiveAfter = 0 // archive immediately once eligible
