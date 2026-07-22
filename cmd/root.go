@@ -10,12 +10,12 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/mattn/go-isatty"
 	"github.com/handarbeit/fabrik/config"
 	"github.com/handarbeit/fabrik/engine"
 	fabrikplugin "github.com/handarbeit/fabrik/plugin"
 	"github.com/handarbeit/fabrik/stages"
 	"github.com/handarbeit/fabrik/tui"
+	"github.com/mattn/go-isatty"
 )
 
 // testReadyCh is set by tests to receive a signal once engine.Run has
@@ -29,52 +29,54 @@ var testReadyCh chan struct{}
 var testResolvedConfigHook func(Config)
 
 type Config struct {
-	Owner             string
-	Repo              string
-	ProjectNum        int
-	OwnerType         string
-	User              string
-	Token             string
-	StagesDir         string
-	Yolo              bool
-	AutoUpgrade       bool
-	GitSSH            bool
-	TUI               bool
-	PollSeconds       int
-	MaxConcurrent     int
-	MaxRetries        int
-	ReviewWaitTimeout int // minutes; 0 means use default (15)
-	MaxReviewCycles   int // 0 means use default (5)
-	CIWaitTimeout     int // minutes; 0 means use default (30)
-	WorkerStaleMins   int // minutes; 0 means use default (5)
-	MaxCiFixCycles    int // 0 means use default (5)
-	MaxRebaseCycles      int    // 0 means use default (3)
-	MaxEnqueueCycles     int    // 0 means use default (5)
-	ConvergenceBudget    string // Go duration string; "" means use default (30m); "0" means disabled
-	AutoMergeStrategy    string // MERGE, SQUASH, or REBASE; "" means use default (MERGE)
-	MergeQueue           string // auto or off; "" means use default (auto)
-	MergeTrain           string // on or off; "" means use default (off)
-	MaxBatchSize             int    // 0 means use default (5)
-	MaxBisectValidations     int    // 0 means derive default (2·⌈log₂(MaxBatchSize)⌉+1)
-	MaxTrainRebaseCycles     int    // 0 means use default (3)
-	MaxTrainTrialsPerWindow  int    // 0 means use default (20)
-	TrainTrialWindowMinutes  int    // 0 means use default (60)
-	ClaudeWaitDelay          int    // seconds; 0 means use default (30)
-	PostPushDwell        int    // seconds; 0 means use default (90)
-	KillGraceSigInt      string // Go duration string; "" means use default (10s); "0s" skips SIGINT step
-	KillGraceSigTerm     string // Go duration string; "" means use default (10s)
-	DebugOutput              bool
-	SymlinkEnv               bool
-	WorktreeBoundaryAudit    bool
-	PluginDir                string
-	Webhooks          bool
-	WebhookPort       int
-	WebhookEvents     string // comma-separated; empty means default event set
-	StatusPollSeconds    int // Layer 2 status-only sweep cadence in seconds; 0 = use default (15)
-	ReconcileInterval    int // seconds; 0 means use default (180 = 3 min); also FABRIK_RECONCILE_INTERVAL
-	JanitorIntervalHours int   // hours; 1 = default; 0 disables the janitor
-	LogRetentionDays     int   // days; 14 = default; 0 disables age-based log pruning
-	LogMaxBytes          int64 // bytes; 2147483648 = default; 0 disables size-cap pruning
+	Owner                   string
+	Repo                    string
+	ProjectNum              int
+	OwnerType               string
+	User                    string
+	Token                   string
+	StagesDir               string
+	Yolo                    bool
+	AutoUpgrade             bool
+	GitSSH                  bool
+	TUI                     bool
+	PollSeconds             int
+	MaxConcurrent           int
+	MaxRetries              int
+	ReviewWaitTimeout       int    // minutes; 0 means use default (15)
+	MaxReviewCycles         int    // 0 means use default (5)
+	CIWaitTimeout           int    // minutes; 0 means use default (30)
+	WorkerStaleMins         int    // minutes; 0 means use default (5)
+	MaxCiFixCycles          int    // 0 means use default (5)
+	MaxRebaseCycles         int    // 0 means use default (3)
+	MaxEnqueueCycles        int    // 0 means use default (5)
+	ConvergenceBudget       string // Go duration string; "" means use default (30m); "0" means disabled
+	AutoMergeStrategy       string // MERGE, SQUASH, or REBASE; "" means use default (MERGE)
+	MergeQueue              string // auto or off; "" means use default (auto)
+	MergeTrain              string // on or off; "" means use default (off)
+	MaxBatchSize            int    // 0 means use default (5)
+	MaxBisectValidations    int    // 0 means derive default (2·⌈log₂(MaxBatchSize)⌉+1)
+	MaxTrainRebaseCycles    int    // 0 means use default (3)
+	MaxTrainTrialsPerWindow int    // 0 means use default (20)
+	TrainTrialWindowMinutes int    // 0 means use default (60)
+	ClaudeWaitDelay         int    // seconds; 0 means use default (30)
+	PostPushDwell           int    // seconds; 0 means use default (90)
+	KillGraceSigInt         string // Go duration string; "" means use default (10s); "0s" skips SIGINT step
+	KillGraceSigTerm        string // Go duration string; "" means use default (10s)
+	DebugOutput             bool
+	SymlinkEnv              bool
+	WorktreeBoundaryAudit   bool
+	PluginDir               string
+	Webhooks                bool
+	WebhookPort             int
+	WebhookEvents           string // comma-separated; empty means default event set
+	StatusPollSeconds       int    // Layer 2 status-only sweep cadence in seconds; 0 = use default (15)
+	ReconcileInterval       int    // seconds; 0 means use default (180 = 3 min); also FABRIK_RECONCILE_INTERVAL
+	JanitorIntervalHours    int    // hours; 1 = default; 0 disables the janitor
+	LogRetentionDays        int    // days; 14 = default; 0 disables age-based log pruning
+	LogMaxBytes             int64  // bytes; 2147483648 = default; 0 disables size-cap pruning
+	ArchiveAfter            string // Go duration string; "" means use default (24h); also FABRIK_ARCHIVE_AFTER
+	ArchiveDone             string // on or off; "" means use default (on); also FABRIK_ARCHIVE_DONE
 }
 
 func Execute() error {
@@ -176,6 +178,8 @@ func Execute() error {
 	flag.Int64Var(&cfg.LogMaxBytes, "log-max-bytes", 2147483648, "Total size cap for .fabrik/logs/ in bytes; oldest files deleted first after age prune; 0 disables size cap (also FABRIK_LOG_MAX_BYTES)")
 	flag.StringVar(&cfg.KillGraceSigInt, "kill-grace-sigint", "", "Grace window after SIGINT before SIGTERM in the kill escalation sequence (Go duration: 10s, 0s to skip SIGINT entirely; also FABRIK_KILL_GRACE_SIGINT; default 10s)")
 	flag.StringVar(&cfg.KillGraceSigTerm, "kill-grace-sigterm", "", "Grace window after SIGTERM before SIGKILL in the kill escalation sequence (Go duration: 10s; also FABRIK_KILL_GRACE_SIGTERM; default 10s)")
+	flag.StringVar(&cfg.ArchiveAfter, "archive-after", "", "Grace period since an item settled into Done before it is auto-archived off the project board (Go duration: 24h, 12h; also FABRIK_ARCHIVE_AFTER; default 24h)")
+	flag.StringVar(&cfg.ArchiveDone, "archive-done", "", "Auto-archive Done items after archive-after elapses: on or off (also FABRIK_ARCHIVE_DONE; default on)")
 
 	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
 		return err
@@ -513,6 +517,14 @@ func Execute() error {
 	if !explicitFlags["kill-grace-sigterm"] {
 		cfg.KillGraceSigTerm = resolveDuration(cfg.KillGraceSigTerm, "FABRIK_KILL_GRACE_SIGTERM") // validated in killGraceSigTerm() helper
 	}
+	if !explicitFlags["archive-after"] {
+		cfg.ArchiveAfter = resolveDuration(cfg.ArchiveAfter, "FABRIK_ARCHIVE_AFTER") // validated in archiveAfter() helper
+	}
+	if !explicitFlags["archive-done"] {
+		if v := os.Getenv("FABRIK_ARCHIVE_DONE"); v != "" {
+			cfg.ArchiveDone = v // validated in archiveDoneMode() helper
+		}
+	}
 	if !cfg.AutoUpgrade {
 		cfg.AutoUpgrade = resolveBool("FABRIK_AUTO_UPGRADE", pc.AutoUpgrade)
 	}
@@ -685,11 +697,11 @@ func Execute() error {
 		AutoMergeStrategy:        autoMergeStrategy(cfg.AutoMergeStrategy),
 		MergeQueue:               mergeQueueMode(cfg.MergeQueue),
 		MergeTrain:               mergeTrainMode(cfg.MergeTrain),
-		MaxMergeTrainEjections:   3, // ADR-059 default
-		MaxBatchSize:             cfg.MaxBatchSize,                                // 0 = derive default (5) in engine
-		MaxBisectValidations:     cfg.MaxBisectValidations,                        // 0 = derive default in engine
-		MaxTrainRebaseCycles:     cfg.MaxTrainRebaseCycles,                        // 0 = derive default (3) in engine
-		MaxTrainTrialsPerWindow:  cfg.MaxTrainTrialsPerWindow,                     // 0 = derive default (20) in engine
+		MaxMergeTrainEjections:   3,                                                     // ADR-059 default
+		MaxBatchSize:             cfg.MaxBatchSize,                                      // 0 = derive default (5) in engine
+		MaxBisectValidations:     cfg.MaxBisectValidations,                              // 0 = derive default in engine
+		MaxTrainRebaseCycles:     cfg.MaxTrainRebaseCycles,                              // 0 = derive default (3) in engine
+		MaxTrainTrialsPerWindow:  cfg.MaxTrainTrialsPerWindow,                           // 0 = derive default (20) in engine
 		TrainTrialWindowDuration: trainTrialWindowDuration(cfg.TrainTrialWindowMinutes), // 0 = derive default (60m) in engine
 		ClaudeWaitDelay:          claudeWaitDelay(cfg.ClaudeWaitDelay),
 		KillGraceSigInt:          killGraceSigInt(cfg.KillGraceSigInt),
@@ -707,6 +719,8 @@ func Execute() error {
 		JanitorIntervalHours:     cfg.JanitorIntervalHours,
 		LogRetentionDays:         cfg.LogRetentionDays,
 		LogMaxBytes:              cfg.LogMaxBytes,
+		ArchiveAfter:             archiveAfter(cfg.ArchiveAfter),
+		ArchiveDone:              archiveDoneMode(cfg.ArchiveDone),
 		ReadyCh:                  testReadyCh,
 	})
 	if err != nil {
@@ -977,6 +991,46 @@ func killGraceSigTerm(s string) time.Duration {
 		return 10 * time.Second
 	}
 	return d
+}
+
+// archiveAfter parses the archive-after grace-period string (Go duration syntax)
+// into a time.Duration. An empty string returns the default of 24 hours. "0"/"0s"
+// is a legal value (archive immediately once the item is eligible) — disabling
+// archival entirely is the separate archiveDoneMode() knob, not a sentinel here.
+// Invalid or negative values log a warning and return the default.
+func archiveAfter(s string) time.Duration {
+	if s == "" {
+		return 24 * time.Hour
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[warn] FABRIK_ARCHIVE_AFTER=%q is invalid (Go duration syntax required, e.g. 24h, 12h); using default 24h\n", s)
+		return 24 * time.Hour
+	}
+	if d < 0 {
+		fmt.Fprintf(os.Stderr, "[warn] FABRIK_ARCHIVE_AFTER=%q is negative; using default 24h\n", s)
+		return 24 * time.Hour
+	}
+	return d
+}
+
+// archiveDoneMode normalizes the --archive-done / FABRIK_ARCHIVE_DONE value.
+// Valid values are "on" and "off" (case-insensitive). An empty string defaults to
+// "on" — unlike MergeTrain, this issue's entire point is re-enabling Done-item
+// archival, so it ships active. Unrecognized values produce a warning and fall
+// back to "on".
+func archiveDoneMode(s string) string {
+	if s == "" {
+		return "on"
+	}
+	lower := strings.ToLower(s)
+	switch lower {
+	case "on", "off":
+		return lower
+	default:
+		fmt.Fprintf(os.Stderr, "[warn] FABRIK_ARCHIVE_DONE=%q is invalid (must be on or off); using default on\n", s)
+		return "on"
+	}
 }
 
 // convergenceBudget parses a convergence budget string (Go duration syntax) into
