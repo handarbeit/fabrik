@@ -1093,9 +1093,9 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 
 	// Done-item archival (ADR-068): archives board items that have sat in the Done
 	// (cleanup) column with their completion label for at least ArchiveAfter (default
-	// 24h), so board bloat — and the per-poll GraphQL cost of fetching it — doesn't
-	// grow unbounded. Runs after settleClosedItemsToDone so items advanced to Done
-	// this same poll are visible to it on the next cycle. Disabled entirely via
+	// 168h = 1 week), so board bloat — and the per-poll GraphQL cost of fetching it —
+	// doesn't grow unbounded. Runs after settleClosedItemsToDone so items advanced to
+	// Done this same poll are visible to it on the next cycle. Disabled entirely via
 	// FABRIK_ARCHIVE_DONE=off.
 	e.settleArchiveDoneItems(board)
 

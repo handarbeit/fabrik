@@ -324,7 +324,7 @@ GITHUB_TOKEN=ghp_...    # Fallback
 | `--merge-train` | Fabrik-internal merge train (ADR-059): `on` advances yolo Validate completions into the `Queued` column for batched landing with a single combined Validate, or `off` to keep the existing per-PR auto-merge path (also `FABRIK_MERGE_TRAIN`) | `off` |
 | `--max-train-trials-per-window` | Merge-train runaway guard: maximum trial-branch creations with zero successful lands within the window before pausing all `Queued` members (0 = default 20; also `FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW`) | `0` (20) |
 | `--train-trial-window` | Merge-train runaway guard: rolling window in minutes over which `--max-train-trials-per-window` is measured (0 = default 60; also `FABRIK_TRAIN_TRIAL_WINDOW`) | `0` (60 min) |
-| `--archive-after` | Grace period since an item settled into Done before it is auto-archived off the project board (Go duration: `24h`, `12h`; also `FABRIK_ARCHIVE_AFTER`) | `""` (24h) |
+| `--archive-after` | Grace period since an item settled into Done before it is auto-archived off the project board (Go duration: `168h`, `24h`; also `FABRIK_ARCHIVE_AFTER`) | `""` (168h = 1 week) |
 | `--archive-done` | Auto-archive Done items after `--archive-after` elapses: `on` or `off` (also `FABRIK_ARCHIVE_DONE`) | `""` (on) |
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` for debugging | `false` |
 | `--symlink-env` | Create a relative symlink at `<worktree>/.env` pointing to the fabrikDir `.env` at worktree setup time. Enables stage code to read project secrets without copying them. Also `FABRIK_SYMLINK_ENV`. | `false` |

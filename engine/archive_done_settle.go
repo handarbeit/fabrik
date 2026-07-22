@@ -19,7 +19,7 @@ const archiveEligibleAtCooldownReason = "archive-eligible-at"
 
 // settleArchiveDoneItems is the per-poll settle scan that archives board items
 // once they have been visibly settled in the Done (cleanup) column for at least
-// ArchiveAfter (default 24h). It re-implements the deliberately-disabled
+// ArchiveAfter (default 168h = 1 week). It re-implements the deliberately-disabled
 // archiveDoneCompleteItems (removed dead by #1025) with corrected timing: the
 // original archived Done items immediately, so work appeared to vanish the
 // moment it completed; this version anchors the grace period to the GitHub-side,

@@ -65,7 +65,7 @@ type Config struct {
 	JanitorIntervalHours     int           // Periodic worktree janitor cadence in hours; 0 disables the janitor (default 1)
 	LogRetentionDays         int           // Log files older than this many days are pruned; 0 disables age-based pruning (default 14)
 	LogMaxBytes              int64         // Total size cap for .fabrik/logs/; oldest files deleted first after age prune; 0 disables (default 2 GiB)
-	ArchiveAfter             time.Duration // Grace period since stage:<Done>:complete was applied before a Done item is archived (default 24h; ADR-068)
+	ArchiveAfter             time.Duration // Grace period since stage:<Done>:complete was applied before a Done item is archived (default 168h = 1 week; ADR-068)
 	ArchiveDone              string        // "on" (default) or "off" to fully disable Done-item auto-archival (also FABRIK_ARCHIVE_DONE; ADR-068)
 	// ReadyCh is closed once Run() has registered signal handlers. Tests use
 	// this to avoid sending SIGINT before signal.Notify is installed.

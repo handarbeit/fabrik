@@ -1741,7 +1741,7 @@ This is a deliberately fragile-by-design, best-effort mechanism: a parameterized
 
 ### 6.12 Done-Item Archival
 
-**Trigger:** A board item's current Status resolves to the Done (cleanup) stage and it carries that stage's completion label (`stage:<Done>:complete`), and at least `ArchiveAfter` (default 24h; `--archive-after`/`FABRIK_ARCHIVE_AFTER`) has elapsed since that label was applied. Disabled entirely via `--archive-done off` / `FABRIK_ARCHIVE_DONE=off`.
+**Trigger:** A board item's current Status resolves to the Done (cleanup) stage and it carries that stage's completion label (`stage:<Done>:complete`), and at least `ArchiveAfter` (default 168h/1 week; `--archive-after`/`FABRIK_ARCHIVE_AFTER`) has elapsed since that label was applied. Disabled entirely via `--archive-done off` / `FABRIK_ARCHIVE_DONE=off`.
 
 **Why this exists.** Un-archived Done and closed items accumulate on the project board indefinitely; every one of them is fetched on each poll cycle, inflating per-poll GraphQL cost. A prior implementation, `archiveDoneCompleteItems`, archived Done items immediately on first observation — with no grace period, completed work appeared to vanish from the board the instant it finished, so its call site was deliberately commented out and the dead function later removed (#1025). This settle scan re-implements the capability with a grace period anchored to a restart-safe, GitHub-side timestamp instead (ADR-068).
 
