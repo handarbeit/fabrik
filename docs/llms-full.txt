@@ -627,6 +627,8 @@ FABRIK_USER=my-personal-username
 | `--log-max-bytes` | Total size cap for `.fabrik/logs/` in bytes; oldest files deleted first after age prune; 0 disables size-cap pruning; also `FABRIK_LOG_MAX_BYTES` | `2147483648` (2 GiB) |
 | `--kill-grace-sigint` | Grace window between SIGINT and SIGTERM when killing the Claude process group (Go duration: `5s`, `10s`; empty string = use default of 10s; `"0s"` = skip SIGINT entirely; also `FABRIK_KILL_GRACE_SIGINT`) | `""` (10s) |
 | `--kill-grace-sigterm` | Grace window between SIGTERM and SIGKILL when killing the Claude process group (Go duration: `5s`, `10s`; empty string = use default of 10s; `"0s"` = skip SIGTERM entirely; also `FABRIK_KILL_GRACE_SIGTERM`) | `""` (10s) |
+| `--archive-after` | Grace period since an item settled into Done (its `stage:<Done>:complete` label was applied) before it is auto-archived off the project board (Go duration: `24h`, `12h`; `"0s"` archives immediately once eligible; also `FABRIK_ARCHIVE_AFTER`) | `""` (24h) |
+| `--archive-done` | Auto-archive Done items after `--archive-after` elapses: `on` or `off`; also `FABRIK_ARCHIVE_DONE` | `""` (on) |
 | `--debug-output` | Save Claude stage output to `.fabrik/debug/` | `false` |
 | `--symlink-env` | Create a relative symlink at `<worktree>/.env` pointing to the fabrikDir `.env` file at worktree setup time. Enables stage code to read credentials (e.g. `ANTHROPIC_API_KEY`) from `.env` without copying secrets. No-op when source `.env` is absent; never overwrites an existing `.env` in the worktree; also excluded from git stash via the worktree's git exclude file. Also `FABRIK_SYMLINK_ENV` | `false` |
 
@@ -673,6 +675,8 @@ FABRIK_USER=my-personal-username
 | `FABRIK_LOG_MAX_BYTES` | `log_max_bytes` | Total size cap for `.fabrik/logs/` in bytes; oldest files deleted first after age prune (`0` disables size-cap pruning) | `2147483648` (2 GiB) |
 | `FABRIK_KILL_GRACE_SIGINT` | *(no config.yaml key)* | Grace window between SIGINT and SIGTERM when killing the Claude process group (Go duration string: `"5s"`, `"10s"`; empty or unset = use default of 10s; `"0s"` = skip SIGINT step entirely) | `""` (10s) |
 | `FABRIK_KILL_GRACE_SIGTERM` | *(no config.yaml key)* | Grace window between SIGTERM and SIGKILL when killing the Claude process group (Go duration string: `"5s"`, `"10s"`; empty or unset = use default of 10s; `"0s"` = skip SIGTERM step, SIGKILL fires immediately after SIGINT) | `""` (10s) |
+| `FABRIK_ARCHIVE_AFTER` | *(no config.yaml key)* | Grace period since an item settled into Done before it is auto-archived off the project board (Go duration string: `"24h"`, `"12h"`; empty or unset = use default of 24h; `"0s"` archives immediately once eligible; invalid or negative values fall back to the default) | `""` (24h) |
+| `FABRIK_ARCHIVE_DONE` | *(no config.yaml key)* | Auto-archive Done items after `FABRIK_ARCHIVE_AFTER` elapses: `"on"` or `"off"` (case-insensitive; unrecognized values fall back to `"on"`) | `""` (on) |
 
 Token precedence: `--token` flag > `FABRIK_TOKEN` > `GITHUB_TOKEN`
 
@@ -1563,7 +1567,7 @@ When an issue reaches Done, Fabrik:
 1. **Removes the worktree** — frees disk space from the issue's working copy
 2. **Adds `stage:Done:complete`** — marks cleanup as finished
 
-**Note:** Auto-archive is currently disabled. It was removing items from the board before users could see them, and is being reworked to track actual Done stage completion time. Items will remain in the Done column until auto-archive is re-enabled in a future release. When re-enabled, archived items will not be deleted — they will remain accessible via the project board's "Archive" view in GitHub.
+**Auto-archive:** Once an item has sat in Done with `stage:<Done>:complete` for at least `--archive-after` (default 24h, also `FABRIK_ARCHIVE_AFTER`), Fabrik archives it off the project board. The 24h default is deliberately conservative — a prior implementation archived items the instant they reached Done, so completed work appeared to vanish before anyone could see it land; the grace period exists to give a human time to notice before the item disappears from view. Archived items are not deleted — they remain accessible via the project board's "Archive" view in GitHub, and can be unarchived there if needed. Set `--archive-done off` (also `FABRIK_ARCHIVE_DONE=off`) to disable auto-archival entirely and leave Done items on the board indefinitely.
 
 **Closed-issue auto-advance:** If an issue is closed externally (for example, a PR merge closes it) while its board item sits at any column other than Done, Fabrik automatically advances it to Done. This process has the following properties:
 
@@ -4390,7 +4394,7 @@ This is a deliberately fragile-by-design, best-effort mechanism: a parameterized
 
 **Deliberately label-state-agnostic.** Unlike every other settle-owner, this scan is **not** conditioned on `fabrik:paused`, `fabrik:awaiting-input`, `fabrik:blocked`, or any other in-flight label. A closed issue at a non-terminal column is itself a terminal state that supersedes any gate/lock label — no further pipeline work can occur on a closed issue sitting outside Done regardless of what else is set on it, so there is nothing for those labels to protect against here (ADR-064).
 
-**Code path:** the settle scan, `settleClosedItemsToDone` (`engine/closed_item_advance_settle.go`), called unconditionally every poll from `poll.go`, immediately after the child board-placement settle scan (§6.9). Auto-archiving of Done items is not currently implemented (tracked separately by #1035).
+**Code path:** the settle scan, `settleClosedItemsToDone` (`engine/closed_item_advance_settle.go`), called unconditionally every poll from `poll.go`, immediately after the child board-placement settle scan (§6.9). Auto-archiving of Done items is covered separately by §6.12.
 
 **Flow:**
 1. Resolve the cleanup (Done) stage via `cleanupStage(e.cfg)` — the lowest-`Order` stage with `CleanupWorktree: true`, mirroring `holdingStage`'s shape but by explicit min-`Order` scan (the same convention `settleNoWorkNeeded` uses) rather than first-encountered, since `e.cfg.Stages` could theoretically contain more than one cleanup-flagged stage. If none is configured, the scan is a no-op for the whole poll — no panic.
@@ -4399,7 +4403,7 @@ This is a deliberately fragile-by-design, best-effort mechanism: a parameterized
 4. Otherwise call `advanceClosedItemToDone`, which mirrors `advanceToQueued`'s shape: look up the cleanup stage's status option, call `UpdateProjectItemStatus`, write through `boardcache.CacheImpl.UpdateItemStatus`, and register the webhook echo. No completion label is added — unlike `advanceToQueued`'s `stage:Validate:complete`, this scan has no per-stage bookkeeping to do; landing the item at the cleanup column is sufficient for the existing `CleanupWorktree` dispatch branch (`engine/item.go:439`) to take over unmodified on the next poll (worktree reaping, `stage:Done:complete` labeling).
 5. On any failure (`e.statusField == nil`, no matching status option, or the API call itself failing), log a warning and move on — no retry counter, no escalation. The next poll re-derives the same predicate from `board.Items` and retries automatically; there is nothing to lose between polls, so a bare retry-forever loop is sufficient (ADR-064; contrast with §6.7–6.10's `MaxRetries`/escalation machinery, which exists to protect an at-risk *sequence* of calls or a durable marker this scan does not have).
 
-**Downstream: unmodified.** Once an item lands at the cleanup column via this scan, no new logic runs — the existing `CleanupWorktree` dispatch branch reaps the worktree and adds `stage:Done:complete` exactly as it already does for every other route into Done (§6.10, the normal pipeline advance, `settleNoWorkNeeded`). Auto-archiving of Done items is not currently implemented (tracked separately by #1035) — this scan closes the *reachability* gap (worktree leak, permanent dispatch stall) but not the *archival* gap: a previously-stranded closed item now gets cleaned up and reaches a `stage:Done:complete`, terminal-skip-eligible state, but still occupies a board row (a cheap one, skipped on every subsequent poll) until #1035 ships or an operator manually archives it.
+**Downstream: unmodified.** Once an item lands at the cleanup column via this scan, no new logic runs — the existing `CleanupWorktree` dispatch branch reaps the worktree and adds `stage:Done:complete` exactly as it already does for every other route into Done (§6.10, the normal pipeline advance, `settleNoWorkNeeded`). This scan closes the *reachability* gap (worktree leak, permanent dispatch stall); the *archival* gap — removing the item from the board afterward — is closed by §6.12's settle scan, which requires no additional wiring here: once this scan lands an item at the cleanup column with `stage:Done:complete`, §6.12 picks it up on a later poll like any other Done item.
 
 **State transitions:**
 
@@ -4411,6 +4415,48 @@ This is a deliberately fragile-by-design, best-effort mechanism: a parameterized
 | Column `<X>`, closed | Settle pass fails (transient API error, missing status field/option) | Column `<X>` (unchanged) | — | — |
 
 **References:** [ADR-057: Single-Owner Validate PR Terminal Advance](../adrs/057-validate-pr-terminal-advance.md), [ADR-064: Closed-Item-At-Any-Stage Advance To Done](../adrs/064-closed-item-any-stage-advance-to-done.md)
+
+---
+
+### 6.12 Done-Item Archival
+
+**Trigger:** A board item's current Status resolves to the Done (cleanup) stage and it carries that stage's completion label (`stage:<Done>:complete`), and at least `ArchiveAfter` (default 24h; `--archive-after`/`FABRIK_ARCHIVE_AFTER`) has elapsed since that label was applied. Disabled entirely via `--archive-done off` / `FABRIK_ARCHIVE_DONE=off`.
+
+**Why this exists.** Un-archived Done and closed items accumulate on the project board indefinitely; every one of them is fetched on each poll cycle, inflating per-poll GraphQL cost. A prior implementation, `archiveDoneCompleteItems`, archived Done items immediately on first observation — with no grace period, completed work appeared to vanish from the board the instant it finished, so its call site was deliberately commented out and the dead function later removed (#1025). This settle scan re-implements the capability with a grace period anchored to a restart-safe, GitHub-side timestamp instead (ADR-068).
+
+**Why `FetchLabelAppliedAt`, not a local timestamp.** No GraphQL field exposes "when did Status become Done" directly; `ProjectV2Item.updatedAt` is a coalesced max of issue/item/linked-PR activity, bumped by unrelated edits, and cannot serve as a "time since Done" measurement. `GitHubClient.FetchLabelAppliedAt` (`github/labels.go`) — the same GitHub-side, restart-safe REST lookup already backing the CI-wait gate (§6.5), the review-wait timeout (§6.1's `ReviewWaitTimeout`), and the post-Validate convergence budget (§5.5) — reads the actual `stage:<Done>:complete` label-applied timestamp. A separate, abandoned prior attempt (#687/#688) used a local `itemstate` field set once at label-observation time, falling back to `item.UpdatedAt` after a restart; that fallback reintroduces the exact premature-archival risk the grace period exists to prevent, since `updatedAt` has no contractual link to the Done transition. `FetchLabelAppliedAt` avoids the fallback problem entirely by having no local state to lose.
+
+**Bounding the REST cost.** `FetchLabelAppliedAt` pages through the full issue-events history — not cheap to call every poll for every Done item sitting in its grace window. The *computed* eligible-at time (`appliedAt + ArchiveAfter`) is cached in `itemstate.CooldownAt` under the reason key `"archive-eligible-at"` after the first successful lookup; every subsequent poll is a pure `time.Now()` comparison against the cached value, with no REST call. The cache is a cost-bounding optimization only, not a correctness-load-bearing marker: losing it (e.g., on an engine restart, since `itemstate.Store` is in-memory) costs exactly one extra `FetchLabelAppliedAt` call, never an incorrect archival.
+
+**Fail-open on unknown timestamp.** `FetchLabelAppliedAt` returns the zero time with a nil error when the label-applied event isn't found (a deliberate fail-open contract). This scan treats a zero result as "not yet known" — no eligible-at time is cached, and the item is retried on the next poll — so an unknown timestamp can never trigger early archival, only a delayed one.
+
+**Code path:** the settle scan, `settleArchiveDoneItems` (`engine/archive_done_settle.go`), called unconditionally every poll from `poll.go`, immediately after §6.11's `settleClosedItemsToDone` — so an item this same poll advances into Done becomes visible to this scan on the next poll.
+
+**Flow:**
+1. If `ArchiveDone == "off"`, the entire scan is a no-op for the poll.
+2. Resolve the cleanup (Done) stage via `cleanupStage(e.cfg)`. If none is configured, no-op.
+3. Iterate `board.Items` directly — not `deepFetchCandidates` — for the same sourcing reason as §6.9–§6.11: a Done item with its worktree already reaped never passes `itemMayNeedWork`'s admission guard again, so it is never deep-fetched. `Status` and `Labels` are present on the shallow board query already.
+4. For each item where `item.Status == cleanup.Name && hasLabel(item.Labels, "stage:<cleanup.Name>:complete")`, call `maybeArchiveDoneItem`.
+5. `maybeArchiveDoneItem` first checks `itemstate.CooldownAt("archive-eligible-at")` for a cached eligible-at time. On a cache miss, it calls `FetchLabelAppliedAt` once: a zero result skips (see above); otherwise it computes `appliedAt + ArchiveAfter`, caches it via `itemstate.CooldownRecorded`, and uses it as the eligible-at time for this poll too.
+6. If `time.Now()` is before the eligible-at time, the item is left alone (still within its grace period).
+7. Otherwise: call `ArchiveProjectItem(board.ProjectID, item.ItemID)`. On success, write through the cache via `boardcache.CacheImpl.RemoveItem(item.ItemID)` (wrapping `store.RemoveByItemID`, mirroring the webhook delta path's `"deleted"/"archived"` case), register the webhook echo (`"projects_v2_item"`/`"archived"`), and `logf` the archived issue for operator visibility. On failure, log a warning and retry on the next poll — no retry counter, no escalation.
+
+**Idempotency and restart-safety.** Archival is terminal: an archived item stops appearing in default board queries, so there is nothing left to re-observe — no marker is needed to prevent double-archival. On an engine restart, the `CooldownAt` cache is empty, so the very next poll re-fetches `FetchLabelAppliedAt` once per still-Done item; if the label was already applied long enough ago, the item archives on that same poll (one extra REST call, not one extra full grace-period wait). A restart during the grace-period wait therefore costs at most one extra `FetchLabelAppliedAt` call — it can never cause early archival, a stuck item, or a double-archive.
+
+**Accepted residual risk: shallow-label truncation.** The board query's `labels(first: 30)` may not surface the completion label for an item with 30+ labels, silently skipping its archival indefinitely. ADR-021 already accepted this trade-off for the original implementation; mitigating it would require a deep fetch, which would reintroduce the per-poll GraphQL cost this scan exists to eliminate.
+
+**State transitions:**
+
+| Before | Trigger | After | Labels Added | Labels Removed |
+|---|---|---|---|---|
+| Done, `stage:Done:complete`, no cached eligible-at | Settle pass: cache miss, `FetchLabelAppliedAt` returns non-zero | Done (unchanged); eligible-at cached in `CooldownAt` | — | — |
+| Done, `stage:Done:complete`, no cached eligible-at | Settle pass: `FetchLabelAppliedAt` returns zero (not found) | Done (unchanged); nothing cached | — | — |
+| Done, `stage:Done:complete`, eligible-at cached, not yet elapsed | Settle pass evaluated | Done (unchanged) | — | — |
+| Done, `stage:Done:complete`, eligible-at cached, elapsed | Settle pass succeeds | Archived (removed from board) | — | — |
+| Done, `stage:Done:complete`, eligible-at elapsed | `ArchiveProjectItem` call fails | Done (unchanged); retried next poll | — | — |
+| Any non-Done column, or Done without `stage:Done:complete` | Settle pass evaluated | No change (out of scope for this scan) | — | — |
+
+**References:** [ADR-021: Housekeeping Mutations on Shallow Data](../adrs/021-housekeeping-mutations-on-shallow-data.md), [ADR-068: Done-Item Archive Timing](../adrs/068-done-item-archive-timing.md)
 
 ---
 
