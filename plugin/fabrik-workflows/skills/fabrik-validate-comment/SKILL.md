@@ -28,7 +28,7 @@ Read the user's comment carefully to understand what they're requesting:
 - If re-verification needs a running instance of the managed app (e.g. a `npm run dev` dev server), do not start it in the background and continue in a later tool call — Claude Code's background-bash detaches the process into its own session (`setsid`), so it survives across tool calls and outlives the stage, and the engine's process-group-scoped teardown kill cannot reach it. In preference order: prefer one-shot verification (e.g. `npm run build`, or a bounded-lifetime `vite preview`); if a live server is genuinely needed, bracket it in a single command with guaranteed teardown:
   ```bash
   npm run dev --port "$PORT" & DEV=$!
-  trap 'kill -- -$(ps -o pgid= -p "$DEV" | tr -d " ") 2>/dev/null' EXIT
+  trap 'pkill -P "$DEV"; kill "$DEV" 2>/dev/null' EXIT
   # health-check / curl / run the verification here
   ```
   or, if a persistent server is unavoidable, bound it with `timeout --signal=KILL <N> npm run dev …` so it self-terminates.
