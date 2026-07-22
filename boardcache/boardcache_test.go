@@ -1176,7 +1176,7 @@ func TestFetchProjectBoardFallsThroughWhenPaused(t *testing.T) {
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
 	testBootstrapFromBoard(c, &gh.ProjectBoard{
 		ProjectID: "PID",
-		Items: []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"}},
+		Items:     []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"}},
 	})
 	c.Pause()
 
@@ -1195,7 +1195,7 @@ func TestFetchLabelsFallsThroughWhenPaused(t *testing.T) {
 	c := NewCacheImpl(mc, itemstate.NewStore(nil), nopLog)
 	testBootstrapFromBoard(c, &gh.ProjectBoard{
 		ProjectID: "PID",
-		Items: []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Labels: []string{"cached-label"}}},
+		Items:     []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Labels: []string{"cached-label"}}},
 	})
 	c.Pause()
 
@@ -2039,7 +2039,7 @@ func TestRegisterItemID(t *testing.T) {
 		c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
 		testBootstrapFromBoard(c, &gh.ProjectBoard{
 			ProjectID: "PID",
-			Items: []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"}},
+			Items:     []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"}},
 		})
 
 		key := ItemKey("owner/repo", 1)
@@ -2097,7 +2097,7 @@ func TestRegisterItemID(t *testing.T) {
 		c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
 		testBootstrapFromBoard(c, &gh.ProjectBoard{
 			ProjectID: "PID",
-			Items: []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"}},
+			Items:     []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"}},
 		})
 		key := ItemKey("owner/repo", 1)
 
@@ -2114,7 +2114,7 @@ func TestRegisterItemID(t *testing.T) {
 		c := NewCacheImpl(&mockClient{}, itemstate.NewStore(nil), nopLog)
 		testBootstrapFromBoard(c, &gh.ProjectBoard{
 			ProjectID: "PID",
-			Items: []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"}},
+			Items:     []gh.ProjectItem{{ID: "I_1", Number: 1, Repo: "owner/repo", Status: "Research"}},
 		})
 		key := ItemKey("owner/repo", 1)
 

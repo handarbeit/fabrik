@@ -293,6 +293,84 @@ func TestMergeTrainMode(t *testing.T) {
 	}
 }
 
+func TestArchiveAfter(t *testing.T) {
+	cases := []struct {
+		in   string
+		want time.Duration
+	}{
+		{"", 24 * time.Hour},
+		{"24h", 24 * time.Hour},
+		{"12h", 12 * time.Hour},
+		{"0", 0},                // bare "0" is accepted by time.ParseDuration; legal: archive immediately
+		{"0s", 0},               // legal: archive immediately once eligible
+		{"-1h", 24 * time.Hour}, // negative -> falls back to default
+		{"not-a-duration", 24 * time.Hour},
+	}
+	for _, c := range cases {
+		if got := archiveAfter(c.in); got != c.want {
+			t.Errorf("archiveAfter(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestArchiveDoneMode(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", "on"},
+		{"on", "on"},
+		{"ON", "on"},
+		{"off", "off"},
+		{"OFF", "off"},
+		{"maybe", "on"},
+	}
+	for _, c := range cases {
+		if got := archiveDoneMode(c.in); got != c.want {
+			t.Errorf("archiveDoneMode(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestExecute_ArchiveAfterEnvBeatsDefault(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("FABRIK_ARCHIVE_AFTER", "12h")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if got := archiveAfter(cfg.ArchiveAfter); got != 12*time.Hour {
+		t.Errorf("resolved archive-after = %v, want 12h from FABRIK_ARCHIVE_AFTER", got)
+	}
+}
+
+func TestExecute_ArchiveAfterFlagBeatsEnv(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("FABRIK_ARCHIVE_AFTER", "12h")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir, "--archive-after", "1h"}
+
+	cfg := executeWithConfigHook(t)
+	if got := archiveAfter(cfg.ArchiveAfter); got != time.Hour {
+		t.Errorf("resolved archive-after = %v, want 1h (explicit flag should beat env)", got)
+	}
+}
+
+func TestExecute_ArchiveDoneEnvBeatsDefault(t *testing.T) {
+	dir, stagesDir := setupValidStages(t)
+	chdirTest(t, dir)
+	resetFlags()
+	t.Setenv("GITHUB_TOKEN", "tok")
+	t.Setenv("FABRIK_ARCHIVE_DONE", "off")
+	os.Args = []string{"fabrik", "--owner", "o", "--repo", "r", "--project", "1", "--user", "u", "--stages", stagesDir}
+
+	cfg := executeWithConfigHook(t)
+	if got := archiveDoneMode(cfg.ArchiveDone); got != "off" {
+		t.Errorf("resolved archive-done = %q, want off from FABRIK_ARCHIVE_DONE", got)
+	}
+}
+
 func TestExecute_MaxBatchSizeConfigOnly(t *testing.T) {
 	dir, stagesDir := setupValidStages(t)
 	chdirTest(t, dir)
