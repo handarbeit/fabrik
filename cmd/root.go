@@ -75,7 +75,7 @@ type Config struct {
 	JanitorIntervalHours    int    // hours; 1 = default; 0 disables the janitor
 	LogRetentionDays        int    // days; 14 = default; 0 disables age-based log pruning
 	LogMaxBytes             int64  // bytes; 2147483648 = default; 0 disables size-cap pruning
-	ArchiveAfter            string // Go duration string; "" means use default (24h); also FABRIK_ARCHIVE_AFTER
+	ArchiveAfter            string // Go duration string; "" means use default (168h = 1 week); also FABRIK_ARCHIVE_AFTER
 	ArchiveDone             string // on or off; "" means use default (on); also FABRIK_ARCHIVE_DONE
 }
 
@@ -178,7 +178,7 @@ func Execute() error {
 	flag.Int64Var(&cfg.LogMaxBytes, "log-max-bytes", 2147483648, "Total size cap for .fabrik/logs/ in bytes; oldest files deleted first after age prune; 0 disables size cap (also FABRIK_LOG_MAX_BYTES)")
 	flag.StringVar(&cfg.KillGraceSigInt, "kill-grace-sigint", "", "Grace window after SIGINT before SIGTERM in the kill escalation sequence (Go duration: 10s, 0s to skip SIGINT entirely; also FABRIK_KILL_GRACE_SIGINT; default 10s)")
 	flag.StringVar(&cfg.KillGraceSigTerm, "kill-grace-sigterm", "", "Grace window after SIGTERM before SIGKILL in the kill escalation sequence (Go duration: 10s; also FABRIK_KILL_GRACE_SIGTERM; default 10s)")
-	flag.StringVar(&cfg.ArchiveAfter, "archive-after", "", "Grace period since an item settled into Done before it is auto-archived off the project board (Go duration: 24h, 12h; also FABRIK_ARCHIVE_AFTER; default 24h)")
+	flag.StringVar(&cfg.ArchiveAfter, "archive-after", "", "Grace period since an item settled into Done before it is auto-archived off the project board (Go duration: 168h, 24h; also FABRIK_ARCHIVE_AFTER; default 168h = 1 week)")
 	flag.StringVar(&cfg.ArchiveDone, "archive-done", "", "Auto-archive Done items after archive-after elapses: on or off (also FABRIK_ARCHIVE_DONE; default on)")
 
 	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
@@ -994,22 +994,23 @@ func killGraceSigTerm(s string) time.Duration {
 }
 
 // archiveAfter parses the archive-after grace-period string (Go duration syntax)
-// into a time.Duration. An empty string returns the default of 24 hours. "0"/"0s"
-// is a legal value (archive immediately once the item is eligible) — disabling
-// archival entirely is the separate archiveDoneMode() knob, not a sentinel here.
-// Invalid or negative values log a warning and return the default.
+// into a time.Duration. An empty string returns the default of one week (168h —
+// Go's duration parser has no day/week unit, so the literal value is 168h).
+// "0"/"0s" is a legal value (archive immediately once the item is eligible) —
+// disabling archival entirely is the separate archiveDoneMode() knob, not a
+// sentinel here. Invalid or negative values log a warning and return the default.
 func archiveAfter(s string) time.Duration {
 	if s == "" {
-		return 24 * time.Hour
+		return 168 * time.Hour
 	}
 	d, err := time.ParseDuration(s)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[warn] FABRIK_ARCHIVE_AFTER=%q is invalid (Go duration syntax required, e.g. 24h, 12h); using default 24h\n", s)
-		return 24 * time.Hour
+		fmt.Fprintf(os.Stderr, "[warn] FABRIK_ARCHIVE_AFTER=%q is invalid (Go duration syntax required, e.g. 168h, 24h); using default 168h\n", s)
+		return 168 * time.Hour
 	}
 	if d < 0 {
-		fmt.Fprintf(os.Stderr, "[warn] FABRIK_ARCHIVE_AFTER=%q is negative; using default 24h\n", s)
-		return 24 * time.Hour
+		fmt.Fprintf(os.Stderr, "[warn] FABRIK_ARCHIVE_AFTER=%q is negative; using default 168h\n", s)
+		return 168 * time.Hour
 	}
 	return d
 }

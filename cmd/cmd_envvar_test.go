@@ -298,13 +298,13 @@ func TestArchiveAfter(t *testing.T) {
 		in   string
 		want time.Duration
 	}{
-		{"", 24 * time.Hour},
+		{"", 168 * time.Hour},
 		{"24h", 24 * time.Hour},
 		{"12h", 12 * time.Hour},
-		{"0", 0},                // bare "0" is accepted by time.ParseDuration; legal: archive immediately
-		{"0s", 0},               // legal: archive immediately once eligible
-		{"-1h", 24 * time.Hour}, // negative -> falls back to default
-		{"not-a-duration", 24 * time.Hour},
+		{"0", 0},                 // bare "0" is accepted by time.ParseDuration; legal: archive immediately
+		{"0s", 0},                // legal: archive immediately once eligible
+		{"-1h", 168 * time.Hour}, // negative -> falls back to default
+		{"not-a-duration", 168 * time.Hour},
 	}
 	for _, c := range cases {
 		if got := archiveAfter(c.in); got != c.want {
