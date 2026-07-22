@@ -86,7 +86,7 @@ In preference order:
 2. **If a live server is genuinely needed** (e.g. an HTTP health check), bracket it in a single command with guaranteed teardown:
    ```bash
    npm run dev --port "$PORT" & DEV=$!
-   trap 'kill -- -$(ps -o pgid= -p "$DEV" | tr -d " ") 2>/dev/null' EXIT
+   trap 'pkill -P "$DEV"; kill "$DEV" 2>/dev/null' EXIT
    # health-check / curl / run the verification here
    ```
 3. **If a persistent server is unavoidable, bound it with a timeout** so it self-terminates:
