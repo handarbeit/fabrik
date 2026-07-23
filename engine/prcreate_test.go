@@ -468,3 +468,149 @@ func TestVerifyAndHealLinkage_BodyTooLong(t *testing.T) {
 		t.Error("issue should be paused when body is too long")
 	}
 }
+
+// ---- verifyAndHealLinkage tests: base:<branch> (non-default-base) repos ----
+//
+// On these repos closedByPullRequestsReferences/closingIssuesReferences are structurally
+// empty (GitHub only populates them for PRs targeting the repo default branch), so
+// linkage must be confirmed via FetchPRClosingIssues (PR body regex) instead of
+// FetchItemDetails/item.LinkedPRNumber. See #1046/#1047.
+
+func TestVerifyAndHealLinkage_NonDefaultBase_AlreadyLinkedViaBody(t *testing.T) {
+	fetchItemDetailsCalls := 0
+	client := &mockGitHubClient{
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			fetchItemDetailsCalls++
+			return nil
+		},
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 42, State: "open", HeadSHA: "abc123"}, nil
+		},
+		fetchPRClosingIssuesFn: func(owner, repo string, prNumber int) ([]int, error) {
+			return []int{1}, nil // body already contains "Closes #1"
+		},
+	}
+	eng := testEngine(t, client, nil)
+	item := gh.ProjectItem{Number: 1, Repo: "owner/repo", Labels: []string{"base:develop"}}
+	stage := &stages.Stage{Name: "Implement"}
+
+	ok := eng.verifyAndHealLinkage(context.Background(), item, 42, stage, "owner", "repo", "owner/repo")
+	if !ok {
+		t.Error("should return true when linkage is already confirmed via PR body")
+	}
+	if fetchItemDetailsCalls != 0 {
+		t.Errorf("FetchItemDetails should not be called on the non-default-base path, got %d calls", fetchItemDetailsCalls)
+	}
+	client.mu.Lock()
+	labels := client.addLabelCalls
+	client.mu.Unlock()
+	for _, l := range labels {
+		if l.labelName == "fabrik:paused" {
+			t.Error("should not pause when linkage already confirmed")
+		}
+	}
+}
+
+func TestVerifyAndHealLinkage_NonDefaultBase_HealSuccess(t *testing.T) {
+	callCount := 0
+	var capturedHealBody string
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 42, State: "open", HeadSHA: "abc123"}, nil
+		},
+		fetchPRClosingIssuesFn: func(owner, repo string, prNumber int) ([]int, error) {
+			callCount++
+			if callCount == 1 {
+				return nil, nil // linkage missing on first check
+			}
+			return []int{1}, nil // linkage present after heal
+		},
+		getIssueBodyFn: func(owner, repo string, issueNumber int) (string, error) {
+			return "## Summary\n\nThis PR does something.", nil
+		},
+		updateIssueBodyFn: func(owner, repo string, issueNumber int, body string) error {
+			capturedHealBody = body
+			return nil
+		},
+	}
+	eng := testEngine(t, client, nil)
+	item := gh.ProjectItem{Number: 1, Repo: "owner/repo", Labels: []string{"base:develop"}}
+	stage := &stages.Stage{Name: "Implement"}
+
+	ok := eng.verifyAndHealLinkage(context.Background(), item, 42, stage, "owner", "repo", "owner/repo")
+	if !ok {
+		t.Error("heal should succeed, expected true")
+	}
+	if !strings.HasPrefix(capturedHealBody, "Closes #1\n\n") {
+		t.Errorf("healed body should start with 'Closes #1\\n\\n', got: %q", capturedHealBody)
+	}
+	if !strings.Contains(capturedHealBody, "## Summary") {
+		t.Error("healed body should contain original body content")
+	}
+	client.mu.Lock()
+	labels := client.addLabelCalls
+	client.mu.Unlock()
+	for _, l := range labels {
+		if l.labelName == "fabrik:paused" {
+			t.Error("should not pause on successful heal")
+		}
+	}
+}
+
+func TestVerifyAndHealLinkage_NonDefaultBase_HealFails_Pauses(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 42, State: "open", HeadSHA: "abc123"}, nil
+		},
+		fetchPRClosingIssuesFn: func(owner, repo string, prNumber int) ([]int, error) {
+			return nil, nil // body never contains the closing keyword, even after heal
+		},
+		getIssueBodyFn: func(owner, repo string, issueNumber int) (string, error) {
+			return "## Summary\n\nThis PR does something.", nil
+		},
+	}
+	eng := testEngine(t, client, nil)
+	item := gh.ProjectItem{Number: 1, Repo: "owner/repo", Labels: []string{"base:develop"}}
+	stage := &stages.Stage{Name: "Implement"}
+
+	ok := eng.verifyAndHealLinkage(context.Background(), item, 42, stage, "owner", "repo", "owner/repo")
+	if ok {
+		t.Error("should return false when body still lacks the closing keyword after heal")
+	}
+	client.mu.Lock()
+	labels := client.addLabelCalls
+	client.mu.Unlock()
+	hasPaused := false
+	for _, l := range labels {
+		if l.labelName == "fabrik:paused" {
+			hasPaused = true
+		}
+	}
+	if !hasPaused {
+		t.Error("issue should be paused when heal doesn't confirm linkage")
+	}
+}
+
+func TestVerifyAndHealLinkage_NonDefaultBase_NoPRFound(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return nil, nil // no PR on branch
+		},
+	}
+	eng := testEngine(t, client, nil)
+	item := gh.ProjectItem{Number: 1, Repo: "owner/repo", Labels: []string{"base:develop"}}
+	stage := &stages.Stage{Name: "Implement"}
+
+	ok := eng.verifyAndHealLinkage(context.Background(), item, 42, stage, "owner", "repo", "owner/repo")
+	if !ok {
+		t.Error("should return true when no PR found via branch (user-diverged)")
+	}
+	client.mu.Lock()
+	labels := client.addLabelCalls
+	client.mu.Unlock()
+	for _, l := range labels {
+		if l.labelName == "fabrik:paused" {
+			t.Error("should not pause when no PR found via branch lookup")
+		}
+	}
+}
