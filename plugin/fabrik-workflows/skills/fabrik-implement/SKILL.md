@@ -157,6 +157,24 @@ Before signaling completion:
 - `go vet` (or equivalent linter) is clean
 - All changes committed and pushed
 
+### Verifying with a live server
+
+If a task needs a running instance of the managed app to verify a change (e.g. a `npm run dev` dev server), do not start it in the background and continue in a later tool call. Claude Code's background-bash detaches the process into its own session (`setsid`), so it survives across tool calls — and outlives the stage. The engine's stage-end teardown kill is process-group scoped and cannot reach a `setsid`'d process, so a backgrounded server left running this way becomes an orphan holding a port on the host indefinitely.
+
+In preference order:
+
+1. **Prefer one-shot verification.** Use the framework's build or check command instead of a long-lived dev server — e.g. `npm run build` (or the framework's equivalent), or a bounded-lifetime preview command like `vite preview` — rather than standing up a persistent server just to confirm a change works.
+2. **If a live server is genuinely needed** (e.g. an HTTP health check), bracket it in a single command with guaranteed teardown, so it never needs to detach and can't outlive the check:
+   ```bash
+   npm run dev --port "$PORT" & DEV=$!
+   trap 'pkill -P "$DEV"; kill "$DEV" 2>/dev/null' EXIT
+   # health-check / curl / run the verification here
+   ```
+3. **If a persistent server is unavoidable, bound it with a timeout** so it self-terminates:
+   ```bash
+   timeout --signal=KILL <N> npm run dev …
+   ```
+
 ## What You Do NOT Do
 
 - **Do not redesign the approach** — the Plan stage made those decisions. If something seems wrong, note it but implement the plan.
@@ -165,6 +183,7 @@ Before signaling completion:
 - **Do not refactor unrelated code** — stay focused on the task list
 - **Do not add features not in the plan** — no scope creep
 - **Do not leave the branch in a broken state** — every push should compile and pass tests
+- **Never background a dev server and continue in a later tool call to verify a change** — it detaches via `setsid` and outlives the stage, becoming an orphaned process holding a port. See "Verifying with a live server" above.
 - **Do not defer documentation** — if the change is user-facing, update the docs in the same PR. A doc update that gets "tracked as a follow-up" is a doc update that never happens.
 - **Never call `gh pr create` directly.** Use the `FABRIK_PR_CREATE_BEGIN/END` marker instead. The engine creates the PR and guarantees the `Closes #N` closing line. A direct `gh pr create` bypasses this guarantee and will break downstream gates.
 - **Never write `Closes #N`, `Fixes #N`, `Resolves #N`, or any closing keyword referencing the issue number in a PR body.** The engine generates this line as the first line of the PR body. Writing one yourself either duplicates it (harmless but messy) or, if you called `gh pr create` directly and omitted it, breaks every downstream gate. The engine owns this line — you don't.
