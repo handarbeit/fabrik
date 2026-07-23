@@ -1276,3 +1276,187 @@ func TestCheckReviewGate_BrokenLinkage_NonDefaultBase_BodyMissing_StillPauses(t 
 		t.Errorf("comment should contain recovery closing keyword, got: %q", body)
 	}
 }
+
+// On a base:<branch> repo, closedByPullRequestsReferences (and everything nested
+// inside it — reviewRequests, latestReviews) is structurally empty, so
+// item.LinkedPRReviewRequests/LinkedPRReviews are always empty regardless of the
+// PR's actual review state. checkReviewGate must fetch reviews/requests via REST,
+// keyed on the PR number handleBrokenReviewLinkage resolves, and clear the gate
+// naturally once a review is in and no requests remain outstanding. See #1046/#1047/#1050.
+func TestCheckReviewGate_NonDefaultBase_RESTReviewSubmitted_ClearsNaturally(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 77, State: "open"}, nil
+		},
+		fetchPRClosingIssuesFn: func(owner, repo string, prNumber int) ([]int, error) {
+			return []int{10}, nil // PR body already contains "Closes #10"
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			if prNumber != 77 {
+				t.Errorf("expected FetchPRReviews to be called with resolved PR #77, got #%d", prNumber)
+			}
+			return []gh.PRReview{{Author: "reviewer1", State: "APPROVED"}}, nil
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			if prNumber != 77 {
+				t.Errorf("expected FetchPRReviewRequests to be called with resolved PR #77, got #%d", prNumber)
+			}
+			return nil, nil // no outstanding requests
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"base:develop"},
+		LinkedPRNumber: 0,
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+
+	blocked, timedOut := eng.checkReviewGate(board, item, stage)
+
+	if blocked {
+		t.Error("expected gate to clear naturally once a REST-sourced review is submitted with no outstanding requests")
+	}
+	if timedOut {
+		t.Error("expected not timedOut")
+	}
+
+	client.mu.Lock()
+	labels := client.addLabelCalls
+	client.mu.Unlock()
+	for _, l := range labels {
+		if l.labelName == "fabrik:paused" {
+			t.Error("should not pause when the REST-sourced review data clears the gate")
+		}
+		if l.labelName == "fabrik:awaiting-review" {
+			t.Error("fabrik:awaiting-review should not be applied when the gate clears immediately")
+		}
+	}
+}
+
+// Outstanding-reviewer detection must also work on base:<branch> repos: a requested
+// reviewer who hasn't submitted keeps the gate blocked, mirroring default-branch behavior.
+func TestCheckReviewGate_NonDefaultBase_RESTOutstandingReviewer_Blocks(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 77, State: "open"}, nil
+		},
+		fetchPRClosingIssuesFn: func(owner, repo string, prNumber int) ([]int, error) {
+			return []int{10}, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return nil, nil // no reviews submitted yet
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			return []gh.ReviewRequest{{Login: "alice", IsBot: false}}, nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"base:develop"},
+		LinkedPRNumber: 0,
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+
+	blocked, timedOut := eng.checkReviewGate(board, item, stage)
+
+	if !blocked {
+		t.Error("expected gate to stay blocked while a REST-sourced outstanding reviewer hasn't submitted")
+	}
+	if timedOut {
+		t.Error("expected not timedOut on first evaluation")
+	}
+
+	client.mu.Lock()
+	labels := client.addLabelCalls
+	client.mu.Unlock()
+	if len(labels) != 1 || labels[0].labelName != "fabrik:awaiting-review" {
+		t.Errorf("expected exactly 1 fabrik:awaiting-review label add, got %v", labels)
+	}
+}
+
+// A transient REST error on either the reviews or requested-reviewers endpoint must
+// not falsely clear the gate — treat the poll as no-data-available and stay blocked,
+// retrying on the next poll.
+func TestCheckReviewGate_NonDefaultBase_RESTFetchError_StaysBlocked(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 77, State: "open"}, nil
+		},
+		fetchPRClosingIssuesFn: func(owner, repo string, prNumber int) ([]int, error) {
+			return []int{10}, nil
+		},
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			return nil, fmt.Errorf("transient GitHub API error")
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			// Succeeds with no outstanding requests — but the reviews call failed, so
+			// the gate must NOT trust this partial success and false-clear.
+			return nil, nil
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"base:develop"},
+		LinkedPRNumber: 0,
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+
+	blocked, timedOut := eng.checkReviewGate(board, item, stage)
+
+	if !blocked {
+		t.Error("expected gate to stay blocked on a partial REST fetch failure (conservative no-data fallback)")
+	}
+	if timedOut {
+		t.Error("expected not timedOut on first evaluation")
+	}
+}
+
+// Default-branch items must never invoke the REST review-fetch helpers — the gate
+// continues to use the GraphQL-sourced item.LinkedPRReviewRequests/LinkedPRReviews
+// exclusively, exactly as before this change.
+func TestCheckReviewGate_DefaultBranch_DoesNotCallRESTReviewFetch(t *testing.T) {
+	var restReviewCalls, restRequestCalls int
+	client := &mockGitHubClient{
+		fetchPRReviewsFn: func(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+			restReviewCalls++
+			return nil, fmt.Errorf("should not be called on default-branch items")
+		},
+		fetchPRReviewRequestsFn: func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+			restRequestCalls++
+			return nil, fmt.Errorf("should not be called on default-branch items")
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:                 10,
+		Repo:                   "owner/repo",
+		LinkedPRNumber:         77, // linkage already resolved via GraphQL
+		LinkedPRReviewRequests: nil,
+		LinkedPRReviews: []gh.PRReview{
+			{Author: "reviewer1", State: "APPROVED"},
+		},
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+
+	blocked, timedOut := eng.checkReviewGate(board, item, stage)
+
+	if blocked {
+		t.Error("expected gate to clear using the existing GraphQL-sourced data")
+	}
+	if timedOut {
+		t.Error("expected not timedOut")
+	}
+	if restReviewCalls != 0 || restRequestCalls != 0 {
+		t.Errorf("expected no REST review-fetch calls on a default-branch item, got reviews=%d requests=%d", restReviewCalls, restRequestCalls)
+	}
+}
