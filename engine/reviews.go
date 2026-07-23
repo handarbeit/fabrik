@@ -77,13 +77,40 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 
-	if e.handleBrokenReviewLinkage(owner, repo, item) {
+	paused, prNumber := e.handleBrokenReviewLinkage(owner, repo, item)
+	if paused {
 		// Return (false, false): the gate did not time out — it paused for a different reason.
 		// The catch-up loop will not reapply fabrik:awaiting-review.
 		return false, false
 	}
 
-	outstanding, hasReviews := reviewGateOutstanding(item)
+	reviewRequests, reviews := item.LinkedPRReviewRequests, item.LinkedPRReviews
+
+	// On a base:<branch> repo, closedByPullRequestsReferences (and everything nested
+	// inside it — reviewRequests, latestReviews) is structurally empty, so
+	// item.LinkedPRReviewRequests/LinkedPRReviews are always empty regardless of the
+	// PR's actual review state. Fetch reviews/requests directly via REST, keyed on the
+	// PR number handleBrokenReviewLinkage already resolved. See #1046/#1047/#1050.
+	if itemHasBaseLabel(item) && prNumber > 0 {
+		restReviews, reviewsErr := e.readClient.FetchPRReviews(owner, repo, prNumber)
+		restRequests, requestsErr := e.readClient.FetchPRReviewRequests(owner, repo, prNumber)
+		if reviewsErr != nil || requestsErr != nil {
+			// Conservative: treat a partial failure as no-data rather than trusting
+			// whichever call succeeded — a false len(outstanding)==0 read could
+			// falsely clear the gate while real outstanding reviewers are unknown.
+			if reviewsErr != nil {
+				e.logf(item.Number, "warn", "checkReviewGate: FetchPRReviews failed: %v\n", reviewsErr)
+			}
+			if requestsErr != nil {
+				e.logf(item.Number, "warn", "checkReviewGate: FetchPRReviewRequests failed: %v\n", requestsErr)
+			}
+			reviewRequests, reviews = nil, nil
+		} else {
+			reviewRequests, reviews = restRequests, restReviews
+		}
+	}
+
+	outstanding, hasReviews := reviewGateOutstanding(reviewRequests, reviews)
 
 	// Gate clears when all outstanding requested reviewers have responded
 	// AND at least one non-DISMISSED review exists. This catches both human
@@ -95,7 +122,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 	}
 
 	// Determine if all outstanding reviewers are bots. Used by Phase 1/2 logic.
-	allBots := reviewGateAllBots(item, outstanding)
+	allBots := reviewGateAllBots(reviewRequests, outstanding)
 
 	// Find the fabrik:bot-reprompted label (idempotency guard for Phase 1 and
 	// timing anchor for Phase 2).
@@ -148,7 +175,7 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 // exists on the fabrik/issue-N branch. Without this guard the gate would
 // silently loop forever applying fabrik:awaiting-review. When detected, it
 // pauses with a clear message (without applying fabrik:awaiting-review) and
-// reports true so the caller returns (false, false) directly.
+// reports paused=true so the caller returns (false, false) directly.
 //
 // On a base:<branch> repo, closedByPullRequestsReferences is structurally empty
 // (GitHub only populates it for PRs targeting the repository default branch), so
@@ -156,14 +183,21 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 // case linkage is confirmed via FetchPRClosingIssues (a direct PR-body parse) before
 // concluding the linkage is actually broken; the default-branch message/behavior below
 // this check is unchanged.
-func (e *Engine) handleBrokenReviewLinkage(owner, repo string, item gh.ProjectItem) bool {
+//
+// Also returns the resolved PR number (0 when no PR was found or the item was
+// paused). Since LinkedPRNumber is always 0 on a base:<branch> repo (the same
+// structurally-empty GraphQL field), this function's FetchLinkedPR lookup is not a
+// one-time linkage-repair path there — it is the steady-state PR-number resolution
+// every checkReviewGate call needs, so the number is threaded back to the caller
+// rather than re-fetched.
+func (e *Engine) handleBrokenReviewLinkage(owner, repo string, item gh.ProjectItem) (paused bool, prNumber int) {
 	if item.LinkedPRNumber != 0 {
-		return false
+		return false, item.LinkedPRNumber
 	}
 
 	pr, prErr := e.readClient.FetchLinkedPR(owner, repo, item.Number)
 	if prErr != nil || pr == nil || pr.Number == 0 || pr.State != "open" || pr.Merged {
-		return false
+		return false, 0
 	}
 
 	if itemHasBaseLabel(item) {
@@ -171,11 +205,11 @@ func (e *Engine) handleBrokenReviewLinkage(owner, repo string, item gh.ProjectIt
 		if err != nil {
 			// Transient fetch error: skip verification rather than false-positive pausing.
 			e.logf(item.Number, "warn", "handleBrokenReviewLinkage: FetchPRClosingIssues failed: %v\n", err)
-			return false
+			return false, pr.Number
 		}
 		if slices.Contains(closingIssues, item.Number) {
 			// Linkage confirmed via PR body — not broken; let the gate proceed normally.
-			return false
+			return false, pr.Number
 		}
 		e.logf(item.Number, "review-gate", "broken linkage: PR #%d (base:<branch> repo) exists on branch fabrik/issue-%d but its body lacks a closing keyword\n", pr.Number, item.Number)
 		msg := fmt.Sprintf(
@@ -196,7 +230,7 @@ func (e *Engine) handleBrokenReviewLinkage(owner, repo string, item gh.ProjectIt
 			labelEcho:  true,
 			labelFirst: true,
 		})
-		return true
+		return true, 0
 	}
 
 	e.logf(item.Number, "review-gate", "broken linkage: PR #%d exists on branch fabrik/issue-%d but is not linked via closing keyword\n", pr.Number, item.Number)
@@ -217,20 +251,24 @@ func (e *Engine) handleBrokenReviewLinkage(owner, repo string, item gh.ProjectIt
 		labelEcho:  true,
 		labelFirst: true,
 	})
-	return true
+	return true, 0
 }
 
 // reviewGateOutstanding computes the outstanding requested reviewers (humans
 // or bots using the formal request mechanism — a dismissed review puts the
 // reviewer back here; if they're not here, they've finished) and whether at
-// least one non-DISMISSED review has been submitted.
-func reviewGateOutstanding(item gh.ProjectItem) (outstanding []string, hasReviews bool) {
-	for _, rr := range item.LinkedPRReviewRequests {
+// least one non-DISMISSED review has been submitted. Takes the review-request
+// and review slices directly (rather than a gh.ProjectItem) so the same logic
+// serves both the GraphQL-sourced default-branch path (item.LinkedPRReviewRequests/
+// LinkedPRReviews) and the REST-sourced base:<branch> path (checkReviewGate) —
+// the caller decides where the data comes from.
+func reviewGateOutstanding(reviewRequests []gh.ReviewRequest, reviews []gh.PRReview) (outstanding []string, hasReviews bool) {
+	for _, rr := range reviewRequests {
 		if rr.Login != "" {
 			outstanding = append(outstanding, rr.Login)
 		}
 	}
-	for _, r := range item.LinkedPRReviews {
+	for _, r := range reviews {
 		if r.State != "DISMISSED" {
 			hasReviews = true
 			break
@@ -241,9 +279,9 @@ func reviewGateOutstanding(item gh.ProjectItem) (outstanding []string, hasReview
 
 // reviewGateAllBots reports whether every outstanding requested reviewer is a
 // bot (false when there are no outstanding reviewers at all).
-func reviewGateAllBots(item gh.ProjectItem, outstanding []string) bool {
+func reviewGateAllBots(reviewRequests []gh.ReviewRequest, outstanding []string) bool {
 	allBots := len(outstanding) > 0
-	for _, rr := range item.LinkedPRReviewRequests {
+	for _, rr := range reviewRequests {
 		if rr.Login != "" && !rr.IsBot {
 			allBots = false
 			break
