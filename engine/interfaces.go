@@ -34,6 +34,8 @@ type GitHubClient interface {
 	FetchPRMergeableState(owner, repo string, prNumber int) (string, error)
 	FetchCheckRuns(owner, repo, sha string) ([]gh.CheckRun, error)
 	FetchPRClosingIssues(owner, repo string, prNumber int) ([]int, error)
+	FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, error)
+	FetchPRReviewRequests(owner, repo string, prNumber int) ([]gh.ReviewRequest, error)
 	FetchPRsForSHA(owner, repo, sha string) ([]int, error)
 	FetchProjectItem(owner, repo string, issueNumber int) (*gh.ProjectItem, error)
 	GetPRBase(owner, repo string, prNumber int) (string, error)

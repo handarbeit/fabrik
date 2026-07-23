@@ -45,6 +45,77 @@ func (c *Client) FetchPRClosingIssues(owner, repo string, prNumber int) ([]int, 
 	return out, nil
 }
 
+// FetchPRReviews returns the submitted reviews for a pull request via the REST API,
+// keyed on PR number rather than closedByPullRequestsReferences — the field GitHub
+// leaves structurally empty for PRs targeting a non-default base branch. This is the
+// base-independent counterpart to the GraphQL-nested latestReviews field, mirroring
+// FetchPRClosingIssues's REST-by-PR-number precedent (see #1047). Unlike GraphQL's
+// latestReviews (one review per author, most recent only), this returns the full
+// review history — every submission, unlimited per author.
+// Returns nil, nil on 404.
+func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews?per_page=100", c.baseURL, owner, repo, prNumber)
+	var raw []struct {
+		ID   int `json:"id"`
+		User *struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		State string `json:"state"`
+		Body  string `json:"body"`
+	}
+	if err := c.restGetJSON(apiURL, &raw); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("fetching PR #%d reviews: %w", prNumber, err)
+	}
+	out := make([]PRReview, 0, len(raw))
+	for _, r := range raw {
+		if r.User == nil || r.User.Login == "" {
+			continue
+		}
+		out = append(out, PRReview{
+			Author:     r.User.Login,
+			State:      r.State,
+			Body:       r.Body,
+			DatabaseID: r.ID,
+		})
+	}
+	return out, nil
+}
+
+// FetchPRReviewRequests returns the outstanding requested reviewers for a pull
+// request via the REST API, keyed on PR number — the base-independent counterpart
+// to the GraphQL-nested reviewRequests field. Team review requests are ignored,
+// matching the GraphQL path's existing behavior (only individual reviewers map to
+// ReviewRequest). IsBot reproduces the GraphQL path's dual signal: REST's
+// user.type == "Bot" field, with the isBotLogin pattern fallback for reviewers
+// (e.g. dependabot) that GitHub doesn't mark with type "Bot".
+// Returns nil, nil on 404.
+func (c *Client) FetchPRReviewRequests(owner, repo string, prNumber int) ([]ReviewRequest, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/requested_reviewers", c.baseURL, owner, repo, prNumber)
+	var raw struct {
+		Users []struct {
+			Login string `json:"login"`
+			Type  string `json:"type"`
+		} `json:"users"`
+	}
+	if err := c.restGetJSON(apiURL, &raw); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("fetching PR #%d requested reviewers: %w", prNumber, err)
+	}
+	out := make([]ReviewRequest, 0, len(raw.Users))
+	for _, u := range raw.Users {
+		if u.Login == "" {
+			continue
+		}
+		out = append(out, ReviewRequest{Login: u.Login, IsBot: u.Type == "Bot" || isBotLogin(u.Login)})
+	}
+	return out, nil
+}
+
 // FetchPRsForSHA returns the PR numbers associated with the given commit SHA via
 // GET /repos/{owner}/{repo}/commits/{sha}/pulls. Returns nil, nil on 404 or empty.
 func (c *Client) FetchPRsForSHA(owner, repo, sha string) ([]int, error) {

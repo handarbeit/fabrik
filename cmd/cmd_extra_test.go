@@ -140,6 +140,12 @@ func (m *testGitHubUpgradeClient) FetchProjectItemStatusBatch(projectID string) 
 func (m *testGitHubUpgradeClient) FetchPRClosingIssues(owner, repo string, prNumber int) ([]int, error) {
 	return nil, nil
 }
+func (m *testGitHubUpgradeClient) FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+	return nil, nil
+}
+func (m *testGitHubUpgradeClient) FetchPRReviewRequests(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+	return nil, nil
+}
 func (m *testGitHubUpgradeClient) FetchPRsForSHA(owner, repo, sha string) ([]int, error) {
 	return nil, nil
 }

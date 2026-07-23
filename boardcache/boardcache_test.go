@@ -23,6 +23,8 @@ type mockClient struct {
 	fetchLinkedPRCount        int
 	fetchLabelsCount          int
 	fetchPRClosingIssuesCount int
+	fetchPRReviewsCount       int
+	fetchPRReviewRequestsCount int
 	fetchPRsForSHACount       int
 	fetchProjectItemCount     int
 
@@ -35,6 +37,8 @@ type mockClient struct {
 	projectItemResult  *gh.ProjectItem
 
 	fetchPRClosingIssuesFn func(owner, repo string, prNumber int) ([]int, error)
+	fetchPRReviewsFn        func(owner, repo string, prNumber int) ([]gh.PRReview, error)
+	fetchPRReviewRequestsFn func(owner, repo string, prNumber int) ([]gh.ReviewRequest, error)
 	fetchPRsForSHAFn       func(owner, repo, sha string) ([]int, error)
 	fetchProjectItemFn     func(owner, repo string, issueNumber int) (*gh.ProjectItem, error)
 }
@@ -119,6 +123,22 @@ func (m *mockClient) FetchPRClosingIssues(owner, repo string, prNumber int) ([]i
 	m.fetchPRClosingIssuesCount++
 	if m.fetchPRClosingIssuesFn != nil {
 		return m.fetchPRClosingIssuesFn(owner, repo, prNumber)
+	}
+	return nil, nil
+}
+
+func (m *mockClient) FetchPRReviews(owner, repo string, prNumber int) ([]gh.PRReview, error) {
+	m.fetchPRReviewsCount++
+	if m.fetchPRReviewsFn != nil {
+		return m.fetchPRReviewsFn(owner, repo, prNumber)
+	}
+	return nil, nil
+}
+
+func (m *mockClient) FetchPRReviewRequests(owner, repo string, prNumber int) ([]gh.ReviewRequest, error) {
+	m.fetchPRReviewRequestsCount++
+	if m.fetchPRReviewRequestsFn != nil {
+		return m.fetchPRReviewRequestsFn(owner, repo, prNumber)
 	}
 	return nil, nil
 }
