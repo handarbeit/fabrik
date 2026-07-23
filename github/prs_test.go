@@ -743,3 +743,116 @@ func TestListPRs_CapturesHeadRefAndMergedAt(t *testing.T) {
 		t.Errorf("PR[1].Merged = false, want true (merged_at set)")
 	}
 }
+
+// FetchPRReviews must collapse the REST API's full review history down to one
+// entry per author (the latest submission), matching GraphQL's latestReviews
+// semantics. Otherwise an author's earlier non-DISMISSED review (e.g. a stale
+// COMMENTED review) could outlive the dismissal of their actual current review
+// and falsely satisfy the review-gate's hasReviews check.
+func TestFetchPRReviews_CollapsesToLatestPerAuthor(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/owner/repo/pulls/42/reviews" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]interface{}{
+			{"id": 1, "user": map[string]string{"login": "alice"}, "state": "COMMENTED", "body": "early comment"},
+			{"id": 2, "user": map[string]string{"login": "alice"}, "state": "APPROVED", "body": "lgtm"},
+			{"id": 3, "user": map[string]string{"login": "alice"}, "state": "DISMISSED", "body": "lgtm"},
+			{"id": 4, "user": map[string]string{"login": "bob"}, "state": "CHANGES_REQUESTED", "body": "fix this"},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	reviews, err := c.FetchPRReviews("owner", "repo", 42)
+	if err != nil {
+		t.Fatalf("FetchPRReviews: %v", err)
+	}
+	if len(reviews) != 2 {
+		t.Fatalf("expected 2 reviews (one per author), got %d: %+v", len(reviews), reviews)
+	}
+	byAuthor := make(map[string]PRReview, len(reviews))
+	for _, r := range reviews {
+		byAuthor[r.Author] = r
+	}
+	// alice's latest submission (id 3) dismissed her earlier APPROVED — the
+	// stale id-1 COMMENTED entry must not leak through and count as a live review.
+	if got := byAuthor["alice"].State; got != "DISMISSED" {
+		t.Errorf("alice's collapsed review state = %q, want DISMISSED (her latest submission)", got)
+	}
+	if got := byAuthor["alice"].DatabaseID; got != 3 {
+		t.Errorf("alice's collapsed review DatabaseID = %d, want 3 (her latest submission)", got)
+	}
+	if got := byAuthor["bob"].State; got != "CHANGES_REQUESTED" {
+		t.Errorf("bob's collapsed review state = %q, want CHANGES_REQUESTED", got)
+	}
+}
+
+func TestFetchPRReviews_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404)
+		w.Write([]byte(`{"message":"Not Found"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	reviews, err := c.FetchPRReviews("owner", "repo", 999)
+	if err != nil {
+		t.Fatalf("expected nil error on 404, got %v", err)
+	}
+	if reviews != nil {
+		t.Errorf("expected nil reviews on 404, got %+v", reviews)
+	}
+}
+
+func TestFetchPRReviewRequests_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/owner/repo/pulls/42/requested_reviewers" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"users": []map[string]string{
+				{"login": "alice", "type": "User"},
+				{"login": "dependabot[bot]", "type": "Bot"},
+			},
+			"teams": []map[string]string{
+				{"slug": "reviewers-team"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	requests, err := c.FetchPRReviewRequests("owner", "repo", 42)
+	if err != nil {
+		t.Fatalf("FetchPRReviewRequests: %v", err)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("expected 2 requested reviewers (teams ignored), got %d: %+v", len(requests), requests)
+	}
+	if requests[0].Login != "alice" || requests[0].IsBot {
+		t.Errorf("requests[0] = %+v, want alice/non-bot", requests[0])
+	}
+	if requests[1].Login != "dependabot[bot]" || !requests[1].IsBot {
+		t.Errorf("requests[1] = %+v, want dependabot[bot]/bot", requests[1])
+	}
+}
+
+func TestFetchPRReviewRequests_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404)
+		w.Write([]byte(`{"message":"Not Found"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithBaseURL("token", srv.URL)
+	requests, err := c.FetchPRReviewRequests("owner", "repo", 999)
+	if err != nil {
+		t.Fatalf("expected nil error on 404, got %v", err)
+	}
+	if requests != nil {
+		t.Errorf("expected nil requests on 404, got %+v", requests)
+	}
+}

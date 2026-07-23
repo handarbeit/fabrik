@@ -45,13 +45,17 @@ func (c *Client) FetchPRClosingIssues(owner, repo string, prNumber int) ([]int, 
 	return out, nil
 }
 
-// FetchPRReviews returns the submitted reviews for a pull request via the REST API,
-// keyed on PR number rather than closedByPullRequestsReferences — the field GitHub
-// leaves structurally empty for PRs targeting a non-default base branch. This is the
-// base-independent counterpart to the GraphQL-nested latestReviews field, mirroring
-// FetchPRClosingIssues's REST-by-PR-number precedent (see #1047). Unlike GraphQL's
-// latestReviews (one review per author, most recent only), this returns the full
-// review history — every submission, unlimited per author.
+// FetchPRReviews returns the latest submitted review per author for a pull request
+// via the REST API, keyed on PR number rather than closedByPullRequestsReferences —
+// the field GitHub leaves structurally empty for PRs targeting a non-default base
+// branch. This is the base-independent counterpart to the GraphQL-nested
+// latestReviews field, mirroring FetchPRClosingIssues's REST-by-PR-number precedent
+// (see #1047). The REST endpoint returns the full review history — every submission,
+// unlimited per author — so results are collapsed to one entry per author (the most
+// recent submission, per GitHub's chronological response order) to match latestReviews'
+// semantics; otherwise an author's earlier non-DISMISSED review (e.g. a stale COMMENTED
+// review) could outlive a later dismissal of their actual current review and falsely
+// satisfy the review-gate's hasReviews check.
 // Returns nil, nil on 404.
 func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, error) {
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews?per_page=100", c.baseURL, owner, repo, prNumber)
@@ -69,17 +73,25 @@ func (c *Client) FetchPRReviews(owner, repo string, prNumber int) ([]PRReview, e
 		}
 		return nil, fmt.Errorf("fetching PR #%d reviews: %w", prNumber, err)
 	}
-	out := make([]PRReview, 0, len(raw))
+	latestByAuthor := make(map[string]PRReview, len(raw))
+	order := make([]string, 0, len(raw))
 	for _, r := range raw {
 		if r.User == nil || r.User.Login == "" {
 			continue
 		}
-		out = append(out, PRReview{
+		if _, seen := latestByAuthor[r.User.Login]; !seen {
+			order = append(order, r.User.Login)
+		}
+		latestByAuthor[r.User.Login] = PRReview{
 			Author:     r.User.Login,
 			State:      r.State,
 			Body:       r.Body,
 			DatabaseID: r.ID,
-		})
+		}
+	}
+	out := make([]PRReview, 0, len(order))
+	for _, author := range order {
+		out = append(out, latestByAuthor[author])
 	}
 	return out, nil
 }
