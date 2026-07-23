@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -148,32 +149,70 @@ func (e *Engine) checkReviewGate(board *gh.ProjectBoard, item gh.ProjectItem, st
 // silently loop forever applying fabrik:awaiting-review. When detected, it
 // pauses with a clear message (without applying fabrik:awaiting-review) and
 // reports true so the caller returns (false, false) directly.
+//
+// On a base:<branch> repo, closedByPullRequestsReferences is structurally empty
+// (GitHub only populates it for PRs targeting the repository default branch), so
+// item.LinkedPRNumber == 0 does not by itself indicate broken linkage there. In that
+// case linkage is confirmed via FetchPRClosingIssues (a direct PR-body parse) before
+// concluding the linkage is actually broken; the default-branch message/behavior below
+// this check is unchanged.
 func (e *Engine) handleBrokenReviewLinkage(owner, repo string, item gh.ProjectItem) bool {
-	if item.LinkedPRNumber == 0 {
-		pr, prErr := e.readClient.FetchLinkedPR(owner, repo, item.Number)
-		if prErr == nil && pr != nil && pr.Number > 0 && pr.State == "open" && !pr.Merged {
-			e.logf(item.Number, "review-gate", "broken linkage: PR #%d exists on branch fabrik/issue-%d but is not linked via closing keyword\n", pr.Number, item.Number)
-			msg := fmt.Sprintf(
-				"🏭 **Fabrik — broken PR↔issue linkage**\n\n"+
-					"PR #%d exists on branch `fabrik/issue-%d` but is not linked to this issue via a closing keyword "+
-					"(`closingIssuesReferences` is empty). The review gate cannot proceed without this linkage.\n\n"+
-					"Add `Closes #%d` as the first line of the PR body and remove `fabrik:paused` to resume:\n\n"+
-					"```bash\n"+
-					"gh pr view %d --json body --jq '.body' > /tmp/pr_body.txt && "+
-					"printf 'Closes #%d\\n\\n' | cat - /tmp/pr_body.txt | "+
-					"gh pr edit %d --body-file -\n"+
-					"```",
-				pr.Number, item.Number, item.Number,
-				pr.Number, item.Number, pr.Number,
-			)
-			e.pauseIssue(item, msg, pauseOpts{
-				labelEcho:  true,
-				labelFirst: true,
-			})
-			return true
-		}
+	if item.LinkedPRNumber != 0 {
+		return false
 	}
-	return false
+
+	pr, prErr := e.readClient.FetchLinkedPR(owner, repo, item.Number)
+	if prErr != nil || pr == nil || pr.Number == 0 || pr.State != "open" || pr.Merged {
+		return false
+	}
+
+	if itemHasBaseLabel(item) {
+		closingIssues, err := e.readClient.FetchPRClosingIssues(owner, repo, pr.Number)
+		if err == nil && slices.Contains(closingIssues, item.Number) {
+			// Linkage confirmed via PR body — not broken; let the gate proceed normally.
+			return false
+		}
+		e.logf(item.Number, "review-gate", "broken linkage: PR #%d (base:<branch> repo) exists on branch fabrik/issue-%d but its body lacks a closing keyword\n", pr.Number, item.Number)
+		msg := fmt.Sprintf(
+			"🏭 **Fabrik — broken PR↔issue linkage**\n\n"+
+				"PR #%d exists on branch `fabrik/issue-%d` but its body does not contain a recognized closing keyword. "+
+				"This issue targets a non-default base branch, so GitHub's `closingIssuesReferences` is always empty here and "+
+				"cannot be used to confirm linkage — the review gate checks the PR body directly instead, but found nothing.\n\n"+
+				"Add `Closes #%d` as the first line of the PR body and remove `fabrik:paused` to resume:\n\n"+
+				"```bash\n"+
+				"gh pr view %d --json body --jq '.body' > /tmp/pr_body.txt && "+
+				"printf 'Closes #%d\\n\\n' | cat - /tmp/pr_body.txt | "+
+				"gh pr edit %d --body-file -\n"+
+				"```",
+			pr.Number, item.Number, item.Number,
+			pr.Number, item.Number, pr.Number,
+		)
+		e.pauseIssue(item, msg, pauseOpts{
+			labelEcho:  true,
+			labelFirst: true,
+		})
+		return true
+	}
+
+	e.logf(item.Number, "review-gate", "broken linkage: PR #%d exists on branch fabrik/issue-%d but is not linked via closing keyword\n", pr.Number, item.Number)
+	msg := fmt.Sprintf(
+		"🏭 **Fabrik — broken PR↔issue linkage**\n\n"+
+			"PR #%d exists on branch `fabrik/issue-%d` but is not linked to this issue via a closing keyword "+
+			"(`closingIssuesReferences` is empty). The review gate cannot proceed without this linkage.\n\n"+
+			"Add `Closes #%d` as the first line of the PR body and remove `fabrik:paused` to resume:\n\n"+
+			"```bash\n"+
+			"gh pr view %d --json body --jq '.body' > /tmp/pr_body.txt && "+
+			"printf 'Closes #%d\\n\\n' | cat - /tmp/pr_body.txt | "+
+			"gh pr edit %d --body-file -\n"+
+			"```",
+		pr.Number, item.Number, item.Number,
+		pr.Number, item.Number, pr.Number,
+	)
+	e.pauseIssue(item, msg, pauseOpts{
+		labelEcho:  true,
+		labelFirst: true,
+	})
+	return true
 }
 
 // reviewGateOutstanding computes the outstanding requested reviewers (humans
