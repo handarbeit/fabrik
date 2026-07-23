@@ -172,6 +172,20 @@ These are **as-built docs** — they describe what the engine currently does. Th
 
 PRs introducing new as-built behavioral docs should also add an entry here.
 
+## Handling Community Bug Reports
+
+**Never run a community- or human-filed bug report through the Fabrik pipeline directly.** The Specify stage rewrites the issue body (`FABRIK_ISSUE_UPDATE`), so pipelining a report would overwrite the reporter's repro and diagnosis with a bot-authored spec — and the pipeline machinery (👀/🚀 reactions, per-stage comments, label churn) would spam the reporter's thread. Report and work are different artifacts: the report is human-owned triage/discussion; the work is bot-driven engineering.
+
+Instead:
+
+- **Keep the report as the canonical thread** — human-owned. Confirm the repro there, then comment linking to the work issue; keep it open until the fix lands.
+- **Create a separate spec-kit WORK issue** (authored as the bot identity, on the engine project board) that restates the report as Problem / Requirements / Scope / Acceptance and references it. **One report maps to 1..N work issues.**
+- **Linkage:** the work issue's PR carries `Closes #<work-issue>` (Fabrik's own discovery relies on it) **and** `Fixes #<report>` (so GitHub auto-closes the report and the reporter sees the resolution land).
+- **Multi-part fixes:** create a **chain of self-contained spec-kit work issues** (`blockedBy`-linked, **no epic/tracking issue**), all referencing the report. Do **not** rely on the in-pipeline child-spawn (`FABRIK_SPAWN_CHILD`) for a *known* decomposition — that path is for decomposition Plan *discovers* mid-flight; pre-decompose into chained issues when you already know the shape.
+- **Exception:** only pipeline the issue itself when it is your own internal issue, already spec-kit-shaped, a single fix, and reshaping it is acceptable. Community-filed reports are always handled as a separate work issue.
+
+**Board separation (recommended):** community reports belong on a separate, **public** triage/roadmap board with coarse columns (Triage → Accepted → In Progress → Shipped → Declined), giving the community a clean "reported → accepted → shipping" view. The engine work board stays private — it is thick with operational machinery (`fabrik:locked`, `stage:<name>:in_progress`, bot churn) that is noisy in public. A GitHub issue can belong to both boards at once (coarse on the public board, fine-grained on the engine board); keep the public board coarse to avoid status-sync overhead.
+
 ## Startup Board Validation
 
 On every startup, Fabrik fetches the project board and compares stage names to board columns. If any non-cleanup stage is missing from the board, Fabrik exits with a detailed error message listing the mismatched names. Extra board columns (without a matching stage) produce a warning but don't block startup. This catches mismatches between stage YAML config and the GitHub Project board configuration early.
