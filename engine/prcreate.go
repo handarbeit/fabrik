@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -212,11 +213,22 @@ func (e *Engine) processPRCreateMarker(ctx context.Context, item gh.ProjectItem,
 // verifyAndHealLinkage verifies that the linked PR's closingIssuesReferences includes the
 // parent issue after Implement completes, and attempts one auto-heal if missing.
 //
+// GitHub only populates closingIssuesReferences / closedByPullRequestsReferences for PRs
+// targeting the repository's default branch. When item carries a base:<branch> label
+// (see itemHasBaseLabel), that field is structurally empty regardless of PR body content,
+// so verification is delegated to verifyAndHealLinkageByBody, which confirms linkage by
+// parsing the PR body directly instead of relying on GitHub's resolved field. The
+// default-branch path below is unchanged.
+//
 // Returns true when linkage is confirmed (either already present or healed).
 // Returns false when linkage cannot be established — the issue is paused before returning.
 func (e *Engine) verifyAndHealLinkage(ctx context.Context, item gh.ProjectItem, prNumber int, stage *stages.Stage, owner, repo, repoStr string) bool {
 	if prNumber == 0 {
 		return true // no PR to verify
+	}
+
+	if itemHasBaseLabel(item) {
+		return e.verifyAndHealLinkageByBody(item, stage, owner, repo, repoStr)
 	}
 
 	// Re-fetch item to get fresh closedByPullRequestsReferences data.
@@ -240,55 +252,10 @@ func (e *Engine) verifyAndHealLinkage(ctx context.Context, item gh.ProjectItem, 
 	}
 
 	// PR exists but is not linked. Attempt auto-heal.
-	prSHA := pr.HeadSHA
-	closingLine := fmt.Sprintf("Closes #%d", item.Number)
-
-	// Fetch current PR body.
-	currentBody, fetchErr := e.client.GetIssueBody(owner, repo, pr.Number)
-	if fetchErr != nil {
-		e.logf(item.Number, "warn", "verifyAndHealLinkage: could not fetch PR #%d body: %v\n", pr.Number, fetchErr)
-		e.pauseForBrokenLinkage(item, pr.Number, closingLine, "could not fetch PR body for auto-heal")
+	closingLine, ok := e.attemptLinkageHeal(item, pr, stage, owner, repo, repoStr)
+	if !ok {
 		return false
 	}
-
-	// Body-length safety (FR-015): ensure prepend doesn't overflow GitHub's limit.
-	const maxBodyLen = 65300
-	if len(currentBody)+len(closingLine)+2 > maxBodyLen {
-		e.logf(item.Number, "warn", "verifyAndHealLinkage: PR #%d body is too long (%d chars) to prepend closing keyword\n", pr.Number, len(currentBody))
-		e.pauseForBrokenLinkage(item, pr.Number, closingLine, "PR body too long for auto-heal")
-		return false
-	}
-
-	// Idempotency guard: only attempt one heal per PR head SHA.
-	snap, _ := e.store.Get(repoStr, item.Number)
-	if snap.LinkageHealAttempted(stage.Name, prSHA) {
-		e.logf(item.Number, "warn", "verifyAndHealLinkage: heal already attempted for PR #%d (SHA %s) — pausing\n", pr.Number, prSHA)
-		e.pauseForBrokenLinkage(item, pr.Number, closingLine, "auto-heal was already attempted once but linkage is still missing")
-		return false
-	}
-
-	// Record that we're attempting the heal.
-	e.store.Apply(itemstate.LinkageHealAttempted{
-		Repo:      repoStr,
-		Number:    item.Number,
-		StageName: stage.Name,
-		PRSHA:     prSHA,
-	})
-
-	// Balance any unclosed code fences, then prepend the closing line.
-	balanced := balanceFences(currentBody)
-	healedBody := closingLine + "\n\n" + balanced
-
-	// no write-through: excluded — issue body is not read from cache for dispatch decisions
-	if err := e.client.UpdateIssueBody(owner, repo, pr.Number, healedBody); err != nil {
-		e.logf(item.Number, "warn", "verifyAndHealLinkage: could not update PR #%d body: %v\n", pr.Number, err)
-		e.pauseForBrokenLinkage(item, pr.Number, closingLine, fmt.Sprintf("UpdateIssueBody failed: %v", err))
-		return false
-	}
-	if e.webhookMgr != nil {
-		e.webhookMgr.RegisterEcho("issues", "edited", boardcache.ItemKey(owner+"/"+repo, pr.Number))
-	}
-	e.logf(item.Number, "pr", "verifyAndHealLinkage: prepended '%s' to PR #%d body\n", closingLine, pr.Number)
 
 	// Re-verify using FetchItemDetails.
 	if err := e.client.FetchItemDetails(&item); err != nil {
@@ -310,6 +277,123 @@ func (e *Engine) verifyAndHealLinkage(ctx context.Context, item gh.ProjectItem, 
 	e.logf(item.Number, "warn", "verifyAndHealLinkage: linkage still missing after heal — pausing\n")
 	e.pauseForBrokenLinkage(item, pr.Number, closingLine, "auto-heal completed but GitHub still reports no closing-issue linkage")
 	return false
+}
+
+// verifyAndHealLinkageByBody is the non-default-base counterpart to verifyAndHealLinkage.
+// It confirms/re-verifies linkage via FetchPRClosingIssues (a direct regex parse of the
+// PR body for a Closes/Fixes/Resolves keyword) instead of item.LinkedPRNumber, which is
+// only ever populated from closedByPullRequestsReferences — a field GitHub leaves empty
+// for PRs targeting a non-default base branch.
+func (e *Engine) verifyAndHealLinkageByBody(item gh.ProjectItem, stage *stages.Stage, owner, repo, repoStr string) bool {
+	pr, err := e.client.FetchLinkedPR(owner, repo, item.Number)
+	if err != nil || pr == nil || pr.Number == 0 || pr.State != "open" || pr.Merged {
+		// No active PR found via branch lookup — user has diverged, or PR is closed/merged.
+		e.logf(item.Number, "warn", "verifyAndHealLinkageByBody: no active PR found for branch fabrik/issue-%d — skipping heal\n", item.Number)
+		return true
+	}
+
+	closingIssues, err := e.client.FetchPRClosingIssues(owner, repo, pr.Number)
+	if err != nil {
+		e.logf(item.Number, "warn", "verifyAndHealLinkageByBody: FetchPRClosingIssues failed: %v\n", err)
+		// Non-fatal: skip verification to avoid false positives on transient errors.
+		return true
+	}
+	if slices.Contains(closingIssues, item.Number) {
+		// Linkage is present — nothing to do.
+		e.logf(item.Number, "pr", "verifyAndHealLinkageByBody: linkage confirmed via PR #%d body (base:<branch> repo)\n", pr.Number)
+		return true
+	}
+
+	// PR exists but its body lacks the closing keyword. Attempt auto-heal.
+	closingLine, ok := e.attemptLinkageHeal(item, pr, stage, owner, repo, repoStr)
+	if !ok {
+		return false
+	}
+
+	// Re-verify by re-parsing the PR body (base-independent).
+	closingIssues, err = e.client.FetchPRClosingIssues(owner, repo, pr.Number)
+	if err != nil {
+		e.logf(item.Number, "warn", "verifyAndHealLinkageByBody: re-verification FetchPRClosingIssues failed: %v\n", err)
+		// Can't confirm — treat as success (heal likely took effect; GitHub may lag).
+		healMsg := fmt.Sprintf("🏭 **Fabrik** — PR body auto-corrected: `%s` prepended (PR was opened without the closing reference). Re-verification fetch failed; please confirm linkage.", closingLine)
+		e.postComment(item, healMsg, false, false) //nolint:errcheck // failure already logged by postComment
+		return true
+	}
+
+	if slices.Contains(closingIssues, item.Number) {
+		e.logf(item.Number, "pr", "verifyAndHealLinkageByBody: linkage confirmed for PR #%d\n", pr.Number)
+		healMsg := fmt.Sprintf("🏭 **Fabrik** — PR body auto-corrected: `%s` prepended (PR was opened without the closing reference).", closingLine)
+		e.postComment(item, healMsg, false, true) //nolint:errcheck // failure already logged by postComment
+		return true
+	}
+
+	// Still not linked after heal — pause with recovery commands.
+	e.logf(item.Number, "warn", "verifyAndHealLinkageByBody: linkage still missing after heal — pausing\n")
+	e.pauseForBrokenLinkage(item, pr.Number, closingLine, "auto-heal completed but PR body still lacks the closing keyword")
+	return false
+}
+
+// attemptLinkageHeal prepends a "Closes #N" line to pr's body when missing, guarded by
+// a body-length check and a per-head-SHA idempotency guard. Shared by
+// verifyAndHealLinkage (default-branch path) and verifyAndHealLinkageByBody
+// (non-default-base path) — extracted from the original verifyAndHealLinkage, behavior
+// unchanged.
+//
+// On failure it pauses the issue itself and returns ok=false; the caller should return
+// immediately. On success it returns the closing line and ok=true; the caller is
+// responsible for re-verifying linkage afterward.
+func (e *Engine) attemptLinkageHeal(item gh.ProjectItem, pr *gh.PRDetails, stage *stages.Stage, owner, repo, repoStr string) (closingLine string, ok bool) {
+	prSHA := pr.HeadSHA
+	closingLine = fmt.Sprintf("Closes #%d", item.Number)
+
+	// Fetch current PR body.
+	currentBody, fetchErr := e.client.GetIssueBody(owner, repo, pr.Number)
+	if fetchErr != nil {
+		e.logf(item.Number, "warn", "verifyAndHealLinkage: could not fetch PR #%d body: %v\n", pr.Number, fetchErr)
+		e.pauseForBrokenLinkage(item, pr.Number, closingLine, "could not fetch PR body for auto-heal")
+		return closingLine, false
+	}
+
+	// Body-length safety (FR-015): ensure prepend doesn't overflow GitHub's limit.
+	const maxBodyLen = 65300
+	if len(currentBody)+len(closingLine)+2 > maxBodyLen {
+		e.logf(item.Number, "warn", "verifyAndHealLinkage: PR #%d body is too long (%d chars) to prepend closing keyword\n", pr.Number, len(currentBody))
+		e.pauseForBrokenLinkage(item, pr.Number, closingLine, "PR body too long for auto-heal")
+		return closingLine, false
+	}
+
+	// Idempotency guard: only attempt one heal per PR head SHA.
+	snap, _ := e.store.Get(repoStr, item.Number)
+	if snap.LinkageHealAttempted(stage.Name, prSHA) {
+		e.logf(item.Number, "warn", "verifyAndHealLinkage: heal already attempted for PR #%d (SHA %s) — pausing\n", pr.Number, prSHA)
+		e.pauseForBrokenLinkage(item, pr.Number, closingLine, "auto-heal was already attempted once but linkage is still missing")
+		return closingLine, false
+	}
+
+	// Record that we're attempting the heal.
+	e.store.Apply(itemstate.LinkageHealAttempted{
+		Repo:      repoStr,
+		Number:    item.Number,
+		StageName: stage.Name,
+		PRSHA:     prSHA,
+	})
+
+	// Balance any unclosed code fences, then prepend the closing line.
+	balanced := balanceFences(currentBody)
+	healedBody := closingLine + "\n\n" + balanced
+
+	// no write-through: excluded — issue body is not read from cache for dispatch decisions
+	if err := e.client.UpdateIssueBody(owner, repo, pr.Number, healedBody); err != nil {
+		e.logf(item.Number, "warn", "verifyAndHealLinkage: could not update PR #%d body: %v\n", pr.Number, err)
+		e.pauseForBrokenLinkage(item, pr.Number, closingLine, fmt.Sprintf("UpdateIssueBody failed: %v", err))
+		return closingLine, false
+	}
+	if e.webhookMgr != nil {
+		e.webhookMgr.RegisterEcho("issues", "edited", boardcache.ItemKey(owner+"/"+repo, pr.Number))
+	}
+	e.logf(item.Number, "pr", "verifyAndHealLinkage: prepended '%s' to PR #%d body\n", closingLine, pr.Number)
+
+	return closingLine, true
 }
 
 // pauseForBrokenLinkage pauses the issue with fabrik:paused and posts a comment
