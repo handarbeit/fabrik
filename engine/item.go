@@ -1538,6 +1538,21 @@ func (e *Engine) extractEffortOverride(issueNumber int, labels []string) string 
 	return ""
 }
 
+// itemHasBaseLabel reports whether item carries any non-empty "base:<branch>" label.
+// This is a zero-cost (no git/API call) signal that the item's PR targets a
+// non-default base branch, used to detect when closingIssuesReferences /
+// closedByPullRequestsReferences will be structurally empty (GitHub only populates
+// those fields for PRs targeting the repository's default branch).
+func itemHasBaseLabel(item gh.ProjectItem) bool {
+	const prefix = "base:"
+	for _, label := range item.Labels {
+		if strings.HasPrefix(label, prefix) && strings.TrimPrefix(label, prefix) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // baseBranchForItem scans item labels for a "base:<branch>" label and returns the
 // named branch if it exists on the remote. If multiple base: labels are present, it
 // uses the first and logs a warning. If the named branch does not exist on the remote,
