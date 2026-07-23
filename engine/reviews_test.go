@@ -1176,3 +1176,103 @@ func TestCheckReviewGate_BrokenLinkage_NoPRFound_FallsThrough(t *testing.T) {
 		}
 	}
 }
+
+// Broken-linkage guard on a base:<branch> repo: closedByPullRequestsReferences is
+// structurally empty there, so LinkedPRNumber == 0 alone doesn't mean linkage is
+// broken. When the PR body already contains the closing keyword (confirmed via
+// FetchPRClosingIssues), the gate must fall through to normal reviewer logic instead
+// of pausing. See #1046/#1047.
+func TestCheckReviewGate_BrokenLinkage_NonDefaultBase_ConfirmedViaBody_ClearsNormally(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 77, State: "open"}, nil
+		},
+		fetchPRClosingIssuesFn: func(owner, repo string, prNumber int) ([]int, error) {
+			return []int{10}, nil // PR body already contains "Closes #10"
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"base:develop"},
+		LinkedPRNumber: 0,
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+
+	blocked, timedOut := eng.checkReviewGate(board, item, stage)
+
+	// Falls through to normal reviewer logic: no reviewers requested, no reviews yet → blocks.
+	if !blocked {
+		t.Error("gate should fall through to normal blocking logic once linkage is confirmed via body")
+	}
+	if timedOut {
+		t.Error("gate should not report timedOut")
+	}
+
+	client.mu.Lock()
+	labels := client.addLabelCalls
+	client.mu.Unlock()
+	for _, l := range labels {
+		if l.labelName == "fabrik:paused" {
+			t.Error("should not pause when linkage is confirmed via PR body on a base:<branch> repo")
+		}
+	}
+}
+
+// Broken-linkage guard on a base:<branch> repo: PR exists but its body still lacks the
+// closing keyword — this is genuinely broken linkage (base-independent), so the gate
+// must pause exactly as it does on the default-branch path.
+func TestCheckReviewGate_BrokenLinkage_NonDefaultBase_BodyMissing_StillPauses(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 77, State: "open"}, nil
+		},
+		fetchPRClosingIssuesFn: func(owner, repo string, prNumber int) ([]int, error) {
+			return nil, nil // no closing keyword found in the PR body
+		},
+	}
+	eng := reviewTestEngine(t, client)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number:         10,
+		Repo:           "owner/repo",
+		Labels:         []string{"base:develop"},
+		LinkedPRNumber: 0,
+	}
+	stage := &stages.Stage{Name: "Implement", WaitForReviews: boolPtr(true)}
+
+	blocked, timedOut := eng.checkReviewGate(board, item, stage)
+
+	if blocked {
+		t.Error("gate should not report blocked when broken linkage detected")
+	}
+	if timedOut {
+		t.Error("gate should not report timedOut for broken linkage")
+	}
+
+	client.mu.Lock()
+	labels := client.addLabelCalls
+	client.mu.Unlock()
+	hasPaused := false
+	for _, l := range labels {
+		if l.labelName == "fabrik:paused" {
+			hasPaused = true
+		}
+		if l.labelName == "fabrik:awaiting-review" {
+			t.Error("fabrik:awaiting-review must not be applied for broken linkage")
+		}
+	}
+	if !hasPaused {
+		t.Error("issue should have fabrik:paused label applied")
+	}
+
+	if len(client.addCommentCalls) == 0 {
+		t.Fatal("expected a broken-linkage comment to be posted")
+	}
+	body := client.addCommentCalls[0].body
+	if !strings.Contains(body, "Closes #10") {
+		t.Errorf("comment should contain recovery closing keyword, got: %q", body)
+	}
+}
