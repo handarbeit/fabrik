@@ -168,7 +168,12 @@ func (e *Engine) handleBrokenReviewLinkage(owner, repo string, item gh.ProjectIt
 
 	if itemHasBaseLabel(item) {
 		closingIssues, err := e.readClient.FetchPRClosingIssues(owner, repo, pr.Number)
-		if err == nil && slices.Contains(closingIssues, item.Number) {
+		if err != nil {
+			// Transient fetch error: skip verification rather than false-positive pausing.
+			e.logf(item.Number, "warn", "handleBrokenReviewLinkage: FetchPRClosingIssues failed: %v\n", err)
+			return false
+		}
+		if slices.Contains(closingIssues, item.Number) {
 			// Linkage confirmed via PR body — not broken; let the gate proceed normally.
 			return false
 		}
