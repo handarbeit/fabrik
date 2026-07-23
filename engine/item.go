@@ -1546,7 +1546,7 @@ func (e *Engine) extractEffortOverride(issueNumber int, labels []string) string 
 func itemHasBaseLabel(item gh.ProjectItem) bool {
 	const prefix = "base:"
 	for _, label := range item.Labels {
-		if strings.HasPrefix(label, prefix) && strings.TrimPrefix(label, prefix) != "" {
+		if strings.HasPrefix(label, prefix) && len(label) > len(prefix) {
 			return true
 		}
 	}
