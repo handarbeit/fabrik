@@ -232,6 +232,7 @@ it will refuse otherwise.
 | `TestCrossRepoSpawn` | Cross-repo decomposition (spawn child in beta, gate parent, resume on close) | 45–60 min | $1.00–2.00 |
 | `TestYoloAutoMergeLabel` | `fabrik:yolo` auto-advance to Done via GitHub native auto-merge; timeline-verifies `fabrik:auto-merge-enabled` was applied | 20–40 min | $0.50–1.50 |
 | `TestCruiseFullPipeline` | `fabrik:cruise` auto-advances to Validate-complete without auto-merge; PR merged by human closes issue | 30–50 min | $0.80–2.00 |
+| `TestBaseBranchPipeline` | `base:<branch>` non-default base branch: throwaway branch created off main, PR targets it (not main), pipeline does not falsely pause at end of Implement, review gate clears via the base-independent REST feed | 35–55 min | $0.80–2.00 |
 | `TestCIFixReinvoke` | CI-fix reinvoke positive path: sentinel fails on first push, Claude fixes, CI passes, issue closes | 75–90 min | $1.00–3.00 |
 | `TestCIFixReinvokeCycleLimit` | CI-fix reinvoke negative path: unfixable sentinel exhausts MaxCiFixCycles, issue pauses | 30–60 min | $0.50–1.50 |
 | `TestPausedMergedPRRecovery` | paused + gate-label at Validate with merged PR heals to CLOSED (3 sequential sub-tests: awaiting-ci, awaiting-review, no-gate-label); regression guard for #874 class | 60–90 min (3 sequential sub-tests, ~20–30 min each); run with `E2E_TIMEOUT=3h` | $1.50–4.50 |
@@ -241,7 +242,7 @@ it will refuse otherwise.
 | `TestMergeTrainRestartSafety` | ADR-059 D5 / #960: after a landing, a restart with the historical merged integration PR present does NOT stall the next batch (reconstruct proceeds fresh). **Not parallel** — restarts the bed | 25–50 min | low |
 | `TestMergeTrainRunawayGuardPausesBatch` | ADR-059 D8 (#964/#965): persistently-red 4-member batch trips the runaway guard at cap=6, pauses all Queued members, no member reaches Done. Runs on RepoBeta for counter isolation | 10–20 min | low (no Claude) |
 
-Approximate suite total: ~470 min wall-clock, $7.50–24 in Claude tokens (CI-fix, `TestPausedMergedPRRecovery`, and conjunctive-gate tests should be run separately with `E2E_TIMEOUT=3h` or `E2E_TIMEOUT=2h` as noted above).
+Approximate suite total: ~515 min wall-clock, $8.30–26 in Claude tokens (CI-fix, `TestPausedMergedPRRecovery`, and conjunctive-gate tests should be run separately with `E2E_TIMEOUT=3h` or `E2E_TIMEOUT=2h` as noted above).
 
 ### Regression coverage map
 
@@ -254,6 +255,7 @@ Approximate suite total: ~470 min wall-clock, $7.50–24 in Claude tokens (CI-fi
 | `TestCrossRepoSpawn` | #797 / #803 (on-demand spawn-target init), v0.0.66 spawn machinery, #800 (addBlockedBy mutation name) |
 | `TestYoloAutoMergeLabel` | #829 (GitHub native auto-merge for yolo), #831/#835/#871 (convergence regression cascade) |
 | `TestCruiseFullPipeline` | #898 (cruise/yolo gate at Validate, `engine/poll.go`); ensures cruise never triggers `checkAutoMergeConvergence` |
+| `TestBaseBranchPipeline` | #1046 (report: base:<branch> GraphQL data gap), #1047 (`verifyAndHealLinkageByBody` linkage fix), #1050 (base-independent review-gate REST data feed) |
 | `TestCIFixReinvoke` | #888 ADR-056 D1 (settling primitive reinterprets CI-gate signals); CI-fix reinvoke loop (engine/ci.go) |
 | `TestCIFixReinvokeCycleLimit` | CI-fix cycle limit (`pauseForCIFixCycleLimit`), `MaxCiFixCycles` exhaustion path |
 | `TestPausedMergedPRRecovery` | #874 (paused+merged PR recovery class), #887 (settle-owner structural fix, `runValidatePRTerminalAdvance`), ADR-056 D2 (single-owner for PR-terminal → Done) |
