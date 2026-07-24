@@ -89,22 +89,21 @@ func TestBaseBranchPipeline(t *testing.T) {
 	}
 	t.Logf("PR #%d targets %s as expected", prNum, branchName)
 
-	// Review-gate assertion (#1050): wait for the gate to engage, then confirm
-	// it clears naturally (not via timeout).
-	reviewWaitTimeout := readEnvFileReviewWaitTimeout(t, env)
-	WaitForIssueLabel(t, env, env.RepoAlpha, num, "fabrik:awaiting-review", 15*time.Minute)
-	t.Logf("fabrik:awaiting-review appeared on %s#%d — review gate engaged", env.RepoAlpha, num)
-	WaitForLabelAbsent(t, env, env.RepoAlpha, num, "fabrik:awaiting-review",
-		time.Duration(reviewWaitTimeout+10)*time.Minute)
+	// Review-gate assertion (#1050): the base:<branch> review gate must clear
+	// NATURALLY via the base-independent review feed (FetchPRReviews), not via a
+	// timeout/fallback pause. Do NOT assert on the transient fabrik:awaiting-review
+	// label: when a review is already present the gate clears within seconds
+	// (verified: a 9-second apply→clear window on one run), so waiting to observe
+	// the label appear is inherently racy. Assert the robust outcome instead —
+	// the issue advances to stage:Validate:complete (proving the gate cleared)
+	// and was never review-timeout-paused up to that point (proving it cleared
+	// naturally; a #1050 regression would hang to fabrik:paused and never reach
+	// Validate).
+	WaitForIssueLabel(t, env, env.RepoAlpha, num, "stage:Validate:complete", 45*time.Minute)
 	AssertLabelWasNeverApplied(t, env, env.RepoAlpha, num, "fabrik:paused")
 	AssertLabelWasNeverApplied(t, env, env.RepoAlpha, num, "fabrik:awaiting-input")
-	t.Logf("fabrik:awaiting-review cleared naturally on %s#%d (no pause, no awaiting-input) — #1050 regression check passed",
+	t.Logf("%s#%d reached stage:Validate:complete without a review-timeout pause — review gate cleared naturally, #1050 regression check passed",
 		env.RepoAlpha, num)
-
-	// Bonus: drive the rest of the pipeline to completion, mirroring
-	// TestCruiseFullPipeline.
-	WaitForIssueLabel(t, env, env.RepoAlpha, num, "stage:Validate:complete", 30*time.Minute)
-	t.Logf("%s#%d reached stage:Validate:complete", env.RepoAlpha, num)
 
 	MergePR(t, env, env.RepoAlpha, prNum)
 	t.Logf("merged PR #%d — waiting for engine poll to advance to Done and close issue", prNum)
