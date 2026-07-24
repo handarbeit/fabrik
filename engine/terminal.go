@@ -121,7 +121,7 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 					Number:   pi.Number,
 					PRNumber: pi.LinkedPRNumber,
 				})
-			} else if pi.LinkedPRNumber == 0 && cachedPRNum != 0 && itemHasBaseLabel(gh.ProjectItem{Labels: s.Labels}) {
+			} else if pi.LinkedPRNumber == 0 && itemHasBaseLabel(gh.ProjectItem{Labels: s.Labels}) {
 				// base:<branch> item: closedByPullRequestsReferences is only populated
 				// for PRs targeting the repo's default branch, so the shallow probe
 				// structurally always reports 0 here even though a real linked PR
