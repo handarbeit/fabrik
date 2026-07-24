@@ -454,6 +454,38 @@ func MergePR(t *testing.T, env *Env, repo string, prNumber int) {
 	}
 }
 
+// CreateThrowawayBaseBranch creates a throwaway branch on repo, forked off
+// main's current head, for use as a non-default base:<branch> label target.
+// Registers a t.Cleanup to delete it (best-effort) at test end.
+func CreateThrowawayBaseBranch(t *testing.T, env *Env, repo, branchName string) {
+	t.Helper()
+	sha := defaultBranchSHA(t, env, repo, "main")
+	if out, err := ghOutput(env, "api", "--method", "POST",
+		fmt.Sprintf("repos/%s/git/refs", repo),
+		"-f", "ref=refs/heads/"+branchName,
+		"-f", "sha="+sha); err != nil {
+		t.Fatalf("create throwaway base branch %s on %s: %v\n%s", branchName, repo, err, out)
+	}
+	t.Cleanup(func() {
+		_, _ = ghOutput(env, "api", "--method", "DELETE",
+			fmt.Sprintf("repos/%s/git/refs/heads/%s", repo, branchName))
+	})
+	t.Logf("created throwaway base branch %s on %s (sha %s)", branchName, repo, sha)
+}
+
+// PRBaseRef returns the PR's base branch name (baseRefName) — used to confirm
+// a PR targets a non-default base branch rather than silently falling back
+// to the repo default.
+func PRBaseRef(t *testing.T, env *Env, repo string, prNumber int) string {
+	t.Helper()
+	out, err := ghOutput(env, "pr", "view", fmt.Sprint(prNumber), "-R", repo,
+		"--json", "baseRefName", "--jq", ".baseRefName")
+	if err != nil {
+		t.Fatalf("read base ref of PR #%d in %s: %v\n%s", prNumber, repo, err, out)
+	}
+	return strings.TrimSpace(out)
+}
+
 func mapKeys(m map[string]bool) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
