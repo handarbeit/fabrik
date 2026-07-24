@@ -2874,7 +2874,9 @@ The probe loop:
 
 4. **New item** (not in store): seeds minimal state via `IssueOpened`, then calls `FetchItemDetails` unconditionally to populate labels and deep fields.
 
-5. **Linkage drift** (`probe.linkedPRNumber ≠ cached LinkedPR.Number`): applies `DeepFetchInvalidated` to reset `LastSeenSourceUpdatedAt`, then falls through to the staleness check.
+5. **Linkage drift** (`probe.linkedPRNumber ≠ cached LinkedPR.Number`) — on a warm cache (`LastDeepFetchAt` set), applies `DeepFetchInvalidated` to reset `LastSeenSourceUpdatedAt`, then falls through to the staleness check.
+
+   **base:`<branch>` suppression**: `closedByPullRequestsReferences` is only populated by GitHub for PRs targeting the repository's *default* branch, so the shallow probe structurally always reports `LinkedPRNumber == 0` for an item whose linked PR targets a non-default `base:<branch>`, even while the warm deep cache correctly holds the real PR number (resolved via the base-independent linkage path). To avoid perpetual false-positive invalidation on every poll, the drift check is suppressed — left as a true no-op, no `DeepFetchInvalidated` and no `PRDetailsUpdated` — when all three hold: the probe reports `LinkedPRNumber == 0`, the cached `LinkedPR.Number` is non-zero, and the cached item (read from the Store's `ItemState.Labels`, never from the probe item — probe items carry no `Labels` field) satisfies `itemHasBaseLabel`. A probe reporting a *different non-zero* PR number on a base-labeled item is still treated as genuine drift and invalidates as usual. Default-branch behavior (no `base:` label) is unaffected — the suppression can never fire since `itemHasBaseLabel` is false.
 
 6. Applies `ProbeBoardItemUpdated` (updates `IsClosed`, `State`, `IsPR`, `Status`, `UpdatedAt`; **explicitly skips `Labels`** to preserve the cached label set populated by prior deep-fetches or webhook deltas).
 
