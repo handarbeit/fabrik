@@ -920,6 +920,89 @@ func TestRunProbeAndDeepFetch_LinkageDrift_InvalidatesAndDeepFetches(t *testing.
 	}
 }
 
+// TestRunProbeAndDeepFetch_BaseLabeledItem_ZeroProbeSuppressesDrift verifies
+// that for a base:<branch>-labeled item, a probe reporting LinkedPRNumber == 0
+// against a warm cache holding a nonzero linked PR is NOT treated as linkage
+// drift: FetchItemDetails must not be called and the cached LinkedPR.Number
+// must survive unchanged. This is the structurally-expected case where
+// closedByPullRequestsReferences is empty because the PR targets a non-default
+// base branch.
+func TestRunProbeAndDeepFetch_BaseLabeledItem_ZeroProbeSuppressesDrift(t *testing.T) {
+	T1 := time.Now().Add(-time.Hour).Truncate(time.Second)
+	var deepFetchCalls int
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return []gh.BoardProbeItem{
+				// Structurally-expected probe value of 0 for a base:<branch> item.
+				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo", Status: "Research", EffectiveUpdatedAt: T1, LinkedPRNumber: 0},
+			}, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalls++
+			return nil
+		},
+	}
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
+	// Warm cache: prior deep-fetch resolved the real PR #42 via the
+	// base-independent linkage path, and the item carries a base: label.
+	eng.store.Apply(itemstate.ItemDeepFetched{
+		Repo:   "owner/repo",
+		Number: 1,
+		FreshState: gh.ProjectItem{
+			ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", UpdatedAt: T1,
+			LinkedPRNumber: 42,
+			Labels:         []string{"base:release"},
+		},
+	})
+	eng.runProbeAndDeepFetch(cache)
+	if deepFetchCalls != 0 {
+		t.Errorf("expected 0 FetchItemDetails calls (suppressed base-label drift); got %d", deepFetchCalls)
+	}
+	snap, err := eng.store.Get("owner/repo", 1)
+	if err != nil {
+		t.Fatalf("store.Get failed: %v", err)
+	}
+	st := snap.State()
+	if st.LinkedPR == nil || st.LinkedPR.Number != 42 {
+		t.Errorf("expected cached LinkedPR.Number to remain 42, got %+v", st.LinkedPR)
+	}
+}
+
+// TestRunProbeAndDeepFetch_BaseLabeledItem_GenuineDriftStillInvalidates
+// verifies that for a base:<branch>-labeled item, a probe reporting a
+// *different nonzero* linked PR than the cache still triggers real linkage
+// drift (invalidate + re-deep-fetch) — only the 0-vs-nonzero case is
+// suppressed.
+func TestRunProbeAndDeepFetch_BaseLabeledItem_GenuineDriftStillInvalidates(t *testing.T) {
+	T1 := time.Now().Add(-time.Hour).Truncate(time.Second)
+	var deepFetchCalls int
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return []gh.BoardProbeItem{
+				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo", Status: "Research", EffectiveUpdatedAt: T1, LinkedPRNumber: 99},
+			}, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalls++
+			return nil
+		},
+	}
+	eng, cache := testEngineWithCache(t, client, &mockClaudeInvoker{})
+	eng.store.Apply(itemstate.ItemDeepFetched{
+		Repo:   "owner/repo",
+		Number: 1,
+		FreshState: gh.ProjectItem{
+			ID: "I_001", ItemID: "PVTI_001", Number: 1, Repo: "owner/repo", UpdatedAt: T1,
+			LinkedPRNumber: 42,
+			Labels:         []string{"base:release"},
+		},
+	})
+	eng.runProbeAndDeepFetch(cache)
+	if deepFetchCalls == 0 {
+		t.Error("expected FetchItemDetails called after genuine drift on base-labeled item (PR #42 → #99); got 0 calls")
+	}
+}
+
 // TestRunProbeAndDeepFetch_ItemGone_RemovedFromStore verifies that an item
 // present in the store but absent from probe results is removed from the store.
 func TestRunProbeAndDeepFetch_ItemGone_RemovedFromStore(t *testing.T) {
