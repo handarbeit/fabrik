@@ -121,6 +121,15 @@ func (e *Engine) runProbeAndDeepFetch(cacheImpl *boardcache.CacheImpl) {
 					Number:   pi.Number,
 					PRNumber: pi.LinkedPRNumber,
 				})
+			} else if pi.LinkedPRNumber == 0 && cachedPRNum != 0 && itemHasBaseLabel(gh.ProjectItem{Labels: s.Labels}) {
+				// base:<branch> item: closedByPullRequestsReferences is only populated
+				// for PRs targeting the repo's default branch, so the shallow probe
+				// structurally always reports 0 here even though a real linked PR
+				// exists in the warm deep cache. This is not real drift — leave the
+				// deep cache untouched (no-op: applying PRDetailsUpdated with 0 would
+				// wipe the correct cached LinkedPR.Number). Read labels from the
+				// cached state (s), never the probe item pi — probe items never
+				// carry labels (see doc comment above).
 			} else {
 				// Warm cache (has been deep-fetched): real linkage drift — invalidate.
 				e.logf(pi.Number, "cache", "probe: linkage drift (was PR #%d, now PR #%d) — invalidating deep cache\n",
