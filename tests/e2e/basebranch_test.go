@@ -89,12 +89,26 @@ func TestBaseBranchPipeline(t *testing.T) {
 	}
 	t.Logf("PR #%d targets %s as expected", prNum, branchName)
 
-	// Review-gate assertion (#1050): the base:<branch> review gate must clear
-	// NATURALLY via the base-independent review feed (FetchPRReviews), not via a
-	// timeout/fallback pause. Do NOT assert on the transient fabrik:awaiting-review
-	// label: when a review is already present the gate clears within seconds
-	// (verified: a 9-second apply→clear window on one run), so waiting to observe
-	// the label appear is inherently racy. Assert the robust outcome instead —
+	// Submit a review DETERMINISTICALLY via FABRIK_REVIEWER_TOKEN (a non-author
+	// account) so #1050's base-independent feed (FetchPRReviews) has a real review
+	// to detect. Relying on an external bot (Gemini) to auto-review this exact PR
+	// is flaky — observed: it reviews some PRs and silently skips others — and its
+	// absence is NOT a #1050 defect (the gate then correctly pauses at the
+	// review-wait timeout). Controlling the review here is what makes the
+	// clear-path assertion below reviewer-independent.
+	reviewerToken := readEnvFileReviewerToken(t, env)
+	if reviewerToken == "" {
+		t.Skip("FABRIK_REVIEWER_TOKEN not set in bed .env — required to deterministically exercise the base:<branch> review-gate clear-path (#1050)")
+	}
+	SubmitPRReview(t, env, reviewerToken, env.RepoAlpha, prNum, "APPROVE")
+	t.Logf("submitted APPROVE review on PR #%d via reviewer token — #1050's base-independent feed should now clear the gate", prNum)
+
+	// Review-gate assertion (#1050): with a review present, the base:<branch>
+	// review gate must clear via the base-independent review feed (FetchPRReviews),
+	// not hang to a timeout/fallback pause. Do NOT assert on the transient
+	// fabrik:awaiting-review label: the gate can clear within seconds of the review
+	// landing (verified: a 9-second apply→clear window on one run), so waiting to
+	// observe the label appear is inherently racy. Assert the robust outcome instead —
 	// the issue advances to stage:Validate:complete (proving the gate cleared)
 	// and was never review-timeout-paused up to that point (proving it cleared
 	// naturally; a #1050 regression would hang to fabrik:paused and never reach
