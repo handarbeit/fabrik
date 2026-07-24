@@ -121,6 +121,9 @@ func ensureLabelExists(t *testing.T, env *Env, repo, label string) {
 		"--color", "5319e7", "--force"); err != nil {
 		t.Fatalf("ensure label %q exists on %s: %v\n%s", label, repo, err, out)
 	}
+	t.Cleanup(func() {
+		_, _ = ghOutput(env, "label", "delete", label, "-R", repo, "--yes")
+	})
 }
 
 // baseBranchPipelineBodyTemplate is the issue body for TestBaseBranchPipeline.
