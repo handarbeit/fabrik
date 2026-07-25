@@ -116,9 +116,13 @@ type Stage struct {
 	// and never auto-advanced — they sit until a human moves them to a real stage.
 	// When true, the prompt/skill requirement is waived, mirroring HoldingStage.
 	// Combining Unmanaged with Prompt/Skill/CleanupWorktree/HoldingStage is
-	// discouraged but not rejected: Unmanaged simply means "never dispatch",
-	// which takes precedence over any other flag in practice (see engine dispatch
-	// guards in engine/item.go and engine/poll.go).
+	// discouraged but not rejected at load time: Unmanaged means "never dispatch,
+	// never resolve as a target," and this precedence is actively enforced (not
+	// just documented) by every resolver that could otherwise pick an Unmanaged
+	// stage as "the" Done/Queued/next column — cleanupStage, holdingStage
+	// (engine/stages.go), and NextStage (stages.go) all skip stages with
+	// Unmanaged: true. See engine dispatch guards in engine/item.go and
+	// engine/poll.go for the per-item suppression side of the same guarantee.
 	Unmanaged bool `yaml:"unmanaged,omitempty"`
 
 	// DisableAdaptiveThinking controls whether Claude Code's adaptive (auto-reduced)
@@ -287,12 +291,21 @@ func loadOne(path string) (*Stage, error) {
 	return &s, nil
 }
 
-// NextStage returns the stage after the given one, or nil if it's the last.
+// NextStage returns the stage after the given one, skipping over any stage
+// marked Unmanaged (a parking column is never a valid auto-advance target —
+// items land there only via explicit human action). Returns nil if current is
+// the last stage, or if only unmanaged stages remain after it.
 func NextStage(stages []*Stage, current string) *Stage {
 	for i, s := range stages {
-		if s.Name == current && i+1 < len(stages) {
-			return stages[i+1]
+		if s.Name != current {
+			continue
 		}
+		for j := i + 1; j < len(stages); j++ {
+			if !stages[j].Unmanaged {
+				return stages[j]
+			}
+		}
+		return nil
 	}
 	return nil
 }

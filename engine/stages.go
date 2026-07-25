@@ -400,10 +400,12 @@ func (e *Engine) handleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 	e.settleNoWorkNeeded(board, item, stage)
 }
 
-// holdingStage returns the first stage in cfg with HoldingStage: true, or nil if none.
+// holdingStage returns the first stage in cfg with HoldingStage: true, or nil if
+// none. A stage also marked Unmanaged is never returned — Unmanaged stages are
+// never a valid resolution target (see the Unmanaged field doc in stages/stages.go).
 func holdingStage(cfg Config) *stages.Stage {
 	for _, s := range cfg.Stages {
-		if s.HoldingStage {
+		if s.HoldingStage && !s.Unmanaged {
 			return s
 		}
 	}
@@ -412,11 +414,12 @@ func holdingStage(cfg Config) *stages.Stage {
 
 // cleanupStage returns the lowest-Order stage in cfg with CleanupWorktree: true,
 // or nil if none is configured. Used by settleClosedItemsToDone to locate the
-// Done column by its behavioral flag rather than a hardcoded stage name.
+// Done column by its behavioral flag rather than a hardcoded stage name. A stage
+// also marked Unmanaged is never returned, for the same reason as holdingStage.
 func cleanupStage(cfg Config) *stages.Stage {
 	var cleanup *stages.Stage
 	for _, s := range cfg.Stages {
-		if s.CleanupWorktree && (cleanup == nil || s.Order < cleanup.Order) {
+		if s.CleanupWorktree && !s.Unmanaged && (cleanup == nil || s.Order < cleanup.Order) {
 			cleanup = s
 		}
 	}

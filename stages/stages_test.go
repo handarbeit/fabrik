@@ -322,10 +322,18 @@ unmanaged: true
 	}
 }
 
-// TestLoadAll_UnmanagedCombinations documents current precedence behavior:
-// unmanaged combined with prompt/skill/cleanup_worktree/holding_stage is not
-// rejected (mirrors the codebase's existing lack of mutual-exclusion validation
-// between cleanup_worktree and holding_stage).
+// TestLoadAll_UnmanagedCombinations documents that unmanaged combined with
+// prompt/skill/cleanup_worktree/holding_stage is not rejected at load time
+// (mirrors the codebase's existing lack of mutual-exclusion validation between
+// cleanup_worktree and holding_stage). This is safe, not just permissive:
+// unlike the loading step tested here, the *resolution* step is where
+// precedence is actually enforced — engine.cleanupStage, engine.holdingStage,
+// and NextStage (this package) all skip stages with Unmanaged: true, so an
+// unmanaged+cleanup_worktree (or +holding_stage) stage loads cleanly but is
+// never picked as "the" Done/Queued/next-stage target. See
+// TestCleanupStage_SkipsUnmanaged and TestHoldingStage_SkipsUnmanaged in
+// engine/closed_item_advance_settle_test.go, and TestNextStage_SkipsUnmanaged
+// below, for that half of the guarantee.
 func TestLoadAll_UnmanagedCombinations(t *testing.T) {
 	tests := []struct {
 		name string
@@ -431,6 +439,35 @@ func TestNextStage(t *testing.T) {
 	// Unknown stage returns nil
 	if s := NextStage(stages, "X"); s != nil {
 		t.Errorf("NextStage(X) = %v, want nil", s)
+	}
+}
+
+// TestNextStage_SkipsUnmanaged is the regression guard for a PR review finding
+// on issue #973: an Unmanaged stage misconfigured with an Order between two
+// dispatched stages must never be returned as "next" — items would advance
+// into it and get stuck forever (both dispatch guards return false for it, the
+// catch-up loop skips it, and no settle scan reaps it). NextStage must walk
+// past any Unmanaged stage to the next real one.
+func TestNextStage_SkipsUnmanaged(t *testing.T) {
+	stages := []*Stage{
+		{Name: "Review"},
+		{Name: "OnHold", Unmanaged: true},
+		{Name: "Validate"},
+	}
+	if s := NextStage(stages, "Review"); s == nil || s.Name != "Validate" {
+		t.Errorf("NextStage(Review) = %v, want Validate (OnHold must be skipped)", s)
+	}
+}
+
+// TestNextStage_TrailingUnmanagedOnly verifies that if only unmanaged stages
+// remain after current, NextStage returns nil rather than parking the item.
+func TestNextStage_TrailingUnmanagedOnly(t *testing.T) {
+	stages := []*Stage{
+		{Name: "Validate"},
+		{Name: "Archive", Unmanaged: true},
+	}
+	if s := NextStage(stages, "Validate"); s != nil {
+		t.Errorf("NextStage(Validate) = %v, want nil (only unmanaged stages remain)", s)
 	}
 }
 

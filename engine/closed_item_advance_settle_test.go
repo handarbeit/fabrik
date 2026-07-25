@@ -214,3 +214,64 @@ func TestCleanupStage_ReturnsLowestOrder(t *testing.T) {
 		t.Errorf("expected lowest-Order cleanup stage %q, got %+v", "Done", got)
 	}
 }
+
+// TestCleanupStage_SkipsUnmanaged is the regression guard for a PR review
+// finding on issue #973: a stage combining unmanaged: true with
+// cleanup_worktree: true (e.g. an order: -1 Backlog stage, the lowest Order in
+// the pipeline) must never be resolved as "the" cleanup stage — that would
+// make settleClosedItemsToDone move every closed board item into Backlog
+// instead of Done, with no self-heal since the guard at
+// closed_item_advance_settle.go skips resolved CleanupWorktree stages.
+func TestCleanupStage_SkipsUnmanaged(t *testing.T) {
+	cfg := Config{Stages: []*stages.Stage{
+		{Name: "Backlog", Order: -1, Unmanaged: true, CleanupWorktree: true},
+		{Name: "Done", Order: 6, CleanupWorktree: true},
+		{Name: "Implement", Order: 2},
+	}}
+	got := cleanupStage(cfg)
+	if got == nil || got.Name != "Done" {
+		t.Errorf("expected the non-unmanaged cleanup stage %q, got %+v (Backlog must be skipped despite its lower Order)", "Done", got)
+	}
+}
+
+// TestCleanupStage_OnlyUnmanagedCleanupStage_ReturnsNil verifies the degrade
+// path when the sole CleanupWorktree stage is also Unmanaged: cleanupStage
+// returns nil (same as "no cleanup stage configured at all") rather than
+// silently returning the unmanaged stage.
+func TestCleanupStage_OnlyUnmanagedCleanupStage_ReturnsNil(t *testing.T) {
+	cfg := Config{Stages: []*stages.Stage{
+		{Name: "Backlog", Order: -1, Unmanaged: true, CleanupWorktree: true},
+		{Name: "Implement", Order: 2},
+	}}
+	if got := cleanupStage(cfg); got != nil {
+		t.Errorf("expected nil (no eligible cleanup stage), got %+v", got)
+	}
+}
+
+// TestHoldingStage_SkipsUnmanaged mirrors TestCleanupStage_SkipsUnmanaged for
+// holdingStage: a stage combining unmanaged: true with holding_stage: true
+// must never be resolved as "the" holding stage (advanceToQueued would move
+// items into a parking column instead of the real merge-train queue).
+func TestHoldingStage_SkipsUnmanaged(t *testing.T) {
+	cfg := Config{Stages: []*stages.Stage{
+		{Name: "Backlog", Order: -1, Unmanaged: true, HoldingStage: true},
+		{Name: "Queued", Order: 6, HoldingStage: true},
+	}}
+	got := holdingStage(cfg)
+	if got == nil || got.Name != "Queued" {
+		t.Errorf("expected the non-unmanaged holding stage %q, got %+v (Backlog must be skipped)", "Queued", got)
+	}
+}
+
+// TestHoldingStage_OnlyUnmanagedHoldingStage_ReturnsNil verifies the degrade
+// path when the sole HoldingStage stage is also Unmanaged: holdingStage
+// returns nil rather than silently returning the unmanaged stage.
+func TestHoldingStage_OnlyUnmanagedHoldingStage_ReturnsNil(t *testing.T) {
+	cfg := Config{Stages: []*stages.Stage{
+		{Name: "Backlog", Order: -1, Unmanaged: true, HoldingStage: true},
+		{Name: "Implement", Order: 2},
+	}}
+	if got := holdingStage(cfg); got != nil {
+		t.Errorf("expected nil (no eligible holding stage), got %+v", got)
+	}
+}
