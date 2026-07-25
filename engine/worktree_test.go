@@ -180,6 +180,73 @@ func TestBranchExists(t *testing.T) {
 	}
 }
 
+// TestRemoteBranchExists verifies the ls-remote probe against origin: true for a
+// branch present on origin, false for one absent, and false (fail-safe) when no
+// origin remote is configured at all (the ls-remote command itself errors).
+func TestRemoteBranchExists(t *testing.T) {
+	skipIfNoGit(t)
+	_, srcDir, _, wm := setupTrainRepo(t)
+
+	mustGit(t, srcDir, "branch", "release/present")
+
+	if !wm.remoteBranchExists("release/present") {
+		t.Error("expected release/present to exist on origin")
+	}
+	if wm.remoteBranchExists("release/absent") {
+		t.Error("expected release/absent to not exist on origin")
+	}
+
+	// No origin remote configured at all — fail safe to false.
+	noOriginWM := NewWorktreeManager(initBareRepo(t))
+	if noOriginWM.remoteBranchExists("main") {
+		t.Error("expected remoteBranchExists to fail safe to false with no origin configured")
+	}
+}
+
+// TestResolveBaseLabelBranch_LocalHit verifies the fast path: a branch already
+// present in the local clone's refs/remotes/origin/* is confirmed without any
+// remote probe or fetch.
+func TestResolveBaseLabelBranch_LocalHit(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+	mustGitDir(t, wm.baseDir, "update-ref", "refs/remotes/origin/develop", "HEAD")
+
+	if !wm.resolveBaseLabelBranch("develop", 1) {
+		t.Error("expected local hit to resolve true")
+	}
+}
+
+// TestResolveBaseLabelBranch_RemoteOnly verifies the miss path: a branch absent
+// from the local clone but present on origin is fetched and then resolves true,
+// and the local clone ends up with a resolvable refs/remotes/origin/<branch>.
+func TestResolveBaseLabelBranch_RemoteOnly(t *testing.T) {
+	skipIfNoGit(t)
+	_, srcDir, _, wm := setupTrainRepo(t)
+	mustGit(t, srcDir, "branch", "release/only-on-remote")
+
+	if wm.branchExists("origin/release/only-on-remote") {
+		t.Fatal("test setup invariant violated: branch should not yet be in the local clone")
+	}
+
+	if !wm.resolveBaseLabelBranch("release/only-on-remote", 1) {
+		t.Error("expected remote-only branch to resolve true after fetch")
+	}
+	if !wm.branchExists("origin/release/only-on-remote") {
+		t.Error("expected fetch to populate refs/remotes/origin/release/only-on-remote locally")
+	}
+}
+
+// TestResolveBaseLabelBranch_Absent verifies a branch absent both locally and on
+// origin resolves false (the genuine-fallback case).
+func TestResolveBaseLabelBranch_Absent(t *testing.T) {
+	skipIfNoGit(t)
+	_, _, _, wm := setupTrainRepo(t)
+
+	if wm.resolveBaseLabelBranch("nonexistent-anywhere", 1) {
+		t.Error("expected absent branch to resolve false")
+	}
+}
+
 func TestEnsureWorktree_StaleDirectoryPreserved(t *testing.T) {
 	skipIfNoGit(t)
 	repoDir := initBareRepo(t)

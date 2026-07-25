@@ -556,7 +556,12 @@ func TestExtractEffortOverrideMultipleLabelsPrecedence(t *testing.T) {
 
 func TestBaseBranchForItem(t *testing.T) {
 	skipIfNoGit(t)
-	repoDir := initBareRepo(t)
+	// Use a real bare-clone + origin setup (rather than a standalone repo with
+	// no remote at all) so the resolveBaseLabelBranch remote-check/fetch path
+	// exercises an authoritative ls-remote against a genuine origin, not just
+	// an error from a missing remote.
+	_, srcDir, _, wm := setupTrainRepo(t)
+	repoDir := wm.baseDir
 
 	// Get the HEAD SHA so we can inject remote tracking refs.
 	shaCmd := exec.Command("git", "rev-parse", "HEAD")
@@ -567,7 +572,9 @@ func TestBaseBranchForItem(t *testing.T) {
 	}
 	sha := strings.TrimSpace(string(shaOut))
 
-	// Inject remote tracking refs for valid-branch tests.
+	// Inject remote tracking refs directly in the local clone for valid-branch
+	// tests — these short-circuit at the local branchExists check and never
+	// reach the remote-check/fetch path, so they're unaffected by it.
 	for _, branch := range []string{"develop", "release/1.x", "feature/a"} {
 		cmd := exec.Command("git", "update-ref", "refs/remotes/origin/"+branch, sha)
 		cmd.Dir = repoDir
@@ -575,6 +582,10 @@ func TestBaseBranchForItem(t *testing.T) {
 			t.Fatalf("git update-ref origin/%s: %s: %v", branch, out, err)
 		}
 	}
+
+	// Branch created directly on the real origin (srcDir), never fetched into
+	// the local clone — exercises the local-miss -> remote-hit -> fetch path.
+	mustGit(t, srcDir, "branch", "release/remote-only")
 
 	tests := []struct {
 		name        string
@@ -618,13 +629,17 @@ func TestBaseBranchForItem(t *testing.T) {
 			labels: []string{"stage:Research:complete", "base:develop", "model:sonnet"},
 			want:   "develop",
 		},
+		{
+			name:   "branch absent locally but present on remote is resolved without fallback",
+			labels: []string{"base:release/remote-only"},
+			want:   "release/remote-only",
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			client := &mockGitHubClient{}
 			eng := testEngine(t, client, &mockClaudeInvoker{})
-			wm := NewWorktreeManager(repoDir)
 			item := gh.ProjectItem{Number: 42, Labels: tc.labels}
 
 			got, err := eng.baseBranchForItem(item, wm)
@@ -636,14 +651,27 @@ func TestBaseBranchForItem(t *testing.T) {
 			}
 			client.mu.Lock()
 			commentCount := len(client.addCommentCalls)
+			var commentBody string
+			if commentCount > 0 {
+				commentBody = client.addCommentCalls[0].body
+			}
 			client.mu.Unlock()
 			if tc.wantComment && commentCount == 0 {
 				t.Error("expected fallback comment to be posted, but none was")
 			}
 			if !tc.wantComment && commentCount > 0 {
-				t.Errorf("unexpected comment posted: %q", client.addCommentCalls[0].body)
+				t.Errorf("unexpected comment posted: %q", commentBody)
+			}
+			if tc.wantComment && !strings.Contains(commentBody, "ls-remote") {
+				t.Errorf("expected fallback comment to mention the ls-remote check, got: %q", commentBody)
 			}
 		})
+	}
+
+	// Confirm the fetch actually populated the local clone, proving
+	// EnsureWorktree would be able to resolve the branch downstream.
+	if !wm.branchExists("origin/release/remote-only") {
+		t.Error("expected release/remote-only to be resolvable locally after resolveBaseLabelBranch fetched it")
 	}
 }
 
