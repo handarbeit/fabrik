@@ -264,7 +264,7 @@ func TestEscalateFailedStage_CacheKeyUsesResolvedRepo(t *testing.T) {
 	item := gh.ProjectItem{Number: 1}
 	stage := &stages.Stage{Name: "Implement", Order: 3, Prompt: "implement"}
 
-	eng.escalateFailedStage(item, stage)
+	eng.escalateFailedStage(item, stage, "")
 
 	labels, err := cache.FetchLabels("owner", "repo", 1)
 	if err != nil {
