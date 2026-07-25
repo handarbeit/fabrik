@@ -567,6 +567,148 @@ func TestProcessItem_ClaudeError(t *testing.T) {
 	}
 }
 
+// testProcessItemDegenerateOutputEscalates drives processItem repeatedly with the
+// given degenerate output until MaxRetries is hit, and asserts that: the bare
+// reference is never posted verbatim as a stage comment, no stage-complete label
+// is ever applied, and the stage eventually escalates (fabrik:paused +
+// stage:<Name>:failed) with a pause comment naming the offending reference.
+func testProcessItemDegenerateOutputEscalates(t *testing.T, issueNumber int, degenerateOutput string) {
+	t.Helper()
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return degenerateOutput + "\nFABRIK_STAGE_COMPLETE", true, TokenUsage{}, nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			MaxRetries: 2,
+			Stages:     testStages(),
+		},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: issueNumber, Title: "Degenerate", Status: "Research", ItemID: "PVTI"}
+
+	// PollSeconds=0 makes cooldown=0, so repeated calls reach Claude without waiting.
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem (first call): %v", err)
+	}
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem (second call): %v", err)
+	}
+
+	// The degenerate reference must never be posted verbatim as the stage's main comment.
+	for _, call := range client.addCommentCalls {
+		if strings.Contains(call.body, "stage: Research") && strings.Contains(call.body, degenerateOutput) &&
+			!strings.Contains(call.body, "degenerate stage output") && !strings.Contains(call.body, "stage failed") {
+			t.Errorf("degenerate output %q was posted verbatim as a stage comment: %s", degenerateOutput, call.body)
+		}
+	}
+
+	// The stage must never be marked complete.
+	for _, call := range client.addLabelCalls {
+		if call.labelName == "stage:Research:complete" {
+			t.Errorf("stage:Research:complete label applied despite degenerate output")
+		}
+	}
+
+	foundPaused, foundFailed := false, false
+	for _, call := range client.addLabelCalls {
+		if call.labelName == "fabrik:paused" {
+			foundPaused = true
+		}
+		if call.labelName == "stage:Research:failed" {
+			foundFailed = true
+		}
+	}
+	if !foundPaused {
+		t.Error("expected fabrik:paused label after max retries")
+	}
+	if !foundFailed {
+		t.Error("expected stage:Research:failed label after max retries")
+	}
+
+	foundReasonInEscalation := false
+	for _, call := range client.addCommentCalls {
+		if strings.Contains(call.body, "stage failed") && strings.Contains(call.body, degenerateOutput) {
+			foundReasonInEscalation = true
+		}
+	}
+	if !foundReasonInEscalation {
+		t.Error("expected escalation comment to name the degenerate reference")
+	}
+}
+
+func TestProcessItem_DegenerateOutput_BareAtRef(t *testing.T) {
+	testProcessItemDegenerateOutputEscalates(t, 20, "@/tmp/plan_comment.md")
+}
+
+func TestProcessItem_DegenerateOutput_BarePath(t *testing.T) {
+	testProcessItemDegenerateOutputEscalates(t, 21, "/tmp/foo.md")
+}
+
+// TestProcessItem_LegitimateShortOutput_StillAdvances is a regression guard proving
+// the degenerate-output detector has no false positive on ordinary short prose —
+// such output must still post normally and advance the stage.
+func TestProcessItem_LegitimateShortOutput_StillAdvances(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	const shortOutput = "Looks good, no changes needed."
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return shortOutput + "\nFABRIK_STAGE_COMPLETE", true, TokenUsage{}, nil
+		},
+	}
+
+	eng := NewWithDeps(
+		Config{Owner: "o", Repo: "r", User: "u", Token: "t", Stages: testStages()},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 22, Title: "Legit", Status: "Research", ItemID: "PVTI_22"}
+
+	if err := eng.processItem(context.Background(), board, item); err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	foundOutputComment := false
+	for _, call := range client.addCommentCalls {
+		if strings.Contains(call.body, shortOutput) {
+			foundOutputComment = true
+		}
+	}
+	if !foundOutputComment {
+		t.Errorf("expected the legitimate short output to be posted verbatim, got comments: %+v", client.addCommentCalls)
+	}
+
+	foundComplete := false
+	for _, call := range client.addLabelCalls {
+		if call.labelName == "stage:Research:complete" {
+			foundComplete = true
+		}
+	}
+	if !foundComplete {
+		t.Error("expected stage:Research:complete label — legitimate short output must still advance the stage")
+	}
+}
+
 func TestProcessItem_ClaudeExitError(t *testing.T) {
 	skipIfNoGit(t)
 	repoDir := initBareRepo(t)
