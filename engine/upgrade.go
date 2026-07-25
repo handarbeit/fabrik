@@ -442,6 +442,59 @@ func (e *Engine) checkAndUpgrade() {
 	}
 }
 
+// versionSkewExecCommandFn is a seam over exec.CommandContext so tests can
+// stub the on-disk binary's `--version` output without spawning a real
+// process. Production code leaves this as exec.CommandContext.
+var versionSkewExecCommandFn = exec.CommandContext
+
+// checkVersionSkew compares the on-disk binary's reported version (via a
+// throttled `<exe> --version` subprocess) against the running process's
+// version, recording a persistent warnings/ entry on mismatch — see #1074.
+// This is a general safety net for "the binary on disk has moved on but this
+// process hasn't," whatever the cause: a SemverGreater bug, a failed
+// syscall.Exec re-exec, or a manual/external replacement (e.g. a fleet
+// sharing ~/go/bin/fabrik). Non-fatal: any error resolving the path or
+// running the subprocess is logged and the check is skipped for this poll.
+func (e *Engine) checkVersionSkew() {
+	exe, err := upgradeExecutableFn()
+	if err != nil {
+		e.logf(0, "upgrade", "version-skew check: could not determine executable path: %v\n", err)
+		return
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		e.logf(0, "upgrade", "version-skew check: could not resolve symlinks for executable: %v\n", err)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := versionSkewExecCommandFn(ctx, exe, "--version").Output()
+	if err != nil {
+		e.logf(0, "upgrade", "version-skew check: running %s --version: %v\n", exe, err)
+		return
+	}
+
+	diskVersion := strings.TrimSpace(string(out))
+	running := e.cfg.Version
+	key := "version_skew:" + exe
+
+	if diskVersion == running {
+		_ = warnings.Clear(key)
+		return
+	}
+
+	e.logf(0, "upgrade", "WARNING: on-disk binary version (%s) differs from running version (%s) — a pending upgrade may be stuck; restart with 'kill -HUP %d' to pick it up\n", diskVersion, running, os.Getpid())
+	_ = warnings.Record(warnings.Entry{
+		Key:       key,
+		Type:      "version_skew",
+		Title:     "Running version differs from on-disk binary",
+		Detail:    fmt.Sprintf("The daemon is running version %s but the binary on disk at %s reports %s. This can happen when an upgrade replaced the binary but the process failed to re-exec, or when another process replaced the binary externally.\n\nFix: kill -HUP %d (restarts in place, picking up the on-disk binary).", running, exe, diskVersion, os.Getpid()),
+		FixAction: "shell_command",
+		FixParams: map[string]string{"cmd": fmt.Sprintf("kill -HUP %d", os.Getpid())},
+	})
+}
+
 // extractBinarySHA extracts the short SHA from a dev version string like
 // "dev(abc1234)". Returns "" if the version is not a dev build or has no SHA.
 func extractBinarySHA(version string) string {
