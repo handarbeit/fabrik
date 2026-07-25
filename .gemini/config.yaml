@@ -1,0 +1,21 @@
+# Gemini Code Assist repo-level configuration.
+# Schema reference (re-verify before editing — has drifted before):
+# https://docs.cloud.google.com/gemini/docs/code-review/customize-repo-review
+#
+# Scope: keeps automatic review enabled, but skips it on draft PRs and on
+# PRs that touch only dependency-manifest files (go.mod, go.sum). This is a
+# deliberate subset of the original request — see adrs/069-gemini-review-scope-defers-docs-exclusion.md
+# for why docs/**-only PRs are NOT excluded here.
+code_review:
+  disable: false
+  comment_severity_threshold: MEDIUM
+  max_review_comments: -1
+  pull_request_opened:
+    help: false
+    summary: false
+    code_review: true
+    include_drafts: false
+
+ignore_patterns:
+  - go.mod
+  - go.sum
