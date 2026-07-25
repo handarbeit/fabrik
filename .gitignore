@@ -23,6 +23,9 @@
 .env
 /fabrik
 /print-plugin-hash
+# goreleaser build output — must be ignored or Go's buildvcs stamps release
+# artifacts +dirty (untracked dist/ makes the tree "modified" at build time).
+/dist/
 *.exe
 .DS_Store
 tmp/
