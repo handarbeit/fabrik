@@ -352,6 +352,53 @@ func TestValidatePRTerminalAdvance_UnmanagedCleanupStageDoesNotBreakFillLoop(t *
 	}
 }
 
+// TestValidatePRTerminalAdvance_UnmanagedGateCheckedStage_NoSpuriousLabel is the
+// regression guard for a PR review finding on issue #973: the prior fix for
+// TestValidatePRTerminalAdvance_UnmanagedCleanupStageDoesNotBreakFillLoop only
+// excluded Unmanaged from the CleanupWorktree break condition
+// (`s.CleanupWorktree && !s.Unmanaged`), so the loop still fell through to the
+// gate-checked fill logic for an Unmanaged stage that ALSO carries a gate flag
+// (wait_for_ci/wait_for_reviews) — a combination loadOne permits, same as
+// unmanaged + cleanup_worktree. An Unmanaged stage must never receive a
+// stage:<name>:complete label here regardless of what other flags it carries;
+// it was never dispatched to.
+func TestValidatePRTerminalAdvance_UnmanagedGateCheckedStage_NoSpuriousLabel(t *testing.T) {
+	tr := true
+	stgs := []*stages.Stage{
+		{Name: "Implement", Order: 1},
+		{Name: "OnHold", Order: 2, Unmanaged: true, WaitForCI: &tr},
+		{Name: "Validate", Order: 3, WaitForCI: &tr},
+		{Name: "Done", Order: 4, CleanupWorktree: true},
+	}
+	client := &mockGitHubClient{
+		fetchLinkedPRFn: func(owner, repo string, issueNumber int) (*gh.PRDetails, error) {
+			return &gh.PRDetails{Number: 8, Merged: true}, nil
+		},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 51,
+		ItemID: "PVTI_51",
+		Status: "Validate",
+		Labels: []string{
+			"stage:Implement:complete",
+			"fabrik:awaiting-ci",
+			// Missing stage:Validate:complete; OnHold (unmanaged) never had one to begin with.
+		},
+	}
+	advancedItems := make(map[string]bool)
+	eng.runValidatePRTerminalAdvance(board, []gh.ProjectItem{item}, advancedItems)
+
+	added := addedLabelNames(client.addLabelCalls)
+	if containsLabel(added, "stage:OnHold:complete") {
+		t.Errorf("unmanaged gate-checked stage OnHold must never receive a completion label; got %v", added)
+	}
+	if !containsLabel(added, "stage:Validate:complete") {
+		t.Errorf("expected stage:Validate:complete to be added; got %v", added)
+	}
+}
+
 // TestValidatePRTerminalAdvance_NonValidateSkipped verifies that items at
 // non-Validate stages are ignored by the single owner.
 func TestValidatePRTerminalAdvance_NonValidateSkipped(t *testing.T) {
