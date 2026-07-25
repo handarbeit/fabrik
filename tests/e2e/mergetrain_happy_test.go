@@ -63,7 +63,7 @@ func TestMergeTrainHappyPathLanding(t *testing.T) {
 	// landing's explicit fallback close — NOT via the member PR. Asserting issue
 	// closure here is the regression guard for the connectivity fix.
 	for _, m := range members {
-		WaitForProjectStatus(t, env, env.RepoAlpha, m.issue, "Done", 10*time.Minute)
+		WaitForMemberLanded(t, env, env.RepoAlpha, m.issue, 10*time.Minute)
 		waitForPRClosed(t, env, env.RepoAlpha, m.pr, 10*time.Minute)
 		WaitForIssueClosed(t, env, env.RepoAlpha, m.issue, 10*time.Minute)
 		t.Logf("member #%d landed: Done + issue closed + member PR #%d closed", m.issue, m.pr)

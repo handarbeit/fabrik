@@ -43,7 +43,7 @@ func TestMergeTrainRestartSafety(t *testing.T) {
 	b1b, b1bPR := QueueMember(t, env, env.RepoAlpha, base, "r1b", "e2e/train/restart/r1b.txt", "restart batch1 b\n")
 	WaitForLogLine(t, env, "landing complete", logStart1, 30*time.Minute)
 	for _, m := range [][2]int{{b1a, b1aPR}, {b1b, b1bPR}} {
-		WaitForProjectStatus(t, env, env.RepoAlpha, m[0], "Done", 10*time.Minute)
+		WaitForMemberLanded(t, env, env.RepoAlpha, m[0], 10*time.Minute)
 		waitForPRClosed(t, env, env.RepoAlpha, m[1], 10*time.Minute)
 	}
 	t.Logf("batch 1 landed — a merged integration PR is now history on the repo")
@@ -61,7 +61,7 @@ func TestMergeTrainRestartSafety(t *testing.T) {
 	b2b, b2bPR := QueueMember(t, env, env.RepoAlpha, base, "r2b", "e2e/train/restart/r2b.txt", "restart batch2 b\n")
 	WaitForLogLine(t, env, "landing complete", logStart2, 30*time.Minute)
 	for _, m := range [][2]int{{b2a, b2aPR}, {b2b, b2bPR}} {
-		WaitForProjectStatus(t, env, env.RepoAlpha, m[0], "Done", 10*time.Minute)
+		WaitForMemberLanded(t, env, env.RepoAlpha, m[0], 10*time.Minute)
 		waitForPRClosed(t, env, env.RepoAlpha, m[1], 10*time.Minute)
 	}
 	assertNoStaleTrainArtifacts(t, env, env.RepoAlpha)
