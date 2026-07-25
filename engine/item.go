@@ -1067,6 +1067,20 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 		postOutput = strings.TrimSpace(postOutput)
 	}
 
+	// Degenerate-output guard (defense-in-depth for issue #1065): a stage output that
+	// reduces to nothing but a bare @file reference or absolute path is never useful to
+	// post and must not be treated as a completion, regardless of whether the marker was
+	// present. Suppress the post and force completed=false so none of the four downstream
+	// branches (no-work, complete-and-advance, blocked-on-input, retry) can advance the
+	// stage on this output — it instead falls through to the existing retry/escalate path.
+	var degenerateReason string
+	if isDegenerateOutput(postOutput) {
+		degenerateReason = postOutput
+		e.logf(item.Number, "warn", "stage %q produced degenerate output (bare file reference: %q) — not posting, not advancing\n", stage.Name, degenerateReason)
+		postOutput = ""
+		completed = false
+	}
+
 	// When completing a stage that posts output to a PR and creates a draft PR,
 	// ensure the PR exists before posting so postOutputToPR can find it.
 	// Error is intentionally ignored here — failure is caught and escalated in
@@ -1237,8 +1251,18 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
 				count = snap.Attempts(stage.Name)
 			}
+			if degenerateReason != "" && count == 1 {
+				// Surface the problem immediately on first detection rather than staying
+				// silent until MaxRetries is hit — matches the existing empty-output
+				// warning's visibility level.
+				warnComment := fmt.Sprintf(
+					"🏭 **Fabrik — degenerate stage output**\n\nStage **%s** produced output that was just a bare file reference (`%s`) instead of real content, likely because the model wrote its output to a file and returned a dangling reference. The comment was not posted and the stage did not advance; it will be retried.",
+					stage.Name, degenerateReason,
+				)
+				e.postItemComment(item, warnComment, true)
+			}
 			if count >= e.cfg.MaxRetries {
-				e.escalateFailedStage(item, stage)
+				e.escalateFailedStage(item, stage, degenerateReason)
 				releaseLock() // permanently giving up — release the lock
 			}
 		}
@@ -1273,7 +1297,9 @@ func (e *Engine) escalatePRCreationFailure(item gh.ProjectItem, stage *stages.St
 // escalateFailedStage is called when a stage has failed MaxRetries times. It adds
 // fabrik:paused and stage:<name>:failed labels, posts an explanatory comment, and
 // records the escalation so clearFailedStage can detect when the user unpauses.
-func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
+// reason, when non-empty, names a specific cause (e.g. a degenerate bare file
+// reference) to append to the pause comment; pass "" for the generic message.
+func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage, reason string) {
 	e.logf(item.Number, "escalate", "stage %q failed %d time(s) — pausing issue\n", stage.Name, e.cfg.MaxRetries)
 
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
@@ -1282,6 +1308,12 @@ func (e *Engine) escalateFailedStage(item gh.ProjectItem, stage *stages.Stage) {
 		"🏭 **Fabrik — stage failed**\n\nStage **%s** failed to complete after %d attempt(s). The issue has been paused (`fabrik:paused`).\n\nTo retry: investigate the failure, make any needed fixes, then remove the `fabrik:paused` label.",
 		stage.Name, e.cfg.MaxRetries,
 	)
+	if reason != "" {
+		comment += fmt.Sprintf(
+			"\n\n**Cause:** the stage's final output was a bare file reference (`%s`) instead of real content — the model likely wrote its output to a file and returned a dangling reference instead of emitting it inline.",
+			reason,
+		)
+	}
 	e.pauseIssue(item, comment, pauseOpts{
 		reactRocket: true,
 		labelEcho:   true,
