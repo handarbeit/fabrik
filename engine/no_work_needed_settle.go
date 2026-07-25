@@ -91,10 +91,13 @@ func (e *Engine) settleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 			}
 		}
 
-		// Find the order boundary for the cleanup (Done) stage.
+		// Find the order boundary for the cleanup (Done) stage. A stage also marked
+		// Unmanaged is excluded — same as cleanupStage() in engine/stages.go — so a
+		// misconfigured unmanaged+cleanup_worktree stage (e.g. an order: -1 Backlog)
+		// never becomes the resolved boundary here.
 		doneOrder := math.MaxInt
 		for _, s := range e.cfg.Stages {
-			if s.CleanupWorktree && s.Order < doneOrder {
+			if s.CleanupWorktree && !s.Unmanaged && s.Order < doneOrder {
 				doneOrder = s.Order
 			}
 		}
@@ -113,7 +116,12 @@ func (e *Engine) settleNoWorkNeeded(board *gh.ProjectBoard, item gh.ProjectItem,
 		skippedComment := fmt.Sprintf("🏭 **Fabrik — skipped: no work needed**\n\n_Skipped: no work needed (FABRIK_NO_WORK_NEEDED emitted by %s)._", stage.Name)
 		alreadyPostedSkipComments := hasSkippedComment(item, stage.Name)
 		for _, s := range e.cfg.Stages {
-			if s.Order <= stage.Order || s.Order >= doneOrder {
+			// Unmanaged stages get no bookkeeping here — a parking column an operator
+			// misordered between the emitting stage and Done (the same misplacement
+			// NextStage guards against, see stages/stages.go) must not receive a
+			// spurious stage:<name>:complete label or "skipped" comment; it was never
+			// actually dispatched to or through.
+			if s.Order <= stage.Order || s.Order >= doneOrder || s.Unmanaged {
 				continue
 			}
 			skipLabel := fmt.Sprintf("stage:%s:complete", s.Name)

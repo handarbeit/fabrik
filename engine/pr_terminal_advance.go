@@ -89,7 +89,13 @@ func (e *Engine) runValidatePRTerminalAdvance(board *gh.ProjectBoard, items []gh
 			// it. Fail-fast on error to preserve idempotent retry (EC-2).
 			fillFailed := false
 			for _, s := range e.cfg.Stages {
-				if s.CleanupWorktree {
+				// A stage also marked Unmanaged (e.g. a misconfigured Backlog combining
+				// unmanaged: true with cleanup_worktree: true) is never the real
+				// terminal/cleanup stage — see cleanupStage() in engine/stages.go, which
+				// applies the same exclusion when resolving "the" Done stage elsewhere.
+				// Breaking on it here would stop the fill loop before any real
+				// gate-checked stage is ever considered.
+				if s.CleanupWorktree && !s.Unmanaged {
 					break
 				}
 				if s.Order <= highestCompleteOrder {

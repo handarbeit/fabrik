@@ -191,6 +191,56 @@ func TestHandleNoWorkNeeded_SkipsIntermediateStages(t *testing.T) {
 	}
 }
 
+// TestHandleNoWorkNeeded_SkipsUnmanagedStage_NoBookkeeping is the regression
+// guard for a PR review finding on issue #973: the skip-labeling loop in
+// settleNoWorkNeeded (engine/no_work_needed_settle.go) iterates every stage
+// between the emitting stage and Done, adding a stage:<name>:complete label
+// and a "skipped" comment for each. An unmanaged column an operator misplaced
+// between two real stages (e.g. "On Hold" with an Order between Implement and
+// Validate — the same misordering NextStage guards against) must receive
+// neither: it was never actually dispatched to, and unmanaged stages get zero
+// engine bookkeeping by design (see docs/state-machine.md).
+func TestHandleNoWorkNeeded_SkipsUnmanagedStage_NoBookkeeping(t *testing.T) {
+	client := &mockGitHubClient{}
+	stgs := []*stages.Stage{
+		{Name: "Research", Order: 1, Prompt: "research"},
+		{Name: "Plan", Order: 2, Prompt: "plan"},
+		{Name: "Implement", Order: 3, Prompt: "implement"},
+		{Name: "OnHold", Order: 4, Unmanaged: true},
+		{Name: "Validate", Order: 5, Prompt: "validate"},
+		{Name: "Done", Order: 6, Prompt: "done", CleanupWorktree: true},
+	}
+	eng := testEngineWithStages(t, client, stgs)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 7, ItemID: "PVTI_7"}
+	stage := &stages.Stage{Name: "Plan", Order: 2}
+
+	eng.handleNoWorkNeeded(board, item, stage)
+
+	labelSet := make(map[string]bool)
+	for _, c := range client.addLabelCalls {
+		labelSet[c.labelName] = true
+	}
+	if !labelSet["stage:Implement:complete"] {
+		t.Error("expected stage:Implement:complete skip label")
+	}
+	if !labelSet["stage:Validate:complete"] {
+		t.Error("expected stage:Validate:complete skip label")
+	}
+	if labelSet["stage:OnHold:complete"] {
+		t.Error("unmanaged OnHold stage must not receive a skip completion label")
+	}
+	if labelSet["stage:Done:complete"] {
+		t.Error("expected no stage:Done:complete skip label (cleanup stage must be excluded)")
+	}
+
+	// Only 2 skipped comments (Implement, Validate) — none for the unmanaged stage.
+	if len(client.addCommentCalls) != 2 {
+		t.Fatalf("expected 2 skipped comments (Implement, Validate only), got %d", len(client.addCommentCalls))
+	}
+}
+
 // TestHandleNoWorkNeeded_ClosesIssue verifies that handleNoWorkNeeded calls
 // CloseIssue after successfully moving the item to Done, and that the
 // ApplyIssueClosed write-through sets IsClosed in the cache.
