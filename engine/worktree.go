@@ -510,7 +510,11 @@ func (wm *WorktreeManager) branchExists(branch string) bool {
 // disambiguated from a genuinely absent branch. Fails safe (returns false) on
 // any error, including an unreachable remote or a missing origin.
 func (wm *WorktreeManager) remoteBranchExists(branch string) bool {
-	cmd := exec.Command("git", "ls-remote", "--heads", "origin", branch)
+	// The "--" separator prevents a label value beginning with "-" (e.g.
+	// "base:--upload-pack=/some/script") from being parsed as a git option
+	// instead of a literal ref pattern — see resolveBaseLabelBranch for why
+	// this matters for the branch's own untrusted origin.
+	cmd := exec.Command("git", "ls-remote", "--heads", "origin", "--", branch)
 	cmd.Dir = wm.baseDir
 	cmd.Env = nonInteractiveGitEnv()
 	out, err := cmd.Output()
@@ -529,6 +533,11 @@ func (wm *WorktreeManager) remoteBranchExists(branch string) bool {
 // resolve it. Returns true only if the branch is confirmed to exist locally
 // by the end of the call (i.e. the local clone can back it); false otherwise,
 // including when ls-remote or fetch themselves error (fail-safe fallback).
+//
+// candidate is user-controlled (a base:<branch> label value) and is passed to
+// git subprocesses with a "--" separator ahead of it — without one, a value
+// like "--upload-pack=/path/to/script" is parsed as a git option rather than a
+// literal ref name, which can execute an arbitrary local program.
 func (wm *WorktreeManager) resolveBaseLabelBranch(candidate string, issueNumber int) bool {
 	wm.mu.Lock()
 	defer wm.mu.Unlock()
@@ -542,7 +551,7 @@ func (wm *WorktreeManager) resolveBaseLabelBranch(candidate string, issueNumber 
 		return false
 	}
 
-	cmd := exec.Command("git", "fetch", "origin", candidate)
+	cmd := exec.Command("git", "fetch", "origin", "--", candidate)
 	cmd.Dir = wm.baseDir
 	cmd.Env = nonInteractiveGitEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
