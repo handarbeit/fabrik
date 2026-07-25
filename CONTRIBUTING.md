@@ -42,6 +42,14 @@ The `docs-drift` workflow will fail the PR otherwise.
 - Code style: standard Go conventions (`gofmt`), `MixedCaps` naming, stdlib-first.
 - Engine-behavior changes must update the corresponding as-built doc (`docs/state-machine.md` or `docs/stage-lifecycle.md`) in the same PR — these are authoritative specs, not afterthought notes.
 
+## Automated review
+
+Gemini Code Assist (`.gemini/config.yaml`) automatically reviews substantive
+pull requests, but skips draft PRs and PRs that touch only `go.mod`/`go.sum`.
+PRs that touch only `docs/**` or `**/*.md` are still reviewed for now — that
+exclusion is intentionally deferred, not an oversight; see
+[ADR-069](adrs/069-gemini-review-scope-defers-docs-exclusion.md) for why.
+
 ## Reporting bugs
 
 Open an issue on [the issue tracker](https://github.com/handarbeit/fabrik/issues). If the bug involves a stage run, attach the relevant section of `.fabrik/logs/fabrik.log` (redact any tokens first).
