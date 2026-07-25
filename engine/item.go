@@ -1579,20 +1579,18 @@ func (e *Engine) baseBranchForItem(item gh.ProjectItem, wm *WorktreeManager) (st
 		return wm.DefaultBaseBranch()
 	}
 
-	wm.mu.Lock()
-	exists := wm.branchExists("origin/" + candidate)
-	wm.mu.Unlock()
-	if exists {
+	if wm.resolveBaseLabelBranch(candidate, item.Number) {
 		e.logf(item.Number, "base", "using base branch %q from label\n", candidate)
 		return candidate, nil
 	}
 
-	// Branch not found — log warning, post comment once, fall back to default.
-	e.logf(item.Number, "warn", "base: label branch %q not found on remote, falling back to default\n", candidate)
+	// Branch genuinely absent on the remote (confirmed via ls-remote) — log
+	// warning, post comment once, fall back to default.
+	e.logf(item.Number, "warn", "base: label branch %q not found on remote (verified via ls-remote), falling back to default\n", candidate)
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	warnKey := fmt.Sprintf("%s/%s#%d:%s", owner, repo, item.Number, candidate)
 	if _, alreadyWarned := e.baseBranchWarnedSet.LoadOrStore(warnKey, true); !alreadyWarned {
-		body := fmt.Sprintf("🏭 **Fabrik — base branch not found**\n\nFabrik could not find branch `%s` on the remote (from `base:%s` label). Falling back to the repository default branch.", candidate, candidate)
+		body := fmt.Sprintf("🏭 **Fabrik — base branch not found**\n\nFabrik checked the remote (`git ls-remote`) and could not find branch `%s` (from `base:%s` label). Falling back to the repository default branch.", candidate, candidate)
 		e.postItemComment(item, body, true)
 	}
 	return wm.DefaultBaseBranch()

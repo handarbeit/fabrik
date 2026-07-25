@@ -503,6 +503,56 @@ func (wm *WorktreeManager) branchExists(branch string) bool {
 	return err == nil
 }
 
+// remoteBranchExists is a read-only network probe that reports whether branch
+// exists as a head ref on origin, via `git ls-remote --heads`. Unlike
+// branchExists (which only consults the local bare clone), this is
+// authoritative against the remote — used when a local miss must be
+// disambiguated from a genuinely absent branch. Fails safe (returns false) on
+// any error, including an unreachable remote or a missing origin.
+func (wm *WorktreeManager) remoteBranchExists(branch string) bool {
+	cmd := exec.Command("git", "ls-remote", "--heads", "origin", branch)
+	cmd.Dir = wm.baseDir
+	cmd.Env = nonInteractiveGitEnv()
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) != ""
+}
+
+// resolveBaseLabelBranch resolves a base:<branch> label candidate, falling
+// back from the local bare clone to an authoritative remote check when the
+// local clone is stale. It first checks branchExists("origin/"+candidate); on
+// a miss, it probes the remote directly via remoteBranchExists and, if the
+// branch is confirmed there, fetches it into the local clone so subsequent
+// worktree operations (EnsureWorktree, updateWorktreeFromMain, rebase) can
+// resolve it. Returns true only if the branch is confirmed to exist locally
+// by the end of the call (i.e. the local clone can back it); false otherwise,
+// including when ls-remote or fetch themselves error (fail-safe fallback).
+func (wm *WorktreeManager) resolveBaseLabelBranch(candidate string, issueNumber int) bool {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+
+	ref := "origin/" + candidate
+	if wm.branchExists(ref) {
+		return true
+	}
+
+	if !wm.remoteBranchExists(candidate) {
+		return false
+	}
+
+	cmd := exec.Command("git", "fetch", "origin", candidate)
+	cmd.Dir = wm.baseDir
+	cmd.Env = nonInteractiveGitEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		wm.logf(issueNumber, "base", "warn: could not fetch base label branch %q: %s\n", candidate, strings.TrimSpace(string(out)))
+		return false
+	}
+
+	return wm.branchExists(ref)
+}
+
 // updateWorktreeFromMain fetches latest origin and rebases the worktree branch
 // onto origin/main. This ensures stages start from an up-to-date base without
 // creating noise merge commits that confuse Claude on retries.
