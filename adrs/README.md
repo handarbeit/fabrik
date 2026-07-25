@@ -30,3 +30,4 @@ contributors and future maintainers.
 | [065](065-consolidated-mutation-helpers.md) | Consolidated GitHub-mutation helpers (label/comment/pause) | Accepted |
 | [066](066-consolidated-github-request-helpers.md) | Consolidated GitHub-client request helpers (REST core, paginator, boardcache mutation/heal) | Accepted |
 | [067](067-merge-train-centralized-inflight-cleanup.md) | Centralized Merge-Train In-Flight Marker Cleanup | Accepted |
+| [069](069-gemini-review-scope-defers-docs-exclusion.md) | Gemini Review Scoping Defers docs/** Exclusion | Accepted |
