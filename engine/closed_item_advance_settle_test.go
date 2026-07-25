@@ -62,6 +62,34 @@ func TestSettleClosedItemsToDone_ClosedAtUnconfiguredColumn_Advances(t *testing.
 	}
 }
 
+// TestSettleClosedItemsToDone_ClosedAtDeclaredUnmanagedStage_Advances covers
+// the case stages.FindStage no longer returns nil for once a declarative
+// `unmanaged: true` Backlog stage exists (issue #973). settleClosedItemsToDone's
+// skip condition only excludes CleanupWorktree/HoldingStage/gate-checked
+// stages, so an Unmanaged stage — which is none of those — must still fall
+// through to advanceClosedItemToDone, exactly as it did when stage was nil.
+// This guards against a future edit that adds `stage.Unmanaged` to the skip
+// list by analogy with the dispatch guards elsewhere, which would silently
+// strand closed Backlog items forever (no worktree, so nothing else reaps them).
+func TestSettleClosedItemsToDone_ClosedAtDeclaredUnmanagedStage_Advances(t *testing.T) {
+	client := &mockGitHubClient{}
+	stgs := append([]*stages.Stage{{Name: "Backlog", Order: -1, Unmanaged: true}}, closedAdvanceStages()...)
+	eng := testEngineWithStages(t, client, stgs)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+
+	item := gh.ProjectItem{Number: 10, ItemID: "PVTI_10", Repo: "owner/repo", Status: "Backlog", IsClosed: true}
+	board.Items = []gh.ProjectItem{item}
+
+	eng.settleClosedItemsToDone(board)
+
+	if len(client.updateStatusCalls) != 1 {
+		t.Fatalf("expected a closed item at a declared unmanaged column (Backlog) to be advanced, got %d status update calls", len(client.updateStatusCalls))
+	}
+	if client.updateStatusCalls[0].optionID != "OPT_Done" {
+		t.Errorf("expected advance to Done option, got %s", client.updateStatusCalls[0].optionID)
+	}
+}
+
 func TestSettleClosedItemsToDone_AlreadyAtDone_Idempotent(t *testing.T) {
 	client := &mockGitHubClient{}
 	eng := testEngineWithStages(t, client, closedAdvanceStages())
