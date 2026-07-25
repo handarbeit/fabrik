@@ -351,6 +351,18 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		return nil
 	}
 
+	// Holding stage: batch-managed by handleMergeTrainBatch in poll.go, never per-item.
+	// Unmanaged stage: a parking column (e.g. Backlog) Fabrik never dispatches at all.
+	// itemMayNeedWork/itemNeedsWork should have filtered these out; this is a safety net.
+	// Placed immediately after the stage == nil check — before ensureRepoReady (bare-clones
+	// the repo), the awaiting-input branch (invokes Claude via processComments), the
+	// paused-unpause branch (mutates labels), and checkDependencies (can add fabrik:blocked
+	// and post a comment) — so a holding/unmanaged item never reaches any of that as a
+	// "safety net" fires too late to actually prevent it.
+	if stage.HoldingStage || stage.Unmanaged {
+		return nil
+	}
+
 	// Ensure the repo's WorktreeManager is registered; bare-clones on first access.
 	if err := e.ensureRepoReady(ctx, item); err != nil {
 		if errors.Is(err, ErrSkipItem) {
@@ -434,13 +446,6 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 			Reason: "dep-blocked",
 			Until:  time.Now().Add(cooldown),
 		})
-		return nil
-	}
-
-	// Holding stage: batch-managed by handleMergeTrainBatch in poll.go, never per-item.
-	// Unmanaged stage: a parking column (e.g. Backlog) Fabrik never dispatches at all.
-	// itemMayNeedWork/itemNeedsWork should have filtered these out; this is a safety net.
-	if stage.HoldingStage || stage.Unmanaged {
 		return nil
 	}
 

@@ -83,6 +83,47 @@ func TestProcessItem_SkipsUnmanagedStage(t *testing.T) {
 	}
 }
 
+// TestProcessItem_UnmanagedStage_AwaitingInputWithNewComment_SkipsClaude is the
+// regression guard for a PR review finding on issue #973: the Unmanaged safety
+// net used to sit ~90 lines into processItem, after ensureRepoReady, the
+// awaiting-input branch (which invokes Claude via processComments), the
+// paused-unpause branch, and checkDependencies. TestProcessItem_SkipsUnmanagedStage
+// doesn't catch this — its item carries no labels, so every branch above the old
+// guard's position was already a no-op. This test's item DOES carry both
+// fabrik:paused and fabrik:awaiting-input (isAwaitingInput requires both) plus a
+// new (un-rocketed, non-Fabrik) comment — the one combination that used to fall
+// into the awaiting-input branch and invoke Claude before ever reaching the
+// Unmanaged check.
+func TestProcessItem_UnmanagedStage_AwaitingInputWithNewComment_SkipsClaude(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := NewWithDeps(
+		Config{Owner: "owner", Repo: "repo", ProjectNum: 1, User: "testuser", Token: "token",
+			Stages: testStagesWithBacklog()},
+		client, claude, NewWorktreeManager(t.TempDir()),
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 1,
+		Title:  "Test",
+		Status: "Backlog",
+		ItemID: "PVTI_1",
+		Labels: []string{"fabrik:paused", "fabrik:awaiting-input"},
+		Comments: []gh.Comment{
+			{ID: "C1", Author: "testuser", Body: "please do X"},
+		},
+	}
+
+	err := eng.processItem(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+	if len(claude.calls) != 0 {
+		t.Error("should not invoke claude for an unmanaged stage, even with fabrik:paused+fabrik:awaiting-input and a new comment")
+	}
+}
+
 func TestProcessItem_SkipsLockedByOther(t *testing.T) {
 	client := &mockGitHubClient{}
 	claude := &mockClaudeInvoker{}
