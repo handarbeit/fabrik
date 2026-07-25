@@ -57,7 +57,7 @@ func TestMergeTrainBisectionEjectsPoisoner(t *testing.T) {
 	for _, m := range []struct {
 		issue, pr int
 	}{{clean1Issue, clean1PR}, {clean2Issue, clean2PR}} {
-		WaitForProjectStatus(t, env, env.RepoAlpha, m.issue, "Done", 25*time.Minute)
+		WaitForMemberLanded(t, env, env.RepoAlpha, m.issue, 25*time.Minute)
 		waitForPRClosed(t, env, env.RepoAlpha, m.pr, 5*time.Minute)
 		t.Logf("survivor #%d landed (Done, PR #%d closed)", m.issue, m.pr)
 	}

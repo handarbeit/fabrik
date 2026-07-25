@@ -181,6 +181,39 @@ func projectStatus(t *testing.T, env *Env, repo string, issueNumber int) string 
 	return strings.TrimSpace(lastNonEmpty(out))
 }
 
+// WaitForMemberLanded polls until a landed member reaches the durable landing
+// signal: board Status == "Done" OR the issue is CLOSED. The two are not
+// equivalent — this repo's project has a native "archive item when issue
+// closes" automation that runs near-instantly after a member's issue closes
+// (via the integration PR's Closes #N), and an archived board item drops out
+// of `gh project item-list` entirely (status reads "" thereafter). A poll keyed
+// solely on Status=="Done" can therefore miss a member that closes-and-archives
+// between two poll ticks, even though the train landed it correctly. Closed is
+// itself a durable, un-missable terminal state, so racing both signals and
+// accepting whichever is observed first eliminates the miss.
+func WaitForMemberLanded(t *testing.T, env *Env, repo string, issueNumber int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var lastStatus, lastState string
+	for time.Now().Before(deadline) {
+		lastStatus = projectStatus(t, env, repo, issueNumber)
+		if lastStatus == "Done" {
+			return
+		}
+		if state, err := tryIssueState(env, repo, issueNumber); err == nil {
+			lastState = state
+			if state == "CLOSED" {
+				return
+			}
+		} else {
+			t.Logf("WaitForMemberLanded: transient gh error reading issue state for %s#%d: %v (will retry)", repo, issueNumber, err)
+		}
+		time.Sleep(10 * time.Second)
+	}
+	t.Fatalf("timed out waiting for %s#%d to land (last observed status %q, issue state %q)",
+		repo, issueNumber, lastStatus, lastState)
+}
+
 // WaitForIssueComment polls the issue's comments until one contains substring, or
 // timeout expires. Used to assert engine-posted lifecycle comments (e.g. the
 // merge-train ejection notice) that are posted on every code path.
