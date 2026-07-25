@@ -129,14 +129,25 @@ func TestCheckStageColumnAlignment_BacklogAndDoneNotExtra(t *testing.T) {
 }
 
 // TestCheckStageColumnAlignment_UnmanagedStageRecognizedNoExtraWarning verifies
-// that a board with a Backlog column and a configured unmanaged Backlog stage
-// produces no "no matching stage" warning — recognition via declaration, not
-// only the hardcoded compat net.
+// that a board with a declared-unmanaged column produces no "no matching
+// stage" warning for it, via declaration — not the hardcoded "Backlog" compat
+// net. Uses "Icebox" (not "Backlog") so the assertion is actually load-bearing:
+// with a literal "Backlog" column, engine/startup.go's hardcoded
+// recognized["Backlog"] = true would keep this test green even if `unmanaged`
+// were reverted entirely, since that column-name check doesn't consult
+// Unmanaged either way. Naming the column something else exercises the real
+// generalization this issue's Requirements calls for ("doesn't generalize to
+// the other parking columns teams commonly add (Icebox, On Hold, Won't Do)").
 func TestCheckStageColumnAlignment_UnmanagedStageRecognizedNoExtraWarning(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchProjectBoardFn: boardWithColumns("proj-1"),
-		fetchStatusFieldFn:  statusFieldWithOptions("Backlog", "Research", "Plan", "Implement", "Done", "Triage"),
+		fetchStatusFieldFn:  statusFieldWithOptions("Icebox", "Research", "Plan", "Implement", "Done", "Triage"),
 	}
+	stagesCfg := append([]*stages.Stage{{
+		Name:      "Icebox",
+		Order:     -1,
+		Unmanaged: true,
+	}}, testStagesWithCleanup()...)
 	e := NewWithDeps(
 		Config{
 			Owner:         "owner",
@@ -145,7 +156,7 @@ func TestCheckStageColumnAlignment_UnmanagedStageRecognizedNoExtraWarning(t *tes
 			User:          "testuser",
 			Token:         "token",
 			MaxConcurrent: 5,
-			Stages:        testStagesWithBacklog(),
+			Stages:        stagesCfg,
 		},
 		client,
 		&mockClaudeInvoker{},
@@ -171,8 +182,8 @@ func TestCheckStageColumnAlignment_UnmanagedStageRecognizedNoExtraWarning(t *tes
 	if !strings.Contains(extraWarn, "Triage") {
 		t.Errorf("genuine extra column Triage should be warned, got: %q", extraWarn)
 	}
-	if strings.Contains(extraWarn, "Backlog") {
-		t.Errorf("Backlog (declared unmanaged stage) must not be flagged as extra, got: %q", extraWarn)
+	if strings.Contains(extraWarn, "Icebox") {
+		t.Errorf("Icebox (declared unmanaged stage) must not be flagged as extra, got: %q", extraWarn)
 	}
 }
 
