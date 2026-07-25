@@ -55,7 +55,7 @@ func (e *Engine) settleChildPlacement(board *gh.ProjectBoard, item gh.ProjectIte
 	sf := e.statusField
 	e.mu.Unlock()
 
-	optionID := resolveSpecifyOptionID(sf)
+	optionID := resolveSpecifyOptionID(sf, e.cfg.Stages)
 	if optionID == "" {
 		e.logf(item.Number, "warn", "child placement settle: no Specify/processing status option available on %s/%s#%d — will retry next poll\n", owner, repo, item.Number)
 		e.recordChildPlacementRetry(item)

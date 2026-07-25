@@ -9,6 +9,7 @@ import (
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 // errPreImplementDeferred signals that preImplement could not conclusively
@@ -132,9 +133,13 @@ func childFooter(parentOwner, parentRepo string, parentNumber int) string {
 }
 
 // resolveSpecifyOptionID returns the project Status option ID for the "Specify"
-// column, or the first non-Backlog, non-terminal column as a fallback. Returns
+// column, or the first non-unmanaged, non-terminal column as a fallback. Returns
 // "" when no suitable option exists or sf is nil (caller skips the status-set).
-func resolveSpecifyOptionID(sf *gh.StatusField) string {
+// stagesCfg is consulted to skip any column backed by an `unmanaged: true`
+// stage (e.g. a declared Backlog), generalizing beyond the literal name
+// "Backlog" — the literal check is kept alongside as the same compat net used
+// in checkStageColumnAlignment, for installs with no matching stage declared.
+func resolveSpecifyOptionID(sf *gh.StatusField, stagesCfg []*stages.Stage) string {
 	if sf == nil {
 		return ""
 	}
@@ -142,7 +147,8 @@ func resolveSpecifyOptionID(sf *gh.StatusField) string {
 	if id, ok := sf.Options["Specify"]; ok {
 		return id
 	}
-	// Fallback: first option that is not "Backlog" and not the last column.
+	// Fallback: first option that is not "Backlog", not an unmanaged column,
+	// and not the last column.
 	names := sf.OrderedOptionNames
 	if len(names) < 2 {
 		return ""
@@ -150,6 +156,9 @@ func resolveSpecifyOptionID(sf *gh.StatusField) string {
 	last := names[len(names)-1]
 	for _, name := range names {
 		if name == "Backlog" || name == last {
+			continue
+		}
+		if st := stages.FindStage(stagesCfg, name); st != nil && st.Unmanaged {
 			continue
 		}
 		return sf.Options[name]
@@ -354,7 +363,7 @@ func (e *Engine) spawnChildren(ctx context.Context, board *gh.ProjectBoard, item
 		// so ordinary dispatch (itemMayNeedWork/itemNeedsWork) would never revisit it.
 		// recordChildPlacementFailure writes a durable marker so the settle scan in
 		// poll.go retries the placement independent of stage dispatch (see spawn_settle.go).
-		if optionID := resolveSpecifyOptionID(sf); optionID != "" {
+		if optionID := resolveSpecifyOptionID(sf, e.cfg.Stages); optionID != "" {
 			if err := e.client.UpdateProjectItemStatus(board.ProjectID, childItemID, sf.FieldID, optionID); err != nil {
 				e.logf(item.Number, "warn", "could not set project status on %s#%d: %v\n", block.Repo, childNumber, err)
 				e.recordChildPlacementFailure(childOwner, childRepo, childNumber)
