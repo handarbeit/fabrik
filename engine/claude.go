@@ -1060,6 +1060,31 @@ func stripLine(output, line string) string {
 	return strings.Join(result, "\n")
 }
 
+// degenerateAtRefRE matches a bare "@some/path" reference with no other content —
+// the pattern produced when a model writes its real output to a file and returns
+// a dangling shell-style reference instead of the content itself.
+var degenerateAtRefRE = regexp.MustCompile(`^@\S+$`)
+
+// degenerateAbsPathRE matches a bare absolute filesystem path (at least two
+// segments) with no other content, e.g. "/tmp/plan_comment.md". Relative paths
+// (no leading "/") are deliberately NOT matched — they are far more likely to be
+// legitimate short prose that merely contains a slash.
+var degenerateAbsPathRE = regexp.MustCompile(`^/[^\s/]+(?:/[^\s/]+)+$`)
+
+// isDegenerateOutput reports whether s — a trimmed stage output about to be posted
+// as a comment — is nothing but a bare file reference: an "@file" attachment-style
+// token, or a bare absolute filesystem path. Such output indicates the model wrote
+// its real content to a file and returned a dangling reference instead of emitting
+// it inline (see issue #1065). Deliberately conservative: only a single-line body
+// that is entirely consumed by one of these two patterns qualifies — any other
+// content on the line, or a multi-line body, is never flagged.
+func isDegenerateOutput(s string) bool {
+	if s == "" || strings.Contains(s, "\n") {
+		return false
+	}
+	return degenerateAtRefRE.MatchString(s) || degenerateAbsPathRE.MatchString(s)
+}
+
 // extractSummary parses a brief summary from Claude's output.
 func extractSummary(output string) string {
 	return extractBetweenMarkers(output, "FABRIK_SUMMARY_BEGIN", "FABRIK_SUMMARY_END")
