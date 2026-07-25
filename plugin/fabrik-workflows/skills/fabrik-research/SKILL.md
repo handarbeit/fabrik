@@ -66,6 +66,8 @@ If there is no documentation impact, note that explicitly — the section must a
 
 Write your research findings as your stage output — the engine posts this as a stage comment automatically. Do **not** use `FABRIK_ISSUE_UPDATE` markers or attempt to rewrite the issue body. The issue body is the spec, owned by Specify.
 
+Your final message text IS posted verbatim by the engine as the stage comment. Emit the full findings inline in your final message — never write them to a file and reference it (e.g. `@/tmp/findings.md`), never use `@file`/attachment syntax, and never post the comment yourself via `gh`.
+
 Structure your findings as:
 
 ```
@@ -107,6 +109,7 @@ The `### Repositories` section is **mandatory** in every Research output. It lis
 - **Do not write or modify code** — you're read-only
 - **Do not make architecture decisions** — surface options, don't choose
 - **Do not revisit requirements** — the spec was approved in Specify. If you find a requirement that seems technically impossible, flag it as a risk, don't change the spec.
+- **Never write your findings to a file and reference it, and never use `@file`/attachment syntax or post the comment yourself via `gh`** — your final message text IS posted verbatim by the engine as the stage comment; emit the full findings inline
 
 ## Interaction Pattern
 
