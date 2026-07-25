@@ -1,6 +1,7 @@
 package stages
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -319,6 +320,49 @@ unmanaged: true
 	}
 	if s.Completion.Type != "" {
 		t.Errorf("unmanaged stage should have no completion type, got %q", s.Completion.Type)
+	}
+}
+
+// TestLoadAll_EmbeddedDefaultExamples is the regression guard for a PR review
+// finding on issue #973: no existing test actually runs loadOne/LoadAll over
+// the real embedded examples/ set. TestLoadAll_UnmanagedStage only exercises
+// an inline fixture, and cmd/init_test.go only byte-compares embedded content
+// to what gets written to disk — neither would catch a typo in an embedded
+// file that breaks loading. This matters most for backlog.yaml: it is the
+// only shipped stage with no prompt/skill, so `unmanaged: true` is the sole
+// thing keeping it valid — misspell it (e.g. "unmaneged") and yaml.Unmarshal
+// silently accepts it as an unrecognized key, then loadOne rejects the stage
+// with "must have a 'prompt' or 'skill' field", a hard startup failure for
+// every new `fabrik init` that nothing in CI would catch.
+func TestLoadAll_EmbeddedDefaultExamples(t *testing.T) {
+	entries, err := fs.ReadDir(DefaultStages, "examples")
+	if err != nil {
+		t.Fatalf("reading embedded examples: %v", err)
+	}
+
+	dir := t.TempDir()
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		data, err := DefaultStages.ReadFile("examples/" + e.Name())
+		if err != nil {
+			t.Fatalf("reading embedded %s: %v", e.Name(), err)
+		}
+		writeStageFile(t, dir, e.Name(), string(data))
+	}
+
+	ss, err := LoadAll(dir)
+	if err != nil {
+		t.Fatalf("LoadAll over embedded default examples: %v", err)
+	}
+
+	backlog := FindStage(ss, "Backlog")
+	if backlog == nil {
+		t.Fatal("expected a Backlog stage among the embedded defaults")
+	}
+	if !backlog.Unmanaged {
+		t.Error("embedded Backlog stage should have Unmanaged == true")
 	}
 }
 
