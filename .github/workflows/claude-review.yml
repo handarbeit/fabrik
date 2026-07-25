@@ -1,0 +1,59 @@
+name: Claude PR Review
+
+# Test-repo bot reviewer. Replaces Gemini on the fabrik-test-* repos so e2e
+# review-gate scenarios get a bot review without draining the shared handarbeit
+# Gemini quota. Submits a FORMAL review (not an issue comment) so it lands in the
+# PR's reviews array — the signal Fabrik's checkReviewGate waits on (engine/reviews.go).
+
+on:
+  pull_request:
+    types: [opened, ready_for_review, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write   # required to submit a formal PR review
+  id-token: write        # required by claude-code-action (OIDC)
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    # Skip drafts — the gate only engages after Fabrik marks the PR ready.
+    if: github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Claude review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Review the diff for PR #${{ github.event.pull_request.number }}
+            (`git diff origin/${{ github.event.pull_request.base.ref }}...HEAD`).
+            Flag correctness bugs, missing tests, and obvious risks. Be concise.
+            Then submit a FORMAL pull-request review (not an issue comment) with:
+              gh pr review ${{ github.event.pull_request.number }} --comment --body-file <your-findings-file>
+            Add inline comments for specific line-level issues where useful.
+          claude_args: "--allowedTools Bash(git:*),Bash(gh:*),Read,Grep"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Safety net: guarantee the review gate always clears even if the agent
+      # posted only a comment. A no-op if a formal review already exists.
+      - name: Ensure a formal review exists
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -m
+          count=$(gh pr view "$PR" --json reviews \
+            --jq '[.reviews[] | select(.author.login=="github-actions" or (.author.login|startswith("claude")))] | length')
+          if [ "${count:-0}" -eq 0 ]; then
+            gh pr review "$PR" --comment --body "🤖 Automated test-repo review (Claude). No blocking issues surfaced by the agent step."
+          fi
