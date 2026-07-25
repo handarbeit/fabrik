@@ -458,7 +458,7 @@ Plan can also decompose an oversized issue autonomously. It emits `FABRIK_SPAWN_
 
 See the [USER_GUIDE §3 — Dependency-Based Sequencing (Formations)](docs/USER_GUIDE.md#dependency-based-sequencing-formations) for the full recipe, diagram, and behavior callouts.
 
-When an issue reaches Done, it remains on the board in the Done column until auto-archive removes it. Auto-archive is **on by default**: once an item has sat in Done for at least `--archive-after` (default `168h` / one week, also `FABRIK_ARCHIVE_AFTER`), anchored to when it settled into Done, Fabrik archives it off the project board. Archived items are not deleted — they remain accessible and recoverable via the project board's "Archive" view in GitHub. Set `--archive-done off` (also `FABRIK_ARCHIVE_DONE=off`) to disable auto-archival and leave Done items on the board indefinitely.
+When an issue reaches Done, it remains on the board in the Done column until auto-archive removes it. Auto-archive is **on by default**: once an item has sat in Done for at least `--archive-after` (default `168h` / one week, also `FABRIK_ARCHIVE_AFTER`), anchored to when the completion label (`stage:<Done>:complete`) was applied, Fabrik archives it off the project board. Archived items are not deleted — they remain accessible and recoverable via the project board's "Archive" view in GitHub. Set `--archive-done off` (also `FABRIK_ARCHIVE_DONE=off`) to disable auto-archival and leave Done items on the board indefinitely.
 
 ## The Self-Evolving Factory
 
