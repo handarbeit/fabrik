@@ -117,12 +117,16 @@ type Stage struct {
 	// When true, the prompt/skill requirement is waived, mirroring HoldingStage.
 	// Combining Unmanaged with Prompt/Skill/CleanupWorktree/HoldingStage is
 	// discouraged but not rejected at load time: Unmanaged means "never dispatch,
-	// never resolve as a target," and this precedence is actively enforced (not
-	// just documented) by every resolver that could otherwise pick an Unmanaged
-	// stage as "the" Done/Queued/next column — cleanupStage, holdingStage
-	// (engine/stages.go), and NextStage (stages.go) all skip stages with
-	// Unmanaged: true. See engine dispatch guards in engine/item.go and
-	// engine/poll.go for the per-item suppression side of the same guarantee.
+	// never resolve as a target, never receive bookkeeping," and this precedence
+	// is actively enforced (not just documented) by every order-sensitive resolver
+	// that could otherwise pick an Unmanaged stage as "the" Done/Queued/next
+	// column, or hand it a completion label/comment it never earned:
+	// cleanupStage, holdingStage (engine/stages.go), NextStage (stages.go),
+	// the gate-checked completion-label fill loop in
+	// engine/pr_terminal_advance.go, and the doneOrder/skip-labeling loops in
+	// engine/no_work_needed_settle.go all skip stages with Unmanaged: true. See
+	// engine dispatch guards in engine/item.go and engine/poll.go for the
+	// per-item suppression side of the same guarantee.
 	Unmanaged bool `yaml:"unmanaged,omitempty"`
 
 	// DisableAdaptiveThinking controls whether Claude Code's adaptive (auto-reduced)
