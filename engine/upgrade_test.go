@@ -3,6 +3,7 @@ package engine
 import (
 	"archive/tar"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -422,6 +423,131 @@ func TestPerformReleaseUpgrade_SuffixedVersionNotEagerlyUpgraded(t *testing.T) {
 
 	if downloaded {
 		t.Errorf("expected no download for running version %q whose numeric core is not older than release v0.0.75", runningVersion)
+	}
+}
+
+// buildTestTarball writes a minimal .tar.gz containing a single "fabrik"
+// entry with the given content to a temp file in dir, and returns its path.
+func buildTestTarball(t *testing.T, dir, content string) string {
+	t.Helper()
+	tarball, err := os.CreateTemp(dir, "release-*.tar.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tarball.Close()
+	gw := gzip.NewWriter(tarball)
+	tw := tar.NewWriter(gw)
+	hdr := &tar.Header{Name: "fabrik", Typeflag: tar.TypeReg, Size: int64(len(content)), Mode: 0755}
+	if err := tw.WriteHeader(hdr); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte(content)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return tarball.Name()
+}
+
+// TestPerformReleaseUpgrade_ExecFailureLogsAndReturnsError drives
+// PerformReleaseUpgrade through a full successful download+extract+replace,
+// then overrides upgradeExecFn to simulate a re-exec failure (e.g. the
+// macOS AMFI SIGKILL scenario). Asserts the strengthened CRITICAL log line
+// appears and PerformReleaseUpgrade returns a non-nil error without
+// panicking — i.e. the daemon survives a failed re-exec rather than dying
+// or silently continuing on the old binary with no signal.
+func TestPerformReleaseUpgrade_ExecFailureLogsAndReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	scratchExe := filepath.Join(dir, "fabrik-under-test")
+	if err := os.WriteFile(scratchExe, []byte("old binary content"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origExecutableFn := upgradeExecutableFn
+	upgradeExecutableFn = func() (string, error) { return scratchExe, nil }
+	defer func() { upgradeExecutableFn = origExecutableFn }()
+
+	origExecFn := upgradeExecFn
+	execErr := errors.New("simulated exec failure (e.g. AMFI SIGKILL)")
+	var execCalled bool
+	upgradeExecFn = func(argv0 string, argv []string, envv []string) error {
+		execCalled = true
+		return execErr
+	}
+	defer func() { upgradeExecFn = origExecFn }()
+
+	matchingAsset := fmt.Sprintf("fabrik_9.9.9_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tarballPath := buildTestTarball(t, t.TempDir(), "new binary content")
+		data, err := os.ReadFile(tarballPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Write(data) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	client := &mockGitHubClient{
+		fetchLatestReleaseFn: func(owner, repo string) (*gh.LatestRelease, error) {
+			return &gh.LatestRelease{
+				TagName: "v9.9.9",
+				Assets: []gh.ReleaseAsset{
+					{Name: matchingAsset, BrowserDownloadURL: srv.URL + "/asset.tar.gz"},
+				},
+			}, nil
+		},
+	}
+	var logs []string
+	logf := func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+
+	err := PerformReleaseUpgrade(client, "v0.0.1", "", nil, logf)
+
+	if !execCalled {
+		t.Fatal("upgradeExecFn was never called — the test did not reach the exec step")
+	}
+	if err == nil {
+		t.Error("expected a non-nil error when re-exec fails")
+	}
+	found := false
+	for _, l := range logs {
+		if strings.Contains(l, "CRITICAL") && strings.Contains(l, "still running the OLD binary") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a CRITICAL 'still running the OLD binary' log line, got: %v", logs)
+	}
+
+	// The binary on disk should have been replaced despite the exec failure.
+	got, err := os.ReadFile(scratchExe)
+	if err != nil {
+		t.Fatalf("reading scratch exe after upgrade: %v", err)
+	}
+	if string(got) != "new binary content" {
+		t.Errorf("expected scratch exe to contain the new binary content, got %q", got)
+	}
+}
+
+// TestResignDarwinBinary_NoopOnNonDarwin verifies that resignDarwinBinary is
+// a safe no-op (no logf calls, no error) on any non-darwin GOOS — this is
+// what actually runs in this sandbox and in Linux CI.
+func TestResignDarwinBinary_NoopOnNonDarwin(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("this test verifies non-darwin no-op behavior; skipping on darwin")
+	}
+	var logs []string
+	logf := func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+	resignDarwinBinary(filepath.Join(t.TempDir(), "fabrik"), logf)
+	if len(logs) != 0 {
+		t.Errorf("expected no log output on non-darwin GOOS, got: %v", logs)
 	}
 }
 
