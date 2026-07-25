@@ -36,10 +36,14 @@ const (
 // install @main/branch pseudo-version), or "0.0.73-abc1234" (a SHA suffix) —
 // all of which previously made the per-segment strconv.Atoi parse fail and
 // silently return false ("not an upgrade"), see #1074.
+// When the numeric cores are equal, a clean version (no suffix) is treated
+// as greater than a suffixed one — this lets a daemon running a +dirty or
+// pseudo-version build of the same core version upgrade to the clean
+// release once one exists, instead of being stuck comparing "equal".
 // Returns false (not an upgrade) on any parse error.
 func SemverGreater(a, b string) bool {
-	aCore, aOK := semverCore(a)
-	bCore, bOK := semverCore(b)
+	aCore, aSuffixed, aOK := semverCore(a)
+	bCore, bSuffixed, bOK := semverCore(b)
 	if !aOK || !bOK {
 		return false
 	}
@@ -55,16 +59,19 @@ func SemverGreater(a, b string) bool {
 			return aCore[i] > bCore[i]
 		}
 	}
-	return false
+	// Equal numeric cores: a clean version outranks a suffixed one.
+	return !aSuffixed && bSuffixed
 }
 
 // semverCore strips a leading "v" and any pre-release/build/pseudo-version
 // suffix (everything from the first "-" or "+" onward), then splits the
 // remaining numeric core on "." and parses each segment as an integer.
-// Returns ok=false if any core segment fails to parse.
-func semverCore(v string) ([]int, bool) {
+// suffixed reports whether a suffix was stripped. Returns ok=false if any
+// core segment fails to parse.
+func semverCore(v string) (core []int, suffixed bool, ok bool) {
 	v = strings.TrimPrefix(v, "v")
 	if i := strings.IndexAny(v, "-+"); i >= 0 {
+		suffixed = true
 		v = v[:i]
 	}
 	parts := strings.Split(v, ".")
@@ -72,11 +79,11 @@ func semverCore(v string) ([]int, bool) {
 	for i, p := range parts {
 		n, err := strconv.Atoi(p)
 		if err != nil {
-			return nil, false
+			return nil, false, false
 		}
 		segs[i] = n
 	}
-	return segs, true
+	return segs, suffixed, true
 }
 
 // ExtractBinaryFromTarball extracts the "fabrik" binary from a .tar.gz archive
@@ -151,15 +158,18 @@ func resignDarwinBinary(path string, logf func(string, ...any)) {
 	if runtime.GOOS != "darwin" {
 		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	if _, err := exec.LookPath("xattr"); err == nil {
-		if out, err := exec.Command("xattr", "-cr", path).CombinedOutput(); err != nil {
+		if out, err := exec.CommandContext(ctx, "xattr", "-cr", path).CombinedOutput(); err != nil {
 			logf("resigning upgraded binary: xattr -cr failed (non-fatal): %v\n%s\n", err, out)
 		}
 	} else {
 		logf("resigning upgraded binary: xattr not found (non-fatal, skipping quarantine clear)\n")
 	}
 	if _, err := exec.LookPath("codesign"); err == nil {
-		if out, err := exec.Command("codesign", "--force", "--sign", "-", path).CombinedOutput(); err != nil {
+		if out, err := exec.CommandContext(ctx, "codesign", "--force", "--sign", "-", path).CombinedOutput(); err != nil {
 			logf("resigning upgraded binary: codesign failed (non-fatal): %v\n%s\n", err, out)
 		}
 	} else {
@@ -455,7 +465,7 @@ var versionSkewExecCommandFn = exec.CommandContext
 // syscall.Exec re-exec, or a manual/external replacement (e.g. a fleet
 // sharing ~/go/bin/fabrik). Non-fatal: any error resolving the path or
 // running the subprocess is logged and the check is skipped for this poll.
-func (e *Engine) checkVersionSkew() {
+func (e *Engine) checkVersionSkew(ctx context.Context) {
 	exe, err := upgradeExecutableFn()
 	if err != nil {
 		e.logf(0, "upgrade", "version-skew check: could not determine executable path: %v\n", err)
@@ -467,7 +477,7 @@ func (e *Engine) checkVersionSkew() {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	out, err := versionSkewExecCommandFn(ctx, exe, "--version").Output()
 	if err != nil {

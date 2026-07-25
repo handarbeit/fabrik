@@ -1134,7 +1134,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 				e.idleCount++
 				if e.idleCount >= idleUpgradeThreshold {
 					e.idleCount = 0
-					e.checkVersionSkew()
+					e.checkVersionSkew(ctx)
 					e.checkAndUpgrade()
 				}
 			}

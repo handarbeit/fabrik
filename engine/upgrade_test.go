@@ -3,6 +3,7 @@ package engine
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -50,6 +51,12 @@ func TestSemverGreater(t *testing.T) {
 		{"v0.0.73-0.20260716173320-aaa+dirty", "v0.0.73-0.20260716173320-bbb", false}, // equal core, both suffixed, different sha
 		{"garbage", "0.0.1", false},                                                   // non-numeric core, no panic
 		{"0.0.1", "garbage", false},                                                   // non-numeric core on b, no panic
+		// Equal numeric core, one suffixed: a clean version outranks a suffixed
+		// one, so a daemon running +dirty/pseudo-version of the same release
+		// still upgrades once the clean tag exists.
+		{"v0.0.73", "v0.0.73-alpha", true},  // clean release beats a pre-release of the same core
+		{"v0.0.73", "v0.0.73+dirty", true},  // clean release beats a +dirty build of the same core
+		{"v0.0.73-alpha", "v0.0.73", false}, // suffixed a, clean b: a is not greater
 	}
 	for _, tc := range tests {
 		got := SemverGreater(tc.a, tc.b)
@@ -774,7 +781,7 @@ func TestCheckVersionSkew_MatchingVersion_NoWarningAndClearsExisting(t *testing.
 	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	eng.cfg.Version = "v1.2.3"
 
-	eng.checkVersionSkew()
+	eng.checkVersionSkew(context.Background())
 
 	entries, err := warnings.Load()
 	if err != nil {
@@ -811,7 +818,7 @@ func TestCheckVersionSkew_MismatchedVersion_RecordsWarning(t *testing.T) {
 	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	eng.cfg.Version = "v1.2.3"
 
-	eng.checkVersionSkew()
+	eng.checkVersionSkew(context.Background())
 
 	entries, err := warnings.Load()
 	if err != nil {
@@ -853,7 +860,7 @@ func TestCheckVersionSkew_ExecutableFnError_NonFatal(t *testing.T) {
 	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
 	eng.cfg.Version = "v1.2.3"
 
-	eng.checkVersionSkew() // must not panic
+	eng.checkVersionSkew(context.Background()) // must not panic
 
 	entries, err := warnings.Load()
 	if err != nil {
