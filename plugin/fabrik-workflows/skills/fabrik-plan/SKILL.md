@@ -82,6 +82,8 @@ If no decisions meet this threshold, note that explicitly so Implement doesn't w
 
 Your plan output is posted by the engine as a stage comment — do **not** use `FABRIK_ISSUE_UPDATE` markers or attempt to rewrite the issue body. The issue body is the spec, owned by Specify.
 
+Your final message text IS posted verbatim by the engine as the stage comment. Emit the full plan inline in your final message — never write it to a file and reference it (e.g. `@/tmp/plan.md`), never use `@file`/attachment syntax, and never post the comment yourself via `gh`.
+
 Structure your output as:
 
 ```
@@ -115,6 +117,7 @@ Description of the chosen approach and key design decisions.
 - **Do not create overly granular tasks** — 5-15 tasks is typical, not 50
 - **Do not ignore the research findings** — your plan must be grounded in what was discovered
 - **Do not over-engineer** — plan for what's needed now, not hypothetical future requirements
+- **Never write your plan output to a file and reference it, and never use `@file`/attachment syntax or post the comment yourself via `gh`** — your final message text IS posted verbatim by the engine as the stage comment; emit the full plan inline
 
 ## Sub-issue Decomposition
 
