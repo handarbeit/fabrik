@@ -377,6 +377,8 @@ This warning is **informational only** — the engine continues running with you
 
 Custom stages (names not present in any embedded default) are silently skipped — no warning is produced for them.
 
+**`refresh-stages` only patches existing files — it does not create new ones.** It matches your local `.fabrik/stages/*.yaml` files against the embedded defaults by `name:` and adds missing *keys* to files that already exist locally. It has no "file is missing entirely" path. This matters for `stages/examples/backlog.yaml` (`unmanaged: true`), the default Backlog stage introduced alongside the `unmanaged` flag: new installs get it automatically via `fabrik init`, which extracts every embedded example file. Existing installs that ran `fabrik init` before `backlog.yaml` existed do **not** get it from `refresh-stages` — there is nothing locally named `Backlog` for it to match against. Those installs keep working unchanged (the hardcoded `"Backlog"` recognition in startup validation is the compat net — see [Startup Board Validation](#startup-board-validation)); to opt in to the declarative form, copy `stages/examples/backlog.yaml` into `.fabrik/stages/` manually.
+
 ### Instance Lock
 
 > **Note:** When Fabrik starts, it creates a PID lock file at `.fabrik/fabrik.lock`. If a second instance attempts to start in the same directory, it reads the lock file, logs an error identifying the running process, and exits immediately. The lock is automatically released when the process exits — including on crash or SIGKILL — so there is no need to manually delete the file after an unclean shutdown.
