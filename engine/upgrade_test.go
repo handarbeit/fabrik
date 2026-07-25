@@ -351,6 +351,80 @@ func TestPerformReleaseUpgrade_DownloadAttempted(t *testing.T) {
 	}
 }
 
+// TestPerformReleaseUpgrade_SuffixedVersionUpgrades is the #1074 regression
+// test: a daemon whose running version carries a non-numeric suffix must
+// still upgrade to a newer release. This covers the exact confirmed
+// real-world exposure — a `go install …@main`/branch pseudo-version running
+// string, live since v0.0.72 — where SemverGreater previously choked on the
+// suffixed segment and silently reported "up to date," so the download path
+// was never reached.
+func TestPerformReleaseUpgrade_SuffixedVersionUpgrades(t *testing.T) {
+	downloaded := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		downloaded = true
+		http.Error(w, "test server error", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	matchingAsset := fmt.Sprintf("fabrik_0.0.75_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	client := &mockGitHubClient{
+		fetchLatestReleaseFn: func(owner, repo string) (*gh.LatestRelease, error) {
+			return &gh.LatestRelease{
+				TagName: "v0.0.75",
+				Assets: []gh.ReleaseAsset{
+					{Name: matchingAsset, BrowserDownloadURL: srv.URL + "/asset.tar.gz"},
+				},
+			}, nil
+		},
+	}
+	var logs []string
+	logf := func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+
+	// The confirmed real-world exposure: a go install …@main/branch pseudo-version.
+	runningVersion := "v0.0.72-0.20260716173320-6198e8102f90+dirty"
+
+	PerformReleaseUpgrade(client, runningVersion, "", nil, logf)
+
+	if !downloaded {
+		t.Errorf("expected download to be attempted for suffixed running version %q vs newer release v0.0.75, got logs: %v", runningVersion, logs)
+	}
+}
+
+// TestPerformReleaseUpgrade_SuffixedVersionNotEagerlyUpgraded is the
+// companion guard for the above: when the suffixed running version's
+// numeric core is NOT older than the release tag, no download must be
+// attempted. This guards against an over-eager regression where suffix
+// stripping makes SemverGreater too permissive (e.g. always upgrading).
+func TestPerformReleaseUpgrade_SuffixedVersionNotEagerlyUpgraded(t *testing.T) {
+	downloaded := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		downloaded = true
+		http.Error(w, "test server error", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	client := &mockGitHubClient{
+		fetchLatestReleaseFn: func(owner, repo string) (*gh.LatestRelease, error) {
+			return &gh.LatestRelease{TagName: "v0.0.75"}, nil
+		},
+	}
+	var logs []string
+	logf := func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+
+	// Suffixed but equal-or-newer numeric core than the release tag — must not upgrade.
+	runningVersion := "v0.0.75-0.20260716173320-6198e8102f90+dirty"
+
+	PerformReleaseUpgrade(client, runningVersion, "", nil, logf)
+
+	if downloaded {
+		t.Errorf("expected no download for running version %q whose numeric core is not older than release v0.0.75", runningVersion)
+	}
+}
+
 // TestPerformReleaseUpgrade_PrefersAPIURL verifies that when both APIURL and
 // BrowserDownloadURL are set, the APIURL is used (required for private repos).
 // Also checks that the Accept: application/octet-stream header is sent.
