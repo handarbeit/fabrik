@@ -1079,6 +1079,7 @@ var degenerateAbsPathRE = regexp.MustCompile(`^/[^\s/]+(?:/[^\s/]+)+$`)
 // that is entirely consumed by one of these two patterns qualifies — any other
 // content on the line, or a multi-line body, is never flagged.
 func isDegenerateOutput(s string) bool {
+	s = strings.TrimSpace(strings.Trim(s, "\"`'"))
 	if s == "" || strings.Contains(s, "\n") {
 		return false
 	}

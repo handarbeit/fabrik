@@ -13,6 +13,8 @@ func TestIsDegenerateOutput(t *testing.T) {
 		{"bare absolute path", "/var/data/foo.md", true},
 		{"at-ref bare filename", "@plan.md", true},
 		{"at-ref relative path", "@relative/path.md", true},
+		{"at-ref wrapped in backticks", "`@/tmp/plan_comment.md`", true},
+		{"bare path wrapped in quotes", "\"/var/data/foo.md\"", true},
 
 		// False positives to guard against.
 		{"short prose N/A", "N/A", false},

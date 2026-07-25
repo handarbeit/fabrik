@@ -1251,7 +1251,7 @@ func (e *Engine) finalizeStageOutcome(p stageOutcomeParams) {
 			if snap, snapErr := e.store.Get(repoStr, item.Number); snapErr == nil {
 				count = snap.Attempts(stage.Name)
 			}
-			if degenerateReason != "" && count == 1 {
+			if degenerateReason != "" && count == 1 && count < e.cfg.MaxRetries {
 				// Surface the problem immediately on first detection rather than staying
 				// silent until MaxRetries is hit — matches the existing empty-output
 				// warning's visibility level.
