@@ -247,6 +247,33 @@ func TestResolveBaseLabelBranch_Absent(t *testing.T) {
 	}
 }
 
+// TestResolveBaseLabelBranch_RejectsOptionInjection verifies that a
+// base:<branch> label value beginning with "-" (an attempted argument
+// injection, e.g. "--upload-pack=<script>") is treated as a literal,
+// nonexistent ref rather than parsed as a git option by the underlying
+// `ls-remote`/`fetch` subprocess calls. Without the "--" separator ahead of
+// the untrusted value, --upload-pack causes git to execute the given local
+// program as a subprocess — this test fails loudly if that regresses.
+func TestResolveBaseLabelBranch_RejectsOptionInjection(t *testing.T) {
+	skipIfNoGit(t)
+	tmp := t.TempDir()
+	marker := filepath.Join(tmp, "pwned")
+	script := filepath.Join(tmp, "pwn.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ntouch "+marker+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, _, wm := setupTrainRepo(t)
+	malicious := "--upload-pack=" + script
+
+	if wm.resolveBaseLabelBranch(malicious, 1) {
+		t.Error("expected option-injection candidate to resolve false (not a real branch)")
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("SECURITY: malicious --upload-pack argument executed a local script via git subprocess")
+	}
+}
+
 func TestEnsureWorktree_StaleDirectoryPreserved(t *testing.T) {
 	skipIfNoGit(t)
 	repoDir := initBareRepo(t)
