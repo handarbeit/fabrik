@@ -656,7 +656,7 @@ func TestProcessItem_DegenerateOutput_BareAtRef(t *testing.T) {
 }
 
 func TestProcessItem_DegenerateOutput_BarePath(t *testing.T) {
-	testProcessItemDegenerateOutputEscalates(t, 21, "/tmp/foo.md")
+	testProcessItemDegenerateOutputEscalates(t, 21, "/var/data/foo.md")
 }
 
 // TestProcessItem_LegitimateShortOutput_StillAdvances is a regression guard proving

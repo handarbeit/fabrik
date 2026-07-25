@@ -10,7 +10,7 @@ func TestIsDegenerateOutput(t *testing.T) {
 	}{
 		// True positives: bare file references.
 		{"at-ref absolute path", "@/tmp/plan_comment.md", true},
-		{"bare absolute path", "/tmp/foo.md", true},
+		{"bare absolute path", "/var/data/foo.md", true},
 		{"at-ref bare filename", "@plan.md", true},
 		{"at-ref relative path", "@relative/path.md", true},
 
