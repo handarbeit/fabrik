@@ -3,6 +3,7 @@ package engine
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,9 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
+
+	"github.com/handarbeit/fabrik/warnings"
 )
 
 // fabrikOwner and fabrikRepo are the canonical owner/repo for fabrik itself.
