@@ -24,35 +24,55 @@ const (
 )
 
 // SemverGreater reports whether version a is greater than version b.
-// Both versions may have a leading "v" which is stripped before comparison.
-// Each version is split on "." and each segment is compared as an integer.
+// Both versions may have a leading "v" and a trailing pre-release/build/
+// pseudo-version suffix (anything from the first "-" or "+" onward), both of
+// which are stripped before comparison — only the numeric MAJOR.MINOR.PATCH
+// core is compared. This tolerates suffixed running versions such as
+// "0.0.73+dirty", "v0.0.74-0.20260716173320-6198e8102f90+dirty" (a go
+// install @main/branch pseudo-version), or "0.0.73-abc1234" (a SHA suffix) —
+// all of which previously made the per-segment strconv.Atoi parse fail and
+// silently return false ("not an upgrade"), see #1074.
 // Returns false (not an upgrade) on any parse error.
 func SemverGreater(a, b string) bool {
-	a = strings.TrimPrefix(a, "v")
-	b = strings.TrimPrefix(b, "v")
-	aParts := strings.Split(a, ".")
-	bParts := strings.Split(b, ".")
+	aCore, aOK := semverCore(a)
+	bCore, bOK := semverCore(b)
+	if !aOK || !bOK {
+		return false
+	}
 	// Pad shorter slice with zeros.
-	for len(aParts) < len(bParts) {
-		aParts = append(aParts, "0")
+	for len(aCore) < len(bCore) {
+		aCore = append(aCore, 0)
 	}
-	for len(bParts) < len(aParts) {
-		bParts = append(bParts, "0")
+	for len(bCore) < len(aCore) {
+		bCore = append(bCore, 0)
 	}
-	for i := range aParts {
-		av, err := strconv.Atoi(aParts[i])
-		if err != nil {
-			return false
-		}
-		bv, err := strconv.Atoi(bParts[i])
-		if err != nil {
-			return false
-		}
-		if av != bv {
-			return av > bv
+	for i := range aCore {
+		if aCore[i] != bCore[i] {
+			return aCore[i] > bCore[i]
 		}
 	}
 	return false
+}
+
+// semverCore strips a leading "v" and any pre-release/build/pseudo-version
+// suffix (everything from the first "-" or "+" onward), then splits the
+// remaining numeric core on "." and parses each segment as an integer.
+// Returns ok=false if any core segment fails to parse.
+func semverCore(v string) ([]int, bool) {
+	v = strings.TrimPrefix(v, "v")
+	if i := strings.IndexAny(v, "-+"); i >= 0 {
+		v = v[:i]
+	}
+	parts := strings.Split(v, ".")
+	segs := make([]int, len(parts))
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			return nil, false
+		}
+		segs[i] = n
+	}
+	return segs, true
 }
 
 // ExtractBinaryFromTarball extracts the "fabrik" binary from a .tar.gz archive
