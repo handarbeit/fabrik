@@ -16,6 +16,7 @@ import (
 	"time"
 
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/warnings"
 )
 
 // TestSemverGreater covers the basic semver comparison logic including the
@@ -727,5 +728,138 @@ func TestStartupUpgradeCheck_SkipsWhenDisabled(t *testing.T) {
 	case <-called:
 		t.Error("upgradeCheckFn was called but AutoUpgrade=false")
 	default:
+	}
+}
+
+// writeFakeVersionBinary writes an executable shell script to dir that prints
+// version to stdout when invoked with any arguments (mimicking `fabrik
+// --version`). Returns the script's path.
+func writeFakeVersionBinary(t *testing.T, dir, version string) string {
+	t.Helper()
+	path := filepath.Join(dir, "fabrik-fake")
+	script := fmt.Sprintf("#!/bin/sh\necho %s\n", version)
+	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestCheckVersionSkew_MatchingVersion_NoWarningAndClearsExisting verifies
+// that when the on-disk binary reports the same version as the running
+// process, no new warning is recorded and any stale entry for this key is
+// cleared.
+func TestCheckVersionSkew_MatchingVersion_NoWarningAndClearsExisting(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake version binary is a shell script; not supported on windows")
+	}
+	dir := t.TempDir()
+	scriptPath := writeFakeVersionBinary(t, dir, "v1.2.3")
+	resolvedPath, err := filepath.EvalSymlinks(scriptPath)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	origExecutableFn := upgradeExecutableFn
+	upgradeExecutableFn = func() (string, error) { return scriptPath, nil }
+	defer func() { upgradeExecutableFn = origExecutableFn }()
+
+	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
+	defer func() { warnings.WarningsPathOverride = "" }()
+
+	key := "version_skew:" + resolvedPath
+	if err := warnings.Record(warnings.Entry{Key: key, Type: "version_skew", Title: "stale"}); err != nil {
+		t.Fatalf("seeding stale entry: %v", err)
+	}
+
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.cfg.Version = "v1.2.3"
+
+	eng.checkVersionSkew()
+
+	entries, err := warnings.Load()
+	if err != nil {
+		t.Fatalf("loading warnings: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.Key == key {
+			t.Errorf("expected stale entry %q to be cleared, still present: %+v", key, entry)
+		}
+	}
+}
+
+// TestCheckVersionSkew_MismatchedVersion_RecordsWarning verifies that when
+// the on-disk binary reports a different version than the running process,
+// a warnings entry is recorded with the expected key, type, and fix params.
+func TestCheckVersionSkew_MismatchedVersion_RecordsWarning(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake version binary is a shell script; not supported on windows")
+	}
+	dir := t.TempDir()
+	scriptPath := writeFakeVersionBinary(t, dir, "v1.2.4")
+	resolvedPath, err := filepath.EvalSymlinks(scriptPath)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	origExecutableFn := upgradeExecutableFn
+	upgradeExecutableFn = func() (string, error) { return scriptPath, nil }
+	defer func() { upgradeExecutableFn = origExecutableFn }()
+
+	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
+	defer func() { warnings.WarningsPathOverride = "" }()
+
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.cfg.Version = "v1.2.3"
+
+	eng.checkVersionSkew()
+
+	entries, err := warnings.Load()
+	if err != nil {
+		t.Fatalf("loading warnings: %v", err)
+	}
+	key := "version_skew:" + resolvedPath
+	var found *warnings.Entry
+	for i := range entries {
+		if entries[i].Key == key {
+			found = &entries[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected a version_skew warning entry with key %q, got: %+v", key, entries)
+	}
+	if found.Type != "version_skew" {
+		t.Errorf("Type = %q, want %q", found.Type, "version_skew")
+	}
+	if found.FixAction != "shell_command" {
+		t.Errorf("FixAction = %q, want %q", found.FixAction, "shell_command")
+	}
+	wantCmd := fmt.Sprintf("kill -HUP %d", os.Getpid())
+	if found.FixParams["cmd"] != wantCmd {
+		t.Errorf("FixParams[cmd] = %q, want %q", found.FixParams["cmd"], wantCmd)
+	}
+}
+
+// TestCheckVersionSkew_ExecutableFnError_NonFatal verifies that a failure
+// resolving the executable path is logged and does not panic or record a
+// spurious warning.
+func TestCheckVersionSkew_ExecutableFnError_NonFatal(t *testing.T) {
+	origExecutableFn := upgradeExecutableFn
+	upgradeExecutableFn = func() (string, error) { return "", errors.New("boom") }
+	defer func() { upgradeExecutableFn = origExecutableFn }()
+
+	warnings.WarningsPathOverride = filepath.Join(t.TempDir(), "warnings.json")
+	defer func() { warnings.WarningsPathOverride = "" }()
+
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	eng.cfg.Version = "v1.2.3"
+
+	eng.checkVersionSkew() // must not panic
+
+	entries, err := warnings.Load()
+	if err != nil {
+		t.Fatalf("loading warnings: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected no warnings entries on executable-path error, got %v", entries)
 	}
 }
