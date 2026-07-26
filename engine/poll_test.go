@@ -1482,6 +1482,79 @@ func TestSeedLabels_multiRepo(t *testing.T) {
 	}
 }
 
+// TestSeedLabels_ExcludesUnmanagedStage is the regression guard for a PR
+// review finding on issue #973: shipping backlog.yaml makes "Backlog" a
+// configured stage name, which flowed unfiltered into SeedLabels' stageNames
+// argument — creating stage:Backlog:in_progress/complete/failed labels on
+// every managed repo, three labels nothing can ever apply (dispatch never
+// touches an unmanaged stage, and settleNoWorkNeeded explicitly excludes them
+// from skip-labeling). Cleanup stages must still be included — stage:X:complete
+// for the Done stage is load-bearing.
+func TestSeedLabels_ExcludesUnmanagedStage(t *testing.T) {
+	board := &gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{Number: 1, Title: "Issue 1", Status: "Done", Repo: "owner/repo1"},
+		},
+	}
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {
+			return board, nil
+		},
+		fetchStatusFieldFn: func(projectID string) (*gh.StatusField, error) {
+			return &gh.StatusField{
+				FieldID: "F1",
+				Options: map[string]string{"Research": "OPT_1", "Done": "OPT_2"},
+			}, nil
+		},
+	}
+
+	stgs := append([]*stages.Stage{{Name: "Backlog", Order: -1, Unmanaged: true}}, testStagesWithCleanup()...)
+
+	// Multi-repo mode: Owner set, Repo empty.
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        stgs,
+		},
+		client,
+		&mockClaudeInvoker{},
+		nil,
+	)
+
+	if _, err := eng.poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	client.mu.Lock()
+	calls := make([]seedLabelsCall, len(client.seedLabelsCalls))
+	copy(calls, client.seedLabelsCalls)
+	client.mu.Unlock()
+
+	if len(calls) != 1 {
+		t.Fatalf("expected exactly 1 SeedLabels call, got %d", len(calls))
+	}
+	for _, name := range calls[0].stageNames {
+		if name == "Backlog" {
+			t.Errorf("expected Backlog (unmanaged) excluded from seeded stage names, got %v", calls[0].stageNames)
+		}
+	}
+	found := false
+	for _, name := range calls[0].stageNames {
+		if name == "Done" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected Done (cleanup stage) included in seeded stage names, got %v", calls[0].stageNames)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Poll log: 'from cache' vs 'from GitHub' wording (Tasks 4-8)
 // ---------------------------------------------------------------------------
