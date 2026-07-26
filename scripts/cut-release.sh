@@ -83,7 +83,7 @@ ok "on main"
 # it never sees this local working tree, dirty or not. So this allowlist
 # cannot affect the CI-built artifact and does not need to be tightened; the
 # built-artifact VCS check lives in .goreleaser.yaml/release.yml instead (see
-# adrs/070-release-artifact-vcs-verification.md).
+# adrs/071-release-artifact-vcs-verification.md).
 DIRTY=$(git status --porcelain | grep -Ev "^\?\? release-notes/${VERSION}\.md$| M release-notes/${VERSION}\.md$|^M  release-notes/${VERSION}\.md$| M plugin/known_embedded_versions\.go$|^M  plugin/known_embedded_versions\.go$" || true)
 [ -z "$DIRTY" ] || die "working tree dirty:
 $DIRTY"

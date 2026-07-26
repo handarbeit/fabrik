@@ -1,4 +1,4 @@
-# ADR 070: Release-Artifact VCS Verification via goreleaser Build Hooks
+# ADR 071: Release-Artifact VCS Verification via goreleaser Build Hooks
 
 **Date**: 2026-07-26
 **Status**: Accepted

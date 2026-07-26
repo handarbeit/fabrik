@@ -30,7 +30,7 @@ builds:
       # asserts vcs.modified=false and vcs.revision == the tag's target commit
       # (TAG_COMMIT, exported by release.yml). A non-zero exit here aborts the
       # whole `goreleaser release` invocation — see docs/USER_GUIDE.md's
-      # /cut-release section and adrs/070-release-artifact-vcs-verification.md.
+      # /cut-release section and adrs/071-release-artifact-vcs-verification.md.
       post:
         - cmd: ./.release-tools/verify-release-artifact {{ .Path }} {{ .Env.TAG_COMMIT }}
           output: true
