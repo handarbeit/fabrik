@@ -6,8 +6,13 @@ name: Claude PR Review
 # PR's reviews array — the signal Fabrik's checkReviewGate waits on (engine/reviews.go).
 
 on:
+  # NOTE: 'synchronize' is deliberately excluded. Fabrik auto-fixes review
+  # findings and pushes, which would re-trigger a review, which finds more,
+  # which triggers another fix — an unbounded review/fix loop (observed on
+  # handarbeit/fabrik#1078: 18 reviews before FABRIK_MAX_REVIEW_CYCLES tripped).
+  # Review once when the PR is ready; a human merges.
   pull_request:
-    types: [opened, ready_for_review, synchronize]
+    types: [opened, ready_for_review]
 
 permissions:
   contents: read
