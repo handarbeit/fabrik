@@ -265,6 +265,167 @@ func TestProcessComments_UpdatesIssueBodyOnMarker(t *testing.T) {
 	}
 }
 
+// TestProcessComments_NoWorkNeeded_SuppressesStageComment verifies that a
+// comment-processing invocation whose output contains FABRIK_NO_WORK_NEEDED
+// posts no reply comment (neither a new comment nor a rewrite of the
+// existing stage comment) — silence, not a "not actionable" message,
+// prevents re-triggering a subscribed bot into a runaway loop (#1083/#1088).
+func TestProcessComments_NoWorkNeeded_SuppressesStageComment(t *testing.T) {
+	skipIfNoGit(t)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "not actionable.\nFABRIK_NO_WORK_NEEDED\n", false, TokenUsage{}, nil
+		},
+	}
+
+	eng := testEngineWithRepo(t, client, claude)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	stage := &stages.Stage{Name: "Research", Order: 1}
+	item := gh.ProjectItem{
+		Number:   14,
+		Body:     "spec",
+		Comments: []gh.Comment{},
+	}
+	userComments := []gh.Comment{
+		{ID: "C_quota", DatabaseID: 401, Author: "gemini-code-assist[bot]", Body: "unrelated bot chatter"},
+	}
+
+	if err := eng.processComments(context.Background(), board, item, stage, userComments); err != nil {
+		t.Fatalf("processComments: %v", err)
+	}
+
+	if len(client.addCommentCalls) > 0 {
+		t.Errorf("expected no AddComment call on FABRIK_NO_WORK_NEEDED verdict, got: %v", client.addCommentCalls)
+	}
+	if len(client.updateCommentCalls) > 0 {
+		t.Errorf("expected no UpdateComment call on FABRIK_NO_WORK_NEEDED verdict, got: %v", client.updateCommentCalls)
+	}
+}
+
+// TestProcessComments_NoWorkNeeded_SuppressesPostToPRComment covers the
+// post_to_pr reply path — also gated on FABRIK_NO_WORK_NEEDED.
+func TestProcessComments_NoWorkNeeded_SuppressesPostToPRComment(t *testing.T) {
+	skipIfNoGit(t)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "not actionable.\nFABRIK_NO_WORK_NEEDED\n", false, TokenUsage{}, nil
+		},
+	}
+
+	eng := testEngineWithRepo(t, client, claude)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	stage := &stages.Stage{Name: "Review", Order: 4, PostToPR: true}
+	item := gh.ProjectItem{
+		Number: 15,
+		Body:   "spec",
+	}
+	userComments := []gh.Comment{
+		{ID: "C_quota", DatabaseID: 402, Author: "gemini-code-assist[bot]", Body: "unrelated bot chatter"},
+	}
+
+	if err := eng.processComments(context.Background(), board, item, stage, userComments); err != nil {
+		t.Fatalf("processComments: %v", err)
+	}
+
+	if len(client.addCommentCalls) > 0 {
+		t.Errorf("expected no AddComment call on FABRIK_NO_WORK_NEEDED verdict for post_to_pr stage, got: %v", client.addCommentCalls)
+	}
+}
+
+// TestProcessComments_NoWorkNeeded_SuppressesReviewFeedbackSummary covers the
+// review-reinvoke PR summary path — also gated on FABRIK_NO_WORK_NEEDED. All
+// comments carry a ReviewThreadID so isReviewReinvoke is true; a linked PR
+// exists via FindPRForIssue, so absent the fix this would post a summary.
+func TestProcessComments_NoWorkNeeded_SuppressesReviewFeedbackSummary(t *testing.T) {
+	skipIfNoGit(t)
+
+	client := &mockGitHubClient{
+		findPRForIssueFn: func(owner, repo string, issueNumber int) (int, error) { return 900, nil },
+	}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			return "addressed, but nothing to do.\nFABRIK_NO_WORK_NEEDED\n", false, TokenUsage{}, nil
+		},
+	}
+
+	eng := testEngineWithRepo(t, client, claude)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	stage := &stages.Stage{Name: "Review", Order: 4}
+	item := gh.ProjectItem{
+		Number: 16,
+		Body:   "spec",
+	}
+	reviewComments := []gh.Comment{
+		{ID: "C_thread", DatabaseID: 403, Author: "copilot-bot", Body: "consider handling nil here", ReviewThreadID: "RT_1"},
+	}
+
+	if err := eng.processComments(context.Background(), board, item, stage, reviewComments); err != nil {
+		t.Fatalf("processComments: %v", err)
+	}
+
+	if len(client.addCommentCalls) > 0 {
+		t.Errorf("expected no PR review-feedback summary on FABRIK_NO_WORK_NEEDED verdict, got: %v", client.addCommentCalls)
+	}
+}
+
+// TestProcessComments_NoWorkNeeded_IssueBodyAndReactionsStillApply verifies
+// that FABRIK_NO_WORK_NEEDED suppresses only the reply comment — the issue
+// body update (FABRIK_ISSUE_UPDATE), 🚀 reactions marking input comments
+// processed, and the editing-label removal must all still occur.
+func TestProcessComments_NoWorkNeeded_IssueBodyAndReactionsStillApply(t *testing.T) {
+	skipIfNoGit(t)
+
+	var updatedBody string
+	client := &mockGitHubClient{
+		updateIssueBodyFn: func(owner, repo string, issueNumber int, body string) error {
+			updatedBody = body
+			return nil
+		},
+		addCommentReactionFn: func(_, _ string, _ int, _ string) error { return nil },
+	}
+	claude := &mockClaudeInvoker{
+		invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, comments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+			output := "FABRIK_ISSUE_UPDATE_BEGIN\nno actual change needed\nFABRIK_ISSUE_UPDATE_END\nnothing to do here.\nFABRIK_NO_WORK_NEEDED\n"
+			return output, false, TokenUsage{}, nil
+		},
+	}
+
+	eng := testEngineWithRepo(t, client, claude)
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	stage := &stages.Stage{Name: "Research", Order: 1}
+	item := gh.ProjectItem{
+		Number: 17,
+		Body:   "old spec",
+	}
+	userComments := []gh.Comment{
+		{ID: "C_u", DatabaseID: 404, Author: "testuser", Body: "is there anything left to do?"},
+	}
+
+	if err := eng.processComments(context.Background(), board, item, stage, userComments); err != nil {
+		t.Fatalf("processComments: %v", err)
+	}
+
+	if updatedBody != "no actual change needed" {
+		t.Errorf("updatedBody = %q, want issue body update to still apply", updatedBody)
+	}
+	sawRocket := false
+	for _, rc := range client.addCommentReactionCalls {
+		if rc.content == "rocket" {
+			sawRocket = true
+		}
+	}
+	if !sawRocket {
+		t.Errorf("expected the input comment to still get a 🚀 reaction, got: %v", client.addCommentReactionCalls)
+	}
+	if len(client.addCommentCalls) > 0 {
+		t.Errorf("expected no reply comment despite issue-body update, got: %v", client.addCommentCalls)
+	}
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a
@@ -293,6 +454,90 @@ func TestFindNewComments_SkipsRocketReactedComment(t *testing.T) {
 	newComments := eng.findNewComments(item)
 	if len(newComments) != 0 {
 		t.Errorf("expected 0 new comments (should skip rocket-reacted), got %d", len(newComments))
+	}
+}
+
+// TestIsBotServiceNotice covers the classifier's decision boundary: bot login
+// AND a known quota/rate-limit pattern must both hold. Regression guard for
+// #1083/#1088 (gemini-code-assist quota-exhaustion runaway loop).
+func TestIsBotServiceNotice(t *testing.T) {
+	tests := []struct {
+		name string
+		c    gh.Comment
+		want bool
+	}{
+		{
+			name: "gemini quota banner",
+			c:    gh.Comment{Author: "gemini-code-assist[bot]", Body: "[!WARNING]\nYou have reached your daily quota limit."},
+			want: true,
+		},
+		{
+			name: "rate limit banner",
+			c:    gh.Comment{Author: "some-bot[bot]", Body: "You have reached your rate limit. Please try again later."},
+			want: true,
+		},
+		{
+			name: "genuine bot review body",
+			c:    gh.Comment{Author: "gemini-code-assist[bot]", Body: "CHANGES_REQUESTED\n\nline 42: this loop never terminates when the slice is empty."},
+			want: false,
+		},
+		{
+			name: "human authored quota-sounding text",
+			c:    gh.Comment{Author: "humanuser", Body: "You have reached your daily quota limit for this API — worth noting in the docs."},
+			want: false,
+		},
+		{
+			name: "existing quota notice fixture body must not collide",
+			c:    gh.Comment{Author: "gemini-code-assist", Body: "quota notice"},
+			want: false,
+		},
+		{
+			name: "bot with unrelated body",
+			c:    gh.Comment{Author: "dependabot[bot]", Body: "Bumps foo from 1.0.0 to 1.0.1."},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isBotServiceNotice(tt.c); got != tt.want {
+				t.Errorf("isBotServiceNotice(%+v) = %v, want %v", tt.c, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFindNewComments_SkipsBotServiceNotice verifies the pre-admission filter
+// excludes a quota/rate-limit bot notice while still admitting a genuine bot
+// review comment and a human comment in the same batch.
+func TestFindNewComments_SkipsBotServiceNotice(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	item := gh.ProjectItem{
+		Number: 21,
+		Comments: []gh.Comment{
+			{ID: "C_quota", DatabaseID: 501, Author: "gemini-code-assist[bot]", Body: "You have reached your daily quota limit."},
+			{ID: "C_review", DatabaseID: 502, Author: "gemini-code-assist[bot]", Body: "CHANGES_REQUESTED: this loop never terminates."},
+			{ID: "C_human", DatabaseID: 503, Author: "humanuser", Body: "please address the review feedback"},
+		},
+	}
+
+	newComments := eng.findNewComments(item)
+	var gotIDs []string
+	for _, c := range newComments {
+		gotIDs = append(gotIDs, c.ID)
+	}
+	if len(newComments) != 2 {
+		t.Fatalf("expected 2 new comments (quota notice excluded), got %d: %v", len(newComments), gotIDs)
+	}
+	for _, want := range []string{"C_review", "C_human"} {
+		found := false
+		for _, id := range gotIDs {
+			if id == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected %q to be admitted, got %v", want, gotIDs)
+		}
 	}
 }
 

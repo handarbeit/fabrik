@@ -2532,9 +2532,12 @@ Multiple users and multiple Fabrik instances can safely share a project board.
 
 **Comment processing**: Fabrik processes comments from *any* author, not just the
 configured `--user`. Human colleagues, code-review bots (Copilot, Gemini), and
-other Fabrik instances all trigger comment processing. Only two categories are
-skipped: comments that start with `🏭 **Fabrik` (Fabrik's own output) and comments
-that already carry a 🚀 rocket reaction (already processed).
+other Fabrik instances all trigger comment processing. Three categories are
+skipped: comments that start with `🏭 **Fabrik` (Fabrik's own output), comments
+that already carry a 🚀 rocket reaction (already processed), and non-actionable
+bot service-notices — e.g. a quota-exhaustion or rate-limit banner from a
+review bot — which are watermarked as processed without ever spawning a worker
+or receiving a reply, so they can't re-trigger the bot into a reply loop.
 
 **Multi-instance locking**: The `fabrik:locked:<user>` label is still the
 concurrency guard, but acquisition now uses a **lock-then-verify** protocol:

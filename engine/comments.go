@@ -30,9 +30,53 @@ func (e *Engine) findNewComments(item gh.ProjectItem) []gh.Comment {
 		if c.HasReaction("ROCKET") {
 			continue
 		}
+		// Skip non-actionable bot service-notices (e.g. quota/rate-limit banners) —
+		// admitting these spawns a comment-processing worker and, if replied to,
+		// re-triggers the subscribed bot into an unbounded reply loop (#1083, #1088).
+		// Watermarking these so they don't re-admit on a later poll is handled
+		// separately by settleBotServiceNotices, since a bot-notice-only backlog
+		// never reaches processComments once excluded here.
+		if isBotServiceNotice(c) {
+			continue
+		}
 		newComments = append(newComments, c)
 	}
 	return newComments
+}
+
+// botServiceNoticePatterns are literal, case-insensitive substrings identifying
+// non-actionable bot service/status notices (quota exhaustion, rate limiting)
+// as opposed to genuine bot review content. Deliberately narrow: a bare
+// "quota"/"rate limit" substring would risk matching genuine review prose that
+// discusses rate limiting, and would collide with this repo's own test
+// fixtures (e.g. the literal body "quota notice" used across
+// blocked_on_input_test.go to exercise the human-only resume gate, ADR-069).
+var botServiceNoticePatterns = []string{
+	"daily quota limit",
+	"you have reached your daily quota",
+	"rate limit exceeded",
+	"you have reached your rate limit",
+	"you have exceeded your rate limit",
+	"api rate limit",
+}
+
+// isBotServiceNotice reports whether c is a non-actionable bot service/status
+// notice (e.g. "you have reached your daily quota limit") rather than genuine
+// bot review content. Both the bot-login check and a pattern match are
+// required — a human comment mentioning the same phrasing is not classified
+// as a notice, and a bot comment that doesn't match a known pattern (e.g. a
+// CHANGES_REQUESTED review body) is left for normal processing.
+func isBotServiceNotice(c gh.Comment) bool {
+	if !gh.IsBotLogin(c.Author) {
+		return false
+	}
+	lower := strings.ToLower(c.Body)
+	for _, pattern := range botServiceNoticePatterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 // filterHuman filters a comment slice down to comments authored by a human —
@@ -322,6 +366,9 @@ func (e *Engine) publishCommentOutput(owner, repo string, item gh.ProjectItem, s
 	branch, commit, mainSHA, timestamp := captureGitMeta(workDir, baseBranch)
 
 	summary := extractSummary(output)
+	// Captured before markers are stripped below — CheckNoWorkNeeded matches the
+	// raw marker line, which stripLine removes a few lines down.
+	noWorkNeeded := CheckNoWorkNeeded(output)
 
 	// Strip FABRIK_ISSUE_UPDATE block from output, then update issue body.
 	if updatedBody := extractUpdatedBody(output); updatedBody != "" {
@@ -346,7 +393,13 @@ func (e *Engine) publishCommentOutput(owner, repo string, item gh.ProjectItem, s
 	// Rewrite or create the stage comment (unless post_to_pr). For post_to_pr
 	// stages the stage output lives on the PR; comment processing output on
 	// such stages is posted as a new comment on the issue as before.
-	if output != "" {
+	// Suppressed entirely on a "no action needed" verdict (#1088) — posting any
+	// reply is what re-triggers a subscribed bot into a runaway reply loop
+	// (#1083), so silence is the correct response here, not a "not actionable"
+	// message.
+	if output != "" && noWorkNeeded {
+		e.logf(item.Number, "comments", "suppressing reply for %s — verdict was FABRIK_NO_WORK_NEEDED\n", stage.Name)
+	} else if output != "" {
 		if stage.PostToPR {
 			comment := formatOutputComment(stage.Name+" (comment review)", output, "", branch, commit, mainSHA, timestamp)
 			e.postItemComment(item, comment, true)
@@ -368,8 +421,8 @@ func (e *Engine) publishCommentOutput(owner, repo string, item gh.ProjectItem, s
 	// comments), also post a Fabrik-marked summary on the linked PR. The
 	// existing issue comment above is unchanged (R4). Gate: output != "" and a
 	// linked PR exists. No post_to_pr check — linked-PR existence is the only
-	// gate (R5).
-	if isReviewReinvoke(comments) && output != "" {
+	// gate (R5). Also suppressed on a "no action needed" verdict, same as above.
+	if isReviewReinvoke(comments) && output != "" && !noWorkNeeded {
 		prNumber, prErr := e.client.FindPRForIssue(owner, repo, item.Number)
 		if prErr != nil {
 			e.logf(item.Number, "warn", "review reinvoke: could not find PR for issue: %v\n", prErr)
