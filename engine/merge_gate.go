@@ -142,46 +142,61 @@ func (e *Engine) dispatchRebaseReinvoke(ctx context.Context, board *gh.ProjectBo
 			if err != nil {
 				return
 			}
-
-			// GitHub disables auto-merge on every push. Re-enable it if this issue is in
-			// the convergence flow (fabrik:auto-merge-enabled present at dispatch time) —
-			// but NOT on a merge-queue repo (ADR-058 D4): there the recovery path is
-			// re-enqueue, not native auto-merge, and the convergence monitor re-enqueues
-			// the resolved PR once it re-derives clean. Re-enabling auto-merge here would
-			// fight the queue model.
-			if !hasLabel(item.Labels, "fabrik:auto-merge-enabled") || item.LinkedPRIsMergeQueueEnabled {
-				return
-			}
-
-			owner, repo := itemOwnerRepo(item, e.defaultRepo())
-			pr, prErr := e.client.FetchLinkedPR(owner, repo, item.Number)
-			if prErr != nil || pr == nil || pr.Number == 0 {
-				e.logf(item.Number, "warn", "rebase reinvoke: could not fetch linked PR for auto-merge re-enable: %v\n", prErr)
-				return
-			}
-			strategy := e.cfg.AutoMergeStrategy
-			if strategy == "" {
-				strategy = "MERGE"
-			}
-			if rerr := e.client.EnablePullRequestAutoMerge(owner, repo, pr.Number, strategy); rerr != nil {
-				if errors.Is(rerr, gh.ErrAutoMergeAlreadyClean) {
-					// PR is already CLEAN after the rebase push — merge directly.
-					// Without this, checkAutoMergeConvergence sees AutoMergeEnabled=false
-					// and incorrectly pauses the issue as "user disabled auto-merge".
-					e.logf(item.Number, "info", "PR #%d is already in clean status after rebase — falling back to direct merge\n", pr.Number)
-					if mergeErr := e.client.MergePR(owner, repo, pr.Number); mergeErr != nil {
-						e.logf(item.Number, "warn", "direct merge fallback after rebase failed: %v\n", mergeErr)
-					} else {
-						e.logf(item.Number, "info", "PR #%d merged directly after rebase push (already-clean fallback)\n", pr.Number)
-					}
-				} else {
-					e.logf(item.Number, "warn", "auto-merge re-enable after rebase failed: %v\n", rerr)
-				}
-			} else {
-				e.logf(item.Number, "auto-merge", "re-enabled auto-merge on PR #%d after rebase push\n", pr.Number)
-			}
+			e.reenableAutoMergeAfterRebase(item)
 		},
 	})
+}
+
+// reenableAutoMergeAfterRebase runs as dispatchRebaseReinvoke's after callback
+// once processComments has completed successfully. GitHub disables auto-merge
+// on every push, so this re-enables it if the issue is in the convergence flow
+// (fabrik:auto-merge-enabled present at dispatch time) — but NOT on a
+// merge-queue repo (ADR-058 D4): there the recovery path is re-enqueue, not
+// native auto-merge, and the convergence monitor re-enqueues the resolved PR
+// once it re-derives clean. Re-enabling auto-merge here would fight the queue
+// model.
+//
+// Extracted from the inline after closure so the already-clean direct-merge
+// fallback branch (including its ErrNotMergeableCI handling, issue #1094) is
+// unit-testable without the full dispatchReinvoke goroutine/worktree scaffold.
+func (e *Engine) reenableAutoMergeAfterRebase(item gh.ProjectItem) {
+	if !hasLabel(item.Labels, "fabrik:auto-merge-enabled") || item.LinkedPRIsMergeQueueEnabled {
+		return
+	}
+
+	owner, repo := itemOwnerRepo(item, e.defaultRepo())
+	pr, prErr := e.client.FetchLinkedPR(owner, repo, item.Number)
+	if prErr != nil || pr == nil || pr.Number == 0 {
+		e.logf(item.Number, "warn", "rebase reinvoke: could not fetch linked PR for auto-merge re-enable: %v\n", prErr)
+		return
+	}
+	strategy := e.cfg.AutoMergeStrategy
+	if strategy == "" {
+		strategy = "MERGE"
+	}
+	if rerr := e.client.EnablePullRequestAutoMerge(owner, repo, pr.Number, strategy); rerr != nil {
+		if errors.Is(rerr, gh.ErrAutoMergeAlreadyClean) {
+			// PR is already CLEAN after the rebase push — merge directly.
+			// Without this, checkAutoMergeConvergence sees AutoMergeEnabled=false
+			// and incorrectly pauses the issue as "user disabled auto-merge".
+			e.logf(item.Number, "info", "PR #%d is already in clean status after rebase — falling back to direct merge\n", pr.Number)
+			// MergePR may return ErrNotMergeableCI here (issue #1094's self-gate) if
+			// mergeable_state flipped away from clean/unstable between the settle that
+			// preceded EnablePullRequestAutoMerge and this call. Logged and swallowed
+			// like any other MergePR failure at this call site — it is a CI-readiness
+			// refusal, not a conflict, so it must not apply fabrik:rebase-needed or
+			// consume a rebase cycle; the next poll's settle/convergence pass retries.
+			if mergeErr := e.client.MergePR(owner, repo, pr.Number); mergeErr != nil {
+				e.logf(item.Number, "warn", "direct merge fallback after rebase failed: %v\n", mergeErr)
+			} else {
+				e.logf(item.Number, "info", "PR #%d merged directly after rebase push (already-clean fallback)\n", pr.Number)
+			}
+		} else {
+			e.logf(item.Number, "warn", "auto-merge re-enable after rebase failed: %v\n", rerr)
+		}
+	} else {
+		e.logf(item.Number, "auto-merge", "re-enabled auto-merge on PR #%d after rebase push\n", pr.Number)
+	}
 }
 
 // checkAutoMergeConvergence monitors a yolo issue that has entered the GitHub
