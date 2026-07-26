@@ -173,7 +173,7 @@ func New(pollSeconds int, info ProjectInfo, pluginDir string, wakeCh chan struct
 			skillsStaleCount: skillsStaleCount,
 			customWorkflow:   customWorkflow,
 		},
-		alert:   AlertBannerComponent{now: now},
+		alert:    AlertBannerComponent{now: now},
 		active:   active,
 		history:  NewHistoryPaneComponent(info.Repo),
 		warnings: NewWarningsPaneComponent(),

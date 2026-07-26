@@ -29,56 +29,56 @@ var testReadyCh chan struct{}
 var testResolvedConfigHook func(Config)
 
 type Config struct {
-	Owner                   string
-	Repo                    string
-	ProjectNum              int
-	OwnerType               string
-	User                    string
-	Token                   string
-	StagesDir               string
-	Yolo                    bool
-	AutoUpgrade             bool
-	GitSSH                  bool
-	TUI                     bool
-	PollSeconds             int
-	MaxConcurrent           int
-	MaxRetries              int
-	ReviewWaitTimeout       int    // minutes; 0 means use default (15)
-	MaxReviewCycles         int    // 0 means use default (5)
-	CIWaitTimeout           int    // minutes; 0 means use default (30)
-	WorkerStaleMins         int    // minutes; 0 means use default (5)
-	MaxCiFixCycles          int    // 0 means use default (5)
-	MaxRebaseCycles         int    // 0 means use default (3)
-	MaxEnqueueCycles        int    // 0 means use default (5)
-	ConvergenceBudget       string // Go duration string; "" means use default (30m); "0" means disabled
-	AutoMergeStrategy       string // MERGE, SQUASH, or REBASE; "" means use default (MERGE)
-	MergeQueue              string // auto or off; "" means use default (auto)
-	MergeTrain              string // on or off; "" means use default (off)
-	MaxBatchSize            int    // 0 means use default (5)
-	MaxBisectValidations    int    // 0 means derive default (2·⌈log₂(MaxBatchSize)⌉+1)
-	MaxTrainRebaseCycles    int    // 0 means use default (3)
-	MaxTrainTrialsPerWindow int    // 0 means use default (20)
-	TrainTrialWindowMinutes int    // 0 means use default (60)
-	MaxCommentCyclesPerWindow int  // Comment-processing circuit breaker: 0 means use default (10)
-	CommentCycleWindowMinutes int  // Comment-processing circuit breaker: 0 means use default (30)
-	ClaudeWaitDelay         int    // seconds; 0 means use default (30)
-	PostPushDwell           int    // seconds; 0 means use default (90)
-	KillGraceSigInt         string // Go duration string; "" means use default (10s); "0s" skips SIGINT step
-	KillGraceSigTerm        string // Go duration string; "" means use default (10s)
-	DebugOutput             bool
-	SymlinkEnv              bool
-	WorktreeBoundaryAudit   bool
-	PluginDir               string
-	Webhooks                bool
-	WebhookPort             int
-	WebhookEvents           string // comma-separated; empty means default event set
-	StatusPollSeconds       int    // Layer 2 status-only sweep cadence in seconds; 0 = use default (15)
-	ReconcileInterval       int    // seconds; 0 means use default (180 = 3 min); also FABRIK_RECONCILE_INTERVAL
-	JanitorIntervalHours    int    // hours; 1 = default; 0 disables the janitor
-	LogRetentionDays        int    // days; 14 = default; 0 disables age-based log pruning
-	LogMaxBytes             int64  // bytes; 2147483648 = default; 0 disables size-cap pruning
-	ArchiveAfter            string // Go duration string; "" means use default (168h = 1 week); also FABRIK_ARCHIVE_AFTER
-	ArchiveDone             string // on or off; "" means use default (on); also FABRIK_ARCHIVE_DONE
+	Owner                     string
+	Repo                      string
+	ProjectNum                int
+	OwnerType                 string
+	User                      string
+	Token                     string
+	StagesDir                 string
+	Yolo                      bool
+	AutoUpgrade               bool
+	GitSSH                    bool
+	TUI                       bool
+	PollSeconds               int
+	MaxConcurrent             int
+	MaxRetries                int
+	ReviewWaitTimeout         int    // minutes; 0 means use default (15)
+	MaxReviewCycles           int    // 0 means use default (5)
+	CIWaitTimeout             int    // minutes; 0 means use default (30)
+	WorkerStaleMins           int    // minutes; 0 means use default (5)
+	MaxCiFixCycles            int    // 0 means use default (5)
+	MaxRebaseCycles           int    // 0 means use default (3)
+	MaxEnqueueCycles          int    // 0 means use default (5)
+	ConvergenceBudget         string // Go duration string; "" means use default (30m); "0" means disabled
+	AutoMergeStrategy         string // MERGE, SQUASH, or REBASE; "" means use default (MERGE)
+	MergeQueue                string // auto or off; "" means use default (auto)
+	MergeTrain                string // on or off; "" means use default (off)
+	MaxBatchSize              int    // 0 means use default (5)
+	MaxBisectValidations      int    // 0 means derive default (2·⌈log₂(MaxBatchSize)⌉+1)
+	MaxTrainRebaseCycles      int    // 0 means use default (3)
+	MaxTrainTrialsPerWindow   int    // 0 means use default (20)
+	TrainTrialWindowMinutes   int    // 0 means use default (60)
+	MaxCommentCyclesPerWindow int    // Comment-processing circuit breaker: 0 means use default (10)
+	CommentCycleWindowMinutes int    // Comment-processing circuit breaker: 0 means use default (30)
+	ClaudeWaitDelay           int    // seconds; 0 means use default (30)
+	PostPushDwell             int    // seconds; 0 means use default (90)
+	KillGraceSigInt           string // Go duration string; "" means use default (10s); "0s" skips SIGINT step
+	KillGraceSigTerm          string // Go duration string; "" means use default (10s)
+	DebugOutput               bool
+	SymlinkEnv                bool
+	WorktreeBoundaryAudit     bool
+	PluginDir                 string
+	Webhooks                  bool
+	WebhookPort               int
+	WebhookEvents             string // comma-separated; empty means default event set
+	StatusPollSeconds         int    // Layer 2 status-only sweep cadence in seconds; 0 = use default (15)
+	ReconcileInterval         int    // seconds; 0 means use default (180 = 3 min); also FABRIK_RECONCILE_INTERVAL
+	JanitorIntervalHours      int    // hours; 1 = default; 0 disables the janitor
+	LogRetentionDays          int    // days; 14 = default; 0 disables age-based log pruning
+	LogMaxBytes               int64  // bytes; 2147483648 = default; 0 disables size-cap pruning
+	ArchiveAfter              string // Go duration string; "" means use default (168h = 1 week); also FABRIK_ARCHIVE_AFTER
+	ArchiveDone               string // on or off; "" means use default (on); also FABRIK_ARCHIVE_DONE
 }
 
 func Execute() error {
@@ -437,6 +437,36 @@ func Execute() error {
 			}
 		}
 	}
+	if !explicitFlags["max-comment-cycles-per-window"] {
+		if v := os.Getenv("FABRIK_MAX_COMMENT_CYCLES_PER_WINDOW"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				cfg.MaxCommentCyclesPerWindow = n
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_MAX_COMMENT_CYCLES_PER_WINDOW=%q is invalid (must be a positive integer); using default 10\n", v)
+			}
+		} else if pc.MaxCommentCyclesPerWindow != nil {
+			if *pc.MaxCommentCyclesPerWindow <= 0 {
+				fmt.Fprintf(os.Stderr, "[warn] config.yaml max_comment_cycles_per_window=%d is invalid (must be a positive integer); using default 10\n", *pc.MaxCommentCyclesPerWindow)
+			} else {
+				cfg.MaxCommentCyclesPerWindow = *pc.MaxCommentCyclesPerWindow
+			}
+		}
+	}
+	if !explicitFlags["comment-cycle-window"] {
+		if v := os.Getenv("FABRIK_COMMENT_CYCLE_WINDOW"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				cfg.CommentCycleWindowMinutes = n
+			} else {
+				fmt.Fprintf(os.Stderr, "[warn] FABRIK_COMMENT_CYCLE_WINDOW=%q is invalid (must be a positive integer of minutes); using default 30\n", v)
+			}
+		} else if pc.CommentCycleWindow != nil {
+			if *pc.CommentCycleWindow <= 0 {
+				fmt.Fprintf(os.Stderr, "[warn] config.yaml comment_cycle_window=%d is invalid (must be a positive integer of minutes); using default 30\n", *pc.CommentCycleWindow)
+			} else {
+				cfg.CommentCycleWindowMinutes = *pc.CommentCycleWindow
+			}
+		}
+	}
 	if !explicitFlags["claude-wait-delay"] {
 		if v := os.Getenv("FABRIK_CLAUDE_WAIT_DELAY"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil {
@@ -678,58 +708,58 @@ func Execute() error {
 	}
 
 	eng, err := engine.New(engine.Config{
-		Owner:                    cfg.Owner,
-		Repo:                     cfg.Repo,
-		ProjectNum:               cfg.ProjectNum,
-		OwnerType:                cfg.OwnerType,
-		User:                     cfg.User,
-		Token:                    cfg.Token,
-		Version:                  Version,
-		Yolo:                     cfg.Yolo,
-		AutoUpgrade:              cfg.AutoUpgrade,
-		GitSSH:                   cfg.GitSSH,
-		PollSeconds:              cfg.PollSeconds,
-		MaxConcurrent:            cfg.MaxConcurrent,
-		MaxRetries:               cfg.MaxRetries,
-		ReviewWaitTimeout:        reviewWaitTimeout(cfg.ReviewWaitTimeout),
-		MaxReviewCycles:          maxReviewCycles(cfg.MaxReviewCycles),
-		CIWaitTimeout:            ciWaitTimeout(cfg.CIWaitTimeout),
-		PostPushDwell:            postPushDwell(cfg.PostPushDwell),
-		WorkerStaleTimeout:       workerStaleTimeout(cfg.WorkerStaleMins),
-		MaxCiFixCycles:           maxCiFixCycles(cfg.MaxCiFixCycles),
-		MaxRebaseCycles:          maxRebaseCycles(cfg.MaxRebaseCycles),
-		MaxEnqueueCycles:         maxEnqueueCycles(cfg.MaxEnqueueCycles),
-		ConvergenceBudget:        convergenceBudget(cfg.ConvergenceBudget),
-		AutoMergeStrategy:        autoMergeStrategy(cfg.AutoMergeStrategy),
-		MergeQueue:               mergeQueueMode(cfg.MergeQueue),
-		MergeTrain:               mergeTrainMode(cfg.MergeTrain),
-		MaxMergeTrainEjections:   3,                                                     // ADR-059 default
-		MaxBatchSize:             cfg.MaxBatchSize,                                      // 0 = derive default (5) in engine
-		MaxBisectValidations:     cfg.MaxBisectValidations,                              // 0 = derive default in engine
-		MaxTrainRebaseCycles:     cfg.MaxTrainRebaseCycles,                              // 0 = derive default (3) in engine
-		MaxTrainTrialsPerWindow:  cfg.MaxTrainTrialsPerWindow,                           // 0 = derive default (20) in engine
-		TrainTrialWindowDuration: trainTrialWindowDuration(cfg.TrainTrialWindowMinutes), // 0 = derive default (60m) in engine
-		MaxCommentCyclesPerWindow: cfg.MaxCommentCyclesPerWindow,                        // 0 = derive default (10) in engine
-		CommentCycleWindow:        commentCycleWindow(cfg.CommentCycleWindowMinutes),    // 0 = derive default (30m) in engine
-		ClaudeWaitDelay:          claudeWaitDelay(cfg.ClaudeWaitDelay),
-		KillGraceSigInt:          killGraceSigInt(cfg.KillGraceSigInt),
-		KillGraceSigTerm:         killGraceSigTerm(cfg.KillGraceSigTerm),
-		DebugOutput:              cfg.DebugOutput,
-		SymlinkEnv:               cfg.SymlinkEnv,
-		WorktreeBoundaryAudit:    cfg.WorktreeBoundaryAudit,
-		PluginDir:                cfg.PluginDir,
-		Stages:                   stageCfgs,
-		Webhooks:                 cfg.Webhooks,
-		WebhookPort:              cfg.WebhookPort,
-		WebhookEvents:            webhookEvents,
-		ProjectStatusPollSeconds: statusPollSeconds(cfg.StatusPollSeconds),
-		ReconcileInterval:        reconcileIntervalDuration(cfg.ReconcileInterval),
-		JanitorIntervalHours:     cfg.JanitorIntervalHours,
-		LogRetentionDays:         cfg.LogRetentionDays,
-		LogMaxBytes:              cfg.LogMaxBytes,
-		ArchiveAfter:             archiveAfter(cfg.ArchiveAfter),
-		ArchiveDone:              archiveDoneMode(cfg.ArchiveDone),
-		ReadyCh:                  testReadyCh,
+		Owner:                     cfg.Owner,
+		Repo:                      cfg.Repo,
+		ProjectNum:                cfg.ProjectNum,
+		OwnerType:                 cfg.OwnerType,
+		User:                      cfg.User,
+		Token:                     cfg.Token,
+		Version:                   Version,
+		Yolo:                      cfg.Yolo,
+		AutoUpgrade:               cfg.AutoUpgrade,
+		GitSSH:                    cfg.GitSSH,
+		PollSeconds:               cfg.PollSeconds,
+		MaxConcurrent:             cfg.MaxConcurrent,
+		MaxRetries:                cfg.MaxRetries,
+		ReviewWaitTimeout:         reviewWaitTimeout(cfg.ReviewWaitTimeout),
+		MaxReviewCycles:           maxReviewCycles(cfg.MaxReviewCycles),
+		CIWaitTimeout:             ciWaitTimeout(cfg.CIWaitTimeout),
+		PostPushDwell:             postPushDwell(cfg.PostPushDwell),
+		WorkerStaleTimeout:        workerStaleTimeout(cfg.WorkerStaleMins),
+		MaxCiFixCycles:            maxCiFixCycles(cfg.MaxCiFixCycles),
+		MaxRebaseCycles:           maxRebaseCycles(cfg.MaxRebaseCycles),
+		MaxEnqueueCycles:          maxEnqueueCycles(cfg.MaxEnqueueCycles),
+		ConvergenceBudget:         convergenceBudget(cfg.ConvergenceBudget),
+		AutoMergeStrategy:         autoMergeStrategy(cfg.AutoMergeStrategy),
+		MergeQueue:                mergeQueueMode(cfg.MergeQueue),
+		MergeTrain:                mergeTrainMode(cfg.MergeTrain),
+		MaxMergeTrainEjections:    3,                                                     // ADR-059 default
+		MaxBatchSize:              cfg.MaxBatchSize,                                      // 0 = derive default (5) in engine
+		MaxBisectValidations:      cfg.MaxBisectValidations,                              // 0 = derive default in engine
+		MaxTrainRebaseCycles:      cfg.MaxTrainRebaseCycles,                              // 0 = derive default (3) in engine
+		MaxTrainTrialsPerWindow:   cfg.MaxTrainTrialsPerWindow,                           // 0 = derive default (20) in engine
+		TrainTrialWindowDuration:  trainTrialWindowDuration(cfg.TrainTrialWindowMinutes), // 0 = derive default (60m) in engine
+		MaxCommentCyclesPerWindow: cfg.MaxCommentCyclesPerWindow,                         // 0 = derive default (10) in engine
+		CommentCycleWindow:        commentCycleWindow(cfg.CommentCycleWindowMinutes),     // 0 = derive default (30m) in engine
+		ClaudeWaitDelay:           claudeWaitDelay(cfg.ClaudeWaitDelay),
+		KillGraceSigInt:           killGraceSigInt(cfg.KillGraceSigInt),
+		KillGraceSigTerm:          killGraceSigTerm(cfg.KillGraceSigTerm),
+		DebugOutput:               cfg.DebugOutput,
+		SymlinkEnv:                cfg.SymlinkEnv,
+		WorktreeBoundaryAudit:     cfg.WorktreeBoundaryAudit,
+		PluginDir:                 cfg.PluginDir,
+		Stages:                    stageCfgs,
+		Webhooks:                  cfg.Webhooks,
+		WebhookPort:               cfg.WebhookPort,
+		WebhookEvents:             webhookEvents,
+		ProjectStatusPollSeconds:  statusPollSeconds(cfg.StatusPollSeconds),
+		ReconcileInterval:         reconcileIntervalDuration(cfg.ReconcileInterval),
+		JanitorIntervalHours:      cfg.JanitorIntervalHours,
+		LogRetentionDays:          cfg.LogRetentionDays,
+		LogMaxBytes:               cfg.LogMaxBytes,
+		ArchiveAfter:              archiveAfter(cfg.ArchiveAfter),
+		ArchiveDone:               archiveDoneMode(cfg.ArchiveDone),
+		ReadyCh:                   testReadyCh,
 	})
 	if err != nil {
 		return err
@@ -889,6 +919,16 @@ func workerStaleTimeout(minutes int) time.Duration {
 // time.Duration for the runaway guard rolling window (ADR-059 D8). When minutes is 0
 // (unset), returns 0 so the engine applies its own default of 60 minutes.
 func trainTrialWindowDuration(minutes int) time.Duration {
+	if minutes <= 0 {
+		return 0
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+// commentCycleWindow converts a CommentCycleWindowMinutes config value (minutes) to a
+// time.Duration for the comment-processing circuit breaker's rolling window (#1089).
+// When minutes is 0 (unset), returns 0 so the engine applies its own default of 30 minutes.
+func commentCycleWindow(minutes int) time.Duration {
 	if minutes <= 0 {
 		return 0
 	}
