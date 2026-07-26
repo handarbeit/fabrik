@@ -1057,6 +1057,13 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// Revalidate scan: operator-facing fabrik:revalidate label re-entry.
 	e.settleRevalidateScan(deepFetchCandidates)
 
+	// Bot service-notice settle scan (#1083/#1088): watermarks non-actionable bot
+	// quota/rate-limit comments excluded by findNewComments so they never re-admit.
+	// Runs over the raw board snapshot, not deepFetchCandidates — a bot-notice-only
+	// backlog never dispatches (itemNeedsWork sees zero new comments), so it would
+	// never appear in deepFetchCandidates.
+	e.settleBotServiceNotices(board)
+
 	// SHA-invalidation scan: detect force-pushes or external commits that change
 	// the linked PR's HEAD SHA after stage:Validate:complete was recorded.
 	e.settleSHAInvalidationScan(deepFetchCandidates)
