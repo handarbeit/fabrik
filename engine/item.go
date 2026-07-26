@@ -358,7 +358,12 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// the repo), the awaiting-input branch (invokes Claude via processComments), the
 	// paused-unpause branch (mutates labels), and checkDependencies (can add fabrik:blocked
 	// and post a comment) — so a holding/unmanaged item never reaches any of that as a
-	// "safety net" fires too late to actually prevent it.
+	// "safety net" fires too late to actually prevent it. Sharing this check between the
+	// two flags means the hoist also moves the HoldingStage case ahead of those same
+	// branches; today that's provably a no-op (processItem is only reachable via
+	// dispatchCandidates, poll.go, gated on itemNeedsWork, which already returns false for
+	// HoldingStage — see engine/item.go's own itemNeedsWork), so this guard's correctness
+	// for HoldingStage rests entirely on that unreachability, not on this placement.
 	if stage.HoldingStage || stage.Unmanaged {
 		return nil
 	}
