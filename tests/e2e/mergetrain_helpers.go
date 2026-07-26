@@ -289,18 +289,41 @@ func assertPRMerged(t *testing.T, env *Env, repo string, prNumber int) {
 	}
 }
 
-// assertNoStaleTrainArtifacts fails if the repo still has open merge-train
-// integration PRs after a scenario — a guard against the reconstruction bugs
-// (permanent stall / orphaned remnants) surviving cleanup.
-func assertNoStaleTrainArtifacts(t *testing.T, env *Env, repo string) {
+// WaitForNoStaleTrainArtifacts polls until the repo has no open merge-train
+// integration PRs, up to timeout — a guard against the reconstruction bugs
+// (permanent stall / orphaned remnants) surviving cleanup. This is a
+// point-in-time condition racing the engine's own poll-cycle cleanup: a
+// batch's terminal event (e.g. the runaway guard firing) pauses/alerts
+// synchronously, but the orphaned trial/integration PR is reclaimed by the
+// normal train-reconcile logic on a subsequent poll cycle, so a bare
+// single-shot check can observe a PR that is already correctly scheduled for
+// (but hasn't yet completed) cleanup.
+func WaitForNoStaleTrainArtifacts(t *testing.T, env *Env, repo string, timeout time.Duration) {
 	t.Helper()
-	out, err := ghOutput(env, "pr", "list", "-R", repo, "--state", "open",
-		"--json", "headRefName", "--jq", `[.[] | select(.headRefName | startswith("fabrik/merge-train/"))] | length`)
-	if err != nil {
-		t.Logf("warn: could not check for stale train PRs on %s: %v", repo, err)
-		return
-	}
-	if n := parseFirstInt(lastNonEmpty(out)); n > 0 {
-		t.Errorf("found %d open merge-train integration PR(s) still on %s after scenario", n, repo)
+	deadline := time.Now().Add(timeout)
+	var lastCount int
+	var lastErr error
+	var sawReading bool
+	for {
+		out, err := ghOutput(env, "pr", "list", "-R", repo, "--state", "open",
+			"--json", "headRefName", "--jq", `[.[] | select(.headRefName | startswith("fabrik/merge-train/"))] | length`)
+		lastErr = err
+		if err == nil {
+			sawReading = true
+			lastCount = parseFirstInt(lastNonEmpty(out))
+			if lastCount == 0 {
+				return
+			}
+			t.Logf("WaitForNoStaleTrainArtifacts: %d open merge-train integration PR(s) still on %s (will retry)", lastCount, repo)
+		} else {
+			t.Logf("WaitForNoStaleTrainArtifacts: transient gh error checking for stale train PRs on %s: %v (will retry)", repo, err)
+		}
+		if time.Now().After(deadline) {
+			if !sawReading {
+				t.Fatalf("could not check for stale merge-train PRs on %s after %s — no successful reading (last err: %v)", repo, timeout, lastErr)
+			}
+			t.Fatalf("found %d open merge-train integration PR(s) still on %s after %s", lastCount, repo, timeout)
+		}
+		time.Sleep(10 * time.Second)
 	}
 }

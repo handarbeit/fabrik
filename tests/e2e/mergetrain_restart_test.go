@@ -64,6 +64,6 @@ func TestMergeTrainRestartSafety(t *testing.T) {
 		WaitForMemberLanded(t, env, env.RepoAlpha, m[0], 10*time.Minute)
 		waitForPRClosed(t, env, env.RepoAlpha, m[1], 10*time.Minute)
 	}
-	assertNoStaleTrainArtifacts(t, env, env.RepoAlpha)
+	WaitForNoStaleTrainArtifacts(t, env, env.RepoAlpha, 2*time.Minute)
 	t.Logf("restart-safety verified: batch 2 landed after restart — no stall from the historical merged PR")
 }
