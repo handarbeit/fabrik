@@ -61,6 +61,7 @@ NDJSON) so no parsing changes are required.
   text. Users who open a `.log` file directly (e.g., `cat ~/.fabrik/logs/.../*.log`)
   will see raw JSON lines rather than human-readable text. Piping through
   `fabrik stream-filter` renders them readably.
+  (Path since changed to `<cwd>/.fabrik/logs/` — see [ADR-023](023-cwd-relative-runtime-state.md).)
 - `.log` file size increases because stdout (which can be many MB for long sessions)
   is now written to disk; previously only stderr diagnostics were written.
 - The `-output-*.json` file now contains NDJSON rather than a single JSON object.
