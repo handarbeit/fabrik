@@ -222,6 +222,27 @@ func TestNew(t *testing.T) {
 	}
 }
 
+func TestNew_WiresMergeStrategy(t *testing.T) {
+	skipIfNoGit(t)
+	cfg := Config{
+		Owner:             "o",
+		Repo:              "r",
+		Token:             "tok",
+		AutoMergeStrategy: "SQUASH",
+	}
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ghClient, ok := eng.client.(*gh.Client)
+	if !ok {
+		t.Fatalf("eng.client is %T, want *gh.Client", eng.client)
+	}
+	if got := ghClient.MergeStrategy(); got != "SQUASH" {
+		t.Errorf("client.MergeStrategy() = %q, want %q", got, "SQUASH")
+	}
+}
+
 func TestRun_ShutdownOnSignal(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {

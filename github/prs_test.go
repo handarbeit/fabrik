@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -166,6 +167,35 @@ func TestMergePR_NonMethodNotAllowedErrorPropagatesImmediately(t *testing.T) {
 	}
 }
 
+// TestMergeMethodAttemptOrder asserts mergeMethodAttemptOrder's exact output
+// against literal expected slices, independent of MergePR — this is what
+// guards the fixed fallback order (merge -> squash -> rebase) itself, since
+// TestMergePR_StrategyFallbackTable derives its own expectations from this
+// same function and can't catch a bug inside it.
+func TestMergeMethodAttemptOrder(t *testing.T) {
+	tests := []struct {
+		strategy string
+		want     []string
+	}{
+		{"MERGE", []string{"merge", "squash", "rebase"}},
+		{"SQUASH", []string{"squash", "merge", "rebase"}},
+		{"REBASE", []string{"rebase", "merge", "squash"}},
+		{"merge", []string{"merge", "squash", "rebase"}},
+		{"Squash", []string{"squash", "merge", "rebase"}},
+		{"", []string{"merge", "squash", "rebase"}},
+		{"bogus", []string{"merge", "squash", "rebase"}},
+		{"SQUASH ", []string{"merge", "squash", "rebase"}}, // untrimmed input is not a recognized method
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("strategy=%q", tt.strategy), func(t *testing.T) {
+			got := mergeMethodAttemptOrder(tt.strategy)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("mergeMethodAttemptOrder(%q) = %v, want %v", tt.strategy, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestMergePR_StrategyFallbackTable exercises every configured strategy
 // against every combination of repo-allowed merge methods, asserting the
 // first method attempted, the fallback order, the total call count, and that
@@ -185,6 +215,7 @@ func TestMergePR_StrategyFallbackTable(t *testing.T) {
 		{"REBASE configured, only merge allowed", "REBASE", map[string]bool{"merge": true, "squash": false, "rebase": false}},
 		{"SQUASH configured, only rebase allowed", "SQUASH", map[string]bool{"merge": false, "squash": false, "rebase": true}},
 		{"default (unset) configured, only squash allowed", "", map[string]bool{"merge": false, "squash": true, "rebase": false}},
+		{"REBASE configured, nothing allowed", "REBASE", map[string]bool{"merge": false, "squash": false, "rebase": false}},
 	}
 
 	for _, tt := range tests {

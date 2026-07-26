@@ -739,11 +739,13 @@ func (c *Client) FetchCommitsBehind(owner, repo, base, head string) (int, error)
 
 // mergeMethodAttemptOrder returns the ordered, de-duplicated list of REST
 // merge_method values to try, starting with the configured strategy
-// (lower-cased, defaulting to "merge" when unset) followed by the remaining
-// methods in the fixed fallback order merge -> squash -> rebase.
+// (lower-cased, defaulting to "merge" when unset or unrecognized) followed by
+// the remaining methods in the fixed fallback order merge -> squash -> rebase.
 func mergeMethodAttemptOrder(strategy string) []string {
 	first := strings.ToLower(strategy)
-	if first == "" {
+	switch first {
+	case "merge", "squash", "rebase":
+	default:
 		first = "merge"
 	}
 	order := []string{first}
@@ -785,15 +787,16 @@ func (c *Client) MergePR(owner, repo string, prNumber int) error {
 	}
 
 	var err error
-	for _, method := range mergeMethodAttemptOrder(c.mergeStrategy) {
+	for _, method := range mergeMethodAttemptOrder(c.MergeStrategy()) {
 		err = c.restPutWithResponse(mergeURL, map[string]interface{}{"merge_method": method}, &mergeResult)
 		if err == nil {
+			logf(0, "merge", "PR #%d/%s/%s: merged using method %q\n", prNumber, owner, repo, method)
 			return nil
 		}
 		if !errors.Is(err, ErrMethodNotAllowed) {
 			return fmt.Errorf("merging PR: %w", err)
 		}
-		logf(0, "merge", "PR #%d/%s/%s: merge method %q not allowed, falling back", prNumber, owner, repo, method)
+		logf(0, "merge", "PR #%d/%s/%s: merge method %q not allowed, falling back\n", prNumber, owner, repo, method)
 	}
 	return fmt.Errorf("merging PR (all merge methods exhausted): %w", err)
 }
