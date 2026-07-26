@@ -90,18 +90,47 @@ the canonical setup.
 10. **`slow-gate` enrolled as a required status check** on
     `handarbeit/fabrik-test-alpha/main`. The test skips gracefully (via
     `t.Skip`) if not enrolled — safe to merge before enrollment.
-11. **One of the following for R5 (joint-clear verification)**:
+11. **The engine process must actually authenticate as `FABRIK_TOKEN`'s
+    identity** — no shell export shadowing it. `config.Token()`'s precedence
+    is `FABRIK_TOKEN > GITHUB_TOKEN`, and `godotenv.Load(".env")` does not
+    override a variable already set in the process environment, so this only
+    breaks if `FABRIK_TOKEN` itself (not merely `GITHUB_TOKEN`) is exported in
+    the shell that launches the test-bed Fabrik instance, shadowing the value
+    in `.env` with a different identity (see handarbeit/fabrik#925 Confound 1
+    for the incident this generalizes from). If this drifts, PRs come out
+    authored by the wrong identity and `RequestPRReviewer` silently no-ops
+    (GitHub forbids requesting a review from the PR author). The test's
+    `AssertPRAuthorIsExpectedIdentity` preflight check catches this in
+    seconds rather than after a full 60–100 min run — if it fails, check the
+    launching shell's environment for a stray `FABRIK_TOKEN` export.
+12. **One of the following for R5 (joint-clear verification)**:
     - **`FABRIK_REVIEWER_TOKEN` in the test bed `.env`** — a GitHub PAT for a
       non-`@arbeithand` account with write access to `fabrik-test-alpha`. The
       test uses this token to submit an approving PR review from a second
       identity (GitHub forbids self-approval). This exercises the full
-      approval-path joint-clear (R5).
-    - **`FABRIK_REVIEW_WAIT_TIMEOUT=2` in the test bed `.env`** — sets the
-      review gate timeout to 2 minutes so the review-timeout fallback path
-      (R5 reduced scope) completes in a reasonable wall-clock budget. If this
-      value exceeds 5 and no reviewer token is present, the test skips with
-      an instructional message. After editing `.env`, restart Fabrik.
-12. **`E2E_TIMEOUT=2h`** when running this test in isolation:
+      approval-path joint-clear (R5). Combined with a generous
+      `FABRIK_REVIEW_WAIT_TIMEOUT` (see next bullet), the test defers
+      requesting this reviewer until `stage:Review:complete` is observed, so
+      Review's own `wait_for_reviews` gate clears first via the incidental
+      `gemini-code-assist` review, and only Validate's gate blocks on the
+      real reviewer.
+    - **`FABRIK_REVIEW_WAIT_TIMEOUT` left at a generous value (e.g. the
+      15-minute default)** when running the approval path — a short timeout
+      (e.g. `2`) risks Review's own gate timing out before
+      `gemini-code-assist` submits its incidental review (documented
+      30s–10m behind PR-ready), which would break the Review-then-Validate
+      sequencing the approval path depends on. The test skips with an
+      instructional message if `FABRIK_REVIEWER_TOKEN` is set and this value
+      is `< 10`. Use `FABRIK_REVIEW_WAIT_TIMEOUT=2` only for the
+      timeout-fallback path below (no `FABRIK_REVIEWER_TOKEN`), so the
+      review-timeout fallback path (R5 reduced scope) completes in a
+      reasonable wall-clock budget. If this value exceeds 5 and no reviewer
+      token is present, the test skips with an instructional message. After
+      editing `.env`, restart Fabrik. Note: the timeout-fallback path has no
+      second identity to request, so it remains exposed to the
+      `gemini-code-assist` bot clearing the gate before the timeout fires
+      (residual flakiness, not fixed by this redesign — see #925).
+13. **`E2E_TIMEOUT=2h`** when running this test in isolation:
     ```bash
     E2E_TIMEOUT=2h scripts/e2e/run.sh -run TestConjunctiveCIReviewGate
     ```
@@ -113,17 +142,17 @@ the canonical setup.
 one-time bed setup. They **skip cleanly** (`requireTrainBed`) if the `Queued`
 column is absent, so they are safe to merge before the bed is set up.
 
-13. **`Queued` board column** on `handarbeit/projects/2`, positioned between
+14. **`Queued` board column** on `handarbeit/projects/2`, positioned between
     `Validate` and `Done` (ADR-059 D1 — the durable train queue). Add it in the
     Project's Status field options.
-14. **`queued.yaml` holding stage** in the bed's `.fabrik/stages/`, e.g.:
+15. **`queued.yaml` holding stage** in the bed's `.fabrik/stages/`, e.g.:
     ```yaml
     name: Queued
     order: 8            # after Validate, before Done
     holding_stage: true # engine-managed; no Claude invocation
     ```
     Copy from `stages/examples/queued.yaml` (`fabrik init` / `fabrik refresh-stages`).
-15. **Train-capable binary** in the bed, built from `main` (the release does not
+16. **Train-capable binary** in the bed, built from `main` (the release does not
     yet carry ADR-059). Run it **without `--auto-upgrade`** so it is not reverted
     to a release mid-suite:
     ```bash
@@ -131,7 +160,7 @@ column is absent, so they are safe to merge before the bed is set up.
     # on macOS/Apple Silicon a copied binary may be SIGKILL'd; build in place or:
     #   xattr -cr ~/dev/fabrik-test/fabrik && codesign --force --sign - ~/dev/fabrik-test/fabrik
     ```
-16. **`train-poison-guard` required check** on `fabrik-test-alpha` — only for
+17. **`train-poison-guard` required check** on `fabrik-test-alpha` — only for
     `TestMergeTrainBisectionEjectsPoisoner`. Commit
     `tests/e2e/testdata/train-poison-guard.yml` to the repo as
     `.github/workflows/train-poison-guard.yml` and mark the `train-poison-guard`
@@ -139,9 +168,9 @@ column is absent, so they are safe to merge before the bed is set up.
     The bisection test skips this check indirectly — if the guard is absent the
     combined batch is green and no bisection occurs, failing the `bisecting`
     log-line wait; run it only after the guard is enrolled.
-17. **`E2E_TIMEOUT=2h`** (happy/bisect) or **`E2E_TIMEOUT=3h`** (restart — two
+18. **`E2E_TIMEOUT=2h`** (happy/bisect) or **`E2E_TIMEOUT=3h`** (restart — two
     sequential landings) when running these in isolation.
-18. **`train-poison-guard` required check on `fabrik-test-beta`** — only for
+19. **`train-poison-guard` required check on `fabrik-test-beta`** — only for
     `TestMergeTrainRunawayGuardPausesBatch`. Commit
     `tests/e2e/testdata/train-poison-guard.yml` to `handarbeit/fabrik-test-beta`
     as `.github/workflows/train-poison-guard.yml` and mark the
@@ -259,7 +288,7 @@ Approximate suite total: ~515 min wall-clock, $8.30–26 in Claude tokens (CI-fi
 | `TestCIFixReinvoke` | #888 ADR-056 D1 (settling primitive reinterprets CI-gate signals); CI-fix reinvoke loop (engine/ci.go) |
 | `TestCIFixReinvokeCycleLimit` | CI-fix cycle limit (`pauseForCIFixCycleLimit`), `MaxCiFixCycles` exhaustion path |
 | `TestPausedMergedPRRecovery` | #874 (paused+merged PR recovery class), #887 (settle-owner structural fix, `runValidatePRTerminalAdvance`), ADR-056 D2 (single-owner for PR-terminal → Done) |
-| `TestConjunctiveCIReviewGate` | ADR-056 D2 (conjunctive gate joint-clear), #887 (settle-owner), #895 (this scenario) |
+| `TestConjunctiveCIReviewGate` | ADR-056 D2 (conjunctive gate joint-clear), #887 (settle-owner), #895 (this scenario), #925 (identity/dual-gate/bot-reviewer redesign) |
 | `TestMergeTrainHappyPathLanding` | ADR-059 D1/D3 (#946, #947, #948) — Queued column, trial-branch build, integration-PR landing + member lifecycle |
 | `TestMergeTrainBisectionEjectsPoisoner` | ADR-059 D4 (#949) — halving bisection, ejection, one-at-a-time fallback |
 | `TestMergeTrainRestartSafety` | ADR-059 D5 (#950) + PR #960 (reconstruct must not stall on a historical merged PR) |

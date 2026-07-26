@@ -1202,6 +1202,37 @@ func RequestPRReviewer(t *testing.T, env *Env, repo string, prNumber int, review
 	}
 }
 
+// AssertPRAuthorIsExpectedIdentity fails the test fast if the PR's actual
+// author (as observed on GitHub) does not match the login that env.GHToken
+// resolves to. The engine authenticates with the same token precedence as
+// this harness's env.GHToken (FABRIK_TOKEN, falling back to GITHUB_TOKEN);
+// if the engine process's shell shadowed FABRIK_TOKEN with a different
+// identity, PRs come out authored by that other identity instead — the
+// exact confound (handarbeit/fabrik#925) that silently breaks
+// RequestPRReviewer (GitHub forbids requesting/approving a review from the
+// PR author) and wastes a full 60-100 min run before failing downstream.
+// Checking PR authorship directly against GitHub (not the test bed's .env)
+// catches either possible shadowing mechanism within seconds.
+func AssertPRAuthorIsExpectedIdentity(t *testing.T, env *Env, repo string, prNumber int) {
+	t.Helper()
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		t.Fatalf("bad repo: %q", repo)
+	}
+	out, err := ghOutput(env, "pr", "view", fmt.Sprint(prNumber), "-R", repo, "--json", "author", "--jq", ".author.login")
+	if err != nil {
+		t.Fatalf("read author of %s/%s PR #%d: %v\n%s", owner, name, prNumber, err, out)
+	}
+	actual := strings.TrimSpace(out)
+	expected := TokenLogin(t, env.GHToken)
+	if actual != expected {
+		t.Fatalf("engine identity mismatch: PR #%d on %s was authored by %q but the test bed's token resolves to %q — "+
+			"the engine process is very likely authenticating as a different identity than FABRIK_TOKEN "+
+			"(e.g. FABRIK_TOKEN itself shadowed by an export in the launching shell; see handarbeit/fabrik#925 Confound 1)",
+			prNumber, repo, actual, expected)
+	}
+}
+
 // WaitForPRCommentReaction polls PR comments (via the issues comments API)
 // every 15s until a comment containing commentSubstring has at least one
 // reaction of type reactionContent (e.g. "eyes" for 👀, "rocket" for 🚀).

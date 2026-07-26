@@ -10,12 +10,57 @@ import (
 
 // TestConjunctiveCIReviewGate is the regression test for the conjunctive
 // CI∧review gate (ADR-056 D2). The Validate stage in the test bed is already
-// configured with both wait_for_ci: true and wait_for_reviews: true.
+// configured with both wait_for_ci: true and wait_for_reviews: true; the
+// Review stage also carries wait_for_reviews: true (the production default —
+// see docs/state-machine.md).
 //
 // The slow-gate CI check (~10 minutes, enrolled as required on
 // handarbeit/fabrik-test-alpha/main) is triggered by placing "slow-ci-required"
 // in the PR body. This creates a wide CI-await window without triggering the
 // CI-fix reinvoke machinery.
+//
+// History: this test originally requested the held-out reviewer immediately
+// after PR creation and assumed reviews gate only at Validate. That plan
+// foundered on three confounds, root-caused in handarbeit/fabrik#925 — none
+// an engine bug (checkReviewGate behaved correctly throughout):
+//  1. Engine/reviewer identity collision: if the engine process's FABRIK_TOKEN
+//     is shadowed by a different identity in the launching shell (e.g. an
+//     exported FABRIK_TOKEN or GITHUB_TOKEN pointing at the operator's
+//     personal account), PRs come out authored by that identity — the same
+//     identity used for FABRIK_REVIEWER_TOKEN in some test-bed configs.
+//     GitHub forbids requesting/approving a review from the PR author, so
+//     RequestPRReviewer silently no-ops. Note: per config.Token()'s actual
+//     precedence (FABRIK_TOKEN > GITHUB_TOKEN, godotenv does not override an
+//     already-set var), a shell-exported GITHUB_TOKEN alone cannot shadow an
+//     .env-declared FABRIK_TOKEN; the shadowing requires FABRIK_TOKEN itself
+//     to be set in the launching shell.
+//  2. Dual review gate: both Review and Validate declare wait_for_reviews:true,
+//     so requesting a reviewer before Review completes makes the gate engage
+//     at Review, not at Validate as this test's scenario intends.
+//  3. gemini-code-assist auto-reviews every fabrik-test-alpha PR. Combined
+//     with confound 1 (no genuinely outstanding reviewer), the bot's review
+//     alone satisfies checkReviewGate's clear condition
+//     (len(outstanding)==0 && hasReviews), so the gate clears without any
+//     human approval ever happening.
+//
+// Redesign (this version): AssertPRAuthorIsExpectedIdentity preflights
+// confound 1 within seconds instead of after a 60-100 min run. The held-out
+// reviewer request is deferred until stage:Review:complete is observed,
+// letting Review's own gate clear the way real (non-test) traffic does — via
+// the incidental gemini-code-assist review, since nothing is yet requested —
+// before a genuinely outstanding human request is established ahead of
+// Validate's gate (confound 2). Because checkReviewGate's outstanding count
+// comes from actual requested-reviewer state (not "any review exists"), once
+// a real reviewer is genuinely outstanding no number of bot reviews can
+// satisfy the gate on their own, which neutralizes confound 3 without any
+// bot-tolerant logic. See docs/state-machine.md for the gate's PR-scoped
+// (not stage-scoped) review-state semantics that make this sequencing work.
+//
+// Known limitation: the timeout-fallback path below (no FABRIK_REVIEWER_TOKEN)
+// has no second identity to request, so it remains exposed to confound 3 —
+// gemini's incidental review can clear the gate before the timeout fires.
+// Out of scope for this redesign; see #925's severity note (test-infra only,
+// scoped to the approval path).
 //
 // Pass criteria (R1–R5):
 //   - R1: fabrik:awaiting-ci is applied after FABRIK_STAGE_COMPLETE; stage:Validate:complete
@@ -31,32 +76,24 @@ import (
 // Prerequisites:
 //   - "slow-gate" enrolled as a required status check on fabrik-test-alpha/main.
 //     Test skips gracefully if not enrolled.
-//   - FABRIK_REVIEWER_TOKEN in test bed .env for the approval path. If absent AND
+//   - The engine process must actually authenticate as the identity FABRIK_TOKEN
+//     resolves to in the test bed's .env — verify no shell export shadows it
+//     (see tests/e2e/README.md prerequisites). AssertPRAuthorIsExpectedIdentity
+//     below fails fast, in seconds, if this drifts.
+//   - FABRIK_REVIEWER_TOKEN in test bed .env for the approval path, set to a PAT
+//     for an identity distinct from FABRIK_TOKEN's. If absent AND
 //     FABRIK_REVIEW_WAIT_TIMEOUT > 5, the test skips with an instructional message.
 //     If absent AND FABRIK_REVIEW_WAIT_TIMEOUT ≤ 5, the timeout fallback path runs.
-//   - FABRIK_REVIEW_WAIT_TIMEOUT=2 (minutes) in the test bed .env when using the
-//     timeout fallback path (otherwise the default 15-minute wait is impractical).
+//   - FABRIK_REVIEW_WAIT_TIMEOUT left at a generous value (15 min default) in the
+//     test bed .env when running the approval path — a short timeout risks
+//     Review's own gate timing out before gemini-code-assist reviews, breaking
+//     the sequencing this redesign depends on. Use FABRIK_REVIEW_WAIT_TIMEOUT=2
+//     only for the timeout-fallback path.
 //
 // Wall-clock: ~65–100 min (approval path); ~35–60 min (timeout path). Use E2E_TIMEOUT=2h.
 // Cost: ~$1.00–2.50.
 func TestConjunctiveCIReviewGate(t *testing.T) {
 	t.Parallel()
-	// Skipped pending handarbeit/fabrik#925. R1 (CI gate holds at the 600s slow-gate
-	// — the #917 fix) and R3 (comment processed during CI-await) pass, but R2/R5
-	// (the review-gate approval path) cannot pass in the current test bed due to
-	// three test-harness/environment confounds — none an engine bug:
-	//   1. Engine identity collides with the reviewer: a GITHUB_TOKEN for the
-	//      operator's personal identity in the engine process env overrides
-	//      FABRIK_TOKEN=arbeithand (shell env > .env), so PRs are authored by that
-	//      personal identity — the same identity as
-	//      FABRIK_REVIEWER_TOKEN. GitHub forbids self-review, so RequestPRReviewer
-	//      is a silent no-op and the R5 approval is impossible.
-	//   2. Dual review gate: both Review and Validate have wait_for_reviews:true, so
-	//      reviews gate at Review — not only at Validate as this test's R2 assumes.
-	//   3. gemini-code-assist auto-reviews every alpha PR, clearing the gate
-	//      (outstanding==0 && hasReviews) before any human approval path runs.
-	// The engine's checkReviewGate logic is correct throughout. See #925.
-	t.Skip("blocked on #925: review-gate approval path has identity/dual-gate/bot-reviewer confounds (engine is correct)")
 	env := LoadEnv(t)
 	AssertFabrikRunning(t, env)
 	assertSlowGateRequired(t, env, env.RepoAlpha)
@@ -68,6 +105,13 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 			"set FABRIK_REVIEWER_TOKEN to a non-author PAT for the approval path, or "+
 			"set FABRIK_REVIEW_WAIT_TIMEOUT=2 (and restart Fabrik) for the timeout-fallback path",
 			reviewWaitTimeout)
+	}
+	if reviewerToken != "" && reviewWaitTimeout < 10 {
+		t.Skipf("FABRIK_REVIEWER_TOKEN is set (approval path) but FABRIK_REVIEW_WAIT_TIMEOUT=%d min (< 10); "+
+			"a short timeout risks Review's own wait_for_reviews gate timing out before gemini-code-assist "+
+			"submits its incidental review, which would break the Review-then-Validate sequencing this test "+
+			"relies on — set FABRIK_REVIEW_WAIT_TIMEOUT to a generous value (e.g. the 15-minute default) "+
+			"for the approval path", reviewWaitTimeout)
 	}
 
 	stamp := time.Now().UTC().Format("20060102-150405")
@@ -83,17 +127,56 @@ func TestConjunctiveCIReviewGate(t *testing.T) {
 	prNumber := LinkedPRNumber(t, env, env.RepoAlpha, num)
 	t.Logf("Implement complete; PR #%d created for %s#%d", prNumber, env.RepoAlpha, num)
 
-	// Establish an outstanding reviewer request so the review gate has something
-	// to hold on. The engine's checkReviewGate only applies fabrik:awaiting-review
-	// when the PR has outstanding requested reviewers; nothing requests one
-	// automatically (validate.yaml has wait_for_reviews:true but no reviewers
-	// list). Request the reviewer-token identity (a non-author account) now, well
-	// before Validate completes. (Approval path only; the timeout-fallback path
-	// has no token to resolve a reviewer login.)
+	// Preflight confound 1: fail fast (seconds) if the engine's actual PR-author
+	// identity doesn't match the test bed's token, instead of discovering a
+	// silently-broken RequestPRReviewer 60-100 min into the run.
+	AssertPRAuthorIsExpectedIdentity(t, env, env.RepoAlpha, prNumber)
+	t.Logf("confirmed PR #%d author matches the test bed's engine identity", prNumber)
+
+	// Let Review's own wait_for_reviews gate clear the way real (non-test)
+	// traffic does — via the incidental gemini-code-assist review, since no
+	// reviewer is requested yet (confound 2). Observe fabrik:awaiting-review
+	// transiently appearing and clearing at Review, non-fatally, to document
+	// that the dual gate is engaging and self-clearing as expected.
 	if reviewerToken != "" {
+		awaitingReviewSeenAtReview := false
+		reviewComplete := false
+		reviewDeadline := time.Now().Add(45 * time.Minute)
+		for time.Now().Before(reviewDeadline) {
+			labels, err := tryIssueLabels(env, env.RepoAlpha, num)
+			if err != nil {
+				t.Logf("transient error polling for stage:Review:complete on %s#%d: %v (retrying)", env.RepoAlpha, num, err)
+				time.Sleep(15 * time.Second)
+				continue
+			}
+			for _, l := range labels {
+				if l == "fabrik:awaiting-review" && !awaitingReviewSeenAtReview {
+					awaitingReviewSeenAtReview = true
+					t.Logf("observed fabrik:awaiting-review at Review on %s#%d (self-clearing via gemini-code-assist, confound 2 resolution)", env.RepoAlpha, num)
+				}
+				if l == "stage:Review:complete" {
+					reviewComplete = true
+				}
+			}
+			if reviewComplete {
+				break
+			}
+			time.Sleep(15 * time.Second)
+		}
+		if !reviewComplete {
+			t.Fatalf("timed out waiting for stage:Review:complete on %s#%d", env.RepoAlpha, num)
+		}
+		if !awaitingReviewSeenAtReview {
+			t.Logf("note: fabrik:awaiting-review was not observed during the Review-stage wait on %s#%d (window may have been missed between polls; not a failure)", env.RepoAlpha, num)
+		}
+		t.Logf("stage:Review:complete confirmed on %s#%d", env.RepoAlpha, num)
+
+		// Now establish a genuinely outstanding reviewer request so Validate's
+		// gate has something real to hold on. Review's own gate has already
+		// cleared (above), so this request only engages at Validate.
 		reviewerLogin := TokenLogin(t, reviewerToken)
 		RequestPRReviewer(t, env, env.RepoAlpha, prNumber, reviewerLogin)
-		t.Logf("requested reviewer %q on PR #%d so the review gate engages", reviewerLogin, prNumber)
+		t.Logf("requested reviewer %q on PR #%d so Validate's review gate engages", reviewerLogin, prNumber)
 	}
 
 	// R1: fabrik:awaiting-ci must appear after Validate fires (CI gate holds).
