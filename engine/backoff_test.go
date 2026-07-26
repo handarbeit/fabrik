@@ -254,8 +254,10 @@ func TestShouldPauseForRESTRateLimit(t *testing.T) {
 		{"near-zero (1%) boundary, future reset -> pause", 50, 5000, future, true},
 		{"just above near-zero, future reset -> no pause", 51, 5000, future, false},
 		{"healthy quota, future reset -> no pause", 4000, 5000, future, false},
-		{"exhausted but reset already passed -> no pause (resume)", 0, 5000, past, false},
-		{"exhausted, reset exactly now -> no pause (After is strict)", 0, 5000, now, false},
+		{"exhausted, reset long past (beyond buffer) -> no pause (resume)", 0, 5000, past, false},
+		{"exhausted, reset exactly now (within buffer) -> pause", 0, 5000, now, true},
+		{"exhausted, reset just passed but within buffer (wakeCh early) -> pause", 0, 5000, now.Add(-2 * time.Second), true},
+		{"exhausted, reset passed beyond buffer -> no pause (resume)", 0, 5000, now.Add(-1 * rateLimitResetBuffer).Add(-time.Second), false},
 		{"unknown limit (0) -> no pause", 0, 0, future, false},
 		{"zero-value reset (pre-first-call) -> no pause", 0, 5000, time.Time{}, false},
 	}

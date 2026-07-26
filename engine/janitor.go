@@ -35,6 +35,18 @@ type janitorWMEntry struct {
 //	(c) worktree is clean (git status --porcelain returns no non-engine-managed paths)
 //	(d) no in-flight dispatch is registered for (repo, number) in the store
 func (e *Engine) runWorktreeJanitor(ctx context.Context) {
+	// Honor the REST rate-limit pause. The janitor runs on its own goroutine and
+	// makes REST closed-state fetches per off-board worktree, independently of the
+	// poll loop — so the doPollCycle gate alone does not stop it from burning the
+	// REST/core budget (or 403-ing) while the engine is paused for exhaustion.
+	// Skip the whole cycle until reset; the next scheduled tick retries.
+	restStats, _ := e.client.RateLimitStats()
+	if shouldPauseForRESTRateLimit(restStats.Remaining, restStats.Limit, restStats.Reset, time.Now()) {
+		e.logf(0, "janitor", "REST rate limit exhausted (%d/%d remaining) — skipping janitor cycle until reset at %s\n",
+			restStats.Remaining, restStats.Limit, restStats.Reset.Format(time.RFC3339))
+		return
+	}
+
 	worktreesRoot := filepath.Join(e.fabrikDir, ".fabrik", "worktrees")
 
 	// Build reverse map: "owner-repo" dir name → ownerRepo string + WorktreeManager.
