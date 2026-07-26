@@ -340,6 +340,14 @@ func TestProcessItem_AwaitingInput_MixedBatch_ProcessesBothCommentsOnUnblock(t *
 		client, claude, wm,
 	)
 
+	var gotIDs []string
+	claude.invokeForCommentsFn = func(_ *stages.Stage, _ gh.ProjectItem, comments []gh.Comment, _ string, _ InvokeOptions) (string, bool, TokenUsage, error) {
+		for _, c := range comments {
+			gotIDs = append(gotIDs, c.ID)
+		}
+		return "mock comment output", false, TokenUsage{}, nil
+	}
+
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
 		Number: 1,
@@ -368,6 +376,9 @@ func TestProcessItem_AwaitingInput_MixedBatch_ProcessesBothCommentsOnUnblock(t *
 
 	if len(claude.forCommentsCalls) != 1 {
 		t.Fatalf("expected exactly one comment-processing invocation, got %d", len(claude.forCommentsCalls))
+	}
+	if len(gotIDs) != 2 || gotIDs[0] != "B1" || gotIDs[1] != "H1" {
+		t.Fatalf("expected both bot and human comments (B1, H1) processed together, got %v", gotIDs)
 	}
 }
 
@@ -631,6 +642,14 @@ func TestProcessItem_Paused_MixedBatch_ProcessesBothCommentsOnUnpause(t *testing
 		client, claude, wm,
 	)
 
+	var gotIDs []string
+	claude.invokeForCommentsFn = func(_ *stages.Stage, _ gh.ProjectItem, comments []gh.Comment, _ string, _ InvokeOptions) (string, bool, TokenUsage, error) {
+		for _, c := range comments {
+			gotIDs = append(gotIDs, c.ID)
+		}
+		return "mock comment output", false, TokenUsage{}, nil
+	}
+
 	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
 	item := gh.ProjectItem{
 		Number: 1,
@@ -659,5 +678,8 @@ func TestProcessItem_Paused_MixedBatch_ProcessesBothCommentsOnUnpause(t *testing
 
 	if len(claude.forCommentsCalls) != 1 {
 		t.Fatalf("expected exactly one comment-processing invocation, got %d", len(claude.forCommentsCalls))
+	}
+	if len(gotIDs) != 2 || gotIDs[0] != "B1" || gotIDs[1] != "H1" {
+		t.Fatalf("expected both bot and human comments (B1, H1) processed together, got %v", gotIDs)
 	}
 }

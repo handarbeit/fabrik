@@ -348,6 +348,33 @@ func TestHumanNewComments(t *testing.T) {
 	}
 }
 
+// TestHumanNewComments_EmptyAuthor_FailsClosed verifies that a comment with no
+// resolvable author (e.g. a deleted GitHub account, which the deep fetch
+// leaves as an empty Author string) is treated as non-human rather than as an
+// implicit resume trigger. IsBotLogin("") is false, so without this guard an
+// unattributed comment would silently defeat a pause exactly like the bot
+// chatter this fix targets (#1083) — fail closed instead.
+func TestHumanNewComments_EmptyAuthor_FailsClosed(t *testing.T) {
+	e := &Engine{
+		cfg:   Config{User: "operator"},
+		store: itemstate.NewStore(nil),
+	}
+
+	item := gh.ProjectItem{
+		Number: 9,
+		Repo:   "owner/repo",
+		Comments: []gh.Comment{
+			{ID: "e1", Author: "", Body: "comment from a deleted account"},
+			{ID: "h1", Author: "alice", Body: "please continue"},
+		},
+	}
+
+	result := e.humanNewComments(item)
+	if len(result) != 1 || result[0].ID != "h1" {
+		t.Fatalf("expected only the human comment h1, got %v", result)
+	}
+}
+
 // TestHumanNewComments_MixedBatch_KeepsOnlyHuman verifies that humanNewComments
 // isolates the human-authored comment out of a mixed human+bot batch. This
 // filtered result is used only to decide *whether* to resume a paused /
