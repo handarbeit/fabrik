@@ -342,6 +342,8 @@ func Execute() error {
 	if !explicitFlags["auto-merge-strategy"] {
 		if v := os.Getenv("FABRIK_AUTO_MERGE_STRATEGY"); v != "" {
 			cfg.AutoMergeStrategy = v // validated in autoMergeStrategy() helper
+		} else if pc.AutoMergeStrategy != "" {
+			cfg.AutoMergeStrategy = pc.AutoMergeStrategy // validated in autoMergeStrategy() helper
 		}
 	}
 	if !explicitFlags["merge-queue"] {

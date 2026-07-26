@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -40,7 +41,10 @@ func fakePRServer(t *testing.T, prNumber int, getHandler, putHandler http.Handle
 	return srv, c
 }
 
-func TestMergePR_RebaseSuccess(t *testing.T) {
+// TestMergePR_ConfiguredStrategyFirst asserts that MergePR attempts the
+// configured strategy (via SetMergeStrategy) as its very first call, not a
+// hardcoded rebase.
+func TestMergePR_ConfiguredStrategyFirst(t *testing.T) {
 	srv, c := fakePRServer(t, 42,
 		func(w http.ResponseWriter, r *http.Request) {
 			mergeable := true
@@ -49,8 +53,37 @@ func TestMergePR_RebaseSuccess(t *testing.T) {
 		func(w http.ResponseWriter, r *http.Request) {
 			var body map[string]interface{}
 			json.NewDecoder(r.Body).Decode(&body)
-			if body["merge_method"] != "rebase" {
-				t.Errorf("merge_method = %v, want rebase", body["merge_method"])
+			if body["merge_method"] != "squash" {
+				t.Errorf("merge_method = %v, want squash", body["merge_method"])
+			}
+			w.WriteHeader(200)
+			json.NewEncoder(w).Encode(map[string]interface{}{"merged": true, "message": "Pull Request successfully merged"})
+		},
+	)
+	defer srv.Close()
+	c.SetMergeStrategy("SQUASH")
+
+	if err := c.MergePR("owner", "repo", 42); err != nil {
+		t.Fatalf("MergePR: %v", err)
+	}
+}
+
+// TestMergePR_DefaultAttemptsMergeFirst is a regression test guarding against
+// reintroducing rebase-first behavior: a Client with no configured strategy
+// (the zero value) must attempt "merge" first, not "rebase".
+func TestMergePR_DefaultAttemptsMergeFirst(t *testing.T) {
+	putCalls := 0
+	srv, c := fakePRServer(t, 42,
+		func(w http.ResponseWriter, r *http.Request) {
+			mergeable := true
+			json.NewEncoder(w).Encode(map[string]interface{}{"mergeable": mergeable})
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			putCalls++
+			var body map[string]interface{}
+			json.NewDecoder(r.Body).Decode(&body)
+			if body["merge_method"] != "merge" {
+				t.Errorf("merge_method = %v, want merge", body["merge_method"])
 			}
 			w.WriteHeader(200)
 			json.NewEncoder(w).Encode(map[string]interface{}{"merged": true, "message": "Pull Request successfully merged"})
@@ -60,6 +93,9 @@ func TestMergePR_RebaseSuccess(t *testing.T) {
 
 	if err := c.MergePR("owner", "repo", 42); err != nil {
 		t.Fatalf("MergePR: %v", err)
+	}
+	if putCalls != 1 {
+		t.Errorf("expected exactly 1 PUT call, got %d", putCalls)
 	}
 }
 
@@ -75,17 +111,17 @@ func TestMergePR_405FallbackToMergeCommit(t *testing.T) {
 			var body map[string]interface{}
 			json.NewDecoder(r.Body).Decode(&body)
 			if putCalls == 1 {
-				// First call: rebase — return 405
-				if body["merge_method"] != "rebase" {
-					t.Errorf("first call merge_method = %v, want rebase", body["merge_method"])
+				// First call: configured default (merge) — return 405
+				if body["merge_method"] != "merge" {
+					t.Errorf("first call merge_method = %v, want merge", body["merge_method"])
 				}
 				w.WriteHeader(405)
-				w.Write([]byte(`{"message":"Rebase merge not allowed"}`))
+				w.Write([]byte(`{"message":"Merge commits are not allowed"}`))
 				return
 			}
-			// Second call: merge commit fallback
-			if body["merge_method"] != "merge" {
-				t.Errorf("second call merge_method = %v, want merge", body["merge_method"])
+			// Second call: next in fallback order (squash)
+			if body["merge_method"] != "squash" {
+				t.Errorf("second call merge_method = %v, want squash", body["merge_method"])
 			}
 			w.WriteHeader(200)
 			json.NewEncoder(w).Encode(map[string]interface{}{"merged": true, "message": "Pull Request successfully merged"})
@@ -98,6 +134,160 @@ func TestMergePR_405FallbackToMergeCommit(t *testing.T) {
 	}
 	if putCalls != 2 {
 		t.Errorf("expected 2 PUT calls, got %d", putCalls)
+	}
+}
+
+// TestMergePR_NonMethodNotAllowedErrorPropagatesImmediately asserts that a
+// non-405 error from the merge endpoint bails out immediately without
+// attempting any fallback method.
+func TestMergePR_NonMethodNotAllowedErrorPropagatesImmediately(t *testing.T) {
+	putCalls := 0
+	srv, c := fakePRServer(t, 42,
+		func(w http.ResponseWriter, r *http.Request) {
+			mergeable := true
+			json.NewEncoder(w).Encode(map[string]interface{}{"mergeable": mergeable})
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			putCalls++
+			w.WriteHeader(500)
+			w.Write([]byte(`{"message":"Internal Server Error"}`))
+		},
+	)
+	defer srv.Close()
+
+	err := c.MergePR("owner", "repo", 42)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if errors.Is(err, ErrMethodNotAllowed) {
+		t.Fatalf("expected non-405 error, got ErrMethodNotAllowed: %v", err)
+	}
+	if putCalls != 1 {
+		t.Errorf("expected exactly 1 PUT call (no fallback on non-405 error), got %d", putCalls)
+	}
+}
+
+// TestMergeMethodAttemptOrder asserts mergeMethodAttemptOrder's exact output
+// against literal expected slices, independent of MergePR — this is what
+// guards the fixed fallback order (merge -> squash -> rebase) itself, since
+// TestMergePR_StrategyFallbackTable derives its own expectations from this
+// same function and can't catch a bug inside it.
+func TestMergeMethodAttemptOrder(t *testing.T) {
+	tests := []struct {
+		strategy string
+		want     []string
+	}{
+		{"MERGE", []string{"merge", "squash", "rebase"}},
+		{"SQUASH", []string{"squash", "merge", "rebase"}},
+		{"REBASE", []string{"rebase", "merge", "squash"}},
+		{"merge", []string{"merge", "squash", "rebase"}},
+		{"Squash", []string{"squash", "merge", "rebase"}},
+		{"", []string{"merge", "squash", "rebase"}},
+		{"bogus", []string{"merge", "squash", "rebase"}},
+		{"SQUASH ", []string{"merge", "squash", "rebase"}}, // untrimmed input is not a recognized method
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("strategy=%q", tt.strategy), func(t *testing.T) {
+			got := mergeMethodAttemptOrder(tt.strategy)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("mergeMethodAttemptOrder(%q) = %v, want %v", tt.strategy, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMergePR_StrategyFallbackTable exercises every configured strategy
+// against every combination of repo-allowed merge methods, asserting the
+// first method attempted, the fallback order, the total call count, and that
+// the merge ultimately succeeds via whichever allowed method comes first in
+// the attempt order.
+func TestMergePR_StrategyFallbackTable(t *testing.T) {
+	allMethods := []string{"merge", "squash", "rebase"}
+
+	tests := []struct {
+		name     string
+		strategy string
+		allowed  map[string]bool // methods the fake repo accepts (others 405)
+	}{
+		{"MERGE configured, all allowed", "MERGE", map[string]bool{"merge": true, "squash": true, "rebase": true}},
+		{"SQUASH configured, all allowed", "SQUASH", map[string]bool{"merge": true, "squash": true, "rebase": true}},
+		{"REBASE configured, all allowed", "REBASE", map[string]bool{"merge": true, "squash": true, "rebase": true}},
+		{"REBASE configured, only merge allowed", "REBASE", map[string]bool{"merge": true, "squash": false, "rebase": false}},
+		{"SQUASH configured, only rebase allowed", "SQUASH", map[string]bool{"merge": false, "squash": false, "rebase": true}},
+		{"default (unset) configured, only squash allowed", "", map[string]bool{"merge": false, "squash": true, "rebase": false}},
+		{"REBASE configured, nothing allowed", "REBASE", map[string]bool{"merge": false, "squash": false, "rebase": false}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wantOrder := mergeMethodAttemptOrder(tt.strategy)
+			var gotOrder []string
+
+			srv, c := fakePRServer(t, 42,
+				func(w http.ResponseWriter, r *http.Request) {
+					mergeable := true
+					json.NewEncoder(w).Encode(map[string]interface{}{"mergeable": mergeable})
+				},
+				func(w http.ResponseWriter, r *http.Request) {
+					var body map[string]interface{}
+					json.NewDecoder(r.Body).Decode(&body)
+					method, _ := body["merge_method"].(string)
+					gotOrder = append(gotOrder, method)
+					if !tt.allowed[method] {
+						w.WriteHeader(405)
+						w.Write([]byte(`{"message":"Method not allowed"}`))
+						return
+					}
+					w.WriteHeader(200)
+					json.NewEncoder(w).Encode(map[string]interface{}{"merged": true, "message": "Pull Request successfully merged"})
+				},
+			)
+			defer srv.Close()
+			c.SetMergeStrategy(tt.strategy)
+
+			err := c.MergePR("owner", "repo", 42)
+
+			// Determine the expected stopping point: the first method in
+			// wantOrder that is allowed.
+			var wantCalls []string
+			for _, m := range wantOrder {
+				wantCalls = append(wantCalls, m)
+				if tt.allowed[m] {
+					break
+				}
+			}
+			// If nothing is allowed, every method in wantOrder is attempted.
+			anyAllowed := false
+			for _, m := range allMethods {
+				if tt.allowed[m] {
+					anyAllowed = true
+				}
+			}
+
+			if !anyAllowed {
+				if err == nil {
+					t.Fatalf("expected error when no method is allowed, got nil")
+				}
+				if len(gotOrder) != len(wantOrder) {
+					t.Errorf("call count = %d, want %d (order=%v)", len(gotOrder), len(wantOrder), gotOrder)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("MergePR: %v", err)
+				}
+				if len(gotOrder) != len(wantCalls) {
+					t.Errorf("call count = %d, want %d (got=%v want=%v)", len(gotOrder), len(wantCalls), gotOrder, wantCalls)
+				}
+			}
+			for i := range gotOrder {
+				if i >= len(wantOrder) {
+					break
+				}
+				if gotOrder[i] != wantOrder[i] {
+					t.Errorf("call %d method = %q, want %q (full order got=%v want=%v)", i, gotOrder[i], wantOrder[i], gotOrder, wantOrder)
+				}
+			}
+		})
 	}
 }
 

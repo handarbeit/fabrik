@@ -38,6 +38,7 @@ type ProjectConfig struct {
 	LogRetentionDays        *int     `yaml:"log_retention_days"`
 	LogMaxBytes             *int64   `yaml:"log_max_bytes"`
 	MergeTrain              string   `yaml:"merge_train"`
+	AutoMergeStrategy       string   `yaml:"auto_merge_strategy"`
 	MaxBatchSize            *int     `yaml:"max_batch_size"`
 	MaxBisectValidations    *int     `yaml:"max_bisect_validations"`
 	MaxTrainRebaseCycles    *int     `yaml:"max_train_rebase_cycles"`
