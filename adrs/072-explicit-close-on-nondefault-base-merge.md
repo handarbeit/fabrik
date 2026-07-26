@@ -1,4 +1,4 @@
-# ADR 071: Explicit Issue Close on Non-Default-Base Merge
+# ADR 072: Explicit Issue Close on Non-Default-Base Merge
 
 **Date**: 2026-07-26
 **Status**: Accepted
