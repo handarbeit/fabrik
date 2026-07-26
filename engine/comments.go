@@ -45,19 +45,34 @@ func (e *Engine) findNewComments(item gh.ProjectItem) []gh.Comment {
 }
 
 // botServiceNoticePatterns are literal, case-insensitive substrings identifying
-// non-actionable bot service/status notices (quota exhaustion, rate limiting)
-// as opposed to genuine bot review content. Deliberately narrow: a bare
-// "quota"/"rate limit" substring would risk matching genuine review prose that
-// discusses rate limiting, and would collide with this repo's own test
-// fixtures (e.g. the literal body "quota notice" used across
-// blocked_on_input_test.go to exercise the human-only resume gate, ADR-069).
+// non-actionable bot service/status notices (quota exhaustion, rate limiting,
+// sunset/unsupported-content notices) as opposed to genuine bot review
+// content. Deliberately narrow: a bare "quota"/"rate limit" substring would
+// risk matching genuine review prose that discusses rate limiting, and would
+// collide with this repo's own test fixtures (e.g. the literal body "quota
+// notice" used across blocked_on_input_test.go to exercise the human-only
+// resume gate, ADR-069).
+//
+// Grouped by vendor. Where a bot emits a non-prose signal (e.g. CodeRabbit's
+// HTML comment marker), that pattern is preferred/listed first for that
+// vendor since structural markers don't drift when marketing copy changes;
+// prose patterns are kept alongside it as a fallback in case a vendor ever
+// omits the marker.
 var botServiceNoticePatterns = []string{
+	// Gemini
 	"daily quota limit",
 	"you have reached your daily quota",
 	"rate limit exceeded",
 	"you have reached your rate limit",
 	"you have exceeded your rate limit",
 	"api rate limit",
+	"the consumer version of gemini code assist on github has been sunset",
+	"gemini is unable to generate a review for this pull request due to the file types involved not being currently supported",
+
+	// CodeRabbit
+	"rate limited by coderabbit.ai", // structural: HTML comment marker, not user-facing prose
+	"## review limit reached",       // markdown heading form used in the actual banner
+	"you've reached your pr review limit, so we couldn't start this review",
 }
 
 // isBotServiceNotice reports whether c is a non-actionable bot service/status
