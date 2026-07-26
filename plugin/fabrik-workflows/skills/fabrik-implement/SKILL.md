@@ -157,7 +157,7 @@ Before signaling completion:
 - `go vet` (or equivalent linter) is clean
 - All changes committed and pushed
 
-### Verifying with a live server
+### Verifying with a live server or a long-running command
 
 If a task needs a running instance of the managed app to verify a change (e.g. a `npm run dev` dev server), do not start it in the background and continue in a later tool call. Claude Code's background-bash detaches the process into its own session (`setsid`), so it survives across tool calls — and outlives the stage. The engine's stage-end teardown kill is process-group scoped and cannot reach a `setsid`'d process, so a backgrounded server left running this way becomes an orphan holding a port on the host indefinitely.
 
@@ -174,6 +174,9 @@ In preference order:
    ```bash
    timeout --signal=KILL <N> npm run dev …
    ```
+4. **The same discipline applies to test suites, benchmarks, and CI waits.** Run them synchronously in the foreground with an explicit timeout (`timeout --signal=KILL <N> <command>`, or the framework's own timeout flag) so the command's outcome is known before the turn ends.
+5. **If it won't fit in one turn even with a timeout, reduce scope** — fewer tests, a subset of the suite, fewer benchmark iterations — rather than backgrounding it to save time.
+6. **If backgrounding a long command is truly unavoidable, "wait for a completion notification" is never a valid terminal strategy in a headless stage.** There is no interactive session to deliver that notification — the stage simply ends without `FABRIK_STAGE_COMPLETE`, and because the reasoning that led there is deterministic, every retry re-derives the identical stall. Instead, poll a concrete completion marker (an exit-code file, a `.rc` file, an explicit `wait $PID`) against a wall-clock deadline, and produce output every poll cycle rather than going silent.
 
 ## What You Do NOT Do
 
@@ -183,7 +186,7 @@ In preference order:
 - **Do not refactor unrelated code** — stay focused on the task list
 - **Do not add features not in the plan** — no scope creep
 - **Do not leave the branch in a broken state** — every push should compile and pass tests
-- **Never background a dev server and continue in a later tool call to verify a change** — it detaches via `setsid` and outlives the stage, becoming an orphaned process holding a port. See "Verifying with a live server" above.
+- **Never background a dev server, test suite, benchmark, or CI wait and continue in a later tool call (or wait for a completion notification) to verify a change** — a backgrounded dev server detaches via `setsid` and outlives the stage, becoming an orphaned process holding a port; a backgrounded long-running command left to "wait for a completion notification" simply ends the stage silently, since there is no interactive session to deliver that notification. See "Verifying with a live server or a long-running command" above.
 - **Do not defer documentation** — if the change is user-facing, update the docs in the same PR. A doc update that gets "tracked as a follow-up" is a doc update that never happens.
 - **Never call `gh pr create` directly.** Use the `FABRIK_PR_CREATE_BEGIN/END` marker instead. The engine creates the PR and guarantees the `Closes #N` closing line. A direct `gh pr create` bypasses this guarantee and will break downstream gates.
 - **Never write `Closes #N`, `Fixes #N`, `Resolves #N`, or any closing keyword referencing the issue number in a PR body.** The engine generates this line as the first line of the PR body. Writing one yourself either duplicates it (harmless but messy) or, if you called `gh pr create` directly and omitted it, breaks every downstream gate. The engine owns this line — you don't.

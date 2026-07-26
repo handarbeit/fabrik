@@ -32,6 +32,7 @@ Read the user's comment carefully to understand what they're requesting:
   # health-check / curl / run the verification here
   ```
   or, if a persistent server is unavoidable, bound it with `timeout --signal=KILL <N> npm run dev …` so it self-terminates.
+- The same discipline applies to re-running test suites, benchmarks, or CI waits: run them synchronously in the foreground with an explicit timeout so the outcome is known before the turn ends; if it won't fit in one turn, reduce scope (fewer tests, a subset of the suite) rather than backgrounding it. If backgrounding is truly unavoidable, "wait for a completion notification" is never a valid terminal strategy in a headless stage — there is no interactive session to deliver it, so the stage ends without `FABRIK_STAGE_COMPLETE`. Poll a concrete completion marker (an exit-code file, a `.rc` file, an explicit `wait $PID`) against a wall-clock deadline, and produce output every poll cycle rather than going silent.
 - Update the validation report with the new results
 
 **Apply a minor fix**: The user has identified a small issue to address before closing.
@@ -79,7 +80,7 @@ This applies to ordinal numbering in any output that reaches a GitHub comment bo
 - **Do not apply fixes beyond what the user requested** — minimal targeted changes only
 - **Do not leave uncommitted changes** — always commit and push before returning
 - **Do not re-run the full validation suite** unless the user specifically requests it — focus on the checks relevant to their feedback
-- **Never background a dev server and continue in a later tool call to re-verify a change** — it detaches via `setsid` and outlives the stage, becoming an orphaned process holding a port. See "Re-run checks" above.
+- **Never background a dev server, test suite, benchmark, or CI wait and continue in a later tool call (or wait for a completion notification) to re-verify a change** — a backgrounded dev server detaches via `setsid` and outlives the stage, becoming an orphaned process holding a port; a backgrounded long-running command left to "wait for a completion notification" simply ends the stage silently, since there is no interactive session to deliver that notification. See "Re-run checks" above.
 - **Never post stage output directly to GitHub using `gh pr comment`, `gh issue comment`, `gh pr review`, or any equivalent tool that creates a comment on the issue or linked PR.** Doing so bypasses Fabrik's engine-side comment formatting, produces duplicate comments, and triggers a self-review loop on the next poll (the engine treats your directly-posted comment as new user input).
 
   Write all stage output to stdout only. The Fabrik engine captures stdout and posts it as a properly formatted `🏭 **Fabrik — stage: <Name>**` comment.
