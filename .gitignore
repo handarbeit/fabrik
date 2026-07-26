@@ -26,6 +26,12 @@
 # goreleaser build output — must be ignored or Go's buildvcs stamps release
 # artifacts +dirty (untracked dist/ makes the tree "modified" at build time).
 /dist/
+
+# verify-release-artifact's own build output (.goreleaser.yaml before.hooks),
+# built before the release matrix — same reasoning as /dist/ above: if this
+# were untracked-but-dirty, every subsequently-built binary would itself be
+# +dirty because of this file's own presence.
+/.release-tools/
 *.exe
 .DS_Store
 tmp/

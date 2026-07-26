@@ -27,6 +27,10 @@ jobs:
             echo "Tag ${{ github.ref_name }} is not on origin/main — aborting release."
             exit 1
           fi
+          # Exported for goreleaser's per-build verify-release-artifact hook
+          # (.goreleaser.yaml), which asserts each built binary's vcs.revision
+          # matches this commit.
+          echo "TAG_COMMIT=$TAG_COMMIT" >> "$GITHUB_ENV"
 
       - name: Set up Go
         uses: actions/setup-go@v5

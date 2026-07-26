@@ -1,5 +1,17 @@
 version: 2
 
+before:
+  hooks:
+    # Built once, natively, in the plain job environment — before any matrix
+    # build sets GOOS/GOARCH. Invoking `go run ./tools/verify-release-artifact`
+    # directly from a per-build hook would inherit that target's cross-compile
+    # env and fail to execute on the runner (e.g. darwin binaries on
+    # ubuntu-latest); building a host-native binary once and invoking it below
+    # avoids that entirely. Built outside dist/ — goreleaser requires dist/ to
+    # be empty when it starts the build phase, even under --clean.
+    - mkdir -p .release-tools
+    - go build -o .release-tools/verify-release-artifact ./tools/verify-release-artifact
+
 builds:
   - id: fabrik
     binary: fabrik
@@ -13,6 +25,15 @@ builds:
       - CGO_ENABLED=0
     ldflags:
       - -s -w -X github.com/handarbeit/fabrik/cmd.Version={{.Version}}
+    hooks:
+      # Verify every built binary before it is archived/checksummed/published:
+      # asserts vcs.modified=false and vcs.revision == the tag's target commit
+      # (TAG_COMMIT, exported by release.yml). A non-zero exit here aborts the
+      # whole `goreleaser release` invocation — see docs/USER_GUIDE.md's
+      # /cut-release section and adrs/070-release-artifact-vcs-verification.md.
+      post:
+        - cmd: ./.release-tools/verify-release-artifact {{ .Path }} {{ .Env.TAG_COMMIT }}
+          output: true
 
 archives:
   - id: fabrik
