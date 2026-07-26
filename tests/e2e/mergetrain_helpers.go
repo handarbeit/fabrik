@@ -276,6 +276,33 @@ func waitForPRClosed(t *testing.T, env *Env, repo string, prNumber int, timeout 
 	}
 }
 
+// waitForPRClosedNotMerged polls until the PR reaches a terminal state, up to
+// timeout. Fails immediately on MERGED — for callers that need the stricter
+// "landed via a separate PR, not by GitHub merging this one" contract (e.g.
+// the merge-train's close-not-merge landing of a member's own PR), where
+// waitForPRClosed's permissive CLOSED-or-MERGED semantics would silently
+// accept the wrong outcome.
+func waitForPRClosedNotMerged(t *testing.T, env *Env, repo string, prNumber int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		out, err := ghOutput(env, "pr", "view", fmt.Sprint(prNumber), "-R", repo,
+			"--json", "state", "--jq", ".state")
+		if err == nil {
+			switch strings.TrimSpace(out) {
+			case "CLOSED":
+				return
+			case "MERGED":
+				t.Fatalf("member PR #%d on %s was MERGED, want CLOSED (should land via a separate integration/singleton PR, not by merging the member's own PR)", prNumber, repo)
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("member PR #%d on %s not closed within %s (last state: %q, err: %v)", prNumber, repo, timeout, strings.TrimSpace(out), err)
+		}
+		time.Sleep(10 * time.Second)
+	}
+}
+
 // assertPRMerged fails unless the PR is in the MERGED state.
 func assertPRMerged(t *testing.T, env *Env, repo string, prNumber int) {
 	t.Helper()
