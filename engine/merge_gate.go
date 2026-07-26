@@ -259,7 +259,25 @@ func (e *Engine) checkAutoMergeConvergence(ctx context.Context, board *gh.Projec
 	// merged=false for several seconds after a queue merge. Evaluate it FIRST, before
 	// any queue/ejection classification — a dequeue is never misread as a failure.
 	if settle.Status == PRMergeTerminal || pr.Merged || pr.State == "closed" {
-		e.advanceConvergedPRToDone(board, item, stage, pr.Number)
+		// Determine the confirmed merged-vs-closed-without-merging distinction for
+		// the explicit non-default-base close (#1096): that close must only fire
+		// on a genuine merge, even though this terminal branch advances a
+		// closed-without-merging auto-merge PR to Done too. settle.PR.Merged is
+		// already authoritative when settle.Status == PRMergeTerminal
+		// (settlePRMergeState re-confirms via FetchPRMerged before returning it);
+		// otherwise fall back to the freshly-fetched pr, re-confirming via
+		// FetchPRMerged when it reports closed-but-not-yet-merged — the same
+		// REST list-endpoint staleness window handled in runValidatePRTerminalAdvance.
+		merged := pr.Merged
+		if settle.Status == PRMergeTerminal && settle.PR != nil && settle.PR.Merged {
+			merged = true
+		}
+		if !merged && pr.State == "closed" {
+			if m, mErr := e.client.FetchPRMerged(owner, repo, pr.Number); mErr == nil {
+				merged = m
+			}
+		}
+		e.advanceConvergedPRToDone(board, item, stage, pr.Number, merged)
 		return
 	}
 
@@ -546,13 +564,21 @@ func (e *Engine) pauseForRebaseCycleLimit(board *gh.ProjectBoard, item gh.Projec
 // successful merge always advances to Done, never re-enqueues or pauses. There is
 // no passive machinery that advances the board column once the label is removed,
 // so advanceToNextStage must be called explicitly.
-func (e *Engine) advanceConvergedPRToDone(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, prNumber int) {
+//
+// merged must reflect a *confirmed* merge (not merely "PR reached a terminal
+// state", which also covers closed-without-merging) — it gates the explicit
+// non-default-base issue close (#1096) via closeIssueIfNonDefaultBase, which
+// must never fire for a PR that was closed without merging.
+func (e *Engine) advanceConvergedPRToDone(board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, prNumber int, merged bool) {
 	owner, repo := itemOwnerRepo(item, e.defaultRepo())
 	e.logf(item.Number, "auto-merge", "PR #%d merged or closed — advancing to Done\n", prNumber)
 	e.applyLabelRemove(item, "fabrik:auto-merge-enabled", false)
 	e.removeRebaseNeededLabel(owner, repo, item)
 	if err := e.advanceToNextStage(board, item, stage); err != nil {
 		e.logf(item.Number, "warn", "could not advance to Done after PR merge: %v\n", err)
+	}
+	if merged {
+		e.closeIssueIfNonDefaultBase(item, prNumber)
 	}
 }
 
@@ -589,7 +615,7 @@ func (e *Engine) reEnqueueOrPause(board *gh.ProjectBoard, item gh.ProjectItem, s
 		return
 	}
 	if merged {
-		e.advanceConvergedPRToDone(board, item, stage, pr.Number)
+		e.advanceConvergedPRToDone(board, item, stage, pr.Number, true)
 		return
 	}
 
