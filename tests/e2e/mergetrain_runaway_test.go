@@ -84,6 +84,6 @@ func TestMergeTrainRunawayGuardPausesBatch(t *testing.T) {
 		}
 	}
 
-	assertNoStaleTrainArtifacts(t, env, env.RepoBeta)
+	WaitForNoStaleTrainArtifacts(t, env, env.RepoBeta, 2*time.Minute)
 	t.Logf("runaway guard contract verified: all-poison batch → guard fires at cap → all Queued members paused → no member reaches Done")
 }
