@@ -516,6 +516,7 @@ type claudeResponse struct {
 	CostUSD   float64  `json:"total_cost_usd"`
 	IsError   bool     `json:"is_error"`
 	Errors    []string `json:"errors"`
+	Subtype   string   `json:"subtype"`
 	// ModelUsage contains per-model accumulated token counts for the full session.
 	// These are more accurate than the top-level "usage" field, which reflects only
 	// the last API call rather than the entire multi-turn session.
@@ -712,13 +713,19 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 	resp, ok := parseClaudeJSON(bytes.TrimSpace(rawOutput))
 	var text string
 	var usage TokenUsage
+	staleSessionDetected := false
 	if ok {
 		// Check for stale session ID error — delete the session file so the
 		// next retry starts fresh instead of looping on the same expired ID.
-		if resp.IsError && len(resp.Errors) > 0 {
+		// Both the structural subtype and the errors[] substring are required:
+		// the CLI echoes the dead session_id back on this response, so without
+		// this detection saveSessionIDDirect below would immediately rewrite
+		// the same dead pointer, making it self-renewing rather than merely stale.
+		if resp.IsError && resp.Subtype == "error_during_execution" && len(resp.Errors) > 0 {
 			for _, errMsg := range resp.Errors {
 				if strings.Contains(errMsg, "No conversation found with session ID") {
-					claudeLog(issueNumber, "warn", "session expired — deleting stale session file for retry\n")
+					staleSessionDetected = true
+					claudeLog(issueNumber, "warn", "session expired (stale session ID %q) — removing %s so the next invocation starts a fresh session\n", resp.SessionID, sessFilePath)
 					os.Remove(sessFilePath)
 					break
 				}
@@ -740,7 +747,9 @@ func interpretClaudeResult(ctx context.Context, issueNumber int, rawOutput []byt
 		} else {
 			claudeLog(issueNumber, "claude", "completed in %d turns, $%.4f\n", resp.NumTurns, resp.CostUSD)
 		}
-		saveSessionIDDirect(issueNumber, sessFilePath, resp.SessionID)
+		if !staleSessionDetected {
+			saveSessionIDDirect(issueNumber, sessFilePath, resp.SessionID)
+		}
 	} else if wasTimedOut {
 		// Process was killed before emitting a result JSON line. Extract text from
 		// intermediate assistant turns collected before the kill so we can detect
