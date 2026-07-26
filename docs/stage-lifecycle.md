@@ -87,7 +87,7 @@ Before each Claude invocation, the engine writes context documents to `.fabrik-c
 
 ### Session Resume
 
-Session file: `~/.fabrik/sessions/issue-<N>/<stageName>.session`. On retry, loaded via `--resume` to restore conversation context.
+Session file: `.fabrik/sessions/issue-<N>/<stageName>.session`, relative to the process working directory — or `.fabrik/sessions/<owner>-<repo>/issue-<N>/<stageName>.session` on multi-repo projects (`engine/claude.go:227-242`). On retry, loaded via `--resume` to restore conversation context.
 
 The session ID is captured even when the invocation ends by hitting `max_turns` — `parseClaudeJSON` accepts a response whose `result` is empty as long as `session_id` is present (`engine/claude.go:1163-1166`), because a turn-cap kill produces exactly that shape. This is deliberate: it is what allows a turn-capped stage to be resumed rather than restarted.
 
@@ -104,7 +104,7 @@ Two consequences follow, and both routinely look like defects to someone reading
 
 Conversely, a successor that *announces* the situation (e.g. "found the implementation already complete from a prior interrupted session") is accurately describing its own resumed state.
 
-**Failure mode — silent fallback to a fresh session.** `--resume` is only appended when the session file exists and is non-empty (`engine/claude.go:480-484`):
+**Failure modes — the session ID is not always honoured.** `buildClaudeArgs` reads the session file inline (`engine/claude.go:480-484`):
 
 ```go
 if resume {
@@ -114,7 +114,17 @@ if resume {
 }
 ```
 
-If that read fails, the flag is dropped and the retry starts a **fresh session against a worktree that already contains the predecessor's changes**. Nothing currently detects or logs this, and it is the one case where a retry genuinely cannot know what its predecessor did. When diagnosing a suspect retry, confirm the session file was present before concluding the output was unreliable.
+Note the length check runs on the **untrimmed** bytes, which produces three distinct outcomes:
+
+| Session file | Behaviour |
+|---|---|
+| Missing or unreadable | `--resume` omitted → **fresh session** against the predecessor's worktree |
+| Zero bytes | `--resume` omitted → **fresh session** |
+| Whitespace only (e.g. a stray newline) | `len > 0` passes, then `TrimSpace` yields `""` → **`--resume` appended with an empty value** |
+
+None of these are detected or logged. The first two are the only cases where a retry genuinely cannot know what its predecessor did — so when diagnosing a suspect retry, confirm the session file was present and non-empty before concluding the output was unreliable.
+
+This inline read is also **not** the same as `engine.ReadSessionID` (`engine/claude.go:286-302`), which trims before returning and so treats a whitespace-only file as absent. `cmd/resume.go` uses `ReadSessionID`; the invocation path does not. Tracked in #1117.
 
 ### Model Override
 

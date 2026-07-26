@@ -1049,9 +1049,9 @@ When a stage doesn't complete (Claude doesn't output `FABRIK_STAGE_COMPLETE`):
 >   following a turn-capped attempt is a resume working correctly.
 >
 > The one case where a retry genuinely cannot know what its predecessor did is when the
-> session file is missing or unreadable, so `--resume` is skipped and a fresh session starts
-> against the existing worktree. See *Session Resume* in
-> [`stage-lifecycle.md`](stage-lifecycle.md) for detail.
+> session file is missing, unreadable, or zero-length, so `--resume` is skipped and a fresh
+> session starts against the existing worktree. This is not currently detected or logged
+> (#1117). See *Session Resume* in [`stage-lifecycle.md`](stage-lifecycle.md) for detail.
 4. **Max retries**: After `--max-retries` failures (default 3):
    - `fabrik:paused` and `stage:<name>:failed` labels are added
    - An explanatory comment is posted on the issue
