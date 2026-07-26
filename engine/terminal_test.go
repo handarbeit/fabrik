@@ -780,6 +780,90 @@ func TestRunProbeAndDeepFetch_UnconfiguredColumn_WarmCache_SkipsDeepFetch(t *tes
 	}
 }
 
+// TestRunProbeAndDeepFetch_UnmanagedStage_ColdCache_SkipsDeepFetch is the
+// regression guard for issue #778's deep-fetch-avoidance optimization once a
+// declarative `unmanaged: true` Backlog stage exists (issue #973). Unlike the
+// UnconfiguredColumn_* tests above (no stage matches "Backlog" at all), here
+// stages.FindStage DOES return a non-nil stage for "Backlog" — configuredStage
+// must still evaluate to false because that stage is Unmanaged, or this
+// silently reintroduces #778 (every Backlog item deep-fetched every poll).
+func TestRunProbeAndDeepFetch_UnmanagedStage_ColdCache_SkipsDeepFetch(t *testing.T) {
+	var deepFetchCalls int
+
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return []gh.BoardProbeItem{
+				// Configured, non-unmanaged stage item (should be deep-fetched normally).
+				{ItemID: "PVTI_001", ContentID: "I_001", Number: 1, Repo: "owner/repo",
+					Status: "Research", EffectiveUpdatedAt: time.Now()},
+				// Unmanaged stage item (must NOT be deep-fetched despite a matching Stage).
+				{ItemID: "PVTI_002", ContentID: "I_002", Number: 2, Repo: "owner/repo",
+					Status: "Backlog", EffectiveUpdatedAt: time.Now()},
+			}, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalls++
+			item.Labels = []string{"stage:Research:in_progress"}
+			return nil
+		},
+	}
+
+	eng := testEngineWithStages(t, client, testStagesWithBacklog())
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	eng.readClient = cache
+
+	eng.runProbeAndDeepFetch(cache)
+
+	if deepFetchCalls != 1 {
+		t.Errorf("expected exactly 1 FetchItemDetails call (for Research item); got %d", deepFetchCalls)
+	}
+
+	if _, err := eng.store.Get("owner/repo", 2); err == nil {
+		t.Error("Backlog item should not be seeded into the store (unmanaged guard must fire before IssueOpened)")
+	}
+}
+
+// TestRunProbeAndDeepFetch_UnmanagedStage_WarmCache_SkipsDeepFetch verifies
+// that an item already in the store, sitting in a declared `unmanaged` column,
+// is never deep-fetched across repeated probe cycles.
+func TestRunProbeAndDeepFetch_UnmanagedStage_WarmCache_SkipsDeepFetch(t *testing.T) {
+	var deepFetchCalls int
+
+	client := &mockGitHubClient{
+		probeProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) ([]gh.BoardProbeItem, string, error) {
+			return []gh.BoardProbeItem{
+				{ItemID: "PVTI_002", ContentID: "I_002", Number: 2, Repo: "owner/repo",
+					Status: "Backlog", EffectiveUpdatedAt: time.Now()},
+			}, "PVT_1", nil
+		},
+		fetchItemDetailsFn: func(item *gh.ProjectItem) error {
+			deepFetchCalls++
+			return nil
+		},
+	}
+
+	eng := testEngineWithStages(t, client, testStagesWithBacklog())
+	eng.store.Apply(itemstate.IssueOpened{Item: gh.ProjectItem{
+		ID: "I_002", ItemID: "PVTI_002", Number: 2, Repo: "owner/repo", Status: "Backlog",
+	}})
+
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	eng.readClient = cache
+
+	// Run several probe cycles — none should trigger a deep-fetch.
+	for i := 0; i < 3; i++ {
+		eng.runProbeAndDeepFetch(cache)
+	}
+
+	if deepFetchCalls != 0 {
+		t.Errorf("Backlog item (unmanaged, warm cache): expected 0 FetchItemDetails calls across repeated cycles; got %d", deepFetchCalls)
+	}
+
+	if _, err := eng.store.Get("owner/repo", 2); err != nil {
+		t.Error("Backlog item should remain in the store after the probe cycles (newKeys guard prevents tombstoning)")
+	}
+}
+
 // TestRunProbeAndDeepFetch_UnconfiguredColumn_StatusDrift_UpdatesStore verifies
 // that when a probe item moves from a configured stage to an unconfigured column
 // (e.g. Research → Backlog), ProbeBoardItemUpdated is still applied so the store

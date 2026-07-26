@@ -1,6 +1,7 @@
 package stages
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -296,6 +297,126 @@ cleanup_worktree: true
 	}
 }
 
+// TestLoadAll_UnmanagedStage verifies that a stage with unmanaged: true
+// loads successfully without a prompt or skill, and has no Claude completion type.
+func TestLoadAll_UnmanagedStage(t *testing.T) {
+	dir := t.TempDir()
+	writeStageFile(t, dir, "backlog.yaml", `
+name: Backlog
+order: -1
+unmanaged: true
+`)
+
+	ss, err := LoadAll(dir)
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	if len(ss) != 1 {
+		t.Fatalf("expected 1 stage, got %d", len(ss))
+	}
+	s := ss[0]
+	if !s.Unmanaged {
+		t.Error("Unmanaged should be true")
+	}
+	if s.Completion.Type != "" {
+		t.Errorf("unmanaged stage should have no completion type, got %q", s.Completion.Type)
+	}
+}
+
+// TestLoadAll_EmbeddedDefaultExamples is the regression guard for a PR review
+// finding on issue #973: no existing test actually runs loadOne/LoadAll over
+// the real embedded examples/ set. TestLoadAll_UnmanagedStage only exercises
+// an inline fixture, and cmd/init_test.go only byte-compares embedded content
+// to what gets written to disk — neither would catch a typo in an embedded
+// file that breaks loading. This matters most for backlog.yaml: it is the
+// only shipped stage with no prompt/skill, so `unmanaged: true` is the sole
+// thing keeping it valid — misspell it (e.g. "unmaneged") and yaml.Unmarshal
+// silently accepts it as an unrecognized key, then loadOne rejects the stage
+// with "must have a 'prompt' or 'skill' field", a hard startup failure for
+// every new `fabrik init` that nothing in CI would catch.
+func TestLoadAll_EmbeddedDefaultExamples(t *testing.T) {
+	entries, err := fs.ReadDir(DefaultStages, "examples")
+	if err != nil {
+		t.Fatalf("reading embedded examples: %v", err)
+	}
+
+	dir := t.TempDir()
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		data, err := DefaultStages.ReadFile("examples/" + e.Name())
+		if err != nil {
+			t.Fatalf("reading embedded %s: %v", e.Name(), err)
+		}
+		writeStageFile(t, dir, e.Name(), string(data))
+	}
+
+	ss, err := LoadAll(dir)
+	if err != nil {
+		t.Fatalf("LoadAll over embedded default examples: %v", err)
+	}
+
+	backlog := FindStage(ss, "Backlog")
+	if backlog == nil {
+		t.Fatal("expected a Backlog stage among the embedded defaults")
+	}
+	if !backlog.Unmanaged {
+		t.Error("embedded Backlog stage should have Unmanaged == true")
+	}
+}
+
+// TestLoadAll_UnmanagedCombinations documents that unmanaged combined with
+// prompt/skill/cleanup_worktree/holding_stage is not rejected at load time
+// (mirrors the codebase's existing lack of mutual-exclusion validation between
+// cleanup_worktree and holding_stage). This is safe, not just permissive:
+// unlike the loading step tested here, the *resolution* step is where
+// precedence is actually enforced — engine.cleanupStage, engine.holdingStage,
+// and NextStage (this package) all skip stages with Unmanaged: true, so an
+// unmanaged+cleanup_worktree (or +holding_stage) stage loads cleanly but is
+// never picked as "the" Done/Queued/next-stage target. See
+// TestCleanupStage_SkipsUnmanaged and TestHoldingStage_SkipsUnmanaged in
+// engine/closed_item_advance_settle_test.go, and TestNextStage_SkipsUnmanaged
+// below, for that half of the guarantee.
+func TestLoadAll_UnmanagedCombinations(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+	}{
+		{
+			name: "with prompt",
+			yaml: "name: Backlog\norder: -1\nunmanaged: true\nprompt: |\n  do something\n",
+		},
+		{
+			name: "with skill",
+			yaml: "name: Backlog\norder: -1\nunmanaged: true\nskill: some-skill\n",
+		},
+		{
+			name: "with cleanup_worktree",
+			yaml: "name: Backlog\norder: -1\nunmanaged: true\ncleanup_worktree: true\n",
+		},
+		{
+			name: "with holding_stage",
+			yaml: "name: Backlog\norder: -1\nunmanaged: true\nholding_stage: true\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeStageFile(t, dir, "backlog.yaml", tt.yaml)
+
+			ss, err := LoadAll(dir)
+			if err != nil {
+				t.Fatalf("LoadAll: %v", err)
+			}
+			if len(ss) != 1 || !ss[0].Unmanaged {
+				t.Errorf("expected 1 unmanaged stage, got %+v", ss)
+			}
+		})
+	}
+}
+
 func TestLoadAll_ReadError(t *testing.T) {
 	dir := t.TempDir()
 	// Create a directory named bad.yaml so os.ReadFile fails deterministically
@@ -362,6 +483,35 @@ func TestNextStage(t *testing.T) {
 	// Unknown stage returns nil
 	if s := NextStage(stages, "X"); s != nil {
 		t.Errorf("NextStage(X) = %v, want nil", s)
+	}
+}
+
+// TestNextStage_SkipsUnmanaged is the regression guard for a PR review finding
+// on issue #973: an Unmanaged stage misconfigured with an Order between two
+// dispatched stages must never be returned as "next" — items would advance
+// into it and get stuck forever (both dispatch guards return false for it, the
+// catch-up loop skips it, and no settle scan reaps it). NextStage must walk
+// past any Unmanaged stage to the next real one.
+func TestNextStage_SkipsUnmanaged(t *testing.T) {
+	stages := []*Stage{
+		{Name: "Review"},
+		{Name: "OnHold", Unmanaged: true},
+		{Name: "Validate"},
+	}
+	if s := NextStage(stages, "Review"); s == nil || s.Name != "Validate" {
+		t.Errorf("NextStage(Review) = %v, want Validate (OnHold must be skipped)", s)
+	}
+}
+
+// TestNextStage_TrailingUnmanagedOnly verifies that if only unmanaged stages
+// remain after current, NextStage returns nil rather than parking the item.
+func TestNextStage_TrailingUnmanagedOnly(t *testing.T) {
+	stages := []*Stage{
+		{Name: "Validate"},
+		{Name: "Archive", Unmanaged: true},
+	}
+	if s := NextStage(stages, "Validate"); s != nil {
+		t.Errorf("NextStage(Validate) = %v, want nil (only unmanaged stages remain)", s)
 	}
 }
 

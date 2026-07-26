@@ -49,9 +49,13 @@ func (e *Engine) settleClosedItemsToDone(board *gh.ProjectBoard) {
 		if !item.IsClosed {
 			continue
 		}
-		// stage == nil covers columns with no matching stage config (Backlog,
-		// or any custom/extra column) — such an item has no stage bookkeeping
-		// to do and, by construction, no worktree, so it advances unconditionally.
+		// stage == nil covers columns with no matching stage config (a custom/
+		// extra column, or Backlog on installs predating backlog.yaml) — such an
+		// item has no stage bookkeeping to do and, by construction, no worktree,
+		// so it advances unconditionally. A resolved Unmanaged stage (e.g. the
+		// declared Backlog stage, issue #973) is deliberately NOT added to the
+		// skip condition below for the same reason: it has no worktree either,
+		// so a closed item there must still be advanced rather than stranded.
 		// Only a *resolved* stage that is itself Cleanup/Holding/gate-checked
 		// is grounds to skip.
 		stage := stages.FindStage(e.cfg.Stages, item.Status)

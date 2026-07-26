@@ -128,6 +128,143 @@ func TestCheckStageColumnAlignment_BacklogAndDoneNotExtra(t *testing.T) {
 	}
 }
 
+// TestCheckStageColumnAlignment_UnmanagedStageRecognizedNoExtraWarning verifies
+// that a board with a declared-unmanaged column produces no "no matching
+// stage" warning for it, via declaration — not the hardcoded "Backlog" compat
+// net. Uses "Icebox" (not "Backlog") so the assertion is actually load-bearing:
+// with a literal "Backlog" column, engine/startup.go's hardcoded
+// recognized["Backlog"] = true would keep this test green even if `unmanaged`
+// were reverted entirely, since that column-name check doesn't consult
+// Unmanaged either way. Naming the column something else exercises the real
+// generalization this issue's Requirements calls for ("doesn't generalize to
+// the other parking columns teams commonly add (Icebox, On Hold, Won't Do)").
+func TestCheckStageColumnAlignment_UnmanagedStageRecognizedNoExtraWarning(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: boardWithColumns("proj-1"),
+		fetchStatusFieldFn:  statusFieldWithOptions("Icebox", "Research", "Plan", "Implement", "Done", "Triage"),
+	}
+	stagesCfg := append([]*stages.Stage{{
+		Name:      "Icebox",
+		Order:     -1,
+		Unmanaged: true,
+	}}, testStagesWithCleanup()...)
+	e := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        stagesCfg,
+		},
+		client,
+		&mockClaudeInvoker{},
+		NewWorktreeManager(t.TempDir()),
+	)
+	events := make(chan tui.Event, 32)
+	e.events = events
+
+	if err := e.checkStageColumnAlignment(context.Background()); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	close(events)
+
+	var extraWarn string
+	for ev := range events {
+		if le, ok := ev.(tui.LogEvent); ok && strings.Contains(le.Message, "no matching stage") {
+			extraWarn = le.Message
+		}
+	}
+	if extraWarn == "" {
+		t.Fatal("expected a 'no matching stage' warning for the genuine extra column Triage")
+	}
+	if !strings.Contains(extraWarn, "Triage") {
+		t.Errorf("genuine extra column Triage should be warned, got: %q", extraWarn)
+	}
+	if strings.Contains(extraWarn, "Icebox") {
+		t.Errorf("Icebox (declared unmanaged stage) must not be flagged as extra, got: %q", extraWarn)
+	}
+}
+
+// TestCheckStageColumnAlignment_UnmanagedStageMissingColumnNotFatal verifies
+// that a board WITHOUT a Backlog column, but with a configured unmanaged
+// Backlog stage, does not fail startup (missing-column check exclusion).
+func TestCheckStageColumnAlignment_UnmanagedStageMissingColumnNotFatal(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: boardWithColumns("proj-1"),
+		// No "Backlog" column on the board at all.
+		fetchStatusFieldFn: statusFieldWithOptions("Research", "Plan", "Implement", "Done"),
+	}
+	e := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithBacklog(),
+		},
+		client,
+		&mockClaudeInvoker{},
+		NewWorktreeManager(t.TempDir()),
+	)
+	err := e.checkStageColumnAlignment(context.Background())
+	if err != nil {
+		t.Fatalf("unmanaged stage missing from board should not be fatal, got: %v", err)
+	}
+}
+
+// TestCheckStageColumnAlignment_CompatNetWithoutBacklogYAML verifies that
+// existing installs with NO local backlog.yaml (no configured Backlog stage
+// at all) still produce no "no matching stage" warning for a Backlog board
+// column, via the hardcoded "Backlog" compat net — while a genuine extra
+// column is still warned.
+func TestCheckStageColumnAlignment_CompatNetWithoutBacklogYAML(t *testing.T) {
+	client := &mockGitHubClient{
+		fetchProjectBoardFn: boardWithColumns("proj-1"),
+		fetchStatusFieldFn:  statusFieldWithOptions("Backlog", "Research", "Plan", "Implement", "Done", "Reviwe"),
+	}
+	e := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStagesWithCleanup(), // no Backlog stage configured
+		},
+		client,
+		&mockClaudeInvoker{},
+		NewWorktreeManager(t.TempDir()),
+	)
+	events := make(chan tui.Event, 32)
+	e.events = events
+
+	if err := e.checkStageColumnAlignment(context.Background()); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	close(events)
+
+	var extraWarn string
+	for ev := range events {
+		if le, ok := ev.(tui.LogEvent); ok && strings.Contains(le.Message, "no matching stage") {
+			extraWarn = le.Message
+		}
+	}
+	if extraWarn == "" {
+		t.Fatal("expected a 'no matching stage' warning for the genuine extra column Reviwe")
+	}
+	if !strings.Contains(extraWarn, "Reviwe") {
+		t.Errorf("genuine extra/typo'd column Reviwe should be warned, got: %q", extraWarn)
+	}
+	if strings.Contains(extraWarn, "Backlog") {
+		t.Errorf("Backlog must stay silent via the hardcoded compat net, got: %q", extraWarn)
+	}
+}
+
 func TestCheckStageColumnAlignment_FetchBoardError(t *testing.T) {
 	client := &mockGitHubClient{
 		fetchProjectBoardFn: func(owner, repo string, projectNum int, ownerType string) (*gh.ProjectBoard, error) {

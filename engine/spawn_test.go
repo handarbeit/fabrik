@@ -13,6 +13,7 @@ import (
 
 	gh "github.com/handarbeit/fabrik/github"
 	"github.com/handarbeit/fabrik/internal/itemstate"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 // planCommentBody returns a fake Plan stage comment body containing the given spawn blocks.
@@ -151,7 +152,7 @@ FABRIK_SPAWN_CHILD_END`
 // ---- resolveSpecifyOptionID unit tests ----
 
 func TestResolveSpecifyOptionID_Nil(t *testing.T) {
-	if got := resolveSpecifyOptionID(nil); got != "" {
+	if got := resolveSpecifyOptionID(nil, nil); got != "" {
 		t.Errorf("got %q, want empty", got)
 	}
 }
@@ -161,7 +162,7 @@ func TestResolveSpecifyOptionID_ExactMatch(t *testing.T) {
 		Options:            map[string]string{"Backlog": "OPT_0", "Specify": "OPT_1", "Done": "OPT_3"},
 		OrderedOptionNames: []string{"Backlog", "Specify", "Done"},
 	}
-	if got := resolveSpecifyOptionID(sf); got != "OPT_1" {
+	if got := resolveSpecifyOptionID(sf, nil); got != "OPT_1" {
 		t.Errorf("got %q, want OPT_1", got)
 	}
 }
@@ -172,7 +173,7 @@ func TestResolveSpecifyOptionID_Fallback(t *testing.T) {
 		Options:            map[string]string{"Backlog": "OPT_0", "Research": "OPT_1", "Done": "OPT_3"},
 		OrderedOptionNames: []string{"Backlog", "Research", "Done"},
 	}
-	if got := resolveSpecifyOptionID(sf); got != "OPT_1" {
+	if got := resolveSpecifyOptionID(sf, nil); got != "OPT_1" {
 		t.Errorf("got %q, want OPT_1 (Research)", got)
 	}
 }
@@ -183,7 +184,7 @@ func TestResolveSpecifyOptionID_BacklogAndDoneOnly(t *testing.T) {
 		Options:            map[string]string{"Backlog": "OPT_0", "Done": "OPT_1"},
 		OrderedOptionNames: []string{"Backlog", "Done"},
 	}
-	if got := resolveSpecifyOptionID(sf); got != "" {
+	if got := resolveSpecifyOptionID(sf, nil); got != "" {
 		t.Errorf("got %q, want empty (no viable column)", got)
 	}
 }
@@ -193,7 +194,7 @@ func TestResolveSpecifyOptionID_EmptyOrderedNames(t *testing.T) {
 		Options:            map[string]string{"Research": "OPT_1"},
 		OrderedOptionNames: nil,
 	}
-	if got := resolveSpecifyOptionID(sf); got != "" {
+	if got := resolveSpecifyOptionID(sf, nil); got != "" {
 		t.Errorf("got %q, want empty when OrderedOptionNames is nil", got)
 	}
 }
@@ -205,8 +206,48 @@ func TestResolveSpecifyOptionID_SingleColumn(t *testing.T) {
 		Options:            map[string]string{"Specify": "OPT_1"},
 		OrderedOptionNames: []string{"Specify"},
 	}
-	if got := resolveSpecifyOptionID(sf); got != "OPT_1" {
+	if got := resolveSpecifyOptionID(sf, nil); got != "OPT_1" {
 		t.Errorf("got %q, want OPT_1 (exact match wins)", got)
+	}
+}
+
+// TestResolveSpecifyOptionID_SkipsDeclaredUnmanagedColumn is the regression
+// guard for the PR review finding on issue #973: the fallback previously only
+// ever skipped the literal name "Backlog", so a parking column declared
+// `unmanaged: true` under any OTHER name (e.g. "Icebox") fell through and was
+// returned as the "Specify" fallback target — landing spawned children in a
+// column itemMayNeedWork/itemNeedsWork deliberately never dispatch, with no
+// fabrik:awaiting-placement marker recorded to ever recover them.
+func TestResolveSpecifyOptionID_SkipsDeclaredUnmanagedColumn(t *testing.T) {
+	sf := &gh.StatusField{
+		Options:            map[string]string{"Icebox": "OPT_0", "Research": "OPT_1", "Done": "OPT_3"},
+		OrderedOptionNames: []string{"Icebox", "Research", "Done"},
+	}
+	stagesCfg := []*stages.Stage{
+		{Name: "Icebox", Unmanaged: true},
+		{Name: "Research"},
+		{Name: "Done", CleanupWorktree: true},
+	}
+	if got := resolveSpecifyOptionID(sf, stagesCfg); got != "OPT_1" {
+		t.Errorf("got %q, want OPT_1 (Research) — declared unmanaged column Icebox must be skipped", got)
+	}
+}
+
+// TestResolveSpecifyOptionID_UnmanagedAndDoneOnly verifies the fallback still
+// correctly yields "" when the only non-terminal option is a declared
+// unmanaged column under a non-Backlog name — mirroring
+// TestResolveSpecifyOptionID_BacklogAndDoneOnly for the generalized case.
+func TestResolveSpecifyOptionID_UnmanagedAndDoneOnly(t *testing.T) {
+	sf := &gh.StatusField{
+		Options:            map[string]string{"Icebox": "OPT_0", "Done": "OPT_1"},
+		OrderedOptionNames: []string{"Icebox", "Done"},
+	}
+	stagesCfg := []*stages.Stage{
+		{Name: "Icebox", Unmanaged: true},
+		{Name: "Done", CleanupWorktree: true},
+	}
+	if got := resolveSpecifyOptionID(sf, stagesCfg); got != "" {
+		t.Errorf("got %q, want empty (no viable column)", got)
 	}
 }
 

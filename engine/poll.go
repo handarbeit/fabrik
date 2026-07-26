@@ -206,9 +206,17 @@ func (e *Engine) Run() error {
 	// Seed all known Fabrik labels with descriptions and sensible default colors.
 	// Non-fatal: a seeding failure must not prevent the engine from polling.
 	// In multi-repo mode (cfg.Repo == ""), skip here; poll() seeds each discovered repo instead.
-	stageNames := make([]string, len(e.cfg.Stages))
-	for i, s := range e.cfg.Stages {
-		stageNames[i] = s.Name
+	// Unmanaged stages (e.g. Backlog) are excluded: dispatch never touches them and
+	// settleNoWorkNeeded explicitly excludes them from skip-labeling, so their
+	// stage:<name>:in_progress/complete/failed labels could never be applied by anything —
+	// pure per-repo label-list and API-call pollution. Cleanup stages stay in;
+	// stage:Done:complete is load-bearing.
+	stageNames := make([]string, 0, len(e.cfg.Stages))
+	for _, s := range e.cfg.Stages {
+		if s.Unmanaged {
+			continue
+		}
+		stageNames = append(stageNames, s.Name)
 	}
 	if e.cfg.Repo != "" {
 		if err := e.client.SeedLabels(e.cfg.Owner, e.cfg.Repo, stageNames, e.cfg.User); err != nil {
@@ -888,10 +896,15 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 	// Seed labels on repos discovered for the first time this process run.
 	// seededRepos is guarded by e.mu; the poll loop is single-goroutine but
 	// lock for future-safety consistent with other Engine maps.
+	// Unmanaged stages excluded from seeding — see the matching comment on
+	// Run()'s SeedLabels call above; cleanup stages stay in.
 	{
-		sn := make([]string, len(e.cfg.Stages))
-		for i, s := range e.cfg.Stages {
-			sn[i] = s.Name
+		sn := make([]string, 0, len(e.cfg.Stages))
+		for _, s := range e.cfg.Stages {
+			if s.Unmanaged {
+				continue
+			}
+			sn = append(sn, s.Name)
 		}
 		for ownerRepo := range seenRepos {
 			e.mu.Lock()
@@ -948,7 +961,7 @@ func (e *Engine) poll(ctx context.Context) (pollResult, error) {
 			continue
 		}
 		stage := stages.FindStage(e.cfg.Stages, item.Status)
-		if stage == nil || stage.CleanupWorktree || stage.HoldingStage {
+		if stage == nil || stage.CleanupWorktree || stage.HoldingStage || stage.Unmanaged {
 			continue
 		}
 		completeLabel := fmt.Sprintf("stage:%s:complete", stage.Name)

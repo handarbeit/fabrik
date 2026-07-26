@@ -111,6 +111,24 @@ type Stage struct {
 	// is waived and no Claude completion type is assigned.
 	HoldingStage bool `yaml:"holding_stage,omitempty"`
 
+	// Unmanaged marks this stage as a parking column that Fabrik recognizes but
+	// never runs a workflow for. Items in an unmanaged column are never dispatched
+	// and never auto-advanced — they sit until a human moves them to a real stage.
+	// When true, the prompt/skill requirement is waived, mirroring HoldingStage.
+	// Combining Unmanaged with Prompt/Skill/CleanupWorktree/HoldingStage is
+	// discouraged but not rejected at load time: Unmanaged means "never dispatch,
+	// never resolve as a target, never receive bookkeeping," and this precedence
+	// is actively enforced (not just documented) by every order-sensitive resolver
+	// that could otherwise pick an Unmanaged stage as "the" Done/Queued/next
+	// column, or hand it a completion label/comment it never earned:
+	// cleanupStage, holdingStage (engine/stages.go), NextStage (stages.go),
+	// the gate-checked completion-label fill loop in
+	// engine/pr_terminal_advance.go, and the doneOrder/skip-labeling loops in
+	// engine/no_work_needed_settle.go all skip stages with Unmanaged: true. See
+	// engine dispatch guards in engine/item.go and engine/poll.go for the
+	// per-item suppression side of the same guarantee.
+	Unmanaged bool `yaml:"unmanaged,omitempty"`
+
 	// DisableAdaptiveThinking controls whether Claude Code's adaptive (auto-reduced)
 	// thinking budget is disabled. nil means use the default (disabled). When nil or
 	// true, CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 is injected into the subprocess
@@ -232,7 +250,7 @@ func loadOne(path string) (*Stage, error) {
 		return nil, fmt.Errorf("stage must have a 'name' field")
 	}
 
-	if !s.CleanupWorktree && !s.HoldingStage {
+	if !s.CleanupWorktree && !s.HoldingStage && !s.Unmanaged {
 		if s.Prompt == "" && s.Skill == "" {
 			return nil, fmt.Errorf("stage %q must have a 'prompt' or 'skill' field", s.Name)
 		}
@@ -277,12 +295,21 @@ func loadOne(path string) (*Stage, error) {
 	return &s, nil
 }
 
-// NextStage returns the stage after the given one, or nil if it's the last.
+// NextStage returns the stage after the given one, skipping over any stage
+// marked Unmanaged (a parking column is never a valid auto-advance target —
+// items land there only via explicit human action). Returns nil if current is
+// the last stage, or if only unmanaged stages remain after it.
 func NextStage(stages []*Stage, current string) *Stage {
 	for i, s := range stages {
-		if s.Name == current && i+1 < len(stages) {
-			return stages[i+1]
+		if s.Name != current {
+			continue
 		}
+		for j := i + 1; j < len(stages); j++ {
+			if !stages[j].Unmanaged {
+				return stages[j]
+			}
+		}
+		return nil
 	}
 	return nil
 }

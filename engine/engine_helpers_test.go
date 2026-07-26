@@ -98,3 +98,14 @@ func testStagesWithCleanup() []*stages.Stage {
 		CleanupWorktree: true,
 	})
 }
+
+// testStagesWithBacklog returns testStagesWithCleanup plus a declarative
+// unmanaged Backlog stage (order -1, precedes Research).
+func testStagesWithBacklog() []*stages.Stage {
+	ss := testStagesWithCleanup()
+	return append([]*stages.Stage{{
+		Name:      "Backlog",
+		Order:     -1,
+		Unmanaged: true,
+	}}, ss...)
+}
