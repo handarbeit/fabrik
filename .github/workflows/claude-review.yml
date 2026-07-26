@@ -44,21 +44,32 @@ jobs:
             Then submit a FORMAL pull-request review (not an issue comment) with:
               gh pr review ${{ github.event.pull_request.number }} --comment --body-file <your-findings-file>
             Add inline comments for specific line-level issues where useful.
-          claude_args: "--allowedTools Bash(git:*),Bash(gh:*),Read,Grep"
+          # Pin the model explicitly. Without --model, claude-code-action@v1
+          # picks its own default, which drifted to an unusable id
+          # (claude-opus-5[1m]) and made every review run fail with
+          # is_error:true after 1 turn — the safety-net step below then posted a
+          # useless "no blocking issues" stub. Sonnet is the intended reviewer
+          # (capable for diff review, far cheaper than Opus per-PR).
+          claude_args: "--model claude-sonnet-5 --allowedTools Bash(git:*),Bash(gh:*),Read,Grep"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Safety net: guarantee the review gate always clears even if the agent
-      # posted only a comment. A no-op if a formal review already exists.
-      - name: Ensure a formal review exists
+      # Fallback: if the agent produced no formal review (it errored, was
+      # skipped, or didn't post), surface that HONESTLY — never claim "no
+      # issues", since a false all-clear is worse than a visible failure (a
+      # failed review previously masqueraded as a clean one). Still posts a
+      # formal review so Fabrik's review gate (engine/reviews.go) clears rather
+      # than hanging.
+      - name: Report if no review was posted
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -m
           count=$(gh pr view "$PR" --json reviews \
             --jq '[.reviews[] | select(.author.login=="github-actions" or (.author.login|startswith("claude")))] | length')
           if [ "${count:-0}" -eq 0 ]; then
-            gh pr review "$PR" --comment --body "🤖 Automated test-repo review (Claude). No blocking issues surfaced by the agent step."
+            gh pr review "$PR" --comment --body "⚠️ **Claude review did not post a formal review.** The review step errored or was skipped (note: PRs that modify this workflow file are skipped by \`claude-code-action\`'s security guard — this resolves once merged). **This is NOT a clean bill of health.** Logs: ${RUN_URL}"
           fi
