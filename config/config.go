@@ -44,6 +44,8 @@ type ProjectConfig struct {
 	MaxTrainRebaseCycles    *int     `yaml:"max_train_rebase_cycles"`
 	MaxTrainTrialsPerWindow *int     `yaml:"max_train_trials_per_window"`
 	TrainTrialWindow        *int     `yaml:"train_trial_window"`
+	MaxCommentCyclesPerWindow *int   `yaml:"max_comment_cycles_per_window"`
+	CommentCycleWindow        *int   `yaml:"comment_cycle_window"`
 }
 
 // LoadProjectConfig reads .fabrik/config.yaml from CWD.

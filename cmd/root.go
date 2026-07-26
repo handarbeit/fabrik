@@ -59,6 +59,8 @@ type Config struct {
 	MaxTrainRebaseCycles    int    // 0 means use default (3)
 	MaxTrainTrialsPerWindow int    // 0 means use default (20)
 	TrainTrialWindowMinutes int    // 0 means use default (60)
+	MaxCommentCyclesPerWindow int  // Comment-processing circuit breaker: 0 means use default (10)
+	CommentCycleWindowMinutes int  // Comment-processing circuit breaker: 0 means use default (30)
 	ClaudeWaitDelay         int    // seconds; 0 means use default (30)
 	PostPushDwell           int    // seconds; 0 means use default (90)
 	KillGraceSigInt         string // Go duration string; "" means use default (10s); "0s" skips SIGINT step
@@ -162,6 +164,8 @@ func Execute() error {
 	flag.IntVar(&cfg.MaxTrainRebaseCycles, "max-train-rebase-cycles", 0, "Maximum main-moved rebase+revalidate cycles for a merge-train batch before dissolving it back to Queued (0 = use default of 3; also FABRIK_MAX_TRAIN_REBASE_CYCLES)")
 	flag.IntVar(&cfg.MaxTrainTrialsPerWindow, "max-train-trials-per-window", 0, "Runaway guard: maximum trial-branch creations with zero successful lands within the window before pausing all Queued members (0 = use default of 20; also FABRIK_MAX_TRAIN_TRIALS_PER_WINDOW)")
 	flag.IntVar(&cfg.TrainTrialWindowMinutes, "train-trial-window", 0, "Runaway guard: rolling window in minutes over which max-train-trials-per-window is measured (0 = use default of 60; also FABRIK_TRAIN_TRIAL_WINDOW)")
+	flag.IntVar(&cfg.MaxCommentCyclesPerWindow, "max-comment-cycles-per-window", 0, "Comment-processing circuit breaker: maximum non-advancing comment-processing invocations for an issue within the window before pausing it (0 = use default of 10; also FABRIK_MAX_COMMENT_CYCLES_PER_WINDOW)")
+	flag.IntVar(&cfg.CommentCycleWindowMinutes, "comment-cycle-window", 0, "Comment-processing circuit breaker: rolling window in minutes over which max-comment-cycles-per-window is measured (0 = use default of 30; also FABRIK_COMMENT_CYCLE_WINDOW)")
 	flag.IntVar(&cfg.ClaudeWaitDelay, "claude-wait-delay", 0, "Seconds to wait after Claude exits before recovering buffered output when grandchildren hold stdout pipe open (0 = use default of 30; also FABRIK_CLAUDE_WAIT_DELAY)")
 	flag.IntVar(&cfg.PostPushDwell, "post-push-dwell", 0, "Seconds to wait after a PR force-push before clearing the CI gate as 'no CI configured' (0 = use default of 90; also FABRIK_POST_PUSH_DWELL)")
 	flag.BoolVar(&cfg.DebugOutput, "debug-output", false, "Save Claude stage output to .fabrik/debug/ for debugging")
@@ -705,6 +709,8 @@ func Execute() error {
 		MaxTrainRebaseCycles:     cfg.MaxTrainRebaseCycles,                              // 0 = derive default (3) in engine
 		MaxTrainTrialsPerWindow:  cfg.MaxTrainTrialsPerWindow,                           // 0 = derive default (20) in engine
 		TrainTrialWindowDuration: trainTrialWindowDuration(cfg.TrainTrialWindowMinutes), // 0 = derive default (60m) in engine
+		MaxCommentCyclesPerWindow: cfg.MaxCommentCyclesPerWindow,                        // 0 = derive default (10) in engine
+		CommentCycleWindow:        commentCycleWindow(cfg.CommentCycleWindowMinutes),    // 0 = derive default (30m) in engine
 		ClaudeWaitDelay:          claudeWaitDelay(cfg.ClaudeWaitDelay),
 		KillGraceSigInt:          killGraceSigInt(cfg.KillGraceSigInt),
 		KillGraceSigTerm:         killGraceSigTerm(cfg.KillGraceSigTerm),
