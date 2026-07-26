@@ -7,6 +7,7 @@ import (
 
 	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
+	"github.com/handarbeit/fabrik/stages"
 )
 
 // TestWebhooksDisabled_ConvergesAcrossDriftCategories is the #957 invariant
@@ -85,6 +86,14 @@ func TestWebhooksDisabled_ConvergesAcrossDriftCategories(t *testing.T) {
 	})
 
 	t.Run("BlockedByDrift", func(t *testing.T) {
+		// Once the live re-read clears the stale edge, checkDependencies stops
+		// suppressing the item and processItem continues on into real stage
+		// dispatch (worktree setup + Claude invocation) — so this subtest needs
+		// an actual local git repo and a Claude mock that completes cleanly,
+		// unlike the unit-level checkDependencies tests in dependencies_test.go.
+		skipIfNoGit(t)
+		repoDir := initBareRepo(t)
+
 		client := &mockGitHubClient{
 			// The live API no longer reports any open dependency — the removal
 			// happened without bumping the item's updatedAt (#977), so a
@@ -96,7 +105,11 @@ func TestWebhooksDisabled_ConvergesAcrossDriftCategories(t *testing.T) {
 				return nil
 			},
 		}
-		claude := &mockClaudeInvoker{}
+		claude := &mockClaudeInvoker{
+			invokeFn: func(stage *stages.Stage, issue gh.ProjectItem, newComments []gh.Comment, resume bool, workDir string, opts InvokeOptions) (string, bool, TokenUsage, error) {
+				return "FABRIK_STAGE_COMPLETE\n", true, TokenUsage{TurnsUsed: 1}, nil
+			},
+		}
 		eng := NewWithDeps(
 			Config{
 				Owner:         "owner",
@@ -106,11 +119,11 @@ func TestWebhooksDisabled_ConvergesAcrossDriftCategories(t *testing.T) {
 				Token:         "token",
 				MaxConcurrent: 5,
 				Webhooks:      false,
-				Stages:        depTestStages(),
+				Stages:        testStages(),
 			},
 			client,
 			claude,
-			NewWorktreeManager(t.TempDir()),
+			NewWorktreeManager(repoDir),
 		)
 		// webhookMgr is left nil (never started) — webhooks disabled end to end.
 
