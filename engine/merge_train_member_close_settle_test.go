@@ -154,6 +154,44 @@ func TestSettleMergeTrainMemberClose_RetrySucceeds(t *testing.T) {
 	}
 }
 
+// TestSettleMergeTrainMemberClose_EmptyItemRepo_CacheWriteThroughSucceeds is a
+// regression test for issue #957's cache-key sweep: the ApplyIssueClosed
+// write-through used boardcache.ItemKey(item.Repo, item.Number) — with
+// item.Repo=="" (a caller passing an item whose Repo field was never
+// populated), that resolves to a different, non-existent key than the one
+// the Store holds ("owner/repo#N"), so the write-through silently no-ops via
+// the phantom-key guard until the next Reconcile repairs it.
+func TestSettleMergeTrainMemberClose_EmptyItemRepo_CacheWriteThroughSucceeds(t *testing.T) {
+	client := &mockGitHubClient{
+		closeIssueFn: func(owner, repo string, n int) error { return nil },
+	}
+	eng := trainTestEngine(t, client, &mockClaudeInvoker{}, NewWorktreeManager(t.TempDir()))
+
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	testBootstrapFromBoard(cache, &gh.ProjectBoard{
+		Items: []gh.ProjectItem{
+			{ID: "I_11", ItemID: "PVTI_11", Number: 11, Repo: "owner/repo", Status: "Queued"},
+		},
+	})
+	eng.readClient = cache
+
+	item := gh.ProjectItem{
+		Number: 11, Repo: "", IsClosed: false,
+		Labels: []string{mergeTrainAwaitingMemberCloseLabel},
+	}
+
+	eng.settleMergeTrainMemberClose(item)
+
+	snap, err := eng.store.Get("owner/repo", 11)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if !snap.IsClosed() {
+		t.Error("want IsClosed=true after settleMergeTrainMemberClose with item.Repo=\"\" " +
+			"(ApplyIssueClosed write-through must not silently drop the update when item.Repo is empty)")
+	}
+}
+
 // TestSettleMergeTrainMemberCloses_SkipsPausedItems mirrors the no-work-needed settle
 // scan's own paused-item guard: an operator investigating a paused item must not be
 // fought by this scan.
