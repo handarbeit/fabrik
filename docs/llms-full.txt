@@ -2530,9 +2530,12 @@ Multiple users and multiple Fabrik instances can safely share a project board.
 
 **Comment processing**: Fabrik processes comments from *any* author, not just the
 configured `--user`. Human colleagues, code-review bots (Copilot, Gemini), and
-other Fabrik instances all trigger comment processing. Only two categories are
-skipped: comments that start with `🏭 **Fabrik` (Fabrik's own output) and comments
-that already carry a 🚀 rocket reaction (already processed).
+other Fabrik instances all trigger comment processing. Three categories are
+skipped: comments that start with `🏭 **Fabrik` (Fabrik's own output), comments
+that already carry a 🚀 rocket reaction (already processed), and non-actionable
+bot service-notices — e.g. a quota-exhaustion or rate-limit banner from a
+review bot — which are watermarked as processed without ever spawning a worker
+or receiving a reply, so they can't re-trigger the bot into a reply loop.
 
 **Multi-instance locking**: The `fabrik:locked:<user>` label is still the
 concurrency guard, but acquisition now uses a **lock-then-verify** protocol:
@@ -3490,17 +3493,19 @@ When new comments are detected on an issue (or synthetic review comments on a PR
 
 ### 4.1 Comment Detection
 
-`findNewComments()` filters `item.Comments` to find unprocessed comments using three independent dedup signals:
+`findNewComments()` filters `item.Comments` to find unprocessed comments using four independent dedup signals:
 
 1. **In-memory `CommentProcessed` in `itemstate.Store`** (session-scoped) — skip comments whose ID is recorded via `snap.CommentProcessed(c.ID)` (written by `CommentProcessed` mutation). Fast but lost on restart.
 2. **`🏭 **Fabrik` body prefix** (engine-authored output convention) — skip comments whose body starts with this header. Durable but requires the header to be present.
 3. **🚀 ROCKET reaction** (durable, cross-restart) — skip comments that already have a rocket reaction. Applied to user comments by `processComments` step 10 after processing; **also applied by the engine to every comment it posts** immediately after `AddComment` succeeds.
+4. **Bot service-notice pattern** (content-based, `isBotServiceNotice`) — skip comments whose author matches `github.IsBotLogin` **and** whose body matches a known quota/rate-limit service-notice pattern (e.g. "daily quota limit", "you have reached your rate limit"). Unlike signals 1–3, this is a content classification rather than a watermark: it must hold on every poll's raw fetch, so a matching comment never reaches `processComments` in the first place — no 👀 reaction, no worktree/Claude invocation, no reply. Because this signal excludes the comment before signal 1's watermark would ever be recorded by the normal `processComments` flow, `settleBotServiceNotices` — an unconditional per-poll scan over the raw board snapshot, independent of dispatch state — separately applies the 🚀 reaction and `CommentProcessed` watermark so the comment doesn't need to re-qualify via this pattern check on every future poll. Introduced to stop a runaway reply loop where a bot's quota-exhaustion auto-reply triggered a Fabrik "not actionable" reply, which in turn re-triggered the bot (#1083/#1088).
 
-Any single signal catching the comment is sufficient to skip it. The three signals are orthogonal — any two can fail independently without triggering the self-review loop.
+Any single signal catching the comment is sufficient to skip it. The four signals are orthogonal — any combination can fail independently without triggering the self-review loop.
 
 **Dedup coverage by comment type:**
 - **Engine-authored comments**: carry signals (2) and (3) — the `🏭 **Fabrik` prefix (when formatted via `formatOutputComment`) and a 🚀 reaction added by the engine at post time.
 - **User comments**: carry signals (1) and (3) after processing — the `CommentProcessed` entry added to `itemstate.Store` during `processComments`, and the 🚀 reaction added at step 10.
+- **Bot service-notice comments**: carry signal (4) immediately, then signals (1) and (3) once `settleBotServiceNotices` watermarks them on a later poll.
 
 > **Invariant:** every engine-emitted `AddComment` call must start with `🏭 **Fabrik — <context>**`. This is an engine-wide convention enforced by `TestAddCommentCompliance` in `engine/compliance_test.go`, not just a detection heuristic.
 
@@ -3516,7 +3521,7 @@ Any single signal catching the comment is sufficient to skip it. The three signa
 | 5 | Check for FABRIK_STAGE_COMPLETE in output | `checkCompletion()` | Determines if comment processing resolved the stage |
 | 6 | Extract and apply FABRIK_ISSUE_UPDATE if present | `extractUpdatedBody()` | Applied unconditionally when markers are present; stripped from output regardless |
 | 7 | Strip all Fabrik markers from output | `stripLine()` calls | Removes FABRIK_STAGE_COMPLETE, FABRIK_BLOCKED_ON_INPUT, FABRIK_NO_WORK_NEEDED, FABRIK_SUMMARY_BEGIN/END |
-| 8 | Post or update stage comment | `AddComment()` / `UpdateComment()` | For `post_to_pr` stages: always posts new comment on issue (labeled as "comment review"); for other stages: rewrites existing stage comment or creates new one. **Review-reinvoke branch (Step 8b):** when the input batch is all-`ReviewThreadID` comments (`isReviewReinvoke` == true) and `output != ""`, also posts a Fabrik-marked `"<StageName> (review feedback addressed)"` comment on the linked PR (via `FindPRForIssue`); includes per-thread footer with path:line for each addressed thread; skipped if no linked PR is found (logs warning). The issue comment is always posted first; the PR comment is additive. |
+| 8 | Post or update stage comment | `AddComment()` / `UpdateComment()` | For `post_to_pr` stages: always posts new comment on issue (labeled as "comment review"); for other stages: rewrites existing stage comment or creates new one. **Review-reinvoke branch (Step 8b):** when the input batch is all-`ReviewThreadID` comments (`isReviewReinvoke` == true) and `output != ""`, also posts a Fabrik-marked `"<StageName> (review feedback addressed)"` comment on the linked PR (via `FindPRForIssue`); includes per-thread footer with path:line for each addressed thread; skipped if no linked PR is found (logs warning). The issue comment is always posted first; the PR comment is additive. **Suppressed on `FABRIK_NO_WORK_NEEDED` (#1088):** when the invocation output contains `FABRIK_NO_WORK_NEEDED` (checked before markers are stripped), none of the three reply paths above post — no stage comment, no `post_to_pr` comment, no review-reinvoke PR summary. Posting *any* reply is what re-triggers a subscribed bot into a loop, so silence replaces the old "not actionable" message. Steps 6 (issue-body update), 9 (editing-label removal), 10 (🚀 reactions), and 11 (stage-complete handling) are unaffected — only the reply post itself is gated. |
 | 9 | Remove `fabrik:editing` label | `RemoveLabelFromIssue("fabrik:editing")` | Releases the editing mutex |
 | 10 | React with 🚀 to all processed comments + resolve review threads | `AddCommentReaction("rocket")` / `AddPRReviewCommentReaction("rocket")` + `ResolveReviewThread()` | Marks comments as processed (durable); resolves addressed review threads |
 | 11 | If FABRIK_STAGE_COMPLETE was detected: handle completion | `handleStageComplete()` | Same completion flow as a normal stage invocation (advance, PR ops, etc.) |
@@ -3563,7 +3568,9 @@ Comments can trigger processing through three paths in `processItem()`:
 2. **Paused unpause:** `fabrik:paused` present + new **human** comments (`humanNewComments()`) → remove `fabrik:paused`, `clearFailedStage()` → fall through → `processComments()`
 3. **Normal comment processing:** Item is not paused → `findNewComments()` finds comments (human or bot) → `processComments()`
 
-In paths 1 and 2, `humanNewComments()` only gates *whether* to resume — once a human comment authorizes it, the raw (unfiltered) comment set from `findNewComments()` is what's actually handed to `processComments()`, in the same `processItem` invocation. Any bot comments that accumulated while paused/awaiting-input are processed together with the resuming human comment, not deferred to a later poll (#1083).
+In paths 1 and 2, `humanNewComments()` only gates *whether* to resume — once a human comment authorizes it, the raw (unfiltered) comment set from `findNewComments()` is what's actually handed to `processComments()`, in the same `processItem` invocation. Any bot comments that accumulated while paused/awaiting-input are processed together with the resuming human comment, not deferred to a later poll (#1083) — except bot service-notice comments (§4.1 signal 4), which `findNewComments()` excludes from that raw set entirely regardless of pause state, since they are non-actionable either way.
+
+All three paths ultimately source their candidate comments from `findNewComments()` (paths 1–2 via `humanNewComments()`'s wrapping, path 3 directly), so the bot service-notice exclusion (§4.1 signal 4) applies uniformly across all of them — a quota/rate-limit bot notice never reaches `processComments()` via any path.
 
 ### 4.5 markCommentsSeenByStage
 
