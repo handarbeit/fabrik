@@ -730,6 +730,36 @@ The "baseline clean AND working tree dirty" guard for Implement prevents a pre-e
 | Column `<X>`, Locked + In Progress | Turn limit hit | No progress detected or progress check failed | Same column, Cooldown | | | No extension; treated as turn-limit failure; `CooldownAt("periodic-re-eval")` recorded; WIP commit + push |
 | Column `<X>`, Locked + In Progress | FABRIK_STAGE_COMPLETE (any extension) | `completed = true` | Same column, Complete | `stage:<X>:complete` | `fabrik:locked:<user>`, `stage:<X>:in_progress` | Normal completion flow; extend-turns label persists to next stage |
 
+#### Turn-Cap Retry Provenance
+
+The extension loop above only engages when `err == nil` — but a real-world turn-cap kill (the Claude CLI's own `--max-turns` self-termination) exits **non-zero**, so `completed = false` and `err != nil` together. That combination falls straight through to the cooldown/retry path (§ Cooldown Retry and Failed Stage Escalation): a later poll re-invokes the same stage with `resume=true`, against a worktree and a resumed Claude session that already carry the killed run's partial work. Without a marker, the successor's posted comment reads identically to a normal, from-scratch completion — a reader has no way to tell it may be reporting on inherited work as first-hand.
+
+**Detection condition (independent of `err`):** `usage.MaxTurns > 0 && usage.TurnsUsed >= usage.MaxTurns && !completed`. This deliberately does not require `err == nil` — copying the extension loop's `hitLimit` condition here would never fire for the real-world case above.
+
+**Storage:** `StageState.LastRunCapped map[string]bool`, keyed by stage name — stage-scoped, not item-scoped. This is unconditionally overwritten in `finalizeStageOutcome` on every finalized invocation of the stage (applied via the `StageCappedRunRecorded` mutation), so:
+- a normal completion clears a stale capped flag from an earlier run, and
+- a chain of consecutive capped runs (e.g. 51/51/23/18/18 turns across five Implement invocations) keeps the flag set for each successor in the chain, not just the first.
+
+Stage-scoping matters because `ItemState.LastInvocationCompleted`/`LastTokenUsage` are overwritten by *any* invocation for the item, including a comment-processing run that happens to land between a capped run and its retry — those item-scoped fields would silently pick up the wrong invocation.
+
+**Read timing:** `processItem` reads `snap.StageCapped(stage.Name)` at dispatch time, before the current invocation runs — this captures whether the *immediately preceding* finalized invocation of this stage was capped, independent of how the current invocation itself turns out.
+
+**Annotation:** When the pre-dispatch read is `true`, `finalizeStageOutcome` prepends a one-line callout to the stage's posted output (both the issue-comment and PR-comment paths share the same `postOutput` value, so both carry it):
+
+> ⚠️ **Provenance notice:** the previous attempt at this stage was stopped after hitting its turn limit. This run resumed that session — treat any claims about freshly-run commands or verification accordingly.
+
+The annotation carries no turn numbers (reproducing the predecessor's own usage would require a second stage-scoped field for no functional gain) and is only prepended when `postOutput` is non-empty (a degenerate/suppressed output is never annotated). It is comment-only — nothing is injected into the resumed session's own prompt context, so the retry's behavior is unaffected; this is a reader-facing provenance marker, not a behavior change to the retry itself.
+
+**`history.json` field:** `InvocationRecorded.AfterCappedRun` (mirrored into `ItemState.LastInvocationAfterCappedRun`) records the same pre-dispatch flag, forwarded by `InvocationObserver` into `tui.JobCompletedEvent.AfterCappedRun` and `tui.HistoryEntry.AfterCappedRun`. The History pane renders a dim `⚠cap` marker alongside the existing `↻` retry indicator when set (§ USER_GUIDE.md History pane table); `fabrik watch` picks up the same field for free since it consumes `tui.HistoryEntry` directly.
+
+**Log-only "suspicious shape" heuristics** (exploratory corroborating signals; neither gates behavior, both accept false negatives):
+- A successor invocation that itself resumed after a capped predecessor, completed, and used under a quarter of the stage's turn budget (`completed && afterCapped && usage.TurnsUsed < stage.MaxTurns/4`) logs a `[#N warn]` line — the "few turns to report on commands that each cost a turn" signature from the issue's Observed section.
+- Stage output containing language naming the inherited-work situation outright (a conservative, case-insensitive substring match against phrases like "prior session", "interrupted session", "prior attempt") logs a separate `[#N warn]` line — the successor is aware it inherited prior work and still reports on it as first-hand.
+
+**Scope:** Full-stage invocations only (`finalizeStageOutcome`). The structurally identical comment-processing retry path (`engine/comments.go`, governed by `comment_max_turns`) is not covered — comment review already has a human in the loop reading the thread, and extending parity there is a deliberately separate follow-up.
+
+See ADR-071 for the rationale behind stage-scoped storage, comment-only annotation, and the full-stage-only scope decision.
+
 #### Cleanup Stage
 
 | Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |

@@ -2097,6 +2097,7 @@ cost, and issue title. Status icons:
 | `?` | Stage blocked / awaiting user input |
 | `↻` | Stage retrying |
 | `💬` | Issue has unprocessed comments |
+| `⚠cap` | This run resumed a same-stage predecessor that was stopped at its turn limit — treat claims about freshly-run commands or verification with caution (see Turn-Cap Retry Provenance in `state-machine.md`) |
 
 **Warnings panel**: Sits below History and surfaces actionable pre-flight issues that Fabrik detected at startup (e.g. `allow_auto_merge` disabled on a managed repo, stage-config drift). The panel header is colour-coded: dim grey for zero outstanding warnings, yellow for 1–2, red for 3+. The panel's appearance when there are no active warnings depends on whether there are dismissed warnings:
 
