@@ -348,11 +348,13 @@ func TestHumanNewComments(t *testing.T) {
 	}
 }
 
-// TestHumanNewComments_MixedBatch_KeepsOnlyHuman verifies that when a paused
-// item receives both a human resume comment and bot chatter in the same
-// batch, only the human comment is handed to processComments — the bot
-// comment is not silently promoted into the "resume" content just because
-// it arrived alongside a valid trigger.
+// TestHumanNewComments_MixedBatch_KeepsOnlyHuman verifies that humanNewComments
+// isolates the human-authored comment out of a mixed human+bot batch. This
+// filtered result is used only to decide *whether* to resume a paused /
+// awaiting-input item — it is not what gets handed to processComments once
+// resumed (processItem passes the full raw findNewComments batch at that
+// point; see TestProcessItem_Paused_MixedBatch_ProcessesBothCommentsOnUnpause
+// and its awaiting-input counterpart).
 func TestHumanNewComments_MixedBatch_KeepsOnlyHuman(t *testing.T) {
 	e := &Engine{
 		cfg:   Config{User: "operator"},
