@@ -163,6 +163,24 @@ func (e *Engine) settlePRMergeState(item gh.ProjectItem, _ *stages.Stage) PRSett
 	}
 
 	if len(checkRuns) == 0 {
+		// ADR-071: a confirmed required-context failure must block regardless
+		// of hadChecks/dwell/mergeable_state — those all exist to wait out
+		// transient GitHub propagation delays for check-run-based CI, but a
+		// classic commit status (the local-CI-takeover case #933 was filed
+		// for) has no check-run footprint for them to react to, and a
+		// confirmed failure is not transient. Checked here, ahead of all of
+		// them, so it isn't masked as generic PRMergeUnsettled by the R3
+		// mergeable_state branch below (which fires for almost any non-empty
+		// mergeable_state, e.g. "blocked" — exactly this scenario). A merely
+		// missing/pending required context is NOT short-circuited here: it
+		// defers to the existing hadChecks/dwell/R3 handling below, since
+		// nothing has regressed yet and unconfigured repos must see zero
+		// behavior change (classifyRequiredContexts is a no-op when
+		// required_status_contexts isn't configured for the repo).
+		if rcStatus, rcMissing, rcPending, rcFailed := e.classifyRequiredContexts(item.Number, owner, repo, pr.HeadSHA, nil); rcStatus == gh.RequiredContextsFailed {
+			return e.requiredContextsSettleResult(item.Number, mergeableState, nil, pr, rcStatus, rcMissing, rcPending, rcFailed)
+		}
+
 		var hadChecks bool
 		var lpr *itemstate.LinkedPRState
 		if snap, snapErr := e.store.Get(itemRepo, item.Number); snapErr == nil {
