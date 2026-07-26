@@ -366,6 +366,9 @@ func (e *Engine) publishCommentOutput(owner, repo string, item gh.ProjectItem, s
 	branch, commit, mainSHA, timestamp := captureGitMeta(workDir, baseBranch)
 
 	summary := extractSummary(output)
+	// Captured before markers are stripped below — CheckNoWorkNeeded matches the
+	// raw marker line, which stripLine removes a few lines down.
+	noWorkNeeded := CheckNoWorkNeeded(output)
 
 	// Strip FABRIK_ISSUE_UPDATE block from output, then update issue body.
 	if updatedBody := extractUpdatedBody(output); updatedBody != "" {
@@ -390,7 +393,13 @@ func (e *Engine) publishCommentOutput(owner, repo string, item gh.ProjectItem, s
 	// Rewrite or create the stage comment (unless post_to_pr). For post_to_pr
 	// stages the stage output lives on the PR; comment processing output on
 	// such stages is posted as a new comment on the issue as before.
-	if output != "" {
+	// Suppressed entirely on a "no action needed" verdict (#1088) — posting any
+	// reply is what re-triggers a subscribed bot into a runaway reply loop
+	// (#1083), so silence is the correct response here, not a "not actionable"
+	// message.
+	if output != "" && noWorkNeeded {
+		e.logf(item.Number, "comments", "suppressing reply for %s — verdict was FABRIK_NO_WORK_NEEDED\n", stage.Name)
+	} else if output != "" {
 		if stage.PostToPR {
 			comment := formatOutputComment(stage.Name+" (comment review)", output, "", branch, commit, mainSHA, timestamp)
 			e.postItemComment(item, comment, true)
@@ -412,8 +421,8 @@ func (e *Engine) publishCommentOutput(owner, repo string, item gh.ProjectItem, s
 	// comments), also post a Fabrik-marked summary on the linked PR. The
 	// existing issue comment above is unchanged (R4). Gate: output != "" and a
 	// linked PR exists. No post_to_pr check — linked-PR existence is the only
-	// gate (R5).
-	if isReviewReinvoke(comments) && output != "" {
+	// gate (R5). Also suppressed on a "no action needed" verdict, same as above.
+	if isReviewReinvoke(comments) && output != "" && !noWorkNeeded {
 		prNumber, prErr := e.client.FindPRForIssue(owner, repo, item.Number)
 		if prErr != nil {
 			e.logf(item.Number, "warn", "review reinvoke: could not find PR for issue: %v\n", prErr)
