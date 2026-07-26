@@ -46,4 +46,9 @@ Fabrik maintains local ephemeral state only:
 - Session files (`~/.fabrik/sessions/`): Claude Code session IDs for resumption.
 - Worktrees (`.fabrik/worktrees/`): Git worktrees for issue isolation.
 
+> **Superseded in part by [ADR-023](023-cwd-relative-runtime-state.md)**: session files and
+> logs moved from `~/.fabrik/` to `<cwd>/.fabrik/` in v0.0.32. The paths above describe the
+> layout at the time of this decision, not current behaviour. The decision this ADR records —
+> GitHub as the sole authoritative state store — is unaffected.
+
 None of this is authoritative — it's a cache that can be safely deleted.

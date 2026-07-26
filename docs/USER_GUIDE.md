@@ -1035,6 +1035,23 @@ When a stage doesn't complete (Claude doesn't output `FABRIK_STAGE_COMPLETE`):
 2. **Resume**: On retry, Claude resumes the existing conversation session with full context.
    The worktree is left as-is (no rebase) to preserve Claude's context.
 3. **WIP commit**: Partial work is committed and pushed to preserve progress.
+
+> **Reading the output of a resumed stage.** Because the retry continues the *same* session
+> rather than starting a new one, its posted comment can legitimately describe work the
+> earlier attempt performed — a test suite run before a turn-cap kill, for example, is
+> reported by the retry without being re-run. Two consequences routinely look like defects
+> but are not:
+>
+> - **A retry may report commands it did not run in that invocation.** The same session ran
+>   them earlier and still has the results in context. This is continuation, not fabrication.
+> - **A retry that completes in very few turns is the expected shape.** The work is already
+>   done; the continuation only needs enough turns to write it up. A two-turn completion
+>   following a turn-capped attempt is a resume working correctly.
+>
+> The one case where a retry genuinely cannot know what its predecessor did is when the
+> session file is missing, unreadable, or zero-length, so `--resume` is skipped and a fresh
+> session starts against the existing worktree. This is not currently detected or logged
+> (#1117). See *Session Resume* in [`stage-lifecycle.md`](stage-lifecycle.md) for detail.
 4. **Max retries**: After `--max-retries` failures (default 3):
    - `fabrik:paused` and `stage:<name>:failed` labels are added
    - An explanatory comment is posted on the issue
