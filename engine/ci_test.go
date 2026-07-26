@@ -1315,7 +1315,7 @@ func TestCheckCIGate_PostPushDwell_Integration(t *testing.T) {
 	}
 }
 
-// ── classifyCIFromRequiredContexts (ADR-071 / #933) ───────────────────────────
+// ── classifyCIFromRequiredContexts (ADR-072 / #933) ───────────────────────────
 
 // TestCheckCIGate_RequiredContextFailed_BlocksAndAddsLabel covers the #933
 // regression: a confirmed required-context failure (e.g. a classic commit

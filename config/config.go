@@ -13,20 +13,20 @@ import (
 // ProjectConfig holds the non-secret, project-level settings read from
 // .fabrik/config.yaml. All fields are optional; absent fields stay zero/nil.
 type ProjectConfig struct {
-	Owner         string   `yaml:"owner"`
-	Repo          string   `yaml:"repo"`
-	ProjectNum    *int     `yaml:"project"`
-	OwnerType     string   `yaml:"owner_type"`
-	User          string   `yaml:"user"`
-	StagesDir     string   `yaml:"stages"`
-	Poll          *int     `yaml:"poll"`
-	MaxConcurrent *int     `yaml:"max_concurrent"`
-	MaxRetries    *int     `yaml:"max_retries"`
-	Yolo          bool     `yaml:"yolo"`
-	AutoUpgrade   bool     `yaml:"auto_upgrade"`
-	GitSSH        bool     `yaml:"git_ssh"`
-	TUI           *bool    `yaml:"tui"`
-	DebugOutput   bool     `yaml:"debug_output"`
+	Owner                   string   `yaml:"owner"`
+	Repo                    string   `yaml:"repo"`
+	ProjectNum              *int     `yaml:"project"`
+	OwnerType               string   `yaml:"owner_type"`
+	User                    string   `yaml:"user"`
+	StagesDir               string   `yaml:"stages"`
+	Poll                    *int     `yaml:"poll"`
+	MaxConcurrent           *int     `yaml:"max_concurrent"`
+	MaxRetries              *int     `yaml:"max_retries"`
+	Yolo                    bool     `yaml:"yolo"`
+	AutoUpgrade             bool     `yaml:"auto_upgrade"`
+	GitSSH                  bool     `yaml:"git_ssh"`
+	TUI                     *bool    `yaml:"tui"`
+	DebugOutput             bool     `yaml:"debug_output"`
 	SymlinkEnv              bool     `yaml:"symlink_env"`
 	WorktreeBoundaryAudit   bool     `yaml:"worktree_boundary_audit"`
 	Version                 string   `yaml:"version"`
@@ -47,7 +47,7 @@ type ProjectConfig struct {
 	// RequiredStatusContexts lists, per "owner/repo", the status/check-run
 	// context names that must report a confirmed success on a PR's exact head
 	// SHA before the ci-gate will clear it. Unconfigured repos get no
-	// behavior change (ADR-071). Checked against the union of check-run names
+	// behavior change (ADR-072). Checked against the union of check-run names
 	// and classic commit-status contexts observed on the head SHA.
 	RequiredStatusContexts map[string][]string `yaml:"required_status_contexts"`
 }
