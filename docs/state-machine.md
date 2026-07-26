@@ -65,7 +65,7 @@ These labels define distinct states (their presence changes what the engine does
 |-------|------|----------------|
 | `fabrik:locked:<user>` | Lock | Yes — gates processing by other instances |
 | `fabrik:editing` | Mutex | Yes — prevents stage dispatch during comment processing |
-| `fabrik:paused` | Pause | Yes — blocks all processing unless a comment arrives |
+| `fabrik:paused` | Pause | Yes — blocks all processing unless a human comment arrives |
 | `fabrik:awaiting-input` | Sub-pause | Yes (with `fabrik:paused`) — blocked-on-input variant |
 | `fabrik:awaiting-review` | Gate | Yes — review gate is active |
 | `fabrik:awaiting-ci` | Gate | Yes — CI gate is active; waiting for CI checks to pass (checks may be running or have failed) |
@@ -107,7 +107,7 @@ Each active stage column has the same set of reachable sub-states:
 | **Idle** | (none of the controlling labels) | Ready for the engine to pick up |
 | **Locked + In Progress** | `fabrik:locked:<user>`, `stage:<X>:in_progress` | Stage invocation is active |
 | **Editing** | `fabrik:editing` | Comment processing is active (Claude invoked for comment review) |
-| **Paused** | `fabrik:paused` | Manually paused or engine-escalated pause; no work until unpause or comment |
+| **Paused** | `fabrik:paused` | Manually paused or engine-escalated pause; no work until unpause or a human comment (bot-authored comments do not resume) |
 | **Paused + Failed** | `fabrik:paused`, `stage:<X>:failed` | Engine paused after MaxRetries exhausted |
 | **Awaiting Input** | `fabrik:paused`, `fabrik:awaiting-input` | Claude signaled FABRIK_BLOCKED_ON_INPUT; waiting for user comment. Engine posts a dedicated `🏭 **Fabrik** — @<user>:` notification comment so GitHub delivers a mobile push to the configured operator (`cfg.User`). If Claude's output included a `FABRIK_SUMMARY` block, the question is embedded as a blockquote. |
 | **Awaiting Review** | `fabrik:awaiting-review`, `stage:<X>:complete` | Review gate active; waiting for PR reviewers (only on stages with `wait_for_reviews: true`) |
@@ -248,8 +248,8 @@ Reconstruction reads only durable state (never the map) and never launches a gor
 |-------|----------|------------|------------|--------------|-------|
 | `fabrik:locked:<user>` | `processItem` | Before stage invocation (lock-then-verify protocol) | `releaseLock` | On stage completion, permanent failure, blocked-on-input, or lock conflict loss | Prevents other instances from processing the item |
 | `fabrik:editing` | `processComments` | Step 2 of comment processing | `processComments` | Step 9 of comment processing (also on error paths). Removal uses bounded retry (≤3 attempts, 500ms/1s/2s backoff) for transient network errors; `ErrNotFound` is a silent no-op. Stale labels with no active Worker are cleaned up at startup by `runStartupCleanup()`. | Pre-dispatch gate in `itemNeedsWork` (prevents goroutine launch); defense-in-depth check retained in `processItem` for the race window. Symmetric with `fabrik:locked:<other-user>`. Note: `JobStartedEvent` is emitted at `processComments` entry (step 0) — *before* `fabrik:editing` is added at step 2. The pre-dispatch gate only blocks *new* dispatches; the active session's `JobStartedEvent` fires before the label exists. |
-| `fabrik:paused` | `escalateFailedStage`, `blockOnInput`, `pauseForReviewTimeout`, `pauseForReviewCycleLimit`, `pauseForCITimeout`, `pauseForCIFixCycleLimit`, `pauseForRebaseCycleLimit`, `attemptMergeOnValidate` (on ErrNotMergeable rebase cycle limit reached, or CI wait timeout), `handleStopRequest` (TUI manual stop) | After MaxRetries, FABRIK_BLOCKED_ON_INPUT, review/CI/rebase timeout or cycle limit, or TUI `s`-key stop | User (manual removal), or `processItem` (on new comment that triggers unpause) | When user removes it manually, or user comments on a paused issue | Blocks all processing; user comment is an implicit resume |
-| `fabrik:awaiting-input` | `blockOnInput`, `pauseForReviewTimeout`, `pauseForReviewCycleLimit`, `pauseForCITimeout`, `pauseForCIFixCycleLimit`, `handleStopRequest` (TUI manual stop) | After FABRIK_BLOCKED_ON_INPUT, review/CI timeout/cycle limit, or TUI `s`-key stop | `unblockAwaitingInput`; `handleStageComplete` (on FABRIK_STAGE_COMPLETE, to clear any orphaned label); `handleNoWorkNeeded` (on FABRIK_NO_WORK_NEEDED); `cleanupClosedIssueTransientLabels` (defensive sweep) | When user comment arrives; when a stage completes (removes any orphaned label that survived a manual `fabrik:paused` removal); or when issue is closed (defensive sweep — label has no meaning on a closed issue) | Combined with `fabrik:paused`, identifies the "awaiting user input" pause variant |
+| `fabrik:paused` | `escalateFailedStage`, `blockOnInput`, `pauseForReviewTimeout`, `pauseForReviewCycleLimit`, `pauseForCITimeout`, `pauseForCIFixCycleLimit`, `pauseForRebaseCycleLimit`, `attemptMergeOnValidate` (on ErrNotMergeable rebase cycle limit reached, or CI wait timeout), `handleStopRequest` (TUI manual stop) | After MaxRetries, FABRIK_BLOCKED_ON_INPUT, review/CI/rebase timeout or cycle limit, or TUI `s`-key stop | User (manual removal), or `processItem` (on new human comment that triggers unpause) | When user removes it manually, or a human comments on a paused issue | Blocks all processing; a human comment is an implicit resume — bot-authored comments (`github.IsBotLogin`) and Fabrik's own output do not resume (`humanNewComments`, #1083) |
+| `fabrik:awaiting-input` | `blockOnInput`, `pauseForReviewTimeout`, `pauseForReviewCycleLimit`, `pauseForCITimeout`, `pauseForCIFixCycleLimit`, `handleStopRequest` (TUI manual stop) | After FABRIK_BLOCKED_ON_INPUT, review/CI timeout/cycle limit, or TUI `s`-key stop | `unblockAwaitingInput`; `handleStageComplete` (on FABRIK_STAGE_COMPLETE, to clear any orphaned label); `handleNoWorkNeeded` (on FABRIK_NO_WORK_NEEDED); `cleanupClosedIssueTransientLabels` (defensive sweep) | When a human comment arrives (bot comments do not resume); when a stage completes (removes any orphaned label that survived a manual `fabrik:paused` removal); or when issue is closed (defensive sweep — label has no meaning on a closed issue) | Combined with `fabrik:paused`, identifies the "awaiting user input" pause variant |
 | `fabrik:awaiting-review` | `handleStageComplete` (Path 1 — only when `wait_for_ci: false`), `checkReviewGate` (Path 2) | Path 1: optimistically after stage completion when `wait_for_reviews: true` **and `wait_for_ci: false`** (does not check reviewer state — data is stale; omitted for `wait_for_ci: true` stages because Path 2 handles the gate after CI clears). Path 2: when `LinkedPRReviewRequests` is non-empty OR when `len(outstanding)==0 && !hasReviews` (the bot self-submission case — covers Copilot/Gemini-style reviewers that don't appear in the formal requested-reviewer list but still need to submit a review) | `checkReviewGate` (both natural clear and timeout paths); `cleanupClosedIssueTransientLabels` (defensive sweep) | When all reviewers submit, or when timeout elapses (removed by `checkReviewGate` before `pauseForReviewTimeout` is called); or when issue is closed (defensive sweep) | Phase 1 / Phase 2 reprompt timers in `checkReviewGate` fire on label-applied-at age (not on `updatedAt` movement). A non-responsive bot reviewer produces no comment / no review / no PR activity, so `updatedAt` never moves — without periodic re-evaluation the timers would never get a chance to fire. The catch-up loop's blocked-path records `CooldownAt("review-blocked")` (via `CooldownRecorded{Reason: "review-blocked"}` mutation) so `itemMayNeedWork`'s cooldown retry path re-admits the item every 10 × `PollSeconds` (same pattern as `fabrik:blocked`); a per-poll cache bypass is intentionally avoided because long-lived review-waiting items would otherwise become a permanent GraphQL hot path. Blocks auto-advance until review gate clears |
 | `fabrik:awaiting-ci` | `handleStageComplete` (on FABRIK_STAGE_COMPLETE for `wait_for_ci: true` stages; idempotent); `checkCIGate` (on confirmed CI failure; idempotent) | `handleStageComplete`: immediately on FABRIK_STAGE_COMPLETE — replaces premature `stage:X:complete` and keeps the item in the CI-await window (ADR 032). `checkCIGate`: when CI check runs for the PR head SHA have `conclusion: failure/timed_out/action_required`. | `checkCIGate` (when `mergeable_state ∈ {clean, unstable}`, when CI check classification reports all-green, or when gate times out); `attemptMergeOnValidate` (when `mergeable_state ∈ {clean, unstable}` shortcut fires); `cleanupClosedIssueTransientLabels` (defensive sweep) | When GitHub's `mergeable_state` indicates the PR is mergeable (v0.0.52 shortcut — the `MergeableStateAccepted` allowlist); when all CI checks pass (green) under the per-check classification fallback; when timeout elapses (removed before `pauseForCITimeout` is called); or when issue is closed (defensive sweep) | Signals CI gate is active (pending or failed); triggers `itemMayNeedWork` updatedAt cache bypass; suppresses dispatcher re-invocation (`itemNeedsWork` returns false); blocks auto-advance until CI gate clears. **`stage:X:complete` is absent while this label is present — it is added by `checkCIGate` when CI clears (R5) or when `mergeable_state` shortcut clears the gate (v0.0.52).** |
 | `fabrik:rebase-needed` | `checkMergeabilityGate` (catch-up loop, `wait_for_ci: true` stages); `checkAutoMergeConvergence` (convergence flow, yolo+Validate with `fabrik:auto-merge-enabled`) | When GitHub reports `mergeable == false` on the linked PR — a confirmed base-branch conflict. Applied idempotently in both paths. NOT added when `mergeable == null` (GitHub still computing). | `checkMergeabilityGate` (when mergeable flips back to true); `checkAutoMergeConvergence` (when PR merges or closes); `cleanupClosedIssueTransientLabels` (defensive sweep) | When GitHub reports `mergeable == true` (after Claude's rebase push lands), or when PR merges/closes; or when issue is closed (defensive sweep) | Signals confirmed merge conflict; triggers `itemMayNeedWork` updatedAt cache bypass (base-branch advances don't bump the item's `updatedAt`); blocks CI gate and auto-advance until rebase resolves the conflict |
@@ -293,9 +293,9 @@ Thirteen distinct event types drive state transitions (§2.1–2.11, §2.13, §2
 **Code path:** `itemNeedsWork()` detects new comments → `processItem()` routes to `processComments()` or triggers unpause/unblock
 
 **Effect:** Can trigger three distinct behaviors:
-1. **Unpause:** On a paused issue, the comment removes `fabrik:paused` (and clears failed state if present) and falls through to comment processing
-2. **Unblock awaiting-input:** On an awaiting-input issue, removes both `fabrik:paused` and `fabrik:awaiting-input`, then routes to `processComments()`
-3. **Comment processing:** On an active (non-paused) issue, routes directly to `processComments()`
+1. **Unpause:** On a paused issue, a **human** comment (`humanNewComments()` — excludes bot logins via `github.IsBotLogin` and Fabrik's own identity) removes `fabrik:paused` (and clears failed state if present) and falls through to comment processing. A bot-authored comment does not unpause (#1083).
+2. **Unblock awaiting-input:** On an awaiting-input issue, a **human** comment removes both `fabrik:paused` and `fabrik:awaiting-input`, then routes to `processComments()`. A bot-authored comment does not unblock.
+3. **Comment processing:** On an active (non-paused) issue, any new comment (human or bot) routes directly to `processComments()` — unaffected by the human-only resume restriction above
 
 ### 2.3 PR Review State Change
 
@@ -383,7 +383,7 @@ Note: within `checkDependencies()`, for each blocker the engine first consults `
 **Code path:** Detected on the next poll cycle when labels are fetched
 
 **Effect varies by label:**
-- Adding `fabrik:paused` → engine skips the item (unless a comment arrives)
+- Adding `fabrik:paused` → engine skips the item (unless a human comment arrives)
 - Removing `fabrik:paused` from a failed issue → `clearFailedStage()` resets retry state
 - Adding `fabrik:yolo` or `fabrik:cruise` → enables auto-advance (even mid-run, due to label re-fetch in `handleStageComplete()`)
 - Adding `model:<name>` or `effort:<level>` → takes effect on next Claude invocation
@@ -594,7 +594,7 @@ This table shows the normal flow when an issue progresses through the pipeline w
 |--------------|-------|-------|-----------------|--------------|----------------|--------------|
 | Any active column, Idle | Human adds `fabrik:paused` | — | Same column, Paused | | | Engine skips item on next poll |
 | Same column, Paused | Human removes `fabrik:paused` | — | Same column, Idle | | | Engine processes item on next poll |
-| Same column, Paused | New user comment | — | Same column, Idle → comment processing | | `fabrik:paused` | Unpause; `clearFailedStage()` also called (clears any failed label + resets retries); falls through to `processComments()` |
+| Same column, Paused | New human comment | Not a bot login (`github.IsBotLogin`) and not Fabrik's own identity (`humanNewComments()`) | Same column, Idle → comment processing | | `fabrik:paused` | Unpause; `clearFailedStage()` also called (clears any failed label + resets retries); falls through to `processComments()`. A bot-authored comment does not match this guard and leaves the item Paused (#1083). |
 
 #### Lock Conflict (Multi-Instance)
 
@@ -616,7 +616,7 @@ This table shows the normal flow when an issue progresses through the pipeline w
 | Current State | Event | Guard | Resulting State | Labels Added | Labels Removed | Side Effects |
 |--------------|-------|-------|-----------------|--------------|----------------|--------------|
 | Column `<X>`, Locked + In Progress | FABRIK_BLOCKED_ON_INPUT | `completed` false, no error | Same column, Awaiting Input | `fabrik:paused`, `fabrik:awaiting-input` | `fabrik:locked:<user>`, `stage:<X>:in_progress` | Lock released |
-| Same column, Awaiting Input | New user comment | — | Same column → comment processing | | `fabrik:paused`, `fabrik:awaiting-input` | `unblockAwaitingInput()` clears `LastAttemptAt` for the stage; routes to `processComments()` |
+| Same column, Awaiting Input | New human comment | Not a bot login (`github.IsBotLogin`) and not Fabrik's own identity (`humanNewComments()`) | Same column → comment processing | | `fabrik:paused`, `fabrik:awaiting-input` | `unblockAwaitingInput()` clears `LastAttemptAt` for the stage; routes to `processComments()`. A bot-authored comment does not match this guard and leaves the item Awaiting Input (#1083). |
 
 #### TUI Manual Stop (s-key)
 
@@ -856,9 +856,9 @@ Note: `currentBudget > 0` is only satisfied when `fabrik:extend-turns` is presen
 
 Comments can trigger processing through three paths in `processItem()`:
 
-1. **Awaiting-input unblock:** `isAwaitingInput(item)` is true + new comments → `unblockAwaitingInput()` → `processComments()`
-2. **Paused unpause:** `fabrik:paused` present + new comments → remove `fabrik:paused`, `clearFailedStage()` → fall through → `processComments()`
-3. **Normal comment processing:** Item is not paused → `findNewComments()` finds comments → `processComments()`
+1. **Awaiting-input unblock:** `isAwaitingInput(item)` is true + new **human** comments (`humanNewComments()`) → `unblockAwaitingInput()` → `processComments()`
+2. **Paused unpause:** `fabrik:paused` present + new **human** comments (`humanNewComments()`) → remove `fabrik:paused`, `clearFailedStage()` → fall through → `processComments()`
+3. **Normal comment processing:** Item is not paused → `findNewComments()` finds comments (human or bot) → `processComments()`
 
 ### 4.5 markCommentsSeenByStage
 
@@ -1969,9 +1969,9 @@ Guards are checked in this order. The first matching guard determines behavior:
 | 2 | Repo not ready | `ensureRepoReady()` fails | Skip (ErrSkipItem) or return error |
 | 3 | Locked by other user | `fabrik:locked:<other>` present | Skip with log |
 | 4 | Editing | `fabrik:editing` present | Skip with log (defense-in-depth; primary gate is in `itemNeedsWork`) |
-| 5 | Awaiting input + comment | `isAwaitingInput()` + new comments | Unblock → comment processing |
+| 5 | Awaiting input + comment | `isAwaitingInput()` + new **human** comments (`humanNewComments()`) | Unblock → comment processing |
 | 6 | Awaiting input, no comment | `isAwaitingInput()` | Skip with log |
-| 7 | Paused + comment | `fabrik:paused` + new comments | Unpause → fall through |
+| 7 | Paused + comment | `fabrik:paused` + new **human** comments (`humanNewComments()`) | Unpause → fall through |
 | 8 | Paused, no comment | `fabrik:paused` | Skip with log |
 | 9 | Dependencies blocked | `checkDependencies()` returns true | Skip (label + comment handled by checkDependencies) |
 | 10 | Cleanup stage | `stage.CleanupWorktree` | Remove worktree, add complete label |
@@ -2386,11 +2386,11 @@ stateDiagram-v2
         Cooldown --> Running : Cooldown expired (retry)
         Cooldown --> PausedFailed : MaxRetries exceeded
 
-        AwaitingInput --> CommentProcessing : User comment
+        AwaitingInput --> CommentProcessing : Human comment
         PausedFailed --> Idle : User removes fabrik:paused
 
         Idle --> Paused : Human adds fabrik:paused
-        Paused --> CommentProcessing : User comment (implicit unpause)
+        Paused --> CommentProcessing : Human comment (implicit unpause)
         Paused --> Idle : Human removes fabrik:paused
 
         Idle --> Blocked : Open dependencies
@@ -2740,8 +2740,8 @@ The engine uses two distinct in-memory stores (both in `itemstate.Store`) for co
 | 2 | Closed issue | Not closed, OR cleanup stage, OR has `stage:<X>:complete` |
 | 3 | Cleanup stage | Not paused, not complete, worktree exists |
 | 4 | Locked by other | No `fabrik:locked:<other>` label |
-| 5 | Awaiting input | `isAwaitingInput()` true AND new comments exist |
-| 6 | Paused | Not paused, OR paused with new comments |
+| 5 | Awaiting input | `isAwaitingInput()` true AND new **human** comments exist (`humanNewComments()`) |
+| 6 | Paused | Not paused, OR paused with new **human** comments (`humanNewComments()`) |
 | 7 | New comments | Any unprocessed comments → true |
 | 8 | PR item | Not a PR (PRs only support comments, checked after comment check) |
 | 9 | Stage complete | No `stage:<X>:complete` label |
