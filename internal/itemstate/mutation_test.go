@@ -527,6 +527,83 @@ func TestApplyWorkerExited(t *testing.T) {
 	}
 }
 
+// ---- StageCappedRunRecorded ----
+
+func TestApplyStageCappedRunRecorded(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, StageCappedRunRecorded{Repo: testRepo, Number: 1, StageName: "Review", Capped: true}, StageStateChanged)
+	if !getItem(t, s, testRepo, 1).StageState.LastRunCapped["Review"] {
+		t.Error("LastRunCapped[Review] not set")
+	}
+	snap, _ := s.Get(testRepo, 1)
+	if !snap.StageCapped("Review") {
+		t.Error("Snapshot.StageCapped(Review) = false, want true")
+	}
+}
+
+// TestApplyStageCappedRunRecordedOverwrites verifies the flag is unconditionally
+// overwritten on every finalize — a normal completion after a capped run clears it,
+// which is what makes the "immediately preceding run" framing correct rather than
+// sticky forever once set.
+func TestApplyStageCappedRunRecordedOverwrites(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	s.Apply(StageCappedRunRecorded{Repo: testRepo, Number: 1, StageName: "Review", Capped: true})
+	if !getItem(t, s, testRepo, 1).StageState.LastRunCapped["Review"] {
+		t.Fatal("precondition: LastRunCapped[Review] not set")
+	}
+	applyExpect(t, s, StageCappedRunRecorded{Repo: testRepo, Number: 1, StageName: "Review", Capped: false}, StageStateChanged)
+	if getItem(t, s, testRepo, 1).StageState.LastRunCapped["Review"] {
+		t.Error("LastRunCapped[Review] should be cleared after Capped=false overwrite")
+	}
+}
+
+// TestApplyStageCappedRunRecordedIsStageScoped verifies that a capped record for one
+// stage is unaffected by a mutation (of any kind, including comment-processing state
+// or a different stage) for a different stage name — the exact mis-scoping risk
+// Research flagged for ItemState.LastInvocationCompleted/LastTokenUsage.
+func TestApplyStageCappedRunRecordedIsStageScoped(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	s.Apply(StageCappedRunRecorded{Repo: testRepo, Number: 1, StageName: "Review", Capped: true})
+
+	// An intervening comment-processing invocation for the same issue...
+	s.Apply(InvocationRecorded{Repo: testRepo, Number: 1, Completed: true, IsComment: true})
+	// ...and a different stage's own capped-run record...
+	s.Apply(StageCappedRunRecorded{Repo: testRepo, Number: 1, StageName: "Implement", Capped: false})
+
+	st := getItem(t, s, testRepo, 1)
+	if !st.StageState.LastRunCapped["Review"] {
+		t.Error("LastRunCapped[Review] was clobbered by an intervening comment invocation or a different stage's record")
+	}
+	if st.StageState.LastRunCapped["Implement"] {
+		t.Error("LastRunCapped[Implement] should be false, unaffected by Review's true record")
+	}
+}
+
+func TestSnapshot_StageCapped_FalseWhenNeverRecorded(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	snap, _ := s.Get(testRepo, 1)
+	if snap.StageCapped("Review") {
+		t.Error("StageCapped(Review) = true, want false when never recorded")
+	}
+}
+
+// TestLastRunCappedSnapshotIsDeepCopy verifies that a Snapshot taken before a later
+// StageCappedRunRecorded retains its original value — confirming copyStageState
+// deep-copies the LastRunCapped map (no shared backing map), mirroring the existing
+// EnqueueCycles deep-copy test.
+func TestLastRunCappedSnapshotIsDeepCopy(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	held := applyExpect(t, s, StageCappedRunRecorded{Repo: testRepo, Number: 1, StageName: "Review", Capped: true}, StageStateChanged)
+	if !held.StageCapped("Review") {
+		t.Fatal("precondition: held snapshot StageCapped(Review) = false, want true")
+	}
+	// Mutate the store further.
+	s.Apply(StageCappedRunRecorded{Repo: testRepo, Number: 1, StageName: "Review", Capped: false})
+	if !held.StageCapped("Review") {
+		t.Error("held snapshot mutated by later overwrite: StageCapped(Review) = false, want true")
+	}
+}
+
 // ---- InvocationRecorded ----
 
 func TestApplyInvocationRecorded(t *testing.T) {
@@ -545,6 +622,32 @@ func TestApplyInvocationRecorded(t *testing.T) {
 	}
 	if st.LastTokenUsage.InputTokens != 100 {
 		t.Errorf("LastTokenUsage.InputTokens = %d; want 100", st.LastTokenUsage.InputTokens)
+	}
+}
+
+// TestApplyInvocationRecordedAfterCappedRun verifies AfterCappedRun mirrors into
+// ItemState.LastInvocationAfterCappedRun, and that a subsequent invocation without
+// the flag clears it (mirrors the existing IsComment clear-on-next-invocation test).
+func TestApplyInvocationRecordedAfterCappedRun(t *testing.T) {
+	s := newStoreWithItem(t, testRepo, 1)
+	applyExpect(t, s, InvocationRecorded{
+		Repo:           testRepo,
+		Number:         1,
+		Completed:      true,
+		AfterCappedRun: true,
+	}, InvocationChanged)
+	if !getItem(t, s, testRepo, 1).LastInvocationAfterCappedRun {
+		t.Error("LastInvocationAfterCappedRun not set when AfterCappedRun=true")
+	}
+
+	applyExpect(t, s, InvocationRecorded{
+		Repo:           testRepo,
+		Number:         1,
+		Completed:      true,
+		AfterCappedRun: false,
+	}, InvocationChanged)
+	if getItem(t, s, testRepo, 1).LastInvocationAfterCappedRun {
+		t.Error("LastInvocationAfterCappedRun should be false after AfterCappedRun=false invocation")
 	}
 }
 
