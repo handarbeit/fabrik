@@ -27,7 +27,25 @@ func setupCloseTestRepo(t *testing.T, client *mockGitHubClient) *Engine {
 
 	mustGitDir(t, wm.baseDir, "update-ref", "refs/remotes/origin/develop", sha)
 
-	eng := testEngine(t, client, &mockClaudeInvoker{})
+	// Built directly via NewWithDeps with worktrees=nil rather than testEngine:
+	// testEngine pre-registers a non-git placeholder WorktreeManager at
+	// "owner/repo", and registerWorktrees is idempotent (a no-op when the key
+	// is already present), so it would never install the real git-backed wm
+	// built above.
+	eng := NewWithDeps(
+		Config{
+			Owner:         "owner",
+			Repo:          "repo",
+			ProjectNum:    1,
+			User:          "testuser",
+			Token:         "token",
+			MaxConcurrent: 5,
+			Stages:        testStages(),
+		},
+		client,
+		&mockClaudeInvoker{},
+		nil,
+	)
 	eng.registerWorktrees("owner/repo", wm.baseDir, worktreeRoot)
 	return eng
 }
