@@ -48,7 +48,7 @@ func TestMergePR_ConfiguredStrategyFirst(t *testing.T) {
 	srv, c := fakePRServer(t, 42,
 		func(w http.ResponseWriter, r *http.Request) {
 			mergeable := true
-			json.NewEncoder(w).Encode(map[string]interface{}{"mergeable": mergeable})
+			json.NewEncoder(w).Encode(map[string]interface{}{"mergeable": mergeable, "mergeable_state": "clean"})
 		},
 		func(w http.ResponseWriter, r *http.Request) {
 			var body map[string]interface{}
@@ -76,7 +76,7 @@ func TestMergePR_DefaultAttemptsMergeFirst(t *testing.T) {
 	srv, c := fakePRServer(t, 42,
 		func(w http.ResponseWriter, r *http.Request) {
 			mergeable := true
-			json.NewEncoder(w).Encode(map[string]interface{}{"mergeable": mergeable})
+			json.NewEncoder(w).Encode(map[string]interface{}{"mergeable": mergeable, "mergeable_state": "clean"})
 		},
 		func(w http.ResponseWriter, r *http.Request) {
 			putCalls++
@@ -104,7 +104,7 @@ func TestMergePR_405FallbackToMergeCommit(t *testing.T) {
 	srv, c := fakePRServer(t, 42,
 		func(w http.ResponseWriter, r *http.Request) {
 			mergeable := true
-			json.NewEncoder(w).Encode(map[string]interface{}{"mergeable": mergeable})
+			json.NewEncoder(w).Encode(map[string]interface{}{"mergeable": mergeable, "mergeable_state": "clean"})
 		},
 		func(w http.ResponseWriter, r *http.Request) {
 			putCalls++
@@ -145,7 +145,7 @@ func TestMergePR_NonMethodNotAllowedErrorPropagatesImmediately(t *testing.T) {
 	srv, c := fakePRServer(t, 42,
 		func(w http.ResponseWriter, r *http.Request) {
 			mergeable := true
-			json.NewEncoder(w).Encode(map[string]interface{}{"mergeable": mergeable})
+			json.NewEncoder(w).Encode(map[string]interface{}{"mergeable": mergeable, "mergeable_state": "clean"})
 		},
 		func(w http.ResponseWriter, r *http.Request) {
 			putCalls++
@@ -226,7 +226,7 @@ func TestMergePR_StrategyFallbackTable(t *testing.T) {
 			srv, c := fakePRServer(t, 42,
 				func(w http.ResponseWriter, r *http.Request) {
 					mergeable := true
-					json.NewEncoder(w).Encode(map[string]interface{}{"mergeable": mergeable})
+					json.NewEncoder(w).Encode(map[string]interface{}{"mergeable": mergeable, "mergeable_state": "clean"})
 				},
 				func(w http.ResponseWriter, r *http.Request) {
 					var body map[string]interface{}
@@ -319,6 +319,101 @@ func TestMergePR_FalseMergeable(t *testing.T) {
 	err := c.MergePR("owner", "repo", 42)
 	if !errors.Is(err, ErrNotMergeable) {
 		t.Fatalf("expected ErrNotMergeable for mergeable=false, got: %v", err)
+	}
+}
+
+// TestMergePR_MergeableStateTable exercises MergePR's mergeable x
+// mergeable_state precondition: a merge conflict (mergeable=false) must
+// still return ErrNotMergeable (the pre-existing behavior, preserving the
+// rebase-needed path), while an accepted mergeable=true PR must additionally
+// be refused with ErrNotMergeableCI — and never reach the merge endpoint —
+// unless mergeable_state is in the MergeableStateAccepted allowlist
+// ({clean, unstable}).
+func TestMergePR_MergeableStateTable(t *testing.T) {
+	tests := []struct {
+		name           string
+		mergeable      interface{} // bool or nil
+		mergeableState string
+		wantMerge      bool
+		wantErr        error // nil means "any error is fine as long as it's not the other sentinel"
+	}{
+		{"clean merges", true, "clean", true, nil},
+		{"unstable merges", true, "unstable", true, nil},
+		{"blocked refused CI", true, "blocked", false, ErrNotMergeableCI},
+		{"behind refused CI", true, "behind", false, ErrNotMergeableCI},
+		{"draft refused CI", true, "draft", false, ErrNotMergeableCI},
+		{"has_hooks refused CI", true, "has_hooks", false, ErrNotMergeableCI},
+		{"unknown refused CI", true, "unknown", false, ErrNotMergeableCI},
+		{"empty state refused CI", true, "", false, ErrNotMergeableCI},
+		{"dirty refused conflict", false, "dirty", false, ErrNotMergeable},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			putCalls := 0
+			srv, c := fakePRServer(t, 42,
+				func(w http.ResponseWriter, r *http.Request) {
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"mergeable":       tt.mergeable,
+						"mergeable_state": tt.mergeableState,
+					})
+				},
+				func(w http.ResponseWriter, r *http.Request) {
+					putCalls++
+					w.WriteHeader(200)
+					json.NewEncoder(w).Encode(map[string]interface{}{"merged": true, "message": "Pull Request successfully merged"})
+				},
+			)
+			defer srv.Close()
+
+			err := c.MergePR("owner", "repo", 42)
+
+			if tt.wantMerge {
+				if err != nil {
+					t.Fatalf("MergePR: unexpected error: %v", err)
+				}
+				if putCalls != 1 {
+					t.Errorf("expected exactly 1 PUT call, got %d", putCalls)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Errorf("error = %v, want errors.Is match for %v", err, tt.wantErr)
+			}
+			if putCalls != 0 {
+				t.Errorf("expected no PUT call when refusing merge, got %d", putCalls)
+			}
+		})
+	}
+}
+
+// TestMergePR_UnstableAcceptedExplicit is a dedicated regression test for the
+// operator-confirmed acceptance criterion that mergeable_state=unstable must
+// merge (not just an entry in the combinatorial table above) — this is the
+// {clean, unstable} decision this issue exists to make deliberate and tested.
+func TestMergePR_UnstableAcceptedExplicit(t *testing.T) {
+	putCalls := 0
+	srv, c := fakePRServer(t, 42,
+		func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(map[string]interface{}{"mergeable": true, "mergeable_state": "unstable"})
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			putCalls++
+			w.WriteHeader(200)
+			json.NewEncoder(w).Encode(map[string]interface{}{"merged": true, "message": "Pull Request successfully merged"})
+		},
+	)
+	defer srv.Close()
+
+	if err := c.MergePR("owner", "repo", 42); err != nil {
+		t.Fatalf("MergePR with mergeable_state=unstable: unexpected error: %v", err)
+	}
+	if putCalls != 1 {
+		t.Errorf("expected exactly 1 PUT call for accepted unstable state, got %d", putCalls)
 	}
 }
 
