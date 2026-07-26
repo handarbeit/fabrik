@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/handarbeit/fabrik/boardcache"
 	gh "github.com/handarbeit/fabrik/github"
 )
 

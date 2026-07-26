@@ -231,7 +231,7 @@ func (e *Engine) checkDependencies(board *gh.ProjectBoard, item gh.ProjectItem, 
 			if err := e.client.UpdateComment(owner, repo, existing.DatabaseID, newComment); err != nil {
 				e.logf(item.Number, "warn", "could not update blocked comment: %v\n", err)
 			} else if c := e.cache(); c != nil {
-				c.ApplyCommentAdded(boardcache.ItemKey(item.Repo, item.Number), gh.Comment{
+				c.ApplyCommentAdded(boardcache.ItemKey(itemRepo, item.Number), gh.Comment{
 					DatabaseID: existing.DatabaseID, Body: newComment, Author: e.cfg.User, CreatedAt: time.Now(),
 				})
 			}

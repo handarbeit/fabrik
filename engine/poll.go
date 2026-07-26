@@ -675,7 +675,7 @@ func (e *Engine) cleanupClosedIssueLocks(board *gh.ProjectBoard) {
 		} else {
 			e.logf(num, "poll", "removed stale lock label from closed issue\n")
 			if c := e.cache(); c != nil {
-				c.ApplyLabelRemoved(boardcache.ItemKey(item.Repo, item.Number), lockLabel)
+				c.ApplyLabelRemoved(boardcache.ItemKey(owner+"/"+repo, item.Number), lockLabel)
 			}
 		}
 	}

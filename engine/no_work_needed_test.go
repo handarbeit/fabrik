@@ -289,6 +289,50 @@ func TestHandleNoWorkNeeded_ClosesIssue(t *testing.T) {
 	}
 }
 
+// TestHandleNoWorkNeeded_EmptyItemRepo_CacheWriteThroughSucceeds is a
+// regression test for issue #957's cache-key sweep: settleNoWorkNeeded's
+// UpdateItemStatus and ApplyIssueClosed write-throughs used
+// boardcache.ItemKey(item.Repo, item.Number) — with item.Repo=="" (a caller
+// passing an item whose Repo field was never populated, common in
+// single-repo default setups), that resolves to a different, non-existent
+// key than the one the Store holds ("owner/repo#N"), so both write-throughs
+// silently no-op via the phantom-key guard until the next Reconcile repairs
+// them. Mirrors TestHandleNoWorkNeeded_ClosesIssue but with an empty
+// item.Repo to actually exercise the mismatch.
+func TestHandleNoWorkNeeded_EmptyItemRepo_CacheWriteThroughSucceeds(t *testing.T) {
+	client := &mockGitHubClient{}
+	eng := testEngineWithStages(t, client, testStagesWithCleanup())
+
+	cache := boardcache.NewCacheImpl(client, eng.store, func(string, ...any) {})
+	testBootstrapFromBoard(cache, &gh.ProjectBoard{
+		ProjectID: "PVT_1",
+		Items: []gh.ProjectItem{
+			{ID: "I_6", ItemID: "PVTI_6", Number: 6, Repo: "owner/repo", Status: "Plan"},
+		},
+	})
+	eng.readClient = cache
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{Number: 6, ItemID: "PVTI_6", Repo: ""}
+	stage := &stages.Stage{Name: "Plan", Order: 2}
+
+	eng.handleNoWorkNeeded(board, item, stage)
+
+	snap, err := eng.store.Get("owner/repo", 6)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if snap.State().Status != "Done" {
+		t.Errorf("Status = %q after handleNoWorkNeeded with item.Repo=\"\", want %q "+
+			"(UpdateItemStatus write-through must not silently drop the update when item.Repo is empty)",
+			snap.State().Status, "Done")
+	}
+	if !snap.IsClosed() {
+		t.Error("want IsClosed=true after handleNoWorkNeeded with item.Repo=\"\" " +
+			"(ApplyIssueClosed write-through must not silently drop the update when item.Repo is empty)")
+	}
+}
+
 // TestHandleNoWorkNeeded_CloseIssueNotCalledOnStatusFailure verifies that
 // CloseIssue is NOT called when UpdateProjectItemStatus fails — the issue
 // has not reached Done and should not be closed.
