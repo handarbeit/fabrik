@@ -330,7 +330,7 @@ func TestHumanNewComments(t *testing.T) {
 			{ID: "c1", Author: "alice", Body: "please continue"},         // human — kept
 			{ID: "c2", Author: "gemini-code-assist", Body: "quota hit"},  // bot — filtered
 			{ID: "c3", Author: "dependabot[bot]", Body: "bump version"},  // bot — filtered
-			{ID: "c4", Author: "fabrikbot", Body: "not a fabrik prefix"}, // engine's own identity — filtered
+			{ID: "c4", Author: "FabrikBot", Body: "not a fabrik prefix"}, // engine's own identity (case-insensitive) — filtered
 			{ID: "c5", Author: "bob", Body: "another human"},             // human — kept
 		},
 	}

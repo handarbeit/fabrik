@@ -42,7 +42,7 @@ func (e *Engine) findNewComments(item gh.ProjectItem) []gh.Comment {
 func (e *Engine) humanNewComments(item gh.ProjectItem) []gh.Comment {
 	var human []gh.Comment
 	for _, c := range e.findNewComments(item) {
-		if gh.IsBotLogin(c.Author) || c.Author == e.cfg.User {
+		if gh.IsBotLogin(c.Author) || strings.EqualFold(c.Author, e.cfg.User) {
 			continue
 		}
 		human = append(human, c)
