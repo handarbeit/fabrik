@@ -303,11 +303,13 @@ func WaitForNoStaleTrainArtifacts(t *testing.T, env *Env, repo string, timeout t
 	deadline := time.Now().Add(timeout)
 	var lastCount int
 	var lastErr error
+	var sawReading bool
 	for {
 		out, err := ghOutput(env, "pr", "list", "-R", repo, "--state", "open",
 			"--json", "headRefName", "--jq", `[.[] | select(.headRefName | startswith("fabrik/merge-train/"))] | length`)
 		lastErr = err
 		if err == nil {
+			sawReading = true
 			lastCount = parseFirstInt(lastNonEmpty(out))
 			if lastCount == 0 {
 				return
@@ -317,7 +319,10 @@ func WaitForNoStaleTrainArtifacts(t *testing.T, env *Env, repo string, timeout t
 			t.Logf("WaitForNoStaleTrainArtifacts: transient gh error checking for stale train PRs on %s: %v (will retry)", repo, err)
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("found %d open merge-train integration PR(s) still on %s after %s (last err: %v)", lastCount, repo, timeout, lastErr)
+			if !sawReading {
+				t.Fatalf("could not check for stale merge-train PRs on %s after %s — no successful reading (last err: %v)", repo, timeout, lastErr)
+			}
+			t.Fatalf("found %d open merge-train integration PR(s) still on %s after %s", lastCount, repo, timeout)
 		}
 		time.Sleep(10 * time.Second)
 	}
