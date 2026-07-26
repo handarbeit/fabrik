@@ -346,6 +346,7 @@ func TestMergePR_MergeableStateTable(t *testing.T) {
 		{"unknown refused CI", true, "unknown", false, ErrNotMergeableCI},
 		{"empty state refused CI", true, "", false, ErrNotMergeableCI},
 		{"dirty refused conflict", false, "dirty", false, ErrNotMergeable},
+		{"still computing refused conflict", nil, "", false, ErrNotMergeable},
 	}
 
 	for _, tt := range tests {
