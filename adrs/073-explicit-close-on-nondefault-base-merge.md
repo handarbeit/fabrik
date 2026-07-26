@@ -33,26 +33,15 @@ called from both terminal-advance sites immediately after their respective `adva
 - `advanceConvergedPRToDone` (`engine/merge_gate.go`), gated on a new `merged bool` parameter passed
   by its callers (see "Merged vs. closed-without-merging" below).
 
-The helper:
-
-1. Skips PR board items (`item.IsPR`).
-2. Skips — without touching the `WorktreeManager` or shelling out to git at all — when the item
-   carries no `base:<branch>` label. `baseBranchForItem`'s documented contract guarantees a
-   label-less item always resolves to exactly the repository default, so the guard trivially holds
-   without needing to ask. This fast path covers the overwhelming majority of items.
-3. For the remaining (labeled) items, looks up the item's `*WorktreeManager` via a direct
-   `e.worktreeManagers[key]` read under `e.mu` — the same non-panicking pattern
-   `worktreeExistsForItem` already uses — rather than the panicking `e.worktreesFor`. If unregistered,
-   logs a warning and returns.
-4. Resolves the item's base via `baseBranchForItem` and the repo's actual default via
-   `wm.DefaultBaseBranch()`. Either error logs a warning and returns without closing — the Done
-   advance the caller already performed must never be blocked or unwound.
-5. If base equals default, returns without action — GitHub's own auto-close already covers this case,
-   and skipping here is the entire double-close guard.
-6. Otherwise pre-checks `item.IsClosed` (returns without action if already true), then logs the
-   decision (`issue #N base %q ≠ default %q — closing explicitly`), calls `CloseIssue`, treats
-   `errors.Is(err, gh.ErrNotFound)` as success, and on any other failure logs it and returns — never
-   propagating an error to the caller.
+The helper skips PR board items and, for the common case (no `base:<branch>` label — guaranteed by
+`baseBranchForItem`'s contract to resolve to exactly the repository default), returns without ever
+touching the `WorktreeManager` or git. For a labeled item it resolves the base and the repo's actual
+default and calls `CloseIssue` only when they differ, treating an already-closed issue,
+`ErrNotFound`, and any `WorktreeManager`/`DefaultBaseBranch()` resolution failure as non-blocking
+outcomes (logged, never propagated). The full as-built behavior — including the exact log strings and
+error handling — is documented in `docs/state-machine.md` §2.8 ("Outbound case — engine-initiated
+close") and in the helper's own doc comment (`engine/close_nondefault_base.go`); this ADR covers the
+design decisions below, not the mechanics.
 
 ### Merged vs. closed-without-merging
 
@@ -91,9 +80,15 @@ while the engine was down can reach this helper before any dispatch has register
 a backlog of already-merged PRs), not a contrived edge case. `TestCheckAutoMergeConvergence_UnregisteredRepo_NoPanic`
 already exists to guard the sibling call site against exactly this class of panic; this helper reuses
 `worktreeExistsForItem`'s established non-panicking pattern rather than introducing a new failure
-mode. Threading a `context.Context` through `runValidatePRTerminalAdvance` to call
-`ensureRepoReady` directly was rejected: ADR-057 scopes that function as synchronous,
-label-mutation-only, with no new blocking dependencies (no goroutines, no git-clone-capable calls).
+mode. Threading a `context.Context` through `runValidatePRTerminalAdvance` to call `ensureRepoReady`
+directly was rejected: ADR-057 scopes that function as synchronous and label-mutation-only, with no
+new *unconditional* blocking dependency. This helper does not fully preserve that property — for the
+minority of items that carry a `base:<branch>` label, `baseBranchForItem`/`DefaultBaseBranch()` run
+synchronously and may shell out to git (`DefaultBaseBranch()`'s `git ls-remote` fallback has no
+timeout, a pre-existing characteristic shared with its other callers, not introduced here). The
+`itemHasBaseLabel` fast path keeps the common case (no label) exactly as blocking-free as ADR-057
+requires; bounding the labeled-item git calls with a timeout is tracked as a separate cross-cutting
+follow-up, not scoped to this issue.
 
 ### Why gate `advanceConvergedPRToDone` on an explicit `merged bool` rather than reusing "reached this function"?
 
