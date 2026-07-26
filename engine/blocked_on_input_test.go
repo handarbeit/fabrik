@@ -101,7 +101,7 @@ func TestItemNeedsWork_AwaitingInput_LockedByOther(t *testing.T) {
 		Status: "Research",
 		Labels: []string{"fabrik:paused", "fabrik:awaiting-input", "fabrik:locked:otheruser"},
 		Comments: []gh.Comment{
-			{ID: "C1", Author: "testuser", Body: "Here is my answer"},
+			{ID: "C1", Author: "humanuser", Body: "Here is my answer"},
 		},
 	}
 
@@ -137,12 +137,29 @@ func TestItemNeedsWork_AwaitingInput_WithNewComments(t *testing.T) {
 		Status: "Research",
 		Labels: []string{"fabrik:paused", "fabrik:awaiting-input"},
 		Comments: []gh.Comment{
-			{ID: "C1", Author: "testuser", Body: "Here is my answer"},
+			{ID: "C1", Author: "humanuser", Body: "Here is my answer"},
 		},
 	}
 
 	if !eng.itemNeedsWork(item) {
 		t.Error("itemNeedsWork should return true for awaiting-input item with new comments")
+	}
+}
+
+func TestItemNeedsWork_AwaitingInput_BotComment_Skips(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+
+	item := gh.ProjectItem{
+		Number: 1,
+		Status: "Research",
+		Labels: []string{"fabrik:paused", "fabrik:awaiting-input"},
+		Comments: []gh.Comment{
+			{ID: "C1", Author: "gemini-code-assist", Body: "quota notice"},
+		},
+	}
+
+	if eng.itemNeedsWork(item) {
+		t.Error("itemNeedsWork should return false for awaiting-input item with only a bot comment")
 	}
 }
 
@@ -196,7 +213,7 @@ func TestProcessItem_AwaitingInput_UnblocksOnComment(t *testing.T) {
 		Status: "Research",
 		Labels: []string{"fabrik:paused", "fabrik:awaiting-input"},
 		Comments: []gh.Comment{
-			{ID: "C1", Author: "testuser", Body: "Here is my answer"},
+			{ID: "C1", Author: "humanuser", Body: "Here is my answer"},
 		},
 	}
 
@@ -258,6 +275,117 @@ func TestProcessItem_AwaitingInput_NoComment_Skips(t *testing.T) {
 	}
 	if len(claude.calls) != 0 {
 		t.Error("should not invoke claude when awaiting-input with no new comments")
+	}
+}
+
+func TestProcessItem_AwaitingInput_BotComment_Skips(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := testEngine(t, client, claude)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 1,
+		Title:  "Test",
+		Status: "Research",
+		Labels: []string{"fabrik:paused", "fabrik:awaiting-input"},
+		Comments: []gh.Comment{
+			{ID: "C1", Author: "gemini-code-assist", Body: "quota notice"},
+		},
+	}
+
+	err := eng.processItem(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	// Should NOT remove labels or invoke Claude — a bot comment must not
+	// resume an awaiting-input issue (#1083).
+	if len(client.removeLabelCalls) != 0 {
+		t.Error("should not remove labels when only a bot comment is present on awaiting-input item")
+	}
+	if len(claude.calls) != 0 {
+		t.Error("should not invoke claude when awaiting-input with only a bot comment")
+	}
+}
+
+// --- (e2) processItem unpauses fabrik:paused (no awaiting-input) on human comment only ---
+
+func TestProcessItem_Paused_BotComment_Retained(t *testing.T) {
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := testEngine(t, client, claude)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 1,
+		Title:  "Test",
+		Status: "Research",
+		Labels: []string{"fabrik:paused"},
+		Comments: []gh.Comment{
+			{ID: "C1", Author: "gemini-code-assist", Body: "quota notice"},
+		},
+	}
+
+	err := eng.processItem(context.Background(), board, item)
+	if err != nil {
+		t.Fatalf("processItem: %v", err)
+	}
+
+	// fabrik:paused must be retained — a bot comment must not silently defeat
+	// an operator-applied pause (#1083).
+	for _, call := range client.removeLabelCalls {
+		if call.labelName == "fabrik:paused" {
+			t.Error("fabrik:paused should not be removed when only a bot comment is present")
+		}
+	}
+	if len(claude.calls) != 0 {
+		t.Error("should not invoke claude when paused with only a bot comment")
+	}
+}
+
+func TestProcessItem_Paused_HumanComment_Unpauses(t *testing.T) {
+	skipIfNoGit(t)
+	repoDir := initBareRepo(t)
+	wm := NewWorktreeManager(repoDir)
+
+	client := &mockGitHubClient{}
+	claude := &mockClaudeInvoker{}
+	eng := NewWithDeps(
+		Config{
+			Owner:      "owner",
+			Repo:       "repo",
+			ProjectNum: 1,
+			User:       "testuser",
+			Token:      "token",
+			Stages:     testStages(),
+		},
+		client, claude, wm,
+	)
+
+	board := &gh.ProjectBoard{ProjectID: "PVT_1"}
+	item := gh.ProjectItem{
+		Number: 1,
+		Title:  "Test",
+		Status: "Research",
+		Labels: []string{"fabrik:paused"},
+		Comments: []gh.Comment{
+			{ID: "C1", Author: "humanuser", Body: "please continue"},
+		},
+	}
+
+	// processItem may error later in comment processing (no real Claude binary
+	// in test env) — we only care that unpause happened before that point.
+	_ = eng.processItem(context.Background(), board, item)
+
+	var removedPaused bool
+	for _, call := range client.removeLabelCalls {
+		if call.labelName == "fabrik:paused" {
+			removedPaused = true
+		}
+	}
+	if !removedPaused {
+		t.Error("expected fabrik:paused to be removed on human comment")
 	}
 }
 

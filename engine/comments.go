@@ -35,6 +35,21 @@ func (e *Engine) findNewComments(item gh.ProjectItem) []gh.Comment {
 	return newComments
 }
 
+// humanNewComments filters findNewComments to comments authored by a human —
+// excluding bot logins (gh.IsBotLogin) and Fabrik's own identity (e.cfg.User).
+// Used at the paused / awaiting-input resume-decision sites so bot chatter
+// cannot silently defeat an operator-applied pause (#1083).
+func (e *Engine) humanNewComments(item gh.ProjectItem) []gh.Comment {
+	var human []gh.Comment
+	for _, c := range e.findNewComments(item) {
+		if gh.IsBotLogin(c.Author) || c.Author == e.cfg.User {
+			continue
+		}
+		human = append(human, c)
+	}
+	return human
+}
+
 // processComments handles new user comments on an issue.
 // Flow: 👀 reactions → editing label → invoke Claude → perform actions / update issue body → remove editing label → 🚀 reactions
 func (e *Engine) processComments(ctx context.Context, board *gh.ProjectBoard, item gh.ProjectItem, stage *stages.Stage, comments []gh.Comment, onPIDReady ...func(int)) error {

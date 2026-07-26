@@ -265,23 +265,24 @@ func (e *Engine) itemNeedsWork(item gh.ProjectItem) bool {
 		// No store entry (first dispatch or restart): admit.
 	}
 
-	// Awaiting-input items: new comment = resume trigger; no comment = skip.
+	// Awaiting-input items: new human comment = resume trigger; no human
+	// comment (or bot-only chatter) = skip.
 	if awaitingInput {
-		return len(e.findNewComments(item)) > 0
+		return len(e.humanNewComments(item)) > 0
 	}
 
-	// Paused items: a new user comment is an implicit "resume and handle this."
-	// Without a comment, respect the pause.
+	// Paused items: a new human comment is an implicit "resume and handle
+	// this." Without one — including bot-only chatter — respect the pause.
 	isPaused := hasLabel(item.Labels, "fabrik:paused")
-	newComments := e.findNewComments(item)
 	if isPaused {
-		if len(newComments) > 0 {
+		if len(e.humanNewComments(item)) > 0 {
 			return true // comment triggers unpause — processItem handles label removal
 		}
 		return false
 	}
 
 	// New comments are always worth processing (even on completed stages)
+	newComments := e.findNewComments(item)
 	if len(newComments) > 0 {
 		return true
 	}
@@ -371,7 +372,7 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 	// Awaiting-input: paused because Claude needs user input. If the user has
 	// responded with a new comment, unblock and route to comment processing.
 	if isAwaitingInput(item) {
-		newComments := e.findNewComments(item)
+		newComments := e.humanNewComments(item)
 		if len(newComments) > 0 {
 			e.unblockAwaitingInput(item, stage)
 			return e.processComments(ctx, board, item, stage, newComments)
@@ -380,12 +381,13 @@ func (e *Engine) processItem(ctx context.Context, board *gh.ProjectBoard, item g
 		return nil
 	}
 
-	// Paused items: if the user commented, unpause and fall through to
-	// comment processing. Otherwise skip. A user comment on a paused issue
-	// is an implicit "resume and handle this."
+	// Paused items: if a human commented, unpause and fall through to
+	// comment processing. Otherwise skip. A human comment on a paused issue
+	// is an implicit "resume and handle this." Bot-only chatter does not
+	// unpause (#1083 — pause must remain an effective operator kill-switch).
 	for _, label := range item.Labels {
 		if label == "fabrik:paused" {
-			newComments := e.findNewComments(item)
+			newComments := e.humanNewComments(item)
 			if len(newComments) > 0 {
 				e.logf(item.Number, "unpause", "user commented on paused issue — unpausing\n")
 				e.removeLabel(item, "fabrik:paused")

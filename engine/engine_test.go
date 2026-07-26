@@ -42,9 +42,47 @@ func TestItemNeedsWork_SkipsPausedWithNewComments(t *testing.T) {
 		},
 	}
 
-	// Any comment (regardless of author) on a paused item triggers work.
+	// A human comment on a paused item triggers work (unpause).
 	if !eng.itemNeedsWork(item) {
-		t.Error("itemNeedsWork should return true for paused item with a new comment from any user")
+		t.Error("itemNeedsWork should return true for paused item with a new human comment")
+	}
+}
+
+func TestItemNeedsWork_Paused_BotComment_Skips(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+
+	item := gh.ProjectItem{
+		Number: 1,
+		Status: "Research",
+		Labels: []string{"fabrik:paused"},
+		Comments: []gh.Comment{
+			{ID: "C1", Author: "gemini-code-assist", Body: "quota notice"},
+		},
+	}
+
+	// A bot comment must not defeat an operator-applied pause (#1083).
+	if eng.itemNeedsWork(item) {
+		t.Error("itemNeedsWork should return false for paused item with only a bot comment")
+	}
+}
+
+func TestItemNeedsWork_NonPaused_BotComment_StillDispatches(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+
+	item := gh.ProjectItem{
+		Number: 1,
+		Status: "Research",
+		Labels: []string{},
+		Comments: []gh.Comment{
+			{ID: "C1", Author: "gemini-code-assist", Body: "review comment"},
+		},
+	}
+
+	// Regression guard: bot comment dispatch on a non-paused issue is unaffected
+	// by the human-only resume-trigger restriction — only the paused/awaiting-input
+	// resume decision is scoped to humans.
+	if !eng.itemNeedsWork(item) {
+		t.Error("itemNeedsWork should return true for non-paused item with a bot comment")
 	}
 }
 
@@ -273,6 +311,36 @@ func TestFindNewCommentsFiltering(t *testing.T) {
 	}
 	if result[0].ID != "c1" || result[1].ID != "c3" {
 		t.Errorf("expected comments c1 and c3, got %v", result)
+	}
+}
+
+// TestHumanNewComments verifies humanNewComments filters findNewComments'
+// output to exclude bot logins and Fabrik's own identity, leaving only
+// human-authored comments (#1083).
+func TestHumanNewComments(t *testing.T) {
+	e := &Engine{
+		cfg:   Config{User: "fabrikbot"},
+		store: itemstate.NewStore(nil),
+	}
+
+	item := gh.ProjectItem{
+		Number: 42,
+		Repo:   "owner/repo",
+		Comments: []gh.Comment{
+			{ID: "c1", Author: "alice", Body: "please continue"},         // human — kept
+			{ID: "c2", Author: "gemini-code-assist", Body: "quota hit"},  // bot — filtered
+			{ID: "c3", Author: "dependabot[bot]", Body: "bump version"},  // bot — filtered
+			{ID: "c4", Author: "fabrikbot", Body: "not a fabrik prefix"}, // engine's own identity — filtered
+			{ID: "c5", Author: "bob", Body: "another human"},             // human — kept
+		},
+	}
+
+	result := e.humanNewComments(item)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 human comments, got %d: %v", len(result), result)
+	}
+	if result[0].ID != "c1" || result[1].ID != "c5" {
+		t.Errorf("expected comments c1 and c5, got %v", result)
 	}
 }
 
