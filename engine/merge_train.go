@@ -1711,28 +1711,32 @@ func (e *Engine) pollTrainCI(ctx context.Context, owner, repo string, prNum int,
 			return TrainCIRed
 		}
 
-		// Check individual check runs.
+		// Check individual check runs via the shared classifier (mirrors
+		// settlePRMergeState/checkCIGate in engine/ci.go — this used to be an
+		// inline duplicate with its own dedup-by-ID drift; ClassifyCheckRuns
+		// fixes that as a side effect of sharing it here).
 		checkRuns, err := e.client.FetchCheckRuns(owner, repo, trialSHA)
 		if err != nil {
 			e.logf(0, "merge-train", "warn: FetchCheckRuns failed for %s: %v\n", trialSHA, err)
 		} else if len(checkRuns) > 0 {
-			var pending, failed int
-			for _, cr := range checkRuns {
-				switch cr.Status {
-				case "queued", "in_progress":
-					pending++
-				case "completed":
-					switch cr.Conclusion {
-					case "failure", "timed_out", "action_required":
-						failed++
-					}
-				}
-			}
-			if failed > 0 {
+			status, _, _ := gh.ClassifyCheckRuns(checkRuns)
+			if status == gh.CheckRunsFailed {
 				return TrainCIRed
 			}
-			if pending == 0 {
-				return TrainCIGreen
+			if status == gh.CheckRunsReady {
+				// ADR-071: don't declare the trial green until any configured
+				// required context has confirmed success on this exact trial
+				// SHA — mirrors settlePRMergeState's guard in pr_settle.go. A
+				// required context that's merely missing/pending falls through
+				// to keep polling (nothing has regressed).
+				rcStatus, _, _, rcFailed := e.classifyRequiredContexts(0, owner, repo, trialSHA, checkRuns)
+				switch rcStatus {
+				case gh.RequiredContextsSatisfied:
+					return TrainCIGreen
+				case gh.RequiredContextsFailed:
+					e.logf(0, "merge-train", "required status context(s) failed for %s: %v\n", trialSHA, rcFailed)
+					return TrainCIRed
+				}
 			}
 		}
 
