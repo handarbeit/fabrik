@@ -1050,6 +1050,20 @@ When a stage doesn't complete (Claude doesn't output `FABRIK_STAGE_COMPLETE`):
 > session file is missing, unreadable, or zero-length, so `--resume` is skipped and a fresh
 > session starts against the existing worktree. This is not currently detected or logged
 > (#1117). See *Session Resume* in [`stage-lifecycle.md`](stage-lifecycle.md) for detail.
+
+> **Troubleshooting: repeated near-instant `$0.00`, 0-turn failures on a comment.** If an
+> issue's comment is never processed and the stage logs show the same tiny failure over
+> and over — `subtype: "error_during_execution"`, an `errors[]` entry reading
+> `No conversation found with session ID: ...`, `num_turns: 0`, `total_cost_usd: 0` — the
+> session Claude Code was asked to resume has been reaped from its own history (its
+> `cleanupPeriodDays` retention, default 30 days), typically because the issue's last
+> stage invocation was over a month ago. From this fix onward, Fabrik detects this
+> structurally, deletes the stale session file, and starts a fresh session automatically
+> on the next poll — no operator action needed. On an older build without this fix, the
+> only way to unblock the issue is to manually delete the stale
+> `.fabrik/sessions/[<owner>-<repo>/]issue-<N>/<Stage>.session` file; moving the item out
+> of its board column and back does **not** work as a workaround, since an unresolved
+> comment always routes to comment processing regardless of board state.
 4. **Max retries**: After `--max-retries` failures (default 3):
    - `fabrik:paused` and `stage:<name>:failed` labels are added
    - An explanatory comment is posted on the issue
@@ -5928,6 +5942,19 @@ Note the length check runs on the **untrimmed** bytes, which produces three dist
 None of these are detected or logged. The first two are the only cases where a retry genuinely cannot know what its predecessor did — so when diagnosing a suspect retry, confirm the session file was present and non-empty before concluding the output was unreliable.
 
 This inline read is also **not** the same as `engine.ReadSessionID` (`engine/claude.go:286-302`), which trims before returning and so treats a whitespace-only file as absent. `cmd/resume.go` uses `ReadSessionID`; the invocation path does not. Tracked in #1117.
+
+#### Dead-session detection and self-heal
+
+A session file can point at a conversation Claude Code itself has since reaped (the CLI's own `cleanupPeriodDays` retention, default 30 days) — distinct from #1117's load failures above: the file is present and well-formed, but the ID no longer resolves to anything. `--resume <dead-id>` then fails structurally, and the CLI **echoes the requested `session_id` back unchanged** in its error response, so a naive unconditional resave would rewrite the exact same dead pointer every retry, making the failure self-renewing rather than merely stale.
+
+`interpretClaudeResult` (`engine/claude.go`) detects this from the parsed response, requiring both signals together:
+
+- `resp.Subtype == "error_during_execution"` (structural)
+- an entry in `resp.Errors` containing `"No conversation found with session ID"` (substring)
+
+On detection, it removes the session file immediately and skips the resave of `resp.SessionID` for that invocation — the one place `saveSessionIDDirect` would otherwise persist the dead ID right back to disk. The next invocation reads no session file, `buildClaudeArgs` omits `--resume`, and a fresh session starts and is saved normally. No retry counter or label is involved: because the specific dead ID is never rewritten, the identical failure cannot recur for that pointer, which bounds the loop without any additional machinery.
+
+This applies uniformly to both the stage-invocation and comment-processing call paths, since both flow through `interpretClaudeResult`.
 
 ### Model Override
 
