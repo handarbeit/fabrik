@@ -4653,6 +4653,8 @@ The poll loop's effective interval grows when there is nothing to do (idle backo
   - **No idle cap**: the rate-limit component has no 5-minute ceiling; it is capped only at `rateLimitMaxBackoffMultiplier × configuredInterval`.
   - **Independence from idle backoff**: activity detection (items dispatched) resets idle backoff but does NOT reset rate-limit backoff.
 
+**REST/core exhaustion is a hard pause, not a slowdown** (`shouldPauseForRESTRateLimit` in `engine/backoff.go`): the interval adjustment above conserves the **GraphQL** budget (spent by the poll read), but the **REST/core** budget is spent by per-item mutations (reactions, labels, comments, merges) and janitor fetches, which interval-stretching does not throttle. So when REST remaining drops to near zero (≤1% of limit, `isRateLimitNearZero`), `doPollCycle` skips the **entire** work phase — fetch, dispatch, and mutations — until GitHub's hourly reset (`reset + rateLimitResetBuffer`), emitting `RateLimitAlertEvent{Exhausted: true}`. The independent worktree-janitor goroutine (`runWorktreeJanitor`) applies the same gate on entry, so it does not keep spending REST while the poll loop is paused. REST stats are refreshed from the headers of every REST response (including 403s), so the reset timestamp is authoritative even at zero budget. Introduced to stop a 403 retry storm after the REST budget was drained (#1118/#1121).
+
 **Idle cap selection** (`effectiveIdleCap` in `engine/backoff.go`):
 
 | Webhook stream state | Idle cap |
