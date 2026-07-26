@@ -71,8 +71,8 @@ var botServiceNoticePatterns = []string{
 
 	// CodeRabbit
 	"rate limited by coderabbit.ai", // structural: HTML comment marker, not user-facing prose
-	"review limit reached",
-	"you've reached your pr review limit",
+	"## review limit reached",       // markdown heading form used in the actual banner
+	"you've reached your pr review limit, so we couldn't start this review",
 }
 
 // isBotServiceNotice reports whether c is a non-actionable bot service/status

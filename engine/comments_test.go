@@ -529,6 +529,15 @@ func TestIsBotServiceNotice(t *testing.T) {
 				"looks like it doesn't back off correctly when we've reached our rate limit."},
 			want: false,
 		},
+		{
+			// Regression guard: a genuine bot review that quotes the CodeRabbit
+			// prose patterns verbatim (e.g. critiquing this very pattern list in
+			// a diff review) must not itself be classified as a notice.
+			name: "bot review quoting the pattern literals is not a notice",
+			c: gh.Comment{Author: "coderabbitai[bot]", Body: "the two bare-phrase fallbacks, `\"review limit reached\"` and " +
+				"`\"you've reached your pr review limit\"`, now live as literal substrings inside this exact file."},
+			want: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
