@@ -496,6 +496,39 @@ func TestIsBotServiceNotice(t *testing.T) {
 			c:    gh.Comment{Author: "dependabot[bot]", Body: "Bumps foo from 1.0.0 to 1.0.1."},
 			want: false,
 		},
+		{
+			name: "gemini sunset notice",
+			c: gh.Comment{Author: "gemini-code-assist[bot]", Body: "The consumer version of Gemini Code Assist on GitHub has been sunset. " +
+				"All code review activity has officially ceased."},
+			want: true,
+		},
+		{
+			name: "gemini unsupported file type notice",
+			c: gh.Comment{Author: "gemini-code-assist[bot]", Body: "Gemini is unable to generate a review for this pull request due to the " +
+				"file types involved not being currently supported."},
+			want: true,
+		},
+		{
+			name: "coderabbit rate-limit notice (prose + structural marker)",
+			c:    gh.Comment{Author: "coderabbitai[bot]", Body: coderabbitRateLimitFixture},
+			want: true,
+		},
+		{
+			name: "coderabbit rate-limit notice (contraction prose only, no marker)",
+			c:    gh.Comment{Author: "coderabbitai[bot]", Body: "`@verveguy`, you've reached your PR review limit, so we couldn't start this review."},
+			want: true,
+		},
+		{
+			name: "coderabbit genuine walkthrough is not a notice",
+			c:    gh.Comment{Author: "coderabbitai[bot]", Body: coderabbitWalkthroughFixture},
+			want: false,
+		},
+		{
+			name: "human comment discussing rate limiting is not a notice",
+			c: gh.Comment{Author: "humanuser", Body: "We should double check the review limit reached handling in the client — " +
+				"looks like it doesn't back off correctly when we've reached our rate limit."},
+			want: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -505,6 +538,153 @@ func TestIsBotServiceNotice(t *testing.T) {
 		})
 	}
 }
+
+// coderabbitRateLimitFixture reproduces the real observed shape of
+// CodeRabbit's rate-limit notice: a change-stack banner, promo imagery, and
+// collapsible help sections, wrapping the prose warning and the HTML comment
+// marker CodeRabbit emits for these notices. At ~3.9k characters, this is a
+// dedicated guard against any length-based classification shortcut — real
+// CodeRabbit rate-limit comments run 3,000-4,400 characters, in contrast to
+// Gemini's notices (<=133 characters above).
+var coderabbitRateLimitFixture = `<!-- This is an auto-generated comment: rate limited by coderabbit.ai -->
+
+> [!WARNING]
+> ## Review limit reached
+>
+> ` + "`@verveguy`" + `, you've reached your PR review limit, so we couldn't start this review.
+> Please add the review as a comment to trigger it manually, or contact us if you'd like to increase your limit.
+>
+> <details>
+> <summary>🚦 How to resolve this issue?</summary>
+>
+> After doing any of the following options, you can immediately re-trigger the review by mentioning ` + "`@coderabbitai`" + ` in a new comment:
+>
+> - **Enable the ` + "`Reviews > Auto Review`" + ` setting**: Automatic reviews are being blocked by the settings in your ` + "`.coderabbit.yaml`" + ` file. Adjust these settings to re-enable automatic reviews.
+> - **Add the review manually**: Trigger a new review by commenting ` + "`@coderabbitai review`" + ` on this PR.
+> - **Increase your review limit**: Upgrade to a higher tier plan for more reviews per hour, or contact us to discuss your specific needs.
+>
+> </details>
+>
+> <details>
+> <summary>📥 Commits</summary>
+>
+> Reviewing files that changed from the base of the PR and between 3fe88ec284b4efa5007315834493336143ecd6d5 and 6189433d8a2c1e4f9b0a5d3e7c8f1a2b3c4d5e6f.
+>
+> </details>
+
+<!-- walkthrough_start -->
+
+## Walkthrough
+
+This pull request stack contains 4 pull requests that are queued for review. CodeRabbit will automatically pick up the next review once your current usage resets.
+
+| Pull Request | Status |
+| --- | --- |
+| #1118 | Queued |
+| #1119 | Queued |
+| #1120 | Queued |
+| #1122 | Queued |
+
+<!-- walkthrough_end -->
+
+<!-- estimated_effort_start -->
+
+**Estimated code review effort**: N/A (review not started due to rate limiting)
+
+<!-- estimated_effort_end -->
+
+<details>
+<summary>✨ Finishing touches</summary>
+
+- [ ] 📝 Generate docstrings
+- [ ] 🧪 Generate unit tests
+
+</details>
+
+<details>
+<summary>🪧 Tips</summary>
+
+### Chat
+
+There are 3 ways to chat with [CodeRabbit](https://coderabbit.ai):
+
+- Review comments: Directly reply to a review comment made by CodeRabbit. Example:
+  - I pushed a fix in commit <commit_id>, please review it.
+  - Explain this complex logic.
+  - Open a follow-up GitHub issue for this discussion.
+- Files and specific lines of code (under the "Files changed" tab): Tag ` + "`@coderabbitai`" + ` in a new review comment at the desired location with your query.
+- PR comments: Tag ` + "`@coderabbitai`" + ` in a new PR comment to ask questions about the PR branch.
+
+### Support
+
+Need help? Create a ticket on our [support page](https://www.coderabbit.ai/contact-us/support) for assistance with any issues or questions.
+
+Note: Free users have a limited number of reviews available for private repos, and comments/issue reviews are also limited.
+
+### CodeRabbit Commands (Invoked using PR comments)
+
+- ` + "`@coderabbitai pause`" + ` to pause the reviews on a PR.
+- ` + "`@coderabbitai resume`" + ` to resume the reviews on a PR.
+- ` + "`@coderabbitai review`" + ` to trigger an incremental review of this PR.
+- ` + "`@coderabbitai full review`" + ` to do a full review from scratch and review all the files again.
+- ` + "`@coderabbitai summary`" + ` to regenerate the summary of the PR.
+- ` + "`@coderabbitai generate docstrings`" + ` to generate docstrings for this PR.
+- ` + "`@coderabbitai plan`" + ` to trigger planning for file edits.
+- ` + "`@coderabbitai resolve`" + ` to resolve all the CodeRabbit review comments.
+- ` + "`@coderabbitai configuration`" + ` to show the current CodeRabbit configuration for the repository.
+- ` + "`@coderabbitai help`" + ` to get help.
+
+### Other keywords and placeholders
+
+- Add ` + "`@coderabbitai ignore`" + ` anywhere in the PR description to prevent this PR from being reviewed.
+- Add ` + "`@coderabbitai summary`" + ` to generate the high-level summary at a specific location in the PR description.
+- Add ` + "`@coderabbitai`" + ` anywhere in the PR title to generate the title automatically.
+
+### CodeRabbit Configuration File
+
+You can programmatically configure CodeRabbit by adding a ` + "`.coderabbit.yaml`" + ` file to the root of your repository.
+
+</details>
+
+<!-- This is an auto-generated comment: rate limited by coderabbit.ai -->
+`
+
+// coderabbitWalkthroughFixture reproduces the real structure of a genuine
+// CodeRabbit review comment (summary + per-file walkthrough table), used to
+// verify the CodeRabbit patterns don't false-positive on substantive review
+// content in the same shape as the notice above.
+var coderabbitWalkthroughFixture = `<!-- walkthrough_start -->
+
+## Walkthrough
+
+This change extends ` + "`isBotServiceNotice`" + ` to recognize additional bot vendor notices and adds table-driven test coverage for the new patterns.
+
+## Changes
+
+| Cohort / File(s) | Summary |
+| --- | --- |
+| **Bot notice patterns**<br>` + "`engine/comments.go`" + ` | Adds CodeRabbit and additional Gemini patterns to ` + "`botServiceNoticePatterns`" + `. |
+| **Tests**<br>` + "`engine/comments_test.go`" + ` | Adds table cases covering the new patterns and a negative case for genuine review content. |
+
+## Sequence Diagram(s)
+
+` + "```" + `mermaid
+sequenceDiagram
+    participant Engine
+    participant Classifier as isBotServiceNotice
+    Engine->>Classifier: comment
+    Classifier-->>Engine: notice / not a notice
+` + "```" + `
+
+<!-- walkthrough_end -->
+
+<details>
+<summary>✨ Finishing touches</summary>
+
+- [ ] 📝 Generate docstrings
+
+</details>
+`
 
 // TestFindNewComments_SkipsBotServiceNotice verifies the pre-admission filter
 // excludes a quota/rate-limit bot notice while still admitting a genuine bot
@@ -538,6 +718,31 @@ func TestFindNewComments_SkipsBotServiceNotice(t *testing.T) {
 		if !found {
 			t.Errorf("expected %q to be admitted, got %v", want, gotIDs)
 		}
+	}
+}
+
+// TestFindNewComments_SkipsCodeRabbitRateLimitButAdmitsWalkthrough verifies
+// that a rate-limited CodeRabbit notice and a genuine CodeRabbit walkthrough
+// on the same PR are classified independently by content, not by author —
+// the notice is excluded while the walkthrough is admitted (observed on
+// #1103 and #1116).
+func TestFindNewComments_SkipsCodeRabbitRateLimitButAdmitsWalkthrough(t *testing.T) {
+	eng := testEngine(t, &mockGitHubClient{}, &mockClaudeInvoker{})
+	item := gh.ProjectItem{
+		Number: 22,
+		Comments: []gh.Comment{
+			{ID: "C_ratelimit", DatabaseID: 601, Author: "coderabbitai[bot]", Body: coderabbitRateLimitFixture},
+			{ID: "C_walkthrough", DatabaseID: 602, Author: "coderabbitai[bot]", Body: coderabbitWalkthroughFixture},
+		},
+	}
+
+	newComments := eng.findNewComments(item)
+	var gotIDs []string
+	for _, c := range newComments {
+		gotIDs = append(gotIDs, c.ID)
+	}
+	if len(newComments) != 1 || gotIDs[0] != "C_walkthrough" {
+		t.Fatalf("expected only C_walkthrough admitted (rate-limit notice excluded), got %v", gotIDs)
 	}
 }
 
