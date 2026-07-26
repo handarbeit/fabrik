@@ -785,7 +785,7 @@ func (c *Client) MergePR(owner, repo string, prNumber int) error {
 	}
 
 	var err error
-	for i, method := range mergeMethodAttemptOrder(c.mergeStrategy) {
+	for _, method := range mergeMethodAttemptOrder(c.mergeStrategy) {
 		err = c.restPutWithResponse(mergeURL, map[string]interface{}{"merge_method": method}, &mergeResult)
 		if err == nil {
 			return nil
@@ -793,9 +793,7 @@ func (c *Client) MergePR(owner, repo string, prNumber int) error {
 		if !errors.Is(err, ErrMethodNotAllowed) {
 			return fmt.Errorf("merging PR: %w", err)
 		}
-		if i == 0 {
-			logf(0, "merge", "PR #%d/%s/%s: merge method %q not allowed, falling back", prNumber, owner, repo, method)
-		}
+		logf(0, "merge", "PR #%d/%s/%s: merge method %q not allowed, falling back", prNumber, owner, repo, method)
 	}
 	return fmt.Errorf("merging PR (all merge methods exhausted): %w", err)
 }
