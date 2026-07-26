@@ -174,7 +174,7 @@ PRs introducing new as-built behavioral docs should also add an entry here.
 
 ## Handling Community Bug Reports
 
-**Never run a community- or human-filed bug report through the Fabrik pipeline directly.** The Specify stage rewrites the issue body (`FABRIK_ISSUE_UPDATE`), so pipelining a report would overwrite the reporter's repro and diagnosis with a bot-authored spec — and the pipeline machinery (👀/🚀 reactions, per-stage comments, label churn) would spam the reporter's thread. Report and work are different artifacts: the report is human-owned triage/discussion; the work is bot-driven engineering.
+**Never run a community- or human-filed bug report through the Fabrik pipeline directly.** The Specify stage rewrites the issue body (`FABRIK_ISSUE_UPDATE_BEGIN` / `FABRIK_ISSUE_UPDATE_END`), so pipelining a report would overwrite the reporter's repro and diagnosis with a bot-authored spec — and the pipeline machinery (👀/🚀 reactions, per-stage comments, label churn) would spam the reporter's thread. Report and work are different artifacts: the report is human-owned triage/discussion; the work is bot-driven engineering.
 
 Instead:
 
