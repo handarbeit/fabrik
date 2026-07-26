@@ -529,6 +529,11 @@ type InvocationRecorded struct {
 	// Duration is the wall-clock time from invocation start to completion.
 	// Zero when not set (e.g., comment-processing paths that don't track start time).
 	Duration time.Duration
+	// AfterCappedRun is true when this invocation was dispatched immediately after a
+	// turn-capped predecessor for the same stage (StageState.LastRunCapped[stage] was
+	// true at dispatch time). Stored in ItemState.LastInvocationAfterCappedRun so the
+	// InvocationObserver can forward it to the TUI/history.json.
+	AfterCappedRun bool
 }
 
 func (InvocationRecorded) isMutation()       {}
@@ -710,6 +715,21 @@ type LinkageHealAttempted struct {
 
 func (LinkageHealAttempted) isMutation()       {}
 func (m LinkageHealAttempted) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
+
+// StageCappedRunRecorded records whether the most recently finalized invocation of
+// a stage was turn-capped (hit its turn limit without completing). Applied
+// unconditionally on every finalized invocation of the stage (not just when true),
+// so the flag correctly clears after a normal completion and correctly persists
+// across a chain of consecutive capped runs.
+type StageCappedRunRecorded struct {
+	Repo      string
+	Number    int
+	StageName string
+	Capped    bool
+}
+
+func (StageCappedRunRecorded) isMutation()       {}
+func (m StageCappedRunRecorded) itemKey() string { return itemKeyFor(m.Repo, m.Number) }
 
 // itemKeyFor constructs the canonical "owner/repo#N" item key used throughout the Store.
 // Returns "" when repo is empty (indicating an invalid or unroutable mutation).

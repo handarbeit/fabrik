@@ -116,6 +116,12 @@ type ItemState struct {
 	// Replaces engine.lastUsage[iKey].
 	LastTokenUsage TokenUsage
 
+	// LastInvocationAfterCappedRun records whether the most recent stage invocation
+	// was dispatched immediately after a turn-capped predecessor for the same stage
+	// (StageState.LastRunCapped[stage] was true at dispatch time). Mirrors
+	// InvocationRecorded.AfterCappedRun for TUI/history display.
+	LastInvocationAfterCappedRun bool
+
 	// BaseBranchWarned tracks which base-branch overrides have already produced a
 	// "branch not found" warning comment. Replaces engine.baseBranchWarnedSet.
 	BaseBranchWarned map[string]bool
@@ -229,6 +235,15 @@ type StageState struct {
 	// auto-heal was attempted. In-memory only — does not survive restart. Keyed by
 	// stage name so force-push (new SHA) clears the guard naturally.
 	LinkageHealAttempted map[string]string
+	// LastRunCapped records, per stage, whether the most recently finalized invocation
+	// of that stage was turn-capped: usage.MaxTurns > 0 && usage.TurnsUsed >= usage.MaxTurns
+	// && !completed — independent of whether the process also exited with an error, which
+	// is the real-world shape of a Claude CLI turn-cap kill (exit status 1, non-nil err).
+	// Stage-scoped (not item-scoped) so an intervening comment-processing invocation or a
+	// different stage's run does not clobber the signal. Overwritten unconditionally on
+	// every finalized invocation of the stage, so a chain of consecutive capped runs keeps
+	// annotating each successor, not just the first.
+	LastRunCapped map[string]bool
 }
 
 // LockState describes who holds the fabrik:locked:<user> label on this issue.

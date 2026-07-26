@@ -444,6 +444,11 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.StageState.LinkageHealAttempted[v.StageName] = v.PRSHA
 		return StageStateChanged
 
+	case StageCappedRunRecorded:
+		ensureStageStateMaps(item)
+		item.StageState.LastRunCapped[v.StageName] = v.Capped
+		return StageStateChanged
+
 	case StageLastAttemptCleared:
 		ensureStageStateMaps(item)
 		delete(item.StageState.LastAttemptAt, v.StageName)
@@ -493,6 +498,7 @@ func (s *Store) applyToItem(item *ItemState, m Mutation) ChangeFlags {
 		item.LastInvocationIsComment = v.IsComment
 		item.LastInvocationDuration = v.Duration
 		item.LastTokenUsage = v.Usage
+		item.LastInvocationAfterCappedRun = v.AfterCappedRun
 		return InvocationChanged
 
 	case DeepFetchFailed:
@@ -1038,6 +1044,9 @@ func ensureStageStateMaps(item *ItemState) {
 	}
 	if ss.LinkageHealAttempted == nil {
 		ss.LinkageHealAttempted = make(map[string]string)
+	}
+	if ss.LastRunCapped == nil {
+		ss.LastRunCapped = make(map[string]bool)
 	}
 }
 

@@ -244,6 +244,14 @@ func (s Snapshot) LinkageHealAttempted(stageName, prSHA string) bool {
 	return recorded != "" && recorded == prSHA
 }
 
+// StageCapped reports whether the most recently finalized invocation of the given
+// stage was turn-capped (hit its turn limit without completing). Stage-scoped: an
+// intervening comment-processing invocation or a different stage's run does not
+// affect this value. Returns false if the stage has never run.
+func (s Snapshot) StageCapped(stageName string) bool {
+	return s.state.StageState.LastRunCapped[stageName]
+}
+
 // ---- deep-copy helpers ----
 
 func copyStrings(src []string) []string {
@@ -330,5 +338,6 @@ func copyStageState(s StageState) StageState {
 		EnqueueCycles:        copyMap(s.EnqueueCycles),
 		ProcessedComments:    copyMap(s.ProcessedComments),
 		LinkageHealAttempted: copyMap(s.LinkageHealAttempted),
+		LastRunCapped:        copyMap(s.LastRunCapped),
 	}
 }
